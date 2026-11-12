@@ -6,6 +6,8 @@
 
 import { isDesignComponentVariantName, isDesignFrameFile } from "@zeros/protocol/design-path";
 import type { DesignFrameComponent } from "@zeros/protocol/design-catalog";
+import type { DesignWorkspaceSnapshotWire } from "../../../platform/bridge/design-bridge";
+import { isDesignWorkspaceBootPreview } from "./design-workspace-boot-cache";
 import { create } from "zustand";
 
 const STORAGE_KEY = "zeros:design-component-variants-v1";
@@ -122,6 +124,19 @@ export function pruneDesignComponentVariants(
       return !((files !== null && !files.has(file)) || (frame !== undefined && !designDeclaredVariants(frame.component).includes(variant)));
     });
     return kept.length === Object.keys(frames).length ? frames : Object.fromEntries(kept);
+  });
+}
+
+/** Prune against what a directory snapshot confirms. A record that is not
+ * current (the boot preview's, or one of a catalog still being prepared)
+ * cannot say which variants its frame declares, so it removes nothing. */
+export function pruneDesignComponentVariantsFor(workspaceId: string, snapshot: DesignWorkspaceSnapshotWire): void {
+  if (!useDesignComponentVariantStore.getState().byWorkspace[workspaceId] || isDesignWorkspaceBootPreview(snapshot)) return;
+  const current = snapshot.preparation ? new Set(snapshot.preparation.current) : null;
+  pruneDesignComponentVariants(workspaceId, {
+    frames: current ? snapshot.frames.filter((frame) => current.has(frame.file)) : snapshot.frames,
+    files: snapshot.preparation ? snapshot.preparation.descriptions.map((frame) => frame.file)
+      : snapshot.pages?.length ? snapshot.pages.flatMap((page) => page.frameFiles) : snapshot.frames.map((frame) => frame.file),
   });
 }
 

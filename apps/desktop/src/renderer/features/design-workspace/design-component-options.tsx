@@ -74,6 +74,7 @@ const EASINGS = [
 const SEGMENTED_CHOICES = 3;
 const MAX_DURATION_MS = 1_000;
 
+const NO_VALUES: ReadonlyMap<string, ComponentOptionValue> = new Map();
 const errorMessage = (error: unknown) => (error instanceof Error ? error.message : String(error));
 /** A variant's name as a person reads it: "wide-plan" is Wide plan. */
 const variantLabel = (name: string) => {
@@ -133,10 +134,13 @@ export function DesignComponentOptions({
     [declaration, instanceState, shownVariant],
   );
   // A value written and not yet in a new generation: the row keeps showing it.
-  const [pending, setPending] = useState<ReadonlyMap<string, ComponentOptionValue>>(() => new Map());
+  // It belongs to the generation and variant it was written against, so a new
+  // one shows its own values without another render to clear it.
+  const generation = `${frame.sourceVersion}\0${shownVariant ?? ""}`;
+  const [unconfirmed, setUnconfirmed] = useState<{ generation: string; values: ReadonlyMap<string, ComponentOptionValue> }>(() => ({ generation, values: NO_VALUES }));
+  const pending = unconfirmed.generation === generation ? unconfirmed.values : NO_VALUES;
   const [folded, setFolded] = useState<ReadonlySet<string>>(() => new Set());
   const [naming, setNaming] = useState(false);
-  useEffect(() => setPending(new Map()), [frame.sourceVersion, shownVariant]);
   const preview = useMemo(
     () => createDesignComponentPreview(workspaceId, frame.file, frame.sourceVersion, instance?.nodeId),
     [workspaceId, frame.file, frame.sourceVersion, instance?.nodeId],
@@ -158,11 +162,13 @@ export function DesignComponentOptions({
       preview.clear();
       return;
     }
-    setPending((previous) => new Map(previous).set(option.name, value));
-    const forget = () => setPending((previous) => {
-      const next = new Map(previous);
-      next.delete(option.name);
-      return next;
+    setUnconfirmed((previous) => ({ generation, values: new Map(previous.generation === generation ? previous.values : NO_VALUES).set(option.name, value) }));
+    // A failure after a newer generation arrived has nothing left to undo.
+    const forget = () => setUnconfirmed((previous) => {
+      if (previous.generation !== generation) return previous;
+      const values = new Map(previous.values);
+      values.delete(option.name);
+      return { generation, values };
     });
     // An instance's value that lands on what it inherits needs no attribute.
     const written = instance && instanceState
@@ -297,7 +303,7 @@ export function DesignComponentOptions({
           onSave={instance ? undefined : () => setNaming(true)}
         />
       ) : null}
-      {naming ? <OptionEntryRow label="Name" inputLabel="Variant name" placeholder="Compact" onSubmit={saveVariant} onCancel={() => setNaming(false)} /> : null}
+      {naming && !tooLarge ? <OptionEntryRow label="Name" inputLabel="Variant name" placeholder="Compact" onSubmit={saveVariant} onCancel={() => setNaming(false)} /> : null}
       {rows}
       {/* Options are the main's to change, so an instance does not offer it. */}
       {instance ? null : (

@@ -57,7 +57,7 @@ import type { DesignRuntimeTreeNode } from "@zeros/protocol/design-runtime";
 import { errorMessage } from "./design-workspace-error";
 import { DesignWorkspaceSidebarPanels } from "./design-workspace-sidebar-panels";
 import { loadDesignComponentOptions } from "./design-component-options-loader";
-import { pruneDesignComponentVariants } from "./state/design-component-variants";
+import { pruneDesignComponentVariantsFor } from "./state/design-component-variants";
 import {
   type DesignCanvasZoomActions,
   type DesignWorkspaceColumnProps,
@@ -147,19 +147,15 @@ export function DesignWorkspaceColumn({
   const loadedDirectory = snapshot.data?.directory ?? null;
   // A component frame here: warm the Options section so selecting it waits on nothing.
   const snapshotFrames = snapshot.data?.frames;
-  const snapshotPages = snapshot.data?.pages;
   const hasComponentFrame = snapshotFrames?.some((frame) => frame.component || frame.instances) === true;
   useEffect(() => {
     if (hasComponentFrame) void loadDesignComponentOptions().catch(() => {});
   }, [hasComponentFrame]);
   // A variant a main frame shows is forgotten with its frame or variant.
+  const snapshotData = snapshot.data;
   useEffect(() => {
-    if (!workspaceId || !snapshotFrames) return;
-    pruneDesignComponentVariants(workspaceId, {
-      frames: snapshotFrames,
-      files: snapshotPages?.length ? snapshotPages.flatMap((page) => page.frameFiles) : snapshotFrames.map((frame) => frame.file),
-    });
-  }, [snapshotFrames, snapshotPages, workspaceId]);
+    if (workspaceId && snapshotData) pruneDesignComponentVariantsFor(workspaceId, snapshotData);
+  }, [snapshotData, workspaceId]);
   const loadedSources = snapshot.data?.styleSources;
   useEffect(() => {
     if (!workspaceId || !surfaceActive || !loadedDirectory) return;

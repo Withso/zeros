@@ -3195,7 +3195,10 @@ export const DesignInspector = React.memo(function DesignInspector({
               <DesignTokenCatalogContext.Provider value={tokenCatalog}>
                 <React.Suspense fallback={null}>
                 <DesignComponentOptions
-                  key={`${optionsFrame.file}:${optionsFrame.sourceVersion}:${optionsTarget.kind === "instance" ? optionsTarget.nodeId : ""}`}
+                  // One target keeps its drafts and folds across generations; the
+                  // section handles a changed declaration itself.
+                  key={JSON.stringify([workspaceId, designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.directoryId ?? "", optionsFrame.file,
+                    optionsTarget.kind === "instance" ? [optionsTarget.nodeId, optionsTarget.host.component] : "main"])}
                   workspaceId={workspaceId}
                   frame={optionsFrame}
                   target={optionsTarget}

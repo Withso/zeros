@@ -1769,7 +1769,11 @@ without one a field, a boolean the app's switch, up to three choices radios
 in the row and more a menu, a colour a swatch with its token as a pill (or
 its value) opening the existing colour and token picker, text typed in place,
 an easing its curve with Type (Easing or Spring), Curve or Bounce, and
-Duration. A group heading folds, and a folded group mounts no rows. The last
+Duration. A group heading folds, and a folded group mounts no rows. Text
+typed and not yet committed, and folded groups, stay through new generations
+of the same frame or instance (a commit, an agent's edit, a change on disk);
+a draft goes only with its option or when the option changes kind, and
+another frame or instance starts with every group open. The last
 row is Ask agent to change options; the skill's "Change a component's
 options" and "Fix a component's options" are the procedures its briefs name.
 The declaration, each option's reach and whether its options applied come
@@ -1812,6 +1816,9 @@ this frame's prepared record."); the others in the reply are shown.
 variant the frame shows: personal view state per workspace and frame in the
 renderer's own store (`design-component-variants.ts`), restored synchronously,
 shown only while the frame declares it and dropped with its frame or variant.
+Only a current record says so: the boot preview (whose records carry no
+declaration) and records still being prepared drop nothing, so the choice
+survives a relaunch.
 The frame's documents carry it (`&variant=` on the native route, `variant` on
 the `design.frame` fallback read) and the engine renders that variant under
 the source's own generation, so no identity, history key or exact-key read
