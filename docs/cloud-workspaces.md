@@ -1463,6 +1463,18 @@ unset. Start restores the workspace by clearing the flag, as does a connect
 request that wakes a stopped workspace. Archive is refused during creation or
 deletion.
 
+Archiving also leaves a visible copy of the workspace's `.context` files on the
+Mac, under the app channel's `archived-contexts/<repository>/<workspace>/`. A
+cloud workspace is copied from this Mac's existing sync folder once its
+workspace document carries `archivedAt`; sleep or a lost connection is not
+archive evidence, and the passive read never wakes the VM. A Local workspace is
+copied just before its worktree is removed. `.context/attachments` and every
+symlink are skipped; one copy holds at most 20,000 files and 1 GiB, and the
+oldest copies are pruned above 5 GiB per channel. The copy is best effort and
+never a restore source: a Local restore still uses its Git snapshot, a failed
+copy does not block a Local archive, and unarchiving a cloud workspace never
+writes the copy back.
+
 ## Restart presentation
 
 The desktop reads main's stored account identity through `auth_get_session_user`

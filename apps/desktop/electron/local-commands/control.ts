@@ -5,6 +5,7 @@ import {
   type LocalCommandDevice, type LocalCommandMacResult,
 } from "@zeros/protocol/local-commands";
 import { DeviceSyncConnectionsReplySchema, SyncGrantReplySchema } from "@zeros/protocol/workspace-sync";
+import { ArchiveWorkspaceReplySchema } from "../workspace-sync/archive";
 
 /** A control-plane refusal or an unusable reply. Never carries a body beyond its closed code. */
 export class DeviceControlError extends Error {
@@ -124,6 +125,10 @@ export class DeviceControl {
   syncConnections(device: LocalCommandDevice, cursor?: string) {
     return this.send("GET", `${this.device(device.deviceId)}/connections${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`,
       { device, schema: DeviceSyncConnectionsReplySchema, syncField: true });
+  }
+
+  archiveWorkspaceState(device: LocalCommandDevice, workspaceId: string) {
+    return this.send("GET", `/v1/cloud-v2/workspaces/${encodeURIComponent(workspaceId)}`, { device, schema: ArchiveWorkspaceReplySchema });
   }
   /** 12.z: another of this person's Macs should (not) sync this workspace; that Mac follows it. */
   setSyncWanted(device: LocalCommandDevice, workspaceId: string, targetDeviceId: string, wanted: boolean) {

@@ -11,6 +11,7 @@ export interface SyncManagerDeps {
   connect(workspaceId: string, handlers: { hint(): void; closed(): void }): Promise<SyncConnection>;
   /** The connected-Macs row's syncing flag (G's route); best effort. */
   setSyncing(workspaceId: string, syncing: boolean): Promise<void>;
+  unavailable?(): void;
   publish(statuses: WorkspaceSyncStatus[]): void;
   /** One `[workspace-sync]` line per event: workspace id prefixes, closed reasons and counts; never a path or file name. */
   log?(line: string): void;
@@ -94,6 +95,29 @@ export class SyncManager {
     if (run) await Promise.race([run.done, new Promise(resolve => setTimeout(resolve, STOP_WAIT_MS))]);
   }
 
+  async archive(workspaceId: string, copy: (folder: string, identity: SyncIdentity, isCurrent: () => boolean) => Promise<unknown>): Promise<void> {
+    const identity = this.deps.identity(), folder = this.folderFor(workspaceId), run = this.runs.get(workspaceId);
+    if (!identity || !folder) return;
+    const isCurrent = () => {
+      const now = this.deps.identity();
+      return now?.accountId === identity.accountId && now?.deviceId === identity.deviceId &&
+        this.folderFor(workspaceId) === folder && this.runs.get(workspaceId) === run;
+    };
+    // A copy must join the writer even when an ordinary off switch would stop waiting.
+    if (run) { run.stop.abort(); run.wake(); await run.done; }
+    if (!isCurrent()) return;
+    try { await copy(folder, this.syncIdentity(workspaceId, identity), isCurrent); }
+    catch (error) {
+      if (isCurrent() && run) { run.status = { workspaceId, state: "error", reason: "archive_failed", problems: run.status.problems }; this.publish(); }
+      throw error;
+    }
+    if (!isCurrent()) return;
+    this.runs.delete(workspaceId);
+    const folders = this.folders(); delete folders[workspaceId]; this.saveFolders(folders);
+    this.publish();
+    this.log(`stopped workspace=${short(workspaceId)} reason=archived`);
+  }
+
   private syncIdentity(workspaceId: string, identity: { accountId: string; deviceId: string }): SyncIdentity {
     return { workspaceId, accountId: identity.accountId, deviceId: identity.deviceId };
   }
@@ -146,14 +170,14 @@ export class SyncManager {
           }
         } catch (error) {
           if (stop.signal.aborted) break;
-          if (error instanceof SyncConnectError && error.kind === "paused") { note("paused", "workspace_stopped"); set({ state: "paused", problems: run.status.problems }); await wait(PAUSED_MS); }
+          if (error instanceof SyncConnectError && error.kind === "paused") { note("paused", "workspace_stopped"); set({ state: "paused", problems: run.status.problems }); this.deps.unavailable?.(); await wait(PAUSED_MS); }
           else if (error instanceof SyncConnectError && error.kind === "signed_out") { this.log(`stopped workspace=${id} reason=signed_out`); break; }
           // This person lost access: stop for good; the folder's files stay on this Mac.
           else if (error instanceof SyncConnectError && error.kind === "access_revoked") {
             this.log(`stopped workspace=${id} reason=access_revoked`); set({ state: "error", reason: "access_revoked", problems: 0 }); break;
           }
           else if (error instanceof SyncConnectError && error.kind === "update_required") { note("error", "update_required"); set({ state: "error", reason: "update_required", problems: 0 }); await wait(UPDATE_MS); }
-          else if (error instanceof SyncConnectError && error.kind === "not_connected") { note("error", "not_connected"); set({ state: "error", reason: "not_connected", problems: 0 }); await wait(ERROR_MS); }
+          else if (error instanceof SyncConnectError && error.kind === "not_connected") { note("error", "not_connected"); set({ state: "error", reason: "not_connected", problems: 0 }); this.deps.unavailable?.(); await wait(ERROR_MS); }
           else if (error instanceof SyncRootError) { note("error", `folder_${error.code}`); set({ state: "error", reason: `folder_${error.code}`, problems: 0 }); await wait(ERROR_MS); engine = undefined; }
           else if (error instanceof SyncConnectError) {
             // Running but unreachable (a failed dial, a closed socket, a timeout): its own words, a growing wait, then an error.
