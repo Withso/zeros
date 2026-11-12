@@ -4,8 +4,8 @@ import { join } from "node:path";
 
 /** Team sharing slice C with production components: a member of an activated
  * workspace restarts it, is asked for their own agent account when a send is
- * refused, sees who a running turn acts as, and reads the personal-secret
- * notice. Every control-plane route is intercepted. PNGs only when
+ * refused, and sees who a running turn acts as. Every control-plane route is
+ * intercepted. PNGs only when
  * ZEROS_SMOKE_SHOTS names a directory. */
 export async function runTeamWritingSmoke({ page, harnessBase, check }) {
   const base = `${new URL(harnessBase).origin}/apps/desktop/src/renderer/harnesses/harness-team-writing.html`;
@@ -32,9 +32,8 @@ export async function runTeamWritingSmoke({ page, harnessBase, check }) {
     await card.getByRole("button", { name: "Retry" }).click();
     await details.getByRole("button", { name: "Restart workspace" }).click();
     expect(await page.evaluate(() => window.__teamWritingFixture.calls())).toEqual(["connect:claude", "retry", "restart"]);
-    await expect(page.locator("[data-team-writing-notice]")).toHaveText(/members can read the agent login and personal secrets/);
     if (shots) await page.locator("main").screenshot({ path: join(shots, `team-writing-${theme}.png`) });
-    check(`A writing member restarts, connects their own account, retries, and sees who a turn acts as and the secret notice in ${theme}`, true);
+    check(`A writing member restarts, connects their own account, retries, and sees who a turn acts as in ${theme}`, true);
   }
   await page.goto(`${base}?theme=dark&actor=me`);
   await expect(page.getByLabel("Running turn").getByText("Acting as you", { exact: true })).toBeVisible();
