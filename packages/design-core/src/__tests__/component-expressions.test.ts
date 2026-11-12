@@ -86,6 +86,15 @@ describe("component expressions", () => {
     expect(refusal("t + t", long)).toMatch(/2,048 characters/);
   });
 
+  it("reads quoted text in one pass, whatever it holds", () => {
+    expect(run('"a \\"quoted\\" word"')).toBe('a "quoted" word');
+    expect(run("'it\\'s' + \"\\t\"")).toBe("it's" + "t");
+    expect(run('  "spaced"\t')).toBe("spaced");
+    // Unclosed text made of escapes: refused at once, not retried from every position.
+    expect(() => parseComponentExpression('"' + '\\"!'.repeat(80))).toThrow(/Unexpected """/);
+    expect(() => parseComponentExpression("'" + "\\'&".repeat(80))).toThrow(/Unexpected "'"/);
+  });
+
   it("refuses malformed expressions", () => {
     for (const source of ["", "1 +", "(1", "[1, 2", "1 ? 2", "min(1)", "max(1, 2, 3)", "1 2", "@"]) {
       expect(() => run(source), source).toThrow(ComponentExpressionError);

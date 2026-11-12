@@ -135,6 +135,9 @@ describe("option values in CSS", () => {
   });
 
   it("turn a spring into a bounded linear() curve that ends at 1", () => {
+    // Any run of spaces, tabs, commas and slashes separates a colour's parts.
+    expect(parseComponentOptionValue({ kind: "color" } as never, "rgb(1\t\t2 , 3 / 0.5)").ok).toBe(true);
+    expect(parseComponentOptionValue({ kind: "color" } as never, `rgb(${"\t".repeat(200)})`).ok).toBe(false);
     const easing = parseComponentOptionValue({ kind: "easing" } as never, "spring(0.3) 400ms");
     expect(easing.ok).toBe(true);
     const { values } = componentOptionValues(read([option({ name: "m", type: "easing", default: "spring(0.3) 400ms" })]).declaration, new Map());

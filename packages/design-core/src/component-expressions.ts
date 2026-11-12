@@ -91,9 +91,13 @@ export const COMPONENT_EXPRESSION_RESERVED_NAMES: ReadonlySet<string> = new Set(
   "constructor", "prototype", "tostring", "tolocalestring", "valueof", "hasownproperty", "isprototypeof", "propertyisenumerable",
 ]);
 
-// One pattern written here, never built from authored text: numbers, quoted
-// text, lowercase names with hyphens, and the operators of the grammar.
-const TOKEN = /\s*(?:(\d+(?:\.\d+)?)|"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)'|([a-z][a-z0-9-]*)|(==|!=|<=|>=|&&|\|\||[-+*/%<>!?:(),[\]]))/y;
+// One pattern written here, never built from authored text: numbers,
+// lowercase names with hyphens, and the operators of the grammar. Quoted text
+// and the space between tokens are read a character at a time, so no input
+// can make the tokenizer do more than one pass.
+const TOKEN = /(\d+(?:\.\d+)?)|([a-z][a-z0-9-]*)|(==|!=|<=|>=|&&|\|\||[-+*/%<>!?:(),[\]])/y;
+const isSpace = (character: string) =>
+  character === " " || character === "\t" || character === "\n" || character === "\r" || character === "\f" || character === "\v";
 
 function tokenize(source: string): Token[] {
   if (source.length > COMPONENT_EXPRESSION_LIMITS.length)
@@ -101,20 +105,43 @@ function tokenize(source: string): Token[] {
   const tokens: Token[] = [];
   let index = 0;
   while (index < source.length) {
-    TOKEN.lastIndex = index;
-    const match = TOKEN.exec(source);
-    if (!match) {
-      if (/^\s*$/.test(source.slice(index))) break;
-      fail(`Unexpected "${source.slice(index).trimStart()[0]}" in the expression.`);
+    const first = source[index]!;
+    if (isSpace(first)) {
+      index += 1;
+      continue;
     }
-    index = TOKEN.lastIndex;
-    const [, number, double, single, name, operator] = match!;
-    if (number !== undefined) tokens.push({ kind: "number", value: Number(number) });
-    else if (double !== undefined || single !== undefined)
-      tokens.push({ kind: "text", value: (double ?? single)!.replace(/\\(.)/g, "$1") });
-    else if (name === "true" || name === "false") tokens.push({ kind: "boolean", value: name === "true" });
-    else if (name !== undefined) tokens.push({ kind: "name", value: name });
-    else tokens.push({ kind: "operator", value: operator! });
+    if (first === '"' || first === "'") {
+      let text = "";
+      let at = index + 1;
+      let closed = false;
+      while (at < source.length) {
+        const character = source[at]!;
+        if (character === "\\" && at + 1 < source.length) {
+          text += source[at + 1]!;
+          at += 2;
+        } else if (character === first) {
+          closed = true;
+          at += 1;
+          break;
+        } else {
+          text += character;
+          at += 1;
+        }
+      }
+      if (!closed) fail(`Unexpected "${first}" in the expression.`);
+      tokens.push({ kind: "text", value: text });
+      index = at;
+    } else {
+      TOKEN.lastIndex = index;
+      const match = TOKEN.exec(source);
+      if (!match) fail(`Unexpected "${first}" in the expression.`);
+      index = TOKEN.lastIndex;
+      const [, number, name, operator] = match!;
+      if (number !== undefined) tokens.push({ kind: "number", value: Number(number) });
+      else if (name === "true" || name === "false") tokens.push({ kind: "boolean", value: name === "true" });
+      else if (name !== undefined) tokens.push({ kind: "name", value: name });
+      else tokens.push({ kind: "operator", value: operator! });
+    }
     if (tokens.length > COMPONENT_EXPRESSION_LIMITS.tokens)
       fail(`An expression may have at most ${COMPONENT_EXPRESSION_LIMITS.tokens} parts.`);
   }

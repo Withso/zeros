@@ -146,7 +146,8 @@ function strictColor(raw: string): string | null {
   if (TOKEN_REFERENCE.test(value)) return value.replace(/\s+/g, "");
   const call = COLOR_FUNCTION.exec(value.toLowerCase());
   if (!call) return null;
-  const parts = call[2]!.split(/\s*[,/]\s*|\s+/).filter(Boolean);
+  // One character class: any run of spaces, commas and slashes separates.
+  const parts = call[2]!.split(/[\s,/]+/).filter(Boolean);
   if (parts.length < 3 || parts.length > 4 || !parts.every((part) => COLOR_ARGUMENT.test(part))) return null;
   return value;
 }
