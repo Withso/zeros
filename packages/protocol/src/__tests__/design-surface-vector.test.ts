@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, it } from "vitest";
-import { chromium, type Browser } from "@playwright/test";
+import { chromium, type Browser, type Page } from "@playwright/test";
 import { DESIGN_SURFACE_VECTOR_SOURCE } from "../design-surface-vector";
 
 let browser: Browser;
@@ -52,12 +52,44 @@ const cases: Array<{ name: string; css: string; body?: string; fallback?: boolea
   { name: "font and layout", css: "body{font:16px/20px monospace;color:rgb(20,90,190)}main{display:grid;grid-template-columns:1fr 1fr;gap:10px}", body: "<main><span>Hello</span><strong>Vector</strong></main>" },
 ];
 
+/** Chromium on a loaded CI runner sometimes answers Page.captureScreenshot with
+ * "Unable to capture screenshot" before any pixels exist (8c974a9c3 and merge
+ * group 43122338545, two different cases, no pixel diff). Retry only that
+ * protocol error, after a frame; every other error and every pixel comparison
+ * still fails. */
+async function capturePixels(page: Pick<Page, "screenshot" | "evaluate">, attempts = 3): Promise<string> {
+  for (let attempt = 1; ; attempt++) {
+    try { return (await page.screenshot({ omitBackground: true })).toString("base64"); }
+    catch (error) {
+      if (attempt >= attempts || !String((error as Error)?.message).includes("Unable to capture screenshot")) throw error;
+      await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => resolve(null))));
+    }
+  }
+}
+
+it("retries only Chromium's transient capture failure", async () => {
+  const transient = new Error("page.screenshot: Protocol error (Page.captureScreenshot): Unable to capture screenshot");
+  let calls = 0;
+  const flaky = { screenshot: async () => { if (++calls < 3) throw transient; return Buffer.from("png"); }, evaluate: async () => null };
+  await expect(capturePixels(flaky as never)).resolves.toBe(Buffer.from("png").toString("base64"));
+  expect(calls).toBe(3);
+  calls = 0;
+  const always = { screenshot: async () => { calls++; throw transient; }, evaluate: async () => null };
+  await expect(capturePixels(always as never)).rejects.toBe(transient);
+  expect(calls).toBe(3);
+  const other = new Error("Target page, context or browser has been closed");
+  calls = 0;
+  const broken = { screenshot: async () => { calls++; throw other; }, evaluate: async () => null };
+  await expect(capturePixels(broken as never)).rejects.toBe(other);
+  expect(calls).toBe(1);
+});
+
 it.each(cases)("preserves native document pixels for $name", async ({ css, body, fallback }) => {
   const page = await browser.newPage({ viewport: { width: 320, height: 240 } });
   try {
     await page.setContent(`<!doctype html><html><head><style>body{margin:0}main{height:40px}${css}</style></head><body>${body ?? "<main></main>"}</body></html>`);
     await page.evaluate(() => document.fonts.ready);
-    const htmlPixels = (await page.screenshot({ omitBackground: true })).toString("base64");
+    const htmlPixels = await capturePixels(page);
     const svg = await page.evaluate(source => new Function(source + ";return designSurfaceVector();")() as string | null, DESIGN_SURFACE_VECTOR_SOURCE);
     // Page-canvas image propagation on a short root has a distinct positioning
     // area. Preserve its native preview instead of presenting different pixels.
@@ -69,7 +101,7 @@ it.each(cases)("preserves native document pixels for $name", async ({ css, body,
       const url = URL.createObjectURL(new Blob([markup!], { type: "image/svg+xml" }));
       image.src = url; await image.decode();
     }, svg);
-    const vectorPixels = (await page.screenshot({ omitBackground: true })).toString("base64");
+    const vectorPixels = await capturePixels(page);
     const result = await page.evaluate(async ({ htmlPixels, vectorPixels }) => {
       async function pixels(base64: string) {
         const image = new Image(); image.src = "data:image/png;base64," + base64; await image.decode();
