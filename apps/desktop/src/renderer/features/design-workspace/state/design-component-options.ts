@@ -108,11 +108,12 @@ export function commitDesignComponentVariant(
   name: string,
   shown: ReadonlyMap<string, ComponentOptionValue>,
 ) {
-  const values: Record<string, string | number | boolean> = {};
-  for (const option of declaration.options) {
-    const value = shown.get(option.name);
-    if (value !== undefined && !sameDesignComponentValue(value, option.default)) values[option.name] = attributeValue(value);
-  }
+  const values: Record<string, string | number | boolean> = Object.fromEntries(
+    declaration.options.flatMap((option) => {
+      const value = shown.get(option.name);
+      return value !== undefined && !sameDesignComponentValue(value, option.default) ? [[option.name, attributeValue(value)] as const] : [];
+    }),
+  );
   return applyDesignEditCached(workspaceId, frame,
     edit(`Save variant ${name}`, [{ operationId: "save-variant", type: "component.save-variant", file: frame.file, name, values }]));
 }

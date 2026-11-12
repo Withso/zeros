@@ -562,8 +562,8 @@ export function componentOptionReach(
   // A derived value the template reads makes what it reads structural too.
   for (const derived of [...declaration.derived].reverse())
     if (structural.has(derived.name)) componentExpressionNames(derived.expression, structural);
-  const reach: Record<string, ComponentOptionReach> = {};
-  for (const option of declaration.options)
-    reach[option.name] = (option.kind === "number" || option.kind === "color" || option.kind === "easing") && !structural.has(option.name) ? "css" : "structure";
-  return reach;
+  return Object.fromEntries(declaration.options.map((option): [string, ComponentOptionReach] => [
+    option.name,
+    (option.kind === "number" || option.kind === "color" || option.kind === "easing") && !structural.has(option.name) ? "css" : "structure",
+  ]));
 }

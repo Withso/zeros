@@ -117,15 +117,11 @@ export function pruneDesignComponentVariants(
   update(workspaceId, (frames) => {
     const known = new Map(input.frames.map((frame) => [frame.file, frame]));
     const files = input.files ? new Set(input.files) : null;
-    let changed = false;
-    const kept: Record<string, string> = {};
-    for (const [file, variant] of Object.entries(frames)) {
+    const kept = Object.entries(frames).filter(([file, variant]) => {
       const frame = known.get(file);
-      const gone = (files !== null && !files.has(file)) || (frame !== undefined && !designDeclaredVariants(frame.component).includes(variant));
-      if (gone) changed = true;
-      else kept[file] = variant;
-    }
-    return changed ? kept : frames;
+      return !((files !== null && !files.has(file)) || (frame !== undefined && !designDeclaredVariants(frame.component).includes(variant)));
+    });
+    return kept.length === Object.keys(frames).length ? frames : Object.fromEntries(kept);
   });
 }
 

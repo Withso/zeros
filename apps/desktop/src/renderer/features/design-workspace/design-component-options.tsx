@@ -182,8 +182,7 @@ export function DesignComponentOptions({
   };
   const reset = instance && instanceState?.resettable
     ? () => {
-        const removed: Record<string, null> = {};
-        for (const name of Object.keys(instance.host.attributes)) removed[name] = null;
+        const removed: Record<string, null> = Object.fromEntries(Object.keys(instance.host.attributes).map((name) => [name, null]));
         void commitDesignInstanceAttributes(workspaceId, frame, instance.nodeId, removed, `Reset ${instance.title}`).catch(failed("the options"));
       }
     : undefined;

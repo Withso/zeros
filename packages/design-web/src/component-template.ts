@@ -309,7 +309,9 @@ function optionsRead(expression: string, declaration: ReturnType<typeof readComp
 }
 
 function boundTextOf(document: DefaultTreeAdapterTypes.Document, declaration: ReturnType<typeof readComponentDeclaration>["declaration"]) {
-  const bound: Record<string, string[]> = {};
+  // A Map while collecting: layer ids are authored text ("__proto__" as a
+  // plain object's key would become its prototype).
+  const bound = new Map<string, string[]>();
   let count = 0;
   const visit = (nodes: readonly Node[]) => {
     for (const node of nodes) {
@@ -317,7 +319,7 @@ function boundTextOf(document: DefaultTreeAdapterTypes.Document, declaration: Re
       const element = node as Element;
       if (RAW_TEXT.has(element.tagName)) continue;
       const oid = element.attrs.find((attribute) => attribute.name === "data-oid")?.value;
-      if (oid && count < 512) {
+      if (oid && count < 512 && oid !== "__proto__" && oid !== "constructor" && oid !== "prototype") {
         const read = new Set<string>();
         let holes = false;
         for (const child of element.childNodes)
@@ -327,7 +329,7 @@ function boundTextOf(document: DefaultTreeAdapterTypes.Document, declaration: Re
               for (const name of optionsRead(match[1]!, declaration)) read.add(name);
             }
         if (holes) {
-          bound[oid] = [...read].sort().slice(0, 8);
+          bound.set(oid, [...read].sort().slice(0, 8));
           count += 1;
         }
       }
@@ -335,7 +337,7 @@ function boundTextOf(document: DefaultTreeAdapterTypes.Document, declaration: Re
     }
   };
   visit(document.childNodes);
-  return count ? bound : undefined;
+  return count ? Object.fromEntries(bound) : undefined;
 }
 
 export function designComponentSummaryOf(source: string): DesignComponentSummary | null {

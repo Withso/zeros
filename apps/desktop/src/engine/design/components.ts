@@ -117,8 +117,17 @@ export interface DesignComponentExpansionOptions {
 /** What an expansion learned about the frame's own instances. */
 interface DesignComponentExpansionUsage {
   templated: boolean;
-  instances?: Omit<DesignFrameInstances, "key">;
+  /** Kept in Maps while a frame expands: layer ids and component names are
+   * authored text, and a plain object would take "__proto__" as its
+   * prototype. */
+  instances?: {
+    components: Map<string, DesignFrameInstances["components"][string]>;
+    hosts: Map<string, DesignFrameInstances["hosts"][string]>;
+  };
 }
+
+/** Names every object already answers to: never a key of a reported record. */
+const INHERITED_NAMES: ReadonlySet<string> = new Set(["__proto__", "constructor", "prototype"]);
 
 type ParentNode =
   | DefaultTreeAdapterTypes.Document
@@ -590,8 +599,12 @@ export async function expandDesignComponentsForRender(
   const expansion = await expandDesignComponents(workspacePath, source, sources, entryFile, options, usage);
   if (!usage.templated || !entryFile) return { html: expansion.html };
   const instancesOf = (shows?: DesignComponentOptionsFallback["shows"]) => {
-    if (!usage.instances || !Object.keys(usage.instances.hosts).length) return {};
-    const record = { ...usage.instances, ...(shows ? { notApplied: shows } : {}) };
+    if (!usage.instances || usage.instances.hosts.size === 0) return {};
+    const record = {
+      components: Object.fromEntries(usage.instances.components),
+      hosts: Object.fromEntries(usage.instances.hosts),
+      ...(shows ? { notApplied: shows } : {}),
+    };
     return { instances: { key: createHash("sha256").update(JSON.stringify(record)).digest("hex").slice(0, 16), ...record } };
   };
   if (!expansion.optionsFailed) {
@@ -687,25 +700,25 @@ function recordInstance(
   failed: boolean,
 ): void {
   const oid = instance.attrs.find((attribute) => attribute.name === "data-oid")?.value;
-  if (!oid || oid.length > 256) return;
-  const record = usage.instances ??= { components: {}, hosts: {} };
-  if (Object.keys(record.hosts).length >= DESIGN_FRAME_INSTANCE_LIMITS.hosts) return;
+  if (!oid || oid.length > 256 || INHERITED_NAMES.has(oid) || INHERITED_NAMES.has(definition.name)) return;
+  const record = usage.instances ??= { components: new Map(), hosts: new Map() };
+  if (record.hosts.size >= DESIGN_FRAME_INSTANCE_LIMITS.hosts) return;
   const { declaration, file } = definition.template;
-  if (!record.components[definition.name]) {
-    if (Object.keys(record.components).length >= DESIGN_FRAME_INSTANCE_LIMITS.components) return;
+  if (!record.components.has(definition.name)) {
+    if (record.components.size >= DESIGN_FRAME_INSTANCE_LIMITS.components) return;
     const summary = definition.template.summary?.() ?? null;
-    record.components[definition.name] = { elements: summary?.elements ?? [], reach: summary?.reach ?? {}, file,
-      frame: registry.get(definition.name) === file };
+    record.components.set(definition.name, { elements: summary?.elements ?? [], reach: summary?.reach ?? {}, file,
+      frame: registry.get(definition.name) === file });
   }
   const names = new Set([...declaration.options.map((option) => option.name), COMPONENT_VARIANT_ATTRIBUTE]);
-  const attributes: Record<string, string> = {};
+  const attributes = new Map<string, string>();
   for (const attribute of instance.attrs) {
     if (!names.has(attribute.name)) continue;
     // A value too long to report would mislead; the host shows no Options.
     if (attribute.value.length > 2_048) return;
-    attributes[attribute.name] = attribute.value;
+    attributes.set(attribute.name, attribute.value);
   }
-  record.hosts[oid] = { component: definition.name, attributes, ...(failed ? { failed: true as const } : {}) };
+  record.hosts.set(oid, { component: definition.name, attributes: Object.fromEntries(attributes), ...(failed ? { failed: true as const } : {}) });
 }
 
 async function expandBoundedComponents(

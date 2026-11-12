@@ -2898,8 +2898,11 @@ export const DesignInspector = React.memo(function DesignInspector({
   // one names the instance and shows nothing to edit.
   const selectedPart = selectedNodeId ? designComponentPartOf(selectedNodeId) : null;
   const instanceNodeId = selectedPart?.host ?? (styleNodeIds.length <= 1 ? selectedNodeId : null);
-  const instanceHost = instanceNodeId ? frame?.instances?.hosts[instanceNodeId] : undefined;
-  const instanceComponent = instanceHost ? frame?.instances?.components[instanceHost.component] : undefined;
+  // Own entries only: a layer id such as "constructor" is not a host.
+  const instanceHost = instanceNodeId && frame?.instances && Object.hasOwn(frame.instances.hosts, instanceNodeId)
+    ? frame.instances.hosts[instanceNodeId] : undefined;
+  const instanceComponent = instanceHost && frame?.instances && Object.hasOwn(frame.instances.components, instanceHost.component)
+    ? frame.instances.components[instanceHost.component] : undefined;
   const instanceTitle = instanceHost && instanceComponent && workspaceId
     ? designComponentTitle(workspaceId, instanceHost.component, instanceComponent)
     : null;

@@ -122,6 +122,20 @@ describe("instances and variants through the engine", () => {
     return { main, host };
   };
 
+  it("records no host under a name every object already has, and keeps the record a plain map", async () => {
+    const { host } = await setUp();
+    // Layer ids are authored text: these would otherwise replace the record's
+    // prototype or shadow what every object inherits.
+    await writeFile(path.join(root, DESIGN_DIRECTORY_NAME, host.file), HOST.replace("<p data-oid=\"p\">After</p>",
+      `<zd-chat-composer data-oid="__proto__" width="640"></zd-chat-composer><zd-chat-composer data-oid="constructor" width="641"></zd-chat-composer>`));
+    const listed = (await readDesignWorkspaceSnapshot(root)).frames.find((candidate) => candidate.file === host.file)!;
+    const hosts = listed.instances!.hosts;
+    expect(Object.getPrototypeOf(hosts)).toBe(Object.prototype);
+    expect(Object.keys(hosts)).toEqual(["inst"]);
+    expect(Object.hasOwn(hosts, "__proto__")).toBe(false);
+    expect(Object.hasOwn(hosts, "constructor")).toBe(false);
+  });
+
   it("names the instances a frame places, their component and their values", async () => {
     const { main, host } = await setUp();
     const listed = (await readDesignWorkspaceSnapshot(root)).frames.find((candidate) => candidate.file === host.file)!;
