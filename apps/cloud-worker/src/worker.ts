@@ -229,7 +229,9 @@ export class CloudWorker {
     catch (error) { throw tagged(error, "lease_refused"); }
     try {
       if (lease.userId !== client.userId) throw tagged(new WorkspaceError("CLOUD_V2_UNSUPPORTED", "Reconnect to the workspace to make changes as yourself."), "lease_person_mismatch");
-      return await operationEnvironment.run({ git: gitIdentityEnvironment(lease.gitIdentity), zeros: { ZEROS_EXECUTION_CONTEXT: lease.contextId } }, work);
+      return await operationEnvironment.run({ git: gitIdentityEnvironment(lease.gitIdentity), zeros: { ZEROS_EXECUTION_CONTEXT: lease.contextId },
+        // A code review mutation is authored by this person (never the Creator).
+        requester: { userId: lease.userId, ...(lease.gitIdentity?.name ? { userName: lease.gitIdentity.name } : {}) } }, work);
     } finally {
       await retireContext(this.contexts, lease.contextId, "operation_done");
     }
@@ -575,7 +577,7 @@ export class CloudWorker {
       if (!changed || changed.some(key => key.startsWith("workspace.")))
         await measureStartup("worker_reconfigure_workspace", () => this.workspace!.configure(config.workspace), timing);
       await measureStartup("worker_reconfigure_mcp", () => this.mcp!.configure(config.mcpServers ?? [], config.loginRevision), timing);
-      if (!this.stopping) await this.reviews!.configure(config.codeReview);
+      if (!this.stopping) await (config.actingUser === 1 ? this.reviews!.configurePerRequester() : this.reviews!.configure(config.codeReview));
       if (!this.reviews!.enabled) this.workspaceMcp.revokeReview();
       this.agents!.configure(config);
     }
@@ -655,7 +657,8 @@ export class CloudWorker {
         this.lastMutationAt = Date.now(); void this.reportIdle();
         void this.broadcast(createMessage({ type: "DB_CHANGED", source: "engine", kinds: ["codeReview"], workspaceIds: [scope.workspace.id] }));
       });
-      reviewConfiguring = measureStartup("worker_services_review", () => reviews!.configure(config.codeReview), timing);
+      // Activated: each review mutation is its requester's; no workspace-wide reviewer (config.codeReview is ignored).
+      reviewConfiguring = measureStartup("worker_services_review", () => config.actingUser === 1 ? reviews!.configurePerRequester() : reviews!.configure(config.codeReview), timing);
       reviewConfiguring.catch(() => {});
       const checkout = await checking;
       refresh = checkout?.refresh;

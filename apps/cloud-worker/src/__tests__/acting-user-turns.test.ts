@@ -590,3 +590,22 @@ it("drops a client whose own handle is revoked: no more requests, its terminals 
   await until(() => !!f.relay.response(answered.id)).toBe(true);
   expect(f.relay.response(ignored.id)).toBeUndefined();
 });
+
+it("authors each review comment in an activated workspace as the person who made it, and refuses a connection without a person", async () => {
+  const f = await setup();
+  f.relay.clientUsers.set(CLIENT_A, ALEX);
+  await f.relay.receive({ t: "open", clientId: CLIENT_A, userId: ALEX, contextId: randomUUID() });
+  await f.relay.receive({ t: "open", clientId: CLIENT_B });
+  await writeFile(join(f.root, "example.ts"), "source\n");
+  const anchor = { path: "example.ts", side: "new", startLine: 1, endLine: 1, revision: "base" };
+  const create = browserFrame("WORKSPACE_REQUEST", { op: "codeReview.create", params: { workspaceId: WORKSPACE_ID, anchor, body: "from alex" } });
+  await f.relay.request(CLIENT_A, create);
+  await until(() => !!f.relay.response(create.id)).toBe(true);
+  expect(f.relay.response(create.id)!.type).toBe("WORKSPACE_RESPONSE");
+  expect(JSON.stringify(f.relay.response(create.id))).toContain(`human:${ALEX}`);
+  expect(f.relay.calls.find(call => call.op === "client-lease")?.body).toMatchObject({ clientId: CLIENT_A, operation: "codeReview.create" });
+  const anonymous = browserFrame("WORKSPACE_REQUEST", { op: "codeReview.create", params: { workspaceId: WORKSPACE_ID, anchor, body: "no person" } });
+  await f.relay.request(CLIENT_B, anonymous);
+  await until(() => !!f.relay.response(anonymous.id)).toBe(true);
+  expect(f.relay.response(anonymous.id)!.type).toBe("WORKSPACE_ERROR");
+});
