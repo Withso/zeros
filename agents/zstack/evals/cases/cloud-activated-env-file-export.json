@@ -1,0 +1,9 @@
+{
+  "id": "cloud-activated-env-file-export",
+  "kind": "replay",
+  "area": "control-plane",
+  "fixedBy": "pr:1049",
+  "symptom": "A valid pinned environment file with one reserved assignment let an activated turn acquire its person's lease, then strict child-variable validation failed both the turn and terminal. The same file worked in legacy mode.",
+  "rule": "A file's accepted bytes are distinct from its exportable process variables. Exercise the signed carrier, real leases, filesystem and child process together; retain private file bytes while excluding names that cannot be exported (principles 10, 11 and 13).",
+  "check": "pnpm --dir apps/control-plane exec vitest run src/cloud/execution/relay-client-authority.integration.test.ts"
+}

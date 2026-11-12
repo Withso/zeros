@@ -37,6 +37,7 @@ class ActingRelay extends FakeRelay {
   waiting?: (batch: { prompts: Delivery[]; stops: [] }) => void;
   authorizations: unknown[][] = [];
   clientUsers = new Map<string, string>();
+  terminalEnvironment?: unknown;
   mcpAuthorization = async (...args: unknown[]) => {
     this.authorizations.push(args.filter(arg => !(arg instanceof AbortSignal)));
     throw Object.assign(new Error("sign in"), { code: "mcp_auth_required" });
@@ -76,7 +77,8 @@ class ActingRelay extends FakeRelay {
     }
     if (path === "terminal-lease") {
       const userId = this.clientUsers.get(body.clientId)!;
-      return { contextId: randomUUID(), userId, expiresAt: Date.now() + 30_000, gitIdentity: { name: userId === ALEX ? "Alex" : "Sam", email: "1+person@users.noreply.github.com" } };
+      return { contextId: randomUUID(), userId, expiresAt: Date.now() + 30_000, gitIdentity: { name: userId === ALEX ? "Alex" : "Sam", email: "1+person@users.noreply.github.com" },
+        ...(this.terminalEnvironment ? { environment: this.terminalEnvironment } : {}) };
     }
     if (path === "client-lease") {
       const userId = this.clientUsers.get(body.clientId)!;
@@ -473,4 +475,70 @@ it.skipIf(process.platform !== "linux")("leases a bridge client's terminal and m
   await f.relay.request(CLIENT_A, browserFrame("PTY_CREATE", { sessionId: "alex-shell", cols: 120, rows: 10 }));
   await until(() => f.relay.bridge("PTY_CREATED").filter(entry => entry.clientId === CLIENT_A).length).toBe(1);
   expect(f.relay.calls.find(call => call.op === "terminal-lease")!.body).toMatchObject({ clientId: authority, terminalId: "alex-shell" });
+});
+
+it.skipIf(process.platform !== "linux")("says why an activated terminal could not start (closed class, one journal line) and retires its lease at once", async () => {
+  const lines: string[] = [];
+  const f = await setup({ log: line => lines.push(line) });
+  f.relay.clientUsers.set(CLIENT_A, ALEX);
+  await f.relay.receive({ t: "open", clientId: CLIENT_A, userId: ALEX, contextId: randomUUID() });
+  // The person's env files cannot be written (one names the other's parent): the lease is retired, not left to lapse.
+  f.relay.terminalEnvironment = { versionId: randomUUID(), repositoryId: "1", variables: {},
+    files: [{ path: "app/.env", content: "DATABASE_URL=x\n" }, { path: "app/.env/.env", content: "OTHER=y\n" }] };
+  await f.relay.request(CLIENT_A, browserFrame("PTY_CREATE", { sessionId: "unwritable", cols: 80, rows: 10 }));
+  await until(() => lines.filter(line => line.startsWith("terminal spawn failed class=personal_env_failed")).length).toBe(1);
+  const leases = f.relay.calls.filter(call => call.op === "terminal-lease").length;
+  await until(() => f.relay.calls.filter(call => /^execution-leases\/.+\/retired$/.test(call.op)).length).toBe(leases);
+  await expect(stat(join(f.home, ".zeros", "contexts", f.relay.calls.filter(call => /^execution-leases\/.+\/retired$/.test(call.op)).at(-1)!.op.split("/")[1]!)))
+    .rejects.toMatchObject({ code: "ENOENT" });
+});
+
+it("names the refusing step of an activated client operation and turn: a closed class on the refusal and one journal line, never a value", async () => {
+  const lines: string[] = [];
+  const f = await setup({ log: line => lines.push(line) });
+  // No person on the connection: the mutation is refused as no_person.
+  await f.relay.receive({ t: "open", clientId: CLIENT_B });
+  const anonymous = browserFrame("WORKSPACE_REQUEST", { op: "file.write", params: { path: "a.txt", content: "secret-content" } });
+  await f.relay.request(CLIENT_B, anonymous);
+  await until(() => f.relay.response(anonymous.id)).toMatchObject({ type: "WORKSPACE_ERROR", failure: "no_person" });
+  expect(lines).toContain("workspace-request op=file.write failed class=no_person code=CLOUD_V2_UNSUPPORTED");
+  // The control plane refuses the person's client lease.
+  await f.relay.receive({ t: "open", clientId: CLIENT_A, userId: ALEX, contextId: randomUUID() });
+  const write = browserFrame("WORKSPACE_REQUEST", { op: "file.write", params: { path: "b.txt", content: "secret-content" } });
+  await f.relay.request(CLIENT_A, write);
+  await until(() => f.relay.response(write.id)).toMatchObject({ type: "WORKSPACE_ERROR", failure: "lease_refused" });
+  expect(lines.some(line => line.startsWith("workspace-request op=file.write failed class=lease_refused"))).toBe(true);
+  // A turn whose lease is refused.
+  f.relay.leaseReply = () => { throw Object.assign(new Error("refused"), { status: 409, contextCode: "actor_changed" }); };
+  f.relay.deliver(delivery(ALEX));
+  await until(() => lines.find(line => line.startsWith("turn failed"))).toBe("turn failed class=lease_refused code=actor_changed");
+  expect(lines.join("\n")).not.toMatch(/secret|\/tmp|[0-9a-f]{8}-[0-9a-f]{4}/);
+});
+
+it.skipIf(process.platform !== "linux")("Alpha w/2: a person's .env file with names a process cannot take still opens their terminal and runs their turn; only exportable names become variables", async () => {
+  const lines: string[] = [];
+  const f = await setup({ log: line => lines.push(line) });
+  f.relay.clientUsers.set(CLIENT_A, ALEX);
+  await f.relay.receive({ t: "open", clientId: CLIENT_A, userId: ALEX, contextId: randomUUID() });
+  // The control plane validates env-file paths and sizes, never the names inside them.
+  const environment = { versionId: randomUUID(), repositoryId: "1", variables: {},
+    files: [{ path: ".env.local", content: "ZEROS_PROOF=one\nNODE_ENV=development\nlower.case=two\nA-B=three\nPATH=/tmp/evil\nAPP_SETTING=kept\n" }] };
+  f.relay.terminalEnvironment = environment;
+  await f.relay.request(CLIENT_A, browserFrame("PTY_CREATE", { sessionId: "env-shell", cols: 200, rows: 10 }));
+  await until(() => f.relay.bridge("PTY_CREATED").filter(entry => entry.clientId === CLIENT_A).length).toBe(1);
+  await f.relay.request(CLIENT_A, browserFrame("PTY_WRITE", { sessionId: "env-shell", data: "echo \"app=$APP_SETTING zp=${ZEROS_PROOF:-unset} ne=${NODE_ENV:-unset} file=$(cat \"$ZEROS_PERSONAL_ENV_DIR/.env.local\" | wc -l) path=${PATH%%:*}\"\r" }));
+  const output = () => f.relay.bridge("PTY_DATA").filter(entry => entry.clientId === CLIENT_A).map(({ frame }) => (frame as { data: string }).data).join("");
+  await until(output).toMatch(/app=kept zp=unset ne=unset file=6 path=(?!\/tmp\/evil)/);
+  // The same lease shape for a turn: the driver starts with the exportable name only.
+  f.relay.leaseReply = (body: any) => ({ contextId: body.contextId, userId: ALEX, generation: body.generation, expiresAt: Date.now() + 30_000,
+    agents: { claude: { apiKey: "alex-personal-key-0000" } }, gitIdentity: { name: "Alex", email: "1+alex@users.noreply.github.com" }, environment });
+  f.relay.deliver(delivery(ALEX));
+  await until(() => f.drivers[0]?.prompts.length ?? 0).toBe(1);
+  expect(f.relay.calls.some(call => call.op === "outcome" && call.body.state === "failed")).toBe(false);
+  // The turn is told how many entries stayed out and why (counts by class, never a name or value); the journal says the same.
+  const notice = JSON.stringify(f.drivers[0]!.prompts[0]);
+  expect(notice).toContain("5 entries were not exported as variables (reserved name: 3, invalid name: 2); they stay in the files.");
+  expect(notice).not.toMatch(/ZEROS_PROOF|NODE_ENV|lower\.case|evil/);
+  expect(lines.filter(line => line === "personal-env unexported reserved=3 invalid=2 limit=0")).toHaveLength(2);
+  f.drivers[0]!.complete();
 });

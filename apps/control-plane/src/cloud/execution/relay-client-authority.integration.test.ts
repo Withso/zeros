@@ -7,6 +7,8 @@ import { join } from "node:path";
 import pg from "pg";
 import WebSocket from "ws";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { withSystemTx } from "../../db.js";
+import { pinCloudEnvironment } from "../environment-store.js";
 import { CloudV2WorkerSigner } from "../worker-auth.js";
 import { executionFixture, type ExecutionFixture } from "./test-fixture.js";
 
@@ -14,9 +16,30 @@ import { executionFixture, type ExecutionFixture } from "./test-fixture.js";
 // control-plane ids that authorize the durable operation receipts.
 const root = new URL(process.env.CLOUD_EXECUTION_TEST_CLIENT_ROOT ?? "../../../../../", import.meta.url);
 const database = process.env.TEST_DATABASE_URL ? describe : describe.skip;
+const envCases = [
+  { name: "reserved-only file", key: "ZEROS_ALPHA_ACTIVATION_TEST", value: "nonsecret-managed-proof", exported: false },
+  { name: "benign lowercase file", key: "app_setting", value: "synthetic-application-value", exported: true },
+];
+const envPath = ".env.local";
+type EnvCase = typeof envCases[number];
+const envContent = (input: EnvCase) => `${input.key}=${input.value}\n`;
+const quote = (text: string) => `'${text.replaceAll("'", "'\\''")}'`;
+const inspectEnvironment = (input: EnvCase, home: string, marker = "") => `
+  const fs = require('node:fs'), path = require('node:path');
+  const env = process.env, context = env.ZEROS_EXECUTION_CONTEXT, directory = env.ZEROS_PERSONAL_ENV_DIR;
+  const key = ${JSON.stringify(input.key)}, value = ${JSON.stringify(input.value)};
+  const expected = path.join(${JSON.stringify(home)}, '.zeros', 'contexts', context, 'env');
+  const file = path.join(directory, ${JSON.stringify(envPath)});
+  const facts = { privateDirectory: directory === expected,
+    intact: fs.readFileSync(file, 'utf8') === ${JSON.stringify(envContent(input))},
+    directoryPrivate: (fs.statSync(directory).mode & 511) === 448,
+    filePrivate: (fs.statSync(file).mode & 511) === 384,
+    exported: Object.hasOwn(env, key), matches: env[key] === value };
+  process.stdout.write(${JSON.stringify(marker ? marker + " " : "")} + JSON.stringify(facts) + '\\n');
+`;
 database("client lease authority through the signed worker carrier", () => {
   let pool: pg.Pool, f: ExecutionFixture;
-  let clients: { InboundBridge: any; CloudWorker: any; FakeRelay: any; FakeDriver: any; browserFrame: any };
+  let clients: { InboundBridge: any; CloudWorker: any; FakeRelay: any; FakeDriver: any; browserFrame: any; agentEnvironment: any };
   const cleanups: Array<() => void | Promise<void>> = [];
   beforeAll(async () => {
     pool = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL, max: 8, statement_timeout: 4000 });
@@ -24,6 +47,7 @@ database("client lease authority through the signed worker carrier", () => {
       ...await import(new URL("apps/cloud-worker/src/inbound-bridge.ts", root).href),
       ...await import(new URL("apps/cloud-worker/src/worker.ts", root).href),
       ...await import(new URL("apps/cloud-worker/src/__tests__/worker-fixtures.ts", root).href),
+      ...await import(new URL("apps/cloud-worker/src/drivers/shared/agent-environment.ts", root).href),
     };
   });
   beforeEach(async () => {
@@ -37,7 +61,7 @@ database("client lease authority through the signed worker carrier", () => {
   });
   afterAll(() => pool.end());
 
-  const setup = async (turns = false) => {
+  const setup = async (turns = false, inspect?: EnvCase) => {
     const hello = await f.worker("hello", { protocol: 2, bootId: f.boot, runtimeSha256: "b".repeat(64) });
     expect(hello.status).toBe(200);
     const config = (await hello.json()).config;
@@ -75,7 +99,21 @@ database("client lease authority through the signed worker carrier", () => {
     const drivers: any[] = [];
     const worker = new clients.CloudWorker({ directory: state, homeDirectory: home, sharedMemory: join(directory, "shm"),
       workspaceId: f.workspace.id, transport: relay, bootClean: async () => 0, prepareCheckout: async () => {},
-      drivers: { claude: () => { const driver = new clients.FakeDriver(); drivers.push(driver); return driver; } },
+      drivers: { claude: () => {
+        const driver = new clients.FakeDriver();
+        if (inspect) {
+          const open = driver.open.bind(driver);
+          driver.open = async (input: any) => {
+            const result = await open(input);
+            const env = clients.agentEnvironment({ agent: "claude", apiKey: input.apiKey }, { HOME: home, PATH: process.env.PATH },
+              input.gitEnvironment, input.application?.variables, input.zerosEnvironment);
+            driver.facts = JSON.parse(execFileSync(process.execPath, ["-e", inspectEnvironment(inspect, home)],
+              { cwd: checkout, env, encoding: "utf8", timeout: 3000 }));
+            return result;
+          };
+        }
+        drivers.push(driver); return driver;
+      } },
       workspaceServices: { watch: false } });
     cleanups.push(() => worker.dispose());
     worker.start();
@@ -101,8 +139,20 @@ database("client lease authority through the signed worker carrier", () => {
       };
       return { clientId, handle, socket, frames, send };
     };
-    return { calls, incoming, checkout, open, drivers };
+    return { calls, incoming, checkout, home, open, drivers };
   };
+
+  const pinFile = async (input: EnvCase) => {
+    await f.cp.routes.environments!.patch(f.organizationId, f.creator.id, "42", f.workspace.repository,
+      { expectedRevision: 0, variables: {}, files: [{ path: envPath, content: envContent(input) }] });
+    await withSystemTx(pool, tx => pinCloudEnvironment(tx, f.workspace, "42"));
+    // A Creator's workspace pin survives later default-file removal.
+    await f.cp.routes.environments!.patch(f.organizationId, f.creator.id, "42", f.workspace.repository,
+      { expectedRevision: 1, files: [{ path: envPath, content: null }] });
+  };
+
+  const expectedFacts = (input: EnvCase) => ({ privateDirectory: true, intact: true, directoryPrivate: true, filePrivate: true,
+    exported: input.exported, matches: input.exported });
 
   it("leases a terminal using the opener id recorded before the carrier remaps it", async () => {
     const worker = await setup(), client = await worker.open();
@@ -155,5 +205,59 @@ database("client lease authority through the signed worker carrier", () => {
     worker.drivers[0].complete();
     await expect.poll(async () => (await pool.query("SELECT state FROM cloud_v2_prompt_outbox WHERE workspace_id=$1 AND user_message_id=$2",
       [f.workspace.id, prompt.userMessageId])).rows[0]?.state).toBe("completed");
+  });
+
+  it.each(envCases)("runs A's turn with the $name intact and only exportable child variables", async input => {
+    const login = await f.login(); await pinFile(input);
+    const worker = await setup(true, input), client = await worker.open(), prompt = f.prompt();
+    expect((await f.send(prompt)).status).toBe(201);
+    client.socket.send(JSON.stringify({ t: "prompts" }));
+    const failure = () => client.frames.find(value => value.frame?.type === "AGENT_SESSION_UPDATE" &&
+      value.frame.notification.update.sessionUpdate === "error_notice" &&
+      value.frame.notification.update.turnFailure?.turnId === prompt.userMessageId)?.frame.notification.update.turnFailure.kind;
+    await expect.poll(() => worker.drivers[0]?.prompts.length === 1 || failure() !== undefined).toBe(true);
+    expect(failure()).toBeUndefined();
+    expect(worker.drivers[0]?.prompts).toHaveLength(1);
+    expect(worker.drivers[0].facts).toEqual(expectedFacts(input));
+    expect(client.frames.some(value => value.frame?.type === "AGENT_SESSION_UPDATE" &&
+      value.frame.notification.update.sessionUpdate === "turn_state" && value.frame.notification.update.turnId === prompt.userMessageId &&
+      value.frame.notification.update.state === "running" && value.frame.notification.update.actingUserId === f.creator.id)).toBe(true);
+    const rows = (await pool.query("SELECT id,user_id,credential_id,state FROM cloud_v2_execution_contexts WHERE workspace_id=$1 AND kind='turn'", [f.workspace.id])).rows;
+    expect(rows).toEqual([{ id: worker.drivers[0].opened.zerosEnvironment.ZEROS_EXECUTION_CONTEXT,
+      user_id: f.creator.id, credential_id: login.id, state: "active" }]);
+    expect(worker.calls.find(call => call.path === "turn-lease")?.status).toBe(200);
+    worker.drivers[0].complete();
+    await expect.poll(async () => (await pool.query("SELECT state FROM cloud_v2_prompt_outbox WHERE workspace_id=$1 AND user_message_id=$2",
+      [f.workspace.id, prompt.userMessageId])).rows[0]?.state).toBe("completed");
+    await expect.poll(async () => (await pool.query("SELECT state FROM cloud_v2_execution_contexts WHERE id=$1", [rows[0].id])).rows[0]?.state).toBe("retired");
+  });
+
+  // The standalone worker runs on Linux; this case exercises its actual node-pty child.
+  it.skipIf(process.platform !== "linux").each(envCases)("spawns A's terminal with the $name intact and only exportable child variables", async input => {
+    await pinFile(input);
+    const worker = await setup(), client = await worker.open();
+    const frame = clients.browserFrame("PTY_CREATE", { workspaceId: f.workspace.id, cwd: worker.checkout,
+      sessionId: randomUUID(), cols: 120, rows: 30 });
+    await client.send(frame);
+    const reply = () => client.frames.find(value => value.frame?.requestId === frame.id ||
+      value.frame?.type === "PTY_EXIT" && value.frame.sessionId === frame.sessionId)?.frame;
+    await expect.poll(reply).toBeDefined();
+    expect(reply()).toMatchObject({ type: "PTY_CREATED", sessionId: frame.sessionId });
+    const rows = (await pool.query("SELECT kind,user_id FROM cloud_v2_execution_contexts WHERE workspace_id=$1 AND request_id=$2 ORDER BY kind",
+      [f.workspace.id, frame.id])).rows;
+    expect(rows).toEqual([{ kind: "client", user_id: f.creator.id }, { kind: "terminal", user_id: f.creator.id }]);
+    const marker = "ENV_FACTS_" + randomUUID().replaceAll("-", "");
+    await client.send(clients.browserFrame("PTY_WRITE", { sessionId: frame.sessionId,
+      data: `${quote(process.execPath)} -e ${quote(inspectEnvironment(input, worker.home, marker))}\n` }));
+    const facts = () => {
+      const output = client.frames.filter(value => value.frame?.type === "PTY_DATA" && value.frame.sessionId === frame.sessionId)
+        .map(value => value.frame.data).join("");
+      const match = output.match(new RegExp(`${marker} (\\{[^\\r\\n]*\\})`));
+      return match ? JSON.parse(match[1]!) : undefined;
+    };
+    await expect.poll(facts).toEqual(expectedFacts(input));
+    await client.send(clients.browserFrame("PTY_KILL", { sessionId: frame.sessionId }));
+    await expect.poll(async () => (await pool.query("SELECT state FROM cloud_v2_execution_contexts WHERE workspace_id=$1 AND terminal_id=$2 AND kind='terminal'",
+      [f.workspace.id, frame.sessionId])).rows[0]?.state).toBe("retired");
   });
 });

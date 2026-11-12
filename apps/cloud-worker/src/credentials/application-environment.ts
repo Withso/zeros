@@ -1,6 +1,7 @@
 import { parseEnv } from "node:util";
 import { StringDecoder } from "node:string_decoder";
 import { CloudEnvironmentMaterialSchema, type CloudEnvironmentMaterial } from "@zeros/protocol/cloud-v2-relay";
+import { tagged } from "../sharing/closed-failure";
 
 const identifiers = new Set(["id", "type", "kind", "role", "status", "state", "source", "sessionUpdate", "stopReason", "agentId", "providerId",
   "agent", "provider", "model", "fromModel", "toModel", "previousModel", "effort", "modeId", "currentModeId", "optionId", "optionIds", "requestId", "sessionId", "chatId", "msgId", "toolCallId", "nativeToolCallId",
@@ -32,7 +33,8 @@ export class ApplicationEnvironment {
   private readonly values: (string | undefined)[];
 
   constructor(material: CloudEnvironmentMaterial = { variables: {}, files: [] }) {
-    if (!CloudEnvironmentMaterialSchema.safeParse(material).success) throw new Error("Invalid application environment.");
+    const checked = CloudEnvironmentMaterialSchema.safeParse(material);
+    if (!checked.success) throw tagged(Object.assign(new Error("Invalid application environment."), { code: checked.error.issues[0]?.message }), "environment_invalid");
     this.variables = Object.freeze({ ...material.variables });
     this.values = [...Object.values(material.variables), ...material.files.flatMap(file => [file.content, ...Object.values(parseEnv(file.content))])];
     this.rebuild();

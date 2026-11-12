@@ -26,7 +26,7 @@ class FakeProcess implements TerminalProcess {
   pause() {} resume() {}
 }
 
-async function setup() {
+async function setup(override: { lease?: TerminalPeople["lease"]; spawn?: (options: TerminalSpawnOptions) => Promise<TerminalProcess> } = {}) {
   const { scope } = await repositoryFixture();
   const spawned: TerminalSpawnOptions[] = [], natives: FakeProcess[] = [];
   const leases: Array<{ clientId: string; terminalId: string; requestId: string }> = [], retired: string[] = [];
@@ -34,18 +34,20 @@ async function setup() {
   let n = 0;
   const people: TerminalPeople = {
     of: value => (value as { userId?: string }).userId,
-    lease: async (value, terminalId, requestId) => {
+    lease: override.lease ?? (async (value, terminalId, requestId) => {
       leases.push({ clientId: value.id, terminalId, requestId });
       const userId = (value as { userId?: string }).userId!, contextId = `66666666-6666-4666-8666-66666666666${n++}`;
       return { contextId, userId, git: { GIT_AUTHOR_NAME: userId === ALEX ? "Alex" : "Sam" },
         zeros: { ZEROS_EXECUTION_CONTEXT: contextId }, application: { PERSONAL: userId === ALEX ? "alex" : "sam" } };
-    },
+    }),
     ended: (contextId, listener) => { ends.set(contextId, listener); return () => ends.delete(contextId); },
     retire: async contextId => { retired.push(contextId); },
   };
-  const service = new Terminals(scope, { people, spawn: async options => { spawned.push(options); const native = new FakeProcess(); natives.push(native); return native; } });
+  const lines: string[] = [];
+  const service = new Terminals(scope, { people, log: line => lines.push(line),
+    spawn: override.spawn ?? (async options => { spawned.push(options); const native = new FakeProcess(); natives.push(native); return native; }) });
   services.push(service);
-  return { service, spawned, natives, leases, retired, ends };
+  return { service, spawned, natives, leases, retired, ends, lines };
 }
 
 it("spawns a shell from its opener's terminal lease, with that person's identity and context", async () => {
@@ -98,4 +100,41 @@ it("shows an agent only its own person's shells", async () => {
   expect(await f.service.output({ maxLines: 10, userId: SAM })).toBeUndefined();
   expect(await f.service.output({ maxLines: 10 })).toBeUndefined();
   expect(await f.service.output({ maxLines: 10, terminalId: "t1", userId: SAM })).toBeUndefined();
+});
+
+const CONTEXT = "77777777-7777-4777-8777-777777777777";
+const leased = (application: Record<string, string> = {}): TerminalPeople["lease"] => async value =>
+  ({ contextId: CONTEXT, userId: (value as { userId?: string }).userId!, git: {}, zeros: { ZEROS_EXECUTION_CONTEXT: CONTEXT }, application });
+const exitOf = (frames: BridgeMessage[]) => frames.find(message => message.type === "PTY_EXIT");
+
+it("names a closed class for each way an activated spawn fails, on the exit frame and in one journal line, never a value", async () => {
+  // A person's .env file parses to a reserved name (NODE_ENV): the shell environment is refused.
+  const reserved = await setup({ lease: leased({ NODE_ENV: "development-secret-value" }) }), alex = client("a", ALEX);
+  await reserved.service.handle(alex.client, frame("PTY_CREATE", { sessionId: "t1" }));
+  expect(exitOf(alex.frames)).toMatchObject({ reason: "spawn-failed", failure: "environment_invalid" });
+  expect(reserved.lines).toEqual(["terminal spawn failed class=environment_invalid code=cloud_environment_reserved"]);
+  expect(reserved.retired).toEqual([CONTEXT]);
+
+  const refused = await setup({ lease: async () => { throw Object.assign(new Error("refused"), { status: 409, contextCode: "actor_changed" }); } });
+  const sam = client("s", SAM);
+  await refused.service.handle(sam.client, frame("PTY_CREATE", { sessionId: "t2" }));
+  expect(exitOf(sam.frames)).toMatchObject({ failure: "lease_refused" });
+  expect(refused.lines).toEqual(["terminal spawn failed class=lease_refused code=actor_changed"]);
+
+  const native = await setup({ lease: leased(), spawn: async () => { throw Object.assign(new Error("forkpty(3) failed."), { code: "EAGAIN" }); } });
+  const third = client("c", ALEX);
+  await native.service.handle(third.client, frame("PTY_CREATE", { sessionId: "t3" }));
+  expect(exitOf(third.frames)).toMatchObject({ failure: "pty_unavailable" });
+  expect(native.lines).toEqual(["terminal spawn failed class=pty_unavailable code=EAGAIN"]);
+  expect(native.retired).toEqual([CONTEXT]);
+
+  const other = await setup({ lease: async () => ({ contextId: CONTEXT, userId: SAM, git: {}, zeros: {} }) });
+  const fourth = client("d", ALEX), nobody = client("x");
+  await other.service.handle(fourth.client, frame("PTY_CREATE", { sessionId: "t4" }));
+  expect(exitOf(fourth.frames)).toMatchObject({ failure: "lease_person_mismatch" });
+  await other.service.handle(nobody.client, frame("PTY_CREATE", { sessionId: "t5" }));
+  expect(exitOf(nobody.frames)).toMatchObject({ failure: "no_person" });
+  await other.service.handle(fourth.client, frame("PTY_CREATE", { sessionId: "t6", cwd: "/etc" }));
+  expect(other.lines).toEqual(["terminal spawn failed class=lease_person_mismatch", "terminal spawn failed class=no_person", "terminal spawn failed class=invalid_request"]);
+  for (const line of [...reserved.lines, ...refused.lines, ...native.lines, ...other.lines]) expect(line).not.toMatch(/secret|forkpty|\/etc/);
 });

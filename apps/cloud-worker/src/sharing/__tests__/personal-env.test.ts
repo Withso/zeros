@@ -33,3 +33,16 @@ it("refuses a path that would leave the context's directory, and a context id th
   await expect(personal.materialize("../../x", environment)).rejects.toThrow();
   await expect(stat(join(home, ".zeros", "contexts", CONTEXT))).rejects.toMatchObject({ code: "ENOENT" });
 });
+
+it("writes every env file as-is but exports only names a process can take, counting the rest by class", async () => {
+  const home = await mkdtemp(join(tmpdir(), "zeros-personal-")); directories.push(home);
+  const many = Array.from({ length: 130 }, (_, index) => `NAME_${index}=v`).join("\n");
+  const content = `ZEROS_PROOF=one\nGIT_DIR=x\nlower.case=1\nBIG=${"x".repeat(17 * 1024)}\n${many}\n`;
+  const result = await new PersonalEnvironments(home).materialize(CONTEXT, { variables: { OWN: "kept" }, files: [{ path: ".env.local", content }] });
+  expect(await readFile(join(result.directory, ".env.local"), "utf8")).toBe(content);
+  expect(result.variables.OWN).toBe("kept");
+  expect(Object.keys(result.variables)).toHaveLength(128);
+  expect(result.variables).not.toHaveProperty("ZEROS_PROOF");
+  expect(result.variables).not.toHaveProperty("GIT_DIR");
+  expect(result.unexported).toEqual({ reserved: 2, invalid: 1, limit: 4 });
+});
