@@ -22,11 +22,12 @@ function fake(handler: (method: string, path: string, init: RequestInit) => Resp
 describe("device control client", () => {
   it("reads the trusted Git scope passively and requests a read token with this Mac's headers and both sync opt-ins", async () => {
     const workspaceId = "11111111-1111-4111-8111-111111111111", organizationId = "22222222-2222-4222-8222-222222222222";
+    const expiresAt = new Date(Date.parse(iso) + 60 * 60_000).toISOString();
     const f = fake((_method, path) => Response.json(path.endsWith("/github-read-token")
-      ? { token: "synthetic-read-token", expiresAt: iso, repository: "example/repo" }
+      ? { token: "synthetic-read-token", expiresAt, repository: "example/repo" }
       : { workspace: { id: workspaceId, organizationId, repository: "example/repo", state: "stopped", future: true } }));
     expect(await f.control.workspaceGitScope(device, workspaceId)).toEqual({ organizationId, repository: "example/repo" });
-    expect(await f.control.githubReadToken(device, workspaceId)).toEqual({ token: "synthetic-read-token", expiresAt: iso, repository: "example/repo" });
+    expect(await f.control.githubReadToken(device, workspaceId)).toEqual({ token: "synthetic-read-token", expiresAt, repository: "example/repo" });
     expect(f.calls.map(call => [call.method, call.path, call.body])).toEqual([
       ["GET", `/v1/cloud-v2/workspaces/${workspaceId}`, undefined], ["POST", `/v1/cloud-v2/workspaces/${workspaceId}/github-read-token`, {}],
     ]);

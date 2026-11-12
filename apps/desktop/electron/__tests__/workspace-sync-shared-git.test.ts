@@ -11,6 +11,7 @@ import { GitMirror, runGit, type GitRun } from "../workspace-sync/git";
 import { SharedGitMirror, sharedGitStorePath } from "../workspace-sync/shared-git";
 import { withGitStoreLock } from "../workspace-sync/git-storage";
 import { CloudGitMirror } from "../workspace-sync/cloud-git";
+import { DeviceControlError } from "../local-commands/control";
 
 const exec = promisify(execFile), cleanup: string[] = [];
 afterEach(async () => { for (const root of cleanup.splice(0)) await rm(root, { recursive: true, force: true }); });
@@ -87,7 +88,7 @@ async function fixture() {
     }
     return runGit(mapped, { ...options, githubToken: undefined, fileTransport: true });
   };
-  const token = async () => ({ token: fixtureToken, expiresAt: new Date(Date.now() + 60_000).toISOString(), repository });
+  const token = async () => ({ token: fixtureToken, expiresAt: new Date(Date.now() + 59 * 60_000).toISOString(), repository });
   const mirror = async (name: string) => { const path = join(root, name); await mkdir(path); return path; };
   const shared = (folder: string, workspaceId = firstId, extras: Partial<ConstructorParameters<typeof SharedGitMirror>[2]> = {}) => new SharedGitMirror(folder, join(folder, ".zeros-sync"), {
     channel, scope, workspaceId, token, git: runner, ...extras,
@@ -98,6 +99,42 @@ async function fixture() {
 }
 
 describe("cloud mirrors sharing a repository store", () => {
+  it("accepts GitHub's one-hour installation expiry and requests a fresh credential for each GitHub command", async () => {
+    const f = await fixture(), folder = await f.mirror("installation-token"), now = Date.now();
+    let minted = 0;
+    const token = vi.fn(async () => ({ token: `${fixtureToken}-${++minted}`, expiresAt: new Date(now + 60 * 60_000).toISOString(), repository }));
+    const uses: boolean[] = [];
+    const git: GitRun = async (args, options) => {
+      if (options?.githubToken) uses.push(options.githubToken.token === `${fixtureToken}-${minted}`);
+      return f.runner(args, options);
+    };
+    const engine = await f.open(folder, firstId, { token, git, now: () => now });
+    expect((await engine.pull(f.source)).git).toBe("ok");
+    await f.commit("next.txt", "another cloud commit\n");
+    expect((await engine.pull(f.source)).git).toBe("ok");
+    expect(token).toHaveBeenCalledTimes(2);
+    expect(uses).toEqual([true, true]);
+    expect(f.commands.filter(command => command.authenticated).map(command => command.args.includes("clone") ? "clone" : "fetch")).toEqual(["clone", "fetch"]);
+    const common = await nativeGit(folder, "rev-parse", "--git-common-dir");
+    expect(await readFile(join(common, "config"), "utf8")).not.toContain(fixtureToken);
+  });
+
+  it.each([-1, 0, 60 * 60_000 + 1, NaN])("falls back for an invalid installation-token expiry (%s ms remaining)", async remaining => {
+    const f = await fixture(), folder = await f.mirror("invalid-expiry"), now = Date.now();
+    const token = async () => ({ ...await f.token(), expiresAt: Number.isNaN(remaining) ? "invalid" : new Date(now + remaining).toISOString() });
+    expect((await (await f.open(folder, firstId, { token, now: () => now })).pull(f.source)).git).toBe("ok");
+    expect(f.commands.some(command => command.authenticated)).toBe(false);
+    expect(f.haves).toEqual([undefined]);
+  });
+
+  it("falls back to the full worker bundle when the caller cannot obtain a scoped read token", async () => {
+    const f = await fixture(), folder = await f.mirror("access-denied");
+    const token = async () => { throw new DeviceControlError(403, "github_access_required"); };
+    expect((await (await f.open(folder, firstId, { token })).pull(f.source)).git).toBe("ok");
+    expect(f.commands.some(command => command.authenticated)).toBe(false);
+    expect(f.haves).toEqual([undefined]);
+  });
+
   it("shares blobless history, keeps separate detached heads/indexes, and writes working files only through sync", async () => {
     const f = await fixture(), first = await f.mirror("first"), second = await f.mirror("second");
     const bootstrap = f.source.bootstrap!;

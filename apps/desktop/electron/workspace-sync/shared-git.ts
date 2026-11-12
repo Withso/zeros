@@ -207,7 +207,7 @@ export class SharedGitMirror extends GitMirror {
     try {
       const token = await this.options.token(); this.check();
       const remaining = Date.parse(token.expiresAt) - this.now();
-      if (token.repository.toLowerCase() !== this.scope.repository || !Number.isFinite(remaining) || remaining <= 0 || remaining > 10 * 60_000 ||
+      if (token.repository.toLowerCase() !== this.scope.repository || !Number.isFinite(remaining) || remaining <= 0 || remaining > 60 * 60_000 ||
         !token.token || token.token.length > 8192 || /[\r\n\0]/.test(token.token)) throw new Error("Invalid Git credential.");
       const auth = { githubToken: { token: token.token, repository: this.scope.repository } };
       if (exists) await this.run(["--git-dir", this.common, "fetch", "-q", "--filter=blob:none", "--no-tags", "--no-write-fetch-head", "origin", "+refs/heads/*:refs/remotes/origin/*"], auth);
