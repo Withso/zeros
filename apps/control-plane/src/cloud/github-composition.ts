@@ -13,6 +13,7 @@ import { CloudGithubPrService, assertCloudGithubPrContext } from "./github-pr-se
 import { CloudGithubActions } from "./github-actions.js";
 import { createSelectedCloudGithubTokens } from "./github-selected-tokens.js";
 import { cloudV2WorkspaceFromRow, type CloudV2Store, type CloudV2Workspace } from "./store.js";
+import { requireWorkspaceCreator } from "./workspace-access.js";
 import { CLOUD_V2_LIVE_ACCESS, cloudV2ActorAccess } from "./workspace-access.js";
 import type { CloudV2ComputerSourceResolver } from "./computer-provenance.js";
 import type { CloudV2Computers } from "./computer.js";
@@ -108,6 +109,7 @@ export function createCloudGithubServices(
   };
   const observedRefreshes = new WeakSet<Promise<void>>();
   const refreshVerifiedBinding = async (workspace: CloudV2Workspace) => {
+    requireWorkspaceCreator(workspace);
     const scope = { organizationId: workspace.organizationId, userId: workspace.creatorUserId };
     const target = await identities.primary(workspace);
     const fingerprint = await connections.fingerprintFor(scope);
@@ -193,6 +195,7 @@ export function createCloudGithubServices(
   const documents = createCloudGithubCatalog({ pool, connections: connections.store, metadata, verifications,
     authorizeSource, continueSource, retireRevoked });
   const binding = async (workspace: CloudV2Workspace, mode: "admission" | "continuation" = "admission", pending?: ReturnType<CloudGithubConnections["access"]>) => {
+    requireWorkspaceCreator(workspace);
     const target = await identities.primary(workspace);
     if (mode === "continuation") {
       // Configuration refresh must still apply provider removals during an
@@ -226,6 +229,7 @@ export function createCloudGithubServices(
     };
   };
   const workerIdentity = async (workspace: CloudV2Workspace, mode: "admission" | "continuation") => {
+    requireWorkspaceCreator(workspace);
     const scope = { organizationId: workspace.organizationId, userId: workspace.creatorUserId };
     const access = connections.access(scope);
     const [repositoryBinding, gitIdentity] = await Promise.all([binding(workspace, mode, access), connections.gitIdentity(scope, access)]);
@@ -238,6 +242,7 @@ export function createCloudGithubServices(
     purpose: "git" | "gh" = "git",
     failedTokenSha256?: string,
   ) => {
+    requireWorkspaceCreator(workspace);
     if (!failedTokenSha256) {
       const { context: value, access: grant } = await open(workspace.id, workspace.creatorUserId, { checkout: false });
       return token({ organizationId: value.organizationId, userId: value.creatorUserId },

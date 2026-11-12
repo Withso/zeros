@@ -2,13 +2,14 @@ import { randomUUID } from "node:crypto";
 import pg from "pg";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { manageAccountPro } from "../../manage-account-pro.js";
+import { withSystemTx, withUserTx } from "../../db.js";
 import { executionFixture, type ExecutionFixture } from "./test-fixture.js";
 
 const database = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 database("durable execution revocation", () => {
   let pool: pg.Pool, f: ExecutionFixture;
   beforeAll(() => { pool = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL, max: 8, statement_timeout: 4000 }); });
-  beforeEach(async () => { f = await executionFixture(pool); await f.activate(); expect((await f.hello()).status).toBe(200); await f.login(f.viewer); await f.login(f.creator); });
+  beforeEach(async () => { f = await executionFixture(pool, { teamOwnership: true }); await f.activate(); expect((await f.hello()).status).toBe(200); await f.login(f.viewer); await f.login(f.creator); });
   afterEach(async () => { await f?.close(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
   afterAll(() => pool.end());
   const read = async (id: string) => (await pool.query("SELECT state,reason,material,environment_version_id FROM cloud_v2_execution_contexts WHERE id=$1", [id])).rows[0];
@@ -28,9 +29,25 @@ database("durable execution revocation", () => {
 
   it("revokes a pinned payer's credential after they cease to own a workspace", async () => {
     const active = await turn();
-    await pool.query("UPDATE cloud_v2_workspaces SET creator_user_id=$2 WHERE id=$1", [f.workspace.id, f.viewer.id]);
+    await withSystemTx(pool, tx => tx.query("UPDATE cloud_v2_workspaces SET creator_user_id=$2 WHERE id=$1", [f.workspace.id, f.viewer.id]));
     await pool.query("UPDATE cloud_agent_credentials SET revoked_at=clock_timestamp(),revision=revision+1 WHERE owner_user_id=$1", [f.creator.id]);
     expect(await read(active.begun.contextId)).toMatchObject({ state: "revoked", reason: "actor_changed", material: null });
+  });
+
+  it("reconciles Creator loss from a non-system membership writer without cutting an earlier admitted payer", async () => {
+    await f.cp.loginChanges.stop();
+    const earlier = await f.dispatch(f.prompt());
+    expect((await f.worker("turn-lease", earlier.lease)).status).toBe(200);
+    await withSystemTx(pool, tx => tx.query("UPDATE cloud_v2_workspaces SET creator_user_id=$2 WHERE id=$1", [f.workspace.id,f.viewer.id]));
+    await withUserTx(pool,f.creator.id, tx => tx.query("DELETE FROM organization_members WHERE org_id=$1 AND user_id=$2", [f.organizationId,f.viewer.id]));
+    expect((await pool.query("SELECT creator_user_id FROM cloud_v2_workspaces WHERE id=$1", [f.workspace.id])).rows[0].creator_user_id).toBe(f.viewer.id);
+    expect(await f.cp.execution.maintenance.due()).toContain(f.workspace.id);
+    const refused = await f.send(f.prompt(randomUUID(), { chatId: "later" }));
+    expect(refused.status).toBe(409); expect((await refused.json()).error.code).toBe("workspace_creator_required");
+    await f.cp.execution.maintenance.sweep(() => {});
+    expect((await pool.query("SELECT creator_user_id,creator_absent_reason FROM cloud_v2_workspaces WHERE id=$1", [f.workspace.id])).rows[0])
+      .toEqual({ creator_user_id: null,creator_absent_reason: "left" });
+    expect((await read(earlier.begun.contextId)).state).toBe("active");
   });
 
   it("revokes a member put on Hold by an entitlement change while keeping another person's turn", async () => {

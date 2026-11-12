@@ -1,5 +1,11 @@
 import { PRO_ORGANIZATION_MEMBER_LIMIT, PRO_ORGANIZATION_FREE_MEMBER_LIMIT, memberOnHoldSql } from "../organization-seats.js";
 import { sql, SqlFragment } from "../sql-fragment.js";
+import { HttpError } from "../authz.js";
+
+/** Legacy credential paths require a Creator; active paths supply an actor. */
+export function requireWorkspaceCreator<T extends { creatorUserId: string | null }>(workspace: T): asserts workspace is T & { creatorUserId: string } {
+  if (!workspace.creatorUserId) throw new HttpError(409, "workspace_creator_required", "This workspace has no Creator");
+}
 
 const LIVE_CREATOR = sql`SELECT 1 FROM organization_members m
   JOIN organizations o ON o.id = m.org_id AND o.deleted_at IS NULL

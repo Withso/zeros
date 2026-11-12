@@ -10,10 +10,14 @@ import { githubHeaders, githubJson, revokeGithubInstallationToken } from "../git
 import { CloudSourceTargetSchema } from "./source-authority.js";
 import type { CloudV2ComputerSourceResolver } from "./computer-provenance.js";
 import type { CloudV2Workspace } from "./store.js";
+import { requireWorkspaceCreator } from "./workspace-access.js";
 
 export function createCloudV2GithubTokens(pool: pg.Pool, config: GithubBackendConfig, fetchImpl: typeof fetch = fetch) {
   const forRepository = createCloudV2RepositoryTokens(pool, config, fetchImpl);
-  return (workspace: CloudV2Workspace) => forRepository(workspace.organizationId, workspace.creatorUserId, workspace.repository, "user");
+  return (workspace: CloudV2Workspace) => {
+    requireWorkspaceCreator(workspace);
+    return forRepository(workspace.organizationId, workspace.creatorUserId, workspace.repository, "user");
+  };
 }
 
 /** A token for one repository through the user's own connection in the organization. */

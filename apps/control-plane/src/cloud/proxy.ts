@@ -69,7 +69,7 @@ export function createCloudV2ProxyRoutes(deps: CloudV2ProxyDeps): Hono {
     }
     if (!isCloudV2Token(token, "proxy")) return failure(401, "proxy_token_invalid", "Invalid workspace proxy token");
     const workspace = await deps.store.verifyProxyToken(token);
-    if (!workspace) return failure(401, "proxy_token_invalid", "The workspace proxy token expired or was revoked");
+    if (!workspace?.creatorUserId) return failure(401, "proxy_token_invalid", "The workspace proxy token expired or was revoked");
     try {
       if (deps.continueSource) await deps.continueSource(workspace,
         workspace.accessEpoch && workspace.loginRevision ? { accessEpoch: workspace.accessEpoch, loginRevision: workspace.loginRevision } : undefined);

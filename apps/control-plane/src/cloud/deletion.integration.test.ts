@@ -9,6 +9,9 @@ import { resetMigratedTestDatabase } from "../test-database.js";
 import { applyWorkOSIdentityEvent } from "../workos-events.js";
 import { ingestWorkOSManagementEvent } from "../workos-sync-events.js";
 import { grantTestPro } from "../test-pro.js";
+import { configureCloudTeamOwnership } from "../db-context.js";
+import { withSystemTx } from "../db.js";
+import { CloudEnvironments, pinCloudEnvironment } from "./environment-store.js";
 import { CloudV2Store } from "./store.js";
 import { CloudV2Computers, CloudV2ComputerBuilder, cloudV2SnapshotName } from "./computer.js";
 import type { CloudV2Compute } from "./boat.js";
@@ -22,6 +25,7 @@ suite("v2 account and organization deletion", () => {
   beforeAll(() => { pool = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL, max: 4 }); });
   afterAll(async () => { await pool.end(); });
   beforeEach(async () => {
+    configureCloudTeamOwnership(pool, false);
     await resetMigratedTestDatabase(pool);
     actor = await user(); org = randomUUID(); store = new CloudV2Store(pool);
     await pool.query("INSERT INTO organizations(id,slug,name,created_by,is_personal,cloud_workspaces_allowed) VALUES($1,$2,'Test organization',$3,false,true)", [org,`org-${org}`,actor.id]);
@@ -75,6 +79,42 @@ suite("v2 account and organization deletion", () => {
     const response=await request("/v1/account/deletion","POST","DELETE MY ACCOUNT");
     expect(response.status).toBe(202); expect(await state(mine)).toBe("deleting"); expect(await state(theirs)).toBe("running");
     expect((await pool.query("SELECT deleted_at FROM organizations WHERE id=$1",[org])).rows[0].deleted_at).toBeNull();
+  });
+
+  it("retains active organization workspaces on account erasure and purges that person's environment pins", async () => {
+    configureCloudTeamOwnership(pool, true);
+    const other = await user();
+    await pool.query("INSERT INTO organization_members(org_id,user_id,role) VALUES($1,$2,'owner')", [org, other.id]);
+    const id = await workspace(), legacy = await workspace();
+    await pool.query("UPDATE cloud_v2_workspaces SET execution_mode='active' WHERE id=$1", [id]);
+    await store.rotateWorkerToken(id);
+    const before = (await pool.query("SELECT state,worker_token_hash,access_epoch,stop_generation,active_at FROM cloud_v2_workspaces WHERE id=$1", [id])).rows[0];
+    const environments = new CloudEnvironments(pool, { currentKeyVersion: 1, keys: { 1: Buffer.alloc(32, 27).toString("base64url") } },
+      async () => ({ repositoryId: "42", assertCurrent: async () => {}, assertReadable: async () => {} }));
+    await environments.patch(org, actor.id, "42", "o/r", { expectedRevision: 0, variables: { APP_KEY: "synthetic-private" } });
+    await withSystemTx(pool, async tx => {
+      const row = await store.get(id, actor.id);
+      await pinCloudEnvironment(tx, row, "42");
+    });
+    const response = await request("/v1/account/deletion", "POST", "DELETE MY ACCOUNT");
+    expect(response.status).toBe(202);
+    expect((await pool.query("SELECT state,worker_token_hash,access_epoch,stop_generation,active_at,creator_user_id,creator_absent_reason FROM cloud_v2_workspaces WHERE id=$1", [id])).rows[0])
+      .toEqual({ ...before, creator_user_id: null, creator_absent_reason: "account_revoked" });
+    expect(await state(legacy)).toBe("deleting");
+    await store.transition(legacy, ["deleting"], "deleted");
+    const processor = new DeletionLifecycleProcessor(pool, { logger: { warn() {}, error() {} } });
+    for (let n = 0; n < 4; n++) {
+      await pool.query(`UPDATE deletion_requests SET requested_at=now()-interval '31 days',purge_after=now()-interval '1 day',
+        next_attempt_at=now(),lease_expires_at=NULL,lease_owner=NULL WHERE target_user_id=$1`, [actor.id]);
+      await processor.tick(10);
+      await pool.query(`UPDATE workos_command_outbox SET state='succeeded',completed_at=now(),updated_at=now(),lease_owner=NULL,lease_expires_at=NULL
+        WHERE user_id=$1 AND state IN ('queued','processing')`, [actor.id]);
+    }
+    expect((await pool.query("SELECT auth_status FROM users WHERE id=$1", [actor.id])).rows[0].auth_status).toBe("deleted");
+    expect(await state(id)).toBe(before.state);
+    for (const table of ["cloud_workspace_environment_pins", "cloud_environment_heads", "cloud_environment_versions"]) {
+      expect((await pool.query(`SELECT 1 FROM ${table} WHERE owner_user_id=$1`, [actor.id])).rowCount).toBe(0);
+    }
   });
 
   it("retires the account's VM when WorkOS deletes its identity", async () => {

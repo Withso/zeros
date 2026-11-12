@@ -496,6 +496,42 @@ admitted members. There is no fallback to the sender's login. Capable workers
 receive only a sparse `agentLogins` availability map for the current Creator,
 fenced by `loginRevision`; actual credentials remain scoped to turn leases.
 
+On channels with `ZEROS_CLOUD_TEAM_OWNERSHIP=1`, a Creator or organization
+admin can reassign an activated workspace to another admitted member who has
+access to every recorded source repository. Candidate agent-login availability
+is presentation only: a member without a selected login is still eligible.
+Reassign preserves the VM, running contexts, personal environment pins and
+sender identity. The former Creator follows the workspace; the new Creator
+does not follow their own workspace. Only subsequent turns select the new
+Creator's agent login.
+
+If the Creator leaves, goes on Hold or loses their account, the workspace has
+no Creator until an admin reassigns it. Rejoining or regaining admission does
+not restore ownership. Admitted members can still Start, Stop, use terminals,
+edit files and use Git; agent turns return `409 workspace_creator_required`.
+Account deletion retains these shared workspaces and erases the departed
+person's private environment material. Legacy and prepared workspaces retain
+their existing lifecycle rules.
+
+Clients negotiate ownership documents with both `X-Zeros-Team-Sharing: 1`
+and `X-Zeros-Team-Ownership: 1`. Those documents allow a null `creatorUserId`
+and include `creatorRevision`, `noCreatorReason` and `canReassign`. The original
+`createdByUserId` remains unchanged. Clients without the ownership header keep
+their existing assigned documents; lists omit unassigned workspaces before
+pagination and direct reads refuse with `409 team_ownership_required`.
+`creator=none` is an admin-only list filter. Turning the channel switch off
+disables ownership changes but keeps negotiated unassigned documents readable.
+
+`GET /v1/cloud-v2/workspaces/:id/reassign-candidates` returns a bounded,
+revision-bound page of members and their eligibility. `POST .../:id/reassign`
+requires `requestId`, `toUserId`, `expectedCreatorUserId` and
+`expectedCreatorRevision`. A changed Creator returns `409 creator_changed`.
+Exact request retries replay their receipt for 30 days without repeating the
+change; reusing the request ID with different input returns
+`409 reassign_conflict`. Source verification and current membership are checked
+again before committing. Neither a candidate list nor a receipt authorizes
+future execution.
+
 Direct sync on an activated workspace requires the exact boot to advertise both
 `acting-user-v1` and `sync-context-v1`. Its signed grant includes a `ctx` client
 handle bound to the person, session and Mac registration. The worker must renew

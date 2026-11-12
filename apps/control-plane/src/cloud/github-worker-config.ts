@@ -8,7 +8,7 @@ import type { CloudGithubPrStore } from "./github-pr-store.js";
 import type { CloudGithubPrContext } from "./github-pr-service.js";
 import { CLOUD_SOURCE_ADMISSION_MS, CLOUD_SOURCE_GRACE_MS, CloudSourceTargetSchema, type CloudSourceContinuation, type CloudSourceProof } from "./source-authority.js";
 import type { CloudV2Workspace } from "./store.js";
-import { CLOUD_V2_LIVE_ACCESS } from "./workspace-access.js";
+import { CLOUD_V2_LIVE_ACCESS, requireWorkspaceCreator } from "./workspace-access.js";
 
 type Binding = { repositoryId: string; repository: string; previousRepositories: string[] };
 type SourceRow = {
@@ -35,6 +35,7 @@ export function createCloudGithubWorkerConfig(deps: {
   retireRevoked(workspace: CloudV2Workspace, error: unknown): Promise<void>;
 }) {
   return async (workspace: CloudV2Workspace, mode: "admission" | "continuation", proof?: CloudSourceProof) => {
+    requireWorkspaceCreator(workspace);
     const scope = { organizationId: workspace.organizationId, userId: workspace.creatorUserId };
     const continuation = mode === "continuation" && workspace.state === "running";
     const read = (expected?: Snapshot): Promise<Snapshot> => {

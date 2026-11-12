@@ -17,7 +17,7 @@ import { securityStreamAuthority } from "../security-events.js";
 import { HttpError } from "../authz.js";
 import type { CloudV2HistoryState, CloudV2MessageRow } from "./contract.js";
 import { hashCloudV2Token, newCloudV2Token } from "./tokens.js";
-import { CLOUD_V2_CREATOR_ON_HOLD, CLOUD_V2_CREATOR_ACCESS_SQL, CLOUD_V2_LIVE_ACCESS as LIVE_ACCESS, CLOUD_V2_LIVE_ACCESS_SQL } from "./workspace-access.js";
+import { CLOUD_V2_CREATOR_ON_HOLD, CLOUD_V2_CREATOR_ACCESS_SQL, CLOUD_V2_LIVE_ACCESS as LIVE_ACCESS, CLOUD_V2_LIVE_ACCESS_SQL, requireWorkspaceCreator } from "./workspace-access.js";
 import { memberOnHoldSql, organizationMemberOnHold } from "../organization-seats.js";
 import { CloudV2PromptOutbox, type CloudApiPrompt } from "./prompt-outbox.js";
 import { computerSourceReviewRequired, readComputerSourceTargets } from "./computer-provenance.js";
@@ -78,7 +78,7 @@ export type CloudV2AppGrant = { userId: string; accessEpoch: string; wake: boole
 export type CloudV2Workspace = {
   id: string;
   organizationId: string;
-  creatorUserId: string;
+  creatorUserId: string | null;
   createdBySessionId?: string | null;
   name: string;
   /** Permanent within the organization (`w-<n>`); never reused. */
@@ -165,7 +165,7 @@ function restoreCreate(value: CloudV2RestoreCreate | null): CloudV2RestoreCreate
 }
 
 export type CloudV2WorkspaceRow = {
-  id: string; org_id: string; creator_user_id: string; name: string; number: number | null; title: string | null;
+  id: string; org_id: string; creator_user_id: string | null; name: string; number: number | null; title: string | null;
   repository: string; branch: string; base_branch: string;
   state: CloudV2WorkspaceState; boat_sandbox_id: string | null; computer_build_id: string | null;
   error_code: string | null; active_at: Date | null; archived_at: Date | null; created_at: Date; updated_at: Date;
@@ -450,6 +450,7 @@ export class CloudV2Store {
         WHERE id=$1 AND state='creating' AND source_pending AND boat_sandbox_id IS NULL AND computer_build_id IS NOT NULL FOR UPDATE`, [id]);
       if (!rows[0]) return false;
       const current = workspace(rows[0]);
+      requireWorkspaceCreator(current);
       await this.admitCreator(tx, current.organizationId, current.creatorUserId);
       const { sourceRepositoryId, scope } = await this.computerScope(tx, current.organizationId, current.computerBuildId!, current.repository,
         input.sourceRepositoryId, input.readableRepositoryIds);

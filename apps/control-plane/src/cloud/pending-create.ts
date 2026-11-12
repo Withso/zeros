@@ -2,6 +2,7 @@ import { HttpError } from "../authz.js";
 import { isGithubTemporary } from "../github-availability.js";
 import type { CloudSourceTarget } from "./source-authority.js";
 import type { CloudV2InstalledRepository, CloudV2Workspace } from "./store.js";
+import { requireWorkspaceCreator } from "./workspace-access.js";
 
 /** errorCode fails the create; skipped means the row stopped being a pending
  * creating row meanwhile (deleted, stopped or resolved by another step). */
@@ -29,6 +30,7 @@ function definite(error: unknown): HttpError | null {
  * Temporary GitHub failures throw, so the lifecycle retries them. */
 export function createPendingSourceResolver(deps: PendingSourceDeps) {
   return async (workspace: CloudV2Workspace): Promise<PendingSourceOutcome> => {
+    requireWorkspaceCreator(workspace);
     const { organizationId, creatorUserId: userId } = workspace;
     const computer = await deps.activeComputer(organizationId);
     if (!computer || computer.buildId !== workspace.computerBuildId) return { errorCode: "cloud_computer_changed" };

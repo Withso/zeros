@@ -7,6 +7,7 @@ export async function scheduleCloudDeletion(
 ): Promise<void> {
   const organizationId = "organizationId" in scope ? scope.organizationId : null;
   const userId = "userId" in scope ? scope.userId : null;
+  if (userId) await tx.query("SELECT clear_cloud_creator_ownership(NULL,$1,'account_revoked')", [userId]);
   if (organizationId) {
     // Build completion is conditional on state/cleanup_requested_at. A provider
     // reply already in flight keeps its durable intent and is cleaned up later.

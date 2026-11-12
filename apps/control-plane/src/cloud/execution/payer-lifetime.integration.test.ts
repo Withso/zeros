@@ -11,7 +11,7 @@ const database = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 database("pinned payer lifetime and rolling-deploy compatibility", () => {
   let pool: pg.Pool, f: ExecutionFixture;
   beforeAll(() => { pool = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL, max: 8, statement_timeout: 4000 }); });
-  beforeEach(async () => { f = await executionFixture(pool); await f.login(); await f.activate(); expect((await f.hello()).status).toBe(200); });
+  beforeEach(async () => { f = await executionFixture(pool, { teamOwnership: true }); await f.login(); await f.activate(); expect((await f.hello()).status).toBe(200); });
   afterEach(async () => { await f?.close(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
   afterAll(() => pool.end());
   const row = async (id: string) => (await pool.query("SELECT state,selection,credential_id,material IS NOT NULL AS has_material FROM cloud_v2_execution_contexts WHERE id=$1", [id])).rows[0];
@@ -167,7 +167,8 @@ database("pinned payer lifetime and rolling-deploy compatibility", () => {
     expect((await row(turn.begun.contextId)).selection).not.toHaveProperty("version");
     await reassign(f.creator.id);
     await withSystemTx(pool, tx => tx.query("DELETE FROM organization_members WHERE org_id=$1 AND user_id=$2", [f.organizationId, f.creator.id]));
-    const leased = await f.worker("turn-lease", turn.lease); expect(leased.status).toBe(200);
+    expect((await row(turn.begun.contextId)).state).toBe("active");
+    const leased = await f.worker("turn-lease", turn.lease); expect(leased.status, (await leased.clone().json()).error?.code).toBe(200);
     expect((await leased.json()).agents.claude.apiKey).toBe(own.secret);
   });
 

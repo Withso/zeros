@@ -7,7 +7,8 @@ import { readCloudV2SharingHistory } from "../history.js";
 import { CloudV2PromptCounterSchema, CloudV2PromptIdSchema, CloudV2SessionNameSchema } from "../prompt-contract.js";
 import { ApiRenameSchema } from "../api/contract.js";
 import type { CloudTeamSharing } from "./store.js";
-import { TEAM_SHARING_HEADER, TeamListSchema, TeamPageSchema, teamNotFound, teamReadOnly, teamManagementDenied, teamUnavailable } from "./contract.js";
+import { TEAM_SHARING_HEADER, TEAM_OWNERSHIP_HEADER, TeamListSchema, TeamPageSchema, TeamReassignSchema,
+  teamNotFound, teamReadOnly, teamManagementDenied, teamOwnershipRequired, teamUnavailable } from "./contract.js";
 
 const uuid = (input: string) => { const parsed = z.string().uuid().safeParse(input); if (!parsed.success) throw teamNotFound(); return parsed.data; };
 async function body<T>(c: Context, schema: z.ZodType<T>, optional = false): Promise<T> {
@@ -22,6 +23,8 @@ const empty = z.object({}).strict();
 
 export function createCloudTeamRoutes(sharing: CloudTeamSharing, document: (value: Awaited<ReturnType<CloudTeamSharing["get"]>>) => unknown): Hono {
   const app = new Hono(), path = "/v1/cloud-v2/workspaces/:id";
+  const owns = (c: Context) => c.req.header(TEAM_SHARING_HEADER) === "1" && c.req.header(TEAM_OWNERSHIP_HEADER) === "1";
+  const marker = (c: Context) => owns(c) ? { teamOwnership: 1 as const } : {};
   const share = (handler: Handler): Handler => async (c,next) => {
     if (c.req.header(TEAM_SHARING_HEADER) !== "1") return next();
     c.header("Cache-Control","no-store");
@@ -35,6 +38,11 @@ export function createCloudTeamRoutes(sharing: CloudTeamSharing, document: (valu
     }
   };
   const limited = bodyLimit({ maxSize: 16*1024,onError: c => c.json({ error: { code: "payload_too_large" } },413) });
+  const ownership = (handler: Handler): Handler => async (c,next) => {
+    c.header("Cache-Control","no-store");
+    if (!owns(c)) { const error = teamOwnershipRequired(); return c.json({ error: { code: error.code,message: error.message } },error.status); }
+    return share(handler)(c,next);
+  };
   // 200 IDs of 256 characters, including JSON escaping, fit the lookup bound.
   const historyLimit = bodyLimit({ maxSize: 320*1024,onError: c => c.json({ error: { code: "payload_too_large" } },413) });
   app.use("/v1/cloud-v2/workspaces*",async (c,next) => {
@@ -45,15 +53,31 @@ export function createCloudTeamRoutes(sharing: CloudTeamSharing, document: (valu
   app.get("/v1/cloud-v2/workspaces",share(async c => {
     const parsed = TeamListSchema.safeParse(c.req.query());
     if (!parsed.success) throw new HttpError(400,"invalid_request","Invalid workspace filters");
-    const result = await sharing.list(c.get("user"),parsed.data);
+    const result = await sharing.list(c.get("user"),parsed.data,owns(c));
     return c.json({ ...result,workspaces: result.workspaces.map(document) });
   }));
   app.get("/v1/cloud-v2/workspaces/by-number/:organization/:number",share(async c => {
     const slug = c.req.param("organization")!, number = c.req.param("number")!;
     if (!/^[a-z0-9](?:[a-z0-9-]{0,98}[a-z0-9])?$/.test(slug) || !/^[1-9][0-9]{0,9}$/.test(number) || Number(number)>2_147_483_647) throw teamNotFound();
-    return c.json({ workspace: document(await sharing.byNumber(slug,Number(number),c.get("user"))),teamSharing: 1 });
+    return c.json({ workspace: document(await sharing.byNumber(slug,Number(number),c.get("user"),owns(c))),teamSharing: 1,...marker(c) });
   }));
-  app.get(path,share(async c => c.json({ workspace: document(await sharing.get(uuid(c.req.param("id")!),c.get("user"))),teamSharing: 1 })));
+  app.get(path,share(async c => c.json({ workspace: document(await sharing.get(uuid(c.req.param("id")!),c.get("user"),owns(c))),teamSharing: 1,...marker(c) })));
+  app.get(`${path}/reassign-candidates`,ownership(async c => {
+    const page = TeamPageSchema.safeParse(c.req.query());
+    if (!page.success) throw new HttpError(400,"invalid_request","Invalid candidates page");
+    const id = uuid(c.req.param("id")!), user = c.get("user");
+    return rateLimit("cloud-team-candidates",12,60_000,() => `${user.id}:${id}`)(c,async () => {
+      c.res = c.json(await sharing.ownership.candidates(id,user,page.data));
+    });
+  }));
+  app.post(`${path}/reassign`,limited,ownership(async c => {
+    const input = await body(c,TeamReassignSchema), id = uuid(c.req.param("id")!), user = c.get("user");
+    const proof = await sharing.authority.admit(id,user);
+    return rateLimit("cloud-team-reassign",10,60_000,() => `${user.id}:${proof.view.workspace.organizationId}`)(c,async () => {
+      const result = await sharing.ownership.reassign(id,user,input);
+      c.res = c.json({ ...result,workspace: document(result.workspace) });
+    });
+  }));
   app.get(`${path}/events`,share(c => sharing.events.open(c,uuid(c.req.param("id")!))));
   const activityLimit = rateLimit("cloud-workspace-activity",12,60_000);
   app.post(`${path}/activity`,share(async c => activityLimit(c,async () => {
@@ -85,18 +109,18 @@ export function createCloudTeamRoutes(sharing: CloudTeamSharing, document: (valu
     const id = uuid(c.req.param("id")!), user = c.get("user");
     if (action === "stop" && await sharing.workspaces.prompts.execution?.active(id)) return next();
     const result = await sharing.manage(id,user,action);
-    return c.json({ workspace: document(await sharing.get(id,user)),teamSharing: 1 },result.moved ? 202 : 200);
+    return c.json({ workspace: document(await sharing.get(id,user,owns(c))),teamSharing: 1,...marker(c) },result.moved ? 202 : 200);
   }));
   app.post(`${path}/rename`,share(async c => {
     const input = await body(c,ApiRenameSchema), id = uuid(c.req.param("id")!), user = c.get("user");
     await sharing.manage(id,user,"rename",input.name);
-    return c.json({ workspace: document(await sharing.get(id,user)),teamSharing: 1 });
+    return c.json({ workspace: document(await sharing.get(id,user,owns(c))),teamSharing: 1,...marker(c) });
   }));
   app.delete(path,share(async c => {
     await body(c,empty,true);
     const id = uuid(c.req.param("id")!), user = c.get("user");
     await sharing.manage(id,user,"delete");
-    return c.json({ workspace: document(await sharing.get(id,user)),teamSharing: 1 },202);
+    return c.json({ workspace: document(await sharing.get(id,user,owns(c))),teamSharing: 1,...marker(c) },202);
   }));
   app.post(`${path}/chats/:chatId/edit`,share(async c => {
     const parsed = CloudV2PromptIdSchema.safeParse(c.req.param("chatId"));

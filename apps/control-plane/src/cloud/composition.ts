@@ -53,6 +53,7 @@ import { CloudLocalCommands } from "./local-commands/requests.js";
 import { startLocalCommandMaintenance } from "./local-commands/maintenance.js";
 import { CloudNotifyUser } from "./notify-user/store.js";
 import { CloudWorkspaceSync } from "./workspace-sync/store.js";
+import { requireWorkspaceCreator } from "./workspace-access.js";
 
 import { CloudExecutionContexts } from "./execution/store.js";
 import { lifecycleExecution } from "./execution/lifecycle.js";
@@ -222,6 +223,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
           checkoutPath: `${CLOUD_V2_HOME}/${workspace.repository}`, branch: workspace.branch, baseBranch: workspace.baseBranch,
           github: { ...target, previousRepositories: [workspace.repository] }, ...(setup ?? {}), ...(baseCommit ? { baseCommit } : {}) } };
     }
+    requireWorkspaceCreator(workspace);
     const proxy = async () => {
       const issued = await store.issueToken({ workspaceId: workspace.id, kind: "proxy", userId: null, ttlMs: PROXY_TOKEN_TTL_MS });
       return { token: issued.token, expiresAt: issued.expiresAt.getTime() };
@@ -265,7 +267,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   // A draining replica would refuse a pending create's row, so a new one waits
   // a lifecycle scan interval before returning creates early, as for #903.
   const asyncCreateFrom = Date.now() + (v2.asyncCreateDelayMs ?? (config.deploymentChannel === "development" ? 0 : CLOUD_V2_ASYNC_CREATE_DELAY_MS));
-  const teamSharing = new CloudTeamSharing(pool,store,github,listenerPool);
+  const teamSharing = new CloudTeamSharing(pool,store,github,listenerPool,undefined,{ ownership: v2.teamOwnership === true });
   const routes: CloudV2RouteDeps = {
     actingUserDefault: v2.actingUserDefault === true,
     activeCreateRuntime,
@@ -329,9 +331,11 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     runtimeSha256ForWorkspace: async workspace => (await runtimeForWorkspace(workspace)).sha256,
     environmentReport: (token, bootId, value) => environments.report(token, bootId, value),
     githubCheckout: (token,bootId,value) => github.metadata.checkout(token,bootId,value),
-    ...(mcp ? { mcpAuthorization: async (workspace, id, force) =>
-      mcp.oauth.authorizationForRepository(workspace.organizationId, workspace.creatorUserId, workspace.repository, id, force,
-        await github.identities.primary(workspace)) } : {}),
+    ...(mcp ? { mcpAuthorization: async (workspace, id, force) => {
+      requireWorkspaceCreator(workspace);
+      return mcp.oauth.authorizationForRepository(workspace.organizationId, workspace.creatorUserId, workspace.repository, id, force,
+        await github.identities.primary(workspace));
+    } } : {}),
     promptOutbox: v2.promptOutbox === true, waitForPrompts: (id, ms, signal) => promptSignals.wait(id, ms, signal) };
   const promptChanges = v2.promptOutbox ? postgresNotificationSubscription(listenerPool, {
     channels: ["zeros_cloud_v2_prompts"],
@@ -489,7 +493,9 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     remoteHead: async workspace => {
       const actor = await lifecycleExecution(execution, workspace);
       const target = await github.identities.primary(workspace); await actor?.check();
-      const head = await remoteHeads(workspace.organizationId, actor?.userId ?? workspace.creatorUserId, workspace.repository, workspace.baseBranch, target.repositoryId);
+      const userId = actor?.userId ?? workspace.creatorUserId;
+      if (!userId) throw new HttpError(409,"workspace_creator_required","This workspace has no execution initiator");
+      const head = await remoteHeads(workspace.organizationId, userId, workspace.repository, workspace.baseBranch, target.repositoryId);
       await actor?.check(); return head;
     },
     githubToken: async workspace => (await lifecycleSource(workspace,"computer"))?.credential ?? github.workspaceToken(workspace),

@@ -60,6 +60,8 @@ export async function manageCloudExecution(pool: pg.Pool, raw: unknown,
       await client.query("ROLLBACK");
       return { state: options.execute ? "replayed" as const : "committed" as const, planSha256: receipt.approval_hash.toString("hex"), targetFingerprint, activationId: input.activationId, bootClean };
     }
+    if (action === "rollback" && workspace.creator_user_id === null)
+      throw new Error("Execution rollback requires reassigning a Creator first");
     // Version metadata fits the existing snapshot; the persisted digest keeps its original SQL constraint.
     const snapshot = action === "rollback" ? null : { ...await preparedExecutionSnapshot(client, input.workspaceId, input.initiatorUserId),
       targetFingerprintVersion: targetIdentity.version };
@@ -81,6 +83,7 @@ export async function manageCloudExecution(pool: pg.Pool, raw: unknown,
       throw new Error("Execution rollback requires a completed provider Stop");
     const planSha256 = hash({ targetFingerprint, receiptHash, snapshot, phase: previous?.phase ?? null, preparedActivationId: prepared?.id ?? null,
       stopGeneration: workspace.stop_generation, confirmedStop: previous?.confirmed_stopped_at ?? null,
+      ...(action === "rollback" ? { creator: [workspace.creator_user_id,workspace.creator_revision] } : {}),
       operatorRevision: operator.auth_revision, principal: owner.principal });
     if (!options.execute) {
       await client.query("ROLLBACK");

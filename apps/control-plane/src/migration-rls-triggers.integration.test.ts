@@ -10,7 +10,9 @@ import { randomUUID } from "node:crypto";
 import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { withSystemTx, withUserTx, type Tx } from "./db.js";
+import { configureCloudTeamOwnership } from "./db-context.js";
 import { resetMigratedTestDatabase } from "./test-database.js";
+import { grantTestPro } from "./test-pro.js";
 import { seedCredentialOwner } from "./agent-credentials/test-fixtures.js";
 import { CloudV2Store } from "./cloud/store.js";
 
@@ -20,8 +22,8 @@ const url = process.env.TEST_DATABASE_URL, d = url ? describe : describe.skip;
  * non-system write, as of this suite's cases. */
 const COVERED_TRIGGERS: Record<string, readonly string[]> = {
   organizations: ["organizations_personal_classification_immutable", "local_command_setting_changed", "execution_organization_update", "execution_organization_personal"],
-  organization_members: ["execution_member_delete", "execution_member_update", "execution_member_insert"],
-  users: ["cloud_actor_staff_revision", "staff_pro_benefit_sync", "execution_user_fence"],
+  organization_members: ["execution_member_delete", "execution_member_update", "execution_member_insert", "cloud_creator_member_loss"],
+  users: ["cloud_actor_staff_revision", "staff_pro_benefit_sync", "execution_user_fence", "cloud_creator_account_loss", "cloud_creator_account_erasure"],
 };
 
 d("triggers on user-writable tables with PostgreSQL", () => {
@@ -30,6 +32,7 @@ d("triggers on user-writable tables with PostgreSQL", () => {
   afterAll(async () => { await pool.end(); });
   beforeEach(async () => {
     await resetMigratedTestDatabase(pool);
+    configureCloudTeamOwnership(pool, true);
     fixture = await seedCredentialOwner(pool);
     member = await addUser("Member");
     await pool.query("INSERT INTO organization_members(org_id,user_id,role) VALUES($1,$2,'member')", [fixture.organizationId, member]);
@@ -85,6 +88,27 @@ d("triggers on user-writable tables with PostgreSQL", () => {
   });
 
   describe("user-context writes", () => {
+    it.each(["membership", "account"] as const)("leaves system-only Creator cleanup to reconciliation after a user-context %s loss", async kind => {
+      await grantTestPro(pool, member);
+      const workspace = await new CloudV2Store(pool).createWorkspace({ id: randomUUID(), organizationId: fixture.organizationId,
+        creatorUserId: member, name: "Member workspace", repository: "example/project", branch: "member", baseBranch: "main", computerBuildId: null });
+      await asSystem("UPDATE cloud_v2_workspaces SET execution_mode='active' WHERE id=$1", [workspace.id]);
+      const before = (await asSystem("SELECT creator_user_id,creator_revision::text FROM cloud_v2_workspaces WHERE id=$1", [workspace.id])).rows[0];
+      const changed = kind === "membership"
+        ? await asUser(member, "DELETE FROM organization_members WHERE org_id=$1 AND user_id=$2", [fixture.organizationId, member])
+        : await asUser(member, "UPDATE users SET deleted_at=clock_timestamp() WHERE id=$1", [member]);
+      expect(changed.rowCount).toBe(1);
+      expect((await asSystem("SELECT creator_user_id,creator_revision::text FROM cloud_v2_workspaces WHERE id=$1", [workspace.id])).rows[0]).toEqual(before);
+      await asSystem("SELECT clear_cloud_creator_ownership($1,$2)", [fixture.organizationId, member]);
+      expect((await asSystem("SELECT creator_user_id,creator_revision::text,creator_absent_reason FROM cloud_v2_workspaces WHERE id=$1", [workspace.id])).rows[0])
+        .toEqual({ creator_user_id: null, creator_revision: "2", creator_absent_reason: kind === "membership" ? "left" : "account_revoked" });
+    });
+
+    it("users: hard-deletes an own account with the enabled Creator-loss trigger", async () => {
+      const deleted = await asUser(member, "DELETE FROM users WHERE id=$1 RETURNING id", [member]);
+      expect(deleted.rows).toEqual([{ id: member }]);
+    });
+
     it("organizations: an unchanged personal classification passes the execution fence under tenant RLS", async () => {
       const changed = await asUser(fixture.userId, "UPDATE organizations SET is_personal=is_personal WHERE id=$1 RETURNING is_personal", [fixture.organizationId]);
       expect(changed.rows).toEqual([{ is_personal: false }]);

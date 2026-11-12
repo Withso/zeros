@@ -5,7 +5,7 @@ import type { MiddlewareHandler } from "hono";
 import { routePath } from "hono/route";
 import type { Pool, PoolClient } from "pg";
 import { advisoryLockPurpose, type DatabaseTimingSpan, type RequestDatabaseTiming } from "./database-timing.js";
-import { PROTOCOL_DATABASE_CONTEXT, SYSTEM_DATABASE_CONTEXT, USER_DATABASE_CONTEXT } from "./db-context.js";
+import { DATABASE_CONTEXT_STATEMENTS } from "./db-context.js";
 
 export const DEFAULT_SLOW_REQUEST_LOG_MS = 1000;
 
@@ -139,8 +139,8 @@ function queryWrites(value: unknown): Array<number | null> | null {
     if (write) return 1;
     // Only the literal helper setup call is known to change request GUCs,
     // rather than persistence. Other functions may write via their bodies.
-    const setup = [SYSTEM_DATABASE_CONTEXT, USER_DATABASE_CONTEXT, PROTOCOL_DATABASE_CONTEXT,
-      "SELECT set_config('app.system', 'on', true)", "SELECT set_config('app.user_id', $1, true)"].includes(statementTexts[statementIndex]!);
+    const setup = DATABASE_CONTEXT_STATEMENTS.has(statementTexts[statementIndex]!) ||
+      ["SELECT set_config('app.system', 'on', true)", "SELECT set_config('app.user_id', $1, true)"].includes(statementTexts[statementIndex]!);
     if (setup) return 0;
     if (words.some((word, index) => words[index + 1] === "(" && !["IN", "AS", "EXISTS", "OVER", "SELECT", "VALUES"].includes(word))) return null;
     return 0;

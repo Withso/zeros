@@ -5,7 +5,7 @@ import { HttpError } from "../authz.js";
 import { withSystemTx, type Tx } from "../db.js";
 import { memberOnHoldSql, organizationMemberOnHold } from "../organization-seats.js";
 import type { CloudAgentCredentialKeys } from "../agent-credentials/agent-credential-envelope.js";
-import { CLOUD_V2_LIVE_ACCESS } from "./workspace-access.js";
+import { CLOUD_V2_LIVE_ACCESS, requireWorkspaceCreator } from "./workspace-access.js";
 import { hashCloudV2Token } from "./tokens.js";
 import { notifyCloudV2WorkerReady } from "./worker-ready.js";
 import type { CloudV2Workspace } from "./store.js";
@@ -72,6 +72,7 @@ function environmentMaterial(scope: Scope, head: Head | undefined, keys: CloudAg
  * cannot change the version between selecting it and retaining its pin. */
 export async function pinCloudEnvironment(tx: Tx, workspace: Pick<CloudV2Workspace, "id" | "organizationId" | "creatorUserId">, repositoryId: string,
   overrides?: { variables: Record<string, string>; keys: CloudAgentCredentialKeys }): Promise<void> {
+  requireWorkspaceCreator(workspace);
   const scope = target(workspace.organizationId, workspace.creatorUserId, repositoryId);
   await lockScope(tx, scope);
   if (overrides) {
@@ -191,6 +192,7 @@ export class CloudEnvironments {
   }
 
   async resolve(workspace: CloudV2Workspace, transaction?: Tx): Promise<CloudWorkspaceEnvironment | undefined> {
+    requireWorkspaceCreator(workspace);
     const read = async (tx: Tx): Promise<CloudWorkspaceEnvironment | undefined> => {
       const row = (await tx.query<{ id: string; repository_id: string; revision: string; envelope: CloudEnvironmentEnvelope }>(
         `SELECT v.id,p.repository_id::text,v.revision::text,v.envelope FROM cloud_workspace_environment_pins p
@@ -224,10 +226,11 @@ export class CloudEnvironments {
     const primary = (await tx.query<{ repository_id: string }>(
       "SELECT repository_id::text FROM cloud_v2_github_sources WHERE workspace_id=$1 AND source_repository=lower($2)", [workspace.id, workspace.repository])).rows[0];
     if (!primary) throw notFound();
-    const version = context.environment_version_id ?? (userId === workspace.creatorUserId
-      ? (await tx.query<{ version_id: string }>("SELECT version_id FROM cloud_workspace_environment_pins WHERE workspace_id=$1 AND owner_user_id=$2", [workspace.id, userId])).rows[0]?.version_id
-      : (await tx.query<{ version_id: string }>("SELECT version_id FROM cloud_environment_heads WHERE org_id=$1 AND owner_user_id=$2 AND repository_id=$3",
-        [workspace.organizationId, userId, primary.repository_id])).rows[0]?.version_id);
+    // A legacy pin belongs to its person even after the workspace is reassigned.
+    const version = context.environment_version_id ??
+      (await tx.query<{ version_id: string }>("SELECT version_id FROM cloud_workspace_environment_pins WHERE workspace_id=$1 AND owner_user_id=$2", [workspace.id, userId])).rows[0]?.version_id ??
+      (await tx.query<{ version_id: string }>("SELECT version_id FROM cloud_environment_heads WHERE org_id=$1 AND owner_user_id=$2 AND repository_id=$3",
+        [workspace.organizationId, userId, primary.repository_id])).rows[0]?.version_id;
     await tx.query("UPDATE cloud_v2_execution_contexts SET environment_version_id=$2,environment_repository_id=$3 WHERE id=$1 AND environment_repository_id IS NULL",
       [contextId, version ?? null, primary.repository_id]);
     if (!version) return undefined;

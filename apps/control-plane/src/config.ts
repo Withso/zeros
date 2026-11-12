@@ -18,6 +18,7 @@ import { BOAT_BILLING_ORG_PATTERN } from "./cloud/boat-client.js";
 import { DEFAULT_SLOW_REQUEST_LOG_MS } from "./request-timing.js";
 import { loadWorkerPollIntervals, type WorkerPollIntervals } from "./worker-polling-config.js";
 import { validateReleaseLedgerUrl } from "./client-compatibility.js";
+import { readCloudTeamOwnership } from "./db-context.js";
 import { CloudV2WorkerSigner } from "./cloud/worker-auth.js";
 import { loadRuntimeCanaryPolicy, type RuntimeCanaryPolicy } from "./cloud/runtime-canary.js";
 import { loadRuntimeRelease, type RuntimeRelease } from "./cloud/runtime-release.js";
@@ -234,6 +235,8 @@ export type Config = {
 export type CloudV2Config = {
   /** Applies only to new organization cloud workspaces on this channel. */
   actingUserDefault?: boolean;
+  /** Enable ownership writes after every replica supports no-Creator rows. */
+  teamOwnership?: boolean;
   /** Enable only after publishing the matching outbox-capable runtime. */
   promptOutbox?: boolean;
   /** Retries a stop's failed checkpoint on a fork of the stopped VM. Enable
@@ -275,6 +278,7 @@ function loadCloudV2Config(env: NodeJS.ProcessEnv, channel: string): CloudV2Conf
   if (asyncCreate && !["true", "false"].includes(asyncCreate)) throw new Error("Invalid environment: CLOUD_V2_ASYNC_CREATE_ENABLED must be true or false");
   const actingUserDefault = env.ZEROS_CLOUD_ACTING_USER_DEFAULT?.trim();
   if (actingUserDefault && !["0", "1"].includes(actingUserDefault)) throw new Error("Invalid environment: ZEROS_CLOUD_ACTING_USER_DEFAULT must be 0 or 1");
+  const teamOwnership = readCloudTeamOwnership(env.ZEROS_CLOUD_TEAM_OWNERSHIP);
   const origin = (name: string, protocol: "https:" | "wss:") => {
     const raw = env[name]?.trim();
     let url: URL;
@@ -307,6 +311,7 @@ function loadCloudV2Config(env: NodeJS.ProcessEnv, channel: string): CloudV2Conf
     checkpointRetry: checkpointRetry === "true",
     asyncCreate: asyncCreate !== "false",
     actingUserDefault: actingUserDefault === "1",
+    teamOwnership,
     workerSigningKey, ...(previous ? { workerSigningKeyPrevious: previous } : {}),
     apiUrl: origin("CLOUD_V2_API_URL", "https:"),
     realtimeUrl: origin("CLOUD_V2_REALTIME_URL", "wss:"),

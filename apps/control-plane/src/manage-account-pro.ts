@@ -1,4 +1,4 @@
-import { SYSTEM_DATABASE_CONTEXT } from "./db-context.js";
+import { SYSTEM_DATABASE_CONTEXT, configuredDatabaseContext, configureCloudTeamOwnership, readCloudTeamOwnership } from "./db-context.js";
 import {createHash} from "node:crypto";
 import {constants,openSync,fstatSync,readFileSync,closeSync} from "node:fs";
 import path from "node:path";
@@ -36,7 +36,7 @@ export async function manageAccountPro(pool:pg.Pool,input:unknown,options:{datab
   const requestSha256=hash(request);
   const client=await pool.connect();
   try {
-    await client.query(`BEGIN; SET LOCAL lock_timeout='5s'; SET LOCAL statement_timeout='15s'; ${SYSTEM_DATABASE_CONTEXT}`);
+    await client.query(`BEGIN; SET LOCAL lock_timeout='5s'; SET LOCAL statement_timeout='15s'; ${configuredDatabaseContext(pool, SYSTEM_DATABASE_CONTEXT)}`);
     const authority=(await client.query<{principal:string;database:string;allowed:boolean}>(`SELECT current_user AS principal,current_database() AS database,
       current_user<>'zeros_app' AND bool_and(pg_get_userbyid(relowner)=current_user) AS allowed FROM pg_class
       WHERE oid IN ('public.account_entitlements'::regclass,'public.account_pro_entitlement_changes'::regclass)`)).rows[0];
@@ -85,6 +85,7 @@ async function main(){
   const fd=openSync(file,constants.O_RDONLY|constants.O_NOFOLLOW);let input:unknown;
   try{const stat=fstatSync(fd);if(!stat.isFile()||stat.size>16384)throw new Error("Invalid operator document");input=JSON.parse(readFileSync(fd,"utf8"));}finally{closeSync(fd);}
   const pool=createMigrationPool(databaseUrl);
+  configureCloudTeamOwnership(pool,readCloudTeamOwnership(process.env.ZEROS_CLOUD_TEAM_OWNERSHIP));
   try{const result=await manageAccountPro(pool,input,{databaseUrl,channel,execute:args.includes("--execute"),approval:process.env.ACCOUNT_PRO_PLAN_SHA256});console.log(JSON.stringify(result));}
   finally{await pool.end();}
 }
