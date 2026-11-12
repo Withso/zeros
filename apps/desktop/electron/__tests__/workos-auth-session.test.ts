@@ -90,6 +90,7 @@ vi.mock("../workos-desktop-revocation", () => ({
   requestWorkOSDesktopRevocation: mocks.revoke,
 }));
 
+import { resetSignedOutLogForTests } from "../auth-signed-out-log";
 import { parseParkedSessions, parseStoredTokenSnapshot } from "../auth-session-record";
 import { withCrossProcessFileLock } from "../cross-process-lock";
 import {
@@ -510,5 +511,42 @@ describe("WorkOS desktop multi-account sessions", () => {
     } finally {
       vi.mocked(withCrossProcessFileLock).mockImplementation(async (_path, operation) => operation());
     }
+  });
+
+  describe("one main-log line when a session read ends signed out", () => {
+    const lines = () => warn.mock.calls.map(([line]: unknown[]) => String(line)).filter((line: string) => line.startsWith("[auth] signed out"));
+    let warn: { mock: { calls: unknown[][] }; mockRestore(): void };
+    beforeEach(() => { resetSignedOutLogForTests(); warn = vi.spyOn(console, "warn").mockImplementation(() => {}); });
+    afterEach(() => { warn.mockRestore(); });
+
+    it("names a refused refresh with the provider's code and status, never a token, email or id", async () => {
+      await install(Date.now() - 1);
+      mocks.refresh.mockResolvedValue({ status: "terminal", reason: "invalid_grant", httpStatus: 400 });
+      await expect(getValidSessionForMain()).resolves.toBeNull();
+      expect(lines()).toEqual(["[auth] signed out reason=refresh_refused code=invalid_grant status=400"]);
+      for (const secret of ["access-current", "refresh-current", "person@example.com", "session_example", "user_example", "00000000-0000-4000-8000-000000000001"])
+        expect(warn.mock.calls.flat().join(" ")).not.toContain(secret);
+    });
+
+    it("tells a missing stored session from an unreadable one, once per state", async () => {
+      await expect(getValidSessionForMain()).resolves.toBeNull();
+      await expect(getValidSessionForMain()).resolves.toBeNull();
+      expect(lines()).toEqual(["[auth] signed out reason=stored_session_missing"]);
+      mocks.raw = "{\"provider\":\"auth0\"}";
+      await expect(getValidSessionForMain()).resolves.toBeNull();
+      mocks.raw = null; mocks.readError = new mocks.SecretStoreReadError("keychain unavailable");
+      await expect(authGetAccessToken({}, {} as never)).resolves.toMatchObject({ access_token: null });
+      expect(lines()).toEqual(["[auth] signed out reason=stored_session_missing", "[auth] signed out reason=stored_session_unreadable code=unrecognized_record",
+        "[auth] signed out reason=stored_session_unreadable code=secret_store_unreadable"]);
+    });
+
+    it("logs again after a session was valid in between", async () => {
+      await expect(getValidSessionForMain()).resolves.toBeNull();
+      await install();
+      await expect(getValidSessionForMain()).resolves.toMatchObject({ accessToken: "access-current" });
+      mocks.raw = null;
+      await expect(getValidSessionForMain()).resolves.toBeNull();
+      expect(lines()).toEqual(["[auth] signed out reason=stored_session_missing", "[auth] signed out reason=stored_session_missing"]);
+    });
   });
 });

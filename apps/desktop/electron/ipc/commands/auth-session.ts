@@ -29,6 +29,7 @@ import type { WorkOSDesktopSession } from "../../workos-desktop-client";
 import { workOSDesktopClientForMain } from "../../workos-desktop-runtime";
 import { requestWorkOSDesktopRevocation } from "../../workos-desktop-revocation";
 import { controlPlaneFetch } from "../../control-plane-fetch";
+import { logSignedOut, noteSignedIn } from "../../auth-signed-out-log";
 
 const TOKENS_KEY = "auth-session:tokens";
 // Other signed-in WorkOS accounts. The active account stays in TOKENS_KEY, so
@@ -201,7 +202,7 @@ async function revokeRetiredSession(tokens: WorkOSStoredTokens): Promise<void> {
 
 type RefreshOutcome =
   | { status: "ok"; tokens: StoredTokens }
-  | { status: "terminal"; expectedRaw?: string }
+  | { status: "terminal"; expectedRaw?: string; refused?: { code: string; status?: number } }
   | { status: "transient" };
 
 function latestAfterLostCommit(
@@ -232,7 +233,8 @@ async function refreshTokens(
   }
   const merged = mergeWorkOSRefresh(snapshot.tokens, providerOutcome);
   if (merged.status === "terminal") {
-    return { status: "terminal", expectedRaw: snapshot.raw };
+    return { status: "terminal", expectedRaw: snapshot.raw, ...(providerOutcome.status === "terminal"
+      ? { refused: { code: providerOutcome.reason, ...(providerOutcome.httpStatus !== undefined ? { status: providerOutcome.httpStatus } : {}) } } : {}) };
   }
 
   // Every active response is durably rewritten even when WorkOS returned the
@@ -294,16 +296,28 @@ function toMainSession(value: StoredTokens): MainAuthSession {
   };
 }
 
+/** Why the active record reads as signed out (for the one diagnostic line). */
+function logStoredSessionAbsent(readError?: unknown): void {
+  if (readError !== undefined) { logSignedOut("stored_session_unreadable", { code: "secret_store_unreadable" }); return; }
+  let raw: string | null;
+  try { raw = getSecret(TOKENS_KEY); } catch { logSignedOut("stored_session_unreadable", { code: "secret_store_unreadable" }); return; }
+  if (raw === null) logSignedOut("stored_session_missing");
+  else logSignedOut("stored_session_unreadable", { code: "unrecognized_record" });
+}
+
 async function getValidSessionFromTokens(
   tokens: StoredTokens | null,
 ): Promise<MainAuthSession | null> {
-  if (!tokens) return null;
+  if (!tokens) { logStoredSessionAbsent(); return null; }
   if (tokens.expiresAt - Date.now() >= REFRESH_SKEW_MS) {
+    noteSignedIn();
     return toMainSession(tokens);
   }
   const outcome = await refreshOnce();
-  if (outcome.status === "ok") return toMainSession(outcome.tokens);
+  if (outcome.status === "ok") { noteSignedIn(); return toMainSession(outcome.tokens); }
   if (outcome.status === "terminal") {
+    // A refused grant names the provider's code; a record that vanished under the refresh lock is a missing session.
+    if (outcome.refused) logSignedOut("refresh_refused", outcome.refused); else logSignedOut("stored_session_missing");
     const removed =
       outcome.expectedRaw !== undefined &&
       replaceSecretIfUnchanged(TOKENS_KEY, outcome.expectedRaw, null);
@@ -370,7 +384,7 @@ export const authGetAccessToken: CommandHandler = async () => {
   try {
     tokens = readTokens();
   } catch (error) {
-    if (error instanceof SecretStoreReadError) return { access_token: null, account: null };
+    if (error instanceof SecretStoreReadError) { logStoredSessionAbsent(error); return { access_token: null, account: null }; }
     throw error;
   }
   const session = await getValidSessionFromTokens(tokens);
