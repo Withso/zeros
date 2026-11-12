@@ -247,7 +247,8 @@ export class InboundBridge {
         if (connection.clients.has(frame.clientId) || connection.clients.size >= 256) { socket.close(4003); return; }
         const id = randomUUID();
         connection.clients.set(frame.clientId, id); this.routes.set(id, { connection, clientId: frame.clientId });
-        frame = { ...frame, clientId: id };
+        // Routing uses the local id; terminal and client leases name the control plane's own (any sent value is replaced).
+        frame = { ...frame, clientId: id, authorityClientId: frame.clientId };
       } else if (frame.t === "frame" || frame.t === "close") {
         const id = connection.clients.get(frame.clientId);
         if (!id) { socket.close(4003); return; }

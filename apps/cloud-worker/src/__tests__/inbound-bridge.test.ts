@@ -59,6 +59,17 @@ it("binds only loopback and authenticates before upgrading or accepting a frame"
   expect(await f.refusal(auth)).toBe(401);
 });
 
+it("keeps each control-plane client's own id as its lease authority, beside the carrier's local routing id; a sent one is ignored", async () => {
+  const f = await fixture(), one = await f.connect(), two = await f.connect(), clientId = randomUUID();
+  one.ws.send(JSON.stringify({ t: "open", clientId }));
+  two.ws.send(JSON.stringify({ t: "open", clientId, authorityClientId: randomUUID() }));
+  await expect.poll(() => f.incoming.length).toBe(2);
+  const opens = f.incoming.filter((frame): frame is Extract<CloudV2ControlFrame, { t: "open" }> => frame.t === "open");
+  expect(opens.map(open => open.authorityClientId)).toEqual([clientId, clientId]);
+  expect(opens.every(open => open.clientId !== clientId)).toBe(true);
+  expect(opens[0]!.clientId).not.toBe(opens[1]!.clientId);
+});
+
 it("isolates equal client ids across two control-plane replicas and broadcasts to both", async () => {
   const f = await fixture(), one = await f.connect(), two = await f.connect(), clientId = randomUUID();
   for (const { ws } of [one, two]) ws.send(JSON.stringify({ t: "open", clientId }));

@@ -1,0 +1,9 @@
+{
+  "id": "cloud-activated-carrier-client-authority",
+  "kind": "replay",
+  "area": "control-plane",
+  "fixedBy": "pr:1048",
+  "symptom": "An activated workspace's terminal and mutation leases failed with actor_changed because the signed worker carrier replaced the control-plane client id with its local routing id. Direct fake-carrier tests bypassed the replacement.",
+  "rule": "zstack-review and principles 1, 3 and 13 require transport routing identity to remain distinct from durable authority identity, with the real signed carrier included in producer-consumer checks.",
+  "check": "pnpm --dir apps/control-plane exec vitest run src/cloud/execution/relay-client-authority.integration.test.ts"
+}
