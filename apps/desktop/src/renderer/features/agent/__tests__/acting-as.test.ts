@@ -4,7 +4,7 @@ import { expect, it } from "vitest";
 import { ActingAsLabel, actingAsName } from "../acting-as";
 
 const me = "11111111-1111-4111-8111-111111111111", alex = "44444444-4444-4444-8444-444444444444";
-const roster = [{ id: alex, name: "Alex Rivera", avatarUrl: null }] as Parameters<typeof actingAsName>[2];
+const roster = [{ id: alex, name: "Alex Rivera", avatarUrl: null, role: "member" }] as unknown as Parameters<typeof actingAsName>[2];
 
 it("names the running turn's person, says you for the viewer's own turn, and nothing without one", () => {
   expect(actingAsName(alex, me, roster)).toBe("Alex Rivera");

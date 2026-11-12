@@ -987,6 +987,8 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
       state?: "running" | "completed" | "failed" | "cancelled";
       turnId?: string;
       stopReason?: AgentSessionState["lastStopReason"];
+      /** Team sharing: on a running turn_state, the person it acts as. */
+      actingUserId?: string;
       startedAt?: number;
       effort?: string;
       providerBinding?: import("@zeros/protocol/identities").ProviderBinding;
