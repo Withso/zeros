@@ -1,4 +1,4 @@
-import type { z } from "zod";
+import { z } from "zod";
 import {
   LOCAL_COMMAND_DEVICE_HEADERS, LocalCommandConnectReplySchema, LocalCommandDisconnectReplySchema, LocalCommandEventSchemas,
   LocalCommandNoticeSchema, LocalCommandPresenceSchema, LocalCommandRegistrationReplySchema, LocalCommandResultReplySchema, WorkspaceSyncFlagReplySchema,
@@ -16,6 +16,9 @@ type EventName = keyof typeof LocalCommandEventSchemas;
 export type DeviceEvent = { [K in EventName]: { event: K; data: z.infer<(typeof LocalCommandEventSchemas)[K]> } }[EventName];
 
 const ERROR_BYTES = 8192, REPLY_BYTES = 256 * 1024;
+const repository = z.string().max(201).regex(/^[A-Za-z0-9][A-Za-z0-9_.-]*\/[A-Za-z0-9][A-Za-z0-9_.-]*$/);
+const gitScopeReply = z.object({ workspace: z.object({ id: z.string().uuid(), organizationId: z.string().uuid(), repository }) });
+const githubReadTokenReply = z.object({ token: z.string().min(1).max(8192).regex(/^[^\s\0]+$/), expiresAt: z.string().datetime(), repository });
 
 async function bounded(response: Response, limit: number): Promise<string> {
   const reader = response.body?.getReader();
@@ -37,7 +40,7 @@ async function bounded(response: Response, limit: number): Promise<string> {
 export class DeviceControl {
   constructor(private readonly deps: { fetch: typeof fetch; baseUrl(): string; token(): Promise<string | null> }) {}
 
-  private async send<T>(method: string, path: string, options: { device?: LocalCommandDevice; body?: unknown; schema?: z.ZodType<T>; timeoutMs?: number; accept?: string; signal?: AbortSignal; syncField?: true }): Promise<T> {
+  private async send<T>(method: string, path: string, options: { device?: LocalCommandDevice; body?: unknown; schema?: z.ZodType<T>; timeoutMs?: number; accept?: string; signal?: AbortSignal; syncField?: true; teamSharing?: true }): Promise<T> {
     const token = await this.deps.token();
     if (!token) throw new DeviceControlError(401, "unauthorized");
     const headers: Record<string, string> = { authorization: `Bearer ${token}`, ...(options.accept ? { accept: options.accept } : {}) };
@@ -45,6 +48,7 @@ export class DeviceControl {
     // Order 3: replies carrying a connected-Macs row include `syncing` only when asked.
     // 12.z: syncWanted has its own opt-in beside the Order 3 syncing field; both always travel together here.
     if (options.syncField) { headers["x-zeros-sync"] = "1"; headers["x-zeros-sync-wanted"] = "1"; }
+    if (options.teamSharing) headers["x-zeros-team-sharing"] = "1";
     if (options.device) Object.assign(headers, {
       [LOCAL_COMMAND_DEVICE_HEADERS.deviceId]: options.device.deviceId,
       [LOCAL_COMMAND_DEVICE_HEADERS.registrationId]: options.device.registrationId,
@@ -137,6 +141,14 @@ export class DeviceControl {
   /** Order 3: a single-use grant for this Mac's direct sync socket (never wakes the VM). */
   syncGrant(device: LocalCommandDevice, workspaceId: string) {
     return this.send("POST", `/v1/cloud-v2/workspaces/${encodeURIComponent(workspaceId)}/sync/grant`, { device, body: {}, schema: SyncGrantReplySchema });
+  }
+  async workspaceGitScope(device: LocalCommandDevice, workspaceId: string, signal?: AbortSignal) {
+    const { workspace } = await this.send("GET", `/v1/cloud-v2/workspaces/${encodeURIComponent(workspaceId)}`, { device, schema: gitScopeReply, syncField: true, teamSharing: true, signal });
+    if (workspace.id !== workspaceId) throw new DeviceControlError(200, "invalid_response");
+    return { organizationId: workspace.organizationId, repository: workspace.repository };
+  }
+  githubReadToken(device: LocalCommandDevice, workspaceId: string, signal?: AbortSignal) {
+    return this.send("POST", `/v1/cloud-v2/workspaces/${encodeURIComponent(workspaceId)}/github-read-token`, { device, body: {}, schema: githubReadTokenReply, syncField: true, signal });
   }
   /** May name another of this person's Macs; H identifies the Mac asking. */
   disconnect(device: LocalCommandDevice, workspaceId: string, targetDeviceId: string) {

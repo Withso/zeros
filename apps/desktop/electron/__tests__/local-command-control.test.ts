@@ -20,6 +20,23 @@ function fake(handler: (method: string, path: string, init: RequestInit) => Resp
 }
 
 describe("device control client", () => {
+  it("reads the trusted Git scope passively and requests a read token with this Mac's headers and both sync opt-ins", async () => {
+    const workspaceId = "11111111-1111-4111-8111-111111111111", organizationId = "22222222-2222-4222-8222-222222222222";
+    const f = fake((_method, path) => Response.json(path.endsWith("/github-read-token")
+      ? { token: "synthetic-read-token", expiresAt: iso, repository: "example/repo" }
+      : { workspace: { id: workspaceId, organizationId, repository: "example/repo", state: "stopped", future: true } }));
+    expect(await f.control.workspaceGitScope(device, workspaceId)).toEqual({ organizationId, repository: "example/repo" });
+    expect(await f.control.githubReadToken(device, workspaceId)).toEqual({ token: "synthetic-read-token", expiresAt: iso, repository: "example/repo" });
+    expect(f.calls.map(call => [call.method, call.path, call.body])).toEqual([
+      ["GET", `/v1/cloud-v2/workspaces/${workspaceId}`, undefined], ["POST", `/v1/cloud-v2/workspaces/${workspaceId}/github-read-token`, {}],
+    ]);
+    expect(f.calls[0]!.headers.get("x-zeros-team-sharing")).toBe("1");
+    for (const call of f.calls) expect([call.headers.get("x-zeros-device-id"), call.headers.get("x-zeros-device-registration"), call.headers.get("x-zeros-device-instance"),
+      call.headers.get("x-zeros-sync"), call.headers.get("x-zeros-sync-wanted")]).toEqual([deviceId, registrationId, instanceId, "1", "1"]);
+    const foreign = fake(() => Response.json({ workspace: { id: organizationId, organizationId, repository: "example/repo" } }));
+    await expect(foreign.control.workspaceGitScope(device, workspaceId)).rejects.toBeInstanceOf(DeviceControlError);
+  });
+
   it("sends exactly the capabilities it is given: no fallback hides a second body under the same request id", async () => {
     const deviceId = "7f1f6c1e-3b0a-4f7e-9d43-8a0b2b9c6d11", requestId = "0f0e0d0c-0b0a-4908-8706-050403020100";
     const f = fake(() => Response.json({ error: { code: "invalid_request" } }, { status: 400 }));

@@ -1,6 +1,8 @@
 /** Main -> renderer: every workspace this Mac mirrors, with its state. */
 export const WORKSPACE_SYNC_STATUS_EVENT = "workspace-sync:status";
 
+export interface WorkspaceSyncStorage { storeId: string; sharedGitBytes: number; folderBytes: number }
+
 /** Off is the absence of a status. Paused: the workspace is asleep. */
 export interface WorkspaceSyncStatus {
   workspaceId: string;
@@ -13,4 +15,5 @@ export interface WorkspaceSyncStatus {
   problems: number;
   /** 12.z: This Mac's own folder, for the popup's path field; main adds it, never the server. */
   folder?: string;
+  storage?: WorkspaceSyncStorage;
 }

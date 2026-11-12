@@ -69,6 +69,7 @@ async function main() {
       const state = params.get("sync") ?? "off";
       const status = state === "off" ? null : { workspaceId: "w", state: state as "syncing" | "in_sync" | "paused" | "error",
         ...(state === "syncing" ? { files: 12 } : {}), ...(state === "error" ? { reason: "too_many_bytes" } : {}), problems: 0,
+        ...(params.has("gitSizes") ? { storage: { storeId: "a".repeat(64), folderBytes: 24 * 1024 ** 2, sharedGitBytes: 58 * 1024 ** 2 } } : {}),
         folder: "/Users/alex/zeros/cloud-sync/zeros/w-19" };
       const old = params.has("old");
       return <main className="bg-bg1 min-h-screen p-8">

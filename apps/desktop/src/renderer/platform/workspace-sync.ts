@@ -7,18 +7,43 @@ import { isElectron, nativeInvoke, nativeListen } from "./runtime";
 let statuses: readonly WorkspaceSyncStatus[] = [];
 const listeners = new Set<() => void>();
 let started: Promise<() => void> | null = null;
-// Anything but a list is no statuses: an older main, a harness or a failed read answers nothing.
-const accept = (next: unknown) => { statuses = Array.isArray(next) ? next as WorkspaceSyncStatus[] : []; for (const listener of listeners) listener(); };
+let generation = 0;
+const count = (value: unknown): value is number => typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+function syncStatus(value: unknown): WorkspaceSyncStatus | null {
+  if (!value || typeof value !== "object") return null;
+  const status = value as WorkspaceSyncStatus;
+  if (typeof status.workspaceId !== "string" || !["syncing", "in_sync", "paused", "error"].includes(status.state) || !count(status.problems)) return null;
+  const storage = status.storage;
+  if (storage === undefined || storage && typeof storage.storeId === "string" && /^[a-f0-9]{64}$/.test(storage.storeId) && count(storage.folderBytes) && count(storage.sharedGitBytes)) return status;
+  const { storage: _, ...rest } = status;
+  return rest;
+}
+const accept = (next: unknown) => {
+  statuses = Array.isArray(next) ? next.map(syncStatus).filter((status): status is WorkspaceSyncStatus => status !== null) : [];
+  for (const listener of listeners) listener();
+};
 export const workspaceSyncStatusFor = (workspaceId: string | null): WorkspaceSyncStatus | null =>
   (workspaceId ? statuses.find(status => status.workspaceId === workspaceId) : undefined) ?? null;
 
 export function startWorkspaceSyncStatus(): () => void {
   if (!isElectron()) return () => {};
-  started ??= nativeListen<unknown>(WORKSPACE_SYNC_STATUS_EVENT, accept).then(stop => {
-    void nativeInvoke<unknown>("workspace_sync_statuses").then(accept, () => {});
-    return stop;
-  });
-  return () => { void started?.then(stop => stop()); started = null; };
+  if (!started) {
+    const current = ++generation;
+    let events = 0;
+    started = nativeListen<unknown>(WORKSPACE_SYNC_STATUS_EVENT, next => { if (current === generation) { events++; accept(next); } }).then(stop => {
+      if (current !== generation) { stop(); return () => {}; }
+      const seen = events;
+      void nativeInvoke<unknown>("workspace_sync_statuses").then(next => { if (current === generation && events === seen) accept(next); }, () => {});
+      return stop;
+    });
+  }
+  const listening = started;
+  return () => {
+    if (started !== listening) return;
+    generation++; started = null;
+    void listening.then(stop => stop());
+    accept([]);
+  };
 }
 
 export function useWorkspaceSyncStatus(workspaceId: string | null): WorkspaceSyncStatus | null {

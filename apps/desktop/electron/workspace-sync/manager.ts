@@ -34,6 +34,7 @@ export class SyncManager {
   private readonly runs = new Map<string, Run>();
   private log(line: string): void { (this.deps.log ?? (text => console.info(`[workspace-sync] ${text}`)))(line); }
   private account: string | null = null;
+  private generation = 0;
   constructor(private readonly deps: SyncManagerDeps) {}
 
   private key(identity: { accountId: string; deviceId: string }): string {
@@ -61,6 +62,7 @@ export class SyncManager {
     this.publish();
   }
   async stop(): Promise<void> {
+    this.generation++;
     const runs = [...this.runs.values()]; this.runs.clear();
     for (const run of runs) { run.stop.abort(); run.wake(); this.log(`stopped workspace=${short(run.status.workspaceId)} reason=app_stopped`); }
     await Promise.all(runs.map(run => run.done));
@@ -75,11 +77,19 @@ export class SyncManager {
   async enable(workspaceId: string, folder: string): Promise<void> {
     const identity = this.deps.identity();
     if (!identity) throw new SyncRootError("other_workspace");
+    const generation = this.generation;
+    const check = () => {
+      const current = this.deps.identity();
+      if (generation !== this.generation || current?.accountId !== identity.accountId || current.deviceId !== identity.deviceId) throw new SyncRootError("other_workspace");
+    };
     const engine = await (this.deps.open ?? SyncEngine.open)(folder, this.syncIdentity(workspaceId, identity));
+    check();
     const previous = this.runs.get(workspaceId);
     if (previous) { this.runs.delete(workspaceId); previous.stop.abort(); previous.wake(); await previous.done; }
+    check();
     this.saveFolders({ ...this.folders(), [workspaceId]: engine.root });
     await this.deps.setSyncing(workspaceId, true).catch(() => {});
+    check();
     this.run(workspaceId, engine.root, identity, false);
     this.publish();
   }
@@ -134,7 +144,7 @@ export class SyncManager {
     const run: Run = { stop, wake: () => wake(), wakePromise: Promise.resolve(), status: { workspaceId, state: "syncing", problems: 0 }, done: Promise.resolve() };
     const rearm = () => { run.wakePromise = new Promise<void>(resolve => { wake = resolve; }); };
     rearm();
-    const set = (status: Omit<WorkspaceSyncStatus, "workspaceId">) => { run.status = { workspaceId, ...status }; if (this.runs.get(workspaceId) === run) this.publish(); };
+    const set = (status: Omit<WorkspaceSyncStatus, "workspaceId">) => { run.status = { workspaceId, ...(run.status.storage ? { storage: run.status.storage } : {}), ...status }; if (this.runs.get(workspaceId) === run) this.publish(); };
     const wait = (ms: number) => { const sleeping = (this.deps.wait ?? defaultWait)(ms, { promise: run.wakePromise }); return sleeping.finally(rearm); };
     this.runs.set(workspaceId, run);
     run.done = (async () => {
@@ -144,7 +154,13 @@ export class SyncManager {
       while (!stop.signal.aborted) {
         let connection: SyncConnection | undefined;
         try {
-          engine ??= await (this.deps.open ?? SyncEngine.open)(folder, this.syncIdentity(workspaceId, identity));
+          engine ??= await (this.deps.open ?? SyncEngine.open)(folder, this.syncIdentity(workspaceId, identity), {
+            signal: stop.signal,
+            isCurrent: () => {
+              const current = this.deps.identity();
+              return !stop.signal.aborted && this.runs.get(workspaceId) === run && current?.accountId === identity.accountId && current.deviceId === identity.deviceId;
+            },
+          });
           if (connects++ > 0) this.log(`reconnect workspace=${id} attempt=${connects - 1}`);
           connection = await this.deps.connect(workspaceId, { hint: () => run.wake(), closed: () => run.wake() });
           // A stop closes the socket at once, so a pull waiting on it ends.
@@ -164,7 +180,8 @@ export class SyncManager {
             if (result.state === "stopped") note("error", result.stopped ?? "stopped");
             if (result.state === "stopped") { set({ state: "error", reason: result.stopped, problems: 0 }); await wait(ERROR_MS); break; }
             if (result.state === "retry") { await wait(RETRY_MS); continue; }
-            set({ state: "in_sync", problems: result.problems.length + result.skipped.length, ...(result.git === "missing" ? { reason: "git_missing" } : result.git === "failed" ? { reason: "git_failed" } : {}) });
+            set({ state: "in_sync", problems: result.problems.length + result.skipped.length, ...(result.storage ? { storage: result.storage } : {}),
+              ...(result.git === "missing" ? { reason: "git_missing" } : result.git === "failed" ? { reason: "git_failed" } : {}) });
             await wait(IDLE_PULL_MS);
             open = !stop.signal.aborted;
           }
