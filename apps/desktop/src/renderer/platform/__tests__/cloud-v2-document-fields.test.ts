@@ -24,3 +24,14 @@ describe("a v2 reply becomes the popup's document", () => {
     expect(CloudWorkspaceDocumentSchema.parse(cloudV2Document(CloudV2WorkspaceSchema.parse(reply)))).not.toHaveProperty("setup");
   });
 });
+
+describe("default activation: a refused first boot", () => {
+  it("says the workspace couldn't start cleanly and lets Start try again in a new boot, stopped or failed", () => {
+    for (const state of ["stopped", "failed"] as const) {
+      const document = cloudV2Document(CloudV2WorkspaceSchema.parse({ ...reply, state, errorCode: "execution_first_boot_failed" }));
+      expect(document.error).toEqual({ code: "execution_first_boot_failed",
+        message: "This cloud workspace couldn't start cleanly. Start it again; if it happens again, ask an organization owner." });
+      expect(document.capabilities).toMatchObject({ canStart: true, startUnavailableReason: null });
+    }
+  });
+});

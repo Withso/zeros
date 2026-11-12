@@ -84,9 +84,12 @@ const ERRORS: Record<string, string> = {
   checkpoint_prerequisites_missing: "This workspace's last checkpoint needs commits that GitHub could not provide. Start it to try again.",
   checkpoint_repository_missing: "This workspace's repository could not be cloned for its restore. Start it to try again.",
   checkpoint_corrupt: "This workspace's last checkpoint is damaged and cannot be restored.",
+  // Default activation: the first boot could not prove a clean start; the next Start boots a new worker and proves it again.
+  execution_first_boot_failed: "This cloud workspace couldn't start cleanly. Start it again; if it happens again, ask an organization owner.",
 };
 /** A failed restore keeps its checkpoint; Start tries it again. */
-const RETRYABLE = new Set(["checkpoint_restore_failed", "checkpoint_download_failed", "checkpoint_prerequisites_missing", "checkpoint_repository_missing"]);
+const RETRYABLE = new Set(["checkpoint_restore_failed", "checkpoint_download_failed", "checkpoint_prerequisites_missing", "checkpoint_repository_missing",
+  "execution_first_boot_failed"]);
 
 export function cloudV2Document(workspace: CloudV2Workspace): CloudWorkspaceDocument {
   const [owner, name] = workspace.repository.split("/") as [string, string];

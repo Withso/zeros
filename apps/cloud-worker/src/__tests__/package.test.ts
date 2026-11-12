@@ -66,6 +66,17 @@ it("ships a relocatable dependency graph and a complete SHA-256 inventory", asyn
   expect(files.some(name => name.includes("@cursor/sdk-linux-") && name.endsWith("/rg"))).toBe(true);
 }, 60_000);
 
+it("ships worker-capabilities.json: exactly this worker's advertised features, sorted, inventoried by the runtime manifest", async () => {
+  const { CLOUD_WORKER_FEATURES } = await import("../worker-features");
+  const bytes = await readFile(join(dist, "worker-capabilities.json"));
+  const capabilities = JSON.parse(bytes.toString("utf8"));
+  expect(Object.keys(capabilities).sort()).toEqual(["features", "version"]);
+  expect(capabilities).toEqual({ version: 1, features: [...new Set(CLOUD_WORKER_FEATURES.split(","))].sort() });
+  for (const feature of capabilities.features) expect(feature).toMatch(/^[a-z][a-z0-9-]{0,63}$/);
+  const manifest = JSON.parse(await readFile(join(dist, "runtime-manifest.json"), "utf8"));
+  expect(manifest.files["worker-capabilities.json"]).toMatchObject({ sha256: createHash("sha256").update(bytes).digest("hex"), bytes: bytes.length });
+});
+
 it("keeps the per-request Git helpers small enough to start like bare Node", async () => {
   // Git starts a helper process for every credential or askpass request; the
   // shared protocol schemas made each one 768 KB and three times slower.
