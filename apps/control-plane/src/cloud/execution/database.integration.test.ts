@@ -3,6 +3,7 @@ import { appendFileSync } from "node:fs";
 import pg from "pg";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { withSystemTx, withUserTx, type Tx } from "../../db.js";
+import { SYSTEM_DATABASE_CONTEXT, USER_DATABASE_CONTEXT } from "../../db-context.js";
 import { executionFixture, type ExecutionFixture } from "./test-fixture.js";
 
 const database = process.env.TEST_DATABASE_URL ? describe : describe.skip;
@@ -49,7 +50,7 @@ database("execution migration roles, erasure and zero-context cost", () => {
     expect((await withUserTx(pool, f.viewer.id, tx => tx.query("SELECT 1 FROM cloud_v2_execution_contexts"))).rowCount).toBe(0);
   });
 
-  it("does not break a non-system session writer and still refuses the filtered context at use time", async () => {
+  it.each([false, true])("does not break a non-system session writer and still refuses the filtered context at use time (N-1=%s)", async old => {
     const handle = await client(), current = await f.cp.execution.clients.current(f.workspace.id, handle.contextId);
     const tx = await pool.connect();
     try {
@@ -58,9 +59,9 @@ database("execution migration roles, erasure and zero-context cost", () => {
       await tx.query("BEGIN");
       await tx.query("CREATE POLICY execution_test_session_writer ON auth_sessions USING (true) WITH CHECK (true)");
       await tx.query("SET LOCAL ROLE zeros_app");
-      await tx.query("SELECT set_config('app.user_id',$1,true)", [f.viewer.id]);
+      await tx.query(old ? "SELECT set_config('app.user_id',$1,true)" : USER_DATABASE_CONTEXT, [f.viewer.id]);
       expect((await tx.query("UPDATE auth_sessions SET status='revoked',revoked_at=clock_timestamp() WHERE provider_session_id=$1", [f.viewer.authentication.sessionId])).rowCount).toBe(1);
-      await tx.query("SELECT set_config('app.system','on',true)");
+      await tx.query(SYSTEM_DATABASE_CONTEXT);
       expect((await tx.query("SELECT state FROM cloud_v2_execution_contexts WHERE id=$1", [handle.contextId])).rows[0].state).toBe("active");
       await expect(f.cp.execution.assertContext(tx, current.context, current.proof)).rejects.toMatchObject({ code: "actor_changed" });
     } finally { await tx.query("ROLLBACK"); tx.release(); }

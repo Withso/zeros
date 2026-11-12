@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
@@ -99,21 +99,23 @@ class ActingRelay extends FakeRelay {
   }
 }
 
-async function setup(options: { activated?: boolean; bootstrap?: string; survivors?: number; setupRunner?: (...args: any[]) => Promise<number>; checkout?: () => void } = {}) {
+async function setup(options: { activated?: boolean; bootstrap?: string; survivors?: number; beforeStart?: (home: string) => Promise<void>; environment?: unknown; setupRunner?: (...args: any[]) => Promise<number>; checkout?: () => void } = {}) {
   const directory = await mkdtemp(join(tmpdir(), "zeros-acting-")); directories.push(directory);
   const root = join(directory, "checkout"); await mkdir(root);
   const relay = new ActingRelay(), drivers: FakeDriver[] = [];
   let socketPath = "";
   const home = join(directory, "home"); await mkdir(home);
+  await options.beforeStart?.(home);
   const worker = new CloudWorker({ directory, homeDirectory: home, transport: relay, workspaceId: WORKSPACE_ID, githubFetch: async () => new Response(null, { status: 200 }),
     prepareCheckout: async (_workspace, environment) => { socketPath = environment.GH_ZEROS_BROKER_SOCKET!; options.checkout?.(); return { createdBranch: true }; },
     ...(options.setupRunner ? { setupRunner: options.setupRunner } : {}),
     bootClean: async () => options.survivors ?? 0,
-    contextRenewMs: 20,
+    contextRenewMs: 20, sharedMemory: join(directory, "shm"),
     drivers: { claude: () => { const driver = new FakeDriver(); drivers.push(driver); return driver; } } });
   workers.push(worker); worker.start();
   await relay.receive({ ...config, workspace: { ...config.workspace, checkoutPath: root, ...(options.setupRunner ? { setup: "make bootstrap" } : {}) }, promptOutbox: 1,
-    ...(options.bootstrap ? { bootstrapContextId: options.bootstrap } : {}), agents: options.activated === false ? { claude: { apiKey: "creator-claude-key-000" } } : {},
+    ...(options.bootstrap ? { bootstrapContextId: options.bootstrap } : {}),
+    ...(options.environment ? { environment: options.environment } : {}), agents: options.activated === false ? { claude: { apiKey: "creator-claude-key-000" } } : {},
     ...(options.activated === false ? {} : { actingUser: 1, gitIdentity: null }) });
   return { relay, drivers, home, root, socketPath: () => socketPath };
 }
@@ -416,4 +418,28 @@ it("names the running turn's person on its turn_state, and nobody on a legacy tu
   await until(() => legacy.drivers[0]?.prompts.length ?? 0).toBe(1);
   expect(states(legacy.relay).every(update => !("actingUserId" in update))).toBe(true);
   legacy.drivers[0]!.complete();
+});
+
+it("removes the Creator's legacy Git identity before attesting a clean boot, and says what it did", async () => {
+  const cleanBodies = (relay: ActingRelay) => relay.calls.filter(call => call.op === "execution-leases/boot-clean").map(call => call.body);
+  const fresh = await setup();
+  await until(() => cleanBodies(fresh.relay).length).toBe(1);
+  expect(cleanBodies(fresh.relay)[0]).toMatchObject({ processes: 0, legacyMaterial: "none" });
+  const legacy = await setup({ beforeStart: async home => {
+    await mkdir(join(home, ".config", "zeros"), { recursive: true });
+    await writeFile(join(home, ".config", "zeros", "git-identity"), '[user]\n\tuseConfigOnly = true\n\tname = "Creator Person"\n\temail = "1+creator@users.noreply.github.com"\n');
+  } });
+  await until(() => cleanBodies(legacy.relay).length).toBe(1);
+  // The activated config's empty identity may land first; either way the Creator's is gone and nothing is refused.
+  expect(["none", "removed"]).toContain(cleanBodies(legacy.relay)[0]!.legacyMaterial);
+  expect(cleanBodies(legacy.relay)[0]).toMatchObject({ processes: 0 });
+  expect(await readFile(join(legacy.home, ".config", "zeros", "git-identity"), "utf8")).not.toContain("Creator");
+});
+
+it("never seeds a global environment into an activated workspace's shared checkout", async () => {
+  const f = await setup({ environment: { versionId: randomUUID(), repositoryId: "42", variables: {}, files: [{ path: ".env.local", content: "VALUE=synthetic-creator\n" }] } });
+  f.relay.deliver(delivery(ALEX));
+  await until(() => f.drivers[0]?.prompts.length ?? 0).toBe(1);
+  await expect(stat(join(f.root, ".env.local"))).rejects.toMatchObject({ code: "ENOENT" });
+  f.drivers[0]!.complete();
 });

@@ -41,7 +41,11 @@ describe("acting-user standalone protocol parity", () => {
     ["CloudV2RenewReplySchema", [{ leases: [{ contextId: uuid, expiresAt: 123 }] }, { leases: [{ contextId: uuid, refused: "cancelled" }] }, { leases: [{ contextId: uuid, expiresAt: 123, refused: "cancelled" }] }]],
     ["CloudV2RetiredRequestSchema", [{ retirementId: uuid, reason: "outcome", processes: 0 }, { retirementId: uuid, reason: "revoked", processes: 2147483647 }, { retirementId: uuid, reason: "stop", processes: -1 }]],
     ["CloudV2RetiredReplySchema", [{ retired: true }, { retired: false }, { retired: 1 }]],
-    ["CloudV2BootCleanRequestSchema", [{ retirementId: uuid, processes: 0 }, { retirementId: uuid, processes: 2147483647 }, { retirementId: uuid, processes: 2147483648 }, { retirementId: uuid, processes: 0, bootId: other }]],
+    ["CloudV2BootCleanRequestSchema", [
+      { retirementId: uuid, processes: 0 }, { retirementId: uuid, processes: 2147483647 },
+      ...["none", "removed", "refused", "unknown", null, true].map(legacyMaterial => ({ retirementId: uuid, processes: 0, legacyMaterial })),
+      { retirementId: uuid, processes: 2147483648 }, { retirementId: uuid, processes: 0, bootId: other },
+    ]],
     ["CloudV2BootCleanReplySchema", [{ retired: 0 }, { retired: 128 }, { retired: -1 }, { retired: true }]],
   ];
   it.each(matrices)("keeps %s identical on accepted, rejected and strict extra-field inputs", (name, values) => {

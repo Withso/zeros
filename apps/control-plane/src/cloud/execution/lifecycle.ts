@@ -5,7 +5,10 @@ import { actorChanged } from "./errors.js";
 import { assertExecutionIntent } from "./authority.js";
 
 export async function lifecycleExecution(contexts: CloudExecutionContexts, workspace: CloudV2LifecycleWorkspace) {
-  if (!await contexts.active(workspace.id)) return null;
+  if (!await contexts.active(workspace.id)) {
+    if (workspace.executionIntent) throw actorChanged();
+    return null;
+  }
   const intent = workspace.executionIntent;
   if (!intent?.id || !intent.userId) throw actorChanged();
   const fence = () => withSystemTx(contexts.pool, async tx => {
@@ -15,7 +18,8 @@ export async function lifecycleExecution(contexts: CloudExecutionContexts, works
     [workspace.id, intent.id, intent.userId, intent.accessEpoch, workspace.stopGeneration, workspace.state])).rowCount) throw actorChanged();
   });
   await fence();
-  let proof = { ...await contexts.deps.authority.admit(workspace.id, intent.userId), runBound: false as const };
+  const options = workspace.state === "starting" && workspace.checkpoint ? { sourceError: "github_access_required" as const } : {};
+  let proof = { ...await contexts.deps.authority.admit(workspace.id, intent.userId, options), runBound: false as const };
   assertExecutionIntent(intent.authority, proof);
   const person = proof.person;
   const check = async () => {
@@ -23,7 +27,7 @@ export async function lifecycleExecution(contexts: CloudExecutionContexts, works
     // Hydration may outlive admission. Reverify the same intent/person; a
     // newly selected connection or permission revision cannot inherit it.
     if (proof.until <= Date.now()) {
-      const renewed = await contexts.deps.authority.admit(workspace.id, intent.userId!);
+      const renewed = await contexts.deps.authority.admit(workspace.id, intent.userId!, options);
       if (renewed.person.personSignature !== person.personSignature || renewed.source.fingerprint !== proof.source.fingerprint) throw actorChanged();
       proof = { ...renewed, runBound: false };
     }

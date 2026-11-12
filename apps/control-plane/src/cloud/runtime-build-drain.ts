@@ -1,3 +1,4 @@
+import { SYSTEM_DATABASE_CONTEXT } from "../db-context.js";
 import { randomUUID } from "node:crypto";
 import type pg from "pg";
 import { z } from "zod";
@@ -28,7 +29,7 @@ async function operatorTransaction<T>(pool: pg.Pool, action: (tx: Tx) => Promise
   const tx = await pool.connect(); let lost = false;
   const onLost = () => { lost = true; }; tx.on("error", onLost); tx.on("end", onLost);
   try {
-    await tx.query("BEGIN; SET LOCAL lock_timeout='5s'; SET LOCAL statement_timeout='10s'; SELECT set_config('app.system','on',true)");
+    await tx.query(`BEGIN; SET LOCAL lock_timeout='5s'; SET LOCAL statement_timeout='10s'; ${SYSTEM_DATABASE_CONTEXT}`);
     const value = await action(tx);
     if (lost) throw unavailable();
     await tx.query("COMMIT");

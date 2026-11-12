@@ -1,3 +1,4 @@
+import { SYSTEM_DATABASE_CONTEXT } from "./db-context.js";
 import {parseDatabaseTarget} from "./database-target.js";
 import {createMigrationPool} from "./db.js";
 // Guarded database-owner utility for reconciling WorkOS provider subjects that
@@ -288,7 +289,7 @@ export async function inspectWorkOSProviderErasureReadiness(
   try {
     await client.query("BEGIN");
     await client.query("SET LOCAL statement_timeout = '30s'");
-    await client.query("SELECT set_config('app.system', 'on', true)");
+    await client.query(SYSTEM_DATABASE_CONTEXT);
     await assertDatabaseOwner(client);
     const counts = await client.query<{
       total_purged: number;
@@ -360,7 +361,7 @@ async function manageWorkOSProviderErasureEvidenceUnlocked(
     await client.query("BEGIN");
     await client.query("SET LOCAL lock_timeout = '10s'");
     await client.query("SET LOCAL statement_timeout = '30s'");
-    await client.query("SELECT set_config('app.system', 'on', true)");
+    await client.query(SYSTEM_DATABASE_CONTEXT);
     await assertDatabaseOwner(client);
 
     const actor = await client.query<{

@@ -17,6 +17,7 @@ import {parseDatabaseTarget, validateMigrationRole} from "./database-target.js";
 import { assertWorkOSProviderLockHeld } from "./workos-provider-lock-context.js";
 import { observeDatabaseTransaction, recordPoolWait, recordTransactionTiming } from "./request-timing.js";
 import { SqlFragment } from "./sql-fragment.js";
+import { SYSTEM_DATABASE_CONTEXT, USER_DATABASE_CONTEXT } from "./db-context.js";
 
 export type Db = pg.Pool;
 export type Tx = pg.PoolClient;
@@ -198,7 +199,7 @@ export async function withUserTx<T>(
     // separate parameterized statement, never interpolated into SQL.
     await client.query(`BEGIN; ${ENTER_APP_ROLE}`);
     // set_config with is_local=true scopes the GUC to this transaction.
-    await client.query("SELECT set_config('app.user_id', $1, true)", [userId]);
+    await client.query(USER_DATABASE_CONTEXT, [userId]);
     connection.assert();
     const result = await fn(client);
     connection.assert();
@@ -247,7 +248,7 @@ export async function withSystemStatement<R extends pg.QueryResultRow>(
     connection.assert();
     // The newline ends any trailing `--` comment before COMMIT.
     const results = await client.query(
-      `BEGIN; ${ENTER_APP_ROLE}; SELECT set_config('app.system', 'on', true); ${statement.text}\n; COMMIT`,
+      `BEGIN; ${ENTER_APP_ROLE}; ${SYSTEM_DATABASE_CONTEXT}; ${statement.text}\n; COMMIT`,
     ) as unknown as pg.QueryResult<R>[];
     connection.assert();
     if (!Array.isArray(results) || results.length !== 5) throw new Error("system_statement_batch_invalid");
@@ -290,7 +291,7 @@ export async function withSystemTx<T>(
     await client.query(`${options.serializable
       ? `BEGIN ISOLATION LEVEL SERIALIZABLE${options.consistentRead ? " READ ONLY" : ""}`
       : options.consistentRead ? "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY"
-      : "BEGIN"}; ${ENTER_APP_ROLE}; SELECT set_config('app.system', 'on', true)`);
+      : "BEGIN"}; ${ENTER_APP_ROLE}; ${SYSTEM_DATABASE_CONTEXT}`);
     connection.assert();
     const result = await fn(client);
     connection.assert();

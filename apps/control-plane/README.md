@@ -516,6 +516,112 @@ contract, or migration authority and writes an immutable
 `cloud_workspace_entitlement_changes` row in the same transaction. Entitlement activation
 does not enable `CLOUD_V2_ENABLED` or create provider resources.
 
+## Shared execution activation
+
+Shared execution stays disabled until an operator prepares and activates one
+exact workspace. There is no HTTP activation route. The command requires the
+database migration owner and an active `platform_owner`; the application role
+can advance an existing transition but cannot create an activation or its
+approval receipts. Use a controlled operator shell with the intended
+`DATABASE_URL`. This procedure does not authorize a live deployment by itself.
+
+Set `CLOUD_EXECUTION_CHANGE_FILE` to a regular JSON file containing exactly:
+
+```json
+{
+  "activationId": "00000000-0000-4000-8000-000000000001",
+  "action": "prepare",
+  "channel": "development",
+  "organizationId": "00000000-0000-4000-8000-000000000002",
+  "workspaceId": "00000000-0000-4000-8000-000000000003",
+  "initiatorUserId": "00000000-0000-4000-8000-000000000004",
+  "operatorUserId": "00000000-0000-4000-8000-000000000005",
+  "runtimeSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "reason": "Explicit approval for this workspace rollout"
+}
+```
+
+Replace the example identifiers and digest with reviewed values. The channel is
+`development`, `alpha`, `beta` or `production` and must match
+`RAILWAY_ENVIRONMENT_NAME`, or `CONTROL_PLANE_EXECUTION_CHANNEL` outside Railway.
+The reason is 16–512 characters; only its hash is retained. The initiator is the
+person whose current membership and repository access will authorize the fresh
+boot, with no Creator fallback. The runtime digest identifies the reviewed
+worker that supports `acting-user-v1` and legacy-material cleanup.
+
+```sh
+pnpm --dir apps/control-plane cloud-execution:manage
+# Inspect the plan; set CLOUD_EXECUTION_PLAN_SHA256 to its exact planSha256.
+pnpm --dir apps/control-plane cloud-execution:manage --execute
+```
+
+The deployed-image equivalent is `node dist/manage-cloud-execution.js`, with
+the same optional `--execute`. Planning is read-only. The approval hash binds
+the channel, routed database identity, organization, workspace, operator,
+initiator, source and permission revisions, run, runtime digest and action.
+Changed authority or a stale approval refuses execution. Repeating a committed
+action with the same activation identity and approval is inert.
+
+`prepare` preserves current execution, tokens and N-1 visibility. Change only
+`action` to `activate`, obtain a new plan and approve that plan separately.
+Activation blocks new prompts, connects and starts; advances the access epoch;
+cancels pending work; and records a durable drain. The normal lifecycle must
+confirm provider Stop before starting the pinned runtime. Each lifecycle
+replica can resume the stored phase after a restart. Stop, archive, deletion,
+membership loss or changed source authority wins over the rollout. The first
+closed failure is retained; the transition has a 30-minute deadline.
+
+The new worker's hello binds a fresh boot and returns no personal material.
+Readiness and every execution lease wait for that boot's process cleanup and
+`legacyMaterial: "none" | "removed"` attestation. Missing or refused cleanup
+keeps execution closed and stops the attempted rollout. The worker owns
+descriptor-checked removal of managed legacy files; the control plane never
+scripts their deletion. The server-side Creator environment pin is retained.
+
+Initial activation refuses a lost VM that needs checkpoint restoration. It
+retains the checkpoint and completes Stop; the operator can roll back, restore
+in legacy mode, and prepare again. Later wakes of an active workspace retain
+thin checkpoints. On a newly created organization snapshot VM only, the control
+plane fetches Git objects with the persisted initiator's repository credential
+before unpacking any checkpoint content. Git starts with a fresh repository,
+system/global configuration, hooks, helpers and redirects disabled. Bundle
+application after the fetch is offline. A denied initiator receives
+`github_access_required`; the Creator's credential is never substituted.
+
+The restore consumes a durable attempt before releasing the credential. An
+uncertain fetch or unpack cannot receive another credential on that VM: retry
+must confirm deletion and create a new snapshot VM. The provider command
+channel sees the credential, as it does in legacy restore. Inside the VM it is
+written only to a random `/dev/shm/zeros-restore-auth-XXXXXXXXXX/token` file
+(private 0700 directory, 0600 file, verified tmpfs), read through askpass, then
+removed and checked absent before unpacking. It is absent from Git arguments,
+configuration and output. Boot cleanup removes proven owned leftovers or
+refuses. This is the sole restore exception to waiting for boot-clean before
+personal credential delivery. It uses the narrowest available credential:
+read-only repository installation tokens for an App connection, or the
+initiator's existing PAT when that connection cannot be downscoped. The broker
+cache deadline does not shorten GitHub's token lifetime.
+
+A `rollback` plan requires a completed provider Stop for the current generation,
+no live contexts and no worker token. It leaves the workspace stopped, changes
+it back to legacy mode and never restores old tokens or starts it. Any later
+legacy start requires a new explicit action. A new `prepare` can supersede an
+obsolete prepared plan; failed or cancelled rollouts require rollback first.
+Up to 128 activation records and their three action receipts are retained per
+workspace until workspace deletion. Replays still work at that limit; new
+plans refuse instead of silently dropping the audit history.
+
+Migration `0240_cloud_execution_activation.sql` adds a restrictive workspace
+RLS predicate. Transactions use the central DB helpers to set
+`app.cloud_execution_protocol=1` locally within the transaction. Prepared-only
+rows remain visible to released replicas. A transition or active workspace is
+hidden from an N-1 transaction, even under `app.system=on`. This is a protocol
+fence, not authorization: `zeros_app` can set the marker deliberately, so
+ordinary session, membership and repository checks remain mandatory. Never set
+the marker at session scope or through connection options on a pooled backend.
+Already-started external work is not retroactively revoked; provider-confirmed
+Stop and the new boot's cleanup separate it from new execution.
+
 ## Optional feedback destinations
 
 The desktop posts authenticated reports to `POST /v1/feedback` on this service.

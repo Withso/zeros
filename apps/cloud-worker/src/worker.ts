@@ -38,6 +38,7 @@ import { gitIdentityEnvironment } from "./sharing/identity";
 import { PersonalEnvironments } from "./sharing/personal-env";
 import { operationEnvironment } from "./sharing/operation-environment";
 import { retireContext } from "./sharing/retire";
+import { removeLegacyMaterial } from "./sharing/legacy-material";
 import type { ModelDiscoveryOptions } from "./credentials/model-availability";
 import { PromptInbox } from "./prompt-inbox";
 import { McpGateway } from "./mcp/gateway";
@@ -60,6 +61,8 @@ interface WorkerOptions {
   /** Team sharing §7a: this boot's pre-boot process sweep, returning what it could not end or prove. Only the
    * production entry supplies the real /proc sweep; without one an activated boot is unproven and acts for no one. */
   bootClean?: () => Promise<number>;
+  /** Where a legacy restore leaves its token directory (tests); /dev/shm otherwise. */
+  sharedMemory?: string;
   /** Context renewal cadence override (tests); 10 s otherwise. */
   contextRenewMs?: number;
   workspaceId?: string;
@@ -479,7 +482,9 @@ export class CloudWorker {
     }
   }
 
-  private async configure(config: WorkerConfig): Promise<void> {
+  private async configure(received: WorkerConfig): Promise<void> {
+    // Activated: a global personal environment never applies (each lease brings its person's); one is ignored, not seeded.
+    const config: WorkerConfig = received.actingUser === 1 && received.environment ? (({ environment: _ignored, ...rest }) => rest)(received) : received;
     if (this.disposed || (!this.scope && this.stopping)) return;
     const started = performance.now(), initial = !this.scope;
     const reviewAvailable = this.configuredReviewAvailable;
@@ -487,7 +492,14 @@ export class CloudWorker {
     const revision = BigInt(config.loginRevision);
     if (this.acceptedConfigurationRevision !== undefined && revision < this.acceptedConfigurationRevision) return;
     this.acting = config.actingUser === 1;
-    if (this.acting && this.contexts) void this.contexts.clean(this.options.bootClean ?? (async () => 1));
+    if (this.acting && this.contexts) {
+      const sweep = this.options.bootClean, workspaceRoot = config.workspace.checkoutPath;
+      // Slice D (Q-D2): after the sweep (nothing old can rewrite it), the phase-1 Creator material goes, with proof.
+      // Only a boot with a real sweep cleans; without one it is unproven anyway.
+      void this.contexts.clean(async () => ({ processes: sweep ? await sweep() : 1,
+        legacyMaterial: sweep ? await removeLegacyMaterial({ root: workspaceRoot, state: this.options.directory, home: this.options.homeDirectory ?? homedir(),
+          ...(this.options.sharedMemory ? { shm: this.options.sharedMemory } : {}) }) : "refused" }));
+    }
     const sections = configurationSections(config), disconnects = this.disconnects;
     // Only a configuration applied in full on this connection is a baseline.
     const changed = this.scope && !this.stopping && this.appliedSections ? changedSections(this.appliedSections, sections) : undefined;
@@ -606,7 +618,8 @@ export class CloudWorker {
       this.initialSetupNeeded ||= checkout?.createdBranch === true;
       if (this.disposed || this.stopping) return false;
       if (config.environment && !this.options.transport.reportEnvironment) throw new EnvironmentSeedError("cloud_environment_runtime_required");
-      try { await seedEnvironment(scope, this.options.directory, config.environment, this.environmentLifetime.signal); }
+      // Activated: the legacy seed journal belongs to boot-clean's removal, never to seeding.
+      try { if (config.actingUser !== 1) await seedEnvironment(scope, this.options.directory, config.environment, this.environmentLifetime.signal); }
       catch (error) {
         if (error instanceof EnvironmentSeedError && config.environment && !this.environmentLifetime.signal.aborted)
           await this.options.transport.reportEnvironment?.({ versionId: config.environment.versionId, sequence: 1, state: "failed", errorCode: error.code }, this.environmentLifetime.signal);

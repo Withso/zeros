@@ -320,7 +320,9 @@ export const CloudV2RetiredRequestSchema = z.object({ retirementId: z.uuid(), re
   processes: z.number().int().min(0).max(2147483647) }).strict();
 export const CloudV2RetiredReplySchema = z.object({ retired: z.literal(true) }).strict();
 /** §7a: once per boot, before any begin or lease. The boot is the authenticated X-Zeros-Worker-Boot; processes 0 is the clean attestation. */
-export const CloudV2BootCleanRequestSchema = z.object({ retirementId: z.uuid(), processes: z.number().int().min(0).max(2147483647) }).strict();
+export const CloudV2BootCleanRequestSchema = z.object({ retirementId: z.uuid(), processes: z.number().int().min(0).max(2147483647),
+  /** Slice D (Q-D2): the phase-1 Creator material this boot removed; the control plane activates only on none/removed (missing = refused). */
+  legacyMaterial: z.enum(["none", "removed", "refused"]).optional() }).strict();
 export const CloudV2BootCleanReplySchema = z.object({ retired: z.number().int().min(0) }).strict();
 /** Context refusal codes (409/403/503 bodies {error:{code,message,agent?}}). */
 export const CloudV2ContextErrorCodeSchema = z.enum(["actor_changed", "actor_busy", "worker_update_required", "workspace_stopping",

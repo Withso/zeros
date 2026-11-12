@@ -1,3 +1,4 @@
+import { SYSTEM_DATABASE_CONTEXT } from "./db-context.js";
 import {parseDatabaseTarget} from "./database-target.js";
 import {createMigrationPool} from "./db.js";
 // Guarded database-owner utility for granting and revoking product-wide staff
@@ -216,7 +217,7 @@ export async function manageStaffRole(
     // transaction must explicitly enter the same bounded system context used
     // by server-side lifecycle work. Relation privileges and the exact table-
     // ownership checks below remain independently enforced.
-    await client.query("SELECT set_config('app.system', 'on', true)");
+    await client.query(SYSTEM_DATABASE_CONTEXT);
 
     const privilege = await client.query<{
       principal: string;

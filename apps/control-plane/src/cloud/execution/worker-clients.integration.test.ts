@@ -1,9 +1,15 @@
 import { generateKeyPairSync, randomUUID } from "node:crypto";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import pg from "pg";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { manageCloudExecution, type CloudExecutionChange } from "../../manage-cloud-execution.js";
+import { CloudV2Lifecycle } from "../lifecycle.js";
+import type { CloudV2Compute } from "../boat.js";
+import { CLOUD_V2_RESTORE_AUTH_PREFIX } from "../checkpoint-active-restore.js";
+import { CloudExecutionActivations } from "./activation.js";
 import { executionFixture, type ExecutionFixture } from "./test-fixture.js";
 
 // Only tests cross the deployment boundary; integration resolves the same
@@ -12,9 +18,11 @@ const root = new URL(process.env.CLOUD_EXECUTION_TEST_CLIENT_ROOT ?? "../../../.
 const database = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 database("real acting-user worker clients against HTTP routes and PostgreSQL", () => {
   let pool: pg.Pool, f: ExecutionFixture, directory: string;
-  let clients: { HybridTransport: any; ExecutionContexts: any; CloudWorker: any; protocol: any };
+  let clients: { HybridTransport: any; ExecutionContexts: any; CloudWorker: any; protocol: any;
+    removeLegacyMaterial: any; seedEnvironment: any; WorkspaceScope: any; configureGitIdentity: any };
   let worker: any, contexts: any, config: any;
   let loseCleanReply: boolean;
+  let startWorker: (token?: string) => Promise<void>;
   type Call = { path: string; body: any; headers: Headers; status?: number; reply?: any };
   let calls: Call[];
   beforeAll(async () => {
@@ -23,6 +31,10 @@ database("real acting-user worker clients against HTTP routes and PostgreSQL", (
       ...await import(new URL("apps/cloud-worker/src/hybrid-transport.ts", root).href),
       ...await import(new URL("apps/cloud-worker/src/sharing/execution-contexts.ts", root).href),
       ...await import(new URL("apps/cloud-worker/src/worker.ts", root).href),
+      ...await import(new URL("apps/cloud-worker/src/sharing/legacy-material.ts", root).href),
+      ...await import(new URL("apps/cloud-worker/src/workspace/environment-seed.ts", root).href),
+      ...await import(new URL("apps/cloud-worker/src/workspace/scope.ts", root).href),
+      ...await import(new URL("apps/cloud-worker/src/credentials/git-identity.ts", root).href),
       protocol: await import(new URL("packages/protocol/src/cloud-v2-relay.ts", root).href),
     };
   });
@@ -46,13 +58,17 @@ database("real acting-user worker clients against HTTP routes and PostgreSQL", (
     };
     f = await executionFixture(pool);
     await f.login(); await f.login(f.viewer); await f.activate();
-    worker = new clients.HybridTransport({ apiUrl: "https://api.example.test", workspaceId: f.workspace.id, tokenFile, port: 0,
-      runtimeSha256: "b".repeat(64), fetch: fetcher,
-      publicKeys: [generateKeyPairSync("ed25519").publicKey.export({ type: "spki", format: "pem" }).toString()] });
-    await writeFile(tokenFile, f.token, { mode: 0o600 });
-    contexts = new clients.ExecutionContexts({ post: (path: string, body: unknown) => worker.contextRequest(path, body) });
-    worker.start({ open: async () => {}, close: () => {}, frame: async (frame: any) => { if (frame.t === "config") config = frame; } });
-    await expect.poll(() => config).toBeDefined();
+    startWorker = async (token = f.token) => {
+      config = undefined;
+      worker = new clients.HybridTransport({ apiUrl: "https://api.example.test", workspaceId: f.workspace.id, tokenFile, port: 0,
+        runtimeSha256: "b".repeat(64), fetch: fetcher,
+        publicKeys: [generateKeyPairSync("ed25519").publicKey.export({ type: "spki", format: "pem" }).toString()] });
+      await writeFile(tokenFile, token, { mode: 0o600 });
+      contexts = new clients.ExecutionContexts({ post: (path: string, body: unknown) => worker.contextRequest(path, body) });
+      worker.start({ open: async () => {}, close: () => {}, frame: async (frame: any) => { if (frame.t === "config") config = frame; } });
+      await expect.poll(() => config).toBeDefined();
+    };
+    await startWorker();
   });
   afterEach(async () => {
     contexts?.dispose(); await worker?.dispose(); await f?.close();
@@ -60,7 +76,15 @@ database("real acting-user worker clients against HTTP routes and PostgreSQL", (
     vi.restoreAllMocks(); vi.unstubAllGlobals();
   });
   afterAll(() => pool.end());
-  const clean = () => contexts.clean(async () => 0);
+  const clean = () => contexts.clean(async () => ({ processes: 0, legacyMaterial: "none" }));
+  const localDisk = async () => {
+    const paths = { root: join(directory,"repository"), state: join(directory,"state"), home: join(directory,"home"), shm: join(directory,"shm") };
+    for (const path of Object.values(paths)) await mkdir(path);
+    execFileSync("git",["init","-q",paths.root]);
+    await writeFile(join(paths.root,".gitignore"),".env*\n");
+    const scope = new clients.WorkspaceScope({ ...config.workspace,checkoutPath: paths.root });
+    return { paths,scope,exists: (path: string) => lstat(path).then(() => true, () => false) };
+  };
   const offer = async (input = f.prompt(), user = f.creator) => {
     expect((await f.send(input, user)).status).toBe(201);
     const delivery = (await worker.promptRequest("pull", { waitMs: 0, held: [] })).prompts.find((value: any) => value.payload.userMessageId === input.userMessageId);
@@ -131,6 +155,148 @@ database("real acting-user worker clients against HTTP routes and PostgreSQL", (
     expect(calls).toHaveLength(before);
     expect((await pool.query("SELECT state FROM cloud_v2_execution_contexts WHERE workspace_id=$1", [f.workspace.id])).rows)
       .toEqual([{ state: "active" }]);
+  });
+
+  it("posts the real disk cleanup result, erases the managed Creator files and permits only personal leases", async () => {
+    const disk=await localDisk();
+    await clients.seedEnvironment(disk.scope,disk.paths.state,{versionId:randomUUID(),repositoryId:"42",variables:{},
+      files:[{path:".env.local",content:"VALUE=synthetic-creator-value\n"}]},new AbortController().signal);
+    await clients.configureGitIdentity(disk.paths.home,{name:"Fixture Creator",email:"creator@example.test"});
+    await mkdir(join(disk.paths.state,"terminals"));
+    await writeFile(join(disk.paths.state,"terminals","fixture.json"),JSON.stringify({screen:"synthetic terminal"}));
+    await contexts.clean(async () => ({processes:0,legacyMaterial:await clients.removeLegacyMaterial(disk.paths)}));
+    expect(calls.find(call=>call.path.endsWith("/boot-clean"))).toMatchObject({body:{processes:0,legacyMaterial:"removed"},status:200,reply:{retired:0}});
+    expect(await disk.exists(join(disk.paths.root,".env.local"))).toBe(false);
+    expect(await disk.exists(join(disk.paths.state,"terminals","fixture.json"))).toBe(false);
+    expect(await readFile(join(disk.paths.home,".config/zeros/git-identity"),"utf8")).not.toContain("Fixture Creator");
+    const lease=await contexts.bootstrapLease(config.bootstrapContextId);
+    expect(lease.userId).toBe(f.creator.id);
+  });
+
+  it("keeps a replaced seed and refuses every lease after the real cleanup reports uncertainty", async () => {
+    const disk=await localDisk(),path=join(disk.paths.root,".env.local");
+    await clients.seedEnvironment(disk.scope,disk.paths.state,{versionId:randomUUID(),repositoryId:"42",variables:{},
+      files:[{path:".env.local",content:"VALUE=synthetic-creator-value\n"}]},new AbortController().signal);
+    await rm(path); await writeFile(path,"MEMBER_FILE=keep\n");
+    await expect(contexts.clean(async () => ({processes:0,legacyMaterial:await clients.removeLegacyMaterial(disk.paths)})))
+      .rejects.toMatchObject({status:409,contextCode:"execution_not_retired"});
+    const receipt=calls.find(call=>call.path.endsWith("/boot-clean"));
+    expect(receipt).toMatchObject({body:{processes:0,legacyMaterial:"refused"},status:409,reply:{error:{code:"execution_not_retired"}}});
+    expect(await readFile(path,"utf8")).toBe("MEMBER_FILE=keep\n");
+    const before=calls.length;
+    await expect(contexts.bootstrapLease(config.bootstrapContextId)).rejects.toMatchObject({contextCode:"execution_not_retired"});
+    expect(calls).toHaveLength(before);
+  });
+
+  it.each(["identity", "terminals"])("refuses a %s directory replaced by a link and keeps the foreign files", async kind => {
+    const disk=await localDisk(),foreign=join(directory,"foreign"),file=kind==="identity"?"git-identity":"fixture.json";
+    await mkdir(foreign);
+    await writeFile(join(foreign,file),"FOREIGN_FILE=keep\n");
+    if(kind==="identity") {
+      await mkdir(join(disk.paths.home,".config"));
+      await symlink(foreign,join(disk.paths.home,".config/zeros"));
+    } else await symlink(foreign,join(disk.paths.state,"terminals"));
+    await expect(contexts.clean(async () => ({processes:0,legacyMaterial:await clients.removeLegacyMaterial(disk.paths)})))
+      .rejects.toMatchObject({status:409,contextCode:"execution_not_retired"});
+    expect(await readFile(join(foreign,file),"utf8")).toBe("FOREIGN_FILE=keep\n");
+  });
+
+  it("refuses a linked ancestor of the actual worker state path and keeps its terminal record", async () => {
+    const disk = await localDisk(), foreign = join(directory, "foreign-local");
+    const suffix = "share/zeros/cloud-worker", state = join(disk.paths.home, ".local", suffix);
+    await mkdir(join(foreign, suffix, "terminals"), { recursive: true });
+    const file = join(foreign, suffix, "terminals/fixture.json");
+    await writeFile(file, "FOREIGN_FILE=keep\n");
+    await symlink(foreign, join(disk.paths.home, ".local"));
+    await expect(contexts.clean(async () => ({ processes: 0,
+      legacyMaterial: await clients.removeLegacyMaterial({ ...disk.paths, state }) })))
+      .rejects.toMatchObject({ status: 409, contextCode: "execution_not_retired" });
+    expect(await readFile(file, "utf8")).toBe("FOREIGN_FILE=keep\n");
+  });
+
+  it.each([false, true])("joins the CP restore-token pattern to the worker cleanup (foreign entry: %s)", async foreign => {
+    const disk = await localDisk();
+    expect(CLOUD_V2_RESTORE_AUTH_PREFIX).toBe("/dev/shm/zeros-restore-auth-");
+    const name = `${CLOUD_V2_RESTORE_AUTH_PREFIX.slice("/dev/shm/".length)}${randomUUID().replaceAll("-", "").slice(0, 10)}`;
+    const path = join(disk.paths.shm, name);
+    await mkdir(path, { mode: 0o700 });
+    await writeFile(join(path, "token"), "synthetic-restore-credential", { mode: 0o600 });
+    if (foreign) await writeFile(join(path, "foreign"), "keep\n");
+    const pending = contexts.clean(async () => ({ processes: 0, legacyMaterial: await clients.removeLegacyMaterial(disk.paths) }));
+    if (foreign) {
+      await expect(pending).rejects.toMatchObject({ status: 409, contextCode: "execution_not_retired" });
+      expect(await readFile(join(path, "token"), "utf8")).toBe("synthetic-restore-credential");
+      expect(await readFile(join(path, "foreign"), "utf8")).toBe("keep\n");
+    } else {
+      await pending;
+      expect(await disk.exists(path)).toBe(false);
+      expect(calls.find(call => call.path.endsWith("/boot-clean"))).toMatchObject({ body: { processes: 0, legacyMaterial: "removed" }, status: 200 });
+    }
+  });
+
+  it("keeps older-boot contexts unretired when processes are zero but material is refused", async () => {
+    await clean();
+    const turn = await begin(await offer());
+    contexts.dispose(); await worker.dispose();
+    await startWorker();
+    await expect(contexts.clean(async () => ({ processes: 0, legacyMaterial: "refused" })))
+      .rejects.toMatchObject({ status: 409, contextCode: "execution_not_retired" });
+    expect(calls.at(-1)).toMatchObject({ path: "/v2/cloud/worker/execution-leases/boot-clean", body: { processes: 0, legacyMaterial: "refused" },
+      status: 409, reply: { error: { code: "execution_not_retired" } } });
+    expect((await pool.query("SELECT state FROM cloud_v2_execution_contexts WHERE id=$1", [turn.result.contextId])).rows[0].state).not.toBe("retired");
+    expect((await pool.query("SELECT clean_at FROM cloud_v2_execution_boots WHERE workspace_id=$1 AND boot_id=$2", [f.workspace.id, worker.bootId])).rows[0].clean_at).toBeNull();
+    contexts.dispose(); await worker.dispose();
+    await startWorker(); await clean();
+    expect((await pool.query("SELECT state,material FROM cloud_v2_execution_contexts WHERE id=$1", [turn.result.contextId])).rows[0])
+      .toEqual({ state: "retired", material: null });
+  });
+
+  it("joins operator prepare and activate through provider Stop, real cleanup and the initiator's first lease", async () => {
+    contexts.dispose(); await worker.dispose(); await f.close();
+    f = await executionFixture(pool); await f.cp.loginChanges.stop();
+    config = (await (await f.hello()).json()).config;
+    const disk = await localDisk();
+    await clients.seedEnvironment(disk.scope, disk.paths.state, { versionId: randomUUID(), repositoryId: "42", variables: {},
+      files: [{ path: ".env.local", content: "LEGACY=synthetic\n" }] }, new AbortController().signal);
+    await clients.configureGitIdentity(disk.paths.home, { name: "Fixture Creator", email: "creator@example.test" });
+    await pool.query("UPDATE users SET staff_role='platform_owner' WHERE id=$1", [f.admin.id]);
+    const change: CloudExecutionChange = { activationId: randomUUID(), action: "prepare", channel: "development",
+      organizationId: f.organizationId, workspaceId: f.workspace.id, initiatorUserId: f.viewer.id, operatorUserId: f.admin.id,
+      runtimeSha256: "b".repeat(64), reason: "Joined activation fixture" };
+    const run = async (action: CloudExecutionChange["action"]) => {
+      const input = { ...change, action }, options = { databaseUrl: process.env.TEST_DATABASE_URL!, channel: "development" };
+      const plan = await manageCloudExecution(pool, input, options);
+      return manageCloudExecution(pool, input, { ...options, execute: true, approval: plan.planSha256 });
+    };
+    const row = async () => (await pool.query("SELECT * FROM cloud_v2_workspaces WHERE id=$1", [f.workspace.id])).rows[0];
+    await run("prepare"); expect(await row()).toMatchObject({ execution_mode: "prepared", execution_transition_id: null });
+    await run("activate");
+    let release!: () => void;
+    const compute = { stop: vi.fn(() => new Promise<void>(resolve => { release = resolve; })), delete: vi.fn(async () => {}),
+      extendLease: vi.fn(async () => {}) } as unknown as CloudV2Compute;
+    const lifecycle = new CloudV2Lifecycle({ store: f.cp.store, compute,
+      runtime: { sha256: change.runtimeSha256, url: async () => "https://example.test/runtime" },
+      publicKeys: [], sealPortToken: () => null, stopWorker: async () => true, bootEnv: () => ({}), sandboxName: () => "fixture" });
+    const stopping = lifecycle.tick(); await expect.poll(() => compute.stop).toHaveBeenCalled();
+    try {
+      expect(await row()).toMatchObject({ state: "stopping", execution_transition_id: change.activationId });
+      expect((await f.worker("hello", { protocol: 2, bootId: f.boot, runtimeSha256: change.runtimeSha256 })).status).toBe(401);
+    } finally { release(); await stopping; }
+    await new CloudExecutionActivations(pool, f.cp.execution).step(change.activationId);
+    expect(await row()).toMatchObject({ state: "starting", execution_mode: "active", execution_transition_id: change.activationId });
+    await startWorker(await f.cp.store.rotateWorkerToken(f.workspace.id));
+    for (const field of ["environment", "api", "mcpServers", "codeReview"]) expect(config).not.toHaveProperty(field);
+    expect(config).toMatchObject({ actingUser: 1, agents: {}, gitIdentity: null });
+    await expect(worker.contextRequest("bootstrap-lease", { contextId: config.bootstrapContextId }))
+      .rejects.toMatchObject({ status: 409, contextCode: "actor_busy" });
+    await contexts.clean(async () => ({ processes: 0, legacyMaterial: await clients.removeLegacyMaterial(disk.paths) }));
+    expect(await row()).toMatchObject({ state: "running", execution_transition_id: null });
+    expect((await pool.query("SELECT phase,boot_id,legacy_material FROM cloud_v2_execution_activations WHERE id=$1", [change.activationId])).rows[0])
+      .toEqual({ phase: "active", boot_id: worker.bootId, legacy_material: "removed" });
+    expect(await disk.exists(join(disk.paths.root, ".env.local"))).toBe(false);
+    const lease = await contexts.bootstrapLease(config.bootstrapContextId);
+    expect(lease.userId).toBe(f.viewer.id);
+    await contexts.retire(lease.contextId, "setup_done", 0);
   });
 
   it("renews a batch without extending authority on a temporary failure, then retires on Stop", async () => {

@@ -15,6 +15,7 @@ import { CLOUD_V2_MAX_PROMPT_BYTES, CloudV2PromptSchema, CloudV2SessionNameSchem
 import type { CloudExecutionContexts, PromptExecutionAdmission } from "./execution/store.js";
 import { executionIntentAuthority } from "./execution/authority.js";
 import { memberOnHoldSql } from "../organization-seats.js";
+import { assertNoExecutionTransition } from "./execution/activation-state.js";
 
 export type CloudApiPrompt = {
   chatId: string; userMessageId: string; agentId: CloudV2Prompt["agentId"];
@@ -136,6 +137,7 @@ export class CloudV2PromptOutbox {
     const executionAdmission = options?.executionAdmission ?? (!options?.tx ? await this.execution?.preflightPrompt(id, userId, payload, authority) : undefined);
     const write = async (tx: Tx) => {
       const workspace = await this.owned(tx, id, userId, true, payload.userMessageId);
+      await assertNoExecutionTransition(tx, id);
       await options?.authorize?.(tx);
       if (workspace.execution_mode === "active") {
         if (!this.execution || !executionAdmission || executionAdmission.person.userId !== userId || executionAdmission.person.workspaceId !== id)

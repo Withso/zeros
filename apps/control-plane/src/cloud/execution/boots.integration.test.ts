@@ -11,7 +11,7 @@ database("boot cleanup through the real worker router", () => {
   afterEach(async () => { await f?.close(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
   afterAll(() => pool.end());
   const hello = (boot = f.boot) => f.worker("hello", { protocol: 2, bootId: boot, runtimeSha256: "b".repeat(64) }, { boot });
-  const clean = (boot = f.boot, input = { retirementId: randomUUID(), processes: 0 }) => f.worker("execution-leases/boot-clean", input, { boot });
+  const clean = (boot = f.boot, input = { retirementId: randomUUID(), processes: 0, legacyMaterial: "none" }) => f.worker("execution-leases/boot-clean", input, { boot });
 
   it("gates begin and every material lease until this boot has a clean receipt", async () => {
     const response = await hello(); expect(response.status).toBe(200);
@@ -27,12 +27,13 @@ database("boot cleanup through the real worker router", () => {
       expect([route, blocked.status, (await blocked.json()).error?.code]).toEqual([route, 409, "actor_busy"]);
     }
     const prompt = f.prompt(); expect((await f.send(prompt)).status).toBe(201);
+    const blocked = await f.worker("prompts/begin", { userMessageId: prompt.userMessageId, deliveryId: randomUUID(), dispatchId: randomUUID() });
+    expect(blocked.status).toBe(409); expect(await blocked.json()).toMatchObject({ error: { code: "actor_busy" } });
+    expect((await pool.query("SELECT state FROM cloud_v2_workspaces WHERE id=$1", [f.workspace.id])).rows[0].state).toBe("starting");
+    expect(await (await clean()).json()).toEqual({ retired: 0 });
     const delivery = (await (await f.worker("prompts/pull", { waitMs: 0 })).json()).prompts[0];
     expect((await f.worker("prompts/ack", { userMessageId: prompt.userMessageId, deliveryId: delivery.deliveryId })).status).toBe(200);
     const begin = { userMessageId: prompt.userMessageId, deliveryId: delivery.deliveryId, dispatchId: randomUUID() };
-    const blocked = await f.worker("prompts/begin", begin);
-    expect(blocked.status).toBe(409); expect(await blocked.json()).toMatchObject({ error: { code: "actor_busy" } });
-    expect(await (await clean()).json()).toEqual({ retired: 0 });
     expect((await f.worker("prompts/begin", begin)).status).toBe(200);
   });
 
@@ -40,7 +41,8 @@ database("boot cleanup through the real worker router", () => {
     expect((await hello()).status).toBe(200);
     const ticket = await f.cp.execution.clients.ticket(f.workspace.id, f.viewer, false);
     const grant = await f.cp.store.consumeConnectTicket(ticket.token, f.workspace.id);
-    await expect(f.cp.execution.clients.open(f.workspace.id, randomUUID(), grant!)).rejects.toMatchObject({ code: "actor_busy" });
+    await expect(f.cp.execution.clients.open(f.workspace.id, randomUUID(), grant!)).rejects.toMatchObject({ code: "worker_update_required" });
+    expect((await pool.query("SELECT 1 FROM cloud_v2_execution_contexts WHERE workspace_id=$1 AND kind='client'", [f.workspace.id])).rowCount).toBe(0);
   });
 
   it("records survivors and retires only replaced-boot contexts after a successful proof", async () => {
@@ -48,13 +50,13 @@ database("boot cleanup through the real worker router", () => {
     const a = await f.dispatch(); expect((await f.worker("turn-lease", a.lease)).status).toBe(200);
     const boot = randomUUID(), response = await hello(boot); expect(response.status).toBe(200);
     const currentBootstrap = (await response.json()).config.bootstrapContextId;
-    const failed = { retirementId: randomUUID(), processes: 1 };
+    const failed = { retirementId: randomUUID(), processes: 1, legacyMaterial: "none" };
     const refused = await clean(boot, failed); expect(refused.status).toBe(409);
     expect(await refused.json()).toMatchObject({ error: { code: "execution_not_retired" } });
     expect((await pool.query("SELECT last_processes FROM cloud_v2_execution_boots WHERE workspace_id=$1 AND boot_id=$2", [f.workspace.id, boot])).rows[0]).toEqual({ last_processes: 1 });
     expect((await pool.query("SELECT state FROM cloud_v2_execution_contexts WHERE id=$1", [a.begun.contextId])).rows[0].state).not.toBe("retired");
     expect((await f.worker("bootstrap-lease", { contextId: currentBootstrap }, { boot })).status).toBe(409);
-    const receipt = { retirementId: randomUUID(), processes: 0 };
+    const receipt = { retirementId: randomUUID(), processes: 0, legacyMaterial: "none" };
     const accepted = await clean(boot, receipt); expect(accepted.status).toBe(200);
     const result = await accepted.json(); expect(result.retired).toBeGreaterThan(0);
     expect((await pool.query("SELECT state,material,environment_version_id FROM cloud_v2_execution_contexts WHERE id=$1", [a.begun.contextId])).rows[0])

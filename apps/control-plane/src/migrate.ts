@@ -1,3 +1,4 @@
+import { SYSTEM_DATABASE_CONTEXT } from "./db-context.js";
 // ──────────────────────────────────────────────────────────
 // Migrations runner — plain numbered .sql files, forward-only,
 // each applied in its own transaction, recorded with a content checksum.
@@ -765,7 +766,7 @@ async function findPreBoundaryCloudState(
     // immediately before 0025. Bind the same system context used by control-
     // plane background work so FORCE ROW LEVEL SECURITY cannot hide rows from
     // this fail-closed deployment check.
-    await client.query("SELECT set_config('app.system', 'on', true)");
+    await client.query(SYSTEM_DATABASE_CONTEXT);
     const { rows } = await client.query<{ relation: string }>(`
       SELECT relation
       FROM (

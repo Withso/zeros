@@ -9,6 +9,7 @@ import { withSystemTx } from "../db.js";
 import type { PostgresSecurityEventBroker } from "../security-events.js";
 import type { Config } from "../config.js";
 import { HttpError } from "../authz.js";
+import { isGithubAccessRevoked } from "../github-availability.js";
 import { BoatApiClient } from "../cloud/boat-client.js";
 import { cloudAgentCredentialKeys } from "../agent-credentials/agent-credentials.js";
 import type { CloudAgentCredentialMaterial } from "../agent-credentials/agent-credential-envelope.js";
@@ -53,6 +54,8 @@ import { CloudWorkspaceSync } from "./workspace-sync/store.js";
 
 import { CloudExecutionContexts } from "./execution/store.js";
 import { lifecycleExecution } from "./execution/lifecycle.js";
+import { claimExecutionRestore } from "./execution/restore.js";
+import { CloudExecutionActivations, executionActivationRuntime } from "./execution/activation.js";
 import { CloudExecutionAuthority } from "./execution/authority.js";
 import { CloudExecutionLogins } from "./execution/logins.js";
 
@@ -102,7 +105,9 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   const store = new CloudV2Store(pool, keys);
   const runtime = cloudV2Runtime(v2.runtime.sha256, v2.runtime.store);
   const runtimeCanary = config.deploymentChannel === "alpha" && v2.runtimeCanary ? new RuntimeCanaryAuthority(v2.runtimeCanary) : undefined;
-  const runtimeForWorkspace = workspaceRuntimeResolver(pool, runtime, runtimeCanary?.policy);
+  const defaultRuntimeForWorkspace = workspaceRuntimeResolver(pool, runtime, runtimeCanary?.policy);
+  const runtimeForWorkspace = async (workspace: CloudV2Workspace & { executionTransitionId?: string }) =>
+    (workspace.executionTransitionId ? await executionActivationRuntime(pool, workspace.id, runtime) : null) ?? defaultRuntimeForWorkspace(workspace);
   const compute = new BoatCloudV2Compute(new BoatApiClient({
     apiKey: v2.boat.apiKey, timeoutMs: 120_000, ...(v2.boat.billingOrg ? { billingOrg: v2.boat.billingOrg } : {}),
   }));
@@ -391,15 +396,23 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   } };
   void loginChanges?.start().catch(() => {}); // The shared listener retries and re-reads onReady.
   const remoteHeads = github.remoteHead;
-  const lifecycleSource = async (workspace: CloudV2LifecycleWorkspace) => {
+  const lifecycleSource = async (workspace: CloudV2LifecycleWorkspace, purpose: "git" | "computer" = "git") => {
     const actor = await lifecycleExecution(execution, workspace);
     if (!actor) return null;
-    const target = await github.identities.primary(workspace); await actor.check();
-    const scope = { organizationId: workspace.organizationId, userId: actor.userId };
-    const access = await github.connections.access(scope); await actor.check();
-    const binding = await access.api.repository(target); await actor.check();
-    const credential = await github.token(scope, binding, "read", "git", actor.check); await actor.check();
-    return { ...actor, credential, repository: binding.repository };
+    try {
+      const target = await github.identities.primary(workspace); await actor.check();
+      const scope = { organizationId: workspace.organizationId, userId: actor.userId };
+      const access = await github.connections.access(scope); await actor.check();
+      const binding = await access.api.repository(target); await actor.check();
+      const credential = await github.token(scope, binding, "read", purpose, actor.check); await actor.check();
+      return { ...actor, credential, repository: binding.repository };
+    } catch (error) {
+      if (purpose === "computer" && workspace.checkpoint && isGithubAccessRevoked(error)) {
+        await actor.check();
+        throw new HttpError(403, "github_access_required", "The workspace initiator needs access to its repository");
+      }
+      throw error;
+    }
   };
   const builder = roles.lifecycle ? new CloudV2ComputerBuilder({
     computers, compute, channel: config.deploymentChannel, localOwner, runtime, publicKeys: signer.publicKeys,
@@ -412,6 +425,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     logger: console,
   }) : null;
   const lifecycle = roles.lifecycle ? new CloudV2Lifecycle({
+    executionActivations: new CloudExecutionActivations(pool, execution),
     runtimeUpdates,
     // Always wired: rows created before async creates were disabled still resolve.
     resolvePendingSource: createPendingSourceResolver({
@@ -430,6 +444,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
       if (!await lifecycleExecution(execution, workspace)) await authorizeSource(workspace, options);
     },
     assertExecution: async workspace => { await lifecycleExecution(execution, workspace); },
+    claimExecutionRestore: (workspace,sandboxId) => claimExecutionRestore(pool,workspace,sandboxId),
     prepareRepository: async (workspace, sandboxId) => {
       const actor = await lifecycleSource(workspace);
       const credential = actor?.credential ?? await github.workspaceToken(workspace);
@@ -461,7 +476,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
       const head = await remoteHeads(workspace.organizationId, actor?.userId ?? workspace.creatorUserId, workspace.repository, workspace.baseBranch, target.repositoryId);
       await actor?.check(); return head;
     },
-    githubToken: async workspace => (await lifecycleSource(workspace))?.credential ?? github.workspaceToken(workspace),
+    githubToken: async workspace => (await lifecycleSource(workspace,"computer"))?.credential ?? github.workspaceToken(workspace),
     logger: console,
   }) : null;
   // Lifecycle rows notify on change. Reconnecting sweeps once, covering any
