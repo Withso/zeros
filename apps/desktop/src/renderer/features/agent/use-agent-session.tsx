@@ -197,6 +197,8 @@ export interface AgentSessionState {
   /** Engine-owned active-turn start. Restored by loadSession after a renderer
    * reload so an empty live tail does not restart its elapsed clock at 0s. */
   activeTurnStartedAt: number | null;
+  /** Team sharing: the person the running cloud turn acts as (its worker names it); null otherwise. */
+  actingUserId?: string | null;
   /** Modes advertised by the agent at session creation, if any. */
   availableModes: SessionMode[];
   /** Currently active mode id (echoed back by session/set_mode and

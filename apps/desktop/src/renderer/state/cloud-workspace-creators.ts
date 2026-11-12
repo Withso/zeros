@@ -51,6 +51,15 @@ export function useCloudFolderIsReader(folder: string | null | undefined): boole
   const read = () => cloudFolderIsReader(folder);
   return useSyncExternalStore(subscribeCloudWorkspaces, read, read);
 }
+/** Team sharing phase 2: this folder is an activated workspace where members write as themselves. */
+export function cloudFolderTeamWriting(folder: string | null | undefined): boolean {
+  const target = folder ? parseCloudWorkspaceKey(folder) : null;
+  return !!target && cloudWorkspaceDocument(target)?.sharing?.teamWriting === true;
+}
+export function useCloudFolderTeamWriting(folder: string | null | undefined): boolean {
+  const read = () => cloudFolderTeamWriting(folder);
+  return useSyncExternalStore(subscribeCloudWorkspaces, read, read);
+}
 /** One reader predicate per catalog snapshot, for lists of folders. */
 export function useCloudReaderLookup(): (folder: string) => boolean {
   const documents = useSyncExternalStore(subscribeCloudWorkspaces, getCloudWorkspaceDocuments, getCloudWorkspaceDocuments);

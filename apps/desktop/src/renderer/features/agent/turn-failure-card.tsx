@@ -8,6 +8,8 @@ import {
 } from "./agent-notice";
 import type { TurnFailure } from "./turn-failure";
 
+const AGENT_NAMES = { claude: "Claude", codex: "Codex", cursor: "Cursor" } as const;
+
 export function TurnFailureCard({
   failure,
   readOnly = false,
@@ -50,7 +52,8 @@ export function TurnFailureCard({
   };
   const reason = failure.cloud?.source === "provider" ? failure.cloud.reason : undefined;
   const accountAction = reason === "auth-required" || reason === "verification-required" || reason === "credentials-unavailable";
-  const retryAction = !readOnly && !accountAction && reason !== "session-expired" && reason !== "model-unavailable" ? onRetry : undefined;
+  // An own-account refusal was never sent: after signing in, the same message can simply be retried.
+  const retryAction = !readOnly && (!accountAction || failure.ownAccount) && reason !== "session-expired" && reason !== "model-unavailable" ? onRetry : undefined;
   const newChatAction = !readOnly && failure.newChatAllowed && (!reason || reason === "session-expired")
     ? reason === "session-expired" ? onStartNewSession ?? onRetryNewChat : onRetryNewChat : undefined;
   const reconnectAction = !readOnly && accountAction ? onReconnect : undefined;
@@ -73,7 +76,8 @@ export function TurnFailureCard({
           </Button>}
           {reconnectAction && <Button type="button" variant="ghost" size="sm" disabled={busy}
             onClick={() => reconnectAction(failure.cloud?.source === "provider" ? failure.cloud.provider : undefined)} className={AGENT_NOTICE_ACTION}>
-            {reason === "auth-required" ? "Reconnect provider account" : "Check provider connection"}
+            {failure.ownAccount && failure.cloud?.source === "provider" ? `Connect your ${AGENT_NAMES[failure.cloud.provider]} account`
+              : reason === "auth-required" ? "Reconnect provider account" : "Check provider connection"}
             <ArrowRight className="size-3.5" aria-hidden="true" />
           </Button>}
           {retryAction && (

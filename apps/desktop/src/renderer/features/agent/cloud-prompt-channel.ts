@@ -16,6 +16,8 @@ export interface PromptJournalEntry {
   receipt?: CloudV2PromptReceipt;
   state?: CloudV2PromptState;
   failure?: string;
+  /** Team sharing: the control plane refused this message because its sender has no login of their own for the chat's agent. */
+  refusal?: { code: "agent_login_required"; agent: "claude" | "codex" | "cursor" };
   cancelRequested?: boolean;
   /** Client-only feedback; never used to admit, retry or retire delivery. */
   presentation?: CloudTurnPresentation;
@@ -44,6 +46,13 @@ const definitive = (error: unknown) => httpStatus(error) >= 400 && httpStatus(er
 const refusal = (error: unknown) => [401, 403].includes(httpStatus(error))
   ? "This message wasn't sent. Check your cloud access and retry."
   : "This message wasn't accepted. Retry to send it again.";
+const AGENT_NAMES = { claude: "Claude", codex: "Codex", cursor: "Cursor" } as const;
+/** 409 agent_login_required (team sharing): never inboxed; the sender connects their own account. */
+const ownAccountRefusal = (error: unknown): PromptJournalEntry["refusal"] => {
+  const value = error as { status?: unknown; code?: unknown; agent?: unknown } | null;
+  return value && value.status === 409 && value.code === "agent_login_required" && (value.agent === "claude" || value.agent === "codex" || value.agent === "cursor")
+    ? { code: "agent_login_required", agent: value.agent } : undefined;
+};
 const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
 
 /** One exact account/workspace/conversation. HTTPS receipt ownership is
@@ -178,8 +187,9 @@ export class CloudPromptChannel {
         } catch (error) {
           if (!this.current()) return;
           await this.edit(record => ({ ...record, entries: record.entries.map(value => value.payload.userMessageId === id && !value.receipt
-            ? { ...value, phase: definitive(error) ? "refused" : "uncertain", failure: definitive(error) ? refusal(error)
-              : "Saved on this device. Delivery will resume when connected.", updatedAt: Date.now() } : value) }));
+            ? { ...value, phase: definitive(error) ? "refused" : "uncertain", failure: ownAccountRefusal(error)
+              ? `Connect your ${AGENT_NAMES[ownAccountRefusal(error)!.agent]} account to send messages in this workspace.` : definitive(error) ? refusal(error)
+              : "Saved on this device. Delivery will resume when connected.", ...(ownAccountRefusal(error) ? { refusal: ownAccountRefusal(error) } : {}), updatedAt: Date.now() } : value) }));
           if (!definitive(error)) return;
         }
         continue;

@@ -80,8 +80,8 @@ export function CloudWorkspaceDetailsCard({ workspace, title, statusLabel, resou
     ) }] : []),
     { Icon: Activity, label: "Status", value: <span className="inline-flex min-w-0 items-center justify-end gap-1">
       <span role="status">{statusLabel}</span>
-      {/* Restart is the Creator's: an admin may stop a teammate's workspace, never start or restart it. */}
-      {workspace.capabilities.canManage && !workspace.sharing?.readOnly && running && <Tooltip label="Restart workspace"><IconButton size="compact" label="Restart workspace"
+      {/* Restart is the Creator's, or (team writing) any member it executes for: an admin may stop a teammate's workspace, never restart it. */}
+      {runsAsViewer(workspace) && running && <Tooltip label="Restart workspace"><IconButton size="compact" label="Restart workspace"
         disabled={changing} onClick={() => onChange("restart")}><RotateCw /></IconButton></Tooltip>}
     </span> },
     ...(workspace.setup ? [{ Icon: Wrench, label: "Setup", value: setupLabel(workspace.setup) }] : []),
@@ -111,7 +111,7 @@ export function CloudWorkspaceDetailsCard({ workspace, title, statusLabel, resou
           {changing ? "Starting…" : "Start workspace"}
         </Button>
       )}
-      {workspace.capabilities.canManage && running && (
+      {(workspace.capabilities.canManage || runsAsViewer(workspace)) && running && (
         <Button size="sm" variant="secondary" className="mt-3" disabled={changing} onClick={() => onChange("stop")}>
           {changing ? "Stopping…" : "Stop workspace"}
         </Button>
@@ -119,6 +119,10 @@ export function CloudWorkspaceDetailsCard({ workspace, title, statusLabel, resou
     </>
   );
 }
+
+/** The viewer runs this workspace's lifecycle as themself: its Creator, or a member of an activated (team writing) workspace that executes for them. */
+const runsAsViewer = (workspace: CloudWorkspaceDocument) => !workspace.sharing?.readOnly &&
+  (workspace.capabilities.canManage || workspace.sharing?.teamWriting === true);
 
 function RenameableTitle({ name, title, onRename }: { name: string; title: string; onRename: (name: string) => Promise<void> }) {
   const [editing, setEditing] = useState<string | null>(null);

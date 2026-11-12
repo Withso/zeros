@@ -113,6 +113,14 @@ describe("durable cloud prompt channel", () => {
     expect(f.channel.snapshot.entries[0]).toMatchObject({ phase: "refused", payload: prompt("one"), failure: expect.stringMatching(/retry/i) });
     expect(JSON.stringify(f.channel.snapshot)).not.toContain("private diagnostic"); expect(f.order).toEqual(["two"]);
   });
+  it("keeps a shared workspace's 'connect your agent account' refusal with its agent, and never sends it", async () => {
+    const f = fixture();
+    f.api.enqueue.mockRejectedValueOnce(Object.assign(new Error("Connect your claude account"), { status: 409, code: "agent_login_required", agent: "claude" }));
+    await f.channel.enqueue(async () => prompt("one")); await f.channel.flush();
+    expect(f.channel.snapshot.entries[0]).toMatchObject({ phase: "refused", refusal: { code: "agent_login_required", agent: "claude" },
+      failure: "Connect your Claude account to send messages in this workspace." });
+    expect(f.order).toEqual([]);
+  });
   it("restores committed remote work on another app and settles a mid-turn worker restart as interrupted", async () => {
     const f = fixture(); await f.api.enqueue(prompt("one")); f.rows.get("one")!.state = "accepted";
     await f.channel.refresh(true); expect(f.channel.snapshot.entries[0]?.state).toBe("accepted");

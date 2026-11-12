@@ -987,6 +987,8 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
       state?: "running" | "completed" | "failed" | "cancelled";
       turnId?: string;
       stopReason?: AgentSessionState["lastStopReason"];
+      /** Team sharing: on a running turn_state, the person it acts as. */
+      actingUserId?: string;
       startedAt?: number;
       effort?: string;
       providerBinding?: import("@zeros/protocol/identities").ProviderBinding;
@@ -1126,6 +1128,7 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
           lastStopReason: null,
           foregroundTurnId: upd.turnId ?? slot.foregroundTurnId,
           ...(slot.cloudPromptPending ? { cloudPromptPending: false } : {}),
+          actingUserId: typeof upd.actingUserId === "string" ? upd.actingUserId : null,
           // A local send starts this clock before admission. Lifecycle updates may move
           // the start earlier, never later, or the timer visibly resets.
           activeTurnStartedAt:
@@ -1151,6 +1154,7 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
               foregroundTurnId: upd.turnId ?? slot.foregroundTurnId,
               ...(slot.cloudPromptPending ? { cloudPromptPending: false } : {}),
               activeTurnStartedAt: slot.cloudStop ? slot.activeTurnStartedAt : null,
+              actingUserId: null,
               ...(isCloudWorkspace(slot.cwd) && upd.turnId ? { cloudTurnPresentations: withCloudTurnPresentation(slot.cloudTurnPresentations, upd.turnId, {
                 startedAt: cloudTurnStart(slot, upd.turnId), endedAt: Date.now(), status: terminalState,
                 source: "native", stopReason: upd.state === "cancelled" ? "cancelled" : upd.stopReason,

@@ -48,7 +48,8 @@ export interface AgentTextMessage {
   retryText?: string;
   /** Failure before engine admission, or while the renderer lost its request
    * transport. Engine-confirmed failures also have a terminal error notice. */
-  recoveryFailure?: { kind: string; message: string };
+  /** cloud/ownAccount: team sharing's refusal of a person without their own agent login (their own sign-in fixes it). */
+  recoveryFailure?: { kind: string; message: string; cloud?: { source: "provider"; provider: "claude" | "codex" | "cursor"; reason: "auth-required" }; ownAccount?: true };
   /** Engine-side message id from the SessionNotification chunk. Used
    *  to coalesce streaming chunks of the SAME message; differs across
    *  turns, so without this every turn's agent reply would merge into
