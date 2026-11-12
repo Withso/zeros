@@ -28,3 +28,8 @@ describe("this Mac's sync statuses in the renderer", () => {
     stop();
   });
 });
+
+it("says plainly that sync stopped because this person no longer has access", async () => {
+  const { workspaceSyncLabel } = await import("../workspace-sync");
+  expect(workspaceSyncLabel({ workspaceId: "11111111-1111-4111-8111-111111111111", state: "error", reason: "access_revoked", problems: 0 })).toBe("Stopped: you no longer have access");
+});

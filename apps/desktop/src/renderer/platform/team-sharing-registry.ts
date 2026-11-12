@@ -27,3 +27,25 @@ export function sharingFor(workspaceId: string): { teamSharing?: true } {
   const role = roleLookup(workspaceId);
   return role === "admin" || role === "member" ? { teamSharing: true } : {};
 }
+
+/** Team sharing phase 3 (3A): this person lost access to a workspace while it
+ * was open (the relay closed 4001, or a re-read no longer finds it). The
+ * workspace view shows that instead of its chats and tools; it clears once a
+ * connection to that workspace is ready again. */
+const accessEnded = new Set<string>();
+const accessListeners = new Set<() => void>();
+export function subscribeWorkspaceAccessEnded(listener: () => void): () => void {
+  accessListeners.add(listener);
+  return () => { accessListeners.delete(listener); };
+}
+export function workspaceAccessEnded(workspaceId: string): boolean { return accessEnded.has(workspaceId); }
+export function reportWorkspaceAccessEnded(workspaceId: string): void {
+  if (accessEnded.has(workspaceId)) return;
+  accessEnded.add(workspaceId);
+  for (const listener of accessListeners) listener();
+}
+export function clearWorkspaceAccessEnded(workspaceId: string): void {
+  if (!accessEnded.delete(workspaceId)) return;
+  for (const listener of accessListeners) listener();
+}
+export function resetWorkspaceAccessForTests(): void { accessEnded.clear(); }

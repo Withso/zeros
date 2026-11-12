@@ -196,6 +196,10 @@ export class CloudWorker {
     const transport = options.transport;
     if (transport.contextRequest) this.contexts = new ExecutionContexts({ post: (path, body) => transport.contextRequest!(path, body),
       ...(options.contextRenewMs ? { renewMs: options.contextRenewMs } : {}) });
+    const contexts = this.contexts;
+    // sync-context-v1: an activated workspace's sync socket reads only while its person's handle lives.
+    if (contexts) transport.setSyncContexts?.({ required: () => this.acting, admit: (contextId, userId) => contexts.admitHandle(contextId, userId),
+      ended: (contextId, listener) => contexts.onEnd(contextId, listener), release: contextId => contexts.release(contextId), live: contextId => contexts.live(contextId) });
   }
 
   private contextGateway(context: { contextId: string; servers: readonly RuntimeMcpServer[] }, workspaceRoot: string, agents: Agents): Promise<McpGateway> {
@@ -227,7 +231,9 @@ export class CloudWorker {
     catch (error) { throw tagged(error, "lease_refused"); }
     try {
       if (lease.userId !== client.userId) throw tagged(new WorkspaceError("CLOUD_V2_UNSUPPORTED", "Reconnect to the workspace to make changes as yourself."), "lease_person_mismatch");
-      return await operationEnvironment.run({ git: gitIdentityEnvironment(lease.gitIdentity), zeros: { ZEROS_EXECUTION_CONTEXT: lease.contextId } }, work);
+      return await operationEnvironment.run({ git: gitIdentityEnvironment(lease.gitIdentity), zeros: { ZEROS_EXECUTION_CONTEXT: lease.contextId },
+        // A code review mutation is authored by this person (never the Creator).
+        requester: { userId: lease.userId, ...(lease.gitIdentity?.name ? { userName: lease.gitIdentity.name } : {}) } }, work);
     } finally {
       await retireContext(this.contexts, lease.contextId, "operation_done");
     }
@@ -414,7 +420,17 @@ export class CloudWorker {
       const previous = this.clients.get(message.clientId); if (previous) this.terminals?.detach(previous);
       if (previous?.contextId && previous.contextId !== message.contextId) this.contexts?.release(previous.contextId);
       // The connection's client handle lives as long as the connection: adopted now, renewed in every batch.
-      if (message.userId && message.contextId) this.contexts?.adopt(message.contextId, message.userId);
+      if (message.userId && message.contextId) {
+        this.contexts?.adopt(message.contextId, message.userId);
+        // Phase 3: that person lost access. The control plane closes the leg; here the client is dropped at once.
+        this.contexts?.onEnd(message.contextId, () => {
+          const current = this.clients.get(message.clientId);
+          if (!current || current.contextId !== message.contextId) return;
+          current.rejected = true;
+          this.terminals?.detach(current);
+          this.clients.delete(message.clientId);
+        });
+      }
       const client: Client = { id: message.clientId, rejected: false, ...(message.passive ? { passive: true } : {}),
         ...(message.passive && message.device ? { device: message.device } : {}),
         ...(message.userId && message.contextId ? { userId: message.userId, contextId: message.contextId } : {}),
@@ -575,7 +591,7 @@ export class CloudWorker {
       if (!changed || changed.some(key => key.startsWith("workspace.")))
         await measureStartup("worker_reconfigure_workspace", () => this.workspace!.configure(config.workspace), timing);
       await measureStartup("worker_reconfigure_mcp", () => this.mcp!.configure(config.mcpServers ?? [], config.loginRevision), timing);
-      if (!this.stopping) await this.reviews!.configure(config.codeReview);
+      if (!this.stopping) await (config.actingUser === 1 ? this.reviews!.configurePerRequester() : this.reviews!.configure(config.codeReview));
       if (!this.reviews!.enabled) this.workspaceMcp.revokeReview();
       this.agents!.configure(config);
     }
@@ -655,7 +671,8 @@ export class CloudWorker {
         this.lastMutationAt = Date.now(); void this.reportIdle();
         void this.broadcast(createMessage({ type: "DB_CHANGED", source: "engine", kinds: ["codeReview"], workspaceIds: [scope.workspace.id] }));
       });
-      reviewConfiguring = measureStartup("worker_services_review", () => reviews!.configure(config.codeReview), timing);
+      // Activated: each review mutation is its requester's; no workspace-wide reviewer (config.codeReview is ignored).
+      reviewConfiguring = measureStartup("worker_services_review", () => config.actingUser === 1 ? reviews!.configurePerRequester() : reviews!.configure(config.codeReview), timing);
       reviewConfiguring.catch(() => {});
       const checkout = await checking;
       refresh = checkout?.refresh;

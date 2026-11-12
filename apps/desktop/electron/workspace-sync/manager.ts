@@ -148,6 +148,10 @@ export class SyncManager {
           if (stop.signal.aborted) break;
           if (error instanceof SyncConnectError && error.kind === "paused") { note("paused", "workspace_stopped"); set({ state: "paused", problems: run.status.problems }); await wait(PAUSED_MS); }
           else if (error instanceof SyncConnectError && error.kind === "signed_out") { this.log(`stopped workspace=${id} reason=signed_out`); break; }
+          // This person lost access: stop for good; the folder's files stay on this Mac.
+          else if (error instanceof SyncConnectError && error.kind === "access_revoked") {
+            this.log(`stopped workspace=${id} reason=access_revoked`); set({ state: "error", reason: "access_revoked", problems: 0 }); break;
+          }
           else if (error instanceof SyncConnectError && error.kind === "update_required") { note("error", "update_required"); set({ state: "error", reason: "update_required", problems: 0 }); await wait(UPDATE_MS); }
           else if (error instanceof SyncConnectError && error.kind === "not_connected") { note("error", "not_connected"); set({ state: "error", reason: "not_connected", problems: 0 }); await wait(ERROR_MS); }
           else if (error instanceof SyncRootError) { note("error", `folder_${error.code}`); set({ state: "error", reason: `folder_${error.code}`, problems: 0 }); await wait(ERROR_MS); engine = undefined; }

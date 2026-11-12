@@ -42,6 +42,8 @@ export interface Transport {
   /** Team sharing slice B (acting-user-v1): POST /v2/cloud/worker/<path> for leases, renew and retirement.
    * A refusal throws with `status` and the closed `contextCode` from its body. */
   contextRequest?(path: string, body: unknown): Promise<unknown>;
+  /** sync-context-v1: the worker's execution contexts for the direct sync socket's handle. */
+  setSyncContexts?(contexts: import("./inbound-bridge").SyncContexts): void;
   /** Best-effort diagnostics, independent of strict authority/history frames. */
   reportTiming?: (record: CloudV2WorkerTiming) => void;
 }

@@ -16,7 +16,7 @@ import { SyncRootError } from "./engine";
 import { SyncManager } from "./manager";
 import WebSocket from "ws";
 import { DeviceControlError } from "../local-commands/control";
-import { DirectSyncConnection, SyncConnectError, type DirectDeps, type SyncSocket } from "./connection";
+import { DirectSyncConnection, SyncConnectError, syncGrantRefusal, type DirectDeps, type SyncSocket } from "./connection";
 import { WORKSPACE_SYNC_STATUS_EVENT } from "../../shared/workspace-sync";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -30,14 +30,7 @@ export function installWorkspaceSync(local: { enabled: boolean; control: DeviceC
     const device = local.device();
     if (!device) throw new SyncConnectError("not_connected");
     try { return await local.control.syncGrant(device, workspaceId); }
-    catch (error) {
-      if (!(error instanceof DeviceControlError)) throw new SyncConnectError("unavailable");
-      if (error.status === 401) throw new SyncConnectError("signed_out");
-      if (error.code === "worker_update_required") throw new SyncConnectError("update_required");
-      if (error.code === "cloud_workspace_not_running") throw new SyncConnectError("paused");
-      if (error.code === "mac_not_connected" || error.status === 403) throw new SyncConnectError("not_connected");
-      throw new SyncConnectError("unavailable");
-    }
+    catch (error) { throw error instanceof DeviceControlError ? syncGrantRefusal(error) : new SyncConnectError("unavailable"); }
   };
   // The same dial as the control plane's dialWorker: port-auth cookie and grant headers, no redirects.
   const dial: DirectDeps["dial"] = (url, protocol, headers) => {

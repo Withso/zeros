@@ -592,3 +592,70 @@ it("names why a person's push failed: a closed Git detail in the journal and on 
   await until(() => f.relay.response(push.id)).toMatchObject({ type: "WORKSPACE_ERROR", code: "GIT_COMMAND_FAILED", detail: "remote_rejected" });
   expect(lines).toContain("workspace-request op=git.push failed class=operation_failed code=GIT_COMMAND_FAILED detail=remote_rejected");
 });
+
+it("ends a revoked person's background work too, and retires their context as revoked", async () => {
+  const f = await setup();
+  f.relay.deliver(delivery(ALEX));
+  await until(() => f.drivers[0]?.prompts.length ?? 0).toBe(1);
+  const contextId = f.relay.calls.find(call => call.op === "turn-lease")!.body.contextId;
+  f.drivers[0]!.emit({ sessionUpdate: "background_tasks_update", tasks: [{ id: "bg-1", description: "watching", status: "running" }] as never, waiting: false,
+    activity: { state: "running", startedAt: Date.now() } });
+  f.drivers[0]!.complete();
+  await new Promise(resolve => setTimeout(resolve, 50));
+  expect(f.relay.calls.some(call => call.op === `execution-leases/${contextId}/retired`)).toBe(false);
+  await f.relay.receive({ t: "revoke-context", contextId, reason: "access_revoked" });
+  await until(() => f.relay.calls.find(call => call.op === `execution-leases/${contextId}/retired`)?.body.reason).toBe("revoked");
+  expect(f.drivers[0]!.disposed).toBe(true);
+});
+
+it("cancels, never fails, a removed person's turn or steer when begin answers member_access_revoked", async () => {
+  const f = await setup();
+  const revoked = () => { throw Object.assign(new Error("revoked"), { status: 403, contextCode: "member_access_revoked" }); };
+  const item = delivery(SAM);
+  f.relay.beginReply = body => body.userMessageId === item.receipt.userMessageId ? revoked() : undefined;
+  f.relay.deliver(item);
+  await until(() => f.relay.calls.find(call => call.op === "outcome" && call.body.userMessageId === item.receipt.userMessageId)?.body.state).toBe("cancelled");
+  expect(f.drivers.every(driver => !driver.opened)).toBe(true);
+  const first = delivery(ALEX); f.relay.deliver(first);
+  await until(() => f.drivers[0]?.prompts.length ?? 0).toBe(1);
+  const second = steer(SAM);
+  f.relay.beginReply = body => body.userMessageId === second.receipt.userMessageId ? revoked() : undefined;
+  f.relay.deliver(second);
+  await until(() => f.relay.calls.find(call => call.op === "outcome" && call.body.userMessageId === second.receipt.userMessageId)?.body.state).toBe("cancelled");
+  expect(f.drivers[0]!.steers).toHaveLength(0);
+  f.drivers[0]!.complete();
+});
+
+it("drops a client whose own handle is revoked: no more requests, its terminals detached; other clients unaffected", async () => {
+  const f = await setup();
+  f.relay.clientUsers.set(CLIENT_A, ALEX).set(CLIENT_B, SAM);
+  const handle = randomUUID();
+  await f.relay.receive({ t: "open", clientId: CLIENT_A, userId: ALEX, contextId: handle });
+  await f.relay.receive({ t: "open", clientId: CLIENT_B, userId: SAM, contextId: randomUUID() });
+  await f.relay.receive({ t: "revoke-context", contextId: handle, reason: "access_revoked" });
+  const ignored = browserFrame("WORKSPACE_REQUEST", { op: "file.read", params: { path: "missing.txt" } });
+  await f.relay.request(CLIENT_A, ignored);
+  const answered = browserFrame("WORKSPACE_REQUEST", { op: "file.read", params: { path: "missing.txt" } });
+  await f.relay.request(CLIENT_B, answered);
+  await until(() => !!f.relay.response(answered.id)).toBe(true);
+  expect(f.relay.response(ignored.id)).toBeUndefined();
+});
+
+it("authors each review comment in an activated workspace as the person who made it, and refuses a connection without a person", async () => {
+  const f = await setup();
+  f.relay.clientUsers.set(CLIENT_A, ALEX);
+  await f.relay.receive({ t: "open", clientId: CLIENT_A, userId: ALEX, contextId: randomUUID() });
+  await f.relay.receive({ t: "open", clientId: CLIENT_B });
+  await writeFile(join(f.root, "example.ts"), "source\n");
+  const anchor = { path: "example.ts", side: "new", startLine: 1, endLine: 1, revision: "base" };
+  const create = browserFrame("WORKSPACE_REQUEST", { op: "codeReview.create", params: { workspaceId: WORKSPACE_ID, anchor, body: "from alex" } });
+  await f.relay.request(CLIENT_A, create);
+  await until(() => !!f.relay.response(create.id)).toBe(true);
+  expect(f.relay.response(create.id)!.type).toBe("WORKSPACE_RESPONSE");
+  expect(JSON.stringify(f.relay.response(create.id))).toContain(`human:${ALEX}`);
+  expect(f.relay.calls.find(call => call.op === "client-lease")?.body).toMatchObject({ clientId: CLIENT_A, operation: "codeReview.create" });
+  const anonymous = browserFrame("WORKSPACE_REQUEST", { op: "codeReview.create", params: { workspaceId: WORKSPACE_ID, anchor, body: "no person" } });
+  await f.relay.request(CLIENT_B, anonymous);
+  await until(() => !!f.relay.response(anonymous.id)).toBe(true);
+  expect(f.relay.response(anonymous.id)!.type).toBe("WORKSPACE_ERROR");
+});

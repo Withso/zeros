@@ -147,3 +147,18 @@ describe("SyncManager", () => {
     expect(f.closed).toHaveBeenCalled();
   });
 });
+
+describe("SyncManager after this person lost access (team sharing 3A)", () => {
+  it("stops syncing for good with its own reason and keeps the folder's files", async () => {
+    let connects = 0;
+    const f = fixture({ connect: async () => { connects++; throw new SyncConnectError("access_revoked"); } });
+    await f.manager.enable(WS, "/f");
+    await vi.waitFor(() => expect(f.last()).toEqual([{ workspaceId: WS, state: "error", reason: "access_revoked", problems: 0 }]));
+    await new Promise(resolve => setTimeout(resolve, 20));
+    for (const wait of f.waits) wait.resolve();
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(connects).toBe(1);
+    expect(f.logs.some(line => line.includes("reason=access_revoked"))).toBe(true);
+    expect(f.manager.folderFor(WS)).toBe("/real/f");
+  });
+});

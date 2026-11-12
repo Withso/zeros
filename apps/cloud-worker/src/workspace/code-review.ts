@@ -1,3 +1,4 @@
+import { operationEnvironment } from "../sharing/operation-environment";
 import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import { mkdir } from "node:fs/promises";
@@ -13,6 +14,9 @@ import { unsupported, WorkspaceError, type WorkspaceScope } from "./scope";
 
 export interface ReviewLimits { threads: number; comments: number; requests: number; bodyBytes: number; bytes: number }
 export const CLOUD_REVIEW_LIMITS: Readonly<ReviewLimits> = Object.freeze({ threads: 10_000, comments: 100_000, requests: 100_000, bodyBytes: 80_000, bytes: 64 * 1024 * 1024 });
+/** Reads author nothing; this id is never stored. */
+const NO_REQUESTER = "00000000-0000-4000-8000-000000000000";
+
 export type ReviewUser = { userId: string; userName?: string };
 interface ReviewDatabase {
   prepare: CodeReviewDatabase["prepare"];
@@ -57,7 +61,9 @@ export class WorkerCodeReview {
   constructor(readonly scope: WorkspaceScope, private readonly directory: string,
     private readonly changed: () => void, private readonly limits = CLOUD_REVIEW_LIMITS) {}
 
-  get enabled(): boolean { return !this.closed && !!this.actor && !!this.store; }
+  /** Activated team sharing: no workspace-wide reviewer; each mutation is authored by its requester. */
+  private perRequester = false;
+  get enabled(): boolean { return !this.closed && !!this.store && (!!this.actor || this.perRequester); }
 
   validateConfiguration(user?: ReviewUser): void {
     if (this.closed) throw new WorkspaceError("WORKSPACE_UNAVAILABLE", "The workspace is stopping.");
@@ -71,6 +77,18 @@ export class WorkerCodeReview {
     this.validateConfiguration(user);
     if (!user) { this.suspend(); return; }
     const actor = codeReviewHumanActorCore(user.userId, hash, user.userName);
+    await this.open();
+    this.perRequester = false; this.userId = user.userId; this.actor = actor;
+  }
+
+  /** Activated team sharing (slice 3A): the store opens with no workspace-wide reviewer; never the Creator. */
+  async configurePerRequester(): Promise<void> {
+    if (this.closed) throw new WorkspaceError("WORKSPACE_UNAVAILABLE", "The workspace is stopping.");
+    await this.open();
+    this.actor = undefined; this.userId = undefined; this.perRequester = true;
+  }
+
+  private async open(): Promise<void> {
     if (!this.db) {
       await mkdir(this.directory, { recursive: true, mode: 0o700 });
       if (this.closed) throw new WorkspaceError("WORKSPACE_UNAVAILABLE", "The workspace is stopping.");
@@ -114,7 +132,6 @@ export class WorkerCodeReview {
         this.descriptor = descriptor;
       } catch (error) { db?.close(); fs.closeSync(descriptor); throw sqliteFailure(error); }
     }
-    this.userId = user.userId; this.actor = actor;
   }
 
   private checkBudget(...[db, operation, input]: Parameters<NonNullable<CodeReviewStoreRuntime["beforeWrite"]>>): void {
@@ -146,10 +163,19 @@ export class WorkerCodeReview {
     if (!this.enabled) return unsupported();
     this.scope.assertId(params.workspaceId);
     if (!["codeReview.list", "codeReview.create", "codeReview.reply", "codeReview.setResolved"].includes(operation)) return unsupported();
-    const result = this.execute(operation as CodeReviewOperation, { ...params, ...(params.workspaceId !== undefined ? { workspaceId: this.scope.key } : {}) }, this.actor!) as Record<string, unknown>;
+    const result = this.execute(operation as CodeReviewOperation, { ...params, ...(params.workspaceId !== undefined ? { workspaceId: this.scope.key } : {}) }, this.author(operation)) as Record<string, unknown>;
     if (operation !== "codeReview.list") this.changed();
     const native = (value: Record<string, unknown>) => ({ ...value, workspaceId: this.scope.workspace.id });
     return { ...native(result), ...(Array.isArray(result.threads) ? { threads: result.threads.map(thread => native(thread)) } : {}) };
+  }
+
+  /** Activated: the requester of this client operation (its lease's person); a read needs none; nobody else is ever the author. */
+  private author(operation: string): CodeReviewActor {
+    if (!this.perRequester) return this.actor!;
+    const requester = operationEnvironment.getStore()?.requester;
+    if (requester) return codeReviewHumanActorCore(requester.userId, hash, requester.userName);
+    if (operation === "codeReview.list") return codeReviewHumanActorCore(NO_REQUESTER, hash);
+    throw new WorkspaceError("CLOUD_V2_UNSUPPORTED", "Reconnect to the workspace to review as yourself.");
   }
 
   tools(input: { agentId: string; conversationId: string; executionId: string; assertCurrent(): void }): CodeReviewAgentToolsCore {
