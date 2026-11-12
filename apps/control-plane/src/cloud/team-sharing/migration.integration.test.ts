@@ -19,7 +19,7 @@ database("team sharing expand migration and hot-table cost", () => {
       await tx.query(`DROP FUNCTION cloud_v2_original_creator() CASCADE;
         DROP FUNCTION notify_cloud_v2_team_rows() CASCADE;
         DROP TABLE cloud_v2_workspace_presence,cloud_v2_workspace_followers,cloud_v2_workspace_pins;
-        ALTER TABLE cloud_v2_workspaces DROP COLUMN created_by_user_id,DROP CONSTRAINT cloud_v2_workspaces_id_org;
+        ALTER TABLE cloud_v2_workspaces DROP COLUMN created_by_user_id,DROP CONSTRAINT cloud_v2_workspaces_id_org CASCADE;
         DROP INDEX cloud_v2_workspaces_organization_page;`);
       const id = randomUUID();
       await tx.query("SET LOCAL ROLE zeros_app"); await tx.query("SELECT set_config('app.system','on',true)");
@@ -37,9 +37,10 @@ database("team sharing expand migration and hot-table cost", () => {
     const proof = await f.sharing.authority.admit(f.workspace.id,f.viewer);
     const connection = await f.sharing.events.presence.open(proof);
     await withSystemTx(pool,async tx => {
-      // Tiny fixtures otherwise prefer sequential scans. This checks that the
-      // production predicates have usable indexes, not a planner-cost ratio.
-      await tx.query("SET LOCAL enable_seqscan=off");
+      // Tiny fixtures otherwise prefer sequential scans, or another index plus a
+      // sort when parallel suites shift the table statistics. This checks that the
+      // production predicates and orderings have usable indexes, not a planner-cost ratio.
+      await tx.query("SET LOCAL enable_seqscan=off"); await tx.query("SET LOCAL enable_sort=off");
       const plans = [
         ["list","SELECT id FROM cloud_v2_workspaces WHERE org_id=$1 AND state<>'deleted' ORDER BY created_at DESC,id LIMIT 50",[f.organizationId],"cloud_v2_workspaces_organization_page"],
         ["source","SELECT verified_at FROM cloud_github_source_verifications WHERE org_id=$1 AND owner_user_id=$2 AND repository_id=ANY($3::bigint[]) AND fingerprint=$4",

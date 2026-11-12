@@ -7,11 +7,12 @@ import { randomUUID } from "node:crypto";
 import { AsyncResource } from "node:async_hooks";
 import { setTimeout as delay } from "node:timers/promises";
 import WebSocket, { WebSocketServer, type RawData } from "ws";
-import { CLOUD_V2_MAX_FRAME_BYTES, CloudV2WorkerFrameSchema, type CloudV2ControlFrame } from "./contract.js";
+import { CLOUD_V2_MAX_FRAME_BYTES, CloudV2WorkerFrameSchema, type CloudV2ControlFrame, type CloudV2ContextReason } from "./contract.js";
 import type { PostgresSecurityEventBroker } from "../security-events.js";
-import type { CloudV2Store, CloudV2Workspace, CloudV2WorkerBinding } from "./store.js";
+import type { CloudV2Store, CloudV2Workspace, CloudV2WorkerBinding, CloudV2AppGrant } from "./store.js";
 import { isCloudV2Token } from "./tokens.js";
-import { dialWorker, workerSupportsApi, workerSupportsLocalCommands, workerSupportsLocalCommandReason, workerSupportsNotifyUser, workerSupportsCheckout, workerSupportsMcp, workerSupportsSetup, workerSupportsRepositorySetup, workerSupportsGithub, workerSupportsGitIdentity, workerSupportsGithubUserTokens, workerSupportsAgentInteractions, workerSupportsCodeReview, workerSupportsHistoryReplacement, workerSupportsEnvironment, workerSupportsRuntimeUpdate, workerSupportsPush, type WorkerRoute } from "./worker-connection.js";
+import type { CloudExecutionContexts } from "./execution/store.js";
+import { dialWorker, workerSupportsActingUser, workerSupportsApi, workerSupportsLocalCommands, workerSupportsLocalCommandReason, workerSupportsNotifyUser, workerSupportsCheckout, workerSupportsMcp, workerSupportsSetup, workerSupportsRepositorySetup, workerSupportsGithub, workerSupportsGitIdentity, workerSupportsGithubUserTokens, workerSupportsAgentInteractions, workerSupportsCodeReview, workerSupportsHistoryReplacement, workerSupportsEnvironment, workerSupportsRuntimeUpdate, workerSupportsPush, type WorkerRoute } from "./worker-connection.js";
 import { emitCloudV2Timing, type CloudV2TimingRecord } from "./lifecycle.js";
 import { HttpError } from "../authz.js";
 import { isGithubAccessRevoked, isGithubTemporary } from "../github-availability.js";
@@ -34,6 +35,7 @@ type ConfigFrame = Extract<CloudV2ControlFrame, { t: "config" }>;
 type ActivityReply = Omit<Extract<CloudV2ControlFrame, { t: "activity-reply" }>, "t" | "id">;
 
 export type CloudV2RelayDeps = {
+  execution?: CloudExecutionContexts;
   store: Pick<CloudV2Store, "consumeConnectTicket" | "get" | "accessEpoch" | "appAccessSnapshot" | "loginRevision">;
   securityEvents?: Pick<PostgresSecurityEventBroker, "start" | "subscribe">;
   /** proof, when present, comes from this room's current allowed database read. */
@@ -62,7 +64,7 @@ type ConfigFlight = { worker: WebSocket; requested: boolean; force: boolean; pro
 type DeliveredPrompt = { worker: WebSocket; agentId?: string };
 type Authority = "allowed" | "revoked" | "unavailable";
 type Room = {
-  workspace: CloudV2Workspace; accessEpoch: string; revoked: boolean;
+  workspace: CloudV2Workspace; accessEpoch: string; revoked: boolean; acting?: boolean;
   worker: WebSocket | null; ready: boolean; loginRevision: string | null; configAt: number;
   workerBinding?: CloudV2WorkerBinding;
   configFlight?: ConfigFlight; dialing?: Promise<void>; idleTimer?: NodeJS.Timeout;
@@ -73,7 +75,7 @@ type Room = {
   retryNow?: () => void; readyHinted?: boolean;
   /** The source authority's absolute grace deadline under the proof that produced it. */
   sourceGrace?: { until: number; proof: string }; sourceRetryMs?: number;
-  clients: Map<string, { ws: WebSocket; sessionId: string | null }>; queued: Map<string, unknown[]>;
+  clients: Map<string, { ws: WebSocket; sessionId: string | null; grant?: CloudV2AppGrant; contextId?: string; tokenTimer?: NodeJS.Timeout }>; queued: Map<string, unknown[]>;
   admitting: Map<string, WebSocket>;
   delivered: Map<string, Map<string, DeliveredPrompt>>;
   forwarding?: Map<string, Promise<void>>;
@@ -135,6 +137,31 @@ export class CloudV2Relay {
   hintPrompts(workspaceId: string): void {
     const room = this.rooms.get(workspaceId);
     if (!this.closed && room?.ready && !room.revoked) send(room.worker, { t: "prompts" });
+  }
+
+  async revokeContexts(workspaceId: string, frames: Array<{ contextId: string; reason: CloudV2ContextReason; bootId: string }>): Promise<void> {
+    if (this.closed || !frames.length) return;
+    const room = this.rooms.get(workspaceId);
+    if (room?.ready && room.acting && room.worker && room.workerBinding) {
+      for (const frame of frames) if (frame.bootId === room.workerBinding.bootId)
+        send(room.worker, { t: "revoke-context", contextId: frame.contextId, reason: frame.reason });
+      return;
+    }
+    // A polling worker may have no desktop room. This control-only connection
+    // releases authority; it never wakes the VM or sends configuration.
+    const route = await this.deps.workerRoute(workspaceId);
+    if (!route?.bootId || !route.url || !route.token || route.workspace.state !== "running") return;
+    const selected = frames.filter(frame => frame.bootId === route.bootId);
+    if (!selected.length) return;
+    const worker = await dialWorker(route, this.deps.mintWorkerToken(workspaceId, route.bootId));
+    try {
+      const current = await this.deps.workerRoute(workspaceId);
+      if (this.closed || !workerSupportsActingUser(worker) || current?.bootId !== route.bootId ||
+        current.workerTokenHash !== route.workerTokenHash || current.accessEpoch !== route.accessEpoch) return;
+      for (const frame of selected) await new Promise<void>((resolve, reject) => {
+        worker.send(JSON.stringify({ t: "revoke-context", contextId: frame.contextId, reason: frame.reason }), error => error ? reject(error) : resolve());
+      });
+    } finally { worker.close(1000); }
   }
 
   /** A LISTEN gap restores HTTPS delivery before the socket itself is lost. */
@@ -225,7 +252,7 @@ export class CloudV2Relay {
     const sessions = new Set([...room.clients.values()].flatMap(client => client.sessionId ? [client.sessionId] : []));
     if (admittingSessionId) sessions.add(admittingSessionId);
     let snapshot;
-    try { snapshot = await this.deps.store.appAccessSnapshot(room.workspace.id, [...sessions]); }
+    try { snapshot = await this.deps.store.appAccessSnapshot(room.workspace.id, room.acting ? [] : [...sessions]); }
     catch {
       if (!admission) this.revoke(room, 1013, "workspace_verification_unavailable");
       return "unavailable";
@@ -237,17 +264,26 @@ export class CloudV2Relay {
     for (const [id, client] of room.clients) {
       // A new admission may have joined while this read was in flight. Its
       // own proof, not an older snapshot that omitted it, controls that client.
-      if (client.sessionId && sessions.has(client.sessionId) && !live.has(client.sessionId)) {
+      if (!room.acting && client.sessionId && sessions.has(client.sessionId) && !live.has(client.sessionId)) {
         this.detachApp(room, id);
         client.ws.close(4001, "access_revoked");
       }
     }
-    if (admittingSessionId && !live.has(admittingSessionId)) return "revoked";
+    if (!room.acting && admittingSessionId && !live.has(admittingSessionId)) return "revoked";
     const proof = snapshot.loginRevision !== undefined ? { accessEpoch: snapshot.accessEpoch, loginRevision: snapshot.loginRevision } : undefined;
     const proofKey = proof && JSON.stringify([proof.accessEpoch, proof.loginRevision]);
     try {
       const controlOnly = !room.clients.size && room.stops.size > 0 && !admission;
-      if (!controlOnly) {
+      if (room.acting && this.deps.execution) {
+        for (const [id, client] of room.clients) {
+          try {
+            if (!client.grant?.execution) throw new HttpError(409, "actor_changed", "Client authority is no longer current");
+            if (client.contextId) await this.deps.execution.clients.current(room.workspace.id, client.contextId);
+            else await this.deps.execution.clients.validateGrant(room.workspace.id, client.grant);
+          } catch (error) { this.refuseExecutionClient(room, id, error); }
+        }
+        room.sourceCheckAt = readStartedAt + APP_AUTHORITY_WINDOW_MS;
+      } else if (!controlOnly) {
         if (!admission && this.deps.continueSource) {
           // During a temporary-failure backoff the next source attempt waits for
           // its retry time; app access and sessions are still read every check.
@@ -316,7 +352,7 @@ export class CloudV2Relay {
   readonly revalidateSources = AsyncResource.bind((scope: { organizationId?: string; ownerUserId?: string }): void => {
     this.securityRevision++;
     for (const room of this.rooms.values()) if ((!scope.organizationId || room.workspace.organizationId === scope.organizationId) &&
-      (!scope.ownerUserId || room.workspace.creatorUserId === scope.ownerUserId)) { delete room.authorizedUntil; delete room.sourceGrace; void this.authorized(room); }
+      (!scope.ownerUserId || room.workspace.creatorUserId === scope.ownerUserId || room.acting)) { delete room.authorizedUntil; delete room.sourceGrace; void this.authorized(room); }
   }, "cloud-v2-source-wake");
   private watch(socket: WebSocket): void { this.alive.add(socket); socket.on("pong", () => this.alive.add(socket)); }
   private heartbeat(): void {
@@ -344,7 +380,7 @@ export class CloudV2Relay {
     room.idleTimer.unref();
   }
   private wake(room: Room): void {
-    if (room.wakeRequested || room.revoked || room.workspace.state !== "stopped") return;
+    if (room.acting || room.wakeRequested || room.revoked || room.workspace.state !== "stopped") return;
     room.wakeRequested = true;
     void this.deps.wake(room.workspace).catch(() => { room.wakeRequested = false; });
   }
@@ -361,7 +397,7 @@ export class CloudV2Relay {
       try {
         const route = await this.deps.workerRoute(room.workspace.id);
         if (!route || route.accessEpoch !== room.accessEpoch) { this.revoke(room); return; }
-        room.workspace = route.workspace;
+        room.workspace = route.workspace; room.acting = route.executionMode === "active";
         if (!acceptsWork(route.workspace)) this.closeExplicitClients(room);
         if (!this.wanted(room)) return;
         if (route.workspace.state === "stopped") {
@@ -396,7 +432,7 @@ export class CloudV2Relay {
             const forwarding: Promise<void>[] = [];
             for (const [clientId, client] of room.clients) {
               if (client.ws.readyState !== WebSocket.OPEN) continue;
-              send(ws, { t: "open", clientId });
+              if (!await this.openClient(room, ws, clientId)) continue;
               for (const frame of room.queued.get(clientId) ?? []) forwarding.push(this.forward(room, ws, clientId, frame));
             }
             room.queued.clear();
@@ -501,6 +537,21 @@ export class CloudV2Relay {
   private async forwardCurrent(room: Room, worker: WebSocket, clientId: string, frame: unknown): Promise<void> {
     const client = room.clients.get(clientId), epoch = room.accessEpoch;
     if (!client || room.revoked || room.worker !== worker) return;
+    if (room.acting && this.deps.execution) {
+      try {
+        if (!client.contextId && !await this.openClient(room, worker, clientId)) return;
+        await this.deps.execution.clients.forward(room.workspace.id, client.contextId!, frame);
+      } catch (error) {
+        const request = frame as { id?: string; type?: string; op?: string };
+        if (error instanceof HttpError && request.id) send(client.ws, { id: randomUUID(), source: "engine", timestamp: Date.now(),
+          type: request.type === "AGENT_PROMPT" || request.type === "AGENT_STEER" ? "AGENT_ERROR" : "WORKSPACE_ERROR",
+          requestId: request.id, ...(request.op ? { op: request.op } : {}), code: error.code, message: error.message });
+        else this.refuseExecutionClient(room, clientId, error);
+        return;
+      }
+      if (room.revoked || room.worker !== worker || room.clients.get(clientId) !== client) return;
+      send(worker, { t: "frame", clientId, frame }); return;
+    }
     const request = frame as { id?: unknown; type?: unknown; agentId?: unknown } | null;
     const legacySend = request?.type === "AGENT_PROMPT" || request?.type === "AGENT_STEER";
     if (legacySend && this.deps.retireLocalSender) {
@@ -568,7 +619,8 @@ export class CloudV2Relay {
       if (await this.current(room) !== "allowed" || room.worker !== ws) return false;
       // Only a proof inside the fresh window lets source continuation reuse its lease.
       const config = await this.deps.config(room.workspace, "continuation", this.fresh(room) ? room.authorizedProof : undefined);
-      const apiConfiguration = workerSupportsApi(ws) && this.deps.apiConfiguration
+      if (config.actingUser === 1 && !workerSupportsActingUser(ws)) throw new Error("Shared execution requires worker support");
+      const apiConfiguration = config.actingUser !== 1 && workerSupportsApi(ws) && this.deps.apiConfiguration
         ? await this.deps.apiConfiguration(room.workspace.id) : undefined;
       const localCommands = workerSupportsLocalCommands(ws) && config.promptOutbox === 1 && await this.deps.localCommandsEnabled?.(room.workspace.id);
       if (await this.current(room) !== "allowed" || room.worker !== ws) return false;
@@ -604,20 +656,27 @@ export class CloudV2Relay {
     const offered = String(request.headers["sec-websocket-protocol"] ?? "").split(",").map(value => value.trim());
     const ticket = offered.find(value => value.startsWith("ticket."))?.slice("ticket.".length) ?? "";
     if (!offered.includes(CLOUD_V2_BRIDGE_PROTOCOL) || !isCloudV2Token(ticket, "connect")) return reject(socket);
-    let workspace: CloudV2Workspace | null = null, epoch: string | undefined, wake = false, sessionId: string | null = null;
+    let workspace: CloudV2Workspace | null = null, epoch: string | undefined, wake = false, sessionId: string | null = null, executionGrant: CloudV2AppGrant | undefined;
     try {
       const grant = await this.deps.store.consumeConnectTicket(ticket, workspaceId);
       if (grant && await this.deps.store.accessEpoch(workspaceId) === grant.accessEpoch) {
-        workspace = await this.deps.store.get(workspaceId, grant.userId); epoch = grant.accessEpoch; wake = grant.wake; sessionId = grant.sessionId;
+        if (grant.execution) {
+          if (!this.deps.execution) return reject(socket);
+          await this.deps.execution.clients.validateGrant(workspaceId, grant);
+          workspace = (await this.deps.execution.workspace(workspaceId, grant.userId)).workspace;
+          executionGrant = grant;
+        } else workspace = await this.deps.store.get(workspaceId, grant.userId);
+        epoch = grant.accessEpoch; wake = grant.wake; sessionId = grant.sessionId;
       }
     } catch { this.deps.logger?.warn("[cloud-v2] app admission failed"); }
     if (!workspace || this.closed) return reject(socket);
     const admitted = workspace;
-    this.server.handleUpgrade(request, socket, head, ws => this.attachApp(admitted, epoch!, wake, sessionId, ws));
+    this.server.handleUpgrade(request, socket, head, ws => this.attachApp(admitted, epoch!, wake, sessionId, ws, executionGrant));
   }
-  private attachApp(workspace: CloudV2Workspace, epoch: string, wake: boolean, sessionId: string | null, ws: WebSocket): void {
+  private attachApp(workspace: CloudV2Workspace, epoch: string, wake: boolean, sessionId: string | null, ws: WebSocket, grant?: CloudV2AppGrant): void {
     const room = this.room(workspace, epoch);
     if (!room) { ws.close(4001, "access_revoked"); return; }
+    if (grant?.execution) room.acting = true;
     const clientId = randomUUID(); this.watch(ws);
     let inboundFrames = 0, inboundBytes = 0;
     room.admitting.set(clientId, ws);
@@ -641,10 +700,17 @@ export class CloudV2Relay {
       clearTimeout(room.idleTimer); delete room.idleTimer;
       if (room.worker && workspace.state !== "running") { room.worker.terminate(); room.worker = null; room.ready = false; }
       if (!room.worker) room.workspace = workspace;
-      room.clients.set(clientId, { ws, sessionId });
+      const client: Room["clients"] extends Map<string, infer C> ? C : never = { ws, sessionId, ...(grant ? { grant } : {}) };
+      room.clients.set(clientId, client);
+      if (grant?.execution) {
+        await this.deps.execution!.clients.validateGrant(workspace.id, grant);
+        if (room.revoked || room.clients.get(clientId) !== client || ws.readyState !== WebSocket.OPEN) return;
+        client.tokenTimer = setTimeout(() => { this.detachApp(room, clientId); ws.close(1000, "token_end"); }, Math.max(1, grant.execution.tokenEnd - Date.now() - 2000));
+        client.tokenTimer.unref();
+      }
       // The window predates this session's expiry; the next app frame re-reads.
       delete room.authorizedUntil;
-      if (room.ready) send(room.worker, { t: "open", clientId });
+      if (room.ready && room.worker) await this.openClient(room, room.worker, clientId);
       else {
         if (wake && ws.protocol !== CLOUD_V2_EXPLICIT_WAKE_PROTOCOL) { room.wakeAllowed = true; this.wake(room); }
         this.ensureConnected(room);
@@ -662,9 +728,37 @@ export class CloudV2Relay {
     });
     ws.on("close", () => { this.detachApp(room, clientId); });
   }
+  private async openClient(room: Room, worker: WebSocket, clientId: string): Promise<boolean> {
+    const client = room.clients.get(clientId);
+    if (!client || client.ws.readyState !== WebSocket.OPEN || room.worker !== worker || room.revoked) return false;
+    if (!room.acting) { send(worker, { t: "open", clientId }); return true; }
+    try {
+      if (!client.grant?.execution || !this.deps.execution || !workerSupportsActingUser(worker)) throw new HttpError(409, "actor_changed", "Client authority is no longer current");
+      if (client.contextId) await this.deps.execution.clients.current(room.workspace.id, client.contextId);
+      else {
+        const context = await this.deps.execution.clients.open(room.workspace.id, clientId, client.grant);
+        if (room.clients.get(clientId) !== client || room.worker !== worker || room.revoked) {
+          await this.deps.execution.clients.close(room.workspace.id, clientId); return false;
+        }
+        client.contextId = context.contextId;
+      }
+      send(worker, { t: "open", clientId, userId: client.grant.userId, contextId: client.contextId }); return true;
+    } catch (error) { this.refuseExecutionClient(room, clientId, error); return false; }
+  }
+
+  private refuseExecutionClient(room: Room, clientId: string, error: unknown): void {
+    const client = room.clients.get(clientId);
+    if (!client) return;
+    const revoked = error instanceof HttpError && ["actor_changed", "member_access_revoked", "session_revoked", "worker_unauthorized"].includes(error.code);
+    this.detachApp(room, clientId);
+    client.ws.close(revoked ? 4001 : 1013, revoked ? "access_revoked" : "workspace_verification_unavailable");
+  }
+
   private detachApp(room: Room, clientId: string): void {
     room.admitting.delete(clientId);
     void this.deps.runtimeAdmission?.releaseClient(room.workspace.id, clientId).catch(() => {});
+    const client = room.clients.get(clientId); clearTimeout(client?.tokenTimer);
+    if (client?.grant?.execution) void this.deps.execution?.clients.close(room.workspace.id, clientId).catch(() => {});
     const attached = room.clients.delete(clientId); room.queued.delete(clientId); room.delivered.delete(clientId);
     if (attached && room.ready) send(room.worker, { t: "close", clientId });
     this.idle(room);

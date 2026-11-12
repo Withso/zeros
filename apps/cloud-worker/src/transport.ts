@@ -25,7 +25,7 @@ export interface Transport {
   mcpAuthorization?: McpAuthorizationRequest;
   /** local-commands-v1: one RunLocalCommand through the control plane to the
    * requester's Mac. The control plane chooses the Mac; the worker only names the chat. */
-  localCommand?(request: { chatId: string; executionId: string; input: LocalCommandInput }, signal: AbortSignal): Promise<{ result: LocalCommandResult; acknowledge(): Promise<void> }>;
+  localCommand?(request: { chatId: string; executionId: string; input: LocalCommandInput; contextId?: string }, signal: AbortSignal): Promise<{ result: LocalCommandResult; acknowledge(): Promise<void> }>;
   /** Before dispatching a legacy relay prompt or steer: a narrow secondary fence; never restores authority. */
   retireLocalCommandSender?(request: { chatId: string; executionId: string }): Promise<void>;
   /** Local commands awaiting their terminal result count as busy work. */
@@ -39,6 +39,9 @@ export interface Transport {
   reportSetup?: (status: CloudV2SetupStatus) => Promise<void>;
   runtimeUpdate?: (request: CloudRuntimeUpdateRequest, signal?: AbortSignal) => Promise<CloudRuntimeUpdateReply>;
   readyRuntime?: () => Promise<void>;
+  /** Team sharing slice B (acting-user-v1): POST /v2/cloud/worker/<path> for leases, renew and retirement.
+   * A refusal throws with `status` and the closed `contextCode` from its body. */
+  contextRequest?(path: string, body: unknown): Promise<unknown>;
   /** Best-effort diagnostics, independent of strict authority/history frames. */
   reportTiming?: (record: CloudV2WorkerTiming) => void;
 }

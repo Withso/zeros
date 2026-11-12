@@ -23,6 +23,8 @@ export type NotifyUserInput = z.infer<typeof NotifyUserInputSchema>;
  * too many 429. executionId is the native session id. */
 export const NotifyUserWorkerRequestSchema = NotifyUserInputSchema.extend({
   notificationId: z.string().uuid(), chatId: id, userMessageId: id, executionId: id,
+  /** Team sharing (activated acting-user-v1 only): the active turn's execution context. */
+  contextId: z.string().uuid().optional(),
 }).strict();
 export type NotifyUserWorkerRequest = z.infer<typeof NotifyUserWorkerRequestSchema>;
 

@@ -57,7 +57,7 @@ export const CloudV2PromptStopSchema = z.object({ chatId: CloudV2PromptIdSchema,
 export const CloudV2PromptStopReplySchema = z.object({ chatId: CloudV2PromptIdSchema, epoch: CloudV2PromptCounterSchema }).strict();
 export const CloudV2PromptPullSchema = z.object({ waitMs: z.number().int().min(0).max(CLOUD_V2_PROMPT_POLL_MS),
   held: z.array(CloudV2PromptIdSchema).max(128).optional() }).strict();
-export const CloudV2PromptDeliverySchema = z.object({ receipt: CloudV2PromptReceiptSchema, payload: CloudV2PromptSchema,
+export const CloudV2PromptDeliverySchema = z.object({ senderUserId: z.uuid().optional(), receipt: CloudV2PromptReceiptSchema, payload: CloudV2PromptSchema,
   deliveryId: z.string().uuid(), sessionName: CloudV2SessionNameSchema.optional() }).strict();
 export type CloudV2PromptDelivery = z.infer<typeof CloudV2PromptDeliverySchema>;
 export const CloudV2ChatEditSchema = z.object({ chatId: z.string().min(1).max(256), version: CloudV2PromptCounterSchema,

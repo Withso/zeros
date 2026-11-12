@@ -28,9 +28,9 @@ export function cloudGithubRequestContext(deps: {
       // deleted checkout no longer has readable PR metadata.
       const tokenAdmission = expected && !options.checkout
         ? await deps.verifications.workspaceAdmission(tx, workspaceId,
-          { organizationId: expected.context.organizationId, userId: expected.context.creatorUserId }, expected.generation) : undefined;
+          { organizationId: expected.context.organizationId, userId: expected.context.actorUserId ?? expected.context.creatorUserId }, expected.generation) : undefined;
       const context = await deps.metadata.context(workspaceId, userId, tx);
-      const scope = { organizationId: context.organizationId, userId: context.creatorUserId };
+      const scope = { organizationId: context.organizationId, userId: context.actorUserId ?? context.creatorUserId };
       let credential: CloudGithubCredentialSnapshot | null = null;
       if (expected) await deps.connections.store.assertCurrent(scope, expected.generation, tx);
       else credential = await deps.connections.store.currentCredential(tx, scope);
@@ -72,7 +72,7 @@ export function cloudGithubRequestContext(deps: {
       assertCurrent,
       api: new CloudGithubApi({ apiBaseUrl: deps.connections.config?.apiBaseUrl ?? "https://api.github.com",
         token: credential.material.accessToken, assertCurrent, fetch: deps.fetch,
-        cacheScope: JSON.stringify([context.organizationId, context.creatorUserId, workspaceId, context.revision, credential.generation]) }),
+        cacheScope: JSON.stringify([context.organizationId, context.actorUserId ?? context.creatorUserId, workspaceId, context.revision, credential.generation]) }),
     };
     return { context, access };
   };

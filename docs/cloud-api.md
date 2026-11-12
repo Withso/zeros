@@ -15,6 +15,7 @@ headers.
 | --- | --- | --- |
 | User API key (`zk_` plus 43 base64url characters) | Its creator, in one organization | Only a SHA-256 hash is stored. The key is shown once at creation and remains usable until revoked or its authority is lost. |
 | Workspace token (`zw2a_` plus 43 base64url characters) | The workspace's creator, in its organization | A hash authenticates requests; an envelope-encrypted copy supports exact redelivery. One token is stable for a VM run, bound to the workspace's stop generation. |
+| Execution token (`zw2x_` plus 43 base64url characters) | The human who owns the calling turn or terminal, in its organization | Available only after shared execution activation. A hash authenticates requests; encrypted redelivery keeps the token stable for that renewable execution context. |
 
 A workspace token can operate on other cloud workspaces created by that user
 in the same organization. It cannot manage API keys. The VM is the credential's
@@ -22,8 +23,8 @@ trust boundary; sessions, agents and terminals inside it are not isolated from
 each other.
 
 Every request checks that the user is active, remains an eligible organization
-member, and the organization allows cloud workspaces. Workspace and session
-access stays creator-only. Another member's workspace or an object outside the
+member, and the organization allows cloud workspaces. Before shared execution
+activation, workspace and session access stays creator-only. Another member's workspace or an object outside the
 credential's organization returns `404 not_found`.
 
 A workspace token also requires `api_access`, a matching stop generation, an
@@ -33,6 +34,54 @@ archive or delete is recorded. Wake mints a new token. Worker restarts and runti
 adoption within the same VM run keep the token unchanged, including candidate
 configuration, rollback and cancellation. An unreadable encrypted copy causes
 configuration to omit `api`; it never rotates the current run's token.
+
+## Shared execution preparation
+
+Shared execution is installed behind a persisted workspace mode. `legacy`
+and `prepared` retain the existing behavior. This change does not activate any
+workspace: activation requires a separate rollout that drains old work, erases
+Creator-wide material and boots a worker advertising `acting-user-v1`.
+An activated workspace refuses an older worker instead of delivering legacy
+Creator credentials. Local workspaces are unaffected.
+
+On an activated workspace, a currently eligible member with their own access
+to every recorded source repository can use a direct workspace or session ID.
+HTTP, CLI and remote MCP use the same authority. Workspace list discovery is
+unchanged. A prompt requires that sender's selected login for the chat's agent;
+otherwise it returns `409 agent_login_required` with `error.agent` set to
+`claude`, `codex` or `cursor`. A temporary source or credential failure returns
+`503` and never selects another person's login. The credential selector allows
+an explicitly configured organization shared key first; shared-key provisioning
+is not included in this rollout.
+
+The control plane assigns the actor when the worker begins a durable prompt.
+The assignment binds the workspace, chat, message, dispatch, generation and
+worker boot. A later person's message waits until the running turn's cleanup
+is acknowledged. A same-person steer reuses the running turn's credentials.
+Any admitted member may Stop. Start, restart, wake and setup use their persisted
+initiator's authority. Terminals use the opener's identity; other members may
+read their output but cannot type, resize or close them.
+
+Execution leases last 30 seconds and renew every 10 seconds. Their API and
+proxy tokens stay stable until retirement or revocation. Each lease selects
+the person's own GitHub authority, agent login, environment and MCP servers;
+global worker configuration carries no personal material. A clean-boot
+attestation is required before any begin or lease. Losing membership, going
+on Hold, or stopping the workspace revokes the affected contexts. Exact desktop
+sign-out also revokes that session's clients and terminals; durably accepted
+turns keep their sender identity. Temporary renewal failure never extends the
+previous deadline. A terminal survives an ordinary desktop token refresh.
+
+A message authenticated by an execution token belongs to the human bound to
+the calling turn or terminal, even when it targets another person's chat.
+Once durably accepted, that message survives the calling context's normal end
+and rechecks its sender when dispatched. Execution tokens share the existing
+10/hour/person/organization workspace-creation budget. They never borrow the
+destination chat's actor or the workspace Creator's identity.
+
+One VM remains one trust domain: members' processes can read personal material
+delivered to that VM. Private context paths and cleanup limit normal reuse;
+they do not isolate teammates or revoke a copied upstream GitHub credential.
 
 ## Workspace API access
 

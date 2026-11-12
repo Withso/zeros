@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 // Each reviewed migration lists its exact exempted statements by rule.
 const reviewed: Readonly<Record<string, Readonly<Record<string, readonly string[]>>>> = {
+  "0239_cloud_execution_contexts.sql": {},
   "0237_cloud_sync_wanted.sql": {
     "privilege-tightening": ["REVOKE ALL ON FUNCTION clear_connected_mac_sync_wanted() FROM PUBLIC;"],
   },
@@ -526,6 +527,16 @@ function statements(sql: string): { text: string; header: string }[] {
   return result;
 }
 
+const cloudExecutionDigests: Readonly<Record<string, readonly string[]>> = {
+  "execution-material-erasure": ["83735358794b8dce0d2bf3fba5f98d1245a1a23dbd472fc3c982410bb240a4aa"],
+  "execution-environment-gate": ["4e0e3feea583fb096bdcfa4ed6d182aca36eba39745e29b9c1dfca1d9cae75cb"],
+  "execution-sender-fence": ["a2b4c5f3744274eec9ff9d42eeefb164574d4c52ebc46e2290404b465f3403ba"],
+  "privilege-tightening": [
+    "565f9f0428190d5a3c45ba480ad68658536a716494c61ef8e2f244b7ce3c076e",
+    "4c2772c82f7532598cc9b74adcbff2c7e54070e00f4f63fbdc36b8de71427b03",
+  ],
+};
+
 export function applyReviewedExpandExceptions(file: string, sql: string): string {
   if (!sql.includes("zeros-expand-exception:")) return sql;
   const exact = reviewed[file];
@@ -537,7 +548,9 @@ export function applyReviewedExpandExceptions(file: string, sql: string): string
     if (annotations.length !== 1) throw new Error("An expand exception must annotate exactly one statement");
     const rule = annotations[0]![1]!;
     const statement = text.replace(/\r\n/g, "\n").trim();
-    const allowed = exact[rule]?.includes(statement) || (rule === "allocation-authority" && file === "0136_cloud_runtime_transfers.sql" &&
+    const allowed = exact[rule]?.includes(statement) ||
+      (file === "0239_cloud_execution_contexts.sql" && cloudExecutionDigests[rule]?.includes(createHash("sha256").update(statement).digest("hex"))) ||
+      (rule === "allocation-authority" && file === "0136_cloud_runtime_transfers.sql" &&
       createHash("sha256").update(statement).digest("hex") === authorityDigest) ||
       (rule === "deleted-boot-pointer" && file === "0142_cloud_workspace_data_purge.sql" &&
         createHash("sha256").update(statement).digest("hex") === deletedBootPointerDigest) ||

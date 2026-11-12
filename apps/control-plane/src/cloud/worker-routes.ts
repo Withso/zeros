@@ -2,7 +2,7 @@ import { Hono, type Context } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
 import { HttpError } from "../authz.js";
-import { CLOUD_V2_MAX_FRAME_BYTES, CloudV2WorkerActivitySchema, CloudV2WorkerHelloSchema, CloudV2WorkerHistorySchema, CloudV2WorkerTimingSchema, type CloudV2ControlFrame } from "./contract.js";
+import { CLOUD_V2_MAX_FRAME_BYTES, CloudV2WorkerActivitySchema, CloudV2WorkerHelloSchema, CloudV2WorkerHistorySchema, CloudV2WorkerTimingSchema, CloudV2RenewRequestSchema, CloudV2TurnLeaseRequestSchema, CloudV2TerminalLeaseRequestSchema, CloudV2ClientLeaseRequestSchema, CloudV2BootstrapLeaseRequestSchema, CloudV2RetiredRequestSchema, CloudV2BootCleanRequestSchema, ACTING_USER_FEATURE, type CloudV2ControlFrame } from "./contract.js";
 import { emitCloudV2Timing, type CloudV2TimingRecord } from "./lifecycle.js";
 import type { CloudV2Store, CloudV2WorkerSession, CloudV2Workspace } from "./store.js";
 import { isCloudV2Token } from "./tokens.js";
@@ -24,11 +24,15 @@ import { CloudV2SetupStatusSchema } from "./setup-status-contract.js";
 import type { CloudWorkspaceSync } from "./workspace-sync/store.js";
 import { SYNC_FEATURE } from "./workspace-sync/contract.js";
 
+import type { CloudExecutionContexts } from "./execution/store.js";
+import { executionWorkerRequired } from "./execution/errors.js";
+
 export const CLOUD_V2_WORKER_API = "/v2/cloud/worker";
 type ConfigFrame = Extract<CloudV2ControlFrame, { t: "config" }>;
 export type CloudV2WorkerRouteDeps = {
   store: Pick<CloudV2Store, "beginWorkerHello" | "acceptWorkerHello" | "workerSession" | "accessEpoch" | "loginRevision" | "markActive" | "writeWorkerHistory" | "failWorkerCheckout"> & Partial<Pick<CloudV2Store, "prompts" | "workerHelloIdentity" | "chatEdits" | "reportWorkerSetup">>;
   runtimeSha256: string;
+  execution?: CloudExecutionContexts;
   runtimeSha256ForWorkspace?(workspace: CloudV2Workspace): Promise<string>;
   runtimeUpdates?: RuntimeAdoption;
   runtimeHandoffs?: RuntimeHandoffStore;
@@ -77,14 +81,16 @@ async function session(c: Context, deps: CloudV2WorkerRouteDeps, source = true, 
   const workspace = await currentSession(deps, token, bootId, privateBoot ? c.req.header("x-zeros-runtime-handoff") : undefined);
   if (!workspace) throw unauthorized();
   // Retain Stop's final history/ack path even when source authority is lost.
-  if (source && workspace.state !== "stopping") {
+  if (source && workspace.state !== "stopping" && workspace.executionMode !== "active") {
     if (deps.continueSource) await deps.continueSource(workspace, workspace);
     else await deps.authorizeSource?.(workspace);
   }
   return { token, bootId, workspace };
 }
 async function configuration(deps: CloudV2WorkerRouteDeps, workspace: CloudV2WorkerSession, token: string, bootId: string, features: ReadonlySet<string>, mode: "admission" | "continuation" = "admission", handoff?: string): Promise<ConfigFrame> {
-  const authorized = mode === "continuation" && deps.continueSource ? deps.continueSource(workspace, workspace) : deps.authorizeSource?.(workspace);
+  const active = workspace.executionMode === "active";
+  if (active && !features.has(ACTING_USER_FEATURE)) throw executionWorkerRequired();
+  const authorized = active ? undefined : mode === "continuation" && deps.continueSource ? deps.continueSource(workspace, workspace) : deps.authorizeSource?.(workspace);
   // The first fence read doesn't depend on the source check, so they overlap.
   // Reading it earlier only widens the window the fence below compares.
   let fence: Promise<CloudV2WorkerSession | null> | undefined = currentSession(deps, token, bootId, handoff);
@@ -98,7 +104,7 @@ async function configuration(deps: CloudV2WorkerRouteDeps, workspace: CloudV2Wor
     let localCommandsEnabled = false;
     try {
       config = await deps.config(before, mode, before);
-      if (features.has("workspace-api-v1") && deps.apiConfiguration) {
+      if (!active && features.has("workspace-api-v1") && deps.apiConfiguration) {
         const api = await deps.apiConfiguration(before.id);
         if (api) config = { ...config, api };
       }
@@ -112,7 +118,7 @@ async function configuration(deps: CloudV2WorkerRouteDeps, workspace: CloudV2Wor
       continue;
     }
     const after = await currentSession(deps, token, bootId, handoff);
-    if (!after || before.accessEpoch !== after.accessEpoch) throw unauthorized();
+    if (!after || before.accessEpoch !== after.accessEpoch || before.executionMode !== after.executionMode) throw unauthorized();
     const revision = before.loginRevision;
     if (revision === after.loginRevision) {
       const { api, localCommands: _localCommands, localCommandReason: _localCommandReason, notifyUser: _notifyUser, mcpServers, githubPullRequests, githubUserTokens, gitIdentity, agentInteractions, codeReview, historyReplacement: _historyReplacement, environment, runtimeUpdate: _runtimeUpdate, ...legacy } = config;
@@ -152,6 +158,47 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
   const timingBoots = new Map<string, Set<string>>();
   app.use(`${CLOUD_V2_WORKER_API}/*`, bodyLimit({ maxSize: CLOUD_V2_MAX_FRAME_BYTES, onError: c => c.json({ error: { code: "payload_too_large" } }, 413) }));
   app.use(`${CLOUD_V2_WORKER_API}/*`, async (c, next) => { bearer(c); c.header("Cache-Control", "no-store"); await next(); });
+  if (deps.execution) {
+    const execution = deps.execution;
+    app.post(`${CLOUD_V2_WORKER_API}/execution-leases/boot-clean`, async c => {
+      const auth = await session(c, deps, false);
+      if (!workerFeatures(c).has(ACTING_USER_FEATURE)) throw executionWorkerRequired();
+      const input = await body(c, CloudV2BootCleanRequestSchema);
+      return c.json(await execution.boots.clean(auth, input));
+    });
+    app.post(`${CLOUD_V2_WORKER_API}/turn-lease`, async c => {
+      const auth = await session(c, deps, false);
+      if (!workerFeatures(c).has(ACTING_USER_FEATURE)) throw executionWorkerRequired();
+      return c.json(await execution.turnLease(auth, await body(c, CloudV2TurnLeaseRequestSchema)));
+    });
+    app.post(`${CLOUD_V2_WORKER_API}/terminal-lease`, async c => {
+      const auth = await session(c, deps, false);
+      return c.json(await execution.clients.terminalLease(auth, await body(c, CloudV2TerminalLeaseRequestSchema)));
+    });
+    app.post(`${CLOUD_V2_WORKER_API}/client-lease`, async c => {
+      const auth = await session(c, deps, false);
+      return c.json(await execution.clients.operationLease(auth, await body(c, CloudV2ClientLeaseRequestSchema)));
+    });
+    app.post(`${CLOUD_V2_WORKER_API}/execution-leases/renew`, async c => {
+      const auth = await session(c, deps, false);
+      if (!workerFeatures(c).has(ACTING_USER_FEATURE)) throw executionWorkerRequired();
+      const input = await body(c, CloudV2RenewRequestSchema);
+      return c.json(await execution.renew(auth, input.contextIds));
+    });
+    app.post(`${CLOUD_V2_WORKER_API}/bootstrap-lease`, async c => {
+      const auth = await session(c, deps, false);
+      if (!workerFeatures(c).has(ACTING_USER_FEATURE)) throw executionWorkerRequired();
+      const input = await body(c, CloudV2BootstrapLeaseRequestSchema);
+      return c.json(await execution.bootstrapLease(auth, input.contextId));
+    });
+    app.post(`${CLOUD_V2_WORKER_API}/execution-leases/:id/retired`, async c => {
+      const auth = await session(c, deps, false);
+      if (!workerFeatures(c).has(ACTING_USER_FEATURE)) throw executionWorkerRequired();
+      const id = z.uuid().safeParse(c.req.param("id"));
+      if (!id.success) throw new HttpError(400, "invalid_request", "Invalid execution context");
+      return c.json(await execution.retired(auth, id.data, await body(c, CloudV2RetiredRequestSchema)));
+    });
+  }
   if (deps.notifications) {
     const notifications = deps.notifications, path = `${CLOUD_V2_WORKER_API}/notifications`;
     const route = new Hono().onError((error,c) => {
@@ -249,7 +296,7 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
       throw new HttpError(409, "worker_runtime_mismatch", "Worker runtime requires an update");
     if (deps.promptOutbox && !(c.req.header("x-zeros-worker-features") ?? "").split(",").map(value => value.trim()).includes("prompt-outbox-v1"))
       throw new HttpError(409, "worker_runtime_mismatch", "Worker runtime requires an update");
-    const workspace = await deps.store.beginWorkerHello(token, input.bootId);
+    const workspace = await deps.store.beginWorkerHello(token, input.bootId, workerFeatures(c).has(ACTING_USER_FEATURE));
     if (!workspace) throw unauthorized();
     if (deps.workspaceSync && !await deps.workspaceSync.advertise(token, input.bootId, workerFeatures(c).has(SYNC_FEATURE))) throw unauthorized();
     if (deps.store.chatEdits && !await deps.store.chatEdits.advertise(token, input.bootId, workerFeatures(c).has("chat-edit-v1"))) throw unauthorized();
@@ -332,8 +379,12 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
     return c.json({ config: await configuration(deps, auth.workspace, auth.token, auth.bootId, workerFeatures(c), "continuation", c.req.header("x-zeros-runtime-handoff")) });
   });
   app.post(`${CLOUD_V2_WORKER_API}/mcp/:id/authorization`, async c => {
-    const auth = await session(c, deps), input = await body(c, z.object({ force: z.boolean().optional() }).strict());
+    const auth = await session(c, deps), input = await body(c, z.object({ force: z.boolean().optional(), contextId: z.uuid().optional() }).strict());
     const id = z.string().uuid().safeParse(c.req.param("id"));
+    if (auth.workspace.executionMode === "active") {
+      if (!id.success) throw new HttpError(400, "invalid_request", "Invalid MCP server");
+      return c.json(await deps.execution!.mcpAuthorization(auth, input.contextId, id.data, input.force ?? false));
+    }
     if (!id.success || !deps.mcpAuthorization) throw new HttpError(404, "not_found", "MCP server not found");
     const result = await deps.mcpAuthorization(auth.workspace, id.data, input.force ?? false);
     if (!await deps.store.workerSession(auth.token, auth.bootId)) throw unauthorized();
@@ -341,7 +392,8 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
   });
   app.post(`${CLOUD_V2_WORKER_API}/github-token`, async c => {
     const auth = await session(c, deps, false);
-    const input = await body(c, z.object({ purpose: z.enum(["git", "gh"]).optional(), failedTokenSha256: z.string().length(64).regex(/^[a-f0-9]{64}$/).optional() }).strict());
+    const input = await body(c, z.object({ purpose: z.enum(["git", "gh"]).optional(), failedTokenSha256: z.string().length(64).regex(/^[a-f0-9]{64}$/).optional(), contextId: z.uuid().optional() }).strict());
+    if (auth.workspace.executionMode === "active") return c.json(await deps.execution!.githubToken(auth, input.contextId, input.purpose ?? "git", input.failedTokenSha256));
     let granted: { token: string; expiresAt: number };
     try {
       if (auth.workspace.state !== "stopping") {
@@ -406,7 +458,9 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
     });
     app.post(`${CLOUD_V2_WORKER_API}/prompts/begin`, async c => {
       const auth = await session(c, deps);
-      return c.json(await outbox.begin(auth.token, auth.bootId, await body(c, CloudV2PromptBeginSchema)));
+      const input = await body(c, CloudV2PromptBeginSchema);
+      if (auth.workspace.executionMode === "active") return c.json(await deps.execution!.begin(auth, input));
+      return c.json(await outbox.begin(auth.token, auth.bootId, input));
     });
     app.post(`${CLOUD_V2_WORKER_API}/prompts/outcome`, async c => {
       const auth = await session(c, deps);

@@ -117,15 +117,16 @@ export type CloudV2LifecycleDeps = {
     open(sealed: unknown, workspaceId: string, object: string): Buffer;
   };
   /** The base branch's GitHub head, recorded at creation; null when unknown. */
-  remoteHead?(workspace: CloudV2Workspace): Promise<string | null>;
+  remoteHead?(workspace: CloudV2LifecycleWorkspace): Promise<string | null>;
   /** A repository token, for a restore that must fetch or clone from GitHub. */
-  githubToken?(workspace: CloudV2Workspace): Promise<{ token: string }>;
+  githubToken?(workspace: CloudV2LifecycleWorkspace): Promise<{ token: string }>;
   /** renew: the worker's hello follows within seconds, so a positive near
    * expiry is renewed in the background. */
-  authorizeSource?(workspace: CloudV2Workspace, options?: { renew?: boolean }): Promise<void>;
+  authorizeSource?(workspace: CloudV2LifecycleWorkspace, options?: { renew?: boolean }): Promise<void>;
+  assertExecution?(workspace: CloudV2LifecycleWorkspace): Promise<void>;
   /** A pending create's GitHub checks and its one-time source scope. */
   resolvePendingSource?(workspace: CloudV2Workspace): Promise<PendingSourceOutcome>;
-  prepareRepository?(workspace: CloudV2Workspace, sandboxId: string): Promise<void>;
+  prepareRepository?(workspace: CloudV2LifecycleWorkspace, sandboxId: string): Promise<void>;
   /** Cloud Computer builds share this loop; one runs at a time. */
   builds?: { tick(): Promise<void>; cleanup?(): Promise<void>; close?(): void };
   runtimeUpdates?: { tick(): Promise<void>; close(): void };
@@ -798,14 +799,16 @@ export class CloudV2Lifecycle {
         sha256: checkpoint.sha256, downloadUrl: await checkpoints.storage.downloadUrl(workspace.id, checkpoint.object),
         repositoryUrl: `https://github.com/${workspace.repository}.git`, ...(github ? { githubToken: github.token } : {}) });
       await this.deps.store.defer(workspace.id, "starting", CHECKPOINT_LEASE_MS, { failure: true });
+      await this.deps.assertExecution?.(workspace);
       const result = await this.deps.compute.exec(sandboxId, command, CLOUD_V2_CHECKPOINT_SECONDS);
+      await this.deps.assertExecution?.(workspace);
       const restored = parseRestoreResult(result.stdout);
       if (!restored.ok) throw checkpointError(restored.code);
       if (result.exitCode !== 0 || result.timedOut) throw checkpointError("checkpoint_restore_failed");
     } finally { key.fill(0); }
   }
 
-  private async lookupBaseCommit(workspace: CloudV2Workspace): Promise<string | null> {
+  private async lookupBaseCommit(workspace: CloudV2LifecycleWorkspace): Promise<string | null> {
     let timer: NodeJS.Timeout | undefined;
     try {
       const head = await Promise.race([this.deps.remoteHead!(workspace),
@@ -818,11 +821,13 @@ export class CloudV2Lifecycle {
     await this.deps.authorizeSource?.(workspace, { renew: true });
     const token = await this.deps.store.rotateWorkerToken(workspace.id, { state: workspace.state, sandboxId, stopGeneration: workspace.stopGeneration });
     if (!token) return;
+    await this.deps.assertExecution?.(workspace);
     const result = await this.execWhenReady(sandboxId, deliverWorkerTokenCommand(token, bootEnv), 30);
+    await this.deps.assertExecution?.(workspace);
     if (result.exitCode !== 0 || result.timedOut) throw Object.assign(new Error("token delivery failed"), { code: "worker_token_delivery_failed" });
   }
 
-  private async host(workspace: CloudV2Workspace, sandboxId: string): Promise<boolean> {
+  private async host(workspace: CloudV2LifecycleWorkspace, sandboxId: string): Promise<boolean> {
     // The route starts beside the VM's first command, so Boat can still be
     // booting it; retry only that reply, as commands do.
     let route: Awaited<ReturnType<CloudV2Compute["hostPort"]>>;
@@ -833,6 +838,7 @@ export class CloudV2Lifecycle {
         await (this.deps.sleep ?? (ms => new Promise(resolve => setTimeout(resolve, ms))))(2_000);
       }
     }
+    await this.deps.assertExecution?.(workspace);
     return this.deps.store.setWorkerRoute(workspace.id, sandboxId, route.url, this.deps.sealPortToken(route.token, workspace.id));
   }
 

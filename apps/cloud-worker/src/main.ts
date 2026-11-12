@@ -6,6 +6,9 @@ import { HybridTransport } from "./hybrid-transport";
 import { WORKER_TOKEN_FILE } from "./worker-token";
 import { runtimePermit } from "./runtime-permit";
 import { persistCompileCache } from "./compile-cache";
+import { homedir } from "node:os";
+import { bootClean, procDeps } from "./sharing/boot-clean";
+import { PersonalEnvironments } from "./sharing/personal-env";
 
 export const WORKER_STATE_DIRECTORY = "/home/user/.local/share/zeros/cloud-worker";
 interface BootOptions { apiUrl: string; workspaceId: string; runtimeSha256: string; tokenFile?: string; directory?: string; publicKeys?: readonly string[]; port?: number;
@@ -52,6 +55,7 @@ export function startWorker(options: BootOptions): { worker: CloudWorker; stop: 
     onReconfigure: changed => log(`reconfigure ${changed.join(",")}`),
     memoryWatchdog: { runtimeRoots: [...new Set([dirname(fileURLToPath(import.meta.url)), dirname(realpathSync(fileURLToPath(import.meta.url)))])] },
     onMemory: event => log(event),
+    bootClean: () => bootClean(procDeps(() => new PersonalEnvironments(homedir()).eraseAll())),
   });
   const shutdown = () => { void stop(); };
   const stop = (code = 0): Promise<void> => {

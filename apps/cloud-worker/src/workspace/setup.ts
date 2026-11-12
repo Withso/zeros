@@ -8,6 +8,7 @@ import { workerChildEnvironment } from "../drivers/shared/agent-environment";
 import type { WorkerConfig } from "./scope";
 import { ApplicationEnvironment } from "../credentials/application-environment";
 import { RepositorySetupError, RepositorySetupSource } from "./repository-setup";
+import { operationEnvironment, type OperationEnvironment } from "../sharing/operation-environment";
 
 const MAX_LOG_BYTES = 256 * 1024;
 const SETUP_TIMEOUT_MS = 3_600_000;
@@ -119,12 +120,24 @@ export class WorkspaceSetup {
 
   start(createdBranch: boolean): void {
     if (this.operation || this.controller.signal.aborted || !createdBranch) return;
+    this.bootstrap = operationEnvironment.getStore();
     this.selection = selectRepositorySetup({ setupScript: this.options.workspace.setupScript, inlineCommand: this.options.workspace.setup });
     this.lfs = usesGitLfs(this.options.workspace.checkoutPath);
     if (!this.selection && !this.lfs) return;
     this.running = true; this.options.activity();
     this.operation = this.execute().finally(() => { this.running = false; this.options.activity(); });
   }
+
+  /** Settles when the started run (if any) has ended. */
+  done(): Promise<void> { return (this.operation ?? Promise.resolve()).then(() => {}, () => {}); }
+
+  private environment(): NodeJS.ProcessEnv {
+    // Activated: the bootstrap lease's person and context (team sharing); none otherwise.
+    const operation = this.bootstrap;
+    return operation ? workerChildEnvironment(undefined, { ...this.options.gitEnvironment, ...operation.git }, this.options.application?.variables, operation.zeros)
+      : workerChildEnvironment(undefined, this.options.gitEnvironment, this.options.application?.variables);
+  }
+  private bootstrap?: OperationEnvironment;
 
   /** After each hello: the status file as the control plane should see it.
    * No file (setup never ran) reports nothing. */
@@ -233,7 +246,7 @@ export class WorkspaceSetup {
           if (this.controller.signal.aborted) throw new RepositorySetupError();
           source?.assertCurrent();
           code = await (this.options.runner ?? runSetup)("bash", args, {
-            cwd: source?.cwd ?? workspace.checkoutPath, env: workerChildEnvironment(undefined, this.options.gitEnvironment, this.options.application?.variables), signal: this.controller.signal,
+            cwd: source?.cwd ?? workspace.checkoutPath, env: this.environment(), signal: this.controller.signal,
             ...(snapshot ? { scriptFd: snapshot.fd } : {}),
             output: chunk => {
               if (chunk.length > MAX_LOG_BYTES - received) truncated = true;

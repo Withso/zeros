@@ -5,6 +5,12 @@ import { connect, type Socket } from "node:net";
 import { githubAuthenticationError, GITHUB_SOCKET_TIMEOUT_MS, type GithubAuthenticationError } from "./github-failure";
 
 const unavailable = () => githubAuthenticationError();
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+/** Team sharing: the execution context this helper runs in (inherited from its agent or terminal), if any. */
+export const executionContext = (source: NodeJS.ProcessEnv = process.env): string | undefined => {
+  const value = source.ZEROS_EXECUTION_CONTEXT;
+  return value && UUID.test(value) ? value : undefined;
+};
 export function brokerRequest(socketPath: string, kind: "token" | "user-token" | "changed" | "report-failure",
   failure?: { purpose: "git" | "gh"; rejectedToken: string }): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
@@ -33,7 +39,8 @@ export function brokerRequest(socketPath: string, kind: "token" | "user-token" |
       attempt.once("close", () => { if (socket === attempt) finish(); });
       attempt.once("connect", () => {
         if (settled || socket !== attempt) return;
-        connected = true; attempt.write(JSON.stringify({ kind, ...failure }) + "\n");
+        const contextId = executionContext();
+        connected = true; attempt.write(JSON.stringify({ kind, ...failure, ...(contextId ? { contextId } : {}) }) + "\n");
       });
       attempt.on("data", (data: string) => {
         if (settled || socket !== attempt) return;

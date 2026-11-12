@@ -4,7 +4,8 @@ import type { AuthedUser } from "../../auth.js";
 import { HttpError } from "../../authz.js";
 import { withSystemTx, type Tx } from "../../db.js";
 import { SECURITY_STREAM_AUTHORITY, securityStreamAuthority, securityStreamParameters } from "../../security-events.js";
-import { CLOUD_V2_LIVE_ACCESS } from "../workspace-access.js";
+import { CLOUD_V2_LIVE_ACCESS, cloudV2ActorAccess } from "../workspace-access.js";
+import type { CloudExecutionContexts } from "../execution/store.js";
 import type { DeviceSyncConnectionsReply, SyncFlags } from "../workspace-sync/contract.js";
 import { LOCAL_COMMANDS_FEATURE, LOCAL_COMMANDS_REASON_FEATURE, type ConnectedMac, type LocalDevice, type LocalDeviceBinding, type LocalDevicePresence, type LocalDeviceRegistration } from "./contract.js";
 import { localCommandDiagnostic } from "./diagnostics.js";
@@ -35,16 +36,28 @@ export async function localUserAuthority(tx: Tx, user: AuthedUser, desktop = fal
 }
 
 export async function localWorkspace(tx: Tx, workspaceId: string, userId: string, lock = false): Promise<void> {
-  const row = await tx.query(`SELECT id FROM cloud_v2_workspaces w WHERE id=$1 AND creator_user_id=$2
+  const row = await tx.query(`SELECT id FROM cloud_v2_workspaces w WHERE id=$1 AND ${cloudV2ActorAccess("$2")}
     AND state NOT IN ('deleting','deleted') AND ${CLOUD_V2_LIVE_ACCESS} ${lock ? "FOR UPDATE OF w" : ""}`, [workspaceId, userId]);
   if (!row.rowCount) throw notFound();
-  if (lock && !(await tx.query(`SELECT id FROM cloud_v2_workspaces w WHERE id=$1 AND ${CLOUD_V2_LIVE_ACCESS}`, [workspaceId])).rowCount) throw notFound();
+  if (lock && !(await tx.query(`SELECT id FROM cloud_v2_workspaces w WHERE id=$1 AND ${cloudV2ActorAccess("$2")} AND ${CLOUD_V2_LIVE_ACCESS}`, [workspaceId,userId])).rowCount) throw notFound();
 }
 
 /** Device identity is account/session authority. Connection expiry is a
  * separate fact: a channel heartbeat cannot make a workspace connection live. */
 export class CloudLocalDevices {
+  execution?: CloudExecutionContexts;
   constructor(readonly pool: pg.Pool) {}
+
+  private async workspace<T>(user: AuthedUser, workspaceId: string, action: (tx: Tx) => Promise<T>, read = false): Promise<T> {
+    const proof = this.execution && await this.execution.active(workspaceId)
+      ? await this.execution.deps.authority.admit(workspaceId, user.id, { user }) : undefined;
+    return withSystemTx(this.pool, async tx => {
+      if (proof) await this.execution!.deps.authority.assert(proof, tx);
+      const result = await action(tx);
+      if (proof) await this.execution!.deps.authority.assert(proof, tx);
+      return result;
+    }, { consistentRead: read && !proof });
+  }
 
   async verify(tx: Tx, user: AuthedUser, binding: LocalDeviceBinding, lock = false): Promise<DeviceRow> {
     const row = (await tx.query<DeviceRow>(`SELECT d.*,clock_timestamp() AS checked_at,${presenceSql} AS presence_required,
@@ -151,34 +164,45 @@ export class CloudLocalDevices {
   }
 
   list(user: AuthedUser, workspaceId: string, includeSync = false, includeWanted = false) {
-    return withSystemTx(this.pool, async tx => {
+    return this.workspace(user, workspaceId, async tx => {
       await localUserAuthority(tx, user); await localWorkspace(tx, workspaceId, user.id);
       return { macs: await this.macs(tx, user.id, workspaceId, includeSync, includeWanted) };
-    }, { consistentRead: true });
+    }, true);
   }
 
   connections(user: AuthedUser, binding: LocalDeviceBinding, cursor: string | null, includeSync = false): Promise<DeviceSyncConnectionsReply> {
     return withSystemTx(this.pool, async tx => {
       await this.verify(tx, user, binding);
-      const { rows } = await tx.query<{ workspace_id: string; repository: string; number: number | null; name: string; sync_wanted: boolean; syncing: boolean }>(
+      const { rows } = await tx.query<{ workspace_id: string; repository: string; number: number | null; name: string; sync_wanted: boolean; syncing: boolean; execution_mode: string }>(
         // One organization admission covers its workspaces in this read snapshot.
         `WITH live_organizations AS MATERIALIZED (
            SELECT w.org_id FROM (SELECT org_id,user_id AS creator_user_id FROM organization_members WHERE user_id=$1) w
            WHERE ${CLOUD_V2_LIVE_ACCESS})
-         SELECT w.id AS workspace_id,w.repository,w.number,w.name,c.sync_wanted,c.syncing
+         SELECT w.id AS workspace_id,w.repository,w.number,w.name,c.sync_wanted,c.syncing,w.execution_mode
          FROM cloud_v2_connected_macs c JOIN local_command_devices d ON d.user_id=c.user_id AND d.device_id=c.device_id
          JOIN cloud_v2_workspaces w ON w.id=c.workspace_id JOIN live_organizations allowed ON allowed.org_id=w.org_id
          WHERE c.user_id=$1 AND c.device_id=$2 AND c.registration_id=$3
            AND d.registration_id=$3 AND d.instance_id=$4 AND d.provider_session_id=$5 AND d.revoked_at IS NULL
-           AND ${connectionLive} AND w.creator_user_id=$1 AND w.state NOT IN ('deleting','deleted')
+           AND ${connectionLive} AND (CASE WHEN w.creator_user_id=$1 THEN true
+             ELSE w.execution_mode='active' AND ${CLOUD_V2_LIVE_ACCESS} END) AND w.state NOT IN ('deleting','deleted')
            AND ($6::uuid IS NULL OR c.workspace_id>$6) ORDER BY c.workspace_id LIMIT 201`,
       [user.id, binding.deviceId, binding.registrationId, binding.instanceId, user.authentication.sessionId, cursor]);
       const page = rows.slice(0, 200);
-      return { connections: page.map(row => ({ workspaceId: row.workspace_id, repository: row.repository, number: row.number,
+      const allowed = [];
+      for (const row of page) {
+        if (row.execution_mode === "active") {
+          if (!this.execution) throw new HttpError(503, "cloud_sync_unavailable", "Sync discovery is temporarily unavailable");
+          try { await this.execution.deps.authority.cached(tx, row.workspace_id, user.id); }
+          catch (error) { if (error instanceof HttpError && [403,404].includes(error.status)) continue; throw error; }
+        }
+        allowed.push(row);
+      }
+      await this.verify(tx, user, binding);
+      return { connections: allowed.map(row => ({ workspaceId: row.workspace_id, repository: row.repository, number: row.number,
         // Legacy workspace names can be 200 characters; this opt-in wire is bounded to 120.
         name: row.name.slice(0, 120), syncWanted: row.sync_wanted, ...(includeSync ? { syncing: row.syncing } : {}) })),
       nextCursor: rows.length > 200 ? page.at(-1)!.workspace_id : null };
-    }, { consistentRead: true });
+    });
   }
 
   private async connectRow(tx: Tx, user: AuthedUser, workspaceId: string, binding: LocalDeviceBinding, appMessage: boolean) {
@@ -200,7 +224,7 @@ export class CloudLocalDevices {
   }
 
   connect(user: AuthedUser, workspaceId: string, targetId: string, binding: LocalDeviceBinding, includeSync = false, includeWanted = false) {
-    return withSystemTx(this.pool, async tx => {
+    return this.workspace(user, workspaceId, async tx => {
       await localWorkspace(tx, workspaceId, user.id, true);
       if (targetId !== binding.deviceId) throw new HttpError(409, "device_mismatch", "Connect must be requested on that Mac");
       await this.connectRow(tx, user, workspaceId, binding, false);
@@ -214,7 +238,7 @@ export class CloudLocalDevices {
   }
 
   disconnect(user: AuthedUser, workspaceId: string, targetId: string, binding: LocalDeviceBinding, includeSync = false, includeWanted = false) {
-    return withSystemTx(this.pool, async tx => {
+    return this.workspace(user, workspaceId, async tx => {
       await localWorkspace(tx, workspaceId, user.id, true);
       await this.verify(tx, user, binding);
       if (!(await tx.query("SELECT device_id FROM local_command_devices WHERE user_id=$1 AND device_id=$2 AND revoked_at IS NULL FOR UPDATE", [user.id, targetId])).rowCount) throw notFound();
@@ -228,7 +252,7 @@ export class CloudLocalDevices {
   }
 
   setSync(user: AuthedUser, workspaceId: string, targetId: string, binding: LocalDeviceBinding, input: SyncFlags, includeWanted = false) {
-    return withSystemTx(this.pool, async tx => {
+    return this.workspace(user, workspaceId, async tx => {
       await localWorkspace(tx, workspaceId, user.id);
       const caller = await this.verify(tx, user, binding);
       if (input.syncing !== undefined && targetId !== binding.deviceId) throw new HttpError(409, "device_mismatch", "Sync must be requested on that Mac");
@@ -246,7 +270,7 @@ export class CloudLocalDevices {
       // The connection lock fences its fields, but membership and an unconnected caller can change during the reads.
       const admission = await tx.query<{ live: boolean }>(`WITH authority AS MATERIALIZED (
         SELECT ${SECURITY_STREAM_AUTHORITY}
-          AND EXISTS (SELECT 1 FROM cloud_v2_workspaces w WHERE w.id=$7 AND w.creator_user_id=$1
+          AND EXISTS (SELECT 1 FROM cloud_v2_workspaces w WHERE w.id=$7 AND ${cloudV2ActorAccess("$1")}
             AND w.state NOT IN ('deleting','deleted') AND ${CLOUD_V2_LIVE_ACCESS})
           AND EXISTS (SELECT 1 FROM local_command_devices d WHERE d.user_id=$1 AND d.device_id=$9 AND d.registration_id=$10
             AND d.instance_id=$11 AND d.provider_session_id=$5 AND d.revoked_at IS NULL)

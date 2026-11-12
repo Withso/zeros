@@ -19,8 +19,9 @@ const url = process.env.TEST_DATABASE_URL, d = url ? describe : describe.skip;
 /** Every non-internal trigger on a table with a policy that admits a
  * non-system write, as of this suite's cases. */
 const COVERED_TRIGGERS: Record<string, readonly string[]> = {
-  organizations: ["organizations_personal_classification_immutable", "local_command_setting_changed"],
-  users: ["cloud_actor_staff_revision", "staff_pro_benefit_sync"],
+  organizations: ["organizations_personal_classification_immutable", "local_command_setting_changed", "execution_organization_update"],
+  organization_members: ["execution_member_delete", "execution_member_update"],
+  users: ["cloud_actor_staff_revision", "staff_pro_benefit_sync", "execution_user_fence"],
 };
 
 d("triggers on user-writable tables with PostgreSQL", () => {

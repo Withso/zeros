@@ -22,7 +22,7 @@ export class CloudWorkspaceApiTokens {
 
   token(workspaceId: string): Promise<string | undefined> {
     return withSystemTx(this.pool, async tx => {
-      const live = `WHERE w.id=$1
+      const live = `WHERE w.id=$1 AND w.execution_mode<>'active'
           AND w.state IN ('creating','starting','running') AND w.archived_at IS NULL AND ${CLOUD_V2_LIVE_ACCESS}`;
       const read = async () => {
         const { rows } = await tx.query<RunToken>(`SELECT w.api_access,w.stop_generation::text,t.token_hash,t.api_envelope

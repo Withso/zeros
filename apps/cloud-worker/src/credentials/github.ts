@@ -10,6 +10,7 @@ export interface GithubToken { token: string; expiresAt: number }
 export const githubTokenHash = (token: string): string => createHash("sha256").update(token).digest("hex");
 export interface GithubTokenRequest { purpose?: "git" | "gh"; failedTokenSha256?: string; timeoutMs?: number }
 const unavailable = () => githubAuthenticationError();
+const CONTEXT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 interface Pending {
   id?: string; promise: Promise<GithubToken>; resolve: (token: GithubToken) => void; reject: (error: Error) => void;
   deadline: number; attempts: number; failure?: GithubAuthenticationError;
@@ -25,7 +26,7 @@ export class GithubTokens {
   private cached?: GithubToken;
   private pending?: Pending;
   private readonly now: () => number;
-  constructor(private readonly send: (frame: CloudV2WorkerFrame, timeoutMs: number) => Promise<boolean>, private readonly options: { now?: () => number; timeoutMs?: number; purpose?: "git" | "gh" } = {}) { this.now = options.now ?? Date.now; }
+  constructor(private readonly send: (frame: CloudV2WorkerFrame, timeoutMs: number) => Promise<boolean>, private readonly options: { now?: () => number; timeoutMs?: number; purpose?: "git" | "gh"; contextId?: string } = {}) { this.now = options.now ?? Date.now; }
   connect(): void {
     if (this.disposed) return;
     this.online = true;
@@ -79,7 +80,8 @@ export class GithubTokens {
     const failed = () => { if (this.pending === pending && pending.id === id) this.failed(pending, unavailable()); };
     const purpose = pending.request.purpose ?? this.options.purpose;
     void this.send({ t: "request", id, kind: "github-token", ...(purpose ? { purpose } : {}),
-      ...(pending.request.failedTokenSha256 ? { failedTokenSha256: pending.request.failedTokenSha256 } : {}) }, remaining)
+      ...(pending.request.failedTokenSha256 ? { failedTokenSha256: pending.request.failedTokenSha256 } : {}),
+      ...(this.options.contextId ? { contextId: this.options.contextId } : {}) }, remaining)
       .then(sent => { if (!sent) failed(); }, failed);
   }
   private failed(pending: Pending, error: GithubAuthenticationError): void {
@@ -115,7 +117,7 @@ export class GithubBroker {
   private ownedSocket?: Stats;
   private ownedDirectory?: Stats;
   private readonly sockets = new Set<Socket>();
-  constructor(readonly socketPath: string, private readonly token: (purpose: "git" | "gh", failedTokenSha256?: string) => Promise<GithubToken>, private readonly changed: () => void = () => {}) {}
+  constructor(readonly socketPath: string, private readonly token: (purpose: "git" | "gh", failedTokenSha256?: string, contextId?: string) => Promise<GithubToken>, private readonly changed: () => void = () => {}) {}
   start(): Promise<void> {
     if (this.disposed) return Promise.reject(new Error("The GitHub broker is disposed."));
     if (this.server) return Promise.resolve();
@@ -186,16 +188,20 @@ export class GithubBroker {
         const request: unknown = JSON.parse(buffer.trim());
         if (!request || typeof request !== "object" || !("kind" in request)) throw unavailable();
         if (request.kind === "changed") { this.changed(); return { ok: true }; }
-        if (request.kind === "token" || request.kind === "user-token") return this.token(request.kind === "user-token" ? "gh" : "git");
+        // The helper's execution context (team sharing); an invalid one names none, and the worker decides what none may have.
+        const contextId = "contextId" in request && typeof request.contextId === "string" && CONTEXT_ID.test(request.contextId) ? request.contextId : undefined;
+        // Legacy callers keep their exact arguments; a context is passed only when named.
+        const ask = (purpose: "git" | "gh", failed?: string) => contextId ? this.token(purpose, failed, contextId) : failed ? this.token(purpose, failed) : this.token(purpose);
+        if (request.kind === "token" || request.kind === "user-token") return ask(request.kind === "user-token" ? "gh" : "git");
         if (request.kind === "report-failure" && "purpose" in request && (request.purpose === "git" || request.purpose === "gh")) {
           if ("rejectedToken" in request) {
             if (typeof request.rejectedToken !== "string" || !request.rejectedToken || request.rejectedToken.length > 8192 || /[\0\r\n]/.test(request.rejectedToken) || "failedTokenSha256" in request) throw unavailable();
             // The credential stays within this VM's private socket. Only its
             // equality fingerprint crosses the control-plane boundary.
-            return this.token(request.purpose, githubTokenHash(request.rejectedToken));
+            return ask(request.purpose, githubTokenHash(request.rejectedToken));
           }
           if ("failedTokenSha256" in request && typeof request.failedTokenSha256 === "string" && request.failedTokenSha256.length === 64 && /^[a-f0-9]{64}$/.test(request.failedTokenSha256))
-            return this.token(request.purpose, request.failedTokenSha256);
+            return ask(request.purpose, request.failedTokenSha256);
         }
         throw unavailable();
       };

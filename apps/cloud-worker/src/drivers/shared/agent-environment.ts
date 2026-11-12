@@ -6,7 +6,7 @@ export type AgentLogin =
   | { agent: "claude"; apiKey: string; oauthToken?: never }
   | { agent: "cursor"; apiKey: string };
 
-const ZEROS_NAMES = new Set(["ZEROS_WORKSPACE_ID", "ZEROS_SESSION_ID", "ZEROS_API_URL", "ZEROS_API_TOKEN"]);
+const ZEROS_NAMES = new Set(["ZEROS_WORKSPACE_ID", "ZEROS_SESSION_ID", "ZEROS_API_URL", "ZEROS_API_TOKEN", "ZEROS_EXECUTION_CONTEXT", "ZEROS_PERSONAL_ENV_DIR"]);
 const runtimeNames = new Set(["PATH", "HOME", "USER", "LANG", "TERM", "TMPDIR", "SHELL"]);
 
 /** Never inherit the worker credential or another provider's login. Git/GH

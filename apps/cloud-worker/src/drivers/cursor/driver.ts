@@ -134,7 +134,7 @@ export class CursorDriver implements Driver {
     this.ready();
     const input = this.input!;
     const host = new CursorProcess({ path: this.options.hostPath ?? fileURLToPath(new URL("./cursor-host.mjs", import.meta.url)),
-      cwd: input.cwd, env: agentEnvironment({ agent: "cursor", apiKey: input.apiKey! }, this.options.environment, this.options.gitEnvironment, input.application?.variables, input.zerosEnvironment),
+      cwd: input.cwd, env: agentEnvironment({ agent: "cursor", apiKey: input.apiKey! }, this.options.environment, input.gitEnvironment ? { ...this.options.gitEnvironment, ...input.gitEnvironment } : this.options.gitEnvironment, input.application?.variables, input.zerosEnvironment),
       timeoutMs: this.options.requestTimeoutMs ?? 30_000, redact: message => this.redact(message),
       onEvent: event => { if (this.process === host) this.event(event); },
       onClose: error => {

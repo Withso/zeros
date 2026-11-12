@@ -5,7 +5,7 @@ import type { LocalCommandInput } from "@zeros/protocol/local-commands";
 import { requestLocalCommand } from "./local-commands/client";
 import { CLOUD_WORKER_FEATURES } from "./worker-features";
 import { CLOUD_V2_MAX_FRAME_BYTES, CLOUD_V2_RELAY_PROTOCOL, CloudV2ControlFrameSchema, CloudV2WorkerActivityReplySchema,
-  CloudV2WorkerFrameSchema, CloudV2WorkerTimingSchema, type CloudV2WorkerTiming, type CloudV2ControlFrame, type CloudV2WorkerFrame } from "@zeros/protocol/cloud-v2-relay";
+  CloudV2WorkerFrameSchema, CloudV2WorkerTimingSchema, type CloudV2WorkerTiming, type CloudV2ControlFrame, type CloudV2WorkerFrame, CloudV2ContextErrorCodeSchema } from "@zeros/protocol/cloud-v2-relay";
 import { InboundBridge } from "./inbound-bridge";
 import { readWorkerToken, WORKER_TOKEN_FILE } from "./worker-token";
 import type { PromptOperation, Transport, TransportHandlers } from "./transport";
@@ -28,8 +28,13 @@ interface Options {
   log?: (line: string) => void;
 }
 class HttpFailure extends Error {
-  constructor(readonly status: number, readonly code?: "mcp_auth_required", readonly githubReason?: CloudGithubUnavailableReason) { super("Worker control request failed."); }
+  constructor(readonly status: number, readonly code?: "mcp_auth_required", readonly githubReason?: CloudGithubUnavailableReason,
+    /** Slice B context routes: the closed refusal code (actor_changed, agent_login_required, …) and its agent. */
+    readonly contextCode?: string, readonly agent?: string) { super("Worker control request failed."); }
 }
+const isContextPath = (path: string) => /^(turn|terminal|client|bootstrap)-lease$|^execution-leases\//.test(path);
+/** Routes whose refusals carry the closed context codes: the context routes, and an activated begin (actor_busy while a previous person's cleanup holds the chat). */
+const decodesContext = (path: string) => isContextPath(path) || path === "prompts/begin";
 
 /** Live frames use authenticated loopback sockets. Durable control traffic
  * uses HTTPS independently, so it survives the final app disconnect. */
@@ -141,7 +146,7 @@ export class HybridTransport implements Transport {
   }
   private localCommandsInFlight = 0;
   get localCommandsPending(): number { return this.localCommandsInFlight; }
-  async localCommand(request: { chatId: string; executionId: string; input: LocalCommandInput }, signal: AbortSignal) {
+  async localCommand(request: { chatId: string; executionId: string; input: LocalCommandInput; contextId?: string }, signal: AbortSignal) {
     this.localCommandsInFlight++;
     try {
       return await requestLocalCommand((method, path, body, timeoutMs, callSignal) =>
@@ -192,6 +197,12 @@ export class HybridTransport implements Transport {
       throw error;
     }
   }
+  /** Slice B: leases, renew and retirement (worker bearer + boot, like every control request). */
+  contextRequest(path: string, body: unknown): Promise<unknown> {
+    if (!isContextPath(path)) return Promise.reject(new Error("Not a context route."));
+    return this.request(path, body);
+  }
+
   async notifyUser(request: NotifyUserWorkerRequest, signal?: AbortSignal): Promise<NotifyUserDelivery> {
     const body = NotifyUserWorkerRequestSchema.parse(request);
     // The same id and body on every try: a replay is inert on the server.
@@ -231,10 +242,11 @@ export class HybridTransport implements Transport {
     // effects. Older control planes return 404 without affecting the worker.
     void this.request("timing", parsed.data, undefined, 2000).catch(() => {});
   }
-  async mcpAuthorization(id: string, force = false, signal?: AbortSignal): Promise<McpAuthorization> {
+  async mcpAuthorization(id: string, force = false, signal?: AbortSignal, contextId?: string): Promise<McpAuthorization> {
     if (!/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(id)) throw new Error("Invalid MCP server identity.");
     let reply: Record<string, unknown>;
-    try { reply = await this.request(`mcp/${id}/authorization`, { force }, signal, 35_000); }
+    // Team sharing: an activated context's server is authorized as that context's person.
+    try { reply = await this.request(`mcp/${id}/authorization`, contextId ? { force, contextId } : { force }, signal, 35_000); }
     catch (error) {
       // This 401 authenticates the worker, not the user's MCP account.
       if (error instanceof HttpFailure && error.status === 401) {
@@ -384,8 +396,8 @@ export class HybridTransport implements Transport {
         ...(payload === undefined ? {} : { body: payload }), redirect: "error", signal: controller.signal,
       });
       if (!response.ok) {
-        let code: "mcp_auth_required" | undefined, githubReason: CloudGithubUnavailableReason | undefined;
-        if ((path.startsWith("mcp/") && response.status === 409) || path === "github-token") {
+        let code: "mcp_auth_required" | undefined, githubReason: CloudGithubUnavailableReason | undefined, contextCode: string | undefined, agent: string | undefined;
+        if ((path.startsWith("mcp/") && response.status === 409) || path === "github-token" || decodesContext(path)) {
           const reader = response.body?.getReader();
           const chunks: Uint8Array[] = []; let bytes = 0;
           try {
@@ -397,6 +409,11 @@ export class HybridTransport implements Transport {
             if (bytes <= 8192) {
               const error = JSON.parse(Buffer.concat(chunks).toString("utf8"))?.error;
               if (path.startsWith("mcp/") && error?.code === "mcp_auth_required") code = "mcp_auth_required";
+              const parsed = CloudV2ContextErrorCodeSchema.safeParse(error?.code);
+              if (decodesContext(path) && parsed.success) {
+                contextCode = parsed.data;
+                if (error?.agent === "codex" || error?.agent === "claude" || error?.agent === "cursor") agent = error.agent;
+              }
               if (path === "github-token" && error?.code === "github_token_unavailable") {
                 const reason = CloudGithubUnavailableReasonSchema.safeParse(error.reason);
                 if (reason.success) githubReason = reason.data;
@@ -405,7 +422,7 @@ export class HybridTransport implements Transport {
           } catch { /* Only the confirmed code can name a provider sign-in problem. */ }
           finally { await reader?.cancel(); }
         } else await response.body?.cancel();
-        throw new HttpFailure(response.status, code, githubReason);
+        throw new HttpFailure(response.status, code, githubReason, contextCode, agent);
       }
       if (response.status === 204) { await response.body?.cancel(); return {}; }
       const reader = response.body?.getReader();

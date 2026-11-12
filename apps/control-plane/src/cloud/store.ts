@@ -1,3 +1,5 @@
+import { executionIntentAuthority, type ExecutionAdmission, type ExecutionIntentAuthority } from "./execution/authority.js";
+import type { ExecutionConnectAuthority } from "./execution/clients.js";
 import type pg from "pg";
 import { createHash } from "node:crypto";
 import { CloudApiReads } from "./api/reads.js";
@@ -54,7 +56,7 @@ type HistoryInput = {
   messages?: { chatId: string; rows: readonly CloudV2MessageRow[]; replace?: true | undefined; historyState?: CloudV2HistoryState | undefined } | undefined;
 };
 export type CloudV2WorkerSession = CloudV2Workspace & {
-  accessEpoch: string; loginRevision: string;
+  accessEpoch: string; loginRevision: string; executionMode?: "legacy" | "prepared" | "active";
   /** Present only on the hello that actually changes a booting state to running. */
   helloTiming?: { state: "creating" | "starting"; durationMs: number };
 };
@@ -65,7 +67,7 @@ const PENDING_WORKER_PROMPTS_SQL = sql`(
     WHERE p.workspace_id=w.id AND p.state IN ('queued','inboxed') AND p.epoch=c.epoch
       AND p.access_epoch=w.access_epoch AND NOT p.cancel_requested AND p.payload IS NOT NULL)
   OR EXISTS (SELECT 1 FROM cloud_v2_prompt_chats c WHERE c.workspace_id=w.id AND c.stop_acked_epoch<c.epoch))`;
-export type CloudV2AppGrant = { userId: string; accessEpoch: string; wake: boolean; sessionId: string | null };
+export type CloudV2AppGrant = { userId: string; accessEpoch: string; wake: boolean; sessionId: string | null; execution?: ExecutionConnectAuthority };
 
 export type CloudV2Workspace = {
   id: string;
@@ -112,6 +114,7 @@ export type CloudV2CheckpointRetry = { generation: string; attempts: number; sto
 
 /** Internal lifecycle metadata is never included in public workspace documents. */
 export type CloudV2LifecycleWorkspace = CloudV2Workspace & {
+  executionIntent?: { id: string | null; userId: string | null; accessEpoch: string; authority: ExecutionIntentAuthority | null };
   leaseRenewedAt: string | null;
   baseCommit: string | null;
   checkpoint: CloudV2Checkpoint | null;
@@ -172,6 +175,8 @@ const COLUMNS = WORKSPACE_COLUMNS_SQL.text;
 export const CLOUD_V2_WORKSPACE_COLUMNS = COLUMNS.split(",").map(value => value.trim());
 
 type LifecycleRow = Row & {
+  execution_mode: string; execution_initiator_user_id: string | null; execution_intent_id: string | null;
+  execution_intent_authority: ExecutionIntentAuthority | null; access_epoch: string;
   lease_renewed_at: Date | null; base_commit: string | null; restore_pending: boolean; restore_attempt: string | null;
   restore_create: CloudV2RestoreCreate | null; checkpoint_uploads: Record<string, string>;
   stop_generation: string; checkpoint_stop_generation: string | null;
@@ -179,6 +184,7 @@ type LifecycleRow = Row & {
   checkpoint_reuse: unknown; checkpoint_retry_fork: unknown;
 };
 const LIFECYCLE_COLUMNS = `${COLUMNS}, lease_renewed_at, base_commit, restore_pending, restore_attempt, restore_create, checkpoint_uploads,
+  execution_mode, execution_initiator_user_id, execution_intent_id, execution_intent_authority, access_epoch,
   stop_generation, checkpoint_stop_generation,
   checkpoint_object, checkpoint_key, checkpoint_sha256, checkpoint_bytes, checkpoint_saved_at, checkpoint_reuse, checkpoint_retry_fork`;
 type RetryRow = LifecycleRow & { retry_stopped_at: Date; checkpoint_retry_generation: string; checkpoint_retry_attempts: number; checkpoint_retry_exhausted_at: Date | null };
@@ -216,6 +222,8 @@ function lifecycleWorkspace(row: LifecycleRow): CloudV2LifecycleWorkspace {
         savedAt: row.checkpoint_saved_at.toISOString(), stopGeneration: row.checkpoint_stop_generation, ...(reuse ? { reuse } : {}) }
     : null;
   return { ...workspace(row), leaseRenewedAt: row.lease_renewed_at?.toISOString() ?? null, baseCommit: row.base_commit,
+    ...(row.execution_mode === "active" ? { executionIntent: { id: row.execution_intent_id, userId: row.execution_initiator_user_id,
+      accessEpoch: row.access_epoch, authority: row.execution_intent_authority } } : {}),
     checkpoint, restorePending: row.restore_pending, restoreAttempt: row.restore_attempt, restoreCreate: restoreCreate(row.restore_create),
     stopGeneration: row.stop_generation, checkpointUploadUntil: uploadHorizon(row.checkpoint_uploads),
     checkpointRetryFork: checkpointFork(row.checkpoint_retry_fork) };
@@ -269,8 +277,8 @@ const LIVE_SESSION = `s.provider = 'workos' AND s.user_id = w.creator_user_id
 
 const notFound = () => new HttpError(404, "not_found", "Cloud workspace not found");
 
-/** v2 is creator-only: the caller must have created the workspace and still
- * belong to its organization. Anyone else sees the same 404. */
+/** Creator-only paths remain closed to members even after shared execution
+ * activates; those callers use the separate per-person admission. */
 async function ownedRow(tx: Tx, id: string, userId: string, lock = false): Promise<Row & { access_epoch: string; login_revision: string }> {
   const { rows } = await tx.query<Row & { access_epoch: string; login_revision: string }>(
     `SELECT ${COLUMNS}, access_epoch::text, login_revision::text FROM cloud_v2_workspaces w
@@ -400,9 +408,9 @@ export class CloudV2Store {
     if (Object.keys(input.env ?? {}).length && sourceRepositoryId === undefined)
       throw new HttpError(409, "cloud_source_review_required", "A workspace environment requires a verified repository identity.");
     const row = (await tx.query<Row>(
-      `INSERT INTO cloud_v2_workspaces (id, org_id, creator_user_id, name, repository, branch, base_branch, state, computer_build_id, source_repositories, source_pending, api_access, created_by_session_id)
+      `INSERT INTO cloud_v2_workspaces (id, org_id, creator_user_id, name, repository, branch, base_branch, state, computer_build_id, source_repositories, source_pending, api_access, created_by_session_id, execution_initiator_user_id, execution_intent_id)
        VALUES ($1, $2, $3, $4, $5, $6, $7, 'creating', $8, $9::text[], $10,
-         coalesce((SELECT workspace_api_access FROM cloud_api_access_settings WHERE org_id=$2 AND user_id=$3),true), $11) RETURNING ${COLUMNS}`,
+         coalesce((SELECT workspace_api_access FROM cloud_api_access_settings WHERE org_id=$2 AND user_id=$3),true), $11, $3, gen_random_uuid()) RETURNING ${COLUMNS}`,
       [input.id, input.organizationId, input.creatorUserId, input.name, input.repository, input.branch,
         input.baseBranch, input.computerBuildId,
         pending ? null : (scope ?? [{ repository: input.repository }]).map(source => source.repository.toLowerCase()), pending, input.createdBySessionId ?? null],
@@ -517,15 +525,40 @@ export class CloudV2Store {
     });
   }
 
-  /** Serialize a creator's intent with lifecycle progress. Flag-only changes
+  /** Serialize the initiator's intent with lifecycle progress. Flag-only changes
    * advance the document version without rescheduling a pending stop. A wake
    * revokes the suspended boot before Boat can resume its old service. */
   async requestLifecycle(id: string, userId: string, action: "start" | "stop" | "archive" | "restart"):
     Promise<{ workspace: CloudV2Workspace; moved: boolean }> {
+    const execution = this.prompts.execution;
+    if (execution && await execution.active(id)) {
+      const proof = action === "stop" ? undefined : await execution.deps.authority.admit(id, userId);
+      return this.requestExecutionLifecycle(id, userId, action, proof);
+    }
     return withSystemTx(this.pool, async tx => {
       const current = await ownedRow(tx, id, userId, true);
       await ownedRow(tx, id, userId);
       return this.lifecycleIntent(tx,id,current,action);
+    });
+  }
+
+  async requestExecutionLifecycle(id: string, userId: string, action: "start" | "stop" | "archive" | "restart", proof?: ExecutionAdmission,
+    user?: AuthedUser, unarchived = false): Promise<{ workspace: CloudV2Workspace; moved: boolean }> {
+    const authority = this.prompts.execution!.deps.authority;
+    return withSystemTx(this.pool, async tx => {
+      const row = (await tx.query<Row>(`SELECT ${COLUMNS} FROM cloud_v2_workspaces WHERE id=$1 FOR UPDATE`, [id])).rows[0];
+      if (!row) throw notFound();
+      if (user) await authority.session(tx, user, userId);
+      const before = await authority.snapshot(tx, id, userId);
+      if (proof) await authority.assert(proof, tx);
+      else if (action !== "stop") throw new HttpError(409, "actor_changed", "Execution authority changed");
+      if (action === "archive" && before.role === "member" && row.creator_user_id !== userId) throw new HttpError(403, "workspace_management_denied", "Only the Creator or an administrator may archive this workspace");
+      if (unarchived && row.archived_at) throw new HttpError(409, "cloud_workspace_not_running", "This cloud workspace is not ready for a connection");
+      const result = await this.lifecycleIntent(tx, id, row, action, userId, proof ? executionIntentAuthority(proof) : undefined);
+      if (proof) await authority.assert(proof, tx, true);
+      else if ((await authority.snapshot(tx, id, userId)).permissionSignature !== before.permissionSignature) throw new HttpError(409, "actor_changed", "Execution authority changed");
+      if (user) await authority.session(tx, user, userId);
+      return result;
     });
   }
 
@@ -558,7 +591,8 @@ export class CloudV2Store {
     });
   }
 
-  private async lifecycleIntent(tx: Tx, id: string, current: Row, action: "start" | "stop" | "archive" | "restart") {
+  private async lifecycleIntent(tx: Tx, id: string, current: Row, action: "start" | "stop" | "archive" | "restart", initiator?: string,
+    executionAuthority?: ExecutionIntentAuthority) {
       const intent = (await tx.query<{ stop_generation: string; restart_stop_generation: string | null }>(
         "SELECT stop_generation::text,restart_stop_generation::text FROM cloud_v2_workspaces WHERE id=$1", [id])).rows[0]!;
       const priorRestart = intent.restart_stop_generation;
@@ -583,6 +617,9 @@ export class CloudV2Store {
         `UPDATE cloud_v2_workspaces SET
            archived_at = CASE WHEN $3::boolean THEN coalesce(archived_at, clock_timestamp()) ELSE NULL END,
            restart_stop_generation = $4::bigint,
+           execution_initiator_user_id = CASE WHEN $5::uuid IS NOT NULL AND $6::boolean THEN $5 ELSE execution_initiator_user_id END,
+           execution_intent_id = CASE WHEN $5::uuid IS NOT NULL AND $6::boolean THEN gen_random_uuid() ELSE execution_intent_id END,
+           execution_intent_authority = CASE WHEN $5::uuid IS NOT NULL AND $6::boolean THEN $7::jsonb ELSE execution_intent_authority END,
            attempts = CASE WHEN state <> $2 THEN 0 ELSE attempts END,
            next_attempt_at = CASE WHEN state <> $2 THEN NULL ELSE next_attempt_at END,
            worker_token_hash = CASE WHEN state <> $2 AND $2 = 'starting' THEN NULL ELSE worker_token_hash END,
@@ -591,7 +628,7 @@ export class CloudV2Store {
            updated_at = clock_timestamp(),
            state = $2
          WHERE id = $1 RETURNING ${COLUMNS}`,
-        [id, state, archived, restart],
+        [id, state, archived, restart, initiator ?? null, action === "start" || action === "restart", executionAuthority ?? null],
       );
       return { workspace: workspace(rows[0]!), moved };
   }
@@ -637,6 +674,13 @@ export class CloudV2Store {
       await tx.query(`UPDATE cloud_v2_workspaces SET worker_token_hash = NULL, worker_boot_id = NULL WHERE id = $1`, [id]);
       await tx.query(`DELETE FROM cloud_v2_tokens WHERE workspace_id = $1`, [id]);
     }
+    if (to === "deleted" || to === "stopped" && patch.revoke) {
+      // Only provider-confirmed shutdown releases these process barriers. A
+      // restart may already have changed the visible state back to starting.
+      await tx.query(`UPDATE cloud_v2_execution_contexts SET state='retired',retired_at=clock_timestamp(),
+        reason=coalesce(reason,'cancelled'),revoked_at=coalesce(revoked_at,clock_timestamp()),material=NULL,environment_version_id=NULL
+        WHERE workspace_id=$1 AND state<>'retired'`, [id]);
+    }
     return workspace(rows[0]);
     });
   }
@@ -676,12 +720,12 @@ export class CloudV2Store {
   }
 
   /** Internal only: private route data is deliberately absent from workspace(). */
-  async workerRoute(id: string): Promise<{ workspace: CloudV2Workspace; accessEpoch: string; url: string | null; portToken: unknown; bootId: string | null; workerTokenHash: string | null } | null> {
-    const { rows } = await withSystemTx(this.pool, tx => tx.query<Row & { access_epoch: string; worker_route_url: string | null; worker_port_token: unknown; worker_boot_id: string | null; worker_token_hash: string | null }>(
-      `SELECT ${COLUMNS}, access_epoch::text, worker_route_url, worker_port_token, worker_boot_id, encode(worker_token_hash,'hex') AS worker_token_hash
+  async workerRoute(id: string): Promise<{ workspace: CloudV2Workspace; executionMode?: "legacy" | "prepared" | "active"; accessEpoch: string; url: string | null; portToken: unknown; bootId: string | null; workerTokenHash: string | null } | null> {
+    const { rows } = await withSystemTx(this.pool, tx => tx.query<Row & { execution_mode: "legacy" | "prepared" | "active"; access_epoch: string; worker_route_url: string | null; worker_port_token: unknown; worker_boot_id: string | null; worker_token_hash: string | null }>(
+      `SELECT ${COLUMNS}, execution_mode, access_epoch::text, worker_route_url, worker_port_token, worker_boot_id, encode(worker_token_hash,'hex') AS worker_token_hash
        FROM cloud_v2_workspaces w WHERE id=$1 AND state NOT IN ('deleting','deleted') AND ${LIVE_ACCESS}`, [id]));
     const row = rows[0];
-    return row ? { workspace: workspace(row), accessEpoch: row.access_epoch, url: row.worker_route_url, portToken: row.worker_port_token, bootId: row.worker_boot_id, workerTokenHash: row.worker_token_hash } : null;
+    return row ? { workspace: workspace(row), executionMode: row.execution_mode, accessEpoch: row.access_epoch, url: row.worker_route_url, portToken: row.worker_port_token, bootId: row.worker_boot_id, workerTokenHash: row.worker_token_hash } : null;
   }
 
   async setWorkerRoute(id: string, sandboxId: string, url: string, portToken: unknown): Promise<boolean> {
@@ -693,36 +737,47 @@ export class CloudV2Store {
 
   /** Refusing a runtime must not retire the workspace's current boot. */
   async workerHelloIdentity(token: string): Promise<CloudV2WorkerSession | null> {
-    const { rows } = await withSystemTx(this.pool, tx => tx.query<Row & { access_epoch: string; login_revision: string }>(
-      `SELECT ${COLUMNS}, access_epoch::text, login_revision::text FROM cloud_v2_workspaces w
+    const { rows } = await withSystemTx(this.pool, tx => tx.query<Row & { execution_mode: "legacy" | "prepared" | "active"; access_epoch: string; login_revision: string }>(
+      `SELECT ${COLUMNS}, execution_mode, access_epoch::text, login_revision::text FROM cloud_v2_workspaces w
        WHERE worker_token_hash=$1 AND state IN ('creating','starting','running') AND ${LIVE_ACCESS}`, [hashCloudV2Token(token)]));
     const row = rows[0];
-    return row ? { ...workspace(row), accessEpoch: row.access_epoch, loginRevision: row.login_revision } : null;
+    return row ? { ...workspace(row), accessEpoch: row.access_epoch, loginRevision: row.login_revision, executionMode: row.execution_mode } : null;
   }
 
   /** Bind the boot before configuration I/O, without publishing readiness.
    * Lifecycle delivery must not replace a credential once this boot claims it. */
-  async beginWorkerHello(token: string, bootId: string): Promise<CloudV2WorkerSession | null> {
-    const { rows } = await withSystemTx(this.pool, tx => tx.query<Row & { access_epoch: string; login_revision: string }>(
-      `UPDATE cloud_v2_workspaces w SET
+  async beginWorkerHello(token: string, bootId: string, actingUser = false): Promise<CloudV2WorkerSession | null> {
+    const { rows } = await withSystemTx(this.pool, async tx => {
+      const result = await tx.query<Row & { execution_mode: "legacy" | "prepared" | "active"; access_epoch: string; login_revision: string; previous_boot_id: string | null }>(
+      `WITH prior AS MATERIALIZED (
+         SELECT id AS prior_id,worker_boot_id AS previous_boot_id FROM cloud_v2_workspaces w
+         WHERE worker_token_hash=$1 AND state IN ('creating','starting','running') AND ${LIVE_ACCESS} FOR UPDATE)
+       UPDATE cloud_v2_workspaces w SET
          worker_history_sequence=CASE WHEN worker_boot_id=$2 THEN worker_history_sequence ELSE 0 END,
          worker_history_digest=CASE WHEN worker_boot_id=$2 THEN worker_history_digest ELSE NULL END,
          state=CASE WHEN state='running' AND worker_boot_id IS DISTINCT FROM $2 THEN 'starting' ELSE state END,
          updated_at=CASE WHEN state='running' AND worker_boot_id IS DISTINCT FROM $2 THEN clock_timestamp() ELSE updated_at END,
-         worker_boot_id=$2
-       WHERE worker_token_hash=$1 AND state IN ('creating','starting','running') AND ${LIVE_ACCESS}
-       RETURNING ${COLUMNS}, access_epoch::text, login_revision::text`, [hashCloudV2Token(token), bootId]));
+         worker_boot_id=$2, acting_user_boot_ids=CASE WHEN $3 THEN ARRAY[$2::uuid] ELSE '{}'::uuid[] END
+       FROM prior WHERE w.id=prior.prior_id AND worker_token_hash=$1 AND state IN ('creating','starting','running') AND ${LIVE_ACCESS}
+       RETURNING ${COLUMNS.replace(/\b(\w+)\b/g, "w.$1")},execution_mode,access_epoch::text,login_revision::text,prior.previous_boot_id`, [hashCloudV2Token(token), bootId, actingUser]);
+      const current = result.rows[0];
+      if (current?.execution_mode === "active") {
+        if (!actingUser || !this.prompts.execution) throw new HttpError(409, "worker_update_required", "Update the worker before shared execution");
+        await this.prompts.execution.boots.bind(tx, { token, bootId }, current.previous_boot_id);
+      }
+      return result;
+    });
     const row = rows[0];
-    return row ? { ...workspace(row), accessEpoch: row.access_epoch, loginRevision: row.login_revision } : null;
+    return row ? { ...workspace(row), accessEpoch: row.access_epoch, loginRevision: row.login_revision, executionMode: row.execution_mode } : null;
   }
 
   async acceptWorkerHello(token: string, bootId: string, proof?: { accessEpoch: string; loginRevision: string }): Promise<CloudV2WorkerSession | null> {
     const { rows } = await withSystemTx(this.pool, async tx => {
-      const result = await tx.query<Row & { access_epoch: string; login_revision: string; prior_state: "creating" | "starting" | "running"; hello_ms: number }>(
+      const result = await tx.query<Row & { execution_mode: "legacy" | "prepared" | "active"; access_epoch: string; login_revision: string; prior_state: "creating" | "starting" | "running"; hello_ms: number }>(
       `WITH prior AS MATERIALIZED (
          SELECT id AS prior_id, state AS prior_state, updated_at AS prior_updated_at,
-           NOT EXISTS (SELECT 1 FROM cloud_workspace_environment_pins p WHERE p.workspace_id=w.id
-             AND (p.ready_boot_id IS NULL OR p.ready_boot_id IS DISTINCT FROM $2::uuid)) AS environment_ready
+           (execution_mode='active' OR NOT EXISTS (SELECT 1 FROM cloud_workspace_environment_pins p WHERE p.workspace_id=w.id
+             AND (p.ready_boot_id IS NULL OR p.ready_boot_id IS DISTINCT FROM $2::uuid))) AS environment_ready
          FROM cloud_v2_workspaces w
          WHERE worker_token_hash=$1 AND state IN ('creating','starting','running') AND ${LIVE_ACCESS}
            AND ($3::bigint IS NULL OR (worker_boot_id=$2 AND access_epoch=$3 AND login_revision=$4::bigint)) FOR UPDATE)
@@ -733,7 +788,7 @@ export class CloudV2Store {
          active_at=CASE WHEN state='running' OR NOT prior.environment_ready THEN active_at ELSE clock_timestamp() END,
          updated_at=CASE WHEN state='running' OR (state='starting' AND NOT prior.environment_ready) THEN updated_at ELSE clock_timestamp() END
        FROM prior WHERE w.id=prior.prior_id
-       RETURNING ${COLUMNS.replace(/\b(\w+)\b/g, "w.$1")}, access_epoch::text, login_revision::text, prior.prior_state,
+       RETURNING ${COLUMNS.replace(/\b(\w+)\b/g, "w.$1")}, execution_mode, access_epoch::text, login_revision::text, prior.prior_state,
          greatest(0, extract(epoch FROM (clock_timestamp()-prior.prior_updated_at))*1000)::float8 AS hello_ms`,
       [hashCloudV2Token(token), bootId, proof?.accessEpoch ?? null, proof?.loginRevision ?? null]);
       const ready = result.rows[0];
@@ -741,23 +796,23 @@ export class CloudV2Store {
       return result;
     });
     const row = rows[0];
-    return row ? { ...workspace(row), accessEpoch: row.access_epoch, loginRevision: row.login_revision,
+    return row ? { ...workspace(row), accessEpoch: row.access_epoch, loginRevision: row.login_revision, executionMode: row.execution_mode,
       ...(row.prior_state === "running" || row.state !== "running" ? {} : { helloTiming: { state: row.prior_state, durationMs: Math.round(row.hello_ms) } }) } : null;
   }
 
   async workerSession(token: string, bootId: string, handoff?: { id: string; sha256?: string }): Promise<CloudV2WorkerSession | null> {
-    const { rows } = handoff ? await withSystemTx(this.pool, tx => tx.query<Row & { access_epoch: string; login_revision: string }>(
-      `SELECT ${COLUMNS}, access_epoch::text, login_revision::text FROM cloud_v2_workspaces w
+    const { rows } = handoff ? await withSystemTx(this.pool, tx => tx.query<Row & { execution_mode: "legacy" | "prepared" | "active"; access_epoch: string; login_revision: string }>(
+      `SELECT ${COLUMNS}, execution_mode, access_epoch::text, login_revision::text FROM cloud_v2_workspaces w
        WHERE worker_token_hash=$1 AND ${RUNTIME_HANDOFF_SESSION}
        AND state NOT IN ('deleting','deleted') AND ${LIVE_ACCESS}`,
       [hashCloudV2Token(token), bootId, handoff.id, handoff.sha256 ?? null]))
-      : await withSystemStatement<Row & { access_epoch: string; login_revision: string }>(this.pool,
-        sql`SELECT ${WORKSPACE_COLUMNS_SQL}, access_epoch::text, login_revision::text FROM cloud_v2_workspaces w
+      : await withSystemStatement<Row & { execution_mode: "legacy" | "prepared" | "active"; access_epoch: string; login_revision: string }>(this.pool,
+        sql`SELECT ${WORKSPACE_COLUMNS_SQL}, execution_mode, access_epoch::text, login_revision::text FROM cloud_v2_workspaces w
           WHERE worker_token_hash=decode(${SqlFragment.text(hashCloudV2Token(token).toString("hex"), /^[0-9a-f]{64}$/)}, 'hex')
             AND worker_boot_id=${SqlFragment.uuid(bootId.toLowerCase())}
             AND state NOT IN ('deleting','deleted') AND ${CLOUD_V2_LIVE_ACCESS_SQL}`);
     const row = rows[0];
-    return row ? { ...workspace(row), accessEpoch: row.access_epoch, loginRevision: row.login_revision } : null;
+    return row ? { ...workspace(row), accessEpoch: row.access_epoch, loginRevision: row.login_revision, executionMode: row.execution_mode } : null;
   }
 
   async reportWorkerSetup(token: string, bootId: string, value: CloudV2SetupStatus,
@@ -782,9 +837,9 @@ export class CloudV2Store {
   }
 
   async relayActivity(binding: CloudV2WorkerBinding, idle: boolean): Promise<(CloudV2WorkerSession & { promptsPending: boolean }) | null> {
-    type ActivityRow = Row & { access_epoch: string; login_revision: string; prompts_pending: boolean };
+    type ActivityRow = Row & { execution_mode: "legacy" | "prepared" | "active"; access_epoch: string; login_revision: string; prompts_pending: boolean };
     const { rows } = idle ? await withSystemStatement<ActivityRow>(this.pool, sql`
-      SELECT ${WORKSPACE_COLUMNS_SQL}, access_epoch::text, login_revision::text, ${PENDING_WORKER_PROMPTS_SQL} AS prompts_pending
+      SELECT ${WORKSPACE_COLUMNS_SQL}, execution_mode, access_epoch::text, login_revision::text, ${PENDING_WORKER_PROMPTS_SQL} AS prompts_pending
       FROM cloud_v2_workspaces w WHERE w.id=${SqlFragment.uuid(binding.workspaceId)}
         AND worker_boot_id=${SqlFragment.uuid(binding.bootId)}
         AND access_epoch=${SqlFragment.text(binding.accessEpoch, /^(0|[1-9][0-9]{0,18})$/)}::bigint
@@ -798,11 +853,11 @@ export class CloudV2Store {
           THEN clock_timestamp() ELSE active_at END
           WHERE id=$1 AND worker_boot_id=$2 AND access_epoch=$3::bigint AND worker_token_hash=decode($4,'hex')
             AND state NOT IN ('deleting','deleted') AND ${LIVE_ACCESS}
-          RETURNING ${COLUMNS}, access_epoch::text, login_revision::text, ${PENDING_WORKER_PROMPTS_SQL.text} AS prompts_pending`,
+          RETURNING ${COLUMNS}, execution_mode, access_epoch::text, login_revision::text, ${PENDING_WORKER_PROMPTS_SQL.text} AS prompts_pending`,
         [binding.workspaceId, binding.bootId, binding.accessEpoch, binding.workerTokenHash]);
       });
     const row = rows[0];
-    return row ? { ...workspace(row), accessEpoch: row.access_epoch, loginRevision: row.login_revision, promptsPending: row.prompts_pending } : null;
+    return row ? { ...workspace(row), executionMode: row.execution_mode, accessEpoch: row.access_epoch, loginRevision: row.login_revision, promptsPending: row.prompts_pending } : null;
   }
 
   /** Hello precedes checkout. Only that same live boot can fail its admission;
@@ -856,6 +911,10 @@ export class CloudV2Store {
          AND NOT EXISTS (SELECT 1 FROM cloud_v2_prompt_outbox p WHERE p.workspace_id=w.id
            AND p.state IN ('queued','inboxed','dispatching','accepted') AND p.access_epoch=w.access_epoch)
          AND NOT EXISTS (SELECT 1 FROM local_command_requests r WHERE r.workspace_id=w.id AND r.phase IN ('pending','claimed'))
+         AND NOT EXISTS (SELECT 1 FROM cloud_v2_execution_contexts e WHERE e.workspace_id=w.id AND w.execution_mode='active'
+           AND e.state='active' AND e.expires_at>clock_timestamp() AND e.worker_boot_id=w.worker_boot_id
+           AND e.access_epoch=w.access_epoch AND e.stop_generation=w.stop_generation
+           AND (e.kind='bootstrap' OR e.kind='client' AND e.operation IS NOT NULL))
        ORDER BY coalesce(active_at, updated_at) LIMIT $2`,
       [before, limit],
     ));
@@ -871,7 +930,11 @@ export class CloudV2Store {
       WHERE id=$1 AND state='running' AND coalesce(active_at,updated_at)<$2
         AND NOT EXISTS (SELECT 1 FROM cloud_v2_prompt_outbox p WHERE p.workspace_id=w.id
           AND p.state IN ('queued','inboxed','dispatching','accepted') AND p.access_epoch=w.access_epoch)
-        AND NOT EXISTS (SELECT 1 FROM local_command_requests r WHERE r.workspace_id=w.id AND r.phase IN ('pending','claimed'))`, [id, before]);
+        AND NOT EXISTS (SELECT 1 FROM local_command_requests r WHERE r.workspace_id=w.id AND r.phase IN ('pending','claimed'))
+        AND NOT EXISTS (SELECT 1 FROM cloud_v2_execution_contexts e WHERE e.workspace_id=w.id AND w.execution_mode='active'
+          AND e.state='active' AND e.expires_at>clock_timestamp() AND e.worker_boot_id=w.worker_boot_id
+          AND e.access_epoch=w.access_epoch AND e.stop_generation=w.stop_generation
+          AND (e.kind='bootstrap' OR e.kind='client' AND e.operation IS NOT NULL))`, [id, before]);
     });
   }
 
@@ -901,24 +964,26 @@ export class CloudV2Store {
 
   /** Consumes a connect ticket exactly once. */
   async consumeConnectTicket(token: string, workspaceId: string): Promise<CloudV2AppGrant | null> {
-    const { rows } = await withSystemTx(this.pool, tx => tx.query<{ user_id: string; access_epoch: string; wake_on_connect: boolean; provider_session_id: string | null }>(
+    const { rows } = await withSystemTx(this.pool, tx => tx.query<{ user_id: string; access_epoch: string; wake_on_connect: boolean; provider_session_id: string | null; execution_authority: ExecutionConnectAuthority | null }>(
       `UPDATE cloud_v2_tokens t SET used_at = clock_timestamp()
        FROM cloud_v2_workspaces w
        WHERE t.token_hash = $1 AND t.kind = 'connect' AND t.workspace_id = $2 AND t.used_at IS NULL
-         AND t.expires_at > clock_timestamp() AND w.id = t.workspace_id AND w.creator_user_id = t.user_id
+         AND t.expires_at > clock_timestamp() AND w.id = t.workspace_id AND ((w.execution_mode<>'active' AND w.creator_user_id=t.user_id AND t.execution_authority IS NULL)
+           OR (w.execution_mode='active' AND t.execution_authority IS NOT NULL AND w.stop_generation=(t.execution_authority->>'stopGeneration')::bigint
+             AND (t.execution_authority->>'tokenEnd')::double precision>extract(epoch FROM clock_timestamp())*1000))
          AND w.state NOT IN ('deleting','deleted') AND ${LIVE_ACCESS}
          AND (t.provider_session_id IS NULL OR EXISTS (SELECT 1 FROM auth_sessions s
-           WHERE s.provider_session_id = t.provider_session_id AND ${LIVE_SESSION}))
-       RETURNING t.user_id, w.access_epoch::text, t.wake_on_connect, t.provider_session_id`,
+           WHERE s.provider_session_id = t.provider_session_id AND ${LIVE_SESSION.replace("s.user_id = w.creator_user_id", "s.user_id = t.user_id")}))
+       RETURNING t.user_id, w.access_epoch::text, t.wake_on_connect, t.provider_session_id, t.execution_authority`,
       [hashCloudV2Token(token), workspaceId],
     ));
-    return rows[0] ? { userId: rows[0].user_id, accessEpoch: rows[0].access_epoch, wake: rows[0].wake_on_connect, sessionId: rows[0].provider_session_id } : null;
+    return rows[0] ? { userId: rows[0].user_id, accessEpoch: rows[0].access_epoch, wake: rows[0].wake_on_connect, sessionId: rows[0].provider_session_id, ...(rows[0].execution_authority ? { execution: rows[0].execution_authority } : {}) } : null;
   }
 
   async verifyProxyToken(token: string): Promise<(CloudV2Workspace & { accessEpoch?: string; loginRevision?: string }) | null> {
     const { rows } = await withSystemTx(this.pool, tx => tx.query<Row & { access_epoch: string; login_revision: string }>(
       `SELECT ${COLUMNS.replace(/\b(\w+)\b/g, "w.$1")},w.access_epoch::text,w.login_revision::text FROM cloud_v2_tokens t JOIN cloud_v2_workspaces w ON w.id = t.workspace_id
-       WHERE t.token_hash = $1 AND t.kind = 'proxy' AND t.expires_at > clock_timestamp() AND w.state = 'running' AND ${LIVE_ACCESS}`,
+       WHERE t.token_hash = $1 AND t.kind = 'proxy' AND t.expires_at > clock_timestamp() AND w.state = 'running' AND w.execution_mode<>'active' AND ${LIVE_ACCESS}`,
       [hashCloudV2Token(token)],
     ));
     return rows[0] ? { ...workspace(rows[0]), accessEpoch: rows[0].access_epoch, loginRevision: rows[0].login_revision } : null;
@@ -1362,10 +1427,19 @@ export class CloudV2Store {
       await acknowledgeCloudChatEdits(tx, workspaceId, input.chatEditAcks ?? []);
   }
 
-  async listChats(workspaceId: string): Promise<{ chats: unknown[]; chatDeletions: string[] }> {
+  async listChats(workspaceId: string, includeActor = false): Promise<{ chats: unknown[]; chatDeletions: string[] }> {
+    const query = includeActor
+      ? `SELECT h.chat_id,h.deleted_at,(h.row-'actingUser') || CASE WHEN w.execution_mode='active' THEN
+          jsonb_build_object('actingUser',CASE WHEN c.state='active' AND c.expires_at>clock_timestamp() THEN
+            jsonb_build_object('userId',c.user_id,'generation',c.generation::text,'userMessageId',c.user_message_id) ELSE NULL END)
+          ELSE '{}'::jsonb END AS row
+        FROM cloud_v2_chats h JOIN cloud_v2_workspaces w ON w.id=h.workspace_id
+        LEFT JOIN cloud_v2_prompt_chats p ON p.workspace_id=h.workspace_id AND p.chat_id=h.chat_id
+        LEFT JOIN cloud_v2_execution_contexts c ON c.workspace_id=h.workspace_id AND c.id=p.active_context_id
+        WHERE h.workspace_id=$1 ORDER BY h.updated_at DESC LIMIT 1000`
+      : "SELECT chat_id,row-'actingUser' AS row,deleted_at FROM cloud_v2_chats WHERE workspace_id=$1 ORDER BY updated_at DESC LIMIT 1000";
     const { rows } = await withSystemTx(this.pool, tx => tx.query<{ chat_id: string; row: unknown; deleted_at: Date | null }>(
-      `SELECT chat_id, row, deleted_at FROM cloud_v2_chats WHERE workspace_id = $1 ORDER BY updated_at DESC LIMIT 1000`,
-      [workspaceId],
+      query, [workspaceId],
     ));
     return {
       chats: rows.filter(row => !row.deleted_at).map(row => row.row),

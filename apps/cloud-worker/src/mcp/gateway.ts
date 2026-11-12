@@ -15,7 +15,7 @@ import { mcpFailure, mcpFailureError } from "./failure";
 import { McpRuntimeActivity } from "./runtime-activity";
 
 export interface McpAuthorization { headers: Record<string, string>; expiresAt?: number }
-export type McpAuthorizationRequest = (id: string, force?: boolean, signal?: AbortSignal) => Promise<McpAuthorization>;
+export type McpAuthorizationRequest = (id: string, force?: boolean, signal?: AbortSignal, contextId?: string) => Promise<McpAuthorization>;
 /** Native providers receive only a worker-local capability, never upstream
  * OAuth refresh tokens, API headers or environment secrets. */
 export type DriverMcpServers = Record<string, { type: "http"; url: string; headers: Record<string, string> }>;

@@ -30,7 +30,8 @@ export function createCloudTeamRoutes(sharing: CloudTeamSharing, document: (valu
       const failure = error instanceof HttpError ? error : teamUnavailable();
       if (failure.status === 503) c.header("Retry-After","5");
       if (failure.status === 429 && !c.res.headers.has("Retry-After")) c.header("Retry-After","60");
-      return c.json({ error: { code: failure.code,message: failure.message } },failure.status);
+      return c.json({ error: { code: failure.code,message: failure.message,
+        ...("agent" in failure ? { agent: failure.agent } : {}) } },failure.status);
     }
   };
   const limited = bodyLimit({ maxSize: 16*1024,onError: c => c.json({ error: { code: "payload_too_large" } },413) });
@@ -72,15 +73,17 @@ export function createCloudTeamRoutes(sharing: CloudTeamSharing, document: (valu
   }));
   const creator = share(async (c,next) => {
     const id = uuid(c.req.param("id")!), user = c.get("user");
+    if (await sharing.workspaces.prompts.execution?.active(id)) return next();
     if (await sharing.authority.isCreator(id,user.id)) return next();
     const proof = await sharing.authority.admit(id,user);
     if (proof.view.role !== "creator") throw teamReadOnly();
     return next();
   });
   for (const action of ["connect","start","restart","prompts","prompts/stop","github"]) app.post(`${path}/${action}`,creator);
-  for (const action of ["stop","archive"] as const) app.post(`${path}/${action}`,share(async c => {
+  for (const action of ["stop","archive"] as const) app.post(`${path}/${action}`,share(async (c,next) => {
     await body(c,empty,true);
     const id = uuid(c.req.param("id")!), user = c.get("user");
+    if (action === "stop" && await sharing.workspaces.prompts.execution?.active(id)) return next();
     const result = await sharing.manage(id,user,action);
     return c.json({ workspace: document(await sharing.get(id,user)),teamSharing: 1 },result.moved ? 202 : 200);
   }));
@@ -101,9 +104,10 @@ export function createCloudTeamRoutes(sharing: CloudTeamSharing, document: (valu
     const patch = await body(c,z.object({ title: CloudV2SessionNameSchema.transform(value => value.trim()).optional(),archived: z.boolean().optional() })
       .strict().refine(value => value.title !== undefined || value.archived !== undefined));
     const id = uuid(c.req.param("id")!), user = c.get("user"), proof = await sharing.authority.admit(id,user);
-    if (proof.view.role === "member") throw teamManagementDenied();
+    const active = await sharing.workspaces.prompts.execution?.active(id);
+    if (!active && proof.view.role === "member") throw teamManagementDenied();
     const chat = await sharing.workspaces.chatEdits.applyForManager({ organizationId: proof.view.workspace.organizationId,userId: user.id },id,parsed.data,
-      { ...(patch.title === undefined ? {} : { title: patch.title }),...(patch.archived === undefined ? {} : { archived: patch.archived }) },tx => sharing.manager(proof,tx));
+      { ...(patch.title === undefined ? {} : { title: patch.title }),...(patch.archived === undefined ? {} : { archived: patch.archived }) },async tx => { if (active) await sharing.authority.assert(proof,tx); else await sharing.manager(proof,tx); });
     return c.json({ chat });
   }));
   for (const verb of ["follow","unfollow","pin","unpin"] as const) app.post(`${path}/${verb}`,share(async c => {

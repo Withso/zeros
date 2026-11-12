@@ -1,5 +1,6 @@
 // Cloud workspace v2 HTTP API under /v1, so the normal authentication
-// middleware always sets c.get("user"). Workspaces are creator-only.
+// middleware always sets c.get("user"). Execution authority belongs to the persisted rollout mode.
+import type { CloudExecutionContexts } from "./execution/store.js";
 import { CloudWorkspaceCreateSchema, createCloudWorkspaceOperations } from "./workspace-create.js";
 import { rateLimit } from "../ratelimit.js";
 import { Hono } from "hono";
@@ -52,9 +53,10 @@ const ChatEditSchema = z.object({ title: CloudV2SessionNameSchema.transform(valu
 
 export type CloudV2RouteDeps = {
   teamSharing?: CloudTeamSharing;
+  execution?: CloudExecutionContexts;
   workspaceSync?: CloudWorkspaceSync;
   localDevices?: CloudLocalDeviceRoutes;
-  store: Pick<CloudV2Store, "activeComputer" | "createWorkspace" | "createWorkspaceOnce" | "readCreateReceipt" | "get" | "promptContext" | "list" | "requestLifecycle" | "transition" | "issueToken" | "listChats" | "messageWindow" | "searchMessages" | "markActive"> & Partial<Pick<CloudV2Store, "prompts" | "getByNumber" | "chatEdits">>;
+  store: Pick<CloudV2Store, "activeComputer" | "createWorkspace" | "createWorkspaceOnce" | "readCreateReceipt" | "get" | "promptContext" | "list" | "requestLifecycle" | "transition" | "issueToken" | "listChats" | "messageWindow" | "searchMessages" | "markActive"> & Partial<Pick<CloudV2Store, "prompts" | "getByNumber" | "chatEdits" | "requestExecutionLifecycle">>;
   /** Roll out only with a runtime that advertises durable prompt delivery. */
   promptOutbox?: boolean;
   computers: Pick<CloudV2Computers, "requireMember" | "requireAdmin" | "overview" | "enqueue" | "buildConfigured" | "buildSourceTargets" | "saveRecipe" | "discardRecipe" | "reactivate" | "log" | "logRepositories">;
@@ -191,21 +193,24 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
     if (!parsed.success) throw new HttpError(400, "invalid_request", "Invalid cloud workspace connection request");
     const { wake } = parsed.data;
     const userId = c.get("user").id;
-    const workspace = await deps.store.get(id.data, userId);
-    if (!workspace.sourcePending) await deps.authorizeSource?.(workspace);
+    const active = deps.execution && await deps.execution.active(id.data);
+    const acting = active ? await deps.execution!.workspace(id.data, userId, c.get("user")) : undefined;
+    const workspace = acting?.workspace ?? await deps.store.get(id.data, userId);
+    if (!active && !workspace.sourcePending) await deps.authorizeSource?.(workspace);
     const explicitWake = c.req.query("wakePolicy") === "explicit";
     if (explicitWake && (workspace.archivedAt || workspace.state === "stopping" || (!wake && workspace.state === "stopped")))
       throw new HttpError(409, "cloud_workspace_not_running", "This cloud workspace is not ready for a connection");
     if (workspace.state === "deleting" || workspace.state === "failed") throw new HttpError(409, "workspace_unavailable", "This cloud workspace is unavailable");
     if (wake && workspace.state === "stopped") {
-      if (!explicitWake) await deps.store.transition(workspace.id, ["stopped"], "starting");
+      if (acting) await deps.store.requestExecutionLifecycle!(workspace.id, userId, "start", acting.proof, c.get("user"), explicitWake);
+      else if (!explicitWake) await deps.store.transition(workspace.id, ["stopped"], "starting");
       else if (!await deps.store.transition(workspace.id, ["stopped"], "starting", { unarchived: true })) {
         const current = await deps.store.get(workspace.id, userId);
         if (current.archivedAt || !["creating", "starting", "running"].includes(current.state))
           throw new HttpError(409, "cloud_workspace_not_running", "This cloud workspace is not ready for a connection");
       }
     }
-    const ticket = await deps.store.issueToken({ workspaceId: workspace.id, kind: "connect", userId, ttlMs: CONNECT_TICKET_TTL_MS, authority: c.get("user"), wake });
+    const ticket = active ? await deps.execution!.clients.ticket(workspace.id, c.get("user"), wake) : await deps.store.issueToken({ workspaceId: workspace.id, kind: "connect", userId, ttlMs: CONNECT_TICKET_TTL_MS, authority: c.get("user"), wake });
     return c.json({
       url: `${deps.bridgeBaseUrl.replace(/\/+$/, "")}/v2/cloud/workspaces/${workspace.id}/bridge`,
       protocols: [CLOUD_V2_BRIDGE_PROTOCOL, `ticket.${ticket.token}`],
@@ -238,8 +243,10 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
     app.post(`/v1/cloud-v2/workspaces/:id/${action}`, async c => {
       const id = uuid.safeParse(c.req.param("id"));
       if (!id.success) throw new HttpError(404, "not_found", "Cloud workspace not found");
-      if (action === "start" || action === "restart") await deps.authorizeSource?.(await deps.store.get(id.data, c.get("user").id));
-      const { workspace, moved } = await deps.store.requestLifecycle(id.data, c.get("user").id, action);
+      const user = c.get("user"), active = deps.execution && await deps.execution.active(id.data);
+      if (!active && (action === "start" || action === "restart")) await deps.authorizeSource?.(await deps.store.get(id.data, user.id));
+      const proof = active && action !== "stop" ? await deps.execution!.deps.authority.admit(id.data, user.id, { user }) : undefined;
+      const { workspace, moved } = active ? await deps.store.requestExecutionLifecycle!(id.data, user.id, action, proof, user) : await deps.store.requestLifecycle(id.data, user.id, action);
       return c.json({ workspace: await document(workspace) }, moved || action === "restart" ? 202 : 200);
     });
   }

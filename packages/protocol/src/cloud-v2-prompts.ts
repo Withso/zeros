@@ -71,7 +71,9 @@ export const CloudV2SessionNameSchema = z.string().max(1024)
   .refine(value => { const trimmed = value.trim(); return trimmed.length >= 1 && trimmed.length <= 120 && !/\p{Cc}/u.test(value); });
 /** `sessionName` is sent only to workers advertising session-name-v1. */
 export const CloudV2PromptDeliverySchema = z.object({ receipt: CloudV2PromptReceiptSchema, payload: CloudV2PromptSchema, deliveryId: z.string().uuid(),
-  sessionName: CloudV2SessionNameSchema.optional() }).strict();
+  sessionName: CloudV2SessionNameSchema.optional(),
+  /** Team sharing slice B, activated workspaces only: who sent it (the actor is chosen later, at begin). */
+  senderUserId: z.string().uuid().optional() }).strict();
 export type CloudV2PromptDelivery = z.infer<typeof CloudV2PromptDeliverySchema>;
 /** chat-edit-v1: a control-plane rename or archive of an existing chat. A
  * worker applies it once per version and acknowledges it in history. */

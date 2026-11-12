@@ -273,6 +273,7 @@ d("owner-managed staff roles", () => {
         `ALTER TABLE staff_role_changes OWNER TO ${migrationOwner}`,
       );
       await pool.query(`GRANT USAGE ON SCHEMA public TO ${migrationOwner}`);
+      await pool.query(`GRANT zeros_app TO ${migrationOwner}`);
       // The users RLS policy references this table even when its system branch
       // is true; PostgreSQL still performs relation privilege checks at plan time.
       await pool.query(

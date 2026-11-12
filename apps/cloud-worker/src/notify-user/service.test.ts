@@ -1,5 +1,5 @@
 import { expect, it, vi } from "vitest";
-import type { NotifyUserWorkerRequest } from "@zeros/protocol/notify-user";
+import { NotifyUserWorkerRequestSchema, type NotifyUserWorkerRequest } from "@zeros/protocol/notify-user";
 import { NotifyUserService } from "./service";
 
 const input = { title: "Ready for review", message: "The fix is ready.", kind: "review" as const };
@@ -44,4 +44,13 @@ it("needs a running turn, and never fails the turn when publishing fails", async
   expect(await f.service.notify("exec", input, signal)).toBe("no_turn");
   const failing = new NotifyUserService({ activeTurn: () => ({ chatId: "c", turnId: "t", executionId: "e" }), publish: async () => { throw new Error("closed"); }, deliver: async () => "sent" });
   expect(await failing.notify("exec", input, signal)).toBe("sent");
+});
+
+it("names the active turn's execution context in an activated workspace, so the server reaches that turn's person", async () => {
+  const deliver = vi.fn(async (_request: NotifyUserWorkerRequest, _signal: AbortSignal) => "sent" as const);
+  const contextId = "66666666-6666-4666-8666-666666666666";
+  const service = new NotifyUserService({ activeTurn: () => ({ chatId: "chat", turnId: "t1", executionId: "native-exec", contextId }), publish: async () => {}, deliver });
+  expect(await service.notify("exec", input, signal)).toBe("sent");
+  expect(deliver.mock.calls[0]![0]).toMatchObject({ contextId });
+  expect(NotifyUserWorkerRequestSchema.parse(deliver.mock.calls[0]![0])).toMatchObject({ contextId });
 });
