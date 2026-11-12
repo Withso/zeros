@@ -97,6 +97,15 @@ async function inventory(directory, prefix = "", files = {}) {
   return files;
 }
 
+/** {version:1,features}: CLOUD_WORKER_FEATURES itself, evaluated from the source, never a copy that can drift. */
+async function workerCapabilities() {
+  const result = await build({ absWorkingDir: root, entryPoints: ["src/worker-features.ts"], bundle: true, write: false, platform: "node", format: "esm", target: "node24", logLevel: "silent" });
+  const { CLOUD_WORKER_FEATURES } = await import(`data:text/javascript;base64,${Buffer.from(result.outputFiles[0].text).toString("base64")}`);
+  const features = [...new Set(String(CLOUD_WORKER_FEATURES).split(","))].sort();
+  if (!features.length || features.length > 128 || features.some(feature => !/^[a-z][a-z0-9-]{0,63}$/.test(feature))) throw new Error("Invalid worker feature list.");
+  return { version: 1, features };
+}
+
 try {
   await build({ absWorkingDir: root, entryPoints: { worker: "src/main.ts", "cursor-host": "src/drivers/cursor/host-entry.ts", "git-askpass": "src/credentials/askpass-entry.ts", "git-credential": "src/credentials/git-credential-entry.ts", gh: "src/credentials/gh-entry.ts", zeros: "src/cli/zeros-entry.ts" },
     outdir: staging, outExtension: { ".js": ".mjs" }, bundle: true, platform: "node", target: "node24", format: "esm", external,
@@ -118,6 +127,8 @@ try {
   for (const name of ["LICENSE", "THIRD-PARTY-NOTICES.md", "THIRD-PARTY-LICENSES.txt"])
     await copyFile(join(repository, name), join(staging, name));
   await writeFile(join(staging, "package.json"), JSON.stringify({ name: sourcePackage.name, version: sourcePackage.version, private: true, type: "module", license: sourcePackage.license, engines: sourcePackage.engines }, null, 2) + "\n");
+  // The features this exact build advertises on hello, for the publisher's digest-keyed capability record.
+  await writeFile(join(staging, "worker-capabilities.json"), JSON.stringify(await workerCapabilities()) + "\n");
   await writeFile(join(staging, "runtime-manifest.json"), JSON.stringify({ version: 1, node: "24", platform: process.platform, arch: process.arch, pins, packages, files: await inventory(staging) }, null, 2) + "\n");
   await rm(output, { recursive: true, force: true }); await rename(staging, output);
   process.stdout.write(`Cloud worker built for ${process.platform}/${process.arch}; ${Object.keys(packages).length} runtime packages.\n`);

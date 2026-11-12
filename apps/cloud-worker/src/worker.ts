@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { access, rm } from "node:fs/promises";
+import { access, lstat, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -635,6 +635,10 @@ export class CloudWorker {
       await this.github.start();
       if (this.disposed || this.stopping) return false;
       // Activated: checkout and setup run as the persisted starter, from the bootstrap lease; no Creator fallback.
+      // Activated with no bootstrap context: only an existing checkout may start (a later process on a boot whose
+      // setup completed, or an earlier boot's checkout). A fresh one is never cloned or set up as nobody.
+      if (this.acting && !config.bootstrapContextId && !this.options.runtimeResume && !await lstat(join(config.workspace.checkoutPath, ".git")).then(() => true, () => false))
+        throw tagged(new WorkspaceError("WORKSPACE_UNAVAILABLE", "This workspace is still being prepared. Try again shortly."), "bootstrap_required");
       const bootstrap = this.acting && config.bootstrapContextId && this.contexts && !this.options.runtimeResume
         ? await this.contexts.bootstrapLease(config.bootstrapContextId).catch(error => { throw tagged(error, "bootstrap_lease_refused"); }) : undefined;
       const bootstrapEnvironment = bootstrap && { git: gitIdentityEnvironment(bootstrap.gitIdentity), zeros: { ZEROS_EXECUTION_CONTEXT: bootstrap.contextId } };
