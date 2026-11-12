@@ -2,6 +2,7 @@ import { createMessage } from "@zeros/protocol/messages";
 import { SYNC_BATCH_CAPABILITY, SYNC_BRIDGE_PATH, SYNC_BRIDGE_PROTOCOL, SYNC_HINT_KIND, SYNC_LIMITS, SyncBootstrapReplySchema, SyncReadBatchReplySchema,
   SyncReadReplySchema, SyncSnapshotReplySchema, type SyncGrantReply, type SyncReadBatchRequest, type SyncReadRequest, type SyncSnapshotRequest } from "@zeros/protocol/workspace-sync";
 import { SyncChangedError, type SyncSource } from "./engine";
+import type { GitHave } from "./git";
 
 /** Why a sync socket could not be opened. Paused waits for the VM. */
 export class SyncConnectError extends Error {
@@ -51,6 +52,7 @@ export class DirectSyncConnection implements SyncSource {
   private inFlight = 0;
   private readonly waiting: Array<() => void> = [];
   private batch = false;
+  private multiHave = false;
   private constructor(private readonly ws: SyncSocket, private readonly hint: () => void, private readonly ended: () => void) {}
 
   static async connect(deps: DirectDeps, handlers: { hint(): void; closed(): void }): Promise<DirectSyncConnection> {
@@ -77,7 +79,10 @@ export class DirectSyncConnection implements SyncSource {
 
   snapshot(request: SyncSnapshotRequest) { return this.request("sync.snapshot", request).then(result => SyncSnapshotReplySchema.parse(result)); }
   read(request: SyncReadRequest) { return this.request("sync.read", request).then(result => SyncReadReplySchema.parse(result)); }
-  bootstrap(have?: string) { return this.request("sync.bootstrap", have ? { have } : {}).then(result => SyncBootstrapReplySchema.parse(result)); }
+  bootstrap(have?: GitHave) {
+    const heads = [...new Set(typeof have === "string" ? [have] : have ?? [])].filter(id => /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(id)).slice(0, 64);
+    return this.request("sync.bootstrap", heads.length ? { have: this.multiHave ? heads : heads[0] } : {}).then(result => SyncBootstrapReplySchema.parse(result));
+  }
   bundleRead(id: string, offset: number, length: number) { return this.request("sync.bundleRead", { id, offset, length }).then(result => SyncReadReplySchema.parse(result)); }
   readBatch(request: SyncReadBatchRequest) { return this.request("sync.readBatch", request).then(result => SyncReadBatchReplySchema.parse(result)); }
   /** The worker serves sync.readBatch (an older one never says so). */
@@ -107,7 +112,11 @@ export class DirectSyncConnection implements SyncSource {
     try { message = JSON.parse(raw); } catch { return; }
     if (message.source !== "engine") return;
     if (message.type === "DB_CHANGED" && Array.isArray(message.kinds) && message.kinds.includes(SYNC_HINT_KIND)) { this.hint(); return; }
-    if (message.type === "ENGINE_READY") { this.batch = Array.isArray(message.capabilities) && message.capabilities.includes(SYNC_BATCH_CAPABILITY); return; }
+    if (message.type === "ENGINE_READY") {
+      this.batch = Array.isArray(message.capabilities) && message.capabilities.includes(SYNC_BATCH_CAPABILITY);
+      this.multiHave = Array.isArray(message.capabilities) && message.capabilities.includes("sync-have-v2");
+      return;
+    }
     if ((message.type !== "WORKSPACE_RESPONSE" && message.type !== "WORKSPACE_ERROR") || typeof message.requestId !== "string") return;
     const pending = this.pending.get(message.requestId);
     if (!pending) return;

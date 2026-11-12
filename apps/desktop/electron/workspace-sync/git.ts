@@ -5,23 +5,35 @@ import { lstat, mkdir, open, readFile, rename, rm, writeFile } from "node:fs/pro
 import { join } from "node:path";
 import { SYNC_LIMITS, isSafeRemoteUrl, type SyncBootstrapReply } from "@zeros/protocol/workspace-sync";
 import { SyncChangedError } from "./engine-errors";
+import type { WorkspaceSyncStorage } from "../../shared/workspace-sync";
 
 /** What the engine needs from the worker for history. */
 export interface GitSource {
-  bootstrap(have?: string): Promise<SyncBootstrapReply>;
+  bootstrap(have?: GitHave): Promise<SyncBootstrapReply>;
   bundleRead(id: string, offset: number, length: number): Promise<{ bytes: number; base64: string }>;
 }
-export interface GitState { head: string; branch: string; created: string[] }
-export type GitRun = (args: string[], options?: { cwd?: string }) => Promise<string>;
+export type GitHave = string | readonly string[];
+export interface GitState { head: string; branch: string; created: string[]; shared?: { store: string; registration: string } }
+export interface GitOptions { cwd?: string; fileTransport?: boolean; githubToken?: { token: string; repository: string }; signal?: AbortSignal }
+export type GitRun = (args: string[], options?: GitOptions) => Promise<string>;
 
-/** Every engine git command: no hooks, no fsmonitor, no gc, no credential
- * helper, no network transport, no system config, no prompt. */
+/** Ambient Git config, helpers and lazy fetches cannot expand a sync command's explicit transport. */
 const HYGIENE = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "gc.auto=0", "-c", "credential.helper=",
-  "-c", "protocol.allow=never", "-c", "protocol.file.allow=always", "-c", "advice.detachedHead=false"];
+  "-c", "protocol.allow=never", "-c", "advice.detachedHead=false", "-c", "fetch.fsckObjects=true", "-c", "transfer.fsckObjects=true",
+  "-c", "http.followRedirects=false", "-c", "fetch.recurseSubmodules=false", "-c", "submodule.recurse=false", "-c", "maintenance.auto=false"];
 export const runGit: GitRun = (args, options = {}) => new Promise((resolve, reject) => {
-  execFile("git", [...HYGIENE, ...args], { cwd: options.cwd, timeout: 15 * 60_000, maxBuffer: 16 * 1024 * 1024,
-    env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: process.env.HOME ?? "/", GIT_TERMINAL_PROMPT: "0", GIT_CONFIG_NOSYSTEM: "1", LANG: "C" } },
-  (error, stdout) => error ? reject(error) : resolve(String(stdout)));
+  const env: NodeJS.ProcessEnv = { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: process.env.HOME ?? "/", GIT_TERMINAL_PROMPT: "0",
+    GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_NO_LAZY_FETCH: "1", GIT_NO_REPLACE_OBJECTS: "1", LANG: "C" };
+  const transport = options.githubToken ? ["-c", "protocol.https.allow=always"] : options.fileTransport ? ["-c", "protocol.file.allow=always"] : [];
+  if (options.githubToken) {
+    const { token, repository } = options.githubToken;
+    if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository) || !token || /[\r\n\0]/.test(token)) { reject(new Error("Invalid Git credential.")); return; }
+    env.GIT_CONFIG_COUNT = "1";
+    env.GIT_CONFIG_KEY_0 = `http.https://github.com/${repository}.extraHeader`;
+    env.GIT_CONFIG_VALUE_0 = `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${token}`).toString("base64")}`;
+  }
+  execFile("git", [...HYGIENE, ...transport, ...args], { cwd: options.cwd, signal: options.signal, timeout: 15 * 60_000, maxBuffer: 16 * 1024 * 1024, env },
+    (error, stdout) => error ? reject(new Error(options.signal?.aborted ? "Git operation cancelled." : "Git operation failed.")) : resolve(String(stdout)));
 });
 
 const STALE_LOCK_MS = 10 * 60_000, BUNDLE_IN_FLIGHT = 2;
@@ -41,9 +53,12 @@ async function hashPath(path: string): Promise<string> {
  * itself; the caller records `head` only after the last one, so a crash at any
  * point is finished by the next cycle. */
 export class GitMirror {
-  constructor(private readonly root: string, private readonly meta: string, private readonly git: GitRun = runGit, private readonly now = Date.now) {}
+  constructor(protected readonly root: string, protected readonly meta: string, protected readonly git: GitRun = runGit, protected readonly now = Date.now) {}
 
   async available(): Promise<boolean> { return this.git(["--version"]).then(() => true, () => false); }
+
+  async current(_previous: GitState): Promise<boolean> { return lstat(join(this.root, ".git")).then(info => info.isDirectory(), () => false); }
+  async storage(_changed = false): Promise<WorkspaceSyncStorage | undefined> { return undefined; }
 
   async apply(source: GitSource, previous: GitState | undefined): Promise<GitState | "too_many_bytes"> {
     const gitDir = join(this.root, ".git");
@@ -59,7 +74,7 @@ export class GitMirror {
       if (bundle) {
         await g("bundle", "verify", "-q", bundle);
         // Every object from the worker is checked: it runs as the same user as the agents.
-        await this.git(["-c", "fetch.fsckObjects=true", "-c", "transfer.fsckObjects=true", "--git-dir", gitDir, "--work-tree", this.root, "fetch", "-q", "--no-tags", "--no-write-fetch-head", bundle, "+refs/heads/*:refs/zeros-sync/heads/*", "+refs/remotes/origin/*:refs/remotes/origin/*"], { cwd: this.root });
+        await this.git(["-c", "fetch.fsckObjects=true", "-c", "transfer.fsckObjects=true", "--git-dir", gitDir, "--work-tree", this.root, "fetch", "-q", "--no-tags", "--no-write-fetch-head", bundle, "+refs/heads/*:refs/zeros-sync/heads/*", "+refs/remotes/origin/*:refs/remotes/origin/*"], { cwd: this.root, fileTransport: true });
       }
       await g("update-ref", `refs/heads/${reply.branch}`, reply.head);
       await g("symbolic-ref", "HEAD", `refs/heads/${reply.branch}`);
@@ -120,7 +135,7 @@ export class GitMirror {
 
   /** The bundle in 1 MiB reads, BUNDLE_IN_FLIGHT at a time, each written at its offset; a retry of the same bundle
    * (the worker keeps it for its lifetime) resumes from the prefix that had landed in order. Then the whole file is hashed. */
-  private async download(source: GitSource, bundle: NonNullable<SyncBootstrapReply["bundle"]>): Promise<string> {
+  protected async download(source: GitSource, bundle: NonNullable<SyncBootstrapReply["bundle"]>): Promise<string> {
     const path = join(this.meta, "tmp", `${bundle.id}.bundle`);
     const resume = this.partial?.id === bundle.id && this.partial.path === path && await lstat(path).then(info => info.isFile(), () => false) ? this.partial.done : 0;
     if (!resume) { await rm(path, { force: true }); this.partial = undefined; }

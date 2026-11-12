@@ -100,6 +100,10 @@ const SYNC_LABEL = "Sync to a local directory";
 const DOT: Record<WorkspaceSyncStatus["state"], string> = { in_sync: "bg-green-primary", error: "bg-red-primary", syncing: "bg-fg3", paused: "bg-fg3" };
 /** A folder under the person's home reads from ~. */
 const displayFolder = (folder: string) => folder.replace(/^\/Users\/[^/]+(?=\/|$)/, "~");
+const displayBytes = (bytes: number) => {
+  const unit = bytes >= 1024 ** 3 ? 3 : bytes >= 1024 ** 2 ? 2 : bytes >= 1024 ? 1 : 0;
+  return `${(bytes / 1024 ** unit).toFixed(unit ? 1 : 0).replace(/\.0$/, "")} ${["B", "KB", "MB", "GB"][unit]}`;
+};
 
 function SwitchRow({ mac, checked, disabled, onChange, children }: {
   mac: ConnectedMac; checked: boolean; disabled: boolean; onChange(value: boolean): void; children?: ReactNode;
@@ -148,6 +152,10 @@ function ThisMacSyncRow({ mac, sync }: { mac: ConnectedMac; sync: ThisMacSync })
           </DropdownMenu>
         </div>
       )}
+      {status?.storage && <>
+        <p className="text-fg3 text-3xxs leading-4.5">{`Folder: ${displayBytes(status.storage.folderBytes)} · Shared Git: ${displayBytes(status.storage.sharedGitBytes)}`}</p>
+        <p className="text-fg3 text-3xxs leading-4.5">Git history downloads use your normal GitHub credentials on this Mac. Git LFS files are not downloaded.</p>
+      </>}
     </SwitchRow>
   );
 }
