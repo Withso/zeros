@@ -24,6 +24,8 @@ interface Options {
   runtimeHandoff?: { id: string; bootId: string };
   publicKeys?: readonly string[]; publicKeysFile?: string; port?: number; fetch?: typeof fetch;
   retryBaseMs?: number; retryMaxMs?: number; onStatus?: (status: HybridStatus) => void;
+  /** The safety heartbeat's phase (epoch ms); random per boot by default. Tests pin it so no heartbeat lands mid-test. */
+  heartbeatPhase?: number;
   /** Worker journal lines from the inbound bridge (sync sockets): short ids and codes only. */
   log?: (line: string) => void;
 }
@@ -66,7 +68,7 @@ export class HybridTransport implements Transport {
   private applying: Promise<void> = Promise.resolve();
   private activityFlight?: Promise<void>;
   private activityRequested = false;
-  private readonly pulsePhase = randomInt(60_000);
+  private readonly pulsePhase: number;
   private readonly promptPolls = new Set<AbortController>();
   private historySequence = 0;
   private pendingHistory?: { sequence: number; frame: Extract<CloudV2WorkerFrame, { t: "history" }> };
@@ -75,6 +77,7 @@ export class HybridTransport implements Transport {
   private readonly reportedTimings = new Set<CloudV2WorkerTiming["phase"]>();
 
   constructor(private readonly options: Options) {
+    this.pulsePhase = options.heartbeatPhase ?? randomInt(60_000);
     this.bootId = options.runtimeHandoff?.bootId ?? randomUUID();
     let url: URL;
     try { url = new URL(options.apiUrl); } catch { throw new Error("Invalid worker API URL"); }
@@ -122,8 +125,9 @@ export class HybridTransport implements Transport {
     if (frame.t === "request") {
       // Do not await delivery into a configuring worker: checkout preparation
       // may already be waiting on this very credential request.
+      // Activated: the context names whose credential this is; without it the control plane can answer for nobody.
       void this.request("github-token", { ...(frame.purpose ? { purpose: frame.purpose } : {}),
-        ...(frame.failedTokenSha256 ? { failedTokenSha256: frame.failedTokenSha256 } : {}) }, undefined,
+        ...(frame.failedTokenSha256 ? { failedTokenSha256: frame.failedTokenSha256 } : {}), ...(frame.contextId ? { contextId: frame.contextId } : {}) }, undefined,
         Math.min(GITHUB_HTTP_TIMEOUT_MS, options?.timeoutMs ?? GITHUB_HTTP_TIMEOUT_MS)).then(value => {
         const reply = CloudV2ControlFrameSchema.safeParse({ t: "reply", id: frame.id, ...value });
         return this.handlers!.frame(reply.success ? reply.data : { t: "refusal", id: frame.id, code: "github_token_unavailable" });

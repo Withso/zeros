@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -572,4 +573,22 @@ it("writes one boot-clean sweep line with closed counts only", async () => {
   workers.push(worker); worker.start();
   await relay.receive({ ...config, workspace: { ...config.workspace, checkoutPath: join(directory) }, promptOutbox: 1, agents: {}, actingUser: 1, gitIdentity: null }).catch(() => {});
   await until(() => lines.find(line => line.startsWith("boot-clean sweep"))).toBe("boot-clean sweep targets=3 zombies=2 zombie_leaders_with_threads=1 unreadable=0 worker_cgroup=0 user_session=1 provider_agent=0 other=0 comms=dbus-daemon:1");
+});
+
+it("names why a person's push failed: a closed Git detail in the journal and on the refusal, never stderr", async () => {
+  const lines: string[] = [];
+  const f = await setup({ log: line => lines.push(line) });
+  const remote = join(f.root, "..", "remote.git"), other = join(f.root, "..", "other");
+  const git = (cwd: string, ...args: string[]) => execFileSync("git", ["-c", "user.name=T", "-c", "user.email=t@example.test", ...args], { cwd, stdio: "ignore" });
+  execFileSync("git", ["init", "-q", "--bare", "-b", "main", remote]);
+  execFileSync("git", ["clone", "-q", remote, other], { stdio: "ignore" });
+  git(other, "commit", "-q", "--allow-empty", "-m", "theirs"); git(other, "push", "-q", "origin", "HEAD:main");
+  execFileSync("git", ["init", "-q", "-b", "main", f.root]); git(f.root, "remote", "add", "origin", remote);
+  git(f.root, "commit", "-q", "--allow-empty", "-m", "mine");
+  f.relay.clientUsers.set(CLIENT_A, ALEX);
+  await f.relay.receive({ t: "open", clientId: CLIENT_A, userId: ALEX, contextId: randomUUID() });
+  const push = browserFrame("WORKSPACE_REQUEST", { op: "git.push", params: { remote: "origin" } });
+  await f.relay.request(CLIENT_A, push);
+  await until(() => f.relay.response(push.id)).toMatchObject({ type: "WORKSPACE_ERROR", code: "GIT_COMMAND_FAILED", detail: "remote_rejected" });
+  expect(lines).toContain("workspace-request op=git.push failed class=operation_failed code=GIT_COMMAND_FAILED detail=remote_rejected");
 });
