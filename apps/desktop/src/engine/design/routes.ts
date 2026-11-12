@@ -87,6 +87,7 @@ import {
   getWorkspaceDesignApi,
 } from "./design-api";
 import { DesignPageTargetError, designPageForWrite, designPageFrameFiles } from "./pages";
+import { deleteDesignCanvasItem, putDesignCanvasItem } from "./canvas-items";
 import {
   captureDesignFrameRestorePoint,
   transferDesignNode,
@@ -294,6 +295,8 @@ const DESIGN_WORKSPACE_ROUTES = new Set([
   "design.page.rename",
   "design.page.delete",
   "design.page.select",
+  "design.canvas.item.put",
+  "design.canvas.item.delete",
   "design.themes.update",
   "design.frame.rename",
   "design.frame.duplicate",
@@ -1414,6 +1417,23 @@ export async function handleDesignWorkspaceRoute(
             change => host.recordDesignHistory(workspace.path, catalogDesignHistoryEntry(change, input.pageId)));
         }
         return { page, snapshot: await host.readDesignSnapshot(workspace, remote, { hostLocalResources, fresh: true }) };
+      });
+    }
+    case "design.canvas.item.put":
+    case "design.canvas.item.delete": {
+      // Section titles, notes and link cards: one catalog write and one
+      // shared history step each, like a page rename.
+      const workspace = host.resolveDesignWorkspace(reqStr(params, "workspaceId"), remote);
+      return withDesignWorkspaceMutation(workspace.path, async () => {
+        // No page in the entry: undoing an item keeps the canvas's selection
+        // rather than selecting the page's first frame.
+        const record = (change: Parameters<typeof catalogDesignHistoryEntry>[0]) =>
+          host.recordDesignHistory(workspace.path, catalogDesignHistoryEntry(change));
+        const pageId = designPageIdSchema.parse(params.pageId);
+        const result = op === "design.canvas.item.put"
+          ? { item: await putDesignCanvasItem(workspace.path, { pageId, item: params.item }, record) }
+          : { deleted: await deleteDesignCanvasItem(workspace.path, { pageId, itemId: params.itemId }, record) };
+        return { ...result, snapshot: await host.readDesignSnapshot(workspace, remote, { hostLocalResources, fresh: true }) };
       });
     }
     case "design.themes.update": {

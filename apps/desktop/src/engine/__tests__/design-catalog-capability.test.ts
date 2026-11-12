@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { ZerosEngine } from "../zeros-engine";
 import type { TransportClient } from "../transport/types";
+import { DESIGN_CANVAS_ITEMS_CAPABILITY } from "@zeros/protocol/design-canvas-items";
 import { DESIGN_CATALOG_READ_CAPABILITY, DESIGN_CATALOG_WIDE_BATCHES_CAPABILITY, DESIGN_COMPONENT_OPTIONS_CAPABILITY, DESIGN_FRAMES_CHANGES_CAPABILITY, DESIGN_LAZY_PREPARATION_CAPABILITY, DESIGN_MUTATION_SNAPSHOTS_CAPABILITY, DESIGN_PAGE_SCOPED_MUTATIONS_CAPABILITY } from "@zeros/protocol/design-catalog";
 import { DESIGN_PREVIEW_JOBS_CAPABILITY, DESIGN_THUMBNAILS_STORE_CAPABILITY } from "@zeros/protocol/design-capture";
 import { DESIGN_SOURCE_SURFACES_CAPABILITY } from "@zeros/protocol/design-surface";
@@ -40,6 +41,8 @@ describe("Design catalog capability advertisement", () => {
             DESIGN_COMPONENT_OPTIONS_CAPABILITY,
             DESIGN_COPY_PLACEMENT_CAPABILITY, // Stored thumbnails need no capture host; batch rendering does, and none runs here.
             DESIGN_MUTATION_SNAPSHOTS_CAPABILITY, DESIGN_PAGE_SCOPED_MUTATIONS_CAPABILITY, DESIGN_THUMBNAILS_STORE_CAPABILITY, DESIGN_FRAMES_CHANGES_CAPABILITY,
+            // Canvas items are written through Local Design routes only.
+            DESIGN_CANVAS_ITEMS_CAPABILITY,
             // Wide catalog batches are Local: a remote transport keeps 256 KB replies.
             DESIGN_CATALOG_WIDE_BATCHES_CAPABILITY] : [])],
         }),

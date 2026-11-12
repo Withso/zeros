@@ -1964,3 +1964,126 @@
   ) {
   display: none;
 }
+
+/* Canvas items: section titles, notes and link cards. They live in world
+   coordinates and scale with the camera; outlines and handles stay one
+   screen pixel by dividing by the zoom. */
+.zd-canvas-item {
+  box-sizing: border-box;
+  cursor: default;
+  user-select: none;
+}
+.zd-canvas-item[data-selected] {
+  outline: calc(1px * var(--design-canvas-inverse-zoom)) solid var(--design-selection-stroke);
+  outline-offset: calc(2px * var(--design-canvas-inverse-zoom));
+}
+.zd-canvas-section {
+  display: flex;
+  align-items: center;
+}
+.zd-canvas-item .zd-canvas-section-text {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--fg1);
+  font-size: 20px;
+  line-height: 28px;
+  font-weight: var(--weight-semibold);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.zd-canvas-note {
+  display: flex;
+  flex-direction: column;
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  background: var(--yellow-bg);
+  color: var(--yellow-fg);
+}
+.zd-canvas-item .zd-canvas-note-text {
+  display: block;
+  min-height: 0;
+  flex: 1;
+  overflow: hidden;
+  color: inherit;
+  font-size: 12px;
+  line-height: 18px;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+.zd-canvas-link {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border2);
+  border-radius: var(--radius-lg);
+  background: var(--bg2);
+  color: var(--fg1);
+}
+.zd-canvas-link-icon {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  color: var(--fg2);
+}
+.zd-canvas-item .zd-canvas-link-title {
+  display: block;
+  overflow: hidden;
+  font-size: 13px;
+  line-height: 18px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.zd-canvas-item .zd-canvas-link-path {
+  display: block;
+  overflow: hidden;
+  color: var(--fg3);
+  font-size: 12px;
+  line-height: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* The shared field primitives, reduced to the item's own text; the item
+   selector outranks the primitives' own utilities. */
+.zd-canvas-item .zd-canvas-item-editor {
+  width: 100%;
+  height: auto;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  background: transparent;
+  outline: none;
+  resize: none;
+  user-select: text;
+}
+.zd-canvas-item-handle {
+  position: absolute;
+  background: var(--design-selection-stroke);
+  border-radius: var(--radius-sm);
+}
+.zd-canvas-item-handle-width {
+  top: 50%;
+  right: calc(-5px * var(--design-canvas-inverse-zoom));
+  width: calc(4px * var(--design-canvas-inverse-zoom));
+  height: calc(16px * var(--design-canvas-inverse-zoom));
+  transform: translateY(-50%);
+  cursor: ew-resize;
+}
+.zd-canvas-item-handle-height {
+  left: 50%;
+  bottom: calc(-5px * var(--design-canvas-inverse-zoom));
+  width: calc(16px * var(--design-canvas-inverse-zoom));
+  height: calc(4px * var(--design-canvas-inverse-zoom));
+  transform: translateX(-50%);
+  cursor: ns-resize;
+}
+.zd-canvas-item-handle-corner {
+  right: calc(-6px * var(--design-canvas-inverse-zoom));
+  bottom: calc(-6px * var(--design-canvas-inverse-zoom));
+  width: calc(8px * var(--design-canvas-inverse-zoom));
+  height: calc(8px * var(--design-canvas-inverse-zoom));
+  cursor: nwse-resize;
+}

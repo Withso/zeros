@@ -511,6 +511,7 @@ export function DesignWorkspaceColumn({
           onMotionPropertiesChange={publishMotionProperties}
           onDeleteFrame={deleteFrame}
           zoomActionsRef={zoomActionsRef}
+          onOpenFile={onOpenFile}
         />
         <DesignFloatingPanel
           ref={panelRef}

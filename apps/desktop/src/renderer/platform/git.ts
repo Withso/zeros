@@ -14,6 +14,7 @@ import { refreshDetectedOpenApps } from "./open-apps";
 import { getActiveBridge } from "./bridge/active-bridge";
 import { isCloudWorkspace, cloudTargetForValue } from "./bridge/cloud-workspace-key";
 import { requestCloudGithubPr } from "./cloud-github-pr";
+import type { DesignCanvasItemInput } from "./bridge/design-bridge";
 import type {
   WorkingDirectoriesWire,
   WorkspaceFileListing,
@@ -106,6 +107,8 @@ import {
   bridgeDesignCreateFrame,
   bridgeDesignCreatePage,
   bridgeDesignRenamePage,
+  bridgeDesignPutCanvasItem,
+  bridgeDesignDeleteCanvasItem,
   bridgeDesignUpdateTheme,
   bridgeDesignDeletePage,
   bridgeDesignSelectPage,
@@ -686,6 +689,14 @@ export async function designCreatePage(workspaceId: string, title?: string) {
 
 export async function designRenamePage(workspaceId: string, pageId: string, title: string) {
   return bridgeDesignRenamePage(requireBridge("rename a design page"), workspaceId, pageId, title);
+}
+
+export async function designPutCanvasItem(workspaceId: string, pageId: string, item: DesignCanvasItemInput) {
+  return bridgeDesignPutCanvasItem(requireBridge("place a canvas item"), workspaceId, pageId, item);
+}
+
+export async function designDeleteCanvasItem(workspaceId: string, pageId: string, itemId: string) {
+  return bridgeDesignDeleteCanvasItem(requireBridge("delete a canvas item"), workspaceId, pageId, itemId);
 }
 
 export async function designUpdateTheme(workspaceId: string, theme: { id: string; label: string; base?: boolean }) {

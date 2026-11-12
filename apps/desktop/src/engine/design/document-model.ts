@@ -55,7 +55,10 @@ export interface DesignLintViolation {
     | "overflow"
     | "spacing-scale"
     | "audit-limit"
-    | "layer-tree-limit";
+    | "layer-tree-limit"
+    | "canvas-item-invalid"
+    | "canvas-item-link-unsafe"
+    | "canvas-item-link-missing";
   severity: DesignLintSeverity;
   message: string;
   file: string;

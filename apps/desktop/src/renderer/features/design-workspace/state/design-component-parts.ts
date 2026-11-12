@@ -4,7 +4,7 @@
 // through the workspace cache, which refuses one that names a part before
 // anything is sent; the engine would find no such layer either.
 
-import type { DesignFrameComponent } from "@zeros/protocol/design-catalog";
+import type { DesignFrameComponent, DesignFrameInstances } from "@zeros/protocol/design-catalog";
 import { designComponentPartOf } from "@zeros/protocol/design-runtime";
 
 export const isDesignComponentPartNodeId = (nodeId: string | null | undefined): nodeId is string =>
@@ -55,4 +55,38 @@ export function designComponentTextLock(
   return { kind: "option", message: options.length
     ? `Set by option ${options.map((name) => optionLabel(frame.component!, name)).join(", ")}`
     : "Set by the component's template" };
+}
+
+/** A main component frame, by the same record that titles its header
+ * "Component". Placing instances never makes a frame one. */
+export function designFrameIsComponent(frame: { component?: DesignFrameComponent }): boolean {
+  return frame.component !== undefined;
+}
+
+/** A component's name as people read it: its main frame's title, else its
+ * file name as a sentence. */
+export function designComponentDisplayTitle(
+  name: string,
+  component: { file: string; frame: boolean },
+  mainTitle: (file: string) => string | undefined,
+): string {
+  const title = component.frame ? mainTitle(component.file) : undefined;
+  if (title) return title;
+  const words = name.replace(/-/g, " ");
+  return words.charAt(0).toUpperCase() + words.slice(1);
+}
+
+/** The component a selected layer is an instance of, or null. Own entries
+ * only: a layer id such as "constructor" is not a host. A part is not itself
+ * an instance. */
+export function designComponentInstanceMark(
+  frame: { instances?: DesignFrameInstances },
+  nodeId: string | null,
+  mainTitle: (file: string) => string | undefined,
+): { component: string; title: string } | null {
+  const instances = frame.instances;
+  if (!instances || !nodeId || !Object.hasOwn(instances.hosts, nodeId)) return null;
+  const name = instances.hosts[nodeId]!.component;
+  if (!Object.hasOwn(instances.components, name)) return null;
+  return { component: name, title: designComponentDisplayTitle(name, instances.components[name]!, mainTitle) };
 }

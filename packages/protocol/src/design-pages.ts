@@ -4,6 +4,12 @@ import {
   isDesignPageFolder,
   portableDesignName,
 } from "./design-path";
+import {
+  DESIGN_CANVAS_ITEM_LIMITS,
+  designCanvasItemsWithinLimits,
+  isDesignCanvasItemSummary,
+  type DesignCanvasItemSummary,
+} from "./design-canvas-items";
 
 /** Frames one page admits; per-page stacking `z` spans 0 through this value.
  * A directory has no frame cap of its own beyond its page count. */
@@ -18,6 +24,9 @@ export interface DesignPageSummary {
   frameFiles: string[];
   /** Registered membership, including sources that are missing or cannot render. */
   frameIds?: string[];
+  /** Section titles, notes and link cards drawn on the page; absent when it
+   * has none. Invalid entries in canvas.json are skipped, never sent. */
+  items?: DesignCanvasItemSummary[];
 }
 
 export const designPageIdSchema = z
@@ -65,6 +74,11 @@ export const designPageCatalogSchema = z
         .refine((folder) => folder === "" || isDesignPageFolder(folder)),
       frameFiles: z.array(designFrameFileSchema).max(DESIGN_MAX_FRAMES_PER_PAGE),
       frameIds: z.array(designPageIdSchema).max(DESIGN_MAX_FRAMES_PER_PAGE).optional(),
+      items: z
+        .array(z.custom<DesignCanvasItemSummary>(isDesignCanvasItemSummary))
+        .max(DESIGN_CANVAS_ITEM_LIMITS.itemsPerPage)
+        .refine(designCanvasItemsWithinLimits)
+        .optional(),
     }),
   )
   .min(1)
@@ -73,7 +87,9 @@ export const designPageCatalogSchema = z
     const ids = new Set<string>(),
       folders = new Set<string>(),
       files = new Set<string>(),
-      frameIds = new Set<string>();
+      frameIds = new Set<string>(pages.flatMap((page) => page.frameIds ?? [])),
+      itemIds = new Set<string>(),
+      seenFrameIds = new Set<string>();
     for (const page of pages) {
       const folder = portableDesignName(page.folder);
       if (
@@ -94,13 +110,21 @@ export const designPageCatalogSchema = z
             message: "Design page frame IDs must match its files.",
           });
         for (const id of page.frameIds) {
-          if (frameIds.has(id))
+          if (seenFrameIds.has(id))
             ctx.addIssue({
               code: "custom",
               message: "Design frame IDs must be distinct.",
             });
-          frameIds.add(id);
+          seenFrameIds.add(id);
         }
+      }
+      for (const item of page.items ?? []) {
+        if (frameIds.has(item.id) || itemIds.has(item.id))
+          ctx.addIssue({
+            code: "custom",
+            message: "Design canvas item IDs must be distinct from frames and each other.",
+          });
+        itemIds.add(item.id);
       }
       for (const file of page.frameFiles) {
         const portable = portableDesignName(file);
