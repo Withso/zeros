@@ -11,6 +11,7 @@ import type { CloudV2AppGrant } from "../store.js";
 import type { ExecutionAdmission } from "./authority.js";
 import type { CloudExecutionContexts, ExecutionContext, ExecutionWorker } from "./store.js";
 import { actorChanged, executionWorkerRequired } from "./errors.js";
+import { EXECUTION_MINIMUM_LIFETIME_MS, assertExecutionLifetime } from "./lifetime.js";
 
 export type ExecutionConnectAuthority = { signature: string; stopGeneration: string; tokenEnd: number };
 const record = z.object({ type: z.string(), id: CloudV2PromptIdSchema.optional(), op: z.string().optional(),
@@ -20,7 +21,7 @@ export class CloudExecutionClients {
   constructor(readonly contexts: CloudExecutionContexts) {}
 
   async ticket(workspaceId: string, user: AuthedUser, wake: boolean) {
-    const proof = await this.contexts.deps.authority.admit(workspaceId, user.id, { user });
+    const proof = await this.contexts.deps.authority.admit(workspaceId, user.id, { user, minimumSourceMs: EXECUTION_MINIMUM_LIFETIME_MS });
     const tokenEnd = user.authentication.tokenExpiresAt ? user.authentication.tokenExpiresAt * 1000 : proof.until;
     const expiresAt = new Date(Math.min(Date.now() + 60_000, tokenEnd));
     const token = newCloudV2Token("connect");
@@ -50,7 +51,7 @@ export class CloudExecutionClients {
 
   async open(workspaceId: string, clientId: string, grant: CloudV2AppGrant) {
     if (!grant.execution || grant.execution.tokenEnd <= Date.now()) throw actorChanged();
-    const proof = await this.contexts.deps.authority.admit(workspaceId, grant.userId);
+    const proof = await this.contexts.deps.authority.admit(workspaceId, grant.userId, { minimumSourceMs: EXECUTION_MINIMUM_LIFETIME_MS });
     if (proof.person.personSignature !== grant.execution.signature || proof.person.accessEpoch !== grant.accessEpoch) throw actorChanged();
     return withSystemTx(this.contexts.pool, async tx => {
       await tx.query("SELECT id FROM users WHERE id=$1 FOR KEY SHARE", [proof.person.userId]);
@@ -63,6 +64,7 @@ export class CloudExecutionClients {
       if (grant.sessionId) await this.session(tx, grant.userId, grant.sessionId);
       const context = await this.insert(tx, proof, { kind: "client", clientId, sessionId: grant.sessionId, tokenEnd: grant.execution!.tokenEnd });
       await this.contexts.assertContext(tx, context, proof);
+      assertExecutionLifetime(context.expires_at.getTime());
       return { contextId: context.id, userId: grant.userId, expiresAt: context.expires_at.getTime() };
     });
   }
@@ -76,6 +78,8 @@ export class CloudExecutionClients {
   private async insert(tx: Tx, proof: ExecutionAdmission, input: { kind: "client" | "terminal"; clientId: string; sessionId: string | null;
     tokenEnd?: number; operation?: string; requestId?: string; terminalId?: string; parentId?: string; fingerprint?: Buffer }) {
     const person = proof.person;
+    const until = Math.min(proof.until, input.tokenEnd ?? Infinity);
+    assertExecutionLifetime(until);
     const row = (await tx.query<ExecutionContext>(`INSERT INTO cloud_v2_execution_contexts(id,workspace_id,org_id,user_id,kind,client_id,
       provider_session_id,client_token_expires_at,operation,request_id,terminal_id,parent_context_id,request_fingerprint,
       access_epoch,stop_generation,worker_boot_id,worker_token_hash,authority,source_fingerprint,expires_at)
@@ -83,13 +87,14 @@ export class CloudExecutionClients {
     [randomUUID(), person.workspaceId, person.organizationId, person.userId, input.kind, input.clientId, input.sessionId,
       input.tokenEnd ? new Date(input.tokenEnd) : null, input.operation ?? null, input.requestId ?? null, input.terminalId ?? null, input.parentId ?? null,
       input.fingerprint ?? null, person.accessEpoch, person.stopGeneration, person.bootId, person.workerTokenHash, { signature: person.signature }, proof.source.fingerprint,
-      new Date(Math.min(proof.until, input.tokenEnd ?? Infinity))])).rows[0]!;
+      new Date(until)])).rows[0]!;
+    assertExecutionLifetime(until);
     return row;
   }
 
-  async current(workspaceId: string, id: string) {
+  async current(workspaceId: string, id: string, minimumSourceMs = 0) {
     const context = await withSystemTx(this.contexts.pool, tx => this.contexts.context(tx, id, workspaceId));
-    const proof = await this.contexts.admission(context);
+    const proof = await this.contexts.admission(context, minimumSourceMs);
     return { context, proof };
   }
 
@@ -97,15 +102,16 @@ export class CloudExecutionClients {
     const parsed = record.safeParse(frame);
     if (!parsed.success) throw new HttpError(400, "invalid_request", "Invalid client frame");
     const request = parsed.data;
-    const { context: handle, proof } = await this.current(workspaceId, id);
-    if (handle.kind !== "client" || handle.operation) throw actorChanged();
-    if (request.type === "AGENT_PROMPT" || request.type === "AGENT_STEER") throw new HttpError(409, "client_update_required", "Update the desktop before sending in a shared workspace");
     const terminal = request.type === "PTY_CREATE";
     const operation = terminal ? "terminal.create" : request.type === "WORKSPACE_REQUEST" &&
       CLOUD_V2_CLIENT_OPERATIONS.some(op => op === request.op) && (request.op !== "git.repoBranchCatalog" ||
         (request.params as { fetch?: unknown } | undefined)?.fetch === true) ? request.op : null;
+    const { context: handle, proof } = await this.current(workspaceId, id, operation ? EXECUTION_MINIMUM_LIFETIME_MS : 0);
+    if (handle.kind !== "client" || handle.operation) throw actorChanged();
+    if (request.type === "AGENT_PROMPT" || request.type === "AGENT_STEER") throw new HttpError(409, "client_update_required", "Update the desktop before sending in a shared workspace");
     const fingerprint = createHash("sha256").update(JSON.stringify([request.type, request.op, request.params, request.sessionId])).digest();
     await withSystemTx(this.contexts.pool, async tx => {
+      let issued: ExecutionContext | undefined;
       await tx.query("SELECT id FROM users WHERE id=$1 FOR KEY SHARE", [proof.person.userId]);
       await tx.query("SELECT 1 FROM cloud_v2_workspaces WHERE id=$1 FOR UPDATE", [workspaceId]);
       await this.contexts.assertContext(tx, handle, proof);
@@ -126,12 +132,13 @@ export class CloudExecutionClients {
         } else {
           const count = (await tx.query<{ n: number }>("SELECT count(*)::int AS n FROM cloud_v2_execution_contexts WHERE parent_context_id=$1 AND state='active'", [id])).rows[0]!.n;
           if (count >= 128) throw new HttpError(429, "execution_limited", "Too many client operations");
-          await this.insert(tx, proof, { kind: "client", clientId: handle.client_id!, sessionId: handle.provider_session_id, parentId: id,
+          issued = await this.insert(tx, proof, { kind: "client", clientId: handle.client_id!, sessionId: handle.provider_session_id, parentId: id,
             requestId: request.id, operation, fingerprint, ...(terminal ? { terminalId: request.sessionId! } : {}),
             ...(handle.client_token_expires_at ? { tokenEnd: handle.client_token_expires_at.getTime() } : {}) });
         }
       }
       await this.contexts.assertContext(tx, handle, proof);
+      if (issued) assertExecutionLifetime(issued.expires_at.getTime());
     });
   }
 
@@ -143,7 +150,7 @@ export class CloudExecutionClients {
       if (!row) throw actorChanged();
       return row;
     });
-    return { context, proof: await this.contexts.admission(context) };
+    return { context, proof: await this.contexts.admission(context, EXECUTION_MINIMUM_LIFETIME_MS) };
   }
 
   async operationLease(identity: ExecutionWorker, input: { clientId: string; requestId: string; operation: string }) {
@@ -164,6 +171,7 @@ export class CloudExecutionClients {
       if (prior) { if (prior.user_id !== request.user_id) throw actorChanged(); await this.contexts.assertContext(tx, prior, proof); return prior.id; }
       const row = await this.insert(tx, proof, { kind: "terminal", clientId: input.clientId, sessionId: request.provider_session_id, requestId: input.requestId, terminalId: input.terminalId });
       await this.contexts.assertContext(tx, request, proof);
+      assertExecutionLifetime(row.expires_at.getTime());
       return row.id;
     });
     return this.contexts.identityLease(identity, id, "terminal");

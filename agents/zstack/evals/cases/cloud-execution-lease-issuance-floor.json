@@ -1,0 +1,9 @@
+{
+  "id": "cloud-execution-lease-issuance-floor",
+  "kind": "replay",
+  "area": "control-plane",
+  "fixedBy": "pr:1054",
+  "symptom": "Activated client handles on a real development VM copied the remaining source-cache lifetime and expired after 1.8 or 2.6 seconds, before the worker's first 10-second renewal. File and Git operations lost their carrier despite valid personal access.",
+  "rule": "Require usable authority at every context issuance, material delivery and renewal boundary. Reverify a short source observation instead of moving its deadline, retain stable live material retries, and fail transactionally if final checks consume the budget (zstack-review time and authority checks).",
+  "check": "pnpm --dir apps/control-plane exec vitest run src/cloud/execution/lease-lifetime.integration.test.ts src/cloud/execution/leases.integration.test.ts src/cloud/execution/worker-clients.integration.test.ts src/cloud/execution/relay.integration.test.ts"
+}
