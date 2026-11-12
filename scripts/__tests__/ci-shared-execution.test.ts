@@ -23,7 +23,7 @@ function condition(
   return new Function("github", "inputs", "needs", "always", "cancelled", `return (${body});`)(
     { event_name: event },
     inputs,
-    { "control-plane-scope": { outputs: { database: "true" } }, "merge-group-evidence": { outputs: { covered } } },
+    { "control-plane-scope": { result: "success", outputs: { database: "true" } }, "merge-group-evidence": { result: covered ? "success" : "skipped", outputs: { covered } } },
     () => true,
     () => false,
   );

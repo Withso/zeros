@@ -702,7 +702,9 @@ jobs:
   control-plane-database:
     name: control-plane database
     needs: control-plane-scope
-    if: needs.control-plane-scope.outputs.database == 'true' && (github.event_name != 'pull_request' || !inputs.pr_selected_database)
+    # Explicit status: implicit success() also covers merge-group-evidence two
+    # levels up, which is skipped outside a push to main.
+    if: ${{ !cancelled() && needs.control-plane-scope.result == 'success' && needs.control-plane-scope.outputs.database == 'true' && (github.event_name != 'pull_request' || !inputs.pr_selected_database) }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:

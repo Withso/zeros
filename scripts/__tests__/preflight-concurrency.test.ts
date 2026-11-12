@@ -184,3 +184,20 @@ describe("Workflow Checks main coverage", () => {
     });
   });
 });
+
+describe("push-only merge-group evidence never skips a dependent job elsewhere", () => {
+  // GitHub's implicit success() covers a job's whole needs chain, so a job
+  // downstream of the push-only merge-group-evidence job (skipped on merge
+  // groups, release branches and PR calls) must use a status function, or it
+  // silently skips there. Run 43133105845: control-plane database skipped in
+  // a merge group and the control plane aggregate failed.
+  it("gives every job that depends on it, directly or transitively, an explicit status function", () => {
+    const jobs = preflight.jobs as Record<string, { needs?: string | string[]; if?: string }>;
+    const needs = (id: string) => { const value = jobs[id].needs; return value === undefined ? [] : typeof value === "string" ? [value] : value; };
+    const downstream = (id: string, seen = new Set<string>()): boolean =>
+      needs(id).some(need => need === "merge-group-evidence" || (!seen.has(need) && (seen.add(need), downstream(need, seen))));
+    const affected = Object.keys(jobs).filter(id => id !== "merge-group-evidence" && downstream(id));
+    expect(affected).toContain("control-plane-database");
+    for (const id of affected) expect(jobs[id].if ?? "", id).toMatch(/!cancelled\(\)|always\(\)/);
+  });
+});
