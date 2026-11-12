@@ -156,7 +156,12 @@ workflow change. Preserve the full `Preflight` and `CodeQL` release-evidence
 identities and Beta/Production's existing barrier. Resume ordinary merge
 operations only after the current-head and incoming-head canaries remain green.
 
-## Merge queue on main
+## Merge queue on main (available, not in use)
+
+The queue ran on `main` from 2026-11-11 to 2026-11-12; the owner then chose no
+queue and full PR CI, and the rule was removed with `remove-merge-queue` from
+the owner's machine. Both stages stay available. Only the owner's `gh` can write
+the ruleset: the Conductor sandbox token is an integration token and gets 403.
 
 The `add-merge-queue` stage adds exactly one `merge_queue` rule (squash,
 `ALLGREEN` grouping, up to three entries built and five merged together, 180-minute
@@ -183,8 +188,8 @@ node scripts/ci/ruleset-migration.mjs apply --stage remove-merge-queue --yes
 Qualify with a canary PR: enqueue it with `pnpm agent:merge <n>` and confirm the
 merge group's runs report every required check and that GitHub merged it.
 
-Applied to `main` on 2026-11-11; this paragraph was the canary PR that first
-went through the queue.
+Applied to `main` on 2026-11-11 (this paragraph was the canary PR that first
+went through the queue) and removed on 2026-11-12.
 
 ## Rollback: restore producers, restore requirements, then retire replacements
 

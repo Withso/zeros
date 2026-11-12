@@ -13,7 +13,7 @@ const REPOSITORY = "Withso/zeros";
 const ciDefinitionNote = (paths) =>
   `This PR changes CI definitions (${paths.join(", ")}); its own CI already ran them, so the normal merge guards apply.`;
 const USAGE =
-  "usage: pnpm agent:merge <pr-number> [--immediate] [--dry-run] [--force --reason <human-PR-comment-URL>]";
+  "usage: pnpm agent:merge <pr-number> [--immediate] [--dry-run]";
 const SKIP_MARKER =
   /\[(?:skip\s+ci|ci\s+skip|no\s+ci|skip\s+actions|actions\s+skip)\]|skip-checks:\s*true\b/i;
 const PR_SECTIONS = [
@@ -113,27 +113,13 @@ function missingPrSections(body) {
   return PR_SECTIONS.filter(section => !headings.has(section.toLowerCase()));
 }
 
-function commentId(reason, number) {
-  if (typeof reason !== "string") return null;
-  const match =
-    /^https:\/\/github\.com\/Withso\/zeros\/pull\/(\d+)#issuecomment-(\d+)$/i.exec(
-      reason,
-    );
-  return match &&
-    Number(match[1]) === number &&
-    positiveInteger(Number(match[2]))
-    ? match[2]
-    : null;
-}
 
 /** Pure policy over gh JSON snapshots. No credentials, processes or writes. */
 export function decideMerge(
   snapshot,
   {
     isCiDefinitionPath = null,
-    force = false,
     immediate = false,
-    reason = null,
     number = snapshot?.pr?.number,
   } = {},
 ) {
@@ -143,7 +129,6 @@ export function decideMerge(
     files,
     requiredChecks,
     openPullRequests,
-    forceComment,
     checks,
     mergeQueue,
     commitMessages,
@@ -272,26 +257,9 @@ export function decideMerge(
       "Unable to confirm all open PRs; refusing to arm auto-merge.",
     );
   }
-  if (
-    force &&
-    (!commentId(reason, number) ||
-      !human(forceComment?.user) ||
-      forceComment.user.login.toLowerCase() !== viewer.login.toLowerCase() ||
-      typeof forceComment.html_url !== "string" ||
-      typeof forceComment.issue_url !== "string" ||
-      forceComment.html_url.toLowerCase() !== reason.toLowerCase() ||
-      forceComment.issue_url.toLowerCase() !==
-        `https://api.github.com/repos/${REPOSITORY}/issues/${number}`.toLowerCase() ||
-      typeof forceComment.body !== "string" ||
-      !forceComment.body.trim())
-  ) {
-    return refuse(
-      "force-undocumented",
-      "A human override requires the caller's justification comment on this PR; refusing to arm auto-merge.",
-    );
-  }
-  // With a merge queue GitHub tests each PR on top of main and the PRs ahead of
-  // it, so several PRs may be in flight; without one, keep one armed PR.
+  // Several PRs may be armed at once (owner decision, 2026-11-12: no merge
+  // queue, full CI on every PR, and main may occasionally go red). With a
+  // merge queue the wrapper enqueues instead.
   if (!immediate && mergeQueue !== null && !(typeof mergeQueue?.id === "string" && mergeQueue.id))
     return refuse(
       "queue-unavailable",
@@ -308,25 +276,11 @@ export function decideMerge(
       "skip-marker",
       "A commit message on this PR contains a GitHub skip marker, which the merge queue's squash would carry to main; reword the commit before enqueuing.",
     );
-  const armed = openPullRequests.filter(
-    (other) => other.number !== number && other.autoMergeRequest !== null,
-  );
-  if (armed.length && !force && !queued) {
-    return refuse(
-      "already-armed",
-      `Another open PR already has auto-merge enabled (${armed.map((other) => `#${other.number}`).join(", ")}); wait for it to merge or be disarmed.`,
-    );
-  }
   if (immediate) {
     if (!sameImmediateViewer(viewer, pr.graphqlViewer))
       return refuse(
         "immediate-identity",
         "Immediate merge requires the same human workspace identity for REST and GraphQL; no merge requested.",
-      );
-    if (force || reason !== null)
-      return refuse(
-        "immediate-force",
-        "Immediate merges do not permit overrides.",
       );
     if (
       typeof pr.id !== "string" ||
@@ -434,30 +388,16 @@ export function decideMerge(
 function parseArguments(argv) {
   let number = null;
   let dryRun = false;
-  let force = false;
   let immediate = false;
-  let reason = null;
   for (let index = 0; index < argv.length; index++) {
     const arg = argv[index];
     if (arg === "--dry-run" && !dryRun) dryRun = true;
     else if (arg === "--immediate" && !immediate) immediate = true;
-    else if (arg === "--force" && !force) force = true;
-    else if (
-      arg === "--reason" &&
-      reason === null &&
-      typeof argv[index + 1] === "string"
-    )
-      reason = argv[++index];
     else if (/^[1-9]\d*$/.test(arg) && number === null) number = Number(arg);
     else throw new Error(USAGE);
   }
-  if (
-    !positiveInteger(number) ||
-    (immediate && force) ||
-    (force ? !commentId(reason, number) : reason !== null)
-  )
-    throw new Error(USAGE);
-  return { number, dryRun, force, reason, immediate };
+  if (!positiveInteger(number)) throw new Error(USAGE);
+  return { number, dryRun, immediate };
 }
 
 async function loadCiDefinition() {
@@ -698,12 +638,6 @@ export async function runAgentMerge(
       )
     )
       throw identityError;
-    const forceComment = options.force
-      ? json([
-          "api",
-          `repos/${REPOSITORY}/issues/comments/${commentId(options.reason, options.number)}`,
-        ])
-      : null;
     const freshPr = options.immediate ? readImmediatePr() : json([
       "pr", "view", prNumber, "--repo", REPOSITORY, "--json",
       "number,title,body,state,isDraft,isCrossRepository,headRefOid,baseRefOid,baseRefName,changedFiles,labels,author",
@@ -720,7 +654,6 @@ export async function runAgentMerge(
       openPullRequests: openPages.flatMap(
         (page) => page.data.repository.pullRequests.nodes,
       ),
-      forceComment,
     };
   };
   let bodyDirectory;
@@ -822,8 +755,6 @@ export async function runAgentMerge(
       stdout(`Requested a merge queue entry for PR #${options.number} at ${snapshot.pr.headRefOid}; GitHub merges it after its merge group passes.`);
       return 0;
     }
-    if (options.force)
-      stdout(`Human override documented at ${options.reason}.`);
     if (options.dryRun) {
       stdout(`Dry run: ${decision.message}`);
       stdout(

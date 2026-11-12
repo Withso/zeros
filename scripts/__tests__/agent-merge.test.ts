@@ -274,15 +274,6 @@ describe("agent merge decision", () => {
     expect(decideMerge(snapshot, { isCiDefinitionPath })).toMatchObject({ allowed: false, code: "incident" });
   });
 
-  it("cannot override missing sections with --force", async () => {
-    const snapshot = fixture();
-    snapshot.pr.body = "A short human change.";
-    const gh = fakeGh(snapshot);
-    expect(await runAgentMerge(["123", "--force", "--reason", COMMENT_URL], gh)).toBe(1);
-    expect(gh.stderr).toHaveBeenCalledWith(expect.stringContaining("Why"));
-    expect(gh.calls.some((call) => call[1] === "merge")).toBe(false);
-  });
-
   it("exports a pure decision that keeps its input unchanged", () => {
     const snapshot = fixture();
     const before = structuredClone(snapshot);
@@ -465,19 +456,17 @@ describe("agent merge decision", () => {
     });
   });
 
-  it("refuses another armed PR but ignores auto-merge on the target PR", async () => {
+  it("arms a PR while other PRs are armed (no one-armed guard; owner decision 2026-11-12)", async () => {
     const snapshot = fixture();
     snapshot.openPullRequests = [
-      { number: 123, autoMergeRequest: { enabledAt: "2026-10-06T00:00:00Z" } },
+      { number: 123, autoMergeRequest: null },
       { number: 124, autoMergeRequest: { enabledAt: "2026-10-06T00:00:00Z" } },
+      { number: 125, autoMergeRequest: { enabledAt: "2026-10-06T00:00:00Z" } },
     ];
     const gh = fakeGh(snapshot);
-    expect(await runAgentMerge(["123"], gh)).toBe(1);
-    expect(gh.stderr).toHaveBeenCalledWith(expect.stringContaining("#124"));
-    snapshot.openPullRequests.pop();
-    expect(decideMerge(snapshot, { isCiDefinitionPath })).toMatchObject({
-      allowed: true,
-    });
+    expect(await runAgentMerge(["123"], gh)).toBe(0);
+    expect(gh.calls.some((args) => args[1] === "merge")).toBe(true);
+    expect(gh.stderr).not.toHaveBeenCalled();
   });
 
   it("permits pending required checks because GitHub waits for them", async () => {
@@ -504,79 +493,25 @@ describe("agent merge decision", () => {
   });
 });
 
-describe("documented human override", () => {
-  it("allows only the one-armed-PR override with the caller's human PR comment", async () => {
-    const snapshot = fixture();
-    snapshot.openPullRequests.push({
-      number: 124,
-      autoMergeRequest: { enabledAt: "2026-10-06T00:00:00Z" },
+describe("no human override flag", () => {
+  it.each([["123", "--force"], ["123", "--force", "--reason", COMMENT_URL], ["123", "--reason", COMMENT_URL]])(
+    "rejects %j as usage: there is no guard left to override", async (...args) => {
+      const gh = fakeGh();
+      expect(await runAgentMerge(args, gh)).toBe(2);
+      expect(gh.calls).toEqual([]);
     });
-    const gh = fakeGh(snapshot);
-    expect(
-      await runAgentMerge(["123", "--force", "--reason", COMMENT_URL], gh),
-    ).toBe(0);
-    expect(gh.calls).toContainEqual([
-      "api",
-      `repos/${REPOSITORY}/issues/comments/456`,
-    ]);
-    expect(gh.calls.some((args) => args[1] === "merge")).toBe(true);
-    expect(gh.stdout).toHaveBeenCalledWith(
-      expect.stringContaining(COMMENT_URL),
-    );
-  });
 
-  it.each([
-    [
-      "a bot comment",
-      (s: Snapshot) => {
-        s.forceComment.user.type = "Bot";
-      },
-    ],
-    [
-      "another user's comment",
-      (s: Snapshot) => {
-        s.forceComment.user.login = "another-user";
-      },
-    ],
-    [
-      "a comment on another PR",
-      (s: Snapshot) => {
-        s.forceComment.issue_url = `https://api.github.com/repos/${REPOSITORY}/issues/124`;
-      },
-    ],
-    [
-      "a blank justification",
-      (s: Snapshot) => {
-        s.forceComment.body = " ";
-      },
-    ],
-  ])("refuses %s", async (_label, change) => {
+  it.each(["skip", "draft", "fork", "incident", "checks"])("keeps the %s guard", async (guard) => {
     const snapshot = fixture();
-    change(snapshot);
+    if (guard === "skip") snapshot.pr.body = "[skip ci]";
+    if (guard === "draft") snapshot.pr.isDraft = true;
+    if (guard === "fork") snapshot.pr.isCrossRepository = true;
+    if (guard === "incident") snapshot.files[0].filename = ".github/ci-incidents/open.json";
+    if (guard === "checks") snapshot.requiredChecks[0].bucket = "fail";
     const gh = fakeGh(snapshot);
-    expect(
-      await runAgentMerge(["123", "--force", "--reason", COMMENT_URL], gh),
-    ).toBe(1);
+    expect(await runAgentMerge(["123"], gh)).toBe(1);
     expect(gh.calls.some((args) => args[1] === "merge")).toBe(false);
   });
-
-  it.each(["skip", "draft", "fork", "incident", "checks"])(
-    "cannot override the %s guard",
-    async (guard) => {
-      const snapshot = fixture();
-      if (guard === "skip") snapshot.pr.body = "[skip ci]";
-      if (guard === "draft") snapshot.pr.isDraft = true;
-      if (guard === "fork") snapshot.pr.isCrossRepository = true;
-      if (guard === "incident")
-        snapshot.files[0].filename = ".github/ci-incidents/open.json";
-      if (guard === "checks") snapshot.requiredChecks[0].bucket = "fail";
-      const gh = fakeGh(snapshot);
-      expect(
-        await runAgentMerge(["123", "--force", "--reason", COMMENT_URL], gh),
-      ).toBe(1);
-      expect(gh.calls.some((args) => args[1] === "merge")).toBe(false);
-    },
-  );
 });
 
 describe("agent merge CLI", () => {
@@ -685,8 +620,9 @@ describe("agent merge CLI", () => {
         ]),
       ]),
     );
-    expect(await runAgentMerge(["123"], gh)).toBe(1);
-    expect(gh.stderr).toHaveBeenCalledWith(expect.stringContaining("#999"));
+    // Every page is still read: immediate mode refuses any armed open PR.
+    expect(await runAgentMerge(["123", "--immediate", "--dry-run"], gh)).not.toBe(0);
+    expect(await runAgentMerge(["123"], gh)).toBe(0);
     expect(gh.calls.find((args) => args[1] === "graphql" && args.includes("--paginate"))).toContain("--slurp");
   });
 
@@ -786,12 +722,11 @@ describe("merge queue on the base branch", () => {
     expect(gh.calls.some((args) => args[1] === "merge")).toBe(false);
   });
 
-  it("keeps the one-armed guard while main has no merge queue", async () => {
+  it("also arms beside other armed PRs while main has no merge queue", async () => {
     const snapshot = fixture();
     snapshot.openPullRequests.push({ number: 124, autoMergeRequest: { enabledAt: "2026-11-11T00:00:00Z" } });
-    expect(await runAgentMerge(["123"], fakeGh(snapshot))).toBe(1);
+    expect(await runAgentMerge(["123"], fakeGh(snapshot))).toBe(0);
   });
-
   it("fails closed when the merge queue state is unreadable", async () => {
     const snapshot = fixture();
     snapshot.mergeQueue = undefined;
