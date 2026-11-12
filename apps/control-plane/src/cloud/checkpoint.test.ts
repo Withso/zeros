@@ -116,6 +116,38 @@ process.exit(result.status??1);
 }
 
 describe("cloud v2 checkpoints", () => {
+  it.each([1, 2])("restores v%s managed environment bytes only for legacy workspaces", version => {
+    const w = workspaces(), key = randomBytes(32), archive = join(w.root, "checkpoint.zck");
+    const files = [".env.fixture", "nested/.env.fixture", "staged/.env.fixture"];
+    const content = "SYNTHETIC_SEED=fixture-only\n";
+    for (const file of files) w.write(join(w.oldRepo, file), content);
+    w.git(w.oldRepo, "add", "-f", "staged/.env.fixture");
+    w.write(join(w.oldHome, ".local/share/zeros/cloud-worker/environment-seed/manifest.json"), JSON.stringify({
+      version, versionId: randomUUID(), complete: true,
+      files: files.map(path => ({ path, alias: randomUUID(), phase: "complete", ...(version === 2 ? { sha256: createHash("sha256").update(content).digest("hex") } : { dev: 1, ino: 2 }) })),
+    }));
+    expect(checkpoint({ home: w.oldHome, repo: w.oldRepo, key, out: archive }, w.env).parsed).toMatchObject({ ok: true });
+    w.git(w.root, "clone", "-q", w.origin, w.newRepo);
+    expect(restore({ home: w.newHome, repo: w.newRepo, key, sha256: sha(archive), from: archive }, w.env).parsed).toEqual({ ok: true });
+    for (const file of files) expect(readFileSync(join(w.newRepo, file), "utf8")).toBe(content);
+    rmSync(w.newHome, { recursive: true, force: true }); mkdirSync(w.newHome);
+    const probe = activeRestoreProbe(w);
+    expect(restore({ home: w.newHome, repo: w.newRepo, key, sha256: sha(archive), from: archive, active: true,
+      githubToken: probe.token, repositoryUrl: "https://github.com/example/project.git" }, probe.env).parsed).toEqual({ ok: true });
+    for (const file of files) expect(existsSync(join(w.newRepo, file))).toBe(false);
+    expect(readFileSync(join(w.newRepo, "README.md"), "utf8")).toBe("hello\n");
+  });
+
+  it("restores an active workspace whose journal recorded variables without any seeded files", () => {
+    const w = workspaces(), key = randomBytes(32), archive = join(w.root, "checkpoint.zck");
+    w.write(join(w.oldHome, ".local/share/zeros/cloud-worker/environment-seed/manifest.json"),
+      JSON.stringify({ version: 2, versionId: randomUUID(), complete: true, files: [] }));
+    expect(checkpoint({ home: w.oldHome, repo: w.oldRepo, key, out: archive }, w.env).parsed.ok).toBe(true);
+    const probe = activeRestoreProbe(w);
+    expect(restore({ home: w.newHome, repo: w.newRepo, key, sha256: sha(archive), from: archive, active: true,
+      githubToken: probe.token, repositoryUrl: "https://github.com/example/project.git" }, probe.env).parsed).toEqual({ ok: true });
+  });
+
   it("fetches active restore prerequisites in a fresh repository, erases tmpfs auth, then unpacks offline", () => {
     const w = workspaces(), key = randomBytes(32), archive = join(w.root,"checkpoint.zck");
     w.write(join(w.oldRepo,"a.txt"),"member's work\n");

@@ -1,0 +1,9 @@
+{
+  "id": "cloud-seed-cleanup-after-resume",
+  "kind": "replay",
+  "area": "cloud-worker",
+  "fixedBy": "pr:1045",
+  "symptom": "Activation refused unchanged seeded environment files after an ordinary VM Stop/Start changed their filesystem identity, while the cleanup receipt did not identify the refusal class.",
+  "rule": "zstack-review and principles 5, 13 and 17 require a proof that survives the real resume boundary, preserves edited bytes, reports a closed refusal and checks every ancestor through the held root-anchored path walk.",
+  "check": "pnpm --dir apps/cloud-worker exec vitest run src/sharing/__tests__/legacy-material.test.ts src/workspace/__tests__/environment-seed.test.ts"
+}

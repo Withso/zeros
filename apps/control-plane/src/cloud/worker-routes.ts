@@ -174,7 +174,7 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
       const auth = await session(c, deps, false);
       if (!workerFeatures(c).has(ACTING_USER_FEATURE)) throw executionWorkerRequired();
       const input = await body(c, CloudV2BootCleanRequestSchema);
-      return c.json(await execution.boots.clean(auth, input));
+      return c.json(await execution.boots.clean(auth, input, deps.logger));
     });
     app.post(`${CLOUD_V2_WORKER_API}/turn-lease`, async c => {
       const auth = await session(c, deps, false);

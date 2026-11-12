@@ -43,7 +43,7 @@ try {
   if (mode === "capture") {
     if (!info(source)) process.exit(0);
     const journal = json(source, 32768);
-    if (journal.version !== 1 || !uuid(journal.versionId) || typeof journal.complete !== "boolean" ||
+    if (![1, 2].includes(journal.version) || !uuid(journal.versionId) || typeof journal.complete !== "boolean" ||
         !Array.isArray(journal.files) || journal.files.length > limits.files || new Set(journal.files.map(file => file.path)).size !== journal.files.length) throw new Error();
     mkdirSync(output, { mode: 0o700 });
     const entries = []; let total = 0;
@@ -61,10 +61,15 @@ try {
       } finally { if (fd !== undefined) closeSync(fd); }
     }
     writeFileSync(output + "/manifest.json", JSON.stringify({ version: 1, entries }), { flag: "wx", mode: 0o600 });
-  } else if (mode === "restore") {
+  } else if (mode === "restore" || mode === "exclude") {
     const manifest = json(source + "/manifest.json", 32768);
     if (manifest.version !== 1 || !Array.isArray(manifest.entries) || manifest.entries.length > limits.files ||
         new Set(manifest.entries.map(entry => entry.path)).size !== manifest.entries.length) throw new Error();
+    if (mode === "exclude") {
+      if (manifest.entries.some(entry => !validPath(entry.path) || !["file", "missing"].includes(entry.state))) throw new Error();
+      writeFileSync(output, manifest.entries.flatMap(entry => [entry.path, "./" + entry.path]).join("\n") + "\n", { flag: "wx", mode: 0o600 });
+      process.exit(0);
+    }
     let total = 0;
     for (const [index, entry] of manifest.entries.entries()) {
       if (!validPath(entry.path) || !["file", "missing"].includes(entry.state)) throw new Error();

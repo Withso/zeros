@@ -99,7 +99,7 @@ class ActingRelay extends FakeRelay {
   }
 }
 
-async function setup(options: { activated?: boolean; bootstrap?: string; survivors?: number; beforeStart?: (home: string) => Promise<void>; environment?: unknown; setupRunner?: (...args: any[]) => Promise<number>; checkout?: () => void } = {}) {
+async function setup(options: { activated?: boolean; bootstrap?: string; survivors?: number; noSweep?: boolean; beforeStart?: (home: string) => Promise<void>; environment?: unknown; log?: (line: string) => void; setupRunner?: (...args: any[]) => Promise<number>; checkout?: () => void } = {}) {
   const directory = await mkdtemp(join(tmpdir(), "zeros-acting-")); directories.push(directory);
   const root = join(directory, "checkout"); await mkdir(root);
   const relay = new ActingRelay(), drivers: FakeDriver[] = [];
@@ -109,8 +109,9 @@ async function setup(options: { activated?: boolean; bootstrap?: string; survivo
   const worker = new CloudWorker({ directory, homeDirectory: home, transport: relay, workspaceId: WORKSPACE_ID, githubFetch: async () => new Response(null, { status: 200 }),
     prepareCheckout: async (_workspace, environment) => { socketPath = environment.GH_ZEROS_BROKER_SOCKET!; options.checkout?.(); return { createdBranch: true }; },
     ...(options.setupRunner ? { setupRunner: options.setupRunner } : {}),
-    bootClean: async () => options.survivors ?? 0,
+    ...(options.noSweep ? {} : { bootClean: async () => options.survivors ?? 0 }),
     contextRenewMs: 20, sharedMemory: join(directory, "shm"),
+    ...(options.log ? { log: options.log } : {}),
     drivers: { claude: () => { const driver = new FakeDriver(); drivers.push(driver); return driver; } } });
   workers.push(worker); worker.start();
   await relay.receive({ ...config, workspace: { ...config.workspace, checkoutPath: root, ...(options.setupRunner ? { setup: "make bootstrap" } : {}) }, promptOutbox: 1,
@@ -420,6 +421,13 @@ it("names the running turn's person on its turn_state, and nobody on a legacy tu
   legacy.drivers[0]!.complete();
 });
 
+it("writes one journal line with the boot-clean outcome and its classes, never a path", async () => {
+  const lines: string[] = [];
+  const f = await setup({ survivors: 2, log: line => lines.push(line) });
+  await until(() => lines.find(line => line.startsWith("boot-clean "))).toBe("boot-clean processes=2 legacy=none refusals=none");
+  void f;
+});
+
 it("removes the Creator's legacy Git identity before attesting a clean boot, and says what it did", async () => {
   const cleanBodies = (relay: ActingRelay) => relay.calls.filter(call => call.op === "execution-leases/boot-clean").map(call => call.body);
   const fresh = await setup();
@@ -442,4 +450,11 @@ it("never seeds a global environment into an activated workspace's shared checko
   await until(() => f.drivers[0]?.prompts.length ?? 0).toBe(1);
   await expect(stat(join(f.root, ".env.local"))).rejects.toMatchObject({ code: "ENOENT" });
   f.drivers[0]!.complete();
+});
+
+it("names why a boot without a real sweep is unproven, so its attestation stays valid", async () => {
+  const lines: string[] = [];
+  const f = await setup({ noSweep: true, log: line => lines.push(line) });
+  await until(() => f.relay.calls.find(call => call.op === "execution-leases/boot-clean")?.body).toMatchObject({ processes: 1, legacyMaterial: "refused", refusals: ["proc_unreadable"] });
+  expect(lines).toContain("boot-clean processes=1 legacy=refused refusals=proc_unreadable");
 });

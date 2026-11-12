@@ -3,7 +3,7 @@ import { access, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { CloudV2ClientOperationSchema, CloudV2ControlFrameSchema, CLOUD_V2_RELAY_PROTOCOL, CLOUD_WORKSPACE_RESOURCES_CAPABILITY, type CloudV2ControlFrame, type CloudV2SetupStatus, type CloudV2WorkerFrame, type RuntimeMcpServer } from "@zeros/protocol/cloud-v2-relay";
+import { CloudV2ClientOperationSchema, CloudV2ControlFrameSchema, type CloudV2BootCleanRefusal, CLOUD_V2_RELAY_PROTOCOL, CLOUD_WORKSPACE_RESOURCES_CAPABILITY, type CloudV2ControlFrame, type CloudV2SetupStatus, type CloudV2WorkerFrame, type RuntimeMcpServer } from "@zeros/protocol/cloud-v2-relay";
 import { CloudV2PromptPullReplySchema } from "@zeros/protocol/cloud-v2-prompts";
 import { createMessage, type BridgeMessage } from "@zeros/protocol/messages";
 import { safeParseClientBridgeMessage } from "@zeros/protocol/schemas";
@@ -60,7 +60,9 @@ interface WorkerOptions {
   homeDirectory?: string;
   /** Team sharing §7a: this boot's pre-boot process sweep, returning what it could not end or prove. Only the
    * production entry supplies the real /proc sweep; without one an activated boot is unproven and acts for no one. */
-  bootClean?: () => Promise<number>;
+  bootClean?: (note?: (refusal: CloudV2BootCleanRefusal) => void) => Promise<number>;
+  /** One worker journal line per notable step (boot-clean's outcome); closed words and counts only. */
+  log?(line: string): void;
   /** Where a legacy restore leaves its token directory (tests); /dev/shm otherwise. */
   sharedMemory?: string;
   /** Context renewal cadence override (tests); 10 s otherwise. */
@@ -496,9 +498,18 @@ export class CloudWorker {
       const sweep = this.options.bootClean, workspaceRoot = config.workspace.checkoutPath;
       // Slice D (Q-D2): after the sweep (nothing old can rewrite it), the phase-1 Creator material goes, with proof.
       // Only a boot with a real sweep cleans; without one it is unproven anyway.
-      void this.contexts.clean(async () => ({ processes: sweep ? await sweep() : 1,
-        legacyMaterial: sweep ? await removeLegacyMaterial({ root: workspaceRoot, state: this.options.directory, home: this.options.homeDirectory ?? homedir(),
-          ...(this.options.sharedMemory ? { shm: this.options.sharedMemory } : {}) }) : "refused" }));
+      void this.contexts.clean(async () => {
+        // Each refused class goes with the attestation and into one journal line (no paths or values).
+        const refusals = new Set<CloudV2BootCleanRefusal>(), note = (refusal: CloudV2BootCleanRefusal) => { refusals.add(refusal); };
+        // No real sweep (not a production boot): unproven, and it says so.
+        if (!sweep) note("proc_unreadable");
+        const processes = sweep ? await sweep(note) : 1;
+        const legacyMaterial = sweep ? await removeLegacyMaterial({ root: workspaceRoot, state: this.options.directory, home: this.options.homeDirectory ?? homedir(),
+          ...(this.options.sharedMemory ? { shm: this.options.sharedMemory } : {}) }, note) : "refused" as const;
+        const classes = [...refusals].sort();
+        this.options.log?.(`boot-clean processes=${processes} legacy=${legacyMaterial} refusals=${classes.join(",") || "none"}`);
+        return { processes, legacyMaterial, refusals: classes };
+      });
     }
     const sections = configurationSections(config), disconnects = this.disconnects;
     // Only a configuration applied in full on this connection is a baseline.

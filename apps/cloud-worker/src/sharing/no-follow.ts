@@ -10,6 +10,12 @@ import { descriptorPath } from "../workspace/checked-files";
  * owned by this user is reached, nothing below it may be anyone else's.
  * undefined: a component is missing. A link, a non-directory or a foreign
  * directory below an owned one throws. */
+/** The walk met a link or non-directory ("linked"), or a foreign directory below this user's ("foreign"). */
+export class NoFollowRefusal extends Error {
+  constructor(readonly kind: "linked" | "foreign") { super(kind === "linked" ? "A path component is a link or not a directory." : "A directory below this user's belongs to someone else."); }
+}
+const linked = (error: unknown) => ["ELOOP", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code ?? "");
+
 export async function openDirectoryNoFollow(path: string): Promise<FileHandle | undefined> {
   if (!isAbsolute(path)) throw new Error("An absolute path is required.");
   const parts = normalize(path).split("/").filter(Boolean);
@@ -20,12 +26,12 @@ export async function openDirectoryNoFollow(path: string): Promise<FileHandle | 
   try {
     for (const part of parts) {
       const next = await open(`${descriptorPath(handle)}/${part}`, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW)
-        .catch(error => { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; });
+        .catch(error => { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw linked(error) ? new NoFollowRefusal("linked") : error; });
       await handle.close();
       if (!next) return undefined;
       handle = next;
       const mine = (await handle.stat()).uid === uid;
-      if (owned && !mine) throw new Error("A directory below this user's belongs to someone else.");
+      if (owned && !mine) throw new NoFollowRefusal("foreign");
       owned ||= mine;
     }
     return handle;

@@ -1,6 +1,6 @@
 import { generateKeyPairSync, randomUUID } from "node:crypto";
-import { lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
-import { execFileSync } from "node:child_process";
+import { chmod, cp, lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { execFileSync, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import pg from "pg";
@@ -16,6 +16,7 @@ import { executionFixture, type ExecutionFixture } from "./test-fixture.js";
 // relative sources, while a separate worktree can pin the worker revision.
 const root = new URL(process.env.CLOUD_EXECUTION_TEST_CLIENT_ROOT ?? "../../../../../", import.meta.url);
 const database = process.env.TEST_DATABASE_URL ? describe : describe.skip;
+const canChangeOwner = process.platform === "linux" && (process.getuid?.() === 0 || spawnSync("sudo", ["-n", "true"], { stdio: "ignore" }).status === 0);
 database("real acting-user worker clients against HTTP routes and PostgreSQL", () => {
   let pool: pg.Pool, f: ExecutionFixture, directory: string;
   let clients: { HybridTransport: any; ExecutionContexts: any; CloudWorker: any; protocol: any;
@@ -25,6 +26,7 @@ database("real acting-user worker clients against HTTP routes and PostgreSQL", (
   let startWorker: (token?: string) => Promise<void>;
   type Call = { path: string; body: any; headers: Headers; status?: number; reply?: any };
   let calls: Call[];
+  const volumes: string[] = [];
   beforeAll(async () => {
     pool = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL, max: 8, statement_timeout: 4000 });
     clients = {
@@ -73,6 +75,7 @@ database("real acting-user worker clients against HTTP routes and PostgreSQL", (
   afterEach(async () => {
     contexts?.dispose(); await worker?.dispose(); await f?.close();
     if (directory) await rm(directory, { recursive: true, force: true });
+    for (const volume of volumes.splice(0)) await rm(volume, { recursive: true, force: true });
     vi.restoreAllMocks(); vi.unstubAllGlobals();
   });
   afterAll(() => pool.end());
@@ -173,19 +176,63 @@ database("real acting-user worker clients against HTTP routes and PostgreSQL", (
     expect(lease.userId).toBe(f.creator.id);
   });
 
-  it("keeps a replaced seed and refuses every lease after the real cleanup reports uncertainty", async () => {
+  it("keeps modified seed bytes, records the closed class and refuses every lease", async () => {
     const disk=await localDisk(),path=join(disk.paths.root,".env.local");
     await clients.seedEnvironment(disk.scope,disk.paths.state,{versionId:randomUUID(),repositoryId:"42",variables:{},
       files:[{path:".env.local",content:"VALUE=synthetic-creator-value\n"}]},new AbortController().signal);
     await rm(path); await writeFile(path,"MEMBER_FILE=keep\n");
-    await expect(contexts.clean(async () => ({processes:0,legacyMaterial:await clients.removeLegacyMaterial(disk.paths)})))
+    await expect(contexts.clean(async () => {
+      const refusals: string[] = [], legacyMaterial = await clients.removeLegacyMaterial(disk.paths, (value: string) => refusals.push(value));
+      return { processes: 0, legacyMaterial, refusals };
+    }))
       .rejects.toMatchObject({status:409,contextCode:"execution_not_retired"});
     const receipt=calls.find(call=>call.path.endsWith("/boot-clean"));
-    expect(receipt).toMatchObject({body:{processes:0,legacyMaterial:"refused"},status:409,reply:{error:{code:"execution_not_retired"}}});
+    expect(receipt).toMatchObject({body:{processes:0,legacyMaterial:"refused",refusals:["seed_target_modified"]},status:409,reply:{error:{code:"execution_not_retired"}}});
+    expect((await pool.query("SELECT first_failed_refusals FROM cloud_v2_execution_boots WHERE workspace_id=$1 AND boot_id=$2", [f.workspace.id, worker.bootId])).rows)
+      .toEqual([{ first_failed_refusals: ["seed_target_modified"] }]);
     expect(await readFile(path,"utf8")).toBe("MEMBER_FILE=keep\n");
     const before=calls.length;
     await expect(contexts.bootstrapLease(config.bootstrapContextId)).rejects.toMatchObject({contextCode:"execution_not_retired"});
     expect(calls).toHaveLength(before);
+  });
+
+  it("keeps a version-1 journal and its bytes, reporting the required legacy upgrade", async () => {
+    const disk = await localDisk(), path = join(disk.paths.root, ".env.local"), journalPath = join(disk.paths.state, "environment-seed/manifest.json");
+    await clients.seedEnvironment(disk.scope, disk.paths.state, { versionId: randomUUID(), repositoryId: "42", variables: {},
+      files: [{ path: ".env.local", content: "LEGACY=synthetic\n" }] }, new AbortController().signal);
+    const journal = JSON.parse(await readFile(journalPath, "utf8")); journal.version = 1;
+    for (const entry of journal.files) delete entry.sha256;
+    await writeFile(journalPath, JSON.stringify(journal));
+    await expect(contexts.clean(async () => {
+      const refusals: string[] = [], legacyMaterial = await clients.removeLegacyMaterial(disk.paths, (value: string) => refusals.push(value));
+      return { processes: 0, legacyMaterial, refusals };
+    })).rejects.toMatchObject({ status: 409, contextCode: "execution_not_retired" });
+    expect(calls.find(call => call.path.endsWith("/boot-clean"))).toMatchObject({
+      body: { processes: 0, legacyMaterial: "refused", refusals: ["seed_journal_outdated"] }, status: 409,
+    });
+    expect(await readFile(path, "utf8")).toBe("LEGACY=synthetic\n");
+    expect(JSON.parse(await readFile(journalPath, "utf8")).version).toBe(1);
+  });
+
+  it.skipIf(!canChangeOwner)("refuses a foreign-owned nested seed parent and keeps the file", async () => {
+    const disk = await localDisk(), parent = join(disk.paths.root, "private-env"), path = join(parent, ".env.local");
+    await clients.seedEnvironment(disk.scope, disk.paths.state, { versionId: randomUUID(), repositoryId: "42", variables: {},
+      files: [{ path: "private-env/.env.local", content: "SYNTHETIC=keep\n" }] }, new AbortController().signal);
+    const uid = process.getuid!(), foreign = uid === 0 ? 1 : 0;
+    const owner = (value: number) => execFileSync(uid === 0 ? "chown" : "sudo",
+      [...(uid === 0 ? [] : ["-n", "chown"]), String(value), "--", parent], { stdio: "pipe" });
+    await chmod(parent, 0o777); owner(foreign);
+    try {
+      expect((await lstat(parent)).uid).toBe(foreign);
+      await expect(contexts.clean(async () => {
+        const refusals: string[] = [], legacyMaterial = await clients.removeLegacyMaterial(disk.paths, (value: string) => refusals.push(value));
+        return { processes: 0, legacyMaterial, refusals };
+      })).rejects.toMatchObject({ status: 409, contextCode: "execution_not_retired" });
+      expect(calls.find(call => call.path.endsWith("/boot-clean"))).toMatchObject({
+        body: { processes: 0, legacyMaterial: "refused", refusals: ["checkout_foreign"] }, status: 409,
+      });
+      expect(await readFile(path, "utf8")).toBe("SYNTHETIC=keep\n");
+    } finally { owner(uid); }
   });
 
   it.each(["identity", "terminals"])("refuses a %s directory replaced by a link and keeps the foreign files", async kind => {
@@ -251,13 +298,21 @@ database("real acting-user worker clients against HTTP routes and PostgreSQL", (
       .toEqual({ state: "retired", material: null });
   });
 
-  it("joins operator prepare and activate through provider Stop, real cleanup and the initiator's first lease", async () => {
+  it.each(["v2", "upgraded_v1"])("joins prepare, Stop and resume on a new filesystem with %s cleanup and the initiator's lease", async journalKind => {
     contexts.dispose(); await worker.dispose(); await f.close();
     f = await executionFixture(pool); await f.cp.loginChanges.stop();
     config = (await (await f.hello()).json()).config;
     const disk = await localDisk();
-    await clients.seedEnvironment(disk.scope, disk.paths.state, { versionId: randomUUID(), repositoryId: "42", variables: {},
-      files: [{ path: ".env.local", content: "LEGACY=synthetic\n" }] }, new AbortController().signal);
+    const environment = { versionId: randomUUID(), repositoryId: "42", variables: {}, files: [{ path: ".env.local", content: "LEGACY=synthetic\n" }] };
+    await clients.seedEnvironment(disk.scope, disk.paths.state, environment, new AbortController().signal);
+    const journalPath = join(disk.paths.state, "environment-seed/manifest.json");
+    if (journalKind === "upgraded_v1") {
+      const journal = JSON.parse(await readFile(journalPath, "utf8")); journal.version = 1;
+      for (const entry of journal.files) delete entry.sha256;
+      await writeFile(journalPath, JSON.stringify(journal));
+      await clients.seedEnvironment(disk.scope, disk.paths.state, environment, new AbortController().signal);
+    }
+    expect(JSON.parse(await readFile(journalPath, "utf8")).version).toBe(2);
     await clients.configureGitIdentity(disk.paths.home, { name: "Fixture Creator", email: "creator@example.test" });
     await pool.query("UPDATE users SET staff_role='platform_owner' WHERE id=$1", [f.admin.id]);
     const change: CloudExecutionChange = { activationId: randomUUID(), action: "prepare", channel: "development",
@@ -282,6 +337,15 @@ database("real acting-user worker clients against HTTP routes and PostgreSQL", (
       expect(await row()).toMatchObject({ state: "stopping", execution_transition_id: change.activationId });
       expect((await f.worker("hello", { protocol: 2, bootId: f.boot, runtimeSha256: change.runtimeSha256 })).status).toBe(401);
     } finally { release(); await stopping; }
+    // Boat can retain the VM identity while rematerializing its filesystem.
+    // Use another real device and a newly written file, not mocked stat data.
+    const volume = await mkdtemp("/dev/shm/zeros-seed-proof-"); volumes.push(volume);
+    const oldIdentity = await lstat(join(disk.paths.root, ".env.local"));
+    for (const kind of ["root", "state", "home", "shm"] as const) {
+      const target = join(volume, kind); await cp(disk.paths[kind], target, { recursive: true }); disk.paths[kind] = target;
+    }
+    const newIdentity = await lstat(join(disk.paths.root, ".env.local"));
+    expect(newIdentity.dev).not.toBe(oldIdentity.dev);
     await new CloudExecutionActivations(pool, f.cp.execution).step(change.activationId);
     expect(await row()).toMatchObject({ state: "starting", execution_mode: "active", execution_transition_id: change.activationId });
     await startWorker(await f.cp.store.rotateWorkerToken(f.workspace.id));

@@ -68,7 +68,40 @@ it("boot-clean carries only a receipt id and the survivors' count (§7a)", async
 it("boot-clean also attests the legacy material cleanup (slice D, Q-D2)", async () => {
   const { CloudV2BootCleanRequestSchema } = await import("../cloud-v2-relay");
   const retirementId = "66666666-6666-4666-8666-666666666666";
-  for (const legacyMaterial of ["none", "removed", "refused"] as const)
+  for (const legacyMaterial of ["none", "removed"] as const)
     expect(CloudV2BootCleanRequestSchema.parse({ retirementId, processes: 0, legacyMaterial })).toEqual({ retirementId, processes: 0, legacyMaterial });
+  expect(CloudV2BootCleanRequestSchema.parse({ retirementId, processes: 0, legacyMaterial: "refused" })).toEqual({ retirementId, processes: 0, legacyMaterial: "refused" });
+  expect(CloudV2BootCleanRequestSchema.parse({ retirementId, processes: 0, legacyMaterial: "refused", refusals: ["io_error"] }))
+    .toEqual({ retirementId, processes: 0, legacyMaterial: "refused", refusals: ["io_error"] });
   expect(CloudV2BootCleanRequestSchema.safeParse({ retirementId, processes: 0, legacyMaterial: "skipped" }).success).toBe(false);
+});
+
+it("boot-clean names each refused cleanup class from a closed list, unique, with no paths or values", async () => {
+  const { CloudV2BootCleanRequestSchema, CLOUD_V2_BOOT_CLEAN_REFUSALS } = await import("../cloud-v2-relay");
+  const retirementId = "66666666-6666-4666-8666-666666666666";
+  expect(CLOUD_V2_BOOT_CLEAN_REFUSALS).toEqual(expect.arrayContaining(["seed_target_modified", "seed_journal_outdated"]));
+  expect(CLOUD_V2_BOOT_CLEAN_REFUSALS).not.toContain("seed_target_replaced");
+  expect(CLOUD_V2_BOOT_CLEAN_REFUSALS).toHaveLength(24);
+  expect(CloudV2BootCleanRequestSchema.parse({ retirementId, processes: 1, legacyMaterial: "refused", refusals: ["cgroup_unreadable", "seed_target_modified"] }))
+    .toMatchObject({ refusals: ["cgroup_unreadable", "seed_target_modified"] });
+  expect(CloudV2BootCleanRequestSchema.safeParse({ retirementId, processes: 0, legacyMaterial: "refused", refusals: ["/home/user/.local"] }).success).toBe(false);
+  expect(CloudV2BootCleanRequestSchema.safeParse({ retirementId, processes: 0, legacyMaterial: "refused", refusals: ["io_error", "io_error"] }).success).toBe(false);
+  expect(CloudV2BootCleanRequestSchema.safeParse({ retirementId, processes: 0, legacyMaterial: "refused", refusals: [] }).success).toBe(false);
+});
+
+it("requires boot-clean classes sorted and none on a clean result, and keeps them optional otherwise (J-S2)", async () => {
+  const { CloudV2BootCleanRequestSchema } = await import("../cloud-v2-relay");
+  const retirementId = "66666666-6666-4666-8666-666666666666";
+  const ok = (body: Record<string, unknown>) => CloudV2BootCleanRequestSchema.safeParse({ retirementId, ...body }).success;
+  expect(ok({ processes: 1, legacyMaterial: "refused", refusals: ["survivors", "io_error"] })).toBe(false);
+  expect(ok({ processes: 1, legacyMaterial: "refused", refusals: ["io_error", "survivors"] })).toBe(true);
+  for (const legacyMaterial of ["none", "removed"]) {
+    expect(ok({ processes: 0, legacyMaterial, refusals: ["seed_target_modified"] })).toBe(false);
+    expect(ok({ processes: 0, legacyMaterial })).toBe(true);
+    expect(ok({ processes: 2, legacyMaterial, refusals: ["survivors"] })).toBe(true);
+  }
+  // An older worker names no class: still a valid (refused) attestation.
+  expect(ok({ processes: 0, legacyMaterial: "refused" })).toBe(true);
+  expect(ok({ processes: 0, legacyMaterial: "refused", refusals: ["seed_journal_outdated"] })).toBe(true);
+  expect(ok({ processes: 0 })).toBe(true);
 });

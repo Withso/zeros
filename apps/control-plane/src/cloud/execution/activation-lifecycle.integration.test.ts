@@ -244,6 +244,22 @@ database("durable activation through provider Stop and real worker routes", () =
     expect((await activation()).first_error_code).toBe("execution_not_retired");
   });
 
+  it("retains closed cleanup classes on the failed activation and prints them in the operator replay", async () => {
+    await lifecycle.tick(); await advance();
+    const started = await boot(); expect(started.response.status).toBe(200);
+    const receipt = { retirementId: randomUUID(), processes: 0, legacyMaterial: "refused", refusals: ["seed_journal_outdated"] };
+    expect((await started.call("execution-leases/boot-clean", receipt)).status).toBe(409);
+    expect(await activation()).toMatchObject({ phase: "failed", first_error_code: "execution_not_retired",
+      legacy_material: "refused", first_failed_refusals: ["seed_journal_outdated"] });
+    await lifecycle.tick();
+    const inspected = await manageCloudExecution(pool, input, options());
+    expect(inspected).toMatchObject({ state: "committed", bootClean: {
+      refusals: ["seed_journal_outdated"], legacyMaterial: "refused", seedJournal: "outdated",
+    } });
+    const rollback = await manageCloudExecution(pool, { ...input, action: "rollback" }, options());
+    expect(rollback).toMatchObject({ bootClean: inspected.bootClean });
+  });
+
   it("rejects the old boot, an unsupported runtime and a missing worker capability", async () => {
     await lifecycle.tick(); await advance();
     expect((await boot(f.features, f.boot)).response.status).toBe(409);

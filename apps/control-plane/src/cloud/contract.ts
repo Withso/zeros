@@ -266,8 +266,17 @@ export const CloudV2RetirementReasonSchema = z.enum(["outcome", "stop", "revoked
 export const CloudV2RetiredRequestSchema = z.object({ retirementId: z.uuid(), reason: CloudV2RetirementReasonSchema,
   processes: z.number().int().min(0).max(2147483647) }).strict();
 export const CloudV2RetiredReplySchema = z.object({ retired: z.literal(true) }).strict();
+export const CLOUD_V2_BOOT_CLEAN_REFUSALS = ["proc_unreadable", "cgroup_unavailable", "cgroup_root", "cgroup_unreadable", "survivors", "contexts_erase_failed",
+  "state_dir_linked", "state_dir_foreign", "checkout_linked", "checkout_foreign", "seed_journal_invalid", "seed_journal_incomplete", "seed_journal_outdated",
+  "seed_target_modified", "seed_target_not_regular", "git_identity_linked", "git_identity_foreign", "git_identity_not_regular", "git_identity_changed",
+  "terminal_dir_linked", "terminal_entry_foreign", "shm_linked", "restore_token_dir_invalid", "io_error"] as const;
+export const CloudV2BootCleanRefusalSchema = z.enum(CLOUD_V2_BOOT_CLEAN_REFUSALS);
+export type CloudV2BootCleanRefusal = z.infer<typeof CloudV2BootCleanRefusalSchema>;
 export const CloudV2BootCleanRequestSchema = z.object({ retirementId: z.uuid(), processes: z.number().int().min(0).max(2147483647),
-  legacyMaterial: z.enum(["none", "removed", "refused"]).optional() }).strict();
+  legacyMaterial: z.enum(["none", "removed", "refused"]).optional(),
+  refusals: z.array(CloudV2BootCleanRefusalSchema).min(1).max(24)
+    .refine(values => values.every((value, index) => index === 0 || values[index - 1]! < value), "Sorted unique classes").optional() }).strict()
+  .refine(value => !value.refusals || value.processes > 0 || value.legacyMaterial === undefined || value.legacyMaterial === "refused", "Clean boots have no refusals");
 export const CloudV2BootCleanReplySchema = z.object({ retired: z.number().int().min(0) }).strict();
 /** Context refusal codes (409/403/503 bodies {error:{code,message,agent?}}). */
 export const CloudV2ContextErrorCodeSchema = z.enum(["actor_changed", "actor_busy", "worker_update_required", "workspace_stopping",

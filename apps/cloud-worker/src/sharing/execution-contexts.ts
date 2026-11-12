@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { z } from "zod";
-import { CloudV2BootCleanReplySchema, CloudV2BootstrapLeaseSchema, CloudV2ClientLeaseSchema, CloudV2RenewReplySchema, CloudV2RetiredReplySchema, CloudV2TerminalLeaseSchema,
+import { type CloudV2BootCleanRefusal, CloudV2BootCleanReplySchema, CloudV2BootCleanRequestSchema, CloudV2BootstrapLeaseSchema, CloudV2ClientLeaseSchema, CloudV2RenewReplySchema, CloudV2RetiredReplySchema, CloudV2TerminalLeaseSchema,
   CloudV2TurnLeaseSchema, type CloudV2BootstrapLease, type CloudV2ClientLease, type CloudV2ContextReason, type CloudV2TerminalLease,
   type CloudV2TurnLease } from "@zeros/protocol/cloud-v2-relay";
 
@@ -31,12 +31,15 @@ export class ExecutionContexts {
   constructor(private readonly deps: ContextsDeps) {}
 
   /** §7a: this boot's clean attestation, once. Every lease waits for it; unproven cleanup (or a refused receipt) grants none. */
-  clean(attest: () => Promise<number | { processes: number; legacyMaterial: "none" | "removed" | "refused" }>): Promise<void> {
+  clean(attest: () => Promise<number | { processes: number; legacyMaterial: "none" | "removed" | "refused"; refusals?: readonly CloudV2BootCleanRefusal[] }>): Promise<void> {
     this.gate ??= (async () => {
-      const proof = await attest().catch(() => ({ processes: 1, legacyMaterial: "refused" as const }));
-      const { processes, legacyMaterial } = typeof proof === "number" ? { processes: proof, legacyMaterial: undefined } : proof;
-      const retirementId = randomUUID();
-      const body = { retirementId, processes, ...(legacyMaterial ? { legacyMaterial } : {}) };
+      const proof = await attest().catch(() => ({ processes: 1, legacyMaterial: "refused" as const, refusals: ["io_error"] as const }));
+      const { processes, legacyMaterial, refusals = [] } = typeof proof === "number" ? { processes: proof, legacyMaterial: undefined } : proof;
+      const retirementId = randomUUID(), classes = [...new Set(refusals)].sort();
+      const proposed = { retirementId, processes, ...(legacyMaterial ? { legacyMaterial } : {}), ...(classes.length ? { refusals: classes } : {}) };
+      // The shared schema decides what is consistent; anything it refuses goes as unproven, refused material.
+      const body = CloudV2BootCleanRequestSchema.safeParse(proposed).success ? proposed
+        : { retirementId, processes: Math.max(1, processes), legacyMaterial: "refused" as const, refusals: ["io_error" as const] };
       for (let attempt = 0; ; attempt++) {
         try { CloudV2BootCleanReplySchema.parse(await this.deps.post("execution-leases/boot-clean", body)); break; }
         catch (error) {
@@ -46,7 +49,8 @@ export class ExecutionContexts {
           await new Promise(resolve => setTimeout(resolve, 250 * 2 ** attempt));
         }
       }
-      if (processes > 0 || legacyMaterial === "refused") throw new Error("This workspace could not prove a clean start.");
+      // What was attested decides, including a fallback for an inconsistent proof.
+      if (body.processes > 0 || body.legacyMaterial === "refused") throw new Error("This workspace could not prove a clean start.");
     })();
     void this.gate.catch(() => {});
     return this.gate;

@@ -43,12 +43,14 @@ export async function manageCloudExecution(pool: pg.Pool, raw: unknown,
     const previous = (await client.query("SELECT * FROM cloud_v2_execution_activations WHERE id=$1 FOR UPDATE", [input.activationId])).rows[0];
     if (previous && (previous.workspace_id !== input.workspaceId || previous.target_fingerprint !== targetFingerprint || previous.request_hash.toString("hex") !== requestHash))
       throw new Error("Execution activation identifies another plan");
+    const bootClean = { legacyMaterial: previous?.legacy_material ?? null, refusals: previous?.first_failed_refusals ?? null,
+      seedJournal: previous?.first_failed_refusals?.includes("seed_journal_outdated") ? "outdated" as const : "unknown" as const };
     const receipt = (await client.query<{ request_hash: Buffer; approval_hash: Buffer }>(
       "SELECT request_hash,approval_hash FROM cloud_v2_execution_activation_receipts WHERE activation_id=$1 AND action=$2", [input.activationId,action])).rows[0];
     if (receipt) {
       if (receipt.request_hash.toString("hex") !== receiptHash || options.execute && options.approval !== receipt.approval_hash.toString("hex")) throw new Error("Execution activation plan changed");
       await client.query("ROLLBACK");
-      return { state: options.execute ? "replayed" as const : "committed" as const, planSha256: receipt.approval_hash.toString("hex"), targetFingerprint, activationId: input.activationId };
+      return { state: options.execute ? "replayed" as const : "committed" as const, planSha256: receipt.approval_hash.toString("hex"), targetFingerprint, activationId: input.activationId, bootClean };
     }
     const snapshot = action === "rollback" ? null : await preparedExecutionSnapshot(client, input.workspaceId, input.initiatorUserId);
     const prepared = action === "prepare" ? (await client.query<{ id: string }>(
@@ -72,7 +74,7 @@ export async function manageCloudExecution(pool: pg.Pool, raw: unknown,
       operatorRevision: operator.auth_revision, principal: owner.principal });
     if (!options.execute) {
       await client.query("ROLLBACK");
-      return { state: "planned" as const, planSha256, targetFingerprint, activationId: input.activationId, action, snapshot };
+      return { state: "planned" as const, planSha256, targetFingerprint, activationId: input.activationId, action, snapshot, bootClean };
     }
     if (options.approval !== planSha256) throw new Error("Execution activation plan changed; inspect the current target before execution");
     if (action === "prepare") {
@@ -100,7 +102,7 @@ export async function manageCloudExecution(pool: pg.Pool, raw: unknown,
     await client.query(`INSERT INTO cloud_v2_execution_activation_receipts(activation_id,action,request_hash,approval_hash)
       VALUES($1,$2,decode($3,'hex'),decode($4,'hex'))`, [input.activationId,action,receiptHash,planSha256]);
     await client.query("COMMIT");
-    return { state: "changed" as const, planSha256, targetFingerprint, activationId: input.activationId, action };
+    return { state: "changed" as const, planSha256, targetFingerprint, activationId: input.activationId, action, bootClean };
   } catch (error) { await client.query("ROLLBACK").catch(() => {}); throw error; }
   finally { client.release(); }
 }

@@ -135,3 +135,28 @@ it("sends the legacy material outcome with the clean-boot attestation, and grant
   expect(posts.map(post => post.path)).toEqual(["execution-leases/boot-clean"]);
   refused.dispose();
 });
+
+it("carries the refused classes with the clean-boot attestation, once each and sorted, and nothing when there are none", async () => {
+  const posts: Array<{ path: string; body: any }> = [];
+  const make = () => new ExecutionContexts({ post: async (path, body) => { posts.push({ path, body }); return { retired: 0 }; } });
+  const refused = make();
+  await expect(refused.clean(async () => ({ processes: 1, legacyMaterial: "refused", refusals: ["seed_target_modified", "cgroup_unreadable", "seed_target_modified"] }))).rejects.toThrow();
+  expect(posts[0]!.body).toEqual({ retirementId: expect.any(String), processes: 1, legacyMaterial: "refused", refusals: ["cgroup_unreadable", "seed_target_modified"] });
+  refused.dispose();
+  posts.length = 0;
+  const clean = make();
+  await clean.clean(async () => ({ processes: 0, legacyMaterial: "none", refusals: [] }));
+  expect(posts[0]!.body).toEqual({ retirementId: expect.any(String), processes: 0, legacyMaterial: "none" });
+  clean.dispose();
+});
+
+it("never posts a boot-clean body the shared schema would refuse: an inconsistent proof goes as refused io_error", async () => {
+  const { CloudV2BootCleanRequestSchema } = await import("@zeros/protocol/cloud-v2-relay");
+  const posts: Array<{ path: string; body: any }> = [];
+  const contexts = new ExecutionContexts({ post: async (path, body) => { posts.push({ path, body }); return { retired: 0 }; } });
+  // A clean result that names a class is inconsistent (J-S2): it goes as unproven, refused material instead.
+  await expect(contexts.clean(async () => ({ processes: 0, legacyMaterial: "none", refusals: ["survivors"] }))).rejects.toThrow();
+  expect(CloudV2BootCleanRequestSchema.safeParse(posts[0]!.body).success).toBe(true);
+  expect(posts[0]!.body).toMatchObject({ legacyMaterial: "refused", refusals: ["io_error"] });
+  contexts.dispose();
+});

@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { HttpError } from "../../authz.js";
 import { withSystemTx, type Tx } from "../../db.js";
 import { hashCloudV2Token } from "../tokens.js";
+import type { CloudV2BootCleanRefusal } from "../contract.js";
 import { actorBusy, actorChanged } from "./errors.js";
 import type { CloudExecutionContexts, ExecutionWorker, ExecutionWorkspace } from "./store.js";
 import { completeExecutionActivation } from "./activation.js";
@@ -9,7 +10,7 @@ import { failExecutionActivation } from "./activation-state.js";
 
 type Boot = { boot_id: string; access_epoch: string; stop_generation: string; worker_token_hash: Buffer; replaced_by: string | null;
   retirement_id: string | null; retirement_hash: Buffer | null; retired_count: number | null; clean_at: Date | null;
-  legacy_material: "none" | "removed" | "refused" | null };
+  legacy_material: "none" | "removed" | "refused" | null; first_failed_at: Date | null };
 
 export class CloudExecutionBoots {
   constructor(readonly contexts: CloudExecutionContexts) {}
@@ -36,9 +37,11 @@ export class CloudExecutionBoots {
     [workspace.id, workspace.worker_boot_id, workspace.access_epoch, workspace.stop_generation, workspace.worker_token_hash])).rowCount) throw actorBusy();
   }
 
-  async clean(identity: ExecutionWorker, input: { retirementId: string; processes: number; legacyMaterial?: "none" | "removed" | "refused" | undefined }) {
+  async clean(identity: ExecutionWorker, input: { retirementId: string; processes: number; legacyMaterial?: "none" | "removed" | "refused" | undefined;
+    refusals?: CloudV2BootCleanRefusal[] | undefined }, logger?: Pick<Console, "warn">) {
     const legacyMaterial = input.legacyMaterial ?? "refused";
-    const digest = createHash("sha256").update(JSON.stringify([input.retirementId, input.processes, legacyMaterial])).digest();
+    const digest = createHash("sha256").update(JSON.stringify([input.retirementId, input.processes, legacyMaterial,
+      ...(input.refusals ? [input.refusals] : [])])).digest();
     const result = await withSystemTx(this.contexts.pool, async tx => {
       const workspace = await this.contexts.worker(tx, identity, true, true);
       const boot = (await tx.query<Boot>("SELECT * FROM cloud_v2_execution_boots WHERE workspace_id=$1 AND boot_id=$2 FOR UPDATE", [workspace.id, identity.bootId])).rows[0];
@@ -51,10 +54,12 @@ export class CloudExecutionBoots {
       if (input.processes || legacyMaterial === "refused") {
         await tx.query(`UPDATE cloud_v2_execution_boots SET last_processes=$3,first_failed_processes=coalesce(first_failed_processes,nullif($3,0)),
           first_failed_at=coalesce(first_failed_at,clock_timestamp()),legacy_material=$4,
-          first_failed_legacy_material=coalesce(first_failed_legacy_material,$4) WHERE workspace_id=$1 AND boot_id=$2`,
-        [workspace.id, identity.bootId, input.processes, legacyMaterial]);
-        await failExecutionActivation(tx, workspace.id, "execution_not_retired");
-        return null;
+          first_failed_legacy_material=coalesce(first_failed_legacy_material,$4),last_refusals=$5,
+          first_failed_refusals=CASE WHEN first_failed_at IS NULL THEN $5::text[] ELSE first_failed_refusals END
+          WHERE workspace_id=$1 AND boot_id=$2`,
+        [workspace.id, identity.bootId, input.processes, legacyMaterial, input.refusals ?? null]);
+        await failExecutionActivation(tx, workspace.id, "execution_not_retired", { legacyMaterial, refusals: input.refusals ?? null });
+        return { refused: true, firstFailure: boot.first_failed_at === null, workspaceId: workspace.id };
       }
       // Only the persisted replacement chain permits this boot to attest another
       // boot's cleanup. A changed token or Stop intent never supplies that proof.
@@ -67,13 +72,16 @@ export class CloudExecutionBoots {
       await tx.query("DELETE FROM cloud_v2_execution_tokens WHERE context_id=ANY($1::uuid[])", [ids]);
       await tx.query(`UPDATE cloud_v2_prompt_outbox SET state='interrupted',terminal_at=clock_timestamp(),updated_at=clock_timestamp()
         WHERE workspace_id=$1 AND execution_context_id=ANY($2::uuid[]) AND state IN ('dispatching','accepted')`, [workspace.id, ids]);
-      await tx.query(`UPDATE cloud_v2_execution_boots SET retirement_id=$3,retirement_hash=$4,retired_count=$5,clean_at=clock_timestamp(),last_processes=0,legacy_material=$6
+      await tx.query(`UPDATE cloud_v2_execution_boots SET retirement_id=$3,retirement_hash=$4,retired_count=$5,clean_at=clock_timestamp(),last_processes=0,legacy_material=$6,last_refusals=NULL
         WHERE workspace_id=$1 AND boot_id=$2`, [workspace.id, identity.bootId, input.retirementId, digest, ids.length, legacyMaterial]);
       if (ids.length) await tx.query("SELECT pg_notify('zeros_cloud_v2_prompts',$1)", [workspace.id]);
       await completeExecutionActivation(tx, workspace, legacyMaterial, this.contexts);
       return { retired: ids.length };
     });
-    if (!result) throw new HttpError(409, "execution_not_retired", "Execution processes are still running or cleanup cannot be proved");
+    if ("refused" in result) {
+      if (result.firstFailure) logger?.warn(`[cloud-v2] activation boot-clean refused classes=${input.refusals?.join(",") ?? "unreported"} workspace=${result.workspaceId.slice(0, 8)}`);
+      throw new HttpError(409, "execution_not_retired", "Execution processes are still running or cleanup cannot be proved");
+    }
     return result;
   }
 }

@@ -1,0 +1,9 @@
+{
+  "id": "cloud-active-checkpoint-environment",
+  "kind": "replay",
+  "area": "control-plane",
+  "fixedBy": "pr:1045",
+  "symptom": "Restoring an activated workspace could recreate its Creator's seeded environment files from the environment archive, ignored archive or a staged Git copy after the worker had removed them.",
+  "rule": "zstack-review and principle 10 require every restore source to obey the active execution boundary before it writes shared files. Keep the server pin, preserve legacy file edits, and accept both supported seed journal versions during capture.",
+  "check": "pnpm --dir apps/control-plane exec vitest run src/cloud/checkpoint.test.ts -t 'managed environment bytes'"
+}

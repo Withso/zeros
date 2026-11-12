@@ -75,3 +75,14 @@ it.skipIf(process.platform !== "linux")("kills a real env -i orphan that outlive
   expect(await bootClean(deps)).toBe(0);
   expect(await real.identity(orphan)).toBeUndefined();
 });
+
+it("names why a boot is unproven: survivors, a root or missing cgroup, an unreadable process, a failed erase", async () => {
+  const classes = async (deps: BootCleanDeps) => { const noted: string[] = []; const count = await bootClean({ ...deps, note: refusal => noted.push(refusal) }); return { count, noted }; };
+  expect(await classes(fake([...base(), p(800, 1, 100)], { stubborn: [800] }).deps)).toEqual({ count: 1, noted: ["survivors"] });
+  expect((await classes(fake(base().map(process => process.pid === SELF ? { ...process, cgroup: "0::/" } : process)).deps)).noted).toEqual(["cgroup_root"]);
+  expect((await classes(fake(base().map(process => process.pid === SELF ? { ...process, cgroup: "12:pids:/system.slice/zeros-worker.service" } : process)).deps)).noted).toEqual(["cgroup_unavailable"]);
+  expect((await classes(fake(base(), { cgroupProcs: async () => { throw new Error("hybrid"); } }).deps)).noted).toEqual(["cgroup_unreadable"]);
+  expect((await classes(fake(base(), { erase: async () => { throw new Error("busy"); } }).deps)).noted).toEqual(["contexts_erase_failed"]);
+  expect((await classes(fake(base(), { identity: async pid => { if (pid === 702) throw Object.assign(new Error("denied"), { code: "EACCES" }); return base().find(process => process.pid === pid); } }).deps)).noted).toEqual(["proc_unreadable"]);
+  expect(await classes(fake(base()).deps)).toEqual({ count: 0, noted: [] });
+});
