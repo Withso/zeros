@@ -21,8 +21,13 @@ import { parseEnv } from "node:util";
 import type { WorkspaceApiEnvironment } from "./credentials/workspace-api";
 import type { ExecutionContexts } from "./sharing/execution-contexts";
 import { gitIdentityEnvironment } from "./sharing/identity";
-import type { PersonalEnvironments } from "./sharing/personal-env";
+import { unexportedLine, unexportedSummary, type PersonalEnvironments, type Unexported } from "./sharing/personal-env";
 import { retireContext } from "./sharing/retire";
+import { ClosedFailure, classOf, errorCode, failingAs, failureLine, tagged } from "./sharing/closed-failure";
+
+/** Where an activated turn stopped (journal only); a step's own class (no_person, personal_env_failed, context_not_live,
+ * lease_person_mismatch, environment_invalid) takes precedence. */
+type TurnFailureClass = "begin_failed" | "lease_refused" | "driver_failed" | "prompt_failed";
 
 export type DriverFactories = Partial<Record<CloudV2Agent, () => Driver>>;
 export interface AppClient { id: string; send(frame: BridgeMessage): Promise<void> }
@@ -50,7 +55,7 @@ interface Runtime {
   mcpFailures?: Set<string>;
   workspaceTools?: WorkspaceToolGrant;
   /** Team sharing (activated): the person this turn runs as, from its lease. The driver lives only as long as it. */
-  context?: { id: string; lease: CloudV2TurnLease; env?: { directory: string; variables: Record<string, string> }; ended?: CloudV2ContextReason };
+  context?: { id: string; lease: CloudV2TurnLease; env?: { directory: string; variables: Record<string, string>; unexported?: Unexported }; ended?: CloudV2ContextReason };
 }
 
 /** An activated begin: the person the control plane chose for this dispatch and its context. */
@@ -176,7 +181,9 @@ export class Agents {
   }
 
   /** Team sharing slice B: where an activated turn's lease comes from. */
-  setExecutionContexts(contexts?: ExecutionContexts, personal?: PersonalEnvironments): void { this.contexts = contexts; this.personal = personal; }
+  setExecutionContexts(contexts?: ExecutionContexts, personal?: PersonalEnvironments, log?: (line: string) => void): void { this.contexts = contexts; this.personal = personal; this.log = log; }
+  /** Worker journal: closed classes and codes only. */
+  private log?: (line: string) => void;
   /** An activated workspace: every turn runs as the person the control plane names, never as the config's login. */
   private get acting(): boolean { return this.config.actingUser === 1; }
   /** Between an activated chat's turns no driver exists; selections apply at the next open. */
@@ -702,7 +709,7 @@ export class Agents {
     if (route.driver && (route.nativeRunning || this.hasBackground(route))) return;
     const context = this.acting ? route.context : undefined;
     if (this.acting && (!context || !this.contexts?.live(context.id)))
-      throw new WorkspaceError("session-expired", "This turn's person is no longer current. Send the message again.");
+      throw tagged(new WorkspaceError("session-expired", "This turn's person is no longer current. Send the message again."), "context_not_live");
     const config = context ? { ...this.config, agents: context.lease.agents } : this.config;
     const unavailable = providerAvailability(route.agentId, config, !!this.factories[route.agentId]);
     if (unavailable) throw Object.assign(new Error(cloudFailureMessage(unavailable)), { cloud: unavailable });
@@ -890,7 +897,7 @@ export class Agents {
   /** Activated: the begin must name this turn's person; the lease supplies only that person's material. Fails closed. */
   private async leaseTurn(route: Runtime, entry: InboxEntry, assigned: boolean | OutboxAssignment): Promise<void> {
     if (assigned === true || assigned === false || assigned.mode !== "prompt" || assigned.actingUser.userMessageId !== entry.userMessageId)
-      throw new WorkspaceError("session-expired", "The control plane named no person for this turn.");
+      throw tagged(new WorkspaceError("session-expired", "The control plane named no person for this turn."), "no_person");
     const context: NonNullable<Runtime["context"]> = { id: assigned.contextId, lease: await this.lease(route, entry, assigned) };
     route.context = context;
     // Revoked, refused at renewal or expired: the person's turn stops now; the settled turn then retires the context.
@@ -901,7 +908,11 @@ export class Agents {
       void route.driver?.interrupt().catch(() => {});
     });
     // The person's env files: private to this context, never in the checkout; retirement erases them.
-    if (context.lease.environment && this.personal) context.env = await this.personal.materialize(context.id, context.lease.environment);
+    if (context.lease.environment && this.personal) {
+      context.env = await failingAs("personal_env_failed", () => this.personal!.materialize(context.id, context.lease.environment!));
+      const line = unexportedLine(context.env.unexported!);
+      if (line) this.log?.(line);
+    }
   }
 
   /** Activated steer: only into the active turn's own context, after the control plane checks this message's link to it. */
@@ -927,7 +938,7 @@ export class Agents {
       throw Object.assign(new Error(cloudFailureMessage(cloud)), { cloud });
     }
     if (lease.userId !== assigned.actingUser.userId || lease.generation !== assigned.actingUser.generation)
-      throw new WorkspaceError("session-expired", "The control plane answered for another person.");
+      throw tagged(new WorkspaceError("session-expired", "The control plane answered for another person."), "lease_person_mismatch");
     return lease;
   }
 
@@ -947,7 +958,9 @@ export class Agents {
     const files = route.context?.env ? route.context.lease.environment?.files ?? [] : [];
     if (!files.length) return content;
     const names = files.map(file => file.path).join(", ");
-    return [{ type: "text", text: `Personal env files for this turn (${names}) are in $ZEROS_PERSONAL_ENV_DIR, not in the checkout.` }, ...content];
+    // Counts by class only: never a name or value that was left out.
+    const skipped = route.context?.env?.unexported ? unexportedSummary(route.context.env.unexported) : undefined;
+    return [{ type: "text", text: `Personal env files for this turn (${names}) are in $ZEROS_PERSONAL_ENV_DIR, not in the checkout.${skipped ? ` ${skipped}; they stay in the files.` : ""}` }, ...content];
   }
 
   private actingVariables(chatId: string, context: NonNullable<Runtime["context"]>): Record<string, string> {
@@ -990,6 +1003,8 @@ export class Agents {
           await this.turnState(route, entry, "running");
         }
         let response: PromptResponse | undefined, failure: BridgeAgentFailure | undefined;
+        // Activated: the step a failed turn stopped at, for one journal line (closed classes only).
+        let stage: TurnFailureClass | undefined;
         try {
           const content = entry.outbox ? await preparePromptFiles(this.scope, entry.prompt) : entry.prompt;
           if (entry.outbox && (route.model !== entry.outbox.model || route.effort !== entry.outbox.effort)) {
@@ -1010,10 +1025,12 @@ export class Agents {
             if (!prepared) response = { stopReason: "cancelled" };
             else {
               entry = prepared; route.active = entry;
+              stage = "begin_failed";
               const assigned = await this.beginWhenFree(route, entry, stopping);
               if (!assigned || route.closed || stopping !== route.stopping) response = { stopReason: "cancelled" };
               else {
                 // The lease first, so the running turn names its person.
+                stage = "lease_refused";
                 await this.leaseTurn(route, entry, assigned);
                 await this.update(route, { sessionId: route.id, update: { sessionUpdate: "user_message_recorded", message: userMessage(entry) } });
                 await this.turnState(route, entry, "running");
@@ -1021,8 +1038,10 @@ export class Agents {
             }
           }
           if (!response) {
+            if (acting) stage = "driver_failed";
             await this.ensureDriver(route);
             route.turnTiming.mark("driver_ready");
+            if (acting) stage = "prompt_failed";
           }
           if (response) { /* settled before any driver */ }
           else if (route.closed || stopping !== route.stopping) response = { stopReason: "cancelled" };
@@ -1070,7 +1089,10 @@ export class Agents {
               }
             }
           }
-        } catch (error) { failure = providerFailure(route.agentId, error, "prompt"); }
+        } catch (error) {
+          failure = providerFailure(route.agentId, error, "prompt");
+          if (stage) this.log?.(failureLine("turn", classOf(error) ?? new ClosedFailure(stage, errorCode(error))));
+        }
         finally { route.nativeRunning = false; }
         route.settling = (async () => {
           if (route.interactions?.blocking) await route.interactions.dismiss(INPUT_CANCELLED);

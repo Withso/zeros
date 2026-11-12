@@ -3,9 +3,9 @@ import { access, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { CloudV2ClientOperationSchema, CloudV2ControlFrameSchema, type CloudV2BootCleanRefusal, CLOUD_V2_RELAY_PROTOCOL, CLOUD_WORKSPACE_RESOURCES_CAPABILITY, type CloudV2ControlFrame, type CloudV2SetupStatus, type CloudV2WorkerFrame, type RuntimeMcpServer } from "@zeros/protocol/cloud-v2-relay";
+import { CloudV2ClientOperationSchema, CloudV2ControlFrameSchema, type CloudV2BootCleanRefusal, type CloudV2ClientLease, CLOUD_V2_RELAY_PROTOCOL, CLOUD_WORKSPACE_RESOURCES_CAPABILITY, type CloudV2ControlFrame, type CloudV2SetupStatus, type CloudV2WorkerFrame, type RuntimeMcpServer } from "@zeros/protocol/cloud-v2-relay";
 import { CloudV2PromptPullReplySchema } from "@zeros/protocol/cloud-v2-prompts";
-import { createMessage, type BridgeMessage } from "@zeros/protocol/messages";
+import { createMessage, type BridgeMessage, type ClientOperationFailure } from "@zeros/protocol/messages";
 import { safeParseClientBridgeMessage } from "@zeros/protocol/schemas";
 import { CodeReviewError } from "@zeros/protocol/code-review";
 import { MIN_SUPPORTED_PROTOCOL, PROTOCOL_VERSION } from "@zeros/protocol/version";
@@ -34,8 +34,9 @@ import { GithubCredentialRecovery } from "./credentials/github-recovery";
 import { configureGitIdentity } from "./credentials/git-identity";
 import { commandRunner } from "./workspace/commands";
 import { Terminals, type TerminalPeople } from "./terminals/service";
+import { ClosedFailure, classOf, closedFailure, errorCode, failureLine, tagged } from "./sharing/closed-failure";
 import { gitIdentityEnvironment } from "./sharing/identity";
-import { PersonalEnvironments } from "./sharing/personal-env";
+import { PersonalEnvironments, unexportedLine } from "./sharing/personal-env";
 import { operationEnvironment } from "./sharing/operation-environment";
 import { retireContext } from "./sharing/retire";
 import { removeLegacyMaterial } from "./sharing/legacy-material";
@@ -218,10 +219,12 @@ export class CloudWorker {
   private async asClient<T>(client: Client, requestId: string, op: string, params: Record<string, unknown>, work: () => Promise<T>): Promise<T> {
     const operation = CloudV2ClientOperationSchema.safeParse(op);
     if (!this.acting || !operation.success || (op === "git.repoBranchCatalog" && params.fetch !== true)) return work();
-    if (!this.contexts || !client.userId) throw new WorkspaceError("CLOUD_V2_UNSUPPORTED", "Reconnect to the workspace to make changes as yourself.");
-    const lease = await this.contexts.clientLease({ clientId: client.authorityId ?? client.id, requestId, operation: operation.data });
+    if (!this.contexts || !client.userId) throw tagged(new WorkspaceError("CLOUD_V2_UNSUPPORTED", "Reconnect to the workspace to make changes as yourself."), "no_person");
+    let lease: CloudV2ClientLease;
+    try { lease = await this.contexts.clientLease({ clientId: client.authorityId ?? client.id, requestId, operation: operation.data }); }
+    catch (error) { throw tagged(error, "lease_refused"); }
     try {
-      if (lease.userId !== client.userId) throw new WorkspaceError("CLOUD_V2_UNSUPPORTED", "Reconnect to the workspace to make changes as yourself.");
+      if (lease.userId !== client.userId) throw tagged(new WorkspaceError("CLOUD_V2_UNSUPPORTED", "Reconnect to the workspace to make changes as yourself."), "lease_person_mismatch");
       return await operationEnvironment.run({ git: gitIdentityEnvironment(lease.gitIdentity), zeros: { ZEROS_EXECUTION_CONTEXT: lease.contextId } }, work);
     } finally {
       await retireContext(this.contexts, lease.contextId, "operation_done");
@@ -234,7 +237,15 @@ export class CloudWorker {
       of: client => (client as Client).userId,
       lease: async (client, terminalId, requestId) => {
         const lease = await contexts.terminalLease({ clientId: (client as Client).authorityId ?? client.id, terminalId, requestId });
-        const env = lease.environment ? await this.personal.materialize(lease.contextId, lease.environment) : undefined;
+        let env: Awaited<ReturnType<PersonalEnvironments["materialize"]>> | undefined;
+        try { env = lease.environment ? await this.personal.materialize(lease.contextId, lease.environment) : undefined; }
+        catch (error) {
+          // Granted but unusable: retired now (its files erased), not left to lapse.
+          void retireContext(contexts, lease.contextId, "terminal_closed", { personal: this.personal }).catch(() => {});
+          throw closedFailure("personal_env_failed", error);
+        }
+        const skipped = env && unexportedLine(env.unexported);
+        if (skipped) this.options.log?.(skipped);
         const variables = env?.variables ?? {};
         application.protect([...Object.values(variables), ...(lease.environment?.files.map(file => file.content) ?? []), ...(lease.api ? [lease.api.token] : [])]);
         return { contextId: lease.contextId, userId: lease.userId, git: gitIdentityEnvironment(lease.gitIdentity),
@@ -475,9 +486,14 @@ export class CloudWorker {
         if (frame.op === "attachment.write") await this.reportIdle();
         await client.send(createMessage({ type: "WORKSPACE_RESPONSE", source: "engine", requestId: frame.id, op: frame.op, result }));
       } catch (error) {
+        // Activated: one journal line names the refusing step (closed class and code, never a path or value).
+        const failure = classOf(error) as ClosedFailure<ClientOperationFailure> | undefined;
+        if (this.acting) this.options.log?.(failureLine(`workspace-request op=${/^[A-Za-z]{1,32}(?:\.[A-Za-z]{1,32}){0,2}$/.test(frame.op) ? frame.op : "other"}`,
+          failure ?? new ClosedFailure("operation_failed", errorCode(error))));
         await client.send(createMessage({ type: "WORKSPACE_ERROR", source: "engine", requestId: frame.id, op: frame.op,
           code: error instanceof WorkspaceError || error instanceof CodeReviewError ? error.code : "WORKSPACE_ERROR",
-          message: error instanceof WorkspaceError || error instanceof CodeReviewError ? error.message : "The workspace request could not be completed." }));
+          message: error instanceof WorkspaceError || error instanceof CodeReviewError ? error.message : "The workspace request could not be completed.",
+          ...(this.acting && failure ? { failure: failure.failure } : {}) }));
       } finally {
         if (activeMutation) {
           this.activeMutations--;
@@ -713,6 +729,7 @@ export class CloudWorker {
       terminals = new Terminals(scope, { gitEnvironment: this.gitEnvironment, applicationEnvironment: application.variables,
         zerosEnvironment: () => workspaceApi.variables(), redact: text => application.text(text),
         ...(config.actingUser === 1 && this.contexts ? { people: this.terminalPeople(this.contexts, application) } : {}),
+        ...(this.options.log ? { log: this.options.log } : {}),
         records: join(this.options.directory, "terminals"), broadcast: frame => this.broadcast(frame), activity: () => { this.runtimeGate.activity(); void this.reportIdle(); } });
       const chats = new ChatService(store, scope, (chatId) => agents!.closeChat(chatId), agents.turns, {
         historyReplacement: () => this.historyReplacementEnabled,
@@ -743,7 +760,7 @@ export class CloudWorker {
       if (this.disposed || this.stopping) return false;
       this.environmentVersion = config.environment?.versionId;
       this.sync?.dispose(); this.sync = sync;
-      this.store = store; this.workspace = workspace; this.mcp = mcp; this.agents = agents; agents.setExecutionContexts(this.contexts, this.personal); this.reviews = reviews;
+      this.store = store; this.workspace = workspace; this.mcp = mcp; this.agents = agents; agents.setExecutionContexts(this.contexts, this.personal, this.options.log); this.reviews = reviews;
       this.terminals = terminals; this.application = application; this.workspaceApi = workspaceApi; this.chats = chats; this.history = history; this.setup = setup; this.checkoutRefresh = refresh;
       this.unsubscribers.push(...unsubscribers); this.scope = scope; published = true;
       recordStartupTiming("worker_services", servicesStarted, timing);

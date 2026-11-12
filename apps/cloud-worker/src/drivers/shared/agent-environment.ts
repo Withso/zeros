@@ -1,4 +1,5 @@
 import { CloudEnvironmentMaterialSchema } from "@zeros/protocol/cloud-v2-relay";
+import { tagged } from "../../sharing/closed-failure";
 
 export type AgentLogin =
   | { agent: "codex"; token: string }
@@ -34,7 +35,9 @@ export function agentEnvironment(
  * opt in, without changing worker or credential-provider environments. */
 export function workerChildEnvironment(source: NodeJS.ProcessEnv = process.env, git: NodeJS.ProcessEnv = {}, application: Readonly<Record<string, string>> = {},
   zeros: Readonly<Record<string, string>> = {}): NodeJS.ProcessEnv {
-  if (!CloudEnvironmentMaterialSchema.safeParse({ variables: application, files: [] }).success) throw new Error("Invalid application environment.");
+  const checked = CloudEnvironmentMaterialSchema.safeParse({ variables: application, files: [] });
+  // The closed validation code (cloud_environment_reserved, …) goes with it, never a name or value.
+  if (!checked.success) throw tagged(Object.assign(new Error("Invalid application environment."), { code: checked.error.issues[0]?.message }), "environment_invalid");
   const env: NodeJS.ProcessEnv = {};
   for (const [name, value] of Object.entries(source)) {
     if (value !== undefined && (runtimeNames.has(name) || /^LC_[A-Z_]+$/.test(name))) env[name] = value;

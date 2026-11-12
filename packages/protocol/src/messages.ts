@@ -1182,7 +1182,11 @@ export interface WorkspaceErrorMessage extends BaseMessage {
   code: string;
   message: string;
   remediation?: string;
+  /** Cloud worker, activated workspace only: which step of a person's operation refused (closed, diagnostic). */
+  failure?: ClientOperationFailure;
 }
+export const CLIENT_OPERATION_FAILURES = ["no_person", "lease_refused", "lease_person_mismatch", "operation_failed"] as const;
+export type ClientOperationFailure = typeof CLIENT_OPERATION_FAILURES[number];
 // Remote writes are gated by the per-workspace remote-restriction list; there
 // is no per-op approval message.
 
@@ -1267,12 +1271,17 @@ export interface PtyDataMessage extends BaseMessage {
  *  Optional for backward compatibility with older engines/clients, where an
  *  absent reason means an ordinary process exit. */
 export type PtyExitReason = "spawn-failed" | "host-unavailable" | "host-lost";
+/** Cloud worker only, with spawn-failed: why the shell could not start (closed, diagnostic; never a value or path). */
+export const PTY_SPAWN_FAILURES = ["invalid_request", "no_person", "private", "limit", "lease_refused", "lease_person_mismatch",
+  "personal_env_failed", "environment_invalid", "cwd_unavailable", "pty_unavailable", "io_error"] as const;
+export type PtySpawnFailure = typeof PTY_SPAWN_FAILURES[number];
 export interface PtyExitMessage extends BaseMessage {
   type: "PTY_EXIT";
   sessionId: string;
   exitCode: number | null;
   signal: number | null;
   reason?: PtyExitReason;
+  failure?: PtySpawnFailure;
 }
 
 /** One shared terminal in the engine registry. */

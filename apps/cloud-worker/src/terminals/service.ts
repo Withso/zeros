@@ -2,13 +2,14 @@ import { createHash, randomUUID } from "node:crypto";
 import { isRunSessionId } from "@zeros/protocol/run-actions";
 import { mkdir, readdir, readFile, readlink, realpath, rename, rm, stat, writeFile, type FileHandle } from "node:fs/promises";
 import { join } from "node:path";
-import { createMessage, type BridgeMessage, type PtyCreateMessage, type PtyTerminalInfo } from "@zeros/protocol/messages";
+import { createMessage, type BridgeMessage, type PtyCreateMessage, type PtySpawnFailure, type PtyTerminalInfo } from "@zeros/protocol/messages";
 import type { AppClient } from "../agents";
 import { RECENT_ACTIVITY_MS } from "../activity";
 import { workerChildEnvironment } from "../drivers/shared/agent-environment";
 import { CheckedFiles, descriptorPath } from "../workspace/checked-files";
 import type { WorkspaceScope } from "../workspace/scope";
 import { TerminalMirror } from "./mirror";
+import { ClosedFailure, closedFailure, failingAs, failureLine } from "../sharing/closed-failure";
 
 export interface TerminalProcess {
   pid: number;
@@ -31,6 +32,10 @@ export interface TerminalPeople {
   /** The shell is gone: the context's receipt. */
   retire(contextId: string): Promise<void>;
 }
+/** Why a shell could not start (closed class and code). */
+class TerminalSpawnError extends ClosedFailure<PtySpawnFailure> {}
+const as = <T>(failure: PtySpawnFailure, work: () => T | Promise<T>): Promise<T> => failingAs(failure, work);
+
 export interface TerminalSpawnOptions { shell: string; args: string[]; cwd: string; cols: number; rows: number; env: NodeJS.ProcessEnv }
 interface Options {
   spawn?: (options: TerminalSpawnOptions) => Promise<TerminalProcess>;
@@ -52,6 +57,8 @@ interface Options {
   /** The shell's live working directory; Linux exposes it under /proc. */
   workingDirectory?: (pid: number) => Promise<string>;
   people?: TerminalPeople;
+  /** Worker journal: closed classes and codes only. */
+  log?(line: string): void;
 }
 interface Session extends PtyTerminalInfo {
   native: TerminalProcess; mirror: TerminalMirror; descriptor?: FileHandle;
@@ -128,7 +135,11 @@ export class Terminals {
     switch (frame.type) {
       case "PTY_CREATE": {
         try { await this.create(client, frame); }
-        catch { if (!this.retiredClients.has(client)) await client.send(createMessage({ type: "PTY_EXIT", source: "engine", sessionId: frame.sessionId, exitCode: 1, signal: null, reason: "spawn-failed" })); }
+        catch (error) {
+          const failure = closedFailure<PtySpawnFailure>("io_error", error);
+          this.options.log?.(failureLine("terminal spawn", failure));
+          if (!this.retiredClients.has(client)) await client.send(createMessage({ type: "PTY_EXIT", source: "engine", sessionId: frame.sessionId, exitCode: 1, signal: null, reason: "spawn-failed", failure: failure.failure }));
+        }
         return;
       }
       case "PTY_LIST": {
@@ -229,22 +240,24 @@ export class Terminals {
   }
 
   private async create(client: AppClient, message: PtyCreateMessage): Promise<void> {
-    this.scope.assertId(message.workspaceId);
-    if (message.loginProvider || !message.sessionId || message.sessionId.length > 1024 || message.sessionId.includes("\0")) throw new Error("Invalid terminal request.");
-    // Validate a supplied cwd even when an id already refers to a live shell.
-    this.scope.path(message.cwd ?? this.scope.root, true);
+    await as("invalid_request", () => {
+      this.scope.assertId(message.workspaceId);
+      if (message.loginProvider || !message.sessionId || message.sessionId.length > 1024 || message.sessionId.includes("\0")) throw new Error("Invalid terminal request.");
+      // Validate a supplied cwd even when an id already refers to a live shell.
+      this.scope.path(message.cwd ?? this.scope.root, true);
+    });
     const people = this.options.people, userId = people?.of(client);
-    if (people && !userId) throw new Error("This client has no person.");
+    if (people && !userId) throw new TerminalSpawnError("no_person");
     let session = this.sessions.get(message.sessionId);
-    if (session?.owner && session.owner !== client) throw new Error("Terminal is private.");
-    if (session && people && session.userId !== userId) throw new Error("Terminal is private.");
+    if (session?.owner && session.owner !== client) throw new TerminalSpawnError("private");
+    if (session && people && session.userId !== userId) throw new TerminalSpawnError("private");
     if (session?.exit) { await this.retire(session, false); session = undefined; }
     if (!session) {
       let pending = this.pending.get(message.sessionId);
-      if (pending?.owner && pending.owner !== client) throw new Error("Terminal is private.");
-      if (pending && people && pending.userId !== userId) throw new Error("Terminal is private.");
+      if (pending?.owner && pending.owner !== client) throw new TerminalSpawnError("private");
+      if (pending && people && pending.userId !== userId) throw new TerminalSpawnError("private");
       if (!pending) {
-        if (this.busyCount() >= 32) throw new Error("Too many open terminals.");
+        if (this.busyCount() >= 32) throw new TerminalSpawnError("limit");
         for (const old of this.sessions.values()) {
           if (this.sessions.size + this.pending.size < 64) break;
           if (old.exit) await this.retire(old, false);
@@ -280,8 +293,8 @@ export class Terminals {
 
   private async spawn(message: PtyCreateMessage, pending: Pending, opener?: AppClient): Promise<Session> {
     // Activated: the opener's lease comes first; its shell is theirs alone and leaves no screen for anyone else to restore.
-    const lease = opener ? await this.options.people!.lease(opener, message.sessionId, message.id) : undefined;
-    if (lease && lease.userId !== pending.userId) { await this.options.people!.retire(lease.contextId).catch(() => {}); throw new Error("The control plane answered for another person."); }
+    const lease = opener ? await as("lease_refused", () => this.options.people!.lease(opener, message.sessionId, message.id)) : undefined;
+    if (lease && lease.userId !== pending.userId) { await this.options.people!.retire(lease.contextId).catch(() => {}); throw new TerminalSpawnError("lease_person_mismatch"); }
     try { return await this.start(message, pending, lease); }
     catch (error) { if (lease) await this.options.people!.retire(lease.contextId).catch(() => {}); throw error; }
   }
@@ -292,23 +305,25 @@ export class Terminals {
     // A client that didn't ask (an older desktop) starts this id over; an
     // earlier sleep's record must not come back after its next one.
     if (!restorable) { const path = this.recordPath(message.sessionId); if (path) await rm(path, { force: true }).catch(() => {}); }
-    const descriptor = record ? await this.files.directory(record.cwd).catch(() => this.files.directory(this.scope.root))
-      : await this.files.directory(message.cwd ?? this.scope.root);
+    const descriptor = await as("cwd_unavailable", () => record ? this.files.directory(record.cwd).catch(() => this.files.directory(this.scope.root))
+      : this.files.directory(message.cwd ?? this.scope.root));
     let native: TerminalProcess | undefined;
     try {
-      const cwd = await realpath(descriptorPath(descriptor));
+      const cwd = await as("cwd_unavailable", () => realpath(descriptorPath(descriptor)));
       const cols = dim(message.cols, record?.cols ?? 80), rows = dim(message.rows, record?.rows ?? 24);
-      native = await (this.options.spawn ?? nativeSpawn)({ shell: "/bin/bash", args: this.options.shellArgs ?? ["-l"],
+      const environment = await as("environment_invalid", () => lease
+        ? workerChildEnvironment(this.options.environment, { ...this.options.gitEnvironment, ...lease.git }, { ...this.options.applicationEnvironment, ...lease.application },
+          { ...withoutApi(this.options.zerosEnvironment?.()), ...lease.zeros })
+        : workerChildEnvironment(this.options.environment, this.options.gitEnvironment, this.options.applicationEnvironment, this.options.zerosEnvironment?.()));
+      native = await as("pty_unavailable", () => (this.options.spawn ?? nativeSpawn)({ shell: "/bin/bash", args: this.options.shellArgs ?? ["-l"],
         // Keep the descriptor owned by the worker while the native fork chdirs.
         cwd: `/proc/${process.pid}/fd/${descriptor.fd}`, cols, rows,
         // bash keeps an inherited PWD that names its working directory, so the
         // prompt shows the checkout instead of the held descriptor's /proc path.
-        env: { ...(lease ? workerChildEnvironment(this.options.environment, { ...this.options.gitEnvironment, ...lease.git }, { ...this.options.applicationEnvironment, ...lease.application },
-            { ...withoutApi(this.options.zerosEnvironment?.()), ...lease.zeros })
-          : workerChildEnvironment(this.options.environment, this.options.gitEnvironment, this.options.applicationEnvironment, this.options.zerosEnvironment?.())), TERM: "xterm-256color", PWD: cwd,
+        env: { ...environment, TERM: "xterm-256color", PWD: cwd,
           PROMPT_COMMAND: namePrompt(terminalName(this.scope.workspace.id, [this.scope.workspace.repository])) },
-      });
-      await this.files.assertDescriptor(descriptor);
+      }));
+      await as("cwd_unavailable", () => this.files.assertDescriptor(descriptor));
       const mirror = await this.mirror(cols, rows, record);
       const session: Session = { sessionId: message.sessionId, workspaceId: this.scope.workspace.id, cwd, createdAt: Date.now(), cols, rows,
         native, descriptor, mirror, owner: pending.owner,
