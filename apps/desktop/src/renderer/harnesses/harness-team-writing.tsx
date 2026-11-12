@@ -54,7 +54,7 @@ async function main() {
 
   function Harness() {
     return <main className="bg-bg1 flex min-h-screen gap-8 p-8">
-      <section aria-label="Details" className="bg-bg3 w-[320px] shrink-0 rounded-lg p-4">
+      <section aria-label="Details" className="bg-bg2 w-[320px] shrink-0 rounded-lg p-4">
         <CloudWorkspaceDetailsCard workspace={doc} title="Fix login" statusLabel="Running" resources={null} changing={false} onChange={operation => { calls.push(operation); }} />
       </section>
       <section aria-label="Conversation" className="flex w-[640px] flex-col gap-4">
