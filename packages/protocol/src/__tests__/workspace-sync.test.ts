@@ -44,6 +44,10 @@ describe("Order 3 sync wire", () => {
     for (const branch of ["-x", "a..b", "a b", "x.lock", "a/", "@{u}"]) expect(SyncSnapshotReplySchema.safeParse({ epoch, seq: 0, full: [], head: { ...head, branch } }).success, branch).toBe(false);
     expect(SyncBootstrapRequestSchema.safeParse({ have: "b".repeat(40) }).success).toBe(true);
     expect(SyncBootstrapRequestSchema.safeParse({ have: "HEAD~1" }).success).toBe(false);
+    // sync-have-v2: up to 64 distinct known commits; the single string stays valid for older Macs.
+    expect(SyncBootstrapRequestSchema.safeParse({ have: ["a".repeat(40), "b".repeat(40)] }).success).toBe(true);
+    for (const have of [[], ["a".repeat(40), "a".repeat(40)], Array.from({ length: 65 }, (_, index) => index.toString(16).padStart(40, "0")), ["HEAD"]])
+      expect(SyncBootstrapRequestSchema.safeParse({ have }).success).toBe(false);
     const bundle = { id: epoch, size: 10, sha256: sha, full: true };
     expect(SyncBootstrapReplySchema.safeParse({ branch: "main", head: head.sha, remoteUrl: null, bundle }).success).toBe(true);
     expect(SyncBootstrapReplySchema.safeParse({ branch: "main", head: head.sha, remoteUrl: null }).success).toBe(true);

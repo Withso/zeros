@@ -6,6 +6,8 @@ export const SYNC_FEATURE = "sync-v1";
 export const SYNC_CAPABILITY = "workspace-sync-v1";
 /** On the worker's ENGINE_READY to a sync socket: `sync.readBatch` is served. An older worker never says it, and the Mac reads files one by one. */
 export const SYNC_BATCH_CAPABILITY = "sync-batch-v1";
+/** On ENGINE_READY: sync.bootstrap accepts `have` as up to 64 known commit ids (the Mac's shared Git store), not only one. */
+export const SYNC_HAVE_V2_CAPABILITY = "sync-have-v2";
 export const SYNC_LIMITS = {
   fileBytes: 100 * 1024 * 1024,
   totalBytes: 5 * 1024 * 1024 * 1024,
@@ -172,7 +174,10 @@ export function isSafeRemoteUrl(value: unknown): value is string {
 }
 
 /** Git history for the Mac's real clone: a bundle of the branch (full, or from `have` when that is an ancestor). */
-export const SyncBootstrapRequestSchema = z.object({ have: gitSha.optional() }).strict();
+/** `have`: one commit (every worker), or with sync-have-v2 up to 64 distinct ones the Mac already holds. */
+export const SyncBootstrapRequestSchema = z.object({
+  have: z.union([gitSha, z.array(gitSha).min(1).max(64).refine(values => new Set(values).size === values.length, "Each commit once")]).optional(),
+}).strict();
 export const SyncBootstrapReplySchema = z.object({
   branch, head: gitSha,
   /** The origin URL without credentials; anything unsafe reads as null (origin left unset). */

@@ -87,9 +87,13 @@ export class SyncService {
     if (!head) throw new WorkspaceError("SYNC_DETACHED", "The checkout has no branch to sync.");
     const remoteUrl = credentialFree(await this.git(["remote", "get-url", "origin"]).catch(() => ""));
     const base = { branch: head.branch, head: head.sha, remoteUrl };
-    const have = parsed.data.have;
-    if (have === head.sha) return base;
-    const incremental = !!have && await this.git(["merge-base", "--is-ancestor", have, head.sha]).then(() => true, () => false);
+    // One known commit (an older Mac) or several (sync-have-v2). Only those HEAD contains bound the bundle; the rest are ignored.
+    const known = parsed.data.have === undefined ? [] : typeof parsed.data.have === "string" ? [parsed.data.have] : parsed.data.have;
+    if (known.includes(head.sha)) return base;
+    const covered: string[] = [];
+    for (const commit of known) if (await this.git(["merge-base", "--is-ancestor", commit, head.sha]).then(() => true, () => false)) covered.push(commit);
+    covered.sort();
+    const incremental = covered.length > 0;
     const refs = [`refs/heads/${head.branch}`];
     for (const name of new Set([head.branch, this.options.baseBranch].filter((value): value is string => !!value)))
       if (await this.git(["rev-parse", "--verify", "--quiet", `refs/remotes/origin/${name}`]).then(() => true, () => false)) refs.push(`refs/remotes/origin/${name}`);
@@ -97,14 +101,14 @@ export class SyncService {
     this.expireBundles();
     // A retried bootstrap (same HEAD, same starting point, same refs) gets the same bundle for its lifetime, so the
     // Mac resumes its download instead of the worker rebuilding tens of MB on every attempt.
-    const reuseKey = JSON.stringify([head.sha, incremental ? have : null, refs, await Promise.all(refs.map(ref => this.git(["rev-parse", ref]).catch(() => "")))]);
+    const reuseKey = JSON.stringify([head.sha, incremental ? covered : null, refs, await Promise.all(refs.map(ref => this.git(["rev-parse", ref]).catch(() => "")))]);
     for (const [id, bundle] of this.bundles) if (bundle.key === reuseKey) {
       this.options.log?.(`sync bootstrap reused bytes=${bundle.size}`);
       return { ...base, bundle: { id, size: bundle.size, sha256: bundle.sha256, full: bundle.full } };
     }
     const started = this.now();
     const id = randomUUID(), path = join(this.options.bundleDirectory, `${id}.bundle`);
-    try { await this.run("git", ["bundle", "create", "--quiet", path, ...refs, ...(incremental ? [`^${have}`] : [])], { readOnly: true }); }
+    try { await this.run("git", ["bundle", "create", "--quiet", path, ...refs, ...covered.map(commit => `^${commit}`)], { readOnly: true }); }
     catch { await rm(path, { force: true }); throw new WorkspaceError("SYNC_BUNDLE_FAILED", "The repository history could not be bundled."); }
     const size = (await stat(path)).size;
     // The bundle counts toward the 5 GB cap with the files.
