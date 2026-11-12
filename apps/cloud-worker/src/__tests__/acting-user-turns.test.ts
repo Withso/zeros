@@ -38,6 +38,7 @@ class ActingRelay extends FakeRelay {
   authorizations: unknown[][] = [];
   clientUsers = new Map<string, string>();
   terminalEnvironment?: unknown;
+  bootstrapError?: unknown;
   mcpAuthorization = async (...args: unknown[]) => {
     this.authorizations.push(args.filter(arg => !(arg instanceof AbortSignal)));
     throw Object.assign(new Error("sign in"), { code: "mcp_auth_required" });
@@ -84,6 +85,7 @@ class ActingRelay extends FakeRelay {
       const userId = this.clientUsers.get(body.clientId)!;
       return { contextId: randomUUID(), userId, expiresAt: Date.now() + 30_000, gitIdentity: { name: "Alex", email: "1+person@users.noreply.github.com" } };
     }
+    if (path === "bootstrap-lease" && this.bootstrapError) throw this.bootstrapError;
     if (path === "bootstrap-lease") return { contextId: body.contextId, userId: SAM, expiresAt: Date.now() + 30_000,
       gitIdentity: { name: "Sam", email: "2+person@users.noreply.github.com" } };
     if (path === "execution-leases/boot-clean") {
@@ -101,10 +103,11 @@ class ActingRelay extends FakeRelay {
   }
 }
 
-async function setup(options: { activated?: boolean; bootstrap?: string; survivors?: number; noSweep?: boolean; beforeStart?: (home: string) => Promise<void>; environment?: unknown; log?: (line: string) => void; setupRunner?: (...args: any[]) => Promise<number>; checkout?: () => void } = {}) {
+async function setup(options: { bootstrapError?: unknown; activated?: boolean; bootstrap?: string; survivors?: number; noSweep?: boolean; beforeStart?: (home: string) => Promise<void>; environment?: unknown; log?: (line: string) => void; setupRunner?: (...args: any[]) => Promise<number>; checkout?: () => void } = {}) {
   const directory = await mkdtemp(join(tmpdir(), "zeros-acting-")); directories.push(directory);
   const root = join(directory, "checkout"); await mkdir(root);
   const relay = new ActingRelay(), drivers: FakeDriver[] = [];
+  if (options.bootstrapError) relay.bootstrapError = options.bootstrapError;
   let socketPath = "";
   const home = join(directory, "home"); await mkdir(home);
   await options.beforeStart?.(home);
@@ -116,10 +119,10 @@ async function setup(options: { activated?: boolean; bootstrap?: string; survivo
     ...(options.log ? { log: options.log } : {}),
     drivers: { claude: () => { const driver = new FakeDriver(); drivers.push(driver); return driver; } } });
   workers.push(worker); worker.start();
-  await relay.receive({ ...config, workspace: { ...config.workspace, checkoutPath: root, ...(options.setupRunner ? { setup: "make bootstrap" } : {}) }, promptOutbox: 1,
+  await (options.bootstrapError || (options.bootstrap && options.survivors) ? (p: Promise<unknown>) => p.catch(() => {}) : (p: Promise<unknown>) => p)(relay.receive({ ...config, workspace: { ...config.workspace, checkoutPath: root, ...(options.setupRunner ? { setup: "make bootstrap" } : {}) }, promptOutbox: 1,
     ...(options.bootstrap ? { bootstrapContextId: options.bootstrap } : {}),
     ...(options.environment ? { environment: options.environment } : {}), agents: options.activated === false ? { claude: { apiKey: "creator-claude-key-000" } } : {},
-    ...(options.activated === false ? {} : { actingUser: 1, gitIdentity: null }) });
+    ...(options.activated === false ? {} : { actingUser: 1, gitIdentity: null }) }));
   return { relay, drivers, home, root, socketPath: () => socketPath };
 }
 
@@ -541,4 +544,32 @@ it.skipIf(process.platform !== "linux")("Alpha w/2: a person's .env file with na
   expect(notice).not.toMatch(/ZEROS_PROOF|NODE_ENV|lower\.case|evil/);
   expect(lines.filter(line => line === "personal-env unexported reserved=3 invalid=2 limit=0")).toHaveLength(2);
   f.drivers[0]!.complete();
+});
+
+it("names why an activated start failed in one journal line: a refused bootstrap lease with its closed code, never an id", async () => {
+  const lines: string[] = [];
+  const BOOT = "77777777-7777-4777-8777-777777777777";
+  await setup({ bootstrap: BOOT, log: line => lines.push(line),
+    bootstrapError: Object.assign(new Error("refused"), { status: 409, contextCode: "actor_changed" }) });
+  await until(() => lines.find(line => line.startsWith("startup failed"))).toBe("startup failed class=bootstrap_lease_refused code=actor_changed");
+  expect(lines.join("\n")).not.toContain(BOOT);
+});
+
+it("names an unproven clean start as its own startup class, before any bootstrap lease", async () => {
+  const lines: string[] = [];
+  await setup({ survivors: 1, bootstrap: "77777777-7777-4777-8777-777777777777", log: line => lines.push(line) });
+  await until(() => lines.find(line => line.startsWith("startup failed"))).toMatch(/^startup failed class=boot_clean_(unproven|refused)( code=[a-z_]+)?$/);
+});
+
+it("writes one boot-clean sweep line with closed counts only", async () => {
+  const lines: string[] = [];
+  const directory = await mkdtemp(join(tmpdir(), "zeros-sweep-")); directories.push(directory);
+  const relay = new ActingRelay();
+  const worker = new CloudWorker({ directory, homeDirectory: directory, transport: relay, workspaceId: WORKSPACE_ID, githubFetch: async () => new Response(null, { status: 200 }),
+    prepareCheckout: async () => ({ createdBranch: false }), sharedMemory: join(directory, "shm"), log: line => lines.push(line),
+    bootClean: async (_note, summary) => { summary?.({ targets: 3, zombies: 2, zombieLeadersWithThreads: 1, unreadable: 0, survivors: { worker_cgroup: 0, user_session: 1, provider_agent: 0, other: 0 }, comms: { "dbus-daemon": 1 } }); return 1; },
+    drivers: { claude: () => new FakeDriver() } });
+  workers.push(worker); worker.start();
+  await relay.receive({ ...config, workspace: { ...config.workspace, checkoutPath: join(directory) }, promptOutbox: 1, agents: {}, actingUser: 1, gitIdentity: null }).catch(() => {});
+  await until(() => lines.find(line => line.startsWith("boot-clean sweep"))).toBe("boot-clean sweep targets=3 zombies=2 zombie_leaders_with_threads=1 unreadable=0 worker_cgroup=0 user_session=1 provider_agent=0 other=0 comms=dbus-daemon:1");
 });
