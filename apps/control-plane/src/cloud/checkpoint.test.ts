@@ -63,14 +63,100 @@ function checkpoint(input: { home: string; repo: string; key: Buffer; out: strin
 
 function restore(input: Omit<RestoreInput, "checkoutPath" | "home"> & { home: string; repo: string; from: string }, env: NodeJS.ProcessEnv) {
   const { from, home, repo, ...rest } = input;
-  const result = run([...checkpointRestoreSteps({ ...rest, checkoutPath: repo, home }, [`cp '${from}' "$work/checkpoint.zck"`]), "report zeros-checkpoint-restored"], env);
+  // System shell startup may prepend /bin; the active fixture must observe
+  // the actual Git/askpass and tar boundaries through its pinned probes.
+  const toolchain = input.active ? [`export PATH='${env.PATH?.replaceAll("'", "'\\''")}'`] : [];
+  const result = run([...toolchain, ...checkpointRestoreSteps({ ...rest, checkoutPath: repo, home }, [`cp '${from}' "$work/checkpoint.zck"`]), "report zeros-checkpoint-restored"], env);
   return { ...result, parsed: parseRestoreResult(result.stdout) };
 }
 
 const sha = (path: string) => execFileSync("sha256sum", [path], { encoding: "utf8" }).slice(0, 64);
 const sorted = (text: string) => text.split("\n").filter(Boolean).sort();
 
+function activeRestoreProbe(w: ReturnType<typeof workspaces>, refuse = false) {
+  const bin = join(w.root, "probe-bin"), log = join(w.root, "restore-events.jsonl");
+  const git = "/usr/bin/git";
+  const tar = execFileSync("which", ["tar"], { encoding: "utf8" }).trim();
+  const token = `synthetic-restore-${randomUUID()}`;
+  const script = `#!${process.execPath}
+const fs = require('node:fs'), cp = require('node:child_process');
+const args = process.argv.slice(2), isGit = process.argv[1].endsWith('/git');
+const log = ${JSON.stringify(log)}, token = ${JSON.stringify(token)};
+const emit = value => fs.appendFileSync(log, JSON.stringify(value)+'\\n');
+if (isGit && args.includes('fetch')) {
+  const askpass = process.env.GIT_ASKPASS, file = process.env.ZEROS_RESTORE_TOKEN_FILE;
+  const directory = file && require('node:path').dirname(file);
+  let credential=false;
+  try { credential=!!askpass && cp.execFileSync(${JSON.stringify(git)},['-c','credential.helper=','credential','fill'],
+    {encoding:'utf8',input:'protocol=https\\nhost=github.com\\n\\n'}).includes('password='+token+'\\n'); }
+  catch(error) { emit({event:'credential-failed',detail:String(error.stderr).replaceAll(token,'[fixture]')}); process.exit(2); }
+  emit({event:'fetch', directory, tmpfs:!!directory && fs.statfsSync(directory).type===0x01021994,
+    mode:file && (fs.statSync(file).mode & 0o777), argvSafe:!args.some(arg=>arg.includes(token)||arg.includes(Buffer.from(token).toString('base64'))),
+    global:process.env.GIT_CONFIG_GLOBAL, system:process.env.GIT_CONFIG_SYSTEM,
+    credential,
+    controls:args.filter(arg=>/^(core\\.|protocol\\.|credential\\.|http\\.)/.test(arg))});
+  if (${refuse}) process.exit(1);
+  const remote = args.indexOf('https://github.com/example/project.git');
+  if(remote<0) process.exit(2);
+  args[remote]=${JSON.stringify(w.origin)};
+  args.unshift('-c','protocol.file.allow=always');
+  process.env.GIT_ALLOW_PROTOCOL='file';
+}
+if (!isGit && args.some(arg=>/^-.*x/.test(arg))) {
+  const entries = fs.existsSync(log) ? fs.readFileSync(log,'utf8').trim().split('\\n').map(JSON.parse) : [];
+  const directory = entries.find(row=>row.event==='fetch')?.directory;
+  emit({event:'unpack',authGone:!!directory&&!fs.existsSync(directory),askpassGone:!process.env.GIT_ASKPASS});
+}
+const result=cp.spawnSync(isGit?${JSON.stringify(git)}:${JSON.stringify(tar)},args,{stdio:'inherit',env:process.env});
+process.exit(result.status??1);
+`;
+  for (const name of ["git","tar"]) { w.write(join(bin,name),script); chmodSync(join(bin,name),0o755); }
+  return { token, env: { ...w.env, PATH: `${bin}:${w.env.PATH}` },
+    events: () => existsSync(log) ? readFileSync(log,"utf8").trim().split("\n").map(line => JSON.parse(line)) : [] };
+}
+
 describe("cloud v2 checkpoints", () => {
+  it("fetches active restore prerequisites in a fresh repository, erases tmpfs auth, then unpacks offline", () => {
+    const w = workspaces(), key = randomBytes(32), archive = join(w.root,"checkpoint.zck");
+    w.write(join(w.oldRepo,"a.txt"),"member's work\n");
+    expect(checkpoint({ home:w.oldHome,repo:w.oldRepo,key,out:archive },w.env).parsed.ok).toBe(true);
+    w.git(w.root,"clone","-q",w.origin,w.newRepo);
+    const hook = join(w.root,"foreign-helper"), called = join(w.root,"helper-called");
+    w.write(hook,`#!/bin/sh\ntouch '${called}'\n`); chmodSync(hook,0o755);
+    w.git(w.newRepo,"config","core.fsmonitor",hook);
+    w.git(w.newRepo,"config","credential.helper",hook);
+    w.write(w.env.GIT_CONFIG_GLOBAL,`[credential]\nhelper = ${hook}\n[url "https://invalid.example/"]\ninsteadOf = https://github.com/\n`);
+    const probe = activeRestoreProbe(w);
+    const result = restore({ home:w.newHome,repo:w.newRepo,key,sha256:sha(archive),from:archive,
+      githubToken:probe.token,repositoryUrl:"https://github.com/example/project.git",...{ active:true } },probe.env);
+    expect(result.parsed,JSON.stringify(probe.events())).toEqual({ok:true});
+    const events=probe.events();
+    expect(events[0]).toMatchObject({event:"fetch",tmpfs:true,mode:0o600,argvSafe:true,credential:true,global:"/dev/null",system:"/dev/null"});
+    expect(events[0].controls).toEqual(expect.arrayContaining(["core.hooksPath=/dev/null","core.fsmonitor=false","credential.helper=","protocol.allow=never","protocol.https.allow=always"]));
+    expect(events.filter(event=>event.event==="fetch")).toHaveLength(1);
+    expect(events.filter(event=>event.event==="unpack")).not.toHaveLength(0);
+    for (const event of events.filter(event=>event.event==="unpack")) expect(event).toMatchObject({authGone:true,askpassGone:true});
+    expect(existsSync(called)).toBe(false);
+    expect(readFileSync(join(w.newRepo,"a.txt"),"utf8")).toBe("member's work\n");
+    expect(result.stdout).not.toContain(probe.token);
+    expect(readFileSync(join(w.newRepo,".git/config"),"utf8")).not.toContain(probe.token);
+    expect(existsSync(events[0].directory)).toBe(false);
+  });
+
+  it("does not unpack a checkpoint when the active restore fetch fails and removes its tmpfs credential", () => {
+    const w=workspaces(),key=randomBytes(32),archive=join(w.root,"checkpoint.zck");
+    expect(checkpoint({home:w.oldHome,repo:w.oldRepo,key,out:archive},w.env).parsed.ok).toBe(true);
+    const probe=activeRestoreProbe(w,true);
+    const result=restore({home:w.newHome,repo:w.newRepo,key,sha256:sha(archive),from:archive,
+      githubToken:probe.token,repositoryUrl:"https://github.com/example/project.git",...{active:true}},probe.env);
+    expect(result.parsed).toEqual({ok:false,code:"checkpoint_prerequisites_missing"});
+    const events=probe.events();
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({event:"fetch",tmpfs:true,mode:0o600,argvSafe:true});
+    expect(existsSync(events[0].directory)).toBe(false);
+    expect(existsSync(w.newRepo)).toBe(false);
+  });
+
   it("keeps completed 500 MB attachments through replacement even when .context is ignored", () => {
     const w = workspaces(), file = ".context/attachments/upload/clip.mp4";
     w.write(join(w.oldRepo, ".gitignore"), ".context/\n.context-graph/\nnode_modules/\n");

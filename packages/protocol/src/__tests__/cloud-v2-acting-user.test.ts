@@ -64,3 +64,11 @@ it("boot-clean carries only a receipt id and the survivors' count (§7a)", async
   expect(CloudV2BootCleanReplySchema.parse({ retired: 3 })).toEqual({ retired: 3 });
   expect(CloudV2BootCleanReplySchema.safeParse({ retired: -1 }).success).toBe(false);
 });
+
+it("boot-clean also attests the legacy material cleanup (slice D, Q-D2)", async () => {
+  const { CloudV2BootCleanRequestSchema } = await import("../cloud-v2-relay");
+  const retirementId = "66666666-6666-4666-8666-666666666666";
+  for (const legacyMaterial of ["none", "removed", "refused"] as const)
+    expect(CloudV2BootCleanRequestSchema.parse({ retirementId, processes: 0, legacyMaterial })).toEqual({ retirementId, processes: 0, legacyMaterial });
+  expect(CloudV2BootCleanRequestSchema.safeParse({ retirementId, processes: 0, legacyMaterial: "skipped" }).success).toBe(false);
+});

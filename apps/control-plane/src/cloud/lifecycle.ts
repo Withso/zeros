@@ -124,12 +124,14 @@ export type CloudV2LifecycleDeps = {
    * expiry is renewed in the background. */
   authorizeSource?(workspace: CloudV2LifecycleWorkspace, options?: { renew?: boolean }): Promise<void>;
   assertExecution?(workspace: CloudV2LifecycleWorkspace): Promise<void>;
+  claimExecutionRestore?(workspace: CloudV2LifecycleWorkspace, sandboxId: string): Promise<boolean>;
   /** A pending create's GitHub checks and its one-time source scope. */
   resolvePendingSource?(workspace: CloudV2Workspace): Promise<PendingSourceOutcome>;
   prepareRepository?(workspace: CloudV2LifecycleWorkspace, sandboxId: string): Promise<void>;
   /** Cloud Computer builds share this loop; one runs at a time. */
   builds?: { tick(): Promise<void>; cleanup?(): Promise<void>; close?(): void };
   runtimeUpdates?: { tick(): Promise<void>; close(): void };
+  executionActivations?: { tick(): Promise<void> };
   /** Retries a stop's failed checkpoint on a fork of the stopped VM. */
   checkpointRetry?: boolean;
   now?: () => number;
@@ -297,6 +299,7 @@ export class CloudV2Lifecycle {
 
   private async admit(): Promise<void> {
     const now = this.deps.now?.() ?? Date.now();
+    await this.deps.executionActivations?.tick();
     await this.deps.runtimeUpdates?.tick();
     await this.deps.prompts?.wakePending();
     if (now - this.lastPromptPrune > 10 * 60_000) {
@@ -380,7 +383,7 @@ export class CloudV2Lifecycle {
       // checkpoint the next attempt restores instead.
       if ((workspace.state === "starting" || workspace.state === "stopping") && workspace.boatSandboxId && sandboxLost(error) && !workspace.checkpoint) {
         await this.deps.store.transition(workspace.id, [workspace.state], "failed", { errorCode: "sandbox_missing", revoke: true, ...fence });
-      } else if (code === "cloud_source_checkout_failed" && (workspace.state === "creating" || workspace.state === "starting")) {
+      } else if ((code === "cloud_source_checkout_failed" || code === "github_access_required") && (workspace.state === "creating" || workspace.state === "starting")) {
         await this.deps.store.transition(workspace.id, [workspace.state], "failed", { errorCode: code });
       } else if (workspace.attempts >= MAX_ATTEMPTS) {
         // A restore that gives up keeps its checkpoint; Start tries again.
@@ -470,7 +473,13 @@ export class CloudV2Lifecycle {
           return;
         }
         const boot = await this.boot(workspace);
-        if (!sandboxId) {
+        if (restoring && workspace.executionIntent && workspace.executionRestoreClaimed) {
+          await this.deps.assertExecution?.(workspace);
+          if (sandboxId) await compute.delete(sandboxId);
+          await this.deps.assertExecution?.(workspace);
+          sandboxId = await this.replacement(workspace, sandboxId, { bootEnv: boot.env });
+          if (!sandboxId) return;
+        } else if (!sandboxId) {
           if (!restoring && !workspace.checkpoint) {
             await store.transition(workspace.id, ["starting"], "failed", { errorCode: "sandbox_missing" });
             return;
@@ -786,18 +795,20 @@ export class CloudV2Lifecycle {
     }
   }
 
-  /** Applies the last checkpoint before the worker starts. Idempotent, so a
-   * failed attempt is simply retried. */
+  /** Legacy restores replay in place. An active restore consumes its fresh
+   * snapshot before credential delivery; an uncertain retry replaces the VM. */
   private async applyCheckpoint(workspace: CloudV2LifecycleWorkspace, sandboxId: string): Promise<void> {
     const checkpoints = this.deps.checkpoints, checkpoint = workspace.checkpoint;
     if (!checkpoints || !checkpoint) throw checkpointError("checkpoint_restore_failed");
     await this.deps.authorizeSource?.(workspace, { renew: true });
+    const active = workspace.executionIntent !== undefined;
+    if (active && !await this.deps.claimExecutionRestore?.(workspace, sandboxId)) throw checkpointError("checkpoint_restore_failed");
     const github = await this.deps.githubToken?.(workspace) ?? null;
     const key = checkpoints.open(checkpoint.key, workspace.id, checkpoint.object);
     try {
       const command = restoreCommand({ checkoutPath: `${CLOUD_V2_HOME}/${workspace.repository}`, home: CLOUD_V2_HOME, key,
         sha256: checkpoint.sha256, downloadUrl: await checkpoints.storage.downloadUrl(workspace.id, checkpoint.object),
-        repositoryUrl: `https://github.com/${workspace.repository}.git`, ...(github ? { githubToken: github.token } : {}) });
+        repositoryUrl: `https://github.com/${workspace.repository}.git`, ...(github ? { githubToken: github.token } : {}), ...(active ? { active: true } : {}) });
       await this.deps.store.defer(workspace.id, "starting", CHECKPOINT_LEASE_MS, { failure: true });
       await this.deps.assertExecution?.(workspace);
       const result = await this.deps.compute.exec(sandboxId, command, CLOUD_V2_CHECKPOINT_SECONDS);

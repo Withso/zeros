@@ -3,6 +3,7 @@ import { z } from "zod";
 import type { AuthedUser } from "../../auth.js";
 import { HttpError } from "../../authz.js";
 import { withSystemTx, type Tx } from "../../db.js";
+import { assertNoExecutionTransition } from "./activation-state.js";
 import { CLOUD_V2_CLIENT_OPERATIONS } from "../contract.js";
 import { CloudV2PromptIdSchema } from "../prompt-contract.js";
 import { newCloudV2Token } from "../tokens.js";
@@ -26,6 +27,7 @@ export class CloudExecutionClients {
     await withSystemTx(this.contexts.pool, async tx => {
       await tx.query("SELECT id FROM users WHERE id=$1 FOR KEY SHARE", [user.id]);
       await tx.query("SELECT 1 FROM cloud_v2_workspaces WHERE id=$1 FOR UPDATE", [workspaceId]);
+      await assertNoExecutionTransition(tx, workspaceId);
       await this.contexts.deps.authority.assert(proof, tx);
       const authority: ExecutionConnectAuthority = { signature: proof.person.personSignature, stopGeneration: proof.person.stopGeneration, tokenEnd };
       await tx.query(`INSERT INTO cloud_v2_tokens(token_hash,workspace_id,kind,user_id,expires_at,wake_on_connect,provider_session_id,execution_authority)

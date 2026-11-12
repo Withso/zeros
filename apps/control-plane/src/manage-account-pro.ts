@@ -1,3 +1,4 @@
+import { SYSTEM_DATABASE_CONTEXT } from "./db-context.js";
 import {createHash} from "node:crypto";
 import {constants,openSync,fstatSync,readFileSync,closeSync} from "node:fs";
 import path from "node:path";
@@ -35,7 +36,7 @@ export async function manageAccountPro(pool:pg.Pool,input:unknown,options:{datab
   const requestSha256=hash(request);
   const client=await pool.connect();
   try {
-    await client.query("BEGIN; SET LOCAL lock_timeout='5s'; SET LOCAL statement_timeout='15s'; SELECT set_config('app.system','on',true)");
+    await client.query(`BEGIN; SET LOCAL lock_timeout='5s'; SET LOCAL statement_timeout='15s'; ${SYSTEM_DATABASE_CONTEXT}`);
     const authority=(await client.query<{principal:string;database:string;allowed:boolean}>(`SELECT current_user AS principal,current_database() AS database,
       current_user<>'zeros_app' AND bool_and(pg_get_userbyid(relowner)=current_user) AS allowed FROM pg_class
       WHERE oid IN ('public.account_entitlements'::regclass,'public.account_pro_entitlement_changes'::regclass)`)).rows[0];

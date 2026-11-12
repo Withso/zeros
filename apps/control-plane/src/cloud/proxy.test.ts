@@ -73,7 +73,7 @@ describe("cloud Codex account model discovery", () => {
     expect(request.redirect).toBe("error");
     expect(request.signal).toBeInstanceOf(AbortSignal);
     expect(new Headers(request.headers).get("authorization")).toBe(`Bearer ${selected.codex.apiKey}`);
-    expect(env.verifyProxyToken).toHaveBeenCalledTimes(8);
+    expect(env.verifyProxyToken).toHaveBeenCalledTimes(16);
     expect(env.login).toHaveBeenCalledTimes(8);
     env.advance(5 * 60_000 - 1);
     expect(await (await modelRequest(env.app)).json()).toEqual({ models: ["gpt-6-luna"] });

@@ -48,14 +48,14 @@ d("triggers on user-writable tables with PostgreSQL", () => {
     withSystemTx(pool, (tx: Tx) => tx.query(statement, values));
 
   it("covers every trigger on a table tenant RLS lets a user write", async () => {
-    // A policy admits a non-system write unless its expression is exactly
+    // A permissive policy admits a non-system write unless its expression is exactly
     // app_is_system(), starts with an app_is_system() conjunction, or
     // admits only the table owner (operator tables).
     const rows = (await pool.query<{ table: string; trigger: string }>(`
       WITH policies AS (
         SELECT policy.polrelid AS rel, coalesce(pg_get_expr(policy.polqual, policy.polrelid), '') AS qual,
           coalesce(pg_get_expr(policy.polwithcheck, policy.polrelid), '') AS checked
-        FROM pg_policy policy WHERE policy.polcmd IN ('*', 'a', 'w', 'd')
+        FROM pg_policy policy WHERE policy.polpermissive AND policy.polcmd IN ('*', 'a', 'w', 'd')
       ), writable AS (
         SELECT DISTINCT rel FROM policies, LATERAL unnest(ARRAY[qual, checked]) AS expression
         WHERE expression <> '' AND expression <> 'app_is_system()' AND expression NOT LIKE 'app_is_system() AND %'
@@ -69,6 +69,19 @@ d("triggers on user-writable tables with PostgreSQL", () => {
     for (const row of rows) (found[row.table] ??= []).push(row.trigger);
     expect(found).toEqual(Object.fromEntries(Object.entries(COVERED_TRIGGERS).map(([table, names]) => [table, [...names].sort()])));
 
+  });
+
+  it("does not let the protocol marker grant a user write to a system-only workspace", async () => {
+    const store = new CloudV2Store(pool);
+    const workspace = await store.createWorkspace({ id: randomUUID(), organizationId: fixture.organizationId,
+      creatorUserId: fixture.userId, name: "Fixture", repository: "example/project", branch: "work", baseBranch: "main", computerBuildId: null });
+    await asSystem("UPDATE cloud_v2_workspaces SET execution_mode='active' WHERE id=$1", [workspace.id]);
+    const changed = await withUserTx(pool, fixture.userId, async tx => {
+      expect((await tx.query("SELECT current_setting('app.cloud_execution_protocol',true) AS marker")).rows[0].marker).toBe("1");
+      return tx.query("UPDATE cloud_v2_workspaces SET name='User changed' WHERE id=$1 RETURNING id", [workspace.id]);
+    });
+    expect(changed.rowCount).toBe(0);
+    expect((await asSystem("SELECT name FROM cloud_v2_workspaces WHERE id=$1", [workspace.id])).rows).toEqual([{ name: "Fixture" }]);
   });
 
   describe("user-context writes", () => {

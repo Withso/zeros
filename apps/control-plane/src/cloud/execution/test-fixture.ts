@@ -53,7 +53,7 @@ export async function executionFixture(pool: pg.Pool, options: { lifecycle?: boo
     const response = await worker("hello", { protocol: 2, bootId: boot, runtimeSha256: "b".repeat(64) }, { features: capabilities });
     const result = response.ok ? await response.clone().json() as { config: { actingUser?: 1 } } : null;
     if (result?.config.actingUser) {
-      const clean = await worker("execution-leases/boot-clean", { retirementId, processes: 0 });
+      const clean = await worker("execution-leases/boot-clean", { retirementId, processes: 0, legacyMaterial: "none" });
       if (!clean.ok) throw new Error(`boot cleanup: ${clean.status}`);
     }
     return response;

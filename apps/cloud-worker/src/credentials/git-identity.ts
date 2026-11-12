@@ -10,9 +10,12 @@ const execute = promisify(execFile);
 type GitIdentity = Extract<CloudV2ControlFrame, { t: "config" }>["gitIdentity"];
 const quote = (value: string) => `"${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
 
+/** The worker-owned global identity include, relative to the home directory. */
+export const GIT_IDENTITY_FILE = join(".config", "zeros", "git-identity");
+
 export async function configureGitIdentity(home: string, identity: GitIdentity): Promise<void> {
   if (identity === undefined) return;
-  const file = join(home, ".config", "zeros", "git-identity"), temporary = `${file}.${randomUUID()}`;
+  const file = join(home, GIT_IDENTITY_FILE), temporary = `${file}.${randomUUID()}`;
   await mkdir(dirname(file), { recursive: true, mode: 0o700 });
   // A global include updates existing shells while preserving deliberate
   // repository-local identities, including those restored from checkpoints.

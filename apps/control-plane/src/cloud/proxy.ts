@@ -91,10 +91,16 @@ export function createCloudV2ProxyRoutes(deps: CloudV2ProxyDeps): Hono {
     const expiring = (value: Awaited<ReturnType<CloudV2AgentLogins>>) =>
       value?.kind === "codex-chatgpt" && value.expiresAt * 1000 <= (deps.now?.() ?? Date.now()) + RENEW_BEFORE_MS;
     let login = await deps.logins(workspace.creatorUserId, workspace.organizationId, "codex");
+    const current = async () => {
+      const after = await deps.store.verifyProxyToken(token);
+      return after !== null && after.accessEpoch === workspace.accessEpoch && after.loginRevision === workspace.loginRevision;
+    };
+    const revoked = () => failure(401, "proxy_token_invalid", "The workspace proxy token expired or was revoked");
     if (rest === "/model-availability") {
       if (c.req.method !== "GET") return new Response(null, { status: 405, headers: { allow: "GET" } });
       if (login?.kind !== "codex-api-key" && login?.kind !== "codex-chatgpt")
         return failure(401, "agent_login_required", "Connect Codex in Settings → Agents for this organization");
+      if (!await current()) return revoked();
       return Response.json({ models: login.kind === "codex-api-key" ? await models.read(login.apiKey) : null },
         { headers: { "cache-control": "no-store" } });
     }
@@ -114,6 +120,8 @@ export function createCloudV2ProxyRoutes(deps: CloudV2ProxyDeps): Hono {
     } else return failure(401, "agent_login_required", "Connect Codex in Settings → Agents for this organization");
 
     const method = c.req.method;
+    // A vault read or refresh may outlive activation's credential revocation.
+    if (!await current()) return revoked();
     const upstream = await upstreamFetch(target + url.search, {
       method,
       headers,

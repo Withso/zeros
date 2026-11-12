@@ -1,4 +1,5 @@
 import type pg from "pg";
+import { PROTOCOL_DATABASE_CONTEXT } from "./db-context.js";
 
 // A continuously held LISTEN session is not an idle query-pool connection.
 // PlanetScale requires replacement within 24h; keep an hour of headroom rather
@@ -201,7 +202,7 @@ class SharedListener {
       const missing = channels.filter(channel => !session.channels.has(channel));
       if (missing.length) {
         try {
-          await session.client.query(missing.map(channel => `LISTEN ${channel}`).join("; "));
+          await session.client.query(`BEGIN; ${PROTOCOL_DATABASE_CONTEXT}; ${missing.map(channel => `LISTEN ${channel}`).join("; ")}; COMMIT`);
         } catch (error) {
           // Initial callers retain the driver's failure, while diagnostics
           // remain closed strings and automatic retries stay payload-free.

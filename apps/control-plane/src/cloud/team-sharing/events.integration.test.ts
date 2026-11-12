@@ -265,13 +265,13 @@ database("passive team transcript events", () => {
       expect(await first.wait("changed",() => true,a)).toEqual({ workspaceId: f.workspace.id });
       expect(await other.wait("changed",() => true,b)).toEqual({ workspaceId: f.workspace.id });
     }
-    const listeners = await pool.query("SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname=current_database() AND query LIKE 'LISTEN %'");
+    const listeners = await pool.query("SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid() AND query ~ '(^|;[[:space:]]*)LISTEN '");
     expect(listeners.rows[0].n).toBe(1);
   });
 
   it("ends on a LISTEN gap so reconnect takes an authoritative snapshot", async () => {
     const stream = await open();
-    const listener = (await pool.query("SELECT pid FROM pg_stat_activity WHERE datname=current_database() AND query LIKE 'LISTEN %'")).rows[0];
+    const listener = (await pool.query("SELECT pid FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid() AND query ~ '(^|;[[:space:]]*)LISTEN '")).rows[0];
     expect(listener).toBeDefined();
     await pool.query("SELECT pg_terminate_backend($1)",[listener.pid]);
     await vi.waitFor(() => expect(stream.ended()).toBe(true),{ interval: 5 });

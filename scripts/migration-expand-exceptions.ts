@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 // Each reviewed migration lists its exact exempted statements by rule.
 const reviewed: Readonly<Record<string, Readonly<Record<string, readonly string[]>>>> = {
+  "0240_cloud_execution_activation.sql": {},
   "0239_cloud_execution_contexts.sql": {},
   "0237_cloud_sync_wanted.sql": {
     "privilege-tightening": ["REVOKE ALL ON FUNCTION clear_connected_mac_sync_wanted() FROM PUBLIC;"],
@@ -527,6 +528,13 @@ function statements(sql: string): { text: string; header: string }[] {
   return result;
 }
 
+const cloudExecutionActivationDigests: Readonly<Record<string, readonly string[]>> = {
+  "execution-protocol-fence": ["f517b301b8cdf2d2fb9d4f43fa8ef5ddb5a741e6fd32c3e08545ec63d6d9cacd"],
+  "execution-operator-authority": [
+    "f302fa2aa3b0c26f16c8b69a071806a3ee1654cabee1f6e09202d7867a3843e6",
+    "45be59015a54b104686560b7f1f61dea02506adb7a5630393ed73bb334b04f60",
+  ],
+};
 const cloudExecutionDigests: Readonly<Record<string, readonly string[]>> = {
   "execution-material-erasure": ["83735358794b8dce0d2bf3fba5f98d1245a1a23dbd472fc3c982410bb240a4aa"],
   "execution-environment-gate": ["4e0e3feea583fb096bdcfa4ed6d182aca36eba39745e29b9c1dfca1d9cae75cb"],
@@ -549,6 +557,7 @@ export function applyReviewedExpandExceptions(file: string, sql: string): string
     const rule = annotations[0]![1]!;
     const statement = text.replace(/\r\n/g, "\n").trim();
     const allowed = exact[rule]?.includes(statement) ||
+      (file === "0240_cloud_execution_activation.sql" && cloudExecutionActivationDigests[rule]?.includes(createHash("sha256").update(statement).digest("hex"))) ||
       (file === "0239_cloud_execution_contexts.sql" && cloudExecutionDigests[rule]?.includes(createHash("sha256").update(statement).digest("hex"))) ||
       (rule === "allocation-authority" && file === "0136_cloud_runtime_transfers.sql" &&
       createHash("sha256").update(statement).digest("hex") === authorityDigest) ||

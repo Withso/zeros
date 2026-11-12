@@ -13,6 +13,7 @@ import { openCredentialBytes, sealCredentialBytes, type CloudAgentCredentialKeys
 import type { CloudV2RuntimeStore } from "./runtime.js";
 import { runtimeObjectMissing } from "./runtime-source.js";
 import { ENVIRONMENT_CHECKPOINT_SCRIPT } from "./checkpoint-environment.js";
+import { activeRestoreFetchSteps } from "./checkpoint-active-restore.js";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const OBJECT = /^cloud-v2\/checkpoints\/([0-9a-f-]{36})\/([0-9a-f-]{36})\.zck$/;
@@ -253,7 +254,7 @@ const OWN_GIT_DIRS = [
 /** Shared prologue: results go to the original stdout as one line; every
  * other output is discarded, so file names and contents never reach the
  * control plane. A failure names only its step. */
-function prologue(kind: "checkpoint" | "restore", lines: string[]): string[] {
+function prologue(kind: "checkpoint" | "restore", lines: string[], activeRestore = false): string[] {
   return [
     "set -euo pipefail", "umask 077", ...lines, "step=start work=''",
     "report() { printf '%s\\n' \"$1\" >&3; reported=1; }",
@@ -263,6 +264,7 @@ function prologue(kind: "checkpoint" | "restore", lines: string[]): string[] {
     "  if [ -n \"${cleanup_refs:-}\" ]; then",
     "    git -C \"$repo\" for-each-ref --format='%(refname)' refs/zeros-checkpoint/ 2>/dev/null | while read -r ref; do git -C \"$repo\" update-ref -d \"$ref\" || true; done",
     "  fi",
+    ...(activeRestore ? ["  if [ -n \"${auth_dir:-}\" ]; then rm -f -- \"$auth_dir/token\" \"$auth_dir/askpass\"; rmdir -- \"$auth_dir\"; fi"] : []),
     "  if [ -n \"$work\" ]; then rm -rf \"$work\"; fi",
     `  if [ "$code" -ne 0 ] && [ -z "\${reported:-}" ]; then printf 'zeros-checkpoint-error ${kind === "checkpoint" ? "checkpoint_failed" : "checkpoint_restore_failed"} %s\\n' "$step" >&3; fi`,
     "}",
@@ -504,7 +506,7 @@ export function checkpointCommand(input: ArchiveInput & { uploadUrl: string }): 
     "sudo -n systemctl disable zeros-worker.service >/dev/null 2>&1 || true", ...script].join("\n"))}`;
 }
 
-export type RestoreInput = CheckpointPaths & { key: Buffer; sha256: string; githubToken?: string; repositoryUrl?: string };
+export type RestoreInput = CheckpointPaths & { key: Buffer; sha256: string; githubToken?: string; repositoryUrl?: string; active?: boolean };
 
 /** Verifies and applies the checkpoint that `fetch` places at
  * `$work/checkpoint.zck`, before the worker starts. */
@@ -512,9 +514,10 @@ export function checkpointRestoreSteps(input: RestoreInput, fetch: readonly stri
   if (!/^[0-9a-f]{64}$/.test(input.sha256)) throw new Error("Invalid checkpoint digest");
   const token = input.githubToken;
   if (token !== undefined && !/^[\x21-\x7e]{16,4096}$/.test(token)) throw new Error("Invalid GitHub token");
-  const remote = input.repositoryUrl === undefined ? "" : https(input.repositoryUrl);
+  const remote = input.active ? input.repositoryUrl ?? "" : input.repositoryUrl === undefined ? "" : https(input.repositoryUrl);
   return [
-    ...prologue("restore", paths(input)),
+    ...prologue("restore", paths(input), input.active),
+    ...(input.active ? activeRestoreFetchSteps(token, remote) : []),
     "step=download",
     ...fetch,
     `printf '%s  %s\\n' ${input.sha256} "$work/checkpoint.zck" | sha256sum -c --status || fail checkpoint_corrupt`,
@@ -529,7 +532,7 @@ export function checkpointRestoreSteps(input: RestoreInput, fetch: readonly stri
     ...OWN_GIT_DIRS,
     "branch() { [[ \"$1\" == refs/heads/* ]] && git check-ref-format \"$1\" || fail checkpoint_corrupt; }",
     // Network only when the Cloud Computer lacks a commit the checkpoint needs.
-    ...(token ? [
+    ...(input.active ? [] : token ? [
       `printf %s ${quote(b64(token))} | base64 -d > "$work/token"`,
       "printf '#!/bin/sh\\ncase \"$1\" in Username*) echo x-access-token ;; *) cat \"%s\" ;; esac\\n' \"$work/token\" > \"$work/askpass\"; chmod 700 \"$work/askpass\"",
       "remote_git() { GIT_ASKPASS=\"$work/askpass\" git -c credential.helper= \"$@\"; }",
@@ -537,8 +540,10 @@ export function checkpointRestoreSteps(input: RestoreInput, fetch: readonly stri
     "fetched=''",
     "need() {",
     "  hex \"$1\"; local object=\"$1^{${2:-commit}}\"; if git cat-file -e \"$object\"; then return 0; fi",
-    "  if [ -z \"$fetched\" ]; then fetched=1; remote_git fetch -q --tags origin || true; fi",
-    "  git cat-file -e \"$object\" || remote_git fetch -q origin \"$1\" || true",
+    ...(input.active ? [] : [
+      "  if [ -z \"$fetched\" ]; then fetched=1; remote_git fetch -q --tags origin || true; fi",
+      "  git cat-file -e \"$object\" || remote_git fetch -q origin \"$1\" || true",
+    ]),
     "  git cat-file -e \"$object\" || fail checkpoint_prerequisites_missing",
     "}",
     "step=sessions",
@@ -546,7 +551,7 @@ export function checkpointRestoreSteps(input: RestoreInput, fetch: readonly stri
     "if grep -q '^worktree ' \"$m\"; then",
     "  step=repository",
     "  if ! { [ -d \"$repo\" ] && top=$(git -C \"$repo\" rev-parse --show-toplevel) && [ \"$(cd \"$repo\" && pwd -P)\" = \"$(cd \"$top\" && pwd -P)\" ]; }; then",
-    ...(remote ? [`    remote_git clone -q --no-checkout ${quote(remote)} "$repo" || fail checkpoint_repository_missing`] : ["    fail checkpoint_repository_missing"]),
+    ...(!input.active && remote ? [`    remote_git clone -q --no-checkout ${quote(remote)} "$repo" || fail checkpoint_repository_missing`] : ["    fail checkpoint_repository_missing"]),
     "  fi",
     "  cd \"$repo\"",
     // A checkout that keeps its own Git directory inside itself under any
@@ -640,7 +645,8 @@ export function checkpointRestoreSteps(input: RestoreInput, fetch: readonly stri
 /** Downloads, verifies and applies a checkpoint before the worker starts. */
 export function restoreCommand(input: RestoreInput & { downloadUrl: string }): string {
   const url = https(input.downloadUrl);
-  return `bash -c ${quote([
+  const shell = input.active ? `env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=${quote(input.home)} /bin/bash --noprofile --norc` : "bash";
+  return `${shell} -c ${quote([
     ...checkpointRestoreSteps(input, [
       `curl -fsS --retry 3 --retry-delay 2 --connect-timeout 10 --max-time 420 -o "$work/checkpoint.zck" ${quote(url)} || fail checkpoint_download_failed`,
     ]),

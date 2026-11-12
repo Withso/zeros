@@ -1,10 +1,11 @@
 import { constants } from "node:fs";
-import { link, lstat, mkdir, mkdtemp, open, rename, rmdir, unlink, type FileHandle } from "node:fs/promises";
+import { link, lstat, mkdir, mkdtemp, open, rename, rm, rmdir, unlink, type FileHandle } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { basename, dirname, isAbsolute, join } from "node:path";
 import { z } from "zod";
 import { isCloudEnvironmentPath, type CloudEnvironmentSeedError, type CloudWorkspaceEnvironment } from "@zeros/protocol/cloud-v2-relay";
 import { CheckedFiles, descriptorPath } from "./checked-files";
+import { openDirectoryNoFollow } from "../sharing/no-follow";
 import { commandRunner } from "./commands";
 import type { WorkspaceScope } from "./scope";
 
@@ -201,4 +202,74 @@ export async function seedEnvironment(scope: WorkspaceScope, stateDirectory: str
       check(); journal.complete = true; await save(directory!, journal);
     });
   } finally { await directory?.close(); await state.close(); }
+}
+
+export type LegacyRemoval = "none" | "removed" | "refused";
+
+/** Team sharing slice D (wire Q-D2): the first activated boot removes the
+ * Creator's seeded files from the shared checkout, using this journal's proof.
+ * Each published file goes only if its path, walked without following any
+ * link, still names the journal's exact inode as a regular file. An unfinished
+ * or unreadable journal, or a replaced, symlinked or foreign file refuses the
+ * whole removal and keeps every byte and the journal. Already deleted files
+ * are gone. Afterwards the private seed directory (journal, aliases) goes. */
+export async function removeSeededEnvironment(root: string, stateDirectory: string): Promise<LegacyRemoval> {
+  // Every ancestor of the state and checkout paths is walked without following links (sharing/no-follow).
+  let state: FileHandle | undefined, seed: FileHandle | undefined;
+  try {
+    state = await openDirectoryNoFollow(stateDirectory);
+    if (!state) return "none";
+    seed = await open(`${descriptorPath(state)}/${SEED_DIRECTORY}`, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW)
+      .catch(error => { if (missing(error)) return undefined; throw error; });
+    if (!seed) return "none";
+    return await removeSeededFiles(root, state, seed);
+  } catch { return "refused"; }
+  finally { await seed?.close().catch(() => {}); await state?.close().catch(() => {}); }
+}
+
+async function removeSeededFiles(root: string, state: FileHandle, seed: FileHandle): Promise<LegacyRemoval> {
+  let journal: Journal;
+  try {
+    const stored = await open(`${descriptorPath(seed)}/manifest.json`, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    try {
+      const parsed = journalSchema.safeParse(JSON.parse((await readBounded(stored, 32 * 1024)).toString("utf8")));
+      if (!parsed.success) return "refused";
+      journal = parsed.data;
+    } finally { await stored.close(); }
+  } catch { return "refused"; }
+  if (!journal.complete || journal.files.some(file => file.phase !== "complete" || file.dev === undefined || file.ino === undefined)) return "refused";
+  // Each target's parent, opened component by component without following links.
+  const parentOf = async (relative: string): Promise<FileHandle | undefined> => {
+    const checkout = await openDirectoryNoFollow(root);
+    if (!checkout) return undefined;
+    let handle: FileHandle = checkout;
+    try {
+      for (const part of relative.split("/").slice(0, -1)) {
+        const next = await open(`${descriptorPath(handle)}/${part}`, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW)
+          .catch(error => { if (missing(error)) return undefined; throw error; });
+        await handle.close();
+        if (!next) return undefined;
+        handle = next;
+      }
+      return handle;
+    } catch (error) { await handle.close(); throw error; }
+  };
+  const targets: Array<{ entry: Entry; held: FileHandle }> = [];
+  try {
+    for (const entry of journal.files) {
+      const held = await parentOf(entry.path);
+      if (!held) continue;   // its directory is gone: so is the file
+      targets.push({ entry, held });
+      const info = await noEntry(`${descriptorPath(held)}/${basename(entry.path)}`);
+      if (info && (!info.isFile() || !owns(entry, info))) return "refused";
+    }
+    for (const { entry, held } of targets) await retire(`${descriptorPath(held)}/${basename(entry.path)}`, entry);
+    for (const { entry, held } of targets) {
+      const left = await noEntry(`${descriptorPath(held)}/${basename(entry.path)}`);
+      if (left && owns(entry, left)) return "refused";
+    }
+  } catch { return "refused"; }
+  finally { await Promise.all(targets.map(({ held }) => held.close().catch(() => {}))); }
+  try { await rm(`${descriptorPath(state)}/${SEED_DIRECTORY}`, { recursive: true, force: true }); } catch { return "refused"; }
+  return "removed";
 }

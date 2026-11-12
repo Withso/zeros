@@ -31,12 +31,14 @@ export class ExecutionContexts {
   constructor(private readonly deps: ContextsDeps) {}
 
   /** §7a: this boot's clean attestation, once. Every lease waits for it; unproven cleanup (or a refused receipt) grants none. */
-  clean(attest: () => Promise<number>): Promise<void> {
+  clean(attest: () => Promise<number | { processes: number; legacyMaterial: "none" | "removed" | "refused" }>): Promise<void> {
     this.gate ??= (async () => {
-      const processes = await attest().catch(() => 1);
+      const proof = await attest().catch(() => ({ processes: 1, legacyMaterial: "refused" as const }));
+      const { processes, legacyMaterial } = typeof proof === "number" ? { processes: proof, legacyMaterial: undefined } : proof;
       const retirementId = randomUUID();
+      const body = { retirementId, processes, ...(legacyMaterial ? { legacyMaterial } : {}) };
       for (let attempt = 0; ; attempt++) {
-        try { CloudV2BootCleanReplySchema.parse(await this.deps.post("execution-leases/boot-clean", { retirementId, processes })); break; }
+        try { CloudV2BootCleanReplySchema.parse(await this.deps.post("execution-leases/boot-clean", body)); break; }
         catch (error) {
           const status = (error as { status?: unknown }).status;
           if (typeof status === "number" && status >= 400 && status < 500 && status !== 408) throw error;
@@ -44,7 +46,7 @@ export class ExecutionContexts {
           await new Promise(resolve => setTimeout(resolve, 250 * 2 ** attempt));
         }
       }
-      if (processes > 0) throw new Error("This workspace could not prove a clean start.");
+      if (processes > 0 || legacyMaterial === "refused") throw new Error("This workspace could not prove a clean start.");
     })();
     void this.gate.catch(() => {});
     return this.gate;

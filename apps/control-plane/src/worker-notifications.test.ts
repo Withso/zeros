@@ -2,6 +2,7 @@ import { EventEmitter } from "node:events";
 import type pg from "pg";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { startWorkerNotifications } from "./worker-notifications.js";
+import { PROTOCOL_DATABASE_CONTEXT } from "./db-context.js";
 
 function client() {
   return Object.assign(new EventEmitter(), { query: vi.fn().mockResolvedValue({}), release: vi.fn() });
@@ -20,7 +21,7 @@ describe("background worker notifications", () => {
   it("listens before repairing the startup gap, and accepts only payload-free worker hints", async () => {
     const { first, workos, security, stop } = fixture();
     await vi.advanceTimersByTimeAsync(0);
-    expect(first.query).toHaveBeenCalledWith("LISTEN zeros_account_maintenance_work; LISTEN zeros_security_publication_work");
+    expect(first.query).toHaveBeenCalledWith(`BEGIN; ${PROTOCOL_DATABASE_CONTEXT}; LISTEN zeros_account_maintenance_work; LISTEN zeros_security_publication_work; COMMIT`);
     expect(workos).toHaveBeenCalledOnce();
     expect(security).toHaveBeenCalledOnce();
     workos.mockClear(); security.mockClear();
@@ -107,7 +108,7 @@ describe("shared account queue wakes", () => {
     try {
       await vi.advanceTimersByTimeAsync(0);
       expect(first.query).toHaveBeenCalledExactlyOnceWith(
-        "LISTEN zeros_account_maintenance_work",
+        `BEGIN; ${PROTOCOL_DATABASE_CONTEXT}; LISTEN zeros_account_maintenance_work; COMMIT`,
       );
       expect(workos).toHaveBeenCalledOnce();
       first.emit("notification", {

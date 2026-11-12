@@ -37,6 +37,7 @@ const ALLOWED: Record<string, string> = {
   // Operator CLIs open their own transaction and set app.system before any
   // table access, on the pool the operator supplies.
   "src/manage-account-pro.ts#manageAccountPro": "Operator CLI; sets app.system in its own transaction.",
+  "src/manage-cloud-execution.ts#manageCloudExecution": "Migration-owner CLI; sets the central transaction-local system/protocol context before accessing tables.",
   "src/manage-cloud-workspace-entitlement.ts#manageCloudWorkspaceEntitlement":
     "Operator CLI; sets app.system in its own transaction.",
   "src/manage-staff.ts#manageStaffRole": "Operator CLI; sets app.system in its own transaction.",

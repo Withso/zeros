@@ -92,7 +92,7 @@ export class CloudExecutionAuthority {
       signature, personSignature, permissionSignature, targets: parsed.data, role: row.role, databaseNow: Number(row.database_now), verifications: row.verifications };
   }
 
-  async admit(workspaceId: string, userId: string, options: { continuation?: boolean; user?: AuthedUser | undefined } = {}): Promise<ExecutionAdmission> {
+  async admit(workspaceId: string, userId: string, options: { continuation?: boolean; user?: AuthedUser | undefined; sourceError?: "github_access_required" } = {}): Promise<ExecutionAdmission> {
     const started = Date.now();
     const person = await withSystemTx(this.pool, async tx => {
       if (options.user) await this.session(tx, options.user, userId);
@@ -105,7 +105,10 @@ export class CloudExecutionAuthority {
         if (options.user) await this.session(tx, options.user, userId);
         if ((await this.snapshot(tx, workspaceId, userId)).signature !== person.signature) throw actorChanged();
       });
-      if (isGithubAccessRevoked(error)) throw memberAccessRevoked();
+      if (isGithubAccessRevoked(error)) {
+        if (options.sourceError) throw new HttpError(403, options.sourceError, "The workspace initiator needs access to its repository");
+        throw memberAccessRevoked();
+      }
       throw executionUnavailable();
     }
     const proof = { person, source, until: Math.min(started + 30_000, source.until), user: options.user };

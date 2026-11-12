@@ -120,3 +120,18 @@ it("keeps an open connection's client context alive by renewal for as long as it
   expect(contexts.live(client)).toBe(false);
   contexts.dispose();
 });
+
+it("sends the legacy material outcome with the clean-boot attestation, and grants nothing when cleanup was refused", async () => {
+  const posts: Array<{ path: string; body: any }> = [];
+  const lease = { contextId: "66666666-6666-4666-8666-666666666666", userId: "44444444-4444-4444-8444-444444444444", expiresAt: Date.now() + 30_000, gitIdentity: null };
+  const contexts = new ExecutionContexts({ post: async (path, body) => { posts.push({ path, body }); return path === "execution-leases/boot-clean" ? { retired: 0 } : lease; } });
+  await contexts.clean(async () => ({ processes: 0, legacyMaterial: "removed" }));
+  expect(posts[0]).toEqual({ path: "execution-leases/boot-clean", body: { retirementId: expect.any(String), processes: 0, legacyMaterial: "removed" } });
+  contexts.dispose();
+  const refused = new ExecutionContexts({ post: async (path, body) => { posts.push({ path, body }); if (path === "execution-leases/boot-clean") return { retired: 0 }; return lease; } });
+  posts.length = 0;
+  await expect(refused.clean(async () => ({ processes: 0, legacyMaterial: "refused" }))).rejects.toThrow();
+  await expect(refused.clientLease({ clientId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", requestId: "r", operation: "file.write" })).rejects.toThrow();
+  expect(posts.map(post => post.path)).toEqual(["execution-leases/boot-clean"]);
+  refused.dispose();
+});

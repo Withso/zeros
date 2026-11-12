@@ -1,3 +1,4 @@
+import { SYSTEM_DATABASE_CONTEXT } from "./db-context.js";
 import {parseDatabaseTarget} from "./database-target.js";
 import {createMigrationPool} from "./db.js";
 // Guarded database-owner utility for activating Organization cloud-workspace
@@ -474,7 +475,7 @@ export async function manageCloudWorkspaceEntitlement(
     await client.query("BEGIN");
     await client.query("SET LOCAL lock_timeout = '10s'");
     await client.query("SET LOCAL statement_timeout = '30s'");
-    await client.query("SELECT set_config('app.system', 'on', true)");
+    await client.query(SYSTEM_DATABASE_CONTEXT);
 
     const privilege = await client.query<{
       principal: string;
