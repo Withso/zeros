@@ -230,7 +230,8 @@ owner. Page switching cancels gestures, hover/marquee state, inline editors and
 frame-anchored menus; an inspector blur still commits to its captured original
 page. Background edits update that page's private view memory. Directory-level
 undo/redo reveals the affected frame's page and restores its selection while
-the submitting owner is still current. Page deletion prunes undo/redo entries
+the submitting owner is still current: the selection last made at the
+generation it returns to, the frame itself included. Page deletion prunes undo/redo entries
 and API sessions for that folder, including previously deleted frames. Permanent
 missing-page history errors drop the entry so older history remains usable;
 history cannot recreate a removed page's source.
@@ -1814,6 +1815,13 @@ outside leaves it. Every node write the workspace cache sends refuses a part
 before anything is sent, and the engine finds no such layer either. Layers
 keeps an instance as one row; an agent's selection names its host.
 
+The canvas marks components by the same record that titles the header
+Component: a main component's frame label shows the Component glyph before
+its name (its title reads "<title>, component"), and one selected instance's
+size chip shows the glyph and its component's name in place of its size,
+from an own entry of `instances.hosts`. Ordinary frames and layers, and a
+part of an instance, never show it; it reads nothing and listens for nothing.
+
 Known limits: several instances selected show no Options; a frame showing a
 variant shows its defaults in pictures drawn by the engine (thumbnails and
 recordings) and saves no still of the variant; Edit main to a main on
@@ -1843,6 +1851,52 @@ before the save, and only that sample's answer repaints the outline. Unrelated
 pointers cannot move or finish the gesture. Lost capture,
 window blur and surface retirement cancel it. Moving or resizing back to the
 original unsnapped geometry writes nothing and preserves authored sizing.
+
+#### Canvas items: sections, notes and link cards
+
+A page's optional `pages[].items` in `meta/canvas.json` holds section titles,
+notes and link cards (`@zeros/protocol/design-canvas-items`). Page and item
+records pass unknown keys through, so no migration exists: a build without
+items rewrites the list unchanged. Ids follow the frame id pattern and are
+unique across every frame and item; x/y stay within ±1,000,000 and widths
+1–16,384 (a note also has a height; a section's and a link card's come from
+their text); a section title is one line of 1–120 characters, a note up to
+2,000 characters with its line breaks, a link card's title up to 120 and
+defaults to the file name. A page holds at most 256 items and 256 KiB of item
+text. Reading never throws: an invalid item is skipped, an unknown kind is
+kept as written and not drawn, and both reach `design validate` as warnings
+(`canvas-item-invalid`, `canvas-item-link-unsafe`,
+`canvas-item-link-missing`) through every full lint, never through the
+canvas's own snapshot lint, so items cannot block Save or editing. Page
+summaries carry the drawable items; a link card whose target is not a regular
+file is marked `missing` from a local stat (at most 512 per read), never a
+read of its contents.
+
+A link target is a workspace-relative path checked by a hand-written scan: no
+leading `/`, `\`, `~`, scheme or URL, no empty, `.` or `..` segment, no
+control characters, and none of the private paths the development servers
+deny (`isPrivateDevPath`). A card opens only in Files; a missing file shows
+"File not found" and its click does nothing. Nothing is ever fetched, and
+titles and paths render as text.
+
+The engine writes items with `design.canvas.item.put` and
+`design.canvas.item.delete` (Local only, offered as
+`design.canvas-items.v1`), each one catalog write and one shared history
+step like a page rename; the entry names no page, so Undo keeps the canvas's
+selection. An item's authored extra fields survive a write, and an id the
+file holds but cannot draw cannot be changed from the canvas. The canvas
+places them from the tool rail beside Text (Section `⇧S`, Note `⇧N`, Link
+card from a workspace file), because placing things is what that rail is
+for; there is no canvas context menu for empty space. Items are chrome in
+world coordinates above frames: no iframe or runtime, culled with the frame
+spatial index (following a wheel or pinch's painted camera), and a page
+without items mounts nothing. A drag or resize paints locally and writes on
+release; Escape cancels a drag or a text edit and writes nothing. A selected
+item clears the frame and layer selection, so the Style panel shows its empty
+state; items never appear in Layers. No export carries them: PNG export,
+`design.capture`, thumbnails, recordings, the frame HTTP document, the
+verification preview, review capture and `design.context.capture` all render
+a frame's own document (`canvas-items-exports.test.ts`).
 
 #### Interaction rules
 
@@ -2553,7 +2607,11 @@ source-generation checks remain in force on native resource reads.
 
 Only a successful private runtime handshake publishes a connection for canvas
 interaction. An incoming buffer keeps the outgoing ready connection until it
-connects. A changed engine capability starts a new frame session using the
+connects. When the frame returns to the generation still displayed before the
+swap (an undo straight after an edit), the incoming buffer is abandoned and the
+displayed document's retired connection takes the frame back; its runtime was
+never torn down, so the frame always ends with a live runtime for the
+generation it shows. A changed engine capability starts a new frame session using the
 current semantic generation, including after an in-place style adoption. A
 failed native handshake revalidates the workspace and hydrates that frame through
 the bounded, exact-version, sanitized bridge cache. Persistent failures offer

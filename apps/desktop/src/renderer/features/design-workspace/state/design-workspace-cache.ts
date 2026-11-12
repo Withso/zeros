@@ -4,7 +4,7 @@ import { normalizeDesignPagesSnapshot } from "@zeros/protocol/design-pages";
 import { isDesignComponentVariantName } from "@zeros/protocol/design-path";
 import { refuseDesignComponentPartWrite } from "./design-component-parts";
 import { forgetDesignLayerDisclosure } from "./design-layer-disclosure";
-import { rememberDesignDirectoryIdentity, setDesignKnownPagesReader } from "../../../platform/bridge/design-bridge";
+import { rememberDesignDirectoryIdentity, setDesignKnownPagesReader, type DesignCanvasItemInput } from "../../../platform/bridge/design-bridge";
 // Canvas, inspector and the Layers panel consume one aggregate engine response.
 // A bounded keyed cache stops those siblings issuing independent bridge requests
 // and keeps the last confirmed canvas while a disk edit revalidates.
@@ -18,6 +18,8 @@ import {
   designDuplicateFrame,
   designCreatePage,
   designRenamePage,
+  designPutCanvasItem,
+  designDeleteCanvasItem,
   designUpdateTheme,
   designRefreshStyles,
   designDeletePage,
@@ -58,6 +60,8 @@ import { onActiveBridgeConnected } from "../../../platform/bridge/active-bridge"
 import { isCloudWorkspace } from "../../../platform/bridge/cloud-workspace-key";
 import { getActiveBridge } from "../../../platform/bridge/active-bridge";
 import { DESIGN_FRAMES_CHANGES_CAPABILITY } from "@zeros/protocol/design-catalog";
+import { stableDesignCanvasItems } from "./design-canvas-items";
+import type { DesignPageSummary } from "@zeros/protocol/design-pages";
 import type { DesignFramesChange } from "@zeros/protocol/messages";
 import { classifyRpcError } from "../../../platform/bridge/failure";
 import { designFrameRuntime } from "../../../platform/bridge/design-frame-runtime";
@@ -1299,10 +1303,20 @@ export function stabilizeDesignWorkspaceSnapshot(
   next: DesignWorkspaceSnapshotWire,
 ): DesignWorkspaceSnapshotWire {
   if (!previous || previous.directoryId !== next.directoryId) return next;
-  const pages = previous.pages && next.pages ? stableArray(previous.pages, next.pages, (left, right) =>
+  const previousPages = previous.pages;
+  // Unchanged items keep their references; a page compares them by array.
+  const nextPages = previousPages && next.pages ? next.pages.map((page): DesignPageSummary => {
+    const prior = previousPages.find((candidate) => candidate.id === page.id);
+    const items = stableDesignCanvasItems(prior?.items, page.items);
+    if (items === page.items) return page;
+    const { items: _items, ...rest } = page;
+    return items ? { ...rest, items } : rest;
+  }) : next.pages;
+  const pages = previousPages && nextPages ? stableArray(previousPages, nextPages, (left, right) =>
+    left.items === right.items &&
     left.id === right.id && left.title === right.title && left.folder === right.folder &&
     left.frameFiles.length === right.frameFiles.length && left.frameFiles.every((file, index) => file === right.frameFiles[index]) &&
-    left.frameIds?.length === right.frameIds?.length && (left.frameIds?.every((id, index) => id === right.frameIds?.[index]) ?? true)) : next.pages;
+    left.frameIds?.length === right.frameIds?.length && (left.frameIds?.every((id, index) => id === right.frameIds?.[index]) ?? true)) : nextPages;
   const frames = stableArray(previous.frames, next.frames, sameFrame);
   const tokens = stableArray(previous.tokens, next.tokens, sameToken);
   const styleSources = stableArray(
@@ -1695,6 +1709,30 @@ export async function renameDesignPageCached(workspaceId: string, pageId: string
     const snapshot = publishDesignWorkspaceSnapshot(workspaceId, result.snapshot);
     recordCatalogHistory(workspaceId, before, snapshot, { pageId });
     return { ...result, snapshot };
+  }, "edit", undefined, { catalog: true });
+}
+
+/** Place, move, resize, retext or delete one canvas item: one engine write
+ * and one Undo step. The canvas keeps its selection on undo. */
+export async function putDesignCanvasItemCached(workspaceId: string, pageId: string, item: DesignCanvasItemInput) {
+  return runLocalDesignMutation(workspaceId, async (assertOwner) => {
+    const before = designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data;
+    const result = await designPutCanvasItem(workspaceId, pageId, item);
+    assertOwner();
+    const snapshot = publishDesignWorkspaceSnapshot(workspaceId, result.snapshot);
+    recordCatalogHistory(workspaceId, before, snapshot);
+    return { itemId: result.itemId, snapshot };
+  }, "edit", undefined, { catalog: true });
+}
+
+export async function deleteDesignCanvasItemCached(workspaceId: string, pageId: string, itemId: string) {
+  return runLocalDesignMutation(workspaceId, async (assertOwner) => {
+    const before = designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data;
+    const result = await designDeleteCanvasItem(workspaceId, pageId, itemId);
+    assertOwner();
+    const snapshot = publishDesignWorkspaceSnapshot(workspaceId, result.snapshot);
+    recordCatalogHistory(workspaceId, before, snapshot);
+    return snapshot;
   }, "edit", undefined, { catalog: true });
 }
 

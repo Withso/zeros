@@ -1,5 +1,9 @@
 // Development-only persisted engine fixture for the production page picker.
 import { designPageTitleSchema } from "@zeros/protocol/design-pages";
+import {
+  designCanvasItemInputProblem,
+  type DesignCanvasItemSummary,
+} from "@zeros/protocol/design-canvas-items";
 import type {
   DesignCanvasFrameWire,
   DesignFrameDocumentWire,
@@ -7,6 +11,8 @@ import type {
 } from "../platform/git";
 
 const STORAGE_KEY = "zeros:harness-design-pages-v1";
+/** Workspace files outside the Design directory a link card may name. */
+const HARNESS_WORKSPACE_FILES = ["README.md", "docs/brief.md"];
 export function createDesignPagesHarness(
   base: DesignWorkspaceSnapshotWire,
   homeSource: string,
@@ -152,7 +158,7 @@ export function createDesignPagesHarness(
       if (op === "file.tree")
         return {
           files: [
-            "README.md",
+            ...HARNESS_WORKSPACE_FILES,
             "North One - Design/meta/design.toml",
             "North One - Design/meta/canvas.json",
             "North One - Design/rules.md",
@@ -166,6 +172,38 @@ export function createDesignPagesHarness(
           designDirectories: ["North One - Design"],
         };
       if (op === "design.snapshot") return { snapshot };
+      if (op === "design.canvas.item.put" || op === "design.canvas.item.delete") {
+        // The engine's contract in miniature: one validated write, the link
+        // card's file checked against this fixture's workspace files.
+        const page = pages.find((candidate) => candidate.id === params.pageId);
+        if (!page) throw new Error("Design page not found: " + String(params.pageId) + ". Refresh before editing.");
+        const items = page.items ?? [];
+        let written: DesignCanvasItemSummary | undefined;
+        let next: DesignCanvasItemSummary[];
+        if (op === "design.canvas.item.delete") {
+          if (!items.some((item) => item.id === params.itemId)) throw new Error("That item is not on this page any more.");
+          next = items.filter((item) => item.id !== params.itemId);
+        } else {
+          const problem = designCanvasItemInputProblem(params.item);
+          if (problem) throw new Error(problem);
+          const input = params.item as DesignCanvasItemSummary & { id?: string };
+          const id = input.id ?? "item_" + crypto.randomUUID().replaceAll("-", "").slice(0, 16);
+          if (input.id !== undefined && !items.some((item) => item.id === id)) throw new Error("That item is not on this page any more.");
+          written = { ...input, id } as DesignCanvasItemSummary;
+          if (written.kind === "link" && !HARNESS_WORKSPACE_FILES.includes(written.target)) written = { ...written, missing: true };
+          next = input.id === undefined ? [...items, written] : items.map((item) => (item.id === id ? written! : item));
+        }
+        snapshot = {
+          ...snapshot,
+          pages: pages.map((candidate) => {
+            if (candidate.id !== page.id) return candidate;
+            const { items: _items, ...rest } = candidate;
+            return next.length ? { ...rest, items: next } : rest;
+          }),
+        };
+        save();
+        return written ? { item: written, snapshot } : { deleted: { id: params.itemId }, snapshot };
+      }
       if (op === "design.page.select") return { ok: true };
       if (historyEnabled && op === "design.themes.update") {
         const theme = params.theme as {
@@ -417,7 +455,7 @@ export function createDesignPagesHarness(
     const mutates =
       historyEnabled &&
       !!op &&
-      /^(design\.page\.(create|rename|delete)|design\.frame\.(create|duplicate|delete)|design\.canvas\.update|design\.themes\.update)$/.test(
+      /^(design\.page\.(create|rename|delete)|design\.frame\.(create|duplicate|delete)|design\.canvas\.(update|item\.put|item\.delete)|design\.themes\.update)$/.test(
         op,
       );
     const before = mutates ? checkpoint() : null;

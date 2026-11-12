@@ -980,6 +980,17 @@ function DesignFrameRuntimeSession({
     replacementSourceVersion,
   ]);
 
+  // A replacement takes the frame's runtime as soon as it connects, before it
+  // is swapped in. When the frame goes back to the generation still displayed
+  // first (an undo straight after an edit), the replacement is abandoned and
+  // the displayed document takes the frame back, so it is never left dead.
+  useLayoutEffect(() => {
+    if (!active || incomingSourceVersion !== null || displayedSourceVersion !== frame.sourceVersion) return;
+    const displayed = connectionsByDocumentRef.current.get(displayedSourceVersion);
+    if (!displayed || designFrameRuntime(workspaceId, frame.file) === displayed || !displayed.reinstate?.()) return;
+    void displayed.getSnapshot().then(handleSnapshot).catch(() => {});
+  }, [active, displayedSourceVersion, frame.file, frame.sourceVersion, handleSnapshot, incomingSourceVersion, workspaceId]);
+
   useEffect(
     () => () => {
       cancelSwap();

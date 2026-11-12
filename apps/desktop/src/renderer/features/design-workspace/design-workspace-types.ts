@@ -58,6 +58,8 @@ export interface DesignCanvasProps {
   onMotionPropertiesChange: (properties: readonly string[]) => void;
   onDeleteFrame: (frame: DesignCanvasFrameWire) => Promise<void>;
   zoomActionsRef: React.MutableRefObject<DesignCanvasZoomActions | null>;
+  /** Open a workspace file in Files; a link card's only destination. */
+  onOpenFile?: (path: string) => void;
 }
 
 export interface DesignInspectorProps {

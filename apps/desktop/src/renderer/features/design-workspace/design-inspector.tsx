@@ -207,7 +207,7 @@ import {
   settleDesignHistorySelection,
 } from "./state/design-selection";
 import { designComponentPartOf } from "@zeros/protocol/design-runtime";
-import { designComponentTextLock, isDesignComponentPartNodeId } from "./state/design-component-parts";
+import { designComponentDisplayTitle, designComponentTextLock, isDesignComponentPartNodeId } from "./state/design-component-parts";
 import type { DesignComponentOptionsTarget } from "./design-component-options";
 import {
   applyDesignEditCached,
@@ -249,12 +249,8 @@ const DesignComponentOptions = React.lazy(() => loadDesignComponentOptions().the
 /** A component's title, as the header names it: its main frame's title, or
  * its tag's name as a sentence for a components/ file. */
 function designComponentTitle(workspaceId: string, name: string, component: { file: string; frame: boolean }): string {
-  const main = component.frame
-    ? designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.frames.find((candidate) => candidate.file === component.file)
-    : undefined;
-  if (main?.title) return main.title;
-  const words = name.replace(/-/g, " ");
-  return words.charAt(0).toUpperCase() + words.slice(1);
+  return designComponentDisplayTitle(name, component, (file) =>
+    designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.frames.find((candidate) => candidate.file === file)?.title);
 }
 
 /** What canvas metadata can store; frame fields settle inside it. */

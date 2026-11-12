@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { designComponentPartNodeId } from "@zeros/protocol/design-runtime";
 import {
+  designComponentInstanceMark,
   designComponentPartHost,
+  designFrameIsComponent,
   designComponentTextLock,
   isDesignComponentPartNodeId,
   refuseDesignComponentPartWrite,
@@ -34,5 +36,44 @@ describe("what a person may not type over in a component", () => {
     expect(designComponentTextLock({}, part)?.kind).toBe("part");
     expect(() => refuseDesignComponentPartWrite({ operations: [{ nodeId: "a" }, { parentId: part }] })).toThrow();
     expect(() => refuseDesignComponentPartWrite({ operations: [{ nodeId: "a" }] })).not.toThrow();
+  });
+});
+
+describe("where the canvas marks a component", () => {
+  const instances = {
+    key: "00000000000000a1",
+    components: {
+      "chat-composer": { elements: [], reach: {}, file: "home/composer.html", frame: true },
+      "status-chip": { elements: [], reach: {}, file: "components/status-chip.html", frame: false },
+    },
+    hosts: {
+      "inst-a": { component: "chat-composer", attributes: {} },
+      "inst-b": { component: "status-chip", attributes: {} },
+      "inst-c": { component: "missing", attributes: {} },
+    },
+  };
+  const mainTitle = (file: string) => (file === "home/composer.html" ? "Chat composer" : undefined);
+
+  it("marks a main component frame by its own record, and nothing else as a frame", () => {
+    expect(designFrameIsComponent({ component })).toBe(true);
+    expect(designFrameIsComponent({})).toBe(false);
+    const placesInstances: { component?: typeof component; instances: typeof instances } = { instances };
+    expect(designFrameIsComponent(placesInstances)).toBe(false);
+  });
+
+  it("marks a selected instance by its host entry, titled by its component", () => {
+    expect(designComponentInstanceMark({ instances }, "inst-a", mainTitle)).toEqual({ component: "chat-composer", title: "Chat composer" });
+    expect(designComponentInstanceMark({ instances }, "inst-b", mainTitle)).toEqual({ component: "status-chip", title: "Status chip" });
+  });
+
+  it("never marks an ordinary layer, a part, an unknown component or an inherited name", () => {
+    expect(designComponentInstanceMark({ instances }, "cc-send", mainTitle)).toBeNull();
+    expect(designComponentInstanceMark({ instances }, designComponentPartNodeId("inst-a", "cc-send#1"), mainTitle)).toBeNull();
+    expect(designComponentInstanceMark({ instances }, "inst-c", mainTitle)).toBeNull();
+    for (const name of ["constructor", "__proto__", "toString", "hasOwnProperty"])
+      expect(designComponentInstanceMark({ instances }, name, mainTitle)).toBeNull();
+    const mainOnly: { component: typeof component; instances?: typeof instances } = { component };
+    expect(designComponentInstanceMark(mainOnly, "inst-a", mainTitle)).toBeNull();
+    expect(designComponentInstanceMark({ instances }, null, mainTitle)).toBeNull();
   });
 });

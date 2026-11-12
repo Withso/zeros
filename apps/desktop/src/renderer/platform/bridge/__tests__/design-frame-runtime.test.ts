@@ -457,6 +457,59 @@ describe("design frame runtime client", () => {
     }
   });
 
+  it("hands the frame back to the displayed document when its replacement is abandoned", async () => {
+    const host = { setTimeout: vi.fn(() => 7), clearTimeout: vi.fn() };
+    const open: MessagePort[] = [];
+    const connect = (version: string) => {
+      const source = { postMessage: vi.fn() };
+      const connection = connectDesignFrameRuntime("undo-workspace", "home.html", version,
+        { contentWindow: source } as unknown as HTMLIFrameElement, {}, host);
+      const port = source.postMessage.mock.calls[0]![1].transfer[0] as MessagePort;
+      const requests: string[] = [];
+      port.onmessage = ({ data }) => {
+        if (data.type !== "request") return;
+        requests.push(data.method);
+        port.postMessage({ protocol: DESIGN_RUNTIME_PROTOCOL, version: DESIGN_RUNTIME_VERSION, type: "response",
+          requestId: data.requestId, ok: true, result: snapshot(2, version) });
+      };
+      port.start();
+      open.push(port);
+      port.postMessage({ protocol: DESIGN_RUNTIME_PROTOCOL, version: DESIGN_RUNTIME_VERSION, type: "event", event: "ready",
+        payload: { sourceVersion: version, capabilities, snapshot: snapshot(1, version) } });
+      return { connection, requests };
+    };
+    const displayed = connect(SOURCE_VERSION);
+    try {
+      await vi.waitFor(() => expect(designFrameRuntime("undo-workspace", "home.html")).toBe(displayed.connection));
+      // The replacement connects and takes the frame while the old document still paints.
+      const incoming = connect(NEXT_SOURCE_VERSION);
+      await vi.waitFor(() => expect(designFrameRuntime("undo-workspace", "home.html")).toBe(incoming.connection));
+      expect(displayed.connection.isActive!()).toBe(false);
+      // An undo returns to the displayed generation before the swap: the
+      // replacement goes away, and the displayed document takes the frame back.
+      incoming.connection.destroy(true);
+      expect(designFrameRuntime("undo-workspace", "home.html")).toBeNull();
+      expect(displayed.connection.reinstate!()).toBe(true);
+      expect(designFrameRuntime("undo-workspace", "home.html")).toBe(displayed.connection);
+      expect(displayed.connection.isActive!()).toBe(true);
+      await expect(displayed.connection.getSnapshot()).resolves.toMatchObject({ sourceVersion: SOURCE_VERSION });
+      expect(displayed.requests).toContain("getSnapshot");
+      // Taking it back from a replacement still connected retires that one.
+      const another = connect(NEXT_SOURCE_VERSION);
+      await vi.waitFor(() => expect(designFrameRuntime("undo-workspace", "home.html")).toBe(another.connection));
+      expect(displayed.connection.reinstate!()).toBe(true);
+      expect(designFrameRuntime("undo-workspace", "home.html")).toBe(displayed.connection);
+      expect(another.connection.isActive!()).toBe(false);
+      // A document that was torn down, not retired, cannot come back.
+      displayed.connection.destroy();
+      expect(displayed.connection.reinstate!()).toBe(false);
+      expect(designFrameRuntime("undo-workspace", "home.html")).toBeNull();
+    } finally {
+      displayed.connection.destroy(true);
+      for (const port of open) port.close();
+    }
+  });
+
   it("publishes only ready connections and keeps the painted runtime during replacement", async () => {
     const host = { setTimeout: vi.fn(() => 7), clearTimeout: vi.fn() };
     const source = { postMessage: vi.fn() };

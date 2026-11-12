@@ -253,6 +253,11 @@ export interface DesignFrameRuntimeConnection {
   cancelCaptures?(): void;
   /** true only after the iframe document was actually removed/navigated. */
   destroy(documentDisposed?: boolean): void;
+  /** Take the frame back after a replacement that retired this connection
+   * was abandoned (an undo to the generation still displayed). Only a
+   * retired connection, whose runtime was never torn down, can; false
+   * otherwise. */
+  reinstate?(): boolean;
 }
 
 let requestSequence = 0;
@@ -1271,6 +1276,19 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
     this.destroy();
   }
 
+  /** Undo a retirement: the port is still open and the runtime still holds
+   * this document's handshake, so requests can flow again. */
+  revive(): boolean {
+    if (!this.destroyed || !this.teardownDeferred) return false;
+    this.teardownDeferred = false;
+    this.destroyed = false;
+    return true;
+  }
+
+  reinstate(): boolean {
+    return this.revive();
+  }
+
   destroy(documentDisposed = false): void {
     if (this.destroyed && !documentDisposed) {
       if (this.teardownDeferred) {
@@ -1349,6 +1367,16 @@ export function connectDesignFrameRuntime(
   // handshake makes it usable for hit testing and edits. Keep an outgoing
   // buffered document available until its replacement has actually connected.
   connectingByFrame.set(key, connection);
+  connection.reinstate = () => {
+    if (!connection.revive()) return false;
+    const current = connectionsByFrame.get(key);
+    if (current !== connection) {
+      current?.retire();
+      connectionsByFrame.set(key, connection);
+      for (const waiter of [...(readyWaiters.get(key) ?? [])]) waiter();
+    }
+    return true;
+  };
   const destroy = connection.destroy.bind(connection);
   connection.destroy = (documentDisposed = false) => {
     if (connectionsByFrame.get(key) === connection) {

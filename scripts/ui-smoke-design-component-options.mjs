@@ -101,8 +101,6 @@ export async function runDesignComponentOptionsSmoke({ page, check }) {
   await page.getByLabel("Design canvas", { exact: true }).focus();
   await page.keyboard.press("ControlOrMeta+z");
   await expect.poll(source).toContain('name="width" type="number" label="Width" default="1120"');
-  // An undo may restore the last layer selected at that generation.
-  await selectComponent();
   await expect(slider("Width")).toHaveAttribute("aria-valuenow", "1120");
   await expect.poll(width).toBe("1120px");
   check("one undo restores the value and the frame", true);

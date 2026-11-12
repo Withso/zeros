@@ -11,7 +11,7 @@ import {
 
 // --- IMPORTS ---
 
-import { Diamond } from "lucide-react";
+import { Component as ComponentGlyph, Diamond } from "lucide-react";
 import React, { useLayoutEffect, useMemo, useRef } from "react";
 
 import type { DesignRuntimeNodeDetails } from "@zeros/protocol/design-runtime";
@@ -177,14 +177,16 @@ export function paintDesignNodeOverlayGeometry(
   const size = element.querySelector<HTMLElement>(
     "[data-design-selection-size]",
   );
-  paintDesignLabelText(
-    size,
-    designSizeBadgeText(
-      overlay.width,
-      overlay.height,
-      designSizeBadgeModesOf(size),
-    ),
-  );
+  // An instance's chip names its component, which no gesture changes.
+  if (!size?.hasAttribute("data-design-selection-component"))
+    paintDesignLabelText(
+      size,
+      designSizeBadgeText(
+        overlay.width,
+        overlay.height,
+        designSizeBadgeModesOf(size),
+      ),
+    );
   if (size) {
     const placement = designSelectionLabelPlacement(overlay);
     size.style.left = `${placement.left}px`;
@@ -1115,6 +1117,7 @@ export function DesignSelectionMeasurements({
   sizeModes,
   sizeWidth,
   sizeHeight,
+  component,
   onSpacingPointerDown,
   onSpacingCommit,
 }: {
@@ -1128,6 +1131,8 @@ export function DesignSelectionMeasurements({
   /** Painted border-box size the badge reads. */
   sizeWidth: number;
   sizeHeight: number;
+  /** A selected instance's component title, shown in place of its size. */
+  component?: string | null;
   onSpacingPointerDown?: DesignLayoutToolsProps["onSpacingPointerDown"];
   onSpacingCommit?: DesignLayoutToolsProps["onSpacingCommit"];
 }) {
@@ -1146,17 +1151,33 @@ export function DesignSelectionMeasurements({
       {showSize ? (
         <span
           data-design-selection-size=""
+          data-design-selection-component={component ? "" : undefined}
           data-design-size-modes={
             sizeModes
               ? `${sizeModes.x ?? "fixed"},${sizeModes.y ?? "fixed"}`
               : undefined
           }
-          className={cn("zd-design-selection-label pointer-events-none absolute", DESIGN_CANVAS_CHIP_CLS)}
+          className={cn(
+            "zd-design-selection-label pointer-events-none absolute",
+            DESIGN_CANVAS_CHIP_CLS,
+            component && "inline-flex items-center gap-1",
+          )}
           style={designSelectionLabelStyle(
             designSelectionOverlayFrame(designSelectionBox(details)),
           )}
         >
-          {designSizeBadgeText(sizeWidth, sizeHeight, sizeModes)}
+          {component ? (
+            <>
+              <ComponentGlyph
+                data-design-component-mark=""
+                className="size-[11px] shrink-0"
+                aria-hidden="true"
+              />
+              {component}
+            </>
+          ) : (
+            designSizeBadgeText(sizeWidth, sizeHeight, sizeModes)
+          )}
         </span>
       ) : null}
     </>

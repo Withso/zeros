@@ -9,6 +9,9 @@ export interface DesignLintViolationGroup {
 
 const RULE_LABELS: Record<DesignLintViolationWire["ruleId"], string> = {
   "audit-limit": "Audit limit",
+  "canvas-item-invalid": "Canvas items",
+  "canvas-item-link-missing": "Missing linked files",
+  "canvas-item-link-unsafe": "Unsafe link cards",
   "component-expression-invalid": "Component expressions",
   "component-invalid": "Component definition",
   "component-option-invalid": "Component options",

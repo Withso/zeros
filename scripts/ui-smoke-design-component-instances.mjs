@@ -60,16 +60,12 @@ export async function runDesignComponentInstancesSmoke({ page, check }) {
     await page.mouse.move(box.x + box.width * toFraction, y, { steps });
     if (release) await page.mouse.up();
   };
-  // A frame's document is live at its current generation. An undo straight
-  // back to the generation a replacement is still swapping out can leave the
-  // outgoing document without its runtime (noticed in this slice, not
-  // fixed), so a write's generation is presented before it is undone.
+  // The frame's runtime answers at its current generation.
   const liveAt = (file) => expect.poll(() => page.evaluate(async (file) => {
     const { designFrameRuntime } = await import("/apps/desktop/src/renderer/platform/bridge/design-frame-runtime.ts");
     const { designWorkspaceSnapshotCache } = await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-cache.ts");
     const frame = designWorkspaceSnapshotCache.peekSnapshot("ws_design_harness").data.frames.find((candidate) => candidate.file === file);
-    return designFrameRuntime("ws_design_harness", file)?.sourceVersion === frame.sourceVersion &&
-      document.querySelector(`[data-design-frame="${file}"] iframe[data-design-document-presented]`)?.getAttribute("data-design-document-source-version") === frame.sourceVersion;
+    return designFrameRuntime("ws_design_harness", file)?.sourceVersion === frame.sourceVersion;
   }, file), { timeout: 10_000 }).toBe(true);
   const undo = async () => {
     await page.getByLabel("Design canvas", { exact: true }).focus();
@@ -148,6 +144,33 @@ export async function runDesignComponentInstancesSmoke({ page, check }) {
   check("an instance's header names its component with Edit main, and its line says Instance of",
     instanceHeader.includes("Chat composer") && instanceHeader.includes("Edit main") && (await line.innerText()).includes("Instance of Chat composer"),
     instanceHeader);
+  // ── The component mark ──
+  const frameLabel = (file) => page.locator(`[data-design-frame="${file}"] [data-design-frame-label]`);
+  const sizeChip = page.locator("[data-design-selection-size]");
+  const opsBeforeMarks = await page.evaluate(() => (window.__zerosHarnessWorkbenchOperations ?? []).slice());
+  await expect(sizeChip.locator("[data-design-component-mark]")).toHaveCount(1);
+  check("a selected instance's chip shows the mark and its component's name, not its size",
+    (await sizeChip.innerText()).trim() === "Chat composer" && (await sizeChip.getAttribute("data-design-selection-component")) === "",
+    await sizeChip.innerText());
+  check("a component frame shows the mark beside its name",
+    (await frameLabel("pricing.html").locator("[data-design-component-mark]").count()) === 1 &&
+      (await frameLabel("pricing.html").getAttribute("title")) === "Chat composer, component");
+  check("a plain frame never shows the mark",
+    (await frameLabel("home.html").locator("[data-design-component-mark]").count()) === 0 &&
+      (await frameLabel("home.html").getAttribute("title")) !== null &&
+      !(await frameLabel("home.html").getAttribute("title")).includes("component"));
+  await expect(async () => {
+    await layer("home-send").click({ timeout: 2_000 });
+    await expect(layer("home-send")).toHaveAttribute("aria-selected", "true", { timeout: 2_000 });
+  }).toPass({ timeout: 15_000 });
+  await expect(sizeChip).toHaveCount(1);
+  await expect(sizeChip.locator("[data-design-component-mark]")).toHaveCount(0);
+  check("a selected ordinary layer's chip shows its size and no mark",
+    /^\d+(?: Hug| Fill)? × \d+/.test((await sizeChip.innerText()).trim()) && (await sizeChip.getAttribute("data-design-selection-component")) === null,
+    await sizeChip.innerText());
+  const markOps = await page.evaluate((before) => (window.__zerosHarnessWorkbenchOperations ?? []).slice(before.length), opsBeforeMarks);
+  check("showing or leaving the mark makes no engine request", markOps.every((op) => !/component|instance/i.test(op)), JSON.stringify(markOps));
+  await selectInstance();
   const dot = (label) => section.locator("[data-option-row]").filter({ hasText: label }).first().locator("[data-option-changed]");
   check("a dot marks each value the instance sets apart from what it inherits",
     (await dot("Width").count()) === 1 && (await dot("Mode").count()) === 1 && (await dot("Gap").count()) === 0);
@@ -196,10 +219,18 @@ export async function runDesignComponentInstancesSmoke({ page, check }) {
   await expect.poll(home).toContain('<zd-chat-composer data-oid="home-composer"></zd-chat-composer>');
   await expect(section.getByRole("button", { name: "Reset options" })).toBeDisabled();
   check("Reset removes every option and the variant in one write", (await section.locator("[data-option-changed]").count()) === 0);
-  // Its generation is presented before the undo (see liveAt).
-  await liveAt("home.html");
+  // Undone at once, while the Reset's document may still be swapping in.
   await undo();
   await expect.poll(home).toBe(beforeReset);
+  check("an undo straight after a write leaves the frame with a live runtime", await liveAt("home.html").then(() => true, () => false));
+  // The selection's outline follows the instance's box at the restored generation.
+  const outlineMatches = async () => {
+    const outline = await page.locator("[data-design-selected-element]").first().boundingBox().catch(() => null);
+    const painted = await frame("home.html").locator('[data-oid="home-composer"]').boundingBox().catch(() => null);
+    return !!outline && !!painted && Math.abs(outline.width - painted.width) <= 2 && Math.abs(outline.height - painted.height) <= 2;
+  };
+  await expect.poll(outlineMatches, { timeout: 3_000 }).toBe(true).catch(() => {});
+  check("after the undo the outline matches the instance's painted box", await outlineMatches());
   check("one undo restores everything Reset removed", true);
   await selectInstance();
 
@@ -218,7 +249,6 @@ export async function runDesignComponentInstancesSmoke({ page, check }) {
   await page.keyboard.press("Shift+Digit2");
   await quiet();
   await selectInstance();
-  await liveAt("home.html");
   const sendPart = frame("home.html").locator('[data-zd-instance] [data-zd-part="cc-send"]');
   // At the canvas, where the selection's outline lies over the frame.
   const at = async (locator, action) => {

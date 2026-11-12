@@ -29,6 +29,11 @@ import {
   type DesignThumbnailsReply,
 } from "@zeros/protocol/design-capture";
 import { designPageCatalogSchema, designPageIdSchema, normalizeDesignPagesSnapshot, type DesignPageSummary } from "@zeros/protocol/design-pages";
+import type { DesignCanvasItem } from "@zeros/protocol/design-canvas-items";
+
+/** What the canvas sends: an item's own fields; no id creates one. */
+export type DesignCanvasItemInput = DesignCanvasItem extends infer Item ? Item extends DesignCanvasItem
+  ? Omit<Item, "id"> & { id?: string } : never : never;
 import { DESIGN_LAZY_PREPARATION_CAPABILITY, DESIGN_MUTATION_SNAPSHOTS_CAPABILITY, DESIGN_PAGE_SCOPED_MUTATIONS_CAPABILITY, designMutationCatalogSchema, designPageScopedCatalogSchema, designPreparedFrameSchema, designFramesPrepareSchema, designFramesPrepareReplySchema, type DesignMutationCatalog, type DesignPageHashes, type DesignPageScopedCatalog } from "@zeros/protocol/design-catalog";
 import { DESIGN_SOURCE_SURFACES_CAPABILITY } from "@zeros/protocol/design-surface";
 import { DESIGN_COMPONENT_OPTIONS_CAPABILITY } from "@zeros/protocol/design-catalog";
@@ -1041,6 +1046,37 @@ export async function bridgeDesignRenamePage(bridge: RuntimeClient, workspaceId:
   return designPageMutationReply(await workspaceOp(bridge, "design.page.rename", {
     workspaceId, pageId, title,
   }), "design.page.rename");
+}
+
+export interface DesignCanvasItemReplyWire {
+  /** The item as written, for a put. */
+  itemId?: string;
+  snapshot: DesignWorkspaceSnapshotWire;
+}
+
+function designCanvasItemReply(value: unknown, operation: string, pageId: string): DesignCanvasItemReplyWire {
+  const result = value as { item?: { id?: unknown }; snapshot?: DesignWorkspaceSnapshotWire } | null;
+  const snapshot = result?.snapshot;
+  const page = snapshot?.pages?.find((candidate) => candidate.id === pageId);
+  if (!snapshot || !page || !isDesignWorkspaceSnapshotWire(snapshot))
+    throw new Error(`${operation}: malformed engine response`);
+  const itemId = result?.item?.id;
+  if (itemId !== undefined && (typeof itemId !== "string" || !page.items?.some((item) => item.id === itemId)))
+    throw new Error(`${operation}: malformed engine response`);
+  return { ...(itemId !== undefined ? { itemId } : {}), snapshot: normalizeDesignWorkspaceSnapshotPages(snapshot) };
+}
+
+/** Create (no id) or replace one canvas item on a page. */
+export async function bridgeDesignPutCanvasItem(bridge: RuntimeClient, workspaceId: string, pageId: string,
+  item: DesignCanvasItemInput): Promise<DesignCanvasItemReplyWire> {
+  return designCanvasItemReply(await workspaceOp(bridge, "design.canvas.item.put", { workspaceId, pageId, item }),
+    "design.canvas.item.put", pageId);
+}
+
+export async function bridgeDesignDeleteCanvasItem(bridge: RuntimeClient, workspaceId: string, pageId: string,
+  itemId: string): Promise<DesignCanvasItemReplyWire> {
+  return designCanvasItemReply(await workspaceOp(bridge, "design.canvas.item.delete", { workspaceId, pageId, itemId }),
+    "design.canvas.item.delete", pageId);
 }
 
 export async function bridgeDesignUpdateTheme(
