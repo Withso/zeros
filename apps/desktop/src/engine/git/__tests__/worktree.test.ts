@@ -63,6 +63,7 @@ import {
   migrateWorktreesToNewRoot,
 } from "..";
 import { upsertRepoByRoot } from "../../db/projects";
+import { openZerosDb } from "../../db/database";
 import { upsertChatMessage, windowChatMessages } from "../../db/messages";
 import {
   upsertChat,
@@ -2464,6 +2465,31 @@ printf ran > '${sentinel}'
     expect(ws.stashRef).toBeNull();
     expect(ws.archiveSnapshot).toBe(result.archiveSnapshot);
   });
+
+  it.each([null, "organization-archive-fixture"])(
+    "keeps a visible context copy on archive without changing the restore snapshot (owner %s)",
+    async (organizationId) => {
+      const created = await createWorkspace({ repoRoot });
+      // Existing organization-local rows remain supported even though new ones are cloud-only.
+      openZerosDb().prepare("UPDATE workspaces SET organization_id = ? WHERE id = ?").run(organizationId, created.workspaceId);
+      const workspace = getWorkspace(created.workspaceId);
+      await mkdir(path.join(created.path, ".context", "attachments"), { recursive: true });
+      await writeFile(path.join(created.path, ".context", "notes.md"), "archive notes\n");
+      await writeFile(path.join(created.path, ".context", "attachments", "original.txt"), "restore attachment\n");
+      const archived = await archiveWorkspace({ workspaceId: created.workspaceId, stashUncommitted: true });
+      const visible = path.join(stateRoot, "archived-contexts", workspace.repoSlug, path.basename(created.path));
+
+      expect(await readFile(path.join(visible, "notes.md"), "utf8")).toBe("archive notes\n");
+      expect(existsSync(path.join(visible, "attachments"))).toBe(false);
+      expect(existsSync(created.path)).toBe(false);
+      expect(archived.archiveSnapshot).toMatch(/^[0-9a-f]{40,64}$/);
+      await writeFile(path.join(visible, "notes.md"), "visible copy edited\n");
+      await restoreWorkspace(created.workspaceId);
+      expect(await readFile(path.join(created.path, ".context", "notes.md"), "utf8")).toBe("archive notes\n");
+      expect(await readFile(path.join(created.path, ".context", "attachments", "original.txt"), "utf8")).toBe("restore attachment\n");
+      expect(getWorkspace(created.workspaceId).organizationId ?? null).toBe(organizationId);
+    },
+  );
 
   it("includes a live uncommitted Design draft in archive and restore", async () => {
     const created = await createWorkspace({ repoRoot, kind: "design" });

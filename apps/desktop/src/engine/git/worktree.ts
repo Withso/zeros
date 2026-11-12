@@ -15,6 +15,7 @@ import {
   lstat,
 } from "node:fs/promises";
 import path from "node:path";
+import { archiveContext } from "../files/archived-contexts";
 import { createGitTemporaryDirectory, writeGitTemporaryFile } from "./git-temporary";
 
 import { readBoundedUtf8DescriptorSync } from "../files/bounded-read-sync";
@@ -3296,6 +3297,13 @@ async function archiveWorkspaceInner(
   if (journal.phase !== "worktree-removed" || existsSync(ws.path)) {
     const removalStartedAt = Date.now();
     if (existsSync(ws.path)) {
+      await archiveContext({
+        sourceRoot: ws.path,
+        channelRoot: path.dirname(worktreesRoot()),
+        repository: ws.repoSlug,
+        workspace: path.basename(ws.path),
+        identity: JSON.stringify(["local", ws.organizationId ?? null, ws.canonicalId ?? ws.id, ws.repoRoot]),
+      });
       stagedWorktree = await removeManagedWorktreeForLifecycle(
         ws,
         beforeCheckoutEviction,

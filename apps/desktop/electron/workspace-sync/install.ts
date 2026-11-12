@@ -14,6 +14,7 @@ import type { DeviceControl } from "../local-commands/control";
 import { deviceIdFor } from "../local-commands/device-identity";
 import { SyncRootError } from "./engine";
 import { SyncManager } from "./manager";
+import { CloudContextArchiver } from "./archive";
 import WebSocket from "ws";
 import { DeviceControlError } from "../local-commands/control";
 import { DirectSyncConnection, SyncConnectError, syncGrantRefusal, type DirectDeps, type SyncSocket } from "./connection";
@@ -25,6 +26,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
  * renderer sees statuses, never paths. */
 export function installWorkspaceSync(local: { enabled: boolean; control: DeviceControl; device(): LocalCommandDevice | undefined; onSyncHint(listener: () => void): () => void }): { dispose(): Promise<void> } {
   const store = { get: getAppSetting, set: setAppSetting };
+  let ownerGeneration = 0;
   /** The grant route (D+H) maps refusals to what the popup says. */
   const grantFor = async (workspaceId: string): ReturnType<DirectDeps["grant"]> => {
     const device = local.device();
@@ -42,11 +44,25 @@ export function installWorkspaceSync(local: { enabled: boolean; control: DeviceC
     identity: () => { const user = getSessionUserForMain(); return user ? { accountId: user.accountId, deviceId: deviceIdFor(store, user.accountId) } : null; },
     connect: (workspaceId, handlers) => DirectSyncConnection.connect({ grant: () => grantFor(workspaceId), dial }, handlers),
     setSyncing: async (workspaceId, syncing) => { const device = local.device(); if (device) await local.control.setSyncing(device, workspaceId, syncing); },
+    unavailable: () => { void follower.hint(); },
     publish: statuses => emitEvent(WORKSPACE_SYNC_STATUS_EVENT, withFolders(statuses)),
   });
   // 12.z: the renderer may see This Mac's own folder (it is the person's Mac); the server never does.
   const withFolders = (statuses: WorkspaceSyncStatus[]): WorkspaceSyncStatus[] =>
     statuses.map(status => { const folder = manager.folderFor(status.workspaceId); return folder ? { ...status, folder } : status; });
+  const ownerKey = () => {
+    const account = getSessionUserForMain(), device = local.device();
+    return account && device ? JSON.stringify([ownerGeneration, account.accountId, device.deviceId, device.registrationId, device.instanceId]) : null;
+  };
+  const archives = new CloudContextArchiver({
+    ownerKey,
+    read: workspaceId => {
+      const device = local.device();
+      if (!device) return Promise.reject(new Error("Device is not registered."));
+      return local.control.archiveWorkspaceState(device, workspaceId);
+    },
+    manager, channel: syncChannelFolder(zerosWorkspacesRoot()),
+  });
   // 12.z: main follows what the person wants synced on this Mac, whatever the renderer shows.
   const follower = new SyncWantedFollower({
     list: cursor => { const device = local.device(); if (!device) return Promise.reject(new Error("not registered")); return local.control.syncConnections(device, cursor); },
@@ -54,6 +70,8 @@ export function installWorkspaceSync(local: { enabled: boolean; control: DeviceC
     folderFor: workspaceId => manager.folderFor(workspaceId),
     enable: (workspaceId, folder) => manager.enable(workspaceId, folder),
     disable: workspaceId => manager.disable(workspaceId),
+    archive: (workspaceId, isCurrent) => archives.inspect(workspaceId, isCurrent),
+    identityKey: ownerKey,
     mkdir: folder => mkdir(folder, { recursive: true, mode: 0o755 }).then(() => {}),
     channel: syncChannelFolder(zerosWorkspacesRoot()), now: Date.now, log: line => console.info(`[workspace-sync] ${line}`),
   });
@@ -65,8 +83,8 @@ export function installWorkspaceSync(local: { enabled: boolean; control: DeviceC
       else { follower.stop(); await manager.stop(); }
     }).catch(() => {});
   };
-  const stopSessionWatch = onMainAuthSessionChanged(sync);
-  const stopSignOut = onBeforeMainSignOut(() => manager.stop());
+  const stopSessionWatch = onMainAuthSessionChanged(() => { ownerGeneration++; follower.stop(); sync(); });
+  const stopSignOut = onBeforeMainSignOut(() => { ownerGeneration++; follower.stop(); return manager.stop(); });
   sync();
 
   const requireMainFrame = (event: IpcMainInvokeEvent) => {

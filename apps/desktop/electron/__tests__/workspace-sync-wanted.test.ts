@@ -40,6 +40,50 @@ describe("following syncWanted for this Mac (12.z)", () => {
     expect(old.cursors).toEqual([undefined]);   // no retry storm on an older control plane
   });
 
+  it("archives a confirmed workspace before a dropped connection can forget its local mirror", async () => {
+    const f = fixture([{ connections: [row(B, true)], nextCursor: null }], [A, B]);
+    const deps = (f.follower as unknown as { deps: SyncWantedDeps }).deps;
+    deps.archive = async (workspaceId) => {
+      f.calls.push(`archive-check ${workspaceId.slice(0, 1)}`);
+      if (workspaceId !== A) return false;
+      f.runs.delete(workspaceId);
+      return true;
+    };
+    await f.follower.refresh();
+    expect(f.calls).toEqual(["archive-check 2", "archive-check 1"]);
+    expect([...f.runs]).toEqual([B]);
+  });
+
+  it("does not restart a still-listed archived workspace, and retries unknown archive state", async () => {
+    const f = fixture([{ connections: [row(A, true)], nextCursor: null }], [B]);
+    const deps = (f.follower as unknown as { deps: SyncWantedDeps }).deps;
+    deps.archive = async (workspaceId) => {
+      if (workspaceId === A) return true;
+      throw new Error("read unavailable");
+    };
+    await f.follower.refresh();
+    expect(f.calls).toEqual([]);
+    expect([...f.runs]).toEqual([B]);
+  });
+
+  it("rechecks a local switch and account generation after the passive archive read", async () => {
+    for (const change of ["switch", "account", "stop"]) {
+      const f = fixture([{ connections: [row(A, true)], nextCursor: null }]);
+      const deps = (f.follower as unknown as { deps: SyncWantedDeps }).deps;
+      let account = "account-a", entered!: () => void, release!: () => void;
+      const probing = new Promise<void>(resolve => { entered = resolve; });
+      const gate = new Promise<void>(resolve => { release = resolve; });
+      deps.identityKey = () => account;
+      deps.archive = async () => { entered(); await gate; return false; };
+      const pending = f.follower.refresh(); await probing;
+      if (change === "switch") f.follower.noteLocalChange(A);
+      else if (change === "account") account = "account-b";
+      else f.follower.stop();
+      release(); await pending;
+      expect(f.calls).toEqual([]);
+    }
+  });
+
   it("never undoes this Mac's own switch flipped while a read was in flight, and refreshes at most every 10 s on hints", async () => {
     let release!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; });

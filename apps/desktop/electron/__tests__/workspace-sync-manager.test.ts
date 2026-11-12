@@ -26,6 +26,39 @@ function fixture(options: { connect?: SyncManagerDeps["connect"]; pull?: () => P
 }
 
 describe("SyncManager", () => {
+  it("joins the sync writer before copying an archive and forgets only the completed archive's binding", async () => {
+    let entered!: () => void, finish!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const pending = new Promise<void>(resolve => { finish = resolve; });
+    const f = fixture({ pull: async () => { entered(); await pending; return { state: "in_sync", problems: [], skipped: [] }; } });
+    await f.manager.enable(WS, "/f"); await started;
+    const copy = vi.fn(async (_folder: string, _identity: unknown, isCurrent: () => boolean) => { expect(isCurrent()).toBe(true); });
+    const archiving = f.manager.archive(WS, copy);
+    expect(f.closed).toHaveBeenCalled();
+    expect(copy).not.toHaveBeenCalled();
+    expect(f.manager.folderFor(WS)).toBe("/real/f");
+    finish(); await archiving;
+    expect(copy).toHaveBeenCalledWith("/real/f", { workspaceId: WS, accountId: "acct-a", deviceId: "22222222-2222-4222-8222-222222222222" }, expect.any(Function));
+    expect(f.manager.folderFor(WS)).toBeUndefined();
+    expect(f.last()).toEqual([]);
+  });
+
+  it("fences an archive while the account changes and preserves a failed copy for retry", async () => {
+    const f = fixture();
+    await f.manager.enable(WS, "/f");
+    await vi.waitFor(() => expect(f.last()[0]?.state).toBe("in_sync"));
+    await expect(f.manager.archive(WS, async () => { throw new Error("disk full"); })).rejects.toThrow("disk full");
+    expect(f.manager.folderFor(WS)).toBe("/real/f");
+    expect(f.last()[0]).toMatchObject({ state: "error", reason: "archive_failed" });
+    const copy = vi.fn(async (_folder: string, _identity: unknown, isCurrent: () => boolean) => {
+      f.setAccount({ accountId: "acct-b", deviceId: "33333333-3333-4333-8333-333333333333" });
+      expect(isCurrent()).toBe(false);
+    });
+    await f.manager.archive(WS, copy);
+    f.setAccount({ accountId: "acct-a", deviceId: "22222222-2222-4222-8222-222222222222" });
+    expect(f.manager.folderFor(WS)).toBe("/real/f");
+    await f.manager.stop();
+  });
   it("turns sync on for a validated folder, flags the Mac, pulls until in sync, and turns off keeping the files", async () => {
     const f = fixture();
     await f.manager.enable(WS, "/Users/alex/w-7");
