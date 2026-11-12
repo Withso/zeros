@@ -14,6 +14,7 @@ vi.mock("../../../state/cloud-workspace-catalog", () => ({
 }));
 import {
   clearCloudAgentRegistry,
+  creatorRevisionInvalidations,
   hasConfirmedWorkspaceAgents,
   useWorkspaceAgents,
   warmCloudAgentRegistry,
@@ -104,5 +105,19 @@ describe("workspace agent registry", () => {
     resolve({ type: "AGENT_AGENTS_LIST", agents: [{ id: "codex", installed: true }] });
     await pending;
     expect(workspaceAgentsSnapshot(a)).toBeNull();
+  });
+});
+
+describe("3B: the picker follows the current Creator", () => {
+  it("re-lists a workspace's agents once its Creator revision changes, never on the first sight or an unchanged one", () => {
+    const seen = new Map<string, string>(), keys = [`${a}#v2`, `${b}#v2`];
+    const revisions: Record<string, string | undefined> = { [a]: "7", [b]: undefined };
+    const read = (key: string) => revisions[key.slice(0, key.indexOf("#"))];
+    expect(creatorRevisionInvalidations(seen, keys, read)).toEqual([]);
+    expect(creatorRevisionInvalidations(seen, keys, read)).toEqual([]);
+    revisions[a] = "8";
+    expect(creatorRevisionInvalidations(seen, keys, read)).toEqual([`${a}#v2`]);
+    revisions[b] = "1";
+    expect(creatorRevisionInvalidations(seen, keys, read)).toEqual([]);
   });
 });

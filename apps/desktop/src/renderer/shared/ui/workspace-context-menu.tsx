@@ -1,6 +1,7 @@
 import React, { useRef, type MouseEvent, type ReactNode } from "react";
 import { isLocalMainWorkspace } from "../../state/local-main-workspace";
-import { Archive, BellOff, BellRing, Check, Link, Pin, PinOff, RotateCw } from "lucide-react";
+import { Archive, BellOff, BellRing, Check, Link, Pin, PinOff, RotateCw, UserRoundCog } from "lucide-react";
+import { openReassignDialog } from "../../features/team/reassign-dialog";
 import { useCloudFolderSharedDocument } from "../../state/cloud-workspace-creators";
 import { setCloudWorkspaceSharingFlag } from "../../state/team-sharing-actions";
 import { parseCloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
@@ -197,6 +198,13 @@ export function WorkspaceContextMenu({
               {shared.sharing.pinned ? <PinOff /> : <Pin />}
               <span>{shared.sharing.pinned ? "Unpin" : "Pin"}</span>
             </ContextMenuItem>
+            {/* 3B: the Creator or an admin, on an activated workspace with team ownership. */}
+            {shared.sharing.ownership?.canReassign && sharedTarget && (
+              <ContextMenuItem onSelect={() => openReassignDialog(sharedTarget)}>
+                <UserRoundCog />
+                <span>Reassign…</span>
+              </ContextMenuItem>
+            )}
           </>
         )}
 

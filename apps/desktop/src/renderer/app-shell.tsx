@@ -151,6 +151,7 @@ import { AppearanceProvider } from "./shared/theme/provider";
 import { getVariant, setPrefs } from "./shared/theme/store";
 import { AuthProvider, AuthGate } from "./features/auth";
 import { Toaster } from "./shared/ui/primitives/elements";
+import { ReassignDialogHost } from "./features/team/reassign-dialog";
 import { TooltipProvider } from "./shared/ui/primitives/tooltip";
 import { useInstantViewSwitch } from "./shared/ui/use-instant-view-switch";
 import {
@@ -1302,6 +1303,8 @@ export function AppShell() {
             transient feedback (docs/design-system.md, Feedback). Above the AuthGate
             so toasts, including auto-update, render on the login screen. */}
         <Toaster />
+        {/* Team sharing 3B: one Reassign dialog, opened from a row, the details or a no-Creator refusal. */}
+        <ReassignDialogHost />
         <GithubAppNotifications />
         {/* Above the gate so a main-process-staged update can notify on the
             login screen too. Main owns checking/downloading even with no

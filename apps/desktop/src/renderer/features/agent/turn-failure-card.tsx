@@ -10,6 +10,14 @@ import { turnFailureDisplay, type TurnFailure } from "./turn-failure";
 import { parseCloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
 import { cloudWorkspaceDocument, subscribeCloudWorkspaces } from "../../state/cloud-workspace-catalog";
 import { memberName, useOrganizationRoster } from "../../state/organization-roster";
+import { openReassignDialog } from "../team/reassign-dialog";
+
+/** 3B: whether this viewer may reassign the chat's cloud workspace (for a no-Creator refusal's action). */
+function useCanReassign(folder: string | null | undefined, needed: boolean) {
+  const target = needed ? parseCloudWorkspaceKey(folder ?? undefined) : null;
+  const read = () => (target ? cloudWorkspaceDocument(target)?.sharing?.ownership?.canReassign === true : false);
+  return { target, allowed: useSyncExternalStore(subscribeCloudWorkspaces, read, read) };
+}
 
 /** Creator pays: the cloud workspace's current Creator's name, only when a failure names the Creator. */
 function useCreatorName(folder: string | null | undefined, needed: boolean): string | null {
@@ -65,7 +73,8 @@ export function TurnFailureCard({
   };
   const reason = failure.cloud?.source === "provider" ? failure.cloud.reason : undefined;
   const creatorName = useCreatorName(folder, failure.cloud?.source === "provider" && failure.cloud.loginRequiredFrom === "creator");
-  const display = turnFailureDisplay(failure, creatorName);
+  const reassignable = useCanReassign(folder, failure.kind === "creator-required" || (failure.cloud?.source === "provider" && failure.cloud.reason === "creator-required"));
+  const display = turnFailureDisplay(failure, creatorName, reassignable.allowed);
   const retryAction = !readOnly && display.retry ? onRetry : undefined;
   const newChatAction = !readOnly && failure.newChatAllowed && (!reason || reason === "session-expired")
     ? reason === "session-expired" ? onStartNewSession ?? onRetryNewChat : onRetryNewChat : undefined;
@@ -81,8 +90,12 @@ export function TurnFailureCard({
       data-turn-failure-card
       className="my-2 first:mt-0"
     >
-      {(retryAction || newChatAction || reconnectAction || modelAction) && (
+      {(retryAction || newChatAction || reconnectAction || modelAction || (!readOnly && display.reassign)) && (
         <div className="mt-1 flex flex-wrap items-center gap-3">
+          {!readOnly && display.reassign && reassignable.target && <Button type="button" variant="ghost" size="sm" disabled={busy}
+            onClick={() => openReassignDialog(reassignable.target!)} className={AGENT_NOTICE_ACTION}>
+            Reassign… <ArrowRight className="size-3.5" aria-hidden="true" />
+          </Button>}
           {modelAction && <Button type="button" variant="ghost" size="sm" disabled={busy}
             onClick={modelAction} className={AGENT_NOTICE_ACTION}>
             Choose another model <ArrowRight className="size-3.5" aria-hidden="true" />

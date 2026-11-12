@@ -80,7 +80,8 @@ export async function cloudAccountRequest<T>(
       ...pickDeviceHeaders(options?.deviceHeaders),
       // 12.z: syncWanted has its own opt-in (released apps parse the Mac strictly); both travel together here.
       ...(options?.syncField ? { "X-Zeros-Sync": "1", "X-Zeros-Sync-Wanted": "1" } : {}),
-      ...(options?.teamSharing ? { "X-Zeros-Team-Sharing": "1" } : {}),
+      // 3B: team ownership travels with team sharing (a workspace may have no Creator; this app reads it).
+      ...(options?.teamSharing ? { "X-Zeros-Team-Sharing": "1", "X-Zeros-Team-Ownership": "1" } : {}),
       ...(input
         ? {
             "content-type": "application/json",
