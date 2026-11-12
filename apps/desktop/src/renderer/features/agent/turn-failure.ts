@@ -1,4 +1,4 @@
-import type { AgentMessage } from "@zeros/protocol/agent-messages";
+import type { AgentMessage, AgentTextMessage } from "@zeros/protocol/agent-messages";
 import { CloudFailureSchema, cloudFailureMessage, type CloudFailure } from "@zeros/protocol/cloud-v2-relay";
 import { redactLogSecrets } from "@zeros/protocol/scrub";
 import { claudeOrganizationStartupCode, claudeOrganizationStartupMessage } from "@zeros/protocol/claude-startup-notice";
@@ -10,6 +10,8 @@ export interface TurnFailure {
   message: string;
   kind: string;
   newChatAllowed: boolean;
+  /** Team sharing: the person has no login of their own for this agent; their own sign-in fixes it, and the unsent message can be retried. */
+  ownAccount?: true;
 }
 
 /** Root terminal notices are owned by the turn footer. Native notices from
@@ -45,7 +47,7 @@ export function turnFailureForCard(input: {
   events: AgentMessage[];
   turnId: string;
   fallback?: AgentFailure | null;
-  recoveryFailure?: { kind: string; message: string };
+  recoveryFailure?: AgentTextMessage["recoveryFailure"];
   live?: boolean;
   retrying?: boolean;
   status?: string;
@@ -79,7 +81,8 @@ export function turnFailureForCard(input: {
     notice?.code === "claude-background-transport-closed";
   if (input.status === "completed" && !backgroundFailure) return null;
   const fallback = input.fallback ?? input.recoveryFailure;
-  const parsedCloud = CloudFailureSchema.safeParse(notice?.cloud ?? input.fallback?.cloud);
+  const ownAccount = !notice && !input.fallback && input.recoveryFailure?.ownAccount === true;
+  const parsedCloud = CloudFailureSchema.safeParse(notice?.cloud ?? input.fallback?.cloud ?? (ownAccount ? input.recoveryFailure?.cloud : undefined));
   const cloud = parsedCloud.success ? parsedCloud.data : undefined;
   const organizationMessage = claudeOrganizationStartupMessage(notice?.code) ??
     claudeOrganizationStartupMessage(claudeOrganizationStartupCode(input.fallback?.advice));
@@ -104,8 +107,9 @@ export function turnFailureForCard(input: {
   ].includes(kind);
   return {
     ...(cloud ? { cloud } : {}),
-    message: cloud ? cloudFailureMessage(cloud) : redactLogSecrets(message).slice(0, 8000),
+    message: cloud && !ownAccount ? cloudFailureMessage(cloud) : redactLogSecrets(message).slice(0, 8000),
     kind,
     newChatAllowed,
+    ...(ownAccount ? { ownAccount: true as const } : {}),
   };
 }

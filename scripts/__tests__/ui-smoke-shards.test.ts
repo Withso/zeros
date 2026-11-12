@@ -102,6 +102,7 @@ const originalOrder = [
   "notify-user",
   "cloud-workspace-details",
   "team-sharing",
+  "team-writing",
   "subscription",
 ];
 

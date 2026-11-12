@@ -1,4 +1,5 @@
 import { LocalLinksProvider } from "./local-links/provider";
+import { TeamWritingNotice } from "./team-writing-notice";
 import { editChat } from "../../state/cloud-chat-edits";
 import { LocalCommandChatApprovals } from "./local-command-approvals";
 import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
@@ -4829,6 +4830,7 @@ function AgentChatBody({
           </ComposerConcealedContext.Provider>
           {/* Keeps the same height as EmptyComposer's toolbar so the chrome doesn't
               jump between them. */}
+          <TeamWritingNotice folder={chatThread?.folder ?? session.cwd} />
         </div>
         )}
       </div>

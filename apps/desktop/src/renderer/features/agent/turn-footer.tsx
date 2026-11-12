@@ -1,3 +1,4 @@
+import type { AgentTextMessage } from "@zeros/protocol/agent-messages";
 import { TurnUsageCard } from "./turn-usage-card";
 import type { CloudV2PromptState } from "@zeros/protocol/cloud-v2-prompts";
 import type { CloudTurnEnding } from "./cloud-turn-presentation";
@@ -437,7 +438,7 @@ interface TurnFooterProps {
   /** Active-turn terminal status before the persisted turn row is fetched. */
   fallbackStatusLabel?: string | null;
   failure?: AgentFailure | null;
-  recoveryFailure?: { kind: string; message: string };
+  recoveryFailure?: AgentTextMessage["recoveryFailure"];
   durablePrompt?: boolean;
   receiptState?: CloudV2PromptState;
   presentation?: CloudTurnEnding;

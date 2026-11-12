@@ -111,6 +111,8 @@ export class ControlPlaneError extends Error {
     public status: number,
     public code: string,
     message: string,
+    /** Team sharing's agent_login_required names the agent the person must connect. */
+    public agent?: "claude" | "codex" | "cursor",
   ) {
     super(message);
   }

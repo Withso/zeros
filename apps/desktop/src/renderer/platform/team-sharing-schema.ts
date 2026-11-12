@@ -12,6 +12,9 @@ export const CloudWorkspaceSharingSchema = z.object({
   pinned: z.boolean(),
   followerIds: z.array(uuid).max(200),
   followerCount: z.number().int().nonnegative(),
+  /** Phase 2 (activated): members write as themselves; canExecute is whether this run executes for people (readOnly = !canExecute). */
+  teamWriting: z.literal(true).optional(),
+  canExecute: z.boolean().optional(),
 });
 export type CloudWorkspaceSharing = z.infer<typeof CloudWorkspaceSharingSchema>;
 
@@ -21,6 +24,8 @@ export function sharingOf(reply: Record<string, unknown>): CloudWorkspaceSharing
   const parsed = CloudWorkspaceSharingSchema.safeParse({
     createdByUserId: reply.createdByUserId ?? null, viewerRole: reply.viewerRole, readOnly: reply.readOnly, canManage: reply.canManage,
     following: reply.following, pinned: reply.pinned, followerIds: reply.followerIds ?? [], followerCount: reply.followerCount ?? 0,
+    ...(reply.teamWriting === undefined ? {} : { teamWriting: reply.teamWriting === 1 ? true : reply.teamWriting }),
+    ...(reply.canExecute === undefined ? {} : { canExecute: reply.canExecute }),
   });
   return parsed.success ? parsed.data : undefined;
 }
