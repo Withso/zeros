@@ -171,6 +171,9 @@ revision in the same checkout and compare failing test names.
   storage, or its unload handlers restore the old state.
 - Native navigation drivers resolve a workspace's actual tab ID by type and
   assert activation; adding an existing tab does not activate it.
+- On the Design canvas a selected layer's outline lies over its frame, so a
+  frame locator's `click()` waits behind it or lands on the outline. Click a
+  point inside a frame with `page.mouse` at the element's `boundingBox()`.
 
 ## Process, CI and delivery
 

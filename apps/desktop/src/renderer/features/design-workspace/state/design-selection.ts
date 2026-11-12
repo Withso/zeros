@@ -624,8 +624,10 @@ function rememberSelectionGeneration(workspaceId: string, frame: string, sourceV
 
 function rememberCurrentSelection(workspaceId: string, frame: string, snapshot: DesignRuntimeSnapshot,
   targets: readonly DesignSelectionTarget[]): void {
-  const selected = targets.filter(target => target.frame === frame && target.nodeId && target.nodeId !== snapshot.frame.oid);
-  if (selected.every(target => treeContainsOid(snapshot.tree, target.nodeId!)))
+  // The frame itself is remembered as a selection too, so an undo to this
+  // generation never brings back a layer selected before it.
+  const selected = targets.filter(target => target.frame === frame && (!target.nodeId || target.nodeId !== snapshot.frame.oid));
+  if (selected.every(target => !target.nodeId || treeContainsOid(snapshot.tree, target.nodeId)))
     rememberSelectionGeneration(workspaceId, frame, snapshot.sourceVersion, selected);
 }
 
@@ -656,7 +658,7 @@ function historySelectionFor(workspaceId: string, frame: string, snapshot: Desig
   const pending = historySelectionByWorkspace.get(workspaceId);
   if (!pending || pending.frame !== frame || pending.until < performance.now()) return null;
   const remembered = selectionByGeneration.get(`${workspaceId}\u0000${frame}`)?.get(snapshot.sourceVersion);
-  if (!remembered?.every(target => treeContainsOid(snapshot.tree, target.nodeId!))) return null;
+  if (!remembered?.every(target => !target.nodeId || treeContainsOid(snapshot.tree, target.nodeId))) return null;
   const same = remembered.length === current.length &&
     remembered.every((target, index) => designSelectionTargetKey(target) === designSelectionTargetKey(current[index]!));
   if (same) return null;
@@ -667,7 +669,7 @@ function historySelectionFor(workspaceId: string, frame: string, snapshot: Desig
 useDesignWorkspaceUiStore.subscribe((state, previous) => {
   for (const [workspaceId, view] of Object.entries(state.byWorkspace)) {
     if (!view || view.selectedTargets === previous.byWorkspace[workspaceId]?.selectedTargets) continue;
-    for (const file of new Set(view.selectedTargets.filter(target => target.nodeId).map(target => target.frame))) {
+    for (const file of new Set(view.selectedTargets.map(target => target.frame))) {
       const snapshot = designRuntimeFrameState(workspaceId, file)?.snapshot;
       if (snapshot) rememberCurrentSelection(workspaceId, file, snapshot, view.selectedTargets);
     }
