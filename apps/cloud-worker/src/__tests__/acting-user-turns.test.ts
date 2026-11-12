@@ -542,3 +542,51 @@ it.skipIf(process.platform !== "linux")("Alpha w/2: a person's .env file with na
   expect(lines.filter(line => line === "personal-env unexported reserved=3 invalid=2 limit=0")).toHaveLength(2);
   f.drivers[0]!.complete();
 });
+
+it("ends a revoked person's background work too, and retires their context as revoked", async () => {
+  const f = await setup();
+  f.relay.deliver(delivery(ALEX));
+  await until(() => f.drivers[0]?.prompts.length ?? 0).toBe(1);
+  const contextId = f.relay.calls.find(call => call.op === "turn-lease")!.body.contextId;
+  f.drivers[0]!.emit({ sessionUpdate: "background_tasks_update", tasks: [{ id: "bg-1", description: "watching", status: "running" }] as never, waiting: false,
+    activity: { state: "running", startedAt: Date.now() } });
+  f.drivers[0]!.complete();
+  await new Promise(resolve => setTimeout(resolve, 50));
+  expect(f.relay.calls.some(call => call.op === `execution-leases/${contextId}/retired`)).toBe(false);
+  await f.relay.receive({ t: "revoke-context", contextId, reason: "access_revoked" });
+  await until(() => f.relay.calls.find(call => call.op === `execution-leases/${contextId}/retired`)?.body.reason).toBe("revoked");
+  expect(f.drivers[0]!.disposed).toBe(true);
+});
+
+it("cancels, never fails, a removed person's turn or steer when begin answers member_access_revoked", async () => {
+  const f = await setup();
+  const revoked = () => { throw Object.assign(new Error("revoked"), { status: 403, contextCode: "member_access_revoked" }); };
+  const item = delivery(SAM);
+  f.relay.beginReply = body => body.userMessageId === item.receipt.userMessageId ? revoked() : undefined;
+  f.relay.deliver(item);
+  await until(() => f.relay.calls.find(call => call.op === "outcome" && call.body.userMessageId === item.receipt.userMessageId)?.body.state).toBe("cancelled");
+  expect(f.drivers.every(driver => !driver.opened)).toBe(true);
+  const first = delivery(ALEX); f.relay.deliver(first);
+  await until(() => f.drivers[0]?.prompts.length ?? 0).toBe(1);
+  const second = steer(SAM);
+  f.relay.beginReply = body => body.userMessageId === second.receipt.userMessageId ? revoked() : undefined;
+  f.relay.deliver(second);
+  await until(() => f.relay.calls.find(call => call.op === "outcome" && call.body.userMessageId === second.receipt.userMessageId)?.body.state).toBe("cancelled");
+  expect(f.drivers[0]!.steers).toHaveLength(0);
+  f.drivers[0]!.complete();
+});
+
+it("drops a client whose own handle is revoked: no more requests, its terminals detached; other clients unaffected", async () => {
+  const f = await setup();
+  f.relay.clientUsers.set(CLIENT_A, ALEX).set(CLIENT_B, SAM);
+  const handle = randomUUID();
+  await f.relay.receive({ t: "open", clientId: CLIENT_A, userId: ALEX, contextId: handle });
+  await f.relay.receive({ t: "open", clientId: CLIENT_B, userId: SAM, contextId: randomUUID() });
+  await f.relay.receive({ t: "revoke-context", contextId: handle, reason: "access_revoked" });
+  const ignored = browserFrame("WORKSPACE_REQUEST", { op: "file.read", params: { path: "missing.txt" } });
+  await f.relay.request(CLIENT_A, ignored);
+  const answered = browserFrame("WORKSPACE_REQUEST", { op: "file.read", params: { path: "missing.txt" } });
+  await f.relay.request(CLIENT_B, answered);
+  await until(() => !!f.relay.response(answered.id)).toBe(true);
+  expect(f.relay.response(ignored.id)).toBeUndefined();
+});

@@ -406,7 +406,17 @@ export class CloudWorker {
       const previous = this.clients.get(message.clientId); if (previous) this.terminals?.detach(previous);
       if (previous?.contextId && previous.contextId !== message.contextId) this.contexts?.release(previous.contextId);
       // The connection's client handle lives as long as the connection: adopted now, renewed in every batch.
-      if (message.userId && message.contextId) this.contexts?.adopt(message.contextId, message.userId);
+      if (message.userId && message.contextId) {
+        this.contexts?.adopt(message.contextId, message.userId);
+        // Phase 3: that person lost access. The control plane closes the leg; here the client is dropped at once.
+        this.contexts?.onEnd(message.contextId, () => {
+          const current = this.clients.get(message.clientId);
+          if (!current || current.contextId !== message.contextId) return;
+          current.rejected = true;
+          this.terminals?.detach(current);
+          this.clients.delete(message.clientId);
+        });
+      }
       const client: Client = { id: message.clientId, rejected: false, ...(message.passive ? { passive: true } : {}),
         ...(message.passive && message.device ? { device: message.device } : {}),
         ...(message.userId && message.contextId ? { userId: message.userId, contextId: message.contextId } : {}),

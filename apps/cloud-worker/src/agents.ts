@@ -319,12 +319,14 @@ export class Agents {
         const entry = await this.store.prepareOutboxDispatch(chatId, next.requestId, true);
         if (!entry) return;
         let outcome: SteerOutcome = "interrupted";
-        let assigned: boolean | OutboxAssignment | undefined;
+        let assigned: boolean | OutboxAssignment | undefined, revoked = false;
         try { assigned = await this.outboxDispatch?.(entry); }
         catch (error) {
-          // Activated: another person's turn still owns the chat; this one waits as an ordinary turn.
-          if (!this.acting || contextCode(error) !== "actor_busy") throw error;
-          assigned = undefined; outcome = "queued";
+          // Activated: the sender lost access (cancelled), or another person's turn still owns the chat (waits as an ordinary turn).
+          if (this.acting && contextCode(error) === "member_access_revoked") revoked = true;
+          else if (!this.acting || contextCode(error) !== "actor_busy") throw error;
+          else outcome = "queued";
+          assigned = undefined;
         }
         if (assigned) {
           const joined = !this.acting || await this.leaseSteer(route, entry, assigned);
@@ -332,7 +334,7 @@ export class Agents {
           else if (!joined || route.active !== active || !route.nativeRunning || !matchesActiveMode() || route.interactions?.blocking) outcome = "queued";
           else outcome = await route.driver!.steer(content);
         }
-        await this.store.finishOutboxSteer(chatId, entry.requestId, outcome, active.userMessageId);
+        await this.store.finishOutboxSteer(chatId, entry.requestId, outcome, active.userMessageId, revoked);
         if (outcome === "delivered") await this.update(route, { sessionId: route.id,
           update: { sessionUpdate: "user_message_recorded", message: userMessage(entry, active.userMessageId) } });
       })().catch(async () => {
@@ -887,6 +889,8 @@ export class Agents {
     for (let attempt = 0; ; attempt++) {
       try { return await this.outboxDispatch?.(entry); }
       catch (error) {
+        // The sender no longer has access (phase 3): their message is cancelled, never a failed turn.
+        if (contextCode(error) === "member_access_revoked") return false;
         if (contextCode(error) !== "actor_busy" || route.closed || stopping !== route.stopping || this.lifetime.signal.aborted) throw error;
         await new Promise(resolve => setTimeout(resolve, Math.min(5_000, 250 * 2 ** Math.min(attempt, 5))));
         if (route.closed || stopping !== route.stopping || this.lifetime.signal.aborted) return false;
@@ -906,6 +910,8 @@ export class Agents {
       context.ended = reason;
       if (route.active) route.active.cancelRequested = true;
       void route.driver?.interrupt().catch(() => {});
+      // After its turn: only that person's background work is left; it ends with their context.
+      if (!route.active) void this.retireContext(route).then(() => this.pump(route), () => {});
     });
     // The person's env files: private to this context, never in the checkout; retirement erases them.
     if (context.lease.environment && this.personal) {
@@ -981,6 +987,11 @@ export class Agents {
     await route.driver?.dispose().catch(() => {});
     await tools;
     route.driver = undefined; route.login = undefined; route.mcpExecutionId = undefined; route.interactions = undefined;
+    // The driver took its background work with it; clients stop showing it.
+    if (this.hasBackground(route)) {
+      route.background = undefined;
+      await this.update(route, { sessionId: route.id, update: { sessionUpdate: "background_tasks_update", tasks: [], waiting: false, activity: null } }).catch(() => {});
+    }
     if (this.contexts) await retireContext(this.contexts, context.id, context.ended === "expired" ? "expired" : context.ended ? "revoked" : "outcome", { personal: this.personal, signal: this.lifetime.signal });
   }
 
@@ -1140,7 +1151,7 @@ export class Agents {
       route.active = undefined; route.closed = true; this.activity();
     }).finally(() => {
       route.pumping = undefined;
-      if (route.context && !route.active && !this.hasBackground(route) && !route.cancelling && !route.stopInFlight)
+      if (route.context && !route.active && (!this.hasBackground(route) || route.context.ended) && !route.cancelling && !route.stopInFlight)
         void this.retireContext(route).finally(() => { if (this.store.hasQueued(route.chatId)) this.pump(route); });
       else if (this.store.hasQueued(route.chatId)) this.pump(route);
     });
