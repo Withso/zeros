@@ -449,7 +449,7 @@ original file over the current one. Encrypted checkpoints explicitly include the
 bounded selected paths, including files beneath ignored directories and deletion
 state. Restore retains edited bytes, file modes, reset/Undo refs and the seed journal.
 
-Only the creator's pin is delivered, after current membership and GitHub source
+In legacy and prepared workspaces, only the creator's pin is delivered, after current membership and GitHub source
 authorization checks. Removing membership or disconnecting GitHub stops delivery
 at the next configuration. Agents, setup and terminals receive application
 variables as a separate child-process input; worker, broker, credential preflight
@@ -470,6 +470,22 @@ own variables. The agent is told in one line where they are. The directory is
 erased when the context retires, after its processes are gone. The VM is still
 one trust domain: other members' processes can read that directory, and the
 person's variables, while the context lives.
+
+Activated workspaces retain the VM when one person leaves, goes on Hold or loses
+account or repository access. That person's contexts, tokens, pending prompts,
+Mac connections and local-command bindings are revoked; other members keep
+working. A session sign-out closes that session's clients and terminals while
+already accepted turns retain their recorded sender. Commit and review identity,
+agent logins, environment and MCP selection come from each execution's person.
+Local workspaces and legacy/prepared cloud workspaces keep their existing rules.
+
+Direct sync on an activated workspace requires the exact boot to advertise both
+`acting-user-v1` and `sync-context-v1`. Its signed grant includes a `ctx` client
+handle bound to the person, session and Mac registration. The worker must renew
+that handle after boot-clean and before opening a passive client or reading any
+files. Renewals run every 10 seconds; push revocation, a refused renewal or the
+lease deadline closes the sync socket with code 4001. Previously synced files
+remain on the Mac. Legacy sync grants retain their original shape.
 
 Deploy expand-only migration `0218_cloud_workspace_environment.sql` and the control
 plane before publishing the worker runtime. The optional `environment` config is

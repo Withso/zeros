@@ -1,3 +1,4 @@
+import { clearWorkspaceAccessEnded, reportWorkspaceAccessEnded } from "../team-sharing-registry";
 // Shared desktop/Linux transport. Environment ports carry no workspace authority.
 import type { BridgeMessage } from "./messages";
 import { createMessageId } from "./messages";
@@ -563,6 +564,8 @@ export class RuntimeClient {
         const failure = new CloudRuntimeAccessError(event.code === 4009
           ? { code: "cloud_workspace_not_running", status: 409 }
           : { code: event.code === 4001 ? "cloud_workspace_access_revoked" : "invalid_input", status: 403 });
+        // Team sharing: this person lost access while the workspace was open.
+        if (event.code === 4001) reportWorkspaceAccessEnded(this.connectionTarget.workspaceId);
         this.rejectCloudConnection(failure);
       }
       this.afterDisconnect(reconnectImmediately);
@@ -970,6 +973,7 @@ export class RuntimeClient {
       this.clearCloudConnectWait();
       this.handshakeReady = true;
       this._engineConnected = true;
+      if (this.connectionTarget.kind === "cloud") clearWorkspaceAccessEnded(this.connectionTarget.workspaceId);
       this.reconnectAttempts = 0;
       this.cloudDiagnostic("ready", {});
       // Make room for synchronous status-listener RPCs even when the

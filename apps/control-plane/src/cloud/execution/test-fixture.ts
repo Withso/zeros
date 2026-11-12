@@ -20,12 +20,13 @@ import { executionIntentAuthority } from "./authority.js";
 export async function executionFixture(pool: pg.Pool, options: { lifecycle?: boolean; relay?: boolean } = {}) {
   const seed = await teamSharingFixture(pool);
   const keys = { currentKeyVersion: 1, keys: { 1: Buffer.alloc(32, 27).toString("base64url") } };
+  const signing = generateKeyPairSync("ed25519");
   vi.stubGlobal("fetch", seed.fetcher);
   const config = {
     github: null, deploymentChannel: "alpha", inviteLinkBase: "https://app.example.test/invite",
     cloudAgentCredentials: { settingsSecretKeyV1: keys.keys[1] },
     cloudV2: { boat: { apiKey: "synthetic-boat-credential" }, apiUrl: "https://api.example.test", realtimeUrl: "https://rt.example.test", promptOutbox: true,
-      workerSigningKey: generateKeyPairSync("ed25519").privateKey.export({ type: "pkcs8", format: "der" }).toString("base64"),
+      workerSigningKey: signing.privateKey.export({ type: "pkcs8", format: "der" }).toString("base64"),
       runtime: { sha256: "b".repeat(64), store: { endpoint: "https://store.example.test", bucket: "fixture", accessKeyId: "fixture", secretAccessKey: "fixture" } } },
   } as Config;
   const cp = createCloudV2(config, pool, { relay: options.relay ?? false, lifecycle: options.lifecycle ?? false })!;
@@ -98,6 +99,10 @@ export async function executionFixture(pool: pg.Pool, options: { lifecycle?: boo
     cp.runtimeUpdates.close(); await cp.api.credentials.close(); await cp.loginChanges.stop();
     await cp.promptChanges?.stop(); await cp.localCommandSignals.close();
   };
-  return { ...seed, cp, app, call, token, boot, features, worker, hello, login, vault, keys, activate, prompt, send, dispatch, close };
+  // Initial LISTEN readiness invalidates source observations. Complete it
+  // before a test starts an admission flight against the assembled router.
+  await cp.loginChanges.start();
+  return { ...seed, cp, app, call, token, boot, features, worker, hello, login, vault, keys, activate, prompt, send, dispatch, close,
+    workerPublicKeys: [signing.publicKey.export({ type: "spki", format: "pem" }).toString()] };
 }
 export type ExecutionFixture = Awaited<ReturnType<typeof executionFixture>>;

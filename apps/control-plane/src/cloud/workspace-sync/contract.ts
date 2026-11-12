@@ -2,6 +2,7 @@ import { z } from "zod";
 
 // Mirrored from packages/protocol/src/workspace-sync.ts; the CP deploys alone.
 export const SYNC_FEATURE = "sync-v1";
+export const SYNC_CONTEXT_FEATURE = "sync-context-v1";
 export const SYNC_HEADER = "x-zeros-sync";
 export const SYNC_WANTED_HEADER = "x-zeros-sync-wanted";
 export const SyncFlagSchema = z.object({ syncing: z.boolean() }).strict();

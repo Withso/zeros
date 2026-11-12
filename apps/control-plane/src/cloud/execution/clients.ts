@@ -10,10 +10,11 @@ import { newCloudV2Token } from "../tokens.js";
 import type { CloudV2AppGrant } from "../store.js";
 import type { ExecutionAdmission } from "./authority.js";
 import type { CloudExecutionContexts, ExecutionContext, ExecutionWorker } from "./store.js";
+import { executionContextAuthority, matchesExecutionSignature, type VersionedExecutionAuthority } from "./signatures.js";
 import { actorChanged, executionWorkerRequired } from "./errors.js";
 import { EXECUTION_MINIMUM_LIFETIME_MS, assertExecutionLifetime } from "./lifetime.js";
 
-export type ExecutionConnectAuthority = { signature: string; stopGeneration: string; tokenEnd: number };
+export type ExecutionConnectAuthority = VersionedExecutionAuthority & { signature: string; stopGeneration: string; tokenEnd: number };
 const record = z.object({ type: z.string(), id: CloudV2PromptIdSchema.optional(), op: z.string().optional(),
   sessionId: CloudV2PromptIdSchema.optional(), params: z.unknown().optional() }).passthrough();
 
@@ -30,7 +31,7 @@ export class CloudExecutionClients {
       await tx.query("SELECT 1 FROM cloud_v2_workspaces WHERE id=$1 FOR UPDATE", [workspaceId]);
       await assertNoExecutionTransition(tx, workspaceId);
       await this.contexts.deps.authority.assert(proof, tx);
-      const authority: ExecutionConnectAuthority = { signature: proof.person.personSignature, stopGeneration: proof.person.stopGeneration, tokenEnd };
+      const authority: ExecutionConnectAuthority = { signatureVersion: 2, signature: proof.person.personSignature, stopGeneration: proof.person.stopGeneration, tokenEnd };
       await tx.query(`INSERT INTO cloud_v2_tokens(token_hash,workspace_id,kind,user_id,expires_at,wake_on_connect,provider_session_id,execution_authority)
         VALUES($1,$2,'connect',$3,$4,$5,$6,$7)`, [token.hash, workspaceId, user.id, expiresAt, wake, user.authentication.sessionId, authority]);
       await this.contexts.deps.authority.assert(proof, tx);
@@ -41,7 +42,7 @@ export class CloudExecutionClients {
   async validateGrant(workspaceId: string, grant: CloudV2AppGrant) {
     if (!grant.execution || grant.execution.tokenEnd <= Date.now()) throw actorChanged();
     const proof = await this.contexts.deps.authority.admit(workspaceId, grant.userId, { continuation: true });
-    if (proof.person.personSignature !== grant.execution.signature || proof.person.accessEpoch !== grant.accessEpoch) throw actorChanged();
+    if (!matchesExecutionSignature(grant.execution, grant.execution.signature, proof.person, "personSignature") || proof.person.accessEpoch !== grant.accessEpoch) throw actorChanged();
     await withSystemTx(this.contexts.pool, async tx => {
       if (grant.sessionId) await this.session(tx, grant.userId, grant.sessionId);
       await this.contexts.deps.authority.assert(proof, tx);
@@ -52,7 +53,7 @@ export class CloudExecutionClients {
   async open(workspaceId: string, clientId: string, grant: CloudV2AppGrant) {
     if (!grant.execution || grant.execution.tokenEnd <= Date.now()) throw actorChanged();
     const proof = await this.contexts.deps.authority.admit(workspaceId, grant.userId, { minimumSourceMs: EXECUTION_MINIMUM_LIFETIME_MS });
-    if (proof.person.personSignature !== grant.execution.signature || proof.person.accessEpoch !== grant.accessEpoch) throw actorChanged();
+    if (!matchesExecutionSignature(grant.execution, grant.execution.signature, proof.person, "personSignature") || proof.person.accessEpoch !== grant.accessEpoch) throw actorChanged();
     return withSystemTx(this.contexts.pool, async tx => {
       await tx.query("SELECT id FROM users WHERE id=$1 FOR KEY SHARE", [proof.person.userId]);
       await tx.query("SELECT 1 FROM cloud_v2_workspaces WHERE id=$1 FOR UPDATE", [workspaceId]);
@@ -86,7 +87,7 @@ export class CloudExecutionClients {
       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,decode($17,'hex'),$18,$19,$20) RETURNING *`,
     [randomUUID(), person.workspaceId, person.organizationId, person.userId, input.kind, input.clientId, input.sessionId,
       input.tokenEnd ? new Date(input.tokenEnd) : null, input.operation ?? null, input.requestId ?? null, input.terminalId ?? null, input.parentId ?? null,
-      input.fingerprint ?? null, person.accessEpoch, person.stopGeneration, person.bootId, person.workerTokenHash, { signature: person.signature }, proof.source.fingerprint,
+      input.fingerprint ?? null, person.accessEpoch, person.stopGeneration, person.bootId, person.workerTokenHash, executionContextAuthority(person), proof.source.fingerprint,
       new Date(until)])).rows[0]!;
     assertExecutionLifetime(until);
     return row;
@@ -107,7 +108,7 @@ export class CloudExecutionClients {
       CLOUD_V2_CLIENT_OPERATIONS.some(op => op === request.op) && (request.op !== "git.repoBranchCatalog" ||
         (request.params as { fetch?: unknown } | undefined)?.fetch === true) ? request.op : null;
     const { context: handle, proof } = await this.current(workspaceId, id, operation ? EXECUTION_MINIMUM_LIFETIME_MS : 0);
-    if (handle.kind !== "client" || handle.operation) throw actorChanged();
+    if (handle.kind !== "client" || handle.operation || handle.sync_device_id) throw actorChanged();
     if (request.type === "AGENT_PROMPT" || request.type === "AGENT_STEER") throw new HttpError(409, "client_update_required", "Update the desktop before sending in a shared workspace");
     const fingerprint = createHash("sha256").update(JSON.stringify([request.type, request.op, request.params, request.sessionId])).digest();
     await withSystemTx(this.contexts.pool, async tx => {

@@ -25,12 +25,12 @@ export class WorkerTokenVerifier {
 
   /** Order 3: a single-use grant for one Mac's sync socket: the control claims
    * plus scope "sync", the user (sub) and the device (dev). */
-  acceptSync(token: unknown): { sub: string; dev: string; iat: number } | null {
+  acceptSync(token: unknown): { sub: string; dev: string; iat: number; ctx?: string } | null {
     const result = this.verify(token);
-    return result?.scope === "sync" ? { sub: result.sub!, dev: result.dev!, iat: result.iat } : null;
+    return result?.scope === "sync" ? { sub: result.sub!, dev: result.dev!, iat: result.iat, ...(result.ctx ? { ctx: result.ctx } : {}) } : null;
   }
 
-  private verify(token: unknown): { scope: "control" | "sync"; iat: number; sub?: string; dev?: string } | null {
+  private verify(token: unknown): { scope: "control" | "sync"; iat: number; sub?: string; dev?: string; ctx?: string } | null {
     if (typeof token !== "string" || token.length > 4096) return null;
     const parts = /^v1\.([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)$/.exec(token);
     if (!parts) return null;
@@ -41,7 +41,9 @@ export class WorkerTokenVerifier {
       const claims = JSON.parse(payload.toString("utf8"));
       if (!claims || typeof claims !== "object") return null;
       const keys = Object.keys(claims).sort().join(",");
-      const sync = keys === "aud,boot,dev,exp,iat,iss,jti,scope,sub";
+      // sync-context-v1 (team sharing 3A): an activated workspace's grant also names its client handle, ctx.
+      const scoped = keys === "aud,boot,ctx,dev,exp,iat,iss,jti,scope,sub";
+      const sync = scoped || keys === "aud,boot,dev,exp,iat,iss,jti,scope,sub";
       if (keys !== "aud,boot,exp,iat,iss,jti" && !sync) return null;
       const { iss, aud, boot, iat, exp, jti } = claims;
       if (iss !== "zeros-cp" || aud !== this.options.workspaceId || boot !== this.options.bootId ||
@@ -49,12 +51,13 @@ export class WorkerTokenVerifier {
           typeof jti !== "string" || !/^[A-Za-z0-9_-]{16,128}$/.test(jti)) return null;
       if (sync && (claims.scope !== "sync" || typeof claims.sub !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(claims.sub)
         || typeof claims.dev !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(claims.dev))) return null;
+      if (scoped && (typeof claims.ctx !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(claims.ctx))) return null;
       const now = Math.floor((this.options.now?.() ?? Date.now()) / 1000);
       if (iat > now + SKEW_SECONDS || exp < now - SKEW_SECONDS) return null;
       for (const [id, expires] of this.used) if (expires < now) this.used.delete(id);
       if (this.used.has(jti) || this.used.size >= (this.options.capacity ?? 4096)) return null;
       this.used.set(jti, exp + SKEW_SECONDS);
-      return sync ? { scope: "sync", iat, sub: claims.sub, dev: claims.dev.toLowerCase() } : { scope: "control", iat };
+      return sync ? { scope: "sync", iat, sub: claims.sub, dev: claims.dev.toLowerCase(), ...(scoped ? { ctx: claims.ctx } : {}) } : { scope: "control", iat };
     } catch { return null; }
   }
 }

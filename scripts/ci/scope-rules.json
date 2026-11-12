@@ -439,6 +439,11 @@
       "lanes": ["repository-contracts"]
     },
     {
+      "id": "migration-exception-registry",
+      "include": ["scripts/migration-expand-exceptions.ts"],
+      "lanes": ["repository-contracts"]
+    },
+    {
       "id": "zstack-pack",
       "include": ["agents/zstack/**"],
       "lanes": ["repository-contracts"]

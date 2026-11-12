@@ -16,6 +16,8 @@ import { CloudExecutionLogins, type ExecutionSelection } from "./logins.js";
 import { CloudExecutionClients } from "./clients.js";
 import { CloudExecutionBoots } from "./boots.js";
 import { CloudExecutionMaintenance } from "./maintenance.js";
+import { CloudExecutionSync } from "./sync.js";
+import { executionContextAuthority, matchesExecutionSignature, type VersionedExecutionAuthority } from "./signatures.js";
 import { openExecution, sealExecution } from "./envelope.js";
 import { EXECUTION_LEASE_MS, EXECUTION_MINIMUM_LIFETIME_MS, assertExecutionLifetime } from "./lifetime.js";
 
@@ -29,8 +31,9 @@ export type ExecutionContext = { id: string; workspace_id: string; org_id: strin
   chat_id: string | null; user_message_id: string | null; dispatch_id: string | null; generation: string | null; chat_epoch: string | null;
   client_id: string | null; terminal_id: string | null; request_id: string | null; operation: string | null; parent_context_id: string | null;
   client_token_expires_at: Date | null; request_fingerprint: Buffer | null;
+  sync_device_id: string | null; sync_registration_id: string | null; sync_instance_id: string | null; sync_connected_at: Date | null;
   provider_session_id: string | null; access_epoch: string; stop_generation: string; worker_boot_id: string; worker_token_hash: Buffer;
-  authority: { signature: string }; source_fingerprint: string; agent: CloudV2Agent | null; selection: ExecutionSelection | null;
+  authority: VersionedExecutionAuthority & { signature: string }; source_fingerprint: string; agent: CloudV2Agent | null; selection: ExecutionSelection | null;
   state: "active" | "revoked" | "retired"; reason: CloudV2ContextReason | null; expires_at: Date; material: unknown; bootstrap_material_issued: boolean | null;
   retirement_id: string | null; retirement_hash: Buffer | null; environment_version_id: string | null; mcp_fingerprint: string | null; intent_id: string | null };
 export type PromptExecutionAdmission = ExecutionAdmission & { agent: CloudV2Agent; selection: ExecutionSelection | null };
@@ -56,6 +59,7 @@ export class CloudExecutionContexts {
   readonly clients = new CloudExecutionClients(this);
   readonly boots = new CloudExecutionBoots(this);
   readonly maintenance = new CloudExecutionMaintenance(this);
+  readonly sync = new CloudExecutionSync(this);
   constructor(readonly pool: pg.Pool, readonly deps: ExecutionDeps) {}
 
   async active(id: string, transaction?: Tx): Promise<boolean> {
@@ -301,7 +305,7 @@ export class CloudExecutionContexts {
         sender_device_id,sender_registration_id,sender_binding_generation,expires_at)
         VALUES($1,$2,$3,$4,'turn',$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22) RETURNING *`,
       [contextId, workspace.id, workspace.org_id, row.creator_user_id, row.chat_id, row.user_message_id, input.dispatchId, generation, chat.epoch,
-        workspace.access_epoch, workspace.stop_generation, identity.bootId, workspace.worker_token_hash, { signature: proof.person.signature }, proof.source.fingerprint,
+        workspace.access_epoch, workspace.stop_generation, identity.bootId, workspace.worker_token_hash, executionContextAuthority(proof.person), proof.source.fingerprint,
         agent, selection, selection.source === "personal" ? selection.credentialId : null, row.sender_device_id, row.sender_registration_id, row.sender_binding_generation, new Date(proof.until)])).rows[0]!;
       await tx.query("UPDATE cloud_v2_prompt_chats SET acting_user_id=$3,acting_generation=$4,active_context_id=$5 WHERE workspace_id=$1 AND chat_id=$2",
         [workspace.id, row.chat_id, row.creator_user_id, generation, contextId]);
@@ -329,7 +333,7 @@ export class CloudExecutionContexts {
   async assertContext(tx: Tx, context: ExecutionContext, proof: ExecutionAdmission): Promise<ExecutionContext> {
     const row = await this.context(tx, context.id, context.workspace_id);
     if (row.state !== "active" || !row.user_id || row.user_id !== proof.person.userId || row.expires_at.getTime() <= Date.now() ||
-        row.authority.signature !== proof.person.signature || row.source_fingerprint !== proof.source.fingerprint) throw actorChanged();
+        !matchesExecutionSignature(row.authority, row.authority.signature, proof.person, "signature")) throw actorChanged();
     if (row.access_epoch !== proof.person.accessEpoch || row.stop_generation !== proof.person.stopGeneration || row.worker_boot_id !== proof.person.bootId ||
         row.worker_token_hash.toString("hex") !== proof.person.workerTokenHash) throw actorChanged();
     if (row.client_token_expires_at && row.client_token_expires_at.getTime() <= Date.now()) throw actorChanged();
@@ -354,7 +358,9 @@ export class CloudExecutionContexts {
     // Renew only when that original authority no longer covers the floor.
     const until = current.expires_at.getTime() - Date.now() >= EXECUTION_MINIMUM_LIFETIME_MS
       ? current.expires_at.getTime() : ceiling;
-    if (until !== current.expires_at.getTime()) await tx.query("UPDATE cloud_v2_execution_contexts SET expires_at=$2 WHERE id=$1", [current.id, new Date(until)]);
+    if (until !== current.expires_at.getTime()) await tx.query(
+      "UPDATE cloud_v2_execution_contexts SET expires_at=$2,authority=$3,source_fingerprint=$4 WHERE id=$1",
+      [current.id, new Date(until), executionContextAuthority(proof.person), proof.source.fingerprint]);
     await this.assertContext(tx, current, proof);
     assertExecutionLifetime(until);
     return { ...current, expires_at: new Date(until) };
@@ -452,7 +458,7 @@ export class CloudExecutionContexts {
       }
       if (existing && (existing.bootstrap_material_issued !== false || existing.retirement_id || existing.material !== null ||
         existing.expires_at.getTime() > Date.now() || existing.state !== "active" && existing.reason !== "expired" ||
-        existing.authority.signature !== proof.person.signature || existing.source_fingerprint !== proof.source.fingerprint)) throw actorChanged();
+        !matchesExecutionSignature(existing.authority, existing.authority.signature, proof.person, "signature"))) throw actorChanged();
       assertExecutionLifetime(proof.until);
       if (existing) {
         const deleted = await tx.query(`DELETE FROM cloud_v2_execution_contexts c WHERE c.id=$1
@@ -464,7 +470,7 @@ export class CloudExecutionContexts {
       await tx.query(`INSERT INTO cloud_v2_execution_contexts(id,workspace_id,org_id,user_id,kind,intent_id,access_epoch,stop_generation,worker_boot_id,worker_token_hash,authority,source_fingerprint,expires_at,bootstrap_material_issued)
         VALUES($1,$2,$3,$4,'bootstrap',$5,$6,$7,$8,decode($9,'hex'),$10,$11,$12,false)`,
       [id, workspaceId, proof.person.organizationId, proof.person.userId, current.execution_intent_id, proof.person.accessEpoch, proof.person.stopGeneration,
-        proof.person.bootId, proof.person.workerTokenHash, { signature: proof.person.signature }, proof.source.fingerprint, new Date(proof.until)]);
+        proof.person.bootId, proof.person.workerTokenHash, executionContextAuthority(proof.person), proof.source.fingerprint, new Date(proof.until)]);
       await this.deps.authority.assert(proof, tx);
       assertExecutionLifetime(proof.until);
       return id;
@@ -572,7 +578,8 @@ export class CloudExecutionContexts {
               if (row.agent && row.selection) await this.deps.logins.select(row.org_id, row.user_id!, row.agent, row.selection, tx);
               const until = Math.min(started + EXECUTION_LEASE_MS, proof.until, row.client_token_expires_at?.getTime() ?? Infinity);
               assertExecutionLifetime(until);
-              await tx.query("UPDATE cloud_v2_execution_contexts SET expires_at=$2 WHERE id=$1", [id, new Date(until)]);
+              await tx.query("UPDATE cloud_v2_execution_contexts SET expires_at=$2,authority=$3,source_fingerprint=$4 WHERE id=$1",
+                [id, new Date(until), executionContextAuthority(proof.person), proof.source.fingerprint]);
               await this.assertContext(tx, row, proof);
               assertExecutionLifetime(until);
               leases.push({ contextId: id, expiresAt: until });

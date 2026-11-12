@@ -11,6 +11,7 @@ import {
   refreshCloudWorkspaceTitleSoon,
 } from "./state/cloud-workspace-catalog";
 import { parseCloudWorkspaceKey } from "./platform/bridge/cloud-workspace-key";
+import { TeamSharingAccessEnded, useWorkspaceAccessEnded } from "./shell/team-sharing-access-ended";
 import { isNamedChatTitle } from "./shared/lib/workspace-name";
 import { isCloudWorkspace } from "./platform/bridge/cloud-workspace-key";
 import {
@@ -953,6 +954,8 @@ function MainShellBody({
   } = useActiveWorkspace();
   // A teammate's workspace this account only reads has no tools either.
   const activeReader = useCloudFolderIsReader(activeWorkspace?.path ?? activeWorkspaceFolder);
+  // Team sharing 3A: this person lost access while the workspace was open; its chats and tools give way.
+  const activeAccessEnded = useWorkspaceAccessEnded(activeWorkspace?.path ?? activeWorkspaceFolder);
   const historyOnly = workspaceIsReadOnly(activeWorkspace) || activeReader;
   const workspaceToolsAvailable = !workspaceLoading && !historyOnly;
   useOpenBrowserHotkey(
@@ -1076,7 +1079,9 @@ function MainShellBody({
               aria-hidden={isHome}
             >
               <div className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden">
-                <div className="absolute inset-0 flex min-h-0 min-w-0 overflow-hidden">
+                {activeAccessEnded ? (
+                  <TeamSharingAccessEnded name={activeWorkspace?.title?.trim() || "this workspace"} />
+                ) : <div className="absolute inset-0 flex min-h-0 min-w-0 overflow-hidden">
                   <ConversationPane
                     workbenchCollapsed={workbenchCollapsed}
                     onToggleWorkbench={toggleWorkbench}
@@ -1088,7 +1093,7 @@ function MainShellBody({
                     surfaceActive={!isHome && !workbenchCollapsed}
                     collapsed={workbenchCollapsed}
                   />}
-                </div>
+                </div>}
               </div>
             </div>
           )}

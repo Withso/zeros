@@ -4,7 +4,7 @@ import type { AuthedUser } from "../../auth.js";
 import { HttpError } from "../../authz.js";
 import { withSystemTx, type Tx } from "../../db.js";
 import { SECURITY_STREAM_AUTHORITY, securityStreamAuthority, securityStreamParameters } from "../../security-events.js";
-import { CLOUD_V2_LIVE_ACCESS, cloudV2ActorAccess } from "../workspace-access.js";
+import { CLOUD_V2_CREATOR_ACCESS_SQL, CLOUD_V2_LIVE_ACCESS, cloudV2ActorAccess } from "../workspace-access.js";
 import type { CloudExecutionContexts } from "../execution/store.js";
 import type { DeviceSyncConnectionsReply, SyncFlags } from "../workspace-sync/contract.js";
 import { LOCAL_COMMANDS_FEATURE, LOCAL_COMMANDS_REASON_FEATURE, type ConnectedMac, type LocalDevice, type LocalDeviceBinding, type LocalDevicePresence, type LocalDeviceRegistration } from "./contract.js";
@@ -177,7 +177,7 @@ export class CloudLocalDevices {
         // One organization admission covers its workspaces in this read snapshot.
         `WITH live_organizations AS MATERIALIZED (
            SELECT w.org_id FROM (SELECT org_id,user_id AS creator_user_id FROM organization_members WHERE user_id=$1) w
-           WHERE ${CLOUD_V2_LIVE_ACCESS})
+           WHERE ${CLOUD_V2_CREATOR_ACCESS_SQL.text})
          SELECT w.id AS workspace_id,w.repository,w.number,w.name,c.sync_wanted,c.syncing,w.execution_mode
          FROM cloud_v2_connected_macs c JOIN local_command_devices d ON d.user_id=c.user_id AND d.device_id=c.device_id
          JOIN cloud_v2_workspaces w ON w.id=c.workspace_id JOIN live_organizations allowed ON allowed.org_id=w.org_id

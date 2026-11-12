@@ -93,3 +93,21 @@ describe("bounded private VM review storage", () => {
     expect(f.list().threads).toEqual([]);
   });
 });
+
+describe("activated workspaces: each review mutation is its requester's", () => {
+  it("opens without a workspace-wide reviewer, refuses a mutation with no requester, and authors each one as its requester", async () => {
+    const { operationEnvironment } = await import("../../sharing/operation-environment");
+    const f = await fixture(CLOUD_REVIEW_LIMITS, false);
+    await f.store.configurePerRequester();
+    expect(f.store.enabled).toBe(true);
+    expect(() => f.create("no requester")).toThrow();
+    const alex = "44444444-4444-4444-8444-444444444444", sam = "55555555-5555-4555-8555-555555555555";
+    const as = <T>(userId: string, userName: string, work: () => T) => operationEnvironment.run({ git: {}, zeros: {}, requester: { userId, userName } }, work);
+    const thread = as(alex, "Alex Rivera", () => f.create("from alex"));
+    expect(JSON.stringify(thread)).toContain(`human:${alex}`);
+    const reply = as(sam, "Sam Lee", () => f.store.handle("codeReview.reply", { workspaceId: f.scope.key, threadId: thread.id, body: "from sam" }));
+    expect(JSON.stringify(reply)).toContain(`human:${sam}`);
+    expect(JSON.stringify(reply)).not.toContain(`"name":"Fixture reviewer"`);
+    expect(f.list().threads).toHaveLength(1);
+  });
+});

@@ -79,3 +79,18 @@ describe("the direct sync socket", () => {
     connection.close();
   });
 });
+
+describe("sync grant refusals", () => {
+  it("names a person's lost access apart from a Mac that is not connected", async () => {
+    const { syncGrantRefusal } = await import("../workspace-sync/connection");
+    const { DeviceControlError } = await import("../local-commands/control");
+    const refused = (status: number, code: string) => syncGrantRefusal(new DeviceControlError(status, code)).kind;
+    expect(refused(403, "member_access_revoked")).toBe("access_revoked");
+    expect(refused(404, "not_found")).toBe("access_revoked");
+    expect(refused(403, "mac_not_connected")).toBe("not_connected");
+    expect(refused(401, "signed_out")).toBe("signed_out");
+    expect(refused(409, "worker_update_required")).toBe("update_required");
+    expect(refused(409, "cloud_workspace_not_running")).toBe("paused");
+    expect(syncGrantRefusal(new Error("network")).kind).toBe("unavailable");
+  });
+});

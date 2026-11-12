@@ -15,7 +15,7 @@ import { securityStreamAuthority } from "../security-events.js";
 import { HttpError } from "../authz.js";
 import type { CloudV2HistoryState, CloudV2MessageRow } from "./contract.js";
 import { hashCloudV2Token, newCloudV2Token } from "./tokens.js";
-import { CLOUD_V2_CREATOR_ON_HOLD, CLOUD_V2_LIVE_ACCESS as LIVE_ACCESS, CLOUD_V2_LIVE_ACCESS_SQL } from "./workspace-access.js";
+import { CLOUD_V2_CREATOR_ON_HOLD, CLOUD_V2_CREATOR_ACCESS_SQL, CLOUD_V2_LIVE_ACCESS as LIVE_ACCESS, CLOUD_V2_LIVE_ACCESS_SQL } from "./workspace-access.js";
 import { memberOnHoldSql, organizationMemberOnHold } from "../organization-seats.js";
 import { CloudV2PromptOutbox, type CloudApiPrompt } from "./prompt-outbox.js";
 import { computerSourceReviewRequired, readComputerSourceTargets } from "./computer-provenance.js";
@@ -292,7 +292,7 @@ async function ownedRow(tx: Tx, id: string, userId: string, lock = false): Promi
   const { rows } = await tx.query<Row & { access_epoch: string; login_revision: string }>(
     `SELECT ${COLUMNS}, access_epoch::text, login_revision::text FROM cloud_v2_workspaces w
      WHERE w.id = $1 AND w.creator_user_id = $2 AND w.state <> 'deleted'
-       AND ${LIVE_ACCESS}
+       AND ${CLOUD_V2_CREATOR_ACCESS_SQL.text}
      ${lock ? "FOR UPDATE OF w" : ""}`,
     [id, userId],
   );
@@ -497,7 +497,7 @@ export class CloudV2Store {
     const { rows } = await withSystemStatement<Row & { access_epoch: string; login_revision: string }>(this.pool,
       sql`SELECT ${WORKSPACE_COLUMNS_SQL}, access_epoch::text, login_revision::text FROM cloud_v2_workspaces w
         WHERE w.id=${SqlFragment.uuid(id.toLowerCase())} AND w.creator_user_id=${SqlFragment.uuid(userId.toLowerCase())}
-          AND w.state<>'deleted' AND ${CLOUD_V2_LIVE_ACCESS_SQL}`);
+          AND w.state<>'deleted' AND ${CLOUD_V2_CREATOR_ACCESS_SQL}`);
     const row = rows[0] ?? await withSystemTx(this.pool, tx => ownedRow(tx, id, userId));
     return { workspace: workspace(row), proof: { accessEpoch: row.access_epoch, loginRevision: row.login_revision } };
   }
@@ -516,7 +516,7 @@ export class CloudV2Store {
   async listApiWorkspaces(organizationId: string, userId: string, page: ApiWorkspaceList): Promise<CloudV2Workspace[]> {
     const { rows } = await withSystemTx(this.pool, tx => tx.query<Row>(
       `SELECT ${COLUMNS} FROM cloud_v2_workspaces w WHERE w.org_id=$1 AND w.creator_user_id=$2
-        AND w.state<>'deleted' AND ${LIVE_ACCESS} AND ($3::boolean OR w.archived_at IS NULL)
+        AND w.state<>'deleted' AND ${CLOUD_V2_CREATOR_ACCESS_SQL.text} AND ($3::boolean OR w.archived_at IS NULL)
         AND ($4::text IS NULL OR w.state=$4) AND ($5::text IS NULL OR lower(w.repository)=lower($5))
         AND ($6::text IS NULL OR strpos(lower(w.name || ' ' || coalesce(w.title,'')),lower($6))>0)
         ORDER BY w.created_at DESC,w.id LIMIT $7 OFFSET $8`,
@@ -528,7 +528,7 @@ export class CloudV2Store {
     return withSystemTx(this.pool, async tx => {
       await ownedRow(tx, id, userId, true);
       const { rows } = await tx.query<Row>(`UPDATE cloud_v2_workspaces w SET title=$3,updated_at=clock_timestamp()
-        WHERE w.id=$1 AND w.creator_user_id=$2 AND ${LIVE_ACCESS} RETURNING ${COLUMNS}`, [id, userId, title]);
+        WHERE w.id=$1 AND w.creator_user_id=$2 AND ${CLOUD_V2_CREATOR_ACCESS_SQL.text} RETURNING ${COLUMNS}`, [id, userId, title]);
       if (!rows[0]) throw notFound();
       return workspace(rows[0]);
     });
@@ -976,7 +976,7 @@ export class CloudV2Store {
       // Serialize issuance with workspace revocation and recheck the HTTP
       // authority. A concurrent session sign-out is also checked at consumption.
       const allowed = await tx.query(`SELECT id FROM cloud_v2_workspaces w
-        WHERE id = $1 AND state NOT IN ('deleting','deleted') AND ${LIVE_ACCESS}
+        WHERE id = $1 AND execution_mode<>'active' AND state NOT IN ('deleting','deleted') AND ${LIVE_ACCESS}
           AND ($2::text = 'proxy' OR creator_user_id = $3) FOR UPDATE`,
         [input.workspaceId, input.kind, input.userId]);
       if (!allowed.rowCount) throw notFound();

@@ -745,11 +745,11 @@ export class SessionStore {
     });
   }
 
-  async finishOutboxSteer(chatId: string, requestId: string, outcome: SteerOutcome, turnId: string): Promise<void> {
+  async finishOutboxSteer(chatId: string, requestId: string, outcome: SteerOutcome, turnId: string, cancelled = false): Promise<void> {
     await this.update(chatId, draft => {
       const entry = draft.inbox.find(value => value.requestId === requestId);
       if (!entry?.outbox || entry.state !== "running") return;
-      if (entry.cancelRequested) entry.state = "cancelled";
+      if (entry.cancelRequested || cancelled) entry.state = "cancelled";
       else if (outcome === "queued") { entry.state = "queued"; entry.outbox.steerDeclined = true; }
       else if (outcome === "delivered") { entry.state = "completed"; entry.outbox.accepted = true; recordUser(draft, entry, turnId); }
       else entry.state = "interrupted";

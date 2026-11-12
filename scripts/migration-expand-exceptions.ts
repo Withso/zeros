@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 // Each reviewed migration lists its exact exempted statements by rule.
 const reviewed: Readonly<Record<string, Readonly<Record<string, readonly string[]>>>> = {
+  "0243_cloud_execution_person_authority.sql": {},
   "0242_cloud_bootstrap_material.sql": {
     "privilege-tightening": ["REVOKE ALL ON FUNCTION capture_cloud_bootstrap_material() FROM PUBLIC;"],
   },
@@ -531,6 +532,18 @@ function statements(sql: string): { text: string; header: string }[] {
   return result;
 }
 
+const cloudExecutionPersonDigests: Readonly<Record<string, readonly string[]>> = {
+  "privilege-tightening": [
+    "2e79182cec4eb56f03c59604bf44749a27d27d899d9fb0b23dc5cc3186f4ffa1",
+    "e8042a3f7ee1046f7de7aca049ccb40a4f84b1898829166b2b102855eca9f559",
+    "111911b33f4c4f4d72416591fb269ebef7e8dc47185083d5da773b029c99b78d",
+  ],
+  "execution-person-cutoff": ["2cc0f48d9ebbe382a5dd40a164434a8f18d74836cdc95e79888ad821e4df566d"],
+  "execution-person-revocation": [
+    "f104c1753a222ef8e0943a0f4dfd92b62e764a66710dfd6bf7f36dd21eaae538",
+    "a57acfbda9d73d3049d60bc05741bcea9d45e5626990612d4bfe151a62e1f91e",
+  ],
+};
 const cloudExecutionActivationDigests: Readonly<Record<string, readonly string[]>> = {
   "execution-protocol-fence": ["f517b301b8cdf2d2fb9d4f43fa8ef5ddb5a741e6fd32c3e08545ec63d6d9cacd"],
   "execution-operator-authority": [
@@ -560,6 +573,7 @@ export function applyReviewedExpandExceptions(file: string, sql: string): string
     const rule = annotations[0]![1]!;
     const statement = text.replace(/\r\n/g, "\n").trim();
     const allowed = exact[rule]?.includes(statement) ||
+      (file === "0243_cloud_execution_person_authority.sql" && cloudExecutionPersonDigests[rule]?.includes(createHash("sha256").update(statement).digest("hex"))) ||
       (file === "0240_cloud_execution_activation.sql" && cloudExecutionActivationDigests[rule]?.includes(createHash("sha256").update(statement).digest("hex"))) ||
       (file === "0239_cloud_execution_contexts.sql" && cloudExecutionDigests[rule]?.includes(createHash("sha256").update(statement).digest("hex"))) ||
       (rule === "allocation-authority" && file === "0136_cloud_runtime_transfers.sql" &&

@@ -1,0 +1,9 @@
+{
+  "id": "cloud-execution-fixture-listen-readiness",
+  "kind": "replay",
+  "area": "control-plane",
+  "fixedBy": "pr:1046",
+  "symptom": "An execution integration test could admit a source proof before the initial login listener was ready; its onReady invalidation then made the same admission fail transiently with executionUnavailable.",
+  "rule": "zstack-review and principles 4 and 14 require fixtures to await their real startup boundary. Hold the LISTEN reply to prove admission cannot race its initial invalidation, without adding retries or timing sleeps.",
+  "check": "pnpm --dir apps/control-plane exec vitest run src/cloud/execution/person-compatibility.integration.test.ts -t 'initial source-invalidation listener'"
+}

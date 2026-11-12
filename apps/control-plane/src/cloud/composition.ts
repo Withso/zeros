@@ -170,8 +170,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
       await check(); return result;
     } } satisfies Pick<import("./execution/store.js").ExecutionDeps, "mcpAuthorization"> : {}),
     material: async (context, check) => {
-      const workspace = await store.get(context.workspace_id, (await withSystemTx(pool, tx => tx.query<{ creator_user_id: string }>(
-        "SELECT creator_user_id FROM cloud_v2_workspaces WHERE id=$1", [context.workspace_id]))).rows[0]!.creator_user_id);
+      const { workspace } = await execution.workspace(context.workspace_id, context.user_id!);
       await check();
       const credential = await withSystemTx(pool, tx => github.connections.store.currentCredential(tx, { organizationId: context.org_id, userId: context.user_id! }));
       await check();

@@ -15,10 +15,10 @@ import { teamNotFound, teamUnavailable } from "./contract.js";
 
 export type TeamView = {
   workspace: CloudV2Workspace; createdByUserId: string | null; role: "creator" | "admin" | "member";
-  epoch: string; signature: string; targets: readonly CloudSourceTarget[]; ongoing: boolean;
+  epoch: string; signature: string; signatureVersion?: 2; targets: readonly CloudSourceTarget[]; ongoing: boolean;
   verifications: VerificationRow[]; databaseNow: number;
 };
-type VerificationRow = { repositoryId: string; verifiedAt: number | null; failureCode: string | null; failureStatus: HttpError["status"] | null };
+type VerificationRow = { repositoryId: string; fingerprint: string; verifiedAt: number | null; failureCode: string | null; failureStatus: HttpError["status"] | null };
 export type TeamAdmission = { user: AuthedUser; view: TeamView; source: CloudViewerSourceProof | null };
 export const TEAM_MEMBER = `m.org_id=w.org_id AND m.user_id=$2 AND NOT ${memberOnHoldSql("m.org_id","m.user_id")}`;
 export const teamConnectionRevisionSql = (organization: string, person: string) => `jsonb_build_array(
@@ -39,11 +39,12 @@ export class CloudTeamAuthority {
   }
 
   async snapshots(tx: Tx, ids: readonly string[], user: AuthedUser, proofs: readonly TeamAdmission[] = []): Promise<Map<string,TeamView>> {
-    type Row = CloudV2WorkspaceRow & { created_by_user_id: string | null; role: string; access_epoch: string; login_revision: string;
-      member_revision: string; org_revision: string; source_repositories: string[] | null; sources: unknown; ongoing: boolean; connection_revision: unknown;
+    type Row = CloudV2WorkspaceRow & { execution_mode: string; created_by_user_id: string | null; role: string; access_epoch: string; login_revision: string;
+      member_revision: string; member_created_at: string; org_revision: string; organization_policy: unknown; source_repositories: string[] | null; sources: unknown; ongoing: boolean; connection_revision: unknown;
       verifications: VerificationRow[]; database_now: string };
     const rows = (await tx.query<Row>(`SELECT ${CLOUD_V2_WORKSPACE_COLUMNS.map(name => `w.${name}`).join(",")},
-      w.created_by_user_id,w.access_epoch::text,w.login_revision::text,m.role,m.authorization_revision::text AS member_revision,w.source_repositories,
+      w.execution_mode,w.created_by_user_id,w.access_epoch::text,w.login_revision::text,m.role,m.authorization_revision::text AS member_revision,m.created_at::text AS member_created_at,w.source_repositories,
+      (SELECT jsonb_build_array(is_personal,cloud_workspaces_allowed,deleted_at IS NULL) FROM organizations WHERE id=w.org_id) AS organization_policy,
       (SELECT authorization_revision::text FROM organizations WHERE id=w.org_id) AS org_revision,
       coalesce((SELECT jsonb_agg(jsonb_build_object('repository',s.source_repository,'repositoryId',s.repository_id::text) ORDER BY s.source_repository)
         FROM cloud_v2_github_sources s WHERE s.workspace_id=w.id),'[]'::jsonb) AS sources,
@@ -51,11 +52,11 @@ export class CloudTeamAuthority {
         AND p.provider_session_id=$5 AND p.access_epoch=w.access_epoch AND p.expires_at>clock_timestamp()) AS ongoing,
       ${teamConnectionRevisionSql("w.org_id","$1")} AS connection_revision,
       extract(epoch FROM clock_timestamp())*1000 AS database_now,
-      coalesce((SELECT jsonb_agg(jsonb_build_object('repositoryId',v.repository_id::text,'verifiedAt',extract(epoch FROM v.verified_at)*1000,
+      coalesce((SELECT jsonb_agg(jsonb_build_object('repositoryId',v.repository_id::text,'fingerprint',v.fingerprint,'verifiedAt',extract(epoch FROM v.verified_at)*1000,
         'failureCode',v.failure_code,'failureStatus',v.failure_status)) FROM cloud_github_source_verifications v
         WHERE v.org_id=w.org_id AND v.owner_user_id=$1
           AND v.repository_id IN (SELECT repository_id FROM cloud_v2_github_sources WHERE workspace_id=w.id)
-          AND v.fingerprint=(SELECT fingerprint FROM jsonb_to_recordset($8::jsonb) p(id uuid,fingerprint text) WHERE p.id=w.id)), '[]'::jsonb) AS verifications
+          AND (w.execution_mode='active' OR v.fingerprint=(SELECT fingerprint FROM jsonb_to_recordset($8::jsonb) p(id uuid,fingerprint text) WHERE p.id=w.id))), '[]'::jsonb) AS verifications
       FROM cloud_v2_workspaces w JOIN organization_members m ON ${TEAM_MEMBER.replace("$2","$1")}
       WHERE w.id=ANY($7::uuid[]) AND w.state<>'deleted' AND ${CLOUD_V2_LIVE_ACCESS} AND ${SECURITY_STREAM_AUTHORITY}
         AND (NOT w.source_pending OR w.creator_user_id=$1)`, [...securityStreamParameters(user),ids,
@@ -70,8 +71,12 @@ export class CloudTeamAuthority {
         role: row.creator_user_id === user.id ? "creator" : ["owner","admin"].includes(row.role) ? "admin" : "member",
         epoch: row.access_epoch,targets: targets.success ? targets.data : [],ongoing: row.ongoing,
         verifications: row.verifications,databaseNow: Number(row.database_now),
-        signature: JSON.stringify([row.id,row.org_id,row.creator_user_id,row.access_epoch,row.login_revision,row.role,row.member_revision,row.org_revision,
-          row.source_pending,row.repository,names,row.sources,row.connection_revision]) }];
+        ...(row.execution_mode === "active" ? { signatureVersion: 2 as const } : {}),
+        signature: row.execution_mode === "active"
+          ? JSON.stringify([2,row.id,row.org_id,user.id,row.access_epoch,row.role,row.member_revision,row.member_created_at,row.organization_policy,
+            row.source_pending,row.repository,names,row.sources,row.connection_revision])
+          : JSON.stringify([row.id,row.org_id,row.creator_user_id,row.access_epoch,row.login_revision,row.role,row.member_revision,row.org_revision,
+            row.source_pending,row.repository,names,row.sources,row.connection_revision]) }];
     }));
   }
 
@@ -131,11 +136,12 @@ export class CloudTeamAuthority {
         const id = proof.view.workspace.id, view = current.get(id);
         if (!view || view.signature !== proof.view.signature) { deny(id); continue; }
         if (!proof.source) continue;
-        if (fingerprints.get(view.workspace.organizationId) !== proof.source.fingerprint) { deny(id); continue; }
+        const fingerprint = fingerprints.get(view.workspace.organizationId);
+        if (view.signatureVersion !== 2 && fingerprint !== proof.source.fingerprint) { deny(id); continue; }
         const byRepository = new Map(view.verifications.map(row => [row.repositoryId,row]));
         for (const target of view.targets) {
           const row = byRepository.get(target.repositoryId);
-          if (!row) throw teamUnavailable();
+          if (!row || view.signatureVersion === 2 && row.fingerprint !== fingerprint && row.fingerprint !== proof.source.fingerprint) throw teamUnavailable();
           const error = row.failureCode && row.failureStatus ? new HttpError(row.failureStatus,row.failureCode,"Repository access changed") : null;
           if (error && isGithubAccessRevoked(error)) { deny(id); break; }
           if (error && (!proof.source.continuation || !isGithubTemporary(error))) throw teamUnavailable();

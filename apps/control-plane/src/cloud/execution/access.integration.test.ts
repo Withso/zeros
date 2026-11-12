@@ -61,7 +61,8 @@ database("shared execution uses each member's source and devices", () => {
     const macs = `/v1/cloud-v2/workspaces/${f.workspace.id}/macs`;
     expect((await f.call(`${macs}/${deviceId}/connect`, "POST", undefined, f.viewer, headers)).status).toBe(200);
     expect((await (await f.call(macs, "GET", undefined, f.viewer, headers)).json()).macs).toMatchObject([{ deviceId, connected: true }]);
-    await pool.query("UPDATE cloud_v2_workspaces SET sync_boot_ids=ARRAY[$2::uuid],worker_route_url='https://fixture.example.test',worker_port_token=$3 WHERE id=$1",
+    expect((await f.hello(`${f.features},sync-v1,sync-context-v1`)).status).toBe(200);
+    await pool.query("UPDATE cloud_v2_workspaces SET worker_route_url='https://fixture.example.test',worker_port_token=$3 WHERE id=$1 AND worker_boot_id=$2",
       [f.workspace.id, f.boot, sealPortToken("synthetic-port-value", f.workspace.id, f.keys)]);
     const grant = await f.call(`/v1/cloud-v2/workspaces/${f.workspace.id}/sync/grant`, "POST", undefined, f.viewer, headers);
     expect(grant.status).toBe(200);
@@ -78,28 +79,26 @@ database("shared execution uses each member's source and devices", () => {
     expect((await f.call(`/v1/cloud-v2/workspaces/${f.workspace.id}/sync/grant`, "POST", undefined, f.viewer, headers)).status).toBe(403);
   });
 
-  it("refuses a sync grant after the member leaves and rejoins during the final route read", async () => {
+  it("refuses a sync grant after the member leaves and rejoins during source admission", async () => {
     const deviceId = randomUUID();
     const registration = await f.call(`/v1/cloud-v2/devices/${deviceId}`, "PUT", { requestId: randomUUID(), name: "Member Mac", capabilities: ["local-commands-v1"] }, f.viewer);
     const { device } = await registration.json();
     const headers = { "X-Zeros-Device-Id": deviceId, "X-Zeros-Device-Registration": device.registrationId, "X-Zeros-Device-Instance": device.instanceId,
       "X-Zeros-Sync": "1", "X-Zeros-Team-Sharing": "1" };
     expect((await f.call(`/v1/cloud-v2/workspaces/${f.workspace.id}/macs/${deviceId}/connect`, "POST", undefined, f.viewer, headers)).status).toBe(200);
-    await pool.query("UPDATE cloud_v2_workspaces SET sync_boot_ids=ARRAY[$2::uuid],worker_route_url='https://fixture.example.test',worker_port_token=$3 WHERE id=$1",
+    expect((await f.hello(`${f.features},sync-v1,sync-context-v1`)).status).toBe(200);
+    await pool.query("UPDATE cloud_v2_workspaces SET worker_route_url='https://fixture.example.test',worker_port_token=$3 WHERE id=$1 AND worker_boot_id=$2",
       [f.workspace.id, f.boot, sealPortToken("synthetic-port-value", f.workspace.id, f.keys)]);
     await f.cp.loginChanges.stop();
-    const authority = f.cp.execution.deps.authority, original = authority.assert.bind(authority);
-    let calls = 0;
-    vi.spyOn(authority, "assert").mockImplementation(async (...args) => {
+    const authority = f.cp.execution.deps.authority, original = authority.admit.bind(authority);
+    vi.spyOn(authority, "admit").mockImplementationOnce(async (...args) => {
       const proof = await original(...args);
-      if (++calls === 2) {
-        await pool.query("DELETE FROM organization_members WHERE org_id=$1 AND user_id=$2", [f.organizationId, f.viewer.id]);
-        await pool.query("INSERT INTO organization_members(org_id,user_id,role) VALUES($1,$2,'member')", [f.organizationId, f.viewer.id]);
-      }
+      await pool.query("DELETE FROM organization_members WHERE org_id=$1 AND user_id=$2", [f.organizationId, f.viewer.id]);
+      await pool.query("INSERT INTO organization_members(org_id,user_id,role) VALUES($1,$2,'member')", [f.organizationId, f.viewer.id]);
       return proof;
     });
     const result = await f.call(`/v1/cloud-v2/workspaces/${f.workspace.id}/sync/grant`, "POST", undefined, f.viewer, headers);
-    expect(result.status).toBe(409);
-    expect(await result.json()).not.toHaveProperty("grant");
+    expect(result.status).toBe(403);
+    expect(await result.json()).toMatchObject({ error: { code: "mac_not_connected" } });
   });
 });
