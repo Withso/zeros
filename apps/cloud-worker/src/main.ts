@@ -55,7 +55,7 @@ export function startWorker(options: BootOptions): { worker: CloudWorker; stop: 
     onReconfigure: changed => log(`reconfigure ${changed.join(",")}`),
     memoryWatchdog: { runtimeRoots: [...new Set([dirname(fileURLToPath(import.meta.url)), dirname(realpathSync(fileURLToPath(import.meta.url)))])] },
     onMemory: event => log(event),
-    bootClean: note => bootClean({ ...procDeps(() => new PersonalEnvironments(homedir()).eraseAll()), ...(note ? { note } : {}) }),
+    bootClean: (note, summary) => bootClean({ ...procDeps(() => new PersonalEnvironments(homedir()).eraseAll()), ...(note ? { note } : {}), ...(summary ? { summary } : {}) }),
     log: line => log(line),
   });
   const shutdown = () => { void stop(); };

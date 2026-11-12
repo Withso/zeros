@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { tagged } from "./closed-failure";
 import type { z } from "zod";
 import { type CloudV2BootCleanRefusal, CloudV2BootCleanReplySchema, CloudV2BootCleanRequestSchema, CloudV2BootstrapLeaseSchema, CloudV2ClientLeaseSchema, CloudV2RenewReplySchema, CloudV2RetiredReplySchema, CloudV2TerminalLeaseSchema,
   CloudV2TurnLeaseSchema, type CloudV2BootstrapLease, type CloudV2ClientLease, type CloudV2ContextReason, type CloudV2TerminalLease,
@@ -44,13 +45,13 @@ export class ExecutionContexts {
         try { CloudV2BootCleanReplySchema.parse(await this.deps.post("execution-leases/boot-clean", body)); break; }
         catch (error) {
           const status = (error as { status?: unknown }).status;
-          if (typeof status === "number" && status >= 400 && status < 500 && status !== 408) throw error;
-          if (attempt >= 4) throw error;
+          if (typeof status === "number" && status >= 400 && status < 500 && status !== 408) throw tagged(error, "boot_clean_refused");
+          if (attempt >= 4) throw tagged(error, "boot_clean_unavailable");
           await new Promise(resolve => setTimeout(resolve, 250 * 2 ** attempt));
         }
       }
       // What was attested decides, including a fallback for an inconsistent proof.
-      if (body.processes > 0 || body.legacyMaterial === "refused") throw new Error("This workspace could not prove a clean start.");
+      if (body.processes > 0 || body.legacyMaterial === "refused") throw tagged(new Error("This workspace could not prove a clean start."), "boot_clean_unproven");
     })();
     void this.gate.catch(() => {});
     return this.gate;

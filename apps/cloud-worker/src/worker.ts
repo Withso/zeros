@@ -37,6 +37,7 @@ import { Terminals, type TerminalPeople } from "./terminals/service";
 import { ClosedFailure, classOf, closedFailure, errorCode, failureLine, tagged } from "./sharing/closed-failure";
 import { gitIdentityEnvironment } from "./sharing/identity";
 import { PersonalEnvironments, unexportedLine } from "./sharing/personal-env";
+import type { SweepSummary } from "./sharing/boot-clean";
 import { operationEnvironment } from "./sharing/operation-environment";
 import { retireContext } from "./sharing/retire";
 import { removeLegacyMaterial } from "./sharing/legacy-material";
@@ -61,7 +62,7 @@ interface WorkerOptions {
   homeDirectory?: string;
   /** Team sharing §7a: this boot's pre-boot process sweep, returning what it could not end or prove. Only the
    * production entry supplies the real /proc sweep; without one an activated boot is unproven and acts for no one. */
-  bootClean?: (note?: (refusal: CloudV2BootCleanRefusal) => void) => Promise<number>;
+  bootClean?: (note?: (refusal: CloudV2BootCleanRefusal) => void, summary?: (summary: SweepSummary) => void) => Promise<number>;
   /** One worker journal line per notable step (boot-clean's outcome); closed words and counts only. */
   log?(line: string): void;
   /** Where a legacy restore leaves its token directory (tests); /dev/shm otherwise. */
@@ -368,7 +369,13 @@ export class CloudWorker {
     if (this.disposed) return;
     if (message.t === "config") {
       this.configuring = this.configuring.catch(() => {}).then(() => this.configure(message));
-      await this.configuring.catch(error => { this.options.onError?.("configuration"); throw error; });
+      await this.configuring.catch(error => {
+        this.options.onError?.("configuration");
+        // One closed line per failed start: which step refused, and its closed code (never an id, path or value).
+        this.options.log?.(failureLine("startup", classOf(error) ??
+          new ClosedFailure(error instanceof EnvironmentSeedError ? "environment_seed_failed" : "configuration_failed", errorCode(error))));
+        throw error;
+      });
       return;
     }
     // Checkout preparation can be waiting for this reply. Never queue control
@@ -522,7 +529,11 @@ export class CloudWorker {
         const refusals = new Set<CloudV2BootCleanRefusal>(), note = (refusal: CloudV2BootCleanRefusal) => { refusals.add(refusal); };
         // No real sweep (not a production boot): unproven, and it says so.
         if (!sweep) note("proc_unreadable");
-        const processes = sweep ? await sweep(note) : 1;
+        // One closed line about what the sweep met: counts by class, command names only from a fixed allowlist.
+        const summarize = (value: SweepSummary) => this.options.log?.(`boot-clean sweep targets=${value.targets} zombies=${value.zombies} zombie_leaders_with_threads=${value.zombieLeadersWithThreads} unreadable=${value.unreadable} ` +
+          Object.entries(value.survivors).map(([kind, count]) => `${kind}=${count}`).join(" ") +
+          ` comms=${Object.entries(value.comms).sort().map(([comm, count]) => `${comm}:${count}`).join(",") || "none"}`);
+        const processes = sweep ? await sweep(note, summarize) : 1;
         const legacyMaterial = sweep ? await removeLegacyMaterial({ root: workspaceRoot, state: this.options.directory, home: this.options.homeDirectory ?? homedir(),
           ...(this.options.sharedMemory ? { shm: this.options.sharedMemory } : {}) }, note) : "refused" as const;
         const classes = [...refusals].sort();
@@ -622,14 +633,14 @@ export class CloudWorker {
       if (this.disposed || this.stopping) return false;
       // Activated: checkout and setup run as the persisted starter, from the bootstrap lease; no Creator fallback.
       const bootstrap = this.acting && config.bootstrapContextId && this.contexts && !this.options.runtimeResume
-        ? await this.contexts.bootstrapLease(config.bootstrapContextId) : undefined;
+        ? await this.contexts.bootstrapLease(config.bootstrapContextId).catch(error => { throw tagged(error, "bootstrap_lease_refused"); }) : undefined;
       const bootstrapEnvironment = bootstrap && { git: gitIdentityEnvironment(bootstrap.gitIdentity), zeros: { ZEROS_EXECUTION_CONTEXT: bootstrap.contextId } };
       const asStarter = <T>(work: () => T): T => bootstrapEnvironment ? operationEnvironment.run(bootstrapEnvironment, work) : work();
       const checking = measureStartup("worker_checkout", () => this.options.runtimeResume ? Promise.resolve(undefined)
         : asStarter(() => (this.options.prepareCheckout ?? prepareCheckout)(config.workspace, this.gitEnvironment, timing)), timing)
         .catch(async error => {
           await this.options.transport.reportCheckoutFailure?.().catch(() => {});
-          throw error;
+          throw tagged(error, "checkout_failed");
         });
       // The session store and review database live in the worker's state
       // directory, not the checkout. Git switches branches in a child process,
