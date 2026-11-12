@@ -5,6 +5,7 @@ import type { CloudV2RouteDeps } from "./routes.js";
 import type { CloudV2InstalledRepository, CloudV2Workspace } from "./store.js";
 import { CloudSourceTargetSchema } from "./source-authority.js";
 import { refuseRuntimeCanary } from "./runtime-canary.js";
+import { executionWorkerRequired } from "./execution/errors.js";
 
 const uuid = z.string().uuid();
 const branchName = z.string().min(1).max(255).regex(/^(?!-)(?!.*\.\.)(?!.*\/\/)(?!.*\.lock$)[A-Za-z0-9._/-]+$/);
@@ -104,7 +105,7 @@ export function createCloudWorkspaceOperations(deps: CloudV2RouteDeps) {
     // needs GitHub to match it, so both stay on the synchronous path below.
     // N-1 source resolvers insert the default environment pin unconditionally;
     // finish source binding here before writing an explicit workspace pin.
-    const pendingEntry = runtimeCanary === undefined && !Object.keys(options.env ?? {}).length && deps.asyncCreate?.() ? computer.repositories.find(named) : undefined;
+    const pendingEntry = !deps.actingUserDefault && runtimeCanary === undefined && !Object.keys(options.env ?? {}).length && deps.asyncCreate?.() ? computer.repositories.find(named) : undefined;
     if (pendingEntry) {
       const baseBranch = input.baseBranch ?? pendingEntry.defaultBranch;
       if (!baseBranch) throw new HttpError(409, "repository_branch_required", "Select a branch or rebuild the Cloud Computer to record its default branch");
@@ -156,6 +157,8 @@ export function createCloudWorkspaceOperations(deps: CloudV2RouteDeps) {
       throw new HttpError(404, "repository_branch_not_found", `Branch ${baseBranch} does not exist in ${target.repository}.`);
     const id = randomUUID();
     const name = input.name ?? input.repository.split("/")[1]!;
+    const executionRuntime = deps.actingUserDefault ? await deps.activeCreateRuntime?.(runtimeCanary) : undefined;
+    if (deps.actingUserDefault && !executionRuntime) throw executionWorkerRequired();
     const create = {
       id, organizationId: input.organizationId, creatorUserId: userId, name,
       repository: repository.repository, branch: input.branch ?? `${prefix}${slug(name)}-${id.slice(0, 8)}`,
@@ -164,6 +167,7 @@ export function createCloudWorkspaceOperations(deps: CloudV2RouteDeps) {
       // Every build repository the creator can read: a v3 image needs them all.
       readableRepositoryIds: candidates.map(candidate => candidate.target.repositoryId),
       ...(runtimeCanary ? { runtimeCanary } : {}),
+      ...(executionRuntime ? { executionRuntime } : {}),
     };
     return record(create);
   };

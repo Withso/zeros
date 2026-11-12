@@ -143,7 +143,7 @@ function launcher({ startupFailure = false, cleanupFailure = false, cancelAtRead
     fs.mkdirSync(path.join(f.root, file), { recursive: true });
   }
   const emitter = new EventEmitter();
-  Object.assign(emitter, { execPath: process.execPath, pid: process.pid });
+  Object.assign(emitter, { execPath: process.execPath, pid: process.pid, env: {} });
   const server = Object.assign(new EventEmitter(), {
     listen: () => queueMicrotask(() => server.emit("listening")), address: () => ({ port: 4242 }),
     closeAllConnections: () => {}, close: (done: () => void) => done(),

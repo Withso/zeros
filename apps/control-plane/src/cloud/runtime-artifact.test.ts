@@ -9,7 +9,7 @@ import { inspectRuntimeArchive } from "./runtime-artifact.js";
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))); });
 
-async function artifact(overrides = {}, corrupt = false) {
+async function artifact(overrides = {}, corrupt = false, capabilities?: unknown, corruptCapabilities = false) {
   const root = await mkdtemp(join(tmpdir(), "cloud-runtime-artifact-")); roots.push(root);
   const dist = join(root, "dist"); await mkdir(dist);
   const files: Record<string, { sha256: string; bytes: number; mode: number }> = {};
@@ -20,6 +20,11 @@ async function artifact(overrides = {}, corrupt = false) {
     files[file] = { sha256: createHash("sha256").update(content).digest("hex"), bytes: content.length, mode: 0o755 };
   }
   const native = ["@openai/codex-linux-x64", "@anthropic-ai/claude-agent-sdk-linux-x64", "@cursor/sdk-linux-x64"];
+  if (capabilities !== undefined) {
+    const content = Buffer.from(JSON.stringify(capabilities));
+    files["worker-capabilities.json"] = { sha256: createHash("sha256").update(content).digest("hex"), bytes: content.length, mode: 0o644 };
+    await writeFile(join(dist, "worker-capabilities.json"), corruptCapabilities ? "{}" : content);
+  }
   await writeFile(join(dist, "runtime-manifest.json"), JSON.stringify({ version: 1, node: "24", platform: "linux", arch: "x64",
     packages: Object.fromEntries(native.map(name => [`node_modules/${name}`, { name, version: "1.0.0" }])), files, ...overrides }));
   await writeFile(join(dist, "BUILD.json"), JSON.stringify({ commit: "a".repeat(40), sourceSha256: "b".repeat(64) }));
@@ -32,6 +37,18 @@ async function artifact(overrides = {}, corrupt = false) {
 it("accepts a packaged Linux x64 Node 24 runtime without building or installing anything", async () => {
   const result = await inspectRuntimeArchive(await artifact());
   expect(result).toMatchObject({ sha256: expect.stringMatching(/^[a-f0-9]{64}$/), bytes: expect.any(Number), commit: "a".repeat(40), sourceSha256: "b".repeat(64) });
+});
+
+it("reads the worker's actual capabilities only from an inventoried manifest member", async () => {
+  const features = ["acting-user-v1", "sync-context-v1"];
+  expect(await inspectRuntimeArchive(await artifact({}, false, { version: 1, features }))).toMatchObject({ features });
+  expect(await inspectRuntimeArchive(await artifact())).not.toHaveProperty("features");
+});
+
+it("refuses changed or malformed capability bytes rather than claiming qualification", async () => {
+  await expect(inspectRuntimeArchive(await artifact({}, false, { version: 1, features: ["acting-user-v1"] }, true))).rejects.toThrow();
+  for (const features of [["sync-context-v1", "acting-user-v1"], ["acting-user-v1", "acting-user-v1"], []])
+    await expect(inspectRuntimeArchive(await artifact({}, false, { version: 1, features }))).rejects.toThrow();
 });
 
 it("accepts bundled subpackages whose manifest omits a package version", async () => {

@@ -130,6 +130,21 @@ export class CloudExecutionAuthority {
   }
 
   async cached(tx: Tx, workspaceId: string, userId: string) {
+    await this.cachedAuthority(tx, workspaceId, userId, false);
+  }
+
+  async creation(tx: Tx, workspaceId: string, userId: string): Promise<ExecutionAdmission> {
+    const { current, fingerprint } = await this.cachedAuthority(tx, workspaceId, userId, true);
+    if (current.state !== "creating" || current.bootId || current.workerTokenHash) throw actorChanged();
+    // The new row is private to this transaction. Reuse the verified source
+    // observation, including its original deadline, without provider I/O.
+    const until = Math.min(...current.verifications.map(row => row.verifiedAt! + CLOUD_SOURCE_ADMISSION_MS));
+    const proof = { person: current, source: { fingerprint, until, recheckAt: until, continuation: false }, until };
+    await this.assert(proof, tx);
+    return proof;
+  }
+
+  private async cachedAuthority(tx: Tx, workspaceId: string, userId: string, admission: boolean) {
     const initial = await this.snapshot(tx, workspaceId, userId);
     const fingerprint = (await this.connections.fingerprintsForPeople(tx, initial.organizationId, [userId])).get(userId);
     if (!fingerprint) throw executionUnavailable();
@@ -142,9 +157,10 @@ export class CloudExecutionAuthority {
       const error = row.failureCode && row.failureStatus ? new HttpError(row.failureStatus as HttpError["status"], row.failureCode, "Repository authority changed") : null;
       if (error && isGithubAccessRevoked(error)) throw memberAccessRevoked();
       const age = row.verifiedAt === null ? Infinity : current.databaseNow - row.verifiedAt;
-      if (age < 0 || age >= (error && isGithubTemporary(error) ? CLOUD_SOURCE_GRACE_MS : CLOUD_SOURCE_REFRESH_MS)) throw executionUnavailable();
-      if (error && !isGithubTemporary(error)) throw executionUnavailable();
+      if (age < 0 || age >= (admission ? CLOUD_SOURCE_ADMISSION_MS : error && isGithubTemporary(error) ? CLOUD_SOURCE_GRACE_MS : CLOUD_SOURCE_REFRESH_MS)) throw executionUnavailable();
+      if (error && (admission || !isGithubTemporary(error))) throw executionUnavailable();
     }
+    return { current, fingerprint };
   }
 
   async assert(proof: ExecutionAdmission, transaction?: Tx, afterIntent = false, contextId?: string): Promise<ExecutionPerson> {

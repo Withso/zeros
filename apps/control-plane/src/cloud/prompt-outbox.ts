@@ -112,7 +112,7 @@ export class CloudV2PromptOutbox {
       "SELECT epoch::text,next_sequence::text FROM cloud_v2_prompt_chats WHERE workspace_id=$1 AND chat_id=$2", [id, chatId])).rows[0]!;
   }
 
-  enqueueApi(id: string, userId: string, input: CloudApiPrompt, tx?: Tx, authorize?: (tx: Tx) => Promise<void>) {
+  enqueueApi(id: string, userId: string, input: CloudApiPrompt, tx?: Tx, authorize?: (tx: Tx) => Promise<void>, executionAdmission?: PromptExecutionAdmission) {
     const { chatId, userMessageId, agentId, model, effort, message } = input;
     const payload: CloudV2Prompt = { chatId, userMessageId, agentId, startedAt: input.startedAt ?? Date.now(),
       prompt: [{ type: "text", text: message }], ...(model === undefined ? {} : { model }), ...(effort === undefined ? {} : { effort }) };
@@ -120,7 +120,7 @@ export class CloudV2PromptOutbox {
     // This digest survives terminal payload compaction just like native receipts.
     const requestHash = createHash("sha256").update(JSON.stringify(["cloud-api-v0", chatId, message])).digest("hex");
     return this.enqueue(id, userId, payload, undefined, { tx, requestHash, apiSession: true, sessionName: input.sessionName,
-      createdBySessionId: input.createdBySessionId, senderCredential: input.senderCredential, authorize });
+      createdBySessionId: input.createdBySessionId, senderCredential: input.senderCredential, authorize, ...(executionAdmission ? { executionAdmission } : {}) });
   }
 
   async enqueue(id: string, userId: string, raw: CloudV2Prompt, authority?: AuthedUser,

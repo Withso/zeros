@@ -452,7 +452,9 @@ export class CloudV2Lifecycle {
         const warmup = image.checkout ? checkoutWarmupCommand(`${CLOUD_V2_HOME}/${workspace.repository}`) : null;
         if (warmup) void this.deps.compute.exec(sandboxId, warmup, 30).catch(() => undefined);
         if (image.prune.length || !image.from) await this.measure(workspace, "image_prepare", () => this.prepareImage(sandboxId, image));
-        if (this.deps.prepareRepository && !image.checkout) {
+        // An active create obtains the initiator's repository material through
+        // its bootstrap lease, after the worker has proved boot cleanup.
+        if (this.deps.prepareRepository && !image.checkout && !workspace.executionIntent) {
           await store.defer(workspace.id, "creating", 17 * 60_000);
           await this.measure(workspace, "repository_prepare", () => this.deps.prepareRepository!(workspace, sandboxId));
         }

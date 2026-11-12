@@ -25,6 +25,8 @@ import type { CloudGithubUnavailableReason } from "./github-connection-contract.
 import type { CloudEnvironments } from "./environment-store.js";
 import { createCloudEnvironmentRoutes } from "./environment-routes.js";
 import { RUNTIME_CANARY_HEADER, type RuntimeCanaryAuthority, type RuntimeCanaryStatus } from "./runtime-canary.js";
+import type { RuntimeCanaryAdmission } from "./runtime-canary.js";
+import type { RuntimeCapabilities } from "./runtime-capabilities.js";
 import { createCloudLocalDeviceRoutes, type CloudLocalDeviceRoutes } from "./local-commands/routes.js";
 import { createCloudTeamRoutes } from "./team-sharing/routes.js";
 import type { CloudTeamSharing } from "./team-sharing/store.js";
@@ -52,6 +54,8 @@ const ChatEditSchema = z.object({ title: CloudV2SessionNameSchema.transform(valu
   .strict().refine(value => value.title !== undefined || value.archived !== undefined);
 
 export type CloudV2RouteDeps = {
+  actingUserDefault?: boolean;
+  activeCreateRuntime?(canary?: RuntimeCanaryAdmission): Promise<RuntimeCapabilities>;
   teamSharing?: CloudTeamSharing;
   execution?: CloudExecutionContexts;
   workspaceSync?: CloudWorkspaceSync;

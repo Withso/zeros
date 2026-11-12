@@ -220,6 +220,14 @@ export class CloudExecutionContexts {
     return { ...proof, runBound: false, agent, selection };
   }
 
+  async creationPrompt(tx: Tx, proof: ExecutionAdmission, input: Pick<CloudV2Prompt, "chatId" | "agentId">): Promise<PromptExecutionAdmission> {
+    await this.deps.authority.assert(proof, tx);
+    const agent = await this.agent(tx, proof.person.workspaceId, input.chatId, input.agentId);
+    const { selection } = await this.deps.logins.select(proof.person.organizationId, proof.person.userId, agent, undefined, tx);
+    await this.deps.authority.assert(proof, tx);
+    return { ...proof, runBound: false, agent, selection };
+  }
+
   async assertPrompt(tx: Tx, proof: PromptExecutionAdmission, input: CloudV2Prompt) {
     await this.deps.authority.assert(proof, tx);
     await this.agent(tx, proof.person.workspaceId, input.chatId, input.agentId);
