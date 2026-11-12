@@ -581,6 +581,10 @@ async function main() {
   };
   const workspaces = workbenchHarness ? [workspace, ...["second", "third"].map((suffix) => ({ ...workspace, id: `${workspaceId}_${suffix}`, path: `${workspacePath}-${suffix}`, branch: `${workspace.branch}-${suffix}` }))] : [workspace];
   const workbenchOperations: string[] = [];
+  // Files the canvas asked Files to open, in order.
+  const openedFiles: string[] = [];
+  (window as Window & { __zerosHarnessOpenedFiles?: string[] }).__zerosHarnessOpenedFiles = openedFiles;
+  const recordOpenedFile = (path: string) => { openedFiles.push(path); };
   (window as Window & { __zerosHarnessWorkbenchOperations?: string[] }).__zerosHarnessWorkbenchOperations = workbenchOperations;
   localStorage.setItem(
     "zeros-projects-v1",
@@ -1351,6 +1355,7 @@ async function main() {
     on: () => () => {},
     onStatusChange: () => () => {},
     supportsEngineCapability: (capability: string) => capability === "design.copy-placement.v1" ||
+      pagesHarness && capability === "design.canvas-items.v1" ||
       scopedMutationsHarness && capability === "design.mutation-snapshots.v1" ||
       lazyPreparationHarness && ["design.preparation.v1", "design.catalog.read.v1"].includes(capability),
     requestConnected: async (message: { op: string; params: { workspaceId: string; intent: number } }) => {
@@ -2979,7 +2984,8 @@ async function main() {
       { ...workspace, id: ownerId, path: ownerId === workspaceId ? rootPath : `${rootPath}-${ownerId}` };
     const designColumn = RetainedDesignDeck
       ? <RetainedDesignDeck workspace={visibleWorkspace} folder={visibleWorkspace.path} active={surfaceActive} />
-      : <DesignWorkspaceColumn workspace={visibleWorkspace} folder={visibleWorkspace.path} surfaceActive={surfaceActive} />;
+      : <DesignWorkspaceColumn workspace={visibleWorkspace} folder={visibleWorkspace.path} surfaceActive={surfaceActive}
+        onOpenFile={recordOpenedFile} />;
     return (
       <BridgeContext.Provider value={styleOriginsHarness ? getActiveBridge() : null}>
       <ActionsCtx.Provider value={new Proxy({

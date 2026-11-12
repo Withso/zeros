@@ -640,6 +640,8 @@ const LIFECYCLE_GATED_WORKSPACE_OPS = new Set<string>([
   "design.page.create",
   "design.page.rename",
   "design.page.delete",
+  "design.canvas.item.put",
+  "design.canvas.item.delete",
   "design.themes.update",
   "design.capture",
   // Starts a capture render like design.capture; archive drains it first.
@@ -788,6 +790,8 @@ const DESIGN_DOCUMENT_MUTATIONS = new Set<string>([
   "design.page.create",
   "design.page.rename",
   "design.page.delete",
+  "design.canvas.item.put",
+  "design.canvas.item.delete",
   "design.themes.update",
   "design.transaction.apply",
   "design.review.resolve",

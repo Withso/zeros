@@ -144,6 +144,33 @@ export async function runDesignComponentInstancesSmoke({ page, check }) {
   check("an instance's header names its component with Edit main, and its line says Instance of",
     instanceHeader.includes("Chat composer") && instanceHeader.includes("Edit main") && (await line.innerText()).includes("Instance of Chat composer"),
     instanceHeader);
+  // ── The component mark ──
+  const frameLabel = (file) => page.locator(`[data-design-frame="${file}"] [data-design-frame-label]`);
+  const sizeChip = page.locator("[data-design-selection-size]");
+  const opsBeforeMarks = await page.evaluate(() => (window.__zerosHarnessWorkbenchOperations ?? []).slice());
+  await expect(sizeChip.locator("[data-design-component-mark]")).toHaveCount(1);
+  check("a selected instance's chip shows the mark and its component's name, not its size",
+    (await sizeChip.innerText()).trim() === "Chat composer" && (await sizeChip.getAttribute("data-design-selection-component")) === "",
+    await sizeChip.innerText());
+  check("a component frame shows the mark beside its name",
+    (await frameLabel("pricing.html").locator("[data-design-component-mark]").count()) === 1 &&
+      (await frameLabel("pricing.html").getAttribute("title")) === "Chat composer, component");
+  check("a plain frame never shows the mark",
+    (await frameLabel("home.html").locator("[data-design-component-mark]").count()) === 0 &&
+      (await frameLabel("home.html").getAttribute("title")) !== null &&
+      !(await frameLabel("home.html").getAttribute("title")).includes("component"));
+  await expect(async () => {
+    await layer("home-send").click({ timeout: 2_000 });
+    await expect(layer("home-send")).toHaveAttribute("aria-selected", "true", { timeout: 2_000 });
+  }).toPass({ timeout: 15_000 });
+  await expect(sizeChip).toHaveCount(1);
+  await expect(sizeChip.locator("[data-design-component-mark]")).toHaveCount(0);
+  check("a selected ordinary layer's chip shows its size and no mark",
+    /^\d+(?: Hug| Fill)? × \d+/.test((await sizeChip.innerText()).trim()) && (await sizeChip.getAttribute("data-design-selection-component")) === null,
+    await sizeChip.innerText());
+  const markOps = await page.evaluate((before) => (window.__zerosHarnessWorkbenchOperations ?? []).slice(before.length), opsBeforeMarks);
+  check("showing or leaving the mark makes no engine request", markOps.every((op) => !/component|instance/i.test(op)), JSON.stringify(markOps));
+  await selectInstance();
   const dot = (label) => section.locator("[data-option-row]").filter({ hasText: label }).first().locator("[data-option-changed]");
   check("a dot marks each value the instance sets apart from what it inherits",
     (await dot("Width").count()) === 1 && (await dot("Mode").count()) === 1 && (await dot("Gap").count()) === 0);

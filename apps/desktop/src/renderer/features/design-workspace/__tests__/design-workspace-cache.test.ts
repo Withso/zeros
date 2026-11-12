@@ -290,6 +290,24 @@ describe("design workspace cache", () => {
     expect(stabilizeDesignWorkspaceSnapshot(previous, legacy).styleSources).toEqual([]);
   });
 
+  it("publishes a page whose canvas items changed and keeps unchanged items by reference", () => {
+    const section = { id: "s1", kind: "section" as const, x: 0, y: 0, width: 200, text: "Flow" };
+    const note = { id: "n1", kind: "note" as const, x: 0, y: 40, width: 200, height: 80, text: "Hi" };
+    const page = { id: "main", title: "Design", folder: "", frameFiles: ["home.html"] };
+    const previous = { ...snapshot(), pages: [{ ...page, items: [section, note] }] };
+    expect(stabilizeDesignWorkspaceSnapshot(previous, structuredClone(previous))).toBe(previous);
+    const moved = stabilizeDesignWorkspaceSnapshot(previous, { ...structuredClone(previous),
+      pages: [{ ...page, items: [section, { ...note, x: 10 }] }] });
+    expect(moved).not.toBe(previous);
+    expect(moved.pages![0]!.items![0]).toBe(previous.pages[0]!.items[0]);
+    expect(moved.pages![0]!.items![1]).toEqual({ ...note, x: 10 });
+    const linked = { id: "l1", kind: "link" as const, x: 0, y: 0, width: 240, target: "README.md" };
+    const withLink = { ...snapshot(), pages: [{ ...page, items: [linked] }] };
+    expect(stabilizeDesignWorkspaceSnapshot(withLink, { ...structuredClone(withLink), pages: [{ ...page, items: [{ ...linked, missing: true as const }] }] }).pages![0]!.items)
+      .toEqual([{ ...linked, missing: true }]);
+    expect(stabilizeDesignWorkspaceSnapshot(previous, { ...structuredClone(previous), pages: [page] }).pages![0]).not.toHaveProperty("items");
+  });
+
   it("publishes a frame whose instances changed under the same generation", () => {
     const instances = { key: "0".repeat(16), components: {}, hosts: { inst: { component: "chat", attributes: {} } } };
     const base = snapshot();

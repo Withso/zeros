@@ -73,6 +73,25 @@ To create a frame:
 - Renaming a page changes its title only; the folder never moves. Each frame belongs to exactly one page and its source stays in that page's folder.
 - 1–64 pages and at most 1,000 frames per page. A directory has no separate frame limit; a page over 1,000 does not open until frames move to another page.
 
+## Sections, notes and link cards
+
+A page's optional `items` list holds canvas annotations people place with the Section, Note and Link card tools. They are canvas chrome, not design: they never appear inside a frame, in Layers, or in any capture, preview or export.
+
+```json
+"items": [
+  { "id": "sec_onboarding", "kind": "section", "x": 0, "y": -60, "width": 480, "text": "Onboarding" },
+  { "id": "note_copy", "kind": "note", "x": 1500, "y": 0, "width": 240, "height": 160, "text": "Check the empty state\nand the error copy" },
+  { "id": "link_brief", "kind": "link", "x": 1500, "y": 200, "width": 280, "target": "docs/brief.md", "title": "Brief" }
+]
+```
+
+- **IDs** follow the frame ID rules and are unique across every frame and item in the directory.
+- **Geometry.** `x`/`y` within ±1,000,000; `width` 1–16,384. A note also needs `height` (1–16,384); a section's and a link card's heights come from their text.
+- **Text.** A section title is one line of 1–120 characters. A note holds up to 2,000 characters and keeps its line breaks. A link card's optional `title` is one line of up to 120 characters and defaults to the file name.
+- **Link targets** are workspace-relative file paths of up to 512 characters: no leading `/`, `\`, `~`, URL or scheme, no empty, `.` or `..` segment, no control characters, and no private files (`.git`, `.zeros`, `.env*`, keys, databases and the like). A card opens its file in Files; a missing file shows as "File not found". Nothing is ever fetched.
+- At most 256 items and 256 KiB of item text per page. An invalid item is skipped and reported by `design validate` (`canvas-item-invalid`, `canvas-item-link-unsafe`, and `canvas-item-link-missing` for a file that is gone), all as warnings; the canvas stays readable. An unknown `kind` is kept as written and not drawn.
+- Keep items people placed; add or edit them only when asked.
+
 ## Components
 
 - Markup used three or more times in a frame is a component. Define it as `components/<name>.html` and use it as `<zd-<name> data-oid="…">`.

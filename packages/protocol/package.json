@@ -32,6 +32,7 @@
     "./design-context": "./src/design-context.ts",
     "./design-path": "./src/design-path.ts",
     "./design-pages": "./src/design-pages.ts",
+    "./design-canvas-items": "./src/design-canvas-items.ts",
     "./design-catalog": "./src/design-catalog.ts",
     "./design-agent-drafts": "./src/design-agent-drafts.ts",
     "./design-review": "./src/design-review.ts",

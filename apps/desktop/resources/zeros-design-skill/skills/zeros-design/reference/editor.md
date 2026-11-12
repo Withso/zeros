@@ -55,6 +55,11 @@ People edit frames in the Design tab while agents work on the same files. This p
 - Content inside open declarative shadow roots (`<template shadowrootmode="open">`) and assigned slots appears in Layers and can be selected. As in the browser, only the first such template on a valid host attaches, closed roots stay opaque, and a slot shows its fallback only while nothing is assigned to it. Shadow layers accept style, text and attribute edits; delete, duplicate and move refuse them with a reason, so change their structure by editing the HTML.
 - Selection identities come from `data-oid`, which the canvas derives for ordinary HTML and saves when an edit needs one.
 
+## Canvas items
+
+- The tool rail beside Text places a Section, a Note or a Link card (from a workspace file) at a click. Each create, move, resize, text edit and delete is one write to the page's `items` in `meta/canvas.json` and one Undo step.
+- Items are not layers: they never appear in Layers, a selected item shows no Style fields, and no frame source changes.
+
 ## Layout controls
 
 - Flex and grid containers show auto-layout controls: direction, gap, padding, alignment, and, for grids, track counts. A track count is written as `repeat(N, minmax(0, 1fr))`.

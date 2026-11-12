@@ -174,6 +174,8 @@ revision in the same checkout and compare failing test names.
 - On the Design canvas a selected layer's outline lies over its frame, so a
   frame locator's `click()` waits behind it or lands on the outline. Click a
   point inside a frame with `page.mouse` at the element's `boundingBox()`.
+- A gesture painting inline sizes restores React's values, not `""`: React
+  never reapplies an unchanged style prop.
 
 ## Process, CI and delivery
 

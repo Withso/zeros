@@ -94,7 +94,8 @@ import {
   type InlineStyleDeclaration,
   canvasReadSnapshot,
 } from "./document-model";
-import { designCanvasPageCatalog } from "./pages";
+import { designCanvasPageCatalog, designFramePage } from "./pages";
+import { designCanvasItemViolations, markMissingDesignCanvasLinks, withDesignCanvasItems } from "./canvas-items";
 import { readDirectoryDesignLayout } from "./metadata";
 import {
   assertFrameFile,
@@ -1140,11 +1141,12 @@ async function readDesignNavigationSnapshotUnlocked(workspacePath: string, affec
     const known = affectedFiles ? options.known : undefined;
     const view = designNavigationView(metadata, !!options.pageHashes || !!known);
     const hashes = view.hashes;
+    const pages = await markMissingDesignCanvasLinks(workspacePath, withDesignCanvasItems(context.canvas, view.pages));
     const changed = known && new Set(metadata.pages.filter((page) =>
       known.some((pages) => pages[page.id] !== hashes!.get(page.id))).map((page) => page.id));
     return { catalogRevision: metadata.revision, directoryId: metadata.directoryId,
       ...(options.pageHashes ? { pageHashes: Object.fromEntries(hashes!) } : {}), snapshot: {
-      ...(changed ? {} : { pages: view.pages }),
+      ...(changed ? {} : { pages }),
       frames, tokens: tokens.tokens, tokenSourceVersion: tokens.sourceVersion, assets,
       ...(affectedFiles && !changed ? { mutationCatalog: { revision: metadata.revision, frames: metadata.frames } } : {}),
       ...(changed ? { pageCatalog: { revision: metadata.revision,
@@ -1529,11 +1531,11 @@ export async function readDesignWorkspaceSnapshot(
       true,
       context,
     );
-    const pages = designCanvasPageCatalog(
+    const pages = await markMissingDesignCanvasLinks(workspacePath, withDesignCanvasItems(context.canvas, designCanvasPageCatalog(
       context.canvas,
       summaries.map((frame) => frame.file),
       context.layout?.canvasVersion === 2,
-    );
+    )));
     const renderBudgetViolations: DesignLintViolation[] = [];
     const [renderedFrames, tokensDocument, assets, styleSources] = await Promise.all([
       mapDesignFramesBounded(summaries, (summary) =>
@@ -2176,12 +2178,24 @@ async function lintDesignDocumentUnlocked(
   };
 }
 
+/** The full report: every frame's findings and, unlike the canvas's own
+ * snapshot, canvas items' (for a frame, those on its page). */
 export function lintDesignDocument(
   workspacePath: string,
   frame?: string,
   options: { healOids?: boolean; includeRuntimeAudits?: boolean } = {},
 ): Promise<DesignLintReport> {
-  const lint = () => lintDesignDocumentUnlocked(workspacePath, frame, options);
+  const lint = async () => {
+    const report = await lintDesignDocumentUnlocked(workspacePath, frame, options);
+    const { canvas, layout } = await readCanvasContext(workspacePath);
+    let pageId: string | undefined;
+    if (frame && report.checkedFiles[0]) {
+      try { pageId = designFramePage(canvas, report.checkedFiles[0]).id; }
+      catch { return report; }
+    }
+    const items = await designCanvasItemViolations(workspacePath, canvas, layout, pageId);
+    return items.length ? { ...report, violations: sortDesignLintViolations([...report.violations, ...items]) } : report;
+  };
   return options.healOids === false
     ? lint()
     : withDocumentWrite(workspacePath, async () => {

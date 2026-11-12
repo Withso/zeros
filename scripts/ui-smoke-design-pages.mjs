@@ -1,6 +1,7 @@
 /* global window, document, localStorage */
 import { expect } from "@playwright/test";
 import { runDesignPageFocusSmoke } from "./ui-smoke-design-focus.mjs";
+import { runDesignCanvasItemsSmoke } from "./ui-smoke-design-canvas-items.mjs";
 import { designCanvasPoint,
   designCanvasSafeRect, openLayersDrawer } from "./ui-smoke-design-helpers.mjs";
 
@@ -17,6 +18,7 @@ export async function runDesignPagesSmoke({ page, check }) {
     await runDesignPageFocusSmoke({ page, check });
     await runDesignPageFocusSmoke({ page, check, moveFocus: false });
     await runDesignPagesHistorySmoke({ page, check });
+    await runDesignCanvasItemsSmoke({ page, check });
   } finally {
     await visitPageStorage(page);
     await page.evaluate((entries) => {
