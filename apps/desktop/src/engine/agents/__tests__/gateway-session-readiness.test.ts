@@ -49,6 +49,9 @@ afterEach(async () => {
   );
 });
 
+// The gateway reaches the adapter after real async work; vi.waitFor's default 1 s is too short on a loaded runner.
+const WAIT = { timeout: 10_000 };
+
 describe("gateway session readiness", () => {
 
   it("starts the provider while post-install territory revalidation continues", async () => {
@@ -82,7 +85,7 @@ describe("gateway session readiness", () => {
 
     try {
       const starting = gw.newSession("contained", { cwd: root });
-      await vi.waitFor(() => expect(adapter.newSession).toHaveBeenCalledOnce());
+      await vi.waitFor(() => expect(adapter.newSession).toHaveBeenCalledOnce(), WAIT);
       const created = await starting;
 
       expect(created.executionId).toBeTruthy();
@@ -137,11 +140,11 @@ describe("gateway session readiness", () => {
 
     try {
       const starting = gw.newSession("contained", { cwd: root });
-      await vi.waitFor(() => expect(adapter.newSession).toHaveBeenCalledOnce());
+      await vi.waitFor(() => expect(adapter.newSession).toHaveBeenCalledOnce(), WAIT);
       const created = await starting;
       failRevalidation(new Error("Design territory changed after install"));
 
-      await vi.waitFor(() => expect(disposeSession).toHaveBeenCalled());
+      await vi.waitFor(() => expect(disposeSession).toHaveBeenCalled(), WAIT);
       await expect(
         gw.prompt("contained", created.executionId, [
           { type: "text", text: "must not run" },
@@ -309,7 +312,7 @@ describe("gateway session readiness", () => {
     const starting = gw.newSession("contained", { cwd: root });
 
     try {
-      await vi.waitFor(() => expect(adapter.newSession).toHaveBeenCalledOnce());
+      await vi.waitFor(() => expect(adapter.newSession).toHaveBeenCalledOnce(), WAIT);
       failAttestation(
         new Error("host-parity Design write split is not enforced"),
       );
