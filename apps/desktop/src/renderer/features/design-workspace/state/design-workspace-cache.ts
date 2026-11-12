@@ -41,6 +41,7 @@ import {
   designWriteHtml,
   type DesignCanvasFrameWire,
   type DesignFrameGeometryWire,
+  type DesignFrameInUseWire,
   type DesignTextFrameSeedWire,
   type DesignFrameDocumentWire,
   type DesignFoundationRevisionWire,
@@ -1675,11 +1676,13 @@ export async function duplicateDesignFrameCached(
 export async function deleteDesignFrameCached(
   workspaceId: string,
   frame: string,
-): Promise<DesignWorkspaceSnapshotWire> {
+  options?: { ifUnused?: boolean },
+): Promise<DesignWorkspaceSnapshotWire | DesignFrameInUseWire> {
   return runLocalDesignMutation(workspaceId, async (assertOwner) => {
     const beforeSnapshot = designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data;
-    const result = await designDeleteFrame(workspaceId, frame);
+    const result = await designDeleteFrame(workspaceId, frame, options);
     assertOwner();
+    if ("inUse" in result) return result;
     const snapshot = publishDesignWorkspaceSnapshot(
       workspaceId,
       result.snapshot,

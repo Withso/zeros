@@ -225,7 +225,7 @@ describe("design workspace interaction wiring", () => {
 
   it("presents authored names while retaining the type-based layer icons", () => {
     expect(layersSource).toContain("designFrameDisplayName(frame)");
-    expect(layersSource).toContain("designRuntimeLayerDisplayName(layer.node)");
+    expect(layersSource).toContain("designLayerDisplayName(frame, layer.node)");
     expect(layersSource).toContain("designRuntimeLayerLabel(layer.node)");
     expect(layersSource).not.toContain("frame.title}");
     expect(layersSource).not.toContain("layer.node.name.trim()");

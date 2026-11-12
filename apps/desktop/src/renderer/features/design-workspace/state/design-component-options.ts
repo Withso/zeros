@@ -8,6 +8,7 @@
 
 import {
   COMPONENT_VARIANT_ATTRIBUTE,
+  componentIgnoredAttributeMessage,
   componentInheritedValues,
   componentOptionCss,
   componentOptionValues,
@@ -16,7 +17,7 @@ import {
   type ComponentEasing,
   type ComponentOptionValue,
 } from "@zeros/design-core/component-options";
-import type { DesignFrameComponent } from "@zeros/protocol/design-catalog";
+import type { DesignFrameComponent, DesignFrameInstances } from "@zeros/protocol/design-catalog";
 import { isDesignComponentVariantName } from "@zeros/protocol/design-path";
 import { DESIGN_RUNTIME_INSTANCE_TARGET } from "@zeros/protocol/design-runtime";
 
@@ -211,4 +212,10 @@ export function designComponentPreviewMessagesForTests(): number {
 
 export function resetDesignComponentOptionsForTests(): void {
   messages = 0;
+}
+
+/** What an instance sets that its component ignores: one line per attribute
+ * that names no option, as the engine's warning reads. */
+export function designInstanceIgnoredAttributes(host: DesignFrameInstances["hosts"][string]): string[] {
+  return Object.entries(host.ignored ?? {}).map(([name, value]) => componentIgnoredAttributeMessage(name, value));
 }

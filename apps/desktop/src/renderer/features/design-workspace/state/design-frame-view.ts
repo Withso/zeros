@@ -11,6 +11,14 @@ export function designPresentedFrame(frame: DesignFrameView | null | undefined):
   if (!frame) return null;
   return isPreparedDesignFrame(frame) ? frame : frame.previous ?? null;
 }
+/** Why a frame's current source could not be prepared, or null. A prepared
+ * view has none: designFrameViews yields one only for a current file. A frame
+ * shown before keeps its last pixels as `previous`; the problem still applies. */
+export function designFramePreparationProblem(snapshot: DesignWorkspaceSnapshotWire | undefined, frame: DesignFrameView): string | null {
+  if (isPreparedDesignFrame(frame)) return null;
+  const errors = snapshot?.preparation?.errors;
+  return errors && Object.hasOwn(errors, frame.file) ? errors[frame.file]! : null;
+}
 const EMPTY: readonly DesignFrameView[] = Object.freeze([]);
 const views = new WeakMap<DesignWorkspaceSnapshotWire, readonly DesignFrameView[]>();
 const authority = new WeakMap<DesignWorkspaceSnapshotWire, DesignWorkspaceSnapshotWire>();

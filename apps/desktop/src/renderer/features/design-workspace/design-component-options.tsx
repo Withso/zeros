@@ -39,6 +39,7 @@ import {
   OptionSwitchRow,
   OptionTextRow,
 } from "../../shared/ui/primitives/option-row";
+import { MessageRow } from "../../shared/ui/primitives/message-row";
 import { pillVariants } from "../../shared/ui/primitives/pill";
 import type { DesignCanvasFrameWire, DesignLintReportWire } from "../../platform/git";
 import { designComponentOptionsBrief, designComponentOptionsFixBrief, type DesignAgentBrief } from "./design-agent-brief";
@@ -53,6 +54,7 @@ import {
   designComponentAttributeText,
   designComponentPreviewProperties,
   designComponentVariantName,
+  designInstanceIgnoredAttributes,
   designInstanceOptionState,
   readDesignFrameComponent,
   sameDesignComponentValue,
@@ -250,6 +252,7 @@ export function DesignComponentOptions({
     );
   }
   const variants = declaration.variants.map((entry) => entry.name);
+  const ignored = useMemo(() => (host ? designInstanceIgnoredAttributes(host) : []), [host]);
 
   return (
     <InspectorSection
@@ -275,6 +278,11 @@ export function DesignComponentOptions({
           </Button>
         </div>
       ) : null}
+      {ignored.map((message) => (
+        <MessageRow key={message} tone="warning" flush data-design-options-ignored="">
+          {message}
+        </MessageRow>
+      ))}
       {!instance || variants.length ? (
         <OptionVariantRow
           variant={variant}

@@ -6,6 +6,7 @@
 
 import type { DesignFrameComponent, DesignFrameInstances } from "@zeros/protocol/design-catalog";
 import { designComponentPartOf } from "@zeros/protocol/design-runtime";
+import { designRuntimeLayerDisplayName } from "../design-layer-label";
 
 export const isDesignComponentPartNodeId = (nodeId: string | null | undefined): nodeId is string =>
   typeof nodeId === "string" && designComponentPartOf(nodeId) !== null;
@@ -89,4 +90,43 @@ export function designComponentInstanceMark(
   const name = instances.hosts[nodeId]!.component;
   if (!Object.hasOwn(instances.components, name)) return null;
   return { component: name, title: designComponentDisplayTitle(name, instances.components[name]!, mainTitle) };
+}
+
+/** The component a selected instance names when no component has that name
+ * any more (its main was deleted, renamed or registered under another name),
+ * or null. Own entries only, as above. */
+export function designMissingComponentOf(frame: { instances?: DesignFrameInstances }, nodeId: string | null): string | null {
+  const instances = frame.instances;
+  if (!instances || !nodeId || !Object.hasOwn(instances.hosts, nodeId)) return null;
+  const host = instances.hosts[nodeId]!;
+  return host.missing ? host.component : null;
+}
+
+/** A layer's name in Layers and in the selection path. An instance of a
+ * component that is gone is named by the component it asks for: it renders
+ * nothing, so the generic "Frame" would say nothing about it. A frame still
+ * revalidating answers from the generation it shows. */
+export function designLayerDisplayName(
+  frame: object,
+  node: Parameters<typeof designRuntimeLayerDisplayName>[0] & { oid: string },
+): string {
+  const presented = (Object.hasOwn(frame, "instances") ? frame : (frame as { previous?: object }).previous ?? frame) as { instances?: DesignFrameInstances };
+  const missing = designMissingComponentOf(presented, node.oid);
+  return missing ? `zd-${missing}` : designRuntimeLayerDisplayName(node);
+}
+
+const NO_MISSING: readonly string[] = Object.freeze([]);
+const missingByInstances = new WeakMap<DesignFrameInstances, readonly string[]>();
+
+/** Each component a frame's instances name that no component answers to,
+ * once, in the order first placed. Shared per record for the canvas. */
+export function designFrameMissingComponents(frame: { instances?: DesignFrameInstances }): readonly string[] {
+  const instances = frame.instances;
+  if (!instances) return NO_MISSING;
+  const known = missingByInstances.get(instances);
+  if (known) return known;
+  const names = [...new Set(Object.values(instances.hosts).filter((host) => host.missing).map((host) => host.component))];
+  const result = names.length ? Object.freeze(names) : NO_MISSING;
+  missingByInstances.set(instances, result);
+  return result;
 }

@@ -25,6 +25,7 @@ import {
   Palette,
   Play,
   StickyNote,
+  TriangleAlert,
   Type,
 } from "lucide-react";
 import React, {
@@ -52,7 +53,6 @@ import {
   type DesignRuntimeTreeNode,
 } from "@zeros/protocol/design-runtime";
 
-import { useWorkbenchStatusSource } from "../../shell/workbench/tab-status";
 import { retainDesignResource } from "./state/design-resource-counters";
 import { designFrameRuntime, waitForDesignFrameRuntime, type DesignFrameRuntimeConnection } from "../../platform/bridge/design-frame-runtime";
 import { applyDesignNodeAction } from "./state/design-node-actions";
@@ -207,7 +207,7 @@ import {
   type DesignMotionTimelineDraft,
 } from "./design-motion-timeline";
 import { canEditDesignNodeText } from "./design-node-capabilities";
-import { designComponentInstanceMark, designComponentPartHost, designComponentTextLock, designFrameIsComponent, isDesignComponentPartNodeId } from "./state/design-component-parts";
+import { designComponentInstanceMark, designComponentPartHost, designComponentTextLock, designFrameIsComponent, designFrameMissingComponents, isDesignComponentPartNodeId } from "./state/design-component-parts";
 import { resolveDesignSelectionShortcut } from "./design-selection-shortcuts";
 import {
   createDesignTextMarkup,
@@ -236,7 +236,7 @@ import {
 import { useDesignRuntimeStore, waitForDesignRuntimeFrame } from "./state/design-runtime-store";
 import { clearDesignFrameIntent, noteDesignFrameIntent, primeDesignFrameIntent, useDesignFrameIntent } from "./state/design-frame-intent";
 import { useDesignFrameResidency } from "./state/use-design-frame-residency";
-import { designFrameViews, designFramesAtPresentedGeometry, isPreparedDesignFrame, type DesignFrameView } from "./state/design-frame-view";
+import { designFramePreparationProblem, designFrameViews, designFramesAtPresentedGeometry, isPreparedDesignFrame, type DesignFrameView } from "./state/design-frame-view";
 import { DesignPassiveSelectionPublisher } from "./state/design-passive-selection";
 import { getActiveBridge, onActiveBridgeConnected } from "../../platform/bridge/active-bridge";
 import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
@@ -301,6 +301,7 @@ import {
 import { useDesignFoundation } from "./state/use-design-foundation";
 
 import { DesignFrameCover, DesignFrameRenderSurface } from "./design-frame-render-surface";
+import { DesignFrameLoadError, DesignFrameProblemLabel, DesignFrameProblemMark } from "./design-frame-load-error";
 import { designGpuRuntime, useDesignFrameColorScheme, useDesignGpuCanvas, useDesignGpuCanvasEnabled, useDesignGpuFailedFrames,
   useDesignGpuSceneFrames } from "./gpu/design-gpu-canvas";
 import { hasAsyncCanvasWheel } from "../../platform/runtime";
@@ -530,6 +531,14 @@ const DesignFramePlayControl = React.memo(function DesignFramePlayControl({ file
   );
 });
 
+const designMissingComponentsLabel = (components: readonly string[]) =>
+  `${components.length === 1 ? "Missing component" : "Missing components"} ${components.map((name) => `zd-${name}`).join(", ")}`;
+
+// Retry on a frame's problem surface must reach its button; every other
+// press on a frame that is not prepared only selects the frame.
+const isDesignFrameRetry = (target: EventTarget) =>
+  target instanceof Element && target.closest("[data-design-frame-problem-surface] [data-design-frame-retry]") !== null;
+
 const DesignPreparingFrame = React.forwardRef<HTMLElement, React.ComponentPropsWithoutRef<"article">>(function DesignPreparingFrame(props, ref) {
   useLayoutEffect(() => retainDesignResource("frameSurfaces"), []);
   return <article {...props} ref={ref} />;
@@ -586,11 +595,6 @@ export const DesignCanvas = React.memo(function DesignCanvas({
     [active, confirmedFrameViews, historyGeometry],
   );
   const preparedFrames = useMemo(() => frameViews.filter(isPreparedDesignFrame), [frameViews]);
-  const preparationError = useMemo(() => {
-    const message = Object.values(snapshot?.preparation?.errors ?? {})[0];
-    return message ? new Error(message) : null;
-  }, [snapshot?.preparation?.errors]);
-  useWorkbenchStatusSource({ error: preparationError, pending: false, hasContent: !!snapshot, active, retry: refresh }, workspaceId ?? undefined);
   const selectedDescription = view.selectedFrame === null ? frameViews[0] : frameViews.find((frame) => frame.file === view.selectedFrame);
   const selectedFrame = selectedDescription && isPreparedDesignFrame(selectedDescription) ? selectedDescription : null;
   const canvasFoundation = useDesignFoundation(
@@ -7987,6 +7991,9 @@ export const DesignCanvas = React.memo(function DesignCanvas({
           {snapshot && mountedFrames.map((description) => {
             const prepared = isPreparedDesignFrame(description);
             const frame = prepared ? description : description.previous;
+            // A frame whose source cannot be read shows that on itself only;
+            // the rest of the page stays usable and a restored file recovers it.
+            const preparationProblem = designFramePreparationProblem(snapshot, description);
             if (!frame) return (
               <DesignPreparingFrame key={`${workspaceId ?? "pending"}:${description.file}`}
                 ref={(element) => {
@@ -8000,12 +8007,18 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                 style={{ left: description.x, top: description.y, width: description.width, height: description.height,
                   zIndex: description.z }}
               >
-                {previewOwner && active && !gpuCanvas ? <DesignFrameCover owner={previewOwner} file={description.file} theme={frameTheme}
+                {preparationProblem !== null && description.kind !== "text" ? (
+                  <>
+                    <DesignFrameProblemLabel title={description.title} message={preparationProblem} width={description.width} />
+                    <DesignFrameLoadError labelled message={preparationProblem} className="pointer-events-auto" onRetry={refresh} />
+                  </>
+                ) : previewOwner && active && !gpuCanvas ? <DesignFrameCover owner={previewOwner} file={description.file} theme={frameTheme}
                   level={coverLevels.get(description.file) ?? "thumbnail"} /> : null}
               </DesignPreparingFrame>
             );
             const framePlaying = currentPlayback?.file === frame.file;
             const frameIsComponent = designFrameIsComponent(frame);
+            const missingComponents = designFrameMissingComponents(frame);
             const paintedFrame = frameGeometryPreviewsRef.current.get(
               `${canvasDocumentOwner}\0${frame.file}`,
             )?.geometry;
@@ -8081,11 +8094,11 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                 data-design-frame={frame.file}
                 data-design-preparing={!prepared ? "" : undefined}
                 onPointerDownCapture={(event) => {
-                  if (prepared || !active || !workspaceId) return;
+                  if (prepared || !active || !workspaceId || isDesignFrameRetry(event.target)) return;
                   event.stopPropagation();
                   void selectDesignFrame(workspaceId, description, { selected: true, additive: event.shiftKey, owner: canvasPageOwner }).catch(() => {});
                 }}
-                onClickCapture={(event) => { if (!prepared) event.stopPropagation(); }}
+                onClickCapture={(event) => { if (!prepared && !isDesignFrameRetry(event.target)) event.stopPropagation(); }}
                 onDoubleClickCapture={(event) => { if (!prepared) event.stopPropagation(); }}
                 onContextMenuCapture={(event) => { if (!prepared) { event.preventDefault(); event.stopPropagation(); } }}
                 onPointerMoveCapture={(event) => { if (!prepared) event.stopPropagation(); }}
@@ -8315,10 +8328,13 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                         <button
                           type="button"
                           data-design-frame-label=""
-                          title={frameIsComponent ? `${frame.title}, component` : frame.title}
+                          title={preparationProblem !== null ? `${frame.title}: ${preparationProblem}`
+                            : missingComponents.length
+                            ? `${frame.title}: ${designMissingComponentsLabel(missingComponents)}`
+                            : frameIsComponent ? `${frame.title}, component` : frame.title}
                           className={cn(
                             "text-2xxs block max-w-full min-w-0 cursor-default overflow-hidden border-0 bg-transparent p-0 text-left leading-4 font-medium whitespace-nowrap outline-none",
-                            frameIsComponent && "flex items-center gap-1",
+                            (frameIsComponent || missingComponents.length > 0 || preparationProblem !== null) && "flex items-center gap-1",
                             frameSelectedOnly
                               ? "text-[var(--design-selection-stroke)]"
                               : "text-muted-fg hover:text-fg2",
@@ -8338,6 +8354,14 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                               data-design-component-mark=""
                               className="size-[11px] shrink-0"
                               aria-hidden="true"
+                            />
+                          ) : null}
+                          {preparationProblem !== null ? <DesignFrameProblemMark message={preparationProblem} /> : null}
+                          {missingComponents.length ? (
+                            <TriangleAlert
+                              data-design-frame-problem="missing-component"
+                              className="text-red-primary size-[11px] shrink-0"
+                              aria-label={designMissingComponentsLabel(missingComponents)}
                             />
                           ) : null}
                           <span
@@ -8365,6 +8389,9 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                       />
                     </div>
                   </>
+                ) : null}
+                {preparationProblem !== null && frame.kind !== "text" ? (
+                  <DesignFrameLoadError labelled message={preparationProblem} onRetry={refresh} />
                 ) : null}
 
                 {workspaceId && folder ? (

@@ -49,6 +49,7 @@ import {
 import { useDesignRuntimeStore } from "./state/design-runtime-store";
 import { useDesignHistoryPresentation, useDesignHistorySelection } from "./state/design-history-presentation";
 import { noteDesignFrameIntent } from "./state/design-frame-intent";
+import { designLayerDisplayName } from "./state/design-component-parts";
 import { useActiveWorkspace } from "../../state/use-active-workspace";
 import { useReadRecovery } from "../../state/use-read-recovery";
 import { useDocumentActive } from "../../state/use-document-active";
@@ -346,7 +347,7 @@ const DesignLayerNodeRow = React.memo(function DesignLayerNodeRow({
   actions: DesignLayerRowActions;
 }) {
   const { frame, layer } = row;
-  const displayName = designRuntimeLayerDisplayName(layer.node);
+  const displayName = designLayerDisplayName(frame, layer.node);
   const dimmed = !layer.node.visible || layer.hiddenByAncestor;
   return (
     <div
@@ -674,7 +675,7 @@ function OwnedDesignWorkspaceSidebarPanels({
       designFrameDisplayName(selectedFrame),
       ...(selectedNodeId
         ? designLayerPathNodes(selectedTree, selectedNodeId).map((node) =>
-            designRuntimeLayerDisplayName(node),
+            designLayerDisplayName(selectedFrame, node),
           )
         : []),
     ];

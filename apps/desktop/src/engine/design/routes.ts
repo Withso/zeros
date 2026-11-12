@@ -99,6 +99,7 @@ import {
   deleteDesignPage,
   deleteDesignFrame,
   designDirectoryNameFor,
+  designFrameComponentUsage,
   DESIGN_TOKENS_FILE,
   duplicateDesignFrame,
   lintDesignDocument,
@@ -1556,6 +1557,12 @@ export async function handleDesignWorkspaceRoute(
         reqStr(params, "workspaceId"),
         remote,
       );
+      // A person deleting a main its instances still use is asked first;
+      // agents and older renderers omit the flag and delete at once.
+      if (params.ifUnused === true) {
+        const usage = await designFrameComponentUsage(workspace.path, reqStr(params, "frame"));
+        if (usage && usage.instances > 0) return { inUse: usage };
+      }
       const restorePoint = await deleteDesignFrame(
         workspace.path,
         reqStr(params, "frame"),

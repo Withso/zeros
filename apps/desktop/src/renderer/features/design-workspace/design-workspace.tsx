@@ -51,6 +51,7 @@ import { DesignSavedEditingContext, DesignSavedEditingSession } from "./design-s
 import { DesignDirectoryPill } from "./design-directory-pill";
 import { DesignFloatingPanel } from "./design-floating-panel";
 import { DesignFrameChangesPanel } from "./design-frame-changes-panel";
+import { DesignFrameDeleteDialog, type DesignFrameComponentUsage } from "./design-frame-delete-dialog";
 import { DesignInspector } from "./design-inspector";
 import type { DesignRuntimeTreeNode } from "@zeros/protocol/design-runtime";
 import { errorMessage } from "./design-workspace-error";
@@ -108,6 +109,11 @@ export function DesignWorkspaceColumn({
   const [motionProperties, setMotionProperties] =
     useState<readonly string[]>(EMPTY_NODE_IDS);
   const deletingFrameFilesRef = useRef(new Set<string>());
+  const [frameDeleteConfirmation, setFrameDeleteConfirmation] = useState<{
+    frame: DesignCanvasFrameWire;
+    usage: DesignFrameComponentUsage;
+    owner: ReturnType<typeof captureDesignPageOwner>;
+  } | null>(null);
   const motionPropertyRequestIdRef = useRef(0);
   const zoomActionsRef = useRef<DesignCanvasZoomActions | null>(null);
   const sectionRef = useRef<HTMLElement | null>(null);
@@ -254,14 +260,20 @@ export function DesignWorkspaceColumn({
     [setCanvasBackground, workspaceId, pageOwner],
   );
   const deleteFrame = useCallback(
-    async (candidate: DesignCanvasFrameWire) => {
+    async (candidate: DesignCanvasFrameWire, confirmed?: boolean) => {
       if (!workspaceId || deletingFrameFilesRef.current.has(candidate.file)) {
         return;
       }
       deletingFrameFilesRef.current.add(candidate.file);
       const owner = captureDesignPageOwner(workspaceId);
       try {
-        const next = await deleteDesignFrameCached(workspaceId, candidate.file);
+        // The engine keeps a main component other frames still place and
+        // reports its usage, so only that delete waits for a confirmation.
+        const next = await deleteDesignFrameCached(workspaceId, candidate.file, confirmed ? undefined : { ifUnused: true });
+        if ("inUse" in next) {
+          if (isCurrentDesignPageOwner(owner)) setFrameDeleteConfirmation({ frame: candidate, usage: next.inUse, owner });
+          return;
+        }
         // Selection publishes locally before its durable bridge write. Do not
         // make that bookkeeping delay—or misreport—a completed deletion.
         if (!isCurrentDesignPageOwner(owner)) return;
@@ -575,6 +587,15 @@ export function DesignWorkspaceColumn({
           }
         />
       </div>
+      <DesignFrameDeleteDialog
+        usage={frameDeleteConfirmation && isCurrentDesignPageOwner(frameDeleteConfirmation.owner) ? frameDeleteConfirmation.usage : null}
+        onCancel={() => setFrameDeleteConfirmation(null)}
+        onDelete={() => {
+          const pending = frameDeleteConfirmation;
+          setFrameDeleteConfirmation(null);
+          if (pending && isCurrentDesignPageOwner(pending.owner)) void deleteFrame(pending.frame, true);
+        }}
+      />
     </section>
     </DesignSavedEditingContext.Provider>
   );

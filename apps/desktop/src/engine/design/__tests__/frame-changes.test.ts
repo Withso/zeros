@@ -125,4 +125,39 @@ describe.each([["its own path", false], ["a symlinked path", true]] as const)("D
     await changes.verifyAll();
     expect(published).toEqual([]);
   });
+
+  it("names the frames that place a registered component when its file is deleted on disk and when it returns", async () => {
+    await editCanvas((canvas) => { canvas.frames.frame_1.component = "tile"; });
+    await touch(`${DESIGN_DIRECTORY_NAME}/page-1/a.html`, frame('<zd-tile data-oid="t"></zd-tile>'));
+    const placed = async () => {
+      const navigation = await readDesignNavigationSnapshot(root);
+      const result = await prepareDesignNavigationFrames(root, navigation.catalogRevision, files);
+      return result.frames.find((entry) => entry.file === "page-1/a.html")?.instances?.hosts.t;
+    };
+    expect(await placed()).toMatchObject({ component: "tile" });
+    expect(await placed()).not.toHaveProperty("missing");
+    const source = path.join(folder, "page-1/b.html");
+    const saved = await readFile(source);
+    await rm(source);
+    expect(await changed(`${DESIGN_DIRECTORY_NAME}/page-1/b.html`)).toMatchObject([{ frames: ["page-1/a.html", "page-1/b.html"] }]);
+    expect(await placed()).toMatchObject({ component: "tile", missing: true });
+    await writeFile(source, saved);
+    expect(await changed(`${DESIGN_DIRECTORY_NAME}/page-1/b.html`)).toMatchObject([{ frames: ["page-1/a.html", "page-1/b.html"] }]);
+    expect(await placed()).not.toHaveProperty("missing");
+  });
+
+  it("keeps the directory readable while a registered frame's file is missing, and names that frame when it returns", async () => {
+    const source = path.join(folder, "page-1/b.html");
+    const saved = await readFile(source);
+    await rm(source);
+    expect(await changed(`${DESIGN_DIRECTORY_NAME}/page-1/b.html`)).toMatchObject([{ frames: ["page-1/b.html"] }]);
+    const navigation = await readDesignNavigationSnapshot(root);
+    expect(navigation.snapshot.pages![0]!.frameFiles).toEqual(files);
+    const missing = await prepareDesignNavigationFrames(root, navigation.catalogRevision, files);
+    expect(missing.errors.map((error) => error.file)).toEqual(["page-1/b.html"]);
+    expect(missing.frames.map((entry) => entry.file)).toEqual(["page-1/a.html", "page-1/c.html"]);
+    await writeFile(source, saved);
+    expect(await changed(`${DESIGN_DIRECTORY_NAME}/page-1/b.html`)).toMatchObject([{ frames: ["page-1/b.html"], catalog: false, all: false }]);
+    expect((await prepareDesignNavigationFrames(root, navigation.catalogRevision, files)).errors).toEqual([]);
+  });
 });

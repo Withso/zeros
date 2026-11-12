@@ -1271,22 +1271,40 @@ export async function bridgeDesignDuplicateFrame(
   return { frame: result.frame, snapshot: result.snapshot };
 }
 
+/** A main component frame the engine kept because other frames place it. */
+export interface DesignFrameInUseWire {
+  inUse: { component: string; title: string; instances: number; frames: number };
+}
+
+const validFrameInUse = (value: unknown): value is DesignFrameInUseWire["inUse"] => {
+  const usage = value as Partial<DesignFrameInUseWire["inUse"]> | null;
+  return !!usage && typeof usage.component === "string" && typeof usage.title === "string" &&
+    Number.isInteger(usage.instances) && Number.isInteger(usage.frames);
+};
+
 export async function bridgeDesignDeleteFrame(
   bridge: RuntimeClient,
   workspaceId: string,
   frame: string,
+  options?: { ifUnused?: boolean },
 ): Promise<{
   deleted: { file: string };
   snapshot: DesignWorkspaceSnapshotWire;
-}> {
+} | DesignFrameInUseWire> {
   const result = (await workspaceOp(bridge, "design.frame.delete", {
     workspaceId,
     frame,
+    ...(options?.ifUnused ? { ifUnused: true } : {}),
     ...scopedMutationSnapshot(bridge, workspaceId),
   })) as {
     deleted?: { file: string };
     snapshot?: DesignWorkspaceSnapshotWire;
+    inUse?: unknown;
   };
+  if (options?.ifUnused && result.inUse !== undefined) {
+    if (!validFrameInUse(result.inUse)) throw new Error("design.frame.delete: malformed engine response");
+    return { inUse: result.inUse };
+  }
   if (
     !result.deleted ||
     !result.snapshot ||

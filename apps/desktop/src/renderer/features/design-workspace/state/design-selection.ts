@@ -1316,7 +1316,7 @@ export async function selectDesignFrameBodyAtLocation(
   const enteredHost = selectedId && frame.instances && !input.additive
     ? isDesignComponentPartNodeId(selectedId)
       ? designComponentPartHost(selectedId)
-      : input.intent === "descend" && Object.hasOwn(frame.instances.hosts, selectedId) ? selectedId : null
+      : input.intent === "descend" && Object.hasOwn(frame.instances.hosts, selectedId) && !frame.instances.hosts[selectedId]!.missing ? selectedId : null
     : null;
   // The layers around an instance know its host, not its parts.
   const selectedNodeId = selectedId ? designComponentPartHost(selectedId) : null;

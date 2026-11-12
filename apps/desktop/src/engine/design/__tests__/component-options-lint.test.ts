@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { createDesignFrame, DESIGN_DIRECTORY_NAME, lintDesignDocument } from "../document";
+import { createDesignFrame, DESIGN_DIRECTORY_NAME, lintDesignDocument, readDesignWorkspaceSnapshot } from "../document";
 import { readCanvas, writeCanvas } from "../document-storage";
 
 const doc = (body: string, head = "") => `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>T</title>${head}</head><body>${body}</body></html>`;
@@ -76,6 +76,20 @@ describe("linting components with options", () => {
       ruleId: "component-expression-invalid", line: 4,
       message: 'Unknown name width-1. To subtract, put spaces around the minus: "width - 1".',
     })]);
+  });
+
+  it("warns at the instance about an attribute that names no option, with the value it ignores", async () => {
+    const main = await createDesignFrame(root, { title: "Chip" });
+    const host = await createDesignFrame(root, { title: "Workspace" });
+    await write(main.file, doc('<div data-oid="c">x</div>', options(['<zd-option name="mood" type="text" default="calm"></zd-option>'])));
+    await register(main.file, "chip");
+    await write(host.file, doc('<zd-chip data-oid="ws" tone="loud" class="x" data-note="n"></zd-chip>'));
+    expect(await lint(host.file)).toEqual([expect.objectContaining({
+      ruleId: "component-value-invalid", severity: "warning", oid: "ws",
+      message: 'This component has no option tone; tone="loud" is ignored.',
+    })]);
+    const listed = (await readDesignWorkspaceSnapshot(root)).frames.find((frame) => frame.file === host.file)!;
+    expect(listed.instances?.hosts.ws).toEqual({ component: "chip", attributes: {}, ignored: { tone: "loud" } });
   });
 
   it("refuses a name registered twice, or also used by a components/ file", async () => {

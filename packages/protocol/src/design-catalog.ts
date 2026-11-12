@@ -316,6 +316,15 @@ export const designFrameInstancesSchema = z.object({
     attributes: boundedRecord(z.string().min(1).max(64), z.string().max(2_048), 72),
     /** Some of its values did not apply. */
     failed: z.literal(true).optional(),
+    /** Attributes it sets that name no option of its component, as written;
+     * the component ignores them. */
+    ignored: boundedRecord(z.string().min(1).max(64), z.string().max(2_048), 72).optional(),
+    /** No component source has this name any more: its main frame or file
+     * was deleted, renamed or registered under another name. A source that is
+     * there but unusable (too large, unsafe, or named twice) is reported as a
+     * component error instead. Such a host has no entry in `components` and
+     * renders as an empty element. */
+    missing: z.literal(true).optional(),
   }).strict(), DESIGN_FRAME_INSTANCE_LIMITS.hosts),
   /** What the frame shows when some instance's values did not apply. */
   notApplied: z.enum(["last-good", "defaults"]).optional(),

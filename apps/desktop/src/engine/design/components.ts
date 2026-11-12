@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { realpath } from "node:fs/promises";
+import { realpath, stat } from "node:fs/promises";
 import path from "node:path";
 
 import { parse, parseFragment, type DefaultTreeAdapterTypes } from "parse5";
@@ -11,6 +11,7 @@ import {
   componentExpressionScope,
   componentOptionCss,
   componentOptionValues,
+  componentIgnoresAttribute,
   componentInheritedValues,
   readComponentDeclaration,
   COMPONENT_VARIANT_ATTRIBUTE,
@@ -189,8 +190,12 @@ async function loadDefinitions(
 ): Promise<{
   definitions: Map<string, ComponentDefinition>;
   errors: DesignComponentExpansionError[];
+  /** Names whose source exists but could not be used; their instances are
+   * reported through errors, not as missing components. */
+  unavailable: Set<string>;
 }> {
   const errors: DesignComponentExpansionError[] = [];
+  const unavailable = new Set<string>();
   const designRoot = path.join(
     workspacePath,
     ...designDirectoryNameFor(workspacePath).split("/"),
@@ -206,10 +211,10 @@ async function loadDefinitions(
   try {
     canonicalDesignRoot = sources ? designRoot : await realpath(designRoot);
   } catch {
-    return { definitions: new Map(), errors };
+    return { definitions: new Map(), errors, unavailable: new Set(referencedComponentNames(sharedDesignParse(frameSource) ?? parse(frameSource))) };
   }
   if (canonicalDirectory && !canonicalDirectory.startsWith(`${canonicalDesignRoot}${path.sep}`)) canonicalDirectory = null;
-  if (!canonicalDirectory && registry.size === 0) return { definitions: new Map(), errors };
+  if (!canonicalDirectory && registry.size === 0) return { definitions: new Map(), errors, unavailable };
 
   const frameDocument = sharedDesignParse(frameSource) ?? parse(frameSource);
   const pending = referencedComponentNames(frameDocument);
@@ -223,6 +228,7 @@ async function loadDefinitions(
         component: name,
         message: `A frame may reference at most ${MAX_COMPONENTS_PER_FRAME} component definitions.`,
       });
+      for (const rest of pending.slice(index)) unavailable.add(rest);
       break;
     }
     const readSource = async (root: string | null, target: string, relative: string) => {
@@ -243,21 +249,28 @@ async function loadDefinitions(
         code: "component-invalid",
         message: `zd-${name} is both a registered frame (${registered}) and components/${name}.html; rename one.`,
       });
+      unavailable.add(name);
       continue;
     }
     const safe = registered ? await readSource(designRoot, path.join(designRoot, ...registered.split("/")), registered) : legacy;
     if (registered && (!safe || safe.size > MAX_COMPONENT_BYTES)) {
       errors.push({ component: name, code: "component-invalid", file: registered,
         message: `The frame registered as zd-${name} (${registered}) could not be read or is over ${MAX_COMPONENT_BYTES / 1024} KiB.` });
+      // Only a registered file that is gone (deleted or renamed) leaves its
+      // instances missing; an oversized or unsafe one is there but unusable.
+      const present = safe !== null || (!sources && await stat(path.join(designRoot, ...registered.split("/"))).then(() => true, () => false));
+      if (present) unavailable.add(name);
       continue;
     }
-    if (!safe || safe.size > MAX_COMPONENT_BYTES) continue;
+    if (!safe) continue;
+    if (safe.size > MAX_COMPONENT_BYTES) { unavailable.add(name); continue; }
     if (totalSourceBytes + safe.size > MAX_COMPONENT_SOURCE_BYTES_PER_FRAME) {
       errors.push({
         component: name,
         message:
           "Referenced component source exceeded the 16 MiB per-frame limit.",
       });
+      for (const rest of pending.slice(index)) unavailable.add(rest);
       break;
     }
     totalSourceBytes += safe.size;
@@ -372,7 +385,7 @@ async function loadDefinitions(
       styles,
     });
   }
-  return { definitions, errors };
+  return { definitions, errors, unavailable };
 }
 
 /** The <zd-option>, <zd-derive> and <zd-variant> lines of a file's
@@ -600,7 +613,7 @@ export async function expandDesignComponentsForRender(
   if (!/<zd-/i.test(source) && Buffer.byteLength(source) <= MAX_EXPANSION_BYTES && !DECLARES_OPTIONS.test(source)) return { html: source };
   const usage: DesignComponentExpansionUsage = { templated: false };
   const expansion = await expandDesignComponents(workspacePath, source, sources, entryFile, options, usage);
-  if (!usage.templated || !entryFile) return { html: expansion.html };
+  if ((!usage.templated && !usage.instances?.hosts.size) || !entryFile) return { html: expansion.html };
   const instancesOf = (shows?: DesignComponentOptionsFallback["shows"]) => {
     if (!usage.instances || usage.instances.hosts.size === 0) return {};
     const record = {
@@ -612,7 +625,7 @@ export async function expandDesignComponentsForRender(
   };
   if (!expansion.optionsFailed) {
     // A variant is a view of the main, not its last good render.
-    if (remember && !options.variant) rememberDesignComponentRender(workspacePath, entryFile, expansion.html);
+    if (remember && !options.variant && usage.templated) rememberDesignComponentRender(workspacePath, entryFile, expansion.html);
     return { html: expansion.html, ...instancesOf() };
   }
   const lastGood = lastGoodDesignComponentRender(workspacePath, entryFile);
@@ -715,13 +728,29 @@ function recordInstance(
   }
   const names = new Set([...declaration.options.map((option) => option.name), COMPONENT_VARIANT_ATTRIBUTE]);
   const attributes = new Map<string, string>();
+  const ignored = new Map<string, string>();
   for (const attribute of instance.attrs) {
-    if (!names.has(attribute.name)) continue;
+    if (!names.has(attribute.name)) {
+      if (componentIgnoresAttribute(attribute.name) && attribute.name.length <= 64 && attribute.value.length <= 2_048 && ignored.size < 72)
+        ignored.set(attribute.name, attribute.value);
+      continue;
+    }
     // A value too long to report would mislead; the host shows no Options.
     if (attribute.value.length > 2_048) return;
     attributes.set(attribute.name, attribute.value);
   }
-  record.hosts.set(oid, { component: definition.name, attributes: Object.fromEntries(attributes), ...(failed ? { failed: true as const } : {}) });
+  record.hosts.set(oid, { component: definition.name, attributes: Object.fromEntries(attributes), ...(failed ? { failed: true as const } : {}),
+    ...(ignored.size ? { ignored: Object.fromEntries(ignored) } : {}) });
+}
+
+/** A top-level instance of a name no definition answers to, so the panel and
+ * canvas can say which component is gone instead of showing an empty layer. */
+function recordMissingInstance(usage: DesignComponentExpansionUsage, name: string, instance: DefaultTreeAdapterTypes.Element): void {
+  const oid = instance.attrs.find((attribute) => attribute.name === "data-oid")?.value;
+  if (!oid || oid.length > 256 || INHERITED_NAMES.has(oid) || !/^[a-z][a-z0-9-]{0,63}$/.test(name)) return;
+  const record = usage.instances ??= { components: new Map(), hosts: new Map() };
+  if (record.hosts.size >= DESIGN_FRAME_INSTANCE_LIMITS.hosts) return;
+  record.hosts.set(oid, { component: name, attributes: {}, missing: true });
 }
 
 async function expandBoundedComponents(
@@ -796,7 +825,10 @@ async function expandBoundedComponents(
       if (++budget.instances > MAX_EXPANSION_INSTANCES) throw new ComponentBudgetExceeded();
       const name = instance.tagName.slice(3);
       const definition = definitions.get(name);
-      if (!definition) continue;
+      if (!definition) {
+        if (depth === 0 && usage && !loaded.unavailable.has(name)) recordMissingInstance(usage, name, instance);
+        continue;
+      }
       if (stack.includes(name) || depth === MAX_EXPANSION_DEPTH) {
         if (errors.length < MAX_COMPONENT_DIAGNOSTICS) errors.push({
           component: name,

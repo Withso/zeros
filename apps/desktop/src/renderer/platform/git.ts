@@ -149,6 +149,7 @@ import {
   type DesignFoundationOpenWire,
   type DesignApiMutationReplyWire,
   type DesignFrameGeometryWire,
+  type DesignFrameInUseWire,
   type DesignTextFrameSeedWire,
   type DesignFrameSummaryWire,
   type DesignLintReportWire,
@@ -180,6 +181,7 @@ export type {
   DesignCanvasFrameWire,
   DesignFrameDocumentWire,
   DesignFrameGeometryWire,
+  DesignFrameInUseWire,
   DesignTextFrameSeedWire,
   DesignFrameSummaryWire,
   DesignFoundationRevisionWire,
@@ -792,14 +794,16 @@ export async function designDuplicateFrame(
 export async function designDeleteFrame(
   workspaceId: string,
   frame: string,
+  options?: { ifUnused?: boolean },
 ): Promise<{
   deleted: { file: string };
   snapshot: DesignWorkspaceSnapshotWire;
-}> {
+} | DesignFrameInUseWire> {
   return bridgeDesignDeleteFrame(
     requireBridge("delete a design frame"),
     workspaceId,
     frame,
+    options,
   );
 }
 

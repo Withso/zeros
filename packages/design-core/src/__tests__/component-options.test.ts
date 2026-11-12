@@ -121,7 +121,7 @@ describe("an instance's values", () => {
 
   it("leave host attributes alone and warn about names that are not options", () => {
     const { problems } = componentOptionValues(declaration, attributes({ class: "x", "data-oid": "c1", style: "color: red", widht: "800" }));
-    expect(problems).toEqual([{ message: "This component has no option widht.", severity: "warning" }]);
+    expect(problems).toEqual([{ message: 'This component has no option widht; widht="800" is ignored.', severity: "warning" }]);
   });
 });
 

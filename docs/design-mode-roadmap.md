@@ -1737,7 +1737,14 @@ holes per rendering. `design validate` and lint report
 `component-option-invalid`, `component-expression-invalid`,
 `component-value-invalid`, `component-unregistered` and the existing
 `component-invalid` and `component-undefined`, at the line in the frame or
-naming the component's file and line. An instance whose values do not fit
+naming the component's file and line. An instance attribute that names no
+option is a `component-value-invalid` warning naming the attribute and the
+ignored value; the source is never rewritten. An instance of a component that
+no longer exists (its main deleted, renamed or registered under another name)
+is `component-undefined` at the instance; it renders as an empty element and
+the host frame still renders. A component whose source is there but cannot be
+used (over the size limit, unsafe, or named twice) is reported by that error
+instead, never as missing. An instance whose values do not fit
 keeps the inherited value; one whose template fails renders its defaults, or
 nothing when those fail too. A frame whose options do not all apply shows the
 last expansion that applied in this session (held for the 12 most recently
@@ -1814,6 +1821,21 @@ header, a click inside the instance picks another part and Escape or a click
 outside leaves it. Every node write the workspace cache sends refuses a part
 before anything is sent, and the engine finds no such layer either. Layers
 keeps an instance as one row; an agent's selection names its host.
+
+A host's record also lists attributes that name no option (`ignored`, as
+written), shown in its Options section as one warning line each, and marks a
+host whose component no longer exists (`missing`; no `components` entry).
+Such a host's frame label carries a red warning mark naming the component;
+Layers, the selection path and the selected instance's title name it
+`zd-<name>`, with an error line saying the component is missing; it cannot
+be entered. Deleting a main component
+frame that other frames place first asks: `design.frame.delete` with
+`ifUnused` keeps the frame and replies `inUse` (the component, its title and
+how many instances in how many frames use it), and the canvas confirms with
+"Delete component …?" before deleting without the flag. Ordinary frames and
+mains nobody places still delete at once. Undo restores the frame at its
+place in the page's frame order and among the canvas file's frame entries, so
+`meta/canvas.json` returns byte for byte.
 
 The canvas marks components by the same record that titles the header
 Component: a main component's frame label shows the Component glyph before
@@ -2846,7 +2868,14 @@ frame has a ready document or loaded picture. There is no batch reveal, fade,
 or empty placeholder card. Hidden metadata shells retain their bounds for
 Layers navigation and Fit selection; they cannot receive pointer input.
 Warm outgoing content stays visible during revalidation. Runtime load errors
-remain actionable, and preparation errors use the shared workbench status.
+remain actionable. A frame whose source cannot be prepared (its registered
+file missing or unreadable, or the whole preparation request failing) shows
+the problem on that frame only, whether it was never shown or still holds
+earlier pixels: its label carries a red mark with the engine's reason, and
+"Couldn’t load this frame." with Retry appears at screen size only where the
+frame is large enough on screen to hold it, never over neighbouring frames.
+The Design tab and other frames stay usable, and restoring the file reports
+it as a frame change, which prepares it again.
 
 For frames using the picture fallback, the authoritative iframe stays mounted
 at deep zoom while a bounded visible crop is rerasterized for device fidelity.

@@ -207,7 +207,8 @@ import {
   settleDesignHistorySelection,
 } from "./state/design-selection";
 import { designComponentPartOf } from "@zeros/protocol/design-runtime";
-import { designComponentDisplayTitle, designComponentTextLock, isDesignComponentPartNodeId } from "./state/design-component-parts";
+import { designComponentDisplayTitle, designComponentTextLock, designMissingComponentOf, isDesignComponentPartNodeId } from "./state/design-component-parts";
+import { MessageRow } from "../../shared/ui/primitives/message-row";
 import type { DesignComponentOptionsTarget } from "./design-component-options";
 import {
   applyDesignEditCached,
@@ -2911,6 +2912,11 @@ export const DesignInspector = React.memo(function DesignInspector({
             ...(frame.instances?.notApplied ? { notApplied: frame.instances.notApplied } : {}) }
         : null;
   const optionsFrame = optionsTarget ? frame : null;
+  // An instance whose main is gone renders nothing; it is named by the
+  // component it asks for rather than read as an empty Frame.
+  const missingComponent = frame && instanceNodeId && !selectedPart && styleNodeIds.length <= 1
+    ? designMissingComponentOf(frame, instanceNodeId)
+    : null;
   // As in Layers, the header names the instance by its component; the line
   // under it says what it is, and a part's line offers its instance too.
   const componentHeader = instanceTitle && instanceComponent && instanceNodeId && (selectedPart || optionsTarget?.kind === "instance")
@@ -2919,6 +2925,7 @@ export const DesignInspector = React.memo(function DesignInspector({
   const textLock = frame && selectedNodeId ? designComponentTextLock(frame, selectedNodeId) : null;
   const selectionType = optionsTarget?.kind === "main"
     ? "Component"
+    : missingComponent ? "Missing component"
     : selectionTitle && selectionTitle !== selectionName ? selectionName : null;
   const editMain = () => {
     if (!workspaceId || !folder || !componentHeader) return;
@@ -2980,11 +2987,11 @@ export const DesignInspector = React.memo(function DesignInspector({
           <DesignPagePicker workspaceId={workspaceId} directoryId={previewDirectoryId} pages={pages}
             activePageId={activePageId} frames={pageFrames ?? []} active={active} />
         ) : <>
-          {componentHeader || optionsTarget?.kind === "main"
+          {componentHeader || optionsTarget?.kind === "main" || missingComponent
             ? <ComponentGlyph className="text-fg2 size-3.5 shrink-0" aria-hidden="true" />
             : <SelectionGlyph className="text-fg2 size-3.5 shrink-0" aria-hidden="true" />}
           <span data-design-inspector-title="" className="text-fg1 min-w-0 flex-1 truncate text-xs font-medium">
-            {componentHeader && !componentHeader.part ? componentHeader.title : selectionTitle ?? selectionName}
+            {componentHeader && !componentHeader.part ? componentHeader.title : missingComponent ? `zd-${missingComponent}` : selectionTitle ?? selectionName}
           </span>
           {componentHeader && !componentHeader.part ? (
             <Button type="button" variant="ghost" size="compact" data-design-edit-main="" disabled={!componentHeader.component.frame && !onOpenFile} onClick={editMain}>
@@ -3036,6 +3043,17 @@ export const DesignInspector = React.memo(function DesignInspector({
             </span>
           ) : null}
         </div>
+      ) : null}
+      {missingComponent ? (
+        <MessageRow
+          tone="error"
+          role="alert"
+          data-design-component-missing={missingComponent}
+          className="border-border1 border-t"
+          title={`The main of zd-${missingComponent} is gone: it was deleted, renamed or unregistered, so this instance shows nothing.`}
+        >
+          {`Component zd-${missingComponent} is missing`}
+        </MessageRow>
       ) : null}
     </section>
   );

@@ -435,6 +435,18 @@ export function componentInheritedValues(declaration: ComponentDeclaration, vari
   return values;
 }
 
+/** An attribute that is neither an option nor one the host keeps for itself
+ * (class, data-*, aria-*, zd-*, event names): the component ignores it. Call
+ * only for a name the declaration has no option for. */
+export function componentIgnoresAttribute(name: string): boolean {
+  return !HOST_ATTRIBUTES.has(name) && !/^(?:data|aria|zd)-/.test(name) && !/^on/.test(name);
+}
+
+/** Why an instance's attribute has no effect, naming the value it ignores. */
+export function componentIgnoredAttributeMessage(name: string, value: string): string {
+  return `This component has no option ${name}; ${name}="${value.length > 64 ? `${value.slice(0, 63)}…` : value}" is ignored.`;
+}
+
 /** An instance's values from its attributes: each option attribute over its
  * `zd-variant` over the defaults. An attribute that does not fit keeps the
  * inherited value and is reported. Host attributes are left alone. */
@@ -452,8 +464,7 @@ export function componentOptionValues(
     if (name === COMPONENT_VARIANT_ATTRIBUTE) continue;
     const option = options.get(name);
     if (!option) {
-      if (!HOST_ATTRIBUTES.has(name) && !/^(?:data|aria|zd)-/.test(name) && !/^on/.test(name))
-        problems.push({ message: `This component has no option ${name}.`, severity: "warning" });
+      if (componentIgnoresAttribute(name)) problems.push({ message: componentIgnoredAttributeMessage(name, raw), severity: "warning" });
       continue;
     }
     const parsed = parseComponentOptionValue(option, raw);
