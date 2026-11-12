@@ -187,6 +187,9 @@ try {
     pageUrl,
     check,
     pageErrors,
+    // One fresh-page retry per independent scenario in CI (GitHub sets CI=true);
+    // passes on retry are annotated and summarized. Local runs never retry.
+    retries: process.env.CI === "true" ? 1 : 0,
   });
 } catch (err) {
   failures.push("harness run crashed");
