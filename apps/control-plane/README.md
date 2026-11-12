@@ -518,12 +518,35 @@ does not enable `CLOUD_V2_ENABLED` or create provider resources.
 
 ## Shared execution activation
 
-Shared execution stays disabled until an operator prepares and activates one
-exact workspace. There is no HTTP activation route. The command requires the
+Existing workspaces enter shared execution only when an operator prepares and
+activates one exact workspace. There is no HTTP activation route. The command requires the
 database migration owner and an active `platform_owner`; the application role
 can advance an existing transition but cannot create an activation or its
 approval receipts. Use a controlled operator shell with the intended
 `DATABASE_URL`. This procedure does not authorize a live deployment by itself.
+
+`ZEROS_CLOUD_ACTING_USER_DEFAULT=1` makes new organization cloud workspaces
+start in active mode. The channel switch defaults to off and accepts only `0`
+or `1`; changing it never migrates an existing workspace or changes an
+idempotent create replay. Local and organization-local workspaces are unaffected.
+Before creating a row, the selected runtime must have an inventoried
+`worker-capabilities.json` advertising both `acting-user-v1` and
+`sync-context-v1`, with a matching completed release receipt on hosted channels.
+A verified dedicated Alpha runtime-canary grant substitutes only for that
+release receipt for its exact candidate and one-use create scope. Missing
+qualification refuses with `worker_update_required`; it never creates a legacy
+workspace as a fallback.
+
+A fresh active workspace records its initial runtime pin in
+`cloud_v2_execution_creations`, separately from operator approvals. Its first
+boot must report clean processes and material before the persisted initiator
+can obtain a bootstrap lease to clone and run setup. The control plane does not
+hydrate the checkout with personal credentials before that proof. The first
+failure is retained and the workspace stops with `execution_first_boot_failed`;
+an ordinary Start retries in a new worker process. Worker configuration carries
+no global personal login, environment or Git identity. Each context receives
+its admitted person's material. Development qualification uses the verified
+artifact record and S9 exercises an ordinary fresh create without the operator.
 
 Set `CLOUD_EXECUTION_CHANGE_FILE` to a regular JSON file containing exactly:
 

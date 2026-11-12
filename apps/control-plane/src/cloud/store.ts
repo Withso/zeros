@@ -1,6 +1,8 @@
 import { executionIntentAuthority, type ExecutionAdmission, type ExecutionIntentAuthority } from "./execution/authority.js";
 import { assertNoExecutionTransition, cancelExecutionActivation, clearStoppedExecutionTransition, confirmExecutionStop, failExecutionActivation, needsExecutionStopConfirmation } from "./execution/activation-state.js";
 import { bindExecutionActivationBoot } from "./execution/activation.js";
+import { assertExecutionCreationBoot, recordExecutionCreation } from "./execution/creation.js";
+import type { RuntimeCapabilities } from "./runtime-capabilities.js";
 import type { ExecutionConnectAuthority } from "./execution/clients.js";
 import type pg from "pg";
 import { createHash } from "node:crypto";
@@ -47,6 +49,7 @@ type CreateWorkspace = {
   /** GitHub repository IDs the creator was just verified to read. */
   readableRepositoryIds?: readonly string[];
   runtimeCanary?: RuntimeCanaryAdmission;
+  executionRuntime?: RuntimeCapabilities;
   /** The lifecycle runs the GitHub checks and sets the source scope before
    * any VM exists; until then the row has no scope (resolvePendingSource). */
   pendingSource?: true;
@@ -396,7 +399,7 @@ export class CloudV2Store {
 
   private async insertWorkspace(tx: Tx, input: CreateWorkspace, createKey?: string): Promise<CloudV2Workspace> {
     const pending = input.pendingSource === true;
-    if (pending && (!input.computerBuildId || input.sourceRepositoryId !== undefined || input.runtimeCanary || Object.keys(input.env ?? {}).length))
+    if (pending && (!input.computerBuildId || input.sourceRepositoryId !== undefined || input.runtimeCanary || input.executionRuntime || Object.keys(input.env ?? {}).length))
       throw new Error("A pending create needs a Computer build and no verified source");
     let sourceRepositoryId = input.sourceRepositoryId, scope: readonly CloudSourceTarget[] | undefined;
     await this.admitCreator(tx, input.organizationId, input.creatorUserId, input.workspaceTokenCreate);
@@ -417,16 +420,25 @@ export class CloudV2Store {
     if (Object.keys(input.env ?? {}).length && sourceRepositoryId === undefined)
       throw new HttpError(409, "cloud_source_review_required", "A workspace environment requires a verified repository identity.");
     const row = (await tx.query<Row>(
-      `INSERT INTO cloud_v2_workspaces (id, org_id, creator_user_id, name, repository, branch, base_branch, state, computer_build_id, source_repositories, source_pending, api_access, created_by_session_id, execution_initiator_user_id, execution_intent_id)
+      `INSERT INTO cloud_v2_workspaces (id, org_id, creator_user_id, name, repository, branch, base_branch, state, computer_build_id, source_repositories, source_pending, api_access, created_by_session_id, execution_initiator_user_id, execution_intent_id, execution_mode)
        VALUES ($1, $2, $3, $4, $5, $6, $7, 'creating', $8, $9::text[], $10,
-         coalesce((SELECT workspace_api_access FROM cloud_api_access_settings WHERE org_id=$2 AND user_id=$3),true), $11, $3, gen_random_uuid()) RETURNING ${COLUMNS}`,
+         coalesce((SELECT workspace_api_access FROM cloud_api_access_settings WHERE org_id=$2 AND user_id=$3),true), $11, $3, gen_random_uuid(), $12) RETURNING ${COLUMNS}`,
       [input.id, input.organizationId, input.creatorUserId, input.name, input.repository, input.branch,
         input.baseBranch, input.computerBuildId,
-        pending ? null : (scope ?? [{ repository: input.repository }]).map(source => source.repository.toLowerCase()), pending, input.createdBySessionId ?? null],
+        pending ? null : (scope ?? [{ repository: input.repository }]).map(source => source.repository.toLowerCase()), pending, input.createdBySessionId ?? null,
+        input.executionRuntime ? "active" : "legacy"],
     )).rows[0]!;
     if (!pending && sourceRepositoryId !== undefined) await this.bindSources(tx, workspace(row), sourceRepositoryId, scope, input.env);
     if (input.runtimeCanary) await consumeRuntimeCanary(tx, workspace(row), input.runtimeCanary, sourceRepositoryId, createKey);
-    if (input.initialPrompt) await this.prompts.enqueueApi(row.id, input.creatorUserId, input.initialPrompt, tx);
+    let promptAdmission;
+    if (input.executionRuntime) {
+      if (!this.prompts.execution) throw new HttpError(503, "execution_unavailable", "Shared execution is unavailable");
+      const authority = await this.prompts.execution.deps.authority.creation(tx, row.id, input.creatorUserId);
+      await tx.query("UPDATE cloud_v2_workspaces SET execution_intent_authority=$2 WHERE id=$1", [row.id, executionIntentAuthority(authority)]);
+      await recordExecutionCreation(tx, row.id, input.executionRuntime);
+      if (input.initialPrompt) promptAdmission = await this.prompts.execution.creationPrompt(tx, authority, input.initialPrompt);
+    }
+    if (input.initialPrompt) await this.prompts.enqueueApi(row.id, input.creatorUserId, input.initialPrompt, tx, undefined, promptAdmission);
     return workspace(row);
   }
 
@@ -771,7 +783,7 @@ export class CloudV2Store {
 
   /** Bind the boot before configuration I/O, without publishing readiness.
    * Lifecycle delivery must not replace a credential once this boot claims it. */
-  async beginWorkerHello(token: string, bootId: string, actingUser = false, runtimeSha256?: string): Promise<CloudV2WorkerSession | null> {
+  async beginWorkerHello(token: string, bootId: string, actingUser = false, runtimeSha256?: string, syncContext = false): Promise<CloudV2WorkerSession | null> {
     const { rows } = await withSystemTx(this.pool, async tx => {
       const result = await tx.query<Row & { execution_mode: "legacy" | "prepared" | "active"; access_epoch: string; login_revision: string; previous_boot_id: string | null }>(
       `WITH prior AS MATERIALIZED (
@@ -788,6 +800,7 @@ export class CloudV2Store {
       const current = result.rows[0];
       if (current?.execution_mode === "active") {
         if (!actingUser || !this.prompts.execution) throw new HttpError(409, "worker_update_required", "Update the worker before shared execution");
+        await assertExecutionCreationBoot(tx, current.id, syncContext);
         await this.prompts.execution.boots.bind(tx, { token, bootId }, current.previous_boot_id);
         await bindExecutionActivationBoot(tx, await this.prompts.execution.worker(tx, { token, bootId }, false, true), runtimeSha256);
       }

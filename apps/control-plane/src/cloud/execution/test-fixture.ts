@@ -12,12 +12,13 @@ import { createCloudV2 } from "../composition.js";
 import { createCloudV2Routes } from "../routes.js";
 import { createCloudV2WorkerRoutes } from "../worker-routes.js";
 import { createCloudApiRoutes } from "../api/routes.js";
+import { createCloudApiMcpRoutes } from "../api/mcp.js";
 import { CloudV2PromptPullReplySchema } from "../prompt-contract.js";
 import { CloudV2BeginActiveReplySchema } from "../contract.js";
 import { teamSharingFixture } from "../team-sharing/test-fixture.js";
 import { executionIntentAuthority } from "./authority.js";
 
-export async function executionFixture(pool: pg.Pool, options: { lifecycle?: boolean; relay?: boolean } = {}) {
+export async function executionFixture(pool: pg.Pool, options: { lifecycle?: boolean; relay?: boolean; actingUserDefault?: boolean; runtimeCanaryKey?: string } = {}) {
   const seed = await teamSharingFixture(pool);
   const keys = { currentKeyVersion: 1, keys: { 1: Buffer.alloc(32, 27).toString("base64url") } };
   const signing = generateKeyPairSync("ed25519");
@@ -26,6 +27,9 @@ export async function executionFixture(pool: pg.Pool, options: { lifecycle?: boo
     github: null, deploymentChannel: "alpha", inviteLinkBase: "https://app.example.test/invite",
     cloudAgentCredentials: { settingsSecretKeyV1: keys.keys[1] },
     cloudV2: { boat: { apiKey: "synthetic-boat-credential" }, apiUrl: "https://api.example.test", realtimeUrl: "https://rt.example.test", promptOutbox: true,
+      ...(options.actingUserDefault === undefined ? {} : { actingUserDefault: options.actingUserDefault }),
+      ...(options.runtimeCanaryKey ? { runtimeCanary: { keys: [{ id: "fixture", publicKey: options.runtimeCanaryKey }],
+        fixture: { creatorUserId: seed.creator.id, organizationId: seed.organizationId, repositoryId: "42" } } } : {}),
       workerSigningKey: signing.privateKey.export({ type: "pkcs8", format: "der" }).toString("base64"),
       runtime: { sha256: "b".repeat(64), store: { endpoint: "https://store.example.test", bucket: "fixture", accessKeyId: "fixture", secretAccessKey: "fixture" } } },
   } as Config;
@@ -35,6 +39,7 @@ export async function executionFixture(pool: pg.Pool, options: { lifecycle?: boo
   app.onError((assembled as unknown as { errorHandler: ErrorHandler }).errorHandler);
   app.route("/", createCloudV2WorkerRoutes(cp.workers));
   app.route("/api/v0", createCloudApiRoutes(cp.api));
+  app.route("/api/mcp", createCloudApiMcpRoutes(cp.api));
   app.use("*", async (c, next) => { c.set("user", seed.actors.get(c.req.header("x-test-actor") ?? "") ?? seed.creator); await next(); });
   app.route("/", createCloudV2Routes(cp.routes));
   const call = (path: string, method = "GET", body?: unknown, user: AuthedUser = seed.creator, headers: Record<string, string> = {}) => app.request(path, {

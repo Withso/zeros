@@ -22,6 +22,18 @@ function fixture() {
 afterEach(() => { for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true }); });
 
 describe("local Dev integration boundaries", () => {
+  it("forwards the explicit active-create switch only to the development backend", () => {
+    const { workspace: w, profile: p } = fixture();
+    w.state.workosWebhook = { secret: "webhook-credential-sentinel" };
+    const settings = { ZEROS_CLOUD_V2_RUNTIME_SHA256: "d".repeat(64) };
+    const environment = (flag?: string) => backendEnvironment(w, p, { database: 21000, api: 21001 }, "fb87f8dd-6161-463b-981c-d039c675e0ca",
+      { ...settings, ...(flag === undefined ? {} : { ZEROS_CLOUD_ACTING_USER_DEFAULT: flag }) });
+    expect(environment()).not.toHaveProperty("ZEROS_CLOUD_ACTING_USER_DEFAULT");
+    expect(environment("1")).toHaveProperty("ZEROS_CLOUD_ACTING_USER_DEFAULT", "1");
+    expect(environment("0")).toHaveProperty("ZEROS_CLOUD_ACTING_USER_DEFAULT", "0");
+    expect(desktopEnvironment(w, p)).not.toHaveProperty("ZEROS_CLOUD_ACTING_USER_DEFAULT");
+    expect(webEnvironment(w, p, 21001)).not.toHaveProperty("ZEROS_CLOUD_ACTING_USER_DEFAULT");
+  });
   it("projects only public auth into the desktop/web while keeping migration and provider authority out", () => {
     const { workspace: w, profile: p } = fixture();
     w.state.workosWebhook = { secret: "webhook-credential-sentinel" };

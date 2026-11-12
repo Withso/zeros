@@ -71,3 +71,18 @@ it("treats a malformed index as unreadable and reports a refused delete", async 
   expect(plan.archives).toEqual([archive("1", 0).key]);
   await expect(pruneRuntimes(store(objects, {}, true), "runtimes", { protect: [], now })).rejects.toThrow(/could not delete/);
 });
+
+it("retires digest-bound capabilities with their archive while preserving protected and recent records", async () => {
+  const capability = (c: string, age: number): StoredObject => ({ key: `cloud-v2/runtime/capabilities/${sha(c)}.json`, lastModified: new Date(now - age), size: 256 });
+  const objects = [archive("1", 10 * day), archive("2", 9 * day), archive("3", 8 * day), archive("4", 0),
+    capability("1", 9 * day), capability("2", 9 * day), capability("5", 9 * day), capability("6", hour)];
+  const client = store(objects, {});
+  const plan = await pruneRuntimes(client, "runtimes", { protect: [sha("2")], now });
+  expect(plan.indices.sort()).toEqual([capability("1", 0).key, capability("5", 0).key].sort());
+  expect(plan.archives).toEqual([archive("1", 0).key]);
+  const deletes = client.send.mock.calls.map(([command]: any[]) => command).filter(command => command.constructor.name === "DeleteObjectsCommand");
+  expect(deletes.map(command => command.input.Delete.Objects.map((o: { Key: string }) => o.Key))).toEqual([
+    [capability("1", 0).key, capability("5", 0).key], [archive("1", 0).key],
+  ]);
+  expect(client.send.mock.calls.some(([command]: any[]) => command.constructor.name === "GetObjectCommand")).toBe(false);
+});

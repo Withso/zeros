@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createReadStream, lstatSync } from "node:fs";
 import { z } from "zod";
+import { WorkerCapabilitiesSchema } from "./runtime-capabilities.js";
 
 const ENTRYPOINTS = ["worker.mjs", "cursor-host.mjs", "git-askpass.mjs", "gh.mjs", "bin/gh", "bin/git-askpass"];
 const NATIVE = ["@openai/codex-linux-x64", "@anthropic-ai/claude-agent-sdk-linux-x64", "@cursor/sdk-linux-x64"];
@@ -19,7 +20,7 @@ const member = (archive: string, name: string) => execFileSync("tar", ["-xOzf", 
   maxBuffer: 16 * 1024 * 1024, timeout: 60_000, stdio: ["ignore", "pipe", "pipe"],
 });
 
-export async function inspectRuntimeArchive(archive: string): Promise<{ sha256: string; bytes: number; commit: string; sourceSha256: string }> {
+export async function inspectRuntimeArchive(archive: string): Promise<{ sha256: string; bytes: number; commit: string; sourceSha256: string; features?: string[] }> {
   const stat = lstatSync(archive);
   if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("Runtime archive must be a regular file");
   if (stat.size < 1 || stat.size > 1024 ** 3) throw new Error("Runtime archive exceeds the size limit");
@@ -36,7 +37,15 @@ export async function inspectRuntimeArchive(archive: string): Promise<{ sha256: 
     if (!expected || expected.bytes !== content.length || createHash("sha256").update(content).digest("hex") !== expected.sha256)
       throw new Error("Runtime entrypoint does not match its build manifest");
   }
+  let features: string[] | undefined;
+  const capabilities = manifest.files["worker-capabilities.json"];
+  if (capabilities) {
+    const content = member(archive, "worker-capabilities.json");
+    if (content.length > 16_384 || capabilities.bytes !== content.length || createHash("sha256").update(content).digest("hex") !== capabilities.sha256)
+      throw new Error("Runtime capabilities do not match the build manifest");
+    features = WorkerCapabilitiesSchema.parse(JSON.parse(content.toString("utf8"))).features;
+  }
   const hash = createHash("sha256");
   for await (const chunk of createReadStream(archive)) hash.update(chunk);
-  return { sha256: hash.digest("hex"), bytes: stat.size, ...build };
+  return { sha256: hash.digest("hex"), bytes: stat.size, ...build, ...(features ? { features } : {}) };
 }

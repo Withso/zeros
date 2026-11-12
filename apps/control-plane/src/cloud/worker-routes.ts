@@ -306,7 +306,7 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
       throw new HttpError(409, "worker_runtime_mismatch", "Worker runtime requires an update");
     if (deps.promptOutbox && !(c.req.header("x-zeros-worker-features") ?? "").split(",").map(value => value.trim()).includes("prompt-outbox-v1"))
       throw new HttpError(409, "worker_runtime_mismatch", "Worker runtime requires an update");
-    const workspace = await deps.store.beginWorkerHello(token, input.bootId, workerFeatures(c).has(ACTING_USER_FEATURE), input.runtimeSha256);
+    const workspace = await deps.store.beginWorkerHello(token, input.bootId, workerFeatures(c).has(ACTING_USER_FEATURE), input.runtimeSha256, workerFeatures(c).has(SYNC_CONTEXT_FEATURE));
     if (!workspace) throw unauthorized();
     if (deps.workspaceSync && !await deps.workspaceSync.advertise(token, input.bootId, workerFeatures(c).has(SYNC_FEATURE), undefined, workerFeatures(c).has(SYNC_CONTEXT_FEATURE) && workerFeatures(c).has("acting-user-v1"))) throw unauthorized();
     if (deps.store.chatEdits && !await deps.store.chatEdits.advertise(token, input.bootId, workerFeatures(c).has("chat-edit-v1"))) throw unauthorized();

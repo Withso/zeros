@@ -150,7 +150,8 @@ async function start(workspace, profile) {
     const tunnel = await ensureTunnel(workspace, profile.cloudflare); signal.throwIfAborted();
     await configureTunnel(workspace, profile.cloudflare, ports); signal.throwIfAborted();
     await ensureWorkosWebhook(workspace, profile); signal.throwIfAborted();
-    const apiEnv = { ...env, ...backendEnvironment(workspace, profile, ports, runId, { ZEROS_CLOUD_V2_RUNTIME_SHA256: runtime }) };
+    const apiEnv = { ...env, ...backendEnvironment(workspace, profile, ports, runId, { ZEROS_CLOUD_V2_RUNTIME_SHA256: runtime,
+      ...(process.env.ZEROS_CLOUD_ACTING_USER_DEFAULT === undefined ? {} : { ZEROS_CLOUD_ACTING_USER_DEFAULT: process.env.ZEROS_CLOUD_ACTING_USER_DEFAULT }) }) };
     const apiCwd = path.join(root, "apps/control-plane"), logs = privateDirectory(workspace.directory, "logs");
     processes.start("Control plane", process.execPath, watch
       ? [path.join(apiCwd, "node_modules/tsx/dist/cli.mjs"), "watch", "--clear-screen=false", "src/index.ts"]

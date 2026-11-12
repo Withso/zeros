@@ -28,6 +28,25 @@ d("cloud initial allocation cleanup", () => {
     vi.spyOn(store, "workspaceImage").mockResolvedValue({ from: "fixture-snapshot", prune: [] });
   });
 
+  it("leaves an active fresh checkout to the worker's bootstrap lease after boot-clean", async () => {
+    await pool.query("UPDATE cloud_v2_workspaces SET execution_mode='active' WHERE id=$1", [workspaceId]);
+    const prepareRepository = vi.fn(async () => {});
+    const compute = {
+      create: vi.fn(async () => ({ sandboxId: "bx_fixture1" })),
+      exec: vi.fn(async () => ({ exitCode: 0, stdout: "", timedOut: false })),
+      hostPort: vi.fn(async () => ({ url: "https://fixture-41783.on.boat.dev", token: "synthetic-port-token" })),
+    } as unknown as CloudV2Compute;
+    await new CloudV2Lifecycle({ store, compute, prepareRepository,
+      runtime: { sha256: "b".repeat(64), url: async () => "https://example.test/runtime.tar.gz" },
+      publicKeys: [generateKeyPairSync("ed25519").publicKey.export({ type: "spki", format: "pem" }).toString()],
+      sealPortToken: () => ({ encrypted: true }), stopWorker: async () => true, bootEnv: () => ({}),
+      sandboxName: () => `zeros-fixture-${workspaceId}`, sleep: async () => {},
+    }).tick();
+    expect(compute.create).toHaveBeenCalledOnce();
+    expect(prepareRepository).not.toHaveBeenCalled();
+    expect((await pool.query("SELECT worker_token_hash IS NOT NULL delivered FROM cloud_v2_workspaces WHERE id=$1", [workspaceId])).rows[0].delivered).toBe(true);
+  });
+
   it("retires a held create reply when another lifecycle replica deletes the workspace", async () => {
     const entered = gate(), release = gate(), deletingClaimed = gate(), allocated = new Set<string>();
     const compute = {

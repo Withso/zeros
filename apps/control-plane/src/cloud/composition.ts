@@ -24,6 +24,8 @@ import { HISTORY_OPS, readCloudV2History } from "./history.js";
 import { CLOUD_V2_HOME, CLOUD_V2_LIFECYCLE_CHANNEL, CloudV2Lifecycle, type CloudV2TimingRecord } from "./lifecycle.js";
 import { cloudV2CheckpointStorage, openCheckpointKey, sealCheckpointKey } from "./checkpoint.js";
 import { runtimeStorageClient } from "./runtime-source.js";
+import { activeRuntimeQualification } from "./runtime-capabilities.js";
+import { executionCreationRuntime } from "./execution/creation.js";
 import { CLOUD_V2_PROXY_PREFIX, type CloudV2ProxyDeps } from "./proxy.js";
 import { CloudV2Relay } from "./relay.js";
 import { cloudV2Runtime } from "./runtime.js";
@@ -104,10 +106,16 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   if (!keys) throw new Error("Cloud v2 requires the credential encryption keyring");
   const store = new CloudV2Store(pool, keys);
   const runtime = cloudV2Runtime(v2.runtime.sha256, v2.runtime.store);
+  const activeCreateRuntime = activeRuntimeQualification(config.deploymentChannel, v2.runtime);
   const runtimeCanary = config.deploymentChannel === "alpha" && v2.runtimeCanary ? new RuntimeCanaryAuthority(v2.runtimeCanary) : undefined;
   const defaultRuntimeForWorkspace = workspaceRuntimeResolver(pool, runtime, runtimeCanary?.policy);
-  const runtimeForWorkspace = async (workspace: CloudV2Workspace & { executionTransitionId?: string }) =>
-    (workspace.executionTransitionId ? await executionActivationRuntime(pool, workspace.id, runtime) : null) ?? defaultRuntimeForWorkspace(workspace);
+  const runtimeForWorkspace = async (workspace: CloudV2Workspace & { executionTransitionId?: string; executionMode?: CloudV2WorkerSession["executionMode"] }) => {
+    const activation = workspace.executionTransitionId ? await executionActivationRuntime(pool, workspace.id, runtime) : null;
+    if (activation) return activation;
+    const selected = await defaultRuntimeForWorkspace(workspace);
+    if (workspace.executionMode && workspace.executionMode !== "active") return selected;
+    return await executionCreationRuntime(pool, workspace.id, selected, activeCreateRuntime) ?? selected;
+  };
   const compute = new BoatCloudV2Compute(new BoatApiClient({
     apiKey: v2.boat.apiKey, timeoutMs: 120_000, ...(v2.boat.billingOrg ? { billingOrg: v2.boat.billingOrg } : {}),
   }));
@@ -257,6 +265,8 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   const asyncCreateFrom = Date.now() + (v2.asyncCreateDelayMs ?? (config.deploymentChannel === "development" ? 0 : CLOUD_V2_ASYNC_CREATE_DELAY_MS));
   const teamSharing = new CloudTeamSharing(pool,store,github,listenerPool);
   const routes: CloudV2RouteDeps = {
+    actingUserDefault: v2.actingUserDefault === true,
+    activeCreateRuntime,
     teamSharing,
     execution,
     store,

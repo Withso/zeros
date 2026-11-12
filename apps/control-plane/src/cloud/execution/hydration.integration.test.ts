@@ -21,12 +21,14 @@ database("persisted lifecycle execution identity", () => {
   afterEach(async () => { await f?.close(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
   afterAll(() => pool.end());
 
-  it("hydrates with the persisted initiator's own credential", async () => {
+  it("authorizes the persisted initiator and leaves personal checkout material to the clean worker", async () => {
+    const admission = vi.spyOn(f.cp.execution.deps.authority, "admit");
     await f.cp.lifecycle!.tick();
-    expect(f.cp.compute.execLong).toHaveBeenCalledOnce();
-    const input = vi.mocked(f.cp.compute.execLong).mock.calls[0]![3];
-    expect(input).toBe(`Authorization: Basic ${Buffer.from(`x-access-token:synthetic-${f.viewer.id}`).toString("base64")}\n`);
-    expect(f.fetcher.mock.calls.every(([, init]) => new Headers(init?.headers).get("authorization") === `Bearer synthetic-${f.viewer.id}`)).toBe(true);
+    expect(admission).toHaveBeenCalled();
+    expect(admission.mock.calls.every(([id, user]) => id === f.workspace.id && user === f.viewer.id)).toBe(true);
+    expect(f.cp.compute.execLong).not.toHaveBeenCalled();
+    expect(vi.mocked(f.cp.compute.exec).mock.calls.some(([, command]) => command.includes("systemctl restart zeros-worker.service"))).toBe(true);
+    expect(JSON.stringify(vi.mocked(f.cp.compute.exec).mock.calls)).not.toContain(`synthetic-${f.viewer.id}`);
   });
 
   it("never falls back to the Creator when the initiator has gone", async () => {
@@ -48,22 +50,24 @@ database("persisted lifecycle execution identity", () => {
     expect(f.cp.compute.exec).not.toHaveBeenCalled();
   });
 
-  it("does not deliver the worker token after access changes during checkout", async () => {
-    vi.mocked(f.cp.compute.execLong).mockImplementationOnce(async () => {
+  it("does not deliver the worker token after access changes during runtime installation", async () => {
+    vi.mocked(f.cp.compute.exec).mockImplementationOnce(async () => {
       await pool.query("DELETE FROM organization_members WHERE org_id=$1 AND user_id=$2", [f.organizationId, f.viewer.id]);
       return ready;
     });
     await f.cp.lifecycle!.tick();
-    expect(f.cp.compute.execLong).toHaveBeenCalledOnce();
+    expect(f.cp.compute.execLong).not.toHaveBeenCalled();
+    expect((await pool.query("SELECT count(*)::int n FROM organization_members WHERE org_id=$1 AND user_id=$2", [f.organizationId, f.viewer.id])).rows[0].n).toBe(0);
     expect(vi.mocked(f.cp.compute.exec).mock.calls.some(([, command]) => command.includes("systemctl restart zeros-worker.service"))).toBe(false);
   });
 
-  it("does not deliver the worker token after Stop supersedes a held checkout", async () => {
-    vi.mocked(f.cp.compute.execLong).mockImplementationOnce(async () => {
+  it("does not deliver the worker token after Stop supersedes runtime installation", async () => {
+    vi.mocked(f.cp.compute.exec).mockImplementationOnce(async () => {
       await pool.query("UPDATE cloud_v2_workspaces SET state='stopping',stop_generation=stop_generation+1 WHERE id=$1", [f.workspace.id]);
       return ready;
     });
     await f.cp.lifecycle!.tick();
+    expect((await pool.query("SELECT state FROM cloud_v2_workspaces WHERE id=$1", [f.workspace.id])).rows[0].state).toBe("stopping");
     expect(vi.mocked(f.cp.compute.exec).mock.calls.some(([, command]) => command.includes("systemctl restart zeros-worker.service"))).toBe(false);
   });
 });
