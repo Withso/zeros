@@ -99,7 +99,9 @@ import {
   authGetSessionUser,
   authSignOutEverywhere,
   clearWorkOSSessionAfterServerRevocation,
+  drainAuthRefreshForQuit,
   getValidSessionForMain,
+  resetAuthQuitForTests,
   listSignedInAccountsForMain,
   MAX_SIGNED_IN_ACCOUNTS,
   onMainAuthSessionChanged,
@@ -547,6 +549,60 @@ describe("WorkOS desktop multi-account sessions", () => {
       mocks.raw = null;
       await expect(getValidSessionForMain()).resolves.toBeNull();
       expect(lines()).toEqual(["[auth] signed out reason=stored_session_missing", "[auth] signed out reason=stored_session_missing"]);
+    });
+  });
+
+  describe("quitting never loses a rotated refresh token", () => {
+    const rotated = () => ({ status: "active", session: { accessToken: "access-next", refreshToken: "refresh-next", expiresAt: Date.now() + 300_000,
+      providerSubject: "user_example", sessionId: "session_example", clientKind: "desktop", email: "person@example.com", name: "Example Person", authenticationMethod: "GoogleOAuth" } });
+    afterEach(() => { resetAuthQuitForTests(); });
+
+    it("holds the quit until a refresh in flight has stored the rotated token", async () => {
+      await install(Date.now() - 1);
+      let finish!: (value: unknown) => void;
+      mocks.refresh.mockReturnValue(new Promise(resolve => { finish = resolve; }));
+      const reading = getValidSessionForMain();
+      await vi.waitFor(() => expect(mocks.refresh).toHaveBeenCalledTimes(1));
+      let drained = false;
+      const drain = drainAuthRefreshForQuit().then(() => { drained = true; });
+      await new Promise(resolve => setTimeout(resolve, 20));
+      expect(drained).toBe(false);
+      finish(rotated());
+      await drain; await reading;
+      expect(parseStoredTokenSnapshot(mocks.raw)?.tokens).toMatchObject({ refreshToken: "refresh-next" });
+    });
+
+    it("sends no new refresh once quitting has begun, and keeps the stored session", async () => {
+      await install(Date.now() - 1);
+      await drainAuthRefreshForQuit();
+      await expect(getValidSessionForMain()).resolves.toBeNull();
+      expect(mocks.refresh).not.toHaveBeenCalled();
+      expect(parseStoredTokenSnapshot(mocks.raw)?.tokens).toMatchObject({ refreshToken: "refresh-current" });
+    });
+
+    it("registers the drain with the quit barrier every quit path awaits (Cmd-Q, a script's quit, an update)", async () => {
+      const { runQuitSteps } = await import("../quit-barrier");
+      await install(Date.now() - 1);
+      let finish!: (value: unknown) => void;
+      mocks.refresh.mockReturnValue(new Promise(resolve => { finish = resolve; }));
+      void getValidSessionForMain();
+      await vi.waitFor(() => expect(mocks.refresh).toHaveBeenCalledTimes(1));
+      let quit = false;
+      const quitting = runQuitSteps().then(() => { quit = true; });
+      await new Promise(resolve => setTimeout(resolve, 20));
+      expect(quit).toBe(false);
+      finish(rotated()); await quitting;
+      expect(parseStoredTokenSnapshot(mocks.raw)?.tokens).toMatchObject({ refreshToken: "refresh-next" });
+    });
+
+    it("lets the quit proceed when the refresh outlasts its bound", async () => {
+      await install(Date.now() - 1);
+      mocks.refresh.mockReturnValue(new Promise(() => {}));
+      void getValidSessionForMain();
+      await vi.waitFor(() => expect(mocks.refresh).toHaveBeenCalledTimes(1));
+      const started = Date.now();
+      await drainAuthRefreshForQuit(30);
+      expect(Date.now() - started).toBeLessThan(1_000);
     });
   });
 });

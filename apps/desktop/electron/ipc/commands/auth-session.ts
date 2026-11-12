@@ -30,6 +30,7 @@ import { workOSDesktopClientForMain } from "../../workos-desktop-runtime";
 import { requestWorkOSDesktopRevocation } from "../../workos-desktop-revocation";
 import { controlPlaneFetch } from "../../control-plane-fetch";
 import { logSignedOut, noteSignedIn } from "../../auth-signed-out-log";
+import { holdQuitFor } from "../../quit-barrier";
 
 const TOKENS_KEY = "auth-session:tokens";
 // Other signed-in WorkOS accounts. The active account stays in TOKENS_KEY, so
@@ -261,8 +262,32 @@ async function refreshTokens(
 }
 
 let inFlightRefresh: Promise<RefreshOutcome> | null = null;
+/** Set once the app starts quitting: a refresh begun now could rotate the
+ * refresh token at the provider and exit before storing the new one. */
+let quitting = false;
+const QUIT_REFRESH_BOUND_MS = 10_000;
+
+/** Quit (Cmd-Q, a script's quit, or an update relaunch) waits, bounded, for a
+ * refresh in flight to store its rotated refresh token; no new refresh starts. */
+export function drainAuthRefreshForQuit(boundMs = QUIT_REFRESH_BOUND_MS): Promise<void> {
+  quitting = true;
+  const flight = inFlightRefresh;
+  if (!flight) return Promise.resolve();
+  return new Promise<void>(resolve => {
+    const bound = setTimeout(resolve, boundMs);
+    bound.unref?.();
+    void flight.catch(() => undefined).finally(() => { clearTimeout(bound); resolve(); });
+  });
+}
+
+export function resetAuthQuitForTests(): void { quitting = false; }
+
+// Every quit path (main's before-quit, the updater's install) awaits this.
+holdQuitFor(() => drainAuthRefreshForQuit());
 
 function refreshOnce(): Promise<RefreshOutcome> {
+  // Quitting: keep the stored session as it is (transient), and send nothing that could rotate it.
+  if (!inFlightRefresh && quitting) return Promise.resolve({ status: "transient" });
   if (!inFlightRefresh) {
     inFlightRefresh = withCrossProcessFileLock(
       sessionLockPath(),
