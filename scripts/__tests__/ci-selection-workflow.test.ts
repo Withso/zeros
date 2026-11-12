@@ -272,8 +272,9 @@ describe("selective pull-request CI", () => {
       path.join(fixture.env.RUNNER_TEMP, "ci-policy/classifier.outputs"),
     );
     expect(Object.keys(outputs).sort()).toEqual(
-      ["ledger", ...JOBS.map((id) => `job-${id}`)].sort(),
+      ["assurance", "ledger", ...JOBS.map((id) => `job-${id}`)].sort(),
     );
+    expect(outputs.assurance).toBe("false");
     expect(outputs.ledger).toBe(classifier.ledger);
     const ledger = JSON.parse(outputs.ledger);
     expect(ledger.schema).toBe("zeros.ci-selection/v1");
@@ -1043,5 +1044,57 @@ describe("current pull-request labels", () => {
     const { result, output } = run({}, fakeGh(body, status));
     expect(result.status).not.toBe(0);
     expect(output).toBe("");
+  });
+});
+
+describe("light PR CI: the merge group runs the complete inventory", () => {
+  const expression = (text: string) => text.replace(/^\$\{\{\s*([\s\S]*?)\s*\}\}$/, "$1");
+  const decide = (scope: string, assurance: string) => new Function("needs", "cancelled", `return (${expression(ci.jobs.assurance!.if!)});`)(
+    { scope: { result: scope, outputs: { assurance } } }, () => false);
+
+  it("runs the remaining Preflight suite on a PR only for ci:full or a failed scope", () => {
+    expect(decide("success", "false")).toBe(false);
+    expect(decide("success", "true")).toBe(true);
+    expect(decide("failure", "")).toBe(true);
+    expect(ci.jobs.assurance!.uses).toBe("./.github/workflows/preflight.yml");
+  });
+
+  it("emits assurance=true from the trusted scope only when ci:full is requested", () => {
+    for (const [labels, expected] of [['["ci:full"]', "true"], ['["ci:ui-smoke"]', "false"], ["[]", "false"]] as const) {
+      const fixture = fixtureRepository(TRUSTED_POLICY);
+      const result = runStep(scopeStep(), { ...fixture.env, LABELS_JSON: labels }, fixture.directory);
+      expect(result.status, result.stderr).toBe(0);
+      expect(readOutputs(fixture.env.GITHUB_OUTPUT).assurance, labels).toBe(expected);
+    }
+  });
+
+  it("keeps Full assurance green for an intentionally skipped suite and red for any other gap", () => {
+    const step = ci.jobs["full-assurance"]!.steps.find(candidate => candidate.name === "Enforce complete PR coverage")!;
+    const run = (env: Record<string, string>) => {
+      const summary = path.join(temporaryDirectory(), "summary");
+      writeFileSync(summary, "");
+      const result = runStep(step, { SELECTED_RESULT: "success", EXTENDED_RESULT: "success", SCOPE_RESULT: "success", ...env, GITHUB_STEP_SUMMARY: summary });
+      return { status: result.status, summary: readFileSync(summary, "utf8") };
+    };
+    const covered = run({ REMAINING_RESULT: "skipped", ASSURANCE_REQUESTED: "false" });
+    expect(covered.status).toBe(0);
+    expect(covered.summary).toContain("covered by the merge group");
+    expect(run({ REMAINING_RESULT: "skipped", ASSURANCE_REQUESTED: "true" }).status).not.toBe(0);
+    expect(run({ REMAINING_RESULT: "failure", ASSURANCE_REQUESTED: "true" }).status).not.toBe(0);
+    expect(run({ REMAINING_RESULT: "skipped", ASSURANCE_REQUESTED: "false", SCOPE_RESULT: "failure" }).status).not.toBe(0);
+    expect(run({ REMAINING_RESULT: "success", ASSURANCE_REQUESTED: "true" }).status).toBe(0);
+  });
+
+  it("names unselected lanes as covered by the merge group in the required aggregates' summaries", () => {
+    for (const id of ["quality", "test", "source-sync", "control-plane", "ui-smoke"]) {
+      const step = ci.jobs[id]!.steps.find(candidate => candidate.name === "Verify CI selection")!;
+      const summary = path.join(temporaryDirectory(), "summary");
+      writeFileSync(summary, "");
+      const base = { SCOPE_RESULT: "success", DATABASE_SCOPE_RESULT: "success", STATIC_RESULT: "success", DATABASE_FLOOR: "false" };
+      const result = runStep(step, { ...base, LANE_SELECTED: "false", LANE_RESULT: "skipped", GITHUB_STEP_SUMMARY: summary });
+      expect(result.status, `${id}: ${result.stderr}`).toBe(0);
+      expect(readFileSync(summary, "utf8"), id).toContain("covered by the merge group");
+      expect(runStep(step, { ...base, LANE_SELECTED: "true", LANE_RESULT: "skipped", GITHUB_STEP_SUMMARY: summary }).status, id).not.toBe(0);
+    }
   });
 });

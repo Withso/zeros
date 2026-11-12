@@ -40,6 +40,10 @@ session itself.
 7. **Merge** with `pnpm agent:merge <n>`. On main's merge queue it enqueues,
    and several PRs may be in flight; each is tested on top of main and the
    entries ahead of it. Without a queue it arms auto-merge for one PR at a time.
+   PR CI is light: only path-selected lanes run, and the merge group runs
+   everything. Add `ci:full` to run the complete suite on the PR (CI-definition
+   changes, risky refactors). `pnpm agent:queue-status <n>` shows why a PR left
+   the queue and which merge-group job failed.
    Apply `ci:*` labels when you open the PR (`gh pr create --label`) or before
    the final push. Label events start no CI run; a label added after CI started
    needs `gh run rerun <run-id>` (whole run) or a push.

@@ -11,14 +11,31 @@ The ruleset still requires `quality`, `test`, `build`, `source-sync (macOS)`,
 is an additional aggregate for a future ruleset migration; it is not required
 by this change. Actionlint and CodeQL retain their separate workflows.
 
-## Full coverage without duplicate PR workloads
+## Light PR CI; the merge group runs everything
 
-Every PR, including documentation-only changes, runs the complete verification
-inventory. `CI` executes the trusted path-selected workloads for the required
-contexts and calls Preflight for the remaining workloads in the **same run**.
-The complementary call receives explicit ownership booleans from the successful
-trusted scope decision. It runs all unselected workloads, including eight
-database shards and three browser shards. A failed scope authorizes no skips.
+Since 2026-11-12 the merge group is the one complete run. Every PR merges
+through main's merge queue, and each merge group runs the full Preflight
+(every lane, all Vitest, database and browser shards, macOS), CodeQL and
+actionlint on main plus the entries ahead. A PR therefore runs only its
+trusted path-selected workloads for the required contexts: typecheck, lint,
+check:ui, secret scan, control-plane static, actionlint and CodeQL, plus the
+lanes its paths or `ci:*` labels select. The nine required names still report
+on every PR; an unselected lane passes as before (`false:skipped`) and its
+aggregate's job summary says it is covered by the merge group. Median
+time-to-merge was about 46 min of CI (22 PR + 24 queue) with both runs.
+
+`ci:full` (or a failed scope, which authorizes no skips) still calls Preflight
+for the remaining workloads in the **same run** (the `assurance` job, "Remaining
+full suite"). That call receives explicit ownership booleans from the
+successful trusted scope decision and runs all unselected workloads, including
+eight database shards and three browser shards. Without `ci:full` it is skipped
+and the non-required "Full assurance" check records "covered by the merge
+group". What used to fail on the PR now fails in the merge group: UI smoke
+without `ci:ui-smoke`, database shards, macOS and build for paths that do not
+select them, and alpha-gate. The failing PR leaves the queue
+(`RemovedFromMergeQueueEvent`, e.g. `failed_checks`); `pnpm agent:queue-status
+[<n>...]` lists the queue and each named PR's removal reason and failed
+merge-group jobs. Fix or rerun, then `pnpm agent:merge <n>` again.
 These inputs are ignored on push and merge-group events, so canonical release
 Preflight always retains its complete exact-source graph.
 
@@ -220,7 +237,7 @@ It does not provide an immutable merge request or an App-owned merge gate.
 
 | Label                 | Additional selection                           |
 | --------------------- | ---------------------------------------------- |
-| `ci:full`             | Every PR lane plus `ui-smoke`                  |
+| `ci:full`             | Every PR lane, `ui-smoke` and the remaining suite |
 | `ci:ui-smoke`         | Full composer smoke                            |
 | `ci:macos`            | macOS verification                             |
 | `ci:control-plane-db` | Control-plane static and database suites       |

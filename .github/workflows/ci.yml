@@ -45,6 +45,7 @@ jobs:
       job-ui-smoke: ${{ steps.scope.outputs.job-ui-smoke }}
       job-control-plane-static: ${{ steps.scope.outputs.job-control-plane-static }}
       job-secret-scan: ${{ steps.scope.outputs.job-secret-scan }}
+      assurance: ${{ steps.scope.outputs.assurance }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -229,8 +230,11 @@ jobs:
           }
           validateLedger(ledger);
           // Forward the classifier ledger unchanged and publish only validated jobs.
+          // The merge group runs the complete inventory, so the complementary
+          // Preflight call runs on a PR only when ci:full asks for it.
           appendFileSync(process.env.GITHUB_OUTPUT, [
-            `ledger=${ledgerJson}`, ...JOB_IDS.map((id) => `job-${id}=${outputs.get(`job-${id}`)}`), "",
+            `ledger=${ledgerJson}`, ...JOB_IDS.map((id) => `job-${id}=${outputs.get(`job-${id}`)}`),
+            `assurance=${ledger.requests.includes("ci:full")}`, "",
           ].join("\n"));
           appendFileSync(process.env.GITHUB_STEP_SUMMARY, [
             "### Pull-request CI selection", "",
@@ -380,7 +384,8 @@ jobs:
             exit 1
           fi
           case "${LANE_SELECTED}:${LANE_RESULT}" in
-            true:success|false:skipped|false:success) ;;
+            true:success) ;;
+            false:skipped|false:success) echo "- quality: not path-selected on this PR; covered by the merge group's full Preflight." >> "${GITHUB_STEP_SUMMARY:-/dev/null}" ;;
             *) echo "::error::Invalid quality selection/result: ${LANE_SELECTED}:${LANE_RESULT}"; exit 1 ;;
           esac
 
@@ -599,7 +604,8 @@ jobs:
             exit 1
           fi
           case "${LANE_SELECTED}:${LANE_RESULT}" in
-            true:success|false:skipped|false:success) ;;
+            true:success) ;;
+            false:skipped|false:success) echo "- Vitest: not path-selected on this PR; covered by the merge group's full Preflight." >> "${GITHUB_STEP_SUMMARY:-/dev/null}" ;;
             *) echo "::error::Invalid Vitest selection/result: ${LANE_SELECTED}:${LANE_RESULT}"; exit 1 ;;
           esac
       - name: Verify runtime selection
@@ -855,7 +861,8 @@ jobs:
             exit 1
           fi
           case "${LANE_SELECTED}:${LANE_RESULT}" in
-            true:success|false:skipped|false:success) ;;
+            true:success) ;;
+            false:skipped|false:success) echo "- macOS: not path-selected on this PR; covered by the merge group's full Preflight." >> "${GITHUB_STEP_SUMMARY:-/dev/null}" ;;
             *) echo "::error::Invalid macOS selection/result: ${LANE_SELECTED}:${LANE_RESULT}"; exit 1 ;;
           esac
       - name: Enforce the source-sync result
@@ -1093,7 +1100,8 @@ jobs:
             *) echo "::error::The trusted database floor is missing or invalid."; exit 1 ;;
           esac
           case "${LANE_SELECTED}:${LANE_RESULT}" in
-            true:success|false:skipped|false:success) ;;
+            true:success) ;;
+            false:skipped|false:success) echo "- database: not path-selected on this PR; covered by the merge group's full Preflight." >> "${GITHUB_STEP_SUMMARY:-/dev/null}" ;;
             *) echo "::error::Invalid database selection/result: ${LANE_SELECTED}:${LANE_RESULT}"; exit 1 ;;
           esac
       - name: Checkout
@@ -1182,7 +1190,8 @@ jobs:
             exit 1
           fi
           case "${LANE_SELECTED}:${LANE_RESULT}" in
-            true:success|false:skipped|false:success) ;;
+            true:success) ;;
+            false:skipped|false:success) echo "- UI smoke (composer): not selected on this PR (ci:ui-smoke); covered by the merge group's full Preflight." >> "${GITHUB_STEP_SUMMARY:-/dev/null}" ;;
             *) echo "::error::Invalid workload selection/result: ${LANE_SELECTED}:${LANE_RESULT}"; exit 1 ;;
           esac
 
@@ -1484,10 +1493,13 @@ jobs:
   # Execute the complement of the trusted selection in this same run. Every
   # PR still gets full coverage, including all database and browser shards.
   # Required aggregates never depend on these additional workloads.
+  # Light PR CI: every merge group runs the complete Preflight on main plus the
+  # entries ahead, so a PR runs only its path-selected lanes. ci:full (or a
+  # failed scope, which authorizes no skips) still runs the remaining suite here.
   assurance:
     name: Remaining full suite
     needs: [scope, control-plane-scope, control-plane-static]
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && (needs.scope.result != 'success' || needs.scope.outputs.assurance == 'true') }}
     uses: ./.github/workflows/preflight.yml
     with:
       full_database: true
@@ -1506,7 +1518,7 @@ jobs:
   full-assurance:
     name: Full assurance
     if: always()
-    needs: [ci-gate, assurance, extended]
+    needs: [scope, ci-gate, assurance, extended]
     runs-on: ubuntu-latest
     steps:
       - name: Enforce complete PR coverage
@@ -1514,8 +1526,14 @@ jobs:
           SELECTED_RESULT: ${{ needs.ci-gate.result }}
           REMAINING_RESULT: ${{ needs.assurance.result }}
           EXTENDED_RESULT: ${{ needs.extended.result }}
+          SCOPE_RESULT: ${{ needs.scope.result }}
+          ASSURANCE_REQUESTED: ${{ needs.scope.outputs.assurance }}
         run: |
           set -euo pipefail
+          if [ "$REMAINING_RESULT" = "skipped" ] && [ "$SCOPE_RESULT" = "success" ] && [ "$ASSURANCE_REQUESTED" = "false" ]; then
+            echo "- Remaining full suite: not requested (no ci:full); covered by the merge group's full Preflight." >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+            REMAINING_RESULT=success
+          fi
           for result in "$SELECTED_RESULT" "$REMAINING_RESULT" "$EXTENDED_RESULT"; do
             if [ "$result" != "success" ]; then
               echo "::error::Full PR assurance is incomplete: $result"

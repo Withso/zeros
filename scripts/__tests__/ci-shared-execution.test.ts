@@ -37,6 +37,7 @@ describe("shared PR verification", () => {
     expect(ci.extended?.uses).toBe("./.github/workflows/scheduled.yml");
     expect(ci["ci-gate"].needs).not.toContain("assurance");
     expect(ci["full-assurance"].needs).toEqual([
+      "scope",
       "ci-gate",
       "assurance",
       "extended",

@@ -170,3 +170,6 @@ Run `pnpm ci:plan` to preview the path-selected lanes, and add any extra `ci:*`
 labels before the final push. Labels only add checks; they cannot remove path
 floors. See [docs/ci.md](docs/ci.md) for the closed label vocabulary and fallback
 rules. CI-definition PRs merge through `pnpm agent:merge` like any other PR.
+PR CI runs only path-selected lanes; the merge group runs the complete suite.
+Add `ci:full` for the complete suite on the PR, and use
+`pnpm agent:queue-status <n>` when a PR leaves the queue.
