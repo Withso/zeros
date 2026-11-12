@@ -16,9 +16,10 @@ vi.mock("../../../platform/git", async (original) => ({
   designDeleteFrame: producer.deleteFrame,
 }));
 
-import { designFrameMissingComponents, designLayerDisplayName, designMissingComponentOf } from "../state/design-component-parts";
-import { designInstanceIgnoredAttributes } from "../state/design-component-options";
+import { designFrameMissingComponents, designFrameOptionsProblem, designLayerDisplayName, designMissingComponentOf } from "../state/design-component-parts";
+import { designComponentRecordProblem, designInstanceIgnoredAttributes } from "../state/design-component-options";
 import { deleteDesignFrameCached, designWorkspaceSnapshotCache, resetDesignWorkspaceCacheForTests } from "../state/design-workspace-cache";
+import { DesignComponentOptions } from "../design-component-options";
 import { DesignFrameDeleteDialog } from "../design-frame-delete-dialog";
 import { DesignFrameLoadError, DesignFrameProblemLabel, DesignFrameProblemMark } from "../design-frame-load-error";
 import { DesignFramePreparation } from "../state/design-workspace-preparation";
@@ -53,7 +54,7 @@ describe("an instance whose component is gone", () => {
 
   it("is shown on the host frame's label and in the panel, not as a Frame", () => {
     expect(source).toContain("designFrameMissingComponents(frame)");
-    expect(source).toContain('data-design-frame-problem="missing-component"');
+    expect(source).toContain('<DesignFrameProblemMark kind="missing-component"');
     expect(source).toContain("designMissingComponentOf(frame, instanceNodeId)");
     expect(source).toContain("data-design-component-missing=");
   });
@@ -179,5 +180,102 @@ describe("a frame whose source cannot be read", () => {
     expect(canvasSource).toContain("<DesignFrameProblemLabel");
     expect(canvasSource).toContain("<DesignFrameProblemMark");
     expect(source).not.toMatch(/preparation\?\.errors \?\? \{\}\)\[0\]/);
+  });
+});
+
+describe("a component whose options do not apply", () => {
+  const canvasSource = readFileSync(resolve(process.cwd(), "apps/desktop/src/renderer/features/design-workspace/design-canvas.tsx"), "utf8");
+  const main = (notApplied?: "last-good" | "defaults") => ({ component: { elements: [], reach: {}, ...(notApplied ? { notApplied } : {}) } });
+  const hosting = (failed: boolean, notApplied?: "last-good" | "defaults"): { instances: DesignFrameInstances } => ({ instances: {
+    ...instances({ a: { component: "card", attributes: {}, ...(failed ? { failed: true as const } : {}) }, b: { component: "card", attributes: {} } }),
+    ...(notApplied ? { notApplied } : {}),
+  } });
+
+  it("says on its main frame what the frame shows instead", () => {
+    expect(designFrameOptionsProblem(main("last-good"))).toBe("These options could not be applied. The frame shows its last good render.");
+    expect(designFrameOptionsProblem(main("defaults"))).toBe("These options could not be applied. The frame shows the component's defaults.");
+    expect(designFrameOptionsProblem(main())).toBeNull();
+    expect(designFrameOptionsProblem({})).toBeNull();
+  });
+
+  it("says on every frame hosting a failed instance which component and what it shows", () => {
+    expect(designFrameOptionsProblem(hosting(true, "last-good"))).toBe("The options of zd-card could not be applied. The frame shows its last good render.");
+    // A host that failed with no fallback named shows the defaults, as its Options section says.
+    expect(designFrameOptionsProblem(hosting(true))).toBe("The options of zd-card could not be applied. The frame shows the component's defaults.");
+    expect(designFrameOptionsProblem(hosting(false))).toBeNull();
+    // The same record answers the same text, so the canvas can compare it cheaply.
+    const frame = hosting(true, "last-good");
+    expect(designFrameOptionsProblem(frame)).toBe(designFrameOptionsProblem(frame));
+  });
+
+  it("is a closed mark kind carrying the reason as its title and accessible name", () => {
+    const message = "These options could not be applied. The frame shows its last good render.";
+    const mark = renderToStaticMarkup(createElement(DesignFrameProblemMark, { kind: "options-not-applied", message }));
+    expect(mark).toContain('data-design-frame-problem="options-not-applied"');
+    expect(mark).toContain(`title="${message}"`);
+    expect(mark).toContain(`aria-label="${message}"`);
+    expect(mark).toContain("text-red-primary");
+  });
+
+  it("is drawn on the frame's label before anything is selected", () => {
+    expect(canvasSource).toContain("designFrameOptionsProblem(frame)");
+    expect(canvasSource).toContain('<DesignFrameProblemMark kind="options-not-applied" message={optionsProblem} />');
+    const optionsSource = readFileSync(resolve(process.cwd(), "apps/desktop/src/renderer/features/design-workspace/design-component-options.tsx"), "utf8");
+    expect(optionsSource).toContain("DESIGN_OPTIONS_NOT_APPLIED_MESSAGES[notApplied]");
+  });
+});
+
+describe("a component whose declaration is too large to show", () => {
+  it("says in its Options why there are none to show, for the main and its instances", () => {
+    expect(designComponentRecordProblem({ elements: [], reach: {}, exceeds: "elements" }, "QA Chip"))
+      .toBe("The options of QA Chip cannot be shown: its declaration has more than 160 elements.");
+    expect(designComponentRecordProblem({ elements: [], reach: {}, file: "page-1/chip.html", frame: true, exceeds: "attribute-value" }, "Chip"))
+      .toBe("The options of Chip cannot be shown: a declaration attribute's value is longer than 2,048 characters.");
+    expect(designComponentRecordProblem({ elements: [], reach: {} }, "Chip")).toBeNull();
+    const optionsSource = readFileSync(resolve(process.cwd(), "apps/desktop/src/renderer/features/design-workspace/design-component-options.tsx"), "utf8");
+    expect(optionsSource).toContain("designComponentRecordProblem(target.component, title)");
+    expect(optionsSource).toContain("data-design-options-too-large");
+  });
+});
+
+describe("the Options section of a component it cannot list", () => {
+  const sectionOf = (target: Parameters<typeof DesignComponentOptions>[0]["target"]) => {
+    const html = renderToStaticMarkup(createElement(DesignComponentOptions, {
+      workspaceId: "local", directory: "Zeros - Design", lint: null, disabled: false, target,
+      frame: { file: "page-1/big.html", frameId: "big", pageId: "page", title: "QA Big", kind: "frame", x: 0, y: 0, width: 100, height: 100,
+        z: 0, nodeCount: 1, modifiedAt: 0, sourceVersion: "a".repeat(24) } as DesignCanvasFrameWire,
+    }));
+    const host = document.createElement("div");
+    host.innerHTML = html;
+    return host;
+  };
+  /** The element and everything in it can wrap: nothing cuts its text to one line. */
+  const wraps = (element: Element) => [element, ...element.querySelectorAll("*")]
+    .every((node) => !/\b(truncate|text-ellipsis|whitespace-nowrap|line-clamp-\d)\b/.test(node.getAttribute("class") ?? ""));
+  const SENTENCE = "The options of QA Big cannot be shown: its declaration has more than 160 elements.";
+
+  it("says why in full, and offers no variants it cannot read, on the main", () => {
+    const section = sectionOf({ kind: "main", component: { elements: [], reach: {}, exceeds: "elements" } });
+    const message = section.querySelector('[data-design-options-too-large="elements"]')!;
+    expect(message.textContent).toBe(SENTENCE);
+    expect(wraps(message)).toBe(true);
+    expect(section.querySelector("[data-design-options-variant]")).toBeNull();
+    expect(section.querySelector('[aria-label="Save as variant"]')).toBeNull();
+    expect(section.querySelector("[data-design-options-ask]")).not.toBeNull();
+    // A main whose declaration arrived keeps its Variant row.
+    expect(sectionOf({ kind: "main", component: { elements: [], reach: {} } }).querySelector("[data-design-options-variant]")).not.toBeNull();
+  });
+
+  it("says why in full on an instance, and shows an ignored attribute whole", () => {
+    const section = sectionOf({ kind: "instance", nodeId: "bh-inst", title: "QA Big",
+      host: { component: "qa-big", attributes: {}, ignored: { tone: "loud" } },
+      component: { elements: [], reach: {}, file: "page-1/big.html", frame: true, exceeds: "elements" } });
+    const message = section.querySelector('[data-design-options-too-large="elements"]')!;
+    expect(message.textContent).toBe(SENTENCE);
+    expect(wraps(message)).toBe(true);
+    const ignored = section.querySelector("[data-design-options-ignored]")!;
+    expect(ignored.textContent).toBe('This component has no option tone; tone="loud" is ignored.');
+    expect(wraps(ignored)).toBe(true);
+    expect(section.querySelector("[data-design-options-variant]")).toBeNull();
   });
 });

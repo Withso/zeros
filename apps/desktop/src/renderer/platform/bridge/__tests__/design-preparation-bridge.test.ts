@@ -1,13 +1,16 @@
 import { expect, it, vi } from "vitest";
 import { bridgeDesignPrepareFrames, bridgeDesignSetRuntimeAudit, rememberDesignDirectoryIdentity } from "../design-bridge";
 import type { RuntimeClient } from "../ws-client";
-import { DESIGN_COMPONENT_OPTIONS_CAPABILITY, DESIGN_LAZY_PREPARATION_CAPABILITY } from "@zeros/protocol/design-catalog";
+import { DESIGN_COMPONENT_OPTIONS_CAPABILITY, DESIGN_LAZY_PREPARATION_CAPABILITY, DESIGN_PREPARED_FRAME_INVALID_MESSAGE, designPreparedFrameSchema,
+  parseDesignFramesPrepareReply } from "@zeros/protocol/design-catalog";
 import { DESIGN_SOURCE_SURFACES_CAPABILITY } from "@zeros/protocol/design-surface";
 
 const input = { workspaceId: "local", directoryId: "design_test", catalogRevision: "a".repeat(64), files: ["page/f0.html"] };
 const frame = { file: input.files[0], frameId: "f0", pageId: "page", title: "Frame", kind: "frame", x: 0, y: 0,
   width: 100, height: 100, z: 0, sourceVersion: "b".repeat(24), nodeCount: 1, modifiedAt: 0 };
 const reply = () => ({ directoryId: input.directoryId, catalogRevision: input.catalogRevision, frames: [frame], errors: [] });
+/** What a reply whose only frame's record does not hold resolves to. */
+const refused = () => ({ ...reply(), frames: [], errors: [{ file: frame.file, message: DESIGN_PREPARED_FRAME_INVALID_MESSAGE }] });
 function client(value: unknown, capable = true, surfaces = false, components = false) {
   return { supportsEngineCapability: (capability: string) => capable && (capability === DESIGN_LAZY_PREPARATION_CAPABILITY ||
     (surfaces && capability === DESIGN_SOURCE_SURFACES_CAPABILITY) || (components && capability === DESIGN_COMPONENT_OPTIONS_CAPABILITY)),
@@ -20,8 +23,8 @@ it("negotiates a component frame's options through the actual preparation reply 
   const bridge = client(value, true, false, true);
   await expect(bridgeDesignPrepareFrames(bridge as unknown as RuntimeClient, input)).resolves.toEqual(value);
   expect(bridge.request).toHaveBeenCalledWith({ type: "WORKSPACE_REQUEST", op: "design.frames.prepare", params: { ...input, componentOptions: true } }, 20_000);
-  // A reply that does not hold the declaration's shape is refused.
-  await expect(bridgeDesignPrepareFrames(client({ ...reply(), frames: [{ ...frame, component: { ...component, reach: { width: "sometimes" } } }] }, true, false, true) as unknown as RuntimeClient, input)).rejects.toThrow();
+  // A record that does not hold the declaration's shape is not admitted.
+  await expect(bridgeDesignPrepareFrames(client({ ...reply(), frames: [{ ...frame, component: { ...component, reach: { width: "sometimes" } } }] }, true, false, true) as unknown as RuntimeClient, input)).resolves.toEqual(refused());
 });
 it("carries a frame's component instances through the actual preparation reply decoder", async () => {
   // A frame-instances comparison key (16 hex characters), not a credential.
@@ -30,7 +33,7 @@ it("carries a frame's component instances through the actual preparation reply d
   const value = { ...reply(), frames: [{ ...frame, instances }] };
   await expect(bridgeDesignPrepareFrames(client(value, true, false, true) as unknown as RuntimeClient, input)).resolves.toEqual(value);
   for (const bad of [{ ...instances, key: "x" }, { ...instances, hosts: { inst: { component: "Bad Name", attributes: {} } } }])
-    await expect(bridgeDesignPrepareFrames(client({ ...reply(), frames: [{ ...frame, instances: bad }] }, true, false, true) as unknown as RuntimeClient, input)).rejects.toThrow();
+    await expect(bridgeDesignPrepareFrames(client({ ...reply(), frames: [{ ...frame, instances: bad }] }, true, false, true) as unknown as RuntimeClient, input)).resolves.toEqual(refused());
 });
 it("negotiates and retains passive HTML costs through the actual preparation reply decoder", async () => {
   const value = { ...reply(), frames: [{ ...frame, surfaceCost: { sourceBytes: 400, nodes: 7, imageBytes: 0 } }] };
@@ -44,12 +47,15 @@ it("prepares an exact Local directory without retargeting to a later selection",
   await expect(bridgeDesignPrepareFrames(bridge as unknown as RuntimeClient, input)).resolves.toEqual(reply());
   expect(bridge.request).toHaveBeenCalledWith({ type: "WORKSPACE_REQUEST", op: "design.frames.prepare", params: input }, 20_000);
 });
-it("rejects foreign ownership, incomplete coverage, and invalid prepared geometry", async () => {
+it("rejects foreign ownership and incomplete coverage, and admits no invalid prepared geometry", async () => {
   for (const value of [
     { ...reply(), directoryId: "design_other" }, { ...reply(), frames: [] },
-    { ...reply(), frames: [frame, frame] }, { ...reply(), frames: [{ ...frame, width: -1 }] },
-    { ...reply(), frames: [{ ...frame, sourceVersion: input.catalogRevision }] },
+    { ...reply(), frames: [frame, frame] },
   ]) await expect(bridgeDesignPrepareFrames(client(value) as unknown as RuntimeClient, input)).rejects.toThrow();
+  for (const value of [
+    { ...reply(), frames: [{ ...frame, width: -1 }] },
+    { ...reply(), frames: [{ ...frame, sourceVersion: input.catalogRevision }] },
+  ]) await expect(bridgeDesignPrepareFrames(client(value) as unknown as RuntimeClient, input)).resolves.toEqual(refused());
 });
 it("keeps Cloud Design disabled and leaves old engines on their compatibility path", async () => {
   for (const [workspaceId, capable] of [["cloud://org/workspace", true], ["local", false]] as const) {
@@ -102,4 +108,42 @@ it("retains compatibility with engines that omit audit readback", async () => {
   await expect(bridgeDesignSetRuntimeAudit(client({ ok: true }) as unknown as RuntimeClient, "local", {
     frame: frame.file, sourceVersion: frame.sourceVersion, warnings: [],
   })).resolves.toBeUndefined();
+});
+
+it("drops only a frame whose prepared record does not hold, reporting that frame, and keeps the rest", async () => {
+  const files = ["page/f0.html", "page/f1.html", "page/f2.html"];
+  const batch = { ...input, files };
+  const record = (file: string, index: number) => ({ ...frame, file, frameId: `f${index}` });
+  const oversize = { elements: Array.from({ length: 161 }, () => ({ tag: "zd-note", attributes: [] })), reach: {} };
+  const value = { ...reply(), frames: [record(files[0]!, 0), { ...record(files[1]!, 1), component: oversize }, record(files[2]!, 2)] };
+  const result = await bridgeDesignPrepareFrames(client(value, true, false, true) as unknown as RuntimeClient, batch);
+  expect(result.frames.map(({ file }) => file)).toEqual([files[0], files[2]]);
+  expect(result.errors).toEqual([{ file: files[1], message: DESIGN_PREPARED_FRAME_INVALID_MESSAGE }]);
+  // A record that names no frame of the batch cannot be placed: the reply is refused.
+  await expect(bridgeDesignPrepareFrames(client({ ...value, frames: [record(files[0]!, 0), { ...oversize, file: 42 }, record(files[2]!, 2)] },
+    true, false, true) as unknown as RuntimeClient, batch)).rejects.toThrow();
+});
+
+it("validates each prepared frame record once, and still bounds what it reports", async () => {
+  const files = Array.from({ length: 16 }, (_, index) => `page/f${index}.html`);
+  const batch = { ...input, files };
+  const records = files.map((file, index) => ({ ...frame, file, frameId: `f${index}` }));
+  const run = vi.spyOn(designPreparedFrameSchema._zod, "run");
+  try {
+    const result = await bridgeDesignPrepareFrames(client({ ...reply(), frames: records }) as unknown as RuntimeClient, batch);
+    expect(result.frames).toHaveLength(16);
+    expect(run).toHaveBeenCalledTimes(16);
+  } finally {
+    run.mockRestore();
+  }
+  // Failed records become errors, and errors stay within the reply's bound of 16.
+  const broken = (index: number) => ({ ...records[index]!, sourceVersion: "not a version" });
+  const errors = (count: number) => Array.from({ length: count }, (_, index) => ({ file: `page/e${index}.html`, message: "x" }));
+  const near = parseDesignFramesPrepareReply({ ...reply(), frames: [broken(0), records[1]], errors: errors(15) });
+  expect(near.frames).toEqual([records[1]]);
+  expect(near.errors).toHaveLength(16);
+  expect(() => parseDesignFramesPrepareReply({ ...reply(), frames: [broken(0), broken(1), records[2]], errors: errors(15) })).toThrow();
+  expect(() => parseDesignFramesPrepareReply({ ...reply(), frames: records, errors: errors(17) })).toThrow();
+  expect(() => parseDesignFramesPrepareReply({ ...reply(), frames: [...records, records[0]] })).toThrow();
+  expect(() => parseDesignFramesPrepareReply({ ...reply(), extra: true })).toThrow();
 });

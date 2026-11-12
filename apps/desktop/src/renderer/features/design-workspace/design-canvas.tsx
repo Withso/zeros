@@ -25,7 +25,6 @@ import {
   Palette,
   Play,
   StickyNote,
-  TriangleAlert,
   Type,
 } from "lucide-react";
 import React, {
@@ -207,7 +206,7 @@ import {
   type DesignMotionTimelineDraft,
 } from "./design-motion-timeline";
 import { canEditDesignNodeText } from "./design-node-capabilities";
-import { designComponentInstanceMark, designComponentPartHost, designComponentTextLock, designFrameIsComponent, designFrameMissingComponents, isDesignComponentPartNodeId } from "./state/design-component-parts";
+import { designComponentInstanceMark, designComponentPartHost, designComponentTextLock, designFrameIsComponent, designFrameMissingComponents, designFrameOptionsProblem, isDesignComponentPartNodeId } from "./state/design-component-parts";
 import { resolveDesignSelectionShortcut } from "./design-selection-shortcuts";
 import {
   createDesignTextMarkup,
@@ -8019,6 +8018,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
             const framePlaying = currentPlayback?.file === frame.file;
             const frameIsComponent = designFrameIsComponent(frame);
             const missingComponents = designFrameMissingComponents(frame);
+            const optionsProblem = designFrameOptionsProblem(frame);
             const paintedFrame = frameGeometryPreviewsRef.current.get(
               `${canvasDocumentOwner}\0${frame.file}`,
             )?.geometry;
@@ -8331,10 +8331,11 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                           title={preparationProblem !== null ? `${frame.title}: ${preparationProblem}`
                             : missingComponents.length
                             ? `${frame.title}: ${designMissingComponentsLabel(missingComponents)}`
+                            : optionsProblem !== null ? `${frame.title}: ${optionsProblem}`
                             : frameIsComponent ? `${frame.title}, component` : frame.title}
                           className={cn(
                             "text-2xxs block max-w-full min-w-0 cursor-default overflow-hidden border-0 bg-transparent p-0 text-left leading-4 font-medium whitespace-nowrap outline-none",
-                            (frameIsComponent || missingComponents.length > 0 || preparationProblem !== null) && "flex items-center gap-1",
+                            (frameIsComponent || missingComponents.length > 0 || optionsProblem !== null || preparationProblem !== null) && "flex items-center gap-1",
                             frameSelectedOnly
                               ? "text-[var(--design-selection-stroke)]"
                               : "text-muted-fg hover:text-fg2",
@@ -8358,12 +8359,9 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                           ) : null}
                           {preparationProblem !== null ? <DesignFrameProblemMark message={preparationProblem} /> : null}
                           {missingComponents.length ? (
-                            <TriangleAlert
-                              data-design-frame-problem="missing-component"
-                              className="text-red-primary size-[11px] shrink-0"
-                              aria-label={designMissingComponentsLabel(missingComponents)}
-                            />
+                            <DesignFrameProblemMark kind="missing-component" message={designMissingComponentsLabel(missingComponents)} />
                           ) : null}
+                          {optionsProblem !== null ? <DesignFrameProblemMark kind="options-not-applied" message={optionsProblem} /> : null}
                           <span
                             data-design-frame-name=""
                             className="block max-w-full min-w-0 overflow-hidden text-ellipsis"

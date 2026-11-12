@@ -1,6 +1,6 @@
 import { readDirectoryDesignManifest } from "./metadata";
 import { designCatalogRevision, inspectDesignCatalog, readDesignCatalogMetadataWithContext, sameDesignCatalogInspection } from "./catalog-storage";
-import type { DesignPageHashes } from "@zeros/protocol/design-catalog";
+import { designComponentRecordLimitMessage, designComponentRecordWithinLimits, type DesignPageHashes } from "@zeros/protocol/design-catalog";
 import { DesignCatalogError, designCatalogPageHashes, type DesignCatalogSnapshot } from "./catalog";
 import { escapeText, escapeAttribute } from "./source";
 import {
@@ -1061,7 +1061,8 @@ async function readDesignCanvasFrameFromSummary(
   }, undefined, undefined, summary.file, canvas, { identityOnly: true });
   const component = designComponentSummaryOf(source);
   return { ...summary, sourceVersion: render.sourceVersion, surfaceCost: render.surfaceCost,
-    ...(component ? { component: { ...component, ...(render.componentOptions ? { notApplied: render.componentOptions.shows } : {}) } } : {}),
+    ...(component ? { component: designComponentRecordWithinLimits({ ...component,
+      ...(render.componentOptions ? { notApplied: render.componentOptions.shows } : {}) }) } : {}),
     ...(render.instances ? { instances: render.instances } : {}) };
 }
 
@@ -1276,7 +1277,8 @@ async function computeRegisteredFrameIdentity(workspacePath: string, file: strin
   const summary = designComponentSummaryOf(source);
   const identity: DesignFrameIdentity = { sourceVersion: render.sourceVersion, surfaceCost: render.surfaceCost,
     nodeCount: designNodeRecords(document).length, layerCount: designLayerCount(document),
-    ...(summary ? { component: { ...summary, ...(render.componentOptions ? { notApplied: render.componentOptions.shows } : {}) } } : {}),
+    ...(summary ? { component: designComponentRecordWithinLimits({ ...summary,
+      ...(render.componentOptions ? { notApplied: render.componentOptions.shows } : {}) }) } : {}),
     ...(render.instances ? { instances: render.instances } : {}) };
   return { identity, modifiedAt: safe.modifiedAt, retained: render.retained };
 }
@@ -1799,6 +1801,11 @@ async function designComponentRegistrationViolations(workspacePath: string, file
   if (name && (await readSafeRegularFile(designDirectory(workspacePath), path.join(designDirectory(workspacePath), "components", `${name}.html`), MAX_DESIGN_TEXT_BYTES)))
     violations.push(violationAt(file, "component-invalid", `zd-${name} is both this frame's registration and components/${name}.html; rename one.`, null, {
       severity: "error", fix: `Change this frame's "component" in meta/canvas.json, or rename components/${name}.html.` }));
+  const summary = designSourceDeclaresOptions(source) ? designComponentSummaryOf(source) : null;
+  const reported = summary && designComponentRecordWithinLimits(summary);
+  if (reported && "exceeds" in reported)
+    violations.push(violationAt(file, "component-option-invalid", designComponentRecordLimitMessage(name ?? file, reported.exceeds), null, {
+      severity: "warning", fix: "Shorten the component's declaration or the layer ids its text holes fill." }));
   if (!name && !registry.problems.some((problem) => problem.file === file) && designSourceDeclaresOptions(source)) {
     const suggested = path.posix.basename(file, ".html").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").replace(/^(?=\d)/, "c-") || "component";
     violations.push(violationAt(file, "component-unregistered",

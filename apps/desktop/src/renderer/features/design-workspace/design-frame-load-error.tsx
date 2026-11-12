@@ -6,14 +6,24 @@ import { DESIGN_CANVAS_INVERSE_ZOOM, designCanvasScreenPixels } from "./design-c
 
 const LOAD_ERROR = "Couldn’t load this frame.";
 
-/** A screen-size red mark for a frame that could not be shown. */
-export function DesignFrameProblemMark({ message, className }: { message?: string; className?: string }) {
+/** Why a frame carries a problem mark. A closed set: the canvas and tests
+ * select marks by it. */
+export type DesignFrameProblemKind = "load-error" | "missing-component" | "options-not-applied";
+
+/** A screen-size red mark for a frame that could not be shown, or whose
+ * options could not be applied. */
+export function DesignFrameProblemMark({ kind = "load-error", message, className }: {
+  kind?: DesignFrameProblemKind;
+  message?: string;
+  className?: string;
+}) {
+  const fallback = kind === "load-error" ? LOAD_ERROR : undefined;
   return (
     <span
-      data-design-frame-problem="load-error"
+      data-design-frame-problem={kind}
       role="img"
-      aria-label={message ? `${LOAD_ERROR} ${message}` : LOAD_ERROR}
-      title={message ?? LOAD_ERROR}
+      aria-label={kind === "load-error" && message ? `${LOAD_ERROR} ${message}` : message ?? fallback}
+      title={message ?? fallback}
       className={cn("text-red-primary inline-flex size-[11px] shrink-0", className)}
     >
       <TriangleAlert className="size-[11px]" aria-hidden="true" />

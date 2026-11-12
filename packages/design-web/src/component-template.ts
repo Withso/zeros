@@ -21,6 +21,7 @@ import {
   type ComponentExpressionBudget,
   type ComponentExpressionValue,
 } from "@zeros/design-core/components";
+import { DESIGN_COMPONENT_BOUND_TEXT_LIMIT, DESIGN_COMPONENT_RECORD_LIMITS } from "@zeros/protocol/design-catalog";
 
 export const COMPONENT_TEMPLATE_LIMITS = Object.freeze({
   /** Holes one rendering may fill. */
@@ -319,7 +320,7 @@ function boundTextOf(document: DefaultTreeAdapterTypes.Document, declaration: Re
       const element = node as Element;
       if (RAW_TEXT.has(element.tagName)) continue;
       const oid = element.attrs.find((attribute) => attribute.name === "data-oid")?.value;
-      if (oid && count < 512 && oid !== "__proto__" && oid !== "constructor" && oid !== "prototype") {
+      if (oid && count < DESIGN_COMPONENT_BOUND_TEXT_LIMIT && oid !== "__proto__" && oid !== "constructor" && oid !== "prototype") {
         const read = new Set<string>();
         let holes = false;
         for (const child of element.childNodes)
@@ -329,7 +330,7 @@ function boundTextOf(document: DefaultTreeAdapterTypes.Document, declaration: Re
               for (const name of optionsRead(match[1]!, declaration)) read.add(name);
             }
         if (holes) {
-          bound.set(oid, [...read].sort().slice(0, 8));
+          bound.set(oid, [...read].sort().slice(0, DESIGN_COMPONENT_RECORD_LIMITS.boundTextOptions));
           count += 1;
         }
       }

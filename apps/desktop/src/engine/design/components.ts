@@ -20,7 +20,8 @@ import {
   type ComponentOptionProblem,
 } from "@zeros/design-core/components";
 
-import { DESIGN_FRAME_INSTANCE_LIMITS, type DesignFrameInstances } from "@zeros/protocol/design-catalog";
+import { DESIGN_COMPONENT_RECORD_LIMITS, DESIGN_FRAME_INSTANCE_LIMITS, designComponentRecordWithinLimits, designFrameInstanceComponentSchema,
+  type DesignFrameInstances } from "@zeros/protocol/design-catalog";
 import { lastGoodDesignComponentRender, rememberDesignComponentRender } from "./component-last-good";
 import { designComponentRegistry } from "./component-registry";
 import {
@@ -716,27 +717,28 @@ function recordInstance(
   failed: boolean,
 ): void {
   const oid = instance.attrs.find((attribute) => attribute.name === "data-oid")?.value;
-  if (!oid || oid.length > 256 || INHERITED_NAMES.has(oid) || INHERITED_NAMES.has(definition.name)) return;
+  if (!oid || oid.length > DESIGN_COMPONENT_RECORD_LIMITS.layerId || INHERITED_NAMES.has(oid) || INHERITED_NAMES.has(definition.name)) return;
   const record = usage.instances ??= { components: new Map(), hosts: new Map() };
   if (record.hosts.size >= DESIGN_FRAME_INSTANCE_LIMITS.hosts) return;
   const { declaration, file } = definition.template;
   if (!record.components.has(definition.name)) {
     if (record.components.size >= DESIGN_FRAME_INSTANCE_LIMITS.components) return;
     const summary = definition.template.summary?.() ?? null;
-    record.components.set(definition.name, { elements: summary?.elements ?? [], reach: summary?.reach ?? {}, file,
-      frame: registry.get(definition.name) === file });
+    record.components.set(definition.name, designComponentRecordWithinLimits({ elements: summary?.elements ?? [], reach: summary?.reach ?? {}, file,
+      frame: registry.get(definition.name) === file }, designFrameInstanceComponentSchema));
   }
   const names = new Set([...declaration.options.map((option) => option.name), COMPONENT_VARIANT_ATTRIBUTE]);
   const attributes = new Map<string, string>();
   const ignored = new Map<string, string>();
   for (const attribute of instance.attrs) {
     if (!names.has(attribute.name)) {
-      if (componentIgnoresAttribute(attribute.name) && attribute.name.length <= 64 && attribute.value.length <= 2_048 && ignored.size < 72)
+      if (componentIgnoresAttribute(attribute.name) && attribute.name.length <= DESIGN_COMPONENT_RECORD_LIMITS.attributeName &&
+        attribute.value.length <= DESIGN_COMPONENT_RECORD_LIMITS.attributeValue && ignored.size < DESIGN_COMPONENT_RECORD_LIMITS.attributes)
         ignored.set(attribute.name, attribute.value);
       continue;
     }
     // A value too long to report would mislead; the host shows no Options.
-    if (attribute.value.length > 2_048) return;
+    if (attribute.value.length > DESIGN_COMPONENT_RECORD_LIMITS.attributeValue) return;
     attributes.set(attribute.name, attribute.value);
   }
   record.hosts.set(oid, { component: definition.name, attributes: Object.fromEntries(attributes), ...(failed ? { failed: true as const } : {}),
@@ -747,7 +749,7 @@ function recordInstance(
  * canvas can say which component is gone instead of showing an empty layer. */
 function recordMissingInstance(usage: DesignComponentExpansionUsage, name: string, instance: DefaultTreeAdapterTypes.Element): void {
   const oid = instance.attrs.find((attribute) => attribute.name === "data-oid")?.value;
-  if (!oid || oid.length > 256 || INHERITED_NAMES.has(oid) || !/^[a-z][a-z0-9-]{0,63}$/.test(name)) return;
+  if (!oid || oid.length > DESIGN_COMPONENT_RECORD_LIMITS.layerId || INHERITED_NAMES.has(oid) || !/^[a-z][a-z0-9-]{0,63}$/.test(name)) return;
   const record = usage.instances ??= { components: new Map(), hosts: new Map() };
   if (record.hosts.size >= DESIGN_FRAME_INSTANCE_LIMITS.hosts) return;
   record.hosts.set(oid, { component: name, attributes: {}, missing: true });

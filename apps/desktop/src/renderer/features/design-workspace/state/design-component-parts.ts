@@ -130,3 +130,33 @@ export function designFrameMissingComponents(frame: { instances?: DesignFrameIns
   missingByInstances.set(instances, result);
   return result;
 }
+
+/** What a frame shows when options did not apply, as its Options section
+ * and its canvas mark say it. */
+export const DESIGN_OPTIONS_NOT_APPLIED_MESSAGES = Object.freeze({
+  "last-good": "The frame shows its last good render.",
+  defaults: "The frame shows the component's defaults.",
+} satisfies Record<NonNullable<DesignFrameComponent["notApplied"]>, string>);
+
+const optionsProblemByInstances = new WeakMap<DesignFrameInstances, string | null>();
+
+/** Why a frame is not showing the options it was given, or null: its own
+ * options (a main component frame) or an instance's it places. The engine
+ * marks every host of a component whose options stop applying, so each of
+ * those frames answers here before anything is selected. */
+export function designFrameOptionsProblem(frame: { component?: DesignFrameComponent; instances?: DesignFrameInstances }): string | null {
+  const own = frame.component?.notApplied;
+  if (own) return `These options could not be applied. ${DESIGN_OPTIONS_NOT_APPLIED_MESSAGES[own]}`;
+  const instances = frame.instances;
+  if (!instances) return null;
+  const known = optionsProblemByInstances.get(instances);
+  if (known !== undefined) return known;
+  const names = [...new Set(Object.values(instances.hosts).filter((host) => host.failed).map((host) => `zd-${host.component}`))];
+  // As the instance's Options section reads it: a failed host with nothing
+  // named shows the defaults.
+  const problem = names.length
+    ? `The options of ${names.join(", ")} could not be applied. ${DESIGN_OPTIONS_NOT_APPLIED_MESSAGES[instances.notApplied ?? "defaults"]}`
+    : null;
+  optionsProblemByInstances.set(instances, problem);
+  return problem;
+}

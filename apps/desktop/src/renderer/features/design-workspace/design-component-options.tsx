@@ -39,7 +39,7 @@ import {
   OptionSwitchRow,
   OptionTextRow,
 } from "../../shared/ui/primitives/option-row";
-import { MessageRow } from "../../shared/ui/primitives/message-row";
+import { cn } from "../../shared/ui/cn";
 import { pillVariants } from "../../shared/ui/primitives/pill";
 import type { DesignCanvasFrameWire, DesignLintReportWire } from "../../platform/git";
 import { designComponentOptionsBrief, designComponentOptionsFixBrief, type DesignAgentBrief } from "./design-agent-brief";
@@ -53,12 +53,14 @@ import {
   createDesignComponentPreview,
   designComponentAttributeText,
   designComponentPreviewProperties,
+  designComponentRecordProblem,
   designComponentVariantName,
   designInstanceIgnoredAttributes,
   designInstanceOptionState,
   readDesignFrameComponent,
   sameDesignComponentValue,
 } from "./state/design-component-options";
+import { DESIGN_OPTIONS_NOT_APPLIED_MESSAGES } from "./state/design-component-parts";
 import { showDesignComponentVariant, useDesignShownComponentVariant } from "./state/design-component-variants";
 
 const EASINGS = [
@@ -253,6 +255,7 @@ export function DesignComponentOptions({
   }
   const variants = declaration.variants.map((entry) => entry.name);
   const ignored = useMemo(() => (host ? designInstanceIgnoredAttributes(host) : []), [host]);
+  const tooLarge = designComponentRecordProblem(target.component, title);
 
   return (
     <InspectorSection
@@ -266,24 +269,26 @@ export function DesignComponentOptions({
       ) : undefined}
     >
       {notApplied ? (
-        <div role="alert" data-design-options-not-applied={notApplied} className="bg-red-bg text-red-fg flex flex-col items-start gap-2 rounded-md p-2.5 text-3xxs leading-4.5">
-          <p>
-            {notApplied === "last-good"
-              ? "These options could not be applied. The frame shows its last good render."
-              : "These options could not be applied. The frame shows the component's defaults."}
-          </p>
+        <OptionsNotice tone="error" role="alert" data-design-options-not-applied={notApplied}>
+          <p>These options could not be applied. {DESIGN_OPTIONS_NOT_APPLIED_MESSAGES[notApplied]}</p>
           <Button type="button" variant="secondary" size="compact" disabled={!askToFix} onClick={askToFix}>
             <Sparkles aria-hidden="true" />
             Ask agent to fix
           </Button>
-        </div>
+        </OptionsNotice>
+      ) : null}
+      {tooLarge ? (
+        <OptionsNotice tone="error" data-design-options-too-large={target.component.exceeds}>
+          <p>{tooLarge}</p>
+        </OptionsNotice>
       ) : null}
       {ignored.map((message) => (
-        <MessageRow key={message} tone="warning" flush data-design-options-ignored="">
-          {message}
-        </MessageRow>
+        <OptionsNotice key={message} tone="warning" data-design-options-ignored="">
+          <p>{message}</p>
+        </OptionsNotice>
       ))}
-      {!instance || variants.length ? (
+      {/* Without its declaration the section cannot list the variants the file declares. */}
+      {!tooLarge && (!instance || variants.length) ? (
         <OptionVariantRow
           variant={variant}
           variants={variants}
@@ -302,6 +307,19 @@ export function DesignComponentOptions({
         </OptionActionRow>
       )}
     </InspectorSection>
+  );
+}
+
+/** A message in this section, shown whole: what it says is the reason. */
+function OptionsNotice({ tone, className, children, ...props }: React.HTMLAttributes<HTMLDivElement> & { tone: "error" | "warning" }) {
+  return (
+    <div
+      {...props}
+      className={cn("flex flex-col items-start gap-2 rounded-md p-2.5 text-3xxs leading-4.5",
+        tone === "error" ? "bg-red-bg text-red-fg" : "bg-yellow-bg text-yellow-fg", className)}
+    >
+      {children}
+    </div>
   );
 }
 

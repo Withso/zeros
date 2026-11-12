@@ -1750,7 +1750,12 @@ nothing when those fail too. A frame whose options do not all apply shows the
 last expansion that applied in this session (held for the 12 most recently
 rendered frames within 16 MiB, dropped when the frame is deleted, never stored
 as a durable identity) and the render says so (`shows: "last-good"`); without
-one it shows the component's defaults (`shows: "defaults"`). The expander's
+one it shows the component's defaults (`shows: "defaults"`). The engine's own
+thread holds that last good render; a preparation worker hands each one it
+makes to the engine and leaves a frame that needs one to the engine, so a
+frame's reported version always matches the bytes `zeros-design://` serves,
+across worker restarts, any number of workers and a shown variant. The
+expander's
 fast path is unchanged for a frame with no `<zd-` and no declaration in its
 head (about 12 µs for a 400-layer frame, before and after).
 
@@ -1783,7 +1788,24 @@ undo step; Escape during a drag restores the value and writes nothing. When
 the frame's options did not all apply the section leads with "These options
 could not be applied. The frame shows its last good render." (or "…the
 component's defaults."), as the engine reports, and Ask agent to fix, which
-sends the lint problems for the frame; the rows stay adjustable.
+sends the lint problems for the frame; the rows stay adjustable. Before
+anything is selected the frame's label carries a red mark
+(`data-design-frame-problem="options-not-applied"`) whose title says the same,
+on the main and on every frame placing an instance whose values did not apply
+(naming `zd-<name>`); it clears with the next generation that applies.
+
+A declaration past the record's limits (160 elements, a 32-character tag, 72
+attributes per element, 64-character attribute names, 2,048-character values,
+a 256-character `data-oid` on a bound text; `DESIGN_COMPONENT_RECORD_LIMITS`
+in `@zeros/protocol/design-catalog`, the one source the engine, the template
+expander and the record's schema read) is reported without its declaration and
+names the limit (`exceeds`); the frame and its instances still render, its
+Options section says which limit in a wrapped error note and offers no
+Variant row or "Save current as variant" (it cannot list the variants the
+file declares), and `design validate`
+reports a `component-option-invalid` warning saying the same. A frame record
+the renderer still cannot read fails that frame alone ("Zeros could not read
+this frame's prepared record."); the others in the reply are shown.
 
 **Variants, instances and parts (slice 3).** On the main the Variant row
 (Default, the declared variants, "Save current as variant…") picks which
@@ -1823,9 +1845,10 @@ before anything is sent, and the engine finds no such layer either. Layers
 keeps an instance as one row; an agent's selection names its host.
 
 A host's record also lists attributes that name no option (`ignored`, as
-written), shown in its Options section as one warning line each, and marks a
+written), shown in its Options section as one wrapped warning note each, and marks a
 host whose component no longer exists (`missing`; no `components` entry).
-Such a host's frame label carries a red warning mark naming the component;
+Such a host's frame label carries a red warning mark naming the component
+(`data-design-frame-problem="missing-component"`);
 Layers, the selection path and the selected instance's title name it
 `zd-<name>`, with an error line saying the component is missing; it cannot
 be entered. Deleting a main component

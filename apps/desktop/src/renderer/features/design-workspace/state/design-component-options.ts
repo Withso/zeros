@@ -17,7 +17,11 @@ import {
   type ComponentEasing,
   type ComponentOptionValue,
 } from "@zeros/design-core/component-options";
-import type { DesignFrameComponent, DesignFrameInstances } from "@zeros/protocol/design-catalog";
+import {
+  designComponentRecordLimitMessage,
+  type DesignFrameComponent,
+  type DesignFrameInstances,
+} from "@zeros/protocol/design-catalog";
 import { isDesignComponentVariantName } from "@zeros/protocol/design-path";
 import { DESIGN_RUNTIME_INSTANCE_TARGET } from "@zeros/protocol/design-runtime";
 
@@ -42,6 +46,16 @@ export function readDesignFrameComponent(component: DesignFrameComponent): Desig
     views.set(component, view);
   }
   return view;
+}
+
+/** Why a component's Options cannot be listed: its declaration is past a
+ * limit of the record, so the engine reported it without one. Null when the
+ * declaration arrived. */
+export function designComponentRecordProblem(
+  component: DesignFrameComponent | DesignFrameInstances["components"][string],
+  title: string,
+): string | null {
+  return component.exceeds ? designComponentRecordLimitMessage(title, component.exceeds) : null;
 }
 
 /** The custom properties these values set, in the strict forms the core

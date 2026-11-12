@@ -34,7 +34,7 @@ import type { DesignCanvasItem } from "@zeros/protocol/design-canvas-items";
 /** What the canvas sends: an item's own fields; no id creates one. */
 export type DesignCanvasItemInput = DesignCanvasItem extends infer Item ? Item extends DesignCanvasItem
   ? Omit<Item, "id"> & { id?: string } : never : never;
-import { DESIGN_LAZY_PREPARATION_CAPABILITY, DESIGN_MUTATION_SNAPSHOTS_CAPABILITY, DESIGN_PAGE_SCOPED_MUTATIONS_CAPABILITY, designMutationCatalogSchema, designPageScopedCatalogSchema, designPreparedFrameSchema, designFramesPrepareSchema, designFramesPrepareReplySchema, type DesignMutationCatalog, type DesignPageHashes, type DesignPageScopedCatalog } from "@zeros/protocol/design-catalog";
+import { DESIGN_LAZY_PREPARATION_CAPABILITY, DESIGN_MUTATION_SNAPSHOTS_CAPABILITY, DESIGN_PAGE_SCOPED_MUTATIONS_CAPABILITY, designMutationCatalogSchema, designPageScopedCatalogSchema, designPreparedFrameSchema, designFramesPrepareSchema, parseDesignFramesPrepareReply, type DesignMutationCatalog, type DesignPageHashes, type DesignPageScopedCatalog } from "@zeros/protocol/design-catalog";
 import { DESIGN_SOURCE_SURFACES_CAPABILITY } from "@zeros/protocol/design-surface";
 import { DESIGN_COMPONENT_OPTIONS_CAPABILITY } from "@zeros/protocol/design-catalog";
 import {
@@ -135,7 +135,7 @@ export async function bridgeDesignPrepareFrames(bridge: RuntimeClient, input: {
     // selection has already updated the bridge's remembered directory.
     const raw = await rawWorkspaceOp(bridge, "design.frames.prepare", params, 20_000);
     if (retired) throw new Error("Design preparation connection was retired.");
-    const result = designFramesPrepareReplySchema.parse(raw);
+    const result = parseDesignFramesPrepareReply(raw);
     const files = [...result.frames, ...result.errors].map((frame) => frame.file);
     if (result.directoryId !== params.directoryId || result.catalogRevision !== params.catalogRevision ||
       files.length !== params.files.length || new Set(files).size !== files.length || files.some((file) => !params.files.includes(file)))
