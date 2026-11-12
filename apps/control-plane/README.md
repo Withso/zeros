@@ -549,6 +549,17 @@ person whose current membership and repository access will authorize the fresh
 boot, with no Creator fallback. The runtime digest identifies the reviewed
 worker that supports `acting-user-v1` and legacy-material cleanup.
 
+Per-person revocation also requires `sync-context-v1` on the exact worker boot
+before issuing active sync grants. Migration `0243_cloud_execution_person_authority.sql`
+preserves old signature inputs for live contexts, tickets, prompts and lifecycle
+intents; renewal verifies the old signature and replaces it with version 2 without
+changing credentials or draining the workspace. Version 2 excludes the current
+Creator and the roster-wide revision, while retaining the person's own account,
+membership, source and connection authority. Legacy/prepared behavior is unchanged.
+The migration refuses with `cloud_execution_legacy_backfill_limit` if more than
+10,000 live authorities need compatibility metadata; review that inventory before
+retrying the deploy. Historical and version-2 rows are not rewritten.
+
 ```sh
 pnpm --dir apps/control-plane cloud-execution:manage
 # Inspect the plan; set CLOUD_EXECUTION_PLAN_SHA256 to its exact planSha256.

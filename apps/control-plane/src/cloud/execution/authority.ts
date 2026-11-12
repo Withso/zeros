@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import type pg from "pg";
 import { z } from "zod";
 import type { AuthedUser } from "../../auth.js";
@@ -11,9 +10,10 @@ import type { CloudGithubConnectionStore } from "../github-connections-store.js"
 import { CLOUD_SOURCE_ADMISSION_MS, CLOUD_SOURCE_REFRESH_MS, CLOUD_SOURCE_GRACE_MS, CloudSourceTargetSchema, type CloudViewerSourceProof, type CloudV2SourceAuthority } from "../source-authority.js";
 import { teamConnectionRevisionSql } from "../team-sharing/authority.js";
 import { CLOUD_V2_LIVE_ACCESS } from "../workspace-access.js";
+import { executionSignatures, matchesExecutionSignature, type ExecutionSignatures, type VersionedExecutionAuthority } from "./signatures.js";
 import { actorChanged, executionUnavailable, executionWorkerRequired, memberAccessRevoked } from "./errors.js";
 
-export type ExecutionPerson = {
+export type ExecutionPerson = ExecutionSignatures & {
   workspaceId: string; organizationId: string; userId: string; creatorUserId: string; repository: string; state: string;
   accessEpoch: string; stopGeneration: string; bootId: string | null; workerTokenHash: string | null;
   signature: string; personSignature: string; permissionSignature: string; accountRevision: string; memberRevision: string; organizationRevision: string;
@@ -22,12 +22,12 @@ export type ExecutionPerson = {
 };
 type Verification = { repositoryId: string; verifiedAt: number | null; failureCode: string | null; failureStatus: number | null };
 export type ExecutionAdmission = { person: ExecutionPerson; source: CloudViewerSourceProof; until: number; user?: AuthedUser | undefined; runBound?: false };
-export type ExecutionIntentAuthority = { permissionSignature: string; sourceFingerprint: string };
+export type ExecutionIntentAuthority = VersionedExecutionAuthority & { permissionSignature: string; sourceFingerprint: string };
 export const executionIntentAuthority = (proof: ExecutionAdmission): ExecutionIntentAuthority => ({
-  permissionSignature: proof.person.permissionSignature, sourceFingerprint: proof.source.fingerprint,
+  signatureVersion: 2, permissionSignature: proof.person.permissionSignature, sourceFingerprint: proof.source.fingerprint,
 });
 export function assertExecutionIntent(expected: ExecutionIntentAuthority | null | undefined, proof: ExecutionAdmission) {
-  if (!expected || expected.permissionSignature !== proof.person.permissionSignature || expected.sourceFingerprint !== proof.source.fingerprint)
+  if (!expected || !matchesExecutionSignature(expected, expected.permissionSignature, proof.person, "permissionSignature"))
     throw actorChanged();
 }
 
@@ -40,22 +40,30 @@ export class CloudExecutionAuthority {
     type Row = { id: string; org_id: string; creator_user_id: string; repository: string; state: string; execution_mode: string;
       access_epoch: string; stop_generation: string; worker_boot_id: string | null; worker_token_hash: string | null;
       account_revision: string; member_revision: string; member_created_at: string; organization_revision: string; role: string; sources: unknown;
-      source_repositories: string[]; source_pending: boolean; connection_revision: unknown; database_now: string; verifications: Verification[]; context_current: boolean };
+      organization_policy: [boolean, boolean, boolean]; source_repositories: string[]; source_pending: boolean; connection_revision: unknown; database_now: string; verifications: Verification[]; context_current: boolean };
     const row = (await tx.query<Row>(`SELECT w.id,w.org_id,w.creator_user_id,w.repository,w.state,w.execution_mode,
       w.access_epoch::text,w.stop_generation::text,w.worker_boot_id,encode(w.worker_token_hash,'hex') AS worker_token_hash,
       u.auth_revision::text AS account_revision,m.authorization_revision::text AS member_revision,m.created_at::text AS member_created_at,
       o.authorization_revision::text AS organization_revision,m.role,
+      jsonb_build_array(o.is_personal,o.cloud_workspaces_allowed,o.deleted_at IS NULL) AS organization_policy,
       w.source_pending,w.source_repositories,
       coalesce((SELECT jsonb_agg(jsonb_build_object('repository',s.source_repository,'repositoryId',s.repository_id::text) ORDER BY s.source_repository)
         FROM cloud_v2_github_sources s WHERE s.workspace_id=w.id),'[]'::jsonb) AS sources,
       ${teamConnectionRevisionSql("w.org_id", "$2")} AS connection_revision,
       extract(epoch FROM clock_timestamp())*1000 AS database_now,
       ($4::uuid IS NULL OR EXISTS(SELECT 1 FROM cloud_v2_execution_contexts c WHERE c.id=$4 AND c.workspace_id=w.id AND c.user_id=$2
-        AND c.state='active' AND c.expires_at>clock_timestamp() AND c.source_fingerprint=$3
+        AND c.state='active' AND c.expires_at>clock_timestamp()
         AND w.state IN ('creating','starting','running') AND w.archived_at IS NULL
         AND c.access_epoch=w.access_epoch AND c.stop_generation=w.stop_generation
         AND c.worker_boot_id=w.worker_boot_id AND c.worker_token_hash=w.worker_token_hash AND c.worker_boot_id=ANY(w.acting_user_boot_ids)
         AND (c.client_token_expires_at IS NULL OR c.client_token_expires_at>clock_timestamp())
+        AND (c.sync_device_id IS NULL OR (c.worker_boot_id=ANY(w.sync_context_boot_ids) AND EXISTS (
+          SELECT 1 FROM local_command_devices d JOIN cloud_v2_connected_macs cm
+            ON cm.workspace_id=w.id AND cm.user_id=d.user_id AND cm.device_id=d.device_id
+          WHERE d.user_id=c.user_id AND d.device_id=c.sync_device_id AND d.revoked_at IS NULL
+            AND d.provider_session_id=c.provider_session_id AND d.registration_id=c.sync_registration_id AND d.instance_id=c.sync_instance_id
+            AND cm.registration_id=c.sync_registration_id AND cm.connected_at=c.sync_connected_at AND cm.disconnected_at IS NULL
+            AND (cm.is_latest_sender OR greatest(cm.connected_at,cm.last_used_at)>clock_timestamp()-interval '12 hours'))))
         AND (c.parent_context_id IS NULL OR EXISTS(SELECT 1 FROM cloud_v2_execution_contexts parent WHERE parent.id=c.parent_context_id
           AND parent.workspace_id=w.id AND parent.user_id=$2 AND parent.state='active' AND parent.expires_at>clock_timestamp()
           AND (parent.client_token_expires_at IS NULL OR parent.client_token_expires_at>clock_timestamp())))
@@ -82,14 +90,14 @@ export class CloudExecutionAuthority {
     const names = row.source_repositories?.map(name => name.toLowerCase()).sort() ?? [];
     if (row.source_pending || !parsed.success || names.length !== parsed.data.length || !names.includes(row.repository.toLowerCase()) ||
         parsed.data.some((target, index) => target.repository !== names[index])) throw executionUnavailable();
-    const permissionSignature = createHash("sha256").update(JSON.stringify([row.id,row.org_id,userId,row.creator_user_id,
-      row.account_revision,row.member_revision,row.member_created_at,row.organization_revision,row.role,row.repository,parsed.data,row.connection_revision])).digest("hex");
-    const personSignature = createHash("sha256").update(JSON.stringify([permissionSignature,row.access_epoch,row.stop_generation])).digest("hex");
-    const signature = createHash("sha256").update(JSON.stringify([personSignature,row.worker_boot_id,row.worker_token_hash])).digest("hex");
+    const signatures = executionSignatures({ permission: [row.id,row.org_id,userId,row.creator_user_id,
+      row.account_revision,row.member_revision,row.member_created_at,row.organization_revision,row.role,row.repository,parsed.data,row.connection_revision],
+      policy: row.organization_policy, accessEpoch: row.access_epoch, stopGeneration: row.stop_generation,
+      bootId: row.worker_boot_id, workerTokenHash: row.worker_token_hash });
     return { workspaceId, organizationId: row.org_id, userId, creatorUserId: row.creator_user_id, repository: row.repository, state: row.state,
       accessEpoch: row.access_epoch, stopGeneration: row.stop_generation, bootId: row.worker_boot_id, workerTokenHash: row.worker_token_hash,
       accountRevision: row.account_revision, memberRevision: row.member_revision, organizationRevision: row.organization_revision,
-      signature, personSignature, permissionSignature, targets: parsed.data, role: row.role, databaseNow: Number(row.database_now), verifications: row.verifications };
+      ...signatures, targets: parsed.data, role: row.role, databaseNow: Number(row.database_now), verifications: row.verifications };
   }
 
   async admit(workspaceId: string, userId: string, options: { continuation?: boolean; user?: AuthedUser | undefined; sourceError?: "github_access_required"; minimumSourceMs?: number } = {}): Promise<ExecutionAdmission> {

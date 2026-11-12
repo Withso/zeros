@@ -12,7 +12,8 @@ import { CloudGithubPrStore } from "./github-pr-store.js";
 import { CloudGithubPrService, assertCloudGithubPrContext } from "./github-pr-service.js";
 import { CloudGithubActions } from "./github-actions.js";
 import { createSelectedCloudGithubTokens } from "./github-selected-tokens.js";
-import type { CloudV2Store, CloudV2Workspace } from "./store.js";
+import { cloudV2WorkspaceFromRow, type CloudV2Store, type CloudV2Workspace } from "./store.js";
+import { CLOUD_V2_LIVE_ACCESS, cloudV2ActorAccess } from "./workspace-access.js";
 import type { CloudV2ComputerSourceResolver } from "./computer-provenance.js";
 import type { CloudV2Computers } from "./computer.js";
 import { z } from "zod";
@@ -135,7 +136,13 @@ export function createCloudGithubServices(
   };
   const authorizePerson = async (id: string, userId: string) => {
     const before = await metadata.context(id, userId);
-    const workspace = await workspaces.get(id, before.creatorUserId);
+    const workspace = before.actorUserId ? await withSystemTx(pool, async tx => {
+      const row = (await tx.query<Parameters<typeof cloudV2WorkspaceFromRow>[0]>(`SELECT w.* FROM cloud_v2_workspaces w
+        WHERE w.id=$1 AND w.execution_mode='active' AND w.state NOT IN ('deleted','deleting')
+          AND ${cloudV2ActorAccess("$2")} AND ${CLOUD_V2_LIVE_ACCESS}`, [id, userId])).rows[0];
+      if (!row) throw new HttpError(404, "not_found", "Cloud workspace not found.");
+      return cloudV2WorkspaceFromRow(row);
+    }) : await workspaces.get(id, before.creatorUserId);
     if (before.actorUserId) {
       const scope = await withSystemTx(pool, tx => tx.query<{ source_repositories: string[] }>(
         "SELECT source_repositories FROM cloud_v2_workspaces WHERE id=$1", [id]));

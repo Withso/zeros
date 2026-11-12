@@ -19,8 +19,8 @@ const url = process.env.TEST_DATABASE_URL, d = url ? describe : describe.skip;
 /** Every non-internal trigger on a table with a policy that admits a
  * non-system write, as of this suite's cases. */
 const COVERED_TRIGGERS: Record<string, readonly string[]> = {
-  organizations: ["organizations_personal_classification_immutable", "local_command_setting_changed", "execution_organization_update"],
-  organization_members: ["execution_member_delete", "execution_member_update"],
+  organizations: ["organizations_personal_classification_immutable", "local_command_setting_changed", "execution_organization_update", "execution_organization_personal"],
+  organization_members: ["execution_member_delete", "execution_member_update", "execution_member_insert"],
   users: ["cloud_actor_staff_revision", "staff_pro_benefit_sync", "execution_user_fence"],
 };
 
@@ -85,6 +85,13 @@ d("triggers on user-writable tables with PostgreSQL", () => {
   });
 
   describe("user-context writes", () => {
+    it("organizations: an unchanged personal classification passes the execution fence under tenant RLS", async () => {
+      const changed = await asUser(fixture.userId, "UPDATE organizations SET is_personal=is_personal WHERE id=$1 RETURNING is_personal", [fixture.organizationId]);
+      expect(changed.rows).toEqual([{ is_personal: false }]);
+      await expect(asUser(fixture.userId, "UPDATE organizations SET is_personal=true WHERE id=$1", [fixture.organizationId]))
+        .rejects.toMatchObject({ code: "23514" });
+    });
+
     it("organizations: local-command settings succeed when invoker RLS filters workspace cleanup", async () => {
       const store = new CloudV2Store(pool);
       const workspace = await store.createWorkspace({ id: randomUUID(), organizationId: fixture.organizationId,

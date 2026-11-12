@@ -5,6 +5,7 @@ import { CloudWorkerScheduler } from "../../worker-scheduler.js";
 import type { CloudV2ContextReason } from "../contract.js";
 import { CLOUD_V2_LIVE_ACCESS } from "../workspace-access.js";
 import type { CloudExecutionContexts, ExecutionContext } from "./store.js";
+import { matchesExecutionSignature } from "./signatures.js";
 
 type Revocation = { contextId: string; reason: CloudV2ContextReason; bootId: string };
 export class CloudExecutionMaintenance {
@@ -24,8 +25,8 @@ export class CloudExecutionMaintenance {
           try {
             if (!row.user_id) reason = "access_revoked";
             else {
-              const person = await this.contexts.deps.authority.snapshot(tx, id, row.user_id, row.source_fingerprint);
-              if (person.signature !== row.authority.signature || person.state === "stopping") reason = "actor_changed";
+              const person = await this.contexts.deps.authority.snapshot(tx, id, row.user_id, row.source_fingerprint, row.id);
+              if (!matchesExecutionSignature(row.authority, row.authority.signature, person, "signature") || person.state === "stopping") reason = "actor_changed";
               if (person.verifications.some(value => value.failureStatus && [401,403,404].includes(value.failureStatus))) reason = "access_revoked";
               if (row.provider_session_id && !(await tx.query(`SELECT 1 FROM auth_sessions WHERE user_id=$1 AND provider='workos' AND provider_session_id=$2
                 AND status='active' AND revoked_at IS NULL AND (provider_session_expires_at IS NULL OR provider_session_expires_at>clock_timestamp())`, [row.user_id,row.provider_session_id])).rowCount)
@@ -67,6 +68,20 @@ export class CloudExecutionMaintenance {
   }
 
   async cancelQueued(tx: Tx, id: string) {
+    // Clock-driven Hold and N-1 writers can leave inventory behind the protocol
+    // policy. Reconcile it under the same personal cutoff as a visible writer.
+    await tx.query(`INSERT INTO cloud_v2_execution_invalidations(workspace_id,user_id)
+      SELECT w.id,person.user_id FROM cloud_v2_workspaces w CROSS JOIN LATERAL (
+        SELECT user_id FROM cloud_v2_execution_contexts WHERE workspace_id=w.id AND state='active'
+        UNION SELECT creator_user_id FROM cloud_v2_prompt_outbox WHERE workspace_id=w.id AND state IN ('queued','inboxed','dispatching','accepted')
+        UNION SELECT user_id FROM cloud_v2_tokens WHERE workspace_id=w.id AND expires_at>clock_timestamp()
+        UNION SELECT user_id FROM cloud_v2_connected_macs WHERE workspace_id=w.id AND disconnected_at IS NULL
+        UNION SELECT user_id FROM cloud_v2_chat_sender_bindings WHERE workspace_id=w.id AND NOT retired
+        UNION SELECT user_id FROM cloud_v2_workspace_presence WHERE workspace_id=w.id AND expires_at>clock_timestamp()
+      ) person WHERE w.id=$1 AND w.execution_mode='active' AND person.user_id IS NOT NULL AND (
+        NOT ${CLOUD_V2_LIVE_ACCESS} OR NOT EXISTS(SELECT 1 FROM organization_members m JOIN users u ON u.id=m.user_id
+          WHERE m.org_id=w.org_id AND m.user_id=person.user_id AND u.auth_status='active' AND u.deleted_at IS NULL
+            AND NOT ${memberOnHoldSql("m.org_id","m.user_id")}))`, [id]);
     const changed = await tx.query(`UPDATE cloud_v2_prompt_outbox p SET cancel_requested=true,
       state=CASE WHEN p.state IN ('dispatching','accepted') AND EXISTS(SELECT 1 FROM cloud_v2_execution_contexts c
         WHERE c.id=p.execution_context_id AND c.reason IN ('worker_changed','expired')) THEN 'interrupted' ELSE 'cancelled' END,
@@ -79,11 +94,6 @@ export class CloudExecutionMaintenance {
           AND (i.user_id IS NULL OR i.user_id=p.creator_user_id) AND p.created_at<=i.created_at)
         OR EXISTS(SELECT 1 FROM cloud_v2_execution_contexts c WHERE c.id=p.execution_context_id AND c.state<>'active' AND c.reason<>'completed'))`, [id]);
     await tx.query("DELETE FROM cloud_v2_execution_invalidations WHERE workspace_id=$1", [id]);
-    await tx.query(`UPDATE cloud_v2_connected_macs cm SET disconnected_at=clock_timestamp(),syncing=false,sync_wanted=false
-      FROM cloud_v2_workspaces w WHERE w.id=$1 AND cm.workspace_id=w.id AND cm.disconnected_at IS NULL AND (
-        NOT ${CLOUD_V2_LIVE_ACCESS} OR NOT EXISTS(SELECT 1 FROM organization_members m JOIN users u ON u.id=m.user_id
-          WHERE m.org_id=w.org_id AND m.user_id=cm.user_id AND u.auth_status='active' AND u.deleted_at IS NULL
-            AND NOT ${memberOnHoldSql("m.org_id","m.user_id")}))`, [id]);
     if (changed.rowCount) await tx.query("SELECT pg_notify('zeros_cloud_v2_prompts',$1)", [id]);
   }
 
@@ -94,9 +104,17 @@ export class CloudExecutionMaintenance {
   }
 
   async affected(scope: { userId?: string; organizationId?: string }, after?: string): Promise<string[]> {
-    return withSystemTx(this.contexts.pool, async tx => (await tx.query<{ id: string }>(`SELECT DISTINCT workspace_id AS id
-      FROM cloud_v2_execution_contexts WHERE state IN ('active','revoked') AND ($1::uuid IS NULL OR user_id=$1)
-        AND ($2::uuid IS NULL OR org_id=$2) AND ($3::uuid IS NULL OR workspace_id>$3) ORDER BY id LIMIT 128`,
+    return withSystemTx(this.contexts.pool, async tx => (await tx.query<{ id: string }>(`SELECT DISTINCT w.id FROM (
+      SELECT workspace_id,user_id FROM cloud_v2_execution_contexts WHERE state IN ('active','revoked')
+      UNION ALL SELECT workspace_id,creator_user_id FROM cloud_v2_prompt_outbox
+        WHERE execution_authority IS NOT NULL AND state IN ('queued','inboxed','dispatching','accepted')
+      UNION ALL SELECT workspace_id,user_id FROM cloud_v2_tokens WHERE execution_authority IS NOT NULL AND expires_at>clock_timestamp()
+      UNION ALL SELECT workspace_id,user_id FROM cloud_v2_connected_macs WHERE disconnected_at IS NULL
+      UNION ALL SELECT workspace_id,user_id FROM cloud_v2_chat_sender_bindings WHERE NOT retired
+      UNION ALL SELECT workspace_id,user_id FROM cloud_v2_workspace_presence WHERE expires_at>clock_timestamp()
+      ) resource JOIN cloud_v2_workspaces w ON w.id=resource.workspace_id
+      WHERE w.execution_mode='active' AND ($1::uuid IS NULL OR resource.user_id=$1)
+        AND ($2::uuid IS NULL OR w.org_id=$2) AND ($3::uuid IS NULL OR w.id>$3) ORDER BY w.id LIMIT 128`,
     [scope.userId ?? null, scope.organizationId ?? null, after ?? null])).rows.map(row => row.id));
   }
 
