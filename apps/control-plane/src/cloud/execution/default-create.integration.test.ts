@@ -78,6 +78,7 @@ suite("new organization workspaces start with personal execution", () => {
     let bearer: string, contextId: string | null = null;
     if (credential === "api_key") bearer = (await fixture.cp.api.credentials.create(fixture.organizationId, fixture.viewer.id, "Fixture")).key;
     else {
+      await fixture.login();
       await fixture.activate(); expect((await fixture.hello()).status).toBe(200);
       const origin = await fixture.dispatch(fixture.prompt(randomUUID(), { chatId: "requesting-person" }), fixture.viewer);
       const lease = await fixture.worker("turn-lease", origin.lease); expect(lease.status).toBe(200);

@@ -8,6 +8,7 @@ export type WorkerRoute = { workspace: CloudV2Workspace; accessEpoch: string; ur
   executionMode?: "legacy" | "prepared" | "active"; workerTokenHash?: string | null; stopBootIds?: readonly string[] };
 const peerFeatures = new WeakMap<WebSocket, ReadonlySet<string>>();
 export const workerSupportsActingUser = (socket: WebSocket): boolean => peerFeatures.get(socket)?.has("acting-user-v1") ?? false;
+export const workerSupportsCreatorLogins = (socket: WebSocket): boolean => peerFeatures.get(socket)?.has("creator-agent-logins-v1") ?? false;
 export const workerSupportsApi = (socket: WebSocket): boolean => peerFeatures.get(socket)?.has("workspace-api-v1") ?? false;
 export const workerSupportsLocalCommands = (socket: WebSocket): boolean => peerFeatures.get(socket)?.has("local-commands-v1") ?? false;
 export const workerSupportsLocalCommandReason = (socket: WebSocket): boolean => peerFeatures.get(socket)?.has("local-commands-reason-v1") ?? false;

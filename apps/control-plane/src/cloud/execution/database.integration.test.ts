@@ -68,7 +68,7 @@ database("execution migration roles, erasure and zero-context cost", () => {
   });
 
   it("keeps an erased person's cleanup barrier and rejects cross-workspace context links", async () => {
-    await f.login(f.viewer); await f.activate(); expect((await f.hello()).status).toBe(200);
+    await f.login(); await f.activate(); expect((await f.hello()).status).toBe(200);
     const turn = await f.dispatch(f.prompt(), f.viewer);
     expect((await f.worker("turn-lease", turn.lease)).status).toBe(200);
     await pool.query("INSERT INTO cloud_v2_prompt_chats(workspace_id,chat_id) VALUES($1,'foreign')", [f.own.id]);

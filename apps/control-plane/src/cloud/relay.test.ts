@@ -763,6 +763,27 @@ describe("cloud v2 relay", () => {
     else expect(frames.find(frame => frame.t === "config")).not.toHaveProperty("mcpServers");
   });
 
+  it.each([false, true])("negotiates Creator availability on active config and replaces it after a refresh (supported=%s)", async supported => {
+    workerServer.on("headers", headers => { headers.push(`X-Zeros-Worker-Features: acting-user-v1${supported ? ",creator-agent-logins-v1" : ""}`); });
+    const original = deps.config;
+    let available: { claude?: true } = { claude: true };
+    deps.config = async ws => ({ ...await original(ws), actingUser: 1, agentLogins: available });
+    const frames: any[] = [];
+    workerServer.on("connection", ws => ws.on("message", raw => frames.push(JSON.parse(String(raw)))));
+    await app();
+    await vi.waitFor(() => expect(frames.filter(frame => frame.t === "config")).toHaveLength(1));
+    const first = frames.find(frame => frame.t === "config");
+    expect(first.agents).toEqual({});
+    if (supported) expect(first.agentLogins).toEqual({ claude: true });
+    else expect(first).not.toHaveProperty("agentLogins");
+    available = {}; loginRevision = "1"; await relay.refreshLogins();
+    await vi.waitFor(() => expect(frames.filter(frame => frame.t === "config")).toHaveLength(2));
+    const next = frames.filter(frame => frame.t === "config").at(-1);
+    expect(next.loginRevision).toBe("1"); expect(next.agents).toEqual({});
+    if (supported) expect(next.agentLogins).toEqual({});
+    else expect(next).not.toHaveProperty("agentLogins");
+  });
+
   it.each(["", "workspace-api-v10", "workspace-api-v1"])("negotiates API configuration for the connected workspace only: %s", async features => {
     workerServer.on("headers", headers => { headers.push(`X-Zeros-Worker-Features: ${features}`); });
     const api = { url: "https://api.example.test/api/v0", token: newCloudV2Token("api").token };

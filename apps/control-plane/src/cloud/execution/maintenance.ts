@@ -17,6 +17,7 @@ export class CloudExecutionMaintenance {
         await tx.query("DELETE FROM cloud_v2_execution_invalidations WHERE workspace_id=$1", [id]);
         return [];
       }
+      await this.contexts.deps.logins.refreshAvailability(id, tx);
       await this.cancelQueued(tx, id);
       const rows = (await tx.query<ExecutionContext>("SELECT * FROM cloud_v2_execution_contexts WHERE workspace_id=$1 AND state='active' ORDER BY id", [id])).rows;
       for (const row of rows) {
@@ -106,6 +107,9 @@ export class CloudExecutionMaintenance {
   async affected(scope: { userId?: string; organizationId?: string }, after?: string): Promise<string[]> {
     return withSystemTx(this.contexts.pool, async tx => (await tx.query<{ id: string }>(`SELECT DISTINCT w.id FROM (
       SELECT workspace_id,user_id FROM cloud_v2_execution_contexts WHERE state IN ('active','revoked')
+      UNION ALL SELECT id,creator_user_id FROM cloud_v2_workspaces WHERE execution_mode='active' AND state<>'deleted'
+      UNION ALL SELECT workspace_id,(selection#>>'{payer,userId}')::uuid FROM cloud_v2_execution_contexts
+        WHERE state IN ('active','revoked') AND selection->>'version'='2'
       UNION ALL SELECT workspace_id,creator_user_id FROM cloud_v2_prompt_outbox
         WHERE execution_authority IS NOT NULL AND state IN ('queued','inboxed','dispatching','accepted')
       UNION ALL SELECT workspace_id,user_id FROM cloud_v2_tokens WHERE execution_authority IS NOT NULL AND expires_at>clock_timestamp()

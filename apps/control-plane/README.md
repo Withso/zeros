@@ -545,8 +545,26 @@ hydrate the checkout with personal credentials before that proof. The first
 failure is retained and the workspace stops with `execution_first_boot_failed`;
 an ordinary Start retries in a new worker process. Worker configuration carries
 no global personal login, environment or Git identity. Each context receives
-its admitted person's material. Development qualification uses the verified
+its admitted person's environment and Git identity; agent turns use the current
+Creator's selected agent login. Development qualification uses the verified
 artifact record and S9 exercises an ordinary fresh create without the operator.
+
+Migration `0245_cloud_execution_payer.sql` pins a turn's login owner separately
+from its actor in version 2 of the existing selection JSON. Renewals and
+same-person steer retain that pin across Reassign. Payer membership, account,
+Hold or explicit login loss revokes funded turns without revoking the sender's
+other contexts or the VM. Normal OAuth refresh preserves the pin. Existing
+version 1 contexts keep their actor-owned login; the insert guard prevents an
+older replica from starting a new member-funded turn in another Creator's
+workspace.
+
+The activated config advertises `agentLogins` only to workers with
+`creator-agent-logins-v1`. Its three optional true values describe the current
+Creator, with `{}` meaning known empty and absence meaning an older control
+plane. The nullable workspace snapshot carries no credentials. Config, activity
+and existing execution maintenance reconcile it against live eligibility and
+advance `loginRevision` only when the map changes, including after a missed
+notification or a clock-driven Hold. Turn admission never trusts the map.
 
 Set `CLOUD_EXECUTION_CHANGE_FILE` to a regular JSON file containing exactly:
 

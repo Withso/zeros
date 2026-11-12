@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import pg from "pg";
+import { withSystemTx } from "../../db.js";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { executionFixture, type ExecutionFixture } from "./test-fixture.js";
 
@@ -33,17 +34,37 @@ database("per-context API and broker authority", () => {
     expect((await f.worker("turn-lease", creator.lease)).status).toBe(200);
   });
 
-  it("permits member API keys on an activated direct target but refuses without that person's agent login", async () => {
+  it("permits a member API key without their own login but names the Creator when its login is missing", async () => {
     const key = await f.cp.api.credentials.create(f.organizationId, f.admin.id, "Fixture");
+    await withSystemTx(pool, tx => tx.query("DELETE FROM cloud_agent_organization_connections WHERE org_id=$1 AND owner_user_id=$2", [f.organizationId, f.creator.id]));
     const response = await api(key.key, "sessions", { workspaceId: f.workspace.id, agent: "claude", message: "No login", sessionId: "admin-chat", messageId: randomUUID() });
     expect(response.status).toBe(409);
-    expect(await response.json()).toMatchObject({ error: { code: "agent_login_required", agent: "claude" } });
-    await f.login(f.admin);
-    const accepted = await api(key.key, "sessions", { workspaceId: f.workspace.id, agent: "claude", message: "Personal login", sessionId: "admin-chat", messageId: randomUUID() });
+    expect(await response.json()).toMatchObject({ error: { code: "agent_login_required", agent: "claude", loginRequiredFrom: "creator" } });
+    await f.login();
+    const accepted = await api(key.key, "sessions", { workspaceId: f.workspace.id, agent: "claude", message: "Creator login", sessionId: "admin-chat", messageId: randomUUID() });
     expect(accepted.status).toBe(201);
     expect((await api(key.key, `workspaces/${f.workspace.id}`)).status).toBe(200);
     expect((await api(key.key, "workspaces")).status).toBe(200);
     expect((await (await api(key.key, "workspaces")).json()).data).toEqual([]);
+  });
+
+  it.each(["self", "creator", "missing"] as const)("projects the Creator login refusal through MCP (%s) without saving work", async from => {
+    const actor = from === "self" ? f.creator : f.viewer;
+    const key = await f.cp.api.credentials.create(f.organizationId, actor.id, "Fixture");
+    await withSystemTx(pool, tx => from === "missing"
+      ? tx.query("DELETE FROM organization_members WHERE org_id=$1 AND user_id=$2", [f.organizationId, f.creator.id])
+      : tx.query("DELETE FROM cloud_agent_organization_connections WHERE org_id=$1 AND owner_user_id=$2", [f.organizationId, f.creator.id]));
+    const response = await f.app.request("/api/mcp", { method: "POST", headers: { authorization: `Bearer ${key.key}`,
+      "content-type": "application/json", accept: "application/json, text/event-stream", "mcp-protocol-version": "2025-11-25" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "create_session", arguments: {
+        workspaceId: f.workspace.id, agent: "claude", message: "No login", sessionId: "mcp-chat", messageId: randomUUID() } } }) });
+    expect(response.status).toBe(200);
+    const result = (await response.json()).result;
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent.error).toMatchObject(from === "missing" ? { code: "workspace_creator_required" }
+      : { code: "agent_login_required", agent: "claude", loginRequiredFrom: from });
+    expect((await pool.query("SELECT 1 FROM cloud_v2_prompt_outbox WHERE workspace_id=$1", [f.workspace.id])).rowCount).toBe(0);
+    expect((await pool.query("SELECT 1 FROM cloud_v2_execution_contexts WHERE workspace_id=$1 AND kind='turn'", [f.workspace.id])).rowCount).toBe(0);
   });
 
   it("wakes a direct API target using the caller's source access even when the Creator cannot read it", async () => {

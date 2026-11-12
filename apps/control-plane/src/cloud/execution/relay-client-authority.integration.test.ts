@@ -85,6 +85,7 @@ database("client lease authority through the signed worker carrier", () => {
         headers: { authorization: `Bearer ${f.token}`, "x-zeros-worker-boot": f.boot,
           "x-zeros-worker-features": f.features, "content-type": "application/json" }, body: JSON.stringify(body) });
       const reply = await response.json();
+      calls.push({ path: `prompts/${operation}`, body, status: response.status, ...(reply.error ? { code: reply.error.code } : {}) });
       if (!response.ok) throw Object.assign(new Error("Prompt refused"), { status: response.status, contextCode: reply.error?.code });
       return reply;
     };
@@ -205,6 +206,60 @@ database("client lease authority through the signed worker carrier", () => {
     worker.drivers[0].complete();
     await expect.poll(async () => (await pool.query("SELECT state FROM cloud_v2_prompt_outbox WHERE workspace_id=$1 AND user_message_id=$2",
       [f.workspace.id, prompt.userMessageId])).rows[0]?.state).toBe("completed");
+  });
+
+  it("runs B without a login on the Creator's login through the signed carrier, retaining B's environment and API identity", async () => {
+    const login = await f.login();
+    for (const user of [f.creator, f.viewer]) await f.cp.routes.environments!.patch(f.organizationId, user.id, "42", f.workspace.repository,
+      { expectedRevision: 0, variables: { APP_PERSON: user === f.creator ? "creator" : "member" },
+        files: [{ path: envPath, content: user === f.creator ? "APP_FILE=creator\n" : "APP_FILE=member\n" }] });
+    const worker = await setup(true), client = await worker.open(f.viewer), prompt = f.prompt();
+    const write = clients.browserFrame("WORKSPACE_REQUEST", { op: "file.write", params: { path: "member.txt", content: "member work" } });
+    await client.send(write);
+    await expect.poll(() => client.frames.find(value => value.frame?.requestId === write.id)?.frame.type).toBe("WORKSPACE_RESPONSE");
+    expect((await pool.query("SELECT user_id FROM cloud_v2_execution_contexts WHERE workspace_id=$1 AND request_id=$2 AND kind='client'",
+      [f.workspace.id, write.id])).rows).toEqual([{ user_id: f.viewer.id }]);
+    expect((await f.send(prompt, f.viewer)).status).toBe(201);
+    client.socket.send(JSON.stringify({ t: "prompts" }));
+    await expect.poll(() => worker.drivers[0]?.prompts.length).toBe(1);
+    const opened = worker.drivers[0].opened, contextId = opened.zerosEnvironment.ZEROS_EXECUTION_CONTEXT;
+    expect(opened.apiKey).toBe(login.secret);
+    expect(opened.application.variables.APP_PERSON).toBe("member");
+    expect(await readFile(join(worker.home, ".zeros", "contexts", contextId, "env", envPath), "utf8")).toBe("APP_FILE=member\n");
+    expect((await pool.query("SELECT user_id,credential_id,selection->'payer'->>'userId' AS payer FROM cloud_v2_execution_contexts WHERE id=$1",
+      [contextId])).rows).toEqual([{ user_id: f.viewer.id, credential_id: login.id, payer: f.creator.id }]);
+    await expect.poll(() => client.frames.some(value => value.frame?.type === "AGENT_SESSION_UPDATE" &&
+      value.frame.notification.update.sessionUpdate === "turn_state" && value.frame.notification.update.state === "running" &&
+      value.frame.notification.update.actingUserId === f.viewer.id)).toBe(true);
+    const me = await f.app.request("/api/v0/me", { headers: { authorization: `Bearer ${opened.zerosEnvironment.ZEROS_API_TOKEN}` } });
+    expect(me.status).toBe(200); expect(await me.json()).toMatchObject({ userId: f.viewer.id });
+    worker.drivers[0].complete();
+    await expect.poll(async () => (await pool.query("SELECT state FROM cloud_v2_prompt_outbox WHERE workspace_id=$1 AND user_message_id=$2",
+      [f.workspace.id, prompt.userMessageId])).rows[0]?.state).toBe("completed");
+    expect((await pool.query("SELECT 1 FROM cloud_agent_organization_connections WHERE org_id=$1 AND owner_user_id=$2", [f.organizationId, f.viewer.id])).rowCount).toBe(0);
+  });
+
+  it("retries an N-1 payer guard refusal with the same dispatch until the upgraded replica admits it", async () => {
+    const payer = await f.login(); await f.login(f.viewer);
+    const old = vi.spyOn(f.cp.execution.deps.logins, "forWorkspace").mockImplementation((_id, actor, agent, expected, tx) =>
+      f.cp.execution.deps.logins.select(f.organizationId, actor, agent, expected, tx));
+    const worker = await setup(true), client = await worker.open(f.viewer), prompt = f.prompt();
+    expect((await f.send(prompt, f.viewer)).status).toBe(201);
+    client.socket.send(JSON.stringify({ t: "prompts" }));
+    await expect.poll(() => worker.calls.some(call => call.path === "prompts/begin" && call.status === 500)).toBe(true);
+    expect((await pool.query("SELECT state FROM cloud_v2_prompt_outbox WHERE workspace_id=$1 AND user_message_id=$2",
+      [f.workspace.id,prompt.userMessageId])).rows).toEqual([{ state: "inboxed" }]);
+    expect((await pool.query("SELECT 1 FROM cloud_v2_execution_contexts WHERE workspace_id=$1 AND kind='turn'", [f.workspace.id])).rowCount).toBe(0);
+    expect(worker.drivers).toHaveLength(0);
+    old.mockRestore();
+    await expect.poll(() => worker.drivers[0]?.prompts.length).toBe(1);
+    expect(worker.drivers[0].opened.apiKey).toBe(payer.secret);
+    const begins = worker.calls.filter(call => call.path === "prompts/begin");
+    expect(begins.at(-1)?.status).toBe(200);
+    expect(new Set(begins.map(call => JSON.stringify(call.body))).size).toBe(1);
+    worker.drivers[0].complete();
+    await expect.poll(async () => (await pool.query("SELECT state FROM cloud_v2_prompt_outbox WHERE workspace_id=$1 AND user_message_id=$2",
+      [f.workspace.id,prompt.userMessageId])).rows[0]?.state).toBe("completed");
   });
 
   it.each(envCases)("runs A's turn with the $name intact and only exportable child variables", async input => {

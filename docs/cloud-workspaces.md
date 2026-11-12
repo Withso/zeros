@@ -476,8 +476,25 @@ account or repository access. That person's contexts, tokens, pending prompts,
 Mac connections and local-command bindings are revoked; other members keep
 working. A session sign-out closes that session's clients and terminals while
 already accepted turns retain their recorded sender. Commit and review identity,
-agent logins, environment and MCP selection come from each execution's person.
+GitHub, environment, MCP, API and Local commands come from each execution's person.
 Local workspaces and legacy/prepared cloud workspaces keep their existing rules.
+
+Every new activated turn uses the current workspace Creator's selected agent
+login. Other members need no agent login or additional Pro subscription to send
+a turn. The login owner is pinned separately from the sender: Reassign affects
+the next turn, while a running turn and the same person's steer retain their
+original login. Losing that pinned owner's membership, admission or selected
+login stops the funded turns; the sender's terminals, files and Git remain usable.
+An ordinary OAuth refresh, desktop sign-out or loss of the Creator's GitHub
+access alone does not revoke another person's funded turn. Old contexts retain
+their original login until they finish.
+
+Missing Creator login returns `409 agent_login_required` with
+`loginRequiredFrom: "self" | "creator"`. A missing or ineligible Creator returns
+`409 workspace_creator_required`; non-agent operations remain available to
+admitted members. There is no fallback to the sender's login. Capable workers
+receive only a sparse `agentLogins` availability map for the current Creator,
+fenced by `loginRevision`; actual credentials remain scoped to turn leases.
 
 Direct sync on an activated workspace requires the exact boot to advertise both
 `acting-user-v1` and `sync-context-v1`. Its signed grant includes a `ctx` client

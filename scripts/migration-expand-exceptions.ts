@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 // Each reviewed migration lists its exact exempted statements by rule.
 const reviewed: Readonly<Record<string, Readonly<Record<string, readonly string[]>>>> = {
+  "0245_cloud_execution_payer.sql": {},
   "0243_cloud_execution_person_authority.sql": {},
   "0242_cloud_bootstrap_material.sql": {
     "privilege-tightening": ["REVOKE ALL ON FUNCTION capture_cloud_bootstrap_material() FROM PUBLIC;"],
@@ -532,6 +533,10 @@ function statements(sql: string): { text: string; header: string }[] {
   return result;
 }
 
+const cloudExecutionPayerDigests: Readonly<Record<string, readonly string[]>> = {
+  "privilege-tightening": ["731bdbca9284f4ccb2dfdd6c6aef2708d84b37a91589f371cb3bf41363b1d346"],
+  "execution-payer-revocation": ["ddd39124e45280cf813bea37cd1ddff56728557558b2a2aafeabc759fa07cfb3"],
+};
 const cloudExecutionPersonDigests: Readonly<Record<string, readonly string[]>> = {
   "privilege-tightening": [
     "2e79182cec4eb56f03c59604bf44749a27d27d899d9fb0b23dc5cc3186f4ffa1",
@@ -573,6 +578,7 @@ export function applyReviewedExpandExceptions(file: string, sql: string): string
     const rule = annotations[0]![1]!;
     const statement = text.replace(/\r\n/g, "\n").trim();
     const allowed = exact[rule]?.includes(statement) ||
+      (file === "0245_cloud_execution_payer.sql" && cloudExecutionPayerDigests[rule]?.includes(createHash("sha256").update(statement).digest("hex"))) ||
       (file === "0243_cloud_execution_person_authority.sql" && cloudExecutionPersonDigests[rule]?.includes(createHash("sha256").update(statement).digest("hex"))) ||
       (file === "0240_cloud_execution_activation.sql" && cloudExecutionActivationDigests[rule]?.includes(createHash("sha256").update(statement).digest("hex"))) ||
       (file === "0239_cloud_execution_contexts.sql" && cloudExecutionDigests[rule]?.includes(createHash("sha256").update(statement).digest("hex"))) ||

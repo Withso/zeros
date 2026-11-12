@@ -55,7 +55,7 @@ database("shared execution lifecycle and metadata", () => {
     expect((await pool.query("SELECT 1 FROM cloud_v2_execution_contexts WHERE id=$1", [bootstrapContextId])).rowCount).toBe(0);
   });
   it("records the waking sender as initiator and exposes write capability only under the sharing opt-in", async () => {
-    await f.login(f.viewer);
+    await f.login();
     await pool.query("UPDATE cloud_v2_workspaces SET state='stopped' WHERE id=$1", [f.workspace.id]);
     expect((await f.send(f.prompt(), f.viewer)).status).toBe(201);
     expect((await pool.query("SELECT execution_initiator_user_id FROM cloud_v2_workspaces WHERE id=$1", [f.workspace.id])).rows[0].execution_initiator_user_id).toBe(f.viewer.id);
@@ -73,7 +73,7 @@ database("shared execution lifecycle and metadata", () => {
   });
 
   it("overlays the live actor only on opted-in history, without trusting a worker-supplied actor", async () => {
-    await f.login(f.viewer); const active = await f.dispatch(f.prompt(), f.viewer);
+    await f.login(); const active = await f.dispatch(f.prompt(), f.viewer);
     await f.cp.store.writeHistory(f.workspace.id, { chats: [{ id: "chat", agentId: "claude", actingUser: { userId: f.creator.id } }] });
     const history = () => call("history", { op: "chats.list", params: {} });
     const result = await history(); expect(result.status).toBe(200);
