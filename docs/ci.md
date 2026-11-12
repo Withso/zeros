@@ -338,6 +338,16 @@ runner image already has its packages, and `apt-get update` uses
 installing from stale lists. `scripts/__tests__/ci-retry.test.ts` fails when a
 new install step bypasses the wrapper.
 
+**UI smoke flake retry.** With a merge queue, one unrelated flaky scenario
+ejected whole merge groups (2026-11-11/12). In CI (`CI=true`) each independent
+shard scenario that crashes, reports a failed check or raises a page error
+reruns once in a fresh page. A pass on retry prints
+`::warning::UI smoke scenario <id> passed on retry; first failure: …` and adds a
+line to the job summary, so flakes stay visible and countable; a second failure
+fails the job as before. Phased scenarios (`core-inline`), the unsharded local
+run and every non-smoke job (typecheck, lint, build, security, Vitest) never
+retry. Local runs never retry.
+
 ## Fail-closed job results
 
 Every producer uses `!cancelled()` with a condition that runs when its trusted

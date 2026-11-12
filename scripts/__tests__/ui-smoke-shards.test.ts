@@ -1,3 +1,6 @@
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { fileURLToPath } from "node:url";
@@ -246,7 +249,8 @@ describe("UI smoke CLI without Vite or Chromium", () => {
   });
 });
 
-function fakeRun(shard?: number, crashId?: string) {
+function fakeRun(shard?: number, crashId?: string,
+  { retries, flaky = {}, failCheck = {} }: { retries?: number; flaky?: Record<string, number>; failCheck?: Record<string, number> } = {}) {
   const pages: (EventEmitter & {
     viewport: { width: number; height: number };
     goto: ReturnType<typeof vi.fn>;
@@ -270,6 +274,7 @@ function fakeRun(shard?: number, crashId?: string) {
         "http://127.0.0.1:4100/apps/desktop/src/renderer/harnesses/harness-model-menu.html",
       check,
       pageErrors,
+      ...(retries === undefined ? {} : { retries }),
       newPage: async ({ viewport }) => {
         const page = Object.assign(new EventEmitter(), {
           viewport,
@@ -293,9 +298,12 @@ function fakeRun(shard?: number, crashId?: string) {
               ])
             : [[undefined, scenario.run]];
           for (const [phase, name] of handlers) {
-            exports[name!] = async ({ page, regression }) => {
+            exports[name!] = async ({ page, regression, check: report }) => {
               calls.push({ id: scenario.id, phase, page, regression });
               if (scenario.id === crashId) throw new Error("scenario crashed");
+              if ((flaky[scenario.id] ?? 0) > 0) { flaky[scenario.id]--; throw new Error(`${scenario.id} timed out`); }
+              if ((failCheck[scenario.id] ?? 0) > 0) { failCheck[scenario.id]--; report(`${scenario.id} check`, false, "first attempt"); return; }
+              report(`${scenario.id} check`, true);
             };
           }
         }
@@ -432,5 +440,57 @@ describe("UI smoke independent execution", () => {
         "uncaught error",
       );
     }
+  });
+});
+
+describe("UI smoke single retry in CI", () => {
+  const summary = () => mkdtempSync(path.join(tmpdir(), "ui-smoke-summary-"));
+  const withSummary = async (body: (file: string, lines: string[]) => Promise<void>) => {
+    const file = path.join(summary(), "summary.md");
+    writeFileSync(file, "");
+    const lines: string[] = [];
+    const log = vi.spyOn(console, "log").mockImplementation((line) => { lines.push(String(line)); });
+    vi.stubEnv("GITHUB_STEP_SUMMARY", file);
+    try { await body(file, lines); } finally { log.mockRestore(); vi.unstubAllEnvs(); }
+  };
+
+  it("retries a crashed scenario once in a fresh page and reports the pass loudly", async () => {
+    await withSummary(async (file, lines) => {
+      const fixture = fakeRun(2, undefined, { retries: 1, flaky: { "design-canvas-refinements": 1 } });
+      await fixture.run();
+      const attempts = fixture.calls.filter((call) => call.id === "design-canvas-refinements");
+      expect(attempts).toHaveLength(2);
+      expect(attempts[0].page).not.toBe(attempts[1].page);
+      expect(attempts[0].page.close).toHaveBeenCalled();
+      expect(lines.some((line) => line.startsWith("::warning::UI smoke scenario design-canvas-refinements passed on retry") &&
+        line.includes("design-canvas-refinements timed out"))).toBe(true);
+      expect(readFileSync(file, "utf8")).toContain("design-canvas-refinements");
+      expect(fixture.check).not.toHaveBeenCalledWith(expect.anything(), false, expect.anything());
+    });
+  });
+
+  it("retries a failed check once and forwards only the passing attempt", async () => {
+    await withSummary(async () => {
+      const fixture = fakeRun(2, undefined, { retries: 1, failCheck: { "design-canvas-refinements": 1 } });
+      await fixture.run();
+      expect(fixture.check).toHaveBeenCalledWith("design-canvas-refinements check", true);
+      expect(fixture.check).not.toHaveBeenCalledWith("design-canvas-refinements check", false, "first attempt");
+    });
+  });
+
+  it("still fails when the retry fails too", async () => {
+    await withSummary(async () => {
+      const crashed = fakeRun(2, undefined, { retries: 1, flaky: { "design-canvas-refinements": 2 } });
+      await expect(crashed.run()).rejects.toThrow("design-canvas-refinements timed out");
+      const failed = fakeRun(2, undefined, { retries: 1, failCheck: { "design-canvas-refinements": 2 } });
+      await failed.run();
+      expect(failed.check).toHaveBeenCalledWith("design-canvas-refinements check", false, "first attempt");
+    });
+  });
+
+  it("does not retry by default (local runs show every flake)", async () => {
+    const fixture = fakeRun(2, undefined, { flaky: { "design-canvas-refinements": 1 } });
+    await expect(fixture.run()).rejects.toThrow("design-canvas-refinements timed out");
+    expect(fixture.calls.filter((call) => call.id === "design-canvas-refinements")).toHaveLength(1);
   });
 });
