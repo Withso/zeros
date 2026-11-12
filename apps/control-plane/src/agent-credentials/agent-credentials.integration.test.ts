@@ -26,6 +26,13 @@ d("explicit personal agent credential authority",()=>{
       {credentialId:request.credentialId,ownerUserId:fixture.userId,kind:"cursor-api-key",version:1,keyVersion:1},{1:key})).toEqual(request.material);
     await expect(service.put({...request,displayName:"Different"})).rejects.toMatchObject({status:409});
   });
+  it("tells an account without Pro that connecting needs Pro, and still hides a missing account",async()=>{
+    await pool.query("UPDATE users SET staff_role=NULL WHERE id=$1",[fixture.userId]);
+    await pool.query("DELETE FROM account_entitlements WHERE user_id=$1",[fixture.userId]);
+    await expect(service.put(input())).rejects.toMatchObject({status:403,code:"pro_required",message:"Connecting an agent login requires Pro"});
+    expect((await service.list(fixture.userId)).credentials).toEqual([]);
+    await expect(service.put({...input(),ownerUserId:randomUUID()})).rejects.toMatchObject({status:404,code:"agent_credential_unavailable"});
+  });
   it("retires old material and consent on rotation, and erases material on revocation",async()=>{
     const request=input();await service.put(request);
     const next=await service.put({...request,expectedRevision:1,operationId:randomUUID(),material:{kind:"cursor-api-key",apiKey:"another-synthetic-cursor-credential"}});

@@ -178,6 +178,8 @@ exceed either limit:
   (`409 organization_free_member_limit`). Pro status is checked here, not at
   invite time.
 - **Cloud:** creating a cloud workspace requires Pro (`403 pro_required`).
+  Connecting or selecting a personal agent login for cloud sessions also
+  requires Pro and returns the same `403 pro_required`.
   Members without Pro keep using the workspaces they created. The shared cloud
   authority clause (`CLOUD_V2_LIVE_ACCESS`) excludes a creator on Hold on every
   HTTP, prompt, proxy and worker path; the creator's own reads return
