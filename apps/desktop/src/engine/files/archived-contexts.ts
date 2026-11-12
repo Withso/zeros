@@ -38,7 +38,8 @@ async function directory(parent: Directory, name: string): Promise<Directory> {
   return childDirectory(parent, name);
 }
 
-function segment(value: string): string {
+/** One visible folder name: the copy lives at `<repository segment>/<workspace segment>`. */
+export function archivedContextSegment(value: string): string {
   return value.normalize("NFC").replace(/[\p{Cc}/\\:]/gu, "-").replace(/\s+/g, " ").trim()
     .replace(/^[.\s-]+|[.\s-]+$/g, "").slice(0, 80) || "workspace";
 }
@@ -75,7 +76,7 @@ function archiveRecord(input: unknown): ArchiveRecord | null {
   const value = input as Partial<ArchiveRecord>;
   if (typeof value.key !== "string" || !/^[0-9a-f]{64}$/.test(value.key) ||
     typeof value.repository !== "string" || typeof value.workspace !== "string" ||
-    segment(value.repository) !== value.repository || segment(value.workspace) !== value.workspace ||
+    archivedContextSegment(value.repository) !== value.repository || archivedContextSegment(value.workspace) !== value.workspace ||
     !Number.isSafeInteger(value.archivedAt) || !Number.isSafeInteger(value.bytes) || value.bytes! < 0 ||
     !Number.isSafeInteger(value.files) || value.files! < 0) return null;
   return value as ArchiveRecord;
@@ -119,7 +120,7 @@ async function recoverPublications(root: Directory, records: Directory): Promise
   }
   const known = await readRecords(records);
   for (const name of await fs.readdir(root.path)) {
-    if (segment(name) !== name) continue;
+    if (archivedContextSegment(name) !== name) continue;
     let repo: Directory;
     try { repo = childDirectory(root, name); } catch (error) { if (unsafe(error)) continue; throw error; }
     try {
@@ -284,11 +285,11 @@ export async function archiveContext(input: ArchiveInput, limits = ARCHIVED_CONT
     await recoverPublications(root, records); current();
     const known = await readRecords(records);
     const existing = known.find(record => record.key === key);
-    const repository = existing?.repository ?? segment(input.repository);
+    const repository = existing?.repository ?? archivedContextSegment(input.repository);
     repo = await directory(root, repository);
-    let workspace = existing?.workspace ?? segment(input.workspace);
+    let workspace = existing?.workspace ?? archivedContextSegment(input.workspace);
     if (!existing && await fs.lstat(path.join(repo.path, workspace)).catch(error => { if (missing(error)) return null; throw error; }))
-      workspace = `${segment(input.workspace).slice(0, 60)}--${key.slice(0, 12)}`;
+      workspace = `${archivedContextSegment(input.workspace).slice(0, 60)}--${key.slice(0, 12)}`;
     if (!existing && await fs.lstat(path.join(repo.path, workspace)).catch(error => { if (missing(error)) return null; throw error; }))
       throw new Error("The context archive destination is already in use.");
     const staged = await directory(repo, temporary);

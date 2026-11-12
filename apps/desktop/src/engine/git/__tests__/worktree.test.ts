@@ -2478,7 +2478,8 @@ printf ran > '${sentinel}'
       await writeFile(path.join(created.path, ".context", "notes.md"), "archive notes\n");
       await writeFile(path.join(created.path, ".context", "attachments", "original.txt"), "restore attachment\n");
       const archived = await archiveWorkspace({ workspaceId: created.workspaceId, stashUncommitted: true });
-      const visible = path.join(stateRoot, "archived-contexts", workspace.repoSlug, path.basename(created.path));
+      // A long temp path (macOS) makes the slug longer than one folder name allows.
+      const visible = path.join(stateRoot, "archived-contexts", contextArchive.archivedContextSegment(workspace.repoSlug), path.basename(created.path));
 
       expect(await readFile(path.join(visible, "notes.md"), "utf8")).toBe("archive notes\n");
       expect(existsSync(path.join(visible, "attachments"))).toBe(false);
