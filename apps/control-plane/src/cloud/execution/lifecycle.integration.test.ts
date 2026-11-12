@@ -46,7 +46,9 @@ database("shared execution lifecycle and metadata", () => {
     expect((await pool.query("SELECT 1 FROM cloud_v2_execution_contexts WHERE id=$1", [bootstrapContextId])).rowCount).toBe(1);
     const response = await f.worker("config", undefined, { method: "GET" });
     expect(response.status).toBe(200);
-    expect((await response.json()).config).toMatchObject({ actingUser: 1, bootstrapContextId, agents: {}, gitIdentity: null });
+    const config = (await response.json()).config;
+    expect(config).toMatchObject({ actingUser: 1, agents: {}, gitIdentity: null });
+    expect(config).not.toHaveProperty("bootstrapContextId");
     expect((await f.worker("bootstrap-lease", { contextId: bootstrapContextId })).status).toBe(409);
     await pool.query("UPDATE cloud_v2_workspaces SET execution_intent_id=$2 WHERE id=$1", [f.workspace.id, randomUUID()]);
     await f.cp.execution.maintenance.sweep(() => {});

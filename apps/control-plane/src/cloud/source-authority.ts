@@ -84,10 +84,10 @@ export class CloudV2SourceAuthority {
 
   /** A reader uses their own connection, independently of the VM's Creator.
    * In particular, a failed refresh here must never retire the Creator's VM. */
-  async viewer(organizationId: string, userId: string, targets: readonly CloudSourceTarget[], continuation: boolean): Promise<CloudViewerSourceProof> {
+  async viewer(organizationId: string, userId: string, targets: readonly CloudSourceTarget[], continuation: boolean, minimumRemainingMs = 0): Promise<CloudViewerSourceProof> {
     const parsed = z.array(CloudSourceTargetSchema).min(1).max(100).parse(targets);
     const observations = await this.observeSources(organizationId,userId,parsed.map(target => target.repository),
-      parsed.map(target => target.repositoryId),continuation);
+      parsed.map(target => target.repositoryId),continuation,false,minimumRemainingMs);
     const fingerprint = observations[0]!.fingerprint;
     if (observations.some(value => value.fingerprint !== fingerprint))
       throw new HttpError(409,"github_authorization_changed","GitHub authorization changed. Try again.");
@@ -113,7 +113,7 @@ export class CloudV2SourceAuthority {
     return pending;
   }
 
-  private async observeSources(organizationId: string, userId: string, repositories: readonly string[], ids?: readonly string[], continuation = false, renew = false): Promise<SourceObservation[]> {
+  private async observeSources(organizationId: string, userId: string, repositories: readonly string[], ids?: readonly string[], continuation = false, renew = false, minimumRemainingMs = 0): Promise<SourceObservation[]> {
     const sources = z.array(repositorySchema).min(1).max(100).safeParse(repositories);
     if (!sources.success || ids && (ids.length !== repositories.length || !z.array(repositoryIdSchema).safeParse(ids).success))
       throw new HttpError(403, "github_repository_invalid", "Repository access could not be verified.");
@@ -122,7 +122,7 @@ export class CloudV2SourceAuthority {
     // Repositories of one owner share a connection: read its fingerprint once
     // before the observations and once after, not once per repository.
     const before = new Map<string, Promise<string>>(), after = new Map<string, Promise<string>>();
-    for (const [index, repository] of sources.data.entries()) observations.push(await this.observeRepository(organizationId, userId, repository, ids?.[index], continuation, deadline, before, renew));
+    for (const [index, repository] of sources.data.entries()) observations.push(await this.observeRepository(organizationId, userId, repository, ids?.[index], continuation, deadline, before, renew, minimumRemainingMs));
     const requireFresh = () => {
       if (observations.some(observation => observation.until <= this.now()))
         throw new HttpError(503, "github_verification_expired", "Repository verification took too long. Try again.");
@@ -179,7 +179,8 @@ export class CloudV2SourceAuthority {
     });
   }
 
-  private refresh(key: string, scope: RepositoryRequest, fingerprint: string, previous: GithubVerification | undefined, revision: SourceRevision, deadline: number, renewal = false): Promise<GithubVerification> {
+  private refresh(key: string, scope: RepositoryRequest, fingerprint: string, previous: GithubVerification | undefined, revision: SourceRevision, deadline: number, renewal = false,
+    renewAfter = renewal ? CLOUD_SOURCE_ADMISSION_MS - CLOUD_SOURCE_RENEWAL_MS : CLOUD_SOURCE_ADMISSION_MS): Promise<GithubVerification> {
     const flightKey = JSON.stringify([key, revision.id]);
     const pending = this.flights.get(flightKey);
     if (pending) return pending;
@@ -189,7 +190,6 @@ export class CloudV2SourceAuthority {
     } : undefined;
     const actor = JSON.stringify([scope.organizationId, scope.userId, fingerprint]);
     const predecessor = this.actorFlights.get(actor);
-    const renewAfter = renewal ? CLOUD_SOURCE_ADMISSION_MS - CLOUD_SOURCE_RENEWAL_MS : CLOUD_SOURCE_ADMISSION_MS;
     const flight = (async () => {
       // One provider verification per actor at a time. A first outage response
       // backs off queued repositories too, instead of producing a request storm.
@@ -216,7 +216,7 @@ export class CloudV2SourceAuthority {
           if (other?.verifiedAt != null && !other.failure && other.verifiedAt + renewAfter > this.now()) return other;
           if (other?.failure && other.retryAt > this.now()) throw other.failure;
           if (!other?.claimId || other.claimUntil <= this.now()) {
-            claim = await (renewal ? this.verificationStore!.claim(persistent, renewAfter) : this.verificationStore!.claim(persistent));
+            claim = await (renewAfter !== CLOUD_SOURCE_ADMISSION_MS ? this.verificationStore!.claim(persistent, renewAfter) : this.verificationStore!.claim(persistent));
             this.assertRevision(scope, revision);
             if (claim?.claimId) break;
           }
@@ -290,7 +290,7 @@ export class CloudV2SourceAuthority {
   }
 
   private async observeRepository(organizationId: string, userId: string, repository: string, repositoryId?: string, continuation = false, deadline = this.now() + VERIFICATION_WAIT_MS,
-    fingerprints?: Map<string, Promise<string>>, renew = false): Promise<SourceObservation> {
+    fingerprints?: Map<string, Promise<string>>, renew = false, minimumRemainingMs = 0): Promise<SourceObservation> {
     const parsed = repositorySchema.safeParse(repository);
     if (!parsed.success) throw new HttpError(403, "github_repository_invalid", "Repository access could not be verified.");
     const [owner, name] = parsed.data.toLowerCase().split("/") as [string, string];
@@ -301,7 +301,7 @@ export class CloudV2SourceAuthority {
     const key = JSON.stringify([organizationId, userId, owner, name, repositoryId ?? null, fingerprint]);
     const freshness = continuation ? CLOUD_SOURCE_REFRESH_MS : CLOUD_SOURCE_ADMISSION_MS;
     let value = this.observations.get(key);
-    const fresh = () => value?.verifiedAt !== null && value?.verifiedAt !== undefined && !value.failure && value.verifiedAt + freshness > this.now();
+    const fresh = () => value?.verifiedAt !== null && value?.verifiedAt !== undefined && !value.failure && value.verifiedAt + freshness - minimumRemainingMs > this.now();
     // The workspace proof fast path above this layer avoids these reads.
     // Without that proof, also observe a denial recorded by another replica
     // whose notification may have been lost; a local positive is not enough.
@@ -334,7 +334,7 @@ export class CloudV2SourceAuthority {
     if (value?.claimId && value.claimUntil > this.now()) {
       if (grace) return observation(value, value.claimUntil);
     }
-    const refresh = this.refresh(key, scope, fingerprint, value, revision, deadline);
+    const refresh = this.refresh(key, scope, fingerprint, value, revision, deadline, false, Math.max(0, CLOUD_SOURCE_ADMISSION_MS - minimumRemainingMs));
     if (grace) {
       const result = observation(value!, this.now() + 60_000, refresh);
       void result.refresh!.catch(() => {});

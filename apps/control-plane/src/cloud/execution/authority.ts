@@ -92,14 +92,14 @@ export class CloudExecutionAuthority {
       signature, personSignature, permissionSignature, targets: parsed.data, role: row.role, databaseNow: Number(row.database_now), verifications: row.verifications };
   }
 
-  async admit(workspaceId: string, userId: string, options: { continuation?: boolean; user?: AuthedUser | undefined; sourceError?: "github_access_required" } = {}): Promise<ExecutionAdmission> {
+  async admit(workspaceId: string, userId: string, options: { continuation?: boolean; user?: AuthedUser | undefined; sourceError?: "github_access_required"; minimumSourceMs?: number } = {}): Promise<ExecutionAdmission> {
     const started = Date.now();
     const person = await withSystemTx(this.pool, async tx => {
       if (options.user) await this.session(tx, options.user, userId);
       return this.snapshot(tx, workspaceId, userId);
     });
     let source: CloudViewerSourceProof;
-    try { source = await this.source.viewer(person.organizationId, userId, person.targets, options.continuation === true); }
+    try { source = await this.source.viewer(person.organizationId, userId, person.targets, options.continuation === true, options.minimumSourceMs ?? 0); }
     catch (error) {
       await withSystemTx(this.pool, async tx => {
         if (options.user) await this.session(tx, options.user, userId);

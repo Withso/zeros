@@ -1,0 +1,9 @@
+{
+  "id": "cloud-bootstrap-authority-lifetime",
+  "kind": "replay",
+  "area": "control-plane",
+  "fixedBy": "pr:1051",
+  "symptom": "An activated runtime-change wake copied the tail of a cached source observation into its bootstrap context. It expired before material delivery, and every config retry returned the same unusable id.",
+  "rule": "Anchor deadlines at fresh observation start, require a usable budget at insertion, and distinguish never-delivered authority from erased material before replacing an expired context. Test the real worker router and PostgreSQL, a delayed config on a development VM, and concurrent retries (zstack-review concurrency and compatibility checks).",
+  "check": "pnpm --dir apps/control-plane exec vitest run src/cloud/execution/bootstrap-lifetime.integration.test.ts src/cloud/execution/lifecycle.integration.test.ts src/cloud/source-authority.test.ts src/cloud/github-verification-store.integration.test.ts"
+}

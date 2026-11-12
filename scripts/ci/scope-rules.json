@@ -155,6 +155,11 @@
       "lanes": ["control-plane"]
     },
     {
+      "id": "migration-review-registry",
+      "include": ["scripts/migration-expand-exceptions.ts"],
+      "lanes": ["control-plane", "repository-contracts"]
+    },
+    {
       "id": "shared-cloud-channel-policy",
       "include": [
         "apps/control-plane/src/cloud/channel-policy.ts",

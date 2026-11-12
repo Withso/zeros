@@ -19,6 +19,9 @@ import { CloudExecutionMaintenance } from "./maintenance.js";
 import { openExecution, sealExecution } from "./envelope.js";
 
 export const EXECUTION_LEASE_MS = 30_000;
+// Bootstrap requests a full 30 s observation; the source verifier may consume
+// up to 5 s before insertion and the final authority checks.
+export const BOOTSTRAP_MINIMUM_LIFETIME_MS = EXECUTION_LEASE_MS - 5_000;
 export type ExecutionWorker = { token: string; bootId: string };
 export type ExecutionWorkspace = { id: string; org_id: string; creator_user_id: string; repository: string; state: string;
   access_epoch: string; stop_generation: string; worker_boot_id: string; worker_token_hash: Buffer; execution_mode: string;
@@ -29,7 +32,7 @@ export type ExecutionContext = { id: string; workspace_id: string; org_id: strin
   client_token_expires_at: Date | null; request_fingerprint: Buffer | null;
   provider_session_id: string | null; access_epoch: string; stop_generation: string; worker_boot_id: string; worker_token_hash: Buffer;
   authority: { signature: string }; source_fingerprint: string; agent: CloudV2Agent | null; selection: ExecutionSelection | null;
-  state: "active" | "revoked" | "retired"; reason: CloudV2ContextReason | null; expires_at: Date; material: unknown;
+  state: "active" | "revoked" | "retired"; reason: CloudV2ContextReason | null; expires_at: Date; material: unknown; bootstrap_material_issued: boolean | null;
   retirement_id: string | null; retirement_hash: Buffer | null; environment_version_id: string | null; mcp_fingerprint: string | null; intent_id: string | null };
 export type PromptExecutionAdmission = ExecutionAdmission & { agent: CloudV2Agent; selection: ExecutionSelection | null };
 type Config = Extract<CloudV2ControlFrame, { t: "config" }>;
@@ -88,6 +91,7 @@ export class CloudExecutionContexts {
   async githubToken(identity: ExecutionWorker, id: string | undefined, purpose: "git" | "gh", failedTokenSha256?: string) {
     const { context, check } = await this.authorizedContext(identity, id);
     if (context.kind === "client" && !context.operation || !this.deps.githubToken) throw actorChanged();
+    if (context.kind === "bootstrap" && context.material === null) throw actorChanged();
     try {
       const result = await this.deps.githubToken(context, check, purpose, failedTokenSha256);
       await check();
@@ -390,35 +394,58 @@ export class CloudExecutionContexts {
     });
   }
 
-  async bootstrap(workspaceId: string): Promise<string> {
-    const initial = await withSystemTx(this.pool, tx => tx.query<{ execution_initiator_user_id: string | null; execution_intent_id: string | null;
-      execution_intent_authority: ExecutionIntentAuthority | null; worker_boot_id: string | null; acting_user_boot_ids: string[]; completed_setup_id: string | null }>(
-      `SELECT execution_initiator_user_id,execution_intent_id,execution_intent_authority,worker_boot_id,acting_user_boot_ids,
-        (SELECT c.id FROM cloud_v2_execution_contexts c WHERE c.workspace_id=w.id AND c.intent_id=w.execution_intent_id
-          AND c.worker_boot_id=w.worker_boot_id AND c.kind='bootstrap' AND c.state='retired' AND c.reason='completed') AS completed_setup_id
-        FROM cloud_v2_workspaces w WHERE id=$1 AND execution_mode='active'`, [workspaceId]));
-    const current = initial.rows[0];
+  async bootstrap(workspaceId: string): Promise<string | undefined> {
+    const initial = await withSystemTx(this.pool, async tx => {
+      const workspace = (await tx.query<{ execution_initiator_user_id: string | null; execution_intent_id: string | null;
+        execution_intent_authority: ExecutionIntentAuthority | null; worker_boot_id: string | null; acting_user_boot_ids: string[] }>(
+        `SELECT execution_initiator_user_id,execution_intent_id,execution_intent_authority,worker_boot_id,acting_user_boot_ids
+          FROM cloud_v2_workspaces WHERE id=$1 AND execution_mode='active'`, [workspaceId])).rows[0];
+      const existing = workspace && (await tx.query<ExecutionContext>(`SELECT * FROM cloud_v2_execution_contexts
+        WHERE workspace_id=$1 AND intent_id=$2 AND worker_boot_id=$3 AND kind='bootstrap'`,
+        [workspaceId, workspace.execution_intent_id, workspace.worker_boot_id])).rows[0];
+      return { workspace, existing };
+    });
+    const current = initial.workspace;
     if (!current?.execution_intent_id || !current.worker_boot_id || !current.acting_user_boot_ids.includes(current.worker_boot_id)) throw executionWorkerRequired();
-    // Completed setup grants no material; its initiator's later departure must
-    // not block credential-free config for the other people on this boot.
-    if (current.completed_setup_id) return current.completed_setup_id;
+    // Delivery is a one-way boundary even if the reply was lost. A new worker
+    // process gets credential-free config, not an already-spent bootstrap id.
+    const done = (row: ExecutionContext | undefined) => row && (row.state === "retired" || row.bootstrap_material_issued === true || row.material !== null);
+    if (done(initial.existing)) return undefined;
     if (!current.execution_initiator_user_id) throw executionWorkerRequired();
-    const proof = await this.deps.authority.admit(workspaceId, current.execution_initiator_user_id);
+    const pending = initial.existing?.state === "active" && initial.existing.expires_at.getTime() > Date.now();
+    const proof = await this.deps.authority.admit(workspaceId, current.execution_initiator_user_id,
+      { minimumSourceMs: pending ? 0 : EXECUTION_LEASE_MS });
     assertExecutionIntent(current.execution_intent_authority, proof);
     return withSystemTx(this.pool, async tx => {
       await tx.query("SELECT id FROM users WHERE id=$1 FOR KEY SHARE", [proof.person.userId]);
       await tx.query("SELECT 1 FROM cloud_v2_workspaces WHERE id=$1 FOR UPDATE", [workspaceId]);
       await this.deps.authority.assert(proof, tx);
-      if (!(await tx.query("SELECT 1 FROM cloud_v2_workspaces WHERE id=$1 AND execution_intent_id=$2 AND execution_initiator_user_id=$3",
-        [workspaceId, current.execution_intent_id, current.execution_initiator_user_id])).rowCount) throw actorChanged();
-      const existing = (await tx.query<{ id: string; state: string }>("SELECT id,state FROM cloud_v2_execution_contexts WHERE workspace_id=$1 AND intent_id=$2 AND worker_boot_id=$3 AND kind='bootstrap'", [workspaceId, current.execution_intent_id, current.worker_boot_id])).rows[0];
-      if (existing) return existing.id;
+      if (!(await tx.query("SELECT 1 FROM cloud_v2_workspaces WHERE id=$1 AND execution_intent_id=$2 AND execution_initiator_user_id=$3 AND worker_boot_id=$4",
+        [workspaceId, current.execution_intent_id, current.execution_initiator_user_id, current.worker_boot_id])).rowCount) throw actorChanged();
+      const existing = (await tx.query<ExecutionContext>(`SELECT * FROM cloud_v2_execution_contexts
+        WHERE workspace_id=$1 AND intent_id=$2 AND worker_boot_id=$3 AND kind='bootstrap' FOR UPDATE`,
+        [workspaceId, current.execution_intent_id, current.worker_boot_id])).rows[0];
+      if (done(existing)) return undefined;
+      if (existing?.state === "active" && existing.expires_at.getTime() > Date.now()) {
+        await this.assertContext(tx, existing, proof); return existing.id;
+      }
+      if (existing && (existing.bootstrap_material_issued !== false || existing.retirement_id || existing.material !== null ||
+        existing.expires_at.getTime() > Date.now() || existing.state !== "active" && existing.reason !== "expired" ||
+        existing.authority.signature !== proof.person.signature || existing.source_fingerprint !== proof.source.fingerprint)) throw actorChanged();
+      if (proof.until - Date.now() < BOOTSTRAP_MINIMUM_LIFETIME_MS) throw executionUnavailable();
+      if (existing) {
+        const deleted = await tx.query(`DELETE FROM cloud_v2_execution_contexts c WHERE c.id=$1
+          AND NOT EXISTS(SELECT 1 FROM cloud_v2_execution_contexts child WHERE child.parent_context_id=c.id)
+          AND NOT EXISTS(SELECT 1 FROM cloud_v2_execution_tokens t WHERE t.context_id=c.id)`, [existing.id]);
+        if (deleted.rowCount !== 1) throw actorChanged();
+      }
       const id = randomUUID();
-      await tx.query(`INSERT INTO cloud_v2_execution_contexts(id,workspace_id,org_id,user_id,kind,intent_id,access_epoch,stop_generation,worker_boot_id,worker_token_hash,authority,source_fingerprint,expires_at)
-        VALUES($1,$2,$3,$4,'bootstrap',$5,$6,$7,$8,decode($9,'hex'),$10,$11,$12)`,
+      await tx.query(`INSERT INTO cloud_v2_execution_contexts(id,workspace_id,org_id,user_id,kind,intent_id,access_epoch,stop_generation,worker_boot_id,worker_token_hash,authority,source_fingerprint,expires_at,bootstrap_material_issued)
+        VALUES($1,$2,$3,$4,'bootstrap',$5,$6,$7,$8,decode($9,'hex'),$10,$11,$12,false)`,
       [id, workspaceId, proof.person.organizationId, proof.person.userId, current.execution_intent_id, proof.person.accessEpoch, proof.person.stopGeneration,
         proof.person.bootId, proof.person.workerTokenHash, { signature: proof.person.signature }, proof.source.fingerprint, new Date(proof.until)]);
       await this.deps.authority.assert(proof, tx);
+      if (proof.until - Date.now() < BOOTSTRAP_MINIMUM_LIFETIME_MS) throw executionUnavailable();
       return id;
     });
   }
