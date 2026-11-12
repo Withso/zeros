@@ -6,7 +6,7 @@ import { requestLocalCommand } from "./local-commands/client";
 import { CLOUD_WORKER_FEATURES } from "./worker-features";
 import { CLOUD_V2_MAX_FRAME_BYTES, CLOUD_V2_RELAY_PROTOCOL, CloudV2ControlFrameSchema, CloudV2WorkerActivityReplySchema,
   CloudV2WorkerFrameSchema, CloudV2WorkerTimingSchema, type CloudV2WorkerTiming, type CloudV2ControlFrame, type CloudV2WorkerFrame, CloudV2ContextErrorCodeSchema } from "@zeros/protocol/cloud-v2-relay";
-import { InboundBridge } from "./inbound-bridge";
+import { InboundBridge, type SyncContexts } from "./inbound-bridge";
 import { readWorkerToken, WORKER_TOKEN_FILE } from "./worker-token";
 import type { PromptOperation, Transport, TransportHandlers } from "./transport";
 import type { McpAuthorization } from "./mcp/gateway";
@@ -82,6 +82,13 @@ export class HybridTransport implements Transport {
         url.username || url.password || url.search || url.hash || url.pathname !== "/") throw new Error("Invalid worker API URL");
     if (!/^[a-f0-9]{64}$/.test(options.runtimeSha256)) throw new Error("Invalid worker runtime pin");
     this.listener = new InboundBridge({ workspaceId: options.workspaceId, bootId: this.bootId,
+      // The worker's execution contexts, once it sets them (sync-context-v1); until then nothing is required or admitted.
+      syncContexts: {
+        required: () => this.syncContexts?.required() ?? false,
+        admit: (contextId, userId) => this.syncContexts ? this.syncContexts.admit(contextId, userId) : Promise.resolve(false),
+        ended: (contextId, listener) => this.syncContexts?.ended(contextId, listener) ?? (() => {}),
+        release: contextId => { this.syncContexts?.release(contextId); },
+      },
       onPushChange: () => {
         for (const controller of this.promptPolls) controller.abort();
         // Reconcile once after subscribing, and on loss of the last carrier.
@@ -242,6 +249,10 @@ export class HybridTransport implements Transport {
     // effects. Older control planes return 404 without affecting the worker.
     void this.request("timing", parsed.data, undefined, 2000).catch(() => {});
   }
+  /** Team sharing 3A: the sync socket's handle goes through the worker's execution contexts. */
+  setSyncContexts(contexts: SyncContexts): void { this.syncContexts = contexts; }
+  private syncContexts?: SyncContexts;
+
   async mcpAuthorization(id: string, force = false, signal?: AbortSignal, contextId?: string): Promise<McpAuthorization> {
     if (!/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(id)) throw new Error("Invalid MCP server identity.");
     let reply: Record<string, unknown>;

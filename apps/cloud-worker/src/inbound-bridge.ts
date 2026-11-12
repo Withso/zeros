@@ -15,6 +15,8 @@ interface Options {
   onPushChange?: () => void;
   /** Worker journal lines for sync sockets: short ids, codes and counts only. */
   log?(line: string): void;
+  /** sync-context-v1 (team sharing 3A, activated workspaces): the sync socket's control-plane client handle. */
+  syncContexts?: SyncContexts;
 }
 type ActivityReply = Extract<CloudV2ControlFrame, { t: "activity-reply" }>;
 interface Connection {
@@ -23,8 +25,17 @@ interface Connection {
   activity?: { id: string; finish: (reply: ActivityReply | null) => void };
 }
 
+/** The worker's execution contexts, as a sync socket's handle needs them. */
+export interface SyncContexts {
+  /** An activated workspace: a grant without its handle opens nothing. */
+  required(): boolean;
+  /** One successful renewal (after the clean boot) before any read: a grant may have been minted before a revocation. */
+  admit(contextId: string, userId: string): Promise<boolean>;
+  ended(contextId: string, listener: () => void): () => void;
+  release(contextId: string): void;
+}
 /** Order 3: one Mac's direct sync socket, carrying plain bridge messages for one passive client. */
-interface SyncConnection { socket: WebSocket; clientId: string; sub: string; dev: string; alive: boolean; deadline: number; renew?: ReturnType<typeof setTimeout>; queue: Promise<void> }
+interface SyncConnection { socket: WebSocket; clientId: string; sub: string; dev: string; ctx?: string; alive: boolean; deadline: number; renew?: ReturnType<typeof setTimeout>; queue: Promise<void> }
 /** Sync backpressure: replies wait while more than this is buffered, for at most SYNC_STALL_MS. */
 const SYNC_LOW_WATER_BYTES = 1024 * 1024, SYNC_STALL_MS = 120_000;
 /** A sync socket lives until the newest accepted grant's SIGNED iat + 10 minutes, less the 30 s skew allowance. */
@@ -35,6 +46,7 @@ const MAX_SYNC_SOCKETS = 4;
  * request headers: Boat forwards its private _port_auth cookie too. */
 export class InboundBridge {
   private readonly connections = new Set<Connection>();
+  private readonly syncByContext = new Map<string, SyncConnection>();
   private readonly routes = new Map<string, { connection: Connection; clientId: string }>();
   private readonly syncs = new Map<string, SyncConnection>();
   private readonly server = createServer((request, response) => {
@@ -163,7 +175,8 @@ export class InboundBridge {
 
   /** A Mac's sync grant, and only that, opens this path; a control grant does not. */
   private upgradeSync(request: IncomingMessage, socket: Duplex, head: Buffer): void {
-    const identity = this.verifier?.acceptSync(request.headers["x-zeros-worker-auth"]);
+    const accepted = this.verifier?.acceptSync(request.headers["x-zeros-worker-auth"]);
+    const identity = accepted && accepted.ctx === undefined && this.options.syncContexts?.required() ? null : accepted;
     if (!identity) {
       if (Date.now() - this.failureWindow >= 30_000) { this.failureWindow = Date.now(); this.failures = 0; }
       this.failures++;
@@ -177,8 +190,20 @@ export class InboundBridge {
 
   private now(): number { return this.options.now?.() ?? Date.now(); }
 
-  private attachSync(socket: WebSocket, identity: { sub: string; dev: string; iat: number }): void {
-    const sync: SyncConnection = { socket, clientId: randomUUID(), sub: identity.sub, dev: identity.dev, alive: true, deadline: syncDeadline(identity.iat), queue: Promise.resolve() };
+  private attachSync(socket: WebSocket, identity: { sub: string; dev: string; iat: number; ctx?: string }): void {
+    const sync: SyncConnection = { socket, clientId: randomUUID(), sub: identity.sub, dev: identity.dev, ...(identity.ctx ? { ctx: identity.ctx } : {}),
+      alive: true, deadline: syncDeadline(identity.iat), queue: Promise.resolve() };
+    const contexts = identity.ctx ? this.options.syncContexts : undefined;
+    // One live socket per handle: a new one replaces its predecessor (which then releases nothing).
+    if (sync.ctx) {
+      const previous = this.syncByContext.get(sync.ctx);
+      this.syncByContext.set(sync.ctx, sync);
+      previous?.socket.close(1000);
+    }
+    let stopEnded = () => {};
+    // Nothing is read, and the passive client is not opened, until the handle's first renewal succeeds.
+    const admitted: Promise<boolean> = sync.ctx && contexts ? contexts.admit(sync.ctx, sync.sub).catch(() => false) : Promise.resolve(true);
+    let opened = false;
     // Unrenewed past its deadline: closed, so a revoked Mac stops reading without any push.
     const arm = () => { clearTimeout(sync.renew); sync.renew = setTimeout(() => socket.close(4001), Math.max(0, sync.deadline - this.now())); sync.renew.unref?.(); };
     arm();
@@ -187,8 +212,17 @@ export class InboundBridge {
     socket.on("pong", () => { sync.alive = true; });
     this.options.log?.(`sync socket open client=${sync.clientId.slice(0, 8)}`);
     // The Mac's device id: a sync's keep-awake allowance counts per device across sockets.
-    void this.receive!({ t: "open", clientId: sync.clientId, passive: true, device: sync.dev }).catch(() => socket.close(1011));
-    socket.on("message", (data, binary) => {
+    const ready = admitted.then(ok => {
+      if (!ok) { socket.close(4001); return false; }
+      if (socket.readyState !== socket.OPEN) return false;
+      // The handle exists once admitted: from now on its end (revoked, refused, expired) closes this socket.
+      if (sync.ctx && contexts) stopEnded = contexts.ended(sync.ctx, () => socket.close(4001));
+      opened = true;
+      void this.receive!({ t: "open", clientId: sync.clientId, passive: true, device: sync.dev }).catch(() => socket.close(1011));
+      return true;
+    });
+    socket.on("message", (data, binary) => { void ready.then(ok => { if (ok) handle(data, binary); }); });
+    const handle = (data: WebSocket.RawData, binary: boolean) => {
       if (binary) { socket.close(4003); return; }
       // Checked on every frame, a renewal included: a late renewal cannot revive a socket.
       if (this.now() >= sync.deadline) { socket.close(4001); return; }
@@ -196,20 +230,22 @@ export class InboundBridge {
       try { value = JSON.parse(data.toString()); } catch { socket.close(4003); return; }
       if (value && typeof value === "object" && (value as { t?: unknown }).t === "renew") {
         const renew = SyncRenewFrameSchema.safeParse(value), next = renew.success ? this.verifier?.acceptSync(renew.data.grant) : null;
-        if (!next || next.sub !== sync.sub || next.dev !== sync.dev) { socket.close(4001); return; }
+        if (!next || next.sub !== sync.sub || next.dev !== sync.dev || next.ctx !== sync.ctx) { socket.close(4001); return; }
         // A held grant (older iat) cannot extend the deadline; only a newer signature moves it.
         sync.deadline = Math.max(sync.deadline, syncDeadline(next.iat));
         arm(); return;
       }
       if (!value || typeof value !== "object" || Array.isArray(value)) { socket.close(4003); return; }
       void this.receive!({ t: "frame", clientId: sync.clientId, frame: value as Record<string, unknown> } as CloudV2ControlFrame).catch(() => socket.close(1011));
-    });
+    };
     socket.on("close", code => {
       clearTimeout(sync.renew);
+      stopEnded();
+      if (sync.ctx && this.syncByContext.get(sync.ctx) === sync) { this.syncByContext.delete(sync.ctx); contexts?.release(sync.ctx); }
       this.options.log?.(`sync socket closed client=${sync.clientId.slice(0, 8)} code=${code}`);
       if (this.syncs.get(sync.clientId) !== sync) return;
       this.syncs.delete(sync.clientId);
-      void this.receive!({ t: "close", clientId: sync.clientId }).catch(() => {});
+      if (opened) void this.receive!({ t: "close", clientId: sync.clientId }).catch(() => {});
     });
   }
 

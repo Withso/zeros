@@ -160,3 +160,28 @@ it("never posts a boot-clean body the shared schema would refuse: an inconsisten
   expect(posts[0]!.body).toMatchObject({ legacyMaterial: "refused", refusals: ["io_error"] });
   contexts.dispose();
 });
+
+it("admits a sync handle only after one successful renewal, keeps the returned deadline exactly, and refuses a refused or unreachable one", async () => {
+  const now = 1_000_000;
+  const replies: Array<unknown> = [];
+  const posts: Array<{ path: string; body: any }> = [];
+  const contexts = new ExecutionContexts({ now: () => now, post: async (path, body) => {
+    posts.push({ path, body });
+    const reply = replies.shift();
+    if (reply instanceof Error) throw reply;
+    return reply;
+  } });
+  const handle = "66666666-6666-4666-8666-666666666666", person = "44444444-4444-4444-8444-444444444444";
+  replies.push({ leases: [{ contextId: handle, expiresAt: now + 12_345 }] });
+  await expect(contexts.admitHandle(handle, person)).resolves.toBe(true);
+  expect(posts).toEqual([{ path: "execution-leases/renew", body: { contextIds: [handle] } }]);
+  expect(contexts.expiresAt(handle)).toBe(now + 12_345);
+  expect(contexts.userOf(handle)).toBe(person);
+  contexts.release(handle);
+  replies.push({ leases: [{ contextId: handle, refused: "access_revoked" }] });
+  await expect(contexts.admitHandle(handle, person)).resolves.toBe(false);
+  expect(contexts.live(handle)).toBe(false);
+  replies.push(Object.assign(new Error("lost"), { status: 503 }));
+  await expect(contexts.admitHandle(handle, person)).resolves.toBe(false);
+  contexts.dispose();
+});

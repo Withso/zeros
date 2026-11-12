@@ -92,6 +92,21 @@ export class ExecutionContexts {
     this.entries.set(contextId, { lease: { contextId, userId, expiresAt, gitIdentity: null }, expiresAt, listeners: new Set() });
     this.arm();
   }
+  /** sync-context-v1: a sync socket's handle is used only after one successful renewal (after the clean boot), with exactly the deadline it returns. */
+  async admitHandle(contextId: string, userId: string): Promise<boolean> {
+    try { await this.ready(); } catch { return false; }
+    let reply: z.infer<typeof CloudV2RenewReplySchema>;
+    try { reply = CloudV2RenewReplySchema.parse(await this.deps.post("execution-leases/renew", { contextIds: [contextId] })); }
+    catch { return false; }
+    const result = reply.leases.find(lease => lease.contextId === contextId);
+    if (!result || "refused" in result) return false;
+    const known = this.entries.get(contextId);
+    if (known?.ended) return false;
+    if (known) known.expiresAt = Math.max(known.expiresAt, result.expiresAt);
+    else this.entries.set(contextId, { lease: { contextId, userId, expiresAt: result.expiresAt, gitIdentity: null }, expiresAt: result.expiresAt, listeners: new Set() });
+    this.arm();
+    return true;
+  }
   /** The connection closed: the handle stops renewing and lapses on the control plane (nothing it owns is retired). */
   release(contextId: string): void {
     const entry = this.entries.get(contextId);
