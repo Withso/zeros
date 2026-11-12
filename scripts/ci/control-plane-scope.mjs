@@ -83,6 +83,7 @@ export const CONTROL_PLANE_DATABASE_INPUTS = Object.freeze([
   "tsconfig.json",
   // Operator documents migrate.test.ts checks for complete approval commands.
   "docs/deployment-environments.md",
+  "scripts/migration-expand-exceptions.ts",
   // This gate itself.
   ".github/workflows/preflight.yml",
   "scripts/ci/control-plane-results.mjs",

@@ -143,8 +143,13 @@ export class CloudV2Relay {
     if (this.closed || !frames.length) return;
     const room = this.rooms.get(workspaceId);
     if (room?.ready && room.acting && room.worker && room.workerBinding) {
-      for (const frame of frames) if (frame.bootId === room.workerBinding.bootId)
+      for (const frame of frames) if (frame.bootId === room.workerBinding.bootId) {
         send(room.worker, { t: "revoke-context", contextId: frame.contextId, reason: frame.reason });
+        for (const [id, client] of room.clients) if (client.contextId === frame.contextId) {
+          this.detachApp(room, id);
+          client.ws.close(4001, "access_revoked");
+        }
+      }
       return;
     }
     // A polling worker may have no desktop room. This control-only connection

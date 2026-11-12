@@ -123,6 +123,7 @@ database("execution migration roles, erasure and zero-context cost", () => {
     });
   });
 
+  // Setup and eight rollback-only 1,000-row samples share this case's budget.
   it("measures ordinary session and security writes before/after the new triggers with no active contexts", async () => {
     await historical();
     await pool.query(`INSERT INTO auth_sessions(provider,provider_session_id,provider_sub,user_id,client_kind,status)
@@ -146,5 +147,5 @@ database("execution migration roles, erasure and zero-context cost", () => {
     }
     expect((await pool.query("SELECT 1 FROM cloud_v2_execution_contexts WHERE state='active'")).rowCount).toBe(0);
     evidence({ millisecondsPer1000: costs });
-  });
+  }, 15_000);
 });

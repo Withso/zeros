@@ -8,7 +8,8 @@ import { teamNotFound } from "./contract.js";
 
 export const TEAM_PRESENCE_TTL_MS = 65_000, TEAM_PRESENCE_RENEW_MS = 30_000;
 const presentPeople = `SELECT DISTINCT p.user_id,jsonb_build_array(u.auth_revision,m.authorization_revision,m.created_at,
-    (SELECT authorization_revision FROM organizations WHERE id=p.org_id),${teamConnectionRevisionSql("p.org_id","p.user_id")}) AS signature
+    CASE WHEN w.execution_mode<>'active' THEN (SELECT authorization_revision FROM organizations WHERE id=p.org_id) END,
+    ${teamConnectionRevisionSql("p.org_id","p.user_id")}) AS signature
   FROM cloud_v2_workspace_presence p
   JOIN cloud_v2_workspaces w ON w.id=p.workspace_id AND w.org_id=p.org_id AND w.access_epoch=p.access_epoch
   JOIN organization_members m ON m.org_id=p.org_id AND m.user_id=p.user_id

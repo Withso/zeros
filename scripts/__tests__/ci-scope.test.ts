@@ -77,6 +77,12 @@ const jobs = (
   }).jobs;
 
 describe("CI scope job mapping", () => {
+  it("routes the migration exception registry to its database and contract checks", () => {
+    expect(selected(decide([change("scripts/migration-expand-exceptions.ts")]))).toEqual([
+      "control-plane", "control-plane-db", "repository-contracts",
+    ]);
+  });
+
   it("registers all eight database partitions without changing job selection", () => {
     const database = POLICY.checks["control-plane-database"];
     expect(database.execution_group).toBe("control-plane-database-matrix-8");
