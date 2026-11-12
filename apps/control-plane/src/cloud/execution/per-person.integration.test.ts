@@ -113,6 +113,37 @@ database("active workspace per-person access loss", () => {
     expect(after).toMatchObject({ ...before, authority: { signatureVersion: 2 } });
   });
 
+  it("re-signs a short phase-2 context when material delivery renews its lease", async () => {
+    const turn = await begin(f.viewer), authority = await legacyAuthority(turn.begun.contextId);
+    await pool.query("UPDATE cloud_v2_execution_contexts SET authority=$2,expires_at=clock_timestamp()+interval '9 seconds' WHERE id=$1",
+      [turn.begun.contextId, authority]);
+    const before = (await pool.query("SELECT material,generation FROM cloud_v2_execution_contexts WHERE id=$1", [turn.begun.contextId])).rows[0];
+    await withSystemTx(pool, tx => tx.query("UPDATE organizations SET authorization_revision=authorization_revision+1 WHERE id=$1", [f.organizationId]));
+    const response = await f.worker("turn-lease", turn.lease);
+    expect(response.status).toBe(200);
+    expect((await response.json()).expiresAt - Date.now()).toBeGreaterThanOrEqual(25_000);
+    const after = (await pool.query("SELECT material,generation,authority FROM cloud_v2_execution_contexts WHERE id=$1", [turn.begun.contextId])).rows[0];
+    expect(after).toMatchObject({ ...before, authority: { signatureVersion: 2 } });
+    expect(after.authority).not.toHaveProperty("legacyBasis");
+  });
+
+  it.each([false, true])("replaces only an authentic expired undelivered phase-2 bootstrap after a roster edit (tampered: %s)", async tampered => {
+    const first = await f.cp.execution.bootstrap(f.workspace.id);
+    expect(first).toEqual(expect.any(String));
+    const authority = await legacyAuthority(first!);
+    await pool.query("UPDATE cloud_v2_execution_contexts SET authority=$2,expires_at=clock_timestamp()-interval '1 second' WHERE id=$1",
+      [first, tampered ? { signature: "f".repeat(64) } : authority]);
+    await withSystemTx(pool, tx => tx.query("UPDATE organizations SET authorization_revision=authorization_revision+1 WHERE id=$1", [f.organizationId]));
+    const response = await f.worker("config", undefined, { method: "GET" });
+    expect(response.status).toBe(tampered ? 409 : 200);
+    if (!tampered) {
+      const next = (await response.json()).config.bootstrapContextId;
+      expect(next).toEqual(expect.any(String)); expect(next).not.toBe(first);
+      expect((await f.worker("bootstrap-lease", { contextId: next })).status).toBe(200);
+    }
+    expect((await f.worker("bootstrap-lease", { contextId: first })).status).toBe(409);
+  });
+
   it("does not upgrade an invalid phase-2 signature into access", async () => {
     const turn = await begin(f.viewer);
     await pool.query("UPDATE cloud_v2_execution_contexts SET authority=$2 WHERE id=$1", [turn.begun.contextId, { signature: "f".repeat(64) }]);

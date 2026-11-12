@@ -358,7 +358,9 @@ export class CloudExecutionContexts {
     // Renew only when that original authority no longer covers the floor.
     const until = current.expires_at.getTime() - Date.now() >= EXECUTION_MINIMUM_LIFETIME_MS
       ? current.expires_at.getTime() : ceiling;
-    if (until !== current.expires_at.getTime()) await tx.query("UPDATE cloud_v2_execution_contexts SET expires_at=$2 WHERE id=$1", [current.id, new Date(until)]);
+    if (until !== current.expires_at.getTime()) await tx.query(
+      "UPDATE cloud_v2_execution_contexts SET expires_at=$2,authority=$3,source_fingerprint=$4 WHERE id=$1",
+      [current.id, new Date(until), executionContextAuthority(proof.person), proof.source.fingerprint]);
     await this.assertContext(tx, current, proof);
     assertExecutionLifetime(until);
     return { ...current, expires_at: new Date(until) };
@@ -456,7 +458,7 @@ export class CloudExecutionContexts {
       }
       if (existing && (existing.bootstrap_material_issued !== false || existing.retirement_id || existing.material !== null ||
         existing.expires_at.getTime() > Date.now() || existing.state !== "active" && existing.reason !== "expired" ||
-        existing.authority.signature !== proof.person.signature || existing.source_fingerprint !== proof.source.fingerprint)) throw actorChanged();
+        !matchesExecutionSignature(existing.authority, existing.authority.signature, proof.person, "signature"))) throw actorChanged();
       assertExecutionLifetime(proof.until);
       if (existing) {
         const deleted = await tx.query(`DELETE FROM cloud_v2_execution_contexts c WHERE c.id=$1

@@ -5,6 +5,7 @@ import type { LocalDeviceBinding } from "../local-commands/contract.js";
 import type { ExecutionAdmission } from "./authority.js";
 import { executionContextAuthority } from "./signatures.js";
 import type { CloudExecutionContexts, ExecutionContext } from "./store.js";
+import { assertExecutionLifetime } from "./lifetime.js";
 
 export class CloudExecutionSync {
   constructor(readonly contexts: CloudExecutionContexts) {}
@@ -22,13 +23,14 @@ export class CloudExecutionSync {
       await this.contexts.assertContext(tx, previous, proof);
       await tx.query("UPDATE cloud_v2_execution_contexts SET client_token_expires_at=greatest(client_token_expires_at,$2) WHERE id=$1",
         [previous.id, new Date(ceiling)]);
-      return previous.id;
+      return this.contexts.issueLease(tx, previous, proof);
     }
     if (previous) {
       await this.contexts.revoke(tx, previous.id, "access_revoked");
       await this.contexts.clients.retireHandles(tx, person.workspaceId, [previous.id]);
     }
-    const id = randomUUID();
+    const id = randomUUID(), until = Math.min(proof.until, ceiling);
+    assertExecutionLifetime(until);
     const row = (await tx.query<ExecutionContext>(`INSERT INTO cloud_v2_execution_contexts
       (id,workspace_id,org_id,user_id,kind,client_id,provider_session_id,client_token_expires_at,
         sync_device_id,sync_registration_id,sync_instance_id,sync_connected_at,
@@ -37,8 +39,9 @@ export class CloudExecutionSync {
     [id, person.workspaceId, person.organizationId, user.id, id, user.authentication.sessionId, new Date(ceiling),
       binding.deviceId, binding.registrationId, binding.instanceId, connectedAt,
       person.accessEpoch, person.stopGeneration, person.bootId, person.workerTokenHash, executionContextAuthority(person),
-      proof.source.fingerprint, new Date(Math.min(proof.until, ceiling))])).rows[0]!;
+      proof.source.fingerprint, new Date(until)])).rows[0]!;
     await this.contexts.assertContext(tx, row, proof);
-    return id;
+    assertExecutionLifetime(until);
+    return row;
   }
 }

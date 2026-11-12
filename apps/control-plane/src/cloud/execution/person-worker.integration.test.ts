@@ -153,12 +153,12 @@ database("per-person authority through the real worker and PostgreSQL", () => {
   it("honors a shortened lease deadline between renewal ticks", async () => {
     vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
     const worker = await sockets(), signed = await grant(await mac());
-    await pool.query("UPDATE cloud_v2_execution_contexts SET client_token_expires_at=clock_timestamp()+interval '25 seconds' WHERE id=$1", [signed.claims.ctx]);
+    await pool.query("UPDATE cloud_v2_execution_contexts SET client_token_expires_at=clock_timestamp()+interval '28 seconds' WHERE id=$1", [signed.claims.ctx]);
     const socket = await worker.dial(signed.grant);
     await expect.poll(() => worker.frames.filter(frame => frame.t === "open")).toHaveLength(1);
     const deadline = worker.contexts.expiresAt(signed.claims.ctx), start = worker.now();
-    expect(deadline - start).toBeLessThanOrEqual(25_000);
-    expect(deadline - start).toBeGreaterThan(20_000);
+    expect(deadline - start).toBeLessThanOrEqual(28_000);
+    expect(deadline - start).toBeGreaterThan(25_000);
     await remove(true); worker.offline();
     for (let time = start; time < deadline;) {
       const elapsed = Math.min(1000, deadline - time); time += elapsed;

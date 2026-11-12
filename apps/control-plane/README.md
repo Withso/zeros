@@ -714,7 +714,7 @@ issued or renewed: two 10-second worker renewal intervals plus five seconds
 for transit. Client handles, file/Git/code-review operations, turns, terminals
 and steering reverify source authority when its original deadline cannot
 cover this floor. Final checks include time spent acquiring locks and material;
-a short proof or desktop-token ceiling fails with `503 execution_unavailable`
+a short proof or desktop-token ceiling fails with `503 agent_credentials_unavailable`
 without issuing material or extending that authority. A material retry keeps
 a usable context's original deadline; a live context below the floor can renew
 under newly checked authority. Expired or revoked contexts are never revived.

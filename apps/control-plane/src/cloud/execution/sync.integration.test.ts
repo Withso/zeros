@@ -62,6 +62,49 @@ database("active direct sync authority", () => {
     expect((await pool.query("SELECT active_at,updated_at FROM cloud_v2_workspaces WHERE id=$1", [f.workspace.id])).rows[0]).toEqual(before);
   });
 
+  it("reverifies a cached source tail before issuing a sync handle", async () => {
+    const device = await mac();
+    await f.cp.execution.deps.authority.admit(f.workspace.id, f.viewer.id);
+    await pool.query(`UPDATE cloud_github_source_verifications SET verified_at=clock_timestamp()-interval '21 seconds'
+      WHERE org_id=$1 AND owner_user_id=$2`, [f.organizationId, f.viewer.id]);
+    const signed = await claims(await grant(device));
+    const row = (await pool.query(`SELECT extract(epoch FROM(expires_at-created_at))*1000 AS lifetime
+      FROM cloud_v2_execution_contexts WHERE id=$1`, [signed.ctx])).rows[0];
+    expect(Number(row.lifetime)).toBeGreaterThanOrEqual(25_000);
+  });
+
+  it("renews a still-live sync handle before reissuing its grant", async () => {
+    const device = await mac(), first = await claims(await grant(device));
+    await pool.query("UPDATE cloud_v2_execution_contexts SET expires_at=clock_timestamp()+interval '9 seconds' WHERE id=$1", [first.ctx]);
+    const next = await claims(await grant(device));
+    expect(next.ctx).toBe(first.ctx);
+    const row = (await pool.query(`SELECT extract(epoch FROM(expires_at-clock_timestamp()))*1000 AS remaining
+      FROM cloud_v2_execution_contexts WHERE id=$1`, [next.ctx])).rows[0];
+    expect(Number(row.remaining)).toBeGreaterThanOrEqual(25_000);
+  });
+
+  it("refuses a short final proof without issuing a sync handle", async () => {
+    const device = await mac(), admit = f.cp.execution.deps.authority.admit.bind(f.cp.execution.deps.authority);
+    vi.spyOn(f.cp.execution.deps.authority, "admit").mockImplementationOnce(async (...args) => ({ ...(await admit(...args)), until: Date.now() + 9000 }));
+    const refused = await grant(device);
+    expect(refused.status).toBe(503);
+    expect(await refused.json()).toMatchObject({ error: { code: "agent_credentials_unavailable" } });
+    expect((await pool.query("SELECT 1 FROM cloud_v2_execution_contexts WHERE workspace_id=$1 AND sync_device_id IS NOT NULL", [f.workspace.id])).rowCount).toBe(0);
+  });
+
+  it("rolls back a sync handle if final grant checks consume the issuance floor", async () => {
+    const device = await mac(), issue = f.cp.execution.sync.grant.bind(f.cp.execution.sync);
+    vi.spyOn(f.cp.execution.sync, "grant").mockImplementationOnce(async (...args) => {
+      const context = await issue(...args);
+      vi.spyOn(Date, "now").mockReturnValue(Date.now() + 6000);
+      return context;
+    });
+    const refused = await grant(device);
+    expect(refused.status).toBe(503);
+    expect(await refused.json()).toMatchObject({ error: { code: "agent_credentials_unavailable" } });
+    expect((await pool.query("SELECT 1 FROM cloud_v2_execution_contexts WHERE workspace_id=$1 AND sync_device_id IS NOT NULL", [f.workspace.id])).rowCount).toBe(0);
+  });
+
   it("refuses an already minted grant before its first read after member loss while a peer renews", async () => {
     const removed = await mac(), peer = await mac(f.creator);
     const first = await claims(await grant(removed)), second = await claims(await grant(peer));
