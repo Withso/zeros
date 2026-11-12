@@ -2,7 +2,7 @@ import { generateKeyPairSync, randomUUID, sign } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
 import { HybridTransport } from "../hybrid-transport";
 import { InboundBridge } from "../inbound-bridge";
@@ -11,10 +11,12 @@ import * as workerToken from "../worker-token";
 import { PromptInbox } from "../prompt-inbox";
 import type { Agents } from "../agents";
 import type { SessionStore } from "../sessions/session-store";
+import * as relayProtocol from "@zeros/protocol/cloud-v2-relay";
+import * as notifyProtocol from "@zeros/protocol/notify-user";
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); vi.useRealTimers(); });
-async function fixture(options: { hello?: Promise<void>; onFrame?: (frame: any) => void } = {}) {
+async function fixture(options: { hello?: Promise<void>; onFrame?: (frame: any) => void; heartbeatPhase?: number } = {}) {
   const directory = await mkdtemp(join(tmpdir(), "hybrid-transport-")), tokenFile = join(directory, "token");
   let expected = "synthetic-worker-token", revision = "0", failHistory = false, lostReply = false;
   await writeFile(tokenFile, expected, { mode: 0o600 });
@@ -42,7 +44,8 @@ async function fixture(options: { hello?: Promise<void>; onFrame?: (frame: any) 
     return new Response(null, { status: 404 });
   });
   const transport = new HybridTransport({ apiUrl: "https://api.example.test", workspaceId: config.workspace.id, runtimeSha256: "a".repeat(64),
-    tokenFile, publicKeys, port: 0, fetch: fetcher, retryBaseMs: 10, retryMaxMs: 20 });
+    // The first safety heartbeat is a full minute away: no test sees an unplanned activity.
+    tokenFile, publicKeys, port: 0, fetch: fetcher, retryBaseMs: 10, retryMaxMs: 20, heartbeatPhase: options.heartbeatPhase ?? Date.now() });
   transport.start({ open: async () => {}, close: () => {}, frame: async frame => { incoming.push(frame); options.onFrame?.(frame); } });
   cleanups.push(async () => { await transport.dispose(); await rm(directory, { recursive: true, force: true }); });
   await expect.poll(() => options.hello ? requests.length > 0 : incoming.some(frame => frame.t === "config")).toBe(true);
@@ -519,4 +522,95 @@ it("throttles busy activity and still heartbeats while idle", async () => {
 it("requires HTTPS away from loopback and rejects credentials or query parameters in API URLs", () => {
   for (const apiUrl of ["http://elsewhere.test", "https://user:password@api.test", "https://api.test?token=synthetic"])
     expect(() => new HybridTransport({ apiUrl, workspaceId: config.workspace.id, runtimeSha256: "a".repeat(64) })).toThrow("Invalid worker API URL");
+});
+it("asks the control plane for an activated context's own GitHub credential: the request keeps its contextId", async () => {
+  const f = await fixture();
+  const contextId = randomUUID(), id = randomUUID();
+  await f.transport.send({ t: "request", id, kind: "github-token", purpose: "git", contextId });
+  await expect.poll(() => f.incoming.some(frame => frame.t === "reply" && frame.id === id)).toBe(true);
+  expect(f.requests.find(request => request.path === "github-token")!.body).toEqual({ purpose: "git", contextId });
+});
+it("sends its safety heartbeat at its phase: a phase due now adds exactly one more activity", async () => {
+  // The flake's mechanism, made deterministic: a random boot phase could fall inside a test.
+  const f = await fixture({ heartbeatPhase: Date.now() - 59_950 });
+  await expect.poll(() => f.requests.filter(request => request.path === "activity").length, { timeout: 3_000 }).toBeGreaterThanOrEqual(1);
+});
+
+/** Transport parity (PR #1055): an activated GitHub request lost its contextId only on the real HTTP carrier. Every
+ * worker → control-plane request the protocol lets carry a context must reach the HTTP body unchanged. The set is
+ * enumerated from the protocol's schemas, so a new context-carrying schema fails here until it is classified. */
+describe("worker → control plane context parity", () => {
+  const contextual = () => {
+    const found = new Set<string>();
+    const walk = (schema: any, label: string, seen = new Set<unknown>()): void => {
+      if (!schema?._zod || seen.has(schema)) return; seen.add(schema);
+      const def = schema._zod.def;
+      if (def.type === "object") {
+        const keys = Object.keys(def.shape);
+        const t = def.shape.t?._zod?.def?.values ? `[t=${[...def.shape.t._zod.def.values].join("|")}]` : "";
+        if (keys.includes("contextId") || keys.includes("contextIds")) found.add(`${label}${t}`);
+        for (const [key, value] of Object.entries(def.shape)) walk(value, `${label}.${key}`, seen);
+      } else if (def.type === "union") for (const option of def.options) walk(option, label, seen);
+      else for (const key of ["in", "out", "innerType", "element"]) if (def[key]) walk(def[key], label, seen);
+    };
+    for (const [name, value] of Object.entries({ ...relayProtocol, ...notifyProtocol })) walk(value, name);
+    return found;
+  };
+  const C = "66666666-6666-4666-8666-666666666666", M = "77777777-7777-4777-8777-777777777777";
+  /** Control plane → worker shapes (replies and control frames): nothing to forward. */
+  const INBOUND = new Set(["CloudV2BeginActiveReplySchema", "CloudV2BootstrapLeaseSchema", "CloudV2ClientLeaseSchema", "CloudV2ControlFrameSchema[t=open]",
+    "CloudV2ControlFrameSchema[t=revoke-context]", "CloudV2RenewReplySchema.leases", "CloudV2TerminalLeaseSchema", "CloudV2TurnLeaseSchema"]);
+  type Case = { schema: any; sample: Record<string, unknown>; framing?: string[]; path: string; send: (transport: HybridTransport, sample: any) => Promise<unknown> };
+  const REQUESTS: Record<string, Case> = {
+    "CloudV2WorkerFrameSchema[t=request]": { schema: relayProtocol.CloudV2WorkerFrameSchema, framing: ["t", "id", "kind"], path: "github-token",
+      sample: { t: "request", id: M, kind: "github-token", purpose: "gh", failedTokenSha256: "a".repeat(64), contextId: C },
+      send: (transport, sample) => transport.send(sample) },
+    "CloudV2BootstrapLeaseRequestSchema": { schema: relayProtocol.CloudV2BootstrapLeaseRequestSchema, path: "bootstrap-lease", sample: { contextId: C },
+      send: (transport, sample) => transport.contextRequest("bootstrap-lease", sample) },
+    "CloudV2RenewRequestSchema": { schema: relayProtocol.CloudV2RenewRequestSchema, path: "renew", sample: { contextIds: [C, M] },
+      send: (transport, sample) => transport.contextRequest("execution-leases/renew", sample) },
+    "CloudV2TurnLeaseRequestSchema": { schema: relayProtocol.CloudV2TurnLeaseRequestSchema, path: "turn-lease",
+      sample: { chatId: "chat", userMessageId: M, dispatchId: M, generation: "1", contextId: C },
+      send: (transport, sample) => transport.contextRequest("turn-lease", sample) },
+    "NotifyUserWorkerRequestSchema": { schema: notifyProtocol.NotifyUserWorkerRequestSchema, path: "notifications",
+      sample: { title: "Done", message: "Ready", kind: "review", notificationId: M, chatId: "chat", userMessageId: M, executionId: "execution", contextId: C },
+      send: (transport, sample) => transport.notifyUser(sample) },
+  };
+
+  it("classifies every context-carrying protocol schema as forwarded (with a case below) or control plane → worker", () => {
+    const found = contextual();
+    expect([...found].filter(label => !INBOUND.has(label) && !REQUESTS[label])).toEqual([]);
+    expect([...INBOUND, ...Object.keys(REQUESTS)].filter(label => !found.has(label))).toEqual([]);
+  });
+
+  it.each(Object.keys(REQUESTS))("forwards %s to the control plane with every field, contextId included", async label => {
+    const { schema, sample, framing = [], path, send } = REQUESTS[label]!;
+    expect(schema.safeParse(sample).success).toBe(true);
+    const shape = (schema._zod.def.type === "object" ? schema : schema._zod.def.options.find((option: any) => [...(option._zod.def.shape.t?._zod.def.values ?? [])].includes(sample.t)))._zod.def.shape;
+    // The sample sets every field the schema allows, so a new field is compared too.
+    expect(Object.keys(shape).filter(key => !(key in sample))).toEqual([]);
+    const f = await fixture();
+    await send(f.transport, sample).catch(() => {});
+    await expect.poll(() => f.requests.find(request => request.path === path)).toBeDefined();
+    const expected = Object.fromEntries(Object.entries(sample).filter(([key]) => !framing.includes(key)));
+    expect(f.requests.find(request => request.path === path)!.body).toEqual(expected);
+  });
+
+  it("forwards the context of the requests whose shapes live outside the protocol: terminal, client and retirement leases, local commands, MCP authorization", async () => {
+    const f = await fixture();
+    const cases: Array<[string, () => Promise<unknown>, Record<string, unknown>]> = [
+      ["terminal-lease", () => f.transport.contextRequest("terminal-lease", { clientId: M, terminalId: "t", requestId: "r" }), { clientId: M, terminalId: "t", requestId: "r" }],
+      ["client-lease", () => f.transport.contextRequest("client-lease", { clientId: M, requestId: "r", operation: "git.push" }), { clientId: M, requestId: "r", operation: "git.push" }],
+      ["retired", () => f.transport.contextRequest(`execution-leases/${C}/retired`, { retirementId: M, reason: "operation_done", processes: 0 }), { retirementId: M, reason: "operation_done", processes: 0 }],
+      ["authorization", () => f.transport.mcpAuthorization(M, true, undefined, C), { force: true, contextId: C }],
+    ];
+    for (const [path, send, body] of cases) {
+      await send().catch(() => {});
+      await expect.poll(() => f.requests.find(request => request.path === path)?.body).toEqual(body);
+    }
+    const controller = new AbortController();
+    const local = f.transport.localCommand({ chatId: "chat", executionId: "execution", input: { command: "pwd" } as never, contextId: C }, controller.signal).catch(() => {});
+    await expect.poll(() => f.requests.find(request => request.path === "local-commands")?.body).toMatchObject({ chatId: "chat", executionId: "execution", contextId: C });
+    controller.abort(); await local;
+  });
 });

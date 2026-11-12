@@ -37,6 +37,7 @@ import { Terminals, type TerminalPeople } from "./terminals/service";
 import { ClosedFailure, classOf, closedFailure, errorCode, failureLine, tagged } from "./sharing/closed-failure";
 import { gitIdentityEnvironment } from "./sharing/identity";
 import { PersonalEnvironments, unexportedLine } from "./sharing/personal-env";
+import { GitCommandError } from "./workspace/commands";
 import type { SweepSummary } from "./sharing/boot-clean";
 import { operationEnvironment } from "./sharing/operation-environment";
 import { retireContext } from "./sharing/retire";
@@ -495,12 +496,14 @@ export class CloudWorker {
       } catch (error) {
         // Activated: one journal line names the refusing step (closed class and code, never a path or value).
         const failure = classOf(error) as ClosedFailure<ClientOperationFailure> | undefined;
+        // A failed Git command adds its closed detail (credential_missing, permission_denied, …), never its stderr.
+        const detail = error instanceof GitCommandError ? error.detail : undefined;
         if (this.acting) this.options.log?.(failureLine(`workspace-request op=${/^[A-Za-z]{1,32}(?:\.[A-Za-z]{1,32}){0,2}$/.test(frame.op) ? frame.op : "other"}`,
-          failure ?? new ClosedFailure("operation_failed", errorCode(error))));
+          failure ?? new ClosedFailure("operation_failed", errorCode(error))) + (detail ? ` detail=${detail}` : ""));
         await client.send(createMessage({ type: "WORKSPACE_ERROR", source: "engine", requestId: frame.id, op: frame.op,
           code: error instanceof WorkspaceError || error instanceof CodeReviewError ? error.code : "WORKSPACE_ERROR",
           message: error instanceof WorkspaceError || error instanceof CodeReviewError ? error.message : "The workspace request could not be completed.",
-          ...(this.acting && failure ? { failure: failure.failure } : {}) }));
+          ...(this.acting && failure ? { failure: failure.failure } : {}), ...(detail ? { detail } : {}) }));
       } finally {
         if (activeMutation) {
           this.activeMutations--;

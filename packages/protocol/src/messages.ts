@@ -1184,6 +1184,9 @@ export interface WorkspaceErrorMessage extends BaseMessage {
   remediation?: string;
   /** Cloud worker, activated workspace only: which step of a person's operation refused (closed, diagnostic). */
   failure?: ClientOperationFailure;
+  /** Cloud worker: why a Git command failed (closed: credential_missing, auth_rejected, permission_denied, repository_not_found,
+   * protected_branch, hook_declined, remote_rejected, network, timeout, other). Never stderr, a URL or a token. */
+  detail?: string;
 }
 export const CLIENT_OPERATION_FAILURES = ["no_person", "lease_refused", "lease_person_mismatch", "operation_failed"] as const;
 export type ClientOperationFailure = typeof CLIENT_OPERATION_FAILURES[number];
