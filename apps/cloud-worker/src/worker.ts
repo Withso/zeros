@@ -93,7 +93,9 @@ interface WorkerOptions {
 /** passive (Order 3): a syncing Mac; never activity, never in the census, sync reads only. */
 interface Client extends AppClient { rejected: boolean; passive?: boolean; device?: string; served?: number;
   /** Activated acting-user-v1: the control plane's person and client context for this connection. */
-  userId?: string; contextId?: string }
+  userId?: string; contextId?: string;
+  /** The control plane's own id for this client (inbound bridge): what its terminal and client leases name; id is the carrier's local routing id. */
+  authorityId?: string }
 
 const stableJson = (value: unknown): string => Array.isArray(value) ? `[${value.map(stableJson).join(",")}]`
   : value && typeof value === "object" ? `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${stableJson((value as Record<string, unknown>)[key])}`).join(",")}}`
@@ -217,7 +219,7 @@ export class CloudWorker {
     const operation = CloudV2ClientOperationSchema.safeParse(op);
     if (!this.acting || !operation.success || (op === "git.repoBranchCatalog" && params.fetch !== true)) return work();
     if (!this.contexts || !client.userId) throw new WorkspaceError("CLOUD_V2_UNSUPPORTED", "Reconnect to the workspace to make changes as yourself.");
-    const lease = await this.contexts.clientLease({ clientId: client.id, requestId, operation: operation.data });
+    const lease = await this.contexts.clientLease({ clientId: client.authorityId ?? client.id, requestId, operation: operation.data });
     try {
       if (lease.userId !== client.userId) throw new WorkspaceError("CLOUD_V2_UNSUPPORTED", "Reconnect to the workspace to make changes as yourself.");
       return await operationEnvironment.run({ git: gitIdentityEnvironment(lease.gitIdentity), zeros: { ZEROS_EXECUTION_CONTEXT: lease.contextId } }, work);
@@ -231,7 +233,7 @@ export class CloudWorker {
     return {
       of: client => (client as Client).userId,
       lease: async (client, terminalId, requestId) => {
-        const lease = await contexts.terminalLease({ clientId: client.id, terminalId, requestId });
+        const lease = await contexts.terminalLease({ clientId: (client as Client).authorityId ?? client.id, terminalId, requestId });
         const env = lease.environment ? await this.personal.materialize(lease.contextId, lease.environment) : undefined;
         const variables = env?.variables ?? {};
         application.protect([...Object.values(variables), ...(lease.environment?.files.map(file => file.content) ?? []), ...(lease.api ? [lease.api.token] : [])]);
@@ -396,7 +398,8 @@ export class CloudWorker {
       if (message.userId && message.contextId) this.contexts?.adopt(message.contextId, message.userId);
       const client: Client = { id: message.clientId, rejected: false, ...(message.passive ? { passive: true } : {}),
         ...(message.passive && message.device ? { device: message.device } : {}),
-        ...(message.userId && message.contextId ? { userId: message.userId, contextId: message.contextId } : {}), send: async (frame) => {
+        ...(message.userId && message.contextId ? { userId: message.userId, contextId: message.contextId } : {}),
+        ...(message.authorityClientId ? { authorityId: message.authorityClientId } : {}), send: async (frame) => {
         if (this.clients.get(client.id) === client && !client.rejected) await this.send({ t: "frame", clientId: client.id, frame });
       } };
       this.clients.set(client.id, client);

@@ -458,3 +458,19 @@ it("names why a boot without a real sweep is unproven, so its attestation stays 
   await until(() => f.relay.calls.find(call => call.op === "execution-leases/boot-clean")?.body).toMatchObject({ processes: 1, legacyMaterial: "refused", refusals: ["proc_unreadable"] });
   expect(lines).toContain("boot-clean processes=1 legacy=refused refusals=proc_unreadable");
 });
+
+it.skipIf(process.platform !== "linux")("leases a bridge client's terminal and mutation under the control plane's own client id, while replies keep the carrier's local id", async () => {
+  const f = await setup();
+  // The inbound bridge routes by a per-carrier local id and keeps the control plane's id as the lease authority.
+  const authority = randomUUID();
+  f.relay.clientUsers.set(authority, ALEX);
+  await f.relay.receive({ t: "open", clientId: CLIENT_A, authorityClientId: authority, userId: ALEX, contextId: randomUUID() });
+  const write = browserFrame("WORKSPACE_REQUEST", { op: "file.write", params: { path: "notes.txt", content: "hello" } });
+  await f.relay.request(CLIENT_A, write);
+  await until(() => !!f.relay.response(write.id)).toBe(true);
+  expect(f.relay.response(write.id)!.type).toBe("WORKSPACE_RESPONSE");
+  expect(f.relay.calls.find(call => call.op === "client-lease")!.body).toEqual({ clientId: authority, requestId: write.id, operation: "file.write" });
+  await f.relay.request(CLIENT_A, browserFrame("PTY_CREATE", { sessionId: "alex-shell", cols: 120, rows: 10 }));
+  await until(() => f.relay.bridge("PTY_CREATED").filter(entry => entry.clientId === CLIENT_A).length).toBe(1);
+  expect(f.relay.calls.find(call => call.op === "terminal-lease")!.body).toMatchObject({ clientId: authority, terminalId: "alex-shell" });
+});
