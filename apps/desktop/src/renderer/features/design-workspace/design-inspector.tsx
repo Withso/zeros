@@ -260,6 +260,12 @@ const DESIGN_FRAME_POSITION_RANGE = {
   min: -DESIGN_FRAME_COORDINATE_LIMIT,
   max: DESIGN_FRAME_COORDINATE_LIMIT,
 };
+/** A percentage field (opacity) writes 0–100% of its value; the field shows
+ * the same bound so a scrub past either end reads what is written. */
+const DESIGN_PERCENTAGE_RANGE = { min: 0, max: 100 };
+/** Only a complete numeric entry is a display percentage; functions, keywords
+ * and tokens are already CSS values and must not become a numeric conversion. */
+const DESIGN_PERCENTAGE_INPUT = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?%?$/i;
 
 function designFrameSizeValue(value: number): number {
   return Math.min(DESIGN_FRAME_MAX_SIZE, Math.max(1, Math.round(value)));
@@ -446,10 +452,10 @@ export function InspectorEditField({
 
   /** A ranged value (opacity) settles inside its range. */
   const withinBounds = (next: string) => {
-    const number = Number(next);
-    if (!range || next.trim() === "" || !Number.isFinite(number)) return next;
-    const bounded = Math.min(range.max, Math.max(range.min, number));
-    return bounded === number ? next : String(bounded);
+    const parts = range ? parseDesignStyleNumericParts(next) : null;
+    if (!range || !parts) return next;
+    const bounded = Math.min(range.max, Math.max(range.min, parts.number));
+    return bounded === parts.number ? next : `${bounded}${parts.unit}`;
   };
   /** A scrub or arrow press also stops at zero where CSS takes no negative;
    * a typed negative is refused instead (refusalOf). */
@@ -476,10 +482,11 @@ export function InspectorEditField({
     const maths = evaluateDesignNumericExpression(next, baseline);
     if (maths && "refused" in maths)
       return maths.refused === "mixed-units" ? "Use CSS for mixed units." : `Cannot divide by zero.${kept}`;
-    if (!styleProperty || designStyleFieldRefusal(styleProperty, typedValue(next, baseline)) === null) return null;
+    const refused = styleProperty ? designStyleFieldRefusal(styleProperty, typedValue(next, baseline)) : null;
+    if (!styleProperty || refused === null) return null;
     const field = messageField();
     const name = field ? readDesignCardField(field, styleProperty).label : label;
-    return `${name} cannot be negative.${kept}`;
+    return refused === "negative" ? `${name} cannot be negative.${kept}` : `${name} does not take ${next.trim()}.${kept}`;
   };
   /** Steps a Mixed field's scrub or arrows have moved its layers. */
   const mixedStepsRef = useRef<{ steps: number; fine: boolean } | null>(null);
@@ -1261,8 +1268,10 @@ const InspectorStyleField = React.memo(function InspectorStyleField({
       : null;
   const styleUpdate = (next: string): Record<string, string | null> => {
     const value =
-      options?.percentage && next.trim()
-        ? String(Math.max(0, Math.min(100, Number.parseFloat(next))) / 100)
+      options?.percentage && next.trim() && DESIGN_PERCENTAGE_INPUT.test(next.trim())
+        ? String(
+            Math.max(DESIGN_PERCENTAGE_RANGE.min, Math.min(DESIGN_PERCENTAGE_RANGE.max, Number.parseFloat(next))) / 100,
+          )
         : next || null;
     return Object.fromEntries(
       [property, ...(options?.linkedProperties ?? [])].map((key) => [
@@ -1308,6 +1317,7 @@ const InspectorStyleField = React.memo(function InspectorStyleField({
       shortLabel={options?.shortLabel}
       suffix={options?.suffix}
       percentage={options?.percentage}
+      range={options?.percentage ? DESIGN_PERCENTAGE_RANGE : undefined}
       placeholder={options?.mixed ? "Mixed" : (options?.placeholder ?? "–")}
       styleProperty={property}
       linkedProperties={options?.linkedProperties}

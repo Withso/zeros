@@ -2237,7 +2237,11 @@ a frame's own document (`canvas-items-exports.test.ts`).
   something else. A typed negative where CSS takes none (sizes, padding, gap,
   radius, border width, font size, durations; `designStyleFieldRefusal`)
   writes nothing, restores the field and says "Width cannot be negative. Kept
-  120." with the field's visible name and the value as it shows. An emptied
+  120." with the field's visible name and the value as it shows. A value the
+  property does not take at all (`abc`, or a unitless `1e3` font size) is
+  refused the same way ("Size does not take abc. Kept 28."), as the browser's
+  `CSS.supports` answers for that property; custom properties, keywords,
+  `var()` and maths functions it accepts still write. An emptied
   field restores its value; X, Y and rotation, which have no menu, keep empty
   as removing the offset. Removal moved to the hover card: a value set on the
   layer that replaces nothing offers Clear (one undoable step, also
@@ -2503,10 +2507,15 @@ a frame's own document (`canvas-items-exports.test.ts`).
   percentage. Text layers keep text semantics: Fill edits `color`, and the
   inspector does not offer conversion into a layout container or a background.
   Ranged fields settle on what can be stored instead of failing on commit:
-  frame W/H stay within 1–16,384, X/Y within ±1,000,000, and opacity and the
-  like within their range. A typed negative size, padding, gap, radius,
-  border width, font size or duration is refused instead (see Field values
-  below; the engine writes declarations verbatim, so `padding-top:-10px`
+  frame W/H stay within 1–16,384, X/Y within ±1,000,000, and opacity within
+  0–100%. The field shows the bound itself while a scrub or arrow goes past
+  it, so the field, the live preview and the write agree. A plain numeric
+  Opacity entry is a display percentage (`25` writes `0.25`, with exponent
+  numbers following the same rule); a valid function, token or global keyword
+  such as `calc(50%)`, `var(--muted)` or `inherit` is already CSS and
+  writes unchanged. A typed negative size, padding, gap, radius, border width,
+  font size or duration is refused instead (see Field values below; the engine
+  writes declarations verbatim, so `padding-top:-10px`
   would persist a declaration the browser ignores), including one component
   of a shorthand (`-5px 10px`); a scrub or arrow stops at 0. Margins, insets,
   letter spacing, offsets and delays keep negative values. Frame W/H edits are built

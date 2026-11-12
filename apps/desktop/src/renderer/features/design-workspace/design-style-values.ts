@@ -785,9 +785,15 @@ export function normalizeDesignStyleFieldInput(
 }
 
 /** Why CSS would reject a typed value, if it would: a negative number for a
- * property that cannot be negative, in any component of a shorthand. */
-export function designStyleFieldRefusal(property: string, value: string): "negative" | null {
-  return clampDesignStyleFieldValue(property, value) === value ? null : "negative";
+ * property that cannot be negative, in any component of a shorthand, or a
+ * value the property does not take at all. The browser that paints the frame
+ * judges the second; without one (tests, workers) only negatives are refused. */
+export function designStyleFieldRefusal(property: string, value: string): "negative" | "invalid" | null {
+  if (clampDesignStyleFieldValue(property, value) !== value) return "negative";
+  const normalized = cssStyleProperty(property);
+  const declared = value.trim().replace(/\s*!\s*important$/i, "");
+  if (!declared || normalized.startsWith("--") || typeof CSS === "undefined" || typeof CSS.supports !== "function") return null;
+  return CSS.supports(normalized, declared) ? null : "invalid";
 }
 
 /** Whether a preview needs browser layout readback to keep the selected box,

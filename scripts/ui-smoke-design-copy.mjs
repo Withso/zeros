@@ -111,6 +111,97 @@ async function runDesignCopyChecks({ page, check }) {
   expect(await page.evaluate(() => window.__zerosHarnessDesignSurface.measurement.requests.filter(request => request.op === "design.transaction.apply").length)).toBe(0);
   check("Escape retires an Option-drag preview without submitting a write", true);
 
+  // The press decides what Option-drag copies: inside the selection, the
+  // selection; elsewhere, the layer the press selects at the selection's depth.
+  frame = await load(page, "home-copy");
+  const heroChildren = () => frame.locator('[data-oid="home-hero"] > [data-oid]').evaluateAll(nodes => nodes.map(node => node.getAttribute("data-oid")));
+  const childrenBefore = await heroChildren();
+  const mark = await designFrameElementBox(page.locator(displayed), frame.locator('[data-oid="home-copy"]'));
+  await page.keyboard.down("Alt");
+  await page.mouse.move(mark.x + mark.width / 2, mark.y + mark.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(mark.x + mark.width / 2, mark.y + mark.height / 2 + 150, { steps: 12 });
+  await page.mouse.up();
+  await page.keyboard.up("Alt");
+  await settled(page);
+  await expect.poll(() => selection(page)).toMatch(/^copy-/);
+  const markCopy = await selection(page);
+  expect(await frame.locator('[data-oid^="copy-"]').evaluateAll(nodes => nodes.map(node => [node.tagName, node.childElementCount, getComputedStyle(node).backgroundColor]))).toEqual([["DIV", 0, "rgb(0, 0, 255)"]]);
+  expect(await frame.locator('[data-oid="home-copy"]').count()).toBe(1);
+  await viewport.focus();
+  await page.keyboard.press("Control+z");
+  await expect(frame.locator(`[data-oid="${markCopy}"]`)).toHaveCount(0);
+  expect(await heroChildren()).toEqual(childrenBefore);
+  await settled(page);
+  check("Option drag inside a selected layer in a flow copies that layer, not its parent", true);
+
+  frame = await load(page, "home-copy");
+  const sibling = await designFrameElementBox(page.locator(displayed), frame.locator('[data-oid="home-heading"]'));
+  await page.keyboard.down("Alt");
+  await page.mouse.move(sibling.x + sibling.width / 2, sibling.y + sibling.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(sibling.x + sibling.width / 2, sibling.y + sibling.height / 2 + 150, { steps: 12 });
+  await page.mouse.up();
+  await page.keyboard.up("Alt");
+  await settled(page);
+  await expect.poll(() => selection(page)).toMatch(/^copy-/);
+  const siblingCopy = await selection(page);
+  expect(await frame.locator('[data-oid^="copy-"]').evaluateAll(nodes => nodes.map(node => [node.tagName, node.childElementCount, getComputedStyle(node).backgroundColor]))).toEqual([["DIV", 0, "rgb(255, 0, 0)"]]);
+  await viewport.focus();
+  await page.keyboard.press("Control+z");
+  await expect(frame.locator(`[data-oid="${siblingCopy}"]`)).toHaveCount(0);
+  await settled(page);
+
+  frame = await load(page, "home-copy");
+  const parent = await designFrameElementBox(page.locator(displayed), frame.locator('[data-oid="home-hero"]'));
+  await page.keyboard.down("Alt");
+  await page.mouse.move(parent.x + parent.width - 20, parent.y + parent.height - 20);
+  await page.mouse.down();
+  await page.mouse.move(parent.x + parent.width - 20, parent.y + parent.height + 100, { steps: 12 });
+  await page.mouse.up();
+  await page.keyboard.up("Alt");
+  await settled(page);
+  await expect.poll(() => selection(page)).toMatch(/^copy-/);
+  const parentCopy = await selection(page);
+  expect(await frame.locator(`[data-oid="${parentCopy}"] > [data-oid]`).count()).toBe(3);
+  await viewport.focus();
+  await page.keyboard.press("Control+z");
+  await expect(frame.locator(`[data-oid="${parentCopy}"]`)).toHaveCount(0);
+  await settled(page);
+  check("Option drag outside the selection copies the layer the press selects: a sibling, or the parent from its own empty area", true);
+  frame = await load(page, "home-composer", "styleOrigins&componentOptions");
+  const host = await designFrameElementBox(page.locator(displayed), frame.locator('[data-oid="home-composer"]'));
+  await page.keyboard.down("Alt");
+  await page.mouse.move(host.x + host.width / 2, host.y + host.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(host.x + host.width / 2 + 40, host.y + host.height / 2 + 120, { steps: 12 });
+  // This fixture's engine answers no layer transfer, so the copy is read from
+  // the drag's own preview and the drag is then cancelled.
+  await expect(frame.locator('[data-oid^="copy-"]')).toHaveCount(1);
+  expect(await frame.locator('[data-oid^="copy-"]').evaluate(node => node.tagName)).toBe("ZD-CHAT-COMPOSER");
+  await page.keyboard.press("Escape");
+  await page.mouse.up();
+  await page.keyboard.up("Alt");
+  await expect(frame.locator('[data-oid^="copy-"]')).toHaveCount(0);
+  check("Option drag inside a selected instance copies the instance", true);
+  frame = await load(page, "home-composer", "styleOrigins&componentOptions");
+  const instance = await designFrameElementBox(page.locator(displayed), frame.locator('[data-oid="home-composer"]'));
+  await page.mouse.dblclick(instance.x + instance.width / 2, instance.y + instance.height / 2);
+  await expect.poll(() => selection(page)).toMatch(/^::zeros-part:home-composer:/);
+  const instanceBefore = await frame.locator('[data-oid="home-composer"]').evaluate(node => node.outerHTML);
+  const writesBefore = await page.evaluate(() => window.__zerosHarnessDesignSurface.measurement.requests.filter(request => request.op === "design.transaction.apply").length);
+  await page.keyboard.down("Alt");
+  await page.mouse.move(instance.x + instance.width / 2, instance.y + instance.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(instance.x + instance.width / 2 + 40, instance.y + instance.height / 2 + 120, { steps: 12 });
+  await page.mouse.up();
+  await page.keyboard.up("Alt");
+  await settled(page);
+  await expect(frame.locator('[data-oid^="copy-"]')).toHaveCount(0);
+  expect(await frame.locator('[data-oid="home-composer"]').evaluate(node => node.outerHTML)).toBe(instanceBefore);
+  expect(await page.evaluate(() => window.__zerosHarnessDesignSurface.measurement.requests.filter(request => request.op === "design.transaction.apply").length)).toBe(writesBefore);
+  check("Option drag of a part inside an instance writes nothing", true);
+
   frame = await load(page, "home-heading");
   await page.evaluate(() => window.__zerosHarnessDesignSurface.ui.getState().setViewport("ws_design_harness", { zoom: 0.25, panX: 80, panY: 140 }));
   const moving = await designFrameElementBox(page.locator(displayed), frame.locator('[data-oid="home-heading"]'));
