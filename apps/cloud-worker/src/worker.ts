@@ -197,7 +197,7 @@ export class CloudWorker {
     const contexts = this.contexts;
     // sync-context-v1: an activated workspace's sync socket reads only while its person's handle lives.
     if (contexts) transport.setSyncContexts?.({ required: () => this.acting, admit: (contextId, userId) => contexts.admitHandle(contextId, userId),
-      ended: (contextId, listener) => contexts.onEnd(contextId, listener), release: contextId => contexts.release(contextId) });
+      ended: (contextId, listener) => contexts.onEnd(contextId, listener), release: contextId => contexts.release(contextId), live: contextId => contexts.live(contextId) });
   }
 
   private contextGateway(context: { contextId: string; servers: readonly RuntimeMcpServer[] }, workspaceRoot: string, agents: Agents): Promise<McpGateway> {

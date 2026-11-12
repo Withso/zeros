@@ -33,6 +33,8 @@ export interface SyncContexts {
   admit(contextId: string, userId: string): Promise<boolean>;
   ended(contextId: string, listener: () => void): () => void;
   release(contextId: string): void;
+  /** The handle's current state, checked before every read and reply: past its (possibly shortened) deadline it has ended. */
+  live(contextId: string): boolean;
 }
 /** Order 3: one Mac's direct sync socket, carrying plain bridge messages for one passive client. */
 interface SyncConnection { socket: WebSocket; clientId: string; sub: string; dev: string; ctx?: string; alive: boolean; deadline: number; renew?: ReturnType<typeof setTimeout>; queue: Promise<void> }
@@ -103,7 +105,7 @@ export class InboundBridge {
       const sync = this.syncs.get(frame.clientId);
       // A sync socket hears only its own replies and hints, as plain bridge messages, and nothing past its deadline.
       if (sync) {
-        if (this.now() >= sync.deadline) { sync.socket.close(4001); return false; }
+        if (this.now() >= sync.deadline || (sync.ctx && !this.options.syncContexts?.live(sync.ctx))) { sync.socket.close(4001); return false; }
         return this.writeSync(sync, frame.frame as object);
       }
       const route = this.routes.get(frame.clientId);
@@ -225,7 +227,7 @@ export class InboundBridge {
     const handle = (data: WebSocket.RawData, binary: boolean) => {
       if (binary) { socket.close(4003); return; }
       // Checked on every frame, a renewal included: a late renewal cannot revive a socket.
-      if (this.now() >= sync.deadline) { socket.close(4001); return; }
+      if (this.now() >= sync.deadline || (sync.ctx && contexts && !contexts.live(sync.ctx))) { socket.close(4001); return; }
       let value: unknown;
       try { value = JSON.parse(data.toString()); } catch { socket.close(4003); return; }
       if (value && typeof value === "object" && (value as { t?: unknown }).t === "renew") {

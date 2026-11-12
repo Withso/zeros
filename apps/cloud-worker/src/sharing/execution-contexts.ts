@@ -13,7 +13,9 @@ export interface ContextsDeps {
 }
 type Lease = CloudV2TurnLease | CloudV2TerminalLease | CloudV2ClientLease | CloudV2BootstrapLease;
 type RetirementReason = "outcome" | "stop" | "revoked" | "generation_changed" | "terminal_closed" | "operation_done" | "expired" | "setup_done";
-interface Entry { lease: Lease; expiresAt: number; ended?: CloudV2ContextReason; listeners: Set<(reason: CloudV2ContextReason) => void>; retirementId?: string; retired?: boolean }
+interface Entry { lease: Lease; expiresAt: number; ended?: CloudV2ContextReason; listeners: Set<(reason: CloudV2ContextReason) => void>; retirementId?: string; retired?: boolean;
+  /** Ends the context at its own deadline, between renewal ticks (J-3A1). */
+  deadline?: ReturnType<typeof setTimeout> }
 
 /** Renewal cadence (team-sharing-2-wire.md Slice B shapes 6): one batch every 10 s while any context lives. */
 export const CONTEXT_RENEW_MS = 10_000;
@@ -78,8 +80,8 @@ export class ExecutionContexts {
     if (expected !== undefined && lease.contextId !== expected) throw new Error("The control plane answered for another context.");
     const known = this.entries.get(lease.contextId);
     if (known?.ended) throw new Error("This context has ended.");
-    if (known) { known.lease = lease; known.expiresAt = Math.max(known.expiresAt, lease.expiresAt); }
-    else this.entries.set(lease.contextId, { lease, expiresAt: lease.expiresAt, listeners: new Set() });
+    if (known) { known.lease = lease; this.expire(lease.contextId, known, lease.expiresAt); }
+    else this.track(lease.contextId, { lease, expiresAt: lease.expiresAt, listeners: new Set() });
     this.arm();
     return lease;
   }
@@ -89,7 +91,7 @@ export class ExecutionContexts {
   adopt(contextId: string, userId: string): void {
     if (this.entries.has(contextId)) return;
     const expiresAt = this.now() + 30_000;
-    this.entries.set(contextId, { lease: { contextId, userId, expiresAt, gitIdentity: null }, expiresAt, listeners: new Set() });
+    this.track(contextId, { lease: { contextId, userId, expiresAt, gitIdentity: null }, expiresAt, listeners: new Set() });
     this.arm();
   }
   /** sync-context-v1: a sync socket's handle is used only after one successful renewal (after the clean boot), with exactly the deadline it returns. */
@@ -102,8 +104,8 @@ export class ExecutionContexts {
     if (!result || "refused" in result) return false;
     const known = this.entries.get(contextId);
     if (known?.ended) return false;
-    if (known) known.expiresAt = Math.max(known.expiresAt, result.expiresAt);
-    else this.entries.set(contextId, { lease: { contextId, userId, expiresAt: result.expiresAt, gitIdentity: null }, expiresAt: result.expiresAt, listeners: new Set() });
+    if (known) this.expire(contextId, known, result.expiresAt);
+    else this.track(contextId, { lease: { contextId, userId, expiresAt: result.expiresAt, gitIdentity: null }, expiresAt: result.expiresAt, listeners: new Set() });
     this.arm();
     return true;
   }
@@ -116,10 +118,11 @@ export class ExecutionContexts {
     this.arm();
   }
 
-  /** A live context: leased, not ended, before its deadline. */
+  /** A live context: leased, not ended, before its deadline. One found past its deadline ends here, so a late timer never admits a use. */
   live(contextId: string): boolean {
     const entry = this.entries.get(contextId);
-    return !!entry && !entry.ended && this.now() < entry.expiresAt;
+    if (entry && !entry.ended && this.now() >= entry.expiresAt) this.end(contextId, "expired");
+    return !!entry && !entry.ended;
   }
   expiresAt(contextId: string): number | undefined { return this.entries.get(contextId)?.expiresAt; }
   userOf(contextId: string): string | undefined { const entry = this.entries.get(contextId); return entry && !entry.ended ? entry.lease.userId : undefined; }
@@ -139,6 +142,7 @@ export class ExecutionContexts {
     const entry = this.entries.get(contextId);
     if (!entry || entry.ended) return;
     entry.ended = reason;
+    clearTimeout(entry.deadline);
     for (const listener of [...entry.listeners]) { try { listener(reason); } catch { /* one owner's cleanup never blocks another's */ } }
     entry.listeners.clear();
   }
@@ -159,7 +163,7 @@ export class ExecutionContexts {
         const entry = this.entries.get(result.contextId);
         if (!entry || entry.ended || !contextIds.includes(result.contextId)) continue;
         if ("refused" in result) this.end(result.contextId, result.refused);
-        else entry.expiresAt = Math.max(entry.expiresAt, result.expiresAt);
+        else this.expire(result.contextId, entry, result.expiresAt);
       }
     }
   }
@@ -175,6 +179,19 @@ export class ExecutionContexts {
     const retired = [...this.entries].filter(([, value]) => value.retired);
     for (const [id] of retired.slice(0, Math.max(0, retired.length - 256))) this.entries.delete(id);
     this.arm();
+  }
+
+  private track(contextId: string, entry: Entry): void {
+    this.entries.set(contextId, entry);
+    this.expire(contextId, entry, entry.expiresAt);
+  }
+  /** The control plane's latest accepted deadline, exactly: it may clamp one shorter (token or source horizon); a failed renewal never calls this. */
+  private expire(contextId: string, entry: Entry, expiresAt: number): void {
+    entry.expiresAt = expiresAt;
+    clearTimeout(entry.deadline);
+    if (entry.ended) return;
+    entry.deadline = setTimeout(() => { if (this.entries.get(contextId) === entry) this.live(contextId); }, Math.max(0, expiresAt - this.now()));
+    entry.deadline.unref?.();
   }
 
   /** Renewal runs only while contexts exist. */

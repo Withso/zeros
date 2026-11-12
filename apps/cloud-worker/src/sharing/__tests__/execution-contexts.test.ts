@@ -185,3 +185,37 @@ it("admits a sync handle only after one successful renewal, keeps the returned d
   await expect(contexts.admitHandle(handle, person)).resolves.toBe(false);
   contexts.dispose();
 });
+
+it("J-3A1: ends a context at its own deadline between renewal ticks, honours a shortened renewal, and never revives it", async () => {
+  vi.useFakeTimers();
+  let now = 1_000_000;
+  const replies: Array<unknown> = [];
+  const contexts = new ExecutionContexts({ now: () => now, post: async () => { const reply = replies.shift(); if (reply instanceof Error) throw reply; return reply; } });
+  const handle = "66666666-6666-4666-8666-666666666666", other = "77777777-7777-4777-8777-777777777777", person = "44444444-4444-4444-8444-444444444444";
+  const ended: string[] = [];
+  // The control plane clamps the first deadline to 25 s (between the 10 s renewal ticks).
+  replies.push({ leases: [{ contextId: handle, expiresAt: now + 25_000 }] });
+  await contexts.admitHandle(handle, person);
+  contexts.onEnd(handle, reason => ended.push(reason));
+  // Offline: both renewals fail, and neither extends it.
+  replies.push(Object.assign(new Error("lost"), { status: 503 }), Object.assign(new Error("lost"), { status: 503 }));
+  for (let elapsed = 0; elapsed < 24_000; elapsed += 1_000) { now += 1_000; await vi.advanceTimersByTimeAsync(1_000); }
+  expect([contexts.live(handle), ended]).toEqual([true, []]);
+  now += 1_000; await vi.advanceTimersByTimeAsync(1_000);
+  expect([contexts.live(handle), ended]).toEqual([false, ["expired"]]);
+  // A delayed timer never admits a read: live() itself ends a context at its deadline.
+  replies.push({ leases: [{ contextId: other, expiresAt: now + 30_000 }] });
+  await contexts.admitHandle(other, person);
+  const otherEnded: string[] = [];
+  contexts.onEnd(other, reason => otherEnded.push(reason));
+  now += 30_000;
+  expect([contexts.live(other), otherEnded]).toEqual([false, ["expired"]]);
+  // A successful renewal that shortens the deadline is honoured, not widened to the older one.
+  const third = "88888888-8888-4888-8888-888888888888";
+  replies.push({ leases: [{ contextId: third, expiresAt: now + 30_000 }] });
+  await contexts.admitHandle(third, person);
+  replies.push({ leases: [{ contextId: third, expiresAt: now + 15_000 }] });
+  now += 10_000; await vi.advanceTimersByTimeAsync(10_000);
+  expect(contexts.expiresAt(third)).toBe(now + 5_000);
+  contexts.dispose();
+});

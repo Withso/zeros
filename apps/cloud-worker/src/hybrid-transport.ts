@@ -88,6 +88,7 @@ export class HybridTransport implements Transport {
         admit: (contextId, userId) => this.syncContexts ? this.syncContexts.admit(contextId, userId) : Promise.resolve(false),
         ended: (contextId, listener) => this.syncContexts?.ended(contextId, listener) ?? (() => {}),
         release: contextId => { this.syncContexts?.release(contextId); },
+        live: contextId => this.syncContexts?.live(contextId) ?? false,
       },
       onPushChange: () => {
         for (const controller of this.promptPolls) controller.abort();

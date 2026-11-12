@@ -134,13 +134,13 @@ it("holds a slow Mac's sync replies (backpressure) instead of terminating its so
 
 /** Team sharing 3A (sync-context-v1): an activated workspace's sync socket carries a control-plane handle (ctx). */
 const ctx = "66666666-6666-4666-8666-666666666666";
-async function scopedFixture(admit: (ctx: string, sub: string) => Promise<boolean> = async () => true) {
+async function scopedFixture(admit: (ctx: string, sub: string) => Promise<boolean> = async () => true, live: (ctx: string) => boolean = () => true) {
   clock = Date.now();
   const incoming: CloudV2ControlFrame[] = [], admitted: string[] = [], released: string[] = [];
   const ends = new Map<string, () => void>();
   const bridge = new InboundBridge({ workspaceId, bootId, port: 0, publicKeys: [key.publicKey.export({ type: "spki", format: "pem" }).toString()], now: () => clock,
     syncContexts: { required: () => true, admit: async (context, sub) => { admitted.push(context); return admit(context, sub); },
-      ended: (context, listener) => { ends.set(context, listener); return () => ends.delete(context); }, release: context => { released.push(context); } } });
+      ended: (context, listener) => { ends.set(context, listener); return () => ends.delete(context); }, release: context => { released.push(context); }, live } });
   const address = await bridge.start(async frame => { incoming.push(frame); });
   cleanups.push(() => bridge.dispose());
   const dial = (auth: string) => new Promise<{ ws: WebSocket; status: number }>(resolve => {
@@ -149,7 +149,7 @@ async function scopedFixture(admit: (ctx: string, sub: string) => Promise<boolea
     ws.on("unexpected-response", (_request, response) => { response.resume(); resolve({ ws, status: response.statusCode! }); });
     ws.on("open", () => resolve({ ws, status: 101 }));
   });
-  return { incoming, admitted, released, ends, dial };
+  return { bridge, incoming, admitted, released, ends, dial };
 }
 const scoped = (extra: Record<string, unknown> = {}) => grant({ scope: "sync", sub: "44444444-4444-4444-8444-444444444444", dev: device, ctx, ...extra });
 
@@ -194,4 +194,22 @@ it("keeps one live socket per handle: a new one replaces its predecessor, and on
   expect(f.released).toEqual([]);
   second.ws.close();
   await expect.poll(() => f.released).toEqual([ctx]);
+});
+
+it("J-3A1: checks the handle's own deadline before every read and every reply, closing 4001 at it even between renewal ticks", async () => {
+  let alive = true;
+  const f = await scopedFixture(async () => true, () => alive);
+  const socket = await f.dial(scoped());
+  request(socket.ws, "in-time");
+  await expect.poll(() => f.incoming.map(frame => frame.t)).toEqual(["open", "frame"]);
+  const clientId = (f.incoming.find(frame => frame.t === "open") as { clientId: string }).clientId;
+  // The control plane's (shortened) deadline passed; no renewal tick or end push has run yet. The signed grant is still far from its own.
+  alive = false;
+  expect(await f.bridge.send({ t: "frame", clientId, frame: { type: "WORKSPACE_RESPONSE", requestId: "in-time" } } as never)).toBe(false);
+  expect(await closedWith(socket.ws)).toBe(4001);
+  const late = await f.dial(scoped());
+  await expect.poll(() => f.incoming.filter(frame => frame.t === "open").length).toBe(2);
+  request(late.ws, "expired-read");
+  expect(await closedWith(late.ws)).toBe(4001);
+  expect(f.incoming.filter(frame => frame.t === "frame")).toHaveLength(1);
 });
