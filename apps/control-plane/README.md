@@ -562,6 +562,30 @@ initiator, source and permission revisions, run, runtime digest and action.
 Changed authority or a stale approval refuses execution. Repeating a committed
 action with the same activation identity and approval is inert.
 
+Temporary operator roles may rotate between steps. A `v2:<16 hex digits>`
+target fingerprint binds the channel, actual database name, migration owner
+(`current_user`), and stable cluster route. For PlanetScale the route includes
+the direct host, port and branch suffix of the routed username; other
+PostgreSQL targets use the host, port and `pg_control_system().system_identifier`.
+The temporary login name is excluded. Planning refuses when the database
+identity cannot be read. The existing digest column stores the 16 hex digits;
+`prepared_snapshot.targetFingerprintVersion: 2` identifies this format.
+No credential or connection string is stored in either field.
+
+An older activation has no fingerprint version and was bound to its original
+login. Once that temporary role is deleted, use the recovery option only for
+`rollback`: inspect its existing `target_fingerprint`, then add
+`"legacyTargetFingerprint": "<the inspected 16 hex digits>"` to the original
+change document. Keep the exact activation, organization, workspace, operator,
+initiator, runtime and reason. Obtain and approve a fresh rollback plan under
+the current role. Recovery requires the completed provider Stop for the same
+generation, a stopped workspace, no worker bearer or transition, and no
+unretired execution context. Its approval and replay receipt also bind the
+current stable database identity. Recovery never rewrites the stored target,
+accepts a version-2 target, or enables `prepare` or `activate`. After rollback,
+prepare a new activation with a new id. An old prepared-only plan can instead
+be superseded by an ordinary new `prepare` while its lifecycle is idle.
+
 `prepare` preserves current execution, tokens and N-1 visibility. Existing
 workspaces need a version-2 seed journal before activation. If the journal is
 version 1, perform one ordinary Stop/Start on the current runtime while still

@@ -1,0 +1,9 @@
+{
+  "id": "cloud-execution-operator-role-rotation",
+  "kind": "replay",
+  "area": "control-plane",
+  "fixedBy": "pr:1047",
+  "symptom": "Deleting a temporary migration-owner login after prepare made every later activation or rollback refuse the same database because the target fingerprint included the ephemeral login name.",
+  "rule": "zstack-review and principles 1, 11 and 13 require operator approvals to bind the stable target across ordinary credential rotation, while a narrowly inspected legacy rollback keeps the completed Stop and retirement gates.",
+  "check": "pnpm --dir apps/control-plane exec vitest run src/cloud/execution/activation-role-rotation.integration.test.ts -t 'allows a newly authenticated migration-owner role'"
+}

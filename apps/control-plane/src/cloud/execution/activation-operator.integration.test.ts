@@ -69,7 +69,7 @@ database("owner-only execution activation plans", () => {
   it("binds exact target, identity, runtime, source and approval rather than accepting a stale plan", async () => {
     const plan = await manageCloudExecution(pool, input, options());
     await expect(manageCloudExecution(pool, input, { ...options(), execute: true, approval: "0".repeat(64) })).rejects.toThrow(/plan/i);
-    const target = new URL(url!); target.username = "another_owner";
+    const target = new URL(url!); target.hostname = "another-database.example.test";
     await expect(manageCloudExecution(pool, input, { ...options(), databaseUrl: target.toString(), execute: true, approval: plan.planSha256 })).rejects.toThrow(/plan/i);
     await expect(manageCloudExecution(pool, input, { ...options(), channel: "production" })).rejects.toThrow(/channel/i);
     await pool.query("UPDATE cloud_v2_workspaces SET base_branch='changed' WHERE id=$1", [f.workspace.id]);
@@ -142,7 +142,7 @@ database("owner-only execution activation plans", () => {
     await run("prepare");
     const snapshot = (await pool.query("SELECT prepared_snapshot FROM cloud_v2_execution_activations WHERE id=$1", [input.activationId])).rows[0].prepared_snapshot;
     expect(Object.keys(snapshot).sort()).toEqual(["accessEpoch", "bootId", "creatorUserId", "initiatorAccountRevision", "initiatorConnectionRevision",
-      "initiatorMemberCreatedAt", "initiatorMemberRevision", "initiatorUserId", "organizationId", "organizationRevision", "sandboxId", "sourceRevision", "state", "stopGeneration", "workspaceId"].sort());
+      "initiatorMemberCreatedAt", "initiatorMemberRevision", "initiatorUserId", "organizationId", "organizationRevision", "sandboxId", "sourceRevision", "state", "stopGeneration", "targetFingerprintVersion", "workspaceId"].sort());
     expect(JSON.stringify(snapshot)).not.toMatch(/synthetic-|token|secret|environment|\/home\//i);
     expect(Buffer.byteLength(JSON.stringify(snapshot))).toBeLessThan(4096);
   });

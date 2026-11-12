@@ -7,11 +7,13 @@ import { createMigrationPool } from "./db.js";
 import { SYSTEM_DATABASE_CONTEXT } from "./db-context.js";
 import { parseDatabaseTarget } from "./database-target.js";
 import { executionActivationDigest as hash, preparedExecutionSnapshot } from "./cloud/execution/activation-snapshot.js";
+import { executionActivationTarget } from "./cloud/execution/activation-target.js";
 
 const Change = z.object({ activationId: z.uuid(), action: z.enum(["prepare", "activate", "rollback"]),
   channel: z.enum(["development", "alpha", "beta", "production"]), organizationId: z.uuid(), workspaceId: z.uuid(),
   initiatorUserId: z.uuid(), operatorUserId: z.uuid(), runtimeSha256: z.string().regex(/^[a-f0-9]{64}$/),
-  reason: z.string().trim().min(16).max(512) }).strict();
+  reason: z.string().trim().min(16).max(512), legacyTargetFingerprint: z.string().regex(/^[a-f0-9]{16}$/).optional() }).strict()
+  .refine(input => input.legacyTargetFingerprint === undefined || input.action === "rollback");
 export type CloudExecutionChange = z.infer<typeof Change>;
 export const CLOUD_EXECUTION_ACTIVATION_LIMIT = 128;
 /** The application cannot insert plans or receipts. The operator must own the
@@ -23,9 +25,8 @@ export async function manageCloudExecution(pool: pg.Pool, raw: unknown,
   const input = parsed.data;
   if (input.channel !== options.channel) throw new Error("Execution deployment channel mismatch");
   const target = parseDatabaseTarget(options.databaseUrl);
-  const targetFingerprint = hash([input.channel,target.hostname,target.port,target.pathname,decodeURIComponent(target.username)]).slice(0,16);
-  const { action, ...identity } = input;
-  const requestHash = hash(identity), receiptHash = hash(input), reasonHash = hash(input.reason);
+  const { action, legacyTargetFingerprint, ...identity } = input;
+  const requestHash = hash(identity), reasonHash = hash(input.reason);
   const client = await pool.connect();
   try {
     await client.query(`BEGIN; SET LOCAL lock_timeout='5s'; SET LOCAL statement_timeout='15s'; ${SYSTEM_DATABASE_CONTEXT}`);
@@ -33,6 +34,9 @@ export async function manageCloudExecution(pool: pg.Pool, raw: unknown,
       current_user<>'zeros_app' AND bool_and(pg_get_userbyid(relowner)=current_user) AS allowed FROM pg_class
       WHERE oid IN ('cloud_v2_execution_activations'::regclass,'cloud_v2_execution_activation_receipts'::regclass)`)).rows[0];
     if (!owner?.allowed || owner.database !== decodeURIComponent(target.pathname.slice(1))) throw new Error("Execution activation requires the exact database migration owner");
+    const targetIdentity = await executionActivationTarget(client, target, owner, input.channel);
+    const targetFingerprint = targetIdentity.fingerprint;
+    const receiptHash = hash({ input, targetFingerprint });
     const accounts = (await client.query<{ id: string; auth_status: string; deleted_at: Date | null; staff_role: string | null; auth_revision: string }>(
       "SELECT id,auth_status,deleted_at,staff_role,auth_revision::text FROM users WHERE id=ANY($1::uuid[]) ORDER BY id FOR KEY SHARE",
       [[input.operatorUserId,input.initiatorUserId]])).rows;
@@ -41,7 +45,11 @@ export async function manageCloudExecution(pool: pg.Pool, raw: unknown,
     const workspace = (await client.query("SELECT * FROM cloud_v2_workspaces WHERE id=$1 AND org_id=$2 FOR UPDATE", [input.workspaceId,input.organizationId])).rows[0];
     if (!workspace) throw new Error("Execution plan workspace not found");
     const previous = (await client.query("SELECT * FROM cloud_v2_execution_activations WHERE id=$1 FOR UPDATE", [input.activationId])).rows[0];
-    if (previous && (previous.workspace_id !== input.workspaceId || previous.target_fingerprint !== targetFingerprint || previous.request_hash.toString("hex") !== requestHash))
+    const legacyRecovery = legacyTargetFingerprint !== undefined && previous &&
+      previous.prepared_snapshot.targetFingerprintVersion === undefined && previous.target_fingerprint === legacyTargetFingerprint;
+    if (legacyTargetFingerprint !== undefined && !legacyRecovery) throw new Error("Execution legacy rollback target did not match");
+    const sameTarget = previous?.prepared_snapshot.targetFingerprintVersion === targetIdentity.version && previous.target_fingerprint === targetIdentity.digest;
+    if (previous && (previous.workspace_id !== input.workspaceId || !sameTarget && !legacyRecovery || previous.request_hash.toString("hex") !== requestHash))
       throw new Error("Execution activation identifies another plan");
     const bootClean = { legacyMaterial: previous?.legacy_material ?? null, refusals: previous?.first_failed_refusals ?? null,
       seedJournal: previous?.first_failed_refusals?.includes("seed_journal_outdated") ? "outdated" as const : "unknown" as const };
@@ -52,7 +60,9 @@ export async function manageCloudExecution(pool: pg.Pool, raw: unknown,
       await client.query("ROLLBACK");
       return { state: options.execute ? "replayed" as const : "committed" as const, planSha256: receipt.approval_hash.toString("hex"), targetFingerprint, activationId: input.activationId, bootClean };
     }
-    const snapshot = action === "rollback" ? null : await preparedExecutionSnapshot(client, input.workspaceId, input.initiatorUserId);
+    // Version metadata fits the existing snapshot; the persisted digest keeps its original SQL constraint.
+    const snapshot = action === "rollback" ? null : { ...await preparedExecutionSnapshot(client, input.workspaceId, input.initiatorUserId),
+      targetFingerprintVersion: targetIdentity.version };
     const prepared = action === "prepare" ? (await client.query<{ id: string }>(
       "SELECT id FROM cloud_v2_execution_activations WHERE workspace_id=$1 AND phase='prepared'", [workspace.id])).rows[0] : undefined;
     if (action === "prepare") {
@@ -82,7 +92,7 @@ export async function manageCloudExecution(pool: pg.Pool, raw: unknown,
       await client.query(`INSERT INTO cloud_v2_execution_activations(id,workspace_id,org_id,initiator_user_id,operator_user_id,
         runtime_sha256,target_fingerprint,request_hash,reason_hash,prepared_snapshot)
         VALUES($1,$2,$3,$4,$5,$6,$7,decode($8,'hex'),decode($9,'hex'),$10)`, [input.activationId,workspace.id,input.organizationId,
-      input.initiatorUserId,input.operatorUserId,input.runtimeSha256,targetFingerprint,requestHash,reasonHash,snapshot]);
+      input.initiatorUserId,input.operatorUserId,input.runtimeSha256,targetIdentity.digest,requestHash,reasonHash,snapshot]);
       await client.query("UPDATE cloud_v2_workspaces SET execution_mode='prepared' WHERE id=$1", [workspace.id]);
     } else if (action === "activate") {
       const started = (await client.query(`UPDATE cloud_v2_workspaces SET execution_transition_id=$2,state='stopping',
