@@ -17,11 +17,10 @@ import { CloudExecutionClients } from "./clients.js";
 import { CloudExecutionBoots } from "./boots.js";
 import { CloudExecutionMaintenance } from "./maintenance.js";
 import { openExecution, sealExecution } from "./envelope.js";
+import { EXECUTION_LEASE_MS, EXECUTION_MINIMUM_LIFETIME_MS, assertExecutionLifetime } from "./lifetime.js";
 
-export const EXECUTION_LEASE_MS = 30_000;
-// Bootstrap requests a full 30 s observation; the source verifier may consume
-// up to 5 s before insertion and the final authority checks.
-export const BOOTSTRAP_MINIMUM_LIFETIME_MS = EXECUTION_LEASE_MS - 5_000;
+export { EXECUTION_LEASE_MS } from "./lifetime.js";
+export const BOOTSTRAP_MINIMUM_LIFETIME_MS = EXECUTION_MINIMUM_LIFETIME_MS;
 export type ExecutionWorker = { token: string; bootId: string };
 export type ExecutionWorkspace = { id: string; org_id: string; creator_user_id: string; repository: string; state: string;
   access_epoch: string; stop_generation: string; worker_boot_id: string; worker_token_hash: Buffer; execution_mode: string;
@@ -237,7 +236,7 @@ export class CloudExecutionContexts {
       return { workspace, prompt: await this.prompt(tx, workspace.id, input.userMessageId) };
     });
     if (!pending(initial.prompt.state)) return { dispatch: false as const, state: initial.prompt.state };
-    const proof = await this.deps.authority.admit(initial.workspace.id, initial.prompt.creator_user_id);
+    const proof = await this.deps.authority.admit(initial.workspace.id, initial.prompt.creator_user_id, { minimumSourceMs: EXECUTION_MINIMUM_LIFETIME_MS });
     const agent = await withSystemTx(this.pool, tx => this.agent(tx, initial.workspace.id, initial.prompt.chat_id, initial.prompt.payload!.agentId));
     let selection: ExecutionSelection;
     try { selection = (await this.deps.logins.select(initial.workspace.org_id, initial.prompt.creator_user_id, agent)).selection; }
@@ -286,14 +285,17 @@ export class CloudExecutionContexts {
       if (steer) {
         await this.assertContext(tx, active!, proof);
         await this.deps.logins.select(workspace.org_id, row.creator_user_id, active!.agent!, active!.selection!, tx);
+        active = await this.issueLease(tx, active!, proof);
         await tx.query(`UPDATE cloud_v2_prompt_outbox SET state='dispatching',dispatch_id=$3,execution_context_id=$4,execution_parent_context_id=$4,updated_at=clock_timestamp()
           WHERE workspace_id=$1 AND user_message_id=$2`, [workspace.id, row.user_message_id, input.dispatchId, active!.id]);
         await this.deps.authority.assert(proof, tx);
+        assertExecutionLifetime(active.expires_at.getTime());
         return this.begun(active!, "dispatching", true);
       }
       const generation = (BigInt(chat.acting_generation) + (chat.acting_user_id === row.creator_user_id ? 0n : 1n)).toString();
       if (BigInt(generation) < 1n || BigInt(generation) > 9223372036854775806n) throw actorChanged();
       const contextId = randomUUID();
+      assertExecutionLifetime(proof.until);
       const context = (await tx.query<ExecutionContext>(`INSERT INTO cloud_v2_execution_contexts(id,workspace_id,org_id,user_id,kind,chat_id,user_message_id,dispatch_id,
         generation,chat_epoch,access_epoch,stop_generation,worker_boot_id,worker_token_hash,authority,source_fingerprint,agent,selection,credential_id,
         sender_device_id,sender_registration_id,sender_binding_generation,expires_at)
@@ -307,6 +309,7 @@ export class CloudExecutionContexts {
         WHERE workspace_id=$1 AND user_message_id=$2`, [workspace.id, row.user_message_id, input.dispatchId, contextId]);
       await this.deps.logins.select(workspace.org_id, row.creator_user_id, agent, selection, tx);
       await this.deps.authority.assert(proof, tx);
+      assertExecutionLifetime(context.expires_at.getTime());
       return this.begun(context, "dispatching", false);
     });
   }
@@ -334,11 +337,27 @@ export class CloudExecutionContexts {
     return row;
   }
 
-  async admission(context: ExecutionContext): Promise<ExecutionAdmission> {
+  async admission(context: ExecutionContext, minimumSourceMs = 0): Promise<ExecutionAdmission> {
     if (!context.user_id || context.state !== "active" || context.expires_at.getTime() <= Date.now()) throw actorChanged();
-    const proof = await this.deps.authority.admit(context.workspace_id, context.user_id, { continuation: true });
+    const proof = await this.deps.authority.admit(context.workspace_id, context.user_id, { continuation: true, minimumSourceMs });
     await withSystemTx(this.pool, tx => this.assertContext(tx, context, proof));
     return proof;
+  }
+
+  /** A live context may renew under this newly checked proof before delivery;
+   * an expired or revoked context never reaches the deadline update. */
+  async issueLease(tx: Tx, context: ExecutionContext, proof: ExecutionAdmission): Promise<ExecutionContext> {
+    const current = await this.assertContext(tx, context, proof);
+    const ceiling = Math.min(proof.until, current.client_token_expires_at?.getTime() ?? Infinity);
+    assertExecutionLifetime(ceiling);
+    // A usable issued lease keeps its original deadline on material retries.
+    // Renew only when that original authority no longer covers the floor.
+    const until = current.expires_at.getTime() - Date.now() >= EXECUTION_MINIMUM_LIFETIME_MS
+      ? current.expires_at.getTime() : ceiling;
+    if (until !== current.expires_at.getTime()) await tx.query("UPDATE cloud_v2_execution_contexts SET expires_at=$2 WHERE id=$1", [current.id, new Date(until)]);
+    await this.assertContext(tx, current, proof);
+    assertExecutionLifetime(until);
+    return { ...current, expires_at: new Date(until) };
   }
 
   private async token(tx: Tx, context: ExecutionContext, kind: "api" | "proxy") {
@@ -365,7 +384,7 @@ export class CloudExecutionContexts {
       await dispatch(tx, current);
       return current;
     });
-    const proof = await this.admission(context);
+    const proof = await this.admission(context, EXECUTION_MINIMUM_LIFETIME_MS);
     const check = async (tx?: Tx) => {
       const read = async (value: Tx) => { await this.assertContext(value, context, proof); await dispatch(value, context); };
       await (tx ? read(tx) : withSystemTx(this.pool, read));
@@ -375,7 +394,8 @@ export class CloudExecutionContexts {
     const material = context.material ? null : await this.deps.material(context, check);
     await check();
     return withSystemTx(this.pool, async tx => {
-      const workspace = await this.worker(tx, identity, true), current = await this.context(tx, context.id, workspace.id, true);
+      const workspace = await this.worker(tx, identity, true);
+      let current = await this.context(tx, context.id, workspace.id, true);
       await check(tx);
       let value: Record<string, unknown>;
       if (current.material) value = openExecution(current.material, envelopeBinding(current), this.deps.keys) as Record<string, unknown>;
@@ -390,6 +410,7 @@ export class CloudExecutionContexts {
       }
       await this.deps.logins.select(current.org_id, current.user_id!, current.agent!, current.selection!, tx);
       await check(tx);
+      current = await this.issueLease(tx, current, proof);
       return CloudV2TurnLeaseSchema.parse({ ...value, expiresAt: current.expires_at.getTime() });
     });
   }
@@ -432,7 +453,7 @@ export class CloudExecutionContexts {
       if (existing && (existing.bootstrap_material_issued !== false || existing.retirement_id || existing.material !== null ||
         existing.expires_at.getTime() > Date.now() || existing.state !== "active" && existing.reason !== "expired" ||
         existing.authority.signature !== proof.person.signature || existing.source_fingerprint !== proof.source.fingerprint)) throw actorChanged();
-      if (proof.until - Date.now() < BOOTSTRAP_MINIMUM_LIFETIME_MS) throw executionUnavailable();
+      assertExecutionLifetime(proof.until);
       if (existing) {
         const deleted = await tx.query(`DELETE FROM cloud_v2_execution_contexts c WHERE c.id=$1
           AND NOT EXISTS(SELECT 1 FROM cloud_v2_execution_contexts child WHERE child.parent_context_id=c.id)
@@ -445,7 +466,7 @@ export class CloudExecutionContexts {
       [id, workspaceId, proof.person.organizationId, proof.person.userId, current.execution_intent_id, proof.person.accessEpoch, proof.person.stopGeneration,
         proof.person.bootId, proof.person.workerTokenHash, { signature: proof.person.signature }, proof.source.fingerprint, new Date(proof.until)]);
       await this.deps.authority.assert(proof, tx);
-      if (proof.until - Date.now() < BOOTSTRAP_MINIMUM_LIFETIME_MS) throw executionUnavailable();
+      assertExecutionLifetime(proof.until);
       return id;
     });
   }
@@ -458,12 +479,13 @@ export class CloudExecutionContexts {
       if (context.kind !== kind || kind === "client" && (!context.operation || context.operation === "terminal.create")) throw actorChanged();
       return context;
     });
-    const proof = await this.admission(context);
+    const proof = await this.admission(context, EXECUTION_MINIMUM_LIFETIME_MS);
     const check = async (tx?: Tx) => { await (tx ? this.assertContext(tx, context, proof) : withSystemTx(this.pool, value => this.assertContext(value, context, proof))); };
     const material = context.material ? null : await this.deps.material(context, check);
     await check();
     return withSystemTx(this.pool, async tx => {
-      const workspace = await this.worker(tx, identity, true), current = await this.context(tx, id, workspace.id, true);
+      const workspace = await this.worker(tx, identity, true);
+      let current = await this.context(tx, id, workspace.id, true);
       await check(tx);
       const value = current.material ? openExecution(current.material, envelopeBinding(current), this.deps.keys) as Record<string, unknown> :
         { contextId: current.id, userId: current.user_id, gitIdentity: material!.gitIdentity,
@@ -473,6 +495,7 @@ export class CloudExecutionContexts {
             ? { api: { url: this.deps.apiUrl, token: await this.token(tx, current, "api") } } : {}) };
       if (!current.material) await tx.query("UPDATE cloud_v2_execution_contexts SET material=$2 WHERE id=$1", [id, sealExecution(value, envelopeBinding(current), this.deps.keys)]);
       await check(tx);
+      current = await this.issueLease(tx, current, proof);
       return (kind === "bootstrap" ? CloudV2BootstrapLeaseSchema : kind === "terminal" ? CloudV2TerminalLeaseSchema : CloudV2ClientLeaseSchema).parse({ ...value, expiresAt: current.expires_at.getTime() });
     });
   }
@@ -524,7 +547,7 @@ export class CloudExecutionContexts {
       if (row.expires_at.getTime() <= started) { refused.set(id, "expired"); continue; }
       if (initial.workspace.state === "stopping") { refused.set(id, "cancelled"); continue; }
       try {
-        const proof = await this.admission(row);
+        const proof = await this.admission(row, EXECUTION_MINIMUM_LIFETIME_MS);
         if (row.agent && row.selection) await this.deps.logins.select(row.org_id, row.user_id!, row.agent, row.selection);
         await withSystemTx(this.pool, tx => this.assertContext(tx, row, proof));
         proofs.set(id, proof);
@@ -548,9 +571,10 @@ export class CloudExecutionContexts {
               await this.assertContext(tx, row, proof);
               if (row.agent && row.selection) await this.deps.logins.select(row.org_id, row.user_id!, row.agent, row.selection, tx);
               const until = Math.min(started + EXECUTION_LEASE_MS, proof.until, row.client_token_expires_at?.getTime() ?? Infinity);
-              if (until <= Date.now()) throw executionUnavailable();
+              assertExecutionLifetime(until);
               await tx.query("UPDATE cloud_v2_execution_contexts SET expires_at=$2 WHERE id=$1", [id, new Date(until)]);
               await this.assertContext(tx, row, proof);
+              assertExecutionLifetime(until);
               leases.push({ contextId: id, expiresAt: until });
               continue;
             }

@@ -321,7 +321,7 @@ export class CloudV2SourceAuthority {
       return observation(value!, value!.verifiedAt! + freshness);
     }
     const grace = continuation && value?.verifiedAt !== null && value?.verifiedAt !== undefined &&
-      value.verifiedAt + CLOUD_SOURCE_GRACE_MS > this.now() && (!value.failure || isGithubTemporary(value.failure));
+      value.verifiedAt + CLOUD_SOURCE_GRACE_MS - minimumRemainingMs > this.now() && (!value.failure || isGithubTemporary(value.failure));
     if (value?.failure && value.retryAt > this.now()) {
       if (grace) return observation(value, value.retryAt);
       throw value.failure;

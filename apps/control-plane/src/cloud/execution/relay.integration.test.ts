@@ -80,12 +80,21 @@ database("activated relay authority through real sockets, routes and PostgreSQL"
   });
 
   it("ends a desktop connection cleanly at token end and keeps its terminal for the same person", async () => {
-    f.viewer.authentication.tokenExpiresAt = Math.floor(Date.now() / 1000) + 5;
+    f.viewer.authentication.tokenExpiresAt = Math.floor(Date.now() / 1000) + 29;
+    let tokenDeadline: { end: () => void; at: number } | undefined;
+    const timeout = globalThis.setTimeout;
+    vi.spyOn(globalThis, "setTimeout").mockImplementation(((callback: () => void, ms: number, ...args: unknown[]) => {
+      if (ms >= 25_000 && ms <= 28_000) tokenDeadline = { end: callback, at: Date.now() + ms };
+      return timeout(callback, ms, ...args);
+    }) as typeof setTimeout);
     const { ws, open } = await connect(), ending = closed(ws);
     ws.send(JSON.stringify({ type: "PTY_CREATE", id: "terminal-open", sessionId: "terminal" }));
     await expect.poll(() => frames.some(value => value.t === "frame" && value.frame.id === "terminal-open")).toBe(true);
     const result = await f.worker("terminal-lease", { clientId: open.clientId, requestId: "terminal-open", terminalId: "terminal" });
     expect(result.status).toBe(200); const terminal = await result.json();
+    expect(tokenDeadline).toBeDefined();
+    vi.spyOn(Date, "now").mockReturnValue(tokenDeadline!.at);
+    tokenDeadline!.end();
     expect(await ending).toEqual({ code: 1000, reason: "token_end" });
     f.viewer.authentication.tokenExpiresAt += 300;
     const next = await connect();

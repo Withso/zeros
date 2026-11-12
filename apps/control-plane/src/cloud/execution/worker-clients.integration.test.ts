@@ -435,8 +435,9 @@ database("real acting-user worker clients against HTTP routes and PostgreSQL", (
         clock.mockReturnValue(started + cycle * 10_000);
         const count = calls.filter(call => call.path.endsWith("/renew")).length;
         tick!();
-        await expect.poll(() => calls.filter(call => call.path.endsWith("/renew") && call.status !== undefined).length).toBe(count + 1);
-        expect(calls.at(-1)!.reply.leases).toEqual([{ contextId: handle.contextId, expiresAt: started + cycle * 10_000 + 30_000 }]);
+        const completed = () => calls.filter(call => call.path.endsWith("/renew") && call.reply !== undefined);
+        await expect.poll(() => completed().length).toBe(count + 1);
+        expect(completed().at(-1)!.reply.leases).toEqual([{ contextId: handle.contextId, expiresAt: started + cycle * 10_000 + 30_000 }]);
       }
       await expect(f.cp.execution.clients.current(f.workspace.id, handle.contextId)).resolves.toMatchObject({ context: { user_id: f.viewer.id } });
       await f.cp.execution.clients.close(f.workspace.id, clientId);
