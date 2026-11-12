@@ -88,8 +88,11 @@ export async function runTeamSharingSmoke({ page, harnessBase, check }) {
       await expect(bar).toHaveText("Read only. Alex Rivera runs this workspace.");
       expect(await color(bar.locator("p"), "color")).toBe(await token("--fg2"));
       const follow = reader.getByRole("button", { name: "Follow" });
-      await follow.focus();
-      expect(await follow.evaluate(node => node.matches(":focus-visible"))).toBe(true);
+      // The header re-renders when a presence event lands; focus and its ring are checked together until they hold.
+      await expect(async () => {
+        await follow.focus();
+        expect(await follow.evaluate(node => node.matches(":focus-visible"))).toBe(true);
+      }).toPass({ timeout: 5_000 });
       await page.keyboard.press("Enter");
       await expect(reader.getByRole("button", { name: "Following" })).toHaveAttribute("aria-pressed", "true");
       const pin = reader.getByRole("button", { name: "Pin workspace" });
