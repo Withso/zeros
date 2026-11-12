@@ -595,6 +595,29 @@ describe("WorkOS desktop multi-account sessions", () => {
       expect(parseStoredTokenSnapshot(mocks.raw)?.tokens).toMatchObject({ refreshToken: "refresh-next" });
     });
 
+    it("refreshes again after a quit that was aborted (the update failed to install)", async () => {
+      const { resumeAfterAbortedQuit } = await import("../quit-barrier");
+      await install(Date.now() - 1);
+      await drainAuthRefreshForQuit();
+      resumeAfterAbortedQuit();
+      mocks.refresh.mockResolvedValue(rotated());
+      await expect(getValidSessionForMain()).resolves.toMatchObject({ accessToken: "access-next" });
+      expect(mocks.refresh).toHaveBeenCalledTimes(1);
+    });
+
+    it("refreshes again when the app is still running well after a quit began", async () => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      try {
+        await install(Date.now() - 1);
+        await drainAuthRefreshForQuit(10_000, 30_000);
+        await expect(getValidSessionForMain()).resolves.toBeNull();
+        expect(mocks.refresh).not.toHaveBeenCalled();
+        vi.advanceTimersByTime(30_000);
+        mocks.refresh.mockResolvedValue(rotated());
+        await expect(getValidSessionForMain()).resolves.toMatchObject({ accessToken: "access-next" });
+      } finally { vi.useRealTimers(); }
+    });
+
     it("lets the quit proceed when the refresh outlasts its bound", async () => {
       await install(Date.now() - 1);
       mocks.refresh.mockReturnValue(new Promise(() => {}));

@@ -82,6 +82,18 @@ describe("update restart relaunch guard", () => {
     resetQuitBarrierForTests();
   });
 
+  it("tells the quit steps their quit was aborted when the install cannot start", async () => {
+    const { holdQuitFor, resetQuitBarrierForTests } = await import("../quit-barrier");
+    resetQuitBarrierForTests();
+    const resumed = vi.fn();
+    holdQuitFor(async () => {}, resumed);
+    mocks.updater.quitAndInstall.mockImplementationOnce(() => { throw new Error("install failed"); });
+    const updater = await stagedUpdater();
+    expect(updater.installStagedUpdate()).toBe(true);
+    await vi.waitFor(() => expect(resumed).toHaveBeenCalledTimes(1));
+    resetQuitBarrierForTests();
+  });
+
   it("keeps one guard across repeated restart requests", async () => {
     const updater = await stagedUpdater();
 

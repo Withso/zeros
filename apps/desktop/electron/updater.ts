@@ -1,4 +1,4 @@
-import { runQuitSteps } from "./quit-barrier";
+import { resumeAfterAbortedQuit, runQuitSteps } from "./quit-barrier";
 // electron-updater consumes ZIPs and channel metadata; DMGs are for initial installs.
 
 import {
@@ -500,6 +500,8 @@ function applyAndRelaunch(): void {
         if (relaunchGuard === guard) relaunchGuard = null;
       }
       console.warn("[updater] quitAndInstall failed:", err);
+      // The app keeps running: what paused for this quit (a sign-in refresh) resumes.
+      resumeAfterAbortedQuit();
       publish({
         kind: "error",
         message: err instanceof Error ? err.message : String(err),

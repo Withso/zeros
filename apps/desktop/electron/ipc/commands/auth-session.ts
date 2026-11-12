@@ -265,12 +265,18 @@ let inFlightRefresh: Promise<RefreshOutcome> | null = null;
 /** Set once the app starts quitting: a refresh begun now could rotate the
  * refresh token at the provider and exit before storing the new one. */
 let quitting = false;
+let quitResumeTimer: ReturnType<typeof setTimeout> | undefined;
 const QUIT_REFRESH_BOUND_MS = 10_000;
+/** Still running this long after a quit began: that quit was aborted (e.g. Squirrel failed after it started). */
+const QUIT_ABORT_RESUME_MS = 30_000;
 
 /** Quit (Cmd-Q, a script's quit, or an update relaunch) waits, bounded, for a
  * refresh in flight to store its rotated refresh token; no new refresh starts. */
-export function drainAuthRefreshForQuit(boundMs = QUIT_REFRESH_BOUND_MS): Promise<void> {
+export function drainAuthRefreshForQuit(boundMs = QUIT_REFRESH_BOUND_MS, resumeAfterMs = QUIT_ABORT_RESUME_MS): Promise<void> {
   quitting = true;
+  clearTimeout(quitResumeTimer);
+  quitResumeTimer = setTimeout(resumeAuthAfterAbortedQuit, resumeAfterMs);
+  quitResumeTimer.unref?.();
   const flight = inFlightRefresh;
   if (!flight) return Promise.resolve();
   return new Promise<void>(resolve => {
@@ -280,10 +286,13 @@ export function drainAuthRefreshForQuit(boundMs = QUIT_REFRESH_BOUND_MS): Promis
   });
 }
 
-export function resetAuthQuitForTests(): void { quitting = false; }
+/** The quit did not happen: refresh normally again, or the session would end at access-token expiry. */
+function resumeAuthAfterAbortedQuit(): void { quitting = false; clearTimeout(quitResumeTimer); quitResumeTimer = undefined; }
 
-// Every quit path (main's before-quit, the updater's install) awaits this.
-holdQuitFor(() => drainAuthRefreshForQuit());
+export function resetAuthQuitForTests(): void { resumeAuthAfterAbortedQuit(); }
+
+// Every quit path (main's before-quit, the updater's install) awaits this; an aborted quit resumes refreshing.
+holdQuitFor(() => drainAuthRefreshForQuit(), resumeAuthAfterAbortedQuit);
 
 function refreshOnce(): Promise<RefreshOutcome> {
   // Quitting: keep the stored session as it is (transient), and send nothing that could rotate it.
