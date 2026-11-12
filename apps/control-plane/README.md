@@ -686,6 +686,18 @@ the marker at session scope or through connection options on a pooled backend.
 Already-started external work is not retroactively revoked; provider-confirmed
 Stop and the new boot's cleanup separate it from new execution.
 
+An activated boot gets a new 30-second source observation when the cached
+observation cannot cover a full lease. Bootstrap insertion requires at least
+25 seconds left after admission and its final checks; slow verification fails
+without creating a short-lived context. Config retries keep a live pending id,
+replace an expired never-delivered id under fresh authority, and omit the id
+after material delivery or retirement. They never extend the original proof
+or revive an explicitly revoked context. Migration
+`0242_cloud_bootstrap_material.sql` records bootstrap material delivery for
+both current and older writers and retains that receipt through erasure.
+Historical rows whose delivery is unknown cannot be replaced. GitHub token
+delivery follows the material lease, so a new bootstrap id alone grants none.
+
 ## Optional feedback destinations
 
 The desktop posts authenticated reports to `POST /v1/feedback` on this service.

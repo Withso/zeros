@@ -32,6 +32,7 @@ import { pathToFileURL } from "node:url";
 export const CONTROL_PLANE_DATABASE_INPUTS = Object.freeze([
   // The service: source, tests, migrations, lockfile and Vitest config.
   "apps/control-plane/",
+  "scripts/migration-expand-exceptions.ts",
   // Contract parity tests and the shared model catalog.
   "packages/protocol/",
   "catalogs/models-v1.json",

@@ -2,6 +2,9 @@ import { createHash } from "node:crypto";
 
 // Each reviewed migration lists its exact exempted statements by rule.
 const reviewed: Readonly<Record<string, Readonly<Record<string, readonly string[]>>>> = {
+  "0242_cloud_bootstrap_material.sql": {
+    "privilege-tightening": ["REVOKE ALL ON FUNCTION capture_cloud_bootstrap_material() FROM PUBLIC;"],
+  },
   "0240_cloud_execution_activation.sql": {},
   "0239_cloud_execution_contexts.sql": {},
   "0237_cloud_sync_wanted.sql": {
