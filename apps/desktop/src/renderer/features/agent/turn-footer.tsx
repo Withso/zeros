@@ -742,6 +742,7 @@ export const TurnFooter = memo(function TurnFooter({
       {settledFailure.card && (
         <TurnFailureCard
           failure={settledFailure.card}
+          folder={folder}
           onRetry={!readOnly && (isLastTurn || durablePrompt) ? onRetry : undefined}
           onRetryNewChat={!readOnly && isLastTurn ? onRetryNewChat : undefined}
           onRetryNewChatIntent={onRetryNewChatIntent}

@@ -18,7 +18,7 @@ it("posts slice B context routes with the worker credential and boot, reads the 
     if (path === "hello" || path === "config") return Response.json({ config });
     if (path === "activity") return Response.json({ state: "running", loginRevision: "0" });
     if (path === "turn-lease") { posts.push({ path, headers: new Headers(init?.headers), body: JSON.parse(String(init?.body)) });
-      return Response.json({ error: { code: "agent_login_required", agent: "claude", message: "PRIVATE_DETAIL" } }, { status: 409 }); }
+      return Response.json({ error: { code: "agent_login_required", agent: "claude", loginRequiredFrom: "creator", message: "PRIVATE_DETAIL" } }, { status: 409 }); }
     if (path === "execution-leases/renew") return Response.json({ leases: [] });
     return Response.json({ prompts: [], stops: [] });
   };
@@ -27,7 +27,7 @@ it("posts slice B context routes with the worker credential and boot, reads the 
   transport.start({ open: async () => {}, close: () => {}, frame: async () => {} });
   cleanups.push(async () => { await transport.dispose(); await rm(directory, { recursive: true, force: true }); });
   const error = await transport.contextRequest("turn-lease", { contextId: "c" }).catch(value => value as { status: number; contextCode?: string; agent?: string; message: string });
-  expect(error).toMatchObject({ status: 409, contextCode: "agent_login_required", agent: "claude" });
+  expect(error).toMatchObject({ status: 409, contextCode: "agent_login_required", agent: "claude", loginRequiredFrom: "creator" });
   expect(JSON.stringify(error)).not.toContain("PRIVATE_DETAIL");
   expect(posts[0]!.headers.get("authorization")).toBe("Bearer synthetic-worker-token");
   expect(posts[0]!.headers.get("x-zeros-worker-boot")).toBe(transport.bootId);

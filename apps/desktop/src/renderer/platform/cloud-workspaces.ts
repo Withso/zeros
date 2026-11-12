@@ -107,7 +107,8 @@ export async function cloudAccountRequest<T>(
       throw new CloudWorkspaceReadOnlyError();
     }
     const error = z
-      .object({ error: z.object({ code: z.string(), message: z.string(), agent: z.enum(["claude", "codex", "cursor"]).optional().catch(undefined) }) })
+      .object({ error: z.object({ code: z.string(), message: z.string(), agent: z.enum(["claude", "codex", "cursor"]).optional().catch(undefined),
+        loginRequiredFrom: z.enum(["self", "creator"]).optional().catch(undefined) }) })
       .safeParse(body);
     throw new ControlPlaneError(
       response.status,
@@ -116,6 +117,7 @@ export async function cloudAccountRequest<T>(
         ? error.data.error.message
         : "Cloud workspaces are temporarily unavailable",
       error.success ? error.data.error.agent : undefined,
+      error.success ? error.data.error.loginRequiredFrom : undefined,
     );
   }
   return schema.parse(body);

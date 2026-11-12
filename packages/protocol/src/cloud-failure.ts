@@ -3,8 +3,12 @@ import { z } from "zod";
 export const CloudProviderFailureSchema = z.object({
   source: z.literal("provider"),
   provider: z.enum(["claude", "codex", "cursor"]),
-  reason: z.enum(["auth-required", "verification-required", "credentials-unavailable", "rate-limited", "session-expired", "model-unavailable", "provider-unavailable"]),
+  reason: z.enum(["auth-required", "verification-required", "credentials-unavailable", "rate-limited", "session-expired", "model-unavailable", "provider-unavailable",
+    /** Creator pays: an organization cloud workspace with no (eligible) Creator runs no turns until an admin reassigns it. */
+    "creator-required"]),
   retryAt: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
+  /** Creator pays: whose agent login is missing. Absent from an older control plane (then the sender's, as before). */
+  loginRequiredFrom: z.enum(["self", "creator"]).optional(),
 }).strict();
 export const CloudMcpFailureSchema = z.object({
   source: z.literal("mcp"),
@@ -26,6 +30,7 @@ export function cloudFailureMessage(failure: CloudFailure): string {
     case "session-expired": return "The provider session is no longer available. Start a new session to continue.";
     case "model-unavailable": return "This model is unavailable for the provider account. Choose another model.";
     case "provider-unavailable": return "The provider could not be reached or is temporarily unavailable. Try again later.";
+    case "creator-required": return "This workspace has no Creator. An admin can reassign it.";
     case "sign-in-required": return "This MCP server requires sign-in. Connect the server to continue.";
     case "sign-in-refused": return "Access to this MCP server was refused. Check the server connection and account permissions.";
     case "server-error": return "The MCP server could not complete the request. Retry the server connection.";

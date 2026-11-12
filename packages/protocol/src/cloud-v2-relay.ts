@@ -50,6 +50,8 @@ const clientId = z.uuid();
 // ── Team sharing phase 2, slice B (team-sharing-2-wire.md "Slice B shapes") ──
 /** Worker feature: leases, contexts and per-person execution. Only an activated workspace's capable boot uses it. */
 export const ACTING_USER_FEATURE = "acting-user-v1";
+/** Creator pays: the worker parses an activated config's agentLogins (which agents the current Creator can run). */
+export const CREATOR_AGENT_LOGINS_FEATURE = "creator-agent-logins-v1";
 /** A decimal bigint string, 1..9223372036854775806, never a JSON number. */
 const GENERATION = /^[1-9][0-9]{0,18}$/;
 // The regex is checked again inside the refine: zod still runs a refine after a failed regex, and BigInt() throws on non-digits.
@@ -213,6 +215,9 @@ export const CloudV2ControlFrameSchema = z.discriminatedUnion("t", [
     actingUser: z.literal(1).optional(),
     /** The persisted create/start/restart/wake initiator's setup context (bootstrap lease). */
     bootstrapContextId: z.uuid().optional(),
+    /** Creator pays (creator-agent-logins-v1 only): the agents the CURRENT Creator has a selected login for, true-only and
+     * sparse, fenced by loginRevision. Presentation only, never a credential; {} is known-empty, absent is unknown. */
+    agentLogins: z.object({ claude: z.literal(true).optional(), codex: z.literal(true).optional(), cursor: z.literal(true).optional() }).strict().optional(),
     /** Sent only to workers advertising workspace-api-v1 whose workspace has
      * API access. The token is fixed for one VM run (create or wake until stop). */
     api: z.object({
@@ -340,4 +345,6 @@ export const CloudV2BootCleanRequestSchema = z.object({ retirementId: z.uuid(), 
 export const CloudV2BootCleanReplySchema = z.object({ retired: z.number().int().min(0) }).strict();
 /** Context refusal codes (409/403/503 bodies {error:{code,message,agent?}}). */
 export const CloudV2ContextErrorCodeSchema = z.enum(["actor_changed", "actor_busy", "worker_update_required", "workspace_stopping",
-  "agent_login_required", "member_access_revoked", "agent_credentials_unavailable", "execution_not_retired"]);
+  "agent_login_required", "member_access_revoked", "agent_credentials_unavailable", "execution_not_retired",
+  /** Creator pays: no (eligible) Creator, so no agent login can run this turn. */
+  "workspace_creator_required"]);

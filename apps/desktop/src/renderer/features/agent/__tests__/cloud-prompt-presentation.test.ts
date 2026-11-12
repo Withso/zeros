@@ -142,3 +142,15 @@ it("presents a shared workspace's agent-login refusal as the person's own provid
   expect(row.recoveryFailure).toEqual({ kind: "auth-required", message: "Connect your Claude account to send messages in this workspace.",
     cloud: { source: "provider", provider: "claude", reason: "auth-required" }, ownAccount: true });
 });
+
+it("Creator pays: a refusal for the Creator's login keeps Retry but is not the sender's own sign-in; no Creator is its own reason", () => {
+  const record = journal();
+  Object.assign(record.entries[0]!, { phase: "refused", failure: "The workspace's Creator needs to connect Claude before messages can run here.",
+    refusal: { code: "agent_login_required", agent: "claude", loginRequiredFrom: "creator" } });
+  expect(cloudPromptView(record, "ready").rows.find(value => value.id === "one")!.recoveryFailure).toEqual({ kind: "auth-required",
+    message: "The workspace's Creator needs to connect Claude before messages can run here.",
+    cloud: { source: "provider", provider: "claude", reason: "auth-required", loginRequiredFrom: "creator" } });
+  Object.assign(record.entries[0]!, { failure: "This workspace has no Creator. An admin can reassign it.", refusal: { code: "workspace_creator_required" } });
+  expect(cloudPromptView(record, "ready").rows.find(value => value.id === "one")!.recoveryFailure).toEqual({ kind: "creator-required",
+    message: "This workspace has no Creator. An admin can reassign it." });
+});

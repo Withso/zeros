@@ -16,8 +16,9 @@ export interface PromptJournalEntry {
   receipt?: CloudV2PromptReceipt;
   state?: CloudV2PromptState;
   failure?: string;
-  /** Team sharing: the control plane refused this message because its sender has no login of their own for the chat's agent. */
-  refusal?: { code: "agent_login_required"; agent: "claude" | "codex" | "cursor" };
+  /** Team sharing: the control plane refused this message for a missing agent login. Creator pays: loginRequiredFrom names
+   * whose (absent from an older control plane: the sender's own); workspace_creator_required means there is no Creator. */
+  refusal?: { code: "agent_login_required"; agent: "claude" | "codex" | "cursor"; loginRequiredFrom?: "self" | "creator" } | { code: "workspace_creator_required" };
   cancelRequested?: boolean;
   /** Client-only feedback; never used to admit, retry or retire delivery. */
   presentation?: CloudTurnPresentation;
@@ -47,12 +48,20 @@ const refusal = (error: unknown) => [401, 403].includes(httpStatus(error))
   ? "This message wasn't sent. Check your cloud access and retry."
   : "This message wasn't accepted. Retry to send it again.";
 const AGENT_NAMES = { claude: "Claude", codex: "Codex", cursor: "Cursor" } as const;
-/** 409 agent_login_required (team sharing): never inboxed; the sender connects their own account. */
+/** 409 agent_login_required (never inboxed): the sender connects their own account, or (Creator pays) the Creator must.
+ * 409 workspace_creator_required: no Creator, so an admin reassigns it. */
 const ownAccountRefusal = (error: unknown): PromptJournalEntry["refusal"] => {
-  const value = error as { status?: unknown; code?: unknown; agent?: unknown } | null;
+  const value = error as { status?: unknown; code?: unknown; agent?: unknown; loginRequiredFrom?: unknown } | null;
+  if (value?.status === 409 && value.code === "workspace_creator_required") return { code: "workspace_creator_required" };
   return value && value.status === 409 && value.code === "agent_login_required" && (value.agent === "claude" || value.agent === "codex" || value.agent === "cursor")
-    ? { code: "agent_login_required", agent: value.agent } : undefined;
+    ? { code: "agent_login_required", agent: value.agent, ...(value.loginRequiredFrom === "self" || value.loginRequiredFrom === "creator" ? { loginRequiredFrom: value.loginRequiredFrom } : {}) }
+    : undefined;
 };
+/** The refusal's stored copy. The Creator's name is filled in where the workspace and roster are known (turnFailureDisplay). */
+const refusalCopy = (value: NonNullable<PromptJournalEntry["refusal"]>): string =>
+  value.code === "workspace_creator_required" ? "This workspace has no Creator. An admin can reassign it."
+    : value.loginRequiredFrom === "creator" ? `The workspace's Creator needs to connect ${AGENT_NAMES[value.agent]} before messages can run here.`
+      : `Connect your ${AGENT_NAMES[value.agent]} account to send messages in this workspace.`;
 const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
 
 /** One exact account/workspace/conversation. HTTPS receipt ownership is
@@ -188,7 +197,7 @@ export class CloudPromptChannel {
           if (!this.current()) return;
           await this.edit(record => ({ ...record, entries: record.entries.map(value => value.payload.userMessageId === id && !value.receipt
             ? { ...value, phase: definitive(error) ? "refused" : "uncertain", failure: ownAccountRefusal(error)
-              ? `Connect your ${AGENT_NAMES[ownAccountRefusal(error)!.agent]} account to send messages in this workspace.` : definitive(error) ? refusal(error)
+              ? refusalCopy(ownAccountRefusal(error)!) : definitive(error) ? refusal(error)
               : "Saved on this device. Delivery will resume when connected.", ...(ownAccountRefusal(error) ? { refusal: ownAccountRefusal(error) } : {}), updatedAt: Date.now() } : value) }));
           if (!definitive(error)) return;
         }
