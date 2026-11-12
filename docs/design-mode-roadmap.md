@@ -230,7 +230,8 @@ owner. Page switching cancels gestures, hover/marquee state, inline editors and
 frame-anchored menus; an inspector blur still commits to its captured original
 page. Background edits update that page's private view memory. Directory-level
 undo/redo reveals the affected frame's page and restores its selection while
-the submitting owner is still current. Page deletion prunes undo/redo entries
+the submitting owner is still current: the selection last made at the
+generation it returns to, the frame itself included. Page deletion prunes undo/redo entries
 and API sessions for that folder, including previously deleted frames. Permanent
 missing-page history errors drop the entry so older history remains usable;
 history cannot recreate a removed page's source.
@@ -2553,7 +2554,11 @@ source-generation checks remain in force on native resource reads.
 
 Only a successful private runtime handshake publishes a connection for canvas
 interaction. An incoming buffer keeps the outgoing ready connection until it
-connects. A changed engine capability starts a new frame session using the
+connects. When the frame returns to the generation still displayed before the
+swap (an undo straight after an edit), the incoming buffer is abandoned and the
+displayed document's retired connection takes the frame back; its runtime was
+never torn down, so the frame always ends with a live runtime for the
+generation it shows. A changed engine capability starts a new frame session using the
 current semantic generation, including after an in-place style adoption. A
 failed native handshake revalidates the workspace and hydrates that frame through
 the bounded, exact-version, sanitized bridge cache. Persistent failures offer

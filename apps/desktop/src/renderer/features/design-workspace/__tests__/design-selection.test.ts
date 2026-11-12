@@ -282,6 +282,19 @@ describe("design selection workflows", () => {
       expect(designWorkspaceView("workspace-a").selectedTargets).toEqual([{ frame: FRAME.file, nodeId: "button-copy" }]);
     });
 
+    it("brings back the frame itself when the frame was what was selected at that generation", () => {
+      show(BEFORE, ["button"]);
+      select("button");
+      // The person then selects the frame and changes it (a component option, say).
+      useDesignWorkspaceUiStore.getState().setSelection("workspace-a", FRAME.file, null, [], { frameSelected: true });
+      show(AFTER, ["button"]);
+      select("button");
+      beginDesignHistorySelection("workspace-a");
+      settleDesignHistorySelection("workspace-a", FRAME.file);
+      show(BEFORE, ["button"]);
+      expect(designWorkspaceView("workspace-a").selectedTargets).toEqual([{ frame: FRAME.file }]);
+    });
+
     it("restores when the frame's runtime reaches the generation before the engine's reply", () => {
       duplicate();
       beginDesignHistorySelection("workspace-a");
