@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { realpath } from "node:fs/promises";
 import path from "node:path";
 
@@ -5,8 +6,32 @@ import { parse, parseFragment, type DefaultTreeAdapterTypes } from "parse5";
 import { sharedDesignParse } from "./shared-parse";
 
 import { assertDesignComponentDefinitionIdentities, rebaseDesignCssReferences, rebaseDesignHtmlReferences } from "@zeros/design-web";
+import {
+  ComponentExpressionError,
+  componentExpressionScope,
+  componentOptionCss,
+  componentOptionValues,
+  componentInheritedValues,
+  readComponentDeclaration,
+  COMPONENT_VARIANT_ATTRIBUTE,
+  type ComponentDeclaration,
+  type ComponentDeclarationElement,
+  type ComponentOptionProblem,
+} from "@zeros/design-core/components";
 
+import { DESIGN_FRAME_INSTANCE_LIMITS, type DesignFrameInstances } from "@zeros/protocol/design-catalog";
+import { lastGoodDesignComponentRender, rememberDesignComponentRender } from "./component-last-good";
+import { designComponentRegistry } from "./component-registry";
+import {
+  ComponentTemplateError,
+  createComponentTemplateBudget,
+  designComponentSummaryOf,
+  renderComponentTemplate,
+  type ComponentTemplateBudget,
+  type DesignComponentSummary,
+} from "@zeros/design-web/component-template";
 import { designDirectoryNameFor } from "./directory-registry";
+import { readSharedCanvasContext } from "./document-storage";
 import { readSafeRegularFile } from "./safe-files";
 
 const MAX_COMPONENTS_PER_FRAME = 1_024;
@@ -38,18 +63,71 @@ interface ComponentDefinition {
   name: string;
   body: string;
   styles: string[];
+  /** Set for a component with options or a registered frame: its markup is
+   * a template and its inner layers carry data-zd-part. Absent for a plain
+   * components/<name>.html, which expands exactly as it always has. */
+  template?: {
+    /** Design-root-relative file the definition came from. */
+    file: string;
+    declaration: ComponentDeclaration;
+    /** The definition's own stylesheet links, as written in its file. */
+    links: string[];
+    /** What the Style panel shows for its instances; read on first use. */
+    summary?: () => DesignComponentSummary | null;
+  };
 }
+
+export type DesignComponentExpansionCode =
+  | "component-invalid"
+  | "component-option-invalid"
+  | "component-expression-invalid"
+  | "component-value-invalid";
 
 export interface DesignComponentExpansionError {
   component: string;
   message: string;
+  /** Set on diagnostics about options and templates; plain component
+   * diagnostics keep their original shape. */
+  code?: DesignComponentExpansionCode;
+  severity?: "error" | "warning";
+  /** The file the problem is in, when it is not the frame itself. */
+  file?: string;
+  /** Where in that file. */
+  offset?: number;
+  /** The line of `offset` in `file`, for a file the caller has not read. */
+  line?: number;
 }
 
 export interface DesignComponentExpansion {
   html: string;
   usedComponents: string[];
   errors: DesignComponentExpansionError[];
+  /** Some options could not be applied: an instance shows its defaults, or
+   * nothing when those fail too. Absent when every option applied. */
+  optionsFailed?: true;
 }
+
+export interface DesignComponentExpansionOptions {
+  /** Registered frame components, name to file; read from the canvas when absent. */
+  registry?: ReadonlyMap<string, string>;
+  /** The variant a main component frame shows. Personal view state. */
+  variant?: string | null;
+}
+
+/** What an expansion learned about the frame's own instances. */
+interface DesignComponentExpansionUsage {
+  templated: boolean;
+  /** Kept in Maps while a frame expands: layer ids and component names are
+   * authored text, and a plain object would take "__proto__" as its
+   * prototype. */
+  instances?: {
+    components: Map<string, DesignFrameInstances["components"][string]>;
+    hosts: Map<string, DesignFrameInstances["hosts"][string]>;
+  };
+}
+
+/** Names every object already answers to: never a key of a reported record. */
+const INHERITED_NAMES: ReadonlySet<string> = new Set(["__proto__", "constructor", "prototype"]);
 
 type ParentNode =
   | DefaultTreeAdapterTypes.Document
@@ -106,7 +184,8 @@ function referencedComponentNames(node: ParentNode): string[] {
 async function loadDefinitions(
   workspacePath: string,
   frameSource: string,
-  sources?: Readonly<Record<string, string>>,
+  sources: Readonly<Record<string, string>> | undefined,
+  registry: ReadonlyMap<string, string>,
 ): Promise<{
   definitions: Map<string, ComponentDefinition>;
   errors: DesignComponentExpansionError[];
@@ -117,16 +196,20 @@ async function loadDefinitions(
     ...designDirectoryNameFor(workspacePath).split("/"),
   );
   const directory = path.join(designRoot, "components");
-  let canonicalDirectory: string;
+  let canonicalDirectory: string | null;
   try {
     canonicalDirectory = sources ? directory : await realpath(directory);
   } catch {
+    canonicalDirectory = null;
+  }
+  let canonicalDesignRoot: string;
+  try {
+    canonicalDesignRoot = sources ? designRoot : await realpath(designRoot);
+  } catch {
     return { definitions: new Map(), errors };
   }
-  const canonicalDesignRoot = sources ? designRoot : await realpath(designRoot);
-  if (!canonicalDirectory.startsWith(`${canonicalDesignRoot}${path.sep}`)) {
-    return { definitions: new Map(), errors };
-  }
+  if (canonicalDirectory && !canonicalDirectory.startsWith(`${canonicalDesignRoot}${path.sep}`)) canonicalDirectory = null;
+  if (!canonicalDirectory && registry.size === 0) return { definitions: new Map(), errors };
 
   const frameDocument = sharedDesignParse(frameSource) ?? parse(frameSource);
   const pending = referencedComponentNames(frameDocument);
@@ -142,9 +225,29 @@ async function loadDefinitions(
       });
       break;
     }
-    const target = path.join(canonicalDirectory, `${name}.html`);
-    const captured = sources?.[`components/${name}.html`];
-    const safe = sources ? (captured === undefined ? null : { body: Buffer.from(captured), size: Buffer.byteLength(captured) }) : await readSafeRegularFile(canonicalDirectory, target, MAX_COMPONENT_BYTES);
+    const readSource = async (root: string | null, target: string, relative: string) => {
+      if (sources) {
+        const captured = sources[relative];
+        return captured === undefined ? null : { body: Buffer.from(captured), size: Buffer.byteLength(captured) };
+      }
+      return root ? readSafeRegularFile(root, target, MAX_COMPONENT_BYTES) : null;
+    };
+    const registered = registry.get(name);
+    const legacy = await readSource(canonicalDirectory, path.join(canonicalDirectory ?? directory, `${name}.html`), `components/${name}.html`);
+    if (registered && legacy) {
+      errors.push({
+        component: name,
+        code: "component-invalid",
+        message: `zd-${name} is both a registered frame (${registered}) and components/${name}.html; rename one.`,
+      });
+      continue;
+    }
+    const safe = registered ? await readSource(canonicalDesignRoot, path.join(canonicalDesignRoot, ...registered.split("/")), registered) : legacy;
+    if (registered && (!safe || safe.size > MAX_COMPONENT_BYTES)) {
+      errors.push({ component: name, code: "component-invalid", file: registered,
+        message: `The frame registered as zd-${name} (${registered}) could not be read or is over ${MAX_COMPONENT_BYTES / 1024} KiB.` });
+      continue;
+    }
     if (!safe || safe.size > MAX_COMPONENT_BYTES) continue;
     if (totalSourceBytes + safe.size > MAX_COMPONENT_SOURCE_BYTES_PER_FRAME) {
       errors.push({
@@ -185,6 +288,7 @@ async function loadDefinitions(
       });
     }
     if (
+      !registered &&
       elements(document).some((element) =>
         element.attrs.some((attribute) => attribute.name === "data-oid"),
       )
@@ -241,6 +345,20 @@ async function loadDefinitions(
     const styles = elements(document)
       .filter((element) => element.tagName === "style")
       .map((element) => innerSource(source, element));
+    const declared = declarationElementsOf(document);
+    if (registered || declared) {
+      const file = registered ?? `components/${name}.html`;
+      const read = readDeclaration(declared ?? [], name, file, errors, source);
+      let summary: DesignComponentSummary | null | undefined;
+      definitions.set(name, {
+        name,
+        body: body ? innerSource(source, body) : "",
+        styles,
+        template: { file, declaration: read, links: stylesheetLinksOf(document),
+          summary: () => (summary === undefined ? (summary = designComponentSummaryOf(source)) : summary) },
+      });
+      continue;
+    }
     // Keep the safe remainder previewable even when lint found an invalid
     // definition. The composed-frame sanitizer and CSP remain the rendering
     // boundary, while component-invalid stays a blocking save/PR diagnostic;
@@ -252,6 +370,69 @@ async function loadDefinitions(
     });
   }
   return { definitions, errors };
+}
+
+/** The <zd-option>, <zd-derive> and <zd-variant> lines of a file's
+ * <template data-zd-options>, or null when the file declares none. */
+function declarationElementsOf(document: ParentNode): (ComponentDeclarationElement & { nested: boolean })[] | null {
+  // Declared in <head> only, where the fast check looks.
+  const head = elements(document).find((element) => element.tagName === "head");
+  const template = head?.childNodes.find(
+    (child) => "tagName" in child && child.tagName === "template" && child.attrs.some((attribute) => attribute.name === "data-zd-options"),
+  ) as DefaultTreeAdapterTypes.Template | undefined;
+  if (!template) return null;
+  const declared: (ComponentDeclarationElement & { nested: boolean })[] = [];
+  const visit = (node: ParentNode, nested: boolean) => {
+    for (const child of node.childNodes) {
+      if (!("tagName" in child)) continue;
+      declared.push({
+        tag: child.tagName,
+        attributes: child.attrs.map((attribute) => ({ name: attribute.name, value: attribute.value })),
+        offset: child.sourceCodeLocation?.startOffset ?? 0,
+        nested,
+      });
+      if (declared.length > 1_024) throw new ComponentBudgetExceeded();
+      visit(child, true);
+    }
+  };
+  visit(template.content, false);
+  return declared;
+}
+
+const lineOf = (source: string, offset: number) => source.slice(0, offset).split("\n").length;
+
+function readDeclaration(
+  declared: readonly (ComponentDeclarationElement & { nested: boolean })[],
+  component: string,
+  file: string,
+  errors: DesignComponentExpansionError[],
+  source: string,
+): ComponentDeclaration {
+  const nested = declared.find((element) => element.nested);
+  if (nested) {
+    const parent = declared[declared.indexOf(nested) - 1];
+    errors.push({
+      component,
+      code: "component-option-invalid",
+      file,
+      offset: parent?.offset ?? nested.offset,
+      line: lineOf(source, parent?.offset ?? nested.offset),
+      message: `Close each <${parent?.tag ?? nested.tag}> with </${parent?.tag ?? nested.tag}>; it cannot hold other elements.`,
+    });
+  }
+  const { declaration, problems } = readComponentDeclaration(declared.filter((element) => !element.nested));
+  for (const problem of problems)
+    errors.push({ component, code: "component-option-invalid", file, message: problem.message,
+      ...(problem.offset !== undefined ? { offset: problem.offset, line: lineOf(source, problem.offset) } : {}), ...(problem.severity === "warning" ? { severity: "warning" as const } : {}) });
+  return declaration;
+}
+
+function stylesheetLinksOf(document: ParentNode): string[] {
+  return elements(document)
+    .filter((element) => element.tagName === "link" &&
+      element.attrs.some((attribute) => attribute.name === "rel" && attribute.value.split(/\s+/).some((part) => part.toLowerCase() === "stylesheet")))
+    .map((element) => element.attrs.find((attribute) => attribute.name === "href")?.value ?? "")
+    .filter((href) => href !== "" && !href.startsWith("/") && !/^[a-z][a-z0-9+.-]*:/i.test(href));
 }
 
 function hasComponentAncestor(
@@ -310,19 +491,37 @@ function injectComponentStyles(
   used: readonly string[],
   definitions: ReadonlyMap<string, ComponentDefinition>,
   budget: ExpansionBudget,
+  extra: { rules: readonly string[]; entryFile: string; entryLinks: readonly string[] } = { rules: [], entryFile: "", entryLinks: [] },
 ): string {
   let bytes = Buffer.byteLength(source);
   for (const name of used) for (const style of definitions.get(name)?.styles ?? []) {
     bytes += Buffer.byteLength(style) + Buffer.byteLength(name) + 40;
     budget.output(bytes);
   }
-  const styleMarkup = used
+  // A templated component's own stylesheets come along once each, rebased to
+  // the frame, unless the frame already links the same file.
+  const linked = new Set(extra.entryLinks.map((href) => resolveFrom(extra.entryFile, href)));
+  let linkMarkup = "";
+  for (const name of used) {
+    const template = definitions.get(name)?.template;
+    for (const href of template?.links ?? []) {
+      const target = resolveFrom(template!.file, href);
+      if (target.startsWith("../") || linked.has(target)) continue;
+      linked.add(target);
+      const rebased = posix.relative(posix.dirname(extra.entryFile || "x"), target) || posix.basename(target);
+      linkMarkup += `<link rel="stylesheet" href="${rebased.replace(/&/g, "&amp;").replace(/"/g, "&quot;")}" data-zeros-component="${name}">`;
+    }
+  }
+  const optionsMarkup = extra.rules.length ? `<style data-zeros-options>${extra.rules.join("\n")}</style>` : "";
+  bytes += Buffer.byteLength(linkMarkup) + Buffer.byteLength(optionsMarkup);
+  budget.output(bytes);
+  const styleMarkup = linkMarkup + used
     .flatMap((name) =>
       (definitions.get(name)?.styles ?? []).map(
         (style) => `<style data-zeros-component="${name}">${style}</style>`,
       ),
     )
-    .join("");
+    .join("") + optionsMarkup;
   if (!styleMarkup) return source;
   if (/<\/head\s*>/i.test(source)) {
     return source.replace(/<\/head\s*>/i, `${styleMarkup}</head>`);
@@ -335,49 +534,241 @@ export async function expandDesignComponents(
   source: string,
   sources?: Readonly<Record<string, string>>,
   entryFile = "",
+  options: DesignComponentExpansionOptions = {},
+  usage?: DesignComponentExpansionUsage,
 ): Promise<DesignComponentExpansion> {
   try {
     if (source.length > MAX_EXPANSION_BYTES || Buffer.byteLength(source) > MAX_EXPANSION_BYTES) throw new ComponentBudgetExceeded();
-    return await expandBoundedComponents(workspacePath, source, sources, entryFile);
+    return await expandBoundedComponents(workspacePath, source, sources, entryFile, options, usage);
   } catch (error) {
     if (!(error instanceof ComponentBudgetExceeded)) throw error;
     return { html: Buffer.byteLength(source) <= MAX_EXPANSION_BYTES ? source : "", usedComponents: [], errors: [{ component: "", message: error.message }] };
   }
 }
 
+/** A frame that declares options renders its own template; without that and
+ * without `<zd-` there is nothing to expand. */
+const DECLARES_OPTIONS_PATTERN = /<template\b[^>]*\sdata-zd-options\b/i;
+/** Options are declared in <head>, so only the head is searched: a frame
+ * without them pays a search that ends near the top of the file. */
+const DECLARES_OPTIONS = {
+  test: (source: string) => {
+    const end = source.search(/<\/head\b|<body\b/i);
+    return DECLARES_OPTIONS_PATTERN.test(end < 0 ? source : source.slice(0, end));
+  },
+};
+export const designSourceDeclaresOptions = (source: string) => DECLARES_OPTIONS.test(source);
+
 /** Expanded markup alone, for rendering. Element names come only from start
- * tags, so without `<zd-` there is no instance and expansion is the identity;
- * diagnostics such as the element budget need `expandDesignComponents`. */
+ * tags, so without `<zd-` (or a declaration of options) there is no instance
+ * and expansion is the identity; diagnostics such as the element budget need
+ * `expandDesignComponents`. */
 export async function expandDesignComponentsHtml(
   workspacePath: string,
   source: string,
   sources?: Readonly<Record<string, string>>,
   entryFile = "",
+  options: DesignComponentExpansionOptions = {},
 ): Promise<string> {
-  if (!/<zd-/i.test(source) && Buffer.byteLength(source) <= MAX_EXPANSION_BYTES) return source;
-  return (await expandDesignComponents(workspacePath, source, sources, entryFile)).html;
+  if (!/<zd-/i.test(source) && Buffer.byteLength(source) <= MAX_EXPANSION_BYTES && !DECLARES_OPTIONS.test(source)) return source;
+  return (await expandDesignComponents(workspacePath, source, sources, entryFile, options)).html;
+}
+
+/** What a frame renders when its component options do not all apply. */
+export interface DesignComponentOptionsFallback {
+  applied: false;
+  /** last-good: this session's last expansion whose options all applied.
+   * defaults: no such expansion; failing instances show their defaults. */
+  shows: "last-good" | "defaults";
+}
+
+/** Expansion for a frame render. A frame whose options do not all apply
+ * shows its last good expansion from this session when there is one, and
+ * says which it shows; `remember` records a good expansion for next time
+ * (a full render does, an identity-only read does not). */
+export async function expandDesignComponentsForRender(
+  workspacePath: string,
+  source: string,
+  sources: Readonly<Record<string, string>> | undefined,
+  entryFile: string,
+  options: DesignComponentExpansionOptions,
+  remember: boolean,
+): Promise<{ html: string; componentOptions?: DesignComponentOptionsFallback; instances?: DesignFrameInstances }> {
+  if (!/<zd-/i.test(source) && Buffer.byteLength(source) <= MAX_EXPANSION_BYTES && !DECLARES_OPTIONS.test(source)) return { html: source };
+  const usage: DesignComponentExpansionUsage = { templated: false };
+  const expansion = await expandDesignComponents(workspacePath, source, sources, entryFile, options, usage);
+  if (!usage.templated || !entryFile) return { html: expansion.html };
+  const instancesOf = (shows?: DesignComponentOptionsFallback["shows"]) => {
+    if (!usage.instances || usage.instances.hosts.size === 0) return {};
+    const record = {
+      components: Object.fromEntries(usage.instances.components),
+      hosts: Object.fromEntries(usage.instances.hosts),
+      ...(shows ? { notApplied: shows } : {}),
+    };
+    return { instances: { key: createHash("sha256").update(JSON.stringify(record)).digest("hex").slice(0, 16), ...record } };
+  };
+  if (!expansion.optionsFailed) {
+    // A variant is a view of the main, not its last good render.
+    if (remember && !options.variant) rememberDesignComponentRender(workspacePath, entryFile, expansion.html);
+    return { html: expansion.html, ...instancesOf() };
+  }
+  const lastGood = lastGoodDesignComponentRender(workspacePath, entryFile);
+  return lastGood === undefined
+    ? { html: expansion.html, componentOptions: { applied: false, shows: "defaults" }, ...instancesOf("defaults") }
+    : { html: lastGood, componentOptions: { applied: false, shows: "last-good" }, ...instancesOf("last-good") };
+}
+
+export { designComponentSummaryOf, type DesignComponentSummary } from "@zeros/design-web/component-template";
+
+/** The registered frame components: given, or read from the shared canvas. */
+async function registryFor(workspacePath: string, options: DesignComponentExpansionOptions): Promise<ReadonlyMap<string, string>> {
+  if (options.registry) return options.registry;
+  try {
+    return designComponentRegistry((await readSharedCanvasContext(workspacePath)).canvas).files;
+  } catch {
+    return new Map();
+  }
+}
+
+const posix = path.posix;
+const resolveFrom = (file: string, href: string) => posix.normalize(posix.join(posix.dirname(file), href.split(/[?#]/)[0]!));
+
+/** One expansion's options work: the template budget shared by every
+ * rendering, each instance's generated rule, and whether anything failed. */
+interface OptionsWork {
+  budget: ComponentTemplateBudget;
+  instances: number;
+  rules: string[];
+  failed: boolean;
+}
+
+function problemsToErrors(component: string, problems: readonly ComponentOptionProblem[], code: DesignComponentExpansionCode): DesignComponentExpansionError[] {
+  return problems.map((problem) => ({ component, code, message: problem.message, ...(problem.severity === "warning" ? { severity: "warning" as const } : {}) }));
+}
+
+const templateMessage = (error: unknown) =>
+  error instanceof ComponentTemplateError || error instanceof ComponentExpressionError ? error.message : null;
+
+/** Render a templated definition for one instance: its values, else its
+ * defaults, else nothing. Returns the markup and the instance's CSS. */
+function renderInstance(
+  definition: ComponentDefinition & { template: NonNullable<ComponentDefinition["template"]> },
+  attributes: ReadonlyMap<string, string>,
+  work: OptionsWork,
+  errors: DesignComponentExpansionError[],
+): { body: string; css: string; failed?: true } {
+  const { declaration } = definition.template;
+  const { values, problems } = componentOptionValues(declaration, attributes);
+  errors.push(...problemsToErrors(definition.name, problems, "component-value-invalid"));
+  const invalid = problems.some((problem) => problem.severity === "error");
+  if (invalid) work.failed = true;
+  const attempt = (chosen: ReadonlyMap<string, unknown>) => {
+    const holes = work.budget.holes;
+    try {
+      const scope = componentExpressionScope(declaration, chosen as never, work.budget.expression);
+      const body = renderComponentTemplate(definition.body, { scope, ids: "part", budget: work.budget });
+      return { body, css: componentOptionCss(declaration, chosen as never, scope) };
+    } finally {
+      // Holes are bounded per rendering; repeats and steps across the frame.
+      work.budget.holes = holes;
+    }
+  };
+  try {
+    return { ...attempt(values), ...(invalid ? { failed: true as const } : {}) };
+  } catch (error) {
+    const message = templateMessage(error);
+    if (message === null) throw error;
+    work.failed = true;
+    errors.push({ component: definition.name, code: "component-expression-invalid", message, file: definition.template.file });
+  }
+  const defaults = componentInheritedValues(declaration, null);
+  try {
+    return { ...attempt(defaults), failed: true };
+  } catch (error) {
+    if (templateMessage(error) === null) throw error;
+    return { body: "", css: componentOptionCss(declaration, defaults), failed: true };
+  }
+}
+
+/** The frame's own instances, for the Style panel: each host layer (its
+ * data-oid), its component and the option attributes it sets. */
+function recordInstance(
+  usage: DesignComponentExpansionUsage,
+  registry: ReadonlyMap<string, string>,
+  definition: ComponentDefinition & { template: NonNullable<ComponentDefinition["template"]> },
+  instance: DefaultTreeAdapterTypes.Element,
+  failed: boolean,
+): void {
+  const oid = instance.attrs.find((attribute) => attribute.name === "data-oid")?.value;
+  if (!oid || oid.length > 256 || INHERITED_NAMES.has(oid) || INHERITED_NAMES.has(definition.name)) return;
+  const record = usage.instances ??= { components: new Map(), hosts: new Map() };
+  if (record.hosts.size >= DESIGN_FRAME_INSTANCE_LIMITS.hosts) return;
+  const { declaration, file } = definition.template;
+  if (!record.components.has(definition.name)) {
+    if (record.components.size >= DESIGN_FRAME_INSTANCE_LIMITS.components) return;
+    const summary = definition.template.summary?.() ?? null;
+    record.components.set(definition.name, { elements: summary?.elements ?? [], reach: summary?.reach ?? {}, file,
+      frame: registry.get(definition.name) === file });
+  }
+  const names = new Set([...declaration.options.map((option) => option.name), COMPONENT_VARIANT_ATTRIBUTE]);
+  const attributes = new Map<string, string>();
+  for (const attribute of instance.attrs) {
+    if (!names.has(attribute.name)) continue;
+    // A value too long to report would mislead; the host shows no Options.
+    if (attribute.value.length > 2_048) return;
+    attributes.set(attribute.name, attribute.value);
+  }
+  record.hosts.set(oid, { component: definition.name, attributes: Object.fromEntries(attributes), ...(failed ? { failed: true as const } : {}) });
 }
 
 async function expandBoundedComponents(
   workspacePath: string, source: string, sources: Readonly<Record<string, string>> | undefined, entryFile: string,
+  options: DesignComponentExpansionOptions, usage?: DesignComponentExpansionUsage,
 ): Promise<DesignComponentExpansion> {
   const budget = new ExpansionBudget();
-  const loaded = await loadDefinitions(workspacePath, source, sources);
+  const registry = /<zd-/i.test(source) ? await registryFor(workspacePath, options) : new Map<string, string>();
+  const loaded = await loadDefinitions(workspacePath, source, sources, registry);
   const definitions = loaded.definitions;
   // Existing definitions use Design-root URL origins. Rebase only definition
   // markup/styles; frame-authored slot children keep the entry file's origin.
-  if (entryFile.includes("/")) {
-    for (const definition of definitions.values()) {
-      try {
-        definition.body = rebaseDesignHtmlReferences(definition.body, "", entryFile);
-        definition.styles = definition.styles.map((style) => rebaseDesignCssReferences(style, "", entryFile));
-      } catch {
-        loaded.errors.push({ component: definition.name, message: "Component URLs could not be prepared; repair its authored HTML/CSS." });
-      }
+  // A registered frame's references are relative to its own file.
+  for (const definition of definitions.values()) {
+    const from = definition.template && registry.get(definition.name) === definition.template.file ? definition.template.file : "";
+    if (from ? posix.dirname(from) === posix.dirname(entryFile || from) : !entryFile.includes("/")) continue;
+    try {
+      definition.body = rebaseDesignHtmlReferences(definition.body, from, entryFile);
+      definition.styles = definition.styles.map((style) => rebaseDesignCssReferences(style, from, entryFile));
+    } catch {
+      loaded.errors.push({ component: definition.name, message: "Component URLs could not be prepared; repair its authored HTML/CSS." });
     }
   }
   const used = new Set<string>();
   const errors: DesignComponentExpansionError[] = [];
+  const work: OptionsWork = { budget: createComponentTemplateBudget(), instances: 0, rules: [], failed: false };
+
+  // A main component frame renders its own template first, with its defaults
+  // or the variant it shows; its instances then expand inside the result.
+  let entry = source;
+  const entryDeclared = DECLARES_OPTIONS.test(source) ? declarationElementsOf(parse(source, { sourceCodeLocationInfo: true })) : null;
+  if (entryDeclared) {
+    const entryName = [...registry].find(([, file]) => file === entryFile)?.[0] ?? "";
+    const declaration = readDeclaration(entryDeclared, entryName, entryFile, errors, source);
+    const values = componentInheritedValues(declaration, options.variant ?? null);
+    try {
+      const scope = componentExpressionScope(declaration, values, work.budget.expression);
+      entry = renderComponentTemplate(source, { scope, ids: "copy", budget: work.budget, document: true });
+      const css = componentOptionCss(declaration, values, scope);
+      if (css) work.rules.push(`:root { ${css} }`);
+    } catch (error) {
+      const message = templateMessage(error);
+      if (message === null) throw error;
+      work.failed = true;
+      errors.push({ component: entryName, code: "component-expression-invalid", message, file: entryFile,
+        ...(error instanceof ComponentTemplateError && error.offset !== undefined ? { offset: error.offset, line: lineOf(source, error.offset) } : {}) });
+    }
+    budget.charge(entry.length);
+    budget.output(Buffer.byteLength(entry));
+  }
 
   const expand = (
     markup: string,
@@ -411,18 +802,31 @@ async function expandBoundedComponents(
         continue;
       }
       used.add(name);
-      const filled = fillSlots(definition.body, markup, instance, budget);
-      const expanded = expand(filled, [...stack, name], depth + 1);
       const location = instance.sourceCodeLocation!;
+      let startTag = location.startTag ? result.slice(location.startTag.startOffset, location.startTag.endOffset) : result.slice(location.startOffset, location.endOffset);
+      let filled: string;
+      if (definition.template) {
+        const attributes = new Map(instance.attrs.map((attribute) => [attribute.name, attribute.value]));
+        const templated = definition as ComponentDefinition & { template: NonNullable<ComponentDefinition["template"]> };
+        const rendered = renderInstance(templated, attributes, work, errors);
+        if (depth === 0 && usage) recordInstance(usage, registry, templated, instance, rendered.failed === true);
+        const id = String(++work.instances);
+        if (rendered.css) work.rules.push(`:where([data-zd-instance="${id}"]) { ${rendered.css} }`);
+        startTag = startTag.replace(/\s*\/?>$/, (end) => ` data-zd-instance="${id}"${end.trim() === "/>" ? " />" : ">"}`);
+        filled = rendered.body ? fillSlots(rendered.body, markup, instance, budget) : "";
+      } else {
+        filled = fillSlots(definition.body, markup, instance, budget);
+      }
+      const expanded = expand(filled, [...stack, name], depth + 1);
       budget.charge(result.length + expanded.length);
       // Charge construction before allocating; the exact output is checked below.
       budget.output(Buffer.byteLength(result) + Buffer.byteLength(expanded));
       if (location.startTag && location.endTag) {
-        result = `${result.slice(0, location.startTag.endOffset)}${expanded}${result.slice(location.endTag.startOffset)}`;
+        result = definition.template
+          ? `${result.slice(0, location.startTag.startOffset)}${startTag}${expanded}${result.slice(location.endTag.startOffset)}`
+          : `${result.slice(0, location.startTag.endOffset)}${expanded}${result.slice(location.endTag.startOffset)}`;
       } else {
-        const startTag = result
-          .slice(location.startOffset, location.endOffset)
-          .replace(/\/\s*>$/, ">");
+        startTag = (definition.template ? startTag : result.slice(location.startOffset, location.endOffset)).replace(/\/\s*>$/, ">");
         result = `${result.slice(0, location.startOffset)}${startTag}${expanded}</${instance.tagName}>${result.slice(location.endOffset)}`;
       }
       if (Buffer.byteLength(result, "utf8") > MAX_EXPANSION_BYTES) {
@@ -432,11 +836,16 @@ async function expandBoundedComponents(
     return result;
   };
 
+  const expandedEntry = expand(entry, [], 0);
+  if (usage) usage.templated = entryDeclared !== null || work.instances > 0;
+  const usedNames = [...used].sort();
+  const carriesLinks = usedNames.some((name) => definitions.get(name)?.template?.links.length);
   const html = injectComponentStyles(
-    expand(source, [], 0),
-    [...used].sort(),
+    expandedEntry,
+    usedNames,
     definitions,
     budget,
+    { rules: work.rules, entryFile, entryLinks: carriesLinks ? stylesheetLinksOf(parse(expandedEntry)) : [] },
   );
   return {
     html,
@@ -445,5 +854,6 @@ async function expandBoundedComponents(
     // graph. Keep nested diagnostics even when an ancestor is also invalid:
     // invalid definitions remain previewable and their safe remainder expands.
     errors: [...loaded.errors, ...errors].slice(0, MAX_COMPONENT_DIAGNOSTICS),
+    ...(work.failed ? { optionsFailed: true as const } : {}),
   };
 }

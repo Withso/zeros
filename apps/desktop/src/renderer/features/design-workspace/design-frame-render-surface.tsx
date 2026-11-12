@@ -23,6 +23,7 @@ import {
 } from "./state/design-frame-previews";
 import { useDesignRuntimeStore } from "./state/design-runtime-store";
 import { useDesignFramePreview } from "./state/use-design-frame-previews";
+import { useDesignShownComponentVariant } from "./state/design-component-variants";
 import { designImageResidency, type DesignImageLease } from "./state/design-image-residency";
 import { retainDesignResource } from "./state/design-resource-counters";
 import { useDesignImageDisplay, useDesignImageState } from "./state/use-design-image-display";
@@ -174,7 +175,10 @@ export const DesignFrameRenderSurface = React.memo(function DesignFrameRenderSur
   onSourceRetired?(file: string, version: string): void;
 }) {
   useLayoutEffect(() => retainDesignResource("frameSurfaces"), []);
-  const sourceOwner = `${workspaceId}\0${folder}\0${previewOwner?.directoryId ?? designDirectory ?? ""}\0${protocolCapability}\0${theme}`;
+  // A main component frame may show one of its variants: personal view state
+  // that its documents render under the source's own generation.
+  const variant = useDesignShownComponentVariant(workspaceId, frame);
+  const sourceOwner = `${workspaceId}\0${folder}\0${previewOwner?.directoryId ?? designDirectory ?? ""}\0${protocolCapability}\0${theme}\0${variant ?? ""}`;
   const sourceRequest = `${frame.sourceVersion}\0${frame.width}\0${frame.height}`;
   const [sourceReady, setSourceReady] = useState<{ owner: string; version: string; key: string } | null>(null);
   const [sourceFailure, setSourceFailure] = useState<{ owner: string; key: string } | null>(null);
@@ -384,7 +388,9 @@ export const DesignFrameRenderSurface = React.memo(function DesignFrameRenderSur
       onPlaybackStopped={onPlaybackStopped}
       selected={selected}
       selectedNodeIds={selectedNodeIds}
-      autoCapture={!playbackSessionId && (recorded ? selected : designFrameAutoCapture(selected, picture))}
+      // Saved stills are the source's, so a variant's view is never captured.
+      autoCapture={!playbackSessionId && !variant && (recorded ? selected : designFrameAutoCapture(selected, picture))}
+      variant={variant}
       underlayReady={sourcePainted || !!still || recorded}
       theme={theme}
       baseTheme={baseTheme}
@@ -434,7 +440,7 @@ export const DesignFrameRenderSurface = React.memo(function DesignFrameRenderSur
       {sourceEnabled || sourcePainted ? <DesignFrameSourceSurface key={sourceOwner} workspaceId={workspaceId}
         folder={folder} directoryId={previewOwner?.directoryId ?? designDirectory ?? ""} width={frame.width} height={frame.height}
         capability={protocolCapability!} file={frame.file} title={frame.title}
-        sourceVersion={frame.sourceVersion} theme={theme} cost={frame.surfaceCost!}
+        sourceVersion={frame.sourceVersion} theme={theme} variant={variant} cost={frame.surfaceCost!}
         visible={sourceVisible} retainHtml={live} allowLoad={sourceEnabled && !sourceReadOnly} onReady={readySource} onUnavailable={failedSource} onRetired={retiredSource} /> : null}
       {/* Keep the same decoded image element through editor activation. Moving
           its URL into the editor's subtree creates a new image whose resource

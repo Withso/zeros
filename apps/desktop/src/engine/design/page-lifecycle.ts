@@ -34,6 +34,7 @@ import { assertDesignWriteAuthorized } from "./write-authority";
 import { designTitleSlug } from "./design-naming";
 import { MAX_DESIGN_TEXT_BYTES } from "./render-budget";
 import { captureDesignCatalogPoint, publishDesignCatalogChange, type CaptureDesignCatalogChange } from "./page-history";
+import { forgetDesignComponentRender } from "./component-last-good";
 
 export async function createDesignPage(
   workspace: string,
@@ -158,6 +159,7 @@ export async function deleteDesignPage(
       });
       delete canvas.frames[file];
       delete canvas.frame_info[file];
+      forgetDesignComponentRender(workspace, file);
     }
     canvas.pages = canvas.pages!.filter(
       (candidate) => candidate.id !== page.id,

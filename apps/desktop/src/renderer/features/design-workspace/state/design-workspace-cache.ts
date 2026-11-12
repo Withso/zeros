@@ -1,6 +1,8 @@
 import { useDesignWorkspaceUiStore } from "./design-workspace-ui";
 import type { DesignMovementGuard } from "@zeros/protocol/design-relocation";
 import { normalizeDesignPagesSnapshot } from "@zeros/protocol/design-pages";
+import { isDesignComponentVariantName } from "@zeros/protocol/design-path";
+import { refuseDesignComponentPartWrite } from "./design-component-parts";
 import { forgetDesignLayerDisclosure } from "./design-layer-disclosure";
 import { rememberDesignDirectoryIdentity, setDesignKnownPagesReader } from "../../../platform/bridge/design-bridge";
 // Canvas, inspector and the Layers panel consume one aggregate engine response.
@@ -899,30 +901,34 @@ const FOUNDATION_KEY_SEPARATOR = "\u0000";
 const FRAME_DOCUMENT_KEY_SEPARATOR = "\u0000";
 export const DESIGN_FRAME_DOCUMENT_MAX_AGE_MS = 60_000;
 
+/** A main component frame showing a variant has its own document under the
+ * same generation: the variant is a view of the source. */
 export function designFrameDocumentKey(
   workspaceId: string,
   frame: string,
   sourceVersion: string,
+  variant?: string | null,
 ): string {
-  return [workspaceId, frame, sourceVersion].join(FRAME_DOCUMENT_KEY_SEPARATOR);
+  return [workspaceId, frame, sourceVersion, ...(variant ? [variant] : [])].join(FRAME_DOCUMENT_KEY_SEPARATOR);
 }
 
 export async function fetchDesignFrameDocument(
   key: string,
 ): Promise<DesignFrameDocumentWire> {
-  const [workspaceId, frame, sourceVersion, ...extra] = key.split(
+  const [workspaceId, frame, sourceVersion, variant, ...extra] = key.split(
     FRAME_DOCUMENT_KEY_SEPARATOR,
   );
   if (
     !workspaceId ||
     !frame ||
     !/^[a-f0-9]{24}$/.test(sourceVersion ?? "") ||
+    (variant !== undefined && !isDesignComponentVariantName(variant)) ||
     extra.length > 0
   ) {
     throw new Error("Invalid design frame document cache key.");
   }
   const document = await executeDesignReadWithTransientRetry(() =>
-    designFrame(workspaceId, frame),
+    designFrame(workspaceId, frame, 4, variant),
   );
   if (document.sourceVersion !== sourceVersion) {
     throw new Error("Design frame changed while its fallback was loading.");
@@ -1067,6 +1073,13 @@ function sameFrame(
     left.layerCount === right.layerCount &&
     left.modifiedAt === right.modifiedAt &&
     left.sourceVersion === right.sourceVersion &&
+    // The declaration follows the source; whether its options applied can
+    // change without a new generation (a session's last good render).
+    (left.component === right.component ||
+      (left.component !== undefined && right.component !== undefined && left.component.notApplied === right.component.notApplied)) &&
+    // A component's own file can change what its instances offer without
+    // changing what this frame renders; the record's key follows it.
+    left.instances?.key === right.instances?.key &&
     // Boot/legacy frames can gain confirmed costs without a source change.
     // Cost changes and withdrawals must reach the shared admission budget.
     (left.surfaceCost === right.surfaceCost ||
@@ -1729,6 +1742,7 @@ export async function transferDesignNodeCached(
    * change and no page binding observes the source frame missing first. */
   beforePublish?: (result: Awaited<ReturnType<typeof designTransferNode>>) => void,
 ) {
+  refuseDesignComponentPartWrite(input);
   return runLocalDesignMutation(workspaceId, async (assertOwner) => {
     if (isCurrent?.() === false) throw new Error("The layer move no longer owns the active selection.");
     const result = await designTransferNode(workspaceId, {
@@ -1769,6 +1783,7 @@ export async function updateDesignNodeStylesCached(
     styles: Record<string, string | null>;
   },
 ): Promise<DesignMutationResultWire> {
+  refuseDesignComponentPartWrite(input.nodeId);
   return runLocalDesignMutation(workspaceId, async (assertOwner) =>
     executeWithFreshGenerationRetry(
       workspaceId,
@@ -1850,6 +1865,7 @@ export async function setDesignNodeTextCached(
     text: string;
   },
 ): Promise<DesignMutationResultWire> {
+  refuseDesignComponentPartWrite(input.nodeId);
   return runLocalDesignMutation(workspaceId, async (assertOwner) =>
     executeWithFreshGenerationRetry(
       workspaceId,
@@ -1904,6 +1920,7 @@ export async function appendDesignNodeHtmlCached(
   mutation: DesignMutationResultWire;
   snapshot: DesignWorkspaceSnapshotWire;
 }> {
+  refuseDesignComponentPartWrite(input.nodeId);
   return runLocalDesignMutation(workspaceId, async (assertOwner) =>
     executeWithFreshGenerationRetry(
       workspaceId,
@@ -2216,6 +2233,8 @@ export function applyDesignEditCached(
   options?: { structurePreviewId?: string },
 ): Promise<DesignApiMutationReplyWire> {
   return applyPreparedDesignTransactionCached(workspaceId, file, async () => {
+    const resolved = typeof intent === "function" ? intent() : intent;
+    refuseDesignComponentPartWrite(resolved.operations);
     const key = designFoundationKey(
       workspaceId,
       file,
@@ -2227,7 +2246,7 @@ export function applyDesignEditCached(
       { maxAgeMs: Number.POSITIVE_INFINITY },
     );
     return {
-      ...(typeof intent === "function" ? intent() : intent),
+      ...resolved,
       documentId: foundation.summary.documentId,
       baseRevision: foundation.summary.revision,
     };
@@ -2245,6 +2264,11 @@ export function applyDesignTransactionCached(
     runtimeInserts?: readonly DesignRuntimeNodeInsert[];
   },
 ): Promise<DesignApiMutationReplyWire> {
+  try {
+    refuseDesignComponentPartWrite(transaction.operations);
+  } catch (error) {
+    return Promise.reject(error);
+  }
   return applyPreparedDesignTransactionCached(
     workspaceId,
     frame,
@@ -2271,6 +2295,7 @@ async function applyPreparedDesignTransactionCached(
     };
     assertCurrent();
     const transaction = await prepare();
+    refuseDesignComponentPartWrite(transaction.operations);
     const visual = transactionRuntimeAdoption(transaction, runtimeInserts, structurePreviewId);
     presentation.ready = !!visual && !visual.patch?.tokens && !visual.patch?.keyframes;
     assertCurrent();

@@ -9,7 +9,7 @@ import {
   readDesignFrameRenderSourceFromSource,
 } from "./document";
 import { readSafeRegularFile } from "./safe-files";
-import { isDesignFrameFile } from "@zeros/protocol/design-path";
+import { isDesignComponentVariantName, isDesignFrameFile } from "@zeros/protocol/design-path";
 import { discoverFrameFiles, readSharedCanvasContext } from "./document-storage";
 import { prepareDesignSurfaceDocument } from "./surface-document";
 
@@ -39,6 +39,9 @@ export interface DesignProtocolResourceInput {
   sourceVersion: string | null;
   surface?: boolean;
   theme?: string | null;
+  /** The variant a main component frame shows: personal view state. The
+   * document renders it under the source's own generation. */
+  variant?: string | null;
 }
 
 function response(
@@ -166,6 +169,7 @@ export async function readDesignProtocolResource(
       (input.theme != null && !/^[a-z][a-z0-9_-]{0,63}$/.test(input.theme)))) return response(404, "Not found.");
   const relativePath = safeRelativePath(input.path);
   if (!relativePath) return response(404, "Not found.");
+  if (input.variant != null && (!isDesignComponentVariantName(input.variant) || !input.sourceVersion)) return response(404, "Not found.");
   const sourceVersion =
     input.sourceVersion && /^[a-f0-9]{24}$/.test(input.sourceVersion)
       ? input.sourceVersion
@@ -207,6 +211,7 @@ export async function readDesignProtocolResource(
         frameHtml,
         authored,
         context?.canvas,
+        input.variant ?? undefined,
       );
     } catch (error) {
       if (error instanceof DesignRenderBudgetError) {

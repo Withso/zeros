@@ -1,15 +1,37 @@
 import { expect, it, vi } from "vitest";
 import { bridgeDesignPrepareFrames, bridgeDesignSetRuntimeAudit, rememberDesignDirectoryIdentity } from "../design-bridge";
 import type { RuntimeClient } from "../ws-client";
-import { DESIGN_LAZY_PREPARATION_CAPABILITY } from "@zeros/protocol/design-catalog";
+import { DESIGN_COMPONENT_OPTIONS_CAPABILITY, DESIGN_LAZY_PREPARATION_CAPABILITY } from "@zeros/protocol/design-catalog";
+import { DESIGN_SOURCE_SURFACES_CAPABILITY } from "@zeros/protocol/design-surface";
 
 const input = { workspaceId: "local", directoryId: "design_test", catalogRevision: "a".repeat(64), files: ["page/f0.html"] };
 const frame = { file: input.files[0], frameId: "f0", pageId: "page", title: "Frame", kind: "frame", x: 0, y: 0,
   width: 100, height: 100, z: 0, sourceVersion: "b".repeat(24), nodeCount: 1, modifiedAt: 0 };
 const reply = () => ({ directoryId: input.directoryId, catalogRevision: input.catalogRevision, frames: [frame], errors: [] });
-function client(value: unknown, capable = true, surfaces = false) {
-  return { supportsEngineCapability: (capability: string) => capable && (capability === DESIGN_LAZY_PREPARATION_CAPABILITY || surfaces), request: vi.fn(async () => ({ type: "WORKSPACE_RESPONSE", result: value })) };
+function client(value: unknown, capable = true, surfaces = false, components = false) {
+  return { supportsEngineCapability: (capability: string) => capable && (capability === DESIGN_LAZY_PREPARATION_CAPABILITY ||
+    (surfaces && capability === DESIGN_SOURCE_SURFACES_CAPABILITY) || (components && capability === DESIGN_COMPONENT_OPTIONS_CAPABILITY)),
+    request: vi.fn(async () => ({ type: "WORKSPACE_RESPONSE", result: value })) };
 }
+it("negotiates a component frame's options through the actual preparation reply decoder", async () => {
+  const component = { elements: [{ tag: "zd-option", attributes: [{ name: "name", value: "width" }, { name: "type", value: "number" }, { name: "default", value: "1" }] }],
+    reach: { width: "css" as const }, notApplied: "defaults" as const };
+  const value = { ...reply(), frames: [{ ...frame, component }] };
+  const bridge = client(value, true, false, true);
+  await expect(bridgeDesignPrepareFrames(bridge as unknown as RuntimeClient, input)).resolves.toEqual(value);
+  expect(bridge.request).toHaveBeenCalledWith({ type: "WORKSPACE_REQUEST", op: "design.frames.prepare", params: { ...input, componentOptions: true } }, 20_000);
+  // A reply that does not hold the declaration's shape is refused.
+  await expect(bridgeDesignPrepareFrames(client({ ...reply(), frames: [{ ...frame, component: { ...component, reach: { width: "sometimes" } } }] }, true, false, true) as unknown as RuntimeClient, input)).rejects.toThrow();
+});
+it("carries a frame's component instances through the actual preparation reply decoder", async () => {
+  // A frame-instances comparison key (16 hex characters), not a credential.
+  const instances = { key: "00000000000000a1", components: { "chat-composer": { elements: [], reach: {}, file: "page/main.html", frame: true } },
+    hosts: { inst: { component: "chat-composer", attributes: { width: "800", "zd-variant": "compact" }, failed: true as const } } };
+  const value = { ...reply(), frames: [{ ...frame, instances }] };
+  await expect(bridgeDesignPrepareFrames(client(value, true, false, true) as unknown as RuntimeClient, input)).resolves.toEqual(value);
+  for (const bad of [{ ...instances, key: "x" }, { ...instances, hosts: { inst: { component: "Bad Name", attributes: {} } } }])
+    await expect(bridgeDesignPrepareFrames(client({ ...reply(), frames: [{ ...frame, instances: bad }] }, true, false, true) as unknown as RuntimeClient, input)).rejects.toThrow();
+});
 it("negotiates and retains passive HTML costs through the actual preparation reply decoder", async () => {
   const value = { ...reply(), frames: [{ ...frame, surfaceCost: { sourceBytes: 400, nodes: 7, imageBytes: 0 } }] };
   const bridge = client(value, true, true);

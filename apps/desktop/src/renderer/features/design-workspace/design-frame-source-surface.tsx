@@ -252,23 +252,26 @@ function SourceDocument({ entry, title, incoming, visible, retainHtml, allowLoad
 /** Ready HTML hands off to a browser vector image, then retires its browsing
  * context. Editing candidates keep their responsive HTML under the editor. */
 export const DesignFrameSourceSurface = React.memo(function DesignFrameSourceSurface({ workspaceId, folder, directoryId, capability, file, title,
-  sourceVersion, theme, width, height, cost, visible, retainHtml, allowLoad = true, onReady, onUnavailable, onRetired }: {
+  sourceVersion, theme, variant = null, width, height, cost, visible, retainHtml, allowLoad = true, onReady, onUnavailable, onRetired }: {
   workspaceId: string; capability: string; file: string; title: string;
   folder: string; directoryId: string; width: number; height: number;
   sourceVersion: string; theme: string | null; cost: DesignSurfaceCost;
+  /** The variant a main component frame shows. */
+  variant?: string | null;
   visible: boolean; retainHtml: boolean; allowLoad?: boolean;
   onReady(file: string, version: string): void;
   onUnavailable(file: string, version: string): void;
   onRetired(file: string, version: string): void;
 }) {
-  const url = designProtocolFrameUrl({ workspaceId, capability, frame: file, sourceVersion, surface: true, theme });
+  const url = designProtocolFrameUrl({ workspaceId, capability, frame: file, sourceVersion, surface: true, theme, variant });
   const { nodes: requestedNodes, sourceBytes: requestedBytes, imageBytes: requestedImages } = cost;
   const requested = useMemo<SurfaceDocument | null>(() => {
     if (!url) return null;
-    const target = { workspaceId, folder, directoryId, capability, file, sourceVersion, theme, width, height, imageBytes: requestedImages };
+    const target = { workspaceId, folder, directoryId, capability, file, sourceVersion, theme, width, height, imageBytes: requestedImages,
+      ...(variant ? { variant } : {}) };
     return { url, sourceVersion, theme, target, key: designSourceVectorKey(target),
       cost: { nodes: requestedNodes, sourceBytes: requestedBytes, imageBytes: requestedImages } };
-  }, [url, workspaceId, folder, directoryId, capability, file, sourceVersion, theme, width, height, requestedNodes, requestedBytes, requestedImages]);
+  }, [url, workspaceId, folder, directoryId, capability, file, sourceVersion, theme, variant, width, height, requestedNodes, requestedBytes, requestedImages]);
   const [displayed, setDisplayed] = useState(requested);
   const [admitted, setAdmitted] = useState(false);
   const callbacks = useRef({ onReady, onUnavailable, onRetired, sourceVersion, displayed });

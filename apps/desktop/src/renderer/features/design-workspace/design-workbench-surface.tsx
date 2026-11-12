@@ -32,6 +32,7 @@ import { EmptyState } from "../../shared/ui/layout/empty-state";
 import { ZerosSpinner } from "../../shared/ui/loading/zeros-spinner";
 import { primeDesignWorkspaceSnapshot } from "./state/design-workspace-cache";
 import { DesignWorkspaceColumn } from "./design-workspace";
+import { useOpenFileInWorkbench } from "../../shell/workbench/use-open-file";
 import { reportDesignDirectoryFailure } from "./design-directory-failure";
 import { DesignGitSetup } from "./design-git-setup";
 
@@ -58,6 +59,8 @@ export function DesignWorkbenchSurface({
   const refreshTarget = target.refresh;
   const project = useProjectForFolder(folder);
   const [creating, setCreating] = useState(false);
+  // A components/ file has no frame to select; its source opens in Files.
+  const openFile = useOpenFileInWorkbench();
   const loadError = target.error ?? checkout.error;
   useWorkbenchStatusSource(
     {
@@ -141,6 +144,7 @@ export function DesignWorkbenchSurface({
           workspace={workspace}
           folder={folder}
           surfaceActive={active}
+          onOpenFile={openFile}
         />
       </div>
     );

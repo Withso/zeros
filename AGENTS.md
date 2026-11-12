@@ -32,6 +32,8 @@ These instructions apply to the entire repository. Read and follow
   preserve stable frame IDs, and re-read changed files before editing.
 - Frames contain HTML, CSS, supported local assets and CSS keyframes/transitions.
   Authored JavaScript, event handlers, framework runtimes and TSX do not execute.
+  Components may declare options and a declarative template layer that Zeros
+  evaluates itself; still no authored JavaScript.
   Shell/Node/Python may generate supported source. App implementation from a
   frame follows that application's runtime conventions. Live Code layers are deferred.
 - Native edits save directly into the checkout; no Design apply/import/publish

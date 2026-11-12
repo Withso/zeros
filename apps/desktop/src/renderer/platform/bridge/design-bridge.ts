@@ -31,6 +31,7 @@ import {
 import { designPageCatalogSchema, designPageIdSchema, normalizeDesignPagesSnapshot, type DesignPageSummary } from "@zeros/protocol/design-pages";
 import { DESIGN_LAZY_PREPARATION_CAPABILITY, DESIGN_MUTATION_SNAPSHOTS_CAPABILITY, DESIGN_PAGE_SCOPED_MUTATIONS_CAPABILITY, designMutationCatalogSchema, designPageScopedCatalogSchema, designPreparedFrameSchema, designFramesPrepareSchema, designFramesPrepareReplySchema, type DesignMutationCatalog, type DesignPageHashes, type DesignPageScopedCatalog } from "@zeros/protocol/design-catalog";
 import { DESIGN_SOURCE_SURFACES_CAPABILITY } from "@zeros/protocol/design-surface";
+import { DESIGN_COMPONENT_OPTIONS_CAPABILITY } from "@zeros/protocol/design-catalog";
 import {
   DESIGN_RECORDINGS_COLOR_SCHEME_CAPABILITY,
   DESIGN_RECORDINGS_READ_FAILURES_CAPABILITY,
@@ -92,6 +93,10 @@ export interface DesignFrameTreeNodeWire {
 export interface DesignCanvasFrameWire extends DesignFrameSummaryWire {
   sourceVersion: string;
   surfaceCost?: import("@zeros/protocol/design-surface").DesignSurfaceCost | null;
+  /** Set when the frame's file declares options (component frames). */
+  component?: import("@zeros/protocol/design-catalog").DesignFrameComponent;
+  /** Set when the frame places component instances with options. */
+  instances?: import("@zeros/protocol/design-catalog").DesignFrameInstances;
 }
 
 /** Navigation metadata cannot authorize rendering or editing. */
@@ -114,6 +119,7 @@ export async function bridgeDesignPrepareFrames(bridge: RuntimeClient, input: {
 }) {
   const params = designFramesPrepareSchema.parse({ ...input,
     ...(bridge.supportsEngineCapability?.(DESIGN_SOURCE_SURFACES_CAPABILITY, input.workspaceId) ? { surfaceCosts: true } : {}),
+    ...(bridge.supportsEngineCapability?.(DESIGN_COMPONENT_OPTIONS_CAPABILITY, input.workspaceId) ? { componentOptions: true } : {}),
   });
   if (isCloudWorkspace(params.workspaceId) || !bridge.supportsEngineCapability?.(DESIGN_LAZY_PREPARATION_CAPABILITY, params.workspaceId))
     throw new Error("Design preparation requires a capable Local engine.");
@@ -631,11 +637,14 @@ export async function bridgeDesignFrame(
   workspaceId: string,
   frame: string,
   depth = 4,
+  /** The variant a main component frame shows; the generation is the source's. */
+  variant?: string,
 ): Promise<DesignFrameDocumentWire> {
   const result = (await workspaceOp(bridge, "design.frame", {
     workspaceId,
     frame,
     depth,
+    ...(variant ? { variant } : {}),
   })) as { frame?: DesignFrameDocumentWire };
   if (!result?.frame || typeof result.frame.file !== "string") {
     throw new Error("design.frame: malformed engine response");
