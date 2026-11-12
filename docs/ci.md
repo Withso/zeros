@@ -492,9 +492,7 @@ Merge-queue branches, any queued or auto-armed open PR (including the target),
 unavailable safety metadata and viewers with administrator bypass capability
 are unsupported in immediate mode and refuse without cancelling existing work.
 This keeps a check/review race from implicitly using a policy bypass. Immediate
-mode rejects `--force`, `--admin`, auto/queue flags and branch-deletion flags.
-The repository-wide one-armed-PR guard is still a snapshot, not an atomic lock
-across workspaces; serialize authorized landing attempts.
+mode rejects `--admin`, auto/queue flags and branch-deletion flags.
 
 The wrapper prints the CI-definition paths a PR changes, using
 `isCiDefinitionPath(path)` from `scripts/ci/ci-definition.mjs` on both sides of
@@ -504,26 +502,30 @@ Drafts, forks, closed PRs, changes to
 bodies, and failed or cancelled required checks are also refused. Pending checks
 may wait for GitHub's normal auto-merge requirements in the default mode only.
 
-**Merge queue.** When the base branch has a merge queue (main, from the
+**No merge queue on main (owner decision, 2026-11-12).** Every PR runs the full
+CI, the PR run is the only pre-merge run, and about 22 minutes after the last
+push GitHub's auto-merge lands it. Several PRs may be armed at once; the old
+one-armed guard (and its human `--force` override) is gone. Two PRs that pass
+alone can still break `main` together, as #1001 and #1002 did. That is accepted:
+the push Preflight on `main` catches it, the **Main red alert** workflow
+(`.github/workflows/main-red.yml`, `scripts/ci/main-red.mjs`) opens or refreshes
+one issue "main is red at <sha>" listing the failed jobs, and closes it on the
+next green push Preflight at or after that commit. Repair by a fix-forward PR
+(or a rerun of the failed jobs for a flake); an Alpha release for a red commit
+fails fast and the next green push ships. The queue tooling below stays
+available.
+
+**Merge queue (available, not in use).** When the base branch has a merge queue (from the
 `add-merge-queue` stage in [the ruleset guide](ci-rulesets.md)), the default mode
-enqueues instead of arming one PR at a time:
+enqueues instead of arming:
 `gh pr merge <n> --auto --match-head-commit <head>`. GitHub adds the PR to the
 queue once its required checks pass, runs the complete Preflight, CodeQL and
 actionlint on a merge-group commit that contains main plus the entries ahead of
 it, and squash-merges only when that group is green. Several PRs may therefore be
-in flight; the one-armed guard below applies only to branches without a queue.
-Every other guard still applies. The queue's squash takes its message from the
+in flight. Every other guard still applies. The queue's squash takes its message from the
 repository default (the commits' messages), so the wrapper also refuses a PR
 whose commit messages contain a skip marker. An unreadable queue state or commit
 list refuses. Immediate mode still refuses queue branches.
-
-Without a merge queue, only one open PR may have auto-merge enabled. Only a human may override this
-guard: first document the justification in a comment on the target PR using the
-same human GitHub identity, then run
-`pnpm agent:merge <pr-number> --force --reason <comment-URL>`. The wrapper verifies
-the comment's author and PR. This flag cannot override any other guard. Agents
-must never supply `--force`. The open-PR guard reads a snapshot; avoid concurrent
-arming from separate workspaces.
 
 The default merge request uses `gh pr merge --auto --squash --match-head-commit` with the
 checked head SHA and explicit checked PR title and body. This keeps GitHub's

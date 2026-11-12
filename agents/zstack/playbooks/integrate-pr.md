@@ -37,9 +37,10 @@ session itself.
    `gh pr edit` is refused for review-request access, update the body with
    `gh api -X PATCH repos/<owner>/<repo>/pulls/<n> -F body=@<file>`. Confirm
    a push with `git ls-remote`, not with a pipeline's exit status.
-7. **Merge** with `pnpm agent:merge <n>`. On main's merge queue it enqueues,
-   and several PRs may be in flight; each is tested on top of main and the
-   entries ahead of it. Without a queue it arms auto-merge for one PR at a time.
+7. **Merge** with `pnpm agent:merge <n>`, which arms auto-merge; several PRs
+   may be armed at once. `main` has no merge queue, so PRs that pass alone can
+   break `main` together: watch the "main is red at <sha>" issue after your
+   merge and fix forward if it names your change.
    Apply `ci:*` labels when you open the PR (`gh pr create --label`) or before
    the final push. Label events start no CI run; a label added after CI started
    needs `gh run rerun <run-id>` (whole run) or a push.

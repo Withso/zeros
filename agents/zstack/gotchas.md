@@ -182,8 +182,8 @@ revision in the same checkout and compare failing test names.
   (`@cursor/sdk`) loads project rules and skills, but resolves no `@rule` or
   `/skill` mention in message text.
 - `gh pr ready` starts a new CI run and cancels the draft's run. Until the new
-  run finishes, `pnpm agent:merge` refuses because of the cancelled checks; it
-  arms only one PR at a time, so queue the others behind it. Mark a PR ready
+  run finishes, `pnpm agent:merge` refuses because of the cancelled checks.
+  Mark a PR ready
   before its final push, not after its CI is already green.
 - Long local batches die with the agent session unless detached. Run them with
   `setsid nohup` under a shared slot and append results to a summary file.

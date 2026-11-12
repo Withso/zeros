@@ -1,0 +1,42 @@
+name: Main red alert
+
+# No merge queue (owner decision, 2026-11-12): PRs merge after their own full
+# CI, so main can occasionally go red. Keep one issue "main is red at <sha>"
+# with the failed jobs while push Preflight on main fails, and close it on the
+# next green push Preflight. workflow_run executes the default branch's copy.
+on:
+  workflow_run:
+    workflows: [Preflight]
+    types: [completed]
+    branches: [main]
+
+permissions: {}
+
+concurrency:
+  group: main-red
+  cancel-in-progress: false
+
+jobs:
+  alert:
+    name: main red alert
+    if: github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+      issues: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Setup Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      - name: Open, refresh or close the main-red issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+        run: node scripts/ci/main-red.mjs

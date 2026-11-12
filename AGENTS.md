@@ -127,11 +127,10 @@ For provider event handling or tool transcript UI, also read
   wrapper with `gh pr merge` or `pnpm agent:gh pr merge`. Agents may merge PRs
   that change CI-definition paths through the same wrapper; the required-check
   list stays in GitHub rules and the wrapper still refuses failed or cancelled
-  required checks. Only a human
-  may use `--force`, after documenting the override in a comment on that PR;
-  pass the comment URL with `--reason`. This overrides only the one-armed-PR
-  guard, which applies only while the base branch has no merge queue; with
-  one, the wrapper enqueues and several PRs may be in flight. See [docs/ci.md](docs/ci.md).
+  required checks. `main` has no merge queue: every PR runs full CI and
+  several PRs may be armed at once, so `main` can occasionally go red; the
+  "main is red at <sha>" issue tracks it until a fix lands. See
+  [docs/ci.md](docs/ci.md).
 - Use the bot only for automation that is not a person's work: cutting a release
   branch
   (`pnpm agent:git push origin <sha>:refs/heads/release/X.Y.Z`), and
