@@ -4,6 +4,19 @@ import type { CloudV2BootCleanRefusal } from "../contract.js";
 
 export const activationBusy = () => new HttpError(409, "actor_busy", "Shared execution is changing; wait for the workspace to restart");
 
+const PREPARED_RECOVERY = `w.execution_mode='prepared' AND w.execution_transition_id IS NULL
+  AND a.phase IN ('failed','cancelled')
+  AND NOT EXISTS (SELECT 1 FROM cloud_v2_execution_activations other
+    WHERE other.workspace_id=w.id AND other.id<>a.id AND other.phase NOT IN ('rolled_back','superseded'))`;
+
+export async function needsExecutionStopConfirmation(tx: Tx, id: string): Promise<boolean> {
+  const result = await tx.query(`SELECT 1 FROM cloud_v2_workspaces w
+    JOIN cloud_v2_execution_activations a ON a.workspace_id=w.id
+    WHERE w.id=$1 AND w.state='stopped' AND ${PREPARED_RECOVERY}
+      AND (a.confirmed_stop_generation IS DISTINCT FROM w.stop_generation OR a.confirmed_stopped_at IS NULL)`, [id]);
+  return result.rowCount === 1;
+}
+
 export async function assertNoExecutionTransition(tx: Tx, id: string) {
   if ((await tx.query("SELECT 1 FROM cloud_v2_workspaces WHERE id=$1 AND execution_transition_id IS NOT NULL", [id])).rowCount)
     throw activationBusy();
@@ -35,8 +48,8 @@ export async function confirmExecutionStop(tx: Tx, id: string, generation: strin
     drained_at=CASE WHEN a.phase='draining' AND a.stop_generation=$2 THEN clock_timestamp() ELSE a.drained_at END,
     phase=CASE WHEN a.phase='draining' AND a.stop_generation=$2 THEN 'authorizing' ELSE a.phase END,
     next_attempt_at=clock_timestamp(),updated_at=clock_timestamp()
-    FROM cloud_v2_workspaces w WHERE w.id=$1 AND a.workspace_id=w.id
-      AND (a.id=w.execution_transition_id OR a.phase='active')`, [id, generation]);
+    FROM cloud_v2_workspaces w WHERE w.id=$1 AND a.workspace_id=w.id AND w.stop_generation=$2::bigint
+      AND (a.id=w.execution_transition_id OR a.phase='active' OR (${PREPARED_RECOVERY}))`, [id, generation]);
   await clearStoppedExecutionTransition(tx, id);
 }
 
