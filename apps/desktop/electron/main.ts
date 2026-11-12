@@ -1,3 +1,4 @@
+import { runQuitSteps } from "./quit-barrier";
 import {
   IS_DEV,
   IS_PACKAGED,
@@ -1898,7 +1899,8 @@ app.on("before-quit", (event) => {
     // stops with its XCTest runners.
     const devices = simulatorRuntime;
     simulatorRuntime = null;
-    subscriptionShutdown ??= Promise.allSettled([stopProviderSubscriptions(), stopCloudProviderAuth(), prepareAttachmentsForQuit(), devices?.dispose()]).then(() => {
+    // runQuitSteps: a sign-in refresh in flight stores its rotated refresh token before the app exits.
+    subscriptionShutdown ??= Promise.allSettled([runQuitSteps(), stopProviderSubscriptions(), stopCloudProviderAuth(), prepareAttachmentsForQuit(), devices?.dispose()]).then(() => {
       subscriptionsStopped = true;
       app.quit();
     });

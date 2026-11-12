@@ -68,6 +68,32 @@ describe("update restart relaunch guard", () => {
     ).toBeLessThan(mocks.updater.quitAndInstall.mock.invocationCallOrder[0]);
   });
 
+  it("installs only after the quit steps (a refresh storing its rotated token) have finished", async () => {
+    const { holdQuitFor, resetQuitBarrierForTests } = await import("../quit-barrier");
+    resetQuitBarrierForTests();
+    let finish!: () => void;
+    holdQuitFor(() => new Promise<void>(resolve => { finish = resolve; }));
+    const updater = await stagedUpdater();
+    expect(updater.installStagedUpdate()).toBe(true);
+    await nextTick(); await nextTick();
+    expect(mocks.updater.quitAndInstall).not.toHaveBeenCalled();
+    finish();
+    await vi.waitFor(() => expect(mocks.updater.quitAndInstall).toHaveBeenCalledWith(false, true));
+    resetQuitBarrierForTests();
+  });
+
+  it("tells the quit steps their quit was aborted when the install cannot start", async () => {
+    const { holdQuitFor, resetQuitBarrierForTests } = await import("../quit-barrier");
+    resetQuitBarrierForTests();
+    const resumed = vi.fn();
+    holdQuitFor(async () => {}, resumed);
+    mocks.updater.quitAndInstall.mockImplementationOnce(() => { throw new Error("install failed"); });
+    const updater = await stagedUpdater();
+    expect(updater.installStagedUpdate()).toBe(true);
+    await vi.waitFor(() => expect(resumed).toHaveBeenCalledTimes(1));
+    resetQuitBarrierForTests();
+  });
+
   it("keeps one guard across repeated restart requests", async () => {
     const updater = await stagedUpdater();
 

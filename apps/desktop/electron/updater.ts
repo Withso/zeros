@@ -1,3 +1,4 @@
+import { resumeAfterAbortedQuit, runQuitSteps } from "./quit-barrier";
 // electron-updater consumes ZIPs and channel metadata; DMGs are for initial installs.
 
 import {
@@ -486,7 +487,9 @@ function armRelaunchGuard(): ChildProcess | null {
  *  guidance — calling it synchronously inside an event handler can race the
  *  download cleanup). isForceRunAfter relaunches into the new version. */
 function applyAndRelaunch(): void {
-  setImmediate(() => {
+  // First the quit steps (a refresh in flight stores its rotated refresh token), each bounded.
+  setImmediate(() => { void runQuitSteps().then(install); });
+  function install(): void {
     const armedEarlier = relaunchGuard !== null;
     const guard = armRelaunchGuard();
     try {
@@ -497,12 +500,14 @@ function applyAndRelaunch(): void {
         if (relaunchGuard === guard) relaunchGuard = null;
       }
       console.warn("[updater] quitAndInstall failed:", err);
+      // The app keeps running: what paused for this quit (a sign-in refresh) resumes.
+      resumeAfterAbortedQuit();
       publish({
         kind: "error",
         message: err instanceof Error ? err.message : String(err),
       });
     }
-  });
+  }
 }
 
 export function setupUpdater(): void {
