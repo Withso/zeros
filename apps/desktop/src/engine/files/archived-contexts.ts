@@ -320,6 +320,7 @@ export async function archiveContext(input: ArchiveInput, limits = ARCHIVED_CONT
     let total = retained.reduce((sum, item) => sum + item.bytes, 0);
     for (const old of retained.sort((a, b) => a.archivedAt - b.archivedAt || a.key.localeCompare(b.key))) {
       if (total <= limits.totalBytes) break;
+      if (old.key === key) continue;
       current();
       let oldRepo: Directory | undefined;
       try { oldRepo = childDirectory(root, old.repository); await removeTree(oldRepo, old.workspace); }

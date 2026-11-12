@@ -28,6 +28,7 @@ import {
 } from "node:fs/promises";
 import { existsSync, promises as fs } from "node:fs";
 import * as setupHooks from "../setup-hooks";
+import * as contextArchive from "../../files/archived-contexts";
 import { opSettingsWrite } from "../../settings/ops";
 import { worktreeSeedPath } from "../../db/paths";
 import { tmpdir } from "node:os";
@@ -2488,6 +2489,39 @@ printf ran > '${sentinel}'
       expect(await readFile(path.join(created.path, ".context", "notes.md"), "utf8")).toBe("archive notes\n");
       expect(await readFile(path.join(created.path, ".context", "attachments", "original.txt"), "utf8")).toBe("restore attachment\n");
       expect(getWorkspace(created.workspaceId).organizationId ?? null).toBe(organizationId);
+    },
+  );
+
+  it.each([null, "organization-archive-fixture"].flatMap(organizationId =>
+    ["storage-file", "inside-source"].map(failure => ({ organizationId, failure }))))(
+    "still archives and restores when the visible copy fails ($failure, owner $organizationId)",
+    async ({ organizationId, failure }) => {
+      const created = await createWorkspace({ repoRoot });
+      openZerosDb().prepare("UPDATE workspaces SET organization_id = ? WHERE id = ?").run(organizationId, created.workspaceId);
+      await mkdir(path.join(created.path, ".context", "attachments"), { recursive: true });
+      await writeFile(path.join(created.path, ".context", "notes.md"), "archive notes\n");
+      await writeFile(path.join(created.path, ".context", "attachments", "original.txt"), "restore attachment\n");
+      const storage = path.join(stateRoot, "archived-contexts");
+      if (failure === "storage-file") await writeFile(storage, "not an archive directory");
+      const copy = contextArchive.archiveContext;
+      const copySpy = failure === "inside-source" ? vi.spyOn(contextArchive, "archiveContext")
+        .mockImplementation(input => copy({ ...input, channelRoot: path.join(input.sourceRoot, ".context") })) : undefined;
+      const warnings = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const archived = await archiveWorkspace({ workspaceId: created.workspaceId, stashUncommitted: true });
+
+        expect(existsSync(created.path)).toBe(false);
+        expect(getWorkspace(created.workspaceId).archivedAt).not.toBeNull();
+        expect(archived.archiveSnapshot).toMatch(/^[0-9a-f]{40,64}$/);
+        expect(warnings.mock.calls.filter(([line]) => String(line).startsWith("[archive] context copy skipped")))
+          .toEqual([["[archive] context copy skipped reason=copy_failed"]]);
+        if (failure === "storage-file") expect(await readFile(storage, "utf8")).toBe("not an archive directory");
+        else expect(existsSync(storage)).toBe(false);
+        await restoreWorkspace(created.workspaceId);
+        expect(await readFile(path.join(created.path, ".context", "notes.md"), "utf8")).toBe("archive notes\n");
+        expect(await readFile(path.join(created.path, ".context", "attachments", "original.txt"), "utf8")).toBe("restore attachment\n");
+        expect(getWorkspace(created.workspaceId).organizationId ?? null).toBe(organizationId);
+      } finally { warnings.mockRestore(); copySpy?.mockRestore(); }
     },
   );
 

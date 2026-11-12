@@ -86,6 +86,17 @@ describe("visible archived contexts", () => {
     expect(await readFile(path.join(beta!.path, "notes"), "utf8")).toBe("12345678");
   });
 
+  it("keeps the copy just published even when its cloud archive time predates the retained copies", async () => {
+    await writeFile(path.join(source, ".context", "notes"), "12345678");
+    const first = await copy({ identity: "first", workspace: "first", archivedAt: 20 });
+    const second = await copy({ identity: "second", workspace: "second", archivedAt: 30 });
+    const published = await copy({ identity: "late-mirror", workspace: "late-mirror", archivedAt: 10 }, { ...limits, totalBytes: 16 });
+
+    expect(await readFile(path.join(published!.path, "notes"), "utf8")).toBe("12345678");
+    await expect(readFile(path.join(first!.path, "notes"))).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await readFile(path.join(second!.path, "notes"), "utf8")).toBe("12345678");
+  });
+
   it("rolls back a failed replacement and serializes concurrent publishers for retention", async () => {
     await writeFile(path.join(source, ".context", "notes"), "first");
     const first = await copy({ archivedAt: 1 });
@@ -104,7 +115,7 @@ describe("visible archived contexts", () => {
       copy({ identity: "b", workspace: "b", archivedAt: 20 }, { ...limits, totalBytes: 5 }),
     ]);
     const copies = await Promise.all([a, b].map(item => readFile(path.join(item!.path, "notes"), "utf8").catch(() => null)));
-    expect(copies).toEqual([null, "later"]);
+    expect(copies.filter(value => value !== null)).toEqual(["later"]);
   });
 
   it("refuses symlinked source or destination parents and never writes outside the channel", async () => {

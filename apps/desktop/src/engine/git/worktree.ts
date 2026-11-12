@@ -3297,13 +3297,18 @@ async function archiveWorkspaceInner(
   if (journal.phase !== "worktree-removed" || existsSync(ws.path)) {
     const removalStartedAt = Date.now();
     if (existsSync(ws.path)) {
-      await archiveContext({
-        sourceRoot: ws.path,
-        channelRoot: path.dirname(worktreesRoot()),
-        repository: ws.repoSlug,
-        workspace: path.basename(ws.path),
-        identity: JSON.stringify(["local", ws.organizationId ?? null, ws.canonicalId ?? ws.id, ws.repoRoot]),
-      });
+      try {
+        await archiveContext({
+          sourceRoot: ws.path,
+          channelRoot: path.dirname(worktreesRoot()),
+          repository: ws.repoSlug,
+          workspace: path.basename(ws.path),
+          identity: JSON.stringify(["local", ws.organizationId ?? null, ws.canonicalId ?? ws.id, ws.repoRoot]),
+        });
+      } catch {
+        // The sealed snapshot is the restore source; the visible copy cannot block Local archive.
+        console.warn("[archive] context copy skipped reason=copy_failed");
+      }
       stagedWorktree = await removeManagedWorktreeForLifecycle(
         ws,
         beforeCheckoutEviction,
