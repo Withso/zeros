@@ -1,0 +1,9 @@
+{
+  "id": "cloud-activation-stopped-recovery-proof",
+  "kind": "replay",
+  "area": "control-plane",
+  "fixedBy": "pr:1050",
+  "symptom": "After failed activation cleanup cleared the transition, a later prepared workspace Stop left its activation's proof on an older generation. Strict rollback remained impossible even after the provider stopped the VM.",
+  "rule": "Retain the current recovery receipt across subsequent lifecycle completions. A stale stopped receipt needs a fresh provider-confirmed Stop, never a weaker rollback predicate or a runner-side row repair (principles 1, 4, 5 and 13).",
+  "check": "pnpm --dir apps/control-plane exec vitest run src/cloud/execution/activation-lifecycle.integration.test.ts"
+}

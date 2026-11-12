@@ -1,5 +1,5 @@
 import { executionIntentAuthority, type ExecutionAdmission, type ExecutionIntentAuthority } from "./execution/authority.js";
-import { assertNoExecutionTransition, cancelExecutionActivation, clearStoppedExecutionTransition, confirmExecutionStop, failExecutionActivation } from "./execution/activation-state.js";
+import { assertNoExecutionTransition, cancelExecutionActivation, clearStoppedExecutionTransition, confirmExecutionStop, failExecutionActivation, needsExecutionStopConfirmation } from "./execution/activation-state.js";
 import { bindExecutionActivationBoot } from "./execution/activation.js";
 import type { ExecutionConnectAuthority } from "./execution/clients.js";
 import type pg from "pg";
@@ -609,8 +609,8 @@ export class CloudV2Store {
     executionAuthority?: ExecutionIntentAuthority) {
       if (action === "stop" || action === "archive") await cancelExecutionActivation(tx, id);
       else await assertNoExecutionTransition(tx, id);
-      const intent = (await tx.query<{ stop_generation: string; restart_stop_generation: string | null }>(
-        "SELECT stop_generation::text,restart_stop_generation::text FROM cloud_v2_workspaces WHERE id=$1", [id])).rows[0]!;
+      const intent = (await tx.query<{ stop_generation: string; restart_stop_generation: string | null; execution_mode: string }>(
+        "SELECT stop_generation::text,restart_stop_generation::text,execution_mode FROM cloud_v2_workspaces WHERE id=$1", [id])).rows[0]!;
       const priorRestart = intent.restart_stop_generation;
       if (action === "restart" && (current.state === "deleting" || current.state === "creating" && current.boat_sandbox_id === null))
         throw new HttpError(409, "workspace_unavailable", "This cloud workspace cannot be restarted yet");
@@ -621,9 +621,11 @@ export class CloudV2Store {
       const configuring = (action === "stop" || action === "restart") && current.state === "creating" && current.boat_sandbox_id !== null &&
         (action === "restart" || (await tx.query("SELECT 1 FROM cloud_v2_workspaces WHERE id=$1 AND worker_boot_id IS NOT NULL", [id])).rowCount === 1);
       const starts = action === "start" || action === "restart" && (current.state === "stopped" || current.state === "failed");
+      const reconfirm = action === "stop" && current.state === "stopped" && intent.execution_mode === "prepared" &&
+        await needsExecutionStopConfirmation(tx, id);
       const state = starts
         ? current.state === "stopped" || current.state === "failed" ? "starting" : current.state
-        : current.state === "running" || current.state === "starting" || configuring ? "stopping" : current.state;
+        : current.state === "running" || current.state === "starting" || configuring || reconfirm ? "stopping" : current.state;
       const moved = state !== current.state;
       const archived = action === "archive" || (action === "stop" && current.archived_at !== null);
       const restart = state === "stopping" && action === "restart" ? (BigInt(intent.stop_generation) + (moved ? 1n : 0n)).toString()

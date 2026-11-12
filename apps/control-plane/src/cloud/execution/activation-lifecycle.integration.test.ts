@@ -29,6 +29,31 @@ database("durable activation through provider Stop and real worker routes", () =
     const call = (path: string, body: unknown) => f.worker(path, body, { token, boot: bootId, features });
     return { token, bootId, response, call };
   };
+  const stoppedRecovery = async (phase: "failed" | "cancelled", stale = false) => {
+    if (phase === "failed") {
+      await lifecycle.tick(); await advance();
+      const started = await boot(); expect(started.response.status).toBe(200);
+      expect((await started.call("execution-leases/boot-clean", {
+        retirementId: randomUUID(), processes: 0, legacyMaterial: "refused",
+      })).status).toBe(409);
+    } else expect([200,202]).toContain((await f.call(`/v1/cloud-v2/workspaces/${f.workspace.id}/stop`, "POST")).status);
+    await lifecycle.tick();
+    expect(await row()).toMatchObject({ state: "stopped", execution_mode: "prepared", execution_transition_id: null });
+    expect((await activation()).phase).toBe(phase);
+    // Rows written by an older replica can retain the prior Stop's proof.
+    if (stale) await pool.query("UPDATE cloud_v2_execution_activations SET confirmed_stop_generation=confirmed_stop_generation-1 WHERE id=$1", [input.activationId]);
+    return activation();
+  };
+  const copyActivation = async (phase: "prepared" | "failed" | "rolled_back" | "superseded") => {
+    const id = randomUUID();
+    await pool.query(`INSERT INTO cloud_v2_execution_activations(id,workspace_id,org_id,initiator_user_id,operator_user_id,
+      runtime_sha256,target_fingerprint,request_hash,reason_hash,prepared_snapshot,phase,started_at,deadline_at,
+      confirmed_stop_generation,confirmed_stopped_at)
+      SELECT $2,workspace_id,org_id,initiator_user_id,operator_user_id,runtime_sha256,target_fingerprint,
+        request_hash,reason_hash,prepared_snapshot,$3,started_at,deadline_at,confirmed_stop_generation,confirmed_stopped_at
+      FROM cloud_v2_execution_activations WHERE id=$1`, [input.activationId, id, phase]);
+    return (await pool.query("SELECT * FROM cloud_v2_execution_activations WHERE id=$1", [id])).rows[0];
+  };
   beforeAll(() => { pool = new pg.Pool({ connectionString: url, max: 8, statement_timeout: 6000 }); });
   beforeEach(async () => {
     f = await executionFixture(pool); await f.hello(); await f.cp.loginChanges.stop();
@@ -258,6 +283,126 @@ database("durable activation through provider Stop and real worker routes", () =
     } });
     const rollback = await manageCloudExecution(pool, { ...input, action: "rollback" }, options());
     expect(rollback).toMatchObject({ bootClean: inspected.bootClean });
+  });
+
+  it("keeps a failed activation rollbackable after a prepared runtime is stopped again", async () => {
+    await lifecycle.tick(); await advance();
+    const started = await boot(); expect(started.response.status).toBe(200);
+    expect((await started.call("execution-leases/boot-clean", {
+      retirementId: randomUUID(), processes: 0, legacyMaterial: "refused",
+    })).status).toBe(409);
+    await lifecycle.tick();
+    const failed = await row(), original = await activation();
+    expect(failed).toMatchObject({ state: "stopped", execution_mode: "prepared", execution_transition_id: null });
+    expect(original).toMatchObject({ phase: "failed", confirmed_stop_generation: failed.stop_generation });
+
+    await f.login();
+    expect((await f.call(`/v1/cloud-v2/workspaces/${f.workspace.id}/start`, "POST")).status).toBe(202);
+    const resumed = await boot(f.features, randomUUID(), "b".repeat(64));
+    expect(resumed.response.status, (await resumed.response.json()).error?.code).toBe(200);
+    expect((await row()).state).toBe("running");
+    expect((await f.call(`/v1/cloud-v2/workspaces/${f.workspace.id}/stop`, "POST")).status).toBe(202);
+    await expect(manageCloudExecution(pool, { ...input, action: "rollback" }, options())).rejects.toThrow(/completed provider Stop/);
+    await lifecycle.tick();
+
+    const stopped = await row(), confirmed = await activation();
+    expect(stopped).toMatchObject({ state: "stopped", execution_mode: "prepared", execution_transition_id: null, worker_token_hash: null });
+    expect(BigInt(stopped.stop_generation)).toBe(BigInt(failed.stop_generation) + 1n);
+    expect(compute.stop).toHaveBeenCalledTimes(3);
+    expect(confirmed).toMatchObject({ phase: "failed", first_error_code: original.first_error_code,
+      confirmed_stop_generation: stopped.stop_generation });
+    expect((await run("rollback")).state).toBe("changed");
+    expect(await row()).toMatchObject({ state: "stopped", execution_mode: "legacy" });
+  });
+
+  it.each(["failed", "cancelled"] as const)("reconfirms a stopped %s activation only after the held provider Stop completes", async phase => {
+    const original = await stoppedRecovery(phase, true), before = await row();
+    const calls = vi.mocked(compute.stop).mock.calls.length;
+    await expect(run("rollback")).rejects.toThrow(/completed provider Stop/);
+    expect((await f.call(`/v1/cloud-v2/workspaces/${f.workspace.id}/stop`, "POST")).status).toBe(202);
+    const stopping = await row();
+    expect(stopping.state).toBe("stopping");
+    expect(BigInt(stopping.stop_generation)).toBe(BigInt(before.stop_generation) + 1n);
+    let release!: () => void;
+    vi.mocked(compute.stop).mockImplementationOnce(() => new Promise(resolve => { release = resolve; }));
+    const pending = lifecycle.tick();
+    try {
+      await expect.poll(() => compute.stop).toHaveBeenCalledTimes(calls + 1);
+      expect(await activation()).toMatchObject({ phase, first_error_code: original.first_error_code,
+        confirmed_stop_generation: original.confirmed_stop_generation, confirmed_stopped_at: original.confirmed_stopped_at });
+      await expect(run("rollback")).rejects.toThrow(/completed provider Stop/);
+      expect((await f.call(`/v1/cloud-v2/workspaces/${f.workspace.id}/stop`, "POST")).status).toBe(200);
+      expect((await row()).stop_generation).toBe(stopping.stop_generation);
+    } finally { release?.(); await pending; }
+    expect(await activation()).toMatchObject({ phase, first_error_code: original.first_error_code,
+      confirmed_stop_generation: stopping.stop_generation });
+    expect((await row()).state).toBe("stopped");
+    expect((await run("rollback")).state).toBe("changed");
+    expect(await row()).toMatchObject({ state: "stopped", execution_mode: "legacy" });
+  });
+
+  it("does not refresh a recovery proof when the provider refuses Stop", async () => {
+    const original = await stoppedRecovery("failed", true), calls = vi.mocked(compute.stop).mock.calls.length;
+    expect((await f.call(`/v1/cloud-v2/workspaces/${f.workspace.id}/stop`, "POST")).status).toBe(202);
+    const stopping = await row();
+    vi.mocked(compute.stop).mockRejectedValueOnce(new CloudProviderError("provider_unavailable", "Synthetic Stop refusal", true));
+    await lifecycle.tick();
+    expect((await row()).state).toBe("stopping");
+    expect(await activation()).toMatchObject({ first_error_code: original.first_error_code,
+      confirmed_stop_generation: original.confirmed_stop_generation, confirmed_stopped_at: original.confirmed_stopped_at });
+    await expect(run("rollback")).rejects.toThrow(/completed provider Stop/);
+    await f.cp.store.defer(f.workspace.id, "stopping", 0, { stopGeneration: stopping.stop_generation });
+    await lifecycle.tick();
+    expect(compute.stop).toHaveBeenCalledTimes(calls + 2);
+    expect(await activation()).toMatchObject({ first_error_code: original.first_error_code,
+      confirmed_stop_generation: stopping.stop_generation });
+    expect((await run("rollback")).state).toBe("changed");
+  });
+
+  it.each(["failed", "cancelled"] as const)("keeps Stop idempotent when the stopped %s activation has a current proof", async phase => {
+    const original = await stoppedRecovery(phase), before = await row(), calls = vi.mocked(compute.stop).mock.calls.length;
+    for (let n = 0; n < 2; n++) expect((await f.call(`/v1/cloud-v2/workspaces/${f.workspace.id}/stop`, "POST")).status).toBe(200);
+    await lifecycle.tick();
+    expect(compute.stop).toHaveBeenCalledTimes(calls);
+    expect(await row()).toMatchObject({ state: "stopped", stop_generation: before.stop_generation });
+    expect(await activation()).toMatchObject({ confirmed_stop_generation: original.confirmed_stop_generation,
+      confirmed_stopped_at: original.confirmed_stopped_at });
+    expect((await run("rollback")).state).toBe("changed");
+    expect((await f.call(`/v1/cloud-v2/workspaces/${f.workspace.id}/stop`, "POST")).status).toBe(200);
+    expect((await row()).stop_generation).toBe(before.stop_generation);
+  });
+
+  it("refreshes only the current recovery and preserves rolled-back and superseded proofs", async () => {
+    const original = await stoppedRecovery("failed", true);
+    const history = [await copyActivation("rolled_back"), await copyActivation("superseded")];
+    expect((await f.call(`/v1/cloud-v2/workspaces/${f.workspace.id}/stop`, "POST")).status).toBe(202);
+    await lifecycle.tick();
+    expect(await activation()).toMatchObject({ phase: "failed", first_error_code: original.first_error_code,
+      confirmed_stop_generation: (await row()).stop_generation });
+    for (const entry of history) {
+      const saved = (await pool.query("SELECT * FROM cloud_v2_execution_activations WHERE id=$1", [entry.id])).rows[0];
+      expect(saved).toEqual(entry);
+    }
+    expect((await run("rollback")).state).toBe("changed");
+  });
+
+  it.each(["prepared", "failed"] as const)("never selects a recovery proof when another %s activation exists", async phase => {
+    const original = await stoppedRecovery("failed", true), other = await copyActivation(phase), before = await row();
+    const calls = vi.mocked(compute.stop).mock.calls.length;
+    expect((await f.call(`/v1/cloud-v2/workspaces/${f.workspace.id}/stop`, "POST")).status).toBe(200);
+    await lifecycle.tick();
+    expect(compute.stop).toHaveBeenCalledTimes(calls);
+    expect((await row()).stop_generation).toBe(before.stop_generation);
+    await f.login();
+    expect((await f.call(`/v1/cloud-v2/workspaces/${f.workspace.id}/start`, "POST")).status).toBe(202);
+    expect((await boot(f.features, randomUUID(), "b".repeat(64))).response.status).toBe(200);
+    expect((await f.call(`/v1/cloud-v2/workspaces/${f.workspace.id}/stop`, "POST")).status).toBe(202);
+    await lifecycle.tick();
+    expect(compute.stop).toHaveBeenCalledTimes(calls + 1);
+    expect(await activation()).toMatchObject({ phase: "failed", confirmed_stop_generation: original.confirmed_stop_generation,
+      confirmed_stopped_at: original.confirmed_stopped_at });
+    expect((await pool.query("SELECT * FROM cloud_v2_execution_activations WHERE id=$1", [other.id])).rows[0]).toEqual(other);
+    await expect(run("rollback")).rejects.toThrow(/completed provider Stop/);
   });
 
   it("rejects the old boot, an unsupported runtime and a missing worker capability", async () => {

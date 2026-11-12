@@ -663,8 +663,12 @@ initiator's existing PAT when that connection cannot be downscoped. The broker
 cache deadline does not shorten GitHub's token lifetime.
 
 A `rollback` plan requires a completed provider Stop for the current generation,
-no live contexts and no worker token. It leaves the workspace stopped, changes
-it back to legacy mode and never restores old tokens or starts it. Any later
+no live contexts and no worker token. If a failed or cancelled activation's
+Stop proof is stale while the prepared workspace is already stopped, request
+an ordinary Stop and wait for provider confirmation before planning rollback.
+Only that stale recovery requeues Stop; a current proof keeps Stop idempotent.
+The first activation failure is retained. Rollback leaves the workspace stopped,
+changes it back to legacy mode and never restores old tokens or starts it. Any later
 legacy start requires a new explicit action. A new `prepare` can supersede an
 obsolete prepared plan; failed or cancelled rollouts require rollback first.
 Up to 128 activation records and their three action receipts are retained per
