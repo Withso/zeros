@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -11,7 +11,10 @@ import { designDirectoryEntry } from "../metadata";
 
 const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=", "base64");
 
-describe("Design frames a worktree change reaches", () => {
+// A checkout opened through a symlink (a linked folder, or /tmp on macOS) is
+// named by its link path, while its real path differs.
+describe.each([["its own path", false], ["a symlinked path", true]] as const)("Design frames a worktree change reaches, for a checkout at %s", (_where, linked) => {
+  let base: string;
   let root: string;
   let folder: string;
   let published: DesignFramesChange[];
@@ -40,7 +43,13 @@ describe("Design frames a worktree change reaches", () => {
 
   beforeEach(async () => {
     resetDesignIdentityCacheForTests();
-    root = await mkdtemp(path.join(tmpdir(), "zeros-frame-changes-"));
+    base = await mkdtemp(path.join(tmpdir(), "zeros-frame-changes-"));
+    root = base;
+    if (linked) {
+      await mkdir(path.join(base, "checkout"));
+      root = path.join(base, "link");
+      await symlink(path.join(base, "checkout"), root, "dir");
+    }
     process.env.ZEROS_DATA_DIR = path.join(root, "private");
     folder = path.join(root, DESIGN_DIRECTORY_NAME);
     await initializeDesignDocument(root);
@@ -68,7 +77,7 @@ describe("Design frames a worktree change reaches", () => {
   afterEach(async () => {
     changes.stop();
     delete process.env.ZEROS_DATA_DIR;
-    await rm(root, { recursive: true, force: true });
+    await rm(base, { recursive: true, force: true });
   });
 
   it("names the frames whose reads a change reaches, inside the directory or out, and nothing for other files", async () => {
@@ -83,6 +92,15 @@ describe("Design frames a worktree change reaches", () => {
     expect(await changed("src/app.ts", "README.md")).toEqual([]);
     const sequences = published.map((change) => change.sequence);
     expect(new Set(sequences).size).toBe(sequences.length);
+  });
+
+  it("names the frames that place a registered component when its frame changes", async () => {
+    await editCanvas((canvas) => { canvas.frames.frame_1.component = "tile"; });
+    await touch(`${DESIGN_DIRECTORY_NAME}/page-1/a.html`, frame('<zd-tile data-oid="t"></zd-tile>'));
+    const navigation = await readDesignNavigationSnapshot(root);
+    expect((await prepareDesignNavigationFrames(root, navigation.catalogRevision, files)).errors).toEqual([]);
+    await touch(`${DESIGN_DIRECTORY_NAME}/page-1/b.html`, frame("changed"));
+    expect(await changed(`${DESIGN_DIRECTORY_NAME}/page-1/b.html`)).toMatchObject([{ frames: ["page-1/a.html", "page-1/b.html"] }]);
   });
 
   it("re-reads the catalog for canvas edits, naming the frames whose identity inputs moved", async () => {

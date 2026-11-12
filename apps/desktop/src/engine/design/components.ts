@@ -233,7 +233,10 @@ async function loadDefinitions(
       return root ? readSafeRegularFile(root, target, MAX_COMPONENT_BYTES) : null;
     };
     const registered = registry.get(name);
-    const legacy = await readSource(canonicalDirectory, path.join(canonicalDirectory ?? directory, `${name}.html`), `components/${name}.html`);
+    // Reads use the checkout's own path spelling, the one read sets record and
+    // worktree changes report; the reader confines each file to the real
+    // Design root when it opens it.
+    const legacy = await readSource(canonicalDirectory && designRoot, path.join(directory, `${name}.html`), `components/${name}.html`);
     if (registered && legacy) {
       errors.push({
         component: name,
@@ -242,7 +245,7 @@ async function loadDefinitions(
       });
       continue;
     }
-    const safe = registered ? await readSource(canonicalDesignRoot, path.join(canonicalDesignRoot, ...registered.split("/")), registered) : legacy;
+    const safe = registered ? await readSource(designRoot, path.join(designRoot, ...registered.split("/")), registered) : legacy;
     if (registered && (!safe || safe.size > MAX_COMPONENT_BYTES)) {
       errors.push({ component: name, code: "component-invalid", file: registered,
         message: `The frame registered as zd-${name} (${registered}) could not be read or is over ${MAX_COMPONENT_BYTES / 1024} KiB.` });
