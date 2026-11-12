@@ -32,6 +32,8 @@ import { openBoundedDirectorySync } from "./files/bounded-read-sync";
 import { DESIGN_CATALOG_READ_CAPABILITY, DESIGN_CATALOG_READ_OPERATION, DESIGN_CATALOG_WIDE_BATCHES_CAPABILITY, DESIGN_FRAMES_CHANGES_CAPABILITY, DESIGN_LAZY_PREPARATION_CAPABILITY, DESIGN_MUTATION_SNAPSHOTS_CAPABILITY, DESIGN_PAGE_SCOPED_MUTATIONS_CAPABILITY } from "@zeros/protocol/design-catalog";
 import { DESIGN_PREVIEW_JOBS_CAPABILITY, DESIGN_RECORDINGS_CAPABILITY, DESIGN_RECORDINGS_COLOR_SCHEME_CAPABILITY, DESIGN_RECORDINGS_READ_FAILURES_CAPABILITY, DESIGN_THUMBNAILS_CAPABILITY, DESIGN_THUMBNAILS_PREPARE_CAPABILITY, DESIGN_THUMBNAILS_STORE_CAPABILITY } from "@zeros/protocol/design-capture";
 import { DESIGN_SOURCE_SURFACES_CAPABILITY } from "@zeros/protocol/design-surface";
+import { DESIGN_COMPONENT_OPTIONS_CAPABILITY } from "@zeros/protocol/design-catalog";
+import { isDesignComponentVariantName } from "@zeros/protocol/design-path";
 import { DESIGN_COPY_PLACEMENT_CAPABILITY } from "@zeros/protocol/design-relocation";
 import {
   personalRepoRoot,
@@ -1663,14 +1665,17 @@ export class ZerosEngine {
         const { workspaceId, resourcePath } = parsed;
         const surface = url.searchParams.get("surface");
         const theme = url.searchParams.get("theme");
+        const variant = url.searchParams.get("variant");
         if ((surface !== null && surface !== "1") ||
-            (theme !== null && (surface !== "1" || !/^[a-z][a-z0-9_-]{0,63}$/.test(theme)))) return null;
+            (theme !== null && (surface !== "1" || !/^[a-z][a-z0-9_-]{0,63}$/.test(theme))) ||
+            (variant !== null && !isDesignComponentVariantName(variant))) return null;
         const resource = await this.workspace.readDesignProtocolResource(
           workspaceId,
           {
             path: resourcePath,
             sourceVersion: url.searchParams.get("v"),
             ...(surface === "1" ? { surface: true, theme } : {}),
+            ...(variant !== null ? { variant } : {}),
           },
         );
         if (!resource) return null;
@@ -9174,7 +9179,7 @@ export class ZerosEngine {
         port: this.actualPort,
         protocolVersion: PROTOCOL_VERSION,
         minProtocolVersion: MIN_SUPPORTED_PROTOCOL,
-        capabilities: [DESIGN_CATALOG_READ_CAPABILITY, CONVERSATION_REPLAY_CAPABILITY, ...(client.kind === "local" ? [DESIGN_PREVIEW_JOBS_CAPABILITY, DESIGN_LAZY_PREPARATION_CAPABILITY, DESIGN_SOURCE_SURFACES_CAPABILITY, DESIGN_COPY_PLACEMENT_CAPABILITY, DESIGN_MUTATION_SNAPSHOTS_CAPABILITY, DESIGN_PAGE_SCOPED_MUTATIONS_CAPABILITY, DESIGN_THUMBNAILS_STORE_CAPABILITY, DESIGN_FRAMES_CHANGES_CAPABILITY,
+        capabilities: [DESIGN_CATALOG_READ_CAPABILITY, CONVERSATION_REPLAY_CAPABILITY, ...(client.kind === "local" ? [DESIGN_PREVIEW_JOBS_CAPABILITY, DESIGN_LAZY_PREPARATION_CAPABILITY, DESIGN_SOURCE_SURFACES_CAPABILITY, DESIGN_COMPONENT_OPTIONS_CAPABILITY, DESIGN_COPY_PLACEMENT_CAPABILITY, DESIGN_MUTATION_SNAPSHOTS_CAPABILITY, DESIGN_PAGE_SCOPED_MUTATIONS_CAPABILITY, DESIGN_THUMBNAILS_STORE_CAPABILITY, DESIGN_FRAMES_CHANGES_CAPABILITY,
           // Wide catalog batches are Local: a remote transport keeps 256 KB replies.
           DESIGN_CATALOG_WIDE_BATCHES_CAPABILITY,
           // Batch thumbnails need a capture host to draw them.

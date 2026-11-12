@@ -8,6 +8,7 @@
 
 import {
   AlertTriangle,
+  Component as ComponentGlyph,
   Diamond,
   Download,
   ExternalLink,
@@ -201,9 +202,13 @@ import {
   captureDesignRuntimeScreenshot,
   clearDesignNodeStylePreviewTransient,
   previewDesignNodeGeometry,
+  selectDesignTargets,
   setDesignNodeVisibility,
   settleDesignHistorySelection,
 } from "./state/design-selection";
+import { designComponentPartOf } from "@zeros/protocol/design-runtime";
+import { designComponentTextLock, isDesignComponentPartNodeId } from "./state/design-component-parts";
+import type { DesignComponentOptionsTarget } from "./design-component-options";
 import {
   applyDesignEditCached,
   applyDesignHistoryCached,
@@ -232,8 +237,25 @@ import {
   paintedDesignFrameGeometry,
 } from "./design-workspace-overlays";
 import { type DesignInspectorProps } from "./design-workspace-types";
+import { loadDesignComponentOptions } from "./design-component-options-loader";
 import { PanelHeader } from "@/renderer/shared/ui/primitives/panel-header";
 
+
+// Only a component frame's selection shows Options, so its rows and the Design
+// core's option code load on their own; the workspace warms them once it has
+// a component frame.
+const DesignComponentOptions = React.lazy(() => loadDesignComponentOptions().then((module) => ({ default: module.DesignComponentOptions })));
+
+/** A component's title, as the header names it: its main frame's title, or
+ * its tag's name as a sentence for a components/ file. */
+function designComponentTitle(workspaceId: string, name: string, component: { file: string; frame: boolean }): string {
+  const main = component.frame
+    ? designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.frames.find((candidate) => candidate.file === component.file)
+    : undefined;
+  if (main?.title) return main.title;
+  const words = name.replace(/-/g, " ");
+  return words.charAt(0).toUpperCase() + words.slice(1);
+}
 
 /** What canvas metadata can store; frame fields settle inside it. */
 const DESIGN_FRAME_SIZE_RANGE = { min: 1, max: DESIGN_FRAME_MAX_SIZE };
@@ -1442,6 +1464,8 @@ export const DesignInspector = React.memo(function DesignInspector({
   onOpenMotionTimeline,
   zoomActionsRef,
   onAskAgent,
+  panelVisible = true,
+  onOpenFile,
 }: DesignInspectorProps) {
   const styleOriginLabel = useDesignStyleOriginLabel(workspaceId);
   const tokenCatalog = useDesignFrameTokenCatalog(workspaceId, frame?.file);
@@ -1503,6 +1527,9 @@ export const DesignInspector = React.memo(function DesignInspector({
   const [frameAction, setFrameAction] = useState<"export" | null>(null);
   const [exportScale, setExportScale] = useState(1);
   const [pendingHistoryActions, setPendingHistoryActions] = useState(0);
+  // An instance's part is read only: the panel shows its values, inert.
+  const partSelected = isDesignComponentPartNodeId(selectedNodeId);
+  const editsDisabled = !active || pendingHistoryActions > 0 || partSelected;
   const [cssMode, setCssMode] = useState(false);
   const inspectorRef = useRef<HTMLElement | null>(null);
   const inspectorId = workspaceId
@@ -2694,7 +2721,7 @@ export const DesignInspector = React.memo(function DesignInspector({
               : DESIGN_FRAME_POSITION_RANGE
           }
           compact={options?.compact}
-          disabled={!active || pendingHistoryActions > 0}
+          disabled={editsDisabled}
           applied
           onPreview={(next) => {
             const number = Number(next);
@@ -2827,7 +2854,7 @@ export const DesignInspector = React.memo(function DesignInspector({
         originLabel={styleOriginLabel}
         onLayoutAction={commitLayoutAction}
         onPreviewLayoutAction={previewLayoutAction}
-        disabled={!active || pendingHistoryActions > 0}
+        disabled={editsDisabled}
         applied={applied}
         motionModeActive={motionTimelineOpen}
         motionTrackActive={motionProperties.includes(property)}
@@ -2865,8 +2892,57 @@ export const DesignInspector = React.memo(function DesignInspector({
           : elementDetails
             ? designRuntimeLayerDisplayName(elementDetails)
             : null;
-  const selectionType =
-    selectionTitle && selectionTitle !== selectionName ? selectionName : null;
+  // A frame whose file declares options is a component: its Options section
+  // mounts only while the frame itself is selected and the panel is shown.
+  // One selected instance in another frame shows that instance's; a part of
+  // one names the instance and shows nothing to edit.
+  const selectedPart = selectedNodeId ? designComponentPartOf(selectedNodeId) : null;
+  const instanceNodeId = selectedPart?.host ?? (styleNodeIds.length <= 1 ? selectedNodeId : null);
+  // Own entries only: a layer id such as "constructor" is not a host.
+  const instanceHost = instanceNodeId && frame?.instances && Object.hasOwn(frame.instances.hosts, instanceNodeId)
+    ? frame.instances.hosts[instanceNodeId] : undefined;
+  const instanceComponent = instanceHost && frame?.instances && Object.hasOwn(frame.instances.components, instanceHost.component)
+    ? frame.instances.components[instanceHost.component] : undefined;
+  const instanceTitle = instanceHost && instanceComponent && workspaceId
+    ? designComponentTitle(workspaceId, instanceHost.component, instanceComponent)
+    : null;
+  const optionsTarget: DesignComponentOptionsTarget | null = !workspaceId || !active || !panelVisible || !frame
+    ? null
+    : frameSelected && frame.component && !selectedNodeId && styleNodeIds.length <= 1
+      ? { kind: "main", component: frame.component }
+      : !selectedPart && instanceNodeId && instanceHost && instanceComponent && instanceTitle && styleNodeIds.length === 1
+        ? { kind: "instance", nodeId: instanceNodeId, title: instanceTitle, host: instanceHost, component: instanceComponent,
+            ...(frame.instances?.notApplied ? { notApplied: frame.instances.notApplied } : {}) }
+        : null;
+  const optionsFrame = optionsTarget ? frame : null;
+  // As in Layers, the header names the instance by its component; the line
+  // under it says what it is, and a part's line offers its instance too.
+  const componentHeader = instanceTitle && instanceComponent && instanceNodeId && (selectedPart || optionsTarget?.kind === "instance")
+    ? { title: instanceTitle, component: instanceComponent, host: instanceNodeId, part: selectedPart?.part ?? null }
+    : null;
+  const textLock = frame && selectedNodeId ? designComponentTextLock(frame, selectedNodeId) : null;
+  const selectionType = optionsTarget?.kind === "main"
+    ? "Component"
+    : selectionTitle && selectionTitle !== selectionName ? selectionName : null;
+  const editMain = () => {
+    if (!workspaceId || !folder || !componentHeader) return;
+    const { component, part } = componentHeader;
+    if (!component.frame) {
+      onOpenFile?.(`${designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.directory ?? ""}/${component.file}`.replace(/^\//, ""));
+      return;
+    }
+    const snapshot = designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data;
+    const pageId = snapshot?.pages?.find((page) => page.frameFiles.includes(component.file))?.id;
+    zoomActionsRef.current?.revealFrames?.({ files: [component.file], pageId });
+    // A part's layer on the main has the id the part was made from.
+    const nodeId = part ? part.replace(/#.*$/, "") : null;
+    void selectDesignTargets({ workspaceId, folder, targets: [{ frame: component.file, ...(nodeId ? { nodeId } : {}) }] })
+      .catch((error) => toast.error("Couldn't open the main component", { description: errorMessage(error) }));
+  };
+  const selectInstance = () => {
+    if (!workspaceId || !folder || !frame || !componentHeader) return;
+    void selectDesignTargets({ workspaceId, folder, targets: [{ frame: frame.file, nodeId: componentHeader.host }] }).catch(() => {});
+  };
   const SelectionGlyph =
     styleNodeIds.length > 1
       ? Layers
@@ -2908,9 +2984,17 @@ export const DesignInspector = React.memo(function DesignInspector({
           <DesignPagePicker workspaceId={workspaceId} directoryId={previewDirectoryId} pages={pages}
             activePageId={activePageId} frames={pageFrames ?? []} active={active} />
         ) : <>
-          <SelectionGlyph className="text-fg2 size-3.5 shrink-0" aria-hidden="true" />
-          <span className="text-fg1 min-w-0 flex-1 truncate text-xs font-medium">{selectionTitle ?? selectionName}</span>
-          {selectionType ? (
+          {componentHeader || optionsTarget?.kind === "main"
+            ? <ComponentGlyph className="text-fg2 size-3.5 shrink-0" aria-hidden="true" />
+            : <SelectionGlyph className="text-fg2 size-3.5 shrink-0" aria-hidden="true" />}
+          <span data-design-inspector-title="" className="text-fg1 min-w-0 flex-1 truncate text-xs font-medium">
+            {componentHeader && !componentHeader.part ? componentHeader.title : selectionTitle ?? selectionName}
+          </span>
+          {componentHeader && !componentHeader.part ? (
+            <Button type="button" variant="ghost" size="compact" data-design-edit-main="" disabled={!componentHeader.component.frame && !onOpenFile} onClick={editMain}>
+              {componentHeader.component.frame ? "Edit main" : "Open in Files"}
+            </Button>
+          ) : selectionType ? (
             <span className="text-fg3 shrink-0 text-3xxs leading-4 tabular-nums">{selectionType}</span>
           ) : null}
           {hiddenBy === "self" ? (
@@ -2921,7 +3005,7 @@ export const DesignInspector = React.memo(function DesignInspector({
                 variant="ghost"
                 size="compact"
                 data-design-hidden-show=""
-                disabled={!active || pendingHistoryActions > 0}
+                disabled={editsDisabled}
                 onClick={showSelectedLayer}
               >
                 Show
@@ -2935,12 +3019,28 @@ export const DesignInspector = React.memo(function DesignInspector({
               states={elementDetails.states}
               held={heldState}
               active={active}
-              disabled={pendingHistoryActions > 0}
+              disabled={pendingHistoryActions > 0 || partSelected}
               onPick={pickLayerState}
             />
           ) : null}
         </>}
       </div>
+      {componentHeader ? (
+        <div data-design-component-of={componentHeader.part ? "part" : "instance"}
+          className="border-border1 text-fg3 flex min-h-7 min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1 border-t py-1 pr-1.5 pl-3 text-xs leading-4">
+          <ComponentGlyph className="size-3 shrink-0" aria-hidden="true" />
+          {/* Its own width first, so a narrow panel moves the buttons to a line of their own. */}
+          <span className="min-w-0 grow basis-auto truncate">{componentHeader.part ? `Part of ${componentHeader.title}.` : `Instance of ${componentHeader.title}`}</span>
+          {componentHeader.part ? (
+            <span className="flex shrink-0 items-center gap-1">
+              <Button type="button" variant="secondary" size="compact" data-design-select-instance="" onClick={selectInstance}>Select instance</Button>
+              <Button type="button" variant="secondary" size="compact" data-design-edit-main="" disabled={!componentHeader.component.frame && !onOpenFile} onClick={editMain}>
+                {componentHeader.component.frame ? "Edit main" : "Open in Files"}
+              </Button>
+            </span>
+          ) : null}
+        </div>
+      ) : null}
     </section>
   );
   const exportSection =
@@ -3064,7 +3164,7 @@ export const DesignInspector = React.memo(function DesignInspector({
             key={`${styleOwner.key}:css`}
             details={elementDetails}
             originLabel={styleOriginLabel}
-            disabled={!active || pendingHistoryActions > 0}
+            disabled={editsDisabled}
             onPreviewStyles={previewSelectedStyles}
             onCancelStylePreview={clearSelectedStylePreview}
             onCommitStyles={commitSelectedStyles}
@@ -3074,6 +3174,25 @@ export const DesignInspector = React.memo(function DesignInspector({
         <ScrollArea className="min-h-0 flex-1">
           <div className="flex flex-col pb-6">
             {inspectorSelectionHeader}
+            {textLock?.kind === "option" ? (
+              <p data-design-text-set-by="" className="border-border1 text-fg2 border-b px-3 py-2 text-3xxs leading-4">{textLock.message}</p>
+            ) : null}
+            {optionsFrame && optionsTarget && workspaceId ? (
+              <DesignTokenCatalogContext.Provider value={tokenCatalog}>
+                <React.Suspense fallback={null}>
+                <DesignComponentOptions
+                  key={`${optionsFrame.file}:${optionsFrame.sourceVersion}:${optionsTarget.kind === "instance" ? optionsTarget.nodeId : ""}`}
+                  workspaceId={workspaceId}
+                  frame={optionsFrame}
+                  target={optionsTarget}
+                  directory={designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.directory ?? ""}
+                  lint={lint}
+                  disabled={editsDisabled}
+                  onAskAgent={onAskAgent}
+                />
+                </React.Suspense>
+              </DesignTokenCatalogContext.Provider>
+            ) : null}
             {heldState && heldChanges ? (
               <DesignHeldStateNote state={heldState} count={heldChanges.count} onBack={() => pickLayerState(null)} />
             ) : null}
@@ -3108,8 +3227,8 @@ export const DesignInspector = React.memo(function DesignInspector({
                   active={active}
                   ownerKey={styleOwnerKey}
                   origins={fieldOrigins}
-                  disabled={!active || pendingHistoryActions > 0}
-                  readOnly={holding}
+                  disabled={editsDisabled}
+                  readOnly={holding || partSelected}
                   apiRef={overlaysApiRef}
                   onChooseToken={chooseFieldToken}
                   onReset={resetField}
@@ -3135,7 +3254,7 @@ export const DesignInspector = React.memo(function DesignInspector({
                     }
                     layoutParents={shownParents}
                     selectionCount={styleNodeIds.length}
-                    disabled={!active || pendingHistoryActions > 0}
+                    disabled={editsDisabled}
                     onPreviewStyles={previewSelectedStyles}
                     onCancelStylePreview={clearSelectedStylePreview}
                     onCommitStyles={commitSelectedStyles}

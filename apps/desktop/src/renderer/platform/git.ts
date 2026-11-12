@@ -557,12 +557,14 @@ export async function designFrame(
   workspaceId: string,
   frame: string,
   depth = 4,
+  variant?: string,
 ): Promise<DesignFrameDocumentWire> {
   return bridgeDesignFrame(
     requireBridge("load a design frame"),
     workspaceId,
     frame,
     depth,
+    variant,
   );
 }
 

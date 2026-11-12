@@ -1,5 +1,5 @@
 // PURPOSE: The briefs Design sends to an agent for "Ask agent to sync",
-// "Ask agent to fix", "Ask agent to change" and Tidy. They stay short: the
+// "Ask agent to fix", "Ask agent to change", Tidy and a component's options. They stay short: the
 // procedure lives in the packaged Zeros Design skill, so typing "sync my
 // styles" in any chat matches them.
 
@@ -111,6 +111,42 @@ export function designTidyBrief(input: {
       `Changes (value on the layer over the value it replaced):\n${input.changes
         .map((change) => `- ${change.layer} (data-oid "${change.oid}"): ${change.property}: ${change.value} over ${change.replaced.value} from ${from(change.replaced)}`)
         .join("\n")}`,
+    ].join("\n"),
+  };
+}
+
+const where = (directory: string, frame: string, title: string) =>
+  `the component "${title}" (${frame})${directory ? ` in the Design directory "${directory}"` : ""}`;
+
+/** "Ask agent to change options": a person only adjusts options; the agent
+ * adds, removes or reshapes them. */
+export function designComponentOptionsBrief(input: { directory: string; frame: string; title: string }): DesignAgentBrief {
+  return {
+    label: `Change the options of ${input.title}`,
+    text: [
+      `I want to change the options of ${where(input.directory, input.frame, input.title)}. Ask me what to change first.`,
+      'Follow "Change a component\'s options" in the Zeros Design skill. Do not stage or commit.',
+      CODE_RULE,
+    ].join("\n"),
+  };
+}
+
+/** "Ask agent to fix": options that could not be applied. */
+export function designComponentOptionsFixBrief(input: {
+  directory: string;
+  frame: string;
+  title: string;
+  shows: "last-good" | "defaults";
+  problems: readonly { line: number; message: string }[];
+}): DesignAgentBrief {
+  const shows = input.shows === "last-good" ? "its last good render" : "the component's defaults";
+  return {
+    label: `Fix the options of ${input.title}`,
+    text: [
+      `The options of ${where(input.directory, input.frame, input.title)} could not be applied; the frame shows ${shows}.${input.problems.length ? "" : " Run design validate to see why."}`,
+      ...(input.problems.length ? ["Problems:", ...input.problems.map((problem) => `- line ${problem.line}: ${problem.message}`)] : []),
+      'Follow "Fix a component\'s options" in the Zeros Design skill. Do not stage or commit.',
+      CODE_RULE,
     ].join("\n"),
   };
 }

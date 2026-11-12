@@ -79,6 +79,53 @@ To create a frame:
 - Give every selectable element in the definition a unique, stable `data-zid` (not `data-oid`). `<slot>` receives instance children; `<slot data-zd-attr="label">` receives an escaped attribute value.
 - Keep scripts, event handlers, external URLs and `data-oid` out of definitions. Component references resolve relative to the Design root.
 
+### Components with options
+
+A frame becomes a component when its file declares options and its record in `meta/canvas.json` registers a name. People adjust options in the Style panel; you create and change them. There is no JavaScript: Zeros evaluates the template below itself, and nothing else runs.
+
+Register the frame with a `component` field on its record. The name is the tag other frames use:
+
+```json
+"chat_composer": { "kind": "html", "source": "chat/composer.html", "title": "Chat composer", "component": "chat-composer",
+                   "x": 0, "y": 0, "width": 1120, "height": 240 }
+```
+
+Declare options in `<head>`, one element per line, each closed with its end tag:
+
+```html
+<template data-zd-options>
+  <zd-option name="width" type="number" label="Width" default="1120" min="640" max="1440" step="8" unit="px"></zd-option>
+  <zd-option name="attachments" type="number" label="Attachments" default="2" min="0" max="4" step="1"></zd-option>
+  <zd-option name="mode" type="choice" label="Mode" choices="ask plan" default="ask"></zd-option>
+  <zd-option name="toolbar" type="boolean" label="Toolbar" default="true"></zd-option>
+  <zd-option name="accent" type="color" label="Accent" default="var(--blue-primary)"></zd-option>
+  <zd-option name="send-radius" type="number" label="Corner radius" group="Send button" default="8" min="0" max="16" unit="px"></zd-option>
+  <zd-option name="send-label" type="text" label="Label" group="Send button" default="Send"></zd-option>
+  <zd-option name="motion" type="easing" label="Easing" default="spring(0.2) 150ms"></zd-option>
+  <zd-derive name="gutter" value="width >= 1200 ? 24 : 16" unit="px"></zd-derive>
+  <zd-variant name="compact" width="800" mode="plan"></zd-variant>
+</template>
+```
+
+- **Kinds.** `number` (`min`, `max`, `step`, `unit` of px, %, rem, em, ch, vw, vh, fr, deg, ms or s; it is a slider only with both `min` and `max`), `boolean`, `choice` (2–16 lowercase values in `choices`; labels come from the values, or `choice-labels="Ask|Plan"`), `color` (a colour or `var(--token)`), `text`, `easing` (a keyword, `cubic-bezier()`, `steps()` or `spring(bounce)`, then a duration). `group` folds consecutive options under one heading. `label` defaults to the name.
+- **Names.** Lowercase letters, digits and single hyphens, at most 32 characters. Not `name`, an HTML attribute an element keeps (`class`, `style`, `id`, `hidden`, `title` and the like), anything starting `data-`, `aria-`, `on` or `zd-`, or a function name.
+- **Variants** are named sets of values (`default` is taken: it is the declared defaults). **Derived values** are expressions over options, worked out in order.
+- **Values in CSS.** Number, colour, easing and numeric derived options are custom properties: `var(--zd-width)`, `var(--zd-accent)`, `var(--zd-motion-easing)` and `var(--zd-motion-duration)`, `var(--zd-gutter)`. Text, choices and booleans reach the markup only through the template.
+- **Template.** In a declaring file, `{{ expression }}` fills text and attribute values (escaped), `data-zd-if="expression"` keeps an element only when true, and `data-zd-for="item in list"` repeats it (`range(n)` or `["a", "b"]`, up to 256 times, nested 3 deep). A `<template data-zd-if>` or `<template data-zd-for>` wraps without adding an element. Holes do not work in `<style>`, `<script>`, comments, the options block, or in `style`, `href`, `src`, `srcset`, `action`, `formaction`, `poster`, `srcdoc`, `data`, `xlink:href`, `ping`, `background`, `cite`, `manifest`, `codebase`, `id`, `data-oid`, `data-zid`, `data-zd-*`, `on*` attributes or a `<meta>` `content`. Write a literal `{{` as `{{ "{{" }}`.
+- **Expressions.** Numbers, `"text"`, `true`/`false`, lists, names, `( )`, `!`, `-`, `* / %`, `+ -` (`+` joins text), `< <= > >=`, `== !=`, `&& ||`, and `a ? b : c`; functions `range`, `min`, `max`, `clamp`, `round`, `floor`, `ceil`, `len`. Types never convert: `"2" + 1` is text, `mode + 1 > 2` is an error. Put spaces around a minus (`width - 1`), since names may contain hyphens.
+
+Place an instance with its values as attributes. A missing attribute takes the variant's value, else the default; write `false` explicitly:
+
+```html
+<zd-chat-composer data-oid="ws-composer" zd-variant="compact" width="760" toolbar="false"></zd-chat-composer>
+```
+
+- The component's linked stylesheets come with it, and its URLs resolve from its own file. Its inner layers carry `data-zd-part` (their `data-oid` in the component frame, or `data-zid` in a `components/` file) and are not separately editable.
+- Changing an option on an instance changes one attribute; on the main component it changes the `default` (or the variant line it shows). Keep one element per line so each change is one line in Git.
+- **Change a component's options** (when a person asks, or Zeros sends "Change the options of …"): ask what to change first. Add, remove, rename or regroup `<zd-option>` lines and their template uses together; keep existing names and values unless asked, since instances in other frames carry them as attributes; keep one element per line; run `design validate` on the component and on frames that place it; capture it before and after; never stage or commit.
+- **Fix a component's options** (Zeros sends "Fix the options of …" with the problems): run `design validate`, repair each named declaration, expression or instance value at its line with the smallest change that keeps what the person set, validate again until it reports none, capture the frame to check it renders, and say what changed. Never stage or commit.
+- `design validate` reports options, expressions and instance values that do not fit, an unregistered frame that declares options, and a name registered twice or also used by `components/<name>.html`. When options cannot apply, the frame keeps its last good render in this session, or shows the component's defaults.
+
 ## Assets and media
 
 - Images: `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, `.avif` inside the Design directory (keep them in `assets/`), up to 10 MiB each and 12 MiB of images per frame. They are inlined when the frame renders.

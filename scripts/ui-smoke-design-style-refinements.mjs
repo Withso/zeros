@@ -6,6 +6,8 @@ import { runDesignStyleStatesSmoke } from "./ui-smoke-design-style-states.mjs";
 import { runDesignFieldMarksSmoke } from "./ui-smoke-design-field-marks.mjs";
 import { runDesignFieldStatesSmoke } from "./ui-smoke-design-field-states.mjs";
 import { runDesignFrameChangesSmoke } from "./ui-smoke-design-frame-changes.mjs";
+import { runDesignComponentOptionsSmoke } from "./ui-smoke-design-component-options.mjs";
+import { runDesignComponentInstancesSmoke } from "./ui-smoke-design-component-instances.mjs";
 import { runDesignTokenPillsSmoke } from "./ui-smoke-design-token-pills.mjs";
 import { runDesignDeferredFocusSmoke, runDesignCloseFocusSmoke } from "./ui-smoke-design-focus.mjs";
 import { runDesignThemeSourcesSmoke } from "./ui-smoke-design-theme-sources.mjs";
@@ -451,6 +453,9 @@ export async function runDesignStyleRefinementsSmoke(context) {
   await runDesignFieldMarksSmoke(context);
   // The frame info panel: changes made by hand and Tidy.
   await runDesignFrameChangesSmoke(context);
+  // A component frame's Options section; its variants, instances and parts.
+  await runDesignComponentOptionsSmoke(context);
+  await runDesignComponentInstancesSmoke(context);
   await runDesignDeferredFocusSmoke(context);
   await runDesignDeferredFocusSmoke({ ...context, moveFocus: false });
   await runDesignCloseFocusSmoke(context);

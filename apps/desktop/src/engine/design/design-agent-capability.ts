@@ -78,6 +78,8 @@ export const DESIGN_AGENT_SAFE_OPERATION_TYPES = Object.freeze<
   "variant.delete",
   "variant.set-parameter",
   "variant.unset-parameter",
+  "component.set-option",
+  "component.save-variant",
 ]);
 
 const SAFE_OPERATION_TYPES = new Set<DesignAgentOperationType>(

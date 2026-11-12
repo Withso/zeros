@@ -9,6 +9,8 @@
     ".": "./src/index.ts",
     "./api": "./src/api.ts",
     "./adapter": "./src/adapter.ts",
+    "./component-options": "./src/component-options.ts",
+    "./component-template": "./src/component-template.ts",
     "./css": "./src/css.ts",
     "./html": "./src/html.ts",
     "./model": "./src/model.ts",

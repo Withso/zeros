@@ -4,10 +4,12 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { DesignSurfaceCost } from "@zeros/protocol/design-surface";
 import { DESIGN_MAX_FRAMES_PER_PAGE } from "@zeros/protocol/design-pages";
+import { designFrameComponentSchema, designFrameInstancesSchema, type DesignFrameComponent, type DesignFrameInstances } from "@zeros/protocol/design-catalog";
 import { isDevRuntime } from "../runtime";
 import { durableDesignDependenciesCurrent, type DurableDesignDependency } from "./dependency-read-set";
 import type { CanvasDocument } from "./document-model";
 import { designPrivateStorageDirectory } from "./metadata-storage";
+import { designComponentRegistry } from "./component-registry";
 
 /** What preparing a frame computes from its sources, beside canvas metadata. */
 export interface DesignFrameIdentity {
@@ -15,6 +17,12 @@ export interface DesignFrameIdentity {
   surfaceCost: DesignSurfaceCost | null;
   nodeCount: number;
   layerCount: number;
+  /** A frame that declares options. Derived from the frame's source; a read
+   * that showed a last good render is never stored, so `notApplied` here is
+   * at most "defaults". */
+  component?: DesignFrameComponent;
+  /** The frame's own component instances, from the same preparation. */
+  instances?: DesignFrameInstances;
 }
 
 // A frame's identity is reused while every file its preparation read keeps
@@ -90,7 +98,10 @@ export function designFrameIdentityContext(canvas: CanvasDocument, file: string,
   let shared = canvasLevel.get(canvas);
   if (shared === undefined) {
     const { frames: _frames, frame_info: _info, pages: _pages, view: _view, ...rest } = canvas as CanvasDocument & { view?: unknown };
-    shared = JSON.stringify(rest);
+    // Which frame each <zd-name> resolves to is canvas-wide; a canvas that
+    // registers no component keeps the context it always had.
+    const components = [...designComponentRegistry(canvas).files];
+    shared = components.length ? JSON.stringify([rest, components]) : JSON.stringify(rest);
     if (Object.isFrozen(canvas)) canvasLevel.set(canvas, shared);
   }
   const page = pageId === undefined ? undefined : canvas.pages?.find((candidate) => candidate.id === pageId);
@@ -136,9 +147,15 @@ async function load(workspacePath: string, page: Page): Promise<void> {
     const indexes = entry.dependencies as unknown[];
     if (!indexes.every((index) => Number.isSafeInteger(index) && usable[index as number])) continue;
     if (page.entries.has(file)) continue;
+    const component = identity.component === undefined ? undefined : designFrameComponentSchema.safeParse(identity.component);
+    if (component && !component.success) continue;
+    const instances = identity.instances === undefined ? undefined : designFrameInstancesSchema.safeParse(identity.instances);
+    if (instances && !instances.success) continue;
     page.entries.set(file, { context: entry.context, identity: {
       sourceVersion: identity.sourceVersion, surfaceCost: identity.surfaceCost ?? null,
       nodeCount: identity.nodeCount, layerCount: identity.layerCount,
+      ...(component ? { component: component.data } : {}),
+      ...(instances ? { instances: instances.data } : {}),
     }, dependencies: indexes.map((index) => table[index as number]!) });
   }
 }

@@ -115,6 +115,22 @@ describe("Design catalog service authority", () => {
     const capable = designFramesPrepareReplySchema.parse(await service.handle("design.frames.prepare", { ...input, surfaceCosts: true }));
     expect(capable.frames[0]).toHaveProperty("surfaceCost", { sourceBytes: expect.any(Number), nodes: 3, imageBytes: 0 });
   });
+  it.each([null, "organization-local"])("reports a component frame's options only to a renderer that asks, for %s", async organizationId => {
+    insert(root, organizationId);
+    await writeFile(path.join(root, directory, "page-1/a.html"),
+      '<html><head><template data-zd-options>\n<zd-option name="width" type="number" default="1" unit="px"></zd-option>\n</template></head><body data-oid="a">Synthetic</body></html>');
+    const navigation = await service.handle("design.navigation.read", { workspaceId: params.workspaceId }) as { catalogRevision: string };
+    const input = { workspaceId: params.workspaceId, directoryId: params.directoryId,
+      catalogRevision: navigation.catalogRevision, files: ["page-1/a.html"] };
+    const legacy = designFramesPrepareReplySchema.parse(await service.handle("design.frames.prepare", input));
+    expect(legacy.frames[0]).not.toHaveProperty("component");
+    const capable = designFramesPrepareReplySchema.parse(await service.handle("design.frames.prepare", { ...input, componentOptions: true }));
+    expect(capable.frames[0]?.component).toEqual({
+      elements: [{ tag: "zd-option", attributes: [{ name: "name", value: "width" }, { name: "type", value: "number" }, { name: "default", value: "1" }, { name: "unit", value: "px" }] }],
+      reach: { width: "css" },
+    });
+    expect(capable.frames[0]).not.toHaveProperty("surfaceCost");
+  });
   it.each([null, "organization-local"])("negotiates page hashes and page-scoped write acknowledgements for %s", async organizationId => {
     insert(root, organizationId);
     const workspaceId = params.workspaceId;

@@ -46,6 +46,10 @@ export interface DesignLintViolation {
     | "no-external-url"
     | "component-undefined"
     | "component-invalid"
+    | "component-option-invalid"
+    | "component-expression-invalid"
+    | "component-value-invalid"
+    | "component-unregistered"
     | "render-budget"
     | "contrast"
     | "overflow"
@@ -114,6 +118,10 @@ export interface DesignCanvasFrame extends DesignFrameSummary {
   sourceVersion: string;
   /** Passive HTML admission. Unknown/legacy costs retain bounded previews. */
   surfaceCost?: import("@zeros/protocol/design-surface").DesignSurfaceCost | null;
+  /** Set when the frame's file declares options. */
+  component?: import("@zeros/protocol/design-catalog").DesignFrameComponent;
+  /** Set when the frame places component instances with options. */
+  instances?: import("@zeros/protocol/design-catalog").DesignFrameInstances;
 }
 
 export interface DesignFrameTreeNode {

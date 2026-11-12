@@ -194,6 +194,7 @@ import {
   type DesignMotionTimelineDraft,
 } from "./design-motion-timeline";
 import { canEditDesignNodeText } from "./design-node-capabilities";
+import { designComponentPartHost, designComponentTextLock, isDesignComponentPartNodeId } from "./state/design-component-parts";
 import { resolveDesignSelectionShortcut } from "./design-selection-shortcuts";
 import {
   createDesignTextMarkup,
@@ -1823,12 +1824,13 @@ export const DesignCanvas = React.memo(function DesignCanvas({
     const actions: DesignCanvasZoomActions = {
       zoomIn: () => zoomAt((currentZoom) => currentZoom * 1.2),
       zoomOut: () => zoomAt((currentZoom) => currentZoom / 1.2),
+      revealFrames: ({ files, pageId }) => revealAgentTarget({ files: [...files], rects: [], pageId: pageId ?? null }),
     };
     zoomActionsRef.current = actions;
     return () => {
       if (zoomActionsRef.current === actions) zoomActionsRef.current = null;
     };
-  }, [active, zoomActionsRef, zoomAt]);
+  }, [active, revealAgentTarget, zoomActionsRef, zoomAt]);
 
   /** Frame creation returns the aggregate snapshot, avoiding a follow-up read.
    * Drawn geometry is authored in that same mutation, so no default-size frame
@@ -2151,6 +2153,13 @@ export const DesignCanvas = React.memo(function DesignCanvas({
    * Select while the independent inline editor owns keyboard input. */
   const finishInlineTextTool = useCallback(
     (frame: DesignCanvasFrameWire, details: DesignRuntimeNodeDetails) => {
+      // A part is read only, and text a main component's option fills is
+      // that option's to set.
+      const lock = designComponentTextLock(frame, details.oid);
+      if (lock) {
+        toast.info(lock.message);
+        return;
+      }
       const initialText = details.text ?? "";
       inlineTextDraftRef.current = initialText;
       activateTool("select");
@@ -2655,6 +2664,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
       if (!workspaceId || !selectedFrame) return false;
       if (gestureCancelRef.current) return true;
       const selection = designWorkspaceView(workspaceId);
+      if (selection.selectedNodeIds.some(isDesignComponentPartNodeId)) return true;
       if (nudgeCommitRef.current || queuedNudgeRef.current) {
         const previous = queuedNudgeRef.current;
         const queued = previous && previous.selectionEvent === selection.selectionEvent && previous.lifetime === nudgeLifetimeRef.current && previous.frame === selectedFrame.file && previous.theme === selection.activeTheme && isCurrentDesignPageOwner(previous.owner) ? previous : {
@@ -2780,6 +2790,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
       ) {
         return false;
       }
+      if (isDesignComponentPartNodeId(selectedNodeDetails.oid)) return true;
       const current = nudgeGestureRef.current;
       const gesture: NonNullable<typeof nudgeGestureRef.current> =
         current?.mode === "resize" &&
@@ -3719,7 +3730,8 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         !active ||
         activeTool !== "select" ||
         !event.isPrimary ||
-        event.button !== 0
+        event.button !== 0 ||
+        isDesignComponentPartNodeId(details.oid)
       ) {
         return;
       }
@@ -3950,7 +3962,8 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         !active ||
         activeTool !== "select" ||
         !event.isPrimary ||
-        event.button !== 0
+        event.button !== 0 ||
+        isDesignComponentPartNodeId(details.oid)
       ) {
         return;
       }
@@ -4145,7 +4158,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
       details: DesignRuntimeNodeDetails,
       control: DesignInlineSpacingControl,
     ) => {
-      if (!workspaceId || !active || !event.isPrimary || event.button !== 0) {
+      if (!workspaceId || !active || !event.isPrimary || event.button !== 0 || isDesignComponentPartNodeId(details.oid)) {
         return;
       }
       // Space-drag pans the canvas, even over spacing chrome.
@@ -4561,7 +4574,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
       details: DesignRuntimeNodeDetails,
       styles: Record<string, string>,
     ) => {
-      if (!workspaceId || !active) return Promise.resolve();
+      if (!workspaceId || !active || isDesignComponentPartNodeId(details.oid)) return Promise.resolve();
       publishDesignGestureLivePreview(
         workspaceId,
         frame.file,
@@ -4604,7 +4617,8 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         !active ||
         !event.isPrimary ||
         event.button !== 0 ||
-        nodes.length < 1
+        nodes.length < 1 ||
+        nodes.some((node) => isDesignComponentPartNodeId(node.oid))
       ) {
         return false;
       }
@@ -4984,7 +4998,8 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         !active ||
         !event.isPrimary ||
         event.button !== 0 ||
-        nodes.length === 0
+        nodes.length === 0 ||
+        nodes.some((node) => isDesignComponentPartNodeId(node.oid))
       ) {
         return;
       }
@@ -5320,7 +5335,8 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         !active ||
         activeTool !== "select" ||
         !event.isPrimary ||
-        event.button !== 0
+        event.button !== 0 ||
+        isDesignComponentPartNodeId(details.oid)
       ) {
         return;
       }
@@ -6162,10 +6178,10 @@ export const DesignCanvas = React.memo(function DesignCanvas({
       }
       if (event.key === "Escape" && view.selectedNodeId && selectedFrame) {
         event.preventDefault();
-        const parentId = designLayerParentId(
-          selectedNavigationTree,
-          view.selectedNodeId,
-        );
+        // Escape leaves an instance: a part's parent is its instance.
+        const parentId = isDesignComponentPartNodeId(view.selectedNodeId)
+          ? designComponentPartHost(view.selectedNodeId)
+          : designLayerParentId(selectedNavigationTree, view.selectedNodeId);
         if (parentId) navigateToNode(parentId);
         else {
           void selectDesignFrame(workspaceId!, selectedFrame, {
@@ -8452,6 +8468,9 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                     inlineTextEdit?.kind === "existing" &&
                     inlineTextEdit.frame === frame.file &&
                     inlineTextEdit.nodeId === details.oid;
+                  // An instance's part is outlined only: no handle, and a
+                  // click goes through to the frame to pick another part.
+                  const partOutline = isDesignComponentPartNodeId(details.oid);
                   // The outline traces the element's own rotated box, not the
                   // upright bounding box a rotation grows around it.
                   const overlayFrame = designSelectionOverlayFrame(
@@ -8474,6 +8493,10 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                         "absolute touch-none",
                         editingThisElement
                           ? "pointer-events-none"
+                          : partOutline
+                            ? additiveSelection
+                              ? "zd-design-selection-outline zd-design-stroke pointer-events-none"
+                              : "zd-design-hover-outline zd-design-stroke pointer-events-none"
                           : primarySelection
                             ? "zd-design-selection-outline zd-design-stroke pointer-events-auto cursor-move"
                             : additiveSelection
@@ -8543,7 +8566,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                       }}
                     >
                       <DesignOverlayGeometrySync overlay={overlayFrame} />
-                      {primarySelection && !editingThisElement ? (
+                      {primarySelection && !editingThisElement && !partOutline ? (
                         <>
                           <span
                             data-design-spacing-hover-zone=""

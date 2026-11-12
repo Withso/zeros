@@ -290,6 +290,16 @@ describe("design workspace cache", () => {
     expect(stabilizeDesignWorkspaceSnapshot(previous, legacy).styleSources).toEqual([]);
   });
 
+  it("publishes a frame whose instances changed under the same generation", () => {
+    const instances = { key: "0".repeat(16), components: {}, hosts: { inst: { component: "chat", attributes: {} } } };
+    const base = snapshot();
+    const previous = { ...base, frames: [{ ...base.frames[0]!, instances }] };
+    expect(stabilizeDesignWorkspaceSnapshot(previous, structuredClone(previous))).toBe(previous);
+    // A component's label changed in its own file: same output, new rows.
+    const relabelled = { ...previous, frames: [{ ...previous.frames[0]!, instances: { ...instances, key: "1".repeat(16) } }] };
+    expect(stabilizeDesignWorkspaceSnapshot(previous, relabelled).frames[0]!.instances?.key).toBe("1".repeat(16));
+  });
+
   it("publishes a theme rename even when nothing else changed", () => {
     const previous = { ...snapshot([]), themes: [{ id: "dark", label: "Base", base: true as const }] };
     expect(stabilizeDesignWorkspaceSnapshot(previous, structuredClone(previous))).toBe(previous);

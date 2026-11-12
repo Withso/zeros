@@ -2,6 +2,7 @@ import type { DesignOperation } from "@zeros/design-core";
 import { designFrameRuntime } from "../../../platform/bridge/design-frame-runtime";
 import { designLayerTopLevelSelectionIds } from "../design-layer-tree";
 import { designFrameViews, isPreparedDesignFrame } from "./design-frame-view";
+import { DesignComponentPartWriteError, isDesignComponentPartNodeId } from "./design-component-parts";
 import { useDesignRuntimeStore } from "./design-runtime-store";
 import { selectDesignFrame, selectDesignNodes } from "./design-selection";
 import { applyDesignEditCached, designWorkspaceSnapshotCache } from "./design-workspace-cache";
@@ -25,6 +26,8 @@ export async function applyDesignNodeAction(input: {
 }): Promise<void> {
   const { workspaceId, folder, action } = input;
   const selection = designWorkspaceView(workspaceId);
+  // Before any preview: an instance's part is read only.
+  if (selection.selectedNodeIds.some(isDesignComponentPartNodeId)) throw new DesignComponentPartWriteError();
   const frame = designFrameViews(designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data)
     .find(candidate => candidate.file === selection.selectedFrame);
   if (!frame || !isPreparedDesignFrame(frame) || !selection.selectedNodeIds.length) return;
