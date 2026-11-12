@@ -8,6 +8,8 @@ import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
 import type { CloudWorkspaceSync } from "./workspace-sync/store.js";
 import { createCloudWorkspaceSyncRoutes } from "./workspace-sync/routes.js";
+import type { CloudWorkspaceGithubReadTokens } from "./workspace-sync/github-read-token.js";
+import { createCloudWorkspaceGithubReadTokenRoutes } from "./workspace-sync/github-read-token-routes.js";
 import { HttpError } from "../authz.js";
 import { securityStreamAuthority } from "../security-events.js";
 import type { CloudV2Capabilities } from "./contract.js";
@@ -59,6 +61,7 @@ export type CloudV2RouteDeps = {
   teamSharing?: CloudTeamSharing;
   execution?: CloudExecutionContexts;
   workspaceSync?: CloudWorkspaceSync;
+  workspaceGithubReadTokens?: CloudWorkspaceGithubReadTokens;
   localDevices?: CloudLocalDeviceRoutes;
   store: Pick<CloudV2Store, "activeComputer" | "createWorkspace" | "createWorkspaceOnce" | "readCreateReceipt" | "get" | "promptContext" | "list" | "requestLifecycle" | "transition" | "issueToken" | "listChats" | "messageWindow" | "searchMessages" | "markActive"> & Partial<Pick<CloudV2Store, "prompts" | "getByNumber" | "chatEdits" | "requestExecutionLifecycle">>;
   /** Roll out only with a runtime that advertises durable prompt delivery. */
@@ -101,6 +104,7 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
   if (deps.teamSharing) app.route("/",createCloudTeamRoutes(deps.teamSharing,value => workspaceDocument(value,deps.promptOutbox === true,!!chatEdits)));
   if (deps.localDevices) app.route("/", createCloudLocalDeviceRoutes(deps.localDevices));
   if (deps.workspaceSync) app.route("/", createCloudWorkspaceSyncRoutes(deps.workspaceSync));
+  if (deps.workspaceGithubReadTokens) app.route("/", createCloudWorkspaceGithubReadTokenRoutes(deps.workspaceGithubReadTokens));
   if (deps.environments) app.route("/", createCloudEnvironmentRoutes(deps.environments));
   if (deps.githubConnections) app.route("/",createCloudGithubConnectionRoutes(deps.githubConnections));
   const documents = async (workspaces: readonly CloudV2Workspace[]) =>

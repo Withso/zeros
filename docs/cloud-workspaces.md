@@ -639,6 +639,26 @@ paths it wrote; a local edit it replaces is kept in `.zeros-sync/overwritten/`
 (7 days, 500 MB). "Open terminal here" opens Terminal at the folder. Local
 workspaces have no sync.
 
+An opted-in Mac can request a GitHub credential for one sync command with
+`POST /v1/cloud-v2/workspaces/:id/github-read-token` and body `{}`. The ordinary
+desktop bearer, exact device/registration/instance headers, `X-Zeros-Sync: 1`
+and `X-Zeros-Sync-Wanted: 1` are required. The Mac must still be connected with
+sync wanted. The response is `{ token, expiresAt, repository }` and is never
+cacheable. The token is an App installation credential restricted to the
+workspace's immutable repository ID with `contents:read` and `metadata:read`.
+`expiresAt` is GitHub's actual expiry, at most one hour; it is not a broker
+cache deadline. The caller's own selected GitHub connection must prove current
+repository access before and after minting. No Creator credential is borrowed,
+and a personal OAuth token or PAT is never returned through this endpoint.
+Missing access, a PAT selection or a missing eligible installation returns
+`403 github_access_required` so the Mac can use the worker bundle. Transient
+GitHub failures remain retryable.
+Issuance is limited to 12 requests per minute per user/device across workspaces
+and 120 per minute per user. It needs no running VM, creates no execution lease,
+and changes no workspace activity. The Mac keeps the token in memory for its
+Git command, never in Git configuration, arguments or files. VM Git and `gh`
+continue to use their existing per-person broker path; Local is unchanged.
+
 ## Credentials and history
 
 Settings → Agents stores encrypted logins in the control plane. The creator's
