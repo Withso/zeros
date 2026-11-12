@@ -36,6 +36,15 @@ export async function runTeamWritingSmoke({ page, harnessBase, check }) {
     if (shots) await page.locator("main").screenshot({ path: join(shots, `team-writing-${theme}.png`) });
     check(`A writing member restarts, connects their own account, retries, and sees who a turn acts as and the secret notice in ${theme}`, true);
   }
+  for (const theme of ["dark", "light"]) {
+    await page.goto(`${base}?theme=${theme}&view=ended`);
+    await expect(page.getByRole("status").getByText("You no longer have access to w-7", { exact: true })).toBeVisible();
+    await expect(page.getByText("Your drafts stay on this Mac.", { exact: false })).toBeVisible();
+    await expect(page.getByLabel("Workspace").getByRole("button")).toHaveCount(0);
+    await expect(page.getByLabel("Sync status")).toHaveText("Stopped: you no longer have access");
+    if (shots) await page.locator("main").screenshot({ path: join(shots, `team-writing-ended-${theme}.png`) });
+    check(`A member who lost access sees it plainly, with no action and sync stopped, in ${theme}`, true);
+  }
   await page.goto(`${base}?theme=dark&actor=me`);
   await expect(page.getByLabel("Running turn").getByText("Acting as you", { exact: true })).toBeVisible();
   check("A member's own running turn says Acting as you", true);

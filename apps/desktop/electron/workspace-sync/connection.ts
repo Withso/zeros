@@ -6,7 +6,20 @@ import { SyncChangedError, type SyncSource } from "./engine";
 /** Why a sync socket could not be opened. Paused waits for the VM. */
 export class SyncConnectError extends Error {
   /** `detail`: a closed code for the log (dial_<status>, dial_timeout, close_<code>, reply_<CODE>, timeout). */
-  constructor(readonly kind: "paused" | "update_required" | "not_connected" | "unavailable" | "signed_out", readonly detail?: string) { super(`Sync connection: ${kind}`); }
+  constructor(readonly kind: "paused" | "update_required" | "not_connected" | "unavailable" | "signed_out" | "access_revoked", readonly detail?: string) { super(`Sync connection: ${kind}`); }
+}
+
+/** What a refused sync grant (D+H) means for the run. Team sharing 3A: this person lost access (removed, Hold, no
+ * repository access): the workspace answers member_access_revoked, or is hidden (404). Sync then stops for good. */
+export function syncGrantRefusal(error: unknown): SyncConnectError {
+  const refusal = error as { status?: unknown; code?: unknown } | null;
+  if (!refusal || typeof refusal.status !== "number" || typeof refusal.code !== "string") return new SyncConnectError("unavailable");
+  if (refusal.status === 401) return new SyncConnectError("signed_out");
+  if (refusal.code === "member_access_revoked" || refusal.status === 404) return new SyncConnectError("access_revoked");
+  if (refusal.code === "worker_update_required") return new SyncConnectError("update_required");
+  if (refusal.code === "cloud_workspace_not_running") return new SyncConnectError("paused");
+  if (refusal.code === "mac_not_connected" || refusal.status === 403) return new SyncConnectError("not_connected");
+  return new SyncConnectError("unavailable");
 }
 
 export interface SyncSocket {

@@ -48,6 +48,8 @@ export function workspaceSyncLabel(status: WorkspaceSyncStatus): string {
   }
   // Running but not reachable is not asleep: its own words while main retries (with a growing wait).
   if (status.state === "paused") return status.reason === "unreachable" ? "Can't reach the workspace, retrying" : "Paused (workspace asleep)";
+  // Team sharing: this person lost access; nothing retries and the folder's files stay.
+  if (status.state === "error" && status.reason === "access_revoked") return "Stopped: you no longer have access";
   return `Error (${SYNC_REASONS[status.reason ?? ""] ?? "sync failed"})`;
 }
 const SYNC_REASONS: Record<string, string> = {

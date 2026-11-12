@@ -276,3 +276,14 @@ it.each([true, false])("keeps readiness failures scoped to the runtime (local: %
     expect(failure).toMatchObject({ code: "cloud_actor_runtime_unavailable", status: 503 });
   }
 });
+
+it("marks the workspace's access as ended on close 4001, and clears it once a connection is ready again", async () => {
+  const { workspaceAccessEnded, resetWorkspaceAccessForTests } = await import("../../team-sharing-registry");
+  resetWorkspaceAccessForTests();
+  const h = fixture(); await h.client.connect(); h.sockets[0].open();
+  const waiting = h.client.waitUntilReady().catch(() => {});
+  h.sockets[0].close(4001); await vi.advanceTimersByTimeAsync(0); await waiting;
+  expect(workspaceAccessEnded("33333333-3333-4333-8333-333333333333")).toBe(true);
+  const other = fixture(); await other.client.connect(); await other.ready(other.sockets[0]);
+  expect(workspaceAccessEnded("33333333-3333-4333-8333-333333333333")).toBe(false);
+});

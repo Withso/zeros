@@ -34,6 +34,8 @@ async function main() {
   const { ActingAs } = await import("../features/agent/acting-as");
   const { TeamWritingNotice } = await import("../features/agent/team-writing-notice");
   const { BLANK, useSessionsStore } = await import("../features/agent/sessions-store");
+  const { TeamSharingAccessEnded } = await import("../shell/team-sharing-access-ended");
+  const { workspaceSyncLabel } = await import("../platform/workspace-sync");
 
   const membership = [{ id: organizationId, slug: "fixture", name: "Organization A", logo: null, role: "member" as const, isPersonal: false, defaultTeamId: null,
     workspaceCapabilities: { local: true, cloud: true }, teamCapabilities: { multiple: false as const, canCreate: false as const } }];
@@ -53,6 +55,11 @@ async function main() {
     message: "Connect your Claude account to send messages in this workspace.", cloud: { source: "provider", provider: "claude", reason: "auth-required" }, ownAccount: true } })!;
 
   function Harness() {
+    // Phase 3 (3A): the member lost access while the workspace was open.
+    if (params.get("view") === "ended") return <main className="bg-bg1 flex min-h-screen flex-col gap-6 p-8">
+      <section aria-label="Workspace" className="bg-bg1 flex h-80 w-[640px]"><TeamSharingAccessEnded name="w-7" /></section>
+      <p aria-label="Sync status" className="text-fg2 text-xs">{workspaceSyncLabel({ workspaceId, state: "error", reason: "access_revoked", problems: 0 })}</p>
+    </main>;
     return <main className="bg-bg1 flex min-h-screen gap-8 p-8">
       <section aria-label="Details" className="bg-bg2 w-[320px] shrink-0 rounded-lg p-4">
         <CloudWorkspaceDetailsCard workspace={doc} title="Fix login" statusLabel="Running" resources={null} changing={false} onChange={operation => { calls.push(operation); }} />
