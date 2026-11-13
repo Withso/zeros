@@ -12,7 +12,8 @@ const messages: Record<CloudGithubUnavailableReason, string> = {
   "connection-changed": "Reconnect GitHub in Zeros: your selected connection changed.",
   "installation-required": "Grant the Zeros GitHub App access to this repository, then try again.",
   "installation-suspended": "Restore the Zeros GitHub App installation in GitHub, then try again.",
-  "access-denied": "Your GitHub account cannot access this repository. Check your repository permissions in GitHub.",
+  // §16: a member without GitHub access still works in the workspace; only operations that talk to GitHub as them fail.
+  "access-denied": "Your GitHub account cannot access this repository, so pushing, fetching and pull requests need someone with access. Everything else in this workspace keeps working.",
   "sso-required": "Authorize your GitHub connection for your organization's SSO, then try again.",
   "source-review-required": "Ask an organization admin to review this workspace's GitHub repositories in Zeros.",
   "rate-limited": "GitHub is rate limiting requests. Try again shortly.",
@@ -30,6 +31,12 @@ export class GithubAuthenticationError extends Error {
 
 export function githubAuthenticationError(reason: unknown = "unavailable"): GithubAuthenticationError {
   return new GithubAuthenticationError(isReason(reason) ? reason : "unavailable");
+}
+
+/** Which of our own fixed refusal messages the credential helper printed (Git passes the helper's stderr through). */
+export function githubFailureReasonIn(stderr: string): CloudGithubUnavailableReason | undefined {
+  const lines = new Set(stderr.split(/\r?\n/).map(line => line.trim()));
+  return (Object.keys(messages) as CloudGithubUnavailableReason[]).find(reason => lines.has(messages[reason]));
 }
 
 export function githubAuthenticationMessage(error: unknown): string {

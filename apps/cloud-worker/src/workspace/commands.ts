@@ -2,6 +2,8 @@ import { execFile } from "node:child_process";
 import { workerChildEnvironment, mergeGitEnvironment } from "../drivers/shared/agent-environment";
 import { WorkspaceError } from "./scope";
 import { operationEnvironment } from "../sharing/operation-environment";
+import type { CloudGithubUnavailableReason } from "@zeros/protocol/cloud-github-connection";
+import { githubAuthenticationError, githubAuthenticationMessage, githubFailureReasonIn } from "../credentials/github-failure";
 
 export interface CommandOptions {
   input?: string | Uint8Array;
@@ -19,7 +21,7 @@ export const GIT_FAILURE_DETAILS = ["credential_missing", "auth_rejected", "perm
   "hook_declined", "remote_rejected", "network", "timeout", "other"] as const;
 export type GitFailureDetail = typeof GIT_FAILURE_DETAILS[number];
 const GIT_FAILURE_PATTERNS: Array<[RegExp, GitFailureDetail]> = [
-  [/could not read (?:Username|Password)|terminal prompts disabled/i, "credential_missing"],
+  [/could not read (?:Username|Password)|terminal prompts disabled|credential helper .* told us to quit/i, "credential_missing"],
   [/Authentication failed|Invalid username or password|HTTP Basic: Access denied/i, "auth_rejected"],
   [/Permission to \S+ denied|Write access to repository not granted|returned error: 403/i, "permission_denied"],
   [/Repository not found|returned error: 404/i, "repository_not_found"],
@@ -32,9 +34,22 @@ export function gitFailureDetail(stderr: string, error: { killed?: boolean; sign
   if (error?.killed) return "timeout";
   return GIT_FAILURE_PATTERNS.find(([pattern]) => pattern.test(stderr))?.[1] ?? "other";
 }
-/** GIT_COMMAND_FAILED with its closed detail. */
+/** GIT_COMMAND_FAILED with its closed detail, and our own fixed copy when the credential broker refused. */
 export class GitCommandError extends WorkspaceError {
-  constructor(readonly detail: GitFailureDetail) { super("GIT_COMMAND_FAILED", "The Git command could not be completed. Check the repository state and try again."); }
+  constructor(readonly detail: GitFailureDetail, message = "The Git command could not be completed. Check the repository state and try again.") { super("GIT_COMMAND_FAILED", message); }
+}
+
+const DETAIL_FOR_REASON: Record<CloudGithubUnavailableReason, GitFailureDetail> = {
+  "connection-required": "credential_missing", "connection-expired": "credential_missing", "connection-changed": "credential_missing",
+  "access-denied": "permission_denied", "installation-required": "permission_denied", "installation-suspended": "permission_denied",
+  "sso-required": "permission_denied", "source-review-required": "permission_denied", "rate-limited": "network", unavailable: "network",
+};
+/** A failed Git command's error: a broker refusal (the credential helper printed one of our fixed messages before telling
+ * Git to quit) keeps that reason and its copy; anything else is classified from stderr, which never leaves. */
+export function gitCommandError(stderr: string, error: { killed?: boolean; signal?: string | null } | null): GitCommandError {
+  const reason = githubFailureReasonIn(stderr);
+  return reason ? new GitCommandError(DETAIL_FOR_REASON[reason], githubAuthenticationMessage(githubAuthenticationError(reason)))
+    : new GitCommandError(gitFailureDetail(stderr, error));
 }
 
 /** No shell interpolation and no ambient provider/worker credentials. stderr
@@ -52,7 +67,7 @@ export function commandRunner(cwd: string, wiring: NodeJS.ProcessEnv = {}): Comm
       else if (program === "git" && /^(?:Author|Committer) identity unknown$|^fatal: (?:empty ident name|no email was given|unable to auto-detect email address)/m.test(stderr))
         reject(new WorkspaceError("GIT_IDENTITY_REQUIRED", "Reconnect GitHub in Zeros to configure your commit identity, or set a repository-local Git identity."));
       else if (error?.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") reject(new WorkspaceError("GIT_OUTPUT_TOO_LARGE", "This result is too large. Select a file to view its changes."));
-      else reject(program === "git" ? new GitCommandError(gitFailureDetail(stderr, error))
+      else reject(program === "git" ? gitCommandError(stderr, error)
         : new WorkspaceError("GIT_COMMAND_FAILED", "The Git command could not be completed. Check the repository state and try again."));
     });
     child.stdin?.on("error", () => {});
