@@ -19,6 +19,7 @@ import { emitCloudV2Timing, type CloudV2TimingRecord } from "./lifecycle.js";
 import { HttpError } from "../authz.js";
 import { isGithubAccessRevoked, isGithubTemporary } from "../github-availability.js";
 import { CLOUD_SOURCE_REFRESH_MS, type CloudSourceContinuation, type CloudSourceProof } from "./source-authority.js";
+import { CLOUD_CLIENT_ROLLOVER_PROTOCOL, CloudConnectionRenewSchema, clientAuthenticationSchedule } from "./client-auth-contract.js";
 
 /** Bounds a lost cross-replica revocation notice for app frames between reads. */
 const APP_AUTHORITY_WINDOW_MS = 5_000;
@@ -77,7 +78,7 @@ type Room = {
   retryNow?: () => void; readyHinted?: boolean;
   /** The source authority's absolute grace deadline under the proof that produced it. */
   sourceGrace?: { until: number; proof: string }; sourceRetryMs?: number;
-  clients: Map<string, { ws: WebSocket; sessionId: string | null; grant?: CloudV2AppGrant; contextId?: string; tokenTimer?: NodeJS.Timeout }>; queued: Map<string, unknown[]>;
+  clients: Map<string, { ws: WebSocket; sessionId: string | null; grant?: CloudV2AppGrant; contextId?: string; tokenTimer?: NodeJS.Timeout; rollover?: boolean; authSent?: boolean }>; queued: Map<string, unknown[]>;
   admitting: Map<string, WebSocket>;
   delivered: Map<string, Map<string, DeliveredPrompt>>;
   forwarding?: Map<string, Promise<void>>;
@@ -681,9 +682,10 @@ export class CloudV2Relay {
     } catch { this.deps.logger?.warn("[cloud-v2] app admission failed"); }
     if (!workspace || this.closed) return reject(socket);
     const admitted = workspace;
-    this.server.handleUpgrade(request, socket, head, ws => this.attachApp(admitted, epoch!, wake, sessionId, ws, executionGrant));
+    this.server.handleUpgrade(request, socket, head, ws => this.attachApp(admitted, epoch!, wake, sessionId, ws, executionGrant,
+      offered.includes(CLOUD_CLIENT_ROLLOVER_PROTOCOL)));
   }
-  private attachApp(workspace: CloudV2Workspace, epoch: string, wake: boolean, sessionId: string | null, ws: WebSocket, grant?: CloudV2AppGrant): void {
+  private attachApp(workspace: CloudV2Workspace, epoch: string, wake: boolean, sessionId: string | null, ws: WebSocket, grant?: CloudV2AppGrant, rollover = false): void {
     const room = this.room(workspace, epoch);
     if (!room) { ws.close(1013, "workspace_verification_unavailable"); return; }
     if (grant?.execution) room.acting = true;
@@ -712,13 +714,13 @@ export class CloudV2Relay {
       clearTimeout(room.idleTimer); delete room.idleTimer;
       if (room.worker && workspace.state !== "running") { room.worker.terminate(); room.worker = null; room.ready = false; }
       if (!room.worker) room.workspace = workspace;
-      const client: Room["clients"] extends Map<string, infer C> ? C : never = { ws, sessionId, ...(grant ? { grant } : {}) };
+      const client: Room["clients"] extends Map<string, infer C> ? C : never = { ws, sessionId, ...(grant ? { grant } : {}),
+        rollover: rollover && !!grant?.execution?.clientInstanceId };
       room.clients.set(clientId, client);
       if (grant?.execution) {
         await this.deps.execution!.clients.validateGrant(workspace.id, grant);
         if (room.revoked || room.clients.get(clientId) !== client || ws.readyState !== WebSocket.OPEN) return;
-        client.tokenTimer = setTimeout(() => { this.detachApp(room, clientId); ws.close(1000, "token_end"); }, Math.max(1, grant.execution.tokenEnd - Date.now() - 2000));
-        client.tokenTimer.unref();
+        this.armClientExpiry(room, clientId);
       }
       // The window predates this session's expiry; the next app frame re-reads.
       delete room.authorizedUntil;
@@ -754,7 +756,12 @@ export class CloudV2Relay {
         }
         client.contextId = context.contextId;
       }
-      send(worker, { t: "open", clientId, userId: client.grant.userId, contextId: client.contextId }); return true;
+      send(worker, { t: "open", clientId, userId: client.grant.userId, contextId: client.contextId });
+      if (client.rollover && !client.authSent) {
+        send(client.ws, { type: "CLOUD_CONNECTION_AUTH", ...clientAuthenticationSchedule(client.grant.execution.tokenEnd) });
+        client.authSent = true;
+      }
+      return true;
     } catch (error) { this.refuseExecutionClient(room, clientId, error); return false; }
   }
 
@@ -764,6 +771,44 @@ export class CloudV2Relay {
     const revoked = error instanceof ExecutionContextRevoked || error instanceof HttpError && ["member_access_revoked", "session_revoked"].includes(error.code);
     this.detachApp(room, clientId);
     client.ws.close(revoked ? 4001 : 1013, revoked ? "access_revoked" : "workspace_verification_unavailable");
+  }
+
+  private armClientExpiry(room: Room, clientId: string): void {
+    const client = room.clients.get(clientId), until = client?.grant?.execution?.tokenEnd;
+    if (!client || until === undefined) return;
+    clearTimeout(client.tokenTimer);
+    client.tokenTimer = setTimeout(() => {
+      if (room.clients.get(clientId) !== client || client.grant?.execution?.tokenEnd !== until) return;
+      this.detachApp(room, clientId); client.ws.close(1013, "token_expired");
+    }, Math.max(1, until - Date.now()));
+    client.tokenTimer.unref();
+  }
+
+  private async rolloverClient(room: Room, clientId: string, frame: unknown): Promise<void> {
+    const client = room.clients.get(clientId), parsed = CloudConnectionRenewSchema.safeParse(frame);
+    if (!client?.rollover || !client.contextId || !client.grant?.execution || !this.deps.execution) return;
+    if (!parsed.success) { client.ws.close(4003, "invalid_frame"); return; }
+    const reply = (value: object) => {
+      if (room.clients.get(clientId) === client && !room.revoked)
+        send(client.ws, { type: "CLOUD_CONNECTION_RENEWED", requestId: parsed.data.id, ...value });
+    };
+    try {
+      await this.deps.execution.clients.validateGrant(room.workspace.id, client.grant);
+      const next = await this.deps.store.consumeConnectTicket(parsed.data.ticket, room.workspace.id);
+      if (!next) { reply({ error: { code: "invalid_ticket" } }); return; }
+      if (room.clients.get(clientId) !== client || room.revoked || client.ws.readyState !== WebSocket.OPEN) return;
+      await this.deps.execution.clients.rollover(room.workspace.id, client.contextId, client.grant, next);
+      if (room.clients.get(clientId) !== client || room.revoked || client.ws.readyState !== WebSocket.OPEN) return;
+      client.grant = next;
+      this.armClientExpiry(room, clientId);
+      reply(clientAuthenticationSchedule(next.execution!.tokenEnd));
+    } catch (error) {
+      if (error instanceof ExecutionContextRevoked || error instanceof HttpError && ["member_access_revoked", "session_revoked"].includes(error.code)) {
+        this.refuseExecutionClient(room, clientId, error); return;
+      }
+      const code = error instanceof HttpError && ["binding_changed", "token_not_advanced"].includes(error.code) ? error.code : "temporarily_unavailable";
+      reply({ error: { code } });
+    }
   }
 
   private detachApp(room: Room, clientId: string): void {
@@ -786,6 +831,9 @@ export class CloudV2Relay {
   private async fromApp(room: Room, clientId: string, ws: WebSocket, data: RawData): Promise<void> {
     let frame: unknown;
     try { frame = parse(data); } catch { ws.close(4003, "invalid_frame"); return; }
+    if ((frame as { type?: unknown } | null)?.type === "CLOUD_CONNECTION_RENEW") {
+      await this.rolloverClient(room, clientId, frame); return;
+    }
     // The worker ignores this empty transport frame too. It cannot release
     // data, wake a VM or turn socket keepalive into a database permission poll.
     if ((frame as { type?: unknown } | null)?.type === "HEARTBEAT") return;

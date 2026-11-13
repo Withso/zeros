@@ -45,6 +45,17 @@ it("allows the ownership negotiation header in the desktop preflight", async () 
 
 
 
+it.each(["x-zeros-client-features", "x-zeros-client-instance"])("allows rollover %s through the desktop preflight", async header => {
+  const app = createApp(config(null), pool, emailConfig as never);
+  const response = await app.request("/v1/cloud-v2/workspaces/fixture/connect", {
+    method: "OPTIONS", headers: { origin: "https://app.example.test", "access-control-request-method": "POST",
+      "access-control-request-headers": `authorization,content-type,${header}` },
+  });
+  expect(response.status).toBe(204);
+  expect(response.headers.get("access-control-allow-headers")?.toLowerCase().split(",")).toContain(header);
+  expect(response.headers.get("access-control-allow-credentials")).toBeNull();
+});
+
 it("requires app authentication before a paid chat title request", async () => {
   const fetchSpy = vi.spyOn(globalThis, "fetch");
   try {

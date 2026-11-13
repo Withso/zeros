@@ -86,6 +86,25 @@ app requests and security notifications recheck that session in the database,
 with the relay heartbeat repairing missed notifications. Account, organization
 and workspace authorization loss still revoke the whole workspace room.
 
+Activated clients that negotiate `client-token-rollover-v1` renew authentication
+on the same socket. Connect requests bind an in-memory, per-open instance UUID
+to their single-use ticket. The relay sends `CLOUD_CONNECTION_AUTH` with the
+accepted token deadline and renewal schedule; the desktop obtains a fresh
+same-session token at about 60% of the remaining lifetime and sends its new
+ticket in `CLOUD_CONNECTION_RENEW`. `CLOUD_CONNECTION_RENEWED` acknowledges the
+new deadline. The relay checks the person, session, instance, workspace and live
+handle before moving its token cap and the caps of its still-live children.
+Neither handle ids nor lease deadlines change during authentication rollover.
+This instance binding does not replace registered-device proof for sync or
+local commands. Tickets never reach the worker or appear in URLs or logs.
+
+A live token tail may cap a renewal below the normal issuance floor; it does
+not fail other contexts in the batch. Ended contexts return their terminal
+reason individually. Expired contexts are never revived. If authentication
+cannot roll over before expiry, the relay closes with retryable code 1013;
+genuine person or session revocation still closes with 4001. Old desktops keep
+their existing reconnect flow, and Local connections do not use this protocol.
+
 The desktop keeps at most 16 live cloud connections, including admissions still
 loading their first chat snapshot. When another workspace needs a connection,
 it releases the least recently used idle connection. The selected workspace,

@@ -1,5 +1,5 @@
 import { HttpError } from "../../authz.js";
-import type { CloudV2Agent } from "../contract.js";
+import type { CloudV2Agent, CloudV2ContextReason } from "../contract.js";
 
 export const actorChanged = () => new HttpError(409, "actor_changed", "Execution authority changed");
 export const actorBusy = () => new HttpError(409, "actor_busy", "The preceding turn is still retiring");
@@ -10,6 +10,9 @@ export const memberAccessRevoked = () => new HttpError(403, "member_access_revok
  * durable distinction between access loss and a temporary context failure. */
 export class ExecutionContextRevoked extends HttpError {
   constructor() { super(409, "actor_changed", "Execution authority changed"); }
+}
+export class ExecutionContextEnded extends HttpError {
+  constructor(readonly reason: CloudV2ContextReason) { super(409, "actor_changed", "Execution context ended"); }
 }
 export const workspaceCreatorRequired = () => new HttpError(409, "workspace_creator_required", "This workspace needs an eligible Creator before messages can run");
 export class AgentLoginRequired extends HttpError {
