@@ -258,6 +258,14 @@ describe("Cloud workspace details", () => {
     workspace: cloud("ready"), title: "Fix login", statusLabel: "Running", resources: null, changing: false, onChange: () => {}, ...props,
   }));
 
+  it("3B: names the Creator (or None) with Reassign… for someone who may, and tells a member an admin can", () => {
+    const manager = card({ ownership: { creatorName: "Sam", onReassign: () => {} } });
+    expect(text(manager)).toEqual(expect.arrayContaining(["Creator", "Sam", "Reassign…"]));
+    const member = text(card({ ownership: { creatorName: null } }));
+    expect(member).toEqual(expect.arrayContaining(["Creator", "None · An admin can reassign it."]));
+    expect(member).not.toContain("Reassign…");
+  });
+
   it("shows where it runs, its status with Restart, and the VM's CPU, memory and disk", () => {
     const html = card({ resources });
     expect(text(html)).toEqual(["Fix login", "Environment", "Zeros Cloud", "Repository", "example/repo", "Created", "3d ago",

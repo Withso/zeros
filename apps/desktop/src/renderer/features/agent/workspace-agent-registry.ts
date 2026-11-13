@@ -36,6 +36,24 @@ subscribeCloudWorkspaceRefresh(organizations => {
     if (!organizations || target && organizations.has(target.organizationId)) cache.invalidate(key);
   }
 });
+/** 3B (Creator pays): a workspace's agents are its current Creator's, so a changed Creator revision re-lists them.
+ * The first sight of a revision only records it. Returns the keys to invalidate. */
+export function creatorRevisionInvalidations(seen: Map<string, string>, keys: Iterable<string>, revisionOf: (key: string) => string | undefined): string[] {
+  const changed: string[] = [];
+  for (const key of keys) {
+    const revision = revisionOf(key);
+    if (revision === undefined) continue;
+    const prior = seen.get(key);
+    seen.set(key, revision);
+    if (prior !== undefined && prior !== revision) changed.push(key);
+  }
+  return changed;
+}
+const seenCreatorRevisions = new Map<string, string>();
+subscribeCloudWorkspaces(() => {
+  const revisionOf = (key: string) => { const target = registryTarget(key); return target ? cloudWorkspaceDocument(target)?.sharing?.ownership?.creatorRevision : undefined; };
+  for (const key of creatorRevisionInvalidations(seenCreatorRevisions, cache.keys(), revisionOf)) cache.invalidate(key);
+});
 export const clearCloudAgentRegistry = () => {
   for (const key of cache.keys()) cache.forget(key);
 };

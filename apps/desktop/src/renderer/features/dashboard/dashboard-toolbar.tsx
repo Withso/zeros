@@ -55,6 +55,7 @@ const DISPLAY_OPTIONS: { value: keyof DashboardDisplay; label: string }[] = [
 function byLabel(by: DashboardByControl): string {
   if (by.value === "anyone") return "By anyone";
   if (by.value === "me") return "By me";
+  if (by.value === "none") return "No Creator";
   const id = by.value.slice("user:".length);
   return `By ${by.people.find((person) => person.id === id)?.name ?? "a teammate"}`;
 }
@@ -97,6 +98,8 @@ export interface DashboardByControl {
   onChange: (value: DashboardBy) => void;
   /** Every roster member except the viewer, by name. */
   people: readonly { id: string; name: string }[];
+  /** 3B: an organization owner or admin also gets No Creator (a management view). */
+  noCreator?: boolean;
 }
 
 export function DashboardToolbar({
@@ -173,6 +176,7 @@ export function DashboardToolbar({
               >
                 <DropdownMenuRadioItem value="anyone">By anyone</DropdownMenuRadioItem>
                 <DropdownMenuRadioItem value="me">By me</DropdownMenuRadioItem>
+                {by.noCreator && <DropdownMenuRadioItem value="none">No Creator</DropdownMenuRadioItem>}
                 {/* By name, as in the sidebar's Team list. */}
                 {[...by.people].sort((a, b) => a.name.localeCompare(b.name)).map((person) => (
                   <DropdownMenuRadioItem key={person.id} value={`user:${person.id}`}>

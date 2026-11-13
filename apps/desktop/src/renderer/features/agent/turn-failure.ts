@@ -118,16 +118,18 @@ export function turnFailureForCard(input: {
 const AGENT_NAMES = { claude: "Claude", codex: "Codex", cursor: "Cursor" } as const;
 /** What the failure card shows and offers. Creator pays: the Creator's missing login names the Creator (from the workspace
  * document and roster) and offers no connect action, only Retry; no Creator offers Retry only. */
-export function turnFailureDisplay(failure: TurnFailure, creatorName: string | null): { message: string; retry: boolean; reconnect: boolean; reconnectLabel: string | undefined } {
+export function turnFailureDisplay(failure: TurnFailure, creatorName: string | null, canReassign = false): {
+  message: string; retry: boolean; reconnect: boolean; reconnectLabel: string | undefined; reassign: boolean } {
   const cloud = failure.cloud?.source === "provider" ? failure.cloud : undefined, reason = cloud?.reason;
   if (failure.kind === "creator-required" || reason === "creator-required")
-    return { message: "This workspace has no Creator. An admin can reassign it.", retry: true, reconnect: false, reconnectLabel: undefined };
+    // 3B: someone who may reassign this workspace gets the action; everyone else is told an admin can.
+    return { message: "This workspace has no Creator. An admin can reassign it.", retry: true, reconnect: false, reconnectLabel: undefined, reassign: canReassign };
   if (cloud?.loginRequiredFrom === "creator")
-    return { message: `${creatorName ?? "The workspace's Creator"} needs to connect ${AGENT_NAMES[cloud.provider]} before messages can run here.`, retry: true, reconnect: false, reconnectLabel: undefined };
+    return { message: `${creatorName ?? "The workspace's Creator"} needs to connect ${AGENT_NAMES[cloud.provider]} before messages can run here.`, retry: true, reconnect: false, reconnectLabel: undefined, reassign: false };
   const accountAction = reason === "auth-required" || reason === "verification-required" || reason === "credentials-unavailable";
   // An own-account refusal was never sent: after signing in, the same message can simply be retried.
   const retry = (!accountAction || failure.ownAccount === true) && reason !== "session-expired" && reason !== "model-unavailable";
   const reconnectLabel = !accountAction ? undefined : failure.ownAccount && cloud ? `Connect your ${AGENT_NAMES[cloud.provider]} account`
     : reason === "auth-required" ? "Reconnect provider account" : "Check provider connection";
-  return { message: failure.message, retry, reconnect: accountAction, reconnectLabel };
+  return { message: failure.message, retry, reconnect: accountAction, reconnectLabel, reassign: false };
 }

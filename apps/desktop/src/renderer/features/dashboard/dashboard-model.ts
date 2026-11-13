@@ -5,6 +5,7 @@ import type { ChatThread } from "../../state/store";
 import { isLocalMainWorkspace } from "../../state/local-main-workspace";
 import { branchDisplayName } from "../../shared/lib/branch-name";
 import type { DashboardArchive, DashboardSort } from "./preferences";
+import { NO_CREATOR } from "../../state/no-creator";
 
 export interface DashboardRow {
   workspace: Workspace;
@@ -138,11 +139,12 @@ export function filterDashboardRows(
  * Local rows always belong to this account (they count as Me, never as a teammate). */
 export function filterDashboardRowsBy(
   rows: readonly DashboardRow[],
-  by: "anyone" | "me" | `user:${string}`,
+  by: "anyone" | "me" | "none" | `user:${string}`,
   me: string | null,
   creatorOf: (row: DashboardRow) => string | null,
 ): readonly DashboardRow[] {
   if (by === "anyone") return rows;
+  if (by === "none") return rows.filter(row => creatorOf(row) === NO_CREATOR);
   const person = by === "me" ? me : by.slice("user:".length);
   return rows.filter(row => {
     const creator = creatorOf(row);

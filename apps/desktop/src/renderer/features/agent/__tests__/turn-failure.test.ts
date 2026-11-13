@@ -185,15 +185,21 @@ describe("Creator pays: the failure card's copy and actions", () => {
   const card = (extra: Record<string, unknown>) => ({ kind: "auth-required", newChatAllowed: false, message: "m", ...extra }) as never;
   it("the Creator's missing login: names the Creator, keeps Retry, offers no connect action", () => {
     const failure = card({ cloud: { source: "provider", provider: "claude", reason: "auth-required", loginRequiredFrom: "creator" } });
-    expect(turnFailureDisplay(failure, "Sam")).toEqual({ message: "Sam needs to connect Claude before messages can run here.", retry: true, reconnect: false, reconnectLabel: undefined });
+    expect(turnFailureDisplay(failure, "Sam")).toEqual({ message: "Sam needs to connect Claude before messages can run here.", retry: true, reconnect: false, reconnectLabel: undefined, reassign: false });
     expect(turnFailureDisplay(failure, null).message).toBe("The workspace's Creator needs to connect Claude before messages can run here.");
   });
   it("the sender's own login keeps today's copy and the connect action", () => {
     const failure = card({ message: "Connect your Claude account to send messages in this workspace.", ownAccount: true, cloud: { source: "provider", provider: "claude", reason: "auth-required", loginRequiredFrom: "self" } });
-    expect(turnFailureDisplay(failure, "Sam")).toEqual({ message: "Connect your Claude account to send messages in this workspace.", retry: true, reconnect: true, reconnectLabel: "Connect your Claude account" });
+    expect(turnFailureDisplay(failure, "Sam")).toEqual({ message: "Connect your Claude account to send messages in this workspace.", retry: true, reconnect: true, reconnectLabel: "Connect your Claude account", reassign: false });
+  });
+  it("3B: no Creator offers Reassign… only to someone who may reassign this workspace", () => {
+    const failure = card({ kind: "creator-required", message: "This workspace has no Creator. An admin can reassign it." });
+    expect(turnFailureDisplay(failure, null, true)).toMatchObject({ reassign: true, retry: true, reconnect: false });
+    expect(turnFailureDisplay(failure, null, false)).toMatchObject({ reassign: false });
+    expect(turnFailureDisplay(card({ cloud: { source: "provider", provider: "claude", reason: "auth-required", loginRequiredFrom: "creator" } }), "Sam", true)).toMatchObject({ reassign: false });
   });
   it("no Creator: its own copy, Retry, nothing to connect", () => {
     expect(turnFailureDisplay(card({ kind: "creator-required", message: "This workspace has no Creator. An admin can reassign it." }), null))
-      .toEqual({ message: "This workspace has no Creator. An admin can reassign it.", retry: true, reconnect: false, reconnectLabel: undefined });
+      .toEqual({ message: "This workspace has no Creator. An admin can reassign it.", retry: true, reconnect: false, reconnectLabel: undefined, reassign: false });
   });
 });

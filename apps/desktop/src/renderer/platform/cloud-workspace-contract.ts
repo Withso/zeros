@@ -19,7 +19,8 @@ export const CloudWorkspaceDocumentSchema = z.object({
   /** The first title one of its chats received; null is "Untitled". */
   title: z.string().min(1).max(200).nullable().optional(),
   createdBy: z.string().uuid(),
-  ownerUserId: z.string().uuid().optional(),
+  /** Null for a team-ownership workspace with no Creator (3B). */
+  ownerUserId: z.string().uuid().nullable().optional(),
   placement: z.literal("cloud"),
   githubUnavailableReason: CloudGithubUnavailableReasonSchema.optional(),
   status: z.string().min(1).max(64),

@@ -33,6 +33,17 @@ describe("Home's By filter", () => {
     expect(by(`user:${me}`)).toEqual([mine]);
   });
 
+  it("3B: No Creator shows exactly the cloud rows whose Creator is gone, never a row still loading or a Local one, and is kept per organization", () => {
+    const orphan = row(cloudWorkspaceKey({ organizationId: org, workspaceId: cloudId(4) }));
+    const lookup = creatorLookup([{ id: cloudId(1), ownerUserId: me }, { id: cloudId(4), ownerUserId: null }] as never);
+    const rowsWith = [local, mine, unknown, orphan];
+    expect(filterDashboardRowsBy(rowsWith, "none", me, item => lookup(item.workspace))).toEqual([orphan]);
+    expect(filterDashboardRowsBy(rowsWith, "me", me, item => lookup(item.workspace))).toEqual([local, mine]);
+    saveDashboardBy(org, "none");
+    resetDashboardPreferencesForTests();
+    expect(readDashboardBy(org)).toBe("none");
+  });
+
   it("keeps By per organization, in storage, and reads anything malformed as Anyone", () => {
     expect(readDashboardBy(org)).toBe("anyone");
     saveDashboardBy(org, `user:${alex}`);

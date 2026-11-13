@@ -1,14 +1,17 @@
 import { useMemo, useSyncExternalStore } from "react";
 import type { Workspace } from "../platform/git";
 import { parseCloudWorkspaceKey } from "../platform/bridge/cloud-workspace-key";
+import { NO_CREATOR } from "./no-creator";
 import { cloudWorkspaceDocument, getCloudWorkspaceDocuments, subscribeCloudWorkspaces } from "./cloud-workspace-catalog";
 
 /** A row's current Creator: null for a Local row (always this account's), ""
- * for a cloud row whose document has no Creator yet (matches no person). */
+ * for a cloud row whose document has no Creator yet (matches no person), and
+ * NO_CREATOR for a cloud row whose Creator is gone (3B; only the No Creator filter matches it). */
 export type CreatorOf = (workspace: Workspace) => string | null;
+export { NO_CREATOR };
 
 export function creatorLookup(documents: ReturnType<typeof getCloudWorkspaceDocuments>): CreatorOf {
-  const byId = new Map(documents.map(doc => [doc.id, doc.ownerUserId ?? ""]));
+  const byId = new Map(documents.map(doc => [doc.id, doc.ownerUserId === null ? NO_CREATOR : doc.ownerUserId ?? ""]));
   return workspace => {
     const target = parseCloudWorkspaceKey(workspace.id) ?? parseCloudWorkspaceKey(workspace.path);
     return target ? (byId.get(target.workspaceId) ?? "") : null;
