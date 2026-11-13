@@ -22,7 +22,7 @@ const fixture = vi.hoisted(() => ({
   account: 0,
   statuses: new Map<string, "connected" | "disconnected">(),
   listeners: new Map<string, Set<() => void>>(),
-  docs: new Map<string, { status: string; setupFailure?: object }>(),
+  docs: new Map<string, { status: string; setupFailure?: object; capabilities?: object }>(),
   catalog: new Set<() => void>(),
   warm: vi.fn(async () => {}),
   localStatus: "disconnected" as "connected" | "disconnected",
@@ -98,7 +98,7 @@ vi.mock("../cloud-workspace-catalog", () => ({
     workspaceId: string;
   }) => {
     const doc = fixture.docs.get(cloudWorkspaceKey(target));
-    return doc ? { ...doc, capabilities: { canWrite: true }, error: null } : undefined;
+    return doc ? { ...doc, capabilities: { canWrite: true, ...doc.capabilities }, error: null } : undefined;
   },
   subscribeCloudWorkspaces: (callback: () => void) => {
     fixture.catalog.add(callback);
@@ -346,6 +346,38 @@ describe("workbench availability observers", () => {
       headline: kind === "connect" ? "Couldn't connect to this cloud workspace" : "Couldn't open this cloud workspace",
       description: "Zeros keeps trying in the background.",
     });
+    resetCloudConnectBackoffForTests();
+  });
+
+  it("a running workspace whose connection keeps failing stays connecting with no toast; a refusal still toasts", () => {
+    resetCloudConnectBackoffForTests();
+    const catalog = (doc: { status: string; capabilities?: object }) => {
+      fixture.docs.set(folder, doc);
+      for (const listener of fixture.catalog) listener();
+    };
+    workbenchAvailabilitySnapshot(folder);
+    catalog({ status: "ready", capabilities: { promptOutbox: 1 } });
+    expect(workbenchAvailabilitySnapshot(folder).messagesWithoutLive).toBe(true);
+    // The relay keeps closing with 1013 (the w-3 trace): connects back off, stay quiet for a minute, then keep failing.
+    recordCloudConnectFailure(cloudConnectBackoffKey(target));
+    vi.setSystemTime(100 + 61_000);
+    recordCloudConnectFailure(cloudConnectBackoffKey(target));
+    recordWorkbenchConnectionFailure(folder, Object.assign(new Error("Cloud workspace is starting"), { status: 503 }), "connect");
+    expect(fixture.toasts.size).toBe(0);
+    expect(describeWorkspaceRuntimeStatus(workbenchAvailabilitySnapshot(folder), Date.now())).toBe("Connecting…");
+    // A worker without the prompt outbox keeps today's toast and status.
+    catalog({ status: "ready", capabilities: {} });
+    recordWorkbenchConnectionFailure(folder, Object.assign(new Error("Cloud workspace is starting"), { status: 503 }), "connect");
+    expect(fixture.toasts.get(`cloud-connect:${folder}`)).toMatchObject({ headline: "Couldn't connect to this cloud workspace" });
+    fixture.toasts.clear();
+    // A definitive refusal is an error whatever the worker: today's toast and Needs attention, cleared by a connection.
+    catalog({ status: "ready", capabilities: { promptOutbox: 1 } });
+    recordWorkbenchConnectionFailure(folder, Object.assign(new Error("Cloud workspace access is not permitted."), { status: 403, category: "revoked" }), "connect");
+    expect(fixture.toasts.get(`cloud-connect:${folder}`)).toMatchObject({ headline: "Couldn't connect to this cloud workspace" });
+    expect(describeWorkspaceRuntimeStatus(workbenchAvailabilitySnapshot(folder), Date.now())).toBe("Needs attention");
+    connection("connected");
+    expect(workbenchAvailabilitySnapshot(folder).refused).toBe(false);
+    expect(describeWorkspaceRuntimeStatus(workbenchAvailabilitySnapshot(folder), Date.now())).toBe("Running");
     resetCloudConnectBackoffForTests();
   });
 

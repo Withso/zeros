@@ -20,6 +20,8 @@ import { accountPresentationOwner, getAccountPresentationOwner } from "../../pla
 import { noteLocalChatPrompt } from "./chat-transcript-summaries-cache";
 import { permissionModesAvailable } from "./chat-feature-availability";
 import { permissionModeIdForDisplay } from "./permission-mode-display";
+import { watchStoredProgress } from "./cloud-stored-progress";
+import { getActiveBridge } from "../../platform/bridge/active-bridge";
 
 /** Process-owned delivery, independent of React's retained chat surfaces and
  * the current bridge. Hooks only subscribe it to exact account/catalog changes. */
@@ -236,6 +238,30 @@ export class CloudPromptRuntime {
       this.coordinator.wake(this.channel(owner));
     } else if (update.sessionUpdate === "user_message_recorded") this.coordinator.wake(this.channel(owner));
   }
+  /** Without the live connection, the active running chat re-reads stored history (cloud-stored-progress). */
+  private watchStoredProgress(): () => void {
+    const workspaceOf = (chatId: string) => parseCloudWorkspaceKey(useSessionsStore.getState().sessions[chatId]?.cwd);
+    return watchStoredProgress({
+      runningChat: () => {
+        const chatId = useWorkspaceStore.getState().activeChatId;
+        // Cheap checks first: this runs on store changes, including stream chunks.
+        if (!chatId || !useSessionsStore.getState().sessions[chatId]?.cloudOutbox?.activeId) return null;
+        const target = workspaceOf(chatId);
+        return target && ["ready", "busy"].includes(cloudWorkspaceDocument(target)?.status ?? "") && this.available(chatId) ? chatId : null;
+      },
+      liveConnected: chatId => {
+        const target = workspaceOf(chatId), bridge = getActiveBridge() as { statusForWorkspace?: (folder: string) => string } | null;
+        return !!target && bridge?.statusForWorkspace?.(cloudWorkspaceKey(target)) === "connected";
+      },
+      visible: () => typeof document === "undefined" || document.visibilityState !== "hidden",
+      reread: chatId => this.historyChanged(chatId),
+      subscribe: listener => {
+        const offs = [useSessionsStore.subscribe(listener), useWorkspaceStore.subscribe(listener), subscribeCloudWorkspaces(listener)];
+        if (typeof document !== "undefined") document.addEventListener("visibilitychange", listener);
+        return () => { for (const off of offs) off(); if (typeof document !== "undefined") document.removeEventListener("visibilitychange", listener); };
+      },
+    });
+  }
   start(): () => void {
     if (this.stopped) { this.stopped = false; this.coordinator = new CloudPromptCoordinator(this.journal, () => this.scheduleReconcile()); this.restoredAccount = undefined; }
     const reconcile = () => this.scheduleReconcile();
@@ -255,6 +281,7 @@ export class CloudPromptRuntime {
               cloudPromptHasLegacyActivity(old) && !cloudPromptHasLegacyActivity(slot)) { reconcile(); break; }
         }
       }),
+      this.watchStoredProgress(),
       subscribeCloudPromptErasure(target => {
         const accountId = getTeamStoreState().me?.user.id;
         const matches = (owner: CloudPromptOwner) => owner.backend === CONTROL_PLANE_URL && owner.accountId === accountId &&

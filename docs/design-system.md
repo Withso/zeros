@@ -623,9 +623,14 @@ Every tab's adapter defines pending, retryable and unavailable empty copy.
 Pending copy explains that content appears when the workspace is ready; Retry
 copy is reserved for a banner offering Retry. Cold cloud availability keeps
 the neutral fallback without a banner or an orphan Retry instruction.
-Archived or non-retryable states
-say the content is unavailable. A single-file viewer says “this file”. Terminal
-reconnections after a confirmed connection say “Terminal reconnects automatically.”
+Local archived or non-retryable states say the content is unavailable, and Local
+terminal reconnections after a confirmed connection say “Terminal reconnects
+automatically.” A cloud workspace that is not ready (setting up, starting,
+stopped, archived or its connection down) shows one empty state for every case:
+the tab icon and “Files appear when the workspace is ready.”, “Changes appear
+when the workspace is ready.”, “Terminal appears when the workspace is ready.”
+or “Review comments appear when the workspace is ready.”, with no other
+sentence, banner or toast; chats keep their stored view. A single-file viewer says “this file”.
 
 **Transient** means a brief connection gap, a read
 that fails once and succeeds on one silent automatic retry after about 1.5
