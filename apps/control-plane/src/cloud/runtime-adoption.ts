@@ -11,7 +11,6 @@ interface Options {
   store: Pick<CloudV2Store, "workerSession" | "get" | "accessEpoch" | "loginRevision">;
   compute: Pick<CloudV2Compute, "execLong">;
   runtimeForWorkspace(workspace: CloudV2Workspace): Promise<CloudV2Runtime>;
-  authorizeSource(workspace: CloudV2Workspace): Promise<void>;
   drainActive?(): Promise<boolean>;
   sleep?(ms: number): Promise<void>;
   logger?: Pick<Console, "warn">;
@@ -41,7 +40,6 @@ export class RuntimeAdoption {
     if (input.op === "ready") {
       const workspace = await this.session(token, bootId, input.id);
       if (!workspace || workspace.executionMode === "active") return { status: "unavailable" };
-      await this.options.authorizeSource(workspace);
       if (this.closed) return { status: "unavailable" };
       if (await handoffs.published(token, bootId, input.id)) return { status: "completed", id: input.id };
       const h = await handoffs.inspect(token, input.id);
@@ -75,10 +73,10 @@ export class RuntimeAdoption {
         const installed = await handoffs.runtime(token, bootId);
         if (this.closed) return { status: "unavailable" };
         // Matching status carries no archive or mutation authority. Adoption
-        // still rechecks the source and effective pin at every admission.
+        // still fences membership, the boot and effective pin at admission.
         if (installed && installed === runtime.sha256) return { status: "current" };
       }
-      await this.options.authorizeSource(workspace); runtime = await this.options.runtimeForWorkspace(workspace);
+      runtime = await this.options.runtimeForWorkspace(workspace);
     }
     catch {
       if (input.op === "commit" || input.op === "activate") {
@@ -175,7 +173,6 @@ export class RuntimeAdoption {
       if (retired.stdout.trim() !== "started") return;
     }
     const workspace = await this.options.store.get(latest.workspace_id, latest.creator_user_id);
-    await this.options.authorizeSource(workspace);
     const accessEpoch = await this.options.store.accessEpoch(workspace.id), loginRevision = await this.options.store.loginRevision(workspace.id);
     if (this.closed || Date.now() >= latest.expires_at.getTime() || accessEpoch === null || loginRevision === null) return;
     const rollback = await this.options.handoffs.rollback(latest.id, { accessEpoch, loginRevision });

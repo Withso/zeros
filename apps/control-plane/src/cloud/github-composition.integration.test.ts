@@ -419,7 +419,7 @@ database("cloud GitHub composition", () => {
     expect((await workspaces.get(workspace.id, userId)).state).toBe("running");
   });
 
-  it("ends a running workspace only after a confirmed background denial", async () => {
+  it("keeps a workspace running after a definitive GitHub denial and refuses the network operation", async () => {
     const f = await fixture();
     const workspace = await workspaces.get(f.workspace.id, userId);
     await services.authorizeSource(workspace);
@@ -428,7 +428,9 @@ database("cloud GitHub composition", () => {
     fetcher.mockImplementationOnce(async () => Response.json({ message: "Resource not accessible by personal access token" }, { status: 403 }));
     const lease = await services.continueSource(workspace);
     await expect(lease.refresh).rejects.toMatchObject({ code: "github_cloud_access_denied" });
-    await vi.waitFor(async () => expect((await workspaces.get(workspace.id, userId)).state).toBe("stopping"));
+    expect((await workspaces.get(workspace.id, userId)).state).toBe("running");
+    await expect(services.service.execute(workspace.id, userId, { op: "gh.prSync", params: {} }))
+      .rejects.toMatchObject({ code: "github_cloud_access_denied" });
     expect((await pool.query("SELECT verified_at FROM cloud_github_source_verifications WHERE org_id=$1", [organizationId])).rows[0].verified_at).toBeNull();
   });
 
@@ -453,7 +455,7 @@ database("cloud GitHub composition", () => {
     await pool.query("UPDATE cloud_v2_github_workspaces SET repository_id=99 WHERE workspace_id=$1", [workspace.id]);
     await expect(services.binding(workspace, "continuation")).rejects.toMatchObject({ code: "github_repository_changed" });
   });
-  it("repairs a missed denial notification on the next authenticated request to another replica", async () => {
+  it("observes a persisted denial at another replica for network operations without stopping the VM", async () => {
     const f = await fixture(), before = (await workspaces.workerSession(f.token, f.boot))!;
     await services.authorizeSource(before);
     const other = createCloudGithubServices(pool, null, keys, workspaces, fetcher);
@@ -466,8 +468,8 @@ database("cloud GitHub composition", () => {
       error: new HttpError(403, "github_cloud_access_denied", "denied") });
     const after = (await workspaces.workerSession(f.token, f.boot))!;
     expect(BigInt(after.loginRevision)).toBeGreaterThan(BigInt(before.loginRevision));
-    await expect(other.continueSource(after, after)).rejects.toMatchObject({ code: "github_cloud_access_denied" });
-    expect((await workspaces.get(after.id, userId)).state).toBe("stopping");
+    await expect(other.workspaceToken(after)).rejects.toMatchObject({ code: "github_cloud_access_denied" });
+    expect((await workspaces.get(after.id, userId)).state).toBe("running");
   });
   it("updates a running checkout's canonical binding from a healthy continuation without extra GitHub calls", async () => {
     owner = "former";
@@ -633,7 +635,7 @@ database("cloud GitHub composition", () => {
       "former/project",
     );
   });
-  it("rejects disconnected credentials, clears PR capability, and retains the disk", async () => {
+  it("rejects disconnected credentials for GitHub operations and retains shared checkout metadata", async () => {
     const { workspace } = await fixture();
     await services.service.execute(workspace.id, userId, {
       op: "gh.prSync",
@@ -651,17 +653,13 @@ database("cloud GitHub composition", () => {
         params: {},
       }),
     ).rejects.toMatchObject({ code: "github_connection_required" });
-    expect((await services.documents([workspace]))[0]).not.toHaveProperty(
-      "github",
-    );
-    expect((await services.documents([workspace]))[0]).toHaveProperty(
-      "githubUnavailableReason",
-      "connection-required",
-    );
-    expect((await workspaces.get(workspace.id, userId)).state).toBe("stopping");
+    expect((await services.documents([workspace]))[0]?.github).toMatchObject({ repositoryId: "42", prNumber: null });
+    expect((await services.documents([workspace]))[0]).not.toHaveProperty("githubUnavailableReason");
+    expect((await workspaces.get(workspace.id, userId)).state).toBe("running");
   });
-  it("withdraws PR metadata if the selected connection changes while catalog metadata is being read", async () => {
+  it("retains shared PR metadata if the selected connection changes during the catalog read", async () => {
     const { workspace } = await fixture();
+    created = true;
     await services.service.execute(workspace.id, userId, {
       op: "gh.prSync",
       params: {},
@@ -679,12 +677,11 @@ database("cloud GitHub composition", () => {
         return result;
       },
     );
-    expect((await services.documents([workspace]))[0]).not.toHaveProperty(
-      "github",
-    );
+    expect((await services.documents([workspace]))[0]?.github).toMatchObject({ repositoryId: "42", prNumber: 7 });
+    expect(services.metadata.documents).toHaveBeenCalled();
   });
   it.each(["membership", "login", "access", "state", "sources"] as const)(
-    "withdraws catalog metadata when %s changes during its read", async change => {
+    "rechecks membership and retains shared metadata when %s changes during its read", async change => {
       const f = await fixture();
       created = true;
       await services.service.execute(f.workspace.id, userId, { op: "gh.prSync", params: {} });
@@ -700,13 +697,16 @@ database("cloud GitHub composition", () => {
         return result;
       });
       const [document] = await services.documents([workspace]);
-      expect(document).not.toHaveProperty("github");
-      expect(document).toHaveProperty("githubUnavailableReason");
-      expect(document?.repository).toBe(workspace.repository);
-      expect(Date.parse(document!.updatedAt)).toBeGreaterThanOrEqual(Date.parse(workspace.updatedAt));
+      expect(services.metadata.documents).toHaveBeenCalled();
+      if (change === "membership") expect(document).toBeUndefined();
+      else {
+        expect(document?.github).toMatchObject({ repositoryId: "42", prNumber: 7 });
+        expect(document?.checkoutPath).toBe(`/home/user/${workspace.repository}`);
+        expect(Date.parse(document!.updatedAt)).toBeGreaterThanOrEqual(Date.parse(workspace.updatedAt));
+      }
     },
   );
-  it("withdraws a catalog row when a secondary source is denied during the metadata read", async () => {
+  it("retains a shared catalog row when a secondary source is denied during the metadata read", async () => {
     const id = randomUUID();
     // Historical workspaces retain every source from their original snapshot.
     await pool.query(`INSERT INTO cloud_v2_workspaces(id,org_id,creator_user_id,name,repository,branch,base_branch,state,source_repositories)
@@ -730,8 +730,9 @@ database("cloud GitHub composition", () => {
       return result;
     });
     const [document] = await services.documents([workspace]);
-    expect(document).not.toHaveProperty("github");
-    expect(document?.githubUnavailableReason).toBe("access-denied");
+    expect(document?.github).toMatchObject({ repositoryId: "42", prNumber: 7 });
+    expect(document).not.toHaveProperty("githubUnavailableReason");
+    expect(services.metadata.documents).toHaveBeenCalled();
   });
   it.each(["held-creator", "cloud-disabled"] as const)("withholds catalog metadata without stopping work when local access is %s", async reason => {
     const { workspace } = await fixture();
@@ -750,9 +751,7 @@ database("cloud GitHub composition", () => {
     expect((await pool.query("SELECT state FROM cloud_v2_workspaces WHERE id=$1", [workspace.id])).rows[0].state).toBe("running");
     const rows = await workspaces.list(organizationId, userId);
     expect(rows).toHaveLength(1);
-    const [document] = await services.documents(rows);
-    expect(document).not.toHaveProperty("github");
-    expect(document).toHaveProperty("githubUnavailableReason");
+    expect(await services.documents(rows)).toEqual([]);
     expect((await pool.query("SELECT state FROM cloud_v2_workspaces WHERE id=$1", [workspace.id])).rows[0].state).toBe("running");
   });
   it("retains a stopped catalog through a temporary refresh failure", async () => {
@@ -762,14 +761,15 @@ database("cloud GitHub composition", () => {
     await services.documents([running]);
     await pool.query("UPDATE cloud_github_source_verifications SET verified_at=clock_timestamp()-interval '10 minutes 1 second' WHERE org_id=$1", [organizationId]);
     await workspaces.transition(running.id, ["running"], "stopped");
+    fetcher.mockClear();
     fetcher.mockImplementation(async () => new Response(null, { status: 503 }));
     const [document] = await services.documents([await workspaces.get(running.id, userId)]);
     expect(document?.github).toBeDefined();
     expect(document?.githubUnavailableReason).toBeUndefined();
-    await vi.waitFor(async () => expect((await pool.query("SELECT failure_code FROM cloud_github_source_verifications WHERE org_id=$1", [organizationId])).rows[0]?.failure_code).toBe("github_unavailable"));
+    expect(fetcher).not.toHaveBeenCalled();
     expect((await workspaces.get(running.id, userId)).state).toBe("stopped");
   });
-  it("never shares a catalog fingerprint or proof across organizations", async () => {
+  it("keeps shared catalog metadata keyed by workspace across organizations", async () => {
     const first = await fixture(), firstOrg = organizationId;
     created = true;
     await services.service.execute(first.workspace.id, userId, { op: "gh.prSync", params: {} });
@@ -782,11 +782,11 @@ database("cloud GitHub composition", () => {
     for (const ordered of [rows, [...rows].reverse(), rows]) {
       const documents = await services.documents(ordered);
       expect(documents.find(row => row.organizationId === firstOrg)).toMatchObject({ github: { prNumber: 7 } });
-      expect(documents.find(row => row.organizationId === organizationId)).not.toHaveProperty("github");
-      expect(documents.find(row => row.organizationId === organizationId)?.githubUnavailableReason).toBe("connection-required");
+      expect(documents.find(row => row.organizationId === organizationId)?.github?.prNumber ?? null).toBeNull();
+      expect(documents.find(row => row.organizationId === organizationId)).not.toHaveProperty("githubUnavailableReason");
     }
   });
-  it("keeps catalog versions monotonic when authorization withdraws newer PR metadata", async () => {
+  it("keeps catalog versions and shared metadata after the selected connection is removed", async () => {
     const { workspace } = await fixture();
     await services.service.execute(workspace.id, userId, {
       op: "gh.prSync",
@@ -806,8 +806,8 @@ database("cloud GitHub composition", () => {
     expect(Date.parse(after!.updatedAt)).toBeGreaterThanOrEqual(
       Date.parse(before!.updatedAt),
     );
-    expect(after).not.toHaveProperty("github");
-    expect(after?.repository).toBe(workspace.repository);
+    expect(after?.github).toEqual(before?.github);
+    expect(after?.repository).toBe(before?.repository);
   });
   it("does not invent historical repository IDs from a reusable name", async () => {
     const { workspace } = await fixture(false);
@@ -818,10 +818,8 @@ database("cloud GitHub composition", () => {
     expect(await workspaces.get(workspace.id, userId)).toMatchObject({
       repository: "former/project",
     });
-    expect((await services.documents([workspace]))[0]).toHaveProperty(
-      "githubUnavailableReason",
-      "source-review-required",
-    );
+    expect((await services.documents([workspace]))[0]).not.toHaveProperty("github");
+    expect(fetcher).not.toHaveBeenCalled();
   });
   it("withholds an in-flight workspace token when deletion retires its source scope", async () => {
     const f = await fixture(), workspace = await workspaces.get(f.workspace.id, userId);
@@ -846,30 +844,22 @@ database("cloud GitHub composition", () => {
     } finally { release(); await pending; fetcher.mockImplementation(original); }
   });
   it.each([
-    ["github_authorization_expired", "connection-expired"],
-    ["github_installation_required", "installation-required"],
-    ["github_installation_suspended", "installation-suspended"],
-    ["github_cloud_access_denied", "access-denied"],
-    ["github_repository_unavailable", "access-denied"],
-    ["github_sso_required", "sso-required"],
-    ["github_rate_limited", "rate-limited"],
-    ["github_unavailable", "unavailable"],
-    ["unexpected", "unavailable"],
-  ])(
-    "reports safe recovery guidance for %s without exposing protected PR data",
-    async (code, reason) => {
-      const { workspace } = await fixture();
-      vi.spyOn(services.source, "workspace").mockRejectedValue(
-        new HttpError(503, code, "Private upstream response"),
-      );
-      const [document] = await services.documents([workspace]);
-      expect(document).toHaveProperty("githubUnavailableReason", reason);
-      expect(document).not.toHaveProperty("github");
-      expect(JSON.stringify(document)).not.toContain(
-        "Private upstream response",
-      );
-    },
-  );
+    "github_authorization_expired", "github_installation_required", "github_installation_suspended",
+    "github_cloud_access_denied", "github_repository_unavailable", "github_sso_required",
+    "github_rate_limited", "github_unavailable", "unexpected",
+  ])("does not consult GitHub for shared catalog metadata when verification would return %s", async code => {
+    const { workspace } = await fixture();
+    created = true;
+    await services.service.execute(workspace.id, userId, { op: "gh.prSync", params: {} });
+    const source = vi.spyOn(services.source, "workspace").mockRejectedValue(new HttpError(503, code, "Private upstream response"));
+    fetcher.mockClear();
+    const [document] = await services.documents([workspace]);
+    expect(document?.github).toMatchObject({ repositoryId: "42", prNumber: 7 });
+    expect(document).not.toHaveProperty("githubUnavailableReason");
+    expect(source).not.toHaveBeenCalled();
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(JSON.stringify(document)).not.toContain("Private upstream response");
+  });
   it("reports a missing remote branch as unknown without masking failed repository authorization", async () => {
     const original = fetcher.getMockImplementation()!;
     fetcher.mockImplementation(async (input, init) =>

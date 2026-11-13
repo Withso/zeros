@@ -154,7 +154,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   };
   const authorizeSource = github.authorizeSource;
   const runtimeHandoffs = new RuntimeHandoffStore(pool);
-  const runtimeUpdates = new RuntimeAdoption({ handoffs: runtimeHandoffs, store, compute, runtimeForWorkspace, authorizeSource,
+  const runtimeUpdates = new RuntimeAdoption({ handoffs: runtimeHandoffs, store, compute, runtimeForWorkspace,
     drainActive: () => buildDrainActive(pool), logger: console });
   const continueSource = github.continueSource;
   const workspaceSync = new CloudWorkspaceSync(pool, localDevices, store, keys, signer, continueSource);
@@ -194,7 +194,6 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
         if (!row) throw new HttpError(409, "actor_changed", "Execution workspace changed");
         const workspace = cloudV2WorkspaceFromRow(row);
         const gitIdentity = await storedGitIdentity(tx, { organizationId: context.org_id, userId: context.user_id! });
-        if (!gitIdentity) throw new HttpError(503, "agent_credentials_unavailable", "Execution credentials are temporarily unavailable");
         const primary = await github.identities.primary(workspace, tx);
         await check(tx);
         return { workspace, gitIdentity, primary };
@@ -248,10 +247,9 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
       const issued = await store.issueToken({ workspaceId: workspace.id, kind: "proxy", userId: null, ttlMs: PROXY_TOKEN_TTL_MS });
       return { token: issued.token, expiresAt: issued.expiresAt.getTime() };
     };
-    // Every worker hello waits on this. The build's setup is read beside
-    // GitHub access. The Git identity stays last: its fence covers every
-    // read before it.
-    const [access, setup] = await Promise.all([github.workerConfiguration(workspace, mode, proof), github.workspaceSetup(workspace, computers)]);
+    // The stored Git identity is read last so its final membership and
+    // configuration fence also covers login, environment and tool reads.
+    const [access, setup] = await Promise.all([github.workerConfiguration(workspace), github.workspaceSetup(workspace, computers)]);
     const { repositoryBinding } = access;
     const { selectedLogins, baseCommit, environment, mcpServers } = await withSystemTx(pool, async tx => ({
       selectedLogins: await logins.all(workspace.creatorUserId, workspace.organizationId, tx),
@@ -318,10 +316,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     retireLocalSender: (id, userId, epoch, sessionId) => store.prompts.retireLocalSender(id, userId, epoch, sessionId),
     store, timing, authorizeSource, continueSource, ...(securityEvents ? { securityEvents } : {}),
     runtimeAdmission: runtimeHandoffs,
-    config: async (workspace, mode = "admission", proof) => {
-      if (!await execution.active(workspace.id)) { if (mode === "continuation") await continueSource(workspace, proof); else await authorizeSource(workspace); }
-      return workerConfig(workspace, mode, proof);
-    },
+    config: workerConfig,
     workerRoute: async id => {
       const route = await store.workerRoute(id);
       if (!route) return null;
@@ -332,7 +327,6 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     workerActivity: async (binding, idle) => {
       const current = await store.relayActivity(binding, idle);
       if (!current) return null;
-      if (!idle && current.state === "running" && current.executionMode !== "active") void continueSource(current, current).catch(() => {});
       const loginRevision = current.executionMode === "active" ? await execution.deps.logins.refreshAvailability(current.id) : null;
       return { state: current.state, loginRevision: loginRevision ?? current.loginRevision, prompts: current.promptsPending };
     },
@@ -481,8 +475,11 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     compute,
     runtime,
     runtimeForWorkspace,
-    authorizeSource: async (workspace, options) => {
-      if (!await lifecycleExecution(execution, workspace)) await authorizeSource(workspace, options);
+    authorizeWorkspace: async workspace => {
+      if (await lifecycleExecution(execution, workspace)) return;
+      requireWorkspaceCreator(workspace);
+      await store.get(workspace.id, workspace.creatorUserId);
+      if (workspace.state === "creating") await authorizeSource(workspace, { renew: true });
     },
     assertExecution: async workspace => { await lifecycleExecution(execution, workspace); },
     claimExecutionRestore: (workspace,sandboxId) => claimExecutionRestore(pool,workspace,sandboxId),

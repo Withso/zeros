@@ -7,11 +7,18 @@ and simulators as unavailable. Local Personal and organization-local workspaces
 keep their own engine, provider permissions and Host lifecycle.
 
 Cloud requires a non-personal organization with `cloud_workspaces_allowed`.
-Only the workspace creator can list, connect to or manage it, and they must
-still belong to that organization. Organization admins manage the shared
-Cloud Computer. Each person must also have current GitHub access to every
-repository whose source is present in their workspace. Repository lists are
-filtered through that person's GitHub connection; organization membership or
+Access follows organization membership: any member who is not
+on Hold can list, open, connect to and work in the organization's workspaces,
+and a workspace's management stays with its Creator and the organization's
+admins. Organization admins manage the shared Cloud Computer. A person's own
+GitHub access is needed only for the operations that talk to GitHub as them:
+creating a workspace, push, fetch, pull requests and other GitHub calls. A
+member therefore reads a workspace's code in the VM without GitHub access to
+its repository; the members panel tells owners and admins so. Without a
+GitHub connection or repository access, those GitHub operations refuse with a
+clear reason (`credential_missing` or `permission_denied`) while chat, files,
+the terminal and local commits keep working. Repository lists for Create are
+filtered through the creator's GitHub connection; organization membership or
 the GitHub App's installation alone does not grant repository access.
 
 ## VM, connections and runtime
@@ -363,20 +370,17 @@ connection generation and verifies read or write permission as needed.
 Cloud Computer builds use installation tokens for explicit repositories and
 permissions when the App is selected. Workspace VMs use the creator's user token
 as described below. Every configured source still needs separate authorization;
-a shared recipe is not a credential grant. A confirmed positive for the exact
-person, connection generation and repository ID is fresh for ten minutes.
-Workspace admission and traffic start a background refresh two minutes before
-expiry, sharing one verification for that person and repository. During a
-GitHub outage or rate limit, connections, chat, files, terminal, history and
-model proxy requests can reuse that positive for at most one hour from its
-original confirmation. A person without a positive gets a retryable unavailable
-answer. Failures never restart the confirmation clock. Git and GitHub network
-tokens still verify repository access on demand; a write-only denial refuses
-that operation without retiring the person's source-read authority.
-Confirmed denial, disconnected
-credentials, changed connection generations and unverified source IDs cannot
-use grace. Organization membership, worker boot and app session checks still
-apply independently.
+a shared recipe is not a credential grant. Workspace admission (list, open,
+connect, history, chat, files, terminal and model proxy requests) never checks
+GitHub: it follows membership, Hold, account and session alone. Create, first
+checkout and Git or GitHub network tokens verify the person's repository access
+when they run. A confirmed positive for the exact person, connection generation
+and repository ID is fresh for ten minutes; those operations start a background
+refresh two minutes before expiry, sharing one verification for that person and
+repository. A denial, a disconnected credential or a changed connection
+generation refuses only that operation; it never retires the person's contexts,
+sessions or other work. Organization membership, worker boot and app session
+checks apply independently.
 
 The relay's 30-second transport heartbeat sends only socket pings; it does not
 poll GitHub, login revisions or per-workspace database authority. Security and
@@ -390,12 +394,10 @@ reads. A fresh successful result can satisfy the waiter; a refusal or changed
 authorization ends it. The worker's hello HTTP timeout is ten seconds. The
 five-second verification budget leaves room for other configuration work, but
 slow credential/configuration I/O can still exceed the hello timeout; the worker
-retries that hello automatically. Waiters neither steal a live claim nor extend
-source grace.
-Lifecycle, hello and create checks use the same background refresh threshold.
+retries that hello automatically. Waiters never steal a live claim.
+Create and GitHub network checks use the same background refresh threshold.
 A temporary refresh failure records its retry deadline while retaining the
-original positive and its one-hour limit; a confirmed refusal withdraws it at
-once.
+original positive; a confirmed refusal withdraws it at once.
 Before that, the Create page warms the selected repository on intent: picking
 or hovering it, or pointing at, focusing or typing in the prompt sends
 `POST /v1/cloud-v2/organizations/:org/computer/repositories/warm`, at most
@@ -404,8 +406,8 @@ repository check with renewal and returns `{ ok: true }`; the desktop ignores
 its result.
 Transient failures back off from one to fifteen minutes, with bounded jitter, and respect
 GitHub's longer retry delay. An idle workspace does not refresh GitHub access.
-Relay close code `4001 access_revoked` means confirmed person access loss,
-including membership, account, session or source denial. Context expiry,
+Relay close code `4001 access_revoked` means confirmed person access loss:
+membership, Hold, account or session. A GitHub denial never closes a relay. Context expiry,
 temporary verification failure, workspace lifecycle changes and relay shutdown
 use retryable code `1013`; a deployment does not declare that a person lost access.
 
@@ -416,11 +418,11 @@ repository ID while applying current provider/MCP changes. Healthy source
 verification also refreshes the canonical name and notifies the worker after a
 rename or transfer, reusing the same GitHub response. Database timestamps keep
 late responses from undoing a newer binding. Configuration refreshes never issue
-GitHub tokens from stale evidence. Stop remains available. Grace expiry blocks
-further protected requests with a retryable availability error; it is not
-reported as an access revocation and does not delete work. A confirmed GitHub
-denial withdraws the grant and initiates stopping.
-Confirmed access loss stops a running workspace while retaining its disk and
+GitHub tokens from stale evidence. Stop remains available. A confirmed GitHub
+denial withdraws only that person's GitHub network authority; the workspace
+keeps running.
+In a legacy workspace, the creator leaving, going on Hold or losing their
+account stops a running workspace while retaining its disk and
 checkpoint. Stop and Delete remain available for cleanup. Revocation does not
 erase source or credentials already delivered to the VM; the VM remains one
 trust domain.
@@ -496,9 +498,10 @@ one trust domain: other members' processes can read that directory, and the
 person's variables, while the context lives.
 
 Activated workspaces retain the VM when one person leaves, goes on Hold or loses
-account or repository access. That person's contexts, tokens, pending prompts,
-Mac connections and local-command bindings are revoked; other members keep
-working. A session sign-out closes that session's clients and terminals while
+their account. Only those membership, Hold and account losses revoke that
+person's contexts, tokens, pending prompts, Mac connections and local-command
+bindings; other members keep working. Losing GitHub repository access revokes
+nothing: it only refuses that person's GitHub operations. A session sign-out closes that session's clients and terminals while
 already accepted turns retain their recorded sender. GitHub network tokens,
 review identity, environment, MCP, API and Local commands come from each
 execution's person. Commits use the current Creator's stored Git identity;

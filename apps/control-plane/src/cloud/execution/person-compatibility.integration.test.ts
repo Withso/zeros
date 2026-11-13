@@ -58,7 +58,7 @@ database("per-person compatibility and delayed admission", () => {
     ].sort((a, b) => a.kind.localeCompare(b.kind) || (a.provider_session_id ?? "").localeCompare(b.provider_session_id ?? "")));
   });
 
-  it("does not apply an old verification completion after a newer connection has admitted a turn", async () => {
+  it("does not apply an old verification completion after the new connection starts verification, or change a turn's membership authority", async () => {
     f = await executionFixture(pool); await f.cp.loginChanges.stop(); await f.activate(); await f.hello(); await f.login();
     const verifications = new PostgresGithubVerificationStore(pool);
     const scope = { organizationId: f.organizationId, userId: f.viewer.id, repositoryId: "42" };
@@ -68,6 +68,7 @@ database("per-person compatibility and delayed admission", () => {
     expect(claim?.claimId).toBeTruthy();
     await store.save(scope, oldFingerprint, { id: "12", login: "fixture" },
       { method: "pat", accessToken: `synthetic-${f.viewer.id}`, expiresAt: null });
+    expect((await verifications.claim({ ...scope, fingerprint: await store.fingerprint(scope) }))?.claimId).toBeTruthy();
     const turn = await f.dispatch(f.prompt(randomUUID()), f.viewer);
     expect((await f.worker("turn-lease", turn.lease)).status).toBe(200);
     const before = (await pool.query("SELECT state,authority,source_fingerprint FROM cloud_v2_execution_contexts WHERE id=$1", [turn.begun.contextId])).rows[0];
@@ -79,34 +80,38 @@ database("per-person compatibility and delayed admission", () => {
       .toEqual({ leases: [{ contextId: turn.begun.contextId, expiresAt: expect.any(Number) }] });
   });
 
-  it("applies a current source refusal to a surviving lease whose cache fingerprint predates a roster edit", async () => {
+  it("keeps a turn and its material after a source refusal following a roster edit", async () => {
     f = await executionFixture(pool); await f.activate(); await f.hello(); await f.login();
     const turn = await f.dispatch(f.prompt(randomUUID()), f.viewer);
     expect((await f.worker("turn-lease", turn.lease)).status).toBe(200);
-    const previous = (await pool.query("SELECT source_fingerprint FROM cloud_v2_execution_contexts WHERE id=$1", [turn.begun.contextId])).rows[0].source_fingerprint;
+    const previous = (await pool.query("SELECT state,material FROM cloud_v2_execution_contexts WHERE id=$1", [turn.begun.contextId])).rows[0];
     await withSystemTx(pool, tx => tx.query("UPDATE organizations SET authorization_revision=authorization_revision+1 WHERE id=$1", [f!.organizationId]));
     const scope = { organizationId: f.organizationId, userId: f.viewer.id, repositoryId: "42" };
     const fingerprint = await f.cp.execution.deps.authority.connections.fingerprint(scope);
-    expect(fingerprint).not.toBe(previous);
     const verifications = new PostgresGithubVerificationStore(pool), claim = await verifications.claim({ ...scope, fingerprint });
     expect(claim?.claimId).toBeTruthy();
     await verifications.finish({ ...scope, fingerprint }, claim!.claimId!,
       { allowed: false, temporary: false, error: new HttpError(403, "github_repository_forbidden", "Access ended"), retryAfterMs: 60000 });
     expect((await pool.query("SELECT state,material FROM cloud_v2_execution_contexts WHERE id=$1", [turn.begun.contextId])).rows[0])
-      .toEqual({ state: "revoked", material: null });
+      .toEqual(previous);
+    expect((await f.worker("execution-leases/renew", { contextIds: [turn.begun.contextId] })).status).toBe(200);
   });
 
   it("keeps valid version-1 tickets, queued prompts and bootstrap intents across another person's roster change", async () => {
     f = await executionFixture(pool); await f.activate(f.viewer); await f.hello(); await f.login();
     const proof = await f.cp.execution.deps.authority.admit(f.workspace.id, f.viewer.id);
     const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
-    const permissionSignature = hash(proof.person.legacyBasis.permission);
-    const signature = hash([permissionSignature, proof.person.accessEpoch, proof.person.stopGeneration]);
     const ticket = await f.cp.execution.clients.ticket(f.workspace.id, f.viewer, false);
+    await pool.query("UPDATE cloud_v2_tokens SET execution_authority=$2 WHERE workspace_id=$1 AND user_id=$3 AND kind='connect'",
+      [f.workspace.id, { signature: "capture" }, f.viewer.id]);
+    const basis = (await pool.query("SELECT execution_authority->'legacyBasis' AS basis FROM cloud_v2_tokens WHERE workspace_id=$1 AND user_id=$2 AND kind='connect'",
+      [f.workspace.id, f.viewer.id])).rows[0].basis;
+    const permissionSignature = hash(basis.permission);
+    const signature = hash([permissionSignature, proof.person.accessEpoch, proof.person.stopGeneration]);
     await pool.query("UPDATE cloud_v2_tokens SET execution_authority=$2 WHERE workspace_id=$1 AND user_id=$3 AND kind='connect'", [f.workspace.id,
       { signature, stopGeneration: proof.person.stopGeneration, tokenEnd: Date.now() + 60_000 }, f.viewer.id]);
     const input = f.prompt(); expect((await f.send(input, f.viewer)).status).toBe(201);
-    const authority = { permissionSignature, sourceFingerprint: proof.source.fingerprint };
+    const authority = { permissionSignature, sourceFingerprint: await f.cp.execution.deps.authority.connections.fingerprint({ organizationId: f.organizationId, userId: f.viewer.id }) };
     await pool.query("UPDATE cloud_v2_prompt_outbox SET execution_authority=$2 WHERE workspace_id=$1 AND user_message_id=$3", [f.workspace.id, authority, input.userMessageId]);
     await pool.query("UPDATE cloud_v2_workspaces SET execution_intent_authority=$2 WHERE id=$1", [f.workspace.id, authority]);
     await withSystemTx(pool, async tx => {

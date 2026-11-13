@@ -21,20 +21,20 @@ suite("direct sync authority fences with PostgreSQL", () => {
   afterEach(async () => { await f?.close(); vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.useRealTimers(); });
   afterAll(() => pool.end());
 
-  async function holdSource() {
-    const entered = deferred(), release = deferred(), original = CloudV2SourceAuthority.prototype.continueWorkspace;
-    vi.spyOn(CloudV2SourceAuthority.prototype, "continueWorkspace").mockImplementationOnce(async function (...args) {
-      const result = await original.apply(this, args);
+  async function holdWorkspaceRead() {
+    const entered = deferred(), release = deferred(), original = f.cp.store.promptContext.bind(f.cp.store);
+    vi.spyOn(f.cp.store, "promptContext").mockImplementationOnce(async (...args) => {
+      const result = await original(...args);
       entered.resolve(); await release.promise; return result;
     });
     const pending = f.grant(mac.headers);
-    await Promise.race([entered.promise, pending.then(() => { throw new Error("The grant bypassed the held source check"); })]);
+    await Promise.race([entered.promise, pending.then(() => { throw new Error("The grant bypassed the held workspace read"); })]);
     return { pending, release: release.resolve };
   }
 
   it.each(["session", "identity", "account", "membership", "entitlement", "registration", "instance", "disconnect", "stop", "archive", "delete",
-    "epoch", "login", "generation", "boot", "route"] as const)("does not issue a grant after %s changes during source continuation", async change => {
-    const held = await holdSource();
+    "epoch", "login", "generation", "boot", "route"] as const)("does not issue a grant after %s changes during the workspace read", async change => {
+    const held = await holdWorkspaceRead();
     try {
       if (change === "session") await pool.query("UPDATE auth_sessions SET status='revoked',revoked_at=clock_timestamp() WHERE provider_session_id=$1", [f.owner.authentication.sessionId]);
       else if (change === "identity") await pool.query("UPDATE user_identities SET status='revoked' WHERE user_id=$1", [f.owner.id]);
@@ -84,7 +84,7 @@ suite("direct sync authority fences with PostgreSQL", () => {
     expect(response.status).toBe(503); expect((await response.json()).error.code).toBe("cloud_sync_unavailable");
   });
 
-  it("does not mint after source grace expires during the final authority read", async () => {
+  it("issues a sync grant when GitHub grace expires during the final authority read", async () => {
     await pool.query("UPDATE cloud_v2_workspaces SET access_epoch=access_epoch+1 WHERE id=$1", [f.workspaceId]);
     await pool.query(`UPDATE cloud_github_source_verifications SET verified_at=clock_timestamp()-interval '59 minutes 30 seconds',
       failure_code='github_unavailable',failure_status=503,retry_at=clock_timestamp()+interval '1 minute' WHERE org_id=$1`, [f.organizationId]);
@@ -92,7 +92,7 @@ suite("direct sync authority fences with PostgreSQL", () => {
     const started = Date.now(), held = await holdFinalDeviceRead();
     vi.setSystemTime(started + 31_000); held.release();
     const response = await held.pending;
-    expect(response.status).toBe(503); expect((await response.json()).error.code).toBe("github_verification_expired");
+    expect(response.status).toBe(200); expect(await response.json()).toHaveProperty("grant");
   });
 
   it.each(["membership", "session", "instance"] as const)("rechecks %s after waiting to write the sync flag", async change => {
@@ -111,7 +111,7 @@ suite("direct sync authority fences with PostgreSQL", () => {
     expect((await pool.query("SELECT syncing FROM cloud_v2_connected_macs WHERE workspace_id=$1", [f.workspaceId])).rows).toEqual([{ syncing: false }]);
   });
 
-  it("keeps source outage and rate-limit backoff unknown without waking or stopping the workspace", async () => {
+  it("keeps sync available through source outages and rate limits without lifecycle effects", async () => {
     for (const [code, status] of [["github_unavailable", 503], ["github_rate_limited", 429]] as const) {
       await pool.query("UPDATE cloud_v2_workspaces SET access_epoch=access_epoch+1 WHERE id=$1", [f.workspaceId]);
       await pool.query(`UPDATE cloud_github_source_verifications SET verified_at=clock_timestamp()-interval '2 hours',
@@ -119,18 +119,20 @@ suite("direct sync authority fences with PostgreSQL", () => {
       const before = (await pool.query("SELECT state,updated_at,active_at FROM cloud_v2_workspaces WHERE id=$1", [f.workspaceId])).rows[0];
       f.fetcher.mockClear();
       const response = await f.grant(mac.headers);
-      expect(response.status).toBe(status); expect((await response.json()).error.code).toBe(code);
+      expect(response.status).toBe(200); expect(await response.json()).toHaveProperty("grant");
       expect(f.fetcher).not.toHaveBeenCalled();
       expect((await pool.query("SELECT state,updated_at,active_at FROM cloud_v2_workspaces WHERE id=$1", [f.workspaceId])).rows[0]).toEqual(before);
     }
   });
 
-  it("honors the source continuation's bounded positive grace", async () => {
+  it("does not consult source continuation for a sync grant", async () => {
+    const source = vi.spyOn(CloudV2SourceAuthority.prototype, "continueWorkspace");
     await pool.query("UPDATE cloud_v2_workspaces SET access_epoch=access_epoch+1 WHERE id=$1", [f.workspaceId]);
     await pool.query(`UPDATE cloud_github_source_verifications SET verified_at=clock_timestamp()-interval '20 minutes',
       failure_code='github_unavailable',failure_status=503,retry_at=clock_timestamp()+interval '1 minute' WHERE org_id=$1`, [f.organizationId]);
     f.fetcher.mockClear();
     expect((await f.grant(mac.headers)).status).toBe(200);
+    expect(source).not.toHaveBeenCalled();
     expect(f.fetcher).not.toHaveBeenCalled();
   });
 

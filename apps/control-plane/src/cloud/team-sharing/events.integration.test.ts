@@ -56,22 +56,22 @@ database("passive team transcript events", () => {
   }
   const tick = () => pool.query("SELECT pg_notify('zeros_security_event','{}')");
 
-  it("projects current source-admitted people from the expiring rows", async () => {
+  it("projects current members from the expiring rows", async () => {
     const proof = await f.sharing.authority.admit(f.workspace.id,f.viewer);
     const connection = await f.sharing.events.presence.open(proof);
     expect(await f.sharing.events.presence.snapshot(proof)).toEqual({ workspaceId: f.workspace.id,userIds: [f.viewer.id],total: 1 });
     await f.sharing.events.presence.close(connection);
   });
 
-  it.each(["signout","membership","fingerprint"])("omits a person whose %s changes during a presence read", async change => {
+  it.each(["signout","membership","fingerprint"])("applies membership and session changes, but not %s GitHub changes, during a presence read", async change => {
     const viewer = await f.sharing.authority.admit(f.workspace.id,f.viewer);
     await f.sharing.events.presence.open(viewer);
     const reader = await f.sharing.authority.admit(f.workspace.id,f.admin);
-    const original = f.github.connections.store.fingerprintsForPeople.bind(f.github.connections.store);
+    const original = f.sharing.authority.assert.bind(f.sharing.authority);
     let changed = false;
-    vi.spyOn(f.github.connections.store,"fingerprintsForPeople").mockImplementation(async (...args) => {
+    vi.spyOn(f.sharing.authority,"assert").mockImplementation(async (...args) => {
       const rows = await original(...args);
-      if (!changed && args[2].includes(f.viewer.id)) {
+      if (!changed) {
         changed = true;
         if (change === "signout") await pool.query("UPDATE auth_sessions SET status='revoked',revoked_at=now() WHERE provider_session_id=$1",[f.viewer.authentication.sessionId]);
         if (change === "membership") await pool.query("DELETE FROM organization_members WHERE org_id=$1 AND user_id=$2",[f.organizationId,f.viewer.id]);
@@ -79,7 +79,8 @@ database("passive team transcript events", () => {
       }
       return rows;
     });
-    expect(await f.sharing.events.presence.snapshot(reader)).toEqual({ workspaceId: f.workspace.id,userIds: [],total: 0 });
+    const userIds = change === "fingerprint" ? [f.viewer.id] : [];
+    expect(await f.sharing.events.presence.snapshot(reader)).toEqual({ workspaceId: f.workspace.id,userIds,total: userIds.length });
     expect(changed).toBe(true);
   });
 

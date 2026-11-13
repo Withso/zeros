@@ -95,7 +95,7 @@ database("opt-in cloud team sharing through the real router", () => {
     expect(await shared.json()).toEqual(await legacy.json());
   });
 
-  it("hides foreign organizations and requires every immutable source, including a snapshot-only repository", async () => {
+  it("hides foreign organizations but admits members without GitHub access to snapshot sources", async () => {
     const id = randomUUID();
     await withSystemTx(pool,async tx => {
       await tx.query(`INSERT INTO cloud_v2_workspaces(id,org_id,creator_user_id,name,repository,branch,base_branch,state,source_repositories)
@@ -104,21 +104,21 @@ database("opt-in cloud team sharing through the real router", () => {
         VALUES($1,'example/project',42),($1,'example/snapshot',43)`,[id]);
     });
     f.denied.add(`${f.viewer.id}:43`);
-    expect((await f.call(`/v1/cloud-v2/workspaces/${id}`)).status).toBe(404);
+    expect((await f.call(`/v1/cloud-v2/workspaces/${id}`)).status).toBe(200);
     const list = await (await f.call(`/v1/cloud-v2/workspaces?organizationId=${f.organizationId}`)).json();
-    expect(list.workspaces.map((row: { id: string }) => row.id).sort()).toEqual([f.workspace.id,f.own.id].sort());
+    expect(list.workspaces.map((row: { id: string }) => row.id).sort()).toEqual([f.workspace.id,f.own.id,id].sort());
     expect((await f.call(path(),"GET",undefined,f.outsider)).status).toBe(404);
     expect((await f.call(`/v1/cloud-v2/workspaces?organizationId=${f.organizationId}`,"GET",undefined,f.outsider)).status).toBe(404);
     expect((await f.call(`/v1/cloud-v2/workspaces/${id}`,"GET",undefined,f.admin)).status).toBe(200);
     expect((await pool.query("SELECT state FROM cloud_v2_workspaces WHERE id=$1",[id])).rows[0].state).toBe("running");
   });
 
-  it("returns retryable unknown rather than an empty list during a provider outage", async () => {
+  it("returns the membership catalog without provider calls during a GitHub outage", async () => {
     f.unavailable.add(f.viewer.id);
     const response = await f.call(`/v1/cloud-v2/workspaces?organizationId=${f.organizationId}`);
-    expect(response.status).toBe(503);
-    expect(response.headers.get("Retry-After")).toBe("5");
-    expect(await response.json()).toMatchObject({ error: { code: "github_verification_unavailable" } });
+    expect(response.status).toBe(200);
+    expect((await response.json()).workspaces).toHaveLength(2);
+    expect(f.fetcher).not.toHaveBeenCalled();
     expect((await f.call(path(),"GET",undefined,f.admin)).status).toBe(200);
   });
 
@@ -155,8 +155,13 @@ database("opt-in cloud team sharing through the real router", () => {
       }
     } finally { release(); }
     const result = await response;
-    expect([401,404]).toContain(result.status);
-    expect((await result.json()).workspace).toBeUndefined();
+    if (change === "fingerprint") {
+      expect(result.status).toBe(200);
+      expect((await result.json()).workspace.id).toBe(f.workspace.id);
+    } else {
+      expect([401,404]).toContain(result.status);
+      expect((await result.json()).workspace).toBeUndefined();
+    }
     expect((await f.store.get(f.workspace.id,f.creator.id)).state).toBe("stopped");
   });
 

@@ -90,28 +90,19 @@ async function currentSession(deps: CloudV2WorkerRouteDeps, token: string, bootI
   }
   return deps.store.workerSession(token, bootId);
 }
-async function session(c: Context, deps: CloudV2WorkerRouteDeps, source = true, privateBoot = false): Promise<{ token: string; bootId: string; workspace: CloudV2WorkerSession }> {
+async function session(c: Context, deps: CloudV2WorkerRouteDeps, privateBoot = false): Promise<{ token: string; bootId: string; workspace: CloudV2WorkerSession }> {
   const token = bearer(c), bootId = c.req.header("x-zeros-worker-boot");
   if (!bootId || !z.string().uuid().safeParse(bootId).success) throw unauthorized();
   const workspace = await currentSession(deps, token, bootId, privateBoot ? c.req.header("x-zeros-runtime-handoff") : undefined);
   if (!workspace) throw unauthorized();
-  // Retain Stop's final history/ack path even when source authority is lost.
-  if (source && workspace.state !== "stopping" && workspace.executionMode !== "active") {
-    if (deps.continueSource) await deps.continueSource(workspace, workspace);
-    else await deps.authorizeSource?.(workspace);
-  }
   return { token, bootId, workspace };
 }
 async function configuration(deps: CloudV2WorkerRouteDeps, workspace: CloudV2WorkerSession, token: string, bootId: string, features: ReadonlySet<string>, mode: "admission" | "continuation" = "admission", handoff?: string): Promise<ConfigFrame> {
   assertLegacyMaterial(workspace);
   const active = workspace.executionMode === "active";
   if (active && !features.has(ACTING_USER_FEATURE)) throw executionWorkerRequired();
-  const authorized = active ? undefined : mode === "continuation" && deps.continueSource ? deps.continueSource(workspace, workspace) : deps.authorizeSource?.(workspace);
-  // The first fence read doesn't depend on the source check, so they overlap.
-  // Reading it earlier only widens the window the fence below compares.
   let fence: Promise<CloudV2WorkerSession | null> | undefined = currentSession(deps, token, bootId, handoff);
   fence.catch(() => {});
-  await authorized;
   for (let attempt = 0; attempt < 8; attempt++) {
     const before = await (fence ?? currentSession(deps, token, bootId, handoff));
     fence = undefined;
@@ -181,38 +172,38 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
   if (deps.execution) {
     const execution = deps.execution;
     app.post(`${CLOUD_V2_WORKER_API}/execution-leases/boot-clean`, async c => {
-      const auth = await session(c, deps, false);
+      const auth = await session(c, deps);
       if (!workerFeatures(c).has(ACTING_USER_FEATURE)) throw executionWorkerRequired();
       const input = await body(c, CloudV2BootCleanRequestSchema);
       return c.json(await execution.boots.clean(auth, input, deps.logger));
     });
     app.post(`${CLOUD_V2_WORKER_API}/turn-lease`, async c => {
-      const auth = await session(c, deps, false);
+      const auth = await session(c, deps);
       if (!workerFeatures(c).has(ACTING_USER_FEATURE)) throw executionWorkerRequired();
       return c.json(leaseReply(c, await execution.turnLease(auth, await body(c, CloudV2TurnLeaseRequestSchema))));
     });
     app.post(`${CLOUD_V2_WORKER_API}/terminal-lease`, async c => {
-      const auth = await session(c, deps, false);
+      const auth = await session(c, deps);
       return c.json(leaseReply(c, await execution.clients.terminalLease(auth, await body(c, CloudV2TerminalLeaseRequestSchema))));
     });
     app.post(`${CLOUD_V2_WORKER_API}/client-lease`, async c => {
-      const auth = await session(c, deps, false);
+      const auth = await session(c, deps);
       return c.json(leaseReply(c, await execution.clients.operationLease(auth, await body(c, CloudV2ClientLeaseRequestSchema))));
     });
     app.post(`${CLOUD_V2_WORKER_API}/execution-leases/renew`, async c => {
-      const auth = await session(c, deps, false);
+      const auth = await session(c, deps);
       if (!workerFeatures(c).has(ACTING_USER_FEATURE)) throw executionWorkerRequired();
       const input = await body(c, CloudV2RenewRequestSchema);
       return c.json(await execution.renew(auth, input.contextIds));
     });
     app.post(`${CLOUD_V2_WORKER_API}/bootstrap-lease`, async c => {
-      const auth = await session(c, deps, false);
+      const auth = await session(c, deps);
       if (!workerFeatures(c).has(ACTING_USER_FEATURE)) throw executionWorkerRequired();
       const input = await body(c, CloudV2BootstrapLeaseRequestSchema);
       return c.json(leaseReply(c, await execution.bootstrapLease(auth, input.contextId)));
     });
     app.post(`${CLOUD_V2_WORKER_API}/execution-leases/:id/retired`, async c => {
-      const auth = await session(c, deps, false);
+      const auth = await session(c, deps);
       if (!workerFeatures(c).has(ACTING_USER_FEATURE)) throw executionWorkerRequired();
       const id = z.uuid().safeParse(c.req.param("id"));
       if (!id.success) throw new HttpError(400, "invalid_request", "Invalid execution context");
@@ -353,13 +344,13 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
     return c.json({ ok: true });
   });
   app.post(`${CLOUD_V2_WORKER_API}/checkout-failed`, async c => {
-    const auth = await session(c, deps, false);
+    const auth = await session(c, deps);
     await body(c, z.object({}).strict());
     if (!await deps.store.failWorkerCheckout(auth.token, auth.bootId)) throw unauthorized();
     return c.json({ ok: true });
   });
   app.post(`${CLOUD_V2_WORKER_API}/environment`, async c => {
-    const auth = await session(c, deps, false, true), report = await body(c, CloudEnvironmentReportSchema);
+    const auth = await session(c, deps, true), report = await body(c, CloudEnvironmentReportSchema);
     const handoff = c.req.header("x-zeros-runtime-handoff");
     if (handoff && await deps.runtimeUpdates?.environment(auth.token, auth.bootId, handoff, report)) return c.json({ sequence: report.sequence });
     if (!deps.environmentReport) throw new HttpError(404, "not_found", "Environment status is unavailable.");
@@ -369,7 +360,7 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
   app.post(`${CLOUD_V2_WORKER_API}/setup`, async c => {
     if (!workerFeatures(c).has("setup-status-v1") || !deps.store.reportWorkerSetup)
       throw new HttpError(404, "not_found", "Setup status is unavailable.");
-    const auth = await session(c, deps, false, true), report = await body(c, CloudV2SetupStatusSchema);
+    const auth = await session(c, deps, true), report = await body(c, CloudV2SetupStatusSchema);
     const handoff = c.req.header("x-zeros-runtime-handoff");
     await deps.store.reportWorkerSetup(auth.token, auth.bootId, report,
       { accessEpoch: auth.workspace.accessEpoch, ...(handoff ? { handoff } : {}) });
@@ -387,17 +378,14 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
   app.post(`${CLOUD_V2_WORKER_API}/activity`, async c => {
     // Activity releases no source or credential. Its current worker/boot proof
     // still applies, but a GitHub outage must never turn a busy VM into idle.
-    const auth = await session(c, deps, false), { idle } = await body(c, CloudV2WorkerActivitySchema);
+    const auth = await session(c, deps), { idle } = await body(c, CloudV2WorkerActivitySchema);
     if (!idle) await deps.store.markActive(auth.workspace.id);
-    // Actual active work can refresh its cached permission in the background.
-    // Neither a slow check nor its failure can suppress the activity receipt.
-    if (!idle && auth.workspace.state === "running") void deps.continueSource?.(auth.workspace, auth.workspace).catch(() => {});
     const loginRevision = auth.workspace.executionMode === "active"
       ? await deps.execution?.deps.logins.refreshAvailability(auth.workspace.id) : null;
     return c.json({ loginRevision: loginRevision ?? auth.workspace.loginRevision, state: auth.workspace.state });
   });
   app.get(`${CLOUD_V2_WORKER_API}/config`, async c => {
-    const auth = await session(c, deps, true, true);
+    const auth = await session(c, deps, true);
     return c.json({ config: await configuration(deps, auth.workspace, auth.token, auth.bootId, workerFeatures(c), "continuation", c.req.header("x-zeros-runtime-handoff")) });
   });
   app.post(`${CLOUD_V2_WORKER_API}/mcp/:id/authorization`, async c => {
@@ -414,12 +402,12 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
     return c.json(result);
   });
   app.post(`${CLOUD_V2_WORKER_API}/github-token`, async c => {
-    const auth = await session(c, deps, false);
+    const auth = await session(c, deps);
     const input = await body(c, z.object({ purpose: z.enum(["git", "gh"]).optional(), failedTokenSha256: z.string().length(64).regex(/^[a-f0-9]{64}$/).optional(), contextId: z.uuid().optional() }).strict());
-    if (auth.workspace.executionMode === "active") return c.json(await deps.execution!.githubToken(auth, input.contextId, input.purpose ?? "git", input.failedTokenSha256));
     assertLegacyMaterial(auth.workspace);
     let granted: { token: string; expiresAt: number };
     try {
+      if (auth.workspace.executionMode === "active") return c.json(await deps.execution!.githubToken(auth, input.contextId, input.purpose ?? "git", input.failedTokenSha256));
       if (auth.workspace.state !== "stopping") {
         if (deps.continueSource) await deps.continueSource(auth.workspace, auth.workspace);
         else await deps.authorizeSource?.(auth.workspace);
@@ -427,6 +415,7 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
       granted = await deps.githubToken(auth.workspace, input.purpose ?? "git", ...(input.failedTokenSha256 ? [input.failedTokenSha256] : []));
     } catch (error) {
       const failure = cloudGithubFailure(error);
+      if (auth.workspace.executionMode === "active" && failure.kind !== "http") throw error;
       deps.logger?.warn("[cloud-v2] GitHub credential unavailable", failure);
       return c.json({ error: { code: "github_token_unavailable", reason: failure.reason } }, 409);
     }

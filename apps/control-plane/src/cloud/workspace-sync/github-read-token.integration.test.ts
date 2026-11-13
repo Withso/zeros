@@ -227,7 +227,7 @@ suite("passive GitHub read tokens through the production router and PostgreSQL",
       const response = await pending, body = await response.json();
       const code = { session: "session_revoked", account: "session_revoked", membership: "not_found", rejoin: "github_authorization_changed",
         registration: "device_registration_changed", instance: "device_registration_changed", disconnect: "mac_not_connected", wanted: "sync_not_wanted",
-        github: "mac_not_connected", source: "github_authorization_changed", delete: "not_found", remote_permission: "github_access_required" }[change];
+        github: "github_authorization_changed", source: "github_authorization_changed", delete: "not_found", remote_permission: "github_access_required" }[change];
       expect(response.status).toBeGreaterThanOrEqual(400);
       expect(body.error.code).toBe(code);
       expect(body).not.toHaveProperty("token");

@@ -11,7 +11,7 @@ import { CreatorRevisionSchema, teamCreatorChanged, teamCursorKey, teamNotFound,
   teamOwnershipRequired, teamUnavailable, type TeamCandidatesQuery, type TeamReassign } from "./contract.js";
 import type { CloudTeamSharing } from "./store.js";
 
-type CandidateReason = "on_hold" | "account_inactive" | "repository_access_required";
+type CandidateReason = "on_hold" | "account_inactive";
 type Candidate = { userId: string; eligible: true; agentLogins: Awaited<ReturnType<typeof selectedAgentLoginAvailability>> } |
   { userId: string; eligible: false; reason: CandidateReason };
 type Receipt = { requestId: string; fromUserId: string | null; toUserId: string; creatorRevision: string };
@@ -51,9 +51,21 @@ export class CloudTeamOwnership {
     } catch (error) {
       const current = await withSystemTx(this.sharing.pool, tx => this.localCandidate(tx, id, userId));
       if (current !== null) return { reason: current ?? "account_inactive" };
-      if (error instanceof HttpError && error.status < 500) return { reason: "repository_access_required" };
       throw teamUnavailable();
     }
+  }
+
+  private async repositoryHint(tx: Tx, view: TeamView, userId: string): Promise<boolean> {
+    const fingerprint = (await this.sharing.github.connections.store.fingerprintsForPeople(tx, view.workspace.organizationId, [userId])).get(userId);
+    const row = (await tx.query<{ unavailable: boolean }>(`SELECT NOT EXISTS (
+        SELECT 1 FROM cloud_github_selections s JOIN cloud_github_credentials c
+          ON c.org_id=s.org_id AND c.owner_user_id=s.owner_user_id AND c.method=s.selected_method
+        WHERE s.org_id=$1 AND s.owner_user_id=$2 AND (c.method<>'pat' OR c.expires_at IS NULL OR c.expires_at>clock_timestamp()))
+      OR EXISTS(SELECT 1 FROM cloud_github_source_verifications v JOIN cloud_v2_github_sources src
+        ON src.repository_id=v.repository_id AND src.workspace_id=$4
+        WHERE v.org_id=$1 AND v.owner_user_id=$2 AND v.fingerprint=$3 AND v.failure_status IN (401,403,404)) AS unavailable`,
+    [view.workspace.organizationId, userId, fingerprint ?? null, view.workspace.id])).rows[0];
+    return row?.unavailable === true;
   }
 
   async candidates(id: string, user: AuthedUser, page: TeamCandidatesQuery) {
@@ -90,8 +102,9 @@ export class CloudTeamOwnership {
         candidates.set(person, await this.candidate(id, person));
       }
     }));
-    const result: Candidate[] = await withSystemTx(this.sharing.pool, async tx => {
+    const result = await withSystemTx(this.sharing.pool, async tx => {
       const values: Candidate[] = [];
+      const candidateHints: Record<string, ["repository_access"]> = {};
       for (const { user_id: userId } of selected) {
         const local = await this.localCandidate(tx, id, userId);
         if (local === undefined) continue;
@@ -101,19 +114,22 @@ export class CloudTeamOwnership {
           try { await this.people.assert(candidate.proof, tx); }
           catch (error) {
             if (!(error instanceof HttpError) || error.status >= 500) throw teamUnavailable();
-            reason = "repository_access_required";
+            const latest = await this.localCandidate(tx, id, userId);
+            if (latest === null) throw teamUnavailable();
+            reason = latest ?? "account_inactive";
           }
         }
         values.push(reason ? { userId, eligible: false, reason } : { userId, eligible: true,
           agentLogins: await selectedAgentLoginAvailability(tx, proof.view.workspace.organizationId, userId) });
+        if (!reason && await this.repositoryHint(tx, proof.view, userId)) candidateHints[userId] = ["repository_access"];
       }
       const current = await this.sharing.authority.assert(proof, tx);
       this.manager(current);
       if (current.creatorRevision !== revision) throw teamCreatorChanged();
-      return values;
+      return { candidates: values, candidateHints };
     });
     const last = selected.at(-1);
-    return { candidates: result, creatorRevision: revision, nextCursor: !self && rows.length>limit && last
+    return { ...result, creatorRevision: revision, nextCursor: !self && rows.length>limit && last
       ? Buffer.from(JSON.stringify({ key, revision, id: last.user_id })).toString("base64url") : null };
   }
 

@@ -55,37 +55,34 @@ database("Creator execution with a team-sharing header", () => {
     expect(admission).not.toHaveBeenCalled();
   });
 
-  it.each(["viewer", "admin"] as const)("still requires the %s's own source proof and refuses execution", async role => {
+  it.each(["viewer", "admin"] as const)("requires activation for the %s without asking GitHub for workspace access", async role => {
     const viewer = vi.spyOn(f.github.source, "viewer");
     for (const action of actions) {
       const response = await f.call(path(action), "POST", { ...body(action), creatorUserId: f[role].id, viewerRole: "creator" }, f[role]);
       expect(response.status).toBe(409);
       expect(await response.json()).toMatchObject({ error: { code: "workspace_read_only" } });
     }
-    expect(viewer).toHaveBeenCalled();
-    expect(viewer.mock.calls.every(call => call[1] === f[role].id)).toBe(true);
+    expect(viewer).not.toHaveBeenCalled();
     expect((await pool.query("SELECT state FROM cloud_v2_workspaces WHERE id=$1", [f.workspace.id])).rows[0].state).toBe("stopped");
     expect((await pool.query("SELECT 1 FROM cloud_v2_tokens WHERE workspace_id=$1", [f.workspace.id])).rowCount).toBe(0);
   });
 
-  it("hides missing, foreign and source-denied workspaces before considering a non-Creator's execution", async () => {
+  it("hides missing and foreign workspaces but retains the activation guard for a member without GitHub access", async () => {
     f.denied.add(`${f.viewer.id}:42`);
     for (const action of actions) {
-      expect((await f.call(path(action), "POST", body(action), f.viewer)).status).toBe(404);
+      expect((await f.call(path(action), "POST", body(action), f.viewer)).status).toBe(409);
       expect((await f.call(path(action), "POST", body(action), f.outsider)).status).toBe(404);
       expect((await f.call(path(action).replace(f.workspace.id, randomUUID()), "POST", body(action), f.creator)).status).toBe(404);
     }
     expect((await f.store.get(f.workspace.id, f.creator.id)).state).toBe("stopped");
   });
 
-  it.each(["connect", "start", "prompts"] as const)("retains the Creator's repository refusal on %s", async action => {
+  it.each(["connect", "start", "prompts"] as const)("admits the Creator's local %s without repository access", async action => {
     await prepare(action);
     f.denied.add(`${f.creator.id}:42`);
     const response = await f.call(path(action), "POST", body(action), f.creator);
-    expect(response.status).toBeGreaterThanOrEqual(400);
-    expect(response.status).toBeLessThan(500);
-    expect((await pool.query("SELECT 1 FROM cloud_v2_tokens WHERE workspace_id=$1", [f.workspace.id])).rowCount).toBe(0);
-    expect((await pool.query("SELECT 1 FROM cloud_v2_prompt_outbox WHERE workspace_id=$1", [f.workspace.id])).rowCount).toBe(0);
+    expect(response.status).toBe(action === "prompts" ? 201 : action === "start" ? 202 : 200);
+    expect(f.fetcher).not.toHaveBeenCalled();
   });
 
   it.each(["connect", "start", "prompts"] as const)("rechecks current ownership and live access after classifying %s", async action => {

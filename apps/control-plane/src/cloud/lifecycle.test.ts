@@ -56,7 +56,7 @@ function setup(claimed: (CloudV2LifecycleWorkspace & { attempts: number })[], op
   checkpoints?: ReturnType<typeof checkpointsFake>; remoteHead?: CloudV2LifecycleDeps["remoteHead"]; githubToken?: CloudV2LifecycleDeps["githubToken"]; uploadHorizon?: string;
   checkpointRetry?: boolean; retries?: RetryRow[]; prepareRepository?: CloudV2LifecycleDeps["prepareRepository"]; pruneEnvironments?: () => Promise<void>;
   runtimeForWorkspace?: CloudV2LifecycleDeps["runtimeForWorkspace"]; bootEnv?: CloudV2LifecycleDeps["bootEnv"]; builds?: CloudV2LifecycleDeps["builds"];
-  authorizeSource?: CloudV2LifecycleDeps["authorizeSource"]; resolvePendingSource?: CloudV2LifecycleDeps["resolvePendingSource"] } = {}) {
+  authorizeWorkspace?: CloudV2LifecycleDeps["authorizeWorkspace"]; resolvePendingSource?: CloudV2LifecycleDeps["resolvePendingSource"] } = {}) {
   const retries = [...options.retries ?? []];
   const compute: CloudV2Compute = {
     create: vi.fn(async () => ({ sandboxId: "bx_new1" })),
@@ -130,7 +130,7 @@ function setup(claimed: (CloudV2LifecycleWorkspace & { attempts: number })[], op
     ...(options.githubToken ? { githubToken: options.githubToken } : {}),
     ...(options.pruneEnvironments ? { pruneEnvironments: options.pruneEnvironments } : {}),
     ...(options.builds ? { builds: options.builds } : {}),
-    ...(options.authorizeSource ? { authorizeSource: options.authorizeSource } : {}),
+    ...(options.authorizeWorkspace ? { authorizeWorkspace: options.authorizeWorkspace } : {}),
     ...(options.resolvePendingSource ? { resolvePendingSource: options.resolvePendingSource } : {}),
   });
   return { lifecycle, compute, store, stopWorker, logs };
@@ -142,14 +142,14 @@ describe("a create that returned before its GitHub checks", () => {
   it("runs them before any VM, then boots with the base commit they read", async () => {
     const row = pending(), order: string[] = [];
     const resolvePendingSource = vi.fn<NonNullable<CloudV2LifecycleDeps["resolvePendingSource"]>>(async () => { order.push("resolve"); return { baseCommit: "d".repeat(40) }; });
-    const authorizeSource = vi.fn<NonNullable<CloudV2LifecycleDeps["authorizeSource"]>>(async () => { order.push("authorize"); });
+    const authorizeWorkspace = vi.fn<NonNullable<CloudV2LifecycleDeps["authorizeWorkspace"]>>(async () => { order.push("authorize"); });
     const remoteHead = vi.fn(async () => "e".repeat(40));
-    const f = setup([row], { resolvePendingSource, authorizeSource, remoteHead });
+    const f = setup([row], { resolvePendingSource, authorizeWorkspace, remoteHead });
     vi.mocked(f.compute.create).mockImplementation(async () => { order.push("create"); return { sandboxId: "bx_new1" }; });
     await f.lifecycle.tick();
     expect(resolvePendingSource).toHaveBeenCalledExactlyOnceWith(row);
     expect(order.slice(0, 3)).toEqual(["resolve", "authorize", "create"]);
-    expect(authorizeSource.mock.calls[0]![0]).not.toHaveProperty("sourcePending");
+    expect(authorizeWorkspace.mock.calls[0]![0]).not.toHaveProperty("sourcePending");
     expect(remoteHead).not.toHaveBeenCalled();
     expect(f.store.setBaseCommit).not.toHaveBeenCalled();
     expect(vmCommand(f, CLOUD_V2_WORKER_TOKEN_PATH)).toBeDefined();
@@ -190,18 +190,15 @@ describe("a create that returned before its GitHub checks", () => {
   });
 });
 
-// The worker's hello follows these checks within seconds; a positive about
-// to expire is renewed so that hello needn't verify GitHub itself.
-it.each(["creating", "starting"] as const)("asks the %s step's source checks to renew, through token delivery", async state => {
+it.each(["creating", "starting"] as const)("rechecks the %s workspace's authority through token delivery", async state => {
   const row = workspace(state, state === "starting" ? { boatSandboxId: "bx_existing" } : {});
-  const authorizeSource = vi.fn<NonNullable<CloudV2LifecycleDeps["authorizeSource"]>>(async () => {});
-  const f = setup([row], { authorizeSource });
+  const authorizeWorkspace = vi.fn<NonNullable<CloudV2LifecycleDeps["authorizeWorkspace"]>>(async () => {});
+  const f = setup([row], { authorizeWorkspace });
   await f.lifecycle.tick();
   expect(vmCommand(f, CLOUD_V2_WORKER_TOKEN_PATH)).toBeDefined();
-  expect(authorizeSource.mock.calls.length).toBeGreaterThanOrEqual(2);
-  for (const [checked, options] of authorizeSource.mock.calls) {
+  expect(authorizeWorkspace.mock.calls.length).toBeGreaterThanOrEqual(2);
+  for (const [checked] of authorizeWorkspace.mock.calls) {
     expect(checked.id).toBe(row.id);
-    expect(options).toEqual({ renew: true });
   }
 });
 

@@ -39,7 +39,7 @@ export class CloudExecutionSync {
     [id, person.workspaceId, person.organizationId, user.id, id, user.authentication.sessionId, new Date(ceiling),
       binding.deviceId, binding.registrationId, binding.instanceId, connectedAt,
       person.accessEpoch, person.stopGeneration, person.bootId, person.workerTokenHash, executionContextAuthority(person),
-      proof.source.fingerprint, new Date(until)])).rows[0]!;
+      proof.source?.fingerprint ?? null, new Date(until)])).rows[0]!;
     await this.contexts.assertContext(tx, row, proof);
     assertExecutionLifetime(until);
     return row;

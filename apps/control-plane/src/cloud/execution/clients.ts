@@ -33,7 +33,7 @@ export class CloudExecutionClients {
       await tx.query("SELECT 1 FROM cloud_v2_workspaces WHERE id=$1 FOR UPDATE", [workspaceId]);
       await assertNoExecutionTransition(tx, workspaceId);
       await this.contexts.deps.authority.assert(proof, tx);
-      const authority: ExecutionConnectAuthority = { signatureVersion: 2, signature: proof.person.personSignature, stopGeneration: proof.person.stopGeneration, tokenEnd,
+      const authority: ExecutionConnectAuthority = { signatureVersion: proof.person.signatureVersion, signature: proof.person.personSignature, stopGeneration: proof.person.stopGeneration, tokenEnd,
         ...(clientInstanceId ? { clientInstanceId } : {}) };
       await tx.query(`INSERT INTO cloud_v2_tokens(token_hash,workspace_id,kind,user_id,expires_at,wake_on_connect,provider_session_id,execution_authority)
         VALUES($1,$2,'connect',$3,$4,$5,$6,$7)`, [token.hash, workspaceId, user.id, expiresAt, wake, user.authentication.sessionId, authority]);
@@ -129,7 +129,7 @@ export class CloudExecutionClients {
       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,decode($17,'hex'),$18,$19,$20) RETURNING *`,
     [randomUUID(), person.workspaceId, person.organizationId, person.userId, input.kind, input.clientId, input.sessionId,
       input.tokenEnd ? new Date(input.tokenEnd) : null, input.operation ?? null, input.requestId ?? null, input.terminalId ?? null, input.parentId ?? null,
-      input.fingerprint ?? null, person.accessEpoch, person.stopGeneration, person.bootId, person.workerTokenHash, executionContextAuthority(person), proof.source.fingerprint,
+      input.fingerprint ?? null, person.accessEpoch, person.stopGeneration, person.bootId, person.workerTokenHash, executionContextAuthority(person), proof.source?.fingerprint ?? null,
       new Date(until)])).rows[0]!;
     assertExecutionLifetime(until, input.tokenEnd);
     return row;

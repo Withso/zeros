@@ -130,15 +130,15 @@ describe("cloud Codex account model discovery", () => {
 });
 
 describe("cloud v2 model proxy", () => {
-  it.each([[503, "github_unavailable", 503], [429, "github_rate_limited", 503], [403, "github_cloud_access_denied", 401]] as const)(
-    "reports source verification %s/%s without misclassifying a temporary outage as revocation", async (status, code, expected) => {
+  it.each([[503, "github_unavailable"], [429, "github_rate_limited"], [403, "github_cloud_access_denied"]] as const)(
+    "does not couple inference to GitHub %s/%s", async (status, code) => {
       const env = setup({ codex: { kind: "codex-api-key", apiKey: secret("key") } }, undefined, {
         continueSource: async () => { throw new HttpError(status, code, "private-error-canary"); },
       });
       const response = await env.app.request("/v2/cloud/proxy/openai/responses", { method: "POST", headers: { authorization: `Bearer ${token}` }, body: "{}" });
-      expect(response.status).toBe(expected);
+      expect(response.status).toBe(200);
       expect(await response.text()).not.toContain("private-error-canary");
-      expect(env.fetch).not.toHaveBeenCalled();
+      expect(env.fetch).toHaveBeenCalledOnce();
     });
 
   it("continues Codex requests on an existing grant without fresh GitHub admission", async () => {
@@ -149,7 +149,7 @@ describe("cloud v2 model proxy", () => {
     expect(response.status).toBe(200);
     expect(env.fetch).toHaveBeenCalledOnce();
     expect(authorizeSource).not.toHaveBeenCalled();
-    expect(continueSource).toHaveBeenCalledOnce();
+    expect(continueSource).not.toHaveBeenCalled();
   });
   it("swaps the workspace token for the creator's ChatGPT login and streams the reply", async () => {
     const { app, fetch } = setup({ codex: { kind: "codex-chatgpt", accessToken: secret("chatgpt-access"), accountId: "acct_1", expiresAt: 2_000_000 } });

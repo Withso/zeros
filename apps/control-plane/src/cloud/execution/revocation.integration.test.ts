@@ -91,12 +91,14 @@ database("durable execution revocation", () => {
     expect((await pool.query("SELECT 1 FROM cloud_v2_execution_contexts WHERE workspace_id=$1 AND kind='turn'", [f.workspace.id])).rowCount).toBe(0);
   });
 
-  it("treats source outage as unknown and a later denial as revocation", async () => {
+  it("keeps turns across GitHub outages and denials, with membership revocation unchanged", async () => {
     const active = await turn();
+    await f.github.source.viewer(f.organizationId, f.viewer.id, [{ repository: f.workspace.repository, repositoryId: "42" }]);
     await pool.query("UPDATE cloud_github_source_verifications SET failure_code='github_unavailable',failure_status=503 WHERE owner_user_id=$1", [f.viewer.id]);
     expect((await read(active.begun.contextId)).state).toBe("active");
     await pool.query("UPDATE cloud_github_source_verifications SET failure_code='github_repository_access_required',failure_status=403 WHERE owner_user_id=$1", [f.viewer.id]);
-    expect(await read(active.begun.contextId)).toMatchObject({ state: "revoked", reason: "access_revoked", material: null });
+    expect(await read(active.begun.contextId)).toMatchObject({ state: "active", reason: null });
+    expect((await f.worker("turn-lease", active.lease)).status).toBe(200);
   });
 
   it("keeps the cleanup barrier after Stop intent and releases it only after confirmed shutdown", async () => {

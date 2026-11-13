@@ -3,13 +3,11 @@ import { HttpError } from "../../authz.js";
 import { withSystemTx } from "../../db.js";
 import { memberOnHoldSql } from "../../organization-seats.js";
 import { CLOUD_V2_LIVE_ACCESS } from "../workspace-access.js";
-import { teamConnectionRevisionSql, type CloudTeamAuthority, type TeamAdmission } from "./authority.js";
+import type { CloudTeamAuthority, TeamAdmission } from "./authority.js";
 import { teamNotFound } from "./contract.js";
 
 export const TEAM_PRESENCE_TTL_MS = 65_000, TEAM_PRESENCE_RENEW_MS = 30_000;
-const presentPeople = `SELECT DISTINCT p.user_id,jsonb_build_array(u.auth_revision,m.authorization_revision,m.created_at,
-    CASE WHEN w.execution_mode<>'active' THEN (SELECT authorization_revision FROM organizations WHERE id=p.org_id) END,
-    ${teamConnectionRevisionSql("p.org_id","p.user_id")}) AS signature
+const presentPeople = `SELECT DISTINCT p.user_id
   FROM cloud_v2_workspace_presence p
   JOIN cloud_v2_workspaces w ON w.id=p.workspace_id AND w.org_id=p.org_id AND w.access_epoch=p.access_epoch
   JOIN organization_members m ON m.org_id=p.org_id AND m.user_id=p.user_id
@@ -63,28 +61,7 @@ export class CloudTeamPresence {
   async snapshot(proof: TeamAdmission): Promise<{ workspaceId: string; userIds: string[]; total: number }> {
     return withSystemTx(this.authority.pool,async tx => {
       const view = await this.authority.assert(proof,tx);
-      const candidates = (await tx.query<{ user_id: string; signature: unknown }>(`${presentPeople} ORDER BY p.user_id`,[view.workspace.id])).rows;
-      const admitted: { user_id: string; fingerprint: string; signature: unknown }[] = [];
-      for (let offset=0;offset<candidates.length;offset+=200) {
-        const page = candidates.slice(offset,offset+200);
-        const generations = await this.authority.connections.fingerprintsForPeople(tx,view.workspace.organizationId,page.map(row => row.user_id));
-        for (const row of page) {
-          const fingerprint = generations.get(row.user_id);
-          if (fingerprint) admitted.push({ ...row,fingerprint });
-        }
-      }
-      const rows = (await tx.query<{ user_id: string }>(`WITH people AS (${presentPeople})
-        SELECT admitted.user_id FROM jsonb_to_recordset($2::jsonb) admitted(user_id uuid,fingerprint text,signature jsonb)
-        JOIN people ON people.user_id=admitted.user_id AND people.signature=admitted.signature
-        WHERE EXISTS(SELECT 1 FROM cloud_v2_workspaces WHERE id=$1 AND source_pending AND creator_user_id=admitted.user_id)
-        OR (EXISTS(SELECT 1 FROM cloud_v2_github_sources WHERE workspace_id=$1)
-        AND NOT EXISTS(SELECT 1 FROM cloud_v2_github_sources src LEFT JOIN cloud_github_source_verifications v
-          ON v.org_id=$3 AND v.owner_user_id=admitted.user_id AND v.repository_id=src.repository_id AND v.fingerprint=admitted.fingerprint
-          WHERE src.workspace_id=$1 AND (v.verified_at IS NULL OR v.verified_at<=clock_timestamp()-interval '60 minutes'
-            OR v.verified_at>clock_timestamp() OR (v.failure_code IS NOT NULL AND NOT (
-              (v.failure_status=429 AND v.failure_code='github_rate_limited') OR (v.failure_status=503 AND v.failure_code IN
-                ('github_unavailable','github_verification_busy','github_verification_expired','github_refresh_pending','github_refresh_uncertain','github_oauth_failed','github_bad_response')))))))
-        ORDER BY admitted.user_id`,[view.workspace.id,JSON.stringify(admitted),view.workspace.organizationId])).rows;
+      const rows = (await tx.query<{ user_id: string }>(`${presentPeople} ORDER BY p.user_id`,[view.workspace.id])).rows;
       await this.authority.assert(proof,tx);
       return { workspaceId: view.workspace.id,userIds: rows.slice(0,200).map(row => row.user_id),total: rows.length };
     });

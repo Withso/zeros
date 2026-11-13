@@ -28,9 +28,8 @@ export class CloudExecutionMaintenance {
           try {
             if (!row.user_id) reason = "access_revoked";
             else {
-              const person = await this.contexts.deps.authority.snapshot(tx, id, row.user_id, row.source_fingerprint, row.id);
+              const person = await this.contexts.deps.authority.snapshot(tx, id, row.user_id, undefined, row.id);
               if (!matchesExecutionSignature(row.authority, row.authority.signature, person, "signature") || person.state === "stopping") reason = "actor_changed";
-              if (person.verifications.some(value => value.failureStatus && [401,403,404].includes(value.failureStatus))) reason = "access_revoked";
               if (row.provider_session_id && !(await tx.query(`SELECT 1 FROM auth_sessions WHERE user_id=$1 AND provider='workos' AND provider_session_id=$2
                 AND status='active' AND revoked_at IS NULL AND (provider_session_expires_at IS NULL OR provider_session_expires_at>clock_timestamp())`, [row.user_id,row.provider_session_id])).rowCount)
                 reason = "access_revoked";

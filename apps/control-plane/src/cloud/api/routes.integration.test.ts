@@ -956,12 +956,18 @@ database("cloud API through the assembled router and PostgreSQL", () => {
     const sessionId = randomUUID();
     await store.writeHistory(workspace.id, { chats: [{ id: sessionId, agentId: "codex" } as never] });
     await store.transition(workspace.id, ["creating"], "stopped");
-    vi.mocked(routes.authorizeSource!).mockImplementationOnce(async () => { await store.requestLifecycle(workspace.id, owner, "archive"); });
+    const read = store.promptContext.bind(store);
+    const authorize = vi.spyOn(store, "promptContext").mockImplementationOnce(async (...args) => {
+      const result = await read(...args);
+      await store.requestLifecycle(workspace.id, owner, "archive");
+      return result;
+    });
     const response = operation === "session"
       ? await request("/sessions", { workspaceId: workspace.id, agent: "codex", message: "New" })
       : await request(`/sessions/${sessionId}/messages`, { message: "New" });
     expect(response.status).toBe(409);
     expect((await response.json()).error.code).toBe("workspace_archived");
+    expect(authorize).toHaveBeenCalled();
     const archived = await store.get(workspace.id, owner);
     expect(archived.state).toBe("stopped"); expect(archived.archivedAt).not.toBeNull();
     expect((await pool.query("SELECT 1 FROM cloud_v2_prompt_outbox WHERE workspace_id=$1", [workspace.id])).rowCount).toBe(0);
@@ -1377,13 +1383,20 @@ database("cloud API through the assembled router and PostgreSQL", () => {
     expect((await request("/workspaces", body, token, tokenHeaders)).status).toBe(429);
   }, 20_000);
 
-  it("preserves source checks and rechecks the API credential after awaited source I/O", async () => {
-    vi.mocked(routes.authorizeSource!).mockRejectedValueOnce(new HttpError(403, "github_cloud_access_denied", "Source access denied"));
-    expect((await request("/sessions", { workspaceId: workspace.id, agent: "codex", message: "Denied" })).status).toBe(404);
-    expect((await pool.query("SELECT 1 FROM cloud_v2_prompt_outbox")).rowCount).toBe(0);
-    vi.mocked(routes.authorizeSource!).mockImplementationOnce(async () => { await credentials.revoke(org, owner, keyId); });
+  it("admits API messages without GitHub and rechecks the credential after the workspace read", async () => {
+    vi.mocked(routes.authorizeSource!).mockRejectedValue(new HttpError(403, "github_cloud_access_denied", "Source access denied"));
+    expect((await request("/sessions", { workspaceId: workspace.id, agent: "codex", message: "Admitted" })).status).toBe(201);
+    expect(routes.authorizeSource).not.toHaveBeenCalled();
+    expect((await pool.query("SELECT 1 FROM cloud_v2_prompt_outbox")).rowCount).toBe(1);
+    const read = store.promptContext.bind(store);
+    const authorize = vi.spyOn(store, "promptContext").mockImplementationOnce(async (...args) => {
+      const result = await read(...args);
+      await credentials.revoke(org, owner, keyId);
+      return result;
+    });
     expect((await request("/sessions", { workspaceId: workspace.id, agent: "codex", message: "Revoked" })).status).toBe(401);
-    expect((await pool.query("SELECT 1 FROM cloud_v2_prompt_outbox")).rowCount).toBe(0);
+    expect(authorize).toHaveBeenCalled();
+    expect((await pool.query("SELECT 1 FROM cloud_v2_prompt_outbox")).rowCount).toBe(1);
   });
 
   it.each(["192.0.2.77", "invalid"])("bounds random credential lookups before authentication using X-Real-IP: %s", async address => {
@@ -1445,7 +1458,7 @@ database("cloud API through the assembled router and PostgreSQL", () => {
     expect((await pool.query("SELECT 1 FROM cloud_v2_workspaces WHERE org_id=$1 AND creator_user_id=$2", [org, owner])).rowCount).toBe(10);
   });
 
-  it("keeps wake and unarchive behind the existing source-admission guard while a create is pending", async () => {
+  it("keeps a pending create pending through wake and unarchive without source admission", async () => {
     routes.asyncCreate = () => true;
     const created = await request("/workspaces", { repository: "example/project" });
     expect(created.status).toBe(201);
@@ -1453,7 +1466,8 @@ database("cloud API through the assembled router and PostgreSQL", () => {
     expect((await store.get(id, owner)).sourcePending).toBe(true);
     vi.mocked(routes.authorizeSource!).mockRejectedValue(new HttpError(409, "cloud_source_pending", "This workspace is still being prepared"));
     for (const action of ["wake", "unarchive"])
-      expect((await request(`/workspaces/${id}/${action}`, {})).status).toBe(409);
+      expect((await request(`/workspaces/${id}/${action}`, {})).status).toBe(200);
+    expect(routes.authorizeSource).not.toHaveBeenCalled();
     expect((await store.get(id, owner)).state).toBe("creating");
   });
 

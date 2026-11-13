@@ -44,28 +44,39 @@ Creator-wide material and boots a worker advertising `acting-user-v1`.
 An activated workspace refuses an older worker instead of delivering legacy
 Creator credentials. Local workspaces are unaffected.
 
-On an activated workspace, a currently eligible member with their own access
-to every recorded source repository can use a direct workspace or session ID.
-HTTP, CLI and remote MCP use the same authority. Workspace list discovery is
-unchanged. A prompt requires that sender's selected login for the chat's agent;
-otherwise it returns `409 agent_login_required` with `error.agent` set to
-`claude`, `codex` or `cursor`. A temporary source or credential failure returns
-`503` and never selects another person's login. The credential selector allows
-an explicitly configured organization shared key first; shared-key provisioning
-is not included in this rollout.
+On an activated workspace, a current organization member not on Hold can use
+a direct workspace or session ID, even without a GitHub connection or repository
+access. HTTP, CLI and remote MCP use the same authority; each list keeps its
+existing discovery filters. `GET /v1/me` advertises `workspaceAccess: "membership"`
+when this policy is enabled. GitHub access is checked only for that person's
+network operations, such as push, fetch, pull, clone, PRs and GitHub API calls.
+A refusal fails that operation without hiding the workspace or revoking local
+execution. Create and the first repository checkout still require source access.
+
+Agent turns use the current Creator's selected login for the chat's agent.
+A sender needs neither their own agent login nor Pro. A missing payer login
+returns `409 agent_login_required` with `error.agent` set to `claude`, `codex` or
+`cursor`; a workspace without a Creator refuses a new turn. A temporary login
+failure returns `503`. The credential selector allows an explicitly configured
+organization shared key first; shared-key provisioning is separate.
 
 The control plane assigns the actor when the worker begins a durable prompt.
 The assignment binds the workspace, chat, message, dispatch, generation and
 worker boot. A later person's message waits until the running turn's cleanup
 is acknowledged. A same-person steer reuses the running turn's credentials.
 Any admitted member may Stop. Start, restart, wake and setup use their persisted
-initiator's authority. Terminals use the opener's identity; other members may
-read their output but cannot type, resize or close them.
+initiator's authority. Terminals use the opener's execution authority; other
+members may read their output but cannot type, resize or close them. Commits
+use the current Creator's stored Git identity, or the actor's stored identity
+when there is no Creator. GitHub network operations always use the actor's
+own credential.
 
 Execution leases last 30 seconds and renew every 10 seconds. Their API and
-proxy tokens stay stable until retirement or revocation. Each lease selects
-the person's own GitHub authority, agent login, environment and MCP servers;
-global worker configuration carries no personal material. A clean-boot
+proxy tokens stay stable until retirement or revocation. Each lease binds the
+actor's environment, MCP servers and on-demand GitHub authority, with the
+Creator's agent login for a turn. Activated configuration carries the current
+Creator's non-secret Git identity, agent availability and selectable model IDs;
+it carries no provider credential. A clean-boot
 attestation is required before any begin or lease. Losing membership, going
 on Hold, or stopping the workspace revokes the affected contexts. Exact desktop
 sign-out also revokes that session's clients and terminals; durably accepted
@@ -820,19 +831,15 @@ Team sharing uses the desktop's WorkOS session and
 workspace tokens, the CLI and remote MCP remain Creator-only. Requests without
 the header keep the released Creator-only selection and response shape.
 
-A reader must be an eligible member of the workspace's organization and have
-their own GitHub access to every recorded source repository, including repositories
-in the original Cloud Computer snapshot. The Creator must retain their existing
-runtime authority too. A confirmed refusal is hidden from lists and returns
-`404 not_found` on a direct read. A temporary verification failure returns
-`503 github_verification_unavailable` with `Retry-After`; clients retain their
-last confirmed snapshot. A reader's source refusal never stops the Creator's VM.
-
-Fresh admission reuses a positive source verification for 30 seconds. An open
-viewer refreshes it after ten minutes and can retain the original positive during
-an outage for at most one hour. Session, membership, credential generation,
-workspace access epoch and immutable repository identities are rechecked before
-data is returned. Following, pinning and presence do not grant access.
+A reader must be a current member of the workspace's organization, with an
+active account and no Hold. Their GitHub access, selected connection and upstream
+availability do not gate lists, documents, events, history, connections or
+execution leases. Session, membership, workspace access epoch and immutable
+repository identities are rechecked before data is returned. A person who loses
+workspace access is hidden from lists and receives `404 not_found` on a direct
+read. Following, pinning and presence do not grant access. Legacy and prepared
+workspaces still require their Creator's runtime authority; activated workspaces
+can remain accessible without a Creator.
 
 The opt-in list includes the viewer's own workspaces and teammates' workspaces:
 
@@ -860,14 +867,24 @@ current Creator; `createdByUserId` preserves the original Creator and becomes
 null after that account is erased. Names and avatars come from the existing
 organization roster. The strict `capabilities` object is unchanged.
 
-Members can read only. Creators and admins with their own repository access may
-rename, stop, archive or delete a workspace and edit its chat metadata. A member's
+For legacy and prepared workspaces, members can read only. Creators and admins
+may rename, stop, archive or delete a workspace and edit its chat metadata. A member's
 management request returns `403 workspace_read_only`. An admin
 cannot start, restart or wake another Creator's workspace, send prompts, open its
 execution bridge, or use its terminal, files or Git. Those execution entrances
 return `409 workspace_read_only` for admitted shared readers; no worker
 configuration, route credential or connection ticket is released. Existing chat
 edit conflicts, including `session_busy` and `worker_update_required`, still apply.
+Activated workspaces instead admit members to execution as described above;
+management permissions remain separate from permission to work.
+
+Ownership-enabled documents expose `noCreator` and the caller's management
+actions. `GET /workspaces/:id/reassign-candidates`, including `?self=1`, returns
+unchanged candidate rows plus optional top-level
+`candidateHints: { "<userId>": ["repository_access"] }`. A hint describes known
+missing or denied GitHub access and does not make that member ineligible.
+Candidates and Reassign do not call GitHub; membership, Hold, account state and
+the Creator revision still fence the change.
 
 `GET /workspaces/:id/events` is a passive SSE feed. It emits
 `ready: { teamSharing: 1 }`, `changed: { workspaceId }`,

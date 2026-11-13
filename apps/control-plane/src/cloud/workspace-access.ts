@@ -28,8 +28,8 @@ export const CLOUD_V2_LIVE_ACCESS_SQL = sql`(
   OR (w.execution_mode<>'active' AND ${CLOUD_V2_CREATOR_ACCESS_SQL}))`;
 export const CLOUD_V2_LIVE_ACCESS = CLOUD_V2_LIVE_ACCESS_SQL.text;
 
-/** Only the membership part of execution authority; callers must also prove
- * that person's immutable repository scope before releasing data or effects. */
+/** Workspace access is membership-based. GitHub operations separately check
+ * the acting person's repository authority at the token broker. */
 export function cloudV2ActorAccess(parameter: "$1" | "$2" | "$3") {
   return `(w.execution_mode<>'active' AND w.creator_user_id=${parameter} OR w.execution_mode='active' AND EXISTS (
     SELECT 1 FROM organization_members am JOIN users au ON au.id=am.user_id

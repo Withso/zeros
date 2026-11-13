@@ -36,6 +36,7 @@ database("team sharing expand migration and hot-table cost", () => {
     await f.call(`/v1/cloud-v2/workspaces/${f.workspace.id}/follow`,"POST");
     const proof = await f.sharing.authority.admit(f.workspace.id,f.viewer);
     const connection = await f.sharing.events.presence.open(proof);
+    const source = await f.github.source.viewer(f.organizationId, f.viewer.id, [{ repository: f.workspace.repository, repositoryId: "42" }]);
     await withSystemTx(pool,async tx => {
       // Tiny fixtures otherwise prefer sequential scans, or another index plus a
       // sort when parallel suites shift the table statistics. This checks that the
@@ -44,7 +45,7 @@ database("team sharing expand migration and hot-table cost", () => {
       const plans = [
         ["list","SELECT id FROM cloud_v2_workspaces WHERE org_id=$1 AND state<>'deleted' ORDER BY created_at DESC,id LIMIT 50",[f.organizationId],"cloud_v2_workspaces_organization_page"],
         ["source","SELECT verified_at FROM cloud_github_source_verifications WHERE org_id=$1 AND owner_user_id=$2 AND repository_id=ANY($3::bigint[]) AND fingerprint=$4",
-          [f.organizationId,f.viewer.id,["42"],proof.source!.fingerprint],"cloud_github_source_verifications_pkey"],
+          [f.organizationId,f.viewer.id,["42"],source.fingerprint],"cloud_github_source_verifications_pkey"],
         ["followers","SELECT user_id FROM cloud_v2_workspace_followers WHERE workspace_id=$1 ORDER BY user_id LIMIT 200",[f.workspace.id],"cloud_v2_workspace_followers_pkey"],
         ["presence","SELECT user_id FROM cloud_v2_workspace_presence WHERE workspace_id=$1 AND expires_at>clock_timestamp()",[f.workspace.id],"cloud_v2_workspace_presence_workspace"],
       ] as const;

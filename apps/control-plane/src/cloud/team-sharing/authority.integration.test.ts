@@ -3,21 +3,20 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 import { teamSharingFixture, type TeamSharingFixture } from "./test-fixture.js";
 
 const database = process.env.TEST_DATABASE_URL ? describe : describe.skip;
-database("team viewer source authority", () => {
+database("team viewer membership authority", () => {
   let pool: pg.Pool, f: TeamSharingFixture;
   beforeAll(() => { pool = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL,max: 6 }); });
   beforeEach(async () => { f = await teamSharingFixture(pool); });
   afterAll(async () => { await pool.end(); });
   const path = () => `/v1/cloud-v2/workspaces/${f.workspace.id}`;
 
-  it.each(["session","membership","account","fingerprint","source","epoch"])("fences %s changes while GitHub is awaited", async change => {
+  it.each(["session","membership","account","fingerprint","source","epoch"])("fences %s changes while metadata is read", async change => {
     let entered!: () => void, release!: () => void;
     const reached = new Promise<void>(resolve => { entered=resolve; }), held = new Promise<void>(resolve => { release=resolve; });
-    const fetcher = f.fetcher.getMockImplementation()!;
-    let first = true;
-    f.fetcher.mockImplementation(async (...args) => {
-      const response = await fetcher(...args);
-      if (first && new URL(String(args[0])).pathname === "/repositories/42") { first=false; entered(); await held; }
+    const documents = f.github.metadata.documents.bind(f.github.metadata);
+    vi.spyOn(f.github.metadata, "documents").mockImplementationOnce(async (...args) => {
+      const response = await documents(...args);
+      entered(); await held;
       return response;
     });
     const response = f.call(path()); await reached;
@@ -30,50 +29,41 @@ database("team viewer source authority", () => {
       if (change === "epoch") await pool.query("UPDATE cloud_v2_workspaces SET access_epoch=access_epoch+1 WHERE id=$1",[f.workspace.id]);
     } finally { release(); }
     const result = await response;
-    expect([401,404,503]).toContain(result.status);
-    expect((await result.json()).workspace).toBeUndefined();
+    if (change === "fingerprint") {
+      expect(result.status).toBe(200);
+      expect((await result.json()).workspace.id).toBe(f.workspace.id);
+    } else {
+      expect([401,404,503]).toContain(result.status);
+      expect((await result.json()).workspace).toBeUndefined();
+    }
+    expect(f.fetcher).not.toHaveBeenCalled();
     expect((await f.store.get(f.workspace.id,f.creator.id)).state).toBe("stopped");
   });
 
-  it("reuses a positive for admission and refreshes it in the background after eight minutes", async () => {
-    const proof = await f.sharing.authority.admit(f.workspace.id,f.viewer);
+  it.each(["31 seconds", "9 minutes", "61 minutes"])("reads without refreshing a source answer aged %s", async age => {
+    await f.github.source.viewer(f.organizationId, f.viewer.id, [{ repository: f.workspace.repository, repositoryId: "42" }]);
     f.fetcher.mockClear();
-    await pool.query("UPDATE cloud_github_source_verifications SET verified_at=now()-interval '31 seconds' WHERE owner_user_id=$1",[f.viewer.id]);
-    expect((await f.call(path())).status).toBe(200);
-    expect(f.fetcher).not.toHaveBeenCalled();
-    const latest = await f.sharing.authority.admit(f.workspace.id,f.viewer);
-    const connection = await f.sharing.events.presence.open(latest);
-    f.fetcher.mockClear();
-    await pool.query("UPDATE cloud_github_source_verifications SET verified_at=now()-interval '9 minutes' WHERE owner_user_id=$1",[f.viewer.id]);
-    expect((await f.call(path())).status).toBe(200);
-    await vi.waitFor(() => expect(f.fetcher).toHaveBeenCalled(),{ interval: 5 });
-    await expect(f.sharing.authority.assert(proof)).resolves.toMatchObject({ workspace: { id: f.workspace.id } });
-    await f.sharing.events.presence.close(connection);
-  });
-
-  it("bounds retained positives to the original hour for both continuation and new admission", async () => {
+    await pool.query("UPDATE cloud_github_source_verifications SET verified_at=now()-$2::interval WHERE owner_user_id=$1", [f.viewer.id, age]);
     const proof = await f.sharing.authority.admit(f.workspace.id,f.viewer);
     const connection = await f.sharing.events.presence.open(proof);
-    await pool.query("UPDATE cloud_github_source_verifications SET verified_at=now()-interval '11 minutes' WHERE owner_user_id=$1",[f.viewer.id]);
-    f.unavailable.add(f.viewer.id);
     expect((await f.call(path())).status).toBe(200);
-    await vi.waitFor(async () => expect((await pool.query("SELECT failure_code FROM cloud_github_source_verifications WHERE owner_user_id=$1",[f.viewer.id])).rows[0].failure_code)
-      .toBe("github_unavailable"),{ interval: 5 });
-    expect((await f.call(path())).status).toBe(200);
-    await pool.query("UPDATE cloud_github_source_verifications SET verified_at=now()-interval '61 minutes' WHERE owner_user_id=$1",[f.viewer.id]);
-    const expired = await f.call(path()); expect(expired.status).toBe(503); expect(expired.headers.get("Retry-After")).toBe("5");
-    await pool.query("UPDATE cloud_github_source_verifications SET verified_at=now()-interval '11 minutes' WHERE owner_user_id=$1",[f.viewer.id]);
+    await expect(f.sharing.authority.assert(proof)).resolves.toMatchObject({ workspace: { id: f.workspace.id } });
+    expect(f.fetcher).not.toHaveBeenCalled();
     await f.sharing.events.presence.close(connection);
-    expect((await f.call(path())).status).toBe(200);
   });
 
-  it("never lets continuation grace override a confirmed refusal", async () => {
+  it("retains workspace admission and presence after a confirmed GitHub refusal", async () => {
+    await f.github.source.viewer(f.organizationId, f.viewer.id, [{ repository: f.workspace.repository, repositoryId: "42" }]);
     const proof = await f.sharing.authority.admit(f.workspace.id,f.viewer);
-    await f.sharing.events.presence.open(proof);
+    const connection = await f.sharing.events.presence.open(proof);
     await pool.query(`UPDATE cloud_github_source_verifications SET verified_at=NULL,failure_status=404,
       failure_code='github_repository_not_found',retry_at=now()+interval '1 minute' WHERE owner_user_id=$1`,[f.viewer.id]);
-    expect((await f.call(path())).status).toBe(404);
+    f.fetcher.mockClear();
+    expect((await f.call(path())).status).toBe(200);
     expect((await f.call(path(),"GET",undefined,f.admin)).status).toBe(200);
+    expect(await f.sharing.events.presence.snapshot(proof)).toMatchObject({ userIds: [f.viewer.id] });
     expect((await f.store.get(f.workspace.id,f.creator.id)).state).toBe("stopped");
+    expect(f.fetcher).not.toHaveBeenCalled();
+    await f.sharing.events.presence.close(connection);
   });
 });

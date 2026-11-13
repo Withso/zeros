@@ -18,17 +18,16 @@ export async function lifecycleExecution(contexts: CloudExecutionContexts, works
     [workspace.id, intent.id, intent.userId, intent.accessEpoch, workspace.stopGeneration, workspace.state])).rowCount) throw actorChanged();
   });
   await fence();
-  const options = workspace.state === "starting" && workspace.checkpoint ? { sourceError: "github_access_required" as const } : {};
-  let proof = { ...await contexts.deps.authority.admit(workspace.id, intent.userId, options), runBound: false as const };
+  let proof = { ...await contexts.deps.authority.admit(workspace.id, intent.userId), runBound: false as const };
   assertExecutionIntent(intent.authority, proof);
   const person = proof.person;
   const check = async () => {
     await fence();
     // Hydration may outlive admission. Reverify the same intent/person; a
-    // newly selected connection or permission revision cannot inherit it.
+    // changed membership or permission revision cannot inherit it.
     if (proof.until <= Date.now()) {
-      const renewed = await contexts.deps.authority.admit(workspace.id, intent.userId!, options);
-      if (renewed.person.personSignature !== person.personSignature || renewed.source.fingerprint !== proof.source.fingerprint) throw actorChanged();
+      const renewed = await contexts.deps.authority.admit(workspace.id, intent.userId!);
+      if (renewed.person.personSignature !== person.personSignature) throw actorChanged();
       proof = { ...renewed, runBound: false };
     }
     await contexts.deps.authority.assert(proof);

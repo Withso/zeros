@@ -117,7 +117,7 @@ database("durable activation through provider Stop and real worker routes", () =
     expect(compute.stop).toHaveBeenCalledTimes(1);
   });
 
-  it("cancels while source admission is held and never commits a later wake", async () => {
+  it("cancels while membership admission is held and never commits a later wake", async () => {
     await lifecycle.tick();
     const original = f.cp.execution.deps.authority.admit.bind(f.cp.execution.deps.authority);
     let entered!: () => void, release!: () => void;
@@ -134,18 +134,14 @@ database("durable activation through provider Stop and real worker routes", () =
     expect((await activation()).phase).toBe("cancelled");
   });
 
-  it("defers unknown source authority across process restart but fails a denied initiator", async () => {
+  it("activates after a process restart even when the initiator lacks GitHub access", async () => {
     await lifecycle.tick();
-    f.unavailable.add(f.viewer.id); await advance();
-    expect(await row()).toMatchObject({ state: "stopped", execution_transition_id: input.activationId });
-    expect((await activation()).phase).toBe("authorizing");
-    f.unavailable.clear(); f.denied.add(`${f.viewer.id}:42`);
-    await pool.query("UPDATE cloud_github_source_verifications SET retry_at=clock_timestamp()-interval '1 second' WHERE owner_user_id=$1", [f.viewer.id]);
+    f.unavailable.add(f.viewer.id); f.denied.add(`${f.viewer.id}:42`);
     const fresh = new CloudExecutionContexts(pool, { ...f.cp.execution.deps,
       authority: new CloudExecutionAuthority(pool, f.github.source, f.github.connections.store) });
     await new CloudExecutionActivations(pool, fresh).step(input.activationId);
-    expect(await row()).toMatchObject({ state: "stopped", execution_mode: "prepared", execution_transition_id: null });
-    expect(await activation()).toMatchObject({ phase: "failed", first_error_code: "member_access_revoked" });
+    expect(await row()).toMatchObject({ state: "starting", execution_mode: "active" });
+    expect(await activation()).toMatchObject({ phase: "booting", first_error_code: null });
   });
 
   it("does not let a cancelled activation's late denial fail its replacement", async () => {
@@ -166,7 +162,7 @@ database("durable activation through provider Stop and real worker routes", () =
     expect(await row()).toMatchObject({ state: "stopping", execution_transition_id: input.activationId });
   });
 
-  it.each(["leave", "suspend", "hold"])("refuses an initiator's %s while source admission is held", async change => {
+  it.each(["leave", "suspend", "hold"])("refuses an initiator's %s while membership admission is held", async change => {
     await lifecycle.tick();
     const original = f.cp.execution.deps.authority.admit.bind(f.cp.execution.deps.authority);
     let entered!: () => void, release!: () => void;
