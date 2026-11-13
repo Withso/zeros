@@ -2,7 +2,9 @@
 // PRO_ORGANIZATION_MEMBER_LIMIT members (owner included) plus pending
 // invitations, and at most PRO_ORGANIZATION_FREE_MEMBER_LIMIT active members
 // without Pro. Members without Pro beyond that allowance are on Hold. Seats are
-// computed in SQL (migration 0216) so HTTP routes and cloud authority agree.
+// stored by input-write triggers (migration 0249) so HTTP and cloud authority
+// agree without recomputing the organization on each read. Stored intervals
+// include scheduled plan changes; expiry needs no read-time refresh.
 // Seat reads cross accounts, so they run only in a system transaction, after
 // the caller has authorized the actor; elsewhere the SQL raises.
 

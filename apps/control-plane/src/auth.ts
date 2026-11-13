@@ -380,6 +380,14 @@ async function workOSAuthenticationTargets(
   database: Tx,
   input: AuthenticatedIdentityInput,
 ): Promise<WorkOSAuthenticationTarget[]> {
+  const exact = await database.query<WorkOSAuthenticationTarget>(
+    `SELECT user_id, true AS exact_identity, false AS subject_binding, false AS email_match
+     FROM user_identities WHERE provider = 'workos' AND provider_sub = $1`,
+    [input.providerSubject],
+  );
+  // An exact identity wins even when its token email names another account.
+  // The caller repeats this lookup after locking and still checks its status.
+  if (exact.rows.length) return exact.rows;
   const sessionId = input.session?.id ?? null;
   const targets = await database.query<WorkOSAuthenticationTarget>(
     `SELECT associated.user_id,

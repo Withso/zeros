@@ -268,14 +268,15 @@ export class CloudGithubPrStore {
   async documents(
     workspaces: readonly CloudV2Workspace[],
     generations?: ReadonlyMap<string, string>,
+    transaction?: Tx,
   ): Promise<CloudGithubWorkspaceDocument[]> {
     if (!workspaces.length) return [];
-    const rows = await withSystemTx(this.pool, (tx) =>
+    const read = (tx: Tx) =>
       tx.query<Metadata>(
         "SELECT * FROM cloud_v2_github_workspaces WHERE workspace_id=ANY($1::uuid[])",
         [workspaces.map((row) => row.id)],
-      ),
-    );
+      );
+    const rows = await (transaction ? read(transaction) : withSystemTx(this.pool, read));
     const metadata = new Map(rows.rows.map((row) => [row.workspace_id, row]));
     return workspaces.map((workspace) => {
       const row = metadata.get(workspace.id),

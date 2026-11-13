@@ -22,8 +22,8 @@ const url = process.env.TEST_DATABASE_URL, d = url ? describe : describe.skip;
  * non-system write, as of this suite's cases. */
 const COVERED_TRIGGERS: Record<string, readonly string[]> = {
   organizations: ["organizations_personal_classification_immutable", "local_command_setting_changed", "execution_organization_update", "execution_organization_personal"],
-  organization_members: ["execution_member_delete", "execution_member_update", "execution_member_insert", "cloud_creator_member_loss"],
-  users: ["cloud_actor_staff_revision", "staff_pro_benefit_sync", "execution_user_fence", "cloud_creator_account_loss", "cloud_creator_account_erasure"],
+  organization_members: ["a1_organization_seat_refresh", "execution_member_delete", "execution_member_update", "execution_member_insert", "cloud_creator_member_loss"],
+  users: ["cloud_actor_staff_revision", "a0_staff_pro_benefit_sync", "execution_user_fence", "cloud_creator_account_loss", "cloud_creator_account_erasure"],
 };
 
 d("triggers on user-writable tables with PostgreSQL", () => {
@@ -129,10 +129,28 @@ d("triggers on user-writable tables with PostgreSQL", () => {
     });
 
     it("organization_members: add, change a role, leave", async () => {
+      await asSystem("UPDATE organization_members SET created_at='2000-01-01' WHERE org_id=$1 AND user_id=$2", [fixture.organizationId, member]);
+      for (let n = 0; n < 4; n++) {
+        const free = await addUser("Free member");
+        await asSystem("INSERT INTO organization_members(org_id,user_id,role,created_at) VALUES($1,$2,'member','2001-01-01'::timestamptz+$3*interval '1 day')", [fixture.organizationId, free, n]);
+      }
       const invitee = await addUser("Invitee");
-      await asUser(fixture.userId, "INSERT INTO organization_members(org_id,user_id,role) VALUES($1,$2,'member')", [fixture.organizationId, invitee]);
+      await withUserTx(pool, fixture.userId, async tx => {
+        const before = (await tx.query("SELECT current_setting('app.system',true) AS context")).rows;
+        await tx.query("INSERT INTO organization_members(org_id,user_id,role,created_at) VALUES($1,$2,'member','2002-01-01')", [fixture.organizationId, invitee]);
+        expect((await tx.query("SELECT current_setting('app.system',true) AS context")).rows).toEqual(before);
+        expect((await tx.query("SELECT 1 FROM organization_member_seat_periods")).rowCount).toBe(0);
+      });
+      const inviteeHold = () => asSystem("SELECT organization_member_on_hold($1,$2,10,5) AS held", [fixture.organizationId, invitee]);
+      expect((await inviteeHold()).rows).toEqual([{ held: true }]);
       await asUser(fixture.userId, "UPDATE organization_members SET role='admin' WHERE org_id=$1 AND user_id=$2", [fixture.organizationId, invitee]);
-      await asUser(member, "DELETE FROM organization_members WHERE org_id=$1 AND user_id=$2", [fixture.organizationId, member]);
+      await withUserTx(pool, member, async tx => {
+        const before = (await tx.query("SELECT current_setting('app.system',true) AS context")).rows;
+        await tx.query("DELETE FROM organization_members WHERE org_id=$1 AND user_id=$2", [fixture.organizationId, member]);
+        expect((await tx.query("SELECT current_setting('app.system',true) AS context")).rows).toEqual(before);
+        expect((await tx.query("SELECT 1 FROM organization_member_seat_periods")).rowCount).toBe(0);
+      });
+      expect((await inviteeHold()).rows).toEqual([{ held: false }]);
     });
 
     it("team_members: add, change a role, leave", async () => {

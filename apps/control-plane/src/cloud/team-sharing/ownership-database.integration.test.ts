@@ -56,6 +56,33 @@ database("0246 Creator loss, write switch and migration cost", () => {
     expect((await pool.query("SELECT creator_user_id FROM cloud_v2_workspaces WHERE id=$1", [f.own.id])).rows[0].creator_user_id).toBe(f.viewer.id);
   });
 
+  it("records a staff lapse before revocation checks so it cannot displace another Creator's free seat", async () => {
+    await pool.query("UPDATE users SET staff_role='developer' WHERE id=$1", [f.viewer.id]);
+    await pool.query("DELETE FROM account_entitlements WHERE user_id=$1", [f.viewer.id]);
+    await pool.query("UPDATE organization_members SET created_at='2000-01-01' WHERE org_id=$1 AND user_id=$2", [f.organizationId,f.viewer.id]);
+    await pool.query("UPDATE cloud_v2_workspaces SET execution_mode='active' WHERE id=$1", [f.own.id]);
+    const free = Array.from({ length: 5 }, () => randomUUID()), workspace = randomUUID();
+    await withSystemTx(pool, async tx => {
+      for (const [n,id] of free.entries()) {
+        await tx.query("INSERT INTO users(id,email) VALUES($1,$2)", [id,`${id}@example.test`]);
+        await tx.query("INSERT INTO organization_members(org_id,user_id,role,created_at) VALUES($1,$2,'member','2001-01-01'::timestamptz+$3*interval '1 day')", [f.organizationId,id,n]);
+      }
+      await tx.query(`INSERT INTO cloud_v2_workspaces(id,org_id,creator_user_id,name,repository,branch,base_branch,state,execution_mode)
+        VALUES($1,$2,$3,'Free seat','example/project','free-seat','main','stopped','active')`, [workspace,f.organizationId,free[4]]);
+    });
+    const tx = await pool.connect();
+    try {
+      await tx.query(`BEGIN; ${SYSTEM_DATABASE_CONTEXT}; SELECT set_config('app.cloud_team_ownership','1',true)`);
+      await tx.query("UPDATE users SET staff_role=NULL WHERE id=$1", [f.viewer.id]);
+      expect((await tx.query("SELECT seat FROM organization_member_seats($1,10,5) WHERE user_id=$2", [f.organizationId,f.viewer.id])).rows)
+        .toEqual([{ seat: "hold" }]);
+      const rows = (await tx.query("SELECT id,creator_user_id,creator_absent_reason FROM cloud_v2_workspaces WHERE id=ANY($1::uuid[])", [[workspace,f.own.id]])).rows;
+      expect(rows.find(row => row.id === workspace)).toMatchObject({ creator_user_id: free[4],creator_absent_reason: null });
+      expect(rows.find(row => row.id === f.own.id)).toMatchObject({ creator_user_id: null,creator_absent_reason: "hold" });
+      await tx.query("COMMIT");
+    } finally { await tx.query("ROLLBACK"); tx.release(); }
+  });
+
   it("keeps receipts system-only and refuses forged Creator metadata", async () => {
     const request = { requestId: randomUUID(), toUserId: f.viewer.id, expectedCreatorUserId: f.creator.id, expectedCreatorRevision: "1" };
     await f.sharing.ownership.reassign(f.workspace.id, f.creator, request);
