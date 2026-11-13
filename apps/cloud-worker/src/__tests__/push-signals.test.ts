@@ -80,3 +80,31 @@ it("R1 N−1: an older control plane that refuses the 60 s pull (400) gets 25 s 
     expect(inbox.pushSignals).toBe(true);
   } finally { await inbox.dispose(); vi.useRealTimers(); }
 });
+
+it("R1 live gate: the first configuration completes within seconds while a negotiated 60 s pull is held open", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "zeros-push-signals-held-"));
+  let held = 0;
+  const relay = Object.assign(new FakeRelay(), {
+    setPushSignals: vi.fn(),
+    promptRequest: vi.fn(async (op: string, body: unknown, signal?: AbortSignal) => {
+      if (op !== "pull") return { ok: true };
+      if ((body as { waitMs: number }).waitMs === 0) return { prompts: [], stops: [] };
+      held++;
+      return new Promise((_, reject) => signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true }));
+    }),
+    runtimeUpdate: vi.fn(async () => ({ status: "current" as const })),
+  });
+  const timings: string[] = [];
+  const worker = new CloudWorker({ directory, transport: relay, prepareCheckout: async () => {}, drivers: {},
+    runtimePermit: { arm: () => {}, revoke: () => {} } as never, onTiming: record => { timings.push(JSON.stringify(record)); } });
+  cleanups.push(async () => { await worker.dispose(); await rm(directory, { recursive: true, force: true }); });
+  worker.start();
+  const started = Date.now();
+  await relay.receive({ ...config, pushSignals: 1, promptOutbox: 1, runtimeUpdate: 1 });
+  expect(Date.now() - started).toBeLessThan(5_000);
+  // A second configuration (the relay's dial carries one) is not queued behind the held pull either.
+  await vi.waitFor(() => expect(held).toBe(1));
+  const again = Date.now();
+  await relay.receive({ ...config, pushSignals: 1, promptOutbox: 1, runtimeUpdate: 1, loginRevision: "1" });
+  expect(Date.now() - again).toBeLessThan(5_000);
+}, 15_000);
