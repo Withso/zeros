@@ -28,13 +28,13 @@ async function fixture() {
 const pairs = (env: NodeJS.ProcessEnv) => Array.from({ length: Number(env.GIT_CONFIG_COUNT ?? 0) }, (_, i) => [env[`GIT_CONFIG_KEY_${i}`], env[`GIT_CONFIG_VALUE_${i}`]]);
 
 describe("the broker's Git config entries survive a context's identity include", () => {
-  it("appends the include after the broker's helper reset and erase helper, keeping their indices", async () => {
+  it("puts the include first, then the broker's helper reset and erase helper, so the reset always wins", async () => {
     const f = await fixture();
     const merged = mergeGitEnvironment(f.broker, f.identity);
     expect(pairs(merged)).toEqual([
+      ["include.path", f.identity.GIT_CONFIG_VALUE_0],
       ["credential.helper", ""],
       ["credential.https://github.com.helper", f.broker.GIT_CONFIG_VALUE_1],
-      ["include.path", f.identity.GIT_CONFIG_VALUE_0],
     ]);
     expect(merged.GIT_CONFIG_COUNT).toBe("3");
     // An environment without entries changes nothing; a malformed count adds nothing.
@@ -43,11 +43,11 @@ describe("the broker's Git config entries survive a context's identity include",
     expect(mergeGitEnvironment({ GIT_AUTHOR_NAME: "A" }, { GIT_AUTHOR_NAME: "B" })).toEqual({ GIT_AUTHOR_NAME: "B" });
   });
 
-  it("joined: the producer → workerChildEnvironment keeps the reset, the erase helper and the include together", async () => {
+  it("joined: the producer → workerChildEnvironment keeps the include, then the reset and the erase helper", async () => {
     const f = await fixture();
     const env = workerChildEnvironment({ PATH: process.env.PATH, HOME: f.home }, mergeGitEnvironment(f.broker, f.identity));
-    expect(pairs(env)).toEqual(expect.arrayContaining([["credential.helper", ""], ["credential.https://github.com.helper", f.broker.GIT_CONFIG_VALUE_1],
-      ["include.path", f.identity.GIT_CONFIG_VALUE_0]]));
+    expect(pairs(env)).toEqual([["include.path", f.identity.GIT_CONFIG_VALUE_0], ["credential.helper", ""],
+      ["credential.https://github.com.helper", f.broker.GIT_CONFIG_VALUE_1]]);
     expect(env.GIT_CONFIG_COUNT).toBe("3");
   });
 
@@ -64,5 +64,18 @@ describe("the broker's Git config entries survive a context's identity include",
     const name = execFileSync("git", ["config", "user.name"], { env: { ...merged, PATH: process.env.PATH!, HOME: f.home, GIT_CONFIG_NOSYSTEM: "1" }, encoding: "utf8" }).trim();
     expect(name).toBe("Sam Member");
     expect(await readFile(f.identity.GIT_CONFIG_VALUE_0!, "utf8")).toContain("Sam Member");
+  });
+
+  it("real Git: a credential helper written into the context's include file is reset and never consulted", async () => {
+    const f = await fixture();
+    await writeFile(join(f.home, ".git-credentials"), "https://stored-user:STORED-SECRET@example.test\n", { mode: 0o600 });
+    // Anyone on the VM can edit the include; the broker's reset comes after it.
+    await writeFile(f.identity.GIT_CONFIG_VALUE_0!, `[user]\n\tname = "Sam Member"\n\temail = "2+sam@users.noreply.github.com"\n[credential]\n\thelper = store\n`);
+    const fill = (env: NodeJS.ProcessEnv) => spawnSync("git", ["credential", "fill"], { input: "protocol=https\nhost=example.test\n\n", encoding: "utf8",
+      env: { ...env, PATH: process.env.PATH!, HOME: f.home, GIT_TERMINAL_PROMPT: "0", GIT_CONFIG_NOSYSTEM: "1" } }).stdout;
+    // Control: with the include last, its helper would answer.
+    const last = { ...f.broker, GIT_CONFIG_COUNT: "3", GIT_CONFIG_KEY_2: "include.path", GIT_CONFIG_VALUE_2: f.identity.GIT_CONFIG_VALUE_0 };
+    expect(fill(workerChildEnvironment({}, last))).toContain("STORED-SECRET");
+    expect(fill(workerChildEnvironment({}, mergeGitEnvironment(f.broker, f.identity)))).not.toContain("STORED-SECRET");
   });
 });

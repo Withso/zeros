@@ -42,12 +42,13 @@ const configEntries = (env: NodeJS.ProcessEnv): Array<[string, string]> => {
 };
 
 /** Layers a per-context Git environment over the worker's: ordinary names override, but GIT_CONFIG_* entries are
- * APPENDED (re-indexed after the base's), never replaced. The base carries the GitHub broker's credential.helper reset
- * and erase helper; a context's identity include (sharing/identity.ts) must not overwrite them. */
+ * combined, never replaced. The context's entries come FIRST and the base's AFTER, re-indexed: the base carries the
+ * GitHub broker's credential.helper reset and erase helper, so they always win over anything a context's identity
+ * include (sharing/identity.ts, editable on the VM) might add. */
 export function mergeGitEnvironment(base: NodeJS.ProcessEnv = {}, overlay: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
   const merged: NodeJS.ProcessEnv = {};
   for (const [name, value] of [...Object.entries(base), ...Object.entries(overlay)]) if (!CONFIG_ENTRY.test(name)) merged[name] = value;
-  const entries = [...configEntries(base), ...configEntries(overlay)];
+  const entries = [...configEntries(overlay), ...configEntries(base)];
   if (entries.length) {
     merged.GIT_CONFIG_COUNT = String(entries.length);
     entries.forEach(([key, value], index) => { merged[`GIT_CONFIG_KEY_${index}`] = key; merged[`GIT_CONFIG_VALUE_${index}`] = value; });
