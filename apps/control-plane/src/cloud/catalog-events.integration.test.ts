@@ -164,7 +164,7 @@ suite("committed cloud catalog changes", () => {
       await tx.query(`SET LOCAL ROLE ${owner}`);
       expect((await tx.query("SELECT rolsuper,rolbypassrls FROM pg_roles WHERE rolname=current_user")).rows)
         .toEqual([{ rolsuper: false, rolbypassrls: false }]);
-      await tx.query(readFileSync(new URL("../../migrations/0249_cloud_push_signals.sql", import.meta.url), "utf8"));
+      await tx.query(readFileSync(new URL("../../migrations/0248_cloud_push_signals.sql", import.meta.url), "utf8"));
       expect((await tx.query("SELECT prosecdef,proconfig FROM pg_proc WHERE oid='notify_cloud_v2_catalog_row()'::regprocedure")).rows)
         .toEqual([{ prosecdef: false, proconfig: ["search_path=pg_catalog, public, pg_temp"] }]);
       await tx.query("SET LOCAL ROLE zeros_app");

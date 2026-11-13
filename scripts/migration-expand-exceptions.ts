@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 
 // Each reviewed migration lists its exact exempted statements by rule.
 const reviewed: Readonly<Record<string, Readonly<Record<string, readonly string[]>>>> = {
-  "0249_cloud_push_signals.sql": {},
+  "0248_cloud_push_signals.sql": {},
   "0247_cloud_membership_access.sql": {},
   "0246_cloud_team_ownership.sql": {},
   "0245_cloud_execution_payer.sql": {},
@@ -607,7 +607,7 @@ export function applyReviewedExpandExceptions(file: string, sql: string): string
     const rule = annotations[0]![1]!;
     const statement = text.replace(/\r\n/g, "\n").trim();
     const allowed = exact[rule]?.includes(statement) ||
-      (file === "0249_cloud_push_signals.sql" && cloudPushSignalsDigests[rule]?.includes(createHash("sha256").update(statement).digest("hex"))) ||
+      (file === "0248_cloud_push_signals.sql" && cloudPushSignalsDigests[rule]?.includes(createHash("sha256").update(statement).digest("hex"))) ||
       (file === "0247_cloud_membership_access.sql" && cloudMembershipAccessDigests[rule]?.includes(createHash("sha256").update(statement).digest("hex"))) ||
       (file === "0246_cloud_team_ownership.sql" && cloudTeamOwnershipDigests[rule]?.includes(createHash("sha256").update(statement).digest("hex"))) ||
       (file === "0245_cloud_execution_payer.sql" && cloudExecutionPayerDigests[rule]?.includes(createHash("sha256").update(statement).digest("hex"))) ||

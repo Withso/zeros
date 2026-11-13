@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { expect, it } from "vitest";
 import { lintMigrationPhase } from "../check-migration-phases";
 
-const file = "0249_cloud_push_signals.sql";
+const file = "0248_cloud_push_signals.sql";
 const sql = readFileSync(`apps/control-plane/migrations/${file}`, "utf8");
 
 it("permits exactly the reviewed catalog and device-liveness expansion", () => {
@@ -26,6 +26,6 @@ it("requires the exception annotations and rejects an unreviewed filename or des
   expect(annotations).toHaveLength(2);
   for (const [annotation] of annotations)
     expect(lintMigrationPhase(file, sql.replace(annotation, "")).length).toBeGreaterThan(0);
-  expect(lintMigrationPhase("0249_unreviewed.sql", sql).length).toBeGreaterThan(0);
+  expect(lintMigrationPhase("0248_unreviewed.sql", sql).length).toBeGreaterThan(0);
   expect(lintMigrationPhase(file, `${sql}\nDELETE FROM cloud_v2_workspaces;`).length).toBeGreaterThan(0);
 });
