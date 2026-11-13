@@ -294,7 +294,11 @@ export function resetAuthQuitForTests(): void { resumeAuthAfterAbortedQuit(); }
 // Every quit path (main's before-quit, the updater's install) awaits this; an aborted quit resumes refreshing.
 holdQuitFor(() => drainAuthRefreshForQuit(), resumeAuthAfterAbortedQuit);
 
-function refreshOnce(): Promise<RefreshOutcome> {
+/** A stored token is current when it has the refresh skew left and, when asked, outlives `notExpiringBefore`. */
+const tokenCurrent = (tokens: StoredTokens, notExpiringBefore = 0) =>
+  tokens.expiresAt - Date.now() >= REFRESH_SKEW_MS && tokens.expiresAt > notExpiringBefore;
+
+function refreshOnce(notExpiringBefore = 0): Promise<RefreshOutcome> {
   // Quitting: keep the stored session as it is (transient), and send nothing that could rotate it.
   if (!inFlightRefresh && quitting) return Promise.resolve({ status: "transient" });
   if (!inFlightRefresh) {
@@ -303,7 +307,7 @@ function refreshOnce(): Promise<RefreshOutcome> {
       async (): Promise<RefreshOutcome> => {
         const snapshot = readTokenSnapshot();
         if (!snapshot) return { status: "terminal" };
-        if (snapshot.tokens.expiresAt - Date.now() >= REFRESH_SKEW_MS) {
+        if (tokenCurrent(snapshot.tokens, notExpiringBefore)) {
           return { status: "ok", tokens: snapshot.tokens };
         }
         return refreshTokens(snapshot);
@@ -341,13 +345,14 @@ function logStoredSessionAbsent(readError?: unknown): void {
 
 async function getValidSessionFromTokens(
   tokens: StoredTokens | null,
+  notExpiringBefore = 0,
 ): Promise<MainAuthSession | null> {
   if (!tokens) { logStoredSessionAbsent(); return null; }
-  if (tokens.expiresAt - Date.now() >= REFRESH_SKEW_MS) {
+  if (tokenCurrent(tokens, notExpiringBefore)) {
     noteSignedIn();
     return toMainSession(tokens);
   }
-  const outcome = await refreshOnce();
+  const outcome = await refreshOnce(notExpiringBefore);
   if (outcome.status === "ok") { noteSignedIn(); return toMainSession(outcome.tokens); }
   if (outcome.status === "terminal") {
     // A refused grant names the provider's code; a record that vanished under the refresh lock is a missing session.
@@ -413,7 +418,14 @@ export function clearWorkOSSessionAfterServerRevocation(expected: {
 
 /** The bearer names its account, so a renderer read that straddles an
  * account switch can discard a token that belongs to the previous account. */
-export const authGetAccessToken: CommandHandler = async () => {
+/** §14.7: a cloud connection rolling its token over asks for one that outlives the JWT it already presented; the same
+ * refresh path (lock, grant) serves it. A bound beyond any token's life is ignored rather than forcing refreshes. */
+function notExpiringBeforeArg(args: Record<string, unknown> | undefined): number {
+  const value = args?.notExpiringBefore;
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 && value <= Date.now() + 15 * 60_000 ? value : 0;
+}
+
+export const authGetAccessToken: CommandHandler = async (args) => {
   let tokens: StoredTokens | null;
   try {
     tokens = readTokens();
@@ -421,7 +433,7 @@ export const authGetAccessToken: CommandHandler = async () => {
     if (error instanceof SecretStoreReadError) { logStoredSessionAbsent(error); return { access_token: null, account: null }; }
     throw error;
   }
-  const session = await getValidSessionFromTokens(tokens);
+  const session = await getValidSessionFromTokens(tokens, notExpiringBeforeArg(args));
   return {
     access_token: session?.accessToken ?? null,
     account: session?.accountId ?? null,
