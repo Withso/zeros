@@ -7,9 +7,29 @@ export function catalogRefreshDelayMs(catalogEvents: boolean, lifecyclePending: 
 
 type Listen = (name: string, handler: (payload: unknown) => void) => Promise<() => void>;
 
-export function watchCloudCatalogEvents(listen: Listen, on: { refresh(): void; modeChanged(): void }): { active(): boolean; stop(): void } {
+/** At most one catalog read per burst of change hints: the first hint waits this long to gather the burst; hints that
+ * arrive while a read is in flight give one trailing read this long after it ends. */
+export const CATALOG_HINT_COALESCE_MS = 1_000;
+
+export function watchCloudCatalogEvents(listen: Listen, on: { refresh(): Promise<void> | void; modeChanged(): void }): { active(): boolean; stop(): void } {
   let active = false, stopped = false;
   const offs: Array<() => void> = [];
+  let timer: ReturnType<typeof setTimeout> | undefined, reading = false, again = false;
+  const read = () => {
+    timer = undefined;
+    if (stopped) return;
+    reading = true;
+    let result: Promise<void> | void;
+    try { result = on.refresh(); } catch { result = undefined; }
+    void Promise.resolve(result).catch(() => {}).finally(() => {
+      reading = false;
+      if (again && !stopped) { again = false; arm(); }
+    });
+  };
+  const arm = () => { if (timer === undefined && !stopped) timer = setTimeout(read, CATALOG_HINT_COALESCE_MS); };
+  const hint = () => { if (stopped) return; if (reading) again = true; else arm(); };
+  /** The stream's ready may follow a gap: read now unless one is already in flight (then once after it). */
+  const now = () => { if (stopped) return; if (reading) { again = true; return; } clearTimeout(timer); read(); };
   const subscribe = (name: string, handler: (payload: unknown) => void) => {
     void listen(name, handler).then(off => { if (stopped) off(); else offs.push(off); }, () => {});
   };
@@ -18,12 +38,11 @@ export function watchCloudCatalogEvents(listen: Listen, on: { refresh(): void; m
     if (next === active) return;
     active = next;
     on.modeChanged();
-    // A new ready may follow a gap: refresh once now.
-    if (active) on.refresh();
+    if (active) now();
   });
   subscribe("cloud-catalog-changed", payload => {
     const change = payload as { organizationId?: unknown; workspaceId?: unknown } | null;
-    if (active && typeof change?.organizationId === "string" && typeof change.workspaceId === "string") on.refresh();
+    if (active && typeof change?.organizationId === "string" && typeof change.workspaceId === "string") hint();
   });
-  return { active: () => active, stop: () => { stopped = true; for (const off of offs.splice(0)) off(); } };
+  return { active: () => active, stop: () => { stopped = true; clearTimeout(timer); timer = undefined; for (const off of offs.splice(0)) off(); } };
 }

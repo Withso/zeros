@@ -28,7 +28,7 @@ import { selectActiveFolder, useWorkspaceStore } from "./store";
 import { useSessionsStore } from "../features/agent/sessions-store";
 import { warmCloudWorkspaceDestination } from "./cloud-workspace-warmup";
 import { clearWorkbenchConnectionFailure, recordWorkbenchConnectionFailure } from "./workbench-availability";
-import { catalogRefreshDelayMs, watchCloudCatalogEvents } from "./cloud-catalog-events";
+import { CATALOG_HINT_COALESCE_MS, catalogRefreshDelayMs, watchCloudCatalogEvents } from "./cloud-catalog-events";
 
 function recordCloudOpenFailure(key: string, error: unknown): void {
   const target = parseCloudWorkspaceKey(key), doc = target ? cloudWorkspaceDocument(target) : undefined;
@@ -58,7 +58,7 @@ function ActiveCloudWorkspaceLifecycle() {
     const storedAccount = () => getStoredAuthUser()?.accountId ?? getStoredAuthUser()?.sub ?? null;
     let account = storedAccount();
     let authVersion = 0, lastRefresh: number | undefined, refreshing = false;
-    let timer: number | undefined, refreshAgain = false;
+    let timer: number | undefined, refreshAgain = false, flight: Promise<void> | undefined;
     // R1 catalog-events-v1: the account stream's events drive refreshes; the timer is then a 60 s fallback.
     const catalogEvents = watchCloudCatalogEvents(nativeListen, { refresh: () => refresh(), modeChanged: () => schedule() });
     const pruneChats = (confirmedRemovals: readonly string[] = []) => {
@@ -91,22 +91,28 @@ function ActiveCloudWorkspaceLifecycle() {
         : Math.max(0, lastRefresh + catalogRefreshDelayMs(catalogEvents.active(), cloudCatalogNeedsFastRefresh()) - performance.now());
       timer = window.setTimeout(refresh, Math.ceil(delay));
     };
-    const refresh = () => {
-      if (refreshing) { refreshAgain = true; return; }
-      if (!canRefresh()) return;
+    const refresh = (): Promise<void> => {
+      if (refreshing) { refreshAgain = true; return flight ?? Promise.resolve(); }
+      if (!canRefresh()) return Promise.resolve();
       lastRefresh = performance.now();
       refreshing = true;
       const version = authVersion;
-      void refreshCloudWorkspaceCatalog().then(() => {
+      flight = refreshCloudWorkspaceCatalog().then(() => {
         if (!alive || version !== authVersion) return;
         runtime()?.pruneCloudConnections();
         pruneChats();
       }).catch(() => {}).finally(() => {
-        refreshing = false;
-        // A catalog event that arrived during this read: read once more now (coalesced).
-        if (refreshAgain) { refreshAgain = false; refresh(); return; }
+        refreshing = false; flight = undefined;
+        // Asked again during this read: one more read, a short delay after it (never back to back).
+        if (refreshAgain) {
+          refreshAgain = false;
+          if (timer !== undefined) window.clearTimeout(timer);
+          timer = alive ? window.setTimeout(refresh, CATALOG_HINT_COALESCE_MS) : undefined;
+          return;
+        }
         schedule();
       });
+      return flight;
     };
     const offSchedule = subscribeCloudWorkspaces(schedule);
     const offRows = subscribeCloudWorkspaceRows(change => {
