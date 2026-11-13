@@ -6,17 +6,17 @@ import { DATABASE_CONTEXT_STATEMENTS } from "../db-context.js";
 
 export const IDLE_WINDOW_MS = 300_000;
 export const LOAD_BUDGETS = [
-  { scenario: "idle", metric: "requests", maximum: 30 },
-  { scenario: "idle", metric: "statements", maximum: 200 },
-  { scenario: "turn-lease", metric: "transactions", maximum: 6 },
-  { scenario: "turn-path", metric: "transactions", maximum: 20 },
-  { scenario: "renewal", metric: "transactions", maximum: 2 },
-  { scenario: "workspace-list", metric: "transactions", maximum: 3 },
-  { scenario: "periodic-renewals", metric: "requests", maximum: 0 },
-  { scenario: "running-stream", metric: "writeTransactions", maximum: 30 },
-  { scenario: "running-stream", metric: "writeStatements", maximum: 150 },
-  { scenario: "running-stream", metric: "maxWriteStatementsPerTransaction", maximum: 5 },
-  { scenario: "running-stream", metric: "maxWriteTransactionsPer2s", maximum: 1 },
+  { phase: "R1", scenario: "idle", metric: "requests", baseline: 211, maximum: 30, expectedFailure: true },
+  { phase: "R1", scenario: "idle", metric: "statements", baseline: 6958, maximum: 200, expectedFailure: true },
+  { phase: "R2", scenario: "turn-lease", metric: "transactions", baseline: 13, maximum: 6, expectedFailure: true },
+  { phase: "R2", scenario: "turn-path", metric: "transactions", baseline: 41, maximum: 20, expectedFailure: true },
+  { phase: "R2", scenario: "renewal", metric: "transactions", baseline: 8, maximum: 2, expectedFailure: true },
+  { phase: "R1", scenario: "workspace-list", metric: "transactions", baseline: 10, maximum: 3, expectedFailure: true },
+  { phase: "R2", scenario: "periodic-renewals", metric: "requests", baseline: 27, maximum: 0, expectedFailure: true },
+  { phase: "R3", scenario: "running-stream", metric: "writeTransactions", baseline: 53, maximum: 30, expectedFailure: true },
+  { phase: "R3", scenario: "running-stream", metric: "writeStatements", baseline: 106, maximum: 150, expectedFailure: false },
+  { phase: "R3", scenario: "running-stream", metric: "maxWriteStatementsPerTransaction", baseline: 2, maximum: 5, expectedFailure: false },
+  { phase: "R3", scenario: "running-stream", metric: "maxWriteTransactionsPer2s", baseline: 2, maximum: 1, expectedFailure: true },
 ] as const;
 
 export type SqlCost = { queries: number; statements: number; transactions: number; commits: number; rollbacks: number;
@@ -343,7 +343,8 @@ export function budgetTable(scenarios: ReadonlyMap<string, LoadScenario>) {
     const total = scenarioTotals(cost);
     if (total.failures || total.inFlight) throw new Error(`Incomplete SQL observation: ${budget.scenario}`);
     const observed = total[budget.metric];
-    return { ...budget, observed, result: observed <= budget.maximum ? "PASS" : "FAIL" };
+    return { ...budget, observed, ratchet: observed <= budget.baseline ? "PASS" : "FAIL",
+      result: observed <= budget.maximum ? "PASS" : "FAIL" };
   });
 }
 

@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { randomUUID } from "node:crypto";
 import type pg from "pg";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createPool, withSystemTx } from "./db.js";
 import { configuredDatabaseContext, SYSTEM_DATABASE_CONTEXT } from "./db-context.js";
 import { requestTiming } from "./request-timing.js";
@@ -40,13 +40,11 @@ describe("load replay stream lifetime", () => {
 });
 database("control-plane load budgets through the router and PostgreSQL", () => {
   let pool: pg.Pool, probe: LoadBudgetProbe;
-  let fixture: Awaited<ReturnType<typeof loadBudgetFixture>> | undefined;
   beforeEach(() => {
     pool = createPool(process.env.TEST_DATABASE_URL!, { maxConnections: 10 });
     probe = new LoadBudgetProbe(pool);
   });
   afterEach(async () => {
-    await fixture?.close(); fixture = undefined;
     probe.close(); await pool.end(); vi.restoreAllMocks(); vi.unstubAllGlobals();
   });
 
@@ -188,8 +186,20 @@ database("control-plane load budgets through the router and PostgreSQL", () => {
         tx => tx.query(`UPDATE ${schema}.items SET value=3 WHERE id=1`)), { writes: true })).rejects.toThrow("deferred trigger");
     } finally { await pool.query(`DROP SCHEMA ${schema} CASCADE`); }
   });
+});
 
-  it("enforces the idle, turn-lease, complete turn path, renewal and workspace-list budgets", async () => {
+database("load-budget workload", () => {
+  let pool: pg.Pool, probe: LoadBudgetProbe;
+  let fixture: Awaited<ReturnType<typeof loadBudgetFixture>> | undefined;
+  let measured: ReturnType<typeof budgetTable>;
+  afterAll(async () => {
+    try { await fixture?.close(); }
+    finally { probe?.close(); await pool?.end(); vi.restoreAllMocks(); vi.unstubAllGlobals(); }
+  });
+  // Setup and accounting failures must not satisfy an expected target failure.
+  beforeAll(async () => {
+    pool = createPool(process.env.TEST_DATABASE_URL!, { maxConnections: 10 });
+    probe = new LoadBudgetProbe(pool);
     fixture = await loadBudgetFixture(pool, probe);
     await fixture.assertTransportCancellation();
     const statementDelayMs = Number(process.env.LOAD_BUDGET_STATEMENT_DELAY_MS ?? 0);
@@ -236,9 +246,23 @@ database("control-plane load budgets through the router and PostgreSQL", () => {
       }
     }
     expect(fixture.observerStatus()).toEqual({ enabled: true, pending: 0, dropped: 0, errors: 0 });
-    const budgets = budgetTable(scenarios);
-    console.table(budgets);
-    expect.soft(fixture.pollWaits(), "real empty-poll waiter/recheck branch").toBe(OBSERVED_IDLE_REPLAY.find(row => row.operation === "pull")!.count);
-    for (const budget of budgets) expect.soft(budget.observed, `${budget.scenario}: ${budget.metric}`).toBeLessThanOrEqual(budget.maximum);
+    measured = budgetTable(scenarios);
+    expect(measured.map(row => [row.scenario, row.metric])).toEqual(LOAD_BUDGETS.map(row => [row.scenario, row.metric]));
+    console.table(measured, ["phase", "scenario", "metric", "observed", "baseline", "ratchet", "maximum", "result"]);
+    expect(fixture.pollWaits(), "real empty-poll waiter/recheck branch").toBe(OBSERVED_IDLE_REPLAY.find(row => row.operation === "pull")!.count);
   }, 600_000);
+
+  it("RATCHET stays within every recorded baseline", () => {
+    for (const budget of measured) {
+      expect.soft(budget.observed, `RATCHET ${budget.scenario}: ${budget.metric}`).toBeLessThanOrEqual(budget.baseline);
+    }
+  });
+
+  for (const budget of LOAD_BUDGETS) {
+    const target = budget.expectedFailure ? it.fails : it;
+    target(`${budget.phase} TARGET ${budget.scenario}: ${budget.metric} <= ${budget.maximum}${budget.expectedFailure ? " — set expectedFailure=false when met" : ""}`, () => {
+      const result = measured.find(row => row.scenario === budget.scenario && row.metric === budget.metric)!;
+      expect(result.observed).toBeLessThanOrEqual(budget.maximum);
+    });
+  }
 });

@@ -253,7 +253,8 @@ export async function loadBudgetFixture(pool: pg.Pool, probe: LoadBudgetProbe) {
           const started = performance.now(); let nextRenewal = CONTEXT_RENEW_MS;
           const pace = async (at: number) => { const remaining = started + at - performance.now(); if (remaining > 0) await delay(remaining); };
           for (let index = 0; index < RUNNING_TURN.deltas; index++) {
-            const at = index * RUNNING_TURN.milliseconds / RUNNING_TURN.deltas;
+            // Keep input deadlines distinct from the mirror's one-second timer.
+            const at = index * RUNNING_TURN.milliseconds / RUNNING_TURN.deltas + (index % 2) * 40;
             await pace(at);
             await probe.at(at, async () => {
               if (at >= nextRenewal) {
