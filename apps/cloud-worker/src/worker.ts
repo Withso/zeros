@@ -35,7 +35,7 @@ import { configureGitIdentity } from "./credentials/git-identity";
 import { commandRunner } from "./workspace/commands";
 import { Terminals, type TerminalPeople } from "./terminals/service";
 import { ClosedFailure, classOf, closedFailure, errorCode, failureLine, tagged } from "./sharing/closed-failure";
-import { gitIdentityEnvironment } from "./sharing/identity";
+import { ContextCommitIdentities, reviewRequesterName } from "./sharing/identity";
 import { PersonalEnvironments, unexportedLine } from "./sharing/personal-env";
 import { GitCommandError } from "./workspace/commands";
 import type { SweepSummary } from "./sharing/boot-clean";
@@ -164,6 +164,9 @@ export class CloudWorker {
   private readonly contexts?: ExecutionContexts;
   private acting = false;
   private readonly personal: PersonalEnvironments;
+  /** creator-commit-identity-v1: each context's Git include, following the current Creator rule. */
+  private readonly commitIdentities: ContextCommitIdentities;
+  private readonly identityEnds = new Set<string>();
   /** One GitHub credential flight per live context; it ends with its context. */
   private readonly contextGithub = new Map<string, { tokens: GithubTokens; recovery: GithubCredentialRecovery }>();
   /** A context's own MCP servers, behind its own gateway; closed when the context ends. */
@@ -193,6 +196,7 @@ export class CloudWorker {
     this.github = new GithubBroker(`/tmp/zeros-github-${this.instanceId}/github.sock`, (purpose, failed, contextId) => this.githubToken(purpose, failed, contextId), () => this.workspace?.githubChanged());
     this.gitEnvironment = githubEnvironment(this.github.socketPath, options.gitAskpassPath ?? fileURLToPath(new URL("../bin/git-askpass", import.meta.url)));
     this.personal = new PersonalEnvironments(options.homeDirectory ?? homedir());
+    this.commitIdentities = new ContextCommitIdentities(options.homeDirectory ?? homedir());
     const transport = options.transport;
     if (transport.contextRequest) this.contexts = new ExecutionContexts({ post: (path, body) => transport.contextRequest!(path, body),
       ...(options.contextRenewMs ? { renewMs: options.contextRenewMs } : {}) });
@@ -231,9 +235,10 @@ export class CloudWorker {
     catch (error) { throw tagged(error, "lease_refused"); }
     try {
       if (lease.userId !== client.userId) throw tagged(new WorkspaceError("CLOUD_V2_UNSUPPORTED", "Reconnect to the workspace to make changes as yourself."), "lease_person_mismatch");
-      return await operationEnvironment.run({ git: gitIdentityEnvironment(lease.gitIdentity), zeros: { ZEROS_EXECUTION_CONTEXT: lease.contextId },
-        // A code review mutation is authored by this person (never the Creator).
-        requester: { userId: lease.userId, ...(lease.gitIdentity?.name ? { userName: lease.gitIdentity.name } : {}) } }, work);
+      const userName = reviewRequesterName(lease, this.commitIdentities.identitySource);
+      return await operationEnvironment.run({ git: this.contextGit(lease.contextId, lease.gitIdentity), zeros: { ZEROS_EXECUTION_CONTEXT: lease.contextId },
+        // A code review mutation is authored by this person (never the Creator, whose identity authors commits).
+        requester: { userId: lease.userId, ...(userName ? { userName } : {}) } }, work);
     } finally {
       await retireContext(this.contexts, lease.contextId, "operation_done");
     }
@@ -256,7 +261,7 @@ export class CloudWorker {
         if (skipped) this.options.log?.(skipped);
         const variables = env?.variables ?? {};
         application.protect([...Object.values(variables), ...(lease.environment?.files.map(file => file.content) ?? []), ...(lease.api ? [lease.api.token] : [])]);
-        return { contextId: lease.contextId, userId: lease.userId, git: gitIdentityEnvironment(lease.gitIdentity),
+        return { contextId: lease.contextId, userId: lease.userId, git: this.contextGit(lease.contextId, lease.gitIdentity),
           zeros: { ZEROS_EXECUTION_CONTEXT: lease.contextId, ...(lease.api ? { ZEROS_API_URL: lease.api.url, ZEROS_API_TOKEN: lease.api.token } : {}),
             ...(env ? { ZEROS_PERSONAL_ENV_DIR: env.directory } : {}) },
           application: variables };
@@ -583,7 +588,11 @@ export class CloudWorker {
     this.localCommandReason = config.localCommandReason === 1;
     this.notifyUserEnabled = config.notifyUser === 1;
     if (this.configurationRevision !== revision) { this.tokens.invalidate(); this.githubCredentials.invalidate(); }
-    if (!changed || changed.includes("gitIdentity")) await configureGitIdentity(this.options.homeDirectory ?? homedir(), config.gitIdentity);
+    if (!changed || changed.includes("gitIdentity") || changed.includes("gitIdentitySource")) {
+      // Activated with a Creator: the VM-wide managed identity is the Creator's; open contexts follow (identity.ts).
+      await configureGitIdentity(this.options.homeDirectory ?? homedir(), config.gitIdentity, { managed: config.gitIdentitySource === "creator" });
+      this.commitIdentities.configure(config.gitIdentitySource, config.gitIdentity ?? null);
+    }
     if (!this.scope) {
       if (!await this.initialize(scope, config, timing)) return;
     } else {
@@ -661,7 +670,7 @@ export class CloudWorker {
         throw tagged(new WorkspaceError("WORKSPACE_UNAVAILABLE", "This workspace is still being prepared. Try again shortly."), "bootstrap_required");
       const bootstrap = this.acting && config.bootstrapContextId && this.contexts && !this.options.runtimeResume
         ? await this.contexts.bootstrapLease(config.bootstrapContextId).catch(error => { throw tagged(error, "bootstrap_lease_refused"); }) : undefined;
-      const bootstrapEnvironment = bootstrap && { git: gitIdentityEnvironment(bootstrap.gitIdentity), zeros: { ZEROS_EXECUTION_CONTEXT: bootstrap.contextId } };
+      const bootstrapEnvironment = bootstrap && { git: this.contextGit(bootstrap.contextId, bootstrap.gitIdentity), zeros: { ZEROS_EXECUTION_CONTEXT: bootstrap.contextId } };
       const asStarter = <T>(work: () => T): T => bootstrapEnvironment ? operationEnvironment.run(bootstrapEnvironment, work) : work();
       const checking = measureStartup("worker_checkout", () => this.options.runtimeResume ? Promise.resolve(undefined)
         : asStarter(() => (this.options.prepareCheckout ?? prepareCheckout)(config.workspace, this.gitEnvironment, timing)), timing)
@@ -799,7 +808,8 @@ export class CloudWorker {
       if (this.disposed || this.stopping) return false;
       this.environmentVersion = config.environment?.versionId;
       this.sync?.dispose(); this.sync = sync;
-      this.store = store; this.workspace = workspace; this.mcp = mcp; this.agents = agents; agents.setExecutionContexts(this.contexts, this.personal, this.options.log); this.reviews = reviews;
+      this.store = store; this.workspace = workspace; this.mcp = mcp; this.agents = agents; agents.setExecutionContexts(this.contexts, this.personal, this.options.log);
+      agents.commitIdentity = (contextId, identity) => this.contextGit(contextId, identity); this.reviews = reviews;
       this.terminals = terminals; this.application = application; this.workspaceApi = workspaceApi; this.chats = chats; this.history = history; this.setup = setup; this.checkoutRefresh = refresh;
       this.unsubscribers.push(...unsubscribers); this.scope = scope; published = true;
       recordStartupTiming("worker_services", servicesStarted, timing);
@@ -854,6 +864,16 @@ export class CloudWorker {
     const hint = createMessage({ type: "DB_CHANGED", source: "engine", kinds: [SYNC_HINT_KIND], workspaceIds: [this.scope.workspace.id] });
     for (const client of this.clients.values()) if (client.passive) void client.send(hint).catch(() => {});
   }
+  /** A context's Git author env; its include file is removed when the context ends. */
+  private contextGit(contextId: string, identity: Parameters<ContextCommitIdentities["environment"]>[1]): Record<string, string> {
+    const env = this.commitIdentities.environment(contextId, identity);
+    if (this.commitIdentities.identitySource && this.contexts && !this.identityEnds.has(contextId)) {
+      this.identityEnds.add(contextId);
+      this.contexts.onEnd(contextId, () => { this.identityEnds.delete(contextId); this.commitIdentities.forget(contextId); });
+    }
+    return env;
+  }
+
   private broadcast(frame: BridgeMessage): Promise<void> { return this.send({ t: "frame", clientId: "*", frame }).then(() => {}); }
   private readyFrame(): BridgeMessage {
     return createMessage({ type: "ENGINE_READY", source: "engine", version: "0.0.0", root: "", framework: "cloud", port: 0,

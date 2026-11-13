@@ -85,6 +85,8 @@ export class Agents {
   private reviewConfig: WorkerConfig["codeReview"];
   private reviewConfiguration = 0;
   private readonly models: CodexModelAvailability;
+  /** Set by the worker (creator-commit-identity-v1): a turn context's Git author env, following the Creator rule. */
+  commitIdentity?: (contextId: string, identity: Parameters<typeof gitIdentityEnvironment>[0]) => Record<string, string>;
   private outboxDispatch?: OutboxDispatch;
   private contexts?: ExecutionContexts;
   private personal?: PersonalEnvironments;
@@ -838,7 +840,7 @@ export class Agents {
         const interactions = route.interactions;
         const native = await driver.open({ sessionId: route.id, cwd: this.scope.root, model: route.model, effort: route.effort, fast: route.fast,
           ...(this.application ? { application: context?.lease.environment ? this.personalApplication(context.lease.environment, context.env) : this.application } : {}),
-          ...(context ? { zerosEnvironment: this.actingVariables(route.chatId, context), gitEnvironment: gitIdentityEnvironment(context.lease.gitIdentity) }
+          ...(context ? { zerosEnvironment: this.actingVariables(route.chatId, context), gitEnvironment: this.commitIdentity?.(context.lease.contextId, context.lease.gitIdentity) ?? gitIdentityEnvironment(context.lease.gitIdentity) }
             : this.zeros ? { zerosEnvironment: this.zeros.variables(route.chatId) } : {}),
           ...(mcpServers || route.workspaceTools ? { mcpServers: { ...mcpServers, ...route.workspaceTools?.servers } } : {}),
           ...(this.config.agentInteractions === 1 ? { modeId: cloudModeId(route.agentId, route.permissionMode ?? "bypass"),

@@ -106,7 +106,7 @@ class ActingRelay extends FakeRelay {
   }
 }
 
-async function setup(options: { agentLogins?: Record<string, true>; freshCheckout?: boolean; bootstrapError?: unknown; activated?: boolean; bootstrap?: string; survivors?: number; noSweep?: boolean; beforeStart?: (home: string) => Promise<void>; environment?: unknown; log?: (line: string) => void; setupRunner?: (...args: any[]) => Promise<number>; checkout?: () => void } = {}) {
+async function setup(options: { identitySource?: "creator" | "actor"; creatorIdentity?: { name: string; email: string }; agentLogins?: Record<string, true>; freshCheckout?: boolean; bootstrapError?: unknown; activated?: boolean; bootstrap?: string; survivors?: number; noSweep?: boolean; beforeStart?: (home: string) => Promise<void>; environment?: unknown; log?: (line: string) => void; setupRunner?: (...args: any[]) => Promise<number>; checkout?: () => void } = {}) {
   const directory = await mkdtemp(join(tmpdir(), "zeros-acting-")); directories.push(directory);
   const root = join(directory, "checkout"); await mkdir(root);
   // An existing checkout (a later process on this boot, or an earlier boot's): nothing to clone without a bootstrap.
@@ -128,7 +128,8 @@ async function setup(options: { agentLogins?: Record<string, true>; freshCheckou
     ...(options.bootstrap ? { bootstrapContextId: options.bootstrap } : {}),
     ...(options.environment ? { environment: options.environment } : {}), agents: options.activated === false ? { claude: { apiKey: "creator-claude-key-000" } } : {},
     ...(options.agentLogins ? { agentLogins: options.agentLogins } : {}),
-    ...(options.activated === false ? {} : { actingUser: 1, gitIdentity: null }) }));
+    ...(options.activated === false ? {} : { actingUser: 1, gitIdentity: options.creatorIdentity ?? null }),
+    ...(options.identitySource ? { gitIdentitySource: options.identitySource } : {}) }));
   return { relay, drivers, home, root, directory, worker, socketPath: () => socketPath };
 }
 
@@ -145,6 +146,19 @@ it("attests a clean boot before its first begin, and starts no one's turn when c
   await until(() => dirty.relay.calls.some(call => call.op === "outcome" && call.body.state === "failed")).toBe(true);
   expect(dirty.relay.calls.some(call => call.op === "begin" || call.op.endsWith("-lease"))).toBe(false);
   expect(dirty.drivers.every(driver => !driver.opened)).toBe(true);
+});
+
+it("creator-commit-identity-v1: a turn points Git at its context's include (no pinned author), the VM-wide identity is the managed Creator's", async () => {
+  const creator = { name: "Creator A", email: "9+creator@users.noreply.github.com" };
+  const f = await setup({ identitySource: "creator", creatorIdentity: creator });
+  f.relay.deliver(delivery(ALEX));
+  await until(() => f.drivers[0]?.prompts.length ?? 0).toBe(1);
+  const env = f.drivers[0]!.opened!.gitEnvironment!;
+  expect(env).not.toHaveProperty("GIT_AUTHOR_NAME");
+  expect(env).toMatchObject({ GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "include.path" });
+  expect(await readFile(env.GIT_CONFIG_VALUE_0!, "utf8")).toBe("");
+  expect(await readFile(join(f.home, ".config", "zeros", "git-identity"), "utf8")).toContain('name = "Creator A"');
+  f.drivers[0]!.complete();
 });
 
 it("runs an activated turn as its person: begin first, then the exact lease, then the driver with that person's login and identity; retired after", async () => {
