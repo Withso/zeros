@@ -147,7 +147,8 @@ it("keeps durable HTTP prompt bounds and strict schemas identical across Zod ver
     CloudV2PromptStopSchema: { chatId: "chat", throughEpoch: "1" },
   };
   expect(controlPrompts.CLOUD_V2_MAX_PROMPT_BYTES).toBe(sharedPrompts.CLOUD_V2_MAX_PROMPT_BYTES);
-  expect(controlPrompts.CLOUD_V2_MAX_PROMPT_WAIT_MS).toBe(sharedPrompts.CLOUD_V2_MAX_PROMPT_WAIT_MS);
+  expect(controlPrompts.CLOUD_V2_PROMPT_PUSH_POLL_MS).toBe(60_000);
+  expect(sharedPrompts.CLOUD_V2_PROMPT_PUSH_POLL_MS).toBe(60_000);
   for (const key of Object.keys(examples) as Array<keyof typeof examples>) {
     expect(controlPrompts[key].parse(examples[key])).toEqual(sharedPrompts[key].parse(examples[key]));
     for (const invalid of [null, {}, { ...examples[key], unknown: true }]) {
