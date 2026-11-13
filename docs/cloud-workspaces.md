@@ -1733,13 +1733,14 @@ catalog invalidations use the account event stream below.
 ## Negotiated change signals
 
 The account stream at `/v1/auth/events` announces `catalog-events-v1` in
-`ready.features`. Committed workspace, lifecycle, setup, cost, pull-request,
+`ready.features`. Committed workspace, lifecycle, setup, pull-request,
 follower and pin changes publish `organization.data_changed` with
 `{resource:"cloud_workspace",workspaceId,change}`. Database triggers cover
 older server writers too; deletion hints remain replayable after their workspace
 row is gone. Membership and plan changes retain the existing account events.
-Activity timestamps and provider-check timestamps do not produce catalog hints.
-Cost totals change at turn settlement or a correction, not on streaming deltas.
+Activity timestamps, provider-check timestamps and cost totals do not produce
+catalog hints. Cost totals arrive with the next document change or the
+60-second fallback; replaying saved history cannot trigger catalog refreshes.
 Catalog notifications use a separate PostgreSQL channel from authority cuts.
 
 A capable desktop gathers hints for one second and keeps one catalog request

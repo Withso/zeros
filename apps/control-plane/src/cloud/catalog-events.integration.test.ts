@@ -89,6 +89,24 @@ suite("committed cloud catalog changes", () => {
     expect(await hints(cursor)).toEqual([]);
   });
 
+  it("leaves cost-only changes to the next catalog read", async () => {
+    const cursor = (await getSecuritySnapshot(pool, user)).cursor;
+    await store.writeHistory(workspace.id, { messages: { chatId: "cost-chat", rows: [{ msgId: "cost", kind: "text", createdAt: 1,
+      payload: JSON.stringify({ role: "user", turnSummary: { usage: { totalCostUsd: 2, costKind: "estimated" } } }) }] } });
+    expect((await store.get(workspace.id, user.id)).agentCost).toEqual({ totalUsd: 2, estimated: true });
+    expect(await hints(cursor)).toEqual([]);
+  });
+
+  it("emits no catalog hint when a history replacement preserves the final cost", async () => {
+    const messages = { chatId: "cost-chat", rows: [{ msgId: "cost", kind: "text", createdAt: 1,
+      payload: JSON.stringify({ role: "user", turnSummary: { usage: { totalCostUsd: 2, costKind: "reported" } } }) }] };
+    await store.writeHistory(workspace.id, { messages });
+    const cursor = (await getSecuritySnapshot(pool, user)).cursor;
+    await store.writeHistory(workspace.id, { messages: { ...messages, replace: true } });
+    expect((await store.get(workspace.id, user.id)).agentCost).toEqual({ totalUsd: 2, estimated: false });
+    expect(await hints(cursor)).toEqual([]);
+  });
+
   it.each(["checkout_boot_id", "pr_connection_generation"])("publishes a %s visibility change", async field => {
     await pool.query("INSERT INTO cloud_v2_github_workspaces(workspace_id,repository_id,canonical_repository) VALUES($1,42,'fixture/project')", [workspace.id]);
     const cursor = (await getSecuritySnapshot(pool, user)).cursor;

@@ -72,12 +72,12 @@ CREATE TRIGGER catalog_workspaces_update AFTER UPDATE ON cloud_v2_workspaces
   FOR EACH ROW WHEN (
     ROW(NEW.org_id,NEW.name,NEW.title,NEW.number,NEW.repository,NEW.branch,NEW.base_branch,NEW.state,NEW.error_code,NEW.archived_at,
       NEW.creator_user_id,NEW.created_by_user_id,NEW.source_pending,
-      NEW.setup_status,NEW.agent_cost_usd,NEW.agent_cost_turns,NEW.agent_cost_estimated_turns,
+      NEW.setup_status,
       NEW.creator_revision,NEW.creator_absent_reason,NEW.execution_mode,coalesce(NEW.worker_boot_id=ANY(NEW.acting_user_boot_ids),false))
     IS DISTINCT FROM
     ROW(OLD.org_id,OLD.name,OLD.title,OLD.number,OLD.repository,OLD.branch,OLD.base_branch,OLD.state,OLD.error_code,OLD.archived_at,
       OLD.creator_user_id,OLD.created_by_user_id,OLD.source_pending,
-      OLD.setup_status,OLD.agent_cost_usd,OLD.agent_cost_turns,OLD.agent_cost_estimated_turns,
+      OLD.setup_status,
       OLD.creator_revision,OLD.creator_absent_reason,OLD.execution_mode,coalesce(OLD.worker_boot_id=ANY(OLD.acting_user_boot_ids),false)))
   EXECUTE FUNCTION notify_cloud_v2_catalog_row();
 

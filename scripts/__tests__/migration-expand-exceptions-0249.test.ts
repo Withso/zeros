@@ -8,7 +8,7 @@ const sql = readFileSync(`apps/control-plane/migrations/${file}`, "utf8");
 
 it("permits exactly the reviewed catalog and device-liveness expansion", () => {
   expect(createHash("sha256").update(sql).digest("hex"))
-    .toBe("1aaa99a6e9e7dd831467eb79331e9acfb2b4bdcc7e05b2a2b5f8879a217308fc");
+    .toBe("ed1ca59d52a5f6a33d1b89f92bd43e1d28cf0ede5c991f69a929a367e76b2471");
   expect(lintMigrationPhase(file, sql)).toEqual([]);
 });
 
