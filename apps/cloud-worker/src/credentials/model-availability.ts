@@ -1,4 +1,5 @@
 import type { AgentInitializeMetadata } from "@zeros/protocol/agent-events";
+import type { CloudV2Agent } from "@zeros/protocol/cloud-v2-relay";
 import type { WorkerConfig } from "../workspace/scope";
 
 export interface ModelDiscoveryOptions { fetch?: typeof fetch; now?: () => number }
@@ -76,4 +77,17 @@ export class CodexModelAvailability {
         value.models.every((id: unknown) => typeof id === "string" && MODEL_ID.test(id)) ? [...new Set<string>(value.models)] : null;
     } finally { await reader.cancel().catch(() => {}); }
   }
+}
+
+/** Activated (creator-agent-models-v1): every member's picker shows the CURRENT Creator's selectable models for an agent,
+ * a complete account-scoped list fenced by loginRevision. An agent without the Creator's login lists none. Undefined
+ * keeps today's metadata (an older control plane sends no agentModels; non-activated workspaces use their own login). */
+export function creatorModelMetadata(agent: CloudV2Agent, config: WorkerConfig): AgentInitializeMetadata | undefined {
+  if (config.actingUser !== 1 || !config.agentModels) return undefined;
+  const ids = config.agentLogins?.[agent] ? config.agentModels[agent] ?? [] : [];
+  return { modelsDynamic: true, cloudModelScope: `cloud/${config.workspace.id}/${config.loginRevision}/creator`, modelsAccountScoped: true,
+    models: ids.map(value => ({ value, label: value })),
+    // As today: a non-Codex chat's menu also knows the Codex list (here the Creator's).
+    ...(agent === "codex" ? { modelEnvVar: "OPENAI_MODEL" }
+      : config.agentLogins?.codex ? { cloudCodexModels: (config.agentModels.codex ?? []).map(value => ({ value, label: value })) } : {}) };
 }

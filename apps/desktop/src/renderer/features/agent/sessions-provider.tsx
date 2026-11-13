@@ -51,6 +51,8 @@ import type {
 import { useBridge } from "../../platform/bridge/use-bridge";
 import { getActiveBridge } from "../../platform/bridge/active-bridge";
 import { refreshAgentModelCatalog } from "./refresh-agent-model-catalog";
+import { watchCloudAgentsChanged } from "./cloud-agents-changed";
+import { invalidateCloudAgentRegistry } from "./workspace-agent-registry";
 import { TranscriptHydrationRetries } from "./transcript-hydration-retries";
 import { cloudScopedId, isCloudWorkspace, parseCloudScopedId, parseCloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
 import { canSwitchPristineChat } from "./pristine-chat";
@@ -5654,6 +5656,12 @@ export function AgentSessionsProvider({
     });
     return unsub;
   }, [bridge, getStore, reconcileChatMessages, resetConversationContext]);
+
+  // A cloud worker's agents or model lists changed (DB_CHANGED agents): re-list them and re-read open chats' models.
+  useEffect(() => {
+    if (!bridge) return;
+    return watchCloudAgentsChanged(bridge, { sessions: () => getStore().sessions, invalidate: invalidateCloudAgentRegistry, refresh: refreshModelCatalog });
+  }, [bridge, getStore, refreshModelCatalog]);
 
   const listSessionsFor = useCallback<SessionsActions["listSessionsFor"]>(
     async (agentId, opts) => {
