@@ -566,6 +566,57 @@ and existing execution maintenance reconcile it against live eligibility and
 advance `loginRevision` only when the map changes, including after a missed
 notification or a clock-driven Hold. Turn admission never trusts the map.
 
+Migration `0246_cloud_team_ownership.sql` permits an absent Creator only for
+activated workspaces. `ZEROS_CLOUD_TEAM_OWNERSHIP` defaults to `0`; `1` enables
+Reassign and durable Creator removal on membership, account or Hold loss.
+It is one channel write switch, passed into each database transaction, not a
+new client authorization or RLS protocol. Deploy the migration and upgrade
+every writer before enabling it. API and lifecycle replicas, and the
+`account-pro:manage` and `staff:manage` operator processes, must receive the
+same channel setting. An older or disabled writer cannot record a transient
+loss followed by restoration; the maintenance sweep repairs current loss,
+not missed history. The existing execution sweep also handles clock-driven
+Hold and bounds expiry cleanup for the 30-day reassignment receipts.
+
+Enable in this order: apply the expand with the switch off; upgrade every API,
+worker and operator binary; pause membership/account/entitlement changes while
+configuration is mixed; enable the worker pool, then every API pool, and pass
+the same enabled setting to Pro/staff CLI invocations before resuming those
+writes. The API's pool is configured independently even when it receives cloud
+services constructed on a separate worker pool. Do not leave an older or
+disabled writer serving those changes during enablement.
+
+Supported membership removals (the organization route, WorkOS events and
+reconciliation, and account erasure) use system transactions and clear the
+Creator at commit. A non-system writer or clock-driven Hold is caught by the
+existing 5–10 second jittered execution poll, in batches of 128, plus the time
+to finish the current sweep and any queued batches. This is a polling bound,
+not a wall-clock guarantee during database failures or backlog. Live admission
+and renewal independently reject lost authority; an offline worker still has
+the existing 30-second lease bound.
+
+Reassign uses the current Creator identity and decimal revision as a compare
+and swap. It changes Creator and agent availability together without changing
+the VM, access epoch, worker bearer, activity clock or existing payer pins.
+Candidates need their own source access; the sparse `agentLogins` map never
+gates eligibility. With no Creator, new turns refuse
+`workspace_creator_required`, while admitted members retain non-agent work
+and ordinary Start/Stop. Account deletion retains activated organization
+workspaces; organization deletion still schedules their provider cleanup.
+
+Both `X-Zeros-Team-Sharing: 1` and `X-Zeros-Team-Ownership: 1` negotiate the
+nullable-Creator document even when the write switch is off. Old clients omit
+unassigned rows from lists and receive `team_ownership_required` on direct
+reads. To roll back below this control-plane version, first reassign every
+workspace with a null Creator through the operator-visible product action,
+then disable the switch. Never roll back the schema or repair ownership with
+ad hoc row edits. Switching off alone preserves existing unassigned rows.
+An activation rollback to legacy also requires a Creator: its plan refuses a
+null Creator before any write. Reassign first, confirm the ordinary provider
+Stop, then inspect and approve the rollback. The approval binds the current
+Creator revision, so a later Reassign requires a new plan. Stop and retirement
+requirements remain unchanged.
+
 Set `CLOUD_EXECUTION_CHANGE_FILE` to a regular JSON file containing exactly:
 
 ```json

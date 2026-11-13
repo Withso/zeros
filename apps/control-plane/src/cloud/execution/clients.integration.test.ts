@@ -1,13 +1,14 @@
 import { randomUUID } from "node:crypto";
 import pg from "pg";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { withSystemTx } from "../../db.js";
 import { executionFixture, type ExecutionFixture } from "./test-fixture.js";
 
 const database = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 database("acting-user live client authority", () => {
   let pool: pg.Pool, f: ExecutionFixture;
   beforeAll(() => { pool = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL, max: 8, statement_timeout: 4000 }); });
-  beforeEach(async () => { f = await executionFixture(pool); await f.activate(); expect((await f.hello()).status).toBe(200); });
+  beforeEach(async () => { f = await executionFixture(pool, { teamOwnership: true }); await f.activate(); expect((await f.hello()).status).toBe(200); });
   afterEach(async () => { await f?.close(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
   afterAll(() => pool.end());
   const open = async (user = f.viewer) => {
@@ -56,6 +57,35 @@ database("acting-user live client authority", () => {
     const client = await open();
     await pool.query("UPDATE cloud_v2_execution_contexts SET client_token_expires_at=clock_timestamp()-interval '1 second' WHERE id=$1", [client.context.contextId]);
     await expect(f.cp.execution.clients.forward(f.workspace.id, client.context.contextId, { type: "WORKSPACE_REQUEST", id: "read", op: "files.read" })).rejects.toMatchObject({ code: "actor_changed" });
+  });
+
+  it("keeps personal terminals, files and Git usable without a Creator while refusing agent turns", async () => {
+    const client = await open();
+    const before = (await pool.query("SELECT state,worker_token_hash,access_epoch,stop_generation FROM cloud_v2_workspaces WHERE id=$1", [f.workspace.id])).rows[0];
+    await withSystemTx(pool, tx => tx.query("DELETE FROM organization_members WHERE org_id=$1 AND user_id=$2", [f.organizationId, f.creator.id]));
+    expect((await pool.query("SELECT creator_user_id FROM cloud_v2_workspaces WHERE id=$1", [f.workspace.id])).rows[0].creator_user_id).toBeNull();
+    const turn = await f.send(f.prompt(), f.viewer);
+    expect(turn.status).toBe(409); expect(await turn.json()).toMatchObject({ error: { code: "workspace_creator_required" } });
+    await f.cp.execution.clients.forward(f.workspace.id, client.context.contextId, { type: "PTY_CREATE", id: "terminal", sessionId: "terminal" });
+    const opened = await f.worker("terminal-lease", { clientId: client.clientId, requestId: "terminal", terminalId: "terminal" });
+    expect(opened.status).toBe(200);
+    const terminal = await opened.json(); expect(terminal.userId).toBe(f.viewer.id); expect(terminal).not.toHaveProperty("agents");
+    for (const operation of ["file.write", "git.commit", "git.push"]) {
+      await f.cp.execution.clients.forward(f.workspace.id, client.context.contextId, { type: "WORKSPACE_REQUEST", id: operation, op: operation });
+      const response = await f.worker("client-lease", { clientId: client.clientId, requestId: operation, operation });
+      expect(response.status).toBe(200);
+      const lease = await response.json(); expect(lease.userId).toBe(f.viewer.id);
+      if (operation === "git.push") {
+        const token = await f.worker("github-token", { contextId: lease.contextId, purpose: "git" });
+        expect(token.status).toBe(200); expect((await token.json()).token).toBe(`synthetic-${f.viewer.id}`);
+      }
+    }
+    const renewed = await f.worker("execution-leases/renew", { contextIds: [client.context.contextId, terminal.contextId] });
+    expect((await renewed.json()).leases).toEqual([
+      { contextId: client.context.contextId, expiresAt: expect.any(Number) }, { contextId: terminal.contextId, expiresAt: expect.any(Number) },
+    ]);
+    expect((await pool.query("SELECT state,worker_token_hash,access_epoch,stop_generation FROM cloud_v2_workspaces WHERE id=$1", [f.workspace.id])).rows[0]).toEqual(before);
+    expect((await f.call(`/v1/cloud-v2/workspaces/${f.workspace.id}/stop`, "POST", {}, f.viewer, { "X-Zeros-Team-Sharing": "1", "X-Zeros-Team-Ownership": "1" })).status).toBe(202);
   });
 
   it("retires a closed handle but retains an operation's cleanup barrier and recent receipt", async () => {

@@ -7,6 +7,8 @@ import pg from "pg";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AuthedUser } from "../../auth.js";
 import { HttpError } from "../../authz.js";
+import { withSystemTx } from "../../db.js";
+import { configureCloudTeamOwnership } from "../../db-context.js";
 import { teamSharingFixture, type TeamSharingFixture } from "./test-fixture.js";
 
 // The override joins an unmerged desktop checkout without copying its clients.
@@ -148,6 +150,77 @@ database("real team-sharing desktop clients against the router and PostgreSQL", 
     await pool.query("UPDATE cloud_v2_workspaces SET active_at=NULL WHERE id=$1", [f.workspace.id]);
     return result.receipt;
   }
+
+  describe("Creator ownership", () => {
+    async function ownershipFixture(enabled: boolean) {
+      await f.sharing.signals.close();
+      f = await teamSharingFixture(pool, { ownership: enabled });
+      f.app.onError((error, c) => {
+        if (!(error instanceof HttpError)) throw error;
+        return c.json({ error: { code: error.code, message: error.message } }, error.status);
+      });
+      await pool.query("UPDATE cloud_v2_workspaces SET execution_mode='active' WHERE id=$1", [f.workspace.id]);
+      signIn(f.creator);
+    }
+    beforeEach(() => ownershipFixture(true));
+
+    it("reads assigned and absent Creators through the desktop document, numbered link and catalog", async () => {
+      expect(await clients.getCloudWorkspaceDocument(target())).toMatchObject({ ownerUserId: f.creator.id,
+        sharing: { createdByUserId: f.creator.id, ownership: { creatorRevision: "1", noCreatorReason: null, canReassign: true } } });
+      await withSystemTx(pool, tx => tx.query("DELETE FROM organization_members WHERE org_id=$1 AND user_id=$2", [f.organizationId, f.creator.id]));
+      signIn(f.admin);
+      const direct = await clients.getCloudWorkspaceDocument(target());
+      expect(direct).toMatchObject({ ownerUserId: null, capabilities: { canWrite: true, canStart: true },
+        sharing: { createdByUserId: f.creator.id, ownership: { creatorRevision: "2", noCreatorReason: "left", canReassign: true } } });
+      expect(await clients.getCloudWorkspaceDocumentByNumber({ owner: `org-${f.organizationId}`, number: f.workspace.number })).toEqual(direct);
+      const catalog = await clients.listCloudWorkspaceCatalogSnapshot(f.organizationId);
+      expect(catalog.complete).toBe(true);
+      expect(catalog.workspaces.find((row: any) => row.id === f.workspace.id)).toEqual(direct);
+      expect(calls.every(call => call.headers.get("X-Zeros-Team-Sharing") === "1" && call.headers.get("X-Zeros-Team-Ownership") === "1")).toBe(true);
+      await unchangedStopped();
+    });
+
+    it("parses sparse candidate logins and carries the exact Creator CAS through Reassign, replay and conflict", async () => {
+      const candidates = await clients.listReassignCandidates(target());
+      expect(candidates).toMatchObject({ creatorRevision: "1", candidates: expect.arrayContaining([{ userId: f.viewer.id, eligible: true, agentLogins: {} }]) });
+      const body = { requestId: randomUUID(), toUserId: f.viewer.id, expectedCreatorUserId: f.creator.id, expectedCreatorRevision: "1" };
+      const moved = await clients.reassignCloudWorkspace(target(), body);
+      expect(calls.at(-1)!.body).toEqual(body);
+      expect(moved).toMatchObject({ workspace: { ownerUserId: f.viewer.id, sharing: { ownership: { creatorRevision: "2", noCreatorReason: null, canReassign: true } } },
+        reassignment: { requestId: body.requestId, fromUserId: f.creator.id, toUserId: f.viewer.id, creatorRevision: "2" } });
+      expect(await clients.reassignCloudWorkspace(target(), body)).toEqual(moved);
+      await expect(clients.reassignCloudWorkspace(target(), { ...body, toUserId: f.admin.id })).rejects.toMatchObject({ status: 409, code: "reassign_conflict" });
+      await expect(clients.reassignCloudWorkspace(target(), { ...body, requestId: randomUUID() })).rejects.toMatchObject({ status: 409, code: "creator_changed" });
+      expect((await pool.query("SELECT count(*)::int AS count FROM cloud_v2_reassignments WHERE workspace_id=$1", [f.workspace.id])).rows[0].count).toBe(1);
+      await unchangedStopped();
+    });
+
+    it("keeps the absent-Creator read after the switch is off and refuses new Reassign requests", async () => {
+      await ownershipFixture(false);
+      configureCloudTeamOwnership(pool, true);
+      await withSystemTx(pool, tx => tx.query("DELETE FROM organization_members WHERE org_id=$1 AND user_id=$2", [f.organizationId, f.creator.id]));
+      configureCloudTeamOwnership(pool, false);
+      signIn(f.admin);
+      expect(await clients.getCloudWorkspaceDocument(target())).toMatchObject({ ownerUserId: null,
+        sharing: { ownership: { creatorRevision: "2", noCreatorReason: "left", canReassign: false } } });
+      await expect(clients.reassignCloudWorkspace(target(), { requestId: randomUUID(), toUserId: f.viewer.id,
+        expectedCreatorUserId: null, expectedCreatorRevision: "2" })).rejects.toMatchObject({ status: 409, code: "team_ownership_required" });
+      await unchangedStopped();
+    });
+
+    it("sends an explicit null Creator when an admin assigns an ownerless workspace", async () => {
+      await withSystemTx(pool, tx => tx.query("DELETE FROM organization_members WHERE org_id=$1 AND user_id=$2", [f.organizationId, f.creator.id]));
+      signIn(f.admin);
+      const document = await clients.getCloudWorkspaceDocument(target());
+      const body = { requestId: randomUUID(), toUserId: f.viewer.id, expectedCreatorUserId: document.ownerUserId,
+        expectedCreatorRevision: document.sharing.ownership.creatorRevision };
+      const result = await clients.reassignCloudWorkspace(target(), body);
+      expect(calls.at(-1)!.body).toEqual({ ...body, expectedCreatorUserId: null });
+      expect(result).toMatchObject({ workspace: { ownerUserId: f.viewer.id, sharing: { ownership: { creatorRevision: "3", noCreatorReason: null } } },
+        reassignment: { fromUserId: null, toUserId: f.viewer.id, creatorRevision: "3" } });
+      await unchangedStopped();
+    });
+  });
 
   it("pages the real shared catalog, including the viewer's own workspaces, with the opt-in on every page", async () => {
     for (let n = 0; n < 200; n++) await f.store.createWorkspace({ id: randomUUID(), organizationId: f.organizationId,

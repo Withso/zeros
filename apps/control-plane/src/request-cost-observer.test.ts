@@ -4,6 +4,7 @@ import { Hono } from "hono";
 import type pg from "pg";
 import { describe, expect, it, vi } from "vitest";
 import { withSystemTx } from "./db.js";
+import { configureCloudTeamOwnership } from "./db-context.js";
 import * as timing from "./request-timing.js";
 
 const result = (command: string, rowCount: number | null = null) => ({ command, rowCount, rows: [], fields: [] });
@@ -46,6 +47,18 @@ function returningNative(native: Promise<unknown>) {
 }
 
 describe("opt-in request database cost observation", () => {
+  it.each([false, true])("counts ownership transaction setup as zero persistent writes with the switch %s", async enabled => {
+    const { pool } = database(async () => result("SELECT", 1));
+    configureCloudTeamOwnership(pool, enabled);
+    const { app, summaries } = appWithCosts();
+    app.get("/cost", async c => {
+      await withSystemTx(pool, tx => tx.query("SELECT 1"));
+      return c.text("ok");
+    });
+    expect((await app.request("/cost")).status).toBe(200);
+    expect(summaries[0]).toMatchObject({ complete: true, sqlWriteStatements: 0, affectedRows: 0, encodedPersistedBytes: 0 });
+  });
+
   it("counts real completed command tags and scalar persistence annotations without another query", async () => {
     const { pool, client, query } = database(async () => result("INSERT", 2));
     const { app, summaries } = appWithCosts();

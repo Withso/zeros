@@ -31,6 +31,16 @@ const pool = {
 
 const emailConfig = { from: null, token: null, apiUrl: "", inviteLinkBase: "" };
 
+it("allows the ownership negotiation header in the desktop preflight", async () => {
+  const app = createApp(config(null), pool, emailConfig as never);
+  const response = await app.request("/v1/cloud-v2/workspaces/fixture/reassign", {
+    method: "OPTIONS", headers: { origin: "https://app.example.test", "access-control-request-method": "POST",
+      "access-control-request-headers": "authorization,content-type,x-zeros-team-sharing,x-zeros-team-ownership" },
+  });
+  expect(response.status).toBe(204);
+  expect(response.headers.get("access-control-allow-headers")?.toLowerCase().split(",")).toContain("x-zeros-team-ownership");
+});
+
 
 
 

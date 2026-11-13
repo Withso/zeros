@@ -1953,6 +1953,10 @@ export class DeletionLifecycleProcessor {
          WHERE id = $1`,
         [request.target_user_id],
       );
+      // Shared workspaces survive the account, but its private environment does not.
+      await tx.query("DELETE FROM cloud_workspace_environment_pins WHERE owner_user_id=$1", [request.target_user_id]);
+      await tx.query("DELETE FROM cloud_environment_heads WHERE owner_user_id=$1", [request.target_user_id]);
+      await tx.query("DELETE FROM cloud_environment_versions WHERE owner_user_id=$1", [request.target_user_id]);
       await tx.query("SELECT public.purge_account_pro_configuration($1)", [
         request.target_user_id,
       ]);

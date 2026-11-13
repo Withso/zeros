@@ -11,7 +11,7 @@ const database = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 database("execution material ownership and pins", () => {
   let pool: pg.Pool, f: ExecutionFixture;
   beforeAll(() => { pool = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL, max: 10, statement_timeout: 5000 }); });
-  beforeEach(async () => { f = await executionFixture(pool); await f.login(); await f.login(f.viewer); });
+  beforeEach(async () => { f = await executionFixture(pool, { teamOwnership: true }); await f.login(); await f.login(f.viewer); });
   afterEach(async () => { await f?.close(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
   afterAll(() => pool.end());
   const environments = () => f.cp.routes.environments!;
@@ -64,6 +64,28 @@ database("execution material ownership and pins", () => {
     expect((await pool.query("SELECT material,environment_version_id FROM cloud_v2_execution_contexts WHERE id=$1", [active.begun.contextId])).rows[0])
       .toEqual({ material: null, environment_version_id: null });
     expect((await pool.query("SELECT 1 FROM cloud_environment_versions WHERE id=$1", [saved.versionId])).rowCount).toBe(0);
+  });
+
+  it("keeps each person's environment after Reassign, including the original Creator's private pin", async () => {
+    await patch(f.creator, 0, "creator-head");
+    await withSystemTx(pool, tx => pinCloudEnvironment(tx, f.workspace, "42", { variables: { APP_KEY: "creator-override" }, keys: f.keys }));
+    await patch(); await ready();
+    const before = await turn(), first = await f.worker("turn-lease", before.lease);
+    expect(first.status).toBe(200);
+    const original = await first.json();
+    const reassigned = await f.call(`/v1/cloud-v2/workspaces/${f.workspace.id}/reassign`, "POST", {
+      requestId: randomUUID(), toUserId: f.viewer.id, expectedCreatorUserId: f.creator.id, expectedCreatorRevision: "1",
+    }, f.creator, { "X-Zeros-Team-Sharing": "1", "X-Zeros-Team-Ownership": "1" });
+    expect(reassigned.status).toBe(200);
+    const next = await f.dispatch(f.prompt(randomUUID(), { chatId: "new-creator" }), f.viewer);
+    const nextLease = await f.worker("turn-lease", next.lease);
+    expect(nextLease.status).toBe(200);
+    expect((await nextLease.json()).environment).toMatchObject({ variables: { APP_KEY: "member-value" } });
+    const former = await f.dispatch(f.prompt(randomUUID(), { chatId: "former-creator" }));
+    const formerLease = await f.worker("turn-lease", former.lease);
+    expect(formerLease.status).toBe(200);
+    expect((await formerLease.json()).environment).toMatchObject({ variables: { APP_KEY: "creator-override" } });
+    expect(await (await f.worker("turn-lease", before.lease)).json()).toEqual(original);
   });
 
   it("freezes an empty environment as well as a selected version", async () => {

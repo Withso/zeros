@@ -30,6 +30,7 @@ export function createCloudGithubCatalog(deps: {
     const deadlines = new Map<string, number>(), freshAdmissions = new Set<string>();
     const unavailable = new Map<string, CloudGithubUnavailableReason>();
     for (const row of rows) {
+      if (row.creatorUserId === null) continue;
       // A pending create has no source or GitHub metadata yet; the lifecycle
       // verifies it before any exists. It reads as a plain creating row.
       if (row.sourcePending) continue;

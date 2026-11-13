@@ -24,7 +24,7 @@ import { EXECUTION_LEASE_MS, EXECUTION_MINIMUM_LIFETIME_MS, assertExecutionLifet
 export { EXECUTION_LEASE_MS } from "./lifetime.js";
 export const BOOTSTRAP_MINIMUM_LIFETIME_MS = EXECUTION_MINIMUM_LIFETIME_MS;
 export type ExecutionWorker = { token: string; bootId: string };
-export type ExecutionWorkspace = { id: string; org_id: string; creator_user_id: string; repository: string; state: string;
+export type ExecutionWorkspace = { id: string; org_id: string; creator_user_id: string | null; repository: string; state: string;
   access_epoch: string; stop_generation: string; worker_boot_id: string; worker_token_hash: Buffer; execution_mode: string;
   acting_user_boot_ids: string[]; execution_initiator_user_id: string | null; execution_intent_id: string | null; api_access: boolean };
 export type ExecutionContext = { id: string; workspace_id: string; org_id: string; user_id: string | null; kind: "turn" | "terminal" | "client" | "bootstrap";

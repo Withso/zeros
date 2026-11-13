@@ -3,7 +3,7 @@ import { z } from "zod";
 import { CloudSourceTargetSchema } from "../source-authority.js";
 
 const basisSchema = z.object({
-  permission: z.tuple([z.string(), z.string(), z.string(), z.string(), z.string(), z.string(),
+  permission: z.tuple([z.string(), z.string(), z.string(), z.string().nullable(), z.string(), z.string(),
     z.string(), z.string(), z.string(), z.string(), z.array(CloudSourceTargetSchema).max(100), z.unknown()]),
   policy: z.tuple([z.boolean(), z.boolean(), z.boolean()]),
   accessEpoch: z.string(), stopGeneration: z.string(), bootId: z.string().nullable(), workerTokenHash: z.string().nullable(),

@@ -3,8 +3,15 @@ import { z } from "zod";
 import { HttpError } from "../../authz.js";
 
 export const TEAM_SHARING_HEADER = "X-Zeros-Team-Sharing";
+export const TEAM_OWNERSHIP_HEADER = "X-Zeros-Team-Ownership";
+export const CreatorRevisionSchema = z.string().regex(/^[1-9][0-9]{0,18}$/)
+  .refine(value => BigInt(value)<9223372036854775807n);
+export const TeamReassignSchema = z.object({ requestId: z.string().uuid().transform(value => value.toLowerCase()),
+  toUserId: z.string().uuid().transform(value => value.toLowerCase()),
+  expectedCreatorUserId: z.string().uuid().transform(value => value.toLowerCase()).nullable(), expectedCreatorRevision: CreatorRevisionSchema }).strict();
+export type TeamReassign = z.infer<typeof TeamReassignSchema>;
 export const TeamListSchema = z.object({
-  organizationId: z.string().uuid(), creator: z.string().uuid().optional(), mine: z.literal("1").optional(),
+  organizationId: z.string().uuid(), creator: z.union([z.string().uuid(),z.literal("none")]).optional(), mine: z.literal("1").optional(),
   following: z.literal("1").optional(), pinned: z.literal("1").optional(),
   repositoryId: z.string().regex(/^[1-9][0-9]{0,15}$/).refine(value => Number.isSafeInteger(Number(value))).optional(),
   archived: z.enum(["exclude","include","only"]).default("exclude"),
@@ -30,4 +37,7 @@ export function writeTeamCursor(key: string, at: string, id: string): string {
 export const teamNotFound = () => new HttpError(404,"not_found","Cloud workspace not found");
 export const teamUnavailable = () => new HttpError(503,"github_verification_unavailable","Repository verification is temporarily unavailable. Try again shortly.");
 export const teamReadOnly = () => new HttpError(409,"workspace_read_only","This workspace is read-only for you");
+export const teamOwnershipRequired = () => new HttpError(409,"team_ownership_required","Workspace ownership is not enabled for this client or channel");
+export const teamCreatorChanged = () => new HttpError(409,"creator_changed","The workspace Creator changed. Refresh and try again.");
+export const teamOwnershipDenied = () => new HttpError(403,"workspace_management_denied","Only the Creator and organization admins may reassign this workspace");
 export const teamManagementDenied = () => new HttpError(403,"workspace_read_only","Only the Creator and organization admins may manage this workspace");

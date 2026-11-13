@@ -9,7 +9,7 @@ database("current Creator availability survives missed notifications", () => {
   let pool: pg.Pool, f: ExecutionFixture;
   beforeAll(() => { pool = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL, max: 8, statement_timeout: 4000 }); });
   beforeEach(async () => {
-    f = await executionFixture(pool); await f.cp.loginChanges.stop(); await f.login(); await f.activate();
+    f = await executionFixture(pool, { teamOwnership: true }); await f.cp.loginChanges.stop(); await f.login(); await f.activate();
     const hello = await f.hello(); expect(hello.status).toBe(200);
     const id = (await hello.json()).config.bootstrapContextId;
     expect((await f.worker("bootstrap-lease", { contextId: id })).status).toBe(200);
@@ -58,6 +58,10 @@ database("current Creator availability survives missed notifications", () => {
     const heartbeat = await f.worker("activity", { idle: true }); expect(heartbeat.status).toBe(200);
     expect(BigInt((await heartbeat.json()).loginRevision)).toBeGreaterThan(BigInt(before.loginRevision));
     expect((await config()).agentLogins).toEqual({});
+    expect(await f.cp.execution.maintenance.due()).toContain(f.workspace.id);
+    await f.cp.execution.maintenance.workspace(f.workspace.id);
+    expect((await pool.query("SELECT creator_user_id,creator_absent_reason FROM cloud_v2_workspaces WHERE id=$1", [f.workspace.id])).rows[0])
+      .toEqual({ creator_user_id: null, creator_absent_reason: "hold" });
     expect((await f.call(`/v1/cloud-v2/workspaces/${f.workspace.id}/connect`, "POST", { wake: false }, f.viewer, { "X-Zeros-Team-Sharing": "1" })).status).toBe(200);
   });
 

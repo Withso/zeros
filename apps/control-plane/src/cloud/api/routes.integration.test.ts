@@ -429,6 +429,7 @@ database("cloud API through the assembled router and PostgreSQL", () => {
       expect((await (await current.pull()).json()).chatEdits ?? []).toEqual([]);
     });
 
+    // Each of the 129 edits crosses the real HTTP and transaction boundary.
     it("does not let an unacknowledged edit starve 128 others or end a held poll", async () => {
       const held = deferred(), dispose = vi.fn(), current = await worker("chat-edit-v1", () => ({ wait: held.promise, dispose }));
       const rows = Array.from({ length: 129 }, () => chat());
@@ -457,7 +458,7 @@ database("cloud API through the assembled router and PostgreSQL", () => {
         expect(dispose).toHaveBeenCalledOnce();
         expect((await (await current.pull()).json()).chatEdits ?? []).toEqual([]);
       } finally { held.resolve(); await waiting; }
-    });
+    }, 30_000);
 
     it("notifies an already-held poll after committing an edit and offers changed versions immediately", async () => {
       const signals = new CloudV2PromptSignals(), current = await worker("chat-edit-v1", (...args) => signals.wait(...args)), row = chat();

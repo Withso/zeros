@@ -12,7 +12,7 @@ import { createCloudGithubServices } from "../github-composition.js";
 import { createCloudV2Routes } from "../routes.js";
 import { CloudTeamSharing } from "./store.js";
 
-export async function teamSharingFixture(pool: pg.Pool, options: { eventNow?: () => number } = {}) {
+export async function teamSharingFixture(pool: pg.Pool, options: { eventNow?: () => number; ownership?: boolean } = {}) {
   await resetMigratedTestDatabase(pool);
   const store = new CloudV2Store(pool), organizationId = randomUUID();
   async function actor(): Promise<AuthedUser> {
@@ -55,7 +55,7 @@ export async function teamSharingFixture(pool: pg.Pool, options: { eventNow?: ()
     repository: "example/project",sourceRepositoryId: "42",branch: "mine",baseBranch: "main",computerBuildId: null });
   for (const item of [workspace,own]) await store.transition(item.id,["creating"],"stopped");
   const app = new Hono();
-  const sharing = new CloudTeamSharing(pool,store,github,pool,options.eventNow);
+  const sharing = new CloudTeamSharing(pool,store,github,pool,options.eventNow,{ ownership: options.ownership === true });
   app.use("*",async (c,next) => { c.set("user",actors.get(c.req.header("x-test-actor") ?? "") ?? viewer); await next(); });
   app.onError((error,c) => {
     if (error instanceof HttpError) return c.json({ error: { code: error.code } },error.status);
