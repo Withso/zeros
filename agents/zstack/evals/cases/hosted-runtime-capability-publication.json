@@ -1,0 +1,9 @@
+{
+  "id": "hosted-runtime-capability-publication",
+  "kind": "replay",
+  "area": "scripts-release",
+  "fixedBy": "pr:1062",
+  "symptom": "A qualified hosted runtime contained the acting-user and sync features, but fresh shared workspace creation refused with worker_update_required because only the development publisher wrote its capability record.",
+  "rule": "Test each production publisher through the admission reader. Share artifact-derived capability publication, ensure records for reused archives, and verify stored source identity and every declared feature before publication succeeds (zstack principles 10, 13 and 16).",
+  "check": "pnpm exec vitest run --config scripts/release/vitest.config.ts scripts/release/runtime-storage.test.ts"
+}

@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
 import { inspectRuntimeArchive } from "../../apps/control-plane/src/cloud/runtime-artifact";
+import { ensureRuntimeCapabilities } from "../../apps/control-plane/src/cloud/runtime-capabilities";
 import { runtimeStorageClient, runtimeObjectMissing } from "../../apps/control-plane/src/cloud/runtime-source";
 import type { CloudV2RuntimeStore } from "../../apps/control-plane/src/cloud/runtime";
 import { PromotionError, requireCheck } from "./contracts";
@@ -101,15 +102,35 @@ export function runtimeReleaseStore(storage: CloudV2RuntimeStore, repository: st
       finally { await rm(directory, { recursive: true, force: true }); }
     } finally { stream.destroy(); }
   }
-  async function checkedArchive(path: string) {
+  async function checkedArchive(path: string, capabilitiesRequired = true) {
     const read = await inspect(path);
-    return RuntimeManifest.parse({ version: 1, repository, sha256: read.sha256, sourceSha: read.commit, sourceSha256: read.sourceSha256, bytes: read.bytes });
+    requireCheck(!capabilitiesRequired || read.features, "Runtime archive must declare its capabilities");
+    return { manifest: RuntimeManifest.parse({ version: 1, repository, sha256: read.sha256, sourceSha: read.commit, sourceSha256: read.sourceSha256, bytes: read.bytes }),
+      features: read.features };
   }
-  async function retainArchive(path: string, manifest: RuntimeManifest) {
+  async function retainArchive(path: string, manifest: RuntimeManifest, features?: string[]) {
     // The ordinary publisher prunes only its archive namespace; release retention must survive that sweep.
     await immutableArchive(retainedKey(manifest.sha256), path, manifest);
     await immutableArchive(archiveKey(manifest.sha256), path, manifest);
+    if (features) {
+      try { await ensureRuntimeCapabilities({ sha256: manifest.sha256, sourceSha256: manifest.sourceSha256, commit: manifest.sourceSha, features }, storage, client); }
+      catch { throw new PromotionError("Runtime capabilities could not be verified"); }
+    }
     await immutableJson(manifestKey(manifest.sha256), manifest);
+  }
+  async function copyArchive(sha256: string, source?: RuntimeReleaseStore, capabilitiesRequired = true): Promise<RuntimeManifest> {
+    const directory = await mkdtemp(join(tmpdir(), "zeros-runtime-copy-")), copy = join(directory, "archive.tar.gz");
+    try {
+      if (source) await source.download(sha256, copy);
+      else {
+        try { await download(retainedKey(sha256), copy, sha256); }
+        catch (error) { if (!runtimeObjectMissing(error)) throw error; await download(archiveKey(sha256), copy, sha256); }
+      }
+      const { manifest, features } = await checkedArchive(copy, capabilitiesRequired);
+      requireCheck(manifest.sha256 === sha256, "Runtime archive digest changed while copying");
+      await retainArchive(copy, manifest, features); return manifest;
+    } catch (error) { throw new PromotionError(error instanceof PromotionError ? error.message : "Runtime archive copy failed; details withheld"); }
+    finally { await rm(directory, { recursive: true, force: true }); }
   }
   return {
     storage: { endpoint: storage.endpoint, bucket: storage.bucket },
@@ -127,27 +148,15 @@ export function runtimeReleaseStore(storage: CloudV2RuntimeStore, repository: st
             requireCheck(bytes === stat.size, "Runtime archive changed during the checked copy");
           } finally { await target.close(); }
         } finally { await source.close(); }
-        const manifest = await checkedArchive(copy);
+        const { manifest, features } = await checkedArchive(copy);
         requireCheck(manifest.sourceSha === sourceSha && manifest.sourceSha256 === sourceSha256, "Runtime archive source changed before publication");
-        await retainArchive(copy, manifest); return manifest;
+        await retainArchive(copy, manifest, features); return manifest;
       } catch (error) { throw new PromotionError(error instanceof PromotionError ? error.message : "Runtime archive publication failed; details withheld"); }
       finally { await rm(directory, { recursive: true, force: true }); }
     },
-    async copy(sha256: string, source?: RuntimeReleaseStore): Promise<RuntimeManifest> {
-      const directory = await mkdtemp(join(tmpdir(), "zeros-runtime-copy-")), copy = join(directory, "archive.tar.gz");
-      try {
-        if (source) await source.download(sha256, copy);
-        else {
-          try { await download(retainedKey(sha256), copy, sha256); }
-          catch (error) { if (!runtimeObjectMissing(error)) throw error; await download(archiveKey(sha256), copy, sha256); }
-        }
-        const manifest = await checkedArchive(copy); requireCheck(manifest.sha256 === sha256, "Runtime archive digest changed while copying");
-        await retainArchive(copy, manifest); return manifest;
-      } catch (error) { throw new PromotionError(error instanceof PromotionError ? error.message : "Runtime archive copy failed; details withheld"); }
-      finally { await rm(directory, { recursive: true, force: true }); }
-    },
+    copy: copyArchive,
     async download(sha256: string, path: string) { await download(retainedKey(sha256), path, sha256); },
-    async retain(pin: RuntimePin) { await this.copy(pin.sha256); },
+    async retain(pin: RuntimePin) { await copyArchive(pin.sha256, undefined, false); },
     async qualification(sha256: string, runId: string, attempt: number) { return RuntimeQualification.parse(await getJson(qualificationKey(sha256, runId, attempt))); },
     async saveQualification(record: RuntimeQualification) { await immutableJson(qualificationKey(record.manifest.sha256, record.receipt.runId, record.receipt.runAttempt), record); },
     async saveReceipt(receipt: RuntimeReleaseReceipt) {

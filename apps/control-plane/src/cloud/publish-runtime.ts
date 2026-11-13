@@ -16,7 +16,7 @@ import { cloudV2RuntimeKey, type CloudV2RuntimeStore } from "./runtime.js";
 import { inspectRuntimeArchive } from "./runtime-artifact.js";
 import { pruneRuntimes } from "./runtime-retention.js";
 import { cloudV2RuntimeSourceKey, runtimeObjectMissing, runtimeStorageClient } from "./runtime-source.js";
-import { runtimeCapabilitiesKey } from "./runtime-capabilities.js";
+import { ensureRuntimeCapabilities } from "./runtime-capabilities.js";
 
 const root = resolve(import.meta.dirname, "../../../..");
 const SHA256 = /^[0-9a-f]{64}$/;
@@ -77,8 +77,7 @@ export async function publishRuntime({ storage, artifact, docker, allowDirty, re
     if (!stored) await client.send(new PutObjectCommand({
       ...target, Body: createReadStream(archive), ContentLength: bytes, ContentType: "application/gzip",
     }), request);
-    if (features) await client.send(new PutObjectCommand({ Bucket: bucket, Key: runtimeCapabilitiesKey(sha256),
-      Body: JSON.stringify({ version: 1, sha256, sourceSha256, commit, features }), ContentType: "application/json", CacheControl: "public,max-age=31536000,immutable" }), request);
+    if (features) await ensureRuntimeCapabilities({ sha256, sourceSha256, commit, features }, storage, client, signal);
     await client.send(new PutObjectCommand({ Bucket: bucket, Key: cloudV2RuntimeSourceKey(sourceSha256),
       Body: JSON.stringify({ version: 1, sourceSha256, sha256, commit }), ContentType: "application/json", CacheControl: "no-cache" }), request);
     return { sha256, sourceSha256, commit, bytes, stored };
