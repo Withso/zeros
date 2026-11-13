@@ -331,7 +331,9 @@ describe("cloud mirrors sharing a repository store", () => {
     const f = await fixture(), store = sharedGitStorePath(f.channel, scope);
     const module = new URL("../workspace-sync/git-storage.ts", import.meta.url).href;
     const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", `
-      import { withGitStoreLock } from ${JSON.stringify(module)};
+      // Node 22 loads this TypeScript module as CommonJS under tsx, where named imports are not detected.
+      const loaded = await import(${JSON.stringify(module)});
+      const withGitStoreLock = loaded.withGitStoreLock ?? loaded.default.withGitStoreLock;
       await withGitStoreLock(process.argv[1], {}, async () => {
         process.stdout.write("locked\\n");
         await new Promise(() => process.stdin.once("data", () => process.exit(0)));
