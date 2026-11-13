@@ -1330,7 +1330,6 @@ function AgentChatBody({
           fast={!!chatThread.fast}
           onSelectAgentModel={switchAgentModel}
           redirectCrossAgent={conversationStarted}
-          selectionTiming={isCloudWorkspace(chatThread.folder) ? "next-message" : undefined}
           onConfigure={({ effort, fast }) => {
             const effortChanged = effort !== chatThread.effort;
             updateChatSettings({ effort, fast });

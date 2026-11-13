@@ -59,7 +59,10 @@ it("keeps the cloud target branch but offers no PR island or creation until clou
   for (const prNumber of [null, 7]) {
     const html = render({ id: cloud, path: cloud, placement: "cloud", prNumber });
     expect(html).toContain("<button>Target</button>");
-    expect(html).toContain("Pull requests aren&#x27;t available for this cloud workspace.");
+    // With no specific reason there is nothing to act on: the row shows the
+    // target branch alone, no explanatory line.
+    expect(html).not.toContain("<span");
+    expect(html).not.toContain("available for this cloud workspace");
     expect(html).not.toContain("Create PR");
     expect(html).not.toContain("PR 7");
   }

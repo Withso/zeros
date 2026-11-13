@@ -71,15 +71,18 @@ export function PrStatusRow({
   const { remoteUrl } = useRepositoryRemote(prWorkspace?.repoRoot, originUrl, active && !cloud);
 
   if (prWorkspace && cloud && !supported) {
-    const message = document?.githubUnavailableReason ? cloudUnavailableCopy[document.githubUnavailableReason]
-      : "Pull requests aren't available for this cloud workspace.";
+    // Only a reason the person can act on earns a line; otherwise the row
+    // just omits Create PR.
+    const message = document?.githubUnavailableReason ? cloudUnavailableCopy[document.githubUnavailableReason] : null;
     return (
       <PanelHeader size="window" className="gap-2">
         <TargetBranchButton workspace={prWorkspace} disabled={!cloudReady} />
         <div className="flex-1" />
-        <span className="text-fg3 min-w-0 truncate text-xs" title={message}>
-          {message}
-        </span>
+        {message && (
+          <span className="text-fg3 min-w-0 truncate text-xs" title={message}>
+            {message}
+          </span>
+        )}
       </PanelHeader>
     );
   }

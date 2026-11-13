@@ -72,7 +72,8 @@ export async function runUnavailableModelSmoke({ page, harnessBase, check }) {
       const row = catalog.locator('[data-model-catalog-item][data-model-value="grok-4.7"]');
       await expect(row).toHaveAttribute("aria-disabled", "true");
       await expect(row.getByRole("button", { name: /^Select/ })).toBeDisabled();
-      await expect(row.getByText("Unavailable for this account.", { exact: true })).toBeVisible();
+      await expect(row.getByText("Unavailable for this account.", { exact: true })).toHaveCount(0);
+      await expect(row.locator("[data-model-row-details]")).toHaveAttribute("title", "Unavailable for this account.");
       await expect(availabilityFilter).toHaveCount(0);
       const availableModel = catalog.locator('[data-model-catalog-item][data-model-value="composer-2.5"]').getByRole("button", { name: /^Select/ });
       await expect(availableModel).toBeEnabled();

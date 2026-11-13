@@ -173,7 +173,6 @@ export function AgentModelMenu({
   onOpenChange,
   triggerTooltip = "Model",
   redirectCrossAgent = false,
-  selectionTiming,
   footer,
   children,
 }: {
@@ -201,7 +200,6 @@ export function AgentModelMenu({
   /** When true (a chat whose session already started), picking a model under a
    *  DIFFERENT agent opens a new chat tab instead of switching in place. */
   redirectCrossAgent?: boolean;
-  selectionTiming?: "next-message";
   footer?: React.ReactNode;
   /** The trigger element (rendered via PopoverTrigger asChild). */
   children: React.ReactNode;
@@ -234,14 +232,14 @@ export function AgentModelMenu({
   const groups = useMemo<AgentGroup[]>(() => {
     const fromRegistry = (registry ?? [])
       .filter((a) => isEnabled(a.id, a.beta) && isSelectableAgent(a))
-      .map((agent) => ({
-        agent,
-        family: agentFamily(agent.id),
-        models: modelsForAgent(
-          agent.id,
-          modelCatalogInitialize(agent.id, value?.agentId, initialize),
-        ),
-      }))
+      .map((agent) => {
+        const catalog = modelCatalogInitialize(agent.id, value?.agentId, initialize);
+        const models = modelsForAgent(agent.id, catalog);
+        // A cloud workspace lists only what its paying login shares; Local
+        // keeps a plan's ineligible models visible but disabled.
+        const sharedOnly = catalog?._meta?.cloudModelScope?.startsWith("cloud/") === true;
+        return { agent, family: agentFamily(agent.id), models: sharedOnly ? models.filter(model => model.selectable !== false) : models };
+      })
       .filter((g) => g.family !== "" && g.models.length > 0);
     // Retain only the effective default when it cannot currently be selected.
     // Its disabled row explains the star without expanding cloud consent or
@@ -499,7 +497,6 @@ export function AgentModelMenu({
         // composer without painting an unrelated ring on the trigger pill.
         onCloseAutoFocus={(e) => e.preventDefault()}
       >
-        {selectionTiming === "next-message" && <p className="text-fg3 px-3 py-2 text-xs leading-4.5" role="note">Model, effort and Fast apply to the next message.</p>}
         {/* Active-model configuration stays inline. The Model section below is
             collapsed until search or selected-row hover/focus asks for more. */}
         {canConfigureActive &&
@@ -798,14 +795,11 @@ function ModelRowDetails({
   ].filter((part): part is string => part !== null);
   return (
     <span
-      className={cn(
-        "flex min-w-0 overflow-hidden",
-        row.unavailable ? "flex-col items-start gap-0" : "items-center gap-1.5",
-        className,
-      )}
+      className={cn("flex min-w-0 items-center gap-1.5 overflow-hidden", className)}
       data-model-row-details
+      // The menu carries no description text; a disabled row's reason is its hover title.
+      title={row.unavailable ? unavailableReason(row) : undefined}
     >
-      <span className="flex min-w-0 items-center gap-1.5">
       <span data-model-name className="max-w-full shrink-0 truncate text-xs">
         {displayModelLabel(row.agent.id, row.model.label)}
       </span>
@@ -825,14 +819,13 @@ function ModelRowDetails({
           className="text-fg2 size-3.5 shrink-0 fill-current"
         />
       )}
-      </span>
-      {row.unavailable && (
-        <span data-model-unavailable-reason className="text-fg3 text-xxs">
-          {row.agent.cloud ? cloudFailureMessage(row.agent.cloud) : !isSelectableAgent(row.agent) ? "Connect this agent to use this model." : "Unavailable for this account."}
-        </span>
-      )}
     </span>
   );
+}
+
+function unavailableReason(row: Row): string {
+  if (row.agent.cloud) return cloudFailureMessage(row.agent.cloud);
+  return isSelectableAgent(row.agent) ? "Unavailable for this account." : "Connect this agent to use this model.";
 }
 
 function FavoriteModelButton({
