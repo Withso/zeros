@@ -305,118 +305,168 @@ async function loadDefinitions(
       break;
     }
     totalSourceBytes += safe.size;
-    const source = safe.body.toString("utf8");
-    const parseErrors: Array<{ code: string }> = [];
-    const document = parse(source, {
-      sourceCodeLocationInfo: true,
-      onParseError: (error) => { if (!parseErrors.length) parseErrors.push(error); },
-    });
-    for (const nestedName of referencedComponentNames(document)) {
+    const analyzed = analyzedDefinition(name, registered, safe.body.toString("utf8"));
+    for (const nestedName of analyzed.nested) {
       if (!scheduled.has(nestedName)) {
         scheduled.add(nestedName);
         pending.push(nestedName);
       }
     }
-    if (parseErrors.length > 0) {
-      errors.push({
-        component: name,
-        message: `Component zd-${name} contains invalid HTML (${parseErrors[0]!.code}).`,
-      });
-    }
-    const unsafeElement = elements(document).find(
-      (element) =>
-        element.tagName === "script" ||
-        element.attrs.some((attribute) => /^on/i.test(attribute.name)),
-    );
-    if (unsafeElement) {
-      errors.push({
-        component: name,
-        message: `Component zd-${name} must contain HTML and CSS only; scripts and event handlers are not allowed.`,
-      });
-    }
-    if (
-      !registered &&
-      elements(document).some((element) =>
-        element.attrs.some((attribute) => attribute.name === "data-oid"),
-      )
-    ) {
-      errors.push({
-        component: name,
-        message: `Component zd-${name} must not declare data-oid values; the authored instance owns selection.`,
-      });
-    }
-    // Pre-Foundation component files had no definition-local IDs. Preserve
-    // those files as a compatibility shape; once a definition declares any
-    // data-zid (and for every component.create operation), require the complete
-    // all-elements identity contract rather than accepting a partial upgrade.
-    const declaresDefinitionIdentity = elements(document).some((element) =>
-      element.attrs.some((attribute) => attribute.name === "data-zid"),
-    );
-    if (declaresDefinitionIdentity) {
-      try {
-        assertDesignComponentDefinitionIdentities(source);
-      } catch (error) {
-        errors.push({
-          component: name,
-          message:
-            error instanceof Error
-              ? error.message
-              : `Component zd-${name} has invalid definition-local identity.`,
-        });
-      }
-    }
-    const externalReference = elements(document).some((element) =>
-      element.attrs.some(
-        (attribute) =>
-          ["href", "src", "action", "poster"].includes(attribute.name) &&
-          (attribute.value.startsWith("/") ||
-            attribute.value.startsWith("//") ||
-            /^[a-z][a-z0-9+.-]*:/i.test(attribute.value)),
-      ),
-    );
-    if (externalReference) {
-      errors.push({
-        component: name,
-        message: `Component zd-${name} must use only relative references inside Zeros Design/.`,
-      });
-    }
-    const body = elements(document).find(
-      (element) => element.tagName === "body",
-    );
-    if (!body) {
-      errors.push({
-        component: name,
-        message: `Component zd-${name} is missing a body element.`,
-      });
-    }
-    const styles = elements(document)
-      .filter((element) => element.tagName === "style")
-      .map((element) => innerSource(source, element));
-    const declared = declarationElementsOf(document);
-    if (registered || declared) {
-      const file = registered ?? `components/${name}.html`;
-      const read = readDeclaration(declared ?? [], name, file, errors, source);
-      let summary: DesignComponentSummary | null | undefined;
-      definitions.set(name, {
-        name,
-        body: body ? innerSource(source, body) : "",
-        styles,
-        template: { file, declaration: read, links: stylesheetLinksOf(document),
-          summary: () => (summary === undefined ? (summary = designComponentSummaryOf(source)) : summary) },
-      });
-      continue;
-    }
-    // Keep the safe remainder previewable even when lint found an invalid
-    // definition. The composed-frame sanitizer and CSP remain the rendering
-    // boundary, while component-invalid stays a blocking save/PR diagnostic;
-    // dropping the whole definition here would hide useful repair context.
-    definitions.set(name, {
-      name,
-      body: body ? stripDefinitionOids(innerSource(source, body)) : "",
-      styles,
-    });
+    for (const error of analyzed.errors) errors.push({ ...error });
+    // Expansion rebases body and styles in place; the remembered analysis
+    // stays as read.
+    definitions.set(name, { ...analyzed.definition, styles: [...analyzed.definition.styles],
+      ...(analyzed.definition.template ? { template: { ...analyzed.definition.template } } : {}) });
   }
   return { definitions, errors, unavailable, missing };
+}
+
+interface AnalyzedDefinition {
+  nested: readonly string[];
+  errors: readonly DesignComponentExpansionError[];
+  definition: ComponentDefinition;
+}
+
+// Every host frame placing a component reads the same definition file; its
+// analysis depends only on these bytes and how the file is registered, so one
+// analysis (and the summary it reads lazily) serves them all. Entries are keyed
+// by a digest; each retains one copy of the source, through its slices and the
+// summary, so its size bounds the entry.
+const ANALYZED_DEFINITION_LIMITS = { entries: 256, bytes: 16 * 1024 * 1024 };
+const analyzedDefinitions = new Map<string, { analyzed: AnalyzedDefinition; bytes: number }>();
+let analyzedDefinitionBytes = 0;
+
+function analyzedDefinition(name: string, registered: string | undefined, source: string): AnalyzedDefinition {
+  const key = `${name}\0${registered ?? ""}\0${createHash("sha256").update(source).digest("hex")}`;
+  const remembered = analyzedDefinitions.get(key);
+  if (remembered) {
+    analyzedDefinitions.delete(key);
+    analyzedDefinitions.set(key, remembered);
+    return remembered.analyzed;
+  }
+  const analyzed = analyzeDefinition(name, registered, source);
+  const bytes = source.length * 2;
+  if (bytes > ANALYZED_DEFINITION_LIMITS.bytes) return analyzed;
+  analyzedDefinitions.set(key, { analyzed, bytes });
+  analyzedDefinitionBytes += bytes;
+  for (const [oldest, entry] of analyzedDefinitions) {
+    if (analyzedDefinitions.size <= ANALYZED_DEFINITION_LIMITS.entries && analyzedDefinitionBytes <= ANALYZED_DEFINITION_LIMITS.bytes) break;
+    analyzedDefinitions.delete(oldest);
+    analyzedDefinitionBytes -= entry.bytes;
+  }
+  return analyzed;
+}
+
+export function resetDesignComponentDefinitionsForTests(): void {
+  analyzedDefinitions.clear();
+  analyzedDefinitionBytes = 0;
+}
+
+function analyzeDefinition(name: string, registered: string | undefined, source: string): AnalyzedDefinition {
+  const errors: DesignComponentExpansionError[] = [];
+  const parseErrors: Array<{ code: string }> = [];
+  const document = parse(source, {
+    sourceCodeLocationInfo: true,
+    onParseError: (error) => { if (!parseErrors.length) parseErrors.push(error); },
+  });
+  const nested = referencedComponentNames(document);
+  if (parseErrors.length > 0) {
+    errors.push({
+      component: name,
+      message: `Component zd-${name} contains invalid HTML (${parseErrors[0]!.code}).`,
+    });
+  }
+  const unsafeElement = elements(document).find(
+    (element) =>
+      element.tagName === "script" ||
+      element.attrs.some((attribute) => /^on/i.test(attribute.name)),
+  );
+  if (unsafeElement) {
+    errors.push({
+      component: name,
+      message: `Component zd-${name} must contain HTML and CSS only; scripts and event handlers are not allowed.`,
+    });
+  }
+  if (
+    !registered &&
+    elements(document).some((element) =>
+      element.attrs.some((attribute) => attribute.name === "data-oid"),
+    )
+  ) {
+    errors.push({
+      component: name,
+      message: `Component zd-${name} must not declare data-oid values; the authored instance owns selection.`,
+    });
+  }
+  // Pre-Foundation component files had no definition-local IDs. Preserve
+  // those files as a compatibility shape; once a definition declares any
+  // data-zid (and for every component.create operation), require the complete
+  // all-elements identity contract rather than accepting a partial upgrade.
+  const declaresDefinitionIdentity = elements(document).some((element) =>
+    element.attrs.some((attribute) => attribute.name === "data-zid"),
+  );
+  if (declaresDefinitionIdentity) {
+    try {
+      assertDesignComponentDefinitionIdentities(source);
+    } catch (error) {
+      errors.push({
+        component: name,
+        message:
+          error instanceof Error
+            ? error.message
+            : `Component zd-${name} has invalid definition-local identity.`,
+      });
+    }
+  }
+  const externalReference = elements(document).some((element) =>
+    element.attrs.some(
+      (attribute) =>
+        ["href", "src", "action", "poster"].includes(attribute.name) &&
+        (attribute.value.startsWith("/") ||
+          attribute.value.startsWith("//") ||
+          /^[a-z][a-z0-9+.-]*:/i.test(attribute.value)),
+    ),
+  );
+  if (externalReference) {
+    errors.push({
+      component: name,
+      message: `Component zd-${name} must use only relative references inside Zeros Design/.`,
+    });
+  }
+  const body = elements(document).find(
+    (element) => element.tagName === "body",
+  );
+  if (!body) {
+    errors.push({
+      component: name,
+      message: `Component zd-${name} is missing a body element.`,
+    });
+  }
+  const styles = elements(document)
+    .filter((element) => element.tagName === "style")
+    .map((element) => innerSource(source, element));
+  const declared = declarationElementsOf(document);
+  if (registered || declared) {
+    const file = registered ?? `components/${name}.html`;
+    const read = readDeclaration(declared ?? [], name, file, errors, source);
+    let summary: DesignComponentSummary | null | undefined;
+    return { nested, errors, definition: {
+      name,
+      body: body ? innerSource(source, body) : "",
+      styles,
+      template: { file, declaration: read, links: stylesheetLinksOf(document),
+        summary: () => (summary === undefined ? (summary = designComponentSummaryOf(source)) : summary) },
+    } };
+  }
+  // Keep the safe remainder previewable even when lint found an invalid
+  // definition. The composed-frame sanitizer and CSP remain the rendering
+  // boundary, while component-invalid stays a blocking save/PR diagnostic;
+  // dropping the whole definition here would hide useful repair context.
+  return { nested, errors, definition: {
+    name,
+    body: body ? stripDefinitionOids(innerSource(source, body)) : "",
+    styles,
+  } };
 }
 
 /** The <zd-option>, <zd-derive> and <zd-variant> lines of a file's
@@ -874,7 +924,9 @@ async function expandBoundedComponents(
   // A main component frame renders its own template first, with its defaults
   // or the variant it shows; its instances then expand inside the result.
   let entry = source;
-  const entryDeclared = DECLARES_OPTIONS.test(source) ? declarationElementsOf(parse(source, { sourceCodeLocationInfo: true })) : null;
+  // Every shared tree is located, as parseDesignSource builds it.
+  const entryDeclared = DECLARES_OPTIONS.test(source)
+    ? declarationElementsOf(sharedDesignParse(source) ?? parse(source, { sourceCodeLocationInfo: true })) : null;
   if (entryDeclared) {
     const entryName = [...registry].find(([, file]) => file === entryFile)?.[0] ?? "";
     const declaration = readDeclaration(entryDeclared, entryName, entryFile, errors, source);

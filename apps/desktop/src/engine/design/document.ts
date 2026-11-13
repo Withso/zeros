@@ -25,9 +25,10 @@ import {
   prepareFrameRenderSource,
   type RetainedFrameRender,
 } from "./render-preparation";
-import { parseDesignSource, sharedDesignParse, withSharedDesignParses } from "./shared-parse";
+import { parseDesignSource, shareDesignParse, sharedDesignParse, withSharedDesignParses } from "./shared-parse";
 import { designFrameIdentities, designFrameIdentityContext, type DesignFrameIdentity } from "./identity-cache";
-import { captureDurableDesignDependencies, isDesignDependencyCaptureActive, type DurableDesignDependency } from "./dependency-read-set";
+import { captureDurableDesignDependencies, designDependencyFingerprint, isDesignDependencyCaptureActive,
+  type DurableDesignDependency } from "./dependency-read-set";
 import { designRecordedCanvasActive, retainDesignFrame } from "./retained-frames";
 import { designPreparationWorkerCount, prepareFrameIdentitiesInWorkers, type DesignWorkerFrameIdentity } from "./preparation-pool";
 import { elementRecords } from "./source";
@@ -938,14 +939,33 @@ export async function readDesignFrameRenderSourceFromSource(
     variant ? { variant } : {},
     canvas,
   );
-  const sourceVersion = variant
-    ? (await prepareFrameRenderSourceForFile(workspacePath, file, source, { identityOnly: true }, canvas)).sourceVersion
-    : render.sourceVersion;
+  const sourceVersion = !variant ? render.sourceVersion : await rememberedSourceVersion(workspacePath, file, source, canvas)
+    ?? (await prepareFrameRenderSourceForFile(workspacePath, file, source, { identityOnly: true }, canvas)).sourceVersion;
   return {
     file,
     sourceVersion,
     html: render.sanitized,
   };
+}
+
+/** The generation a prepared frame's identity gives exactly these bytes on
+ * this canvas, so a variant view need not expand the source a second time to
+ * learn it. Null when no current identity was prepared from them. */
+async function rememberedSourceVersion(workspacePath: string, file: string, source: string,
+  canvas?: CanvasDocument, viewport?: { width: number; height: number }): Promise<string | null> {
+  // A running capture must record every read the generation depends on.
+  if (isDesignDependencyCaptureActive()) return null;
+  const shared = canvas ?? (await readSharedCanvasContext(workspacePath)).canvas;
+  // Identities are prepared at the frame's canvas size.
+  const geometry = shared.frames[file];
+  if (viewport && (geometry?.w !== viewport.width || geometry.h !== viewport.height)) return null;
+  const context = designFrameIdentityContextOf(shared, file);
+  if (context === null) return null;
+  const identity = await designFrameIdentities(workspacePath, designDirectoryNameFor(workspacePath)).readFrom(file, context, {
+    target: path.join(designDirectory(workspacePath), file),
+    fingerprint: designDependencyFingerprint(Buffer.from(source, "utf8"))!,
+  });
+  return identity?.sourceVersion ?? null;
 }
 
 /** One-frame selection identity. Unlike readDesignFrame(), this never scans,
@@ -1038,7 +1058,9 @@ async function readDesignFrameFromSummary(
   const composed = await composeFrameSrcDoc(workspacePath, source, {
     width: summary.width,
     height: summary.height,
-  }, summary.file, variant);
+  }, summary.file, variant, variant
+    ? await rememberedSourceVersion(workspacePath, summary.file, source, undefined, { width: summary.width, height: summary.height })
+    : null);
   return {
     ...summary,
     sourceVersion: composed.sourceVersion,
@@ -1860,6 +1882,7 @@ async function lintFrame(
       document = parseSource();
     }
   }
+  shareDesignParse(source, document);
   const violations: DesignLintViolation[] = parseErrors.map((error) =>
     violationAt(
       file,
@@ -2172,7 +2195,7 @@ async function lintDesignDocumentUnlocked(
   for (const file of files) {
     let result: Awaited<ReturnType<typeof lintFrame>>;
     try {
-      result = await lintFrame(
+      result = await withSharedDesignParses(() => lintFrame(
         workspacePath,
         file,
         { healOids: options.healOids !== false },
@@ -2181,7 +2204,7 @@ async function lintDesignDocumentUnlocked(
         undefined,
         knownTokens.colors(file),
         context?.canvas,
-      );
+      ));
     } catch (error) {
       if (!(error instanceof DesignRenderBudgetError)) throw error;
       violations.push(designRenderBudgetViolation(file, error));

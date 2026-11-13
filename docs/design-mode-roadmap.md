@@ -387,12 +387,13 @@ A per-directory private journal records paths, before/after hashes, phases and
 private payload-file names; it embeds no HTML payloads. Durable phases are
 prepared → sources → metadata → deleted → invalidated → complete. Preflight
 checks destinations, links, ignores and pending journals. Sources and metadata
-are atomically written and verified before predecessors are removed. Recovery
-recognizes only journal-owned intermediate manifests and resumes each write or
-delete idempotently; repeating a completed migration is a no-op. Competing root
-and meta manifests outside such a journal pause writes. Changed inputs or
-successors pause recovery with an actionable error. Migration never changes
-the Git index, even with staged or dirty source.
+are atomically written and verified before predecessors are removed. Each
+phase syncs the directories it changed once before the next phase is recorded.
+Recovery recognizes only journal-owned intermediate manifests and resumes each
+write or delete idempotently; repeating a completed migration is a no-op.
+Competing root and meta manifests outside such a journal pause writes. Changed
+inputs or successors pause recovery with an actionable error. Migration never
+changes the Git index, even with staged or dirty source.
 
 Reference edits use parser offsets and URL tokens, preserving unrelated bytes
 rather than reserializing documents. Moved HTML rebases relative

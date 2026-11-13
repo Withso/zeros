@@ -98,6 +98,7 @@ import {
   writePrivateDesignState,
 } from "./metadata";
 import { readSafeRegularFile } from "./safe-files";
+import { parseDesignSource, withSharedDesignParses } from "./shared-parse";
 import { safeLocalReference } from "./assets";
 import type { DesignMovementGuard } from "@zeros/protocol/design-relocation";
 import { readDesignFrameRenderIdentityFromSource } from "./frame-lifecycle";
@@ -422,7 +423,7 @@ async function readDesignWebDocumentStateUnlocked(
   }
   // Root styles remain available for tokens/provenance. Also retain each CSS
   // link from this entry at its actual source path for immutable composition.
-  const document = parse(files[file]!, { sourceCodeLocationInfo: true });
+  const document = parseDesignSource(files[file]!);
   for (const { element } of elementRecords(document)) {
     if (element.tagName !== "link" || !element.attrs.some((attribute) =>
       attribute.name === "rel" && attribute.value.split(/\s+/).some((value) => value.toLowerCase() === "stylesheet"))) continue;
@@ -493,11 +494,7 @@ async function readDesignWebDocumentStateUnlocked(
     ...canvas.foundation,
     components,
   });
-  const meta = readFrameMeta(
-    parse(files[file]!, { sourceCodeLocationInfo: true }),
-    file,
-    canvas,
-  );
+  const meta = readFrameMeta(document, file, canvas);
   const geometry = canvas.frames[file] ?? {
     x: 0,
     y: 0,
@@ -882,10 +879,10 @@ export async function readDesignWebDocumentState(
   workspacePath: string,
   frame: string,
 ): Promise<DesignWebDocumentState> {
-  return withDocumentWrite(workspacePath, async () => {
+  return withSharedDesignParses(() => withDocumentWrite(workspacePath, async () => {
     await recoverPendingDesignTransactionUnlocked(workspacePath);
     return readDesignWebDocumentStateUnlocked(workspacePath, frame);
-  });
+  }));
 }
 
 export async function commitDesignWebDocumentState(
@@ -899,7 +896,7 @@ export async function commitDesignWebDocumentState(
   } = {},
 ): Promise<void> {
   const file = assertFrameFile(frame);
-  await withDocumentWrite(workspacePath, async () => {
+  await withSharedDesignParses(() => withDocumentWrite(workspacePath, async () => {
     options.assertAuthorized?.();
     await recoverPendingDesignTransactionUnlocked(workspacePath);
     // A new transaction must capture its recovery identity in the current
@@ -1146,5 +1143,5 @@ export async function commitDesignWebDocumentState(
     if (committed.revision !== normalized.revision) {
       throw new Error("Design transaction did not commit its exact revision.");
     }
-  });
+  }));
 }
