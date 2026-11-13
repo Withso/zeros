@@ -92,7 +92,8 @@ database("0246 Creator loss, write switch and migration cost", () => {
         SELECT gen_random_uuid(),org_id,creator_user_id,'Fixture history',repository,'history-'||n,base_branch,'stopped'
         FROM cloud_v2_workspaces w,generate_series(1,10000) n WHERE w.id=$1`, [f.workspace.id]);
       await tx.query("ANALYZE cloud_v2_workspaces");
-      await tx.query(`DROP TABLE cloud_v2_reassignments;
+      await tx.query(`DROP FUNCTION notify_cloud_v2_catalog_row() CASCADE;
+        DROP TABLE cloud_v2_reassignments;
         DROP FUNCTION guard_cloud_creator_ownership(),fence_cloud_creator_loss(),clear_cloud_creator_ownership(uuid,uuid,text,uuid) CASCADE;
         DROP INDEX cloud_team_current_creator;
         ALTER TABLE cloud_v2_workspaces DROP CONSTRAINT cloud_creator_presence,DROP COLUMN creator_revision,DROP COLUMN creator_absent_reason,DROP COLUMN creator_absent_at;
