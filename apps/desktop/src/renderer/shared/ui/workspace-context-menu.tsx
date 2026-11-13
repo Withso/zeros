@@ -1,7 +1,7 @@
 import React, { useRef, type MouseEvent, type ReactNode } from "react";
 import { isLocalMainWorkspace } from "../../state/local-main-workspace";
 import { Archive, BellOff, BellRing, Check, Link, Pin, PinOff, RotateCw, UserRoundCog } from "lucide-react";
-import { openReassignDialog } from "../../features/team/reassign-dialog";
+import { openReassignDialog } from "../../platform/reassign-dialog-signal";
 import { useCloudFolderSharedDocument } from "../../state/cloud-workspace-creators";
 import { setCloudWorkspaceSharingFlag } from "../../state/team-sharing-actions";
 import { parseCloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";

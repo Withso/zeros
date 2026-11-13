@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { CloudWorkspaceTarget } from "../../platform/bridge/cloud-workspace-key";
 import { listReassignCandidates, reassignCloudWorkspace } from "../../platform/team-sharing";
+import { closeReassignDialog, readReassignDialog, subscribeReassignDialog } from "../../platform/reassign-dialog-signal";
 import { useMyUserId } from "../../platform/team-sharing-state";
 import { acceptCloudWorkspaceDocument, cloudWorkspaceDocument, refreshCloudWorkspace, subscribeCloudWorkspaces } from "../../state/cloud-workspace-catalog";
 import { memberName, useOrganizationRoster } from "../../state/organization-roster";
@@ -11,17 +12,10 @@ import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, Dia
 import { toast } from "../../shared/ui/primitives/elements";
 import { reassignCandidateRows, reassignConfirmCopy, reassignErrorMessage, reassignNextRequestId, type ReassignRow } from "./reassign-model";
 
-/** Team sharing 3B: one Reassign dialog for the app, opened from a workspace row, its details or a no-Creator refusal. */
-let openTarget: CloudWorkspaceTarget | null = null;
-const listeners = new Set<() => void>();
-const emit = () => { for (const listener of listeners) listener(); };
-export function openReassignDialog(target: CloudWorkspaceTarget): void { openTarget = target; emit(); }
-function closeReassignDialog(): void { openTarget = null; emit(); }
-const subscribe = (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; };
-const read = () => openTarget;
-
+/** Team sharing 3B: one Reassign dialog for the app, opened (platform/reassign-dialog-signal) from a workspace row,
+ * its details or a no-Creator refusal. */
 export function ReassignDialogHost() {
-  const target = useSyncExternalStore(subscribe, read, read);
+  const target = useSyncExternalStore(subscribeReassignDialog, readReassignDialog, readReassignDialog);
   return target ? <ReassignDialog key={`${target.organizationId}:${target.workspaceId}`} target={target} /> : null;
 }
 

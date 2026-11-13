@@ -10,7 +10,7 @@ import { turnFailureDisplay, type TurnFailure } from "./turn-failure";
 import { parseCloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
 import { cloudWorkspaceDocument, subscribeCloudWorkspaces } from "../../state/cloud-workspace-catalog";
 import { memberName, useOrganizationRoster } from "../../state/organization-roster";
-import { openReassignDialog } from "../team/reassign-dialog";
+import { openReassignDialog } from "../../platform/reassign-dialog-signal";
 
 /** 3B: whether this viewer may reassign the chat's cloud workspace (for a no-Creator refusal's action). */
 function useCanReassign(folder: string | null | undefined, needed: boolean) {

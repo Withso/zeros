@@ -3,7 +3,7 @@ import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import { Activity, ArrowUpRight, CircleDollarSign, Clock, Cloud, Cpu, FolderGit2, HardDrive, MemoryStick, Pencil, RotateCw, UserRound, Users, Wrench, type LucideIcon } from "lucide-react";
 import type { CloudWorkspaceResources } from "@zeros/protocol/cloud-v2-relay";
 import { Button, Tooltip } from "../../shared/ui/primitives";
-import { openReassignDialog } from "../../features/team/reassign-dialog";
+import { openReassignDialog } from "../../platform/reassign-dialog-signal";
 import { Popover, PopoverContent } from "../../shared/ui/primitives/popover";
 import { toast } from "../../shared/ui/primitives/elements";
 import { shellOpenUrl } from "../../platform/app";
