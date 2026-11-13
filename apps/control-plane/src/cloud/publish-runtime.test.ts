@@ -37,7 +37,8 @@ async function fixture(version = 1, features?: string[]) {
   const sha256 = createHash("sha256").update(contents).digest("hex");
 
   const requests: { method: string; path: string; authorization: string; body: Buffer }[] = [];
-  const status = { head: 404, archive: 200, index: 200, capabilities: 200 };
+  const status = { head: 404, archive: 200, index: 200, capabilities: 200, capabilitiesRead: "stored" as "stored" | "missing" | "incomplete" };
+  let archiveStored = false;
   // What a runtime listing returns, and the bodies of stored source indices.
   const listing: { key: string; lastModified: string; size: number }[] = [], stored: Record<string, string> = {};
   const server = createServer(async (request, response) => {
@@ -45,6 +46,7 @@ async function fixture(version = 1, features?: string[]) {
     for await (const chunk of request) chunks.push(Buffer.from(chunk));
     requests.push({ method: request.method!, path: request.url!, authorization: request.headers.authorization ?? "", body: Buffer.concat(chunks) });
     const url = new URL(request.url!, "http://storage.test");
+    const key = url.pathname.split("/").slice(2).join("/");
     if (request.method === "GET" && url.searchParams.get("list-type") === "2") {
       const contents = listing.map(o => `<Contents><Key>${o.key}</Key><LastModified>${o.lastModified}</LastModified><Size>${o.size}</Size></Contents>`).join("");
       response.writeHead(200, { "content-type": "application/xml" }).end(`<?xml version="1.0" encoding="UTF-8"?><ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><KeyCount>${listing.length}</KeyCount><IsTruncated>false</IsTruncated>${contents}</ListBucketResult>`);
@@ -54,9 +56,26 @@ async function fixture(version = 1, features?: string[]) {
       response.writeHead(200, { "content-type": "application/xml" }).end(`<?xml version="1.0" encoding="UTF-8"?><DeleteResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"></DeleteResult>`);
       return;
     }
-    const body = request.method === "GET" ? stored[url.pathname.split("/").slice(2).join("/")] : undefined;
+    if (request.method === "HEAD") {
+      const code = status.head === 404 && archiveStored ? 200 : status.head;
+      response.writeHead(code, code === 200 ? { "content-length": contents.length } : {}).end(); return;
+    }
+    if (request.method === "PUT" && key.includes("/capabilities/") && status.capabilities === 200) {
+      if (request.headers["if-none-match"] === "*" && stored[key] !== undefined) { response.writeHead(412).end(); return; }
+      const body = Buffer.concat(chunks).toString();
+      stored[key] = body.slice(body.indexOf("{"), body.lastIndexOf("}") + 1);
+    }
+    if (request.method === "GET" && key.includes("/capabilities/")) {
+      if (status.capabilitiesRead === "missing") { response.writeHead(404).end(); return; }
+      if (status.capabilitiesRead === "incomplete") {
+        const body = JSON.stringify({ ...JSON.parse(stored[key]!), features: [features![0]] });
+        response.writeHead(200, { "content-type": "application/json" }).end(body); return;
+      }
+    }
+    if (request.method === "PUT" && key.endsWith(".tar.gz") && status.archive === 200) archiveStored = true;
+    const body = request.method === "GET" ? stored[key] : undefined;
     if (body !== undefined) { response.writeHead(200, { "content-type": "application/json" }).end(body); return; }
-    response.writeHead(request.method === "HEAD" ? status.head : request.url!.includes("/sources/") ? status.index : request.url!.includes("/capabilities/") ? status.capabilities : status.archive).end();
+    response.writeHead(request.url!.includes("/sources/") ? status.index : request.url!.includes("/capabilities/") ? status.capabilities : status.archive).end();
   });
   await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
   cleanup.push(() => new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())));
@@ -175,11 +194,11 @@ it("publishes digest-bound capabilities before the unchanged source index", asyn
   const features = ["acting-user-v1", "sync-context-v1"];
   const test = await fixture(1, features);
   const { stdout, stderr } = await test.publish("--local", "--no-prune");
-  expect(test.requests.map(request => request.method)).toEqual(["HEAD", "PUT", "PUT", "PUT"]);
+  expect(test.requests.map(request => request.method)).toEqual(["HEAD", "PUT", "PUT", "GET", "HEAD", "PUT"]);
   expect(test.requests[2]!.path.split("?")[0]).toBe(`/fixture-local/cloud-v2/runtime/capabilities/${test.sha256}.json`);
   expect(test.requests[2]!.body.toString()).toContain(JSON.stringify({ version: 1, sha256: test.sha256,
     sourceSha256: "b".repeat(64), commit: "a".repeat(40), features }));
-  expect(test.requests[3]!.body.toString()).toContain(JSON.stringify({ version: 1, sourceSha256: "b".repeat(64), sha256: test.sha256, commit: "a".repeat(40) }));
+  expect(test.requests[5]!.body.toString()).toContain(JSON.stringify({ version: 1, sourceSha256: "b".repeat(64), sha256: test.sha256, commit: "a".repeat(40) }));
   expect(stdout).toContain(`CLOUD_V2_RUNTIME_SHA256=${test.sha256}`); expect(stderr).toBe("");
 });
 
@@ -188,5 +207,24 @@ it("does not advertise a source or a pin when the capability upload fails", asyn
   const result = await test.publish("--local", "--no-prune").catch(error => error);
   expect(result.code).toBe(1); expect(result.stdout).not.toContain("CLOUD_V2_RUNTIME_SHA256=");
   expect(test.requests.map(request => request.method)).toEqual(["HEAD", "PUT", "PUT"]);
+  expect(test.requests.some(request => request.path.includes("/sources/"))).toBe(false);
+});
+
+it("ensures and verifies capabilities for an already-stored archive without re-uploading it", async () => {
+  const features = ["acting-user-v1", "sync-context-v1"], test = await fixture(1, features);
+  test.status.head = 200;
+  await test.publish("--local", "--no-prune");
+  await test.publish("--local", "--no-prune");
+  expect(test.requests.some(request => request.method === "PUT" && request.path.includes(".tar.gz"))).toBe(false);
+  expect(test.requests.filter(request => request.method === "GET" && request.path.includes("/capabilities/"))).toHaveLength(2);
+  expect(JSON.parse(test.stored[`cloud-v2/runtime/capabilities/${test.sha256}.json`]!)).toEqual({ version: 1, sha256: test.sha256,
+    sourceSha256: "b".repeat(64), commit: "a".repeat(40), features });
+});
+
+it.each(["missing", "incomplete"] as const)("does not emit a source index or pin when capability read-back is %s", async fault => {
+  const test = await fixture(1, ["acting-user-v1", "sync-context-v1"]); test.status.capabilitiesRead = fault;
+  const result = await test.publish("--local", "--no-prune").catch(error => error);
+  expect(result.code).toBe(1); expect(result.stdout).not.toContain("CLOUD_V2_RUNTIME_SHA256=");
+  expect(test.requests.some(request => request.method === "GET" && request.path.includes("/capabilities/"))).toBe(true);
   expect(test.requests.some(request => request.path.includes("/sources/"))).toBe(false);
 });
