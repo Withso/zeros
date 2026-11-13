@@ -203,6 +203,7 @@ function entryFor(folder: string): AvailabilityEntry {
       state: doc?.status,
       stopError: doc?.error,
       canWake: doc?.capabilities.canWrite,
+      messagesWithoutLive: doc?.capabilities.promptOutbox === 1,
       // A start's first connection is not a reconnect to the stopped VM.
       ...(becameReady && entry.value.connection !== "connected"
         ? { since: Date.now(), previouslyConnected: false }
@@ -227,7 +228,7 @@ function entryFor(folder: string): AvailabilityEntry {
           ? { since: Date.now() }
           : {}),
         ...(connection === "connected"
-          ? { rejected: false, rejection: undefined }
+          ? { rejected: false, rejection: undefined, refused: false }
           : {}),
       });
       if (connection === "connected") clearConnectionNotice(entry);
@@ -285,8 +286,14 @@ export function recordWorkbenchConnectionFailure(
   if (backoff && !definitive && cloudConnectFailureQuiet(backoff)) return;
   const retrying = !!backoff && !definitive && cloudConnectFailing(backoff);
   const entry = entryFor(folder);
-  entry.value = { ...entry.value, rejected: true };
+  entry.value = { ...entry.value, rejected: true, refused: definitive };
   refreshAvailability(entry);
+  // Chats and messages keep working without the live connection; a failing connect that is still being retried
+  // (or rebuilt by the server) says nothing. Only a definitive refusal, or a worker without the prompt outbox, toasts.
+  if (target && !definitive && entry.value.messagesWithoutLive && ["ready", "busy"].includes(entry.value.state ?? "")) {
+    clearConnectionNotice(entry);
+    return;
+  }
   if (entry.notice?.id !== `cloud-connect:${folder}`)
     clearConnectionNotice(entry);
   entry.notice = { id: `cloud-connect:${folder}` };
@@ -314,7 +321,7 @@ export function clearWorkbenchConnectionFailure(folder: string): void {
   if (!entry) return;
   clearConnectionNotice(entry);
   if (!entry.value.rejected || entry.value.rejection) return;
-  entry.value = { ...entry.value, rejected: false };
+  entry.value = { ...entry.value, rejected: false, refused: false };
   refreshAvailability(entry);
 }
 

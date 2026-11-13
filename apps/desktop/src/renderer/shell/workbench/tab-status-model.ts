@@ -130,6 +130,11 @@ export interface WorkspaceAvailability {
   rejection?: ConnectionRejection;
   stopError?: { code: string; message: string } | null;
   canWake?: boolean;
+  /** Cloud only: chats come from stored history and messages go over HTTPS (the prompt outbox), so neither needs the
+   * live connection. Absent for workers without the prompt outbox. */
+  messagesWithoutLive?: boolean;
+  /** A definitive connect refusal (access, not an outage): always an error, never "connecting". */
+  refused?: boolean;
 }
 
 // Cloud gaps affect shared availability at 10s; both placements reach failure
@@ -139,6 +144,17 @@ export const WORKBENCH_RECONNECT_GRACE_MS = 10_000;
 export const WORKBENCH_RECONNECT_ERROR_MS = 45_000;
 export const WORKBENCH_SILENT_RETRY_MS = 1_500;
 export const WORKBENCH_RETRY_LIMIT_MS = 30_000;
+
+/** Cloud: the one empty state while the workspace is not ready (setting up, starting, stopped, connection down or
+ * archived): the tab's icon and one line. A tab's own read failure keeps describeWorkbenchEmptyState. */
+const CLOUD_NOT_READY: Partial<Record<WorkbenchTabType, string>> = {
+  terminal: "Terminal appears when the workspace is ready.",
+  review: "Review comments appear when the workspace is ready.",
+};
+export function describeCloudNotReady(type: WorkbenchTabType, singleFile = false): string {
+  if (type === "files" && singleFile) return "This file appears when the workspace is ready.";
+  return CLOUD_NOT_READY[type] ?? WORKBENCH_STATUS_ADAPTERS[type].empty.pending;
+}
 
 export function describeWorkbenchEmptyState(
   type: WorkbenchTabType,
@@ -212,11 +228,14 @@ export function describeWorkspaceAvailability(
     };
   }
   const elapsed = now - input.since;
-  if (
+  // Messages and stored chats do not depend on the live connection, so a running workspace whose connection keeps
+  // failing (and is being retried or rebuilt) stays connecting; only a definitive refusal is an error.
+  const keepsConnecting = input.cloud && !!input.messagesWithoutLive && !input.refused && ["ready", "busy"].includes(input.state ?? "");
+  if (!keepsConnecting && (
     input.rejected ||
     (input.connection !== "connected" &&
       elapsed >= WORKBENCH_RECONNECT_ERROR_MS)
-  )
+  ))
     return {
       tone: "error",
       message: `Can't reach the ${input.cloud ? "workspace" : "Zeros engine"}.`,

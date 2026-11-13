@@ -167,6 +167,24 @@ it("settles a mid-turn worker restart from its interrupted receipt without repla
   expect(slot.cloudOutbox?.rows[0]?.recoveryFailure?.message).toBe("The worker restarted before this turn finished");
   expect(f.api.enqueue).toHaveBeenCalledTimes(1);
 });
+it("without the live connection, re-reads the running turn's stored history every 5 s until it ends", async () => {
+  const historyChanged = vi.fn();
+  const runtime = new CloudPromptRuntime(historyChanged); cleanup = runtime.start();
+  await runtime.send(chatId, { text: "ok" }, { id: "one" }); await vi.advanceTimersByTimeAsync(1);
+  const page = await f.api.list(); page.items[0].state = "accepted";
+  runtime.refresh(chatId); await vi.advanceTimersByTimeAsync(1);
+  expect(useSessionsStore.getState().sessions[chatId]?.cloudOutbox?.activeId).toBe("one");
+  historyChanged.mockClear();
+  // No bridge reaches the VM (w-3): stored history is read on the bounded clock, not on every status poll.
+  await vi.advanceTimersByTimeAsync(10_000);
+  expect(historyChanged.mock.calls.filter(([id]) => id === chatId).length).toBeGreaterThanOrEqual(2);
+  expect(historyChanged.mock.calls.length).toBeLessThanOrEqual(3);
+  page.items[0].state = "completed";
+  runtime.refresh(chatId); await vi.advanceTimersByTimeAsync(1);
+  historyChanged.mockClear();
+  await vi.advanceTimersByTimeAsync(30_000);
+  expect(historyChanged).not.toHaveBeenCalled();
+});
 it("retains a refusal, sends the next message, and adopts a restarted execution for only the known message", async () => {
   const runtime = new CloudPromptRuntime(); cleanup = runtime.start();
   f.api.enqueue.mockRejectedValueOnce(Object.assign(new Error("sensitive diagnostic"), { status: 409 }));

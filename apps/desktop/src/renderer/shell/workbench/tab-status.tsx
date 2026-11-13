@@ -21,6 +21,7 @@ import {
 } from "../../state/workbench-availability";
 import {
   describeWorkbenchFailure,
+  describeCloudNotReady,
   describeWorkbenchEmptyState,
   WORKBENCH_STATUS_ADAPTERS,
   workbenchSourcesFor,
@@ -267,11 +268,13 @@ export function WorkbenchTabFrame({
             <div className="absolute inset-0 flex min-h-0 flex-col">
               <WorkbenchEmptyStateContent
                 type={tab.type}
-                message={describeWorkbenchEmptyState(
-                  tab.type,
-                  emptyStatus,
-                  !!tab.filePath,
-                )}
+                message={cloud && !status
+                  ? describeCloudNotReady(tab.type, !!tab.filePath)
+                  : describeWorkbenchEmptyState(
+                    tab.type,
+                    emptyStatus,
+                    !!tab.filePath,
+                  )}
               />
             </div>
           )}

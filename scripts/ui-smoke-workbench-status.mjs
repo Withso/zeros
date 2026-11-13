@@ -25,6 +25,12 @@ const pendingCopy = {
   terminal: "The terminal opens when the workspace is ready.",
   simulator: "The simulator opens when the workspace is ready.",
 };
+// Cloud: one empty state for every not-ready case (owner ruling 2026-11-13).
+const cloudNotReadyCopy = {
+  ...pendingCopy,
+  review: "Review comments appear when the workspace is ready.",
+  terminal: "Terminal appears when the workspace is ready.",
+};
 const unavailableCopy = {
   files: "Files aren't available.",
   changes: "Changes aren't available.",
@@ -247,7 +253,7 @@ export async function runWorkbenchStatusSmoke({ page, check, harnessBase }) {
     }, type);
     await expect(banner()).toHaveCount(0);
     await expect(empty()).toHaveCount(1);
-    await expect(empty()).toHaveText(pendingCopy[type]);
+    await expect(empty()).toHaveText(cloudNotReadyCopy[type]);
     await noToast();
     await screenshot(type, "setting-up");
 
@@ -257,9 +263,7 @@ export async function runWorkbenchStatusSmoke({ page, check, harnessBase }) {
         state,
       );
       await expect(banner()).toHaveCount(0);
-      await expect(empty()).toHaveText(
-        ["archived", "failed"].includes(state) ? unavailableCopy[type] : pendingCopy[type],
-      );
+      await expect(empty()).toHaveText(cloudNotReadyCopy[type]);
       await noToast();
       await screenshot(type, state);
     }
@@ -272,7 +276,7 @@ export async function runWorkbenchStatusSmoke({ page, check, harnessBase }) {
     await expect(banner()).toHaveCount(0);
     await page.clock.fastForward(200);
     await expect(banner()).toHaveCount(0);
-    await expect(empty()).toHaveText(pendingCopy[type]);
+    await expect(empty()).toHaveText(cloudNotReadyCopy[type]);
     await noToast();
     await screenshot(type, "connecting");
     await page.clock.resume();
@@ -298,16 +302,12 @@ export async function runWorkbenchStatusSmoke({ page, check, harnessBase }) {
     await page.clock.fastForward(200);
     await expect(banner()).toHaveCount(0);
     await expect(empty()).toHaveCount(1);
-    await expect(empty()).toHaveText(
-      type === "terminal"
-        ? "Terminal reconnects automatically."
-        : pendingCopy[type],
-    );
+    await expect(empty()).toHaveText(cloudNotReadyCopy[type]);
     await screenshot(type, "reconnecting");
     await page.clock.resume();
     await page.clock.fastForward(35_000);
     await expect(banner()).toHaveCount(0);
-    await expect(empty()).toHaveText(unavailableCopy[type]);
+    await expect(empty()).toHaveText(cloudNotReadyCopy[type]);
     await noToast();
     await screenshot(type, "unreachable");
 
