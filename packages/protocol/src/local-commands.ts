@@ -9,6 +9,9 @@ import { NotifyUserEventSchema } from "./notify-user";
 export const LOCAL_COMMANDS_FEATURE = "local-commands-v1";
 /** Wire v1.3: the worker may send, and a Mac may receive, `reason`. */
 export const LOCAL_COMMANDS_REASON_FEATURE = "local-commands-reason-v1";
+/** A capable registration uses stream liveness with the fallback interval named by ready. */
+export const DEVICE_LIVENESS_FEATURE = "device-liveness-v1";
+const heartbeatIntervalMs = z.union([z.literal(25_000), z.literal(300_000)]);
 export const LOCAL_COMMAND_LIMITS = {
   commandChars: 16_384, cwdChars: 4096, textChars: 1000, reasonChars: 280, macChars: 128,
   defaultTimeoutMs: 60_000, timeoutMs: 120_000, extendedTimeoutMs: 1_800_000,
@@ -83,8 +86,9 @@ const uuid = z.string().uuid();
 const iso = z.string().datetime();
 const id = z.string().min(1).max(256).refine(value => !/[\u0000-\u001f]/.test(value));
 const deviceName = z.string().min(1).max(LOCAL_COMMAND_LIMITS.macChars).refine(value => value.trim() === value && value.length > 0 && !/[\u0000-\u001f\u007f]/.test(value));
-/** local-commands-v1, optionally with local-commands-reason-v1 (released desktops send only the first). */
-const capabilities = z.union([z.tuple([z.literal(LOCAL_COMMANDS_FEATURE)]), z.tuple([z.literal(LOCAL_COMMANDS_FEATURE), z.literal(LOCAL_COMMANDS_REASON_FEATURE)])]);
+const capabilities = z.union([z.tuple([z.literal(LOCAL_COMMANDS_FEATURE)]),
+  z.tuple([z.literal(LOCAL_COMMANDS_FEATURE), z.literal(LOCAL_COMMANDS_REASON_FEATURE)]),
+  z.tuple([z.literal(LOCAL_COMMANDS_FEATURE), z.literal(LOCAL_COMMANDS_REASON_FEATURE), z.literal(DEVICE_LIVENESS_FEATURE)])]);
 
 export const LocalCommandReceiptSchema = z.object({
   requestId: uuid, state: z.enum(["pending", "claimed", "terminal"]), approvalDeadline: iso, runDeadline: iso.nullable(),
@@ -99,7 +103,7 @@ export type LocalCommandPresence = z.infer<typeof LocalCommandPresenceSchema>;
 export const LocalCommandDeviceSchema = z.object({ deviceId: uuid, registrationId: uuid, instanceId: uuid, name: deviceName, capabilities }).strict();
 export type LocalCommandDevice = z.infer<typeof LocalCommandDeviceSchema>;
 export const LocalCommandRegistrationRequestSchema = z.object({ requestId: uuid, name: deviceName, capabilities }).strict();
-export const LocalCommandRegistrationReplySchema = z.object({ device: LocalCommandDeviceSchema, presence: LocalCommandPresenceSchema, heartbeatIntervalMs: z.literal(25_000) }).strict();
+export const LocalCommandRegistrationReplySchema = z.object({ device: LocalCommandDeviceSchema, presence: LocalCommandPresenceSchema, heartbeatIntervalMs }).strict();
 export const LocalCommandMacSchema = z.object({ deviceId: uuid, name: deviceName, connected: z.boolean(), active: z.boolean(), reachable: z.boolean(), expiresAt: iso.nullable(),
   /** Order 3: this Mac mirrors the workspace into a local folder (optional until every control plane sends it). */
   syncing: z.boolean().optional(),
@@ -129,7 +133,8 @@ export const LocalCommandResultReplySchema = z.object({ outcome: z.enum(LOCAL_CO
 
 /** Account-level device channel events, by exact SSE event name. */
 export const LocalCommandEventSchemas = {
-  ready: z.object({ deviceId: uuid, registrationId: uuid, instanceId: uuid, presence: LocalCommandPresenceSchema, heartbeatIntervalMs: z.literal(25_000) }).strict(),
+  ready: z.object({ deviceId: uuid, registrationId: uuid, instanceId: uuid, presence: LocalCommandPresenceSchema, heartbeatIntervalMs,
+    features: z.array(z.literal(DEVICE_LIVENESS_FEATURE)).max(1).optional() }).strict(),
   presence: LocalCommandPresenceSchema,
   request: LocalCommandNoticeSchema,
   heartbeat: z.object({ at: iso, presence: LocalCommandPresenceSchema }).strict(),

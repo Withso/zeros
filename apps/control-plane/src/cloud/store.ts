@@ -958,7 +958,9 @@ export class CloudV2Store {
          AND NOT EXISTS (SELECT 1 FROM cloud_v2_execution_contexts e WHERE e.workspace_id=w.id AND w.execution_mode='active'
            AND e.state='active' AND e.expires_at>clock_timestamp() AND e.worker_boot_id=w.worker_boot_id
            AND e.access_epoch=w.access_epoch AND e.stop_generation=w.stop_generation
-           AND (e.kind='bootstrap' OR e.kind='client' AND e.operation IS NOT NULL))
+           AND (e.kind='bootstrap' OR e.kind='client' AND (e.operation IS NOT NULL
+             OR e.client_id IS NOT NULL AND e.parent_context_id IS NULL AND e.sync_device_id IS NULL
+               AND e.client_token_expires_at>clock_timestamp() AND e.worker_token_hash=w.worker_token_hash)))
        ORDER BY coalesce(active_at, updated_at) LIMIT $2`,
       [before, limit],
     ));
@@ -978,7 +980,9 @@ export class CloudV2Store {
         AND NOT EXISTS (SELECT 1 FROM cloud_v2_execution_contexts e WHERE e.workspace_id=w.id AND w.execution_mode='active'
           AND e.state='active' AND e.expires_at>clock_timestamp() AND e.worker_boot_id=w.worker_boot_id
           AND e.access_epoch=w.access_epoch AND e.stop_generation=w.stop_generation
-          AND (e.kind='bootstrap' OR e.kind='client' AND e.operation IS NOT NULL))`, [id, before]);
+          AND (e.kind='bootstrap' OR e.kind='client' AND (e.operation IS NOT NULL
+            OR e.client_id IS NOT NULL AND e.parent_context_id IS NULL AND e.sync_device_id IS NULL
+              AND e.client_token_expires_at>clock_timestamp() AND e.worker_token_hash=w.worker_token_hash)))`, [id, before]);
     });
   }
 

@@ -192,7 +192,7 @@ export const RuntimeMcpServerSchema = z.discriminatedUnion("transport", [
 export type RuntimeMcpServer = z.infer<typeof RuntimeMcpServerSchema>;
 
 export const CloudV2ControlFrameSchema = z.discriminatedUnion("t", [
-  z.object({ t: z.literal("push"), prompts: z.boolean() }).strict(),
+  z.object({ t: z.literal("push"), prompts: z.boolean(), runtimeUpdate: z.literal(true).optional() }).strict(),
   z.object({ t: z.literal("activity-reply"), id: z.uuid(), prompts: z.boolean(),
     loginRevision: z.string().regex(/^(0|[1-9][0-9]{0,19})$/),
     state: z.enum(["creating", "starting", "running", "stopping", "stopped", "failed", "deleting", "deleted"]),
@@ -219,6 +219,7 @@ export const CloudV2ControlFrameSchema = z.discriminatedUnion("t", [
     environment: CloudWorkspaceEnvironmentSchema.optional(),
     promptOutbox: z.literal(1).optional(),
     runtimeUpdate: z.literal(1).optional(),
+    pushSignals: z.literal(1).optional(),
     agentInteractions: z.literal(1).optional(),
     codeReview: z.object({
       userId: z.uuid(),

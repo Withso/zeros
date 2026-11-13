@@ -188,8 +188,8 @@ describe("cloud v2 relay", () => {
   });
 
   describe("negotiated worker activity", () => {
-    const enable = () => {
-      workerServer.on("headers", headers => { headers.push("X-Zeros-Worker-Features: worker-push-v1"); });
+    const enable = (features = "") => {
+      workerServer.on("headers", headers => { headers.push(`X-Zeros-Worker-Features: worker-push-v1${features ? `,${features}` : ""}`); });
       vi.mocked(deps.workerRoute).mockImplementation(async () => ({ workspace: workspace(state), accessEpoch, url: workerUrl,
         token: "synthetic-port-token", bootId: workspaceId, workerTokenHash: "a".repeat(64) }));
       deps.workerActivity = vi.fn(async () => ({ state, loginRevision, prompts: false }));
@@ -197,6 +197,33 @@ describe("cloud v2 relay", () => {
       workerServer.on("connection", ws => { ws.on("message", data => { frames.push(JSON.parse(String(data))); }); });
       return frames;
     };
+
+    it.each(["", "push-signals-v10", "push-signals-v1", "push-signals-v1,runtime-update-v1"])(
+      "negotiates timer changes and runtime hints for exact features: %s", async features => {
+        const frames = enable(features), config = deps.config;
+        deps.config = async workspace => ({ ...await config(workspace), promptOutbox: 1, pushSignals: 1, runtimeUpdate: 1 });
+        await worker();
+        await vi.waitFor(() => expect(frames.some(frame => frame.t === "push")).toBe(true));
+        const accepted = features.split(",").includes("push-signals-v1");
+        expect(frames.find(frame => frame.t === "config").pushSignals).toBe(accepted ? 1 : undefined);
+        expect(frames.find(frame => frame.t === "push").runtimeUpdate)
+          .toBe(accepted && features.includes("runtime-update-v1") ? true : undefined);
+        frames.length = 0; loginRevision = "1"; await relay.refreshLogins();
+        await vi.waitFor(() => expect(frames.some(frame => frame.t === "config")).toBe(true));
+        expect(frames.find(frame => frame.t === "config").pushSignals).toBe(accepted ? 1 : undefined);
+        if (accepted && features.includes("runtime-update-v1"))
+          await vi.waitFor(() => expect(frames.some(frame => frame.t === "push" && frame.runtimeUpdate === true)).toBe(true));
+      });
+
+    it("does not repeat relay authority reads for catalog-only notifications", async () => {
+      enable(); await worker();
+      const before = vi.mocked(deps.store.appAccessSnapshot).mock.calls.length;
+      for (let i = 0; i < 40; i++) notification.emit("notification", { channel: "zeros_cloud_v2_catalog" });
+      await new Promise<void>(resolve => setImmediate(resolve));
+      expect(deps.store.appAccessSnapshot).toHaveBeenCalledTimes(before);
+      authorized = false; notification.emit("notification", { channel: "zeros_security_event" });
+      await vi.waitFor(() => expect(sockets[0]!.readyState).not.toBe(WebSocket.OPEN));
+    });
 
     it("binds activity to the dial proof and never forwards its reply to the app", async () => {
       const frames = enable(); relay.promptNotifications(true);

@@ -69,6 +69,10 @@ it("matches registration and rejects injected identities and untrimmed names", (
   parity(LocalDeviceRegistrationSchema,protocol.LocalCommandRegistrationRequestSchema,{ ...base,instanceId: base.requestId },false);
   for (const [capabilities,valid] of [
     [[LOCAL_COMMANDS_FEATURE,LOCAL_COMMANDS_REASON_FEATURE],true],[[LOCAL_COMMANDS_REASON_FEATURE],false],
+    [[LOCAL_COMMANDS_FEATURE,LOCAL_COMMANDS_REASON_FEATURE,"device-liveness-v1"],true],
+    [[LOCAL_COMMANDS_FEATURE,"device-liveness-v1"],false],
+    [[LOCAL_COMMANDS_FEATURE,"device-liveness-v1",LOCAL_COMMANDS_REASON_FEATURE],false],
+    [[LOCAL_COMMANDS_FEATURE,LOCAL_COMMANDS_REASON_FEATURE,"device-liveness-v1","device-liveness-v1"],false],
     [[LOCAL_COMMANDS_REASON_FEATURE,LOCAL_COMMANDS_FEATURE],false],[[LOCAL_COMMANDS_FEATURE,LOCAL_COMMANDS_FEATURE],false],
     [[LOCAL_COMMANDS_FEATURE,"local-commands-reason-v10"],false],
   ] as Array<[unknown,boolean]>) parity(LocalDeviceRegistrationSchema,protocol.LocalCommandRegistrationRequestSchema,{ ...base,capabilities },valid);

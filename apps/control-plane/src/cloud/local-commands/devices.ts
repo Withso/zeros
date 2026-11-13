@@ -7,24 +7,28 @@ import { SECURITY_STREAM_AUTHORITY, securityStreamAuthority, securityStreamParam
 import { CLOUD_V2_CREATOR_ACCESS_SQL, CLOUD_V2_LIVE_ACCESS, cloudV2ActorAccess } from "../workspace-access.js";
 import type { CloudExecutionContexts } from "../execution/store.js";
 import type { DeviceSyncConnectionsReply, SyncFlags } from "../workspace-sync/contract.js";
-import { LOCAL_COMMANDS_FEATURE, LOCAL_COMMANDS_REASON_FEATURE, type ConnectedMac, type LocalDevice, type LocalDeviceBinding, type LocalDevicePresence, type LocalDeviceRegistration } from "./contract.js";
+import { DEVICE_LIVENESS_FEATURE, LOCAL_COMMANDS_FEATURE, LOCAL_COMMANDS_REASON_FEATURE, type ConnectedMac, type LocalDevice, type LocalDeviceBinding, type LocalDevicePresence, type LocalDeviceRegistration } from "./contract.js";
 import { localCommandDiagnostic } from "./diagnostics.js";
 
 export const DEVICE_HEARTBEAT_MS = 25_000;
+export const DEVICE_LIVENESS_HEARTBEAT_MS = 300_000;
 export const DEVICE_LEASE_MS = 65_000;
 export const notFound = () => new HttpError(404, "not_found", "Local command resource not found");
 const changed = () => new HttpError(409, "device_registration_changed", "This desktop registration is no longer current");
 export const limited = () => new HttpError(429, "local_commands_limited", "Local command capacity is temporarily full");
 export type DeviceRow = { user_id: string; device_id: string; provider_session_id: string; registration_id: string; instance_id: string;
   registration_request_id: string; registration_hash: Buffer; name: string; revoked_at: Date | null; reachable_until: Date | null;
-  presence_required: boolean; has_requests: boolean; checked_at: Date; reason_instance_id: string | null };
+  presence_required: boolean; has_requests: boolean; checked_at: Date; reason_instance_id: string | null;
+  liveness_instance_id: string | null; liveness_stream_id: string | null };
 const connectionLive = `(c.disconnected_at IS NULL AND c.registration_id=d.registration_id
   AND (c.is_latest_sender OR greatest(c.connected_at,c.last_used_at)>clock_timestamp()-interval '12 hours'))`;
 const presenceSql = `EXISTS (SELECT 1 FROM cloud_v2_connected_macs c JOIN cloud_v2_workspaces w ON w.id=c.workspace_id
   WHERE c.user_id=d.user_id AND c.device_id=d.device_id AND ${connectionLive} AND w.state NOT IN ('deleting','deleted')
     AND ${CLOUD_V2_LIVE_ACCESS} AND EXISTS (SELECT 1 FROM organization_members m WHERE m.org_id=w.org_id AND m.user_id=d.user_id))`;
+const streamLiveness = (row: DeviceRow) => row.liveness_instance_id === row.instance_id && row.reason_instance_id === row.instance_id;
 const device = (row: DeviceRow): LocalDevice => ({ deviceId: row.device_id, registrationId: row.registration_id, instanceId: row.instance_id,
-  name: row.name, capabilities: row.reason_instance_id === row.instance_id
+  name: row.name, capabilities: streamLiveness(row) ? [LOCAL_COMMANDS_FEATURE, LOCAL_COMMANDS_REASON_FEATURE, DEVICE_LIVENESS_FEATURE]
+    : row.reason_instance_id === row.instance_id
     ? [LOCAL_COMMANDS_FEATURE, LOCAL_COMMANDS_REASON_FEATURE] : [LOCAL_COMMANDS_FEATURE] });
 const presence = (row: DeviceRow): LocalDevicePresence => ({ presenceRequired: row.presence_required,
   reachableUntil: row.presence_required ? row.reachable_until?.toISOString() ?? null : null });
@@ -70,11 +74,41 @@ export class CloudLocalDevices {
     return row;
   }
 
-  snapshot(user: AuthedUser, binding: LocalDeviceBinding) {
+  snapshot(user: AuthedUser, binding: LocalDeviceBinding, streamId?: string) {
     return withSystemTx(this.pool, async tx => {
-      const row = await this.verify(tx, user, binding);
+      const row = await this.verify(tx, user, binding, streamId !== undefined);
+      if (streamId !== undefined) {
+        if (!streamLiveness(row) || row.liveness_stream_id !== streamId) throw changed();
+        if (row.presence_required) {
+          const updated = await tx.query<{ reachable_until: Date }>(`UPDATE local_command_devices d
+            SET reachable_until=clock_timestamp()+interval '65 seconds',updated_at=clock_timestamp()
+            WHERE user_id=$1 AND device_id=$2 AND registration_id=$3 AND instance_id=$4 AND liveness_stream_id=$5
+              AND revoked_at IS NULL AND ${presenceSql}
+              AND (reachable_until IS NULL OR reachable_until<clock_timestamp()+interval '50 seconds') RETURNING reachable_until`,
+          [user.id, binding.deviceId, binding.registrationId, binding.instanceId, streamId]);
+          if (updated.rows[0]) row.reachable_until = updated.rows[0].reachable_until;
+        }
+      }
       return { device: device(row), presence: presence(row), hasRequests: row.has_requests, checkedAt: row.checked_at.toISOString() };
-    }, { consistentRead: true });
+    }, { consistentRead: streamId === undefined });
+  }
+
+  openStream(user: AuthedUser, binding: LocalDeviceBinding) {
+    return withSystemTx(this.pool, async tx => {
+      const row = await this.verify(tx, user, binding, true);
+      const streamId = streamLiveness(row) ? randomUUID() : null;
+      if (streamId) await tx.query("UPDATE local_command_devices SET liveness_stream_id=$3 WHERE user_id=$1 AND device_id=$2",
+        [user.id, binding.deviceId, streamId]);
+      return { streamId, checkedAt: row.checked_at.toISOString() };
+    });
+  }
+
+  closeStream(user: AuthedUser, binding: LocalDeviceBinding, streamId: string) {
+    // A replaced stream can finish after its successor has acquired the row.
+    return withSystemTx(this.pool, tx => tx.query(`UPDATE local_command_devices SET liveness_stream_id=NULL,
+      reachable_until=NULL,updated_at=clock_timestamp() WHERE user_id=$1 AND device_id=$2 AND registration_id=$3
+      AND instance_id=$4 AND liveness_stream_id=$5 AND provider_session_id=$6`,
+    [user.id, binding.deviceId, binding.registrationId, binding.instanceId, streamId, user.authentication.sessionId]));
   }
 
   async register(user: AuthedUser, deviceId: string, input: LocalDeviceRegistration) {
@@ -98,13 +132,15 @@ export class CloudLocalDevices {
             AND EXISTS (SELECT 1 FROM user_identities i WHERE i.user_id=d.user_id AND i.provider='workos' AND i.provider_sub=s.provider_sub AND i.status='active')`, [user.id, deviceId])).rows[0].count) >= 20) throw limited();
         const registrationId = old && !old.revoked_at && old.provider_session_id === user.authentication.sessionId ? old.registration_id : randomUUID();
         const instanceId = randomUUID();
-        await tx.query(`INSERT INTO local_command_devices(user_id,device_id,provider_session_id,registration_id,instance_id,registration_request_id,registration_hash,name,reason_instance_id)
-          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(user_id,device_id) DO UPDATE SET provider_session_id=EXCLUDED.provider_session_id,
+        await tx.query(`INSERT INTO local_command_devices(user_id,device_id,provider_session_id,registration_id,instance_id,registration_request_id,registration_hash,name,reason_instance_id,liveness_instance_id)
+          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT(user_id,device_id) DO UPDATE SET provider_session_id=EXCLUDED.provider_session_id,
             registration_id=EXCLUDED.registration_id,instance_id=EXCLUDED.instance_id,registration_request_id=EXCLUDED.registration_request_id,
             registration_hash=EXCLUDED.registration_hash,name=EXCLUDED.name,reason_instance_id=EXCLUDED.reason_instance_id,
+            liveness_instance_id=EXCLUDED.liveness_instance_id,liveness_stream_id=NULL,
             revoked_at=NULL,reachable_until=NULL,updated_at=clock_timestamp()`,
         [user.id, deviceId, user.authentication.sessionId, registrationId, instanceId, input.requestId, hash, input.name,
-          input.capabilities.some(value => value === LOCAL_COMMANDS_REASON_FEATURE) ? instanceId : null]);
+          input.capabilities.some(value => value === LOCAL_COMMANDS_REASON_FEATURE) ? instanceId : null,
+          input.capabilities.some(value => value === DEVICE_LIVENESS_FEATURE) ? instanceId : null]);
       }
       const row = (await tx.query<DeviceRow>(`SELECT d.*,${presenceSql} AS presence_required FROM local_command_devices d WHERE user_id=$1 AND device_id=$2`, [user.id, deviceId])).rows[0]!;
       return { device: device(row), presence: presence(row), heartbeatIntervalMs: DEVICE_HEARTBEAT_MS };

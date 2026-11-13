@@ -302,14 +302,15 @@ type Wake = () => void;
 export class PostgresSecurityEventBroker {
   private readonly listener: PostgresNotificationSubscription;
   private readonly subscribers = new Set<Wake>();
+  private readonly authoritySubscribers = new Set<Wake>();
   private stopped = false;
   private wakeRevision = 0;
 
   constructor(pool: pg.Pool) {
     this.listener = postgresNotificationSubscription(pool, {
-      channels: ["zeros_security_event"],
+      channels: ["zeros_security_event", "zeros_cloud_v2_catalog"],
       reconnect: false,
-      onNotification: () => this.wakeSubscribers(),
+      onNotification: notice => this.wakeSubscribers(notice.channel !== "zeros_cloud_v2_catalog"),
       onDisconnect: () => this.wakeSubscribers(),
     });
   }
@@ -318,9 +319,10 @@ export class PostgresSecurityEventBroker {
     if (!this.stopped) await this.listener.start();
   }
 
-  subscribe(wake: Wake): () => void {
-    this.subscribers.add(wake);
-    return () => this.subscribers.delete(wake);
+  subscribe(wake: Wake, scope: "all" | "authority" = "all"): () => void {
+    const subscribers = scope === "authority" ? this.authoritySubscribers : this.subscribers;
+    subscribers.add(wake);
+    return () => subscribers.delete(wake);
   }
 
   healthy(): boolean {
@@ -331,9 +333,9 @@ export class PostgresSecurityEventBroker {
     return this.wakeRevision;
   }
 
-  private wakeSubscribers(): void {
+  private wakeSubscribers(authority = true): void {
     this.wakeRevision += 1;
-    for (const wake of this.subscribers) {
+    for (const wake of [...this.subscribers, ...(authority ? this.authoritySubscribers : [])]) {
       try {
         wake();
       } catch {
@@ -397,7 +399,7 @@ export function createSecurityEventRoutes(
       const tokenEnd = expiry ? expiry*1000 : Number.POSITIVE_INFINITY;
       const ended = () => signal.aborted || Date.now() >= tokenEnd-TOKEN_END_MARGIN_MS;
       try {
-        await stream.writeSSE({ event: "ready", data: JSON.stringify({ cursor: after }), retry: 3_000 });
+        await stream.writeSSE({ event: "ready", data: JSON.stringify({ cursor: after, features: ["catalog-events-v1"] }), retry: 3_000 });
         while (!ended()) {
           const beforeReplay = broker.revision();
           const published = await publishPendingSecurityEvents(pool);

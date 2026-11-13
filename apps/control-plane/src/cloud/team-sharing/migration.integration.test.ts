@@ -16,7 +16,8 @@ database("team sharing expand migration and hot-table cost", () => {
     const migration = await readFile(new URL("../../../migrations/0236_cloud_team_sharing.sql",import.meta.url),"utf8");
     const tx = await pool.connect(); await tx.query("BEGIN");
     try {
-      await tx.query(`DROP FUNCTION cloud_v2_original_creator() CASCADE;
+      await tx.query(`DROP FUNCTION notify_cloud_v2_catalog_row() CASCADE;
+        DROP FUNCTION cloud_v2_original_creator() CASCADE;
         DROP FUNCTION notify_cloud_v2_team_rows() CASCADE;
         DROP TABLE cloud_v2_workspace_presence,cloud_v2_workspace_followers,cloud_v2_workspace_pins;
         ALTER TABLE cloud_v2_workspaces DROP COLUMN created_by_user_id,DROP CONSTRAINT cloud_v2_workspaces_id_org CASCADE;

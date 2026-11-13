@@ -14,6 +14,25 @@ function fixture(query = vi.fn(async (_sql: string) => ({ rows: [] }))) {
 afterEach(() => vi.useRealTimers());
 
 describe("security event listener lifecycle", () => {
+  it("wakes catalog replay without repeating authority checks, and wakes both on a gap", async () => {
+    const { client, broker } = fixture(), feed = vi.fn(), authority = vi.fn();
+    broker.subscribe(feed);
+    broker.subscribe(authority, "authority");
+    await broker.start();
+    const before = broker.revision();
+    client.emit("notification", { channel: "zeros_cloud_v2_catalog" });
+    expect(feed).toHaveBeenCalledOnce();
+    expect(authority).not.toHaveBeenCalled();
+    expect(broker.revision()).toBe(before + 1);
+    client.emit("notification", { channel: "zeros_security_event" });
+    expect(feed).toHaveBeenCalledTimes(2);
+    expect(authority).toHaveBeenCalledOnce();
+    client.emit("error", new Error("synthetic gap"));
+    expect(feed).toHaveBeenCalledTimes(3);
+    expect(authority).toHaveBeenCalledTimes(2);
+    await broker.stop();
+  });
+
   it("does not lose a notification arriving between replay and waiter subscription", async () => {
     vi.useFakeTimers();
     const { client, broker } = fixture();

@@ -26,6 +26,7 @@ export const workerSupportsGitIdentity = (socket: WebSocket): boolean => peerFea
 export const workerSupportsCodeReview = (socket: WebSocket): boolean => peerFeatures.get(socket)?.has("code-review-v1") ?? false;
 export const workerSupportsEnvironment = (socket: WebSocket): boolean => peerFeatures.get(socket)?.has("workspace-environment-v1") ?? false;
 export const workerSupportsRuntimeUpdate = (socket: WebSocket): boolean => peerFeatures.get(socket)?.has("runtime-update-v1") ?? false;
+export const workerSupportsPushSignals = (socket: WebSocket): boolean => peerFeatures.get(socket)?.has("push-signals-v1") ?? false;
 export const workerSupportsPush = (socket: WebSocket): boolean => peerFeatures.get(socket)?.has("worker-push-v1") ?? false;
 
 export const workerSupportsAgentInteractions = (socket: WebSocket): boolean => peerFeatures.get(socket)?.has("agent-interactions-v1") ?? false;

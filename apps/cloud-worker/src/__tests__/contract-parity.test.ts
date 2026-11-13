@@ -140,13 +140,15 @@ it("keeps durable HTTP prompt bounds and strict schemas identical across Zod ver
   const examples = {
     CloudV2PromptSchema: payload,
     CloudV2PromptReceiptSchema: receipt,
-    CloudV2PromptPullSchema: { waitMs: 25_000, held: [CLIENT_A] },
+    CloudV2PromptPullSchema: { waitMs: 60_000, held: [CLIENT_A] },
     CloudV2PromptPullReplySchema: { prompts: [{ payload, receipt, deliveryId: CLIENT_A }], stops: [] },
     CloudV2PromptBeginSchema: { userMessageId: CLIENT_A, deliveryId: CLIENT_A, dispatchId: WORKSPACE_ID },
     CloudV2PromptOutcomeSchema: { userMessageId: CLIENT_A, dispatchId: WORKSPACE_ID, state: "completed" },
     CloudV2PromptStopSchema: { chatId: "chat", throughEpoch: "1" },
   };
   expect(controlPrompts.CLOUD_V2_MAX_PROMPT_BYTES).toBe(sharedPrompts.CLOUD_V2_MAX_PROMPT_BYTES);
+  expect(controlPrompts.CLOUD_V2_PROMPT_PUSH_POLL_MS).toBe(60_000);
+  expect(sharedPrompts.CLOUD_V2_PROMPT_PUSH_POLL_MS).toBe(60_000);
   for (const key of Object.keys(examples) as Array<keyof typeof examples>) {
     expect(controlPrompts[key].parse(examples[key])).toEqual(sharedPrompts[key].parse(examples[key]));
     for (const invalid of [null, {}, { ...examples[key], unknown: true }]) {
@@ -156,7 +158,10 @@ it("keeps durable HTTP prompt bounds and strict schemas identical across Zod ver
   }
   for (const schemas of [controlPrompts, sharedPrompts]) {
     expect(schemas.CloudV2PromptSchema.safeParse({ ...payload, chatId: "cloud:foreign" }).success).toBe(false);
-    expect(schemas.CloudV2PromptPullSchema.safeParse({ waitMs: 25_001 }).success).toBe(false);
+    for (const waitMs of [0, 25_000, 25_001, 60_000])
+      expect(schemas.CloudV2PromptPullSchema.safeParse({ waitMs }).success).toBe(true);
+    for (const waitMs of [-1, 0.5, 60_001])
+      expect(schemas.CloudV2PromptPullSchema.safeParse({ waitMs }).success).toBe(false);
     expect(schemas.CloudV2PromptOutcomeSchema.safeParse({ userMessageId: CLIENT_A, deliveryId: CLIENT_A, state: "accepted" }).success).toBe(false);
   }
 });

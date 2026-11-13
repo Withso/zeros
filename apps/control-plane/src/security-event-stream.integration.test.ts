@@ -6,6 +6,8 @@ import { ensureUser, type AuthedUser } from "./auth.js";
 import { withSystemTx } from "./db.js";
 import { resetMigratedTestDatabase } from "./test-database.js";
 import { createSecurityEventRoutes, PostgresSecurityEventBroker } from "./security-events.js";
+import { CloudV2Store } from "./cloud/store.js";
+import { grantTestPro } from "./test-pro.js";
 
 const database = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 database("security event stream token lifetime through the router and PostgreSQL", () => {
@@ -25,6 +27,33 @@ database("security event stream token lifetime through the router and PostgreSQL
     app.route("/", createSecurityEventRoutes(pool, broker));
   });
   afterEach(async () => { await broker.stop(); vi.restoreAllMocks(); });
+
+  it("announces catalog events and replays a committed writer across the snapshot-to-stream gap", async () => {
+    const org = randomUUID(), controller = new AbortController();
+    await grantTestPro(pool, user.id);
+    await pool.query("INSERT INTO organizations(id,slug,name,created_by,is_personal,cloud_workspaces_allowed) VALUES($1,$2,'Catalog',$3,false,true)", [org, `catalog-${org}`, user.id]);
+    await pool.query("INSERT INTO organization_members(org_id,user_id,role) VALUES($1,$2,'owner')", [org, user.id]);
+    const snapshot = await (await app.request("/v1/auth/snapshot")).json();
+    const workspace = await new CloudV2Store(pool).createWorkspace({ id: randomUUID(), organizationId: org,
+      creatorUserId: user.id, repository: "fixture/project", branch: "topic", baseBranch: "main", name: "Catalog", computerBuildId: null });
+    const response = await app.request(`/v1/auth/events?after=${snapshot.cursor}`, { signal: controller.signal });
+    const reader = response.body!.getReader(), decoder = new TextDecoder();
+    const timeout = setTimeout(() => controller.abort(), 2000);
+    try {
+      let text = decoder.decode((await reader.read()).value);
+      expect(text).toContain('"features":["catalog-events-v1"]');
+      while (!text.includes('"change":"created"')) {
+        const chunk = await reader.read(); if (chunk.done) break; text += decoder.decode(chunk.value);
+      }
+      expect(text).toContain(`"workspaceId":"${workspace.id}"`);
+      expect(text).toContain('"change":"created"');
+      await pool.query("UPDATE cloud_v2_workspaces SET title='Next' WHERE id=$1", [workspace.id]);
+      while (!text.includes('"change":"document"')) {
+        const chunk = await reader.read(); if (chunk.done) break; text += decoder.decode(chunk.value);
+      }
+      expect(text).toContain('"change":"document"');
+    } finally { clearTimeout(timeout); controller.abort(); await reader.cancel(); }
+  });
 
   it("does not call an expired access token a revoked session after a held database await", async () => {
     const holder = await pool.connect(), controller = new AbortController();

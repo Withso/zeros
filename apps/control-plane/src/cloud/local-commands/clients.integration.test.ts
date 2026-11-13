@@ -240,7 +240,7 @@ database("real desktop and worker local-command clients against the router and P
         const request = new Request(input, init);
         if (request.method !== "PUT") return f.app.fetch(request);
         const body = await request.clone().json();
-        // The released route's strict capability tuple refuses v1.3 before its store runs.
+        // The oldest supported route accepts only v1, before its store runs.
         if (legacy && body.capabilities.length !== 1) {
           registrations.push({ body, status: 400 });
           return Response.json({ error: { code: "invalid_request" } }, { status: 400 });
@@ -256,15 +256,18 @@ database("real desktop and worker local-command clients against the router and P
       },
     });
     const { service } = await desktopNotifications(mixed, id);
-    expect(registrations.map(call => call.status)).toEqual([400, 200, 200]);
-    expect(registrations[0]!.body.capabilities).toEqual(deviceCapabilities);
-    expect(registrations[1]!.body.capabilities).toEqual(["local-commands-v1"]);
-    expect(registrations[1]!.body.requestId).not.toBe(registrations[0]!.body.requestId);
-    expect(registrations[2]!.body).toEqual(registrations[1]!.body);
+    const offers = registrations[0]!.body.capabilities.includes("device-liveness-v1")
+      ? [[...deviceCapabilities, "device-liveness-v1"], [...deviceCapabilities], ["local-commands-v1"]]
+      : [[...deviceCapabilities], ["local-commands-v1"]];
+    expect(registrations.map(call => call.status)).toEqual([...offers.slice(1).map(() => 400), 200, 200]);
+    expect(registrations.map(call => call.body.capabilities)).toEqual([...offers, ["local-commands-v1"]]);
+    expect(new Set(registrations.slice(0, -1).map(call => call.body.requestId)).size).toBe(offers.length);
+    const accepted = registrations.at(-2)!;
+    expect(registrations.at(-1)!.body).toEqual(accepted.body);
     expect(service.currentDevice()).toEqual(committed);
     const row = (await pool.query("SELECT registration_id,instance_id,registration_request_id FROM local_command_devices WHERE user_id=$1 AND device_id=$2", [f.owner.id,id])).rows[0];
     expect(row).toEqual({ registration_id: committed!.registrationId, instance_id: committed!.instanceId,
-      registration_request_id: registrations[1]!.body.requestId });
+      registration_request_id: accepted.body.requestId });
   });
 
   it("returns a Mac's denial through the worker client", async () => {

@@ -240,7 +240,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
             gitIdentity };
         })]);
       return { t: "config", actingUser: 1, bootstrapContextId, agents: {}, ...presentation, ...commitIdentity, loginRevision: workspace.loginRevision ?? "0",
-        promptOutbox: 1, notifyUser: 1, githubPullRequests: 1, githubUserTokens: 1, agentInteractions: 1, runtimeUpdate: 1,
+        promptOutbox: 1, pushSignals: 1, notifyUser: 1, githubPullRequests: 1, githubUserTokens: 1, agentInteractions: 1, runtimeUpdate: 1,
         workspace: { id: workspace.id, organizationId: workspace.organizationId, repository: workspace.repository,
           checkoutPath: `${CLOUD_V2_HOME}/${workspace.repository}`, branch: workspace.branch, baseBranch: workspace.baseBranch,
           github: { ...target, previousRepositories: [workspace.repository] }, ...(setup ?? {}), ...(baseCommit ? { baseCommit } : {}) } };
@@ -270,7 +270,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
       githubUserTokens: 1,
       agentInteractions: 1,
       runtimeUpdate: 1,
-      ...(v2.promptOutbox ? { promptOutbox: 1 as const,notifyUser: 1 as const } : {}),
+      ...(v2.promptOutbox ? { promptOutbox: 1 as const, pushSignals: 1 as const, notifyUser: 1 as const } : {}),
       loginRevision: access.loginRevision,
       workspace: {
         id: workspace.id, organizationId: workspace.organizationId, repository: workspace.repository,

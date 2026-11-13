@@ -1,4 +1,5 @@
 import { HttpError } from "../authz.js";
+import { CLOUD_V2_PROMPT_PUSH_POLL_MS } from "./prompt-contract.js";
 
 /** Notifications are hints, not a queue. Register before the database read;
  * timeout/reconnect always re-read the outbox. No database connection is held
@@ -18,7 +19,7 @@ export class CloudV2PromptSignals {
       if (!listeners.size) this.waiters.delete(workspaceId);
       resolve();
     };
-    const timer = setTimeout(dispose, Math.min(25_000, Math.max(0, milliseconds))); timer.unref();
+    const timer = setTimeout(dispose, Math.min(CLOUD_V2_PROMPT_PUSH_POLL_MS, Math.max(0, milliseconds))); timer.unref();
     listeners.add(dispose); this.waiters.set(workspaceId, listeners); this.count++;
     if (signal.aborted) dispose(); else signal.addEventListener("abort", dispose, { once: true });
     return { wait, dispose };

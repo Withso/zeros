@@ -432,6 +432,7 @@ describe("cloud v2 connect wake intent", () => {
     app.route("/", createCloudV2Routes({ store, authorizeSource, bridgeBaseUrl: "wss://dev.example.test" } as unknown as CloudV2RouteDeps));
     const response = await app.request(path, { method: "POST" });
     expect(response.status).toBe(200);
+    expect((await response.json()).features).toBeUndefined();
     expect(authorizeSource).not.toHaveBeenCalled();
     expect(store.issueToken).toHaveBeenCalledOnce();
   });
