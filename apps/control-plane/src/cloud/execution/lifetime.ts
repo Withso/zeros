@@ -1,4 +1,4 @@
-import { executionUnavailable } from "./errors.js";
+import { ExecutionContextEnded, executionUnavailable } from "./errors.js";
 import { HttpError } from "../../authz.js";
 
 export const EXECUTION_LEASE_MS = 30_000;
@@ -11,8 +11,13 @@ export class ExecutionLifetimeUnavailable extends HttpError {
     super(error.status, error.code, error.message);
   }
 }
-export function assertExecutionLifetime(until: number) {
-  if (!Number.isFinite(until) || until - Date.now() < EXECUTION_MINIMUM_LIFETIME_MS) throw new ExecutionLifetimeUnavailable();
+export function assertExecutionLifetime(until: number, tokenEnd?: number) {
+  const now = Date.now();
+  if (tokenEnd !== undefined && tokenEnd <= now) throw new ExecutionContextEnded("expired");
+  // A live client may use the remaining token tail while its authenticated
+  // rollover is in flight. That hard ceiling never extends source authority.
+  const floor = tokenEnd === undefined ? EXECUTION_MINIMUM_LIFETIME_MS : Math.min(EXECUTION_MINIMUM_LIFETIME_MS, tokenEnd - now);
+  if (!Number.isFinite(until) || until - now < floor) throw new ExecutionLifetimeUnavailable();
 }
 
 /** The attempt owns its transaction. Only a rolled-back lifetime refusal may

@@ -1,0 +1,9 @@
+{
+  "id": "cloud-client-token-rollover",
+  "kind": "replay",
+  "area": "control-plane-workers",
+  "fixedBy": "pr:1070",
+  "symptom": "A connected person lost their client handle near each authentication-token boundary; one short cap failed the entire renewal batch, and an ended context could lose its terminal reason.",
+  "rule": "Preserve connection identity through same-session authentication rollover, keep hard token ceilings, and return terminal context results individually. Verify the real application browser preflight and two real token boundaries, not only a raw socket and a fixed observation-window duration (zstack principles 5, 6, 13 and 16).",
+  "check": "pnpm --dir apps/control-plane test src/app.test.ts src/cloud/execution/client-rollover.integration.test.ts src/cloud/execution/lease-lifetime.integration.test.ts"
+}

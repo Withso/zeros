@@ -10,7 +10,7 @@ import type { CloudV2Prompt, CloudV2PromptState } from "../prompt-contract.js";
 import { hashCloudV2Token } from "../tokens.js";
 import { CLOUD_V2_LIVE_ACCESS } from "../workspace-access.js";
 import { cloudV2WorkspaceFromRow } from "../store.js";
-import { actorBusy, actorChanged, executionUnavailable, executionWorkerRequired, memberAccessRevoked, AgentLoginRequired, ExecutionContextRevoked } from "./errors.js";
+import { actorBusy, actorChanged, executionUnavailable, executionWorkerRequired, memberAccessRevoked, AgentLoginRequired, ExecutionContextRevoked, ExecutionContextEnded } from "./errors.js";
 import { assertExecutionIntent, CloudExecutionAuthority, type ExecutionAdmission, type ExecutionIntentAuthority } from "./authority.js";
 import { CloudExecutionLogins, type ExecutionSelection } from "./logins.js";
 import { CloudExecutionClients } from "./clients.js";
@@ -357,11 +357,13 @@ export class CloudExecutionContexts {
   async assertContext(tx: Tx, context: ExecutionContext, proof: ExecutionAdmission): Promise<ExecutionContext> {
     const row = await this.context(tx, context.id, context.workspace_id);
     if (row.state !== "active" && row.reason === "access_revoked") throw new ExecutionContextRevoked();
-    if (row.state !== "active" || !row.user_id || row.user_id !== proof.person.userId || row.expires_at.getTime() <= Date.now() ||
+    if (row.state !== "active") throw new ExecutionContextEnded(row.reason ?? "actor_changed");
+    if (row.expires_at.getTime() <= Date.now() || row.client_token_expires_at && row.client_token_expires_at.getTime() <= Date.now())
+      throw new ExecutionContextEnded("expired");
+    if (!row.user_id || row.user_id !== proof.person.userId ||
         !matchesExecutionSignature(row.authority, row.authority.signature, proof.person, "signature")) throw actorChanged();
     if (row.access_epoch !== proof.person.accessEpoch || row.stop_generation !== proof.person.stopGeneration || row.worker_boot_id !== proof.person.bootId ||
         row.worker_token_hash.toString("hex") !== proof.person.workerTokenHash) throw actorChanged();
-    if (row.client_token_expires_at && row.client_token_expires_at.getTime() <= Date.now()) throw actorChanged();
     if (row.selection) await this.deps.logins.assertPayer(tx, row.org_id, row.selection);
     await this.deps.authority.assert(proof, tx, false, row.id);
     return row;
@@ -380,7 +382,8 @@ export class CloudExecutionContexts {
   async issueLease(tx: Tx, context: ExecutionContext, proof: ExecutionAdmission): Promise<ExecutionContext> {
     const current = await this.assertContext(tx, context, proof);
     const ceiling = Math.min(proof.until, current.client_token_expires_at?.getTime() ?? Infinity);
-    assertExecutionLifetime(ceiling);
+    assertExecutionLifetime(proof.until);
+    assertExecutionLifetime(ceiling, current.client_token_expires_at?.getTime());
     let until = Math.min(current.expires_at.getTime(), proof.source.until, current.client_token_expires_at?.getTime() ?? Infinity);
     if (until - Date.now() < EXECUTION_MINIMUM_LIFETIME_MS) until = ceiling;
     const update = async () => {
@@ -392,7 +395,7 @@ export class CloudExecutionContexts {
     // Reconsider an older delivery deadline after the final reads; the newly
     // observed proof can still cover the floor without sliding either proof.
     if (until !== ceiling && until - Date.now() < EXECUTION_MINIMUM_LIFETIME_MS) { until = ceiling; await update(); }
-    assertExecutionLifetime(until);
+    assertExecutionLifetime(until, current.client_token_expires_at?.getTime());
     return { ...current, expires_at: new Date(until) };
   }
 
@@ -587,7 +590,7 @@ export class CloudExecutionContexts {
         const row = contexts.get(id);
         if (!row || row.state !== "active") { refused.set(id, row?.reason ?? "actor_changed"); continue; }
         if (row.worker_boot_id !== identity.bootId) { refused.set(id, "worker_changed"); continue; }
-        if (row.expires_at.getTime() <= Date.now()) { refused.set(id, "expired"); continue; }
+        if (row.expires_at.getTime() <= Date.now() || row.client_token_expires_at && row.client_token_expires_at.getTime() <= Date.now()) { refused.set(id, "expired"); continue; }
         if (initial.workspace.state === "stopping") { refused.set(id, "cancelled"); continue; }
         try {
           if (!row.user_id) throw memberAccessRevoked();
@@ -613,23 +616,25 @@ export class CloudExecutionContexts {
           if (proof && !refused.has(id)) {
             try {
               const row = await this.context(tx, id, workspace.id, true);
-              if (row.expires_at.getTime() <= Date.now()) refused.set(id, "expired");
+              if (row.state !== "active") refused.set(id, row.reason ?? "actor_changed");
+              else if (row.expires_at.getTime() <= Date.now() || row.client_token_expires_at && row.client_token_expires_at.getTime() <= Date.now()) refused.set(id, "expired");
               else if (workspace.state === "stopping") refused.set(id, "cancelled");
               else {
                 await this.assertContext(tx, row, proof);
                 if (row.agent && row.selection) await this.deps.logins.select(row.org_id, row.user_id!, row.agent, row.selection, tx);
                 const until = Math.min(proof.until, row.client_token_expires_at?.getTime() ?? Infinity);
-                assertExecutionLifetime(until);
+                assertExecutionLifetime(until, row.client_token_expires_at?.getTime());
                 await tx.query("UPDATE cloud_v2_execution_contexts SET expires_at=$2,authority=$3,source_fingerprint=$4 WHERE id=$1",
                   [id, new Date(until), executionContextAuthority(proof.person), proof.source.fingerprint]);
                 await this.assertContext(tx, row, proof);
-                assertExecutionLifetime(until);
+                assertExecutionLifetime(until, row.client_token_expires_at?.getTime());
                 leases.push({ contextId: id, expiresAt: until });
                 continue;
               }
             } catch (error) {
               if (!(error instanceof HttpError) || error.status >= 500) throw error;
-              refused.set(id, error instanceof ExecutionContextRevoked || error.code === "member_access_revoked" ? "access_revoked" : "actor_changed");
+              refused.set(id, error instanceof ExecutionContextRevoked || error.code === "member_access_revoked" ? "access_revoked" :
+                error instanceof ExecutionContextEnded ? error.reason : "actor_changed");
             }
           }
           if (contexts.has(id)) await this.revoke(tx, id, refused.get(id) ?? "actor_changed");
