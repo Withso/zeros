@@ -211,7 +211,7 @@ database("cloud GitHub composition", () => {
         reads++;
         if (reads === 1) {
           expect((await pool.query(`UPDATE cloud_github_source_verifications
-            SET verified_at=clock_timestamp()-interval '31 seconds' WHERE org_id=$1 RETURNING repository_id`, [organizationId])).rowCount).toBe(1);
+            SET verified_at=clock_timestamp()-interval '10 minutes 1 second' WHERE org_id=$1 RETURNING repository_id`, [organizationId])).rowCount).toBe(1);
         }
         return Response.json(op === "gh.prGet" ? { ...pull(), title: reads === 1 ? "Discarded" : "Fresh", draft: reads === 1 } : {
           total_count: 1, check_runs: [{ name: reads === 1 ? "Discarded" : "Fresh", status: "completed", conclusion: "success" }],
@@ -325,7 +325,7 @@ database("cloud GitHub composition", () => {
           reads++;
           reached(); await held;
           if (change === "expired observation" && reads > 1)
-            expect((await pool.query("UPDATE cloud_github_source_verifications SET verified_at=clock_timestamp()-interval '31 seconds' WHERE org_id=$1 RETURNING repository_id", [organizationId])).rowCount).toBe(1);
+            expect((await pool.query("UPDATE cloud_github_source_verifications SET verified_at=clock_timestamp()-interval '10 minutes 1 second' WHERE org_id=$1 RETURNING repository_id", [organizationId])).rowCount).toBe(1);
         }
         return defaultFetch(value, init);
       });
@@ -344,7 +344,7 @@ database("cloud GitHub composition", () => {
         } else if (change === "source") {
           expect((await pool.query("DELETE FROM cloud_v2_github_sources WHERE workspace_id=$1 RETURNING workspace_id", [f.workspace.id])).rowCount).toBe(1);
         } else if (change === "expired observation") {
-          expect((await pool.query("UPDATE cloud_github_source_verifications SET verified_at=clock_timestamp()-interval '31 seconds' WHERE org_id=$1 RETURNING repository_id", [organizationId])).rowCount).toBe(1);
+          expect((await pool.query("UPDATE cloud_github_source_verifications SET verified_at=clock_timestamp()-interval '10 minutes 1 second' WHERE org_id=$1 RETURNING repository_id", [organizationId])).rowCount).toBe(1);
         } else {
           expect((await pool.query(`UPDATE cloud_github_source_verifications SET verified_at=NULL,
             failure_code='github_cloud_access_denied',failure_status=403,retry_at=clock_timestamp()+interval '1 minute'
@@ -369,7 +369,7 @@ database("cloud GitHub composition", () => {
       const path = new URL(String(value)).pathname;
       if (path.endsWith("/pulls/7")) {
         reads++;
-        expect((await pool.query("UPDATE cloud_github_source_verifications SET verified_at=clock_timestamp()-interval '31 seconds' WHERE org_id=$1 RETURNING repository_id", [organizationId])).rowCount).toBe(1);
+        expect((await pool.query("UPDATE cloud_github_source_verifications SET verified_at=clock_timestamp()-interval '10 minutes 1 second' WHERE org_id=$1 RETURNING repository_id", [organizationId])).rowCount).toBe(1);
       }
       if (path.endsWith("/branches")) {
         admissions++;
@@ -414,7 +414,7 @@ database("cloud GitHub composition", () => {
     fetcher.mockClear();
     const restarted = createCloudGithubServices(pool, null, keys, workspaces, fetcher);
     await expect(restarted.continueSource(workspace)).resolves.toMatchObject({ recheckAt: expect.any(Number) });
-    await expect(restarted.authorizeSource(workspace)).rejects.toMatchObject({ code: status === 403 ? "github_rate_limited" : "github_unavailable" });
+    await expect(restarted.authorizeSource(workspace)).resolves.toBeUndefined();
     expect(fetcher).not.toHaveBeenCalled();
     expect((await workspaces.get(workspace.id, userId)).state).toBe("running");
   });
@@ -755,18 +755,18 @@ database("cloud GitHub composition", () => {
     expect(document).toHaveProperty("githubUnavailableReason");
     expect((await pool.query("SELECT state FROM cloud_v2_workspaces WHERE id=$1", [workspace.id])).rows[0].state).toBe("running");
   });
-  it("keeps stopped catalog admission fresh instead of borrowing a running continuation", async () => {
+  it("retains a stopped catalog through a temporary refresh failure", async () => {
     const f = await fixture();
     await services.service.execute(f.workspace.id, userId, { op: "gh.prSync", params: {} });
     const running = await workspaces.get(f.workspace.id, userId);
     await services.documents([running]);
-    await pool.query("UPDATE cloud_github_source_verifications SET verified_at=clock_timestamp()-interval '31 seconds' WHERE org_id=$1", [organizationId]);
+    await pool.query("UPDATE cloud_github_source_verifications SET verified_at=clock_timestamp()-interval '10 minutes 1 second' WHERE org_id=$1", [organizationId]);
     await workspaces.transition(running.id, ["running"], "stopped");
     fetcher.mockImplementation(async () => new Response(null, { status: 503 }));
     const [document] = await services.documents([await workspaces.get(running.id, userId)]);
-    expect(fetcher).toHaveBeenCalled();
-    expect(document).not.toHaveProperty("github");
-    expect(document?.githubUnavailableReason).toBe("unavailable");
+    expect(document?.github).toBeDefined();
+    expect(document?.githubUnavailableReason).toBeUndefined();
+    await vi.waitFor(async () => expect((await pool.query("SELECT failure_code FROM cloud_github_source_verifications WHERE org_id=$1", [organizationId])).rows[0]?.failure_code).toBe("github_unavailable"));
     expect((await workspaces.get(running.id, userId)).state).toBe("stopped");
   });
   it("never shares a catalog fingerprint or proof across organizations", async () => {

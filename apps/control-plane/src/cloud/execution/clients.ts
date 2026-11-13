@@ -12,7 +12,7 @@ import type { ExecutionAdmission } from "./authority.js";
 import type { CloudExecutionContexts, ExecutionContext, ExecutionWorker } from "./store.js";
 import { executionContextAuthority, matchesExecutionSignature, type VersionedExecutionAuthority } from "./signatures.js";
 import { actorChanged, executionWorkerRequired } from "./errors.js";
-import { EXECUTION_MINIMUM_LIFETIME_MS, assertExecutionLifetime } from "./lifetime.js";
+import { EXECUTION_MINIMUM_LIFETIME_MS, assertExecutionLifetime, withExecutionLifetimeRetry } from "./lifetime.js";
 
 export type ExecutionConnectAuthority = VersionedExecutionAuthority & { signature: string; stopGeneration: string; tokenEnd: number };
 const record = z.object({ type: z.string(), id: CloudV2PromptIdSchema.optional(), op: z.string().optional(),
@@ -52,28 +52,32 @@ export class CloudExecutionClients {
 
   async open(workspaceId: string, clientId: string, grant: CloudV2AppGrant) {
     if (!grant.execution || grant.execution.tokenEnd <= Date.now()) throw actorChanged();
-    const proof = await this.contexts.deps.authority.admit(workspaceId, grant.userId, { minimumSourceMs: EXECUTION_MINIMUM_LIFETIME_MS });
-    if (!matchesExecutionSignature(grant.execution, grant.execution.signature, proof.person, "personSignature") || proof.person.accessEpoch !== grant.accessEpoch) throw actorChanged();
-    return withSystemTx(this.contexts.pool, async tx => {
-      await tx.query("SELECT id FROM users WHERE id=$1 FOR KEY SHARE", [proof.person.userId]);
-      await tx.query("SELECT 1 FROM cloud_v2_workspaces WHERE id=$1 FOR UPDATE", [workspaceId]);
-      await this.contexts.deps.authority.assert(proof, tx);
-      if (!(await tx.query(`SELECT 1 FROM cloud_v2_workspaces WHERE id=$1 AND state='running' AND archived_at IS NULL
-        AND worker_boot_id=$2 AND worker_boot_id=ANY(acting_user_boot_ids)`, [workspaceId, proof.person.bootId])).rowCount) throw executionWorkerRequired();
-      await this.contexts.boots.assertClean(tx, { id: workspaceId, worker_boot_id: proof.person.bootId!,
-        access_epoch: proof.person.accessEpoch, stop_generation: proof.person.stopGeneration, worker_token_hash: Buffer.from(proof.person.workerTokenHash!, "hex") });
-      if (grant.sessionId) await this.session(tx, grant.userId, grant.sessionId);
-      const context = await this.insert(tx, proof, { kind: "client", clientId, sessionId: grant.sessionId, tokenEnd: grant.execution!.tokenEnd });
-      await this.contexts.assertContext(tx, context, proof);
-      assertExecutionLifetime(context.expires_at.getTime());
-      return { contextId: context.id, userId: grant.userId, expiresAt: context.expires_at.getTime() };
+    const execution = grant.execution;
+    return withExecutionLifetimeRetry(async () => {
+      const proof = await this.contexts.deps.authority.admit(workspaceId, grant.userId, { minimumSourceMs: EXECUTION_MINIMUM_LIFETIME_MS });
+      if (!matchesExecutionSignature(execution, execution.signature, proof.person, "personSignature") || proof.person.accessEpoch !== grant.accessEpoch) throw actorChanged();
+      return withSystemTx(this.contexts.pool, async tx => {
+        await tx.query("SELECT id FROM users WHERE id=$1 FOR KEY SHARE", [proof.person.userId]);
+        await tx.query("SELECT 1 FROM cloud_v2_workspaces WHERE id=$1 FOR UPDATE", [workspaceId]);
+        await this.contexts.deps.authority.assert(proof, tx);
+        if (!(await tx.query(`SELECT 1 FROM cloud_v2_workspaces WHERE id=$1 AND state='running' AND archived_at IS NULL
+          AND worker_boot_id=$2 AND worker_boot_id=ANY(acting_user_boot_ids)`, [workspaceId, proof.person.bootId])).rowCount) throw executionWorkerRequired();
+        await this.contexts.boots.assertClean(tx, { id: workspaceId, worker_boot_id: proof.person.bootId!,
+          access_epoch: proof.person.accessEpoch, stop_generation: proof.person.stopGeneration, worker_token_hash: Buffer.from(proof.person.workerTokenHash!, "hex") });
+        if (grant.sessionId) await this.session(tx, grant.userId, grant.sessionId);
+        const context = await this.insert(tx, proof, { kind: "client", clientId, sessionId: grant.sessionId, tokenEnd: grant.execution!.tokenEnd });
+        await this.contexts.assertContext(tx, context, proof);
+        assertExecutionLifetime(context.expires_at.getTime());
+        return { contextId: context.id, userId: grant.userId, expiresAt: context.expires_at.getTime() };
+      });
     });
   }
 
   private async session(tx: Tx, userId: string, sessionId: string) {
     if (!(await tx.query(`SELECT 1 FROM auth_sessions s WHERE s.provider='workos' AND s.provider_session_id=$1 AND s.user_id=$2
       AND s.status='active' AND s.revoked_at IS NULL AND (s.provider_session_expires_at IS NULL OR s.provider_session_expires_at>clock_timestamp())
-      AND EXISTS(SELECT 1 FROM user_identities i WHERE i.user_id=s.user_id AND i.provider=s.provider AND i.provider_sub=s.provider_sub AND i.status='active')`, [sessionId, userId])).rowCount) throw actorChanged();
+      AND EXISTS(SELECT 1 FROM user_identities i WHERE i.user_id=s.user_id AND i.provider=s.provider AND i.provider_sub=s.provider_sub AND i.status='active')`, [sessionId, userId])).rowCount)
+      throw new HttpError(401, "session_revoked", "Authentication is no longer current");
   }
 
   private async insert(tx: Tx, proof: ExecutionAdmission, input: { kind: "client" | "terminal"; clientId: string; sessionId: string | null;
@@ -107,39 +111,41 @@ export class CloudExecutionClients {
     const operation = terminal ? "terminal.create" : request.type === "WORKSPACE_REQUEST" &&
       CLOUD_V2_CLIENT_OPERATIONS.some(op => op === request.op) && (request.op !== "git.repoBranchCatalog" ||
         (request.params as { fetch?: unknown } | undefined)?.fetch === true) ? request.op : null;
-    const { context: handle, proof } = await this.current(workspaceId, id, operation ? EXECUTION_MINIMUM_LIFETIME_MS : 0);
-    if (handle.kind !== "client" || handle.operation || handle.sync_device_id) throw actorChanged();
-    if (request.type === "AGENT_PROMPT" || request.type === "AGENT_STEER") throw new HttpError(409, "client_update_required", "Update the desktop before sending in a shared workspace");
-    const fingerprint = createHash("sha256").update(JSON.stringify([request.type, request.op, request.params, request.sessionId])).digest();
-    await withSystemTx(this.contexts.pool, async tx => {
-      let issued: ExecutionContext | undefined;
-      await tx.query("SELECT id FROM users WHERE id=$1 FOR KEY SHARE", [proof.person.userId]);
-      await tx.query("SELECT 1 FROM cloud_v2_workspaces WHERE id=$1 FOR UPDATE", [workspaceId]);
-      await this.contexts.assertContext(tx, handle, proof);
-      if (["PTY_CREATE", "PTY_WRITE", "PTY_RESIZE", "PTY_KILL"].includes(request.type)) {
-        if (!request.sessionId) throw actorChanged();
-        const owner = (await tx.query<ExecutionContext>(`SELECT * FROM cloud_v2_execution_contexts WHERE workspace_id=$1 AND worker_boot_id=$2
-          AND kind='terminal' AND terminal_id=$3 AND state<>'retired'`, [workspaceId, handle.worker_boot_id, request.sessionId])).rows[0];
-        if (owner && owner.user_id !== handle.user_id || !terminal && !owner) throw actorChanged();
-        if (owner) await this.contexts.assertContext(tx, owner, proof);
-      }
-      if (operation) {
-        if (!request.id) throw actorChanged();
-        const prior = (await tx.query<ExecutionContext>(`SELECT * FROM cloud_v2_execution_contexts WHERE workspace_id=$1 AND client_id=$2 AND request_id=$3 AND kind='client'`,
-          [workspaceId, handle.client_id, request.id])).rows[0];
-        if (prior) {
-          if (prior.operation !== operation || !prior.request_fingerprint?.equals(fingerprint)) throw actorChanged();
-          await this.contexts.assertContext(tx, prior, proof);
-        } else {
-          const count = (await tx.query<{ n: number }>("SELECT count(*)::int AS n FROM cloud_v2_execution_contexts WHERE parent_context_id=$1 AND state='active'", [id])).rows[0]!.n;
-          if (count >= 128) throw new HttpError(429, "execution_limited", "Too many client operations");
-          issued = await this.insert(tx, proof, { kind: "client", clientId: handle.client_id!, sessionId: handle.provider_session_id, parentId: id,
-            requestId: request.id, operation, fingerprint, ...(terminal ? { terminalId: request.sessionId! } : {}),
-            ...(handle.client_token_expires_at ? { tokenEnd: handle.client_token_expires_at.getTime() } : {}) });
+    return withExecutionLifetimeRetry(async () => {
+      const { context: handle, proof } = await this.current(workspaceId, id, operation ? EXECUTION_MINIMUM_LIFETIME_MS : 0);
+      if (handle.kind !== "client" || handle.operation || handle.sync_device_id) throw actorChanged();
+      if (request.type === "AGENT_PROMPT" || request.type === "AGENT_STEER") throw new HttpError(409, "client_update_required", "Update the desktop before sending in a shared workspace");
+      const fingerprint = createHash("sha256").update(JSON.stringify([request.type, request.op, request.params, request.sessionId])).digest();
+      await withSystemTx(this.contexts.pool, async tx => {
+        let issued: ExecutionContext | undefined;
+        await tx.query("SELECT id FROM users WHERE id=$1 FOR KEY SHARE", [proof.person.userId]);
+        await tx.query("SELECT 1 FROM cloud_v2_workspaces WHERE id=$1 FOR UPDATE", [workspaceId]);
+        await this.contexts.assertContext(tx, handle, proof);
+        if (["PTY_CREATE", "PTY_WRITE", "PTY_RESIZE", "PTY_KILL"].includes(request.type)) {
+          if (!request.sessionId) throw actorChanged();
+          const owner = (await tx.query<ExecutionContext>(`SELECT * FROM cloud_v2_execution_contexts WHERE workspace_id=$1 AND worker_boot_id=$2
+            AND kind='terminal' AND terminal_id=$3 AND state<>'retired'`, [workspaceId, handle.worker_boot_id, request.sessionId])).rows[0];
+          if (owner && owner.user_id !== handle.user_id || !terminal && !owner) throw actorChanged();
+          if (owner) await this.contexts.assertContext(tx, owner, proof);
         }
-      }
-      await this.contexts.assertContext(tx, handle, proof);
-      if (issued) assertExecutionLifetime(issued.expires_at.getTime());
+        if (operation) {
+          if (!request.id) throw actorChanged();
+          const prior = (await tx.query<ExecutionContext>(`SELECT * FROM cloud_v2_execution_contexts WHERE workspace_id=$1 AND client_id=$2 AND request_id=$3 AND kind='client'`,
+            [workspaceId, handle.client_id, request.id])).rows[0];
+          if (prior) {
+            if (prior.operation !== operation || !prior.request_fingerprint?.equals(fingerprint)) throw actorChanged();
+            await this.contexts.assertContext(tx, prior, proof);
+          } else {
+            const count = (await tx.query<{ n: number }>("SELECT count(*)::int AS n FROM cloud_v2_execution_contexts WHERE parent_context_id=$1 AND state='active'", [id])).rows[0]!.n;
+            if (count >= 128) throw new HttpError(429, "execution_limited", "Too many client operations");
+            issued = await this.insert(tx, proof, { kind: "client", clientId: handle.client_id!, sessionId: handle.provider_session_id, parentId: id,
+              requestId: request.id, operation, fingerprint, ...(terminal ? { terminalId: request.sessionId! } : {}),
+              ...(handle.client_token_expires_at ? { tokenEnd: handle.client_token_expires_at.getTime() } : {}) });
+          }
+        }
+        await this.contexts.assertContext(tx, handle, proof);
+        if (issued) assertExecutionLifetime(issued.expires_at.getTime());
+      });
     });
   }
 
@@ -151,29 +157,32 @@ export class CloudExecutionClients {
       if (!row) throw actorChanged();
       return row;
     });
-    return { context, proof: await this.contexts.admission(context, EXECUTION_MINIMUM_LIFETIME_MS) };
+    return context;
   }
 
   async operationLease(identity: ExecutionWorker, input: { clientId: string; requestId: string; operation: string }) {
-    const { context } = await this.request(identity, input.clientId, input.requestId, input.operation);
+    const context = await this.request(identity, input.clientId, input.requestId, input.operation);
     return this.contexts.identityLease(identity, context.id, "client");
   }
 
   async terminalLease(identity: ExecutionWorker, input: { clientId: string; requestId: string; terminalId: string }) {
-    const { context: request, proof } = await this.request(identity, input.clientId, input.requestId, "terminal.create");
+    const request = await this.request(identity, input.clientId, input.requestId, "terminal.create");
     if (request.terminal_id !== input.terminalId) throw actorChanged();
-    const id = await withSystemTx(this.contexts.pool, async tx => {
-      await tx.query("SELECT id FROM users WHERE id=$1 FOR KEY SHARE", [proof.person.userId]);
-      const workspace = await this.contexts.worker(tx, identity, true);
-      await this.contexts.assertContext(tx, request, proof);
-      const prior = (await tx.query<ExecutionContext>(`SELECT * FROM cloud_v2_execution_contexts WHERE workspace_id=$1 AND worker_boot_id=$2 AND kind='terminal'
-        AND ((client_id=$3 AND request_id=$4) OR (terminal_id=$5 AND state<>'retired')) ORDER BY created_at LIMIT 1`,
-      [workspace.id, identity.bootId, input.clientId, input.requestId, input.terminalId])).rows[0];
-      if (prior) { if (prior.user_id !== request.user_id) throw actorChanged(); await this.contexts.assertContext(tx, prior, proof); return prior.id; }
-      const row = await this.insert(tx, proof, { kind: "terminal", clientId: input.clientId, sessionId: request.provider_session_id, requestId: input.requestId, terminalId: input.terminalId });
-      await this.contexts.assertContext(tx, request, proof);
-      assertExecutionLifetime(row.expires_at.getTime());
-      return row.id;
+    const id = await withExecutionLifetimeRetry(async () => {
+      const proof = await this.contexts.admission(request, EXECUTION_MINIMUM_LIFETIME_MS);
+      return withSystemTx(this.contexts.pool, async tx => {
+        await tx.query("SELECT id FROM users WHERE id=$1 FOR KEY SHARE", [proof.person.userId]);
+        const workspace = await this.contexts.worker(tx, identity, true);
+        await this.contexts.assertContext(tx, request, proof);
+        const prior = (await tx.query<ExecutionContext>(`SELECT * FROM cloud_v2_execution_contexts WHERE workspace_id=$1 AND worker_boot_id=$2 AND kind='terminal'
+          AND ((client_id=$3 AND request_id=$4) OR (terminal_id=$5 AND state<>'retired')) ORDER BY created_at LIMIT 1`,
+        [workspace.id, identity.bootId, input.clientId, input.requestId, input.terminalId])).rows[0];
+        if (prior) { if (prior.user_id !== request.user_id) throw actorChanged(); await this.contexts.assertContext(tx, prior, proof); return prior.id; }
+        const row = await this.insert(tx, proof, { kind: "terminal", clientId: input.clientId, sessionId: request.provider_session_id, requestId: input.requestId, terminalId: input.terminalId });
+        await this.contexts.assertContext(tx, request, proof);
+        assertExecutionLifetime(row.expires_at.getTime());
+        return row.id;
+      });
     });
     return this.contexts.identityLease(identity, id, "terminal");
   }

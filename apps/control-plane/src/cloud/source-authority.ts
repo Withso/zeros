@@ -13,15 +13,16 @@ const repositorySchema = z.string().max(201).regex(/^[A-Za-z0-9_.-]{1,100}\/[A-Z
 const repositoryIdSchema = z.string().regex(/^[1-9][0-9]{0,15}$/).refine(value => Number.isSafeInteger(Number(value)));
 export const CloudSourceTargetSchema = z.object({ repository: repositorySchema, repositoryId: repositoryIdSchema }).strict();
 export type CloudSourceTarget = z.infer<typeof CloudSourceTargetSchema>;
-export const CLOUD_SOURCE_ADMISSION_MS = 30_000;
-/** A booting workspace's worker says hello seconds after the lifecycle's
- * checks, which renew a positive this close to expiry in the background. */
-export const CLOUD_SOURCE_RENEWAL_MS = 15_000;
+export const CLOUD_SOURCE_ADMISSION_MS = 10 * 60_000;
+export const CLOUD_SOURCE_RENEWAL_MS = 2 * 60_000;
 // Worker HTTP requests allow ten seconds, including configuration after admission.
 const VERIFICATION_WAIT_MS = 5_000;
 export const CLOUD_SOURCE_REFRESH_MS = 10 * 60_000;
 export const CLOUD_SOURCE_GRACE_MS = 60 * 60_000;
 const MAX_LEASES = 1024;
+export class SourceLifetimeUnavailable extends HttpError {
+  constructor() { super(503, "github_verification_expired", "Repository verification took too long. Try again."); }
+}
 type SourceRevision = { id: number; invalidated?: HttpError };
 type SourceObservation = { scope: RepositoryRequest; fingerprint: string; revision: SourceRevision; until: number; recheckAt: number; refresh?: Promise<void> };
 export type CloudSourceProof = { accessEpoch: string; loginRevision: string };
@@ -34,9 +35,8 @@ type SourceVerifier = Pick<GithubRepositoryAuthority, "check" | "fingerprintFor"
 };
 type WorkspaceLease = { proof: string; revision: SourceRevision; organizationId: string; userId: string; value: CloudSourceContinuation };
 
-/** Fresh admission and continuation are deliberately separate. Only a running
- * workspace with known original IDs can retain a positive observation during
- * a provider outage; failures never renew that observation's one-hour limit. */
+/** A confirmed positive is retained only for its exact person, connection and
+ * repository identity. Temporary failures never move its one-hour deadline. */
 export class CloudV2SourceAuthority {
   private readonly observations = new Map<string, GithubVerification>();
   private readonly flights = new Map<string, Promise<GithubVerification>>();
@@ -45,7 +45,6 @@ export class CloudV2SourceAuthority {
   private readonly fingerprints = new Map<string, Promise<string>>();
   private readonly actorFlights = new Map<string, Promise<GithubVerification>>();
   private readonly backoffs = new Map<string, { until: number; error: HttpError }>();
-  private readonly renewalPauses = new Map<string, number>();
   private readonly revisions = new Map<string, SourceRevision>();
   private nextRevision = 0;
   constructor(private readonly pool: pg.Pool, private readonly github: SourceVerifier,
@@ -85,10 +84,10 @@ export class CloudV2SourceAuthority {
 
   /** A reader uses their own connection, independently of the VM's Creator.
    * In particular, a failed refresh here must never retire the Creator's VM. */
-  async viewer(organizationId: string, userId: string, targets: readonly CloudSourceTarget[], continuation: boolean, minimumRemainingMs = 0): Promise<CloudViewerSourceProof> {
+  async viewer(organizationId: string, userId: string, targets: readonly CloudSourceTarget[], continuation: boolean, minimumRemainingMs = 0, requireFresh = false): Promise<CloudViewerSourceProof> {
     const parsed = z.array(CloudSourceTargetSchema).min(1).max(100).parse(targets);
     const observations = await this.observeSources(organizationId,userId,parsed.map(target => target.repository),
-      parsed.map(target => target.repositoryId),continuation,false,minimumRemainingMs);
+      parsed.map(target => target.repositoryId),continuation,false,minimumRemainingMs,requireFresh);
     const fingerprint = observations[0]!.fingerprint;
     if (observations.some(value => value.fingerprint !== fingerprint))
       throw new HttpError(409,"github_authorization_changed","GitHub authorization changed. Try again.");
@@ -114,7 +113,7 @@ export class CloudV2SourceAuthority {
     return pending;
   }
 
-  private async observeSources(organizationId: string, userId: string, repositories: readonly string[], ids?: readonly string[], continuation = false, renew = false, minimumRemainingMs = 0): Promise<SourceObservation[]> {
+  private async observeSources(organizationId: string, userId: string, repositories: readonly string[], ids?: readonly string[], continuation = false, renew = false, minimumRemainingMs = 0, requireFresh = false): Promise<SourceObservation[]> {
     const sources = z.array(repositorySchema).min(1).max(100).safeParse(repositories);
     if (!sources.success || ids && (ids.length !== repositories.length || !z.array(repositoryIdSchema).safeParse(ids).success))
       throw new HttpError(403, "github_repository_invalid", "Repository access could not be verified.");
@@ -123,18 +122,18 @@ export class CloudV2SourceAuthority {
     // Repositories of one owner share a connection: read its fingerprint once
     // before the observations and once after, not once per repository.
     const before = new Map<string, Promise<string>>(), after = new Map<string, Promise<string>>();
-    for (const [index, repository] of sources.data.entries()) observations.push(await this.observeRepository(organizationId, userId, repository, ids?.[index], continuation, deadline, before, renew, minimumRemainingMs));
-    const requireFresh = () => {
-      if (observations.some(observation => observation.until <= this.now()))
-        throw new HttpError(503, "github_verification_expired", "Repository verification took too long. Try again.");
+    for (const [index, repository] of sources.data.entries()) observations.push(await this.observeRepository(organizationId, userId, repository, ids?.[index], continuation, deadline, before, renew, minimumRemainingMs,requireFresh));
+    const assertLifetime = () => {
+      if (observations.some(observation => observation.until - this.now() < minimumRemainingMs || observation.until <= this.now()))
+        throw new SourceLifetimeUnavailable();
     };
-    requireFresh();
+    assertLifetime();
     for (const observation of observations) {
       if (await this.waitFor(this.fingerprintOnce(after, observation.scope), deadline) !== observation.fingerprint)
         throw new HttpError(409, "github_authorization_changed", "GitHub authorization changed. Try again.");
     }
     for (const observation of observations) this.assertRevision(observation.scope, observation.revision);
-    requireFresh();
+    assertLifetime();
     return observations;
   }
 
@@ -147,25 +146,6 @@ export class CloudV2SourceAuthority {
   private rememberBackoff(actor: string, value: { until: number; error: HttpError }): void {
     if (!this.backoffs.has(actor) && this.backoffs.size >= MAX_LEASES) this.backoffs.delete(this.backoffs.keys().next().value!);
     this.backoffs.set(actor, value);
-  }
-
-  private pauseRenewal(key: string, until: number): void {
-    if (!this.renewalPauses.has(key) && this.renewalPauses.size >= MAX_LEASES) this.renewalPauses.delete(this.renewalPauses.keys().next().value!);
-    this.renewalPauses.set(key, until);
-  }
-
-  /** Verifies a durable positive again in the background once it is within
-   * CLOUD_SOURCE_RENEWAL_MS of expiry. One flight per process, one claim
-   * across replicas; a confirmed refusal still withdraws it at once. */
-  private renew(key: string, scope: RepositoryRequest, fingerprint: string, value: GithubVerification, revision: SourceRevision): void {
-    const now = this.now(), expires = value.verifiedAt! + CLOUD_SOURCE_ADMISSION_MS;
-    if (expires - now > CLOUD_SOURCE_RENEWAL_MS) return;
-    const paused = this.renewalPauses.get(key);
-    if (paused !== undefined && paused > now) return;
-    this.renewalPauses.delete(key);
-    // After any failure the positive simply expires and admission verifies as before.
-    void this.refresh(key, scope, fingerprint, value, revision, now + VERIFICATION_WAIT_MS, true)
-      .catch(() => this.pauseRenewal(key, expires));
   }
 
   private waitFor<T>(pending: Promise<T>, deadline: number): Promise<T> {
@@ -249,12 +229,6 @@ export class CloudV2SourceAuthority {
           ? new HttpError(409, "github_authorization_changed", "GitHub authorization changed. Try again.") : error;
         const failure = currentError instanceof HttpError ? currentError : new HttpError(503, "github_verification_failed", "Repository verification could not complete. Try again.");
         const temporary = isGithubTemporary(failure);
-        // A renewal never shortens the positive it renews: an outage records
-        // nothing. A confirmed refusal below withdraws it as usual.
-        if (renewal && temporary && persistent && claim?.claimId) {
-          await this.verificationStore!.release(persistent, claim.claimId);
-          throw failure;
-        }
         const prior = claim ?? previous;
         const backoff = Math.min(15 * 60_000, 60_000 * 2 ** Math.min(prior?.failures ?? 0, 4));
         const retryAfterMs = Math.max(backoff, currentError instanceof GithubTemporaryError ? currentError.retryAfterMs : 0) + Math.floor(backoff * 0.2 * this.random());
@@ -291,7 +265,7 @@ export class CloudV2SourceAuthority {
   }
 
   private async observeRepository(organizationId: string, userId: string, repository: string, repositoryId?: string, continuation = false, deadline = this.now() + VERIFICATION_WAIT_MS,
-    fingerprints?: Map<string, Promise<string>>, renew = false, minimumRemainingMs = 0): Promise<SourceObservation> {
+    fingerprints?: Map<string, Promise<string>>, renew = false, minimumRemainingMs = 0, requireFresh = false): Promise<SourceObservation> {
     const parsed = repositorySchema.safeParse(repository);
     if (!parsed.success) throw new HttpError(403, "github_repository_invalid", "Repository access could not be verified.");
     const [owner, name] = parsed.data.toLowerCase().split("/") as [string, string];
@@ -301,8 +275,12 @@ export class CloudV2SourceAuthority {
     this.assertRevision(scope, revision);
     const key = JSON.stringify([organizationId, userId, owner, name, repositoryId ?? null, fingerprint]);
     const freshness = continuation ? CLOUD_SOURCE_REFRESH_MS : CLOUD_SOURCE_ADMISSION_MS;
+    const retainPositive = !requireFresh && (continuation || repositoryId !== undefined);
+    const lifetime = retainPositive ? CLOUD_SOURCE_GRACE_MS : CLOUD_SOURCE_ADMISSION_MS;
+    const refreshAge = freshness - (renew || retainPositive ? CLOUD_SOURCE_RENEWAL_MS : 0);
     let value = this.observations.get(key);
-    const fresh = () => value?.verifiedAt !== null && value?.verifiedAt !== undefined && !value.failure && value.verifiedAt + freshness - minimumRemainingMs > this.now();
+    const fresh = () => value?.verifiedAt !== null && value?.verifiedAt !== undefined && !value.failure &&
+      value.verifiedAt + refreshAge > this.now() && value.verifiedAt + lifetime - minimumRemainingMs > this.now();
     // The workspace proof fast path above this layer avoids these reads.
     // Without that proof, also observe a denial recorded by another replica
     // whose notification may have been lost; a local positive is not enough.
@@ -313,15 +291,12 @@ export class CloudV2SourceAuthority {
       else { this.observations.delete(key); value = undefined; }
     }
     const observation = (record: GithubVerification, recheckAt: number, refresh?: Promise<GithubVerification>): SourceObservation => ({
-      scope, fingerprint, revision, until: record.verifiedAt! + (continuation ? CLOUD_SOURCE_GRACE_MS : CLOUD_SOURCE_ADMISSION_MS),
+      scope, fingerprint, revision, until: record.verifiedAt! + lifetime,
       recheckAt: Math.min(recheckAt, record.verifiedAt! + CLOUD_SOURCE_GRACE_MS),
       ...(refresh ? { refresh: refresh.then(() => {}) } : {}),
     });
-    if (fresh()) {
-      if (renew && !continuation && this.verificationStore && repositoryId) this.renew(key, scope, fingerprint, value!, revision);
-      return observation(value!, value!.verifiedAt! + freshness);
-    }
-    const grace = continuation && value?.verifiedAt !== null && value?.verifiedAt !== undefined &&
+    if (fresh()) return observation(value!, value!.verifiedAt! + refreshAge);
+    const grace = retainPositive && value?.verifiedAt !== null && value?.verifiedAt !== undefined &&
       value.verifiedAt + CLOUD_SOURCE_GRACE_MS - minimumRemainingMs > this.now() && (!value.failure || isGithubTemporary(value.failure));
     if (value?.failure && value.retryAt > this.now()) {
       if (grace) return observation(value, value.retryAt);
@@ -335,16 +310,16 @@ export class CloudV2SourceAuthority {
     if (value?.claimId && value.claimUntil > this.now()) {
       if (grace) return observation(value, value.claimUntil);
     }
-    const refresh = this.refresh(key, scope, fingerprint, value, revision, deadline, false, Math.max(0, CLOUD_SOURCE_ADMISSION_MS - minimumRemainingMs));
+    const refresh = this.refresh(key, scope, fingerprint, value, revision, deadline, !!grace, Math.max(0, refreshAge - minimumRemainingMs));
     if (grace) {
       const result = observation(value!, this.now() + 60_000, refresh);
       void result.refresh!.catch(() => {});
       return result;
     }
     value = await this.waitFor(refresh, deadline);
-    if (value.verifiedAt === null || value.verifiedAt + freshness <= this.now())
-      throw new HttpError(503, "github_verification_expired", "Repository verification took too long. Try again.");
-    return observation(value, value.verifiedAt + freshness);
+    if (value.verifiedAt === null || value.verifiedAt + freshness <= this.now() || value.verifiedAt + lifetime - this.now() < minimumRemainingMs)
+      throw new SourceLifetimeUnavailable();
+    return observation(value, value.verifiedAt + refreshAge);
   }
 
   private async sources(workspace: CloudV2Workspace): Promise<{ names: string[]; ids?: string[] }> {
@@ -365,13 +340,11 @@ export class CloudV2SourceAuthority {
     return { names: sources.data, ids: targets.map(target => target.repositoryId) };
   }
 
-  /** renew is for the lifecycle's checks of a booting workspace, whose hello
-   * follows within seconds. Other checks would renew every 15 s while polled. */
-  async workspace(workspace: CloudV2Workspace, renew = false): Promise<void> {
+  async workspace(workspace: CloudV2Workspace, renew = false, requireFresh = false): Promise<void> {
     requireWorkspaceCreator(workspace);
     const sources = await this.sources(workspace);
     await this.observeSources(workspace.organizationId, workspace.creatorUserId, sources.names, sources.ids, false,
-      renew && (workspace.state === "creating" || workspace.state === "starting"));
+      renew && (workspace.state === "creating" || workspace.state === "starting"),0,requireFresh);
   }
 
   /** proof comes only from a live creator, worker token or room/session database

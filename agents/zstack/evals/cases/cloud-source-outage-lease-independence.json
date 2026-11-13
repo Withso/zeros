@@ -1,0 +1,9 @@
+{
+  "id": "cloud-source-outage-lease-independence",
+  "kind": "replay",
+  "area": "control-plane",
+  "fixedBy": "pr:1068",
+  "symptom": "Healthy cloud users received temporary credential failures when source observations or database work consumed a short issuance window; failed renewals then interrupted turns and connections.",
+  "rule": "The bug-fix playbook requires aged observations and per-query latency through the real router and PostgreSQL. Reuse exact confirmed source positives during temporary outages within the original bound; local execution must not require a live GitHub request. Network token mint and definitive revocation remain live.",
+  "check": "pnpm --dir apps/control-plane exec vitest run src/cloud/execution/source-resilience.integration.test.ts src/cloud/execution/lease-recovery.integration.test.ts"
+}

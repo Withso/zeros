@@ -64,9 +64,9 @@ export function createCloudGithubCatalog(deps: {
             deadlines.set(row.id, lease.recheckAt);
           } else {
             let admission = authority.admission;
-            if (!admission || admission.until <= Date.now()) {
+            if (!admission || admission.until <= Date.now() || admission.refreshAt <= Date.now()) {
               await deps.authorizeSource(row);
-              admission = await withSystemTx(deps.pool, tx => deps.verifications.workspaceAdmission(tx, row.id, group.scope, group.generation!));
+              admission = await withSystemTx(deps.pool, tx => deps.verifications.workspaceAdmission(tx, row.id, group.scope, group.generation!,true));
             }
             if (!admission || admission.until <= Date.now()) throw expired();
             deadlines.set(row.id, admission.until); freshAdmissions.add(row.id);

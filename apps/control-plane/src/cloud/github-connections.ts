@@ -97,6 +97,7 @@ export class RecentGithubProfiles {
     const entry = this.entries.get(this.key(token));
     return entry && this.now() - entry.at < GITHUB_PROFILE_REUSE_MS ? entry.value : undefined;
   }
+  confirmed(token: string): GithubProfile | undefined { return this.entries.get(this.key(token))?.value; }
   clear(): void { this.entries.clear(); }
 }
 
@@ -215,7 +216,15 @@ export class CloudGithubConnections {
       throw error;
     }
   }
-  async workerProfile(credential: CloudGithubCredentialSnapshot, assertCurrent: () => Promise<void>) {
+  async workerProfile(credential: CloudGithubCredentialSnapshot, assertCurrent: () => Promise<void>, options: { verifiedSource?: true } = {}) {
+    // Activated material has already checked the person's repository proof.
+    // Git author identity must not add a provider dependency to local work.
+    if (options.verifiedSource) {
+      const identity = this.profiles.confirmed(credential.material.accessToken) ?? credential.identity;
+      await assertCurrent();
+      if (identity.id !== credential.identity.id) throw changed();
+      return identity;
+    }
     // A hello's Git identity follows the create's or a verification's /user
     // read of this token by seconds. Its fence still runs, as before a request.
     const recent = this.profiles.recent(credential.material.accessToken);

@@ -344,13 +344,17 @@ connection generation and verifies read or write permission as needed.
 Cloud Computer builds use installation tokens for explicit repositories and
 permissions when the App is selected. Workspace VMs use the creator's user token
 as described below. Every configured source still needs separate authorization;
-a shared recipe is not a credential grant. New connections, create/wake/restore, GitHub credentials and
-PR actions require source verification no older than 30 seconds, measured
-before remote I/O. Running workspaces reuse exact-source permission evidence
-for ten minutes, then refresh it on actual work in the background. During a
-GitHub outage or rate limit, existing chat, files, terminal, history and model
-proxy requests can continue for at most one hour from the original successful
-verification. Failures never restart that clock. Confirmed denial, disconnected
+a shared recipe is not a credential grant. A confirmed positive for the exact
+person, connection generation and repository ID is fresh for ten minutes.
+Workspace admission and traffic start a background refresh two minutes before
+expiry, sharing one verification for that person and repository. During a
+GitHub outage or rate limit, connections, chat, files, terminal, history and
+model proxy requests can reuse that positive for at most one hour from its
+original confirmation. A person without a positive gets a retryable unavailable
+answer. Failures never restart the confirmation clock. Git and GitHub network
+tokens still verify repository access on demand; a write-only denial refuses
+that operation without retiring the person's source-read authority.
+Confirmed denial, disconnected
 credentials, changed connection generations and unverified source IDs cannot
 use grace. Organization membership, worker boot and app session checks still
 apply independently.
@@ -369,13 +373,10 @@ five-second verification budget leaves room for other configuration work, but
 slow credential/configuration I/O can still exceed the hello timeout; the worker
 retries that hello automatically. Waiters neither steal a live claim nor extend
 source grace.
-The lifecycle's checks of a creating or starting workspace renew a positive
-within 15 seconds of expiry in the background, so the worker's hello seconds
-later doesn't wait for GitHub. Other checks, including that hello and status
-polls, never renew, so a boot costs at most about one extra verification. A
-renewal's outage response records nothing and leaves the positive to expire; a
-confirmed refusal withdraws it at once.
-The create request's check of its requested repository renews the same way.
+Lifecycle, hello and create checks use the same background refresh threshold.
+A temporary refresh failure records its retry deadline while retaining the
+original positive and its one-hour limit; a confirmed refusal withdraws it at
+once.
 Before that, the Create page warms the selected repository on intent: picking
 or hovering it, or pointing at, focusing or typing in the prompt sends
 `POST /v1/cloud-v2/organizations/:org/computer/repositories/warm`, at most
@@ -384,6 +385,10 @@ repository check with renewal and returns `{ ok: true }`; the desktop ignores
 its result.
 Transient failures back off from one to fifteen minutes, with bounded jitter, and respect
 GitHub's longer retry delay. An idle workspace does not refresh GitHub access.
+Relay close code `4001 access_revoked` means confirmed person access loss,
+including membership, account, session or source denial. Context expiry,
+temporary verification failure, workspace lifecycle changes and relay shutdown
+use retryable code `1013`; a deployment does not declare that a person lost access.
 
 Current authenticated worker activity records independently of GitHub, even
 with the prompt outbox disabled, so an outage cannot make an active turn look
@@ -772,6 +777,11 @@ the same control-plane process read for the same token within the last 30 s
 (for example, during that hello's source check or the create's branch lookup)
 is reused instead of calling GitHub again. The authorization generation is
 still rechecked.
+Activated workspace leases use the person's already-confirmed profile or the
+selected connection's stored identity without a GitHub request. This remains
+available when the Git token needs renewal; network operations still obtain a
+separately verified token. The current database authority is checked before any
+material is returned.
 The VM user's global Git config includes the worker-owned
 `~/.config/zeros/git-identity`, which also sets `user.useConfigOnly=true`.
 Confirmed configuration changes atomically replace that file, so existing

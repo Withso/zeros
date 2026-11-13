@@ -79,6 +79,26 @@ database("activated relay authority through real sockets, routes and PostgreSQL"
     expect(await ending).toEqual({ code: 1013, reason: "workspace_verification_unavailable" });
   });
 
+  it("uses a retryable close when the control plane shuts down", async () => {
+    const { ws } = await connect(), ending = closed(ws);
+    f.cp.relay!.close();
+    expect(await ending).toEqual({ code: 1013, reason: "relay_restarting" });
+  });
+
+  it.each(["expired", "actor_changed", "worker_changed", "client_closed", "cancelled", "completed"] as const)(
+    "does not call a %s context a person revocation", async reason => {
+      const { ws, open } = await connect(), ending = closed(ws);
+      await f.cp.relay!.revokeContexts(f.workspace.id, [{ contextId: open.contextId, bootId: f.boot, reason }]);
+      expect(await ending).toEqual({ code: 1013, reason: "execution_context_unavailable" });
+    });
+
+  it("uses a retryable close when a live person's handle expires between frames", async () => {
+    const { ws, open } = await connect(), ending = closed(ws);
+    await pool.query("UPDATE cloud_v2_execution_contexts SET expires_at=clock_timestamp()-interval '1 second' WHERE id=$1", [open.contextId]);
+    f.cp.relay!.revalidateSources({ ownerUserId: f.viewer.id });
+    expect(await ending).toEqual({ code: 1013, reason: "workspace_verification_unavailable" });
+  });
+
   it("ends a desktop connection cleanly at token end and keeps its terminal for the same person", async () => {
     f.viewer.authentication.tokenExpiresAt = Math.floor(Date.now() / 1000) + 29;
     let tokenDeadline: { end: () => void; at: number } | undefined;

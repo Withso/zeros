@@ -13,6 +13,7 @@ import type { CloudV2Store, CloudV2Workspace, CloudV2WorkerBinding, CloudV2AppGr
 import { requireWorkspaceCreator } from "./workspace-access.js";
 import { isCloudV2Token } from "./tokens.js";
 import type { CloudExecutionContexts } from "./execution/store.js";
+import { ExecutionContextRevoked } from "./execution/errors.js";
 import { dialWorker, workerSupportsActingUser, workerSupportsCreatorLogins, workerSupportsApi, workerSupportsLocalCommands, workerSupportsLocalCommandReason, workerSupportsNotifyUser, workerSupportsCheckout, workerSupportsMcp, workerSupportsSetup, workerSupportsRepositorySetup, workerSupportsGithub, workerSupportsGitIdentity, workerSupportsGithubUserTokens, workerSupportsAgentInteractions, workerSupportsCodeReview, workerSupportsHistoryReplacement, workerSupportsEnvironment, workerSupportsRuntimeUpdate, workerSupportsPush, type WorkerRoute } from "./worker-connection.js";
 import { emitCloudV2Timing, type CloudV2TimingRecord } from "./lifecycle.js";
 import { HttpError } from "../authz.js";
@@ -129,7 +130,7 @@ export class CloudV2Relay {
 
   close(): void {
     this.closed = true; clearInterval(this.ping); this.unsubscribeSecurity?.();
-    for (const room of this.rooms.values()) this.revoke(room);
+    for (const room of this.rooms.values()) this.revoke(room, 1013, "relay_restarting");
     this.rooms.clear(); this.server.close();
   }
 
@@ -148,7 +149,8 @@ export class CloudV2Relay {
         send(room.worker, { t: "revoke-context", contextId: frame.contextId, reason: frame.reason });
         for (const [id, client] of room.clients) if (client.contextId === frame.contextId) {
           this.detachApp(room, id);
-          client.ws.close(4001, "access_revoked");
+          client.ws.close(frame.reason === "access_revoked" ? 4001 : 1013,
+            frame.reason === "access_revoked" ? "access_revoked" : "execution_context_unavailable");
         }
       }
       return;
@@ -226,7 +228,7 @@ export class CloudV2Relay {
     return room;
   }
 
-  private revoke(room: Room, code = 4001, reason = "access_revoked"): void {
+  private revoke(room: Room, code = 1013, reason = "workspace_verification_unavailable"): void {
     room.revoked = true; room.ready = false; room.abort.abort(); room.queued.clear(); room.delivered.clear(); clearTimeout(room.idleTimer);
     room.worker?.close(code, reason); room.worker = null;
     for (const finish of room.stops.values()) finish(false);
@@ -252,7 +254,7 @@ export class CloudV2Relay {
   }
 
   private async authorize(room: Room, admittingSessionId: string | null, admission: boolean): Promise<Authority> {
-    if (room.revoked || this.closed) return "revoked";
+    if (room.revoked || this.closed) return "unavailable";
     const revision = this.securityRevision;
     const readStartedAt = this.deps.now?.() ?? Date.now();
     const sessions = new Set([...room.clients.values()].flatMap(client => client.sessionId ? [client.sessionId] : []));
@@ -263,9 +265,9 @@ export class CloudV2Relay {
       if (!admission) this.revoke(room, 1013, "workspace_verification_unavailable");
       return "unavailable";
     }
-    if (room.revoked) return "revoked";
+    if (room.revoked) return "unavailable";
     if (revision !== this.securityRevision) return this.authorize(room, admittingSessionId, admission);
-    if (!snapshot || snapshot.accessEpoch !== room.accessEpoch) { this.revoke(room); return "revoked"; }
+    if (!snapshot || snapshot.accessEpoch !== room.accessEpoch) { this.revoke(room); return "unavailable"; }
     const live = new Set(snapshot.activeSessionIds);
     for (const [id, client] of room.clients) {
       // A new admission may have joined while this read was in flight. Its
@@ -313,7 +315,7 @@ export class CloudV2Relay {
       }
     } catch (error) {
       if (revision !== this.securityRevision) return this.authorize(room, admittingSessionId, admission);
-      if (isGithubAccessRevoked(error)) { this.revoke(room); return "revoked"; }
+      if (isGithubAccessRevoked(error)) { this.revoke(room, 4001, "access_revoked"); return "revoked"; }
       const now = this.deps.now?.() ?? Date.now();
       if (error instanceof HttpError && error.code === "cloud_source_pending") {
         // A create that returned before its GitHub checks, by a fresh read: no
@@ -502,7 +504,7 @@ export class CloudV2Relay {
           // source outage must not suppress an active worker's idle-stop receipt.
           void this.deps.workerActivity(binding, frame.idle).then(reply => {
             if (room.worker !== ws || room.revoked || ws.readyState !== WebSocket.OPEN) return;
-            if (!reply) { ws.close(4001, "worker_unauthorized"); return; }
+            if (!reply) { ws.close(1013, "worker_unavailable"); return; }
             send(ws, { t: "activity-reply", id: frame.id, ...reply });
           }).catch(() => ws.close(1013, "activity_unavailable")).finally(() => { activityPending = false; });
           return;
@@ -683,7 +685,7 @@ export class CloudV2Relay {
   }
   private attachApp(workspace: CloudV2Workspace, epoch: string, wake: boolean, sessionId: string | null, ws: WebSocket, grant?: CloudV2AppGrant): void {
     const room = this.room(workspace, epoch);
-    if (!room) { ws.close(4001, "access_revoked"); return; }
+    if (!room) { ws.close(1013, "workspace_verification_unavailable"); return; }
     if (grant?.execution) room.acting = true;
     const clientId = randomUUID(); this.watch(ws);
     let inboundFrames = 0, inboundBytes = 0;
@@ -701,8 +703,10 @@ export class CloudV2Relay {
           if (room.revoked || this.closed || ws.readyState !== WebSocket.OPEN || Date.now() >= deadline) { ws.close(1013); return; }
           await delay(250, undefined, { signal: room.abort.signal }).catch(() => {});
         }
-        if (room.revoked || this.closed || ws.readyState !== WebSocket.OPEN || await this.authorized(room, sessionId, true) !== "allowed") {
-          await this.deps.runtimeAdmission.releaseClient(workspace.id, clientId); ws.close(4001); return;
+        const current = room.revoked || this.closed || ws.readyState !== WebSocket.OPEN ? "unavailable" : await this.authorized(room, sessionId, true);
+        if (current !== "allowed") {
+          await this.deps.runtimeAdmission.releaseClient(workspace.id, clientId);
+          ws.close(current === "revoked" ? 4001 : 1013, current === "revoked" ? "access_revoked" : "workspace_verification_unavailable"); return;
         }
       }
       clearTimeout(room.idleTimer); delete room.idleTimer;
@@ -757,7 +761,7 @@ export class CloudV2Relay {
   private refuseExecutionClient(room: Room, clientId: string, error: unknown): void {
     const client = room.clients.get(clientId);
     if (!client) return;
-    const revoked = error instanceof HttpError && ["actor_changed", "member_access_revoked", "session_revoked", "worker_unauthorized"].includes(error.code);
+    const revoked = error instanceof ExecutionContextRevoked || error instanceof HttpError && ["member_access_revoked", "session_revoked"].includes(error.code);
     this.detachApp(room, clientId);
     client.ws.close(revoked ? 4001 : 1013, revoked ? "access_revoked" : "workspace_verification_unavailable");
   }

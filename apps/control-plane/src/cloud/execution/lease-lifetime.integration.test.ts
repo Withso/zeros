@@ -97,41 +97,43 @@ database("usable execution lifetimes through the real router", () => {
     expect((await pool.query("SELECT 1 FROM cloud_v2_execution_contexts WHERE workspace_id=$1 AND kind='client'", [f.workspace.id])).rowCount).toBe(0);
   });
 
-  it("refuses a short proof instead of extending it at insert", async () => {
+  it("refuses when both observations are short instead of extending a proof at insert", async () => {
     const grant = await ticket(), original = f.cp.execution.deps.authority.admit.bind(f.cp.execution.deps.authority);
-    vi.spyOn(f.cp.execution.deps.authority, "admit").mockImplementationOnce(async (...args) => ({ ...(await original(...args)), until: Date.now() + 9000 }));
+    const admit = vi.spyOn(f.cp.execution.deps.authority, "admit").mockImplementation(async (...args) => ({ ...(await original(...args)), until: Date.now() + 9000 }));
     await expect(f.cp.execution.clients.open(f.workspace.id, randomUUID(), grant)).rejects.toMatchObject({ status: 503 });
     expect((await pool.query("SELECT 1 FROM cloud_v2_execution_contexts WHERE workspace_id=$1 AND kind='client'", [f.workspace.id])).rowCount).toBe(0);
+    expect(admit).toHaveBeenCalledTimes(2);
   });
 
   it("rolls back a renewal whose final proof is too short and retains the original deadline", async () => {
     const client = await open(), before = await expiry(client.context.contextId);
     const original = f.cp.execution.deps.authority.admit.bind(f.cp.execution.deps.authority);
-    vi.spyOn(f.cp.execution.deps.authority, "admit").mockImplementationOnce(async (...args) => ({ ...(await original(...args)), until: Date.now() + 9000 }));
+    const admit = vi.spyOn(f.cp.execution.deps.authority, "admit").mockImplementation(async (...args) => ({ ...(await original(...args)), until: Date.now() + 9000 }));
     expect((await f.worker("execution-leases/renew", { contextIds: [client.context.contextId] })).status).toBe(503);
     expect((await expiry(client.context.contextId)).expires_at).toEqual(before.expires_at);
+    expect(admit).toHaveBeenCalledTimes(2);
   });
 
-  it("rolls back a new handle when the final authority check consumes the usable budget", async () => {
+  it("rolls back a new handle and obtains a new proof after the final check consumes its budget", async () => {
     const grant = await ticket(), entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
     const assert = f.cp.execution.assertContext.bind(f.cp.execution);
     vi.spyOn(f.cp.execution, "assertContext").mockImplementationOnce(async (...args) => {
       const row = await assert(...args); entered.resolve(); await release.promise; return row;
     });
     const pending = f.cp.execution.clients.open(f.workspace.id, randomUUID(), grant);
-    const refused = expect(pending).rejects.toMatchObject({ status: 503 });
     try {
       await Promise.race([entered.promise, pending.then(() => { throw new Error("final authority check was not held"); })]);
       vi.spyOn(Date, "now").mockReturnValue(Date.now() + 6000);
     } finally { release.resolve(); }
-    await refused;
-    expect((await pool.query("SELECT 1 FROM cloud_v2_execution_contexts WHERE workspace_id=$1 AND kind='client'", [f.workspace.id])).rowCount).toBe(0);
+    const context = await pending;
+    expect(context.expiresAt - Date.now()).toBeGreaterThanOrEqual(FLOOR);
+    expect((await pool.query("SELECT 1 FROM cloud_v2_execution_contexts WHERE workspace_id=$1 AND kind='client'", [f.workspace.id])).rowCount).toBe(1);
   });
 
   it("does not commit material or tokens after materialization consumes the usable budget", async () => {
     const turn = await f.dispatch(), before = await expiry(turn.begun.contextId);
     const material = f.cp.execution.deps.material;
-    vi.spyOn(f.cp.execution.deps, "material").mockImplementationOnce(async (...args) => {
+    vi.spyOn(f.cp.execution.deps, "material").mockImplementation(async (...args) => {
       const value = await material(...args);
       vi.spyOn(Date, "now").mockReturnValue(Date.now() + 6000); return value;
     });
