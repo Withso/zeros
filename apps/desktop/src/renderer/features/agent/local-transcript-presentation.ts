@@ -50,12 +50,17 @@ export function presentCachedLocalTranscript(
 }
 
 export function presentCachedTranscript(chatId: string, window: LocalTranscriptWindow): boolean {
-  if (window.messages.length === 0 && !window.historyState?.revision) return false;
+  if (window.messages.length === 0 && !window.historyState?.revision && !window.cloudCache) return false;
   const store = useSessionsStore.getState();
   const slot = store.sessions[chatId];
   if (slot?.transcriptState === "resident" || !transcriptCacheFor(chatId, slot?.cwd)) return false;
   if (slot?.transcriptPresentation && slot.messages[0] === window.messages[0] &&
-      slot.messages.length >= window.messages.length) return true;
+      slot.messages.length >= window.messages.length) {
+    if (slot.transcriptPresentation.cloudCache !== window.cloudCache) store.patchSession(chatId, {
+      transcriptPresentation: { source: "cache", ...(window.cloudCache ? { cloudCache: window.cloudCache } : {}) },
+    });
+    return true;
+  }
   const current = slot?.messages ?? [];
   if (current.some((message) => message.kind !== "text" || !message.queued)) return false;
   const known = new Set(window.messages.map((message) => message.id));
@@ -64,7 +69,10 @@ export function presentCachedTranscript(chatId: string, window: LocalTranscriptW
     messages: queued.length > 0 ? [...window.messages, ...queued] : window.messages,
     leadingPrompt: window.leadingPrompt,
     transcriptState: "loading",
-    transcriptPresentation: { source: "cache", ...(window.messages.length === 0 ? { empty: true } : {}) },
+    transcriptPresentation: { source: "cache",
+      ...(window.messages.length === 0 && !window.cloudCache?.receiptRows?.length ? { empty: true } : {}),
+      ...(window.cloudCache ? { cloudCache: window.cloudCache } : {}),
+    },
     transcriptSource: window.source,
     ...(window.historyState ? { transcriptHistoryState: window.historyState } : {}),
     transcriptContentSignatures: window.contentSignatures,
@@ -72,7 +80,7 @@ export function presentCachedTranscript(chatId: string, window: LocalTranscriptW
     // A live update may have marked this exact read stale; keep that so the
     // authoritative publish still re-windows once.
     transcriptDirty: slot?.transcriptDirty ?? false,
-    hasTranscript: window.messages.length > 0,
+    hasTranscript: window.messages.length > 0 || !!window.cloudCache?.receiptRows?.length,
   };
   if (slot) store.patchSession(chatId, patch);
   else store.setSession(chatId, { ...BLANK, ...patch });

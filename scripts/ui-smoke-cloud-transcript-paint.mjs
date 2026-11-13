@@ -1,5 +1,5 @@
-// The same production ChatView/provider as the app, with all native/history
-// promises held through the first frame. Also runnable on its own.
+// Production ChatView/provider with saved native-cache rows simulated; auth,
+// refresh and bridge promises stay held through the first frame.
 import { chromium, expect } from "@playwright/test";
 import { mkdir } from "node:fs/promises";
 import { spawn } from "node:child_process";

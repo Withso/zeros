@@ -1,5 +1,5 @@
-// Real identity bootstrap, IndexedDB, ChatView and sessions provider. Native
-// and network work is held independently of disk and never reaches a VM.
+// Real identity bootstrap, native-cache client, ChatView and sessions provider.
+// Main's saved rows are simulated; auth, refresh and bridge work remain held.
 import "../../../../../styles/zeros-tokens.css";
 import "../../../../../styles/semantic-tokens.css";
 import "../../../../../styles/globals.css";
@@ -10,15 +10,33 @@ import type { CloudWorkspaceDocument } from "../platform/cloud-workspace-contrac
 import type { BridgeMessage } from "../platform/bridge/messages";
 
 const target = { organizationId: "11111111-1111-4111-8111-111111111111", workspaceId: "22222222-2222-4222-8222-222222222222" };
-const user = { sub: "33333333-3333-4333-8333-333333333333", email: "fixture@example.test", name: "Fixture", provider: "workos" as const };
+const user = { sub: "33333333-3333-4333-8333-333333333333", email: "fixture@example.test", name: "Fixture", provider: "workos" as const, sessionId: "fixture-sign-in" };
+const NATIVE_ROWS = "zeros:fixture:cloud-native-transcript";
 const fixture = {
   seeded: false, bootReads: [] as string[], historyReads: [] as string[], otherRequests: 0,
   firstFrame: null as null | { painted: boolean; loading: boolean; provisional: boolean },
   releaseHistory: (_messages?: AgentMessage[]) => {},
 };
 Object.assign(window, { cloudTranscriptFixture: fixture });
-window.__ZEROS_NATIVE__ = { on: () => () => {}, invoke: async <T,>(command: string): Promise<T> => {
+window.__ZEROS_NATIVE__ = { on: () => () => {}, invoke: async <T,>(command: string, args?: Record<string, unknown>): Promise<T> => {
   if (command === "auth_get_session_user") return user as T;
+  if (command === "cloud_chat_cache") {
+    const reply = (result: unknown) => ({ ok: true, result }) as T;
+    if (args?.op === "bind") return reply({ lease: "44444444-4444-4444-8444-444444444444" });
+    if (["protect", "release", "forget"].includes(String(args?.op))) return reply(null);
+    if (args?.op === "list") return reply({ items: [], nextAfter: null });
+    const range = JSON.parse(localStorage.getItem(NATIVE_ROWS) ?? "null");
+    if (args?.op === "read") {
+      const fromIndex = range ? Math.max(range.fromIndex, range.toIndex - Number(args.limit)) : 0;
+      return reply({ range: range && { ...range, fromIndex, rows: range.rows.slice(fromIndex - range.fromIndex) }, pending: null });
+    }
+    if (args?.op === "read-before") {
+      const index = range?.rows.findIndex((row: { msgId: string }) => row.msgId === args.before) ?? -1;
+      const fromIndex = Math.max(0, index - Number(args.limit));
+      return reply(index < 0 || args.revision !== range.revision ? null :
+        { ...range, fromIndex, toIndex: index, rows: range.rows.slice(fromIndex, index) });
+    }
+  }
   return new Promise(() => {});
 } };
 
@@ -75,8 +93,8 @@ if (new URLSearchParams(location.search).has("seed")) {
   useWorkspaceStore.getState().dispatch({ type: "OPEN_WORKSPACE", folder, repoRoot: folder, chatId });
   persistWorkspaceChatCache("chats-v1", chats);
   localStorage.setItem("zeros:ui-state:v1", JSON.stringify({ activePage: "workspace", activeChatId: chatId, lastWorkspaceFolder: folder, activeChatByFolder: { [folder]: chatId } }));
-  cloudTranscriptCache.remember(chatId, folder, { messages, leadingPrompt: null, source: "control-plane" });
-  await cloudTranscriptCache.flush();
+  localStorage.setItem(NATIVE_ROWS, JSON.stringify({ revision: 1, messageCount: messages.length, fromIndex: 0, toIndex: messages.length,
+    rows: messages.map((row, index) => ({ index, msgId: row.id, kind: row.kind, payload: JSON.stringify(row), createdAt: row.createdAt })) }));
   fixture.seeded = true;
 } else {
   // This starts the read; importing/mounting the shell does not wait for it,

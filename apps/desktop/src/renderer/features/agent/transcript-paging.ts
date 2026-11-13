@@ -1,6 +1,7 @@
 import { CHAT_SCROLL_NAVIGATION_EVENT } from "./chat-scroll-navigation";
 import type { AgentMessage, AgentSessionState } from "./use-agent-session";
 import { reconcileHistoryMessages } from "./history-message-identity";
+import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
 import {
   resolveAnchorTop,
   type AnchorScrollElement,
@@ -12,11 +13,14 @@ export function canApplyHistoryPage(
   before: AgentSessionState,
   current: AgentSessionState | undefined,
 ): current is AgentSessionState {
+  const cached = before.transcriptState === "loading" && isCloudWorkspace(before.cwd) ? before.transcriptPresentation?.cloudCache : undefined;
+  const next = current?.transcriptState === "loading" ? current.transcriptPresentation?.cloudCache : undefined;
+  const sameCache = cached && next && before.cwd === current?.cwd &&
+    cached.owner === next.owner && cached.epoch === next.epoch && cached.revision === next.revision;
   return Boolean(
-    before.transcriptState === "resident" &&
     before.messages[0] &&
     current &&
-    current.transcriptState === "resident" &&
+    (before.transcriptState === "resident" && current.transcriptState === "resident" || sameCache) &&
     current.executionId === before.executionId &&
     current.sessionId === before.sessionId &&
     current.messages[0]?.id === before.messages[0]?.id,

@@ -46,6 +46,7 @@ import {
 } from "../../platform/bridge/workspace-bridge";
 
 export type { MessageSearchHit, DbPullResult, ChatMessageDelta };
+export { cachedWindowOlderMessages } from "./cloud-cached-transcript-page";
 
 function requireBridge(action: string) {
   const bridge = getActiveBridge();

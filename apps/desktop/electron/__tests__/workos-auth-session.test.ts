@@ -105,6 +105,7 @@ import {
   listSignedInAccountsForMain,
   MAX_SIGNED_IN_ACCOUNTS,
   onMainAuthSessionChanged,
+  onMainAuthSessionRetired,
   persistWorkOSSession,
   switchWorkOSAccount,
 } from "../ipc/commands/auth-session";
@@ -362,6 +363,79 @@ describe("WorkOS desktop multi-account sessions", () => {
     mocks.refresh.mockReset();
     mocks.revoke.mockReset();
     mocks.revoke.mockResolvedValue(true);
+  });
+
+  it("retires replaced sign-ins but retains account caches through ordinary switches", async () => {
+    const retired = vi.fn(); const off = onMainAuthSessionRetired(retired);
+    try {
+      await signIn(1); await signIn(2);
+      await switchWorkOSAccount(account(1)); await switchWorkOSAccount(account(2));
+      expect(retired).not.toHaveBeenCalled();
+      await signIn(2, { session: "session_2_next" });
+      expect(retired.mock.calls).toEqual([[{ accountId: account(2), sessionId: "session_2" }]]);
+      await signIn(1, { session: "session_1_next" });
+      expect(retired.mock.calls).toEqual([
+        [{ accountId: account(2), sessionId: "session_2" }], [{ accountId: account(1), sessionId: "session_1" }],
+      ]);
+    } finally { off(); }
+  });
+
+  it("retires the exact active and parked sessions on local sign-out", async () => {
+    const retired = vi.fn(); const off = onMainAuthSessionRetired(retired);
+    try {
+      await signIn(1); await signIn(2); await signIn(3);
+      await authClearSession({}, {} as never);
+      expect(retired.mock.calls).toEqual([[{ accountId: account(3), sessionId: "session_3" }]]);
+      await authClearSession({ accountId: account(1) }, {} as never);
+      expect(retired.mock.calls).toEqual([
+        [{ accountId: account(3), sessionId: "session_3" }], [{ accountId: account(1), sessionId: "session_1" }],
+      ]);
+    } finally { off(); }
+  });
+
+  it("retires terminal refresh removals but not offline failures or stale revocations", async () => {
+    const retired = vi.fn(); const off = onMainAuthSessionRetired(retired);
+    try {
+      await signIn(1, { expiresAt: Date.now() - 1 });
+      mocks.refresh.mockResolvedValue({ status: "transient" });
+      await getValidSessionForMain();
+      expect(retired).not.toHaveBeenCalled();
+      mocks.refresh.mockResolvedValue({ status: "terminal", reason: "invalid_grant" });
+      await getValidSessionForMain();
+      expect(retired.mock.calls).toEqual([[{ accountId: account(1), sessionId: "session_1" }]]);
+      await signIn(2, { expiresAt: Date.now() - 1 }); await signIn(3);
+      await switchWorkOSAccount(account(2));
+      expect(retired).toHaveBeenLastCalledWith({ accountId: account(2), sessionId: "session_2" });
+      retired.mockClear();
+      expect(clearWorkOSSessionAfterServerRevocation({ accountId: account(3), sessionId: "older" })).toBe(false);
+      expect(retired).not.toHaveBeenCalled();
+      expect(clearWorkOSSessionAfterServerRevocation({ accountId: account(3), sessionId: "session_3" })).toBe(true);
+      expect(retired.mock.calls).toEqual([[{ accountId: account(3), sessionId: "session_3" }]]);
+    } finally { off(); }
+  });
+
+  it("retires an evicted parked sign-in without retiring retained accounts", async () => {
+    const retired = vi.fn(); const off = onMainAuthSessionRetired(retired);
+    try {
+      for (let n = 1; n <= MAX_SIGNED_IN_ACCOUNTS + 1; n++) await signIn(n);
+      expect(retired.mock.calls).toEqual([[{ accountId: account(1), sessionId: "session_1" }]]);
+    } finally { off(); }
+  });
+
+  it("reports the actual replacement removed by sign-out-everywhere", async () => {
+    const retired = vi.fn(); const off = onMainAuthSessionRetired(retired);
+    try {
+      await signIn(1);
+      let resolve!: (value: boolean) => void;
+      mocks.revoke.mockImplementationOnce(() => new Promise<boolean>(done => { resolve = done; }));
+      const clearing = authSignOutEverywhere({}, {} as never);
+      await vi.waitFor(() => expect(resolve).toBeTypeOf("function"));
+      await signIn(1, { session: "session_1_next" });
+      resolve(true); await clearing;
+      expect(retired.mock.calls).toEqual([
+        [{ accountId: account(1), sessionId: "session_1" }], [{ accountId: account(1), sessionId: "session_1_next" }],
+      ]);
+    } finally { off(); }
   });
 
   it("parks the signed-in account when another one signs in, and lists both without tokens", async () => {
@@ -624,6 +698,43 @@ describe("WorkOS desktop multi-account sessions", () => {
       expect(quit).toBe(false);
       finish(rotated()); await quitting;
       expect(parseStoredTokenSnapshot(mocks.raw)?.tokens).toMatchObject({ refreshToken: "refresh-next" });
+    });
+
+    it("waits for a retired session's cache erasure before allowing quit", async () => {
+      const { runQuitSteps } = await import("../quit-barrier");
+      await install(Date.now() + 300_000);
+      const session = parseStoredTokenSnapshot(mocks.raw)!.tokens;
+      let finish!: () => void;
+      const pending = new Promise<void>(resolve => { finish = resolve; });
+      const listener = vi.fn(() => pending), off = onMainAuthSessionRetired(listener);
+      try {
+        expect(clearWorkOSSessionAfterServerRevocation(session)).toBe(true);
+        expect(listener).toHaveBeenCalledTimes(1);
+        let done = false;
+        const quitting = runQuitSteps().then(() => { done = true; });
+        await new Promise<void>(resolve => setImmediate(resolve));
+        expect(done).toBe(false);
+        finish(); await quitting;
+        expect(done).toBe(true);
+      } finally { finish(); off(); }
+    });
+
+    it("bounds a retirement listener that cannot finish during quit", async () => {
+      const { runQuitSteps } = await import("../quit-barrier");
+      await install(Date.now() + 300_000);
+      const session = parseStoredTokenSnapshot(mocks.raw)!.tokens;
+      let finish!: () => void;
+      const pending = new Promise<void>(resolve => { finish = resolve; });
+      const off = onMainAuthSessionRetired(() => pending);
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      try {
+        clearWorkOSSessionAfterServerRevocation(session);
+        let done = false;
+        const quitting = runQuitSteps().then(() => { done = true; });
+        await vi.advanceTimersByTimeAsync(2_000);
+        expect(done).toBe(true);
+        await quitting;
+      } finally { finish(); off(); vi.useRealTimers(); }
     });
 
     it("refreshes again after a quit that was aborted (the update failed to install)", async () => {

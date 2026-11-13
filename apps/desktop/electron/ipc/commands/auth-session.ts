@@ -93,6 +93,36 @@ export interface MainAuthSession {
 type AuthSessionChangeListener = () => void | Promise<void>;
 const sessionChangeListeners = new Set<AuthSessionChangeListener>();
 
+type RetiredSession = Pick<MainAuthSession, "accountId" | "sessionId">;
+const sessionRetirementListeners = new Set<(session: RetiredSession) => void | Promise<void>>();
+const pendingRetirements = new Set<Promise<void>>();
+export function onMainAuthSessionRetired(listener: (session: RetiredSession) => void | Promise<void>): () => void {
+  sessionRetirementListeners.add(listener);
+  return () => sessionRetirementListeners.delete(listener);
+}
+
+function notifySessionRetired(session: RetiredSession): void {
+  const retired = { accountId: session.accountId, sessionId: session.sessionId };
+  for (const listener of sessionRetirementListeners) {
+    try {
+      const pending = Promise.resolve(listener(retired)).catch(() => console.warn("[auth] session-retirement listener failed"))
+        .finally(() => { pendingRetirements.delete(pending); });
+      pendingRetirements.add(pending);
+    } catch { console.warn("[auth] session-retirement listener failed"); }
+  }
+}
+
+async function drainSessionRetirementsForQuit(): Promise<void> {
+  if (!pendingRetirements.size) return;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      (async () => { while (pendingRetirements.size) await Promise.all([...pendingRetirements]); })(),
+      new Promise<void>(resolve => { timer = setTimeout(resolve, 1_500); }),
+    ]);
+  } finally { clearTimeout(timer); }
+}
+
 function notifySessionChanged(): void {
   for (const listener of sessionChangeListeners) {
     try {
@@ -190,6 +220,9 @@ export async function persistWorkOSSession(
       };
     });
   }, SESSION_LOCK_OPTIONS);
+  for (const tokens of retired) {
+    if (tokens.accountId !== next.accountId || tokens.sessionId !== next.sessionId) notifySessionRetired(tokens);
+  }
   notifySessionChanged();
   for (const tokens of retired) void revokeRetiredSession(tokens);
 }
@@ -292,7 +325,10 @@ function resumeAuthAfterAbortedQuit(): void { quitting = false; clearTimeout(qui
 export function resetAuthQuitForTests(): void { resumeAuthAfterAbortedQuit(); }
 
 // Every quit path (main's before-quit, the updater's install) awaits this; an aborted quit resumes refreshing.
-holdQuitFor(() => drainAuthRefreshForQuit(), resumeAuthAfterAbortedQuit);
+holdQuitFor(async () => {
+  await drainAuthRefreshForQuit();
+  await drainSessionRetirementsForQuit();
+}, resumeAuthAfterAbortedQuit);
 
 /** A stored token is current when it has the refresh skew left and, when asked, outlives `notExpiringBefore`. */
 const tokenCurrent = (tokens: StoredTokens, notExpiringBefore = 0) =>
@@ -360,7 +396,11 @@ async function getValidSessionFromTokens(
     const removed =
       outcome.expectedRaw !== undefined &&
       replaceSecretIfUnchanged(TOKENS_KEY, outcome.expectedRaw, null);
-    if (removed) notifySessionChanged();
+    if (removed) {
+      const retired = parseStoredTokenSnapshot(outcome.expectedRaw!)?.tokens;
+      if (retired) notifySessionRetired(retired);
+      notifySessionChanged();
+    }
     const latest = readTokens();
     return latest ? toMainSession(latest) : null;
   }
@@ -412,7 +452,7 @@ export function clearWorkOSSessionAfterServerRevocation(expected: {
     return false;
   }
   const removed = replaceSecretIfUnchanged(TOKENS_KEY, snapshot.raw, null);
-  if (removed) notifySessionChanged();
+  if (removed) { notifySessionRetired(snapshot.tokens); notifySessionChanged(); }
   return removed;
 }
 
@@ -457,6 +497,7 @@ function clearCapturedSession(
   let removed =
     rawAtStart !== null &&
     replaceSecretIfUnchanged(TOKENS_KEY, rawAtStart, null);
+  let retired = removed ? snapshot?.tokens : undefined;
   if (!removed && rawAtStart !== null) {
     const latest = readTokenSnapshot();
     const sameTarget =
@@ -467,9 +508,10 @@ function clearCapturedSession(
         : latest.tokens.sessionId === snapshot.tokens.sessionId);
     if (sameTarget && latest) {
       removed = replaceSecretIfUnchanged(TOKENS_KEY, latest.raw, null);
+      if (removed) retired = latest.tokens;
     }
   }
-  if (removed) notifySessionChanged();
+  if (removed) { if (retired) notifySessionRetired(retired); notifySessionChanged(); }
 }
 
 const beforeSignOutListeners = new Set<() => Promise<void>>();
@@ -551,13 +593,16 @@ export function listSignedInAccountsForMain(): SignedInAccount[] {
 
 /** Store a parked account's tokens, or remove the account with null. */
 function writeParkedSession(accountId: string, tokens: WorkOSStoredTokens | null): void {
+  let retired: RetiredSession | undefined;
   updateSessionEntries((values) => {
     const parked = parseParkedSessions(values[PARKED_KEY]);
     const current = parked.get(accountId);
+    retired = !tokens ? current?.tokens : undefined;
     if (!tokens) parked.delete(accountId);
     else parked.set(accountId, { tokens, parkedAt: current?.parkedAt ?? nextParkedAt(parked) });
     return { ...values, [PARKED_KEY]: serializeParkedSessions(parked) };
   });
+  if (retired) notifySessionRetired(retired);
 }
 
 /** Refresh a parked session without touching the active record. */
