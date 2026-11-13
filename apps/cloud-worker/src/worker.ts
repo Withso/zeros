@@ -644,6 +644,8 @@ export class CloudWorker {
         }
         return reply;
       }, (chatId, version) => this.history?.acknowledgeChatEdit(chatId, version));
+      // The negotiated cadence applies from the inbox's first poll, not from the next configuration.
+      this.promptInbox.pushSignals = this.pushSignals;
       this.promptInbox.start();
     } else if (this.promptInbox) { await this.promptInbox.dispose(); this.promptInbox = undefined; }
     this.configurationRevision = revision;
@@ -654,6 +656,7 @@ export class CloudWorker {
           await this.flushServices();
           if (!await this.history!.flush()) throw new Error("History mirror is unavailable.");
         } });
+      this.runtimeUpdater.setPushSignals(this.pushSignals);
       this.runtimeUpdater.start();
     }
     if (!initial && reviewAvailable !== this.reviews?.enabled) await this.broadcast(this.readyFrame());
