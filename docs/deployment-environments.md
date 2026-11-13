@@ -571,6 +571,22 @@ retained under `cloud-v2/runtime/releases/`, outside the ordinary publisher's
 pruning namespace. Before a retained archive is selected, the controller
 restores its ordinary `cloud-v2/runtime/<digest>.tar.gz` object if necessary.
 
+Hosted publication and the local publisher share capability publication. They
+derive `cloud-v2/runtime/capabilities/<digest>.json` from the archive's inventoried
+`worker-capabilities.json`, including the archive digest and source identity.
+They ensure this immutable record even when the archive already exists, then
+read it back through the control plane's admission reader. Missing, malformed,
+or differing features or source identity fail publication before qualification
+or a source-index update. A new hosted candidate must declare its capabilities;
+older archives without the member can still be retained but cannot be selected
+as a new release. Retaining the current pin during the next publication also
+ensures its record when that archive declares capabilities, so a missing index
+does not require rebuilding those archived bytes.
+
+The Docker release build derives the manifest directly from
+`CLOUD_WORKER_FEATURES`, the same constant used by worker hello and inbound
+connections. No environment flag enables individual features during packaging.
+
 The workflow needs no fixture account, candidate VM, gate0 probe or canary
 signing key. Existing control-plane canary admission stays dormant without
 configuration and is not part of this workflow. Manual Alpha qualification

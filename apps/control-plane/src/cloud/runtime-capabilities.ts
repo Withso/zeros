@@ -1,4 +1,4 @@
-import { GetObjectCommand, HeadObjectCommand, type S3Client } from "@aws-sdk/client-s3";
+import { GetObjectCommand, HeadObjectCommand, PutObjectCommand } from "@aws-sdk/client-s3";
 import { z } from "zod";
 import { HttpError } from "../authz.js";
 import { runtimeObjectMissing, runtimeStorageClient } from "./runtime-source.js";
@@ -17,11 +17,17 @@ export const RuntimeCapabilitiesSchema = WorkerCapabilitiesSchema.extend({
 }).strict();
 export type RuntimeCapabilities = z.infer<typeof RuntimeCapabilitiesSchema>;
 export const runtimeCapabilitiesKey = (sha256: string) => `cloud-v2/runtime/capabilities/${digest.parse(sha256)}.json`;
+export type RuntimeCapabilitiesClient = {
+  send(command: GetObjectCommand | HeadObjectCommand | PutObjectCommand, options?: { abortSignal?: AbortSignal }): Promise<unknown>;
+};
+type RuntimeObject = { Body?: AsyncIterable<Uint8Array>; ContentLength?: number };
 
-export async function readRuntimeCapabilities(sha256: string, store: CloudV2RuntimeStore, provided?: S3Client): Promise<RuntimeCapabilities | null> {
-  const client = provided ?? runtimeStorageClient(store);
+export async function readRuntimeCapabilities(sha256: string, store: CloudV2RuntimeStore, provided?: RuntimeCapabilitiesClient,
+  signal?: AbortSignal): Promise<RuntimeCapabilities | null> {
+  const owned = provided ? undefined : runtimeStorageClient(store), client = provided ?? owned!;
+  const request = signal ? { abortSignal: signal } : undefined;
   try {
-    const object = await client.send(new GetObjectCommand({ Bucket: store.bucket, Key: runtimeCapabilitiesKey(sha256) }));
+    const object = await client.send(new GetObjectCommand({ Bucket: store.bucket, Key: runtimeCapabilitiesKey(sha256) }), request) as RuntimeObject;
     if (!object.Body || (object.ContentLength ?? 0) > 16_384) throw new Error();
     const parts: Buffer[] = []; let bytes = 0;
     for await (const chunk of object.Body as AsyncIterable<Uint8Array>) {
@@ -29,13 +35,32 @@ export async function readRuntimeCapabilities(sha256: string, store: CloudV2Runt
     }
     const record = RuntimeCapabilitiesSchema.parse(JSON.parse(Buffer.concat(parts).toString("utf8")));
     if (record.sha256 !== sha256) throw new Error();
-    const archive = await client.send(new HeadObjectCommand({ Bucket: store.bucket, Key: cloudV2RuntimeKey(sha256) }));
+    const archive = await client.send(new HeadObjectCommand({ Bucket: store.bucket, Key: cloudV2RuntimeKey(sha256) }), request) as RuntimeObject;
     if (!archive.ContentLength || archive.ContentLength > 1024 ** 3) throw new Error();
     return record;
   } catch (error) {
     if (runtimeObjectMissing(error)) return null;
     throw new HttpError(503, "worker_runtime_unavailable", "Worker capabilities could not be verified");
-  } finally { if (!provided) client.destroy(); }
+  } finally { owned?.destroy(); }
+}
+
+/** A stored archive can predate its capability index. Ensure the index on every
+ * publication, then verify what admission will read before advertising it. */
+export async function ensureRuntimeCapabilities(artifact: Omit<RuntimeCapabilities, "version">, store: CloudV2RuntimeStore,
+  client: RuntimeCapabilitiesClient, signal?: AbortSignal): Promise<RuntimeCapabilities> {
+  const { sha256, sourceSha256, commit, features } = RuntimeCapabilitiesSchema.parse({ version: 1, ...artifact });
+  const bytes = Buffer.from(JSON.stringify({ version: 1, sha256, sourceSha256, commit, features }));
+  try {
+    await client.send(new PutObjectCommand({ Bucket: store.bucket, Key: runtimeCapabilitiesKey(sha256), Body: bytes,
+      ContentLength: bytes.length, ContentType: "application/json", CacheControl: "public,max-age=31536000,immutable", IfNoneMatch: "*" }),
+    signal ? { abortSignal: signal } : undefined);
+  } catch (error) {
+    if ((error as { $metadata?: { httpStatusCode?: number } })?.$metadata?.httpStatusCode !== 412) throw error;
+  }
+  const record = await readRuntimeCapabilities(sha256, store, client, signal);
+  if (!record || record.sourceSha256 !== sourceSha256 || record.commit !== commit || JSON.stringify(record.features) !== JSON.stringify(features))
+    throw new Error("Runtime capabilities do not match the checked archive");
+  return record;
 }
 
 const unavailable = () => new HttpError(409, "worker_update_required", "Update the qualified worker before creating shared workspaces");
