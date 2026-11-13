@@ -14,6 +14,7 @@ import {
   type RuntimeClient,
 } from "../platform/bridge/ws-client";
 import { toast } from "../shared/ui/primitives/elements";
+import { cloudConnectBackoffKey, cloudConnectFailing, cloudConnectFailureQuiet } from "../platform/bridge/cloud-connect-backoff";
 import {
   cloudWorkspaceDocument,
   subscribeCloudWorkspaces,
@@ -274,6 +275,15 @@ export function recordWorkbenchConnectionFailure(
   error: unknown,
   kind: "connect" | "open" = "connect",
 ): void {
+  // §14.5: a connect that is backing off (503, 1013) is still being retried: the tab stays connecting and no toast
+  // appears until it has kept failing for a minute; then the toast says plainly that Zeros keeps trying.
+  const target = parseCloudWorkspaceKey(folder);
+  const backoff = target ? cloudConnectBackoffKey(target) : null;
+  const { status, category } = (error ?? {}) as { status?: unknown; category?: unknown };
+  const definitive = (typeof category === "string" && category !== "transient") ||
+    (typeof status === "number" && status >= 400 && status < 500 && status !== 408 && status !== 429);
+  if (backoff && !definitive && cloudConnectFailureQuiet(backoff)) return;
+  const retrying = !!backoff && !definitive && cloudConnectFailing(backoff);
   const entry = entryFor(folder);
   entry.value = { ...entry.value, rejected: true };
   refreshAvailability(entry);
@@ -288,8 +298,9 @@ export function recordWorkbenchConnectionFailure(
       : "Couldn't open this cloud workspace",
     {
       id: entry.notice.id,
-      description:
-        error instanceof Error
+      description: retrying
+        ? "Zeros keeps trying in the background."
+        : error instanceof Error
           ? workbenchFailureDiagnostic(error)
           : kind === "connect"
             ? "Try opening the workspace again."

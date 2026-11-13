@@ -16,6 +16,7 @@ import {
   subscribeWorkbenchAvailability,
   workbenchAvailabilityStatusSnapshot,
 } from "../workbench-availability";
+import { cloudConnectBackoffKey, recordCloudConnectFailure, resetCloudConnectBackoffForTests } from "../../platform/bridge/cloud-connect-backoff";
 
 const fixture = vi.hoisted(() => ({
   account: 0,
@@ -330,6 +331,30 @@ describe("workbench availability observers", () => {
       [...fixture.listeners.values()].filter((listeners) => listeners.size > 0),
     ).toHaveLength(64);
     expect(fixture.catalog.size).toBe(64);
+  });
+
+  it.each(["connect", "open"] as const)("§14.5: a backing-off cloud %s failure stays quiet for a minute, then toasts plainly", (kind) => {
+    resetCloudConnectBackoffForTests();
+    const key = cloudConnectBackoffKey(target);
+    recordCloudConnectFailure(key);
+    recordWorkbenchConnectionFailure(folder, new Error("The cloud runtime is temporarily unavailable."), kind);
+    expect(fixture.toasts.size).toBe(0);
+    expect(workbenchAvailabilitySnapshot(folder).rejected).not.toBe(true);
+    vi.advanceTimersByTime(60_000); recordCloudConnectFailure(key);
+    recordWorkbenchConnectionFailure(folder, new Error("The cloud runtime is temporarily unavailable."), kind);
+    expect(fixture.toasts.get(`cloud-connect:${folder}`)).toMatchObject({
+      headline: kind === "connect" ? "Couldn't connect to this cloud workspace" : "Couldn't open this cloud workspace",
+      description: "Zeros keeps trying in the background.",
+    });
+    resetCloudConnectBackoffForTests();
+  });
+
+  it("§14.5: a definitive refusal still toasts at once while the connect is backing off", () => {
+    resetCloudConnectBackoffForTests();
+    recordCloudConnectFailure(cloudConnectBackoffKey(target));
+    recordWorkbenchConnectionFailure(folder, Object.assign(new Error("Cloud workspace access is not permitted."), { status: 403, category: "revoked" }), "connect");
+    expect(fixture.toasts.get(`cloud-connect:${folder}`)).toMatchObject({ description: "Cloud workspace access is not permitted." });
+    resetCloudConnectBackoffForTests();
   });
 
   it.each(["connect", "open"] as const)(

@@ -1,4 +1,5 @@
 import { clearWorkspaceAccessEnded, reportWorkspaceAccessEnded, workspaceAccessScope } from "../team-sharing-registry";
+import { cloudConnectBackoffKey, cloudConnectWaitMs, recordCloudConnectFailure, resetCloudConnectBackoff } from "./cloud-connect-backoff";
 // Shared desktop/Linux transport. Environment ports carry no workspace authority.
 import type { BridgeMessage } from "./messages";
 import { createMessageId } from "./messages";
@@ -564,7 +565,11 @@ export class RuntimeClient {
       if (wasPending) this.pendingWs = null;
       if (this.ws !== ws && !wasPending) return;
       this.cloudDiagnostic("close", { code: event?.code ?? null, stage: wasPending ? "upgrade" : this.handshakeReady ? "ready" : "handshake" });
-      const reconnectImmediately = this.connectionTarget.kind === "cloud" && this.handshakeReady &&
+      // §14.5: a relay 1013 (try again later) or a refused upgrade is a failed connect: it grows the shared backoff
+      // and is never an immediate reconnect.
+      const failedConnect = this.connectionTarget.kind === "cloud" && (event?.code === 1013 || wasPending);
+      if (failedConnect) recordCloudConnectFailure(this.cloudBackoffKey()!);
+      const reconnectImmediately = this.connectionTarget.kind === "cloud" && this.handshakeReady && !failedConnect &&
         event?.code !== 1000 && event?.code !== 4001;
       if (this.ws === ws) this.ws = null;
       // D2: the relay also closes 4001 for an expired or unrenewable context, a redeploy or worker_unauthorized.
@@ -993,7 +998,10 @@ export class RuntimeClient {
       this.clearCloudConnectWait();
       this.handshakeReady = true;
       this._engineConnected = true;
-      if (this.connectionTarget.kind === "cloud") clearWorkspaceAccessEnded({ organizationId: this.connectionTarget.organizationId, workspaceId: this.connectionTarget.workspaceId });
+      if (this.connectionTarget.kind === "cloud") {
+        clearWorkspaceAccessEnded({ organizationId: this.connectionTarget.organizationId, workspaceId: this.connectionTarget.workspaceId });
+        resetCloudConnectBackoff(this.cloudBackoffKey()!);
+      }
       this.reconnectAttempts = 0;
       this.cloudDiagnostic("ready", {});
       // Make room for synchronous status-listener RPCs even when the
@@ -1259,10 +1267,13 @@ export class RuntimeClient {
     // A previously healthy cloud socket may be dropped by the network/tunnel.
     // Refresh its ticket in the next tick; unsuccessful handshakes still use
     // the bounded ladder, and the Local sidecar keeps its existing cadence.
-    const delay = immediate ? 0 :
+    // A cloud reconnect also waits out the workspace's shared connect backoff (§14.5), which outgrows the ladder.
+    const delay = immediate ? 0 : Math.max(
       RECONNECT_LADDER[
         Math.min(this.reconnectAttempts, RECONNECT_LADDER.length - 1)
-      ];
+      ],
+      this.connectionTarget.kind === "cloud" ? cloudConnectWaitMs(this.cloudBackoffKey()!) : 0,
+    );
     if (!immediate) this.reconnectAttempts += 1;
     this.cloudDiagnostic("reconnect", { attempt: this.reconnectAttempts, delayMs: delay });
     this.reconnectTimer = setTimeout(() => {
@@ -1344,6 +1355,11 @@ export class RuntimeClient {
     this.scheduleReconnect();
   }
 
+  private cloudBackoffKey(): string | null {
+    const target = this.connectionTarget;
+    return target.kind === "cloud" ? cloudConnectBackoffKey({ organizationId: target.organizationId, workspaceId: target.workspaceId }) : null;
+  }
+
   private refreshCurrentCloudTarget(): Promise<boolean> {
     if (this.cloudTargetRefreshPromise) return this.cloudTargetRefreshPromise;
     const current = this.connectionTarget;
@@ -1391,6 +1407,8 @@ export class RuntimeClient {
     return this.cloudTargetRefreshPromise;
   }
   private rejectCloudConnection(failure: CloudRuntimeAccessError): void {
+    // §14.5: no ready connection within the grace is a failed connect; the next open waits the shared backoff.
+    if (failure.code === "cloud_actor_runtime_unavailable") recordCloudConnectFailure(this.cloudBackoffKey()!);
     this._rejected = true;
     this.lastRejection = { reason: `cloud-${failure.category}`, message: failure.message, code: failure.code };
     this.retireCloudConnection(failure);
