@@ -139,6 +139,12 @@ export function DesignComponentOptions({
   const generation = `${frame.sourceVersion}\0${shownVariant ?? ""}`;
   const [unconfirmed, setUnconfirmed] = useState<{ generation: string; values: ReadonlyMap<string, ComponentOptionValue> }>(() => ({ generation, values: NO_VALUES }));
   const pending = unconfirmed.generation === generation ? unconfirmed.values : NO_VALUES;
+  // A later generation retires such values for good: an undo restores the
+  // bytes, and with them the content hash, of the generation they were
+  // written against.
+  useEffect(() => {
+    setUnconfirmed((previous) => (previous.generation === generation || previous.values === NO_VALUES ? previous : { generation, values: NO_VALUES }));
+  }, [generation]);
   const [folded, setFolded] = useState<ReadonlySet<string>>(() => new Set());
   const [naming, setNaming] = useState(false);
   const preview = useMemo(

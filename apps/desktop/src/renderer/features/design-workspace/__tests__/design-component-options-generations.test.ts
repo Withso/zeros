@@ -172,6 +172,23 @@ describe("the Options section across new generations of the same target", () => 
     expect(field("Label")!.value).toBe("Hello");
   });
 
+  it("shows the restored value when an undo brings back the generation a write was made against", async () => {
+    await show({ file: "components/chip.html", sourceVersion: V1, component: CHIP });
+    type(field("Label")!, "Hello");
+    press(field("Label")!, "Enter");
+    await show({ file: "components/chip.html", sourceVersion: V2, component: component(element("zd-option", { name: "label", type: "text", default: "Hello" }), RADIUS) });
+    expect(field("Label")!.value).toBe("Hello");
+    // A byte-exact undo restores the first generation's content hash too.
+    await show({ file: "components/chip.html", sourceVersion: V1, component: CHIP });
+    expect(field("Label")!.value).toBe("Send");
+    type(field("Label")!, "Hello");
+    press(field("Label")!, "Enter");
+    expect(written()).toEqual([
+      { sourceVersion: V1, operations: [expect.objectContaining({ type: "component.set-option", option: "label", value: "Hello" })] },
+      { sourceVersion: V1, operations: [expect.objectContaining({ type: "component.set-option", option: "label", value: "Hello" })] },
+    ]);
+  });
+
   it("starts clean for a different frame or instance", async () => {
     await show({ file: "components/chip.html", sourceVersion: V1, component: CHIP });
     fold("Shape");
