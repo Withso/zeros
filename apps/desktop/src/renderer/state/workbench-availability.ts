@@ -204,6 +204,7 @@ function entryFor(folder: string): AvailabilityEntry {
       stopError: doc?.error,
       canWake: doc?.capabilities.canWrite,
       messagesWithoutLive: doc?.capabilities.promptOutbox === 1,
+      liveConnectionUnavailable: doc?.error?.code === "live_connection_unavailable",
       // A start's first connection is not a reconnect to the stopped VM.
       ...(becameReady && entry.value.connection !== "connected"
         ? { since: Date.now(), previouslyConnected: false }

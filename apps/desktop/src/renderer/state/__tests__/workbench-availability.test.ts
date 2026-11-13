@@ -22,7 +22,7 @@ const fixture = vi.hoisted(() => ({
   account: 0,
   statuses: new Map<string, "connected" | "disconnected">(),
   listeners: new Map<string, Set<() => void>>(),
-  docs: new Map<string, { status: string; setupFailure?: object; capabilities?: object }>(),
+  docs: new Map<string, { status: string; setupFailure?: object; capabilities?: object; error?: object }>(),
   catalog: new Set<() => void>(),
   warm: vi.fn(async () => {}),
   localStatus: "disconnected" as "connected" | "disconnected",
@@ -98,7 +98,7 @@ vi.mock("../cloud-workspace-catalog", () => ({
     workspaceId: string;
   }) => {
     const doc = fixture.docs.get(cloudWorkspaceKey(target));
-    return doc ? { ...doc, capabilities: { canWrite: true, ...doc.capabilities }, error: null } : undefined;
+    return doc ? { error: null, ...doc, capabilities: { canWrite: true, ...doc.capabilities } } : undefined;
   },
   subscribeCloudWorkspaces: (callback: () => void) => {
     fixture.catalog.add(callback);
@@ -351,7 +351,7 @@ describe("workbench availability observers", () => {
 
   it("a running workspace whose connection keeps failing stays connecting with no toast; a refusal still toasts", () => {
     resetCloudConnectBackoffForTests();
-    const catalog = (doc: { status: string; capabilities?: object }) => {
+    const catalog = (doc: { status: string; capabilities?: object; error?: object }) => {
       fixture.docs.set(folder, doc);
       for (const listener of fixture.catalog) listener();
     };
@@ -375,6 +375,15 @@ describe("workbench availability observers", () => {
     recordWorkbenchConnectionFailure(folder, Object.assign(new Error("Cloud workspace access is not permitted."), { status: 403, category: "revoked" }), "connect");
     expect(fixture.toasts.get(`cloud-connect:${folder}`)).toMatchObject({ headline: "Couldn't connect to this cloud workspace" });
     expect(describeWorkspaceRuntimeStatus(workbenchAvailabilitySnapshot(folder), Date.now())).toBe("Needs attention");
+    // The server's named condition after exhausted repair: the existing failure, still with no toast.
+    fixture.toasts.clear();
+    catalog({ status: "ready", capabilities: { promptOutbox: 1 }, error: { code: "live_connection_unavailable", message: "x" } });
+    expect(workbenchAvailabilitySnapshot(folder).liveConnectionUnavailable).toBe(true);
+    recordWorkbenchConnectionFailure(folder, Object.assign(new Error("Cloud workspace is starting"), { status: 503 }), "connect");
+    expect(fixture.toasts.size).toBe(0);
+    expect(describeWorkspaceRuntimeStatus(workbenchAvailabilitySnapshot(folder), Date.now())).toBe("Needs attention");
+    catalog({ status: "ready", capabilities: { promptOutbox: 1 } });
+    expect(workbenchAvailabilitySnapshot(folder).liveConnectionUnavailable).toBe(false);
     connection("connected");
     expect(workbenchAvailabilitySnapshot(folder).refused).toBe(false);
     expect(describeWorkspaceRuntimeStatus(workbenchAvailabilitySnapshot(folder), Date.now())).toBe("Running");
