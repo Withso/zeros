@@ -9,6 +9,9 @@ database("persisted lifecycle execution identity", () => {
   beforeAll(() => { pool = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL, max: 8, statement_timeout: 4000 }); });
   beforeEach(async () => {
     f = await executionFixture(pool, { lifecycle: true });
+    // This suite drives one lifecycle tick. Drain notification maintenance so
+    // its workspace lock cannot make that tick's SKIP LOCKED claim miss.
+    await f.cp.loginChanges.stop();
     await f.activate(f.viewer);
     await pool.query("UPDATE cloud_v2_workspaces SET state='creating',lease_renewed_at=clock_timestamp() WHERE id=$1", [f.workspace.id]);
     vi.spyOn(f.cp.compute, "exec").mockResolvedValue(ready);
