@@ -86,7 +86,6 @@ export function ModelPill({
   onRefreshModels,
   onSelectAgentModel,
   redirectCrossAgent,
-  selectionTiming,
   active = true,
 }: {
   agents?: BridgeRegistryAgent[] | null;
@@ -112,7 +111,6 @@ export function ModelPill({
   /** True once the chat's session has started (first prompt sent) — other
    *  agents' models then show a ↗ in the dropdown ("opens a new chat"). */
   redirectCrossAgent?: boolean;
-  selectionTiming?: "next-message";
   active?: boolean;
 }) {
   const [open, setOpen] = useState(false);
@@ -161,7 +159,6 @@ export function ModelPill({
       open={open && !concealed && active}
       onOpenChange={(nextOpen) => { if (nextOpen && active && !concealed) onRefreshModels?.(); setOpen(nextOpen); }}
       redirectCrossAgent={redirectCrossAgent}
-      selectionTiming={selectionTiming}
       onConfigure={onConfigure}
       onSelect={(sel) => {
         if (agentFamily(sel.agentId) === agentFamily(agentId)) {

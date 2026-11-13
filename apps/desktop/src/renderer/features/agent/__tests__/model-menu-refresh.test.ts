@@ -42,8 +42,15 @@ describe("cloud model menu revalidation", () => {
       registry: [{ id: "codex" }, { id: "claude" }], hasSavedDefault: false, FAMILY_ORDER: { claude: 0, codex: 1, cursor: 2 },
     }) as () => Array<{ agent: { id: string }; models: Array<{ value: string; selectable?: boolean }> }>;
     const sol = run().find(group => group.agent.id === "codex")?.models.find(model => model.value === "gpt-6.1-sol");
-    expect(sol).toBeDefined();
-    expect(sol?.selectable === false).toBe(placement === "cloud");
+    // Cloud lists only what the paying login shares; Local keeps the curated row.
+    expect(sol === undefined).toBe(placement === "cloud");
+    if (placement !== "cloud") expect(sol?.selectable).not.toBe(false);
+  });
+
+  it("carries no description text: no timing note, and a disabled row's reason is only its hover title", () => {
+    const source = readFileSync(new URL("../agent-model-menu.tsx", import.meta.url), "utf8");
+    expect(source).not.toMatch(/role="note"|apply to the next message|data-model-unavailable-reason/);
+    expect(source).toMatch(/title=\{row\.unavailable \? unavailableReason\(row\) : undefined\}/);
   });
 
   it("requests fresh cached metadata when opened, without waiting or refreshing on close", () => {
