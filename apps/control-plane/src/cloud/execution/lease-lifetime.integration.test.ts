@@ -91,10 +91,11 @@ database("usable execution lifetimes through the real router", () => {
     expect((await response.json()).expiresAt - Date.now()).toBeGreaterThanOrEqual(FLOOR);
   });
 
-  it("refuses a short desktop-token ceiling without issuing a context or extending the token", async () => {
+  it("uses a live desktop-token tail without extending it or reporting a server outage", async () => {
     const grant = await ticket(); grant.execution!.tokenEnd = Date.now() + 9000;
-    await expect(f.cp.execution.clients.open(f.workspace.id, randomUUID(), grant)).rejects.toMatchObject({ status: 503 });
-    expect((await pool.query("SELECT 1 FROM cloud_v2_execution_contexts WHERE workspace_id=$1 AND kind='client'", [f.workspace.id])).rowCount).toBe(0);
+    const context = await f.cp.execution.clients.open(f.workspace.id, randomUUID(), grant);
+    expect(context.expiresAt).toBe(grant.execution!.tokenEnd);
+    expect((await pool.query("SELECT 1 FROM cloud_v2_execution_contexts WHERE workspace_id=$1 AND kind='client'", [f.workspace.id])).rowCount).toBe(1);
   });
 
   it("refuses when both observations are short instead of extending a proof at insert", async () => {
@@ -112,6 +113,46 @@ database("usable execution lifetimes through the real router", () => {
     expect((await f.worker("execution-leases/renew", { contextIds: [client.context.contextId] })).status).toBe(503);
     expect((await expiry(client.context.contextId)).expires_at).toEqual(before.expires_at);
     expect(admit).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps a token-capped context and its healthy neighbour renewing without failing the batch", async () => {
+    const short = await open(), healthy = await open(f.creator);
+    const cap = Date.now() + 9000;
+    await pool.query("UPDATE cloud_v2_execution_contexts SET client_token_expires_at=$2 WHERE id=$1", [short.context.contextId, new Date(cap)]);
+    const reply = await f.worker("execution-leases/renew", { contextIds: [short.context.contextId, healthy.context.contextId] });
+    expect(reply.status).toBe(200);
+    expect((await reply.json()).leases).toEqual([
+      { contextId: short.context.contextId, expiresAt: cap },
+      { contextId: healthy.context.contextId, expiresAt: expect.any(Number) },
+    ]);
+    expect((await expiry(healthy.context.contextId)).expires_at.getTime() - Date.now()).toBeGreaterThanOrEqual(FLOOR);
+  });
+
+  it("reports an expired client token precisely without failing another person's renewal", async () => {
+    const ended = await open(), healthy = await open(f.creator);
+    await pool.query("UPDATE cloud_v2_execution_contexts SET client_token_expires_at=clock_timestamp()-interval '1 second' WHERE id=$1", [ended.context.contextId]);
+    const reply = await f.worker("execution-leases/renew", { contextIds: [ended.context.contextId, healthy.context.contextId] });
+    expect(reply.status).toBe(200);
+    expect((await reply.json()).leases).toEqual([
+      { contextId: ended.context.contextId, refused: "expired" },
+      { contextId: healthy.context.contextId, expiresAt: expect.any(Number) },
+    ]);
+  });
+
+  it("retains a completion reason when the context ends between the renewal snapshot and lock", async () => {
+    const ended = await open(), healthy = await open(f.creator);
+    const admit = f.cp.execution.deps.authority.admit.bind(f.cp.execution.deps.authority);
+    vi.spyOn(f.cp.execution.deps.authority, "admit").mockImplementationOnce(async (...args) => {
+      const proof = await admit(...args);
+      await withSystemTx(pool, tx => f.cp.execution.revoke(tx, ended.context.contextId, "completed"));
+      return proof;
+    });
+    const reply = await f.worker("execution-leases/renew", { contextIds: [ended.context.contextId, healthy.context.contextId] });
+    expect(reply.status).toBe(200);
+    expect((await reply.json()).leases).toEqual([
+      { contextId: ended.context.contextId, refused: "completed" },
+      { contextId: healthy.context.contextId, expiresAt: expect.any(Number) },
+    ]);
   });
 
   it("rolls back a new handle and obtains a new proof after the final check consumes its budget", async () => {

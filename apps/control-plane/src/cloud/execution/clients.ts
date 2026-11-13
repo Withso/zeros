@@ -14,14 +14,16 @@ import { executionContextAuthority, matchesExecutionSignature, type VersionedExe
 import { actorChanged, executionWorkerRequired } from "./errors.js";
 import { EXECUTION_MINIMUM_LIFETIME_MS, assertExecutionLifetime, withExecutionLifetimeRetry } from "./lifetime.js";
 
-export type ExecutionConnectAuthority = VersionedExecutionAuthority & { signature: string; stopGeneration: string; tokenEnd: number };
+export type ExecutionConnectAuthority = VersionedExecutionAuthority & { signature: string; stopGeneration: string; tokenEnd: number; clientInstanceId?: string };
 const record = z.object({ type: z.string(), id: CloudV2PromptIdSchema.optional(), op: z.string().optional(),
   sessionId: CloudV2PromptIdSchema.optional(), params: z.unknown().optional() }).passthrough();
 
 export class CloudExecutionClients {
   constructor(readonly contexts: CloudExecutionContexts) {}
 
-  async ticket(workspaceId: string, user: AuthedUser, wake: boolean) {
+  async ticket(workspaceId: string, user: AuthedUser, wake: boolean, clientInstanceId?: string) {
+    if (clientInstanceId && (!user.authentication.sessionId || !z.uuid().safeParse(clientInstanceId).success))
+      throw new HttpError(400, "invalid_request", "Invalid cloud connection binding");
     const proof = await this.contexts.deps.authority.admit(workspaceId, user.id, { user, minimumSourceMs: EXECUTION_MINIMUM_LIFETIME_MS });
     const tokenEnd = user.authentication.tokenExpiresAt ? user.authentication.tokenExpiresAt * 1000 : proof.until;
     const expiresAt = new Date(Math.min(Date.now() + 60_000, tokenEnd));
@@ -31,12 +33,47 @@ export class CloudExecutionClients {
       await tx.query("SELECT 1 FROM cloud_v2_workspaces WHERE id=$1 FOR UPDATE", [workspaceId]);
       await assertNoExecutionTransition(tx, workspaceId);
       await this.contexts.deps.authority.assert(proof, tx);
-      const authority: ExecutionConnectAuthority = { signatureVersion: 2, signature: proof.person.personSignature, stopGeneration: proof.person.stopGeneration, tokenEnd };
+      const authority: ExecutionConnectAuthority = { signatureVersion: 2, signature: proof.person.personSignature, stopGeneration: proof.person.stopGeneration, tokenEnd,
+        ...(clientInstanceId ? { clientInstanceId } : {}) };
       await tx.query(`INSERT INTO cloud_v2_tokens(token_hash,workspace_id,kind,user_id,expires_at,wake_on_connect,provider_session_id,execution_authority)
         VALUES($1,$2,'connect',$3,$4,$5,$6,$7)`, [token.hash, workspaceId, user.id, expiresAt, wake, user.authentication.sessionId, authority]);
       await this.contexts.deps.authority.assert(proof, tx);
     });
     return { token: token.token, expiresAt };
+  }
+
+  async rollover(workspaceId: string, contextId: string, current: CloudV2AppGrant, next: CloudV2AppGrant) {
+    const original = current.execution, renewed = next.execution;
+    if (!original?.clientInstanceId || !renewed || !current.sessionId || next.sessionId !== current.sessionId ||
+        next.userId !== current.userId || next.accessEpoch !== current.accessEpoch || renewed.clientInstanceId !== original.clientInstanceId ||
+        renewed.stopGeneration !== original.stopGeneration)
+      throw new HttpError(409, "binding_changed", "Cloud connection binding changed");
+    if (renewed.tokenEnd <= original.tokenEnd) throw new HttpError(409, "token_not_advanced", "A fresh authentication is required");
+    const proof = await this.contexts.deps.authority.admit(workspaceId, current.userId, { continuation: true });
+    if (proof.person.accessEpoch !== next.accessEpoch || !matchesExecutionSignature(renewed, renewed.signature, proof.person, "personSignature") ||
+        !matchesExecutionSignature(original, original.signature, proof.person, "personSignature"))
+      throw new HttpError(409, "binding_changed", "Cloud connection binding changed");
+    await withSystemTx(this.contexts.pool, async tx => {
+      await tx.query("SELECT id FROM users WHERE id=$1 FOR KEY SHARE", [current.userId]);
+      await tx.query("SELECT 1 FROM cloud_v2_workspaces WHERE id=$1 FOR UPDATE", [workspaceId]);
+      await this.session(tx, current.userId, current.sessionId!);
+      const handle = await this.contexts.context(tx, contextId, workspaceId);
+      if (handle.kind !== "client" || handle.operation || handle.sync_device_id || handle.parent_context_id ||
+          handle.user_id !== current.userId || handle.provider_session_id !== current.sessionId ||
+          handle.client_token_expires_at?.getTime() !== original.tokenEnd)
+        throw new HttpError(409, "binding_changed", "Cloud connection binding changed");
+      await this.contexts.assertContext(tx, handle, proof);
+      // Lock every still-live child in the same order used by revocation. A
+      // refreshed token moves only the cap; it cannot revive or renew a lease.
+      const ids = (await tx.query<{ id: string }>(`SELECT id FROM cloud_v2_execution_contexts WHERE workspace_id=$1
+        AND (id=$2 OR (parent_context_id=$2 AND client_id=$3 AND user_id=$4 AND provider_session_id=$5))
+        AND state='active' AND expires_at>clock_timestamp() AND client_token_expires_at>clock_timestamp()
+        ORDER BY id FOR UPDATE`, [workspaceId, contextId, handle.client_id, current.userId, current.sessionId])).rows.map(row => row.id);
+      if (!ids.includes(contextId)) throw actorChanged();
+      await tx.query("UPDATE cloud_v2_execution_contexts SET client_token_expires_at=$2 WHERE id=ANY($1::uuid[])", [ids, new Date(renewed.tokenEnd)]);
+      await this.contexts.assertContext(tx, handle, proof);
+      await this.session(tx, current.userId, current.sessionId!);
+    });
   }
 
   async validateGrant(workspaceId: string, grant: CloudV2AppGrant) {
@@ -67,7 +104,7 @@ export class CloudExecutionClients {
         if (grant.sessionId) await this.session(tx, grant.userId, grant.sessionId);
         const context = await this.insert(tx, proof, { kind: "client", clientId, sessionId: grant.sessionId, tokenEnd: grant.execution!.tokenEnd });
         await this.contexts.assertContext(tx, context, proof);
-        assertExecutionLifetime(context.expires_at.getTime());
+        assertExecutionLifetime(context.expires_at.getTime(), execution.tokenEnd);
         return { contextId: context.id, userId: grant.userId, expiresAt: context.expires_at.getTime() };
       });
     });
@@ -84,7 +121,8 @@ export class CloudExecutionClients {
     tokenEnd?: number; operation?: string; requestId?: string; terminalId?: string; parentId?: string; fingerprint?: Buffer }) {
     const person = proof.person;
     const until = Math.min(proof.until, input.tokenEnd ?? Infinity);
-    assertExecutionLifetime(until);
+    assertExecutionLifetime(proof.until);
+    assertExecutionLifetime(until, input.tokenEnd);
     const row = (await tx.query<ExecutionContext>(`INSERT INTO cloud_v2_execution_contexts(id,workspace_id,org_id,user_id,kind,client_id,
       provider_session_id,client_token_expires_at,operation,request_id,terminal_id,parent_context_id,request_fingerprint,
       access_epoch,stop_generation,worker_boot_id,worker_token_hash,authority,source_fingerprint,expires_at)
@@ -93,7 +131,7 @@ export class CloudExecutionClients {
       input.tokenEnd ? new Date(input.tokenEnd) : null, input.operation ?? null, input.requestId ?? null, input.terminalId ?? null, input.parentId ?? null,
       input.fingerprint ?? null, person.accessEpoch, person.stopGeneration, person.bootId, person.workerTokenHash, executionContextAuthority(person), proof.source.fingerprint,
       new Date(until)])).rows[0]!;
-    assertExecutionLifetime(until);
+    assertExecutionLifetime(until, input.tokenEnd);
     return row;
   }
 
@@ -144,7 +182,7 @@ export class CloudExecutionClients {
           }
         }
         await this.contexts.assertContext(tx, handle, proof);
-        if (issued) assertExecutionLifetime(issued.expires_at.getTime());
+        if (issued) assertExecutionLifetime(issued.expires_at.getTime(), issued.client_token_expires_at?.getTime());
       });
     });
   }

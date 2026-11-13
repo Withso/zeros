@@ -304,6 +304,8 @@ export function createApp(
         "authorization",
         "content-type",
         "x-zeros-client",
+        "x-zeros-client-features",
+        "x-zeros-client-instance",
         "x-zeros-team-sharing",
         "x-zeros-team-ownership",
         "x-zeros-sync",

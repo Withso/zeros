@@ -6,6 +6,7 @@ import { rateLimit } from "../ratelimit.js";
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
+import { CLOUD_CLIENT_ROLLOVER_FEATURE } from "./client-auth-contract.js";
 import type { CloudWorkspaceSync } from "./workspace-sync/store.js";
 import { createCloudWorkspaceSyncRoutes } from "./workspace-sync/routes.js";
 import type { CloudWorkspaceGithubReadTokens } from "./workspace-sync/github-read-token.js";
@@ -229,7 +230,13 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
           throw new HttpError(409, "cloud_workspace_not_running", "This cloud workspace is not ready for a connection");
       }
     }
-    const ticket = active ? await deps.execution!.clients.ticket(workspace.id, c.get("user"), wake) : await deps.store.issueToken({ workspaceId: workspace.id, kind: "connect", userId, ttlMs: CONNECT_TICKET_TTL_MS, authority: c.get("user"), wake });
+    let clientInstanceId: string | undefined;
+    if (active && c.req.header("X-Zeros-Client-Features")?.split(",").map(value => value.trim()).includes(CLOUD_CLIENT_ROLLOVER_FEATURE)) {
+      const instance = uuid.safeParse(c.req.header("X-Zeros-Client-Instance"));
+      if (!instance.success) throw new HttpError(400, "invalid_request", "Invalid cloud connection binding");
+      clientInstanceId = instance.data;
+    }
+    const ticket = active ? await deps.execution!.clients.ticket(workspace.id, c.get("user"), wake, clientInstanceId) : await deps.store.issueToken({ workspaceId: workspace.id, kind: "connect", userId, ttlMs: CONNECT_TICKET_TTL_MS, authority: c.get("user"), wake });
     return c.json({
       url: `${deps.bridgeBaseUrl.replace(/\/+$/, "")}/v2/cloud/workspaces/${workspace.id}/bridge`,
       protocols: [CLOUD_V2_BRIDGE_PROTOCOL, `ticket.${ticket.token}`],
