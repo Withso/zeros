@@ -25,4 +25,20 @@ describe("GitHub commit identity", () => {
   it.each([{ rows: [] }, { rows: [{ github_login: "legacy", github_user_id: null }] }])("leaves disconnected and unrefreshed legacy accounts unset", async ({ rows }) => {
     expect(await readGithubGitAuthor({ query: async () => ({ rows }) } as unknown as Tx, "member")).toBeNull();
   });
+  it("reuses a stored name only for the selected immutable GitHub identity", async () => {
+    const tx = { query: async () => ({ rows: [{ github_user_id: "1234", github_login: "old-login", git_author_name: "Stored Name" }] }) } as unknown as Tx;
+    expect(await readGithubGitAuthor(tx, "member", { id: "1234", login: "selected-login" }))
+      .toEqual({ name: "Stored Name", email: "1234+selected-login@users.noreply.github.com" });
+    expect(await readGithubGitAuthor(tx, "member", { id: "5678", login: "other-account" }))
+      .toEqual({ name: "other-account", email: "5678+other-account@users.noreply.github.com" });
+  });
+  it.each([{ rows: [] }, { rows: [{ github_user_id: null, github_login: "legacy", git_author_name: "Legacy Name" }] }])("uses the selected confirmed login without a matching global profile", async ({ rows }) => {
+    const tx = { query: async () => ({ rows }) } as unknown as Tx;
+    expect(await readGithubGitAuthor(tx, "member", { id: "5678", login: "selected-login" }))
+      .toEqual({ name: "selected-login", email: "5678+selected-login@users.noreply.github.com" });
+  });
+  it.each([{ id: "0", login: "selected" }, { id: "1234", login: "bad\nlogin" }])("never falls back to another profile for invalid selected metadata", async selected => {
+    const tx = { query: async () => ({ rows: [{ github_user_id: "1234", github_login: "global", git_author_name: "Global Name" }] }) } as unknown as Tx;
+    expect(await readGithubGitAuthor(tx, "member", selected)).toBeNull();
+  });
 });

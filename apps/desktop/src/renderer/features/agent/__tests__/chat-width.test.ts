@@ -53,7 +53,8 @@ describe("chat width", () => {
       "features/agent/agent-chat.tsx": { "max-w-(--chat-column)": 2 },
       "features/agent/turn-event-list.tsx": { "max-w-(--chat-lane)": 1 },
       "features/agent/turn-container.tsx": { "max-w-(--chat-lane)": 1 },
-      "shell/workspace-history-bar.tsx": { "max-w-(--chat-column)": 1 },
+      // The archived, read-only and no-Creator bars share one frame.
+      "shell/composer-replacement-bar.tsx": { "max-w-(--chat-column)": 1 },
       "shell/conversation/chat-view.tsx": { "max-w-(--chat-column)": 1 },
       "shell/conversation/conversation-pane.tsx": { "max-w-(--chat-column)": 1 },
     };

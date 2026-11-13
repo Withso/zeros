@@ -7,7 +7,7 @@ import { readCloudV2SharingHistory } from "../history.js";
 import { CloudV2PromptCounterSchema, CloudV2PromptIdSchema, CloudV2SessionNameSchema } from "../prompt-contract.js";
 import { ApiRenameSchema } from "../api/contract.js";
 import type { CloudTeamSharing } from "./store.js";
-import { TEAM_SHARING_HEADER, TEAM_OWNERSHIP_HEADER, TeamListSchema, TeamPageSchema, TeamReassignSchema,
+import { TEAM_SHARING_HEADER, TEAM_OWNERSHIP_HEADER, TeamListSchema, TeamPageSchema, TeamCandidatesQuerySchema, TeamReassignSchema,
   teamNotFound, teamReadOnly, teamManagementDenied, teamOwnershipRequired, teamUnavailable } from "./contract.js";
 
 const uuid = (input: string) => { const parsed = z.string().uuid().safeParse(input); if (!parsed.success) throw teamNotFound(); return parsed.data; };
@@ -63,7 +63,7 @@ export function createCloudTeamRoutes(sharing: CloudTeamSharing, document: (valu
   }));
   app.get(path,share(async c => c.json({ workspace: document(await sharing.get(uuid(c.req.param("id")!),c.get("user"),owns(c))),teamSharing: 1,...marker(c) })));
   app.get(`${path}/reassign-candidates`,ownership(async c => {
-    const page = TeamPageSchema.safeParse(c.req.query());
+    const page = TeamCandidatesQuerySchema.safeParse(c.req.query());
     if (!page.success) throw new HttpError(400,"invalid_request","Invalid candidates page");
     const id = uuid(c.req.param("id")!), user = c.get("user");
     return rateLimit("cloud-team-candidates",12,60_000,() => `${user.id}:${id}`)(c,async () => {

@@ -111,6 +111,38 @@ database("active cloud Creator ownership through the router and PostgreSQL", () 
     expect(body.candidates.some((row: { userId: string }) => row.userId === f.creator.id)).toBe(false);
   });
 
+  it("returns the caller's own candidate deterministically, including the current Creator", async () => {
+    for (const user of [f.creator, f.admin]) {
+      const response = await call("/reassign-candidates?self=1", "GET", undefined, user);
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ creatorRevision: "1", nextCursor: null,
+        candidates: [{ userId: user.id, eligible: true, agentLogins: {} }] });
+    }
+  });
+
+  it("lets a no-Creator admin read their own eligibility once and reassign to themself", async () => {
+    await withSystemTx(pool, tx => tx.query("DELETE FROM organization_members WHERE org_id=$1 AND user_id=$2", [f.organizationId, f.creator.id]));
+    const response = await call("/reassign-candidates?self=1", "GET", undefined, f.admin);
+    expect(response.status).toBe(200);
+    const page = await response.json();
+    expect(page).toEqual({ creatorRevision: "2", nextCursor: null,
+      candidates: [{ userId: f.admin.id, eligible: true, agentLogins: {} }] });
+    const reassigned = await call("/reassign", "POST", transfer(f.admin.id, null, page.creatorRevision), f.admin);
+    expect(reassigned.status).toBe(200);
+    expect((await reassigned.json()).workspace).toMatchObject({ creatorUserId: f.admin.id, creatorRevision: "3" });
+  });
+
+  it.each(["self=1&limit=1", "self=1&cursor=unknown", "self=0", "self=true", "self=1&userId=foreign"])("refuses ambiguous self-candidate filters: %s", async query => {
+    expect((await call(`/reassign-candidates?${query}`)).status).toBe(400);
+  });
+
+  it("keeps admission, manager and opt-in fences for the self candidate", async () => {
+    expect((await call("/reassign-candidates?self=1", "GET", undefined, f.viewer)).status).toBe(403);
+    expect((await call("/reassign-candidates?self=1", "GET", undefined, f.admin, false)).status).toBe(409);
+    await withSystemTx(pool, tx => tx.query("DELETE FROM organization_members WHERE org_id=$1 AND user_id=$2", [f.organizationId, f.admin.id]));
+    expect((await call("/reassign-candidates?self=1", "GET", undefined, f.admin)).status).toBe(404);
+  });
+
   it("requires a manager, both opt-ins and an active workspace", async () => {
     const member = await call("/reassign", "POST", transfer(), f.viewer);
     expect(member.status).toBe(403); expect((await member.json()).error.code).toBe("workspace_management_denied");

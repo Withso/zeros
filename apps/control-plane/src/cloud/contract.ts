@@ -167,6 +167,7 @@ export const CloudV2ControlFrameSchema = z.discriminatedUnion("t", [
     }).strict().optional(),
     historyReplacement: z.literal(1).optional(),
     gitIdentity: CloudV2GitIdentitySchema.nullable().optional(),
+    gitIdentitySource: z.enum(["creator", "actor"]).optional(),
   githubPullRequests: z.literal(1).optional(),
     githubUserTokens: z.literal(1).optional(),
     loginRevision: z.string().regex(/^(0|[1-9][0-9]{0,19})$/),
@@ -236,12 +237,14 @@ export const CloudV2TurnLeaseRequestSchema = z.object({ chatId: CloudV2PromptIdS
   generation: CloudV2GenerationSchema, contextId: z.uuid() }).strict();
 export const CloudV2TurnLeaseSchema = z.object({
   contextId: z.uuid(), userId: z.uuid(), generation: CloudV2GenerationSchema, expiresAt: epochMs, agents: oneAgent,
+  personName: CloudV2GitIdentitySchema.shape.name.optional(),
   gitIdentity: CloudV2GitIdentitySchema.nullable(), environment: CloudWorkspaceEnvironmentSchema.optional(),
   mcpServers: z.array(RuntimeMcpServerSchema).max(128).optional(), api: contextApi.optional(),
 }).strict();
 export type CloudV2TurnLease = z.infer<typeof CloudV2TurnLeaseSchema>;
 export const CloudV2TerminalLeaseRequestSchema = z.object({ clientId: z.uuid(), terminalId: CloudV2PromptIdSchema, requestId: CloudV2PromptIdSchema }).strict();
 export const CloudV2TerminalLeaseSchema = z.object({ contextId: z.uuid(), userId: z.uuid(), expiresAt: epochMs,
+  personName: CloudV2GitIdentitySchema.shape.name.optional(),
   gitIdentity: CloudV2GitIdentitySchema.nullable(), environment: CloudWorkspaceEnvironmentSchema.optional(), api: contextApi.optional() }).strict();
 export type CloudV2TerminalLease = z.infer<typeof CloudV2TerminalLeaseSchema>;
 /** The worker's real client mutations that need a person (closed list; git.repoBranchCatalog only with params.fetch === true). */
@@ -253,10 +256,12 @@ export const CLOUD_V2_CLIENT_OPERATIONS = ["git.prepareGithub", "git.stage", "gi
   "messages.truncateFrom"] as const;
 export const CloudV2ClientOperationSchema = z.enum(CLOUD_V2_CLIENT_OPERATIONS);
 export const CloudV2ClientLeaseRequestSchema = z.object({ clientId: z.uuid(), requestId: CloudV2PromptIdSchema, operation: CloudV2ClientOperationSchema }).strict();
-export const CloudV2ClientLeaseSchema = z.object({ contextId: z.uuid(), userId: z.uuid(), expiresAt: epochMs, gitIdentity: CloudV2GitIdentitySchema.nullable() }).strict();
+export const CloudV2ClientLeaseSchema = z.object({ contextId: z.uuid(), userId: z.uuid(), expiresAt: epochMs,
+  personName: CloudV2GitIdentitySchema.shape.name.optional(), gitIdentity: CloudV2GitIdentitySchema.nullable() }).strict();
 export type CloudV2ClientLease = z.infer<typeof CloudV2ClientLeaseSchema>;
 export const CloudV2BootstrapLeaseRequestSchema = z.object({ contextId: z.uuid() }).strict();
 export const CloudV2BootstrapLeaseSchema = z.object({ contextId: z.uuid(), userId: z.uuid(), expiresAt: epochMs,
+  personName: CloudV2GitIdentitySchema.shape.name.optional(),
   gitIdentity: CloudV2GitIdentitySchema.nullable(), environment: CloudWorkspaceEnvironmentSchema.optional() }).strict();
 export type CloudV2BootstrapLease = z.infer<typeof CloudV2BootstrapLeaseSchema>;
 export const CloudV2RenewRequestSchema = z.object({ contextIds: z.array(z.uuid()).min(1).max(128) }).strict()

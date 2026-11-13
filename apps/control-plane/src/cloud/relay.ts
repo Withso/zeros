@@ -14,7 +14,8 @@ import { requireWorkspaceCreator } from "./workspace-access.js";
 import { isCloudV2Token } from "./tokens.js";
 import type { CloudExecutionContexts } from "./execution/store.js";
 import { ExecutionContextRevoked } from "./execution/errors.js";
-import { dialWorker, workerSupportsActingUser, workerSupportsCreatorLogins, workerSupportsCreatorModels, workerSupportsApi, workerSupportsLocalCommands, workerSupportsLocalCommandReason, workerSupportsNotifyUser, workerSupportsCheckout, workerSupportsMcp, workerSupportsSetup, workerSupportsRepositorySetup, workerSupportsGithub, workerSupportsGitIdentity, workerSupportsGithubUserTokens, workerSupportsAgentInteractions, workerSupportsCodeReview, workerSupportsHistoryReplacement, workerSupportsEnvironment, workerSupportsRuntimeUpdate, workerSupportsPush, type WorkerRoute } from "./worker-connection.js";
+import { dialWorker, workerSupportsActingUser, workerSupportsCreatorLogins, workerSupportsCreatorModels, workerSupportsCreatorCommitIdentity, workerSupportsApi, workerSupportsLocalCommands, workerSupportsLocalCommandReason, workerSupportsNotifyUser, workerSupportsCheckout, workerSupportsMcp, workerSupportsSetup, workerSupportsRepositorySetup, workerSupportsGithub, workerSupportsGitIdentity, workerSupportsGithubUserTokens, workerSupportsAgentInteractions, workerSupportsCodeReview, workerSupportsHistoryReplacement, workerSupportsEnvironment, workerSupportsRuntimeUpdate, workerSupportsPush, type WorkerRoute } from "./worker-connection.js";
+import { workerGitIdentity } from "./worker-git-identity.js";
 import { emitCloudV2Timing, type CloudV2TimingRecord } from "./lifecycle.js";
 import { HttpError } from "../authz.js";
 import { isGithubAccessRevoked, isGithubTemporary } from "../github-availability.js";
@@ -636,7 +637,7 @@ export class CloudV2Relay {
       if (await this.current(room) !== "allowed" || room.worker !== ws) return false;
       if (revision !== await this.deps.store.loginRevision(room.workspace.id)) { flight.requested = true; flight.force = true; continue; }
       if (room.worker !== ws || room.revoked) return false;
-      const { api: _api, agentLogins, agentModels, localCommands: _localCommands, localCommandReason: _localCommandReason, notifyUser, mcpServers, githubPullRequests, githubUserTokens, gitIdentity, agentInteractions, codeReview, historyReplacement: _historyReplacement, environment, runtimeUpdate, ...legacy } = config;
+      const { api: _api, agentLogins, agentModels, localCommands: _localCommands, localCommandReason: _localCommandReason, notifyUser, mcpServers, githubPullRequests, githubUserTokens, gitIdentity: _gitIdentity, gitIdentitySource: _gitIdentitySource, agentInteractions, codeReview, historyReplacement: _historyReplacement, environment, runtimeUpdate, ...legacy } = config;
       if (environment && !workerSupportsEnvironment(ws)) throw new Error("Cloud environment runtime support is required.");
       const { setup, setupScript, baseCommit, github, ...workspaceConfig } = config.workspace;
       if (setupScript !== undefined && !workerSupportsRepositorySetup(ws)) throw new Error("Repository setup runtime support is required.");
@@ -656,7 +657,7 @@ export class CloudV2Relay {
         ...(config.actingUser === 1 && workerSupportsCreatorModels(ws) && agentModels ? { agentModels } : {}),
         ...(environment ? { environment } : {}),
         ...(workerSupportsRuntimeUpdate(ws) && runtimeUpdate === 1 ? { runtimeUpdate } : {}),
-        ...(workerSupportsGitIdentity(ws) && gitIdentity !== undefined ? { gitIdentity } : {}),
+        ...workerGitIdentity(config, workerSupportsGitIdentity(ws), workerSupportsCreatorCommitIdentity(ws)),
         ...(workerSupportsCodeReview(ws) && codeReview ? { codeReview } : {}),
         ...(workerSupportsGithubUserTokens(ws) && githubUserTokens === 1 ? { githubUserTokens } : {}),
         ...(workerSupportsGithub(ws) && githubPullRequests === 1 ? { githubPullRequests } : {}), loginRevision: revision }); room.loginRevision = revision; room.configAt = Date.now();

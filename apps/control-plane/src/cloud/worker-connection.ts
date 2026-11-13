@@ -10,6 +10,7 @@ const peerFeatures = new WeakMap<WebSocket, ReadonlySet<string>>();
 export const workerSupportsActingUser = (socket: WebSocket): boolean => peerFeatures.get(socket)?.has("acting-user-v1") ?? false;
 export const workerSupportsCreatorLogins = (socket: WebSocket): boolean => peerFeatures.get(socket)?.has("creator-agent-logins-v1") ?? false;
 export const workerSupportsCreatorModels = (socket: WebSocket): boolean => peerFeatures.get(socket)?.has("creator-agent-models-v1") ?? false;
+export const workerSupportsCreatorCommitIdentity = (socket: WebSocket): boolean => peerFeatures.get(socket)?.has("creator-commit-identity-v1") ?? false;
 export const workerSupportsApi = (socket: WebSocket): boolean => peerFeatures.get(socket)?.has("workspace-api-v1") ?? false;
 export const workerSupportsLocalCommands = (socket: WebSocket): boolean => peerFeatures.get(socket)?.has("local-commands-v1") ?? false;
 export const workerSupportsLocalCommandReason = (socket: WebSocket): boolean => peerFeatures.get(socket)?.has("local-commands-reason-v1") ?? false;

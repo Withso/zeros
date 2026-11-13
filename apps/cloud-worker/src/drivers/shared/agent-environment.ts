@@ -33,6 +33,29 @@ export function agentEnvironment(
 
 /** Generic commands receive no app values; only explicit application callers
  * opt in, without changing worker or credential-provider environments. */
+const CONFIG_ENTRY = /^GIT_CONFIG_(?:COUNT|KEY_\d+|VALUE_\d+)$/;
+const configEntries = (env: NodeJS.ProcessEnv): Array<[string, string]> => {
+  const count = Number(env.GIT_CONFIG_COUNT);
+  if (!Number.isSafeInteger(count) || count < 0 || count > 64) return [];
+  return Array.from({ length: count }, (_, index) => [env[`GIT_CONFIG_KEY_${index}`], env[`GIT_CONFIG_VALUE_${index}`]] as const)
+    .filter((entry): entry is [string, string] => entry[0] !== undefined && entry[1] !== undefined);
+};
+
+/** Layers a per-context Git environment over the worker's: ordinary names override, but GIT_CONFIG_* entries are
+ * combined, never replaced. The context's entries come FIRST and the base's AFTER, re-indexed: the base carries the
+ * GitHub broker's credential.helper reset and erase helper, so they always win over anything a context's identity
+ * include (sharing/identity.ts, editable on the VM) might add. */
+export function mergeGitEnvironment(base: NodeJS.ProcessEnv = {}, overlay: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
+  const merged: NodeJS.ProcessEnv = {};
+  for (const [name, value] of [...Object.entries(base), ...Object.entries(overlay)]) if (!CONFIG_ENTRY.test(name)) merged[name] = value;
+  const entries = [...configEntries(overlay), ...configEntries(base)];
+  if (entries.length) {
+    merged.GIT_CONFIG_COUNT = String(entries.length);
+    entries.forEach(([key, value], index) => { merged[`GIT_CONFIG_KEY_${index}`] = key; merged[`GIT_CONFIG_VALUE_${index}`] = value; });
+  }
+  return merged;
+}
+
 export function workerChildEnvironment(source: NodeJS.ProcessEnv = process.env, git: NodeJS.ProcessEnv = {}, application: Readonly<Record<string, string>> = {},
   zeros: Readonly<Record<string, string>> = {}): NodeJS.ProcessEnv {
   const checked = CloudEnvironmentMaterialSchema.safeParse({ variables: application, files: [] });

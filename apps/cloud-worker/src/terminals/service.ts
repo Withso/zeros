@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { createMessage, type BridgeMessage, type PtyCreateMessage, type PtySpawnFailure, type PtyTerminalInfo } from "@zeros/protocol/messages";
 import type { AppClient } from "../agents";
 import { RECENT_ACTIVITY_MS } from "../activity";
-import { workerChildEnvironment } from "../drivers/shared/agent-environment";
+import { workerChildEnvironment, mergeGitEnvironment } from "../drivers/shared/agent-environment";
 import { CheckedFiles, descriptorPath } from "../workspace/checked-files";
 import type { WorkspaceScope } from "../workspace/scope";
 import { TerminalMirror } from "./mirror";
@@ -312,7 +312,7 @@ export class Terminals {
       const cwd = await as("cwd_unavailable", () => realpath(descriptorPath(descriptor)));
       const cols = dim(message.cols, record?.cols ?? 80), rows = dim(message.rows, record?.rows ?? 24);
       const environment = await as("environment_invalid", () => lease
-        ? workerChildEnvironment(this.options.environment, { ...this.options.gitEnvironment, ...lease.git }, { ...this.options.applicationEnvironment, ...lease.application },
+        ? workerChildEnvironment(this.options.environment, mergeGitEnvironment(this.options.gitEnvironment, lease.git), { ...this.options.applicationEnvironment, ...lease.application },
           { ...withoutApi(this.options.zerosEnvironment?.()), ...lease.zeros })
         : workerChildEnvironment(this.options.environment, this.options.gitEnvironment, this.options.applicationEnvironment, this.options.zerosEnvironment?.()));
       native = await as("pty_unavailable", () => (this.options.spawn ?? nativeSpawn)({ shell: "/bin/bash", args: this.options.shellArgs ?? ["-l"],

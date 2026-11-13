@@ -73,6 +73,8 @@ export const CloudConnectionRenewedFrameSchema = z.union([
 /** Activated: the worker serves an activated config's agentModels (the current Creator's selectable model ids) as each
  * agent's picker list. */
 export const CREATOR_AGENT_MODELS_FEATURE = "creator-agent-models-v1";
+/** Activated: every commit is authored as the current Creator (VM-wide identity); leases carry the person's name for review. */
+export const CREATOR_COMMIT_IDENTITY_FEATURE = "creator-commit-identity-v1";
 const creatorModelIds = z.array(z.string().max(256).regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]*(?:\[1m\])?$/)).max(128)
   .refine(value => new Set(value).size === value.length, "Duplicate model ids");
 /** A decimal bigint string, 1..9223372036854775806, never a JSON number. */
@@ -224,6 +226,9 @@ export const CloudV2ControlFrameSchema = z.discriminatedUnion("t", [
     }).strict().optional(),
     historyReplacement: z.literal(1).optional(),
     gitIdentity: CloudV2GitIdentitySchema.nullable().optional(),
+    /** creator-commit-identity-v1 only: "creator" = gitIdentity is the current Creator's (null: none stored, commits refuse);
+     * "actor" = no Creator, each context commits as its own person. Absent: N−1 behaviour. */
+    gitIdentitySource: z.enum(["creator", "actor"]).optional(),
   githubPullRequests: z.literal(1).optional(),
     githubUserTokens: z.literal(1).optional(),
     /** local-commands-v1 workers only, while the organization allows local
@@ -316,15 +321,17 @@ export const CloudV2BeginActiveReplySchema = z.object({
 const oneAgent = CloudV2AgentLoginsSchema.refine(value => Object.keys(value).length === 1, "Exactly one agent");
 export const CloudV2TurnLeaseRequestSchema = z.object({ chatId: CloudV2PromptIdSchema, userMessageId: CloudV2PromptIdSchema, dispatchId: z.uuid(),
   generation: CloudV2GenerationSchema, contextId: z.uuid() }).strict();
+/** Every lease's optional personName (creator-commit-identity-v1): the person's name for review authorship, never the
+ * commit identity (which is the Creator's in an activated workspace). */
 export const CloudV2TurnLeaseSchema = z.object({
   contextId: z.uuid(), userId: z.uuid(), generation: CloudV2GenerationSchema, expiresAt: epochMs, agents: oneAgent,
-  gitIdentity: CloudV2GitIdentitySchema.nullable(), environment: CloudWorkspaceEnvironmentSchema.optional(),
+  personName: CloudV2GitIdentitySchema.shape.name.optional(), gitIdentity: CloudV2GitIdentitySchema.nullable(), environment: CloudWorkspaceEnvironmentSchema.optional(),
   mcpServers: z.array(RuntimeMcpServerSchema).max(128).optional(), api: contextApi.optional(),
 }).strict();
 export type CloudV2TurnLease = z.infer<typeof CloudV2TurnLeaseSchema>;
 export const CloudV2TerminalLeaseRequestSchema = z.object({ clientId: z.uuid(), terminalId: CloudV2PromptIdSchema, requestId: CloudV2PromptIdSchema }).strict();
 export const CloudV2TerminalLeaseSchema = z.object({ contextId: z.uuid(), userId: z.uuid(), expiresAt: epochMs,
-  gitIdentity: CloudV2GitIdentitySchema.nullable(), environment: CloudWorkspaceEnvironmentSchema.optional(), api: contextApi.optional() }).strict();
+  personName: CloudV2GitIdentitySchema.shape.name.optional(), gitIdentity: CloudV2GitIdentitySchema.nullable(), environment: CloudWorkspaceEnvironmentSchema.optional(), api: contextApi.optional() }).strict();
 export type CloudV2TerminalLease = z.infer<typeof CloudV2TerminalLeaseSchema>;
 /** The worker's real client mutations that need a person (closed list; git.repoBranchCatalog only with params.fetch === true). */
 export const CLOUD_V2_CLIENT_OPERATIONS = ["git.prepareGithub", "git.stage", "git.unstage", "git.discard", "git.clean", "git.commit", "git.push",
@@ -335,11 +342,11 @@ export const CLOUD_V2_CLIENT_OPERATIONS = ["git.prepareGithub", "git.stage", "gi
   "messages.truncateFrom"] as const;
 export const CloudV2ClientOperationSchema = z.enum(CLOUD_V2_CLIENT_OPERATIONS);
 export const CloudV2ClientLeaseRequestSchema = z.object({ clientId: z.uuid(), requestId: CloudV2PromptIdSchema, operation: CloudV2ClientOperationSchema }).strict();
-export const CloudV2ClientLeaseSchema = z.object({ contextId: z.uuid(), userId: z.uuid(), expiresAt: epochMs, gitIdentity: CloudV2GitIdentitySchema.nullable() }).strict();
+export const CloudV2ClientLeaseSchema = z.object({ contextId: z.uuid(), userId: z.uuid(), expiresAt: epochMs, personName: CloudV2GitIdentitySchema.shape.name.optional(), gitIdentity: CloudV2GitIdentitySchema.nullable() }).strict();
 export type CloudV2ClientLease = z.infer<typeof CloudV2ClientLeaseSchema>;
 export const CloudV2BootstrapLeaseRequestSchema = z.object({ contextId: z.uuid() }).strict();
 export const CloudV2BootstrapLeaseSchema = z.object({ contextId: z.uuid(), userId: z.uuid(), expiresAt: epochMs,
-  gitIdentity: CloudV2GitIdentitySchema.nullable(), environment: CloudWorkspaceEnvironmentSchema.optional() }).strict();
+  personName: CloudV2GitIdentitySchema.shape.name.optional(), gitIdentity: CloudV2GitIdentitySchema.nullable(), environment: CloudWorkspaceEnvironmentSchema.optional() }).strict();
 export type CloudV2BootstrapLease = z.infer<typeof CloudV2BootstrapLeaseSchema>;
 export const CloudV2RenewRequestSchema = z.object({ contextIds: z.array(z.uuid()).min(1).max(128) }).strict()
   .refine(value => new Set(value.contextIds).size === value.contextIds.length, "Unique context ids");

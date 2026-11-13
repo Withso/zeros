@@ -19,6 +19,8 @@ export const TeamListSchema = z.object({
 }).strict().refine(value => !(value.creator && value.mine));
 export type TeamList = z.infer<typeof TeamListSchema>;
 export const TeamPageSchema = z.object({ limit: z.coerce.number().int().min(1).max(200).default(50),cursor: z.string().min(1).max(2048).optional() }).strict();
+export const TeamCandidatesQuerySchema = z.union([z.object({ self: z.literal("1") }).strict(), TeamPageSchema]);
+export type TeamCandidatesQuery = z.infer<typeof TeamCandidatesQuerySchema>;
 const Cursor = z.object({ key: z.string().length(64),at: z.string().max(64).datetime({ offset: true }),id: z.string().uuid() }).strict();
 export type TeamCursor = z.infer<typeof Cursor>;
 export const teamCursorKey = (scope: unknown) => createHash("sha256").update(JSON.stringify(scope)).digest("hex");

@@ -8,7 +8,7 @@ import { CloudExecutionAuthority, type ExecutionAdmission } from "../execution/a
 import { selectedAgentLoginAvailability } from "../execution/logins.js";
 import type { TeamView } from "./authority.js";
 import { CreatorRevisionSchema, teamCreatorChanged, teamCursorKey, teamNotFound, teamOwnershipDenied,
-  teamOwnershipRequired, teamUnavailable, type TeamReassign } from "./contract.js";
+  teamOwnershipRequired, teamUnavailable, type TeamCandidatesQuery, type TeamReassign } from "./contract.js";
 import type { CloudTeamSharing } from "./store.js";
 
 type CandidateReason = "on_hold" | "account_inactive" | "repository_access_required";
@@ -56,12 +56,13 @@ export class CloudTeamOwnership {
     }
   }
 
-  async candidates(id: string, user: AuthedUser, page: { limit: number; cursor?: string | undefined }) {
+  async candidates(id: string, user: AuthedUser, page: TeamCandidatesQuery) {
     const proof = await this.sharing.authority.admit(id, user);
     this.requireEnabled(proof.view); this.manager(proof.view);
     const key = teamCursorKey(["reassign", id, user.id]), revision = proof.view.creatorRevision;
+    const self = "self" in page, limit = self ? 1 : page.limit;
     let after: string | null = null;
-    if (page.cursor) {
+    if (!self && page.cursor) {
       let cursor: z.infer<typeof cursorSchema>;
       try {
         if (!/^[A-Za-z0-9_-]+$/.test(page.cursor)) throw new Error();
@@ -75,11 +76,13 @@ export class CloudTeamOwnership {
       const current = await this.sharing.authority.assert(proof, tx);
       this.manager(current);
       if (current.creatorRevision !== revision) throw teamCreatorChanged();
+      if (self) return (await tx.query<{ user_id: string }>("SELECT user_id FROM organization_members WHERE org_id=$1 AND user_id=$2",
+        [current.workspace.organizationId, user.id])).rows;
       return (await tx.query<{ user_id: string }>(`SELECT user_id FROM organization_members
         WHERE org_id=$1 AND user_id IS DISTINCT FROM $2::uuid AND ($3::uuid IS NULL OR user_id>$3)
-        ORDER BY user_id LIMIT $4`, [current.workspace.organizationId, current.workspace.creatorUserId, after, page.limit+1])).rows;
+        ORDER BY user_id LIMIT $4`, [current.workspace.organizationId, current.workspace.creatorUserId, after, limit+1])).rows;
     });
-    const selected = rows.slice(0, page.limit), candidates = new Map<string, Awaited<ReturnType<CloudTeamOwnership["candidate"]>>>();
+    const selected = rows.slice(0, limit), candidates = new Map<string, Awaited<ReturnType<CloudTeamOwnership["candidate"]>>>();
     let next = 0;
     await Promise.all(Array.from({ length: Math.min(4, selected.length) }, async () => {
       while (next < selected.length) {
@@ -110,7 +113,7 @@ export class CloudTeamOwnership {
       return values;
     });
     const last = selected.at(-1);
-    return { candidates: result, creatorRevision: revision, nextCursor: rows.length>page.limit && last
+    return { candidates: result, creatorRevision: revision, nextCursor: !self && rows.length>limit && last
       ? Buffer.from(JSON.stringify({ key, revision, id: last.user_id })).toString("base64url") : null };
   }
 

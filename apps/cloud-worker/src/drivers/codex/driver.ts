@@ -13,7 +13,7 @@ import { unsupportedInputNotice } from "../shared/unsupported-input";
 import { CLOUD_INPUT_TIMEOUT_MS, cleanInteraction, nativeInputResponse } from "../shared/native-input";
 import { driverTiming } from "../../agent-timings";
 import { JsonRpcProcess, RpcError } from "../shared/json-rpc-process";
-import { agentEnvironment } from "../shared/agent-environment";
+import { agentEnvironment, mergeGitEnvironment } from "../shared/agent-environment";
 import { CodexEventMapper } from "./event-mapper";
 
 export const CODEX_VERSION = "0.166.0";
@@ -107,7 +107,7 @@ export class CodexDriver implements Driver {
       command, args: [...args, "app-server", ...(input.onQuestion ? codexQuestionFeatureArgs() : []),
         ...Object.entries(config).flatMap(([key, value]) => ["-c", `${key}=${JSON.stringify(value)}`])],
       cwd: input.cwd,
-      env: agentEnvironment({ agent: "codex", token: input.proxy.token }, this.options.environment, input.gitEnvironment ? { ...this.options.gitEnvironment, ...input.gitEnvironment } : this.options.gitEnvironment, input.application?.variables, input.zerosEnvironment),
+      env: agentEnvironment({ agent: "codex", token: input.proxy.token }, this.options.environment, input.gitEnvironment ? mergeGitEnvironment(this.options.gitEnvironment, input.gitEnvironment) : this.options.gitEnvironment, input.application?.variables, input.zerosEnvironment),
       requestTimeoutMs: this.options.requestTimeoutMs ?? 30_000,
       onNotification: (method, params) => this.notification(method, params),
       onRequest: (method, params, id) => this.nativeRequest(method, params, id),

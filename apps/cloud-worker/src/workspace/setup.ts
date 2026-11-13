@@ -4,7 +4,7 @@ import { mkdir, open, readFile, type FileHandle } from "node:fs/promises";
 import { join } from "node:path";
 import { CloudV2SetupStatusSchema, type CloudV2SetupStatus } from "@zeros/protocol/cloud-v2-relay";
 import { selectRepositorySetup, type RepositorySetupSelection } from "@zeros/protocol/run-actions";
-import { workerChildEnvironment } from "../drivers/shared/agent-environment";
+import { workerChildEnvironment, mergeGitEnvironment } from "../drivers/shared/agent-environment";
 import type { WorkerConfig } from "./scope";
 import { ApplicationEnvironment } from "../credentials/application-environment";
 import { RepositorySetupError, RepositorySetupSource } from "./repository-setup";
@@ -134,7 +134,7 @@ export class WorkspaceSetup {
   private environment(): NodeJS.ProcessEnv {
     // Activated: the bootstrap lease's person and context (team sharing); none otherwise.
     const operation = this.bootstrap;
-    return operation ? workerChildEnvironment(undefined, { ...this.options.gitEnvironment, ...operation.git }, this.options.application?.variables, operation.zeros)
+    return operation ? workerChildEnvironment(undefined, mergeGitEnvironment(this.options.gitEnvironment, operation.git), this.options.application?.variables, operation.zeros)
       : workerChildEnvironment(undefined, this.options.gitEnvironment, this.options.application?.variables);
   }
   private bootstrap?: OperationEnvironment;

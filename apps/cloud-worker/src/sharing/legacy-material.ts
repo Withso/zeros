@@ -5,6 +5,7 @@ import { descriptorPath } from "../workspace/checked-files";
 import type { CloudV2BootCleanRefusal } from "@zeros/protocol/cloud-v2-relay";
 import { NoFollowRefusal, openDirectoryNoFollow } from "./no-follow";
 import { removeSeededEnvironment, type LegacyRemoval } from "../workspace/environment-seed";
+import { CREATOR_IDENTITY_MARKER } from "../credentials/git-identity";
 
 export type { LegacyRemoval };
 
@@ -89,7 +90,7 @@ async function clearGitIdentity(home: string): Promise<LegacyRemoval> {
       if (opened.size > 64 * 1024) refuse("git_identity_not_regular");
       contents = await file.readFile("utf8");
     } finally { await file.close(); }
-    if (contents === EMPTY_IDENTITY) return "none";
+    if (contents === EMPTY_IDENTITY || contents.startsWith(`${CREATOR_IDENTITY_MARKER}\n`)) return "none";
     // The empty identity replaces exactly the file that was read, in the same held directory.
     const temporary = `${descriptorPath(directory)}/.git-identity-${process.pid}-${Date.now()}`;
     const replacement = await open(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);

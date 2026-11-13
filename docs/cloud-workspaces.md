@@ -499,8 +499,12 @@ Activated workspaces retain the VM when one person leaves, goes on Hold or loses
 account or repository access. That person's contexts, tokens, pending prompts,
 Mac connections and local-command bindings are revoked; other members keep
 working. A session sign-out closes that session's clients and terminals while
-already accepted turns retain their recorded sender. Commit and review identity,
-GitHub, environment, MCP, API and Local commands come from each execution's person.
+already accepted turns retain their recorded sender. GitHub network tokens,
+review identity, environment, MCP, API and Local commands come from each
+execution's person. Commits use the current Creator's stored Git identity;
+without a Creator, they use the acting person's stored identity. Reassign changes
+the identity for subsequent commits, including those in a running turn, without
+changing that turn's sender or its GitHub network authority.
 Local workspaces and legacy/prepared cloud workspaces keep their existing rules.
 
 Every new activated turn uses the current workspace Creator's selected agent
@@ -555,7 +559,13 @@ pagination and direct reads refuse with `409 team_ownership_required`.
 disables ownership changes but keeps negotiated unassigned documents readable.
 
 `GET /v1/cloud-v2/workspaces/:id/reassign-candidates` returns a bounded,
-revision-bound page of members and their eligibility. `POST .../:id/reassign`
+revision-bound page of members and their eligibility. With `?self=1`, it returns
+only the caller's candidate, including when they are already the Creator, with
+`nextCursor: null`. This filter cannot be combined with `cursor` or `limit`;
+the same membership, repository, manager and opt-in checks apply. An admin can
+use it to check their own eligibility in one read before assigning an unassigned
+workspace to themself. Agent-login availability is presentation only.
+`POST .../:id/reassign`
 requires `requestId`, `toUserId`, `expectedCreatorUserId` and
 `expectedCreatorRevision`. A changed Creator returns `409 creator_changed`.
 Exact request retries replay their receipt for 30 days without repeating the
@@ -804,11 +814,29 @@ the same control-plane process read for the same token within the last 30 s
 (for example, during that hello's source check or the create's branch lookup)
 is reused instead of calling GitHub again. The authorization generation is
 still rechecked.
-Activated workspace leases use the person's already-confirmed profile or the
-selected connection's stored identity without a GitHub request. This remains
-available when the Git token needs renewal; network operations still obtain a
-separately verified token. The current database authority is checked before any
-material is returned.
+Activated workspace config supplies the current Creator's stored identity to
+workers advertising `creator-commit-identity-v1`. Its optional
+`gitIdentitySource` is `creator` when there is a Creator, even if no identity is
+available, and `actor` when there is none. A missing Creator identity never
+silently borrows another person's identity. The stored GitHub display name is
+used only when its immutable account id matches the selected organization
+connection; otherwise the selected connection's confirmed login is the name.
+The noreply email always comes from that selected connection. These reads make
+no GitHub request and remain available when its token needs renewal; network
+operations still obtain a separately verified acting-person token.
+
+Execution leases retain the acting person's identity for compatibility and
+for workspaces without a Creator. Their optional `personName` identifies the
+code-review requester, independently of commit authorship. That field is
+projected only in replies to workers advertising the new capability, never
+added to stored lease material. Older workers keep the existing person identity
+behavior; older control planes omit the new config marker. Current database
+authority is checked before any material is returned.
+With Git 2.31 or newer, each activated context uses a worker-managed Git include
+that is rewritten when the Creator changes. An already-open terminal therefore
+uses the new Creator on its next commit, including a transition from no Creator.
+Older Git versions retain the identity selected when the terminal opened until
+it is reopened.
 The VM user's global Git config includes the worker-owned
 `~/.config/zeros/git-identity`, which also sets `user.useConfigOnly=true`.
 Confirmed configuration changes atomically replace that file, so existing
