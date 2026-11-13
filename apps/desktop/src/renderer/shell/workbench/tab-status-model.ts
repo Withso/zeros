@@ -135,6 +135,9 @@ export interface WorkspaceAvailability {
   messagesWithoutLive?: boolean;
   /** A definitive connect refusal (access, not an outage): always an error, never "connecting". */
   refused?: boolean;
+  /** Cloud: the server named live_connection_unavailable after its route repair and rebuild were exhausted or
+   * unsafe, so connecting has ended (chats and messages still work). */
+  liveConnectionUnavailable?: boolean;
 }
 
 // Cloud gaps affect shared availability at 10s; both placements reach failure
@@ -230,8 +233,10 @@ export function describeWorkspaceAvailability(
   const elapsed = now - input.since;
   // Messages and stored chats do not depend on the live connection, so a running workspace whose connection keeps
   // failing (and is being retried or rebuilt) stays connecting; only a definitive refusal is an error.
-  const keepsConnecting = input.cloud && !!input.messagesWithoutLive && !input.refused && ["ready", "busy"].includes(input.state ?? "");
-  if (!keepsConnecting && (
+  const running = ["ready", "busy"].includes(input.state ?? "");
+  const named = input.cloud && running && !!input.liveConnectionUnavailable && input.connection !== "connected";
+  const keepsConnecting = input.cloud && !!input.messagesWithoutLive && !input.refused && running && !named;
+  if (named || !keepsConnecting && (
     input.rejected ||
     (input.connection !== "connected" &&
       elapsed >= WORKBENCH_RECONNECT_ERROR_MS)

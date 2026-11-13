@@ -100,4 +100,22 @@ describe("cloud not-ready empty state", () => {
     expect(describeWorkspaceRuntimeStatus({ ...failing, messagesWithoutLive: undefined }, 60_000)).toBe("Needs attention");
     expect(describeWorkspaceRuntimeStatus({ cloud: false, connection: "disconnected", since: 0 }, 60_000)).toBe("Needs attention");
   });
+
+  it("ends connecting in the existing failed state once the server names live_connection_unavailable", () => {
+    const named = { cloud: true, state: "ready", connection: "disconnected", since: 0, messagesWithoutLive: true, liveConnectionUnavailable: true } as WorkspaceAvailability;
+    // Named only after the server's repair and rebuild are exhausted or unsafe: no grace interval, the existing failure.
+    for (const now of [0, 15_000, 60_000]) {
+      expect(describeWorkspaceAvailability(named, now)).toMatchObject({ tone: "error", message: "Can't reach the workspace." });
+      expect(describeWorkspaceRuntimeStatus(named, now)).toBe("Needs attention");
+    }
+    expect(describeWorkspaceRuntimeStatus({ ...named, state: "busy", previouslyConnected: true }, 60_000)).toBe("Needs attention");
+    // A live connection that comes back wins; the tabs keep their one not-ready line, never a failure sentence.
+    expect(describeWorkspaceRuntimeStatus({ ...named, connection: "connected" }, 60_000)).toBe("Running");
+    fixture.availability = named;
+    for (const type of Object.keys(LINES) as (keyof typeof LINES)[]) {
+      const markup = render(type);
+      expect(markup).toContain(LINES[type]);
+      expect(markup).not.toContain("Can't reach");
+    }
+  });
 });
