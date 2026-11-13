@@ -153,3 +153,19 @@ it("an old relay (no AUTH frame) schedules nothing, and rollover frames never re
   h.auth(h.sockets[0]);
   expect(seen).not.toHaveBeenCalled();
 });
+
+it("labels an ENGINE_READY re-sent on an already ready socket as a repeat in diagnostics", async () => {
+  const h = fixture(); void h.client.connect(); await vi.advanceTimersByTimeAsync(0);
+  const socket = h.sockets[0]!; await h.ready(socket);
+  const readies = () => h.logger.warn.mock.calls.map(([line]) => String(line)).filter(line => line.includes("\"event\":\"ready\""));
+  expect(readies()).toHaveLength(1);
+  expect(readies()[0]).not.toContain("repeat");
+  socket.frame({ id: "r2", timestamp: Date.now(), source: "engine", type: "ENGINE_READY", capabilities: [] });
+  await vi.advanceTimersByTimeAsync(0);
+  expect(readies()).toHaveLength(2);
+  expect(readies()[1]).toContain("\"repeat\":1");
+  expect(h.client.status).toBe("connected");
+  // A new socket's first ready is not a repeat.
+  socket.close(1013); await vi.advanceTimersByTimeAsync(60_000);
+  const next = h.sockets.at(-1)!; if (next !== socket) { await h.ready(next); expect(readies().at(-1)).not.toContain("repeat"); }
+});
