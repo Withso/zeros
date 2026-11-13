@@ -5,7 +5,8 @@ import { createPendingSourceResolver } from "./pending-create.js";
 import { postgresNotificationSubscription } from "../postgres-notifications.js";
 import { randomUUID } from "node:crypto";
 import type pg from "pg";
-import { withSystemTx } from "../db.js";
+import { withSystemTx, type Tx } from "../db.js";
+import { readGithubGitAuthor } from "../github-git-author.js";
 import type { PostgresSecurityEventBroker } from "../security-events.js";
 import type { Config } from "../config.js";
 import { HttpError } from "../authz.js";
@@ -159,6 +160,12 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   const workspaceSync = new CloudWorkspaceSync(pool, localDevices, store, keys, signer, continueSource);
   const workspaceGithubReadTokens = new CloudWorkspaceGithubReadTokens(pool, localDevices, github.token);
   const mcp = createMcpServices(pool, config, github.connections.authorizeRepositoryConfiguration.bind(github.connections));
+  const storedGitIdentity = async (tx: Tx, scope: { organizationId: string; userId: string }) => {
+    const selected = await github.connections.store.selectedIdentity(scope, tx);
+    const identity = selected ? await readGithubGitAuthor(tx, scope.userId, selected.identity) : null;
+    await selected?.assertCurrent();
+    return identity;
+  };
   const execution: CloudExecutionContexts = new CloudExecutionContexts(pool, {
     authority: new CloudExecutionAuthority(pool, source, github.connections.store), logins: new CloudExecutionLogins(pool, keys), keys,
     apiUrl: `${v2.apiUrl}/api/v0`, proxyBase, agentConfig: cloudV2AgentConfig,
@@ -181,20 +188,17 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
       await check(); return result;
     } } satisfies Pick<import("./execution/store.js").ExecutionDeps, "mcpAuthorization"> : {}),
     material: async (context, check) => {
-      const { workspace, credential, storedIdentity, primary } = await withSystemTx(pool, async tx => {
+      const { workspace, gitIdentity, primary } = await withSystemTx(pool, async tx => {
         const row = (await tx.query<Parameters<typeof cloudV2WorkspaceFromRow>[0]>(
           "SELECT * FROM cloud_v2_workspaces WHERE id=$1", [context.workspace_id])).rows[0];
         if (!row) throw new HttpError(409, "actor_changed", "Execution workspace changed");
         const workspace = cloudV2WorkspaceFromRow(row);
-        const credential = await github.connections.store.currentCredential(tx, { organizationId: context.org_id, userId: context.user_id! });
-        const storedIdentity = credential ? credential.identity : (await github.connections.store.selectedIdentity({ organizationId: context.org_id, userId: context.user_id! }, tx))?.identity;
-        if (!storedIdentity) throw new HttpError(503, "agent_credentials_unavailable", "Execution credentials are temporarily unavailable");
+        const gitIdentity = await storedGitIdentity(tx, { organizationId: context.org_id, userId: context.user_id! });
+        if (!gitIdentity) throw new HttpError(503, "agent_credentials_unavailable", "Execution credentials are temporarily unavailable");
         const primary = await github.identities.primary(workspace, tx);
         await check(tx);
-        return { workspace, credential, storedIdentity, primary };
+        return { workspace, gitIdentity, primary };
       });
-      const profile: { id: string; login: string; name?: string } = credential
-        ? await github.connections.workerProfile(credential, () => check(), { verifiedSource: true }) : storedIdentity;
       const material = await withSystemTx(pool, async tx => {
         const environment = context.kind === "client" ? undefined : await environments.resolveExecution(workspace, context.user_id!, context.id, tx);
         const mcpServers = context.kind === "turn" && mcp ? await mcp.store.resolve(context.org_id, context.user_id!, workspace.repository,
@@ -202,7 +206,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
         await check(tx);
         return { ...(environment ? { environment } : {}), ...(mcpServers ? { mcpServers } : {}) };
       });
-      return { ...material, gitIdentity: { name: profile.name ?? profile.login, email: `${profile.id}+${profile.login}@users.noreply.github.com` } };
+      return { ...material, gitIdentity };
     },
   });
   store.prompts.execution = execution;
@@ -219,9 +223,21 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     if (workspace.executionMode === "active" || workspace.executionMode === undefined && await execution.active(workspace.id)) {
       await execution.deps.logins.refreshAvailability(workspace.id);
       const bootstrapContextId = await execution.bootstrap(workspace.id);
-      const [setup, target, baseCommit, presentation] = await Promise.all([github.workspaceSetup(workspace, computers), github.identities.primary(workspace),
-        store.baseCommit(workspace.id), execution.deps.logins.presentation(workspace.id)]);
-      return { t: "config", actingUser: 1, bootstrapContextId, agents: {}, ...presentation, gitIdentity: null, loginRevision: workspace.loginRevision ?? "0",
+      const [setup, target, baseCommit, presentation, commitIdentity] = await Promise.all([github.workspaceSetup(workspace, computers), github.identities.primary(workspace),
+        store.baseCommit(workspace.id), execution.deps.logins.presentation(workspace.id), withSystemTx(pool, async tx => {
+          // A relay room can retain its workspace snapshot across Reassign.
+          const current = (await tx.query<{ creator_user_id: string | null }>("SELECT creator_user_id FROM cloud_v2_workspaces WHERE id=$1", [workspace.id])).rows[0];
+          if (!current) throw new HttpError(409, "actor_changed", "Execution workspace changed");
+          const gitIdentity = current.creator_user_id ? await storedGitIdentity(tx, { organizationId: workspace.organizationId, userId: current.creator_user_id })
+            .catch(error => {
+              // An N-1 membership writer can leave the old Creator until maintenance.
+              if (error instanceof HttpError && error.status === 404 && error.code === "not_found") return null;
+              throw error;
+            }) : null;
+          return { gitIdentitySource: current.creator_user_id ? "creator" as const : "actor" as const,
+            gitIdentity };
+        })]);
+      return { t: "config", actingUser: 1, bootstrapContextId, agents: {}, ...presentation, ...commitIdentity, loginRevision: workspace.loginRevision ?? "0",
         promptOutbox: 1, notifyUser: 1, githubPullRequests: 1, githubUserTokens: 1, agentInteractions: 1, runtimeUpdate: 1,
         workspace: { id: workspace.id, organizationId: workspace.organizationId, repository: workspace.repository,
           checkoutPath: `${CLOUD_V2_HOME}/${workspace.repository}`, branch: workspace.branch, baseBranch: workspace.baseBranch,

@@ -27,6 +27,7 @@ import { SYNC_FEATURE, SYNC_CONTEXT_FEATURE } from "./workspace-sync/contract.js
 import type { CloudExecutionContexts } from "./execution/store.js";
 import { executionWorkerRequired } from "./execution/errors.js";
 import { activationBusy } from "./execution/activation-state.js";
+import { workerGitIdentity } from "./worker-git-identity.js";
 
 export const CLOUD_V2_WORKER_API = "/v2/cloud/worker";
 type ConfigFrame = Extract<CloudV2ControlFrame, { t: "config" }>;
@@ -62,6 +63,12 @@ function sameMaterialAuthority(before: CloudV2WorkerSession, after: CloudV2Worke
     (after.executionMode === "active" || !after.executionTransitionId);
 }
 const workerFeatures = (c: Context) => new Set((c.req.header("x-zeros-worker-features") ?? "").split(",").map(value => value.trim()));
+function leaseReply<T extends { gitIdentity: { name: string } | null; personName?: string | undefined }>(c: Context, lease: T) {
+  // Persisted material remains readable by a control plane without this field.
+  const { personName: _personName, ...value } = lease;
+  const personName = workerFeatures(c).has("creator-commit-identity-v1") ? lease.gitIdentity?.name : undefined;
+  return { ...value, ...(personName ? { personName } : {}) };
+}
 function bearer(c: Context): string {
   const header = c.req.header("authorization") ?? "";
   if (!header.startsWith("Bearer ")) throw unauthorized();
@@ -131,7 +138,7 @@ async function configuration(deps: CloudV2WorkerRouteDeps, workspace: CloudV2Wor
     if (!after || !sameMaterialAuthority(before, after)) throw unauthorized();
     const revision = before.loginRevision;
     if (revision === after.loginRevision) {
-      const { api, agentLogins, agentModels, localCommands: _localCommands, localCommandReason: _localCommandReason, notifyUser: _notifyUser, mcpServers, githubPullRequests, githubUserTokens, gitIdentity, agentInteractions, codeReview, historyReplacement: _historyReplacement, environment, runtimeUpdate: _runtimeUpdate, ...legacy } = config;
+      const { api, agentLogins, agentModels, localCommands: _localCommands, localCommandReason: _localCommandReason, notifyUser: _notifyUser, mcpServers, githubPullRequests, githubUserTokens, gitIdentity: _gitIdentity, gitIdentitySource: _gitIdentitySource, agentInteractions, codeReview, historyReplacement: _historyReplacement, environment, runtimeUpdate: _runtimeUpdate, ...legacy } = config;
       if (environment && !features.has("workspace-environment-v1"))
         throw new HttpError(409, "cloud_environment_runtime_required", "Update the cloud runtime before opening this workspace.");
       const { setup, setupScript, baseCommit, github, ...workspaceConfig } = config.workspace;
@@ -151,7 +158,8 @@ async function configuration(deps: CloudV2WorkerRouteDeps, workspace: CloudV2Wor
         ...(features.has(NOTIFY_USER_FEATURE) && deps.promptOutbox && deps.notifications ? { notifyUser: 1 } : {}),
         ...(environment ? { environment } : {}),
         ...(features.has("runtime-update-v1") && deps.runtimeUpdates ? { runtimeUpdate: 1 } : {}),
-        loginRevision: revision, ...(features.has("history-replace-v1") ? { historyReplacement: 1 } : {}), ...(features.has("git-identity-v1") && gitIdentity !== undefined ? { gitIdentity } : {}),
+        loginRevision: revision, ...(features.has("history-replace-v1") ? { historyReplacement: 1 } : {}),
+        ...workerGitIdentity(config, features.has("git-identity-v1"), features.has("creator-commit-identity-v1")),
         ...(features.has("code-review-v1") && codeReview ? { codeReview } : {}),
         ...(features.has("github-user-token-v1") && githubUserTokens === 1 ? { githubUserTokens } : {}),
         ...(features.has("github-pr-v1") && githubPullRequests === 1 ? { githubPullRequests } : {}), ...(features.has("mcp-v1") && mcpServers ? { mcpServers } : {}),
@@ -181,15 +189,15 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
     app.post(`${CLOUD_V2_WORKER_API}/turn-lease`, async c => {
       const auth = await session(c, deps, false);
       if (!workerFeatures(c).has(ACTING_USER_FEATURE)) throw executionWorkerRequired();
-      return c.json(await execution.turnLease(auth, await body(c, CloudV2TurnLeaseRequestSchema)));
+      return c.json(leaseReply(c, await execution.turnLease(auth, await body(c, CloudV2TurnLeaseRequestSchema))));
     });
     app.post(`${CLOUD_V2_WORKER_API}/terminal-lease`, async c => {
       const auth = await session(c, deps, false);
-      return c.json(await execution.clients.terminalLease(auth, await body(c, CloudV2TerminalLeaseRequestSchema)));
+      return c.json(leaseReply(c, await execution.clients.terminalLease(auth, await body(c, CloudV2TerminalLeaseRequestSchema))));
     });
     app.post(`${CLOUD_V2_WORKER_API}/client-lease`, async c => {
       const auth = await session(c, deps, false);
-      return c.json(await execution.clients.operationLease(auth, await body(c, CloudV2ClientLeaseRequestSchema)));
+      return c.json(leaseReply(c, await execution.clients.operationLease(auth, await body(c, CloudV2ClientLeaseRequestSchema))));
     });
     app.post(`${CLOUD_V2_WORKER_API}/execution-leases/renew`, async c => {
       const auth = await session(c, deps, false);
@@ -201,7 +209,7 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
       const auth = await session(c, deps, false);
       if (!workerFeatures(c).has(ACTING_USER_FEATURE)) throw executionWorkerRequired();
       const input = await body(c, CloudV2BootstrapLeaseRequestSchema);
-      return c.json(await execution.bootstrapLease(auth, input.contextId));
+      return c.json(leaseReply(c, await execution.bootstrapLease(auth, input.contextId)));
     });
     app.post(`${CLOUD_V2_WORKER_API}/execution-leases/:id/retired`, async c => {
       const auth = await session(c, deps, false);

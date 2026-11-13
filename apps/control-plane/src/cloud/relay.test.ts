@@ -892,6 +892,27 @@ describe("cloud v2 relay", () => {
     }
   });
 
+  it.each(["git-identity-v1", "git-identity-v1,creator-commit-identity-v10", "creator-commit-identity-v1"])("negotiates Creator identity on both socket config deliveries: %s", async features => {
+    workerServer.on("headers", headers => { headers.push(`X-Zeros-Worker-Features: acting-user-v1,${features}`); });
+    const original = deps.config, creator = { name: "Creator", email: "123+creator@users.noreply.github.com" };
+    let assigned = true;
+    deps.config = async ws => ({ ...await original(ws), actingUser: 1,
+      gitIdentitySource: assigned ? "creator" as const : "actor" as const, gitIdentity: assigned ? creator : null });
+    const frames: any[] = [];
+    workerServer.on("connection", ws => ws.on("message", raw => frames.push(JSON.parse(String(raw)))));
+    await app();
+    await vi.waitFor(() => expect(frames.filter(frame => frame.t === "config")).toHaveLength(1));
+    const first = frames.find(frame => frame.t === "config");
+    if (features === "creator-commit-identity-v1") expect(first).toMatchObject({ gitIdentity: creator, gitIdentitySource: "creator" });
+    else { expect(first.gitIdentity).toBeNull(); expect(first).not.toHaveProperty("gitIdentitySource"); }
+    assigned = false; loginRevision = "1"; await relay.refreshLogins();
+    await vi.waitFor(() => expect(frames.filter(frame => frame.t === "config")).toHaveLength(2));
+    const next = frames.filter(frame => frame.t === "config").at(-1);
+    expect(next.gitIdentity).toBeNull();
+    if (features === "creator-commit-identity-v1") expect(next.gitIdentitySource).toBe("actor");
+    else expect(next).not.toHaveProperty("gitIdentitySource");
+  });
+
   it.each(["", "code-review-v10", "code-review-v1"])("gates trusted review identity on initial and refreshed WebSocket config: %s", async features => {
     workerServer.on("headers", headers => { headers.push(`X-Zeros-Worker-Features: mcp-v1,${features}`); });
     const original = deps.config, codeReview = { userId: workspaceId, userName: "Fixture reviewer" };

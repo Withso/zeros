@@ -14,14 +14,15 @@ export function githubCommitProfile(value: unknown): GithubCommitProfile {
   return { login: user.login, githubUserId: String(user.id), gitName: name.success ? name.data : user.login };
 }
 
-/** Callers must first authorize the exact workspace actor. An installation's
- * owner or a delegated agent credential's owner is not the commit author. */
-export async function readGithubGitAuthor(tx: Tx, actorUserId: string): Promise<GithubGitAuthor | null> {
+/** Callers authorize the person first. A selected cloud account may reuse a
+ * global display name only when both refer to the same immutable GitHub id. */
+export async function readGithubGitAuthor(tx: Tx, userId: string, selected?: { id: string; login: string }): Promise<GithubGitAuthor | null> {
   const row = (await tx.query<{ github_user_id: string | null; github_login: string; git_author_name: string | null }>(
     "SELECT github_user_id,github_login,git_author_name FROM github_authorizations WHERE owner_user_id=$1 AND app_variant='github.com'",
-    [actorUserId],
+    [userId],
   )).rows[0];
-  if (!row?.github_user_id || !/^[1-9][0-9]{0,15}$/.test(row.github_user_id) || !loginSchema.safeParse(row.github_login).success) return null;
-  const name = authorName.safeParse(row.git_author_name);
-  return { name: name.success ? name.data : row.github_login, email: `${row.github_user_id}+${row.github_login}@users.noreply.github.com` };
+  const identity = selected ?? (row?.github_user_id ? { id: row.github_user_id, login: row.github_login } : null);
+  if (!identity || !/^[1-9][0-9]{0,15}$/.test(identity.id) || !loginSchema.safeParse(identity.login).success) return null;
+  const name = authorName.safeParse(row?.github_user_id === identity.id ? row.git_author_name : undefined);
+  return { name: name.success ? name.data : identity.login, email: `${identity.id}+${identity.login}@users.noreply.github.com` };
 }

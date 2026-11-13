@@ -79,6 +79,10 @@ database("real acting-user worker clients against HTTP routes and PostgreSQL", (
     vi.restoreAllMocks(); vi.unstubAllGlobals();
   });
   afterAll(() => pool.end());
+  const advertisedFeatures = () => new Set(calls.findLast(call => call.path.endsWith("/hello"))?.headers.get("x-zeros-worker-features")?.split(",") ?? []);
+  const expectedConfigIdentity = () => advertisedFeatures().has("creator-commit-identity-v1")
+    ? { gitIdentitySource: "creator", gitIdentity: { name: "fixture", email: "12+fixture@users.noreply.github.com" } }
+    : { gitIdentity: null };
   const clean = () => contexts.clean(async () => ({ processes: 0, legacyMaterial: "none" }));
   const localDisk = async () => {
     const paths = { root: join(directory,"repository"), state: join(directory,"state"), home: join(directory,"home"), shm: join(directory,"shm") };
@@ -106,7 +110,7 @@ database("real acting-user worker clients against HTTP routes and PostgreSQL", (
   });
 
   it("gates every personal lease behind boot-clean and replays a lost successful reply", async () => {
-    expect(config).toMatchObject({ actingUser: 1, agents: {}, gitIdentity: null, promptOutbox: 1, notifyUser: 1 });
+    expect(config).toMatchObject({ actingUser: 1, agents: {}, ...expectedConfigIdentity(), promptOutbox: 1, notifyUser: 1 });
     for (const key of ["api", "environment", "mcpServers", "codeReview"]) expect(config).not.toHaveProperty(key);
     await expect(worker.contextRequest("bootstrap-lease", { contextId: config.bootstrapContextId })).rejects.toMatchObject({ status: 409, contextCode: "actor_busy" });
     loseCleanReply = true; await clean();
@@ -131,7 +135,8 @@ database("real acting-user worker clients against HTTP routes and PostgreSQL", (
     const response = await f.app.request("/v2/cloud/worker/config", { headers });
     expect(response.status).toBe(200);
     const frame = (await response.json()).config;
-    expect(clients.protocol.CloudV2ControlFrameSchema.parse(frame)).toMatchObject({ actingUser: 1, notifyUser: 1, promptOutbox: 1 });
+    expect(clients.protocol.CloudV2ControlFrameSchema.parse(frame))
+      .toMatchObject({ actingUser: 1, notifyUser: 1, promptOutbox: 1, ...expectedConfigIdentity() });
   });
 
   it("passes begin, steer, handover and stable leases through the real strict decoders", async () => {
@@ -352,7 +357,7 @@ database("real acting-user worker clients against HTTP routes and PostgreSQL", (
     expect(await row()).toMatchObject({ state: "starting", execution_mode: "active", execution_transition_id: change.activationId });
     await startWorker(await f.cp.store.rotateWorkerToken(f.workspace.id));
     for (const field of ["environment", "api", "mcpServers", "codeReview"]) expect(config).not.toHaveProperty(field);
-    expect(config).toMatchObject({ actingUser: 1, agents: {}, gitIdentity: null });
+    expect(config).toMatchObject({ actingUser: 1, agents: {}, ...expectedConfigIdentity() });
     await expect(worker.contextRequest("bootstrap-lease", { contextId: config.bootstrapContextId }))
       .rejects.toMatchObject({ status: 409, contextCode: "actor_busy" });
     await contexts.clean(async () => ({ processes: 0, legacyMaterial: await clients.removeLegacyMaterial(disk.paths) }));

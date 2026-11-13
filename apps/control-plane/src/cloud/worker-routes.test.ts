@@ -292,6 +292,26 @@ it("delivers managed identity only to workers negotiating it on both config carr
   }
 });
 
+it("negotiates Creator identity independently on both HTTP config carriers", async () => {
+  const f = fixture(), original = await f.deps.config({} as CloudV2Workspace);
+  const active = { ...(await f.deps.store.workerSession(f.token, f.bootId))!, executionMode: "active" as const };
+  vi.mocked(f.deps.store.workerSession).mockResolvedValue(active);
+  vi.mocked(f.deps.store.beginWorkerHello).mockResolvedValue(active);
+  vi.mocked(f.deps.store.acceptWorkerHello).mockResolvedValue(active);
+  vi.mocked(f.deps.store.workerHelloIdentity!).mockResolvedValue(active);
+  const gitIdentity = { name: "Stored Creator", email: "123+creator@users.noreply.github.com" };
+  vi.mocked(f.deps.config).mockResolvedValue({ ...original, actingUser: 1, gitIdentitySource: "creator", gitIdentity });
+  for (const [path, body] of [["hello", { bootId: f.bootId, protocol: 2, runtimeSha256: "a".repeat(64) }], ["config", undefined]] as const) {
+    for (const capability of ["git-identity-v1", "git-identity-v1,creator-commit-identity-v10", "creator-commit-identity-v1"]) {
+      const response = await f.request(path, body, { "x-zeros-worker-features": `acting-user-v1,${capability}` });
+      expect(response.status).toBe(200);
+      const frame = (await response.json()).config;
+      if (capability === "creator-commit-identity-v1") expect(frame).toMatchObject({ gitIdentity, gitIdentitySource: "creator" });
+      else { expect(frame.gitIdentity).toBeNull(); expect(frame).not.toHaveProperty("gitIdentitySource"); }
+    }
+  }
+});
+
 it("delivers MCP only to feature-advertising workers over both HTTP config carriers", async () => {
   const f = fixture(), original = await f.deps.config({} as CloudV2Workspace);
   const mcpServers = [{ id: randomUUID(), name: "fixture", transport: "http" as const, url: "https://mcp.example.test" }];
