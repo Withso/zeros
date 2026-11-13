@@ -66,6 +66,18 @@ export function useCloudReaderLookup(): (folder: string) => boolean {
   }, [documents]);
 }
 
+/** No-Creator bar: whether a folder's document negotiated team ownership and has no Creator (exact organization + workspace). */
+export function useCloudNoCreatorLookup(): (folder: string) => boolean {
+  const documents = useSyncExternalStore(subscribeCloudWorkspaces, getCloudWorkspaceDocuments, getCloudWorkspaceDocuments);
+  return useMemo(() => {
+    const none = new Set(documents.filter(doc => doc.sharing?.ownership && doc.ownerUserId === null).map(doc => `${doc.organizationId}|${doc.id}`));
+    return (folder: string) => {
+      const target = parseCloudWorkspaceKey(folder);
+      return !!target && none.has(`${target.organizationId}|${target.workspaceId}`);
+    };
+  }, [documents]);
+}
+
 /** The folder's cloud document when it carries Team sharing fields (a stable reference), else null. */
 export function useCloudFolderSharedDocument(folder: string | null | undefined) {
   const read = () => {

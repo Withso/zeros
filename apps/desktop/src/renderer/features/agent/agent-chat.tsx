@@ -4506,7 +4506,7 @@ function AgentChatBody({
           jumpToBottom={jumpToBottom}
         />
         {/* The same column as the transcript band above, so they stay in lock-step. */}
-        {readOnly ? composerReplacement : (
+        {readOnly || composerReplacement != null ? composerReplacement : (
         <div ref={composerDockRef} className="relative mx-auto box-border flex w-full max-w-(--chat-column) min-w-0 shrink-0 flex-col gap-2 border-t-0 bg-transparent px-7 pt-0 pb-4">
           {/* pt-0 puts the column's top on its topmost card, so this one fade
               sits on the composer alone or on the highest docked card.

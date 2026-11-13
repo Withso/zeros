@@ -1,8 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { Archive, FolderX } from "lucide-react";
 import { Button } from "../shared/ui/primitives";
-import { cn } from "../shared/ui/cn";
-import { DOCK_CARD_CLS } from "../features/agent/composer-shell";
+import { ComposerReplacementBar } from "./composer-replacement-bar";
 import {
   type Workspace,
   dialogPickFolder,
@@ -124,40 +123,35 @@ export function WorkspaceHistoryBar({
   };
   const Icon = workspace.archivedAt == null ? FolderX : Archive;
   return (
-    <div className="mx-auto w-full max-w-(--chat-column) shrink-0 px-7 pt-2 pb-4">
-      {/* It takes the composer's place, so it is a dock card like the ones
-          above a live composer. */}
-      <div
-        className={cn(DOCK_CARD_CLS, "flex items-center gap-3 px-3.5 py-3")}
-        role="status"
-      >
-        <Icon className="text-fg2 size-4 shrink-0" />
-        <div className="min-w-0 flex-1">
-          <p className="text-fg2 text-sm">{banner.message}</p>
-          {recovery.data?.action === "restore" &&
-            recovery.data.snapshotAt != null && (
-              <p className="text-fg3 mt-1 text-xs">
-                Saved {new Date(recovery.data.snapshotAt).toLocaleString()}.
-                Later changes may be unavailable.
-              </p>
-            )}
-          {(error || recovery.error) && (
-            <p role="alert" className="text-red-fg mt-1 text-xs">
-              {error ?? "Couldn't check workspace recovery."}
+    // It takes the composer's place, so it is a dock card like the ones above a live composer.
+    <ComposerReplacementBar
+      icon={<Icon className="text-fg2 size-4 shrink-0" />}
+      message={banner.message}
+      stacked
+      details={<>
+        {recovery.data?.action === "restore" &&
+          recovery.data.snapshotAt != null && (
+            <p className="text-fg3 mt-1 text-xs">
+              Saved {new Date(recovery.data.snapshotAt).toLocaleString()}.
+              Later changes may be unavailable.
             </p>
           )}
-        </div>
-        {banner.action && (
-          <Button
-            variant="secondary"
-            size="sm"
-            disabled={busy}
-            onClick={() => void act()}
-          >
-            {busy ? "Working…" : banner.action}
-          </Button>
+        {(error || recovery.error) && (
+          <p role="alert" className="text-red-fg mt-1 text-xs">
+            {error ?? "Couldn't check workspace recovery."}
+          </p>
         )}
-      </div>
-    </div>
+      </>}
+      actions={banner.action && (
+        <Button
+          variant="secondary"
+          size="sm"
+          disabled={busy}
+          onClick={() => void act()}
+        >
+          {busy ? "Working…" : banner.action}
+        </Button>
+      )}
+    />
   );
 }

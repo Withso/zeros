@@ -34,8 +34,9 @@ import {
   useProjects,
 } from "../../state/use-projects";
 import { readOnlyWorkspaceForFolder } from "../../state/workspace-history";
-import { useCloudReaderLookup } from "../../state/cloud-workspace-creators";
+import { useCloudNoCreatorLookup, useCloudReaderLookup } from "../../state/cloud-workspace-creators";
 import { TeamSharingReadOnlyBar } from "../team-sharing-read-only-bar";
+import { NoCreatorBar } from "../no-creator-bar";
 import { WorkspaceHistoryBar } from "../workspace-history-bar";
 
 const MAX_RETAINED_CHAT_VIEWS = 12;
@@ -79,6 +80,7 @@ export function ChatDeck({
   const activePage = useActivePage();
   // Team sharing: a teammate's workspace reads like history, with its own bar.
   const isReaderFolder = useCloudReaderLookup();
+  const isNoCreatorFolder = useCloudNoCreatorLookup();
   const pendingAutoSend = useWorkspaceStore((state) => state.pendingAutoSend);
   const paneSlots = usePanePortalsStore((state) => state.panes);
   const layoutsByFolder = useChatPanesStore((state) => state.byFolder);
@@ -224,6 +226,9 @@ export function ChatDeck({
                     workspace={historyWorkspace}
                     surfaceActive={isActive}
                   />
+                ) : !historyWorkspace && isNoCreatorFolder(chat.folder) ? (
+                  // Archived wins; a workspace with no Creator comes before the read-only line (owner decision).
+                  <NoCreatorBar folder={chat.folder} surfaceActive={isActive} />
                 ) : reader ? (
                   <TeamSharingReadOnlyBar folder={chat.folder} surfaceActive={isActive} />
                 ) : null
