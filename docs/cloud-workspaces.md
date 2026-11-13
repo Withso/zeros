@@ -832,6 +832,11 @@ projected only in replies to workers advertising the new capability, never
 added to stored lease material. Older workers keep the existing person identity
 behavior; older control planes omit the new config marker. Current database
 authority is checked before any material is returned.
+With Git 2.31 or newer, each activated context uses a worker-managed Git include
+that is rewritten when the Creator changes. An already-open terminal therefore
+uses the new Creator on its next commit, including a transition from no Creator.
+Older Git versions retain the identity selected when the terminal opened until
+it is reopened.
 The VM user's global Git config includes the worker-owned
 `~/.config/zeros/git-identity`, which also sets `user.useConfigOnly=true`.
 Confirmed configuration changes atomically replace that file, so existing

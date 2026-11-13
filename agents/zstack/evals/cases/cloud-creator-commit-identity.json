@@ -1,0 +1,9 @@
+{
+  "id": "cloud-creator-commit-identity",
+  "kind": "scenario",
+  "area": "control-plane-workers",
+  "fixedBy": "pr:1077",
+  "symptom": "Activated workspace commits used the sender's identity instead of the current Creator's. Reusing that field for the Creator would also misattribute review requests, and a fixed terminal environment would keep the earlier identity after Reassign.",
+  "rule": "Keep commit authorship separate from acting-person network authority and review attribution. Project the current Creator's stored identity through a negotiated config, fall back to the actor only with no Creator, and test an open terminal across assignment and Reassign through real Git (zstack principles 1, 10, 11, 13 and 16).",
+  "check": "pnpm --dir apps/control-plane test src/cloud/execution/creator-identity.integration.test.ts src/cloud/execution/worker-clients.integration.test.ts src/cloud/team-sharing/ownership.integration.test.ts src/github-git-author.test.ts && pnpm --dir apps/cloud-worker test src/__tests__/creator-commit-identity.test.ts"
+}
