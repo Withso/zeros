@@ -1,12 +1,13 @@
 import { Hono } from "hono";
 import { randomUUID } from "node:crypto";
+import { writeFile } from "node:fs/promises";
 import type pg from "pg";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createPool, withSystemTx } from "./db.js";
 import { configuredDatabaseContext, SYSTEM_DATABASE_CONTEXT } from "./db-context.js";
 import { requestTiming } from "./request-timing.js";
 import { budgetTable, deferred, holdLoadStream, LOAD_BUDGETS, LoadBudgetProbe, routeTable, scenarioTotals, selectLoadRequests, type LoadScenario } from "./test-support/load-budget.js";
-import { loadBudgetFixture, OBSERVED_IDLE_REPLAY } from "./test-support/load-budget-fixture.js";
+import { loadBudgetFixture, loadBudgetReadFrame, OBSERVED_IDLE_REPLAY, R1_IDLE_REPLAY } from "./test-support/load-budget-fixture.js";
 
 const database = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 describe("load replay stream lifetime", () => {
@@ -116,6 +117,18 @@ database("control-plane load budgets through the router and PostgreSQL", () => {
       .toThrow("Incomplete SQL observation: idle");
   });
 
+  it("counts the workspace lock at the real pg query boundary, including configured queries", async () => {
+    const { cost } = await probe.measure("lock-control", () => withSystemTx(pool, async tx => {
+      await tx.query({ name: "load-workspace-lock", text: "SELECT id FROM cloud_v2_workspaces WHERE id=$1 FOR UPDATE", values: [randomUUID()] });
+      await tx.query("SELECT 'FOR UPDATE' FROM cloud_v2_workspaces FOR KEY SHARE");
+      await tx.query("SELECT id FROM cloud_v2_execution_contexts FOR UPDATE");
+      await tx.query("SELECT w.id FROM cloud_v2_execution_contexts c, cloud_v2_workspaces w WHERE c.workspace_id=w.id FOR UPDATE OF w");
+      await tx.query("SELECT id FROM ONLY (cloud_v2_workspaces) FOR UPDATE");
+      await tx.query("SELECT w.id FROM (SELECT id FROM cloud_v2_workspaces) AS w FOR UPDATE OF w");
+    }), { locks: true });
+    expect(scenarioTotals(cost)).toMatchObject({ workspaceUpdateLocks: 4, transactions: 1, failures: 0, inFlight: 0 });
+  });
+
   it("counts writing transactions and hidden CTE/trigger mutations without charging its census queries", async () => {
     const schema = `load_writes_${randomUUID().replaceAll("-", "")}`;
     await pool.query(`CREATE SCHEMA ${schema};
@@ -192,6 +205,7 @@ database("load-budget workload", () => {
   let pool: pg.Pool, probe: LoadBudgetProbe;
   let fixture: Awaited<ReturnType<typeof loadBudgetFixture>> | undefined;
   let measured: ReturnType<typeof budgetTable>;
+  const reportPath = process.env.LOAD_BUDGET_REPORT_PATH;
   afterAll(async () => {
     try { await fixture?.close(); }
     finally { probe?.close(); await pool?.end(); vi.restoreAllMocks(); vi.unstubAllGlobals(); }
@@ -205,6 +219,8 @@ database("load-budget workload", () => {
     const statementDelayMs = Number(process.env.LOAD_BUDGET_STATEMENT_DELAY_MS ?? 0);
     probe.setDelay(statementDelayMs);
     const wallClock = process.env.LOAD_BUDGET_WALL_CLOCK === "1";
+    const wallProfile = process.env.LOAD_BUDGET_WALL_PROFILE ?? "observed";
+    expect(["observed", "r1"]).toContain(wallProfile);
     const scenarios = new Map<string, LoadScenario>();
     const list = await probe.measure("workspace-list", () => fixture!.workspaceList());
     scenarios.set("workspace-list", list.cost);
@@ -225,12 +241,26 @@ database("load-budget workload", () => {
     const end = await probe.measure("turn-end", running.finish, { writes: true });
     scenarios.set("turn-end", end.cost);
     console.info("Running turn:", await running.verify());
-    const idle = await probe.measure("idle", () => fixture!.idleReplay(wallClock));
+    const idle = await probe.measure("idle", () => fixture!.idleReplay(wallClock && wallProfile === "observed"));
     scenarios.set("idle", idle.cost);
     scenarios.set("periodic-renewals", selectLoadRequests({ ...idle.cost, requests: [...idle.cost.requests, ...stream.cost.requests],
       elapsedMs: idle.cost.elapsedMs + stream.cost.elapsedMs }, request => request.route === "/v2/cloud/worker/execution-leases/renew"));
+    const fallback = await probe.measure("r1-fallback-idle", () => fixture!.idleReplay(wallClock && wallProfile === "r1", R1_IDLE_REPLAY));
+    scenarios.set("r1-fallback-idle", fallback.cost);
+    expect(fallback.cost.requests.some(request => request.route.includes("execution-leases/renew"))).toBe(false);
+    for (const operation of ["list", "open", "connect", "history"] as const) {
+      await fixture.coldSource();
+      const sample = await probe.measure(`cold-${operation}`, () => fixture!.admission(operation));
+      scenarios.set(`cold-${operation}`, sample.cost);
+    }
+    expect(fixture.pollWaits(), "real empty-poll waiter/recheck branch").toBe(OBSERVED_IDLE_REPLAY.find(row => row.operation === "pull")!.count + R1_IDLE_REPLAY.find(row => row.operation === "pull")!.count);
+    expect(fixture.observerStatus()).toEqual({ enabled: true, pending: 0, dropped: 0, errors: 0 });
+    await fixture.close(); fixture = undefined;
+    const readFrame = await loadBudgetReadFrame(pool, probe);
+    scenarios.set("read-frame", readFrame.cost);
 
-    console.info(`Idle profile: observed Alpha; 300000 simulated ms; ${wallClock ? "wall-paced" : "compressed request replay (periodic server work is a lower bound)"}`);
+    console.info(`Idle profile: observed Alpha; 300000 simulated ms; ${wallClock && wallProfile === "observed" ? "wall-paced" : "compressed request replay (periodic server work is a lower bound)"}`);
+    console.info(`R1 idle profile: server cost at the approved fallback rates; renewals excluded; ${wallClock && wallProfile === "r1" ? "wall-paced" : "compressed request replay (periodic server work is a lower bound)"}. This proves SQL per route mix, not timer rates.`);
     for (const [name, cost] of scenarios) {
       if (["turn-lease", "running-stream", "periodic-renewals"].includes(name)) continue;
       console.info(`Load scenario: ${name}; statement delay ${statementDelayMs} ms; write census ${cost.writesObserved ? "enabled (diagnostic queries excluded)" : "disabled"}`);
@@ -245,24 +275,29 @@ database("load-budget workload", () => {
           uncheckedClientCheckouts: 0, checkoutsInFlight: 0 });
       }
     }
-    expect(fixture.observerStatus()).toEqual({ enabled: true, pending: 0, dropped: 0, errors: 0 });
     measured = budgetTable(scenarios);
     expect(measured.map(row => [row.scenario, row.metric])).toEqual(LOAD_BUDGETS.map(row => [row.scenario, row.metric]));
     console.table(measured, ["phase", "scenario", "metric", "observed", "baseline", "ratchet", "maximum", "result"]);
-    expect(fixture.pollWaits(), "real empty-poll waiter/recheck branch").toBe(OBSERVED_IDLE_REPLAY.find(row => row.operation === "pull")!.count);
+    if (reportPath) await writeFile(reportPath, JSON.stringify({ version: 1, profile: "load-budget-r1", wallClock, wallProfile, statementDelayMs, budgets: measured,
+      scenarios: [...scenarios].map(([name, cost]) => ({ name, totals: scenarioTotals(cost), routes: routeTable(cost), background: cost.background })) }, null, 2) + "\n", { flag: "wx", mode: 0o600 });
   }, 600_000);
 
-  it("RATCHET stays within every recorded baseline", () => {
-    for (const budget of measured) {
-      expect.soft(budget.observed, `RATCHET ${budget.scenario}: ${budget.metric}`).toBeLessThanOrEqual(budget.baseline);
-    }
+  if (reportPath) it("MEASURE produces a complete report; the comparison command enforces the candidate ratchet", () => {
+    expect(measured).toHaveLength(LOAD_BUDGETS.length);
   });
-
-  for (const budget of LOAD_BUDGETS) {
-    const target = budget.expectedFailure ? it.fails : it;
-    target(`${budget.phase} TARGET ${budget.scenario}: ${budget.metric} <= ${budget.maximum}${budget.expectedFailure ? " — set expectedFailure=false when met" : ""}`, () => {
-      const result = measured.find(row => row.scenario === budget.scenario && row.metric === budget.metric)!;
-      expect(result.observed).toBeLessThanOrEqual(budget.maximum);
+  else {
+    it("RATCHET stays within every recorded baseline", () => {
+      for (const budget of measured) {
+        expect.soft(budget.observed, `RATCHET ${budget.scenario}: ${budget.metric}`).toBeLessThanOrEqual(budget.baseline);
+      }
     });
+
+    for (const budget of LOAD_BUDGETS) {
+      const target = budget.expectedFailure ? it.fails : it;
+      target(`${budget.phase} TARGET ${budget.scenario}: ${budget.metric} <= ${budget.maximum}${budget.expectedFailure ? " — set expectedFailure=false when met" : ""}`, () => {
+        const result = measured.find(row => row.scenario === budget.scenario && row.metric === budget.metric)!;
+        expect(result.observed).toBeLessThanOrEqual(budget.maximum);
+      });
+    }
   }
 });
