@@ -4,6 +4,7 @@ import { z } from "zod";
 
 export const CLOUD_V2_MAX_PROMPT_BYTES = 8 * 1024 * 1024;
 export const CLOUD_V2_PROMPT_POLL_MS = 25_000;
+export const CLOUD_V2_PROMPT_PUSH_POLL_MS = 60_000;
 /** Byte-bearing HTTP attachment courier. The VM materializes it as an ordinary
  * file reference before provider dispatch; it is never a provider resource. */
 export function cloudPromptAttachmentFile(uri: string): { id: string; name: string; path: string } {
@@ -63,7 +64,7 @@ export const CloudV2PromptStatusSchema = z.object({ receipt: CloudV2PromptReceip
 export type CloudV2PromptStatus = z.infer<typeof CloudV2PromptStatusSchema>;
 export const CloudV2PromptStopSchema = z.object({ chatId: CloudV2PromptIdSchema, throughEpoch: CloudV2PromptCounterSchema }).strict();
 export const CloudV2PromptStopReplySchema = z.object({ chatId: CloudV2PromptIdSchema, epoch: CloudV2PromptCounterSchema }).strict();
-export const CloudV2PromptPullSchema = z.object({ waitMs: z.number().int().min(0).max(CLOUD_V2_PROMPT_POLL_MS),
+export const CloudV2PromptPullSchema = z.object({ waitMs: z.number().int().min(0).max(CLOUD_V2_PROMPT_PUSH_POLL_MS),
   held: z.array(CloudV2PromptIdSchema).max(128).optional() }).strict();
 /** A chat name chosen through the Zeros API: 1..120 characters once trimmed,
  * no control characters. Outside the payload, so its hash stays unchanged. */

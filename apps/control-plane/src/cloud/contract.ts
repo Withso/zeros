@@ -153,6 +153,7 @@ export const CloudV2ControlFrameSchema = z.discriminatedUnion("t", [
     environment: CloudWorkspaceEnvironmentSchema.optional(),
     promptOutbox: z.literal(1).optional(),
     runtimeUpdate: z.literal(1).optional(),
+    pushSignals: z.literal(1).optional(),
     localCommands: z.literal(1).optional(),
     localCommandReason: z.literal(1).optional(),
     notifyUser: z.literal(1).optional(),

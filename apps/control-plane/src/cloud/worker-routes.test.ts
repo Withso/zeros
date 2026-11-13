@@ -55,6 +55,33 @@ it("accepts outbound hello and returns configuration, refusing stale runtimes", 
   expect(await response.json()).toMatchObject({ config: { t: "config", loginRevision: "0" } });
   expect((await f.request("hello", { ...body, runtimeSha256: "b".repeat(64) })).status).toBe(409);
 });
+it("negotiates push signals on hello and config without changing older worker configuration", async () => {
+  const f = fixture(true), config = await f.deps.config({} as CloudV2Workspace);
+  vi.mocked(f.deps.config).mockResolvedValue({ ...config, pushSignals: 1 });
+  for (const [path, input] of [["hello", { bootId: f.bootId, protocol: 2, runtimeSha256: "a".repeat(64) }], ["config", undefined]] as const) {
+    const old = (await (await f.request(path, input, { "x-zeros-worker-features": "prompt-outbox-v1" })).json()).config;
+    expect(old).not.toHaveProperty("pushSignals");
+    expect(legacyWorkerFrame.safeParse(old).success).toBe(true);
+    const capable = (await (await f.request(path, input, { "x-zeros-worker-features": "prompt-outbox-v1,push-signals-v1" })).json()).config;
+    expect(capable.pushSignals).toBe(1);
+  }
+});
+it("accepts a minute-long pull only for the authenticated push-signals worker and rechecks after waiting", async () => {
+  const f = fixture(true);
+  const unsupported = await f.request("prompts/pull", { waitMs: 60_000 });
+  expect(unsupported.status).toBe(400);
+  expect(f.deps.waitForPrompts).not.toHaveBeenCalled();
+  let registered!: () => void;
+  const waiting = new Promise<void>(resolve => { registered = resolve; });
+  const original = vi.mocked(f.deps.waitForPrompts!).getMockImplementation()!;
+  vi.mocked(f.deps.waitForPrompts!).mockImplementation((...args) => { registered(); return original(...args); });
+  const request = f.request("prompts/pull", { waitMs: 60_000 }, { "x-zeros-worker-features": "push-signals-v1" });
+  await Promise.race([waiting, request.then(response => { throw new Error(`Long poll refused before waiting: ${response.status}`); })]);
+  expect(f.deps.waitForPrompts).toHaveBeenCalledWith(expect.any(String), 60_000, expect.any(AbortSignal));
+  f.revoke(); f.notify();
+  expect((await request).status).toBe(401);
+  expect(f.cancelWait).toHaveBeenCalledOnce();
+});
 it("selects the authenticated workspace's runtime before mutating its boot or publishing config", async () => {
   const f = fixture(), candidate = "b".repeat(64);
   f.deps.runtimeSha256ForWorkspace = vi.fn(async () => candidate);

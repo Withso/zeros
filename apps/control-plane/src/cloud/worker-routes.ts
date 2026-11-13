@@ -7,7 +7,7 @@ import { emitCloudV2Timing, type CloudV2TimingRecord } from "./lifecycle.js";
 import type { CloudV2Store, CloudV2WorkerSession, CloudV2Workspace } from "./store.js";
 import { isCloudV2Token } from "./tokens.js";
 import type { LiveRecoveryProofBinding } from "./live-recovery-signals.js";
-import { CloudV2PromptAckSchema, CloudV2PromptBeginSchema, CloudV2PromptOutcomeSchema, CloudV2PromptPullSchema, CloudV2PromptStopReplySchema, CloudV2PromptStopSchema, type CloudV2PromptPullReply } from "./prompt-contract.js";
+import { CLOUD_V2_PROMPT_POLL_MS, CloudV2PromptAckSchema, CloudV2PromptBeginSchema, CloudV2PromptOutcomeSchema, CloudV2PromptPullSchema, CloudV2PromptStopReplySchema, CloudV2PromptStopSchema, type CloudV2PromptPullReply } from "./prompt-contract.js";
 import { CloudGithubCheckoutSchema, type CloudGithubCheckout } from "./github-pr-contract.js";
 import type { CloudSourceContinuation, CloudSourceProof } from "./source-authority.js";
 import { cloudGithubFailure } from "./github-failure.js";
@@ -131,7 +131,7 @@ async function configuration(deps: CloudV2WorkerRouteDeps, workspace: CloudV2Wor
     if (!after || !sameMaterialAuthority(before, after)) throw unauthorized();
     const revision = before.loginRevision;
     if (revision === after.loginRevision) {
-      const { api, agentLogins, agentModels, localCommands: _localCommands, localCommandReason: _localCommandReason, notifyUser: _notifyUser, mcpServers, githubPullRequests, githubUserTokens, gitIdentity: _gitIdentity, gitIdentitySource: _gitIdentitySource, agentInteractions, codeReview, historyReplacement: _historyReplacement, environment, runtimeUpdate: _runtimeUpdate, ...legacy } = config;
+      const { api, agentLogins, agentModels, localCommands: _localCommands, localCommandReason: _localCommandReason, notifyUser: _notifyUser, mcpServers, githubPullRequests, githubUserTokens, gitIdentity: _gitIdentity, gitIdentitySource: _gitIdentitySource, agentInteractions, codeReview, historyReplacement: _historyReplacement, environment, runtimeUpdate: _runtimeUpdate, pushSignals, ...legacy } = config;
       if (environment && !features.has("workspace-environment-v1"))
         throw new HttpError(409, "cloud_environment_runtime_required", "Update the cloud runtime before opening this workspace.");
       const { setup, setupScript, baseCommit, github, ...workspaceConfig } = config.workspace;
@@ -151,6 +151,7 @@ async function configuration(deps: CloudV2WorkerRouteDeps, workspace: CloudV2Wor
         ...(features.has(NOTIFY_USER_FEATURE) && deps.promptOutbox && deps.notifications ? { notifyUser: 1 } : {}),
         ...(environment ? { environment } : {}),
         ...(features.has("runtime-update-v1") && deps.runtimeUpdates ? { runtimeUpdate: 1 } : {}),
+        ...(features.has("push-signals-v1") && deps.promptOutbox && pushSignals === 1 ? { pushSignals } : {}),
         loginRevision: revision, ...(features.has("history-replace-v1") ? { historyReplacement: 1 } : {}),
         ...workerGitIdentity(config, features.has("git-identity-v1"), features.has("creator-commit-identity-v1")),
         ...(features.has("code-review-v1") && codeReview ? { codeReview } : {}),
@@ -440,6 +441,8 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
       const auth = await session(c, deps);
       const { waitMs, held } = await body(c, CloudV2PromptPullSchema);
       const features = workerFeatures(c);
+      if (waitMs > CLOUD_V2_PROMPT_POLL_MS && !features.has("push-signals-v1"))
+        throw new HttpError(400, "invalid_request", "Longer delivery polls require push signal support");
       const forWorker = async (batch: CloudV2PromptPullReply): Promise<CloudV2PromptPullReply> => {
         if (!features.has("chat-edit-v1")) { const { chatEdits: _edits, ...legacy } = batch; batch = legacy; }
         if (!features.has("session-name-v1")) batch = { ...batch, prompts: batch.prompts.map(({ sessionName: _name, ...item }) => item) };
