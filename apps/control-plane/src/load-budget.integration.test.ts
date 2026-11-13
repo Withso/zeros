@@ -1,9 +1,11 @@
 import { Hono } from "hono";
+import { randomUUID } from "node:crypto";
 import type pg from "pg";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createPool, withSystemTx } from "./db.js";
+import { configuredDatabaseContext, SYSTEM_DATABASE_CONTEXT } from "./db-context.js";
 import { requestTiming } from "./request-timing.js";
-import { budgetTable, deferred, holdLoadStream, LOAD_BUDGETS, LoadBudgetProbe, routeTable, scenarioTotals, type LoadScenario } from "./test-support/load-budget.js";
+import { budgetTable, deferred, holdLoadStream, LOAD_BUDGETS, LoadBudgetProbe, routeTable, scenarioTotals, selectLoadRequests, type LoadScenario } from "./test-support/load-budget.js";
 import { loadBudgetFixture, OBSERVED_IDLE_REPLAY } from "./test-support/load-budget-fixture.js";
 
 const database = process.env.TEST_DATABASE_URL ? describe : describe.skip;
@@ -116,6 +118,77 @@ database("control-plane load budgets through the router and PostgreSQL", () => {
       .toThrow("Incomplete SQL observation: idle");
   });
 
+  it("counts writing transactions and hidden CTE/trigger mutations without charging its census queries", async () => {
+    const schema = `load_writes_${randomUUID().replaceAll("-", "")}`;
+    await pool.query(`CREATE SCHEMA ${schema};
+      CREATE TABLE ${schema}.items (id integer PRIMARY KEY, value integer NOT NULL);
+      CREATE TABLE ${schema}.audit (id integer);
+      CREATE FUNCTION ${schema}.audit_update() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN INSERT INTO ${schema}.audit VALUES (NEW.id); RETURN NEW; END $$;
+      CREATE TRIGGER audit_update AFTER UPDATE ON ${schema}.items
+        FOR EACH ROW EXECUTE FUNCTION ${schema}.audit_update();
+      GRANT USAGE ON SCHEMA ${schema} TO zeros_app;
+      GRANT ALL ON ALL TABLES IN SCHEMA ${schema} TO zeros_app`);
+    try {
+      const app = new Hono();
+      app.use("*", requestTiming({ slowMs: Infinity, databasePool: pool, costObserver: probe.observe }));
+      app.get("/_load-budget/:id", async c => {
+        await withSystemTx(pool, async tx => {
+          if (c.req.param("id") === "write") {
+            await new Promise<void>((resolve, reject) => tx.query(`INSERT INTO ${schema}.items VALUES (1, 0)`, error => error ? reject(error) : resolve()));
+            await tx.query(`WITH changed AS (UPDATE ${schema}.items SET value=1 WHERE id=1 RETURNING id) SELECT id FROM changed`);
+          }
+          await tx.query(`SELECT count(*) FROM ${schema}.items`);
+        });
+        return c.json({ ok: true });
+      });
+      const { cost } = await probe.measure("write-control", async () => {
+        for (const id of ["write", "read"]) {
+          const request = new Request(`https://api.example.test/_load-budget/${id}`);
+          await probe.request(request, () => app.fetch(request));
+        }
+      }, { writes: true });
+      expect(cost.requests[0]).toMatchObject({ writeTransactions: 1, writeStatements: 2, rowMutations: 3, maxWriteStatementsPerTransaction: 2 });
+      expect(cost.requests[1]).toMatchObject({ writeTransactions: 0, writeStatements: 0, rowMutations: 0 });
+      for (const request of cost.requests) expect(request.observer).toMatchObject({ sqlStatements: request.statements, transactions: request.transactions });
+      expect(scenarioTotals(cost)).toMatchObject({ writeTransactions: 1, writeStatements: 2, rowMutations: 3, maxWriteStatementsPerTransaction: 2 });
+      const background = await probe.measure("write-background", () => withSystemTx(pool,
+        tx => tx.query(`UPDATE ${schema}.items SET value=2 WHERE id=1`)), { writes: true });
+      expect(background.cost.background).toMatchObject({ writeTransactions: 1, writeStatements: 1, rowMutations: 2 });
+      const queued = await probe.measure("write-queued", () => withSystemTx(pool, tx => Promise.all([
+        tx.query(`SELECT count(*) FROM ${schema}.items`),
+        tx.query(`UPDATE ${schema}.items SET value=3 WHERE id=1`),
+      ])), { writes: true });
+      expect(queued.cost.background).toMatchObject({ writeTransactions: 1, writeStatements: 1, rowMutations: 2 });
+      for (const write of [true, false]) {
+        const statement = write ? `WITH changed AS (UPDATE ${schema}.items SET value=4 WHERE id=1 RETURNING id) SELECT id FROM changed`
+          : `SELECT count(*) FROM ${schema}.items`;
+        const batched = await probe.measure("write-batched", () => pool.query(
+          `BEGIN; SET LOCAL ROLE zeros_app; ${configuredDatabaseContext(pool, SYSTEM_DATABASE_CONTEXT)}; ${statement}\n; COMMIT`), { writes: true });
+        expect(batched.value).toHaveLength(5);
+        expect(batched.cost.background).toMatchObject({ queries: 1, statements: 5, transactions: 1, commits: 1,
+          writeTransactions: Number(write), writeStatements: Number(write), rowMutations: write ? 2 : 0, censusQueries: 2 });
+      }
+      const client = await pool.connect();
+      try {
+        for (const statements of [
+          [`BEGIN; UPDATE ${schema}.items SET value=5 WHERE id=1`],
+          ["BEGIN", `UPDATE ${schema}.items SET value=5 WHERE id=1; ROLLBACK`],
+          ["BEGIN", `TRUNCATE ${schema}.items`],
+        ]) {
+          await expect(probe.measure("unsupported-write-shape", async () => {
+            try { for (const statement of statements) await client.query(statement); }
+            finally { await client.query("ROLLBACK"); }
+          }, { writes: true })).rejects.toThrow("Load write census");
+        }
+      } finally { client.release(true); }
+      await pool.query(`CREATE CONSTRAINT TRIGGER deferred_audit AFTER UPDATE ON ${schema}.items
+        DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION ${schema}.audit_update()`);
+      await expect(probe.measure("unsupported-deferred", () => withSystemTx(pool,
+        tx => tx.query(`UPDATE ${schema}.items SET value=3 WHERE id=1`)), { writes: true })).rejects.toThrow("deferred trigger");
+    } finally { await pool.query(`DROP SCHEMA ${schema} CASCADE`); }
+  });
+
   it("enforces the idle, turn-lease, complete turn path, renewal and workspace-list budgets", async () => {
     fixture = await loadBudgetFixture(pool, probe);
     await fixture.assertTransportCancellation();
@@ -125,22 +198,32 @@ database("control-plane load budgets through the router and PostgreSQL", () => {
     const scenarios = new Map<string, LoadScenario>();
     const list = await probe.measure("workspace-list", () => fixture!.workspaceList());
     scenarios.set("workspace-list", list.cost);
-    const turn = await probe.measure("turn-path", () => fixture!.turnStart());
+    const turn = await probe.measure("turn-path", () => fixture!.turnStart(), { writes: true });
     scenarios.set("turn-path", turn.cost);
     const lease = turn.cost.requests.filter(request => request.route === "/v2/cloud/worker/turn-lease");
     expect(lease).toHaveLength(1);
-    scenarios.set("turn-lease", { ...turn.cost, requests: lease, background: { ...turn.cost.background,
-      queries: 0, statements: 0, transactions: 0, commits: 0, rollbacks: 0, failures: 0, inFlight: 0, injectedDelayMs: 0 } });
+    scenarios.set("turn-lease", selectLoadRequests(turn.cost, request => lease.includes(request)));
     const renewal = await probe.measure("renewal", () => fixture!.renew());
     scenarios.set("renewal", renewal.cost);
-    await fixture.finishTurn(turn.value);
+    const running = await fixture.runningTurn(turn.value);
+    const historyStart = await probe.measure("turn-history-start", running.prepare, { writes: true });
+    scenarios.set("turn-history-start", historyStart.cost);
+    const stream = await probe.measure("running-turn", running.stream, { writes: true });
+    scenarios.set("running-turn", stream.cost);
+    expect(stream.cost.background.writeTransactions, "running-stream background writes need attribution").toBe(0);
+    scenarios.set("running-stream", selectLoadRequests(stream.cost, request => request.route === "/v2/cloud/worker/history"));
+    const end = await probe.measure("turn-end", running.finish, { writes: true });
+    scenarios.set("turn-end", end.cost);
+    console.info("Running turn:", await running.verify());
     const idle = await probe.measure("idle", () => fixture!.idleReplay(wallClock));
     scenarios.set("idle", idle.cost);
+    scenarios.set("periodic-renewals", selectLoadRequests({ ...idle.cost, requests: [...idle.cost.requests, ...stream.cost.requests],
+      elapsedMs: idle.cost.elapsedMs + stream.cost.elapsedMs }, request => request.route === "/v2/cloud/worker/execution-leases/renew"));
 
     console.info(`Idle profile: observed Alpha; 300000 simulated ms; ${wallClock ? "wall-paced" : "compressed request replay (periodic server work is a lower bound)"}`);
     for (const [name, cost] of scenarios) {
-      if (name === "turn-lease") continue;
-      console.info(`Load scenario: ${name}; statement delay ${statementDelayMs} ms`);
+      if (["turn-lease", "running-stream", "periodic-renewals"].includes(name)) continue;
+      console.info(`Load scenario: ${name}; statement delay ${statementDelayMs} ms; write census ${cost.writesObserved ? "enabled (diagnostic queries excluded)" : "disabled"}`);
       console.table(routeTable(cost));
       console.table([{ scope: "background", ...cost.background, elapsedMs: Math.round(cost.elapsedMs) }]);
       expect(scenarioTotals(cost).failures).toBe(0);

@@ -14,7 +14,7 @@ import { workosTestAuth } from "../test-workos-env.js";
 import { RailwayWorkOSProvider, type WorkOSExchange } from "../workos-provider.js";
 import { PostgresWorkOSBrowserSessionRepository, WorkOSBrowserSessions, WORKOS_SESSION_COOKIE } from "../workos-browser-sessions.js";
 import { executionFixture } from "../cloud/execution/test-fixture.js";
-import { CloudV2BeginActiveReplySchema } from "../cloud/contract.js";
+import { CloudV2BeginActiveReplySchema, type CloudV2MessageRow } from "../cloud/contract.js";
 import { CloudV2PromptPullReplySchema } from "../cloud/prompt-contract.js";
 import { deferred, holdLoadStream, IDLE_WINDOW_MS, type LoadBudgetProbe } from "./load-budget.js";
 
@@ -33,6 +33,12 @@ type DeviceClient = { register(id: string, input: unknown): Promise<{ device: De
 type WorkerClient = { bootId: string; promptRequest(operation: string, body: unknown): Promise<unknown>;
   contextRequest(path: string, body: unknown): Promise<unknown>; dispose(): Promise<void> };
 type PromptClient = { enqueue(body: unknown): Promise<unknown>; list(after: string, includePayload: boolean): Promise<unknown> };
+type StreamStore = { upsert(chat: unknown): Promise<void>; enqueue(chatId: string, input: unknown): Promise<unknown>;
+  claim(chatId: string): Promise<unknown>; importMessages(chatId: string, rows: CloudV2MessageRow[]): Promise<unknown>;
+  fold(chatId: string, update: unknown): Promise<unknown>; finish(chatId: string, requestId: string, result: unknown): Promise<unknown>;
+  history(chatId: string): readonly CloudV2MessageRow[]; flush(): Promise<void> };
+type StreamMirror = { connect(): void; flush(): Promise<boolean>; dispose(): Promise<void> };
+export const RUNNING_TURN = { milliseconds: 60_000, deltas: 300, deltaCharacters: 100 } as const;
 const requireValue = (condition: unknown, reason: string): void => { if (!condition) throw new Error(`Load fixture: ${reason}`); };
 const baseUrl = "https://api.example.test";
 async function closeAll(cleanups: Array<() => Promise<void>>): Promise<void> {
@@ -203,6 +209,86 @@ export async function loadBudgetFixture(pool: pg.Pool, probe: LoadBudgetProbe) {
       await worker.contextRequest(`execution-leases/${turn.contextId}/retired`, { retirementId: randomUUID(), reason: "outcome", processes: 0 });
     };
     let sequence = 0;
+    const runningTurn = async (turn: Awaited<ReturnType<typeof turnStart>>) => {
+      const { SessionStore } = await import(source("apps/cloud-worker/src/sessions/session-store.ts")) as {
+        SessionStore: { open(directory: string, workspaceKey: string): Promise<StreamStore> } };
+      const { HistoryMirror } = await import(source("apps/cloud-worker/src/sessions/history-mirror.ts")) as {
+        HistoryMirror: new (store: StreamStore, transport: { send(frame: unknown): Promise<boolean> }) => StreamMirror };
+      const { CONTEXT_RENEW_MS } = await import(source("apps/cloud-worker/src/sharing/execution-contexts.ts")) as { CONTEXT_RENEW_MS: number };
+      const workspaceKey = `cloud://${f.organizationId}/${f.workspace.id}`;
+      const store = await SessionStore.open(join(directory, "running-turn"), workspaceKey);
+      const chatId = "chat", answerId = "load-answer", messageId = "load-stream";
+      await store.upsert({ id: chatId, folder: workspaceKey, title: "Load stream" });
+      await store.enqueue(chatId, { requestId: turn.begin.dispatchId, userMessageId: turn.begin.userMessageId,
+        prompt: [{ type: "text", text: "Load stream" }], startedAt: Date.now() });
+      await store.claim(chatId);
+      await store.importMessages(chatId, [{ msgId: answerId, kind: "text", createdAt: 1,
+        payload: JSON.stringify({ id: answerId, kind: "text", role: "agent", messageId, createdAt: 1, text: "" }) }]);
+      const flights = new Set<Promise<boolean>>(), release = deferred<void>();
+      let hold = false, failed: unknown, frames = 0;
+      const mirror = new HistoryMirror(store, { send: async frame => {
+        if (hold) await release.promise;
+        const operation = (async () => {
+          try {
+            requireValue(frame && typeof frame === "object" && "t" in frame && frame.t === "history", "unexpected stream carrier");
+            await workerJson("history", { ...frame as object, bootId: worker.bootId, sequence: ++sequence });
+            frames++; return true;
+          } catch (error) { failed = error; return false; }
+        })();
+        flights.add(operation);
+        try { return await operation; } finally { flights.delete(operation); }
+      } });
+      const settled = async () => {
+        while (flights.size) await Promise.all([...flights]);
+        if (failed !== undefined) throw failed;
+      };
+      const releaseEnd = () => { hold = false; release.resolve(); };
+      cleanups.push(async () => { releaseEnd(); await mirror.dispose(); await store.flush(); });
+      return {
+        prepare: async () => {
+          mirror.connect(); const connected = await mirror.flush();
+          await settled(); requireValue(connected, "history mirror did not connect");
+        },
+        stream: async () => {
+          const started = performance.now(); let nextRenewal = CONTEXT_RENEW_MS;
+          const pace = async (at: number) => { const remaining = started + at - performance.now(); if (remaining > 0) await delay(remaining); };
+          for (let index = 0; index < RUNNING_TURN.deltas; index++) {
+            const at = index * RUNNING_TURN.milliseconds / RUNNING_TURN.deltas;
+            await pace(at);
+            await probe.at(at, async () => {
+              if (at >= nextRenewal) {
+                const reply = await worker.contextRequest("execution-leases/renew", { contextIds: [client.contextId, turn.contextId] }) as {
+                  leases: Array<{ contextId: string; expiresAt?: number; refused?: unknown }> };
+                requireValue(reply.leases.length === 2 && reply.leases.every(lease => !lease.refused && Number(lease.expiresAt) > Date.now()),
+                  "running turn lost its live context");
+                nextRenewal += CONTEXT_RENEW_MS;
+              }
+              await store.fold(chatId, { sessionId: "load-execution", update: { sessionUpdate: "agent_message_chunk", messageId,
+                content: { type: "text", text: "x".repeat(RUNNING_TURN.deltaCharacters) } } });
+            });
+          }
+          await pace(RUNNING_TURN.milliseconds);
+          // Finish any request already sent. A due tail frame waits for the
+          // separately measured turn-end phase rather than leaking between them.
+          hold = true; await settled();
+        },
+        finish: async () => {
+          releaseEnd();
+          await store.finish(chatId, turn.begin.dispatchId, { stopReason: "end_turn" });
+          requireValue(await mirror.flush(), "history mirror did not finish");
+          await settled(); await store.flush(); await finishTurn(turn);
+        },
+        verify: async () => {
+          const expected = [...store.history(chatId)].sort((a, b) => a.msgId.localeCompare(b.msgId));
+          const actual = (await f.cp.store.windowMessages(f.workspace.id, chatId, 1000)).sort((a, b) => a.msgId.localeCompare(b.msgId));
+          requireValue(JSON.stringify(actual) === JSON.stringify(expected), "running-turn durable history differs from the VM store");
+          const answer = expected.find(row => row.msgId === answerId);
+          requireValue(answer && JSON.parse(answer.payload).text === "x".repeat(RUNNING_TURN.deltas * RUNNING_TURN.deltaCharacters),
+            "running turn did not fold every delta");
+          return { ...RUNNING_TURN, frames, rows: actual.length };
+        },
+      };
+    };
     const idleReplay = async (wallClock = false) => {
       const streams: Array<() => Promise<void>> = [];
       const startedAt = performance.now();
@@ -255,7 +341,7 @@ export async function loadBudgetFixture(pool: pg.Pool, probe: LoadBudgetProbe) {
       catch (error) { cancelled = error instanceof Error && error.name === "AbortError"; }
       requireValue(cancelled, "HTTP transport ignored cancellation");
     };
-    return { close, workspaceList, turnStart, finishTurn, renew, idleReplay, assertTransportCancellation, pollWaits: () => pollWaits,
+    return { close, workspaceList, turnStart, finishTurn, runningTurn, renew, idleReplay, assertTransportCancellation, pollWaits: () => pollWaits,
       observerStatus: () => app.requestCostObserverStatus!() };
   } catch (error) { await close(); throw error; }
 }
