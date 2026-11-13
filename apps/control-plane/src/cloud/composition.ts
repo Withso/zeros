@@ -53,6 +53,7 @@ import { CloudLocalCommands } from "./local-commands/requests.js";
 import { startLocalCommandMaintenance } from "./local-commands/maintenance.js";
 import { CloudNotifyUser } from "./notify-user/store.js";
 import { CloudWorkspaceSync } from "./workspace-sync/store.js";
+import { CloudWorkspaceGithubReadTokens } from "./workspace-sync/github-read-token.js";
 
 import { CloudExecutionContexts } from "./execution/store.js";
 import { lifecycleExecution } from "./execution/lifecycle.js";
@@ -155,6 +156,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     drainActive: () => buildDrainActive(pool), logger: console });
   const continueSource = github.continueSource;
   const workspaceSync = new CloudWorkspaceSync(pool, localDevices, store, keys, signer, continueSource);
+  const workspaceGithubReadTokens = new CloudWorkspaceGithubReadTokens(pool, localDevices, github.token);
   const mcp = createMcpServices(pool, config, github.connections.authorizeRepositoryConfiguration.bind(github.connections));
   const execution: CloudExecutionContexts = new CloudExecutionContexts(pool, {
     authority: new CloudExecutionAuthority(pool, source, github.connections.store), logins: new CloudExecutionLogins(pool, keys), keys,
@@ -285,6 +287,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     promptOutbox: v2.promptOutbox === true,
     localDevices: { devices: localDevices, signals: localCommandSignals, requests: localCommands, notifications },
     workspaceSync,
+    workspaceGithubReadTokens,
   };
   const proxy: CloudV2ProxyDeps = { store, execution, logins, authorizeSource, continueSource, ...(keys ? { refreshCodex: createCloudV2CodexRefresh(pool, keys) } : {}) };
   const api = { credentials: apiCredentials,

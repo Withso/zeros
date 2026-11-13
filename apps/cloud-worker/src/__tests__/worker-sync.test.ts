@@ -203,3 +203,32 @@ it("reuses the same bundle for a retried bootstrap (same HEAD and have) for its 
   await writeFile(join(f.root, "next.txt"), "next\n"); await f.git("add", "next.txt"); await f.git("commit", "-m", "next");
   expect((await boot({})).id).not.toBe(first.id);
 });
+
+it("sync-have-v2: bundles only the commits no known head covers, keeps the N-1 single head, and is full when none applies", async () => {
+  const f = await fixture();
+  await f.relay.receive({ t: "open", clientId: CLIENT_A, passive: true });
+  const ready = f.relay.bridge().find(entry => entry.clientId === CLIENT_A && entry.frame.type === "ENGINE_READY");
+  expect((ready!.frame as { capabilities?: string[] }).capabilities).toContain("sync-have-v2");
+  await f.snapshot(CLIENT_A);
+  const boot = async (params: Record<string, unknown>) => {
+    const reply = await f.request(CLIENT_A, "sync.bootstrap", params);
+    expect(reply.type, JSON.stringify(reply)).toBe("WORKSPACE_RESPONSE");
+    return (reply as { result: { head: string; bundle?: { id: string; size: number; full: boolean } } }).result;
+  };
+  const commit = async (name: string) => { await writeFile(join(f.root, `${name}.txt`), `${name}\n`); await f.git("add", `${name}.txt`); await f.git("commit", "-m", name); return f.git("rev-parse", "HEAD"); };
+  const first = await f.git("rev-parse", "HEAD"), second = await commit("second"), third = await commit("third");
+  const unrelated = "c".repeat(40);
+  // Two known heads: everything up to the newer one is covered, so only `third` travels.
+  const several = await boot({ have: [first, second, unrelated] });
+  expect(several).toMatchObject({ head: third, bundle: { full: false } });
+  expect(await f.git("rev-list", "--count", `${second}..${third}`)).toBe("1");
+  // HEAD itself known: nothing to send.
+  expect((await boot({ have: [unrelated, third] })).bundle).toBeUndefined();
+  // N-1 desktops send one string: unchanged.
+  expect(await boot({ have: second })).toMatchObject({ bundle: { full: false } });
+  // Nothing known applies: full.
+  expect(await boot({ have: [unrelated] })).toMatchObject({ bundle: { full: true } });
+  // At most 64, each a full commit id.
+  expect(await f.request(CLIENT_A, "sync.bootstrap", { have: Array.from({ length: 65 }, (_, index) => index.toString(16).padStart(40, "0")) })).toMatchObject({ type: "WORKSPACE_ERROR", code: "VALIDATION_FAILED" });
+  expect(await f.request(CLIENT_A, "sync.bootstrap", { have: ["HEAD~1"] })).toMatchObject({ type: "WORKSPACE_ERROR", code: "VALIDATION_FAILED" });
+});

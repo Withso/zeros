@@ -5,7 +5,7 @@ import { SyncConnectError } from "../workspace-sync/connection";
 import type { WorkspaceSyncStatus } from "../../shared/workspace-sync";
 
 const WS = "11111111-1111-4111-8111-111111111111";
-function fixture(options: { connect?: SyncManagerDeps["connect"]; pull?: () => Promise<{ state: "in_sync" | "retry" | "stopped"; problems: []; skipped: []; stopped?: "too_many_files" }> } = {}) {
+function fixture(options: { connect?: SyncManagerDeps["connect"]; open?: typeof SyncEngine.open; pull?: () => Promise<{ state: "in_sync" | "retry" | "stopped"; problems: []; skipped: []; stopped?: "too_many_files" }> } = {}) {
   const settings = new Map<string, string>(), flags: Array<[string, boolean]> = [], published: WorkspaceSyncStatus[][] = [];
   let account: { accountId: string; deviceId: string } | null = { accountId: "acct-a", deviceId: "22222222-2222-4222-8222-222222222222" };
   const pull = vi.fn(options.pull ?? (async () => ({ state: "in_sync" as const, problems: [] as [], skipped: [] as [] })));
@@ -18,7 +18,7 @@ function fixture(options: { connect?: SyncManagerDeps["connect"]; pull?: () => P
     connect: options.connect ?? (async () => ({ snapshot: async () => { throw new Error("unused"); }, read: async () => { throw new Error("unused"); }, close: closed })),
     setSyncing: async (workspaceId, syncing) => { flags.push([workspaceId, syncing]); },
     publish: statuses => { published.push(statuses); },
-    open: (async (folder: string) => ({ root: `/real${folder}`, pull })) as unknown as typeof SyncEngine.open,
+    open: options.open ?? (async (folder: string) => ({ root: `/real${folder}`, pull })) as unknown as typeof SyncEngine.open,
     wait: (ms, wake) => new Promise<void>(resolve => { waits.push({ ms, resolve }); void wake.promise.then(resolve); }),
     log: line => { logs.push(line); },
   });
@@ -59,6 +59,21 @@ describe("SyncManager", () => {
     expect(f.manager.folderFor(WS)).toBe("/real/f");
     await f.manager.stop();
   });
+
+  it("discards a held folder admission after A to B to A rather than registering it in the resumed account", async () => {
+    let release!: () => void, entered!: () => void;
+    const ready = new Promise<void>(resolve => { entered = resolve; }), pending = new Promise<void>(resolve => { release = resolve; });
+    const f = fixture({ open: (async (folder: string) => { entered(); await pending; return { root: folder }; }) as unknown as typeof SyncEngine.open });
+    const enabling = f.manager.enable(WS, "/old-admission");
+    await ready;
+    f.setAccount({ accountId: "acct-b", deviceId: "33333333-3333-4333-8333-333333333333" }); await f.manager.start();
+    f.setAccount({ accountId: "acct-a", deviceId: "22222222-2222-4222-8222-222222222222" }); await f.manager.start();
+    const rejected = expect(enabling).rejects.toMatchObject({ code: "other_workspace" });
+    release(); await rejected;
+    expect(f.flags).toEqual([]); expect(f.manager.folderFor(WS)).toBeUndefined(); expect(f.last()).toEqual([]);
+    await f.manager.stop();
+  });
+
   it("turns sync on for a validated folder, flags the Mac, pulls until in sync, and turns off keeping the files", async () => {
     const f = fixture();
     await f.manager.enable(WS, "/Users/alex/w-7");

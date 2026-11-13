@@ -103,7 +103,9 @@ describe("sync engine", () => {
     c.set({ "dir/file.txt": "two\n", "dir/new.txt": "new\n" });
     c.replies.push({ epoch: EPOCH, seq: 1, changes: [c.entry("dir/file.txt"), c.entry("dir/new.txt")], deletes: [] });
     const result = await engine.pull(c.source);
-    expect(result.problems).toEqual([{ path: "dir/file.txt", reason: "unsafe_parent" }, { path: "dir/new.txt", reason: "unsafe_parent" }]);
+    // Entries are applied concurrently, so the two refusals arrive in either order.
+    expect([...result.problems].sort((a, b) => a.path.localeCompare(b.path)))
+      .toEqual([{ path: "dir/file.txt", reason: "unsafe_parent" }, { path: "dir/new.txt", reason: "unsafe_parent" }]);
     expect(await readdir(s.outside)).toEqual(["secret.txt"]);
   });
 

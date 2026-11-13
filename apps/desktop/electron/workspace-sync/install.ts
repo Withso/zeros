@@ -12,9 +12,11 @@ import { emitEvent, getMainWindow } from "../ipc/events";
 import { setCommand } from "../ipc/router";
 import type { DeviceControl } from "../local-commands/control";
 import { deviceIdFor } from "../local-commands/device-identity";
-import { SyncRootError } from "./engine";
+import { SyncEngine, SyncRootError } from "./engine";
 import { SyncManager } from "./manager";
 import { CloudContextArchiver } from "./archive";
+import { CloudGitMirror } from "./cloud-git";
+import { maintainSharedGitStores } from "./shared-git";
 import WebSocket from "ws";
 import { DeviceControlError } from "../local-commands/control";
 import { DirectSyncConnection, SyncConnectError, syncGrantRefusal, type DirectDeps, type SyncSocket } from "./connection";
@@ -27,6 +29,10 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 export function installWorkspaceSync(local: { enabled: boolean; control: DeviceControl; device(): LocalCommandDevice | undefined; onSyncHint(listener: () => void): () => void }): { dispose(): Promise<void> } {
   const store = { get: getAppSetting, set: setAppSetting };
   let ownerGeneration = 0;
+  const ownerKey = () => {
+    const account = getSessionUserForMain(), device = local.device();
+    return account && device ? JSON.stringify([ownerGeneration, account.accountId, device.deviceId, device.registrationId, device.instanceId]) : null;
+  };
   /** The grant route (D+H) maps refusals to what the popup says. */
   const grantFor = async (workspaceId: string): ReturnType<DirectDeps["grant"]> => {
     const device = local.device();
@@ -46,14 +52,20 @@ export function installWorkspaceSync(local: { enabled: boolean; control: DeviceC
     setSyncing: async (workspaceId, syncing) => { const device = local.device(); if (device) await local.control.setSyncing(device, workspaceId, syncing); },
     unavailable: () => { void follower.hint(); },
     publish: statuses => emitEvent(WORKSPACE_SYNC_STATUS_EVENT, withFolders(statuses)),
+    open: (folder, identity, deps = {}) => {
+      const key = ownerKey(), device = local.device();
+      const isCurrent = () => key !== null && key === ownerKey() && deps.isCurrent?.() !== false;
+      return SyncEngine.open(folder, identity, { ...deps, gitFactory: (root, meta) => new CloudGitMirror(root, meta, {
+        channel: syncChannelFolder(zerosWorkspacesRoot()), workspaceId: identity.workspaceId, isCurrent, signal: deps.signal,
+        scope: () => device ? local.control.workspaceGitScope(device, identity.workspaceId, deps.signal) : Promise.reject(new Error("Device is not registered.")),
+        token: () => device ? local.control.githubReadToken(device, identity.workspaceId, deps.signal) : Promise.reject(new Error("Device is not registered.")),
+        log: line => console.info(`[workspace-sync] ${line}`),
+      }) });
+    },
   });
   // 12.z: the renderer may see This Mac's own folder (it is the person's Mac); the server never does.
   const withFolders = (statuses: WorkspaceSyncStatus[]): WorkspaceSyncStatus[] =>
     statuses.map(status => { const folder = manager.folderFor(status.workspaceId); return folder ? { ...status, folder } : status; });
-  const ownerKey = () => {
-    const account = getSessionUserForMain(), device = local.device();
-    return account && device ? JSON.stringify([ownerGeneration, account.accountId, device.deviceId, device.registrationId, device.instanceId]) : null;
-  };
   const archives = new CloudContextArchiver({
     ownerKey,
     read: workspaceId => {
@@ -76,16 +88,25 @@ export function installWorkspaceSync(local: { enabled: boolean; control: DeviceC
     channel: syncChannelFolder(zerosWorkspacesRoot()), now: Date.now, log: line => console.info(`[workspace-sync] ${line}`),
   });
   const stopHints = local.onSyncHint(() => { void follower.hint(); });
-  let changing = Promise.resolve();
+  let changing = Promise.resolve(), resetRequested = false;
   const sync = () => {
     changing = changing.then(async () => {
+      if (resetRequested) { resetRequested = false; await manager.stop(); }
       if (local.enabled && getSessionUserForMain()) { await manager.start(); follower.start(); }
       else { follower.stop(); await manager.stop(); }
     }).catch(() => {});
   };
-  const stopSessionWatch = onMainAuthSessionChanged(() => { ownerGeneration++; follower.stop(); sync(); });
-  const stopSignOut = onBeforeMainSignOut(() => { ownerGeneration++; follower.stop(); return manager.stop(); });
+  const stopSessionWatch = onMainAuthSessionChanged(() => { ownerGeneration++; resetRequested = true; follower.stop(); sync(); });
+  const stopSignOut = onBeforeMainSignOut(() => { ownerGeneration++; resetRequested = true; follower.stop(); return manager.stop(); });
   sync();
+  const maintenanceStop = new AbortController();
+  let maintenance: Promise<void> | undefined;
+  const maintain = () => {
+    if (!local.enabled || maintenance || maintenanceStop.signal.aborted) return;
+    maintenance = maintainSharedGitStores(syncChannelFolder(zerosWorkspacesRoot()), { signal: maintenanceStop.signal, log: line => console.info(`[workspace-sync] ${line}`) })
+      .catch(() => {}).finally(() => { maintenance = undefined; });
+  };
+  const maintenanceTimer = setInterval(maintain, 3600_000); maintenanceTimer.unref?.(); maintain();
 
   const requireMainFrame = (event: IpcMainInvokeEvent) => {
     const window = getMainWindow();
@@ -153,5 +174,9 @@ export function installWorkspaceSync(local: { enabled: boolean; control: DeviceC
     await openInTerminal({ path: folder }, event);
     return true;
   });
-  return { dispose: async () => { stopSessionWatch(); stopSignOut(); stopHints(); follower.stop(); await manager.stop(); } };
+  return { dispose: async () => {
+    stopSessionWatch(); stopSignOut(); stopHints(); follower.stop();
+    clearInterval(maintenanceTimer); maintenanceStop.abort();
+    await Promise.all([manager.stop(), maintenance]);
+  } };
 }

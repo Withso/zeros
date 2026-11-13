@@ -16,6 +16,17 @@ const render = (props: Partial<Parameters<typeof ConnectedMacs>[0]> = {}) =>
   renderToStaticMarkup(createElement(TooltipProvider, { children: createElement(ConnectedMacs, { macs, now, onConnect: () => {}, onDisconnect: () => {}, ...props }) }));
 
 describe("Connected Macs", () => {
+  it("shows this Mac's folder and shared Git sizes with the credential and LFS limits", () => {
+    const html = render({ macs: [{ ...macs[0]!, state: "connected" }], sync: {
+      busy: false, onEnable: () => {}, onStop: () => {}, onChoose: () => {}, onOpenTerminal: () => {}, onReveal: () => {}, onCopyPath: () => {},
+      status: { workspaceId: "w", state: "in_sync", problems: 0, storage: { storeId: "a".repeat(64), folderBytes: 2 * 1024 ** 2, sharedGitBytes: 12 * 1024 ** 2 } },
+    } });
+    expect(text(html)).toEqual(expect.arrayContaining(["Folder: 2 MB · Shared Git: 12 MB",
+      "Git history downloads use your normal GitHub credentials on this Mac. Git LFS files are not downloaded."]));
+    expect(html).not.toContain("a".repeat(64));
+    expect(render()).not.toContain("Shared Git:");
+  });
+
   it("lists this person's Macs with This Mac, their state and one action each", () => {
     // Connect is issued by that Mac itself, so only This Mac offers it.
     expect(text(render())).toEqual(["Connected Macs", "Alex's MacBook Pro", "This Mac", "Not connected", "Connect",

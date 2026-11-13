@@ -16,6 +16,27 @@ function socket() {
 }
 
 describe("the direct sync socket", () => {
+  it("sends multiple held commits only after sync-have-v2, bounded to 64 distinct commit IDs", async () => {
+    const s = socket();
+    const connection = await DirectSyncConnection.connect({ grant: async () => grant(1), dial: () => s.ws }, { hint: () => {}, closed: () => {} });
+    const heads = Array.from({ length: 70 }, (_, i) => i.toString(16).padStart(40, "0"));
+    const send = async (have: string[]) => {
+      const result = connection.bootstrap(have);
+      const frame = s.sent.at(-1)!;
+      s.ws.emitMessage({ type: "WORKSPACE_RESPONSE", requestId: frame.id, result: { branch: "main", head: heads[0] } });
+      await result;
+      return frame.params;
+    };
+    try {
+      expect(await send(heads)).toEqual({ have: heads[0] });
+      s.ws.emitMessage({ type: "ENGINE_READY", capabilities: ["workspace-sync-v1", "sync-have-v2"] });
+      expect(await send([heads[0]!, ...heads, "not-an-id"])).toEqual({ have: heads.slice(0, 64) });
+      expect(await send([])).toEqual({});
+      s.ws.emitMessage({ type: "ENGINE_READY", capabilities: ["workspace-sync-v1"] });
+      expect(await send(heads)).toEqual({ have: heads[0] });
+    } finally { connection.close(); }
+  });
+
   it("dials the worker's sync path with the port-auth cookie and grant, and renews with fresh grants", async () => {
     vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
     try {

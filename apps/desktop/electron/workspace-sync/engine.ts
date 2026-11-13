@@ -7,6 +7,7 @@ import { SYNC_LIMITS, isSyncPath, type SyncEntry, type SyncReadBatchReply, type 
 import { admitEntries, safeParent, type SyncProblem } from "./paths";
 import { SyncChangedError, SyncRootError } from "./engine-errors";
 import { GitMirror, type GitSource, type GitState } from "./git";
+import type { WorkspaceSyncStorage } from "../../shared/workspace-sync";
 
 /** The worker as the engine sees it (the relay bridge in production). */
 export interface SyncSource extends Partial<GitSource> {
@@ -43,6 +44,7 @@ export interface SyncResult {
   stopped?: SyncSnapshotReply["stopped"];
   /** The real clone: in step with the cloud HEAD, Git missing on this Mac, or a failed update (retried next cycle). */
   git?: "ok" | "missing" | "failed";
+  storage?: WorkspaceSyncStorage;
   /** For the [workspace-sync] log: counts only, never paths. */
   stats?: { kind: "full" | "delta"; files: number; bytes: number; deletes: number };
 }
@@ -88,7 +90,8 @@ export class SyncEngine {
       ? saved : { version: 1, workspaceId: identity.workspaceId, files: {} };
     // The direct path is not paced (one read in flight per Mac instead).
     return new SyncEngine(root, identity, state, { now: Date.now, sleep: ms => new Promise(resolve => setTimeout(resolve, ms)),
-      paceBytesPerSecond: Infinity, commitEvery: 100, overwrittenBytes: OVERWRITTEN_BYTES, git: new GitMirror(root, join(root, META)), ...deps });
+      paceBytesPerSecond: Infinity, commitEvery: 100, overwrittenBytes: OVERWRITTEN_BYTES, ...deps,
+      git: deps.git ?? deps.gitFactory?.(root, meta) ?? new GitMirror(root, meta) });
   }
 
   get position(): { epoch?: string; seq?: number; files: number } { return { epoch: this.state.epoch, seq: this.state.seq, files: Object.keys(this.state.files).length }; }
@@ -125,7 +128,8 @@ export class SyncEngine {
       await this.pruneOverwritten();
       const git = early ?? (head ? await this.syncGit(source, head) : undefined);
       if (git === "too_many_bytes") return { state: "stopped", problems, skipped, stopped: "too_many_bytes", stats };
-      return { state: "in_sync", problems, skipped, stats, ...(git ? { git } : {}) };
+      const storage = await this.deps.git.storage?.(stats.files > 0 || stats.deletes > 0).catch(() => undefined);
+      return { state: "in_sync", problems, skipped, stats, ...(git ? { git } : {}), ...(storage ? { storage } : {}) };
     } catch (error) {
       await this.commit();
       if (error instanceof SyncChangedError) return { state: "retry", problems: [], skipped };
@@ -133,13 +137,13 @@ export class SyncEngine {
     }
   }
 
-  /** History for the real clone, after the files: a new bundle only when the cloud HEAD moved. */
+  /** An unchanged HEAD can still need migration or recovery before it is safe to reuse. */
   private async syncGit(source: SyncSource, head: NonNullable<SyncSnapshotReply["head"]>): Promise<SyncResult["git"] | "too_many_bytes"> {
     if (!source.bootstrap || !source.bundleRead) return undefined;
     const current = this.state.git;
-    if (current?.head === head.sha && current.branch === head.branch && await lstat(join(this.root, ".git")).then(info => info.isDirectory(), () => false)) return "ok";
     if (!await this.deps.git.available()) return "missing";
     try {
+      if (current?.head === head.sha && current.branch === head.branch && await this.deps.git.current?.(current)) return "ok";
       const next = await this.deps.git.apply({ bootstrap: source.bootstrap.bind(source), bundleRead: source.bundleRead.bind(source) }, current);
       if (next === "too_many_bytes") return next;
       this.state.git = next;
@@ -360,7 +364,13 @@ export class SyncEngine {
 }
 
 type Pacer = (bytes: number) => Promise<void>;
-export interface SyncEngineDeps { now(): number; sleep(ms: number): Promise<void>; paceBytesPerSecond: number; commitEvery: number; overwrittenBytes: number; git: GitMirror }
+export interface SyncEngineDeps {
+  now(): number; sleep(ms: number): Promise<void>; paceBytesPerSecond: number; commitEvery: number; overwrittenBytes: number;
+  git: Pick<GitMirror, "available" | "apply"> & Partial<Pick<GitMirror, "current" | "storage">>;
+  gitFactory?(root: string, meta: string): GitMirror;
+  signal?: AbortSignal;
+  isCurrent?(): boolean;
+}
 
 const untouched = (previous: FileState, local: Stats) => local.size === previous.localSize && Math.round(local.mtimeMs) === previous.localMtimeMs
   && (previous.symlink !== undefined ? local.isSymbolicLink() : local.isFile());

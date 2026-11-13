@@ -24,7 +24,7 @@ import { WorkspaceSetup, readSetupOutput, type SetupRunner } from "./workspace/s
 import { NotifyUserService } from "./notify-user/service";
 import { SyncService } from "./workspace/sync-service";
 import { SyncTransferActivity } from "./workspace/sync-activity";
-import { SYNC_CAPABILITY, SYNC_HINT_KIND, SYNC_BATCH_CAPABILITY, SYNC_TRANSFER_OPS } from "@zeros/protocol/workspace-sync";
+import { SYNC_CAPABILITY, SYNC_HINT_KIND, SYNC_BATCH_CAPABILITY, SYNC_HAVE_V2_CAPABILITY, SYNC_TRANSFER_OPS } from "@zeros/protocol/workspace-sync";
 import { WorkspaceError, WorkspaceScope, type WorkerConfig } from "./workspace/scope";
 import { WorkspaceService, type WorkspaceServiceOptions } from "./workspace/service";
 import { isGitMutation } from "./workspace/git";
@@ -854,7 +854,7 @@ export class CloudWorker {
   private readyFrame(): BridgeMessage {
     return createMessage({ type: "ENGINE_READY", source: "engine", version: "0.0.0", root: "", framework: "cloud", port: 0,
       protocolVersion: PROTOCOL_VERSION, minProtocolVersion: MIN_SUPPORTED_PROTOCOL, instanceId: this.instanceId,
-      capabilities: [...(this.reviews?.enabled ? ["code-review-v1"] : []), CLOUD_WORKSPACE_RESOURCES_CAPABILITY, SYNC_CAPABILITY, SYNC_BATCH_CAPABILITY] });
+      capabilities: [...(this.reviews?.enabled ? ["code-review-v1"] : []), CLOUD_WORKSPACE_RESOURCES_CAPABILITY, SYNC_CAPABILITY, SYNC_BATCH_CAPABILITY, SYNC_HAVE_V2_CAPABILITY] });
   }
   private async touchCheckout(): Promise<void> {
     await this.checkoutRefresh?.touch();

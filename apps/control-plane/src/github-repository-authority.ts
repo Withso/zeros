@@ -79,9 +79,14 @@ export class GithubRepositoryAuthority {
     return (await this.run(input, true)).credential!;
   }
 
+  async mintContentsRead(input: Omit<RepositoryRequest, "access"> & { repositoryIds: readonly string[] }): Promise<{ token: string; expiresAtMs: number }> {
+    if (input.repositories.length !== 1 || input.repositoryIds.length !== 1) throw denied();
+    return (await this.run({ ...input, access: "read" }, true, true)).credential!;
+  }
+
   async check(input: RepositoryRequest): Promise<string> { return (await this.run(input, false)).fingerprint; }
 
-  private async run(input: RepositoryRequest, issue: boolean) {
+  private async run(input: RepositoryRequest, issue: boolean, contentsOnly = false) {
     if (!input.repositories.length || input.repositories.length > 10 || input.repositories.some(name => !/^[A-Za-z0-9_.-]{1,100}$/.test(name) || name === "." || name === "..")) throw denied();
     if (input.repositoryIds && (input.repositoryIds.length !== input.repositories.length || input.repositoryIds.some(id =>
       !/^[1-9][0-9]{0,15}$/.test(id) || !Number.isSafeInteger(Number(id))))) throw denied();
@@ -100,7 +105,7 @@ export class GithubRepositoryAuthority {
           credential = await mintGithubInstallationToken(this.fetchImpl, this.config, {
             installationId: Number(actor.installation), repositories: input.repositories,
             ...(input.repositoryIds ? { repositoryIds: input.repositoryIds } : {}),
-            permissions: { metadata: "read", contents: level, pull_requests: level }, nowMs: Date.now(),
+            permissions: { metadata: "read", contents: level, ...(contentsOnly ? {} : { pull_requests: level }) }, nowMs: Date.now(),
           });
         }
       } finally {

@@ -27,8 +27,10 @@ const installations = z.object({
     .max(100),
 });
 
-/** Workspace credentials keep the selected human's scope. Only the shared
- * Computer builder uses repository-scoped installation credentials. */
+const syncAccessRequired = () => new HttpError(403, "github_access_required", "Your GitHub account needs access to this repository.");
+
+/** VM credentials keep the selected human's scope. Computer builds and Mac
+ * sync use installation credentials scoped to the exact repository. */
 export function createSelectedCloudGithubTokens(
   pool: pg.Pool,
   connections: CloudGithubConnections,
@@ -38,11 +40,12 @@ export function createSelectedCloudGithubTokens(
     scope: CloudGithubConnectionScope,
     target: CloudGithubRepositoryTarget,
     access: "read" | "write" | "user" = "read",
-    purpose: "git" | "gh" | "computer" = "git",
+    purpose: "git" | "gh" | "computer" | "sync" = "git",
     beforeRelease: () => Promise<void> = async () => {},
     failedTokenSha256?: string,
     prepared?: Awaited<ReturnType<CloudGithubConnections["access"]>>,
   ) => {
+    if (purpose === "sync" && (access !== "read" || !target.repositoryId)) throw syncAccessRequired();
     const grant = prepared ?? await connections.access(scope, failedTokenSha256),
       repository = await grant.api.repository(target);
     if (access === "write" && !repository.canPush)
@@ -56,7 +59,8 @@ export function createSelectedCloudGithubTokens(
       `/repositories/${repository.repositoryId}/branches?per_page=1`,
       z.array(z.unknown()).max(1),
     );
-    if (grant.material.method === "pat" || purpose !== "computer") {
+    if (purpose === "sync" && (grant.material.method === "pat" || !connections.config)) throw syncAccessRequired();
+    if (grant.material.method === "pat" || purpose !== "computer" && purpose !== "sync") {
       await beforeRelease();
       await grant.assertCurrent();
       // This is a broker cache deadline, not a claimed GitHub token lifetime.
@@ -150,14 +154,26 @@ export function createSelectedCloudGithubTokens(
         return actor;
       },
     );
-    const minted = await authority.mint({
+    const request = {
       ...scope,
       owner,
       repositories: [name],
       repositoryIds: [repository.repositoryId],
       access,
-    });
+    };
+    const minted = purpose === "sync" ? await authority.mintContentsRead(request) : await authority.mint(request);
     try {
+      if (purpose === "sync") {
+        if (minted.expiresAtMs <= Date.now() || minted.expiresAtMs > Date.now() + 3_600_000)
+          throw new HttpError(503, "github_unavailable", "GitHub returned an unexpected credential lifetime.");
+        await grant.assertCurrent();
+        // The caller's device/session/source snapshot is the final admission;
+        // no provider call or credential cleanup may follow it.
+        await beforeRelease();
+        if (minted.expiresAtMs <= Date.now() || minted.expiresAtMs > Date.now() + 3_600_000)
+          throw new HttpError(503, "github_unavailable", "GitHub credential expired while access was being checked.");
+        return { token: minted.token, expiresAt: minted.expiresAtMs, repository: repository.repository };
+      }
       await beforeRelease();
       await grant.assertCurrent();
       return {
