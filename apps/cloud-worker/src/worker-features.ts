@@ -1,4 +1,4 @@
-import { ACTING_USER_FEATURE, CREATOR_AGENT_LOGINS_FEATURE } from "@zeros/protocol/cloud-v2-relay";
+import { ACTING_USER_FEATURE, CREATOR_AGENT_LOGINS_FEATURE, CREATOR_AGENT_MODELS_FEATURE } from "@zeros/protocol/cloud-v2-relay";
 
 /** Advertised on hello and on the relay's inbound dial. The control plane gates
  * each configuration on the list it saw, so the two must be identical. */
@@ -10,4 +10,6 @@ export const CLOUD_WORKER_FEATURES = ["prompt-outbox-v1", "mcp-v1", "workspace-s
   /** Team sharing 3A: an activated workspace's direct sync socket carries and renews its person's client handle. */
   "sync-context-v1",
   /** Creator pays: parses an activated config's agentLogins (the current Creator's agents; presentation only). */
-  CREATOR_AGENT_LOGINS_FEATURE].join(",");
+  CREATOR_AGENT_LOGINS_FEATURE,
+  /** Activated: serves agentModels (the current Creator's model ids) as every member's picker list. */
+  CREATOR_AGENT_MODELS_FEATURE].join(",");

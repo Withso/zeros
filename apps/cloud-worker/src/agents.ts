@@ -9,7 +9,7 @@ import type { Driver } from "./drivers/driver";
 import { agentTiming, type TimingObserver, type TimingSpan } from "./agent-timings";
 import { recordUser, userMessage, type InboxEntry, type SessionStore, type SteerReceipt } from "./sessions/session-store";
 import { WorkspaceError, type WorkerConfig, type WorkspaceScope } from "./workspace/scope";
-import { CodexModelAvailability, type ModelDiscoveryOptions } from "./credentials/model-availability";
+import { CodexModelAvailability, creatorModelMetadata, type ModelDiscoveryOptions } from "./credentials/model-availability";
 import { preparePromptFiles } from "./prompt-files";
 import type { DriverMcpServers } from "./mcp/gateway";
 import type { WorkspaceToolFactory, WorkspaceToolGrant } from "./mcp/workspace-tools";
@@ -174,7 +174,7 @@ export class Agents {
     }).catch(() => { if (owns()) this.cancelForInput(route, INPUT_CANCELLED); });
   }
   private initialized(agentId: CloudV2Agent): InitializeResponse {
-    return { ...initialized(agentId), _meta: this.models.metadata(agentId === "codex") };
+    return { ...initialized(agentId), _meta: creatorModelMetadata(agentId, this.config) ?? this.models.metadata(agentId === "codex") };
   }
   get busy(): boolean { return [...this.routes.values()].some(route => (this.waitingForInput(route) ? this.hasIndependentWork(route) : !!route.active || this.hasBackground(route))); }
   get runtimeBusy(): boolean {

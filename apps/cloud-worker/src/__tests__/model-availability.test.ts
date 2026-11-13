@@ -4,6 +4,9 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { BridgeMessage } from "@zeros/protocol/messages";
+import { CloudV2ControlFrameSchema, CREATOR_AGENT_MODELS_FEATURE } from "@zeros/protocol/cloud-v2-relay";
+import { creatorModelMetadata } from "../credentials/model-availability";
+import { CLOUD_WORKER_FEATURES } from "../worker-features";
 import { CloudWorker } from "../worker";
 import { CLIENT_A, FakeDriver, FakeRelay, browserFrame, config } from "./worker-fixtures";
 
@@ -138,5 +141,45 @@ describe("cloud Codex model metadata", () => {
     expect(removed._meta?.modelsAccountScoped).not.toBe(true);
     expect(removed._meta?.cloudModelScope).not.toBe(empty._meta?.cloudModelScope);
     expect(fetch).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("§ activated workspace: the current Creator's selected models (creator-agent-models-v1)", () => {
+  const acting = { ...config, agents: {}, actingUser: 1 as const, gitIdentity: null, loginRevision: "7",
+    agentLogins: { claude: true as const, cursor: true as const },
+    agentModels: { claude: ["claude-opus-5-5[1m]", "claude-haiku-5-5"], cursor: ["grok-4.7"] } };
+  const values = (menu: Array<{ value: string; selectable?: boolean }>) => menu.filter(model => model.selectable !== false).map(model => model.value);
+
+  it("lists exactly the Creator's models for every member, scoped by loginRevision; a logged-in agent with none lists none", () => {
+    const claude = creatorModelMetadata("claude", acting as never)!;
+    expect(claude).toMatchObject({ modelsDynamic: true, modelsAccountScoped: true, cloudModelScope: `cloud/${config.workspace.id}/7/creator` });
+    expect(values(modelsForAgent("claude", { protocolVersion: 1, agentCapabilities: {}, _meta: claude }))).toEqual(["claude-opus-5-5[1m]", "claude-haiku-5-5"]);
+    expect(values(modelsForAgent("cursor", { protocolVersion: 1, agentCapabilities: {}, _meta: creatorModelMetadata("cursor", acting as never) }))).toEqual(["grok-4.7"]);
+    const none = creatorModelMetadata("cursor", { ...acting, agentModels: { claude: [] } } as never)!;
+    expect(none.models).toEqual([]);
+    expect(values(modelsForAgent("cursor", { protocolVersion: 1, agentCapabilities: {}, _meta: none }))).toEqual([]);
+    expect(creatorModelMetadata("codex", acting as never)).toMatchObject({ models: [], modelEnvVar: "OPENAI_MODEL", modelsAccountScoped: true });
+  });
+
+  it("keeps today's metadata for an older control plane (no agentModels) and for non-activated workspaces", () => {
+    const { agentModels: _models, ...older } = acting;
+    expect(creatorModelMetadata("claude", older as never)).toBeUndefined();
+    expect(creatorModelMetadata("claude", { ...config, agentModels: acting.agentModels } as never)).toBeUndefined();
+  });
+
+  it("parses agentModels like the control plane: unique, ≤ 128, valid ids, known agents only", () => {
+    expect(CloudV2ControlFrameSchema.safeParse(acting).success).toBe(true);
+    for (const bad of [{ claude: ["a", "a"] }, { claude: ["not a model"] }, { gemini: ["x"] }, { claude: Array.from({ length: 129 }, (_, i) => `m${i}`) }])
+      expect(CloudV2ControlFrameSchema.safeParse({ ...acting, agentModels: bad }).success).toBe(false);
+    expect(CLOUD_WORKER_FEATURES.split(",")).toContain(CREATOR_AGENT_MODELS_FEATURE);
+  });
+
+  it("tells every client to re-read agents when the login revision changes, and only then", async () => {
+    const env = await setup();
+    const signals = () => env.relay.bridge("DB_CHANGED").filter(entry => (entry.frame as { kinds: string[] }).kinds.includes("agents"));
+    await env.relay.receive({ ...config, mcpServers: [] });
+    expect(signals()).toHaveLength(0);
+    await env.relay.receive({ ...config, loginRevision: "1" });
+    expect(signals()).toEqual([{ clientId: "*", frame: expect.objectContaining({ type: "DB_CHANGED", kinds: ["agents"], workspaceIds: [config.workspace.id] }) }]);
   });
 });
