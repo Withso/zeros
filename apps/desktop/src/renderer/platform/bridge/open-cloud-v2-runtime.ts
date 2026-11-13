@@ -16,10 +16,11 @@ import { RuntimeClient } from "./ws-client";
 import type { CloudPeer } from "./workspace-runtime-client";
 import { bridgeWorkspaceList } from "./workspace-bridge";
 import { confirmCloudWorkspaceAccessEnded } from "../cloud-access-confirm";
+import { cloudConnectBackoffKey, cloudConnectWaitMs, recordCloudConnectFailure } from "./cloud-connect-backoff";
 
 const CONNECT_TIMEOUT_MS = 3 * 60_000;
 const TICKET_TIMEOUT_MS = 30_000;
-const TICKET_BACKOFF_MS = [250, 500, 1_000, 2_000];
+const TICKET_ATTEMPTS = 5;
 
 function connectionWait(assertCurrent: () => void, deadline: number, signal?: AbortSignal) {
   const controller = new AbortController();
@@ -33,7 +34,8 @@ function connectionWait(assertCurrent: () => void, deadline: number, signal?: Ab
   const off = subscribeCloudWorkspaces(() => {
     try { check(); } catch (error) { controller.abort(error); }
   });
-  const timer = setTimeout(timeout, Math.max(0, deadline - performance.now()));
+  // An unbounded wait (Infinity) arms no timer: an over-large delay would fire at once.
+  const timer = Number.isFinite(deadline) ? setTimeout(timeout, Math.max(0, deadline - performance.now())) : undefined;
   signal?.addEventListener("abort", abort, { once: true });
   if (signal?.aborted) abort();
   return {
@@ -55,11 +57,25 @@ function transientTicketFailure(error: unknown): boolean {
   return error instanceof TypeError || error instanceof DOMException && ["NetworkError", "TimeoutError"].includes(error.name);
 }
 
+/** §14.5: waits out this workspace's shared connect backoff before any POST connect, bounded only by the open's own
+ * deadline and cancellation (not the 30 s ticket window, which a grown backoff would always exceed). */
+async function backoffGate(key: string, assertCurrent: () => void, deadline: number, signal?: AbortSignal): Promise<void> {
+  const delay = cloudConnectWaitMs(key);
+  if (delay <= 0) return;
+  const waiting = connectionWait(assertCurrent, deadline, signal);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try { await waiting.wait(new Promise<void>(resolve => { timer = setTimeout(resolve, delay); })); waiting.check(); }
+  finally { clearTimeout(timer); waiting.dispose(); }
+}
+
 async function ticketTarget(
   target: CloudWorkspaceTarget, sequence: number, wake: boolean,
   assertCurrent: () => void, deadline: number, signal?: AbortSignal,
 ): Promise<CloudV2ConnectionTarget> {
-  const waiting = connectionWait(assertCurrent, Math.min(deadline, performance.now() + TICKET_TIMEOUT_MS), signal);
+  const backoff = cloudConnectBackoffKey(target);
+  await backoffGate(backoff, assertCurrent, deadline, signal);
+  const windowEnd = Math.min(deadline, performance.now() + TICKET_TIMEOUT_MS);
+  const waiting = connectionWait(assertCurrent, windowEnd, signal);
   let ticket: Awaited<ReturnType<typeof connectCloudV2Workspace>>;
   try {
     for (let attempt = 0; ; attempt++) {
@@ -70,8 +86,10 @@ async function ticketTarget(
         break;
       } catch (error) {
         waiting.check();
-        const delay = TICKET_BACKOFF_MS[attempt];
-        if (delay === undefined || !transientTicketFailure(error)) throw error;
+        if (!transientTicketFailure(error)) throw error;
+        // Every transient failure (503 included) grows the shared backoff; only a ready connection resets it.
+        const delay = recordCloudConnectFailure(backoff);
+        if (attempt + 1 >= TICKET_ATTEMPTS || performance.now() + delay >= windowEnd) throw error;
         let timer: ReturnType<typeof setTimeout> | undefined;
         try { await waiting.wait(new Promise<void>(resolve => { timer = setTimeout(resolve, delay); })); }
         finally { clearTimeout(timer); }
@@ -149,7 +167,8 @@ export async function openCloudV2Runtime(
     // restarts a VM that stopped meanwhile. Fresh user input owns the next wake.
     refreshCloudConnectionTarget: async () => {
       assertCurrent();
-      const refreshed = await ticketTarget(target, sequence + 1, false, assertCurrent, opened ? performance.now() + TICKET_TIMEOUT_MS : deadline, signal);
+      // After the open, the ticket window starts once the shared backoff has passed (Infinity: no outer deadline).
+      const refreshed = await ticketTarget(target, sequence + 1, false, assertCurrent, opened ? Infinity : deadline, signal);
       sequence = refreshed.connectionSequence;
       return refreshed;
     },

@@ -123,6 +123,12 @@ interface RefusedAdmission {
  * Unscoped host operations remain local. Every cloud operation carries its
  * semantic owner, so focus changes cannot redirect an outstanding request.
  * Existing transcript/workbench consumers subscribe to this same client. */
+/** The control plane's closed temporary GitHub outcomes (github-availability.ts isGithubTemporary), read by shape. */
+function temporaryGithubFailure(error: unknown): boolean {
+  const { status, code } = (error ?? {}) as { status?: unknown; code?: unknown };
+  return typeof code === "string" && (status === 503 && code.startsWith("github_") || status === 429 && code === "github_rate_limited");
+}
+
 export class WorkspaceRuntimeClient extends RuntimeClient {
   private readonly peers = new Map<string, PeerEntry>();
   private readonly opening = new Map<string, OpeningPeer>();
@@ -138,6 +144,8 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
   private accountEpoch = 0;
   private workspaceStatusListeners = new Map<string, Set<() => void>>();
   private closed = false;
+  /** §14.5: one quiet re-read per history key after a temporary GitHub verification failure, growing per failure. */
+  private readonly historyRetries = new Map<string, { timer?: ReturnType<typeof setTimeout>; failures: number }>();
   private readonly history = new KeyedAsyncCache<WireRecord>({
     maxEntries: 64, maxWeight: 24 * 1024 * 1024,
     weightOf: value => JSON.stringify(value).length * 2,
@@ -548,7 +556,11 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
       ? attached : undefined;
     const rows = op === "chats.list" ? "chats" : op === "messages.search" ? "hits" : "messages";
     const cacheKey = this.historyKey(target, op, params) + (peer ? `\0runtime:${peer.runtimeId}` : "");
-    const snapshot = await this.history.load(cacheKey, async () => {
+    // §14.5: while a quiet retry is pending after a temporary GitHub failure, the kept transcript answers without a read.
+    const kept = this.historyRetries.get(cacheKey)?.timer ? this.history.peekSnapshot(cacheKey).data : undefined;
+    if (kept) return kept;
+    let snapshot: WireRecord;
+    try { snapshot = await this.history.load(cacheKey, async () => {
       assertAccess();
       let result: WireRecord;
       if (peer) {
@@ -574,7 +586,16 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
         if (previous && JSON.stringify(previous) === JSON.stringify(result)) return previous;
       }
       return result;
-    }, { maxAgeMs: (this.historyIntents.get(cacheKey) ?? -1) >= performance.now() ? 15_000 : 1000 });
+    }, { maxAgeMs: (this.historyIntents.get(cacheKey) ?? -1) >= performance.now() ? 15_000 : 1000 }); }
+    catch (error) {
+      // A temporary GitHub verification failure keeps the confirmed transcript and re-reads quietly; anything else
+      // (a refusal, no transcript yet) fails as before.
+      const confirmed = temporaryGithubFailure(error) ? this.history.peekSnapshot(cacheKey).data : undefined;
+      if (!confirmed || this.closed) throw error;
+      this.retryHistoryQuietly(cacheKey, () => this.readHistory(target, op, params));
+      snapshot = confirmed;
+    }
+    if (!this.historyRetries.get(cacheKey)?.timer) this.historyRetries.delete(cacheKey);
     assertAccess();
     // A cold mirror read may finish after the worker attaches; reuse that peer,
     // never open or wake one to reconcile a passive history read.
@@ -588,6 +609,23 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
       while (this.historyWorkspaces.size > 32) this.historyWorkspaces.delete(this.historyWorkspaces.keys().next().value!);
     }
     return snapshot;
+  }
+
+  private retryHistoryQuietly(cacheKey: string, read: () => Promise<unknown>): void {
+    const entry = this.historyRetries.get(cacheKey) ?? { failures: 0 };
+    if (entry.timer) return;
+    const ceiling = Math.min(300_000, 30_000 * 2 ** entry.failures);
+    entry.failures += 1;
+    entry.timer = setTimeout(() => {
+      entry.timer = undefined;
+      if (!this.closed) void read().catch(() => {});
+    }, Math.round(ceiling / 2 + Math.random() * (ceiling / 2)));
+    this.historyRetries.delete(cacheKey);
+    this.historyRetries.set(cacheKey, entry);
+    while (this.historyRetries.size > 64) {
+      const [oldest, value] = this.historyRetries.entries().next().value!;
+      clearTimeout(value.timer); this.historyRetries.delete(oldest);
+    }
   }
 
   private invalidateHistory(target: CloudWorkspaceTarget): void {
@@ -1233,6 +1271,8 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
   }
   override dispose(): void {
     this.closed = true;
+    for (const entry of this.historyRetries.values()) clearTimeout(entry.timer);
+    this.historyRetries.clear();
     this.stopLocalStatus();
     this.stopLocalChanges();
     this.clearCloudConnections();

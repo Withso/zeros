@@ -49,6 +49,7 @@ vi.mock("../ws-client", () => ({
 
 import { ControlPlaneError } from "../../../features/team/control-plane";
 import { openCloudV2Runtime } from "../open-cloud-v2-runtime";
+import { cloudConnectBackoffKey, cloudConnectWaitMs, recordCloudConnectFailure, resetCloudConnectBackoffForTests } from "../cloud-connect-backoff";
 
 const target = { organizationId: "11111111-1111-4111-8111-111111111111", workspaceId: "22222222-2222-4222-8222-222222222222" };
 const workspace = { id: target.workspaceId, path: "/home/user/example/repo" };
@@ -76,10 +77,12 @@ beforeEach(() => {
   mocks.connect.mockReset().mockResolvedValue(ticket);
   mocks.list.mockReset().mockResolvedValue([workspace]); mocks.accept.mockReset();
   mocks.clients.length = 0; mocks.listeners.clear();
+  // The lower jitter bound: each wait is half its ceiling (500 ms, 1 s, 2 s, 4 s, ...).
+  resetCloudConnectBackoffForTests(); vi.spyOn(Math, "random").mockReturnValue(0);
 });
 afterEach(async () => {
   for (const controller of controllers.splice(0)) controller.abort();
-  await flush(); vi.useRealTimers();
+  await flush(); vi.useRealTimers(); vi.restoreAllMocks();
 });
 
 describe("bounded cloud connect ticket retries", () => {
@@ -92,7 +95,7 @@ describe("bounded cloud connect ticket retries", () => {
     const attempt = opening(); await flush();
     expect(mocks.connect).toHaveBeenCalledTimes(1);
     expect(attempt.settled()).toBe(false);
-    await vi.advanceTimersByTimeAsync(249); expect(mocks.connect).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(499); expect(mocks.connect).toHaveBeenCalledTimes(1);
     await vi.advanceTimersByTimeAsync(1);
     expect(await attempt.result).toMatchObject({ scope: { ...target, root: workspace.path } });
     expect(mocks.connect).toHaveBeenCalledTimes(2);
@@ -113,7 +116,7 @@ describe("bounded cloud connect ticket retries", () => {
   it("stops after five ticket attempts with nonzero increasing backoff", async () => {
     const error = unavailable(); mocks.connect.mockRejectedValue(error);
     const attempt = opening(); await flush();
-    for (const [index, delay] of [250, 500, 1_000, 2_000].entries()) {
+    for (const [index, delay] of [500, 1_000, 2_000, 4_000].entries()) {
       await vi.advanceTimersByTimeAsync(delay - 1);
       expect(mocks.connect).toHaveBeenCalledTimes(index + 1);
       await vi.advanceTimersByTimeAsync(1);
@@ -127,10 +130,10 @@ describe("bounded cloud connect ticket retries", () => {
     mocks.connect.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
     const attempt = opening(); await flush();
     await vi.advanceTimersByTimeAsync(20_000); first.reject(new DOMException("Timeout", "TimeoutError"));
-    await flush(); await vi.advanceTimersByTimeAsync(250);
+    await flush(); await vi.advanceTimersByTimeAsync(500);
     expect(mocks.connect).toHaveBeenCalledTimes(2);
     const signal = mocks.connect.mock.calls[1]![1].signal as AbortSignal;
-    await vi.advanceTimersByTimeAsync(9_749); expect(attempt.settled()).toBe(false);
+    await vi.advanceTimersByTimeAsync(9_499); expect(attempt.settled()).toBe(false);
     await vi.advanceTimersByTimeAsync(1); expect(attempt.settled()).toBe(true);
     expect(await attempt.result).toBeInstanceOf(Error); expect(signal.aborted).toBe(true);
     second.resolve(ticket); await flush(); expect(mocks.clients).toHaveLength(0);
@@ -184,7 +187,7 @@ describe("bounded cloud connect ticket retries", () => {
     expect(mocks.connect.mock.calls[0]![1].wake).toBe(wake);
     mocks.connect.mockClear().mockRejectedValueOnce(unavailable()).mockResolvedValue(ticket);
     const refreshing = mocks.clients[0]!.refresh().catch(error => error); await flush();
-    await vi.advanceTimersByTimeAsync(250);
+    await vi.advanceTimersByTimeAsync(500);
     expect(await refreshing).toMatchObject({ kind: "cloud", workspaceId: target.workspaceId });
     expect(mocks.connect).toHaveBeenCalledTimes(2);
     for (const [, options] of mocks.connect.mock.calls) expect(options.wake).toBe(false);
@@ -207,10 +210,12 @@ describe("bounded cloud connect ticket retries", () => {
     const attempt = opening(); await flush(); await attempt.result;
     mocks.connect.mockRejectedValue(unavailable());
     const failed = mocks.clients[0]!.refresh().catch(error => error);
-    await vi.advanceTimersByTimeAsync(3_750);
+    await vi.advanceTimersByTimeAsync(7_500);
     expect(await failed).toBeInstanceOf(Error);
     mocks.connect.mockResolvedValue(ticket);
-    expect(await mocks.clients[0]!.refresh()).toMatchObject({ connectionSequence: 2 });
+    // The next ticket waits for the shared backoff (the fifth failure set 8 s).
+    const next = mocks.clients[0]!.refresh(); await vi.advanceTimersByTimeAsync(8_000);
+    expect(await next).toMatchObject({ connectionSequence: 2 });
     expect(vi.getTimerCount()).toBe(0);
   });
 
@@ -223,6 +228,40 @@ describe("bounded cloud connect ticket retries", () => {
     const reconnect = mocks.clients[0]!.refresh().catch(error => { settled = true; return error; });
     await flush(); peer.release(); await flush();
     expect(settled).toBe(true); expect(await reconnect).toBeInstanceOf(Error);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+  it("shares one backoff across opens: a second open waits before posting connect again", async () => {
+    mocks.connect.mockRejectedValue(unavailable());
+    const first = opening(); await flush(); await vi.advanceTimersByTimeAsync(7_500);
+    expect(await first.result).toBeInstanceOf(Error); expect(mocks.connect).toHaveBeenCalledTimes(5);
+    const second = opening(); await flush();
+    await vi.advanceTimersByTimeAsync(7_999); expect(mocks.connect).toHaveBeenCalledTimes(5);
+    mocks.connect.mockResolvedValue(ticket);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(mocks.connect).toHaveBeenCalledTimes(6);
+    expect(await second.result).toMatchObject({ scope: { ...target, root: workspace.path } });
+  });
+
+  it("waits at least 30 s between connect posts once failures have grown, outside the 30 s ticket window", async () => {
+    const key = cloudConnectBackoffKey(target);
+    for (let index = 0; index < 7; index++) recordCloudConnectFailure(key);
+    expect(cloudConnectWaitMs(key)).toBe(30_000);
+    mocks.connect.mockRejectedValueOnce(unavailable()).mockResolvedValue(ticket);
+    const attempt = opening(); await flush();
+    await vi.advanceTimersByTimeAsync(29_999); expect(mocks.connect).toHaveBeenCalledTimes(0);
+    await vi.advanceTimersByTimeAsync(1); expect(mocks.connect).toHaveBeenCalledTimes(1);
+    // The next wait (30 s) cannot fit the ticket window: the open fails without another post.
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(await attempt.result).toBeInstanceOf(Error); expect(mocks.connect).toHaveBeenCalledTimes(1);
+    expect(cloudConnectWaitMs(key)).toBeGreaterThanOrEqual(0);
+  });
+
+  it("cancels a shared-backoff wait on abort without posting", async () => {
+    recordCloudConnectFailure(cloudConnectBackoffKey(target));
+    const attempt = opening(); await flush();
+    attempt.controller.abort(); await flush();
+    expect(await attempt.result).toBeInstanceOf(Error);
+    await vi.advanceTimersByTimeAsync(5_000); expect(mocks.connect).not.toHaveBeenCalled();
     expect(vi.getTimerCount()).toBe(0);
   });
 });

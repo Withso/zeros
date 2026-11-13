@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { RuntimeClient, type RuntimeClientEnvironment, type RuntimeTransportSocket } from "../runtime-client";
 import { classifyRpcError } from "../failure";
+import { cloudConnectBackoffKey, cloudConnectWaitMs, recordCloudConnectFailure, resetCloudConnectBackoffForTests } from "../cloud-connect-backoff";
 import WebSocket, { WebSocketServer } from "ws";
 import type { AddressInfo } from "node:net";
 
@@ -20,7 +21,7 @@ class Socket implements RuntimeTransportSocket {
   }
 }
 const clients: RuntimeClient[] = [];
-beforeEach(() => vi.useFakeTimers());
+beforeEach(() => { vi.useFakeTimers(); resetCloudConnectBackoffForTests(); });
 afterEach(() => { for (const client of clients.splice(0)) client.dispose(); vi.useRealTimers(); });
 function fixture(local = false, confirm: () => Promise<"ended" | "present" | "unknown"> = async () => "ended") {
   const sockets: Socket[] = [];
@@ -310,4 +311,50 @@ it("D2: 1013 (the relay's new non-access close) reconnects and never asks whethe
   expect(h.sockets.length).toBeGreaterThan(1);
   expect(h.confirmCloudAccessEnded).not.toHaveBeenCalled();
   expect(h.client.lastRejection).toBeNull();
+});
+
+it("§14.5: 1013 after ready is not an immediate reconnect; it waits the shared backoff", async () => {
+  vi.spyOn(Math, "random").mockReturnValue(1);
+  const h = fixture(); await h.client.connect(); await h.ready(h.sockets[0]);
+  h.sockets[0].close(1013, "try_again_later"); await vi.advanceTimersByTimeAsync(999);
+  expect(h.sockets).toHaveLength(1); expect(h.refresh).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(1); expect(h.sockets).toHaveLength(2);
+  vi.restoreAllMocks();
+});
+
+it("§14.5: repeated 1013 before ready grows the reconnect wait past 30 s, with no access check", async () => {
+  vi.spyOn(Math, "random").mockReturnValue(0);
+  const h = fixture(); await h.client.connect();
+  const opened: number[] = [];
+  for (let round = 0; round < 9; round++) {
+    const socket = h.sockets.at(-1)!; socket.open(); opened.push(Date.now());
+    socket.close(1013, "try_again_later");
+    const before = h.sockets.length;
+    for (let waited = 0; h.sockets.length === before && waited < 120_000; waited += 500) await vi.advanceTimersByTimeAsync(500);
+    if (h.sockets.length === before) break;
+  }
+  const gaps = opened.slice(1).map((at, index) => at - opened[index]!);
+  expect(Math.max(...gaps)).toBeGreaterThanOrEqual(30_000);
+  expect(gaps).toEqual([...gaps].sort((a, b) => a - b));
+  expect(h.confirmCloudAccessEnded).not.toHaveBeenCalled();
+  vi.restoreAllMocks();
+});
+
+it("§14.5: the desktop's own unavailable rejection (no ready within the grace) grows the shared backoff", async () => {
+  const h = fixture(); const key = cloudConnectBackoffKey(h.target);
+  await h.client.connect(); h.sockets[0].open();
+  const waiting = h.client.waitUntilReady().catch(() => {});
+  await vi.advanceTimersByTimeAsync(120_000); await waiting;
+  expect(h.client.lastRejection?.code).toBe("cloud_actor_runtime_unavailable");
+  expect(cloudConnectWaitMs(key)).toBeGreaterThan(0);
+});
+
+it("§14.5: only a ready connection clears the shared connect backoff", async () => {
+  const h = fixture(); const key = cloudConnectBackoffKey(h.target);
+  for (let index = 0; index < 4; index++) recordCloudConnectFailure(key);
+  await h.client.connect(); h.sockets[0].open(); await vi.advanceTimersByTimeAsync(0);
+  expect(cloudConnectWaitMs(key)).toBeGreaterThan(0);
+  h.sockets[0].answer(h.sockets[0].sent.find(message => message.op === "workspace.list")!);
+  await vi.advanceTimersByTimeAsync(0);
+  expect(h.client.status).toBe("connected"); expect(cloudConnectWaitMs(key)).toBe(0);
 });
