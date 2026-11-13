@@ -1368,7 +1368,41 @@ const InspectorStyleField = React.memo(function InspectorStyleField({
       mixedSteps={mixedSteps}
     />
   );
-});
+}, sameInspectorStyleFieldProps);
+
+function sameFieldOptions(
+  left: DesignLayoutFieldOptions | undefined,
+  right: DesignLayoutFieldOptions | undefined,
+): boolean {
+  if (left === right) return true;
+  if (!left || !right) return false;
+  const keys = Object.keys(left) as (keyof DesignLayoutFieldOptions)[];
+  if (keys.length !== Object.keys(right).length) return false;
+  return keys.every((key) => {
+    if (!Object.hasOwn(right, key)) return false;
+    if (key !== "linkedProperties") return Object.is(left[key], right[key]);
+    const before = left.linkedProperties;
+    const after = right.linkedProperties;
+    return before === after || (
+      before !== undefined && after !== undefined &&
+      before.length === after.length && before.every((property, index) => property === after[index])
+    );
+  });
+}
+
+/** Sections build each field's options inline, so a section that re-renders
+ * for one live value would otherwise re-render every field it holds. */
+function sameInspectorStyleFieldProps<Props extends { options?: DesignLayoutFieldOptions }>(
+  left: Readonly<Props>,
+  right: Readonly<Props>,
+): boolean {
+  const keys = Object.keys(left) as (keyof Props)[];
+  if (keys.length !== Object.keys(right).length) return false;
+  return keys.every((key) =>
+    Object.hasOwn(right, key) &&
+    (key === "options" ? sameFieldOptions(left.options, right.options) : Object.is(left[key], right[key])),
+  );
+}
 
 /** A Mixed field's steps as per-layer writes: geometry by an amount from
  * each layer's own box, a style from each layer's own value in its own unit.

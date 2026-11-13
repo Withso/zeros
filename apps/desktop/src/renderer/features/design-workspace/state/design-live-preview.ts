@@ -1,6 +1,6 @@
 import { designBackgroundWork } from "./design-background-work";
 import { create } from "zustand";
-import { useMemo } from "react";
+import { useShallow } from "zustand/react/shallow";
 import {
   designHistoryPresentation,
   useDesignHistoryPresentation,
@@ -327,22 +327,32 @@ export function designLivePreviewValue(
     : useDesignLivePreviewStore.getState().byOwner[key]?.styles[property];
 }
 
+/** One owner's live styles. With `reads`, only the properties it accepts, and
+ * the same reference until one of those changes: a section that reads layout
+ * does not re-render for every tick of a colour or opacity scrub. */
 export function useDesignLivePreviewStyles(
   workspaceId: string,
   frame: string,
   nodeId: string,
+  reads?: (property: string) => boolean,
 ) {
   const key = ownerKey(workspaceId, frame, nodeId);
-  const entry = useDesignLivePreviewStore((state) => state.byOwner[key]);
   const history = useDesignHistoryPresentation(workspaceId);
   const cutoff = historyCutoff(history, frame, nodeId);
-  return useMemo(() => {
-    if (!entry || cutoff === undefined) return entry?.styles;
-    const styles = Object.entries(entry.styles);
-    const visible = styles.filter(([property]) => !supersededByHistory(key, property, cutoff));
-    if (visible.length === styles.length) return entry.styles;
-    return visible.length ? Object.fromEntries(visible) : undefined;
-  }, [entry, key, cutoff]);
+  // The history cutoff is applied inside the selector: re-entering a value
+  // after Undo leaves the styles unchanged but makes them visible again.
+  return useDesignLivePreviewStore(
+    useShallow((state) => {
+      const styles = state.byOwner[key]?.styles;
+      if (!styles || (!reads && cutoff === undefined)) return styles;
+      const entries = Object.entries(styles);
+      const visible = entries.filter(
+        ([property]) => (!reads || reads(property)) && !supersededByHistory(key, property, cutoff),
+      );
+      if (visible.length === entries.length) return styles;
+      return visible.length ? Object.fromEntries(visible) : undefined;
+    }),
+  );
 }
 
 export function useDesignLivePreviewValue(
