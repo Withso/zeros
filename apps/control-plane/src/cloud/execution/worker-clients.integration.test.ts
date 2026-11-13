@@ -126,9 +126,11 @@ database("real acting-user worker clients against HTTP routes and PostgreSQL", (
     }
   });
 
-  it("keeps existing feature flags on the WebSocket configuration path too", async () => {
-    const current = await f.cp.store.workerSession(f.token, worker.bootId);
-    const frame = await f.cp.workers.config(current!);
+  it("keeps existing feature flags after a negotiated configuration refresh", async () => {
+    const headers = calls.find(call => call.path.endsWith("/hello"))!.headers;
+    const response = await f.app.request("/v2/cloud/worker/config", { headers });
+    expect(response.status).toBe(200);
+    const frame = (await response.json()).config;
     expect(clients.protocol.CloudV2ControlFrameSchema.parse(frame)).toMatchObject({ actingUser: 1, notifyUser: 1, promptOutbox: 1 });
   });
 
