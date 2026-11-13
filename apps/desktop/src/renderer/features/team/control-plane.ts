@@ -50,6 +50,8 @@ export type OrganizationSummary = {
   teamCapabilities: { multiple: false; canCreate: false };
   /** Absent for Personal and from an older control plane. */
   seat?: OrganizationSeat;
+  /** §16: "membership" once every member may open the organization's cloud workspaces; absent from an older control plane. */
+  workspaceAccess?: "membership";
 };
 export type TeamSummary = OrganizationSummary;
 

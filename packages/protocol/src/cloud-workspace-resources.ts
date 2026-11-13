@@ -3,6 +3,10 @@ import { z } from "zod";
 /** WORKSPACE_REQUEST `workspace.resources`, answered only by a cloud worker
  * that advertises this ENGINE_READY capability. Sampled on request. */
 export const CLOUD_WORKSPACE_RESOURCES_CAPABILITY = "workspace-resources-v1";
+/** R1 push-not-poll: `workspace.resources` with `watch: true` answers once, then the worker pushes WORKSPACE_RESOURCES
+ * to that client every CLOUD_WORKSPACE_RESOURCES_PUSH_MS until `watch: false` or the client closes. */
+export const CLOUD_WORKSPACE_RESOURCES_WATCH_CAPABILITY = "workspace-resources-watch-v1";
+export const CLOUD_WORKSPACE_RESOURCES_PUSH_MS = 5_000;
 
 const percent = z.number().min(0).max(100);
 const bytes = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);

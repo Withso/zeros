@@ -233,6 +233,14 @@ export interface DesignFramesChange {
   all: boolean;
 }
 
+/** A cloud worker's pushed CPU/memory/disk sample for a client watching `workspace.resources` (R1). */
+export interface WorkspaceResourcesMessage extends BaseMessage {
+  type: "WORKSPACE_RESOURCES";
+  /** Set by the desktop's cloud wire to the workspace key; absent on the worker's own frame. */
+  workspaceId?: string;
+  result: unknown;
+}
+
 export interface DbChangedMessage extends BaseMessage {
   type: "DB_CHANGED";
   kinds: string[];
@@ -1354,6 +1362,7 @@ export type BridgeMessage =
   | HeartbeatMessage
   | EngineReadyMessage
   | DbChangedMessage
+  | WorkspaceResourcesMessage
   | GithubTokenSetMessage
   | GithubTokenChangedMessage
   | GithubCredentialChangedMessage

@@ -5,7 +5,7 @@
 // stay until an admin removes them, and every edit waits for the next build.
 // Older builds stay in the history and can be made active again, which
 // rebuilds them at the same commits.
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useState } from "react";
 import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import { ChevronDown, ChevronUp, CircleCheck, CircleMinus, CircleX, LoaderCircle, TriangleAlert, X } from "lucide-react";
 import { Button } from "../../shared/ui";
@@ -22,6 +22,7 @@ import {
   getCloudV2Computer, type CloudV2Build, type CloudV2RepositoryDraft,
 } from "../../platform/cloud-v2";
 import { computerChanges, computerStatus, editableRepositories, historyNote, relativeAge, type ComputerStatus } from "./cloud-computer-model";
+import { useFocusRefresh } from "./use-focus-refresh";
 export { prefetchCloudComputer } from "./cloud-computer-store";
 
 export function CloudComputerPanel({ surfaceActive = true, openCloudRepository }: {
@@ -46,11 +47,8 @@ function CloudComputerScope({ userId, organizationId, canManage, active, openRep
   const latestBuild = builds[0];
   const running = latestBuild?.state === "queued" || latestBuild?.state === "building";
   const refresh = computer.refresh;
-  useEffect(() => {
-    if (!active || !running) return;
-    const timer = setInterval(refresh, 3000);
-    return () => clearInterval(timer);
-  }, [active, running, refresh]);
+  // R1: a build takes minutes; re-read on focus and every 60 s while it runs (was every 3 s).
+  useFocusRefresh(active && running, refresh);
 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);

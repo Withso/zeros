@@ -230,6 +230,8 @@ export function cloudIncoming(
     out.terminals = message.terminals.map((row) =>
       mapFields(scope, record(row), "in"),
     );
+  // R1: a watching client's pushed resources sample names its workspace by the desktop key.
+  if (message.type === "WORKSPACE_RESOURCES") out.workspaceId = cloudWorkspaceKey(scope);
   if (message.type === "DB_CHANGED") {
     out.workspaceId = cloudWorkspaceKey(scope);
     out.workspaceIds = [cloudWorkspaceKey(scope)];

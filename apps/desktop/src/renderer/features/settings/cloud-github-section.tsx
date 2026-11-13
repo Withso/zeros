@@ -20,6 +20,7 @@ import {
   readCloudGithubConnection,
 } from "../../platform/cloud-github-connection";
 import { cloudGithubHealthCopy } from "./cloud-github-health";
+import { useFocusRefresh } from "./use-focus-refresh";
 
 const methods = ["github-app", "pat"] as const;
 const label = (method: CloudGithubMethod) =>
@@ -85,25 +86,23 @@ export function CloudGithubSection({
       }
     }
   };
+  // R1: the sign-in finishes in the browser; re-read when the person comes back (focus), else every 60 s.
+  useFocusRefresh(surfaceActive && !!waiting, () => {
+    if (!waiting || Date.now() >= waiting.expires) return;
+    void cloudGithubConnectionCache
+      .load(key, () => readCloudGithubConnection(userId, organizationId), {
+        maxAgeMs: 0,
+      })
+      .catch(() => {});
+  });
   useEffect(() => {
     if (!surfaceActive || !waiting) return;
-    const refresh = () => {
-      if (document.visibilityState === "hidden") return;
-      if (Date.now() >= waiting.expires) {
-        setWaiting(null);
-        setError("GitHub sign-in timed out. Start again to reconnect.");
-        return;
-      }
-      void cloudGithubConnectionCache
-        .load(key, () => readCloudGithubConnection(userId, organizationId), {
-          maxAgeMs: 0,
-        })
-        .catch(() => {});
-    };
-    const timer = window.setInterval(refresh, 2500);
-    refresh();
-    return () => window.clearInterval(timer);
-  }, [key, organizationId, surfaceActive, userId, waiting]);
+    const timer = window.setTimeout(() => {
+      setWaiting(null);
+      setError("GitHub sign-in timed out. Start again to reconnect.");
+    }, Math.max(0, waiting.expires - Date.now()));
+    return () => window.clearTimeout(timer);
+  }, [surfaceActive, waiting]);
   useEffect(() => {
     if (
       waiting &&

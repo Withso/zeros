@@ -5,12 +5,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const bridge = vi.hoisted(() => ({
   supports: new Set<string>(), requests: [] as Array<{ message: unknown; timeout: unknown }>,
+  handlers: new Set<(message: unknown) => void>(),
   reply: (async (_message: unknown) => ({ type: "WORKSPACE_RESPONSE", op: "workspace.resources", result: {} })) as (message: unknown) => Promise<unknown>,
 }));
 vi.mock("../bridge/active-bridge", () => ({
   getActiveBridge: () => ({
     supportsEngineCapability: (capability: string, workspaceId: string) => bridge.supports.has(`${capability} ${workspaceId}`),
     requestConnected: (message: unknown, timeout: unknown) => { bridge.requests.push({ message, timeout }); return bridge.reply(message); },
+    on: (type: string, handler: (message: unknown) => void) => {
+      if (type !== "WORKSPACE_RESOURCES") return () => {};
+      bridge.handlers.add(handler); return () => bridge.handlers.delete(handler);
+    },
   }),
 }));
 import { readCloudWorkspaceResources, useCloudWorkspaceResources } from "../cloud-workspace-resources";
@@ -29,6 +34,29 @@ beforeEach(() => {
 afterEach(() => { act(() => roots.splice(0).forEach(root => root.unmount())); vi.useRealTimers(); });
 
 describe("cloud workspace resources", () => {
+  it("R1: a watch-capable worker is asked once with watch:true, then its pushes update the sample; 60 s fallback; watch:false on close", async () => {
+    bridge.supports.add(`workspace-resources-watch-v1 ${key(a)}`);
+    let seen: unknown = null;
+    function Probe({ active }: { active: boolean }) { seen = useCloudWorkspaceResources(a, active); return null; }
+    const root = createRoot(document.createElement("div")); roots.push(root);
+    await act(async () => root.render(createElement(Probe, { active: true })));
+    expect(bridge.requests).toEqual([{ message: { type: "WORKSPACE_REQUEST", op: "workspace.resources", params: { workspaceId: key(a), watch: true } }, timeout: 10_000 }]);
+    expect(seen).toEqual(sample(12));
+    act(() => { for (const handler of bridge.handlers) handler({ type: "WORKSPACE_RESOURCES", workspaceId: key(a), result: sample(40) }); });
+    expect(seen).toEqual(sample(40));
+    act(() => { for (const handler of bridge.handlers) handler({ type: "WORKSPACE_RESOURCES", workspaceId: key(b), result: sample(90) }); });
+    act(() => { for (const handler of bridge.handlers) handler({ type: "WORKSPACE_RESOURCES", workspaceId: key(a), result: { cpu: "bad" } }); });
+    expect(seen).toEqual(sample(40));
+    await act(async () => { await vi.advanceTimersByTimeAsync(59_000); });
+    expect(bridge.requests).toHaveLength(1);
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+    expect(bridge.requests).toHaveLength(2);
+    await act(async () => root.render(createElement(Probe, { active: false })));
+    expect(bridge.requests.at(-1)).toEqual({ message: { type: "WORKSPACE_REQUEST", op: "workspace.resources", params: { workspaceId: key(a), watch: false } }, timeout: 10_000 });
+    expect(bridge.handlers.size).toBe(0);
+  });
+
+
   it("asks a worker that advertises the capability, with the workspace's own key", async () => {
     await expect(readCloudWorkspaceResources(a)).resolves.toEqual(sample(12));
     expect(bridge.requests).toEqual([{ message: { type: "WORKSPACE_REQUEST", op: "workspace.resources", params: { workspaceId: key(a) } }, timeout: 10_000 }]);

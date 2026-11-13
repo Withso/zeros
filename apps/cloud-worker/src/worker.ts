@@ -3,7 +3,7 @@ import { access, lstat, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { CloudV2ClientOperationSchema, CloudV2ControlFrameSchema, type CloudV2BootCleanRefusal, type CloudV2ClientLease, CLOUD_V2_RELAY_PROTOCOL, CLOUD_WORKSPACE_RESOURCES_CAPABILITY, type CloudV2ControlFrame, type CloudV2SetupStatus, type CloudV2WorkerFrame, type RuntimeMcpServer } from "@zeros/protocol/cloud-v2-relay";
+import { CloudV2ClientOperationSchema, CloudV2ControlFrameSchema, type CloudV2BootCleanRefusal, type CloudV2ClientLease, CLOUD_V2_RELAY_PROTOCOL, CLOUD_WORKSPACE_RESOURCES_CAPABILITY, CLOUD_WORKSPACE_RESOURCES_PUSH_MS, CLOUD_WORKSPACE_RESOURCES_WATCH_CAPABILITY, type CloudV2ControlFrame, type CloudV2SetupStatus, type CloudV2WorkerFrame, type RuntimeMcpServer } from "@zeros/protocol/cloud-v2-relay";
 import { CloudV2PromptPullReplySchema } from "@zeros/protocol/cloud-v2-prompts";
 import { createMessage, type BridgeMessage, type ClientOperationFailure } from "@zeros/protocol/messages";
 import { safeParseClientBridgeMessage } from "@zeros/protocol/schemas";
@@ -81,6 +81,8 @@ interface WorkerOptions {
   gitAskpassPath?: string;
   githubFetch?: typeof fetch;
   workspaceServices?: WorkspaceServiceOptions;
+  /** R1: how often a watching client gets a pushed resources sample (tests shorten it). */
+  resourcesPushMs?: number;
   onError?: (code: "configuration" | "storage" | "transport") => void;
   onTiming?: TimingObserver;
   /** Closed configuration paths only; never values or user-defined keys. */
@@ -328,6 +330,8 @@ export class CloudWorker {
   }
 
   async dispose(): Promise<void> {
+    for (const timer of this.resourceWatchers.values()) clearInterval(timer);
+    this.resourceWatchers.clear();
     if (this.disposed) return;
     this.disposed = true; this.runtimeUpdater?.stop(); this.watchdog?.stop(); clearInterval(this.heartbeat); this.tokens.dispose(); this.githubCredentials.invalidate();
     const workspaceTools = this.workspaceMcp.dispose();
@@ -418,6 +422,7 @@ export class CloudWorker {
       const client = this.clients.get(message.clientId); if (client) this.terminals?.detach(client);
       if (client?.passive) this.options.onSync?.(`sync served client=${client.id.slice(0, 8)} reads=${client.served ?? 0}`);
       if (client?.contextId) this.contexts?.release(client.contextId);
+      clearInterval(this.resourceWatchers.get(message.clientId)); this.resourceWatchers.delete(message.clientId);
       this.clients.delete(message.clientId); return;
     }
     if (this.stopping) return;
@@ -497,6 +502,13 @@ export class CloudWorker {
     if (frame.type.startsWith("PTY_")) {
       if (frame.type !== "PTY_LIST") await this.touchCheckout();
       return this.terminals!.handle(client, frame);
+    }
+    if (frame.type === "WORKSPACE_REQUEST" && frame.op === "workspace.resources" && typeof (frame.params as { watch?: unknown } | undefined)?.watch === "boolean") {
+      this.watchResources(client, (frame.params as { watch: boolean }).watch);
+      if (!(frame.params as { watch: boolean }).watch) {
+        await client.send(createMessage({ type: "WORKSPACE_RESPONSE", source: "engine", requestId: frame.id, op: frame.op, result: { watching: false } }));
+        return;
+      }
     }
     if (frame.type === "WORKSPACE_REQUEST") {
       const mutation = frame.op === "file.write" || frame.op === "workspace.prepareGithub" ||
@@ -864,6 +876,26 @@ export class CloudWorker {
     const hint = createMessage({ type: "DB_CHANGED", source: "engine", kinds: [SYNC_HINT_KIND], workspaceIds: [this.scope.workspace.id] });
     for (const client of this.clients.values()) if (client.passive) void client.send(hint).catch(() => {});
   }
+  /** R1 push-not-poll: one pushed sample stream per watching client (bounded), stopped by watch:false, close or dispose. */
+  private readonly resourceWatchers = new Map<string, ReturnType<typeof setInterval>>();
+  private watchResources(client: Client, watch: boolean): void {
+    clearInterval(this.resourceWatchers.get(client.id)); this.resourceWatchers.delete(client.id);
+    if (!watch || this.resourceWatchers.size >= 32) return;
+    let sampling = false;
+    const timer = setInterval(() => {
+      if (sampling) return;
+      if (this.clients.get(client.id) !== client || client.rejected || this.disposed || this.stopping) {
+        clearInterval(timer); if (this.resourceWatchers.get(client.id) === timer) this.resourceWatchers.delete(client.id); return;
+      }
+      sampling = true;
+      void this.workspace!.handle("workspace.resources", {})
+        .then(result => client.send(createMessage({ type: "WORKSPACE_RESOURCES", source: "engine", result })))
+        .catch(() => {}).finally(() => { sampling = false; });
+    }, this.options.resourcesPushMs ?? CLOUD_WORKSPACE_RESOURCES_PUSH_MS);
+    timer.unref?.();
+    this.resourceWatchers.set(client.id, timer);
+  }
+
   /** A context's Git author env; its include file is removed when the context ends. */
   private contextGit(contextId: string, identity: Parameters<ContextCommitIdentities["environment"]>[1]): Record<string, string> {
     const env = this.commitIdentities.environment(contextId, identity);
@@ -878,7 +910,7 @@ export class CloudWorker {
   private readyFrame(): BridgeMessage {
     return createMessage({ type: "ENGINE_READY", source: "engine", version: "0.0.0", root: "", framework: "cloud", port: 0,
       protocolVersion: PROTOCOL_VERSION, minProtocolVersion: MIN_SUPPORTED_PROTOCOL, instanceId: this.instanceId,
-      capabilities: [...(this.reviews?.enabled ? ["code-review-v1"] : []), CLOUD_WORKSPACE_RESOURCES_CAPABILITY, SYNC_CAPABILITY, SYNC_BATCH_CAPABILITY, SYNC_HAVE_V2_CAPABILITY] });
+      capabilities: [...(this.reviews?.enabled ? ["code-review-v1"] : []), CLOUD_WORKSPACE_RESOURCES_CAPABILITY, CLOUD_WORKSPACE_RESOURCES_WATCH_CAPABILITY, SYNC_CAPABILITY, SYNC_BATCH_CAPABILITY, SYNC_HAVE_V2_CAPABILITY] });
   }
   private async touchCheckout(): Promise<void> {
     await this.checkoutRefresh?.touch();
