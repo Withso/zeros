@@ -136,10 +136,10 @@ export function designComponentOptionsFixBrief(input: {
   directory: string;
   frame: string;
   title: string;
-  shows: "last-good" | "defaults";
+  shows: "last-good" | "defaults" | "nothing";
   problems: readonly { line: number; message: string }[];
 }): DesignAgentBrief {
-  const shows = input.shows === "last-good" ? "its last good render" : "the component's defaults";
+  const shows = input.shows === "last-good" ? "its last good render" : input.shows === "nothing" ? "nothing in its place" : "the component's defaults";
   return {
     label: `Fix the options of ${input.title}`,
     text: [

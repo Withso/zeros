@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { ZerosEngine } from "../zeros-engine";
 import type { TransportClient } from "../transport/types";
 import { DESIGN_CANVAS_ITEMS_CAPABILITY } from "@zeros/protocol/design-canvas-items";
-import { DESIGN_CATALOG_READ_CAPABILITY, DESIGN_CATALOG_WIDE_BATCHES_CAPABILITY, DESIGN_COMPONENT_OPTIONS_CAPABILITY, DESIGN_FRAMES_CHANGES_CAPABILITY, DESIGN_LAZY_PREPARATION_CAPABILITY, DESIGN_MUTATION_SNAPSHOTS_CAPABILITY, DESIGN_PAGE_SCOPED_MUTATIONS_CAPABILITY } from "@zeros/protocol/design-catalog";
+import { DESIGN_CATALOG_READ_CAPABILITY, DESIGN_CATALOG_WIDE_BATCHES_CAPABILITY, DESIGN_COMPONENT_OPTIONS_CAPABILITY, DESIGN_FRAMES_CHANGES_CAPABILITY, DESIGN_FRAMES_LINT_CAPABILITY, DESIGN_FRAMES_PREPARE_LINT_CAPABILITY, DESIGN_LAZY_PREPARATION_CAPABILITY, DESIGN_OPTIONS_SHOW_NOTHING_CAPABILITY, DESIGN_MUTATION_SNAPSHOTS_CAPABILITY, DESIGN_PAGE_SCOPED_MUTATIONS_CAPABILITY } from "@zeros/protocol/design-catalog";
 import { DESIGN_PREVIEW_JOBS_CAPABILITY, DESIGN_THUMBNAILS_STORE_CAPABILITY } from "@zeros/protocol/design-capture";
 import { DESIGN_SOURCE_SURFACES_CAPABILITY } from "@zeros/protocol/design-surface";
 import { DESIGN_COPY_PLACEMENT_CAPABILITY } from "@zeros/protocol/design-relocation";
@@ -39,6 +39,8 @@ describe("Design catalog capability advertisement", () => {
           capabilities: [DESIGN_CATALOG_READ_CAPABILITY, CONVERSATION_REPLAY_CAPABILITY, ...(kind === "local" ? [DESIGN_PREVIEW_JOBS_CAPABILITY, DESIGN_LAZY_PREPARATION_CAPABILITY, DESIGN_SOURCE_SURFACES_CAPABILITY,
             // Component options ride the prepared frame record, which only a Local engine serves.
             DESIGN_COMPONENT_OPTIONS_CAPABILITY,
+            // Lint rows ride the same Local preparation reply, or a Local lint read.
+            DESIGN_FRAMES_PREPARE_LINT_CAPABILITY, DESIGN_FRAMES_LINT_CAPABILITY, DESIGN_OPTIONS_SHOW_NOTHING_CAPABILITY,
             DESIGN_COPY_PLACEMENT_CAPABILITY, // Stored thumbnails need no capture host; batch rendering does, and none runs here.
             DESIGN_MUTATION_SNAPSHOTS_CAPABILITY, DESIGN_PAGE_SCOPED_MUTATIONS_CAPABILITY, DESIGN_THUMBNAILS_STORE_CAPABILITY, DESIGN_FRAMES_CHANGES_CAPABILITY,
             // Canvas items are written through Local Design routes only.

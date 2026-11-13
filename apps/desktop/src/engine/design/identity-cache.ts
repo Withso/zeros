@@ -19,7 +19,7 @@ export interface DesignFrameIdentity {
   layerCount: number;
   /** A frame that declares options. Derived from the frame's source; a read
    * that showed a last good render is never stored, so `notApplied` here is
-   * at most "defaults". */
+   * "defaults" or "nothing", never "last-good". */
   component?: DesignFrameComponent;
   /** The frame's own component instances, from the same preparation. */
   instances?: DesignFrameInstances;

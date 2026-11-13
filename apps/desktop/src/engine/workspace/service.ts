@@ -24,6 +24,7 @@ import {
   type DesignWorkspaceRouteHost,
   type DesignReadWorkspace,
 } from "../design/routes";
+import { designReplyCarriesFrames, designReplyForOlderRenderer, takeDesignShowsNothing } from "../design/options-shows-compat";
 import {
   MAX_DESIGN_HISTORY_WORKSPACES,
   pruneWorkspaceDesignHistory,
@@ -2541,6 +2542,8 @@ export class WorkspaceService {
       hostLocalResources?: boolean;
       gitMutationAdmitted?: boolean;
       designDirectoryResolved?: boolean;
+      /** The Design reply shape is settled by an outer call. */
+      designReplyShaped?: boolean;
       catalogAdmission?: DesignCatalogAdmission;
       /** Serialize transcript resets with provider admission/close. The service
        * decides whether history changes; the engine retires its live context. */
@@ -2551,6 +2554,11 @@ export class WorkspaceService {
       previewAdmission?: DesignCatalogAdmission;
     } = {},
   ): Promise<unknown> {
+    if (designReplyCarriesFrames(op) && !opts.designReplyShaped) {
+      const request = takeDesignShowsNothing(params);
+      const result = await this.handle(op, request.params, { ...opts, designReplyShaped: true });
+      return request.negotiated ? result : designReplyForOlderRenderer(result);
+    }
     const remote = opts.remote === true;
     const hostLocalResources = opts.hostLocalResources ?? !remote;
     const lifecycleMutationWorkspaceId = this.lifecycleMutationWorkspaceId(

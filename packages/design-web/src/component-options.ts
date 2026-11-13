@@ -30,19 +30,13 @@ interface Declared {
 
 function declaredIn(source: string, file: string): Declared {
   const document = parse(source, { sourceCodeLocationInfo: true });
-  const pending: DefaultTreeAdapterTypes.ParentNode[] = [document];
-  let template: DefaultTreeAdapterTypes.Template | undefined;
-  while (pending.length && !template) {
-    const node = pending.shift()!;
-    for (const child of node.childNodes) {
-      if (!("tagName" in child)) continue;
-      if (child.tagName === "template" && child.attrs.some((attribute) => attribute.name === "data-zd-options")) {
-        template = child as DefaultTreeAdapterTypes.Template;
-        break;
-      }
-      pending.push(child);
-    }
-  }
+  const isElement = (node: DefaultTreeAdapterTypes.ChildNode): node is Element => "tagName" in node;
+  // Only <head> declares options, as the engine reads them; a template
+  // elsewhere is ignored there and must not be written to here.
+  const head = document.childNodes.find(isElement)?.childNodes.find((node): node is Element => isElement(node) && node.tagName === "head");
+  const template = head?.childNodes.find((child) =>
+    isElement(child) && child.tagName === "template" && child.attrs.some((attribute) => attribute.name === "data-zd-options"),
+  ) as DefaultTreeAdapterTypes.Template | undefined;
   if (!template) throw new Error(`${file} declares no options.`);
   const elements = template.content.childNodes.filter((child): child is Element => "tagName" in child);
   const read: ComponentDeclarationElement[] = elements.map((element) => ({
@@ -90,7 +84,9 @@ export function mutateComponentOption(
   }
   if (input.variant === null) {
     if (raw === null) throw new Error("A default cannot be removed; set another value.");
-    const element = elements.find((entry) => entry.tagName === "zd-option" && nameOf(entry) === input.option)!;
+    // The declaration keeps the first valid <zd-option> of a name; an earlier
+    // invalid one with that name is ignored, so the write goes where it kept.
+    const element = elements.find((entry) => entry.tagName === "zd-option" && entry.sourceCodeLocation?.startOffset === option.offset)!;
     return setAttribute(source, element, "default", raw);
   }
   const variant = elements.find((entry) => entry.tagName === "zd-variant" && nameOf(entry) === input.variant);
@@ -131,7 +127,8 @@ export function appendComponentVariant(
 
 /** Whether a file declares options (so its instances need explicit values). */
 export function designSourceDeclaresComponentOptions(source: string): boolean {
-  return /<template\b[^>]*\sdata-zd-options\b/i.test(source);
+  const end = source.search(/<\/head\b|<body\b/i);
+  return /<template\b[^>]*\sdata-zd-options\b/i.test(end < 0 ? source : source.slice(0, end));
 }
 
 /** The declaration in a component file, for checking instance values. */

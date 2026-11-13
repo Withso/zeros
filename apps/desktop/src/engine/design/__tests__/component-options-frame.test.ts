@@ -90,11 +90,13 @@ describe("a component frame whose options do not apply", () => {
     await rm(root, { recursive: true, force: true });
   });
 
-  it("says it shows the component's defaults when this session has no good render", async () => {
+  it("says it shows nothing when its own template fails and this session has no good render", async () => {
     const frame = await createDesignFrame(root, { title: "Chat composer" });
     await writeFile(path.join(root, DESIGN_DIRECTORY_NAME, frame.file), MAIN.replace("{{ label }}", "{{ missing }}"));
     const listed = (await readDesignWorkspaceSnapshot(root)).frames.find((candidate) => candidate.file === frame.file)!;
-    expect(listed.component?.notApplied).toBe("defaults");
+    expect(listed.component?.notApplied).toBe("nothing");
+    const shown = await readDesignFrame(root, frame.file, 4);
+    expect(shown.srcDoc).not.toContain("{{");
   });
 });
 

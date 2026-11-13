@@ -4,8 +4,8 @@ import {
   designMovementGuardSchema,
   designRelocationSchema,
 } from "@zeros/protocol/design-relocation";
-import { DESIGN_CATALOG_BATCH_ENTRIES, designCatalogReadSchema, designNavigationReadSchema, designFramesPrepareSchema, designPageHashesSchema, type DesignCatalogRead, type DesignCatalogReply, type DesignPageHashes } from "@zeros/protocol/design-catalog";
-import { prepareDesignNavigationFrames } from "./document";
+import { DESIGN_CATALOG_BATCH_ENTRIES, designCatalogReadSchema, designNavigationReadSchema, designFramesLintSchema, designFramesPrepareSchema, designPageHashesSchema, type DesignCatalogRead, type DesignCatalogReply, type DesignPageHashes } from "@zeros/protocol/design-catalog";
+import { lintDesignFramesAtVersions, prepareDesignNavigationFrames } from "./document";
 import type { DesignCatalogAdmission } from "./catalog";
 import { encodeDesignFramePath, isDesignComponentVariantName } from "@zeros/protocol/design-path";
 import { DESIGN_MAX_FRAMES_PER_PAGE, designPageCreateInputSchema, designPageDeleteInputSchema, designPageIdSchema, designPageRenameInputSchema } from "@zeros/protocol/design-pages";
@@ -255,6 +255,7 @@ export interface DesignWorkspaceRouteHost {
 const DESIGN_WORKSPACE_ROUTES = new Set([
   "design.navigation.read",
   "design.frames.prepare",
+  "design.frames.lint",
   "design.catalog.read",
   "design.capture",
   "design.preview",
@@ -366,7 +367,8 @@ export async function handleDesignWorkspaceRoute(
       if (remote || !hostLocalResources) throw new Error("Design preparation requires a Local workspace.");
       const input = designFramesPrepareSchema.parse(params);
       const result = await host.withDesignReadWorkspace(input.workspaceId, remote, ({ root }) =>
-        prepareDesignNavigationFrames(root, input.catalogRevision, input.files, input.directoryId));
+        prepareDesignNavigationFrames(root, input.catalogRevision, input.files, input.directoryId,
+          input.lintFiles ? { lintFiles: input.lintFiles } : {}));
       // Older preparation decoders reject unknown fields. Keep their exact
       // reply shape; a new renderer opts in after capability negotiation.
       if (input.surfaceCosts && input.componentOptions) return result;
@@ -376,6 +378,12 @@ export async function handleDesignWorkspaceRoute(
         ...(input.componentOptions && component ? { component } : {}),
         ...(input.componentOptions && instances ? { instances } : {}),
       })) };
+    }
+    case "design.frames.lint": {
+      if (remote || !hostLocalResources) throw new Error("Design lint requires a Local workspace.");
+      const input = designFramesLintSchema.parse(params);
+      return host.withDesignReadWorkspace(input.workspaceId, remote, ({ root }) =>
+        lintDesignFramesAtVersions(root, input.directoryId, input.frames));
     }
     case "design.catalog.read": {
       if (!options.catalogAdmission) throw new GitError({ code: "REMOTE_RESTRICTED", message: "Design catalog requires a live connection." });

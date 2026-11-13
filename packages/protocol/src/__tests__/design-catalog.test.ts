@@ -9,7 +9,29 @@ import {
   designCatalogBatchSchema,
   designCatalogReadSchema,
   designCatalogReplySchema,
+  parseDesignFramesPrepareReply,
+  designFramesLintReplySchema,
+  designFramesLintSchema,
 } from "../design-catalog";
+
+describe("what a frame whose options do not apply says it shows", () => {
+  const frame = { file: "page/a.html", frameId: "a", pageId: "page", title: "A", kind: "frame", x: 0, y: 0, width: 1, height: 1, z: 0,
+    sourceVersion: "b".repeat(24), nodeCount: 1, modifiedAt: 0 };
+  const reply = (notApplied: string) => ({ directoryId: "design_test", catalogRevision: "a".repeat(64), errors: [], frames: [
+    { ...frame, component: { elements: [], reach: {}, notApplied } },
+    { ...frame, file: "page/b.html", frameId: "b", instances: { key: "0".repeat(16), components: {}, hosts: {}, notApplied } }] });
+  it("accepts nothing only from a reply the renderer negotiated it for", () => {
+    const negotiated = parseDesignFramesPrepareReply(reply("nothing"), { optionsShowNothing: true });
+    expect(negotiated.errors).toEqual([]);
+    expect(negotiated.frames.map((candidate) => candidate.component?.notApplied ?? candidate.instances?.notApplied)).toEqual(["nothing", "nothing"]);
+    const legacy = parseDesignFramesPrepareReply(reply("nothing"));
+    expect(legacy.frames).toEqual([]);
+    expect(legacy.errors.map((error) => error.file)).toEqual(["page/a.html", "page/b.html"]);
+    for (const shows of ["last-good", "defaults"])
+      expect(parseDesignFramesPrepareReply(reply(shows)).frames).toHaveLength(2);
+    expect(parseDesignFramesPrepareReply(reply("everything"), { optionsShowNothing: true }).frames).toEqual([]);
+  });
+});
 
 const batch = {
   kind: "design-catalog",
@@ -148,5 +170,25 @@ describe("a component record past the declaration limits", () => {
       designFrameInstanceComponentSchema);
     expect(placed).toMatchObject({ elements: [], reach: {}, exceeds: "elements", file: longestFile });
     expect(designFrameInstanceComponentSchema.safeParse(placed).success).toBe(true);
+  });
+});
+
+describe("design.frames.lint", () => {
+  const version = "b".repeat(24);
+  const request = { workspaceId: "local", directoryId: "design_test", frames: [{ file: "page/a.html", sourceVersion: version }] };
+
+  it("names each frame once, at an exact source version, at most 16 a request", () => {
+    expect(designFramesLintSchema.parse(request)).toEqual(request);
+    for (const frames of [[], [...request.frames, ...request.frames], [{ file: "page/a.html", sourceVersion: "not-a-version" }],
+      Array.from({ length: 17 }, (_, index) => ({ file: `page/f${index}.html`, sourceVersion: version }))])
+      expect(designFramesLintSchema.safeParse({ ...request, frames }).success).toBe(false);
+    expect(designFramesLintSchema.safeParse({ ...request, lintFiles: ["page/a.html"] }).success).toBe(false);
+  });
+
+  it("replies with the frames it linted and their rows only", () => {
+    const reply = { frames: request.frames, checkedFiles: ["page/a.html"],
+      violations: [{ ruleId: "unknown-token", severity: "warning", message: "Unknown", file: "page/a.html", line: 1, column: 1 }] };
+    expect(designFramesLintReplySchema.parse(reply)).toEqual(reply);
+    expect(designFramesLintReplySchema.safeParse({ ...reply, workspacePath: "/x" }).success).toBe(false);
   });
 });

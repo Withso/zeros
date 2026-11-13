@@ -1,7 +1,8 @@
 import { expect, it, vi } from "vitest";
-import { bridgeDesignPrepareFrames, bridgeDesignSetRuntimeAudit, rememberDesignDirectoryIdentity } from "../design-bridge";
+import { bridgeDesignLintFrames, bridgeDesignPrepareFrames, bridgeDesignSetRuntimeAudit, rememberDesignDirectoryIdentity } from "../design-bridge";
 import type { RuntimeClient } from "../ws-client";
-import { DESIGN_COMPONENT_OPTIONS_CAPABILITY, DESIGN_LAZY_PREPARATION_CAPABILITY, DESIGN_PREPARED_FRAME_INVALID_MESSAGE, designPreparedFrameSchema,
+import { DESIGN_COMPONENT_OPTIONS_CAPABILITY, DESIGN_FRAMES_LINT_CAPABILITY, DESIGN_FRAMES_PREPARE_LINT_CAPABILITY, DESIGN_LAZY_PREPARATION_CAPABILITY,
+  DESIGN_OPTIONS_SHOW_NOTHING_CAPABILITY, DESIGN_OPTIONS_SHOW_NOTHING_PARAM, DESIGN_PREPARED_FRAME_INVALID_MESSAGE, designPreparedFrameSchema,
   parseDesignFramesPrepareReply } from "@zeros/protocol/design-catalog";
 import { DESIGN_SOURCE_SURFACES_CAPABILITY } from "@zeros/protocol/design-surface";
 
@@ -40,6 +41,48 @@ it("negotiates and retains passive HTML costs through the actual preparation rep
   const bridge = client(value, true, true);
   await expect(bridgeDesignPrepareFrames(bridge as unknown as RuntimeClient, input)).resolves.toEqual(value);
   expect(bridge.request).toHaveBeenCalledWith({ type: "WORKSPACE_REQUEST", op: "design.frames.prepare", params: { ...input, surfaceCosts: true } }, 20_000);
+});
+it("asks for prepared lint rows only from an engine that negotiates them, and drops malformed rows", async () => {
+  const lint = { checkedFiles: [frame.file], violations: [{ ruleId: "unknown-token", severity: "warning", message: "Unknown", file: frame.file, line: 1, column: 1 }] };
+  const capable = { ...client({ ...reply(), lint }), supportsEngineCapability: (capability: string) =>
+    capability === DESIGN_LAZY_PREPARATION_CAPABILITY || capability === DESIGN_FRAMES_PREPARE_LINT_CAPABILITY };
+  await expect(bridgeDesignPrepareFrames(capable as unknown as RuntimeClient, { ...input, lintFiles: input.files })).resolves.toEqual({ ...reply(), lint });
+  expect(capable.request).toHaveBeenCalledWith({ type: "WORKSPACE_REQUEST", op: "design.frames.prepare", params: { ...input, lintFiles: input.files } }, 20_000);
+  const malformed = { ...capable, request: vi.fn(async () => ({ type: "WORKSPACE_RESPONSE", result: { ...reply(), lint: { checkedFiles: 42 } } })) };
+  await expect(bridgeDesignPrepareFrames(malformed as unknown as RuntimeClient, { ...input, lintFiles: input.files })).resolves.toEqual(reply());
+  const old = client(reply());
+  await bridgeDesignPrepareFrames(old as unknown as RuntimeClient, { ...input, lintFiles: input.files });
+  expect(old.request).toHaveBeenCalledWith({ type: "WORKSPACE_REQUEST", op: "design.frames.prepare", params: input }, 20_000);
+});
+it("asks for written frames' lint rows only from a Local engine that negotiates design.frames.lint, and admits only rows for the versions asked", async () => {
+  const asked = { workspaceId: "local", directoryId: input.directoryId, frames: [{ file: frame.file, sourceVersion: frame.sourceVersion }] };
+  const row = { ruleId: "unknown-token", severity: "warning", message: "Unknown", file: frame.file, line: 1, column: 1 };
+  const value = { frames: asked.frames, checkedFiles: [frame.file], violations: [row] };
+  const capable = (result: unknown) => ({ ...client(result), supportsEngineCapability: (capability: string) => capability === DESIGN_FRAMES_LINT_CAPABILITY });
+  const bridge = capable(value);
+  await expect(bridgeDesignLintFrames(bridge as unknown as RuntimeClient, asked)).resolves.toEqual(value);
+  expect(bridge.request).toHaveBeenCalledWith({ type: "WORKSPACE_REQUEST", op: "design.frames.lint", params: asked }, 20_000);
+  for (const foreign of [{ ...value, frames: [{ file: frame.file, sourceVersion: "c".repeat(24) }] },
+    { ...value, frames: [] }, { ...value, checkedFiles: [], frames: [], violations: [row] }])
+    await expect(bridgeDesignLintFrames(capable(foreign) as unknown as RuntimeClient, asked)).rejects.toThrow();
+  for (const [workspaceId, engine] of [["cloud://org/workspace", capable(value)], ["local", client(value)]] as const) {
+    await expect(bridgeDesignLintFrames(engine as unknown as RuntimeClient, { ...asked, workspaceId })).resolves.toBeNull();
+    expect(engine.request).not.toHaveBeenCalled();
+  }
+});
+it("is told a frame shows nothing only after negotiating it, and refuses such a record otherwise", async () => {
+  const component = { elements: [], reach: {}, notApplied: "nothing" as const };
+  const value = { ...reply(), frames: [{ ...frame, component }] };
+  const capable = { ...client(value, true, false, true), supportsEngineCapability: (capability: string) =>
+    [DESIGN_LAZY_PREPARATION_CAPABILITY, DESIGN_COMPONENT_OPTIONS_CAPABILITY, DESIGN_OPTIONS_SHOW_NOTHING_CAPABILITY].includes(capability) };
+  await expect(bridgeDesignPrepareFrames(capable as unknown as RuntimeClient, input)).resolves.toEqual(value);
+  expect(capable.request).toHaveBeenCalledWith({ type: "WORKSPACE_REQUEST", op: "design.frames.prepare",
+    params: { ...input, componentOptions: true, [DESIGN_OPTIONS_SHOW_NOTHING_PARAM]: true } }, 20_000);
+  const old = client(value, true, false, true);
+  await expect(bridgeDesignPrepareFrames(old as unknown as RuntimeClient, input)).resolves.toEqual(refused());
+  expect(old.request).toHaveBeenCalledWith({ type: "WORKSPACE_REQUEST", op: "design.frames.prepare", params: { ...input, componentOptions: true } }, 20_000);
+  // Cloud Design stays unavailable: nothing is negotiated there.
+  await expect(bridgeDesignPrepareFrames(capable as unknown as RuntimeClient, { ...input, workspaceId: "cloud://org/workspace" })).rejects.toThrow(/Local engine/);
 });
 it("prepares an exact Local directory without retargeting to a later selection", async () => {
   const bridge = client(reply());

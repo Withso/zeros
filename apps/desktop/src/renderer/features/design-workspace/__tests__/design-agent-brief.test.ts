@@ -120,5 +120,7 @@ describe("Design agent briefs", () => {
     expect(brief.text).toContain("- line 4: Unknown name widht.");
     expect(designComponentOptionsFixBrief({ directory: "D", frame: "a.html", title: "A", shows: "last-good", problems: [] }).text)
       .toContain("the frame shows its last good render. Run design validate to see why.");
+    expect(designComponentOptionsFixBrief({ directory: "D", frame: "a.html", title: "A", shows: "nothing", problems: [] }).text)
+      .toContain("could not be applied; the frame shows nothing in its place. Run design validate to see why.");
   });
 });

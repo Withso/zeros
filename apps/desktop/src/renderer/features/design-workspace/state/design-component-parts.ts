@@ -136,6 +136,7 @@ export function designFrameMissingComponents(frame: { instances?: DesignFrameIns
 export const DESIGN_OPTIONS_NOT_APPLIED_MESSAGES = Object.freeze({
   "last-good": "The frame shows its last good render.",
   defaults: "The frame shows the component's defaults.",
+  nothing: "The frame shows nothing in its place.",
 } satisfies Record<NonNullable<DesignFrameComponent["notApplied"]>, string>);
 
 const optionsProblemByInstances = new WeakMap<DesignFrameInstances, string | null>();

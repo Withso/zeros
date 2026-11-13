@@ -185,8 +185,8 @@ describe("a frame whose source cannot be read", () => {
 
 describe("a component whose options do not apply", () => {
   const canvasSource = readFileSync(resolve(process.cwd(), "apps/desktop/src/renderer/features/design-workspace/design-canvas.tsx"), "utf8");
-  const main = (notApplied?: "last-good" | "defaults") => ({ component: { elements: [], reach: {}, ...(notApplied ? { notApplied } : {}) } });
-  const hosting = (failed: boolean, notApplied?: "last-good" | "defaults"): { instances: DesignFrameInstances } => ({ instances: {
+  const main = (notApplied?: "last-good" | "defaults" | "nothing") => ({ component: { elements: [], reach: {}, ...(notApplied ? { notApplied } : {}) } });
+  const hosting = (failed: boolean, notApplied?: "last-good" | "defaults" | "nothing"): { instances: DesignFrameInstances } => ({ instances: {
     ...instances({ a: { component: "card", attributes: {}, ...(failed ? { failed: true as const } : {}) }, b: { component: "card", attributes: {} } }),
     ...(notApplied ? { notApplied } : {}),
   } });
@@ -196,6 +196,11 @@ describe("a component whose options do not apply", () => {
     expect(designFrameOptionsProblem(main("defaults"))).toBe("These options could not be applied. The frame shows the component's defaults.");
     expect(designFrameOptionsProblem(main())).toBeNull();
     expect(designFrameOptionsProblem({})).toBeNull();
+  });
+
+  it("says a main or an instance whose template fails with no last good render shows nothing", () => {
+    expect(designFrameOptionsProblem(main("nothing"))).toBe("These options could not be applied. The frame shows nothing in its place.");
+    expect(designFrameOptionsProblem(hosting(true, "nothing"))).toBe("The options of zd-card could not be applied. The frame shows nothing in its place.");
   });
 
   it("says on every frame hosting a failed instance which component and what it shows", () => {

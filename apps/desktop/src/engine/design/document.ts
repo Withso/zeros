@@ -1,6 +1,7 @@
 import { readDirectoryDesignManifest } from "./metadata";
 import { designCatalogRevision, inspectDesignCatalog, readDesignCatalogMetadataWithContext, sameDesignCatalogInspection } from "./catalog-storage";
-import { designComponentRecordLimitMessage, designComponentRecordWithinLimits, type DesignPageHashes } from "@zeros/protocol/design-catalog";
+import { designComponentRecordLimitMessage, designComponentRecordWithinLimits, DESIGN_PREPARED_LINT_ROWS_PER_FRAME,
+  type DesignPageHashes } from "@zeros/protocol/design-catalog";
 import { DesignCatalogError, designCatalogPageHashes, type DesignCatalogSnapshot } from "./catalog";
 import { escapeText, escapeAttribute } from "./source";
 import {
@@ -63,7 +64,8 @@ import postcss from "postcss";
 import { withDesignDirectoryNameLease } from "./directory-registry";
 import { withDesignDocumentWrite as withDocumentWrite } from "./document-write-lock";
 
-import { designComponentSummaryOf, designSourceDeclaresOptions, expandDesignComponents } from "./components";
+import { designComponentSummaryOf, designFrameOptionPropertyNames, designIgnoredOptionsTemplates, designSourceDeclaresOptions,
+  expandDesignComponents } from "./components";
 import { designComponentRegistry } from "./component-registry";
 import {
   DESIGN_CANVAS_FILE as CANVAS_MARKER_FILE,
@@ -1459,7 +1461,7 @@ async function withPreparingBatch<T>(run: () => Promise<T>): Promise<T> {
  * matching context but never publishes one: change attribution diffs the
  * canvas it holds against the current one, as what renderers prepared against. */
 export async function prepareDesignNavigationFrames(workspacePath: string, catalogRevision: string, files: readonly string[], directoryId?: string,
-  options: { forRenderer?: boolean } = {}) {
+  options: { forRenderer?: boolean; lintFiles?: readonly string[] } = {}) {
   if (!files.length || files.length > 16 || new Set(files).size !== files.length) throw new Error("Invalid Design preparation batch.");
   const { directory, before, revision, context } = await withDocumentWrite(workspacePath, async () => {
     await recoverPendingDesignTransactionUnlocked(workspacePath);
@@ -1484,16 +1486,20 @@ export async function prepareDesignNavigationFrames(workspacePath: string, catal
   const prepared = await withPreparingBatch(() => withDesignDirectoryNameLease(workspacePath, directory, () => withDesignReadScope(async () => {
     const frames: DesignCanvasFrame[] = [];
     const errors: Array<{ file: string; message: string }> = [];
+    const preparedFiles: string[] = [];
     const pageIds = designFramePageIds(context.canvas);
     const identities = designFrameIdentities(workspacePath, directory);
     const fromWorkers = await prepareColdFramesInWorkers(workspacePath, revision, files, context.canvas, pageIds, identities);
     // One native preparation at a time; optional demand must not fan out large
     // decoder/source buffers across every frame in a batch.
     for (const file of files) {
-      try { frames.push(fromWorkers.get(file) ?? await prepareRegisteredDesignFrame(workspacePath, file, context.canvas, pageIds, identities)); }
-      catch (error) { errors.push({ file, message: error instanceof Error ? error.message : "Could not prepare this frame." }); }
+      try {
+        frames.push(fromWorkers.get(file) ?? await prepareRegisteredDesignFrame(workspacePath, file, context.canvas, pageIds, identities));
+        preparedFiles.push(file);
+      } catch (error) { errors.push({ file, message: error instanceof Error ? error.message : "Could not prepare this frame." }); }
     }
-    return { frames, errors };
+    const linted = options.lintFiles && await lintPreparedDesignFrames(workspacePath, preparedFiles.filter((file) => options.lintFiles!.includes(file)), context);
+    return { frames, errors, ...(linted ? { lint: { checkedFiles: linted.checkedFiles, violations: linted.violations } } : {}) };
   })));
   if (designDirectoryNameFor(workspacePath) !== directory ||
     !sameDesignCatalogInspection(before, inspectDesignCatalog(workspacePath, directory, { revision: false })))
@@ -1988,6 +1994,7 @@ async function lintFrame(
   const availableTokens = new Set([
     ...knownTokens,
     ...frameCustomPropertyNames(document),
+    ...designFrameOptionPropertyNames(source, document),
   ]);
   for (const match of source.matchAll(/var\(\s*(--[A-Za-z0-9_-]+)\s*(,)?/g)) {
     const token = match[1];
@@ -2019,7 +2026,9 @@ async function lintFrame(
     file,
     canvas ? { registry: designComponentRegistry(canvas).files } : {},
   );
-  const availableClasses = componentExpansion.errors.length === 0
+  // Only an error can leave a component's markup or CSS out of the
+  // expansion; a warning (an ignored attribute) changes nothing it renders.
+  const availableClasses = !componentExpansion.errors.some((error) => (error.severity ?? "error") === "error")
     ? await knownClasses(file, componentExpansion.html, componentExpansion.html === source ? document : undefined)
     : null;
   if (availableClasses) {
@@ -2052,6 +2061,16 @@ async function lintFrame(
       if (remainder) break;
     }
   }
+  for (const { element, inHead } of designIgnoredOptionsTemplates(source, document)) {
+    violations.push(violationAt(file, "component-option-invalid",
+      inHead
+        ? "Only the first <template data-zd-options> in <head> is read; move these options into it."
+        : "Options are read only from <head>; move this <template data-zd-options> into <head>.",
+      element.sourceCodeLocation?.startTag, {
+        severity: "warning",
+        fix: inHead ? "Merge the option templates into one." : "Move the options template into the frame's <head>.",
+      }));
+  }
   violations.push(...lintDesignAuthoringContract({
     file,
     source,
@@ -2065,21 +2084,28 @@ async function lintFrame(
   const componentRecords = designNodeRecords(document).filter(
     ({ element }) => element.tagName.startsWith("zd-") && !isShadowDesignNodeElement(element),
   );
+  const unavailableComponents = new Set(componentExpansion.unavailable);
   for (const { element, oid } of componentRecords) {
     if (!element.tagName.startsWith("zd-")) continue;
     const component = element.tagName.slice(3);
     const definition = `${component}.html`;
-    if (usedComponents.has(component)) continue;
+    // An unusable definition has its own error row, which says why.
+    if (usedComponents.has(component) || unavailableComponents.has(component)) continue;
+    const registeredFile = componentExpansion.missing?.get(component);
     violations.push(
       violationAt(
         file,
         "component-undefined",
-        `Component <${element.tagName}> has no components/${definition} definition.`,
+        registeredFile
+          ? `Component <${element.tagName}> is registered to ${registeredFile}, which is missing.`
+          : `Component <${element.tagName}> has no definition: no frame is registered as ${element.tagName} and there is no components/${definition}.`,
         element.sourceCodeLocation?.startTag,
         {
           severity: "error",
           oid: oid ?? undefined,
-          fix: `Create components/${definition} or replace the component instance.`,
+          fix: registeredFile
+            ? `Restore ${registeredFile}, register another frame as ${element.tagName} in meta/canvas.json, or replace the component instance.`
+            : `Register a frame as ${element.tagName} in meta/canvas.json, create components/${definition}, or replace the component instance.`,
         },
       ),
     );
@@ -2132,13 +2158,13 @@ async function lintFrame(
 
 async function lintDesignDocumentUnlocked(
   workspacePath: string,
-  frame?: string,
+  frame?: string | readonly string[],
   options: { healOids?: boolean; includeRuntimeAudits?: boolean } = {},
   context?: DesignCanvasReadContext,
 ): Promise<DesignLintReport> {
-  const files = frame
+  const files = typeof frame === "string"
     ? [(await designFrameTarget(workspacePath, frame)).file]
-    : await discoverFrameFiles(workspacePath, context);
+    : frame ? [...frame] : await discoverFrameFiles(workspacePath, context);
   const knownTokens = await designKnownTokens(workspacePath, context);
   const knownClasses = await designKnownClasses(workspacePath, context);
   const violations: DesignLintViolation[] = [];
@@ -2209,6 +2235,65 @@ export function lintDesignDocument(
         await initializeDesignDocumentUnlocked(workspacePath);
         return lint();
       });
+}
+
+/** Source lint rows for frames a reply names, bounded per frame. Nothing is
+ * written, runtime audits keep their own generation, and a lint that cannot
+ * run leaves the frames unchecked rather than failing the reply. */
+async function lintPreparedDesignFrames(
+  workspacePath: string,
+  files: readonly string[],
+  context: DesignCanvasReadContext,
+): Promise<DesignLintReport | null> {
+  if (files.length === 0) return null;
+  try {
+    const report = await lintDesignDocumentUnlocked(workspacePath, files, { healOids: false, includeRuntimeAudits: false }, context);
+    const kept = new Map<string, number>();
+    const severe = [...report.violations].sort((left, right) => Number(left.severity === "warning") - Number(right.severity === "warning"));
+    const bounded = severe.filter((violation) => {
+      const count = kept.get(violation.file) ?? 0;
+      kept.set(violation.file, count + 1);
+      return count < DESIGN_PREPARED_LINT_ROWS_PER_FRAME;
+    });
+    return { ...report, violations: bounded.length === report.violations.length ? report.violations : sortDesignLintViolations(bounded) };
+  } catch {
+    return null;
+  }
+}
+
+/** Source lint rows for frames at the source versions a renderer holds,
+ * for design.frames.lint. It takes no document lock, so a write never waits
+ * for it; like preparation it may meet a write half applied, so each frame's
+ * version is checked before and after its lint and a frame that moved on is
+ * left out. A canvas or directory change meanwhile refuses the whole read. */
+export async function lintDesignFramesAtVersions(workspacePath: string, directoryId: string,
+  frames: ReadonlyArray<{ file: string; sourceVersion: string }>) {
+  const directory = designDirectoryNameFor(workspacePath);
+  const before = inspectDesignCatalog(workspacePath, directory, { revision: false });
+  if (before.layout.manifest.id !== directoryId) throw new DesignCatalogError("stale");
+  const result = await withDesignDirectoryNameLease(workspacePath, directory, () => withDesignReadScope(async () => {
+    const context = await readSharedCanvasContext(workspacePath);
+    const pageIds = designFramePageIds(context.canvas);
+    const identities = designFrameIdentities(workspacePath, directory);
+    const atVersion = async (wanted: readonly { file: string; sourceVersion: string }[]) => {
+      const held: Array<{ file: string; sourceVersion: string }> = [];
+      for (const frame of wanted) {
+        const current = await prepareRegisteredDesignFrame(workspacePath, frame.file, context.canvas, pageIds, identities).catch(() => null);
+        if (current?.sourceVersion === frame.sourceVersion) held.push({ file: frame.file, sourceVersion: frame.sourceVersion });
+      }
+      return held;
+    };
+    const held = await atVersion(frames);
+    const report = await lintPreparedDesignFrames(workspacePath, held.map((frame) => frame.file), context);
+    const kept = report ? await atVersion(held) : [];
+    const files = new Set(kept.map((frame) => frame.file));
+    return { frames: kept, checkedFiles: report?.checkedFiles.filter((file) => files.has(file)) ?? [],
+      violations: report?.violations.filter((violation) => files.has(violation.file)) ?? [] };
+  }));
+  if (designDirectoryNameFor(workspacePath) !== directory ||
+    !sameDesignCatalogInspection(before, inspectDesignCatalog(workspacePath, directory, { revision: false })))
+    throw new DesignCatalogError("stale");
+  return result;
 }
 
 function sortDesignLintViolations(

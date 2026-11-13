@@ -95,7 +95,7 @@ export type DesignComponentOptionsTarget =
       host: DesignFrameInstances["hosts"][string];
       component: DesignFrameInstances["components"][string];
       /** What the frame shows when this instance's values did not apply. */
-      notApplied?: "last-good" | "defaults";
+      notApplied?: "last-good" | "defaults" | "nothing";
     };
 
 export function DesignComponentOptions({

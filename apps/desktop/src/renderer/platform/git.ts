@@ -133,6 +133,7 @@ import {
   bridgeDesignRefreshStyles,
   bridgeDesignSnapshot,
   bridgeDesignPrepareFrames,
+  bridgeDesignLintFrames,
   bridgeDesignPreview,
   bridgeDesignMoveFrames,
   bridgeDesignTokens,
@@ -582,10 +583,19 @@ export async function designSnapshot(
   );
 }
 
-export async function designPrepareFrames(workspaceId: string, directoryId: string, catalogRevision: string, files: readonly string[]) {
+export async function designPrepareFrames(workspaceId: string, directoryId: string, catalogRevision: string, files: readonly string[],
+  lintFiles?: readonly string[]) {
   const bridge = requireBridge("prepare design frames");
-  const result = await bridgeDesignPrepareFrames(bridge, { workspaceId, directoryId, catalogRevision, files });
+  const result = await bridgeDesignPrepareFrames(bridge, { workspaceId, directoryId, catalogRevision, files, ...(lintFiles ? { lintFiles } : {}) });
   if (getActiveBridge() !== bridge) throw new Error("Design preparation owner was retired.");
+  return result;
+}
+
+export async function designLintFrames(workspaceId: string, directoryId: string,
+  frames: ReadonlyArray<{ file: string; sourceVersion: string }>) {
+  const bridge = requireBridge("lint design frames");
+  const result = await bridgeDesignLintFrames(bridge, { workspaceId, directoryId, frames });
+  if (getActiveBridge() !== bridge) throw new Error("Design lint owner was retired.");
   return result;
 }
 

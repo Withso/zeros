@@ -2,7 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 
 import { setDesignKnownPagesReader, bridgeDesignHistory, bridgeDesignSnapshot, bridgeDesignTransferNode, bridgeDesignDuplicateFrame, bridgeDesignMoveFrames, bridgeDesignUpdateCanvas, bridgeDesignCreateFrame, bridgeDesignDeleteFrame, bridgeDesignUpdateStyles, bridgeDesignSetText, bridgeDesignWriteHtml, bridgeDesignInsertAsset, isDesignWorkspaceSnapshotWire, normalizeDesignWorkspaceSnapshotPages } from "../design-bridge";
 import type { RuntimeClient } from "../ws-client";
-import { DESIGN_MUTATION_SNAPSHOTS_CAPABILITY, DESIGN_PAGE_SCOPED_MUTATIONS_CAPABILITY } from "@zeros/protocol/design-catalog";
+import { DESIGN_MUTATION_SNAPSHOTS_CAPABILITY, DESIGN_OPTIONS_SHOW_NOTHING_CAPABILITY, DESIGN_OPTIONS_SHOW_NOTHING_PARAM,
+  DESIGN_PAGE_SCOPED_MUTATIONS_CAPABILITY } from "@zeros/protocol/design-catalog";
 
 function scopedSnapshot() {
   const descriptor = { id: "home", pageId: "screens", source: "page-1/home.html", title: "Home", kind: "html" as const,
@@ -182,6 +183,17 @@ describe("Design bridge read budgets", () => {
     expect(normalized.frames[0].pageId).toBe("main");
     expect(normalizeDesignWorkspaceSnapshotPages(normalized)).toBe(normalized);
   });
+  it.each([["personal-local", true], ["legacy-local", false], ["cloud://org/workspace", false]] as const)(
+    "asks for the shows-nothing value on design reads and writes only from a capable Local engine: %s", async (workspaceId, asked) => {
+      const snapshot = scopedSnapshot();
+      const request = vi.fn(async () => ({ type: "WORKSPACE_RESPONSE", result: { snapshot, frame: snapshot.frames[0], mutation: { changed: true, frame: { file: snapshot.frames[0]!.file } } } }));
+      const bridge = { request, supportsEngineCapability: (capability: string) =>
+        workspaceId !== "legacy-local" && capability === DESIGN_OPTIONS_SHOW_NOTHING_CAPABILITY } as unknown as RuntimeClient;
+      await bridgeDesignSnapshot(bridge, workspaceId);
+      await bridgeDesignSetText(bridge, workspaceId, { frame: snapshot.frames[0]!.file, nodeId: "root", sourceVersion: "a".repeat(24), text: "Text" });
+      for (const [message] of request.mock.calls as unknown as Array<[{ params: Record<string, unknown> }]>)
+        expect(message.params[DESIGN_OPTIONS_SHOW_NOTHING_PARAM]).toBe(asked ? true : undefined);
+    });
   it("gives the aggregate cold snapshot enough time to scan a large document", async () => {
     let timeoutMs: number | undefined;
     const bridge = {

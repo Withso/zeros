@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { realpath, stat } from "node:fs/promises";
+import { realpath } from "node:fs/promises";
 import path from "node:path";
 
 import { parse, parseFragment, type DefaultTreeAdapterTypes } from "parse5";
@@ -10,6 +10,7 @@ import {
   ComponentExpressionError,
   componentExpressionScope,
   componentOptionCss,
+  componentOptionPropertyNames,
   componentOptionValues,
   componentIgnoresAttribute,
   componentInheritedValues,
@@ -34,7 +35,7 @@ import {
 } from "@zeros/design-web/component-template";
 import { designDirectoryNameFor } from "./directory-registry";
 import { readSharedCanvasContext } from "./document-storage";
-import { readSafeRegularFile } from "./safe-files";
+import { diagnoseSafeRegularFile, readSafeRegularFile, type SafeRegularFileProblem } from "./safe-files";
 
 const MAX_COMPONENTS_PER_FRAME = 1_024;
 const MAX_COMPONENT_BYTES = 512 * 1024;
@@ -44,6 +45,12 @@ const MAX_EXPANSION_DEPTH = 8;
 const MAX_EXPANSION_INSTANCES = 2_048;
 const MAX_EXPANSION_WORK = 32 * 1024 * 1024;
 const MAX_COMPONENT_DIAGNOSTICS = 128;
+const REFUSAL_REASONS: Record<Exclude<SafeRegularFileProblem, "missing">, string> = {
+  link: "it is a symbolic link, which Zeros does not follow",
+  outside: "it resolves outside the Design folder",
+  "too-large": `it is over ${MAX_COMPONENT_BYTES / 1024} KiB`,
+  unreadable: "it is not a readable file",
+};
 
 class ComponentBudgetExceeded extends Error {
   constructor() { super("Component expansion exceeded its work or output limit."); }
@@ -107,6 +114,13 @@ export interface DesignComponentExpansion {
   /** Some options could not be applied: an instance shows its defaults, or
    * nothing when those fail too. Absent when every option applied. */
   optionsFailed?: true;
+  /** Something renders nothing where its options failed: the frame's own
+   * template (its body is empty), or an instance whose defaults failed too. */
+  showsNothing?: { main: boolean; instances: boolean };
+  /** Names whose source is there but cannot be used; `errors` says why. */
+  unavailable?: readonly string[];
+  /** Registered names whose frame file is gone, to the file they name. */
+  missing?: ReadonlyMap<string, string>;
 }
 
 export interface DesignComponentExpansionOptions {
@@ -194,9 +208,12 @@ async function loadDefinitions(
   /** Names whose source exists but could not be used; their instances are
    * reported through errors, not as missing components. */
   unavailable: Set<string>;
+  /** Registered names whose frame file is gone, to the file they name. */
+  missing: Map<string, string>;
 }> {
   const errors: DesignComponentExpansionError[] = [];
   const unavailable = new Set<string>();
+  const missing = new Map<string, string>();
   const designRoot = path.join(
     workspacePath,
     ...designDirectoryNameFor(workspacePath).split("/"),
@@ -212,10 +229,13 @@ async function loadDefinitions(
   try {
     canonicalDesignRoot = sources ? designRoot : await realpath(designRoot);
   } catch {
-    return { definitions: new Map(), errors, unavailable: new Set(referencedComponentNames(sharedDesignParse(frameSource) ?? parse(frameSource))) };
+    return { definitions: new Map(), errors, unavailable: new Set(referencedComponentNames(sharedDesignParse(frameSource) ?? parse(frameSource))), missing };
   }
-  if (canonicalDirectory && !canonicalDirectory.startsWith(`${canonicalDesignRoot}${path.sep}`)) canonicalDirectory = null;
-  if (!canonicalDirectory && registry.size === 0) return { definitions: new Map(), errors, unavailable };
+  // A components/ folder that resolves elsewhere is read from nowhere, but
+  // its definitions are still reported as refused rather than missing.
+  const escapes = canonicalDirectory !== null && !canonicalDirectory.startsWith(`${canonicalDesignRoot}${path.sep}`);
+  if (escapes) canonicalDirectory = null;
+  if (!canonicalDirectory && !escapes && registry.size === 0) return { definitions: new Map(), errors, unavailable, missing };
 
   const frameDocument = sharedDesignParse(frameSource) ?? parse(frameSource);
   const pending = referencedComponentNames(frameDocument);
@@ -243,7 +263,8 @@ async function loadDefinitions(
     // Reads use the checkout's own path spelling, the one read sets record and
     // worktree changes report; the reader confines each file to the real
     // Design root when it opens it.
-    const legacy = await readSource(canonicalDirectory && designRoot, path.join(directory, `${name}.html`), `components/${name}.html`);
+    const legacyPath = path.join(directory, `${name}.html`);
+    const legacy = await readSource(canonicalDirectory && designRoot, legacyPath, `components/${name}.html`);
     if (registered && legacy) {
       errors.push({
         component: name,
@@ -253,18 +274,27 @@ async function loadDefinitions(
       unavailable.add(name);
       continue;
     }
-    const safe = registered ? await readSource(designRoot, path.join(designRoot, ...registered.split("/")), registered) : legacy;
-    if (registered && (!safe || safe.size > MAX_COMPONENT_BYTES)) {
-      errors.push({ component: name, code: "component-invalid", file: registered,
-        message: `The frame registered as zd-${name} (${registered}) could not be read or is over ${MAX_COMPONENT_BYTES / 1024} KiB.` });
-      // Only a registered file that is gone (deleted or renamed) leaves its
-      // instances missing; an oversized or unsafe one is there but unusable.
-      const present = safe !== null || (!sources && await stat(path.join(designRoot, ...registered.split("/"))).then(() => true, () => false));
-      if (present) unavailable.add(name);
+    // Only a file that is gone leaves its instances missing; one that is
+    // there but refused (a link, too large, not a file) is reported as such.
+    const refusal = async (target: string, read: { size: number } | null) =>
+      read ? (read.size > MAX_COMPONENT_BYTES ? "too-large" : null)
+        : sources ? "missing" : await diagnoseSafeRegularFile(designRoot, target, MAX_COMPONENT_BYTES);
+    const registeredPath = registered && path.join(designRoot, ...registered.split("/"));
+    const safe = registeredPath ? await readSource(designRoot, registeredPath, registered) : legacy;
+    const refused = await refusal(registeredPath || legacyPath, safe);
+    if (refused === "missing") {
+      if (registered) missing.set(name, registered);
+      continue;
+    }
+    if (refused) {
+      errors.push(registered
+        ? { component: name, code: "component-invalid", file: registered,
+          message: `The frame registered as zd-${name} (${registered}) cannot be used: ${REFUSAL_REASONS[refused]}.` }
+        : { component: name, message: `Component zd-${name}'s definition components/${name}.html cannot be used: ${REFUSAL_REASONS[refused]}.` });
+      unavailable.add(name);
       continue;
     }
     if (!safe) continue;
-    if (safe.size > MAX_COMPONENT_BYTES) { unavailable.add(name); continue; }
     if (totalSourceBytes + safe.size > MAX_COMPONENT_SOURCE_BYTES_PER_FRAME) {
       errors.push({
         component: name,
@@ -386,7 +416,7 @@ async function loadDefinitions(
       styles,
     });
   }
-  return { definitions, errors, unavailable };
+  return { definitions, errors, unavailable, missing };
 }
 
 /** The <zd-option>, <zd-derive> and <zd-variant> lines of a file's
@@ -576,6 +606,38 @@ const DECLARES_OPTIONS = {
 };
 export const designSourceDeclaresOptions = (source: string) => DECLARES_OPTIONS.test(source);
 
+/** The custom properties a frame's own declaration sets on it, by the same
+ * rule as the CSS its render carries. */
+export function designFrameOptionPropertyNames(source: string, document: DefaultTreeAdapterTypes.Document): string[] {
+  if (!DECLARES_OPTIONS.test(source)) return [];
+  let declared: ReturnType<typeof declarationElementsOf>;
+  try {
+    declared = declarationElementsOf(document);
+  } catch (error) {
+    if (error instanceof ComponentBudgetExceeded) return [];
+    throw error;
+  }
+  return declared ? componentOptionPropertyNames(readComponentDeclaration(declared.filter((element) => !element.nested)).declaration) : [];
+}
+
+/** Each <template data-zd-options> the engine does not read: any outside
+ * <head>, or after the first one there. */
+export function designIgnoredOptionsTemplates(source: string, document: DefaultTreeAdapterTypes.Document): Array<{ element: DefaultTreeAdapterTypes.Element; inHead: boolean }> {
+  if (!/\sdata-zd-options\b/i.test(source)) return [];
+  let all: DefaultTreeAdapterTypes.Element[];
+  try {
+    all = elements(document);
+  } catch (error) {
+    if (error instanceof ComponentBudgetExceeded) return [];
+    throw error;
+  }
+  const declares = (element: DefaultTreeAdapterTypes.Element) =>
+    element.tagName === "template" && element.attrs.some((attribute) => attribute.name === "data-zd-options");
+  const head = all.find((element) => element.tagName === "head");
+  const read = head?.childNodes.find((child) => "tagName" in child && declares(child));
+  return all.filter((element) => element !== read && declares(element)).map((element) => ({ element, inHead: element.parentNode === head }));
+}
+
 /** Expanded markup alone, for rendering. Element names come only from start
  * tags, so without `<zd-` (or a declaration of options) there is no instance
  * and expansion is the identity; diagnostics such as the element budget need
@@ -595,8 +657,10 @@ export async function expandDesignComponentsHtml(
 export interface DesignComponentOptionsFallback {
   applied: false;
   /** last-good: this session's last expansion whose options all applied.
-   * defaults: no such expansion; failing instances show their defaults. */
-  shows: "last-good" | "defaults";
+   * defaults: no such expansion; failing instances show their defaults.
+   * nothing: no such expansion, and the frame's own template failed, so its
+   * body is empty. Older renderers are told "defaults" instead. */
+  shows: "last-good" | "defaults" | "nothing";
 }
 
 /** Expansion for a frame render. A frame whose options do not all apply
@@ -630,9 +694,9 @@ export async function expandDesignComponentsForRender(
     return { html: expansion.html, ...instancesOf() };
   }
   const lastGood = lastGoodDesignComponentRender(workspacePath, entryFile);
-  return lastGood === undefined
-    ? { html: expansion.html, componentOptions: { applied: false, shows: "defaults" }, ...instancesOf("defaults") }
-    : { html: lastGood, componentOptions: { applied: false, shows: "last-good" }, ...instancesOf("last-good") };
+  if (lastGood !== undefined) return { html: lastGood, componentOptions: { applied: false, shows: "last-good" }, ...instancesOf("last-good") };
+  return { html: expansion.html, componentOptions: { applied: false, shows: expansion.showsNothing?.main ? "nothing" : "defaults" },
+    ...instancesOf(expansion.showsNothing?.instances ? "nothing" : "defaults") };
 }
 
 export { designComponentSummaryOf, type DesignComponentSummary } from "@zeros/design-web/component-template";
@@ -657,6 +721,10 @@ interface OptionsWork {
   instances: number;
   rules: string[];
   failed: boolean;
+  /** The frame's own template failed: it renders an empty body. */
+  mainEmpty?: boolean;
+  /** An instance the frame places renders nothing: its defaults failed too. */
+  instancesEmpty?: boolean;
 }
 
 function problemsToErrors(component: string, problems: readonly ComponentOptionProblem[], code: DesignComponentExpansionCode): DesignComponentExpansionError[] {
@@ -673,7 +741,7 @@ function renderInstance(
   attributes: ReadonlyMap<string, string>,
   work: OptionsWork,
   errors: DesignComponentExpansionError[],
-): { body: string; css: string; failed?: true } {
+): { body: string; css: string; failed?: true; empty?: true } {
   const { declaration } = definition.template;
   const { values, problems } = componentOptionValues(declaration, attributes);
   errors.push(...problemsToErrors(definition.name, problems, "component-value-invalid"));
@@ -703,8 +771,31 @@ function renderInstance(
     return { ...attempt(defaults), failed: true };
   } catch (error) {
     if (templateMessage(error) === null) throw error;
-    return { body: "", css: componentOptionCss(declaration, defaults), failed: true };
+    return { body: "", css: componentOptionCss(declaration, defaults), failed: true, empty: true };
   }
+}
+
+/** The frame's document with nothing in its body: its head's styles,
+ * stylesheet links and meta, and the html and body tags. A `<style>` is kept
+ * as written, since template holes never apply inside one; a link, meta or
+ * html or body tag is kept only when it carries no hole, since a failed
+ * template evaluates none. */
+function emptyDesignDocument(source: string): string {
+  const document = parse(source, { sourceCodeLocationInfo: true });
+  const html = document.childNodes.find((node): node is DefaultTreeAdapterTypes.Element => node.nodeName === "html");
+  const child = (name: string) => html?.childNodes.find((node): node is DefaultTreeAdapterTypes.Element => node.nodeName === name);
+  const raw = (location: { startOffset: number; endOffset: number } | undefined) =>
+    location ? source.slice(location.startOffset, location.endOffset) : "";
+  const tag = (element: DefaultTreeAdapterTypes.Element | undefined, name: string) => {
+    const start = raw(element?.sourceCodeLocation?.startTag ?? undefined);
+    return start && !start.includes("{{") ? start : `<${name}>`;
+  };
+  const kept = (child("head")?.childNodes ?? []).flatMap((node) => {
+    if (!("tagName" in node) || !["style", "link", "meta"].includes(node.tagName)) return [];
+    const text = raw(node.sourceCodeLocation ?? undefined);
+    return text && (node.tagName === "style" || !text.includes("{{")) ? [text] : [];
+  });
+  return `<!doctype html>${tag(html, "html")}<head>${kept.join("")}</head>${tag(child("body"), "body")}</body></html>`;
 }
 
 /** The frame's own instances, for the Style panel: each host layer (its
@@ -797,8 +888,11 @@ async function expandBoundedComponents(
       const message = templateMessage(error);
       if (message === null) throw error;
       work.failed = true;
+      work.mainEmpty = true;
       errors.push({ component: entryName, code: "component-expression-invalid", message, file: entryFile,
         ...(error instanceof ComponentTemplateError && error.offset !== undefined ? { offset: error.offset, line: lineOf(source, error.offset) } : {}) });
+      // Raw holes would show as text; render nothing, as an instance does.
+      entry = emptyDesignDocument(source);
     }
     budget.charge(entry.length);
     budget.output(Buffer.byteLength(entry));
@@ -847,6 +941,7 @@ async function expandBoundedComponents(
         const templated = definition as ComponentDefinition & { template: NonNullable<ComponentDefinition["template"]> };
         const rendered = renderInstance(templated, attributes, work, errors);
         if (depth === 0 && usage) recordInstance(usage, registry, templated, instance, rendered.failed === true);
+        if (depth === 0 && rendered.empty) work.instancesEmpty = true;
         const id = String(++work.instances);
         if (rendered.css) work.rules.push(`:where([data-zd-instance="${id}"]) { ${rendered.css} }`);
         startTag = startTag.replace(/\s*\/?>$/, (end) => ` data-zd-instance="${id}"${end.trim() === "/>" ? " />" : ">"}`);
@@ -892,5 +987,8 @@ async function expandBoundedComponents(
     // invalid definitions remain previewable and their safe remainder expands.
     errors: [...loaded.errors, ...errors].slice(0, MAX_COMPONENT_DIAGNOSTICS),
     ...(work.failed ? { optionsFailed: true as const } : {}),
+    ...(work.mainEmpty || work.instancesEmpty ? { showsNothing: { main: work.mainEmpty === true, instances: work.instancesEmpty === true } } : {}),
+    ...(loaded.unavailable.size ? { unavailable: [...loaded.unavailable] } : {}),
+    ...(loaded.missing.size ? { missing: loaded.missing } : {}),
   };
 }

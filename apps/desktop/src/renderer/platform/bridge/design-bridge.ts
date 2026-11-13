@@ -36,7 +36,9 @@ export type DesignCanvasItemInput = DesignCanvasItem extends infer Item ? Item e
   ? Omit<Item, "id"> & { id?: string } : never : never;
 import { DESIGN_LAZY_PREPARATION_CAPABILITY, DESIGN_MUTATION_SNAPSHOTS_CAPABILITY, DESIGN_PAGE_SCOPED_MUTATIONS_CAPABILITY, designMutationCatalogSchema, designPageScopedCatalogSchema, designPreparedFrameSchema, designFramesPrepareSchema, parseDesignFramesPrepareReply, type DesignMutationCatalog, type DesignPageHashes, type DesignPageScopedCatalog } from "@zeros/protocol/design-catalog";
 import { DESIGN_SOURCE_SURFACES_CAPABILITY } from "@zeros/protocol/design-surface";
-import { DESIGN_COMPONENT_OPTIONS_CAPABILITY } from "@zeros/protocol/design-catalog";
+import { DESIGN_COMPONENT_OPTIONS_CAPABILITY, DESIGN_FRAMES_LINT_CAPABILITY, DESIGN_FRAMES_PREPARE_LINT_CAPABILITY,
+  DESIGN_OPTIONS_SHOW_NOTHING_PARAM, designFramesLintReplySchema, designFramesLintSchema,
+} from "@zeros/protocol/design-catalog";
 import {
   DESIGN_RECORDINGS_COLOR_SCHEME_CAPABILITY,
   DESIGN_RECORDINGS_READ_FAILURES_CAPABILITY,
@@ -48,7 +50,7 @@ import {
 import { isCloudWorkspace } from "./cloud-workspace-key";
 
 import type { RuntimeClient } from "./ws-client";
-import { workspaceOp as rawWorkspaceOp } from "./workspace-bridge";
+import { workspaceOp as rawWorkspaceOp, showsNothingParam } from "./workspace-bridge";
 import { designCaptureScheduler, type DesignCapturePriority } from "./design-capture-scheduler";
 
 const directoryIds = new Map<string, string>();
@@ -60,7 +62,7 @@ export function rememberDesignDirectoryIdentity(workspaceId: string, directoryId
 
 const workspaceOp: typeof rawWorkspaceOp = (bridge, op, params = {}, ...rest) => {
   const directoryId = typeof params.workspaceId === "string" ? directoryIds.get(params.workspaceId) : undefined;
-  return rawWorkspaceOp(bridge, op, { ...params, ...(directoryId ? { directoryId } : {}) }, ...rest);
+  return rawWorkspaceOp(bridge, op, { ...params, ...(directoryId ? { directoryId } : {}), ...showsNothingParam(bridge, params.workspaceId) }, ...rest);
 };
 
 // A cold aggregate snapshot intentionally parses, lints, and composes every
@@ -120,11 +122,13 @@ export interface DesignFrameDocumentWire extends DesignCanvasFrameWire {
 }
 
 export async function bridgeDesignPrepareFrames(bridge: RuntimeClient, input: {
-  workspaceId: string; directoryId: string; catalogRevision: string; files: readonly string[];
+  workspaceId: string; directoryId: string; catalogRevision: string; files: readonly string[]; lintFiles?: readonly string[];
 }) {
-  const params = designFramesPrepareSchema.parse({ ...input,
+  const { lintFiles, ...request } = input;
+  const params = designFramesPrepareSchema.parse({ ...request,
     ...(bridge.supportsEngineCapability?.(DESIGN_SOURCE_SURFACES_CAPABILITY, input.workspaceId) ? { surfaceCosts: true } : {}),
     ...(bridge.supportsEngineCapability?.(DESIGN_COMPONENT_OPTIONS_CAPABILITY, input.workspaceId) ? { componentOptions: true } : {}),
+    ...(lintFiles?.length && bridge.supportsEngineCapability?.(DESIGN_FRAMES_PREPARE_LINT_CAPABILITY, input.workspaceId) ? { lintFiles } : {}),
   });
   if (isCloudWorkspace(params.workspaceId) || !bridge.supportsEngineCapability?.(DESIGN_LAZY_PREPARATION_CAPABILITY, params.workspaceId))
     throw new Error("Design preparation requires a capable Local engine.");
@@ -133,14 +137,36 @@ export async function bridgeDesignPrepareFrames(bridge: RuntimeClient, input: {
   try {
     // Preserve the directory that produced the descriptions, even when a new
     // selection has already updated the bridge's remembered directory.
-    const raw = await rawWorkspaceOp(bridge, "design.frames.prepare", params, 20_000);
+    const showsNothing = showsNothingParam(bridge, params.workspaceId);
+    const raw = await rawWorkspaceOp(bridge, "design.frames.prepare", { ...params, ...showsNothing }, 20_000);
     if (retired) throw new Error("Design preparation connection was retired.");
-    const result = parseDesignFramesPrepareReply(raw);
+    const result = parseDesignFramesPrepareReply(raw, { optionsShowNothing: DESIGN_OPTIONS_SHOW_NOTHING_PARAM in showsNothing });
     const files = [...result.frames, ...result.errors].map((frame) => frame.file);
     if (result.directoryId !== params.directoryId || result.catalogRevision !== params.catalogRevision ||
       files.length !== params.files.length || new Set(files).size !== files.length || files.some((file) => !params.files.includes(file)))
       throw new Error("Invalid Design preparation coverage or owner.");
     return result;
+  } finally { off?.(); }
+}
+
+/** Source lint rows for frames at the source versions the renderer holds;
+ * null when the engine cannot answer design.frames.lint. */
+export async function bridgeDesignLintFrames(bridge: RuntimeClient, input: {
+  workspaceId: string; directoryId: string; frames: ReadonlyArray<{ file: string; sourceVersion: string }>;
+}) {
+  if (isCloudWorkspace(input.workspaceId) || !bridge.supportsEngineCapability?.(DESIGN_FRAMES_LINT_CAPABILITY, input.workspaceId)) return null;
+  const params = designFramesLintSchema.parse(input);
+  let retired = false;
+  const off = bridge.onStatusChange?.((status) => { if (status !== "connected") retired = true; });
+  try {
+    const reply = designFramesLintReplySchema.parse(await rawWorkspaceOp(bridge, "design.frames.lint", params, 20_000));
+    if (retired) throw new Error("Design lint connection was retired.");
+    const asked = new Map(params.frames.map((frame) => [frame.file, frame.sourceVersion]));
+    const answered = new Set(reply.frames.map((frame) => frame.file));
+    if (reply.frames.some((frame) => asked.get(frame.file) !== frame.sourceVersion) ||
+      reply.checkedFiles.some((file) => !answered.has(file)) || reply.violations.some((row) => !answered.has(row.file)))
+      throw new Error("Invalid Design lint coverage.");
+    return reply;
   } finally { off?.(); }
 }
 
@@ -253,6 +279,12 @@ export interface DesignWorkspaceSnapshotWire {
     pageHashes?: DesignPageHashes;
     /** Pages kept from an earlier projection that the engine no longer matches. */
     stalePages?: string[];
+    /** Prepared frames whose source changed outside Zeros: their next
+     * preparation carries their lint rows. */
+    relint?: string[];
+    /** Frames a write acknowledgement prepared without lint rows; a
+     * background design.frames.lint read supplies them. */
+    lintPending?: string[];
   };
   /** Absent only on older engines and pre-migration boot snapshots. */
   directoryId?: string;

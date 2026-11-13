@@ -527,21 +527,21 @@ const easingCss = (easing: ComponentEasing) => {
 /** The custom properties an instance (or a main frame) sets: every number,
  * colour and easing option and every numeric derived value, defaults
  * included, so nothing an outer instance sets reaches an inner one. */
-export function componentOptionCss(
+function componentOptionProperties(
   declaration: ComponentDeclaration,
   values: ReadonlyMap<string, ComponentOptionValue>,
   derived?: ReadonlyMap<string, ComponentExpressionValue>,
-): string {
-  const declarations: string[] = [];
+): Array<[property: string, value: string]> {
+  const properties: Array<[string, string]> = [];
   for (const option of declaration.options) {
     const value = values.get(option.name) ?? option.default;
-    if (option.kind === "number") declarations.push(`--zd-${option.name}: ${cssNumber(value as number)}${option.unit ?? ""};`);
+    if (option.kind === "number") properties.push([`--zd-${option.name}`, `${cssNumber(value as number)}${option.unit ?? ""}`]);
     else if (option.kind === "color") {
       const color = strictColor(String(value));
-      if (color) declarations.push(`--zd-${option.name}: ${color};`);
+      if (color) properties.push([`--zd-${option.name}`, color]);
     } else if (option.kind === "easing") {
       const easing = value as ComponentEasing;
-      declarations.push(`--zd-${option.name}-easing: ${easingCss(easing)};`, `--zd-${option.name}-duration: ${cssNumber(easing.duration)}ms;`);
+      properties.push([`--zd-${option.name}-easing`, easingCss(easing)], [`--zd-${option.name}-duration`, `${cssNumber(easing.duration)}ms`]);
     }
   }
   let scope = derived;
@@ -554,9 +554,23 @@ export function componentOptionCss(
   }
   for (const entry of declaration.derived) {
     const value = scope?.get(entry.name);
-    if (typeof value === "number" && Number.isFinite(value)) declarations.push(`--zd-${entry.name}: ${cssNumber(value)}${entry.unit ?? ""};`);
+    if (typeof value === "number" && Number.isFinite(value)) properties.push([`--zd-${entry.name}`, `${cssNumber(value)}${entry.unit ?? ""}`]);
   }
-  return declarations.join(" ");
+  return properties;
+}
+
+export function componentOptionCss(
+  declaration: ComponentDeclaration,
+  values: ReadonlyMap<string, ComponentOptionValue>,
+  derived?: ReadonlyMap<string, ComponentExpressionValue>,
+): string {
+  return componentOptionProperties(declaration, values, derived).map(([property, value]) => `${property}: ${value};`).join(" ");
+}
+
+/** The custom properties a main frame sets for itself from its defaults:
+ * the names `componentOptionCss` writes, so lint knows them as tokens. */
+export function componentOptionPropertyNames(declaration: ComponentDeclaration): string[] {
+  return componentOptionProperties(declaration, defaultValues(declaration)).map(([property]) => property);
 }
 
 /** css: the option reaches the frame only through its custom property (or a

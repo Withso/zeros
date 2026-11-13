@@ -33,6 +33,7 @@ import {
   designSetText,
   designSnapshot,
   designPrepareFrames,
+  designLintFrames,
   designUpdateToken,
   designUpdateCanvas,
   designMoveFrames,
@@ -55,12 +56,13 @@ import {
 import type { DesignTransaction } from "@zeros/design-core";
 import type { DesignRuntimeGenerationPatch, DesignRuntimeNodeInsert } from "@zeros/protocol/design-runtime";
 import { KeyedAsyncCache } from "../../../shared/lib/keyed-async-cache";
-import { DesignFramePreparation, readDesignNavigation, projectDesignMutationSnapshot } from "./design-workspace-preparation";
+import { DesignFramePreparation, readDesignNavigation, projectDesignMutationSnapshot, RUNTIME_AUDIT_RULE_IDS,
+  withSourceLintRows } from "./design-workspace-preparation";
 import { preparedDesignSnapshot } from "./design-frame-view";
 import { onActiveBridgeConnected } from "../../../platform/bridge/active-bridge";
 import { isCloudWorkspace } from "../../../platform/bridge/cloud-workspace-key";
 import { getActiveBridge } from "../../../platform/bridge/active-bridge";
-import { DESIGN_FRAMES_CHANGES_CAPABILITY } from "@zeros/protocol/design-catalog";
+import { DESIGN_FRAMES_CHANGES_CAPABILITY, DESIGN_FRAMES_LINT_CAPABILITY } from "@zeros/protocol/design-catalog";
 import { stableDesignCanvasItems } from "./design-canvas-items";
 import type { DesignPageSummary } from "@zeros/protocol/design-pages";
 import type { DesignFramesChange } from "@zeros/protocol/messages";
@@ -151,13 +153,6 @@ const runtimeAuditSettlementByFrame = new Map<
   string,
   { fingerprint: string; result: Promise<void> }
 >();
-const RUNTIME_AUDIT_RULE_IDS = new Set([
-  "contrast",
-  "overflow",
-  "spacing-scale",
-  "audit-limit",
-  "layer-tree-limit",
-]);
 
 /** Design reads are idempotent and exact-keyed, so a single transport bounce
  * can be retried safely. Keep this boundary away from mutations: their reply
@@ -1442,7 +1437,49 @@ function publishDesignWorkspaceSnapshot(
   if (stable.preparation?.stalePages?.length) designWorkspaceSnapshotCache.invalidate(workspaceId);
   notifyDesignSelectionSnapshot(workspaceId);
   if (!stable.preparation) queueDesignWorkspaceBootSnapshot(workspaceId, stable);
+  if (stable.preparation?.lintPending?.length) lintWrittenDesignFrames(workspaceId);
   return stable;
+}
+
+const WRITTEN_LINT_BATCH = 16;
+
+/** A write acknowledgement carries no lint rows, so the write lock is never
+ * held for lint; its frames are linted here, off the write path, at the
+ * source version each one has. A reply applies only to frames whose source
+ * version and owner are still the ones asked about. */
+function lintWrittenDesignFrames(workspaceId: string): void {
+  const snapshot = designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data;
+  if (!snapshot?.preparation?.lintPending?.length) return;
+  if (isCloudWorkspace(workspaceId) || !getActiveBridge()?.supportsEngineCapability?.(DESIGN_FRAMES_LINT_CAPABILITY, workspaceId)) {
+    const { lintPending: _pending, ...preparation } = snapshot.preparation;
+    designWorkspaceSnapshotCache.setData(workspaceId, { ...snapshot, preparation });
+    return;
+  }
+  void designBackgroundWork.schedule(`written-lint\0${workspaceId}`, async () => {
+    const asked = designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data;
+    const pending = new Set(asked?.preparation?.lintPending);
+    if (!asked?.directoryId || !pending.size) return;
+    const frames = asked.frames.flatMap((frame) => pending.has(frame.file) && frame.sourceVersion
+      ? [{ file: frame.file, sourceVersion: frame.sourceVersion }] : []).slice(0, WRITTEN_LINT_BATCH);
+    const reply = frames.length ? await designLintFrames(workspaceId, asked.directoryId, frames).catch(() => null) : null;
+    const current = designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data;
+    if (!current?.preparation || current.directoryId !== asked.directoryId || current.lint.workspacePath !== asked.lint.workspacePath ||
+      current.protocolCapability !== asked.protocolCapability) return;
+    const versions = new Map(current.frames.map((frame) => [frame.file, frame.sourceVersion]));
+    const held = (frame: { file: string; sourceVersion: string }) => versions.get(frame.file) === frame.sourceVersion;
+    // A frame asked about at the version it still has is settled even without
+    // rows (the engine saw newer source, or could not lint it); a later write
+    // or change of it asks again. One without a version cannot be asked about.
+    const settled = new Set([...frames.filter(held).map((frame) => frame.file),
+      ...[...pending].filter((file) => !versions.get(file))]);
+    const linted = new Set(reply?.frames.filter(held).map((frame) => frame.file));
+    const lintPending = current.preparation.lintPending?.filter((file) => !settled.has(file)) ?? [];
+    const { lintPending: _pending, ...preparation } = current.preparation;
+    designWorkspaceSnapshotCache.setData(workspaceId, stabilizeDesignWorkspaceSnapshot(current, { ...current,
+      lint: withSourceLintRows(current.lint, linted, reply?.violations ?? []),
+      preparation: { ...preparation, ...(lintPending.length ? { lintPending } : {}) } }));
+    if (lintPending.length) lintWrittenDesignFrames(workspaceId);
+  });
 }
 
 /** Seed the exact aggregate carried by a lifecycle/mutation receipt. Publishing
@@ -2974,7 +3011,10 @@ export function applyDesignFramesChange(workspaceId: string, change: DesignFrame
     mutation.deferredRefresh = true;
     return;
   }
+  // Source changed outside Zeros: its lint rows come with the re-preparation.
+  const relint = [...new Set([...(preparation.relint ?? []), ...preparation.current.filter((file) => changed.has(file))])];
   designWorkspaceSnapshotCache.setData(workspaceId, { ...snapshot, preparation: { ...preparation,
+    ...(relint.length ? { relint } : {}),
     current: preparation.current.filter((file) => !changed.has(file)),
     errors: Object.fromEntries(Object.entries(preparation.errors).filter(([file]) => !changed.has(file))) } });
   designFramePreparation.resume();

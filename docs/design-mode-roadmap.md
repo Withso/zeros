@@ -1229,6 +1229,10 @@ records pass unknown fields through:
   source's tokens are the custom properties its own files declare, Tailwind
   `@theme` included; Tailwind's stock theme and package defaults are not the
   application's tokens and still warn (`document.ts`, `designKnownTokens`).
+  The `--zd-<name>` properties of the number, colour, easing and numeric
+  derived options of the frame's own declaration and of the components it
+  places are known too (`designFrameOptionPropertyNames`); text, choice and
+  boolean options have none.
 - Lint's `unknown-class` warning reports each distinct class on the frame's
   own elements that none of its available styles defines. Recognition is
   case-sensitive, decodes CSS escapes, and includes selectors inside
@@ -1243,7 +1247,8 @@ records pass unknown fields through:
   The sole marker allowlist is `group`, `peer`, `group/<name>`, `peer/<name>`,
   `lucide` and `lucide-<name>` (`style-classes.ts`, `DESIGN_CLASS_MARKERS`).
   An unreadable or unclassifiable stylesheet, failed source, missing build
-  output, unavailable Tailwind dependency or a frame whose Tailwind
+  output, unavailable Tailwind dependency, a component expansion error (a
+  warning does not) or a frame whose Tailwind
   candidates reach the 4,096 cap skips this check for that frame;
   other lint rules still run. Findings point to the first `class` attribute
   using each name, at most 50 per frame; past 50 classes, the 50th warning
@@ -1687,7 +1692,11 @@ of the expander's earlier output holds this), and it may declare options too.
 
 Options are declared in the file's `<head>` inside `<template
 data-zd-options>`, one `<zd-option>`, `<zd-derive>` or `<zd-variant>` per line,
-so a person sliding one option changes one line in Git: the instance's
+so a person sliding one option changes one line in Git. Only the first such
+template in `<head>` is read, by the engine and by the canvas's Options and
+default writes alike; one in `<body>` or a later one in `<head>` is a
+`component-option-invalid` warning that says where to move it. A person
+sliding one option changes the instance's
 attribute (`width="800"` → `width="760"`), or on the main component the
 `default` (or the line of the variant it shows). Kinds are number (a slider only
 with both `min` and `max`), boolean, choice, colour (or `var(--token)`), text
@@ -1742,15 +1751,31 @@ option is a `component-value-invalid` warning naming the attribute and the
 ignored value; the source is never rewritten. An instance of a component that
 no longer exists (its main deleted, renamed or registered under another name)
 is `component-undefined` at the instance; it renders as an empty element and
-the host frame still renders. A component whose source is there but cannot be
-used (over the size limit, unsafe, or named twice) is reported by that error
-instead, never as missing. An instance whose values do not fit
+the host frame still renders; the message says whether the registered frame's
+file is missing or no frame and no `components/<name>.html` defines it. A
+component whose source is there but cannot be used (a symbolic link, outside
+the directory, over the size limit, unreadable, or named twice) is reported by
+that error, naming the reason, instead, never as missing. An instance whose values do not fit
 keeps the inherited value; one whose template fails renders its defaults, or
 nothing when those fail too. A frame whose options do not all apply shows the
 last expansion that applied in this session (held for the 12 most recently
 rendered frames within 16 MiB, dropped when the frame is deleted, never stored
 as a durable identity) and the render says so (`shows: "last-good"`); without
-one it shows the component's defaults (`shows: "defaults"`). The engine's own
+one it shows the component's defaults (`shows: "defaults"`), or, when its own
+template fails or an instance's defaults fail too, nothing in that place
+(`shows: "nothing"`): a main renders an empty body keeping the `<style>`
+elements of its `<head>` as written (holes never apply inside them) and its
+stylesheet links and meta that carry no hole, never its raw `{{ }}` source.
+The Options section, the canvas mark on the main and on every frame placing
+it, and the "Ask agent to fix" brief all say the frame shows nothing in its
+place. Older renderers parse `notApplied` strictly as `"last-good"` or
+`"defaults"`, so only a renderer that negotiated
+`design.component-options.shows-nothing.v1` and sends
+`optionsShowNothing: true` (Local only) is told `"nothing"`. Every other
+reply says `"defaults"` for those frames while serving the same empty render:
+the engine rewrites the frame records of every Design reply and of the
+`workspace.setMode` entry snapshot (`frame`, `frames`, `snapshot.frames` and
+the thumbnails reply's `prepared`) in `options-shows-compat.ts`. The engine's own
 thread holds that last good render; a preparation worker hands each one it
 makes to the engine and leaves a frame that needs one to the engine, so a
 frame's reported version always matches the bytes `zeros-design://` serves,
@@ -2837,7 +2862,23 @@ acknowledgements, and for Undo and Redo of those edits, which prepare the
 frames the step restored (page and theme steps keep the aggregate). A write or
 step that reaches a stylesheet, tokens.css or a component reads the
 aggregate, since every linking frame renders it. Scoped replies carry no
-lint; the projection keeps other files' confirmed rows. Each reply
+lint, so the write lock is never held for it (linting the written frame held
+the lock 3-25 ms longer, 30-80 % of its locked time, in a measured bench); the projection keeps
+other files' confirmed rows and marks the written frames `lintPending`. On
+engines that negotiate `design.frames.lint.v1` (Local only) the renderer then
+asks, on the background lane, for those frames' rows at the source versions it
+holds; the engine lints them without the document lock, checks each frame's
+version before and after, leaves out a frame that moved on and refuses the read
+when the canvas or directory changed. The renderer applies the rows only to
+frames still at the version asked, of the same directory and owner, replacing
+their source rows and keeping their runtime audits; a written frame keeps its
+earlier rows until then. A frame that changes outside Zeros
+(`design.frames.changes.v1`) asks for its rows on its next preparation:
+engines that negotiate `design.frames.prepare-lint.v1` lint the named
+`lintFiles` and the renderer replaces them the same way. Both replies carry at
+most 256 rows a frame, most severe first. A frame's first preparation on open
+is not linted, so a lazily opened directory shows no rows for frames nobody has
+changed or validated yet. Each reply
 contains complete validated page/frame metadata and prepared source for at most
 16 affected frames; a single-frame edit never re-prepares, lints or reads the
 HTML of unrelated frames (token names for its lint are read without usage

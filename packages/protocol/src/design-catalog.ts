@@ -256,6 +256,24 @@ export const designFramesPrepareSchema = z.object({
   surfaceCosts: z.literal(true).optional(),
   /** Only requested after design.component-options.v1 capability negotiation. */
   componentOptions: z.literal(true).optional(),
+  /** Of `files`, those whose source lint rows the reply should carry. Only
+   * requested after design.frames.prepare-lint.v1 capability negotiation. */
+  lintFiles: z.array(designFrameFileSchema).min(1).max(16).optional(),
+}).strict();
+
+/** Local engines that lint the frames a preparation names
+ * (design.frames.prepare lintFiles) and return their rows. */
+export const DESIGN_FRAMES_PREPARE_LINT_CAPABILITY = "design.frames.prepare-lint.v1";
+
+/** Local engines that answer design.frames.lint: source lint rows for frames
+ * a renderer names at the source version it holds. A write acknowledgement
+ * carries no rows, so the write lock is never held for lint. */
+export const DESIGN_FRAMES_LINT_CAPABILITY = "design.frames.lint.v1";
+const versionedFrameSchema = z.object({ file: designFrameFileSchema, sourceVersion: z.string().regex(/^[a-f0-9]{24}$/) }).strict();
+export const designFramesLintSchema = z.object({
+  workspaceId: z.string().min(1).max(4096),
+  directoryId: z.string().regex(/^design_[A-Za-z0-9_-]{1,64}$/),
+  frames: z.array(versionedFrameSchema).min(1).max(16).refine((frames) => new Set(frames.map((frame) => frame.file)).size === frames.length),
 }).strict();
 
 /** Local engines that name the Design frames a worktree change reaches, as
@@ -301,6 +319,19 @@ const optionReachSchema = z.record(z.string().min(1).max(LIMITS.optionName), z.e
 const boundedRecord = <T extends z.ZodTypeAny>(key: z.ZodString, value: T, max: number) =>
   z.record(key, value).refine((record) => Object.keys(record).length <= max, { message: `At most ${max} entries` });
 const recordLimitSchema = z.enum(DESIGN_COMPONENT_RECORD_LIMIT_CODES);
+/** What a frame shows when options did not apply. "nothing" (no last good
+ * render, and the template failed with its defaults too) reaches only a
+ * renderer that sent DESIGN_OPTIONS_SHOW_NOTHING_PARAM; older renderers
+ * accept only the first two and are told "defaults". */
+const notAppliedSchema = z.enum(["last-good", "defaults", "nothing"]);
+
+/** Local engines that can say a frame shows nothing where options did not
+ * apply, to a renderer that asks with DESIGN_OPTIONS_SHOW_NOTHING_PARAM. */
+export const DESIGN_OPTIONS_SHOW_NOTHING_CAPABILITY = "design.component-options.shows-nothing.v1";
+/** The Design request parameter a renderer sends once it negotiated
+ * DESIGN_OPTIONS_SHOW_NOTHING_CAPABILITY. The engine removes it before the
+ * operation reads its parameters. */
+export const DESIGN_OPTIONS_SHOW_NOTHING_PARAM = "optionsShowNothing";
 
 /** Text a hole fills on a main component frame: the layer (its data-oid)
  * and the options the hole reads (none when it reads only a loop's name),
@@ -314,7 +345,7 @@ export const DESIGN_COMPONENT_BOUND_TEXT_LIMIT = 512;
 export const designFrameComponentSchema = z.object({
   elements: declarationElementsSchema,
   reach: optionReachSchema,
-  notApplied: z.enum(["last-good", "defaults"]).optional(),
+  notApplied: notAppliedSchema.optional(),
   boundText: boundedRecord(z.string().min(1).max(LIMITS.layerId),
     z.array(z.string().min(1).max(LIMITS.optionName)).max(LIMITS.boundTextOptions), DESIGN_COMPONENT_BOUND_TEXT_LIMIT).optional(),
   /** The declaration is past this limit: `elements` and `reach` are empty,
@@ -405,7 +436,7 @@ export const designFrameInstancesSchema = z.object({
     missing: z.literal(true).optional(),
   }).strict(), DESIGN_FRAME_INSTANCE_LIMITS.hosts),
   /** What the frame shows when some instance's values did not apply. */
-  notApplied: z.enum(["last-good", "defaults"]).optional(),
+  notApplied: notAppliedSchema.optional(),
 }).strict();
 export type DesignFrameInstances = z.infer<typeof designFrameInstancesSchema>;
 
@@ -429,13 +460,37 @@ export const designPreparedFrameSchema = designCatalogFrameSchema.pick({
   instances: designFrameInstancesSchema.optional(),
 }).strict();
 const PREPARE_REPLY_ERRORS = 16;
+/** Source lint rows a preparation carries per frame; past this a frame's
+ * rows are cut to the most severe. */
+export const DESIGN_PREPARED_LINT_ROWS_PER_FRAME = 256;
+const preparedLintSchema = z.object({
+  /** Every file linted; a file listed with no rows has none. */
+  checkedFiles: z.array(designFrameFileSchema).max(16),
+  violations: z.array(z.object({
+    ruleId: z.string().min(1).max(64),
+    severity: z.enum(["error", "warning"]),
+    message: z.string().max(16_384),
+    file: designFrameFileSchema,
+    line: z.number().int().nonnegative(),
+    column: z.number().int().nonnegative(),
+    oid: z.string().max(256).optional(),
+    fix: z.string().max(16_384).optional(),
+  }).strict()).max(16 * DESIGN_PREPARED_LINT_ROWS_PER_FRAME),
+}).strict();
 export const designFramesPrepareReplySchema = z.object({
   directoryId,
   catalogRevision: revision,
   frames: z.array(designPreparedFrameSchema).max(16),
   errors: z.array(z.object({ file: designFrameFileSchema, message: z.string().max(16_384) }).strict()).max(PREPARE_REPLY_ERRORS),
+  /** Present only when the request named lintFiles. */
+  lint: preparedLintSchema.optional(),
 }).strict();
-const prepareReplyEnvelopeSchema = designFramesPrepareReplySchema.extend({ frames: z.array(z.unknown()).max(16) });
+/** `frames` names those linted at the version asked for; a frame whose
+ * source moved on is left out and has no rows. */
+export const designFramesLintReplySchema = preparedLintSchema.extend({
+  frames: z.array(versionedFrameSchema).max(16),
+}).strict();
+const prepareReplyEnvelopeSchema = designFramesPrepareReplySchema.extend({ frames: z.array(z.unknown()).max(16), lint: z.unknown().optional() });
 
 /** The problem a frame shows when its prepared record does not hold. */
 export const DESIGN_PREPARED_FRAME_INVALID_MESSAGE = "Zeros could not read this frame's prepared record.";
@@ -443,7 +498,7 @@ export const DESIGN_PREPARED_FRAME_INVALID_MESSAGE = "Zeros could not read this 
 /** A preparation reply, with each frame's record checked on its own: one
  * that does not hold becomes that frame's error and the others are kept. A
  * record that names no frame cannot be placed, so the reply is refused. */
-export function parseDesignFramesPrepareReply(raw: unknown): z.infer<typeof designFramesPrepareReplySchema> {
+export function parseDesignFramesPrepareReply(raw: unknown, negotiated: { optionsShowNothing?: boolean } = {}): z.infer<typeof designFramesPrepareReplySchema> {
   // The envelope is checked whole and each record once; only the error
   // bound, which failed records add to, is checked again by hand.
   const envelope = prepareReplyEnvelopeSchema.parse(raw);
@@ -451,12 +506,16 @@ export function parseDesignFramesPrepareReply(raw: unknown): z.infer<typeof desi
   const errors = [...envelope.errors];
   for (const candidate of envelope.frames) {
     const parsed = designPreparedFrameSchema.safeParse(candidate);
-    if (parsed.success) {
+    if (parsed.success && (negotiated.optionsShowNothing ||
+      (parsed.data.component?.notApplied !== "nothing" && parsed.data.instances?.notApplied !== "nothing"))) {
       frames.push(parsed.data);
       continue;
     }
     errors.push({ file: designFrameFileSchema.parse((candidate as { file?: unknown } | null)?.file), message: DESIGN_PREPARED_FRAME_INVALID_MESSAGE });
   }
   if (errors.length > PREPARE_REPLY_ERRORS) throw new Error(`A preparation reply reports at most ${PREPARE_REPLY_ERRORS} frame errors.`);
-  return { ...envelope, frames, errors };
+  // Lint rows are advisory: rows that do not hold are dropped, never the frames.
+  const { lint: rawLint, ...rest } = envelope;
+  const lint = rawLint === undefined ? undefined : preparedLintSchema.safeParse(rawLint);
+  return { ...rest, frames, errors, ...(lint?.success ? { lint: lint.data } : {}) };
 }

@@ -18,7 +18,11 @@ import {
   DESIGN_CATALOG_BATCH_ENTRIES,
   DESIGN_CATALOG_READ_OPERATION,
   DESIGN_CATALOG_WIDE_BATCH_ENTRIES,
+  DESIGN_OPTIONS_SHOW_NOTHING_PARAM,
+  designFramesLintReplySchema,
+  parseDesignFramesPrepareReply,
 } from "@zeros/protocol/design-catalog";
+import { withDesignDocumentWrite } from "../../design/document-write-lock";
 
 const directory = "Product - Design";
 const admission = {
@@ -130,6 +134,105 @@ describe("Design catalog service authority", () => {
       reach: { width: "css" },
     });
     expect(capable.frames[0]).not.toHaveProperty("surfaceCost");
+  });
+  it.each([null, "organization-local"])("a main whose own template fails shows nothing and says so, to a renderer that asks, for %s", async organizationId => {
+    insert(root, organizationId);
+    const canvasFile = path.join(root, directory, "meta/canvas.json");
+    const canvas = JSON.parse(await readFile(canvasFile, "utf8"));
+    canvas.frames.a.component = "chip";
+    await writeFile(canvasFile, JSON.stringify(canvas));
+    await writeFile(path.join(root, directory, "page-1/a.html"),
+      '<html><head><template data-zd-options>\n<zd-option name="label" type="text" default="Chip"></zd-option>\n</template></head><body data-oid="a"><b data-oid="r">{{ label + }}</b></body></html>');
+    await writeFile(path.join(root, directory, "page-1/b.html"), '<html><body data-oid="b"><zd-chip data-oid="ws"></zd-chip></body></html>');
+    const workspaceId = params.workspaceId;
+    const navigation = await service.handle("design.navigation.read", { workspaceId }) as { catalogRevision: string };
+    const input = { workspaceId, directoryId: params.directoryId, catalogRevision: navigation.catalogRevision,
+      files: ["page-1/a.html", "page-1/b.html"], componentOptions: true };
+    const shownReply = await service.handle("design.frame", { workspaceId, frame: "page-1/a.html" });
+    // Every reply below made without negotiating carries no "nothing", whatever key holds the record.
+    expect(JSON.stringify(shownReply)).not.toContain('"nothing"');
+    const shown = (shownReply as { frame: { srcDoc: string } }).frame.srcDoc;
+    expect(shown).not.toContain("{{");
+    expect(shown).not.toContain("label +");
+    const capable = parseDesignFramesPrepareReply(await service.handle("design.frames.prepare", { ...input, [DESIGN_OPTIONS_SHOW_NOTHING_PARAM]: true }),
+      { optionsShowNothing: true });
+    const byFile = new Map(capable.frames.map((frame) => [frame.file, frame]));
+    expect(byFile.get("page-1/a.html")?.component?.notApplied).toBe("nothing");
+    expect(byFile.get("page-1/b.html")?.instances?.hosts.ws?.failed).toBe(true);
+    expect(byFile.get("page-1/b.html")?.instances?.notApplied).toBe("nothing");
+    const snapshot = await service.handle("design.snapshot", { workspaceId, [DESIGN_OPTIONS_SHOW_NOTHING_PARAM]: true }) as {
+      snapshot: { frames: Array<{ file: string; component?: { notApplied?: string }; instances?: { notApplied?: string } }> } };
+    expect(snapshot.snapshot.frames.find((frame) => frame.file === "page-1/a.html")?.component?.notApplied).toBe("nothing");
+    // An older renderer reads records strictly and knows only these two values:
+    // it is told "defaults" and still receives no raw template source.
+    const legacyRaw = await service.handle("design.frames.prepare", input);
+    expect(JSON.stringify(legacyRaw)).not.toContain('"nothing"');
+    const legacy = parseDesignFramesPrepareReply(legacyRaw);
+    expect(legacy.errors).toEqual([]);
+    expect(legacy.frames.map((frame) => frame.component?.notApplied ?? frame.instances?.notApplied)).toEqual(["defaults", "defaults"]);
+    const legacySnapshot = await service.handle("design.snapshot", { workspaceId });
+    expect(JSON.stringify(legacySnapshot)).not.toContain('"nothing"');
+    const legacyShownReply = await service.handle("design.frame", { workspaceId, frame: "page-1/a.html" });
+    expect(JSON.stringify(legacyShownReply)).not.toContain('"nothing"');
+    const legacyShown = (legacyShownReply as { frame: { srcDoc: string } }).frame.srcDoc;
+    expect(legacyShown).not.toContain("{{");
+  });
+  it.each([null, "organization-local"])("lints on preparation only the frames a renderer names, for %s", async organizationId => {
+    insert(root, organizationId);
+    await writeFile(path.join(root, directory, "page-1/a.html"), '<html><body data-oid="a"><p data-oid="p" class="no-such-class">Synthetic</p></body></html>');
+    const navigation = await service.handle("design.navigation.read", { workspaceId: params.workspaceId }) as { catalogRevision: string };
+    const input = { workspaceId: params.workspaceId, directoryId: params.directoryId,
+      catalogRevision: navigation.catalogRevision, files: ["page-1/a.html", "page-1/b.html"] };
+    const legacy = await service.handle("design.frames.prepare", input);
+    expect(legacy).not.toHaveProperty("lint");
+    const linted = designFramesPrepareReplySchema.parse(await service.handle("design.frames.prepare", { ...input, lintFiles: ["page-1/a.html"] }));
+    expect(linted.frames.map((frame) => frame.file).sort()).toEqual(["page-1/a.html", "page-1/b.html"]);
+    expect(linted.lint?.checkedFiles).toEqual(["page-1/a.html"]);
+    expect(linted.lint?.violations).toContainEqual(expect.objectContaining({ file: "page-1/a.html", ruleId: "unknown-class", oid: "p" }));
+    expect(linted.lint?.violations.every((violation) => violation.file === "page-1/a.html")).toBe(true);
+    // Linting on preparation reads the source; it never writes it.
+    expect(await readFile(path.join(root, directory, "page-1/a.html"), "utf8")).toContain('class="no-such-class"');
+  });
+  it.each([null, "organization-local"])("lints the frames that prepared when another named frame's file is gone, for %s", async organizationId => {
+    insert(root, organizationId);
+    await writeFile(path.join(root, directory, "page-1/a.html"), '<html><body data-oid="a"><p data-oid="p" class="no-such-class">Synthetic</p></body></html>');
+    const navigation = await service.handle("design.navigation.read", { workspaceId: params.workspaceId }) as { catalogRevision: string };
+    // Changed outside Zeros while both were prepared: one edited, one deleted.
+    await rm(path.join(root, directory, "page-1/b.html"));
+    const files = ["page-1/a.html", "page-1/b.html"];
+    const reply = designFramesPrepareReplySchema.parse(await service.handle("design.frames.prepare", { workspaceId: params.workspaceId,
+      directoryId: params.directoryId, catalogRevision: navigation.catalogRevision, files, lintFiles: files }));
+    expect(reply.frames.map((frame) => frame.file)).toEqual(["page-1/a.html"]);
+    expect(reply.errors.map((error) => error.file)).toEqual(["page-1/b.html"]);
+    expect(reply.lint?.checkedFiles).toEqual(["page-1/a.html"]);
+    expect(reply.lint?.violations).toContainEqual(expect.objectContaining({ file: "page-1/a.html", ruleId: "unknown-class", oid: "p" }));
+  });
+  it.each([null, "organization-local"])("keeps lint off a scoped write acknowledgement and lints the written frame on request without the write lock, for %s", async organizationId => {
+    insert(root, organizationId);
+    const source = '<html><body data-oid="a"><p data-oid="p" class="no-such-class">Synthetic</p></body></html>';
+    await writeFile(path.join(root, directory, "page-1/a.html"), source);
+    const workspaceId = params.workspaceId;
+    const geometry = { x: 0, y: 0, w: 100, h: 100, z: 0 };
+    const moved = await service.handle("design.frames.move", { workspaceId, snapshotMode: "scoped",
+      moves: [{ frame: "page-1/a.html", from: geometry, to: { ...geometry, x: 40 } }] }) as {
+      snapshot: { frames: Array<{ file: string; sourceVersion: string }>; lint: { checkedFiles: string[]; violations: unknown[] } } };
+    expect(moved.snapshot.lint).toMatchObject({ checkedFiles: [], violations: [] });
+    const sourceVersion = moved.snapshot.frames.find((frame) => frame.file === "page-1/a.html")!.sourceVersion;
+    // A write holding the document lock does not keep this read waiting.
+    let release!: () => void;
+    const held = withDesignDocumentWrite(root, () => new Promise<void>((done) => { release = done; }));
+    try {
+      const linted = designFramesLintReplySchema.parse(await service.handle("design.frames.lint", { workspaceId, directoryId: params.directoryId,
+        frames: [{ file: "page-1/a.html", sourceVersion }, { file: "page-1/b.html", sourceVersion: "0".repeat(24) }] }));
+      // b.html has another source than the one named: no rows for it.
+      expect(linted.frames).toEqual([{ file: "page-1/a.html", sourceVersion }]);
+      expect(linted.checkedFiles).toEqual(["page-1/a.html"]);
+      expect(linted.violations).toContainEqual(expect.objectContaining({ file: "page-1/a.html", ruleId: "unknown-class", oid: "p" }));
+      expect(linted.violations.every((violation) => violation.file === "page-1/a.html")).toBe(true);
+    } finally { release(); await held; }
+    expect(await readFile(path.join(root, directory, "page-1/a.html"), "utf8")).toBe(source);
+    await expect(service.handle("design.frames.lint", { workspaceId, directoryId: "design_other", frames: [{ file: "page-1/a.html", sourceVersion }] }))
+      .rejects.toThrow();
   });
   it.each([null, "organization-local"])("negotiates page hashes and page-scoped write acknowledgements for %s", async organizationId => {
     insert(root, organizationId);

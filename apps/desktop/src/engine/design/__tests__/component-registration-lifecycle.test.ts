@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -97,6 +97,7 @@ describe("instances of a component that is no longer there", () => {
   const MAIN = '<!doctype html><html><head><template data-zd-options>\n<zd-option name="label" type="text" default="Chip"></zd-option>\n</template></head>' +
     '<body><b data-oid="root">{{ label }}</b></body></html>';
   const HOST = '<!doctype html><html><head></head><body><p data-oid="p">Before</p><zd-chip data-oid="ws" label="Hi"></zd-chip></body></html>';
+  const LEGACY = '<!doctype html><html><head></head><body><b data-zid="b">Chip</b></body></html>';
   const register = async (file: string, name: string) => {
     const canvas = await readCanvas(root);
     canvas.frame_info[file] = { ...canvas.frame_info[file]!, component: name } as never;
@@ -155,7 +156,66 @@ describe("instances of a component that is no longer there", () => {
     const lint = (await lintDesignDocument(root, host.file, { healOids: false, includeRuntimeAudits: false })).violations;
     expect(lint.some((violation) => violation.oid === "ws" || /zd-chip/.test(violation.message))).toBe(true);
   });
-});
+  it("names the registered file that is missing, in one row", async () => {
+    const main = await createDesignFrame(root, { title: "Chip" });
+    const host = await createDesignFrame(root, { title: "Workspace" });
+    await writeFile(path.join(root, DESIGN_DIRECTORY_NAME, main.file), MAIN);
+    await register(main.file, "chip");
+    await writeFile(path.join(root, DESIGN_DIRECTORY_NAME, host.file), HOST);
+    await rename(path.join(root, DESIGN_DIRECTORY_NAME, main.file), path.join(root, DESIGN_DIRECTORY_NAME, main.file.replace(/\.html$/, "-old.html")));
+    const lint = (await lintDesignDocument(root, host.file, { healOids: false, includeRuntimeAudits: false })).violations;
+    expect(lint.filter((violation) => violation.oid === "ws" || /zd-chip/.test(violation.message))).toEqual([expect.objectContaining({
+      ruleId: "component-undefined", severity: "error", oid: "ws",
+      message: `Component <zd-chip> is registered to ${main.file}, which is missing.`,
+      fix: `Restore ${main.file}, register another frame as zd-chip in meta/canvas.json, or replace the component instance.`,
+    })]);
+  });
+
+  it("says no frame is registered and there is no components/ file when the name is not defined at all", async () => {
+    const host = await createDesignFrame(root, { title: "Workspace" });
+    await writeFile(path.join(root, DESIGN_DIRECTORY_NAME, host.file), HOST);
+    const lint = (await lintDesignDocument(root, host.file, { healOids: false, includeRuntimeAudits: false })).violations;
+    expect(lint.filter((violation) => violation.oid === "ws" || /zd-chip/.test(violation.message))).toEqual([expect.objectContaining({
+      ruleId: "component-undefined", oid: "ws",
+      message: "Component <zd-chip> has no definition: no frame is registered as zd-chip and there is no components/chip.html.",
+    })]);
+  });
+
+  it.each([
+    ["a symbolic link", "it is a symbolic link, which Zeros does not follow", async (file: string) => {
+      await writeFile(path.join(root, DESIGN_DIRECTORY_NAME, "real-chip.html"), LEGACY);
+      await symlink(path.join(root, DESIGN_DIRECTORY_NAME, "real-chip.html"), file);
+    }],
+    ["over the size limit", "it is over 512 KiB", async (file: string) => {
+      await writeFile(file, LEGACY.replace("</body>", `<p>${"x".repeat(600 * 1024)}</p></body>`));
+    }],
+    ["not a file", "it is not a readable file", async (file: string) => { await mkdir(file); }],
+  ])("reports a components/ definition that is %s as unusable, never as missing", async (_case, reason, spoil) => {
+    const host = await createDesignFrame(root, { title: "Workspace" });
+    await writeFile(path.join(root, DESIGN_DIRECTORY_NAME, host.file), HOST);
+    await mkdir(path.join(root, DESIGN_DIRECTORY_NAME, "components"), { recursive: true });
+    await spoil(path.join(root, DESIGN_DIRECTORY_NAME, "components", "chip.html"));
+    const lint = (await lintDesignDocument(root, host.file, { healOids: false, includeRuntimeAudits: false })).violations;
+    expect(lint.filter((violation) => violation.oid === "ws" || /zd-chip/.test(violation.message))).toEqual([expect.objectContaining({
+      ruleId: "component-invalid", severity: "error", oid: "ws",
+      message: `Component zd-chip's definition components/chip.html cannot be used: ${reason}.`,
+    })]);
+    const render = await prepareFrameRenderSource(root, HOST, { width: 400, height: 300 }, undefined, undefined, host.file, await readCanvas(root));
+    expect(render.sanitized).toContain('<p data-oid="p">Before</p>');
+    expect(render.instances?.hosts.ws).toBeUndefined();
+  });
+
+  it("says why a registered frame that is there cannot be used", async () => {
+    const main = await createDesignFrame(root, { title: "Chip" });
+    const host = await createDesignFrame(root, { title: "Workspace" });
+    await writeFile(path.join(root, DESIGN_DIRECTORY_NAME, main.file), MAIN.replace("</body>", `<p>${"x".repeat(600 * 1024)}</p></body>`));
+    await register(main.file, "chip");
+    await writeFile(path.join(root, DESIGN_DIRECTORY_NAME, host.file), HOST);
+    const lint = (await lintDesignDocument(root, host.file, { healOids: false, includeRuntimeAudits: false })).violations;
+    expect(lint.filter((violation) => violation.oid === "ws")).toEqual([expect.objectContaining({
+      ruleId: "component-invalid", message: `${main.file}: The frame registered as zd-chip (${main.file}) cannot be used: it is over 512 KiB.`,
+    })]);
+  });});
 
 describe("canvas files and the component field", () => {
   const base = {
