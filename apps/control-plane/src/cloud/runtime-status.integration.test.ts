@@ -130,7 +130,10 @@ suite("idle worker runtime status", () => {
   it("prepares a different runtime with membership authority despite GitHub denial", async () => {
     const f = await fixture(); f.deny(); f.pin("b".repeat(64));
     try {
-      expect(await f.request({ op: "prepare", revision: "0", generation: 1, instanceId: randomUUID() })).toMatchObject({ status: "prepared" });
+      const revision = (await f.row()).login_revision;
+      expect(revision).not.toBe("0");
+      expect(await f.request({ op: "prepare", revision: "0", generation: 1, instanceId: randomUUID() })).toEqual({ status: "unavailable" });
+      expect(await f.request({ op: "prepare", revision, generation: 1, instanceId: randomUUID() })).toMatchObject({ status: "prepared" });
       expect(f.authorize).not.toHaveBeenCalled(); expect(f.compute.execLong).toHaveBeenCalledOnce(); expect(f.url).toHaveBeenCalledOnce();
       expect((await pool.query("SELECT id FROM cloud_worker_runtime_handoffs WHERE workspace_id=$1", [f.input.id])).rowCount).toBe(1);
     } finally { f.adoption.close(); }

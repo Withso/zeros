@@ -404,10 +404,10 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
   app.post(`${CLOUD_V2_WORKER_API}/github-token`, async c => {
     const auth = await session(c, deps);
     const input = await body(c, z.object({ purpose: z.enum(["git", "gh"]).optional(), failedTokenSha256: z.string().length(64).regex(/^[a-f0-9]{64}$/).optional(), contextId: z.uuid().optional() }).strict());
-    if (auth.workspace.executionMode === "active") return c.json(await deps.execution!.githubToken(auth, input.contextId, input.purpose ?? "git", input.failedTokenSha256));
     assertLegacyMaterial(auth.workspace);
     let granted: { token: string; expiresAt: number };
     try {
+      if (auth.workspace.executionMode === "active") return c.json(await deps.execution!.githubToken(auth, input.contextId, input.purpose ?? "git", input.failedTokenSha256));
       if (auth.workspace.state !== "stopping") {
         if (deps.continueSource) await deps.continueSource(auth.workspace, auth.workspace);
         else await deps.authorizeSource?.(auth.workspace);
@@ -415,6 +415,7 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
       granted = await deps.githubToken(auth.workspace, input.purpose ?? "git", ...(input.failedTokenSha256 ? [input.failedTokenSha256] : []));
     } catch (error) {
       const failure = cloudGithubFailure(error);
+      if (auth.workspace.executionMode === "active" && failure.kind !== "http") throw error;
       deps.logger?.warn("[cloud-v2] GitHub credential unavailable", failure);
       return c.json({ error: { code: "github_token_unavailable", reason: failure.reason } }, 409);
     }

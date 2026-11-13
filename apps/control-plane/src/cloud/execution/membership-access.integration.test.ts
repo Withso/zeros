@@ -60,9 +60,26 @@ database("organization membership admits work independently of GitHub network ac
     const lease = await response.json(); expect(lease.userId).toBe(f.viewer.id); expect(lease.agents.claude).toBeDefined();
     expect(f.fetcher).not.toHaveBeenCalled();
     const github = await f.worker("github-token", { contextId: lease.contextId, purpose: "git" });
-    expect([403, 409]).toContain(github.status);
+    expect(github.status).toBe(409);
+    expect(await github.json()).toEqual({ error: { code: "github_token_unavailable", reason: "connection-required" } });
     const renewed = await f.worker("execution-leases/renew", { contextIds: [client.context.contextId, lease.contextId] });
     expect(renewed.status).toBe(200); expect((await renewed.json()).leases.every((row: { refused?: unknown }) => !row.refused)).toBe(true);
+  });
+
+  it.each(["denied", "unavailable"] as const)("preserves the worker's GitHub refusal reason when access is %s", async state => {
+    const turn = await f.dispatch(f.prompt(), f.viewer);
+    const response = await f.worker("turn-lease", turn.lease); expect(response.status).toBe(200);
+    const lease = await response.json();
+    if (state === "denied") f.denied.add(`${f.viewer.id}:42`);
+    else f.unavailable.add(f.viewer.id);
+    const github = await f.worker("github-token", { contextId: lease.contextId, purpose: "git" });
+    expect(github.status).toBe(409);
+    expect(await github.json()).toEqual({ error: { code: "github_token_unavailable", reason: state === "denied" ? "access-denied" : "unavailable" } });
+    const renewed = await f.worker("execution-leases/renew", { contextIds: [lease.contextId] });
+    expect(renewed.status).toBe(200);
+    const leases = (await renewed.json()).leases;
+    expect(leases).toMatchObject([{ contextId: lease.contextId }]);
+    expect(leases.every((row: { refused?: unknown }) => !row.refused)).toBe(true);
   });
 
   it.each(["denial", "selection", "disconnect"] as const)("keeps live authority on GitHub %s, but still cuts membership loss", async change => {
