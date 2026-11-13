@@ -103,7 +103,9 @@ database("workspace membership across GitHub refresh and outages", () => {
     f.denied.add(`${f.creator.id}:42`); f.fetcher.mockClear();
     expect((await history()).status).toBe(200);
     expect(f.fetcher).not.toHaveBeenCalled();
-    expect((await f.worker("github-token", { purpose: "git", contextId: turn.begun.contextId })).status).toBe(404);
+    const refused = await f.worker("github-token", { purpose: "git", contextId: turn.begun.contextId });
+    expect(refused.status).toBe(409);
+    expect(await refused.json()).toEqual({ error: { code: "github_token_unavailable", reason: "access-denied" } });
     expect((await pool.query("SELECT state,reason FROM cloud_v2_execution_contexts WHERE id=$1", [turn.begun.contextId])).rows[0])
       .toEqual({ state: "active", reason: null });
     expect((await connect()).status).toBe(200);
@@ -114,8 +116,8 @@ database("workspace membership across GitHub refresh and outages", () => {
     const turn = await f.dispatch();
     f.denied.add(`${f.creator.id}:42`);
     const response = await f.worker("github-token", { purpose: "git", contextId: turn.begun.contextId });
-    expect(response.status).toBe(404);
-    expect(await response.json()).toMatchObject({ error: { code: "github_repository_unavailable" } });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ error: { code: "github_token_unavailable", reason: "access-denied" } });
   });
 
   it("leaves source-read authority and the turn intact after a write-only Git denial", async () => {
