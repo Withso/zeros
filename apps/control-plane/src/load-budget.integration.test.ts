@@ -6,6 +6,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { createPool, withSystemTx } from "./db.js";
 import { configuredDatabaseContext, SYSTEM_DATABASE_CONTEXT } from "./db-context.js";
 import { requestTiming } from "./request-timing.js";
+import { resetMigratedTestDatabase } from "./test-database.js";
 import { budgetTable, deferred, holdLoadStream, LOAD_BUDGETS, LoadBudgetProbe, routeTable, scenarioTotals, selectLoadRequests, type LoadScenario } from "./test-support/load-budget.js";
 import { loadBudgetFixture, loadBudgetReadFrame, OBSERVED_IDLE_REPLAY, R1_IDLE_REPLAY } from "./test-support/load-budget-fixture.js";
 
@@ -41,6 +42,15 @@ describe("load replay stream lifetime", () => {
 });
 database("control-plane load budgets through the router and PostgreSQL", () => {
   let pool: pg.Pool, probe: LoadBudgetProbe;
+  beforeAll(async () => {
+    // A migration-ladder suite can leave public empty after global setup.
+    const empty = createPool(process.env.TEST_DATABASE_URL!, { maxConnections: 1 });
+    try {
+      await empty.query("DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;");
+      expect((await empty.query("SELECT to_regclass('public.cloud_v2_workspaces') AS workspace")).rows[0]?.workspace).toBeNull();
+      await resetMigratedTestDatabase(empty);
+    } finally { await empty.end(); }
+  });
   beforeEach(() => {
     pool = createPool(process.env.TEST_DATABASE_URL!, { maxConnections: 10 });
     probe = new LoadBudgetProbe(pool);
