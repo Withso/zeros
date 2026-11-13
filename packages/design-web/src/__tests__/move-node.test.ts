@@ -32,3 +32,68 @@ describe("moving authored layers", () => {
     ).toContain('</main><div data-oid="a">');
   });
 });
+
+describe("moving a layer that has its own line", () => {
+  const indented = [
+    "<!doctype html><html><body>",
+    '<main data-oid="root">',
+    '  <h1 data-oid="title">Title</h1>',
+    '  <p data-oid="one">One</p>',
+    '  <p data-oid="two">Two</p>',
+    "</main>",
+    "</body></html>",
+  ].join("\n");
+
+  it("reorders whole lines, leaving no blank line and no shared line", () => {
+    expect(mutateDesignNodeMoveSource(indented, "title", "root", null)).toBe(
+      [
+        "<!doctype html><html><body>",
+        '<main data-oid="root">',
+        '  <p data-oid="one">One</p>',
+        '  <p data-oid="two">Two</p>',
+        '  <h1 data-oid="title">Title</h1>',
+        "</main>",
+        "</body></html>",
+      ].join("\n"),
+    );
+    expect(mutateDesignNodeMoveSource(indented, "two", "root", "title")).toBe(
+      [
+        "<!doctype html><html><body>",
+        '<main data-oid="root">',
+        '  <p data-oid="two">Two</p>',
+        '  <h1 data-oid="title">Title</h1>',
+        '  <p data-oid="one">One</p>',
+        "</main>",
+        "</body></html>",
+      ].join("\n"),
+    );
+  });
+
+  it("keeps CRLF line endings on the moved line", () => {
+    const crlf = indented.replaceAll("\n", "\r\n");
+    const moved = mutateDesignNodeMoveSource(crlf, "title", "root", null);
+    expect(moved).not.toMatch(/(^|[^\r])\n/);
+    expect(moved).toBe(mutateDesignNodeMoveSource(indented, "title", "root", null).replaceAll("\n", "\r\n"));
+    expect(mutateDesignNodeMoveSource(moved, "title", "root", "one")).toBe(crlf);
+  });
+
+  it("moving back restores the exact source", () => {
+    const moved = mutateDesignNodeMoveSource(indented, "title", "root", null);
+    expect(mutateDesignNodeMoveSource(moved, "title", "root", "one")).toBe(indented);
+  });
+
+  it("takes its line along when the destination closes on the same line", () => {
+    const inline = indented.replace("</main>", '  <section data-oid="nested"></section>\n</main>');
+    expect(mutateDesignNodeMoveSource(inline, "title", "nested", null)).toBe(
+      [
+        "<!doctype html><html><body>",
+        '<main data-oid="root">',
+        '  <p data-oid="one">One</p>',
+        '  <p data-oid="two">Two</p>',
+        '  <section data-oid="nested"><h1 data-oid="title">Title</h1></section>',
+        "</main>",
+        "</body></html>",
+      ].join("\n"),
+    );
+  });
+});

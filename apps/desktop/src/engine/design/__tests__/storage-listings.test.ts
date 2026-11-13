@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -25,7 +25,7 @@ import { assertSafeDesignStoragePath, atomicWriteDesignStorageFile, withDesignSt
 describe("Design storage path listings", () => {
   let root: string;
   beforeEach(() => {
-    root = mkdtempSync(path.join(tmpdir(), "zeros-storage-listings-"));
+    root = realpathSync(mkdtempSync(path.join(tmpdir(), "zeros-storage-listings-")));
     process.env.ZEROS_DATA_DIR = path.join(root, "private");
   });
   afterEach(() => {

@@ -1205,6 +1205,8 @@ async function main() {
       publishHomeFrame(currentHomeSource, shows ?? undefined);
     };
   }
+  if (layoutGestureHarness)
+    (window as Window & { __zerosHarnessHomeSource?: () => string }).__zerosHarnessHomeSource = () => currentHomeSource;
   let nestedFrameCounter = 0;
   let styleGenerationCounter = 0;
   let textTransactionCounter = 0;
@@ -2055,6 +2057,7 @@ async function main() {
           transaction?.operations?.some(
             (operation) =>
               operation.type === "node.set-styles" ||
+              operation.type === "node.move" ||
               operation.type === "node.set-attribute" ||
               operation.type === "node.set-html" ||
               operation.type === "node.duplicate" ||

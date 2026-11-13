@@ -193,7 +193,8 @@ describe("canvas items through WorkspaceService", () => {
       const moved = { id: "dup1", kind: "section", x: 50, y: 40, width: 200, text: "Moved" };
       const edited = await call("design.canvas.item.put", { pageId, item: moved });
       expect(pageItems(edited.snapshot)).toEqual([moved]);
-      expect(entries()).toEqual([JSON.stringify(malformed), JSON.stringify({ extra: { keep: true }, ...moved })]);
+      // The entry keeps its authored key order; only the changed values are rewritten.
+      expect(entries()).toEqual([JSON.stringify(malformed), JSON.stringify({ ...moved, extra: { keep: true } })]);
     });
 
     it("is kept as written when the drawn item is deleted", async () => {

@@ -512,15 +512,68 @@ export function mutateDesignNodeMoveSource(
   if (insertion === span.startOffset || insertion === span.endOffset)
     return source;
   const content = source.slice(span.startOffset, span.endOffset);
-  const removed =
-    source.slice(0, span.startOffset) + source.slice(span.endOffset);
-  const offset =
-    insertion > span.startOffset ? insertion - content.length : insertion;
-  return removed.slice(0, offset) + content + removed.slice(offset);
+  const line = ownLine(source, span.startOffset, span.endOffset);
+  const target = line ? lineStart(source, insertion) : null;
+  // A layer on its own line lands on its own line, indented like the sibling
+  // it precedes or the destination's last child, so a reorder leaves neither a
+  // blank line nor two layers on one line.
+  const indent =
+    target === null
+      ? null
+      : before
+        ? source.slice(target, insertion)
+        : lastChildIndent(source, parent, element) ?? (element.parentNode === parent ? line!.indent : null);
+  if (line && target !== null && indent !== null)
+    return applySourceEdits(source, [
+      { start: line.start, end: line.end, text: "" },
+      { start: target, end: target, text: `${indent}${content}${line.newline}` },
+    ]);
+  const [removeStart, removeEnd] = line ? [line.start, line.end] : [span.startOffset, span.endOffset];
+  return applySourceEdits(source, [
+    { start: removeStart, end: removeEnd, text: "" },
+    { start: insertion, end: insertion, text: content },
+  ]);
 }
 
-/** Remove exactly one authored element subtree, preserving all neighboring
- * whitespace and bytes. */
+/** Where the line holding `offset` starts, when only spaces or tabs precede it. */
+function lineStart(source: string, offset: number): number | null {
+  let start = offset;
+  while (start > 0 && (source[start - 1] === " " || source[start - 1] === "\t")) start--;
+  return start === 0 || source[start - 1] === "\n" ? start : null;
+}
+
+/** The whole line an element has to itself, newline included, or null when
+ * other source shares it. */
+function ownLine(
+  source: string,
+  start: number,
+  end: number,
+): { start: number; end: number; indent: string; newline: string } | null {
+  const first = lineStart(source, start);
+  if (first === null) return null;
+  let last = end;
+  while (last < source.length && (source[last] === " " || source[last] === "\t" || source[last] === "\r")) last++;
+  if (source[last] !== "\n") return null;
+  return {
+    start: first,
+    end: last + 1,
+    indent: source.slice(first, start),
+    newline: source[last - 1] === "\r" ? "\r\n" : "\n",
+  };
+}
+
+function lastChildIndent(source: string, parent: Element, moving: Element): string | null {
+  const children = parent.childNodes.filter(
+    (node): node is Element => "tagName" in node && node !== moving,
+  );
+  const offset = children.at(-1)?.sourceCodeLocation?.startOffset;
+  if (offset === undefined) return null;
+  const start = lineStart(source, offset);
+  return start === null ? null : source.slice(start, offset);
+}
+
+/** Remove exactly one authored element subtree. An element alone on its line
+ * takes the line with it; otherwise neighboring bytes stay as written. */
 export function mutateDesignNodeDeleteSource(
   source: string,
   nodeId: string,
@@ -529,7 +582,9 @@ export function mutateDesignNodeDeleteSource(
   const location = element.sourceCodeLocation;
   if (!location)
     throw new Error(`Design element has no authored span: ${nodeId}`);
-  return `${source.slice(0, location.startOffset)}${source.slice(location.endOffset)}`;
+  const line = ownLine(source, location.startOffset, location.endOffset);
+  const [start, end] = line ? [line.start, line.end] : [location.startOffset, location.endOffset];
+  return `${source.slice(0, start)}${source.slice(end)}`;
 }
 
 function fragmentElements(

@@ -1,0 +1,4 @@
+format = "zeros-design"
+version = 3
+id = "design_component_fixture"
+canvas = "canvas.json"

@@ -105,6 +105,8 @@ export interface DesignComponentExpansionError {
   offset?: number;
   /** The line of `offset` in `file`, for a file the caller has not read. */
   line?: number;
+  /** The frame's own instance whose values the problem is about. */
+  oid?: string;
 }
 
 export interface DesignComponentExpansion {
@@ -791,10 +793,11 @@ function renderInstance(
   attributes: ReadonlyMap<string, string>,
   work: OptionsWork,
   errors: DesignComponentExpansionError[],
+  oid?: string,
 ): { body: string; css: string; failed?: true; empty?: true } {
   const { declaration } = definition.template;
   const { values, problems } = componentOptionValues(declaration, attributes);
-  errors.push(...problemsToErrors(definition.name, problems, "component-value-invalid"));
+  errors.push(...problemsToErrors(definition.name, problems, "component-value-invalid").map((error) => (oid ? { ...error, oid } : error)));
   const invalid = problems.some((problem) => problem.severity === "error");
   if (invalid) work.failed = true;
   const attempt = (chosen: ReadonlyMap<string, unknown>) => {
@@ -991,7 +994,8 @@ async function expandBoundedComponents(
       if (definition.template) {
         const attributes = new Map(instance.attrs.map((attribute) => [attribute.name, attribute.value]));
         const templated = definition as ComponentDefinition & { template: NonNullable<ComponentDefinition["template"]> };
-        const rendered = renderInstance(templated, attributes, work, errors);
+        const oid = depth === 0 ? attributes.get("data-oid") : undefined;
+        const rendered = renderInstance(templated, attributes, work, errors, oid);
         if (depth === 0 && usage) recordInstance(usage, registry, templated, instance, rendered.failed === true);
         if (depth === 0 && rendered.empty) work.instancesEmpty = true;
         const id = String(++work.instances);

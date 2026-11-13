@@ -564,6 +564,10 @@ Canvas/page titles and existing Foundation metadata are portable authored
 content. Membership order and optional `z` determine stacking within each page;
 z is independent between pages. New-frame placement considers that page only.
 Unknown supported canvas/page/frame extension fields survive engine writes.
+Engine writes change only the members whose values change, so
+`meta/canvas.json` keeps its formatting, key order and escapes; a file without
+`foundation` gets none until a Foundation value is set. Frame order comes from
+`pages[].frames` and `z`, never from key order.
 Legacy geometry extensions use `geometryMetadata` to
 avoid colliding with frame extensions. Camera, credentials, grants, recovery
 journals, captures and caches do not belong in this file. No DOM/node tree or
@@ -4742,6 +4746,21 @@ fixture. New caches require exact-key, race and bounded-eviction tests. A new
 surface kind also needs a resource fixture, measured host baseline, teardown
 coverage and review of its trust boundary. The historical name
 `check:design-containment` does not make composer mode a filesystem sandbox.
+
+The UI smokes emulate the engine for component option writes, variants and
+undo, so those flows are also proved against the real engine. The committed
+folder `apps/desktop/src/engine/workspace/__tests__/fixtures/design-components/`
+holds a main component with number, colour, text, choice and easing options, a
+derived value and two variants; a host frame with two instances, one carrying
+an ignored attribute; a legacy `components/fx-badge.html` definition; and a
+section, a note and a file link card on the canvas.
+`design-components-fixture.test.ts` copies it to a scratch root, opens it
+through `WorkspaceService` and the Design routes, and checks preparation and
+expansion, instance and main default writes, variants, byte-exact undo and
+redo with the earlier source version, `ifUnused` deletion reporting `inUse`, a
+missing main, canvas item put, delete and undo, and that frame geometry and
+layer delete or move change only the bytes they must. Extend that fixture
+rather than adding another when a component or canvas item flow changes.
 
 ### Required failure matrix
 

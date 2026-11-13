@@ -2134,8 +2134,8 @@ async function lintFrame(
     );
   }
   for (const error of componentExpansion.errors) {
-    const record = componentRecords.find(
-      ({ element }) => element.tagName === `zd-${error.component}`,
+    const record = componentRecords.find(({ element, oid }) =>
+      error.oid ? oid === error.oid : element.tagName === `zd-${error.component}`,
     );
     if (!error.code) {
       violations.push(

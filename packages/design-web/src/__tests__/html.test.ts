@@ -270,3 +270,26 @@ describe("HTML source adapter", () => {
     ).toThrow("Active design element");
   });
 });
+
+describe("deleting a layer", () => {
+  it("removes a layer alone on its line with its indentation and newline", () => {
+    const source = '<main data-oid="root">\n  <p data-oid="one">One</p>\n  <p data-oid="two">Two</p>  \r\n  <p data-oid="three">Three</p>\n</main>';
+    expect(mutateDesignNodeDeleteSource(source, "one")).toBe(
+      '<main data-oid="root">\n  <p data-oid="two">Two</p>  \r\n  <p data-oid="three">Three</p>\n</main>',
+    );
+    expect(mutateDesignNodeDeleteSource(source, "two")).toBe(
+      '<main data-oid="root">\n  <p data-oid="one">One</p>\n  <p data-oid="three">Three</p>\n</main>',
+    );
+  });
+
+  it("leaves no stray carriage return in a CRLF frame", () => {
+    const source = '<main data-oid="root">\r\n  <p data-oid="one">One</p>\r\n  <p data-oid="two">Two</p>\r\n</main>';
+    expect(mutateDesignNodeDeleteSource(source, "one")).toBe('<main data-oid="root">\r\n  <p data-oid="two">Two</p>\r\n</main>');
+  });
+
+  it("leaves the rest of a shared line as written", () => {
+    const source = '<main data-oid="root">\n  <b data-oid="a">A</b> <i data-oid="b">B</i>\n</main>';
+    expect(mutateDesignNodeDeleteSource(source, "a")).toBe('<main data-oid="root">\n   <i data-oid="b">B</i>\n</main>');
+    expect(mutateDesignNodeDeleteSource(source, "b")).toBe('<main data-oid="root">\n  <b data-oid="a">A</b> \n</main>');
+  });
+});
