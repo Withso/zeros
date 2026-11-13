@@ -48,7 +48,7 @@ export class DeviceControl {
     // Order 3: replies carrying a connected-Macs row include `syncing` only when asked.
     // 12.z: syncWanted has its own opt-in beside the Order 3 syncing field; both always travel together here.
     if (options.syncField) { headers["x-zeros-sync"] = "1"; headers["x-zeros-sync-wanted"] = "1"; }
-    if (options.teamSharing) headers["x-zeros-team-sharing"] = "1";
+    if (options.teamSharing) { headers["x-zeros-team-sharing"] = "1"; headers["x-zeros-team-ownership"] = "1"; }
     if (options.device) Object.assign(headers, {
       [LOCAL_COMMAND_DEVICE_HEADERS.deviceId]: options.device.deviceId,
       [LOCAL_COMMAND_DEVICE_HEADERS.registrationId]: options.device.registrationId,
@@ -132,7 +132,7 @@ export class DeviceControl {
   }
 
   archiveWorkspaceState(device: LocalCommandDevice, workspaceId: string) {
-    return this.send("GET", `/v1/cloud-v2/workspaces/${encodeURIComponent(workspaceId)}`, { device, schema: ArchiveWorkspaceReplySchema });
+    return this.send("GET", `/v1/cloud-v2/workspaces/${encodeURIComponent(workspaceId)}`, { device, schema: ArchiveWorkspaceReplySchema, teamSharing: true });
   }
   /** 12.z: another of this person's Macs should (not) sync this workspace; that Mac follows it. */
   setSyncWanted(device: LocalCommandDevice, workspaceId: string, targetDeviceId: string, wanted: boolean) {

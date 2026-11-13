@@ -32,6 +32,7 @@ describe("device control client", () => {
       ["GET", `/v1/cloud-v2/workspaces/${workspaceId}`, undefined], ["POST", `/v1/cloud-v2/workspaces/${workspaceId}/github-read-token`, {}],
     ]);
     expect(f.calls[0]!.headers.get("x-zeros-team-sharing")).toBe("1");
+    expect(f.calls[0]!.headers.get("x-zeros-team-ownership")).toBe("1");
     for (const call of f.calls) expect([call.headers.get("x-zeros-device-id"), call.headers.get("x-zeros-device-registration"), call.headers.get("x-zeros-device-instance"),
       call.headers.get("x-zeros-sync"), call.headers.get("x-zeros-sync-wanted")]).toEqual([deviceId, registrationId, instanceId, "1", "1"]);
     const foreign = fake(() => Response.json({ workspace: { id: organizationId, organizationId, repository: "example/repo" } }));
