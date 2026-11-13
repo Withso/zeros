@@ -2,8 +2,8 @@ import { randomUUID } from "node:crypto";
 import type pg from "pg";
 import { withSystemTx, type Tx } from "../db.js";
 import { HttpError } from "../authz.js";
-import { isGithubAccessRevoked } from "../github-availability.js";
-import { CLOUD_SOURCE_ADMISSION_MS, CloudSourceTargetSchema, type CloudSourceProof } from "./source-authority.js";
+import { isGithubAccessRevoked, isGithubTemporary } from "../github-availability.js";
+import { CLOUD_SOURCE_ADMISSION_MS, CLOUD_SOURCE_GRACE_MS, CLOUD_SOURCE_RENEWAL_MS, CloudSourceTargetSchema, type CloudSourceProof } from "./source-authority.js";
 import type { CloudV2Workspace } from "./store.js";
 import { CLOUD_V2_LIVE_ACCESS, cloudV2ActorAccess } from "./workspace-access.js";
 
@@ -47,25 +47,29 @@ const columns = "verified_at,canonical_repository,retry_at,failures,failure_code
 const params = (scope: GithubVerificationScope) => [scope.organizationId, scope.userId, scope.repositoryId, scope.fingerprint];
 type WorkspaceSource = {
   repository: string; source: string; repository_id: string | null; source_count: number;
-  verified_at: Date | null; failure_code: string | null; database_now: Date;
+  verified_at: Date | null; failure_code: string | null; failure_status: HttpError["status"] | null; database_now: Date;
 };
 export type CloudGithubCatalogAuthority = {
   proof: CloudSourceProof; state: CloudV2Workspace["state"]; repository: string; sources: string;
-  admission: { repositoryId: string; until: number } | null;
+  admission: { repositoryId: string; until: number; refreshAt: number } | null;
 };
 const sourceReviewRequired = () => new HttpError(409, "cloud_source_review_required", "This workspace needs its original source identities verified. Its files have been retained.");
-function admission(rows: readonly WorkspaceSource[], started: number) {
+function admission(rows: readonly WorkspaceSource[], started: number, retainPositive = false) {
   const primary = rows.find(row => row.source.toLowerCase() === row.repository.toLowerCase());
   if (!primary || rows.length > 100 || rows.length !== primary.source_count || rows.some(row =>
     !CloudSourceTargetSchema.safeParse({ repository: row.source, repositoryId: row.repository_id }).success))
     throw sourceReviewRequired();
-  let until = Infinity;
+  let until = Infinity, refreshAt = Infinity;
+  const lifetime = retainPositive ? CLOUD_SOURCE_GRACE_MS : CLOUD_SOURCE_ADMISSION_MS;
   for (const row of rows) {
     const age = row.verified_at ? row.database_now.getTime() - row.verified_at.getTime() : -1;
-    if (row.failure_code || age < 0 || age >= CLOUD_SOURCE_ADMISSION_MS) return null;
-    until = Math.min(until, started + CLOUD_SOURCE_ADMISSION_MS - age);
+    if (row.failure_code && (!retainPositive || !row.failure_status ||
+      !isGithubTemporary(new HttpError(row.failure_status,row.failure_code,"Repository access could not be verified.")))) return null;
+    if (age < 0 || age >= lifetime) return null;
+    until = Math.min(until, started + lifetime - age);
+    refreshAt = Math.min(refreshAt, started + CLOUD_SOURCE_ADMISSION_MS - CLOUD_SOURCE_RENEWAL_MS - age);
   }
-  return { repositoryId: primary.repository_id!, until };
+  return { repositoryId: primary.repository_id!, until, refreshAt };
 }
 
 /** No timer, provider call or lock held across I/O. Short claims coalesce
@@ -73,19 +77,19 @@ function admission(rows: readonly WorkspaceSource[], started: number) {
 export class PostgresGithubVerificationStore implements GithubVerificationStore {
   constructor(private readonly pool: pg.Pool, private readonly now = () => Date.now()) {}
 
-  /** A fresh positive for every immutable source, read with the caller's live
-   * membership, credential and checkout checks. A miss needs ordinary admission. */
-  async workspaceAdmission(tx: Tx, workspaceId: string, scope: { organizationId: string; userId: string }, fingerprint: string) {
+  /** Network requests require a fresh positive. Passive catalog reads may
+   * retain one through temporary failure, with the original one-hour bound. */
+  async workspaceAdmission(tx: Tx, workspaceId: string, scope: { organizationId: string; userId: string }, fingerprint: string, retainPositive = false) {
     const started = this.now();
     const { rows } = await tx.query<WorkspaceSource>(`SELECT w.repository,src.name AS source,s.repository_id::text,cardinality(w.source_repositories) AS source_count,
-        v.verified_at,v.failure_code,clock_timestamp() AS database_now
+        v.verified_at,v.failure_code,v.failure_status,clock_timestamp() AS database_now
       FROM cloud_v2_workspaces w CROSS JOIN LATERAL unnest(w.source_repositories) src(name)
       LEFT JOIN cloud_v2_github_sources s ON s.workspace_id=w.id AND s.source_repository=lower(src.name)
       LEFT JOIN cloud_github_source_verifications v ON v.org_id=w.org_id AND v.owner_user_id=$3
         AND v.repository_id=s.repository_id AND v.fingerprint=$4
       WHERE w.id=$1 AND w.org_id=$2 AND ${cloudV2ActorAccess("$3")} AND ${CLOUD_V2_LIVE_ACCESS} AND w.state NOT IN ('deleted','deleting')
       LIMIT 101`, [workspaceId, scope.organizationId, scope.userId, fingerprint]);
-    return admission(rows, started);
+    return admission(rows, started, retainPositive);
   }
 
   /** These proofs stay inside the current catalog request. The final read
@@ -94,7 +98,7 @@ export class PostgresGithubVerificationStore implements GithubVerificationStore 
     const started = this.now();
     type CatalogRow = WorkspaceSource & {
       workspace_id: string; state: CloudV2Workspace["state"]; access_epoch: string; login_revision: string;
-      live: boolean; failure_status: HttpError["status"] | null;
+      live: boolean;
     };
     const { rows } = await tx.query<CatalogRow>(`WITH requested AS MATERIALIZED (
         SELECT w.id,w.org_id,w.creator_user_id,w.repository,w.source_repositories,w.state,
@@ -121,7 +125,7 @@ export class PostgresGithubVerificationStore implements GithubVerificationStore 
         const sources = byWorkspace.get(id) ?? [], first = sources[0];
         if (!first) throw sourceReviewRequired();
         if (!first.live) throw new HttpError(404, "not_found", "Cloud workspace not found.");
-        const fresh = admission(sources, started);
+        const fresh = admission(sources, started,true);
         for (const source of sources) {
           if (!source.failure_code || !source.failure_status) continue;
           const error = new HttpError(source.failure_status, source.failure_code, "GitHub repository access could not be verified.");

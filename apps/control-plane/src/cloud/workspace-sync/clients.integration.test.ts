@@ -21,7 +21,7 @@ suite("desktop direct sync client, worker and control-plane routes joined", () =
   let clients: Record<string, any>, pool: pg.Pool, f: SyncFixture;
   let control: any, device: any, bridge: any, worker: any, directory: string, address: string, clock: number;
   let handlers: { open(): Promise<void>; close(): void; frame(value: unknown): Promise<void> };
-  let cleanup: Array<() => void | Promise<void>>, grants: any[], requests: Array<{ path: string; headers: Headers; status: number }>;
+  let cleanup: Array<() => void | Promise<void>>, grants: any[], requests: Array<{ path: string; headers: Headers; status: number; code?: string }>;
   let frames: any[], fetcher: typeof fetch;
 
   beforeAll(async () => {
@@ -49,7 +49,8 @@ suite("desktop direct sync client, worker and control-plane routes joined", () =
       const request = new Request(input, init), url = new URL(request.url);
       if (url.hostname !== "api.example.test") return githubFetch(input, init);
       const response = await f.app.fetch(request);
-      requests.push({ path: url.pathname, headers: request.headers, status: response.status });
+      const code = response.ok ? undefined : (await response.clone().json()).error?.code;
+      requests.push({ path: url.pathname, headers: request.headers, status: response.status, code });
       if (url.pathname.endsWith("/sync/grant") && response.ok) grants.push(await response.clone().json());
       return response;
     };
@@ -130,7 +131,8 @@ suite("desktop direct sync client, worker and control-plane routes joined", () =
     const first = JSON.parse(Buffer.from(grants[0].grant.split(".")[1], "base64url").toString());
     clock += 8 * 60_000;
     await vi.advanceTimersByTimeAsync(8 * 60_000);
-    await expect.poll(() => grants.length).toBe(2);
+    await expect.poll(() => requests.filter(item => item.path.endsWith("/sync/grant")).map(item => ({ status: item.status, code: item.code })))
+      .toEqual([{ status: 200, code: undefined }, { status: 200, code: undefined }]);
     await connection.snapshot({});
     const renewed = JSON.parse(Buffer.from(grants[1].grant.split(".")[1], "base64url").toString());
     expect(renewed.iat).toBeGreaterThan(first.iat); expect(renewed.jti).not.toBe(first.jti);

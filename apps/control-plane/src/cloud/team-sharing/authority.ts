@@ -10,7 +10,7 @@ import { memberOnHoldSql } from "../../organization-seats.js";
 import type { CloudGithubConnectionStore } from "../github-connections-store.js";
 import { CLOUD_V2_WORKSPACE_COLUMNS, cloudV2WorkspaceFromRow, type CloudV2Workspace, type CloudV2WorkspaceRow } from "../store.js";
 import { CLOUD_V2_LIVE_ACCESS } from "../workspace-access.js";
-import { CLOUD_SOURCE_ADMISSION_MS, CLOUD_SOURCE_GRACE_MS, CloudSourceTargetSchema, type CloudSourceTarget, type CloudV2SourceAuthority, type CloudViewerSourceProof } from "../source-authority.js";
+import { CLOUD_SOURCE_GRACE_MS, CloudSourceTargetSchema, type CloudSourceTarget, type CloudV2SourceAuthority, type CloudViewerSourceProof } from "../source-authority.js";
 import { teamNotFound, teamUnavailable } from "./contract.js";
 
 export type TeamView = {
@@ -147,9 +147,9 @@ export class CloudTeamAuthority {
           if (!row || view.signatureVersion === 2 && row.fingerprint !== fingerprint && row.fingerprint !== proof.source.fingerprint) throw teamUnavailable();
           const error = row.failureCode && row.failureStatus ? new HttpError(row.failureStatus,row.failureCode,"Repository access changed") : null;
           if (error && isGithubAccessRevoked(error)) { deny(id); break; }
-          if (error && (!proof.source.continuation || !isGithubTemporary(error))) throw teamUnavailable();
+          if (error && !isGithubTemporary(error)) throw teamUnavailable();
           const age = row.verifiedAt === null ? Infinity : view.databaseNow-row.verifiedAt;
-          if (age<0 || age>=(proof.source.continuation ? CLOUD_SOURCE_GRACE_MS : CLOUD_SOURCE_ADMISSION_MS)) throw teamUnavailable();
+          if (age<0 || age>=CLOUD_SOURCE_GRACE_MS) throw teamUnavailable();
         }
         if (current.has(id) && proof.source.until<=Date.now()) throw teamUnavailable();
       }

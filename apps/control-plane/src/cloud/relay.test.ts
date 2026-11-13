@@ -1178,7 +1178,7 @@ describe("cloud v2 relay", () => {
     try { await socket.runInAsyncScope(() => relay[method]({})); }
     finally { socket.emitDestroy(); }
     await vi.waitFor(() => expect(a.readyState).toBe(WebSocket.CLOSED));
-    expect(closed).toHaveBeenCalledWith(4001, expect.anything());
+    expect(closed).toHaveBeenCalledWith(1013, expect.anything());
     await vi.waitFor(() => expect(w.readyState).toBe(WebSocket.CLOSED));
   });
 

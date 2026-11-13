@@ -85,7 +85,7 @@ database("active direct sync authority", () => {
 
   it("refuses a short final proof without issuing a sync handle", async () => {
     const device = await mac(), admit = f.cp.execution.deps.authority.admit.bind(f.cp.execution.deps.authority);
-    vi.spyOn(f.cp.execution.deps.authority, "admit").mockImplementationOnce(async (...args) => ({ ...(await admit(...args)), until: Date.now() + 9000 }));
+    vi.spyOn(f.cp.execution.deps.authority, "admit").mockImplementation(async (...args) => ({ ...(await admit(...args)), until: Date.now() + 9000 }));
     const refused = await grant(device);
     expect(refused.status).toBe(503);
     expect(await refused.json()).toMatchObject({ error: { code: "agent_credentials_unavailable" } });
@@ -94,7 +94,7 @@ database("active direct sync authority", () => {
 
   it("rolls back a sync handle if final grant checks consume the issuance floor", async () => {
     const device = await mac(), issue = f.cp.execution.sync.grant.bind(f.cp.execution.sync);
-    vi.spyOn(f.cp.execution.sync, "grant").mockImplementationOnce(async (...args) => {
+    vi.spyOn(f.cp.execution.sync, "grant").mockImplementation(async (...args) => {
       const context = await issue(...args);
       vi.spyOn(Date, "now").mockReturnValue(Date.now() + 6000);
       return context;

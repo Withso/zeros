@@ -14,7 +14,7 @@ import { CloudV2WorkerSigner } from "../worker-auth.js";
 import { openPortToken } from "../worker-port-token.js";
 import { CLOUD_V2_LIVE_ACCESS, cloudV2ActorAccess } from "../workspace-access.js";
 import type { CloudExecutionContexts } from "../execution/store.js";
-import { EXECUTION_MINIMUM_LIFETIME_MS, assertExecutionLifetime } from "../execution/lifetime.js";
+import { EXECUTION_MINIMUM_LIFETIME_MS, assertExecutionLifetime, withExecutionLifetimeRetry } from "../execution/lifetime.js";
 import { SyncGrantReplySchema, type SyncGrantReply } from "./contract.js";
 
 const notRunning = () => new HttpError(409, "cloud_workspace_not_running", "The cloud workspace is not running");
@@ -94,26 +94,29 @@ export class CloudWorkspaceSync {
 
   private async activeGrant(workspaceId: string, user: AuthedUser, binding: LocalDeviceBinding, before: Route): Promise<SyncGrantReply> {
     if (!this.execution) throw unavailable();
-    const execution = this.execution, proof = await execution.deps.authority.admit(workspaceId, user.id, { user, minimumSourceMs: EXECUTION_MINIMUM_LIFETIME_MS });
-    const started = Date.now(), monotonic = performance.now(), iat = Math.floor(started / 1000), expiresAt = (iat + 60) * 1000;
-    return withSystemTx(this.pool, async tx => {
-      await tx.query("SELECT id FROM cloud_v2_workspaces WHERE id=$1 FOR UPDATE", [workspaceId]);
-      await this.devices.verify(tx, user, binding, true);
-      const after = await this.read(workspaceId, user, binding, tx);
-      for (const field of ["execution_mode", "access_epoch", "stop_generation", "worker_boot_id", "boat_sandbox_id", "worker_token_hash",
-        "worker_route_url", "connected_at"] as const) if (after[field] !== before[field]) throw notRunning();
-      if (JSON.stringify(after.worker_port_token) !== JSON.stringify(before.worker_port_token)) throw notRunning();
-      await execution.deps.authority.assert(proof, tx);
-      await execution.boots.assertClean(tx, { id: workspaceId, worker_boot_id: after.worker_boot_id!,
-        access_epoch: after.access_epoch, stop_generation: after.stop_generation, worker_token_hash: Buffer.from(after.worker_token_hash!, "hex") });
-      const context = await execution.sync.grant(tx, proof, user, binding, after.connected_at!, iat);
-      const reply = SyncGrantReplySchema.parse({ url: after.worker_route_url, portAuth: openPortToken(after.worker_port_token, workspaceId, this.keys),
-        grant: this.signer.mintSync(workspaceId, after.worker_boot_id!, user.id, binding.deviceId, iat, context.id), expiresAt: new Date(expiresAt).toISOString() });
-      await execution.deps.authority.assert(proof, tx);
-      await this.read(workspaceId, user, binding, tx);
-      if (Date.now() >= expiresAt || performance.now() - monotonic >= 60_000) throw unavailable();
-      assertExecutionLifetime(context.expires_at.getTime());
-      return reply;
+    const execution = this.execution;
+    return withExecutionLifetimeRetry(async () => {
+      const proof = await execution.deps.authority.admit(workspaceId, user.id, { user, minimumSourceMs: EXECUTION_MINIMUM_LIFETIME_MS });
+      const started = Date.now(), monotonic = performance.now(), iat = Math.floor(started / 1000), expiresAt = (iat + 60) * 1000;
+      return withSystemTx(this.pool, async tx => {
+        await tx.query("SELECT id FROM cloud_v2_workspaces WHERE id=$1 FOR UPDATE", [workspaceId]);
+        await this.devices.verify(tx, user, binding, true);
+        const after = await this.read(workspaceId, user, binding, tx);
+        for (const field of ["execution_mode", "access_epoch", "stop_generation", "worker_boot_id", "boat_sandbox_id", "worker_token_hash",
+          "worker_route_url", "connected_at"] as const) if (after[field] !== before[field]) throw notRunning();
+        if (JSON.stringify(after.worker_port_token) !== JSON.stringify(before.worker_port_token)) throw notRunning();
+        await execution.deps.authority.assert(proof, tx);
+        await execution.boots.assertClean(tx, { id: workspaceId, worker_boot_id: after.worker_boot_id!,
+          access_epoch: after.access_epoch, stop_generation: after.stop_generation, worker_token_hash: Buffer.from(after.worker_token_hash!, "hex") });
+        const context = await execution.sync.grant(tx, proof, user, binding, after.connected_at!, iat);
+        const reply = SyncGrantReplySchema.parse({ url: after.worker_route_url, portAuth: openPortToken(after.worker_port_token, workspaceId, this.keys),
+          grant: this.signer.mintSync(workspaceId, after.worker_boot_id!, user.id, binding.deviceId, iat, context.id), expiresAt: new Date(expiresAt).toISOString() });
+        await execution.deps.authority.assert(proof, tx);
+        await this.read(workspaceId, user, binding, tx);
+        if (Date.now() >= expiresAt || performance.now() - monotonic >= 60_000) throw unavailable();
+        assertExecutionLifetime(context.expires_at.getTime());
+        return reply;
+      });
     });
   }
 

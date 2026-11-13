@@ -44,7 +44,7 @@ export function createCloudGithubServices(
   const source = new CloudV2SourceAuthority(
     pool,
     connections,
-    Date.now,
+    () => Date.now(),
     (workspace, sources) => identities.targets(workspace, sources),
     verifications,
   );
@@ -99,9 +99,9 @@ export function createCloudGithubServices(
   const retireRevoked = async (workspace: CloudV2Workspace, error: unknown) => {
     if (isGithubAccessRevoked(error)) await workspaces.transition(workspace.id, ["running"], "stopping");
   };
-  const authorizeSource = async (workspace: CloudV2Workspace, options?: { renew?: boolean }) => {
+  const authorizeSource = async (workspace: CloudV2Workspace, options?: { renew?: boolean; requireFresh?: boolean }) => {
     try {
-      await source.workspace(workspace, options?.renew);
+      await source.workspace(workspace, options?.renew, options?.requireFresh);
     } catch (error) {
       await retireRevoked(workspace, error);
       throw error;
@@ -136,7 +136,7 @@ export function createCloudGithubServices(
       throw error;
     }
   };
-  const authorizePerson = async (id: string, userId: string) => {
+  const authorizePerson = async (id: string, userId: string, requireFresh = false) => {
     const before = await metadata.context(id, userId);
     const workspace = before.actorUserId ? await withSystemTx(pool, async tx => {
       const row = (await tx.query<Parameters<typeof cloudV2WorkspaceFromRow>[0]>(`SELECT w.* FROM cloud_v2_workspaces w
@@ -148,9 +148,9 @@ export function createCloudGithubServices(
     if (before.actorUserId) {
       const scope = await withSystemTx(pool, tx => tx.query<{ source_repositories: string[] }>(
         "SELECT source_repositories FROM cloud_v2_workspaces WHERE id=$1", [id]));
-      await source.viewer(workspace.organizationId, userId, await identities.targets(workspace, scope.rows[0]?.source_repositories ?? []), false);
+      await source.viewer(workspace.organizationId, userId, await identities.targets(workspace, scope.rows[0]?.source_repositories ?? []), false,0,requireFresh);
     }
-    else await authorizeSource(workspace);
+    else await authorizeSource(workspace,{ requireFresh });
     assertCloudGithubPrContext(before, await metadata.context(id, userId));
     return workspace;
   };
@@ -168,7 +168,7 @@ export function createCloudGithubServices(
     return { ...value, repositoryId: primary.repositoryId };
   };
   const open = cloudGithubRequestContext({ pool, connections, metadata, actions, verifications,
-    authorize: async (id, userId) => { await authorizePerson(id, userId); }, fetch: fetchImpl });
+    authorize: async (id, userId) => { await authorizePerson(id, userId,true); }, fetch: fetchImpl });
   const service = new CloudGithubPrService({
     open,
     repository: async (value, identity, access) => {

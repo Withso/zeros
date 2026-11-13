@@ -7,11 +7,12 @@ import { isGithubAccessRevoked, isGithubTemporary } from "../../github-availabil
 import { memberOnHoldSql } from "../../organization-seats.js";
 import { securityStreamAuthority } from "../../security-events.js";
 import type { CloudGithubConnectionStore } from "../github-connections-store.js";
-import { CLOUD_SOURCE_ADMISSION_MS, CLOUD_SOURCE_REFRESH_MS, CLOUD_SOURCE_GRACE_MS, CloudSourceTargetSchema, type CloudViewerSourceProof, type CloudV2SourceAuthority } from "../source-authority.js";
+import { CLOUD_SOURCE_GRACE_MS, CloudSourceTargetSchema, SourceLifetimeUnavailable, type CloudViewerSourceProof, type CloudV2SourceAuthority } from "../source-authority.js";
 import { teamConnectionRevisionSql } from "../team-sharing/authority.js";
 import { CLOUD_V2_LIVE_ACCESS } from "../workspace-access.js";
 import { executionSignatures, matchesExecutionSignature, type ExecutionSignatures, type VersionedExecutionAuthority } from "./signatures.js";
 import { actorChanged, executionUnavailable, executionWorkerRequired, memberAccessRevoked } from "./errors.js";
+import { EXECUTION_LEASE_MS, ExecutionLifetimeUnavailable } from "./lifetime.js";
 
 export type ExecutionPerson = ExecutionSignatures & {
   workspaceId: string; organizationId: string; userId: string; creatorUserId: string | null; repository: string; state: string;
@@ -117,9 +118,10 @@ export class CloudExecutionAuthority {
         if (options.sourceError) throw new HttpError(403, options.sourceError, "The workspace initiator needs access to its repository");
         throw memberAccessRevoked();
       }
+      if (error instanceof SourceLifetimeUnavailable) throw new ExecutionLifetimeUnavailable();
       throw executionUnavailable();
     }
-    const proof = { person, source, until: Math.min(started + 30_000, source.until), user: options.user };
+    const proof = { person, source, until: Math.min(started + EXECUTION_LEASE_MS, source.until), user: options.user };
     await this.assert(proof);
     return proof;
   }
@@ -130,21 +132,22 @@ export class CloudExecutionAuthority {
   }
 
   async cached(tx: Tx, workspaceId: string, userId: string) {
-    await this.cachedAuthority(tx, workspaceId, userId, false);
+    await this.cachedAuthority(tx, workspaceId, userId);
   }
 
   async creation(tx: Tx, workspaceId: string, userId: string): Promise<ExecutionAdmission> {
-    const { current, fingerprint } = await this.cachedAuthority(tx, workspaceId, userId, true);
+    const { current, fingerprint } = await this.cachedAuthority(tx, workspaceId, userId);
     if (current.state !== "creating" || current.bootId || current.workerTokenHash) throw actorChanged();
     // The new row is private to this transaction. Reuse the verified source
     // observation, including its original deadline, without provider I/O.
-    const until = Math.min(...current.verifications.map(row => row.verifiedAt! + CLOUD_SOURCE_ADMISSION_MS));
-    const proof = { person: current, source: { fingerprint, until, recheckAt: until, continuation: false }, until };
+    const sourceUntil = Math.min(...current.verifications.map(row => row.verifiedAt! + CLOUD_SOURCE_GRACE_MS));
+    const proof = { person: current, source: { fingerprint, until: sourceUntil, recheckAt: sourceUntil, continuation: false },
+      until: Math.min(Date.now() + EXECUTION_LEASE_MS, sourceUntil) };
     await this.assert(proof, tx);
     return proof;
   }
 
-  private async cachedAuthority(tx: Tx, workspaceId: string, userId: string, admission: boolean) {
+  private async cachedAuthority(tx: Tx, workspaceId: string, userId: string) {
     const initial = await this.snapshot(tx, workspaceId, userId);
     const fingerprint = (await this.connections.fingerprintsForPeople(tx, initial.organizationId, [userId])).get(userId);
     if (!fingerprint) throw executionUnavailable();
@@ -157,8 +160,8 @@ export class CloudExecutionAuthority {
       const error = row.failureCode && row.failureStatus ? new HttpError(row.failureStatus as HttpError["status"], row.failureCode, "Repository authority changed") : null;
       if (error && isGithubAccessRevoked(error)) throw memberAccessRevoked();
       const age = row.verifiedAt === null ? Infinity : current.databaseNow - row.verifiedAt;
-      if (age < 0 || age >= (admission ? CLOUD_SOURCE_ADMISSION_MS : error && isGithubTemporary(error) ? CLOUD_SOURCE_GRACE_MS : CLOUD_SOURCE_REFRESH_MS)) throw executionUnavailable();
-      if (error && (admission || !isGithubTemporary(error))) throw executionUnavailable();
+      if (age < 0 || age >= CLOUD_SOURCE_GRACE_MS) throw executionUnavailable();
+      if (error && !isGithubTemporary(error)) throw executionUnavailable();
     }
     return { current, fingerprint };
   }
@@ -177,11 +180,11 @@ export class CloudExecutionAuthority {
         if (!row) throw executionUnavailable();
         const error = row.failureCode && row.failureStatus ? new HttpError(row.failureStatus as HttpError["status"], row.failureCode, "Repository authority changed") : null;
         if (error && isGithubAccessRevoked(error)) throw memberAccessRevoked();
-        if (error && (!proof.source.continuation || !isGithubTemporary(error))) throw executionUnavailable();
+        if (error && !isGithubTemporary(error)) throw executionUnavailable();
         const age = row.verifiedAt === null ? Infinity : current.databaseNow - row.verifiedAt;
-        if (age < 0 || age >= (proof.source.continuation ? CLOUD_SOURCE_GRACE_MS : CLOUD_SOURCE_ADMISSION_MS)) throw executionUnavailable();
+        if (age < 0 || age >= CLOUD_SOURCE_GRACE_MS) throw executionUnavailable();
       }
-      if (proof.until <= Date.now()) throw executionUnavailable();
+      if (proof.until <= Date.now()) throw new ExecutionLifetimeUnavailable();
       return current;
     };
     return transaction ? read(transaction) : withSystemTx(this.pool, read);
