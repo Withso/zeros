@@ -2351,9 +2351,11 @@ a frame's own document (`canvas-items-exports.test.ts`).
   action. A missing token's pill is two spans, so the name truncates and
   "is missing" always shows. Section actions, icon buttons and the Stroke
   sides select (`data-design-filter-companion`) hide under a Styled-by
-  filter and a held state. A layer inside a component instance cannot be
-  selected today (the expander drops `data-oid` from definition content),
-  so "Part of <component>." waits for Phase 7.
+  filter and a held state. A layer inside a component instance (a part,
+  entered by double-clicking the selected instance) reads "Part of
+  <component>." with Select instance and Edit main under the header; its
+  Style panel is inert and Layers keeps the instance as one row (see
+  "Variants, instances and parts").
 - **Frame changes and Tidy:** with a frame (not a layer in it) selected, an
   info panel at the foot of the side panel, directly above Layers
   (`design-frame-changes-panel.tsx`), counts the frame's changes made by
@@ -4654,10 +4656,6 @@ Architecture A. Phase 7 extends that qualified shared-session workflow.
 - Reuse source-bound reviews/results and durable tasks. Compare accepted-output
   quality and cost against the single-session workflow before increasing
   concurrency or autonomous scope.
-- A layer inside a component instance: selectable with definition-local
-  identity, its styles read only, with "Part of <component>." and Select
-  instance or Edit main in the Style panel. Moved here from Phase 5c, where no
-  such layer could be selected.
 
 Exit gates: multi-step work pauses/resumes across conflicts, resource limits,
 and disconnects without duplicate edits, leaked authority, or orphan processes.

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { COMPONENT_OPTION_LIMITS } from "./component-options";
 
 export const DESIGN_FOUNDATION_SCHEMA_VERSION = 1 as const;
 export const DESIGN_TRANSACTION_MAX_OPERATIONS = 256;
@@ -810,10 +811,10 @@ export const designOperationSchema = z.discriminatedUnion("type", [
     .extend({
       type: z.literal("component.set-option"),
       file: designRelativeFileSchema,
-      option: z.string().min(1).max(32),
+      option: z.string().min(1).max(COMPONENT_OPTION_LIMITS.name),
       /** null edits the default; a name edits that variant, where a null
        * value removes the variant's own value. */
-      variant: z.string().min(1).max(32).nullable().default(null),
+      variant: z.string().min(1).max(COMPONENT_OPTION_LIMITS.name).nullable().default(null),
       value: designParameterValueSchema,
     })
     .strict(),
@@ -821,10 +822,12 @@ export const designOperationSchema = z.discriminatedUnion("type", [
     .extend({
       type: z.literal("component.save-variant"),
       file: designRelativeFileSchema,
-      name: z.string().min(1).max(32),
+      name: z.string().min(1).max(COMPONENT_OPTION_LIMITS.name),
       values: z
-        .record(z.string().min(1).max(32), z.union([z.string().max(2_048), z.number().finite(), z.boolean()]))
-        .refine((values) => Object.keys(values).length <= 64, { message: "A variant may set at most 64 options" }),
+        .record(z.string().min(1).max(COMPONENT_OPTION_LIMITS.name), z.union([z.string().max(2_048), z.number().finite(), z.boolean()]))
+        .refine((values) => Object.keys(values).length <= COMPONENT_OPTION_LIMITS.options, {
+          message: `A variant may set at most ${COMPONENT_OPTION_LIMITS.options} options`,
+        }),
     })
     .strict(),
 ]);

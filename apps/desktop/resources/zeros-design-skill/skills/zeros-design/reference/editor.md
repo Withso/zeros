@@ -54,6 +54,7 @@ People edit frames in the Design tab while agents work on the same files. This p
 - Rows are the frame's elements, named by `data-name`, then a readable runtime name, then a type label. Frame rows show the frame title from `meta/canvas.json`.
 - Content inside open declarative shadow roots (`<template shadowrootmode="open">`) and assigned slots appears in Layers and can be selected. As in the browser, only the first such template on a valid host attaches, closed roots stay opaque, and a slot shows its fallback only while nothing is assigned to it. Shadow layers accept style, text and attribute edits; delete, duplicate and move refuse them with a reason, so change their structure by editing the HTML.
 - Selection identities come from `data-oid`, which the canvas derives for ordinary HTML and saves when an edit needs one.
+- A component instance is one row. Its inner parts never appear in Layers; a person selects one by double-clicking the instance on the canvas, and a selection you receive names the instance's host.
 
 ## Canvas items
 

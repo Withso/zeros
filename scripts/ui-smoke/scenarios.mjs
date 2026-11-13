@@ -379,7 +379,23 @@ export function validateSmokePartition(partition = smokeShards) {
     throw new Error(`ui-smoke partition is missing: ${missing.join(", ")}`);
 }
 
-export function selectScenarios(shard) {
+/** `ids` names registry entries to run on their own; a shard already
+ * selects its own, so the two do not combine. */
+export function selectScenarios(shard, ids) {
+  if (ids !== undefined) {
+    if (shard !== undefined)
+      throw new Error("--scenario cannot be combined with --shard");
+    if (ids.length === 0)
+      throw new Error("name at least one ui-smoke scenario");
+    const registryIds = scenarioRegistry.map(({ id }) => id);
+    const unknown = ids.filter((id) => !registryIds.includes(id));
+    if (unknown.length)
+      throw new Error(
+        `unknown ui-smoke scenario: ${unknown.join(", ")}; valid scenarios: ${registryIds.join(", ")}`,
+      );
+    const named = new Set(ids);
+    return scenarioRegistry.filter(({ id }) => named.has(id));
+  }
   if (shard === undefined) return scenarioRegistry;
   if (!Number.isInteger(shard) || shard < 1 || shard > SHARD_COUNT) {
     throw new Error(`ui-smoke shard must be between 1 and ${SHARD_COUNT}`);
@@ -388,7 +404,7 @@ export function selectScenarios(shard) {
   return scenarioRegistry.filter(({ id }) => assigned.has(id));
 }
 
-export function selectScenarioSteps(shard) {
-  const selected = new Set(selectScenarios(shard).map(({ id }) => id));
+export function selectScenarioSteps(shard, ids) {
+  const selected = new Set(selectScenarios(shard, ids).map(({ id }) => id));
   return defaultSteps.filter(({ id }) => selected.has(id));
 }

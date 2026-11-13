@@ -4,6 +4,7 @@
 // only the line a person changed.
 
 import {
+  COMPONENT_OPTION_LIMITS,
   componentOptionValues,
   parseComponentOptionValue,
   readComponentDeclaration,
@@ -103,7 +104,7 @@ export function appendComponentVariant(
 ): string {
   const { declaration, template, elements } = declaredIn(source, file);
   if (input.name === "default") throw new Error("A variant cannot be named default: Default is the declared defaults.");
-  if (!/^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/.test(input.name) || input.name.length > 32)
+  if (!/^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/.test(input.name) || input.name.length > COMPONENT_OPTION_LIMITS.name)
     throw new Error(`The variant name ${JSON.stringify(input.name)}: use lowercase letters, digits and single hyphens.`);
   if (declaration.variants.some((entry) => entry.name === input.name)) throw new Error(`The variant ${input.name} already exists.`);
   const attributes = new Map(Object.entries(input.values).map(([name, value]) => [name, componentOptionAttributeValue(value)]));
