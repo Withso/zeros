@@ -63,6 +63,28 @@ polling can resume that same VM and re-establish its idempotent protected route;
 the matching runtime installer does not restart it, and the bound boot prevents
 token rotation. A configured hello returns the workspace to `running`.
 
+A failed live connection keeps its closed failure class in the control-plane
+log. Each protected-route dial has at most 15 seconds within the original
+60-second connection window, so a slower explicit gateway refusal is preserved.
+No response headers, bodies or credential-bearing URLs enter diagnostics.
+Repeated 502/504 responses start two consecutive 60-second verification windows;
+each must also observe a newly authenticated outbound hello or prompt pull for
+the same sandbox, boot and access epoch. A successful dial or changed binding
+ends that attempt. Timeouts, 503s and authentication/configuration refusals do
+not authorize a route repair.
+
+After both windows, the control plane hides and recreates the protected
+localhost route once. A per-boot receipt is flushed to disk before hide, and a
+new, boot-bound host idempotency key survives retries. An uncertain hide reply
+is reconciled from that receipt; it never triggers another hide. Publication
+checks the current sandbox, boot, access epoch, worker and route credentials,
+and excludes lifecycle and runtime handoffs. The worker process, workspace
+identity, history and outbound prompt delivery continue. One more 60-second
+window verifies the repaired route. An unsafe or exhausted attempt leaves the
+workspace `running` with `error.code: "live_connection_unavailable"`; a proven
+successful connection clears it. This condition does not revoke authority,
+stop the VM or replace its disk. Local workspaces use their existing engine.
+
 The worker serializes HTTP and relay configuration. Its first configuration
 constructs the required checkout, session, MCP, agent and terminal services
 before publishing its scope or admitting app requests. A failed or cancelled

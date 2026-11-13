@@ -61,7 +61,7 @@ export async function syncFixture(pool: pg.Pool) {
   const grant = (headers: Record<string, string>, body?: unknown) => call(`${path}/sync/grant`, "POST", body, headers);
   const close = async () => {
     cp.runtimeUpdates.close(); await cp.api.credentials.close(); await cp.loginChanges?.stop(); await cp.promptChanges?.stop();
-    await cp.localCommandSignals.close(); await f.signals.close();
+    await cp.localCommandSignals.close(); await f.signals.close(); await cp.stopLiveRecovery();
   };
   return { ...f, cp, app, call, hello, token, boot, keys, portAuth, path, grant, fetcher, close,
     publicKey: signing.publicKey.export({ type: "spki", format: "pem" }).toString() };

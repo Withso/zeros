@@ -96,6 +96,16 @@ describe("cloud v2 Boat compute", () => {
     expect(new Headers(fetcher.mock.calls[0]?.[1]?.headers).get("idempotency-key")).toBe(new Headers(fetcher.mock.calls[1]?.[1]?.headers).get("idempotency-key"));
   });
 
+  it("replays a route repair under its durable key rather than the wake's cached host request", async () => {
+    const fetcher = vi.fn(async () => Response.json({ type: "sandbox.host", url: "https://fixture-41783.on.boat.dev/?_token=synthetic-port-token", access: "private", isProtected: true, localhost: true }));
+    const compute = new BoatCloudV2Compute(new BoatApiClient({ apiKey: "synthetic-unused-key", timeoutMs: 1000, fetch: fetcher }));
+    const key = "bx_abc12345:host:41783:recovery:00000000-0000-4000-8000-000000000001";
+    await compute.hostPort("bx_abc12345", { port: 41783, localhost: true, title: "Zeros worker" });
+    for (let i = 0; i < 2; i++) await compute.hostPort("bx_abc12345", { port: 41783, localhost: true, title: "Zeros worker", key });
+    const keys = fetcher.mock.calls.map(call => new Headers(call[1]?.headers).get("idempotency-key"));
+    expect(keys).toEqual(["bx_abc12345:host:41783", key, key]);
+  });
+
   it("refuses an unprotected or foreign host URL without exposing the token in its error", async () => {
     for (const response of [
       { url: "https://fixture-41783.on.boat.dev/?_token=synthetic-port-token", access: "public", isProtected: false, localhost: true },

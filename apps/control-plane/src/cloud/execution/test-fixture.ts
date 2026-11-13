@@ -103,7 +103,7 @@ export async function executionFixture(pool: pg.Pool, options: { lifecycle?: boo
     cp.connections?.close();
     await cp.lifecycleChanges?.stop();
     cp.runtimeUpdates.close(); await cp.api.credentials.close(); await cp.loginChanges.stop();
-    await cp.promptChanges?.stop(); await cp.localCommandSignals.close();
+    await cp.promptChanges?.stop(); await cp.localCommandSignals.close(); await cp.stopLiveRecovery();
   };
   // Initial LISTEN readiness invalidates source observations. Complete it
   // before a test starts an admission flight against the assembled router.

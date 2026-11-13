@@ -39,7 +39,7 @@ export interface CloudV2Compute {
   /** Saves the sandbox's disk under a name and returns once it can deploy. */
   saveSnapshot(sandboxId: string, name: string): Promise<void>;
   deleteSnapshot(name: string): Promise<void>;
-  hostPort(sandboxId: string, input: { port: number; localhost: true; title: string }): Promise<{ url: string; token: string }>;
+  hostPort(sandboxId: string, input: { port: number; localhost: true; title: string; key?: string; signal?: AbortSignal }): Promise<{ url: string; token: string }>;
   /** A sandbox with exactly this name created at or after `since`, newest first. */
   findSandbox(name: string, since: Date): Promise<string | null>;
 }
@@ -120,12 +120,14 @@ export class BoatCloudV2Compute implements CloudV2Compute {
     await this.client.request(`/sandboxes/${this.id(sandboxId)}`, { method: "PATCH", body: { ttlSeconds } });
   }
 
-  async hostPort(sandboxId: string, input: { port: number; localhost: true; title: string }): Promise<{ url: string; token: string }> {
+  async hostPort(sandboxId: string, input: { port: number; localhost: true; title: string; key?: string; signal?: AbortSignal }): Promise<{ url: string; token: string }> {
     const id = this.id(sandboxId);
-    if (!Number.isSafeInteger(input.port) || input.port < 1024 || input.port > 65535 || input.localhost !== true || input.title.length > 100)
+    if (!Number.isSafeInteger(input.port) || input.port < 1024 || input.port > 65535 || input.localhost !== true || input.title.length > 100 ||
+        (input.key !== undefined && !/^[a-zA-Z0-9:._-]{1,200}$/.test(input.key)))
       throw new Error("Invalid private worker route");
     const raw = await this.client.request(`/sandboxes/${id}/host`, {
-      method: "POST", idempotencyKey: `${id}:host:${input.port}`, body: { port: input.port, localhost: true, title: input.title },
+      method: "POST", idempotencyKey: input.key ?? `${id}:host:${input.port}`, body: { port: input.port, localhost: true, title: input.title },
+      ...(input.signal ? { signal: input.signal } : {}),
     });
     try {
       const hosted = z.object({ url: z.string().max(16_384), access: z.literal("private"), isProtected: z.literal(true), localhost: z.literal(true) }).passthrough().parse(raw);

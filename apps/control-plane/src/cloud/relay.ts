@@ -14,7 +14,8 @@ import { requireWorkspaceCreator } from "./workspace-access.js";
 import { isCloudV2Token } from "./tokens.js";
 import type { CloudExecutionContexts } from "./execution/store.js";
 import { ExecutionContextRevoked } from "./execution/errors.js";
-import { dialWorker, workerSupportsActingUser, workerSupportsCreatorLogins, workerSupportsCreatorModels, workerSupportsCreatorCommitIdentity, workerSupportsApi, workerSupportsLocalCommands, workerSupportsLocalCommandReason, workerSupportsNotifyUser, workerSupportsCheckout, workerSupportsMcp, workerSupportsSetup, workerSupportsRepositorySetup, workerSupportsGithub, workerSupportsGitIdentity, workerSupportsGithubUserTokens, workerSupportsAgentInteractions, workerSupportsCodeReview, workerSupportsHistoryReplacement, workerSupportsEnvironment, workerSupportsRuntimeUpdate, workerSupportsPush, type WorkerRoute } from "./worker-connection.js";
+import { dialWorker, WorkerConnectionFailure, workerSupportsActingUser, workerSupportsCreatorLogins, workerSupportsCreatorModels, workerSupportsCreatorCommitIdentity, workerSupportsApi, workerSupportsLocalCommands, workerSupportsLocalCommandReason, workerSupportsNotifyUser, workerSupportsCheckout, workerSupportsMcp, workerSupportsSetup, workerSupportsRepositorySetup, workerSupportsGithub, workerSupportsGitIdentity, workerSupportsGithubUserTokens, workerSupportsAgentInteractions, workerSupportsCodeReview, workerSupportsHistoryReplacement, workerSupportsEnvironment, workerSupportsRuntimeUpdate, workerSupportsPush, type WorkerRoute } from "./worker-connection.js";
+import { LIVE_CONNECTION_UNAVAILABLE, type CloudLiveRecovery } from "./live-recovery.js";
 import { workerGitIdentity } from "./worker-git-identity.js";
 import { emitCloudV2Timing, type CloudV2TimingRecord } from "./lifecycle.js";
 import { HttpError } from "../authz.js";
@@ -50,6 +51,7 @@ export type CloudV2RelayDeps = {
   authorizeSource?(workspace: CloudV2Workspace): Promise<void>;
   continueSource?(workspace: CloudV2Workspace, proof?: CloudSourceProof): Promise<CloudSourceContinuation>;
   workerRoute(workspaceId: string): Promise<WorkerRoute | null>;
+  liveRecovery?: Pick<CloudLiveRecovery, "failed" | "connected" | "exhausted">;
   workerActivity?(binding: CloudV2WorkerBinding, idle: boolean): Promise<ActivityReply | null>;
   mintWorkerToken(workspaceId: string, bootId: string): string;
   wake(workspace: CloudV2Workspace): Promise<void>;
@@ -351,6 +353,7 @@ export class CloudV2Relay {
   private async connect(room: Room): Promise<void> {
     const started = this.deps.now?.() ?? Date.now();
     const deadline = Date.now() + 60_000;
+    let lastFailure: { route: WorkerRoute; error: WorkerConnectionFailure } | undefined;
     for (let attempt = 0, attempts = 0; this.wanted(room) && Date.now() < deadline; attempt++, attempts++) {
       if (await this.current(room) !== "allowed") return;
       let ws: WebSocket | undefined;
@@ -372,7 +375,20 @@ export class CloudV2Relay {
         const bootId = room.stops.size && route.stopBootIds?.length ? route.stopBootIds[attempts % route.stopBootIds.length] : route.bootId;
         if (route.url && route.token && bootId && (route.workspace.state === "running" || (route.workspace.state === "stopping" && room.stops.size))) {
           const dialStarted = this.deps.now?.() ?? Date.now();
-          ws = await dialWorker(route, this.deps.mintWorkerToken(room.workspace.id, bootId));
+          try {
+            ws = await dialWorker(route, this.deps.mintWorkerToken(room.workspace.id, bootId),
+              { timeoutMs: Math.max(0, deadline - Date.now()), signal: room.abort.signal });
+          } catch (error) {
+            if (error instanceof WorkerConnectionFailure) {
+              lastFailure = { route, error };
+              this.deps.logger?.warn("[cloud-v2] carrier dial", { workspaceId: room.workspace.id.slice(0, 8), reason: error.reason,
+                statusClass: error.statusClass, durationMs: Math.max(0, Math.round((this.deps.now?.() ?? Date.now()) - dialStarted)), attempt: attempts + 1 });
+              if (room.clients.size && route.workspace.state === "running") this.deps.liveRecovery?.failed(route, error);
+            }
+            throw error;
+          }
+          lastFailure = undefined;
+          void this.deps.liveRecovery?.connected(route).catch(() => {});
           const dialed = this.deps.now?.() ?? Date.now();
           if (!this.wanted(room) || await this.current(room) !== "allowed") { ws.terminate(); return; }
           room.worker = ws; room.loginRevision = null;
@@ -406,10 +422,12 @@ export class CloudV2Relay {
       } catch { ws?.terminate(); /* Errors can include route headers; never log them. */ }
       const ms = Math.min(this.deps.retryMaxMs ?? 2000, (this.deps.retryBaseMs ?? 250) * 2 ** Math.min(attempt, 4));
       // A worker that has just become ready is retried from the base delay.
-      if (await this.retryWait(room, ms)) attempt = -1;
+      if (await this.retryWait(room, Math.min(ms, Math.max(0, deadline - Date.now())))) attempt = -1;
     }
     if (!room.revoked && this.wanted(room)) {
-      for (const { ws: client } of room.clients.values()) client.close(1013, "workspace_starting");
+      if (lastFailure && room.clients.size) void this.deps.liveRecovery?.exhausted(lastFailure.route, lastFailure.error).catch(() => {});
+      const reason = room.workspace.errorCode === LIVE_CONNECTION_UNAVAILABLE ? LIVE_CONNECTION_UNAVAILABLE : "workspace_starting";
+      for (const { ws: client } of room.clients.values()) client.close(1013, reason);
       for (const finish of room.stops.values()) finish(false);
     }
   }
@@ -477,9 +495,11 @@ export class CloudV2Relay {
         }).catch(() => ws.close(1013, "workspace_verification_unavailable")).finally(() => { pending = undefined; queuedBytes = 0; });
       } catch { ws.close(4003, "invalid_frame"); }
     });
-    ws.on("close", () => {
+    ws.on("close", code => {
       this.failDelivered(room, ws);
       if (room.worker !== ws) return;
+      this.deps.logger?.warn("[cloud-v2] carrier closed", { workspaceId: room.workspace.id.slice(0, 8), code,
+        stage: room.ready ? "connected" : "configuration" });
       room.worker = null; room.ready = false; room.loginRevision = null; delete room.workerBinding;
       // A close during initial configuration is handled by connect's retry.
       if (!room.dialing) this.ensureConnected(room);

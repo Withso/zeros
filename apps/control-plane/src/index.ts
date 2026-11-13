@@ -141,6 +141,7 @@ function shutdown(signal: string): void {
   cloudV2?.connections?.close();
   cloudV2?.promptSignals.wakeAll();
   const backgroundStopped = Promise.allSettled([
+    cloudV2?.stopLiveRecovery() ?? Promise.resolve(),
     cloudV2?.api.credentials.close() ?? Promise.resolve(),
     cloudV2?.localCommandSignals.close() ?? Promise.resolve(),
     cloudV2?.teamSharing.signals.close() ?? Promise.resolve(),

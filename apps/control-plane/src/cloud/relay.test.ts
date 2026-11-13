@@ -117,6 +117,34 @@ describe("cloud v2 relay", () => {
     return ws;
   };
 
+  it("reports a closed gateway failure to recovery, then clears it on a successful carrier", async () => {
+    const refused = createServer();
+    refused.on("upgrade", (_request, socket) => socket.end("HTTP/1.1 502 Bad Gateway\r\nX-Private: synthetic-private-canary\r\nContent-Length: 0\r\n\r\n"));
+    await new Promise<void>(resolve => refused.listen(0, "127.0.0.1", resolve));
+    deps.logger = { warn: vi.fn() };
+    deps.liveRecovery = { failed: vi.fn(), connected: vi.fn(async () => {}), exhausted: vi.fn(async () => {}) };
+    const failedRoute = { workspace: workspace(state), accessEpoch, bootId: workspaceId, token: "synthetic-port-token",
+      url: `http://127.0.0.1:${(refused.address() as AddressInfo).port}` };
+    vi.mocked(deps.workerRoute).mockResolvedValueOnce(failedRoute);
+    try {
+      await worker();
+      expect(deps.liveRecovery.failed).toHaveBeenCalledExactlyOnceWith(failedRoute, expect.objectContaining({ reason: "gateway", statusClass: "5xx" }));
+      expect(deps.liveRecovery.connected).toHaveBeenCalledWith(expect.objectContaining({ url: workerUrl }));
+      expect(deps.logger.warn).toHaveBeenCalledWith("[cloud-v2] carrier dial", expect.objectContaining({ reason: "gateway", statusClass: "5xx" }));
+      expect(JSON.stringify(vi.mocked(deps.logger.warn).mock.calls)).not.toMatch(/synthetic-private|502/);
+    } finally { await new Promise<void>(resolve => refused.close(() => resolve())); }
+  });
+
+  it("logs a carrier protocol refusal without treating it as a gateway failure or retaining its reason", async () => {
+    deps.logger = { warn: vi.fn() };
+    deps.liveRecovery = { failed: vi.fn(), connected: vi.fn(async () => {}), exhausted: vi.fn(async () => {}) };
+    workerServer.on("connection", ws => ws.close(4003, "synthetic-private-canary"));
+    await app();
+    await vi.waitFor(() => expect(deps.logger!.warn).toHaveBeenCalledWith("[cloud-v2] carrier closed", expect.objectContaining({ code: 4003 })));
+    expect(deps.liveRecovery.failed).not.toHaveBeenCalled();
+    expect(JSON.stringify(vi.mocked(deps.logger.warn).mock.calls)).not.toContain("synthetic-private");
+  });
+
   it("commits legacy sender retirement before forwarding a prompt", async () => {
     let entered!: () => void, release!: () => void;
     const started = new Promise<void>(resolve => { entered = resolve; }), held = new Promise<void>(resolve => { release = resolve; });
