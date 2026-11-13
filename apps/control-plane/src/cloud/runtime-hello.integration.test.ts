@@ -11,11 +11,11 @@ import { resetMigratedTestDatabase } from "../test-database.js";
 import { grantTestPro } from "../test-pro.js";
 import { CLOUD_V2_ASYNC_CREATE_DELAY_MS, createCloudV2 } from "./composition.js";
 import { createCloudV2WorkerRoutes } from "./worker-routes.js";
-import type { CloudV2LifecycleDeps } from "./lifecycle.js";
 import { CLOUD_SOURCE_ADMISSION_MS, CLOUD_SOURCE_GRACE_MS, CLOUD_SOURCE_REFRESH_MS } from "./source-authority.js";
 import { DatabaseCloudAgentCredentialService } from "../agent-credentials/agent-credentials.js";
 import { cloudAgentModels } from "../agent-credentials/agent-models.js";
 import { createCloudApiRoutes } from "./api/routes.js";
+import { CloudGithubPrStore } from "./github-pr-store.js";
 
 const suite = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 suite("runtime hello through the production composition", () => {
@@ -360,60 +360,50 @@ suite("runtime hello through the production composition", () => {
     ["github_unavailable", 503, false], ["github_rate_limited", 429, false],
     ["github_unavailable", 503, true], ["github_rate_limited", 429, true],
     ["github_cloud_access_denied", 403, false],
-  ] as const)("rechecks a stored %s at hello configuration without bypassing backoff (%s, %s)", async (code, status, backoff) => {
+  ] as const)("keeps hello independent of stored %s (%s, backoff=%s)", async (code, status, backoff) => {
     const f = await fixture(false);
+    await f.cp.routes.authorizeSource!(f.workspace);
     expect((await f.ordinary("hello")).status).toBe(200);
     const config = f.cp.workers.config;
     vi.spyOn(f.cp.workers, "config").mockImplementationOnce(async (...args) => {
-      // A different replica may record a failure after the route's admission.
-      await pool.query(`UPDATE cloud_github_source_verifications SET
+      const changed = await pool.query(`UPDATE cloud_github_source_verifications SET
         verified_at=clock_timestamp()-interval '1 minute',failure_code=$2,failure_status=$3,
         retry_at=clock_timestamp()+($4::double precision * interval '1 minute') WHERE org_id=$1`,
       [f.org, code, status, backoff ? 1 : -1]);
+      expect(changed.rowCount).toBe(1);
       return config(...args);
     });
     f.fetcher.mockClear();
     const response = await f.ordinary("hello");
-    expect(response.status).toBe(status === 403 ? 403 : 200);
-    const body = await response.json();
-    if (status !== 403) {
-      expect(body.config.workspace.github).toMatchObject({ repositoryId: "42", repository: "fixture/repo" });
-      expect(f.fetcher).not.toHaveBeenCalled();
-      if (!backoff) {
-        expect((await f.ordinary("hello")).status).toBe(200);
-        await vi.waitFor(async () => expect((await pool.query("SELECT failure_code FROM cloud_github_source_verifications WHERE org_id=$1", [f.org])).rows)
-          .toEqual([{ failure_code: null }]));
-        expect(f.fetcher.mock.calls.filter(([url]) => new URL(String(url)).pathname === "/repositories/42")).toHaveLength(1);
-      }
-    } else {
-      expect(body).toEqual({ code });
-      expect(f.fetcher).not.toHaveBeenCalled();
-    }
-    expect((await f.cp.store.get(f.workspace.id, f.creator)).state).toBe(status === 403 ? "stopping" : "running");
+    expect(response.status).toBe(200);
+    expect((await response.json()).config.workspace.github).toMatchObject({ repositoryId: "42", repository: "fixture/repo" });
+    expect((await f.ordinary("config")).status).toBe(200);
+    expect(f.fetcher).not.toHaveBeenCalled();
+    expect((await pool.query("SELECT failure_code FROM cloud_github_source_verifications WHERE org_id=$1", [f.org])).rows)
+      .toEqual([{ failure_code: code }]);
+    expect((await f.cp.store.get(f.workspace.id, f.creator)).state).toBe("running");
   });
 
-  async function holdProfile(f: Awaited<ReturnType<typeof fixture>>, route: "hello" | "config") {
+  async function holdIdentity(f: Awaited<ReturnType<typeof fixture>>, route: "hello" | "config") {
     let entered!: () => void, release!: () => void;
     const waiting = new Promise<void>(resolve => { entered = resolve; }), held = new Promise<void>(resolve => { release = resolve; });
-    const original = f.fetcher.getMockImplementation()!;
-    // Hold the profile read itself, not a reused answer from the hello before.
-    f.cp.routes.githubConnections!.forgetRecentProfiles();
-    f.fetcher.mockImplementationOnce(async (...args) => {
-      expect(new URL(String(args[0])).pathname).toBe("/user");
-      const response = await original(...args); entered(); await held; return response;
+    const store = f.cp.routes.githubConnections!.store, read = store.selectedIdentity.bind(store);
+    vi.spyOn(store, "selectedIdentity").mockImplementationOnce(async (...args) => {
+      const identity = await read(...args); entered(); await held; return identity;
     });
     const pending = f.ordinary(route);
-    await Promise.race([waiting, pending.then(() => { throw new Error("Configuration completed before the held profile read"); })]);
+    await Promise.race([waiting, pending.then(() => { throw new Error("Configuration completed before the held identity read"); })]);
     return { pending, release };
   }
 
   it.each((["hello", "config"] as const).flatMap(route =>
     (["member", "access", "stop", "source", "denial", "expiry", "disconnect", "checkout"] as const).map(change => [route, change] as const)))(
-  "withholds %s when %s changes during held profile I/O", async (route, change) => {
+  "withholds %s when %s changes during a held stored-identity read", async (route, change) => {
     const f = await fixture(false);
     expect((await f.ordinary("hello")).status).toBe(200);
     await f.cp.loginChanges?.stop();
-    const held = await holdProfile(f, route);
+    await f.cp.routes.authorizeSource!(f.workspace);
+    const held = await holdIdentity(f, route);
     try {
       if (change === "member") await pool.query("DELETE FROM organization_members WHERE org_id=$1", [f.org]);
       else if (change === "access") await pool.query("UPDATE cloud_v2_workspaces SET access_epoch=access_epoch+1 WHERE id=$1", [f.workspace.id]);
@@ -432,20 +422,23 @@ suite("runtime hello through the production composition", () => {
       }
     } finally { held.release(); }
     const response = await held.pending;
-    expect(response.status, change).not.toBe(200);
-    expect(await response.json(), change).not.toHaveProperty("config");
-    if (change === "denial") expect((await f.cp.store.get(f.workspace.id, f.creator)).state).toBe("stopping");
+    if (["denial", "expiry", "disconnect"].includes(change)) {
+      expect(response.status, change).toBe(200);
+      expect(await response.json()).toHaveProperty("config");
+      expect((await f.cp.store.get(f.workspace.id, f.creator)).state).toBe("running");
+    } else {
+      expect(response.status, change).not.toBe(200);
+      expect(await response.json(), change).not.toHaveProperty("config");
+    }
   });
 
-  // The lifecycle verifies the source (reading /user) seconds before the
-  // worker's hello, whose Git identity read /user again on the critical path.
-  it("reuses the creator's /user answer from the lifecycle's check at hello, still fencing the credential", async () => {
+  it("uses the confirmed stored login at hello without a profile lookup", async () => {
     const f = await fixture(false);
     await f.cp.routes.authorizeSource!(f.workspace);
     f.fetcher.mockClear();
     const response = await f.ordinary("hello");
     expect(response.status).toBe(200);
-    expect((await response.json()).config.gitIdentity).toMatchObject({ name: "Fixture" });
+    expect((await response.json()).config.gitIdentity).toMatchObject({ name: "fixture" });
     expect(f.fetcher.mock.calls.filter(([value]) => new URL(String(value)).pathname === "/user")).toHaveLength(0);
   });
 
@@ -460,7 +453,7 @@ suite("runtime hello through the production composition", () => {
     f.cp.routes.githubConnections!.forgetRecentProfiles();
     f.fetcher.mockClear();
     // The composition gives the lifecycle this same check, which asks to renew.
-    const lifecycleCheck: NonNullable<CloudV2LifecycleDeps["authorizeSource"]> = f.cp.routes.authorizeSource!;
+    const lifecycleCheck = f.cp.routes.authorizeSource!;
     const started = performance.now();
     await lifecycleCheck(await f.cp.store.get(f.workspace.id, f.creator), { renew: true });
     expect(performance.now() - started).toBeLessThan(5000);
@@ -470,7 +463,7 @@ suite("runtime hello through the production composition", () => {
     f.fetcher.mockClear();
     const response = await f.ordinary("hello");
     expect(response.status).toBe(200);
-    expect((await response.json()).config.gitIdentity).toMatchObject({ name: "Fixture" });
+    expect((await response.json()).config.gitIdentity).toMatchObject({ name: "fixture" });
     expect(f.fetcher).not.toHaveBeenCalled();
     expect((await f.cp.store.get(f.workspace.id, f.creator)).state).toBe("running");
   });
@@ -486,31 +479,32 @@ suite("runtime hello through the production composition", () => {
     } finally { vi.useRealTimers(); }
   });
 
-  it("rechecks a secondary original source after held configuration I/O", async () => {
+  it("does not couple configuration to a secondary source denial", async () => {
     const f = await fixture(false, true);
+    await f.cp.routes.authorizeSource!(f.workspace);
     expect((await f.ordinary("hello")).status).toBe(200);
     await f.cp.loginChanges?.stop();
-    const held = await holdProfile(f, "config");
+    const held = await holdIdentity(f, "config");
     try {
       await pool.query(`UPDATE cloud_github_source_verifications SET verified_at=NULL,
         failure_code='github_cloud_access_denied',failure_status=403 WHERE org_id=$1 AND repository_id=43`, [f.org]);
     } finally { held.release(); }
     const response = await held.pending;
-    expect(response.status).toBe(403);
-    expect(await response.json()).not.toHaveProperty("config");
+    expect(response.status).toBe(200);
+    expect(await response.json()).toHaveProperty("config");
   });
 
-  it.each(["hello", "config"] as const)("keeps the original %s deadline even if a later positive appears while profile I/O is held", async route => {
+  it.each(["hello", "config"] as const)("does not impose a GitHub freshness deadline on %s during a held identity read", async route => {
     const f = await fixture(false);
     expect((await f.ordinary("hello")).status).toBe(200);
-    const held = await holdProfile(f, route), now = Date.now();
+    const held = await holdIdentity(f, route), now = Date.now();
     try {
       await pool.query("UPDATE cloud_github_source_verifications SET verified_at=clock_timestamp() WHERE org_id=$1", [f.org]);
       vi.spyOn(Date, "now").mockReturnValue(now + (route === "hello" ? CLOUD_SOURCE_GRACE_MS : CLOUD_SOURCE_REFRESH_MS) + 1000);
     } finally { held.release(); }
     const response = await held.pending;
-    expect(response.status).toBe(503);
-    expect(await response.json()).toEqual({ code: "github_verification_expired" });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toHaveProperty("config");
   });
 
   it("restarts configuration for a new selected GitHub account instead of publishing the held account", async () => {
@@ -521,7 +515,7 @@ suite("runtime hello through the production composition", () => {
     f.fetcher.mockImplementation(async (value, init) => new URL(String(value)).pathname === "/user" &&
       new Headers(init?.headers).get("authorization") === "Bearer synthetic-reselected-pat"
       ? Response.json({ id: 99, login: "reselected", name: "Reselected Author" }) : original(value, init));
-    const held = await holdProfile(f, "config");
+    const held = await holdIdentity(f, "config");
     try {
       const scope = { organizationId: f.org, userId: f.creator }, connections = f.cp.routes.githubConnections!;
       await connections.store.save(scope, await connections.store.fingerprint(scope), { id: "99", login: "reselected" },
@@ -529,7 +523,7 @@ suite("runtime hello through the production composition", () => {
     } finally { held.release(); }
     const response = await held.pending;
     expect(response.status).toBe(200);
-    expect((await response.json()).config.gitIdentity).toEqual({ name: "Reselected Author", email: "99+reselected@users.noreply.github.com" });
+    expect((await response.json()).config.gitIdentity).toEqual({ name: "reselected", email: "99+reselected@users.noreply.github.com" });
   });
 
   it("removes a provider revoked after the config read before publishing the new revision", async () => {
@@ -544,7 +538,7 @@ suite("runtime hello through the production composition", () => {
     const before = await f.ordinary("hello");
     expect((await before.json()).config.agents.claude).toBeDefined();
     await f.cp.loginChanges?.stop();
-    const held = await holdProfile(f, "config");
+    const held = await holdIdentity(f, "config");
     try { await service.revoke(f.creator, id); } finally { held.release(); }
     const response = await held.pending;
     expect(response.status).toBe(200);
@@ -564,24 +558,16 @@ suite("runtime hello through the production composition", () => {
     });
   });
 
-  it("retains aliases and the newest binding observation through canonical moves and older positives", async () => {
-    const f = await fixture(false);
+  it("reads canonical aliases already confirmed by a network operation without asking GitHub again", async () => {
+    const f = await fixture(false), metadata = new CloudGithubPrStore(pool);
     expect((await f.ordinary("hello")).status).toBe(200);
-    const original = (await pool.query("SELECT verified_at FROM cloud_github_source_verifications WHERE org_id=$1", [f.org])).rows[0].verified_at;
-    await pool.query("UPDATE cloud_github_source_verifications SET canonical_repository='moved/repo',verified_at=clock_timestamp() WHERE org_id=$1", [f.org]);
+    await metadata.repository(await metadata.context(f.workspace.id, f.creator), { repositoryId: "42", repository: "moved/repo" });
+    f.fetcher.mockClear();
     const moved = await f.ordinary("config");
     expect(moved.status).toBe(200);
     expect((await moved.json()).config.workspace.github).toMatchObject({ repositoryId: "42", repository: "moved/repo",
       previousRepositories: expect.arrayContaining(["fixture/repo", "moved/repo"]) });
-    await pool.query("UPDATE cloud_github_source_verifications SET verified_at=clock_timestamp() WHERE org_id=$1", [f.org]);
-    expect((await f.ordinary("config")).status).toBe(200);
-    const observed = (await pool.query("SELECT repository_observed_at FROM cloud_v2_github_workspaces WHERE workspace_id=$1", [f.workspace.id])).rows[0].repository_observed_at;
-    expect(observed.getTime()).toBeGreaterThan(original.getTime());
-    await pool.query("UPDATE cloud_github_source_verifications SET canonical_repository='fixture/repo',verified_at=$2 WHERE org_id=$1", [f.org, original]);
-    const retained = await f.ordinary("config");
-    expect(retained.status).toBe(200);
-    expect((await retained.json()).config.workspace.github.repository).toBe("moved/repo");
-    expect((await pool.query("SELECT repository_observed_at FROM cloud_v2_github_workspaces WHERE workspace_id=$1", [f.workspace.id])).rows[0].repository_observed_at).toEqual(observed);
+    expect(f.fetcher).not.toHaveBeenCalled();
     expect((await f.cp.store.get(f.workspace.id, f.creator)).repository).toBe("fixture/repo");
   });
 
@@ -616,12 +602,13 @@ suite("runtime hello through the production composition", () => {
     expect(config).not.toHaveBeenCalled();
   });
 
-  it("refuses a revoked original source before releasing private configuration", async () => {
+  it("allows private configuration without the Creator's GitHub access", async () => {
     const f = await fixture();
     await f.cp.loginChanges?.stop();
     f.deny();
     const reply = await f.hello();
-    expect(reply.status).toBe(403); expect(await reply.json()).not.toHaveProperty("config");
+    expect(reply.status).toBe(200); expect(await reply.json()).toHaveProperty("config");
+    expect(f.fetcher).not.toHaveBeenCalled();
   });
 
   it.each(["login", "stop", "access", "expiry", "member", "source"])("revalidates %s after the last awaited configuration read", async change => {

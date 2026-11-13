@@ -222,7 +222,7 @@ it.each([false, true])("records authenticated activity during a GitHub outage wi
   expect((await f.request("activity", { idle: false })).status).toBe(401);
   expect(f.deps.store.markActive).toHaveBeenCalledTimes(1);
 });
-it("refreshes an existing worker's configuration during grace but keeps initial hello strict", async () => {
+it("admits hello and configuration refresh without GitHub verification", async () => {
   const f = fixture();
   f.deps.authorizeSource = vi.fn(async () => { throw new HttpError(503, "github_unavailable", "unavailable"); });
   f.deps.continueSource = vi.fn(async () => ({ recheckAt: Date.now() + 60_000 }));
@@ -231,7 +231,9 @@ it("refreshes an existing worker's configuration during grace but keeps initial 
   expect(response.status).toBe(200);
   expect(await response.json()).toMatchObject({ config: { loginRevision: "2", agents: {} } });
   expect(f.deps.authorizeSource).not.toHaveBeenCalled();
-  expect((await f.request("hello", { bootId: f.bootId, protocol: 2, runtimeSha256: "a".repeat(64) })).status).toBe(503);
+  expect((await f.request("hello", { bootId: f.bootId, protocol: 2, runtimeSha256: "a".repeat(64) })).status).toBe(200);
+  expect(f.deps.authorizeSource).not.toHaveBeenCalled();
+  expect(f.deps.continueSource).not.toHaveBeenCalled();
 });
 it("discards credential reads made obsolete by a concurrent committed Settings change", async () => {
   const f = fixture(), original = await f.deps.config({} as CloudV2Workspace);

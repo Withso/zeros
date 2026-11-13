@@ -127,7 +127,7 @@ suite("private runtime handoff", () => {
       return { exitCode: 0, stdout: "started", timedOut: false };
     }) };
     const make = (sleep: () => Promise<void>) => new RuntimeAdoption({ handoffs: new RuntimeHandoffStore(pool), store: new CloudV2Store(pool), compute,
-      authorizeSource: async () => {}, runtimeForWorkspace: async () => ({ sha256: f.h.target_sha256, url: async () => "https://example.test/runtime.tar.gz" }), sleep });
+      runtimeForWorkspace: async () => ({ sha256: f.h.target_sha256, url: async () => "https://example.test/runtime.tar.gz" }), sleep });
     const prior = make(async () => { observed(); await held; });
     let replacement: RuntimeAdoption | undefined;
     try {
@@ -220,7 +220,7 @@ suite("private runtime handoff", () => {
     const f = await fixture(false); expect(await f.commit()).toBe(true); await f.updates.activate(f.token, f.h.id);
     const before = await f.state(); let target = "c".repeat(64);
     const adoption = new RuntimeAdoption({ handoffs: f.updates, store: f.store, compute: { execLong: async () => ({ exitCode: 0, stdout: "", timedOut: false }) },
-      authorizeSource: async () => {}, runtimeForWorkspace: async () => ({ sha256: target, url: async () => "https://fixture.example.test/runtime.tar.gz" }) });
+      runtimeForWorkspace: async () => ({ sha256: target, url: async () => "https://fixture.example.test/runtime.tar.gz" }) });
     try {
       expect(await adoption.request(f.token, f.h.next_boot_id, { op: "ready", id: f.h.id })).toEqual({ status: "unavailable" });
       expect(await f.store.workerSession(f.token, f.boot)).not.toBeNull(); expect(await f.state()).toEqual(before);
@@ -293,7 +293,7 @@ suite("private runtime handoff", () => {
     const next = (await f.updates.prepare(f.token, boot, { target: "c".repeat(64), instanceId: f.h.instance_id, revision: f.h.login_revision, generation: 8 }))!;
     expect(next).not.toBeNull(); expect(await f.updates.cancel(f.token, next.id, boot)).toBe(true);
     const adoption = new RuntimeAdoption({ handoffs: f.updates, store: f.store, compute: { execLong: async () => ({ exitCode: 0, stdout: "", timedOut: false }) },
-      authorizeSource: async () => {}, runtimeForWorkspace: async () => ({ sha256: next.target_sha256, url: async () => "https://fixture.example.test/runtime.tar.gz" }) });
+      runtimeForWorkspace: async () => ({ sha256: next.target_sha256, url: async () => "https://fixture.example.test/runtime.tar.gz" }) });
     try {
       expect(await adoption.request(f.token, boot.toUpperCase(), { op: "ready", id: f.h.id })).toEqual({ status: "completed", id: f.h.id });
       expect(await f.updates.promote(f.token, f.h.id, boot)).toBe(true);

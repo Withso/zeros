@@ -70,13 +70,15 @@ database("activated relay authority through real sockets, routes and PostgreSQL"
     expect(frames.some(value => value.t === "frame" && value.frame.id === "legacy")).toBe(false);
   });
 
-  it("uses a retryable close for unknown repository authority, never revocation", async () => {
-    const { ws } = await connect(), ending = closed(ws);
-    f.unavailable.add(f.viewer.id);
-    await pool.query("UPDATE cloud_github_source_verifications SET verified_at=clock_timestamp()-interval '1 hour' WHERE owner_user_id=$1", [f.viewer.id]);
-    f.cp.execution.deps.authority.source.invalidate();
+  it("keeps the same socket usable without repository authority", async () => {
+    const { ws } = await connect(), onClose = vi.fn(); ws.on("close", onClose);
+    f.unavailable.add(f.viewer.id); f.denied.add(`${f.viewer.id}:42`);
+    await pool.query("DELETE FROM cloud_github_selections WHERE owner_user_id=$1", [f.viewer.id]);
     f.cp.relay!.revalidateSources({ ownerUserId: f.viewer.id });
-    expect(await ending).toEqual({ code: 1013, reason: "workspace_verification_unavailable" });
+    ws.send(JSON.stringify({ type: "WORKSPACE_REQUEST", id: "after-github-loss", op: "messages.windowOlder" }));
+    await expect.poll(() => frames.some(value => value.t === "frame" && value.frame.id === "after-github-loss")).toBe(true);
+    expect(onClose).not.toHaveBeenCalled();
+    expect(ws.readyState).toBe(WebSocket.OPEN);
   });
 
   it("uses a retryable close when the control plane shuts down", async () => {

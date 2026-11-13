@@ -75,15 +75,11 @@ export class CloudWorkspaceSync {
     const { workspace, proof } = await this.store.promptContext(workspaceId, user.id);
     if (workspace.state !== "running" || workspace.archivedAt || workspace.sourcePending ||
       before.access_epoch !== proof.accessEpoch || before.login_revision !== proof.loginRevision) throw notRunning();
-    const source = await this.continueSource(workspace, proof);
-    const until = Math.min(source.recheckAt, source.graceUntil ?? Infinity);
     const started = Date.now(), monotonic = performance.now();
     const after = await this.read(workspaceId, user, binding);
     for (const field of ["access_epoch", "login_revision", "stop_generation", "worker_boot_id", "boat_sandbox_id", "worker_token_hash",
       "worker_route_url", "connected_at"] as const) if (after[field] !== before[field]) throw notRunning();
     if (JSON.stringify(after.worker_port_token) !== JSON.stringify(before.worker_port_token)) throw notRunning();
-    if (Date.now() >= until)
-      throw new HttpError(503, "github_verification_expired", "Repository verification took too long. Try again.");
     const iat = Math.floor(started / 1000), expiresAt = (iat + 60) * 1000;
     if (Date.now() >= expiresAt || performance.now() - monotonic >= 60_000) throw unavailable();
     try {

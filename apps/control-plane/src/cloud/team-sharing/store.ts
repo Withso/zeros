@@ -42,9 +42,8 @@ export class CloudTeamSharing {
 
   async documents(proofs: readonly TeamAdmission[], omitDenied = false, ownership = false) {
     if (!proofs.length) return [];
-    const current = proofs.filter(proof => proof.source && !proof.view.workspace.sourcePending);
-    const metadata = new Map((await this.github.metadata.documents(current.map(proof => proof.view.workspace),
-      new Map(current.map(proof => [proof.view.workspace.id,proof.source!.fingerprint])))).map(row => [row.id,row]));
+    const current = proofs.filter(proof => !proof.view.workspace.sourcePending);
+    const metadata = new Map((await this.github.metadata.documents(current.map(proof => proof.view.workspace))).map(row => [row.id,row]));
     const flags = await withSystemTx(this.pool,async tx => {
       const rows = (await tx.query<{ id: string; creator_revision: string; following: boolean; pinned: boolean; follower_ids: string[]; follower_count: string; execution_mode: string; can_execute: boolean }>(`SELECT w.id,w.creator_revision::text,w.execution_mode,coalesce(w.execution_mode='active' AND (w.state IN ('stopped','starting','creating') OR w.worker_boot_id=ANY(w.acting_user_boot_ids)),false) AS can_execute,
         EXISTS(SELECT 1 FROM cloud_v2_workspace_followers WHERE workspace_id=w.id AND user_id=$2) AS following,

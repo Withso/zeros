@@ -578,139 +578,62 @@ describe("cloud v2 relay", () => {
     expect(sent).toEqual([]);
   });
 
-  describe("temporary source failures", () => {
-    const GRACE_END = 1000 + 3_600_000;
-    let now: number, failure: Error | null;
-    const setup = async () => {
-      now = 1000; deps.now = () => now; failure = null;
-      deps.authorizeSource = vi.fn(async () => {});
-      deps.continueSource = vi.fn(async () => { if (failure) throw failure; return { recheckAt: now + 600_000, graceUntil: GRACE_END }; });
-      const original = vi.mocked(deps.store.appAccessSnapshot).getMockImplementation()!;
-      vi.mocked(deps.store.appAccessSnapshot).mockImplementation(async (id, sessions) => {
-        const snapshot = await original(id, sessions);
-        return snapshot && { ...snapshot, loginRevision };
-      });
+  describe("membership access independent of GitHub", () => {
+    it.each([403, 404, 429, 503])("keeps local frames and new connections available while GitHub would return %s", async status => {
+      let now = 1000; deps.now = () => now;
+      deps.authorizeSource = vi.fn(async () => { throw new HttpError(status as 403 | 404 | 429 | 503, "github_unavailable", "fixture"); });
+      deps.continueSource = vi.fn(async () => { throw new HttpError(503, "github_verification_busy", "fixture"); });
       const w = await worker(), a = sockets[0]!, frames: any[] = [];
       w.on("message", raw => { const value = JSON.parse(String(raw)); if (value.t === "frame") frames.push(value.frame); });
       await vi.waitFor(() => expect(deps.config).toHaveBeenCalledTimes(1));
-      return { w, a, frames };
-    };
-    const busy = () => new HttpError(503, "github_verification_busy", "busy");
-    it("keeps an authorized room through a temporary failure and retries on a bounded backoff", async () => {
-      const { a, frames } = await setup();
-      failure = busy();
-      now += 5_000; a.send(JSON.stringify({ type: "PING", id: "1" }));
-      await vi.waitFor(() => expect(frames.map(frame => frame.id)).toEqual(["1"]));
-      expect(a.readyState).toBe(WebSocket.OPEN);
-      const calls = vi.mocked(deps.continueSource!).mock.calls.length;
-      now += 9_000; a.send(JSON.stringify({ type: "PING", id: "2" }));
-      await vi.waitFor(() => expect(frames).toHaveLength(2));
-      expect(deps.continueSource).toHaveBeenCalledTimes(calls);
-      now += 1_001; a.send(JSON.stringify({ type: "PING", id: "3" }));
-      await vi.waitFor(() => expect(frames).toHaveLength(3));
-      expect(deps.continueSource).toHaveBeenCalledTimes(calls + 1);
-      // The second consecutive failure doubles the wait; a success resets it.
-      now += 19_000; a.send(JSON.stringify({ type: "PING", id: "4" }));
-      await vi.waitFor(() => expect(frames).toHaveLength(4));
-      expect(deps.continueSource).toHaveBeenCalledTimes(calls + 1);
-      failure = null; now += 1_001; a.send(JSON.stringify({ type: "PING", id: "5" }));
-      await vi.waitFor(() => expect(frames).toHaveLength(5));
-      expect(deps.continueSource).toHaveBeenCalledTimes(calls + 2);
-      expect(a.readyState).toBe(WebSocket.OPEN);
+      for (const age of [5_000, 600_000, 3_600_001]) {
+        now += age; a.send(JSON.stringify({ type: "PING", id: String(age) }));
+        await vi.waitFor(() => expect(frames.map(frame => frame.id)).toContain(String(age)));
+      }
+      ticketSession = "session-b";
+      const b = await app();
+      b.send(JSON.stringify({ type: "PING", id: "new" }));
+      await vi.waitFor(() => expect(frames.map(frame => frame.id)).toContain("new"));
+      expect(a.readyState).toBe(WebSocket.OPEN); expect(b.readyState).toBe(WebSocket.OPEN);
+      expect(deps.authorizeSource).not.toHaveBeenCalled(); expect(deps.continueSource).not.toHaveBeenCalled();
     });
-    it("closes at the original grace deadline even after cached continuations near it", async () => {
-      const { a, frames } = await setup();
-      now = GRACE_END - 6_000; a.send(JSON.stringify({ type: "PING", id: "cached" }));
-      await vi.waitFor(() => expect(frames).toHaveLength(1));
-      failure = busy();
-      now = GRACE_END - 500; a.send(JSON.stringify({ type: "PING", id: "inside" }));
-      await vi.waitFor(() => expect(frames).toHaveLength(2));
-      const closed = new Promise(resolve => a.once("close", code => resolve(code)));
-      now = GRACE_END; a.send(JSON.stringify({ type: "PING", id: "late" }));
-      await expect(closed).resolves.toBe(1013);
-      expect(frames.map(frame => frame.id)).toEqual(["cached", "inside"]);
-    });
-    it("does not carry the grace across a changed login proof", async () => {
-      const { a, frames } = await setup();
-      failure = busy(); loginRevision = "1";
-      const closed = new Promise(resolve => a.once("close", code => resolve(code)));
-      now += 5_000; a.send(JSON.stringify({ type: "PING", id: "after-change" }));
-      await expect(closed).resolves.toBe(1013);
+
+    it("still cuts off a lost workspace snapshot within the existing five-second read window", async () => {
+      let now = 1000; deps.now = () => now;
+      const w = await worker(), a = sockets[0]!, frames: any[] = [];
+      w.on("message", raw => { const value = JSON.parse(String(raw)); if (value.t === "frame") frames.push(value.frame); });
+      await vi.waitFor(() => expect(deps.config).toHaveBeenCalledTimes(1));
+      const closed = new Promise<number>(resolve => a.once("close", resolve));
+      authorized = false; now += 5_000;
+      a.send(JSON.stringify({ type: "PING", id: "removed" }));
+      expect(await closed).toBe(1013);
       expect(frames).toEqual([]);
     });
-    it("does not carry the grace across a source revalidation", async () => {
-      const { a, frames } = await setup();
-      failure = busy();
-      const closed = new Promise(resolve => a.once("close", code => resolve(code)));
+
+    it("rechecks membership on a connection-change notification without calling GitHub", async () => {
+      deps.continueSource = vi.fn(async () => { throw new HttpError(403, "github_cloud_access_denied", "fixture"); });
+      const w = await worker(), a = sockets[0]!;
+      await vi.waitFor(() => expect(deps.config).toHaveBeenCalledTimes(1));
+      vi.mocked(deps.store.appAccessSnapshot).mockClear();
       relay.revalidateSources({});
-      await expect(closed).resolves.toBe(1013);
-      expect(frames).toEqual([]);
-    });
-    it("does not restore cleared grace from a held continuation after source revalidation", async () => {
-      const { a, frames } = await setup();
-      let reached!: () => void, release!: () => void, first = true;
-      const entered = new Promise<void>(resolve => { reached = resolve; });
-      const held = new Promise<void>(resolve => { release = resolve; });
-      deps.continueSource = vi.fn(async () => {
-        if (!first) throw busy();
-        first = false; reached(); await held;
-        return { recheckAt: now + 600_000, graceUntil: GRACE_END };
-      });
-      now += 5_000; a.send(JSON.stringify({ type: "PING", id: "held" }));
-      try {
-        await entered;
-        relay.revalidateSources({});
-        release();
-        await vi.waitFor(() => expect(vi.mocked(deps.continueSource!).mock.calls.length).toBeGreaterThanOrEqual(2));
-        await vi.waitFor(() => expect(a.readyState).toBe(WebSocket.CLOSED));
-        expect(frames).toEqual([]);
-      } finally { release(); }
-    });
-    it("still closes on a confirmed revocation inside the grace", async () => {
-      const { a } = await setup();
-      failure = new HttpError(403, "github_cloud_access_denied", "denied");
-      const closed = new Promise(resolve => a.once("close", code => resolve(code)));
-      now += 5_000; a.send(JSON.stringify({ type: "PING", id: "denied" }));
-      await expect(closed).resolves.not.toBe(1013);
+      await vi.waitFor(() => expect(deps.store.appAccessSnapshot).toHaveBeenCalled());
+      const reply = nextMessage(a);
+      w.send(JSON.stringify({ t: "frame", clientId: "*", frame: { continued: true } }));
+      expect(await reply).toEqual({ continued: true });
+      expect(deps.continueSource).not.toHaveBeenCalled();
     });
   });
 
-  it("refuses a fresh admission during an outage without closing the existing session", async () => {
-    deps.authorizeSource = vi.fn(async () => {});
-    deps.continueSource = vi.fn(async () => ({ recheckAt: Date.now() + 600_000 }));
-    const w = await worker(), existing = sockets[0]!;
-    await vi.waitFor(() => expect(deps.config).toHaveBeenCalledTimes(1));
-    vi.mocked(deps.authorizeSource).mockRejectedValue(new HttpError(503, "github_unavailable", "unavailable"));
-    ticketSession = "session-b";
-    const b = await app(), closed = vi.fn(); b.on("close", closed);
-    await vi.waitFor(() => expect(b.readyState).toBe(WebSocket.CLOSED));
-    expect(closed).toHaveBeenCalledWith(1013, expect.anything());
-    expect(existing.readyState).toBe(WebSocket.OPEN);
-    expect(w.readyState).toBe(WebSocket.OPEN);
-    const reply = nextMessage(existing);
-    w.send(JSON.stringify({ t: "frame", clientId: "*", frame: { continued: true } }));
-    expect(await reply).toEqual({ continued: true });
-  });
-
-  // A create that returned before its GitHub checks: the app opens it at once.
-  it("admits an app to a pending create's room and checks its source again within a second", async () => {
-    let now = 1000;
-    deps.now = () => now;
-    const pending = new HttpError(409, "cloud_source_pending", "pending");
-    deps.authorizeSource = vi.fn(async () => { throw pending; });
-    deps.continueSource = vi.fn(async () => { throw pending; });
-    const a = await app(), closed = vi.fn(); a.on("close", closed);
-    await vi.waitFor(() => expect(deps.authorizeSource).toHaveBeenCalled());
-    await new Promise(resolve => setTimeout(resolve, 50));
-    expect(a.readyState).toBe(WebSocket.OPEN);
-    // Once the lifecycle's checks refuse it, the room's next check does too.
-    const refused = new HttpError(404, "github_repository_not_found", "gone");
-    vi.mocked(deps.authorizeSource).mockRejectedValue(refused);
-    vi.mocked(deps.continueSource!).mockRejectedValue(refused);
-    now += 1_001;
+  it("keeps a pending create's room independent of GitHub and observes a later lifecycle refusal", async () => {
+    let now = 1000; deps.now = () => now;
+    deps.authorizeSource = vi.fn(async () => { throw new HttpError(409, "cloud_source_pending", "pending"); });
+    const a = await app();
+    await vi.waitFor(() => expect(deps.store.appAccessSnapshot).toHaveBeenCalled());
+    expect(a.readyState).toBe(WebSocket.OPEN); expect(deps.authorizeSource).not.toHaveBeenCalled();
+    const closed = new Promise<number>(resolve => a.once("close", resolve));
+    authorized = false; now += 5_000;
     a.send(JSON.stringify({ type: "PING", id: "after-refusal" }));
-    await vi.waitFor(() => expect(a.readyState).toBe(WebSocket.CLOSED));
-    expect(closed).toHaveBeenCalledWith(4001, expect.anything());
+    expect(await closed).toBe(1013);
   });
 
   it("checks session expiry before streaming past an otherwise current GitHub grant", async () => {

@@ -110,7 +110,7 @@ database("active workspace per-person access loss", () => {
     const response = await f.worker("execution-leases/renew", { contextIds: [survivor.begun.contextId] });
     expect(await response.json()).toEqual({ leases: [{ contextId: survivor.begun.contextId, expiresAt: expect.any(Number) }] });
     const after = (await pool.query("SELECT material,generation,authority FROM cloud_v2_execution_contexts WHERE id=$1", [survivor.begun.contextId])).rows[0];
-    expect(after).toMatchObject({ ...before, authority: { signatureVersion: 2 } });
+    expect(after).toMatchObject({ ...before, authority: { signatureVersion: 3 } });
   });
 
   it("re-signs a short phase-2 context when material delivery renews its lease", async () => {
@@ -123,7 +123,7 @@ database("active workspace per-person access loss", () => {
     expect(response.status).toBe(200);
     expect((await response.json()).expiresAt - Date.now()).toBeGreaterThanOrEqual(25_000);
     const after = (await pool.query("SELECT material,generation,authority FROM cloud_v2_execution_contexts WHERE id=$1", [turn.begun.contextId])).rows[0];
-    expect(after).toMatchObject({ ...before, authority: { signatureVersion: 2 } });
+    expect(after).toMatchObject({ ...before, authority: { signatureVersion: 3 } });
     expect(after.authority).not.toHaveProperty("legacyBasis");
   });
 

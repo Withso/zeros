@@ -9,7 +9,6 @@ import type { CloudV2AgentLogins } from "./agent-logins.js";
 import type { CloudV2Store, CloudV2Workspace } from "./store.js";
 import { isCloudV2Token } from "./tokens.js";
 import { OpenAiModelAvailability } from "./model-availability.js";
-import { isGithubAccessRevoked } from "../github-availability.js";
 import type { CloudSourceContinuation, CloudSourceProof } from "./source-authority.js";
 
 export const CLOUD_V2_PROXY_PREFIX = "/v2/cloud/proxy";
@@ -70,15 +69,6 @@ export function createCloudV2ProxyRoutes(deps: CloudV2ProxyDeps): Hono {
     if (!isCloudV2Token(token, "proxy")) return failure(401, "proxy_token_invalid", "Invalid workspace proxy token");
     const workspace = await deps.store.verifyProxyToken(token);
     if (!workspace?.creatorUserId) return failure(401, "proxy_token_invalid", "The workspace proxy token expired or was revoked");
-    try {
-      if (deps.continueSource) await deps.continueSource(workspace,
-        workspace.accessEpoch && workspace.loginRevision ? { accessEpoch: workspace.accessEpoch, loginRevision: workspace.loginRevision } : undefined);
-      else await deps.authorizeSource?.(workspace);
-    } catch (error) {
-      return isGithubAccessRevoked(error)
-        ? failure(401, "workspace_access_revoked", "Repository access was revoked")
-        : failure(503, "workspace_verification_unavailable", "Repository verification is temporarily unavailable. Retry shortly.");
-    }
     const length = Number(c.req.header("content-length") ?? 0);
     if (length > MAX_REQUEST_BYTES) return failure(413, "payload_too_large", "Request is too large");
 

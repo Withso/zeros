@@ -9,7 +9,7 @@ it("returns a pending create's document as a plain creating row without reading 
   const pending = { id: "w", organizationId: "org", creatorUserId: "user", repository: "o/r", state: "creating",
     updatedAt: new Date(0).toISOString(), sourcePending: true } as CloudV2Workspace;
   const deps = {
-    pool: {} as pg.Pool,
+    pool: { connect: async () => ({ query: async () => ({ rows: [{ id: pending.id }] }), release() {} }) } as unknown as pg.Pool,
     connections: { fingerprint: vi.fn(), assertCurrent: vi.fn() },
     metadata: { documents: vi.fn(async () => []) },
     verifications: { catalogAuthority: vi.fn() },

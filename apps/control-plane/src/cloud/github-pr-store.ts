@@ -267,7 +267,7 @@ export class CloudGithubPrStore {
 
   async documents(
     workspaces: readonly CloudV2Workspace[],
-    generations: ReadonlyMap<string, string> = new Map(),
+    generations?: ReadonlyMap<string, string>,
   ): Promise<CloudGithubWorkspaceDocument[]> {
     if (!workspaces.length) return [];
     const rows = await withSystemTx(this.pool, (tx) =>
@@ -280,7 +280,7 @@ export class CloudGithubPrStore {
     return workspaces.map((workspace) => {
       const row = metadata.get(workspace.id),
         current =
-          row?.pr_connection_generation === generations.get(workspace.id);
+          generations === undefined || row?.pr_connection_generation === generations.get(workspace.id);
       return {
         ...workspace,
         repository: row?.canonical_repository ?? workspace.repository,

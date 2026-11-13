@@ -34,9 +34,9 @@ database("0243 signature metadata and live migration cost", () => {
       expect(Object.keys(value.legacyBasis).sort()).toEqual(["accessEpoch", "bootId", "permission", "policy", "stopGeneration", "workerTokenHash"]);
       expect(Buffer.byteLength(JSON.stringify(value.legacyBasis))).toBeLessThanOrEqual(65536);
     }
-    const versionTwo = { signatureVersion: 2, signature: "d".repeat(64) };
-    await pool.query("UPDATE cloud_v2_tokens SET execution_authority=$2 WHERE token_hash=$1", [ticket, versionTwo]);
-    expect((await pool.query("SELECT execution_authority FROM cloud_v2_tokens WHERE token_hash=$1", [ticket])).rows[0].execution_authority).toEqual(versionTwo);
+    const versionThree = { signatureVersion: 3, signature: "d".repeat(64) };
+    await pool.query("UPDATE cloud_v2_tokens SET execution_authority=$2 WHERE token_hash=$1", [ticket, versionThree]);
+    expect((await pool.query("SELECT execution_authority FROM cloud_v2_tokens WHERE token_hash=$1", [ticket])).rows[0].execution_authority).toEqual(versionThree);
   });
 
   it("refuses a compatibility backfill above the bounded live set", async () => {

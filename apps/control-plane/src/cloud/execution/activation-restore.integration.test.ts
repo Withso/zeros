@@ -74,7 +74,7 @@ database("active checkpoint restore authority and fresh-VM fence", () => {
     await pool.query("DELETE FROM cloud_github_source_verifications WHERE owner_user_id=$1",[f.viewer.id]);
     await f.cp.lifecycle!.tick();
     expect(restores()).toHaveLength(0);
-    expect(f.cp.compute.create).not.toHaveBeenCalled();
+    expect(vi.mocked(f.cp.compute.exec).mock.calls.some(([,command])=>command.includes("systemctl restart zeros-worker.service"))).toBe(false);
     expect(await row()).toMatchObject({state:"failed",error_code:"github_access_required",checkpoint_object:object});
   });
 

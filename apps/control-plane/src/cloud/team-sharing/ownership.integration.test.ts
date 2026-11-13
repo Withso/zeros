@@ -115,7 +115,7 @@ database("active cloud Creator ownership through the router and PostgreSQL", () 
     for (const user of [f.creator, f.admin]) {
       const response = await call("/reassign-candidates?self=1", "GET", undefined, user);
       expect(response.status).toBe(200);
-      expect(await response.json()).toEqual({ creatorRevision: "1", nextCursor: null,
+      expect(await response.json()).toEqual({ creatorRevision: "1", nextCursor: null, candidateHints: {},
         candidates: [{ userId: user.id, eligible: true, agentLogins: {} }] });
     }
   });
@@ -125,7 +125,7 @@ database("active cloud Creator ownership through the router and PostgreSQL", () 
     const response = await call("/reassign-candidates?self=1", "GET", undefined, f.admin);
     expect(response.status).toBe(200);
     const page = await response.json();
-    expect(page).toEqual({ creatorRevision: "2", nextCursor: null,
+    expect(page).toEqual({ creatorRevision: "2", nextCursor: null, candidateHints: {},
       candidates: [{ userId: f.admin.id, eligible: true, agentLogins: {} }] });
     const reassigned = await call("/reassign", "POST", transfer(f.admin.id, null, page.creatorRevision), f.admin);
     expect(reassigned.status).toBe(200);
@@ -218,7 +218,7 @@ database("active cloud Creator ownership through the router and PostgreSQL", () 
       .rejects.toMatchObject({ status: 409, code: "team_ownership_required" });
   });
 
-  it("checks every source for a candidate and keeps provider uncertainty distinct from ineligibility", async () => {
+  it("reports a known source denial as a hint without withholding an eligible candidate during an outage", async () => {
     const id = randomUUID();
     await withSystemTx(pool, async tx => {
       await tx.query(`INSERT INTO cloud_v2_workspaces(id,org_id,creator_user_id,name,repository,branch,base_branch,state,source_repositories,execution_mode)
@@ -227,17 +227,24 @@ database("active cloud Creator ownership through the router and PostgreSQL", () 
     });
     f.workspace = await f.store.get(id, f.creator.id);
     f.denied.add(`${f.viewer.id}:43`);
+    await expect(f.github.source.viewer(f.organizationId, f.viewer.id,
+      [{ repository: "example/project", repositoryId: "42" }, { repository: "example/snapshot", repositoryId: "43" }], false))
+      .rejects.toMatchObject({ status: 404 });
+    f.fetcher.mockClear();
     const list = await call("/reassign-candidates");
     expect(list.status).toBe(200);
-    expect((await list.json()).candidates).toContainEqual({ userId: f.viewer.id, eligible: false, reason: "repository_access_required" });
-    const refuse = await call("/reassign", "POST", transfer());
-    expect(refuse.status).toBe(422); expect((await refuse.json()).error.code).toBe("assignee_ineligible");
+    const body = await list.json();
+    expect(body.candidates).toContainEqual({ userId: f.viewer.id, eligible: true, agentLogins: {} });
+    expect(body.candidateHints[f.viewer.id]).toEqual(["repository_access"]);
     f.unavailable.add(f.admin.id);
     await pool.query("DELETE FROM cloud_github_source_verifications WHERE owner_user_id=$1", [f.admin.id]);
     f.github.source.invalidate({ userId: f.admin.id });
     const unknown = await call("/reassign-candidates");
-    expect(unknown.status).toBe(503); expect((await unknown.json()).error.code).toBe("github_verification_unavailable");
-    expect((await state()).creator_revision).toBe("1");
+    expect(unknown.status).toBe(200);
+    expect((await unknown.json()).candidates).toContainEqual({ userId: f.admin.id, eligible: true, agentLogins: {} });
+    expect((await call("/reassign", "POST", transfer())).status).toBe(200);
+    expect((await state()).creator_revision).toBe("2");
+    expect(f.fetcher).not.toHaveBeenCalled();
   });
 
   it.each(["target", "caller"] as const)("refuses a held transfer after the %s leaves and rejoins", async who => {
@@ -270,7 +277,8 @@ database("active cloud Creator ownership through the router and PostgreSQL", () 
     expect(stale.status).toBe(409); expect((await stale.json()).error.code).toBe("creator_changed");
   });
 
-  it("rolls the transfer back if target source access is withdrawn after its initial locked check", async () => {
+  it("retains target eligibility when GitHub access is withdrawn after the initial locked check", async () => {
+    await f.github.source.viewer(f.organizationId, f.viewer.id, [{ repository: "example/project", repositoryId: "42" }], false);
     const assert = f.sharing.ownership.people.assert.bind(f.sharing.ownership.people);
     let withdrawn = false;
     vi.spyOn(f.sharing.ownership.people, "assert").mockImplementation(async (...args) => {
@@ -285,9 +293,9 @@ database("active cloud Creator ownership through the router and PostgreSQL", () 
     });
     const response = await call("/reassign", "POST", transfer());
     expect(withdrawn).toBe(true);
-    expect(response.status).toBe(422); expect((await response.json()).error.code).toBe("assignee_ineligible");
-    expect((await state()).creator_user_id).toBe(f.creator.id);
-    expect((await pool.query("SELECT 1 FROM cloud_v2_reassignments WHERE workspace_id=$1", [f.workspace.id])).rowCount).toBe(0);
+    expect(response.status).toBe(200);
+    expect((await state()).creator_user_id).toBe(f.viewer.id);
+    expect((await pool.query("SELECT 1 FROM cloud_v2_reassignments WHERE workspace_id=$1", [f.workspace.id])).rowCount).toBe(1);
   });
 
   it("never combines new ownership with follow flags from before the transfer", async () => {

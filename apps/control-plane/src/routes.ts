@@ -471,6 +471,7 @@ export function createRoutes(
     };
     return c.json({
       user: publicUser,
+      workspaceAccess: "membership",
       capabilities: {
         createOrganization: canCreateOrganization(pro),
         pro,

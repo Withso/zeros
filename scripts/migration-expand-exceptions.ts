@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 // Each reviewed migration lists its exact exempted statements by rule.
 const reviewed: Readonly<Record<string, Readonly<Record<string, readonly string[]>>>> = {
+  "0247_cloud_membership_access.sql": {},
   "0246_cloud_team_ownership.sql": {},
   "0245_cloud_execution_payer.sql": {},
   "0243_cloud_execution_person_authority.sql": {},
@@ -534,6 +535,19 @@ function statements(sql: string): { text: string; header: string }[] {
   return result;
 }
 
+const cloudMembershipAccessDigests: Readonly<Record<string, readonly string[]>> = {
+  "optional-source-fingerprint": [
+    "dbeaf0af340842ca6f74aa4f832f4a6e5d6b14e6d9aad5b5f74be3c8a7021d51"
+  ],
+  "execution-signature-compatibility": [
+    "b04d62edd5cec850f0a1a8f798fa0e414048e6076599b31f75e07dc07a7f9eae"
+  ],
+  "membership-source-cutoff": [
+    "bb5eb464adebd8abf1ec25e03b3e222bb76edcf81eab7373ce669baa84d3b282",
+    "234689248750e4377a8206cf50c2c57c2ad5dbb71b001e29798738d22af254a8",
+    "026d26711f41d9bb80fa1439ba9e41a0a2c272b501e5a0835703e421a585198c"
+  ]
+};
 const cloudTeamOwnershipDigests: Readonly<Record<string, readonly string[]>> = {
   "nullable-cloud-creator": ["3b8599d97e757c1ee25a51f12c5207c538110c3d75ba1a4899dca868068bc258"],
   "cloud-creator-loss": ["6bdf9914aa9386dd4bda52f25a24ec89459a4ef80c6d0696974c808ee5eb8bef"],
@@ -588,6 +602,7 @@ export function applyReviewedExpandExceptions(file: string, sql: string): string
     const rule = annotations[0]![1]!;
     const statement = text.replace(/\r\n/g, "\n").trim();
     const allowed = exact[rule]?.includes(statement) ||
+      (file === "0247_cloud_membership_access.sql" && cloudMembershipAccessDigests[rule]?.includes(createHash("sha256").update(statement).digest("hex"))) ||
       (file === "0246_cloud_team_ownership.sql" && cloudTeamOwnershipDigests[rule]?.includes(createHash("sha256").update(statement).digest("hex"))) ||
       (file === "0245_cloud_execution_payer.sql" && cloudExecutionPayerDigests[rule]?.includes(createHash("sha256").update(statement).digest("hex"))) ||
       (file === "0243_cloud_execution_person_authority.sql" && cloudExecutionPersonDigests[rule]?.includes(createHash("sha256").update(statement).digest("hex"))) ||

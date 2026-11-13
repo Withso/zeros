@@ -5,10 +5,11 @@ import { CloudGithubConnections } from "../github-connections.js";
 import { executionFixture, type ExecutionFixture } from "./test-fixture.js";
 
 const database = process.env.TEST_DATABASE_URL ? describe : describe.skip;
-database("confirmed source authority across refresh and outages", () => {
+database("workspace membership across GitHub refresh and outages", () => {
   let pool: pg.Pool, f: ExecutionFixture;
   beforeAll(() => { pool = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL, max: 10, statement_timeout: 4000 }); });
-  beforeEach(async () => { f = await executionFixture(pool); await f.login(); await f.activate(); expect((await f.hello()).status).toBe(200); });
+  beforeEach(async () => { f = await executionFixture(pool); await f.login(); await f.activate(); expect((await f.hello()).status).toBe(200);
+    await f.github.source.viewer(f.organizationId, f.creator.id, [{ repository: f.workspace.repository, repositoryId: "42" }], false); });
   afterEach(async () => { await f?.close(); await f?.cp.routes.teamSharing?.signals.close(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
   afterAll(() => pool.end());
 
@@ -42,7 +43,7 @@ database("confirmed source authority across refresh and outages", () => {
     const confirmed = (await sourceRow()).verified_at;
     f.unavailable.add(f.creator.id);
     expect((await connect()).status).toBe(200);
-    await expect.poll(async () => (await sourceRow()).failure_code).toBe("github_unavailable");
+    expect((await sourceRow()).failure_code).toBeNull();
     expect((await history()).status).toBe(200);
     const controller = new AbortController();
     const events = await f.app.request(path("events"), { signal: controller.signal, headers: { ...headers, "x-test-actor": f.creator.id } });
@@ -69,9 +70,9 @@ database("confirmed source authority across refresh and outages", () => {
     expect(f.fetcher).not.toHaveBeenCalled();
   });
 
-  it("refuses without a confirmed positive during an outage", async () => {
+  it("admits a member without any confirmed GitHub positive during an outage", async () => {
     f.unavailable.add(f.viewer.id);
-    expect((await connect(f.viewer)).status).toBe(503);
+    expect((await connect(f.viewer)).status).toBe(200);
     expect((await pool.query("SELECT verified_at FROM cloud_github_source_verifications WHERE owner_user_id=$1", [f.viewer.id])).rows.every(row => row.verified_at === null)).toBe(true);
   });
 
@@ -86,26 +87,27 @@ database("confirmed source authority across refresh and outages", () => {
     expect((await f.worker("github-token", { purpose: "git", contextId: turn.begun.contextId })).status).toBe(409);
   });
 
-  it("stops reusing an outage positive at sixty minutes without moving its confirmation", async () => {
+  it("does not depend on an expired source positive for connect or history", async () => {
     await age(60 * 60 + 1);
     const confirmed = (await sourceRow()).verified_at;
     f.unavailable.add(f.creator.id);
-    expect((await connect()).status).toBe(503);
-    expect((await history()).status).toBe(503);
+    expect((await connect()).status).toBe(200);
+    expect((await history()).status).toBe(200);
     expect((await sourceRow()).verified_at).toEqual(confirmed);
   });
 
-  it("refreshes at eight minutes and a definitive denial retires the person's context", async () => {
+  it("refuses a GitHub network operation without retiring the person's turn or socket authority", async () => {
     const turn = await f.dispatch();
     expect((await f.worker("turn-lease", turn.lease)).status).toBe(200);
     await age(8 * 60 + 1);
     f.denied.add(`${f.creator.id}:42`); f.fetcher.mockClear();
-    await history();
-    await expect.poll(async () => (await sourceRow()).verified_at).toBeNull();
+    expect((await history()).status).toBe(200);
+    expect(f.fetcher).not.toHaveBeenCalled();
+    expect((await f.worker("github-token", { purpose: "git", contextId: turn.begun.contextId })).status).toBe(404);
     expect((await pool.query("SELECT state,reason FROM cloud_v2_execution_contexts WHERE id=$1", [turn.begun.contextId])).rows[0])
-      .toEqual({ state: "revoked", reason: "access_revoked" });
-    expect(f.fetcher.mock.calls.filter(([input]) => new URL(String(input)).pathname === "/repositories/42")).toHaveLength(1);
-    expect((await connect()).status).toBe(403);
+      .toEqual({ state: "active", reason: null });
+    expect((await connect()).status).toBe(200);
+    expect((await f.worker("turn-lease", turn.lease)).status).toBe(200);
   });
 
   it("checks Git network access immediately even while a workspace positive is fresh", async () => {

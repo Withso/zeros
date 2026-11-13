@@ -84,13 +84,9 @@ export class CloudApiService {
       await this.deps.credentials.assertCurrent(credential);
       return;
     }
-    const { workspace, proof } = await this.deps.store.promptContext(workspaceId, credential.userId);
+    const { workspace } = await this.deps.store.promptContext(workspaceId, credential.userId);
     if (workspace.organizationId !== credential.organizationId) throw notFound();
     if (workspace.archivedAt) throw new HttpError(409, "workspace_archived", "Unarchive the workspace before sending a message");
-    if (!workspace.sourcePending) {
-      if (workspace.state === "running" && this.deps.routes.continueSource) await this.deps.routes.continueSource(workspace, proof);
-      else await this.deps.routes.authorizeSource?.(workspace);
-    }
     await this.deps.credentials.assertCurrent(credential);
   }
 
@@ -145,7 +141,6 @@ export class CloudApiService {
   async lifecycle(credential: CloudApiCredential, id: string, action: "archive" | "unarchive" | "sleep" | "wake") {
     const workspace = await this.owned(credential, id);
     const operation = action === "archive" ? "archive" : action === "sleep" ? "stop" : "start";
-    if (operation === "start" && !await this.deps.store.prompts.execution?.active(id)) await this.deps.routes.authorizeSource?.(workspace);
     await this.deps.credentials.assertCurrent(credential);
     const result = await this.deps.store.requestLifecycle(id, credential.userId, operation);
     return this.workspaceDocument(credential, result.workspace);

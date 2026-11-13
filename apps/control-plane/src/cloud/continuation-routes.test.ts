@@ -11,7 +11,8 @@ function fixture(state: CloudV2Workspace["state"] = "running") {
   const continueSource = vi.fn(async () => ({ recheckAt: Date.now() + 60_000 }));
   const enqueue = vi.fn(async () => ({ receipt: { workspaceId: id }, replay: false }));
   const list = vi.fn(async () => ({ prompts: [] })), stop = vi.fn(async () => ({ epoch: "1" }));
-  const issueToken = vi.fn(), requestLifecycle = vi.fn();
+  const issueToken = vi.fn(async () => ({ token: "synthetic-ticket", expiresAt: new Date(Date.now()+60_000) }));
+  const requestLifecycle = vi.fn(async () => ({ workspace, moved: false }));
   const get = vi.fn(async () => workspace);
   const proof = { accessEpoch: "3", loginRevision: "7" };
   const promptContext = vi.fn(async () => ({ workspace, proof }));
@@ -31,32 +32,31 @@ function fixture(state: CloudV2Workspace["state"] = "running") {
 }
 const prompt = { chatId: "chat", userMessageId: "message", agentId: "codex", startedAt: 1000, prompt: [{ type: "text", text: "Continue" }] };
 
-it("accepts durable prompts and their status during continuation grace", async () => {
+it("accepts durable prompts and their status without GitHub verification", async () => {
   const f = fixture();
   expect((await f.request("prompts", prompt)).status).toBe(201);
   expect((await f.request("prompts?chatId=chat")).status).toBe(200);
   expect(f.enqueue).toHaveBeenCalledTimes(1);
   expect(f.list).toHaveBeenCalledTimes(1);
   expect(f.authorizeSource).not.toHaveBeenCalled();
-  expect(f.continueSource).toHaveBeenCalledTimes(2);
-  expect(f.continueSource).toHaveBeenCalledWith(f.workspace, f.proof);
+  expect(f.continueSource).not.toHaveBeenCalled();
   expect(f.promptContext).toHaveBeenCalledWith(id, "user");
   expect(f.get).not.toHaveBeenCalled();
 });
 
-it.each(["stopped", "starting"] as const)("requires fresh verification before a prompt can start a %s workspace", async state => {
+it.each(["stopped", "starting"] as const)("admits a prompt to a %s workspace without repository verification", async state => {
   const f = fixture(state);
-  expect((await f.request("prompts", prompt)).status).toBe(503);
-  expect(f.enqueue).not.toHaveBeenCalled();
+  expect((await f.request("prompts", prompt)).status).toBe(201);
+  expect(f.enqueue).toHaveBeenCalledOnce();
   expect(f.continueSource).not.toHaveBeenCalled();
 });
 
-it("does not use continuation grace to issue a new connect ticket or wake a VM", async () => {
+it("issues a connect ticket and admits wake without repository verification", async () => {
   const f = fixture();
-  expect((await f.request("connect", {})).status).toBe(503);
-  expect((await f.request("start", {})).status).toBe(503);
-  expect(f.issueToken).not.toHaveBeenCalled();
-  expect(f.requestLifecycle).not.toHaveBeenCalled();
+  expect((await f.request("connect", {})).status).toBe(200);
+  expect((await f.request("start", {})).status).toBe(200);
+  expect(f.issueToken).toHaveBeenCalledOnce();
+  expect(f.requestLifecycle).toHaveBeenCalledOnce();
   expect(f.continueSource).not.toHaveBeenCalled();
 });
 
@@ -69,7 +69,7 @@ it("keeps Stop available after grace expires or a repository is denied", async (
   expect(f.stop).toHaveBeenCalledTimes(1);
 });
 
-it("retains creator authorization before reading cached source permission", async () => {
+it("retains Creator authorization for legacy prompt admission", async () => {
   const f = fixture();
   f.promptContext.mockRejectedValue(new HttpError(404, "not_found", "not found"));
   expect((await f.request("prompts", prompt)).status).toBe(404);
@@ -77,14 +77,15 @@ it("retains creator authorization before reading cached source permission", asyn
   expect(f.enqueue).not.toHaveBeenCalled();
 });
 
-it("keeps running workspace history readable during grace while a stopped workspace requires fresh access", async () => {
+it("reads running and stopped history without GitHub access", async () => {
   const active = fixture();
   expect((await active.request("history", { op: "chats.list", params: {} })).status).toBe(200);
   expect(active.listChats).toHaveBeenCalledOnce();
   expect(active.authorizeSource).not.toHaveBeenCalled();
-  expect(active.continueSource).toHaveBeenCalledWith(active.workspace, undefined);
+  expect(active.continueSource).not.toHaveBeenCalled();
   expect(active.promptContext).not.toHaveBeenCalled();
   const stopped = fixture("stopped");
-  expect((await stopped.request("history", { op: "chats.list", params: {} })).status).toBe(503);
-  expect(stopped.listChats).not.toHaveBeenCalled();
+  expect((await stopped.request("history", { op: "chats.list", params: {} })).status).toBe(200);
+  expect(stopped.listChats).toHaveBeenCalledOnce();
+  expect(stopped.authorizeSource).not.toHaveBeenCalled();
 });

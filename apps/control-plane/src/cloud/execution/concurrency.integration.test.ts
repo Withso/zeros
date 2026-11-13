@@ -21,8 +21,9 @@ database("execution fences across held material and database locks", () => {
     stop: () => f.call(`/v1/cloud-v2/workspaces/${f.workspace.id}/stop`, "POST"),
   };
 
-  it.each(Object.keys(changes) as Array<keyof typeof changes>)("rechecks %s after material resolves and returns no stale credential", async kind => {
+  it.each(Object.keys(changes) as Array<keyof typeof changes>)("applies the %s policy after material resolves", async kind => {
     const turn = await f.dispatch(f.prompt(), f.viewer);
+    if (kind === "source") await f.github.source.viewer(f.organizationId, f.viewer.id, [{ repository: f.workspace.repository, repositoryId: "42" }]);
     let entered!: () => void, release!: () => void;
     const observed = new Promise<void>(resolve => { entered = resolve; }), held = new Promise<void>(resolve => { release = resolve; });
     const material = f.cp.execution.deps.material;
@@ -33,6 +34,12 @@ database("execution fences across held material and database locks", () => {
     await observed;
     try { await changes[kind](); } finally { release(); }
     const response = await leasing;
+    if (kind === "source") {
+      expect(response.status).toBe(200);
+      expect((await response.json()).contextId).toBe(turn.begun.contextId);
+      expect((await pool.query("SELECT state FROM cloud_v2_execution_contexts WHERE id=$1", [turn.begun.contextId])).rows[0].state).toBe("active");
+      return;
+    }
     expect([401, 403, 409]).toContain(response.status);
     const body = await response.json();
     for (const field of ["agents", "environment", "api", "mcpServers"]) expect(body).not.toHaveProperty(field);

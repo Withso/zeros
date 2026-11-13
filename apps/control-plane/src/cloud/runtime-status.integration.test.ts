@@ -60,7 +60,7 @@ suite("idle worker runtime status", () => {
     const policy: RuntimeCanaryPolicy = { keys: [{ id: "fixture", publicKey: generateKeyPairSync("ed25519").publicKey.export({ type: "spki", format: "der" }).toString("base64") }],
       fixture: { creatorUserId: creator, organizationId: org, repositoryId: "42" } };
     const authorize = vi.fn(github.authorizeSource), compute = { execLong: vi.fn(async () => ({ exitCode: 0, stdout: "", timedOut: false })) };
-    const adoption = new RuntimeAdoption({ store, handoffs, compute, authorizeSource: authorize,
+    const adoption = new RuntimeAdoption({ store, handoffs, compute,
       drainActive: () => buildDrainActive(pool),
       runtimeForWorkspace: workspace => workspaceRuntimeResolver(pool, { sha256: target, url }, canary ? policy : undefined)(workspace) });
     const app = new Hono();
@@ -123,16 +123,16 @@ suite("idle worker runtime status", () => {
       expect(await f.row()).toEqual(before);
       expect((await pool.query("SELECT id FROM cloud_worker_runtime_handoffs WHERE workspace_id=$1", [f.input.id])).rowCount).toBe(0);
       expect(await f.request({ op: "prepare", revision: "0", generation: 1, instanceId: randomUUID() })).toEqual({ status: "unavailable" });
-      expect(f.authorize).toHaveBeenCalledOnce(); expect(f.compute.execLong).not.toHaveBeenCalled(); expect(f.url).not.toHaveBeenCalled();
+      expect(f.authorize).not.toHaveBeenCalled(); expect(f.compute.execLong).not.toHaveBeenCalled(); expect(f.url).not.toHaveBeenCalled();
     } finally { f.adoption.close(); }
   });
 
-  it("keeps source authorization before preparing a different runtime", async () => {
+  it("prepares a different runtime with membership authority despite GitHub denial", async () => {
     const f = await fixture(); f.deny(); f.pin("b".repeat(64));
     try {
-      expect(await f.request({ op: "prepare", revision: "0", generation: 1, instanceId: randomUUID() })).toEqual({ status: "unavailable" });
-      expect(f.authorize).toHaveBeenCalledOnce(); expect(f.compute.execLong).not.toHaveBeenCalled(); expect(f.url).not.toHaveBeenCalled();
-      expect((await pool.query("SELECT id FROM cloud_worker_runtime_handoffs WHERE workspace_id=$1", [f.input.id])).rowCount).toBe(0);
+      expect(await f.request({ op: "prepare", revision: "0", generation: 1, instanceId: randomUUID() })).toMatchObject({ status: "prepared" });
+      expect(f.authorize).not.toHaveBeenCalled(); expect(f.compute.execLong).toHaveBeenCalledOnce(); expect(f.url).toHaveBeenCalledOnce();
+      expect((await pool.query("SELECT id FROM cloud_worker_runtime_handoffs WHERE workspace_id=$1", [f.input.id])).rowCount).toBe(1);
     } finally { f.adoption.close(); }
   });
 
@@ -142,7 +142,7 @@ suite("idle worker runtime status", () => {
     if (identity === "old-boot") await pool.query("UPDATE cloud_v2_workspaces SET worker_boot_id=$2 WHERE id=$1", [f.input.id, randomUUID()]);
     try {
       expect(await f.request({ op: "status" }, identity === "foreign-boot" ? randomUUID() : f.boot)).toEqual({ status: "unavailable" });
-      if (identity === "missing") expect(f.authorize).toHaveBeenCalledOnce();
+      if (identity === "missing") expect(f.authorize).not.toHaveBeenCalled();
       expect(f.compute.execLong).not.toHaveBeenCalled(); expect(f.url).not.toHaveBeenCalled();
     } finally { f.adoption.close(); }
   });

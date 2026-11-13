@@ -44,11 +44,7 @@ export class CloudTeamEvents {
           if (!this.signals.healthy() || pending.has("gap")) break;
           if (pending.delete("authority")) nextAuthority = this.now();
           if (this.now()>=nextAuthority) {
-            // Registration makes later reads continuations, with the existing
-            // ten-minute refresh and one-hour unknown-only source grace.
-            if (first || proof.source && (!proof.source.continuation || proof.source.recheckAt<=Date.now()))
-              proof = await this.sharing.authority.admit(workspaceId,user);
-            else await this.sharing.authority.assert(proof);
+            await this.sharing.authority.assert(proof);
             nextAuthority = this.now()+AUTHORITY_INTERVAL_MS;
           }
           if (this.now()>=nextRenew) { await this.presence.renew(connectionId,proof); nextRenew = this.now()+TEAM_PRESENCE_RENEW_MS; }

@@ -19,7 +19,7 @@ const github = vi.hoisted(() => ({
   workspaceSetup: vi.fn(async () => null),
   source: { invalidate: vi.fn(), targets: vi.fn(async () => {}) },
   binding: vi.fn(async () => ({ repository: "owner/project" })),
-  workerConfiguration: vi.fn(),
+  workerConfiguration: vi.fn(), assertConfiguration: vi.fn(async () => {}),
 }));
 vi.mock("./github-composition.js", () => ({ createCloudGithubServices: () => github }));
 vi.mock("../postgres-notifications.js", () => ({ postgresNotificationSubscription: () => ({ start: async () => {}, stop: async () => {} }) }));
@@ -35,7 +35,7 @@ vi.mock("./lifecycle.js", async original => ({ ...await original<typeof import("
 it("wires workspace git, gh, legacy, hydration and restore credentials to the creator while Computer builds keep automation credentials", async () => {
   github.workerConfiguration.mockImplementation(async workspace => ({ repositoryBinding: await github.binding(), loginRevision: "0",
     gitIdentity: async () => {
-      await github.authorizeSource();
+      await github.assertConfiguration();
       return github.connections.gitIdentity({ organizationId: workspace.organizationId, userId: workspace.creatorUserId });
     } }));
   const config = {
@@ -83,13 +83,13 @@ it("wires workspace git, gh, legacy, hydration and restore credentials to the cr
   let entered!: () => void, release!: () => void, revoked = false;
   const waiting = new Promise<void>(done => { entered = done; }), held = new Promise<void>(done => { release = done; });
   environment.mockImplementationOnce(async () => { entered(); await held; return pinned; });
-  github.authorizeSource.mockImplementation(async () => { if (revoked) throw new Error("Source revoked"); });
-  const configuring = assembled.workers.config(workspace), outcome = expect(configuring).rejects.toThrow("Source revoked");
+  github.assertConfiguration.mockImplementation(async () => { if (revoked) throw new Error("Membership changed"); });
+  const configuring = assembled.workers.config(workspace), outcome = expect(configuring).rejects.toThrow("Membership changed");
   try { await waiting; revoked = true; } finally { release(); }
   await outcome;
 });
 
-it("passes the relay room's proof into configuration authority after entry continuation", async () => {
+it("uses membership configuration without source continuation for a relay room", async () => {
   const config = {
     github: null, deploymentChannel: "alpha", inviteLinkBase: "https://app.example.test/invite", cloudAgentCredentials: { settingsSecretKeyV1: Buffer.alloc(32, 1).toString("base64url") },
     cloudV2: { boat: { apiKey: "synthetic-boat-credential" }, apiUrl: "https://api.example.test", realtimeUrl: "https://rt.example.test",
@@ -106,11 +106,11 @@ it("passes the relay room's proof into configuration authority after entry conti
   const proof = { accessEpoch: "3", loginRevision: "5" };
   github.continueSource.mockClear();
   await relay.deps.config(workspace, "continuation", proof);
-  expect(github.continueSource.mock.calls).toEqual([[workspace, proof]]);
-  expect(github.workerConfiguration).toHaveBeenLastCalledWith(workspace, "continuation", proof);
+  expect(github.continueSource).not.toHaveBeenCalled();
+  expect(github.workerConfiguration).toHaveBeenLastCalledWith(workspace);
   github.continueSource.mockClear();
   await relay.deps.config(workspace, "continuation");
-  expect(github.continueSource.mock.calls).toEqual([[workspace, undefined]]);
-  expect(github.workerConfiguration).toHaveBeenLastCalledWith(workspace, "continuation", undefined);
+  expect(github.continueSource).not.toHaveBeenCalled();
+  expect(github.workerConfiguration).toHaveBeenLastCalledWith(workspace);
   assembled.connections?.close();
 });

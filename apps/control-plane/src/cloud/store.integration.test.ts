@@ -8,8 +8,6 @@ import { createCloudV2Routes, type CloudV2RouteDeps } from "./routes.js";
 import { createCloudV2WorkerRoutes } from "./worker-routes.js";
 import { CloudV2Lifecycle } from "./lifecycle.js";
 import type { CloudV2Compute } from "./boat.js";
-import { CloudV2SourceAuthority } from "./source-authority.js";
-import { PostgresGithubVerificationStore } from "./github-verification-store.js";
 import { HttpError } from "../authz.js";
 import { grantTestPro } from "../test-pro.js";
 
@@ -226,42 +224,29 @@ d("cloud v2 store", () => {
     expect((await store.get(w.id, creator)).activeAt).not.toBeNull();
   });
 
-  it("joins first connect and hello verification across replicas before publishing worker readiness", async () => {
+  it("admits first connect without GitHub while hello still waits for configuration", async () => {
     const w = await create(), token = await store.rotateWorkerToken(w.id), boot = randomUUID();
-    let checking!: () => void, releaseCheck!: () => void, peerRead!: () => void;
-    const entered = new Promise<void>(resolve => { checking = resolve; });
-    const checked = new Promise<void>(resolve => { releaseCheck = resolve; });
-    const observedPeer = new Promise<void>(resolve => { peerRead = resolve; });
-    const fingerprint = "f".repeat(64);
-    const github = { fingerprintFor: vi.fn(async () => fingerprint), check: vi.fn(async () => { checking(); await checked; return fingerprint; }) };
-    const peerStore = new PostgresGithubVerificationStore(pool);
-    const read = peerStore.read.bind(peerStore);
-    vi.spyOn(peerStore, "read").mockImplementation(async scope => {
-      const value = await read(scope); if (value?.claimId) peerRead(); return value;
-    });
-    const authority = (verificationStore: PostgresGithubVerificationStore) => {
-      const source = new CloudV2SourceAuthority(pool, github, Date.now, undefined, verificationStore);
-      return () => source.targets(org, creator, [{ repository: w.repository, repositoryId: "42" }]);
-    };
-    const hello = heldHello(w, authority(new PostgresGithubVerificationStore(pool)));
-    const response = hello.request(token, boot); await entered;
+    const authorizeSource = vi.fn(async () => { throw new HttpError(503, "github_unavailable", "fixture"); });
+    const hello = heldHello(w, authorizeSource);
+    const response = hello.request(token, boot);
     await pool.query(`INSERT INTO user_identities (user_id,provider,provider_sub,email_at_link)
       VALUES ($1::uuid,'workos',($1::uuid)::text,'fixture@example.test')`, [creator]);
     const app = new Hono();
     app.use("*", async (c, next) => { c.set("user", { id: creator, accountRevision: 1,
       identity: { provider: "workos", subject: creator }, authentication: { sessionId: null, tokenExpiresAt: null } } as never); await next(); });
     app.onError((error, c) => error instanceof HttpError ? c.json({ error: { code: error.code } }, error.status) : c.json({ error: "internal" }, 500));
-    app.route("/", createCloudV2Routes({ store, bridgeBaseUrl: "wss://api.example.test", authorizeSource: authority(peerStore) } as CloudV2RouteDeps));
-    const connect = app.request(`/v1/cloud-v2/workspaces/${w.id}/connect?wakePolicy=explicit`, {
-      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ wake: true }),
-    });
+    app.route("/", createCloudV2Routes({ store, bridgeBaseUrl: "wss://api.example.test", authorizeSource } as CloudV2RouteDeps));
     try {
-      await observedPeer; expect(github.check).toHaveBeenCalledTimes(1); releaseCheck();
       await hello.configuring;
-      expect((await connect).status).toBe(200);
+      const connect = await app.request(`/v1/cloud-v2/workspaces/${w.id}/connect?wakePolicy=explicit`, {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ wake: true }),
+      });
+      expect(connect.status).toBe(200);
       expect((await store.get(w.id, creator)).state).toBe("creating");
-    } finally { releaseCheck(); hello.release(); }
-    expect((await response).status).toBe(200); expect(github.check).toHaveBeenCalledTimes(1);
+      expect(authorizeSource).not.toHaveBeenCalled();
+    } finally { hello.release(); }
+    expect((await response).status).toBe(200);
+    expect(authorizeSource).not.toHaveBeenCalled();
     expect((await store.get(w.id, creator)).state).toBe("running");
   });
 
@@ -315,20 +300,24 @@ d("cloud v2 store", () => {
     expect(current.error_code).toBeNull();
   });
 
-  it("never restores an archive committed while explicit connect is awaiting source authorization", async () => {
+  it("never restores an archive committed while explicit connect is awaiting the workspace read", async () => {
     const workspace = await create();
     await store.transition(workspace.id, ["creating"], "stopped");
     let release!: () => void, authorizing = false;
     const gate = new Promise<void>(resolve => { release = resolve; });
+    const read = store.get.bind(store);
+    vi.spyOn(store, "get").mockImplementationOnce(async (...args) => {
+      const result = await read(...args);
+      authorizing = true; await gate;
+      return result;
+    });
     await pool.query(`INSERT INTO user_identities (user_id, provider, provider_sub, email_at_link)
       VALUES ($1::uuid, 'workos', ($1::uuid)::text, 'fixture@example.test')`, [creator]);
     const app = new Hono();
     app.use("*", async (c, next) => { c.set("user", { id: creator, accountRevision: 1,
       identity: { provider: "workos", subject: creator }, authentication: { sessionId: null, tokenExpiresAt: null } } as never); await next(); });
     app.onError((error, c) => error instanceof HttpError ? c.json({ error: { code: error.code } }, error.status) : c.json({ error: "internal" }, 500));
-    app.route("/", createCloudV2Routes({ store, bridgeBaseUrl: "wss://api.example.test",
-      authorizeSource: async () => { authorizing = true; await gate; },
-    } as CloudV2RouteDeps));
+    app.route("/", createCloudV2Routes({ store, bridgeBaseUrl: "wss://api.example.test" } as CloudV2RouteDeps));
     const connecting = app.request(`/v1/cloud-v2/workspaces/${workspace.id}/connect?wakePolicy=explicit`, {
       method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ wake: true }),
     });

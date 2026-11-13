@@ -61,7 +61,7 @@ suite("new organization workspaces start with personal execution", () => {
       source_pending: false, boat_sandbox_id: null, worker_token_hash: null });
     expect(stored.execution_intent_id).toMatch(/^[a-f0-9-]{36}$/);
     if (enabled) {
-      expect(stored.execution_intent_authority).toMatchObject({ signatureVersion: 2 });
+      expect(stored.execution_intent_authority).toMatchObject({ signatureVersion: 3 });
       expect((await pool.query("SELECT * FROM cloud_v2_execution_creations WHERE workspace_id=$1", [workspace.id])).rows[0])
         .toMatchObject({ intent_id: stored.execution_intent_id, runtime_sha256: "b".repeat(64), clean_boot_id: null, first_failed_boot_id: null });
     }
@@ -106,7 +106,7 @@ suite("new organization workspaces start with personal execution", () => {
       FROM cloud_v2_prompt_outbox WHERE workspace_id=$1`, [created.workspace.id])).rows;
     expect(receipts).toHaveLength(1);
     expect(receipts[0]).toMatchObject({ creator_user_id: fixture.viewer.id, state: "queued",
-      execution_authority: { signatureVersion: 2 }, sender_credential_kind: credential === "api_key" ? "api_key" : "workspace_token", sender_context_id: contextId });
+      execution_authority: { signatureVersion: 3 }, sender_credential_kind: credential === "api_key" ? "api_key" : "workspace_token", sender_context_id: contextId });
     expect((await pool.query("SELECT count(*)::int n FROM cloud_v2_execution_creations WHERE workspace_id=$1", [created.workspace.id])).rows[0].n).toBe(1);
   });
 

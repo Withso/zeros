@@ -64,22 +64,24 @@ database("bootstrap authority through the real worker router", () => {
     expect(next).not.toBe(first);
     const after = (await pool.query("SELECT authority,source_fingerprint FROM cloud_v2_execution_contexts WHERE id=$1", [next])).rows[0];
     expect(after.authority).toEqual(before.authority);
-    expect(after.source_fingerprint).not.toBe(before.source_fingerprint);
+    expect(after.source_fingerprint).toBeNull();
+    expect(before.source_fingerprint).toBeNull();
     expect((await f.worker("bootstrap-lease", { contextId: first })).status).toBe(409);
     expect((await f.worker("bootstrap-lease", { contextId: next })).status).toBe(200);
   });
 
-  it("refuses expired bootstrap replacement when its initiator's own GitHub selection changes", async () => {
+  it("replaces an expired undelivered bootstrap independently of the initiator's GitHub selection", async () => {
     const first = await bootstrap();
     await pool.query("UPDATE cloud_v2_execution_contexts SET expires_at=clock_timestamp()-interval '1 second' WHERE id=$1", [first]);
     const scope = { organizationId: f.organizationId, userId: f.creator.id, repositoryId: "42" };
     const connections = f.cp.execution.deps.authority.connections;
     await connections.save(scope, await connections.fingerprint(scope), { id: "12", login: "fixture" },
       { method: "pat", accessToken: `synthetic-${f.creator.id}`, expiresAt: null });
-    expect((await config()).status).toBe(409);
-    expect((await pool.query("SELECT id FROM cloud_v2_execution_contexts WHERE workspace_id=$1 AND kind='bootstrap'", [f.workspace.id])).rows)
-      .toEqual([{ id: first }]);
+    const replacement = await config(); expect(replacement.status).toBe(200);
+    const next = (await replacement.json()).config.bootstrapContextId;
+    expect(next).not.toBe(first);
     expect((await f.worker("bootstrap-lease", { contextId: first })).status).toBe(409);
+    expect((await f.worker("bootstrap-lease", { contextId: next })).status).toBe(200);
   });
 
   it("captures an older replica's material write and keeps the delivery receipt through erasure", async () => {

@@ -19,25 +19,29 @@ function signatures(permission: unknown[], basis: ExecutionSignatureBasis) {
   return { permissionSignature, personSignature, signature: hash([personSignature, basis.bootId, basis.workerTokenHash]) };
 }
 
-export function executionSignatures(basis: ExecutionSignatureBasis) {
+function personPermission(basis: ExecutionSignatureBasis, version: 2 | 3) {
   const [workspace, organization, user, , account, member, incarnation, , role, repository, targets, connection] = basis.permission;
-  return { ...signatures([2, workspace, organization, user, account, member, incarnation, role, repository, targets, connection, basis.policy], basis),
-    legacyBasis: basis, signatureVersion: 2 as const };
+  return [version, workspace, organization, user, account, member, incarnation, role, repository, targets,
+    ...(version === 2 ? [connection] : []), basis.policy];
+}
+
+export function executionSignatures(basis: ExecutionSignatureBasis) {
+  return { ...signatures(personPermission(basis, 3), basis), legacyBasis: basis, signatureVersion: 3 as const };
 }
 export type ExecutionSignatures = ReturnType<typeof executionSignatures>;
 
 export function matchesExecutionSignature(authority: VersionedExecutionAuthority, signature: string,
   person: ExecutionSignatures, kind: SignatureKind): boolean {
-  if (authority.signatureVersion === 2) return signature === person[kind];
-  if (authority.signatureVersion !== undefined && authority.signatureVersion !== 1) return false;
+  if (authority.signatureVersion === 3) return signature === person[kind];
+  if (authority.signatureVersion !== undefined && authority.signatureVersion !== 1 && authority.signatureVersion !== 2) return false;
   const basis = authority.legacyBasis ?? person.legacyBasis;
   if (Buffer.byteLength(JSON.stringify(basis)) > 65536) return false;
   const parsed = basisSchema.safeParse(basis);
   if (!parsed.success) return false;
   // The migration captures the old hash's inputs, not a fresh authorization.
   // Verify that original hash before comparing the same person's current scope.
-  return signatures(parsed.data.permission, parsed.data)[kind] === signature &&
+  return signatures(authority.signatureVersion === 2 ? personPermission(parsed.data, 2) : parsed.data.permission, parsed.data)[kind] === signature &&
     executionSignatures(parsed.data)[kind] === person[kind];
 }
 
-export const executionContextAuthority = (person: ExecutionSignatures) => ({ signatureVersion: 2, signature: person.signature });
+export const executionContextAuthority = (person: ExecutionSignatures) => ({ signatureVersion: person.signatureVersion, signature: person.signature });

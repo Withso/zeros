@@ -186,7 +186,7 @@ database("durable prompt request cost", () => {
     expect(f.fetcher).not.toHaveBeenCalled();
   });
 
-  it("refuses a late creator proof after a newer credential selection was observed", async () => {
+  it("keeps prompt admission independent of a newer GitHub selection", async () => {
     const f = await fixture();
     let reached!: () => void, release!: () => void;
     const reading = new Promise<void>(resolve => { reached = resolve; }), held = new Promise<void>(resolve => { release = resolve; });
@@ -204,29 +204,29 @@ database("durable prompt request cost", () => {
       expect(current.loginRevision).not.toBe(f.live.loginRevision);
       await f.github.continueSource(current, current);
       release();
-      expect(await (await pending).json()).toEqual({ error: { code: "github_authorization_changed" } });
-      expect((await pool.query("SELECT 1 FROM cloud_v2_prompt_outbox WHERE workspace_id=$1", [f.workspace.id])).rowCount).toBe(0);
+      expect((await pending).status).toBe(201);
+      expect((await pool.query("SELECT 1 FROM cloud_v2_prompt_outbox WHERE workspace_id=$1", [f.workspace.id])).rowCount).toBe(1);
     } finally { release(); await pending; spy.mockRestore(); }
   });
 
-  it("does not reuse a warm source proof after credential disconnection without a notification", async () => {
+  it("admits a prompt after GitHub disconnection without a notification", async () => {
     const f = await fixture();
     await f.github.connections.store.disconnect(f.scope, await f.github.connections.store.fingerprint(f.scope), "pat");
     const response = await f.submit();
-    expect(response.status).toBe(409);
-    expect(await response.json()).toEqual({ error: { code: "github_connection_required" } });
-    expect((await pool.query("SELECT 1 FROM cloud_v2_prompt_outbox WHERE workspace_id=$1", [f.workspace.id])).rowCount).toBe(0);
+    expect(response.status).toBe(201);
+    expect((await pool.query("SELECT 1 FROM cloud_v2_prompt_outbox WHERE workspace_id=$1", [f.workspace.id])).rowCount).toBe(1);
     expect(f.fetcher).not.toHaveBeenCalled();
   });
 
-  it("rechecks creator membership under the enqueue lock after source continuation", async () => {
-    const f = await fixture();
-    const api = f.app(undefined, async (workspace, proof) => {
-      const lease = await f.github.continueSource(workspace, proof);
-      await pool.query("DELETE FROM organization_members WHERE org_id=$1 AND user_id=$2", [f.organizationId, f.userId]);
-      return lease;
+  it("rechecks Creator membership under the enqueue lock after admission", async () => {
+    const f = await fixture(), read = f.store.promptContext.bind(f.store);
+    vi.spyOn(f.store, "promptContext").mockImplementationOnce(async (...args) => {
+      const context = await read(...args);
+      const removed = await pool.query("DELETE FROM organization_members WHERE org_id=$1 AND user_id=$2", [f.organizationId, f.userId]);
+      expect(removed.rowCount).toBe(1);
+      return context;
     });
-    expect((await f.submit(api)).status).toBe(404);
+    expect((await f.submit()).status).toBe(404);
     expect((await pool.query("SELECT 1 FROM cloud_v2_prompt_outbox WHERE workspace_id=$1", [f.workspace.id])).rowCount).toBe(0);
     expect(f.fetcher).not.toHaveBeenCalled();
   });

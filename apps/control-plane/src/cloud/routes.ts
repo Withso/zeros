@@ -111,19 +111,15 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
   if (deps.githubConnections) app.route("/",createCloudGithubConnectionRoutes(deps.githubConnections));
   const documents = async (workspaces: readonly CloudV2Workspace[]) =>
     (deps.github ? await deps.github.documents(workspaces) : workspaces).map(workspace => workspaceDocument(workspace, deps.promptOutbox === true, !!chatEdits));
-  const document = async (workspace: CloudV2Workspace) => (await documents([workspace]))[0]!;
-  // A pending create holds only its creator's own request: no VM, worker,
-  // token or repository metadata exists before the lifecycle verifies it.
-  const continueWorkspace = async (workspace: CloudV2Workspace, proof?: CloudSourceProof) => {
-    if (workspace.sourcePending) return;
-    if (workspace.state === "running" && deps.continueSource) await deps.continueSource(workspace, proof);
-    else await deps.authorizeSource?.(workspace);
+  const document = async (workspace: CloudV2Workspace) => {
+    const value = (await documents([workspace]))[0];
+    if (!value) throw new HttpError(404, "not_found", "Cloud workspace not found");
+    return value;
   };
   if (deps.promptOutbox) {
     if (!deps.store.prompts) throw new Error("Cloud prompt store is required");
     app.route("/", createCloudV2PromptRoutes(deps.store.prompts, async (id, userId) => {
-      const { workspace, proof } = await deps.store.promptContext(id, userId);
-      await continueWorkspace(workspace, proof);
+      await deps.store.promptContext(id, userId);
     }));
   }
   const json = bodyLimit({ maxSize: 16 * 1024, onError: c => c.json({ error: { code: "payload_too_large", message: "Request is too large" } }, 413) });
@@ -216,7 +212,6 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
     const active = deps.execution && await deps.execution.active(id.data);
     const acting = active ? await deps.execution!.workspace(id.data, userId, c.get("user")) : undefined;
     const workspace = acting?.workspace ?? await deps.store.get(id.data, userId);
-    if (!active && !workspace.sourcePending) await deps.authorizeSource?.(workspace);
     const explicitWake = c.req.query("wakePolicy") === "explicit";
     if (explicitWake && (workspace.archivedAt || workspace.state === "stopping" || (!wake && workspace.state === "stopped")))
       throw new HttpError(409, "cloud_workspace_not_running", "This cloud workspace is not ready for a connection");
@@ -261,7 +256,6 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
     const id = uuid.safeParse(c.req.param("id"));
     if (!id.success) throw new HttpError(404, "not_found", "Cloud workspace not found");
     const workspace = await deps.store.get(id.data, c.get("user").id);
-    await continueWorkspace(workspace);
     return c.json({ result: await readCloudV2History(deps.store, workspace.id, await c.req.json().catch(() => null)) });
   });
 
@@ -272,7 +266,6 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
       const user = c.get("user"), active = deps.execution && await deps.execution.active(id.data);
       const ownership = c.req.header(TEAM_SHARING_HEADER) === "1" && c.req.header(TEAM_OWNERSHIP_HEADER) === "1";
       if (active && !ownership) await deps.teamSharing?.requireOwnershipAfterHiddenRead(user, { id: id.data });
-      if (!active && (action === "start" || action === "restart")) await deps.authorizeSource?.(await deps.store.get(id.data, user.id));
       const proof = active && action !== "stop" ? await deps.execution!.deps.authority.admit(id.data, user.id, { user }) : undefined;
       const { workspace, moved } = active ? await deps.store.requestExecutionLifecycle!(id.data, user.id, action, proof, user) : await deps.store.requestLifecycle(id.data, user.id, action);
       if (active && ownership && deps.teamSharing) return c.json({

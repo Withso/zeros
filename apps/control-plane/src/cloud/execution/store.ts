@@ -33,7 +33,7 @@ export type ExecutionContext = { id: string; workspace_id: string; org_id: strin
   client_token_expires_at: Date | null; request_fingerprint: Buffer | null;
   sync_device_id: string | null; sync_registration_id: string | null; sync_instance_id: string | null; sync_connected_at: Date | null;
   provider_session_id: string | null; access_epoch: string; stop_generation: string; worker_boot_id: string; worker_token_hash: Buffer;
-  authority: VersionedExecutionAuthority & { signature: string }; source_fingerprint: string; agent: CloudV2Agent | null; selection: ExecutionSelection | null;
+  authority: VersionedExecutionAuthority & { signature: string }; source_fingerprint: string | null; agent: CloudV2Agent | null; selection: ExecutionSelection | null;
   state: "active" | "revoked" | "retired"; reason: CloudV2ContextReason | null; expires_at: Date; material: unknown; bootstrap_material_issued: boolean | null;
   retirement_id: string | null; retirement_hash: Buffer | null; environment_version_id: string | null; mcp_fingerprint: string | null; intent_id: string | null };
 export type PromptExecutionAdmission = ExecutionAdmission & { agent: CloudV2Agent; selection: ExecutionSelection | null; parentContextId?: string };
@@ -325,7 +325,7 @@ export class CloudExecutionContexts {
           sender_device_id,sender_registration_id,sender_binding_generation,expires_at)
           VALUES($1,$2,$3,$4,'turn',$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22) RETURNING *`,
         [contextId, workspace.id, workspace.org_id, row.creator_user_id, row.chat_id, row.user_message_id, input.dispatchId, generation, chat.epoch,
-          workspace.access_epoch, workspace.stop_generation, identity.bootId, workspace.worker_token_hash, executionContextAuthority(proof.person), proof.source.fingerprint,
+          workspace.access_epoch, workspace.stop_generation, identity.bootId, workspace.worker_token_hash, executionContextAuthority(proof.person), proof.source?.fingerprint ?? null,
           agent, selection, selection.source === "personal" ? selection.credentialId : null, row.sender_device_id, row.sender_registration_id, row.sender_binding_generation, new Date(proof.until)])).rows[0]!;
         await tx.query("UPDATE cloud_v2_prompt_chats SET acting_user_id=$3,acting_generation=$4,active_context_id=$5 WHERE workspace_id=$1 AND chat_id=$2",
           [workspace.id, row.chat_id, row.creator_user_id, generation, contextId]);
@@ -384,11 +384,11 @@ export class CloudExecutionContexts {
     const ceiling = Math.min(proof.until, current.client_token_expires_at?.getTime() ?? Infinity);
     assertExecutionLifetime(proof.until);
     assertExecutionLifetime(ceiling, current.client_token_expires_at?.getTime());
-    let until = Math.min(current.expires_at.getTime(), proof.source.until, current.client_token_expires_at?.getTime() ?? Infinity);
+    let until = Math.min(current.expires_at.getTime(), proof.source?.until ?? Infinity, current.client_token_expires_at?.getTime() ?? Infinity);
     if (until - Date.now() < EXECUTION_MINIMUM_LIFETIME_MS) until = ceiling;
     const update = async () => {
       await tx.query("UPDATE cloud_v2_execution_contexts SET expires_at=$2,authority=$3,source_fingerprint=$4 WHERE id=$1",
-        [current.id, new Date(until), executionContextAuthority(proof.person), proof.source.fingerprint]);
+        [current.id, new Date(until), executionContextAuthority(proof.person), proof.source?.fingerprint ?? null]);
       await this.assertContext(tx, current, proof);
     };
     if (until !== current.expires_at.getTime()) await update();
@@ -506,7 +506,7 @@ export class CloudExecutionContexts {
         await tx.query(`INSERT INTO cloud_v2_execution_contexts(id,workspace_id,org_id,user_id,kind,intent_id,access_epoch,stop_generation,worker_boot_id,worker_token_hash,authority,source_fingerprint,expires_at,bootstrap_material_issued)
           VALUES($1,$2,$3,$4,'bootstrap',$5,$6,$7,$8,decode($9,'hex'),$10,$11,$12,false)`,
         [id, workspaceId, proof.person.organizationId, proof.person.userId, current.execution_intent_id, proof.person.accessEpoch, proof.person.stopGeneration,
-          proof.person.bootId, proof.person.workerTokenHash, executionContextAuthority(proof.person), proof.source.fingerprint, new Date(proof.until)]);
+          proof.person.bootId, proof.person.workerTokenHash, executionContextAuthority(proof.person), proof.source?.fingerprint ?? null, new Date(proof.until)]);
         await this.deps.authority.assert(proof, tx);
         assertExecutionLifetime(proof.until);
         return id;
@@ -625,7 +625,7 @@ export class CloudExecutionContexts {
                 const until = Math.min(proof.until, row.client_token_expires_at?.getTime() ?? Infinity);
                 assertExecutionLifetime(until, row.client_token_expires_at?.getTime());
                 await tx.query("UPDATE cloud_v2_execution_contexts SET expires_at=$2,authority=$3,source_fingerprint=$4 WHERE id=$1",
-                  [id, new Date(until), executionContextAuthority(proof.person), proof.source.fingerprint]);
+                  [id, new Date(until), executionContextAuthority(proof.person), proof.source?.fingerprint ?? null]);
                 await this.assertContext(tx, row, proof);
                 assertExecutionLifetime(until, row.client_token_expires_at?.getTime());
                 leases.push({ contextId: id, expiresAt: until });
