@@ -1,6 +1,7 @@
 import { generateKeyPairSync, randomUUID } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -8,6 +9,7 @@ import { serve } from "@hono/node-server";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
 import type pg from "pg";
 import { vi } from "vitest";
+import WebSocket, { WebSocketServer } from "ws";
 import { createApp } from "../app.js";
 import type { Config } from "../config.js";
 import { workosTestAuth } from "../test-workos-env.js";
@@ -16,6 +18,7 @@ import { PostgresWorkOSBrowserSessionRepository, WorkOSBrowserSessions, WORKOS_S
 import { executionFixture } from "../cloud/execution/test-fixture.js";
 import { CloudV2BeginActiveReplySchema, type CloudV2MessageRow } from "../cloud/contract.js";
 import { CloudV2PromptPullReplySchema } from "../cloud/prompt-contract.js";
+import { sealPortToken } from "../cloud/worker-port-token.js";
 import { deferred, holdLoadStream, IDLE_WINDOW_MS, type LoadBudgetProbe } from "./load-budget.js";
 
 // Counts supplied from Alpha. Unspecified stream/discovery counts contribute
@@ -26,6 +29,14 @@ export const OBSERVED_IDLE_REPLAY = [
   { operation: "renew", count: 22 }, { operation: "workspace", count: 25 }, { operation: "heartbeat", count: 13 },
   { operation: "activity", count: 9 }, { operation: "connections", count: 1 },
 ] as const;
+// This is server cost at the approved fallback rates, not a timer-frequency
+// measurement. Scheduler tests and live idle counts qualify the producers.
+export const R1_IDLE_REPLAY: ReadonlyArray<{ operation: typeof OBSERVED_IDLE_REPLAY[number]["operation"]; count: number }> = [
+  { operation: "workspace-list", count: 5 }, { operation: "pull", count: 5 },
+  { operation: "heartbeat", count: 1 }, { operation: "activity", count: 2 },
+  { operation: "connections", count: 1 }, { operation: "me", count: 1 }, { operation: "browser-session", count: 1 },
+  { operation: "prompts", count: 1 }, { operation: "workspace", count: 1 },
+];
 type Device = { deviceId: string; registrationId: string; instanceId: string };
 type DeviceClient = { register(id: string, input: unknown): Promise<{ device: Device }>; connect(device: Device, workspace: string): Promise<unknown>;
   heartbeat(device: Device): Promise<unknown>; syncConnections(device: Device): Promise<unknown>;
@@ -52,6 +63,8 @@ async function closeAll(cleanups: Array<() => Promise<void>>): Promise<void> {
 export async function loadBudgetFixture(pool: pg.Pool, probe: LoadBudgetProbe) {
   const nativeFetch = globalThis.fetch;
   const f = await executionFixture(pool, { teamOwnership: true });
+  const github = f.fetcher.getMockImplementation()!;
+  f.fetcher.mockImplementation((...args) => probe.githubRequest(() => github(...args)));
   const cleanups: Array<() => Promise<void>> = [() => f.close(), () => f.cp.teamSharing.signals.close()];
   const close = () => closeAll(cleanups);
   try {
@@ -65,12 +78,13 @@ export async function loadBudgetFixture(pool: pg.Pool, probe: LoadBudgetProbe) {
     const address = jwks.address();
     if (!address || typeof address === "string") throw new Error("Load fixture: JWKS address unavailable");
     const auth = { ...workosTestAuth(), jwksUrl: `http://127.0.0.1:${address.port}/jwks` };
-    const sign = (sessionId: string, clientId: string) => new SignJWT({ sid: sessionId, client_id: clientId,
-      auth_time: Math.floor(Date.now() / 1000), "https://zeros.build/email": f.creator.email,
+    const sign = (sessionId: string, clientId: string, user = f.creator) => new SignJWT({ sid: sessionId, client_id: clientId,
+      auth_time: Math.floor(Date.now() / 1000), "https://zeros.build/email": user.email,
       "https://zeros.build/email_verified": true, "https://zeros.build/name": "Load fixture" })
       .setProtectedHeader({ alg: "RS256", kid: "load-budget" }).setIssuer(auth.issuer).setAudience(auth.audience)
-      .setSubject(f.creator.identity.subject).setJti(randomUUID()).setIssuedAt().setExpirationTime("1h").sign(pair.privateKey);
+      .setSubject(user.identity.subject).setJti(randomUUID()).setIssuedAt().setExpirationTime("1h").sign(pair.privateKey);
     const desktopToken = await sign(f.creator.authentication.sessionId!, auth.desktopClientId);
+    const memberToken = await sign(f.viewer.authentication.sessionId!, auth.desktopClientId, f.viewer);
     const browserSessionId = `session_${randomUUID()}`;
     const exchange: WorkOSExchange = { sealedSession: `synthetic-seal-${randomUUID()}`, sessionId: browserSessionId,
       accessToken: await sign(browserSessionId, auth.webClientId), accessTokenExpiresAt: Date.now() + 3_600_000,
@@ -185,6 +199,33 @@ export async function loadBudgetFixture(pool: pg.Pool, probe: LoadBudgetProbe) {
       requireValue(rows.length === 1 && rows[0]!.id === f.workspace.id, "list must admit exactly one workspace");
       return reply;
     };
+    const coldSource = async () => {
+      await pool.query("DELETE FROM cloud_github_source_verifications WHERE org_id=$1", [f.organizationId]);
+      f.cp.teamSharing.github.source.invalidate();
+      const remaining = await pool.query("SELECT 1 FROM cloud_github_source_verifications WHERE org_id=$1", [f.organizationId]);
+      requireValue(remaining.rowCount === 0, "source verification was not cold");
+    };
+    const admission = async (operation: "list" | "open" | "connect" | "history") => {
+      const headers = { authorization: `Bearer ${memberToken}` };
+      switch (operation) {
+        case "list": {
+          const reply = await desktop(`/v1/cloud-v2/workspaces?organizationId=${f.organizationId}`, undefined, headers).then(json);
+          requireValue((reply.workspaces as Array<{ id: string }>).some(row => row.id === f.workspace.id), "member list hid workspace"); break;
+        }
+        case "open": {
+          const reply = await desktop(workspacePath, undefined, headers).then(json);
+          requireValue((reply.workspace as { id: string }).id === f.workspace.id, "member open hid workspace"); break;
+        }
+        case "connect": {
+          const reply = await desktop(`${workspacePath}/connect`, { wake: false }, headers).then(json);
+          requireValue(Array.isArray(reply.protocols) && reply.protocols.length === 2, "member connect did not issue a ticket"); break;
+        }
+        case "history": {
+          const reply = await desktop(`${workspacePath}/history`, { op: "messages.windowOlder", params: { chatId: "chat", beforeMsgId: "load-answer", limit: 20 } }, headers).then(json);
+          requireValue(reply.result && typeof reply.result === "object" && Array.isArray((reply.result as { messages: unknown }).messages), "member history did not return a window"); break;
+        }
+      }
+    };
     const renew = async () => {
       const result = await worker.contextRequest("execution-leases/renew", { contextIds: [client.contextId] }) as { leases: Array<{ contextId: string; expiresAt?: number; refused?: unknown }> };
       requireValue(result.leases.length === 1 && result.leases[0]!.contextId === client.contextId &&
@@ -290,7 +331,7 @@ export async function loadBudgetFixture(pool: pg.Pool, probe: LoadBudgetProbe) {
         },
       };
     };
-    const idleReplay = async (wallClock = false) => {
+    const idleReplay = async (wallClock = false, profile: typeof R1_IDLE_REPLAY = OBSERVED_IDLE_REPLAY) => {
       const streams: Array<() => Promise<void>> = [];
       const startedAt = performance.now();
       const pace = async (at: number) => {
@@ -304,7 +345,7 @@ export async function loadBudgetFixture(pool: pg.Pool, probe: LoadBudgetProbe) {
         const response = await desktop(`${workspacePath}/events`, undefined, { accept: "text/event-stream" }, workspaceAbort.signal);
         requireValue(response.body, "workspace stream missing");
         streams.push((await holdLoadStream(response.body!, workspaceAbort)).stop);
-        const schedule = OBSERVED_IDLE_REPLAY.flatMap(({ operation, count }) => Array.from({ length: count }, (_, i) =>
+        const schedule = profile.flatMap(({ operation, count }) => Array.from({ length: count }, (_, i) =>
           ({ operation, at: Math.floor(i * IDLE_WINDOW_MS / count) }))).sort((left, right) => left.at - right.at);
         for (const { operation, at } of schedule) {
           await pace(at);
@@ -342,7 +383,62 @@ export async function loadBudgetFixture(pool: pg.Pool, probe: LoadBudgetProbe) {
       catch (error) { cancelled = error instanceof Error && error.name === "AbortError"; }
       requireValue(cancelled, "HTTP transport ignored cancellation");
     };
-    return { close, workspaceList, turnStart, finishTurn, runningTurn, renew, idleReplay, assertTransportCancellation, pollWaits: () => pollWaits,
+    return { close, workspaceList, coldSource, admission, turnStart, finishTurn, runningTurn, renew, idleReplay, assertTransportCancellation, pollWaits: () => pollWaits,
       observerStatus: () => app.requestCostObserverStatus!() };
   } catch (error) { await close(); throw error; }
+}
+
+export async function loadBudgetReadFrame(pool: pg.Pool, probe: LoadBudgetProbe) {
+  const f = await executionFixture(pool, { relay: true, teamOwnership: true });
+  const github = f.fetcher.getMockImplementation()!;
+  f.fetcher.mockImplementation((...args) => probe.githubRequest(() => github(...args)));
+  const cleanups: Array<() => Promise<void>> = [() => f.close(), () => f.cp.teamSharing.signals.close(), async () => f.cp.relay!.close()];
+  try {
+    await f.login(); await f.activate();
+    requireValue((await f.hello()).ok, "read-frame worker did not register");
+    const opened = deferred<void>();
+    const worker = new WebSocketServer({ port: 0, host: "127.0.0.1", handleProtocols: () => "zeros.cloud.v2.worker" });
+    cleanups.push(async () => { for (const client of worker.clients) client.terminate(); await new Promise<void>(resolve => worker.close(() => resolve())); });
+    worker.on("headers", headers => headers.push(`X-Zeros-Worker-Features: ${f.features}`));
+    worker.on("connection", socket => socket.on("message", raw => {
+      const frame = JSON.parse(String(raw));
+      if (frame.t === "open") opened.resolve();
+      if (frame.t === "frame" && frame.frame.id === "load-read") socket.send(JSON.stringify({ t: "frame", clientId: frame.clientId,
+        frame: { type: "WORKSPACE_RESPONSE", id: randomUUID(), source: "engine", timestamp: Date.now(), requestId: "load-read",
+          op: "messages.windowOlder", result: { messages: [] } } }));
+    }));
+    await new Promise<void>(resolve => worker.once("listening", resolve));
+    await pool.query("UPDATE cloud_v2_workspaces SET worker_route_url=$2,worker_port_token=$3 WHERE id=$1", [f.workspace.id,
+      `http://127.0.0.1:${(worker.address() as AddressInfo).port}`, sealPortToken("synthetic-port-token", f.workspace.id, f.keys)]);
+    const server = createServer();
+    server.on("upgrade", (request, socket, head) => { if (!f.cp.relay!.handleUpgrade(request, socket, head)) socket.destroy(); });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    cleanups.push(() => new Promise<void>(resolve => server.close(() => resolve())));
+    const ticket = await f.call(`/v1/cloud-v2/workspaces/${f.workspace.id}/connect`, "POST", { wake: false }, f.viewer,
+      { "X-Zeros-Team-Sharing": "1", "X-Zeros-Team-Ownership": "1" });
+    requireValue(ticket.ok, "read-frame member connect was refused");
+    const { protocols } = await ticket.json() as { protocols: string[] };
+    requireValue(Array.isArray(protocols) && protocols.length === 2 && protocols.every(value => typeof value === "string"), "read-frame ticket shape invalid");
+    const client = new WebSocket(`ws://127.0.0.1:${(server.address() as AddressInfo).port}/v2/cloud/workspaces/${f.workspace.id}/bridge`, protocols);
+    cleanups.push(async () => client.terminate());
+    client.on("error", error => opened.reject(error));
+    client.on("close", () => opened.reject(new Error("Load fixture: read-frame socket closed before open")));
+    let timer = setTimeout(() => opened.reject(new Error("Load fixture: read-frame open timed out")), 10_000);
+    try { await opened.promise; } finally { clearTimeout(timer); }
+    return await probe.measure("read-frame", async () => {
+      const reply = deferred<void>();
+      client.on("message", raw => {
+        const value = JSON.parse(String(raw));
+        if (value.requestId !== "load-read") return;
+        if (value.type === "WORKSPACE_RESPONSE" && Array.isArray(value.result?.messages)) reply.resolve();
+        else reply.reject(new Error("Load fixture: read frame was refused"));
+      });
+      client.once("close", () => reply.reject(new Error("Load fixture: read-frame socket closed during read")));
+      timer = setTimeout(() => reply.reject(new Error("Load fixture: read frame did not reach worker")), 10_000);
+      try {
+        client.send(JSON.stringify({ type: "WORKSPACE_REQUEST", id: "load-read", op: "messages.windowOlder", params: { chatId: "chat", beforeMsgId: "load-answer", limit: 20 } }));
+        await reply.promise;
+      } finally { clearTimeout(timer); }
+    }, { locks: true });
+  } finally { await closeAll(cleanups); }
 }
