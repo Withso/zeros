@@ -2,9 +2,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   status: "ready",
-  connect: vi.fn(async () => ({ url: "wss://api.example.test/v2/cloud/workspaces/w/bridge",
+  connect: vi.fn(async (_target: unknown, _options: { clientInstance?: string; [key: string]: unknown }) => ({ url: "wss://api.example.test/v2/cloud/workspaces/w/bridge",
     protocols: ["zeros.cloud.v2", "ticket.fixture"], expiresAt: new Date(Date.now() + 60_000).toISOString() })),
-  clients: [] as Array<{ refresh?: () => Promise<unknown>; reject: () => void }>,
+  clients: [] as Array<{ refresh?: () => Promise<unknown>; renew?: (notExpiringBefore: number) => Promise<{ ticket: string; tokenExpiresAt: number | null }>; reject: () => void }>,
 }));
 vi.mock("../../cloud-v2", () => ({ connectCloudV2Workspace: mocks.connect }));
 vi.mock("../../../state/cloud-workspace-catalog", () => ({
@@ -24,8 +24,8 @@ vi.mock("../ws-client", () => ({
     status = "connecting";
     lastRejection: { code: string; message: string } | null = null;
     listeners = new Set<(status: string) => void>();
-    constructor(_target: unknown, options: { refreshCloudConnectionTarget?: () => Promise<unknown> }) {
-      mocks.clients.push({ refresh: options.refreshCloudConnectionTarget, reject: () => {
+    constructor(_target: unknown, options: { refreshCloudConnectionTarget?: () => Promise<unknown>; renewCloudConnectionTicket?: (n: number) => Promise<{ ticket: string; tokenExpiresAt: number | null }> }) {
+      mocks.clients.push({ refresh: options.refreshCloudConnectionTarget, renew: options.renewCloudConnectionTicket, reject: () => {
         this.lastRejection = { code: "cloud_workspace_not_running", message: "The cloud workspace is not ready for a connection." };
         this.status = "disconnected"; for (const cb of this.listeners) cb(this.status);
       } });
@@ -49,6 +49,19 @@ async function openThenCancel(options: { wake?: boolean }) {
 }
 
 describe("cloud v2 connection tickets", () => {
+  it("§14.7: a renewal ticket never wakes, keeps the peer's instance, asks for a newer bearer and returns only the raw ticket", async () => {
+    const { controller, opening } = await openThenCancel({ wake: true });
+    const instance = mocks.connect.mock.calls.at(-1)![1].clientInstance;
+    mocks.connect.mockImplementationOnce((async (_target: unknown, options: { presentedTokenExpiry?: (value: number | null) => void }) => {
+      options.presentedTokenExpiry?.(1_234_000);
+      return { url: "wss://api.example.test/v2/cloud/workspaces/w/bridge", protocols: ["zeros.cloud.v2", `ticket.zw2c_${"r".repeat(43)}`], expiresAt: new Date(Date.now() + 60_000).toISOString() };
+    }) as never);
+    await expect(mocks.clients[0]!.renew!(999_000)).resolves.toEqual({ ticket: `zw2c_${"r".repeat(43)}`, tokenExpiresAt: 1_234_000 });
+    expect(mocks.connect).toHaveBeenLastCalledWith(target, expect.objectContaining({ wake: false, clientInstance: instance, notExpiringBefore: 999_000 }));
+    controller.abort(); await opening.catch(() => {});
+  });
+
+
   it("settles the open immediately when the relay refuses the stopped worker", async () => {
     vi.useFakeTimers();
     const { controller, opening } = await openThenCancel({ wake: true });
@@ -73,11 +86,13 @@ describe("cloud v2 connection tickets", () => {
     for (const wake of [true, undefined]) {
       mocks.connect.mockClear(); mocks.clients.length = 0;
       const { controller, opening, refresh } = await openThenCancel(wake ? { wake } : {});
-      expect(mocks.connect).toHaveBeenLastCalledWith(target, { wake: wake === true, signal: expect.any(AbortSignal) });
+      expect(mocks.connect).toHaveBeenLastCalledWith(target, { wake: wake === true, signal: expect.any(AbortSignal), clientInstance: expect.stringMatching(/^[0-9a-f-]{36}$/) });
+      const instance = mocks.connect.mock.calls.at(-1)![1].clientInstance;
       // A laptop wake, network drop or control-plane deploy reconnects with a
       // fresh ticket; that must not restart a VM that idled to a stop.
       await refresh();
-      expect(mocks.connect).toHaveBeenLastCalledWith(target, { wake: false, signal: expect.any(AbortSignal) });
+      // §14.7: a reconnect ticket carries the same peer's instance id.
+      expect(mocks.connect).toHaveBeenLastCalledWith(target, { wake: false, signal: expect.any(AbortSignal), clientInstance: instance });
       controller.abort();
       await expect(opening).rejects.toThrow("cancelled");
     }

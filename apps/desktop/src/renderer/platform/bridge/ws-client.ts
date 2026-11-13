@@ -6,7 +6,7 @@ import {
   type RuntimeClientEnvironment,
   type RuntimeConnectionTarget,
   type CloudRuntimeConnectionTargetRefresher,
-  type CloudAccessConfirmer,
+  type CloudAccessConfirmer, type CloudConnectionTicketRenewer,
 } from "./runtime-client";
 export * from "./runtime-client";
 
@@ -148,6 +148,7 @@ export class RuntimeClient extends SharedRuntimeClient {
   constructor(target: RuntimeConnectionTarget = { kind: "local" }, options: {
     refreshCloudConnectionTarget?: CloudRuntimeConnectionTargetRefresher;
     confirmCloudAccessEnded?: CloudAccessConfirmer;
+    renewCloudConnectionTicket?: CloudConnectionTicketRenewer;
   } = {}) {
     super(target, { ...options, environment: desktopEnvironment() });
   }

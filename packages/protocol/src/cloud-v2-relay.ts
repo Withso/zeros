@@ -52,6 +52,24 @@ const clientId = z.uuid();
 export const ACTING_USER_FEATURE = "acting-user-v1";
 /** Creator pays: the worker parses an activated config's agentLogins (which agents the current Creator can run). */
 export const CREATOR_AGENT_LOGINS_FEATURE = "creator-agent-logins-v1";
+/** §14.7: the desktop rolls its client token over on the SAME socket (CLOUD_CONNECTION_AUTH / RENEW / RENEWED). Sent as
+ * X-Zeros-Client-Features on POST connect (with X-Zeros-Client-Instance) and offered as the subprotocol below. */
+export const CLIENT_TOKEN_ROLLOVER_FEATURE = "client-token-rollover-v1";
+export const CLIENT_TOKEN_ROLLOVER_PROTOCOL = "zeros.cloud.v2.client-token-rollover-v1";
+const rolloverTime = z.number().int().nonnegative().max(8_640_000_000_000_000);
+const rolloverSchedule = { expiresAt: rolloverTime, refreshAt: rolloverTime, retryUntil: rolloverTime };
+/** Relay → desktop after handle admission: the accepted client JWT's deadline and when to roll it over (Unix ms). */
+export const CloudConnectionAuthFrameSchema = z.object({ type: z.literal("CLOUD_CONNECTION_AUTH"), ...rolloverSchedule });
+/** Desktop → relay: a fresh connect ticket (minted with wake:false, same instance) for the same socket. */
+export const CloudConnectionRenewFrameSchema = z.object({
+  type: z.literal("CLOUD_CONNECTION_RENEW"), id: z.uuid(), ticket: z.string().regex(/^zw2c_[A-Za-z0-9_-]{43}$/),
+}).strict();
+export const CloudConnectionRenewRefusalSchema = z.enum(["invalid_ticket", "binding_changed", "token_not_advanced", "temporarily_unavailable"]);
+/** Relay → desktop: the renewal's answer, a fresh schedule or a closed refusal (no deadline change). */
+export const CloudConnectionRenewedFrameSchema = z.union([
+  z.object({ type: z.literal("CLOUD_CONNECTION_RENEWED"), requestId: z.uuid(), ...rolloverSchedule }),
+  z.object({ type: z.literal("CLOUD_CONNECTION_RENEWED"), requestId: z.uuid(), error: z.object({ code: CloudConnectionRenewRefusalSchema }) }),
+]);
 /** A decimal bigint string, 1..9223372036854775806, never a JSON number. */
 const GENERATION = /^[1-9][0-9]{0,18}$/;
 // The regex is checked again inside the refine: zod still runs a refine after a failed regex, and BigInt() throws on non-digits.

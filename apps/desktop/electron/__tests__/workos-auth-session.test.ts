@@ -256,6 +256,25 @@ describe("WorkOS desktop safe-storage session lifecycle", () => {
     });
   });
 
+  it("§14.7: notExpiringBefore refreshes a still-valid token through the same refresh path; without it the token is reused", async () => {
+    const current = Date.now() + 120_000;
+    await install(current);
+    const next = Date.now() + 300_000;
+    mocks.refresh.mockResolvedValue({ status: "active", session: { accessToken: "access-next", refreshToken: "refresh-next", expiresAt: next,
+      providerSubject: "user_example", sessionId: "session_example", clientKind: "desktop", email: "person@example.com", name: "Example Person",
+      authenticationMethod: "GoogleOAuth" } });
+    await expect(authGetAccessToken({}, {} as never)).resolves.toMatchObject({ access_token: "access-current" });
+    expect(mocks.refresh).not.toHaveBeenCalled();
+    await expect(authGetAccessToken({ notExpiringBefore: current + 1_000 } as never, {} as never)).resolves.toMatchObject({ access_token: "access-next" });
+    expect(mocks.refresh).toHaveBeenCalledOnce();
+    expect(withCrossProcessFileLock).toHaveBeenCalled();
+    // A token that already outlives the bound is reused; an absurd bound is ignored, never a refresh storm.
+    await expect(authGetAccessToken({ notExpiringBefore: current + 1_000 } as never, {} as never)).resolves.toMatchObject({ access_token: "access-next" });
+    await expect(authGetAccessToken({ notExpiringBefore: Date.now() + 60 * 60_000 } as never, {} as never)).resolves.toMatchObject({ access_token: "access-next" });
+    await expect(authGetAccessToken({ notExpiringBefore: "soon" } as never, {} as never)).resolves.toMatchObject({ access_token: "access-next" });
+    expect(mocks.refresh).toHaveBeenCalledOnce();
+  });
+
   it("keeps a post-rotation replacement but withholds an expired bearer", async () => {
     await install(Date.now() - 1);
     mocks.refresh.mockResolvedValue({

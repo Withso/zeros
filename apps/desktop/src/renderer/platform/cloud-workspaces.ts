@@ -2,6 +2,7 @@ export * from "./cloud-workspace-contract";
 import type { CloudWorkspaceDocument } from "./cloud-workspace-contract";
 import { z } from "zod";
 import { getSession } from "../features/auth/auth-store";
+import { CLIENT_TOKEN_ROLLOVER_FEATURE } from "@zeros/protocol/cloud-v2-relay";
 import { controlPlaneFetch } from "../features/update/control-plane-fetch";
 import { getOrganizationStoreGeneration } from "../features/team/team-store";
 import {
@@ -47,6 +48,20 @@ function pickDeviceHeaders(headers: Record<string, string> | undefined): Record<
   return Object.fromEntries(DEVICE_HEADER_NAMES.map(name => [name, headers[name]!]));
 }
 
+/** The bearer's exp claim in ms, read without verifying (the control plane verifies); null when unreadable. */
+function bearerExpiry(token: string): number | null {
+  try {
+    const payload = token.split(".")[1];
+    if (!payload || payload.length > 8192) return null;
+    const exp = (JSON.parse(atob(payload.replace(/-/g, "+").replace(/_/g, "/"))) as { exp?: unknown }).exp;
+    return typeof exp === "number" && Number.isSafeInteger(exp) ? exp * 1000 : null;
+  } catch { return null; }
+}
+
+const ROLLOVER_REFUSED_MS = 30 * 60_000;
+const rolloverRefused = new Map<string, number>();
+export function resetClientRolloverHeadersForTests(): void { rolloverRefused.clear(); }
+
 export async function cloudAccountRequest<T>(
   path: string,
   schema: z.ZodType<T>,
@@ -57,7 +72,13 @@ export async function cloudAccountRequest<T>(
     /** Order 3: ask for the connected-Macs `syncing` field (released desktops parse those replies strictly). */
     syncField?: true;
     /** Team sharing phase 1: opt in to organization-wide reads and the top-level sharing fields. */
-    teamSharing?: true },
+    teamSharing?: true;
+    /** §14.7 client-token-rollover-v1 on POST connect: this open peer's in-memory instance id (binds its tickets). */
+    clientInstance?: string;
+    /** §14.7: the bearer must outlive this instant (a rollover after the JWT it already presented). */
+    notExpiringBefore?: number;
+    /** §14.7: told the presented bearer's expiry (its exp claim), so a retry can ask for a newer one. Never the token. */
+    presentedTokenExpiry?: (expiresAt: number | null) => void },
 ): Promise<T> {
   if (!isFeatureEnabled("cloud-workspaces"))
     throw new Error("Cloud workspaces are not available in this release channel.");
@@ -66,11 +87,16 @@ export async function cloudAccountRequest<T>(
   // Capture the initiating account synchronously, before token refresh or any
   // other yield can replace it with the next signed-in account.
   const epoch = getOrganizationStoreGeneration();
-  const session = await getSession();
+  const session = await getSession(options?.notExpiringBefore ? { notExpiringBefore: options.notExpiringBefore } : undefined);
   if (epoch !== getOrganizationStoreGeneration())
     throw new Error("Your account changed while loading cloud workspaces");
   if (!session) throw new Error("Sign in to use cloud workspaces");
-  const response = await controlPlaneFetch(`${CONTROL_PLANE_URL}${path}`, {
+  options?.presentedTokenExpiry?.(bearerExpiry(session.access_token));
+  // §14.7: an N-1 control plane's CORS preflight refuses the rollover headers (a browser fetch cannot ignore them).
+  // One retry without them; remembered for this server only when that retry succeeds, and only for a while.
+  const rollover = !!options?.clientInstance && /^[0-9a-f-]{36}$/i.test(options.clientInstance) &&
+    !((rolloverRefused.get(CONTROL_PLANE_URL) ?? -Infinity) > Date.now());
+  const send = (withRollover: boolean) => controlPlaneFetch(`${CONTROL_PLANE_URL}${path}`, {
     method: input?.method ?? (input ? "POST" : "GET"),
     redirect: "error",
     cache: "no-store",
@@ -82,6 +108,7 @@ export async function cloudAccountRequest<T>(
       ...(options?.syncField ? { "X-Zeros-Sync": "1", "X-Zeros-Sync-Wanted": "1" } : {}),
       // 3B: team ownership travels with team sharing (a workspace may have no Creator; this app reads it).
       ...(options?.teamSharing ? { "X-Zeros-Team-Sharing": "1", "X-Zeros-Team-Ownership": "1" } : {}),
+      ...(withRollover ? { "X-Zeros-Client-Features": CLIENT_TOKEN_ROLLOVER_FEATURE, "X-Zeros-Client-Instance": options!.clientInstance! } : {}),
       ...(input
         ? {
             "content-type": "application/json",
@@ -93,6 +120,14 @@ export async function cloudAccountRequest<T>(
   }, () => {
     if (epoch !== getOrganizationStoreGeneration()) throw new Error("Your account changed while loading cloud workspaces");
   });
+  let response: Response;
+  try { response = await send(rollover); }
+  catch (error) {
+    // A preflight refusal looks like any network failure (TypeError) and never reached the server.
+    if (!rollover || !(error instanceof TypeError) || options?.signal?.aborted) throw error;
+    response = await send(false);
+    rolloverRefused.set(CONTROL_PLANE_URL, Date.now() + ROLLOVER_REFUSED_MS);
+  }
   // Recovery can include the outbox's bounded attachment page. Ordinary
   // account APIs retain their smaller response budget.
   const body = await readCloudJson(response, options?.promptRecovery && /^\/v1\/cloud-v2\/workspaces\/[^/]+\/prompts\?/.test(path)
