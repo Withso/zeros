@@ -91,7 +91,7 @@ async function fixture(pool: pg.Pool) {
   const issue = (headers: Record<string, string>, body: unknown = {}) => call(tokenPath, "POST", body, headers);
   const close = async () => {
     cp.runtimeUpdates.close(); await cp.api.credentials.close(); await cp.loginChanges.stop();
-    await cp.promptChanges?.stop(); await cp.localCommandSignals.close(); await f.signals.close();
+    await cp.promptChanges?.stop(); await cp.localCommandSignals.close(); await f.signals.close(); await cp.stopLiveRecovery();
   };
   await cp.loginChanges.start();
   return { ...f, cp, call, path, tokenPath, connected, active, issue, close, fetcher, issued, revoked, expiry, denyB: () => { denyB = true; } };

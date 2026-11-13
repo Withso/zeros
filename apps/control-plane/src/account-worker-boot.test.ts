@@ -17,6 +17,7 @@ const f = vi.hoisted(() => ({
   teamSharing: { signals: { close: vi.fn(async () => {}) } },
   api: { credentials: { close: vi.fn(async () => {}) }, service: {} },
   runtimeUpdates: { close: vi.fn() },
+  stopLiveRecovery: vi.fn(async () => {}),
   loginChanges: { stop: vi.fn(async () => {}) }, relay: { close: vi.fn(), handleUpgrade: vi.fn() },
   promptChanges: { stop: vi.fn(async () => {}) }, promptSignals: { wakeAll: vi.fn() },
   routes: {}, proxy: {}, server: { on: vi.fn(), close: vi.fn() },
@@ -79,7 +80,7 @@ beforeEach(() => {
   f.cloud.mockImplementation((config, _pool, roles) => config.cloudV2 ? {
     routes: f.routes, proxy: f.proxy, api: f.api, connections: f.relay, workers: {}, relay: roles.relay ? f.relay : null,
     lifecycle: roles.lifecycle ? f.lifecycle : null, loginChanges: roles.relay ? f.loginChanges : null,
-    runtimeUpdates: f.runtimeUpdates,
+    runtimeUpdates: f.runtimeUpdates, stopLiveRecovery: f.stopLiveRecovery,
     startLocalCommands: roles.lifecycle ? f.startLocalCommands : () => async () => {}, localCommandSignals: f.localCommandSignals,
     teamSharing: f.teamSharing,
     promptChanges: config.cloudV2.promptOutbox ? f.promptChanges : null, promptSignals: f.promptSignals,
@@ -175,10 +176,12 @@ describe("account workers and cloud v2 boot composition", () => {
     let releaseApiUsage!: () => void;
     let releaseLocalCommands!: () => void;
     let releaseTeamSharing!: () => void;
+    let releaseLiveRecovery!: () => void;
     f.promptChanges.stop.mockImplementationOnce(() => new Promise<void>(resolve => { releasePromptListener = resolve; }));
     f.api.credentials.close.mockImplementationOnce(() => new Promise<void>(resolve => { releaseApiUsage = resolve; }));
     f.localCommandsStop.mockImplementationOnce(() => new Promise<void>(resolve => { releaseLocalCommands = resolve; }));
     f.teamSharing.signals.close.mockImplementationOnce(() => new Promise<void>(resolve => { releaseTeamSharing = resolve; }));
+    f.stopLiveRecovery.mockImplementationOnce(() => new Promise<void>(resolve => { releaseLiveRecovery = resolve; }));
     const shutdown = process.listeners("SIGTERM").find(listener => !oldTerm.includes(listener))!;
     shutdown("SIGTERM"); await vi.advanceTimersByTimeAsync(0);
     expect(f.runtimeUpdates.close).toHaveBeenCalledOnce();
@@ -190,6 +193,7 @@ describe("account workers and cloud v2 boot composition", () => {
     expect(f.api.credentials.close).toHaveBeenCalledOnce();
     expect(f.localCommandSignals.close).toHaveBeenCalledOnce(); expect(f.localCommandsStop).toHaveBeenCalledOnce();
     expect(f.teamSharing.signals.close).toHaveBeenCalledOnce();
+    expect(f.stopLiveRecovery).toHaveBeenCalledOnce();
     expect(f.promptSignals.wakeAll.mock.invocationCallOrder[0]).toBeLessThan(f.server.close.mock.invocationCallOrder[0]!);
     for (const pool of [f.apiPool, f.workerPool, f.listenerPool, f.lockPool]) expect(pool.end).not.toHaveBeenCalled();
     releasePromptListener(); await vi.advanceTimersByTimeAsync(0);
@@ -199,6 +203,8 @@ describe("account workers and cloud v2 boot composition", () => {
     releaseLocalCommands(); await vi.advanceTimersByTimeAsync(0);
     for (const pool of [f.apiPool, f.workerPool, f.listenerPool, f.lockPool]) expect(pool.end).not.toHaveBeenCalled();
     releaseTeamSharing(); await vi.advanceTimersByTimeAsync(0);
+    for (const pool of [f.apiPool, f.workerPool, f.listenerPool, f.lockPool]) expect(pool.end).not.toHaveBeenCalled();
+    releaseLiveRecovery(); await vi.advanceTimersByTimeAsync(0);
     for (const pool of [f.apiPool, f.workerPool, f.listenerPool, f.lockPool]) expect(pool.end).toHaveBeenCalledOnce();
     expect(exit).toHaveBeenCalledWith(0);
   });

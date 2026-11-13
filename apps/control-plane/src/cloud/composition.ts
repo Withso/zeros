@@ -29,6 +29,9 @@ import { activeRuntimeQualification } from "./runtime-capabilities.js";
 import { executionCreationRuntime } from "./execution/creation.js";
 import { CLOUD_V2_PROXY_PREFIX, type CloudV2ProxyDeps } from "./proxy.js";
 import { CloudV2Relay } from "./relay.js";
+import { CloudLiveRecovery } from "./live-recovery.js";
+import { LiveRecoverySignals } from "./live-recovery-signals.js";
+import { LiveRecoveryStore } from "./live-recovery-store.js";
 import { cloudV2Runtime } from "./runtime.js";
 import type { CloudV2RouteDeps } from "./routes.js";
 import { CloudV2Store, cloudV2WorkspaceFromRow, type CloudV2LifecycleWorkspace, type CloudV2WorkerSession, type CloudV2Workspace } from "./store.js";
@@ -310,20 +313,29 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   const proxy: CloudV2ProxyDeps = { store, execution, logins, authorizeSource, continueSource, ...(keys ? { refreshCodex: createCloudV2CodexRefresh(pool, keys) } : {}) };
   const api = { credentials: apiCredentials,
     service: new CloudApiService({ store, routes, credentials: apiCredentials, appBaseUrl: new URL(config.inviteLinkBase).origin }) };
+  const workerRoute = async (id: string) => {
+    const route = await store.workerRoute(id);
+    if (!route) return null;
+    const handoff = await runtimeHandoffs.route(id);
+    return { ...route, bootId: handoff.blocked ? null : route.bootId, ...(handoff.stopBootIds ? { stopBootIds: handoff.stopBootIds } : {}),
+      token: route.portToken ? openPortToken(route.portToken, id, keys) : null };
+  };
+  const liveSignals = new LiveRecoverySignals(pool, listenerPool);
+  const liveStore = new LiveRecoveryStore(pool, (token, id) => sealPortToken(token, id, keys));
+  const liveRecovery = roles.relay ? new CloudLiveRecovery({ route: workerRoute, compute,
+    witness: (binding, until) => liveSignals.watch(binding, until),
+    publish: (route, hosted) => liveStore.publish(route, hosted), condition: (route, failed) => liveStore.condition(route, failed),
+    mint: (id, boot) => signer.mint(id, boot), ready: id => connections?.hintReady(id), logger: console }) : null;
+  void liveSignals.start().catch(() => {});
   const connections = roles.relay || roles.lifecycle ? new CloudV2Relay({
     apiConfiguration, execution,
     localCommandsEnabled: id => localCommands.enabled(id),
     retireLocalSender: (id, userId, epoch, sessionId) => store.prompts.retireLocalSender(id, userId, epoch, sessionId),
     store, timing, authorizeSource, continueSource, ...(securityEvents ? { securityEvents } : {}),
     runtimeAdmission: runtimeHandoffs,
+    ...(liveRecovery ? { liveRecovery } : {}),
     config: workerConfig,
-    workerRoute: async id => {
-      const route = await store.workerRoute(id);
-      if (!route) return null;
-      const handoff = await runtimeHandoffs.route(id);
-      return { ...route, bootId: handoff.blocked ? null : route.bootId, ...(handoff.stopBootIds ? { stopBootIds: handoff.stopBootIds } : {}),
-        token: route.portToken ? openPortToken(route.portToken, id, keys) : null };
-    },
+    workerRoute,
     workerActivity: async (binding, idle) => {
       const current = await store.relayActivity(binding, idle);
       if (!current) return null;
@@ -338,6 +350,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   const relay = roles.relay ? connections : null;
   const promptSignals = new CloudV2PromptSignals();
   const workers: CloudV2WorkerRouteDeps = { store, execution, timing, logger: console, authorizeSource, continueSource, config: workerConfig, githubToken, runtimeSha256: v2.runtime.sha256,
+    outboundProof: binding => liveSignals.worker(binding),
     apiConfiguration,
     localCommands: { requests: localCommands, signals: localCommandSignals },
     notifications,
@@ -528,6 +541,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   }) : null;
   void lifecycleChanges?.start().catch(() => {});
   return { store, execution, compute, routes, proxy, workers, api, relay, connections, lifecycle, runtimeUpdates, loginChanges, promptChanges, lifecycleChanges, promptSignals, localCommandSignals, teamSharing,
+    stopLiveRecovery: async () => { await liveRecovery?.close(); await liveSignals.stop(); },
     startLocalCommands: () => {
       if (!roles.lifecycle) return async () => {};
       const local = startLocalCommandMaintenance(localCommands,localCommandSignals,console,notifications);

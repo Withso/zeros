@@ -58,7 +58,7 @@ suite("runtime hello through the production composition", () => {
         runtime: { sha256: "b".repeat(64), store: { endpoint: "https://store.example.test", bucket: "fixture", accessKeyId: "fixture", secretAccessKey: "fixture" } } },
     } as Config;
     const cp = createCloudV2(config, pool, { relay: false, lifecycle: false })!;
-    cleanup.push(async () => { cp.runtimeUpdates.close(); await cp.api.credentials.close(); await cp.loginChanges?.stop(); await cp.promptChanges?.stop(); await cp.localCommandSignals.close(); });
+    cleanup.push(async () => { cp.runtimeUpdates.close(); await cp.api.credentials.close(); await cp.loginChanges?.stop(); await cp.promptChanges?.stop(); await cp.localCommandSignals.close(); await cp.stopLiveRecovery(); });
     const scope = { organizationId: org, userId: creator }, connections = cp.routes.githubConnections!;
     await connections.store.save(scope, await connections.store.fingerprint(scope), { id: "12", login: "fixture" },
       { method: "pat", accessToken: "synthetic-pat", expiresAt: null });

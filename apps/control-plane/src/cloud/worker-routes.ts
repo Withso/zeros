@@ -6,6 +6,7 @@ import { CLOUD_V2_MAX_FRAME_BYTES, CloudV2WorkerActivitySchema, CloudV2WorkerHel
 import { emitCloudV2Timing, type CloudV2TimingRecord } from "./lifecycle.js";
 import type { CloudV2Store, CloudV2WorkerSession, CloudV2Workspace } from "./store.js";
 import { isCloudV2Token } from "./tokens.js";
+import type { LiveRecoveryProofBinding } from "./live-recovery-signals.js";
 import { CloudV2PromptAckSchema, CloudV2PromptBeginSchema, CloudV2PromptOutcomeSchema, CloudV2PromptPullSchema, CloudV2PromptStopReplySchema, CloudV2PromptStopSchema, type CloudV2PromptPullReply } from "./prompt-contract.js";
 import { CloudGithubCheckoutSchema, type CloudGithubCheckout } from "./github-pr-contract.js";
 import type { CloudSourceContinuation, CloudSourceProof } from "./source-authority.js";
@@ -32,6 +33,7 @@ import { workerGitIdentity } from "./worker-git-identity.js";
 export const CLOUD_V2_WORKER_API = "/v2/cloud/worker";
 type ConfigFrame = Extract<CloudV2ControlFrame, { t: "config" }>;
 export type CloudV2WorkerRouteDeps = {
+  outboundProof?(binding: LiveRecoveryProofBinding): Promise<void>;
   store: Pick<CloudV2Store, "beginWorkerHello" | "acceptWorkerHello" | "workerSession" | "accessEpoch" | "loginRevision" | "markActive" | "writeWorkerHistory" | "failWorkerCheckout"> & Partial<Pick<CloudV2Store, "prompts" | "workerHelloIdentity" | "chatEdits" | "reportWorkerSetup">>;
   runtimeSha256: string;
   execution?: CloudExecutionContexts;
@@ -322,6 +324,8 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
     if (!ready) throw unauthorized();
     if (workerFeatures(c).has("runtime-update-v1")) await deps.runtimeHandoffs?.recordRuntime(token, input.bootId, input.runtimeSha256);
     if (ready.helloTiming) emitCloudV2Timing(deps.timing, { workspaceId: ready.id.slice(0, 8), phase: "worker_hello", ...ready.helloTiming, configMs });
+    if (ready.boatSandboxId) void deps.outboundProof?.({ workspaceId: ready.id, bootId: input.bootId,
+      sandboxId: ready.boatSandboxId, accessEpoch: workspace.accessEpoch }).catch(() => {});
     return c.json({ config });
   });
   app.post(`${CLOUD_V2_WORKER_API}/runtime`, async c => {
@@ -456,13 +460,19 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
       const waiter = waitMs ? deps.waitForPrompts?.(auth.workspace.id, waitMs, c.req.raw.signal) : undefined;
       const pull = (mode: "new" | "due") => features.has("chat-edit-v1")
         ? outbox.pull(auth.token, auth.bootId, held, { chatEdits: mode }) : outbox.pull(auth.token, auth.bootId, held);
+      const reply = async (batch: CloudV2PromptPullReply) => {
+        const value = await forWorker(batch);
+        if (auth.workspace.boatSandboxId) void deps.outboundProof?.({ workspaceId: auth.workspace.id, bootId: auth.bootId,
+          sandboxId: auth.workspace.boatSandboxId, accessEpoch: auth.workspace.accessEpoch }).catch(() => {});
+        return c.json(value);
+      };
       try {
         const first = await pull(waiter ? "new" : "due");
-        if (!waiter || first.prompts.length || first.stops.length || first.chatEdits?.length) return c.json(await forWorker(first));
+        if (!waiter || first.prompts.length || first.stops.length || first.chatEdits?.length) return await reply(first);
         await waiter.wait;
         if (c.req.raw.signal.aborted) throw new HttpError(503, "request_cancelled", "Delivery poll ended");
         await session(c, deps);
-        return c.json(await forWorker(await pull("due")));
+        return await reply(await pull("due"));
       } finally { waiter?.dispose(); }
     });
     app.post(`${CLOUD_V2_WORKER_API}/prompts/ack`, async c => {

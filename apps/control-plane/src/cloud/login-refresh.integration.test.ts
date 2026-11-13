@@ -89,7 +89,7 @@ suite("Settings changes reach connected cloud workers", () => {
   });
   afterEach(async () => {
     vi.restoreAllMocks();
-    app?.terminate(); worker?.terminate(); runtime?.connections?.close(); await runtime?.loginChanges?.stop();
+    app?.terminate(); worker?.terminate(); runtime?.connections?.close(); await runtime?.loginChanges?.stop(); await runtime?.stopLiveRecovery();
     if (workerServer) await new Promise(resolve => workerServer.close(resolve));
     if (server) await new Promise(resolve => server.close(resolve));
   });
