@@ -236,6 +236,7 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
       url: `${deps.bridgeBaseUrl.replace(/\/+$/, "")}/v2/cloud/workspaces/${workspace.id}/bridge`,
       protocols: [CLOUD_V2_BRIDGE_PROTOCOL, `ticket.${ticket.token}`],
       expiresAt: ticket.expiresAt.toISOString(),
+      ...(active ? { features: ["relay-presence-v1"] } : {}),
     });
   });
 

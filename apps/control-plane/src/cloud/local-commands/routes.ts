@@ -5,10 +5,10 @@ import { z } from "zod";
 import { HttpError } from "../../authz.js";
 import { isDatabaseUnavailable } from "../../db.js";
 import { rateLimit } from "../../ratelimit.js";
-import { LOCAL_DEVICE_HEADERS, LocalDeviceBindingSchema, LocalDeviceRegistrationSchema, type LocalDeviceBinding } from "./contract.js";
+import { DEVICE_LIVENESS_FEATURE, LOCAL_DEVICE_HEADERS, LocalDeviceBindingSchema, LocalDeviceRegistrationSchema, type LocalDeviceBinding } from "./contract.js";
 import { LocalMacResultSchema } from "./contract.js";
 import { localUnavailable, type CloudLocalCommands } from "./requests.js";
-import { CloudLocalDevices, DEVICE_HEARTBEAT_MS } from "./devices.js";
+import { CloudLocalDevices, DEVICE_HEARTBEAT_MS, DEVICE_LIVENESS_HEARTBEAT_MS } from "./devices.js";
 import { CloudLocalCommandSignals, deviceSignal } from "./signals.js";
 import type { CloudNotifyUser, NotificationHint } from "../notify-user/store.js";
 import { localCommandDiagnostic, type LocalChannelCloseReason } from "./diagnostics.js";
@@ -130,8 +130,12 @@ export function createCloudLocalDeviceRoutes(deps: CloudLocalDeviceRoutes): Hono
   }
   app.get(`${path}/events`, async c => {
     const user = c.get("user"), identity = binding(c);
-    const initial = await deps.devices.snapshot(user, identity);
-    await deps.signals.start();
+    const initial = await deps.devices.openStream(user, identity);
+    try { await deps.signals.start(); }
+    catch (error) {
+      if (initial.streamId) await deps.devices.closeStream(user, identity, initial.streamId);
+      throw error;
+    }
     return streamSSE(c, async stream => {
       const openedAt = performance.now();
       let closeReason: LocalChannelCloseReason = "client_closed";
@@ -159,10 +163,12 @@ export function createCloudLocalDeviceRoutes(deps: CloudLocalDeviceRoutes): Hono
             Math.max(0, Math.min(DEVICE_HEARTBEAT_MS-(Date.now()-lastHeartbeat), tokenEnd-TOKEN_END_MARGIN_MS-Date.now())), signal);
           try {
             const observedChange = deviceChanged; deviceChanged = false;
-            const snapshot = await deps.devices.snapshot(user, identity);
+            const snapshot = await deps.devices.snapshot(user, identity, initial.streamId ?? undefined);
             const encodedPresence = JSON.stringify(snapshot.presence);
             if (first) {
-              await stream.writeSSE({ event: "ready", data: JSON.stringify({ ...identity, presence: snapshot.presence, heartbeatIntervalMs: DEVICE_HEARTBEAT_MS }) });
+              await stream.writeSSE({ event: "ready", data: JSON.stringify({ ...identity, presence: snapshot.presence,
+                heartbeatIntervalMs: initial.streamId ? DEVICE_LIVENESS_HEARTBEAT_MS : DEVICE_HEARTBEAT_MS,
+                ...(initial.streamId ? { features: [DEVICE_LIVENESS_FEATURE] } : {}) }) });
               first = false;
             } else if (observedChange || encodedPresence !== previousPresence) await stream.writeSSE({ event: "presence", data: encodedPresence });
             previousPresence = encodedPresence;
@@ -213,6 +219,10 @@ export function createCloudLocalDeviceRoutes(deps: CloudLocalDeviceRoutes): Hono
         }
       } finally {
         unsubscribe?.(); unsubscribeDevice?.(); controller.abort();
+        if (initial.streamId) {
+          try { await deps.devices.closeStream(user, identity, initial.streamId); }
+          catch { closeReason = "error"; }
+        }
         localCommandDiagnostic({ event: "channel_closed", userId: user.id, ...identity, reason: closeReason, secondsOpen: (performance.now()-openedAt)/1000 });
       }
     });

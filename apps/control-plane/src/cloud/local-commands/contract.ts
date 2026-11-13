@@ -4,6 +4,7 @@ import { z } from "zod";
 // keeps this mirror aligned with local-commands.ts and the frozen wire.
 export const LOCAL_COMMANDS_FEATURE = "local-commands-v1";
 export const LOCAL_COMMANDS_REASON_FEATURE = "local-commands-reason-v1";
+export const DEVICE_LIVENESS_FEATURE = "device-liveness-v1";
 export const LOCAL_COMMAND_LIMITS = {
   commandChars: 16_384, cwdChars: 4096, textChars: 1000, reasonChars: 280, macChars: 128,
   defaultTimeoutMs: 60_000, timeoutMs: 120_000, extendedTimeoutMs: 1_800_000,
@@ -47,7 +48,8 @@ export type LocalDeviceBinding = z.infer<typeof LocalDeviceBindingSchema>;
 export const LocalDeviceRegistrationSchema = z.object({ requestId: z.string().uuid(),
   name: z.string().min(1).max(128).refine(value => noC0(value) && !value.includes("\u007f") && value.trim() === value),
   capabilities: z.union([z.tuple([z.literal(LOCAL_COMMANDS_FEATURE)]),
-    z.tuple([z.literal(LOCAL_COMMANDS_FEATURE), z.literal(LOCAL_COMMANDS_REASON_FEATURE)])]),
+    z.tuple([z.literal(LOCAL_COMMANDS_FEATURE), z.literal(LOCAL_COMMANDS_REASON_FEATURE)]),
+    z.tuple([z.literal(LOCAL_COMMANDS_FEATURE), z.literal(LOCAL_COMMANDS_REASON_FEATURE), z.literal(DEVICE_LIVENESS_FEATURE)])]),
 }).strict();
 export type LocalDeviceRegistration = z.infer<typeof LocalDeviceRegistrationSchema>;
 export type LocalDevice = LocalDeviceBinding & { name: string; capabilities: LocalDeviceRegistration["capabilities"] };

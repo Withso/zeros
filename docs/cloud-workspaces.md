@@ -1724,11 +1724,45 @@ An empty cold/loading session cannot erase a confirmed cached window. Local
 Personal and organization-local history retain their device-owned authority and
 startup behavior.
 
-A transactional change feed remains a follow-up: catalog/history writes and
+A transactional history change feed remains a follow-up: history writes and
 deletion tombstones would advance a sequence in the same database transaction,
-with scoped cursors and a bounded snapshot fallback after cursor expiry. This
-change introduces no sync endpoint or worker protocol; revalidation uses the
-existing catalog and history window/older-page reads.
+with scoped cursors and a bounded snapshot fallback after cursor expiry.
+History revalidation uses the existing window/older-page reads. Workspace
+catalog invalidations use the account event stream below.
+
+## Negotiated change signals
+
+The account stream at `/v1/auth/events` announces `catalog-events-v1` in
+`ready.features`. Committed workspace, lifecycle, setup, cost, pull-request,
+follower and pin changes publish `organization.data_changed` with
+`{resource:"cloud_workspace",workspaceId,change}`. Database triggers cover
+older server writers too; deletion hints remain replayable after their workspace
+row is gone. Membership and plan changes retain the existing account events.
+Activity timestamps and provider-check timestamps do not produce catalog hints.
+Cost totals change at turn settlement or a correction, not on streaming deltas.
+Catalog notifications use a separate PostgreSQL channel from authority cuts.
+
+A capable desktop gathers hints for one second and keeps one catalog request
+in flight. Hints during that request schedule one trailing read a second after
+it completes. It also refreshes on stream readiness and uses a 60-second
+fallback. A stream without the feature retains the previous catalog timers.
+
+An activated workspace's connect reply announces `relay-presence-v1`. Its
+admitted root client handle prevents idle stop while the existing 30-second
+execution lease, authentication deadline, boot, epoch and stop generation are
+current. Closing the connection revokes the handle; a failed relay cannot renew
+it. Sync handles, detached terminal shells and history-only viewers do not
+count. Older desktops may continue sending their focus pings.
+
+A device offering `device-liveness-v1` receives that feature and
+`heartbeatIntervalMs:300000` only in a bound stream's ready frame. The current
+registration instance and stream nonce own its reachability refresh; an older
+stream's late close cannot clear its successor. The stream retains its
+25-second authority checks and heartbeats, and the lease expires 65 seconds
+after server refreshes stop. Silent client-side stalls still depend on
+connection and token expiry. Reachability does not grant command authority.
+Registrations and streams without the feature keep the 25-second client beat.
+Local workspaces retain their existing engine and device authority.
 
 ## Durable prompt delivery
 
@@ -1754,11 +1788,20 @@ each entry only after that private commit.
 The worker pulls through `/v2/cloud/worker/prompts/*`. A hint over an existing
 hybrid connection shortens the wait. With `worker-push-v1`, the control plane
 offers prompt push while its shared LISTEN subscription is healthy. After an
-initial drain, an empty inbox waits locally for a hint; the minute safety pulse
+initial drain, an empty inbox waits locally for a hint; the safety pulse
 repairs a missed hint without leasing an empty batch. A LISTEN gap or loss of
-the last negotiated relay resumes the 25-second HTTPS long poll immediately;
+the last negotiated relay resumes HTTPS long polling immediately;
 reconnection drains once before waiting again. Payloads, inbox ACKs, dispatch
 and Stop receipts always use the same durable HTTPS routes.
+
+`push-signals-v1` workers receive `pushSignals:1` only when the control plane
+accepts the feature. They may hold a prompt pull for 60 seconds, send idle
+reports on change plus a five-minute fallback, and use five-minute activity
+and transport pulses. Unnegotiated workers keep their existing timers and
+25-second pull limit. Lease renewals keep their separate authority deadlines.
+A capable worker also accepts `push{runtimeUpdate:true}` on configuration or
+reconnection and checks runtime updates with a 15-minute fallback. Neither
+optional field is sent to a worker that lacks its capability.
 
 The relay is retained for attached apps, so a worker with no attached app still
 uses HTTPS prompt polling and activity until the ordinary 15-minute idle stop.

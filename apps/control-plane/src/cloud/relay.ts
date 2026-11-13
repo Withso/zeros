@@ -14,7 +14,7 @@ import { requireWorkspaceCreator } from "./workspace-access.js";
 import { isCloudV2Token } from "./tokens.js";
 import type { CloudExecutionContexts } from "./execution/store.js";
 import { ExecutionContextRevoked } from "./execution/errors.js";
-import { dialWorker, WorkerConnectionFailure, workerSupportsActingUser, workerSupportsCreatorLogins, workerSupportsCreatorModels, workerSupportsCreatorCommitIdentity, workerSupportsApi, workerSupportsLocalCommands, workerSupportsLocalCommandReason, workerSupportsNotifyUser, workerSupportsCheckout, workerSupportsMcp, workerSupportsSetup, workerSupportsRepositorySetup, workerSupportsGithub, workerSupportsGitIdentity, workerSupportsGithubUserTokens, workerSupportsAgentInteractions, workerSupportsCodeReview, workerSupportsHistoryReplacement, workerSupportsEnvironment, workerSupportsRuntimeUpdate, workerSupportsPush, type WorkerRoute } from "./worker-connection.js";
+import { dialWorker, WorkerConnectionFailure, workerSupportsActingUser, workerSupportsCreatorLogins, workerSupportsCreatorModels, workerSupportsCreatorCommitIdentity, workerSupportsApi, workerSupportsLocalCommands, workerSupportsLocalCommandReason, workerSupportsNotifyUser, workerSupportsCheckout, workerSupportsMcp, workerSupportsSetup, workerSupportsRepositorySetup, workerSupportsGithub, workerSupportsGitIdentity, workerSupportsGithubUserTokens, workerSupportsAgentInteractions, workerSupportsCodeReview, workerSupportsHistoryReplacement, workerSupportsEnvironment, workerSupportsRuntimeUpdate, workerSupportsPushSignals, workerSupportsPush, type WorkerRoute } from "./worker-connection.js";
 import { LIVE_CONNECTION_UNAVAILABLE, type CloudLiveRecovery } from "./live-recovery.js";
 import { workerGitIdentity } from "./worker-git-identity.js";
 import { emitCloudV2Timing, type CloudV2TimingRecord } from "./lifecycle.js";
@@ -68,6 +68,7 @@ type Room = {
   workspace: CloudV2Workspace; accessEpoch: string; revoked: boolean; acting?: boolean;
   worker: WebSocket | null; ready: boolean; loginRevision: string | null; configAt: number;
   workerBinding?: CloudV2WorkerBinding;
+  runtimeUpdateHints?: boolean;
   configFlight?: ConfigFlight; dialing?: Promise<void>; idleTimer?: NodeJS.Timeout;
   authorityFlight?: Promise<Authority>; authorityCheckAt: number;
   /** App frames and the relay's own re-checks skip the read until this time, at this security revision. */
@@ -114,7 +115,7 @@ export class CloudV2Relay {
     // operation whose provider lock has ended. These reads belong to the relay.
     this.unsubscribeSecurity = deps.securityEvents?.subscribe(AsyncResource.bind(() => {
       this.securityRevision++; this.revalidate();
-    }, "cloud-v2-security-wake"));
+    }, "cloud-v2-security-wake"), "authority");
     void deps.securityEvents?.start().catch(() => this.revalidate());
   }
 
@@ -181,7 +182,7 @@ export class CloudV2Relay {
   private offerPush(room: Room): void {
     if (!this.closed && room.ready && !room.revoked && room.worker && room.workerBinding &&
         this.deps.workerActivity && workerSupportsPush(room.worker))
-      send(room.worker, { t: "push", prompts: this.promptNotificationsHealthy });
+      send(room.worker, { t: "push", prompts: this.promptNotificationsHealthy, ...(room.runtimeUpdateHints ? { runtimeUpdate: true } : {}) });
   }
 
   /** Best-effort latency hint: a room waiting for this workspace's worker
@@ -607,10 +608,11 @@ export class CloudV2Relay {
       if (await this.current(room) !== "allowed" || room.worker !== ws) return false;
       if (revision !== await this.deps.store.loginRevision(room.workspace.id)) { flight.requested = true; flight.force = true; continue; }
       if (room.worker !== ws || room.revoked) return false;
-      const { api: _api, agentLogins, agentModels, localCommands: _localCommands, localCommandReason: _localCommandReason, notifyUser, mcpServers, githubPullRequests, githubUserTokens, gitIdentity: _gitIdentity, gitIdentitySource: _gitIdentitySource, agentInteractions, codeReview, historyReplacement: _historyReplacement, environment, runtimeUpdate, ...legacy } = config;
+      const { api: _api, agentLogins, agentModels, localCommands: _localCommands, localCommandReason: _localCommandReason, notifyUser, mcpServers, githubPullRequests, githubUserTokens, gitIdentity: _gitIdentity, gitIdentitySource: _gitIdentitySource, agentInteractions, codeReview, historyReplacement: _historyReplacement, environment, runtimeUpdate, pushSignals, ...legacy } = config;
       if (environment && !workerSupportsEnvironment(ws)) throw new Error("Cloud environment runtime support is required.");
       const { setup, setupScript, baseCommit, github, ...workspaceConfig } = config.workspace;
       if (setupScript !== undefined && !workerSupportsRepositorySetup(ws)) throw new Error("Repository setup runtime support is required.");
+      const acceptPushSignals = workerSupportsPushSignals(ws) && config.promptOutbox === 1 && pushSignals === 1;
       send(ws, { ...legacy, workspace: { ...workspaceConfig,
         ...(setupScript !== undefined ? { setupScript } : {}),
         ...(workerSupportsGithub(ws) && github ? { github } : {}),
@@ -627,10 +629,13 @@ export class CloudV2Relay {
         ...(config.actingUser === 1 && workerSupportsCreatorModels(ws) && agentModels ? { agentModels } : {}),
         ...(environment ? { environment } : {}),
         ...(workerSupportsRuntimeUpdate(ws) && runtimeUpdate === 1 ? { runtimeUpdate } : {}),
+        ...(acceptPushSignals ? { pushSignals: 1 } : {}),
         ...workerGitIdentity(config, workerSupportsGitIdentity(ws), workerSupportsCreatorCommitIdentity(ws)),
         ...(workerSupportsCodeReview(ws) && codeReview ? { codeReview } : {}),
         ...(workerSupportsGithubUserTokens(ws) && githubUserTokens === 1 ? { githubUserTokens } : {}),
         ...(workerSupportsGithub(ws) && githubPullRequests === 1 ? { githubPullRequests } : {}), loginRevision: revision }); room.loginRevision = revision; room.configAt = Date.now();
+      room.runtimeUpdateHints = acceptPushSignals && workerSupportsRuntimeUpdate(ws) && runtimeUpdate === 1;
+      if (room.runtimeUpdateHints) this.offerPush(room);
     } while (flight.requested);
     return true;
   }

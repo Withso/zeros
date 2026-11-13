@@ -78,8 +78,24 @@ suite("committed cloud catalog changes", () => {
     const cursor = (await getSecuritySnapshot(pool, user)).cursor;
     await pool.query("INSERT INTO cloud_v2_chats(workspace_id,chat_id,row) VALUES($1,'chat','{}')", [workspace.id]);
     await pool.query("INSERT INTO cloud_v2_messages(workspace_id,chat_id,msg_id,kind,payload,created_at_ms) VALUES($1,'chat','item','text','text',1)", [workspace.id]);
-    await pool.query("UPDATE cloud_v2_workspaces SET updated_at=clock_timestamp(),attempts=attempts+1 WHERE id=$1", [workspace.id]);
+    await pool.query("UPDATE cloud_v2_workspaces SET updated_at=clock_timestamp(),attempts=attempts+1,boat_sandbox_id='bx_catalog' WHERE id=$1", [workspace.id]);
     expect(await hints(cursor)).toEqual([]);
+  });
+
+  it("does not turn 30-second activity updates into catalog refreshes", async () => {
+    const cursor = (await getSecuritySnapshot(pool, user)).cursor;
+    for (let beat = 0; beat < 3; beat++)
+      await pool.query("UPDATE cloud_v2_workspaces SET active_at=clock_timestamp()+$2*interval '30 seconds' WHERE id=$1", [workspace.id, beat]);
+    expect(await hints(cursor)).toEqual([]);
+  });
+
+  it.each(["checkout_boot_id", "pr_connection_generation"])("publishes a %s visibility change", async field => {
+    await pool.query("INSERT INTO cloud_v2_github_workspaces(workspace_id,repository_id,canonical_repository) VALUES($1,42,'fixture/project')", [workspace.id]);
+    const cursor = (await getSecuritySnapshot(pool, user)).cursor;
+    await pool.query(`UPDATE cloud_v2_github_workspaces SET ${field}=$2 WHERE workspace_id=$1`, [workspace.id, randomUUID()]);
+    expect(await hints(cursor)).toEqual([expect.objectContaining({
+      payload: { resource: "cloud_workspace", workspaceId: workspace.id, change: "pull_request" },
+    })]);
   });
 
   it("publishes only committed changes and preserves current membership filtering", async () => {

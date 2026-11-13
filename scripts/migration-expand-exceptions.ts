@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 // Each reviewed migration lists its exact exempted statements by rule.
 const reviewed: Readonly<Record<string, Readonly<Record<string, readonly string[]>>>> = {
+  "0249_cloud_push_signals.sql": {},
   "0247_cloud_membership_access.sql": {},
   "0246_cloud_team_ownership.sql": {},
   "0245_cloud_execution_payer.sql": {},
@@ -535,6 +536,10 @@ function statements(sql: string): { text: string; header: string }[] {
   return result;
 }
 
+const cloudPushSignalsDigests: Readonly<Record<string, readonly string[]>> = {
+  "catalog-notification-channel": ["976954fcbaadbb9bd483ab049b34bfb12a6db5ab71ea6b88f4179c06e850dd1d"],
+  "privilege-tightening": ["af0d8ba056b2a04ee390886ef057732b2e0ace426122847922fcef3d028ce504"],
+};
 const cloudMembershipAccessDigests: Readonly<Record<string, readonly string[]>> = {
   "optional-source-fingerprint": [
     "dbeaf0af340842ca6f74aa4f832f4a6e5d6b14e6d9aad5b5f74be3c8a7021d51"
@@ -602,6 +607,7 @@ export function applyReviewedExpandExceptions(file: string, sql: string): string
     const rule = annotations[0]![1]!;
     const statement = text.replace(/\r\n/g, "\n").trim();
     const allowed = exact[rule]?.includes(statement) ||
+      (file === "0249_cloud_push_signals.sql" && cloudPushSignalsDigests[rule]?.includes(createHash("sha256").update(statement).digest("hex"))) ||
       (file === "0247_cloud_membership_access.sql" && cloudMembershipAccessDigests[rule]?.includes(createHash("sha256").update(statement).digest("hex"))) ||
       (file === "0246_cloud_team_ownership.sql" && cloudTeamOwnershipDigests[rule]?.includes(createHash("sha256").update(statement).digest("hex"))) ||
       (file === "0245_cloud_execution_payer.sql" && cloudExecutionPayerDigests[rule]?.includes(createHash("sha256").update(statement).digest("hex"))) ||

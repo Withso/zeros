@@ -71,14 +71,14 @@ CREATE TRIGGER catalog_workspaces_delete AFTER DELETE ON cloud_v2_workspaces
 CREATE TRIGGER catalog_workspaces_update AFTER UPDATE ON cloud_v2_workspaces
   FOR EACH ROW WHEN (
     ROW(NEW.org_id,NEW.name,NEW.title,NEW.number,NEW.repository,NEW.branch,NEW.base_branch,NEW.state,NEW.error_code,NEW.archived_at,
-      NEW.creator_user_id,NEW.created_by_user_id,NEW.created_by_session_id,NEW.boat_sandbox_id,NEW.computer_build_id,NEW.source_pending,
-      NEW.setup_status,NEW.agent_cost_usd,NEW.agent_cost_turns,NEW.agent_cost_estimated_turns,NEW.active_at,
-      NEW.creator_revision,NEW.creator_absent_reason,NEW.execution_mode,NEW.worker_boot_id=ANY(NEW.acting_user_boot_ids))
+      NEW.creator_user_id,NEW.created_by_user_id,NEW.source_pending,
+      NEW.setup_status,NEW.agent_cost_usd,NEW.agent_cost_turns,NEW.agent_cost_estimated_turns,
+      NEW.creator_revision,NEW.creator_absent_reason,NEW.execution_mode,coalesce(NEW.worker_boot_id=ANY(NEW.acting_user_boot_ids),false))
     IS DISTINCT FROM
     ROW(OLD.org_id,OLD.name,OLD.title,OLD.number,OLD.repository,OLD.branch,OLD.base_branch,OLD.state,OLD.error_code,OLD.archived_at,
-      OLD.creator_user_id,OLD.created_by_user_id,OLD.created_by_session_id,OLD.boat_sandbox_id,OLD.computer_build_id,OLD.source_pending,
-      OLD.setup_status,OLD.agent_cost_usd,OLD.agent_cost_turns,OLD.agent_cost_estimated_turns,OLD.active_at,
-      OLD.creator_revision,OLD.creator_absent_reason,OLD.execution_mode,OLD.worker_boot_id=ANY(OLD.acting_user_boot_ids)))
+      OLD.creator_user_id,OLD.created_by_user_id,OLD.source_pending,
+      OLD.setup_status,OLD.agent_cost_usd,OLD.agent_cost_turns,OLD.agent_cost_estimated_turns,
+      OLD.creator_revision,OLD.creator_absent_reason,OLD.execution_mode,coalesce(OLD.worker_boot_id=ANY(OLD.acting_user_boot_ids),false)))
   EXECUTE FUNCTION notify_cloud_v2_catalog_row();
 
 CREATE TRIGGER catalog_github_insert AFTER INSERT ON cloud_v2_github_workspaces
@@ -87,9 +87,9 @@ CREATE TRIGGER catalog_github_delete AFTER DELETE ON cloud_v2_github_workspaces
   FOR EACH ROW EXECUTE FUNCTION notify_cloud_v2_catalog_row();
 CREATE TRIGGER catalog_github_update AFTER UPDATE ON cloud_v2_github_workspaces
   FOR EACH ROW WHEN (
-    ROW(NEW.workspace_id,NEW.repository_id,NEW.canonical_repository,NEW.repository_aliases,NEW.branch,NEW.base_branch,NEW.head_sha,NEW.pr_number,NEW.pr_state,NEW.pr_url)
+    ROW(NEW.workspace_id,NEW.repository_id,NEW.canonical_repository,NEW.checkout_boot_id IS NOT NULL,NEW.branch,NEW.base_branch,NEW.head_sha,NEW.pr_number,NEW.pr_state,NEW.pr_url,NEW.pr_connection_generation)
     IS DISTINCT FROM
-    ROW(OLD.workspace_id,OLD.repository_id,OLD.canonical_repository,OLD.repository_aliases,OLD.branch,OLD.base_branch,OLD.head_sha,OLD.pr_number,OLD.pr_state,OLD.pr_url))
+    ROW(OLD.workspace_id,OLD.repository_id,OLD.canonical_repository,OLD.checkout_boot_id IS NOT NULL,OLD.branch,OLD.base_branch,OLD.head_sha,OLD.pr_number,OLD.pr_state,OLD.pr_url,OLD.pr_connection_generation))
   EXECUTE FUNCTION notify_cloud_v2_catalog_row();
 
 CREATE TRIGGER catalog_followers_insert AFTER INSERT ON cloud_v2_workspace_followers
