@@ -658,7 +658,10 @@ export class CloudWorker {
     if (!initial && reviewAvailable !== this.reviews?.enabled) await this.broadcast(this.readyFrame());
     this.configuredReviewAvailable = this.reviews?.enabled === true;
     if (disconnects === this.disconnects) this.appliedSections = sections;
-    await this.reportIdle(true);
+    // Readiness never waits for the history backfill: a cold wake's first client gets ENGINE_READY as soon as the
+    // services are configured, while the idle report flushes sessions and history in the background (reportIdle reports
+    // idle only after both flushes, so idle-stop still sees persisted work).
+    void this.reportIdle(true).catch(() => this.options.onError?.("storage"));
     if (initial) recordStartupTiming("worker_configure", started, timing);
     else recordStartupTiming("worker_reconfigure", started, timing);
   }
