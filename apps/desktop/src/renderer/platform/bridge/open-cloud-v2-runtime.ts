@@ -15,6 +15,7 @@ import type { CloudWorkspaceTarget } from "./cloud-workspace-key";
 import { RuntimeClient } from "./ws-client";
 import type { CloudPeer } from "./workspace-runtime-client";
 import { bridgeWorkspaceList } from "./workspace-bridge";
+import { confirmCloudWorkspaceAccessEnded } from "../cloud-access-confirm";
 
 const CONNECT_TIMEOUT_MS = 3 * 60_000;
 const TICKET_TIMEOUT_MS = 30_000;
@@ -141,6 +142,8 @@ export async function openCloudV2Runtime(
   const ticket = await ticketTarget(target, sequence, options?.wake === true, assertCurrent, deadline, signal);
   assertCurrent();
   const client = new RuntimeClient(ticket, {
+    // D2: a 4001 access_revoked ends access only once the workspace document confirms it.
+    confirmCloudAccessEnded: workspace => confirmCloudWorkspaceAccessEnded(workspace),
     // Each reconnect presents a fresh ticket. A reconnect after a laptop wake,
     // network drop or control-plane deploy is not explicit work, so it never
     // restarts a VM that stopped meanwhile. Fresh user input owns the next wake.

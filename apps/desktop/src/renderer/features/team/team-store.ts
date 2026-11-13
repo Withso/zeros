@@ -19,6 +19,7 @@ import { useEffect, useSyncExternalStore } from "react";
 import { isLocalDevelopment } from "../../platform/runtime";
 import { getSettingMigrated, setSetting } from "../../platform/settings";
 import { getAccountPresentationOwner } from "../../platform/account-presentation-cache";
+import { registerAccessAccountScope } from "../../platform/team-sharing-registry";
 import { loadOrganizationPresentation, persistOrganizationPresentation } from "./organization-presentation-cache";
 import { pruneScopedSettingsSelections } from "../settings/settings-scope";
 import { pruneSidebarOwnerPreferences } from "../../state/sidebar-list-preferences";
@@ -120,6 +121,8 @@ function emit(next: TeamStoreState): void {
 export function getTeamStoreState(): TeamStoreState {
   return state;
 }
+// D3: the access-ended registry is keyed by this account session (user + store generation).
+registerAccessAccountScope(() => { const id = state.me?.user.id; return id ? `${id}#${generation}` : null; });
 
 function persistPresentation(): void {
   const snapshot = state.me ?? state.presentation;

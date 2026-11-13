@@ -1,4 +1,4 @@
-import { clearWorkspaceAccessEnded, reportWorkspaceAccessEnded } from "../team-sharing-registry";
+import { clearWorkspaceAccessEnded, reportWorkspaceAccessEnded, workspaceAccessScope } from "../team-sharing-registry";
 // Shared desktop/Linux transport. Environment ports carry no workspace authority.
 import type { BridgeMessage } from "./messages";
 import { createMessageId } from "./messages";
@@ -11,6 +11,9 @@ import {
   MAX_BRIDGE_FRAME_BYTES,
   safeParseBridgeMessage,
 } from "@zeros/protocol/schemas";
+
+/** "ended" only for a 404 or a 403 member_access_revoked of the workspace document; "unknown" for any failed read. */
+export type CloudAccessConfirmer = (target: { organizationId: string; workspaceId: string }) => Promise<"ended" | "present" | "unknown">;
 /** Ladder for reconnect backoff in ms. Index = consecutive-failure count. */
 const RECONNECT_LADDER = [1_000, 2_000, 4_000, 8_000, 15_000];
 
@@ -347,6 +350,8 @@ export class RuntimeClient {
     (identity: RuntimeExecutionIdentity) => void
   >();
   private readonly refreshCloudConnectionTarget?: CloudRuntimeConnectionTargetRefresher;
+  /** D2: one exact read of the workspace document (team headers, this account) to confirm a 4001 access_revoked. */
+  private readonly confirmCloudAccessEnded?: CloudAccessConfirmer;
   private cloudTargetNeedsRefresh = false;
   private cloudTargetRefreshPromise: Promise<boolean> | null = null;
   private cloudConnectDeadline: number | null = null;
@@ -358,11 +363,13 @@ export class RuntimeClient {
     options: {
       environment: RuntimeClientEnvironment;
       refreshCloudConnectionTarget?: CloudRuntimeConnectionTargetRefresher;
+      confirmCloudAccessEnded?: CloudAccessConfirmer;
     },
   ) {
     this.environment = options.environment;
     this.connectionTarget = parseRuntimeConnectionTarget(target, Date.now(), this.environment);
     this.refreshCloudConnectionTarget = options.refreshCloudConnectionTarget;
+    this.confirmCloudAccessEnded = options.confirmCloudAccessEnded;
     this.armConnectionTargetExpiry();
   }
 
@@ -560,13 +567,26 @@ export class RuntimeClient {
       const reconnectImmediately = this.connectionTarget.kind === "cloud" && this.handshakeReady &&
         event?.code !== 1000 && event?.code !== 4001;
       if (this.ws === ws) this.ws = null;
-      if (this.connectionTarget.kind === "cloud" && [4001, 4003, 4009].includes(event?.code)) {
-        const failure = new CloudRuntimeAccessError(event.code === 4009
-          ? { code: "cloud_workspace_not_running", status: 409 }
-          : { code: event.code === 4001 ? "cloud_workspace_access_revoked" : "invalid_input", status: 403 });
-        // Team sharing: this person lost access while the workspace was open.
-        if (event.code === 4001) reportWorkspaceAccessEnded(this.connectionTarget.workspaceId);
-        this.rejectCloudConnection(failure);
+      // D2: the relay also closes 4001 for an expired or unrenewable context, a redeploy or worker_unauthorized.
+      // Only "access_revoked" may end access, and only once the workspace document confirms it (404, or 403
+      // member_access_revoked). Anything else reconnects with the normal backoff, against old and new relays.
+      if (this.connectionTarget.kind === "cloud" && event?.code === 4001) {
+        const target = this.connectionTarget;
+        if (event.reason !== "access_revoked" || !this.confirmCloudAccessEnded) { this.afterDisconnect(false); return; }
+        const scope = workspaceAccessScope();
+        void this.confirmCloudAccessEnded({ organizationId: target.organizationId, workspaceId: target.workspaceId }).catch(() => "unknown" as const).then(verdict => {
+          if (this._disposed || targetEpoch !== this.connectionTargetEpoch) return;
+          if (verdict === "ended") {
+            reportWorkspaceAccessEnded({ organizationId: target.organizationId, workspaceId: target.workspaceId }, scope);
+            this.rejectCloudConnection(new CloudRuntimeAccessError({ code: "cloud_workspace_access_revoked", status: 403 }));
+          }
+          this.afterDisconnect(false);
+        });
+        return;
+      }
+      if (this.connectionTarget.kind === "cloud" && [4003, 4009].includes(event?.code)) {
+        this.rejectCloudConnection(new CloudRuntimeAccessError(event.code === 4009
+          ? { code: "cloud_workspace_not_running", status: 409 } : { code: "invalid_input", status: 403 }));
       }
       this.afterDisconnect(reconnectImmediately);
     };
@@ -973,7 +993,7 @@ export class RuntimeClient {
       this.clearCloudConnectWait();
       this.handshakeReady = true;
       this._engineConnected = true;
-      if (this.connectionTarget.kind === "cloud") clearWorkspaceAccessEnded(this.connectionTarget.workspaceId);
+      if (this.connectionTarget.kind === "cloud") clearWorkspaceAccessEnded({ organizationId: this.connectionTarget.organizationId, workspaceId: this.connectionTarget.workspaceId });
       this.reconnectAttempts = 0;
       this.cloudDiagnostic("ready", {});
       // Make room for synchronous status-listener RPCs even when the
