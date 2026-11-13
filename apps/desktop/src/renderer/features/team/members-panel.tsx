@@ -53,6 +53,7 @@ import { setActiveOrganizationSelection } from "./active-team";
 import { getOrganizationStoreGeneration, refreshTeams, useActiveTeam } from "./team-store";
 import { MAX_INVITES_PER_BATCH, parseInviteEmails } from "./invite-emails";
 import { ROLE_LABELS, errorMessage } from "./team-panel";
+import { membershipAccessNote } from "./members-access-note";
 
 export function MembersPanel({ surfaceActive = true }: { surfaceActive?: boolean }) {
   const { me, error, reload } = useTeamReadRecovery(surfaceActive);
@@ -159,6 +160,7 @@ function MembersBody({
         description="Invited teammates get an email with a join link. A single invite's link is also copied for you to share directly."
       >
         {iAmAdmin && <InviteComposer teamId={team.id} onInvited={reload} />}
+        {membershipAccessNote(team) && <p className="text-fg2 text-xs" data-membership-access="">{membershipAccessNote(team)}</p>}
         {(memberRead.error || invitationRead.error) && (
           <div className="flex items-center gap-2 text-xs text-fg2" role="status">
             <span>{memberRead.error ? "Couldn't load members." : "Couldn't load invitations."}</span>

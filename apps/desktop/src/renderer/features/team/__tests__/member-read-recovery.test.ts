@@ -33,6 +33,7 @@ const script = buildSync({
     const MemberRow = ({ member }) => <span>{member.name}</span>;
     const InviteComposer = () => null, PendingInviteRow = () => null;
     const SETTINGS_CARD_LIST_CLS = "";
+    const membershipAccessNote = () => null;
     ${body}
     const root = createRoot(document.querySelector("#app"));
     f.render = () => flushSync(() => root.render(<MembersBody key={f.team} team={{id: f.team, role: "member"}} myUserId="user" refreshMe={async () => {}} />));

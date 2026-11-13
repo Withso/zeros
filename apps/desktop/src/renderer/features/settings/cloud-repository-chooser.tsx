@@ -20,6 +20,7 @@ import {
 import { cloudGithubHealthCopy } from "./cloud-github-health";
 import { requestUserSettingsSection } from "./settings-navigation";
 import { chooserRows, fullName, repositoryOwners, type ChooserRepository } from "./cloud-repository-chooser-model";
+import { useFocusRefresh } from "./use-focus-refresh";
 
 const PAGE_LIMIT = 10;
 const CONNECT_WAIT_MS = 10 * 60_000;
@@ -76,15 +77,16 @@ export function CloudRepositoryChooser({ userId, organizationId, active, disable
 
   // GitHub's installation page reports back through the connection's
   // generation; poll only while this chooser waits on it.
+  // R1: re-read when the person comes back from GitHub (focus), else every 60 s; stop at the deadline.
+  useFocusRefresh(active && !!connecting, () => {
+    if (!connecting || Date.now() >= connecting.until) return;
+    void cloudGithubConnectionCache.load(scope, () => readCloudGithubConnection(userId, organizationId), { maxAgeMs: 0 }).catch(() => {});
+  });
   useEffect(() => {
     if (!active || !connecting) return;
-    const refresh = () => {
-      if (Date.now() >= connecting.until) { setConnecting(null); return; }
-      void cloudGithubConnectionCache.load(scope, () => readCloudGithubConnection(userId, organizationId), { maxAgeMs: 0 }).catch(() => {});
-    };
-    const timer = window.setInterval(refresh, 2500);
-    return () => window.clearInterval(timer);
-  }, [active, connecting, scope, userId, organizationId]);
+    const timer = window.setTimeout(() => setConnecting(null), Math.max(0, connecting.until - Date.now()));
+    return () => window.clearTimeout(timer);
+  }, [active, connecting]);
   useEffect(() => {
     if (connecting && generation && generation !== connecting.generation) setConnecting(null);
   }, [connecting, generation]);
