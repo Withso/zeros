@@ -126,7 +126,11 @@ export function turnFailureDisplay(failure: TurnFailure, creatorName: string | n
     return { message: "This workspace has no Creator. An admin can reassign it.", retry: true, reconnect: false, reconnectLabel: undefined, reassign: canReassign };
   if (cloud?.loginRequiredFrom === "creator")
     return { message: `${creatorName ?? "The workspace's Creator"} needs to connect ${AGENT_NAMES[cloud.provider]} before messages can run here.`, retry: true, reconnect: false, reconnectLabel: undefined, reassign: false };
-  const accountAction = reason === "auth-required" || reason === "verification-required" || reason === "credentials-unavailable";
+  // A temporary server-side failure to deliver the payer's credential (503 agent_credentials_unavailable): nothing the
+  // viewer can connect fixes it, whoever pays. Provider actions stay for the provider rejecting the viewer's own login.
+  if (reason === "credentials-unavailable")
+    return { message: "Couldn't start this turn. Try again.", retry: true, reconnect: false, reconnectLabel: undefined, reassign: false };
+  const accountAction = reason === "auth-required" || reason === "verification-required";
   // An own-account refusal was never sent: after signing in, the same message can simply be retried.
   const retry = (!accountAction || failure.ownAccount === true) && reason !== "session-expired" && reason !== "model-unavailable";
   const reconnectLabel = !accountAction ? undefined : failure.ownAccount && cloud ? `Connect your ${AGENT_NAMES[cloud.provider]} account`

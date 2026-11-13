@@ -3,8 +3,8 @@ import { getActiveBridge } from "../platform/bridge/active-bridge";
 import type { CloudWorkspaceTarget } from "../platform/bridge/cloud-workspace-key";
 import { WorkspaceRuntimeClient } from "../platform/bridge/workspace-runtime-client";
 import { watchCloudWorkspaceEvents } from "../platform/cloud-workspace-events";
-import { cloudWorkspaceDocument, refreshCloudWorkspace } from "./cloud-workspace-catalog";
-import { reportWorkspaceAccessEnded } from "../platform/team-sharing-registry";
+import { refreshCloudWorkspace } from "./cloud-workspace-catalog";
+import { reportIfCloudWorkspaceAccessEnded } from "../platform/cloud-access-confirm";
 
 export interface CloudWorkspacePresence { userIds: readonly string[]; total: number }
 const COALESCE_MS = 300;
@@ -35,7 +35,9 @@ export function useCloudWorkspaceEvents(target: CloudWorkspaceTarget | null, ena
       // Access changed: read the document once; the catalog drops or downgrades it. Dropped: this person lost access.
       ended: () => {
         setPresence(null);
-        void refreshCloudWorkspace(scope).then(() => { if (!cloudWorkspaceDocument(scope)) reportWorkspaceAccessEnded(scope.workspaceId); }).catch(() => {});
+        // D2: only a confirmed 404 / 403 member_access_revoked ends access; a failed or unavailable read reports nothing.
+        void refreshCloudWorkspace(scope).catch(() => {});
+        void reportIfCloudWorkspaceAccessEnded(scope);
       },
     });
     return () => { stop(); clearTimeout(timer); };

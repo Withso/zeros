@@ -13,7 +13,7 @@ class Socket implements RuntimeTransportSocket {
   onerror: RuntimeTransportSocket["onerror"] = null;
   send(text: string) { this.sent.push(JSON.parse(text)); }
   open() { this.readyState = 1; this.onopen?.({} as Event); }
-  close(code = 1000) { this.readyState = 3; this.onclose?.({ code } as CloseEvent); }
+  close(code = 1000, reason = "") { this.readyState = 3; this.onclose?.({ code, reason } as CloseEvent); }
   answer(request: Record<string, any>) {
     this.onmessage?.({ data: JSON.stringify({ id: `reply-${request.id}`, timestamp: Date.now(), source: "engine",
       type: "WORKSPACE_RESPONSE", requestId: request.id, op: request.op, result: { workspaces: [] } }) } as MessageEvent);
@@ -22,7 +22,7 @@ class Socket implements RuntimeTransportSocket {
 const clients: RuntimeClient[] = [];
 beforeEach(() => vi.useFakeTimers());
 afterEach(() => { for (const client of clients.splice(0)) client.dispose(); vi.useRealTimers(); });
-function fixture(local = false) {
+function fixture(local = false, confirm: () => Promise<"ended" | "present" | "unknown"> = async () => "ended") {
   const sockets: Socket[] = [];
   const offers: Array<string[] | undefined> = [];
   const target = {
@@ -41,7 +41,8 @@ function fixture(local = false) {
     logger: { warn: vi.fn(), error: vi.fn() },
   };
   const refresh = vi.fn(async current => ({ ...current, connectionSequence: current.connectionSequence + 1, expiresAt: Date.now() + 60_000 }));
-  const client = new RuntimeClient(local ? { kind: "local" } : target, { environment, refreshCloudConnectionTarget: refresh });
+  const confirmCloudAccessEnded = vi.fn(confirm);
+  const client = new RuntimeClient(local ? { kind: "local" } : target, { environment, refreshCloudConnectionTarget: refresh, confirmCloudAccessEnded });
   clients.push(client);
   const ready = async (socket: Socket) => {
     socket.open();
@@ -49,7 +50,7 @@ function fixture(local = false) {
     await vi.advanceTimersByTimeAsync(0);
     expect(client.status).toBe("connected");
   };
-  return { client, sockets, refresh, ready, offers, target, environment };
+  return { client, sockets, refresh, ready, offers, target, environment, confirmCloudAccessEnded };
 }
 
 it("retains connecting when an unopened cloud ticket expires during the same bounded wait", async () => {
@@ -126,12 +127,12 @@ it("does not renew the cloud connection deadline after a transient reconnect", a
   expect(h.sockets).toHaveLength(2);
 });
 
-it.each([4001, 4003])("ends a definitive cloud refusal immediately (close %s)", async code => {
+it.each([[4001, "access_revoked"], [4003, ""]] as const)("ends a definitive cloud refusal (close %s %s)", async (code, reason) => {
   const h = fixture(); await h.client.connect(); h.sockets[0].open();
   const connectFailure = vi.fn(), readFailure = vi.fn();
   const waiting = h.client.waitUntilReady().catch(connectFailure);
   const reading = h.client.request({ type: "WORKSPACE_REQUEST", op: "file.read", params: { path: "retained.txt" } }).catch(readFailure);
-  h.sockets[0].close(code); await vi.advanceTimersByTimeAsync(0);
+  h.sockets[0].close(code, reason); await vi.advanceTimersByTimeAsync(0);
   expect(connectFailure).toHaveBeenCalledOnce(); expect(readFailure).toHaveBeenCalledOnce();
   await waiting; await reading;
   await vi.advanceTimersByTimeAsync(120_000);
@@ -278,12 +279,35 @@ it.each([true, false])("keeps readiness failures scoped to the runtime (local: %
 });
 
 it("marks the workspace's access as ended on close 4001, and clears it once a connection is ready again", async () => {
-  const { workspaceAccessEnded, resetWorkspaceAccessForTests } = await import("../../team-sharing-registry");
-  resetWorkspaceAccessForTests();
+  const { workspaceAccessEnded, resetWorkspaceAccessForTests, registerAccessAccountScope } = await import("../../team-sharing-registry");
+  resetWorkspaceAccessForTests(); registerAccessAccountScope(() => "user-1#1");
+  const workspace = { organizationId: "22222222-2222-4222-8222-222222222222", workspaceId: "33333333-3333-4333-8333-333333333333" };
   const h = fixture(); await h.client.connect(); h.sockets[0].open();
   const waiting = h.client.waitUntilReady().catch(() => {});
-  h.sockets[0].close(4001); await vi.advanceTimersByTimeAsync(0); await waiting;
-  expect(workspaceAccessEnded("33333333-3333-4333-8333-333333333333")).toBe(true);
+  h.sockets[0].close(4001, "access_revoked"); await vi.advanceTimersByTimeAsync(0); await waiting;
+  expect(h.confirmCloudAccessEnded).toHaveBeenCalledOnce();
+  expect(workspaceAccessEnded(workspace)).toBe(true);
   const other = fixture(); await other.client.connect(); await other.ready(other.sockets[0]);
-  expect(workspaceAccessEnded("33333333-3333-4333-8333-333333333333")).toBe(false);
+  expect(workspaceAccessEnded(workspace)).toBe(false);
+});
+
+it.each([
+  ["access_revoked", "present"], ["access_revoked", "unknown"], ["context_expired", "ended"], ["", "ended"], ["worker_unauthorized", "ended"],
+] as const)("D2: a 4001 (%s) that the workspace document does not confirm (%s) is not access ended: it reconnects with the normal backoff", async (reason, verdict) => {
+  const h = fixture(false, async () => verdict); await h.client.connect(); await h.ready(h.sockets[0]);
+  const failure = vi.fn(); h.client.waitUntilReady().catch(failure);
+  h.sockets[0].close(4001, reason); await vi.advanceTimersByTimeAsync(0);
+  expect(h.client.lastRejection).toBeNull();
+  // Only an access_revoked close is worth a confirming read.
+  expect(h.confirmCloudAccessEnded).toHaveBeenCalledTimes(reason === "access_revoked" ? 1 : 0);
+  await vi.advanceTimersByTimeAsync(30_000);
+  expect(h.sockets.length).toBeGreaterThan(1);
+});
+
+it("D2: 1013 (the relay's new non-access close) reconnects and never asks whether access ended", async () => {
+  const h = fixture(); await h.client.connect(); await h.ready(h.sockets[0]);
+  h.sockets[0].close(1013, "context_expired"); await vi.advanceTimersByTimeAsync(30_000);
+  expect(h.sockets.length).toBeGreaterThan(1);
+  expect(h.confirmCloudAccessEnded).not.toHaveBeenCalled();
+  expect(h.client.lastRejection).toBeNull();
 });

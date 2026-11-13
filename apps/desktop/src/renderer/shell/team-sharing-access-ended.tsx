@@ -4,10 +4,11 @@ import { EmptyState } from "../shared/ui/layout/empty-state";
 import { parseCloudWorkspaceKey } from "../platform/bridge/cloud-workspace-key";
 import { subscribeWorkspaceAccessEnded, workspaceAccessEnded } from "../platform/team-sharing-registry";
 
-/** Team sharing phase 3 (3A): this person lost access to the open workspace. */
+/** Team sharing phase 3 (3A): THIS account lost access to the open workspace (D3: exact account, organization and workspace). */
 export function useWorkspaceAccessEnded(folder: string | null | undefined): boolean {
-  const workspaceId = parseCloudWorkspaceKey(folder)?.workspaceId;
-  const read = () => !!workspaceId && workspaceAccessEnded(workspaceId);
+  const target = parseCloudWorkspaceKey(folder);
+  // The registry reads the CURRENT account session on every render (an account switch re-renders the app).
+  const read = () => !!target && workspaceAccessEnded(target);
   return useSyncExternalStore(subscribeWorkspaceAccessEnded, read, read);
 }
 

@@ -25,7 +25,7 @@ function messages(cloud: CloudProviderFailure | CloudMcpFailure) {
 
 it.each([
   ["auth-required", "Reconnect provider account"],
-  ["credentials-unavailable", "Check provider connection"],
+  ["credentials-unavailable", "Retry"],
   ["rate-limited", "Retry"],
   ["provider-unavailable", "Retry"],
   ["session-expired", "Start a new session"],

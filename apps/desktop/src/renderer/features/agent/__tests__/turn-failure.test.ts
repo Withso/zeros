@@ -203,3 +203,18 @@ describe("Creator pays: the failure card's copy and actions", () => {
       .toEqual({ message: "This workspace has no Creator. An admin can reassign it.", retry: true, reconnect: false, reconnectLabel: undefined, reassign: false });
   });
 });
+
+describe("a temporary server-side failure to deliver the payer's credential", () => {
+  const card = (extra: Record<string, unknown>) => ({ kind: "cloud-credentials-unavailable", newChatAllowed: false, message: "m", ...extra }) as never;
+  it("reads 'Couldn't start this turn. Try again.' with Retry and no provider action, for everyone", () => {
+    for (const failure of [card({ cloud: { source: "provider", provider: "claude", reason: "credentials-unavailable" } }),
+      card({ ownAccount: true, cloud: { source: "provider", provider: "claude", reason: "credentials-unavailable" } })])
+      expect(turnFailureDisplay(failure, "Sam")).toEqual({ message: "Couldn't start this turn. Try again.", retry: true, reconnect: false, reconnectLabel: undefined, reassign: false });
+  });
+  it("keeps the provider action only where the provider rejected the viewer's own login", () => {
+    expect(turnFailureDisplay(card({ kind: "auth-required", cloud: { source: "provider", provider: "claude", reason: "auth-required" } }), null))
+      .toMatchObject({ reconnect: true, reconnectLabel: "Reconnect provider account" });
+    expect(turnFailureDisplay(card({ kind: "verification-required", cloud: { source: "provider", provider: "claude", reason: "verification-required" } }), null))
+      .toMatchObject({ reconnect: true, reconnectLabel: "Check provider connection" });
+  });
+});
