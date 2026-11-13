@@ -295,7 +295,8 @@ export class InboundBridge {
       } else if (frame.t === "stop") {
         if (connection.stops.size >= 8) { socket.close(4003); return; }
         const id = randomUUID(); connection.stops.set(id, frame.id); frame = { ...frame, id };
-      } else if (frame.t !== "config" && frame.t !== "prompts") { socket.close(4003); return; }
+      // A per-context revocation (3A) ends one person's context; the carrier and everyone else on it stay up.
+      } else if (frame.t !== "config" && frame.t !== "prompts" && frame.t !== "revoke-context") { socket.close(4003); return; }
       void this.receive!(frame).catch(() => socket.close(1011));
     });
     socket.on("close", () => {

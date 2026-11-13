@@ -185,3 +185,47 @@ it("admits a valid control-plane grant even after the failed-auth limit is exhau
   for (let i = 0; i < 40; i++) expect(await f.refusal("invalid")).toBe(i < 32 ? 401 : 429);
   expect(await f.refusal(token())).toBe(101);
 });
+
+const A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", B = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+const contextB = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+const until = async (check: () => boolean) => { for (let i = 0; i < 200 && !check(); i++) await new Promise(resolve => setTimeout(resolve, 5)); };
+
+it("3A: a person's revoke-context reaches the worker without closing the shared carrier; another person's pending reply still arrives", async () => {
+  const f = await fixture();
+  const { ws, frames } = await f.connect();
+  ws.send(JSON.stringify({ t: "open", clientId: A, userId: randomUUID(), contextId: randomUUID() }));
+  ws.send(JSON.stringify({ t: "open", clientId: B, userId: randomUUID(), contextId: contextB }));
+  ws.send(JSON.stringify({ t: "frame", clientId: A, frame: { type: "WORKSPACE_REQUEST", id: "a-1" } }));
+  await until(() => f.incoming.length >= 3);
+  const localA = (f.incoming.find(frame => frame.t === "open" && (frame as { authorityClientId?: string }).authorityClientId === A) as { clientId: string }).clientId;
+  ws.send(JSON.stringify({ t: "revoke-context", contextId: contextB, reason: "access_revoked" }));
+  await until(() => f.incoming.some(frame => frame.t === "revoke-context"));
+  expect(f.incoming).toContainEqual({ t: "revoke-context", contextId: contextB, reason: "access_revoked" });
+  expect(ws.readyState).toBe(WebSocket.OPEN);
+  expect(await f.listener.send({ t: "frame", clientId: localA, frame: { type: "WORKSPACE_RESPONSE", requestId: "a-1" } } as never)).toBe(true);
+  await until(() => frames.some(frame => frame.t === "frame"));
+  expect(frames).toContainEqual({ t: "frame", clientId: A, frame: { type: "WORKSPACE_RESPONSE", requestId: "a-1" } });
+  expect(ws.readyState).toBe(WebSocket.OPEN);
+});
+
+it("contract: the inbound carrier accepts every control-plane frame type the relay sends", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const relay = await readFile(new URL("../../../control-plane/src/cloud/relay.ts", import.meta.url), "utf8");
+  const sent = [...new Set([...relay.matchAll(/\{ t: "([a-z-]+)"/g)].map(match => match[1]!))].sort();
+  const { config } = await import("./worker-fixtures");
+  const samples: Record<string, unknown> = {
+    "activity-reply": { t: "activity-reply", id: randomUUID(), prompts: false, loginRevision: "0", state: "running" },
+    open: { t: "open", clientId: A }, frame: { t: "frame", clientId: A, frame: { type: "PING" } }, close: { t: "close", clientId: A },
+    config, prompts: { t: "prompts" }, push: { t: "push", prompts: true }, stop: { t: "stop", id: randomUUID() },
+    "revoke-context": { t: "revoke-context", contextId: contextB, reason: "access_revoked" },
+  };
+  // A new relay frame type must get a sample here and a case in the inbound bridge.
+  expect(sent).toEqual(Object.keys(samples).sort());
+  const f = await fixture();
+  const { ws } = await f.connect();
+  for (const type of ["open", "frame", "close", "activity-reply", "config", "prompts", "push", "stop", "revoke-context"]) ws.send(JSON.stringify(samples[type]));
+  await until(() => f.incoming.some(frame => frame.t === "revoke-context"));
+  await new Promise(resolve => setTimeout(resolve, 20));
+  expect(ws.readyState).toBe(WebSocket.OPEN);
+  expect(new Set(f.incoming.map(frame => frame.t))).toEqual(new Set(["open", "frame", "close", "config", "prompts", "stop", "revoke-context"]));
+});
