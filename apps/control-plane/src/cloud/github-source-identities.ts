@@ -1,6 +1,6 @@
 import type pg from "pg";
 import { HttpError } from "../authz.js";
-import { withSystemTx } from "../db.js";
+import { withSystemTx, type Tx } from "../db.js";
 import type { CloudV2Workspace } from "./store.js";
 
 export class CloudGithubSourceIdentities {
@@ -8,14 +8,15 @@ export class CloudGithubSourceIdentities {
   async targets(
     workspace: CloudV2Workspace,
     sources: readonly string[],
+    transaction?: Tx,
   ): Promise<readonly { repository: string; repositoryId: string }[]> {
-    const { rows } = await withSystemTx(this.pool, (tx) =>
+    const read = (tx: Tx) =>
       tx.query<{ source_repository: string; repository_id: string }>(
         `SELECT s.source_repository,s.repository_id::text FROM cloud_v2_github_sources s JOIN cloud_v2_workspaces w ON w.id=s.workspace_id
        WHERE w.id=$1 AND w.org_id=$2 AND (w.execution_mode='active' OR w.creator_user_id=$3) AND w.state NOT IN ('deleted','deleting')`,
         [workspace.id, workspace.organizationId, workspace.creatorUserId],
-      ),
-    );
+      );
+    const { rows } = transaction ? await read(transaction) : await withSystemTx(this.pool, read);
     const ids = new Map(
       rows.map((row) => [row.source_repository, row.repository_id]),
     );
@@ -33,7 +34,7 @@ export class CloudGithubSourceIdentities {
       repositoryId: ids.get(repository.toLowerCase())!,
     }));
   }
-  async primary(workspace: CloudV2Workspace) {
-    return (await this.targets(workspace, [workspace.repository]))[0]!;
+  async primary(workspace: CloudV2Workspace, transaction?: Tx) {
+    return (await this.targets(workspace, [workspace.repository], transaction))[0]!;
   }
 }

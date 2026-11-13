@@ -156,7 +156,9 @@ suite("runtime hello through the production composition", () => {
     expect(capable.status).toBe(200); expect((await capable.json()).config.localCommands).toBe(1);
     expect((await pool.query("SELECT local_command_boot_ids FROM cloud_v2_workspaces WHERE id=$1",[f.workspace.id])).rows[0].local_command_boot_ids).toContain(f.boot);
     await pool.query("UPDATE organizations SET local_commands_allowed=false WHERE id=$1",[f.org]);
-    expect((await (await f.ordinary("config")).json()).config).not.toHaveProperty("localCommands");
+    const switched = await f.ordinary("config"), switchedBody = await switched.json();
+    expect({ status: switched.status,code: switchedBody.code }).toEqual({ status: 200,code: undefined });
+    expect(switchedBody.config).not.toHaveProperty("localCommands");
     const disabled = await f.app.request("/v2/cloud/worker/local-commands",{ method: "POST",headers: {
       authorization: `Bearer ${f.token}`,"x-zeros-worker-boot": f.boot,"x-zeros-worker-features": "local-commands-v1","content-type": "application/json",
     },body: JSON.stringify({ requestId: randomUUID(),chatId: "chat",executionId: "execution",input: { command: "x" } }) });
@@ -371,14 +373,18 @@ suite("runtime hello through the production composition", () => {
       return config(...args);
     });
     f.fetcher.mockClear();
-    const response = await f.ordinary("hello"), recover = !backoff && status !== 403;
-    expect(response.status).toBe(recover ? 200 : status);
+    const response = await f.ordinary("hello");
+    expect(response.status).toBe(status === 403 ? 403 : 200);
     const body = await response.json();
-    if (recover) {
+    if (status !== 403) {
       expect(body.config.workspace.github).toMatchObject({ repositoryId: "42", repository: "fixture/repo" });
-      expect((await pool.query("SELECT failure_code FROM cloud_github_source_verifications WHERE org_id=$1", [f.org])).rows)
-        .toEqual([{ failure_code: null }]);
-      expect(f.fetcher.mock.calls.filter(([url]) => new URL(String(url)).pathname === "/repositories/42")).toHaveLength(1);
+      expect(f.fetcher).not.toHaveBeenCalled();
+      if (!backoff) {
+        expect((await f.ordinary("hello")).status).toBe(200);
+        await vi.waitFor(async () => expect((await pool.query("SELECT failure_code FROM cloud_github_source_verifications WHERE org_id=$1", [f.org])).rows)
+          .toEqual([{ failure_code: null }]));
+        expect(f.fetcher.mock.calls.filter(([url]) => new URL(String(url)).pathname === "/repositories/42")).toHaveLength(1);
+      }
     } else {
       expect(body).toEqual({ code });
       expect(f.fetcher).not.toHaveBeenCalled();
@@ -419,7 +425,7 @@ suite("runtime hello through the production composition", () => {
         SET verified_at=NULL,failure_code='github_cloud_access_denied',failure_status=403 WHERE org_id=$1`, [f.org]);
       else if (change === "expiry") await pool.query(`UPDATE cloud_github_source_verifications
         SET verified_at=clock_timestamp()-($2::double precision * interval '1 millisecond') WHERE org_id=$1`,
-      [f.org, (route === "hello" ? CLOUD_SOURCE_ADMISSION_MS : CLOUD_SOURCE_GRACE_MS) + 1000]);
+      [f.org, CLOUD_SOURCE_GRACE_MS + 1000]);
       else {
         const scope = { organizationId: f.org, userId: f.creator }, connections = f.cp.routes.githubConnections!;
         await connections.store.disconnect(scope, await connections.store.fingerprint(scope), "pat");
@@ -443,8 +449,6 @@ suite("runtime hello through the production composition", () => {
     expect(f.fetcher.mock.calls.filter(([value]) => new URL(String(value)).pathname === "/user")).toHaveLength(0);
   });
 
-  // Alpha, 2026-11-09: a create reused a 26 s old positive, so the hello four
-  // seconds later verified GitHub itself and its configuration took 3.6 s.
   it("renews a booting workspace's aging verification at the lifecycle's check, so its hello makes no GitHub request", async () => {
     const f = await fixture(false);
     await f.cp.routes.authorizeSource!(f.workspace);
@@ -452,7 +456,7 @@ suite("runtime hello through the production composition", () => {
       FROM cloud_github_source_verifications WHERE org_id=$1`, [f.org])).rows[0]!.age);
     // A wake in progress, whose last positive has 10 s left.
     await pool.query("UPDATE cloud_v2_workspaces SET state='starting' WHERE id=$1", [f.workspace.id]);
-    await pool.query("UPDATE cloud_github_source_verifications SET verified_at=clock_timestamp()-interval '20 seconds' WHERE org_id=$1", [f.org]);
+    await pool.query("UPDATE cloud_github_source_verifications SET verified_at=clock_timestamp()-($2::double precision * interval '1 millisecond') WHERE org_id=$1", [f.org, CLOUD_SOURCE_ADMISSION_MS - 10_000]);
     f.cp.routes.githubConnections!.forgetRecentProfiles();
     f.fetcher.mockClear();
     // The composition gives the lifecycle this same check, which asks to renew.
@@ -502,7 +506,7 @@ suite("runtime hello through the production composition", () => {
     const held = await holdProfile(f, route), now = Date.now();
     try {
       await pool.query("UPDATE cloud_github_source_verifications SET verified_at=clock_timestamp() WHERE org_id=$1", [f.org]);
-      vi.spyOn(Date, "now").mockReturnValue(now + (route === "hello" ? CLOUD_SOURCE_ADMISSION_MS : CLOUD_SOURCE_REFRESH_MS) + 1000);
+      vi.spyOn(Date, "now").mockReturnValue(now + (route === "hello" ? CLOUD_SOURCE_GRACE_MS : CLOUD_SOURCE_REFRESH_MS) + 1000);
     } finally { held.release(); }
     const response = await held.pending;
     expect(response.status).toBe(503);

@@ -2,7 +2,7 @@ import type pg from "pg";
 import { expect, it, vi } from "vitest";
 import { HttpError } from "../authz.js";
 import { GithubTemporaryError } from "../github-availability.js";
-import { CloudV2SourceAuthority, CLOUD_SOURCE_GRACE_MS, CLOUD_SOURCE_REFRESH_MS } from "./source-authority.js";
+import { CloudV2SourceAuthority, CLOUD_SOURCE_GRACE_MS, CLOUD_SOURCE_REFRESH_MS, CLOUD_SOURCE_RENEWAL_MS } from "./source-authority.js";
 import type { CloudV2Workspace } from "./store.js";
 import type { GithubVerification, GithubVerificationStore } from "./github-verification-store.js";
 
@@ -26,7 +26,7 @@ it("reuses the exact admitted workspace proof without GitHub or additional datab
   await f.source.workspace(f.workspace);
   await f.source.continueWorkspace(f.workspace, f.proof);
   vi.clearAllMocks();
-  for (let second = 1; second < 10 * 60; second++) {
+  for (let second = 1; second < (CLOUD_SOURCE_REFRESH_MS - CLOUD_SOURCE_RENEWAL_MS) / 1000; second++) {
     f.time(1000 + second * 1000);
     await f.source.continueWorkspace(f.workspace, f.proof);
   }
@@ -53,7 +53,7 @@ it.each(["github_unavailable", "github_rate_limited"] as const)("keeps work resp
   for (let i = 0; i < 100; i++) await f.source.continueWorkspace(f.workspace, f.proof);
   expect(f.github.check).not.toHaveBeenCalled();
   expect(f.pool.query).not.toHaveBeenCalled();
-  await expect(f.source.workspace(f.workspace)).rejects.toMatchObject({ code });
+  await expect(f.source.workspace(f.workspace)).resolves.toBeUndefined();
   expect(f.github.check).not.toHaveBeenCalled();
 });
 
@@ -94,7 +94,7 @@ it("moves the grace deadline only after a new successful verification", async ()
   expect((await f.source.continueWorkspace(f.workspace, f.proof)).graceUntil).toBe(1001 + CLOUD_SOURCE_REFRESH_MS + CLOUD_SOURCE_GRACE_MS);
 });
 
-it.each(["github_refresh_pending", "github_refresh_uncertain", "github_oauth_failed", "github_bad_response"])(
+it.each(["github_refresh_pending", "github_refresh_uncertain", "github_oauth_failed", "github_bad_response", "github_verification_failed"])(
   "retains an existing grant during %s without treating it as an explicit GitHub denial", async code => {
     const f = fixture();
     await f.source.workspace(f.workspace);
@@ -103,7 +103,7 @@ it.each(["github_refresh_pending", "github_refresh_uncertain", "github_oauth_fai
     const lease = await f.source.continueWorkspace(f.workspace, f.proof);
     await expect(lease.refresh).rejects.toMatchObject({ code });
     await expect(f.source.continueWorkspace(f.workspace, f.proof)).resolves.toMatchObject({ recheckAt: expect.any(Number) });
-    await expect(f.source.workspace(f.workspace)).rejects.toMatchObject({ code });
+    await expect(f.source.workspace(f.workspace)).resolves.toBeUndefined();
   });
 
 it.each([
@@ -145,7 +145,7 @@ it("requires positive authority for every original ID, including after cache inv
   expect(f.github.check).toHaveBeenLastCalledWith(expect.objectContaining({ repositoryIds: ["99"] }));
 });
 
-it("does not offer outage grace to a cold or stopped workspace", async () => {
+it("refuses a cold workspace but retains a stopped workspace's confirmed positive", async () => {
   const f = fixture();
   f.github.check.mockRejectedValue(new GithubTemporaryError("github_unavailable"));
   await expect(f.source.continueWorkspace(f.workspace, f.proof)).rejects.toMatchObject({ code: "github_unavailable" });
@@ -153,10 +153,10 @@ it("does not offer outage grace to a cold or stopped workspace", async () => {
   await warmed.source.workspace(warmed.workspace);
   warmed.time(1001 + CLOUD_SOURCE_REFRESH_MS);
   warmed.github.check.mockRejectedValue(new GithubTemporaryError("github_unavailable"));
-  await expect(warmed.source.continueWorkspace({ ...warmed.workspace, state: "stopped" }, warmed.proof)).rejects.toMatchObject({ code: "github_unavailable" });
+  await expect(warmed.source.continueWorkspace({ ...warmed.workspace, state: "stopped" }, warmed.proof)).resolves.toHaveProperty("recheckAt");
 });
 
-it("coalesces a refresh across concurrent continuations and keeps a fresh admission strict", async () => {
+it("coalesces a refresh across concurrent continuations without blocking a new admission", async () => {
   const f = fixture();
   await f.source.workspace(f.workspace);
   f.time(1001 + CLOUD_SOURCE_REFRESH_MS);
@@ -166,8 +166,8 @@ it("coalesces a refresh across concurrent continuations and keeps a fresh admiss
   expect(f.github.check).toHaveBeenCalledTimes(2);
   let admitted = false;
   const admission = f.source.workspace(f.workspace).then(() => { admitted = true; });
-  await Promise.resolve();
-  expect(admitted).toBe(false);
+  await admission;
+  expect(admitted).toBe(true);
   finish("original");
   await Promise.all([admission, ...leases.map(lease => lease.refresh)]);
   expect(admitted).toBe(true);
@@ -195,9 +195,9 @@ it("withdraws sibling workspace leases immediately when a shared source is denie
   const f = fixture(), sibling = { ...f.workspace, id: "sibling" };
   await f.source.workspace(f.workspace);
   await f.source.continueWorkspace(sibling, f.proof);
-  f.time(32_000);
+  f.time(1001 + CLOUD_SOURCE_REFRESH_MS - CLOUD_SOURCE_RENEWAL_MS);
   f.github.check.mockRejectedValue(new HttpError(403, "github_cloud_access_denied", "denied"));
-  await expect(f.source.workspace(f.workspace)).rejects.toMatchObject({ code: "github_cloud_access_denied" });
+  await expect(f.source.continueWorkspace(f.workspace, f.proof).then(lease => lease.refresh)).rejects.toMatchObject({ code: "github_cloud_access_denied" });
   await expect(f.source.continueWorkspace(sibling, f.proof)).rejects.toMatchObject({ code: "github_cloud_access_denied" });
 });
 

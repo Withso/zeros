@@ -8,7 +8,7 @@ const MAX_RETRY_MS = 24 * 60 * 60_000;
 export function isGithubTemporary(error: unknown): error is HttpError {
   return error instanceof HttpError &&
     ((error.status === 429 && error.code === "github_rate_limited") ||
-      (error.status === 503 && ["github_unavailable", "github_verification_busy", "github_verification_expired",
+      (error.status === 503 && ["github_unavailable", "github_verification_busy", "github_verification_expired", "github_verification_failed",
         "github_refresh_pending", "github_refresh_uncertain", "github_oauth_failed", "github_bad_response"].includes(error.code)));
 }
 

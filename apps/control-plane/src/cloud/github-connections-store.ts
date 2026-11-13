@@ -167,13 +167,13 @@ export class CloudGithubConnectionStore {
   private read(scope: CloudGithubConnectionScope) {
     return withSystemTx(this.pool, (tx) => this.snapshot(tx, scope));
   }
-  async selectedIdentity(scope: CloudGithubConnectionScope) {
-    const value = await this.read(scope);
+  async selectedIdentity(scope: CloudGithubConnectionScope, tx?: Tx) {
+    const value = await (tx ? this.snapshot(tx, scope) : this.read(scope));
     const row = value.rows.find(
       (row) => row.method === value.actor.selected_method,
     );
     if (!row) return null;
-    const assertCurrent = () => this.assertCurrent(value.scope, value.generation);
+    const assertCurrent = () => this.assertCurrent(value.scope, value.generation, tx);
     await assertCurrent();
     return {
       identity: { id: row.github_user_id, login: row.github_login },

@@ -1,0 +1,9 @@
+{
+  "id": "cloud-relay-temporary-close-class",
+  "kind": "replay",
+  "area": "control-plane",
+  "fixedBy": "pr:1068",
+  "symptom": "Relay shutdown, expired contexts and temporary lifecycle failures used the access-revoked close code, making healthy users appear to have lost workspace access.",
+  "rule": "The bug-fix playbook requires real socket closure assertions for transient failures and genuine person revocation. Preserve the durable reason across renewal races; only confirmed access loss uses 4001, while retryable context and lifecycle failures use 1013.",
+  "check": "pnpm --dir apps/control-plane exec vitest run src/cloud/execution/relay.integration.test.ts src/cloud/execution/lease-recovery.integration.test.ts"
+}

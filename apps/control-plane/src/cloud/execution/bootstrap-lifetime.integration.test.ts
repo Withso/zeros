@@ -112,7 +112,7 @@ database("bootstrap authority through the real worker router", () => {
 
   it("does not persist an almost-expired proof after final authority work", async () => {
     const admit = f.cp.execution.deps.authority.admit.bind(f.cp.execution.deps.authority);
-    vi.spyOn(f.cp.execution.deps.authority, "admit").mockImplementationOnce(async (...args) => {
+    vi.spyOn(f.cp.execution.deps.authority, "admit").mockImplementation(async (...args) => {
       const proof = await admit(...args);
       return { ...proof, until: Date.now() + 1000 };
     });

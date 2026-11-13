@@ -6,7 +6,7 @@ import type { CloudGithubConnections } from "./github-connections.js";
 import type { CloudGithubCredentialSnapshot } from "./github-connections-store.js";
 import type { CloudGithubPrStore } from "./github-pr-store.js";
 import type { CloudGithubPrContext } from "./github-pr-service.js";
-import { CLOUD_SOURCE_ADMISSION_MS, CLOUD_SOURCE_GRACE_MS, CloudSourceTargetSchema, type CloudSourceContinuation, type CloudSourceProof } from "./source-authority.js";
+import { CLOUD_SOURCE_GRACE_MS, CloudSourceTargetSchema, type CloudSourceContinuation, type CloudSourceProof } from "./source-authority.js";
 import type { CloudV2Workspace } from "./store.js";
 import { CLOUD_V2_LIVE_ACCESS, requireWorkspaceCreator } from "./workspace-access.js";
 
@@ -67,10 +67,10 @@ export function createCloudGithubWorkerConfig(deps: {
         for (const row of rows) {
           if (row.failure_code) {
             const failure = new HttpError(row.failure_status ?? 503, row.failure_code, "GitHub repository access could not be verified.");
-            if (!continuation || !isGithubTemporary(failure)) { sourceFailure = failure; throw failure; }
+            if (!isGithubTemporary(failure)) { sourceFailure = failure; throw failure; }
           }
           const age = row.verified_at ? row.database_now.getTime() - row.verified_at.getTime() : -1;
-          const freshness = continuation ? CLOUD_SOURCE_GRACE_MS : CLOUD_SOURCE_ADMISSION_MS;
+          const freshness = CLOUD_SOURCE_GRACE_MS;
           if (age < 0 || age >= freshness) throw expired();
           until = Math.min(until, started + freshness - age);
         }

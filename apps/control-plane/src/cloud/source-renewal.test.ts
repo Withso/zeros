@@ -2,7 +2,7 @@ import type pg from "pg";
 import { afterEach, expect, it, vi } from "vitest";
 import { HttpError } from "../authz.js";
 import { GithubTemporaryError } from "../github-availability.js";
-import { CLOUD_SOURCE_ADMISSION_MS, CLOUD_SOURCE_RENEWAL_MS, CloudV2SourceAuthority } from "./source-authority.js";
+import { CLOUD_SOURCE_ADMISSION_MS, CLOUD_SOURCE_RENEWAL_MS, CLOUD_SOURCE_GRACE_MS, CloudV2SourceAuthority } from "./source-authority.js";
 import type { GithubVerification, GithubVerificationStore } from "./github-verification-store.js";
 import type { CloudV2Workspace } from "./store.js";
 
@@ -43,10 +43,7 @@ function fixture(age: number) {
   return { source, store, github, workspace, record: () => record, update: (value: Partial<GithubVerification>) => { record = { ...record, ...value }; } };
 }
 
-// The lifecycle checks a booting workspace's sources seconds before its
-// worker's hello. A positive that expires in between left that hello to
-// verify GitHub on the critical path. Only the lifecycle asks to renew.
-it.each(["creating", "starting"] as const)("renews a %s workspace's positive in its final seconds without waiting for GitHub", async state => {
+it.each(["creating", "starting"] as const)("renews a %s workspace's positive in its final two minutes without waiting for GitHub", async state => {
   const f = fixture(AGING);
   let verified!: (fingerprint: string) => void;
   f.github.check.mockImplementationOnce(() => new Promise(resolve => { verified = resolve; }));
@@ -67,7 +64,7 @@ it.each(["creating", "starting"] as const)("renews a %s workspace's positive in 
 });
 
 it.each([
-  ["creating", AGING - 2000], ["running", CLOUD_SOURCE_ADMISSION_MS - 1000], ["stopped", CLOUD_SOURCE_ADMISSION_MS - 1000],
+  ["creating", AGING - 2000], ["running", AGING - 2000], ["stopped", AGING - 2000],
 ] as const)("keeps a %s workspace's %i ms old positive without a renewal", async (state, age) => {
   const f = fixture(age);
   await f.source.workspace(f.workspace(state), true);
@@ -77,22 +74,23 @@ it.each([
 });
 
 it.each([new GithubTemporaryError("github_unavailable"), new GithubTemporaryError("github_rate_limited", 120_000)])(
-  "keeps the positive in force after a temporary renewal failure (%s), retrying only once it expires", async failure => {
+  "keeps the positive in force after a temporary renewal failure (%s), retrying after the recorded backoff", async failure => {
   const f = fixture(AGING);
   f.github.check.mockRejectedValueOnce(failure);
   await f.source.workspace(f.workspace("creating"), true);
   await vi.advanceTimersByTimeAsync(0);
-  expect(f.store.release).toHaveBeenCalledWith(expect.objectContaining({ repositoryId: "42" }), "renewal");
-  expect(f.store.finish).not.toHaveBeenCalled();
-  expect(f.record()).toMatchObject({ verifiedAt: 100_000 - AGING, failure: null, claimId: null, retryAt: 0 });
+  expect(f.store.release).not.toHaveBeenCalled();
+  expect(f.store.finish).toHaveBeenCalledWith(expect.anything(), "renewal", expect.objectContaining({ allowed: false, temporary: true, error: failure }));
+  expect(f.record()).toMatchObject({ verifiedAt: 100_000 - AGING, failure, claimId: null, retryAt: 100_000 + failure.retryAfterMs });
   // Later booting checks inside the original positive pass without a retry.
   await vi.advanceTimersByTimeAsync(5000);
   await f.source.workspace(f.workspace("creating"), true);
   await vi.advanceTimersByTimeAsync(0);
   expect(f.github.check).toHaveBeenCalledTimes(1);
-  // Once it expires, admission verifies as before.
+  // A later request retries in the background after the provider backoff.
   await vi.advanceTimersByTimeAsync(CLOUD_SOURCE_RENEWAL_MS);
   await f.source.workspace(f.workspace("creating"), true);
+  await vi.advanceTimersByTimeAsync(0);
   expect(f.github.check).toHaveBeenCalledTimes(2);
 });
 
@@ -144,12 +142,12 @@ it("never queues the creator's other verifications behind a held renewal", async
   verified("fingerprint");
 });
 
-it("keeps a booting workspace's other checks, such as its hello and status polls, from renewing", async () => {
+it("starts the same background renewal from an ordinary workspace admission", async () => {
   const f = fixture(AGING);
   await f.source.workspace(f.workspace("creating"));
   await vi.advanceTimersByTimeAsync(1000);
-  expect(f.store.claim).not.toHaveBeenCalled();
-  expect(f.github.check).not.toHaveBeenCalled();
+  expect(f.store.claim).toHaveBeenCalledTimes(1);
+  expect(f.github.check).toHaveBeenCalledTimes(1);
 });
 
 // Co-master review 7: when every booting check could renew, a workspace polled
@@ -164,7 +162,7 @@ it("adds at most one verification to a booting workspace polled every 2 s for tw
     }
     return f.github.check.mock.calls.length;
   };
-  // Without renewal, polling verifies once per expired 30 s window.
+  // All ordinary admissions refresh before the ten-minute window ends.
   const windows = Math.ceil(120_000 / CLOUD_SOURCE_ADMISSION_MS);
   expect(await verifications(false)).toBe(windows);
   expect(await verifications(true)).toBeLessThanOrEqual(windows + 1);
@@ -172,11 +170,11 @@ it("adds at most one verification to a booting workspace polled every 2 s for tw
 
 // A create request checks its requested repository by target, before any
 // workspace exists; it asks to renew as the lifecycle does.
-it("renews a create's requested repository by target only when asked", async () => {
+it("renews an admitted exact repository without a special lifecycle flag", async () => {
   const quiet = fixture(AGING);
   await quiet.source.targets("org", "user", [{ repository: "o/r", repositoryId: "42" }]);
   await vi.advanceTimersByTimeAsync(0);
-  expect(quiet.store.claim).not.toHaveBeenCalled();
+  expect(quiet.store.claim).toHaveBeenCalledTimes(1);
   const f = fixture(AGING);
   await f.source.targets("org", "user", [{ repository: "o/r", repositoryId: "42" }], true);
   await vi.advanceTimersByTimeAsync(0);
@@ -194,4 +192,8 @@ it.each([[false], [true]])("refuses a pending create's sources without a GitHub 
   await expect(source.continueWorkspace(f.workspace("creating"))).rejects.toMatchObject({ code: "cloud_source_pending" });
   expect(f.github.check).not.toHaveBeenCalled();
   expect(f.store.read).not.toHaveBeenCalled();
+});
+
+it("pins the admission, refresh lead and maximum outage reuse windows", () => {
+  expect([CLOUD_SOURCE_ADMISSION_MS, CLOUD_SOURCE_RENEWAL_MS, CLOUD_SOURCE_GRACE_MS]).toEqual([600_000, 120_000, 3_600_000]);
 });

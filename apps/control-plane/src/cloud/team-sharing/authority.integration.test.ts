@@ -35,23 +35,23 @@ database("team viewer source authority", () => {
     expect((await f.store.get(f.workspace.id,f.creator.id)).state).toBe("stopped");
   });
 
-  it("refreshes fresh admission after thirty seconds but reuses an open viewer's positive for ten minutes", async () => {
+  it("reuses a positive for admission and refreshes it in the background after eight minutes", async () => {
     const proof = await f.sharing.authority.admit(f.workspace.id,f.viewer);
     f.fetcher.mockClear();
     await pool.query("UPDATE cloud_github_source_verifications SET verified_at=now()-interval '31 seconds' WHERE owner_user_id=$1",[f.viewer.id]);
     expect((await f.call(path())).status).toBe(200);
-    expect(f.fetcher).toHaveBeenCalled();
+    expect(f.fetcher).not.toHaveBeenCalled();
     const latest = await f.sharing.authority.admit(f.workspace.id,f.viewer);
     const connection = await f.sharing.events.presence.open(latest);
     f.fetcher.mockClear();
     await pool.query("UPDATE cloud_github_source_verifications SET verified_at=now()-interval '9 minutes' WHERE owner_user_id=$1",[f.viewer.id]);
     expect((await f.call(path())).status).toBe(200);
-    expect(f.fetcher).not.toHaveBeenCalled();
-    await expect(f.sharing.authority.assert(proof)).rejects.toMatchObject({ status: 503 });
+    await vi.waitFor(() => expect(f.fetcher).toHaveBeenCalled(),{ interval: 5 });
+    await expect(f.sharing.authority.assert(proof)).resolves.toMatchObject({ workspace: { id: f.workspace.id } });
     await f.sharing.events.presence.close(connection);
   });
 
-  it("bounds unknown-only continuation to the original hour and never extends fresh admission", async () => {
+  it("bounds retained positives to the original hour for both continuation and new admission", async () => {
     const proof = await f.sharing.authority.admit(f.workspace.id,f.viewer);
     const connection = await f.sharing.events.presence.open(proof);
     await pool.query("UPDATE cloud_github_source_verifications SET verified_at=now()-interval '11 minutes' WHERE owner_user_id=$1",[f.viewer.id]);
@@ -64,7 +64,7 @@ database("team viewer source authority", () => {
     const expired = await f.call(path()); expect(expired.status).toBe(503); expect(expired.headers.get("Retry-After")).toBe("5");
     await pool.query("UPDATE cloud_github_source_verifications SET verified_at=now()-interval '11 minutes' WHERE owner_user_id=$1",[f.viewer.id]);
     await f.sharing.events.presence.close(connection);
-    expect((await f.call(path())).status).toBe(503);
+    expect((await f.call(path())).status).toBe(200);
   });
 
   it("never lets continuation grace override a confirmed refusal", async () => {

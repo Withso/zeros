@@ -10,7 +10,7 @@ import type { CloudV2Prompt, CloudV2PromptState } from "../prompt-contract.js";
 import { hashCloudV2Token } from "../tokens.js";
 import { CLOUD_V2_LIVE_ACCESS } from "../workspace-access.js";
 import { cloudV2WorkspaceFromRow } from "../store.js";
-import { actorBusy, actorChanged, executionUnavailable, executionWorkerRequired, AgentLoginRequired } from "./errors.js";
+import { actorBusy, actorChanged, executionUnavailable, executionWorkerRequired, memberAccessRevoked, AgentLoginRequired, ExecutionContextRevoked } from "./errors.js";
 import { assertExecutionIntent, CloudExecutionAuthority, type ExecutionAdmission, type ExecutionIntentAuthority } from "./authority.js";
 import { CloudExecutionLogins, type ExecutionSelection } from "./logins.js";
 import { CloudExecutionClients } from "./clients.js";
@@ -19,7 +19,7 @@ import { CloudExecutionMaintenance } from "./maintenance.js";
 import { CloudExecutionSync } from "./sync.js";
 import { executionContextAuthority, matchesExecutionSignature, type VersionedExecutionAuthority } from "./signatures.js";
 import { openExecution, sealExecution } from "./envelope.js";
-import { EXECUTION_LEASE_MS, EXECUTION_MINIMUM_LIFETIME_MS, assertExecutionLifetime } from "./lifetime.js";
+import { EXECUTION_MINIMUM_LIFETIME_MS, assertExecutionLifetime, withExecutionLifetimeRetry } from "./lifetime.js";
 
 export { EXECUTION_LEASE_MS } from "./lifetime.js";
 export const BOOTSTRAP_MINIMUM_LIFETIME_MS = EXECUTION_MINIMUM_LIFETIME_MS;
@@ -261,82 +261,85 @@ export class CloudExecutionContexts {
       return { workspace, prompt: await this.prompt(tx, workspace.id, input.userMessageId) };
     });
     if (!pending(initial.prompt.state)) return { dispatch: false as const, state: initial.prompt.state };
-    const proof = await this.deps.authority.admit(initial.workspace.id, initial.prompt.creator_user_id, { minimumSourceMs: EXECUTION_MINIMUM_LIFETIME_MS });
-    const agent = await withSystemTx(this.pool, tx => this.agent(tx, initial.workspace.id, initial.prompt.chat_id, initial.prompt.payload!.agentId));
-    await this.deps.authority.assert(proof);
-    const result = await withSystemTx(this.pool, async tx => {
-      await tx.query("SELECT id FROM users WHERE id=$1 FOR KEY SHARE", [proof.person.userId]);
-      const workspace = await this.worker(tx, identity, true);
-      await this.maintenance.cancelQueued(tx, workspace.id);
-      const row = await this.prompt(tx, workspace.id, input.userMessageId);
-      const chat = (await tx.query<{ epoch: string; acting_user_id: string | null; acting_generation: string; active_context_id: string | null }>(
-        "SELECT epoch::text,acting_user_id,acting_generation::text,active_context_id FROM cloud_v2_prompt_chats WHERE workspace_id=$1 AND chat_id=$2 FOR UPDATE", [workspace.id, row.chat_id])).rows[0];
-      await this.deps.authority.assert(proof, tx);
-      if (!pending(row.state)) return { dispatch: false as const, state: row.state };
-      if (!chat || row.cancel_requested || row.epoch !== chat.epoch || row.access_epoch !== workspace.access_epoch || workspace.state !== "running")
-        return { dispatch: false as const, state: "cancelled" as const };
-      if (row.worker_boot_id !== identity.bootId || row.delivery_id !== input.deliveryId) throw new HttpError(409, "prompt_conflict", "This dispatch is no longer current");
-      if (row.dispatch_id) {
-        if (row.dispatch_id !== input.dispatchId || !row.execution_context_id) throw new HttpError(409, "prompt_conflict", "This dispatch is no longer current");
-        const context = await this.context(tx, row.execution_context_id, workspace.id);
-        await this.assertContext(tx, context, proof);
-        return this.begun(context, row.state, row.execution_parent_context_id !== null);
-      }
-      if (row.state !== "inboxed") throw new HttpError(409, "prompt_inbox_required", "Persist the message before dispatch");
-      let active = chat.active_context_id ? await this.context(tx, chat.active_context_id, workspace.id) : null;
-      if (active?.state === "retired") {
-        const parent = await this.prompt(tx, workspace.id, active.user_message_id!);
-        if (pending(parent.state)) throw actorBusy();
-        active = null;
-      }
-      const steer = row.payload?.mode === "steer" && active?.user_id === row.creator_user_id;
-      if (active && !steer) throw actorBusy();
-      const older = (await tx.query(`SELECT 1 FROM cloud_v2_prompt_outbox WHERE workspace_id=$1 AND chat_id=$2 AND sequence<$3
-        AND state IN ('queued','inboxed','dispatching','accepted') AND ($4::text IS NULL OR user_message_id<>$4) LIMIT 1`,
-      [workspace.id, row.chat_id, row.sequence, steer ? active!.user_message_id : null])).rowCount;
-      if (older) throw actorBusy();
-      if (steer) {
-        await this.assertContext(tx, active!, proof);
-        await this.deps.logins.select(workspace.org_id, row.creator_user_id, active!.agent!, active!.selection!, tx);
-        active = await this.issueLease(tx, active!, proof);
-        await tx.query(`UPDATE cloud_v2_prompt_outbox SET state='dispatching',dispatch_id=$3,execution_context_id=$4,execution_parent_context_id=$4,updated_at=clock_timestamp()
-          WHERE workspace_id=$1 AND user_message_id=$2`, [workspace.id, row.user_message_id, input.dispatchId, active!.id]);
-        await this.deps.authority.assert(proof, tx);
-        assertExecutionLifetime(active.expires_at.getTime());
-        return this.begun(active!, "dispatching", true);
-      }
-      let selection: ExecutionSelection;
-      try { selection = (await this.deps.logins.forWorkspace(workspace.id, row.creator_user_id, agent, undefined, tx)).selection; }
-      catch (error) {
-        if (!(error instanceof HttpError) || !["agent_login_required", "workspace_creator_required"].includes(error.code)) throw error;
-        await this.deps.authority.assert(proof, tx);
-        await tx.query("UPDATE cloud_v2_prompt_outbox SET state='failed',terminal_at=clock_timestamp(),updated_at=clock_timestamp() WHERE workspace_id=$1 AND user_message_id=$2", [workspace.id, row.user_message_id]);
-        await notify(tx, workspace.id);
-        return { refusal: error };
-      }
-      const generation = (BigInt(chat.acting_generation) + (chat.acting_user_id === row.creator_user_id ? 0n : 1n)).toString();
-      if (BigInt(generation) < 1n || BigInt(generation) > 9223372036854775806n) throw actorChanged();
-      const contextId = randomUUID();
+    return withExecutionLifetimeRetry(async () => {
+      const proof = await this.deps.authority.admit(initial.workspace.id, initial.prompt.creator_user_id, { minimumSourceMs: EXECUTION_MINIMUM_LIFETIME_MS });
       assertExecutionLifetime(proof.until);
-      const context = (await tx.query<ExecutionContext>(`INSERT INTO cloud_v2_execution_contexts(id,workspace_id,org_id,user_id,kind,chat_id,user_message_id,dispatch_id,
-        generation,chat_epoch,access_epoch,stop_generation,worker_boot_id,worker_token_hash,authority,source_fingerprint,agent,selection,credential_id,
-        sender_device_id,sender_registration_id,sender_binding_generation,expires_at)
-        VALUES($1,$2,$3,$4,'turn',$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22) RETURNING *`,
-      [contextId, workspace.id, workspace.org_id, row.creator_user_id, row.chat_id, row.user_message_id, input.dispatchId, generation, chat.epoch,
-        workspace.access_epoch, workspace.stop_generation, identity.bootId, workspace.worker_token_hash, executionContextAuthority(proof.person), proof.source.fingerprint,
-        agent, selection, selection.source === "personal" ? selection.credentialId : null, row.sender_device_id, row.sender_registration_id, row.sender_binding_generation, new Date(proof.until)])).rows[0]!;
-      await tx.query("UPDATE cloud_v2_prompt_chats SET acting_user_id=$3,acting_generation=$4,active_context_id=$5 WHERE workspace_id=$1 AND chat_id=$2",
-        [workspace.id, row.chat_id, row.creator_user_id, generation, contextId]);
-      await tx.query(`UPDATE cloud_v2_prompt_outbox SET state='dispatching',dispatch_id=$3,execution_context_id=$4,updated_at=clock_timestamp()
-        WHERE workspace_id=$1 AND user_message_id=$2`, [workspace.id, row.user_message_id, input.dispatchId, contextId]);
-      await this.deps.logins.forWorkspace(workspace.id, row.creator_user_id, agent, selection, tx);
-      await this.deps.authority.assert(proof, tx);
-      assertExecutionLifetime(context.expires_at.getTime());
-      return this.begun(context, "dispatching", false);
+      const agent = await withSystemTx(this.pool, tx => this.agent(tx, initial.workspace.id, initial.prompt.chat_id, initial.prompt.payload!.agentId));
+      await this.deps.authority.assert(proof);
+      const result = await withSystemTx(this.pool, async tx => {
+        await tx.query("SELECT id FROM users WHERE id=$1 FOR KEY SHARE", [proof.person.userId]);
+        const workspace = await this.worker(tx, identity, true);
+        await this.maintenance.cancelQueued(tx, workspace.id);
+        const row = await this.prompt(tx, workspace.id, input.userMessageId);
+        const chat = (await tx.query<{ epoch: string; acting_user_id: string | null; acting_generation: string; active_context_id: string | null }>(
+          "SELECT epoch::text,acting_user_id,acting_generation::text,active_context_id FROM cloud_v2_prompt_chats WHERE workspace_id=$1 AND chat_id=$2 FOR UPDATE", [workspace.id, row.chat_id])).rows[0];
+        await this.deps.authority.assert(proof, tx);
+        if (!pending(row.state)) return { dispatch: false as const, state: row.state };
+        if (!chat || row.cancel_requested || row.epoch !== chat.epoch || row.access_epoch !== workspace.access_epoch || workspace.state !== "running")
+          return { dispatch: false as const, state: "cancelled" as const };
+        if (row.worker_boot_id !== identity.bootId || row.delivery_id !== input.deliveryId) throw new HttpError(409, "prompt_conflict", "This dispatch is no longer current");
+        if (row.dispatch_id) {
+          if (row.dispatch_id !== input.dispatchId || !row.execution_context_id) throw new HttpError(409, "prompt_conflict", "This dispatch is no longer current");
+          const context = await this.context(tx, row.execution_context_id, workspace.id);
+          await this.assertContext(tx, context, proof);
+          return this.begun(context, row.state, row.execution_parent_context_id !== null);
+        }
+        if (row.state !== "inboxed") throw new HttpError(409, "prompt_inbox_required", "Persist the message before dispatch");
+        let active = chat.active_context_id ? await this.context(tx, chat.active_context_id, workspace.id) : null;
+        if (active?.state === "retired") {
+          const parent = await this.prompt(tx, workspace.id, active.user_message_id!);
+          if (pending(parent.state)) throw actorBusy();
+          active = null;
+        }
+        const steer = row.payload?.mode === "steer" && active?.user_id === row.creator_user_id;
+        if (active && !steer) throw actorBusy();
+        const older = (await tx.query(`SELECT 1 FROM cloud_v2_prompt_outbox WHERE workspace_id=$1 AND chat_id=$2 AND sequence<$3
+          AND state IN ('queued','inboxed','dispatching','accepted') AND ($4::text IS NULL OR user_message_id<>$4) LIMIT 1`,
+        [workspace.id, row.chat_id, row.sequence, steer ? active!.user_message_id : null])).rowCount;
+        if (older) throw actorBusy();
+        if (steer) {
+          await this.assertContext(tx, active!, proof);
+          await this.deps.logins.select(workspace.org_id, row.creator_user_id, active!.agent!, active!.selection!, tx);
+          active = await this.issueLease(tx, active!, proof);
+          await tx.query(`UPDATE cloud_v2_prompt_outbox SET state='dispatching',dispatch_id=$3,execution_context_id=$4,execution_parent_context_id=$4,updated_at=clock_timestamp()
+            WHERE workspace_id=$1 AND user_message_id=$2`, [workspace.id, row.user_message_id, input.dispatchId, active!.id]);
+          await this.deps.authority.assert(proof, tx);
+          assertExecutionLifetime(active.expires_at.getTime());
+          return this.begun(active!, "dispatching", true);
+        }
+        let selection: ExecutionSelection;
+        try { selection = (await this.deps.logins.forWorkspace(workspace.id, row.creator_user_id, agent, undefined, tx)).selection; }
+        catch (error) {
+          if (!(error instanceof HttpError) || !["agent_login_required", "workspace_creator_required"].includes(error.code)) throw error;
+          await this.deps.authority.assert(proof, tx);
+          await tx.query("UPDATE cloud_v2_prompt_outbox SET state='failed',terminal_at=clock_timestamp(),updated_at=clock_timestamp() WHERE workspace_id=$1 AND user_message_id=$2", [workspace.id, row.user_message_id]);
+          await notify(tx, workspace.id);
+          return { refusal: error };
+        }
+        const generation = (BigInt(chat.acting_generation) + (chat.acting_user_id === row.creator_user_id ? 0n : 1n)).toString();
+        if (BigInt(generation) < 1n || BigInt(generation) > 9223372036854775806n) throw actorChanged();
+        const contextId = randomUUID();
+        assertExecutionLifetime(proof.until);
+        const context = (await tx.query<ExecutionContext>(`INSERT INTO cloud_v2_execution_contexts(id,workspace_id,org_id,user_id,kind,chat_id,user_message_id,dispatch_id,
+          generation,chat_epoch,access_epoch,stop_generation,worker_boot_id,worker_token_hash,authority,source_fingerprint,agent,selection,credential_id,
+          sender_device_id,sender_registration_id,sender_binding_generation,expires_at)
+          VALUES($1,$2,$3,$4,'turn',$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22) RETURNING *`,
+        [contextId, workspace.id, workspace.org_id, row.creator_user_id, row.chat_id, row.user_message_id, input.dispatchId, generation, chat.epoch,
+          workspace.access_epoch, workspace.stop_generation, identity.bootId, workspace.worker_token_hash, executionContextAuthority(proof.person), proof.source.fingerprint,
+          agent, selection, selection.source === "personal" ? selection.credentialId : null, row.sender_device_id, row.sender_registration_id, row.sender_binding_generation, new Date(proof.until)])).rows[0]!;
+        await tx.query("UPDATE cloud_v2_prompt_chats SET acting_user_id=$3,acting_generation=$4,active_context_id=$5 WHERE workspace_id=$1 AND chat_id=$2",
+          [workspace.id, row.chat_id, row.creator_user_id, generation, contextId]);
+        await tx.query(`UPDATE cloud_v2_prompt_outbox SET state='dispatching',dispatch_id=$3,execution_context_id=$4,updated_at=clock_timestamp()
+          WHERE workspace_id=$1 AND user_message_id=$2`, [workspace.id, row.user_message_id, input.dispatchId, contextId]);
+        await this.deps.logins.forWorkspace(workspace.id, row.creator_user_id, agent, selection, tx);
+        await this.deps.authority.assert(proof, tx);
+        assertExecutionLifetime(context.expires_at.getTime());
+        return this.begun(context, "dispatching", false);
+      });
+      // Keep the failed receipt even when dispatch loses its payer while queued.
+      if ("refusal" in result) throw result.refusal;
+      return result;
     });
-    // Keep the failed receipt even when dispatch loses its payer while queued.
-    if ("refusal" in result) throw result.refusal;
-    return result;
   }
 
   private begun(context: ExecutionContext, state: CloudV2PromptState, steer: boolean) {
@@ -353,6 +356,7 @@ export class CloudExecutionContexts {
 
   async assertContext(tx: Tx, context: ExecutionContext, proof: ExecutionAdmission): Promise<ExecutionContext> {
     const row = await this.context(tx, context.id, context.workspace_id);
+    if (row.state !== "active" && row.reason === "access_revoked") throw new ExecutionContextRevoked();
     if (row.state !== "active" || !row.user_id || row.user_id !== proof.person.userId || row.expires_at.getTime() <= Date.now() ||
         !matchesExecutionSignature(row.authority, row.authority.signature, proof.person, "signature")) throw actorChanged();
     if (row.access_epoch !== proof.person.accessEpoch || row.stop_generation !== proof.person.stopGeneration || row.worker_boot_id !== proof.person.bootId ||
@@ -364,6 +368,7 @@ export class CloudExecutionContexts {
   }
 
   async admission(context: ExecutionContext, minimumSourceMs = 0): Promise<ExecutionAdmission> {
+    if (context.state !== "active" && context.reason === "access_revoked") throw new ExecutionContextRevoked();
     if (!context.user_id || context.state !== "active" || context.expires_at.getTime() <= Date.now()) throw actorChanged();
     const proof = await this.deps.authority.admit(context.workspace_id, context.user_id, { continuation: true, minimumSourceMs });
     await withSystemTx(this.pool, tx => this.assertContext(tx, context, proof));
@@ -376,14 +381,17 @@ export class CloudExecutionContexts {
     const current = await this.assertContext(tx, context, proof);
     const ceiling = Math.min(proof.until, current.client_token_expires_at?.getTime() ?? Infinity);
     assertExecutionLifetime(ceiling);
-    // A usable issued lease keeps its original deadline on material retries.
-    // Renew only when that original authority no longer covers the floor.
-    const until = current.expires_at.getTime() - Date.now() >= EXECUTION_MINIMUM_LIFETIME_MS
-      ? current.expires_at.getTime() : ceiling;
-    if (until !== current.expires_at.getTime()) await tx.query(
-      "UPDATE cloud_v2_execution_contexts SET expires_at=$2,authority=$3,source_fingerprint=$4 WHERE id=$1",
-      [current.id, new Date(until), executionContextAuthority(proof.person), proof.source.fingerprint]);
-    await this.assertContext(tx, current, proof);
+    let until = Math.min(current.expires_at.getTime(), proof.source.until, current.client_token_expires_at?.getTime() ?? Infinity);
+    if (until - Date.now() < EXECUTION_MINIMUM_LIFETIME_MS) until = ceiling;
+    const update = async () => {
+      await tx.query("UPDATE cloud_v2_execution_contexts SET expires_at=$2,authority=$3,source_fingerprint=$4 WHERE id=$1",
+        [current.id, new Date(until), executionContextAuthority(proof.person), proof.source.fingerprint]);
+      await this.assertContext(tx, current, proof);
+    };
+    if (until !== current.expires_at.getTime()) await update();
+    // Reconsider an older delivery deadline after the final reads; the newly
+    // observed proof can still cover the floor without sliding either proof.
+    if (until !== ceiling && until - Date.now() < EXECUTION_MINIMUM_LIFETIME_MS) { until = ceiling; await update(); }
     assertExecutionLifetime(until);
     return { ...current, expires_at: new Date(until) };
   }
@@ -412,34 +420,36 @@ export class CloudExecutionContexts {
       await dispatch(tx, current);
       return current;
     });
-    const proof = await this.admission(context, EXECUTION_MINIMUM_LIFETIME_MS);
-    const check = async (tx?: Tx) => {
-      const read = async (value: Tx) => { await this.assertContext(value, context, proof); await dispatch(value, context); };
-      await (tx ? read(tx) : withSystemTx(this.pool, read));
-    };
-    const login = await this.deps.logins.select(context.org_id, context.user_id!, context.agent!, context.selection!);
-    await check();
-    const material = context.material ? null : await this.deps.material(context, check);
-    await check();
-    return withSystemTx(this.pool, async tx => {
-      const workspace = await this.worker(tx, identity, true);
-      let current = await this.context(tx, context.id, workspace.id, true);
-      await check(tx);
-      let value: Record<string, unknown>;
-      if (current.material) value = openExecution(current.material, envelopeBinding(current), this.deps.keys) as Record<string, unknown>;
-      else {
-        const agents = await this.deps.agentConfig({ [current.agent!]: login.material }, this.deps.proxyBase,
-          async () => ({ token: await this.token(tx, current, "proxy"), expiresAt: current.expires_at.getTime() }));
-        const apiAllowed = workspace.api_access && (await tx.query<{ allowed: boolean }>(`SELECT coalesce((SELECT workspace_api_access
-          FROM cloud_api_access_settings WHERE org_id=$1 AND user_id=$2),true) AS allowed`, [current.org_id, current.user_id])).rows[0]!.allowed;
-        value = { contextId: current.id, userId: current.user_id, generation: current.generation, ...material, agents,
-          ...(apiAllowed ? { api: { url: this.deps.apiUrl, token: await this.token(tx, current, "api") } } : {}) };
-        await tx.query("UPDATE cloud_v2_execution_contexts SET material=$2 WHERE id=$1", [current.id, sealExecution(value, envelopeBinding(current), this.deps.keys)]);
-      }
-      await this.deps.logins.select(current.org_id, current.user_id!, current.agent!, current.selection!, tx);
-      await check(tx);
-      current = await this.issueLease(tx, current, proof);
-      return CloudV2TurnLeaseSchema.parse({ ...value, expiresAt: current.expires_at.getTime() });
+    return withExecutionLifetimeRetry(async () => {
+      const proof = await this.admission(context, EXECUTION_MINIMUM_LIFETIME_MS);
+      assertExecutionLifetime(proof.until);
+      const check = async (tx?: Tx) => {
+        const read = async (value: Tx) => { await this.assertContext(value, context, proof); await dispatch(value, context); };
+        await (tx ? read(tx) : withSystemTx(this.pool, read));
+      };
+      const login = await this.deps.logins.select(context.org_id, context.user_id!, context.agent!, context.selection!);
+      const material = context.material ? null : await this.deps.material(context, check);
+      return withSystemTx(this.pool, async tx => {
+        const workspace = await this.worker(tx, identity, true);
+        let current = await this.context(tx, context.id, workspace.id, true);
+        await check(tx);
+        let value: Record<string, unknown>;
+        if (current.material) value = openExecution(current.material, envelopeBinding(current), this.deps.keys) as Record<string, unknown>;
+        else {
+          const agents = await this.deps.agentConfig({ [current.agent!]: login.material }, this.deps.proxyBase,
+            async () => ({ token: await this.token(tx, current, "proxy"), expiresAt: current.expires_at.getTime() }));
+          const apiAllowed = workspace.api_access && (await tx.query<{ allowed: boolean }>(`SELECT coalesce((SELECT workspace_api_access
+            FROM cloud_api_access_settings WHERE org_id=$1 AND user_id=$2),true) AS allowed`, [current.org_id, current.user_id])).rows[0]!.allowed;
+          value = { contextId: current.id, userId: current.user_id, generation: current.generation, ...material, agents,
+            ...(apiAllowed ? { api: { url: this.deps.apiUrl, token: await this.token(tx, current, "api") } } : {}) };
+          await tx.query("UPDATE cloud_v2_execution_contexts SET material=$2 WHERE id=$1", [current.id, sealExecution(value, envelopeBinding(current), this.deps.keys)]);
+        }
+        await this.deps.logins.select(current.org_id, current.user_id!, current.agent!, current.selection!, tx);
+        current = await this.issueLease(tx, current, proof);
+        await dispatch(tx, current);
+        assertExecutionLifetime(current.expires_at.getTime());
+        return CloudV2TurnLeaseSchema.parse({ ...value, expiresAt: current.expires_at.getTime() });
+      });
     });
   }
 
@@ -462,40 +472,42 @@ export class CloudExecutionContexts {
     if (done(initial.existing)) return undefined;
     if (!current.execution_initiator_user_id) throw executionWorkerRequired();
     const pending = initial.existing?.state === "active" && initial.existing.expires_at.getTime() > Date.now();
-    const proof = await this.deps.authority.admit(workspaceId, current.execution_initiator_user_id,
-      { minimumSourceMs: pending ? 0 : EXECUTION_LEASE_MS });
-    assertExecutionIntent(current.execution_intent_authority, proof);
-    return withSystemTx(this.pool, async tx => {
-      await tx.query("SELECT id FROM users WHERE id=$1 FOR KEY SHARE", [proof.person.userId]);
-      await tx.query("SELECT 1 FROM cloud_v2_workspaces WHERE id=$1 FOR UPDATE", [workspaceId]);
-      await this.deps.authority.assert(proof, tx);
-      if (!(await tx.query("SELECT 1 FROM cloud_v2_workspaces WHERE id=$1 AND execution_intent_id=$2 AND execution_initiator_user_id=$3 AND worker_boot_id=$4",
-        [workspaceId, current.execution_intent_id, current.execution_initiator_user_id, current.worker_boot_id])).rowCount) throw actorChanged();
-      const existing = (await tx.query<ExecutionContext>(`SELECT * FROM cloud_v2_execution_contexts
-        WHERE workspace_id=$1 AND intent_id=$2 AND worker_boot_id=$3 AND kind='bootstrap' FOR UPDATE`,
-        [workspaceId, current.execution_intent_id, current.worker_boot_id])).rows[0];
-      if (done(existing)) return undefined;
-      if (existing?.state === "active" && existing.expires_at.getTime() > Date.now()) {
-        await this.assertContext(tx, existing, proof); return existing.id;
-      }
-      if (existing && (existing.bootstrap_material_issued !== false || existing.retirement_id || existing.material !== null ||
-        existing.expires_at.getTime() > Date.now() || existing.state !== "active" && existing.reason !== "expired" ||
-        !matchesExecutionSignature(existing.authority, existing.authority.signature, proof.person, "signature"))) throw actorChanged();
-      assertExecutionLifetime(proof.until);
-      if (existing) {
-        const deleted = await tx.query(`DELETE FROM cloud_v2_execution_contexts c WHERE c.id=$1
-          AND NOT EXISTS(SELECT 1 FROM cloud_v2_execution_contexts child WHERE child.parent_context_id=c.id)
-          AND NOT EXISTS(SELECT 1 FROM cloud_v2_execution_tokens t WHERE t.context_id=c.id)`, [existing.id]);
-        if (deleted.rowCount !== 1) throw actorChanged();
-      }
-      const id = randomUUID();
-      await tx.query(`INSERT INTO cloud_v2_execution_contexts(id,workspace_id,org_id,user_id,kind,intent_id,access_epoch,stop_generation,worker_boot_id,worker_token_hash,authority,source_fingerprint,expires_at,bootstrap_material_issued)
-        VALUES($1,$2,$3,$4,'bootstrap',$5,$6,$7,$8,decode($9,'hex'),$10,$11,$12,false)`,
-      [id, workspaceId, proof.person.organizationId, proof.person.userId, current.execution_intent_id, proof.person.accessEpoch, proof.person.stopGeneration,
-        proof.person.bootId, proof.person.workerTokenHash, executionContextAuthority(proof.person), proof.source.fingerprint, new Date(proof.until)]);
-      await this.deps.authority.assert(proof, tx);
-      assertExecutionLifetime(proof.until);
-      return id;
+    return withExecutionLifetimeRetry(async () => {
+      const proof = await this.deps.authority.admit(workspaceId, current.execution_initiator_user_id!,
+        { minimumSourceMs: pending ? 0 : EXECUTION_MINIMUM_LIFETIME_MS });
+      assertExecutionIntent(current.execution_intent_authority, proof);
+      return withSystemTx(this.pool, async tx => {
+        await tx.query("SELECT id FROM users WHERE id=$1 FOR KEY SHARE", [proof.person.userId]);
+        await tx.query("SELECT 1 FROM cloud_v2_workspaces WHERE id=$1 FOR UPDATE", [workspaceId]);
+        await this.deps.authority.assert(proof, tx);
+        if (!(await tx.query("SELECT 1 FROM cloud_v2_workspaces WHERE id=$1 AND execution_intent_id=$2 AND execution_initiator_user_id=$3 AND worker_boot_id=$4",
+          [workspaceId, current.execution_intent_id, current.execution_initiator_user_id, current.worker_boot_id])).rowCount) throw actorChanged();
+        const existing = (await tx.query<ExecutionContext>(`SELECT * FROM cloud_v2_execution_contexts
+          WHERE workspace_id=$1 AND intent_id=$2 AND worker_boot_id=$3 AND kind='bootstrap' FOR UPDATE`,
+          [workspaceId, current.execution_intent_id, current.worker_boot_id])).rows[0];
+        if (done(existing)) return undefined;
+        if (existing?.state === "active" && existing.expires_at.getTime() > Date.now()) {
+          await this.assertContext(tx, existing, proof); return existing.id;
+        }
+        if (existing && (existing.bootstrap_material_issued !== false || existing.retirement_id || existing.material !== null ||
+          existing.expires_at.getTime() > Date.now() || existing.state !== "active" && existing.reason !== "expired" ||
+          !matchesExecutionSignature(existing.authority, existing.authority.signature, proof.person, "signature"))) throw actorChanged();
+        assertExecutionLifetime(proof.until);
+        if (existing) {
+          const deleted = await tx.query(`DELETE FROM cloud_v2_execution_contexts c WHERE c.id=$1
+            AND NOT EXISTS(SELECT 1 FROM cloud_v2_execution_contexts child WHERE child.parent_context_id=c.id)
+            AND NOT EXISTS(SELECT 1 FROM cloud_v2_execution_tokens t WHERE t.context_id=c.id)`, [existing.id]);
+          if (deleted.rowCount !== 1) throw actorChanged();
+        }
+        const id = randomUUID();
+        await tx.query(`INSERT INTO cloud_v2_execution_contexts(id,workspace_id,org_id,user_id,kind,intent_id,access_epoch,stop_generation,worker_boot_id,worker_token_hash,authority,source_fingerprint,expires_at,bootstrap_material_issued)
+          VALUES($1,$2,$3,$4,'bootstrap',$5,$6,$7,$8,decode($9,'hex'),$10,$11,$12,false)`,
+        [id, workspaceId, proof.person.organizationId, proof.person.userId, current.execution_intent_id, proof.person.accessEpoch, proof.person.stopGeneration,
+          proof.person.bootId, proof.person.workerTokenHash, executionContextAuthority(proof.person), proof.source.fingerprint, new Date(proof.until)]);
+        await this.deps.authority.assert(proof, tx);
+        assertExecutionLifetime(proof.until);
+        return id;
+      });
     });
   }
 
@@ -507,24 +519,26 @@ export class CloudExecutionContexts {
       if (context.kind !== kind || kind === "client" && (!context.operation || context.operation === "terminal.create")) throw actorChanged();
       return context;
     });
-    const proof = await this.admission(context, EXECUTION_MINIMUM_LIFETIME_MS);
-    const check = async (tx?: Tx) => { await (tx ? this.assertContext(tx, context, proof) : withSystemTx(this.pool, value => this.assertContext(value, context, proof))); };
-    const material = context.material ? null : await this.deps.material(context, check);
-    await check();
-    return withSystemTx(this.pool, async tx => {
-      const workspace = await this.worker(tx, identity, true);
-      let current = await this.context(tx, id, workspace.id, true);
-      await check(tx);
-      const value = current.material ? openExecution(current.material, envelopeBinding(current), this.deps.keys) as Record<string, unknown> :
-        { contextId: current.id, userId: current.user_id, gitIdentity: material!.gitIdentity,
-          ...(kind !== "client" && material!.environment ? { environment: material!.environment } : {}),
-          ...(kind === "terminal" && workspace.api_access && (await tx.query<{ allowed: boolean }>(`SELECT coalesce((SELECT workspace_api_access
-            FROM cloud_api_access_settings WHERE org_id=$1 AND user_id=$2),true) AS allowed`, [context.org_id, context.user_id])).rows[0]!.allowed
-            ? { api: { url: this.deps.apiUrl, token: await this.token(tx, current, "api") } } : {}) };
-      if (!current.material) await tx.query("UPDATE cloud_v2_execution_contexts SET material=$2 WHERE id=$1", [id, sealExecution(value, envelopeBinding(current), this.deps.keys)]);
-      await check(tx);
-      current = await this.issueLease(tx, current, proof);
-      return (kind === "bootstrap" ? CloudV2BootstrapLeaseSchema : kind === "terminal" ? CloudV2TerminalLeaseSchema : CloudV2ClientLeaseSchema).parse({ ...value, expiresAt: current.expires_at.getTime() });
+    return withExecutionLifetimeRetry(async () => {
+      const proof = await this.admission(context, EXECUTION_MINIMUM_LIFETIME_MS);
+      assertExecutionLifetime(proof.until);
+      const check = async (tx?: Tx) => { await (tx ? this.assertContext(tx, context, proof) : withSystemTx(this.pool, value => this.assertContext(value, context, proof))); };
+      const material = context.material ? null : await this.deps.material(context, check);
+      return withSystemTx(this.pool, async tx => {
+        const workspace = await this.worker(tx, identity, true);
+        let current = await this.context(tx, id, workspace.id, true);
+        await check(tx);
+        const value = current.material ? openExecution(current.material, envelopeBinding(current), this.deps.keys) as Record<string, unknown> :
+          { contextId: current.id, userId: current.user_id, gitIdentity: material!.gitIdentity,
+            ...(kind !== "client" && material!.environment ? { environment: material!.environment } : {}),
+            ...(kind === "terminal" && workspace.api_access && (await tx.query<{ allowed: boolean }>(`SELECT coalesce((SELECT workspace_api_access
+              FROM cloud_api_access_settings WHERE org_id=$1 AND user_id=$2),true) AS allowed`, [context.org_id, context.user_id])).rows[0]!.allowed
+              ? { api: { url: this.deps.apiUrl, token: await this.token(tx, current, "api") } } : {}) };
+        if (!current.material) await tx.query("UPDATE cloud_v2_execution_contexts SET material=$2 WHERE id=$1", [id, sealExecution(value, envelopeBinding(current), this.deps.keys)]);
+        await check(tx);
+        current = await this.issueLease(tx, current, proof);
+        return (kind === "bootstrap" ? CloudV2BootstrapLeaseSchema : kind === "terminal" ? CloudV2TerminalLeaseSchema : CloudV2ClientLeaseSchema).parse({ ...value, expiresAt: current.expires_at.getTime() });
+      });
     });
   }
 
@@ -559,64 +573,71 @@ export class CloudExecutionContexts {
   }
 
   async renew(identity: ExecutionWorker, ids: readonly string[]) {
-    const started = Date.now();
     const initial = await withSystemTx(this.pool, async tx => {
       const workspace = await this.worker(tx, identity, false, true);
       if (workspace.state !== "stopping") await this.boots.assertClean(tx, workspace);
       return { workspace, contexts: (await tx.query<ExecutionContext>("SELECT * FROM cloud_v2_execution_contexts WHERE workspace_id=$1 AND id=ANY($2::uuid[])", [workspace.id, ids])).rows };
     });
     const contexts = new Map(initial.contexts.map(row => [row.id, row]));
-    const proofs = new Map<string, ExecutionAdmission>();
-    const refused = new Map<string, CloudV2ContextReason>();
-    for (const id of ids) {
-      const row = contexts.get(id);
-      if (!row || row.state !== "active") { refused.set(id, row?.reason ?? "actor_changed"); continue; }
-      if (row.worker_boot_id !== identity.bootId) { refused.set(id, "worker_changed"); continue; }
-      if (row.expires_at.getTime() <= started) { refused.set(id, "expired"); continue; }
-      if (initial.workspace.state === "stopping") { refused.set(id, "cancelled"); continue; }
-      try {
-        const proof = await this.admission(row, EXECUTION_MINIMUM_LIFETIME_MS);
-        if (row.agent && row.selection) await this.deps.logins.select(row.org_id, row.user_id!, row.agent, row.selection);
-        await withSystemTx(this.pool, tx => this.assertContext(tx, row, proof));
-        proofs.set(id, proof);
-      } catch (error) {
-        if (!(error instanceof HttpError) || error.status >= 500) throw error;
-        refused.set(id, error.code === "member_access_revoked" ? "access_revoked" : "actor_changed");
-      }
-    }
-    return withSystemTx(this.pool, async tx => {
-      const workspace = await this.worker(tx, identity, true, true);
-      const leases: Array<{ contextId: string; expiresAt: number } | { contextId: string; refused: CloudV2ContextReason }> = [];
-      // Authority triggers take context locks in UUID order too.
-      for (const id of [...ids].sort()) {
-        const proof = proofs.get(id);
-        if (proof && !refused.has(id)) {
-          try {
-            const row = await this.context(tx, id, workspace.id, true);
-            if (row.expires_at.getTime() <= Date.now()) refused.set(id, "expired");
-            else if (workspace.state === "stopping") refused.set(id, "cancelled");
-            else {
-              await this.assertContext(tx, row, proof);
-              if (row.agent && row.selection) await this.deps.logins.select(row.org_id, row.user_id!, row.agent, row.selection, tx);
-              const until = Math.min(started + EXECUTION_LEASE_MS, proof.until, row.client_token_expires_at?.getTime() ?? Infinity);
-              assertExecutionLifetime(until);
-              await tx.query("UPDATE cloud_v2_execution_contexts SET expires_at=$2,authority=$3,source_fingerprint=$4 WHERE id=$1",
-                [id, new Date(until), executionContextAuthority(proof.person), proof.source.fingerprint]);
-              await this.assertContext(tx, row, proof);
-              assertExecutionLifetime(until);
-              leases.push({ contextId: id, expiresAt: until });
-              continue;
-            }
-          } catch (error) {
-            if (!(error instanceof HttpError) || error.status >= 500) throw error;
-            refused.set(id, error.code === "member_access_revoked" ? "access_revoked" : "actor_changed");
+    return withExecutionLifetimeRetry(async () => {
+      const proofs = new Map<string, ExecutionAdmission>();
+      const people = new Map<string, ExecutionAdmission>();
+      const refused = new Map<string, CloudV2ContextReason>();
+      for (const id of ids) {
+        const row = contexts.get(id);
+        if (!row || row.state !== "active") { refused.set(id, row?.reason ?? "actor_changed"); continue; }
+        if (row.worker_boot_id !== identity.bootId) { refused.set(id, "worker_changed"); continue; }
+        if (row.expires_at.getTime() <= Date.now()) { refused.set(id, "expired"); continue; }
+        if (initial.workspace.state === "stopping") { refused.set(id, "cancelled"); continue; }
+        try {
+          if (!row.user_id) throw memberAccessRevoked();
+          let proof = people.get(row.user_id);
+          if (!proof) {
+            proof = await this.deps.authority.admit(row.workspace_id, row.user_id,
+              { continuation: true, minimumSourceMs: EXECUTION_MINIMUM_LIFETIME_MS });
+            people.set(row.user_id, proof);
           }
+          assertExecutionLifetime(proof.until);
+          proofs.set(id, proof);
+        } catch (error) {
+          if (!(error instanceof HttpError) || error.status >= 500) throw error;
+          refused.set(id, error instanceof ExecutionContextRevoked || error.code === "member_access_revoked" ? "access_revoked" : "actor_changed");
         }
-        if (contexts.has(id)) await this.revoke(tx, id, refused.get(id) ?? "actor_changed");
-        leases.push({ contextId: id, refused: refused.get(id) ?? "actor_changed" });
       }
-      const byId = new Map(leases.map(lease => [lease.contextId, lease]));
-      return { leases: ids.map(id => byId.get(id)!) };
+      return withSystemTx(this.pool, async tx => {
+        const workspace = await this.worker(tx, identity, true, true);
+        const leases: Array<{ contextId: string; expiresAt: number } | { contextId: string; refused: CloudV2ContextReason }> = [];
+        // Authority triggers take context locks in UUID order too.
+        for (const id of [...ids].sort()) {
+          const proof = proofs.get(id);
+          if (proof && !refused.has(id)) {
+            try {
+              const row = await this.context(tx, id, workspace.id, true);
+              if (row.expires_at.getTime() <= Date.now()) refused.set(id, "expired");
+              else if (workspace.state === "stopping") refused.set(id, "cancelled");
+              else {
+                await this.assertContext(tx, row, proof);
+                if (row.agent && row.selection) await this.deps.logins.select(row.org_id, row.user_id!, row.agent, row.selection, tx);
+                const until = Math.min(proof.until, row.client_token_expires_at?.getTime() ?? Infinity);
+                assertExecutionLifetime(until);
+                await tx.query("UPDATE cloud_v2_execution_contexts SET expires_at=$2,authority=$3,source_fingerprint=$4 WHERE id=$1",
+                  [id, new Date(until), executionContextAuthority(proof.person), proof.source.fingerprint]);
+                await this.assertContext(tx, row, proof);
+                assertExecutionLifetime(until);
+                leases.push({ contextId: id, expiresAt: until });
+                continue;
+              }
+            } catch (error) {
+              if (!(error instanceof HttpError) || error.status >= 500) throw error;
+              refused.set(id, error instanceof ExecutionContextRevoked || error.code === "member_access_revoked" ? "access_revoked" : "actor_changed");
+            }
+          }
+          if (contexts.has(id)) await this.revoke(tx, id, refused.get(id) ?? "actor_changed");
+          leases.push({ contextId: id, refused: refused.get(id) ?? "actor_changed" });
+        }
+        const byId = new Map(leases.map(lease => [lease.contextId, lease]));
+        return { leases: ids.map(id => byId.get(id)!) };
+      });
     });
   }
 }

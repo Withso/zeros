@@ -1,6 +1,6 @@
 import type pg from "pg";
 import { expect, it, vi } from "vitest";
-import { CloudV2SourceAuthority, hydrateCloudRepository, pruneCloudRepositories, type CloudSourceTarget } from "./source-authority.js";
+import { CLOUD_SOURCE_ADMISSION_MS, CLOUD_SOURCE_GRACE_MS, CloudV2SourceAuthority, hydrateCloudRepository, pruneCloudRepositories, type CloudSourceTarget } from "./source-authority.js";
 import { mkdtemp, mkdir, writeFile, access, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -12,6 +12,24 @@ import { HttpError } from "../authz.js";
 import { createCloudV2Routes, type CloudV2RouteDeps } from "./routes.js";
 
 vi.mock("../db.js", () => ({ withSystemTx: async (pool: unknown, run: (tx: unknown) => unknown) => run(pool) }));
+
+it("uses a confirmed positive when a lease caller joins an older in-flight source observation", async () => {
+  let now = 0;
+  const entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
+  const github = { fingerprintFor: vi.fn(async () => "epoch"), check: vi.fn(async () => "epoch") };
+  github.check.mockImplementationOnce(async () => { entered.resolve(); await release.promise; return "epoch"; });
+  const source = new CloudV2SourceAuthority({} as pg.Pool, github, () => now);
+  const targets = [{ repository: "example/project", repositoryId: "42" }];
+  const weak = source.viewer("org", "user", targets, false).catch(() => undefined);
+  await entered.promise;
+  now = 7000;
+  const strong = source.viewer("org", "user", targets, false, 25_000);
+  release.resolve();
+  const proof = await strong;
+  await weak;
+  expect(proof.until - now).toBeGreaterThanOrEqual(25_000);
+  expect(github.check).toHaveBeenCalledTimes(1);
+});
 
 it("pins every retained source to its original ID and isolates leases from a reused name", async () => {
   const github = { fingerprintFor: vi.fn(async () => "epoch"), check: vi.fn(async () => "epoch") };
@@ -148,7 +166,7 @@ it("refuses a source scope when an earlier cached observation expires during a l
   const pool = { query: async () => ({ rows: [{ source_repositories: ["example/selected", "other/additional"] }] }) };
   const source = new CloudV2SourceAuthority(pool as unknown as pg.Pool, github, () => now);
   await source.repository("org", "member", "example/selected");
-  now = 29_990;
+  now = CLOUD_SOURCE_ADMISSION_MS - 10;
   const workspace = { id: "workspace", organizationId: "org", creatorUserId: "member", repository: "example/selected" } as CloudV2Workspace;
   await expect(source.workspace(workspace)).rejects.toMatchObject({ code: "github_verification_expired" });
   // A retry can refresh just the expired observation and use the fresh neighbor.
@@ -175,13 +193,15 @@ it("keeps the original observation deadline through the final durable identity r
   let now = 0, otherIdentityReads = 0;
   const github = {
     fingerprintFor: vi.fn(async (input: { owner?: string }) => {
-      if (input.owner === "other" && ++otherIdentityReads === 2) now = 30_001;
+      if (input.owner === "other" && ++otherIdentityReads === 2) now += 20;
       return "epoch";
     }),
     check: vi.fn(async () => "epoch"),
   };
   const pool = { query: async () => ({ rows: [{ source_repositories: ["example/selected", "other/additional"] }] }) };
   const source = new CloudV2SourceAuthority(pool as unknown as pg.Pool, github, () => now);
+  await source.repository("org", "member", "example/selected");
+  now = CLOUD_SOURCE_ADMISSION_MS - 10;
   await expect(source.workspace({ id: "workspace", organizationId: "org", creatorUserId: "member", repository: "example/selected" } as CloudV2Workspace))
     .rejects.toMatchObject({ code: "github_verification_expired" });
 });
@@ -255,13 +275,13 @@ it("coalesces checks, expires positive observations, and never reuses them acros
   const source = new CloudV2SourceAuthority({} as pg.Pool, github, () => now);
   await Promise.all(Array.from({ length: 30 }, () => source.repository("org", "user", "example/repo")));
   expect(github.check).toHaveBeenCalledTimes(1);
-  now = 30_001;
+  now = CLOUD_SOURCE_ADMISSION_MS + 1;
   await source.repository("org", "user", "example/repo");
   expect(github.check).toHaveBeenCalledTimes(2);
   generation = "two";
   await source.repository("org", "user", "example/repo");
   expect(github.check).toHaveBeenCalledTimes(3);
-  github.check.mockRejectedValue(new HttpError(403, "github_cloud_access_denied", "revoked")); now += 30_001;
+  github.check.mockRejectedValue(new HttpError(403, "github_cloud_access_denied", "revoked")); now += CLOUD_SOURCE_ADMISSION_MS + 1;
   await expect(source.repository("org", "user", "example/repo")).rejects.toThrow("revoked");
   await expect(source.repository("org", "user", "example/repo")).rejects.toThrow("revoked");
 });
@@ -280,6 +300,7 @@ it.each(["expires", "reconnects"] as const)("does not disclose a build log when 
   const github = {
     fingerprintFor: vi.fn(async (input: { owner?: string }) => input.owner === "example" ? selectedGeneration : "other"),
     check: vi.fn(async (input: { owner?: string }) => {
+      if (change === "expires" && input.owner === "example" && now > 0) throw new HttpError(503, "github_unavailable", "temporary");
       if (input.owner === "other") {
         if (change === "expires") now += 20;
         else selectedGeneration = "successor";
@@ -294,7 +315,7 @@ it.each(["expires", "reconnects"] as const)("does not disclose a build log when 
   const buildId = "44444444-4444-4444-8444-444444444444";
   const targets = [{ repository: "example/selected", repositoryId: "42" }, { repository: "other/additional", repositoryId: "43" }];
   await source.targets(organizationId, userId, targets.slice(0, 1));
-  now = 29_990;
+  now = CLOUD_SOURCE_GRACE_MS - 10;
   const log = vi.fn(async () => "private-build-log-canary");
   const app = new Hono();
   app.use("*", async (c, next) => { c.set("user", { id: userId } as never); await next(); });

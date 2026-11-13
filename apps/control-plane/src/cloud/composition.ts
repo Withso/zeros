@@ -30,7 +30,7 @@ import { CLOUD_V2_PROXY_PREFIX, type CloudV2ProxyDeps } from "./proxy.js";
 import { CloudV2Relay } from "./relay.js";
 import { cloudV2Runtime } from "./runtime.js";
 import type { CloudV2RouteDeps } from "./routes.js";
-import { CloudV2Store, type CloudV2LifecycleWorkspace, type CloudV2WorkerSession, type CloudV2Workspace } from "./store.js";
+import { CloudV2Store, cloudV2WorkspaceFromRow, type CloudV2LifecycleWorkspace, type CloudV2WorkerSession, type CloudV2Workspace } from "./store.js";
 import { CloudV2WorkerSigner } from "./worker-auth.js";
 import { openPortToken, sealPortToken } from "./worker-port-token.js";
 import type { CloudV2WorkerRouteDeps } from "./worker-routes.js";
@@ -181,25 +181,27 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
       await check(); return result;
     } } satisfies Pick<import("./execution/store.js").ExecutionDeps, "mcpAuthorization"> : {}),
     material: async (context, check) => {
-      const { workspace } = await execution.workspace(context.workspace_id, context.user_id!);
-      await check();
-      const credential = await withSystemTx(pool, tx => github.connections.store.currentCredential(tx, { organizationId: context.org_id, userId: context.user_id! }));
-      await check();
-      if (!credential) throw new HttpError(503, "agent_credentials_unavailable", "Execution credentials are temporarily unavailable");
-      const profile = await github.connections.workerProfile(credential, () => check());
-      await check();
-      const primary = await github.identities.primary(workspace);
-      await check();
+      const { workspace, credential, storedIdentity, primary } = await withSystemTx(pool, async tx => {
+        const row = (await tx.query<Parameters<typeof cloudV2WorkspaceFromRow>[0]>(
+          "SELECT * FROM cloud_v2_workspaces WHERE id=$1", [context.workspace_id])).rows[0];
+        if (!row) throw new HttpError(409, "actor_changed", "Execution workspace changed");
+        const workspace = cloudV2WorkspaceFromRow(row);
+        const credential = await github.connections.store.currentCredential(tx, { organizationId: context.org_id, userId: context.user_id! });
+        const storedIdentity = credential ? credential.identity : (await github.connections.store.selectedIdentity({ organizationId: context.org_id, userId: context.user_id! }, tx))?.identity;
+        if (!storedIdentity) throw new HttpError(503, "agent_credentials_unavailable", "Execution credentials are temporarily unavailable");
+        const primary = await github.identities.primary(workspace, tx);
+        await check(tx);
+        return { workspace, credential, storedIdentity, primary };
+      });
+      const profile: { id: string; login: string; name?: string } = credential
+        ? await github.connections.workerProfile(credential, () => check(), { verifiedSource: true }) : storedIdentity;
       const material = await withSystemTx(pool, async tx => {
-        await check(tx);
         const environment = context.kind === "client" ? undefined : await environments.resolveExecution(workspace, context.user_id!, context.id, tx);
-        await check(tx);
         const mcpServers = context.kind === "turn" && mcp ? await mcp.store.resolve(context.org_id, context.user_id!, workspace.repository,
           primary, tx) : undefined;
         await check(tx);
         return { ...(environment ? { environment } : {}), ...(mcpServers ? { mcpServers } : {}) };
       });
-      await check();
       return { ...material, gitIdentity: { name: profile.name ?? profile.login, email: `${profile.id}+${profile.login}@users.noreply.github.com` } };
     },
   });
