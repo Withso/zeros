@@ -784,6 +784,26 @@ describe("cloud v2 relay", () => {
     else expect(next).not.toHaveProperty("agentLogins");
   });
 
+  it.each(["", "creator-agent-models-v10", "creator-agent-models-v1"])("negotiates Creator models on the live worker socket and replaces them on refresh: %s", async feature => {
+    workerServer.on("headers", headers => { headers.push(`X-Zeros-Worker-Features: acting-user-v1,creator-agent-logins-v1,${feature}`); });
+    const original = deps.config;
+    let models: { claude?: string[]; cursor?: string[] } = { claude: ["claude-haiku-4-5"] };
+    deps.config = async ws => ({ ...await original(ws), actingUser: 1, agentModels: models });
+    const frames: any[] = [];
+    workerServer.on("connection", ws => ws.on("message", raw => frames.push(JSON.parse(String(raw)))));
+    await app();
+    await vi.waitFor(() => expect(frames.filter(frame => frame.t === "config")).toHaveLength(1));
+    const first = frames.find(frame => frame.t === "config");
+    if (feature === "creator-agent-models-v1") expect(first.agentModels).toEqual(models);
+    else expect(first).not.toHaveProperty("agentModels");
+    models = { cursor: ["default"] }; loginRevision = "1"; await relay.refreshLogins();
+    await vi.waitFor(() => expect(frames.filter(frame => frame.t === "config")).toHaveLength(2));
+    const next = frames.filter(frame => frame.t === "config").at(-1);
+    expect(next.loginRevision).toBe("1");
+    if (feature === "creator-agent-models-v1") expect(next.agentModels).toEqual(models);
+    else expect(next).not.toHaveProperty("agentModels");
+  });
+
   it.each(["", "workspace-api-v10", "workspace-api-v1"])("negotiates API configuration for the connected workspace only: %s", async features => {
     workerServer.on("headers", headers => { headers.push(`X-Zeros-Worker-Features: ${features}`); });
     const api = { url: "https://api.example.test/api/v0", token: newCloudV2Token("api").token };

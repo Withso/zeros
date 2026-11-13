@@ -15,6 +15,8 @@ export const CLOUD_V2_MAX_HISTORY_ROWS = 500;
 
 export const CloudV2AgentSchema = z.enum(["codex", "claude", "cursor"]);
 export type CloudV2Agent = z.infer<typeof CloudV2AgentSchema>;
+const modelIds = z.array(z.string().max(256).regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]*(?:\[1m\])?$/)).max(128)
+  .refine(value => new Set(value).size === value.length, "Duplicate model ids");
 
 /** What the shared UI may show. Cloud v2 never offers Design, the browser or
  * simulators; the UI gates those tabs on this object, not on placement. */
@@ -156,6 +158,7 @@ export const CloudV2ControlFrameSchema = z.discriminatedUnion("t", [
     notifyUser: z.literal(1).optional(),
     actingUser: z.literal(1).optional(),
     agentLogins: z.object({ claude: z.literal(true).optional(), codex: z.literal(true).optional(), cursor: z.literal(true).optional() }).strict().optional(),
+    agentModels: z.object({ claude: modelIds.optional(), codex: modelIds.optional(), cursor: modelIds.optional() }).strict().optional(),
     bootstrapContextId: z.uuid().optional(),
     agentInteractions: z.literal(1).optional(),
     codeReview: z.object({
