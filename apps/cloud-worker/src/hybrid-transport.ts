@@ -1,3 +1,4 @@
+import { CLOUD_V2_PROMPT_POLL_MS, CLOUD_V2_PROMPT_PUSH_POLL_MS } from "@zeros/protocol/cloud-v2-prompts";
 import { NotifyUserWorkerRequestSchema, type NotifyUserWorkerRequest } from "@zeros/protocol/notify-user";
 import type { NotifyUserDelivery } from "./notify-user/service";
 import { randomInt, randomUUID } from "node:crypto";
@@ -189,7 +190,10 @@ export class HybridTransport implements Transport {
     try {
       if (operation === "pull" && (body as { waitMs?: unknown } | null)?.waitMs !== 0)
         await this.listener.waitForPromptFallback(lifetime);
-      return await this.request(`prompts/${operation}`, body, lifetime, operation === "pull" ? 35_000 : 10_000);
+      // A pull's HTTP deadline follows its own long-poll wait (25 s or a negotiated 60 s), plus 10 s for the reply.
+      const waitMs = (body as { waitMs?: unknown } | null)?.waitMs;
+      const pullMs = Math.min(CLOUD_V2_PROMPT_PUSH_POLL_MS, typeof waitMs === "number" && Number.isFinite(waitMs) ? Math.max(0, waitMs) : CLOUD_V2_PROMPT_POLL_MS) + 10_000;
+      return await this.request(`prompts/${operation}`, body, lifetime, operation === "pull" ? pullMs : 10_000);
     }
     catch (error) { if (error instanceof HttpFailure && error.status === 401) this.failed(error); throw error; }
     finally { this.promptPolls.delete(controller); }

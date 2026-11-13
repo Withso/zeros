@@ -47,3 +47,36 @@ it("R1: the FIRST negotiated configuration already gives the prompt inbox the 60
   expect(waits.filter(wait => wait > 0)).toEqual([60_000]);
   expect((worker as unknown as { runtimeUpdater: { checkMs: number } }).runtimeUpdater.checkMs).toBe(15 * 60_000);
 });
+
+it("R1 N−1: an older control plane that refuses the 60 s pull (400) gets 25 s pulls for a bounded time, with no other downgrade", async () => {
+  const { PromptInbox, PUSH_POLL_FALLBACK_MS } = await import("../prompt-inbox");
+  const waits: number[] = [];
+  let refuse = true;
+  const store = { onChange: () => () => {}, outboxEntries: () => [] } as never;
+  const agents = { setOutboxDispatch: () => {} } as never;
+  const inbox = new PromptInbox(store, agents, async (op, body, signal) => {
+    if (op !== "pull") return {};
+    const waitMs = (body as { waitMs: number }).waitMs; waits.push(waitMs);
+    if (waitMs > 25_000 && refuse) throw Object.assign(new Error("invalid_request"), { status: 400 });
+    if (waitMs === 0) return { prompts: [], stops: [] };
+    return new Promise((_, reject) => signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true }));
+  });
+  vi.useFakeTimers({ toFake: ["Date"] });
+  try {
+    inbox.pushSignals = true;
+    inbox.start();
+    // The immediate first pull, one refused 60 s pull, then 25 s pulls (no hot loop, no authority change).
+    await vi.waitFor(() => expect(waits.slice(0, 3)).toEqual([0, 60_000, 25_000]), { timeout: 5_000 });
+    expect(PUSH_POLL_FALLBACK_MS).toBe(15 * 60_000);
+    refuse = false;
+    inbox.hint();
+    await vi.waitFor(() => expect(waits.length).toBeGreaterThanOrEqual(5));
+    expect(waits.filter(wait => wait > 0).at(-1)).toBe(25_000);
+    // After the bound it offers 60 s again; a control plane that accepts it keeps it.
+    vi.setSystemTime(Date.now() + PUSH_POLL_FALLBACK_MS + 1);
+    const before = waits.length;
+    inbox.hint();
+    await vi.waitFor(() => expect(waits.slice(before).filter(wait => wait > 0)).toContain(60_000));
+    expect(inbox.pushSignals).toBe(true);
+  } finally { await inbox.dispose(); vi.useRealTimers(); }
+});

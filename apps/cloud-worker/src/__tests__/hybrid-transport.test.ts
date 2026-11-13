@@ -634,3 +634,25 @@ describe("worker → control plane context parity", () => {
     controller.abort(); await local;
   });
 });
+
+it("R1: a negotiated 60 s pull keeps its HTTP request open past 35 s and is bounded just past its wait", async () => {
+  const f = await fixture();
+  let abortedAt: number | undefined;
+  const started = { at: 0 };
+  vi.mocked(f.fetcher).mockImplementationOnce(async (_url, init) => new Promise<Response>((_, reject) => {
+    started.at = Date.now();
+    init!.signal!.addEventListener("abort", () => { abortedAt = Date.now(); reject(new DOMException("Aborted", "AbortError")); }, { once: true });
+  }));
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+  try {
+    const pending = f.transport.promptRequest("pull", { waitMs: 60_000, held: [] }).catch(() => "aborted");
+    for (let i = 0; i < 50 && !started.at; i++) { await vi.advanceTimersByTimeAsync(0); await new Promise(resolve => setImmediate(resolve)); }
+    expect(started.at).toBeGreaterThan(0);
+    await vi.advanceTimersByTimeAsync(40_000);
+    expect(abortedAt).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(40_000);
+    expect(abortedAt! - started.at).toBeGreaterThanOrEqual(60_000);
+    expect(abortedAt! - started.at).toBeLessThanOrEqual(75_000);
+    expect(await pending).toBe("aborted");
+  } finally { vi.useRealTimers(); }
+});
