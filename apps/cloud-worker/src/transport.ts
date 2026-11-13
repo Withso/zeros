@@ -41,6 +41,8 @@ export interface Transport {
   notifyUser?(request: NotifyUserWorkerRequest, signal?: AbortSignal): Promise<NotifyUserDelivery>;
   /** setup-status-v1: POST setup, 204. Best effort; the next hello reports again. */
   reportSetup?: (status: CloudV2SetupStatus) => Promise<void>;
+  /** history-digest-v1: each chat's stored digest (one read on reconnect). */
+  historyDigests?: () => Promise<unknown>;
   runtimeUpdate?: (request: CloudRuntimeUpdateRequest, signal?: AbortSignal) => Promise<CloudRuntimeUpdateReply>;
   /** recovery-quiesce-v1 (outbound): seal or confirm a recovery binding. */
   recovery?: (request: CloudRecoveryRequest, signal?: AbortSignal) => Promise<CloudRecoveryReply>;

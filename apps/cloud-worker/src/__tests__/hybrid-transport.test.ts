@@ -656,3 +656,15 @@ it("R1: a negotiated 60 s pull keeps its HTTP request open past 35 s and is boun
     expect(await pending).toBe("aborted");
   } finally { vi.useRealTimers(); }
 });
+
+it("history-digest-v1: the digests read is authenticated exactly like the history POST", async () => {
+  const f = await fixture();
+  vi.mocked(f.fetcher).mockImplementationOnce(async (url, init) => {
+    expect(new URL(String(url)).pathname).toBe("/v2/cloud/worker/history/digests");
+    expect(init?.method).toBe("POST");
+    expect(new Headers(init?.headers).get("authorization")).toBe("Bearer synthetic-worker-token");
+    expect(new Headers(init?.headers).get("x-zeros-worker-boot")).toBe(f.transport.bootId);
+    return Response.json({ chats: [] });
+  });
+  expect(await f.transport.historyDigests()).toEqual({ chats: [] });
+});

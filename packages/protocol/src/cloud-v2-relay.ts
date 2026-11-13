@@ -95,6 +95,14 @@ export type CloudV2ContextReason = z.infer<typeof CloudV2ContextReasonSchema>;
 const frame = z.unknown();
 
 /** The same row Local persists from `applyUpdate` (engine db/messages). */
+/** history-digest-v1 (not advertised until the control plane's half lands): on reconnect the worker reads each chat's
+ * stored digest once and re-sends only chats whose content differs. Any doubt means today's full replacement. */
+export const HISTORY_DIGEST_FEATURE = "history-digest-v1";
+export const CLOUD_V2_MAX_DIGEST_CHATS = 4096;
+export const CloudV2HistoryDigestSchema = z.string().regex(/^[0-9a-f]{64}$/);
+export const CloudV2HistoryDigestsReplySchema = z.object({ chats: z.array(z.object({
+  chatId: z.string().min(1).max(256), digest: CloudV2HistoryDigestSchema.nullable() }).strict()).max(CLOUD_V2_MAX_DIGEST_CHATS) }).strict();
+export type CloudV2HistoryDigestsReply = z.infer<typeof CloudV2HistoryDigestsReplySchema>;
 export const CloudV2MessageRowSchema = z.object({
   msgId: z.string().min(1).max(256),
   kind: z.string().max(64),
@@ -123,6 +131,8 @@ export const CloudV2HistoryFrameSchema = z.object({
       rows: z.array(CloudV2MessageRowSchema).max(CLOUD_V2_MAX_HISTORY_ROWS),
       replace: z.literal(true).optional(),
       historyState: CloudV2HistoryStateSchema.optional(),
+      /** history-digest-v1: only on the final frame of a chat's replacement (the control plane stamps it there). */
+      digest: CloudV2HistoryDigestSchema.optional(),
     }).strict().refine(value => !value.historyState || value.replace === true, "History state requires replacement").optional(),
     /** chat-edit-v1 only: edits whose chat rows this same batch carries. */
     chatEditAcks: z.array(CloudV2ChatEditAckSchema).max(128).optional(),
@@ -232,6 +242,8 @@ export const CloudV2ControlFrameSchema = z.discriminatedUnion("t", [
       userName: z.string().min(1).max(256).refine(value => !!value.trim() && !/[\u0000-\u001f\u007f]/.test(value)).optional(),
     }).strict().optional(),
     historyReplacement: z.literal(1).optional(),
+    /** history-digest-v1: the control plane stores per-chat digests and serves history/digests. */
+    historyDigest: z.literal(1).optional(),
     gitIdentity: CloudV2GitIdentitySchema.nullable().optional(),
     /** creator-commit-identity-v1 only: "creator" = gitIdentity is the current Creator's (null: none stored, commits refuse);
      * "actor" = no Creator, each context commits as its own person. Absent: N−1 behaviour. */
