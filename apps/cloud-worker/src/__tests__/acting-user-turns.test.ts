@@ -8,7 +8,6 @@ import type { CloudV2WorkerFrame } from "@zeros/protocol/cloud-v2-relay";
 import { brokerRequest } from "../credentials/client";
 import { operationEnvironment } from "../sharing/operation-environment";
 import { CloudWorker } from "../worker";
-import { turnLeaseRetry } from "../agents";
 import { CLIENT_A, CLIENT_B, FakeDriver, FakeRelay, WORKSPACE_ID, WORKSPACE_KEY, browserFrame, config } from "./worker-fixtures";
 import { SessionStore } from "../sessions/session-store";
 
@@ -689,27 +688,6 @@ it("Creator pays: a turn refused for the Creator's login, or for a workspace wit
     await store.flush();
     expect(f.drivers.every(driver => !driver.opened)).toBe(true);
   }
-});
-
-it("§14.5: a turn lease answered 503 agent_credentials_unavailable is retried quietly before it fails", async () => {
-  const saved = [...turnLeaseRetry.delaysMs]; turnLeaseRetry.delaysMs = [1, 1, 1, 1];
-  try {
-    const f = await setup();
-    let refusals = 2;
-    const unavailable = () => Object.assign(new Error("unavailable"), { status: 503, contextCode: "agent_credentials_unavailable" });
-    f.relay.leaseReply = () => { if (--refusals === 0) f.relay.leaseReply = undefined; throw unavailable(); };
-    f.relay.deliver(delivery(ALEX));
-    await until(() => f.drivers[0]?.prompts.length ?? 0).toBe(1);
-    expect(f.relay.calls.filter(call => call.op === "turn-lease")).toHaveLength(3);
-    expect(f.relay.calls.some(call => call.op === "outcome" && call.body.state === "failed")).toBe(false);
-    f.drivers[0]!.complete();
-    const g = await setup();
-    g.relay.leaseReply = () => { throw unavailable(); };
-    g.relay.deliver(delivery(ALEX));
-    await until(() => g.relay.calls.find(call => call.op === "outcome")?.body.state).toBe("failed");
-    expect(g.relay.calls.filter(call => call.op === "turn-lease")).toHaveLength(5);
-    expect(g.drivers.every(driver => !driver.opened)).toBe(true);
-  } finally { turnLeaseRetry.delaysMs = saved; }
 });
 
 it("Creator pays: a leased turn runs on its lease's login even when the presentation map says the Creator has none", async () => {

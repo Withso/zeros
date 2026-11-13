@@ -73,10 +73,6 @@ const initialized = (agentId: CloudV2Agent): InitializeResponse => ({
 
 /** Executions are worker-owned routes; provider resume ids never select a
  * live process. Client disconnects do not change a conversation's lifetime. */
-/** §14.5: waits before re-requesting a turn lease refused with 503 agent_credentials_unavailable (each jittered down
- * to half); about 15 s in total before the turn fails. Mutable for tests only. */
-export const turnLeaseRetry = { delaysMs: [1_000, 2_000, 4_000, 8_000] };
-
 export class Agents {
   readonly turns: TurnService;
   private readonly routes = new Map<string, Runtime>();
@@ -940,20 +936,8 @@ export class Agents {
     if (!this.contexts) throw new WorkspaceError("CLOUD_V2_UNSUPPORTED", "This cloud worker cannot run turns as their person.");
     let lease: CloudV2TurnLease;
     try {
-      for (let attempt = 0; ; attempt++) {
-        try {
-          lease = await this.contexts.turnLease({ chatId: route.chatId, userMessageId: entry.userMessageId, dispatchId: entry.outbox!.dispatchId!,
-            generation: assigned.actingUser.generation, contextId: assigned.contextId });
-          break;
-        } catch (error) {
-          // §14.5: the payer's credential is temporarily undeliverable (nothing was granted): retry the same lease
-          // quietly, with jitter, before the turn fails. Stop or close ends the wait.
-          const delay = turnLeaseRetry.delaysMs[attempt];
-          if (contextCode(error) !== "agent_credentials_unavailable" || delay === undefined || route.closed || this.lifetime.signal.aborted) throw error;
-          await new Promise(resolve => setTimeout(resolve, Math.round(delay / 2 + Math.random() * delay / 2)));
-          if (route.closed || this.lifetime.signal.aborted) throw error;
-        }
-      }
+      lease = await this.contexts.turnLease({ chatId: route.chatId, userMessageId: entry.userMessageId, dispatchId: entry.outbox!.dispatchId!,
+        generation: assigned.actingUser.generation, contextId: assigned.contextId });
     } catch (error) {
       const code = contextCode(error);
       const reason = code === "agent_login_required" ? "auth-required" as const : code === "agent_credentials_unavailable" ? "credentials-unavailable" as const
