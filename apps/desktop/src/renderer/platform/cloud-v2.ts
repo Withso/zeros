@@ -271,9 +271,16 @@ export async function pingCloudV2WorkspaceActivity(target: CloudWorkspaceTarget)
     { body: {}, idempotencyKey: crypto.randomUUID() }, sharingFor(target.workspaceId));
 }
 
-export async function connectCloudV2Workspace(target: CloudWorkspaceTarget, options: { wake: boolean; signal?: AbortSignal }) {
+export async function connectCloudV2Workspace(target: CloudWorkspaceTarget, options: {
+  wake: boolean; signal?: AbortSignal;
+  /** §14.7: the open peer's instance id, notExpiringBefore and presented-expiry report for token rollover. */
+  clientInstance?: string; notExpiringBefore?: number; presentedTokenExpiry?: (expiresAt: number | null) => void;
+}) {
   return cloudAccountRequest(`/v1/cloud-v2/workspaces/${uuid.parse(target.workspaceId)}/connect?wakePolicy=explicit`, CloudV2ConnectSchema,
-    { body: { wake: options.wake }, idempotencyKey: key() }, { ...sharingFor(target.workspaceId), signal: options.signal });
+    { body: { wake: options.wake }, idempotencyKey: key() }, { ...sharingFor(target.workspaceId), signal: options.signal,
+      ...(options.clientInstance ? { clientInstance: options.clientInstance } : {}),
+      ...(options.notExpiringBefore ? { notExpiringBefore: options.notExpiringBefore } : {}),
+      ...(options.presentedTokenExpiry ? { presentedTokenExpiry: options.presentedTokenExpiry } : {}) });
 }
 
 /** Chat history from the control plane's mirror, readable while the VM sleeps. */

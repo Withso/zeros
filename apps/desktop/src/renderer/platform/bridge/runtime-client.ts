@@ -1,4 +1,5 @@
 import { clearWorkspaceAccessEnded, reportWorkspaceAccessEnded, workspaceAccessScope } from "../team-sharing-registry";
+import { CLIENT_TOKEN_ROLLOVER_PROTOCOL, CloudConnectionAuthFrameSchema, CloudConnectionRenewedFrameSchema } from "@zeros/protocol/cloud-v2-relay";
 import { cloudConnectBackoffKey, cloudConnectWaitMs, recordCloudConnectFailure, resetCloudConnectBackoff } from "./cloud-connect-backoff";
 // Shared desktop/Linux transport. Environment ports carry no workspace authority.
 import type { BridgeMessage } from "./messages";
@@ -15,6 +16,15 @@ import {
 
 /** "ended" only for a 404 or a 403 member_access_revoked of the workspace document; "unknown" for any failed read. */
 export type CloudAccessConfirmer = (target: { organizationId: string; workspaceId: string }) => Promise<"ended" | "present" | "unknown">;
+/** §14.7: mints a renewal ticket for the open socket (wake:false, same instance) whose bearer outlives `notExpiringBefore`,
+ * and reports that bearer's expiry. The ticket goes only into the RENEW frame. */
+export type CloudConnectionTicketRenewer = (notExpiringBefore: number) => Promise<{ ticket: string; tokenExpiresAt: number | null }>;
+type Rollover = {
+  socket: RuntimeTransportSocket; epoch: number; expiresAt: number; retryUntil: number;
+  /** The latest bearer expiry this socket presented: a lost ACK may have made it the server's current one. */
+  presented: number; attempt: number; timer?: ReturnType<typeof setTimeout>; request?: string; stopped?: boolean;
+};
+const ROLLOVER_ACK_MS = 10_000, ROLLOVER_RETRY_MS = 2_000, ROLLOVER_RETRY_CAP_MS = 20_000;
 /** Ladder for reconnect backoff in ms. Index = consecutive-failure count. */
 const RECONNECT_LADDER = [1_000, 2_000, 4_000, 8_000, 15_000];
 
@@ -353,6 +363,8 @@ export class RuntimeClient {
   private readonly refreshCloudConnectionTarget?: CloudRuntimeConnectionTargetRefresher;
   /** D2: one exact read of the workspace document (team headers, this account) to confirm a 4001 access_revoked. */
   private readonly confirmCloudAccessEnded?: CloudAccessConfirmer;
+  private readonly renewCloudConnectionTicket?: CloudConnectionTicketRenewer;
+  private rollover: Rollover | null = null;
   private cloudTargetNeedsRefresh = false;
   private cloudTargetRefreshPromise: Promise<boolean> | null = null;
   private cloudConnectDeadline: number | null = null;
@@ -365,12 +377,14 @@ export class RuntimeClient {
       environment: RuntimeClientEnvironment;
       refreshCloudConnectionTarget?: CloudRuntimeConnectionTargetRefresher;
       confirmCloudAccessEnded?: CloudAccessConfirmer;
+      renewCloudConnectionTicket?: CloudConnectionTicketRenewer;
     },
   ) {
     this.environment = options.environment;
     this.connectionTarget = parseRuntimeConnectionTarget(target, Date.now(), this.environment);
     this.refreshCloudConnectionTarget = options.refreshCloudConnectionTarget;
     this.confirmCloudAccessEnded = options.confirmCloudAccessEnded;
+    this.renewCloudConnectionTicket = options.renewCloudConnectionTicket;
     this.armConnectionTargetExpiry();
   }
 
@@ -489,7 +503,8 @@ export class RuntimeClient {
       }
       // The one-use ticket is offered as a subprotocol, never in the URL.
       wsUrl = target.url;
-      protocols = [...target.protocols, "zeros.cloud.v2.explicit-wake"];
+      protocols = [...target.protocols, "zeros.cloud.v2.explicit-wake",
+        ...(this.renewCloudConnectionTicket ? [CLIENT_TOKEN_ROLLOVER_PROTOCOL] : [])];
     } else {
       let port: number;
       let token: string;
@@ -552,6 +567,7 @@ export class RuntimeClient {
 
     ws.onmessage = (event) => {
       if (this._disposed || this.ws !== ws || targetEpoch !== this.connectionTargetEpoch) return;
+      if (this.handleRolloverFrame(ws, targetEpoch, event.data)) return;
       const msg = parseInboundBridgeWebSocketFrame(event.data);
       if (msg) this.handleIncoming(msg);
     };
@@ -571,7 +587,7 @@ export class RuntimeClient {
       if (failedConnect) recordCloudConnectFailure(this.cloudBackoffKey()!);
       const reconnectImmediately = this.connectionTarget.kind === "cloud" && this.handshakeReady && !failedConnect &&
         event?.code !== 1000 && event?.code !== 4001;
-      if (this.ws === ws) this.ws = null;
+      if (this.ws === ws) { this.ws = null; this.cancelRollover(); }
       // D2: the relay also closes 4001 for an expired or unrenewable context, a redeploy or worker_unauthorized.
       // Only "access_revoked" may end access, and only once the workspace document confirms it (404, or 403
       // member_access_revoked). Anything else reconnects with the normal backoff, against old and new relays.
@@ -884,6 +900,7 @@ export class RuntimeClient {
 
   dispose(): void {
     this._disposed = true;
+    this.cancelRollover();
     this.clearCloudConnectWait();
     for (const finish of this.readyWaiters) finish(new Error("Client disposed"));
     if (this.connectionTargetExpiryTimer) {
@@ -1353,6 +1370,72 @@ export class RuntimeClient {
       }
     }
     this.scheduleReconnect();
+  }
+
+  /** §14.7: the relay's AUTH and RENEWED frames for the current socket; they never reach bridge listeners. */
+  private handleRolloverFrame(ws: RuntimeTransportSocket, epoch: number, data: unknown): boolean {
+    if (this.connectionTarget.kind !== "cloud" || typeof data !== "string" || data.length > 4096 || !data.includes("\"CLOUD_CONNECTION_")) return false;
+    let frame: unknown;
+    try { frame = JSON.parse(data); } catch { return false; }
+    const type = (frame as { type?: unknown } | null)?.type;
+    if (type === "CLOUD_CONNECTION_AUTH") {
+      const auth = CloudConnectionAuthFrameSchema.safeParse(frame);
+      if (auth.success && this.renewCloudConnectionTicket) this.scheduleRollover(ws, epoch, auth.data, Number.NEGATIVE_INFINITY);
+      return true;
+    }
+    if (type !== "CLOUD_CONNECTION_RENEWED") return false;
+    const reply = CloudConnectionRenewedFrameSchema.safeParse(frame);
+    const current = this.rollover;
+    if (!reply.success || !current || current.socket !== ws || current.epoch !== epoch || current.request !== reply.data.requestId) return true;
+    clearTimeout(current.timer); current.request = undefined;
+    if (!("error" in reply.data)) this.scheduleRollover(ws, epoch, reply.data, current.presented);
+    else if (reply.data.error.code === "binding_changed") current.stopped = true; // ends 1013 at expiry, then reconnects
+    else this.retryRollover(current);
+    return true;
+  }
+
+  private scheduleRollover(ws: RuntimeTransportSocket, epoch: number, schedule: { expiresAt: number; refreshAt: number; retryUntil: number }, presented: number): void {
+    this.cancelRollover();
+    const rollover: Rollover = { socket: ws, epoch, expiresAt: schedule.expiresAt, retryUntil: schedule.retryUntil, presented, attempt: 0 };
+    this.rollover = rollover;
+    rollover.timer = setTimeout(() => void this.attemptRollover(rollover), Math.max(0, schedule.refreshAt - Date.now()));
+  }
+
+  private rolloverCurrent(rollover: Rollover): boolean {
+    return !this._disposed && !rollover.stopped && this.rollover === rollover && this.ws === rollover.socket &&
+      rollover.epoch === this.connectionTargetEpoch;
+  }
+
+  private async attemptRollover(rollover: Rollover): Promise<void> {
+    if (!this.rolloverCurrent(rollover) || rollover.request || Date.now() >= rollover.retryUntil) return;
+    const id = createMessageId();
+    rollover.request = id;
+    let minted: Awaited<ReturnType<CloudConnectionTicketRenewer>>;
+    try { minted = await this.renewCloudConnectionTicket!(Math.max(rollover.expiresAt, rollover.presented) + 1_000); }
+    catch { if (this.rolloverCurrent(rollover) && rollover.request === id) { rollover.request = undefined; this.retryRollover(rollover); } return; }
+    if (!this.rolloverCurrent(rollover) || rollover.request !== id) return;
+    if (minted.tokenExpiresAt !== null) rollover.presented = Math.max(rollover.presented, minted.tokenExpiresAt);
+    try { rollover.socket.send(JSON.stringify({ type: "CLOUD_CONNECTION_RENEW", id, ticket: minted.ticket })); }
+    catch { rollover.request = undefined; this.retryRollover(rollover); return; }
+    rollover.timer = setTimeout(() => {
+      if (!this.rolloverCurrent(rollover) || rollover.request !== id) return;
+      rollover.request = undefined; this.retryRollover(rollover);
+    }, ROLLOVER_ACK_MS);
+  }
+
+  /** Bounded, jittered, single flight, and only while the relay still accepts a renewal. */
+  private retryRollover(rollover: Rollover): void {
+    if (!this.rolloverCurrent(rollover)) return;
+    const ceiling = Math.min(ROLLOVER_RETRY_CAP_MS, ROLLOVER_RETRY_MS * 2 ** rollover.attempt++);
+    const delay = Math.round(ceiling / 2 + Math.random() * (ceiling / 2));
+    if (Date.now() + delay >= rollover.retryUntil) return;
+    clearTimeout(rollover.timer);
+    rollover.timer = setTimeout(() => void this.attemptRollover(rollover), delay);
+  }
+
+  private cancelRollover(): void {
+    if (!this.rollover) return;
+    clearTimeout(this.rollover.timer); this.rollover.stopped = true; this.rollover = null;
   }
 
   private cloudBackoffKey(): string | null {

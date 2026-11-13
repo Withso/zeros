@@ -70,7 +70,7 @@ async function backoffGate(key: string, assertCurrent: () => void, deadline: num
 
 async function ticketTarget(
   target: CloudWorkspaceTarget, sequence: number, wake: boolean,
-  assertCurrent: () => void, deadline: number, signal?: AbortSignal,
+  assertCurrent: () => void, deadline: number, signal?: AbortSignal, clientInstance?: string,
 ): Promise<CloudV2ConnectionTarget> {
   const backoff = cloudConnectBackoffKey(target);
   await backoffGate(backoff, assertCurrent, deadline, signal);
@@ -81,7 +81,7 @@ async function ticketTarget(
     for (let attempt = 0; ; attempt++) {
       waiting.check();
       try {
-        ticket = await waiting.wait(connectCloudV2Workspace(target, { wake, signal: waiting.signal }));
+        ticket = await waiting.wait(connectCloudV2Workspace(target, { wake, signal: waiting.signal, ...(clientInstance ? { clientInstance } : {}) }));
         waiting.check();
         break;
       } catch (error) {
@@ -157,18 +157,29 @@ export async function openCloudV2Runtime(
   assertCurrent();
   let sequence = 1;
   let opened = false;
-  const ticket = await ticketTarget(target, sequence, options?.wake === true, assertCurrent, deadline, signal);
+  // §14.7: one instance id per opened peer, in memory only; it binds this peer's connect and renewal tickets.
+  const clientInstance = crypto.randomUUID();
+  const ticket = await ticketTarget(target, sequence, options?.wake === true, assertCurrent, deadline, signal, clientInstance);
   assertCurrent();
   const client = new RuntimeClient(ticket, {
     // D2: a 4001 access_revoked ends access only once the workspace document confirms it.
     confirmCloudAccessEnded: workspace => confirmCloudWorkspaceAccessEnded(workspace),
+    // §14.7: a renewal ticket for the SAME socket: never wakes, same instance, a bearer newer than the one presented.
+    renewCloudConnectionTicket: async notExpiringBefore => {
+      assertCurrent();
+      const presented = { expiresAt: null as number | null };
+      const minted = await connectCloudV2Workspace(target, { wake: false, signal, clientInstance, notExpiringBefore,
+        presentedTokenExpiry: value => { presented.expiresAt = value; } });
+      assertCurrent();
+      return { ticket: minted.protocols[1].slice("ticket.".length), tokenExpiresAt: presented.expiresAt };
+    },
     // Each reconnect presents a fresh ticket. A reconnect after a laptop wake,
     // network drop or control-plane deploy is not explicit work, so it never
     // restarts a VM that stopped meanwhile. Fresh user input owns the next wake.
     refreshCloudConnectionTarget: async () => {
       assertCurrent();
       // After the open, the ticket window starts once the shared backoff has passed (Infinity: no outer deadline).
-      const refreshed = await ticketTarget(target, sequence + 1, false, assertCurrent, opened ? Infinity : deadline, signal);
+      const refreshed = await ticketTarget(target, sequence + 1, false, assertCurrent, opened ? Infinity : deadline, signal, clientInstance);
       sequence = refreshed.connectionSequence;
       return refreshed;
     },

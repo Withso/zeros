@@ -68,13 +68,18 @@ function notify(next: AuthSessionInfo | null): void {
 /** Restore the current session: a live access token (main refreshes first if
  *  it's near expiry) + decoded identity. An absent live token does not prove
  *  sign-out: main can retain identity through an offline refresh failure. */
-export async function getSession(): Promise<AuthSessionInfo | null> {
+export async function getSession(options?: {
+  /** §14.7: a token rollover needs a bearer that outlives the one it presented; main refreshes through its usual path.
+   * An older main ignores it and returns its current token. */
+  notExpiringBefore?: number;
+}): Promise<AuthSessionInfo | null> {
   if (isLocalDevelopment() || storedUser === null || pendingSignOuts > 0) return null;
   const version = generation;
   // Token refresh can atomically update identity metadata. Read the user only
   // after main settles that refresh so both values describe one stored record.
   const tokenRes = await nativeInvoke<{ access_token: string | null; account?: string | null }>(
     "auth_get_access_token",
+    ...(options?.notExpiringBefore ? [{ notExpiringBefore: options.notExpiringBefore }] as const : [] as const),
   );
   if (version !== generation || !tokenRes?.access_token) return null;
   const user = await nativeInvoke<AuthUser | null>("auth_get_session_user");
