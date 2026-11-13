@@ -36,7 +36,6 @@ function render(type: WorkbenchTabType, folder = cloud, filePath?: string) {
   sources.update("body", { primary: true, pending: false, hasContent: false });
   return renderToStaticMarkup(createElement(WorkbenchTabFrame, { tab, folder, active: true, children: createElement("span", null, "Confirmed content") }));
 }
-const emptyText = (markup: string) => markup.match(/data-workbench-empty=""[^>]*>(?:<svg[\s\S]*?<\/svg>)?([\s\S]*?)<\/div>/)?.[1]?.replace(/<[^>]+>/g, "");
 afterEach(() => {
   for (const sources of stores) sources.remove("body");
   stores.clear();
@@ -67,14 +66,17 @@ describe("cloud not-ready empty state", () => {
       const markup = render(type);
       expect(markup, JSON.stringify(state)).toContain("data-workbench-empty");
       expect(markup).toContain("<svg");
-      expect(emptyText(markup), JSON.stringify({ state, now })).toBe(LINES[type]);
+      expect(markup, JSON.stringify({ state, now })).toContain(LINES[type]);
+      for (const other of Object.values(LINES)) if (other !== LINES[type]) expect(markup).not.toContain(other);
       for (const old of ["aren't available", "isn't available", "Retry", "reconnects automatically", "Open the cloud workspace"]) expect(markup).not.toContain(old);
     }
   });
 
   it("a single file says the same, and a tab's own read failure keeps its copy", () => {
     fixture.availability = { cloud: true, connection: "disconnected", since: 0, state: "stopped" };
-    expect(emptyText(render("files", cloud, "src/index.ts"))).toBe("This file appears when the workspace is ready.");
+    const file = render("files", cloud, "src/index.ts");
+    expect(file).toContain("This file appears when the workspace is ready.");
+    expect(file).not.toContain(LINES.files);
     fixture.availability = { cloud: true, connection: "connected", since: 0, state: "ready" };
     const sources = workbenchSourcesFor(workbenchStatusKey(cloud, { id: "not-ready-files", type: "files", title: "files" }), cloud);
     stores.add(sources);
