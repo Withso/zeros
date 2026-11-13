@@ -17,6 +17,9 @@ import type { CloudPeer } from "./workspace-runtime-client";
 import { bridgeWorkspaceList } from "./workspace-bridge";
 import { confirmCloudWorkspaceAccessEnded } from "../cloud-access-confirm";
 import { cloudConnectBackoffKey, cloudConnectWaitMs, recordCloudConnectFailure } from "./cloud-connect-backoff";
+import { setRelayPresence } from "./relay-presence";
+
+const RELAY_PRESENCE_FEATURE = "relay-presence-v1";
 
 const CONNECT_TIMEOUT_MS = 3 * 60_000;
 const TICKET_TIMEOUT_MS = 30_000;
@@ -71,7 +74,7 @@ async function backoffGate(key: string, assertCurrent: () => void, deadline: num
 async function ticketTarget(
   target: CloudWorkspaceTarget, sequence: number, wake: boolean,
   assertCurrent: () => void, deadline: number, signal?: AbortSignal, clientInstance?: string,
-): Promise<CloudV2ConnectionTarget> {
+): Promise<CloudV2ConnectionTarget & { features?: string[] }> {
   const backoff = cloudConnectBackoffKey(target);
   await backoffGate(backoff, assertCurrent, deadline, signal);
   const windowEnd = Math.min(deadline, performance.now() + TICKET_TIMEOUT_MS);
@@ -110,6 +113,7 @@ async function ticketTarget(
     url: ticket.url,
     protocols: ticket.protocols,
     expiresAt: Date.parse(ticket.expiresAt),
+    ...(ticket.features ? { features: ticket.features } : {}),
   };
 }
 
@@ -159,8 +163,11 @@ export async function openCloudV2Runtime(
   let opened = false;
   // §14.7: one instance id per opened peer, in memory only; it binds this peer's connect and renewal tickets.
   const clientInstance = crypto.randomUUID();
-  const ticket = await ticketTarget(target, sequence, options?.wake === true, assertCurrent, deadline, signal, clientInstance);
+  const { features, ...ticket } = await ticketTarget(target, sequence, options?.wake === true, assertCurrent, deadline, signal, clientInstance);
   assertCurrent();
+  // R1 relay-presence-v1: an admission with the feature makes this live connection count as presence.
+  let presenceAdmitted = features?.includes(RELAY_PRESENCE_FEATURE) === true;
+  let endPresence: (() => void) | undefined;
   const client = new RuntimeClient(ticket, {
     // D2: a 4001 access_revoked ends access only once the workspace document confirms it.
     confirmCloudAccessEnded: workspace => confirmCloudWorkspaceAccessEnded(workspace),
@@ -179,12 +186,19 @@ export async function openCloudV2Runtime(
     refreshCloudConnectionTarget: async () => {
       assertCurrent();
       // After the open, the ticket window starts once the shared backoff has passed (Infinity: no outer deadline).
-      const refreshed = await ticketTarget(target, sequence + 1, false, assertCurrent, opened ? Infinity : deadline, signal, clientInstance);
+      const { features: renewed, ...refreshed } = await ticketTarget(target, sequence + 1, false, assertCurrent, opened ? Infinity : deadline, signal, clientInstance);
       sequence = refreshed.connectionSequence;
+      presenceAdmitted = renewed?.includes(RELAY_PRESENCE_FEATURE) === true;
       return refreshed;
     },
   });
-  const release = () => { lifetime.abort(); client.dispose(); };
+  const syncPresence = () => {
+    const live = presenceAdmitted && client.status === "connected" && !lifetime.signal.aborted;
+    if (live && !endPresence) endPresence = setRelayPresence(target);
+    else if (!live && endPresence) { endPresence(); endPresence = undefined; }
+  };
+  const offPresence = client.onStatusChange(syncPresence);
+  const release = () => { lifetime.abort(); offPresence(); syncPresence(); client.dispose(); };
   const waiting = connectionWait(assertCurrent, deadline, signal);
   try {
     waiting.check();

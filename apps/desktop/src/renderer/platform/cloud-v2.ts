@@ -262,6 +262,8 @@ export const CloudV2ConnectSchema = z.object({
   url: z.string().url(),
   protocols: z.tuple([z.literal("zeros.cloud.v2"), z.string().regex(/^ticket\.zw2c_[A-Za-z0-9_-]{43}$/)]),
   expiresAt: z.string(),
+  /** R1: what this admission supports (relay-presence-v1); absent from an older control plane. */
+  features: z.array(z.string().max(64)).max(32).optional(),
 });
 /** Only an explicit open/input starts compute. The additive query keeps the
  * strict connect body readable by older control planes. */

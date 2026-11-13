@@ -47,3 +47,12 @@ describe("cloud focus activity under Team sharing", () => {
     expect(ping).toHaveBeenCalledOnce();
   });
 });
+
+describe("R1 relay-presence-v1", () => {
+  it("never pings while the workspace's live relay connection counts as presence; pings again once it does not", () => {
+    const base = { visible: true, focused: true, status: "ready", lastPingAt: Number.NEGATIVE_INFINITY, now: 1 };
+    expect(cloudFocusPingDue({ ...base, relayPresence: true })).toBe(false);
+    expect(cloudFocusPingDue({ ...base, relayPresence: false })).toBe(true);
+    expect(cloudFocusPingDue(base)).toBe(true);
+  });
+});
