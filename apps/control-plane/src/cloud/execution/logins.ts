@@ -5,6 +5,7 @@ import { openCloudAgentCredential, parseCloudAgentCredential, type CloudAgentCre
 import type { CloudV2Agent } from "../contract.js";
 import { DatabaseCodexAuthRenewal, type CodexCredentialVersion } from "../../agent-credentials/codex-auth-renewal.js";
 import { memberOnHoldSql } from "../../organization-seats.js";
+import { cloudAgentModels } from "../../agent-credentials/agent-models.js";
 import { actorChanged, AgentLoginRequired, executionUnavailable, workspaceCreatorRequired } from "./errors.js";
 
 export type ExecutionPayer = { userId: string; accountRevision: string; memberRevision: string; memberCreatedAt: string };
@@ -12,14 +13,22 @@ export type ExecutionSelection = { source: "personal" | "shared"; credentialId: 
   ({ version?: undefined; payer?: undefined } | { version: 2; payer: ExecutionPayer });
 export type ExecutionLogin = { selection: ExecutionSelection; material: CloudAgentCredentialMaterial };
 export type SharedExecutionLogin = (organizationId: string, agent: CloudV2Agent, tx?: Tx) => Promise<ExecutionLogin | null>;
+type AgentPresentation = { agentLogins: Partial<Record<CloudV2Agent, true>>; agentModels: Partial<Record<CloudV2Agent, string[]>> };
 
 export async function selectedAgentLoginAvailability(tx: Tx, organizationId: string, userId: string): Promise<Partial<Record<CloudV2Agent, true>>> {
-  const rows = (await tx.query<{ provider: CloudV2Agent }>(`SELECT c.provider FROM cloud_agent_organization_connections c
+  return (await selectedAgentPresentation(tx, organizationId, userId)).agentLogins;
+}
+
+async function selectedAgentPresentation(tx: Tx, organizationId: string, userId: string): Promise<AgentPresentation> {
+  const rows = (await tx.query<{ provider: CloudV2Agent; models: string[]; all_models: boolean }>(`SELECT c.provider,c.models,c.all_models FROM cloud_agent_organization_connections c
     JOIN cloud_agent_credentials k ON k.id=c.credential_id AND k.owner_user_id=c.owner_user_id
     JOIN cloud_agent_credential_versions v ON v.credential_id=k.id AND v.version=k.current_version
     WHERE c.org_id=$1 AND c.owner_user_id=$2 AND k.revoked_at IS NULL AND c.credential_revision=k.revision
       AND (v.material_mode IS NULL OR v.material_mode='local')`, [organizationId, userId])).rows;
-  return Object.fromEntries(rows.map(row => [row.provider, true as const]));
+  return {
+    agentLogins: Object.fromEntries(rows.map(row => [row.provider, true as const])),
+    agentModels: Object.fromEntries(rows.map(row => [row.provider, [...new Set(row.all_models ? cloudAgentModels(row.provider) : row.models)]])),
+  };
 }
 
 /** The shared-key selection port is deliberately separate from provisioning.
@@ -67,11 +76,15 @@ export class CloudExecutionLogins {
   }
 
   async availability(workspaceId: string, transaction?: Tx): Promise<Partial<Record<CloudV2Agent, true>>> {
-    const read = async (tx: Tx) => {
+    return (await this.presentation(workspaceId, transaction)).agentLogins;
+  }
+
+  async presentation(workspaceId: string, transaction?: Tx): Promise<AgentPresentation> {
+    const read = async (tx: Tx): Promise<AgentPresentation> => {
       let current: Awaited<ReturnType<CloudExecutionLogins["creator"]>>;
       try { current = await this.creator(tx, workspaceId); }
-      catch (error) { if (error instanceof Error && "code" in error && error.code === "workspace_creator_required") return {}; throw error; }
-      return selectedAgentLoginAvailability(tx, current.organizationId, current.payer.userId);
+      catch (error) { if (error instanceof Error && "code" in error && error.code === "workspace_creator_required") return { agentLogins: {}, agentModels: {} }; throw error; }
+      return selectedAgentPresentation(tx, current.organizationId, current.payer.userId);
     };
     return transaction ? read(transaction) : withSystemTx(this.pool, read, { consistentRead: true });
   }

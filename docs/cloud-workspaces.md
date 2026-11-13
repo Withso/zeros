@@ -517,8 +517,16 @@ Missing Creator login returns `409 agent_login_required` with
 `loginRequiredFrom: "self" | "creator"`. A missing or ineligible Creator returns
 `409 workspace_creator_required`; non-agent operations remain available to
 admitted members. There is no fallback to the sender's login. Capable workers
-receive only a sparse `agentLogins` availability map for the current Creator,
+receive a sparse `agentLogins` availability map for the current Creator,
 fenced by `loginRevision`; actual credentials remain scoped to turn leases.
+Workers advertising `creator-agent-models-v1` also receive `agentModels`, a
+sparse map from agent to model ids, from that same Creator snapshot. An
+all-models selection expands the supported catalog; otherwise it contains the
+selected ids. Model-only selection changes, new connections and Reassign
+advance the revision so connected members can refresh their pickers. No
+Creator or login yields no model entry. HTTP and relay configuration omit this
+field for older workers; Local and organization-local model selection keep
+their existing provider path.
 
 On channels with `ZEROS_CLOUD_TEAM_OWNERSHIP=1`, a Creator or organization
 admin can reassign an activated workspace to another admitted member who has

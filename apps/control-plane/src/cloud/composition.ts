@@ -219,9 +219,9 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     if (workspace.executionMode === "active" || workspace.executionMode === undefined && await execution.active(workspace.id)) {
       await execution.deps.logins.refreshAvailability(workspace.id);
       const bootstrapContextId = await execution.bootstrap(workspace.id);
-      const [setup, target, baseCommit, agentLogins] = await Promise.all([github.workspaceSetup(workspace, computers), github.identities.primary(workspace),
-        store.baseCommit(workspace.id), execution.deps.logins.availability(workspace.id)]);
-      return { t: "config", actingUser: 1, bootstrapContextId, agents: {}, agentLogins, gitIdentity: null, loginRevision: workspace.loginRevision ?? "0",
+      const [setup, target, baseCommit, presentation] = await Promise.all([github.workspaceSetup(workspace, computers), github.identities.primary(workspace),
+        store.baseCommit(workspace.id), execution.deps.logins.presentation(workspace.id)]);
+      return { t: "config", actingUser: 1, bootstrapContextId, agents: {}, ...presentation, gitIdentity: null, loginRevision: workspace.loginRevision ?? "0",
         promptOutbox: 1, notifyUser: 1, githubPullRequests: 1, githubUserTokens: 1, agentInteractions: 1, runtimeUpdate: 1,
         workspace: { id: workspace.id, organizationId: workspace.organizationId, repository: workspace.repository,
           checkoutPath: `${CLOUD_V2_HOME}/${workspace.repository}`, branch: workspace.branch, baseBranch: workspace.baseBranch,

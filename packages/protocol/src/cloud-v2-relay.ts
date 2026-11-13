@@ -70,6 +70,11 @@ export const CloudConnectionRenewedFrameSchema = z.union([
   z.object({ type: z.literal("CLOUD_CONNECTION_RENEWED"), requestId: z.uuid(), ...rolloverSchedule }),
   z.object({ type: z.literal("CLOUD_CONNECTION_RENEWED"), requestId: z.uuid(), error: z.object({ code: CloudConnectionRenewRefusalSchema }) }),
 ]);
+/** Activated: the worker serves an activated config's agentModels (the current Creator's selectable model ids) as each
+ * agent's picker list. */
+export const CREATOR_AGENT_MODELS_FEATURE = "creator-agent-models-v1";
+const creatorModelIds = z.array(z.string().max(256).regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]*(?:\[1m\])?$/)).max(128)
+  .refine(value => new Set(value).size === value.length, "Duplicate model ids");
 /** A decimal bigint string, 1..9223372036854775806, never a JSON number. */
 const GENERATION = /^[1-9][0-9]{0,18}$/;
 // The regex is checked again inside the refine: zod still runs a refine after a failed regex, and BigInt() throws on non-digits.
@@ -236,6 +241,9 @@ export const CloudV2ControlFrameSchema = z.discriminatedUnion("t", [
     /** Creator pays (creator-agent-logins-v1 only): the agents the CURRENT Creator has a selected login for, true-only and
      * sparse, fenced by loginRevision. Presentation only, never a credential; {} is known-empty, absent is unknown. */
     agentLogins: z.object({ claude: z.literal(true).optional(), codex: z.literal(true).optional(), cursor: z.literal(true).optional() }).strict().optional(),
+    /** creator-agent-models-v1 only: the CURRENT Creator's selectable model ids per agent, from the same snapshot and
+     * loginRevision as agentLogins. Sparse; no login, no entry. Ids only, never a credential. */
+    agentModels: z.object({ claude: creatorModelIds.optional(), codex: creatorModelIds.optional(), cursor: creatorModelIds.optional() }).strict().optional(),
     /** Sent only to workers advertising workspace-api-v1 whose workspace has
      * API access. The token is fixed for one VM run (create or wake until stop). */
     api: z.object({

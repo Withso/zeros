@@ -131,7 +131,7 @@ async function configuration(deps: CloudV2WorkerRouteDeps, workspace: CloudV2Wor
     if (!after || !sameMaterialAuthority(before, after)) throw unauthorized();
     const revision = before.loginRevision;
     if (revision === after.loginRevision) {
-      const { api, agentLogins, localCommands: _localCommands, localCommandReason: _localCommandReason, notifyUser: _notifyUser, mcpServers, githubPullRequests, githubUserTokens, gitIdentity, agentInteractions, codeReview, historyReplacement: _historyReplacement, environment, runtimeUpdate: _runtimeUpdate, ...legacy } = config;
+      const { api, agentLogins, agentModels, localCommands: _localCommands, localCommandReason: _localCommandReason, notifyUser: _notifyUser, mcpServers, githubPullRequests, githubUserTokens, gitIdentity, agentInteractions, codeReview, historyReplacement: _historyReplacement, environment, runtimeUpdate: _runtimeUpdate, ...legacy } = config;
       if (environment && !features.has("workspace-environment-v1"))
         throw new HttpError(409, "cloud_environment_runtime_required", "Update the cloud runtime before opening this workspace.");
       const { setup, setupScript, baseCommit, github, ...workspaceConfig } = config.workspace;
@@ -144,6 +144,7 @@ async function configuration(deps: CloudV2WorkerRouteDeps, workspace: CloudV2Wor
         ...(features.has("checkout-v2") && baseCommit !== undefined ? { baseCommit } : {}) },
         ...(features.has("agent-interactions-v1") && agentInteractions === 1 ? { agentInteractions } : {}),
         ...(active && features.has("creator-agent-logins-v1") && agentLogins ? { agentLogins } : {}),
+        ...(active && features.has("creator-agent-models-v1") && agentModels ? { agentModels } : {}),
         ...(features.has("workspace-api-v1") && api ? { api } : {}),
         ...(localCommandsEnabled ? { localCommands: 1 } : {}),
         ...(localCommandsEnabled && features.has(LOCAL_COMMANDS_REASON_FEATURE) ? { localCommandReason: 1 } : {}),

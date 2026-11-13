@@ -594,6 +594,10 @@ export class CloudWorker {
       if (!this.stopping) await (config.actingUser === 1 ? this.reviews!.configurePerRequester() : this.reviews!.configure(config.codeReview));
       if (!this.reviews!.enabled) this.workspaceMcp.revokeReview();
       this.agents!.configure(config);
+      // The agents and their model lists follow the login revision (and, activated, the Creator's logins and models):
+      // every client re-reads them now instead of polling.
+      if (changed?.some(key => key === "loginRevision" || key === "agentLogins" || key === "agentModels"))
+        void this.broadcast(createMessage({ type: "DB_CHANGED", source: "engine", kinds: ["agents"], workspaceIds: [scope.workspace.id] }));
     }
     if (this.disposed) return;
     if (this.stopping) {

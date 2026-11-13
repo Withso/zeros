@@ -1,0 +1,9 @@
+{
+  "id": "cloud-creator-model-availability",
+  "kind": "replay",
+  "area": "control-plane-workers",
+  "fixedBy": "pr:1073",
+  "symptom": "An activated workspace member without a personal agent login saw only the selected model, although the Creator had selected multiple models and connected another agent.",
+  "rule": "Project available agents and selectable model ids from the same current-Creator snapshot. Verify model-only updates, a new connection and Reassign through the live carrier, including feature negotiation for older workers (zstack principles 5, 6, 13 and 16).",
+  "check": "pnpm --dir apps/control-plane test src/cloud/execution/creator-models.integration.test.ts src/cloud/creator-models-contract.test.ts src/cloud/relay.test.ts"
+}
