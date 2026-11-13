@@ -3,7 +3,7 @@ import { access, lstat, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { CloudV2ClientOperationSchema, CloudV2ControlFrameSchema, type CloudV2BootCleanRefusal, type CloudV2ClientLease, CLOUD_V2_RELAY_PROTOCOL, CLOUD_WORKSPACE_RESOURCES_CAPABILITY, CLOUD_WORKSPACE_RESOURCES_PUSH_MS, CLOUD_WORKSPACE_RESOURCES_WATCH_CAPABILITY, type CloudV2ControlFrame, type CloudV2SetupStatus, type CloudV2WorkerFrame, type RuntimeMcpServer } from "@zeros/protocol/cloud-v2-relay";
+import { CloudV2ClientOperationSchema, CloudV2ControlFrameSchema, type CloudV2BootCleanRefusal, type CloudV2ClientLease, CLOUD_V2_RELAY_PROTOCOL, CLOUD_WORKSPACE_RESOURCES_CAPABILITY, CLOUD_WORKSPACE_RESOURCES_PUSH_MS, CLOUD_WORKSPACE_RESOURCES_WATCH_CAPABILITY, PUSH_SIGNALS_REPORT_MS, type CloudV2ControlFrame, type CloudV2SetupStatus, type CloudV2WorkerFrame, type RuntimeMcpServer } from "@zeros/protocol/cloud-v2-relay";
 import { CloudV2PromptPullReplySchema } from "@zeros/protocol/cloud-v2-prompts";
 import { createMessage, type BridgeMessage, type ClientOperationFailure } from "@zeros/protocol/messages";
 import { safeParseClientBridgeMessage } from "@zeros/protocol/schemas";
@@ -291,8 +291,7 @@ export class CloudWorker {
   start(): void {
     if (this.started || this.disposed) return;
     this.started = true;
-    this.heartbeat = setInterval(() => { void this.reportIdle(this.busy); }, 55_000);
-    this.heartbeat.unref?.();
+    this.armIdleHeartbeat();
     this.options.transport.start({
       open: async () => {
         if (this.disposed) return;
@@ -304,6 +303,7 @@ export class CloudWorker {
         void this.setup?.reportCurrent();
       },
       frame: (raw) => this.receive(raw),
+      runtimeUpdate: () => { this.runtimeUpdater?.hint(); void this.runtimeUpdater?.tick(); },
       close: () => {
         this.online = false; this.appliedSections = undefined; this.disconnects++;
         for (const client of this.clients.values()) this.terminals?.detach(client);
@@ -621,6 +621,7 @@ export class CloudWorker {
         void this.broadcast(createMessage({ type: "DB_CHANGED", source: "engine", kinds: ["agents"], workspaceIds: [scope.workspace.id] }));
     }
     if (this.disposed) return;
+    this.applyPushSignals(config.pushSignals === 1);
     if (this.stopping) {
       // Stop can need refreshed credentials to finish its final mirror receipt.
       this.history!.connect();
@@ -897,6 +898,24 @@ export class CloudWorker {
     }, this.options.resourcesPushMs ?? CLOUD_WORKSPACE_RESOURCES_PUSH_MS);
     timer.unref?.();
     this.resourceWatchers.set(client.id, timer);
+  }
+  /** R1 push-signals-v1: once the control plane accepts the cadences, the forced idle report runs every 5 min (it is
+   * still sent on every busy/idle change), the transport pulse every 5 min, the prompt long poll 60 s and the runtime
+   * update check falls back to 15 min. Without it, today's timers stay. */
+  private pushSignals = false;
+  private applyPushSignals(on: boolean): void {
+    if (this.promptInbox) this.promptInbox.pushSignals = on;
+    this.runtimeUpdater?.setPushSignals(on);
+    if (on === this.pushSignals) return;
+    this.pushSignals = on;
+    this.options.transport.setPushSignals?.(on);
+    this.armIdleHeartbeat();
+  }
+  private armIdleHeartbeat(): void {
+    clearInterval(this.heartbeat);
+    if (!this.started || this.disposed) return;
+    this.heartbeat = setInterval(() => { void this.reportIdle(this.busy); }, this.pushSignals ? PUSH_SIGNALS_REPORT_MS : 55_000);
+    this.heartbeat.unref?.();
   }
 
   /** A context's Git author env; its include file is removed when the context ends. */

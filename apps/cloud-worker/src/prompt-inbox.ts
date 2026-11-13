@@ -1,6 +1,6 @@
 import { setTimeout as delay } from "node:timers/promises";
 import { z } from "zod";
-import { CLOUD_V2_PROMPT_POLL_MS, CloudV2PromptPullReplySchema, CloudV2PromptStateSchema, CloudV2PromptStopReplySchema,
+import { CLOUD_V2_PROMPT_POLL_MS, CLOUD_V2_PROMPT_PUSH_POLL_MS, CloudV2PromptPullReplySchema, CloudV2PromptStateSchema, CloudV2PromptStopReplySchema,
   type CloudV2PromptDelivery, type CloudV2PromptState } from "@zeros/protocol/cloud-v2-prompts";
 import { CloudV2BeginActiveReplySchema } from "@zeros/protocol/cloud-v2-relay";
 import type { Agents, OutboxAssignment } from "./agents";
@@ -21,6 +21,8 @@ export class PromptInbox {
   private readonly held = new Set<string>();
   private polling?: AbortController;
   private hinted = true;
+  /** push-signals-v1 accepted: the long poll lasts 60 s (the relay's hint still wakes it at once). */
+  pushSignals = false;
   private task?: Promise<void>;
   private unsubscribe?: () => void;
   private receiving = false;
@@ -138,7 +140,7 @@ export class PromptInbox {
         await this.report();
         const controller = new AbortController(); this.polling = controller;
         const signal = AbortSignal.any([controller.signal, this.lifetime.signal]);
-        const waitMs = this.hinted ? 0 : CLOUD_V2_PROMPT_POLL_MS; this.hinted = false;
+        const waitMs = this.hinted ? 0 : this.pushSignals ? CLOUD_V2_PROMPT_PUSH_POLL_MS : CLOUD_V2_PROMPT_POLL_MS; this.hinted = false;
         let batch;
         try { batch = CloudV2PromptPullReplySchema.parse(await this.request("pull", { waitMs, held: [...this.held] }, signal)); }
         catch (error) { hintAbortedPoll = controller.signal.aborted; throw error; }

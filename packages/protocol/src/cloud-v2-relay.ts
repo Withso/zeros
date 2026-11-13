@@ -75,6 +75,11 @@ export const CloudConnectionRenewedFrameSchema = z.union([
 export const CREATOR_AGENT_MODELS_FEATURE = "creator-agent-models-v1";
 /** Activated: every commit is authored as the current Creator (VM-wide identity); leases carry the person's name for review. */
 export const CREATOR_COMMIT_IDENTITY_FEATURE = "creator-commit-identity-v1";
+/** R1 push, not poll: with config pushSignals: 1 the worker long-polls prompts 60 s, reports busy/idle on change plus
+ * every 5 min, sends its activity pulse every 5 min and checks for runtime updates on a pushed hint (15 min fallback). */
+export const PUSH_SIGNALS_FEATURE = "push-signals-v1";
+export const PUSH_SIGNALS_REPORT_MS = 300_000;
+export const PUSH_SIGNALS_RUNTIME_CHECK_MS = 900_000;
 const creatorModelIds = z.array(z.string().max(256).regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]*(?:\[1m\])?$/)).max(128)
   .refine(value => new Set(value).size === value.length, "Duplicate model ids");
 /** A decimal bigint string, 1..9223372036854775806, never a JSON number. */
@@ -230,6 +235,8 @@ export const CloudV2ControlFrameSchema = z.discriminatedUnion("t", [
     /** creator-commit-identity-v1 only: "creator" = gitIdentity is the current Creator's (null: none stored, commits refuse);
      * "actor" = no Creator, each context commits as its own person. Absent: N−1 behaviour. */
     gitIdentitySource: z.enum(["creator", "actor"]).optional(),
+    /** push-signals-v1 only: the control plane accepts the R1 cadences (see PUSH_SIGNALS_FEATURE). */
+    pushSignals: z.literal(1).optional(),
   githubPullRequests: z.literal(1).optional(),
     githubUserTokens: z.literal(1).optional(),
     /** local-commands-v1 workers only, while the organization allows local
