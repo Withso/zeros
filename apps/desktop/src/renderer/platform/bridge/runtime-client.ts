@@ -948,6 +948,8 @@ export class RuntimeClient {
       generation: target.generation, authorityEpoch: target.authorityEpoch, engineInstanceId: target.engineInstanceId,
       connectionSequence: target.connectionSequence, channel: target.channel } : undefined;
   }
+  /** The socket whose handshake last reported ready, so a repeat on it is labelled in diagnostics. */
+  private readySocket?: unknown;
   private cloudDiagnostic(event: CloudDiagnosticEvent, data: Record<string, string | number | null | undefined>,
     scope = this.diagnosticScope()): void {
     if (!scope) return;
@@ -1020,7 +1022,10 @@ export class RuntimeClient {
         resetCloudConnectBackoff(this.cloudBackoffKey()!);
       }
       this.reconnectAttempts = 0;
-      this.cloudDiagnostic("ready", {});
+      // A worker may re-send ENGINE_READY on the same socket (a re-applied configuration); that is not a reconnect.
+      const repeat = this.readySocket === socket;
+      this.readySocket = socket;
+      this.cloudDiagnostic("ready", repeat ? { repeat: 1 } : {});
       // Make room for synchronous status-listener RPCs even when the
       // disconnect queue was full. The concurrency bound still applies.
       if (this.connectionTarget.kind === "cloud") this.flushQueue();
