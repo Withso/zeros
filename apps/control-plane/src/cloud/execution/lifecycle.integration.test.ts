@@ -1,13 +1,14 @@
 import { randomUUID } from "node:crypto";
 import pg from "pg";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { withSystemTx } from "../../db.js";
 import { executionFixture, type ExecutionFixture } from "./test-fixture.js";
 
 const database = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 database("shared execution lifecycle and metadata", () => {
   let pool: pg.Pool, f: ExecutionFixture;
   beforeAll(() => { pool = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL, max: 8, statement_timeout: 4000 }); });
-  beforeEach(async () => { f = await executionFixture(pool); await f.activate(); expect((await f.hello()).status).toBe(200); });
+  beforeEach(async () => { f = await executionFixture(pool, { teamOwnership: true }); await f.activate(); expect((await f.hello()).status).toBe(200); });
   afterEach(async () => { await f?.close(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
   afterAll(() => pool.end());
   const call = (action: string, body?: unknown, user = f.viewer) => f.call(`/v1/cloud-v2/workspaces/${f.workspace.id}/${action}`, "POST", body, user, { "X-Zeros-Team-Sharing": "1" });
@@ -28,6 +29,47 @@ database("shared execution lifecycle and metadata", () => {
     expect((await call("stop")).status).toBe(202);
     expect(f.fetcher).not.toHaveBeenCalled();
     expect((await call("archive")).status).toBe(403);
+  });
+  it("starts a workspace with no Creator using only the waking member's bootstrap authority", async () => {
+    await withSystemTx(pool, tx => tx.query("DELETE FROM organization_members WHERE org_id=$1 AND user_id=$2", [f.organizationId, f.creator.id]));
+    await pool.query("UPDATE cloud_v2_workspaces SET state='stopped' WHERE id=$1", [f.workspace.id]);
+    const response = await f.call(`/v1/cloud-v2/workspaces/${f.workspace.id}/start`, "POST", {}, f.viewer,
+      { "X-Zeros-Team-Sharing": "1", "X-Zeros-Team-Ownership": "1" });
+    expect(response.status).toBe(202);
+    expect(await response.json()).toMatchObject({ teamSharing: 1, teamOwnership: 1, workspace: {
+      creatorUserId: null, teamOwnership: 1, creatorRevision: "2", noCreatorReason: "left", canReassign: false,
+    } });
+    expect((await pool.query("SELECT creator_user_id,execution_initiator_user_id,state FROM cloud_v2_workspaces WHERE id=$1", [f.workspace.id])).rows[0])
+      .toEqual({ creator_user_id: null, execution_initiator_user_id: f.viewer.id, state: "starting" });
+    const token = await f.cp.store.rotateWorkerToken(f.workspace.id), boot = randomUUID();
+    const options = { token, boot, features: `${f.features},creator-agent-logins-v1` };
+    const hello = await f.worker("hello", { protocol: 2, bootId: boot, runtimeSha256: "b".repeat(64) }, options);
+    expect(hello.status).toBe(200);
+    const { config } = await hello.json();
+    expect(config).toMatchObject({ actingUser: 1, agents: {}, agentLogins: {}, gitIdentity: null, bootstrapContextId: expect.any(String) });
+    expect(config).not.toHaveProperty("environment");
+    expect((await f.worker("execution-leases/boot-clean", { retirementId: randomUUID(), processes: 0, legacyMaterial: "none" }, options)).status).toBe(200);
+    const bootstrap = await f.worker("bootstrap-lease", { contextId: config.bootstrapContextId }, options);
+    expect(bootstrap.status).toBe(200);
+    const lease = await bootstrap.json();
+    expect(lease.userId).toBe(f.viewer.id); expect(lease).not.toHaveProperty("agents");
+    const github = await f.worker("github-token", { contextId: lease.contextId, purpose: "git" }, options);
+    expect(github.status).toBe(200); expect((await github.json()).token).toBe(`synthetic-${f.viewer.id}`);
+    expect((await f.worker(`execution-leases/${lease.contextId}/retired`, { retirementId: randomUUID(), reason: "setup_done", processes: 0 }, options)).status).toBe(200);
+    f.fetcher.mockClear();
+    const stopped = await f.call(`/v1/cloud-v2/workspaces/${f.workspace.id}/stop`, "POST", {}, f.viewer,
+      { "X-Zeros-Team-Sharing": "1", "X-Zeros-Team-Ownership": "1" });
+    expect(stopped.status).toBe(202);
+    expect(await stopped.json()).toMatchObject({ teamOwnership: 1, workspace: { creatorUserId: null, teamOwnership: 1, state: "stopping" } });
+    expect(f.fetcher).not.toHaveBeenCalled();
+  });
+  it("refuses an unnegotiated no-Creator lifecycle request before changing its state", async () => {
+    await withSystemTx(pool, tx => tx.query("DELETE FROM organization_members WHERE org_id=$1 AND user_id=$2", [f.organizationId, f.creator.id]));
+    await pool.query("UPDATE cloud_v2_workspaces SET state='stopped' WHERE id=$1", [f.workspace.id]);
+    const response = await call("start");
+    expect(response.status).toBe(409);
+    expect((await response.json()).error.code).toBe("team_ownership_required");
+    expect((await pool.query("SELECT state FROM cloud_v2_workspaces WHERE id=$1", [f.workspace.id])).rows[0].state).toBe("stopped");
   });
   it.each(["left", "erased"])("refreshes credential-free config after the completed setup initiator is %s", async state => {
     await f.activate(f.viewer);

@@ -17,6 +17,7 @@ export type TeamView = {
   workspace: CloudV2Workspace; createdByUserId: string | null; role: "creator" | "admin" | "member";
   epoch: string; signature: string; signatureVersion?: 2; targets: readonly CloudSourceTarget[]; ongoing: boolean;
   verifications: VerificationRow[]; databaseNow: number;
+  executionMode: string; creatorRevision: string; noCreatorReason: "left" | "hold" | "account_revoked" | null;
 };
 type VerificationRow = { repositoryId: string; fingerprint: string; verifiedAt: number | null; failureCode: string | null; failureStatus: HttpError["status"] | null };
 export type TeamAdmission = { user: AuthedUser; view: TeamView; source: CloudViewerSourceProof | null };
@@ -41,9 +42,10 @@ export class CloudTeamAuthority {
   async snapshots(tx: Tx, ids: readonly string[], user: AuthedUser, proofs: readonly TeamAdmission[] = []): Promise<Map<string,TeamView>> {
     type Row = CloudV2WorkspaceRow & { execution_mode: string; created_by_user_id: string | null; role: string; access_epoch: string; login_revision: string;
       member_revision: string; member_created_at: string; org_revision: string; organization_policy: unknown; source_repositories: string[] | null; sources: unknown; ongoing: boolean; connection_revision: unknown;
-      verifications: VerificationRow[]; database_now: string };
+      verifications: VerificationRow[]; database_now: string; creator_revision: string; creator_absent_reason: TeamView["noCreatorReason"] };
     const rows = (await tx.query<Row>(`SELECT ${CLOUD_V2_WORKSPACE_COLUMNS.map(name => `w.${name}`).join(",")},
       w.execution_mode,w.created_by_user_id,w.access_epoch::text,w.login_revision::text,m.role,m.authorization_revision::text AS member_revision,m.created_at::text AS member_created_at,w.source_repositories,
+      w.creator_revision::text,w.creator_absent_reason,
       (SELECT jsonb_build_array(is_personal,cloud_workspaces_allowed,deleted_at IS NULL) FROM organizations WHERE id=w.org_id) AS organization_policy,
       (SELECT authorization_revision::text FROM organizations WHERE id=w.org_id) AS org_revision,
       coalesce((SELECT jsonb_agg(jsonb_build_object('repository',s.source_repository,'repositoryId',s.repository_id::text) ORDER BY s.source_repository)
@@ -68,6 +70,7 @@ export class CloudTeamAuthority {
       if (!row.source_pending && (!targets.success || !targets.data.length || targets.data.length !== names.length ||
           targets.data.some((target,index) => target.repository !== names[index]) || !names.includes(row.repository.toLowerCase()))) throw teamUnavailable();
       return [row.id,{ workspace: cloudV2WorkspaceFromRow(row),createdByUserId: row.created_by_user_id,
+        executionMode: row.execution_mode,creatorRevision: row.creator_revision,noCreatorReason: row.creator_absent_reason,
         role: row.creator_user_id === user.id ? "creator" : ["owner","admin"].includes(row.role) ? "admin" : "member",
         epoch: row.access_epoch,targets: targets.success ? targets.data : [],ongoing: row.ongoing,
         verifications: row.verifications,databaseNow: Number(row.database_now),

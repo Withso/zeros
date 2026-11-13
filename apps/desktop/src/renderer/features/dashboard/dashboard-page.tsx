@@ -220,6 +220,8 @@ export function DashboardPage() {
             value: byValue,
             onChange: setBy,
             people: (roster ?? []).filter((member) => member.id !== me),
+            // 3B: No Creator is for the organization's owners and admins (their role, not any one row's canReassign).
+            noCreator: ["owner", "admin"].includes((roster ?? []).find((member) => member.id === me)?.role ?? ""),
           }
         : undefined,
     [sharing, sharingOrganizationId, byValue, setBy, roster, me],

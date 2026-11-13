@@ -3,6 +3,7 @@ import pg from "pg";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { manageCloudExecution, type CloudExecutionChange } from "../../manage-cloud-execution.js";
 import { withSystemTx } from "../../db.js";
+import { configureCloudTeamOwnership } from "../../db-context.js";
 import { HttpError } from "../../authz.js";
 import type { CloudV2Compute } from "../boat.js";
 import { CloudProviderError } from "../provider-error.js";
@@ -428,5 +429,32 @@ database("durable activation through provider Stop and real worker routes", () =
     expect(await row()).toMatchObject({ state: "stopped", execution_mode: "legacy", execution_transition_id: null, worker_token_hash: null, worker_boot_id: null });
     expect((await row()).stop_generation).toBe(stopped.stop_generation);
     expect((await activation()).phase).toBe("rolled_back");
+  });
+
+  it("requires Reassign before planning a no-Creator rollback", async () => {
+    await lifecycle.tick(); await advance(); const started = await boot();
+    expect((await started.call("execution-leases/boot-clean", { retirementId: randomUUID(), processes: 0, legacyMaterial: "none" })).status).toBe(200);
+    configureCloudTeamOwnership(pool,true);
+    await withSystemTx(pool, tx => tx.query("DELETE FROM organization_members WHERE org_id=$1 AND user_id=$2", [f.organizationId,f.creator.id]));
+    await f.cp.store.requestExecutionLifecycle(f.workspace.id,f.viewer.id,"stop");
+    await lifecycle.tick();
+    const before = await row();
+    expect(before).toMatchObject({ state: "stopped", creator_user_id: null, execution_mode: "active" });
+    await expect(manageCloudExecution(pool,{ ...input,action: "rollback" },options())).rejects.toThrow(/reassign.*Creator/i);
+    expect(await row()).toEqual(before);
+  });
+
+  it("binds a rollback approval to the current Creator revision", async () => {
+    await lifecycle.tick(); await advance(); const started = await boot();
+    expect((await started.call("execution-leases/boot-clean", { retirementId: randomUUID(), processes: 0, legacyMaterial: "none" })).status).toBe(200);
+    await f.call(`/v1/cloud-v2/workspaces/${f.workspace.id}/stop`,"POST");
+    await lifecycle.tick();
+    const request = { ...input,action: "rollback" as const }, plan = await manageCloudExecution(pool,request,options());
+    configureCloudTeamOwnership(pool,true);
+    await withSystemTx(pool, tx => tx.query("UPDATE cloud_v2_workspaces SET creator_user_id=$2 WHERE id=$1", [f.workspace.id,f.viewer.id]));
+    await expect(manageCloudExecution(pool,request,{ ...options(),execute: true,approval: plan.planSha256 })).rejects.toThrow(/plan changed/);
+    expect((await row()).execution_mode).toBe("active");
+    expect((await run("rollback")).state).toBe("changed");
+    expect(await row()).toMatchObject({ execution_mode: "legacy", creator_user_id: f.viewer.id });
   });
 });

@@ -10,6 +10,7 @@ import WebSocket, { WebSocketServer, type RawData } from "ws";
 import { CLOUD_V2_MAX_FRAME_BYTES, CloudV2WorkerFrameSchema, type CloudV2ControlFrame, type CloudV2ContextReason } from "./contract.js";
 import type { PostgresSecurityEventBroker } from "../security-events.js";
 import type { CloudV2Store, CloudV2Workspace, CloudV2WorkerBinding, CloudV2AppGrant } from "./store.js";
+import { requireWorkspaceCreator } from "./workspace-access.js";
 import { isCloudV2Token } from "./tokens.js";
 import type { CloudExecutionContexts } from "./execution/store.js";
 import { dialWorker, workerSupportsActingUser, workerSupportsCreatorLogins, workerSupportsApi, workerSupportsLocalCommands, workerSupportsLocalCommandReason, workerSupportsNotifyUser, workerSupportsCheckout, workerSupportsMcp, workerSupportsSetup, workerSupportsRepositorySetup, workerSupportsGithub, workerSupportsGitIdentity, workerSupportsGithubUserTokens, workerSupportsAgentInteractions, workerSupportsCodeReview, workerSupportsHistoryReplacement, workerSupportsEnvironment, workerSupportsRuntimeUpdate, workerSupportsPush, type WorkerRoute } from "./worker-connection.js";
@@ -561,6 +562,7 @@ export class CloudV2Relay {
     const legacySend = request?.type === "AGENT_PROMPT" || request?.type === "AGENT_STEER";
     if (legacySend && this.deps.retireLocalSender) {
       try {
+        requireWorkspaceCreator(room.workspace);
         await this.deps.retireLocalSender(room.workspace.id, room.workspace.creatorUserId, epoch, client.sessionId);
       } catch { client.ws.close(1013, "workspace_verification_unavailable"); return; }
       if (room.revoked || room.worker !== worker || room.accessEpoch !== epoch || room.clients.get(clientId) !== client) return;

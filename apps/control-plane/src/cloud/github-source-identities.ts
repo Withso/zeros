@@ -12,7 +12,7 @@ export class CloudGithubSourceIdentities {
     const { rows } = await withSystemTx(this.pool, (tx) =>
       tx.query<{ source_repository: string; repository_id: string }>(
         `SELECT s.source_repository,s.repository_id::text FROM cloud_v2_github_sources s JOIN cloud_v2_workspaces w ON w.id=s.workspace_id
-       WHERE w.id=$1 AND w.org_id=$2 AND w.creator_user_id=$3 AND w.state NOT IN ('deleted','deleting')`,
+       WHERE w.id=$1 AND w.org_id=$2 AND (w.execution_mode='active' OR w.creator_user_id=$3) AND w.state NOT IN ('deleted','deleting')`,
         [workspace.id, workspace.organizationId, workspace.creatorUserId],
       ),
     );

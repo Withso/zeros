@@ -7,6 +7,7 @@ import { isIP } from "node:net";
 import type pg from "pg";
 
 import type { Config } from "./config.js";
+import { configureCloudTeamOwnership } from "./db-context.js";
 import { DatabaseAcquireTimeoutError } from "./db.js";
 import { createReleaseIdentityRoutes } from "./release-identity.js";
 import { ClientCompatibility, createClientCompatibilityMiddleware } from "./client-compatibility.js";
@@ -105,6 +106,7 @@ export function createApp(
   emailConfig: EmailConfig,
   dependencies: CreateAppDependencies = {},
 ): ControlPlaneApp {
+  configureCloudTeamOwnership(pool, config.cloudV2?.teamOwnership === true);
   const app: ControlPlaneApp = new Hono();
   const databaseTimingReporter = createDatabaseTimingReporter();
   const timing = requestTiming({ slowMs: config.slowRequestLogMs ?? DEFAULT_SLOW_REQUEST_LOG_MS,
@@ -303,6 +305,7 @@ export function createApp(
         "content-type",
         "x-zeros-client",
         "x-zeros-team-sharing",
+        "x-zeros-team-ownership",
         "x-zeros-sync",
         "x-zeros-sync-wanted",
         "idempotency-key",

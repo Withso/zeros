@@ -3,7 +3,7 @@
 import { z } from "zod";
 import { CloudGithubUnavailableReasonSchema } from "@zeros/protocol/cloud-github-connection";
 import { CloudV2AgentCostSchema, CloudV2SetupStatusSchema, RepositorySetupPathSchema } from "@zeros/protocol/cloud-v2-relay";
-import { sharingOf } from "./team-sharing-schema";
+import { ownershipOf, sharingOf } from "./team-sharing-schema";
 import { sharingFor } from "./team-sharing-registry";
 import { isCloudWorkspacePageOwner } from "@zeros/protocol/cloud-workspace-link";
 import { isWorkspaceNumber, type WorkspaceAddress } from "@zeros/protocol/local-orchestration";
@@ -25,7 +25,8 @@ export type CloudV2Capabilities = z.infer<typeof CloudV2CapabilitiesSchema>;
 export const CloudV2WorkspaceSchema = z.object({
   id: uuid,
   organizationId: uuid,
-  creatorUserId: uuid,
+  /** Null only with team ownership (3B): a workspace whose Creator left, is on Hold or lost their account. */
+  creatorUserId: uuid.nullable(),
   name: z.string().min(1).max(200),
   /** Permanent number within the organization (`w-<n>`); absent from an
    * older control plane. */
@@ -50,7 +51,10 @@ export const CloudV2WorkspaceSchema = z.object({
   /** The chat edit route exists (top level only: older desktops parse
    * capabilities strictly). Any other value reads as absent. */
   chatEdits: z.literal(1).optional().catch(undefined),
-}).passthrough();
+}).passthrough()
+  // A missing Creator is never accepted without well-formed team ownership and a known creator of record.
+  .refine(value => value.creatorUserId !== null || (!!ownershipOf(value) && typeof value.createdByUserId === "string" && uuid.safeParse(value.createdByUserId).success),
+    "A workspace without a Creator needs team ownership");
 export type CloudV2Workspace = z.infer<typeof CloudV2WorkspaceSchema>;
 
 /** The shared UI's existing status vocabulary. */
@@ -106,7 +110,7 @@ export function cloudV2Document(workspace: CloudV2Workspace): CloudWorkspaceDocu
     // Undefined (an older control plane) keeps the legacy name in every label.
     ...(workspace.number !== undefined ? { number: workspace.number } : {}),
     ...(workspace.title !== undefined ? { title: workspace.title } : {}),
-    createdBy: workspace.creatorUserId,
+    createdBy: workspace.creatorUserId ?? String(workspace.createdByUserId),
     ownerUserId: workspace.creatorUserId,
     placement: "cloud",
     // Archiving a failed workspace marks it without a stop; both read as archived.

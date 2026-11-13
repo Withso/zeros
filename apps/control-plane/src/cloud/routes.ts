@@ -32,6 +32,7 @@ import type { RuntimeCapabilities } from "./runtime-capabilities.js";
 import { createCloudLocalDeviceRoutes, type CloudLocalDeviceRoutes } from "./local-commands/routes.js";
 import { createCloudTeamRoutes } from "./team-sharing/routes.js";
 import type { CloudTeamSharing } from "./team-sharing/store.js";
+import { TEAM_SHARING_HEADER, TEAM_OWNERSHIP_HEADER, teamOwnershipRequired } from "./team-sharing/contract.js";
 
 export type CloudGithubWorkspaceDocument = CloudV2Workspace & {
   checkoutPath?: string;
@@ -182,13 +183,23 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
     const organization = c.req.param("organization").toLowerCase(), number = c.req.param("number");
     if (!deps.store.getByNumber || !ORGANIZATION_SLUG.test(organization) || !WORKSPACE_NUMBER.test(number) || Number(number) > MAX_WORKSPACE_NUMBER)
       throw new HttpError(404, "not_found", "Cloud workspace not found");
-    return c.json({ workspace: await document(await deps.store.getByNumber(organization, Number(number), c.get("user").id)) });
+    try { return c.json({ workspace: await document(await deps.store.getByNumber(organization, Number(number), c.get("user").id)) }); }
+    catch (error) {
+      if (error instanceof HttpError && error.status === 404)
+        await deps.teamSharing?.requireOwnershipAfterHiddenRead(c.get("user"), { organization, number: Number(number) });
+      throw error;
+    }
   });
 
   app.get("/v1/cloud-v2/workspaces/:id", async c => {
     const id = uuid.safeParse(c.req.param("id"));
     if (!id.success) throw new HttpError(404, "not_found", "Cloud workspace not found");
-    return c.json({ workspace: await document(await deps.store.get(id.data, c.get("user").id)) });
+    try { return c.json({ workspace: await document(await deps.store.get(id.data, c.get("user").id)) }); }
+    catch (error) {
+      if (error instanceof HttpError && error.status === 404)
+        await deps.teamSharing?.requireOwnershipAfterHiddenRead(c.get("user"), { id: id.data });
+      throw error;
+    }
   });
 
   /** A one-use, one-minute ticket. Passive reconnects keep stopped VMs stopped;
@@ -252,9 +263,16 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
       const id = uuid.safeParse(c.req.param("id"));
       if (!id.success) throw new HttpError(404, "not_found", "Cloud workspace not found");
       const user = c.get("user"), active = deps.execution && await deps.execution.active(id.data);
+      const ownership = c.req.header(TEAM_SHARING_HEADER) === "1" && c.req.header(TEAM_OWNERSHIP_HEADER) === "1";
+      if (active && !ownership) await deps.teamSharing?.requireOwnershipAfterHiddenRead(user, { id: id.data });
       if (!active && (action === "start" || action === "restart")) await deps.authorizeSource?.(await deps.store.get(id.data, user.id));
       const proof = active && action !== "stop" ? await deps.execution!.deps.authority.admit(id.data, user.id, { user }) : undefined;
       const { workspace, moved } = active ? await deps.store.requestExecutionLifecycle!(id.data, user.id, action, proof, user) : await deps.store.requestLifecycle(id.data, user.id, action);
+      if (active && ownership && deps.teamSharing) return c.json({
+        workspace: workspaceDocument(await deps.teamSharing.lifecycleDocument(id.data,user),deps.promptOutbox === true,!!chatEdits),
+        teamSharing: 1,teamOwnership: 1,
+      },moved || action === "restart" ? 202 : 200);
+      if (workspace.creatorUserId === null) throw teamOwnershipRequired();
       return c.json({ workspace: await document(workspace) }, moved || action === "restart" ? 202 : 200);
     });
   }

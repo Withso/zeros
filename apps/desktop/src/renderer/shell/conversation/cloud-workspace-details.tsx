@@ -3,6 +3,7 @@ import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import { Activity, ArrowUpRight, CircleDollarSign, Clock, Cloud, Cpu, FolderGit2, HardDrive, MemoryStick, Pencil, RotateCw, UserRound, Users, Wrench, type LucideIcon } from "lucide-react";
 import type { CloudWorkspaceResources } from "@zeros/protocol/cloud-v2-relay";
 import { Button, Tooltip } from "../../shared/ui/primitives";
+import { openReassignDialog } from "../../platform/reassign-dialog-signal";
 import { Popover, PopoverContent } from "../../shared/ui/primitives/popover";
 import { toast } from "../../shared/ui/primitives/elements";
 import { shellOpenUrl } from "../../platform/app";
@@ -42,8 +43,10 @@ function setupLabel(setup: NonNullable<CloudWorkspaceDocument["setup"]>): string
  * and status (with Start, Stop and Restart), its setup and agent cost when the
  * document carries them, then the VM's usage when its worker reports it.
  * Older servers and workers report none, and those rows stay out. */
-export function CloudWorkspaceDetailsCard({ workspace, title, statusLabel, resources, changing, onChange, creatorName, runnerName, followers, onRename }: {
+export function CloudWorkspaceDetailsCard({ workspace, title, statusLabel, resources, changing, onChange, creatorName, runnerName, followers, onRename, ownership }: {
   workspace: CloudWorkspaceDocument;
+  /** Team sharing 3B: the current Creator's name (null: none), and Reassign for the Creator or an admin. Replaces "Runs it". */
+  ownership?: { creatorName: string | null; onReassign?: () => void } | null;
   title?: string;
   /** Team sharing: who runs it now, when that is not who created it. */
   runnerName?: string | null;
@@ -72,7 +75,11 @@ export function CloudWorkspaceDetailsCard({ workspace, title, statusLabel, resou
     </span> },
     { Icon: Clock, label: "Created", value: <Tooltip label={new Date(workspace.createdAt).toLocaleString()}>
       <span>{creatorName ? `${creatorName} · ` : ""}{createdAge === "now" ? "Just now" : `${createdAge} ago`}</span></Tooltip> },
-    ...(runnerName ? [{ Icon: UserRound, label: "Runs it", value: <span className="min-w-0 truncate">{runnerName}</span> }] : []),
+    ...(ownership ? [{ Icon: UserRound, label: "Creator", value: <span className="inline-flex min-w-0 items-center justify-end gap-1">
+      <span className="min-w-0 truncate">{ownership.creatorName ?? (ownership.onReassign ? "None" : "None · An admin can reassign it.")}</span>
+      {ownership.onReassign && <Button type="button" variant="ghost" size="compact" onClick={ownership.onReassign}>Reassign…</Button>}
+    </span> }]
+      : runnerName ? [{ Icon: UserRound, label: "Runs it", value: <span className="min-w-0 truncate">{runnerName}</span> }] : []),
     ...(followers ? [{ Icon: Users, label: "Followers", value: followers.count === 0 ? "None" : (
       <Tooltip label={followers.names.join(", ") + (followers.count > followers.names.length ? ` and ${followers.count - followers.names.length} more` : "")}>
         <span className="min-w-0 truncate">{followers.count === 1 ? followers.names[0] ?? "1 person" : `${followers.count} people`}</span>
@@ -197,6 +204,8 @@ export function CloudWorkspaceDetails({ folder, name, title, workspace }: {
       <PopoverContent align="start" sideOffset={6} className="w-[320px]" aria-label="Cloud workspace details">
         {workspace ? (
           <CloudWorkspaceDetailsCard workspace={workspace} title={title} creatorName={creatorName} runnerName={runnerName} followers={followers}
+            ownership={sharing?.ownership ? { creatorName: workspace.ownerUserId ? nameOf(workspace.ownerUserId) : null,
+              ...(sharing.ownership.canReassign ? { onReassign: () => openReassignDialog(target) } : {}) } : null}
             onRename={sharing && workspace.capabilities.canManage ? name => renameSharedCloudWorkspace(target, name) : undefined} statusLabel={cloudStatusLabel(workspace.status, availability)}
             resources={running ? resources : null} changing={changing} onChange={change} />
         ) : <p className="text-fg2 text-xs">Loading workspace details…</p>}

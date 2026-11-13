@@ -6,6 +6,7 @@ import { GithubTemporaryError, isGithubAccessRevoked, isGithubTemporary } from "
 import type { GithubVerification, GithubVerificationStore } from "./github-verification-store.js";
 import type { GithubRepositoryAuthority, RepositoryRequest } from "../github-repository-authority.js";
 import type { CloudV2Workspace } from "./store.js";
+import { requireWorkspaceCreator } from "./workspace-access.js";
 
 const repositorySchema = z.string().max(201).regex(/^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/)
   .refine(value => value.split("/").every(part => part !== "." && part !== ".."));
@@ -244,9 +245,9 @@ export class CloudV2SourceAuthority {
         this.assertRevision(scope, revision);
       } catch (error) {
         // A rejection from a superseded connection cannot revoke its successor.
-        if (await this.fingerprint(scope) !== fingerprint)
-          error = new HttpError(409, "github_authorization_changed", "GitHub authorization changed. Try again.");
-        const failure = error instanceof HttpError ? error : new HttpError(503, "github_verification_failed", "Repository verification could not complete. Try again.");
+        const currentError = await this.fingerprint(scope) !== fingerprint
+          ? new HttpError(409, "github_authorization_changed", "GitHub authorization changed. Try again.") : error;
+        const failure = currentError instanceof HttpError ? currentError : new HttpError(503, "github_verification_failed", "Repository verification could not complete. Try again.");
         const temporary = isGithubTemporary(failure);
         // A renewal never shortens the positive it renews: an outage records
         // nothing. A confirmed refusal below withdraws it as usual.
@@ -256,7 +257,7 @@ export class CloudV2SourceAuthority {
         }
         const prior = claim ?? previous;
         const backoff = Math.min(15 * 60_000, 60_000 * 2 ** Math.min(prior?.failures ?? 0, 4));
-        const retryAfterMs = Math.max(backoff, error instanceof GithubTemporaryError ? error.retryAfterMs : 0) + Math.floor(backoff * 0.2 * this.random());
+        const retryAfterMs = Math.max(backoff, currentError instanceof GithubTemporaryError ? currentError.retryAfterMs : 0) + Math.floor(backoff * 0.2 * this.random());
         const value = persistent ? await this.verificationStore!.finish(persistent, claim!.claimId!, { allowed: false, temporary, error: failure, retryAfterMs }) : {
           verifiedAt: temporary ? prior?.verifiedAt ?? null : null,
           failure, failures: Math.min((prior?.failures ?? 0) + 1, 16), retryAt: this.now() + retryAfterMs,
@@ -367,6 +368,7 @@ export class CloudV2SourceAuthority {
   /** renew is for the lifecycle's checks of a booting workspace, whose hello
    * follows within seconds. Other checks would renew every 15 s while polled. */
   async workspace(workspace: CloudV2Workspace, renew = false): Promise<void> {
+    requireWorkspaceCreator(workspace);
     const sources = await this.sources(workspace);
     await this.observeSources(workspace.organizationId, workspace.creatorUserId, sources.names, sources.ids, false,
       renew && (workspace.state === "creating" || workspace.state === "starting"));
@@ -375,6 +377,7 @@ export class CloudV2SourceAuthority {
   /** proof comes only from a live creator, worker token or room/session database
    * read. Never accept these revisions from request bodies or a cached client. */
   async continueWorkspace(workspace: CloudV2Workspace, proof?: CloudSourceProof): Promise<CloudSourceContinuation> {
+    requireWorkspaceCreator(workspace);
     if (workspace.state !== "running") {
       await this.workspace(workspace);
       return { recheckAt: this.now() + CLOUD_SOURCE_ADMISSION_MS };

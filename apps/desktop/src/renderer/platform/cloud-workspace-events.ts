@@ -44,7 +44,7 @@ export async function* readCloudWorkspaceEvents(target: CloudWorkspaceTarget, si
   if (!session) throw new ControlPlaneError(401, "signed_out", "Sign in to use cloud workspaces");
   const response = await controlPlaneFetch(`${CONTROL_PLANE_URL}/v1/cloud-v2/workspaces/${encodeURIComponent(uuid.parse(target.workspaceId))}/events`, {
     method: "GET", redirect: "error", cache: "no-store", signal,
-    headers: { authorization: `Bearer ${session.access_token}`, accept: "text/event-stream", "X-Zeros-Team-Sharing": "1" },
+    headers: { authorization: `Bearer ${session.access_token}`, accept: "text/event-stream", "X-Zeros-Team-Sharing": "1", "X-Zeros-Team-Ownership": "1" },
   });
   if (!response.ok) {
     await response.body?.cancel().catch(() => {});

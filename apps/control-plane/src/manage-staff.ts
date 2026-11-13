@@ -1,4 +1,4 @@
-import { SYSTEM_DATABASE_CONTEXT } from "./db-context.js";
+import { SYSTEM_DATABASE_CONTEXT, configuredDatabaseContext, configureCloudTeamOwnership, readCloudTeamOwnership } from "./db-context.js";
 import {parseDatabaseTarget} from "./database-target.js";
 import {createMigrationPool} from "./db.js";
 // Guarded database-owner utility for granting and revoking product-wide staff
@@ -217,7 +217,7 @@ export async function manageStaffRole(
     // transaction must explicitly enter the same bounded system context used
     // by server-side lifecycle work. Relation privileges and the exact table-
     // ownership checks below remain independently enforced.
-    await client.query(SYSTEM_DATABASE_CONTEXT);
+    await client.query(configuredDatabaseContext(pool, SYSTEM_DATABASE_CONTEXT));
 
     const privilege = await client.query<{
       principal: string;
@@ -435,6 +435,7 @@ async function runCli(): Promise<void> {
     reason: process.env.CONTROL_PLANE_STAFF_REASON,
   });
   const pool = createMigrationPool(databaseUrl, {maxConnections: 1});
+  configureCloudTeamOwnership(pool, readCloudTeamOwnership(process.env.ZEROS_CLOUD_TEAM_OWNERSHIP));
   try {
     const result = await manageStaffRole(pool, request);
     console.log(

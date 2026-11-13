@@ -1,5 +1,6 @@
 import { HttpError } from "../../authz.js";
 import { withSystemTx, type Tx } from "../../db.js";
+import { cloudTeamOwnershipEnabled } from "../../db-context.js";
 import { memberOnHoldSql } from "../../organization-seats.js";
 import { CloudWorkerScheduler } from "../../worker-scheduler.js";
 import type { CloudV2ContextReason } from "../contract.js";
@@ -17,6 +18,7 @@ export class CloudExecutionMaintenance {
         await tx.query("DELETE FROM cloud_v2_execution_invalidations WHERE workspace_id=$1", [id]);
         return [];
       }
+      if (cloudTeamOwnershipEnabled(this.contexts.pool)) await tx.query("SELECT clear_cloud_creator_ownership(NULL,NULL,NULL,$1)", [id]);
       await this.contexts.deps.logins.refreshAvailability(id, tx);
       await this.cancelQueued(tx, id);
       const rows = (await tx.query<ExecutionContext>("SELECT * FROM cloud_v2_execution_contexts WHERE workspace_id=$1 AND state='active' ORDER BY id", [id])).rows;
@@ -101,7 +103,12 @@ export class CloudExecutionMaintenance {
   async due(): Promise<string[]> {
     return withSystemTx(this.contexts.pool, async tx => (await tx.query<{ id: string }>(`SELECT id FROM (
       SELECT workspace_id AS id FROM cloud_v2_execution_contexts WHERE state='active' AND expires_at<=clock_timestamp()
-      UNION SELECT workspace_id FROM cloud_v2_execution_invalidations) pending ORDER BY id LIMIT 128`)).rows.map(row => row.id));
+      UNION SELECT workspace_id FROM cloud_v2_execution_invalidations
+      ${cloudTeamOwnershipEnabled(this.contexts.pool) ? `UNION SELECT w.id FROM cloud_v2_workspaces w WHERE w.execution_mode='active'
+        AND w.creator_user_id IS NOT NULL AND w.state<>'deleted' AND NOT EXISTS(
+          SELECT 1 FROM organization_members m JOIN users u ON u.id=m.user_id
+          WHERE m.org_id=w.org_id AND m.user_id=w.creator_user_id AND u.auth_status='active' AND u.deleted_at IS NULL
+            AND NOT ${memberOnHoldSql("m.org_id", "m.user_id")})` : ""}) pending ORDER BY id LIMIT 128`)).rows.map(row => row.id));
   }
 
   async affected(scope: { userId?: string; organizationId?: string }, after?: string): Promise<string[]> {
@@ -124,6 +131,8 @@ export class CloudExecutionMaintenance {
 
   async sweep(push: (id: string, frames: Revocation[]) => void | Promise<void>) {
     for (const id of await this.due()) await this.publish(id, push);
+    await withSystemTx(this.contexts.pool, tx => tx.query(`DELETE FROM cloud_v2_reassignments WHERE (workspace_id,caller_user_id,request_id) IN (
+      SELECT workspace_id,caller_user_id,request_id FROM cloud_v2_reassignments WHERE expires_at<=clock_timestamp() ORDER BY expires_at LIMIT 128)`));
     const stale = await withSystemTx(this.contexts.pool, async tx => (await tx.query<{ id: string }>(`SELECT DISTINCT c.workspace_id AS id
       FROM cloud_v2_execution_contexts c WHERE c.state='retired' AND c.retired_at<clock_timestamp()-interval '7 days'
         AND NOT EXISTS(SELECT 1 FROM cloud_v2_execution_contexts child WHERE child.parent_context_id=c.id

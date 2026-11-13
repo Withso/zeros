@@ -57,12 +57,13 @@ export function useDashboardRepoFilter(): string | null {
 }
 
 // ── Team sharing: By (Anyone, Me, or one person), per organization ──
-export type DashboardBy = "anyone" | "me" | `user:${string}`;
+/** "none": 3B's admin-only No Creator view. */
+export type DashboardBy = "anyone" | "me" | "none" | `user:${string}`;
 const BY_KEY = (organizationId: string) => `zeros:dashboard-by:v1:${organizationId}`;
 const bySnapshots = new Map<string, DashboardBy>();
 const byListeners = new Set<() => void>();
 const validBy = (value: unknown): value is DashboardBy =>
-  value === "anyone" || value === "me" || (typeof value === "string" && /^user:[0-9a-f-]{36}$/i.test(value));
+  value === "anyone" || value === "me" || value === "none" || (typeof value === "string" && /^user:[0-9a-f-]{36}$/i.test(value));
 
 export function readDashboardBy(organizationId: string): DashboardBy {
   const cached = bySnapshots.get(organizationId);

@@ -14,7 +14,7 @@ import { executionSignatures, matchesExecutionSignature, type ExecutionSignature
 import { actorChanged, executionUnavailable, executionWorkerRequired, memberAccessRevoked } from "./errors.js";
 
 export type ExecutionPerson = ExecutionSignatures & {
-  workspaceId: string; organizationId: string; userId: string; creatorUserId: string; repository: string; state: string;
+  workspaceId: string; organizationId: string; userId: string; creatorUserId: string | null; repository: string; state: string;
   accessEpoch: string; stopGeneration: string; bootId: string | null; workerTokenHash: string | null;
   signature: string; personSignature: string; permissionSignature: string; accountRevision: string; memberRevision: string; organizationRevision: string;
   targets: Array<{ repository: string; repositoryId: string }>;
@@ -37,7 +37,7 @@ export class CloudExecutionAuthority {
   constructor(readonly pool: pg.Pool, readonly source: CloudV2SourceAuthority, readonly connections: CloudGithubConnectionStore) {}
 
   async snapshot(tx: Tx, workspaceId: string, userId: string, fingerprint?: string, contextId?: string): Promise<ExecutionPerson> {
-    type Row = { id: string; org_id: string; creator_user_id: string; repository: string; state: string; execution_mode: string;
+    type Row = { id: string; org_id: string; creator_user_id: string | null; repository: string; state: string; execution_mode: string;
       access_epoch: string; stop_generation: string; worker_boot_id: string | null; worker_token_hash: string | null;
       account_revision: string; member_revision: string; member_created_at: string; organization_revision: string; role: string; sources: unknown;
       organization_policy: [boolean, boolean, boolean]; source_repositories: string[]; source_pending: boolean; connection_revision: unknown; database_now: string; verifications: Verification[]; context_current: boolean };
