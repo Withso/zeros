@@ -10,7 +10,7 @@ afterEach(async () => { for (const path of cleanups.splice(0)) await rm(path, { 
 const quit = (reason: Parameters<typeof githubAuthenticationError>[0]) =>
   `${githubAuthenticationMessage(githubAuthenticationError(reason))}\nfatal: credential helper '!/opt/zeros/git-credential' told us to quit\n`;
 
-it("R1 §16: a broker refusal on a structured Git request carries its safe reason and copy, never stderr", () => {
+it("a broker refusal on a structured Git request carries its safe reason and copy, never stderr", () => {
   const cases = [
     ["connection-required", "credential_missing"], ["connection-expired", "credential_missing"], ["connection-changed", "credential_missing"],
     ["access-denied", "permission_denied"], ["installation-required", "permission_denied"], ["installation-suspended", "permission_denied"],
@@ -27,7 +27,7 @@ it("R1 §16: a broker refusal on a structured Git request carries its safe reaso
   expect(gitCommandError("fatal: unrelated failure\n", null)).toMatchObject({ detail: "other", message: "The Git command could not be completed. Check the repository state and try again." });
 });
 
-it("R1 §16: access denied says only the GitHub operation needs access", () => {
+it("access denied says only the GitHub operation needs access", () => {
   expect(githubAuthenticationMessage(githubAuthenticationError("access-denied")))
     .toBe("Your GitHub account cannot access this repository, so pushing, fetching and pull requests need someone with access. Everything else in this workspace keeps working.");
 });

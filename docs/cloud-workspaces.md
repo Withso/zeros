@@ -7,7 +7,7 @@ and simulators as unavailable. Local Personal and organization-local workspaces
 keep their own engine, provider permissions and Host lifecycle.
 
 Cloud requires a non-personal organization with `cloud_workspaces_allowed`.
-Access follows organization membership, as in Conductor: any member who is not
+Access follows organization membership: any member who is not
 on Hold can list, open, connect to and work in the organization's workspaces,
 and a workspace's management stays with its Creator and the organization's
 admins. Organization admins manage the shared Cloud Computer. A person's own
@@ -421,7 +421,8 @@ late responses from undoing a newer binding. Configuration refreshes never issue
 GitHub tokens from stale evidence. Stop remains available. A confirmed GitHub
 denial withdraws only that person's GitHub network authority; the workspace
 keeps running.
-In a legacy workspace, the creator's confirmed access loss stops a running workspace while retaining its disk and
+In a legacy workspace, the creator leaving, going on Hold or losing their
+account stops a running workspace while retaining its disk and
 checkpoint. Stop and Delete remain available for cleanup. Revocation does not
 erase source or credentials already delivered to the VM; the VM remains one
 trust domain.
@@ -497,10 +498,10 @@ one trust domain: other members' processes can read that directory, and the
 person's variables, while the context lives.
 
 Activated workspaces retain the VM when one person leaves, goes on Hold or loses
-their account; losing GitHub repository access only refuses that person's GitHub
-operations. That person's contexts, tokens, pending prompts,
-Mac connections and local-command bindings are revoked; other members keep
-working. A session sign-out closes that session's clients and terminals while
+their account. Only those membership, Hold and account losses revoke that
+person's contexts, tokens, pending prompts, Mac connections and local-command
+bindings; other members keep working. Losing GitHub repository access revokes
+nothing: it only refuses that person's GitHub operations. A session sign-out closes that session's clients and terminals while
 already accepted turns retain their recorded sender. GitHub network tokens,
 review identity, environment, MCP, API and Local commands come from each
 execution's person. Commits use the current Creator's stored Git identity;
