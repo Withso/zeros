@@ -9,7 +9,7 @@ import { mapClaudeContextUsage } from "@zeros/protocol/context-usage";
 import { redactDriverMessage, redactDriverValue, type Driver, type DriverOpen } from "../driver";
 import { driverTiming } from "../../agent-timings";
 import { persistCompileCache } from "../../compile-cache";
-import { agentEnvironment } from "../shared/agent-environment";
+import { agentEnvironment, mergeGitEnvironment } from "../shared/agent-environment";
 import { InputQueue, createDeferred, type Deferred } from "./input-queue";
 import { isClaudeBackgroundAcknowledgement, isUnownedClaudeResult } from "./result-ownership";
 import { ClaudeStreamTranslator } from "./translator";
@@ -240,7 +240,7 @@ export class ClaudeDriver implements Driver {
       settings: claudeSettings(this.effort, this.fast),
       ...(this.effort?.trim() === "max" ? { effort: "max" as const } : {}),
       ...(this.resumed ? { resume: this.nativeSessionId } : { sessionId: this.nativeSessionId }),
-      env: agentEnvironment(session.oauthToken ? { agent: "claude", oauthToken: session.oauthToken } : { agent: "claude", apiKey: session.apiKey! }, this.options.environment, session.gitEnvironment ? { ...this.options.gitEnvironment, ...session.gitEnvironment } : this.options.gitEnvironment, session.application?.variables, session.zerosEnvironment),
+      env: agentEnvironment(session.oauthToken ? { agent: "claude", oauthToken: session.oauthToken } : { agent: "claude", apiKey: session.apiKey! }, this.options.environment, session.gitEnvironment ? mergeGitEnvironment(this.options.gitEnvironment, session.gitEnvironment) : this.options.gitEnvironment, session.application?.variables, session.zerosEnvironment),
       permissionMode: claudePermissionMode(this.modeId),
       ...(fullAccessQuestions ? { permissionPromptToolName: "stdio" } : {}),
       ...(this.modeId === "bypass" ? { allowDangerouslySkipPermissions: true } : {
