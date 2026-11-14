@@ -333,3 +333,17 @@ it("drops only the denied cached chat on confirmed native access loss", async ()
   expect(localTranscriptCache.peek("local")?.messages).toBe(messages);
   expect(m.workspace.useWorkspaceStore.getState().chats.some(chat => chat.id === "local")).toBe(true);
 });
+
+it("a relaunch paints cached cloud chats only for workspaces in the restored catalog", async () => {
+  const m = await seed();
+  // A chat of a workspace that is no longer in this account's catalog (it left while the app was closed).
+  const gone = { ...target, workspaceId: "99999999-2222-4222-8222-222222222222" };
+  const goneChat = m.boot.sanitizeCachedChat({ id: cloudScopedId(gone, "old"), folder: cloudWorkspaceKey(gone), title: "Gone" })!;
+  const kept = m.workspace.useWorkspaceStore.getState().chats;
+  m.cache.persistWorkspaceChatCache("chats-v1", [...kept, goneChat]);
+  vi.resetModules(); vi.clearAllMocks();
+  const next = await modules();
+  next.identity.installAccountPresentationIdentity(user);
+  expect(next.workspace.useWorkspaceStore.getState().chats.map(chat => chat.id)).toEqual(["local", id]);
+  expect(io.me).not.toHaveBeenCalled();
+});

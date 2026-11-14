@@ -71,7 +71,10 @@ export function installAccountPresentationIdentity(user: AuthUser | null): void 
   restoreOrganizationPresentation();
   restoreCloudWorkspaceCatalog(loadCloudCatalogPresentation(owner));
   setCloudChatCacheOwner(owner);
-  state.dispatch({ type: "MERGE_CHATS", chats: loadCloudChatCache() });
+  // Paint cached cloud chats at once (Conductor renders its chat list from its local database), but only for
+  // workspaces this account's restored catalog still holds; the live catalog and each chats.list then revalidate.
+  const restoredDocuments = new Set(getCloudWorkspaceDocuments().filter(canReadCloudWorkspace).map(doc => cloudWorkspaceKey({ organizationId: doc.organizationId, workspaceId: doc.id })));
+  state.dispatch({ type: "MERGE_CHATS", chats: loadCloudChatCache().filter(chat => restoredDocuments.has(chat.folder)) });
   completeCloudChatCacheRestore(owner);
   // Begin disk I/O during stored-identity bootstrap, before token refresh or
   // VM admission. ChatView consumes the memory hit or shares the pending read.

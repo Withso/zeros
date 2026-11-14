@@ -35,6 +35,16 @@ describe("chat snapshot reconciliation", () => {
     expect(canMirrorChat(local, new Set())).toBe(true);
     expect(canMirrorChat(cached, new Set([cloudFolder]))).toBe(true);
   });
+  it("a confirmed fresh list removes a deleted cached chat and applies an archive", () => {
+    // Deletions arrive as the list's tombstones (kept until the workspace is deleted); a cached row the list does not
+    // name at all may be a chat created here and not uploaded yet, so absence alone keeps it.
+    const deleted = { ...chat("deleted", 3), folder: cloudFolder };
+    const archived = { ...chat("archived", 3), folder: cloudFolder };
+    const fresh = { ...archived, archived: true, updatedAt: 4 };
+    const result = reconcileChatSnapshot([deleted, archived], [fresh], ["deleted"], [cloudFolder]);
+    expect(result.chats.map(row => [row.id, row.archived])).toEqual([["archived", true]]);
+    expect(result.rowsToPush).toEqual([]);
+  });
   it("allows newer cloud metadata only after confirmation of the exact workspace", () => {
     const cached = { ...chat("cloud", 3), folder: cloudFolder };
     const remote = { ...cached, updatedAt: 2 };
