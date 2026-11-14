@@ -101,7 +101,7 @@ export function selectCloudOrganizationCredential(
     credentialRevision?: number;
     models?: string[];
     allModels?: boolean;
-    /** Compatibility only: older control planes recorded it; current ones ignore it. No person is ever asked. */
+    /** Compatibility field for older control planes; current ones ignore it. */
     consent?: "zeros-managed";
   },
 ) {

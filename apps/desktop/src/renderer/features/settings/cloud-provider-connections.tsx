@@ -365,8 +365,7 @@ function CloudProviderConnection({
           // refresh grant. N-1 servers leave it absent; do not invent readiness.
           const status = !isSelected ? "Saved" : !health ? "Selected · Status unavailable"
             : health.status === "ready" ? ready ? "Connected" : "Account changed"
-            // Agent logins need no consent (owner decision 2026-11-14): current control planes never report
-            // consent_required; an older one's is shown neutrally, never as a request for permission.
+            // An older server's consent_required does not establish readiness.
             : ({ not_selected: "Status unavailable", consent_required: "Status unavailable",
                 credential_unavailable: "Account unavailable", credential_changed: "Account changed",
                 expiring: "Connection expires soon", expired: "Connection expired" })[health.status];
