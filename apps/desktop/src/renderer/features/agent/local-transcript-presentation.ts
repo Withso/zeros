@@ -56,8 +56,11 @@ export function presentCachedTranscript(chatId: string, window: LocalTranscriptW
   if (slot?.transcriptState === "resident" || !transcriptCacheFor(chatId, slot?.cwd)) return false;
   if (slot?.transcriptPresentation && slot.messages[0] === window.messages[0] &&
       slot.messages.length >= window.messages.length) {
-    if (slot.transcriptPresentation.cloudCache !== window.cloudCache) store.patchSession(chatId, {
-      transcriptPresentation: { source: "cache", ...(window.cloudCache ? { cloudCache: window.cloudCache } : {}) },
+    // The same rows with new receipt metadata: keep the empty indicator exact (a last receipt can drain).
+    const empty = window.messages.length === 0 && !window.cloudCache?.receiptRows?.length;
+    if (slot.transcriptPresentation.cloudCache !== window.cloudCache || !!slot.transcriptPresentation.empty !== empty) store.patchSession(chatId, {
+      transcriptPresentation: { source: "cache", ...(empty ? { empty: true } : {}), ...(window.cloudCache ? { cloudCache: window.cloudCache } : {}) },
+      ...(window.messages.length === 0 ? { hasTranscript: !!window.cloudCache?.receiptRows?.length } : {}),
     });
     return true;
   }

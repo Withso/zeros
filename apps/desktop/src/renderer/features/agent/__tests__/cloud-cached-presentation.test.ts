@@ -45,6 +45,20 @@ describe("native cached history and own receipt presentation", () => {
     expect(projectCloudPromptSession(saved)).toBe(shown);
   });
 
+  it("a receipt-only cached window that loses its last receipt presents the confirmed empty state", () => {
+    cloudTranscriptCache.bindOwner(owner, false);
+    useSessionsStore.getState().setSession(chatId, { ...BLANK, cwd, transcriptState: "loading" });
+    const empty = { ...range, messageCount: 0, fromIndex: 0, toIndex: 0, rows: [] };
+    expect(presentCachedTranscript(chatId, decodeNativeCloudTranscriptWindow({ range: empty, pending }, owner, 3)!)).toBe(true);
+    // Receipts present: not the confirmed empty state.
+    expect(useSessionsStore.getState().sessions[chatId].transcriptPresentation?.empty).toBeUndefined();
+    const drained = { ...pending, queueRevision: 6, items: [] };
+    expect(presentCachedTranscript(chatId, decodeNativeCloudTranscriptWindow({ range: empty, pending: drained }, owner, 3)!)).toBe(true);
+    const slot = useSessionsStore.getState().sessions[chatId];
+    expect(slot.hasTranscript).toBe(false);
+    expect(slot.transcriptPresentation?.empty).toBe(true);
+  });
+
   it("allows a receipt-only cached view without fabricating a native history row", () => {
     cloudTranscriptCache.bindOwner(owner, false);
     const empty = { ...range, messageCount: 0, fromIndex: 0, toIndex: 0, rows: [] };
