@@ -999,6 +999,7 @@ export const designWebTransactionAdapter: DesignTransactionAdapter<DesignWebDocu
               new Set([operation.nodeId, ...(operation.type === "node.move" ? [operation.parentId, operation.beforeId ?? ""] : [])].map(operand)),
               (marked) => applyOperation(updateDesignWebState(state, { files: { ...state.files, [state.entryFile]: marked } }), operation)
                 .state.files[state.entryFile]!,
+              operation.type === "node.duplicate" ? operand(operation.nodeId) : undefined,
             )
           : null;
       const working = identified?.changed

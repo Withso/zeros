@@ -721,7 +721,10 @@ export function scopeDesignComponentStyle(name: string, css: string): string {
       let depth = 0;
       let end = -1;
       for (let index = 0; index < params.length && end < 0; index += 1) {
-        if (params[index] === "(") depth += 1;
+        const quote = params[index];
+        if (quote === '"' || quote === "'") {
+          for (index += 1; index < params.length && params[index] !== quote; index += 1) if (params[index] === "\\") index += 1;
+        } else if (params[index] === "(") depth += 1;
         else if (params[index] === ")" && --depth === 0) end = index;
       }
       if (end < 0) return;

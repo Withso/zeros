@@ -1091,13 +1091,22 @@ function pendingIdentities(source: string, written: ReadonlyMap<string, string>)
  * the derived ids of the layers the edit shifts, so each keeps its own id and
  * none takes another's, and of the layers it names; every other layer keeps
  * its bytes. `edit` applies the edit to a source and may throw, in which case
- * every derived id is written, as the edit's own failure will report. */
+ * every derived id is written, as the edit's own failure will report.
+ * `subtree` names a layer whose descendants are all written too: a copy of
+ * it then takes <copy>-<original> ids, as the canvas's clone does, rather
+ * than deriving ones from its new place that a sibling may already hold. */
 export function healDesignHtmlIdentitiesForEdit(
   source: string,
   operands: ReadonlySet<string>,
   edit: (source: string) => string,
+  subtree?: string,
 ): { source: string; changed: boolean } {
-  const named = healDesignHtmlIdentities(source, { native: true, only: operands }).source;
+  let named = healDesignHtmlIdentities(source, { native: true, only: operands }).source;
+  if (subtree) {
+    const root = designElements(parse(named, { sourceCodeLocationInfo: true })).find((element) => oid(element) === subtree);
+    const span = root?.sourceCodeLocation;
+    if (span) named = healDesignHtmlIdentities(named, { native: true, within: { start: span.startOffset, end: span.endOffset } }).source;
+  }
   const document = parse(named, { sourceCodeLocationInfo: true });
   const edits: Array<{ start: number; end: number; text: string }> = [];
   const used = new Set<string>();

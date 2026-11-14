@@ -6083,6 +6083,32 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     return true;
   }
 
+  function isScopeRule(rule) {
+    return typeof CSSScopeRule !== "undefined" && rule instanceof CSSScopeRule;
+  }
+
+  // An @scope rule reaches an element only below a root its start matches
+  // and above any limit its end matches. A rootless one is rooted at the
+  // parent of the style that holds it.
+  function withinScopeRule(element, rule) {
+    var start = rule.start;
+    var end = rule.end;
+    var ownerNode = rule.parentStyleSheet && rule.parentStyleSheet.ownerNode;
+    var ownerParent = ownerNode && ownerNode.parentElement;
+    if (!start && !ownerParent) return true;
+    for (var root = element; root; root = root.parentElement) {
+      var isRoot = false;
+      try { isRoot = start ? root.matches(start) : root === ownerParent; } catch (_error) { isRoot = false; }
+      if (!isRoot) continue;
+      var limited = false;
+      for (var at = element; end && at && at !== root && !limited; at = at.parentElement) {
+        try { limited = at.matches(end); } catch (_error) { limited = true; }
+      }
+      if (!limited) return true;
+    }
+    return false;
+  }
+
   function matchedDeclarationsForElement(element, property, inherited, output) {
     if (element.style) {
       var inlineValue = element.style.getPropertyValue(property);
@@ -6116,6 +6142,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
             });
           }
         } else if (rule.cssRules) {
+          if (isScopeRule(rule) && !withinScopeRule(element, rule)) continue;
           visitRules(
             rule.cssRules,
             sourceFile,

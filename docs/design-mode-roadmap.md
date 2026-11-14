@@ -1781,7 +1781,8 @@ its root limited the same way (`@scope (.card)` becomes
 `@scope (:is(.card):where(zd-card, zd-card *))`); one without a root, whose
 root would be the element holding the style, is rooted at the host. The
 runtime reads the selector back as authored for Style origins
-(`authoredComponentSelector`).
+(`authoredComponentSelector`), and lists a rule inside `@scope` as matched
+only for an element below its root and above its limit.
 
 A plain `components/<name>.html` without a declaration, whose markup reads
 its host through `<slot data-zd-attr="…">` and a default `<slot>`, is a

@@ -52,6 +52,8 @@ body { background: rgb(200, 0, 0); } /* check:ui ignore-line -- authored frame c
     expect(scopeDesignComponentStyle("card", "@scope to (.slot) { p { color: red; } }")).toBe("@scope (zd-card) to (.slot) { p { color: red; } }");
     expect(scopeDesignComponentStyle("card", "@media (min-width: 1px) { @scope (.card) { p { color: red; } } }"))
       .toBe("@media (min-width: 1px) { @scope (:is(.card):where(zd-card, zd-card *)) { p { color: red; } } }");
+    expect(scopeDesignComponentStyle("card", '@scope ([title="a)b"]) to ([title=\'(\']) { p { color: red; } }'))
+      .toBe('@scope (:is([title="a)b"]):where(zd-card, zd-card *)) to ([title=\'(\']) { p { color: red; } }');
     const card = doc('<article class="card" data-zid="card"><h3 class="title" data-zid="title">T</h3></article>',
       "<style>@scope (.card) { .title { color: rgb(1, 2, 3); } }</style>"); // check:ui ignore-line -- authored frame colour fixture.
     const frame = doc('<main data-oid="m"><article class="card" data-oid="plain-card"><h3 class="title" data-oid="plain">Plain</h3></article><zd-card data-oid="c"></zd-card></main>');

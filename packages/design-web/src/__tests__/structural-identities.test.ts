@@ -75,6 +75,18 @@ describe("a structural edit's layer ids", () => {
     expect(after.files["home.html"]).toContain(`<p>Two</p><p data-oid="${extra}">Extra</p></section>`);
   });
 
+  it("give a duplicate's copy its own ids, as the canvas names them, beside a sibling just like it", () => {
+    const initial = state(page("<ul><li><span>A</span><button>Buy</button></li><li><span>B</span><button>Buy</button></li></ul>"));
+    const [, first, label, button] = readDesignWebProjection(initial).nodes;
+    const after = apply(initial, { operationId: "c", type: "node.duplicate", nodeId: first!.id, duplicateNodeId: "copy" });
+    const projection = readDesignWebProjection(after);
+    expect(projection.diagnostics).toEqual([]);
+    expect(projection.nodes).toHaveLength(10);
+    // The runtime's clone names each copied layer <copy>-<original>.
+    expect(projection.nodes.map((node) => node.id)).toEqual(expect.arrayContaining([`copy-${label!.id}`, `copy-${button!.id}`]));
+    expect(idsByLabel(after).get("Buy")).toBeDefined();
+  });
+
   it("leave a duplicate's original in place and write the layers after it", () => {
     const initial = state(SOURCE);
     const before = idsByLabel(initial);
