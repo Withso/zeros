@@ -56,8 +56,11 @@ const storedSender = (senders: Record<string, unknown> | undefined, msgId: strin
   const parsed = SenderSchema.safeParse(senders[msgId]);
   return parsed.success ? JSON.stringify(parsed.data) : null;
 };
-const userPrompt = (kind: string, payload: string): boolean => {
-  try { const value = JSON.parse(payload); return kind === "text" && value?.kind === "text" && value?.role === "user"; }
+/** The control plane's rule (history.ts isUserMessage): a text row whose payload's role is user. A minimal payload
+ * without its own `kind` still counts. `opening` also excludes steered prompts, which never open a turn. */
+const userPrompt = (kind: string, payload: string, opening = false): boolean => {
+  if (kind !== "text") return false;
+  try { const value = JSON.parse(payload); return value?.role === "user" && (!opening || value.steeredTurnId == null); }
   catch { return false; }
 };
 const native = (row: Message): CloudCacheRow => ({ index: row.idx, msgId: row.msg_id, kind: row.kind, payload: row.payload, createdAt: row.created_at });
@@ -254,9 +257,8 @@ export class CloudChatCacheStore {
     for (const row of rows) {
       const size = bytes(row.payload) + bytes(row.msgId) + bytes(row.kind) + 64;
       if (size > this.limits.chatBytes) throw new Capacity();
-      let user = false;
-      try { const value = JSON.parse(row.payload); user = row.kind === "text" && value?.kind === "text" && value?.role === "user"; }
-      catch { /* Opaque malformed native payloads are refused by presentation. */ }
+      // Opaque malformed native payloads are not user prompts here; presentation refuses them.
+      const user = userPrompt(row.kind, row.payload, true);
       statement.run(key, row.index, row.msgId, row.kind, row.payload, row.createdAt, size, Number(user));
     }
   }

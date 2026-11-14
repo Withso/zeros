@@ -453,6 +453,26 @@ describe("senders travel with their cached rows (Team sharing)", () => {
     expect(store.putRange(key, { ...range(1, 4, 1, 4), turnOpening: row(0), senders: { "m-0": alice } })).toBe(true);
     expect(store.readRange(key, 1, 4)).toMatchObject({ turnOpening: { msgId: "m-0" }, senders: { "m-0": alice } });
   });
+  it("a minimal user payload (the control plane's rule: row kind text, payload role user) keeps its sender across a reopen", () => {
+    const root = directory();
+    const opening = { index: 0, msgId: "opening", kind: "text", createdAt: 1, payload: JSON.stringify({ role: "user", text: "\0" }) };
+    const first = open(root);
+    expect(first.putRange(key, { ...range(1, 4, 1, 4), turnOpening: opening, senders: { opening: null, "m-0": alice } })).toBe(true);
+    expect(first.readRange(key, 1, 4)?.senders).toEqual({ opening: null });
+    first.close();
+    expect(open(root).readRange(key, 1, 4)).toMatchObject({ turnOpening: { msgId: "opening" }, senders: { opening: null } });
+  });
+
+  it("a steered prompt never becomes a cached turn opening (the control plane's opening rule)", () => {
+    const store = open();
+    const user = (index: number, extra: Record<string, unknown> = {}) => ({ index, msgId: `u-${index}`, kind: "text", createdAt: index + 1,
+      payload: JSON.stringify({ id: `u-${index}`, kind: "text", role: "user", text: "prompt", createdAt: index + 1, ...extra }) });
+    const agent = (index: number) => ({ index, msgId: `a-${index}`, kind: "text", createdAt: index + 1,
+      payload: JSON.stringify({ id: `a-${index}`, kind: "text", role: "agent", text: "reply", createdAt: index + 1 }) });
+    store.putRange(key, { revision: 1, messageCount: 3, fromIndex: 0, toIndex: 3, rows: [user(0), user(1, { steeredTurnId: "turn" }), agent(2)] });
+    expect(store.readRange(key, 2, 3)?.turnOpening?.msgId).toBe("u-0");
+  });
+
   it("a chat without senders reads exactly as before", () => {
     const store = open();
     store.putRange(key, range(0, 4));
