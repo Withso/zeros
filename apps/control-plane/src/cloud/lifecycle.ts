@@ -13,7 +13,7 @@ import { pruneCloudRepositories } from "./source-authority.js";
 import type { PendingSourceOutcome } from "./pending-create.js";
 import type { CloudV2CheckpointFork, CloudV2CheckpointReuse, CloudV2CheckpointRetry, CloudV2CheckpointScope, CloudV2Store, CloudV2Workspace,
   CloudV2LifecycleWorkspace, CloudV2RestoreCreate } from "./store.js";
-import { CLOUD_V2_WORKER_PORT, type CloudV2WorkerTiming } from "./contract.js";
+import { CLOUD_V2_WORKER_PORT, type CloudV2WorkerTiming, type CloudV2WorkerBootTiming } from "./contract.js";
 import { CLOUD_V2_CHECKPOINT_ERRORS, CLOUD_V2_CHECKPOINT_SECONDS, checkpointCommand, cloudV2CheckpointObject, parseCheckpointResult, parseRestoreResult,
   restoreCommand, type CloudV2CheckpointError, type CloudV2CheckpointStorage } from "./checkpoint.js";
 
@@ -73,8 +73,6 @@ export const CLOUD_V2_WORKER_ENV_PATH = "/home/user/.config/zeros/worker.env";
 type LifecyclePhase = "boat_create" | "boat_resume" | "source_resolve" | "source_authorize" | "runtime_install" | "image_prepare" | "repository_prepare" | "protected_route" | "token_delivery" | "checkpoint" | "checkpoint_restore" | "total";
 export type CloudV2TimingRecord = {
   workspaceId: string;
-  phase: LifecyclePhase | CloudV2WorkerTiming["phase"] | "worker_hello" | "relay_ready";
-  durationMs: number;
   state?: CloudV2Workspace["state"];
   runtimeChanged?: boolean;
   /** Whether a checkpoint command uploaded a new object or kept the last one. */
@@ -84,7 +82,10 @@ export type CloudV2TimingRecord = {
   dialMs?: number; configMs?: number;
   /** relay_ready: route reads until the worker was ready, including the successful one. */
   attempts?: number;
-};
+} & ({
+  phase: LifecyclePhase | CloudV2WorkerTiming["phase"] | "worker_hello" | "relay_ready";
+  durationMs: number;
+} | CloudV2WorkerBootTiming);
 type TimingDetail = Pick<CloudV2TimingRecord, "runtimeChanged" | "checkpoint">;
 export function emitCloudV2Timing(observer: ((record: CloudV2TimingRecord) => void) | undefined, record: CloudV2TimingRecord): void {
   try { observer?.(record); } catch { /* Optional diagnostics cannot change lifecycle authority. */ }
