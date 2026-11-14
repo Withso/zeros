@@ -179,6 +179,21 @@ function workosConfig(): Config {
 }
 
 describe("unexpected error privacy", () => {
+  it.each([
+    { code: "55P03", where: "PL/pgSQL function other_trigger() line 3 at PERFORM" },
+    { code: "40P01", where: "PL/pgSQL function track_cloud_prompt_cache() line 3 at PERFORM" },
+    { code: "55P03", where: undefined },
+  ])("does not mislabel another database error as a prompt cache fence ($code, $where)", async fields => {
+    const app = createApp(config(null), pool, emailConfig as never);
+    app.post("/test-fence/:id", () => { throw Object.assign(new Error("private detail"), fields); });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      expect((await app.request("/test-fence/private-id", { method: "POST" })).status).toBe(500);
+      expect(warn).not.toHaveBeenCalled();
+      expect(error).toHaveBeenCalledExactlyOnceWith("[error]", { code: "internal", sqlState: fields.code });
+    } finally { warn.mockRestore(); error.mockRestore(); }
+  });
   it.each(["self", "creator"] as const)("preserves the selected agent and %s payer on a shared execution login refusal", async loginRequiredFrom => {
     const app = createApp(config(null), pool, emailConfig as never);
     const path = "/v1/cloud-v2/workspaces/11111111-1111-4111-8111-111111111111/prompts";

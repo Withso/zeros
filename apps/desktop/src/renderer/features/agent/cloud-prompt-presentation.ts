@@ -114,8 +114,16 @@ function currentPromptView(slot: AgentSessionState, view: CloudPromptView): Clou
  * echo. Confirmed native rows keep their position and replace matching IDs. */
 const projected = new WeakMap<AgentSessionState, AgentSessionState>();
 export function projectCloudPromptSession(slot: AgentSessionState): AgentSessionState {
-  if (!isCloudWorkspace(slot.cwd) || !slot.cloudOutbox) return slot;
+  if (!isCloudWorkspace(slot.cwd)) return slot;
   const cached = projected.get(slot); if (cached) return cached;
+  if (!slot.cloudOutbox) {
+    const receipts = slot.transcriptState === "loading" ? slot.transcriptPresentation?.cloudCache?.receiptRows : undefined;
+    if (!receipts?.length) return slot;
+    const native = new Set([...slot.messages.map(row => row.id), ...(slot.leadingPrompt ? [slot.leadingPrompt.id] : [])]);
+    const extra = receipts.filter(row => !native.has(row.id));
+    const value = extra.length ? { ...slot, messages: [...slot.messages, ...extra] } : slot;
+    projected.set(slot, value); return value;
+  }
   const view = currentPromptView(slot, slot.cloudOutbox);
   const original = slot;
   if (view !== slot.cloudOutbox) slot = { ...slot, ...cloudPromptSessionPatch(slot, view) };

@@ -4,8 +4,8 @@ import { z } from "zod";
 import { HttpError } from "../authz.js";
 import { localDeviceHeaders } from "./local-commands/routes.js";
 import type { CloudV2PromptOutbox } from "./prompt-outbox.js";
-import { CLOUD_V2_MAX_PROMPT_BYTES, CloudV2PromptSchema, CloudV2PromptIdSchema,
-  CloudV2PromptCounterSchema, CloudV2PromptStopSchema } from "./prompt-contract.js";
+import { CLOUD_V2_MAX_PROMPT_BYTES, CloudV2PromptSchema, CloudV2PromptStopSchema } from "./prompt-contract.js";
+import { promptStatusQuery } from "./prompt-status-query.js";
 
 /** Admission precedes durable enqueue; returning a receipt never waits for
  * the worker to connect or execute the message. */
@@ -29,11 +29,13 @@ export function createCloudV2PromptRoutes(outbox: CloudV2PromptOutbox, authorize
     return c.json({ receipt }, replay ? 200 : 201);
   });
   app.get(path, async c => {
-    const parsed = z.object({ chatId: CloudV2PromptIdSchema, after: CloudV2PromptCounterSchema.default("0"),
-      limit: z.coerce.number().int().min(1).max(100).default(100),
-      includePayload: z.enum(["true", "false"]).default("true") }).strict().safeParse(c.req.query());
-    if (!parsed.success) throw new HttpError(400, "invalid_request", "Invalid message status request");
-    return c.json(await outbox.list(id(c.req.param("id")), c.get("user").id, parsed.data.chatId, parsed.data.after, parsed.data.limit, parsed.data.includePayload === "true"));
+    const cache = c.req.header("X-Zeros-Chat-Cache") === "1", query = promptStatusQuery(c.req.query(), cache);
+    const workspaceId = id(c.req.param("id")), userId = c.get("user").id;
+    if (cache) await authorizeSource?.(workspaceId, userId);
+    const result = await outbox.list(workspaceId, userId, query.chatId, query.after, query.limit, query.includePayload === "true",
+      cache ? { queueRevision: query.queueRevision } : undefined);
+    if (cache) await authorizeSource?.(workspaceId, userId);
+    return c.json(result);
   });
   app.post(`${path}/stop`, body, async c => {
     const parsed = CloudV2PromptStopSchema.safeParse(await c.req.json().catch(() => null));

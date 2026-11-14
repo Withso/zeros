@@ -1,0 +1,5 @@
+{
+  "file": "apps/control-plane/src/cloud/history.ts",
+  "before": "CASE WHEN pg_input_is_valid(payload,'jsonb') THEN",
+  "after": "CASE WHEN payload IS JSON OBJECT THEN"
+}

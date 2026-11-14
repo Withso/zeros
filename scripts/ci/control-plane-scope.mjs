@@ -45,6 +45,8 @@ export const CONTROL_PLANE_DATABASE_INPUTS = Object.freeze([
   "apps/cloud-worker/src/",
   // The local-command client suite drives the desktop device client against the real routes.
   "apps/desktop/electron/local-commands/",
+  "apps/desktop/electron/cloud-chat-cache/",
+  "apps/desktop/shared/cloud-chat-cache.ts",
   // The sync client suite drives the desktop sync connection and the renderer's Macs list against the real routes.
   "apps/desktop/electron/workspace-sync/connection.ts",
   "apps/desktop/src/renderer/platform/local-commands.ts",

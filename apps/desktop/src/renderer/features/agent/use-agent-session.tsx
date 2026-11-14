@@ -19,6 +19,7 @@ import type {
   WorkflowProgress,
 } from "../../platform/bridge/agent-events";
 import type { BridgeRegistryAgent } from "../../platform/bridge/messages";
+import type { CloudTranscriptCachePresentation } from "../../state/local-transcript-cache";
 import type {
   ProviderBinding,
   ProviderMetadata,
@@ -145,7 +146,7 @@ export interface AgentSessionState {
   /** A cached window may paint while authoritative hydration is
    * pending. It never grants admission, completes a turn or drains a queue.
    * `empty`: a Local chat known to be empty paints its empty state. */
-  transcriptPresentation: { source: "cache"; empty?: true } | null;
+  transcriptPresentation: { source: "cache"; empty?: true; cloudCache?: CloudTranscriptCachePresentation } | null;
   /** Renderer-only provenance for mirror catch-up; never execution authority. */
   transcriptSource?: "worker" | "control-plane";
   transcriptHistoryState?: import("@zeros/protocol/cloud-v2-relay").CloudV2HistoryState;

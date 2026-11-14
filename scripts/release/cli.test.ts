@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -39,8 +39,12 @@ function fixture() {
   const github = { assertRequiredChecks: vi.fn(async () => {}), assertCurrent: vi.fn(async () => {}),
     betaReceipt: vi.fn(async () => {}), ownServicesReceipt: vi.fn(async () => services) };
   deps.providers.mockReturnValue(providers); deps.github.mockReturnValue(github);
-  deps.command.mockImplementation(async (_command: string, args: string[]) => JSON.stringify(args.includes("--execute") ? migration :
-    { ...migration, mode: "plan", ledger: "pending", backup: null }));
+  deps.command.mockImplementation(async (_command: string, args: string[], options) => {
+    if (options?.env?.MIGRATION_VERSION_FILE) {
+      await writeFile(options.env.MIGRATION_VERSION_FILE, JSON.stringify({ serverVersionNum: 180006 }));
+    }
+    return JSON.stringify(args.includes("--execute") ? migration : { ...migration, mode: "plan", ledger: "pending", backup: null });
+  });
   return { backend, services, providers, github };
 }
 describe("hosted release CLI", () => {

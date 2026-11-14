@@ -26,6 +26,7 @@ database("0240 protocol policy cost and migration locks", () => {
   afterEach(async () => { await f?.close(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
   afterAll(() => pool.end());
 
+  // The 496 real EXPLAIN samples measure executor cost; their wall clock also includes database round trips.
   it("keeps released list and hot-read index plans for both legacy and prepared rows", async () => {
     const columns = CLOUD_V2_WORKSPACE_COLUMNS.join(","), queries = {
       list: { sql: `SELECT ${columns} FROM cloud_v2_workspaces w WHERE w.org_id=$1 AND w.creator_user_id=$2 AND w.state<>'deleted'
@@ -64,7 +65,7 @@ database("0240 protocol policy cost and migration locks", () => {
         }
       }
     } finally { client.release(); }
-  });
+  }, 30_000);
 
   it("measures the scoped foreign key and verifies column-selective SET NULL on real PostgreSQL", async () => {
     const existing = (await pool.query("SELECT pg_get_constraintdef(oid) AS sql FROM pg_constraint WHERE conname='cloud_execution_transition_scope'")).rows[0].sql as string;

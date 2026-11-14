@@ -41,6 +41,7 @@ database("electron:cloud seed and confirmed resource drain", () => {
       await pool.end();
     }
   });
+  // The identity marker changes the schema, so later resets replay the entire migration chain.
   beforeEach(async () => {
     await resetMigratedTestDatabase(pool);
     await pool.query(`CREATE TABLE zeros_cloud_local_identity(singleton boolean PRIMARY KEY DEFAULT true CHECK(singleton),owner text NOT NULL,instance_id uuid NOT NULL)`);
@@ -48,7 +49,7 @@ database("electron:cloud seed and confirmed resource drain", () => {
     // Production's local runtime inherits public USAGE from zeros_app. Keep
     // this NOINHERIT test login stricter and grant only the marker read here.
     await pool.query(`GRANT USAGE ON SCHEMA public TO ${role}; GRANT SELECT ON zeros_cloud_local_identity TO ${role}`);
-  });
+  }, 60_000);
 
   function seedRequest() {
     const fixture = bindFixture({}, { workosUserId: "user_localfixture", workosOrganizationId: "org_localfixture",

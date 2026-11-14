@@ -104,6 +104,7 @@ const commandTable: Record<string, CommandHandler> = {
   open_in_app: notImpl("open_in_app", 3),
   cloud_workspace_capability: notImpl("cloud_workspace_capability", 3),
   cloud_catalog_stream_state: notImpl("cloud_catalog_stream_state", 3),
+  cloud_chat_cache: notImpl("cloud_chat_cache", 3),
 
   // ── WorkOS session at rest — main owns the full token pair; the renderer only
   // ever gets a live access token or decoded identity claims. Main writes the

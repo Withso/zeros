@@ -25,6 +25,8 @@
 // ──────────────────────────────────────────────────────────
 
 import { cloudScopedId, cloudWorkspaceKey, isCloudWorkspace, parseCloudScopedId } from "../platform/bridge/cloud-workspace-key";
+import { getActiveBridge } from "../platform/bridge/active-bridge";
+import { WorkspaceRuntimeClient } from "../platform/bridge/workspace-runtime-client";
 import {
   createIndexedDbTranscriptStore,
   type LocalTranscriptIndexEntry,
@@ -32,6 +34,9 @@ import {
 } from "../platform/local-transcript-store";
 import { readPreferenceCache, writePreferenceCache } from "../platform/personal-preferences";
 import type { AgentMessage, AgentTextMessage } from "../features/agent/use-agent-session";
+import type { NativeCloudCacheSnapshot } from "../platform/cloud-chat-cache-client";
+import { nativeCloudChatCache } from "../platform/cloud-chat-cache";
+import { createNativeCloudTranscriptCache } from "./cloud-native-transcript-cache";
 import { CloudV2HistoryStateSchema, type CloudV2HistoryState } from "@zeros/protocol/cloud-v2-relay";
 import {
   capMessagesKeepingLeadingPrompt,
@@ -74,6 +79,10 @@ function cloudDiskOwner(owner: string | null, retire: boolean): string {
   return JSON.stringify([owner, lifetime]);
 }
 
+export interface CloudTranscriptCachePresentation {
+  owner: string; epoch: number; revision: number; receiptRows?: AgentTextMessage[];
+}
+
 export interface LocalTranscriptWindow {
   messages: AgentMessage[];
   leadingPrompt: AgentTextMessage | null;
@@ -82,6 +91,7 @@ export interface LocalTranscriptWindow {
   historyState?: CloudV2HistoryState;
   /** Original content for worker rows shortened only in the disk copy. */
   contentSignatures?: Record<string, string>;
+  cloudCache?: CloudTranscriptCachePresentation;
 }
 
 /** Local Personal and organization-local chats only. A cloud-scoped id or a
@@ -337,6 +347,56 @@ export function decodeCloudTranscriptWindow(json: string): LocalTranscriptWindow
   return decodeTranscriptWindow(json, "cloud");
 }
 
+export function decodeNativeCloudTranscriptWindow(
+  snapshot: NativeCloudCacheSnapshot,
+  owner: string,
+  epoch: number,
+): LocalTranscriptWindow | null {
+  const range = snapshot.range;
+  if (!range) return null;
+  try {
+    const decode = (row: (typeof range.rows)[number] | NonNullable<typeof range.turnOpening>): AgentMessage | null => {
+      const message: unknown = JSON.parse(row.payload);
+      return isCloudMessageShape(message) && message.id === row.msgId && message.kind === row.kind ? message : null;
+    };
+    const messages: AgentMessage[] = [];
+    for (const row of range.rows) {
+      const message = decode(row);
+      if (!message) return null;
+      messages.push(message);
+    }
+    const ids = new Set(messages.map(message => message.id));
+    if (ids.size !== messages.length) return null;
+    const opening = range.turnOpening ? decode(range.turnOpening) : null;
+    if (range.turnOpening && (!opening || !isUserPromptRow(opening) || ids.has(opening.id))) return null;
+    const leadingPrompt = opening as AgentTextMessage | null;
+    if (leadingPrompt) ids.add(leadingPrompt.id);
+    const receiptRows: AgentTextMessage[] = [];
+    let receiptBytes = 0;
+    const before = range.historyState?.beforeEpoch;
+    for (let index = (snapshot.pending?.items.length ?? 0) - 1; index >= 0 && receiptRows.length < 200; index--) {
+      const item = snapshot.pending!.items[index], payload = item.payload;
+      if (!payload || item.state === "completed" || ids.has(item.receipt.userMessageId) ||
+          before && BigInt(item.receipt.epoch) < BigInt(before)) continue;
+      const bubble = payload.bubble;
+      // Cached receipts can paint a bubble, never queue or recovery authority.
+      const row: AgentTextMessage = { id: item.receipt.userMessageId, kind: "text", role: "user", createdAt: payload.startedAt,
+        text: bubble?.displayText ?? payload.prompt.flatMap(block => block.type === "text" ? [block.text] : []).join(""),
+        ...(bubble?.attachments?.length ? { attachments: bubble.attachments } : {}),
+        ...(bubble?.segments?.length ? { segments: bubble.segments } : {}),
+      };
+      const bytes = estimateJsonSize(row, 512 * 1024);
+      if (receiptBytes + bytes > 512 * 1024) continue;
+      receiptBytes += bytes; receiptRows.push(row); ids.add(row.id);
+    }
+    receiptRows.reverse();
+    return { messages, leadingPrompt, source: "control-plane",
+      ...(range.historyState ? { historyState: range.historyState } : {}),
+      cloudCache: { owner, epoch, revision: range.revision, ...(receiptRows.length ? { receiptRows } : {}) },
+    };
+  } catch { return null; }
+}
+
 function decodeTranscriptWindow(json: string, namespace: "local" | "cloud"): LocalTranscriptWindow | null {
   if (namespace === "cloud" && json.length > LOCAL_TRANSCRIPT_ENTRY_BYTES) return null;
   const validMessage = namespace === "local" ? isMessageShape : isCloudMessageShape;
@@ -515,7 +575,7 @@ export class LocalTranscriptCache {
     if (this.namespace !== "cloud" || this.owner === owner && !retire) return;
     this.resetMemory();
     this.owner = owner;
-    this.diskOwner = cloudDiskOwner(owner, retire);
+    this.diskOwner = this.store ? cloudDiskOwner(owner, retire) : null;
     if (retire) void this.commit({ clear: true }).catch(() => {});
     if (owner) void this.loadIndex();
   }
@@ -617,7 +677,7 @@ export class LocalTranscriptCache {
    * the disk copy is written later, once, if its content changed. */
   remember(chatId: string, folder: string | null | undefined, window: LocalTranscriptWindow): void {
     if (!this.eligible(chatId, folder) || !folder) return;
-    if (window.messages.length === 0 && !(this.namespace === "cloud" && window.historyState?.revision)) {
+    if (window.messages.length === 0 && !(this.namespace === "cloud" && (window.historyState?.revision || window.cloudCache))) {
       // A confirmed empty transcript has nothing to paint; drop stale copies.
       this.forget(chatId);
       return;
@@ -634,6 +694,7 @@ export class LocalTranscriptCache {
       ...(this.namespace === "cloud" && window.source ? { source: window.source } : {}),
       ...(this.namespace === "cloud" && window.historyState ? { historyState: window.historyState } : {}),
       ...(this.namespace === "cloud" && window.contentSignatures ? { contentSignatures: window.contentSignatures } : {}),
+      ...(this.namespace === "cloud" && window.cloudCache ? { cloudCache: window.cloudCache } : {}),
     };
     this.putMemory(chatId, folder, bounded);
     if (this.namespace === "cloud" && !this.memory.has(chatId)) {
@@ -699,6 +760,9 @@ export class LocalTranscriptCache {
   }
 
   /** Retire all memory and async readers, including the disk index view. */
+  /** Tests: settles once background revalidation for the chat has finished (none here). */
+  settledForTesting(_chatId: string): Promise<void> { return Promise.resolve(); }
+
   resetForTesting(): void {
     this.resetMemory();
   }
@@ -732,7 +796,8 @@ export class LocalTranscriptCache {
     const bytes =
       knownBytes ??
       estimateJsonSize(window.messages, this.memoryBytes) +
-        (window.leadingPrompt ? estimateJsonSize(window.leadingPrompt) : 0);
+        (window.leadingPrompt ? estimateJsonSize(window.leadingPrompt) : 0) +
+        (this.namespace === "cloud" && window.cloudCache ? estimateJsonSize(window.cloudCache, this.memoryBytes) : 0);
     if (bytes > this.memoryBytes) return;
     this.memory.set(chatId, { window, folder, bytes });
     this.memoryTotal += bytes;
@@ -921,13 +986,8 @@ export class LocalTranscriptCache {
 
 /** The renderer's single Local transcript cache. */
 export const localTranscriptCache = new LocalTranscriptCache();
-export const cloudTranscriptCache = new LocalTranscriptCache({
-  namespace: "cloud",
-  memoryEntries: 8,
-  memoryBytes: 8 * 1024 * 1024,
-  diskEntries: 48,
-  diskBytes: 20 * 1024 * 1024,
-});
+export const cloudTranscriptCache = createNativeCloudTranscriptCache(LocalTranscriptCache, nativeCloudChatCache, decodeNativeCloudTranscriptWindow,
+  async chatId => { const bridge = getActiveBridge(); return bridge instanceof WorkspaceRuntimeClient ? bridge.chatHistoryRevision(chatId) : undefined; });
 
 export function transcriptCacheFor(chatId: string, folder?: string | null): LocalTranscriptCache | null {
   if (isCloudTranscriptChat(chatId, folder ?? undefined)) return cloudTranscriptCache;

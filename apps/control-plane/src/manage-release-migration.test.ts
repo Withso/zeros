@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import type pg from "pg";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   parseReleaseMigrationArgs,
@@ -78,6 +78,19 @@ function harness(options: {
 }
 
 describe("release migration runner", () => {
+  it("forwards the version recorder to every strict execution, including an up-to-date release", async () => {
+    const { deps } = harness();
+    const record = vi.fn();
+    deps.onServerVersion = record;
+    deps.migrator!.run = async (_pool, options) => {
+      options?.onServerVersion?.(180006);
+      return [];
+    };
+    await releaseMigration({ database: "zeros-control-plane-beta", branch: "main", execute: true,
+      confirm: "zeros-control-plane-beta" }, deps);
+    expect(record).toHaveBeenCalledExactlyOnceWith(180006);
+  });
+
   it("never reflects arbitrary driver diagnostics even without the minted password", async () => {
     const { deps } = harness({ runError: new Error("provider-secret-from-a-driver") });
     await expect(releaseMigration({ database: "zeros-control-plane-beta", branch: "main", execute: true,

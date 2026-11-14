@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import pg from "pg";
 import { describe, it, expect } from "vitest";
-import { createMigrationPool, createPool } from "./db.js";
+import { createMigrationPool, createPool, withSystemTx } from "./db.js";
 import { planMigrations, runMigrations, verifyMigrations } from "./migrate.js";
 const database = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 database("stable migration owner with rotating NOINHERIT logins", () => {
@@ -106,6 +106,26 @@ database("stable migration owner with rotating NOINHERIT logins", () => {
           )
         ).rows[0].owner,
       ).toBe(owner);
+      const cacheTables = ["cloud_v2_history_cache", "cloud_v2_history_changes", "cloud_v2_prompt_cache"];
+      await withSystemTx(rotated, async tx => {
+        for (const table of cacheTables) {
+          expect((await tx.query(`SELECT * FROM ${table}`)).rows).toEqual([]);
+        }
+      });
+      const cacheGrants = (await rotated.query(`SELECT table_name,grantee,privilege_type
+        FROM information_schema.role_table_grants
+        WHERE table_schema='public' AND table_name=ANY($1::text[]) AND grantee IN ('PUBLIC','zeros_app')
+        ORDER BY table_name,grantee,privilege_type`, [cacheTables])).rows;
+      expect(cacheGrants).toEqual(cacheTables.map(table_name => ({ table_name, grantee: "zeros_app", privilege_type: "SELECT" })));
+      await withSystemTx(rotated, async tx => {
+        for (const table of cacheTables) {
+          for (const statement of [`INSERT INTO ${table} DEFAULT VALUES`, `UPDATE ${table} SET revision=revision WHERE false`, `DELETE FROM ${table} WHERE false`]) {
+            await tx.query("SAVEPOINT cache_write");
+            await expect(tx.query(statement)).rejects.toMatchObject({ code: "42501" });
+            await tx.query("ROLLBACK TO SAVEPOINT cache_write; RELEASE SAVEPOINT cache_write");
+          }
+        }
+      });
     } finally {
       for (const pool of pools) await pool.end();
       try {

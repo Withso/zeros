@@ -115,6 +115,7 @@ import {
 import { appInfo, appSettingGet, appSettingSet, engineRestart, localNavigationReady } from "./app";
 import { logSubmit, logsExportOpen, logsRecent } from "./logs";
 import { cloudCatalogStreamStateCommand, cloudWorkspaceCapability } from "./cloud-capability";
+import { cloudChatCache } from "./cloud-chat-cache";
 import { fullDiskAccessOpenSettings, fullDiskAccessStatus } from "./full-disk-access";
 export function registerAllCommands(): void {
   registerAttachmentSourceIpc();
@@ -170,6 +171,7 @@ export function registerAllCommands(): void {
 
   setCommand("cloud_workspace_capability", cloudWorkspaceCapability);
   setCommand("cloud_catalog_stream_state", cloudCatalogStreamStateCommand);
+  setCommand("cloud_chat_cache", cloudChatCache);
 
   // Auth: main owns the WorkOS token pair (auth-session.ts); the renderer only
   // ever gets a live access token or identity claims, NEVER the refresh token.

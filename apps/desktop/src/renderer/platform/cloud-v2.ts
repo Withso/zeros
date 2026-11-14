@@ -9,6 +9,10 @@ import { isCloudWorkspacePageOwner } from "@zeros/protocol/cloud-workspace-link"
 import { isWorkspaceNumber, type WorkspaceAddress } from "@zeros/protocol/local-orchestration";
 import { prepareCloudPromptErasure } from "./cloud-prompt-erasure";
 import { cloudAccountRequest } from "./cloud-workspaces";
+import { nativeCloudChatCache } from "./cloud-chat-cache";
+import { readNativeCloudHistory } from "./cloud-chat-cache-history";
+import type { CloudCacheKnown } from "../../../shared/cloud-chat-cache";
+import { NativeCloudCacheError } from "./cloud-chat-cache-client";
 import type { CloudWorkspaceDocument } from "./cloud-workspace-contract";
 import type { CloudWorkspaceTarget } from "./bridge/cloud-workspace-key";
 
@@ -285,8 +289,16 @@ export async function connectCloudV2Workspace(target: CloudWorkspaceTarget, opti
       ...(options.presentedTokenExpiry ? { presentedTokenExpiry: options.presentedTokenExpiry } : {}) });
 }
 
+/** `known`: the chat's historyCache from the chats.list snapshot that proved access (cache skip/continuation). */
+export interface CloudHistoryReadOptions { known?: CloudCacheKnown }
+
 /** Chat history from the control plane's mirror, readable while the VM sleeps. */
-export async function readCloudV2History(target: CloudWorkspaceTarget, op: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
+export async function readCloudV2History(target: CloudWorkspaceTarget, op: string, params: Record<string, unknown>,
+  options?: CloudHistoryReadOptions): Promise<Record<string, unknown>> {
+  const epoch = nativeCloudChatCache.epoch;
+  const native = await readNativeCloudHistory(nativeCloudChatCache, target, op, params, options?.known);
+  if (epoch !== nativeCloudChatCache.epoch) throw new NativeCloudCacheError("owner_changed");
+  if (native) return native;
   const { result } = await cloudAccountRequest(`/v1/cloud-v2/workspaces/${uuid.parse(target.workspaceId)}/history`,
     z.object({ result: z.record(z.string(), z.unknown()) }), { body: { op, params }, idempotencyKey: key() },
     // messages.senders exists only under the sharing opt-in, for every viewer (the Creator too); every other history op follows the role rule.

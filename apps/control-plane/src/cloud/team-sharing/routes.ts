@@ -4,7 +4,8 @@ import { z } from "zod";
 import { HttpError } from "../../authz.js";
 import { rateLimit } from "../../ratelimit.js";
 import { readCloudV2SharingHistory } from "../history.js";
-import { CloudV2PromptCounterSchema, CloudV2PromptIdSchema, CloudV2SessionNameSchema } from "../prompt-contract.js";
+import { CloudV2PromptIdSchema, CloudV2SessionNameSchema } from "../prompt-contract.js";
+import { promptStatusQuery } from "../prompt-status-query.js";
 import { ApiRenameSchema } from "../api/contract.js";
 import type { CloudTeamSharing } from "./store.js";
 import { TEAM_SHARING_HEADER, TEAM_OWNERSHIP_HEADER, TeamListSchema, TeamPageSchema, TeamCandidatesQuerySchema, TeamReassignSchema,
@@ -89,12 +90,10 @@ export function createCloudTeamRoutes(sharing: CloudTeamSharing, document: (valu
     return c.json({ result: await sharing.read(id,c.get("user"),() => readCloudV2SharingHistory(sharing.workspaces,id,request)) });
   }));
   app.get(`${path}/prompts`,share(async c => {
-    const query = z.object({ chatId: CloudV2PromptIdSchema,after: CloudV2PromptCounterSchema.default("0"),
-      limit: z.coerce.number().int().min(1).max(100).default(100),includePayload: z.enum(["true","false"]).default("true") }).strict().safeParse(c.req.query());
-    if (!query.success) throw new HttpError(400,"invalid_request","Invalid message status request");
-    const id = uuid(c.req.param("id")!), { chatId,after,limit,includePayload } = query.data;
+    const cache = c.req.header("X-Zeros-Chat-Cache") === "1", query = promptStatusQuery(c.req.query(), cache);
+    const id = uuid(c.req.param("id")!), { chatId,after,limit,includePayload,queueRevision } = query;
     return c.json(await sharing.read(id,c.get("user"),proof => sharing.workspaces.prompts.listForViewer(id,chatId,after,limit,includePayload === "true",
-      async tx => { await sharing.authority.assert(proof,tx); })));
+      async tx => { await sharing.authority.assert(proof,tx); },cache ? { userId: c.get("user").id,queueRevision } : undefined)));
   }));
   const creator = share(async (c,next) => {
     const id = uuid(c.req.param("id")!), user = c.get("user");

@@ -1,0 +1,37 @@
+import { NativeCloudCacheError, type NativeCloudChatCacheClient } from "./cloud-chat-cache-client";
+import { CloudCacheTargetSchema, type CloudCacheKnown, type CloudCacheTarget } from "../../../shared/cloud-chat-cache";
+
+export async function readNativeCloudHistory(
+  native: NativeCloudChatCacheClient,
+  target: Omit<CloudCacheTarget, "chatId">,
+  op: string,
+  params: Record<string, unknown>,
+  known?: CloudCacheKnown,
+): Promise<Record<string, unknown> | null> {
+  if (!native.owner || !["messages.window", "messages.windowOlder"].includes(op) || params.before !== undefined) return null;
+  const parsed = CloudCacheTargetSchema.safeParse({ ...target, chatId: params.chatId });
+  const limit = params.limit;
+  if (!parsed.success || typeof limit !== "number" || !Number.isInteger(limit) || limit < 1 || limit > 500 ||
+      op === "messages.windowOlder" && typeof params.beforeMsgId !== "string") return null;
+  const epoch = native.epoch;
+  try {
+    const refreshed = op === "messages.window"
+      ? await native.refresh(parsed.data, limit, known)
+      : { range: await native.refreshBefore(parsed.data, params.beforeMsgId as string, limit) };
+    if (epoch !== native.epoch) throw new NativeCloudCacheError("owner_changed");
+    if (!refreshed.range) return null;
+    const range = refreshed.range;
+    // An unchanged chat makes no read at all; the prompt queue has its own reader (cloudPrompts) for live state.
+    if (op === "messages.window" && !("cached" in refreshed && refreshed.cached)) void native.refreshPending(parsed.data).catch(() => {});
+    return { messages: range.rows.map(({ index: _index, ...row }) => row),
+      ...(range.historyState ? { historyState: range.historyState } : {}),
+      ...(range.turnOpening ? { turnOpening: range.turnOpening } : {}),
+      // Team sharing: senders stored with the cached rows answer attribution without a messages.senders read.
+      ...(range.senders ? { senders: range.senders } : {}),
+    };
+  } catch (error) {
+    if (epoch !== native.epoch) throw new NativeCloudCacheError("owner_changed");
+    if (error instanceof NativeCloudCacheError && ["access_lost", "owner_changed"].includes(error.reason)) throw error;
+    return null;
+  }
+}

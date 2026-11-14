@@ -2,7 +2,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type pg from "pg";
 
 import {
@@ -277,6 +277,73 @@ describe("migration checksums", () => {
 });
 
 describe("migration runner connection boundary", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it.each([
+    ["180006", "180006", "accepted"],
+    ["160000", "160000", "accepted"],
+    ["150010", "150010", "refused"],
+    [null, "unknown", "refused"],
+    ["private-version-detail\n180006", "unknown", "refused"],
+    ["1.8e5", "unknown", "refused"],
+    ["9007199254740992", "unknown", "refused"],
+  ])("records only the safe measured PostgreSQL version (%s)", async (version, measured, result) => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const { pool, calls } = poolWithAppliedMigrations(LADDER, version);
+    const failure = await runMigrations(pool).catch((error: unknown) => error);
+    expect(log).toHaveBeenCalledWith(`[migrate] server_version_num=${measured} minimum=160000 ${result}`);
+    expect(JSON.stringify(log.mock.calls)).not.toContain("private-version-detail");
+    if (result === "refused") {
+      expect(failure).toBeInstanceOf(Error);
+      expect(calls.map(call => call.text)).toEqual(["SHOW server_version_num"]);
+    }
+  });
+
+  it("records an unknown version without echoing a failed SHOW diagnostic", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const { pool, calls } = poolWithAppliedMigrations(LADDER);
+    const client = await pool.connect();
+    vi.mocked(client.query).mockRejectedValueOnce(new Error("private-driver-detail"));
+    const failure = await runMigrations(pool).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(Error);
+    expect(log).toHaveBeenCalledWith("[migrate] server_version_num=unknown minimum=160000 refused");
+    expect(JSON.stringify(log.mock.calls)).not.toContain("private-driver-detail");
+    expect(calls).toEqual([]);
+    expect(client.release).toHaveBeenCalledWith(true);
+  });
+
+  it("reports the exact guard measurement before schema work through a release recorder", async () => {
+    const { pool, calls } = poolWithAppliedMigrations(LADDER);
+    const record = vi.fn((version: number | null) => {
+      expect(version).toBe(180006);
+      expect(calls.map(call => call.text)).toEqual(["SHOW server_version_num"]);
+    });
+    await runMigrations(pool, { onServerVersion: record });
+    expect(record).toHaveBeenCalledOnce();
+  });
+
+  it.each(["150010", "not-a-version", null])("rejects an unsupported PostgreSQL version before migration work (%s)", async version => {
+    const { pool, calls } = poolWithAppliedMigrations(LADDER, version);
+    const client = await pool.connect();
+    const error = await runMigrations(pool).catch((failure: unknown) => failure);
+    expect(error).toBeInstanceOf(Error);
+    expect(migrationFailureDiagnostic(error)).toContain("PostgreSQL 16 or newer");
+    expect(calls.map(call => call.text)).toEqual(["SHOW server_version_num"]);
+    expect(client.release).toHaveBeenCalledWith(true);
+  });
+
+  it.each(["160000", "160011", "180006"])("accepts PostgreSQL version %s before migration work", async version => {
+    const { pool, calls } = poolWithAppliedMigrations(LADDER, version);
+    await expect(runMigrations(pool)).resolves.toEqual([]);
+    expect(calls[0]?.text).toBe("SHOW server_version_num");
+  });
+
+  it("rejects a pre-16 service-boot migrator before it touches the schema", async () => {
+    const { pool, calls } = poolWithAppliedMigrations(LADDER, "150010");
+    await expect(runServiceBootMigrations(pool, { cloudWorkspacesEnabled: true })).rejects.toThrow("PostgreSQL 16 or newer");
+    expect(calls.map(call => call.text)).toEqual(["SHOW server_version_num"]);
+  });
+
   it("reports safe driver codes without logging driver messages or objects", () => {
     const secret = "private-database-row-or-url";
     const driverError = Object.assign(new Error(secret), { code: "23514", detail: secret });
@@ -325,6 +392,9 @@ describe("migration runner connection boundary", () => {
           const parameters =
             values ?? (typeof query === "string" ? [] : (query.values ?? []));
           calls.push({ text, values: parameters });
+          if (text === "SHOW server_version_num") {
+            return { rows: [{ server_version_num: "180006" }], rowCount: 1 };
+          }
           if (/SHOW\s+statement_timeout/i.test(text)) {
             return { rows: [{ statement_timeout: "30s" }], rowCount: 1 };
           }
@@ -371,7 +441,7 @@ describe("migration runner connection boundary", () => {
   });
 });
 
-function poolWithAppliedMigrations(appliedNames: readonly string[]): {
+function poolWithAppliedMigrations(appliedNames: readonly string[], serverVersion: string | null = "180006"): {
   pool: pg.Pool;
   calls: Array<{ text: string; values: readonly unknown[] }>;
 } {
@@ -392,6 +462,9 @@ function poolWithAppliedMigrations(appliedNames: readonly string[]): {
         const parameters =
           values ?? (typeof query === "string" ? [] : (query.values ?? []));
         calls.push({ text, values: parameters });
+        if (text === "SHOW server_version_num") {
+          return { rows: [{ server_version_num: serverVersion }], rowCount: 1 };
+        }
         if (/SHOW\s+statement_timeout/i.test(text)) {
           return { rows: [{ statement_timeout: "30s" }], rowCount: 1 };
         }

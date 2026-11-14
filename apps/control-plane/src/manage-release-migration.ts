@@ -49,8 +49,9 @@ export type ReleaseMigrationDeps = {
   createPool: (databaseUrl: string) => pg.Pool;
   migrator?: {
     plan: typeof planMigrations;
-    run: (pool: pg.Pool) => Promise<string[]>;
+    run: typeof runMigrations;
   };
+  onServerVersion?: (version: number | null) => void;
   now?: () => Date;
   sleep?: (ms: number) => Promise<void>;
 };
@@ -145,7 +146,7 @@ export async function releaseMigration(
   }
   const now = deps.now ?? (() => new Date());
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
-  const migrator = deps.migrator ?? { plan: planMigrations, run: (pool: pg.Pool) => runMigrations(pool) };
+  const migrator = deps.migrator ?? { plan: planMigrations, run: runMigrations };
   const branchPath = `/databases/${input.database}/branches/${input.branch}`;
 
   const branchResponse = await deps.planetScale("GET", branchPath);
@@ -229,7 +230,7 @@ export async function releaseMigration(
         // Always run: the strict runner verifies every recorded checksum
         // even when nothing is pending.
         try {
-          applied = await migrator.run(pool);
+          applied = await migrator.run(pool, deps.onServerVersion ? { onServerVersion: deps.onServerVersion } : {});
         } catch (error) {
           // Each file commits on its own: re-read the ledger with this login
           // so a partial run reports exactly what committed, or "unknown".

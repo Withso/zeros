@@ -1,3 +1,5 @@
+import { CloudCacheKnownSchema, type CloudCacheKnown } from "../../../../shared/cloud-chat-cache";
+import type { CloudHistoryReadOptions } from "../cloud-v2";
 import type { BridgeMessage } from "./messages";
 import { CloudWorkspaceReadOnlyError } from "../cloud-workspace-read-only";
 import { RuntimeClient, runtimeExecutionKey, type ConnectionStatus } from "./ws-client";
@@ -63,7 +65,7 @@ export interface WorkspaceRuntimeOptions {
   manage?: (target: CloudWorkspaceTarget, op: string, params?: WireRecord) => Promise<WireRecord>;
   /** Authorized database reads that do not require a worker connection. The
    * mirror stores the worker's native rows, so they are scoped like its replies. */
-  readHistory?: (target: CloudWorkspaceTarget, op: string, params: WireRecord) => Promise<WireRecord>;
+  readHistory?: (target: CloudWorkspaceTarget, op: string, params: WireRecord, options?: CloudHistoryReadOptions) => Promise<WireRecord>;
   /** The workspace's native checkout path, used to scope mirror rows before a
    * worker has confirmed it in this session. */
   historyRoot?: (target: CloudWorkspaceTarget) => string | undefined;
@@ -137,6 +139,9 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
   private ongoingOpens = 0;
   private peerUseSequence = 0;
   private readonly historyIntents = new Map<string, number>();
+  /** chats.list keys invalidated by a change event and not yet re-read: they must not supply historyCache. */
+  private readonly unconfirmedLists = new Set<string>();
+  private listInvalidations = 0;
   private readonly routedHandlers = new Map<
     string,
     Set<(message: BridgeMessage) => void>
@@ -536,11 +541,41 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     return { ...target, root, engineWorkspaceId: target.workspaceId };
   }
 
+  /** The scoped chat's historyCache for the local transcript cache (one chats.list per workspace, never per chat). */
+  async chatHistoryRevision(chatId: string): Promise<CloudCacheKnown | undefined> {
+    const target = parseCloudScopedId(chatId);
+    return target ? (await this.knownHistoryReady(target, "messages.window", { chatId }))?.known : undefined;
+  }
+
+  /** At launch a restored transcript can be read before its workspace's chats.list: join (or start) that one read
+   * so every chat of the workspace revalidates against it. A failed list read leaves the normal path. */
+  private async knownHistoryReady(target: CloudWorkspaceTarget, op: string, params: WireRecord): Promise<CloudHistoryReadOptions | undefined> {
+    if (op !== "messages.window" || params.before !== undefined || typeof params.chatId !== "string" || !this.routing.readHistory) return undefined;
+    const listKey = this.historyKey(target, "chats.list", {});
+    if (!this.history.peekSnapshot(listKey).data || this.unconfirmedLists.has(listKey))
+      await this.warmHistorySnapshot(target).catch(() => undefined);
+    return this.knownHistory(target, op, params);
+  }
+
+  /** The chat's historyCache from the confirmed chats.list snapshot: the local transcript cache answers an unchanged
+   * chat without a read and continues a changed one once. Absent (N-1 control plane, no snapshot): the normal read. */
+  private knownHistory(target: CloudWorkspaceTarget, op: string, params: WireRecord): CloudHistoryReadOptions | undefined {
+    if (op !== "messages.window" || params.before !== undefined || typeof params.chatId !== "string") return undefined;
+    const listKey = this.historyKey(target, "chats.list", {});
+    // An invalidated list (a change event) still paints, but its revisions may be behind the server's until a
+    // re-read succeeds; a failed re-read keeps it unconfirmed.
+    if (this.unconfirmedLists.has(listKey)) return undefined;
+    const chats = this.history.peekSnapshot(listKey).data?.chats;
+    const row = Array.isArray(chats) ? chats.find(chat => record(chat).id === params.chatId) : undefined;
+    const known = CloudCacheKnownSchema.safeParse(record(row).historyCache);
+    return known.success ? { known: known.data } : undefined;
+  }
+
   private historyKey(target: CloudWorkspaceTarget, op: string, params: WireRecord): string {
     return `${cloudWorkspaceKey(target)}\0${this.identity(target)}\0${op}\0${JSON.stringify(params)}`;
   }
   private async readHistory(target: CloudWorkspaceTarget, op: string, params: WireRecord): Promise<WireRecord> {
-    const epoch = this.accountEpoch;
+    const epoch = this.accountEpoch, listGeneration = this.listInvalidations;
     const identity = this.identity(target);
     const assertAccess = () => {
       if (this.closed || epoch !== this.accountEpoch || identity !== this.identity(target) || (this.routing.canAccess && !this.routing.canAccess(target)))
@@ -576,7 +611,8 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
         // Translate exactly as for the worker: the mirror holds its native rows.
         const scope = this.mirrorScope(target);
         const native = record(cloudOutgoing(scope, { type: "WORKSPACE_REQUEST", op, params }).params);
-        const reply = await this.routing.readHistory!(target, op, native);
+        const known = await this.knownHistoryReady(target, op, params);
+        const reply = await (known ? this.routing.readHistory!(target, op, native, known) : this.routing.readHistory!(target, op, native));
         result = record(cloudIncoming(scope, { type: "WORKSPACE_RESPONSE", op, result: reply }).result);
       }
       assertAccess();
@@ -604,6 +640,9 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
         currentPeer.client.status === "connected")
       return this.readHistory(target, op, params);
     if (op === "chats.list") {
+      // Only a list read that started after the latest invalidation confirms it. (One in flight across an invalidation
+      // is followed by the shared cache's queued re-read.)
+      if (listGeneration === this.listInvalidations) this.unconfirmedLists.delete(this.historyKey(target, op, params));
       this.historyWorkspaces.delete(key);
       this.historyWorkspaces.set(key, target);
       while (this.historyWorkspaces.size > 32) this.historyWorkspaces.delete(this.historyWorkspaces.keys().next().value!);
@@ -631,6 +670,12 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
   private invalidateHistory(target: CloudWorkspaceTarget): void {
     const prefix = `${cloudWorkspaceKey(target)}\0`;
     for (const key of this.history.keys()) if (key.startsWith(prefix)) this.history.invalidate(key);
+    this.listInvalidations++;
+    // A marker guards a cached list; a workspace with no cached list has nothing stale (its next read loads first).
+    // Markers leave only with their snapshot, so they are bounded by the history cache, never evicted while stale.
+    const listKey = this.historyKey(target, "chats.list", {});
+    if (this.history.peekSnapshot(listKey).data !== undefined) this.unconfirmedLists.add(listKey);
+    for (const marker of this.unconfirmedLists) if (this.history.peekSnapshot(marker).data === undefined) this.unconfirmedLists.delete(marker);
   }
 
   hasChatSnapshot(folder: string): boolean {

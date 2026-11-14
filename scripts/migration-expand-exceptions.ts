@@ -2,6 +2,16 @@ import { createHash } from "node:crypto";
 
 // Each reviewed migration lists its exact exempted statements by rule.
 const reviewed: Readonly<Record<string, Readonly<Record<string, readonly string[]>>>> = {
+  "0252_cloud_chat_cache.sql": {
+    "privilege-tightening": [
+      "REVOKE ALL ON cloud_v2_history_cache, cloud_v2_history_changes, cloud_v2_prompt_cache FROM PUBLIC, zeros_app;",
+      "REVOKE ALL ON FUNCTION advance_cloud_history_cache(uuid,text,boolean,bigint) FROM PUBLIC;",
+      "REVOKE ALL ON FUNCTION track_cloud_message_cache() FROM PUBLIC;",
+      "REVOKE ALL ON FUNCTION track_cloud_message_count() FROM PUBLIC;",
+      "REVOKE ALL ON FUNCTION track_cloud_chat_cache() FROM PUBLIC;",
+      "REVOKE ALL ON FUNCTION track_cloud_prompt_cache() FROM PUBLIC;",
+    ],
+  },
   "0251_cloud_history_digests.sql": {
     "privilege-tightening": [
       "REVOKE ALL ON FUNCTION invalidate_cloud_chat_history_digest() FROM PUBLIC;",
@@ -625,6 +635,8 @@ const cloudExecutionDigests: Readonly<Record<string, readonly string[]>> = {
   ],
 };
 
+const cloudHistoryCountTransitionDigest = "7b529e5609509ae4a2414e777c7c4cad24f0bfb9fcda80398e86aee035f7f34c";
+
 export function applyReviewedExpandExceptions(file: string, sql: string): string {
   if (!sql.includes("zeros-expand-exception:")) return sql;
   const exact = reviewed[file];
@@ -637,6 +649,8 @@ export function applyReviewedExpandExceptions(file: string, sql: string): string
     const rule = annotations[0]![1]!;
     const statement = text.replace(/\r\n/g, "\n").trim();
     const allowed = exact[rule]?.includes(statement) ||
+      (file === "0252_cloud_chat_cache.sql" && rule === "cache-count-transition" &&
+        createHash("sha256").update(statement).digest("hex") === cloudHistoryCountTransitionDigest) ||
       (file === "0250_cloud_workspace_recovery.sql" && cloudWorkspaceRecoveryDigests[rule]?.includes(createHash("sha256").update(statement).digest("hex"))) ||
       (file === "0249_organization_seat_state.sql" && organizationSeatStateDigests[rule]?.includes(createHash("sha256").update(statement).digest("hex"))) ||
       (file === "0248_cloud_push_signals.sql" && cloudPushSignalsDigests[rule]?.includes(createHash("sha256").update(statement).digest("hex"))) ||

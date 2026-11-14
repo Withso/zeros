@@ -17,6 +17,7 @@ import { executionIntentAuthority } from "./execution/authority.js";
 import { memberOnHoldSql } from "../organization-seats.js";
 import { assertNoExecutionTransition } from "./execution/activation-state.js";
 import { CLOUD_RECOVERY_TURN_HOLD, assertRecoveryTurnReady } from "./recovery-state.js";
+import { cacheCounter } from "./history-cache.js";
 
 export type CloudApiPrompt = {
   chatId: string; userMessageId: string; agentId: CloudV2Prompt["agentId"];
@@ -29,6 +30,7 @@ export type CloudApiPrompt = {
 const PENDING = "('queued','inboxed','dispatching','accepted')";
 export const CLOUD_V2_PROMPT_LIMITS = { pending: 128, bytes: 32 * 1024 * 1024, receipts: 10_000, leaseMs: 30_000, readBytes: 14 * 1024 * 1024 };
 type Limits = typeof CLOUD_V2_PROMPT_LIMITS;
+type ReceiptCache = { userId: string; queueRevision?: number | undefined };
 type Workspace = { id: string; repository: string; state: CloudV2PromptReceipt["workspaceState"]; archived_at: Date | null;
   access_epoch: string; worker_boot_id: string | null; execution_mode: string; previous?: Row };
 type Row = { user_message_id: string; chat_id: string; creator_user_id: string; sequence: string; epoch: string; access_epoch: string;
@@ -264,32 +266,47 @@ export class CloudV2PromptOutbox {
     });
   }
 
-  async list(id: string, userId: string, chatId: string, after = "0", limit = 100, includePayload = true): Promise<{ epoch: string; items: CloudV2PromptStatus[]; nextAfter: string | null }> {
-    return withSystemTx(this.pool, async tx => {
+  async list(id: string, userId: string, chatId: string, after = "0", limit = 100, includePayload = true, cache?: { queueRevision?: number | undefined }) {
+    const result = await withSystemTx(this.pool, async tx => {
       await this.owned(tx, id, userId, false);
-      return this.readStatuses(tx,id,chatId,after,limit,includePayload);
+      return this.readStatuses(tx,id,chatId,after,limit,includePayload,cache ? { userId, ...cache } : undefined);
     }, { consistentRead: true });
+    if (cache) await withSystemTx(this.pool, tx => this.owned(tx, id, userId, false));
+    return result;
   }
 
-  async listForViewer(id: string, chatId: string, after: string, limit: number, includePayload: boolean, authorize: (tx: Tx) => Promise<void>) {
+  async listForViewer(id: string, chatId: string, after: string, limit: number, includePayload: boolean, authorize: (tx: Tx) => Promise<void>, cache?: ReceiptCache) {
     return withSystemTx(this.pool,async tx => {
       await authorize(tx);
-      const result = await this.readStatuses(tx,id,chatId,after,limit,includePayload);
+      const result = await this.readStatuses(tx,id,chatId,after,limit,includePayload,cache);
       await authorize(tx);
       return result;
-    });
+    }, { consistentRead: !!cache });
   }
 
-  private async readStatuses(tx: Tx, id: string, chatId: string, after: string, limit: number, includePayload: boolean) {
-      const chat = (await tx.query<{ epoch: string; next_sequence: string }>("SELECT epoch::text,next_sequence::text FROM cloud_v2_prompt_chats WHERE workspace_id=$1 AND chat_id=$2", [id, chatId])).rows[0];
+  private async readStatuses(tx: Tx, id: string, chatId: string, after: string, limit: number, includePayload: boolean, cache?: ReceiptCache) {
+      const chat = (await tx.query<{ epoch: string; next_sequence: string; revision: string }>(cache
+        ? `SELECT coalesce(c.epoch,0)::text AS epoch,coalesce(c.next_sequence,0)::text AS next_sequence,
+            coalesce(s.revision,0)::text AS revision FROM (VALUES(1)) seed(n)
+            LEFT JOIN cloud_v2_prompt_chats c ON c.workspace_id=$1 AND c.chat_id=$2
+            LEFT JOIN cloud_v2_prompt_cache s ON s.workspace_id=$1 AND s.chat_id=$2`
+        : "SELECT epoch::text,next_sequence::text FROM cloud_v2_prompt_chats WHERE workspace_id=$1 AND chat_id=$2", [id, chatId])).rows[0];
+      const queueRevision = cache ? cacheCounter(chat!.revision) : undefined;
+      if (cache?.queueRevision !== undefined && cache.queueRevision !== queueRevision)
+        throw new HttpError(409, "queue_changed", "Message status changed while paging");
       const { rows } = await tx.query<Row>(`WITH candidates AS (
         SELECT user_message_id,sequence,CASE WHEN $6::boolean THEN payload_bytes ELSE 0 END AS payload_bytes FROM cloud_v2_prompt_outbox
-        WHERE workspace_id=$1 AND chat_id=$2 AND sequence>$3 ORDER BY sequence LIMIT $4),
+        WHERE workspace_id=$1 AND chat_id=$2 AND sequence>$3 ${cache ? "AND creator_user_id=$7" : ""} ORDER BY sequence LIMIT $4),
         bounded AS (SELECT user_message_id,sum(payload_bytes) OVER (ORDER BY sequence) AS bytes FROM candidates)
         SELECT p.receipt,p.state,p.cancel_requested,p.sequence,CASE WHEN $6::boolean THEN p.payload ELSE NULL END AS payload
         FROM cloud_v2_prompt_outbox p JOIN bounded b USING(user_message_id)
-        WHERE p.workspace_id=$1 AND b.bytes<=$5 ORDER BY p.sequence`, [id, chatId, after, limit, this.limits.readBytes, includePayload]);
+        WHERE p.workspace_id=$1 AND b.bytes<=$5 ORDER BY p.sequence`, [id, chatId, after, limit, this.limits.readBytes, includePayload, ...(cache ? [cache.userId] : [])]);
       const last = rows.at(-1)?.sequence;
+      if (cache) {
+        const more = last && (await tx.query(`SELECT 1 FROM cloud_v2_prompt_outbox
+          WHERE workspace_id=$1 AND chat_id=$2 AND creator_user_id=$3 AND sequence>$4 LIMIT 1`, [id, chatId, cache.userId, last])).rowCount;
+        return { epoch: chat?.epoch ?? "0", items: rows.map(status), nextAfter: more ? last! : null, queueRevision: queueRevision! };
+      }
       return { epoch: chat?.epoch ?? "0", items: rows.map(status), nextAfter: last && BigInt(last) < BigInt(chat?.next_sequence ?? "0") ? last : null };
   }
 
@@ -453,8 +470,15 @@ export class CloudV2PromptOutbox {
   /** Compaction retains the hash/receipt until erasure. Never forget a message
    * ID and thereby turn a late HTTP retry into a fresh provider execution. */
   async prune(): Promise<void> {
-    await withSystemTx(this.pool, tx => tx.query(`UPDATE cloud_v2_prompt_outbox SET payload=NULL,payload_bytes=0
-      WHERE (workspace_id,user_message_id) IN (SELECT workspace_id,user_message_id FROM cloud_v2_prompt_outbox
-        WHERE payload IS NOT NULL AND terminal_at<clock_timestamp()-interval '7 days' ORDER BY terminal_at LIMIT 1000)`));
+    // Different outbox rows share a per-chat revision. Take their workspace
+    // fences first, and let foreground work keep every lock it already owns.
+    await withSystemTx(this.pool, tx => tx.query(`WITH candidates AS MATERIALIZED (
+      SELECT workspace_id,user_message_id FROM cloud_v2_prompt_outbox
+      WHERE payload IS NOT NULL AND terminal_at<clock_timestamp()-interval '7 days' ORDER BY terminal_at LIMIT 1000),
+      workspaces AS MATERIALIZED (SELECT w.id FROM cloud_v2_workspaces w
+        WHERE w.id IN (SELECT workspace_id FROM candidates) ORDER BY w.id FOR UPDATE OF w SKIP LOCKED)
+      UPDATE cloud_v2_prompt_outbox p SET payload=NULL,payload_bytes=0
+      FROM workspaces w WHERE p.workspace_id=w.id AND (p.workspace_id,p.user_message_id) IN (SELECT workspace_id,user_message_id FROM candidates)
+        AND p.payload IS NOT NULL AND p.terminal_at<clock_timestamp()-interval '7 days'`));
   }
 }

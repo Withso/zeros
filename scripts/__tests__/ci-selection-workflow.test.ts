@@ -992,7 +992,10 @@ describe("current pull-request labels", () => {
     const runner = temporaryDirectory();
     const output = path.join(runner, "outputs");
     writeFileSync(output, "");
-    const result = runStep(labelsStep(), {
+    const step = labelsStep();
+    // Hosts can prepend their command wrappers while starting the shell. Set
+    // the fixture path inside it so these API checks cannot call the real gh.
+    const result = runStep({ ...step, run: `export PATH="$GH_FIXTURE_BIN:$PATH"\n${step.run}` }, {
       GH_TOKEN: "fixture-token-value",
       GITHUB_REPOSITORY: "Withso/zeros",
       PR_NUMBER: "123",
@@ -1001,9 +1004,12 @@ describe("current pull-request labels", () => {
       LABEL_SETTLE_SECONDS: "15",
       LABEL_RETRY_SECONDS: "0",
       GITHUB_OUTPUT: output,
-      PATH: `${gh.bin}:${process.env.PATH}`,
+      GH_FIXTURE_BIN: gh.bin,
       ...env,
     });
+    expect(readFileSync(path.join(gh.bin, "calls"), "utf8")).toContain(
+      "api repos/Withso/zeros/pulls/123 --jq [.labels[].name]",
+    );
     return { result, output: readFileSync(output, "utf8") };
   }
 

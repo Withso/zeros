@@ -1,0 +1,9 @@
+{
+  "id": "cloud-history-opaque-walk-cost",
+  "kind": "seeded",
+  "area": "control-plane-data",
+  "fixedBy": "pr:1066",
+  "symptom": "Hundreds of opaque non-user history rows turn one cached range read into hundreds of database round trips even though the reply is correct.",
+  "rule": "Exceptional opaque candidates must be read in bounded batches while preserving opening preference and steer fallback; a real PostgreSQL cost regression must cover both a distant opening and its absence.",
+  "check": "pnpm --dir apps/control-plane exec vitest run src/cloud/chat-cache.integration.test.ts"
+}

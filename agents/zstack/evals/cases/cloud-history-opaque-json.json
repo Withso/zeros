@@ -1,0 +1,9 @@
+{
+  "id": "cloud-history-opaque-json",
+  "kind": "seeded",
+  "area": "control-plane-data",
+  "fixedBy": "pr:1066",
+  "symptom": "A partial cloud history range fails when an earlier opaque message contains valid JSON outside PostgreSQL jsonb's Unicode or numeric domain.",
+  "rule": "The bug-fix playbook requires a real HTTP/PostgreSQL regression: guard database casts with representability checks and preserve opaque opening payloads using the native parser, including N-1 writes and cache revisions.",
+  "check": "pnpm --dir apps/control-plane exec vitest run src/cloud/chat-cache.integration.test.ts src/cloud/history.integration.test.ts"
+}

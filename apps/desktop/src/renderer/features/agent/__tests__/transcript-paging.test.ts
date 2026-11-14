@@ -9,9 +9,10 @@ import type {
   AgentToolMessage,
 } from "../use-agent-session";
 import { beginChatScrollNavigation, CHAT_SCROLL_NAVIGATION_EVENT } from "../chat-scroll-navigation";
-import { BLANK } from "../sessions-store";
+import { BLANK, useSessionsStore } from "../sessions-store";
 import { captureScrollAnchor, restoreTargetTop } from "../chat-scroll-anchor";
 import * as paging from "../transcript-paging";
+import { isCloudWorkspace } from "../../../platform/bridge/cloud-workspace-key";
 
 // Like queue-workflow.test.ts, exercise the actual callbacks with deferred I/O
 // and immutable session slots. No provider account or private history is needed.
@@ -107,6 +108,7 @@ function setup(agentId = "claude", strictWindowReceivers = false) {
     resolve: (messages: AgentMessage[]) => void;
     reject: (error: Error) => void;
   }> = [];
+  const cachedRequests: Array<{ resolve(value: { messages: AgentMessage[]; leadingPrompt: AgentTextMessage | null }): void }> = [];
   const frames = new Map<number, FrameRequestCallback>();
   let frameId = 0;
   const turns = [
@@ -159,6 +161,7 @@ function setup(agentId = "claude", strictWindowReceivers = false) {
   };
   const context = {
     ...paging,
+    isCloudWorkspace,
     chatId: "chat",
     loadingOlder: false,
     hasOlder: true,
@@ -193,6 +196,7 @@ function setup(agentId = "claude", strictWindowReceivers = false) {
           requests.push({ resolve, reject }),
         ),
     ),
+    ipcCachedWindowOlderMessages: vi.fn(() => new Promise(resolve => cachedRequests.push({ resolve }))),
     setLoadingOlder: vi.fn((_value: boolean) => {}),
     setHasOlder: vi.fn((_value: boolean) => {}),
     setNearTop: vi.fn((_value: boolean) => {}),
@@ -228,6 +232,7 @@ function setup(agentId = "claude", strictWindowReceivers = false) {
     context,
     store,
     requests,
+    cachedRequests,
     scrollEl,
     turns,
     listeners,
@@ -678,5 +683,84 @@ describe("transcript page scroll restoration", () => {
     test.flushFrames();
     expect(test.scrollEl.scrollTop).toBe(200);
     expect(test.context.olderPageRequestRef.current).toBeNull();
+  });
+});
+
+
+describe("offline paging of provisional cloud transcripts", () => {
+  const cwd = "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
+  const cloudCache = { owner: '["https://api.example.test","viewer-a"]', epoch: 3, revision: 7 };
+  const cached = (slot: AgentSessionState): AgentSessionState => ({ ...slot, cwd, transcriptState: "loading",
+    transcriptPresentation: { source: "cache", cloudCache } });
+
+  it("keeps successive cached pages provisional through the real session store and restores the scroll anchor", async () => {
+    const h = setup();
+    const chatId = "cloud:11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222:cached-paging";
+    h.context.chatId = chatId;
+    h.context.useSessionsStore.getState = () => useSessionsStore.getState();
+    useSessionsStore.getState().setSession(chatId, cached({ ...BLANK, messages: [user("oldest")], transcriptDirty: true }));
+    const initial = useSessionsStore.getState().sessions[chatId];
+    try {
+      const first = h.loadOlder();
+      h.cachedRequests[0].resolve({ messages: [user("older")], leadingPrompt: null });
+      await first;
+      const current = useSessionsStore.getState().sessions[chatId];
+      expect(current.transcriptState).toBe("loading");
+      expect(current.transcriptPresentation).toBe(initial.transcriptPresentation);
+      expect(current.transcriptDirty).toBe(true);
+      expect(current.messages.at(-1)).toBe(initial.messages[0]);
+      h.turns.forEach(turn => { turn.top += 300; });
+      for (let frame = 0; frame < 6; frame++) h.flushFrames();
+      expect(h.scrollEl.scrollTop).toBe(500);
+      expect(h.context.olderPageRequestRef.current).toBeNull();
+      const second = h.loadOlder();
+      expect(h.cachedRequests).toHaveLength(2);
+      h.cachedRequests[1].resolve({ messages: [user("earliest")], leadingPrompt: null });
+      await second;
+      const complete = useSessionsStore.getState().sessions[chatId];
+      expect(complete.messages.map(row => row.id)).toEqual(["earliest", "older", "oldest"]);
+      expect(complete.transcriptState).toBe("loading");
+      expect(complete.transcriptPresentation).toBe(initial.transcriptPresentation);
+      expect(h.context.ipcWindowOlderMessages).not.toHaveBeenCalled();
+    } finally { useSessionsStore.getState().removeSession(chatId); }
+  });
+
+  it("prepends an offline page and its leading prompt without granting transcript authority", async () => {
+    const h = setup();
+    h.store.sessions.chat = cached(h.store.sessions.chat);
+    const slot = h.store.sessions.chat;
+    const loading = h.loadOlder();
+    expect(h.context.ipcCachedWindowOlderMessages).toHaveBeenCalledWith("chat", 200, "oldest", cloudCache);
+    expect(h.context.ipcWindowOlderMessages).not.toHaveBeenCalled();
+    const opening = user("opening"), older = { ...answer("Earlier answer"), id: "older" };
+    h.cachedRequests[0].resolve({ messages: [older], leadingPrompt: opening });
+    await loading;
+    expect(h.store.sessions.chat.messages).toEqual([older, ...slot.messages]);
+    expect(h.store.sessions.chat.leadingPrompt).toEqual(opening);
+    expect(h.store.sessions.chat.transcriptState).toBe("loading");
+    expect(h.store.sessions.chat.transcriptPresentation).toBe(slot.transcriptPresentation);
+  });
+
+  it("probes cached ranges only and ignores a response from another cache revision", async () => {
+    const h = setup();
+    h.store.sessions.chat = cached(h.store.sessions.chat);
+    const probing = h.probe();
+    expect(h.context.ipcCachedWindowOlderMessages).toHaveBeenCalledWith("chat", 1, "oldest", cloudCache);
+    h.store.sessions.chat = { ...h.store.sessions.chat, transcriptPresentation: { source: "cache", cloudCache: { ...cloudCache, revision: 8 } } };
+    h.cachedRequests[0].resolve({ messages: [], leadingPrompt: null });
+    await probing;
+    expect(h.context.ipcWindowOlderMessages).not.toHaveBeenCalled();
+    expect(h.context.setHasOlder).not.toHaveBeenCalled();
+  });
+
+  it("requires matching account, native lifetime, revision, workspace and provisional state", () => {
+    const slot = cached(setup().store.sessions.chat);
+    expect(paging.canApplyHistoryPage(slot, { ...slot })).toBe(true);
+    for (const change of [{ owner: "other" }, { epoch: 4 }, { revision: 8 }])
+      expect(paging.canApplyHistoryPage(slot, { ...slot, transcriptPresentation: { source: "cache", cloudCache: { ...cloudCache, ...change } } })).toBe(false);
+    expect(paging.canApplyHistoryPage(slot, { ...slot, cwd: cwd + "x" })).toBe(false);
+    expect(paging.canApplyHistoryPage(slot, { ...slot, transcriptState: "resident" })).toBe(false);
+    const local = { ...slot, cwd: "/fixture/local" };
+    expect(paging.canApplyHistoryPage(local, local)).toBe(false);
   });
 });

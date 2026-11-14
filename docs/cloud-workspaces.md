@@ -1082,6 +1082,61 @@ Older workers keep the original digest reply, including deleted rows with null
 digests. Their ordinary chat upsert can still revive a deleted row; the new
 worker avoids that resend after an explicit deletion reply.
 
+Cloud transcript caching uses the same passive HTTP history route and current
+viewer authority. `chats.list` supplies per-chat `historyCache: {revision, messageCount}`;
+this revision is separate from the transcript-cut `historyState.revision`.
+`messages.range` reads a contiguous, half-open range of at most 500 native rows
+with dense, zero-based indexes. `messages.since` returns all final append/edit
+changes from an exact revision, or `resync: true` after a cut, deletion,
+recreation, unknown base or more than 500 changes. Rows, counts and revisions
+come from one snapshot. Database triggers observe older replicas' writes and
+retention as well as current worker mirroring; identical replay is inert.
+The cache stores message counts after a chat's first tracked message write.
+Older untouched histories use an indexed count until then; migration does not
+scan or backfill their messages. Counts change with the same transaction as
+the rows, including mixed inserts/updates and deletes from older writers.
+Confirmed chat deletion returns `404 chat_not_found`. Cache reads never wake
+the VM or report activity, and saved rows do not grant execution authority.
+With the sharing opt-in, range and non-resync delta replies include window's
+`senders` map, under the same current-viewer authority. It covers returned
+user rows and a range's separate turn opening; unknown attribution is `null`.
+Without the opt-in, and on resync, the field is absent. Older servers' absent
+sender maps remain unknown to the cache, rather than becoming explicit nulls.
+The control plane requires PostgreSQL 16 or newer for guarded native JSON
+validation. The migrator checks `server_version_num` before taking the schema
+lock or changing the ledger, including when no migrations are pending.
+Each execution logs the measured integer and its accepted/refused result;
+missing or malformed values log as `unknown` and refuse migration. Hosted
+releases carry this measurement through a private file so suppressing driver
+output cannot hide the version check. Provider startup banners are supporting
+evidence; this release-time check enforces the minimum.
+Turn-opening reads keep opaque payloads intact and use the worker's JSON
+classification. After the ordinary one-row lookup, exceptional candidates are
+read in batches of 128, with unsteered openings preferred over steers. For 513
+opaque non-user rows before a tail, finding an older opening costs at most six queries;
+the steer-only or no-opening case costs at most twelve. The scan is still linear
+in candidate count and does not discard an opening after an arbitrary cap.
+
+Receipt caching opts into `GET .../prompts` with `X-Zeros-Chat-Cache: 1` and
+`includePayload=true`. This returns only the caller's receipts, with a chat's
+numeric `queueRevision`. Begin at `after=0` without a revision; each later page
+must pin the first page's revision. Status, payload, retention or epoch changes
+return `409 queue_changed`, so the reader restarts the incomplete refresh.
+Without the header, the existing live response is unchanged. An older server's
+response without a revision cannot populate the receipt cache. Account or
+workspace access loss retires cached material; temporary unavailability keeps
+the last confirmed view marked as cached.
+Prompt writers take the workspace row before outbox and per-chat cache rows.
+Retention takes candidate workspace locks in ID order with `SKIP LOCKED`.
+The cache trigger also takes `FOR NO KEY UPDATE NOWAIT`: an older compactor
+that starts at a child row rolls back with `55P03` on contention, so it cannot
+hold cache locks while waiting on a foreground workspace writer. The lifecycle
+scheduler retries that background work on its next poll. Runtime cache-table
+access is SELECT-only; definer triggers own the writes.
+If a prompt cache fence violation reaches an HTTP request, the server logs
+`prompt_cache_workspace_fence_missed` with the matched route template and
+SQLSTATE, without PostgreSQL context, request values or workspace identifiers.
+
 Chat search uses the connected worker when available and the HTTP history
 mirror while the VM sleeps, without waking it. Search is scoped to the selected
 workspace or conversation. Local, the worker and the mirror share literal

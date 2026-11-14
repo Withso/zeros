@@ -28,6 +28,7 @@ import { originalSetupBuild } from "./setup-selection.js";
 
 import { mirrorMessageSenders, mirrorMessageWindow, type MessageWindow, type WindowOptions } from "./history.js";
 import { mirrorMessageSearch, type SearchOptions } from "./history-search.js";
+import { cacheCounter, mirrorMessageDelta, mirrorMessageRange } from "./history-cache.js";
 import { MESSAGE_SEARCH_DEADLINE_MS } from "./message-search.js";
 import { consumeRuntimeCanary } from "./runtime-canary-store.js";
 import type { RuntimeCanaryAdmission } from "./runtime-canary.js";
@@ -1547,9 +1548,9 @@ export class CloudV2Store {
       await acknowledgeCloudChatEdits(tx, workspaceId, input.chatEditAcks ?? []);
   }
 
-  async listChats(workspaceId: string, includeActor = false): Promise<{ chats: unknown[]; chatDeletions: string[] }> {
+  async listChats(workspaceId: string, includeActor = false, includeCache = false): Promise<{ chats: unknown[]; chatDeletions: string[] }> {
     const query = includeActor
-      ? `SELECT h.chat_id,h.deleted_at,(h.row-'actingUser') || CASE WHEN w.execution_mode='active' THEN
+      ? `SELECT h.chat_id,h.deleted_at,h.updated_at,(h.row-'actingUser') || CASE WHEN w.execution_mode='active' THEN
           jsonb_build_object('actingUser',CASE WHEN c.state='active' AND c.expires_at>clock_timestamp() THEN
             jsonb_build_object('userId',c.user_id,'generation',c.generation::text,'userMessageId',c.user_message_id) ELSE NULL END)
           ELSE '{}'::jsonb END AS row
@@ -1557,18 +1558,31 @@ export class CloudV2Store {
         LEFT JOIN cloud_v2_prompt_chats p ON p.workspace_id=h.workspace_id AND p.chat_id=h.chat_id
         LEFT JOIN cloud_v2_execution_contexts c ON c.workspace_id=h.workspace_id AND c.id=p.active_context_id
         WHERE h.workspace_id=$1 ORDER BY h.updated_at DESC LIMIT 1000`
-      : "SELECT chat_id,row-'actingUser' AS row,deleted_at FROM cloud_v2_chats WHERE workspace_id=$1 ORDER BY updated_at DESC LIMIT 1000";
-    const { rows } = await withSystemTx(this.pool, tx => tx.query<{ chat_id: string; row: unknown; deleted_at: Date | null }>(
-      query, [workspaceId],
+      : "SELECT chat_id,row-'actingUser' AS row,deleted_at,updated_at FROM cloud_v2_chats WHERE workspace_id=$1 ORDER BY updated_at DESC LIMIT 1000";
+    const cached = `WITH chats AS (${query}) SELECT h.*,coalesce(s.revision,0)::text AS revision,
+      coalesce(s.message_count,(SELECT count(*) FROM cloud_v2_messages m WHERE m.workspace_id=$1 AND m.chat_id=h.chat_id))::text AS message_count
+      FROM chats h LEFT JOIN LATERAL (SELECT c.revision,c.message_count FROM cloud_v2_history_cache c
+        WHERE c.workspace_id=$1 AND c.chat_id=h.chat_id LIMIT 1) s ON true ORDER BY h.updated_at DESC`;
+    const { rows } = await withSystemTx(this.pool, tx => tx.query<{ chat_id: string; row: unknown; deleted_at: Date | null; revision: string; message_count: string }>(
+      includeCache ? cached : query, [workspaceId],
     ));
     return {
-      chats: rows.filter(row => !row.deleted_at).map(row => row.row),
+      chats: rows.filter(row => !row.deleted_at).map(row => includeCache ? { ...row.row as Record<string, unknown>,
+        historyCache: { revision: cacheCounter(row.revision), messageCount: cacheCounter(row.message_count) } } : row.row),
       chatDeletions: rows.filter(row => row.deleted_at).map(row => row.chat_id),
     };
   }
 
   messageWindow(workspaceId: string, chatId: string, options: WindowOptions = {}): Promise<MessageWindow> {
     return withSystemTx(this.pool, tx => mirrorMessageWindow(tx, workspaceId, chatId, options), { consistentRead: true });
+  }
+
+  messageRange(workspaceId: string, chatId: string, fromIndex: number, toIndex: number, includeSenders = false) {
+    return withSystemTx(this.pool, tx => mirrorMessageRange(tx, workspaceId, chatId, fromIndex, toIndex, includeSenders), { consistentRead: true });
+  }
+
+  messageSince(workspaceId: string, chatId: string, revision: number, includeSenders = false) {
+    return withSystemTx(this.pool, tx => mirrorMessageDelta(tx, workspaceId, chatId, revision, includeSenders), { consistentRead: true });
   }
 
   messageSenders(workspaceId: string, chatId: string, userMessageIds: string[]) {

@@ -9,9 +9,12 @@ const request = { type: "WORKSPACE_REQUEST" as const, op: "messages.window", par
 const page = (text: string) => ({ messages: [{ msgId: "m1", kind: "text", payload: JSON.stringify({ text }), createdAt: 1 }] });
 
 type ReadHistory = NonNullable<ConstructorParameters<typeof WorkspaceRuntimeClient>[0]["readHistory"]>;
-function stopped(readHistory: ReturnType<typeof vi.fn>) {
+// `readHistory` scripts the transcript reads; the workspace's one chats.list (joined before a first window read) is
+// answered separately so each scripted step stays a transcript read.
+function stopped(readHistory: (...args: unknown[]) => unknown) {
   const open = vi.fn(async () => { throw new Error("VM must stay stopped"); });
-  return new WorkspaceRuntimeClient({ open, readHistory: readHistory as unknown as ReadHistory, historyRoot: () => "/home/user/Owner/repo", workspaces: () => [] });
+  const route = (target: unknown, op: string, params: unknown) => op === "chats.list" ? Promise.resolve({ chats: [] }) : readHistory(target, op, params);
+  return new WorkspaceRuntimeClient({ open, readHistory: route as unknown as ReadHistory, historyRoot: () => "/home/user/Owner/repo", workspaces: () => [] });
 }
 
 beforeEach(() => { vi.useFakeTimers(); vi.spyOn(Math, "random").mockReturnValue(1); });

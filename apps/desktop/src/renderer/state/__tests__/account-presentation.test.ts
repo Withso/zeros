@@ -18,7 +18,7 @@ vi.mock("../../features/settings/settings-scope", async original => ({
   ...await original<typeof import("../../features/settings/settings-scope")>(), pruneScopedSettingsSelections: io.prune,
 }));
 
-const user = { sub: "account-a", email: "a@example.test", name: null, provider: "workos" as const };
+const user = { sub: "account-a", email: "a@example.test", name: null, provider: "workos" as const, sessionId: "sign-in-a" };
 const organizations = multiOrganizationFixture as OrganizationSummary[];
 const target = { organizationId: organizations[18]!.id, workspaceId: "99999999-1111-4111-8111-111111111111" };
 const folder = cloudWorkspaceKey(target), id = cloudScopedId(target, "chat");
@@ -262,4 +262,88 @@ it("does not resurrect an older catalog snapshot when its replacement exceeds th
     error: { code: "large", message: "x".repeat(2 * 1024 * 1024) } };
   persistCloudCatalogPresentation(owner, [replacement], null);
   expect(loadCloudCatalogPresentation(owner).some(row => row.id === doc.id)).toBe(false);
+});
+
+
+it("rebinds a replacement sign-in for the same account before the same-owner fast path", async () => {
+  const m = await seed();
+  const { cloudTranscriptCache, localTranscriptCache } = await import("../local-transcript-cache");
+  const { nativeCloudChatCache } = await import("../../platform/cloud-chat-cache");
+  const { useSessionsStore, BLANK } = await import("../../features/agent/sessions-store");
+  const messages = [{ id: "saved", kind: "text" as const, role: "agent" as const, text: "Cached", createdAt: 1 }];
+  cloudTranscriptCache.remember(id, folder, { messages, leadingPrompt: null });
+  localTranscriptCache.remember("local", "/local", { messages, leadingPrompt: null });
+  useSessionsStore.getState().setSession(id, { ...BLANK, cwd: folder, transcriptState: "loading", messages, transcriptPresentation: { source: "cache" } });
+  const epoch = nativeCloudChatCache.epoch;
+  m.identity.installAccountPresentationIdentity({ ...user });
+  expect(nativeCloudChatCache.epoch).toBe(epoch);
+  expect(cloudTranscriptCache.peek(id)?.messages).toBe(messages);
+  m.identity.installAccountPresentationIdentity({ ...user, sessionId: "replacement-sign-in" });
+  expect(nativeCloudChatCache.owner).toBe(m.account.getAccountPresentationOwner());
+  expect(nativeCloudChatCache.epoch).toBeGreaterThan(epoch);
+  expect(cloudTranscriptCache.peek(id)).toBeNull();
+  expect(useSessionsStore.getState().sessions[id]).toBeUndefined();
+  expect(localTranscriptCache.peek("local")?.messages).toBe(messages);
+});
+
+it("protects the active cloud chat and releases it when switching to Local", async () => {
+  const m = await modules();
+  const { nativeCloudChatCache } = await import("../../platform/cloud-chat-cache");
+  const protect = vi.spyOn(nativeCloudChatCache, "protect").mockResolvedValue();
+  m.identity.installAccountPresentationIdentity(user);
+  expect(protect).not.toHaveBeenCalled();
+  await seed();
+  expect(protect).toHaveBeenLastCalledWith({ ...target, chatId: "chat" });
+  m.workspace.useWorkspaceStore.getState().dispatch({ type: "OPEN_WORKSPACE", folder: "/local", repoRoot: "/local", chatId: "local" });
+  expect(protect).toHaveBeenLastCalledWith(null);
+});
+
+it("does not let a malformed cloud chat id interrupt active-chat publication", async () => {
+  const m = await seed();
+  const { nativeCloudChatCache } = await import("../../platform/cloud-chat-cache");
+  const protect = vi.spyOn(nativeCloudChatCache, "protect").mockResolvedValue();
+  const current = m.workspace.useWorkspaceStore.getState().chats.find(chat => chat.id === id)!;
+  const malformed = `cloud:${target.organizationId}:${target.workspaceId}:%`;
+  expect(() => m.workspace.useWorkspaceStore.setState({ chats: [{ ...current, id: malformed }], activeChatId: malformed })).not.toThrow();
+  expect(protect).toHaveBeenLastCalledWith(null);
+});
+
+it("drops only the denied cached chat on confirmed native access loss", async () => {
+  const m = await seed();
+  const { nativeCloudChatCache } = await import("../../platform/cloud-chat-cache");
+  const { cloudTranscriptCache, localTranscriptCache } = await import("../local-transcript-cache");
+  const { useSessionsStore, BLANK } = await import("../../features/agent/sessions-store");
+  const otherId = cloudScopedId(target, "other");
+  const messages = [{ id: "saved", kind: "text" as const, role: "agent" as const, text: "Cached", createdAt: 1 }];
+  for (const chatId of [id, otherId]) {
+    cloudTranscriptCache.remember(chatId, folder, { messages, leadingPrompt: null });
+    useSessionsStore.getState().setSession(chatId, { ...BLANK, cwd: folder, messages, transcriptState: "loading", transcriptPresentation: { source: "cache" } });
+  }
+  localTranscriptCache.remember("local", "/local", { messages, leadingPrompt: null });
+  window.__ZEROS_NATIVE__ = { on: () => () => {}, invoke: vi.fn(async (_command, input) => {
+    if (input?.op === "bind") return { ok: true, result: { lease: "33333333-3333-4333-8333-333333333333" } };
+    if (input?.op === "refresh") return { ok: false, reason: "access_lost", scope: "chat" };
+    return { ok: true, result: input?.op === "list" ? { items: [], nextAfter: null } : null };
+  }) as NonNullable<Window["__ZEROS_NATIVE__"]>["invoke"] };
+  await expect(nativeCloudChatCache.refresh({ ...target, chatId: "chat" })).rejects.toMatchObject({ reason: "access_lost" });
+  expect(cloudTranscriptCache.peek(id)).toBeNull();
+  expect(cloudTranscriptCache.peek(otherId)?.messages).toBe(messages);
+  expect(useSessionsStore.getState().sessions[id]?.messages ?? []).toEqual([]);
+  expect(useSessionsStore.getState().sessions[otherId]?.messages).toBe(messages);
+  expect(localTranscriptCache.peek("local")?.messages).toBe(messages);
+  expect(m.workspace.useWorkspaceStore.getState().chats.some(chat => chat.id === "local")).toBe(true);
+});
+
+it("a relaunch paints cached cloud chats only for workspaces in the restored catalog", async () => {
+  const m = await seed();
+  // A chat of a workspace that is no longer in this account's catalog (it left while the app was closed).
+  const gone = { ...target, workspaceId: "99999999-2222-4222-8222-222222222222" };
+  const goneChat = m.boot.sanitizeCachedChat({ id: cloudScopedId(gone, "old"), folder: cloudWorkspaceKey(gone), title: "Gone" })!;
+  const kept = m.workspace.useWorkspaceStore.getState().chats;
+  m.cache.persistWorkspaceChatCache("chats-v1", [...kept, goneChat]);
+  vi.resetModules(); vi.clearAllMocks();
+  const next = await modules();
+  next.identity.installAccountPresentationIdentity(user);
+  expect(next.workspace.useWorkspaceStore.getState().chats.map(chat => chat.id)).toEqual(["local", id]);
+  expect(io.me).not.toHaveBeenCalled();
 });

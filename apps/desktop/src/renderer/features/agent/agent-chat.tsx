@@ -40,6 +40,7 @@ import {
   captureHistoryPageScrollPosition,
   prependHistoryPage,
   scheduleHistoryPageScrollRestore,
+  bottomTrimPatch,
 } from "./transcript-paging";
 import { useOpenPrUrlInReviewTab } from "@/renderer/shell/pr/use-open-review-tab";
 import { warmWorkspaceFiles } from "@/renderer/shell/workspace-files-cache";
@@ -300,7 +301,6 @@ import {
   type Checkpoint,
 } from "./checkpoint-rail";
 import {
-  MAX_MESSAGES_PER_CHAT,
   usePendingLocalTurnId,
   useSessionsStore,
 } from "./sessions-store";
@@ -311,6 +311,7 @@ import {
 import { collectPendingQuestionToolCallIds } from "./pending-question-tools";
 import {
   windowOlderMessages as ipcWindowOlderMessages,
+  cachedWindowOlderMessages as ipcCachedWindowOlderMessages,
   truncateMessagesFrom as ipcTruncateMessagesFrom,
 } from "./agent-history-client";
 
@@ -2402,6 +2403,9 @@ function AgentChatBody({
     session.executionId,
     session.sessionId,
     session.transcriptState,
+    session.transcriptPresentation?.cloudCache?.owner,
+    session.transcriptPresentation?.cloudCache?.epoch,
+    session.transcriptPresentation?.cloudCache?.revision,
   ]);
   // Probe SQLite once with a one-row read so a brand-new chat never loads.
   const [hasOlder, setHasOlder] = useState(false);
@@ -2451,7 +2455,9 @@ function AgentChatBody({
         return;
       }
       try {
-        const rows = await ipcWindowOlderMessages(chatId, 1, oldest.id);
+        const cached = slot.transcriptState === "loading" && isCloudWorkspace(slot.cwd) ? slot.transcriptPresentation?.cloudCache : undefined;
+        const rows = cached ? (await ipcCachedWindowOlderMessages(chatId, 1, oldest.id, cached))?.messages ?? []
+          : await ipcWindowOlderMessages(chatId, 1, oldest.id);
         if (cancelled) return;
         const current = useSessionsStore.getState().sessions[chatId];
         if (!canApplyHistoryPage(slot, current)) return;
@@ -2488,13 +2494,16 @@ function AgentChatBody({
     session.executionId,
     session.sessionId,
     session.transcriptState,
+    session.transcriptPresentation?.cloudCache?.owner,
+    session.transcriptPresentation?.cloudCache?.epoch,
+    session.transcriptPresentation?.cloudCache?.revision,
   ]);
   const loadOlder = useCallback(async () => {
     if (!chatId || !surfaceActiveRef.current) return;
     if (loadingOlder || olderPageRequestRef.current) return;
     const slot = useSessionsStore.getState().sessions[chatId];
     const oldest = slot?.messages[0];
-    if (!oldest || slot.transcriptState !== "resident") return;
+    if (!oldest || !canApplyHistoryPage(slot, slot)) return;
     const epoch = olderPageEpochRef.current;
     const failure = olderPageFailureRef.current;
     // Clearing loading state must not retry the same failed read on each
@@ -2518,7 +2527,9 @@ function AgentChatBody({
     olderPageRequestRef.current = request;
     setLoadingOlder(true);
     try {
-      const older = await ipcWindowOlderMessages(
+      const cached = slot.transcriptState === "loading" && isCloudWorkspace(slot.cwd) ? slot.transcriptPresentation?.cloudCache : undefined;
+      const cachedPage = cached ? await ipcCachedWindowOlderMessages(chatId, LOAD_OLDER_PAGE, oldest.id, cached) : null;
+      const older = cached ? cachedPage?.messages ?? [] : await ipcWindowOlderMessages(
         chatId,
         LOAD_OLDER_PAGE,
         oldest.id,
@@ -2572,6 +2583,10 @@ function AgentChatBody({
       }
       useSessionsStore.getState().patchSession(chatId, {
         messages,
+        // Message patches default to confirmed history unless provenance is explicit.
+        ...(cachedPage ? { leadingPrompt: cachedPage.leadingPrompt,
+          transcriptState: current.transcriptState, transcriptPresentation: current.transcriptPresentation,
+          transcriptDirty: current.transcriptDirty } : {}),
         // Suspend the live-append trim (MAX_MESSAGES_PER_CHAT) while the
         // reader holds expanded history — see the re-arm effect below.
         historyExpanded: true,
@@ -2622,13 +2637,7 @@ function AgentChatBody({
     if (!chatId || !isAtBottom) return;
     const slot = useSessionsStore.getState().sessions[chatId];
     if (!slot?.historyExpanded) return;
-    useSessionsStore.getState().patchSession(chatId, {
-      historyExpanded: false,
-      messages:
-        slot.messages.length > MAX_MESSAGES_PER_CHAT
-          ? slot.messages.slice(-MAX_MESSAGES_PER_CHAT)
-          : slot.messages,
-    });
+    useSessionsStore.getState().patchSession(chatId, bottomTrimPatch(slot));
   }, [chatId, isAtBottom]);
 
   // Older builds persisted mode_switch rows; drop them before grouping so they

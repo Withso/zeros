@@ -36,6 +36,8 @@ function database(
   let phaseColumn = initialPhaseColumn;
   const query = vi.fn(
     async (text: string, _parameters?: readonly unknown[]) => {
+      if (text === "SHOW server_version_num")
+        return { rows: [{ server_version_num: "180006" }] };
       if (text === "SHOW statement_timeout")
         return { rows: [{ statement_timeout: "30s" }] };
       if (/SELECT\s+name,\s*checksum/.test(text)) return { rows };

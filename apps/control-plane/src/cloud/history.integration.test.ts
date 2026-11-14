@@ -70,6 +70,7 @@ suite("offline native history paging", () => {
     const cases = [
       [row("u", "user"), ...Array.from({ length: 20 }, (_, i) => row(`a${i}`))],
       [row("u", "user"), ...Array.from({ length: 1100 }, (_, i) => row(`a${i}`))],
+      [row("opaque-u", "user", { text: "\0" }), ...Array.from({ length: 1100 }, (_, i) => row(`a${i}`))],
       [row("u", "user"), ...Array.from({ length: 1050 }, (_, i) => row(`a${i}`)), row("steer", "user", { steeredTurnId: "turn" }), row("last")],
       [{ msgId: "bad", kind: "text", payload: "{not json", createdAt: 1 }, row("a")],
     ];
@@ -91,7 +92,7 @@ suite("offline native history paging", () => {
   it("keeps native identities and creator authorization at the HTTP boundary", async () => {
     await mirror("native-chat", [row("u", "user")]);
     expect(await (await read("chats.list")).json()).toEqual({ result: {
-      chats: [{ id: "native-chat", folder: "/home/user/Owner/Project" }], chatDeletions: [],
+      chats: [{ id: "native-chat", folder: "/home/user/Owner/Project", historyCache: { revision: expect.any(Number), messageCount: 1 } }], chatDeletions: [],
     } });
     expect(await (await read("messages.window", { chatId: "cloud:org:ws:native-chat" })).json()).toEqual({ result: { messages: [] } });
     expect((await read("messages.window", { chatId: "native-chat" }, randomUUID())).status).toBe(404);

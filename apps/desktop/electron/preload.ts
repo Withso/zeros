@@ -76,6 +76,7 @@ const ALLOWED_COMMANDS = new Set<string>([
   "auth_switch_account",
   "cloud_catalog_stream_state",
   "cloud_workspace_capability",
+  "cloud_chat_cache",
   "detect_open_apps",
   "native_app_icons",
   "native_app_names",

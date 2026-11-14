@@ -1,5 +1,5 @@
-import { afterEach, expect, it, vi } from "vitest";
-import { CATALOG_HINT_COALESCE_MS, catalogRefreshDelayMs, watchCloudCatalogEvents } from "../cloud-catalog-events";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { CATALOG_FOCUS_REFRESH_MS, CATALOG_HINT_COALESCE_MS, catalogFocusRefreshDue, catalogMembershipKey, catalogRefreshDelayMs, watchCloudCatalogEvents } from "../cloud-catalog-events";
 
 afterEach(() => { vi.useRealTimers(); });
 
@@ -115,4 +115,21 @@ it("R1 catalog-events-v1: a renderer that subscribes after main announced the st
   await vi.advanceTimersByTimeAsync(0);
   expect(third.active()).toBe(false);
   second.stop(); third.stop();
+});
+
+describe("launch: catalog refresh triggers", () => {
+  it("an identical account reply does not re-list; a changed membership does", () => {
+    const me = (organizations: unknown[]) => ({ user: { id: "u" }, organizations });
+    const a = me([{ id: "org-a", role: "member" }]);
+    expect(catalogMembershipKey(a)).toBe(catalogMembershipKey(me([{ id: "org-a", role: "member" }])));
+    expect(catalogMembershipKey(a)).not.toBe(catalogMembershipKey(me([{ id: "org-a", role: "admin" }])));
+    expect(catalogMembershipKey(a)).not.toBe(catalogMembershipKey(me([])));
+    expect(catalogMembershipKey(null)).toBeNull();
+  });
+  it("focus re-reads only without pushed events or after a long gap", () => {
+    expect(catalogFocusRefreshDue(false, 1_000, 1_001)).toBe(true);
+    expect(catalogFocusRefreshDue(true, undefined, 0)).toBe(true);
+    expect(catalogFocusRefreshDue(true, 1_000, 1_000 + CATALOG_FOCUS_REFRESH_MS - 1)).toBe(false);
+    expect(catalogFocusRefreshDue(true, 1_000, 1_000 + CATALOG_FOCUS_REFRESH_MS)).toBe(true);
+  });
 });

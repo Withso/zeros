@@ -3,6 +3,7 @@
 import { writeFileSync } from "node:fs";
 import { releaseMigration, planetScaleClient, ReleaseMigrationError } from "../../apps/control-plane/src/manage-release-migration";
 import { createMigrationPool } from "../../apps/control-plane/src/db";
+import { migrationVersionDiagnostic } from "../../apps/control-plane/src/migration-version";
 import { MigrationReceipt, promotionConfig } from "./contracts";
 
 async function main() {
@@ -19,6 +20,13 @@ async function main() {
     planetScale: planetScaleClient({ organization: config.organization,
       tokenId: process.env.PLANETSCALE_SERVICE_TOKEN_ID!, token: process.env.PLANETSCALE_SERVICE_TOKEN! }),
     createPool: url => createMigrationPool(url, { role: "postgres", maxConnections: 1, applicationName: "zeros-hosted-promotion" }),
+    onServerVersion: serverVersionNum => {
+      if (process.env.MIGRATION_VERSION_FILE) {
+        writeFileSync(process.env.MIGRATION_VERSION_FILE, JSON.stringify({ serverVersionNum }), { mode: 0o600 });
+      } else {
+        process.stderr.write(`${migrationVersionDiagnostic(serverVersionNum)}\n`);
+      }
+    },
   });
   const parsed = MigrationReceipt.safeParse(receipt);
   if (!parsed.success) {
