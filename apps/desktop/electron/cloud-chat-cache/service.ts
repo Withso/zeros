@@ -21,6 +21,7 @@ export interface CloudChatCacheSource {
   since(target: CloudCacheKey, revision: number, context: CloudCacheRequestContext): Promise<CloudCacheDelta>;
   pending(target: CloudCacheKey, context: CloudCacheRequestContext): Promise<CloudCachePending | null>;
 }
+interface Queued { id: string; window: number; cancel(): void }
 interface Binding { owner: string; session: string; client: string; lease: string; stop: AbortController }
 interface Refresh { range: CloudCacheRange; replaced: boolean; cached?: true }
 interface Flight<T> {
@@ -62,6 +63,7 @@ export class CloudChatCacheService {
   private key(binding: Binding, target: CloudCacheTarget): CloudCacheKey { return { owner: binding.owner, ...CloudCacheTargetSchema.parse(target) }; }
 
   release(window: number): void {
+    this.cancelQueued(entry => entry.window === window);
     const binding = this.bindings.get(window);
     binding?.stop.abort(); this.bindings.delete(window);
     this.deps.store.protect(String(window), null);
@@ -71,9 +73,9 @@ export class CloudChatCacheService {
     }
   }
   unbind(window: number, lease: string): void { this.binding(window, lease); this.release(window); }
-  sessionChanged(): void { this.retirements++; for (const window of this.bindings.keys()) this.release(window); }
+  sessionChanged(): void { this.retirements++; this.cancelQueued(() => true); for (const window of this.bindings.keys()) this.release(window); }
   retireOwner(owner: string, session?: string): void {
-    this.retirements++;
+    this.retirements++; this.cancelQueued(() => true);
     for (const [window, binding] of this.bindings) if (binding.owner === owner &&
       (session === undefined || binding.session === session)) this.release(window);
     this.deps.store.retireOwner(owner, session);
@@ -102,14 +104,20 @@ export class CloudChatCacheService {
     for (const flights of [this.flights, this.pendingFlights, this.beforeFlights]) for (const [id, flight] of flights)
       if (!keep(flight)) { flight.stop.abort(); flights.delete(id); }
   }
+  private readonly queued = new Set<Queued>();
+  private cancelQueued(match: (entry: Queued) => boolean): void {
+    for (const entry of [...this.queued]) if (match(entry)) { this.queued.delete(entry); entry.cancel(); }
+  }
   /** Advances on any forget of a target or owner-wide retirement; queued continuations compare it. */
   private readonly forgotten = new Map<string, number>();
   private retirements = 0;
   private generation(id: string): string { return `${this.retirements}:${this.forgotten.get(id) ?? 0}`; }
   private forgetGeneration(id: string): void {
-    this.forgotten.delete(id); this.forgotten.set(id, (this.forgotten.get(id) ?? 0) + 1);
+    this.cancelQueued(entry => entry.id === id);
+    const next = (this.forgotten.get(id) ?? 0) + 1;
+    this.forgotten.delete(id); this.forgotten.set(id, next);
     // Evicting a record could reset a target's generation, so an eviction cancels every queued continuation instead.
-    while (this.forgotten.size > 4096) { this.forgotten.delete(this.forgotten.keys().next().value!); this.retirements++; }
+    while (this.forgotten.size > 4096) { this.forgotten.delete(this.forgotten.keys().next().value!); this.retirements++; this.cancelQueued(() => true); }
   }
 
   forget(window: number, lease: string, target: CloudCacheTarget): void {
@@ -149,7 +157,13 @@ export class CloudChatCacheService {
         // The queued continuation belongs to its target: a forget (or owner/session change) while it waits cancels it,
         // so it can never recreate what was just forgotten.
         const generation = this.generation(id);
-        return previous.result.then(() => undefined, () => undefined).then(() => {
+        // Registered so a forget, unbind or retirement releases it at once rather than when the predecessor settles.
+        const waiting = new Promise<void>((resolve, reject) => {
+          const entry: Queued = { id, window, cancel: () => reject(changed()) };
+          this.queued.add(entry);
+          void previous.result.then(() => undefined, () => undefined).then(() => { this.queued.delete(entry); resolve(); });
+        });
+        return waiting.then(() => {
           if (this.generation(id) !== generation) throw changed();
           return this.refresh(window, lease, target, limit, known);
         });
@@ -211,7 +225,7 @@ export class CloudChatCacheService {
           this.forgetGeneration(cloudCacheKey(key));
           this.cancel(other => cloudCacheKey(other.key) !== cloudCacheKey(key)); this.deps.store.forget(key);
         } else {
-          this.retirements++;
+          this.retirements++; this.cancelQueued(() => true);
           this.cancel(other => other.key.owner !== key.owner || other.key.organizationId !== key.organizationId || other.key.workspaceId !== key.workspaceId);
           this.deps.store.forgetWorkspace(key.owner, key.organizationId, key.workspaceId);
         }

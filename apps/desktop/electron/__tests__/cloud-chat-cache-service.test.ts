@@ -43,6 +43,38 @@ function fixture() {
 }
 
 describe("main cloud cache admission and refresh", () => {
+  it("a second forget also cancels a queued refresh (generations advance on every forget)", async () => {
+    const f = fixture(), key = { owner, ...target };
+    f.store.putRange(key, page(1));
+    f.service.forget(1, f.binding, target);
+    f.store.putRange(key, page(1));
+    const first = held<void>(), started = held<void>();
+    vi.mocked(f.source.since).mockImplementationOnce(async () => { started.resolve(); await first.promise;
+      return { resync: false, fromRevision: 1, revision: 2, messageCount: 2, rows: [row(1)] }; });
+    const older = f.service.refresh(1, f.binding, target, 200, { revision: 2, messageCount: 2 });
+    await started.promise;
+    const newer = f.service.refresh(1, f.binding, target, 200, { revision: 3, messageCount: 3 });
+    f.service.forget(1, f.binding, target);
+    first.resolve();
+    await expect(older).rejects.toThrow("changed");
+    await expect(newer).rejects.toThrow("changed");
+    expect(f.store.metadata(key)).toBeNull();
+  });
+
+  it("a queued refresh is released as soon as its binding is cancelled, not when its predecessor settles", async () => {
+    const f = fixture(), key = { owner, ...target };
+    f.store.putRange(key, page(1));
+    const started = held<void>();
+    // The predecessor ignores cancellation and never settles: only the release can end the queued refresh.
+    vi.mocked(f.source.since).mockImplementationOnce(async () => { started.resolve(); return new Promise(() => {}); });
+    void f.service.refresh(1, f.binding, target, 200, { revision: 2, messageCount: 2 }).catch(() => {});
+    await started.promise;
+    const newer = f.service.refresh(1, f.binding, target, 200, { revision: 3, messageCount: 3 });
+    f.service.unbind(1, f.binding);
+    await expect(newer).rejects.toThrow("changed");
+    expect(f.store.metadata(key)?.revision).toBe(1);
+  });
+
   it("a queued newer-revision refresh never recreates a chat forgotten while it waited", async () => {
     const f = fixture(), key = { owner, ...target };
     f.store.putRange(key, page(1));
