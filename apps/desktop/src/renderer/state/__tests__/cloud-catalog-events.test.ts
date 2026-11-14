@@ -88,3 +88,31 @@ it("R1 catalog-events-v1: stop (owner switch or teardown) cancels a pending trai
   await vi.advanceTimersByTimeAsync(CATALOG_HINT_COALESCE_MS);
   expect(f.handlers.size).toBe(0);
 });
+
+it("R1 catalog-events-v1: a renderer that subscribes after main announced the stream asks for the current state (no 30 s fallback)", async () => {
+  vi.useFakeTimers();
+  const f = fakeListen(), refresh = vi.fn(async () => {}), modeChanged = vi.fn();
+  let answer!: (value: { catalogEvents: boolean }) => void;
+  const query = vi.fn(() => new Promise<{ catalogEvents: boolean }>(resolve => { answer = resolve; }));
+  const watch = watchCloudCatalogEvents(f.listen, { refresh, modeChanged }, query);
+  await vi.advanceTimersByTimeAsync(0);
+  expect(query).toHaveBeenCalledOnce();
+  answer({ catalogEvents: true });
+  await vi.advanceTimersByTimeAsync(0);
+  expect(watch.active()).toBe(true); expect(modeChanged).toHaveBeenCalledTimes(1); expect(refresh).toHaveBeenCalledTimes(1);
+  expect(catalogRefreshDelayMs(watch.active(), false)).toBe(60_000);
+  watch.stop();
+  // An event that arrives before the answer wins; a failed query changes nothing.
+  const g = fakeListen();
+  let late!: (value: { catalogEvents: boolean }) => void;
+  const second = watchCloudCatalogEvents(g.listen, { refresh: vi.fn(async () => {}), modeChanged: () => {} }, () => new Promise(resolve => { late = resolve; }));
+  await vi.advanceTimersByTimeAsync(0);
+  g.emit("cloud-catalog-stream", { catalogEvents: true });
+  g.emit("cloud-catalog-stream", { catalogEvents: false });
+  late({ catalogEvents: true }); await vi.advanceTimersByTimeAsync(0);
+  expect(second.active()).toBe(false);
+  const third = watchCloudCatalogEvents(fakeListen().listen, { refresh: vi.fn(async () => {}), modeChanged: () => {} }, () => Promise.reject(new Error("no native")));
+  await vi.advanceTimersByTimeAsync(0);
+  expect(third.active()).toBe(false);
+  second.stop(); third.stop();
+});

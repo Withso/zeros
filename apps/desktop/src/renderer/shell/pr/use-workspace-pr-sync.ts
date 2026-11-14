@@ -39,6 +39,10 @@ import { useCloudGithubPrScope } from "../../platform/cloud-github-pr-scope";
 type Probe = { refreshKey: number; at: number; failures?: number; retryAt?: number; refsVersion?: number; key?: string; retired?: boolean };
 const lastProbe = new Map<string, Probe>();
 const PROBE_FRESH_MS = 60_000;
+/** Idle is quiet: a PR opened only on github.com is found within 5 min in a cloud workspace (its pushes and Zeros' own
+ * PR actions are signals); Local keeps its minute. */
+const CLOUD_PR_DISCOVERY_POLL_MS = 300_000;
+export const prDiscoveryPollMs = (local: boolean): number => local ? PROBE_FRESH_MS : CLOUD_PR_DISCOVERY_POLL_MS;
 const RESUME_PROBE_FRESH_MS = 2_000;
 const MAX_PR_PROBE_WORKSPACES = 128;
 type ProbeReason = "refresh" | "resume" | "poll" | "manual";
@@ -239,6 +243,6 @@ export function useWorkspacePrSync(workspace: Workspace | null): void {
     if (!eligible || !id || !repoSlug) return;
     // Discovery has no work while the window is away. The existing
     // exact-workspace age and in-flight guards coalesce return events.
-    return pollWhileForeground(() => probe("resume"), PROBE_FRESH_MS);
+    return pollWhileForeground(() => probe("resume"), prDiscoveryPollMs(local));
   }, [eligible, id, repoSlug, probe, local]);
 }

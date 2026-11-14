@@ -2,8 +2,16 @@ import { describe, expect, it } from "vitest";
 
 import {
   isWorkspacePrSyncEligible,
+  prDiscoveryPollMs,
   shouldProbeWorkspacePr,
 } from "../use-workspace-pr-sync";
+
+describe("idle is quiet: PR discovery while a workspace stays visible", () => {
+  it("polls a cloud workspace every 5 min (refs changes and returning to the window still probe at once); Local keeps 1 min", () => {
+    expect(prDiscoveryPollMs(false)).toBe(300_000);
+    expect(prDiscoveryPollMs(true)).toBe(60_000);
+  });
+});
 
 describe("isWorkspacePrSyncEligible", () => {
   it("rejects the synthetic Local-main row before it reaches gh.prSync", () => {

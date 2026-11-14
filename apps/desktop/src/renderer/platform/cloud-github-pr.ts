@@ -241,9 +241,12 @@ export function requestCloudGithubPr(
         snapshots.delete(snapshots.keys().next().value!);
       // The request boundary reads the catalog's pure projection. Loading the
       // refresh owner only after I/O avoids a Git → catalog → Git import cycle.
+      // Idle is quiet: a read-only PR sync re-reads the workspace only when the PR it reports differs from the
+      // document's (the control plane records it there); a write always does.
       if (write || op === "gh.prSync")
         await import("../state/cloud-workspace-catalog")
-          .then(({ refreshCloudWorkspace }) => refreshCloudWorkspace(target))
+          .then(({ refreshCloudWorkspace, cloudWorkspaceDocument }) =>
+            write || prSyncChangesDocument(cloudWorkspaceDocument(target)?.github, result) ? refreshCloudWorkspace(target) : undefined)
           .catch(() => {});
       if (!current() && !write) throw changed();
       return result;
@@ -294,4 +297,13 @@ export function requestCloudGithubPr(
     });
   if (!write) flights.set(flightKey, pending);
   return pending;
+}
+
+/** Whether a gh.prSync result differs from the workspace document's PR fields; unknown means yes. */
+function prSyncChangesDocument(github: { prNumber: number | null; prState: string | null; prUrl: string | null } | undefined, result: unknown): boolean {
+  if (!github) return true;
+  if (result === null || result === undefined) return github.prNumber !== null;
+  if (typeof result !== "object") return true;
+  const pr = result as { number?: unknown; url?: unknown; state?: unknown };
+  return pr.number !== github.prNumber || pr.url !== github.prUrl || pr.state !== github.prState;
 }

@@ -6,6 +6,7 @@ const f = vi.hoisted(() => ({
   branch: "work",
   refresh: vi.fn(),
   forget: vi.fn(),
+  doc: undefined as undefined | { github?: { prNumber: number | null; prState: string | null; prUrl: string | null } },
 }));
 vi.mock("../cloud-workspaces", () => ({ cloudAccountRequest: f.request }));
 vi.mock("../../features/team/team-store", () => ({
@@ -19,6 +20,7 @@ vi.mock("../cloud-github-pr-capability", () => ({
 }));
 vi.mock("../../state/cloud-workspace-catalog", () => ({
   refreshCloudWorkspace: f.refresh,
+  cloudWorkspaceDocument: () => f.doc,
 }));
 vi.mock("../../shell/pr/pr-cache-forget", () => ({
   forgetPrCachesForWorkspace: f.forget,
@@ -53,7 +55,34 @@ beforeEach(() => {
   f.branch = "work";
   f.refresh.mockResolvedValue(undefined);
   f.request.mockResolvedValue({ authority, result: pr });
+  f.doc = undefined;
 });
+describe("idle is quiet: a read-only PR sync re-reads the workspace only when the PR it reports differs", () => {
+  it("skips the document read for an unchanged PR (or none), and reads it when number, url or state changed", async () => {
+    const found = { ...pr, url: "https://github.com/example/project/pull/7", state: "ready" };
+    f.doc = { github: { prNumber: 7, prState: "ready", prUrl: found.url } };
+    f.request.mockResolvedValue({ authority, result: found });
+    await requestCloudGithubPr(target, "gh.prSync", {});
+    expect(f.refresh).not.toHaveBeenCalled();
+    f.request.mockResolvedValue({ authority, result: { ...found, state: "merged" } });
+    await requestCloudGithubPr(target, "gh.prSync", {});
+    expect(f.refresh).toHaveBeenCalledTimes(1);
+    f.doc = { github: { prNumber: null, prState: null, prUrl: null } };
+    f.request.mockResolvedValue({ authority, result: null });
+    await requestCloudGithubPr(target, "gh.prSync", {});
+    expect(f.refresh).toHaveBeenCalledTimes(1);
+    // No document held, or no github block: read it (the safe default).
+    f.doc = undefined;
+    await requestCloudGithubPr(target, "gh.prSync", {});
+    expect(f.refresh).toHaveBeenCalledTimes(2);
+    // A write always reads it.
+    f.doc = { github: { prNumber: 7, prState: "ready", prUrl: found.url } };
+    f.request.mockResolvedValue({ authority, result: found });
+    await requestCloudGithubPr(target, "gh.prMarkReady", { prNumber: 7 });
+    expect(f.refresh).toHaveBeenCalledTimes(3);
+  });
+});
+
 describe("cloud PR transport", () => {
   it("reads through the control plane without a connect or wake request", async () => {
     await expect(

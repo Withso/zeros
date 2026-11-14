@@ -293,3 +293,86 @@ describe("R1 device-liveness-v1", () => {
     await s.service.stop();
   });
 });
+
+describe("idle is quiet: the device stream hints sync only when something it reads changed", () => {
+  it("hints on ready and on a presenceRequired flip, never on a presence frame that only extends reachableUntil", async () => {
+    const root = await mkdtemp(join(tmpdir(), "local-command-hints-")); directories.push(root);
+    const h = harness({ journalRoot: root });
+    let hints = 0;
+    const service = new LocalCommandService({ ...h.deps, syncHint: () => { hints++; } });
+    await service.start();
+    await vi.waitFor(() => expect(h.calls).toContain("register"));
+    const presence = (presenceRequired: boolean, at: number) => ({ event: "presence" as const, data: { presenceRequired, reachableUntil: new Date(at).toISOString() } });
+    h.push({ event: "ready", data: { deviceId, registrationId: device.registrationId, instanceId: device.instanceId, presence: { presenceRequired: false, reachableUntil: null }, heartbeatIntervalMs: 25_000 } });
+    await vi.waitFor(() => expect(hints).toBe(1));
+    for (let i = 1; i <= 5; i++) h.push(presence(false, 1_000 * i));
+    h.push(presence(true, 10_000));
+    await vi.waitFor(() => expect(hints).toBe(2));
+    for (let i = 11; i <= 15; i++) h.push(presence(true, 1_000 * i));
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(hints).toBe(2);
+    await service.stop();
+  });
+});
+
+describe("device ready diagnostics", () => {
+  it("logs the ready's heartbeat interval and features on every channel open, with no ids or tokens", async () => {
+    const root = await mkdtemp(join(tmpdir(), "local-command-ready-log-")); directories.push(root);
+    const h = harness({ journalRoot: root });
+    const lines: string[] = [];
+    const service = new LocalCommandService({ ...h.deps, log: line => { lines.push(line); } });
+    await service.start();
+    await vi.waitFor(() => expect(h.calls).toContain("register"));
+    h.push({ event: "ready", data: { deviceId, registrationId: device.registrationId, instanceId: device.instanceId, presence: { presenceRequired: false, reachableUntil: null },
+      heartbeatIntervalMs: 300_000, features: ["device-liveness-v1"] } });
+    await vi.waitFor(() => expect(lines).toContain("ready heartbeat_interval_ms=300000 features=device-liveness-v1"));
+    expect(lines.some(line => line.startsWith("registered capabilities=3"))).toBe(true);
+    expect(lines.join("\n")).not.toContain(device.registrationId);
+    await service.stop();
+  });
+});
+
+describe("idle is quiet: a token-rollover reopen", () => {
+  const readyFrame = (heartbeatIntervalMs: 25_000 | 300_000) => ({ event: "ready" as const, data: { deviceId, registrationId: device.registrationId, instanceId: device.instanceId,
+    presence: { presenceRequired: true, reachableUntil: null }, heartbeatIntervalMs } });
+
+  it("sends no extra heartbeat when the last beat is still inside its interval", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
+    const s = await setup();
+    const beats = () => s.calls.filter(call => call === "heartbeat").length;
+    s.push(readyFrame(25_000));
+    await vi.waitFor(() => expect(beats()).toBe(1));
+    await vi.advanceTimersByTimeAsync(10_000);
+    s.push(null);                                   // the server ends the stream at token expiry
+    await vi.advanceTimersByTimeAsync(1);
+    s.push(readyFrame(25_000));
+    await vi.advanceTimersByTimeAsync(1);
+    expect(beats()).toBe(1);
+    await vi.advanceTimersByTimeAsync(25_000);
+    expect(beats()).toBe(2);
+    await s.service.stop();
+  });
+
+  it("re-offers device-liveness-v1 after a downgrade, at most every 30 min, on a clean reopen", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
+    const root = await mkdtemp(join(tmpdir(), "local-command-renegotiate-")); directories.push(root);
+    const h = harness({ journalRoot: root });
+    const offered: number[] = [];
+    let refuse = true;
+    (h.deps.control.register as ReturnType<typeof vi.fn>).mockImplementation(async (_name: unknown, registration: { capabilities: string[] }) => {
+      offered.push(registration.capabilities.length);
+      if (refuse && registration.capabilities.length === 3) { refuse = false; throw new DeviceControlError(400, "invalid_request"); }
+      return { device, presence: { presenceRequired: false, reachableUntil: null }, heartbeatIntervalMs: 25_000 as const };
+    });
+    const lines: string[] = [];
+    const service = new LocalCommandService({ ...h.deps, log: line => { lines.push(line); } }); await service.start();
+    await vi.waitFor(() => expect(offered).toEqual([3, 2]));
+    const reopen = async () => { h.push(readyFrame(25_000)); await vi.advanceTimersByTimeAsync(6_000); h.push(null); await vi.advanceTimersByTimeAsync(1); };
+    await reopen();
+    expect(offered).toEqual([3, 2]);               // a reopen inside 30 min keeps the registration
+    await vi.advanceTimersByTimeAsync(31 * 60_000);
+    await reopen(); await vi.advanceTimersByTimeAsync(200_000);
+    await vi.waitFor(() => expect(offered).toEqual([3, 2, 3]));
+    await service.stop();
+  });
+});
