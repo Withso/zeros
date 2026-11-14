@@ -14,7 +14,7 @@ const pendingReply = z.object({
   epoch: CloudV2PromptCounterSchema, items: z.array(CloudCachePendingRowSchema).max(100),
   nextAfter: CloudV2PromptCounterSchema.nullable(), queueRevision: counter.optional(),
 });
-const unavailable = () => new Error("Cloud cache transport unavailable.");
+const unavailable = () => Object.assign(new Error("Cloud cache transport unavailable."), { stage: "source" });
 class QueueChanged extends Error {}
 function parse<T>(schema: z.ZodType<T>, value: unknown): T {
   const result = schema.safeParse(value);

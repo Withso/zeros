@@ -29,7 +29,7 @@ interface Flight<T> {
   readers: Map<Binding, Promise<T>>; result: Promise<T>;
 }
 const changed = () => new CloudCacheChanged();
-const unavailable = () => new Error("Cloud history cache unavailable.");
+const unavailable = () => Object.assign(new Error("Cloud history cache unavailable."), { stage: "service_check" });
 
 export class CloudChatCacheService {
   private readonly bindings = new Map<number, Binding>();

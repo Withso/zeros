@@ -57,10 +57,13 @@ app.once("will-quit", () => { closed = true; generation++; runtime?.service.clos
 
 function admit(event: IpcMainInvokeEvent): { window: number; current(): boolean } {
   const window = getMainWindow(), sender = event.sender, frame = event.senderFrame;
-  if (IS_LOCAL_DEVELOPMENT || closed || !window || window.isDestroyed() || sender.isDestroyed() ||
-      window.webContents !== sender || sender.mainFrame !== frame) throw unavailable();
+  if (IS_LOCAL_DEVELOPMENT) throw Object.assign(unavailable(), { stage: "disabled" });
+  if (closed) throw Object.assign(unavailable(), { stage: "closed" });
+  if (!window || window.isDestroyed() || sender.isDestroyed() ||
+      window.webContents !== sender || sender.mainFrame !== frame) throw Object.assign(unavailable(), { stage: "window" });
   const account = identity();
-  if (!account) throw unavailable();
+  // Main has no signed-in session user yet: the renderer falls back to its old reads.
+  if (!account) throw Object.assign(unavailable(), { stage: "no_session" });
   let lifetime = windows.get(sender.id);
   if (!lifetime) {
     lifetime = { generation: 0 }; windows.set(sender.id, lifetime);
