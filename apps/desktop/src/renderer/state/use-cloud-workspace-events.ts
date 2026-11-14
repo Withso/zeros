@@ -3,7 +3,7 @@ import { getActiveBridge } from "../platform/bridge/active-bridge";
 import type { CloudWorkspaceTarget } from "../platform/bridge/cloud-workspace-key";
 import { WorkspaceRuntimeClient } from "../platform/bridge/workspace-runtime-client";
 import { watchCloudWorkspaceEvents } from "../platform/cloud-workspace-events";
-import { refreshCloudWorkspace } from "./cloud-workspace-catalog";
+import { cloudWorkspaceDocument, refreshCloudWorkspace, subscribeCloudWorkspaces } from "./cloud-workspace-catalog";
 import { reportIfCloudWorkspaceAccessEnded } from "../platform/cloud-access-confirm";
 
 export interface CloudWorkspacePresence { userIds: readonly string[]; total: number }
@@ -29,6 +29,7 @@ export function useCloudWorkspaceEvents(target: CloudWorkspaceTarget | null, ena
         if (bridge instanceof WorkspaceRuntimeClient) bridge.refreshHistoryWorkspace(scope);
       }, COALESCE_MS);
     };
+    const ready = () => { const doc = cloudWorkspaceDocument(scope); return !doc || ["ready", "busy"].includes(doc.status); };
     const stop = watchCloudWorkspaceEvents(scope, {
       invalidate,
       presence: (userIds, total) => setPresence({ key, value: { userIds, total } }),
@@ -39,7 +40,7 @@ export function useCloudWorkspaceEvents(target: CloudWorkspaceTarget | null, ena
         void refreshCloudWorkspace(scope).catch(() => {});
         void reportIfCloudWorkspaceAccessEnded(scope);
       },
-    });
+    }, { ready, onReadiness: subscribeCloudWorkspaces });
     return () => { stop(); clearTimeout(timer); };
   }, [enabled, key, organizationId, reads, workspaceId]);
   return presence && presence.key === key ? presence.value : null;
