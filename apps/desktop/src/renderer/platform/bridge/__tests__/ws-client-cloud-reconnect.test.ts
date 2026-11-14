@@ -358,3 +358,18 @@ it("§14.5: only a ready connection clears the shared connect backoff", async ()
   await vi.advanceTimersByTimeAsync(0);
   expect(h.client.status).toBe("connected"); expect(cloudConnectWaitMs(key)).toBe(0);
 });
+
+// Master's carrier-hold ruling: the relay holds the desktop's WebSocket across a worker-carrier redial (up to 20 s),
+// so the desktop sees no close. These pin what the desktop does with a held socket.
+it("a held socket (relay redialling its worker carrier) causes no status change and no new ticket", async () => {
+  const h = fixture(), states: string[] = [];
+  await h.client.connect(); await h.ready(h.sockets[0]!);
+  h.client.onStatusChange(status => states.push(status));
+  // 20 s of silence on an open socket: the hold bound.
+  await vi.advanceTimersByTimeAsync(20_000);
+  expect(states).toEqual([]);
+  expect(h.client.status).toBe("connected");
+  expect(h.refresh).not.toHaveBeenCalled();
+  expect(h.sockets).toHaveLength(1);
+});
+
