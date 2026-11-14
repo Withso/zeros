@@ -11,7 +11,7 @@ const page = (text: string) => ({ messages: [{ msgId: "m1", kind: "text", payloa
 type ReadHistory = NonNullable<ConstructorParameters<typeof WorkspaceRuntimeClient>[0]["readHistory"]>;
 // `readHistory` scripts the transcript reads; the workspace's one chats.list (joined before a first window read) is
 // answered separately so each scripted step stays a transcript read.
-function stopped(readHistory: ReturnType<typeof vi.fn>) {
+function stopped(readHistory: (...args: unknown[]) => unknown) {
   const open = vi.fn(async () => { throw new Error("VM must stay stopped"); });
   const route = (target: unknown, op: string, params: unknown) => op === "chats.list" ? Promise.resolve({ chats: [] }) : readHistory(target, op, params);
   return new WorkspaceRuntimeClient({ open, readHistory: route as unknown as ReadHistory, historyRoot: () => "/home/user/Owner/repo", workspaces: () => [] });

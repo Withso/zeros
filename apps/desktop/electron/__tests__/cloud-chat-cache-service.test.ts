@@ -43,6 +43,15 @@ function fixture() {
 }
 
 describe("main cloud cache admission and refresh", () => {
+  it("a Team-shared chat whose revision matches opens with its senders and zero requests", async () => {
+    const f = fixture(), key = { owner, ...target }, alice = { userId: "44444444-4444-4444-8444-444444444444" };
+    const prompt = { index: 0, msgId: "p", kind: "text", createdAt: 1, payload: JSON.stringify({ id: "p", kind: "text", role: "user", text: "Hi", createdAt: 1 }) };
+    f.store.putRange(key, { revision: 5, messageCount: 1, fromIndex: 0, toIndex: 1, rows: [prompt], senders: { p: alice } });
+    const hit = await f.service.refresh(1, f.binding, target, 200, { revision: 5, messageCount: 1 });
+    expect(hit.range.senders).toEqual({ p: alice });
+    for (const fn of [f.source.workspace, f.source.range, f.source.since, f.source.pending]) expect(fn).not.toHaveBeenCalled();
+  });
+
   it("a chat whose chats.list revision matches the cache opens with no network read; a changed one continues once", async () => {
     const f = fixture(), key = { owner, ...target };
     f.store.putRange(key, page(3));

@@ -1,5 +1,6 @@
 import { cloudScopedId, cloudWorkspaceKey, parseCloudScopedId } from "../platform/bridge/cloud-workspace-key";
 import type { CloudCacheKnown, CloudCacheTarget } from "../../../shared/cloud-chat-cache";
+import { acceptHistorySenders } from "../platform/chat-senders";
 import type { NativeCloudChatCacheClient, NativeCloudCacheSnapshot } from "../platform/cloud-chat-cache-client";
 import type { LocalTranscriptCache, LocalTranscriptWindow } from "./local-transcript-cache";
 
@@ -70,6 +71,8 @@ export function createNativeCloudTranscriptCache(
       const epoch = this.epoch, nativeEpoch = native.epoch;
       const flight: Promise<LocalTranscriptWindow | null> = native.read(key, 200).then(snapshot => {
         if (epoch !== this.epoch || nativeEpoch !== native.epoch || !this.isOwner(owner) || this.nativeReads.get(chatId) !== flight) return null;
+        // Team sharing: a painted cached transcript carries its stored senders, so attribution asks nothing.
+        if (snapshot?.range?.senders) acceptHistorySenders(key, key.chatId, snapshot.range.senders);
         const live = this.peek(chatId);
         if (live) return live;
         const value = snapshot && decode(snapshot, owner, nativeEpoch);

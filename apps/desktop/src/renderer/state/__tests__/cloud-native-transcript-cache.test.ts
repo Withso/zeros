@@ -3,6 +3,7 @@ import { LocalTranscriptCache, type LocalTranscriptWindow } from "../local-trans
 import { createNativeCloudTranscriptCache } from "../cloud-native-transcript-cache";
 import { NativeCloudChatCacheClient, type NativeCloudCacheSnapshot } from "../../platform/cloud-chat-cache-client";
 import type { CloudCacheRequest } from "../../../../shared/cloud-chat-cache";
+import { chatKeyFor, chatSender, clearChatSenders } from "../../platform/chat-senders";
 
 const owner = JSON.stringify(["https://api.example.test", "viewer-a"]);
 const target = { organizationId: "11111111-1111-4111-8111-111111111111", workspaceId: "22222222-2222-4222-8222-222222222222", chatId: "chat" };
@@ -30,6 +31,15 @@ function fixture(known?: (chatId: string) => Promise<{ revision: number; message
 }
 
 describe("cloud native disk and renderer memory tiers", () => {
+  it("a painted cached transcript publishes its stored senders", async () => {
+    const f = fixture();
+    const alice = { userId: "44444444-4444-4444-8444-444444444444" };
+    f.invoke.mockImplementation(async input => input.op === "bind" ? ok({ lease }) :
+      input.op === "read" ? ok({ range: { ...page, senders: { message: alice } }, pending: null }) : { ok: false, reason: "unavailable" });
+    await f.cache.read(chatId);
+    expect(chatSender(chatKeyFor(target, "chat"), "message")).toBe(alice.userId);
+    clearChatSenders();
+  });
   it("revalidates an unchanged chat with its chats.list revision and no receipts read", async () => {
     for (const cached of [true, false]) {
       const f = fixture(async id => id === chatId ? { revision: 6, messageCount: 1 } : undefined);

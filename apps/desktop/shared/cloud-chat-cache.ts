@@ -16,9 +16,12 @@ export const CloudCacheMessageSchema = z.object({
 export const CloudCacheRowSchema = CloudCacheMessageSchema.extend({ index: counter });
 export type CloudCacheRow = z.infer<typeof CloudCacheRowSchema>;
 const metadata = { revision: counter, messageCount: counter, historyState: CloudV2HistoryStateSchema.optional() };
+/** Team sharing: who sent each user row in this reply ({userId} or null for a known-unknown legacy attribution).
+ * Read leniently, like a window's senders: unknown or malformed entries are ignored, absence means not answered. */
+export const CloudCacheSendersSchema = z.record(z.string().min(1).max(256), z.unknown());
 export const CloudCacheRangeSchema = z.object({
   ...metadata, fromIndex: counter, toIndex: counter, rows: z.array(CloudCacheRowSchema).max(500),
-  turnOpening: CloudCacheMessageSchema.optional(),
+  turnOpening: CloudCacheMessageSchema.optional(), senders: CloudCacheSendersSchema.optional(),
 }).refine(page => page.fromIndex <= page.toIndex && page.toIndex <= page.messageCount &&
   page.toIndex - page.fromIndex === page.rows.length &&
   page.rows.every((row, index) => row.index === page.fromIndex + index) &&
@@ -26,7 +29,8 @@ export const CloudCacheRangeSchema = z.object({
 export type CloudCacheRange = z.infer<typeof CloudCacheRangeSchema>;
 export const CloudCacheDeltaSchema = z.discriminatedUnion("resync", [
   z.object({ resync: z.literal(true), ...metadata }),
-  z.object({ resync: z.literal(false), fromRevision: counter, ...metadata, rows: z.array(CloudCacheRowSchema).max(500) })
+  z.object({ resync: z.literal(false), fromRevision: counter, ...metadata, rows: z.array(CloudCacheRowSchema).max(500),
+    senders: CloudCacheSendersSchema.optional() })
     .refine(delta => delta.fromRevision <= delta.revision && delta.rows.every(row => row.index < delta.messageCount) &&
       delta.rows.every((row, index) => index === 0 || row.index > delta.rows[index - 1].index) &&
       new Set(delta.rows.map(row => row.index)).size === delta.rows.length &&

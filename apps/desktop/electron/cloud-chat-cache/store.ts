@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import Database from "better-sqlite3";
+import { z } from "zod";
 import {
   CloudCacheDeltaSchema, CloudCachePendingSchema, CloudCacheRangeSchema, CloudCacheMessageSchema, CloudCacheTargetSchema,
   cloudCacheKey, type CloudCacheDelta, type CloudCacheKey, type CloudCachePending, type CloudCacheRange, type CloudCacheRow, type CloudCacheTarget,
@@ -28,6 +29,10 @@ const SCHEMA = `
     kind TEXT NOT NULL, payload TEXT NOT NULL, created_at INTEGER NOT NULL, bytes INTEGER NOT NULL, user_prompt INTEGER NOT NULL,
     PRIMARY KEY(chat_key,idx), UNIQUE(chat_key,msg_id)
   );
+  CREATE TABLE senders (
+    chat_key TEXT NOT NULL REFERENCES chats(key) ON DELETE CASCADE, msg_id TEXT NOT NULL, sender TEXT NOT NULL,
+    PRIMARY KEY(chat_key,msg_id)
+  );
   CREATE TABLE segments (
     chat_key TEXT NOT NULL REFERENCES chats(key) ON DELETE CASCADE, start_index INTEGER NOT NULL,
     end_index INTEGER NOT NULL, opening TEXT, PRIMARY KEY(chat_key,start_index)
@@ -43,6 +48,18 @@ const expectedSchema = schemaText(SCHEMA.split(";"));
 type Chat = { revision: number; message_count: number; history_state: string | null; queue_revision: number | null; queue_epoch: string | null; last_read: number };
 type Segment = { start_index: number; end_index: number; opening: string | null };
 type Message = { idx: number; msg_id: string; kind: string; payload: string; created_at: number; bytes: number; user_prompt: number };
+const SenderSchema = z.union([z.object({ userId: z.string().uuid() }).transform(({ userId }) => ({ userId })), z.null()]);
+/** A user message's sender as stored: '{"userId":…}' or 'null' (a known-unknown legacy attribution); no row means
+ * never answered. A stored sender never changes. */
+const storedSender = (senders: Record<string, unknown> | undefined, msgId: string): string | null => {
+  if (!senders || !Object.hasOwn(senders, msgId)) return null;
+  const parsed = SenderSchema.safeParse(senders[msgId]);
+  return parsed.success ? JSON.stringify(parsed.data) : null;
+};
+const userPrompt = (kind: string, payload: string): boolean => {
+  try { const value = JSON.parse(payload); return kind === "text" && value?.kind === "text" && value?.role === "user"; }
+  catch { return false; }
+};
 const native = (row: Message): CloudCacheRow => ({ index: row.idx, msgId: row.msg_id, kind: row.kind, payload: row.payload, createdAt: row.created_at });
 class Capacity extends Error {}
 class Incompatible extends Error {}
@@ -184,6 +201,17 @@ export class CloudChatCacheStore {
     return freed > 0;
   }
 
+  /** Team sharing: keep the senders a reply delivered for its user rows (and its turn opening). A reply without
+   * senders (N-1, or not shared) keeps what is known. */
+  private putSenders(key: string, messages: Array<{ msgId: string; kind: string; payload: string }>, senders?: Record<string, unknown>): void {
+    if (!senders) return;
+    const statement = this.database().prepare("INSERT INTO senders VALUES (?,?,?) ON CONFLICT(chat_key,msg_id) DO NOTHING");
+    for (const message of messages) {
+      const sender = userPrompt(message.kind, message.payload) ? storedSender(senders, message.msgId) : null;
+      if (sender !== null) statement.run(key, message.msgId, sender);
+    }
+  }
+
   private upsertRows(key: string, rows: CloudCacheRow[]): void {
     const statement = this.database().prepare(`INSERT INTO messages VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(chat_key,idx) DO UPDATE SET
       msg_id=excluded.msg_id,kind=excluded.kind,payload=excluded.payload,created_at=excluded.created_at,bytes=excluded.bytes,user_prompt=excluded.user_prompt`);
@@ -215,13 +243,17 @@ export class CloudChatCacheStore {
         opening: previous.find(segment => segment.start_index <= idx && segment.end_index > idx)?.opening ?? null });
     }
     for (const segment of next) db.prepare("INSERT INTO segments VALUES (?,?,?,?)").run(key, segment.start_index, segment.end_index, segment.opening);
+    // Senders live only as long as a cached row or turn opening they attribute.
+    db.prepare(`DELETE FROM senders WHERE chat_key=@key AND msg_id NOT IN (SELECT msg_id FROM messages WHERE chat_key=@key)
+      AND msg_id NOT IN (SELECT json_extract(opening,'$.msgId') FROM segments WHERE chat_key=@key AND opening IS NOT NULL)`).run({ key });
   }
 
   private measure(key: string): number {
     const db = this.database(), chat = this.chat(key);
     if (!chat) return 0;
     const sum = (table: "messages" | "pending") => Number((db.prepare(`SELECT coalesce(sum(bytes),0) AS bytes FROM ${table} WHERE chat_key=?`).get(key) as { bytes: number }).bytes);
-    return bytes(key) + 128 + (chat.history_state ? bytes(chat.history_state) : 0) + sum("messages") + sum("pending") +
+    const senders = Number((db.prepare("SELECT coalesce(sum(length(msg_id)+length(sender)+32),0) AS bytes FROM senders WHERE chat_key=?").get(key) as { bytes: number }).bytes);
+    return bytes(key) + 128 + (chat.history_state ? bytes(chat.history_state) : 0) + sum("messages") + sum("pending") + senders +
       this.segments(key).reduce((total, segment) => total + 32 + (segment.opening ? bytes(segment.opening) : 0), 0);
   }
 
@@ -277,6 +309,7 @@ export class CloudChatCacheStore {
         page.revision, page.messageCount, encoded(page.historyState), current?.last_read ?? this.now());
       const segments = this.segments(key);
       this.upsertRows(key, page.rows);
+      this.putSenders(key, [...page.rows, ...(page.turnOpening ? [page.turnOpening] : [])], page.senders);
       this.rebuildSegments(key, [{ start_index: page.fromIndex, end_index: page.toIndex, opening: encoded(page.turnOpening) }, ...segments]);
       this.bound(key);
     }, key) && this.chat(key) !== undefined;
@@ -308,6 +341,7 @@ export class CloudChatCacheStore {
       const tail = current.message_count === 0 || segments.at(-1)?.end_index === current.message_count;
       this.upsertRows(key, delta.rows.filter(row => row.index >= current.message_count ? tail :
         segments.some(segment => segment.start_index <= row.index && row.index < segment.end_index)));
+      this.putSenders(key, delta.rows, delta.senders);
       this.database().prepare("UPDATE chats SET revision=?,message_count=?,history_state=? WHERE key=?")
         .run(delta.revision, delta.messageCount, encoded(delta.historyState), key);
       this.rebuildSegments(key, segments);
@@ -342,10 +376,17 @@ export class CloudChatCacheStore {
     const stored = this.database().prepare("SELECT * FROM messages WHERE chat_key=? AND idx>=? AND idx<? ORDER BY idx").all(key, fromIndex, toIndex) as Message[];
     const rows = stored.map(native);
     const opening = segment && !stored[0]?.user_prompt ? this.opening(key, fromIndex, segment) : null;
+    let openingId: unknown;
+    try { openingId = opening ? (JSON.parse(opening) as { msgId?: unknown }).msgId : undefined; } catch { openingId = undefined; }
+    const ids = [...stored.map(row => row.msg_id), ...(typeof openingId === "string" ? [openingId] : [])];
+    const lookup = this.database().prepare("SELECT sender FROM senders WHERE chat_key=? AND msg_id=?");
+    const known = ids.flatMap(id => { const hit = lookup.get(key, id) as { sender: string } | undefined; return hit ? [[id, JSON.parse(hit.sender) as unknown] as const] : []; });
+    const senders = known.length ? Object.fromEntries(known) : undefined;
     let result;
     try {
       result = CloudCacheRangeSchema.safeParse({ revision: chat.revision, messageCount: chat.message_count, fromIndex, toIndex, rows,
-        ...(chat.history_state ? { historyState: JSON.parse(chat.history_state) } : {}), ...(opening ? { turnOpening: JSON.parse(opening) } : {}) });
+        ...(chat.history_state ? { historyState: JSON.parse(chat.history_state) } : {}), ...(opening ? { turnOpening: JSON.parse(opening) } : {}),
+        ...(senders ? { senders } : {}) });
     } catch { this.forget(input); return null; }
     if (!result.success) { this.forget(input); return null; }
     this.database().prepare("UPDATE chats SET last_read=? WHERE key=?").run(this.now(), key);

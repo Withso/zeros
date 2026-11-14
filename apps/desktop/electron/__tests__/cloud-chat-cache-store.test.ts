@@ -367,3 +367,30 @@ describe("main-owned cloud chat SQLite cache", () => {
     } finally { writer.exec("ROLLBACK"); writer.close(); }
   });
 });
+
+describe("senders travel with their cached rows (Team sharing)", () => {
+  const alice = { userId: "44444444-4444-4444-8444-444444444444" }, bob = { userId: "55555555-5555-4555-8555-555555555555" };
+  it("keeps each delivered sender, serves it on read, and never erases a known one", () => {
+    const store = open();
+    // m-0 is a user row; m-1 is an agent row whose (ignored) entry must not be stored; m-9 is not in the page.
+    expect(store.putRange(key, { ...range(0, 4), senders: { "m-0": alice, "m-1": bob, "m-9": bob, bad: { userId: "x" } } })).toBe(true);
+    expect(store.readRange(key, 0, 4)?.senders).toEqual({ "m-0": alice });
+    // A later page of the same revision without senders (N-1 server) keeps what is known.
+    expect(store.putRange(key, range(0, 4))).toBe(true);
+    expect(store.readTail(key, 200)?.senders).toEqual({ "m-0": alice });
+    // A since delta brings the new user row's sender; a known-unknown legacy attribution is kept as null.
+    expect(store.applyDelta(key, { resync: false, fromRevision: 1, revision: 2, messageCount: 5, rows: [row(4)], senders: { "m-4": null } })).toBe(true);
+    expect(store.readTail(key, 200)?.senders).toEqual({ "m-0": alice, "m-4": null });
+  });
+  it("keeps the sender of a page's turn opening, which is not one of its rows", () => {
+    const store = open();
+    // Rows 1..3 are agent rows; the turn opened at user row 0, delivered as turnOpening.
+    expect(store.putRange(key, { ...range(1, 4, 1, 4), turnOpening: row(0), senders: { "m-0": alice } })).toBe(true);
+    expect(store.readRange(key, 1, 4)).toMatchObject({ turnOpening: { msgId: "m-0" }, senders: { "m-0": alice } });
+  });
+  it("a chat without senders reads exactly as before", () => {
+    const store = open();
+    store.putRange(key, range(0, 4));
+    expect(store.readRange(key, 0, 4)).not.toHaveProperty("senders");
+  });
+});

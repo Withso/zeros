@@ -26,6 +26,8 @@ export async function readNativeCloudHistory(
     return { messages: range.rows.map(({ index: _index, ...row }) => row),
       ...(range.historyState ? { historyState: range.historyState } : {}),
       ...(range.turnOpening ? { turnOpening: range.turnOpening } : {}),
+      // Team sharing: senders stored with the cached rows answer attribution without a messages.senders read.
+      ...(range.senders ? { senders: range.senders } : {}),
     };
   } catch (error) {
     if (epoch !== native.epoch) throw new NativeCloudCacheError("owner_changed");
