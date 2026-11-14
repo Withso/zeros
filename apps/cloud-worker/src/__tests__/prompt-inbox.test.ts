@@ -708,3 +708,16 @@ it("applies chat edits after the reply's prompts and acknowledges each with its 
   await until(() => f.relay.calls.filter(call => call.op === "pull").length).toBeGreaterThanOrEqual(pulls + 5);
   expect(Date.now() - started).toBeGreaterThanOrEqual(700);
 });
+
+it("R1 push-signals-v1: an accepted pushSignals config long-polls 60 s; without it the pull keeps 25 s", async () => {
+  const legacy = await setup();
+  await until(() => legacy.relay.calls.some(call => call.op === "pull" && call.body.waitMs > 0)).toBe(true);
+  expect(legacy.relay.calls.filter(call => call.op === "pull" && call.body.waitMs > 0).at(-1)!.body.waitMs).toBe(25_000);
+  const relay = new PullRelay();
+  const f = await setup({ relay });
+  await relay.receive({ ...config, promptOutbox: 1, pushSignals: 1, loginRevision: "1" });
+  // The waiting pull is replaced once the config is accepted.
+  relay.enqueue({ prompts: [], stops: [] });
+  await until(() => relay.calls.filter(call => call.op === "pull" && call.body.waitMs === 60_000).length).toBeGreaterThan(0);
+  expect(f.worker).toBeDefined();
+});

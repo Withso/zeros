@@ -1,3 +1,4 @@
+import { CLOUD_V2_PROMPT_POLL_MS, CLOUD_V2_PROMPT_PUSH_POLL_MS } from "@zeros/protocol/cloud-v2-prompts";
 import { NotifyUserWorkerRequestSchema, type NotifyUserWorkerRequest } from "@zeros/protocol/notify-user";
 import type { NotifyUserDelivery } from "./notify-user/service";
 import { randomInt, randomUUID } from "node:crypto";
@@ -16,6 +17,7 @@ import { CloudGithubUnavailableReasonSchema, type CloudGithubUnavailableReason }
 import { GITHUB_HTTP_TIMEOUT_MS } from "./credentials/github-failure";
 import { CloudEnvironmentReportSchema, CloudV2SetupStatusSchema, type CloudEnvironmentReport, type CloudV2SetupStatus } from "@zeros/protocol/cloud-v2-relay";
 import { CloudRuntimeUpdateReplySchema, type CloudRuntimeUpdateRequest, type CloudRuntimeUpdateReply } from "@zeros/protocol/cloud-v2-relay";
+import { PUSH_SIGNALS_REPORT_MS } from "@zeros/protocol/cloud-v2-relay";
 
 type ConfigFrame = Extract<CloudV2ControlFrame, { t: "config" }>;
 export type HybridStatus = "connected" | "disconnected" | "credential-unavailable" | "unauthorized" | "stopped" | "protocol-error";
@@ -71,6 +73,9 @@ export class HybridTransport implements Transport {
   private activityFlight?: Promise<void>;
   private activityRequested = false;
   private readonly pulsePhase: number;
+  /** push-signals-v1 accepted: the safety pulse and the busy repeat run every 5 min instead of every minute / 30 s. */
+  private pulseMs = 60_000;
+  private busyRepeatMs = 30_000;
   private readonly promptPolls = new Set<AbortController>();
   private historySequence = 0;
   private pendingHistory?: { sequence: number; frame: Extract<CloudV2WorkerFrame, { t: "history" }> };
@@ -95,6 +100,7 @@ export class HybridTransport implements Transport {
         release: contextId => { this.syncContexts?.release(contextId); },
         live: contextId => this.syncContexts?.live(contextId) ?? false,
       },
+      onRuntimeUpdate: () => this.handlers?.runtimeUpdate?.(),
       onPushChange: () => {
         for (const controller of this.promptPolls) controller.abort();
         // Reconcile once after subscribing, and on loss of the last carrier.
@@ -102,6 +108,13 @@ export class HybridTransport implements Transport {
       },
       ...(options.publicKeys ? { publicKeys: options.publicKeys } : {}), ...(options.publicKeysFile ? { publicKeysFile: options.publicKeysFile } : {}),
       ...(options.port === undefined ? {} : { port: options.port }), ...(options.log ? { log: options.log } : {}) });
+  }
+  setPushSignals(on: boolean): void {
+    const pulseMs = on ? PUSH_SIGNALS_REPORT_MS : 60_000;
+    this.busyRepeatMs = on ? PUSH_SIGNALS_REPORT_MS : 30_000;
+    if (pulseMs === this.pulseMs) return;
+    this.pulseMs = pulseMs;
+    if (this.heartbeat) this.scheduleHeartbeat();
   }
   start(handlers: TransportHandlers): void {
     if (this.handlers || this.stopped) return;
@@ -124,8 +137,8 @@ export class HybridTransport implements Transport {
     }
     if (frame.t === "idle") {
       this.idle = frame.idle;
-      if (!frame.idle && Date.now() - this.lastBusy < 30_000) {
-        this.busyTimer ??= setTimeout(() => { this.busyTimer = undefined; if (!this.idle) void this.activity(); }, 30_000 - (Date.now() - this.lastBusy));
+      if (!frame.idle && Date.now() - this.lastBusy < this.busyRepeatMs) {
+        this.busyTimer ??= setTimeout(() => { this.busyTimer = undefined; if (!this.idle) void this.activity(); }, this.busyRepeatMs - (Date.now() - this.lastBusy));
         this.busyTimer.unref?.(); return true;
       }
       // Configuration can emit idle while its own HTTP response is being
@@ -177,7 +190,10 @@ export class HybridTransport implements Transport {
     try {
       if (operation === "pull" && (body as { waitMs?: unknown } | null)?.waitMs !== 0)
         await this.listener.waitForPromptFallback(lifetime);
-      return await this.request(`prompts/${operation}`, body, lifetime, operation === "pull" ? 35_000 : 10_000);
+      // A pull's HTTP deadline follows its own long-poll wait (25 s or a negotiated 60 s), plus 10 s for the reply.
+      const waitMs = (body as { waitMs?: unknown } | null)?.waitMs;
+      const pullMs = Math.min(CLOUD_V2_PROMPT_PUSH_POLL_MS, typeof waitMs === "number" && Number.isFinite(waitMs) ? Math.max(0, waitMs) : CLOUD_V2_PROMPT_POLL_MS) + 10_000;
+      return await this.request(`prompts/${operation}`, body, lifetime, operation === "pull" ? pullMs : 10_000);
     }
     catch (error) { if (error instanceof HttpFailure && error.status === 401) this.failed(error); throw error; }
     finally { this.promptPolls.delete(controller); }
@@ -371,8 +387,8 @@ export class HybridTransport implements Transport {
     if (this.stopped) return;
     // A random boot phase spreads safety reads without extending the minute
     // repair bound or turning the socket's ping cadence into database work.
-    const elapsed = ((Date.now() - this.pulsePhase) % 60_000 + 60_000) % 60_000;
-    this.heartbeat = setTimeout(() => { void this.activity(); }, 60_000 - elapsed);
+    const elapsed = ((Date.now() - this.pulsePhase) % this.pulseMs + this.pulseMs) % this.pulseMs;
+    this.heartbeat = setTimeout(() => { void this.activity(); }, this.pulseMs - elapsed);
     this.heartbeat.unref();
   }
   private failed(error: unknown): void {

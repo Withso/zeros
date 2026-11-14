@@ -12,6 +12,8 @@ export interface TransportHandlers {
   open(): void | Promise<void>;
   frame(raw: unknown): Promise<void>;
   close(): void;
+  /** push-signals-v1: the control plane says a runtime update may be ready. */
+  runtimeUpdate?(): void;
 }
 
 /** No offline queue: native work stays in the session store, and a fresh
@@ -20,6 +22,8 @@ export interface Transport {
   start(handlers: TransportHandlers): void;
   send(frame: CloudV2WorkerFrame, options?: { timeoutMs: number }): Promise<boolean>;
   dispose(): Promise<void>;
+  /** push-signals-v1 accepted: the activity pulse and busy repeat move to every 5 min. */
+  setPushSignals?(on: boolean): void;
   /** Durable explicit work has its own typed/idempotent HTTPS channel. */
   promptRequest?: PromptRequest;
   mcpAuthorization?: McpAuthorizationRequest;

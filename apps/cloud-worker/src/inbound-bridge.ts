@@ -13,6 +13,8 @@ interface Options {
   workspaceId: string; bootId: string; port?: number; publicKeys?: readonly string[]; publicKeysFile?: string;
   failedAuthLimit?: number; pingIntervalMs?: number; now?: () => number;
   onPushChange?: () => void;
+  /** push-signals-v1: a `push` frame with runtimeUpdate: true. */
+  onRuntimeUpdate?: () => void;
   /** Worker journal lines for sync sockets: short ids, codes and counts only. */
   log?(line: string): void;
   /** sync-context-v1 (team sharing 3A, activated workspaces): the sync socket's control-plane client handle. */
@@ -277,6 +279,7 @@ export class InboundBridge {
         const changed = !connection.push || connection.push.prompts !== frame.prompts;
         connection.push = { prompts: frame.prompts };
         if (changed) this.pushChanged();
+        if (frame.runtimeUpdate) this.options.onRuntimeUpdate?.();
         return;
       } else if (frame.t === "activity-reply") {
         if (connection.activity?.id === frame.id) connection.activity.finish(frame);

@@ -1,6 +1,7 @@
 import { CloudRuntimeUpdateReplySchema, type CloudRuntimeUpdateRequest, type CloudRuntimeUpdateReply } from "@zeros/protocol/cloud-v2-relay";
 import type { RuntimeQuiescence } from "./runtime-quiescence";
 import type { RuntimePermit } from "./runtime-permit";
+import { PUSH_SIGNALS_RUNTIME_CHECK_MS } from "@zeros/protocol/cloud-v2-relay";
 
 interface Options {
   gate: RuntimeQuiescence;
@@ -16,6 +17,8 @@ export class RuntimeUpdate {
   private timer?: ReturnType<typeof setTimeout>;
   private readonly lifetime = new AbortController();
   private nextCheck = 0;
+  /** push-signals-v1: the control plane hints when an update is ready, so the status check is only a 15 min fallback. */
+  private checkMs = 60_000;
   private id?: string;
   private committed = false;
 
@@ -28,6 +31,13 @@ export class RuntimeUpdate {
     }, 1000);
     this.timer.unref();
   }
+  setPushSignals(on: boolean): void {
+    this.checkMs = on ? PUSH_SIGNALS_RUNTIME_CHECK_MS : 60_000;
+    // Back on an older control plane (no hints): the next check is at most the old minute away.
+    if (!on) this.nextCheck = Math.min(this.nextCheck, Date.now() + this.checkMs);
+  }
+  /** A pushed hint: check at the next tick. */
+  hint(): void { this.nextCheck = 0; }
   tick(): Promise<void> {
     return this.task ??= this.check().catch(() => {}).finally(() => { this.task = undefined; });
   }
@@ -52,7 +62,7 @@ export class RuntimeUpdate {
     }
     const ticket = gate.ticket(), revision = this.options.revision();
     if (!ticket || revision === undefined || Date.now() < this.nextCheck) return;
-    this.nextCheck = Date.now() + 60_000;
+    this.nextCheck = Date.now() + this.checkMs;
     const target = await this.request({ op: "status" });
     if (target.status !== "target" || !gate.valid(ticket)) return;
     const prepared = await this.request({ op: "prepare", revision, generation: ticket.generation, instanceId: this.options.instanceId });

@@ -83,3 +83,28 @@ it("never lets permit cleanup failure prevent synchronous Stop retirement", asyn
   await f.updater.tick();
   expect(f.seen.filter(op => op === "activate")).toHaveLength(1);
 });
+
+it("R1 push-signals-v1: with pushed hints the status check falls back to 15 min (no 1-min check), and a hint checks at once", async () => {
+  let now = 0;
+  vi.spyOn(Date, "now").mockImplementation(() => now);
+  const census: RuntimeCensus = { clients: false, requests: false, agents: false, terminals: false, setup: false, checkout: false,
+    configuration: false, prompts: false, attachments: false, storage: false, tools: false };
+  const gate = new RuntimeQuiescence(() => census);
+  const request = vi.fn(async (_input: CloudRuntimeUpdateRequest): Promise<CloudRuntimeUpdateReply> => ({ status: "current" }));
+  const updater = new RuntimeUpdate({ gate, permit: { arm: vi.fn(), revoke: vi.fn() }, instanceId: randomUUID(), revision: () => "4", flush: async () => {}, request });
+  const statuses = () => request.mock.calls.filter(([input]) => input.op === "status").length;
+  updater.setPushSignals(true);
+  await updater.tick(); now = 30_000; await updater.tick();
+  expect(statuses()).toBe(1);
+  now = 30_000 + 60_000; await updater.tick();
+  expect(statuses()).toBe(1);
+  now = 30_000 + 900_000; await updater.tick();
+  expect(statuses()).toBe(2);
+  updater.hint(); await updater.tick();
+  expect(statuses()).toBe(3);
+  // Without pushed hints, the 1-minute check stays.
+  updater.setPushSignals(false);
+  now += 60_000; await updater.tick();
+  expect(statuses()).toBe(4);
+  updater.stop();
+});

@@ -14,7 +14,7 @@ function token(boot = bootId): string {
   const body = `v1.${Buffer.from(JSON.stringify({ iss: "zeros-cp", aud: workspaceId, boot, iat: now, exp: now + 60, jti: randomUUID() })).toString("base64url")}`;
   return `${body}.${sign(null, Buffer.from(body), key.privateKey).toString("base64url")}`;
 }
-async function fixture(options: { failedAuthLimit?: number; pingIntervalMs?: number } = {}) {
+async function fixture(options: { failedAuthLimit?: number; pingIntervalMs?: number; onRuntimeUpdate?: () => void } = {}) {
   const incoming: CloudV2ControlFrame[] = [];
   const listener = new InboundBridge({ workspaceId, bootId, port: 0,
     publicKeys: [key.publicKey.export({ type: "spki", format: "pem" }).toString()], ...options });
@@ -228,4 +228,15 @@ it("contract: the inbound carrier accepts every control-plane frame type the rel
   await new Promise(resolve => setTimeout(resolve, 20));
   expect(ws.readyState).toBe(WebSocket.OPEN);
   expect(new Set(f.incoming.map(frame => frame.t))).toEqual(new Set(["open", "frame", "close", "config", "prompts", "stop", "revoke-context"]));
+});
+
+it("R1 push-signals-v1: a push frame with runtimeUpdate:true hints a runtime check; a plain push does not", async () => {
+  let hints = 0;
+  const f = await fixture({ onRuntimeUpdate: () => { hints++; } });
+  const { ws } = await f.connect();
+  ws.send(JSON.stringify({ t: "push", prompts: true }));
+  ws.send(JSON.stringify({ t: "push", prompts: false, runtimeUpdate: true }));
+  await until(() => hints > 0);
+  expect(hints).toBe(1);
+  expect(ws.readyState).toBe(WebSocket.OPEN);
 });

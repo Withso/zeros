@@ -1,8 +1,12 @@
 import { setTimeout as delay } from "node:timers/promises";
 import { z } from "zod";
-import { CLOUD_V2_PROMPT_POLL_MS, CloudV2PromptPullReplySchema, CloudV2PromptStateSchema, CloudV2PromptStopReplySchema,
+import { CLOUD_V2_PROMPT_POLL_MS, CLOUD_V2_PROMPT_PUSH_POLL_MS, CloudV2PromptPullReplySchema, CloudV2PromptStateSchema, CloudV2PromptStopReplySchema,
   type CloudV2PromptDelivery, type CloudV2PromptState } from "@zeros/protocol/cloud-v2-prompts";
 import { CloudV2BeginActiveReplySchema } from "@zeros/protocol/cloud-v2-relay";
+
+/** N−1 rollback: after an older control plane refuses the negotiated 60 s pull (400), pull 25 s for this long, then
+ * offer 60 s again. Only the wait changes; prompt authority and the push-signals setting are untouched. */
+export const PUSH_POLL_FALLBACK_MS = 15 * 60_000;
 import type { Agents, OutboxAssignment } from "./agents";
 import type { InboxEntry, SessionStore } from "./sessions/session-store";
 import type { PromptOperation, PromptRequest } from "./transport";
@@ -21,6 +25,9 @@ export class PromptInbox {
   private readonly held = new Set<string>();
   private polling?: AbortController;
   private hinted = true;
+  /** push-signals-v1 accepted: the long poll lasts 60 s (the relay's hint still wakes it at once). */
+  pushSignals = false;
+  private longPollRefusedUntil = 0;
   private task?: Promise<void>;
   private unsubscribe?: () => void;
   private receiving = false;
@@ -133,12 +140,14 @@ export class PromptInbox {
     let attempt = 0;
     while (!this.lifetime.signal.aborted) {
       const started = Date.now();
-      let hintAbortedPoll = false;
+      let hintAbortedPoll = false, lastWait = 0;
       try {
         await this.report();
         const controller = new AbortController(); this.polling = controller;
         const signal = AbortSignal.any([controller.signal, this.lifetime.signal]);
-        const waitMs = this.hinted ? 0 : CLOUD_V2_PROMPT_POLL_MS; this.hinted = false;
+        const longPoll = this.pushSignals && Date.now() >= this.longPollRefusedUntil;
+        const waitMs = this.hinted ? 0 : longPoll ? CLOUD_V2_PROMPT_PUSH_POLL_MS : CLOUD_V2_PROMPT_POLL_MS; this.hinted = false;
+        lastWait = waitMs;
         let batch;
         try { batch = CloudV2PromptPullReplySchema.parse(await this.request("pull", { waitMs, held: [...this.held] }, signal)); }
         catch (error) { hintAbortedPoll = controller.signal.aborted; throw error; }
@@ -165,6 +174,8 @@ export class PromptInbox {
       } catch (error) {
         if (this.lifetime.signal.aborted) break;
         if (httpStatus(error) === 401) { this.fence(); break; }
+        // An older control plane's schema caps the wait at 25 s: fall back for a bounded time and retry at once.
+        if (httpStatus(error) === 400 && lastWait > CLOUD_V2_PROMPT_POLL_MS) { this.longPollRefusedUntil = Date.now() + PUSH_POLL_FALLBACK_MS; continue; }
         if (hintAbortedPoll && this.hinted) continue;
         try { await delay(Math.min(5_000, 250 * 2 ** Math.min(attempt++, 5)), undefined, { signal: this.lifetime.signal, ref: false }); }
         catch { break; }

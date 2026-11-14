@@ -164,6 +164,26 @@ it("keeps one safety pulse per minute at a stable random boot phase without idle
   expect(f.requests.filter(request => request.path === "activity")).toEqual([]);
 });
 
+it("R1 push-signals-v1: once accepted, the safety pulse runs every 5 min (no 1-min pulse) and busy repeats every 5 min", async () => {
+  const f = await fixture(), socket = await connectRelay(f), pulses: number[] = [];
+  socket.on("message", raw => {
+    const frame = JSON.parse(String(raw));
+    if (frame.t !== "activity") return;
+    pulses.push(Date.now());
+    socket.send(JSON.stringify({ t: "activity-reply", id: frame.id, loginRevision: "0", state: "running", prompts: false }));
+  });
+  socket.send(JSON.stringify({ t: "push", prompts: true })); await socketBoundary(socket);
+  f.transport.setPushSignals(true);
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+  await f.transport.send({ t: "idle", idle: true });
+  await expect.poll(() => pulses.length).toBe(1); await socketBoundary(socket);
+  for (let count = 2; count <= 4; count++) {
+    await vi.advanceTimersToNextTimerAsync();
+    await expect.poll(() => pulses.length).toBe(count); await socketBoundary(socket);
+  }
+  expect(pulses.slice(2).map((at, index) => at - pulses[index + 1]!)).toEqual(Array(2).fill(300_000));
+});
+
 it("falls back to authenticated HTTPS after losing the activity ACK socket", async () => {
   const f = await fixture(), socket = await connectRelay(f);
   socket.on("message", raw => { if (JSON.parse(String(raw)).t === "activity") socket.terminate(); });
@@ -458,7 +478,7 @@ it("ignores an older control plane that rejects a newer timing phase", async () 
 });
 it("advertises outbox support without changing the strict hello body, and rereads credentials on pull", async () => {
   const f = await fixture();
-  expect(new Headers(vi.mocked(f.fetcher).mock.calls[0]![1]?.headers).get("x-zeros-worker-features")).toBe("prompt-outbox-v1,mcp-v1,workspace-setup-v1,checkout-v2,agent-interactions-v1,github-pr-v1,git-identity-v1,github-user-token-v1,code-review-v1,history-replace-v1,workspace-environment-v1,repository-setup-v1,runtime-update-v1,worker-push-v1,workspace-api-v1,session-name-v1,chat-edit-v1,local-commands-v1,setup-status-v1,notify-user-v1,sync-v1,local-commands-reason-v1,acting-user-v1,sync-context-v1,creator-agent-logins-v1,creator-agent-models-v1,creator-commit-identity-v1");
+  expect(new Headers(vi.mocked(f.fetcher).mock.calls[0]![1]?.headers).get("x-zeros-worker-features")).toBe("prompt-outbox-v1,mcp-v1,workspace-setup-v1,checkout-v2,agent-interactions-v1,github-pr-v1,git-identity-v1,github-user-token-v1,code-review-v1,history-replace-v1,workspace-environment-v1,repository-setup-v1,runtime-update-v1,worker-push-v1,workspace-api-v1,session-name-v1,chat-edit-v1,local-commands-v1,setup-status-v1,notify-user-v1,sync-v1,local-commands-reason-v1,acting-user-v1,sync-context-v1,creator-agent-logins-v1,creator-agent-models-v1,creator-commit-identity-v1,push-signals-v1");
   expect(Object.keys(f.requests[0]!.body).sort()).toEqual(["bootId", "protocol", "runtimeSha256"]);
   await f.rotate();
   vi.mocked(f.fetcher).mockImplementationOnce(async (_url, init) => {
@@ -613,4 +633,26 @@ describe("worker → control plane context parity", () => {
     await expect.poll(() => f.requests.find(request => request.path === "local-commands")?.body).toMatchObject({ chatId: "chat", executionId: "execution", contextId: C });
     controller.abort(); await local;
   });
+});
+
+it("R1: a negotiated 60 s pull keeps its HTTP request open past 35 s and is bounded just past its wait", async () => {
+  const f = await fixture();
+  let abortedAt: number | undefined;
+  const started = { at: 0 };
+  vi.mocked(f.fetcher).mockImplementationOnce(async (_url, init) => new Promise<Response>((_, reject) => {
+    started.at = Date.now();
+    init!.signal!.addEventListener("abort", () => { abortedAt = Date.now(); reject(new DOMException("Aborted", "AbortError")); }, { once: true });
+  }));
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+  try {
+    const pending = f.transport.promptRequest("pull", { waitMs: 60_000, held: [] }).catch(() => "aborted");
+    for (let i = 0; i < 50 && !started.at; i++) { await vi.advanceTimersByTimeAsync(0); await new Promise(resolve => setImmediate(resolve)); }
+    expect(started.at).toBeGreaterThan(0);
+    await vi.advanceTimersByTimeAsync(40_000);
+    expect(abortedAt).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(40_000);
+    expect(abortedAt! - started.at).toBeGreaterThanOrEqual(60_000);
+    expect(abortedAt! - started.at).toBeLessThanOrEqual(75_000);
+    expect(await pending).toBe("aborted");
+  } finally { vi.useRealTimers(); }
 });
