@@ -2,7 +2,7 @@ export * from "./cloud-workspace-contract";
 import type { CloudWorkspaceDocument } from "./cloud-workspace-contract";
 import { z } from "zod";
 import { getSession } from "../features/auth/auth-store";
-import { CLIENT_TOKEN_ROLLOVER_FEATURE } from "@zeros/protocol/cloud-v2-relay";
+import { CARRIER_HOLD_FEATURE, CLIENT_TOKEN_ROLLOVER_FEATURE } from "@zeros/protocol/cloud-v2-relay";
 import { controlPlaneFetch } from "../features/update/control-plane-fetch";
 import { getOrganizationStoreGeneration } from "../features/team/team-store";
 import {
@@ -108,7 +108,9 @@ export async function cloudAccountRequest<T>(
       ...(options?.syncField ? { "X-Zeros-Sync": "1", "X-Zeros-Sync-Wanted": "1" } : {}),
       // 3B: team ownership travels with team sharing (a workspace may have no Creator; this app reads it).
       ...(options?.teamSharing ? { "X-Zeros-Team-Sharing": "1", "X-Zeros-Team-Ownership": "1" } : {}),
-      ...(withRollover ? { "X-Zeros-Client-Features": CLIENT_TOKEN_ROLLOVER_FEATURE, "X-Zeros-Client-Instance": options!.clientInstance! } : {}),
+      // A comma list the control plane splits and trims: rollover, and carrier-hold-v1 (this client pauses request
+      // deadlines on the relay's hold notices).
+      ...(withRollover ? { "X-Zeros-Client-Features": `${CLIENT_TOKEN_ROLLOVER_FEATURE},${CARRIER_HOLD_FEATURE}`, "X-Zeros-Client-Instance": options!.clientInstance! } : {}),
       ...(input
         ? {
             "content-type": "application/json",

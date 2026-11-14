@@ -22,7 +22,7 @@ describe("§14.7: POST connect for a rolling-over peer", () => {
     const seen: Array<number | null> = [];
     await connectCloudV2Workspace(target, { wake: false, clientInstance: instance, notExpiringBefore: 1_234_567, presentedTokenExpiry: value => seen.push(value) });
     const headers = new Headers(fetch.mock.calls[0]![1].headers);
-    expect([headers.get("x-zeros-client-features"), headers.get("x-zeros-client-instance")]).toEqual(["client-token-rollover-v1", instance]);
+    expect([headers.get("x-zeros-client-features"), headers.get("x-zeros-client-instance")]).toEqual(["client-token-rollover-v1,carrier-hold-v1", instance]);
     expect(auth.getSession).toHaveBeenCalledWith({ notExpiringBefore: 1_234_567 });
     expect(seen).toEqual([1_900_000_000_000]);
   });
