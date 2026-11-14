@@ -56,6 +56,11 @@ export const CREATOR_AGENT_LOGINS_FEATURE = "creator-agent-logins-v1";
 /** §14.7: the desktop rolls its client token over on the SAME socket (CLOUD_CONNECTION_AUTH / RENEW / RENEWED). Sent as
  * X-Zeros-Client-Features on POST connect (with X-Zeros-Client-Instance) and offered as the subprotocol below. */
 export const CLIENT_TOKEN_ROLLOVER_FEATURE = "client-token-rollover-v1";
+/** carrier-hold-v1: the desktop pauses its request deadlines while the relay holds its socket across a worker-carrier
+ * redial. Advertised by the desktop on connect; the relay sends the two notices below only to such a socket. */
+export const CARRIER_HOLD_FEATURE = "carrier-hold-v1";
+/** The longest a single hold may last, and the most any one request's deadline is extended across holds. */
+export const CARRIER_HOLD_MAX_MS = 20_000;
 export const CLIENT_TOKEN_ROLLOVER_PROTOCOL = "zeros.cloud.v2.client-token-rollover-v1";
 const rolloverTime = z.number().int().nonnegative().max(8_640_000_000_000_000);
 const rolloverSchedule = { expiresAt: rolloverTime, refreshAt: rolloverTime, retryUntil: rolloverTime };
@@ -71,6 +76,15 @@ export const CloudConnectionRenewedFrameSchema = z.union([
   z.object({ type: z.literal("CLOUD_CONNECTION_RENEWED"), requestId: z.uuid(), ...rolloverSchedule }),
   z.object({ type: z.literal("CLOUD_CONNECTION_RENEWED"), requestId: z.uuid(), error: z.object({ code: CloudConnectionRenewRefusalSchema }) }),
 ]);
+/** Relay → desktop (carrier-hold-v1): the worker carrier is being redialled; this hold ends within remainingMs. A
+ * duration, never a wall-clock time (no cross-machine clock comparison). */
+export const CloudConnectionHoldFrameSchema = z.object({
+  type: z.literal("CLOUD_CONNECTION_HOLD"), remainingMs: z.number().int().positive().max(CARRIER_HOLD_MAX_MS),
+}).strict();
+/** Relay → desktop (carrier-hold-v1): the carrier is back and freshly admitted; buffered frames follow. A hold that fails
+ * ends with today's close instead. */
+export const CloudConnectionResumedFrameSchema = z.object({ type: z.literal("CLOUD_CONNECTION_RESUMED") }).strict();
+
 /** Activated: the worker serves an activated config's agentModels (the current Creator's selectable model ids) as each
  * agent's picker list. */
 export const CREATOR_AGENT_MODELS_FEATURE = "creator-agent-models-v1";

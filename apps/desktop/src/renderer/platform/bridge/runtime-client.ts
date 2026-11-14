@@ -1,5 +1,6 @@
 import { clearWorkspaceAccessEnded, reportWorkspaceAccessEnded, workspaceAccessScope } from "../team-sharing-registry";
-import { CLIENT_TOKEN_ROLLOVER_PROTOCOL, CloudConnectionAuthFrameSchema, CloudConnectionRenewedFrameSchema } from "@zeros/protocol/cloud-v2-relay";
+import { CARRIER_HOLD_MAX_MS, CLIENT_TOKEN_ROLLOVER_PROTOCOL, CloudConnectionAuthFrameSchema, CloudConnectionHoldFrameSchema, CloudConnectionRenewedFrameSchema,
+  CloudConnectionResumedFrameSchema } from "@zeros/protocol/cloud-v2-relay";
 import { cloudConnectBackoffKey, cloudConnectWaitMs, recordCloudConnectFailure, resetCloudConnectBackoff } from "./cloud-connect-backoff";
 // Shared desktop/Linux transport. Environment ports carry no workspace authority.
 import type { BridgeMessage } from "./messages";
@@ -274,6 +275,13 @@ interface PendingRequest {
   diagnostic: ReturnType<typeof requestDiagnostic>;
   scope?: CloudDiagnosticScope;
   startedAt: number;
+  /** carrier-hold-v1: the request's own deadline (performance.now) and what a held relay has already added to it. */
+  deadlineAt?: number;
+  onTimeout?: () => void;
+  extendedMs?: number;
+  /** While held: when this request was paused and how much of its own time was left then. */
+  pausedAt?: number;
+  remainingMs?: number;
 }
 
 interface QueuedRequest {
@@ -901,6 +909,7 @@ export class RuntimeClient {
   dispose(): void {
     this._disposed = true;
     this.cancelRollover();
+    if (this.carrierHold) { clearTimeout(this.carrierHold.timer); this.carrierHold = undefined; }
     this.clearCloudConnectWait();
     for (const finish of this.readyWaiters) finish(new Error("Client disposed"));
     if (this.connectionTargetExpiryTimer) {
@@ -1155,11 +1164,14 @@ export class RuntimeClient {
       };
 
       if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
-        pending.timer = setTimeout(() => {
+        pending.onTimeout = () => {
           this.cloudDiagnostic("request_failed", { ...pending.diagnostic, class: "timeout",
             elapsedMs: Math.round(performance.now() - pending.startedAt) }, pending.scope);
           rejectPending(new Error(`Request timeout: ${msg.type}`));
-        }, timeoutMs);
+        };
+        pending.deadlineAt = performance.now() + timeoutMs; pending.extendedMs = 0;
+        if (this.carrierHold) this.pauseRequest(pending, performance.now());
+        else pending.timer = setTimeout(pending.onTimeout, timeoutMs);
       }
       if (signal) {
         pending.onAbort = () => {
@@ -1216,6 +1228,8 @@ export class RuntimeClient {
   }
 
   private rejectInFlightSoftFail(): void {
+    // A hold that ends in a close rejects at once, as before.
+    if (this.carrierHold) { clearTimeout(this.carrierHold.timer); this.carrierHold = undefined; }
     // Called from onclose. Any request that was already on the wire
     // when the socket dropped — we can't replay safely (response id
     // is lost), so we reject with the soft-fail shape. Upstream retry
@@ -1377,12 +1391,59 @@ export class RuntimeClient {
     this.scheduleReconnect();
   }
 
+  // ── carrier-hold-v1: the relay holds this socket across a worker-carrier redial ──
+  private carrierHold?: { socket: RuntimeTransportSocket; timer: ReturnType<typeof setTimeout> };
+  /** Pause one request's own deadline. A hard stop still runs: its remaining time plus its unused extension budget, so no
+   * sequence of notices keeps it pending past its deadline plus CARRIER_HOLD_MAX_MS. */
+  private pauseRequest(pending: PendingRequest, now: number): void {
+    if (!pending.onTimeout || pending.deadlineAt === undefined || pending.pausedAt !== undefined) return;
+    const budget = CARRIER_HOLD_MAX_MS - (pending.extendedMs ?? 0);
+    if (budget <= 0) return;
+    if (pending.timer !== null) clearTimeout(pending.timer);
+    pending.remainingMs = Math.max(0, pending.deadlineAt - now); pending.pausedAt = now;
+    pending.timer = setTimeout(pending.onTimeout, pending.remainingMs + budget);
+  }
+  private resumeRequest(pending: PendingRequest, now: number): void {
+    if (pending.pausedAt === undefined || pending.remainingMs === undefined || !pending.onTimeout) return;
+    const paused = now - pending.pausedAt, allowed = Math.min(paused, CARRIER_HOLD_MAX_MS - (pending.extendedMs ?? 0));
+    pending.extendedMs = (pending.extendedMs ?? 0) + allowed;
+    const left = pending.remainingMs - (paused - allowed);
+    pending.pausedAt = undefined; pending.remainingMs = undefined;
+    if (pending.timer !== null) clearTimeout(pending.timer);
+    pending.deadlineAt = now + Math.max(0, left);
+    pending.timer = setTimeout(pending.onTimeout, Math.max(0, left));
+  }
+  private startCarrierHold(ws: RuntimeTransportSocket, remainingMs: number): void {
+    // One hold at a time: a repeated notice inside a hold restarts nothing.
+    if (this.carrierHold || ws !== this.ws) return;
+    const now = performance.now();
+    const timer = setTimeout(() => this.endCarrierHold(ws), Math.min(remainingMs, CARRIER_HOLD_MAX_MS));
+    this.carrierHold = { socket: ws, timer };
+    for (const pending of this.pendingRequests.values()) this.pauseRequest(pending, now);
+  }
+  private endCarrierHold(ws?: RuntimeTransportSocket): void {
+    const hold = this.carrierHold;
+    if (!hold || (ws && hold.socket !== ws)) return;
+    clearTimeout(hold.timer); this.carrierHold = undefined;
+    const now = performance.now();
+    for (const pending of this.pendingRequests.values()) this.resumeRequest(pending, now);
+  }
+
   /** §14.7: the relay's AUTH and RENEWED frames for the current socket; they never reach bridge listeners. */
   private handleRolloverFrame(ws: RuntimeTransportSocket, epoch: number, data: unknown): boolean {
     if (this.connectionTarget.kind !== "cloud" || typeof data !== "string" || data.length > 4096 || !data.includes("\"CLOUD_CONNECTION_")) return false;
     let frame: unknown;
     try { frame = JSON.parse(data); } catch { return false; }
     const type = (frame as { type?: unknown } | null)?.type;
+    if (type === "CLOUD_CONNECTION_HOLD") {
+      const hold = CloudConnectionHoldFrameSchema.safeParse(frame);
+      if (hold.success && epoch === this.connectionTargetEpoch) this.startCarrierHold(ws, hold.data.remainingMs);
+      return true;
+    }
+    if (type === "CLOUD_CONNECTION_RESUMED") {
+      if (CloudConnectionResumedFrameSchema.safeParse(frame).success) this.endCarrierHold(ws);
+      return true;
+    }
     if (type === "CLOUD_CONNECTION_AUTH") {
       const auth = CloudConnectionAuthFrameSchema.safeParse(frame);
       if (auth.success && this.renewCloudConnectionTicket) this.scheduleRollover(ws, epoch, auth.data, Number.NEGATIVE_INFINITY);
