@@ -83,6 +83,24 @@ describe("history-digest-deletions-v1 (worker half)", () => {
     expect(f.relay.tombstones()).toEqual([]);
   });
 
+  it.each([
+    { restored: false, restart: false }, { restored: false, restart: true },
+    { restored: true, restart: false }, { restored: true, restart: true },
+  ])("fences a server-deleted ID absent from local history (restored: $restored, restart: $restart)", async ({ restored, restart }) => {
+    const f = await setup(); cleanups.push(f.close);
+    f.state.restored = restored;
+    f.relay.softDeleted.add("remote-only");
+    expect(f.store.list().chats.map(chat => chat.id)).not.toContain("remote-only");
+    expect(f.store.list().chatDeletions).not.toContain("remote-only");
+    f.mirror.connect(); await f.mirror.flush();
+    expect(f.relay.tombstones()).toEqual([]);
+    const store = restart ? await SessionStore.open(f.dir, WORKSPACE_KEY) : f.store;
+    await expect(store.upsert({ id: "remote-only", folder: WORKSPACE_KEY, title: "Delayed renderer row" })).rejects.toThrow("deleted");
+    expect(store.list().chatDeletions).toContain("remote-only");
+    expect(store.list().chats.map(chat => chat.id).sort()).toEqual(["gone", "keep", "other"]);
+    expect(f.relay.softDeleted.has("remote-only")).toBe(true);
+  });
+
   it("an older checkpoint restored after the prune cannot resurrect the chat; unnamed chats are never deleted", async () => {
     const f = await setup(); cleanups.push(f.close);
     f.mirror.connect(); await f.mirror.flush();

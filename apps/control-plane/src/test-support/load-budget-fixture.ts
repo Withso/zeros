@@ -21,8 +21,8 @@ import { executionFixture } from "../cloud/execution/test-fixture.js";
 import { CloudV2BeginActiveReplySchema, type CloudV2MessageRow } from "../cloud/contract.js";
 import { CloudV2PromptPullReplySchema } from "../cloud/prompt-contract.js";
 import { sealPortToken } from "../cloud/worker-port-token.js";
-import { deferred, holdLoadStream, IDLE_WINDOW_MS, type LoadBudgetProbe } from "./load-budget.js";
-import { CENSUS_CAPTURE, censusSchedule, type CensusProfile } from "./load-budget-census.js";
+import { deferred, holdLoadStream, IDLE_WINDOW_MS, selectLoadRequests, type LoadBudgetProbe, type LoadScenario } from "./load-budget.js";
+import { CENSUS_CAPTURE, censusSchedule, type CensusOperation, type CensusProfile } from "./load-budget-census.js";
 
 // Counts supplied from Alpha. Unspecified stream/discovery counts contribute
 // one initial open/read each; these are a lower bound, not invented polling.
@@ -63,6 +63,11 @@ async function closeAll(cleanups: Array<() => Promise<void>>): Promise<void> {
     try { await cleanup(); } catch (error) { errors.push(error); }
   }
   if (errors.length) throw errors[0];
+}
+
+export function censusReplayCosts(cost: LoadScenario) {
+  const renewals = selectLoadRequests(cost, request => request.route === "/v2/cloud/worker/execution-leases/renew");
+  return { captured: { ...cost, requests: cost.requests.filter(request => !renewals.requests.includes(request)) }, renewals };
 }
 
 export async function loadBudgetFixture(pool: pg.Pool, probe: LoadBudgetProbe) {
@@ -197,6 +202,7 @@ export async function loadBudgetFixture(pool: pg.Pool, probe: LoadBudgetProbe) {
     const promptModule = await import(source(`${renderer}platform/cloud-prompt-api.ts`)) as {
       cloudPromptApi(target: { organizationId: string; workspaceId: string }, chatId: string): PromptClient };
     const { CLOUD_WORKER_FEATURES } = await import(source("apps/cloud-worker/src/worker-features.ts")) as { CLOUD_WORKER_FEATURES: string };
+    const { CONTEXT_RENEW_MS } = await import(source("apps/cloud-worker/src/sharing/execution-contexts.ts")) as { CONTEXT_RENEW_MS: number };
     const { CLOUD_V2_PROMPT_POLL_MS } = await import(source("packages/protocol/src/cloud-v2-prompts.ts")) as { CLOUD_V2_PROMPT_POLL_MS: number };
     const control = new deviceModule.DeviceControl({ fetch: fetcher, baseUrl: () => baseUrl, token: async () => desktopToken });
     const { device } = await control.register(randomUUID(), { requestId: randomUUID(), name: "Load fixture", capabilities: ["local-commands-v1", "local-commands-reason-v1"] });
@@ -489,6 +495,7 @@ export async function loadBudgetFixture(pool: pg.Pool, probe: LoadBudgetProbe) {
       // route-cost window. Global maintenance has separate scheduler coverage.
       await f.cp.loginChanges.stop();
       await security.start();
+      if (profile.state === "running") await renew();
       return {
         replay: async (wallClock = false) => {
           const streams: Array<() => Promise<void>> = [];
@@ -502,10 +509,16 @@ export async function loadBudgetFixture(pool: pg.Pool, probe: LoadBudgetProbe) {
             return holdLoadStream(response.body!, abort, path.startsWith(`${workspacePath}/events`) ? presenceClosed?.promise : undefined);
           };
           try {
-            for (const { operation, at } of censusSchedule(profile)) {
+            const schedule: Array<{ operation: CensusOperation | "renew"; at: number }> = censusSchedule(profile);
+            if (wallClock && profile.state === "running") {
+              for (let at = CONTEXT_RENEW_MS; at < CENSUS_CAPTURE.windowMs; at += CONTEXT_RENEW_MS) schedule.push({ operation: "renew", at });
+              schedule.sort((left, right) => left.at - right.at);
+            }
+            for (const { operation, at } of schedule) {
               await pace(at);
               await probe.at(at, async () => {
                 switch (operation) {
+                  case "renew": await renew(); break;
                   case "workspace": {
                     const reply = await desktop(workspacePath).then(json);
                     requireValue((reply.workspace as { id: string; state: string }).id === f.workspace.id &&

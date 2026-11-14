@@ -8,7 +8,7 @@ import { configuredDatabaseContext, SYSTEM_DATABASE_CONTEXT } from "./db-context
 import { requestTiming } from "./request-timing.js";
 import { resetMigratedTestDatabase } from "./test-database.js";
 import { backgroundBudgetTable, budgetTable, deferred, holdLoadStream, LOAD_BUDGETS, LoadBudgetProbe, routeTable, scenarioTotals, selectLoadRequests, type LoadScenario } from "./test-support/load-budget.js";
-import { loadBudgetFixture, loadBudgetReadFrame, OBSERVED_IDLE_REPLAY, R1_IDLE_REPLAY } from "./test-support/load-budget-fixture.js";
+import { censusReplayCosts, loadBudgetFixture, loadBudgetReadFrame, OBSERVED_IDLE_REPLAY, R1_IDLE_REPLAY } from "./test-support/load-budget-fixture.js";
 import { CENSUS_CAPTURE, CENSUS_PROFILES, CENSUS_ROUTES, censusCaptureTable } from "./test-support/load-budget-census.js";
 
 const database = process.env.TEST_DATABASE_URL ? describe : describe.skip;
@@ -283,6 +283,37 @@ database("control-plane load budgets through the router and PostgreSQL", () => {
 });
 
 database("captured app census replay", () => {
+  it("keeps the connected census live beyond its initial lease during the captured minute", async () => {
+    const pool = createPool(process.env.TEST_DATABASE_URL!, { maxConnections: 10 });
+    const probe = new LoadBudgetProbe(pool);
+    let fixture: Awaited<ReturnType<typeof loadBudgetFixture>> | undefined;
+    try {
+      fixture = await loadBudgetFixture(pool, probe);
+      const profile = CENSUS_PROFILES.find(profile => profile.state === "running")!;
+      const census = await fixture.census(profile);
+      const initial = (await pool.query<{ id: string; expires_at: Date }>(
+        "SELECT id,expires_at FROM cloud_v2_execution_contexts WHERE kind='client' AND state='active'",
+      )).rows;
+      expect(initial).toHaveLength(1);
+      const { cost } = await probe.measure(profile.name, () => census.replay(true));
+      expect((await pool.query("SELECT clock_timestamp()>$1::timestamptz AS crossed", [initial[0]!.expires_at])).rows[0].crossed).toBe(true);
+      expect(await census.verify()).toMatchObject({ state: "running", liveClients: 1, liveTurns: 0 });
+      const { captured, renewals } = censusReplayCosts(cost);
+      expect(renewals.requests).toHaveLength(5);
+      expect(renewals.requests.every(request => request.status === 200 && request.failures === 0 && request.inFlight === 0)).toBe(true);
+      expect(captured.requests).toHaveLength(profile.routes.reduce((sum, row) => sum + row.requests, 0));
+      expect(captured.background).toBe(cost.background);
+      expect(captured.backgroundOperations).toBe(cost.backgroundOperations);
+      const total = scenarioTotals(cost), app = scenarioTotals(captured), renewal = scenarioTotals(renewals);
+      for (const metric of ["requests", "queries", "statements", "transactions", "failures", "inFlight"] as const) {
+        expect(app[metric] + renewal[metric], metric).toBe(total[metric]);
+      }
+    } finally {
+      try { await fixture?.close(); }
+      finally { probe.close(); await pool.end(); vi.restoreAllMocks(); vi.unstubAllGlobals(); }
+    }
+  }, 90_000);
+
   it("rejects an expired client even while its context still says active", async () => {
     const pool = createPool(process.env.TEST_DATABASE_URL!, { maxConnections: 10 });
     const probe = new LoadBudgetProbe(pool);
@@ -396,8 +427,10 @@ database("load-budget workload", () => {
       fixture = await loadBudgetFixture(pool, probe);
       const census = await fixture.census(profile);
       const sample = await probe.measure(profile.name, () => census.replay(wallClock && wallProfile === profile.name));
-      scenarios.set(profile.name, sample.cost);
-      const routes = routeTable(sample.cost);
+      const { captured, renewals } = censusReplayCosts(sample.cost);
+      scenarios.set(profile.name, captured);
+      scenarios.set(`${profile.name}-renewals`, renewals);
+      const routes = routeTable(captured);
       expect(routes).toHaveLength(profile.routes.length);
       for (const row of profile.routes) {
         const identity = CENSUS_ROUTES[row.operation];

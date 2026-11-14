@@ -34,6 +34,7 @@ export const CENSUS_CAPTURE = {
     "GitHub uses gh.prSync with empty params, an authorized synthetic repository and no pull request",
     "Connect requests use wake:false and obtain tickets; they do not imply relay reconnects",
     "Requests are evenly spaced within the captured minute and compressed in CI",
+    "Paced connected replays keep the client live through the real worker renewal route at its source cadence; these measured costs are reported separately from captured app requests",
     "Workspace streams reconnect sequentially; device/auth streams stay open until the window ends",
     "Auth events resume at the snapshot cursor; unknown worker HTTP counts are not fabricated",
     "Setup mutation notifications are stopped and joined before measurement; global maintenance is outside this route replay",

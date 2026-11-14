@@ -157,7 +157,7 @@ export function renderCensus(report: LoadReport): string {
   return ["", `Captured app census: build ${CENSUS_CAPTURE.build}; one minute per profile. ${CENSUS_CAPTURE.scope}.`, "",
     `Counts-only source SHA-256: ${CENSUS_CAPTURE.sourceSha256}.`,
     ...CENSUS_PROFILES.map(profile => `${profile.name}: ${profile.capturedAt}.`), "",
-    "Captured Alpha transactions below are informational; replay costs are measured separately with assumed bodies. Unknown request counts stay unknown. Excluded traffic is not replayed.", "",
+    "Captured Alpha transactions below are informational; replay costs are measured separately with assumed bodies. Unknown request counts stay unknown. Paced connected replays report client keepalive renewals separately; they do not reproduce the unknown captured worker traffic.", "",
     "| Scenario | Route | Captured HTTP | Captured transactions | Replayed | Scope |",
     "| --- | --- | ---: | ---: | --- | --- |",
     ...censusCaptureTable().map(row => `| ${row.scenario} | ${row.method} ${row.route} | ${row.requests ?? "unknown"} | ${row.capturedTransactions} | ${row.replayed ? "yes" : "no"} | ${row.reason} |`), "",

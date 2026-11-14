@@ -93,11 +93,11 @@ export class HistoryMirror {
     if (epoch !== this.epoch || !this.online) return;
     if (stored) this.stampEpoch = epoch;
     // Explicit deletions survive checkpoint rollback; absence alone never deletes a live local chat.
-    if (deleted) for (const chat of this.store.list().chats) {
-      if (!deleted.has(chat.id)) continue;
-      await this.store.delete(chat.id);
+    const guarded = new Set(tombstones);
+    if (deleted) for (const chatId of deleted) {
+      if (!guarded.has(chatId)) await this.store.delete(chatId);
       if (epoch !== this.epoch || !this.online) return;
-      this.pending.delete(chat.id);
+      this.pending.delete(chatId);
     }
     // Keep the durable local guard against delayed upserts; server acknowledgement only suppresses its POST.
     for (const chatId of tombstones) {

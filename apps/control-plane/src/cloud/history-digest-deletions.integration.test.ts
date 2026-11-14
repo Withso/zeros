@@ -198,18 +198,23 @@ suite("negotiated history deletion reconciliation", () => {
     const checkpoint = await mkdtemp(join(tmpdir(), "history-deletions-checkpoint-"));
     cleanups.push(() => rm(checkpoint, { recursive: true, force: true }));
     await cp(native.directory, checkpoint, { recursive: true });
-    expect((await write({ chatDeletions: ["gone"] })).status).toBe(200);
+    expect((await write({ chatDeletions: ["gone", "remote-only"] })).status).toBe(200);
     await f.cp.store.writeHistory(f.own.id, { chatDeletions: ["other"] });
     const restored = await nativeMirror({ directory: checkpoint, restored: true, ids: ["unknown"] });
     expect(restored.store.list().chats.map(chat => chat.id).sort()).toEqual(["gone", "keep", "other", "unknown"]);
+    expect(restored.store.list().chatDeletions).not.toContain("remote-only");
     await restored.connect();
     expect(restored.reads()).toBe(1);
     expect(restored.deleted()).toEqual([]);
     expect(restored.replaced()).toEqual(["keep", "other", "unknown"]);
     expect(restored.frames.some(frame => frame.chats?.some(chat => chat.id === "gone"))).toBe(false);
     expect(restored.store.list().chats.map(chat => chat.id).sort()).toEqual(["keep", "other", "unknown"]);
-    expect(await (await read()).json()).toMatchObject({ deleted: ["gone"] });
+    expect(await (await read()).json()).toMatchObject({ deleted: ["gone", "remote-only"] });
     expect(await f.cp.store.windowMessages(f.workspace.id, "gone", 10)).toEqual([]);
+    expect(restored.store.list().chatDeletions.sort()).toEqual(["gone", "remote-only"]);
+    const reopened = await SessionStore.open(checkpoint, restored.key);
+    for (const store of [restored.store, reopened])
+      await expect(store.upsert({ id: "remote-only", folder: restored.key, title: "Delayed row" })).rejects.toThrow("deleted");
     for (const id of ["keep", "other", "unknown"])
       expect(await f.cp.store.windowMessages(f.workspace.id, id, 10)).toEqual(restored.store.history(id));
     await restored.reconnect();
