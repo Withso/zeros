@@ -40,7 +40,7 @@ database("execution leases and idle stop", () => {
     await setupDone(); await ageActivity();
     expect(await idle()).toBe(true);
     const { reply, clientId, handle } = await openClient();
-    expect(reply.features).toEqual(["relay-presence-v1"]);
+    expect(reply.features).toEqual(["relay-presence-v1", "connect-ready-v1"]);
     expect(handle.expiresAt - Date.now()).toBeLessThanOrEqual(30_000);
     await f.cp.store.stopIdle(f.workspace.id, before());
     expect((await f.cp.store.get(f.workspace.id, f.creator.id)).state).toBe("running");

@@ -68,10 +68,17 @@ database("current Creator availability survives missed notifications", () => {
   it("cannot replace a newer Creator map with a late replica's older snapshot", async () => {
     await config(); await f.login(f.admin, "cursor");
     const entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
-    const logins = f.cp.execution.deps.logins, read = logins.presentation.bind(logins);
-    vi.spyOn(logins, "presentation").mockImplementationOnce(async (...args) => {
-      const value = await read(...args); entered.resolve(); await release.promise; return value;
-    });
+    const logins = f.cp.execution.deps.logins, query = pg.Client.prototype.query;
+    let intercepted = false;
+    vi.spyOn(pg.Client.prototype, "query").mockImplementation(function (this: pg.Client, ...args: unknown[]) {
+      const result = Reflect.apply(query, this, args);
+      if (!intercepted && typeof args[0] === "string" && args[0].startsWith("SELECT w.login_revision::text,w.org_id,") &&
+          Array.isArray(args[1]) && args[1][0] === f.workspace.id) {
+        intercepted = true;
+        return Promise.resolve(result).then(async value => { entered.resolve(); await release.promise; return value; });
+      }
+      return result;
+    } as typeof query);
     const old = logins.refreshAvailability(f.workspace.id);
     try {
       await entered.promise;
