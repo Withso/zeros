@@ -40,11 +40,11 @@ export class CloudTeamSharing {
     if (!found.rowCount) throw teamNotFound();
   }
 
-  async documents(proofs: readonly TeamAdmission[], omitDenied = false, ownership = false) {
+  async documents(proofs: readonly TeamAdmission[], omitDenied = false, ownership = false, transaction?: Tx) {
     if (!proofs.length) return [];
-    const current = proofs.filter(proof => !proof.view.workspace.sourcePending);
-    const metadata = new Map((await this.github.metadata.documents(current.map(proof => proof.view.workspace))).map(row => [row.id,row]));
-    const flags = await withSystemTx(this.pool,async tx => {
+    const read = async (tx: Tx) => {
+      const current = proofs.filter(proof => !proof.view.workspace.sourcePending);
+      const metadata = new Map((await this.github.metadata.documents(current.map(proof => proof.view.workspace),undefined,tx)).map(row => [row.id,row]));
       const rows = (await tx.query<{ id: string; creator_revision: string; following: boolean; pinned: boolean; follower_ids: string[]; follower_count: string; execution_mode: string; can_execute: boolean }>(`SELECT w.id,w.creator_revision::text,w.execution_mode,coalesce(w.execution_mode='active' AND (w.state IN ('stopped','starting','creating') OR w.worker_boot_id=ANY(w.acting_user_boot_ids)),false) AS can_execute,
         EXISTS(SELECT 1 FROM cloud_v2_workspace_followers WHERE workspace_id=w.id AND user_id=$2) AS following,
         EXISTS(SELECT 1 FROM cloud_v2_workspace_pins WHERE workspace_id=w.id AND user_id=$2) AS pinned,
@@ -56,21 +56,22 @@ export class CloudTeamSharing {
         const view = allowed.get(row.id);
         if (view && (view.creatorRevision !== row.creator_revision || view.executionMode !== row.execution_mode)) throw teamUnavailable();
       }
-      return new Map(rows.filter(row => allowed.has(row.id) && (ownership || allowed.get(row.id)!.workspace.creatorUserId !== null))
-        .map(row => [row.id,{ row,view: allowed.get(row.id)! }]));
-    });
-    return proofs.filter(proof => flags.has(proof.view.workspace.id)).map(proof => {
-      const id = proof.view.workspace.id, { row,view } = flags.get(id)!, enriched = metadata.get(id);
-      return { ...view.workspace,...(enriched ? { repository: enriched.repository, checkoutPath: enriched.checkoutPath,
-        updatedAt: Date.parse(enriched.updatedAt) > Date.parse(view.workspace.updatedAt) ? enriched.updatedAt : view.workspace.updatedAt,
-        ...(enriched.github ? { github: enriched.github } : {}) } : {}),
-        teamSharing: 1 as const,createdByUserId: view.createdByUserId,viewerRole: view.role,
-        ...(ownership ? { teamOwnership: 1 as const,creatorRevision: view.creatorRevision,noCreatorReason: view.noCreatorReason,
-          canReassign: this.ownership.enabled && view.executionMode === "active" && view.role !== "member" } : {}),
-        ...(row.execution_mode === "active" ? { teamWriting: 1 as const, canExecute: row.can_execute } : {}),
-        readOnly: row.execution_mode === "active" ? !row.can_execute : view.role !== "creator",canManage: view.role !== "member",
-        following: row.following,pinned: row.pinned,followerIds: row.follower_ids,followerCount: Number(row.follower_count) };
-    });
+      const flags = new Map(rows.filter(row => allowed.has(row.id) && (ownership || allowed.get(row.id)!.workspace.creatorUserId !== null))
+          .map(row => [row.id,{ row,view: allowed.get(row.id)! }]));
+      return proofs.filter(proof => flags.has(proof.view.workspace.id)).map(proof => {
+        const id = proof.view.workspace.id, { row,view } = flags.get(id)!, enriched = metadata.get(id);
+        return { ...view.workspace,...(enriched ? { repository: enriched.repository, checkoutPath: enriched.checkoutPath,
+          updatedAt: Date.parse(enriched.updatedAt) > Date.parse(view.workspace.updatedAt) ? enriched.updatedAt : view.workspace.updatedAt,
+          ...(enriched.github ? { github: enriched.github } : {}) } : {}),
+          teamSharing: 1 as const,createdByUserId: view.createdByUserId,viewerRole: view.role,
+          ...(ownership ? { teamOwnership: 1 as const,creatorRevision: view.creatorRevision,noCreatorReason: view.noCreatorReason,
+            canReassign: this.ownership.enabled && view.executionMode === "active" && view.role !== "member" } : {}),
+          ...(row.execution_mode === "active" ? { teamWriting: 1 as const, canExecute: row.can_execute } : {}),
+          readOnly: row.execution_mode === "active" ? !row.can_execute : view.role !== "creator",canManage: view.role !== "member",
+          following: row.following,pinned: row.pinned,followerIds: row.follower_ids,followerCount: Number(row.follower_count) };
+      });
+    };
+    return transaction ? read(transaction) : withSystemTx(this.pool,read);
   }
 
   async document(proof: TeamAdmission, ownership = false) {
@@ -111,11 +112,11 @@ export class CloudTeamSharing {
     const key = teamCursorKey([user.id,query.organizationId,query.creator ?? null,!!query.mine,!!query.following,!!query.pinned,query.repositoryId ?? null,query.archived,
       ...(ownership ? [true] : [])]);
     const cursor = readTeamCursor(query.cursor,key);
-    const rows = await withSystemTx(this.pool,async tx => {
+    const { rows,proofs } = await withSystemTx(this.pool,async tx => {
       await this.organization(tx,query.organizationId,user);
       if (query.creator === "none" && !(await tx.query("SELECT 1 FROM organization_members WHERE org_id=$1 AND user_id=$2 AND role IN ('owner','admin')", [query.organizationId,user.id])).rowCount)
         throw teamOwnershipDenied();
-      return (await tx.query<{ id: string; at: string }>(`SELECT w.id,to_char(w.created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS at
+      const rows = (await tx.query<{ id: string; at: string }>(`SELECT w.id,to_char(w.created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS at
         FROM cloud_v2_workspaces w JOIN organization_members m ON ${TEAM_MEMBER}
         WHERE w.org_id=$1 AND w.state<>'deleted' AND ${CLOUD_V2_LIVE_ACCESS}
           AND (NOT w.source_pending OR w.creator_user_id=$2)
@@ -130,13 +131,18 @@ export class CloudTeamSharing {
           AND ($8::timestamptz IS NULL OR w.created_at<$8 OR (w.created_at=$8 AND w.id>$9::uuid))
         ORDER BY w.created_at DESC,w.id LIMIT $10`,[query.organizationId,user.id,query.mine ? user.id : query.creator === "none" ? null : query.creator ?? null,
         !!query.following,!!query.pinned,query.repositoryId ?? null,query.archived,cursor?.at ?? null,cursor?.id ?? null,query.limit+1,ownership,query.creator === "none"])).rows;
+      return { rows,proofs: await this.authority.admitMany(rows.slice(0,query.limit).map(row => row.id),user,false,tx) };
     });
-    const selected = rows.slice(0,query.limit), proofs = await this.authority.admitMany(selected.map(row => row.id),user);
+    const selected = rows.slice(0,query.limit);
     // Keep page order independent of the batched SQL's plan and row order.
     const positions = new Map(selected.map((row,index) => [row.id,index]));
     proofs.sort((a,b) => positions.get(a.view.workspace.id)!-positions.get(b.view.workspace.id)!);
-    await withSystemTx(this.pool,tx => this.organization(tx,query.organizationId,user));
-    const workspaces = await this.documents(proofs,true,ownership);
+    const workspaces = await withSystemTx(this.pool,async tx => {
+      const documents = await this.documents(proofs,true,ownership,tx);
+      // Empty pages also need a final session, membership and Hold check.
+      await this.organization(tx,query.organizationId,user);
+      return documents;
+    });
     const last = selected.at(-1);
     return { workspaces,teamSharing: 1 as const,...(ownership ? { teamOwnership: 1 as const } : {}),nextCursor: rows.length>query.limit && last ? writeTeamCursor(key,last.at,last.id) : null };
   }

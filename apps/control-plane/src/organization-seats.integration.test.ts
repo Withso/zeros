@@ -164,6 +164,23 @@ d("Pro organization seats", () => {
     });
   });
 
+  it("answers seat and Hold reads without reopening plan tables", async () => {
+    for (let n = 1; n <= 6; n++) await member(`free-${n}`, 100 - n);
+    const blocker = await pool.connect();
+    await blocker.query("BEGIN; LOCK TABLE account_entitlements, staff_pro_benefits IN ACCESS EXCLUSIVE MODE");
+    try {
+      const result = await withSystemTx(pool, async tx => {
+        await tx.query("SET LOCAL lock_timeout='200ms'");
+        const seats = await organizationMemberSeats(tx, org);
+        const held = await tx.query<{ held: boolean }>("SELECT organization_member_on_hold($1,$2,10,5) AS held", [org,id("free-6")]);
+        return { seats, held: held.rows[0]?.held };
+      });
+      expect(result.seats.get(id("owner"))).toBe("pro");
+      expect(result.seats.get(id("free-5"))).toBe("free");
+      expect(result.held).toBe(true);
+    } finally { await blocker.query("ROLLBACK"); blocker.release(); }
+  });
+
   it("queues a lapsed member behind members already free and releases them when a seat opens", async () => {
     await member("lapsed", 150, { pro: true });
     for (let n = 1; n <= 5; n++) await member(`free-${n}`, 100 - n);

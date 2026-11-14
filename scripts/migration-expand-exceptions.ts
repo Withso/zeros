@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 // Each reviewed migration lists its exact exempted statements by rule.
 const reviewed: Readonly<Record<string, Readonly<Record<string, readonly string[]>>>> = {
+  "0249_organization_seat_state.sql": {},
   "0248_cloud_push_signals.sql": {},
   "0247_cloud_membership_access.sql": {},
   "0246_cloud_team_ownership.sql": {},
@@ -540,6 +541,21 @@ const cloudPushSignalsDigests: Readonly<Record<string, readonly string[]>> = {
   "catalog-notification-channel": ["976954fcbaadbb9bd483ab049b34bfb12a6db5ab71ea6b88f4179c06e850dd1d"],
   "privilege-tightening": ["af0d8ba056b2a04ee390886ef057732b2e0ace426122847922fcef3d028ce504"],
 };
+const organizationSeatStateDigests: Readonly<Record<string, readonly string[]>> = {
+  "privilege-tightening": [
+    "9f9f228180ab38795ee1df6de07ada3249d5e94f39de1126941790ba6eb55b51",
+    "1d791e58bfe187af2d205aaf3a846360616eeb9b331565b739b5c94e83ce1abe",
+    "edb77ed74a2c3fb20586bab795bd8d49ac9bbca1381fad7a4c52e85f1e6c3477",
+    "c2c0b6576a23c399143944742c2e08fbe70686ef4b5177ac30884605523e53a9",
+    "0f645e32b8c0867a45733b9bcc7fb606655b8d1351e48c061b85b0102d8d3141",
+  ],
+  "seat-projection-refresh": ["3e01db04557b8d34ac9c9c6d1ba4cc6373eb230002ad689b5431738070c3ebde"],
+  "seat-trigger-order": ["6ef9e7a9004f7e6bd9cd4115e8e9172489732ccd9bd968eb0615a1fe0c6a0649"],
+  "stored-seat-read": [
+    "2e87af29a12ce04c2f26808b016639293bd16bdf042f073c1944c80867645247",
+    "b20fbba574bf3ae9904de355ca772c1a4a3b0844204e74323ed9a57f8371dafc",
+  ],
+};
 const cloudMembershipAccessDigests: Readonly<Record<string, readonly string[]>> = {
   "optional-source-fingerprint": [
     "dbeaf0af340842ca6f74aa4f832f4a6e5d6b14e6d9aad5b5f74be3c8a7021d51"
@@ -607,6 +623,7 @@ export function applyReviewedExpandExceptions(file: string, sql: string): string
     const rule = annotations[0]![1]!;
     const statement = text.replace(/\r\n/g, "\n").trim();
     const allowed = exact[rule]?.includes(statement) ||
+      (file === "0249_organization_seat_state.sql" && organizationSeatStateDigests[rule]?.includes(createHash("sha256").update(statement).digest("hex"))) ||
       (file === "0248_cloud_push_signals.sql" && cloudPushSignalsDigests[rule]?.includes(createHash("sha256").update(statement).digest("hex"))) ||
       (file === "0247_cloud_membership_access.sql" && cloudMembershipAccessDigests[rule]?.includes(createHash("sha256").update(statement).digest("hex"))) ||
       (file === "0246_cloud_team_ownership.sql" && cloudTeamOwnershipDigests[rule]?.includes(createHash("sha256").update(statement).digest("hex"))) ||

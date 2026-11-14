@@ -76,8 +76,9 @@ export class CloudTeamAuthority {
     return view;
   }
 
-  async admitMany(ids: readonly string[], user: AuthedUser, _fresh = false): Promise<TeamAdmission[]> {
-    const views = await withSystemTx(this.pool,tx => this.snapshots(tx,ids,user));
+  async admitMany(ids: readonly string[], user: AuthedUser, _fresh = false, transaction?: Tx): Promise<TeamAdmission[]> {
+    const read = (tx: Tx) => this.snapshots(tx,ids,user);
+    const views = await (transaction ? read(transaction) : withSystemTx(this.pool,read));
     return [...views.values()].map(view => ({ user,view,source: null }));
   }
 
