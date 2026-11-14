@@ -13,7 +13,7 @@ export type WindowOptions = { limit?: number; before?: number; beforeMsgId?: str
 type Row = { ord: string; msg_id: string; kind: string; payload: string; created_at_ms: string };
 const columns = "ord, msg_id, kind, payload, created_at_ms";
 const persisted = (row: Row): CloudV2MessageRow => ({ msgId: row.msg_id, kind: row.kind, payload: row.payload, createdAt: Number(row.created_at_ms) });
-const user = (row: Pick<Row, "kind" | "payload">, openingOnly = false): boolean => {
+export const isUserMessage = (row: Pick<Row, "kind" | "payload">, openingOnly = false): boolean => {
   if (row.kind !== "text") return false;
   try { const value = JSON.parse(row.payload); return value?.role === "user" && (!openingOnly || value.steeredTurnId == null); }
   catch { return false; }
@@ -25,7 +25,7 @@ export async function mirrorMessageWindow(tx: Tx, workspaceId: string, chatId: s
   const state = parsed.success ? { historyState: parsed.data } : {};
   const result = { ...await mirrorMessageRows(tx, workspaceId, chatId, options), ...state };
   if (!options.includeSenders) return result;
-  const ids = [...result.messages, ...(result.turnOpening ? [result.turnOpening] : [])].filter(row => user(row)).map(row => row.msgId);
+  const ids = [...result.messages, ...(result.turnOpening ? [result.turnOpening] : [])].filter(row => isUserMessage(row)).map(row => row.msgId);
   return { ...result, senders: await mirrorMessageSenders(tx, workspaceId, chatId, ids) };
 }
 
@@ -65,35 +65,46 @@ async function mirrorMessageRows(tx: Tx, workspaceId: string, chatId: string, op
      ${cursor ? "AND ord<$4" : ""} ORDER BY ord DESC LIMIT $3`, [workspaceId, chatId, count, ...(cursor ? [cursor] : [])])).rows;
   const rows = await newest(cap, before);
   let oldest = rows.at(-1);
-  if (!paged && oldest && !user(oldest) && rows.length < 1000) {
+  if (!paged && oldest && !isUserMessage(oldest) && rows.length < 1000) {
     const extra = await newest(1000 - rows.length, oldest.ord);
-    let opening = extra.findIndex(row => user(row, true));
-    if (opening < 0) opening = extra.findIndex(row => user(row));
+    let opening = extra.findIndex(row => isUserMessage(row, true));
+    if (opening < 0) opening = extra.findIndex(row => isUserMessage(row));
     if (opening >= 0) rows.push(...extra.slice(0, opening + 1));
     oldest = rows.at(-1);
   }
   const result: MessageWindow = { messages: rows.map(persisted).reverse() };
-  if (!paged && oldest && !user(oldest)) {
+  if (!paged && oldest && !isUserMessage(oldest)) {
     // A turn larger than the 1,000-row budget keeps a separate opening. Only
     // that row crosses the DB boundary; malformed legacy payloads are inert.
-    for (const openingOnly of [true, false]) {
-      const { rows: anchors } = await tx.query<Row>(
-        `SELECT ${columns} FROM cloud_v2_messages WHERE workspace_id=$1 AND chat_id=$2 AND ord<$3 AND kind='text'
-         AND (CASE WHEN payload IS JSON OBJECT THEN payload::jsonb END)->>'role'='user'
-         ${openingOnly ? "AND (CASE WHEN payload IS JSON OBJECT THEN payload::jsonb END)->>'steeredTurnId' IS NULL" : ""}
-         ORDER BY ord DESC LIMIT 1`, [workspaceId, chatId, oldest.ord]);
-      if (anchors[0]) { result.turnOpening = persisted(anchors[0]); break; }
-    }
+    const opening = await mirrorTurnOpening(tx, workspaceId, chatId, oldest.ord);
+    if (opening) result.turnOpening = opening;
   }
   return result;
 }
 
-export const HISTORY_OPS = ["chats.list", "messages.window", "messages.windowOlder", "messages.search"] as const;
+export async function mirrorTurnOpening(tx: Tx, workspaceId: string, chatId: string, before: string): Promise<CloudV2MessageRow | undefined> {
+  for (const openingOnly of [true, false]) {
+    const { rows: anchors } = await tx.query<Row>(
+        `SELECT ${columns} FROM cloud_v2_messages WHERE workspace_id=$1 AND chat_id=$2 AND ord<$3 AND kind='text'
+         AND (CASE WHEN payload IS JSON OBJECT THEN payload::jsonb END)->>'role'='user'
+         ${openingOnly ? "AND (CASE WHEN payload IS JSON OBJECT THEN payload::jsonb END)->>'steeredTurnId' IS NULL" : ""}
+         ORDER BY ord DESC LIMIT 1`, [workspaceId, chatId, before]);
+    if (anchors[0]) return persisted(anchors[0]);
+  }
+}
+
+export const HISTORY_OPS = ["chats.list", "messages.window", "messages.windowOlder", "messages.search", "messages.range", "messages.since"] as const;
 const HistorySchema = z.object({ op: z.enum(HISTORY_OPS), params: z.record(z.string(), z.unknown()).default({}) }).strict();
 const SharingHistorySchema = HistorySchema.extend({ op: z.enum([...HISTORY_OPS, "messages.senders"]) });
 const id = z.string().min(1).max(256);
+const cacheId = id.refine(value => !value.includes("\0"));
+const counter = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
+const RangeSchema = z.object({ chatId: cacheId, fromIndex: counter, toIndex: counter }).strict()
+  .refine(value => value.fromIndex <= value.toIndex && value.toIndex - value.fromIndex <= 500);
+const SinceSchema = z.object({ chatId: cacheId, revision: counter }).strict();
 const SendersSchema = z.object({ chatId: id, userMessageIds: z.array(id).min(1).max(200) }).strict();
-export async function readCloudV2SharingHistory(store: Pick<CloudV2Store, "listChats" | "messageWindow" | "searchMessages" | "messageSenders">,
+export type HistoryStore = Pick<CloudV2Store, "listChats" | "messageWindow" | "searchMessages" | "messageRange" | "messageSince">;
+export async function readCloudV2SharingHistory(store: HistoryStore & Pick<CloudV2Store, "messageSenders">,
   workspaceId: string, request: unknown): Promise<unknown> {
   const parsed = SharingHistorySchema.safeParse(request);
   if (!parsed.success) throw new HttpError(400, "invalid_request", "Unsupported history read");
@@ -106,7 +117,7 @@ export async function readCloudV2SharingHistory(store: Pick<CloudV2Store, "listC
   return readCloudV2History(store, workspaceId, parsed.data, { includeSenders: true });
 }
 
-export async function readCloudV2History(store: Pick<CloudV2Store, "listChats" | "messageWindow" | "searchMessages">,
+export async function readCloudV2History(store: HistoryStore,
   workspaceId: string, request: unknown, options: { includeSenders?: boolean } = {}): Promise<unknown> {
   const parsed = HistorySchema.safeParse(request);
   if (!parsed.success) throw new HttpError(400, "invalid_request", "Unsupported history read");
@@ -120,7 +131,17 @@ export async function readCloudV2History(store: Pick<CloudV2Store, "listChats" |
       throw error;
     }
   }
-  if (op === "chats.list") return options.includeSenders ? store.listChats(workspaceId, true) : store.listChats(workspaceId);
+  if (op === "chats.list") return store.listChats(workspaceId, !!options.includeSenders, true);
+  if (op === "messages.range") {
+    const range = RangeSchema.safeParse(params);
+    if (!range.success) throw new HttpError(400, "invalid_request", "Invalid message range");
+    return store.messageRange(workspaceId, range.data.chatId, range.data.fromIndex, range.data.toIndex);
+  }
+  if (op === "messages.since") {
+    const since = SinceSchema.safeParse(params);
+    if (!since.success) throw new HttpError(400, "invalid_request", "Invalid history revision");
+    return store.messageSince(workspaceId, since.data.chatId, since.data.revision);
+  }
   const chatId = id.safeParse(params.chatId);
   if (!chatId.success) throw new HttpError(400, "invalid_request", "chatId is required");
   const limit = z.number().finite().catch(200).parse(params.limit);

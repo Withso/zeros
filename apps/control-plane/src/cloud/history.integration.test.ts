@@ -91,7 +91,7 @@ suite("offline native history paging", () => {
   it("keeps native identities and creator authorization at the HTTP boundary", async () => {
     await mirror("native-chat", [row("u", "user")]);
     expect(await (await read("chats.list")).json()).toEqual({ result: {
-      chats: [{ id: "native-chat", folder: "/home/user/Owner/Project" }], chatDeletions: [],
+      chats: [{ id: "native-chat", folder: "/home/user/Owner/Project", historyCache: { revision: expect.any(Number), messageCount: 1 } }], chatDeletions: [],
     } });
     expect(await (await read("messages.window", { chatId: "cloud:org:ws:native-chat" })).json()).toEqual({ result: { messages: [] } });
     expect((await read("messages.window", { chatId: "native-chat" }, randomUUID())).status).toBe(404);

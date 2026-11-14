@@ -1082,6 +1082,32 @@ Older workers keep the original digest reply, including deleted rows with null
 digests. Their ordinary chat upsert can still revive a deleted row; the new
 worker avoids that resend after an explicit deletion reply.
 
+Cloud transcript caching uses the same passive HTTP history route and current
+viewer authority. `chats.list` supplies per-chat `historyCache: {revision, messageCount}`;
+this revision is separate from the transcript-cut `historyState.revision`.
+`messages.range` reads a contiguous, half-open range of at most 500 native rows
+with dense, zero-based indexes. `messages.since` returns all final append/edit
+changes from an exact revision, or `resync: true` after a cut, deletion,
+recreation, unknown base or more than 500 changes. Rows, counts and revisions
+come from one snapshot. Database triggers observe older replicas' writes and
+retention as well as current worker mirroring; identical replay is inert.
+The cache stores message counts after a chat's first tracked message write.
+Older untouched histories use an indexed count until then; migration does not
+scan or backfill their messages. Counts change with the same transaction as
+the rows, including mixed inserts/updates and deletes from older writers.
+Confirmed chat deletion returns `404 chat_not_found`. Cache reads never wake
+the VM or report activity, and saved rows do not grant execution authority.
+
+Receipt caching opts into `GET .../prompts` with `X-Zeros-Chat-Cache: 1` and
+`includePayload=true`. This returns only the caller's receipts, with a chat's
+numeric `queueRevision`. Begin at `after=0` without a revision; each later page
+must pin the first page's revision. Status, payload, retention or epoch changes
+return `409 queue_changed`, so the reader restarts the incomplete refresh.
+Without the header, the existing live response is unchanged. An older server's
+response without a revision cannot populate the receipt cache. Account or
+workspace access loss retires cached material; temporary unavailability keeps
+the last confirmed view marked as cached.
+
 Chat search uses the connected worker when available and the HTTP history
 mirror while the VM sleeps, without waking it. Search is scoped to the selected
 workspace or conversation. Local, the worker and the mirror share literal

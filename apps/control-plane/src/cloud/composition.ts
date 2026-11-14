@@ -21,7 +21,7 @@ import { CloudV2ComputerBuilder, CloudV2Computers } from "./computer.js";
 import { createCloudGithubServices } from "./github-composition.js";
 import { CLOUD_V2_READY_CHANNEL } from "./worker-ready.js";
 import { hydrateCloudRepository, type CloudSourceProof, type CloudSourceTarget } from "./source-authority.js";
-import { HISTORY_OPS, readCloudV2History } from "./history.js";
+import { HISTORY_OPS, readCloudV2History, type HistoryStore } from "./history.js";
 import { CLOUD_V2_HOME, CLOUD_V2_LIFECYCLE_CHANNEL, CloudV2Lifecycle, type CloudV2TimingRecord } from "./lifecycle.js";
 import { cloudV2CheckpointStorage, openCheckpointKey, sealCheckpointKey } from "./checkpoint.js";
 import { runtimeStorageClient } from "./runtime-source.js";
@@ -89,7 +89,7 @@ export async function cloudV2AgentConfig(logins: { codex?: Login; claude?: Login
 }
 
 /** Bridge history reads answered from the mirror while the VM is stopped. */
-export async function answerCloudV2Offline(store: Pick<CloudV2Store, "listChats" | "messageWindow" | "searchMessages">,
+export async function answerCloudV2Offline(store: HistoryStore,
   workspace: CloudV2Workspace, frame: unknown): Promise<unknown | null> {
   const request = frame as { type?: unknown; id?: unknown; op?: unknown; params?: Record<string, unknown> } | null;
   if (request?.type !== "WORKSPACE_REQUEST" || typeof request.id !== "string" || typeof request.op !== "string") return null;
