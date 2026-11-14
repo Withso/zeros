@@ -745,3 +745,32 @@ describe("boot-timings-v1 (one wake on one timing line)", () => {
     await expect.poll(() => lines.some(line => /^boot listener-failed reason=missing uptime=\d+ boot=[0-9a-f-]{36}$/.test(line))).toBe(true);
   });
 });
+
+describe("runtime update request deadlines", () => {
+  it("a stage gets the same bounded deadline as prepare (it awaits verify+publish), ready 30 s, the rest 10 s", async () => {
+    const { runtimeRequestTimeoutMs } = await import("../hybrid-transport");
+    expect(runtimeRequestTimeoutMs("stage")).toBe(310_000);
+    expect(runtimeRequestTimeoutMs("prepare")).toBe(310_000);
+    expect(runtimeRequestTimeoutMs("ready")).toBe(30_000);
+    for (const op of ["status", "commit", "activate", "cancel"] as const) expect(runtimeRequestTimeoutMs(op)).toBe(10_000);
+  });
+
+  it("a stage request stays bounded and still aborts on Stop", async () => {
+    const f = await fixture();
+    const controller = new AbortController();
+    let aborted = false, started!: () => void;
+    const fetching = new Promise<void>(resolve => { started = resolve; });
+    const original = vi.mocked(f.fetcher).getMockImplementation()!;
+    vi.mocked(f.fetcher).mockImplementation(async (url, init) => new URL(String(url)).pathname.endsWith("/runtime")
+      ? new Promise<Response>((_resolve, reject) => {
+        started();
+        init?.signal?.addEventListener("abort", () => { aborted = true; reject(new Error("aborted")); }, { once: true });
+      })
+      : original(url, init));
+    const staging = f.transport.runtimeUpdate({ op: "stage" }, controller.signal);
+    await fetching;
+    controller.abort();
+    await expect(staging).rejects.toThrow();
+    expect(aborted).toBe(true);
+  });
+});

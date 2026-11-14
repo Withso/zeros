@@ -44,6 +44,12 @@ const decodesContext = (path: string) => isContextPath(path) || path === "prompt
 
 /** Live frames use authenticated loopback sockets. Durable control traffic
  * uses HTTPS independently, so it survives the final app disconnect. */
+/** prepare and stage await a bounded verified preparation on the control plane (stage B took 22.7 s on Development); ready
+ * waits for promotion; everything else is a quick state read or transition. Stop still aborts each through its signal. */
+export function runtimeRequestTimeoutMs(op: CloudRuntimeUpdateRequest["op"]): number {
+  return op === "prepare" || op === "stage" ? 310_000 : op === "ready" ? 30_000 : 10_000;
+}
+
 export class HybridTransport implements Transport {
   readonly bootId: string;
   private runtimeReady = false;
@@ -252,7 +258,7 @@ export class HybridTransport implements Transport {
     finally { this.promptPolls.delete(controller); }
   }
   async runtimeUpdate(input: CloudRuntimeUpdateRequest, signal?: AbortSignal): Promise<CloudRuntimeUpdateReply> {
-    return CloudRuntimeUpdateReplySchema.parse(await this.request("runtime", input, signal, input.op === "prepare" ? 310_000 : input.op === "ready" ? 30_000 : 10_000));
+    return CloudRuntimeUpdateReplySchema.parse(await this.request("runtime", input, signal, runtimeRequestTimeoutMs(input.op)));
   }
   /** recovery-quiesce-v1: seal or confirm a recovery binding. A 409 recovery_binding_changed rejects (the worker stays frozen). */
   async recovery(input: CloudRecoveryRequest, signal?: AbortSignal): Promise<CloudRecoveryReply> {
