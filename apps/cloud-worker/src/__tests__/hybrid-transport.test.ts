@@ -716,12 +716,29 @@ describe("boot-timings-v1 (one wake on one timing line)", () => {
   it("a failed timing batch never reconnects or re-registers", async () => {
     const f = await fixture({ config: { bootTimings: 1 } });
     await expect.poll(() => timings(f).length).toBe(1);
-    vi.mocked(f.fetcher).mockImplementationOnce(async () => new Response(null, { status: 503 }));
-    await connectRelay(f);
-    await f.transport.send({ t: "idle", idle: false });
-    await expect.poll(() => f.requests.some(request => request.path === "activity")).toBe(true);
-    expect(f.requests.filter(request => request.path === "hello")).toHaveLength(1);
-    expect(f.requests.filter(request => request.path === "config")).toHaveLength(0);
+    let releaseTiming!: () => void, timingReadStarted!: () => void;
+    const timingToken = new Promise<string>(resolve => { releaseTiming = () => resolve("synthetic-worker-token"); });
+    const timingRead = new Promise<void>(resolve => { timingReadStarted = resolve; });
+    // Independent token reads may let activity reach fetch before the timing batch.
+    vi.spyOn(workerToken, "readWorkerToken").mockImplementationOnce(() => { timingReadStarted(); return timingToken; });
+    const failures: string[] = [];
+    const fetcher = vi.mocked(f.fetcher).getMockImplementation()!;
+    vi.mocked(f.fetcher).mockImplementation(async (url, init) => {
+      if (new URL(String(url)).pathname !== "/v2/cloud/worker/timing") return fetcher(url, init);
+      failures.push(new URL(String(url)).pathname.split("/").at(-1)!);
+      return new Response(null, { status: 503 });
+    });
+    try {
+      await connectRelay(f); await timingRead;
+      await f.transport.send({ t: "idle", idle: false });
+      await expect.poll(() => vi.mocked(f.fetcher).mock.calls.some(([url]) => new URL(String(url)).pathname.endsWith("/activity"))).toBe(true);
+      releaseTiming();
+      await expect.poll(() => vi.mocked(f.fetcher).mock.calls.filter(([url]) => new URL(String(url)).pathname.endsWith("/timing"))).toHaveLength(2);
+      expect(failures).toEqual(["timing"]);
+      expect(f.requests.some(request => request.path === "activity")).toBe(true);
+      expect(f.requests.filter(request => request.path === "hello")).toHaveLength(1);
+      expect(f.requests.filter(request => request.path === "config")).toHaveLength(0);
+    } finally { releaseTiming(); }
   });
 
   it("tells the first accepted relay apart from refusals before it", async () => {
