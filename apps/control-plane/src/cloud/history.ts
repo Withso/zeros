@@ -74,8 +74,7 @@ async function mirrorMessageRows(tx: Tx, workspaceId: string, chatId: string, op
   }
   const result: MessageWindow = { messages: rows.map(persisted).reverse() };
   if (!paged && oldest && !isUserMessage(oldest)) {
-    // A turn larger than the 1,000-row budget keeps a separate opening. Only
-    // that row crosses the DB boundary; malformed legacy payloads are inert.
+    // A turn larger than the 1,000-row budget keeps a separate opening.
     const opening = await mirrorTurnOpening(tx, workspaceId, chatId, oldest.ord);
     if (opening) result.turnOpening = opening;
   }
@@ -84,12 +83,20 @@ async function mirrorMessageRows(tx: Tx, workspaceId: string, chatId: string, op
 
 export async function mirrorTurnOpening(tx: Tx, workspaceId: string, chatId: string, before: string): Promise<CloudV2MessageRow | undefined> {
   for (const openingOnly of [true, false]) {
-    const { rows: anchors } = await tx.query<Row>(
+    let cursor = before;
+    for (;;) {
+      // Native JSON can exceed jsonb's Unicode or numeric domain. Keep those
+      // candidates opaque and classify them with the worker's parser.
+      const { rows: [anchor] } = await tx.query<Row>(
         `SELECT ${columns} FROM cloud_v2_messages WHERE workspace_id=$1 AND chat_id=$2 AND ord<$3 AND kind='text'
-         AND (CASE WHEN payload IS JSON OBJECT THEN payload::jsonb END)->>'role'='user'
-         ${openingOnly ? "AND (CASE WHEN payload IS JSON OBJECT THEN payload::jsonb END)->>'steeredTurnId' IS NULL" : ""}
-         ORDER BY ord DESC LIMIT 1`, [workspaceId, chatId, before]);
-    if (anchors[0]) return persisted(anchors[0]);
+         AND CASE WHEN pg_input_is_valid(payload,'jsonb') THEN
+           payload::jsonb->>'role'='user' ${openingOnly ? "AND payload::jsonb->>'steeredTurnId' IS NULL" : ""}
+         ELSE payload IS JSON OBJECT END
+         ORDER BY ord DESC LIMIT 1`, [workspaceId, chatId, cursor]);
+      if (!anchor) break;
+      if (isUserMessage(anchor, openingOnly)) return persisted(anchor);
+      cursor = anchor.ord;
+    }
   }
 }
 

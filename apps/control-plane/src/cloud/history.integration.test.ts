@@ -70,6 +70,7 @@ suite("offline native history paging", () => {
     const cases = [
       [row("u", "user"), ...Array.from({ length: 20 }, (_, i) => row(`a${i}`))],
       [row("u", "user"), ...Array.from({ length: 1100 }, (_, i) => row(`a${i}`))],
+      [row("opaque-u", "user", { text: "\0" }), ...Array.from({ length: 1100 }, (_, i) => row(`a${i}`))],
       [row("u", "user"), ...Array.from({ length: 1050 }, (_, i) => row(`a${i}`)), row("steer", "user", { steeredTurnId: "turn" }), row("last")],
       [{ msgId: "bad", kind: "text", payload: "{not json", createdAt: 1 }, row("a")],
     ];

@@ -15,6 +15,11 @@ suite("passive cloud chat cache through PostgreSQL and HTTP", () => {
   beforeEach(async () => { f = await teamSharingFixture(pool); });
   const row = (msgId: string, text = msgId): CloudV2MessageRow => ({ msgId, kind: "text", createdAt: 1,
     payload: JSON.stringify({ id: msgId, kind: "text", role: "assistant", text, createdAt: 1 }) });
+  const opaquePayloads = [
+    ["escaped NUL", JSON.stringify({ role: "user", text: "\0" })],
+    ["unpaired surrogate", JSON.stringify({ role: "user", text: "\ud800" })],
+    ["large exponent", '{"role":"user","text":"Opening","value":1e1000000}'],
+  ] as const;
   const path = () => `/v1/cloud-v2/workspaces/${f.workspace.id}`;
   const history = (op: string, params: object = {}, actor = f.viewer) => f.call(`${path()}/history`, "POST", { op, params }, actor);
   async function result(op: string, params: object = {}) {
@@ -71,6 +76,71 @@ suite("passive cloud chat cache through PostgreSQL and HTTP", () => {
     const snapshot = await range();
     expect((await result("chats.list")).chats).toEqual([{ id: "chat", messageCount: 87, revision: 42,
       historyCache: { revision: snapshot.revision, messageCount: 1 } }]);
+  });
+
+  it.each(opaquePayloads)("keeps a range and its turn opening readable with an opaque %s payload", async (_label, payload) => {
+    const opening = { ...row("opening"), payload };
+    await mirror([opening, row("answer")]);
+    expect(await range(1, 2)).toEqual({ revision: expect.any(Number), messageCount: 2,
+      fromIndex: 1, toIndex: 2, rows: [{ index: 1, ...row("answer") }],
+      turnOpening: opening, senders: { opening: null } });
+  });
+
+  it.each(opaquePayloads)("preserves opaque %s payloads through deltas and chat counts", async (_label, payload) => {
+    await mirror([]);
+    const base = await range(), opening = { ...row("opening"), payload };
+    await mirror([opening, row("answer")]);
+    const revision = base.revision + 1;
+    expect(await since(base.revision)).toEqual({ resync: false, fromRevision: base.revision, revision, messageCount: 2,
+      rows: [{ index: 0, ...opening }, { index: 1, ...row("answer") }], senders: { opening: null } });
+    expect((await result("chats.list")).chats).toEqual([{ id: "chat", historyCache: { revision, messageCount: 2 } }]);
+    await mirror([opening]);
+    expect(await since(revision)).toEqual({ resync: false, fromRevision: revision, revision, messageCount: 2, rows: [], senders: {} });
+  });
+
+  it.each(opaquePayloads)("tracks N-1 writes of an opaque %s payload without changing identical revisions", async (_label, payload) => {
+    await mirror([]);
+    const base = await range();
+    async function write(sql: string, value: string) {
+      const tx = await pool.connect();
+      try {
+        await tx.query("BEGIN; SET LOCAL ROLE zeros_app; SELECT set_config('app.system','on',true)");
+        await tx.query(sql, [f.workspace.id, value]);
+        await tx.query("COMMIT");
+      } catch (error) {
+        await tx.query("ROLLBACK"); throw error;
+      } finally { tx.release(); }
+    }
+    await write(`INSERT INTO cloud_v2_messages(workspace_id,chat_id,msg_id,kind,payload,created_at_ms)
+      VALUES($1,'chat','legacy','text',$2,1)`, payload);
+    const inserted = base.revision + 1;
+    expect(await since(base.revision)).toEqual({ resync: false, fromRevision: base.revision, revision: inserted, messageCount: 1,
+      rows: [{ index: 0, ...row("legacy"), payload }], senders: { legacy: null } });
+    const update = "UPDATE cloud_v2_messages SET payload=$2 WHERE workspace_id=$1 AND chat_id='chat' AND msg_id='legacy'";
+    await write(update, payload);
+    expect(await since(inserted)).toEqual({ resync: false, fromRevision: inserted, revision: inserted, messageCount: 1, rows: [], senders: {} });
+    await write(update, ` ${payload}`);
+    expect(await since(inserted)).toEqual({ resync: false, fromRevision: inserted, revision: inserted + 1, messageCount: 1,
+      rows: [{ index: 0, ...row("legacy"), payload: ` ${payload}` }], senders: { legacy: null } });
+    expect((await result("chats.list")).chats).toEqual([{ id: "chat", historyCache: { revision: inserted + 1, messageCount: 1 } }]);
+  });
+
+  it.each([false, true])("keeps opening precedence across opaque steers and non-user rows (steer only: %s)", async steerOnly => {
+    const opening = { ...row("opening"), payload: JSON.stringify({ role: "user", text: "\0" }) };
+    const steer = { ...row("steer"), payload: JSON.stringify({ role: "user", text: "\0", steeredTurnId: "turn" }) };
+    const rows = [...(steerOnly ? [] : [opening]), steer, row("opaque", "\0"),
+      { ...row("malformed"), payload: "{not json" }, row("answer")];
+    await mirror(rows);
+    const expected = steerOnly ? steer : opening;
+    expect(await range(rows.length - 1, rows.length)).toMatchObject({
+      rows: [{ index: rows.length - 1, ...row("answer") }], turnOpening: expected, senders: { [expected.msgId]: null },
+    });
+  });
+
+  it("ignores opaque non-user candidates without losing the requested range", async () => {
+    await mirror([row("opaque", "\0"), row("answer")]);
+    expect(await range(1, 2)).toEqual({ revision: expect.any(Number), messageCount: 2,
+      fromIndex: 1, toIndex: 2, rows: [{ index: 1, ...row("answer") }], senders: {} });
   });
 
   it("returns every final append/edit since the exact base and ignores identical upserts", async () => {
