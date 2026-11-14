@@ -211,7 +211,9 @@ export class CloudChatCacheService {
     if (metadata) {
       const delta = CloudCacheDeltaSchema.parse(await this.deps.source.since(key, metadata.revision, context)); context.current();
       if (delta.resync) {
-        if (!this.deps.store.applyDelta(key, delta, metadata.revision)) throw changed();
+        // Keep the confirmed snapshot until a validated replacement commits: putRange of the newer revision replaces
+        // the old lineage in one transaction, and a failed replacement read leaves it readable.
+        if (this.deps.store.metadata(key)?.revision !== metadata.revision) throw changed();
         const id = cloudCacheKey(key);
         for (const flights of [this.pendingFlights, this.beforeFlights]) {
           flights.get(id)?.stop.abort(); flights.delete(id);

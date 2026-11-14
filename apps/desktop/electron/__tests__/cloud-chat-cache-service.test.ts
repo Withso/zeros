@@ -239,17 +239,25 @@ describe("main cloud cache admission and refresh", () => {
     expect(f.service.read(1, f.binding, target, 200)).toBeNull();
   });
 
-  it("drops a replaced lineage and refetches the newest contiguous range", async () => {
+  it("replaces a resynced lineage atomically: the confirmed snapshot stays until the replacement commits", async () => {
     const f = fixture(); f.store.putRange({ owner, ...target }, page());
     vi.mocked(f.source.since).mockResolvedValue({ resync: true, revision: 4, messageCount: 2 });
     vi.mocked(f.source.range).mockImplementation(async (_target, fromIndex, toIndex) => {
-      expect(f.store.readTail({ owner, ...target })).toBeNull();
+      expect(f.store.readTail({ owner, ...target })?.rows).toEqual([row(0)]);
       return { revision: 4, messageCount: 2, fromIndex, toIndex, rows: [row(0, "replacement"), row(1)] };
     });
     const reply = await f.service.refresh(1, f.binding, target, 200);
     expect(reply.range.rows).toEqual([row(0, "replacement"), row(1)]);
     expect(reply.replaced).toBe(true);
     expect(f.source.range).toHaveBeenCalledTimes(1);
+  });
+
+  it("a failed replacement read after a resync keeps the confirmed snapshot readable offline", async () => {
+    const f = fixture(); f.store.putRange({ owner, ...target }, page());
+    vi.mocked(f.source.since).mockResolvedValue({ resync: true, revision: 4, messageCount: 2 });
+    vi.mocked(f.source.range).mockRejectedValue(new Error("offline"));
+    await expect(f.service.refresh(1, f.binding, target, 200)).rejects.toThrow();
+    expect(f.service.read(1, f.binding, target, 200)?.rows).toEqual([row(0)]);
   });
 
   it("retiring a parked account removes only that viewing account and fences its old replies", () => {
