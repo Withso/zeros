@@ -25,10 +25,31 @@ import { getActiveBridge } from "../../platform/bridge/active-bridge";
 
 /** Process-owned delivery, independent of React's retained chat surfaces and
  * the current bridge. Hooks only subscribe it to exact account/catalog changes. */
+const promptWorkspaceKey = (owner: Pick<CloudPromptOwner, "organizationId" | "workspaceId">) =>
+  cloudWorkspaceKey({ organizationId: owner.organizationId, workspaceId: owner.workspaceId });
+/** Ready to answer status (running): only ready or busy. Unknown (no document yet) is treated as ready, as today. */
+function workspaceReady(owner: Pick<CloudPromptOwner, "organizationId" | "workspaceId">): boolean {
+  const doc = cloudWorkspaceDocument({ organizationId: owner.organizationId, workspaceId: owner.workspaceId });
+  return !doc || ["ready", "busy"].includes(doc.status);
+}
+
 export class CloudPromptRuntime {
   constructor(private readonly historyChanged: (chatId: string) => void = () => {}) {}
   private readonly journal = createCloudPromptJournal();
-  private coordinator = new CloudPromptCoordinator(this.journal, () => this.scheduleReconcile());
+  private coordinator = this.newCoordinator();
+  /** A committed prompt's status is not re-read while its workspace is not ready; readiness releases it. */
+  private newCoordinator(): CloudPromptCoordinator {
+    return new CloudPromptCoordinator(this.journal, () => this.scheduleReconcile(), owner => !workspaceReady(owner));
+  }
+  private readyWorkspaces = new Set<string>();
+  /** On a catalog change, any workspace that became ready releases its parked status reads (one read each). */
+  private noticeReadiness(): void {
+    const ready = new Set<string>();
+    for (const channel of this.channels.values()) if (workspaceReady(channel.owner)) ready.add(promptWorkspaceKey(channel.owner));
+    const became = [...ready].some(key => !this.readyWorkspaces.has(key));
+    this.readyWorkspaces = ready;
+    if (became) this.coordinator.refreshPending();
+  }
   private owners: CloudPromptOwner[] = [];
   private restoredAccount?: string;
   private readonly restored = new Set<string>();
@@ -263,9 +284,9 @@ export class CloudPromptRuntime {
     });
   }
   start(): () => void {
-    if (this.stopped) { this.stopped = false; this.coordinator = new CloudPromptCoordinator(this.journal, () => this.scheduleReconcile()); this.restoredAccount = undefined; }
+    if (this.stopped) { this.stopped = false; this.coordinator = this.newCoordinator(); this.restoredAccount = undefined; }
     const reconcile = () => this.scheduleReconcile();
-    this.cleanups = [subscribeCloudWorkspaces(reconcile), subscribeOrganizationSnapshots(reconcile),
+    this.cleanups = [subscribeCloudWorkspaces(reconcile), subscribeCloudWorkspaces(() => this.noticeReadiness()), subscribeOrganizationSnapshots(reconcile),
       useWorkspaceStore.subscribe((state, previous) => { if (state.activeChatId !== previous.activeChatId || state.chats !== previous.chats) reconcile(); }),
       useSessionsStore.subscribe((state, previous) => {
         // Stream chunks do not rescan conversations or start network reads.

@@ -61,3 +61,28 @@ it("uses only a dedicated public canary key on Alpha and never accepts the worke
   for (const channel of ["beta", "production"]) expect(() => loadConfig({ ...base, RAILWAY_ENVIRONMENT_NAME: channel, CLOUD_V2_RUNTIME_CANARY_CONFIG: policy(canary) })).toThrow("Alpha-only");
   expect(() => loadConfig({ ...base, RAILWAY_ENVIRONMENT_NAME: "development", CLOUD_V2_RUNTIME_CANARY_CONFIG: policy(canary) })).toThrow("Alpha-only");
 });
+
+it("uses only the release's explicit qualified support set, never the previous pin alone", () => {
+  const key = generateKeyPairSync("ed25519").privateKey.export({ format: "der", type: "pkcs8" }).toString("base64");
+  const release = (sha256: string) => ({ version: 1, sha256, sourceSha: "c".repeat(40), sourceSha256: "d".repeat(64),
+    qualification: { channel: "alpha", runId: "123", runAttempt: 1, completedAt: "2026-11-01T00:00:00.000Z",
+      receiptSha256: "e".repeat(64), deleted: true } });
+  const current = release(env.CLOUD_V2_RUNTIME_SHA256), previous = release("b".repeat(64));
+  const base = { ...env, CLOUD_V2_WORKER_SIGNING_KEY: key, CLOUD_V2_RUNTIME_RELEASE_METADATA: JSON.stringify(current),
+    CLOUD_V2_RUNTIME_PREVIOUS_SHA256: previous.sha256, CLOUD_V2_RUNTIME_PREVIOUS_RELEASE_METADATA: JSON.stringify(previous) };
+  expect(loadConfig(base).cloudV2?.runtime.supportedSha256).toEqual([current.sha256]);
+  const support = { version: 1, currentSha256: current.sha256, releases: [current, previous] };
+  expect(loadConfig({ ...base, CLOUD_V2_RUNTIME_SUPPORT: JSON.stringify(support) }).cloudV2?.runtime.supportedSha256)
+    .toEqual([current.sha256, previous.sha256]);
+  expect(loadConfig({ ...base, CLOUD_V2_RUNTIME_SUPPORT: JSON.stringify({ ...support, releases: [current] }) }).cloudV2?.runtime.supportedSha256)
+    .toEqual([current.sha256]);
+  for (const invalid of [
+    { ...support, currentSha256: previous.sha256 }, { ...support, releases: [previous, current] },
+    { ...support, releases: [current, current] }, { ...support, releases: [current, { sha256: previous.sha256 }] },
+    { ...support, releases: [current, { ...previous, qualification: { ...previous.qualification, deleted: false } }] },
+    { ...support, releases: [current, previous, release("f".repeat(64)), release("0".repeat(64))] },
+    { ...support, token: "private-fixture-value" },
+  ]) expect(() => loadConfig({ ...base, CLOUD_V2_RUNTIME_SUPPORT: JSON.stringify(invalid) })).toThrow("Invalid environment: CLOUD_V2_RUNTIME_SUPPORT");
+  expect(() => loadConfig({ ...base, CLOUD_V2_RUNTIME_RELEASE_METADATA: "", CLOUD_V2_RUNTIME_SUPPORT: JSON.stringify(support) }))
+    .toThrow("Invalid environment: CLOUD_V2_RUNTIME_SUPPORT");
+});

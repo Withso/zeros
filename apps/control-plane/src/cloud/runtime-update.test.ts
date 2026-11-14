@@ -14,12 +14,16 @@ function fixture() {
   const root = mkdtempSync(join(tmpdir(), "zeros-runtime-update-")); roots.push(root);
   const runtimes = join(root, "opt/zeros/runtime"), bin = join(root, "bin"), source = join(root, "source");
   const old = "a".repeat(64), extra = "b".repeat(64);
-  for (const path of [bin, source, join(runtimes, old), join(runtimes, extra), join(root, "home/user/.config/zeros"), join(root, "home/user/.local/share/zeros/cloud-worker")]) mkdirSync(path, { recursive: true });
+  for (const path of [bin, source, join(runtimes, old), join(runtimes, extra), join(root, "home/user/.config/zeros"), join(root, "home/user/.local/share/zeros/cloud-worker"), join(root, "run")]) mkdirSync(path, { recursive: true });
   const token = `zw2w_${"a".repeat(43)}`, bootId = randomUUID();
   writeFileSync(join(root, "home/user/.config/zeros/worker-token"), token);
   writeFileSync(join(root, "home/user/.local/share/zeros/cloud-worker/runtime-boot"), bootId);
   writeFileSync(join(runtimes, old, ".complete"), "");
   writeFileSync(join(source, "worker.mjs"), "process.stdout.write('fixture');\n");
+  const worker = readFileSync(join(source, "worker.mjs"));
+  writeFileSync(join(source, "runtime-manifest.json"), JSON.stringify({ version: 1, files: {
+    "worker.mjs": { sha256: createHash("sha256").update(worker).digest("hex"), bytes: worker.length, mode: 0o644 },
+  } }));
   const archive = join(root, "runtime.tar.gz"); execFileSync("tar", ["-czf", archive, "-C", source, "."]);
   const sha256 = createHash("sha256").update(readFileSync(archive)).digest("hex");
   const current = join(root, "opt/zeros/worker"); symlinkSync(join(runtimes, old), current);
@@ -28,14 +32,14 @@ function fixture() {
   writeFileSync(join(bin, "sudo"), '#!/bin/sh\n[ "$1" != "-n" ] || shift\n[ "$1" != "chown" ] || exit 0\nexec "$@"\n', { mode: 0o755 });
   writeFileSync(join(bin, "curl"), '#!/bin/sh\nwhile [ "$1" != "-o" ]; do shift; done\ncp "$ZEROS_TEST_ARCHIVE" "$2"\n', { mode: 0o755 });
   writeFileSync(join(bin, "systemctl"), '#!/bin/sh\nprintf "%s\\n" "$*" >> "$ZEROS_TEST_SYSTEMCTL_LOG"\n', { mode: 0o755 });
-  const run = (command: string) => execFileSync("bash", ["-c", command.replaceAll("/opt/zeros", join(root, "opt/zeros")).replaceAll("/home/user", join(root, "home/user"))], {
+  const run = (command: string) => execFileSync("bash", ["-c", command.replaceAll("/opt/zeros", join(root, "opt/zeros")).replaceAll("/home/user", join(root, "home/user")).replaceAll("/run/zeros-worker.boot", join(root, "run/zeros-worker.boot"))], {
     encoding: "utf8", env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, ZEROS_TEST_SYSTEMCTL_LOG: log, ZEROS_TEST_ARCHIVE: archive }, stdio: ["ignore", "pipe", "pipe"],
   });
   const permit = (id: string) => {
     const directory = join(root, "home/user/.local/share/zeros/cloud-worker/runtime-handoffs"); mkdirSync(directory, { recursive: true });
     const path = join(directory, `permit-${id}-${bootId}`); writeFileSync(path, "", { flag: "wx", mode: 0o600 }); return path;
   };
-  const runAsync = (command: string, env: NodeJS.ProcessEnv) => promisify(execFile)("bash", ["-c", command.replaceAll("/opt/zeros", join(root, "opt/zeros")).replaceAll("/home/user", join(root, "home/user"))], {
+  const runAsync = (command: string, env: NodeJS.ProcessEnv) => promisify(execFile)("bash", ["-c", command.replaceAll("/opt/zeros", join(root, "opt/zeros")).replaceAll("/home/user", join(root, "home/user")).replaceAll("/run/zeros-worker.boot", join(root, "run/zeros-worker.boot"))], {
     encoding: "utf8", env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, ZEROS_TEST_SYSTEMCTL_LOG: log, ZEROS_TEST_ARCHIVE: archive, ...env }, timeout: 10_000,
   });
   return { root, bin, runtimes, sha256, old, extra, current, auth, log, archive, run, runAsync, permit, bootId, tokenSha256: createHash("sha256").update(token).digest("hex") };
@@ -55,8 +59,7 @@ it("verifies and stages bytes without activation, then activates once and retain
   const activation = { sha256: f.sha256, previousSha256: f.old, id, bootId: randomUUID(), instanceId: randomUUID(), tokenSha256: f.tokenSha256 };
   const command = activateRuntimeCommand({ ...activation, expectedBootIds: [f.bootId] });
   f.run(command);
-  // The old worker exits during the restart and cannot write its compiled code back.
-  expect(existsSync(dirname(dirname(compiled)))).toBe(false);
+  expect(readFileSync(compiled, "utf8")).toBe("previous runtime");
   mkdirSync(dirname(compiled), { recursive: true }); writeFileSync(compiled, "current runtime");
   f.run(command);
   expect(readlinkSync(f.current)).toBe(join(f.runtimes, f.sha256));
@@ -108,5 +111,5 @@ it("a natural token delivery clears the private override and fences a delayed ol
   expect(() => f.run(activateRuntimeCommand({ sha256: f.sha256, previousSha256: f.old, id, bootId: randomUUID(), instanceId: randomUUID(),
     tokenSha256: f.tokenSha256, expectedBootIds: [f.bootId] }))).toThrow();
   expect(readlinkSync(f.current)).toBe(join(f.runtimes, f.old));
-  expect(readFileSync(f.log, "utf8")).toBe("is-enabled --quiet zeros-worker.service\nrestart zeros-worker.service\n");
+  expect(readFileSync(f.log, "utf8")).toBe("is-enabled --quiet zeros-worker.service\nstart zeros-worker.service\n");
 });

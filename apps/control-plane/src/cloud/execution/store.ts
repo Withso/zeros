@@ -1,7 +1,8 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type pg from "pg";
 import type { AuthedUser } from "../../auth.js";
-import { withSystemTx, type Tx } from "../../db.js";
+import { withSystemStatement, withSystemTx, type Tx } from "../../db.js";
+import { sql, SqlFragment } from "../../sql-fragment.js";
 import { HttpError } from "../../authz.js";
 import { CLOUD_RECOVERY_TURN_HOLD, assertRecoveryTurnReady } from "../recovery-state.js";
 import type { CloudAgentCredentialKeys, CloudAgentCredentialMaterial } from "../../agent-credentials/agent-credential-envelope.js";
@@ -15,7 +16,7 @@ import { actorBusy, actorChanged, executionUnavailable, executionWorkerRequired,
 import { assertExecutionIntent, CloudExecutionAuthority, type ExecutionAdmission, type ExecutionIntentAuthority } from "./authority.js";
 import { CloudExecutionLogins, type ExecutionSelection } from "./logins.js";
 import { CloudExecutionClients } from "./clients.js";
-import { CloudExecutionBoots } from "./boots.js";
+import { CLEAN_EXECUTION_BOOT, CloudExecutionBoots } from "./boots.js";
 import { CloudExecutionMaintenance } from "./maintenance.js";
 import { CloudExecutionSync } from "./sync.js";
 import { executionContextAuthority, matchesExecutionSignature, type VersionedExecutionAuthority } from "./signatures.js";
@@ -43,7 +44,7 @@ type Config = Extract<CloudV2ControlFrame, { t: "config" }>;
 type Material = { gitIdentity: Config["gitIdentity"]; environment?: CloudWorkspaceEnvironment; mcpServers?: RuntimeMcpServer[] };
 export type ExecutionDeps = {
   authority: CloudExecutionAuthority; logins: CloudExecutionLogins; keys: CloudAgentCredentialKeys; apiUrl: string; proxyBase: string;
-  material(context: ExecutionContext, check: (tx?: Tx) => Promise<void>): Promise<Material>;
+  material(context: ExecutionContext, check: (tx?: Tx) => Promise<void>, transaction?: Tx): Promise<Material>;
   agentConfig(logins: Partial<Record<CloudV2Agent, CloudAgentCredentialMaterial>>, base: string,
     proxy: () => Promise<{ token: string; expiresAt: number }>): Promise<Config["agents"]>;
   githubToken?(context: ExecutionContext, check: (tx?: Tx) => Promise<void>, purpose: "git" | "gh", failedTokenSha256?: string): Promise<{ token: string; expiresAt: number }>;
@@ -65,8 +66,10 @@ export class CloudExecutionContexts {
   constructor(readonly pool: pg.Pool, readonly deps: ExecutionDeps) {}
 
   async active(id: string, transaction?: Tx): Promise<boolean> {
-    const read = async (tx: Tx) => (await tx.query("SELECT 1 FROM cloud_v2_workspaces WHERE id=$1 AND execution_mode='active'", [id])).rowCount === 1;
-    return transaction ? read(transaction) : withSystemTx(this.pool, read);
+    const result = transaction
+      ? await transaction.query("SELECT 1 FROM cloud_v2_workspaces WHERE id=$1 AND execution_mode='active'", [id])
+      : await withSystemStatement(this.pool, sql`SELECT 1 FROM cloud_v2_workspaces WHERE id=${SqlFragment.uuid(id.toLowerCase())} AND execution_mode='active'`);
+    return result.rowCount === 1;
   }
 
   async workspace(id: string, userId: string, user?: AuthedUser, transaction?: Tx) {
@@ -187,9 +190,9 @@ export class CloudExecutionContexts {
   }
 
   async worker(tx: Tx, identity: ExecutionWorker, lock = false, cleanup = false): Promise<ExecutionWorkspace> {
-    const read = () => tx.query<ExecutionWorkspace>(`SELECT w.id,w.org_id,w.creator_user_id,w.repository,w.state,w.access_epoch::text,w.stop_generation::text,
+    const read = () => tx.query<ExecutionWorkspace & { clean: boolean }>(`SELECT w.id,w.org_id,w.creator_user_id,w.repository,w.state,w.access_epoch::text,w.stop_generation::text,
         w.worker_boot_id,w.worker_token_hash,w.execution_mode,w.acting_user_boot_ids,w.execution_initiator_user_id,w.execution_intent_id,w.api_access,
-        (${CLOUD_RECOVERY_TURN_HOLD}) AS recovery_held
+        (${CLOUD_RECOVERY_TURN_HOLD}) AS recovery_held,${cleanup ? "true" : CLEAN_EXECUTION_BOOT} AS clean
       FROM cloud_v2_workspaces w WHERE worker_token_hash=$1 AND worker_boot_id=$2
         AND state IN ('creating','starting','running','stopping') AND ${CLOUD_V2_LIVE_ACCESS} ${lock ? "FOR UPDATE OF w" : ""}`,
       [hashCloudV2Token(identity.token), identity.bootId]);
@@ -198,7 +201,7 @@ export class CloudExecutionContexts {
     if (!row) throw new HttpError(401, "worker_unauthorized", "Worker authorization is no longer current");
     if (row.execution_mode !== "active" || !row.acting_user_boot_ids.includes(identity.bootId)) throw executionWorkerRequired();
     if (!cleanup && row.state === "stopping") throw new HttpError(409, "workspace_stopping", "The workspace is stopping");
-    if (!cleanup) await this.boots.assertClean(tx, row);
+    if (!row.clean) throw actorBusy();
     return row;
   }
 
@@ -468,26 +471,22 @@ export class CloudExecutionContexts {
     });
   }
 
-  async bootstrap(workspaceId: string): Promise<string | undefined> {
-    const initial = await withSystemTx(this.pool, async tx => {
-      const workspace = (await tx.query<{ execution_initiator_user_id: string | null; execution_intent_id: string | null;
+  async bootstrap(workspaceId: string, transaction?: Tx): Promise<string | undefined> {
+    const bootstrap = async (tx: Tx) => {
+      const current = (await tx.query<{ execution_initiator_user_id: string | null; execution_intent_id: string | null;
         execution_intent_authority: ExecutionIntentAuthority | null; worker_boot_id: string | null; acting_user_boot_ids: string[] }>(
         `SELECT execution_initiator_user_id,execution_intent_id,execution_intent_authority,worker_boot_id,acting_user_boot_ids
           FROM cloud_v2_workspaces WHERE id=$1 AND execution_mode='active'`, [workspaceId])).rows[0];
-      const existing = workspace && (await tx.query<ExecutionContext>(`SELECT * FROM cloud_v2_execution_contexts
+      const initial = current && (await tx.query<ExecutionContext>(`SELECT * FROM cloud_v2_execution_contexts
         WHERE workspace_id=$1 AND intent_id=$2 AND worker_boot_id=$3 AND kind='bootstrap'`,
-        [workspaceId, workspace.execution_intent_id, workspace.worker_boot_id])).rows[0];
-      return { workspace, existing };
-    });
-    const current = initial.workspace;
-    if (!current?.execution_intent_id || !current.worker_boot_id || !current.acting_user_boot_ids.includes(current.worker_boot_id)) throw executionWorkerRequired();
-    // Delivery is a one-way boundary even if the reply was lost. A new worker
-    // process gets credential-free config, not an already-spent bootstrap id.
-    const done = (row: ExecutionContext | undefined) => row && (row.state === "retired" || row.bootstrap_material_issued === true || row.material !== null);
-    if (done(initial.existing)) return undefined;
-    if (!current.execution_initiator_user_id) throw executionWorkerRequired();
-    const pending = initial.existing?.state === "active" && initial.existing.expires_at.getTime() > Date.now();
-    return withExecutionLifetimeRetry(() => withSystemTx(this.pool, async tx => {
+        [workspaceId, current.execution_intent_id, current.worker_boot_id])).rows[0];
+      if (!current?.execution_intent_id || !current.worker_boot_id || !current.acting_user_boot_ids.includes(current.worker_boot_id)) throw executionWorkerRequired();
+      // Delivery is a one-way boundary even if the reply was lost. A new worker
+      // process gets credential-free config, not an already-spent bootstrap id.
+      const done = (row: ExecutionContext | undefined) => row && (row.state === "retired" || row.bootstrap_material_issued === true || row.material !== null);
+      if (done(initial)) return undefined;
+      if (!current.execution_initiator_user_id) throw executionWorkerRequired();
+      const pending = initial?.state === "active" && initial.expires_at.getTime() > Date.now();
       await tx.query("SELECT id FROM users WHERE id=$1 FOR KEY SHARE", [current.execution_initiator_user_id]);
       if (!(await tx.query(`SELECT 1 FROM cloud_v2_workspaces WHERE id=$1 AND execution_intent_id=$2
         AND execution_initiator_user_id=$3 AND worker_boot_id=$4 FOR UPDATE`,
@@ -520,26 +519,34 @@ export class CloudExecutionContexts {
       await this.deps.authority.assert(proof, tx);
       assertExecutionLifetime(proof.until);
       return id;
-    }));
+    };
+    return transaction ? bootstrap(transaction) : withExecutionLifetimeRetry(() => withSystemTx(this.pool, bootstrap));
   }
 
   async bootstrapLease(identity: ExecutionWorker, id: string) { return this.identityLease(identity, id, "bootstrap"); }
 
   async identityLease(identity: ExecutionWorker, id: string, kind: "bootstrap" | "terminal" | "client") {
     return withExecutionLifetimeRetry(async () => {
-      const { context, proof } = await withSystemTx(this.pool, async tx => {
+      const { context, proof, material } = await withSystemTx(this.pool, async tx => {
         const workspace = await this.worker(tx, identity), context = await this.context(tx, id, workspace.id);
         if (context.kind !== kind || kind === "client" && (!context.operation || context.operation === "terminal.create")) throw actorChanged();
-        const proof = await this.admission(context, EXECUTION_MINIMUM_LIFETIME_MS, tx);
-        return { context, proof };
+        if (context.state !== "active" && context.reason === "access_revoked") throw new ExecutionContextRevoked();
+        if (!context.user_id || context.state !== "active" || context.expires_at.getTime() <= Date.now()) throw actorChanged();
+        const proof = await this.deps.authority.admit(workspace.id, context.user_id, { continuation: true, minimumSourceMs: EXECUTION_MINIMUM_LIFETIME_MS, transaction: tx });
+        const check = async (value?: Tx) => { await this.assertContext(value ?? tx, context, proof); };
+        // No workspace/context lock precedes material preparation. A concurrent
+        // Stop or expired-bootstrap replacement must still be able to win.
+        const material = context.material ? null : await this.deps.material(context, check, tx).catch(async error => {
+          await check(tx);
+          throw error;
+        });
+        return { context, proof, material };
       });
       assertExecutionLifetime(proof.until);
-      const check = async (tx?: Tx) => { await (tx ? this.assertContext(tx, context, proof) : withSystemTx(this.pool, value => this.assertContext(value, context, proof))); };
-      const material = context.material ? null : await this.deps.material(context, check);
       return withSystemTx(this.pool, async tx => {
         const workspace = await this.worker(tx, identity, true);
         let current = await this.context(tx, id, workspace.id, true);
-        await check(tx);
+        if (!current.material && !material) throw actorChanged();
         const value = current.material ? openExecution(current.material, envelopeBinding(current), this.deps.keys) as Record<string, unknown> :
           { contextId: current.id, userId: current.user_id, gitIdentity: material!.gitIdentity,
             ...(kind !== "client" && material!.environment ? { environment: material!.environment } : {}),

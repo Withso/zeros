@@ -4,11 +4,13 @@ import { GithubTemporaryError } from "../github-availability.js";
 import type { CloudV2Compute } from "./boat.js";
 import { CLOUD_V2_IDLE_STOP_MS, CLOUD_V2_WORKER_TOKEN_PATH, CloudV2Lifecycle, checkoutWarmupCommand, deliverWorkerTokenCommand, type CloudV2LifecycleDeps } from "./lifecycle.js";
 import type { CloudV2CheckpointFork, CloudV2CheckpointRetry, CloudV2Workspace, CloudV2LifecycleWorkspace } from "./store.js";
+
 import { generateKeyPairSync } from "node:crypto";
 
 const NOW = Date.parse("2026-10-21T12:00:00Z");
 const token = `zw2w_${"a".repeat(43)}`;
 const runtime = `/opt/zeros/runtime/${"b".repeat(64)}`;
+
 const publicKeys = [generateKeyPairSync("ed25519").publicKey.export({ type: "spki", format: "pem" }).toString()];
 
 function workspace(state: CloudV2Workspace["state"], extra: Partial<CloudV2LifecycleWorkspace & { attempts: number }> = {}): CloudV2LifecycleWorkspace & { attempts: number } {
@@ -55,7 +57,7 @@ const vmCommand = (f: { compute: CloudV2Compute }, marker: string) => vi.mocked(
 function setup(claimed: (CloudV2LifecycleWorkspace & { attempts: number })[], options: { snapshot?: string | null; prune?: string[]; stock?: true; checkout?: true; idle?: CloudV2Workspace[]; stopIdle?: CloudV2LifecycleDeps["stopIdle"]; timing?: CloudV2LifecycleDeps["timing"]; now?: () => number;
   checkpoints?: ReturnType<typeof checkpointsFake>; remoteHead?: CloudV2LifecycleDeps["remoteHead"]; githubToken?: CloudV2LifecycleDeps["githubToken"]; uploadHorizon?: string;
   checkpointRetry?: boolean; retries?: RetryRow[]; prepareRepository?: CloudV2LifecycleDeps["prepareRepository"]; pruneEnvironments?: () => Promise<void>;
-  runtimeForWorkspace?: CloudV2LifecycleDeps["runtimeForWorkspace"]; bootEnv?: CloudV2LifecycleDeps["bootEnv"]; builds?: CloudV2LifecycleDeps["builds"]; recovery?: CloudV2LifecycleDeps["recovery"];
+  runtimeForWorkspace?: CloudV2LifecycleDeps["runtimeForWorkspace"]; runtimeUpdates?: CloudV2LifecycleDeps["runtimeUpdates"]; bootEnv?: CloudV2LifecycleDeps["bootEnv"]; builds?: CloudV2LifecycleDeps["builds"]; recovery?: CloudV2LifecycleDeps["recovery"];
   authorizeWorkspace?: CloudV2LifecycleDeps["authorizeWorkspace"]; resolvePendingSource?: CloudV2LifecycleDeps["resolvePendingSource"] } = {}) {
   const retries = [...options.retries ?? []];
   const compute: CloudV2Compute = {
@@ -124,6 +126,7 @@ function setup(claimed: (CloudV2LifecycleWorkspace & { attempts: number })[], op
     runtime: { sha256: "b".repeat(64), url: async () => "https://r2.example.test/runtime.tar.gz?sig=1" },
     bootEnv: options.bootEnv ?? (ws => ({ CLOUD_V2_API_URL: "https://api.example.test", ZEROS_WORKSPACE_ID: ws.id })),
     ...(options.runtimeForWorkspace ? { runtimeForWorkspace: options.runtimeForWorkspace } : {}),
+    ...(options.runtimeUpdates ? { runtimeUpdates: options.runtimeUpdates } : {}),
     sandboxName: ws => `zeros-alpha-${ws.id.slice(0, 8)}`,
     ...(options.checkpoints ? { checkpoints: options.checkpoints } : {}),
     ...(options.remoteHead ? { remoteHead: options.remoteHead } : {}),
@@ -136,6 +139,31 @@ function setup(claimed: (CloudV2LifecycleWorkspace & { attempts: number })[], op
   });
   return { lifecycle, compute, store, stopWorker, logs };
 }
+
+it("attempts idle runtime preparation before the fresh idle-stop fence without holding other lifecycle work", async () => {
+  const held = Promise.withResolvers<void>(), idle = workspace("running", { boatSandboxId: "bx_idle" });
+  const runtimeUpdates = { tick: vi.fn(async () => {}), close: vi.fn(), beforeIdleStop: vi.fn(() => held.promise), cancelStaging: vi.fn() };
+  const stopIdle = vi.fn(async () => {});
+  const f = setup([workspace("creating")], { idle: [idle], runtimeUpdates, stopIdle });
+  const task = f.lifecycle.tick();
+  try {
+    await expect.poll(() => vi.mocked(f.compute.create).mock.calls.length).toBe(1);
+    expect(runtimeUpdates.beforeIdleStop).toHaveBeenCalledExactlyOnceWith(idle);
+    expect(stopIdle).not.toHaveBeenCalled();
+  } finally { held.resolve(); await task; }
+  expect(stopIdle).toHaveBeenCalledWith(idle.id, expect.any(Date));
+});
+
+it.each(["stopping", "deleting"] as const)("cancels staging before %s provider work", async state => {
+  const row = workspace(state, { boatSandboxId: "bx_staging" });
+  const runtimeUpdates = { tick: vi.fn(async () => {}), close: vi.fn(), cancelStaging: vi.fn() };
+  const f = setup([row], { runtimeUpdates });
+  const call = state === "stopping" ? f.stopWorker : vi.mocked(f.compute.delete);
+  await f.lifecycle.tick();
+  expect(runtimeUpdates.cancelStaging).toHaveBeenCalledExactlyOnceWith(row.id);
+  expect(call).toHaveBeenCalledOnce();
+  expect(runtimeUpdates.cancelStaging.mock.invocationCallOrder[0]).toBeLessThan(call.mock.invocationCallOrder[0]!);
+});
 
 describe("a create that returned before its GitHub checks", () => {
   const pending = (extra: Partial<CloudV2LifecycleWorkspace & { attempts: number }> = {}) => workspace("creating", { sourcePending: true, computerBuildId: "build", ...extra });
@@ -227,6 +255,43 @@ it.each(["creating", "starting"] as const)("refuses provider effects on a failed
   expect(f.compute.resume).not.toHaveBeenCalled();
   expect(f.compute.exec).not.toHaveBeenCalled();
   expect(f.store.rotateWorkerToken).not.toHaveBeenCalled();
+});
+
+it("pins token delivery to the supported runtime actually selected on disk", async () => {
+  const current = "b".repeat(64), installed = "c".repeat(64);
+  const candidate = { sha256: current, supportedSha256: [current, installed], url: async () => "https://fixture.example.test/runtime" };
+  const bootEnv = vi.fn<CloudV2LifecycleDeps["bootEnv"]>(async (_ws, runtime) => ({ CLOUD_V2_RUNTIME_SHA256: runtime!.sha256 }));
+  const f = setup([workspace("starting", { boatSandboxId: "bx_test" })], { runtimeForWorkspace: async () => candidate, bootEnv });
+  vi.mocked(f.compute.exec).mockResolvedValueOnce({ exitCode: 0, timedOut: false, stdout: `runtime-selected ${installed}\n` });
+  await f.lifecycle.tick();
+  expect(bootEnv.mock.calls.map(([, runtime]) => runtime!.sha256)).toEqual([current, installed]);
+  const delivery = vi.mocked(f.compute.exec).mock.calls.find(([, command]) => command.includes("worker-token.tmp"));
+  expect(delivery?.[1]).toContain(Buffer.from(`CLOUD_V2_RUNTIME_SHA256=${installed}\n`).toString("base64"));
+});
+
+it.each(["missing", "foreign", "ambiguous"])("refuses %s runtime selection before giving the worker a token", async result => {
+  const current = "b".repeat(64), installed = "c".repeat(64);
+  const runtime = { sha256: current, supportedSha256: [current, installed], url: async () => "https://fixture.example.test/runtime" };
+  const f = setup([workspace("starting", { boatSandboxId: "bx_test" })], { runtimeForWorkspace: async () => runtime });
+  const stdout = result === "missing" ? "" : result === "foreign" ? `runtime-selected ${"d".repeat(64)}\n`
+    : `runtime-selected ${current}\nruntime-selected ${installed}\n`;
+  vi.mocked(f.compute.exec).mockResolvedValueOnce({ exitCode: 0, timedOut: false, stdout });
+  await f.lifecycle.tick();
+  expect(f.store.rotateWorkerToken).not.toHaveBeenCalled();
+  expect(f.store.transition).toHaveBeenCalledWith(expect.any(String), ["starting"], "failed",
+    expect.objectContaining({ errorCode: "worker_runtime_install_failed" }));
+});
+
+it("shares one 30-second runtime deadline across provider attempts and ends the wake when exhausted", async () => {
+  let now = NOW;
+  const f = setup([workspace("starting", { boatSandboxId: "bx_test" })], { now: () => now });
+  vi.mocked(f.compute.exec).mockImplementation(async () => { now += 11_000; throw new Error("provider unavailable"); });
+  await f.lifecycle.tick();
+  expect(vi.mocked(f.compute.exec).mock.calls.map(call => call[2])).toEqual([30, 19, 8]);
+  expect(f.store.rotateWorkerToken).not.toHaveBeenCalled();
+  expect(f.store.transition).toHaveBeenCalledWith(expect.any(String), ["starting"], "failed",
+    expect.objectContaining({ errorCode: "worker_runtime_install_failed" }));
+  expect(f.store.defer).not.toHaveBeenCalled();
 });
 
 it("ends a clone failure with its typed cause before worker hello instead of retrying into a boot timeout", async () => {
@@ -634,21 +699,38 @@ describe("cloud v2 lifecycle", () => {
     const f = setup([workspace(state, { boatSandboxId: state === "starting" ? "bx_test" : null })], { timing, now: () => now });
     vi.mocked(f.compute.create).mockImplementationOnce(async () => { now += 10; return { sandboxId: "bx_test" }; });
     vi.mocked(f.compute.resume).mockImplementationOnce(async () => { now += 10; });
-    vi.mocked(f.compute.exec).mockImplementationOnce(async () => { now += 20; return { exitCode: 0, stdout: "runtime-changed\n", timedOut: false }; })
+    vi.mocked(f.compute.exec).mockImplementationOnce(async () => { now += 20; return { exitCode: 0,
+      stdout: "zeros-runtime-timing download 7 ok\nzeros-runtime-timing verify 3 ok\nzeros-runtime-timing unpack 4 ok\nzeros-runtime-timing activate 2 ok\nruntime-changed\n", timedOut: false }; })
       .mockImplementationOnce(async () => { now += 40; return { exitCode: 0, stdout: "credential never logged", timedOut: false }; });
     vi.mocked(f.compute.hostPort).mockImplementationOnce(async () => ({ url: "https://private.example.test", token: "never-log" }));
     await f.lifecycle.tick();
     const records = timing.mock.calls.map(([record]) => record);
     // The route overlaps the VM's runtime check, so it adds nothing to the total.
-    expect(records).toHaveLength(5);
+    expect(records).toHaveLength(10);
     expect(records).toEqual(expect.arrayContaining([
       { workspaceId: "6f2b7c1e", state, phase: state === "creating" ? "boat_create" : "boat_resume", durationMs: 10 },
       { workspaceId: "6f2b7c1e", state, phase: "runtime_install", durationMs: 20, runtimeChanged: true },
+      { workspaceId: "6f2b7c1e", state, phase: "runtime_download", durationMs: 7, runtimeResult: "ok" },
+      { workspaceId: "6f2b7c1e", state, phase: "runtime_verify", durationMs: 3, runtimeResult: "ok" },
+      { workspaceId: "6f2b7c1e", state, phase: "runtime_unpack", durationMs: 4, runtimeResult: "ok" },
+      { workspaceId: "6f2b7c1e", state, phase: "runtime_activate", durationMs: 2, runtimeResult: "ok" },
+      { workspaceId: "6f2b7c1e", state, phase: "runtime_unattributed", durationMs: 4, runtimeResult: "ok" },
       { workspaceId: "6f2b7c1e", state, phase: "protected_route", durationMs: expect.any(Number) },
       { workspaceId: "6f2b7c1e", state, phase: "token_delivery", durationMs: 40 },
       { workspaceId: "6f2b7c1e", state, phase: "total", durationMs: 70 },
     ]));
     expect(JSON.stringify(records)).not.toMatch(/never-log|credential never logged|private\.example/);
+  });
+
+  it("retains a failed runtime verification without exposing the provider output", async () => {
+    const timing = vi.fn(), f = setup([workspace("starting", { boatSandboxId: "bx_test" })], { timing });
+    vi.mocked(f.compute.exec).mockResolvedValueOnce({ exitCode: 17, timedOut: false,
+      stdout: "zeros-runtime-timing verify 3 failed\nhttps://private.example.test/?token=synthetic-secret\n" });
+    await f.lifecycle.tick();
+    expect(timing).toHaveBeenCalledWith({ workspaceId: "6f2b7c1e", state: "starting", phase: "runtime_verify", durationMs: 3, runtimeResult: "failed" });
+    expect(f.store.transition).toHaveBeenCalledWith(expect.any(String), ["starting"], "failed",
+      expect.objectContaining({ errorCode: "worker_runtime_install_failed", revoke: true }));
+    expect(JSON.stringify(timing.mock.calls)).not.toMatch(/private\.example|synthetic-secret/);
   });
 
   it("never lets a timing observer prevent a workspace from starting", async () => {
@@ -1171,9 +1253,11 @@ describe("cloud v2 lifecycle", () => {
     expect(() => deliverWorkerTokenCommand("zw2w_'; rm -rf / #")).toThrow();
   });
 
-  it("re-enables the worker that stop disabled before restarting it with the delivered token", () => {
+  it("admits the machine boot and re-enables the stopped unit before its idempotent start", () => {
     const command = deliverWorkerTokenCommand(token);
-    expect(command).toMatch(/systemctl is-enabled --quiet zeros-worker\.service \|\| sudo -n systemctl enable zeros-worker\.service[^)]*\) && \(sudo -n systemctl restart zeros-worker\.service/);
+    expect(command).toMatch(/systemctl is-enabled --quiet zeros-worker\.service \|\| sudo -n systemctl enable zeros-worker\.service[^)]*\) && sudo -n systemctl start zeros-worker\.service/);
+    expect(command.indexOf("cat /proc/sys/kernel/random/boot_id")).toBeLessThan(command.indexOf("systemctl start"));
+    expect(command).not.toContain("systemctl restart");
   });
 });
 

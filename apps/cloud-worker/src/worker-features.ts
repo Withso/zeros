@@ -1,4 +1,4 @@
-import { ACTING_USER_FEATURE, CLOUD_RECOVERY_QUIESCE_FEATURE, HISTORY_DIGEST_DELETIONS_FEATURE, HISTORY_DIGEST_FEATURE, CREATOR_AGENT_LOGINS_FEATURE, CREATOR_AGENT_MODELS_FEATURE, CREATOR_COMMIT_IDENTITY_FEATURE, PUSH_SIGNALS_FEATURE } from "@zeros/protocol/cloud-v2-relay";
+import { ACTING_USER_FEATURE, BOOT_TIMINGS_FEATURE, RUNTIME_STAGING_FEATURE, CLOUD_RECOVERY_QUIESCE_FEATURE, HISTORY_DIGEST_DELETIONS_FEATURE, HISTORY_DIGEST_FEATURE, CREATOR_AGENT_LOGINS_FEATURE, CREATOR_AGENT_MODELS_FEATURE, CREATOR_COMMIT_IDENTITY_FEATURE, PUSH_SIGNALS_FEATURE } from "@zeros/protocol/cloud-v2-relay";
 
 /** Advertised on hello and on the relay's inbound dial. The control plane gates
  * each configuration on the list it saw, so the two must be identical. */
@@ -21,4 +21,8 @@ export const CLOUD_WORKER_FEATURES = ["prompt-outbox-v1", "mcp-v1", "workspace-s
   CLOUD_RECOVERY_QUIESCE_FEATURE,
   /** A reconnect reads each chat's stored digest once and re-sends only changed chats (with config.historyDigest). */
   HISTORY_DIGEST_FEATURE,
-  HISTORY_DIGEST_DELETIONS_FEATURE].join(",");
+  HISTORY_DIGEST_DELETIONS_FEATURE,
+  /** Reports listening, hello sent and acknowledged, and the first accepted relay as timing marks (with config.bootTimings). */
+  BOOT_TIMINGS_FEATURE,
+  /** Asks the control plane to stage each runtime target at once (with config.runtimeStaging); the quiet handoff reuses it. */
+  RUNTIME_STAGING_FEATURE].join(",");

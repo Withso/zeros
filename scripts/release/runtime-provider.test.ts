@@ -90,6 +90,31 @@ function transaction(f: ReturnType<typeof fixture>) {
 }
 
 describe("runtime-only Railway boundary", () => {
+  it("publishes a qualified support set and preserves it through a failed publication cleanup", async () => {
+    const f = fixture();
+    const previous = { ...f.previous, release: { ...f.pin.release, sha256: f.previous.sha256, sourceSha: "4".repeat(40) } };
+    const retained = { ...previous.release, sha256: "e".repeat(64), sourceSha: "5".repeat(40) };
+    const support = { version: 1, currentSha256: previous.sha256, releases: [previous.release, retained] };
+    f.variables.CLOUD_V2_RUNTIME_RELEASE_METADATA = JSON.stringify(previous.release);
+    f.variables.CLOUD_V2_RUNTIME_SUPPORT = JSON.stringify(support);
+    Object.assign(f.identity, runtimeReleaseIdentity(previous));
+    await f.provider.stage(f.pin, previous, f.lease);
+    expect(JSON.parse(f.variables.CLOUD_V2_RUNTIME_SUPPORT)).toEqual({ version: 1, currentSha256: f.pin.sha256,
+      releases: [f.pin.release, previous.release] });
+    expect(await f.restart().recover(f.lease)).toEqual({ releaseDrain: true });
+    expect(JSON.parse(f.variables.CLOUD_V2_RUNTIME_SUPPORT)).toEqual(support);
+  });
+  it("does not advertise an unqualified previous runtime as supported", async () => {
+    const f = fixture(); await f.provider.stage(f.pin, f.previous, f.lease);
+    expect(JSON.parse(f.variables.CLOUD_V2_RUNTIME_SUPPORT)).toEqual({ version: 1, currentSha256: f.pin.sha256, releases: [f.pin.release] });
+  });
+  it("refuses a support-set change between staging and deploy", async () => {
+    const f = fixture(); await f.provider.stage(f.pin, f.previous, f.lease);
+    f.variables.CLOUD_V2_RUNTIME_SUPPORT = JSON.stringify({ version: 1, currentSha256: f.pin.sha256,
+      releases: [f.pin.release, { ...f.pin.release, sha256: "e".repeat(64) }] });
+    await expect(f.provider.deploy(f.config.expectedCpSha, f.lease)).rejects.toThrow(/support/);
+    expect(f.calls.some(call => call.query.includes("RuntimeDeploy("))).toBe(false);
+  });
   it.each(["stage", "deploy"] as const)("refuses %s when Alpha no longer serves the exact ready digest", async phase => {
     const f = fixture("beta");
     if (phase === "deploy") await f.provider.stage(f.pin, f.previous, f.lease);
@@ -179,6 +204,7 @@ describe("runtime-only Railway boundary", () => {
     expect(stage.variables.input).toEqual({ ...f.target, replace: false, skipDeploys: true, variables: {
       CLOUD_V2_RUNTIME_SHA256: f.pin.sha256, CLOUD_V2_RUNTIME_RELEASE_METADATA: JSON.stringify(f.pin.release),
       CLOUD_V2_RUNTIME_PREVIOUS_SHA256: f.previous.sha256, CLOUD_V2_RUNTIME_PREVIOUS_RELEASE_METADATA: "",
+      CLOUD_V2_RUNTIME_SUPPORT: JSON.stringify({ version: 1, currentSha256: f.pin.sha256, releases: [f.pin.release] }),
     } });
     const deployments = f.calls.filter(c => c.query.includes("RuntimeDeploy("));
     expect(deployments).toHaveLength(1); expect(deployments[0].variables.commitSha).toBe(f.config.expectedCpSha);
@@ -298,7 +324,8 @@ describe("runtime-only Railway boundary", () => {
   it("keeps the exact requested intent when a provider response is lost", async () => {
     const f = fixture(); f.loseMutation();
     await expect(f.provider.stage(f.pin, f.previous, f.lease)).rejects.toThrow();
-    expect(f.intents).toEqual([{ kind: "stage", phase: "requested", previous: f.previous, retainedPrevious: null, next: f.pin, lease: f.lease, servingDeploymentId: "old-deployment" }]);
+    expect(f.intents).toEqual([{ kind: "stage", phase: "requested", previous: f.previous, retainedPrevious: null, next: f.pin, lease: f.lease, servingDeploymentId: "old-deployment",
+      support: { previous: null, next: { version: 1, currentSha256: f.pin.sha256, releases: [f.pin.release] } } }]);
     expect(JSON.stringify(f.intents)).not.toContain(f.storage.secretAccessKey);
     expect(JSON.stringify(f.intents)).not.toContain(f.env.RAILWAY_DEPLOY_TOKEN);
   });

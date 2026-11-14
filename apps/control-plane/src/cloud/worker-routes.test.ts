@@ -56,6 +56,26 @@ it("accepts outbound hello and returns configuration, refusing stale runtimes", 
   expect(await response.json()).toMatchObject({ config: { t: "config", loginRevision: "0" } });
   expect((await f.request("hello", { ...body, runtimeSha256: "b".repeat(64) })).status).toBe(409);
 });
+it("admits a fallback only from the workspace's current supported runtime policy", async () => {
+  const f = fixture(), current = "a".repeat(64), previous = "b".repeat(64), foreign = "c".repeat(64);
+  const policy = vi.fn(async () => ({ sha256: current, supportedSha256: [current, previous] }));
+  Object.assign(f.deps, { runtimeForWorkspace: policy });
+  const hello = (sha256: string) => f.request("hello", { bootId: f.bootId, protocol: 2, runtimeSha256: sha256 });
+  expect((await hello(previous)).status).toBe(200);
+  expect(f.deps.store.beginWorkerHello).toHaveBeenCalledWith(f.token, f.bootId, false, previous, false, false, false, undefined);
+  expect((await hello(foreign)).status).toBe(409);
+  policy.mockResolvedValue({ sha256: current, supportedSha256: [current] });
+  expect((await hello(previous)).status).toBe(409);
+  f.revoke();
+  expect((await hello(current)).status).toBe(401);
+});
+it("does not let a recorded old boot override the release's current supported set", async () => {
+  const f = fixture(), old = "b".repeat(64);
+  Object.assign(f.deps, { runtimeHandoffs: { runtime: vi.fn(async () => old), recordRuntime: vi.fn(async () => true) } });
+  const response = await f.request("hello", { bootId: f.bootId, protocol: 2, runtimeSha256: old }, { "x-zeros-worker-features": "runtime-update-v1" });
+  expect(response.status).toBe(409);
+  expect(f.deps.store.beginWorkerHello).not.toHaveBeenCalled();
+});
 it("delivers a recovery hint only to the advertising worker and withholds prompts while fenced", async () => {
   const f = fixture(true), id = randomUUID();
   const auth = await f.deps.store.workerSession(f.token, f.bootId);
@@ -108,6 +128,84 @@ it("negotiates push signals on hello and config without changing older worker co
     const capable = (await (await f.request(path, input, { "x-zeros-worker-features": "prompt-outbox-v1,push-signals-v1" })).json()).config;
     expect(capable.pushSignals).toBe(1);
   }
+});
+it.each(["", "boot-timings-v10", "boot-timings-v1"])("negotiates boot timing marks on hello and refreshed config: %s", async feature => {
+  const f = fixture(), config = await f.deps.config({} as CloudV2Workspace);
+  vi.mocked(f.deps.config).mockResolvedValue({ ...config, bootTimings: 1 });
+  for (const [path, input] of [["hello", { bootId: f.bootId, protocol: 2, runtimeSha256: "a".repeat(64) }], ["config", undefined]] as const) {
+    const reply = await f.request(path, input, { "x-zeros-worker-features": feature });
+    expect(reply.status).toBe(200);
+    const body = await reply.json();
+    expect(body.config.bootTimings).toBe(feature === "boot-timings-v1" ? 1 : undefined);
+    if (!feature) expect(legacyWorkerFrame.safeParse(body.config).success).toBe(true);
+  }
+});
+it.each(["", "runtime-update-v1", "runtime-update-v1,runtime-staging-v10", "runtime-update-v1,runtime-staging-v1"])(
+  "negotiates runtime staging without extending an older worker's strict config: %s", async features => {
+    const f = fixture(), request = vi.fn(async () => ({ status: "staged", sha256: "b".repeat(64) }));
+    Object.assign(f.deps, { runtimeUpdates: { request } });
+    const config = await f.deps.config({} as CloudV2Workspace);
+    vi.mocked(f.deps.config).mockResolvedValue({ ...config, runtimeStaging: 1 } as typeof config);
+    const headers = { "x-zeros-worker-features": features };
+    const capable = features.split(",").includes("runtime-staging-v1");
+    for (const [path, input] of [["hello", { bootId: f.bootId, protocol: 2, runtimeSha256: "a".repeat(64) }], ["config", undefined]] as const) {
+      const response = await f.request(path, input, headers);
+      expect(response.status).toBe(200);
+      const reply = await response.json();
+      expect(reply.config.runtimeStaging).toBe(capable ? 1 : undefined);
+      if (!features) expect(legacyWorkerFrame.safeParse(reply.config).success).toBe(true);
+    }
+    const staged = await f.request("runtime", { op: "stage" }, headers);
+    expect(staged.status).toBe(capable ? 200 : 404);
+    expect(request).toHaveBeenCalledTimes(capable ? 1 : 0);
+  });
+it("records authorized boot timing marks without changing activity or accepting a foreign boot", async () => {
+  const f = fixture(); f.deps.timing = vi.fn();
+  const headers = { "x-zeros-worker-features": "boot-timings-v1" };
+  const mark = { phase: "worker_listening", uptimeMs: 120, atMs: 1_800_000_000_120, bootId: f.bootId, helloSequence: 1 };
+  expect((await f.request("timing", mark, headers)).status).toBe(200);
+  expect(f.deps.timing).toHaveBeenCalledWith(expect.objectContaining(mark));
+  expect((await f.request("timing", mark, headers)).status).toBe(200);
+  expect(f.deps.timing).toHaveBeenCalledTimes(1);
+  expect((await f.request("timing", { ...mark, bootId: randomUUID() }, headers)).status).toBe(401);
+  expect((await f.request("timing", { ...mark, phase: "worker_first_inbound", firstStatus: 401, refusedBefore: 2 }, headers)).status).toBe(200);
+  for (const input of [{ ...mark, token: "synthetic-secret" }, { ...mark, firstStatus: 101 },
+    { ...mark, phase: "worker_first_inbound", firstStatus: 502, refusedBefore: 0 }])
+    expect((await f.request("timing", input, headers)).status).toBe(400);
+  expect(f.deps.store.markActive).not.toHaveBeenCalled();
+  f.revoke();
+  expect((await f.request("timing", mark, headers)).status).toBe(401);
+});
+it("admits a bounded startup timing batch once and never lets diagnostics change readiness", async () => {
+  const f = fixture(); f.deps.timing = vi.fn();
+  const headers = { "x-zeros-worker-features": "boot-timings-v1" };
+  const mark = { phase: "worker_applied_ready", uptimeMs: 400, atMs: 1_800_000_000_400, bootId: f.bootId, helloSequence: 1 };
+  const records = [{ phase: "worker_services", durationMs: 23 }, mark, mark];
+  expect((await f.request("timing", { records }, headers)).status).toBe(200);
+  expect(f.deps.store.workerSession).toHaveBeenCalledExactlyOnceWith(f.token, f.bootId);
+  expect(f.deps.timing).toHaveBeenCalledTimes(2);
+  expect(f.deps.timing).toHaveBeenLastCalledWith(expect.objectContaining(mark));
+  expect(f.deps.store.acceptWorkerHello).not.toHaveBeenCalled();
+  expect(f.deps.store.markActive).not.toHaveBeenCalled();
+  f.deps.timing = () => { throw new Error("diagnostics unavailable"); };
+  expect((await f.request("timing", { records: [{ ...mark, phase: "worker_hello_acked" }] }, headers)).status).toBe(200);
+});
+it("rejects the whole timing batch before emitting any record from a foreign boot or invalid envelope", async () => {
+  const f = fixture(); f.deps.timing = vi.fn();
+  const headers = { "x-zeros-worker-features": "boot-timings-v1" };
+  const duration = { phase: "worker_services", durationMs: 23 };
+  const mark = { phase: "worker_applied_ready", uptimeMs: 400, atMs: 1_800_000_000_400, bootId: randomUUID(), helloSequence: 1 };
+  expect((await f.request("timing", { records: [duration, mark] }, headers)).status).toBe(401);
+  expect((await f.request("timing", { records: [duration] })).status).toBe(401);
+  for (const input of [{ records: [] }, { records: Array.from({ length: 33 }, () => duration) },
+    { records: [duration, { ...duration, token: "synthetic-secret" }] }, { records: [duration], extra: 1 }]) {
+    expect((await f.request("timing", input, headers)).status).toBe(400);
+  }
+  expect(f.deps.timing).not.toHaveBeenCalled();
+  expect((await f.request("timing", { records: Array.from({ length: 32 }, () => duration) }, headers)).status).toBe(200);
+  expect(f.deps.timing).toHaveBeenCalledTimes(1);
+  f.revoke();
+  expect((await f.request("timing", { records: [duration] }, headers)).status).toBe(401);
 });
 it("accepts a minute-long pull only for the authenticated push-signals worker and rechecks after waiting", async () => {
   const f = fixture(true);

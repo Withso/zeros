@@ -56,6 +56,11 @@ export const CREATOR_AGENT_LOGINS_FEATURE = "creator-agent-logins-v1";
 /** §14.7: the desktop rolls its client token over on the SAME socket (CLOUD_CONNECTION_AUTH / RENEW / RENEWED). Sent as
  * X-Zeros-Client-Features on POST connect (with X-Zeros-Client-Instance) and offered as the subprotocol below. */
 export const CLIENT_TOKEN_ROLLOVER_FEATURE = "client-token-rollover-v1";
+/** carrier-hold-v1: the desktop pauses its request deadlines while the relay holds its socket across a worker-carrier
+ * redial. Advertised by the desktop on connect; the relay sends the two notices below only to such a socket. */
+export const CARRIER_HOLD_FEATURE = "carrier-hold-v1";
+/** The longest a single hold may last, and the most any one request's deadline is extended across holds. */
+export const CARRIER_HOLD_MAX_MS = 20_000;
 export const CLIENT_TOKEN_ROLLOVER_PROTOCOL = "zeros.cloud.v2.client-token-rollover-v1";
 const rolloverTime = z.number().int().nonnegative().max(8_640_000_000_000_000);
 const rolloverSchedule = { expiresAt: rolloverTime, refreshAt: rolloverTime, retryUntil: rolloverTime };
@@ -71,6 +76,15 @@ export const CloudConnectionRenewedFrameSchema = z.union([
   z.object({ type: z.literal("CLOUD_CONNECTION_RENEWED"), requestId: z.uuid(), ...rolloverSchedule }),
   z.object({ type: z.literal("CLOUD_CONNECTION_RENEWED"), requestId: z.uuid(), error: z.object({ code: CloudConnectionRenewRefusalSchema }) }),
 ]);
+/** Relay → desktop (carrier-hold-v1): the worker carrier is being redialled; this hold ends within remainingMs. A
+ * duration, never a wall-clock time (no cross-machine clock comparison). */
+export const CloudConnectionHoldFrameSchema = z.object({
+  type: z.literal("CLOUD_CONNECTION_HOLD"), remainingMs: z.number().int().positive().max(CARRIER_HOLD_MAX_MS),
+}).strict();
+/** Relay → desktop (carrier-hold-v1): the carrier is back and freshly admitted; buffered frames follow. A hold that fails
+ * ends with today's close instead. */
+export const CloudConnectionResumedFrameSchema = z.object({ type: z.literal("CLOUD_CONNECTION_RESUMED") }).strict();
+
 /** Activated: the worker serves an activated config's agentModels (the current Creator's selectable model ids) as each
  * agent's picker list. */
 export const CREATOR_AGENT_MODELS_FEATURE = "creator-agent-models-v1";
@@ -98,6 +112,12 @@ const frame = z.unknown();
 /** history-digest-v1 (not advertised until the control plane's half lands): on reconnect the worker reads each chat's
  * stored digest once and re-sends only chats whose content differs. Any doubt means today's full replacement. */
 export const HISTORY_DIGEST_FEATURE = "history-digest-v1";
+/** boot-timings-v1: the worker reports when it listens, sends and gets its hello acknowledged, and first accepts an
+ * inbound relay, so one wake reads on one timing line. Opt-in by config.bootTimings for workers that advertise it. */
+export const BOOT_TIMINGS_FEATURE = "boot-timings-v1";
+/** runtime-staging-v1: the worker asks the control plane to stage the runtime target at once (config.runtimeStaging),
+ * so a wake never installs it; the quiet handoff then reuses the staged bytes. */
+export const RUNTIME_STAGING_FEATURE = "runtime-staging-v1";
 export const CLOUD_V2_MAX_DIGEST_CHATS = 4096;
 export const CloudV2HistoryDigestSchema = z.string().regex(/^[0-9a-f]{64}$/);
 /** history-digest-deletions-v1: the reply also names the control plane's soft-deleted chats (kept until the workspace
@@ -228,7 +248,7 @@ export const CloudV2ControlFrameSchema = z.discriminatedUnion("t", [
     /** The worker's own inbound bridge only: the control plane's id for this client, its lease authority, kept beside the per-carrier local routing id. */
     authorityClientId: clientId.optional(),
     /** Activated acting-user-v1 only: the CP-authored person and client context; a worker never trusts a client's claim. */
-    userId: z.uuid().optional(), contextId: z.uuid().optional() }).strict(),
+    userId: z.uuid().optional(), contextId: z.uuid().optional(), carrierHold: z.literal(true).optional() }).strict(),
   /** Activated acting-user-v1 only: end that context now (a lost push is caught by renew or expiry). */
   z.object({ t: z.literal("revoke-context"), contextId: z.uuid(), reason: CloudV2ContextReasonSchema }).strict(),
   z.object({ t: z.literal("close"), clientId }).strict(),
@@ -251,6 +271,10 @@ export const CloudV2ControlFrameSchema = z.discriminatedUnion("t", [
     historyReplacement: z.literal(1).optional(),
     /** history-digest-v1: the control plane stores per-chat digests and serves history/digests. */
     historyDigest: z.literal(1).optional(),
+    /** boot-timings-v1: the control plane accepts CloudV2WorkerBootTimingSchema on the timing route. */
+    bootTimings: z.literal(1).optional(),
+    /** runtime-staging-v1: the control plane accepts { op: "stage" } on the runtime update route. */
+    runtimeStaging: z.literal(1).optional(),
     gitIdentity: CloudV2GitIdentitySchema.nullable().optional(),
     /** creator-commit-identity-v1 only: "creator" = gitIdentity is the current Creator's (null: none stored, commits refuse);
      * "actor" = no Creator, each context commits as its own person. Absent: N−1 behaviour. */
@@ -329,6 +353,32 @@ export const CloudV2WorkerTimingSchema = z.object({
   durationMs: z.number().int().nonnegative().max(3_600_000),
 }).strict();
 export type CloudV2WorkerTiming = z.infer<typeof CloudV2WorkerTimingSchema>;
+/** The inbound upgrade outcomes the worker itself returns (101 accepted; the rest are its refusals). */
+export const CLOUD_V2_INBOUND_STATUSES = [101, 400, 401, 404, 429, 503] as const;
+const inboundStatus = z.union([z.literal(101), z.literal(400), z.literal(401), z.literal(404), z.literal(429), z.literal(503)]);
+/** boot-timings-v1 marks, on the worker's own clocks: uptimeMs since process start, atMs its wall clock, the boot id and
+ * the hello attempt they belong to. worker_first_inbound is the first ACCEPTED (101) relay; firstStatus and refusedBefore
+ * tell it apart from earlier refusals. */
+export const CloudV2WorkerBootTimingSchema = z.object({
+  phase: z.enum(["worker_listening", "worker_hello_sent", "worker_hello_acked", "worker_applied_ready", "worker_first_inbound"]),
+  uptimeMs: z.number().int().nonnegative().max(86_400_000),
+  atMs: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  bootId: z.uuid(),
+  helloSequence: z.number().int().positive().max(1_000_000),
+  firstStatus: inboundStatus.optional(),
+  refusedBefore: z.number().int().nonnegative().max(1_000_000).optional(),
+}).strict().refine(value => value.phase === "worker_first_inbound"
+  ? value.firstStatus !== undefined && value.refusedBefore !== undefined
+  : value.firstStatus === undefined && value.refusedBefore === undefined, "Only worker_first_inbound carries inbound outcomes");
+export type CloudV2WorkerBootTiming = z.infer<typeof CloudV2WorkerBootTimingSchema>;
+/** The timing route's body: today's single duration record, or (with config.bootTimings) one boot mark or a batch of
+ * 1..32 duration records and boot marks. worker_applied_ready is a diagnostic hint, never authority. */
+export const CloudV2WorkerTimingRequestSchema = z.union([
+  CloudV2WorkerTimingSchema,
+  CloudV2WorkerBootTimingSchema,
+  z.object({ records: z.array(z.union([CloudV2WorkerTimingSchema, CloudV2WorkerBootTimingSchema])).min(1).max(32) }).strict(),
+]);
+export type CloudV2WorkerTimingRequest = z.infer<typeof CloudV2WorkerTimingRequestSchema>;
 
 // ── Team sharing phase 2, slice B: leases (team-sharing-2-wire.md "Slice B shapes") ──
 const epochMs = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);

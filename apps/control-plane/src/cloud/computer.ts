@@ -529,17 +529,18 @@ export class CloudV2Computers {
     });
   }
 
-  private async sourceBuild(organizationId: string, buildId: string): Promise<{ recipe: CloudV2Recipe; sources: CloudSourceTarget[] }> {
-    const row = (await withSystemTx(this.pool, tx => tx.query<{ source_policy_version: number; recipe: unknown; source_targets: unknown }>(
-      `SELECT source_policy_version,recipe,source_targets FROM cloud_v2_computer_builds WHERE org_id=$1 AND id=$2`, [organizationId, buildId]))).rows[0];
+  private async sourceBuild(organizationId: string, buildId: string, transaction?: Tx): Promise<{ recipe: CloudV2Recipe; sources: CloudSourceTarget[] }> {
+    const read = (tx: Tx) => tx.query<{ source_policy_version: number; recipe: unknown; source_targets: unknown }>(
+      `SELECT source_policy_version,recipe,source_targets FROM cloud_v2_computer_builds WHERE org_id=$1 AND id=$2`, [organizationId, buildId]);
+    const row = (await (transaction ? read(transaction) : withSystemTx(this.pool, read))).rows[0];
     if (!row) throw new HttpError(404, "not_found", "Cloud Computer build not found");
     const recipe = CloudV2RecipeSchema.safeParse(row.recipe);
     if (!recipe.success || row.source_policy_version < 2) throw computerSourceReviewRequired();
     return { recipe: recipe.data, sources: readComputerSourceTargets(recipe.data.repositories, row.source_targets) };
   }
 
-  async buildSourceTargets(organizationId: string, buildId: string): Promise<CloudSourceTarget[]> {
-    return (await this.sourceBuild(organizationId, buildId)).sources;
+  async buildSourceTargets(organizationId: string, buildId: string, transaction?: Tx): Promise<CloudSourceTarget[]> {
+    return (await this.sourceBuild(organizationId, buildId, transaction)).sources;
   }
 
   /** Internal creation/hydration guard. Paths select the recorded recipe, then
@@ -554,8 +555,8 @@ export class CloudV2Computers {
 
   /** Integration seam for a workspace ledger that already knows the ID. The
    * pinned commit, branch and setup always come from that ID's original entry. */
-  async recipeForRepositoryId(organizationId: string, buildId: string, repositoryId: string): Promise<RecipeEntry> {
-    const { recipe, sources } = await this.sourceBuild(organizationId, buildId);
+  async recipeForRepositoryId(organizationId: string, buildId: string, repositoryId: string, transaction?: Tx): Promise<RecipeEntry> {
+    const { recipe, sources } = await this.sourceBuild(organizationId, buildId, transaction);
     const index = sources.findIndex(source => source.repositoryId === repositoryId);
     if (index < 0) throw computerSourceReviewRequired();
     return recipe.repositories[index]!;

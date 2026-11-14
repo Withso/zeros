@@ -23,7 +23,7 @@ export class HistoryMirror {
     private readonly sanitize: <T>(value: T) => T = value => value,
     /** history-digest-v1: enabled when the control plane serves digests; `restored` (a boot from a checkpoint, possibly
      * older than the control plane's rows) replaces every remaining live chat. */
-    private readonly digests?: { enabled(): boolean; restored(): boolean }) {
+    private readonly digests?: { enabled(): boolean; restored(): boolean; delivered?(): void }) {
     this.unsubscribe = store.onChange((change) => this.change(change));
   }
 
@@ -37,15 +37,14 @@ export class HistoryMirror {
     this.epoch++;
     this.pending.clear();
     const tombstone = (chatId: string) => this.pending.set(chatId, { deleted: true, revision: 0, rows: new Map(), due: 0 });
-    // A boot restored from a checkpoint (possibly older than the control plane's rows) replaces everything once.
-    const restored = this.firstConnect && !!this.digests?.restored();
+    // A lost connection keeps the restored replacement obligation until one connection drains it in full.
+    this.restoredOwed ??= !!this.digests?.restored();
+    const restored = this.restoredOwed;
     if (this.negotiated() && this.transport.historyDigests) {
       // One read of the stored digests; only chats whose content differs are replaced (a restored boot replaces all, but
       // the read still proves the route). flush() and runtimeBusy wait for it.
       const epoch = this.epoch;
-      const sending = this.reconcile(epoch, restored, chatDeletions).then(() => {
-        if (epoch === this.epoch && this.online) this.firstConnect = false;
-      }).catch(() => {
+      const sending = this.reconcile(epoch, restored, chatDeletions).catch(() => {
         if (epoch !== this.epoch) return;
         this.disconnect();
       }).finally(() => {
@@ -55,13 +54,17 @@ export class HistoryMirror {
       this.sending = sending;
       return;
     }
-    this.firstConnect = false;
     for (const chatId of chatDeletions) tombstone(chatId);
     for (const chat of chats) this.pending.set(chat.id, this.snapshot(chat));
     this.drain();
   }
 
-  private firstConnect = true;
+  private restoredOwed?: boolean;
+  private settleRestored(): void {
+    if (!this.restoredOwed || !this.online || this.sending || this.pending.size) return;
+    this.restoredOwed = false;
+    this.digests?.delivered?.();
+  }
   /** The connection epoch whose digests read succeeded with a valid reply (an empty one included). */
   private stampEpoch = -1;
   private negotiated(): boolean { return !!this.digests?.enabled() && this.replacement(); }
@@ -160,6 +163,7 @@ export class HistoryMirror {
     clearTimeout(this.timer); this.timer = undefined;
     const ready = () => [...this.pending].find(([, pending]) => pending.due <= Date.now());
     if (!ready()) {
+      if (!this.pending.size) this.settleRestored();
       if (this.pending.size) {
         const delay = Math.max(0, Math.min(...[...this.pending.values()].map(pending => pending.due)) - Date.now());
         this.timer = setTimeout(() => { this.timer = undefined; this.drain(); }, delay);

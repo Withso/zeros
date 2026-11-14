@@ -212,7 +212,7 @@ const templates = [
   "/auth/browser/session", "/v1/me", "/v1/auth/snapshot", "/v1/auth/events", "/v1/cloud-v2/workspaces",
   "/v1/cloud-v2/workspaces/:id", "/v1/cloud-v2/workspaces/:id/events", "/v1/cloud-v2/workspaces/:id/prompts",
   "/v1/cloud-v2/workspaces/:id/connect", "/v1/cloud-v2/workspaces/:id/history", "/v1/cloud-v2/workspaces/:id/activity",
-  "/v1/cloud-v2/workspaces/:id/github",
+  "/v1/cloud-v2/workspaces/:id/github", "/v1/cloud-v2/workspaces/:id/start",
   "/v1/cloud-v2/devices/:deviceId/connections", "/v1/cloud-v2/devices/:deviceId/events", "/v1/cloud-v2/devices/:deviceId/heartbeat",
   "/v2/cloud/worker/prompts/pull", "/v2/cloud/worker/prompts/ack", "/v2/cloud/worker/prompts/begin",
   "/v2/cloud/worker/turn-lease", "/v2/cloud/worker/execution-leases/renew", "/v2/cloud/worker/history", "/v2/cloud/worker/activity",

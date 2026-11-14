@@ -11,6 +11,7 @@ interface Options {
   store: Pick<CloudV2Store, "workerSession" | "get" | "accessEpoch" | "loginRevision">;
   compute: Pick<CloudV2Compute, "execLong">;
   runtimeForWorkspace(workspace: CloudV2Workspace): Promise<CloudV2Runtime>;
+  stageRoute?: CloudV2Store["workerRoute"];
   drainActive?(): Promise<boolean>;
   sleep?(ms: number): Promise<void>;
   logger?: Pick<Console, "warn">;
@@ -20,6 +21,7 @@ interface Options {
  * target; neither a client nor the worker can request an arbitrary archive. */
 export class RuntimeAdoption {
   private readonly flights = new Map<string, Promise<void>>();
+  private readonly stages = new Map<string, { bootId: string; sha256: string; abort: AbortController; task: Promise<CloudRuntimeUpdateReply> }>();
   private readonly stop = new AbortController();
   private closed = false;
   constructor(private readonly options: Options) {}
@@ -51,9 +53,11 @@ export class RuntimeAdoption {
     }
     if (input.op === "cancel") return await handoffs.cancel(token, input.id, bootId) ? { status: "cancelled", id: input.id } : { status: "unavailable" };
     const workspace = await this.options.store.workerSession(token, bootId);
-    // Shared execution needs the separate drain and clean-boot rollout before
-    // a runtime handoff may use any legacy setup or credential path.
-    if (this.closed || !workspace || workspace.state !== "running" || workspace.executionMode === "active") return { status: "unavailable" };
+    if (this.closed || !workspace || workspace.state !== "running") return { status: "unavailable" };
+    // Staging grants no execution or credential authority. Shared adoption
+    // still requires its separate clean-boot and promotion fences.
+    if (workspace.executionMode === "active" && input.op !== "stage" && !(input.op === "status" && !input.id))
+      return { status: "unavailable" };
     if (input.op === "status" && input.id) {
       const h = await handoffs.inspect(token, input.id);
       if (!h || h.workspace_id !== workspace.id || h.old_boot_id !== bootId.toLowerCase()) return { status: "unavailable" };
@@ -89,6 +93,7 @@ export class RuntimeAdoption {
       const installed = await handoffs.runtime(token, bootId);
       return !installed ? { status: "unavailable" } : installed === runtime.sha256 ? { status: "current" } : { status: "target", sha256: runtime.sha256 };
     }
+    if (input.op === "stage") return this.stage(token, bootId, workspace, runtime);
     if (input.op === "prepare") {
       const h = await handoffs.prepare(token, bootId, { ...input, target: runtime.sha256 });
       if (!h) return { status: "unavailable" };
@@ -129,6 +134,79 @@ export class RuntimeAdoption {
     }
   }
   close(): void { this.closed = true; this.stop.abort(); }
+  cancelStaging(workspaceId: string): void { this.stages.get(workspaceId)?.abort.abort(); }
+  async beforeIdleStop(workspace: CloudV2Workspace): Promise<void> {
+    if (this.closed || !this.options.stageRoute) return;
+    const abort = new AbortController();
+    const timer = setTimeout(() => { abort.abort(); this.cancelStaging(workspace.id); }, 30_000);
+    timer.unref();
+    try {
+      await this.bounded(abort.signal, async () => {
+        const before = await this.options.stageRoute!(workspace.id);
+        if (!before?.bootId || !before.workerTokenHash || before.workspace.state !== "running" ||
+            before.workspace.boatSandboxId !== workspace.boatSandboxId || this.closed || abort.signal.aborted) return;
+        const runtime = await this.options.runtimeForWorkspace(before.workspace);
+        const current = async () => {
+          const after = await this.options.stageRoute!(workspace.id);
+          return after?.workspace.state === "running" && after.bootId === before.bootId && after.workerTokenHash === before.workerTokenHash &&
+            after.workspace.boatSandboxId === before.workspace.boatSandboxId && after.accessEpoch === before.accessEpoch &&
+            after.recoveryAttemptId === before.recoveryAttemptId && after.executionMode === before.executionMode &&
+            (await this.options.runtimeForWorkspace(after.workspace)).sha256 === runtime.sha256;
+        };
+        if (!this.closed && !abort.signal.aborted) await this.prepareStage(before.bootId, before.workspace, runtime, current, 30, abort.signal);
+      });
+    } catch { this.options.logger?.warn("[cloud-v2] idle runtime staging deferred"); }
+    finally { clearTimeout(timer); }
+  }
+  private stage(token: string, bootId: string, workspace: CloudV2WorkerSession, runtime: CloudV2Runtime): Promise<CloudRuntimeUpdateReply> {
+    const current = async () => {
+      const value = await this.options.store.workerSession(token, bootId);
+      return value?.state === "running" && value.id === workspace.id && value.boatSandboxId === workspace.boatSandboxId &&
+        value.accessEpoch === workspace.accessEpoch && value.loginRevision === workspace.loginRevision &&
+        value.executionMode === workspace.executionMode && value.recoveryAttemptId === workspace.recoveryAttemptId &&
+        (await this.options.runtimeForWorkspace(value)).sha256 === runtime.sha256;
+    };
+    return this.prepareStage(bootId, workspace, runtime, current);
+  }
+  private prepareStage(bootId: string, workspace: CloudV2Workspace, runtime: CloudV2Runtime, current: () => Promise<boolean>,
+    seconds = 300, callerSignal?: AbortSignal): Promise<CloudRuntimeUpdateReply> {
+    const prior = this.stages.get(workspace.id);
+    if (prior) {
+      if (!prior.abort.signal.aborted && prior.bootId === bootId && prior.sha256 === runtime.sha256) return prior.task;
+      prior.abort.abort();
+      return Promise.resolve({ status: "unavailable" });
+    }
+    if (!workspace.boatSandboxId || this.stages.size >= 32) return Promise.resolve({ status: "unavailable" });
+    const abort = new AbortController();
+    const signal = AbortSignal.any([abort.signal, this.stop.signal, AbortSignal.timeout(seconds * 1000), ...(callerSignal ? [callerSignal] : [])]);
+    const task = (async (): Promise<CloudRuntimeUpdateReply> => {
+      try {
+        return await this.bounded(signal, async (): Promise<CloudRuntimeUpdateReply> => {
+          const url = await runtime.url();
+          if (signal.aborted || !await current() || signal.aborted) return { status: "unavailable" };
+          const result = await this.options.compute.execLong(workspace.boatSandboxId!,
+            prepareRuntimeCommand({ sha256: runtime.sha256, url, timeoutSeconds: seconds }), seconds, undefined, signal);
+          if (result.exitCode !== 0 || result.timedOut || signal.aborted || !await current() || signal.aborted) return { status: "unavailable" };
+          return { status: "staged", sha256: runtime.sha256 };
+        });
+      } catch {
+        this.options.logger?.warn("[cloud-v2] runtime staging deferred");
+        return { status: "unavailable" };
+      }
+    })().finally(() => { if (this.stages.get(workspace.id)?.task === task) this.stages.delete(workspace.id); });
+    this.stages.set(workspace.id, { bootId, sha256: runtime.sha256, abort, task });
+    return task;
+  }
+  private async bounded<T>(signal: AbortSignal, action: () => Promise<T>): Promise<T> {
+    signal.throwIfAborted();
+    let stop!: () => void;
+    const cancelled = new Promise<never>((_resolve, reject) => {
+      stop = () => reject(new Error("Runtime staging cancelled"));
+      signal.addEventListener("abort", stop, { once: true });
+    });
+    try { return await Promise.race([action(), cancelled]); }
+    finally { signal.removeEventListener("abort", stop); }
+  }
   private track(id: string, action: () => Promise<void>): void {
     if (this.flights.has(id)) return;
     const task = action().catch(() => this.options.logger?.warn("[cloud-v2] runtime adoption unsettled"))

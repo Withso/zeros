@@ -116,7 +116,7 @@ export class CloudWorkspaceSync {
     });
   }
 
-  async advertise(token: string, bootId: string, supported: boolean, handoff?: string, contextSupported = false): Promise<boolean> {
+  async advertise(token: string, bootId: string, supported: boolean, handoff?: string, contextSupported = false, transaction?: Tx): Promise<boolean> {
     const bootIdsFor = (column: "sync_boot_ids" | "sync_context_boot_ids", supported: "$5" | "$6") => `ARRAY(
       SELECT DISTINCT id FROM unnest(${column} || CASE WHEN ${supported} THEN ARRAY[$2::uuid] ELSE '{}'::uuid[] END) AS boots(id)
       WHERE (id=w.worker_boot_id OR id=$2::uuid OR ($3::uuid IS NULL AND id=(
@@ -128,12 +128,13 @@ export class CloudWorkspaceSync {
     const authority = `worker_token_hash=$1 AND state IN ('creating','starting','running') AND ${CLOUD_V2_LIVE_ACCESS}
       AND (($3::uuid IS NULL AND worker_boot_id=$2) OR ($3::uuid IS NOT NULL AND ${RUNTIME_HANDOFF_SESSION}))`;
     const parameters = [hashCloudV2Token(token), bootId, handoff ?? null, null, supported, supported && contextSupported];
-    return withSystemTx(this.pool, async tx => {
+    const advertise = async (tx: Tx) => {
       const row = (await tx.query<{ unchanged: boolean }>(`SELECT sync_boot_ids=${bootIds} AND sync_context_boot_ids=${contextBootIds} AS unchanged
         FROM cloud_v2_workspaces w WHERE ${authority}`, parameters)).rows[0];
       if (!row) return false;
       if (row.unchanged) return true;
       return Boolean((await tx.query(`UPDATE cloud_v2_workspaces w SET sync_boot_ids=${bootIds},sync_context_boot_ids=${contextBootIds} WHERE ${authority}`, parameters)).rowCount);
-    });
+    };
+    return transaction ? advertise(transaction) : withSystemTx(this.pool, advertise);
   }
 }

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RuntimeClient, type RuntimeClientEnvironment, type RuntimeTransportSocket } from "../runtime-client";
 import { classifyRpcError } from "../failure";
 import { cloudConnectBackoffKey, cloudConnectWaitMs, recordCloudConnectFailure, resetCloudConnectBackoffForTests } from "../cloud-connect-backoff";
@@ -358,3 +358,89 @@ it("§14.5: only a ready connection clears the shared connect backoff", async ()
   await vi.advanceTimersByTimeAsync(0);
   expect(h.client.status).toBe("connected"); expect(cloudConnectWaitMs(key)).toBe(0);
 });
+
+// Master's carrier-hold ruling: the relay holds the desktop's WebSocket across a worker-carrier redial (up to 20 s),
+// so the desktop sees no close. These pin what the desktop does with a held socket.
+it("a held socket (relay redialling its worker carrier) causes no status change and no new ticket", async () => {
+  const h = fixture(), states: string[] = [];
+  await h.client.connect(); await h.ready(h.sockets[0]!);
+  h.client.onStatusChange(status => states.push(status));
+  // 20 s of silence on an open socket: the hold bound.
+  await vi.advanceTimersByTimeAsync(20_000);
+  expect(states).toEqual([]);
+  expect(h.client.status).toBe("connected");
+  expect(h.refresh).not.toHaveBeenCalled();
+  expect(h.sockets).toHaveLength(1);
+});
+
+
+describe("carrier-hold-v1: a held relay pauses request deadlines", () => {
+  const notice = (socket: Socket, frame: Record<string, unknown>) => socket.onmessage?.({ data: JSON.stringify(frame) } as MessageEvent);
+  const hold = (socket: Socket, remainingMs = 20_000) => notice(socket, { type: "CLOUD_CONNECTION_HOLD", remainingMs });
+  const resumed = (socket: Socket) => notice(socket, { type: "CLOUD_CONNECTION_RESUMED" });
+  const status = (h: ReturnType<typeof fixture>) => h.client.request({ type: "WORKSPACE_REQUEST", op: "git.status", params: {} } as never)
+    .then(() => "answered", error => String(error));
+  const sentStatus = (socket: Socket) => socket.sent.filter(message => message.op === "git.status").at(-1)!;
+
+  it("a request in flight survives a 12 s hold and is answered after it", async () => {
+    const h = fixture(); await h.client.connect(); const socket = h.sockets[0]!; await h.ready(socket);
+    const states: string[] = []; h.client.onStatusChange(value => states.push(value));
+    const settled = status(h);
+    await vi.advanceTimersByTimeAsync(1_000); hold(socket);
+    await vi.advanceTimersByTimeAsync(12_000); resumed(socket);
+    socket.answer(sentStatus(socket));
+    expect(await settled).toBe("answered");
+    expect(states).toEqual([]); expect(h.refresh).not.toHaveBeenCalled();
+  });
+
+  it("a request made during the hold survives it", async () => {
+    const h = fixture(); await h.client.connect(); const socket = h.sockets[0]!; await h.ready(socket);
+    hold(socket);
+    const settled = status(h);
+    await vi.advanceTimersByTimeAsync(12_000); resumed(socket);
+    await vi.advanceTimersByTimeAsync(1_000);
+    socket.answer(sentStatus(socket));
+    expect(await settled).toBe("answered");
+  });
+
+  it("a hold that ends in a close rejects pending requests at once", async () => {
+    const h = fixture(); await h.client.connect(); const socket = h.sockets[0]!; await h.ready(socket);
+    hold(socket);
+    const settled = status(h);
+    await vi.advanceTimersByTimeAsync(3_000);
+    socket.close(1006);
+    expect(await settled).toContain("Request timeout");
+  });
+
+  it("repeated notices cannot keep one request pending past its deadline plus 20 s", async () => {
+    const h = fixture(); await h.client.connect(); const socket = h.sockets[0]!; await h.ready(socket);
+    const settled = status(h);
+    let outcome: string | undefined; void settled.then(value => { outcome = value; });
+    for (let i = 0; i < 6; i++) { hold(socket); await vi.advanceTimersByTimeAsync(10_000); resumed(socket); }
+    // Default 5 s deadline + at most 20 s of holds: settled by 25 s, well before the 60 s of notices end.
+    expect(outcome).toContain("Request timeout");
+  });
+
+  it("a hold longer than 20 s resumes on its own at the desktop's cap", async () => {
+    const h = fixture(); await h.client.connect(); const socket = h.sockets[0]!; await h.ready(socket);
+    const settled = status(h);
+    hold(socket, 20_000);
+    await vi.advanceTimersByTimeAsync(24_000);
+    socket.answer(sentStatus(socket));
+    expect(await settled).toBe("answered");
+  });
+
+  it("without notices (an older relay) today's 5 s deadline is unchanged", async () => {
+    const h = fixture(); await h.client.connect(); const socket = h.sockets[0]!; await h.ready(socket);
+    const settled = status(h);
+    await vi.advanceTimersByTimeAsync(5_001);
+    expect(await settled).toContain("Request timeout");
+  });
+
+  it("an older desktop drops the notices: they are not engine frames", async () => {
+    const { parseInboundBridgeWebSocketFrame } = await import("../runtime-client");
+    expect(parseInboundBridgeWebSocketFrame(JSON.stringify({ type: "CLOUD_CONNECTION_HOLD", remainingMs: 20_000 }))).toBeNull();
+    expect(parseInboundBridgeWebSocketFrame(JSON.stringify({ type: "CLOUD_CONNECTION_RESUMED" }))).toBeNull();
+  });
+});
+

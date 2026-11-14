@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { constants, createReadStream } from "node:fs";
-import { chmod, copyFile, lstat, mkdir, mkdtemp, open, realpath, rm, writeFile } from "node:fs/promises";
+import { chmod, copyFile, lstat, mkdir, mkdtemp, open, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -71,8 +71,17 @@ const CONTAINER_BUILD = [
   "pnpm --filter @zeros/cloud-worker rebuild node-pty esbuild",
   "node apps/cloud-worker/scripts/build.mjs --outdir /runtime",
   "cp /source/build-metadata.json /runtime/BUILD.json",
-  "tar --sort=name --owner=0 --group=0 --numeric-owner -czf /out/runtime.tar.gz -C /runtime .",
+  'node --input-type=module -e \'import { archiveRuntime } from "./apps/cloud-worker/scripts/package-runtime.mjs"; await archiveRuntime("/runtime", "/out/runtime.tar.gz");\'',
 ].join("\n");
+
+export async function archiveRuntime(directory, archive, { execute = execFileSync, env } = {}) {
+  // Boot verifies these pinned members before hashing the extracted files.
+  // Leading metadata lets tar stop without decompressing every native binary.
+  const metadata = ["runtime-manifest.json", "BUILD.json"];
+  const members = [...metadata, ...(await readdir(directory)).filter(name => !metadata.includes(name)).sort()];
+  await execute("tar", ["--sort=name", "--owner=0", "--group=0", "--numeric-owner", "-czf", archive,
+    "-C", directory, ...members.map(name => `./${name}`)], { timeout: 10 * 60_000, env });
+}
 
 export function dockerRuntimeInvocation(source, output, name) {
   if ([source, output].some(value => !value.startsWith("/") || /[,\r\n]/.test(value)) || !/^zeros-runtime-[a-z0-9-]+$/.test(name))
@@ -113,7 +122,7 @@ export async function packageRuntime({ output, allowDirty = false, docker = fals
       if ((await runtimeSourceIdentity(repository)).sourceSha256 !== metadata.sourceSha256)
         throw new Error("Worker sources changed during packaging; retry the build");
       await copyFile(join(source, "build-metadata.json"), join(dist, "BUILD.json"));
-      await execute("tar", ["--sort=name", "--owner=0", "--group=0", "--numeric-owner", "-czf", archive, "-C", dist, "."], { timeout: 10 * 60_000, env });
+      await archiveRuntime(dist, archive, { execute, env });
     }
     const hash = createHash("sha256");
     for await (const chunk of createReadStream(archive)) hash.update(chunk);

@@ -20,6 +20,9 @@ import { cloudConnectBackoffKey, cloudConnectWaitMs, recordCloudConnectFailure }
 import { setRelayPresence } from "./relay-presence";
 
 const RELAY_PRESENCE_FEATURE = "relay-presence-v1";
+/** The control plane holds this ticket's relay socket until the worker is ready (bounded), so a waking workspace costs
+ * one connect: churn before ready ends the open instead of minting another ticket. */
+const CONNECT_READY_FEATURE = "connect-ready-v1";
 
 const CONNECT_TIMEOUT_MS = 3 * 60_000;
 const TICKET_TIMEOUT_MS = 30_000;
@@ -167,6 +170,8 @@ export async function openCloudV2Runtime(
   assertCurrent();
   // R1 relay-presence-v1: an admission with the feature makes this live connection count as presence.
   let presenceAdmitted = features?.includes(RELAY_PRESENCE_FEATURE) === true;
+  const readyHeld = features?.includes(CONNECT_READY_FEATURE) === true;
+  const beforeReady = new AbortController();
   let endPresence: (() => void) | undefined;
   const client = new RuntimeClient(ticket, {
     // D2: a 4001 access_revoked ends access only once the workspace document confirms it.
@@ -185,6 +190,13 @@ export async function openCloudV2Runtime(
     // restarts a VM that stopped meanwhile. Fresh user input owns the next wake.
     refreshCloudConnectionTarget: async () => {
       assertCurrent();
+      if (readyHeld && !opened) {
+        // connect-ready-v1: the one socket was the whole wait. Its loss before ready ends this open (no new connect
+        // while the workspace is still waking); fresh user input owns the next attempt.
+        const error = new Error("The cloud workspace connection ended before it was ready. Try again.");
+        beforeReady.abort(error);
+        throw error;
+      }
       // After the open, the ticket window starts once the shared backoff has passed (Infinity: no outer deadline).
       const { features: renewed, ...refreshed } = await ticketTarget(target, sequence + 1, false, assertCurrent, opened ? Infinity : deadline, signal, clientInstance);
       sequence = refreshed.connectionSequence;
@@ -199,7 +211,7 @@ export async function openCloudV2Runtime(
   };
   const offPresence = client.onStatusChange(syncPresence);
   const release = () => { lifetime.abort(); offPresence(); syncPresence(); client.dispose(); };
-  const waiting = connectionWait(assertCurrent, deadline, signal);
+  const waiting = connectionWait(assertCurrent, deadline, AbortSignal.any([signal, beforeReady.signal]));
   try {
     waiting.check();
     void client.connect();
@@ -224,6 +236,7 @@ export async function openCloudV2Runtime(
     };
   } catch (error) {
     release();
-    throw error;
+    // connect-ready-v1: name why the open ended (the socket was lost before ready), not a generic cancellation.
+    throw beforeReady.signal.aborted ? beforeReady.signal.reason : error;
   } finally { waiting.dispose(); }
 }

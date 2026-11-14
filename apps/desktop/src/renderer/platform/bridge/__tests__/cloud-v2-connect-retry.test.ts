@@ -281,3 +281,41 @@ describe("bounded cloud connect ticket retries", () => {
     other.release();
   });
 });
+
+describe("connect-ready-v1: at most one connect per waking workspace", () => {
+  const readyTicket = { ...ticket, features: ["connect-ready-v1"] };
+
+  it("holds the one socket while the workspace becomes ready (over 70 s), with no second connect", async () => {
+    mocks.connect.mockResolvedValue(readyTicket); mocks.autoConnect = false;
+    const attempt = opening(); await flush();
+    await vi.advanceTimersByTimeAsync(75_000);
+    expect(attempt.settled()).toBe(false);
+    const client = mocks.clients[0] as unknown as { status: string; listeners: Set<(status: string) => void> };
+    client.status = "connected"; for (const listener of client.listeners) listener("connected");
+    expect(await attempt.result).toMatchObject({ runtimeId: target.workspaceId });
+    expect(mocks.connect).toHaveBeenCalledTimes(1);
+  });
+
+  it("socket churn before ready ends the open instead of posting another connect", async () => {
+    mocks.connect.mockResolvedValue(readyTicket); mocks.autoConnect = false;
+    const attempt = opening(); await flush();
+    await expect(mocks.clients[0]!.refresh()).rejects.toThrow();
+    expect(await attempt.result).toMatchObject({ message: expect.stringContaining("before it was ready") });
+    expect(mocks.connect).toHaveBeenCalledTimes(1);
+  });
+
+  it("an older control plane (no feature) still re-tickets on churn before ready", async () => {
+    mocks.autoConnect = false;
+    const attempt = opening(); await flush();
+    await expect(mocks.clients[0]!.refresh()).resolves.toMatchObject({ connectionSequence: 2 });
+    expect(mocks.connect).toHaveBeenCalledTimes(2);
+    expect(attempt.settled()).toBe(false);
+  });
+
+  it("after the open, an established session's reconnect re-tickets as before", async () => {
+    mocks.connect.mockResolvedValue(readyTicket);
+    const attempt = opening(); await flush(); await attempt.result;
+    await expect(mocks.clients[0]!.refresh()).resolves.toMatchObject({ connectionSequence: 2 });
+    expect(mocks.connect).toHaveBeenCalledTimes(2);
+  });
+});

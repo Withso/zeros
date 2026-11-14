@@ -193,6 +193,22 @@ database("in-place client authentication through the real router, PostgreSQL and
     expect((await call(feature, randomUUID())).status).toBe(400);
   });
 
+  it("binds carrier hold to the consumed ticket without losing comma-list rollover", async () => {
+    const instance = randomUUID();
+    for (const features of [`${feature}, carrier-hold-v1`, feature, `${feature},carrier-hold-v10`]) {
+      const response = await f.call(`/v1/cloud-v2/workspaces/${f.workspace.id}/connect`, "POST", { wake: false }, f.viewer, {
+        "X-Zeros-Team-Sharing": "1", "X-Zeros-Client-Features": features, "X-Zeros-Client-Instance": instance,
+      });
+      expect(response.status).toBe(200);
+      const value = await response.json(), raw = value.protocols[1].slice(7);
+      const grant = await f.cp.store.consumeConnectTicket(raw, f.workspace.id);
+      expect(grant?.execution?.clientInstanceId).toBe(instance);
+      expect(grant?.execution).toMatchObject(features.endsWith(" carrier-hold-v1") ? { carrierHold: 1 } : { clientInstanceId: instance });
+      if (!features.endsWith(" carrier-hold-v1")) expect(grant?.execution).not.toHaveProperty("carrierHold");
+      expect(await f.cp.store.consumeConnectTicket(raw, f.workspace.id)).toBeNull();
+    }
+  });
+
   it("does not acknowledge or revive a handle closed while rollover is waiting", async () => {
     const client = await connect();
     f.viewer.authentication.tokenExpiresAt! += 300;

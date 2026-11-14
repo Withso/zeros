@@ -6,7 +6,7 @@ import { rateLimit } from "../ratelimit.js";
 import { Hono, type Context } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
-import { CLOUD_CLIENT_ROLLOVER_FEATURE } from "./client-auth-contract.js";
+import { CARRIER_HOLD_FEATURE, CLOUD_CLIENT_ROLLOVER_FEATURE } from "./client-auth-contract.js";
 import type { CloudWorkspaceSync } from "./workspace-sync/store.js";
 import { createCloudWorkspaceSyncRoutes } from "./workspace-sync/routes.js";
 import type { CloudWorkspaceGithubReadTokens } from "./workspace-sync/github-read-token.js";
@@ -58,6 +58,7 @@ const ChatEditSchema = z.object({ title: CloudV2SessionNameSchema.transform(valu
   .strict().refine(value => value.title !== undefined || value.archived !== undefined);
 
 export type CloudV2RouteDeps = {
+  connectReady?: boolean;
   actingUserDefault?: boolean;
   activeCreateRuntime?(canary?: RuntimeCanaryAdmission): Promise<RuntimeCapabilities>;
   teamSharing?: CloudTeamSharing;
@@ -104,6 +105,15 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
   const app = new Hono();
   const chatEdits = deps.store.chatEdits;
   const connections = new WeakMap<Context, Promise<Awaited<ReturnType<CloudExecutionContexts["connectionWorkspace"]>>>>();
+  const activeWorkspaces = new WeakMap<Context, Promise<boolean>>();
+  const activeWorkspace = (c: Context, id: string) => {
+    let pending = activeWorkspaces.get(c);
+    if (!pending) {
+      pending = deps.execution?.active(id) ?? Promise.resolve(false);
+      activeWorkspaces.set(c, pending);
+    }
+    return pending;
+  };
   const connectionWorkspace = (c: Context, id: string) => {
     let pending = connections.get(c);
     if (!pending) {
@@ -113,7 +123,7 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
     return pending;
   };
   if (deps.teamSharing) app.route("/",createCloudTeamRoutes(deps.teamSharing,value => workspaceDocument(value,deps.promptOutbox === true,!!chatEdits),
-    async (c,id) => Boolean(await connectionWorkspace(c,id))));
+    async (c,id) => c.req.path.endsWith("/connect") ? Boolean(await connectionWorkspace(c,id)) : activeWorkspace(c,id)));
   if (deps.localDevices) app.route("/", createCloudLocalDeviceRoutes(deps.localDevices));
   if (deps.workspaceSync) app.route("/", createCloudWorkspaceSyncRoutes(deps.workspaceSync));
   if (deps.workspaceGithubReadTokens) app.route("/", createCloudWorkspaceGithubReadTokenRoutes(deps.workspaceGithubReadTokens));
@@ -236,18 +246,19 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
       }
     }
     let clientInstanceId: string | undefined;
-    if (active && c.req.header("X-Zeros-Client-Features")?.split(",").map(value => value.trim()).includes(CLOUD_CLIENT_ROLLOVER_FEATURE)) {
+    const clientFeatures = c.req.header("X-Zeros-Client-Features")?.split(",").map(value => value.trim()) ?? [];
+    if (active && clientFeatures.includes(CLOUD_CLIENT_ROLLOVER_FEATURE)) {
       const instance = uuid.safeParse(c.req.header("X-Zeros-Client-Instance"));
       if (!instance.success) throw new HttpError(400, "invalid_request", "Invalid cloud connection binding");
       clientInstanceId = instance.data;
     }
     const ticket = active ? await deps.execution!.clients.ticket(workspace.id, c.get("user"), wake, clientInstanceId,
-      wake && workspace.state === "stopped" ? undefined : acting!.proof) : await deps.store.issueToken({ workspaceId: workspace.id, kind: "connect", userId, ttlMs: CONNECT_TICKET_TTL_MS, authority: c.get("user"), wake });
+      wake && workspace.state === "stopped" ? undefined : acting!.proof, clientFeatures.includes(CARRIER_HOLD_FEATURE)) : await deps.store.issueToken({ workspaceId: workspace.id, kind: "connect", userId, ttlMs: CONNECT_TICKET_TTL_MS, authority: c.get("user"), wake });
     return c.json({
       url: `${deps.bridgeBaseUrl.replace(/\/+$/, "")}/v2/cloud/workspaces/${workspace.id}/bridge`,
       protocols: [CLOUD_V2_BRIDGE_PROTOCOL, `ticket.${ticket.token}`],
       expiresAt: ticket.expiresAt.toISOString(),
-      ...(active ? { features: ["relay-presence-v1"] } : {}),
+      ...(active || deps.connectReady ? { features: [...(active ? ["relay-presence-v1"] : []), ...(deps.connectReady ? ["connect-ready-v1"] : [])] } : {}),
     });
   });
 
@@ -275,11 +286,10 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
     app.post(`/v1/cloud-v2/workspaces/:id/${action}`, async c => {
       const id = uuid.safeParse(c.req.param("id"));
       if (!id.success) throw new HttpError(404, "not_found", "Cloud workspace not found");
-      const user = c.get("user"), active = deps.execution && await deps.execution.active(id.data);
+      const user = c.get("user"), active = await activeWorkspace(c, id.data);
       const ownership = c.req.header(TEAM_SHARING_HEADER) === "1" && c.req.header(TEAM_OWNERSHIP_HEADER) === "1";
-      if (active && !ownership) await deps.teamSharing?.requireOwnershipAfterHiddenRead(user, { id: id.data });
-      const proof = active && action !== "stop" ? await deps.execution!.deps.authority.admit(id.data, user.id, { user }) : undefined;
-      const { workspace, moved } = active ? await deps.store.requestExecutionLifecycle!(id.data, user.id, action, proof, user) : await deps.store.requestLifecycle(id.data, user.id, action);
+      const { workspace, moved } = active ? await deps.store.requestExecutionLifecycle!(id.data, user.id, action, undefined, user, false, ownership)
+        : await deps.store.requestLifecycle(id.data, user.id, action);
       if (active && ownership && deps.teamSharing) return c.json({
         workspace: workspaceDocument(await deps.teamSharing.lifecycleDocument(id.data,user),deps.promptOutbox === true,!!chatEdits),
         teamSharing: 1,teamOwnership: 1,

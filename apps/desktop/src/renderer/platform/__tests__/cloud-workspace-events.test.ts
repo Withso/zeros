@@ -104,3 +104,28 @@ describe("watching a teammate's workspace", () => {
     h.stop();
   });
 });
+
+describe("a waking workspace's events stream", () => {
+  it("opens no stream while the workspace is not ready, and opens once when it becomes ready", async () => {
+    let ready = false;
+    const listeners = new Set<() => void>();
+    const opens: number[] = [];
+    const events = async function* (_target: unknown, signal: AbortSignal): AsyncGenerator<CloudWorkspaceEvent> {
+      opens.push(1);
+      yield { event: "ready" };
+      await new Promise((_resolve, reject) => signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true }));
+    };
+    const stop = watchCloudWorkspaceEvents(target, { invalidate: vi.fn(), presence: vi.fn(), ended: vi.fn() }, {
+      events: events as never, sleep: async () => {},
+      ready: () => ready, onReadiness: listener => { listeners.add(listener); return () => listeners.delete(listener); },
+    });
+    for (let i = 0; i < 5; i++) { for (const listener of [...listeners]) listener(); await Promise.resolve(); }
+    expect(opens).toHaveLength(0);
+    ready = true;
+    for (const listener of [...listeners]) listener();
+    await vi.waitFor(() => expect(opens).toHaveLength(1));
+    stop();
+    expect(listeners.size).toBe(0);
+  });
+});
+

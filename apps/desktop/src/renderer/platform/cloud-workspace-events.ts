@@ -99,6 +99,9 @@ export interface CloudWorkspaceEventDeps {
   events?: typeof readCloudWorkspaceEvents;
   sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
   now?: () => number;
+  /** A workspace that is not ready (stopped, waking) holds no stream: it waits, without a timer, for readiness. */
+  ready?: () => boolean;
+  onReadiness?: (listener: () => void) => () => void;
 }
 export const CLOUD_EVENTS_SILENCE_MS = 70_000;
 const HEALTHY_STREAM_MS = 30_000;
@@ -117,9 +120,16 @@ export function watchCloudWorkspaceEvents(target: CloudWorkspaceTarget, handlers
   const stop = new AbortController();
   const generation = getOrganizationStoreGeneration();
   let presence: string | null = null;
+  const untilReady = () => new Promise<void>(resolve => {
+    if (!deps.ready || deps.ready() || stop.signal.aborted) { resolve(); return; }
+    const finish = () => { off?.(); stop.signal.removeEventListener("abort", finish); resolve(); };
+    const off = deps.onReadiness?.(() => { if (deps.ready!()) finish(); });
+    stop.signal.addEventListener("abort", finish, { once: true });
+  });
   void (async () => {
     let failures = 0;
     while (!stop.signal.aborted && generation === getOrganizationStoreGeneration()) {
+      if (deps.ready && !deps.ready()) { await untilReady(); if (stop.signal.aborted) return; }
       const stream = new AbortController();
       const abortStream = () => stream.abort();
       stop.signal.addEventListener("abort", abortStream, { once: true });

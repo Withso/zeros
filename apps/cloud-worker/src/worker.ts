@@ -161,6 +161,8 @@ export class CloudWorker {
   private readonly githubCredentials: GithubCredentialRecovery;
   private githubUserTokensEnabled = false;
   private historyReplacementEnabled = false;
+  /** runtime-staging-v1: stage each runtime target at once, independent of quiet. */
+  private runtimeStagingEnabled = false;
   /** The control plane must opt in before digest fields enter history frames. */
   private historyDigestEnabled = false;
   /** Read when a native execution's tools are admitted. */
@@ -605,6 +607,7 @@ export class CloudWorker {
     }
     this.historyReplacementEnabled = config.historyReplacement === 1;
     this.historyDigestEnabled = config.historyDigest === 1;
+    this.runtimeStagingEnabled = config.runtimeStaging === 1;
     this.localCommandsEnabled = config.localCommands === 1;
     this.localCommandReason = config.localCommandReason === 1;
     this.notifyUserEnabled = config.notifyUser === 1;
@@ -636,6 +639,16 @@ export class CloudWorker {
       this.history!.connect();
       this.configurationRevision = revision;
       return;
+    }
+    if (this.acting && this.options.runtimeResume && this.contexts) {
+      // An acting handoff boot skips bootstrapLease, the only other wait on this boot's clean attestation. Its private
+      // ready (readyRuntime, then runtimeResume.ready completing the handoff marker) waits for an ACCEPTED attestation
+      // on top of the configuration applied above; a refused, unproven or failed clean never promotes or clears it.
+      this.options.log?.("runtime-ready waiting=boot-clean");
+      const accepted = await this.contexts.ready().then(() => true, () => false);
+      if (!accepted) { this.options.log?.("runtime-ready refused=boot-clean"); return; }
+      // Stop, dispose or a newer configuration while waiting own readiness now.
+      if (this.disposed || this.stopping || this.acceptedConfigurationRevision !== revision) return;
     }
     await measureStartup("worker_reconfigure_ready", async () => { await this.options.transport.readyRuntime?.(); }, initial ? undefined : timing);
     if (this.disposed || this.stopping) return;
@@ -672,6 +685,7 @@ export class CloudWorker {
     if (config.runtimeUpdate === 1 && this.options.transport.runtimeUpdate && this.options.runtimePermit && !this.runtimeUpdater) {
       this.runtimeUpdater = new RuntimeUpdate({ gate: this.runtimeGate, permit: this.options.runtimePermit, instanceId: this.instanceId,
         revision: () => this.configurationRevision?.toString(), request: this.options.transport.runtimeUpdate.bind(this.options.transport),
+        staging: () => this.runtimeStagingEnabled,
         flush: async () => {
           await this.flushServices();
           if (!await this.history!.flush()) throw new Error("History mirror is unavailable.");
@@ -752,6 +766,14 @@ export class CloudWorker {
         if (error.code !== "ENOENT") throw error;
         return false;
       });
+      // The marker has one meaning: this restored boot still owes something. It clears only when the restored history
+      // replacement was delivered AND, if a setup is selected, that setup was admitted. A crash before either keeps
+      // it, so the next boot repeats the forced replacement (the safe direction).
+      let restoredHistoryDelivered = false, restoredSetupAdmitted = false;
+      const settleRestoreMarker = async () => {
+        if (!restored || !restoredHistoryDelivered || !(restoredSetupAdmitted || setup?.selected() === false)) return;
+        await rm(restoreMarker, { force: true }).catch(() => {});
+      };
       // Before setup starts, so a restart mid-setup still holds new turns.
       const holdTurns = await openRecoveryTurnHold(this.options.directory);
       store = await storeOpening;
@@ -826,7 +848,8 @@ export class CloudWorker {
         files: action => workspace!.git.mutate(action),
       });
       history = new HistoryMirror(store, this.options.transport, () => this.historyReplacementEnabled, value => application.value(value),
-        { enabled: () => this.historyDigestEnabled, restored: () => restored });
+        { enabled: () => this.historyDigestEnabled, restored: () => restored,
+          delivered: () => { restoredHistoryDelivered = true; void settleRestoreMarker(); } });
       unsubscribers.push(store.onChange((change) => {
         this.runtimeGate.activity();
         if (!change.chat && !change.deleted && !change.rows.length && !change.replace) return;
@@ -845,7 +868,10 @@ export class CloudWorker {
           if (refresh?.mayFastForward) await refreshing;
           await refresh?.touch();
         },
-        onAdmitted: async () => { this.initialSetupNeeded = false; await rm(restoreMarker, { force: true }).catch(() => {}); },
+        onAdmitted: async kind => {
+          this.initialSetupNeeded = false;
+          if (kind === "setup") { restoredSetupAdmitted = true; await settleRestoreMarker(); }
+        },
       });
       if (config.environment) await this.options.transport.reportEnvironment!({ versionId: config.environment.versionId, sequence: 1, state: "ready" }, this.environmentLifetime.signal);
       if (this.disposed || this.stopping) return false;

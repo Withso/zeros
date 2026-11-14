@@ -17,6 +17,8 @@ interface Options {
   onRuntimeUpdate?: () => void;
   /** Worker journal lines for sync sockets: short ids, codes and counts only. */
   log?(line: string): void;
+  /** boot-timings-v1: each relay upgrade's outcome (101 accepted, or the worker's own refusal status). */
+  onInbound?(status: 101 | 400 | 401 | 404 | 429 | 503): void;
   /** sync-context-v1 (team sharing 3A, activated workspaces): the sync socket's control-plane client handle. */
   syncContexts?: SyncContexts;
 }
@@ -78,14 +80,15 @@ export class InboundBridge {
     this.receive = receive;
     this.server.on("upgrade", (request, socket, head) => {
       if (request.method === "GET" && request.url === SYNC_BRIDGE_PATH) return this.upgradeSync(request, socket, head);
-      if (request.method !== "GET" || request.url !== CLOUD_V2_WORKER_BRIDGE_PATH) return this.reject(socket, 404);
+      const refuse = (status: 400 | 401 | 404 | 429 | 503) => { this.options.onInbound?.(status); this.reject(socket, status); };
+      if (request.method !== "GET" || request.url !== CLOUD_V2_WORKER_BRIDGE_PATH) return refuse(404);
       const status = this.authenticate(request);
-      if (status) return this.reject(socket, status);
+      if (status) return refuse(status as 401 | 429);
       const protocols = String(request.headers["sec-websocket-protocol"] ?? "").split(",").map(value => value.trim());
-      if (!protocols.includes(CLOUD_V2_WORKER_BRIDGE_PROTOCOL)) return this.reject(socket, 400);
-      if (this.connections.size >= 8) return this.reject(socket, 503);
+      if (!protocols.includes(CLOUD_V2_WORKER_BRIDGE_PROTOCOL)) return refuse(400);
+      if (this.connections.size >= 8) return refuse(503);
       // No frame parser exists for this socket until authentication succeeds.
-      this.websockets.handleUpgrade(request, socket, head, ws => this.attach(ws));
+      this.websockets.handleUpgrade(request, socket, head, ws => { this.options.onInbound?.(101); this.attach(ws); });
     });
     await new Promise<void>((resolve, reject) => {
       this.server.once("error", reject);

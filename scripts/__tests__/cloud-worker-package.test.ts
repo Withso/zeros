@@ -4,10 +4,37 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { build } from "esbuild";
 import { afterEach, expect, it } from "vitest";
-import { dockerRuntimeInvocation, runtimeSourceIdentity, runtimeSourcePaths, stageRuntimeSource } from "../../apps/cloud-worker/scripts/package-runtime.mjs";
+import { dockerRuntimeInvocation, packageRuntime, runtimeSourceIdentity, runtimeSourcePaths, stageRuntimeSource } from "../../apps/cloud-worker/scripts/package-runtime.mjs";
 
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))); });
+
+it("places the pinned verification metadata before the runtime payload, with each member present once", async () => {
+  const root = await mkdtemp(join(tmpdir(), "cloud-runtime-archive-order-")); roots.push(root);
+  const git = (...args: string[]) => execFileSync("git", args, { cwd: root, stdio: "pipe" });
+  git("init", "-q");
+  await mkdir(join(root, "apps/cloud-worker/src"), { recursive: true });
+  await writeFile(join(root, "apps/cloud-worker/src/main.ts"), "export {};\n");
+  git("add", "."); git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-qm", "fixture");
+  const archive = join(root, "out/runtime.tar.gz");
+  await packageRuntime({ output: archive, repository: root, execute: async (command: string, args: string[]) => {
+    if (command === process.execPath) {
+      const output = args[args.indexOf("--outdir") + 1]!;
+      await mkdir(join(output, "node_modules/example"), { recursive: true });
+      await writeFile(join(output, "node_modules/example/index.js"), "payload\n");
+      await writeFile(join(output, "worker.mjs"), "worker\n");
+      await writeFile(join(output, "runtime-manifest.json"), '{"version":1}\n');
+      return;
+    }
+    expect(command).toBe("tar");
+    execFileSync(command, args, { stdio: "pipe" });
+  } });
+  const members = execFileSync("tar", ["-tzf", archive], { encoding: "utf8" }).trim().split("\n");
+  expect(members.slice(0, 2)).toEqual(["./runtime-manifest.json", "./BUILD.json"]);
+  expect(members.filter(name => !name.endsWith("/"))).toEqual([
+    "./runtime-manifest.json", "./BUILD.json", "./node_modules/example/index.js", "./worker.mjs",
+  ]);
+});
 
 it("copies only build inputs, never private profiles, credentials, installed packages or git metadata", async () => {
   const root = await mkdtemp(join(tmpdir(), "cloud-worker-package-")); roots.push(root);

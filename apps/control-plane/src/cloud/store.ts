@@ -25,6 +25,7 @@ import { computerSourceReviewRequired, readComputerSourceTargets } from "./compu
 import { CloudSourceTargetSchema, type CloudSourceTarget } from "./source-authority.js";
 import { pinCloudEnvironment, releaseCloudEnvironment } from "./environment-store.js";
 import { originalSetupBuild } from "./setup-selection.js";
+import { teamOwnershipRequired } from "./team-sharing/contract.js";
 
 import { mirrorMessageSenders, mirrorMessageWindow, type MessageWindow, type WindowOptions } from "./history.js";
 import { mirrorMessageSearch, type SearchOptions } from "./history-search.js";
@@ -33,7 +34,7 @@ import { MESSAGE_SEARCH_DEADLINE_MS } from "./message-search.js";
 import { consumeRuntimeCanary } from "./runtime-canary-store.js";
 import type { RuntimeCanaryAdmission } from "./runtime-canary.js";
 import { RUNTIME_HANDOFF_SESSION } from "./runtime-handoff-store.js";
-import { notifyCloudV2WorkerReady } from "./worker-ready.js";
+import { notifyCloudV2WorkerBoot, notifyCloudV2WorkerReady } from "./worker-ready.js";
 import type { CloudV2SetupStatus } from "./setup-status-contract.js";
 
 export type CloudV2WorkspaceState =
@@ -572,19 +573,22 @@ export class CloudV2Store {
   }
 
   async requestExecutionLifecycle(id: string, userId: string, action: "start" | "stop" | "archive" | "restart", proof?: ExecutionAdmission,
-    user?: AuthedUser, unarchived = false): Promise<{ workspace: CloudV2Workspace; moved: boolean }> {
+    user?: AuthedUser, unarchived = false, ownership = true): Promise<{ workspace: CloudV2Workspace; moved: boolean }> {
     const authority = this.prompts.execution!.deps.authority;
     return withSystemTx(this.pool, async tx => {
       const row = (await tx.query<Row>(`SELECT ${COLUMNS} FROM cloud_v2_workspaces WHERE id=$1 FOR UPDATE`, [id])).rows[0];
       if (!row) throw notFound();
-      if (user) await authority.session(tx, user, userId);
-      const before = await authority.snapshot(tx, id, userId);
-      if (proof) await authority.assert(proof, tx);
-      else if (action !== "stop") throw new HttpError(409, "actor_changed", "Execution authority changed");
+      // Ordinary lifecycle admission is database-only. Read its authority after
+      // the row lock, then fence again after the intent mutation in this transaction.
+      const admission = proof ?? (action !== "stop" && user ? await authority.admit(id, userId, { user, transaction: tx }) : undefined);
+      if (user && (proof || !admission)) await authority.session(tx, user, userId);
+      const before = proof ? await authority.assert(proof, tx) : admission?.person ?? await authority.snapshot(tx, id, userId);
+      if (!admission && action !== "stop") throw new HttpError(409, "actor_changed", "Execution authority changed");
+      if (!ownership && row.creator_user_id === null) throw teamOwnershipRequired();
       if (action === "archive" && before.role === "member" && row.creator_user_id !== userId) throw new HttpError(403, "workspace_management_denied", "Only the Creator or an administrator may archive this workspace");
       if (unarchived && row.archived_at) throw new HttpError(409, "cloud_workspace_not_running", "This cloud workspace is not ready for a connection");
-      const result = await this.lifecycleIntent(tx, id, row, action, userId, proof ? executionIntentAuthority(proof) : undefined);
-      if (proof) await authority.assert(proof, tx, true);
+      const result = await this.lifecycleIntent(tx, id, row, action, userId, admission ? executionIntentAuthority(admission) : undefined);
+      if (admission) await authority.assert(admission, tx, true);
       else if ((await authority.snapshot(tx, id, userId)).permissionSignature !== before.permissionSignature) throw new HttpError(409, "actor_changed", "Execution authority changed");
       if (user) await authority.session(tx, user, userId);
       if (action === "stop" || action === "archive") await clearStoppedExecutionTransition(tx, id);
@@ -781,9 +785,10 @@ export class CloudV2Store {
 
   /** Refusing a runtime must not retire the workspace's current boot. */
   async workerHelloIdentity(token: string): Promise<CloudV2WorkerSession | null> {
-    const { rows } = await withSystemTx(this.pool, tx => tx.query<Row & { execution_mode: "legacy" | "prepared" | "active"; execution_transition_id: string | null; recovery_attempt_id: string | null; access_epoch: string; login_revision: string }>(
-      `SELECT ${COLUMNS}, execution_mode, execution_transition_id, recovery_attempt_id, access_epoch::text, login_revision::text FROM cloud_v2_workspaces w
-       WHERE worker_token_hash=$1 AND state IN ('creating','starting','running') AND ${LIVE_ACCESS}`, [hashCloudV2Token(token)]));
+    const { rows } = await withSystemStatement<Row & { execution_mode: "legacy" | "prepared" | "active"; execution_transition_id: string | null; recovery_attempt_id: string | null; access_epoch: string; login_revision: string }>(this.pool,
+      sql`SELECT ${WORKSPACE_COLUMNS_SQL}, execution_mode, execution_transition_id, recovery_attempt_id, access_epoch::text, login_revision::text FROM cloud_v2_workspaces w
+       WHERE worker_token_hash=decode(${SqlFragment.text(hashCloudV2Token(token).toString("hex"), /^[a-f0-9]{64}$/)}, 'hex')
+         AND state IN ('creating','starting','running') AND ${CLOUD_V2_LIVE_ACCESS_SQL}`);
     const row = rows[0];
     return row ? { ...workspace(row), accessEpoch: row.access_epoch, loginRevision: row.login_revision, executionMode: row.execution_mode,
       ...(row.recovery_attempt_id ? { recoveryAttemptId: row.recovery_attempt_id } : {}),
@@ -792,8 +797,8 @@ export class CloudV2Store {
 
   /** Bind the boot before configuration I/O, without publishing readiness.
    * Lifecycle delivery must not replace a credential once this boot claims it. */
-  async beginWorkerHello(token: string, bootId: string, actingUser = false, runtimeSha256?: string, syncContext = false, recovery = false): Promise<CloudV2WorkerSession | null> {
-    const { rows } = await withSystemTx(this.pool, async tx => {
+  async beginWorkerHello(token: string, bootId: string, actingUser = false, runtimeSha256?: string, syncContext = false, recovery = false, bootTimings = false, transaction?: Tx): Promise<CloudV2WorkerSession | null> {
+    const begin = async (tx: Tx) => {
       const result = await tx.query<Row & { execution_mode: "legacy" | "prepared" | "active"; recovery_attempt_id: string | null; access_epoch: string; login_revision: string; previous_boot_id: string | null }>(
       `WITH prior AS MATERIALIZED (
          SELECT id AS prior_id,worker_boot_id AS previous_boot_id FROM cloud_v2_workspaces w
@@ -811,18 +816,20 @@ export class CloudV2Store {
       if (current?.execution_mode === "active") {
         if (!actingUser || !this.prompts.execution) throw new HttpError(409, "worker_update_required", "Update the worker before shared execution");
         await assertExecutionCreationBoot(tx, current.id, syncContext);
-        await this.prompts.execution.boots.bind(tx, { token, bootId }, current.previous_boot_id);
-        await bindExecutionActivationBoot(tx, await this.prompts.execution.worker(tx, { token, bootId }, false, true), runtimeSha256);
+        const bound = await this.prompts.execution.boots.bind(tx, { token, bootId }, current.previous_boot_id);
+        await bindExecutionActivationBoot(tx, bound, runtimeSha256);
       }
+      if (current && bootTimings && current.previous_boot_id !== bootId) await notifyCloudV2WorkerBoot(tx, current.id, bootId, "hello");
       return result;
-    });
+    };
+    const { rows } = await (transaction ? begin(transaction) : withSystemTx(this.pool, begin));
     const row = rows[0];
     return row ? { ...workspace(row), accessEpoch: row.access_epoch, loginRevision: row.login_revision, executionMode: row.execution_mode,
       ...(row.recovery_attempt_id ? { recoveryAttemptId: row.recovery_attempt_id } : {}) } : null;
   }
 
-  async acceptWorkerHello(token: string, bootId: string, proof?: { accessEpoch: string; loginRevision: string }): Promise<CloudV2WorkerSession | null> {
-    const { rows } = await withSystemTx(this.pool, async tx => {
+  async acceptWorkerHello(token: string, bootId: string, proof?: { accessEpoch: string; loginRevision: string }, transaction?: Tx): Promise<CloudV2WorkerSession | null> {
+    const accept = async (tx: Tx) => {
       const result = await tx.query<Row & { execution_mode: "legacy" | "prepared" | "active"; access_epoch: string; login_revision: string; prior_state: "creating" | "starting" | "running"; hello_ms: number }>(
       `WITH prior AS MATERIALIZED (
          SELECT id AS prior_id, state AS prior_state, updated_at AS prior_updated_at,
@@ -848,7 +855,8 @@ export class CloudV2Store {
       const ready = result.rows[0];
       if (ready?.state === "running" && ready.prior_state !== "running") await notifyCloudV2WorkerReady(tx, ready.id);
       return result;
-    });
+    };
+    const { rows } = await (transaction ? accept(transaction) : withSystemTx(this.pool, accept));
     const row = rows[0];
     return row ? { ...workspace(row), accessEpoch: row.access_epoch, loginRevision: row.login_revision, executionMode: row.execution_mode,
       ...(row.prior_state === "running" || row.state !== "running" ? {} : { helloTiming: { state: row.prior_state, durationMs: Math.round(row.hello_ms) } }) } : null;

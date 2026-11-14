@@ -14,7 +14,7 @@ import { executionContextAuthority, matchesExecutionSignature, type VersionedExe
 import { actorChanged, executionWorkerRequired } from "./errors.js";
 import { EXECUTION_MINIMUM_LIFETIME_MS, assertExecutionLifetime, withExecutionLifetimeRetry } from "./lifetime.js";
 
-export type ExecutionConnectAuthority = VersionedExecutionAuthority & { signature: string; stopGeneration: string; tokenEnd: number; clientInstanceId?: string };
+export type ExecutionConnectAuthority = VersionedExecutionAuthority & { signature: string; stopGeneration: string; tokenEnd: number; clientInstanceId?: string; carrierHold?: 1 };
 const record = z.object({ type: z.string(), id: CloudV2PromptIdSchema.optional(), op: z.string().optional(),
   sessionId: CloudV2PromptIdSchema.optional(), params: z.unknown().optional() }).passthrough();
 const READ_OPERATIONS: ReadonlySet<string> = new Set([
@@ -36,7 +36,7 @@ export function cloudClientReadFrame(frame: unknown): boolean {
 export class CloudExecutionClients {
   constructor(readonly contexts: CloudExecutionContexts) {}
 
-  async ticket(workspaceId: string, user: AuthedUser, wake: boolean, clientInstanceId?: string, admitted?: ExecutionAdmission) {
+  async ticket(workspaceId: string, user: AuthedUser, wake: boolean, clientInstanceId?: string, admitted?: ExecutionAdmission, carrierHold = false) {
     if (clientInstanceId && (!user.authentication.sessionId || !z.uuid().safeParse(clientInstanceId).success))
       throw new HttpError(400, "invalid_request", "Invalid cloud connection binding");
     if (admitted && (admitted.user !== user || admitted.person.workspaceId !== workspaceId || admitted.person.userId !== user.id)) throw actorChanged();
@@ -50,7 +50,7 @@ export class CloudExecutionClients {
       await assertNoExecutionTransition(tx, workspaceId);
       await this.contexts.deps.authority.assert(proof, tx);
       const authority: ExecutionConnectAuthority = { signatureVersion: proof.person.signatureVersion, signature: proof.person.personSignature, stopGeneration: proof.person.stopGeneration, tokenEnd,
-        ...(clientInstanceId ? { clientInstanceId } : {}) };
+        ...(clientInstanceId ? { clientInstanceId } : {}), ...(carrierHold ? { carrierHold: 1 } : {}) };
       await tx.query(`INSERT INTO cloud_v2_tokens(token_hash,workspace_id,kind,user_id,expires_at,wake_on_connect,provider_session_id,execution_authority)
         VALUES($1,$2,'connect',$3,$4,$5,$6,$7)`, [token.hash, workspaceId, user.id, expiresAt, wake, user.authentication.sessionId, authority]);
       await this.contexts.deps.authority.assert(proof, tx);

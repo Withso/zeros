@@ -6,7 +6,7 @@ import { RuntimeUpdate } from "../runtime-update";
 
 afterEach(() => vi.restoreAllMocks());
 function deferred() { let resolve!: () => void; const promise = new Promise<void>(done => { resolve = done; }); return { promise, resolve }; }
-function fixture(flush = async () => {}) {
+function fixture(flush = async () => {}, staging = false) {
   let now = 0, revision = "4";
   vi.spyOn(Date, "now").mockImplementation(() => now);
   const census: RuntimeCensus = { clients: false, requests: false, agents: false, terminals: false, setup: false, checkout: false,
@@ -19,10 +19,11 @@ function fixture(flush = async () => {}) {
     if (input.op === "prepare") return { status: "prepared", id, sha256 };
     if (input.op === "commit") return { status: "committed", id };
     if (input.op === "cancel") return { status: "cancelled", id };
+    if (input.op === "stage") return { status: "staged", sha256 };
     return { status: "activating", id };
   });
   const permit = { arm: vi.fn(), revoke: vi.fn() };
-  const updater = new RuntimeUpdate({ gate, permit, instanceId: randomUUID(), revision: () => revision, flush, request });
+  const updater = new RuntimeUpdate({ gate, permit, instanceId: randomUUID(), revision: () => revision, flush, request, staging: () => staging });
   const quiet = async () => { await updater.tick(); now = 30_000; };
   return { gate, updater, permit, seen, request, quiet, census, changeRevision: () => { revision = "5"; } };
 }
@@ -107,4 +108,28 @@ it("R1 push-signals-v1: with pushed hints the status check falls back to 15 min 
   now += 60_000; await updater.tick();
   expect(statuses()).toBe(4);
   updater.stop();
+});
+
+it("runtime-staging-v1: stages the target at once while busy, once per target, then hands off only when quiet", async () => {
+  const f = fixture(async () => {}, true);
+  // A connected client and a running turn: not quiet. Staging still happens immediately and does not postpone.
+  f.census.clients = true; f.census.agents = true;
+  await f.updater.tick();
+  expect(f.seen).toEqual(["status", "stage"]);
+  f.updater.hint(); await f.updater.tick();
+  expect(f.seen).toEqual(["status", "stage", "status"]);
+  expect(f.permit.arm).not.toHaveBeenCalled();
+  // Quiet later: the ordinary quiet path prepares (reusing the staged bytes on the control plane), commits and activates.
+  f.census.clients = false; f.census.agents = false;
+  await f.quiet(); f.updater.hint(); await f.updater.tick();
+  expect(f.seen.slice(3)).toEqual(["status", "prepare", "commit", "activate"]);
+  f.updater.stop();
+});
+
+it("without runtime-staging-v1 (older control plane) nothing is staged and the quiet path is unchanged", async () => {
+  const f = fixture();
+  f.census.clients = true;
+  await f.updater.tick();
+  expect(f.seen).toEqual([]);
+  f.updater.stop();
 });

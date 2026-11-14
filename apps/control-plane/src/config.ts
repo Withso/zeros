@@ -22,6 +22,7 @@ import { readCloudTeamOwnership } from "./db-context.js";
 import { CloudV2WorkerSigner } from "./cloud/worker-auth.js";
 import { loadRuntimeCanaryPolicy, type RuntimeCanaryPolicy } from "./cloud/runtime-canary.js";
 import { loadRuntimeRelease, type RuntimeRelease } from "./cloud/runtime-release.js";
+import { loadRuntimeSupport } from "./cloud/runtime-support.js";
 
 function containsAsciiControl(value: string): boolean {
   for (const character of value) {
@@ -257,7 +258,7 @@ export type CloudV2Config = {
   workerSigningKey: string;
   workerSigningKeyPrevious?: string;
   /** The ordinary channel runtime pin and its storage. */
-  runtime: { sha256: string; release?: RuntimeRelease; store: { endpoint: string; bucket: string; accessKeyId: string; secretAccessKey: string } };
+  runtime: { sha256: string; release?: RuntimeRelease; supportedSha256?: readonly string[]; store: { endpoint: string; bucket: string; accessKeyId: string; secretAccessKey: string } };
   runtimeCanary?: RuntimeCanaryPolicy;
 };
 
@@ -305,6 +306,7 @@ function loadCloudV2Config(env: NodeJS.ProcessEnv, channel: string): CloudV2Conf
   const workerPublicKeys = new Set(workerSigner.publicKeys.map(key => createPublicKey(key).export({ format: "der", type: "spki" }).toString("base64")));
   if (runtimeCanary?.keys.some(key => workerPublicKeys.has(key.publicKey))) throw new Error("Invalid environment: runtime canaries require a dedicated signing key");
   const release = loadRuntimeRelease(env.CLOUD_V2_RUNTIME_RELEASE_METADATA);
+  const supportedSha256 = loadRuntimeSupport(env.CLOUD_V2_RUNTIME_SUPPORT, { sha256, ...(release ? { release } : {}) });
   return {
     boat: { apiKey, ...(billingOrg ? { billingOrg } : {}) },
     promptOutbox: promptOutbox === "true",
@@ -316,7 +318,7 @@ function loadCloudV2Config(env: NodeJS.ProcessEnv, channel: string): CloudV2Conf
     apiUrl: origin("CLOUD_V2_API_URL", "https:"),
     realtimeUrl: origin("CLOUD_V2_REALTIME_URL", "wss:"),
     ...(runtimeCanary ? { runtimeCanary } : {}),
-    runtime: { sha256, ...(release ? { release } : {}), store: {
+    runtime: { sha256, ...(release ? { release } : {}), supportedSha256, store: {
       endpoint, bucket: required("CLOUD_V2_RUNTIME_STORE_BUCKET"),
       accessKeyId: required("CLOUD_V2_RUNTIME_STORE_ACCESS_KEY_ID"), secretAccessKey: required("CLOUD_V2_RUNTIME_STORE_SECRET_ACCESS_KEY"),
     } },

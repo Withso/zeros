@@ -117,6 +117,41 @@ describe("cloud v2 relay", () => {
     return ws;
   };
 
+  it("holds the one connect flight for applied readiness and keeps gateway retries to two route reads", async () => {
+    state = "starting";
+    const held = Promise.withResolvers<void>();
+    Object.assign(deps, { waitReady: vi.fn(() => held.promise) });
+    let attempts = 0;
+    workerServer.options.verifyClient = (_info, done) => {
+      attempts++; done(attempts > 3, attempts > 3 ? undefined : 502);
+    };
+    const frames: any[] = [];
+    workerServer.on("connection", ws => ws.on("message", raw => frames.push(JSON.parse(String(raw)))));
+    await app();
+    try {
+      await expect.poll(() => vi.mocked(deps.waitReady!).mock.calls.length).toBe(1);
+      expect(deps.workerRoute).not.toHaveBeenCalled();
+      expect(attempts).toBe(0);
+    } finally { state = "running"; held.resolve(); }
+    await expect.poll(() => frames.some(frame => frame.t === "config")).toBe(true);
+    expect(attempts).toBe(4);
+    expect(deps.workerRoute).toHaveBeenCalledTimes(2);
+    expect(deps.store.consumeConnectTicket).toHaveBeenCalledOnce();
+  });
+
+  it("does not configure a carrier whose boot changed during the gateway wait", async () => {
+    Object.assign(deps, { waitReady: vi.fn(async () => {}) });
+    const route = await deps.workerRoute(workspaceId);
+    vi.mocked(deps.workerRoute).mockReset().mockResolvedValueOnce(route)
+      .mockResolvedValue({ ...route!, bootId: "a".repeat(36) });
+    const frames: any[] = [];
+    workerServer.on("connection", ws => ws.on("message", raw => frames.push(JSON.parse(String(raw)))));
+    const client = await app();
+    await expect.poll(() => client.readyState).toBe(WebSocket.CLOSED);
+    expect(frames).toEqual([]);
+    expect(deps.workerRoute).toHaveBeenCalledTimes(2);
+  });
+
   it("reports a closed gateway failure to recovery, then clears it on a successful carrier", async () => {
     const refused = createServer();
     refused.on("upgrade", (_request, socket) => socket.end("HTTP/1.1 502 Bad Gateway\r\nX-Private: synthetic-private-canary\r\nContent-Length: 0\r\n\r\n"));
@@ -130,8 +165,8 @@ describe("cloud v2 relay", () => {
       await worker();
       expect(deps.liveRecovery.failed).toHaveBeenCalledExactlyOnceWith(failedRoute, expect.objectContaining({ reason: "gateway", statusClass: "5xx" }));
       expect(deps.liveRecovery.connected).toHaveBeenCalledWith(expect.objectContaining({ url: workerUrl }));
-      expect(deps.logger.warn).toHaveBeenCalledWith("[cloud-v2] carrier dial", expect.objectContaining({ reason: "gateway", statusClass: "5xx" }));
-      expect(JSON.stringify(vi.mocked(deps.logger.warn).mock.calls)).not.toMatch(/synthetic-private|502/);
+      expect(deps.logger.warn).toHaveBeenCalledWith("[cloud-v2] carrier dial", expect.objectContaining({ reason: "gateway", statusClass: "5xx", status: 502, responseBodyClass: "empty" }));
+      expect(JSON.stringify(vi.mocked(deps.logger.warn).mock.calls)).not.toMatch(/synthetic-private|synthetic-port|synthetic-grant/);
     } finally { await new Promise<void>(resolve => refused.close(() => resolve())); }
   });
 
@@ -258,7 +293,10 @@ describe("cloud v2 relay", () => {
       await vi.waitFor(() => expect(frames).toContainEqual({ t: "push", prompts: false }));
       w.send(JSON.stringify({ t: "activity", id: workspaceId, idle: true })); await reading;
       try {
+        const closed = new Promise<number>(resolve => sockets[0]!.once("close", resolve));
         w.terminate();
+        expect(await closed).toBe(1013);
+        await app();
         await vi.waitFor(() => expect(connectedWorkers).toHaveLength(2));
         const successor = connectedWorkers[1]!;
         release();
@@ -833,6 +871,20 @@ describe("cloud v2 relay", () => {
     else expect(deps.localCommandsEnabled).not.toHaveBeenCalled();
   });
 
+  it.each(["", "boot-timings-v10", "boot-timings-v1"])("negotiates boot timing marks on initial and refreshed relay config: %s", async features => {
+    workerServer.on("headers", headers => { headers.push(`X-Zeros-Worker-Features: ${features}`); });
+    const original = deps.config;
+    deps.config = async workspace => ({ ...await original(workspace), bootTimings: 1 });
+    const frames: any[] = [];
+    workerServer.on("connection", ws => ws.on("message", raw => frames.push(JSON.parse(String(raw)))));
+    await app();
+    await vi.waitFor(() => expect(frames.filter(frame => frame.t === "config")).toHaveLength(1));
+    loginRevision = "1"; await relay.refreshLogins();
+    await vi.waitFor(() => expect(frames.filter(frame => frame.t === "config")).toHaveLength(2));
+    for (const frame of frames.filter(frame => frame.t === "config"))
+      expect(frame.bootTimings).toBe(features === "boot-timings-v1" ? 1 : undefined);
+  });
+
   it.each(["","notify-user-v10","notify-user-v1"])("negotiates NotifyUser with durable outbox on initial and refreshed config: %s",async features => {
     workerServer.on("headers",headers => { headers.push(`X-Zeros-Worker-Features: ${features}`); });
     const original = deps.config;
@@ -1038,6 +1090,19 @@ describe("cloud v2 relay", () => {
     expect(frame.runtimeUpdate).toBe(features === "runtime-update-v1" ? 1 : undefined);
   });
 
+  it.each(["", "runtime-update-v1", "runtime-update-v1,runtime-staging-v10", "runtime-update-v1,runtime-staging-v1"])(
+    "negotiates runtime staging on the actual worker socket: %s", async features => {
+      workerServer.on("headers", headers => { headers.push(`X-Zeros-Worker-Features: ${features}`); });
+      const original = deps.config;
+      deps.config = async workspace => ({ ...await original(workspace), runtimeUpdate: 1, runtimeStaging: 1 });
+      const frames: any[] = [];
+      workerServer.on("connection", ws => ws.on("message", raw => frames.push(JSON.parse(String(raw)))));
+      await app();
+      await vi.waitFor(() => expect(frames.some(frame => frame.t === "config")).toBe(true));
+      expect(frames.find(frame => frame.t === "config").runtimeStaging)
+        .toBe(features.split(",").includes("runtime-staging-v1") ? 1 : undefined);
+    });
+
   it("bounds inbound frames while runtime admission is waiting", async () => {
     let finish!: (allowed: boolean) => void;
     deps.runtimeAdmission = { admitClient: vi.fn(() => new Promise<boolean>(resolve => { finish = resolve; })),
@@ -1059,9 +1124,12 @@ describe("cloud v2 relay", () => {
     const previous = { type: "AGENT_PROMPT", id: "old-request", agentId: "codex", chatId: "chat", sessionId: "execution", prompt: [] };
     a.send(JSON.stringify(previous));
     await vi.waitFor(() => expect(forwarded[0].some(frame => frame.frame?.id === previous.id)).toBe(true));
+    const closed = new Promise<number>(resolve => a.once("close", resolve));
     state = "starting"; connectedWorkers[0].terminate();
+    expect(await closed).toBe(1013);
     await vi.waitFor(() => expect(replies.some(frame => frame.requestId === previous.id && frame.type === "AGENT_ERROR")).toBe(true));
-    const queued = { ...previous, id: "queued-for-next-worker" }; a.send(JSON.stringify(queued));
+    const next = await app(); next.on("message", raw => replies.push(JSON.parse(String(raw))));
+    const queued = { ...previous, id: "queued-for-next-worker" }; next.send(JSON.stringify(queued));
     await vi.waitFor(() => expect(deps.answerOffline).toHaveBeenCalledWith(expect.anything(), queued));
     expect(replies.some(frame => frame.requestId === queued.id)).toBe(false);
     state = "running";
@@ -1070,7 +1138,10 @@ describe("cloud v2 relay", () => {
     const clientId = forwarded[1].find(frame => frame.t === "open").clientId;
     connectedWorkers[1].send(JSON.stringify({ t: "frame", clientId, frame: { type: "AGENT_PROMPT_COMPLETE", requestId: queued.id } }));
     await vi.waitFor(() => expect(replies.some(frame => frame.requestId === queued.id && frame.type === "AGENT_PROMPT_COMPLETE")).toBe(true));
+    const nextClosed = new Promise<number>(resolve => next.once("close", resolve));
     connectedWorkers[1].terminate();
+    expect(await nextClosed).toBe(1013);
+    await app();
     await vi.waitFor(() => expect(forwarded.length).toBe(3));
     expect(replies.filter(frame => frame.requestId === queued.id)).toHaveLength(1);
   });
@@ -1357,9 +1428,13 @@ describe("cloud v2 relay", () => {
     expect(frames[2].frame).toEqual(prompt);
   });
 
-  it("redials while apps remain, and closes the connection after the final app leaves", async () => {
+  it("redials after a legacy app reconnects, and closes the connection after the final app leaves", async () => {
     const w = await worker();
+    const closed = new Promise<number>(resolve => sockets[0]!.once("close", resolve));
     w.terminate();
+    expect(await closed).toBe(1013);
+    expect(connectedWorkers).toHaveLength(1);
+    await app();
     await vi.waitFor(() => expect(connectedWorkers).toHaveLength(2));
     for (const a of sockets) a.close();
     await vi.waitFor(() => expect(connectedWorkers.at(-1)!.readyState).toBe(WebSocket.CLOSED));
@@ -1369,11 +1444,9 @@ describe("cloud v2 relay", () => {
   it.each(["new room", "reconnect after idle stop"])("keeps a passive %s stopped until explicit work wakes it", async scenario => {
     if (scenario === "reconnect after idle stop") {
       const w = await worker(), original = sockets[0]!;
-      const reads = vi.mocked(deps.workerRoute).mock.calls.length;
+      const closed = new Promise<number>(resolve => original.once("close", resolve));
       state = "stopped"; w.terminate();
-      await vi.waitFor(() => expect(vi.mocked(deps.workerRoute).mock.calls.length).toBeGreaterThan(reads));
-      original.close();
-      await vi.waitFor(() => expect(original.readyState).toBe(WebSocket.CLOSED));
+      expect(await closed).toBe(1013);
     }
     state = "stopped"; ticketWake = false;
     const dials = connectedWorkers.length;
@@ -1429,41 +1502,54 @@ describe("cloud v2 relay", () => {
     expect(connectedWorkers).toHaveLength(0);
   });
 
-  it("keeps opted-in sockets attached and resumes output after a running worker redial", async () => {
+  it("requires an explicit-wake client without carrier-hold support to reconnect after carrier loss", async () => {
     const a = await app(true);
     await vi.waitFor(() => expect(deps.config).toHaveBeenCalledOnce());
     const received: unknown[] = [];
     a.on("message", raw => received.push(JSON.parse(String(raw))));
+    const closed = new Promise<number>(resolve => a.once("close", resolve));
+    let successorClient: string | undefined;
     workerServer.once("connection", ws => ws.on("message", raw => {
       const frame = JSON.parse(String(raw));
-      if (frame.t === "open") ws.send(JSON.stringify({ t: "frame", clientId: frame.clientId, frame: { resumed: true } }));
+      if (frame.t === "open") successorClient = frame.clientId;
     }));
     connectedWorkers[0]!.terminate();
-    await vi.waitFor(() => expect(a.readyState === WebSocket.CLOSED || received.length > 0).toBe(true));
-    expect(a.readyState).toBe(WebSocket.OPEN);
+    expect(await closed).toBe(1013);
+    expect(received).toEqual([]);
+    const next = await app(true); next.on("message", raw => received.push(JSON.parse(String(raw))));
+    await vi.waitFor(() => expect(successorClient).toBeTypeOf("string"));
+    connectedWorkers[1]!.send(JSON.stringify({ t: "frame", clientId: successorClient, frame: { resumed: true } }));
+    await vi.waitFor(() => expect(received).toHaveLength(1));
+    expect(next.readyState).toBe(WebSocket.OPEN);
     expect(received).toEqual([{ resumed: true }]);
     expect(connectedWorkers).toHaveLength(2);
     expect(deps.wake).not.toHaveBeenCalled();
   });
 
-  it("retires opted-in sockets after Stop while leaving a legacy app attached", async () => {
+  it("retires explicit-wake reconnects after Stop while allowing passive legacy history", async () => {
     const a = await app(true), legacy = await app();
     await vi.waitFor(() => expect(deps.config).toHaveBeenCalledOnce());
-    let closeCode: number | undefined;
-    a.once("close", code => { closeCode = code; });
+    const closed = new Promise<number>(resolve => a.once("close", resolve));
+    const legacyClosed = new Promise<number>(resolve => legacy.once("close", resolve));
     state = "stopped";
     connectedWorkers[0]!.terminate();
-    await vi.waitFor(() => expect(closeCode !== undefined || connectedWorkers.length > 1).toBe(true));
-    expect(closeCode).toBe(4009);
-    expect(legacy.readyState).toBe(WebSocket.OPEN);
+    expect(await closed).toBe(1013);
+    expect(await legacyClosed).toBe(1013);
+    ticketWake = false;
+    const next = await app(true), nextClosed = new Promise<number>(resolve => next.once("close", resolve));
+    expect(await nextClosed).toBe(4009);
+    const passive = await app();
+    expect(passive.readyState).toBe(WebSocket.OPEN);
     expect(deps.wake).not.toHaveBeenCalled();
   });
 
-  it("keeps an attached app on offline history after Stop and wakes only for explicit work", async () => {
-    const w = await worker(), a = sockets[0]!;
-    const reads = vi.mocked(deps.workerRoute).mock.calls.length;
+  it("keeps a reconnected app on offline history after Stop and wakes only for explicit work", async () => {
+    const w = await worker(), original = sockets[0]!;
+    const closed = new Promise<number>(resolve => original.once("close", resolve));
     state = "stopped"; w.terminate();
-    await vi.waitFor(() => expect(vi.mocked(deps.workerRoute).mock.calls.length).toBeGreaterThan(reads));
+    expect(await closed).toBe(1013);
+    ticketWake = false;
+    const a = await app();
     expect(deps.wake).not.toHaveBeenCalled();
     a.send(JSON.stringify({ type: "HEARTBEAT" }));
     a.send(JSON.stringify({ type: "CONNECTED", protocolVersion: 21 }));
