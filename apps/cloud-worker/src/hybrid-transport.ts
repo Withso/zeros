@@ -6,7 +6,7 @@ import type { LocalCommandInput } from "@zeros/protocol/local-commands";
 import { requestLocalCommand } from "./local-commands/client";
 import { CLOUD_WORKER_FEATURES } from "./worker-features";
 import { CLOUD_V2_MAX_FRAME_BYTES, CLOUD_V2_RELAY_PROTOCOL, CloudV2ControlFrameSchema, CloudV2WorkerActivityReplySchema,
-  CloudV2WorkerFrameSchema, CloudV2WorkerTimingSchema, type CloudV2WorkerTiming, type CloudV2ControlFrame, type CloudV2WorkerFrame, CloudV2ContextErrorCodeSchema } from "@zeros/protocol/cloud-v2-relay";
+  CloudV2WorkerFrameSchema, CloudV2WorkerTimingSchema, type CloudV2WorkerTiming, CloudV2WorkerBootTimingSchema, type CloudV2WorkerBootTiming, CloudV2WorkerTimingRequestSchema, type CloudV2ControlFrame, type CloudV2WorkerFrame, CloudV2ContextErrorCodeSchema } from "@zeros/protocol/cloud-v2-relay";
 import { InboundBridge, type SyncContexts } from "./inbound-bridge";
 import { readWorkerToken, WORKER_TOKEN_FILE } from "./worker-token";
 import type { PromptOperation, Transport, TransportHandlers } from "./transport";
@@ -107,7 +107,60 @@ export class HybridTransport implements Transport {
         void this.handlers?.frame({ t: "prompts" }).catch(() => {});
       },
       ...(options.publicKeys ? { publicKeys: options.publicKeys } : {}), ...(options.publicKeysFile ? { publicKeysFile: options.publicKeysFile } : {}),
-      ...(options.port === undefined ? {} : { port: options.port }), ...(options.log ? { log: options.log } : {}) });
+      ...(options.port === undefined ? {} : { port: options.port }), ...(options.log ? { log: options.log } : {}),
+      onInbound: status => this.inbound(status) });
+  }
+
+  // ── boot-timings-v1: one wake on one timing line ──
+  private bootTimings = false;
+  private helloSequence = 0;
+  private inboundSeen = false;
+  private firstInboundStatus?: 101 | 400 | 401 | 404 | 429 | 503;
+  private refusedInbound = 0;
+  private readonly bootMarks: CloudV2WorkerBootTiming[] = [];
+  private readonly sentBootMarks = new Set<CloudV2WorkerBootTiming["phase"]>();
+  private appliedReady = false;
+  private sendQueued = false;
+  private readonly pendingTimings: Array<CloudV2WorkerTiming | CloudV2WorkerBootTiming> = [];
+  /** Startup records wait for applied-ready and go as one batch; later ones coalesce per burst. Diagnostics only: a
+   * failed batch is dropped and never reconnects, retries or re-registers. */
+  private enqueueTiming(record: CloudV2WorkerTiming | CloudV2WorkerBootTiming): void {
+    this.pendingTimings.push(record);
+    if (!this.appliedReady || this.sendQueued) return;
+    this.sendQueued = true;
+    queueMicrotask(() => { this.sendQueued = false; this.sendTimings(); });
+  }
+  private sendTimings(): void {
+    if (this.stopped) { this.pendingTimings.length = 0; return; }
+    while (this.pendingTimings.length) {
+      const batch = this.pendingTimings.splice(0, 32);
+      const parsed = CloudV2WorkerTimingRequestSchema.safeParse({ records: batch });
+      if (parsed.success) void this.request("timing", parsed.data, undefined, 2000).catch(() => {});
+    }
+  }
+  /** Record a mark on the worker's own clocks and write its journal line; sent once the control plane opts in. */
+  private mark(phase: CloudV2WorkerBootTiming["phase"], extra: Partial<CloudV2WorkerBootTiming> = {}): void {
+    if (this.bootMarks.some(mark => mark.phase === phase)) return;
+    const record = { phase, uptimeMs: Math.round(process.uptime() * 1000), atMs: Date.now(), bootId: this.bootId,
+      helloSequence: Math.max(1, this.helloSequence), ...extra } as CloudV2WorkerBootTiming;
+    this.bootMarks.push(record);
+    const detail = phase === "worker_first_inbound" ? ` status=${record.firstStatus} refused=${record.refusedBefore}` : ` seq=${record.helloSequence}`;
+    this.options.log?.(`boot ${phase.replace("worker_", "").replace(/_/g, "-")} uptime=${record.uptimeMs} boot=${this.bootId}${detail}`);
+    this.flushBootMarks();
+  }
+  /** Only to a control plane that opted in (config.bootTimings), after registration. */
+  private flushBootMarks(): void {
+    if (!this.bootTimings || !this.registered || this.stopped) return;
+    for (const record of this.bootMarks) {
+      if (this.sentBootMarks.has(record.phase)) continue;
+      this.sentBootMarks.add(record.phase);
+      if (CloudV2WorkerBootTimingSchema.safeParse(record).success) this.enqueueTiming(record);
+    }
+  }
+  private inbound(status: 101 | 400 | 401 | 404 | 429 | 503): void {
+    if (!this.inboundSeen) { this.inboundSeen = true; this.firstInboundStatus = status; }
+    if (status !== 101) { this.refusedInbound++; return; }
+    this.mark("worker_first_inbound", { firstStatus: this.firstInboundStatus!, refusedBefore: this.refusedInbound });
   }
   setPushSignals(on: boolean): void {
     const pulseMs = on ? PUSH_SIGNALS_REPORT_MS : 60_000;
@@ -276,6 +329,8 @@ export class HybridTransport implements Transport {
     const parsed = CloudV2WorkerTimingSchema.safeParse(record);
     if (!parsed.success) return;
     this.reportedTimings.add(record.phase);
+    // boot-timings-v1: batched with the startup marks (or the next burst); an older control plane keeps single posts.
+    if (this.bootTimings) { this.enqueueTiming(parsed.data); return; }
     // At most one small request per startup phase, no retries or recovery side
     // effects. Older control planes return 404 without affecting the worker.
     void this.request("timing", parsed.data, undefined, 2000).catch(() => {});
@@ -315,7 +370,8 @@ export class HybridTransport implements Transport {
         if (this.checkoutFailed) return;
       }
       if (!this.listening) {
-        await this.listener.start(async frame => {
+        try {
+          await this.listener.start(async frame => {
           // Hold early viewers until local services are published. Stop must
           // reach the owner that can cancel an in-flight configuration.
           if (!this.bootstrapped && frame.t !== "stop") {
@@ -325,10 +381,20 @@ export class HybridTransport implements Transport {
           }
           await this.control(frame);
         });
+        } catch (error) {
+          // A late bind is visible, not inferred: name why the listener could not start.
+          const code = (error as NodeJS.ErrnoException)?.code;
+          const reason = code === "ENOENT" ? "missing" : code === "EADDRINUSE" || code === "EACCES" ? "bind" : "invalid";
+          this.options.log?.(`boot listener-failed reason=${reason} uptime=${Math.round(process.uptime() * 1000)} boot=${this.bootId}`);
+          throw error;
+        }
         this.listening = true;
+        this.mark("worker_listening");
       }
       if (!this.registered) {
+        this.helloSequence++; this.mark("worker_hello_sent");
         const reply = await this.request("hello", { protocol: CLOUD_V2_RELAY_PROTOCOL, runtimeSha256: this.options.runtimeSha256, bootId: this.bootId }, undefined, 30_000);
+        this.mark("worker_hello_acked");
         this.registered = true;
         await this.handlers!.open();
         await this.configuration(reply);
@@ -340,6 +406,11 @@ export class HybridTransport implements Transport {
         await this.configuration(await this.request("config"));
       }
       this.bootstrapped = true; this.releaseInitial();
+      if (!this.appliedReady) {
+        // Initial configuration and its control barrier are done: a diagnostic hint, never authority.
+        this.mark("worker_applied_ready"); this.appliedReady = true;
+        if (this.bootTimings) this.sendTimings(); else this.pendingTimings.length = 0;
+      }
       this.attempt = 0; this.options.onStatus?.("connected"); this.scheduleHeartbeat();
     })().catch(error => this.failed(error)).finally(() => {
       this.recovering = undefined;
@@ -356,6 +427,7 @@ export class HybridTransport implements Transport {
   private async configuration(value: Record<string, unknown>): Promise<void> {
     const frame = CloudV2ControlFrameSchema.parse(value.config);
     if (frame.t !== "config") throw new Error("Invalid worker configuration.");
+    this.bootTimings = frame.bootTimings === 1; this.flushBootMarks();
     await this.control(frame);
   }
   private async control(frame: CloudV2ControlFrame): Promise<void> {
