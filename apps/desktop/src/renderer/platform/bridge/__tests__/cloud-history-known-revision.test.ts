@@ -48,4 +48,28 @@ describe("mirror transcript reads carry the chats.list revision", () => {
         .toEqual(Array(3).fill({ known: { revision: 1, messageCount: 1 } }));
     } finally { client.dispose(); }
   });
+
+  it("an invalidated chats.list never supplies the revision: it is re-read first, and a failed re-read supplies none", async () => {
+    let revision = 7, failList = false;
+    const readHistory = vi.fn(async (_target: unknown, op: string, _params?: Record<string, unknown>, _options?: unknown) => {
+      if (op !== "chats.list") return { messages: [] };
+      if (failList) throw new Error("offline");
+      return { chats: [chat("a", { revision, messageCount: revision })] };
+    });
+    const client = new WorkspaceRuntimeClient({ open: vi.fn(), readHistory, historyRoot: () => "/home/user/Owner/repo", workspaces: () => [] });
+    const window = (limit: number) => client.request({ type: "WORKSPACE_REQUEST", op: "messages.window", params: { chatId: cloudScopedId(target, "a"), limit } });
+    const lastKnown = () => readHistory.mock.calls.filter(([, op]) => op === "messages.window").at(-1)?.[3];
+    try {
+      await window(200);
+      expect(lastKnown()).toEqual({ known: { revision: 7, messageCount: 7 } });
+      // A change event: the server moved the chat to revision 8.
+      revision = 8; client.refreshHistoryWorkspace(target);
+      await window(199);
+      expect(lastKnown()).toEqual({ known: { revision: 8, messageCount: 8 } });
+      revision = 9; client.refreshHistoryWorkspace(target); failList = true;
+      await window(198);
+      expect(lastKnown()).toBeUndefined();
+    } finally { client.dispose(); }
+  });
 });
+

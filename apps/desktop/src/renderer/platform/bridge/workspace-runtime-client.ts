@@ -139,6 +139,9 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
   private ongoingOpens = 0;
   private peerUseSequence = 0;
   private readonly historyIntents = new Map<string, number>();
+  /** chats.list keys invalidated by a change event and not yet re-read: they must not supply historyCache. */
+  private readonly unconfirmedLists = new Set<string>();
+  private listInvalidations = 0;
   private readonly routedHandlers = new Map<
     string,
     Set<(message: BridgeMessage) => void>
@@ -548,7 +551,8 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
    * so every chat of the workspace revalidates against it. A failed list read leaves the normal path. */
   private async knownHistoryReady(target: CloudWorkspaceTarget, op: string, params: WireRecord): Promise<CloudHistoryReadOptions | undefined> {
     if (op !== "messages.window" || params.before !== undefined || typeof params.chatId !== "string" || !this.routing.readHistory) return undefined;
-    if (!this.history.peekSnapshot(this.historyKey(target, "chats.list", {})).data)
+    const listKey = this.historyKey(target, "chats.list", {});
+    if (!this.history.peekSnapshot(listKey).data || this.unconfirmedLists.has(listKey))
       await this.warmHistorySnapshot(target).catch(() => undefined);
     return this.knownHistory(target, op, params);
   }
@@ -557,7 +561,11 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
    * chat without a read and continues a changed one once. Absent (N-1 control plane, no snapshot): the normal read. */
   private knownHistory(target: CloudWorkspaceTarget, op: string, params: WireRecord): CloudHistoryReadOptions | undefined {
     if (op !== "messages.window" || params.before !== undefined || typeof params.chatId !== "string") return undefined;
-    const chats = this.history.peekSnapshot(this.historyKey(target, "chats.list", {})).data?.chats;
+    const listKey = this.historyKey(target, "chats.list", {});
+    // An invalidated list (a change event) still paints, but its revisions may be behind the server's until a
+    // re-read succeeds; a failed re-read keeps it unconfirmed.
+    if (this.unconfirmedLists.has(listKey)) return undefined;
+    const chats = this.history.peekSnapshot(listKey).data?.chats;
     const row = Array.isArray(chats) ? chats.find(chat => record(chat).id === params.chatId) : undefined;
     const known = CloudCacheKnownSchema.safeParse(record(row).historyCache);
     return known.success ? { known: known.data } : undefined;
@@ -567,7 +575,7 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     return `${cloudWorkspaceKey(target)}\0${this.identity(target)}\0${op}\0${JSON.stringify(params)}`;
   }
   private async readHistory(target: CloudWorkspaceTarget, op: string, params: WireRecord): Promise<WireRecord> {
-    const epoch = this.accountEpoch;
+    const epoch = this.accountEpoch, listGeneration = this.listInvalidations;
     const identity = this.identity(target);
     const assertAccess = () => {
       if (this.closed || epoch !== this.accountEpoch || identity !== this.identity(target) || (this.routing.canAccess && !this.routing.canAccess(target)))
@@ -632,6 +640,8 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
         currentPeer.client.status === "connected")
       return this.readHistory(target, op, params);
     if (op === "chats.list") {
+      // Only a list read that started after the latest invalidation confirms it.
+      if (listGeneration === this.listInvalidations) this.unconfirmedLists.delete(this.historyKey(target, op, params));
       this.historyWorkspaces.delete(key);
       this.historyWorkspaces.set(key, target);
       while (this.historyWorkspaces.size > 32) this.historyWorkspaces.delete(this.historyWorkspaces.keys().next().value!);
@@ -659,6 +669,8 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
   private invalidateHistory(target: CloudWorkspaceTarget): void {
     const prefix = `${cloudWorkspaceKey(target)}\0`;
     for (const key of this.history.keys()) if (key.startsWith(prefix)) this.history.invalidate(key);
+    this.unconfirmedLists.add(this.historyKey(target, "chats.list", {})); this.listInvalidations++;
+    while (this.unconfirmedLists.size > 64) this.unconfirmedLists.delete(this.unconfirmedLists.values().next().value!);
   }
 
   hasChatSnapshot(folder: string): boolean {
