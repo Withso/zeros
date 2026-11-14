@@ -300,7 +300,6 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   const asyncCreateFrom = Date.now() + (v2.asyncCreateDelayMs ?? (config.deploymentChannel === "development" ? 0 : CLOUD_V2_ASYNC_CREATE_DELAY_MS));
   const teamSharing = new CloudTeamSharing(pool,store,github,listenerPool,undefined,{ ownership: v2.teamOwnership === true });
   const routes: CloudV2RouteDeps = {
-    connectReady: true,
     actingUserDefault: v2.actingUserDefault === true,
     activeCreateRuntime,
     teamSharing,

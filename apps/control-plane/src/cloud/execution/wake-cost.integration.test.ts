@@ -42,7 +42,7 @@ database("execution wake request costs", () => {
     const result = await value.json();
     expect(result.protocols).toHaveLength(2);
     expect(result.features).toContain("relay-presence-v1");
-    expect(result.features).toContain("connect-ready-v1");
+    expect(result.features).not.toContain("connect-ready-v1");
     expect(totals.transactions).toBeLessThanOrEqual(2);
     expect(totals.queries).toBeLessThanOrEqual(25);
   });
@@ -74,9 +74,11 @@ database("execution wake request costs", () => {
     const hello = await f.hello();
     expect(hello.status).toBe(200);
     const { config } = await hello.json();
+    f.fetcher.mockClear();
     const { value, totals } = await measure("bootstrap", "/v2/cloud/worker/bootstrap-lease", () => f.worker("bootstrap-lease", {
       contextId: config.bootstrapContextId,
     }));
+    expect(f.fetcher).not.toHaveBeenCalled();
     const lease = await value.json();
     expect(lease.contextId).toBe(config.bootstrapContextId);
     expect(lease.userId).toBe(f.creator.id);
