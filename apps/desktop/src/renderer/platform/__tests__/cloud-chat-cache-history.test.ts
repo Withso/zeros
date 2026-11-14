@@ -27,10 +27,11 @@ describe("passive native history integration", () => {
   it("forwards the chats.list revision; an unchanged chat answers from the cache without a receipts read", async () => {
     for (const cached of [false, true]) {
       const { native, invoke } = fixture(undefined, cached), known = { revision: 12, messageCount: 1 };
+      // The receipts refresh is started before the read returns, or not at all: no timer is needed to observe it.
+      const pending = vi.spyOn(native, "refreshPending");
       expect(await readNativeCloudHistory(native, target, "messages.window", { chatId: "chat", limit: 200 }, known)).toEqual({ messages: [row] });
-      await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith(expect.objectContaining({ op: "refresh", known })));
-      await new Promise(resolve => setTimeout(resolve, 0));
-      expect(invoke.mock.calls.some(([input]) => input.op === "refresh-pending")).toBe(!cached);
+      expect(invoke).toHaveBeenCalledWith(expect.objectContaining({ op: "refresh", known }));
+      expect(pending).toHaveBeenCalledTimes(cached ? 0 : 1);
     }
   });
   it("caches older live pages only through the revision-checked refresh-before boundary", async () => {

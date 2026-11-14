@@ -118,6 +118,9 @@ export function createNativeCloudTranscriptCache(
         } while (current());
       })().catch(() => {});
     }
+    override settledForTesting(chatId: string): Promise<void> {
+      return Promise.resolve(this.warming.get(chatId)).then(() => undefined, () => undefined);
+    }
     override resetForTesting(): void { super.resetForTesting(); this.nativeReads.clear(); this.warming.clear(); this.refreshAgain.clear(); }
   }();
 }

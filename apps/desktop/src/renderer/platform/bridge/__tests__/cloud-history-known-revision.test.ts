@@ -29,10 +29,12 @@ describe("mirror transcript reads carry the chats.list revision", () => {
   });
 
   it("restored transcripts read before any chats.list join one list read for their workspace", async () => {
-    let release!: () => void;
+    let release!: () => void, admitted!: () => void;
     const held = new Promise<void>(resolve => { release = resolve; });
+    const listAdmitted = new Promise<void>(resolve => { admitted = resolve; });
     const readHistory = vi.fn(async (_target: unknown, op: string, _params?: Record<string, unknown>, _options?: unknown) => {
       if (op !== "chats.list") return { messages: [] };
+      admitted();
       await held;
       return { chats: ["a", "b", "c"].map(id => chat(id, { revision: 1, messageCount: 1 })) };
     });
@@ -40,7 +42,9 @@ describe("mirror transcript reads carry the chats.list revision", () => {
     try {
       const reads = ["a", "b", "c"].map(id => client.request({ type: "WORKSPACE_REQUEST", op: "messages.window",
         params: { chatId: cloudScopedId(target, id), limit: 200 } }));
-      await new Promise(resolve => setTimeout(resolve, 0));
+      // The race window is open: the one list read is held and no transcript read has started.
+      await listAdmitted;
+      expect(readHistory.mock.calls.filter(([, op]) => op === "chats.list")).toHaveLength(1);
       expect(readHistory.mock.calls.filter(([, op]) => op === "messages.window")).toEqual([]);
       release(); await Promise.all(reads);
       expect(readHistory.mock.calls.filter(([, op]) => op === "chats.list")).toHaveLength(1);

@@ -67,7 +67,8 @@ describe("cloud native disk and renderer memory tiers", () => {
         input.op === "refresh" ? ok({ range: page, replaced: false, ...(cached ? { cached: true } : {}) }) : ok(null));
       await f.cache.read(chatId);
       await vi.waitFor(() => expect(f.invoke).toHaveBeenCalledWith(expect.objectContaining({ op: "refresh", known: { revision: 6, messageCount: 1 } })));
-      await new Promise(resolve => setTimeout(resolve, 0));
+      // Await the warm-up's completion (not a timer): by then its receipts read has started, or never will.
+      await f.cache.settledForTesting(chatId);
       expect(f.invoke.mock.calls.some(([input]) => input.op === "refresh-pending")).toBe(!cached);
       f.cache.resetForTesting();
     }

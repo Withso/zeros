@@ -760,6 +760,9 @@ export class LocalTranscriptCache {
   }
 
   /** Retire all memory and async readers, including the disk index view. */
+  /** Tests: settles once background revalidation for the chat has finished (none here). */
+  settledForTesting(_chatId: string): Promise<void> { return Promise.resolve(); }
+
   resetForTesting(): void {
     this.resetMemory();
   }
