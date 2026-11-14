@@ -127,8 +127,15 @@ export class CloudChatCacheService {
         if (cached?.revision === known.revision) return Promise.resolve({ range: cached, replaced: false, cached: true });
       }
     } catch (error) { return Promise.reject(error); }
-    return this.start(window, lease, target, this.flights, known ? `${limit}:known` : String(limit),
-      (key, context) => this.update(key, limit, context, !!known));
+    const variant = known ? `${limit}:known:${known.revision}:${known.messageCount}` : String(limit);
+    // A newer known revision never completes from an observation started for older metadata, and never cancels it:
+    // it waits for that flight, then continues from what it stored.
+    try {
+      const previous = this.flights.get(cloudCacheKey(this.key(this.binding(window, lease), target)));
+      if (known && previous && previous.variant !== variant && previous.variant.startsWith(`${limit}:known:`))
+        return previous.result.then(() => undefined, () => undefined).then(() => this.refresh(window, lease, target, limit, known));
+    } catch (error) { return Promise.reject(error); }
+    return this.start(window, lease, target, this.flights, variant, (key, context) => this.update(key, limit, context, !!known));
   }
 
   refreshPending(window: number, lease: string, target: CloudCacheTarget): Promise<CloudCachePending | null> {

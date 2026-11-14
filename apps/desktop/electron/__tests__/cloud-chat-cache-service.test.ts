@@ -43,6 +43,22 @@ function fixture() {
 }
 
 describe("main cloud cache admission and refresh", () => {
+  it("a refresh for a newer known revision never joins a flight started for an older one", async () => {
+    const f = fixture(), key = { owner, ...target };
+    f.store.putRange(key, page(1));
+    const first = held<void>(), started = held<void>();
+    vi.mocked(f.source.since).mockImplementationOnce(async () => { started.resolve(); await first.promise;
+      return { resync: false, fromRevision: 1, revision: 2, messageCount: 2, rows: [row(1)] }; })
+      .mockImplementationOnce(async () => ({ resync: false, fromRevision: 2, revision: 3, messageCount: 3, rows: [row(2)] }));
+    const older = f.service.refresh(1, f.binding, target, 200, { revision: 2, messageCount: 2 });
+    await started.promise;
+    const newer = f.service.refresh(1, f.binding, target, 200, { revision: 3, messageCount: 3 });
+    first.resolve();
+    expect((await older).range.revision).toBe(2);
+    expect((await newer).range.revision).toBe(3);
+    expect(f.source.since).toHaveBeenCalledTimes(2);
+  });
+
   it("a Team-shared chat whose revision matches opens with its senders and zero requests", async () => {
     const f = fixture(), key = { owner, ...target }, alice = { userId: "44444444-4444-4444-8444-444444444444" };
     const prompt = { index: 0, msgId: "p", kind: "text", createdAt: 1, payload: JSON.stringify({ id: "p", kind: "text", role: "user", text: "Hi", createdAt: 1 }) };
