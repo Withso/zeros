@@ -95,6 +95,13 @@ export function createNativeCloudTranscriptCache(
     }
     override retain(keep: (chatId: string, folder: string) => boolean): void {
       super.retain(keep);
+      // A read or warm-up already past admission must not write a dropped chat back: forget its flight, so its
+      // completion (which checks flight identity) returns nothing.
+      for (const chatId of [...this.nativeReads.keys(), ...this.warming.keys()]) {
+        const key = target(chatId);
+        if (key && keep(chatId, cloudWorkspaceKey(key))) continue;
+        this.nativeReads.delete(chatId); this.warming.delete(chatId); this.refreshAgain.delete(chatId);
+      }
       const owner = native.owner, epoch = native.epoch, memoryEpoch = this.epoch;
       if (!owner || !this.isOwner(owner)) return;
       const current = () => owner === native.owner && epoch === native.epoch && memoryEpoch === this.epoch && this.isOwner(owner);

@@ -31,6 +31,26 @@ function fixture(known?: (chatId: string) => Promise<{ revision: number; message
 }
 
 describe("cloud native disk and renderer memory tiers", () => {
+  it("a native read in flight when retain drops its chat never writes the chat back into memory", async () => {
+    const f = fixture();
+    let release!: (value: unknown) => void;
+    const held = new Promise<unknown>(resolve => { release = resolve; });
+    let reading!: () => void;
+    const started = new Promise<void>(resolve => { reading = resolve; });
+    f.invoke.mockImplementation(async input => {
+      if (input.op === "bind") return ok({ lease });
+      if (input.op === "read") { reading(); return held; }
+      if (input.op === "list") return ok({ items: [], nextAfter: null });
+      return { ok: false, reason: "unavailable" };
+    });
+    const read = f.cache.read(chatId);
+    await started;
+    f.cache.retain(() => false);
+    release(ok({ range: page, pending: null }));
+    expect(await read).toBeNull();
+    expect(f.cache.peek(chatId)).toBeNull();
+  });
+
   it("a painted cached transcript publishes its stored senders", async () => {
     const f = fixture();
     const alice = { userId: "44444444-4444-4444-8444-444444444444" };
