@@ -10,6 +10,8 @@ interface Options {
   revision(): string | undefined;
   flush(): Promise<void>;
   request(input: CloudRuntimeUpdateRequest, signal?: AbortSignal): Promise<CloudRuntimeUpdateReply>;
+  /** runtime-staging-v1 (config.runtimeStaging): stage each new target at once, before and independent of quiet. */
+  staging?(): boolean;
 }
 
 export class RuntimeUpdate {
@@ -21,6 +23,9 @@ export class RuntimeUpdate {
   private checkMs = 60_000;
   private id?: string;
   private committed = false;
+  private nextStage = 0;
+  /** The target this worker last saw staged: a successful staged reply is the signal, never a VM marker. */
+  private staged?: string;
 
   constructor(private readonly options: Options) {}
   start(): void {
@@ -37,7 +42,7 @@ export class RuntimeUpdate {
     if (!on) this.nextCheck = Math.min(this.nextCheck, Date.now() + this.checkMs);
   }
   /** A pushed hint: check at the next tick. */
-  hint(): void { this.nextCheck = 0; }
+  hint(): void { this.nextCheck = 0; this.nextStage = 0; }
   tick(): Promise<void> {
     return this.task ??= this.check().catch(() => {}).finally(() => { this.task = undefined; });
   }
@@ -60,10 +65,20 @@ export class RuntimeUpdate {
       else if (status.status === "committed") await this.request({ op: "activate", id: this.id });
       return;
     }
-    const ticket = gate.ticket(), revision = this.options.revision();
+    // Staging runs whether or not the worker is quiet: running turns or connected clients never postpone the download.
+    let seen: CloudRuntimeUpdateReply | undefined;
+    if (this.options.staging?.() && Date.now() >= this.nextStage) {
+      this.nextStage = Date.now() + this.checkMs;
+      seen = await this.request({ op: "status" });
+      if (seen.status === "target" && seen.sha256 !== this.staged) {
+        const staged = await this.request({ op: "stage" });
+        if (staged.status === "staged" && staged.sha256 === seen.sha256) this.staged = staged.sha256;
+      }
+    }
+    const ticket = gate.ticket("runtime"), revision = this.options.revision();
     if (!ticket || revision === undefined || Date.now() < this.nextCheck) return;
     this.nextCheck = Date.now() + this.checkMs;
-    const target = await this.request({ op: "status" });
+    const target = seen ?? await this.request({ op: "status" });
     if (target.status !== "target" || !gate.valid(ticket)) return;
     const prepared = await this.request({ op: "prepare", revision, generation: ticket.generation, instanceId: this.options.instanceId });
     if (prepared.status !== "prepared") return;

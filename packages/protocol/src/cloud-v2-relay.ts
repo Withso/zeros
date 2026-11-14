@@ -101,6 +101,9 @@ export const HISTORY_DIGEST_FEATURE = "history-digest-v1";
 /** boot-timings-v1: the worker reports when it listens, sends and gets its hello acknowledged, and first accepts an
  * inbound relay, so one wake reads on one timing line. Opt-in by config.bootTimings for workers that advertise it. */
 export const BOOT_TIMINGS_FEATURE = "boot-timings-v1";
+/** runtime-staging-v1: the worker asks the control plane to stage the runtime target at once (config.runtimeStaging),
+ * so a wake never installs it; the quiet handoff then reuses the staged bytes. */
+export const RUNTIME_STAGING_FEATURE = "runtime-staging-v1";
 export const CLOUD_V2_MAX_DIGEST_CHATS = 4096;
 export const CloudV2HistoryDigestSchema = z.string().regex(/^[0-9a-f]{64}$/);
 /** history-digest-deletions-v1: the reply also names the control plane's soft-deleted chats (kept until the workspace
@@ -256,6 +259,8 @@ export const CloudV2ControlFrameSchema = z.discriminatedUnion("t", [
     historyDigest: z.literal(1).optional(),
     /** boot-timings-v1: the control plane accepts CloudV2WorkerBootTimingSchema on the timing route. */
     bootTimings: z.literal(1).optional(),
+    /** runtime-staging-v1: the control plane accepts { op: "stage" } on the runtime update route. */
+    runtimeStaging: z.literal(1).optional(),
     gitIdentity: CloudV2GitIdentitySchema.nullable().optional(),
     /** creator-commit-identity-v1 only: "creator" = gitIdentity is the current Creator's (null: none stored, commits refuse);
      * "actor" = no Creator, each context commits as its own person. Absent: N−1 behaviour. */

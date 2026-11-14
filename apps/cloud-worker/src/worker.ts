@@ -161,6 +161,8 @@ export class CloudWorker {
   private readonly githubCredentials: GithubCredentialRecovery;
   private githubUserTokensEnabled = false;
   private historyReplacementEnabled = false;
+  /** runtime-staging-v1: stage each runtime target at once, independent of quiet. */
+  private runtimeStagingEnabled = false;
   /** The control plane must opt in before digest fields enter history frames. */
   private historyDigestEnabled = false;
   /** Read when a native execution's tools are admitted. */
@@ -605,6 +607,7 @@ export class CloudWorker {
     }
     this.historyReplacementEnabled = config.historyReplacement === 1;
     this.historyDigestEnabled = config.historyDigest === 1;
+    this.runtimeStagingEnabled = config.runtimeStaging === 1;
     this.localCommandsEnabled = config.localCommands === 1;
     this.localCommandReason = config.localCommandReason === 1;
     this.notifyUserEnabled = config.notifyUser === 1;
@@ -672,6 +675,7 @@ export class CloudWorker {
     if (config.runtimeUpdate === 1 && this.options.transport.runtimeUpdate && this.options.runtimePermit && !this.runtimeUpdater) {
       this.runtimeUpdater = new RuntimeUpdate({ gate: this.runtimeGate, permit: this.options.runtimePermit, instanceId: this.instanceId,
         revision: () => this.configurationRevision?.toString(), request: this.options.transport.runtimeUpdate.bind(this.options.transport),
+        staging: () => this.runtimeStagingEnabled,
         flush: async () => {
           await this.flushServices();
           if (!await this.history!.flush()) throw new Error("History mirror is unavailable.");
