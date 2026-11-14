@@ -12,6 +12,10 @@ export const CLOUD_V2_WORKER_BRIDGE_PROTOCOL = "zeros.cloud.v2.worker";
 export const CLOUD_V2_MAX_FRAME_BYTES = 16 * 1024 * 1024;
 /** Rows per history frame; larger backfills are split by the sender. */
 export const CLOUD_V2_MAX_HISTORY_ROWS = 500;
+export const HISTORY_DIGEST_FEATURE = "history-digest-v1";
+export const CloudV2HistoryDigestsReplySchema = z.object({
+  chats: z.array(z.object({ chatId: z.string().min(1).max(256), digest: z.string().length(64).regex(/^[a-f0-9]{64}$/).nullable() }).strict()).max(4096),
+}).strict();
 
 export const CloudV2AgentSchema = z.enum(["codex", "claude", "cursor"]);
 export type CloudV2Agent = z.infer<typeof CloudV2AgentSchema>;
@@ -75,6 +79,7 @@ export const CloudV2HistoryFrameSchema = z.object({
       rows: z.array(CloudV2MessageRowSchema).max(CLOUD_V2_MAX_HISTORY_ROWS),
       replace: z.literal(true).optional(),
       historyState: CloudV2HistoryStateSchema.optional(),
+      digest: z.string().length(64).regex(/^[a-f0-9]{64}$/).optional(),
     }).strict().refine(value => !value.historyState || value.replace === true, "History state requires replacement").optional(),
     chatEditAcks: z.array(CloudV2ChatEditAckSchema).max(128).optional(),
   }).strict();
@@ -167,6 +172,7 @@ export const CloudV2ControlFrameSchema = z.discriminatedUnion("t", [
       userName: z.string().min(1).max(256).refine(value => !!value.trim() && !/[\u0000-\u001f\u007f]/.test(value)).optional(),
     }).strict().optional(),
     historyReplacement: z.literal(1).optional(),
+    historyDigest: z.literal(1).optional(),
     gitIdentity: CloudV2GitIdentitySchema.nullable().optional(),
     gitIdentitySource: z.enum(["creator", "actor"]).optional(),
   githubPullRequests: z.literal(1).optional(),

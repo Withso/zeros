@@ -478,7 +478,7 @@ it("ignores an older control plane that rejects a newer timing phase", async () 
 });
 it("advertises outbox support without changing the strict hello body, and rereads credentials on pull", async () => {
   const f = await fixture();
-  expect(new Headers(vi.mocked(f.fetcher).mock.calls[0]![1]?.headers).get("x-zeros-worker-features")).toBe("prompt-outbox-v1,mcp-v1,workspace-setup-v1,checkout-v2,agent-interactions-v1,github-pr-v1,git-identity-v1,github-user-token-v1,code-review-v1,history-replace-v1,workspace-environment-v1,repository-setup-v1,runtime-update-v1,worker-push-v1,workspace-api-v1,session-name-v1,chat-edit-v1,local-commands-v1,setup-status-v1,notify-user-v1,sync-v1,local-commands-reason-v1,acting-user-v1,sync-context-v1,creator-agent-logins-v1,creator-agent-models-v1,creator-commit-identity-v1,push-signals-v1,recovery-quiesce-v1");
+  expect(new Headers(vi.mocked(f.fetcher).mock.calls[0]![1]?.headers).get("x-zeros-worker-features")).toBe("prompt-outbox-v1,mcp-v1,workspace-setup-v1,checkout-v2,agent-interactions-v1,github-pr-v1,git-identity-v1,github-user-token-v1,code-review-v1,history-replace-v1,workspace-environment-v1,repository-setup-v1,runtime-update-v1,worker-push-v1,workspace-api-v1,session-name-v1,chat-edit-v1,local-commands-v1,setup-status-v1,notify-user-v1,sync-v1,local-commands-reason-v1,acting-user-v1,sync-context-v1,creator-agent-logins-v1,creator-agent-models-v1,creator-commit-identity-v1,push-signals-v1,recovery-quiesce-v1,history-digest-v1");
   expect(Object.keys(f.requests[0]!.body).sort()).toEqual(["bootId", "protocol", "runtimeSha256"]);
   await f.rotate();
   vi.mocked(f.fetcher).mockImplementationOnce(async (_url, init) => {
@@ -655,4 +655,16 @@ it("R1: a negotiated 60 s pull keeps its HTTP request open past 35 s and is boun
     expect(abortedAt! - started.at).toBeLessThanOrEqual(75_000);
     expect(await pending).toBe("aborted");
   } finally { vi.useRealTimers(); }
+});
+
+it("history-digest-v1: the digests read is authenticated exactly like the history POST", async () => {
+  const f = await fixture();
+  vi.mocked(f.fetcher).mockImplementationOnce(async (url, init) => {
+    expect(new URL(String(url)).pathname).toBe("/v2/cloud/worker/history/digests");
+    expect(init?.method).toBe("POST");
+    expect(new Headers(init?.headers).get("authorization")).toBe("Bearer synthetic-worker-token");
+    expect(new Headers(init?.headers).get("x-zeros-worker-boot")).toBe(f.transport.bootId);
+    return Response.json({ chats: [] });
+  });
+  expect(await f.transport.historyDigests()).toEqual({ chats: [] });
 });

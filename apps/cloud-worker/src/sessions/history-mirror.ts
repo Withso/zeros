@@ -1,4 +1,5 @@
-import { CLOUD_V2_MAX_FRAME_BYTES, CLOUD_V2_MAX_HISTORY_ROWS, type CloudV2HistoryState, type CloudV2MessageRow, type CloudV2WorkerFrame } from "@zeros/protocol/cloud-v2-relay";
+import { createHash } from "node:crypto";
+import { CLOUD_V2_MAX_FRAME_BYTES, CLOUD_V2_MAX_HISTORY_ROWS, CloudV2HistoryDigestsReplySchema, type CloudV2HistoryState, type CloudV2MessageRow, type CloudV2WorkerFrame } from "@zeros/protocol/cloud-v2-relay";
 import type { Transport } from "../transport";
 import type { ChatRow } from "./chat-history";
 import type { SessionChange, SessionStore } from "./session-store";
@@ -19,7 +20,10 @@ export class HistoryMirror {
   private unsubscribe: () => void;
 
   constructor(private readonly store: SessionStore, private readonly transport: Transport, private readonly replacement = () => false,
-    private readonly sanitize: <T>(value: T) => T = value => value) {
+    private readonly sanitize: <T>(value: T) => T = value => value,
+    /** history-digest-v1: enabled when the control plane serves digests; `restored` (a boot from a checkpoint, possibly
+     * older than the control plane's rows) always replaces everything. */
+    private readonly digests?: { enabled(): boolean; restored(): boolean }) {
     this.unsubscribe = store.onChange((change) => this.change(change));
   }
 
@@ -33,9 +37,55 @@ export class HistoryMirror {
     this.epoch++;
     this.pending.clear();
     for (const chatId of chatDeletions) this.pending.set(chatId, { deleted: true, revision: 0, rows: new Map(), due: 0 });
-    for (const chat of chats) this.pending.set(chat.id, { chat, ...(this.replacement() ? { replace: true, historyState: this.store.historyState(chat.id) } : {}),
-      revision: this.store.historyRevision(chat.id), rows: new Map(this.store.history(chat.id).map((row) => [row.msgId, row])), due: 0 });
+    // A boot restored from a checkpoint (possibly older than the control plane's rows) replaces everything once.
+    const restored = this.firstConnect && !!this.digests?.restored(); this.firstConnect = false;
+    if (this.negotiated() && this.transport.historyDigests) {
+      // One read of the stored digests; only chats whose content differs are replaced (a restored boot replaces all, but
+      // the read still proves the route). flush() and runtimeBusy wait for it.
+      const epoch = this.epoch;
+      this.sending = this.reconcile(epoch, restored).finally(() => { if (epoch === this.epoch) { this.sending = undefined; this.drain(); } });
+      return;
+    }
+    for (const chat of chats) this.pending.set(chat.id, this.snapshot(chat));
     this.drain();
+  }
+
+  private firstConnect = true;
+  /** The connection epoch whose digests read succeeded with a valid reply (an empty one included). */
+  private stampEpoch = -1;
+  private negotiated(): boolean { return !!this.digests?.enabled() && this.replacement(); }
+  /** Digests go out only after this connection's read proved the control plane serves them: after a failed or invalid
+   * read the replacement carries no optional field, so an older control plane's strict schema still accepts it. */
+  private stamping(): boolean { return this.negotiated() && this.stampEpoch === this.epoch; }
+  private snapshot(chat: ChatRow): Pending {
+    return { chat, ...(this.replacement() ? { replace: true, historyState: this.store.historyState(chat.id) } : {}),
+      revision: this.store.historyRevision(chat.id), rows: new Map(this.store.history(chat.id).map((row) => [row.msgId, row])), due: 0 };
+  }
+  /** What the control plane stores for a chat after its final replacement frame: chat row, history state and rows. */
+  private digestOf(chat: ChatRow, historyState: CloudV2HistoryState | undefined, rows: Iterable<CloudV2MessageRow>): string {
+    const hash = createHash("sha256");
+    hash.update(`chat\0${JSON.stringify(this.sanitize(chat))}\n`).update(`state\0${JSON.stringify(historyState ?? null)}\n`);
+    for (const source of rows) {
+      const row = this.sanitize(source);
+      hash.update(`${row.msgId}\0${row.kind}\0${row.createdAt}\0${createHash("sha256").update(row.payload).digest("hex")}\n`);
+    }
+    return hash.digest("hex");
+  }
+  private async reconcile(epoch: number, restored: boolean): Promise<void> {
+    let stored: Map<string, string | null> | undefined;
+    // Any doubt (error, 404, an older control plane, an invalid reply) means today's full replacement, unstamped.
+    try { stored = new Map(CloudV2HistoryDigestsReplySchema.parse(await this.transport.historyDigests!()).chats.map(entry => [entry.chatId, entry.digest])); }
+    catch { stored = undefined; }
+    if (epoch !== this.epoch || !this.online) return;
+    if (stored) this.stampEpoch = epoch;
+    if (restored) stored = undefined;
+    for (const chat of this.store.list().chats) {
+      const full = this.snapshot(chat), digest = stored?.get(chat.id);
+      if (digest && digest === this.digestOf(full.chat!, full.historyState, full.rows.values())) continue;
+      // A chat edit acknowledged during the read rides with the replacement (which then carries no digest).
+      const ack = this.pending.get(chat.id)?.ack;
+      this.pending.set(chat.id, ack === undefined ? full : { ...full, ack });
+    }
   }
 
   /** Call after the edit is in the store. The next frame for this chat sends
@@ -106,6 +156,9 @@ export class HistoryMirror {
           let rows: CloudV2MessageRow[] = [], size = 1024;
           let replace = pending.replace;
           const batch = () => { frames.push({ t: "history", messages: { chatId, rows, ...(replace ? { replace, historyState: pending.historyState } : {}) } }); replace = undefined; };
+          // history-digest-v1: a full replacement with no chat-edit ACK pending stamps its digest on its final frame.
+          const digest = pending.replace && pending.chat && pending.ack === undefined && this.stamping()
+            ? this.digestOf(pending.chat, pending.historyState, pending.rows.values()) : undefined;
           for (const source of pending.rows.values()) {
             const row = this.sanitize(source);
             const bytes = Buffer.byteLength(JSON.stringify(row)) + 1;
@@ -115,6 +168,8 @@ export class HistoryMirror {
             rows.push(row); size += bytes;
           }
           if (rows.length || replace) batch();
+          const last = frames.at(-1);
+          if (digest && last?.t === "history" && last.messages) last.messages = { ...last.messages, digest };
         }
         for (const frame of frames) {
           if (!this.online || epoch !== this.epoch) break;

@@ -205,6 +205,10 @@ export class HybridTransport implements Transport {
   async recovery(input: CloudRecoveryRequest, signal?: AbortSignal): Promise<CloudRecoveryReply> {
     return CloudRecoveryReplySchema.parse(await this.request("recovery", CloudRecoveryRequestSchema.parse(input), signal, 10_000));
   }
+  /** history-digest-v1: one read of each chat's stored digest, authenticated like the history POST. */
+  async historyDigests(): Promise<unknown> {
+    return this.request("history/digests", {}, undefined, 10_000);
+  }
   async readyRuntime(): Promise<void> {
     if (!this.options.runtimeHandoff || this.runtimeReady) return;
     const reply = await this.runtimeUpdate({ op: "ready", id: this.options.runtimeHandoff.id });

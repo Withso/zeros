@@ -1,4 +1,4 @@
-import { ACTING_USER_FEATURE, CLOUD_RECOVERY_QUIESCE_FEATURE, CREATOR_AGENT_LOGINS_FEATURE, CREATOR_AGENT_MODELS_FEATURE, CREATOR_COMMIT_IDENTITY_FEATURE, PUSH_SIGNALS_FEATURE } from "@zeros/protocol/cloud-v2-relay";
+import { ACTING_USER_FEATURE, CLOUD_RECOVERY_QUIESCE_FEATURE, HISTORY_DIGEST_FEATURE, CREATOR_AGENT_LOGINS_FEATURE, CREATOR_AGENT_MODELS_FEATURE, CREATOR_COMMIT_IDENTITY_FEATURE, PUSH_SIGNALS_FEATURE } from "@zeros/protocol/cloud-v2-relay";
 
 /** Advertised on hello and on the relay's inbound dial. The control plane gates
  * each configuration on the list it saw, so the two must be identical. */
@@ -18,4 +18,6 @@ export const CLOUD_WORKER_FEATURES = ["prompt-outbox-v1", "mcp-v1", "workspace-s
   /** R1: long-polls 60 s, reports on change + 5 min, pulses every 5 min and checks runtime updates on a hint, once accepted. */
   PUSH_SIGNALS_FEATURE,
   /** Fences, flushes and seals over the outbound path for a fresh-checkpoint replacement; holds a replacement's turns until its setup succeeds. */
-  CLOUD_RECOVERY_QUIESCE_FEATURE].join(",");
+  CLOUD_RECOVERY_QUIESCE_FEATURE,
+  /** A reconnect reads each chat's stored digest once and re-sends only changed chats (with config.historyDigest). */
+  HISTORY_DIGEST_FEATURE].join(",");

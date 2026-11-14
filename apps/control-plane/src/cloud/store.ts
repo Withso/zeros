@@ -16,7 +16,7 @@ import type { AuthedUser } from "../auth.js";
 import type { CloudAgentCredentialKeys } from "../agent-credentials/agent-credential-envelope.js";
 import { securityStreamAuthority } from "../security-events.js";
 import { HttpError } from "../authz.js";
-import type { CloudV2HistoryState, CloudV2MessageRow } from "./contract.js";
+import { CloudV2HistoryDigestsReplySchema, type CloudV2HistoryState, type CloudV2MessageRow } from "./contract.js";
 import { hashCloudV2Token, newCloudV2Token } from "./tokens.js";
 import { CLOUD_V2_CREATOR_ON_HOLD, CLOUD_V2_CREATOR_ACCESS_SQL, CLOUD_V2_LIVE_ACCESS as LIVE_ACCESS, CLOUD_V2_LIVE_ACCESS_SQL, requireWorkspaceCreator } from "./workspace-access.js";
 import { memberOnHoldSql, organizationMemberOnHold } from "../organization-seats.js";
@@ -59,7 +59,7 @@ type CreateReceipt = { status: 201; response: Record<string, unknown> };
 type HistoryInput = {
   chats?: readonly { id: string }[] | undefined; chatDeletions?: readonly string[] | undefined;
   chatEditAcks?: readonly { chatId: string; version: string }[] | undefined;
-  messages?: { chatId: string; rows: readonly CloudV2MessageRow[]; replace?: true | undefined; historyState?: CloudV2HistoryState | undefined } | undefined;
+  messages?: { chatId: string; rows: readonly CloudV2MessageRow[]; replace?: true | undefined; historyState?: CloudV2HistoryState | undefined; digest?: string | undefined } | undefined;
 };
 export type CloudV2WorkerSession = CloudV2Workspace & {
   accessEpoch: string; loginRevision: string; executionMode?: "legacy" | "prepared" | "active";
@@ -935,12 +935,24 @@ export class CloudV2Store {
 
   /** Sequence and rows commit together. A retry after a lost HTTP response is
    * a no-op, while a gap or a conflicting reuse cannot overwrite newer rows. */
-  async writeWorkerHistory(token: string, bootId: string, sequence: number, input: HistoryInput): Promise<void> {
+  async writeWorkerHistory(token: string, bootId: string, sequence: number, input: HistoryInput, historyDigests = false): Promise<void> {
     const digest = createHash("sha256").update(JSON.stringify(input)).digest("hex");
     await withSystemTx(this.pool, async tx => {
-      const { rows } = await tx.query<{ id: string; worker_boot_id: string | null; worker_history_sequence: string; worker_history_digest: string | null }>(
-        `SELECT id, worker_boot_id, worker_history_sequence::text, worker_history_digest FROM cloud_v2_workspaces w
-         WHERE worker_token_hash=$1 AND state IN ('running','stopping') AND ${LIVE_ACCESS} FOR UPDATE`, [hashCloudV2Token(token)]);
+      // Invalidation may preserve only this boot's immediately preceding
+      // replacement. Other writers clear it without knowing this protocol.
+      const { rows } = await tx.query<{ id: string; worker_boot_id: string | null; worker_history_sequence: string; worker_history_digest: string | null; history_replacement: boolean }>(
+        `SELECT id, worker_boot_id, worker_history_sequence::text, worker_history_digest,
+           EXISTS (SELECT 1 FROM cloud_v2_chats h WHERE h.workspace_id=w.id AND h.chat_id=$2
+             AND h.history_replacement_boot_id=$3 AND h.history_replacement_sequence=$4::bigint-1) AS history_replacement,
+           set_config('app.cloud_history_workspace',CASE WHEN $5::boolean THEN w.id::text ELSE '' END,true),
+           set_config('app.cloud_history_chat',coalesce($2::text,''),true),
+           set_config('app.cloud_history_boot',$3::uuid::text,true),
+           set_config('app.cloud_history_previous',($4::bigint-1)::text,true),
+           set_config('app.cloud_history_state',CASE WHEN $6::boolean THEN 'on' ELSE '' END,true)
+         FROM cloud_v2_workspaces w
+         WHERE worker_token_hash=$1 AND state IN ('running','stopping') AND ${LIVE_ACCESS} FOR UPDATE`,
+        [hashCloudV2Token(token), input.messages?.chatId ?? null, bootId, sequence, historyDigests,
+          !!input.messages?.historyState && !input.chats?.some(chat => chat.id === input.messages?.chatId)]);
       const row = rows[0];
       if (!row || row.worker_boot_id !== bootId) throw new HttpError(401, "worker_boot_changed", "Worker authorization changed");
       const previous = Number(row.worker_history_sequence);
@@ -948,8 +960,48 @@ export class CloudV2Store {
       if (sequence <= previous) return;
       if (sequence !== previous + 1) throw new HttpError(409, "history_sequence_gap", "History sequence is not contiguous");
       await this.mirrorHistory(tx, row.id, input);
+      const batch = input.messages;
+      const prepare = historyDigests && !batch ? input.chats?.filter(chat =>
+        !input.chatDeletions?.includes(chat.id) && !input.chatEditAcks?.some(ack => ack.chatId === chat.id)).map(chat => chat.id) : undefined;
+      if (prepare?.length) await tx.query(`UPDATE cloud_v2_chats h SET history_digest=NULL,
+          history_replacement_boot_id=$3,history_replacement_sequence=$4,history_replacement_started=false
+        WHERE workspace_id=$1 AND chat_id=ANY($2::text[]) AND deleted_at IS NULL
+          AND NOT EXISTS (SELECT 1 FROM cloud_v2_chat_edits e WHERE e.workspace_id=h.workspace_id AND e.chat_id=h.chat_id
+            AND e.version>e.acknowledged_version)`, [row.id, prepare, bootId, sequence]);
+      if (historyDigests && batch && (batch.replace || batch.digest || row.history_replacement) && !input.chatEditAcks?.some(ack => ack.chatId === batch.chatId)) {
+        // The trigger's marker is checked after all content writes. A cut,
+        // retention or edit between frames cannot be covered by a later stamp.
+        await tx.query(`UPDATE cloud_v2_chats h SET history_digest=$3,
+            history_replacement_boot_id=CASE WHEN $3::text IS NULL THEN $4::uuid ELSE NULL END,
+            history_replacement_sequence=CASE WHEN $3::text IS NULL THEN $5::bigint ELSE NULL END,
+            history_replacement_started=CASE WHEN $3::text IS NULL THEN true ELSE NULL END
+          WHERE workspace_id=$1 AND chat_id=$2 AND deleted_at IS NULL
+            AND history_replacement_boot_id=$4 AND history_replacement_sequence=$5::bigint-1
+            AND history_replacement_started=NOT $6::boolean
+            AND NOT EXISTS (SELECT 1 FROM cloud_v2_chat_edits e WHERE e.workspace_id=h.workspace_id AND e.chat_id=h.chat_id
+              AND e.version>e.acknowledged_version)`,
+        [row.id, batch.chatId, batch.digest ?? null, bootId, sequence, batch.replace === true]);
+      }
       await tx.query("UPDATE cloud_v2_workspaces SET worker_history_sequence=$2, worker_history_digest=$3 WHERE id=$1", [row.id, sequence, digest]);
     });
+  }
+
+  async workerHistoryDigests(token: string, bootId: string) {
+    const { rows } = await withSystemStatement<{ chat_id: string | null; history_digest: string | null }>(this.pool, sql`
+      SELECT h.chat_id,h.history_digest FROM cloud_v2_workspaces w
+      LEFT JOIN LATERAL (
+        SELECT c.chat_id,CASE WHEN c.deleted_at IS NULL AND NOT EXISTS (SELECT 1 FROM cloud_v2_chat_edits e
+          WHERE e.workspace_id=c.workspace_id AND e.chat_id=c.chat_id AND e.version>e.acknowledged_version)
+          THEN c.history_digest ELSE NULL END AS history_digest
+        FROM cloud_v2_chats c WHERE c.workspace_id=w.id ORDER BY c.chat_id LIMIT 4097
+      ) h ON true
+      WHERE w.worker_token_hash=decode(${SqlFragment.text(hashCloudV2Token(token).toString("hex"), /^[0-9a-f]{64}$/)},'hex')
+        AND w.worker_boot_id=${SqlFragment.uuid(bootId)} AND w.state IN ('running','stopping') AND ${CLOUD_V2_LIVE_ACCESS_SQL}`);
+    if (!rows.length) return null;
+    const reply = CloudV2HistoryDigestsReplySchema.safeParse({ chats: rows.filter(row => row.chat_id !== null)
+      .map(row => ({ chatId: row.chat_id, digest: row.history_digest })) });
+    if (!reply.success) throw new HttpError(503, "history_digest_limit", "History digests are unavailable");
+    return reply.data;
   }
 
   async markActive(id: string): Promise<void> {

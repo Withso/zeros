@@ -42,14 +42,15 @@ type DeviceClient = { register(id: string, input: unknown): Promise<{ device: De
   heartbeat(device: Device): Promise<unknown>; syncConnections(device: Device): Promise<unknown>;
   events(device: Device, signal: AbortSignal): Promise<ReadableStream<Uint8Array>> };
 type WorkerClient = { bootId: string; promptRequest(operation: string, body: unknown): Promise<unknown>;
-  contextRequest(path: string, body: unknown): Promise<unknown>; dispose(): Promise<void> };
+  contextRequest(path: string, body: unknown): Promise<unknown>; historyDigests?(): Promise<unknown>; dispose(): Promise<void> };
 type PromptClient = { enqueue(body: unknown): Promise<unknown>; list(after: string, includePayload: boolean): Promise<unknown> };
 type StreamStore = { upsert(chat: unknown): Promise<void>; enqueue(chatId: string, input: unknown): Promise<unknown>;
   claim(chatId: string): Promise<unknown>; importMessages(chatId: string, rows: CloudV2MessageRow[]): Promise<unknown>;
   fold(chatId: string, update: unknown): Promise<unknown>; finish(chatId: string, requestId: string, result: unknown): Promise<unknown>;
   history(chatId: string): readonly CloudV2MessageRow[]; flush(): Promise<void> };
-type StreamMirror = { connect(): void; flush(): Promise<boolean>; dispose(): Promise<void> };
+type StreamMirror = { connect(): void; disconnect(): void; flush(): Promise<boolean>; dispose(): Promise<void> };
 export const RUNNING_TURN = { milliseconds: 60_000, deltas: 300, deltaCharacters: 100 } as const;
+export const WAKE_HISTORY = { chats: 12, rowsPerChat: 4 } as const;
 const requireValue = (condition: unknown, reason: string): void => { if (!condition) throw new Error(`Load fixture: ${reason}`); };
 const baseUrl = "https://api.example.test";
 async function closeAll(cleanups: Array<() => Promise<void>>): Promise<void> {
@@ -344,6 +345,54 @@ export async function loadBudgetFixture(pool: pg.Pool, probe: LoadBudgetProbe) {
         },
       };
     };
+    const cleanWake = async () => {
+      const { SessionStore } = await import(source("apps/cloud-worker/src/sessions/session-store.ts")) as {
+        SessionStore: { open(directory: string, workspaceKey: string): Promise<StreamStore> } };
+      const { HistoryMirror } = await import(source("apps/cloud-worker/src/sessions/history-mirror.ts")) as {
+        HistoryMirror: new (store: StreamStore, transport: { send(frame: unknown): Promise<boolean>; historyDigests(): Promise<unknown> },
+          replacement: () => boolean, sanitize: <T>(value: T) => T, digests: { enabled(): boolean; restored(): boolean }) => StreamMirror };
+      const workspaceKey = `cloud://${f.organizationId}/${f.workspace.id}`;
+      const store = await SessionStore.open(join(directory, "clean-wake"), workspaceKey);
+      for (let chat = 0; chat < WAKE_HISTORY.chats; chat++) {
+        const chatId = `wake-${chat}`;
+        await store.upsert({ id: chatId, folder: workspaceKey, title: `Wake ${chat}` });
+        await store.importMessages(chatId, Array.from({ length: WAKE_HISTORY.rowsPerChat }, (_, row) => ({
+          msgId: `${chatId}-row-${row}`, kind: "text", createdAt: row,
+          payload: JSON.stringify({ id: `${chatId}-row-${row}`, kind: "text", role: "assistant", text: `${chat}/${row}`, createdAt: row }),
+        })));
+      }
+      const configuration = hello.config as { historyReplacement?: 1; historyDigest?: 1 };
+      let failed: unknown;
+      const mirror = new HistoryMirror(store, {
+        send: async frame => {
+          try {
+            requireValue(frame && typeof frame === "object" && "t" in frame && frame.t === "history", "unexpected wake carrier");
+            await workerJson("history", { ...frame as object, bootId: worker.bootId, sequence: ++sequence });
+            return true;
+          } catch (error) { failed = error; return false; }
+        },
+        historyDigests: () => worker.historyDigests ? worker.historyDigests() : workerJson("history/digests", {}),
+      }, () => configuration.historyReplacement === 1, value => value,
+      { enabled: () => configuration.historyDigest === 1, restored: () => false });
+      cleanups.push(async () => { mirror.disconnect(); await mirror.dispose(); await store.flush(); });
+      const connect = async () => {
+        mirror.connect(); const connected = await mirror.flush();
+        if (failed !== undefined) throw failed;
+        requireValue(connected, "wake history mirror did not finish");
+      };
+      return {
+        prepare: connect,
+        resume: async () => { mirror.disconnect(); await connect(); },
+        verify: async () => {
+          for (let chat = 0; chat < WAKE_HISTORY.chats; chat++) {
+            const chatId = `wake-${chat}`;
+            const actual = await f.cp.store.windowMessages(f.workspace.id, chatId, 1000);
+            requireValue(JSON.stringify(actual) === JSON.stringify(store.history(chatId)), "wake changed mirrored history");
+          }
+          return { ...WAKE_HISTORY, negotiated: configuration.historyDigest === 1 };
+        },
+      };
+    };
     const idleReplay = async (wallClock = false, profile: typeof R1_IDLE_REPLAY = OBSERVED_IDLE_REPLAY) => {
       const streams: Array<() => Promise<void>> = [];
       presenceClosed = deferred<void>();
@@ -398,7 +447,7 @@ export async function loadBudgetFixture(pool: pg.Pool, probe: LoadBudgetProbe) {
       catch (error) { cancelled = error instanceof Error && error.name === "AbortError"; }
       requireValue(cancelled, "HTTP transport ignored cancellation");
     };
-    return { close, workspaceList, coldSource, admission, turnStart, finishTurn, runningTurn, renew, idleReplay, assertTransportCancellation, pollWaits: () => pollWaits,
+    return { close, workspaceList, coldSource, admission, turnStart, finishTurn, runningTurn, cleanWake, renew, idleReplay, assertTransportCancellation, pollWaits: () => pollWaits,
       observerStatus: () => app.requestCostObserverStatus!() };
   } catch (error) { await close(); throw error; }
 }

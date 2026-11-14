@@ -837,6 +837,23 @@ describe("cloud v2 relay", () => {
     expect(frames.filter(frame => frame.t === "config").at(-1)).not.toHaveProperty("notifyUser");
   });
 
+  it.each(["", "history-digest-v1", "history-replace-v1", "history-replace-v1,history-digest-v10", "history-replace-v1,history-digest-v1"]
+    .flatMap(features => [false, true].map(configured => ({ features, configured }))))(
+    "negotiates history digests on initial and refreshed relay configuration: $features, configured=$configured", async ({ features, configured }) => {
+      workerServer.on("headers", headers => { headers.push(`X-Zeros-Worker-Features: ${features}`); });
+      const original = deps.config;
+      deps.config = async workspace => ({ ...await original(workspace), ...(configured ? { historyDigest: 1 as const } : {}) });
+      const frames: any[] = [];
+      workerServer.on("connection", ws => ws.on("message", raw => frames.push(JSON.parse(String(raw)))));
+      await app();
+      await vi.waitFor(() => expect(frames.filter(frame => frame.t === "config")).toHaveLength(1));
+      loginRevision = "1"; await relay.refreshLogins();
+      await vi.waitFor(() => expect(frames.filter(frame => frame.t === "config")).toHaveLength(2));
+      for (const frame of frames.filter(frame => frame.t === "config")) {
+        expect(frame.historyDigest).toBe(features === "history-replace-v1,history-digest-v1" ? 1 : undefined);
+      }
+    });
+
   it.each([false, true])("gates managed identity on WebSocket upgrade support=%s for initial and refreshed config", async supported => {
     workerServer.on("headers", headers => { headers.push(`X-Zeros-Worker-Features: mcp-v1${supported ? ",git-identity-v1" : ""}`); });
     const original = deps.config, gitIdentity = { name: "Fixture Contributor", email: "123+contributor@users.noreply.github.com" };

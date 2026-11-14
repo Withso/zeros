@@ -24,6 +24,16 @@ describe("request and background ratchets", () => {
   });
 });
 
+it("refuses an unregistered route even when the client catches the failed request", async () => {
+  const pool = new pg.Pool();
+  const probe = new LoadBudgetProbe(pool);
+  try {
+    await expect(probe.measure("unknown-route", async () => {
+      await probe.request(new Request("https://api.example.test/unknown-route"), () => new Response(null, { status: 200 })).catch(() => {});
+    })).rejects.toThrow("Load replay reached an unregistered route");
+  } finally { probe.close(); await pool.end(); }
+});
+
 describe("workspace update-lock measurement", () => {
   it.each([
     ["SELECT 1 FROM cloud_v2_workspaces WHERE id=$1 FOR UPDATE", 1],

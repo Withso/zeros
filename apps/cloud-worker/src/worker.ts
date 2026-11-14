@@ -161,6 +161,8 @@ export class CloudWorker {
   private readonly githubCredentials: GithubCredentialRecovery;
   private githubUserTokensEnabled = false;
   private historyReplacementEnabled = false;
+  /** The control plane must opt in before digest fields enter history frames. */
+  private historyDigestEnabled = false;
   /** Read when a native execution's tools are admitted. */
   private localCommandsEnabled = false;
   private localCommandReason = false;
@@ -602,6 +604,7 @@ export class CloudWorker {
       this.workspaceMcp.revoke();
     }
     this.historyReplacementEnabled = config.historyReplacement === 1;
+    this.historyDigestEnabled = config.historyDigest === 1;
     this.localCommandsEnabled = config.localCommands === 1;
     this.localCommandReason = config.localCommandReason === 1;
     this.notifyUserEnabled = config.notifyUser === 1;
@@ -822,7 +825,8 @@ export class CloudWorker {
         mutate: agents.mutateChat.bind(agents),
         files: action => workspace!.git.mutate(action),
       });
-      history = new HistoryMirror(store, this.options.transport, () => this.historyReplacementEnabled, value => application.value(value));
+      history = new HistoryMirror(store, this.options.transport, () => this.historyReplacementEnabled, value => application.value(value),
+        { enabled: () => this.historyDigestEnabled, restored: () => restored });
       unsubscribers.push(store.onChange((change) => {
         this.runtimeGate.activity();
         if (!change.chat && !change.deleted && !change.rows.length && !change.replace) return;
