@@ -13,6 +13,7 @@ export const CLOUD_V2_MAX_FRAME_BYTES = 16 * 1024 * 1024;
 /** Rows per history frame; larger backfills are split by the sender. */
 export const CLOUD_V2_MAX_HISTORY_ROWS = 500;
 export const HISTORY_DIGEST_FEATURE = "history-digest-v1";
+export const BOOT_TIMINGS_FEATURE = "boot-timings-v1";
 export const HISTORY_DIGEST_DELETIONS_FEATURE = "history-digest-deletions-v1";
 export const CloudV2HistoryDigestsReplySchema = z.object({
   chats: z.array(z.object({ chatId: z.string().min(1).max(256), digest: z.string().length(64).regex(/^[a-f0-9]{64}$/).nullable() }).strict()).max(4096),
@@ -179,6 +180,7 @@ export const CloudV2ControlFrameSchema = z.discriminatedUnion("t", [
     }).strict().optional(),
     historyReplacement: z.literal(1).optional(),
     historyDigest: z.literal(1).optional(),
+    bootTimings: z.literal(1).optional(),
     gitIdentity: CloudV2GitIdentitySchema.nullable().optional(),
     gitIdentitySource: z.enum(["creator", "actor"]).optional(),
   githubPullRequests: z.literal(1).optional(),
@@ -232,6 +234,32 @@ export const CloudV2WorkerTimingSchema = z.object({
   durationMs: z.number().int().nonnegative().max(3_600_000),
 }).strict();
 export type CloudV2WorkerTiming = z.infer<typeof CloudV2WorkerTimingSchema>;
+/** The inbound upgrade outcomes the worker itself returns (101 accepted; the rest are its refusals). */
+export const CLOUD_V2_INBOUND_STATUSES = [101, 400, 401, 404, 429, 503] as const;
+const inboundStatus = z.union([z.literal(101), z.literal(400), z.literal(401), z.literal(404), z.literal(429), z.literal(503)]);
+/** boot-timings-v1 marks, on the worker's own clocks: uptimeMs since process start, atMs its wall clock, the boot id and
+ * the hello attempt they belong to. worker_first_inbound is the first ACCEPTED (101) relay; firstStatus and refusedBefore
+ * tell it apart from earlier refusals. */
+export const CloudV2WorkerBootTimingSchema = z.object({
+  phase: z.enum(["worker_listening", "worker_hello_sent", "worker_hello_acked", "worker_applied_ready", "worker_first_inbound"]),
+  uptimeMs: z.number().int().nonnegative().max(86_400_000),
+  atMs: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  bootId: z.uuid(),
+  helloSequence: z.number().int().positive().max(1_000_000),
+  firstStatus: inboundStatus.optional(),
+  refusedBefore: z.number().int().nonnegative().max(1_000_000).optional(),
+}).strict().refine(value => value.phase === "worker_first_inbound"
+  ? value.firstStatus !== undefined && value.refusedBefore !== undefined
+  : value.firstStatus === undefined && value.refusedBefore === undefined, "Only worker_first_inbound carries inbound outcomes");
+export type CloudV2WorkerBootTiming = z.infer<typeof CloudV2WorkerBootTimingSchema>;
+/** The timing route's body: today's single duration record, or (with config.bootTimings) one boot mark or a batch of
+ * 1..32 duration records and boot marks. worker_applied_ready is a diagnostic hint, never authority. */
+export const CloudV2WorkerTimingRequestSchema = z.union([
+  CloudV2WorkerTimingSchema,
+  CloudV2WorkerBootTimingSchema,
+  z.object({ records: z.array(z.union([CloudV2WorkerTimingSchema, CloudV2WorkerBootTimingSchema])).min(1).max(32) }).strict(),
+]);
+export type CloudV2WorkerTimingRequest = z.infer<typeof CloudV2WorkerTimingRequestSchema>;
 
 const epochMs = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 const contextApi = z.object({ url: z.url({ protocol: /^https$/ }).max(2048), token: z.string().regex(/^zw2x_[A-Za-z0-9_-]{43}$/) }).strict();

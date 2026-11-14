@@ -2,7 +2,7 @@ import { Hono, type Context } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
 import { HttpError } from "../authz.js";
-import { CLOUD_V2_MAX_FRAME_BYTES, CloudV2WorkerActivitySchema, CloudV2WorkerHelloSchema, CloudV2WorkerHistorySchema, CloudV2WorkerTimingSchema, CloudV2RenewRequestSchema, CloudV2TurnLeaseRequestSchema, CloudV2TerminalLeaseRequestSchema, CloudV2ClientLeaseRequestSchema, CloudV2BootstrapLeaseRequestSchema, CloudV2RetiredRequestSchema, CloudV2BootCleanRequestSchema, ACTING_USER_FEATURE, HISTORY_DIGEST_FEATURE, HISTORY_DIGEST_DELETIONS_FEATURE, type CloudV2ControlFrame } from "./contract.js";
+import { CLOUD_V2_MAX_FRAME_BYTES, CloudV2WorkerActivitySchema, CloudV2WorkerHelloSchema, CloudV2WorkerHistorySchema, CloudV2WorkerTimingRequestSchema, CloudV2RenewRequestSchema, CloudV2TurnLeaseRequestSchema, CloudV2TerminalLeaseRequestSchema, CloudV2ClientLeaseRequestSchema, CloudV2BootstrapLeaseRequestSchema, CloudV2RetiredRequestSchema, CloudV2BootCleanRequestSchema, ACTING_USER_FEATURE, BOOT_TIMINGS_FEATURE, HISTORY_DIGEST_FEATURE, HISTORY_DIGEST_DELETIONS_FEATURE, type CloudV2ControlFrame } from "./contract.js";
 import { emitCloudV2Timing, type CloudV2TimingRecord } from "./lifecycle.js";
 import type { CloudV2Store, CloudV2WorkerSession, CloudV2Workspace } from "./store.js";
 import { isCloudV2Token } from "./tokens.js";
@@ -139,7 +139,7 @@ async function configuration(deps: CloudV2WorkerRouteDeps, workspace: CloudV2Wor
     if (!after || !sameMaterialAuthority(before, after)) throw unauthorized();
     const revision = active ? config.loginRevision ?? before.loginRevision : before.loginRevision;
     if (revision === after.loginRevision) {
-      const { api, agentLogins, agentModels, localCommands: _localCommands, localCommandReason: _localCommandReason, notifyUser: _notifyUser, mcpServers, githubPullRequests, githubUserTokens, gitIdentity: _gitIdentity, gitIdentitySource: _gitIdentitySource, agentInteractions, codeReview, historyReplacement: _historyReplacement, historyDigest: _historyDigest, environment, runtimeUpdate: _runtimeUpdate, pushSignals, ...legacy } = config;
+      const { api, agentLogins, agentModels, localCommands: _localCommands, localCommandReason: _localCommandReason, notifyUser: _notifyUser, mcpServers, githubPullRequests, githubUserTokens, gitIdentity: _gitIdentity, gitIdentitySource: _gitIdentitySource, agentInteractions, codeReview, historyReplacement: _historyReplacement, historyDigest: _historyDigest, bootTimings: _bootTimings, environment, runtimeUpdate: _runtimeUpdate, pushSignals, ...legacy } = config;
       if (environment && !features.has("workspace-environment-v1"))
         throw new HttpError(409, "cloud_environment_runtime_required", "Update the cloud runtime before opening this workspace.");
       const { setup, setupScript, baseCommit, github, ...workspaceConfig } = config.workspace;
@@ -158,6 +158,7 @@ async function configuration(deps: CloudV2WorkerRouteDeps, workspace: CloudV2Wor
         ...(localCommandsEnabled && features.has(LOCAL_COMMANDS_REASON_FEATURE) ? { localCommandReason: 1 } : {}),
         ...(features.has(NOTIFY_USER_FEATURE) && deps.promptOutbox && deps.notifications ? { notifyUser: 1 } : {}),
         ...(environment ? { environment } : {}),
+        ...(features.has(BOOT_TIMINGS_FEATURE) ? { bootTimings: 1 } : {}),
         ...(features.has("runtime-update-v1") && deps.runtimeUpdates ? { runtimeUpdate: 1 } : {}),
         ...(features.has("push-signals-v1") && deps.promptOutbox && pushSignals === 1 ? { pushSignals } : {}),
         loginRevision: revision, ...(features.has("history-replace-v1") ? { historyReplacement: 1 } : {}),
@@ -354,16 +355,21 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
     return c.json(CloudRecoveryReplySchema.parse(await deps.recovery.request(auth.token, auth.bootId, input)));
   });
   app.post(`${CLOUD_V2_WORKER_API}/timing`, async c => {
-    const auth = await session(c, deps), record = await body(c, CloudV2WorkerTimingSchema);
+    const auth = await session(c, deps), input = await body(c, CloudV2WorkerTimingRequestSchema);
+    const records = "records" in input ? input.records : [input];
+    if (("records" in input || records.some(record => "bootId" in record)) && !workerFeatures(c).has(BOOT_TIMINGS_FEATURE)) throw unauthorized();
+    if (records.some(record => "bootId" in record && record.bootId.toLowerCase() !== auth.bootId.toLowerCase())) throw unauthorized();
     const key = `${auth.workspace.id}:${auth.bootId}`;
     let phases = timingBoots.get(key);
     if (!phases) {
       if (timingBoots.size >= 1024) timingBoots.delete(timingBoots.keys().next().value!);
       phases = new Set(); timingBoots.set(key, phases);
     }
-    if (phases.has(record.phase)) return c.json({ ok: true });
-    phases.add(record.phase);
-    emitCloudV2Timing(deps.timing, { workspaceId: auth.workspace.id.slice(0, 8), ...record });
+    for (const record of records) {
+      if (phases.has(record.phase)) continue;
+      phases.add(record.phase);
+      emitCloudV2Timing(deps.timing, { workspaceId: auth.workspace.id.slice(0, 8), ...record });
+    }
     return c.json({ ok: true });
   });
   app.post(`${CLOUD_V2_WORKER_API}/checkout-failed`, async c => {

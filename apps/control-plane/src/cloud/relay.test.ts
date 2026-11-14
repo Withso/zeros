@@ -833,6 +833,20 @@ describe("cloud v2 relay", () => {
     else expect(deps.localCommandsEnabled).not.toHaveBeenCalled();
   });
 
+  it.each(["", "boot-timings-v10", "boot-timings-v1"])("negotiates boot timing marks on initial and refreshed relay config: %s", async features => {
+    workerServer.on("headers", headers => { headers.push(`X-Zeros-Worker-Features: ${features}`); });
+    const original = deps.config;
+    deps.config = async workspace => ({ ...await original(workspace), bootTimings: 1 });
+    const frames: any[] = [];
+    workerServer.on("connection", ws => ws.on("message", raw => frames.push(JSON.parse(String(raw)))));
+    await app();
+    await vi.waitFor(() => expect(frames.filter(frame => frame.t === "config")).toHaveLength(1));
+    loginRevision = "1"; await relay.refreshLogins();
+    await vi.waitFor(() => expect(frames.filter(frame => frame.t === "config")).toHaveLength(2));
+    for (const frame of frames.filter(frame => frame.t === "config"))
+      expect(frame.bootTimings).toBe(features === "boot-timings-v1" ? 1 : undefined);
+  });
+
   it.each(["","notify-user-v10","notify-user-v1"])("negotiates NotifyUser with durable outbox on initial and refreshed config: %s",async features => {
     workerServer.on("headers",headers => { headers.push(`X-Zeros-Worker-Features: ${features}`); });
     const original = deps.config;
