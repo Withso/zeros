@@ -8,6 +8,7 @@
 
 import {
   COMPONENT_VARIANT_ATTRIBUTE,
+  componentIgnoredAttributeMessage,
   componentInheritedValues,
   componentOptionCss,
   componentOptionValues,
@@ -16,7 +17,11 @@ import {
   type ComponentEasing,
   type ComponentOptionValue,
 } from "@zeros/design-core/component-options";
-import type { DesignFrameComponent } from "@zeros/protocol/design-catalog";
+import {
+  designComponentRecordLimitMessage,
+  type DesignFrameComponent,
+  type DesignFrameInstances,
+} from "@zeros/protocol/design-catalog";
 import { isDesignComponentVariantName } from "@zeros/protocol/design-path";
 import { DESIGN_RUNTIME_INSTANCE_TARGET } from "@zeros/protocol/design-runtime";
 
@@ -41,6 +46,16 @@ export function readDesignFrameComponent(component: DesignFrameComponent): Desig
     views.set(component, view);
   }
   return view;
+}
+
+/** Why a component's Options cannot be listed: its declaration is past a
+ * limit of the record, so the engine reported it without one. Null when the
+ * declaration arrived. */
+export function designComponentRecordProblem(
+  component: DesignFrameComponent | DesignFrameInstances["components"][string],
+  title: string,
+): string | null {
+  return component.exceeds ? designComponentRecordLimitMessage(title, component.exceeds) : null;
 }
 
 /** The custom properties these values set, in the strict forms the core
@@ -145,6 +160,19 @@ export function commitDesignInstanceAttributes(
     ({ operationId: `set-attribute-${index}`, type: "node.set-attribute", nodeId, attribute, value }))));
 }
 
+/** Set the text a plain component's instance fills its default slot with:
+ * its host's own text. */
+export function commitDesignInstanceText(workspaceId: string, frame: { file: string; sourceVersion: string }, nodeId: string, text: string) {
+  return applyDesignEditCached(workspaceId, frame, edit("Set text", [{ operationId: "set-text", type: "node.set-text", nodeId, text }]));
+}
+
+/** Empty an instance's slot back to what its main puts there: delete the
+ * frame's own layers it holds, in one step. */
+export function commitDesignInstanceSlotReset(workspaceId: string, frame: { file: string; sourceVersion: string }, layers: readonly string[], label: string) {
+  return applyDesignEditCached(workspaceId, frame, edit(`Reset ${label}`, layers.map((nodeId, index) =>
+    ({ operationId: `reset-slot-${index}`, type: "node.delete", nodeId }))));
+}
+
 let messages = 0;
 
 /** One frame's preview while a row is adjusted. The latest values go to the
@@ -211,4 +239,10 @@ export function designComponentPreviewMessagesForTests(): number {
 
 export function resetDesignComponentOptionsForTests(): void {
   messages = 0;
+}
+
+/** What an instance sets that its component ignores: one line per attribute
+ * that names no option, as the engine's warning reads. */
+export function designInstanceIgnoredAttributes(host: DesignFrameInstances["hosts"][string]): string[] {
+  return Object.entries(host.ignored ?? {}).map(([name, value]) => componentIgnoredAttributeMessage(name, value));
 }

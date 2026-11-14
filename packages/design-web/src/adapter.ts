@@ -29,8 +29,9 @@ import {
   assertSafeDesignHtmlDocument,
   assertSafeDesignHtmlFragment,
   designHtmlUsesComponent,
+  designNodeHtmlInsertion,
   healDesignHtmlIdentities,
-  nativeDesignIdentityBase,
+  healDesignHtmlIdentitiesForEdit,
   mutateDesignNodeAttributeSource,
   mutateDesignNodeDeleteSource,
   mutateDesignNodeDuplicateSource,
@@ -45,6 +46,8 @@ import type {
   DesignWebMutation,
 } from "./model";
 import { updateDesignWebState } from "./revision";
+import { designPartOfNodeId } from "./component-overrides";
+import { designSlotOfNodeId } from "./component-slots";
 import {
   appendComponentVariant,
   designSourceDeclaresComponentOptions,
@@ -423,19 +426,20 @@ function applyOperation(
   }
   if (operation.type === "node.set-html") {
     const source = state.files[state.entryFile]!;
-    const updated = mutateDesignNodeHtmlSource(
+    const inserted = designNodeHtmlInsertion(
       source,
       operation.nodeId,
       operation.html,
       operation.mode,
       state.entryFile,
     );
-    const healed = healDesignHtmlIdentities(updated).source;
+    // Only the new content takes ids; the layers around it keep their bytes.
+    const healed = healDesignHtmlIdentities(inserted.source, { within: inserted }).source;
     return withFiles(
       state,
       operation,
       { ...state.files, [state.entryFile]: healed },
-      [operation.nodeId],
+      [designSlotOfNodeId(operation.nodeId)?.host ?? operation.nodeId],
     );
   }
   if (operation.type === "node.move") {
@@ -449,7 +453,7 @@ function applyOperation(
       state,
       operation,
       { ...state.files, [state.entryFile]: updated },
-      [operation.nodeId, operation.parentId],
+      [operation.nodeId, designSlotOfNodeId(operation.parentId)?.host ?? operation.parentId],
     );
   }
   if (operation.type === "node.duplicate") {
@@ -976,13 +980,28 @@ export const designWebTransactionAdapter: DesignTransactionAdapter<DesignWebDocu
     revision: (state) => state.revision,
     apply: (state, operation) => {
       // Hydrate identities only for an explicit semantic edit. Its inverse
-      // includes the hydration so undo restores the exact original HTML.
-      const identified = operation.type.startsWith("node.")
-        ? healDesignHtmlIdentities(
-            state.files[state.entryFile]!,
-            nativeDesignIdentityBase,
-          )
-        : null;
+      // includes the hydration so undo restores the exact original HTML. An
+      // edit within one layer writes only that layer's id; one that moves,
+      // adds or removes layers also writes the ids of the layers whose place
+      // it shifts.
+      const source = state.files[state.entryFile]!;
+      const operand = (id: string) => designPartOfNodeId(id)?.host ?? designSlotOfNodeId(id)?.host ?? id;
+      const identified = operation.type === "node.set-styles" ||
+        operation.type === "node.set-text" ||
+        operation.type === "node.set-attribute"
+        ? healDesignHtmlIdentities(source, { native: true, only: new Set([operand(operation.nodeId)]) })
+        : operation.type === "node.set-html" ||
+            operation.type === "node.move" ||
+            operation.type === "node.duplicate" ||
+            operation.type === "node.delete"
+          ? healDesignHtmlIdentitiesForEdit(
+              source,
+              new Set([operation.nodeId, ...(operation.type === "node.move" ? [operation.parentId, operation.beforeId ?? ""] : [])].map(operand)),
+              (marked) => applyOperation(updateDesignWebState(state, { files: { ...state.files, [state.entryFile]: marked } }), operation)
+                .state.files[state.entryFile]!,
+              operation.type === "node.duplicate" ? operand(operation.nodeId) : undefined,
+            )
+          : null;
       const working = identified?.changed
         ? updateDesignWebState(state, {
             files: { ...state.files, [state.entryFile]: identified.source },

@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -65,7 +65,8 @@ describe("Design verification command", () => {
       cwd: workspace, encoding: "utf8", timeout: 10_000,
     });
     expect(result.status, result.stderr).toBe(0);
-    expect(JSON.parse(result.stdout)).toEqual({ args: ["design", "--help"], cwd: workspace });
+    // A process reports its working directory by its real path.
+    expect(JSON.parse(result.stdout)).toEqual({ args: ["design", "--help"], cwd: await realpath(workspace) });
   });
 
   it.each(["missing", "executable", "virtual"] as const)("runs the compiled sidecar with a %s entry", async (kind) => {

@@ -19,7 +19,7 @@ export interface DesignFrameIdentity {
   layerCount: number;
   /** A frame that declares options. Derived from the frame's source; a read
    * that showed a last good render is never stored, so `notApplied` here is
-   * at most "defaults". */
+   * "defaults" or "nothing", never "last-good". */
   component?: DesignFrameComponent;
   /** The frame's own component instances, from the same preparation. */
   instances?: DesignFrameInstances;
@@ -32,7 +32,7 @@ export interface DesignFrameIdentity {
 // parse-heavy preparation for unchanged frames.
 
 /** Bump whenever preparation computes a different identity from the same inputs. */
-const DESIGN_IDENTITY_PIPELINE = 1;
+const DESIGN_IDENTITY_PIPELINE = 2;
 const MAX_PAGE_ENTRIES = DESIGN_MAX_FRAMES_PER_PAGE * 2;
 const MAX_PAGES = 256;
 const WRITE_DELAY_MS = 1_000;
@@ -222,20 +222,32 @@ async function write(page: Page): Promise<void> {
  * that several frames read, such as stylesheets and style sources. */
 export function designFrameIdentities(workspacePath: string, directory: string) {
   const memo = new Map<string, string | null>();
+  const read = async (file: string, context: string): Promise<DesignFrameIdentity | null> => {
+    const page = pageFor(workspacePath, directory, file);
+    await page.loaded;
+    const entry = page.entries.get(file);
+    const current = entry?.context === context &&
+      (entry.dependencies ? durableDesignDependenciesCurrent(entry.dependencies, memo) : entry.current?.() === true);
+    if (!current) {
+      if (entry) page.entries.delete(file);
+      testing.misses++;
+      return null;
+    }
+    testing.hits++;
+    return entry.identity;
+  };
   return {
-    async read(file: string, context: string): Promise<DesignFrameIdentity | null> {
+    read,
+    /** The identity, when it is current and its preparation read `source.target`
+     * with exactly these bytes. A caller holding bytes the frame no longer has
+     * gets null and leaves the entry for readers of the current file. */
+    async readFrom(file: string, context: string, source: { target: string; fingerprint: string }): Promise<DesignFrameIdentity | null> {
       const page = pageFor(workspacePath, directory, file);
       await page.loaded;
       const entry = page.entries.get(file);
-      const current = entry?.context === context &&
-        (entry.dependencies ? durableDesignDependenciesCurrent(entry.dependencies, memo) : entry.current?.() === true);
-      if (!current) {
-        if (entry) page.entries.delete(file);
-        testing.misses++;
-        return null;
-      }
-      testing.hits++;
-      return entry.identity;
+      if (entry?.context !== context ||
+        !entry.dependencies?.some((dependency) => dependency.target === source.target && dependency.fingerprint === source.fingerprint)) return null;
+      return read(file, context);
     },
     remember(file: string, context: string, identity: DesignFrameIdentity,
       read: { complete: boolean; durable: DurableDesignDependency[] | null; current: () => boolean; targets?: string[] }): void {

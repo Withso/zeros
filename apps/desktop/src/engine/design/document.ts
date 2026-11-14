@@ -1,6 +1,7 @@
 import { readDirectoryDesignManifest } from "./metadata";
 import { designCatalogRevision, inspectDesignCatalog, readDesignCatalogMetadataWithContext, sameDesignCatalogInspection } from "./catalog-storage";
-import type { DesignPageHashes } from "@zeros/protocol/design-catalog";
+import { designComponentRecordLimitMessage, designComponentRecordWithinLimits, DESIGN_PREPARED_LINT_ROWS_PER_FRAME,
+  type DesignPageHashes } from "@zeros/protocol/design-catalog";
 import { DesignCatalogError, designCatalogPageHashes, type DesignCatalogSnapshot } from "./catalog";
 import { escapeText, escapeAttribute } from "./source";
 import {
@@ -24,9 +25,10 @@ import {
   prepareFrameRenderSource,
   type RetainedFrameRender,
 } from "./render-preparation";
-import { parseDesignSource, sharedDesignParse, withSharedDesignParses } from "./shared-parse";
+import { parseDesignSource, shareDesignParse, sharedDesignParse, withSharedDesignParses } from "./shared-parse";
 import { designFrameIdentities, designFrameIdentityContext, type DesignFrameIdentity } from "./identity-cache";
-import { captureDurableDesignDependencies, isDesignDependencyCaptureActive, type DurableDesignDependency } from "./dependency-read-set";
+import { captureDurableDesignDependencies, designDependencyFingerprint, isDesignDependencyCaptureActive,
+  type DurableDesignDependency } from "./dependency-read-set";
 import { designRecordedCanvasActive, retainDesignFrame } from "./retained-frames";
 import { designPreparationWorkerCount, prepareFrameIdentitiesInWorkers, type DesignWorkerFrameIdentity } from "./preparation-pool";
 import { elementRecords } from "./source";
@@ -63,7 +65,8 @@ import postcss from "postcss";
 import { withDesignDirectoryNameLease } from "./directory-registry";
 import { withDesignDocumentWrite as withDocumentWrite } from "./document-write-lock";
 
-import { designComponentSummaryOf, designSourceDeclaresOptions, expandDesignComponents } from "./components";
+import { designComponentSummaryOf, designFrameOptionPropertyNames, designIgnoredOptionsTemplates, designSourceDeclaresOptions,
+  expandDesignComponents } from "./components";
 import { designComponentRegistry } from "./component-registry";
 import {
   DESIGN_CANVAS_FILE as CANVAS_MARKER_FILE,
@@ -147,7 +150,7 @@ export { designDirectoryNameFor } from "./directory-registry";
 export { createDesignPage, deleteDesignPage, renameDesignPage } from "./page-lifecycle";
 export { type DesignCanvasFrame,type DesignElementOffset,type DesignFrameChange,type DesignFrameDocument,type DesignFrameGeometry,type DesignFrameRenderIdentity,type DesignFrameRenderSource,type DesignFrameRestorePoint,type DesignFrameSelectionIdentity,type DesignFrameSummary,type DesignFrameTreeNode,type DesignLintReport,type DesignLintSeverity,type DesignLintViolation,type DesignMutationResult,type DesignSourceSpan,type DesignTokenMutationResult,type DesignTokenSummary,type DesignTokensDocument,type DesignWorkspaceSnapshot } from "./document-model";
 export { DESIGN_TOKENS_FILE,DESIGN_TRANSACTION_JOURNAL_FILE,commitDesignWebDocumentState,designTransactionJournalPath,designTransactionRecoveryDirectory,designWebDocumentId,readDesignWebDocumentState,recoverDesignStorageForArchive,recoverPendingDesignTransaction } from "./document-transactions";
-export { captureDesignFrameRestorePoint,createDesignFrame,createDesignFrameWithRestorePoint,designFrameCreateBatchesForTests,deleteDesignFrame,duplicateDesignFrame,healDesignOids,listDesignFrames,moveDesignFrameGeometries,readDesignFrameRenderIdentityFromSource,renameDesignFrame,replaceDesignFrameFromHistory,restoreDesignFrame,restoreDesignFrameChanges,sameDesignFrameRestorePoint,transferDesignNode,updateDesignFrameGeometry } from "./frame-lifecycle";
+export { captureDesignFrameRestorePoint,createDesignFrame,createDesignFrameWithRestorePoint,designFrameCreateBatchesForTests,deleteDesignFrame,designFrameComponentUsage,duplicateDesignFrame,healDesignOids,listDesignFrames,moveDesignFrameGeometries,readDesignFrameRenderIdentityFromSource,renameDesignFrame,replaceDesignFrameFromHistory,restoreDesignFrame,restoreDesignFrameChanges,sameDesignFrameRestorePoint,transferDesignNode,updateDesignFrameGeometry } from "./frame-lifecycle";
 export { stripNonDesignOidsForRender } from "./node-identities";
 export { DesignRenderBudgetError } from "./render-budget";
 export {
@@ -936,14 +939,33 @@ export async function readDesignFrameRenderSourceFromSource(
     variant ? { variant } : {},
     canvas,
   );
-  const sourceVersion = variant
-    ? (await prepareFrameRenderSourceForFile(workspacePath, file, source, { identityOnly: true }, canvas)).sourceVersion
-    : render.sourceVersion;
+  const sourceVersion = !variant ? render.sourceVersion : await rememberedSourceVersion(workspacePath, file, source, canvas)
+    ?? (await prepareFrameRenderSourceForFile(workspacePath, file, source, { identityOnly: true }, canvas)).sourceVersion;
   return {
     file,
     sourceVersion,
     html: render.sanitized,
   };
+}
+
+/** The generation a prepared frame's identity gives exactly these bytes on
+ * this canvas, so a variant view need not expand the source a second time to
+ * learn it. Null when no current identity was prepared from them. */
+async function rememberedSourceVersion(workspacePath: string, file: string, source: string,
+  canvas?: CanvasDocument, viewport?: { width: number; height: number }): Promise<string | null> {
+  // A running capture must record every read the generation depends on.
+  if (isDesignDependencyCaptureActive()) return null;
+  const shared = canvas ?? (await readSharedCanvasContext(workspacePath)).canvas;
+  // Identities are prepared at the frame's canvas size.
+  const geometry = shared.frames[file];
+  if (viewport && (geometry?.w !== viewport.width || geometry.h !== viewport.height)) return null;
+  const context = designFrameIdentityContextOf(shared, file);
+  if (context === null) return null;
+  const identity = await designFrameIdentities(workspacePath, designDirectoryNameFor(workspacePath)).readFrom(file, context, {
+    target: path.join(designDirectory(workspacePath), file),
+    fingerprint: designDependencyFingerprint(Buffer.from(source, "utf8"))!,
+  });
+  return identity?.sourceVersion ?? null;
 }
 
 /** One-frame selection identity. Unlike readDesignFrame(), this never scans,
@@ -1036,7 +1058,9 @@ async function readDesignFrameFromSummary(
   const composed = await composeFrameSrcDoc(workspacePath, source, {
     width: summary.width,
     height: summary.height,
-  }, summary.file, variant);
+  }, summary.file, variant, variant
+    ? await rememberedSourceVersion(workspacePath, summary.file, source, undefined, { width: summary.width, height: summary.height })
+    : null);
   return {
     ...summary,
     sourceVersion: composed.sourceVersion,
@@ -1061,7 +1085,8 @@ async function readDesignCanvasFrameFromSummary(
   }, undefined, undefined, summary.file, canvas, { identityOnly: true });
   const component = designComponentSummaryOf(source);
   return { ...summary, sourceVersion: render.sourceVersion, surfaceCost: render.surfaceCost,
-    ...(component ? { component: { ...component, ...(render.componentOptions ? { notApplied: render.componentOptions.shows } : {}) } } : {}),
+    ...(component ? { component: designComponentRecordWithinLimits({ ...component,
+      ...(render.componentOptions ? { notApplied: render.componentOptions.shows } : {}) }) } : {}),
     ...(render.instances ? { instances: render.instances } : {}) };
 }
 
@@ -1276,7 +1301,8 @@ async function computeRegisteredFrameIdentity(workspacePath: string, file: strin
   const summary = designComponentSummaryOf(source);
   const identity: DesignFrameIdentity = { sourceVersion: render.sourceVersion, surfaceCost: render.surfaceCost,
     nodeCount: designNodeRecords(document).length, layerCount: designLayerCount(document),
-    ...(summary ? { component: { ...summary, ...(render.componentOptions ? { notApplied: render.componentOptions.shows } : {}) } } : {}),
+    ...(summary ? { component: designComponentRecordWithinLimits({ ...summary,
+      ...(render.componentOptions ? { notApplied: render.componentOptions.shows } : {}) }) } : {}),
     ...(render.instances ? { instances: render.instances } : {}) };
   return { identity, modifiedAt: safe.modifiedAt, retained: render.retained };
 }
@@ -1457,7 +1483,7 @@ async function withPreparingBatch<T>(run: () => Promise<T>): Promise<T> {
  * matching context but never publishes one: change attribution diffs the
  * canvas it holds against the current one, as what renderers prepared against. */
 export async function prepareDesignNavigationFrames(workspacePath: string, catalogRevision: string, files: readonly string[], directoryId?: string,
-  options: { forRenderer?: boolean } = {}) {
+  options: { forRenderer?: boolean; lintFiles?: readonly string[] } = {}) {
   if (!files.length || files.length > 16 || new Set(files).size !== files.length) throw new Error("Invalid Design preparation batch.");
   const { directory, before, revision, context } = await withDocumentWrite(workspacePath, async () => {
     await recoverPendingDesignTransactionUnlocked(workspacePath);
@@ -1482,16 +1508,20 @@ export async function prepareDesignNavigationFrames(workspacePath: string, catal
   const prepared = await withPreparingBatch(() => withDesignDirectoryNameLease(workspacePath, directory, () => withDesignReadScope(async () => {
     const frames: DesignCanvasFrame[] = [];
     const errors: Array<{ file: string; message: string }> = [];
+    const preparedFiles: string[] = [];
     const pageIds = designFramePageIds(context.canvas);
     const identities = designFrameIdentities(workspacePath, directory);
     const fromWorkers = await prepareColdFramesInWorkers(workspacePath, revision, files, context.canvas, pageIds, identities);
     // One native preparation at a time; optional demand must not fan out large
     // decoder/source buffers across every frame in a batch.
     for (const file of files) {
-      try { frames.push(fromWorkers.get(file) ?? await prepareRegisteredDesignFrame(workspacePath, file, context.canvas, pageIds, identities)); }
-      catch (error) { errors.push({ file, message: error instanceof Error ? error.message : "Could not prepare this frame." }); }
+      try {
+        frames.push(fromWorkers.get(file) ?? await prepareRegisteredDesignFrame(workspacePath, file, context.canvas, pageIds, identities));
+        preparedFiles.push(file);
+      } catch (error) { errors.push({ file, message: error instanceof Error ? error.message : "Could not prepare this frame." }); }
     }
-    return { frames, errors };
+    const linted = options.lintFiles && await lintPreparedDesignFrames(workspacePath, preparedFiles.filter((file) => options.lintFiles!.includes(file)), context);
+    return { frames, errors, ...(linted ? { lint: { checkedFiles: linted.checkedFiles, violations: linted.violations } } : {}) };
   })));
   if (designDirectoryNameFor(workspacePath) !== directory ||
     !sameDesignCatalogInspection(before, inspectDesignCatalog(workspacePath, directory, { revision: false })))
@@ -1730,6 +1760,33 @@ async function designKnownTokens(
   return { names: (file) => forFrame(file).names, colors: (file) => forFrame(file).colors };
 }
 
+/** The source with every text and comment node outside `<style>` blanked,
+ * keeping offsets, lines and columns: prose that names a token is not CSS. */
+function sourceWithoutProse(source: string, document: DefaultTreeAdapterTypes.Document): string {
+  const ranges: Array<[number, number]> = [];
+  const pending: Array<{ node: DefaultTreeAdapterTypes.Node; css: boolean }> = [{ node: document, css: false }];
+  while (pending.length) {
+    const { node, css } = pending.pop()!;
+    if ((node.nodeName === "#text" && !css) || node.nodeName === "#comment") {
+      const location = node.sourceCodeLocation;
+      if (location) ranges.push([location.startOffset, location.endOffset]);
+      continue;
+    }
+    const inner = "tagName" in node ? node.tagName === "style" : css;
+    if ("childNodes" in node) for (const child of node.childNodes) pending.push({ node: child, css: inner });
+    if ("tagName" in node && node.tagName === "template" && "content" in node)
+      pending.push({ node: (node as DefaultTreeAdapterTypes.Template).content, css: false });
+  }
+  if (!ranges.length) return source;
+  let masked = "";
+  let at = 0;
+  for (const [start, end] of ranges.sort((left, right) => left[0] - right[0])) {
+    if (start < at) continue;
+    masked += source.slice(at, start) + source.slice(start, end).replace(/[^\n]/g, " ");
+    at = end;
+  }
+  return masked + source.slice(at);
+}
 function collectDeclaredCustomProperties(
   css: string,
   names: Set<string>,
@@ -1799,6 +1856,11 @@ async function designComponentRegistrationViolations(workspacePath: string, file
   if (name && (await readSafeRegularFile(designDirectory(workspacePath), path.join(designDirectory(workspacePath), "components", `${name}.html`), MAX_DESIGN_TEXT_BYTES)))
     violations.push(violationAt(file, "component-invalid", `zd-${name} is both this frame's registration and components/${name}.html; rename one.`, null, {
       severity: "error", fix: `Change this frame's "component" in meta/canvas.json, or rename components/${name}.html.` }));
+  const summary = designSourceDeclaresOptions(source) ? designComponentSummaryOf(source) : null;
+  const reported = summary && designComponentRecordWithinLimits(summary);
+  if (reported && "exceeds" in reported)
+    violations.push(violationAt(file, "component-option-invalid", designComponentRecordLimitMessage(name ?? file, reported.exceeds), null, {
+      severity: "warning", fix: "Shorten the component's declaration or the layer ids its text holes fill." }));
   if (!name && !registry.problems.some((problem) => problem.file === file) && designSourceDeclaresOptions(source)) {
     const suggested = path.posix.basename(file, ".html").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").replace(/^(?=\d)/, "c-") || "component";
     violations.push(violationAt(file, "component-unregistered",
@@ -1847,6 +1909,7 @@ async function lintFrame(
       document = parseSource();
     }
   }
+  shareDesignParse(source, document);
   const violations: DesignLintViolation[] = parseErrors.map((error) =>
     violationAt(
       file,
@@ -1981,8 +2044,9 @@ async function lintFrame(
   const availableTokens = new Set([
     ...knownTokens,
     ...frameCustomPropertyNames(document),
+    ...designFrameOptionPropertyNames(source, document),
   ]);
-  for (const match of source.matchAll(/var\(\s*(--[A-Za-z0-9_-]+)\s*(,)?/g)) {
+  for (const match of sourceWithoutProse(source, document).matchAll(/var\(\s*(--[A-Za-z0-9_-]+)\s*(,)?/g)) {
     const token = match[1];
     // A fallback marks an optional hook (the app's icons paint with
     // var(--zeros-fi, var(--zeros-fi-blue))); declaring it would change the
@@ -2012,7 +2076,9 @@ async function lintFrame(
     file,
     canvas ? { registry: designComponentRegistry(canvas).files } : {},
   );
-  const availableClasses = componentExpansion.errors.length === 0
+  // Only an error can leave a component's markup or CSS out of the
+  // expansion; a warning (an ignored attribute) changes nothing it renders.
+  const availableClasses = !componentExpansion.errors.some((error) => (error.severity ?? "error") === "error")
     ? await knownClasses(file, componentExpansion.html, componentExpansion.html === source ? document : undefined)
     : null;
   if (availableClasses) {
@@ -2021,8 +2087,9 @@ async function lintFrame(
     for (const record of records) {
       const value = record.element.attrs.find((attribute) => attribute.name === "class")?.value;
       if (!value) continue;
-      for (const name of value.split(/[\t\n\f\r ]+/)) {
-        if (!name || checked.has(name)) continue;
+      // A hole such as badge--{{ tone }} names its class only once drawn.
+      for (const name of value.replace(/\{\{[^}]*\}\}/g, "{{}}").split(/[\t\n\f\r ]+/)) {
+        if (!name || name.includes("{{") || checked.has(name)) continue;
         checked.add(name);
         if (!availableClasses.has(name)) unknown.set(name, record);
       }
@@ -2045,6 +2112,16 @@ async function lintFrame(
       if (remainder) break;
     }
   }
+  for (const { element, inHead } of designIgnoredOptionsTemplates(source, document)) {
+    violations.push(violationAt(file, "component-option-invalid",
+      inHead
+        ? "Only the first <template data-zd-options> in <head> is read; move these options into it."
+        : "Options are read only from <head>; move this <template data-zd-options> into <head>.",
+      element.sourceCodeLocation?.startTag, {
+        severity: "warning",
+        fix: inHead ? "Merge the option templates into one." : "Move the options template into the frame's <head>.",
+      }));
+  }
   violations.push(...lintDesignAuthoringContract({
     file,
     source,
@@ -2058,28 +2135,35 @@ async function lintFrame(
   const componentRecords = designNodeRecords(document).filter(
     ({ element }) => element.tagName.startsWith("zd-") && !isShadowDesignNodeElement(element),
   );
+  const unavailableComponents = new Set(componentExpansion.unavailable);
   for (const { element, oid } of componentRecords) {
     if (!element.tagName.startsWith("zd-")) continue;
     const component = element.tagName.slice(3);
     const definition = `${component}.html`;
-    if (usedComponents.has(component)) continue;
+    // An unusable definition has its own error row, which says why.
+    if (usedComponents.has(component) || unavailableComponents.has(component)) continue;
+    const registeredFile = componentExpansion.missing?.get(component);
     violations.push(
       violationAt(
         file,
         "component-undefined",
-        `Component <${element.tagName}> has no components/${definition} definition.`,
+        registeredFile
+          ? `Component <${element.tagName}> is registered to ${registeredFile}, which is missing.`
+          : `Component <${element.tagName}> has no definition: no frame is registered as ${element.tagName} and there is no components/${definition}.`,
         element.sourceCodeLocation?.startTag,
         {
           severity: "error",
           oid: oid ?? undefined,
-          fix: `Create components/${definition} or replace the component instance.`,
+          fix: registeredFile
+            ? `Restore ${registeredFile}, register another frame as ${element.tagName} in meta/canvas.json, or replace the component instance.`
+            : `Register a main frame as ${element.tagName} in meta/canvas.json, or replace the component instance.`,
         },
       ),
     );
   }
   for (const error of componentExpansion.errors) {
-    const record = componentRecords.find(
-      ({ element }) => element.tagName === `zd-${error.component}`,
+    const record = componentRecords.find(({ element, oid }) =>
+      error.oid ? oid === error.oid : element.tagName === `zd-${error.component}`,
     );
     if (!error.code) {
       violations.push(
@@ -2125,13 +2209,13 @@ async function lintFrame(
 
 async function lintDesignDocumentUnlocked(
   workspacePath: string,
-  frame?: string,
+  frame?: string | readonly string[],
   options: { healOids?: boolean; includeRuntimeAudits?: boolean } = {},
   context?: DesignCanvasReadContext,
 ): Promise<DesignLintReport> {
-  const files = frame
+  const files = typeof frame === "string"
     ? [(await designFrameTarget(workspacePath, frame)).file]
-    : await discoverFrameFiles(workspacePath, context);
+    : frame ? [...frame] : await discoverFrameFiles(workspacePath, context);
   const knownTokens = await designKnownTokens(workspacePath, context);
   const knownClasses = await designKnownClasses(workspacePath, context);
   const violations: DesignLintViolation[] = [];
@@ -2139,7 +2223,7 @@ async function lintDesignDocumentUnlocked(
   for (const file of files) {
     let result: Awaited<ReturnType<typeof lintFrame>>;
     try {
-      result = await lintFrame(
+      result = await withSharedDesignParses(() => lintFrame(
         workspacePath,
         file,
         { healOids: options.healOids !== false },
@@ -2148,7 +2232,7 @@ async function lintDesignDocumentUnlocked(
         undefined,
         knownTokens.colors(file),
         context?.canvas,
-      );
+      ));
     } catch (error) {
       if (!(error instanceof DesignRenderBudgetError)) throw error;
       violations.push(designRenderBudgetViolation(file, error));
@@ -2202,6 +2286,65 @@ export function lintDesignDocument(
         await initializeDesignDocumentUnlocked(workspacePath);
         return lint();
       });
+}
+
+/** Source lint rows for frames a reply names, bounded per frame. Nothing is
+ * written, runtime audits keep their own generation, and a lint that cannot
+ * run leaves the frames unchecked rather than failing the reply. */
+async function lintPreparedDesignFrames(
+  workspacePath: string,
+  files: readonly string[],
+  context: DesignCanvasReadContext,
+): Promise<DesignLintReport | null> {
+  if (files.length === 0) return null;
+  try {
+    const report = await lintDesignDocumentUnlocked(workspacePath, files, { healOids: false, includeRuntimeAudits: false }, context);
+    const kept = new Map<string, number>();
+    const severe = [...report.violations].sort((left, right) => Number(left.severity === "warning") - Number(right.severity === "warning"));
+    const bounded = severe.filter((violation) => {
+      const count = kept.get(violation.file) ?? 0;
+      kept.set(violation.file, count + 1);
+      return count < DESIGN_PREPARED_LINT_ROWS_PER_FRAME;
+    });
+    return { ...report, violations: bounded.length === report.violations.length ? report.violations : sortDesignLintViolations(bounded) };
+  } catch {
+    return null;
+  }
+}
+
+/** Source lint rows for frames at the source versions a renderer holds,
+ * for design.frames.lint. It takes no document lock, so a write never waits
+ * for it; like preparation it may meet a write half applied, so each frame's
+ * version is checked before and after its lint and a frame that moved on is
+ * left out. A canvas or directory change meanwhile refuses the whole read. */
+export async function lintDesignFramesAtVersions(workspacePath: string, directoryId: string,
+  frames: ReadonlyArray<{ file: string; sourceVersion: string }>) {
+  const directory = designDirectoryNameFor(workspacePath);
+  const before = inspectDesignCatalog(workspacePath, directory, { revision: false });
+  if (before.layout.manifest.id !== directoryId) throw new DesignCatalogError("stale");
+  const result = await withDesignDirectoryNameLease(workspacePath, directory, () => withDesignReadScope(async () => {
+    const context = await readSharedCanvasContext(workspacePath);
+    const pageIds = designFramePageIds(context.canvas);
+    const identities = designFrameIdentities(workspacePath, directory);
+    const atVersion = async (wanted: readonly { file: string; sourceVersion: string }[]) => {
+      const held: Array<{ file: string; sourceVersion: string }> = [];
+      for (const frame of wanted) {
+        const current = await prepareRegisteredDesignFrame(workspacePath, frame.file, context.canvas, pageIds, identities).catch(() => null);
+        if (current?.sourceVersion === frame.sourceVersion) held.push({ file: frame.file, sourceVersion: frame.sourceVersion });
+      }
+      return held;
+    };
+    const held = await atVersion(frames);
+    const report = await lintPreparedDesignFrames(workspacePath, held.map((frame) => frame.file), context);
+    const kept = report ? await atVersion(held) : [];
+    const files = new Set(kept.map((frame) => frame.file));
+    return { frames: kept, checkedFiles: report?.checkedFiles.filter((file) => files.has(file)) ?? [],
+      violations: report?.violations.filter((violation) => files.has(violation.file)) ?? [] };
+  }));
+  if (designDirectoryNameFor(workspacePath) !== directory ||
+    !sameDesignCatalogInspection(before, inspectDesignCatalog(workspacePath, directory, { revision: false })))
+    throw new DesignCatalogError("stale");
+  return result;
 }
 
 function sortDesignLintViolations(
@@ -2493,7 +2636,7 @@ export const DESIGN_GUIDES = Object.freeze({
   layout: `Use normal HTML flow and flexbox for structural layout. Prefer flex containers, gap, padding, alignment, and intrinsic sizing over absolute positioning inside a frame.`,
   tokens: `Use var(--token) from tokens.css whenever a matching color, spacing, radius, or type token exists. Add typed @property declarations before introducing a new token.`,
   workflow: `Read the active Design directory's rules.md, meta/canvas.json page catalog and relevant sources. Follow the active page named in context unless the user says otherwise; always supply an explicit pageId to frame API writes when several pages exist. Inspect the live element selection and frames and make targeted HTML/CSS edits in that directory. Call lint_design, re-read the affected frame using its full page-folder path, use screenshot_frame to visually verify it, then call lint_design again so exact-generation browser contrast, overflow, and spacing checks are included. Resolve errors and review non-blocking advisories. JavaScript and external URLs are not part of design documents.`,
-  components: `Define a reusable component as one direct components/name.html file and instantiate it with <zd-name data-oid="stable-instance">. Give every selectable definition-body element except <slot> a unique, stable data-zid, for example <article data-zid="surface">. The definition body expands only at render time; <slot> accepts instance children and <slot data-zd-attr="label"> accepts escaped attributes. Keep scripts, event handlers, external URLs, and data-oid attributes out of definitions—the authored zd-* wrapper owns selection and editing. Legacy definitions with no data-zid remain renderable, but new component.create operations require complete definition-local identity.`,
+  components: `Make a reusable component a main frame: an ordinary page frame whose meta/canvas.json record adds "component": "name". Declare options in <head> inside <template data-zd-options>, one <zd-option name="label" type="text" default="Save"></zd-option> per line, and use them as {{ label }} in text and attributes. Mark a frame data-zd-slot="body" to let instances place their own layers there (slot="body"); what the main's frame holds is the default. Keep the main's data-oid values stable: an instance restyles a part with zd-style-<part>, named by them. Place an instance with <zd-name data-oid="stable-instance" label="Buy">. Existing components/name.html files stay readable; do not add new ones (component.create writes that older form and remains for existing callers), and Move main to canvas converts one into a main. Keep scripts, event handlers and external URLs out of components.`,
 });
 
 export type DesignGuideTopic = keyof typeof DESIGN_GUIDES;

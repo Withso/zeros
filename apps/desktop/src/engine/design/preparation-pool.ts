@@ -17,7 +17,9 @@ export type DesignWorkerFrameIdentity =
   | { file: string; error: string };
 
 export type DesignWorkerComposedFrame =
-  | { file: string; sourceVersion: string; sanitized: string; sheets?: DesignFrameRenderSheet[]; reused?: true }
+  | { file: string; sourceVersion: string; sanitized: string; sheets?: DesignFrameRenderSheet[]; reused?: true;
+      /** The frame's expansion with all its options applied, for the engine's last good render. */
+      lastGood?: string }
   | { file: string; error: string };
 
 const testing: { workers: number | null; frames: number; composed: number; reused: number; workerUrl: URL | null } =

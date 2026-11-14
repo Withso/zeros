@@ -4,8 +4,8 @@ import {
   designMovementGuardSchema,
   designRelocationSchema,
 } from "@zeros/protocol/design-relocation";
-import { DESIGN_CATALOG_BATCH_ENTRIES, designCatalogReadSchema, designNavigationReadSchema, designFramesPrepareSchema, designPageHashesSchema, type DesignCatalogRead, type DesignCatalogReply, type DesignPageHashes } from "@zeros/protocol/design-catalog";
-import { prepareDesignNavigationFrames } from "./document";
+import { DESIGN_CATALOG_BATCH_ENTRIES, designCatalogReadSchema, designNavigationReadSchema, designFramesLintSchema, designFramesPrepareSchema, designPageHashesSchema, type DesignCatalogRead, type DesignCatalogReply, type DesignPageHashes } from "@zeros/protocol/design-catalog";
+import { lintDesignFramesAtVersions, prepareDesignNavigationFrames } from "./document";
 import type { DesignCatalogAdmission } from "./catalog";
 import { encodeDesignFramePath, isDesignComponentVariantName } from "@zeros/protocol/design-path";
 import { DESIGN_MAX_FRAMES_PER_PAGE, designPageCreateInputSchema, designPageDeleteInputSchema, designPageIdSchema, designPageRenameInputSchema } from "@zeros/protocol/design-pages";
@@ -99,6 +99,7 @@ import {
   deleteDesignPage,
   deleteDesignFrame,
   designDirectoryNameFor,
+  designFrameComponentUsage,
   DESIGN_TOKENS_FILE,
   duplicateDesignFrame,
   lintDesignDocument,
@@ -129,6 +130,7 @@ import { stickyRecognizedDesignDirectories } from "./recognition-store";
 import { withDesignWorkspaceMutation } from "./document-write-lock";
 import { withMeasuredDesignMovement } from "./movement-guard";
 import { upsertDesignTheme } from "./theme-lifecycle";
+import { moveDesignComponentToCanvas } from "./component-move";
 import { restoreDesignCatalogChange } from "./page-history";
 import { setDesignRuntimeAudit } from "./runtime-audits";
 import { normalizeDesignScreenshot, setDesignScreenshot } from "./screenshots";
@@ -254,6 +256,7 @@ export interface DesignWorkspaceRouteHost {
 const DESIGN_WORKSPACE_ROUTES = new Set([
   "design.navigation.read",
   "design.frames.prepare",
+  "design.frames.lint",
   "design.catalog.read",
   "design.capture",
   "design.preview",
@@ -298,6 +301,7 @@ const DESIGN_WORKSPACE_ROUTES = new Set([
   "design.canvas.item.put",
   "design.canvas.item.delete",
   "design.themes.update",
+  "design.component.move",
   "design.frame.rename",
   "design.frame.duplicate",
   "design.frame.delete",
@@ -365,7 +369,8 @@ export async function handleDesignWorkspaceRoute(
       if (remote || !hostLocalResources) throw new Error("Design preparation requires a Local workspace.");
       const input = designFramesPrepareSchema.parse(params);
       const result = await host.withDesignReadWorkspace(input.workspaceId, remote, ({ root }) =>
-        prepareDesignNavigationFrames(root, input.catalogRevision, input.files, input.directoryId));
+        prepareDesignNavigationFrames(root, input.catalogRevision, input.files, input.directoryId,
+          input.lintFiles ? { lintFiles: input.lintFiles } : {}));
       // Older preparation decoders reject unknown fields. Keep their exact
       // reply shape; a new renderer opts in after capability negotiation.
       if (input.surfaceCosts && input.componentOptions) return result;
@@ -375,6 +380,12 @@ export async function handleDesignWorkspaceRoute(
         ...(input.componentOptions && component ? { component } : {}),
         ...(input.componentOptions && instances ? { instances } : {}),
       })) };
+    }
+    case "design.frames.lint": {
+      if (remote || !hostLocalResources) throw new Error("Design lint requires a Local workspace.");
+      const input = designFramesLintSchema.parse(params);
+      return host.withDesignReadWorkspace(input.workspaceId, remote, ({ root }) =>
+        lintDesignFramesAtVersions(root, input.directoryId, input.frames));
     }
     case "design.catalog.read": {
       if (!options.catalogAdmission) throw new GitError({ code: "REMOTE_RESTRICTED", message: "Design catalog requires a live connection." });
@@ -726,7 +737,9 @@ export async function handleDesignWorkspaceRoute(
             else source.push(entry);
             throw error;
           }
-          forgetWorkspaceDesignApiFrames(workspace.path, changedFiles.filter(file => !after.canvas.frames[file]));
+          // A step may also add or remove a source that is not a frame, such as a
+          // components/ definition moved onto the canvas.
+          forgetWorkspaceDesignApiFrames(workspace.path, changedFiles.filter(file => before.canvas.frames[file] && !after.canvas.frames[file]));
           const restored = direction === "undo" ? entry.beforeHistory : entry.afterHistory;
           for (const checkpoint of restored) await api.restoreLocalHistory(checkpoint).catch(() => false);
           if (direction === "undo") entry.afterHistory = currentHistory.checkpoints;
@@ -736,9 +749,12 @@ export async function handleDesignWorkspaceRoute(
           destination.push(entry); pruneWorkspaceDesignHistory(history);
           const snapshot = await host.readDesignSnapshot(workspace, remote, { hostLocalResources, fresh: true });
           const page = snapshot.pages?.find(page => page.id === entry.pageId);
+          const itemHistory = entry.itemId !== undefined;
+          const historyPageId = page?.id ?? (itemHistory ? undefined : snapshot.pages?.[0]?.id);
           return { result: null, snapshot,
-            ...(entry.pageId ? { historyPageId: page?.id ?? snapshot.pages?.[0]?.id,
-              historySelection: (page ?? snapshot.pages?.[0])?.frameFiles[0] ?? null } : {}) };
+            ...(entry.pageId ? { ...(historyPageId ? { historyPageId } : {}),
+              historySelection: itemHistory ? null : (page ?? snapshot.pages?.[0])?.frameFiles[0] ?? null,
+              ...(itemHistory ? { historyItemId: page?.items?.some(item => item.id === entry.itemId) ? entry.itemId : null } : {}) } : {}) };
         }
         if (entry.kind === "transfer") {
           const api = getWorkspaceDesignApi(workspace.path);
@@ -1425,15 +1441,27 @@ export async function handleDesignWorkspaceRoute(
       // shared history step each, like a page rename.
       const workspace = host.resolveDesignWorkspace(reqStr(params, "workspaceId"), remote);
       return withDesignWorkspaceMutation(workspace.path, async () => {
-        // No page in the entry: undoing an item keeps the canvas's selection
-        // rather than selecting the page's first frame.
-        const record = (change: Parameters<typeof catalogDesignHistoryEntry>[0]) =>
-          host.recordDesignHistory(workspace.path, catalogDesignHistoryEntry(change));
         const pageId = designPageIdSchema.parse(params.pageId);
+        let change: Parameters<typeof catalogDesignHistoryEntry>[0] | undefined;
+        const capture = (next: Parameters<typeof catalogDesignHistoryEntry>[0]) => { change = next; };
         const result = op === "design.canvas.item.put"
-          ? { item: await putDesignCanvasItem(workspace.path, { pageId, item: params.item }, record) }
-          : { deleted: await deleteDesignCanvasItem(workspace.path, { pageId, itemId: params.itemId }, record) };
+          ? { item: await putDesignCanvasItem(workspace.path, { pageId, item: params.item }, capture) }
+          : { deleted: await deleteDesignCanvasItem(workspace.path, { pageId, itemId: params.itemId }, capture) };
+        const itemId = "item" in result ? result.item?.id : result.deleted?.id;
+        if (change && itemId) host.recordDesignHistory(workspace.path, catalogDesignHistoryEntry(change, pageId, [], true, itemId));
         return { ...result, snapshot: await host.readDesignSnapshot(workspace, remote, { hostLocalResources, fresh: true }) };
+      });
+    }
+    case "design.component.move": {
+      // A components/<name>.html definition becomes a registered main frame:
+      // one catalog write and one shared history step, like a page rename.
+      const workspace = host.resolveDesignWorkspace(reqStr(params, "workspaceId"), remote);
+      return withDesignWorkspaceMutation(workspace.path, async () => {
+        const pageId = params.pageId === undefined || params.pageId === null ? undefined : designPageIdSchema.parse(params.pageId);
+        const frame = await moveDesignComponentToCanvas(workspace.path, { component: reqStr(params, "component"), ...(pageId ? { pageId } : {}) },
+          change => host.recordDesignHistory(workspace.path, catalogDesignHistoryEntry(change, change.after.canvas.pages?.find(page =>
+            page.frames.some(id => !change.before.canvas.pages?.some(previous => previous.frames.includes(id))))?.id)));
+        return { frame, snapshot: await host.readDesignSnapshot(workspace, remote, { hostLocalResources, fresh: true }) };
       });
     }
     case "design.themes.update": {
@@ -1556,6 +1584,12 @@ export async function handleDesignWorkspaceRoute(
         reqStr(params, "workspaceId"),
         remote,
       );
+      // A person deleting a main its instances still use is asked first;
+      // agents and older renderers omit the flag and delete at once.
+      if (params.ifUnused === true) {
+        const usage = await designFrameComponentUsage(workspace.path, reqStr(params, "frame"));
+        if (usage && usage.instances > 0) return { inUse: usage };
+      }
       const restorePoint = await deleteDesignFrame(
         workspace.path,
         reqStr(params, "frame"),

@@ -15,6 +15,7 @@ import { clearDesignNodeStylePreviewTransient } from "./state/design-selection";
 import { publishDesignGestureLivePreview } from "./state/design-live-preview";
 import {
   createDesignLayoutDropResolver,
+  designLayoutDropSourceStyles,
   type DesignLayoutDrop,
 } from "./design-layout-drag";
 import { createDesignDragPresentation } from "./design-drag-presentation";
@@ -639,16 +640,18 @@ export function startDesignLayoutDrag(input: {
           parentId: drop.parentId,
           beforeId: drop.beforeId,
         },
-        {
+      ];
+      const sourceStyles = designLayoutDropSourceStyles(details, drop);
+      if (Object.keys(sourceStyles).length)
+        operations.push({
           operationId: crypto.randomUUID(),
           type: "node.set-styles",
           nodeId: details.oid,
-          styles: drop.styles,
+          styles: sourceStyles,
           scope: "auto",
           responsiveContext: "base",
           stateContext: "default",
-        },
-      ];
+        });
       if (
         parent &&
         parent.oid !== details.layout?.parentId &&
@@ -683,6 +686,18 @@ export function startDesignLayoutDrag(input: {
         const confirmed = result.snapshot?.frames.find(candidate => candidate.file === frame.file);
         if (confirmed && ownsPointer() && isCurrentDesignPageOwner(pageOwner)) input.copied?.(confirmed, duplicateNodeId);
       }
+      // The commit adopts only the styles it saved; the canvas still previews
+      // the rest, which the layer computes without them.
+      if (
+        Object.keys(drop.styles).some((property) => !(property in sourceStyles)) &&
+        dragOwners.get(article) === ownership
+      )
+        await clearDesignNodeStylePreviewTransient({
+          workspaceId,
+          frame: frame.file,
+          sourceVersion,
+          nodeId: details.oid,
+        }).catch(() => {});
       presentation?.remove();
     })();
     pendingSaves.set(saveKey, save);

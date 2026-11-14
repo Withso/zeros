@@ -49,7 +49,9 @@ import {
   parseDesignManifest,
   serializeDesignRegistration,
 } from "./manifest";
-import { DESIGN_CANVAS_FILE, decodeCanvasFile, encodeCanvasFile, isCanonicalDesignCanvas } from "./canvas-file";
+import { DESIGN_CANVAS_FILE, decodeCanvasFile, encodeCanvasFile, rememberEquivalentDesignCanvas } from "./canvas-file";
+import { editParsedJsonPreservingFormat } from "./json-format-edit";
+import { migrateDesignFoundationManifest } from "@zeros/design-core";
 import { resolveDesignManifestLayout } from "./layout";
 import {
   isDesignFrameFile,
@@ -808,6 +810,32 @@ export function recoverDesignMetadataMigration(
   syncDirectory(root);
 }
 
+/** The canvas a scene change writes: the existing file with only the changed
+ * members rewritten, so key order, escapes and untouched values survive, or
+ * `before` itself when the scene is unchanged. The canonical encoding stands
+ * in when the edit cannot reproduce it. A `before` that is not JSON throws:
+ * invalid storage errors instead of being rewritten. */
+function editedCanvas(before: string, canonical: string): string {
+  const prior: unknown = JSON.parse(before);
+  const next = JSON.parse(canonical) as Record<string, unknown>;
+  if (!prior || typeof prior !== "object" || Array.isArray(prior)) return canonical;
+  // Reads supply an empty foundation where the file has none; writing that
+  // default back would add a block that changes nothing.
+  if (!Object.hasOwn(prior, "foundation") && isDeepStrictEqual(next.foundation, migrateDesignFoundationManifest(undefined)))
+    delete next.foundation;
+  let edited: string | null;
+  try {
+    edited = editParsedJsonPreservingFormat(before, prior, next);
+  } catch {
+    return canonical;
+  }
+  if (edited === null) return canonical;
+  // No decode comparison: the edit reads back as JSON equal to the encoder's
+  // output, and decoding takes frame order only from pages[].frames and z.
+  if (edited !== before) rememberEquivalentDesignCanvas(edited, canonical);
+  return edited;
+}
+
 /** Called only while holding the Design document mutation lane. Write a
  * recoverable, compare-before-replace transaction, with legacy deletion last. */
 export function commitDesignMetadata(
@@ -957,13 +985,11 @@ export function commitDesignMetadata(
     const canvasAfter = encode
       ? encode(layout?.canvasVersion ?? 1)
       : encodeCanvasFile(documentModel(folder === directory ? document : oldSource), { version: layout?.canvasVersion ?? 1 });
-    // Preserve formatting when the authored scene itself is unchanged. Two
-    // canonical encodings of one scene have one length, so a length change
-    // proves a change without parsing either document.
-    const unchanged = canvasBefore !== null && (canvasBefore === canvasAfter ||
-      ((canvasBefore.length === canvasAfter.length || !isCanonicalDesignCanvas(canvasBefore)) &&
-        isDeepStrictEqual(JSON.parse(canvasBefore), JSON.parse(canvasAfter))));
-    changes.push({ file: canvasFile, before: canvasBefore, after: unchanged ? canvasBefore : canvasAfter });
+    changes.push({
+      file: canvasFile,
+      before: canvasBefore,
+      after: canvasBefore === null || canvasBefore === canvasAfter ? canvasAfter : editedCanvas(canvasBefore, canvasAfter),
+    });
     changes.push({ file: metadata, before, after: manifest?.canvas ? before : serializeDesignRegistration(entryId) });
     const rules = `${folder}/rules.md`;
     const rulesBefore = readDesignStorageFile(workspace, rules);

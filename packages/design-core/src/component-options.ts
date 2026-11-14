@@ -4,7 +4,8 @@
 // works out an instance's values, and writes the values that reach CSS.
 // Values enter CSS only in strict forms: a finite number with a known unit,
 // a colour from a fixed grammar or var(--token), and an easing from a fixed
-// grammar. Text, choices and booleans never reach CSS.
+// grammar. Text, choices and booleans never reach CSS. A slot takes layers,
+// not a value: the instance's own layers placed in it.
 
 import {
   COMPONENT_EXPRESSION_RESERVED_NAMES,
@@ -28,8 +29,8 @@ export const COMPONENT_OPTION_LIMITS = Object.freeze({
   text: 2_048,
 });
 
-export type ComponentOptionKind = "number" | "boolean" | "choice" | "color" | "text" | "easing";
-const KINDS: readonly ComponentOptionKind[] = ["number", "boolean", "choice", "color", "text", "easing"];
+export type ComponentOptionKind = "number" | "boolean" | "choice" | "color" | "text" | "easing" | "slot";
+const KINDS: readonly ComponentOptionKind[] = ["number", "boolean", "choice", "color", "text", "easing", "slot"];
 
 export interface ComponentEasing {
   /** As written: a keyword, cubic-bezier(), steps() or spring(bounce). */
@@ -51,7 +52,10 @@ export type ComponentOption =
   | (OptionBase & { kind: "choice"; default: string; choices: string[]; choiceLabels: string[] })
   | (OptionBase & { kind: "color"; default: string })
   | (OptionBase & { kind: "text"; default: string })
-  | (OptionBase & { kind: "easing"; default: ComponentEasing });
+  | (OptionBase & { kind: "easing"; default: ComponentEasing })
+  /** Its default is what the main's slot layer holds; an instance fills it
+   * with layers that carry slot="<name>". */
+  | (OptionBase & { kind: "slot"; default: "" });
 
 export interface ComponentDerived {
   name: string;
@@ -222,6 +226,8 @@ export function parseComponentOptionValue(option: ComponentOption, raw: string):
       const value = strictEasing(raw);
       return value ? { ok: true, value } : misfit('an easing and a duration, such as "ease-out 150ms", "cubic-bezier(0.2, 0, 0, 1) 200ms" or "spring(0.2) 300ms"');
     }
+    case "slot":
+      return { ok: false, message: `${option.name} is a slot: place layers in it, with slot="${option.name}", rather than setting a value.` };
   }
 }
 
@@ -250,6 +256,10 @@ function readOption(element: ComponentDeclarationElement, problem: (message: str
     return problem(`The option ${name}'s group must be 1 to ${COMPONENT_OPTION_LIMITS.label} characters.`), null;
   const base = { name, label, ...(group ? { group } : {}), offset: element.offset };
   const raw = attributes.get("default");
+  if (kind === "slot") {
+    if (raw !== undefined) return problem(`The slot ${name} takes no default: its default is what the main's slot layer holds.`), null;
+    return { ...base, kind, default: "" };
+  }
   if (raw === undefined && kind !== "text") return problem(`The option ${name} needs a default.`), null;
   let option: ComponentOption;
   if (kind === "number") {
@@ -435,6 +445,18 @@ export function componentInheritedValues(declaration: ComponentDeclaration, vari
   return values;
 }
 
+/** An attribute that is neither an option nor one the host keeps for itself
+ * (class, data-*, aria-*, zd-*, event names): the component ignores it. Call
+ * only for a name the declaration has no option for. */
+export function componentIgnoresAttribute(name: string): boolean {
+  return !HOST_ATTRIBUTES.has(name) && !/^(?:data|aria|zd)-/.test(name) && !/^on/.test(name);
+}
+
+/** Why an instance's attribute has no effect, naming the value it ignores. */
+export function componentIgnoredAttributeMessage(name: string, value: string): string {
+  return `This component has no option ${name}; ${name}="${value.length > 64 ? `${value.slice(0, 63)}…` : value}" is ignored.`;
+}
+
 /** An instance's values from its attributes: each option attribute over its
  * `zd-variant` over the defaults. An attribute that does not fit keeps the
  * inherited value and is reported. Host attributes are left alone. */
@@ -452,18 +474,17 @@ export function componentOptionValues(
     if (name === COMPONENT_VARIANT_ATTRIBUTE) continue;
     const option = options.get(name);
     if (!option) {
-      if (!HOST_ATTRIBUTES.has(name) && !/^(?:data|aria|zd)-/.test(name) && !/^on/.test(name))
-        problems.push({ message: `This component has no option ${name}.`, severity: "warning" });
+      if (componentIgnoresAttribute(name)) problems.push({ message: componentIgnoredAttributeMessage(name, raw), severity: "warning" });
       continue;
     }
     const parsed = parseComponentOptionValue(option, raw);
     if (parsed.ok) values.set(name, parsed.value);
-    else problems.push({ message: parsed.message, severity: "error" });
+    else problems.push({ message: parsed.message, severity: option.kind === "slot" ? "warning" : "error" });
   }
   return { values, problems };
 }
 
-/** The names a template's expressions see: every option but an easing, then
+/** The names a template's expressions see: every option but an easing or a slot, then
  * each derived value in order. Throws ComponentExpressionError. */
 export function componentExpressionScope(
   declaration: ComponentDeclaration,
@@ -473,7 +494,7 @@ export function componentExpressionScope(
   const scope = new Map<string, ComponentExpressionValue>();
   for (const option of declaration.options) {
     const value = values.get(option.name) ?? option.default;
-    if (option.kind !== "easing") scope.set(option.name, value as ComponentExpressionValue);
+    if (option.kind !== "easing" && option.kind !== "slot") scope.set(option.name, value as ComponentExpressionValue);
   }
   for (const derived of declaration.derived) {
     const value = evaluateComponentExpression(derived.expression, scope, budget);
@@ -516,21 +537,21 @@ const easingCss = (easing: ComponentEasing) => {
 /** The custom properties an instance (or a main frame) sets: every number,
  * colour and easing option and every numeric derived value, defaults
  * included, so nothing an outer instance sets reaches an inner one. */
-export function componentOptionCss(
+function componentOptionProperties(
   declaration: ComponentDeclaration,
   values: ReadonlyMap<string, ComponentOptionValue>,
   derived?: ReadonlyMap<string, ComponentExpressionValue>,
-): string {
-  const declarations: string[] = [];
+): Array<[property: string, value: string]> {
+  const properties: Array<[string, string]> = [];
   for (const option of declaration.options) {
     const value = values.get(option.name) ?? option.default;
-    if (option.kind === "number") declarations.push(`--zd-${option.name}: ${cssNumber(value as number)}${option.unit ?? ""};`);
+    if (option.kind === "number") properties.push([`--zd-${option.name}`, `${cssNumber(value as number)}${option.unit ?? ""}`]);
     else if (option.kind === "color") {
       const color = strictColor(String(value));
-      if (color) declarations.push(`--zd-${option.name}: ${color};`);
+      if (color) properties.push([`--zd-${option.name}`, color]);
     } else if (option.kind === "easing") {
       const easing = value as ComponentEasing;
-      declarations.push(`--zd-${option.name}-easing: ${easingCss(easing)};`, `--zd-${option.name}-duration: ${cssNumber(easing.duration)}ms;`);
+      properties.push([`--zd-${option.name}-easing`, easingCss(easing)], [`--zd-${option.name}-duration`, `${cssNumber(easing.duration)}ms`]);
     }
   }
   let scope = derived;
@@ -543,9 +564,23 @@ export function componentOptionCss(
   }
   for (const entry of declaration.derived) {
     const value = scope?.get(entry.name);
-    if (typeof value === "number" && Number.isFinite(value)) declarations.push(`--zd-${entry.name}: ${cssNumber(value)}${entry.unit ?? ""};`);
+    if (typeof value === "number" && Number.isFinite(value)) properties.push([`--zd-${entry.name}`, `${cssNumber(value)}${entry.unit ?? ""}`]);
   }
-  return declarations.join(" ");
+  return properties;
+}
+
+export function componentOptionCss(
+  declaration: ComponentDeclaration,
+  values: ReadonlyMap<string, ComponentOptionValue>,
+  derived?: ReadonlyMap<string, ComponentExpressionValue>,
+): string {
+  return componentOptionProperties(declaration, values, derived).map(([property, value]) => `${property}: ${value};`).join(" ");
+}
+
+/** The custom properties a main frame sets for itself from its defaults:
+ * the names `componentOptionCss` writes, so lint knows them as tokens. */
+export function componentOptionPropertyNames(declaration: ComponentDeclaration): string[] {
+  return componentOptionProperties(declaration, defaultValues(declaration)).map(([property]) => property);
 }
 
 /** css: the option reaches the frame only through its custom property (or a

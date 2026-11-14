@@ -40,6 +40,41 @@ export function designLayoutDrop(
   return createDesignLayoutDropResolver(node, targets)(point, origin);
 }
 
+/** The styles a flow drop writes: the preview resets every positional value so
+ * an earlier sample's preview cannot linger, but a layer already in flow with
+ * no offset, at its slot's rank and grid placement, needs none of them in its
+ * source. */
+export function designLayoutDropSourceStyles(
+  node: DesignRuntimeNodeDetails,
+  drop: DesignLayoutDrop,
+): Record<string, string | null> {
+  if (drop.styles.position !== "relative" || drop.relocation) return drop.styles;
+  const computed = node.styles;
+  const styles = { ...drop.styles };
+  // Layout targets measure only left and top; for a relative layer those
+  // resolve any right or bottom offset too, so they decide on their own.
+  if (
+    ["static", "relative"].includes(computed.position ?? "") &&
+    ["left", "top"].every((side) => ["auto", "0px"].includes(computed[side] ?? "")) &&
+    ["right", "bottom"].every((side) => ["auto", "0px", "", undefined].includes(computed[side]))
+  )
+    for (const key of ["position", "left", "top", "right", "bottom"]) delete styles[key];
+  if (styles.order !== undefined && styles.order === (computed.order || "0"))
+    delete styles.order;
+  for (const axis of ["Column", "Row"]) {
+    const placement = [
+      computed[`grid${axis}Start`] ?? computed[`grid${axis}`]?.split("/")[0],
+      computed[`grid${axis}End`] ?? computed[`grid${axis}`]?.split("/")[1] ?? "auto",
+    ];
+    if (
+      styles[`grid-${axis.toLowerCase()}`] === "auto" &&
+      placement.every((value) => value?.trim() === "auto")
+    )
+      delete styles[`grid-${axis.toLowerCase()}`];
+  }
+  return styles;
+}
+
 /** Build ancestry, stacking, and flow order once per gesture. Pointer samples
  * only perform hit testing and a linear nearest-slot search. */
 export function createDesignLayoutDropResolver(

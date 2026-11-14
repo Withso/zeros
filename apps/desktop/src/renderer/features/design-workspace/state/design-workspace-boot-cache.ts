@@ -485,6 +485,8 @@ export function queueDesignWorkspaceBootSnapshot(
       };
 }
 
+const bootPreviews = new WeakSet<DesignWorkspaceSnapshotWire>();
+
 export function readDesignWorkspaceBootSnapshots(): ReadonlyMap<
   string,
   DesignWorkspaceSnapshotWire
@@ -492,8 +494,17 @@ export function readDesignWorkspaceBootSnapshots(): ReadonlyMap<
   return new Map(
     Object.entries(loadStoredEntries())
       .sort((left, right) => right[1].updatedAt - left[1].updatedAt)
-      .map(([workspaceId, entry]) => [workspaceId, entry.snapshot]),
+      .map(([workspaceId, entry]) => {
+        bootPreviews.add(entry.snapshot);
+        return [workspaceId, entry.snapshot];
+      }),
   );
+}
+
+/** A snapshot painted from this mirror: its catalog may predate this
+ * launch, and its records keep no component declarations. */
+export function isDesignWorkspaceBootPreview(snapshot: DesignWorkspaceSnapshotWire): boolean {
+  return bootPreviews.has(snapshot);
 }
 
 export function forgetDesignWorkspaceBootSnapshot(workspaceId: string): void {

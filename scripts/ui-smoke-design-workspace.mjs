@@ -2745,7 +2745,8 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
   // Property fields (UI components · Property field): hover fills
   // bg2-highlight, a click edits with only the caret, and keyboard focus rings.
   {
-    const field = page.locator("[data-design-inspector] .zd-inspector-field").first();
+    // X and Y are locked while auto layout places the layer.
+    const field = page.locator("[data-design-inspector] .zd-inspector-field:has(input:not(:disabled))").first();
     const fieldLook = () =>
       field.evaluate((element) => {
         const probe = document.createElement("div");
@@ -2760,7 +2761,9 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
     await expect.poll(async () => (await fieldLook()).hovered).toBe(true);
     await field.locator("input").first().click();
     await expect.poll(async () => (await fieldLook()).ring).toBe("none");
+    // The next tab stop may be a control beside the field; return to it by keyboard.
     await page.keyboard.press("Tab");
+    await page.keyboard.press("Shift+Tab");
     await expect
       .poll(() =>
         page.evaluate(() => {

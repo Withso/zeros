@@ -10,7 +10,7 @@ The files a Design directory holds, how frames and pages are registered, and the
   meta/canvas.json          pages, frames, geometry, foundation metadata, style sources, themes, fonts
   rules.md                  generated rules, then project guidance appended below them
   tokens.css                Design-only tokens (the theme editor's Manual source)
-  components/<name>.html    reusable components
+  components/<name>.html    older reusable components (read, never added)
   assets/                   images used by frames
   <page-folder>/<frame>.html
 ```
@@ -87,16 +87,17 @@ A page's optional `items` list holds canvas annotations people place with the Se
 
 - **IDs** follow the frame ID rules and are unique across every frame and item in the directory.
 - **Geometry.** `x`/`y` within ±1,000,000; `width` 1–16,384. A note also needs `height` (1–16,384); a section's and a link card's heights come from their text.
-- **Text.** A section title is one line of 1–120 characters. A note holds up to 2,000 characters and keeps its line breaks. A link card's optional `title` is one line of up to 120 characters and defaults to the file name.
-- **Link targets** are workspace-relative file paths of up to 512 characters: no leading `/`, `\`, `~`, URL or scheme, no empty, `.` or `..` segment, no control characters, and no private files (`.git`, `.zeros`, `.env*`, keys, databases and the like). A card opens its file in Files; a missing file shows as "File not found". Nothing is ever fetched.
-- At most 256 items and 256 KiB of item text per page. An invalid item is skipped and reported by `design validate` (`canvas-item-invalid`, `canvas-item-link-unsafe`, and `canvas-item-link-missing` for a file that is gone), all as warnings; the canvas stays readable. An unknown `kind` is kept as written and not drawn.
+- **Text.** A section title is one line of 1–120 Unicode code points. A note holds up to 2,000 code points and keeps its line breaks. A link card's optional `title` is one line of up to 120 code points and defaults to the file name; clearing a custom title restores that fallback.
+- **Link targets** are workspace-relative file paths of up to 512 characters: no leading `/`, `\`, `~`, URL or scheme, no empty, `.` or `..` segment, no control characters, and no private files (`.git`, `.zeros`, `.env*`, keys, databases and the like). A card opens its file in Files; a missing file shows as "File not found". An internal symlink to a regular file works, but a symlink whose resolved target leaves the workspace is missing. Nothing is ever fetched.
+- At most 256 items and 256 KiB of item text per page. An invalid item is skipped without reserving its id against a later valid item; canvas edits and deletes act on the entry that is drawn and keep the skipped one exactly as written. Skipped items are reported by `design validate` (`canvas-item-invalid`, `canvas-item-link-unsafe`, and `canvas-item-link-missing` for a file that is gone), all as warnings; the canvas stays readable. An unknown `kind` is kept as written and not drawn. Valid items past the cap still reserve their ids, and the canvas says how many more items are not shown.
 - Keep items people placed; add or edit them only when asked.
 
 ## Components
 
-- Markup used three or more times in a frame is a component. Define it as `components/<name>.html` and use it as `<zd-<name> data-oid="…">`.
-- Give every selectable element in the definition a unique, stable `data-zid` (not `data-oid`). `<slot>` receives instance children; `<slot data-zd-attr="label">` receives an escaped attribute value.
-- Keep scripts, event handlers, external URLs and `data-oid` out of definitions. Component references resolve relative to the Design root.
+- Markup used three or more times is a component. Make it a **main frame**: an ordinary frame in a page folder, registered with a `component` field (below), and place it elsewhere as `<zd-<name> data-oid="…">`. Never add `components/<name>.html`.
+- Keep the main's `data-oid` values stable: an instance's inner layers are named by them, and its overrides point at them.
+- Keep scripts, event handlers and external URLs out of a main, as in any frame.
+- **Older `components/<name>.html` files** stay valid and render as before: `data-zid` names their layers, `<slot>` takes instance children and `<slot data-zd-attr="label">` an escaped attribute value, and their references resolve from the Design root. Leave them as they are unless asked; a person turns one into a main with Move main to canvas on a selected instance, one undo step.
 
 ### Components with options
 
@@ -109,7 +110,7 @@ Register the frame with a `component` field on its record. The name is the tag o
                    "x": 0, "y": 0, "width": 1120, "height": 240 }
 ```
 
-Declare options in `<head>`, one element per line, each closed with its end tag:
+Declare options in `<head>`, one element per line, each closed with its end tag. Only the first `<template data-zd-options>` in `<head>` is read; one in `<body>` or a second one is ignored and `design validate` warns:
 
 ```html
 <template data-zd-options>
@@ -126,10 +127,10 @@ Declare options in `<head>`, one element per line, each closed with its end tag:
 </template>
 ```
 
-- **Kinds.** `number` (`min`, `max`, `step`, `unit` of px, %, rem, em, ch, vw, vh, fr, deg, ms or s; it is a slider only with both `min` and `max`), `boolean`, `choice` (2–16 lowercase values in `choices`; labels come from the values, or `choice-labels="Ask|Plan"`), `color` (a colour or `var(--token)`), `text`, `easing` (a keyword, `cubic-bezier()`, `steps()` or `spring(bounce)`, then a duration). `group` folds consecutive options under one heading. `label` defaults to the name.
+- **Kinds.** `slot` (below), `number` (`min`, `max`, `step`, `unit` of px, %, rem, em, ch, vw, vh, fr, deg, ms or s; it is a slider only with both `min` and `max`), `boolean`, `choice` (2–16 lowercase values in `choices`; labels come from the values, or `choice-labels="Ask|Plan"`), `color` (a colour or `var(--token)`), `text`, `easing` (a keyword, `cubic-bezier()`, `steps()` or `spring(bounce)`, then a duration). `group` folds consecutive options under one heading. `label` defaults to the name.
 - **Names.** Lowercase letters, digits and single hyphens, at most 32 characters. Not `name`, an HTML attribute an element keeps (`class`, `style`, `id`, `hidden`, `title` and the like), anything starting `data-`, `aria-`, `on` or `zd-`, or a function name.
 - **Variants** are named sets of values (`default` is taken: it is the declared defaults). **Derived values** are expressions over options, worked out in order.
-- **Values in CSS.** Number, colour, easing and numeric derived options are custom properties: `var(--zd-width)`, `var(--zd-accent)`, `var(--zd-motion-easing)` and `var(--zd-motion-duration)`, `var(--zd-gutter)`. Text, choices and booleans reach the markup only through the template.
+- **Values in CSS.** Number, colour, easing and numeric derived options are custom properties: `var(--zd-width)`, `var(--zd-accent)`, `var(--zd-motion-easing)` and `var(--zd-motion-duration)`, `var(--zd-gutter)`. These names count as known tokens in lint. Text, choices and booleans reach the markup only through the template.
 - **Template.** In a declaring file, `{{ expression }}` fills text and attribute values (escaped), `data-zd-if="expression"` keeps an element only when true, and `data-zd-for="item in list"` repeats it (`range(n)` or `["a", "b"]`, up to 256 times, nested 3 deep). A `<template data-zd-if>` or `<template data-zd-for>` wraps without adding an element. Holes do not work in `<style>`, `<script>`, comments, the options block, or in `style`, `href`, `src`, `srcset`, `action`, `formaction`, `poster`, `srcdoc`, `data`, `xlink:href`, `ping`, `background`, `cite`, `manifest`, `codebase`, `id`, `data-oid`, `data-zid`, `data-zd-*`, `on*` attributes or a `<meta>` `content`. Write a literal `{{` as `{{ "{{" }}`.
 - **Expressions.** Numbers, `"text"`, `true`/`false`, lists, names, `( )`, `!`, `-`, `* / %`, `+ -` (`+` joins text), `< <= > >=`, `== !=`, `&& ||`, and `a ? b : c`; functions `range`, `min`, `max`, `clamp`, `round`, `floor`, `ceil`, `len`. Types never convert: `"2" + 1` is text, `mode + 1 > 2` is an error. Put spaces around a minus (`width - 1`), since names may contain hyphens.
 
@@ -139,11 +140,20 @@ Place an instance with its values as attributes. A missing attribute takes the v
 <zd-chat-composer data-oid="ws-composer" zd-variant="compact" width="760" toolbar="false"></zd-chat-composer>
 ```
 
-- The component's linked stylesheets come with it, and its URLs resolve from its own file. Its inner layers carry `data-zd-part` (their `data-oid` in the component frame, or `data-zid` in a `components/` file) and are not separately editable.
+- **Slots.** Mark a frame in the main `data-zd-slot="body"`; what it holds is the default. That makes it a slot option; declare `<zd-option name="body" type="slot" label="Body"></zd-option>` (never with a `default`) only to give it a label, a group or its place in Options. An instance's children with `slot="body"` replace it; give them their own `data-oid`:
+
+  ```html
+  <div class="card-body" data-oid="body" data-zd-slot="body"><p data-oid="placeholder">Empty</p></div>
+  <zd-card data-oid="plans" heading="Plans"><p data-oid="plans-copy" slot="body">Pick a plan.</p></zd-card>
+  ```
+
+  A bare `<slot>` in the main is the default slot, filled by children with no `slot` attribute.
+- The component's linked stylesheets come with it, and its URLs resolve from its own file. Its inner layers carry `data-zd-part` (their `data-oid` in the main, or `data-zid` in a `components/` file).
+- **Part overrides.** An instance restyles one of its parts, or hides it with `display: none`, through `zd-style-<part>` on its host, where `<part>` is the part's `data-oid` in the main: `<zd-card data-oid="plans" zd-style-heading="color: var(--fg2)">`. The override wins over the part's own rules and its options; text still changes only through options. Clear the attribute to return to the main.
 - Changing an option on an instance changes one attribute; on the main component it changes the `default` (or the variant line it shows). Keep one element per line so each change is one line in Git.
 - **Change a component's options** (when a person asks, or Zeros sends "Change the options of …"): ask what to change first. Add, remove, rename or regroup `<zd-option>` lines and their template uses together; keep existing names and values unless asked, since instances in other frames carry them as attributes; keep one element per line; run `design validate` on the component and on frames that place it; capture it before and after; never stage or commit.
 - **Fix a component's options** (Zeros sends "Fix the options of …" with the problems): run `design validate`, repair each named declaration, expression or instance value at its line with the smallest change that keeps what the person set, validate again until it reports none, capture the frame to check it renders, and say what changed. Never stage or commit.
-- `design validate` reports options, expressions and instance values that do not fit, an unregistered frame that declares options, and a name registered twice or also used by `components/<name>.html`. When options cannot apply, the frame keeps its last good render in this session, or shows the component's defaults.
+- `design validate` reports options, expressions and instance values that do not fit, an instance attribute that names no option of its component (it is ignored, never rewritten), an instance of a component that no longer exists (its main was deleted, renamed or unregistered; it renders nothing; the message says whether the registered file is missing or nothing defines the name; a component that is there but unusable, such as a symbolic link or an oversized file, is reported by its own error with the reason instead), an unregistered frame that declares options, and a name registered twice or also used by `components/<name>.html`. When options cannot apply, the frame keeps its last good render in this session, or shows the component's defaults, or shows nothing in that place when the template fails even with its defaults (a main's own failing template renders an empty body, never its raw `{{ }}` text); its canvas label, and the label of every frame placing it, carries a red mark saying which. A declaration over 160 elements, 72 attributes per element, or attribute values over 2,048 characters still renders, but its Options cannot be shown and `design validate` warns which limit it passed (`component-option-invalid`).
 
 ## Assets and media
 

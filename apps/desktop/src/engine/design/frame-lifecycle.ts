@@ -40,6 +40,7 @@ import path from "node:path";
 
 import {
   createDesignWebDocumentState,
+  designSlotOfNodeId,
   mutateDesignNodeAttributeSource,
   mutateDesignNodeDeleteSource,
   mutateDesignNodeDuplicateSource,
@@ -104,6 +105,7 @@ import {
 } from "@zeros/protocol/design-relocation";
 import { assertDesignRelocationSource, designRelocationFlowRootStyles, designRelocationRootStyles } from "./relocation-source";
 import { forgetDesignComponentRender } from "./component-last-good";
+import { designComponentRegistry } from "./component-registry";
 
 export interface DesignFrameCreateInput {
   title?: string;
@@ -633,11 +635,12 @@ async function designFrameRestorePointUnlocked(
     h: meta.height,
     z: Object.keys(canvas.frames).length,
   };
+  const page = designFramePage(canvas, file);
   return {
     target,
     restorePoint: {
       file,
-      pageId: designFramePage(canvas, file).id,
+      pageId: page.id,
       source,
       geometry: { ...geometry },
       metadata: { ...canvas.frame_info[file], title: meta.title, kind: meta.kind },
@@ -679,6 +682,37 @@ export async function captureDesignFrameRestorePoint(
   );
 }
 
+/** What deleting a main component frame leaves without a definition: the
+ * instances other registered frames place and how many frames place them.
+ * Null for a frame that is not registered as a component. */
+export async function designFrameComponentUsage(
+  workspacePath: string,
+  frame: string,
+): Promise<{ component: string; title: string; instances: number; frames: number } | null> {
+  const file = assertFrameFile(frame);
+  const canvas = await readCanvas(workspacePath);
+  const component = [...designComponentRegistry(canvas).files].find(([, source]) => source === file)?.[0];
+  if (!component) return null;
+  const tag = `zd-${component}`;
+  let instances = 0;
+  let frames = 0;
+  for (const other of Object.keys(canvas.frames)) {
+    if (other === file) continue;
+    let source: string;
+    try {
+      source = await readBoundedDesignFrameSource(workspacePath, other);
+    } catch {
+      continue;
+    }
+    if (!source.toLowerCase().includes(`<${tag}`)) continue;
+    const placed = elementRecords(parse(source)).filter(({ element }) => element.tagName === tag).length;
+    if (placed === 0) continue;
+    instances += placed;
+    frames += 1;
+  }
+  return { component, title: canvas.frame_info[file]?.title ?? component, instances, frames };
+}
+
 export async function deleteDesignFrame(
   workspacePath: string,
   frame: string,
@@ -695,6 +729,12 @@ export async function deleteDesignFrame(
       throw new Error(`Design frame changed after this history entry: ${file}`);
     }
     const canvas = await readCanvas(workspacePath);
+    // Restoring appends to the page, so Undo needs the deleted frame's place
+    // in the page's order for meta/canvas.json to come back unchanged.
+    const id = canvas.frame_info[file]?.id;
+    const listed = canvas.pages?.find((page) => page.id === restorePoint.pageId)?.frames;
+    const pageIndex = id && listed ? listed.indexOf(id) : -1;
+    const frameIndex = Object.keys(canvas.frames).indexOf(file);
     delete canvas.frames[file];
     delete canvas.frame_info[file];
     forgetDesignComponentRender(workspacePath, file);
@@ -705,7 +745,7 @@ export async function deleteDesignFrame(
         after: null,
       },
     ]);
-    return restorePoint;
+    return { ...restorePoint, ...(pageIndex >= 0 ? { pageIndex } : {}), ...(frameIndex >= 0 ? { frameIndex } : {}) };
   });
 }
 
@@ -745,11 +785,20 @@ export async function restoreDesignFrame(
     });
     if (existsSync(target))
       throw new Error(`Design frame already exists: ${file}`);
-    canvas.frames[file] = geometry;
+    if (restorePoint.frameIndex !== undefined && !Object.hasOwn(canvas.frames, file)) {
+      const entries = Object.entries(canvas.frames);
+      entries.splice(Math.min(restorePoint.frameIndex, entries.length), 0, [file, geometry]);
+      for (const [key] of entries) delete canvas.frames[key];
+      for (const [key, value] of entries) canvas.frames[key] = value;
+    } else canvas.frames[file] = geometry;
     canvas.frame_info[file] = restorePoint.metadata ?? {
       title: meta.title,
       kind: meta.kind,
     };
+    const listed = canvas.pages?.find((candidate) => candidate.id === page.id)?.frames;
+    const id = canvas.frame_info[file]?.id;
+    if (listed && id && restorePoint.pageIndex !== undefined && !listed.includes(id))
+      listed.splice(Math.min(restorePoint.pageIndex, listed.length), 0, id);
     await writeCanvas(workspacePath, canvas, [
       {
         file: `${designDirectoryNameFor(workspacePath)}/${file}`,
@@ -1302,7 +1351,8 @@ function withPositionedParent(
   parentId: string | undefined,
   parentStyles: { position: "relative" } | undefined,
 ): string {
-  if (!parentStyles || !parentId || parentId === DESIGN_RUNTIME_DOCUMENT_BODY_ID) return source;
+  // A slot's frame is the main component's to position.
+  if (!parentStyles || !parentId || parentId === DESIGN_RUNTIME_DOCUMENT_BODY_ID || designSlotOfNodeId(parentId)) return source;
   const state = createDesignWebDocumentState({
     documentId: "transfer",
     entryFile: file,

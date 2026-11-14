@@ -17,7 +17,7 @@ describe("WorkspaceService settings ops", () => {
   let svc: WorkspaceService;
 
   beforeEach(() => {
-    dir = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-settings-ops-"));
+    dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "zeros-settings-ops-")));
     userDir = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-user-settings-"));
     process.env.ZEROS_USER_SETTINGS_DIR = userDir;
     setStateRootForTesting(path.join(dir, "state"));

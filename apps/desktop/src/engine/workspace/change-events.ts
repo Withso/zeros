@@ -72,6 +72,7 @@ const WORKSPACE_MUTATIONS = new Set([
   "design.canvas.item.put",
   "design.canvas.item.delete",
   "design.themes.update",
+  "design.component.move",
   "design.initialize",
   "design.transaction.apply",
   "design.history.undo",

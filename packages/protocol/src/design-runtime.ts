@@ -61,6 +61,9 @@ export interface DesignRuntimeTreeNode {
    * compatibility with snapshots produced before this metadata existed. */
   display?: string;
   flexDirection?: string;
+  /** An absolute or fixed layer whose parent has auto layout (flex or grid):
+   * taken out of that flow. Omitted otherwise and by older runtimes. */
+  absolute?: true;
   /** Present on layers rendered inside an open shadow root (for example a
    * declarative `<template shadowrootmode>`); omitted for ordinary layers. */
   shadow?: true;
@@ -279,6 +282,31 @@ export function designComponentPartOf(nodeId: string): { host: string; part: str
   if (split <= 0 || split === rest.length - 1 || rest.indexOf(":", split + 1) >= 0) return null;
   try {
     return { host: decodeURIComponent(rest.slice(0, split)), part: decodeURIComponent(rest.slice(split + 1)) };
+  } catch {
+    return null;
+  }
+}
+
+/** A slot of a component instance: a frame its main marks with
+ * data-zd-slot="<name>", which the instance fills with its own layers
+ * (slot="<name>"). Addressed through its host layer as a part is; an empty
+ * name is the default slot (the main's bare <slot>), which the host itself
+ * stands for. A layer moved or drawn into one lands in the host, with its
+ * slot attribute set. */
+export const DESIGN_COMPONENT_SLOT_PREFIX = "::zeros-slot:";
+
+export function designComponentSlotNodeId(host: string, name: string): string {
+  return `${DESIGN_COMPONENT_SLOT_PREFIX}${encodeURIComponent(host)}:${encodeURIComponent(name)}`;
+}
+
+/** The host and slot name a slot id names; null for any other id. */
+export function designComponentSlotOf(nodeId: string): { host: string; name: string } | null {
+  if (!nodeId.startsWith(DESIGN_COMPONENT_SLOT_PREFIX)) return null;
+  const rest = nodeId.slice(DESIGN_COMPONENT_SLOT_PREFIX.length);
+  const split = rest.indexOf(":");
+  if (split <= 0 || rest.indexOf(":", split + 1) >= 0) return null;
+  try {
+    return { host: decodeURIComponent(rest.slice(0, split)), name: decodeURIComponent(rest.slice(split + 1)) };
   } catch {
     return null;
   }
@@ -1198,6 +1226,7 @@ function isRuntimeTree(value: unknown): value is DesignRuntimeTreeNode[] {
         (typeof current.value.flexDirection !== "string" ||
           current.value.flexDirection.length > 64)) ||
       (current.value.shadow !== undefined && current.value.shadow !== true) ||
+      (current.value.absolute !== undefined && current.value.absolute !== true) ||
       !Array.isArray(current.value.children)
     ) {
       return false;
@@ -1648,6 +1677,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   // main component's repeated copy (data-zd-copy) hits as its source layer.
 
   var PART_PREFIX = ${JSON.stringify(DESIGN_COMPONENT_PART_PREFIX)};
+  var SLOT_PREFIX = ${JSON.stringify(DESIGN_COMPONENT_SLOT_PREFIX)};
   var componentMarks = false;
 
   function componentAddressing() {
@@ -1661,12 +1691,41 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     return parent;
   }
 
+  // A frame the main marks as a slot is addressed as its slot, so a layer
+  // can be dropped or drawn into it; its other part writes go through Options.
   function partIdOf(element) {
+    var slot = element.getAttribute("data-zd-slot");
     var part = element.getAttribute("data-zd-part");
-    if (!part) return "";
+    if (!part && !slot) return "";
     var owner = partOwnerOf(element);
     var host = owner ? oidOf(owner) : "";
-    return host ? PART_PREFIX + encodeURIComponent(host) + ":" + encodeURIComponent(part) : "";
+    if (!host) return "";
+    return (slot ? SLOT_PREFIX : PART_PREFIX) + encodeURIComponent(host) + ":" + encodeURIComponent(slot || part);
+  }
+
+  /** The element a slot id names: the marked frame, or for the default slot
+   * the host itself. */
+  function slotElementFor(id) {
+    var rest = id.slice(SLOT_PREFIX.length);
+    var split = rest.indexOf(":");
+    if (split <= 0 || rest.indexOf(":", split + 1) >= 0) return null;
+    var host;
+    var name;
+    try {
+      host = decodeURIComponent(rest.slice(0, split));
+      name = decodeURIComponent(rest.slice(split + 1));
+    } catch (_error) {
+      return null;
+    }
+    ensureElementMap();
+    var hostElement = elementsByOid.get(host);
+    if (!hostElement || !hostElement.hasAttribute("data-zd-instance")) return null;
+    if (!name) return hostElement;
+    var marked = hostElement.querySelectorAll("[data-zd-slot]");
+    for (var index = 0; index < marked.length; index += 1) {
+      if (marked[index].getAttribute("data-zd-slot") === name && !oidOf(marked[index]) && partOwnerOf(marked[index]) === hostElement) return marked[index];
+    }
+    return null;
   }
 
   function partElementFor(id) {
@@ -1708,7 +1767,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     visitElementsFromPoint(x, y, function (element) {
       if (element === host || !host.contains(element)) return false;
       for (var current = element; current && current !== host; current = current.parentElement) {
-        if (current.hasAttribute("data-zd-part") && partOwnerOf(current) === host) {
+        if ((current.hasAttribute("data-zd-part") || current.hasAttribute("data-zd-slot")) && partOwnerOf(current) === host) {
           found = current;
           return true;
         }
@@ -2271,7 +2330,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       // A nested rule's selector is relative to its parent rule.
       if (!rule.active || rule.selector === null || rule.declared.length === 0) continue;
       var matches = false;
-      try { matches = element.matches(rule.selector); } catch (_error) { matches = false; }
+      try { matches = element.matches(rule.match || rule.selector); } catch (_error) { matches = false; }
       if (!matches) continue;
       var targets = ruleTargetsElement(element, rule);
       for (var propertyIndex = 0; propertyIndex < rule.declared.length; propertyIndex += 1) {
@@ -2311,6 +2370,26 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     var component = node.getAttribute("data-zeros-component");
     if (component) return { origin: "frame", component: component.slice(0, ${DESIGN_RUNTIME_AUTHORED_STYLE_LIMITS.component}) };
     return { origin: "frame" };
+  }
+
+  // The engine limits a component's style element to its instances by
+  // wrapping each selector (scopeDesignComponentStyle in the engine's
+  // components.ts); this reads the selector back as it was authored.
+  function authoredComponentSelector(selector, component) {
+    if (!component || !selector || selector.indexOf(":where(zd-") < 0) return selector;
+    var host = "zd-" + component;
+    var within = "):where(" + host + ", " + host + " *)";
+    var root = ", " + host + "):where(" + host + ")";
+    return splitTopLevel(selector, ",").map(function (complex) {
+      if (complex.indexOf(":is(") !== 0) return complex;
+      if (complex.slice(-root.length) === root) return complex.slice(4, -root.length);
+      var end = complex.lastIndexOf(within);
+      if (end < 0) return complex;
+      var subject = complex.slice(4, end);
+      var tail = complex.slice(end + within.length);
+      if (tail && /[\s>+~]:where\(\*\)$/.test(subject)) subject = subject.slice(0, -":where(*)".length);
+      return (subject === "*" && tail ? "" : subject) + tail;
+    }).join(", ");
   }
 
   function splitTopLevel(text, separator) {
@@ -2490,14 +2569,18 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
         if ((rule.type === CSSRule.STYLE_RULE && rule.selectorText && rule.style) || (context.nested && kind === "CSSNestedDeclarations" && rule.style)) {
           var declared = declarationProperties(rule.style);
           var selector = null;
+          var matchSelector = null;
           if (kind === "CSSNestedDeclarations") selector = context.parent;
-          else if (!context.nested) selector = rule.selectorText;
+          else if (!context.nested) {
+            selector = authoredComponentSelector(rule.selectorText, context.origin.component);
+            if (selector !== rule.selectorText) matchSelector = rule.selectorText;
+          }
           else if (context.depth === 1 && context.parent) selector = resolveNestedSelector(rule.selectorText, context.parent);
           // A nested selector that cannot be resolved is relative to its
           // parent, so element.matches() cannot establish applicability or
           // specificity. Keep its property footprint rather than silently
           // selecting a losing outer rule.
-          var entry = { rule: rule, selector: selector, uncertain: context.uncertain || selector === null, active: context.active, layer: context.layer.path, order: rules.length, origin: context.origin, declared: declared, shadow: scope !== document, grouped: context.grouped || context.nested, chain: context.chain, anonymousLayer: context.anonymous };
+          var entry = { rule: rule, selector: selector, match: matchSelector, uncertain: context.uncertain || selector === null, active: context.active, layer: context.layer.path, order: rules.length, origin: context.origin, declared: declared, shadow: scope !== document, grouped: context.grouped || context.nested, chain: context.chain, anonymousLayer: context.anonymous };
           var copied = heldState && heldState.copies.get(rule);
           if (copied) {
             entry.origin = copied.entry.origin;
@@ -2537,7 +2620,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
               uncertain: context.uncertain,
               nested: true,
               depth: context.nested ? context.depth + 1 : 1,
-              parent: selector && splitTopLevel(selector, ",").length === 1 ? selector : null,
+              parent: (matchSelector || selector) && splitTopLevel(matchSelector || selector, ",").length === 1 ? matchSelector || selector : null,
               chain: context.chain,
               anonymous: context.anonymous,
               grouped: context.grouped,
@@ -2611,7 +2694,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       var entry = entries[index];
       if (!entry.active) continue;
       var matches = entry.selector === null;
-      try { if (!matches) matches = element.matches(entry.selector); } catch (_error) { matches = false; }
+      try { if (!matches) matches = element.matches(entry.match || entry.selector); } catch (_error) { matches = false; }
       if (matches) result.push({ entry: entry, specificity: null });
     }
     return result;
@@ -2939,7 +3022,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     if (total === undefined) {
       total = 0;
       try {
-        var found = styleScopeOf(element).querySelectorAll(entry.selector);
+        var found = styleScopeOf(element).querySelectorAll(entry.match || entry.selector);
         for (var position = 0; position < found.length; position += 1) {
           if (found[position].hasAttribute("data-oid")) total += 1;
         }
@@ -3380,22 +3463,40 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     });
   }
 
+  /** A layer's id in Layers: its data-oid, or, for a host that addresses
+   * them, an instance's part id. */
+  function layerIdOf(element) {
+    return oidOf(element) || (componentAddressing() ? partIdOf(element) : "");
+  }
+
+  /** The layers under an element. Inside an instance an element without an id
+   * (a definition that names no parts) is passed through, so the frame's own
+   * layers slotted into it still show. */
+  function treeChildrenOf(element, depth, into) {
+    var layerChildren = composedChildrenOf(element);
+    for (var index = 0; index < layerChildren.length; index += 1) {
+      var child = layerChildren[index];
+      if (layerIdOf(child)) into.push(child);
+      else if (depth < MAX_TREE_DEPTH && componentAddressing() && partOwnerOf(child)) treeChildrenOf(child, depth + 1, into);
+    }
+    return into;
+  }
+
   function treeNode(element, depth, budget) {
     if (budget.count >= MAX_TREE_NODES) {
       budget.truncated = true;
       return null;
     }
     budget.count += 1;
-    var oid = oidOf(element);
+    var oid = layerIdOf(element);
     var computed = getComputedStyle(element);
     var children = [];
-    var layerChildren = composedChildrenOf(element);
+    var layerChildren = treeChildrenOf(element, depth, []);
     if (depth >= MAX_TREE_DEPTH) {
       if (layerChildren.length > 0) budget.truncated = true;
     } else {
       for (var index = 0; index < layerChildren.length; index += 1) {
         var child = layerChildren[index];
-        if (!oidOf(child)) continue;
         var childNode = treeNode(child, depth + 1, budget);
         if (childNode) children.push(childNode);
       }
@@ -3412,6 +3513,10 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       children: children
     };
     if (inShadowTree(element)) node.shadow = true;
+    if (computed.position === "absolute" || computed.position === "fixed") {
+      var parent = composedParentOf(element);
+      if (parent && /^(inline-)?(flex|grid)$/.test(getComputedStyle(parent).display)) node.absolute = true;
+    }
     return node;
   }
 
@@ -3658,7 +3763,9 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       name: nameOf(element),
       text: textEditable ? editableTextOf(element) : directText(element),
       textEditable: textEditable,
-      selector: element === document.body ? "body" : oidOf(element) ? "[data-oid=\"" + escaped + "\"]" : "[data-zd-part=\"" + cssEscaped(element.getAttribute("data-zd-part") || "") + "\"]",
+      selector: element === document.body ? "body" : oidOf(element) ? "[data-oid=\"" + escaped + "\"]" : element.hasAttribute("data-zd-part")
+        ? "[data-zd-part=\"" + cssEscaped(element.getAttribute("data-zd-part") || "") + "\"]"
+        : "[data-zd-slot=\"" + cssEscaped(element.getAttribute("data-zd-slot") || "") + "\"]",
       visible: hiddenBy === null,
       breadcrumb: layoutOnly ? [] : breadcrumbOf(element),
       rect: rect,
@@ -3915,14 +4022,126 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     return body || document.documentElement;
   }
 
+  var parsedColors = new Map();
   function parsedColor(value) {
-    var parts = String(value || "").match(/[0-9.]+/g);
-    if (!parts || parts.length < 3) return null;
+    var text = String(value || "").trim().toLowerCase();
+    if (parsedColors.has(text)) return parsedColors.get(text);
+    var color = colorFromCss(text);
+    if (parsedColors.size >= 512) parsedColors.clear();
+    parsedColors.set(text, color);
+    return color;
+  }
+
+  function multiply(matrix, vector) {
+    return matrix.map(function (row) { return row[0] * vector[0] + row[1] * vector[1] + row[2] * vector[2]; });
+  }
+
+  var XYZ_TO_LINEAR_SRGB = [[3.2409699419045226, -1.537383177570094, -0.4986107602930034], [-0.9692436362808796, 1.8759675015077202, 0.04155505740717559], [0.05563007969699366, -0.20397695888897652, 1.0569715142428786]];
+  var D50_TO_D65 = [[0.9554734527042182, -0.023098536874261423, 0.0632593086610217], [-0.028369706963208136, 1.0099954580058226, 0.021041398966943008], [0.012314001688319899, -0.020507696433477912, 1.3303659366080753]];
+  var RGB_SPACES = {
+    "display-p3": { matrix: [[0.4865709486482162, 0.26566769316909306, 0.1982172852343625], [0.2289745640697488, 0.6917385218365064, 0.079286914093745], [0, 0.04511338185890264, 1.043944368900976]], linear: srgbLinear },
+    rec2020: { matrix: [[0.6369580483012914, 0.14461690358620832, 0.1688809751641721], [0.2627002120112671, 0.6779980715188708, 0.05930171646986196], [0, 0.028072693049087428, 1.060985057710791]], linear: function (value) {
+      var sign = value < 0 ? -1 : 1, magnitude = Math.abs(value);
+      return sign * (magnitude < 0.018053968510807 * 4.5 ? magnitude / 4.5 : Math.pow((magnitude + 0.09929682680944) / 1.09929682680944, 1 / 0.45));
+    } },
+    "a98-rgb": { matrix: [[0.5766690429101305, 0.1855582379065463, 0.1882286462349947], [0.29734497525053605, 0.6273635662554661, 0.07529145849399788], [0.02703136138641234, 0.07068885253582723, 0.9913375368376388]], linear: function (value) {
+      return (value < 0 ? -1 : 1) * Math.pow(Math.abs(value), 563 / 256);
+    } },
+    "prophoto-rgb": { d50: true, matrix: [[0.7977604896723027, 0.13518583717574031, 0.0313493495815248], [0.2880711282292934, 0.7118432178101014, 0.00008565396060525902], [0, 0, 0.8251046025104601]], linear: function (value) {
+      var magnitude = Math.abs(value);
+      return (value < 0 ? -1 : 1) * (magnitude <= 16 / 512 ? magnitude / 16 : Math.pow(magnitude, 1.8));
+    } }
+  };
+
+  function srgbLinear(value) {
+    var sign = value < 0 ? -1 : 1, magnitude = Math.abs(value);
+    return sign * (magnitude <= 0.04045 ? magnitude / 12.92 : Math.pow((magnitude + 0.055) / 1.055, 2.4));
+  }
+
+  function srgbEncoded(value) {
+    var magnitude = Math.abs(value);
+    var encoded = magnitude <= 0.0031308 ? magnitude * 12.92 : 1.055 * Math.pow(magnitude, 1 / 2.4) - 0.055;
+    return Math.max(0, Math.min(1, (value < 0 ? -1 : 1) * encoded));
+  }
+
+  function labToXyzD50(lightness, a, b) {
+    var kappa = 24389 / 27, epsilon = 216 / 24389;
+    var f1 = (lightness + 16) / 116, f0 = a / 500 + f1, f2 = f1 - b / 200;
+    var x = Math.pow(f0, 3) > epsilon ? Math.pow(f0, 3) : (116 * f0 - 16) / kappa;
+    var y = lightness > kappa * epsilon ? Math.pow(f1, 3) : lightness / kappa;
+    var z = Math.pow(f2, 3) > epsilon ? Math.pow(f2, 3) : (116 * f2 - 16) / kappa;
+    return [x * 0.9642956764295677, y, z * 0.8251046025104602];
+  }
+
+  function oklabToLinearSrgb(lightness, a, b) {
+    var l = Math.pow(lightness + 0.3963377774 * a + 0.2158037573 * b, 3);
+    var m = Math.pow(lightness - 0.1055613458 * a - 0.0638541728 * b, 3);
+    var s = Math.pow(lightness - 0.0894841775 * a - 1.291485548 * b, 3);
+    return [
+      4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
+      -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
+      -0.0041960863 * l - 0.7034186147 * m + 1.707614701 * s
+    ];
+  }
+
+  // Computed colours keep their space: rgb() for sRGB; oklch(), oklab(),
+  // lab(), lch() or color() otherwise. Each becomes gamma-encoded sRGB, so a
+  // colour outside sRGB is measured as the display clips it. An unreadable
+  // colour returns null and is not audited.
+  function colorFromCss(text) {
+    var match = /^([a-z0-9-]+)\(([^()]*)\)$/.exec(text);
+    if (!match) return null;
+    var name = match[1];
+    var halves = match[2].split("/");
+    var channels = halves[0].trim().split(/[\s,]+/).filter(Boolean);
+    var space = name;
+    if (name === "color") space = channels.shift() || "";
+    var alphaToken = halves.length > 1 ? halves[1].trim() : (name === "rgb" || name === "rgba") && channels.length === 4 ? channels.pop() : "1";
+    if (channels.length !== 3) return null;
+    function channel(token, percent) {
+      if (token === "none") return 0;
+      var number = parseFloat(token);
+      return token.slice(-1) === "%" ? number / 100 * percent : number;
+    }
+    var alpha = channel(alphaToken, 1);
+    var c;
+    if (space === "rgb" || space === "rgba") c = [channel(channels[0], 255) / 255, channel(channels[1], 255) / 255, channel(channels[2], 255) / 255];
+    else if (space === "srgb") c = [channel(channels[0], 1), channel(channels[1], 1), channel(channels[2], 1)];
+    else {
+      var linear;
+      if (space === "srgb-linear") linear = [channel(channels[0], 1), channel(channels[1], 1), channel(channels[2], 1)];
+      else if (space === "oklab" || space === "oklch") {
+        var okLightness = channel(channels[0], 1), okA = channel(channels[1], 0.4), okB = channel(channels[2], 0.4);
+        if (space === "oklch") {
+          var okHue = parseFloat(channels[2]) * Math.PI / 180 || 0;
+          okA = channel(channels[1], 0.4) * Math.cos(okHue);
+          okB = channel(channels[1], 0.4) * Math.sin(okHue);
+        }
+        linear = oklabToLinearSrgb(okLightness, okA, okB);
+      } else if (space === "lab" || space === "lch") {
+        var labLightness = channel(channels[0], 100), labA = channel(channels[1], 125), labB = channel(channels[2], 125);
+        if (space === "lch") {
+          var labHue = parseFloat(channels[2]) * Math.PI / 180 || 0;
+          labA = channel(channels[1], 150) * Math.cos(labHue);
+          labB = channel(channels[1], 150) * Math.sin(labHue);
+        }
+        linear = multiply(XYZ_TO_LINEAR_SRGB, multiply(D50_TO_D65, labToXyzD50(labLightness, labA, labB)));
+      } else if (space === "xyz" || space === "xyz-d65" || space === "xyz-d50") {
+        var xyz = [channel(channels[0], 1), channel(channels[1], 1), channel(channels[2], 1)];
+        linear = multiply(XYZ_TO_LINEAR_SRGB, space === "xyz-d50" ? multiply(D50_TO_D65, xyz) : xyz);
+      } else if (RGB_SPACES[space]) {
+        var definition = RGB_SPACES[space];
+        var toXyz = multiply(definition.matrix, [channel(channels[0], 1), channel(channels[1], 1), channel(channels[2], 1)].map(definition.linear));
+        linear = multiply(XYZ_TO_LINEAR_SRGB, definition.d50 ? multiply(D50_TO_D65, toXyz) : toXyz);
+      } else return null;
+      c = linear.map(srgbEncoded);
+    }
+    if (c.some(function (value) { return !isFinite(value); }) || !isFinite(alpha)) return null;
     return {
-      r: Math.max(0, Math.min(255, Number(parts[0]))) / 255,
-      g: Math.max(0, Math.min(255, Number(parts[1]))) / 255,
-      b: Math.max(0, Math.min(255, Number(parts[2]))) / 255,
-      a: parts.length > 3 ? Math.max(0, Math.min(1, Number(parts[3]))) : 1
+      r: Math.max(0, Math.min(1, c[0])),
+      g: Math.max(0, Math.min(1, c[1])),
+      b: Math.max(0, Math.min(1, c[2])),
+      a: Math.max(0, Math.min(1, alpha))
     };
   }
 
@@ -3985,9 +4204,12 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       auditedElements += 1;
       if (!visibleOf(element)) return;
       var computed = getComputedStyle(element);
+      // An ellipsis or a line clamp cuts text off on purpose.
+      var ellipsis = computed.textOverflow === "ellipsis" && computed.overflowX !== "visible";
+      var clamped = !!computed.webkitLineClamp && computed.webkitLineClamp !== "none" && computed.overflowY !== "visible";
       if (
-        (element.clientWidth > 0 && element.scrollWidth > element.clientWidth + 1) ||
-        (element.clientHeight > 0 && element.scrollHeight > element.clientHeight + 1)
+        (!ellipsis && element.clientWidth > 0 && element.scrollWidth > element.clientWidth + 1) ||
+        (!clamped && element.clientHeight > 0 && element.scrollHeight > element.clientHeight + 1)
       ) {
         add(
           "overflow",
@@ -4143,6 +4365,11 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       var part = partElementFor(oid);
       if (!part) throw new Error("Element not found: " + oid);
       return part;
+    }
+    if (oid.indexOf(SLOT_PREFIX) === 0 && componentAddressing()) {
+      var slot = slotElementFor(oid);
+      if (!slot) throw new Error("Element not found: " + oid);
+      return slot;
     }
     ensureElementMap();
     var element = elementsByOid.get(oid);
@@ -5856,6 +6083,32 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     return true;
   }
 
+  function isScopeRule(rule) {
+    return typeof CSSScopeRule !== "undefined" && rule instanceof CSSScopeRule;
+  }
+
+  // An @scope rule reaches an element only below a root its start matches
+  // and above any limit its end matches. A rootless one is rooted at the
+  // parent of the style that holds it.
+  function withinScopeRule(element, rule) {
+    var start = rule.start;
+    var end = rule.end;
+    var ownerNode = rule.parentStyleSheet && rule.parentStyleSheet.ownerNode;
+    var ownerParent = ownerNode && ownerNode.parentElement;
+    if (!start && !ownerParent) return true;
+    for (var root = element; root; root = root.parentElement) {
+      var isRoot = false;
+      try { isRoot = start ? root.matches(start) : root === ownerParent; } catch (_error) { isRoot = false; }
+      if (!isRoot) continue;
+      var limited = false;
+      for (var at = element; end && at && at !== root && !limited; at = at.parentElement) {
+        try { limited = at.matches(end); } catch (_error) { limited = true; }
+      }
+      if (!limited) return true;
+    }
+    return false;
+  }
+
   function matchedDeclarationsForElement(element, property, inherited, output) {
     if (element.style) {
       var inlineValue = element.style.getPropertyValue(property);
@@ -5869,7 +6122,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
         });
       }
     }
-    function visitRules(rules, sourceFile, active) {
+    function visitRules(rules, sourceFile, active, component) {
       for (var index = 0; index < rules.length; index += 1) {
         if (output.length >= MAX_MATCHED_DECLARATIONS) return;
         var rule = rules[index];
@@ -5882,17 +6135,19 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
               property: property,
               value: value,
               important: rule.style.getPropertyPriority(property) === "important",
-              selector: rule.selectorText,
+              selector: authoredComponentSelector(rule.selectorText, component),
               sourceFile: sourceFile,
               inherited: inherited,
               active: active
             });
           }
         } else if (rule.cssRules) {
+          if (isScopeRule(rule) && !withinScopeRule(element, rule)) continue;
           visitRules(
             rule.cssRules,
             sourceFile,
-            active && conditionalRuleActive(rule)
+            active && conditionalRuleActive(rule),
+            component
           );
         }
       }
@@ -5901,7 +6156,9 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     for (var sheetIndex = 0; sheetIndex < matchedScope.styleSheets.length; sheetIndex += 1) {
       var sheet = matchedScope.styleSheets[sheetIndex];
       try {
-        visitRules(sheet.cssRules || [], stylesheetSource(sheet), true);
+        var owner = sheet.ownerNode;
+        visitRules(sheet.cssRules || [], stylesheetSource(sheet), true,
+          owner && owner.getAttribute && !owner.getAttribute("data-zeros-source") ? owner.getAttribute("data-zeros-component") : null);
       } catch (_error) {
         // The design renderer normally owns every stylesheet. If a browser
         // still marks one inaccessible, omit it instead of inventing source.

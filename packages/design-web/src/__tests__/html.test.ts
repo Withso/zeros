@@ -270,3 +270,45 @@ describe("HTML source adapter", () => {
     ).toThrow("Active design element");
   });
 });
+
+describe("derived layer ids", () => {
+  const derived = (source: string) => [...healDesignHtmlIdentities(source, { native: true }).source.matchAll(/data-oid="([^"]+)"/g)].map((match) => match[1]!);
+
+  it("never give a layer another layer's id after a layer is added above it", () => {
+    const [, one, two] = derived("<main><p>One</p><p>Two</p></main>");
+    const [, zero, movedOne, movedTwo] = derived("<main><p>Zero</p><p>One</p><p>Two</p></main>");
+    expect(zero).not.toBe(one);
+    expect(movedOne).not.toBe(two);
+    expect(movedTwo).not.toBe(one);
+  });
+
+  it("keep every other layer's id when one layer's style, text or attributes change", () => {
+    const source = '<main><section class="a"><p>One</p><p>Two</p></section><p>Three</p></main>';
+    const before = derived(source);
+    const after = derived(source.replace('class="a"', 'class="a" style="color: red"').replace(">One<", ">Uno<"));
+    expect([after[0], after[3], after[4]]).toEqual([before[0], before[3], before[4]]);
+  });
+});
+
+describe("deleting a layer", () => {
+  it("removes a layer alone on its line with its indentation and newline", () => {
+    const source = '<main data-oid="root">\n  <p data-oid="one">One</p>\n  <p data-oid="two">Two</p>  \r\n  <p data-oid="three">Three</p>\n</main>';
+    expect(mutateDesignNodeDeleteSource(source, "one")).toBe(
+      '<main data-oid="root">\n  <p data-oid="two">Two</p>  \r\n  <p data-oid="three">Three</p>\n</main>',
+    );
+    expect(mutateDesignNodeDeleteSource(source, "two")).toBe(
+      '<main data-oid="root">\n  <p data-oid="one">One</p>\n  <p data-oid="three">Three</p>\n</main>',
+    );
+  });
+
+  it("leaves no stray carriage return in a CRLF frame", () => {
+    const source = '<main data-oid="root">\r\n  <p data-oid="one">One</p>\r\n  <p data-oid="two">Two</p>\r\n</main>';
+    expect(mutateDesignNodeDeleteSource(source, "one")).toBe('<main data-oid="root">\r\n  <p data-oid="two">Two</p>\r\n</main>');
+  });
+
+  it("leaves the rest of a shared line as written", () => {
+    const source = '<main data-oid="root">\n  <b data-oid="a">A</b> <i data-oid="b">B</i>\n</main>';
+    expect(mutateDesignNodeDeleteSource(source, "a")).toBe('<main data-oid="root">\n   <i data-oid="b">B</i>\n</main>');
+    expect(mutateDesignNodeDeleteSource(source, "b")).toBe('<main data-oid="root">\n  <b data-oid="a">A</b> \n</main>');
+  });
+});

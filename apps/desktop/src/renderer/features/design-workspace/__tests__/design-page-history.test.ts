@@ -12,6 +12,7 @@ import {
   resetDesignWorkspaceUiForTests,
   useDesignWorkspaceUiStore,
 } from "../state/design-workspace-ui";
+import { designCanvasItemOwner, designCanvasItemSelection, setDesignCanvasItemSelection } from "../state/design-canvas-item-selection";
 
 const pages = [
   { id: "a", title: "A", folder: "a", frameFiles: ["a/home.html"] },
@@ -46,6 +47,50 @@ describe("Design history page ownership", () => {
       }),
     );
   });
+  it.each([
+    { items: [{ id: "note_1", kind: "note" as const, x: 0, y: 0, width: 200, height: 100, text: "Note" }], replyItemId: "note_1", expected: "note_1" },
+    { items: [], replyItemId: "note_1", expected: null },
+    { items: [{ id: "note_1", kind: "note" as const, x: 0, y: 0, width: 200, height: 100, text: "Note" }], replyItemId: null, expected: null },
+  ])("restores item selection only when the item exists in the returned generation", async ({ items, replyItemId, expected }) => {
+    const itemPages = [pages[0]!, { ...pages[1]!, frameFiles: [], items }];
+    const onItem = vi.fn();
+    await restoreDesignPageHistorySelection("workspace", captureDesignPageOwner("workspace"), {
+      ...reply, historyFrame: undefined, historySelection: null, historyPageId: "b", historyItemId: replyItemId,
+      snapshot: { ...reply.snapshot!, activePageId: "b", pages: itemPages, frames: [] },
+    } as DesignApiMutationReplyWire, "undo", onItem);
+    expect(designWorkspaceView("workspace").activePageId).toBe("b");
+    expect(selectFrame).toHaveBeenCalledWith("workspace", null, expect.objectContaining({ owner: expect.objectContaining({ pageId: "b" }) }));
+    expect(onItem).toHaveBeenCalledExactlyOnceWith(expected, expect.objectContaining({ id: "b" }));
+  });
+  it("does not restore an item after the user leaves during the frame-selection write", async () => {
+    let finish!: () => void;
+    selectFrame.mockImplementationOnce(() => new Promise<void>(resolve => { finish = resolve; }));
+    const onItem = vi.fn();
+    const itemPages = [pages[0]!, { ...pages[1]!, frameFiles: [], items: [{ id: "note_1", kind: "note" as const, x: 0, y: 0, width: 200, height: 100, text: "Note" }] }];
+    const restoring = restoreDesignPageHistorySelection("workspace", captureDesignPageOwner("workspace"), {
+      ...reply, historyFrame: undefined, historySelection: null, historyPageId: "b", historyItemId: "note_1",
+      snapshot: { ...reply.snapshot!, pages: itemPages, frames: [] },
+    } as DesignApiMutationReplyWire, "undo", onItem);
+    await vi.waitFor(() => expect(selectFrame).toHaveBeenCalled());
+    useDesignWorkspaceUiStore.getState().setActivePage("workspace", "a", "directory");
+    finish();
+    await restoring;
+    expect(onItem).not.toHaveBeenCalled();
+  });
+  it("does not let a stale owner clear another owner's restored item selection", () => {
+    const stale = designCanvasItemOwner("workspace", "directory", "a");
+    const current = designCanvasItemOwner("workspace", "directory", "b");
+    try {
+      setDesignCanvasItemSelection(current, "note_1");
+      setDesignCanvasItemSelection(stale, null);
+      expect(designCanvasItemSelection(current)).toBe("note_1");
+      setDesignCanvasItemSelection(current, null);
+      expect(designCanvasItemSelection(current)).toBeNull();
+    } finally {
+      setDesignCanvasItemSelection(current, null);
+    }
+  });
+
   it("restores an empty page by its explicit history identity", async () => {
     await restoreDesignPageHistorySelection("workspace", captureDesignPageOwner("workspace"), {
       ...reply, historyFrame: undefined, historySelection: null, historyPageId: "b",

@@ -8,8 +8,11 @@ import { openLayersDrawer } from "./ui-smoke-design-helpers.mjs";
 // frame shows its values with a dot where they differ from what it
 // inherits, writes its attributes, resets in one undo step and previews on
 // its own host with no engine request; Edit main opens the main; a
-// double-click enters the instance and selects a read-only part that every
-// write path refuses.
+// double-click enters the instance and selects a part, whose style edits are
+// overrides on the instance (shared by repeated copies, reset and undone)
+// while its place, structure and text stay the main's; a slot the main marks
+// takes layers drawn or dropped into it, and Reset to default removes them;
+// a main kept in components/ moves to the canvas, and is then Edit main.
 export async function runDesignComponentInstancesSmoke({ page, check }) {
   await page.clock.resume().catch(() => {});
   const origin = new URL(page.url()).origin;
@@ -242,7 +245,7 @@ export async function runDesignComponentInstancesSmoke({ page, check }) {
   await expect(section).toHaveAttribute("data-design-component-options", "main");
   check("Edit main selects the main component", (await header.innerText()).includes("Component"));
 
-  // ── Inner parts ──
+  // ── Inner parts: restyled as the instance's overrides ──
   await selectInstance();
   // Edit main moved the camera to the main; bring the home frame back.
   await page.getByLabel("Design canvas", { exact: true }).focus();
@@ -250,6 +253,8 @@ export async function runDesignComponentInstancesSmoke({ page, check }) {
   await quiet();
   await selectInstance();
   const sendPart = frame("home.html").locator('[data-zd-instance] [data-zd-part="cc-send"]');
+  const chips = frame("home.html").locator('[data-zd-instance] .chip');
+  const styleWrites = () => page.evaluate(() => (window.__zerosHarnessWorkbenchOperations ?? []).filter((op) => op === "design.node.styles").length);
   // At the canvas, where the selection's outline lies over the frame.
   const at = async (locator, action) => {
     const box = await locator.boundingBox();
@@ -262,25 +267,77 @@ export async function runDesignComponentInstancesSmoke({ page, check }) {
     partLine.includes("Part of Chat composer.") && (await page.locator("[data-design-select-instance]").count()) === 1 &&
       (await page.locator("[data-design-edit-main]").count()) === 1, partLine);
   check("a part shows no Options", (await section.count()) === 0);
-  const fields = page.locator("[data-design-inspector] input:not([type=hidden])");
-  const enabled = await fields.evaluateAll((inputs) => inputs.filter((input) => !input.disabled && !input.closest("[inert]")).map((input) => input.getAttribute("aria-label")));
-  check("every field of a part's Style panel is inert", (await fields.count()) > 0 && enabled.length === 0, JSON.stringify(enabled));
-  // What stays open reads or leaves: the tabs, zoom, the part's own line, what styles it, and export.
-  const reading = new Set(["Style", "CSS", "Select instance", "Edit main", "What styles this layer", "Open preview", "Export scale", "Export PNG"]);
-  const buttons = await page.locator("[data-design-inspector] button:not([disabled])").evaluateAll((elements) =>
-    elements.filter((element) => !element.closest("[inert]")).map((element) => element.getAttribute("aria-label") || element.textContent.trim()));
-  const editing = buttons.filter((name) => !reading.has(name) && !name.startsWith("Canvas zoom"));
-  check("no control of a part's Style panel can edit it", editing.length === 0, JSON.stringify(editing));
-  check("Layers keeps the instance as one row", (await page.locator('[data-design-layer-id^="::zeros-part"]').count()) === 0 && (await layer("home-composer").count()) === 1);
+  check("Layers lists the selected part once, under its one instance row",
+    (await page.locator('[data-design-layer-id="::zeros-part:home-composer:cc-send"]').count()) === 1 && (await layer("home-composer").count()) === 1);
   check("a part has no resize, spacing or rotation handle",
     (await page.locator("[data-design-selected-element] [data-design-resize-handle], [data-design-selected-element] button").count()) === 0);
 
-  // Every write path refuses a part.
+  const opacity = page.locator("[data-design-inspector]").getByLabel("Opacity", { exact: true });
+  const labels = await page.locator("[data-design-inspector] input:not([type=hidden])").evaluateAll((inputs) =>
+    inputs.filter((input) => !input.disabled).map((input) => input.getAttribute("aria-label")));
+  check("a part's Style panel can be edited", labels.includes("Opacity"), JSON.stringify(labels));
+  const mainBeforeOverride = await main();
+  await opacity.fill("50");
+  await opacity.press("Enter");
+  await expect.poll(home).toMatch(/zd-style-cc-send="opacity: [^"]+"/);
+  await expect.poll(() => style("home.html", '[data-zd-instance] [data-zd-part="cc-send"]', "opacity")).toBe("0.5");
+  check("a part's style edit is an override on its instance, and the main is unchanged",
+    (await main()) === mainBeforeOverride && /<zd-chat-composer [^>]*zd-style-cc-send="opacity: [^"]+"/.test(await home()));
+  await expect(line).toContainText("Part of Chat composer, overridden.");
+  check("an overridden part says so and offers Reset", (await page.locator("[data-design-part-reset]").count()) === 1);
+
+  // A repeated part's copies share one override.
+  await at(chips.first(), "click");
+  await expect(line).toHaveAttribute("data-design-component-of", "part");
+  await expect.poll(selected).toBe("::zeros-part:home-composer:cc-chip");
+  const chipOpacity = page.locator("[data-design-inspector]").getByLabel("Opacity", { exact: true });
+  await chipOpacity.fill("40");
+  await chipOpacity.press("Enter");
+  await expect.poll(home).toContain('zd-style-cc-chip="opacity: 0.4"');
+  const chipOpacities = () => chips.evaluateAll((elements) => elements.map((element) => getComputedStyle(element).opacity));
+  await expect.poll(async () => { const all = await chipOpacities(); return all.length >= 2 && all.every((value) => value === "0.4"); }).toBe(true);
+  check("restyling one copy of a repeated part restyles every copy", true);
+
+  // The instance offers to reset its overrides; undo takes back one.
+  await selectInstance();
+  await expect(section.locator("[data-design-overrides-reset]")).toHaveAttribute("data-design-overrides-reset", "2");
+  check("an instance's Options offer to reset its part overrides", (await section.locator("[data-design-overrides-reset]").innerText()).includes("Reset 2 part overrides"));
+  await undo();
+  await expect.poll(home).not.toContain("zd-style-cc-chip");
+  await expect(section.locator("[data-design-overrides-reset]")).toHaveAttribute("data-design-overrides-reset", "1");
+  check("undo takes back the last part override", /zd-style-cc-send="opacity: [^"]+"/.test(await home()));
+
+  // A part's Reset removes its override.
+  await at(sendPart, "dblclick");
+  await expect(line).toContainText("overridden");
+  await page.locator("[data-design-part-reset]").click();
+  await expect.poll(home).not.toContain("zd-style-cc-send");
+  await expect.poll(() => style("home.html", '[data-zd-instance] [data-zd-part="cc-send"]', "opacity")).toBe("1");
+  await expect(line).toHaveAttribute("data-design-component-of", "part");
+  await expect(line).not.toContainText("overridden");
+  check("a part's Reset removes its override", true);
+
+  // The Layers eye hides a part on the canvas, as it does any layer.
+  const sourceBeforeEye = await home();
+  const writesBeforeEye = await writes();
+  const partRow = page.locator('[data-design-layer-id="::zeros-part:home-composer:cc-send"]');
+  await partRow.hover();
+  await partRow.locator("..").getByRole("button", { name: /^Hide / }).click();
+  await expect(sendPart).toBeHidden();
+  await partRow.hover();
+  await partRow.locator("..").getByRole("button", { name: /^Show / }).click();
+  await expect(sendPart).toBeVisible();
+  check("the Layers eye hides and shows a part without writing", (await home()) === sourceBeforeEye && (await writes()) === writesBeforeEye);
+
+  // Its layers, place and text stay the main's: those writes are refused.
+  await at(sendPart, "click");
+  await expect(line).toHaveAttribute("data-design-component-of", "part");
   const partSource = await home();
   const partWrites = await writes();
+  const partStyleWrites = await styleWrites();
   const unchanged = async (path) => {
     await page.waitForTimeout(250);
-    check(`a part refuses ${path}`, (await writes()) === partWrites && (await home()) === partSource);
+    check(`a part refuses ${path}`, (await writes()) === partWrites && (await styleWrites()) === partStyleWrites && (await home()) === partSource);
     await expect(line).toHaveAttribute("data-design-component-of", "part");
   };
   const canvas = page.getByLabel("Design canvas", { exact: true });
@@ -307,22 +364,10 @@ export async function runDesignComponentInstancesSmoke({ page, check }) {
   await page.mouse.move(box.x + box.width / 2 + 60, box.y + box.height / 2 + 30, { steps: 8 });
   await page.mouse.up();
   await unchanged("a drag");
-  const layoutButtons = await page.locator("[data-design-inspector] [data-design-auto-layout] button:not([disabled])").evaluateAll((buttons) =>
-    buttons.filter((button) => !button.closest("[inert]")).map((button) => button.getAttribute("aria-label") ?? button.textContent));
-  check("a part's layout actions are disabled", layoutButtons.length === 0, JSON.stringify(layoutButtons));
-  const styleWrites = await page.evaluate(async () => {
-    const { updateDesignNodeStylesCached, designWorkspaceSnapshotCache } = await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-cache.ts");
-    const { designWorkspaceView } = await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-ui.ts");
-    const view = designWorkspaceView("ws_design_harness");
-    const frame = designWorkspaceSnapshotCache.peekSnapshot("ws_design_harness").data.frames.find((candidate) => candidate.file === "home.html");
-    return updateDesignNodeStylesCached("ws_design_harness", { frame: frame.file, sourceVersion: frame.sourceVersion, nodeId: view.selectedNodeId, styles: { width: "10px" } })
-      .then(() => "written", (error) => error.message);
-  });
-  check("a style commit for a part is refused before it is sent", /part of a component instance/.test(styleWrites), styleWrites);
-  await unchanged("a style commit");
 
   // Inside the instance a click picks another part; Escape leaves it.
   await at(frame("home.html").locator('[data-zd-instance] [data-zd-part="cc-prompt"]'), "click");
+  await expect.poll(selected).toBe("::zeros-part:home-composer:cc-prompt");
   await expect(line).toHaveAttribute("data-design-component-of", "part");
   check("inside the instance a click picks another part", true);
   await canvas.focus();
@@ -340,6 +385,85 @@ export async function runDesignComponentInstancesSmoke({ page, check }) {
   await expect(layer("cc-send")).toHaveAttribute("aria-selected", "true");
   check("a part's Edit main opens the main with the layer of the same id selected", true);
 
+  // ── A slot: the main marks a frame, and an instance puts its own layers there ──
+  await selectMain();
+  const slotOption = () => section.locator("[data-design-option-slot]").first();
+  await expect(slotOption()).toHaveAttribute("data-design-option-slot", "main");
+  check("the main's Options list its slot", (await slotOption().innerText()).includes("Extras") && (await slotOption().innerText()).includes("Slot"),
+    await slotOption().innerText());
+  await selectInstance();
+  await page.getByLabel("Design canvas", { exact: true }).focus();
+  await page.keyboard.press("Shift+Digit2");
+  await quiet();
+  await selectInstance();
+  const slotRow = page.locator('[data-design-layer-id="::zeros-slot:home-composer:extras"]');
+  if (!(await slotRow.count())) await layer("home-composer").locator("[data-layer-disclosure]").click();
+  await expect(slotRow).toHaveCount(1);
+  check("Layers shows the instance's slot as a slot row",
+    (await slotRow.locator("[data-design-layer-slot]").count()) === 1 && (await slotRow.innerText()).includes("Extras slot"), await slotRow.innerText());
+  await expect(slotOption()).toHaveAttribute("data-design-option-slot", "0");
+  check("an empty slot reads Default and offers no Reset",
+    (await slotOption().innerText()).includes("Default") && (await section.locator("[data-design-slot-reset]").count()) === 0);
+  const extras = frame("home.html").locator('[data-zd-instance] [data-zd-slot="extras"]');
+  const slotted = () => page.evaluate(() =>
+    [...new DOMParser().parseFromString(window.__zerosHarnessHomeSource(), "text/html").querySelectorAll('zd-chat-composer[data-oid="home-composer"] > [slot]')]
+      .map((element) => `${element.getAttribute("slot")}:${element.getAttribute("data-oid")}`));
+  const mainBeforeSlot = await main();
+
+  // Drawn into the slot: the layer is the instance's, named for the slot.
+  const writesBeforeDraw = await writes();
+  await page.getByRole("button", { name: "Frame tool", exact: true }).click();
+  const slotBox = await extras.boundingBox();
+  await page.mouse.move(slotBox.x + slotBox.width * 0.5, slotBox.y + 6);
+  await page.mouse.down();
+  await page.mouse.move(slotBox.x + slotBox.width * 0.5 + 40, slotBox.y + slotBox.height - 6, { steps: 6 });
+  await page.mouse.up();
+  await expect.poll(writes).toBe(writesBeforeDraw + 1);
+  await expect.poll(async () => (await slotted()).length).toBe(1);
+  const [drawn] = await slotted();
+  check("a layer drawn into a slot is written in the instance with that slot's name, and the main is unchanged",
+    /^extras:frame-/.test(drawn) && (await main()) === mainBeforeSlot, drawn);
+  await expect(extras.locator(`[data-oid="${drawn.slice("extras:".length)}"]`)).toHaveCount(1);
+  await expect(extras.locator('[data-zd-part="cc-extras-empty"]')).toHaveCount(0);
+  check("the slot shows the instance's layer in place of the main's", true);
+
+  // Dropped into the slot: a free layer of the frame moves into the instance.
+  await quiet();
+  await expect(async () => {
+    await layer("home-drawn").click({ timeout: 2_000 });
+    await expect(layer("home-drawn")).toHaveAttribute("aria-selected", "true", { timeout: 2_000 });
+  }).toPass({ timeout: 15_000 });
+  const writesBeforeFree = await writes();
+  await page.locator("[data-design-inspector]").getByRole("checkbox", { name: "Absolute position", exact: true }).locator("..").click();
+  await expect.poll(writes).toBe(writesBeforeFree + 1);
+  await quiet();
+  const moves = () => page.evaluate(() => (window.__zerosHarnessWorkbenchOperations ?? [])
+    .filter((op) => op === "design.transaction.apply" || op === "design.node.transfer").length);
+  const movesBeforeDrop = await moves();
+  const moving = await frame("home.html").locator('[data-oid="home-drawn"]').boundingBox();
+  const target = await extras.boundingBox();
+  await page.mouse.move(moving.x + moving.width / 2, moving.y + moving.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(target.x + target.width * 0.7, target.y + target.height / 2, { steps: 16 });
+  await page.mouse.up();
+  await expect.poll(moves).toBe(movesBeforeDrop + 1);
+  await expect.poll(slotted).toContain("extras:home-drawn");
+  check("a layer dropped into a slot moves into the instance with that slot's name", (await slotted()).length === 2, JSON.stringify(await slotted()));
+  await selectInstance();
+  await expect(slotOption()).toHaveAttribute("data-design-option-slot", "2");
+  check("the slot's row counts the instance's layers and marks itself changed",
+    (await slotOption().innerText()).includes("2 layers") && (await slotOption().locator("[data-option-changed]").count()) === 1);
+
+  // Reset to default removes the instance's layers in one write; one undo restores them.
+  const writesBeforeSlotReset = await writes();
+  await section.locator("[data-design-slot-reset]").click();
+  await expect.poll(writes).toBe(writesBeforeSlotReset + 1);
+  await expect.poll(slotted).toEqual([]);
+  await expect(extras.locator('[data-zd-part="cc-extras-empty"]')).toHaveCount(1);
+  check("Reset to default empties the slot in one write and shows the main's content again", true);
+  await undo();
+  await expect.poll(async () => (await slotted()).length).toBe(2);
+  check("one undo restores every layer the Reset removed", (await slotted()).includes("extras:home-drawn"));
   // An instance whose values did not apply says so, as the main does.
   await selectInstance();
   for (const [shows, text] of [
@@ -353,4 +477,20 @@ export async function runDesignComponentInstancesSmoke({ page, check }) {
   }
   await page.evaluate(() => window.__zerosHarnessInstanceNotApplied(null));
   await expect(section.getByRole("alert")).toHaveCount(0);
+
+  // ── A main kept in components/: Move main to canvas ──
+  await page.goto(`${origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html?styleOrigins&componentOptions&legacyMain`, { waitUntil: "networkidle" });
+  await openLayersDrawer(page);
+  await selectInstance();
+  const legacyHeader = await header.innerText();
+  check("an instance whose main is a components/ file offers Move main to canvas, not Open in Files",
+    legacyHeader.includes("Move main to canvas") && !legacyHeader.includes("Open in Files") && !legacyHeader.includes("Edit main"), legacyHeader);
+  await page.locator("[data-design-edit-main]").click();
+  await expect(frameRow("pricing.html")).toHaveAttribute("aria-selected", "true");
+  const mainMoves = await page.evaluate(() => window.__zerosHarnessComponentMoves);
+  check("Move main to canvas asks the engine once for that component and selects the new main",
+    mainMoves.length === 1 && mainMoves[0].component === "chat-composer" && (await section.getAttribute("data-design-component-options")) === "main",
+    JSON.stringify(mainMoves));
+  await selectInstance();
+  check("the instance then offers Edit main", (await header.innerText()).includes("Edit main"));
 }

@@ -1,8 +1,22 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
+import { build } from "esbuild";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { expandDesignComponents, expandDesignComponentsForRender, expandDesignComponentsHtml } from "../components";
 import { designComponentRenderBytesForTests, forgetDesignComponentRender, resetDesignComponentRendersForTests } from "../component-last-good";
 import { captureDurableDesignDependencies } from "../dependency-read-set";
+import { designDirectoryNameFor } from "../directory-registry";
+import { createDesignFrame, DESIGN_DIRECTORY_NAME, prepareDesignNavigationFrames, prepareRegisteredDesignFrameParts, readDesignFrame,
+  readDesignNavigationSnapshot } from "../document";
+import { readCanvas, writeCanvas } from "../document-storage";
+import { resetDesignIdentityCacheForTests } from "../identity-cache";
+import { designDirectoryEntry } from "../metadata";
+import { configureDesignPreparationWorkersForTests, designPreparationWorkerStatsForTests, stopDesignPreparationWorkers } from "../preparation-pool";
+import { readDesignProtocolResource } from "../protocol-resource";
+import { composeDesignThumbnailBatches } from "../thumbnail-batch";
 
 const doc = (body: string, head = "") => `<!doctype html><html><head>${head}</head><body>${body}</body></html>`;
 const options = (lines: string) => `<template data-zd-options>\n${lines}\n</template>`;
@@ -49,6 +63,27 @@ describe("an instance of a component with options", () => {
     expect(result.html.match(/href="\.\.\/tokens\.css"/g)).toHaveLength(1);
     expect(result.html).toContain('<link rel="stylesheet" href="../chat/chat.css" data-zeros-component="chat-composer">');
     expect(result.html).toContain('url("../assets/bg.png")');
+  });
+
+  it("expands an instance that a template wrapper keeps, in a main frame and in a component", async () => {
+    const card = doc('<article data-zid="card"><h3 data-zid="heading"><slot data-zd-attr="heading"></slot></h3><slot></slot></article>');
+    const frame = doc(
+      '<main data-oid="m"><template data-zd-if="show"><zd-card data-oid="wrapped" heading="Kept">Body</zd-card></template>' +
+        '<template data-zd-for="i in range(2)"><zd-card data-oid="looped" heading="Row">Each</zd-card></template></main>',
+      options('<zd-option name="show" type="boolean" default="true"></zd-option>'),
+    );
+    const result = await expand(frame, { "components/card.html": card }, "home/index.html", {});
+    expect(result.errors).toEqual([]);
+    expect(result.usedComponents).toEqual(["card"]);
+    expect(result.html).toContain('<zd-card data-oid="wrapped" heading="Kept" data-zd-instance="3"><article data-zd-part="card"><h3 data-zd-part="heading">Kept</h3>Body</article></zd-card>');
+    expect(result.html.match(/<article data-zd-part="card"><h3 data-zd-part="heading">Row<\/h3>Each<\/article>/g)).toHaveLength(2);
+
+    const panel = doc('<section data-zid="panel"><template data-zd-if="card"><zd-card data-zid="inner" heading="Nested">In</zd-card></template></section>',
+      options('<zd-option name="card" type="boolean" default="true"></zd-option>'));
+    const nested = await expand(doc('<zd-panel data-oid="p"></zd-panel>'), { "components/card.html": card, "components/panel.html": panel }, "home/index.html", {});
+    expect(nested.errors).toEqual([]);
+    expect(nested.usedComponents).toEqual(["card", "panel"]);
+    expect(nested.html).toContain('<h3 data-zd-part="heading">Nested</h3>In</article></zd-card>');
   });
 
   it("keeps nested instances' values apart, even for options with the same name", async () => {
@@ -199,4 +234,146 @@ describe("the work one frame's options may take", () => {
     // Instances past the budget fall back to their defaults, which also fit no longer, and render empty.
     expect(Buffer.byteLength(result.html)).toBeLessThan(2 * 1024 * 1024);
   });
+});
+
+describe("a frame whose options stop applying, prepared on preparation workers", () => {
+  const MAIN = `<!doctype html><html><head><title>Chip</title>
+<template data-zd-options>
+<zd-option name="label" type="text" default="Send"></zd-option>
+<zd-option name="width" type="number" default="120" unit="px"></zd-option>
+<zd-variant name="wide" width="240"></zd-variant>
+</template>
+<style>.c { width: var(--zd-width); }</style></head>
+<body><div class="c" data-oid="root"><i data-oid="new">added</i><b data-oid="b">{{ label }}</b></div></body></html>`;
+  const BROKEN = MAIN.replace("{{ label }}", "{{ missing }}");
+  const HOST = '<!doctype html><html><head></head><body><main data-oid="m"><zd-chip data-oid="i" label="Go"></zd-chip></main></body></html>';
+  const PLAIN = '<!doctype html><html><head></head><body><p data-oid="p">plain</p></body></html>';
+
+  let bundle: { directory: string; url: URL };
+  let root: string;
+  let folder: string;
+  let main: string;
+  let files: string[];
+  beforeAll(async () => {
+    const cache = path.resolve(__dirname, "../../../../../../node_modules/.cache");
+    await mkdir(cache, { recursive: true });
+    const directory = await mkdtemp(path.join(cache, "zeros-preparation-worker-"));
+    const outfile = path.join(directory, "preparation-worker.mjs");
+    await build({
+      entryPoints: [path.join(__dirname, "../preparation-worker.ts")],
+      bundle: true, platform: "node", format: "esm", target: "node22", outfile, logLevel: "error",
+      external: ["better-sqlite3", "node-pty", "bun:sqlite", "fsevents", "@tailwindcss/oxide", "lightningcss", "*.node"],
+      banner: { js: 'import { createRequire as __workerRequire } from "node:module"; const require = __workerRequire(import.meta.url);' },
+    });
+    bundle = { directory, url: pathToFileURL(outfile) };
+  }, 120_000);
+  afterAll(async () => { await rm(bundle.directory, { recursive: true, force: true }); });
+  beforeEach(async () => {
+    resetDesignComponentRendersForTests();
+    resetDesignIdentityCacheForTests();
+    configureDesignPreparationWorkersForTests(0);
+    root = await mkdtemp(path.join(tmpdir(), "zeros-options-workers-"));
+    process.env.ZEROS_DATA_DIR = path.join(root, "private");
+    folder = path.join(root, DESIGN_DIRECTORY_NAME);
+    const created = [await createDesignFrame(root, { title: "Chip" }), await createDesignFrame(root, { title: "Host" }),
+      await createDesignFrame(root, { title: "Plain" })];
+    files = created.map(({ file }) => file);
+    main = files[0]!;
+    await writeFile(path.join(folder, files[0]!), MAIN);
+    await writeFile(path.join(folder, files[1]!), HOST);
+    await writeFile(path.join(folder, files[2]!), PLAIN);
+    const canvas = await readCanvas(root);
+    canvas.frame_info[main] = { ...canvas.frame_info[main]!, component: "chip" } as never;
+    await writeCanvas(root, canvas);
+  });
+  afterEach(async () => {
+    configureDesignPreparationWorkersForTests(null);
+    await stopDesignPreparationWorkers();
+    delete process.env.ZEROS_DATA_DIR;
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const prepare = async (order = files) => {
+    const prepared = await prepareDesignNavigationFrames(root, (await readDesignNavigationSnapshot(root)).catalogRevision, order);
+    expect(prepared.errors).toEqual([]);
+    return new Map(prepared.frames.map((frame) => [frame.file, frame]));
+  };
+  const served = async (file: string, sourceVersion: string, variant?: string) =>
+    (await readDesignProtocolResource(root, { path: file, sourceVersion, ...(variant ? { variant } : {}) })).status;
+  const onWorkers = () => configureDesignPreparationWorkersForTests(3, { workerUrl: bundle.url });
+  /** Every frame's reported version is the one its document is served at. */
+  const expectServedAsPrepared = async (prepared: Map<string, { sourceVersion?: string }>) => {
+    for (const file of files) expect({ file, status: await served(file, prepared.get(file)!.sourceVersion!) }).toEqual({ file, status: 200 });
+  };
+
+  it("reports the generation the engine serves when the engine holds the last good render", async () => {
+    await readDesignFrame(root, main);
+    await readDesignFrame(root, files[1]!);
+    await writeFile(path.join(folder, main), BROKEN);
+    onWorkers();
+    const before = designPreparationWorkerStatsForTests().frames;
+    const prepared = await prepare();
+    expect(designPreparationWorkerStatsForTests().frames - before).toBeGreaterThan(0);
+    expect(prepared.get(main)!.component?.notApplied).toBe("last-good");
+    expect(prepared.get(files[1]!)!.instances?.notApplied).toBe("last-good");
+    await expectServedAsPrepared(prepared);
+    const parts = await prepareRegisteredDesignFrameParts(root, main, await readCanvas(root));
+    expect(parts.render.sourceVersion).toBe(prepared.get(main)!.sourceVersion);
+  }, 60_000);
+
+  it("keeps the last good render a worker composed, for the engine to show and serve", async () => {
+    onWorkers();
+    const good = await prepare();
+    const input = { workspaceId: "w", directoryId: designDirectoryEntry(root, designDirectoryNameFor(root))!.id, theme: null,
+      colorScheme: "light" as const, maxDimension: 256, frames: files.map((file) => ({ file, sourceVersion: good.get(file)!.sourceVersion! })) };
+    const composed = designPreparationWorkerStatsForTests().composed;
+    expect((await composeDesignThumbnailBatches(root, input as never)).failed).toEqual([]);
+    expect(designPreparationWorkerStatsForTests().composed - composed).toBeGreaterThan(0);
+    await writeFile(path.join(folder, main), BROKEN);
+    resetDesignIdentityCacheForTests();
+    const prepared = await prepare();
+    expect(prepared.get(main)!.component?.notApplied).toBe("last-good");
+    await expectServedAsPrepared(prepared);
+  }, 60_000);
+
+  it("agrees on whichever worker prepares it, and after the workers restart", async () => {
+    await readDesignFrame(root, main);
+    await writeFile(path.join(folder, main), BROKEN);
+    onWorkers();
+    const versions = new Set<string>();
+    // Each worker takes the batch's next frame in turn, so the main lands on each of the three.
+    for (const order of [files, [files[1]!, main, files[2]!], [files[1]!, files[2]!, main]]) {
+      resetDesignIdentityCacheForTests();
+      const prepared = await prepare(order);
+      versions.add(prepared.get(main)!.sourceVersion!);
+      await expectServedAsPrepared(prepared);
+    }
+    await stopDesignPreparationWorkers();
+    resetDesignIdentityCacheForTests();
+    const restarted = await prepare();
+    versions.add(restarted.get(main)!.sourceVersion!);
+    await expectServedAsPrepared(restarted);
+    expect(versions.size).toBe(1);
+  }, 60_000);
+
+  it("serves a variant of a main whose options do not apply under the generation it reports", async () => {
+    await readDesignFrame(root, main);
+    await writeFile(path.join(folder, main), BROKEN);
+    onWorkers();
+    const prepared = await prepare();
+    expect(await served(main, prepared.get(main)!.sourceVersion!, "wide")).toBe(200);
+  }, 60_000);
+
+  it("refuses an old generation of a frame that changed again, and serves the new one it then reports", async () => {
+    await readDesignFrame(root, main);
+    await writeFile(path.join(folder, main), BROKEN);
+    onWorkers();
+    const first = (await prepare()).get(main)!.sourceVersion!;
+    expect(await served(main, first)).toBe(200);
+    await writeFile(path.join(folder, main), BROKEN.replace(">added<", ">added again<"));
+    expect(await served(main, first)).toBe(409);
+    const prepared = await prepare();
+    expect(prepared.get(main)!.sourceVersion).not.toBe(first);
+    await expectServedAsPrepared(prepared);
+  }, 60_000);
 });

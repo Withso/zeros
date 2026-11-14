@@ -25,7 +25,7 @@ import {
   type DesignFrameRuntimeConnection,
 } from "../../platform/bridge/design-frame-runtime";
 import { designProtocolFrameUrl } from "../../platform/bridge/design-protocol-url";
-import { Button } from "../../shared/ui/primitives/button";
+import { DesignFrameLoadError } from "./design-frame-load-error";
 import {
   captureDesignRuntimeScreenshot,
   reconcileDesignRuntimeSnapshot,
@@ -1077,27 +1077,14 @@ function DesignFrameRuntimeSession({
         )
       ) : null}
       {active && failedSourceVersion === frame.sourceVersion ? (
-        <div
-          data-design-frame-load-error=""
-          className="bg-bg1 text-muted-fg absolute inset-0 z-[2] flex flex-col items-center justify-center gap-2 text-xs [transform:scale(var(--design-canvas-inverse-zoom,1))]"
-          onPointerDown={(event) => event.stopPropagation()}
-          onDoubleClick={(event) => event.stopPropagation()}
-        >
-          <span>Couldn’t load this frame.</span>
-          <Button
-            size="sm"
-            variant="secondary"
-            onClick={(event) => {
-              event.stopPropagation();
-              setFailedSourceVersion(null);
-              setReadySourceVersions([]);
-              setRetryAttempt((current) => current + 1);
-              void refreshDesignWorkspaceSnapshot(workspaceId).catch(() => {});
-            }}
-          >
-            Retry frame
-          </Button>
-        </div>
+        <DesignFrameLoadError
+          onRetry={() => {
+            setFailedSourceVersion(null);
+            setReadySourceVersions([]);
+            setRetryAttempt((current) => current + 1);
+            void refreshDesignWorkspaceSnapshot(workspaceId).catch(() => {});
+          }}
+        />
       ) : null}
     </div>
   );

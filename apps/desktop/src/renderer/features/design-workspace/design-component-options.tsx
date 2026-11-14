@@ -4,7 +4,11 @@
 // (personal view state) and a row writes that variant's line, or the default
 // with Default shown; "Save current as variant…" adds one line. On an
 // instance in another frame each row writes the host's attribute, a dot marks
-// a value that differs from what it inherits, and Reset removes them all.
+// a value that differs from what it inherits, and Reset removes them all. A
+// plain component's instance whose default slot holds only text also offers
+// that text, which is the host's own. A slot row says what the slot holds;
+// on an instance that filled it, Reset to default deletes those layers. An
+// instance whose parts carry style overrides offers to reset them.
 // Mounted only for one selected component frame or instance; a folded group
 // mounts no rows. Local only.
 
@@ -39,6 +43,7 @@ import {
   OptionSwitchRow,
   OptionTextRow,
 } from "../../shared/ui/primitives/option-row";
+import { cn } from "../../shared/ui/cn";
 import { pillVariants } from "../../shared/ui/primitives/pill";
 import type { DesignCanvasFrameWire, DesignLintReportWire } from "../../platform/git";
 import { designComponentOptionsBrief, designComponentOptionsFixBrief, type DesignAgentBrief } from "./design-agent-brief";
@@ -49,14 +54,19 @@ import {
   commitDesignComponentOption,
   commitDesignComponentVariant,
   commitDesignInstanceAttributes,
+  commitDesignInstanceSlotReset,
+  commitDesignInstanceText,
   createDesignComponentPreview,
   designComponentAttributeText,
   designComponentPreviewProperties,
+  designComponentRecordProblem,
   designComponentVariantName,
+  designInstanceIgnoredAttributes,
   designInstanceOptionState,
   readDesignFrameComponent,
   sameDesignComponentValue,
 } from "./state/design-component-options";
+import { DESIGN_OPTIONS_NOT_APPLIED_MESSAGES, designComponentSlotLabel, designPartOverrideAttribute } from "./state/design-component-parts";
 import { showDesignComponentVariant, useDesignShownComponentVariant } from "./state/design-component-variants";
 
 const EASINGS = [
@@ -70,6 +80,7 @@ const EASINGS = [
 const SEGMENTED_CHOICES = 3;
 const MAX_DURATION_MS = 1_000;
 
+const NO_VALUES: ReadonlyMap<string, ComponentOptionValue> = new Map();
 const errorMessage = (error: unknown) => (error instanceof Error ? error.message : String(error));
 /** A variant's name as a person reads it: "wide-plan" is Wide plan. */
 const variantLabel = (name: string) => {
@@ -90,7 +101,7 @@ export type DesignComponentOptionsTarget =
       host: DesignFrameInstances["hosts"][string];
       component: DesignFrameInstances["components"][string];
       /** What the frame shows when this instance's values did not apply. */
-      notApplied?: "last-good" | "defaults";
+      notApplied?: "last-good" | "defaults" | "nothing";
     };
 
 export function DesignComponentOptions({
@@ -129,10 +140,19 @@ export function DesignComponentOptions({
     [declaration, instanceState, shownVariant],
   );
   // A value written and not yet in a new generation: the row keeps showing it.
-  const [pending, setPending] = useState<ReadonlyMap<string, ComponentOptionValue>>(() => new Map());
+  // It belongs to the generation and variant it was written against, so a new
+  // one shows its own values without another render to clear it.
+  const generation = `${frame.sourceVersion}\0${shownVariant ?? ""}`;
+  const [unconfirmed, setUnconfirmed] = useState<{ generation: string; values: ReadonlyMap<string, ComponentOptionValue> }>(() => ({ generation, values: NO_VALUES }));
+  const pending = unconfirmed.generation === generation ? unconfirmed.values : NO_VALUES;
+  // A later generation retires such values for good: an undo restores the
+  // bytes, and with them the content hash, of the generation they were
+  // written against.
+  useEffect(() => {
+    setUnconfirmed((previous) => (previous.generation === generation || previous.values === NO_VALUES ? previous : { generation, values: NO_VALUES }));
+  }, [generation]);
   const [folded, setFolded] = useState<ReadonlySet<string>>(() => new Set());
   const [naming, setNaming] = useState(false);
-  useEffect(() => setPending(new Map()), [frame.sourceVersion, shownVariant]);
   const preview = useMemo(
     () => createDesignComponentPreview(workspaceId, frame.file, frame.sourceVersion, instance?.nodeId),
     [workspaceId, frame.file, frame.sourceVersion, instance?.nodeId],
@@ -154,11 +174,13 @@ export function DesignComponentOptions({
       preview.clear();
       return;
     }
-    setPending((previous) => new Map(previous).set(option.name, value));
-    const forget = () => setPending((previous) => {
-      const next = new Map(previous);
-      next.delete(option.name);
-      return next;
+    setUnconfirmed((previous) => ({ generation, values: new Map(previous.generation === generation ? previous.values : NO_VALUES).set(option.name, value) }));
+    // A failure after a newer generation arrived has nothing left to undo.
+    const forget = () => setUnconfirmed((previous) => {
+      if (previous.generation !== generation) return previous;
+      const values = new Map(previous.values);
+      values.delete(option.name);
+      return { generation, values };
     });
     // An instance's value that lands on what it inherits needs no attribute.
     const written = instance && instanceState
@@ -186,6 +208,18 @@ export function DesignComponentOptions({
         void commitDesignInstanceAttributes(workspaceId, frame, instance.nodeId, removed, `Reset ${instance.title}`).catch(failed("the options"));
       }
     : undefined;
+  const overridden = instance ? Object.keys(instance.host.overrides ?? {}) : [];
+  const resetOverrides = instance && overridden.length
+    ? () => {
+        const removed: Record<string, null> = Object.fromEntries(overridden.map((part) => [designPartOverrideAttribute(part), null]));
+        void commitDesignInstanceAttributes(workspaceId, frame, instance.nodeId, removed, "Reset overrides").catch(failed("the overrides"));
+      }
+    : undefined;
+  const resetSlot = (label: string, layers: readonly string[]) => {
+    void commitDesignInstanceSlotReset(workspaceId, frame, layers, label).catch(failed(label));
+  };
+  // The default slot is no declared option; it has a row once it holds layers.
+  const defaultSlotted = instance?.host.slotted?.[""];
   const saveVariant = (typed: string) => {
     const named = designComponentVariantName(declaration, typed);
     if ("error" in named) return named.error;
@@ -235,6 +269,11 @@ export function DesignComponentOptions({
       }
     }
     if (option.group && folded.has(option.group)) continue;
+    if (option.kind === "slot") {
+      rows.push(<OptionSlotRow key={option.name} label={option.label} layers={instance ? instance.host.slotted?.[option.name] ?? [] : null}
+        disabled={disabled} onReset={(layers) => resetSlot(option.label, layers)} />);
+      continue;
+    }
     const value = current(option);
     rows.push(
       <DesignComponentOptionRow
@@ -250,6 +289,8 @@ export function DesignComponentOptions({
     );
   }
   const variants = declaration.variants.map((entry) => entry.name);
+  const ignored = useMemo(() => (host ? designInstanceIgnoredAttributes(host) : []), [host]);
+  const tooLarge = designComponentRecordProblem(target.component, title);
 
   return (
     <InspectorSection
@@ -263,19 +304,26 @@ export function DesignComponentOptions({
       ) : undefined}
     >
       {notApplied ? (
-        <div role="alert" data-design-options-not-applied={notApplied} className="bg-red-bg text-red-fg flex flex-col items-start gap-2 rounded-md p-2.5 text-3xxs leading-4.5">
-          <p>
-            {notApplied === "last-good"
-              ? "These options could not be applied. The frame shows its last good render."
-              : "These options could not be applied. The frame shows the component's defaults."}
-          </p>
+        <OptionsNotice tone="error" role="alert" data-design-options-not-applied={notApplied}>
+          <p>These options could not be applied. {DESIGN_OPTIONS_NOT_APPLIED_MESSAGES[notApplied]}</p>
           <Button type="button" variant="secondary" size="compact" disabled={!askToFix} onClick={askToFix}>
             <Sparkles aria-hidden="true" />
             Ask agent to fix
           </Button>
-        </div>
+        </OptionsNotice>
       ) : null}
-      {!instance || variants.length ? (
+      {tooLarge ? (
+        <OptionsNotice tone="error" data-design-options-too-large={target.component.exceeds}>
+          <p>{tooLarge}</p>
+        </OptionsNotice>
+      ) : null}
+      {ignored.map((message) => (
+        <OptionsNotice key={message} tone="warning" data-design-options-ignored="">
+          <p>{message}</p>
+        </OptionsNotice>
+      ))}
+      {/* Without its declaration the section cannot list the variants the file declares. */}
+      {!tooLarge && (!instance || variants.length) ? (
         <OptionVariantRow
           variant={variant}
           variants={variants}
@@ -284,8 +332,28 @@ export function DesignComponentOptions({
           onSave={instance ? undefined : () => setNaming(true)}
         />
       ) : null}
-      {naming ? <OptionEntryRow label="Name" inputLabel="Variant name" placeholder="Compact" onSubmit={saveVariant} onCancel={() => setNaming(false)} /> : null}
+      {naming && !tooLarge ? <OptionEntryRow label="Name" inputLabel="Variant name" placeholder="Compact" onSubmit={saveVariant} onCancel={() => setNaming(false)} /> : null}
       {rows}
+      {defaultSlotted ? (
+        <OptionSlotRow label={designComponentSlotLabel("")} layers={defaultSlotted} disabled={disabled}
+          onReset={(layers) => resetSlot(designComponentSlotLabel(""), layers)} />
+      ) : null}
+      {instance && instance.host.text !== undefined ? (
+        <OptionTextRow
+          label="Text"
+          value={instance.host.text}
+          disabled={disabled}
+          onCommit={(next) => {
+            if (next !== instance.host.text) void commitDesignInstanceText(workspaceId, frame, instance.nodeId, next).catch(failed("the text"));
+          }}
+        />
+      ) : null}
+      {resetOverrides ? (
+        <OptionActionRow disabled={disabled} onClick={resetOverrides} data-design-overrides-reset={overridden.length}>
+          <RotateCcw aria-hidden="true" />
+          {overridden.length === 1 ? "Reset 1 part override" : `Reset ${overridden.length} part overrides`}
+        </OptionActionRow>
+      ) : null}
       {/* Options are the main's to change, so an instance does not offer it. */}
       {instance ? null : (
         <OptionActionRow disabled={!askToChange} onClick={askToChange} data-design-options-ask="">
@@ -294,6 +362,19 @@ export function DesignComponentOptions({
         </OptionActionRow>
       )}
     </InspectorSection>
+  );
+}
+
+/** A message in this section, shown whole: what it says is the reason. */
+function OptionsNotice({ tone, className, children, ...props }: React.HTMLAttributes<HTMLDivElement> & { tone: "error" | "warning" }) {
+  return (
+    <div
+      {...props}
+      className={cn("flex flex-col items-start gap-2 rounded-md p-2.5 text-3xxs leading-4.5",
+        tone === "error" ? "bg-red-bg text-red-fg" : "bg-yellow-bg text-yellow-fg", className)}
+    >
+      {children}
+    </div>
   );
 }
 
@@ -390,7 +471,29 @@ function DesignComponentOptionRow({ option, value, inherited, disabled, onPrevie
     case "easing":
       return <OptionEasingRows label={option.label} value={value as ComponentEasing} inherited={inherited as ComponentEasing | undefined} disabled={disabled}
         onPreview={onPreview} onCancel={onCancel} onCommit={onCommit} />;
+    case "slot":
+      return null;
   }
+}
+
+/** A slot: on the main, that it is one; on an instance, the layers it put
+ * there (or that it shows the main's), with Reset to default. */
+function OptionSlotRow({ label, layers, disabled, onReset }: {
+  label: string; layers: readonly string[] | null; disabled: boolean; onReset: (layers: readonly string[]) => void;
+}) {
+  const filled = !!layers?.length;
+  return (
+    <OptionRow label={label} changed={filled} data-design-option-slot={layers === null ? "main" : layers.length}>
+      <span className="text-fg2">
+        {layers === null ? "Slot" : filled ? (layers.length === 1 ? "1 layer" : `${layers.length} layers`) : "Default"}
+      </span>
+      {filled ? (
+        <InspectorIconButton label={`Reset ${label} to default`} data-design-slot-reset="" disabled={disabled} onClick={() => onReset(layers!)}>
+          <RotateCcw />
+        </InspectorIconButton>
+      ) : null}
+    </OptionRow>
+  );
 }
 
 function OptionMenuRow({ label, value, choices, disabled, changed, onCommit }: {

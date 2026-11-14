@@ -37,7 +37,7 @@ describe("Design agent briefs", () => {
     expect(empty.text).toContain("declares no style sources yet");
     const existing = designSyncBrief("Shop - Design", [source]);
     expect(existing.label).toBe("Update style syncing");
-    expect(existing.text).toContain("- app (tailwind, src/index.css): error — src/index.css does not exist.");
+    expect(existing.text).toContain('- "app" ("tailwind", "src/index.css"): error — "src/index.css does not exist."');
     expect(existing.text).not.toContain("Compiled with Tailwind");
   });
 
@@ -69,14 +69,14 @@ describe("Design agent briefs", () => {
     expect(brief.label).toBe("Change Corner radius on Card");
     expect(brief.text).toContain('"home.html" in the Design directory "Shop - Design"');
     expect(brief.text).toContain('layer "Card" (data-oid "home-card")');
-    expect(brief.text).toContain("border-radius: 4px");
-    expect(brief.text).toContain("`.legacy-card` in App styles");
+    expect(brief.text).toContain('"border-radius": "4px"');
+    expect(brief.text).toContain('".legacy-card" in "App styles"');
     expect(brief.text).toContain("!important");
     expect(brief.text).toContain("Remove the !important, or move the value");
     expect(brief.text).toContain("Ask before changing application code.");
     // Without a named source the rule stands alone.
     expect(designForcedValueBrief({ directory: "D", frame: "f.html", layer: "L", nodeId: "n", property: "color", label: "Text color", value: "red", rule: ".x" }).text)
-      .toContain("forced by `.x` with !important");
+      .toContain('forced by ".x" with !important');
   });
 
   it("asks to tidy a frame's changes made by hand through the skill, listing each one", () => {
@@ -93,8 +93,8 @@ describe("Design agent briefs", () => {
     expect(brief.label).toBe("Tidy 2 changes in sign-in.html");
     expect(brief.text).toContain('"sign-in.html" in the Design directory "Shop - Design"');
     expect(brief.text).toContain('Follow "Tidy changes made by hand" in the Zeros Design skill');
-    expect(brief.text).toContain('- Send (data-oid "send"): border-radius: 8px over var(--radius-md) from .btn');
-    expect(brief.text).toContain('- Card (data-oid "card"): gap: 12px over 8px from the component card');
+    expect(brief.text).toContain('- "Send" (data-oid "send"): "border-radius": "8px" over "var(--radius-md)" from ".btn"');
+    expect(brief.text).toContain('- "Card" (data-oid "card"): "gap": "12px" over "8px" from the component "card"');
     expect(brief.text).toContain("The frame must look the same. Do not stage or commit.");
     expect(brief.text).toContain("Ask before changing application code.");
     expect(designTidyBrief({ directory: "D", frame: "a.html", changes: [{ oid: "x", layer: "X", property: "gap", value: "1px", replaced: { value: "2px" } }] }).label)
@@ -104,7 +104,7 @@ describe("Design agent briefs", () => {
   it("asks to change a component's options through the skill, naming the frame", () => {
     const brief = designComponentOptionsBrief({ directory: "Shop - Design", frame: "chat/composer.html", title: "Chat composer" });
     expect(brief.label).toBe("Change the options of Chat composer");
-    expect(brief.text).toContain('the component "Chat composer" (chat/composer.html) in the Design directory "Shop - Design"');
+    expect(brief.text).toContain('the component "Chat composer" ("chat/composer.html") in the Design directory "Shop - Design"');
     expect(brief.text).toContain('Follow "Change a component\'s options" in the Zeros Design skill');
     expect(brief.text).toContain("Ask me what to change first.");
   });
@@ -117,8 +117,10 @@ describe("Design agent briefs", () => {
     expect(brief.label).toBe("Fix the options of Chat composer");
     expect(brief.text).toContain("could not be applied; the frame shows the component's defaults.");
     expect(brief.text).toContain('Follow "Fix a component\'s options" in the Zeros Design skill');
-    expect(brief.text).toContain("- line 4: Unknown name widht.");
+    expect(brief.text).toContain('- line 4: "Unknown name widht."');
     expect(designComponentOptionsFixBrief({ directory: "D", frame: "a.html", title: "A", shows: "last-good", problems: [] }).text)
       .toContain("the frame shows its last good render. Run design validate to see why.");
+    expect(designComponentOptionsFixBrief({ directory: "D", frame: "a.html", title: "A", shows: "nothing", problems: [] }).text)
+      .toContain("could not be applied; the frame shows nothing in its place. Run design validate to see why.");
   });
 });

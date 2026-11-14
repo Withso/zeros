@@ -12,7 +12,7 @@ A state is an attribute or a state class on the same markup, never a second vers
 
 ## One frame with a row per state
 
-- Define the part once as `components/<name>.html` and place one `<zd-<name>>` instance per state, each under a short label. Instance children fill `<slot>`, and `<slot data-zd-attr="label">` receives an attribute value, so each instance carries its own text and state attributes (`reference/format.md`, Components). A change to the definition updates every state at once.
+- Make the part a main frame once and place one `<zd-<name>>` instance per state, each under a short label. Each instance carries its own option values and fills its slots, so it holds its own text and state (`reference/format.md`, Components). A change to the main updates every state at once.
 - Markup drawn three or more times is a component; `design validate` warns with `repeated-markup` otherwise. For one or two states, the same markup with its state attribute is enough.
 - A grid or a column with `gap` keeps the rows aligned, and a person can reorder or duplicate rows on the canvas.
 - Best for small parts such as buttons, rows, chips and menu items.

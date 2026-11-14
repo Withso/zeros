@@ -1831,6 +1831,29 @@
 )) > * {
   visibility: hidden;
 }
+/* A frame that could not be shown. Its problem surface is sized in screen
+   pixels, so the message and Retry appear only where they fit on screen and
+   never spill over neighbouring frames; smaller frames keep the mark. */
+.zd-design-frame-problem-screen {
+  container-type: size;
+}
+.zd-design-frame-problem-screen > [data-design-frame-problem-message] {
+  display: none;
+}
+@container (min-width: 160px) and (min-height: 76px) {
+  .zd-design-frame-problem-screen > [data-design-frame-problem-message] {
+    display: flex;
+  }
+  .zd-design-frame-problem-screen > [data-design-frame-problem] {
+    display: none;
+  }
+}
+@container (max-width: 15.98px), (max-height: 15.98px) {
+  .zd-design-frame-problem-screen > [data-design-frame-problem] {
+    display: none;
+  }
+}
+
 /* Retained HTML and pictures cover editor startup. Painting them beneath a ready editor
    would composite authored alpha twice, but a just-revealed native document can
    composite nothing for a frame: keep them until it reports a produced frame. */

@@ -429,7 +429,7 @@ function repeatedMarkup(
   }
   reported.sort((left, right) =>
     (left[0]!.sourceCodeLocation?.startOffset ?? 0) - (right[0]!.sourceCodeLocation?.startOffset ?? 0));
-  const fix = "Define it once as components/<name>.html with <slot> for its content and data-zd-attr for attribute values, then place one <zd-name> per use.";
+  const fix = 'Make one copy a main frame ("component": "<name>" on its meta/canvas.json record, with options for the values that change), then place one <zd-name> per use.';
   const describe = (element: Element) => {
     const classes = (attribute(element, "class") ?? "").split(/[\t\n\f\r ]+/).filter(Boolean).slice(0, 2).join(" ");
     return classes ? `<${element.tagName}> markup with class "${classes}",` : `<${element.tagName}> markup`;

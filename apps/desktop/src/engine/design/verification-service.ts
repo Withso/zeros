@@ -239,7 +239,7 @@ async function startVerificationServer(options: DesignVerificationOptions) {
         assertOwner(); send(JSON.stringify(state), "application/json"); return;
       }
       if (action === "validate") {
-        const { workspacePath: _root, ...report } = await lintDesignDocument(lease.workspacePath, file, { healOids: false, includeRuntimeAudits: false });
+        const { workspacePath: _root, ...report } = await lintDesignDocument(lease.workspacePath, file, { healOids: false });
         await assertRevision(); send(JSON.stringify({ ...state, report }), "application/json"); return;
       }
       const composed = await prepareFrameRenderSource(lease.workspacePath, inspection.source, state, undefined, undefined, file);

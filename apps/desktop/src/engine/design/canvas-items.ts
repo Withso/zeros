@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
-import { lstat, stat } from "node:fs/promises";
+import { constants } from "node:fs";
+import { open, realpath } from "node:fs/promises";
 import path from "node:path";
 import {
   DESIGN_CANVAS_ITEM_LIMITS,
@@ -38,8 +39,11 @@ export function withDesignCanvasItems(canvas: CanvasDocument, pages: DesignPageS
   if (!(canvas.pages ?? []).some((page) => page.items !== undefined)) return pages;
   const items = readDesignCanvasItems(canvas);
   return pages.map((page) => {
-    const drawn = items.get(page.id)?.items;
-    return drawn?.length ? { ...page, items: drawn } : page;
+    const read = items.get(page.id);
+    const drawn = read?.items;
+    const notShown = read?.issues.find(issue => issue.kind === "limit")?.count ?? 0;
+    if (!drawn?.length && !notShown) return page;
+    return { ...page, ...(drawn?.length ? { items: drawn } : {}), ...(notShown ? { itemsNotShown: notShown } : {}) };
   });
 }
 
@@ -52,14 +56,30 @@ const MAX_LINK_CHECKS = 512;
 export async function markMissingDesignCanvasLinks(workspacePath: string, pages: DesignPageSummary[]): Promise<DesignPageSummary[]> {
   if (!pages.some((page) => page.items?.some((item) => item.kind === "link"))) return pages;
   const present = new Map<string, Promise<boolean>>();
+  const root = await realpath(workspacePath).catch(() => null);
   const check = (target: string): Promise<boolean> => {
     let known = present.get(target);
     if (known) return known;
     if (present.size >= MAX_LINK_CHECKS) return Promise.resolve(true);
+    if (!root) return Promise.resolve(false);
     // The target is validated workspace-relative: no absolute, `.` or `..`.
     const file = path.join(workspacePath, ...target.split("/"));
-    known = lstat(file).then(async (info) => info.isFile() || (info.isSymbolicLink() && (await stat(file)).isFile()))
-      .catch(() => false);
+    known = (async () => {
+      let handle;
+      try {
+        const resolved = await realpath(file);
+        const relative = path.relative(root, resolved);
+        if (!relative || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) return false;
+        // The final component may have been replaced after realpath. Internal
+        // symlinks are already resolved; do not follow a replacement here.
+        handle = await open(resolved, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+        return (await handle.stat()).isFile();
+      } catch {
+        return false;
+      } finally {
+        await handle?.close().catch(() => undefined);
+      }
+    })();
     present.set(target, known);
     return known;
   };
@@ -140,6 +160,15 @@ function pageItemsForWrite(page: CanvasPage): unknown[] {
   return page.items;
 }
 
+/** The stored position of the entry the reader draws for `id`, or -1. Entries
+ * the reader skipped keep their id without taking it, so an earlier malformed
+ * entry or a later duplicate with the same id is never the drawn one. */
+function drawnItemIndex(stored: readonly unknown[], issues: readonly DesignCanvasItemIssue[], id: string): number {
+  const skipped = new Set(issues.filter((issue) => issue.kind !== "limit").map((issue) => issue.index));
+  return stored.findIndex((entry, position) => !skipped.has(position) &&
+    !!entry && typeof entry === "object" && (entry as { id?: unknown }).id === id);
+}
+
 /** Create or replace one item on a page in one catalog write and one history
  * step. Fields of the stored entry that are not the item's own are kept. */
 export async function putDesignCanvasItem(
@@ -158,8 +187,8 @@ export async function putDesignCanvasItem(
     const page = designPageForWrite(canvas, pageId);
     const stored = pageItemsForWrite(page);
     const id = requested.id === undefined ? newItemId(canvas) : requested.id as string;
-    const index = stored.findIndex((entry) => !!entry && typeof entry === "object" && (entry as { id?: unknown }).id === id);
     const drawn = readDesignCanvasItems(canvas).get(page.id)!;
+    const index = requested.id === undefined ? -1 : drawnItemIndex(stored, drawn.issues, id);
     if (requested.id !== undefined) {
       const current = drawn.items.find((item) => item.id === id);
       if (index < 0 || !current)
@@ -203,10 +232,10 @@ export async function deleteDesignCanvasItem(
     const before = capture ? captureDesignCatalogPoint(workspace, canvas) : undefined;
     const page = designPageForWrite(canvas, pageId);
     const stored = pageItemsForWrite(page);
-    if (!readDesignCanvasItems(canvas).get(page.id)!.items.some((item) => item.id === itemId))
+    const drawn = readDesignCanvasItems(canvas).get(page.id)!;
+    if (!drawn.items.some((item) => item.id === itemId))
       throw new DesignCanvasItemError("That item is not on this page any more. Refresh before deleting it.");
-    // The drawn entry is the first with its id; a later duplicate is kept as written.
-    const index = stored.findIndex((entry) => !!entry && typeof entry === "object" && (entry as { id?: unknown }).id === itemId);
+    const index = drawnItemIndex(stored, drawn.issues, itemId);
     const next = stored.filter((_, position) => position !== index);
     if (next.length) page.items = next;
     else delete page.items;

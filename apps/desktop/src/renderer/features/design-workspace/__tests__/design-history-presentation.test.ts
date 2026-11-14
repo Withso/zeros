@@ -1,16 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({ geometry: vi.fn(), history: vi.fn(), create: vi.fn(), transaction: vi.fn(), runtime: vi.fn(),
-  createPage: vi.fn(), renamePage: vi.fn(), deletePage: vi.fn(), theme: vi.fn() }));
+  createPage: vi.fn(), renamePage: vi.fn(), deletePage: vi.fn(), theme: vi.fn(), deleteItem: vi.fn() }));
 vi.mock("../../../platform/git", async original => ({
   ...(await original<typeof import("../../../platform/git")>()),
   designUpdateCanvas: mocks.geometry, designHistory: mocks.history, designCreateFrame: mocks.create,
-  designApplyTransaction: mocks.transaction,
+  designDeleteCanvasItem: mocks.deleteItem, designApplyTransaction: mocks.transaction,
   designCreatePage: mocks.createPage, designRenamePage: mocks.renamePage, designDeletePage: mocks.deletePage,
   designUpdateTheme: mocks.theme,
 }));
 vi.mock("../../../platform/bridge/active-bridge", () => ({ getActiveBridge: () => null, onActiveBridgeConnected: () => () => {} }));
 vi.mock("../../../platform/bridge/design-frame-runtime", () => ({ designFrameRuntime: mocks.runtime }));
-import { applyDesignHistoryCached, applyDesignTransactionCached, createDesignFrameAndRefresh, designWorkspaceSnapshotCache,
+import { applyDesignHistoryCached, applyDesignTransactionCached, createDesignFrameAndRefresh, deleteDesignCanvasItemCached, designWorkspaceSnapshotCache,
   observeDesignDirectory, resetDesignWorkspaceCacheForTests, updateDesignFrameGeometryCached } from "../state/design-workspace-cache";
 import { createDesignPageCached, renameDesignPageCached, deleteDesignPageCached, updateDesignThemeCached } from "../state/design-workspace-cache";
 import { designHistoryTransientStatsForTests } from "../state/design-workspace-cache";
@@ -18,6 +18,7 @@ import { designHistoryPresentation, designHistorySelection, presentDesignHistory
 import { designWorkspaceView, resetDesignWorkspaceUiForTests, useDesignWorkspaceUiStore } from "../state/design-workspace-ui";
 import type { DesignWorkspaceSnapshotWire } from "../../../platform/git";
 import { resetDesignRuntimeStoreForTests, useDesignRuntimeStore } from "../state/design-runtime-store";
+import { designCanvasItemsPageId } from "../state/design-canvas-items";
 
 const snapshot = (x: number): DesignWorkspaceSnapshotWire => ({ directoryId: "design-a", protocolCapability: "c".repeat(64),
   frames: [{ file: "a.html", title: "A", x, y: 20, width: 100, height: 80, z: 0, sourceVersion: "1".repeat(24), nodeCount: 0, modifiedAt: 1 }],
@@ -56,6 +57,13 @@ describe("history presentation stays separate from authority", () => {
     if (change === "page") useDesignWorkspaceUiStore.getState().setActivePage("personal", "another", "design-a");
     else useDesignWorkspaceUiStore.getState().setSelection("personal", "a.html", "child");
     expect(designHistorySelection("personal")).toBeNull();
+  });
+
+  it("follows a predicted page only for item history, keeping other item writes on the confirmed page", () => {
+    presentDesignHistory("personal", {}, { selection: { pageId: "second", frame: null, frameSelected: false } });
+    expect(designCanvasItemsPageId("main", designHistorySelection("personal"))).toBe("main");
+    presentDesignHistory("personal", {}, { selection: { pageId: "second", frame: null, frameSelected: false, itemId: null } });
+    expect(designCanvasItemsPageId("main", designHistorySelection("personal"))).toBe("second");
   });
 
   it("reveals the page and frame of a structural inverse before authority, with no UI-store writes", async () => {
@@ -172,6 +180,36 @@ describe("history presentation stays separate from authority", () => {
     expect(designHistoryPresentation("personal")?.catalog?.deref()?.frames.map(f => f.file)).toEqual(["a.html"]);
     expect(designWorkspaceSnapshotCache.peekSnapshot("personal").data?.frames).toHaveLength(2);
     held.done(); await undo; expect(designHistoryPresentation("personal")).toBeNull();
+  });
+
+  it("previews the affected item and its absence across undo and redo without changing authority", async () => {
+    const note = { id: "note_1", kind: "note" as const, x: 20, y: 30, width: 200, height: 100, text: "Restore me" };
+    const main = { id: "main", title: "Design", folder: "", frameFiles: ["a.html"], frameIds: ["a"] };
+    const second = { id: "second", title: "Second", folder: "second", frameFiles: [], frameIds: [], items: [note] };
+    const before = { ...snapshot(10), pages: [main, second] };
+    const after = { ...before, pages: [main, { ...second, items: [] }] };
+    designWorkspaceSnapshotCache.setData("personal", before); observeDesignDirectory("personal", before);
+    useDesignWorkspaceUiStore.getState().setActivePage("personal", "main", "design-a");
+    mocks.deleteItem.mockResolvedValue({ deleted: { id: note.id }, snapshot: after });
+    await deleteDesignCanvasItemCached("personal", "second", note.id);
+    const confirmedAfter = designWorkspaceSnapshotCache.peekSnapshot("personal").data;
+
+    const undoHeld = hold({ result: null, historyPageId: "second", historyItemId: note.id, historySelection: null, snapshot: before });
+    mocks.history.mockReturnValueOnce(undoHeld.promise);
+    const undo = applyDesignHistoryCached("personal", "a.html", "undo"); pending.push(undo);
+    expect(designHistorySelection("personal")).toMatchObject({ activePageId: "second", selectedItemId: note.id, selectedFrame: null });
+    expect(designWorkspaceSnapshotCache.peekSnapshot("personal").data).toBe(confirmedAfter);
+    expect(useDesignWorkspaceUiStore.getState().byWorkspace.personal?.activePageId).toBe("main");
+    undoHeld.done(); await undo;
+    const confirmedBefore = designWorkspaceSnapshotCache.peekSnapshot("personal").data;
+
+    const redoHeld = hold({ result: null, historyPageId: "second", historyItemId: null, historySelection: null, snapshot: after });
+    mocks.history.mockReturnValueOnce(redoHeld.promise);
+    const redo = applyDesignHistoryCached("personal", "a.html", "redo"); pending.push(redo);
+    expect(designHistorySelection("personal")).toMatchObject({ activePageId: "second", selectedItemId: null, selectedFrame: null });
+    expect(designWorkspaceSnapshotCache.peekSnapshot("personal").data).toBe(confirmedBefore);
+    expect(useDesignWorkspaceUiStore.getState().byWorkspace.personal?.activePageId).toBe("main");
+    redoHeld.done(); await redo;
   });
 
   it("clears a rejected geometry prediction and cannot expose it to a replacement owner", async () => {

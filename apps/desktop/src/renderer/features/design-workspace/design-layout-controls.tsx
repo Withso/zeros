@@ -23,7 +23,6 @@ import type {
 
 import { cn } from "../../shared/ui/cn";
 import {
-  Button,
   Tooltip,
   DropdownMenu,
   DropdownMenuTrigger,
@@ -33,11 +32,13 @@ import {
   DropdownMenuSeparator,
 } from "../../shared/ui/primitives";
 import {
+  InspectorCheckboxRow,
   InspectorIconButton,
   InspectorSection,
   InspectorSelect,
 } from "./design-inspector-kit";
 import {
+  designLayoutAbsolutePosition,
   designLayoutConstraint,
   designLayoutFieldValue,
   designLayoutPlacedByParent,
@@ -174,8 +175,9 @@ function PinnedEdges({
 }
 
 /** Position: where the selected layer sits and what it keeps when its parent
- * resizes. Every action acts on the selected layers themselves; a layer its
- * parent's auto layout places offers Place freely instead of pins. */
+ * resizes. Every action acts on the selected layers themselves; a layer of an
+ * auto layout parent offers Absolute position, and its X and Y lock while
+ * auto layout places it. */
 export function DesignPositionSection({
   details,
   renderField,
@@ -195,6 +197,7 @@ export function DesignPositionSection({
   const selection = layoutParents?.length ? layoutParents : [details];
   const placed = !frameSelected && selection.some(designLayoutPlacedByParent);
   const free = !frameSelected && !placed && selection.every((node) => node.layout?.parentId);
+  const absolute = frameSelected ? null : designLayoutAbsolutePosition(selection);
   const field = (label: string, property: string, extra: DesignLayoutFieldOptions = {}) =>
     renderField(label, property, designLayoutFieldValue(details, property), {
       whole: true,
@@ -225,10 +228,22 @@ export function DesignPositionSection({
         ) : null
       }
     >
-      {placed ? (
-        <p className="zd-section-note" data-design-position-placed="">
-          Placed by its parent’s auto layout.
-        </p>
+      {absolute ? (
+        <div
+          data-design-position-absolute={absolute}
+          {...(absolute === "off" ? { "data-design-position-placed": "" } : {})}
+        >
+          <InspectorCheckboxRow
+            label="Absolute position"
+            checked={absolute === "on"}
+            mixed={absolute === "mixed"}
+            disabled={disabled}
+            title={absolute === "on"
+              ? "Placed freely. Untick to let the parent's auto layout place it."
+              : "Placed by its parent's auto layout. Tick to place it freely."}
+            onChange={() => onAction({ type: absolute === "on" ? "join-auto-layout" : "place-freely" })}
+          />
+        </div>
       ) : null}
       {free ? (
         <div
@@ -267,8 +282,8 @@ export function DesignPositionSection({
         data-design-layout-geometry=""
         className="grid grid-cols-2 gap-2"
       >
-        {field("X", "left")}
-        {field("Y", "top")}
+        {field("X", "left", placed ? { disabled: true } : {})}
+        {field("Y", "top", placed ? { disabled: true } : {})}
         {field("Rotation", "rotate")}
         <div
           className="zd-segmented grid-cols-3"
@@ -290,18 +305,6 @@ export function DesignPositionSection({
           ))}
         </div>
       </div>
-      {placed ? (
-        <Button
-          type="button"
-          variant="secondary"
-          size="compact"
-          className="self-start"
-          disabled={disabled}
-          onClick={() => onAction({ type: "place-freely" })}
-        >
-          Place freely
-        </Button>
-      ) : null}
       {free ? (
         <div
           data-design-layout-constraints=""

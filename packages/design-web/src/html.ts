@@ -12,6 +12,8 @@ import {
   designNodeIdSchema,
 } from "@zeros/design-core";
 import { designDocumentBody, withExplicitDesignBody } from "./document-body";
+import { designPartOfNodeId } from "./component-overrides";
+import { designSlotOfNodeId, designSlottedFragment } from "./component-slots";
 
 import { normalizeDesignCssProperty, validateDesignCssValue } from "./css";
 import { designSrcsetReferences, isContainedDesignReference } from "./references";
@@ -162,23 +164,68 @@ function oid(element: Element): string | null {
   return value?.trim() || null;
 }
 
-/** Exact-source identity shared with the desktop preview. Explicit IDs remain
- * authoritative, so existing documents keep their persisted identities. */
-export function nativeDesignIdentityBase(tag: string, offset: number, source: string): string {
-  const digest = sha256(new TextEncoder().encode(`${tag}:${offset}:${source.slice(offset, offset + 80)}`));
-  return `o-${Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join("").slice(0, 9)}`;
+/** A derived identity, shared by the engine and the canvas, names an element
+ * by its tag and element-sibling index at every level from the document root,
+ * plus its own attributes and direct text. Writing one layer's id, or changing
+ * one layer's text or attributes, changes no other layer's derived id, so such
+ * an edit persists only that layer's id. Adding, moving or removing elements
+ * shifts places, so those edits also persist the ids of the layers they shift
+ * (healDesignHtmlIdentitiesForEdit). A layer that shifts
+ * gets a new id rather than the one its neighbour had, so a held selection is
+ * dropped, not moved to another layer. Explicit IDs remain authoritative. */
+export function nativeDesignIdentities(document: Document): (element: Element) => string {
+  const places = new Map<Element, { parent: Element | null; step: string }>();
+  const pending: Array<{ node: Document | DocumentFragment | Element; parent: Element | null; prefix: string }> = [
+    { node: document, parent: null, prefix: "" },
+  ];
+  while (pending.length) {
+    const { node, parent, prefix } = pending.pop()!;
+    let index = 0;
+    for (const child of node.childNodes) {
+      if (!("tagName" in child)) continue;
+      places.set(child, { parent, step: `${prefix}/${child.tagName}:${index++}` });
+      pending.push({ node: child, parent: child, prefix: "" });
+      if (child.tagName === "template" && "content" in child)
+        pending.push({ node: (child as DefaultTreeAdapterTypes.Template).content, parent: child, prefix: "#content" });
+    }
+  }
+  const encoder = new TextEncoder();
+  const ids = new Map<Element, string>();
+  // Hashing waits until an element needs a derived id; most already carry one.
+  return (element) => {
+    const known = ids.get(element);
+    if (known) return known;
+    const steps: string[] = [];
+    for (let place = places.get(element); place; place = place.parent ? places.get(place.parent) : undefined)
+      steps.push(place.step);
+    const attributes = element.attrs
+      .filter((attribute) => attribute.name !== "data-oid")
+      .map((attribute) => `${attribute.name}=${attribute.value}`)
+      .join("\u0000");
+    const text = element.childNodes
+      .map((child) => (child.nodeName === "#text" ? (child as DefaultTreeAdapterTypes.TextNode).value : ""))
+      .join("")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 80);
+    const digest = sha256(encoder.encode(`${steps.reverse().join("")}\u0000${attributes}\u0000${text}`));
+    const id = `o-${Array.from(digest.subarray(0, 5), (byte) => byte.toString(16).padStart(2, "0")).join("").slice(0, 9)}`;
+    ids.set(element, id);
+    return id;
+  };
 }
 
 /** Attach derived IDs to the parsed tree only. Locations still address the
  * original file; explicit duplicates retain their validation errors. */
-export function identifyDesignHtmlNodes(document: Document, source: string): void {
+export function identifyDesignHtmlNodes(document: Document): void {
   const used = new Set<string>();
+  const derived = nativeDesignIdentities(document);
   for (const element of designElements(document).filter(isDesignElement)) {
     const location = element.sourceCodeLocation;
     if (!location?.startTag) continue;
     const current = oid(element);
     if (current && !used.has(current)) { used.add(current); continue; }
-    const base = nativeDesignIdentityBase(element.tagName, location.startOffset, source);
+    const base = derived(element);
     let next = base;
     for (let suffix = 2; used.has(next); suffix++) next = `${base}-${suffix}`;
     used.add(next);
@@ -226,7 +273,7 @@ export function parseDesignWebProjection(input: {
     sourceCodeLocationInfo: true,
     onParseError: (error) => parseErrors.push(error),
   });
-  identifyDesignHtmlNodes(document, input.source);
+  identifyDesignHtmlNodes(document);
   const diagnostics: DesignWebDiagnostic[] = parseErrors.map((error) => ({
     severity: "error",
     code: "html-parse",
@@ -323,6 +370,12 @@ function elementForMutation(
   return matches[0];
 }
 
+/** A layer's tag and attributes as written (decoded). */
+export function designNodeAttributes(source: string, nodeId: string): { tag: string; attributes: ReadonlyMap<string, string> } {
+  const element = elementForMutation(source, nodeId, undefined, { shadow: true });
+  return { tag: element.tagName, attributes: new Map(element.attrs.map((attribute) => [attribute.name, attribute.value])) };
+}
+
 function shadowContentRefusal(nodeId: string): Error {
   return new Error(
     `Design element ${nodeId} is inside a shadow root: restyle or retext it here, and move, duplicate or delete it by editing the HTML.`,
@@ -331,7 +384,7 @@ function shadowContentRefusal(nodeId: string): Error {
 
 function isShadowContent(source: string, nodeId: string): boolean {
   const document = parse(source, { sourceCodeLocationInfo: true });
-  identifyDesignHtmlNodes(document, source);
+  identifyDesignHtmlNodes(document);
   const light = new Set(elements(document));
   return designElements(document).some(
     (element) => !light.has(element) && isDesignElement(element) && oid(element) === nodeId,
@@ -461,8 +514,34 @@ export function mutateDesignNodeDuplicateSource(
   return `${source.slice(0, location.endOffset)}${duplicate}${source.slice(location.endOffset)}`;
 }
 
-/** Move the exact authored span; do not serialize and normalize its subtree. */
+/** Move the exact authored span; do not serialize and normalize its subtree.
+ * Into a slot id, the layer joins the slot's host with slot="<name>"; out
+ * of an instance it leaves its slot behind. */
 export function mutateDesignNodeMoveSource(
+  source: string,
+  nodeId: string,
+  parentId: string,
+  beforeId: string | null,
+): string {
+  const slot = designSlotOfNodeId(parentId);
+  if (slot) {
+    // The parts between slotted layers are the component's: no place to name.
+    const sibling = beforeId && (designPartOfNodeId(beforeId) || designSlotOfNodeId(beforeId)) ? null : beforeId;
+    const moved = moveDesignNodeSource(source, nodeId, slot.host, sibling);
+    return mutateDesignNodeAttributeSource(moved, nodeId, "slot", slot.name || null);
+  }
+  const slotted = /\sslot\s*=/i.test(source) && slottedInInstance(source, nodeId);
+  const moved = moveDesignNodeSource(source, nodeId, parentId, beforeId);
+  return slotted ? mutateDesignNodeAttributeSource(moved, nodeId, "slot", null) : moved;
+}
+
+function slottedInInstance(source: string, nodeId: string): boolean {
+  const element = elementForMutation(source, nodeId);
+  const parent = element.parentNode;
+  return !!parent && "tagName" in parent && parent.tagName.startsWith("zd-") && element.attrs.some((attribute) => attribute.name === "slot");
+}
+
+function moveDesignNodeSource(
   source: string,
   nodeId: string,
   parentId: string,
@@ -512,15 +591,68 @@ export function mutateDesignNodeMoveSource(
   if (insertion === span.startOffset || insertion === span.endOffset)
     return source;
   const content = source.slice(span.startOffset, span.endOffset);
-  const removed =
-    source.slice(0, span.startOffset) + source.slice(span.endOffset);
-  const offset =
-    insertion > span.startOffset ? insertion - content.length : insertion;
-  return removed.slice(0, offset) + content + removed.slice(offset);
+  const line = ownLine(source, span.startOffset, span.endOffset);
+  const target = line ? lineStart(source, insertion) : null;
+  // A layer on its own line lands on its own line, indented like the sibling
+  // it precedes or the destination's last child, so a reorder leaves neither a
+  // blank line nor two layers on one line.
+  const indent =
+    target === null
+      ? null
+      : before
+        ? source.slice(target, insertion)
+        : lastChildIndent(source, parent, element) ?? (element.parentNode === parent ? line!.indent : null);
+  if (line && target !== null && indent !== null)
+    return applySourceEdits(source, [
+      { start: line.start, end: line.end, text: "" },
+      { start: target, end: target, text: `${indent}${content}${line.newline}` },
+    ]);
+  const [removeStart, removeEnd] = line ? [line.start, line.end] : [span.startOffset, span.endOffset];
+  return applySourceEdits(source, [
+    { start: removeStart, end: removeEnd, text: "" },
+    { start: insertion, end: insertion, text: content },
+  ]);
 }
 
-/** Remove exactly one authored element subtree, preserving all neighboring
- * whitespace and bytes. */
+/** Where the line holding `offset` starts, when only spaces or tabs precede it. */
+function lineStart(source: string, offset: number): number | null {
+  let start = offset;
+  while (start > 0 && (source[start - 1] === " " || source[start - 1] === "\t")) start--;
+  return start === 0 || source[start - 1] === "\n" ? start : null;
+}
+
+/** The whole line an element has to itself, newline included, or null when
+ * other source shares it. */
+function ownLine(
+  source: string,
+  start: number,
+  end: number,
+): { start: number; end: number; indent: string; newline: string } | null {
+  const first = lineStart(source, start);
+  if (first === null) return null;
+  let last = end;
+  while (last < source.length && (source[last] === " " || source[last] === "\t" || source[last] === "\r")) last++;
+  if (source[last] !== "\n") return null;
+  return {
+    start: first,
+    end: last + 1,
+    indent: source.slice(first, start),
+    newline: source[last - 1] === "\r" ? "\r\n" : "\n",
+  };
+}
+
+function lastChildIndent(source: string, parent: Element, moving: Element): string | null {
+  const children = parent.childNodes.filter(
+    (node): node is Element => "tagName" in node && node !== moving,
+  );
+  const offset = children.at(-1)?.sourceCodeLocation?.startOffset;
+  if (offset === undefined) return null;
+  const start = lineStart(source, offset);
+  return start === null ? null : source.slice(start, offset);
+}
+
+/** Remove exactly one authored element subtree. An element alone on its line
+ * takes the line with it; otherwise neighboring bytes stay as written. */
 export function mutateDesignNodeDeleteSource(
   source: string,
   nodeId: string,
@@ -529,7 +661,9 @@ export function mutateDesignNodeDeleteSource(
   const location = element.sourceCodeLocation;
   if (!location)
     throw new Error(`Design element has no authored span: ${nodeId}`);
-  return `${source.slice(0, location.startOffset)}${source.slice(location.endOffset)}`;
+  const line = ownLine(source, location.startOffset, location.endOffset);
+  const [start, end] = line ? [line.start, line.end] : [location.startOffset, location.endOffset];
+  return `${source.slice(0, start)}${source.slice(end)}`;
 }
 
 function fragmentElements(
@@ -737,6 +871,22 @@ export function mutateDesignNodeHtmlSource(
   mode: "append" | "replace-inner" = "replace-inner",
   sourceFile = "",
 ): string {
+  return designNodeHtmlInsertion(source, nodeId, html, mode, sourceFile).source;
+}
+
+/** The edited source and where the new content sits in it. */
+export function designNodeHtmlInsertion(
+  source: string,
+  nodeId: string,
+  html: string,
+  mode: "append" | "replace-inner" = "replace-inner",
+  sourceFile = "",
+): { source: string; start: number; end: number } {
+  const slot = designSlotOfNodeId(nodeId);
+  if (slot) {
+    if (mode !== "append") throw new Error("A slot's layers can only be added to.");
+    return designNodeHtmlInsertion(source, slot.host, designSlottedFragment(html, slot.name), "append", sourceFile);
+  }
   assertSafeDesignHtmlFragment(html, sourceFile);
   if (nodeId === DESIGN_DOCUMENT_BODY_ID) {
     if (mode !== "append")
@@ -757,7 +907,7 @@ export function mutateDesignNodeHtmlSource(
     mode === "append"
       ? location.endTag.startOffset
       : location.startTag.endOffset;
-  return `${source.slice(0, start)}${html}${source.slice(location.endTag.startOffset)}`;
+  return { source: `${source.slice(0, start)}${html}${source.slice(location.endTag.startOffset)}`, start, end: start + html.length };
 }
 
 function attributeRemovalStart(source: string, start: number): number {
@@ -846,13 +996,24 @@ function identityBase(tag: string, offset: number, source: string): string {
 
 /** Minimal identity repair. Once written, generated IDs no longer depend on
  * offsets; offsets are used only to seed a previously unidentified element. */
-export function healDesignHtmlIdentities(source: string, identity = identityBase): {
+export function healDesignHtmlIdentities(
+  source: string,
+  options: {
+    /** Write the ids the canvas derives, instead of new offset-seeded ones. */
+    native?: boolean;
+    /** Write only these derived ids; every other element keeps its bytes. */
+    only?: ReadonlySet<string>;
+    /** Write ids only on elements that start within this span. */
+    within?: { start: number; end: number };
+  } = {},
+): {
   source: string;
   changed: boolean;
   healed: number;
 } {
   const document = parse(source, { sourceCodeLocationInfo: true });
   const records = designElements(document).filter(isDesignElement);
+  const derived = options.native ? nativeDesignIdentities(document) : null;
   const used = new Set<string>();
   const edits: Array<{ start: number; end: number; text: string }> = [];
   for (const element of records) {
@@ -863,11 +1024,13 @@ export function healDesignHtmlIdentities(source: string, identity = identityBase
       used.add(current);
       continue;
     }
-    const base = identity(element.tagName, location.startOffset, source);
+    const base = derived ? derived(element) : identityBase(element.tagName, location.startOffset, source);
     let next = base;
     for (let suffix = 2; used.has(next); suffix += 1)
       next = `${base}-${suffix}`;
     used.add(next);
+    if (options.only && !options.only.has(next)) continue;
+    if (options.within && (location.startOffset < options.within.start || location.startOffset >= options.within.end)) continue;
     const attributeLocation = element.sourceCodeLocation?.attrs?.["data-oid"];
     if (attributeLocation) {
       edits.push({
@@ -890,4 +1053,106 @@ export function healDesignHtmlIdentities(source: string, identity = identityBase
   }
   const result = applySourceEdits(source, edits);
   return { source: result, changed: result !== source, healed: edits.length };
+}
+
+/** A placeholder data-oid that stands for an element's derived id while an
+ * edit is tried, so each element can be followed through it. The "::zeros-"
+ * namespace is one no authored layer takes. */
+const PENDING_IDENTITY = "::zeros-pending:";
+
+/** The id every element that heal would identify gets, keyed by its
+ * placeholder, given the ids `written` would put on some of them. */
+function pendingIdentities(source: string, written: ReadonlyMap<string, string>): Map<string, string> {
+  const document = parse(source, { sourceCodeLocationInfo: true });
+  const derived = nativeDesignIdentities(document);
+  const used = new Set<string>();
+  const result = new Map<string, string>();
+  for (const element of designElements(document).filter(isDesignElement)) {
+    if (!element.sourceCodeLocation?.startTag) continue;
+    const value = oid(element);
+    const pending = value?.startsWith(PENDING_IDENTITY) ? value : null;
+    // A copy of a pending element (a duplicate's) is new and has no id yet.
+    const current = pending ? written.get(pending) ?? null : value?.includes(PENDING_IDENTITY) ? null : value;
+    if (current && !used.has(current)) {
+      used.add(current);
+      if (pending) result.set(pending, current);
+      continue;
+    }
+    const base = derived(element);
+    let next = base;
+    for (let suffix = 2; used.has(next); suffix += 1) next = `${base}-${suffix}`;
+    used.add(next);
+    if (pending) result.set(pending, next);
+  }
+  return result;
+}
+
+/** Before a structural edit (a move, delete, duplicate or new content), write
+ * the derived ids of the layers the edit shifts, so each keeps its own id and
+ * none takes another's, and of the layers it names; every other layer keeps
+ * its bytes. `edit` applies the edit to a source and may throw, in which case
+ * every derived id is written, as the edit's own failure will report.
+ * `subtree` names a layer whose descendants are all written too: a copy of
+ * it then takes <copy>-<original> ids, as the canvas's clone does, rather
+ * than deriving ones from its new place that a sibling may already hold. */
+export function healDesignHtmlIdentitiesForEdit(
+  source: string,
+  operands: ReadonlySet<string>,
+  edit: (source: string) => string,
+  subtree?: string,
+): { source: string; changed: boolean } {
+  let named = healDesignHtmlIdentities(source, { native: true, only: operands }).source;
+  if (subtree) {
+    const root = designElements(parse(named, { sourceCodeLocationInfo: true })).find((element) => oid(element) === subtree);
+    const span = root?.sourceCodeLocation;
+    if (span) named = healDesignHtmlIdentities(named, { native: true, within: { start: span.startOffset, end: span.endOffset } }).source;
+  }
+  const document = parse(named, { sourceCodeLocationInfo: true });
+  const edits: Array<{ start: number; end: number; text: string }> = [];
+  const used = new Set<string>();
+  let count = 0;
+  for (const element of designElements(document).filter(isDesignElement)) {
+    const location = element.sourceCodeLocation;
+    if (!location?.startTag) continue;
+    const current = oid(element);
+    if (current && !used.has(current)) { used.add(current); continue; }
+    const marker = `${PENDING_IDENTITY}${count++}`;
+    const attribute = location.attrs?.["data-oid"];
+    if (attribute) { edits.push({ start: attribute.startOffset, end: attribute.endOffset, text: `data-oid="${marker}"` }); continue; }
+    const close = named.lastIndexOf(">", location.startTag.endOffset - 1);
+    if (close < location.startTag.startOffset) continue;
+    const slash = named.slice(location.startTag.startOffset, close).match(/\/\s*$/);
+    const insertAt = slash?.index === undefined ? close : location.startTag.startOffset + slash.index;
+    edits.push({ start: insertAt, end: insertAt, text: ` data-oid="${marker}"` });
+  }
+  const everything = () => {
+    const healed = healDesignHtmlIdentities(source, { native: true }).source;
+    return { source: healed, changed: healed !== source };
+  };
+  const marked = applySourceEdits(named, edits);
+  const before = pendingIdentities(marked, new Map());
+  let edited: string;
+  try {
+    edited = edit(marked);
+  } catch {
+    return everything();
+  }
+  // Writing one id can change which of two alike layers takes a suffix, so
+  // look again until no other layer shifts.
+  const keep = new Map<string, string>();
+  for (let round = 0; round < 8; round += 1) {
+    const after = pendingIdentities(edited, keep);
+    let grew = false;
+    for (const [marker, id] of before) {
+      const now = after.get(marker);
+      if (now === undefined || now === id || keep.has(marker)) continue;
+      keep.set(marker, id);
+      grew = true;
+    }
+    if (!grew) {
+      const result = keep.size ? healDesignHtmlIdentities(named, { native: true, only: new Set(keep.values()) }).source : named;
+      return { source: result, changed: result !== source };
+    }
+  }
+  return everything();
 }

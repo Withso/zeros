@@ -275,7 +275,7 @@ describe("authoring contract lint", () => {
     expect(contract("repeated-cards.html")[0]).toMatchObject({
       ruleId: "repeated-markup",
       message: 'Make the <article> markup with class "card", repeated 3 times (lines 1, 1 and 1), one component.',
-      fix: "Define it once as components/<name>.html with <slot> for its content and data-zd-attr for attribute values, then place one <zd-name> per use.",
+      fix: 'Make one copy a main frame ("component": "<name>" on its meta/canvas.json record, with options for the values that change), then place one <zd-name> per use.',
     });
   });
 

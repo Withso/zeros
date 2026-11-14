@@ -1,5 +1,7 @@
 export * from "./adapter";
 export * from "./api";
+export * from "./component-overrides";
+export * from "./component-slots";
 export * from "./css";
 export * from "./html";
 export * from "./model";

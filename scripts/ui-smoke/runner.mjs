@@ -34,6 +34,7 @@ async function seedOrigin(page, harnessBase) {
 
 export async function runSmokeScenarios({
   shard,
+  scenarios,
   newPage,
   harnessBase,
   pageUrl,
@@ -48,10 +49,14 @@ export async function runSmokeScenarios({
   const byId = new Map(
     scenarioRegistry.map((scenario) => [scenario.id, scenario]),
   );
-  const steps = selectScenarioSteps(shard);
+  const steps = selectScenarioSteps(shard, scenarios);
+  // A shard or a named scenario runs without the units before it, so each
+  // unit gets the page its fixture describes instead of the full run's.
+  const isolated = shard !== undefined || scenarios !== undefined;
+  const label = shard ? `shard ${shard}/${SHARD_COUNT}` : "scenario";
   const pages = new Map();
   const livePages = new Set();
-  const pageKey = (scenario) => (shard ? scenario.id : scenario.fixture.page);
+  const pageKey = (scenario) => (isolated ? scenario.id : scenario.fixture.page);
   const remaining = new Map();
   for (const { id } of steps) {
     const key = pageKey(byId.get(id));
@@ -68,7 +73,7 @@ export async function runSmokeScenarios({
       page.on("console", (msg) => consoleLines.push(msg.text()));
     }
     if (fixture.navigation === "origin") {
-      if (shard) await seedOrigin(page, harnessBase);
+      if (isolated) await seedOrigin(page, harnessBase);
       else await page.goto(pageUrl, { waitUntil: "networkidle" });
     }
     return { page, consoleLines };
@@ -112,9 +117,9 @@ export async function runSmokeScenarios({
       const module = await loadModule(scenario.module);
       const key = pageKey(scenario);
       const started = Date.now();
-      if (shard)
+      if (isolated)
         console.log(
-          `ui-smoke-composer: shard ${shard}/${SHARD_COUNT} — ${id}${phase ? ` (${phase})` : ""}`,
+          `ui-smoke-composer: ${label} — ${id}${phase ? ` (${phase})` : ""}`,
         );
       if (scenario.regressions) {
         for (const regression of [undefined, ...module[scenario.regressions]]) {
@@ -136,7 +141,7 @@ export async function runSmokeScenarios({
         const phaseConfig = scenario.phases?.[phase];
         // Phases share one page's history, and a full run shares pages across
         // scenarios: retry only independent shard scenarios.
-        const independent = shard && !scenario.phases;
+        const independent = isolated && !scenario.phases;
         let state;
         await attempt(id, async (report, tries) => {
           // A retry always starts from a fresh page.
@@ -146,7 +151,7 @@ export async function runSmokeScenarios({
             state = await createPage(scenario);
             pages.set(key, state);
           }
-          if (shard && phaseConfig)
+          if (isolated && phaseConfig)
             await state.page.setViewportSize(phaseConfig.viewport);
           await module[phaseConfig?.run ?? scenario.run]({
             ...state,
@@ -159,13 +164,13 @@ export async function runSmokeScenarios({
         remaining.set(key, remaining.get(key) - 1);
         if (
           remaining.get(key) === 0 &&
-          (shard || scenario.fixture.page !== "main")
+          (isolated || scenario.fixture.page !== "main")
         ) {
           await closePage(state.page);
           pages.delete(key);
         }
       }
-      if (shard)
+      if (isolated)
         console.log(
           `ui-smoke-composer: completed ${id}${phase ? ` (${phase})` : ""} in ${((Date.now() - started) / 1000).toFixed(2)}s`,
         );

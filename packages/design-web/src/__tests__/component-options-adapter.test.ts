@@ -2,6 +2,7 @@ import { applyDesignTransaction, DesignTransactionSession, type DesignOperation 
 import { describe, expect, it } from "vitest";
 
 import { designWebTransactionAdapter } from "../adapter";
+import { designSourceDeclaresComponentOptions } from "../component-options";
 import { createDesignWebDocumentState } from "../revision";
 import { webTransaction } from "./fixtures";
 
@@ -82,6 +83,26 @@ describe("setting a component option on its main", () => {
     expect(refused({ ...setOption("width", 900), file: "other.html" } as DesignOperation)).toThrow("Design component file is missing: other.html");
   });
 
+  it("writes the default on the option the declaration kept, not an earlier invalid one with that name", () => {
+    const source = MAIN.replace(
+      '      <zd-option name="mode"',
+      '      <zd-option name="mode" type="choice" label="Mode" choices="ask" default="ask"></zd-option>\n      <zd-option name="mode"',
+    );
+    const initial = createDesignWebDocumentState({ documentId: "chat/composer.html", entryFile: "chat/composer.html", files: { "chat/composer.html": source } });
+    expect(diff(source, apply([setOption("mode", "plan")], initial).file)).toEqual([
+      '      <zd-option name="mode" type="choice" label="Mode" choices="ask plan" default="ask"></zd-option> -> ' +
+        '      <zd-option name="mode" type="choice" label="Mode" choices="ask plan" default="plan"></zd-option>',
+    ]);
+  });
+
+  it("refuses a file whose options template is outside <head>, which the engine does not read", () => {
+    const source = MAIN.replace(/<template data-zd-options>[\s\S]*<\/template>\n/, "").replace("<body>", `<body>${/<template data-zd-options>[\s\S]*<\/template>/.exec(MAIN)![0]}`);
+    expect(source).toMatch(/<body><template data-zd-options>/);
+    expect(designSourceDeclaresComponentOptions(source)).toBe(false);
+    expect(designSourceDeclaresComponentOptions(MAIN)).toBe(true);
+    const initial = createDesignWebDocumentState({ documentId: "chat/composer.html", entryFile: "chat/composer.html", files: { "chat/composer.html": source } });
+    expect(() => apply([setOption("width", 1080)], initial)).toThrow("chat/composer.html declares no options.");
+  });
   it("refuses a file that declares no options", () => {
     const initial = createDesignWebDocumentState({ documentId: "home.html", entryFile: "home.html", files: { "home.html": "<!doctype html><html><body></body></html>" } });
     expect(() => applyDesignTransaction(initial, webTransaction(initial, "x", [{ ...setOption("width", 900), file: "home.html" } as DesignOperation]),

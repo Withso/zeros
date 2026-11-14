@@ -27,6 +27,8 @@ export interface DesignPageSummary {
   /** Section titles, notes and link cards drawn on the page; absent when it
    * has none. Invalid entries in canvas.json are skipped, never sent. */
   items?: DesignCanvasItemSummary[];
+  /** Valid items omitted by the page's item or text cap. Older engines omit it. */
+  itemsNotShown?: number;
 }
 
 export const designPageIdSchema = z
@@ -79,6 +81,7 @@ export const designPageCatalogSchema = z
         .max(DESIGN_CANVAS_ITEM_LIMITS.itemsPerPage)
         .refine(designCanvasItemsWithinLimits)
         .optional(),
+      itemsNotShown: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
     }),
   )
   .min(1)

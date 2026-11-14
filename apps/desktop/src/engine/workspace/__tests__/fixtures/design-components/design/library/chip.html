@@ -1,0 +1,23 @@
+<!doctype html>
+<html>
+  <head>
+    <title>Chip</title>
+    <template data-zd-options>
+<zd-option name="width" type="number" default="160" min="80" max="320" unit="px"></zd-option>
+<zd-option name="accent" type="color" default="var(--fx-accent)"></zd-option>
+<zd-option name="label" type="text" default="Chip"></zd-option>
+<zd-option name="tone" type="choice" choices="quiet loud" default="quiet"></zd-option>
+<zd-option name="motion" type="easing" default="ease-out 150ms"></zd-option>
+<zd-derive name="pad" value="width / 10" unit="px"></zd-derive>
+<zd-variant name="compact" width="96" label="Small"></zd-variant>
+<zd-variant name="loud" tone="loud"></zd-variant>
+    </template>
+    <link rel="stylesheet" href="../tokens.css">
+    <style>.chip { width: var(--zd-width); padding: var(--zd-pad); color: var(--zd-accent); transition: opacity var(--zd-motion-duration) var(--zd-motion-easing); }</style>
+  </head>
+  <body>
+    <div class="chip" data-oid="chip-root" data-tone="{{ tone }}">
+      <b data-oid="chip-label">{{ label }}</b>
+    </div>
+  </body>
+</html>

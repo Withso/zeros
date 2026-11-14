@@ -387,12 +387,13 @@ A per-directory private journal records paths, before/after hashes, phases and
 private payload-file names; it embeds no HTML payloads. Durable phases are
 prepared → sources → metadata → deleted → invalidated → complete. Preflight
 checks destinations, links, ignores and pending journals. Sources and metadata
-are atomically written and verified before predecessors are removed. Recovery
-recognizes only journal-owned intermediate manifests and resumes each write or
-delete idempotently; repeating a completed migration is a no-op. Competing root
-and meta manifests outside such a journal pause writes. Changed inputs or
-successors pause recovery with an actionable error. Migration never changes
-the Git index, even with staged or dirty source.
+are atomically written and verified before predecessors are removed. Each
+phase syncs the directories it changed once before the next phase is recorded.
+Recovery recognizes only journal-owned intermediate manifests and resumes each
+write or delete idempotently; repeating a completed migration is a no-op.
+Competing root and meta manifests outside such a journal pause writes. Changed
+inputs or successors pause recovery with an actionable error. Migration never
+changes the Git index, even with staged or dirty source.
 
 Reference edits use parser offsets and URL tokens, preserving unrelated bytes
 rather than reserializing documents. Moved HTML rebases relative
@@ -563,6 +564,10 @@ Canvas/page titles and existing Foundation metadata are portable authored
 content. Membership order and optional `z` determine stacking within each page;
 z is independent between pages. New-frame placement considers that page only.
 Unknown supported canvas/page/frame extension fields survive engine writes.
+Engine writes change only the members whose values change, so
+`meta/canvas.json` keeps its formatting, key order and escapes; a file without
+`foundation` gets none until a Foundation value is set. Frame order comes from
+`pages[].frames` and `z`, never from key order.
 Legacy geometry extensions use `geometryMetadata` to
 avoid colliding with frame extensions. Camera, credentials, grants, recovery
 journals, captures and caches do not belong in this file. No DOM/node tree or
@@ -692,7 +697,11 @@ execute the emitted shell prefix, including paths with spaces and quotes.
 Optional
 `--revision` requires an exact render revision; omit it after an edit to validate
 and capture current source. Validation reports existing file/line diagnostics
-without healing source and exits nonzero for errors. Capture writes an ordinary
+without healing source and exits nonzero for errors. It also reports, as
+warnings, the canvas's runtime audits (contrast, overflow, spacing scale) of
+the frame's current source when the open canvas has audited that exact
+generation (`runtime-audits.ts`); the agent's `design_lint` reads the same
+rows. Audit warnings never change the exit status. Capture writes an ordinary
 PNG and reports revision, dimensions, capture time and reduced-motion behavior.
 Fractional frame dimensions round up to whole CSS viewport pixels. Frames above
 2048 pixels retain that layout viewport (up to the canvas's 16384-pixel bound)
@@ -936,8 +945,9 @@ only, since cloud v2 has no Design authoring.
    that value.
 4. Inline style is for one-off values and people's Style panel edits;
    declarations used on several elements belong in a class.
-5. `data-oid` only where it is needed (format rules above); component
-   definitions use `data-zid`.
+5. `data-oid` only where it is needed (format rules above); a main frame's
+   `data-oid` values name the parts its instances override, so they stay
+   stable. Older `components/` files use `data-zid`.
 6. Meaningful layers carry `data-name`.
 7. Captured or pasted markup carries `data-zd-captured` on its root, its
    optional value naming the source (`data-zd-captured="zeros renderer"`);
@@ -945,14 +955,19 @@ only, since cloud v2 has no Design authoring.
    "Settings — captured" tells people. The marker is for markup that really
    came from elsewhere, not a way to quiet warnings on the directory's own
    frames.
-8. Markup repeated three or more times becomes a component
-   (`components/<name>.html`, `<slot>`, `data-zd-attr`).
+8. Markup repeated three or more times becomes a component: a main frame
+   registered with `"component"` in `meta/canvas.json`, with options
+   (`{{ name }}`) and slots (`data-zd-slot`). Agents never add
+   `components/<name>.html`; Move main to canvas converts an existing one.
 
 The contract's text is part of the generated `rules.md` for paged
-directories. The text shipped before it is the compatibility contract
-`PREVIOUS_PER_PAGE_DESIGN_RULES` (`design-rules.ts`), so a directory holding
-it upgrades on its next authoring lifecycle refresh and keeps the project text
-appended after it; a hand-edited file is left alone. Unpaged legacy layouts
+directories. Earlier shipped texts are compatibility contracts in
+`design-rules.ts`: `PREVIOUS_CONTRACT_DESIGN_RULES` (the first contract,
+whose rule 8 made repeats `components/` files with a `title=` example that
+no option can take) and `PREVIOUS_PER_PAGE_DESIGN_RULES` (before the
+contract). A directory holding either upgrades on its next authoring
+lifecycle refresh and keeps the project text appended after it; a hand-edited
+file is left alone. Unpaged legacy layouts
 keep `ROOT_DESIGN_RULES` until they move to pages.
 
 #### Native edit and refresh behavior
@@ -1142,7 +1157,9 @@ records pass unknown fields through:
   directives (`@tailwind`, `@source`, `@plugin`, `@config`, `@apply`, …),
   lifts Tailwind `@theme` custom properties into `:root`, drops comments, and
   rewrites each `themes` selector to `[data-zd-theme="<name>"]` so the canvas
-  Themes control applies it. A `themes` value of `@media (prefers-color-scheme:
+  Themes control applies it. Only the whole class is rewritten: `.dark`
+  leaves `.darker` and an escaped name that starts with it, such as
+  Tailwind's `.dark\:bg-zinc-900`, as they are. A `themes` value of `@media (prefers-color-scheme:
   dark|light)` instead rewrites those media blocks to rules scoped by
   `:where([data-zd-theme="<name>"])`, which keeps specificity; Tailwind's
   nested default dark variant becomes `:where(…) &`. Any other `@media` mapping
@@ -1223,14 +1240,23 @@ records pass unknown fields through:
   unchanged.
   The render generation hashes the result, so an edit to a source file gives
   its frames new generations through the ordinary worktree event.
+- Lint's `unknown-token` warning reads `var(--name)` only in markup and CSS:
+  text and comments outside `<style>` are prose, so a sentence that names a
+  token is not a finding (`sourceWithoutProse`).
 - Lint's `unknown-token` warning counts a frame's `var(--name)` as known when
   `tokens.css`, Design-folder CSS, the frame's own styles or any source the
   frame receives (its `styles` list, App fonts included) declares it. A
   source's tokens are the custom properties its own files declare, Tailwind
   `@theme` included; Tailwind's stock theme and package defaults are not the
   application's tokens and still warn (`document.ts`, `designKnownTokens`).
+  The `--zd-<name>` properties of the number, colour, easing and numeric
+  derived options of the frame's own declaration and of the components it
+  places are known too (`designFrameOptionPropertyNames`); text, choice and
+  boolean options have none.
 - Lint's `unknown-class` warning reports each distinct class on the frame's
-  own elements that none of its available styles defines. Recognition is
+  own elements that none of its available styles defines. A class that
+  contains a template hole (`badge--{{ tone }}`) names its class only once
+  drawn and is skipped. Recognition is
   case-sensitive, decodes CSS escapes, and includes selectors inside
   functional pseudo-classes, the frame's and expanded components' `<style>`
   elements, linked Design CSS, and the full unpruned imported sources that
@@ -1243,7 +1269,8 @@ records pass unknown fields through:
   The sole marker allowlist is `group`, `peer`, `group/<name>`, `peer/<name>`,
   `lucide` and `lucide-<name>` (`style-classes.ts`, `DESIGN_CLASS_MARKERS`).
   An unreadable or unclassifiable stylesheet, failed source, missing build
-  output, unavailable Tailwind dependency or a frame whose Tailwind
+  output, unavailable Tailwind dependency, a component expansion error (a
+  warning does not) or a frame whose Tailwind
   candidates reach the 4,096 cap skips this check for that frame;
   other lint rules still run. Findings point to the first `class` attribute
   using each name, at most 50 per frame; past 50 classes, the 50th warning
@@ -1500,6 +1527,18 @@ or renderer owners.
 - Plain HTML inspection derives missing/duplicate markers without writing source.
   An explicit visual or semantic edit persists required identity repairs with
   minimal source changes. A source offset is location metadata, never identity.
+  A derived marker (`nativeDesignIdentities`, shared by the engine and
+  design-web) hashes the element's tag and sibling index at each level plus its
+  own attributes and direct text, computed only for elements without a usable
+  `data-oid`. A style, text or attribute edit therefore writes only the edited
+  layer's `data-oid`. Adding, moving or removing layers writes the ids of the
+  layers it names and of those whose place it shifts, and no others
+  (`healDesignHtmlIdentitiesForEdit`): the edit is tried on a copy whose
+  id-less layers carry placeholder ids, so each layer is followed through it,
+  and a layer whose derived id would change keeps its old one in source. New
+  content takes ids only within itself. After an outside edit a shifted layer
+  gets a new marker, never its neighbour's, so a held selection is dropped
+  rather than moved.
 - Layers follow the rendered (flat) tree. Content of a declarative shadow root
   (`<template shadowrootmode>`, common in markup serialized from web
   components) renders as its host's layers. design-web's `shadow.ts` holds the
@@ -1687,7 +1726,11 @@ of the expander's earlier output holds this), and it may declare options too.
 
 Options are declared in the file's `<head>` inside `<template
 data-zd-options>`, one `<zd-option>`, `<zd-derive>` or `<zd-variant>` per line,
-so a person sliding one option changes one line in Git: the instance's
+so a person sliding one option changes one line in Git. Only the first such
+template in `<head>` is read, by the engine and by the canvas's Options and
+default writes alike; one in `<body>` or a later one in `<head>` is a
+`component-option-invalid` warning that says where to move it. A person
+sliding one option changes the instance's
 attribute (`width="800"` → `width="760"`), or on the main component the
 `default` (or the line of the variant it shows). Kinds are number (a slider only
 with both `min` and `max`), boolean, choice, colour (or `var(--token)`), text
@@ -1728,6 +1771,51 @@ URLs resolve from its own file. An instance's inner elements carry
 `data-zd-part` (the main frame's `data-oid`, or a `components/` file's
 `data-zid`), with `#n` on repeats after the first; on a main frame the first
 repeat keeps its `data-oid` and the others carry `data-zd-copy`.
+A component's own `<style>` elements style only its instances: the engine
+wraps each selector as `:is(S):where(zd-<name>, zd-<name> *)` (a selector
+naming the host keeps matching it) with `scopeDesignComponentStyle`, so a
+component's `.title` rule never restyles another frame's `.title`. A
+pseudo-element after a combinator (`.field ::placeholder`) keeps its subject
+as `:where(*)` there. An `@scope` rule keeps its rules as written and has
+its root limited the same way (`@scope (.card)` becomes
+`@scope (:is(.card):where(zd-card, zd-card *))`); one without a root, whose
+root would be the element holding the style, is rooted at the host. The
+runtime reads the selector back as authored for Style origins
+(`authoredComponentSelector`), and lists a rule inside `@scope` as matched
+only for an element below its root and above its limit.
+
+A plain `components/<name>.html` without a declaration, whose markup reads
+its host through `<slot data-zd-attr="…">` and a default `<slot>`, is a
+slot component. Its instances are instances too: each carries
+`data-zd-instance`, its `data-zid` elements become `data-zd-part` (when the
+definition declares them), each `data-zd-attr` name that is a valid option
+name becomes a text option whose default is the slot's fallback, and a host
+whose default-slot content is text alone offers that text as a Text row in
+Options (`node.set-text` on the host). A reserved attribute such as `title`
+is not offered. Instances are recorded at any depth when the host has its own
+`data-oid`, so a card placed inside another component's slot is one too.
+**Move main to canvas.** Components are authored as main frames;
+`components/<name>.html` is the older form, still read and never added by
+the rules or the skill. A selected instance of one offers Move main to canvas
+in place of Edit main (`design.component.move`, Local only): one canvas write
+places a 480×320 frame `<page folder>/<name>.html` on the active page with
+`"component": "<name>"` on its record, removes the file and its
+`foundation.components` entry, and records one history step, so undo and redo restore both byte for byte, and then opens the
+main. The conversion (`designMainFromComponentSource`) turns `data-zid` into
+`data-oid` (so the part names instances override keep), each
+`<slot data-zd-attr>` into a `{{ name }}` hole with a text option whose
+default is the fallback, adds a `<title>`, rebases the file's URLs to its new
+place and leaves a bare `<slot>` as the default slot. It refuses, with a
+reason, a slot name no option can take (such as `title`), markup in an
+attribute slot's fallback, `{{` in a file without options, a definition with
+errors, and a component that already has a main. A `foundation.components`
+entry whose file is gone while a main frame registers its name is read as
+replaced by that main, and the next edit drops it from `canvas.json`.
+
+A `components/` file `meta/canvas.json` does not list is still read as a
+component named after its file; an edit that changes nothing about the
+components keeps `canvas.json`'s own list (`persistedDesignFoundation`), so
+saving a frame never registers those files as a side effect.
 
 Budgets, on top of the expander's own: 64 options, 32 variants and 32 derived
 values per component, 16 choices; text up to 2,048 characters; an expression of
@@ -1737,13 +1825,41 @@ holes per rendering. `design validate` and lint report
 `component-option-invalid`, `component-expression-invalid`,
 `component-value-invalid`, `component-unregistered` and the existing
 `component-invalid` and `component-undefined`, at the line in the frame or
-naming the component's file and line. An instance whose values do not fit
+naming the component's file and line. An instance attribute that names no
+option is a `component-value-invalid` warning naming the attribute and the
+ignored value; the source is never rewritten. An instance of a component that
+no longer exists (its main deleted, renamed or registered under another name)
+is `component-undefined` at the instance; it renders as an empty element and
+the host frame still renders; the message says whether the registered frame's
+file is missing or no frame and no `components/<name>.html` defines it. A
+component whose source is there but cannot be used (a symbolic link, outside
+the directory, over the size limit, unreadable, or named twice) is reported by
+that error, naming the reason, instead, never as missing. An instance whose values do not fit
 keeps the inherited value; one whose template fails renders its defaults, or
 nothing when those fail too. A frame whose options do not all apply shows the
 last expansion that applied in this session (held for the 12 most recently
 rendered frames within 16 MiB, dropped when the frame is deleted, never stored
 as a durable identity) and the render says so (`shows: "last-good"`); without
-one it shows the component's defaults (`shows: "defaults"`). The expander's
+one it shows the component's defaults (`shows: "defaults"`), or, when its own
+template fails or an instance's defaults fail too, nothing in that place
+(`shows: "nothing"`): a main renders an empty body keeping the `<style>`
+elements of its `<head>` as written (holes never apply inside them) and its
+stylesheet links and meta that carry no hole, never its raw `{{ }}` source.
+The Options section, the canvas mark on the main and on every frame placing
+it, and the "Ask agent to fix" brief all say the frame shows nothing in its
+place. Older renderers parse `notApplied` strictly as `"last-good"` or
+`"defaults"`, so only a renderer that negotiated
+`design.component-options.shows-nothing.v1` and sends
+`optionsShowNothing: true` (Local only) is told `"nothing"`. Every other
+reply says `"defaults"` for those frames while serving the same empty render:
+the engine rewrites the frame records of every Design reply and of the
+`workspace.setMode` entry snapshot (`frame`, `frames`, `snapshot.frames` and
+the thumbnails reply's `prepared`) in `options-shows-compat.ts`. The engine's own
+thread holds that last good render; a preparation worker hands each one it
+makes to the engine and leaves a frame that needs one to the engine, so a
+frame's reported version always matches the bytes `zeros-design://` serves,
+across worker restarts, any number of workers and a shown variant. The
+expander's
 fast path is unchanged for a frame with no `<zd-` and no declaration in its
 head (about 12 µs for a 400-layer frame, before and after).
 
@@ -1757,7 +1873,11 @@ without one a field, a boolean the app's switch, up to three choices radios
 in the row and more a menu, a colour a swatch with its token as a pill (or
 its value) opening the existing colour and token picker, text typed in place,
 an easing its curve with Type (Easing or Spring), Curve or Bounce, and
-Duration. A group heading folds, and a folded group mounts no rows. The last
+Duration. A group heading folds, and a folded group mounts no rows. Text
+typed and not yet committed, and folded groups, stay through new generations
+of the same frame or instance (a commit, an agent's edit, a change on disk);
+a draft goes only with its option or when the option changes kind, and
+another frame or instance starts with every group open. The last
 row is Ask agent to change options; the skill's "Change a component's
 options" and "Fix a component's options" are the procedures its briefs name.
 The declaration, each option's reach and whether its options applied come
@@ -1776,13 +1896,33 @@ undo step; Escape during a drag restores the value and writes nothing. When
 the frame's options did not all apply the section leads with "These options
 could not be applied. The frame shows its last good render." (or "…the
 component's defaults."), as the engine reports, and Ask agent to fix, which
-sends the lint problems for the frame; the rows stay adjustable.
+sends the lint problems for the frame; the rows stay adjustable. Before
+anything is selected the frame's label carries a red mark
+(`data-design-frame-problem="options-not-applied"`) whose title says the same,
+on the main and on every frame placing an instance whose values did not apply
+(naming `zd-<name>`); it clears with the next generation that applies.
+
+A declaration past the record's limits (160 elements, a 32-character tag, 72
+attributes per element, 64-character attribute names, 2,048-character values,
+a 256-character `data-oid` on a bound text; `DESIGN_COMPONENT_RECORD_LIMITS`
+in `@zeros/protocol/design-catalog`, the one source the engine, the template
+expander and the record's schema read) is reported without its declaration and
+names the limit (`exceeds`); the frame and its instances still render, its
+Options section says which limit in a wrapped error note and offers no
+Variant row or "Save current as variant" (it cannot list the variants the
+file declares), and `design validate`
+reports a `component-option-invalid` warning saying the same. A frame record
+the renderer still cannot read fails that frame alone ("Zeros could not read
+this frame's prepared record."); the others in the reply are shown.
 
 **Variants, instances and parts (slice 3).** On the main the Variant row
 (Default, the declared variants, "Save current as variant…") picks which
 variant the frame shows: personal view state per workspace and frame in the
 renderer's own store (`design-component-variants.ts`), restored synchronously,
 shown only while the frame declares it and dropped with its frame or variant.
+Only a current record says so: the boot preview (whose records carry no
+declaration) and records still being prepared drop nothing, so the choice
+survives a relaunch.
 The frame's documents carry it (`&variant=` on the native route, `variant` on
 the `design.frame` fallback read) and the engine renders that variant under
 the source's own generation, so no identity, history key or exact-key read
@@ -1794,11 +1934,12 @@ template" for a loop's own name; `component.boundText` in the record), and a
 click on a repeated copy selects its source layer.
 
 A frame's prepared record also names the instances it places at its top
-level (`instances`: their components' declarations and reach, each host's
-option attributes and `zd-variant`, whether its values applied, and a key
-that changes with any of it; at most 32 components and 256 hosts). One
-selected instance shows "Instance of …" under its header, Edit main (or Open
-in Files for a `components/` file), and the component's rows with its own
+level, and deeper hosts that carry their own `data-oid` (`instances`: their components' declarations and reach, each host's
+option attributes and `zd-variant`, its part overrides, the layers each slot
+holds, whether its values applied, and a key that changes with any of it; at
+most 32 components and 256 hosts). One
+selected instance shows "Instance of …" under its header, Edit main (or Move
+main to canvas for a `components/` file), and the component's rows with its own
 values: a dot marks a value that differs from what it inherits, a commit that
 lands on that value removes the attribute, the Variant row writes
 `zd-variant`, and Reset removes every option attribute and `zd-variant` in one
@@ -1808,12 +1949,63 @@ runtime-owned style over the zero-specificity rule). A double-click on a
 selected instance enters it and selects the part under the pointer
 (`getComponentPartAtLoc`, opt-in; a part's id is
 `::zeros-part:<host>:<part>`, percent-encoded, which no authored layer can
-take). A part's Style panel is inert, its outline has no handle, Select
-instance and Edit main (the main with the layer of the same id) sit under the
-header, a click inside the instance picks another part and Escape or a click
-outside leaves it. Every node write the workspace cache sends refuses a part
-before anything is sent, and the engine finds no such layer either. Layers
-keeps an instance as one row; an agent's selection names its host.
+take). A part reads "Part of …" (", overridden" when it is), its outline has
+no handle, Select instance and Edit main (the main with the layer of the same
+id) sit under the header, a click inside the instance picks another part and
+Escape or a click outside leaves it.
+
+**Part overrides.** A part's Style panel edits write the host's
+`zd-style-<part>` attribute (`<part>` is the part's `data-oid` in the main,
+without its `#n`), one declaration list per part, set, replaced or removed
+by property in one transaction and one undo. Expansion appends it to the
+part's own inline style, so an override wins over the main's rules and over
+options; `display: none` there hides the part in that instance. Text changes
+only through options, and structure only on the main: every other node write
+the workspace cache sends refuses a part before anything is sent (naming
+what to do instead), and the engine finds no such layer either. Reset under
+the header of an overridden part removes its override, and the instance's Options section
+ends with "Reset N part overrides". Canvas drag and resize on a part stay
+blocked. Layers names an instance by its component (an authored layer name
+wins) with the component mark, and, where the runtime offers
+`getComponentPartAtLoc`, lists its parts and slots beneath it; elements
+without ids inside an instance pass their children through. A part row cannot
+be renamed; its eye hides it on the canvas only, like any layer. An agent's
+selection names its host.
+
+**Slots.** A frame the main marks `data-zd-slot="<name>"` is a slot option
+(declaring `<zd-option type="slot">` only adds a label, group or order; it
+takes no default). What the main's frame holds is the default; an instance's
+children with `slot="<name>"` replace it, and a bare `<slot>` takes the
+rest. Layers shows a slot row (`::zeros-slot:<host>:<name>`) holding the
+instance's own layers, which are ordinary layers; Options shows the slot with
+how many layers it holds and Reset to default, which deletes them in one
+step. A layer dropped or drawn into a slot joins the host with
+`slot="<name>"`, and moving it out of the instance removes the attribute.
+A slot's own frame takes no style (it is the main's). Known limit: a canvas
+drag nests only a free layer that fully fits its target.
+
+A host's record also lists attributes that name no option (`ignored`, as
+written), shown in its Options section as one wrapped warning note each, and marks a
+host whose component no longer exists (`missing`; no `components` entry).
+Such a host's frame label carries a red warning mark naming the component
+(`data-design-frame-problem="missing-component"`);
+Layers, the selection path and the selected instance's title name it
+`zd-<name>`, with an error line saying the component is missing; it cannot
+be entered. Deleting a main component
+frame that other frames place first asks: `design.frame.delete` with
+`ifUnused` keeps the frame and replies `inUse` (the component, its title and
+how many instances in how many frames use it), and the canvas confirms with
+"Delete component …?" before deleting without the flag. Ordinary frames and
+mains nobody places still delete at once. Undo restores the frame at its
+place in the page's frame order and among the canvas file's frame entries, so
+`meta/canvas.json` returns byte for byte.
+
+Each frame's label also carries a count of that frame's lint findings
+(`data-design-frame-lint`, yellow for warnings, red when any is an error),
+read from the page's lint report, runtime audits included. Clicking it
+opens the findings grouped by rule, each rule's in line order and bounded to
+its first 20 with a count of the rest; a finding on a layer selects that layer.
+A frame without findings shows nothing.
 
 The canvas marks components by the same record that titles the header
 Component: a main component's frame label shows the Component glyph before
@@ -1863,14 +2055,18 @@ unique across every frame and item; x/y stay within ±1,000,000 and widths
 their text); a section title is one line of 1–120 characters, a note up to
 2,000 characters with its line breaks, a link card's title up to 120 and
 defaults to the file name. A page holds at most 256 items and 256 KiB of item
-text. Reading never throws: an invalid item is skipped, an unknown kind is
-kept as written and not drawn, and both reach `design validate` as warnings
+text. Reading never throws: an invalid item is skipped without reserving its
+id against a later valid item, an unknown kind is kept as written and not
+drawn, and both reach `design validate` as warnings
 (`canvas-item-invalid`, `canvas-item-link-unsafe`,
 `canvas-item-link-missing`) through every full lint, never through the
-canvas's own snapshot lint, so items cannot block Save or editing. Page
-summaries carry the drawable items; a link card whose target is not a regular
-file is marked `missing` from a local stat (at most 512 per read), never a
-read of its contents.
+canvas's own snapshot lint, so items cannot block Save or editing. Valid items
+past either cap still reserve their ids. Page summaries carry the drawable
+items and, when a cap hides valid items, `itemsNotShown`; one canvas notice
+says how many more are not shown without raising the cap. A link card whose
+resolved target escapes the workspace or is not a regular file is marked
+`missing` (at most 512 checks per read). The check opens the resolved target
+with no-follow semantics and inspects its descriptor, never its contents.
 
 A link target is a workspace-relative path checked by a hand-written scan: no
 leading `/`, `\`, `~`, scheme or URL, no empty, `.` or `..` segment, no
@@ -1882,16 +2078,30 @@ titles and paths render as text.
 The engine writes items with `design.canvas.item.put` and
 `design.canvas.item.delete` (Local only, offered as
 `design.canvas-items.v1`), each one catalog write and one shared history
-step like a page rename; the entry names no page, so Undo keeps the canvas's
-selection. An item's authored extra fields survive a write, and an id the
-file holds but cannot draw cannot be changed from the canvas. The canvas
+step like a page rename. Its history entry names the page and item: Undo and
+Redo reveal that page, clear frame and layer selection, and select the item
+only if it exists in the generation being restored. Immediate prediction is
+paint-only and item editing stays inert until the confirmed owner returns. An
+item's authored extra fields survive a write, and an id the file holds but
+cannot draw cannot be changed from the canvas. An edit or delete acts on the
+stored entry the reader draws, so a skipped entry with the same id (an
+earlier malformed one or a later duplicate) stays exactly as written. The canvas
 places them from the tool rail beside Text (Section `⇧S`, Note `⇧N`, Link
 card from a workspace file), because placing things is what that rail is
 for; there is no canvas context menu for empty space. Items are chrome in
 world coordinates above frames: no iframe or runtime, culled with the frame
 spatial index (following a wheel or pinch's painted camera), and a page
 without items mounts nothing. A drag or resize paints locally and writes on
-release; Escape cancels a drag or a text edit and writes nothing. A selected
+release; Escape cancels a drag or a text edit and writes nothing. Text is
+validated by the protocol's Unicode code-point limits after normalization.
+A section whose title is empty after trimming writes nothing and shows no
+error, on Enter or blur: a new section is not placed and an existing one
+keeps its confirmed title, as a Layers rename does. Other invalid input or a
+rejected write leaves the draft open beside a field error without moving
+focus, so after a click-away focus stays where the user put it and the user
+can click back in to fix the draft or press Escape. A write that settles
+after another item's editor opened closes only its own draft. Notes may be
+empty, and clearing a link's custom title restores its filename fallback. A selected
 item clears the frame and layer selection, so the Style panel shows its empty
 state; items never appear in Layers. No export carries them: PNG export,
 `design.capture`, thumbnails, recordings, the frame HTTP document, the
@@ -2185,7 +2395,11 @@ a frame's own document (`canvas-items-exports.test.ts`).
   something else. A typed negative where CSS takes none (sizes, padding, gap,
   radius, border width, font size, durations; `designStyleFieldRefusal`)
   writes nothing, restores the field and says "Width cannot be negative. Kept
-  120." with the field's visible name and the value as it shows. An emptied
+  120." with the field's visible name and the value as it shows. A value the
+  property does not take at all (`abc`, or a unitless `1e3` font size) is
+  refused the same way ("Size does not take abc. Kept 28."), as the browser's
+  `CSS.supports` answers for that property; custom properties, keywords,
+  `var()` and maths functions it accepts still write. An emptied
   field restores its value; X, Y and rotation, which have no menu, keep empty
   as removing the offset. Removal moved to the hover card: a value set on the
   layer that replaces nothing offers Clear (one undoable step, also
@@ -2251,9 +2465,11 @@ a frame's own document (`canvas-items-exports.test.ts`).
   action. A missing token's pill is two spans, so the name truncates and
   "is missing" always shows. Section actions, icon buttons and the Stroke
   sides select (`data-design-filter-companion`) hide under a Styled-by
-  filter and a held state. A layer inside a component instance cannot be
-  selected today (the expander drops `data-oid` from definition content),
-  so "Part of <component>." waits for Phase 7.
+  filter and a held state. A layer inside a component instance (a part,
+  entered by double-clicking the selected instance) reads "Part of
+  <component>." with Select instance and Edit main under the header; its
+  Style panel writes the instance's override for that part (see "Part
+  overrides").
 - **Frame changes and Tidy:** with a frame (not a layer in it) selected, an
   info panel at the foot of the side panel, directly above Layers
   (`design-frame-changes-panel.tsx`), counts the frame's changes made by
@@ -2419,11 +2635,19 @@ a frame's own document (`canvas-items-exports.test.ts`).
   Align horizontally / Align vertically (within its parent), two constraint
   selects (Left, Right, Center, Left and right, Scale; Top, Bottom, Center,
   Top and bottom, Scale) beside a pinned-edges diagram, and Stacking order
-  (`z-index`). A layer its parent's auto layout places shows "Placed by its
-  parent's auto layout." and Place freely instead: one undoable update that
-  writes `position: absolute` at the current box (left/top less margins,
-  border-box width/height, start markers) and makes the parent `relative`
-  only when it is static. A canvas frame's root has no constraints. Fit to
+  (`z-index`). A layer of a parent with auto layout shows an Absolute
+  position checkbox. Unticked, auto layout places the layer and X and Y are
+  locked. Ticking it is one undoable update that writes `position: absolute`
+  at the current box (left/top less margins, border-box width/height, start
+  markers) and makes the parent `relative` only when it is static. Unticking
+  removes the layer's position, insets and markers. When a stylesheet also makes
+  it absolute, including under its own inline value, it writes `relative` (which
+  stays the box its absolute children sit in) and `auto` for the rule's insets,
+  so auto layout places it where it now
+  belongs; its size stays. Several layers that differ read Mixed, and a
+  click ticks the ones not yet absolute. In Layers, an absolute layer of an
+  auto layout parent shows the absolute mark (`absolute` on the runtime's
+  tree node) in place of its type icon. A canvas frame's root has no constraints. Fit to
   content (a free-layout container with children) sits in the header. With
   several layers selected, each aligns or constrains within its own parent,
   and a constraint that differs reads Mixed. Scale stores left/top and
@@ -2451,10 +2675,15 @@ a frame's own document (`canvas-items-exports.test.ts`).
   percentage. Text layers keep text semantics: Fill edits `color`, and the
   inspector does not offer conversion into a layout container or a background.
   Ranged fields settle on what can be stored instead of failing on commit:
-  frame W/H stay within 1–16,384, X/Y within ±1,000,000, and opacity and the
-  like within their range. A typed negative size, padding, gap, radius,
-  border width, font size or duration is refused instead (see Field values
-  below; the engine writes declarations verbatim, so `padding-top:-10px`
+  frame W/H stay within 1–16,384, X/Y within ±1,000,000, and opacity within
+  0–100%. The field shows the bound itself while a scrub or arrow goes past
+  it, so the field, the live preview and the write agree. A plain numeric
+  Opacity entry is a display percentage (`25` writes `0.25`, with exponent
+  numbers following the same rule); a valid function, token or global keyword
+  such as `calc(50%)`, `var(--muted)` or `inherit` is already CSS and
+  writes unchanged. A typed negative size, padding, gap, radius, border width,
+  font size or duration is refused instead (see Field values below; the engine
+  writes declarations verbatim, so `padding-top:-10px`
   would persist a declaration the browser ignores), including one component
   of a shorthand (`-5px 10px`); a scrub or arrow stops at 0. Margins, insets,
   letter spacing, offsets and delays keep negative values. Frame W/H edits are built
@@ -2758,7 +2987,23 @@ acknowledgements, and for Undo and Redo of those edits, which prepare the
 frames the step restored (page and theme steps keep the aggregate). A write or
 step that reaches a stylesheet, tokens.css or a component reads the
 aggregate, since every linking frame renders it. Scoped replies carry no
-lint; the projection keeps other files' confirmed rows. Each reply
+lint, so the write lock is never held for it (linting the written frame held
+the lock 3-25 ms longer, 30-80 % of its locked time, in a measured bench); the projection keeps
+other files' confirmed rows and marks the written frames `lintPending`. On
+engines that negotiate `design.frames.lint.v1` (Local only) the renderer then
+asks, on the background lane, for those frames' rows at the source versions it
+holds; the engine lints them without the document lock, checks each frame's
+version before and after, leaves out a frame that moved on and refuses the read
+when the canvas or directory changed. The renderer applies the rows only to
+frames still at the version asked, of the same directory and owner, replacing
+their source rows and keeping their runtime audits; a written frame keeps its
+earlier rows until then. A frame that changes outside Zeros
+(`design.frames.changes.v1`) asks for its rows on its next preparation:
+engines that negotiate `design.frames.prepare-lint.v1` lint the named
+`lintFiles` and the renderer replaces them the same way. Both replies carry at
+most 256 rows a frame, most severe first. A frame's first preparation on open
+is not linted, so a lazily opened directory shows no rows for frames nobody has
+changed or validated yet. Each reply
 contains complete validated page/frame metadata and prepared source for at most
 16 affected frames; a single-frame edit never re-prepares, lints or reads the
 HTML of unrelated frames (token names for its lint are read without usage
@@ -2846,7 +3091,14 @@ frame has a ready document or loaded picture. There is no batch reveal, fade,
 or empty placeholder card. Hidden metadata shells retain their bounds for
 Layers navigation and Fit selection; they cannot receive pointer input.
 Warm outgoing content stays visible during revalidation. Runtime load errors
-remain actionable, and preparation errors use the shared workbench status.
+remain actionable. A frame whose source cannot be prepared (its registered
+file missing or unreadable, or the whole preparation request failing) shows
+the problem on that frame only, whether it was never shown or still holds
+earlier pixels: its label carries a red mark with the engine's reason, and
+"Couldn’t load this frame." with Retry appears at screen size only where the
+frame is large enough on screen to hold it, never over neighbouring frames.
+The Design tab and other frames stay usable, and restoring the file reports
+it as a frame change, which prepares it again.
 
 For frames using the picture fallback, the authoritative iframe stays mounted
 at deep zoom while a bounded visible crop is rerasterized for device fidelity.
@@ -4526,10 +4778,6 @@ Architecture A. Phase 7 extends that qualified shared-session workflow.
 - Reuse source-bound reviews/results and durable tasks. Compare accepted-output
   quality and cost against the single-session workflow before increasing
   concurrency or autonomous scope.
-- A layer inside a component instance: selectable with definition-local
-  identity, its styles read only, with "Part of <component>." and Select
-  instance or Edit main in the Style panel. Moved here from Phase 5c, where no
-  such layer could be selected.
 
 Exit gates: multi-step work pauses/resumes across conflicts, resource limits,
 and disconnects without duplicate edits, leaked authority, or orphan processes.
@@ -4616,6 +4864,21 @@ fixture. New caches require exact-key, race and bounded-eviction tests. A new
 surface kind also needs a resource fixture, measured host baseline, teardown
 coverage and review of its trust boundary. The historical name
 `check:design-containment` does not make composer mode a filesystem sandbox.
+
+The UI smokes emulate the engine for component option writes, variants and
+undo, so those flows are also proved against the real engine. The committed
+folder `apps/desktop/src/engine/workspace/__tests__/fixtures/design-components/`
+holds a main component with number, colour, text, choice and easing options, a
+derived value and two variants; a host frame with two instances, one carrying
+an ignored attribute; a legacy `components/fx-badge.html` definition; and a
+section, a note and a file link card on the canvas.
+`design-components-fixture.test.ts` copies it to a scratch root, opens it
+through `WorkspaceService` and the Design routes, and checks preparation and
+expansion, instance and main default writes, variants, byte-exact undo and
+redo with the earlier source version, `ifUnused` deletion reporting `inUse`, a
+missing main, canvas item put, delete and undo, and that frame geometry and
+layer delete or move change only the bytes they must. Extend that fixture
+rather than adding another when a component or canvas item flow changes.
 
 ### Required failure matrix
 

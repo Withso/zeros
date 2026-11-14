@@ -53,21 +53,28 @@ const formatted = (value: number) => String(value);
 function useTypedValue(value: string, onCommit: (text: string) => void, onDone?: () => void) {
   const [text, setText] = React.useState(value);
   const done = React.useRef(false);
-  React.useEffect(() => setText(value), [value]);
+  const typing = React.useRef(false);
+  // A new value arriving while something is typed here leaves the typing alone.
+  React.useEffect(() => { if (!typing.current) setText(value); }, [value]);
   return {
     value: text,
-    onChange: (event: React.ChangeEvent<HTMLInputElement>) => setText(event.target.value),
+    onChange: (event: React.ChangeEvent<HTMLInputElement>) => {
+      typing.current = event.target.value !== value;
+      setText(event.target.value);
+    },
     onFocus: () => { done.current = false; },
     onKeyDown: (event: React.KeyboardEvent<HTMLInputElement>) => {
       if (event.key === "Enter") {
         event.preventDefault();
         done.current = true;
+        typing.current = false;
         if (text !== value) onCommit(text);
         onDone?.();
       } else if (event.key === "Escape") {
         event.preventDefault();
         event.stopPropagation();
         done.current = true;
+        typing.current = false;
         setText(value);
         onDone?.();
       }
@@ -75,6 +82,7 @@ function useTypedValue(value: string, onCommit: (text: string) => void, onDone?:
     onBlur: () => {
       if (!done.current && text !== value) onCommit(text);
       done.current = false;
+      typing.current = false;
       onDone?.();
     },
   };

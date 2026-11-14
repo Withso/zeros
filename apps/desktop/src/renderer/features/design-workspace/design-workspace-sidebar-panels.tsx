@@ -19,13 +19,16 @@ import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import {
   ChevronDown,
   ChevronRight,
+  Diamond,
   Eye,
   EyeClosed,
   Frame,
   Grid2X2,
   Image,
   ListCollapse,
+  Scan,
   Spline,
+  SquareDashed,
   StretchHorizontal,
   StretchVertical,
   Type,
@@ -49,6 +52,7 @@ import {
 import { useDesignRuntimeStore } from "./state/design-runtime-store";
 import { useDesignHistoryPresentation, useDesignHistorySelection } from "./state/design-history-presentation";
 import { noteDesignFrameIntent } from "./state/design-frame-intent";
+import { designLayerDisplayName, designLayerRowKind } from "./state/design-component-parts";
 import { useActiveWorkspace } from "../../state/use-active-workspace";
 import { useReadRecovery } from "../../state/use-read-recovery";
 import { useDocumentActive } from "../../state/use-document-active";
@@ -206,6 +210,22 @@ function LayerTypeIcon({
   );
 }
 
+export function DesignLayerRowIcon({ kind, node }: {
+  kind: ReturnType<typeof designLayerRowKind>;
+  node: DesignRuntimeTreeNode;
+}) {
+  if (kind === "instance") return <Diamond data-design-layer-instance="" aria-hidden="true" />;
+  if (kind === "slot") return <SquareDashed data-design-layer-slot="" aria-hidden="true" />;
+  if (node.absolute) return <Scan data-design-layer-absolute="" aria-hidden="true" />;
+  return (
+    <LayerTypeIcon
+      label={designRuntimeLayerLabel(node)}
+      display={node.display}
+      flexDirection={node.flexDirection}
+    />
+  );
+}
+
 /** A selection and the rows it owns form one rounded container: the run's first
  * row rounds its top, its last rounds its bottom, and the rows between stay
  * square. Rows outside a run round on their own, so hover reads as one chip. */
@@ -333,9 +353,10 @@ const DesignLayerFrameRow = React.memo(function DesignLayerFrameRow({
 });
 
 const DesignLayerNodeRow = React.memo(function DesignLayerNodeRow({
-  row, rowIndex, blockRadius, selected, inSelectionSubtree, hovered, tabbable, rename, actions,
+  row, displayName, rowIndex, blockRadius, selected, inSelectionSubtree, hovered, tabbable, rename, actions,
 }: {
   row: Extract<DesignPanelRow, { kind: "layer" }>;
+  displayName: string;
   rowIndex: number;
   blockRadius: string;
   selected: boolean;
@@ -346,7 +367,7 @@ const DesignLayerNodeRow = React.memo(function DesignLayerNodeRow({
   actions: DesignLayerRowActions;
 }) {
   const { frame, layer } = row;
-  const displayName = designRuntimeLayerDisplayName(layer.node);
+  const kind = designLayerRowKind(frame, layer.node.oid);
   const dimmed = !layer.node.visible || layer.hiddenByAncestor;
   return (
     <div
@@ -405,11 +426,7 @@ const DesignLayerNodeRow = React.memo(function DesignLayerNodeRow({
           ) : (
             <span className={DESIGN_LAYER_DISCLOSURE_SPACER} />
           )}
-          <LayerTypeIcon
-            label={designRuntimeLayerLabel(layer.node)}
-            display={layer.node.display}
-            flexDirection={layer.node.flexDirection}
-          />
+          <DesignLayerRowIcon kind={kind} node={layer.node} />
           <DesignLayerRowName rename={rename} name={displayName} actions={actions} />
         </div>
       </Button>
@@ -505,6 +522,11 @@ function OwnedDesignWorkspaceSidebarPanels({
   // Follow the shared snapshot whenever the panel shows, as the workspace
   // does: requests are shared per key, and connectivity only shapes recovery.
   const snapshot = useDesignWorkspaceSnapshot(workspaceId, folder, active);
+  const snapshotFrames = snapshot.data?.frames;
+  const mainTitle = useCallback(
+    (file: string) => snapshotFrames?.find((candidate) => candidate.file === file)?.title,
+    [snapshotFrames],
+  );
   const recovery = useReadRecovery(`design-layers:${JSON.stringify([workspaceId, folder])}`, {
     error: snapshot.error, pending: snapshot.loading || snapshot.refreshing,
     hasContent: snapshot.data !== undefined, retry: snapshot.refresh,
@@ -674,12 +696,12 @@ function OwnedDesignWorkspaceSidebarPanels({
       designFrameDisplayName(selectedFrame),
       ...(selectedNodeId
         ? designLayerPathNodes(selectedTree, selectedNodeId).map((node) =>
-            designRuntimeLayerDisplayName(node),
+            designLayerDisplayName(selectedFrame, node, mainTitle),
           )
         : []),
     ];
     return names.slice(-2).join(" › ");
-  }, [expanded, selectedFrame, selectedNodeId, selectedTree]);
+  }, [expanded, selectedFrame, selectedNodeId, selectedTree, mainTitle]);
   // A retained tree must never revive another directory/page's draft, or
   // commit it when hiding/removing the input happens to produce a blur.
   useLayoutEffect(() => {
@@ -1157,6 +1179,7 @@ function OwnedDesignWorkspaceSidebarPanels({
 
   const beginRename = (row: DesignPanelRow) => {
     if (!treeActive || !layerOwnerKey || row.kind === "pending") return;
+    if (row.kind === "layer" && ["part", "slot"].includes(designLayerRowKind(row.frame, row.layer.node.oid))) return;
     if (!isPreparedDesignFrame(row.frame)) { chooseFrame(row.frame); return; }
     if (savedEditing && !savedEditing.enter()) {
       toast.info("Saved source is still restoring. Try the edit again when the preview has cleared.");
@@ -1496,6 +1519,7 @@ function OwnedDesignWorkspaceSidebarPanels({
                   <DesignLayerNodeRow
                     key={row.key}
                     row={row}
+                    displayName={designLayerDisplayName(frame, layer.node, mainTitle)}
                     rowIndex={rowIndex}
                     blockRadius={blockRadius}
                     selected={selectedLayer}

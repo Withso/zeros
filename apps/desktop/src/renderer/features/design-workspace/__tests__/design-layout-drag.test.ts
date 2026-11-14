@@ -3,6 +3,7 @@ import type { DesignRuntimeNodeDetails } from "@zeros/protocol/design-runtime";
 import {
   createDesignLayoutDropResolver,
   designLayoutDrop,
+  designLayoutDropSourceStyles,
 } from "../design-layout-drag";
 
 function node(
@@ -322,5 +323,73 @@ describe("canvas layout drop intent", () => {
         { x: 980, y: 980 },
       ),
     ).toBeNull();
+  });
+});
+
+describe("the styles a flow drop saves", () => {
+  // Layout targets report this subset of computed styles for a layer in flow.
+  const inFlow = (target: DesignRuntimeNodeDetails, styles: Record<string, string> = {}) => ({
+    ...target,
+    styles: {
+      ...target.styles,
+      position: "static",
+      left: "auto",
+      top: "auto",
+      order: "0",
+      gridColumnStart: "auto",
+      gridColumnEnd: "auto",
+      gridRowStart: "auto",
+      gridRowEnd: "auto",
+      ...styles,
+    },
+  });
+
+  it("saves nothing positional for a reorder of a layer already in flow", () => {
+    const moving = inFlow(a);
+    const siblings = [root, moving, inFlow(b), inFlow(c)];
+    const drop = designLayoutDrop(moving, siblings, { x: 190, y: 30 }, { x: 180, y: 0 })!;
+    expect(drop.styles).toMatchObject({ position: "relative", left: "auto", order: "0" });
+    expect(designLayoutDropSourceStyles(moving, drop)).toEqual({});
+    const grid = { ...root, styles: { ...root.styles, display: "grid" } };
+    const gridDrop = designLayoutDrop(moving, [grid, moving, inFlow(b), inFlow(c)], { x: 190, y: 30 }, { x: 180, y: 0 })!;
+    expect(gridDrop.styles).toMatchObject({ "grid-column": "auto", "grid-row": "auto" });
+    expect(designLayoutDropSourceStyles(moving, gridDrop)).toEqual({});
+  });
+
+  it("keeps what the slot needs: its rank, a grid span, and clearing an offset", () => {
+    const moving = inFlow(a);
+    const ranked = designLayoutDrop(moving, [root, moving, inFlow(b, { order: "2" }), inFlow(c, { order: "2" })], { x: 190, y: 30 }, { x: 180, y: 0 })!;
+    expect(designLayoutDropSourceStyles(moving, ranked)).toEqual({ order: "2" });
+    const offset = inFlow(a, { position: "relative", left: "12px" });
+    const shifted = designLayoutDrop(offset, [root, offset, inFlow(b), inFlow(c)], { x: 190, y: 30 }, { x: 180, y: 0 })!;
+    expect(designLayoutDropSourceStyles(offset, shifted)).toEqual({
+      position: "relative",
+      left: "auto",
+      top: "auto",
+      right: "auto",
+      bottom: "auto",
+    });
+    const spanning = inFlow(a, { gridColumnStart: "span 2" });
+    const grid = { ...root, styles: { ...root.styles, display: "grid" } };
+    const spanned = designLayoutDrop(spanning, [grid, spanning, inFlow(b), inFlow(c)], { x: 190, y: 30 }, { x: 180, y: 0 })!;
+    expect(designLayoutDropSourceStyles(spanning, spanned)).toEqual({ "grid-column": "span 2" });
+  });
+
+  it("clears the offset of a free layer that joins a flow", () => {
+    const outer = node("outer", null, 0, 0, 900, 700);
+    const parent = { ...root, layout: { ...root.layout!, parentId: "outer" } };
+    const free = {
+      ...inFlow(a, { position: "absolute", left: "66px", top: "223px" }),
+      layout: { ...a.layout!, parentId: "outer" },
+    };
+    const drop = designLayoutDrop(free, [outer, parent, free, b], { x: 400, y: 300 }, { x: 350, y: 260 })!;
+    expect(designLayoutDropSourceStyles(free, drop)).toMatchObject({
+      position: "relative",
+      left: "auto",
+      top: "auto",
+      right: "auto",
+      bottom: "auto",
+      width: "100px",
+    });
   });
 });

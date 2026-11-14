@@ -11,6 +11,7 @@ export type WorkspaceDesignHistoryEntry =
       kind: "catalog";
       change: DesignCatalogChange;
       pageId?: string;
+      itemId?: string;
       beforeHistory: DesignLocalHistoryCheckpoint[];
       afterHistory: DesignLocalHistoryCheckpoint[];
       bytes: number;
@@ -56,11 +57,12 @@ export const MAX_DESIGN_HISTORY_BYTES = 16 * 1024 * 1024;
 
 export function catalogDesignHistoryBytes(entry: Extract<WorkspaceDesignHistoryEntry, { kind: "catalog" }>): number {
   return JSON.stringify(entry.change).length * 2 +
+    ((entry.pageId?.length ?? 0) + (entry.itemId?.length ?? 0)) * 2 +
     [...entry.beforeHistory, ...entry.afterHistory].reduce((sum, checkpoint) => sum + checkpoint.bytes, 0) + 256;
 }
 export function catalogDesignHistoryEntry(change: DesignCatalogChange, pageId?: string,
-  beforeHistory: DesignLocalHistoryCheckpoint[] = [], complete = true): Extract<WorkspaceDesignHistoryEntry, { kind: "catalog" }> {
-  const entry = { kind: "catalog" as const, change, ...(pageId ? { pageId } : {}), beforeHistory, afterHistory: [], bytes: 0 };
+  beforeHistory: DesignLocalHistoryCheckpoint[] = [], complete = true, itemId?: string): Extract<WorkspaceDesignHistoryEntry, { kind: "catalog" }> {
+  const entry = { kind: "catalog" as const, change, ...(pageId ? { pageId } : {}), ...(itemId ? { itemId } : {}), beforeHistory, afterHistory: [], bytes: 0 };
   entry.bytes = complete ? catalogDesignHistoryBytes(entry) : MAX_DESIGN_HISTORY_BYTES + 1;
   return entry;
 }

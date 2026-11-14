@@ -301,6 +301,12 @@ describe("design workspace cache", () => {
     expect(moved).not.toBe(previous);
     expect(moved.pages![0]!.items![0]).toBe(previous.pages[0]!.items[0]);
     expect(moved.pages![0]!.items![1]).toEqual({ ...note, x: 10 });
+    const hiddenChanged = stabilizeDesignWorkspaceSnapshot(previous, { ...structuredClone(previous),
+      pages: [{ ...page, items: [section, note], itemsNotShown: 2 }] });
+    expect(hiddenChanged).not.toBe(previous);
+    expect(hiddenChanged.pages![0]!.items).toBe(previous.pages![0]!.items);
+    expect(hiddenChanged.pages![0]!.itemsNotShown).toBe(2);
+    expect(stabilizeDesignWorkspaceSnapshot(hiddenChanged, structuredClone(hiddenChanged))).toBe(hiddenChanged);
     const linked = { id: "l1", kind: "link" as const, x: 0, y: 0, width: 240, target: "README.md" };
     const withLink = { ...snapshot(), pages: [{ ...page, items: [linked] }] };
     expect(stabilizeDesignWorkspaceSnapshot(withLink, { ...structuredClone(withLink), pages: [{ ...page, items: [{ ...linked, missing: true as const }] }] }).pages![0]!.items)
