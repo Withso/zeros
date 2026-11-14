@@ -945,8 +945,9 @@ only, since cloud v2 has no Design authoring.
    that value.
 4. Inline style is for one-off values and people's Style panel edits;
    declarations used on several elements belong in a class.
-5. `data-oid` only where it is needed (format rules above); component
-   definitions use `data-zid`.
+5. `data-oid` only where it is needed (format rules above); a main frame's
+   `data-oid` values name the parts its instances override, so they stay
+   stable. Older `components/` files use `data-zid`.
 6. Meaningful layers carry `data-name`.
 7. Captured or pasted markup carries `data-zd-captured` on its root, its
    optional value naming the source (`data-zd-captured="zeros renderer"`);
@@ -954,14 +955,19 @@ only, since cloud v2 has no Design authoring.
    "Settings — captured" tells people. The marker is for markup that really
    came from elsewhere, not a way to quiet warnings on the directory's own
    frames.
-8. Markup repeated three or more times becomes a component
-   (`components/<name>.html`, `<slot>`, `data-zd-attr`).
+8. Markup repeated three or more times becomes a component: a main frame
+   registered with `"component"` in `meta/canvas.json`, with options
+   (`{{ name }}`) and slots (`data-zd-slot`). Agents never add
+   `components/<name>.html`; Move main to canvas converts an existing one.
 
 The contract's text is part of the generated `rules.md` for paged
-directories. The text shipped before it is the compatibility contract
-`PREVIOUS_PER_PAGE_DESIGN_RULES` (`design-rules.ts`), so a directory holding
-it upgrades on its next authoring lifecycle refresh and keeps the project text
-appended after it; a hand-edited file is left alone. Unpaged legacy layouts
+directories. Earlier shipped texts are compatibility contracts in
+`design-rules.ts`: `PREVIOUS_CONTRACT_DESIGN_RULES` (the first contract,
+whose rule 8 made repeats `components/` files with a `title=` example that
+no option can take) and `PREVIOUS_PER_PAGE_DESIGN_RULES` (before the
+contract). A directory holding either upgrades on its next authoring
+lifecycle refresh and keeps the project text appended after it; a hand-edited
+file is left alone. Unpaged legacy layouts
 keep `ROOT_DESIGN_RULES` until they move to pages.
 
 #### Native edit and refresh behavior
@@ -1525,9 +1531,14 @@ or renderer owners.
   design-web) hashes the element's tag and sibling index at each level plus its
   own attributes and direct text, computed only for elements without a usable
   `data-oid`. A style, text or attribute edit therefore writes only the edited
-  layer's `data-oid`; adding, moving or removing layers writes every missing one
-  first. After an outside edit a shifted layer gets a new marker, never its
-  neighbour's, so a held selection is dropped rather than moved.
+  layer's `data-oid`. Adding, moving or removing layers writes the ids of the
+  layers it names and of those whose place it shifts, and no others
+  (`healDesignHtmlIdentitiesForEdit`): the edit is tried on a copy whose
+  id-less layers carry placeholder ids, so each layer is followed through it,
+  and a layer whose derived id would change keeps its old one in source. New
+  content takes ids only within itself. After an outside edit a shifted layer
+  gets a new marker, never its neighbour's, so a held selection is dropped
+  rather than moved.
 - Layers follow the rendered (flat) tree. Content of a declarative shadow root
   (`<template shadowrootmode>`, common in markup serialized from web
   components) renders as its host's layers. design-web's `shadow.ts` holds the
@@ -1765,7 +1776,10 @@ wraps each selector as `:is(S):where(zd-<name>, zd-<name> *)` (a selector
 naming the host keeps matching it) with `scopeDesignComponentStyle`, so a
 component's `.title` rule never restyles another frame's `.title`. A
 pseudo-element after a combinator (`.field ::placeholder`) keeps its subject
-as `:where(*)` there. `@scope` rules are copied unscoped. The
+as `:where(*)` there. An `@scope` rule keeps its rules as written and has
+its root limited the same way (`@scope (.card)` becomes
+`@scope (:is(.card):where(zd-card, zd-card *))`); one without a root, whose
+root would be the element holding the style, is rooted at the host. The
 runtime reads the selector back as authored for Style origins
 (`authoredComponentSelector`).
 
@@ -1779,6 +1793,22 @@ whose default-slot content is text alone offers that text as a Text row in
 Options (`node.set-text` on the host). A reserved attribute such as `title`
 is not offered. Instances are recorded at any depth when the host has its own
 `data-oid`, so a card placed inside another component's slot is one too.
+**Move main to canvas.** Components are authored as main frames;
+`components/<name>.html` is the older form, still read and never added by
+the rules or the skill. A selected instance of one offers Move main to canvas
+in place of Edit main (`design.component.move`, Local only): one canvas write
+places a 480×320 frame `<page folder>/<name>.html` on the active page with
+`"component": "<name>"` on its record, removes the file and records one
+history step, so undo and redo restore both byte for byte, and then opens the
+main. The conversion (`designMainFromComponentSource`) turns `data-zid` into
+`data-oid` (so the part names instances override keep), each
+`<slot data-zd-attr>` into a `{{ name }}` hole with a text option whose
+default is the fallback, adds a `<title>`, rebases the file's URLs to its new
+place and leaves a bare `<slot>` as the default slot. It refuses, with a
+reason, a slot name no option can take (such as `title`), markup in an
+attribute slot's fallback, `{{` in a file without options, a definition with
+errors, and a component that already has a main.
+
 A `components/` file `meta/canvas.json` does not list is still read as a
 component named after its file; an edit that changes nothing about the
 components keeps `canvas.json`'s own list (`persistedDesignFoundation`), so
@@ -1902,10 +1932,11 @@ click on a repeated copy selects its source layer.
 
 A frame's prepared record also names the instances it places at its top
 level, and deeper hosts that carry their own `data-oid` (`instances`: their components' declarations and reach, each host's
-option attributes and `zd-variant`, whether its values applied, and a key
-that changes with any of it; at most 32 components and 256 hosts). One
-selected instance shows "Instance of …" under its header, Edit main (or Open
-in Files for a `components/` file), and the component's rows with its own
+option attributes and `zd-variant`, its part overrides, the layers each slot
+holds, whether its values applied, and a key that changes with any of it; at
+most 32 components and 256 hosts). One
+selected instance shows "Instance of …" under its header, Edit main (or Move
+main to canvas for a `components/` file), and the component's rows with its own
 values: a dot marks a value that differs from what it inherits, a commit that
 lands on that value removes the attribute, the Variant row writes
 `zd-variant`, and Reset removes every option attribute and `zd-variant` in one
@@ -1915,16 +1946,40 @@ runtime-owned style over the zero-specificity rule). A double-click on a
 selected instance enters it and selects the part under the pointer
 (`getComponentPartAtLoc`, opt-in; a part's id is
 `::zeros-part:<host>:<part>`, percent-encoded, which no authored layer can
-take). A part's Style panel is inert, its outline has no handle, Select
-instance and Edit main (the main with the layer of the same id) sit under the
-header, a click inside the instance picks another part and Escape or a click
-outside leaves it. Every node write the workspace cache sends refuses a part
-before anything is sent, and the engine finds no such layer either. Layers
-names an instance by its component (an authored layer name wins) with the
-component mark, and, where the runtime offers `getComponentPartAtLoc`, lists
-its parts beneath it; elements without ids inside an instance pass their
-children through. A part row has no eye, rename or visibility actions: the
-main component owns them. An agent's selection names its host.
+take). A part reads "Part of …" (", overridden" when it is), its outline has
+no handle, Select instance and Edit main (the main with the layer of the same
+id) sit under the header, a click inside the instance picks another part and
+Escape or a click outside leaves it.
+
+**Part overrides.** A part's Style panel edits write the host's
+`zd-style-<part>` attribute (`<part>` is the part's `data-oid` in the main,
+without its `#n`), one declaration list per part, set, replaced or removed
+by property in one transaction and one undo. Expansion appends it to the
+part's own inline style, so an override wins over the main's rules and over
+options; `display: none` there hides the part in that instance. Text changes
+only through options, and structure only on the main: every other node write
+the workspace cache sends refuses a part before anything is sent (naming
+what to do instead), and the engine finds no such layer either. Reset under
+the header of an overridden part removes its override, and the instance's Options section
+ends with "Reset N part overrides". Canvas drag and resize on a part stay
+blocked. Layers names an instance by its component (an authored layer name
+wins) with the component mark, and, where the runtime offers
+`getComponentPartAtLoc`, lists its parts and slots beneath it; elements
+without ids inside an instance pass their children through. A part row cannot
+be renamed; its eye hides it on the canvas only, like any layer. An agent's
+selection names its host.
+
+**Slots.** A frame the main marks `data-zd-slot="<name>"` is a slot option
+(declaring `<zd-option type="slot">` only adds a label, group or order; it
+takes no default). What the main's frame holds is the default; an instance's
+children with `slot="<name>"` replace it, and a bare `<slot>` takes the
+rest. Layers shows a slot row (`::zeros-slot:<host>:<name>`) holding the
+instance's own layers, which are ordinary layers; Options shows the slot with
+how many layers it holds and Reset to default, which deletes them in one
+step. A layer dropped or drawn into a slot joins the host with
+`slot="<name>"`, and moving it out of the instance removes the attribute.
+A slot's own frame takes no style (it is the main's). Known limit: a canvas
+drag nests only a free layer that fully fits its target.
 
 A host's record also lists attributes that name no option (`ignored`, as
 written), shown in its Options section as one wrapped warning note each, and marks a
@@ -2410,8 +2465,8 @@ a frame's own document (`canvas-items-exports.test.ts`).
   filter and a held state. A layer inside a component instance (a part,
   entered by double-clicking the selected instance) reads "Part of
   <component>." with Select instance and Edit main under the header; its
-  Style panel is inert and Layers keeps the instance as one row (see
-  "Variants, instances and parts").
+  Style panel writes the instance's override for that part (see "Part
+  overrides").
 - **Frame changes and Tidy:** with a frame (not a layer in it) selected, an
   info panel at the foot of the side panel, directly above Layers
   (`design-frame-changes-panel.tsx`), counts the frame's changes made by
