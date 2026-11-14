@@ -5,6 +5,7 @@ import { withSystemTx, withUserTx } from "../db.js";
 import type { CloudV2MessageRow } from "./contract.js";
 import { teamSharingFixture, type TeamSharingFixture } from "./team-sharing/test-fixture.js";
 import { mirrorMessageDelta, mirrorMessageRange } from "./history-cache.js";
+import { mirrorTurnOpening } from "./history.js";
 
 const suite = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 suite("passive cloud chat cache through PostgreSQL and HTTP", () => {
@@ -141,6 +142,55 @@ suite("passive cloud chat cache through PostgreSQL and HTTP", () => {
     await mirror([row("opaque", "\0"), row("answer")]);
     expect(await range(1, 2)).toEqual({ revision: expect.any(Number), messageCount: 2,
       fromIndex: 1, toIndex: 2, rows: [{ index: 1, ...row("answer") }], senders: {} });
+  });
+
+  it.each(["opening", "steer", "absent"])("bounds opening reads across hundreds of opaque non-user candidates (%s)", async kind => {
+    const opening = { ...row("opening"), payload: JSON.stringify({ role: "user", text: "Opening" }) };
+    const steer = { ...row("steer"), payload: JSON.stringify({ role: "user", text: "Steer", steeredTurnId: "turn" }) };
+    const opaque = [JSON.stringify({ role: "assistant", text: "\0" }),
+      JSON.stringify({ role: "assistant", text: "\ud800" }), '{"role":"assistant","value":1e1000000}'];
+    const rows = [...(kind === "opening" ? [opening] : []), ...(kind !== "absent" ? [steer] : []),
+      ...Array.from({ length: 513 }, (_, i) => ({ ...row(`opaque-${i}`), payload: opaque[i % opaque.length]! })), row("answer")];
+    for (let i = 0; i < rows.length; i += 500) await mirror(rows.slice(i, i + 500));
+    const observed = await withSystemTx(pool, async tx => {
+      const { rows: [last] } = await tx.query<{ ord: string }>(
+        "SELECT ord FROM cloud_v2_messages WHERE workspace_id=$1 AND chat_id='chat' AND msg_id='answer'", [f.workspace.id]);
+      const query = tx.query.bind(tx);
+      let queries = 0, largestBatch = 0;
+      tx.query = (async (sql: string, values: unknown[]) => {
+        queries++;
+        const result = await query(sql, values);
+        largestBatch = Math.max(largestBatch, result.rows.length);
+        return result;
+      }) as typeof tx.query;
+      try { return { opening: await mirrorTurnOpening(tx, f.workspace.id, "chat", last!.ord), queries, largestBatch }; }
+      finally { tx.query = query; }
+    }, { consistentRead: true });
+    const expected = kind === "opening" ? opening : kind === "steer" ? steer : undefined;
+    expect(observed.opening).toEqual(expected);
+    expect(observed.queries).toBeLessThanOrEqual(kind === "opening" ? 6 : 12);
+    expect(observed.largestBatch).toBeLessThanOrEqual(128);
+    const reply = await range(rows.length - 1, rows.length);
+    expect(reply.rows).toEqual([{ index: rows.length - 1, ...row("answer") }]);
+    expect(reply.turnOpening).toEqual(expected);
+    expect(reply.senders).toEqual(expected ? { [expected.msgId]: null } : {});
+  });
+
+  it("keeps an ordinary opening read to one query and one candidate", async () => {
+    const rows = Array.from({ length: 5 }, (_, i) => ({ ...row(`user-${i}`), payload: JSON.stringify({ role: "user", text: "Opening" }) }));
+    await mirror([...rows, row("answer")]);
+    await withSystemTx(pool, async tx => {
+      const { rows: [last] } = await tx.query<{ ord: string }>(
+        "SELECT ord FROM cloud_v2_messages WHERE workspace_id=$1 AND chat_id='chat' AND msg_id='answer'", [f.workspace.id]);
+      const query = tx.query.bind(tx);
+      const sizes: number[] = [];
+      tx.query = (async (sql: string, values: unknown[]) => {
+        const result = await query(sql, values); sizes.push(result.rows.length); return result;
+      }) as typeof tx.query;
+      try { expect(await mirrorTurnOpening(tx, f.workspace.id, "chat", last!.ord)).toEqual(rows.at(-1)); }
+      finally { tx.query = query; }
+      expect(sizes).toEqual([1]);
+    }, { consistentRead: true });
   });
 
   it("returns every final append/edit since the exact base and ignores identical upserts", async () => {

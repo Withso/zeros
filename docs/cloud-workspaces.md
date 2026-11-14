@@ -1102,6 +1102,15 @@ With the sharing opt-in, range and non-resync delta replies include window's
 user rows and a range's separate turn opening; unknown attribution is `null`.
 Without the opt-in, and on resync, the field is absent. Older servers' absent
 sender maps remain unknown to the cache, rather than becoming explicit nulls.
+The control plane requires PostgreSQL 16 or newer for guarded native JSON
+validation. The migrator checks `server_version_num` before taking the schema
+lock or changing the ledger, including when no migrations are pending.
+Turn-opening reads keep opaque payloads intact and use the worker's JSON
+classification. After the ordinary one-row lookup, exceptional candidates are
+read in batches of 128, with unsteered openings preferred over steers. For 513
+opaque non-user rows before a tail, finding an older opening costs at most six queries;
+the steer-only or no-opening case costs at most twelve. The scan is still linear
+in candidate count and does not discard an opening after an arbitrary cap.
 
 Receipt caching opts into `GET .../prompts` with `X-Zeros-Chat-Cache: 1` and
 `includePayload=true`. This returns only the caller's receipts, with a chat's

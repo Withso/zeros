@@ -84,18 +84,22 @@ async function mirrorMessageRows(tx: Tx, workspaceId: string, chatId: string, op
 export async function mirrorTurnOpening(tx: Tx, workspaceId: string, chatId: string, before: string): Promise<CloudV2MessageRow | undefined> {
   for (const openingOnly of [true, false]) {
     let cursor = before;
+    let limit = 1;
     for (;;) {
       // Native JSON can exceed jsonb's Unicode or numeric domain. Keep those
-      // candidates opaque and classify them with the worker's parser.
-      const { rows: [anchor] } = await tx.query<Row>(
+      // candidates opaque; after the one-row fast path, classify them in batches
+      // so exceptional non-user rows do not each cost a database round trip.
+      const { rows } = await tx.query<Row>(
         `SELECT ${columns} FROM cloud_v2_messages WHERE workspace_id=$1 AND chat_id=$2 AND ord<$3 AND kind='text'
          AND CASE WHEN pg_input_is_valid(payload,'jsonb') THEN
            payload::jsonb->>'role'='user' ${openingOnly ? "AND payload::jsonb->>'steeredTurnId' IS NULL" : ""}
          ELSE payload IS JSON OBJECT END
-         ORDER BY ord DESC LIMIT 1`, [workspaceId, chatId, cursor]);
-      if (!anchor) break;
-      if (isUserMessage(anchor, openingOnly)) return persisted(anchor);
-      cursor = anchor.ord;
+         ORDER BY ord DESC LIMIT $4`, [workspaceId, chatId, cursor, limit]);
+      const anchor = rows.find(row => isUserMessage(row, openingOnly));
+      if (anchor) return persisted(anchor);
+      if (rows.length < limit) break;
+      cursor = rows.at(-1)!.ord;
+      limit = 128;
     }
   }
 }

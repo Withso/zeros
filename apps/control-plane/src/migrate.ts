@@ -589,6 +589,13 @@ async function withMigrationClient<T>(
   let operationError: unknown;
 
   try {
+    const version = await client.query<{ server_version_num: string }>("SHOW server_version_num");
+    const versionNumber = Number(version.rows[0]?.server_version_num);
+    if (!Number.isSafeInteger(versionNumber) || versionNumber < 160000) {
+      throw new MigrationDiagnosticError(
+        "PostgreSQL 16 or newer is required for cloud history reads; upgrade the database before release.",
+      );
+    }
     const timeout = await client.query<{ statement_timeout: string }>(
       "SHOW statement_timeout",
     );

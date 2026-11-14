@@ -277,6 +277,28 @@ describe("migration checksums", () => {
 });
 
 describe("migration runner connection boundary", () => {
+  it.each(["150010", "not-a-version", null])("rejects an unsupported PostgreSQL version before migration work (%s)", async version => {
+    const { pool, calls } = poolWithAppliedMigrations(LADDER, version);
+    const client = await pool.connect();
+    const error = await runMigrations(pool).catch((failure: unknown) => failure);
+    expect(error).toBeInstanceOf(Error);
+    expect(migrationFailureDiagnostic(error)).toContain("PostgreSQL 16 or newer");
+    expect(calls.map(call => call.text)).toEqual(["SHOW server_version_num"]);
+    expect(client.release).toHaveBeenCalledWith(true);
+  });
+
+  it.each(["160000", "160011", "180006"])("accepts PostgreSQL version %s before migration work", async version => {
+    const { pool, calls } = poolWithAppliedMigrations(LADDER, version);
+    await expect(runMigrations(pool)).resolves.toEqual([]);
+    expect(calls[0]?.text).toBe("SHOW server_version_num");
+  });
+
+  it("rejects a pre-16 service-boot migrator before it touches the schema", async () => {
+    const { pool, calls } = poolWithAppliedMigrations(LADDER, "150010");
+    await expect(runServiceBootMigrations(pool, { cloudWorkspacesEnabled: true })).rejects.toThrow("PostgreSQL 16 or newer");
+    expect(calls.map(call => call.text)).toEqual(["SHOW server_version_num"]);
+  });
+
   it("reports safe driver codes without logging driver messages or objects", () => {
     const secret = "private-database-row-or-url";
     const driverError = Object.assign(new Error(secret), { code: "23514", detail: secret });
@@ -325,6 +347,9 @@ describe("migration runner connection boundary", () => {
           const parameters =
             values ?? (typeof query === "string" ? [] : (query.values ?? []));
           calls.push({ text, values: parameters });
+          if (text === "SHOW server_version_num") {
+            return { rows: [{ server_version_num: "180006" }], rowCount: 1 };
+          }
           if (/SHOW\s+statement_timeout/i.test(text)) {
             return { rows: [{ statement_timeout: "30s" }], rowCount: 1 };
           }
@@ -371,7 +396,7 @@ describe("migration runner connection boundary", () => {
   });
 });
 
-function poolWithAppliedMigrations(appliedNames: readonly string[]): {
+function poolWithAppliedMigrations(appliedNames: readonly string[], serverVersion: string | null = "180006"): {
   pool: pg.Pool;
   calls: Array<{ text: string; values: readonly unknown[] }>;
 } {
@@ -392,6 +417,9 @@ function poolWithAppliedMigrations(appliedNames: readonly string[]): {
         const parameters =
           values ?? (typeof query === "string" ? [] : (query.values ?? []));
         calls.push({ text, values: parameters });
+        if (text === "SHOW server_version_num") {
+          return { rows: [{ server_version_num: serverVersion }], rowCount: 1 };
+        }
         if (/SHOW\s+statement_timeout/i.test(text)) {
           return { rows: [{ statement_timeout: "30s" }], rowCount: 1 };
         }
