@@ -15,6 +15,8 @@ export const BASE_SIZE = 5_000;
 const FACTOR = 4;
 const GROWTH = 8;
 const MIN_FLAGGED_MS = 30;
+const SAMPLE_PAIRS = 7;
+const QUORUM = 4;
 const GENERIC = [" ", "\n", "\t", "a", "a-", "aB1-", "-", "=", ":", "\"", "'", "<a", "/", "*", "`", "0", ".", "_",
   "a ", "a=", "a:", " :", "\" ", "\\", "[", "("];
 
@@ -60,20 +62,34 @@ function scan(pattern, flags, input, timeout) {
   return performance.now() - started;
 }
 
-// The fastest of three base scans discounts scheduling noise on a busy host.
-function grows(pattern, flags, unit, size) {
-  let base = scan(pattern, flags, fill(unit, size), 2_000);
-  if (base === Infinity) return { base, large: Infinity };
-  for (let run = 1; run < 3; run++) base = Math.min(base, scan(pattern, flags, fill(unit, size), 2_000));
-  const large = scan(pattern, flags, fill(unit, size * FACTOR), 4_000);
-  return large === Infinity || (large > MIN_FLAGGED_MS && large > GROWTH * Math.max(base, 0.25)) ? { base, large } : null;
+const median = (values) => values.toSorted((a, b) => a - b)[Math.floor(values.length / 2)];
+
+// Four agreeing pairs tolerate three timing outliers in either direction.
+// A native timeout still rejects immediately rather than spending the budget again.
+function grows(pattern, flags, unit, size, measure) {
+  const smallInput = fill(unit, size), largeInput = fill(unit, size * FACTOR);
+  const growing = [];
+  let linear = 0;
+  for (let pair = 0; pair < SAMPLE_PAIRS; pair++) {
+    const base = measure(pattern, flags, smallInput, 2_000);
+    if (base === Infinity) return { base, large: Infinity };
+    const large = measure(pattern, flags, largeInput, 4_000);
+    if (large === Infinity) return { base, large };
+    if (large > MIN_FLAGGED_MS && large > GROWTH * Math.max(base, 0.25)) {
+      growing.push({ base, large });
+      if (growing.length === QUORUM) return {
+        base: median(growing.map((sample) => sample.base)), large: median(growing.map((sample) => sample.large)),
+      };
+    } else if (++linear === QUORUM) return null;
+  }
+  return null;
 }
 
-/** The first input shape whose global scan grows super-linearly, confirmed by a second measurement. */
-export function superLinear({ source, flags }, size = BASE_SIZE) {
+/** The first input shape whose global scan has a majority of super-linear measurements. */
+export function superLinear({ source, flags }, size = BASE_SIZE, measure = scan) {
   for (const unit of attackUnits(source)) {
-    const first = grows(source, flags, unit, size);
-    if (first && grows(source, flags, unit, size)) return { unit, baseMs: Math.round(first.base), largeMs: Math.round(first.large) };
+    const growth = grows(source, flags, unit, size, measure);
+    if (growth) return { unit, baseMs: Math.round(growth.base), largeMs: Math.round(growth.large) };
   }
   return null;
 }
