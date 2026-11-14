@@ -16,7 +16,7 @@ import * as notifyProtocol from "@zeros/protocol/notify-user";
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); vi.useRealTimers(); });
-async function fixture(options: { hello?: Promise<void>; onFrame?: (frame: any) => void; heartbeatPhase?: number } = {}) {
+async function fixture(options: { hello?: Promise<void>; onFrame?: (frame: any) => void; heartbeatPhase?: number; config?: Record<string, unknown> } = {}) {
   const directory = await mkdtemp(join(tmpdir(), "hybrid-transport-")), tokenFile = join(directory, "token");
   let expected = "synthetic-worker-token", revision = "0", failHistory = false, lostReply = false;
   await writeFile(tokenFile, expected, { mode: 0o600 });
@@ -33,7 +33,7 @@ async function fixture(options: { hello?: Promise<void>; onFrame?: (frame: any) 
     const body = init?.body ? JSON.parse(String(init.body)) : null;
     requests.push({ path, body, authorized: new Headers(init?.headers).get("authorization") === `Bearer ${expected}` });
     if (path === "hello") await options.hello;
-    if (path === "hello" || path === "config") return Response.json({ config: { ...config, loginRevision: revision } });
+    if (path === "hello" || path === "config") return Response.json({ config: { ...config, ...options.config, loginRevision: revision } });
     if (path === "activity") return Response.json({ state: "running", loginRevision: revision });
     if (path === "pull") return Response.json({ prompts: [], stops: [] });
     if (path === "history") {
@@ -478,7 +478,7 @@ it("ignores an older control plane that rejects a newer timing phase", async () 
 });
 it("advertises outbox support without changing the strict hello body, and rereads credentials on pull", async () => {
   const f = await fixture();
-  expect(new Headers(vi.mocked(f.fetcher).mock.calls[0]![1]?.headers).get("x-zeros-worker-features")).toBe("prompt-outbox-v1,mcp-v1,workspace-setup-v1,checkout-v2,agent-interactions-v1,github-pr-v1,git-identity-v1,github-user-token-v1,code-review-v1,history-replace-v1,workspace-environment-v1,repository-setup-v1,runtime-update-v1,worker-push-v1,workspace-api-v1,session-name-v1,chat-edit-v1,local-commands-v1,setup-status-v1,notify-user-v1,sync-v1,local-commands-reason-v1,acting-user-v1,sync-context-v1,creator-agent-logins-v1,creator-agent-models-v1,creator-commit-identity-v1,push-signals-v1,recovery-quiesce-v1,history-digest-v1,history-digest-deletions-v1");
+  expect(new Headers(vi.mocked(f.fetcher).mock.calls[0]![1]?.headers).get("x-zeros-worker-features")).toBe("prompt-outbox-v1,mcp-v1,workspace-setup-v1,checkout-v2,agent-interactions-v1,github-pr-v1,git-identity-v1,github-user-token-v1,code-review-v1,history-replace-v1,workspace-environment-v1,repository-setup-v1,runtime-update-v1,worker-push-v1,workspace-api-v1,session-name-v1,chat-edit-v1,local-commands-v1,setup-status-v1,notify-user-v1,sync-v1,local-commands-reason-v1,acting-user-v1,sync-context-v1,creator-agent-logins-v1,creator-agent-models-v1,creator-commit-identity-v1,push-signals-v1,recovery-quiesce-v1,history-digest-v1,history-digest-deletions-v1,boot-timings-v1");
   expect(Object.keys(f.requests[0]!.body).sort()).toEqual(["bootId", "protocol", "runtimeSha256"]);
   await f.rotate();
   vi.mocked(f.fetcher).mockImplementationOnce(async (_url, init) => {
@@ -670,4 +670,78 @@ it("history-digest-v1: the digests read is authenticated exactly like the histor
     return Response.json({ chats: [] });
   });
   expect(await f.transport.historyDigests()).toEqual({ chats: [] });
+});
+
+describe("boot-timings-v1 (one wake on one timing line)", () => {
+  const bootPhases = ["worker_listening", "worker_hello_sent", "worker_hello_acked", "worker_applied_ready", "worker_first_inbound"];
+  const timings = (f: Awaited<ReturnType<typeof fixture>>) => f.requests.filter(request => request.path === "timing");
+  const records = (f: Awaited<ReturnType<typeof fixture>>) => timings(f).flatMap(request => request.body?.records ?? [request.body]);
+  const boot = (f: Awaited<ReturnType<typeof fixture>>) => records(f).filter(record => bootPhases.includes(record?.phase));
+
+  it("opted in, startup goes as ONE batch after applied-ready (marks and durations), and the first accepted relay as a later batch", async () => {
+    let transport!: HybridTransport;
+    const f = await fixture({ config: { bootTimings: 1 }, onFrame: frame => {
+      // A duration measured during configuration joins the startup batch.
+      if (frame.t === "config") transport.reportTiming({ phase: "worker_configure", durationMs: 42 });
+    } });
+    transport = f.transport;
+    await expect.poll(() => timings(f).length).toBe(1);
+    const startup = timings(f)[0]!.body;
+    expect(relayProtocol.CloudV2WorkerTimingRequestSchema.parse(startup)).toEqual(startup);
+    expect(startup.records.map((record: { phase: string }) => record.phase).sort())
+      .toEqual(["worker_applied_ready", "worker_configure", "worker_hello_acked", "worker_hello_sent", "worker_listening"]);
+    await connectRelay(f); await connectRelay(f);
+    await expect.poll(() => timings(f).length).toBe(2);
+    const by = Object.fromEntries(boot(f).map(record => [record.phase, record]));
+    for (const phase of bootPhases)
+      expect(relayProtocol.CloudV2WorkerBootTimingSchema.parse(by[phase])).toMatchObject({ bootId: f.transport.bootId, helloSequence: 1 });
+    expect(by.worker_listening.uptimeMs).toBeLessThanOrEqual(by.worker_hello_sent.uptimeMs);
+    expect(by.worker_hello_sent.uptimeMs).toBeLessThanOrEqual(by.worker_hello_acked.uptimeMs);
+    expect(by.worker_hello_acked.uptimeMs).toBeLessThanOrEqual(by.worker_applied_ready.uptimeMs);
+    expect(by.worker_first_inbound).toMatchObject({ firstStatus: 101, refusedBefore: 0 });
+    expect(f.requests.find(request => request.path === "hello")?.body).not.toHaveProperty("bootTimings");
+  });
+
+  it("an older control plane (no config.bootTimings) gets no boot mark and keeps single duration posts", async () => {
+    const f = await fixture();
+    await connectRelay(f);
+    f.transport.reportTiming({ phase: "worker_checkout", durationMs: 10 });
+    await f.transport.send({ t: "idle", idle: false });
+    await expect.poll(() => f.requests.some(request => request.path === "activity")).toBe(true);
+    await expect.poll(() => timings(f).length).toBe(1);
+    expect(timings(f)[0]!.body).toEqual({ phase: "worker_checkout", durationMs: 10 });
+    expect(boot(f)).toEqual([]);
+  });
+
+  it("a failed timing batch never reconnects or re-registers", async () => {
+    const f = await fixture({ config: { bootTimings: 1 } });
+    await expect.poll(() => timings(f).length).toBe(1);
+    vi.mocked(f.fetcher).mockImplementationOnce(async () => new Response(null, { status: 503 }));
+    await connectRelay(f);
+    await f.transport.send({ t: "idle", idle: false });
+    await expect.poll(() => f.requests.some(request => request.path === "activity")).toBe(true);
+    expect(f.requests.filter(request => request.path === "hello")).toHaveLength(1);
+    expect(f.requests.filter(request => request.path === "config")).toHaveLength(0);
+  });
+
+  it("tells the first accepted relay apart from refusals before it", async () => {
+    const f = await fixture({ config: { bootTimings: 1 } });
+    const refused = new WebSocket(`ws://127.0.0.1:${f.port}/v2/worker/bridge`, "zeros.cloud.v2.worker", { headers: { "X-Zeros-Worker-Auth": "v1.bad.bad" } });
+    await new Promise<void>(resolve => { refused.once("error", () => resolve()); refused.once("unexpected-response", () => resolve()); });
+    refused.terminate();
+    await connectRelay(f);
+    await expect.poll(() => boot(f).find(record => record.phase === "worker_first_inbound")).toMatchObject({ firstStatus: 401, refusedBefore: 1 });
+  });
+
+  it("a listener that cannot start for a missing key file logs a distinct line instead of binding late silently", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "hybrid-transport-keys-")), tokenFile = join(directory, "token");
+    await writeFile(tokenFile, "synthetic-worker-token", { mode: 0o600 });
+    const lines: string[] = [];
+    const transport = new HybridTransport({ apiUrl: "https://api.example.test", workspaceId: config.workspace.id, runtimeSha256: "a".repeat(64),
+      tokenFile, publicKeysFile: join(directory, "missing-worker-auth.json"), port: 0, fetch: vi.fn(async () => new Response(null, { status: 404 })),
+      retryBaseMs: 10, retryMaxMs: 20, heartbeatPhase: Date.now(), log: line => lines.push(line) });
+    cleanups.push(async () => { await transport.dispose(); await rm(directory, { recursive: true, force: true }); });
+    transport.start({ open: async () => {}, close: () => {}, frame: async () => {} });
+    await expect.poll(() => lines.some(line => /^boot listener-failed reason=missing uptime=\d+ boot=[0-9a-f-]{36}$/.test(line))).toBe(true);
+  });
 });
