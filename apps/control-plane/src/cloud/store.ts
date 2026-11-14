@@ -1,6 +1,7 @@
 import { executionIntentAuthority, type ExecutionAdmission, type ExecutionIntentAuthority } from "./execution/authority.js";
 import { assertNoExecutionTransition, cancelExecutionActivation, clearStoppedExecutionTransition, confirmExecutionStop, failExecutionActivation, needsExecutionStopConfirmation } from "./execution/activation-state.js";
 import { bindExecutionActivationBoot } from "./execution/activation.js";
+import { CLOUD_RECOVERY_TURN_HOLD } from "./recovery-state.js";
 import { assertExecutionCreationBoot, recordExecutionCreation } from "./execution/creation.js";
 import type { RuntimeCapabilities } from "./runtime-capabilities.js";
 import type { ExecutionConnectAuthority } from "./execution/clients.js";
@@ -63,6 +64,7 @@ type HistoryInput = {
 export type CloudV2WorkerSession = CloudV2Workspace & {
   accessEpoch: string; loginRevision: string; executionMode?: "legacy" | "prepared" | "active";
   executionTransitionId?: string;
+  recoveryAttemptId?: string;
   /** Present only on the hello that actually changes a booting state to running. */
   helloTiming?: { state: "creating" | "starting"; durationMs: number };
 };
@@ -120,6 +122,7 @@ export type CloudV2CheckpointRetry = { generation: string; attempts: number; sto
 
 /** Internal lifecycle metadata is never included in public workspace documents. */
 export type CloudV2LifecycleWorkspace = CloudV2Workspace & {
+  recoveryAttemptId?: string;
   executionTransitionId?: string;
   executionRestoreClaimed?: true;
   executionIntent?: { id: string | null; userId: string | null; accessEpoch: string; authority: ExecutionIntentAuthority | null };
@@ -225,7 +228,7 @@ function checkpointFork(value: unknown): CloudV2CheckpointFork | null {
     sandboxId: typeof fork.sandboxId === "string" ? fork.sandboxId : null };
 }
 
-function lifecycleWorkspace(row: LifecycleRow): CloudV2LifecycleWorkspace {
+export function cloudV2LifecycleWorkspaceFromRow(row: LifecycleRow): CloudV2LifecycleWorkspace {
   const reuse = row.checkpoint_object ? checkpointReuse(row.checkpoint_reuse, row.checkpoint_object) : null;
   const checkpoint = row.checkpoint_object && row.checkpoint_sha256 && row.checkpoint_bytes && row.checkpoint_saved_at
     ? { object: row.checkpoint_object, key: row.checkpoint_key, sha256: row.checkpoint_sha256, bytes: Number(row.checkpoint_bytes),
@@ -240,6 +243,7 @@ function lifecycleWorkspace(row: LifecycleRow): CloudV2LifecycleWorkspace {
     stopGeneration: row.stop_generation, checkpointUploadUntil: uploadHorizon(row.checkpoint_uploads),
     checkpointRetryFork: checkpointFork(row.checkpoint_retry_fork) };
 }
+const lifecycleWorkspace = cloudV2LifecycleWorkspaceFromRow;
 
 /** Where a checkpoint write may land. A stop's own write needs that stop to
  * still be stopping this VM. A retry's needs the latest stop to be the one it
@@ -757,12 +761,14 @@ export class CloudV2Store {
   }
 
   /** Internal only: private route data is deliberately absent from workspace(). */
-  async workerRoute(id: string): Promise<{ workspace: CloudV2Workspace; executionMode?: "legacy" | "prepared" | "active"; accessEpoch: string; url: string | null; portToken: unknown; bootId: string | null; workerTokenHash: string | null } | null> {
-    const { rows } = await withSystemTx(this.pool, tx => tx.query<Row & { execution_mode: "legacy" | "prepared" | "active"; access_epoch: string; worker_route_url: string | null; worker_port_token: unknown; worker_boot_id: string | null; worker_token_hash: string | null }>(
-      `SELECT ${COLUMNS}, execution_mode, access_epoch::text, worker_route_url, worker_port_token, worker_boot_id, encode(worker_token_hash,'hex') AS worker_token_hash
+  async workerRoute(id: string): Promise<{ workspace: CloudV2Workspace; executionMode?: "legacy" | "prepared" | "active"; recoveryAttemptId?: string; accessEpoch: string; url: string | null; portToken: unknown; bootId: string | null; workerTokenHash: string | null } | null> {
+    const { rows } = await withSystemTx(this.pool, tx => tx.query<Row & { execution_mode: "legacy" | "prepared" | "active"; recovery_attempt_id: string | null; access_epoch: string; worker_route_url: string | null; worker_port_token: unknown; worker_boot_id: string | null; worker_token_hash: string | null }>(
+      `SELECT ${COLUMNS}, execution_mode, recovery_attempt_id, access_epoch::text, worker_route_url, worker_port_token, worker_boot_id, encode(worker_token_hash,'hex') AS worker_token_hash
        FROM cloud_v2_workspaces w WHERE id=$1 AND state NOT IN ('deleting','deleted') AND ${LIVE_ACCESS}`, [id]));
     const row = rows[0];
-    return row ? { workspace: workspace(row), executionMode: row.execution_mode, accessEpoch: row.access_epoch, url: row.worker_route_url, portToken: row.worker_port_token, bootId: row.worker_boot_id, workerTokenHash: row.worker_token_hash } : null;
+    return row ? { workspace: workspace(row), executionMode: row.execution_mode,
+      ...(row.recovery_attempt_id ? { recoveryAttemptId: row.recovery_attempt_id } : {}),
+      accessEpoch: row.access_epoch, url: row.worker_route_url, portToken: row.worker_port_token, bootId: row.worker_boot_id, workerTokenHash: row.worker_token_hash } : null;
   }
 
   async setWorkerRoute(id: string, sandboxId: string, url: string, portToken: unknown): Promise<boolean> {
@@ -774,19 +780,20 @@ export class CloudV2Store {
 
   /** Refusing a runtime must not retire the workspace's current boot. */
   async workerHelloIdentity(token: string): Promise<CloudV2WorkerSession | null> {
-    const { rows } = await withSystemTx(this.pool, tx => tx.query<Row & { execution_mode: "legacy" | "prepared" | "active"; execution_transition_id: string | null; access_epoch: string; login_revision: string }>(
-      `SELECT ${COLUMNS}, execution_mode, execution_transition_id, access_epoch::text, login_revision::text FROM cloud_v2_workspaces w
+    const { rows } = await withSystemTx(this.pool, tx => tx.query<Row & { execution_mode: "legacy" | "prepared" | "active"; execution_transition_id: string | null; recovery_attempt_id: string | null; access_epoch: string; login_revision: string }>(
+      `SELECT ${COLUMNS}, execution_mode, execution_transition_id, recovery_attempt_id, access_epoch::text, login_revision::text FROM cloud_v2_workspaces w
        WHERE worker_token_hash=$1 AND state IN ('creating','starting','running') AND ${LIVE_ACCESS}`, [hashCloudV2Token(token)]));
     const row = rows[0];
     return row ? { ...workspace(row), accessEpoch: row.access_epoch, loginRevision: row.login_revision, executionMode: row.execution_mode,
+      ...(row.recovery_attempt_id ? { recoveryAttemptId: row.recovery_attempt_id } : {}),
       ...(row.execution_transition_id ? { executionTransitionId: row.execution_transition_id } : {}) } : null;
   }
 
   /** Bind the boot before configuration I/O, without publishing readiness.
    * Lifecycle delivery must not replace a credential once this boot claims it. */
-  async beginWorkerHello(token: string, bootId: string, actingUser = false, runtimeSha256?: string, syncContext = false): Promise<CloudV2WorkerSession | null> {
+  async beginWorkerHello(token: string, bootId: string, actingUser = false, runtimeSha256?: string, syncContext = false, recovery = false): Promise<CloudV2WorkerSession | null> {
     const { rows } = await withSystemTx(this.pool, async tx => {
-      const result = await tx.query<Row & { execution_mode: "legacy" | "prepared" | "active"; access_epoch: string; login_revision: string; previous_boot_id: string | null }>(
+      const result = await tx.query<Row & { execution_mode: "legacy" | "prepared" | "active"; recovery_attempt_id: string | null; access_epoch: string; login_revision: string; previous_boot_id: string | null }>(
       `WITH prior AS MATERIALIZED (
          SELECT id AS prior_id,worker_boot_id AS previous_boot_id FROM cloud_v2_workspaces w
          WHERE worker_token_hash=$1 AND state IN ('creating','starting','running') AND ${LIVE_ACCESS} FOR UPDATE)
@@ -795,9 +802,10 @@ export class CloudV2Store {
          worker_history_digest=CASE WHEN worker_boot_id=$2 THEN worker_history_digest ELSE NULL END,
          state=CASE WHEN state='running' AND worker_boot_id IS DISTINCT FROM $2 THEN 'starting' ELSE state END,
          updated_at=CASE WHEN state='running' AND worker_boot_id IS DISTINCT FROM $2 THEN clock_timestamp() ELSE updated_at END,
-         worker_boot_id=$2, acting_user_boot_ids=CASE WHEN $3 THEN ARRAY[$2::uuid] ELSE '{}'::uuid[] END
+         worker_boot_id=$2, acting_user_boot_ids=CASE WHEN $3 THEN ARRAY[$2::uuid] ELSE '{}'::uuid[] END,
+         worker_recovery_boot_id=CASE WHEN $4 THEN $2 ELSE NULL END
        FROM prior WHERE w.id=prior.prior_id AND worker_token_hash=$1 AND state IN ('creating','starting','running') AND ${LIVE_ACCESS}
-       RETURNING ${COLUMNS.replace(/\b(\w+)\b/g, "w.$1")},execution_mode,access_epoch::text,login_revision::text,prior.previous_boot_id`, [hashCloudV2Token(token), bootId, actingUser]);
+       RETURNING ${COLUMNS.replace(/\b(\w+)\b/g, "w.$1")},execution_mode,recovery_attempt_id,access_epoch::text,login_revision::text,prior.previous_boot_id`, [hashCloudV2Token(token), bootId, actingUser, recovery]);
       const current = result.rows[0];
       if (current?.execution_mode === "active") {
         if (!actingUser || !this.prompts.execution) throw new HttpError(409, "worker_update_required", "Update the worker before shared execution");
@@ -808,7 +816,8 @@ export class CloudV2Store {
       return result;
     });
     const row = rows[0];
-    return row ? { ...workspace(row), accessEpoch: row.access_epoch, loginRevision: row.login_revision, executionMode: row.execution_mode } : null;
+    return row ? { ...workspace(row), accessEpoch: row.access_epoch, loginRevision: row.login_revision, executionMode: row.execution_mode,
+      ...(row.recovery_attempt_id ? { recoveryAttemptId: row.recovery_attempt_id } : {}) } : null;
   }
 
   async acceptWorkerHello(token: string, bootId: string, proof?: { accessEpoch: string; loginRevision: string }): Promise<CloudV2WorkerSession | null> {
@@ -820,7 +829,8 @@ export class CloudV2Store {
              AND b.clean_at IS NOT NULL AND b.legacy_material IN ('none','removed') AND b.replaced_by IS NULL
              AND b.access_epoch=w.access_epoch AND b.stop_generation=w.stop_generation AND b.worker_token_hash=w.worker_token_hash)
              ELSE NOT EXISTS (SELECT 1 FROM cloud_workspace_environment_pins p WHERE p.workspace_id=w.id
-               AND (p.ready_boot_id IS NULL OR p.ready_boot_id IS DISTINCT FROM $2::uuid)) END) AS environment_ready
+               AND (p.ready_boot_id IS NULL OR p.ready_boot_id IS DISTINCT FROM $2::uuid)) END
+             AND NOT (${CLOUD_RECOVERY_TURN_HOLD})) AS environment_ready
          FROM cloud_v2_workspaces w
          WHERE worker_token_hash=$1 AND state IN ('creating','starting','running') AND ${LIVE_ACCESS}
            AND ($3::bigint IS NULL OR (worker_boot_id=$2 AND access_epoch=$3 AND login_revision=$4::bigint)) FOR UPDATE)
@@ -844,18 +854,19 @@ export class CloudV2Store {
   }
 
   async workerSession(token: string, bootId: string, handoff?: { id: string; sha256?: string }): Promise<CloudV2WorkerSession | null> {
-    const { rows } = handoff ? await withSystemTx(this.pool, tx => tx.query<Row & { execution_mode: "legacy" | "prepared" | "active"; execution_transition_id: string | null; access_epoch: string; login_revision: string }>(
-      `SELECT ${COLUMNS}, execution_mode, execution_transition_id, access_epoch::text, login_revision::text FROM cloud_v2_workspaces w
+    const { rows } = handoff ? await withSystemTx(this.pool, tx => tx.query<Row & { execution_mode: "legacy" | "prepared" | "active"; execution_transition_id: string | null; recovery_attempt_id: string | null; access_epoch: string; login_revision: string }>(
+      `SELECT ${COLUMNS}, execution_mode, execution_transition_id, recovery_attempt_id, access_epoch::text, login_revision::text FROM cloud_v2_workspaces w
        WHERE worker_token_hash=$1 AND ${RUNTIME_HANDOFF_SESSION}
        AND state NOT IN ('deleting','deleted') AND ${LIVE_ACCESS}`,
       [hashCloudV2Token(token), bootId, handoff.id, handoff.sha256 ?? null]))
-      : await withSystemStatement<Row & { execution_mode: "legacy" | "prepared" | "active"; execution_transition_id: string | null; access_epoch: string; login_revision: string }>(this.pool,
-        sql`SELECT ${WORKSPACE_COLUMNS_SQL}, execution_mode, execution_transition_id, access_epoch::text, login_revision::text FROM cloud_v2_workspaces w
+      : await withSystemStatement<Row & { execution_mode: "legacy" | "prepared" | "active"; execution_transition_id: string | null; recovery_attempt_id: string | null; access_epoch: string; login_revision: string }>(this.pool,
+        sql`SELECT ${WORKSPACE_COLUMNS_SQL}, execution_mode, execution_transition_id, recovery_attempt_id, access_epoch::text, login_revision::text FROM cloud_v2_workspaces w
           WHERE worker_token_hash=decode(${SqlFragment.text(hashCloudV2Token(token).toString("hex"), /^[0-9a-f]{64}$/)}, 'hex')
             AND worker_boot_id=${SqlFragment.uuid(bootId.toLowerCase())}
             AND state NOT IN ('deleting','deleted') AND ${CLOUD_V2_LIVE_ACCESS_SQL}`);
     const row = rows[0];
     return row ? { ...workspace(row), accessEpoch: row.access_epoch, loginRevision: row.login_revision, executionMode: row.execution_mode,
+      ...(row.recovery_attempt_id ? { recoveryAttemptId: row.recovery_attempt_id } : {}),
       ...(row.execution_transition_id ? { executionTransitionId: row.execution_transition_id } : {}) } : null;
   }
 

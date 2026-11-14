@@ -80,10 +80,50 @@ is reconciled from that receipt; it never triggers another hide. Publication
 checks the current sandbox, boot, access epoch, worker and route credentials,
 and excludes lifecycle and runtime handoffs. The worker process, workspace
 identity, history and outbound prompt delivery continue. One more 60-second
-window verifies the repaired route. An unsafe or exhausted attempt leaves the
-workspace `running` with `error.code: "live_connection_unavailable"`; a proven
-successful connection clears it. This condition does not revoke authority,
-stop the VM or replace its disk. Local workspaces use their existing engine.
+window verifies the repaired route. Another witnessed gateway failure can
+start checkpoint recovery only for an active workspace whose current worker
+advertised `recovery-quiesce-v1`. Older workers retain the named
+`error.code: "live_connection_unavailable"` condition; a successful connection
+clears it. Local workspaces use their existing engine.
+
+Checkpoint recovery waits up to ten minutes for queued and running turns and
+setup to finish. It checks the recorded initiator's GitHub access before
+disrupting the source VM, then fences turn admission under the workspace lock.
+New sends remain durably queued. The worker receives an outbound prompt-pull
+hint, freezes mutating admissions after its 30-second quiet ticket, flushes
+store and history, and seals the exact attempt and generation over HTTPS.
+Clients and terminals do not prevent this quiet ticket. A seal must arrive
+within 90 seconds of the fence. Lost replies or binding mismatches never
+release a frozen worker; only an explicit cancellation of that binding does.
+
+After a seal, the control plane verifies service shutdown and an empty worker
+cgroup, then forces a fresh encrypted checkpoint. It never substitutes a
+previous Stop archive. The replacement uses the source's pinned runtime and
+the existing Cloud Computer/checkpoint restore path. A recovery-only restore
+marker creates a durable worker turn hold before setup. Both outbound dispatch
+and bridge turns wait until the original setup succeeds (including a confirmed
+no-op); failed or interrupted setup keeps the hold. The workspace stays in
+`starting` during verification, with stored chats visible. There is no recovery
+banner or toast.
+
+The original VM is retained until the replacement's disk, configured worker
+and successful setup are proven. Stop, deletion and authority loss supersede
+the attempt. If Stop wins after candidate publication, the unproven source is
+still retained; cleanup may not infer abandonment from the new workspace
+sandbox pointer. The overall attempt has a 40-minute deadline and a durable
+rolling one-hour cap, including failed attempts. Unsafe or exhausted recovery
+reports `live_connection_unavailable`, retaining the original disk and history.
+Completed journal rows retain sealed credentials for at least 24 hours. The
+lifecycle recovery coordinator purges them only after non-current VMs,
+uncertain creates/uploads and unowned checkpoint objects are reconciled.
+Cleanup failures keep their receipts.
+
+A rebuilt workspace keeps its ID, number, name, chat IDs, deep link and stored
+history. The checkpoint includes native Claude, Codex and Cursor session files
+for context continuation. Packages return from the permitted Cloud Computer
+image or the original setup. Processes, terminals, `/tmp`, hand-installed tools
+outside that image/setup, and files outside the checkpoint's documented scope
+do not carry over.
 
 The worker serializes HTTP and relay configuration. Its first configuration
 constructs the required checkout, session, MCP, agent and terminal services

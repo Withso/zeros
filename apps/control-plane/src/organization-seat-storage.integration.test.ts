@@ -1,10 +1,11 @@
 import { randomUUID } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { SYSTEM_DATABASE_CONTEXT } from "./db-context.js";
 import { withSystemTx, withUserTx } from "./db.js";
-import { runMigrations } from "./migrate.js";
+import { migrationChecksum, runMigrations } from "./migrate.js";
+import { migrationPhase } from "./migration-phase.js";
 import { organizationMemberSeats } from "./organization-seats.js";
 import { resetMigratedTestDatabase } from "./test-database.js";
 import { grantTestPro } from "./test-pro.js";
@@ -38,8 +39,7 @@ database("stored organization seats", () => {
     await tx.query(legacy.slice(legacy.indexOf("CREATE FUNCTION organization_member_seats(")).replaceAll("CREATE FUNCTION", "CREATE OR REPLACE FUNCTION"));
     await tx.query("DROP FUNCTION organization_member_seats_at(uuid,integer,integer,timestamptz)");
   };
-  beforeEach(async () => {
-    await resetMigratedTestDatabase(pool);
+  const seedSeats = async () => {
     people = Array.from({ length: 8 }, () => randomUUID());
     await pool.query("INSERT INTO users(id,email) SELECT id,id::text||'@example.test' FROM unnest($1::uuid[]) AS u(id)", [people]);
     await grantTestPro(pool,person(0));
@@ -48,6 +48,10 @@ database("stored organization seats", () => {
       SELECT $1,id,CASE WHEN n=1 THEN 'owner' ELSE 'member' END::organization_role,'2000-01-01'::timestamptz+n*interval '1 day'
       FROM unnest($2::uuid[]) WITH ORDINALITY AS u(id,n)`, [org,people.slice(0,7)]);
     expect((await seats()).get(person(6))).toBe("hold");
+  };
+  beforeEach(async () => {
+    await resetMigratedTestDatabase(pool);
+    await seedSeats();
   });
 
   it.each(["insert","delete","ordering","rebind","move","account cascade"] as const)("refreshes old and new scope for membership %s", async change => {
@@ -430,14 +434,26 @@ database("stored organization seats", () => {
   });
 
   it("rolls back a blocked backfill without a ledger entry and retries on the same populated database", async () => {
-    const before = await seats();
+    const directory = new URL("../migrations/", import.meta.url);
+    const migrations = (await readdir(directory)).filter(file => /^\d{4}_.+\.sql$/.test(file)).sort();
+    const boundary = "0249_organization_seat_state.sql";
     const setup = await pool.connect();
     try {
-      await setup.query(`BEGIN; ${SYSTEM_DATABASE_CONTEXT}`);
-      await restoreLegacySeats(setup);
-      await setup.query("DELETE FROM schema_migrations WHERE name='0249_organization_seat_state.sql'");
-      await setup.query("COMMIT");
+      // Reconstruct the real prefix; deleting only 0249's ledger row leaves
+      // later schema and ledger entries that cannot precede this migration.
+      await setup.query(`DROP SCHEMA public CASCADE; CREATE SCHEMA public;
+        CREATE TABLE schema_migrations(name text PRIMARY KEY,applied_at timestamptz NOT NULL DEFAULT now(),checksum text,phase text NOT NULL DEFAULT 'legacy');`);
+      for (const file of migrations.filter(file => file < boundary)) {
+        const sql = await readFile(new URL(file, directory), "utf8");
+        await setup.query("BEGIN");
+        await setup.query(sql);
+        await setup.query("INSERT INTO schema_migrations(name,checksum,phase) VALUES($1,$2,$3)",
+          [file, migrationChecksum(sql), migrationPhase(file, sql).phase]);
+        await setup.query("COMMIT");
+      }
     } finally { await setup.query("ROLLBACK"); setup.release(); }
+    await seedSeats();
+    const before = await seats();
     const ledger = (await pool.query("SELECT name,checksum FROM schema_migrations ORDER BY name")).rows;
     const blocker = await pool.connect();
     try {
@@ -451,9 +467,9 @@ database("stored organization seats", () => {
         .toEqual([{ periods: null, generations: null, people: null, refresh: null }]);
     } finally { await blocker.query("ROLLBACK"); blocker.release(); }
     expect(await seats()).toEqual(before);
-    await expect(runMigrations(pool)).resolves.toEqual(["0249_organization_seat_state.sql"]);
+    await expect(runMigrations(pool)).resolves.toEqual(migrations.filter(file => file >= boundary));
     expect(await seats()).toEqual(before);
     await parity();
     await expect(runMigrations(pool)).resolves.toEqual([]);
-  }, 20_000);
+  }, 40_000);
 });

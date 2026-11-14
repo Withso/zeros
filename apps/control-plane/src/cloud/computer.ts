@@ -694,8 +694,12 @@ export class CloudV2Computers {
     // snapshot. New pins need an active build.
     const { rows } = await withSystemTx(this.pool, tx => tx.query<Resources>(`SELECT b.*,
       EXISTS (SELECT 1 FROM cloud_v2_computers c WHERE c.active_build_id=b.id) AS active,
-      EXISTS (SELECT 1 FROM cloud_v2_workspaces w WHERE w.computer_build_id=b.id AND w.org_id=b.org_id AND w.boat_sandbox_id IS NULL
-        AND (w.state='creating' OR (w.restore_pending AND w.state<>'deleted'))) AS pinned
+      (EXISTS (SELECT 1 FROM cloud_v2_workspaces w WHERE w.computer_build_id=b.id AND w.org_id=b.org_id AND w.boat_sandbox_id IS NULL
+        AND (w.state='creating' OR (w.restore_pending AND w.state<>'deleted')))
+        OR EXISTS (SELECT 1 FROM cloud_v2_recovery_attempts a WHERE a.org_id=b.org_id
+          AND a.replacement_create->>'computerBuildId'=b.id::text AND a.replacement_sandbox_id IS NULL
+          AND a.replacement_create->>'createRejectedAt' IS NULL
+          AND (a.completed_at IS NULL OR a.replacement_create->>'createIssuedAt' IS NOT NULL))) AS pinned
       FROM cloud_v2_computer_builds b WHERE b.id=$1`, [id]));
     return rows[0] ?? null;
   }

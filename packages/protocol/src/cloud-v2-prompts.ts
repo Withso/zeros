@@ -1,6 +1,7 @@
 // Durable cloud sends use HTTPS independently of the live bridge. The control
 // plane mirrors this contract with Zod 3 in cloud/prompt-contract.ts.
 import { z } from "zod";
+import { CloudRecoveryHintSchema } from "./cloud-recovery-quiesce";
 
 export const CLOUD_V2_MAX_PROMPT_BYTES = 8 * 1024 * 1024;
 export const CLOUD_V2_PROMPT_POLL_MS = 25_000;
@@ -83,7 +84,9 @@ export const CloudV2ChatEditSchema = z.object({ chatId: z.string().min(1).max(25
 export type CloudV2ChatEdit = z.infer<typeof CloudV2ChatEditSchema>;
 export const CloudV2ChatEditAckSchema = z.object({ chatId: z.string().min(1).max(256), version: CloudV2PromptCounterSchema }).strict();
 export const CloudV2PromptPullReplySchema = z.object({ prompts: z.array(CloudV2PromptDeliverySchema).max(16), stops: z.array(CloudV2PromptStopReplySchema).max(128),
-  chatEdits: z.array(CloudV2ChatEditSchema).max(128).optional() }).strict();
+  chatEdits: z.array(CloudV2ChatEditSchema).max(128).optional(),
+  /** recovery-quiesce-v1: sent only to a worker that advertised it, with no prompts. */
+  recovery: CloudRecoveryHintSchema.optional() }).strict();
 export type CloudV2PromptPullReply = z.infer<typeof CloudV2PromptPullReplySchema>;
 export const CloudV2PromptAckSchema = z.object({ userMessageId: CloudV2PromptIdSchema, deliveryId: z.string().uuid() }).strict();
 export const CloudV2PromptBeginSchema = CloudV2PromptAckSchema.extend({ dispatchId: z.string().uuid() });

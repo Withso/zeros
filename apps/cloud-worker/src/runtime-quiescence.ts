@@ -1,12 +1,18 @@
 const CATEGORIES = ["clients", "requests", "agents", "terminals", "setup", "checkout", "configuration", "prompts", "attachments", "storage", "tools"] as const;
 export type RuntimeCensus = Record<typeof CATEGORIES[number], boolean | null>;
-export type QuietTicket = { generation: number };
+/** runtime: an in-place runtime handoff needs the complete census. recovery (recovery-quiesce-v1): a replacement VM loses
+ * attached clients and terminals by design, so only turns, setup and writes must be quiet, and terminal output is not
+ * activity. */
+export type QuietScope = "runtime" | "recovery";
+export type QuietTicket = { generation: number; scope?: QuietScope };
+const RECOVERY_IGNORES: ReadonlySet<string> = new Set(["clients", "terminals"]);
 
 /** Idle-stop deliberately tolerates shells and pending input. Runtime adoption
  * requires a separate complete census, and activity between samples fences it. */
 export class RuntimeQuiescence {
   private generation = 0;
-  private quietSince?: number;
+  private workGeneration = 0;
+  private quietSince: Partial<Record<QuietScope, number>> = {};
   private phase: "open" | "sealing" | "committed" = "open";
   private pending = 0;
   private wait?: Promise<void>;
@@ -16,17 +22,25 @@ export class RuntimeQuiescence {
 
   get open(): boolean { return this.phase === "open"; }
 
-  activity(): void { this.generation++; this.quietSince = undefined; }
-  private quiet(): boolean {
+  /** Terminal output fences a runtime handoff but not a recovery. */
+  activity(source?: "terminal"): void {
+    this.generation++; this.quietSince.runtime = undefined;
+    if (source !== "terminal") { this.workGeneration++; this.quietSince.recovery = undefined; }
+  }
+  private quiet(scope: QuietScope = "runtime"): boolean {
     const census = this.census();
-    return this.pending === 0 && CATEGORIES.every(key => census[key] === false);
+    return this.pending === 0 && CATEGORIES.every(key => (scope === "recovery" && RECOVERY_IGNORES.has(key)) || census[key] === false);
   }
-  ticket(): QuietTicket | null {
-    if (this.phase !== "open" || !this.quiet()) { this.quietSince = undefined; return null; }
-    this.quietSince ??= this.now();
-    return this.now() - this.quietSince >= 30_000 ? { generation: this.generation } : null;
+  private current(scope: QuietScope): number { return scope === "recovery" ? this.workGeneration : this.generation; }
+  ticket(scope: QuietScope = "runtime"): QuietTicket | null {
+    if (this.phase !== "open" || !this.quiet(scope)) { this.quietSince[scope] = undefined; return null; }
+    const since = this.quietSince[scope] ??= this.now();
+    return this.now() - since >= 30_000 ? { generation: this.current(scope), ...(scope === "recovery" ? { scope } : {}) } : null;
   }
-  valid(ticket: QuietTicket): boolean { return ticket.generation === this.generation && this.quiet(); }
+  valid(ticket: QuietTicket): boolean {
+    const scope = ticket.scope ?? "runtime";
+    return ticket.generation === this.current(scope) && this.quiet(scope);
+  }
   freeze(ticket: QuietTicket): boolean {
     if (this.phase !== "open" || !this.valid(ticket)) return false;
     this.phase = "sealing";
@@ -45,7 +59,7 @@ export class RuntimeQuiescence {
     return () => {
       if (released) return;
       released = true; this.pending--; this.activity();
-      if (this.quiet()) this.quietSince = this.now();
+      for (const scope of ["runtime", "recovery"] as const) if (this.quiet(scope)) this.quietSince[scope] = this.now();
     };
   }
   release(): void {

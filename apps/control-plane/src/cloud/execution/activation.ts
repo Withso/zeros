@@ -4,6 +4,7 @@ import { HttpError } from "../../authz.js";
 import { preparedExecutionSnapshot, type PreparedExecutionSnapshot } from "./activation-snapshot.js";
 import type { CloudV2Runtime } from "../runtime.js";
 import { notifyCloudV2WorkerReady } from "../worker-ready.js";
+import { CLOUD_RECOVERY_TURN_HOLD } from "../recovery-state.js";
 import type { CloudExecutionContexts, ExecutionWorkspace } from "./store.js";
 import { executionIntentAuthority } from "./authority.js";
 import { actorChanged } from "./errors.js";
@@ -136,8 +137,8 @@ export async function completeExecutionActivation(tx: Tx, workspace: ExecutionWo
       WHERE id=$1`, [a.id,legacyMaterial]);
     await tx.query("UPDATE cloud_v2_workspaces SET execution_transition_id=NULL WHERE id=$1", [workspace.id]);
   }
-  const ready = await tx.query(`UPDATE cloud_v2_workspaces SET state='running',attempts=0,next_attempt_at=NULL,active_at=clock_timestamp(),updated_at=clock_timestamp()
+  const ready = await tx.query(`UPDATE cloud_v2_workspaces w SET state='running',attempts=0,next_attempt_at=NULL,active_at=clock_timestamp(),updated_at=clock_timestamp()
     WHERE id=$1 AND state IN ('creating','starting') AND worker_boot_id=$2 AND worker_token_hash=$3 AND access_epoch=$4 AND stop_generation=$5
-      AND archived_at IS NULL RETURNING id`, [workspace.id,workspace.worker_boot_id,workspace.worker_token_hash,workspace.access_epoch,workspace.stop_generation]);
+      AND archived_at IS NULL AND NOT (${CLOUD_RECOVERY_TURN_HOLD}) RETURNING id`, [workspace.id,workspace.worker_boot_id,workspace.worker_token_hash,workspace.access_epoch,workspace.stop_generation]);
   if (ready.rowCount) await notifyCloudV2WorkerReady(tx, workspace.id);
 }

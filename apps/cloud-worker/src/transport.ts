@@ -1,6 +1,6 @@
 import type { NotifyUserWorkerRequest } from "@zeros/protocol/notify-user";
 import type { NotifyUserDelivery } from "./notify-user/service";
-import type { CloudEnvironmentReport, CloudRuntimeUpdateReply, CloudRuntimeUpdateRequest, CloudV2SetupStatus, CloudV2WorkerFrame, CloudV2WorkerTiming } from "@zeros/protocol/cloud-v2-relay";
+import type { CloudEnvironmentReport, CloudRecoveryReply, CloudRecoveryRequest, CloudRuntimeUpdateReply, CloudRuntimeUpdateRequest, CloudV2SetupStatus, CloudV2WorkerFrame, CloudV2WorkerTiming } from "@zeros/protocol/cloud-v2-relay";
 import type { LocalCommandInput, LocalCommandResult } from "@zeros/protocol/local-commands";
 import type { McpAuthorizationRequest } from "./mcp/gateway";
 import type { ReportGithubCheckout } from "./workspace/github-checkout";
@@ -42,6 +42,8 @@ export interface Transport {
   /** setup-status-v1: POST setup, 204. Best effort; the next hello reports again. */
   reportSetup?: (status: CloudV2SetupStatus) => Promise<void>;
   runtimeUpdate?: (request: CloudRuntimeUpdateRequest, signal?: AbortSignal) => Promise<CloudRuntimeUpdateReply>;
+  /** recovery-quiesce-v1 (outbound): seal or confirm a recovery binding. */
+  recovery?: (request: CloudRecoveryRequest, signal?: AbortSignal) => Promise<CloudRecoveryReply>;
   readyRuntime?: () => Promise<void>;
   /** Team sharing slice B (acting-user-v1): POST /v2/cloud/worker/<path> for leases, renew and retirement.
    * A refusal throws with `status` and the closed `contextCode` from its body. */

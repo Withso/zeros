@@ -30,6 +30,9 @@ import { executionCreationRuntime } from "./execution/creation.js";
 import { CLOUD_V2_PROXY_PREFIX, type CloudV2ProxyDeps } from "./proxy.js";
 import { CloudV2Relay } from "./relay.js";
 import { CloudLiveRecovery } from "./live-recovery.js";
+import { CloudRecovery } from "./recovery.js";
+import { CloudRecoveryStore, RECOVERY_CHANNEL } from "./recovery-store.js";
+import { recoveryWorkerReady } from "./recovery-ready.js";
 import { LiveRecoverySignals } from "./live-recovery-signals.js";
 import { LiveRecoveryStore } from "./live-recovery-store.js";
 import { cloudV2Runtime } from "./runtime.js";
@@ -111,11 +114,17 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   const keys = cloudAgentCredentialKeys(config.cloudAgentCredentials ?? null);
   if (!keys) throw new Error("Cloud v2 requires the credential encryption keyring");
   const store = new CloudV2Store(pool, keys);
+  const recoveryStore = new CloudRecoveryStore(pool);
   const runtime = cloudV2Runtime(v2.runtime.sha256, v2.runtime.store);
   const activeCreateRuntime = activeRuntimeQualification(config.deploymentChannel, v2.runtime);
   const runtimeCanary = config.deploymentChannel === "alpha" && v2.runtimeCanary ? new RuntimeCanaryAuthority(v2.runtimeCanary) : undefined;
   const defaultRuntimeForWorkspace = workspaceRuntimeResolver(pool, runtime, runtimeCanary?.policy);
-  const runtimeForWorkspace = async (workspace: CloudV2Workspace & { executionTransitionId?: string; executionMode?: CloudV2WorkerSession["executionMode"] }) => {
+  const runtimeForWorkspace = async (workspace: CloudV2Workspace & { executionTransitionId?: string; recoveryAttemptId?: string; executionMode?: CloudV2WorkerSession["executionMode"] }) => {
+    if (workspace.recoveryAttemptId) {
+      const sha256 = await recoveryStore.runtime(workspace.id);
+      if (!sha256) throw new HttpError(409, "recovery_binding_changed", "Workspace recovery changed.");
+      return { sha256, url: () => runtime.url(sha256) };
+    }
     const activation = workspace.executionTransitionId ? await executionActivationRuntime(pool, workspace.id, runtime) : null;
     if (activation) return activation;
     const selected = await defaultRuntimeForWorkspace(workspace);
@@ -325,6 +334,8 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   const liveRecovery = roles.relay ? new CloudLiveRecovery({ route: workerRoute, compute,
     witness: (binding, until) => liveSignals.watch(binding, until),
     publish: (route, hosted) => liveStore.publish(route, hosted), condition: (route, failed) => liveStore.condition(route, failed),
+    rebuild: async route => !!await recoveryStore.begin(route),
+    recovered: route => recoveryStore.cancel(route.recoveryAttemptId!, route),
     mint: (id, boot) => signer.mint(id, boot), ready: id => connections?.hintReady(id), logger: console }) : null;
   void liveSignals.start().catch(() => {});
   const connections = roles.relay || roles.lifecycle ? new CloudV2Relay({
@@ -350,6 +361,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   const relay = roles.relay ? connections : null;
   const promptSignals = new CloudV2PromptSignals();
   const workers: CloudV2WorkerRouteDeps = { store, execution, timing, logger: console, authorizeSource, continueSource, config: workerConfig, githubToken, runtimeSha256: v2.runtime.sha256,
+    recovery: recoveryStore,
     outboundProof: binding => liveSignals.worker(binding),
     apiConfiguration,
     localCommands: { requests: localCommands, signals: localCommandSignals },
@@ -444,8 +456,8 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   } };
   void loginChanges?.start().catch(() => {}); // The shared listener retries and re-reads onReady.
   const remoteHeads = github.remoteHead;
-  const lifecycleSource = async (workspace: CloudV2LifecycleWorkspace, purpose: "git" | "computer" = "git") => {
-    const actor = await lifecycleExecution(execution, workspace);
+  const lifecycleSource = async (workspace: CloudV2LifecycleWorkspace, purpose: "git" | "computer" = "git", recoveryId?: string) => {
+    const actor = await lifecycleExecution(execution, workspace, recoveryId ? { recoveryId } : undefined);
     if (!actor) return null;
     try {
       const target = await github.identities.primary(workspace); await actor.check();
@@ -462,6 +474,34 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
       throw error;
     }
   };
+  const checkpoints = {
+    storage: cloudV2CheckpointStorage(runtimeStorageClient(v2.runtime.store), v2.runtime.store),
+    seal: (key: Buffer, id: string, object: string) => sealCheckpointKey(key, id, object, keys),
+    open: (sealed: unknown, id: string, object: string) => openCheckpointKey(sealed, id, object, keys),
+  };
+  const recovery = roles.lifecycle ? new CloudRecovery({
+    store: recoveryStore, compute, runtime, publicKeys: signer.publicKeys, checkpoints,
+    authorize: async workspace => {
+      if (!workspace.recoveryAttemptId || !await lifecycleExecution(execution, workspace, { recoveryId: workspace.recoveryAttemptId }))
+        throw new HttpError(409, "recovery_binding_changed", "Workspace recovery changed.");
+    },
+    githubToken: async workspace => {
+      if (!workspace.recoveryAttemptId) throw new HttpError(409, "recovery_binding_changed", "Workspace recovery changed.");
+      const actor = await lifecycleSource(workspace, "computer", workspace.recoveryAttemptId);
+      if (!actor) throw new HttpError(409, "recovery_binding_changed", "Workspace recovery changed.");
+      return actor.credential;
+    },
+    bootEnv: async (workspace, selected) => ({ CLOUD_V2_API_URL: v2.apiUrl, CLOUD_V2_RUNTIME_SHA256: selected.sha256, ZEROS_WORKSPACE_ID: workspace.id }),
+    sandboxName: (workspace, attempt) => `${cloudV2SandboxName(config.deploymentChannel, "ws", workspace.id, localOwner)}-r${attempt.slice(0, 8)}`,
+    sealToken: (token, id) => sealPortToken(token, id, keys), openToken: (envelope, id) => openPortToken(envelope, id, keys),
+    ready: async (workspace, attempt) => {
+      const route = await workerRoute(workspace.id);
+      return !!route && route.workspace.boatSandboxId === attempt.replacement_sandbox_id &&
+        route.bootId === attempt.replacement_boot_id && route.workerTokenHash === attempt.replacement_token_hash?.toString("hex") &&
+        route.recoveryAttemptId === attempt.id && await recoveryWorkerReady(route, signer.mint(workspace.id, route.bootId!));
+    },
+    logger: console,
+  }) : null;
   const builder = roles.lifecycle ? new CloudV2ComputerBuilder({
     computers, compute, channel: config.deploymentChannel, localOwner, runtime, publicKeys: signer.publicKeys,
     cloneToken: async (organizationId, userId, target) => {
@@ -473,6 +513,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     logger: console,
   }) : null;
   const lifecycle = roles.lifecycle ? new CloudV2Lifecycle({
+    ...(recovery ? { recovery } : {}),
     executionActivations: new CloudExecutionActivations(pool, execution),
     runtimeUpdates,
     // Always wired: rows created before async creates were disabled still resolve.
@@ -516,11 +557,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
       CLOUD_V2_RUNTIME_SHA256: (selected ?? await runtimeForWorkspace(workspace)).sha256, ZEROS_WORKSPACE_ID: workspace.id }),
     sandboxName: workspace => cloudV2SandboxName(config.deploymentChannel, "ws", workspace.id, localOwner),
     // Checkpoints share the runtime's bucket, under cloud-v2/checkpoints/.
-    checkpoints: {
-      storage: cloudV2CheckpointStorage(runtimeStorageClient(v2.runtime.store), v2.runtime.store),
-      seal: (key, id, object) => sealCheckpointKey(key, id, object, keys),
-      open: (sealed, id, object) => openCheckpointKey(sealed, id, object, keys),
-    },
+    checkpoints,
     remoteHead: async workspace => {
       const actor = await lifecycleExecution(execution, workspace);
       const target = await github.identities.primary(workspace); await actor?.check();
@@ -535,9 +572,9 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   // Lifecycle rows notify on change. Reconnecting sweeps once, covering any
   // notice lost meanwhile; the shared LISTEN session carries the channel.
   const lifecycleChanges = lifecycle ? postgresNotificationSubscription(listenerPool, {
-    channels: [CLOUD_V2_LIFECYCLE_CHANNEL],
-    onReady: () => lifecycle.wake(),
-    onNotification: () => lifecycle.wake(),
+    channels: [CLOUD_V2_LIFECYCLE_CHANNEL, RECOVERY_CHANNEL],
+    onReady: () => { lifecycle.wake(); recovery?.wake(); },
+    onNotification: notice => { if (notice.channel === RECOVERY_CHANNEL) recovery?.wake(); else lifecycle.wake(); },
   }) : null;
   void lifecycleChanges?.start().catch(() => {});
   return { store, execution, compute, routes, proxy, workers, api, relay, connections, lifecycle, runtimeUpdates, loginChanges, promptChanges, lifecycleChanges, promptSignals, localCommandSignals, teamSharing,

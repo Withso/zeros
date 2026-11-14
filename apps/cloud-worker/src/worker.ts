@@ -55,6 +55,8 @@ import { ApplicationEnvironment } from "./credentials/application-environment";
 import { WorkspaceApiEnvironment } from "./credentials/workspace-api";
 import { RuntimeQuiescence, type RuntimeCensus } from "./runtime-quiescence";
 import { RuntimeUpdate } from "./runtime-update";
+import { RecoveryQuiesce } from "./recovery-quiesce";
+import { openRecoveryTurnHold, releaseRecoveryTurnHold } from "./recovery-turn-hold";
 import type { RuntimePermit } from "./runtime-permit";
 import { ExecutionContexts } from "./sharing/execution-contexts";
 
@@ -129,6 +131,10 @@ export class CloudWorker {
   private readonly pendingClients = new Map<string, object>();
   private readonly runtimeGate = new RuntimeQuiescence(() => this.runtimeCensus, () => this.options.runtimeClock?.() ?? Date.now());
   private runtimeUpdater?: RuntimeUpdate;
+  /** recovery-quiesce-v1: fences and seals this worker for a fresh-checkpoint replacement. */
+  private recoveryQuiesce?: RecoveryQuiesce;
+  /** A recovery replacement holds new turns until its restored setup succeeds (or is a confirmed no-op). */
+  private turnsHeld = false;
   private runtimePublished = false;
   private configurations = 0;
   private scope?: WorkspaceScope;
@@ -333,7 +339,7 @@ export class CloudWorker {
     for (const timer of this.resourceWatchers.values()) clearInterval(timer);
     this.resourceWatchers.clear();
     if (this.disposed) return;
-    this.disposed = true; this.runtimeUpdater?.stop(); this.watchdog?.stop(); clearInterval(this.heartbeat); this.tokens.dispose(); this.githubCredentials.invalidate();
+    this.disposed = true; this.runtimeUpdater?.stop(); this.recoveryQuiesce?.stop(); this.watchdog?.stop(); clearInterval(this.heartbeat); this.tokens.dispose(); this.githubCredentials.invalidate();
     const workspaceTools = this.workspaceMcp.dispose();
     const agentsClosing = this.agents?.dispose();
     this.environmentLifetime.abort();
@@ -644,9 +650,20 @@ export class CloudWorker {
         }
         return reply;
       }, (chatId, version) => this.history?.acknowledgeChatEdit(chatId, version));
+      const inbox = this.promptInbox;
       // The negotiated cadence applies from the inbox's first poll, not from the next configuration.
-      this.promptInbox.pushSignals = this.pushSignals;
-      this.promptInbox.start();
+      inbox.pushSignals = this.pushSignals;
+      if (this.options.transport.recovery) {
+        const request = this.options.transport.recovery.bind(this.options.transport);
+        this.recoveryQuiesce ??= new RecoveryQuiesce({ gate: this.runtimeGate, request: input => request(input),
+          flush: async () => { await this.store?.flush(); await this.history?.flush(); },
+          pausePrompts: paused => { if (paused) this.promptInbox?.pause("recovery"); else this.promptInbox?.resume("recovery"); } });
+        const recovery = this.recoveryQuiesce;
+        inbox.onRecovery = hint => recovery.requested(hint);
+        if (recovery.frozen) inbox.pause("recovery");
+      }
+      if (this.turnsHeld) inbox.pause("setup");
+      inbox.start();
     } else if (this.promptInbox) { await this.promptInbox.dispose(); this.promptInbox = undefined; }
     this.configurationRevision = revision;
     if (config.runtimeUpdate === 1 && this.options.transport.runtimeUpdate && this.options.runtimePermit && !this.runtimeUpdater) {
@@ -732,6 +749,8 @@ export class CloudWorker {
         if (error.code !== "ENOENT") throw error;
         return false;
       });
+      // Before setup starts, so a restart mid-setup still holds new turns.
+      const holdTurns = await openRecoveryTurnHold(this.options.directory);
       store = await storeOpening;
       const servicesStarted = performance.now();
       // Earlier worker snapshots stored a cloud key in chat metadata. Native
@@ -797,7 +816,7 @@ export class CloudWorker {
         zerosEnvironment: () => workspaceApi.variables(), redact: text => application.text(text),
         ...(config.actingUser === 1 && this.contexts ? { people: this.terminalPeople(this.contexts, application) } : {}),
         ...(this.options.log ? { log: this.options.log } : {}),
-        records: join(this.options.directory, "terminals"), broadcast: frame => this.broadcast(frame), activity: () => { this.runtimeGate.activity(); void this.reportIdle(); } });
+        records: join(this.options.directory, "terminals"), broadcast: frame => this.broadcast(frame), activity: () => { this.runtimeGate.activity("terminal"); void this.reportIdle(); } });
       const chats = new ChatService(store, scope, (chatId) => agents!.closeChat(chatId), agents.turns, {
         historyReplacement: () => this.historyReplacementEnabled,
         mutate: agents.mutateChat.bind(agents),
@@ -815,6 +834,7 @@ export class CloudWorker {
       }));
       setup = new WorkspaceSetup({ directory: this.options.directory, workspace: config.workspace, gitEnvironment: this.gitEnvironment, application,
         signal: this.environmentLifetime.signal,
+        recordNoop: holdTurns,
         runner: this.options.setupRunner, activity: () => { void this.reportIdle(); }, onStorageError: () => this.options.onError?.("storage"),
         ...(this.options.transport.reportSetup ? { report: (status: CloudV2SetupStatus) => this.options.transport.reportSetup!(status) } : {}),
         beforeRun: async () => {
@@ -829,6 +849,7 @@ export class CloudWorker {
       this.sync?.dispose(); this.sync = sync;
       this.store = store; this.workspace = workspace; this.mcp = mcp; this.agents = agents; agents.setExecutionContexts(this.contexts, this.personal, this.options.log);
       agents.commitIdentity = (contextId, identity) => this.contextGit(contextId, identity); this.reviews = reviews;
+      agents.turnsHeld = () => this.turnsHeld;
       this.terminals = terminals; this.application = application; this.workspaceApi = workspaceApi; this.chats = chats; this.history = history; this.setup = setup; this.checkoutRefresh = refresh;
       this.unsubscribers.push(...unsubscribers); this.scope = scope; published = true;
       recordStartupTiming("worker_services", servicesStarted, timing);
@@ -837,6 +858,17 @@ export class CloudWorker {
       // Before start: a file a hard stop left running reads as interrupted, never as this run.
       void setup.reportCurrent();
       if (!this.options.runtimeResume) asStarter(() => setup!.start(this.initialSetupNeeded || restored));
+      if (holdTurns) {
+        this.turnsHeld = true;
+        // Only success or a confirmed no-op releases; failed/interrupted keep the hold (the control plane keeps the
+        // original VM and names the condition).
+        void setup.outcome().then(async outcome => {
+          if (outcome !== "succeeded" && outcome !== "noop") return;
+          await releaseRecoveryTurnHold(this.options.directory);
+          if (this.setup !== setup || this.disposed) return;
+          this.turnsHeld = false; this.promptInbox?.resume("setup");
+        }).catch(() => this.options.onError?.("storage"));
+      }
       if (bootstrap) void setup.done().then(() => retireContext(this.contexts!, bootstrap.contextId, "setup_done")).catch(() => {});
       return true;
     } finally {

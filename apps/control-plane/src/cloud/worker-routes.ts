@@ -22,6 +22,8 @@ import { requestSignal, type CloudLocalCommandSignals } from "./local-commands/s
 import { NOTIFY_USER_FEATURE, NotifyUserWorkerRequestSchema } from "./notify-user/contract.js";
 import { NotificationRateLimit, type CloudNotifyUser } from "./notify-user/store.js";
 import { CloudV2SetupStatusSchema } from "./setup-status-contract.js";
+import { CLOUD_RECOVERY_QUIESCE_FEATURE, CloudRecoveryRequestSchema, CloudRecoveryReplySchema,
+  type CloudRecoveryHint, type CloudRecoveryRequest, type CloudRecoveryReply } from "./recovery-quiesce-contract.js";
 import type { CloudWorkspaceSync } from "./workspace-sync/store.js";
 import { SYNC_FEATURE, SYNC_CONTEXT_FEATURE } from "./workspace-sync/contract.js";
 
@@ -34,6 +36,12 @@ export const CLOUD_V2_WORKER_API = "/v2/cloud/worker";
 type ConfigFrame = Extract<CloudV2ControlFrame, { t: "config" }>;
 export type CloudV2WorkerRouteDeps = {
   outboundProof?(binding: LiveRecoveryProofBinding): Promise<void>;
+  recovery?: {
+    pull(token: string, bootId: string, id: string): Promise<{ hold: boolean; hint?: CloudRecoveryHint }>;
+    request(token: string, bootId: string, input: CloudRecoveryRequest): Promise<CloudRecoveryReply>;
+    hello(token: string, bootId: string, runtime: string, capable: boolean, id: string): Promise<boolean>;
+    setup(token: string, bootId: string, id: string, report: z.infer<typeof CloudV2SetupStatusSchema>): Promise<void>;
+  };
   store: Pick<CloudV2Store, "beginWorkerHello" | "acceptWorkerHello" | "workerSession" | "accessEpoch" | "loginRevision" | "markActive" | "writeWorkerHistory" | "failWorkerCheckout"> & Partial<Pick<CloudV2Store, "prompts" | "workerHelloIdentity" | "chatEdits" | "reportWorkerSetup">>;
   runtimeSha256: string;
   execution?: CloudExecutionContexts;
@@ -298,10 +306,10 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
         && !await deps.localCommands.requests.advertise(token,input.bootId,true,handoff)) throw unauthorized();
       return c.json({ config: await configuration(deps, identity, token, input.bootId, workerFeatures(c), "admission", handoff) });
     }
-    let runtimeSha256 = deps.runtimeSha256;
+    let runtimeSha256 = deps.runtimeSha256, identity: CloudV2WorkerSession | null = null;
     if (deps.runtimeSha256ForWorkspace) {
       if (!deps.store.workerHelloIdentity) throw new HttpError(503, "worker_runtime_unavailable", "Worker runtime could not be verified");
-      const identity = await deps.store.workerHelloIdentity(token);
+      identity = await deps.store.workerHelloIdentity(token);
       if (!identity) throw unauthorized();
       runtimeSha256 = await deps.runtimeSha256ForWorkspace(identity);
     }
@@ -310,7 +318,10 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
       throw new HttpError(409, "worker_runtime_mismatch", "Worker runtime requires an update");
     if (deps.promptOutbox && !(c.req.header("x-zeros-worker-features") ?? "").split(",").map(value => value.trim()).includes("prompt-outbox-v1"))
       throw new HttpError(409, "worker_runtime_mismatch", "Worker runtime requires an update");
-    const workspace = await deps.store.beginWorkerHello(token, input.bootId, workerFeatures(c).has(ACTING_USER_FEATURE), input.runtimeSha256, workerFeatures(c).has(SYNC_CONTEXT_FEATURE));
+    const recoveryCapable = workerFeatures(c).has(CLOUD_RECOVERY_QUIESCE_FEATURE);
+    if (identity?.recoveryAttemptId && (!deps.recovery || !await deps.recovery.hello(token, input.bootId, input.runtimeSha256, recoveryCapable, identity.recoveryAttemptId)))
+      throw unauthorized();
+    const workspace = await deps.store.beginWorkerHello(token, input.bootId, workerFeatures(c).has(ACTING_USER_FEATURE), input.runtimeSha256, workerFeatures(c).has(SYNC_CONTEXT_FEATURE), recoveryCapable);
     if (!workspace) throw unauthorized();
     if (deps.workspaceSync && !await deps.workspaceSync.advertise(token, input.bootId, workerFeatures(c).has(SYNC_FEATURE), undefined, workerFeatures(c).has(SYNC_CONTEXT_FEATURE) && workerFeatures(c).has("acting-user-v1"))) throw unauthorized();
     if (deps.store.chatEdits && !await deps.store.chatEdits.advertise(token, input.bootId, workerFeatures(c).has("chat-edit-v1"))) throw unauthorized();
@@ -334,6 +345,12 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
     const token = bearer(c), bootId = c.req.header("x-zeros-worker-boot");
     if (!bootId || !z.string().uuid().safeParse(bootId).success) throw unauthorized();
     return c.json(await deps.runtimeUpdates.request(token, bootId, await body(c, CloudRuntimeUpdateRequestSchema)));
+  });
+  app.post(`${CLOUD_V2_WORKER_API}/recovery`, async c => {
+    if (!workerFeatures(c).has(CLOUD_RECOVERY_QUIESCE_FEATURE) || !deps.recovery)
+      throw new HttpError(404, "not_found", "Recovery is unavailable.");
+    const auth = await session(c, deps), input = await body(c, CloudRecoveryRequestSchema);
+    return c.json(CloudRecoveryReplySchema.parse(await deps.recovery.request(auth.token, auth.bootId, input)));
   });
   app.post(`${CLOUD_V2_WORKER_API}/timing`, async c => {
     const auth = await session(c, deps), record = await body(c, CloudV2WorkerTimingSchema);
@@ -369,6 +386,7 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
     const handoff = c.req.header("x-zeros-runtime-handoff");
     await deps.store.reportWorkerSetup(auth.token, auth.bootId, report,
       { accessEpoch: auth.workspace.accessEpoch, ...(handoff ? { handoff } : {}) });
+    if (auth.workspace.recoveryAttemptId) await deps.recovery?.setup(auth.token, auth.bootId, auth.workspace.recoveryAttemptId, report);
     return c.body(null, 204);
   });
   app.post(`${CLOUD_V2_WORKER_API}/history`, async c => {
@@ -438,7 +456,7 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
     const outbox = deps.store.prompts;
     if (!outbox) throw new Error("Cloud prompt store is required");
     app.post(`${CLOUD_V2_WORKER_API}/prompts/pull`, async c => {
-      const auth = await session(c, deps);
+      let auth = await session(c, deps);
       const { waitMs, held } = await body(c, CloudV2PromptPullSchema);
       const features = workerFeatures(c);
       if (waitMs > CLOUD_V2_PROMPT_POLL_MS && !features.has("push-signals-v1"))
@@ -461,8 +479,14 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
         return { ...batch, prompts };
       };
       const waiter = waitMs ? deps.waitForPrompts?.(auth.workspace.id, waitMs, c.req.raw.signal) : undefined;
-      const pull = (mode: "new" | "due") => features.has("chat-edit-v1")
-        ? outbox.pull(auth.token, auth.bootId, held, { chatEdits: mode }) : outbox.pull(auth.token, auth.bootId, held);
+      const pull = async (mode: "new" | "due"): Promise<CloudV2PromptPullReply> => {
+        if (auth.workspace.recoveryAttemptId && deps.recovery) {
+          const state = await deps.recovery.pull(auth.token, auth.bootId, auth.workspace.recoveryAttemptId);
+          if (state.hold) return { prompts: [], stops: [],
+            ...(state.hint && features.has(CLOUD_RECOVERY_QUIESCE_FEATURE) ? { recovery: state.hint } : {}) };
+        }
+        return features.has("chat-edit-v1") ? outbox.pull(auth.token, auth.bootId, held, { chatEdits: mode }) : outbox.pull(auth.token, auth.bootId, held);
+      };
       const reply = async (batch: CloudV2PromptPullReply) => {
         const value = await forWorker(batch);
         if (auth.workspace.boatSandboxId) void deps.outboundProof?.({ workspaceId: auth.workspace.id, bootId: auth.bootId,
@@ -471,10 +495,10 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
       };
       try {
         const first = await pull(waiter ? "new" : "due");
-        if (!waiter || first.prompts.length || first.stops.length || first.chatEdits?.length) return await reply(first);
+        if (!waiter || first.prompts.length || first.stops.length || first.chatEdits?.length || first.recovery) return await reply(first);
         await waiter.wait;
         if (c.req.raw.signal.aborted) throw new HttpError(503, "request_cancelled", "Delivery poll ended");
-        await session(c, deps);
+        auth = await session(c, deps);
         return await reply(await pull("due"));
       } finally { waiter?.dispose(); }
     });

@@ -49,6 +49,7 @@ interface SetupOptions {
   runner?: SetupRunner; activity(): void; onStorageError?(): void;
   /** setup-status-v1: best effort, never affects the setup itself. */
   report?(status: CloudV2SetupStatus): Promise<void>;
+  recordNoop?: boolean;
   beforeRun?(): Promise<void>;
   onAdmitted?(): Promise<void>;
 }
@@ -117,19 +118,32 @@ export class WorkspaceSetup {
 
   private selection: RepositorySetupSelection | null = null;
   private lfs = false;
+  private noop = false;
+  private noopRecorded = false;
 
   start(createdBranch: boolean): void {
     if (this.operation || this.controller.signal.aborted || !createdBranch) return;
     this.bootstrap = operationEnvironment.getStore();
     this.selection = selectRepositorySetup({ setupScript: this.options.workspace.setupScript, inlineCommand: this.options.workspace.setup });
     this.lfs = usesGitLfs(this.options.workspace.checkoutPath);
-    if (!this.selection && !this.lfs) return;
+    this.noop = !this.selection && !this.lfs;
+    if (this.noop && !this.options.recordNoop) return;
     this.running = true; this.options.activity();
-    this.operation = this.execute().finally(() => { this.running = false; this.options.activity(); });
+    this.operation = (this.noop ? this.recordNoop() : this.execute()).finally(() => { this.running = false; this.options.activity(); });
   }
 
   /** Settles when the started run (if any) has ended. */
   done(): Promise<void> { return (this.operation ?? Promise.resolve()).then(() => {}, () => {}); }
+
+  /** After start(): how this workspace's setup ended. `noop` is a confirmed no-op (nothing selected, no LFS); a file a
+   * hard stop left running reads as interrupted; no readable status is `unknown`. */
+  async outcome(): Promise<"succeeded" | "noop" | "failed" | "interrupted" | "unknown"> {
+    await this.done();
+    if (this.noop) return !this.options.recordNoop || this.noopRecorded ? "noop" : "unknown";
+    const status = await this.readStatus();
+    if (!status) return "unknown";
+    return status.state === "running" ? "interrupted" : status.state;
+  }
 
   private environment(): NodeJS.ProcessEnv {
     // Activated: the bootstrap lease's person and context (team sharing); none otherwise.
@@ -184,6 +198,32 @@ export class WorkspaceSetup {
     this.reportsClosed = true;
     this.cancel(); this.options.signal?.removeEventListener("abort", this.cancel);
     await this.operation;
+  }
+
+  /** A recovery's control plane also holds turns. Persist its no-op proof so
+   * a lost report can be replayed after the local turn hold is removed. */
+  private async recordNoop(): Promise<void> {
+    const directory = join(this.options.directory, "workspace-setup");
+    let file: FileHandle | undefined;
+    try {
+      await mkdir(directory, { recursive: true, mode: 0o700 });
+      try { file = await open(join(directory, `${this.options.workspace.id}.json`), constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
+      if (file) {
+        const now = new Date().toISOString();
+        await this.persist(file, { workspaceId: this.options.workspace.id, state: "succeeded", startedAt: now, finishedAt: now, exitCode: 0 });
+      }
+      const status = await this.readStatus();
+      if (!status || wireStatus(status, false)?.state !== "succeeded") return;
+      for (const path of [directory, this.options.directory]) {
+        const parent = await open(path, "r");
+        try { await parent.sync(); } finally { await parent.close(); }
+      }
+      await this.options.onAdmitted?.();
+      this.noopRecorded = true;
+      void this.reportCurrent();
+    } catch { this.options.onStorageError?.(); }
+    finally { await file?.close(); }
   }
 
   private async execute(): Promise<void> {

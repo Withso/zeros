@@ -32,6 +32,11 @@ export class PromptInbox {
   private unsubscribe?: () => void;
   private receiving = false;
   private calls = 0;
+  /** Reasons prompt claims are paused (a recovery freeze, a post-recovery setup hold); no pull runs while any is set. */
+  private readonly pauses = new Set<string>();
+  private unpaused?: () => void;
+  /** recovery-quiesce-v1: the control plane's hint, sent with no prompts. */
+  onRecovery?: (hint: { id: string }) => void;
 
   get runtimeBusy(): boolean {
     return this.lifetime.signal.aborted || this.receiving || this.calls > 0 || this.held.size > 0 || this.store.outboxEntries().some(({ entry }) =>
@@ -54,6 +59,20 @@ export class PromptInbox {
     this.task = this.run();
   }
   hint(): void { this.hinted = true; this.polling?.abort(); }
+  pause(reason: string): void { this.pauses.add(reason); this.polling?.abort(); }
+  resume(reason: string): void {
+    if (!this.pauses.delete(reason) || this.pauses.size) return;
+    this.hinted = true; this.unpaused?.(); this.unpaused = undefined;
+  }
+  get paused(): boolean { return this.pauses.size > 0; }
+  private async whilePaused(): Promise<void> {
+    while (this.pauses.size && !this.lifetime.signal.aborted) {
+      await new Promise<void>(resolve => {
+        this.unpaused = resolve;
+        this.lifetime.signal.addEventListener("abort", () => resolve(), { once: true });
+      });
+    }
+  }
   async dispose(): Promise<void> {
     this.unsubscribe?.(); this.lifetime.abort(); this.polling?.abort();
     this.agents.setOutboxDispatch();
@@ -142,6 +161,8 @@ export class PromptInbox {
       const started = Date.now();
       let hintAbortedPoll = false, lastWait = 0;
       try {
+        await this.whilePaused();
+        if (this.lifetime.signal.aborted) break;
         await this.report();
         const controller = new AbortController(); this.polling = controller;
         const signal = AbortSignal.any([controller.signal, this.lifetime.signal]);
@@ -152,6 +173,7 @@ export class PromptInbox {
         try { batch = CloudV2PromptPullReplySchema.parse(await this.request("pull", { waitMs, held: [...this.held] }, signal)); }
         catch (error) { hintAbortedPoll = controller.signal.aborted; throw error; }
         finally { this.polling = undefined; }
+        if (batch.recovery) this.onRecovery?.(batch.recovery);
         this.receiving = batch.stops.length > 0 || batch.prompts.length > 0;
         await Promise.all(batch.stops.map(async stop => {
           await this.agents.stopOutbox(stop.chatId, stop.epoch);
@@ -176,7 +198,7 @@ export class PromptInbox {
         if (httpStatus(error) === 401) { this.fence(); break; }
         // An older control plane's schema caps the wait at 25 s: fall back for a bounded time and retry at once.
         if (httpStatus(error) === 400 && lastWait > CLOUD_V2_PROMPT_POLL_MS) { this.longPollRefusedUntil = Date.now() + PUSH_POLL_FALLBACK_MS; continue; }
-        if (hintAbortedPoll && this.hinted) continue;
+        if (hintAbortedPoll && (this.hinted || this.pauses.size)) continue;
         try { await delay(Math.min(5_000, 250 * 2 ** Math.min(attempt++, 5)), undefined, { signal: this.lifetime.signal, ref: false }); }
         catch { break; }
       } finally { this.receiving = false; }

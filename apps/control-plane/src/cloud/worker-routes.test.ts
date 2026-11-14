@@ -7,6 +7,7 @@ import { newCloudV2Token } from "./tokens.js";
 import type { CloudV2Store, CloudV2Workspace } from "./store.js";
 import { CloudV2ControlFrameSchema as legacyWorkerFrame } from "./__fixtures__/worker-contract-before-identity.js";
 import { CloudV2PromptSchema, type CloudV2PromptPullReply } from "./prompt-contract.js";
+import { CloudRecoveryReplySchema } from "./recovery-quiesce-contract.js";
 
 function fixture(prompts = false) {
   const bootId = randomUUID(), token = newCloudV2Token("worker").token;
@@ -54,6 +55,48 @@ it("accepts outbound hello and returns configuration, refusing stale runtimes", 
   expect(response.status).toBe(200);
   expect(await response.json()).toMatchObject({ config: { t: "config", loginRevision: "0" } });
   expect((await f.request("hello", { ...body, runtimeSha256: "b".repeat(64) })).status).toBe(409);
+});
+it("delivers a recovery hint only to the advertising worker and withholds prompts while fenced", async () => {
+  const f = fixture(true), id = randomUUID();
+  const auth = await f.deps.store.workerSession(f.token, f.bootId);
+  vi.mocked(f.deps.store.workerSession).mockResolvedValue({ ...auth!, ...{ recoveryAttemptId: id } });
+  const recovery = { pull: vi.fn(async () => ({ hold: true, hint: { id } })), request: vi.fn(), hello: vi.fn(), setup: vi.fn() };
+  Object.assign(f.deps, { recovery });
+  const legacy = await f.request("prompts/pull", { waitMs: 0 });
+  expect(await legacy.json()).toEqual({ prompts: [], stops: [] });
+  const capable = await f.request("prompts/pull", { waitMs: 25_000 }, { "x-zeros-worker-features": "recovery-quiesce-v1" });
+  expect(await capable.json()).toEqual({ prompts: [], stops: [], recovery: { id } });
+  expect(f.pull).not.toHaveBeenCalled();
+  expect(f.cancelWait).toHaveBeenCalledOnce();
+});
+it("rechecks a recovery fence that arrived during a delivery long poll", async () => {
+  const f = fixture(true), id = randomUUID();
+  const auth = await f.deps.store.workerSession(f.token, f.bootId);
+  const recovery = { pull: vi.fn(async () => ({ hold: true, hint: { id } })), request: vi.fn(), hello: vi.fn(), setup: vi.fn() };
+  Object.assign(f.deps, { recovery });
+  const pending = f.request("prompts/pull", { waitMs: 25_000 }, { "x-zeros-worker-features": "recovery-quiesce-v1" });
+  await vi.waitFor(() => expect(f.pull).toHaveBeenCalledOnce());
+  vi.mocked(f.deps.store.workerSession).mockResolvedValue({ ...auth!, ...{ recoveryAttemptId: id } });
+  f.notify();
+  expect(await (await pending).json()).toEqual({ prompts: [], stops: [], recovery: { id } });
+  expect(f.pull).toHaveBeenCalledOnce();
+});
+it("authenticates and binds recovery seals and status replies before exposing the closed protocol", async () => {
+  const f = fixture(), id = randomUUID(), generation = 8;
+  const request = vi.fn(async () => ({ id, generation, status: "sealed" as const }));
+  Object.assign(f.deps, { recovery: { pull: vi.fn(), request, hello: vi.fn(), setup: vi.fn() } });
+  const headers = { "x-zeros-worker-features": "recovery-quiesce-v1" };
+  expect((await f.request("recovery", { op: "seal", id, generation })).status).toBe(404);
+  for (const op of ["seal", "status"]) {
+    const reply = await f.request("recovery", { op, id, generation }, headers);
+    expect(reply.status).toBe(200);
+    expect(CloudRecoveryReplySchema.parse(await reply.json())).toEqual({ id, generation, status: "sealed" });
+  }
+  expect(request).toHaveBeenCalledWith(f.token, f.bootId, { op: "status", id, generation });
+  expect((await f.request("recovery", { op: "seal", id, generation: -1 }, headers)).status).toBe(400);
+  f.revoke();
+  expect((await f.request("recovery", { op: "status", id, generation }, headers)).status).toBe(401);
+  expect(request).toHaveBeenCalledTimes(2);
 });
 it("negotiates push signals on hello and config without changing older worker configuration", async () => {
   const f = fixture(true), config = await f.deps.config({} as CloudV2Workspace);
