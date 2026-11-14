@@ -2156,7 +2156,7 @@ async function lintFrame(
           oid: oid ?? undefined,
           fix: registeredFile
             ? `Restore ${registeredFile}, register another frame as ${element.tagName} in meta/canvas.json, or replace the component instance.`
-            : `Register a frame as ${element.tagName} in meta/canvas.json, create components/${definition}, or replace the component instance.`,
+            : `Register a main frame as ${element.tagName} in meta/canvas.json, or replace the component instance.`,
         },
       ),
     );
@@ -2636,7 +2636,7 @@ export const DESIGN_GUIDES = Object.freeze({
   layout: `Use normal HTML flow and flexbox for structural layout. Prefer flex containers, gap, padding, alignment, and intrinsic sizing over absolute positioning inside a frame.`,
   tokens: `Use var(--token) from tokens.css whenever a matching color, spacing, radius, or type token exists. Add typed @property declarations before introducing a new token.`,
   workflow: `Read the active Design directory's rules.md, meta/canvas.json page catalog and relevant sources. Follow the active page named in context unless the user says otherwise; always supply an explicit pageId to frame API writes when several pages exist. Inspect the live element selection and frames and make targeted HTML/CSS edits in that directory. Call lint_design, re-read the affected frame using its full page-folder path, use screenshot_frame to visually verify it, then call lint_design again so exact-generation browser contrast, overflow, and spacing checks are included. Resolve errors and review non-blocking advisories. JavaScript and external URLs are not part of design documents.`,
-  components: `Define a reusable component as one direct components/name.html file and instantiate it with <zd-name data-oid="stable-instance">. Give every selectable definition-body element except <slot> a unique, stable data-zid, for example <article data-zid="surface">. The definition body expands only at render time; <slot> accepts instance children and <slot data-zd-attr="label"> accepts escaped attributes. Keep scripts, event handlers, external URLs, and data-oid attributes out of definitions—the authored zd-* wrapper owns selection and editing. Legacy definitions with no data-zid remain renderable, but new component.create operations require complete definition-local identity.`,
+  components: `Make a reusable component a main frame: an ordinary page frame whose meta/canvas.json record adds "component": "name". Declare options in <head> inside <template data-zd-options>, one <zd-option name="label" type="text" default="Save"></zd-option> per line, and use them as {{ label }} in text and attributes. Mark a frame data-zd-slot="body" to let instances place their own layers there (slot="body"); what the main's frame holds is the default. Keep the main's data-oid values stable: an instance restyles a part with zd-style-<part>, named by them. Place an instance with <zd-name data-oid="stable-instance" label="Buy">. Existing components/name.html files stay readable; do not add new ones (component.create writes that older form and remains for existing callers), and Move main to canvas converts one into a main. Keep scripts, event handlers and external URLs out of components.`,
 });
 
 export type DesignGuideTopic = keyof typeof DESIGN_GUIDES;

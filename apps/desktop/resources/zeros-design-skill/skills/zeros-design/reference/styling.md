@@ -108,7 +108,7 @@ When Zeros sends "Tidy N changes in <frame>", or the person asks you to tidy a f
 
 1. **A token.** When the value equals a token's value (in `tokens.css` or an imported style source; see Choosing tokens), write `var(--name)` in its place on the layer.
 2. **The class.** When every layer using the class should take the new value, move it into the class's rule and remove it from the layer. Check the other layers the rule matches first; when they should not change, leave it.
-3. **The component.** When the layer belongs to a component (`components/<name>.html`), change the component the same way.
+3. **The component.** When the layer belongs to a component, change its main frame (or an older `components/<name>.html`) the same way.
 4. **Otherwise leave it** on the layer.
 
 The frame must look the same: validate it and capture it before and after in each theme, and undo a move that changes how it looks. Never stage or commit. Report what moved where and what stayed.

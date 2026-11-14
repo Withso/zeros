@@ -13,6 +13,7 @@ import {
   PREVIOUS_NATIVE_DESIGN_RULES,
   PREVIOUS_PAGED_DESIGN_RULES,
   PREVIOUS_PER_PAGE_DESIGN_RULES,
+  PREVIOUS_CONTRACT_DESIGN_RULES,
   upgradedDesignRules,
 } from "../design-rules";
 
@@ -49,12 +50,18 @@ describe("page authoring guidance", () => {
       "69aa279db449eeac1e53b17ce7ee5e9e957096d11c721085851261233067b114",
     );
     expect(GENERATED_DESIGN_RULES).toContain(PREVIOUS_PER_PAGE_DESIGN_RULES);
+    // The first authoring contract, which made repeats components/ files.
+    expect(createHash("sha256").update(PREVIOUS_CONTRACT_DESIGN_RULES).digest("hex")).toBe(
+      "7ae3af3ced5113aaad90dee21fcd26c85338e7b4a09338746b04caf55e8c0153",
+    );
+    expect(GENERATED_DESIGN_RULES).toContain(PREVIOUS_CONTRACT_DESIGN_RULES);
     for (const previous of [
       ROOT_DESIGN_RULES,
       LEGACY_DESIGN_RULES,
       PREVIOUS_NATIVE_DESIGN_RULES,
       PREVIOUS_PAGED_DESIGN_RULES,
       PREVIOUS_PER_PAGE_DESIGN_RULES,
+      PREVIOUS_CONTRACT_DESIGN_RULES,
     ])
       expect(upgradedDesignRules(previous + "\nKeep our brand.\n", 2)).toBe(
         DESIGN_RULES + "\nKeep our brand.\n",
@@ -85,6 +92,19 @@ describe("page authoring guidance", () => {
     expect(upgradedDesignRules(edited, 2)).toBe(edited);
     // An unpaged directory keeps its own generated rules until it moves to pages.
     expect(upgradedDesignRules(ROOT_DESIGN_RULES + project, 1)).toBe(ROOT_DESIGN_RULES + project);
+  });
+
+  it("has agents author components as main frames on the canvas, never new components/ files", () => {
+    expect(DESIGN_RULES).toContain('"component":"card"');
+    expect(DESIGN_RULES).toContain("<template data-zd-options>");
+    expect(DESIGN_RULES).toContain('<zd-option name="heading" type="text" default="Untitled"></zd-option>');
+    expect(DESIGN_RULES).toContain("data-zd-slot");
+    expect(DESIGN_RULES).toContain("Never add components/<name>.html");
+    // title is an attribute an instance keeps, so it cannot name an option.
+    expect(DESIGN_RULES).not.toContain('title="Plans"');
+    expect(DESIGN_RULES).not.toContain("with <slot> and data-zd-attr");
+    expect(DESIGN_GUIDES.components).toContain('"component"');
+    expect(DESIGN_GUIDES.components).not.toContain("Define a reusable component as one direct components/name.html file");
   });
 
   it("keeps frame and workflow guides aligned with the active directory's pages", () => {

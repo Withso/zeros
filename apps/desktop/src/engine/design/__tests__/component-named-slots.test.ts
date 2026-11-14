@@ -50,6 +50,15 @@ describe("a main component's slots", () => {
     expect(instances?.hosts.c2?.slotted).toBeUndefined();
   });
 
+  it("render the example rules.md gives agents", async () => {
+    const main = doc('<article data-oid="card"><h2 data-oid="heading">{{ heading }}</h2><div data-oid="body" data-zd-slot="body"><p data-oid="placeholder">Empty</p></div></article>',
+      options('<zd-option name="heading" type="text" default="Untitled"></zd-option>'));
+    const result = await expandDesignComponents("/work/slots", doc('<zd-card data-oid="plans" heading="Plans"><p data-oid="plans-copy" slot="body">Body</p></zd-card>'),
+      { "parts/card.html": main }, "home/index.html", { registry });
+    expect(result.errors).toEqual([]);
+    expect(result.html).toContain('<h2 data-zd-part="heading">Plans</h2><div data-zd-part="body" data-zd-slot="body"><p data-oid="plans-copy" slot="body">Body</p></div>');
+  });
+
   it("work in a components/ file too", async () => {
     const result = await expand('<zd-panel data-oid="p1"><b data-oid="t" slot="top">T</b><i data-oid="r">R</i></zd-panel>');
     expect(result.html).toContain('<section data-zd-part="panel"><div data-zd-part="top" data-zd-slot="top"><b data-oid="t" slot="top">T</b></div><i data-oid="r">R</i></section>');

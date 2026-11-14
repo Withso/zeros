@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { DESIGN_RULES, PREVIOUS_PAGED_DESIGN_RULES, PREVIOUS_PER_PAGE_DESIGN_RULES } from "../design-rules";
+import { DESIGN_RULES, PREVIOUS_CONTRACT_DESIGN_RULES, PREVIOUS_PAGED_DESIGN_RULES, PREVIOUS_PER_PAGE_DESIGN_RULES } from "../design-rules";
 import { DESIGN_DIRECTORY_NAME, initializeDesignDocument } from "../document";
 import { ensureDesignMetadataLayout } from "../metadata";
 
@@ -27,6 +27,7 @@ describe("generated rules.md in a paged Design directory", () => {
   });
 
   it.each([
+    ["the first authoring contract", PREVIOUS_CONTRACT_DESIGN_RULES],
     ["the per-page rules", PREVIOUS_PER_PAGE_DESIGN_RULES],
     ["the directory-wide limit rules", PREVIOUS_PAGED_DESIGN_RULES],
   ])("upgrades %s and keeps the project's appended text", async (_name, previous) => {
