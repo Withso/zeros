@@ -166,6 +166,13 @@ export function commitDesignInstanceText(workspaceId: string, frame: { file: str
   return applyDesignEditCached(workspaceId, frame, edit("Set text", [{ operationId: "set-text", type: "node.set-text", nodeId, text }]));
 }
 
+/** Empty an instance's slot back to what its main puts there: delete the
+ * frame's own layers it holds, in one step. */
+export function commitDesignInstanceSlotReset(workspaceId: string, frame: { file: string; sourceVersion: string }, layers: readonly string[], label: string) {
+  return applyDesignEditCached(workspaceId, frame, edit(`Reset ${label}`, layers.map((nodeId, index) =>
+    ({ operationId: `reset-slot-${index}`, type: "node.delete", nodeId }))));
+}
+
 let messages = 0;
 
 /** One frame's preview while a row is adjusted. The latest values go to the

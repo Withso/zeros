@@ -2,20 +2,34 @@
 // as in Figma: a style write on a part becomes an override on its instance
 // (the host's zd-style-<part>), and the Layers eye hides it on the canvas.
 // Its layers, structure and text belong to the main component (text that
-// an option sets is changed in Options). Every node write the canvas and the
-// Style panel make goes through the workspace cache, which refuses any other
-// write that names a part before anything is sent.
+// an option sets is changed in Options). A frame the main marks as a slot
+// takes layers instead: one moved or drawn into it lands in the instance
+// with slot="<name>". Every node write the canvas and the Style panel make
+// goes through the workspace cache, which refuses any other write that
+// names a part or slot before anything is sent.
 
 import type { DesignFrameComponent, DesignFrameInstances } from "@zeros/protocol/design-catalog";
-import { designComponentPartOf } from "@zeros/protocol/design-runtime";
+import { designComponentPartOf, designComponentSlotOf } from "@zeros/protocol/design-runtime";
 import { designRuntimeLayerDisplayName } from "../design-layer-label";
 
+/** A layer inside an instance: one of its parts, or one of its slots, which
+ * are parts too except that layers can be put in them. Neither moves,
+ * resizes, duplicates or deletes. */
 export const isDesignComponentPartNodeId = (nodeId: string | null | undefined): nodeId is string =>
-  typeof nodeId === "string" && designComponentPartOf(nodeId) !== null;
+  typeof nodeId === "string" && (designComponentPartOf(nodeId) !== null || designComponentSlotOf(nodeId) !== null);
 
-/** The host layer a part belongs to, or the id itself for any other layer. */
+export const isDesignComponentSlotNodeId = (nodeId: unknown): nodeId is string =>
+  typeof nodeId === "string" && designComponentSlotOf(nodeId) !== null;
+
+/** The host layer a part or slot belongs to, or the id itself for any other layer. */
 export function designComponentPartHost(nodeId: string): string {
-  return designComponentPartOf(nodeId)?.host ?? nodeId;
+  return designComponentPartOf(nodeId)?.host ?? designComponentSlotOf(nodeId)?.host ?? nodeId;
+}
+
+/** A slot's name as people read it: "Content", or "Content" for the default slot. */
+export function designComponentSlotLabel(name: string): string {
+  const words = (name || "content").replace(/-/g, " ");
+  return words.charAt(0).toUpperCase() + words.slice(1);
 }
 
 export class DesignComponentPartWriteError extends Error {
@@ -33,16 +47,27 @@ export function designPartOverrideKey(part: string): string {
 }
 export const designPartOverrideAttribute = (part: string) => `zd-style-${designPartOverrideKey(part)}`;
 
-/** Throw when a write's input names a part anywhere a layer id can go,
- * except a style write, which the engine stores as the instance's override. */
+/** Throw when a write's input names a part or slot anywhere a layer id can
+ * go, except a style write on a part, which the engine stores as the
+ * instance's override, and a slot as the parent a layer moves into or the
+ * layer drawn layers are added to. */
 export function refuseDesignComponentPartWrite(input: unknown, depth = 0): void {
   if (typeof input === "string") {
     if (isDesignComponentPartNodeId(input)) throw new DesignComponentPartWriteError();
     return;
   }
   if (!input || typeof input !== "object" || depth > 3) return;
-  if ((input as { type?: unknown }).type === "node.set-styles") return;
-  for (const value of Array.isArray(input) ? input : Object.values(input)) refuseDesignComponentPartWrite(value, depth + 1);
+  const operation = input as { type?: unknown; nodeId?: unknown; mode?: unknown };
+  if (operation.type === "node.set-styles") {
+    if (isDesignComponentSlotNodeId(operation.nodeId)) throw new DesignComponentPartWriteError();
+    return;
+  }
+  const appendsToSlot = operation.type === "node.set-html" && operation.mode === "append" && isDesignComponentSlotNodeId(operation.nodeId);
+  const entries: Array<[string | number, unknown]> = Array.isArray(input) ? [...input.entries()] : Object.entries(input);
+  for (const [key, value] of entries) {
+    if ((key === "parentId" || (key === "nodeId" && appendsToSlot)) && isDesignComponentSlotNodeId(value)) continue;
+    refuseDesignComponentPartWrite(value, depth + 1);
+  }
 }
 
 /** An option's label as its declaration gives it, without reading the whole
@@ -128,6 +153,8 @@ export function designLayerDisplayName(
   node: Parameters<typeof designRuntimeLayerDisplayName>[0] & { oid: string },
   mainTitle: (file: string) => string | undefined = () => undefined,
 ): string {
+  const slot = designComponentSlotOf(node.oid);
+  if (slot) return `${designComponentSlotLabel(slot.name)} slot`;
   const presented = presentedInstances(frame);
   const missing = designMissingComponentOf(presented, node.oid);
   if (missing) return `zd-${missing}`;
@@ -137,7 +164,8 @@ export function designLayerDisplayName(
 
 /** What a Layers row is: an instance of a component, one of an instance's
  * parts (hidden and restyled, never renamed), or any other layer. */
-export function designLayerRowKind(frame: object, nodeId: string): "instance" | "part" | "layer" {
+export function designLayerRowKind(frame: object, nodeId: string): "instance" | "part" | "slot" | "layer" {
+  if (isDesignComponentSlotNodeId(nodeId)) return "slot";
   if (isDesignComponentPartNodeId(nodeId)) return "part";
   return designComponentInstanceMark(presentedInstances(frame), nodeId, () => undefined) ? "instance" : "layer";
 }

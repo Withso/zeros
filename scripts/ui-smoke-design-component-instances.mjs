@@ -10,7 +10,8 @@ import { openLayersDrawer } from "./ui-smoke-design-helpers.mjs";
 // its own host with no engine request; Edit main opens the main; a
 // double-click enters the instance and selects a part, whose style edits are
 // overrides on the instance (shared by repeated copies, reset and undone)
-// while its place, structure and text stay the main's.
+// while its place, structure and text stay the main's; a slot the main marks
+// takes layers drawn or dropped into it, and Reset to default removes them.
 export async function runDesignComponentInstancesSmoke({ page, check }) {
   await page.clock.resume().catch(() => {});
   const origin = new URL(page.url()).origin;
@@ -287,6 +288,7 @@ export async function runDesignComponentInstancesSmoke({ page, check }) {
   // A repeated part's copies share one override.
   await at(chips.first(), "click");
   await expect(line).toHaveAttribute("data-design-component-of", "part");
+  await expect.poll(selected).toBe("::zeros-part:home-composer:cc-chip");
   const chipOpacity = page.locator("[data-design-inspector]").getByLabel("Opacity", { exact: true });
   await chipOpacity.fill("40");
   await chipOpacity.press("Enter");
@@ -364,6 +366,7 @@ export async function runDesignComponentInstancesSmoke({ page, check }) {
 
   // Inside the instance a click picks another part; Escape leaves it.
   await at(frame("home.html").locator('[data-zd-instance] [data-zd-part="cc-prompt"]'), "click");
+  await expect.poll(selected).toBe("::zeros-part:home-composer:cc-prompt");
   await expect(line).toHaveAttribute("data-design-component-of", "part");
   check("inside the instance a click picks another part", true);
   await canvas.focus();
@@ -381,6 +384,85 @@ export async function runDesignComponentInstancesSmoke({ page, check }) {
   await expect(layer("cc-send")).toHaveAttribute("aria-selected", "true");
   check("a part's Edit main opens the main with the layer of the same id selected", true);
 
+  // ── A slot: the main marks a frame, and an instance puts its own layers there ──
+  await selectMain();
+  const slotOption = () => section.locator("[data-design-option-slot]").first();
+  await expect(slotOption()).toHaveAttribute("data-design-option-slot", "main");
+  check("the main's Options list its slot", (await slotOption().innerText()).includes("Extras") && (await slotOption().innerText()).includes("Slot"),
+    await slotOption().innerText());
+  await selectInstance();
+  await page.getByLabel("Design canvas", { exact: true }).focus();
+  await page.keyboard.press("Shift+Digit2");
+  await quiet();
+  await selectInstance();
+  const slotRow = page.locator('[data-design-layer-id="::zeros-slot:home-composer:extras"]');
+  if (!(await slotRow.count())) await layer("home-composer").locator("[data-layer-disclosure]").click();
+  await expect(slotRow).toHaveCount(1);
+  check("Layers shows the instance's slot as a slot row",
+    (await slotRow.locator("[data-design-layer-slot]").count()) === 1 && (await slotRow.innerText()).includes("Extras slot"), await slotRow.innerText());
+  await expect(slotOption()).toHaveAttribute("data-design-option-slot", "0");
+  check("an empty slot reads Default and offers no Reset",
+    (await slotOption().innerText()).includes("Default") && (await section.locator("[data-design-slot-reset]").count()) === 0);
+  const extras = frame("home.html").locator('[data-zd-instance] [data-zd-slot="extras"]');
+  const slotted = () => page.evaluate(() =>
+    [...new DOMParser().parseFromString(window.__zerosHarnessHomeSource(), "text/html").querySelectorAll('zd-chat-composer[data-oid="home-composer"] > [slot]')]
+      .map((element) => `${element.getAttribute("slot")}:${element.getAttribute("data-oid")}`));
+  const mainBeforeSlot = await main();
+
+  // Drawn into the slot: the layer is the instance's, named for the slot.
+  const writesBeforeDraw = await writes();
+  await page.getByRole("button", { name: "Frame tool", exact: true }).click();
+  const slotBox = await extras.boundingBox();
+  await page.mouse.move(slotBox.x + slotBox.width * 0.5, slotBox.y + 6);
+  await page.mouse.down();
+  await page.mouse.move(slotBox.x + slotBox.width * 0.5 + 40, slotBox.y + slotBox.height - 6, { steps: 6 });
+  await page.mouse.up();
+  await expect.poll(writes).toBe(writesBeforeDraw + 1);
+  await expect.poll(async () => (await slotted()).length).toBe(1);
+  const [drawn] = await slotted();
+  check("a layer drawn into a slot is written in the instance with that slot's name, and the main is unchanged",
+    /^extras:frame-/.test(drawn) && (await main()) === mainBeforeSlot, drawn);
+  await expect(extras.locator(`[data-oid="${drawn.slice("extras:".length)}"]`)).toHaveCount(1);
+  await expect(extras.locator('[data-zd-part="cc-extras-empty"]')).toHaveCount(0);
+  check("the slot shows the instance's layer in place of the main's", true);
+
+  // Dropped into the slot: a free layer of the frame moves into the instance.
+  await quiet();
+  await expect(async () => {
+    await layer("home-drawn").click({ timeout: 2_000 });
+    await expect(layer("home-drawn")).toHaveAttribute("aria-selected", "true", { timeout: 2_000 });
+  }).toPass({ timeout: 15_000 });
+  const writesBeforeFree = await writes();
+  await page.locator("[data-design-inspector]").getByRole("checkbox", { name: "Absolute position", exact: true }).locator("..").click();
+  await expect.poll(writes).toBe(writesBeforeFree + 1);
+  await quiet();
+  const moves = () => page.evaluate(() => (window.__zerosHarnessWorkbenchOperations ?? [])
+    .filter((op) => op === "design.transaction.apply" || op === "design.node.transfer").length);
+  const movesBeforeDrop = await moves();
+  const moving = await frame("home.html").locator('[data-oid="home-drawn"]').boundingBox();
+  const target = await extras.boundingBox();
+  await page.mouse.move(moving.x + moving.width / 2, moving.y + moving.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(target.x + target.width * 0.7, target.y + target.height / 2, { steps: 16 });
+  await page.mouse.up();
+  await expect.poll(moves).toBe(movesBeforeDrop + 1);
+  await expect.poll(slotted).toContain("extras:home-drawn");
+  check("a layer dropped into a slot moves into the instance with that slot's name", (await slotted()).length === 2, JSON.stringify(await slotted()));
+  await selectInstance();
+  await expect(slotOption()).toHaveAttribute("data-design-option-slot", "2");
+  check("the slot's row counts the instance's layers and marks itself changed",
+    (await slotOption().innerText()).includes("2 layers") && (await slotOption().locator("[data-option-changed]").count()) === 1);
+
+  // Reset to default removes the instance's layers in one write; one undo restores them.
+  const writesBeforeSlotReset = await writes();
+  await section.locator("[data-design-slot-reset]").click();
+  await expect.poll(writes).toBe(writesBeforeSlotReset + 1);
+  await expect.poll(slotted).toEqual([]);
+  await expect(extras.locator('[data-zd-part="cc-extras-empty"]')).toHaveCount(1);
+  check("Reset to default empties the slot in one write and shows the main's content again", true);
+  await undo();
+  await expect.poll(async () => (await slotted()).length).toBe(2);
+  check("one undo restores every layer the Reset removed", (await slotted()).includes("extras:home-drawn"));
   // An instance whose values did not apply says so, as the main does.
   await selectInstance();
   for (const [shows, text] of [

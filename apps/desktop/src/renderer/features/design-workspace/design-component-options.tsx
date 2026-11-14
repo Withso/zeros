@@ -6,8 +6,9 @@
 // instance in another frame each row writes the host's attribute, a dot marks
 // a value that differs from what it inherits, and Reset removes them all. A
 // plain component's instance whose default slot holds only text also offers
-// that text, which is the host's own. An instance whose parts carry style
-// overrides offers to reset them.
+// that text, which is the host's own. A slot row says what the slot holds;
+// on an instance that filled it, Reset to default deletes those layers. An
+// instance whose parts carry style overrides offers to reset them.
 // Mounted only for one selected component frame or instance; a folded group
 // mounts no rows. Local only.
 
@@ -53,6 +54,7 @@ import {
   commitDesignComponentOption,
   commitDesignComponentVariant,
   commitDesignInstanceAttributes,
+  commitDesignInstanceSlotReset,
   commitDesignInstanceText,
   createDesignComponentPreview,
   designComponentAttributeText,
@@ -64,7 +66,7 @@ import {
   readDesignFrameComponent,
   sameDesignComponentValue,
 } from "./state/design-component-options";
-import { DESIGN_OPTIONS_NOT_APPLIED_MESSAGES, designPartOverrideAttribute } from "./state/design-component-parts";
+import { DESIGN_OPTIONS_NOT_APPLIED_MESSAGES, designComponentSlotLabel, designPartOverrideAttribute } from "./state/design-component-parts";
 import { showDesignComponentVariant, useDesignShownComponentVariant } from "./state/design-component-variants";
 
 const EASINGS = [
@@ -213,6 +215,11 @@ export function DesignComponentOptions({
         void commitDesignInstanceAttributes(workspaceId, frame, instance.nodeId, removed, "Reset overrides").catch(failed("the overrides"));
       }
     : undefined;
+  const resetSlot = (label: string, layers: readonly string[]) => {
+    void commitDesignInstanceSlotReset(workspaceId, frame, layers, label).catch(failed(label));
+  };
+  // The default slot is no declared option; it has a row once it holds layers.
+  const defaultSlotted = instance?.host.slotted?.[""];
   const saveVariant = (typed: string) => {
     const named = designComponentVariantName(declaration, typed);
     if ("error" in named) return named.error;
@@ -262,6 +269,11 @@ export function DesignComponentOptions({
       }
     }
     if (option.group && folded.has(option.group)) continue;
+    if (option.kind === "slot") {
+      rows.push(<OptionSlotRow key={option.name} label={option.label} layers={instance ? instance.host.slotted?.[option.name] ?? [] : null}
+        disabled={disabled} onReset={(layers) => resetSlot(option.label, layers)} />);
+      continue;
+    }
     const value = current(option);
     rows.push(
       <DesignComponentOptionRow
@@ -322,6 +334,10 @@ export function DesignComponentOptions({
       ) : null}
       {naming && !tooLarge ? <OptionEntryRow label="Name" inputLabel="Variant name" placeholder="Compact" onSubmit={saveVariant} onCancel={() => setNaming(false)} /> : null}
       {rows}
+      {defaultSlotted ? (
+        <OptionSlotRow label={designComponentSlotLabel("")} layers={defaultSlotted} disabled={disabled}
+          onReset={(layers) => resetSlot(designComponentSlotLabel(""), layers)} />
+      ) : null}
       {instance && instance.host.text !== undefined ? (
         <OptionTextRow
           label="Text"
@@ -455,7 +471,29 @@ function DesignComponentOptionRow({ option, value, inherited, disabled, onPrevie
     case "easing":
       return <OptionEasingRows label={option.label} value={value as ComponentEasing} inherited={inherited as ComponentEasing | undefined} disabled={disabled}
         onPreview={onPreview} onCancel={onCancel} onCommit={onCommit} />;
+    case "slot":
+      return null;
   }
+}
+
+/** A slot: on the main, that it is one; on an instance, the layers it put
+ * there (or that it shows the main's), with Reset to default. */
+function OptionSlotRow({ label, layers, disabled, onReset }: {
+  label: string; layers: readonly string[] | null; disabled: boolean; onReset: (layers: readonly string[]) => void;
+}) {
+  const filled = !!layers?.length;
+  return (
+    <OptionRow label={label} changed={filled} data-design-option-slot={layers === null ? "main" : layers.length}>
+      <span className="text-fg2">
+        {layers === null ? "Slot" : filled ? (layers.length === 1 ? "1 layer" : `${layers.length} layers`) : "Default"}
+      </span>
+      {filled ? (
+        <InspectorIconButton label={`Reset ${label} to default`} data-design-slot-reset="" disabled={disabled} onClick={() => onReset(layers!)}>
+          <RotateCcw />
+        </InspectorIconButton>
+      ) : null}
+    </OptionRow>
+  );
 }
 
 function OptionMenuRow({ label, value, choices, disabled, changed, onCommit }: {

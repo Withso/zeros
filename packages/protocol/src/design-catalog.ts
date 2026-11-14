@@ -400,7 +400,7 @@ export function designComponentRecordLimitMessage(component: string, limit: Desi
 /** Instances a frame places, at its top level (the layers it owns), and the
  * components they are of. Bounded: a frame past these limits reports none,
  * and its instances show no Options. */
-export const DESIGN_FRAME_INSTANCE_LIMITS = { components: 32, hosts: 256 } as const;
+export const DESIGN_FRAME_INSTANCE_LIMITS = { components: 32, hosts: 256, slots: 16, slotted: 64 } as const;
 const componentNameSchema = z.string().regex(/^[a-z][a-z0-9-]{0,63}$/);
 /** A component an instance is of, as `instances.components` reports it. */
 export const designFrameInstanceComponentSchema = z.object({
@@ -441,6 +441,11 @@ export const designFrameInstancesSchema = z.object({
      * alone: that text, as written (decoded). Absent when it places elements
      * there, or its component has no default slot. */
     text: z.string().max(LIMITS.attributeValue).optional(),
+    /** The frame's own layers (data-oid) it places in each slot of its
+     * component, in order; "" is the default slot. A slot holding more than
+     * the limit, or a layer whose id is too long, is left out. */
+    slotted: boundedRecord(z.string().max(LIMITS.optionName),
+      z.array(z.string().min(1).max(LIMITS.layerId)).min(1).max(DESIGN_FRAME_INSTANCE_LIMITS.slotted), DESIGN_FRAME_INSTANCE_LIMITS.slots).optional(),
   }).strict(), DESIGN_FRAME_INSTANCE_LIMITS.hosts),
   /** What the frame shows when some instance's values did not apply. */
   notApplied: notAppliedSchema.optional(),

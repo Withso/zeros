@@ -32,7 +32,9 @@ import { createComponentTemplateBudget, designComponentSummaryOf, renderComponen
 import { applyDesignPartStyleOverrides, designPartOfNodeId, designPartStyleAttribute, designPartStyleOverrides, mergeDesignPartStyleOverride }
   from "@zeros/design-web/component-overrides";
 import { designComponentPreviewMessagesForTests } from "../features/design-workspace/state/design-component-options";
-import { mutateDesignNodeAttributeSource, mutateDesignNodeDuplicateSource, mutateDesignNodeDeleteSource } from "@zeros/design-web/html";
+import { mutateDesignNodeAttributeSource, mutateDesignNodeDuplicateSource, mutateDesignNodeDeleteSource, mutateDesignNodeHtmlSource,
+  mutateDesignNodeMoveSource } from "@zeros/design-web/html";
+import { designComponentBodySlots, designSlotOfNodeId } from "@zeros/design-web/component-slots";
 import {
   mutateDesignKeyframes,
   readDesignKeyframes,
@@ -300,6 +302,7 @@ const COMPONENT_OPTIONS_SOURCE = `<!doctype html>
       .toolbar { display: flex; justify-content: space-between; }
       .send { border: 0; border-radius: var(--zd-send-radius); padding: 4px 10px; background: var(--zd-accent); color: white;
         transition: transform var(--zd-settle-duration) var(--zd-settle-easing); }
+      .extras { display: flex; gap: 6px; min-width: 240px; min-height: 64px; padding: 4px; border: 1px dashed gainsboro; }
     </style>
   </head>
   <body>
@@ -310,6 +313,7 @@ const COMPONENT_OPTIONS_SOURCE = `<!doctype html>
         <span data-oid="cc-mode">{{ mode == "plan" ? "Plan" : "Ask" }}</span>
         <button class="send" data-oid="cc-send">{{ send-label }}</button>
       </div>
+      <div class="extras" data-oid="cc-extras" data-zd-slot="extras"><span data-oid="cc-extras-empty">No extras</span></div>
     </main>
   </body>
 </html>`;
@@ -351,18 +355,60 @@ function renderHarnessInstances(source: string): string {
   const hosts = harnessInstanceAttributes(source);
   const rules: string[] = [];
   let count = 0;
-  const html = source.replace(/<zd-chat-composer\b([^>]*)><\/zd-chat-composer>/g, (_match, attributes: string) => {
+  const html = source.replace(/<zd-chat-composer\b([^>]*)>([\s\S]*?)<\/zd-chat-composer>/g, (_match, attributes: string, children: string) => {
     const id = String(++count);
     const oid = /data-oid="([^"]+)"/.exec(attributes)?.[1] ?? "";
     const hostAttributes = hosts.get(oid) ?? new Map<string, string>();
     const values = componentOptionValues(declaration, hostAttributes).values;
     const scope = componentExpressionScope(declaration, values);
     rules.push(`:where([data-zd-instance="${id}"]) { ${componentOptionCss(declaration, values, scope)} }`);
-    const inner = applyDesignPartStyleOverrides(renderComponentTemplate(body, { scope, ids: "part", budget: createComponentTemplateBudget() }),
-      harnessPartOverrides(hostAttributes));
+    const inner = fillHarnessSlots(applyDesignPartStyleOverrides(renderComponentTemplate(body, { scope, ids: "part", budget: createComponentTemplateBudget() }),
+      harnessPartOverrides(hostAttributes)), children);
     return `<zd-chat-composer${attributes} data-zd-instance="${id}" style="display:block">${inner}</zd-chat-composer>`;
   });
   return html.replace(/<\/head>/i, `<style data-zeros-component="chat-composer">${styles}</style><style data-zeros-options>${rules.join("\n")}</style></head>`);
+}
+
+/** The instance's layers named for a slot take the place of what the main
+ * puts there, as the engine's expansion places them. */
+function fillHarnessSlots(inner: string, children: string): string {
+  if (!children.trim()) return inner;
+  const rendered = document.createElement("template");
+  rendered.innerHTML = inner;
+  const given = document.createElement("template");
+  given.innerHTML = children;
+  for (const slot of rendered.content.querySelectorAll("[data-zd-slot]")) {
+    const placed = [...given.content.children].filter((child) => child.getAttribute("slot") === slot.getAttribute("data-zd-slot"));
+    if (placed.length) slot.replaceChildren(...placed);
+  }
+  return rendered.innerHTML;
+}
+
+/** The frame's own layers each host places in each slot. */
+function harnessSlottedLayers(source: string): Map<string, Record<string, string[]>> {
+  const names = designComponentBodySlots(/<body>([\s\S]*)<\/body>/i.exec(harnessComponentDefinition)![1]!);
+  const hosts = new Map<string, Record<string, string[]>>();
+  for (const host of new DOMParser().parseFromString(source, "text/html").querySelectorAll("zd-chat-composer[data-oid]")) {
+    const slotted: Record<string, string[]> = {};
+    for (const child of host.children) {
+      const slot = child.getAttribute("slot") ?? "";
+      if (child.getAttribute("data-oid") && names.includes(slot)) (slotted[slot] ??= []).push(child.getAttribute("data-oid")!);
+    }
+    if (Object.keys(slotted).length) hosts.set(host.getAttribute("data-oid")!, slotted);
+  }
+  return hosts;
+}
+
+/** A layer's own inline styles, as the generic path writes them. */
+function harnessInlineStyleSource(source: string, nodeId: string, styles: Record<string, string | null>): string {
+  const parsed = new DOMParser().parseFromString(source, "text/html");
+  const target = parsed.querySelector<HTMLElement>(`[data-oid="${CSS.escape(nodeId)}"]`);
+  if (!target) throw new Error("The style transaction node is unavailable.");
+  for (const [property, value] of Object.entries(styles)) {
+    if (value === null) target.style.removeProperty(property);
+    else target.style.setProperty(property, value);
+  }
+  return `<!doctype html>${parsed.documentElement.outerHTML}`;
 }
 
 function harnessPartOverrides(attributes: ReadonlyMap<string, string>): Map<string, string> {
@@ -380,11 +426,12 @@ function harnessPartStyleSource(source: string, nodeId: string, styles: Record<s
 /** What the engine reports about the home frame's instance. */
 function harnessInstancesRecord(source: string, notApplied?: "last-good" | "defaults") {
   const summary = designComponentSummaryOf(harnessComponentDefinition)!;
+  const slotted = harnessSlottedLayers(source);
   const hosts = Object.fromEntries([...harnessInstanceAttributes(source)].map(([oid, attributes]) => {
     const overrides = harnessPartOverrides(attributes);
     return [oid, {
       component: "chat-composer", attributes: Object.fromEntries(attributes), ...(harnessInstanceFailures.has(oid) ? { failed: true as const } : {}),
-      ...(overrides.size ? { overrides: Object.fromEntries(overrides) } : {}),
+      ...(overrides.size ? { overrides: Object.fromEntries(overrides) } : {}), ...(slotted.has(oid) ? { slotted: slotted.get(oid)! } : {}),
     }];
   }));
   if (!Object.keys(hosts).length) return undefined;
@@ -1577,6 +1624,19 @@ async function main() {
         });
         return { type: "WORKSPACE_RESPONSE", result: { frame, snapshot: currentWorkspaceSnapshot } };
       }
+      // A free layer released over an instance's slot: the engine's
+      // same-frame relocation, placed in the slot as the adapter places it.
+      if (componentOptionsHarness && message.op === "design.node.transfer" && designSlotOfNodeId(String(message.params?.parentId ?? ""))) {
+        const params = message.params!;
+        const nodeId = String(params.nodeId);
+        let next = mutateDesignNodeMoveSource(currentHomeSource, nodeId, String(params.parentId), typeof params.beforeId === "string" ? params.beforeId : null);
+        if (params.relocation) next = harnessInlineStyleSource(next, nodeId, designRelocationStyles(designRelocationSchema.parse(params.relocation)));
+        componentUndo.push({ source: currentPricingSource, home: currentHomeSource, frame: "home.html", snapshot: currentWorkspaceSnapshot });
+        componentRedo.length = 0;
+        publishHomeFrame(next);
+        applyDesignWorkspaceRefreshVersion(workspaceId, 500 + componentGeneration);
+        return { type: "WORKSPACE_RESPONSE", result: { frame: "home.html", nodeId, snapshot: currentWorkspaceSnapshot } };
+      }
       if (layoutGestureHarness && message.op === "design.node.transfer") {
         const params = message.params!;
         designShortcutOperations.push("transfer:waiting");
@@ -2050,9 +2110,17 @@ async function main() {
           };
         }
         const componentWrite = transaction?.operations?.length && transaction.operations.every((operation) => operation.type === "component.set-option" || operation.type === "component.save-variant");
+        // A slot's writes as the adapter makes them: a layer moved or drawn
+        // into it, and the layers a Reset to default deletes.
+        const slotted = new Set([...harnessSlottedLayers(currentHomeSource).values()].flatMap((slots) => Object.values(slots).flat()));
+        const movedIntoSlot = new Set((transaction?.operations ?? []).flatMap((operation) =>
+          operation.type === "node.move" && designSlotOfNodeId(String(operation.parentId ?? "")) ? [String(operation.nodeId)] : []));
         const instanceWrite = transaction?.operations?.length && transaction.documentId === "harness:home.html" &&
           transaction.operations.every((operation) => operation.type === "node.set-attribute" ||
-            (operation.type === "node.set-styles" && !!designPartOfNodeId(String(operation.nodeId ?? ""))));
+            (operation.type === "node.set-styles" && (!!designPartOfNodeId(String(operation.nodeId ?? "")) || movedIntoSlot.has(String(operation.nodeId)))) ||
+            (operation.type === "node.move" && !!designSlotOfNodeId(String(operation.parentId ?? ""))) ||
+            (operation.type === "node.set-html" && operation.mode === "append" && !!designSlotOfNodeId(String(operation.nodeId ?? ""))) ||
+            (operation.type === "node.delete" && slotted.has(String(operation.nodeId ?? ""))));
         if (componentOptionsHarness && (componentWrite || instanceWrite)) {
           const file = componentWrite ? "pricing.html" : "home.html";
           const current = currentWorkspaceSnapshot.frames.find((frame) => frame.file === file)!;
@@ -2064,7 +2132,11 @@ async function main() {
           for (const operation of (transaction.operations ?? []) as unknown as Array<Record<string, never>>) {
             if (operation.type === "component.set-option") next = mutateComponentOption(next, operation.file, operation as never);
             else if (operation.type === "component.save-variant") next = appendComponentVariant(next, operation.file, operation as never);
-            else if (operation.type === "node.set-styles") next = harnessPartStyleSource(next, operation.nodeId, operation.styles);
+            else if (operation.type === "node.set-styles") next = designPartOfNodeId(operation.nodeId)
+              ? harnessPartStyleSource(next, operation.nodeId, operation.styles) : harnessInlineStyleSource(next, operation.nodeId, operation.styles);
+            else if (operation.type === "node.move") next = mutateDesignNodeMoveSource(next, operation.nodeId, operation.parentId, operation.beforeId ?? null);
+            else if (operation.type === "node.set-html") next = mutateDesignNodeHtmlSource(next, operation.nodeId, operation.html, "append", "home.html");
+            else if (operation.type === "node.delete") next = mutateDesignNodeDeleteSource(next, operation.nodeId);
             else next = mutateDesignNodeAttributeSource(next, operation.nodeId, operation.attribute, operation.value, "home.html");
           }
           const { before, after } = componentWrite ? publishComponentFrame(next) : publishHomeFrame(next);

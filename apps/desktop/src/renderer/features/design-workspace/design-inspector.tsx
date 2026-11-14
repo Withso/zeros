@@ -207,9 +207,9 @@ import {
   setDesignNodeVisibility,
   settleDesignHistorySelection,
 } from "./state/design-selection";
-import { designComponentPartOf } from "@zeros/protocol/design-runtime";
-import { designComponentDisplayTitle, designComponentTextLock, designMissingComponentOf, designPartOverrideAttribute, designPartOverrideKey,
-  isDesignComponentPartNodeId } from "./state/design-component-parts";
+import { designComponentPartOf, designComponentSlotOf } from "@zeros/protocol/design-runtime";
+import { designComponentDisplayTitle, designComponentSlotLabel, designComponentTextLock, designMissingComponentOf, designPartOverrideAttribute,
+  designPartOverrideKey, isDesignComponentPartNodeId } from "./state/design-component-parts";
 import { MessageRow } from "../../shared/ui/primitives/message-row";
 import type { DesignComponentOptionsTarget } from "./design-component-options";
 import {
@@ -1574,7 +1574,9 @@ export const DesignInspector = React.memo(function DesignInspector({
   // An instance's part takes style writes, as overrides on its instance; a
   // held state has no override to write.
   const partSelected = isDesignComponentPartNodeId(selectedNodeId);
-  const editsDisabled = !active || pendingHistoryActions > 0;
+  // A slot takes layers, not styles: its frame is the main's.
+  const slotSelected = !!selectedNodeId && designComponentSlotOf(selectedNodeId) !== null;
+  const editsDisabled = !active || pendingHistoryActions > 0 || slotSelected;
   const [cssMode, setCssMode] = useState(false);
   const inspectorRef = useRef<HTMLElement | null>(null);
   const inspectorId = workspaceId
@@ -2944,7 +2946,8 @@ export const DesignInspector = React.memo(function DesignInspector({
   // One selected instance in another frame shows that instance's; a part of
   // one names the instance and shows nothing to edit.
   const selectedPart = selectedNodeId ? designComponentPartOf(selectedNodeId) : null;
-  const instanceNodeId = selectedPart?.host ?? (styleNodeIds.length <= 1 ? selectedNodeId : null);
+  const selectedSlot = selectedNodeId ? designComponentSlotOf(selectedNodeId) : null;
+  const instanceNodeId = selectedPart?.host ?? selectedSlot?.host ?? (styleNodeIds.length <= 1 ? selectedNodeId : null);
   // Own entries only: a layer id such as "constructor" is not a host.
   const instanceHost = instanceNodeId && frame?.instances && Object.hasOwn(frame.instances.hosts, instanceNodeId)
     ? frame.instances.hosts[instanceNodeId] : undefined;
@@ -2957,21 +2960,22 @@ export const DesignInspector = React.memo(function DesignInspector({
     ? null
     : frameSelected && frame.component && !selectedNodeId && styleNodeIds.length <= 1
       ? { kind: "main", component: frame.component }
-      : !selectedPart && instanceNodeId && instanceHost && instanceComponent && instanceTitle && styleNodeIds.length === 1
+      : !selectedPart && !selectedSlot && instanceNodeId && instanceHost && instanceComponent && instanceTitle && styleNodeIds.length === 1
         ? { kind: "instance", nodeId: instanceNodeId, title: instanceTitle, host: instanceHost, component: instanceComponent,
             ...(frame.instances?.notApplied ? { notApplied: frame.instances.notApplied } : {}) }
         : null;
   const optionsFrame = optionsTarget ? frame : null;
   // An instance whose main is gone renders nothing; it is named by the
   // component it asks for rather than read as an empty Frame.
-  const missingComponent = frame && instanceNodeId && !selectedPart && styleNodeIds.length <= 1
+  const missingComponent = frame && instanceNodeId && !selectedPart && !selectedSlot && styleNodeIds.length <= 1
     ? designMissingComponentOf(frame, instanceNodeId)
     : null;
   // As in Layers, the header names the instance by its component; the line
   // under it says what it is, and a part's line offers its instance too.
-  const componentHeader = instanceTitle && instanceComponent && instanceNodeId && (selectedPart || optionsTarget?.kind === "instance")
-    ? { title: instanceTitle, component: instanceComponent, host: instanceNodeId, part: selectedPart?.part ?? null }
+  const componentHeader = instanceTitle && instanceComponent && instanceNodeId && (selectedPart || selectedSlot || optionsTarget?.kind === "instance")
+    ? { title: instanceTitle, component: instanceComponent, host: instanceNodeId, part: selectedPart?.part ?? null, slot: selectedSlot?.name ?? null }
     : null;
+  const headerInner = !!componentHeader && (componentHeader.part !== null || componentHeader.slot !== null);
   const textLock = frame && selectedNodeId ? designComponentTextLock(frame, selectedNodeId) : null;
   const selectionType = optionsTarget?.kind === "main"
     ? "Component"
@@ -3055,9 +3059,9 @@ export const DesignInspector = React.memo(function DesignInspector({
             ? <ComponentGlyph className="text-fg2 size-3.5 shrink-0" aria-hidden="true" />
             : <SelectionGlyph className="text-fg2 size-3.5 shrink-0" aria-hidden="true" />}
           <span data-design-inspector-title="" className="text-fg1 min-w-0 flex-1 truncate text-xs font-medium">
-            {componentHeader && !componentHeader.part ? componentHeader.title : missingComponent ? `zd-${missingComponent}` : selectionTitle ?? selectionName}
+            {componentHeader && !headerInner ? componentHeader.title : missingComponent ? `zd-${missingComponent}` : selectionTitle ?? selectionName}
           </span>
-          {componentHeader && !componentHeader.part ? (
+          {componentHeader && !headerInner ? (
             <Button type="button" variant="ghost" size="compact" data-design-edit-main="" disabled={!componentHeader.component.frame && !onOpenFile} onClick={editMain}>
               {componentHeader.component.frame ? "Edit main" : "Open in Files"}
             </Button>
@@ -3093,14 +3097,16 @@ export const DesignInspector = React.memo(function DesignInspector({
         </>}
       </div>
       {componentHeader ? (
-        <div data-design-component-of={componentHeader.part ? "part" : "instance"}
+        <div data-design-component-of={componentHeader.slot !== null ? "slot" : componentHeader.part ? "part" : "instance"}
           className="border-border1 text-fg3 flex min-h-7 min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1 border-t py-1 pr-1.5 pl-3 text-xs leading-4">
           <ComponentGlyph className="size-3 shrink-0" aria-hidden="true" />
           {/* Its own width first, so a narrow panel moves the buttons to a line of their own. */}
           <span className="min-w-0 grow basis-auto truncate">
-            {componentHeader.part ? `Part of ${componentHeader.title}${partOverridden ? ", overridden" : ""}.` : `Instance of ${componentHeader.title}`}
+            {componentHeader.slot !== null
+              ? `${designComponentSlotLabel(componentHeader.slot)} slot of ${componentHeader.title}. Drop or draw layers into it.`
+              : componentHeader.part ? `Part of ${componentHeader.title}${partOverridden ? ", overridden" : ""}.` : `Instance of ${componentHeader.title}`}
           </span>
-          {componentHeader.part ? (
+          {headerInner ? (
             <span className="flex shrink-0 items-center gap-1">
               {partOverridden ? (
                 <Button type="button" variant="secondary" size="compact" data-design-part-reset="" disabled={editsDisabled} onClick={resetPart}>Reset</Button>

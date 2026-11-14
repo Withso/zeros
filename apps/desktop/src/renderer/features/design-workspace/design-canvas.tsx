@@ -150,6 +150,7 @@ import {
 } from "./design-effect-values";
 import {
   canInsertDesignFrame,
+  designDrawParentAt,
   designFrameInsertion,
 } from "./design-frame-insertion";
 import {
@@ -6804,20 +6805,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         const runtime = designFrameRuntime(workspaceId, owner.file);
         if (!runtime)
           throw new Error("The frame is still preparing its editable surface.");
-        let parent = await runtime.getElementAtLoc(start.x, start.y, {
-          mode: "deepest",
-        });
-        // Text and images can be hit while drawing; insert beside them inside
-        // their nearest frame, never inside a text node or a void element.
-        for (
-          let depth = 0;
-          parent && !canInsertDesignFrame(parent) && depth < 32;
-          depth++
-        ) {
-          parent = parent.layout?.parentId
-            ? await runtime.getNodeDetails(parent.layout.parentId)
-            : null;
-        }
+        let parent = await designDrawParentAt(runtime, start);
         if (!parent) {
           const snapshot = await runtime.getSnapshot();
           parent = snapshot.frame.oid

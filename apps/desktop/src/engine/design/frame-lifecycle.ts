@@ -40,6 +40,7 @@ import path from "node:path";
 
 import {
   createDesignWebDocumentState,
+  designSlotOfNodeId,
   mutateDesignNodeAttributeSource,
   mutateDesignNodeDeleteSource,
   mutateDesignNodeDuplicateSource,
@@ -1350,7 +1351,8 @@ function withPositionedParent(
   parentId: string | undefined,
   parentStyles: { position: "relative" } | undefined,
 ): string {
-  if (!parentStyles || !parentId || parentId === DESIGN_RUNTIME_DOCUMENT_BODY_ID) return source;
+  // A slot's frame is the main component's to position.
+  if (!parentStyles || !parentId || parentId === DESIGN_RUNTIME_DOCUMENT_BODY_ID || designSlotOfNodeId(parentId)) return source;
   const state = createDesignWebDocumentState({
     documentId: "transfer",
     entryFile: file,

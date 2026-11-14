@@ -45,6 +45,7 @@ import type {
 } from "./model";
 import { updateDesignWebState } from "./revision";
 import { designPartOfNodeId } from "./component-overrides";
+import { designSlotOfNodeId } from "./component-slots";
 import {
   appendComponentVariant,
   designSourceDeclaresComponentOptions,
@@ -435,7 +436,7 @@ function applyOperation(
       state,
       operation,
       { ...state.files, [state.entryFile]: healed },
-      [operation.nodeId],
+      [designSlotOfNodeId(operation.nodeId)?.host ?? operation.nodeId],
     );
   }
   if (operation.type === "node.move") {
@@ -449,7 +450,7 @@ function applyOperation(
       state,
       operation,
       { ...state.files, [state.entryFile]: updated },
-      [operation.nodeId, operation.parentId],
+      [operation.nodeId, designSlotOfNodeId(operation.parentId)?.host ?? operation.parentId],
     );
   }
   if (operation.type === "node.duplicate") {

@@ -12,6 +12,8 @@ import {
   designNodeIdSchema,
 } from "@zeros/design-core";
 import { designDocumentBody, withExplicitDesignBody } from "./document-body";
+import { designPartOfNodeId } from "./component-overrides";
+import { designSlotOfNodeId, designSlottedFragment } from "./component-slots";
 
 import { normalizeDesignCssProperty, validateDesignCssValue } from "./css";
 import { designSrcsetReferences, isContainedDesignReference } from "./references";
@@ -511,8 +513,34 @@ export function mutateDesignNodeDuplicateSource(
   return `${source.slice(0, location.endOffset)}${duplicate}${source.slice(location.endOffset)}`;
 }
 
-/** Move the exact authored span; do not serialize and normalize its subtree. */
+/** Move the exact authored span; do not serialize and normalize its subtree.
+ * Into a slot id, the layer joins the slot's host with slot="<name>"; out
+ * of an instance it leaves its slot behind. */
 export function mutateDesignNodeMoveSource(
+  source: string,
+  nodeId: string,
+  parentId: string,
+  beforeId: string | null,
+): string {
+  const slot = designSlotOfNodeId(parentId);
+  if (slot) {
+    // The parts between slotted layers are the component's: no place to name.
+    const sibling = beforeId && (designPartOfNodeId(beforeId) || designSlotOfNodeId(beforeId)) ? null : beforeId;
+    const moved = moveDesignNodeSource(source, nodeId, slot.host, sibling);
+    return mutateDesignNodeAttributeSource(moved, nodeId, "slot", slot.name || null);
+  }
+  const slotted = /\sslot\s*=/i.test(source) && slottedInInstance(source, nodeId);
+  const moved = moveDesignNodeSource(source, nodeId, parentId, beforeId);
+  return slotted ? mutateDesignNodeAttributeSource(moved, nodeId, "slot", null) : moved;
+}
+
+function slottedInInstance(source: string, nodeId: string): boolean {
+  const element = elementForMutation(source, nodeId);
+  const parent = element.parentNode;
+  return !!parent && "tagName" in parent && parent.tagName.startsWith("zd-") && element.attrs.some((attribute) => attribute.name === "slot");
+}
+
+function moveDesignNodeSource(
   source: string,
   nodeId: string,
   parentId: string,
@@ -842,6 +870,11 @@ export function mutateDesignNodeHtmlSource(
   mode: "append" | "replace-inner" = "replace-inner",
   sourceFile = "",
 ): string {
+  const slot = designSlotOfNodeId(nodeId);
+  if (slot) {
+    if (mode !== "append") throw new Error("A slot's layers can only be added to.");
+    return mutateDesignNodeHtmlSource(source, slot.host, designSlottedFragment(html, slot.name), "append", sourceFile);
+  }
   assertSafeDesignHtmlFragment(html, sourceFile);
   if (nodeId === DESIGN_DOCUMENT_BODY_ID) {
     if (mode !== "append")

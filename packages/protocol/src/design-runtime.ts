@@ -287,6 +287,31 @@ export function designComponentPartOf(nodeId: string): { host: string; part: str
   }
 }
 
+/** A slot of a component instance: a frame its main marks with
+ * data-zd-slot="<name>", which the instance fills with its own layers
+ * (slot="<name>"). Addressed through its host layer as a part is; an empty
+ * name is the default slot (the main's bare <slot>), which the host itself
+ * stands for. A layer moved or drawn into one lands in the host, with its
+ * slot attribute set. */
+export const DESIGN_COMPONENT_SLOT_PREFIX = "::zeros-slot:";
+
+export function designComponentSlotNodeId(host: string, name: string): string {
+  return `${DESIGN_COMPONENT_SLOT_PREFIX}${encodeURIComponent(host)}:${encodeURIComponent(name)}`;
+}
+
+/** The host and slot name a slot id names; null for any other id. */
+export function designComponentSlotOf(nodeId: string): { host: string; name: string } | null {
+  if (!nodeId.startsWith(DESIGN_COMPONENT_SLOT_PREFIX)) return null;
+  const rest = nodeId.slice(DESIGN_COMPONENT_SLOT_PREFIX.length);
+  const split = rest.indexOf(":");
+  if (split <= 0 || rest.indexOf(":", split + 1) >= 0) return null;
+  try {
+    return { host: decodeURIComponent(rest.slice(0, split)), name: decodeURIComponent(rest.slice(split + 1)) };
+  } catch {
+    return null;
+  }
+}
+
 /** A host oid an instance preview may name: the same strict form inserted
  * layers use, so it can sit in a selector with nothing to escape. */
 export const DESIGN_RUNTIME_INSTANCE_TARGET = /^[A-Za-z0-9_-]{1,128}$/;
@@ -1652,6 +1677,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   // main component's repeated copy (data-zd-copy) hits as its source layer.
 
   var PART_PREFIX = ${JSON.stringify(DESIGN_COMPONENT_PART_PREFIX)};
+  var SLOT_PREFIX = ${JSON.stringify(DESIGN_COMPONENT_SLOT_PREFIX)};
   var componentMarks = false;
 
   function componentAddressing() {
@@ -1665,12 +1691,41 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     return parent;
   }
 
+  // A frame the main marks as a slot is addressed as its slot, so a layer
+  // can be dropped or drawn into it; its other part writes go through Options.
   function partIdOf(element) {
+    var slot = element.getAttribute("data-zd-slot");
     var part = element.getAttribute("data-zd-part");
-    if (!part) return "";
+    if (!part && !slot) return "";
     var owner = partOwnerOf(element);
     var host = owner ? oidOf(owner) : "";
-    return host ? PART_PREFIX + encodeURIComponent(host) + ":" + encodeURIComponent(part) : "";
+    if (!host) return "";
+    return (slot ? SLOT_PREFIX : PART_PREFIX) + encodeURIComponent(host) + ":" + encodeURIComponent(slot || part);
+  }
+
+  /** The element a slot id names: the marked frame, or for the default slot
+   * the host itself. */
+  function slotElementFor(id) {
+    var rest = id.slice(SLOT_PREFIX.length);
+    var split = rest.indexOf(":");
+    if (split <= 0 || rest.indexOf(":", split + 1) >= 0) return null;
+    var host;
+    var name;
+    try {
+      host = decodeURIComponent(rest.slice(0, split));
+      name = decodeURIComponent(rest.slice(split + 1));
+    } catch (_error) {
+      return null;
+    }
+    ensureElementMap();
+    var hostElement = elementsByOid.get(host);
+    if (!hostElement || !hostElement.hasAttribute("data-zd-instance")) return null;
+    if (!name) return hostElement;
+    var marked = hostElement.querySelectorAll("[data-zd-slot]");
+    for (var index = 0; index < marked.length; index += 1) {
+      if (marked[index].getAttribute("data-zd-slot") === name && !oidOf(marked[index]) && partOwnerOf(marked[index]) === hostElement) return marked[index];
+    }
+    return null;
   }
 
   function partElementFor(id) {
@@ -1712,7 +1767,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     visitElementsFromPoint(x, y, function (element) {
       if (element === host || !host.contains(element)) return false;
       for (var current = element; current && current !== host; current = current.parentElement) {
-        if (current.hasAttribute("data-zd-part") && partOwnerOf(current) === host) {
+        if ((current.hasAttribute("data-zd-part") || current.hasAttribute("data-zd-slot")) && partOwnerOf(current) === host) {
           found = current;
           return true;
         }
@@ -3708,7 +3763,9 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       name: nameOf(element),
       text: textEditable ? editableTextOf(element) : directText(element),
       textEditable: textEditable,
-      selector: element === document.body ? "body" : oidOf(element) ? "[data-oid=\"" + escaped + "\"]" : "[data-zd-part=\"" + cssEscaped(element.getAttribute("data-zd-part") || "") + "\"]",
+      selector: element === document.body ? "body" : oidOf(element) ? "[data-oid=\"" + escaped + "\"]" : element.hasAttribute("data-zd-part")
+        ? "[data-zd-part=\"" + cssEscaped(element.getAttribute("data-zd-part") || "") + "\"]"
+        : "[data-zd-slot=\"" + cssEscaped(element.getAttribute("data-zd-slot") || "") + "\"]",
       visible: hiddenBy === null,
       breadcrumb: layoutOnly ? [] : breadcrumbOf(element),
       rect: rect,
@@ -4308,6 +4365,11 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       var part = partElementFor(oid);
       if (!part) throw new Error("Element not found: " + oid);
       return part;
+    }
+    if (oid.indexOf(SLOT_PREFIX) === 0 && componentAddressing()) {
+      var slot = slotElementFor(oid);
+      if (!slot) throw new Error("Element not found: " + oid);
+      return slot;
     }
     ensureElementMap();
     var element = elementsByOid.get(oid);

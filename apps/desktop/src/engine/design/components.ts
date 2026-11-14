@@ -8,6 +8,8 @@ import { sharedDesignParse } from "./shared-parse";
 
 import { applyDesignPartStyleOverrides, assertDesignComponentDefinitionIdentities, designPartStyleOverrides, DESIGN_PART_STYLE_ATTRIBUTE_PREFIX,
   rebaseDesignCssReferences, rebaseDesignHtmlReferences } from "@zeros/design-web";
+import { DESIGN_SLOT_ATTRIBUTE, designComponentBodySlotShape, designInstanceSlottedLayers, designSlotOptionElement, isDesignSlotName,
+  withDesignSlotOptions } from "@zeros/design-web/component-slots";
 import {
   ComponentExpressionError,
   componentExpressionScope,
@@ -472,7 +474,9 @@ function analyzeDefinition(name: string, registered: string | undefined, source:
   const declared = declarationElementsOf(document);
   if (registered || declared) {
     const file = registered ?? `components/${name}.html`;
-    const read = readDeclaration(declared ?? [], name, file, errors, source);
+    const slots = body ? designComponentBodySlotShape(innerSource(source, body)).names : [];
+    const read = readDeclaration(withDesignSlotOptions(declared ?? [], slots, (slot) => ({ ...designSlotOptionElement(slot), offset: 0, nested: false })),
+      name, file, errors, source);
     let summary: DesignComponentSummary | null | undefined;
     return { nested, errors, definition: {
       name,
@@ -596,6 +600,10 @@ function hasComponentAncestor(
   return false;
 }
 
+/** Place an instance's children in its definition's slots. A frame the
+ * definition marks data-zd-slot="<name>" takes the children named for it
+ * (slot="<name>") in place of what it holds; a bare <slot> takes the rest,
+ * else shows its fallback; <slot data-zd-attr> shows an attribute's text. */
 function fillSlots(
   definitionBody: string,
   instanceSource: string,
@@ -606,32 +614,60 @@ function fillSlots(
   const fragment = parseFragment(definitionBody, {
     sourceCodeLocationInfo: true,
   });
-  const instanceChildren = innerSource(instanceSource, instance);
   const attributes = new Map(
     instance.attrs.map((attribute) => [attribute.name, attribute.value]),
   );
-  const slots = elements(fragment).filter(
-    (element) => element.tagName === "slot" && element.sourceCodeLocation,
-  );
-  let result = definitionBody;
-  for (const slot of slots.sort(
-    (left, right) =>
-      (right.sourceCodeLocation?.startOffset ?? 0) -
-      (left.sourceCodeLocation?.startOffset ?? 0),
-  )) {
+  const all = elements(fragment);
+  const named = new Map<string, DefaultTreeAdapterTypes.Element>();
+  if (definitionBody.includes(DESIGN_SLOT_ATTRIBUTE)) {
+    for (const element of all) {
+      const name = element.attrs.find((attribute) => attribute.name === DESIGN_SLOT_ATTRIBUTE)?.value;
+      // A slot inside a nested instance belongs to that instance.
+      if (name && isDesignSlotName(name) && !named.has(name) && element.sourceCodeLocation?.startTag && element.sourceCodeLocation.endTag &&
+        !hasComponentAncestor(element)) named.set(name, element);
+    }
+  }
+  const taken = new Map<string, string>();
+  let rest = "";
+  for (const child of named.size ? instance.childNodes : []) {
+    const location = child.sourceCodeLocation;
+    if (!location) continue;
+    const text = instanceSource.slice(location.startOffset, location.endOffset);
+    const slot = "tagName" in child ? child.attrs.find((attribute) => attribute.name === "slot")?.value : undefined;
+    if (slot && named.has(slot)) taken.set(slot, (taken.get(slot) ?? "") + text);
+    else rest += text;
+  }
+  // Without a named slot filled, the default slot takes every child as written.
+  const instanceChildren = taken.size ? (rest.trim() ? rest : "") : innerSource(instanceSource, instance);
+  const edits: Array<{ start: number; end: number; text: string }> = [];
+  const filled: Array<{ start: number; end: number }> = [];
+  for (const [name, slot] of named) {
+    const text = taken.get(name);
     const location = slot.sourceCodeLocation!;
+    const start = location.startTag!.endOffset, end = location.endTag!.startOffset;
+    if (text === undefined || filled.some((range) => range.start <= start && end <= range.end)) continue;
+    edits.push({ start, end, text });
+    filled.push({ start, end });
+  }
+  for (const slot of all) {
+    const location = slot.sourceCodeLocation;
+    if (slot.tagName !== "slot" || !location || filled.some((range) => range.start <= location.startOffset && location.endOffset <= range.end)) continue;
     const attributeName = slot.attrs.find(
       (attribute) => attribute.name === "data-zd-attr",
     )?.value;
     const fallback = innerSource(definitionBody, slot);
-    const replacement = attributeName
+    const text = attributeName
       ? attributes.has(attributeName)
         ? escapeText(attributes.get(attributeName) ?? "")
         : fallback
       : instanceChildren || fallback;
-    budget.charge(result.length + replacement.length);
-    budget.output(Buffer.byteLength(result) - Buffer.byteLength(result.slice(location.startOffset, location.endOffset)) + Buffer.byteLength(replacement));
-    result = `${result.slice(0, location.startOffset)}${replacement}${result.slice(location.endOffset)}`;
+    edits.push({ start: location.startOffset, end: location.endOffset, text });
+  }
+  let result = definitionBody;
+  for (const edit of edits.sort((left, right) => right.start - left.start)) {
+    budget.charge(result.length + edit.text.length);
+    budget.output(Buffer.byteLength(result) - Buffer.byteLength(result.slice(edit.start, edit.end)) + Buffer.byteLength(edit.text));
+    result = `${result.slice(0, edit.start)}${edit.text}${result.slice(edit.end)}`;
   }
   return result;
 }
@@ -970,10 +1006,13 @@ function recordInstance(
   failed: boolean,
 ): void {
   const { declaration, file } = definition.template;
+  const shape = designComponentBodySlotShape(definition.body);
+  const slotted = designInstanceSlottedLayers(instance, shape);
   recordHost(usage, definition.name, instance, new Set([...declaration.options.map((option) => option.name), COMPONENT_VARIANT_ATTRIBUTE]), () => {
     const summary = definition.template.summary?.() ?? null;
-    return { elements: summary?.elements ?? [], reach: summary?.reach ?? {}, file, frame: registry.get(definition.name) === file };
-  }, failed ? { failed: true } : {});
+    return { elements: withDesignSlotOptions(summary?.elements ?? [], shape.names, designSlotOptionElement), reach: summary?.reach ?? {},
+      file, frame: registry.get(definition.name) === file };
+  }, { ...(failed ? { failed: true } : {}), ...(slotted ? { slotted } : {}) });
 }
 
 /** A plain definition's instance: each attribute slot is a text option with
@@ -988,13 +1027,15 @@ function recordSlotInstance(
   const text = content && instance.childNodes.every((child) => child.nodeName === "#text")
     ? instance.childNodes.map((child) => (child as DefaultTreeAdapterTypes.TextNode).value).join("")
     : undefined;
+  const names = designComponentBodySlotShape(definition.body).names.filter((name) => !options.some((option) => option.name === name));
+  const slotted = designInstanceSlottedLayers(instance, { names, fallback: content });
   recordHost(usage, definition.name, instance, new Set(options.map((option) => option.name)), () => ({
-    elements: options.map((option) => ({ tag: "zd-option", attributes: [{ name: "name", value: option.name }, { name: "type", value: "text" },
-      { name: "default", value: option.fallback }] })),
+    elements: [...options.map((option) => ({ tag: "zd-option", attributes: [{ name: "name", value: option.name }, { name: "type", value: "text" },
+      { name: "default", value: option.fallback }] })), ...names.map(designSlotOptionElement)],
     reach: {},
     file: `components/${definition.name}.html`,
     frame: false,
-  }), text !== undefined && text.length <= DESIGN_COMPONENT_RECORD_LIMITS.attributeValue ? { text } : {});
+  }), { ...(text !== undefined && text.length <= DESIGN_COMPONENT_RECORD_LIMITS.attributeValue ? { text } : {}), ...(slotted ? { slotted } : {}) });
 }
 
 function recordHost(
@@ -1003,7 +1044,7 @@ function recordHost(
   instance: DefaultTreeAdapterTypes.Element,
   names: ReadonlySet<string>,
   component: () => DesignFrameInstances["components"][string],
-  extra: { failed?: true; text?: string },
+  extra: { failed?: true; text?: string; slotted?: Record<string, string[]> },
 ): void {
   const oid = instance.attrs.find((attribute) => attribute.name === "data-oid")?.value;
   if (!oid || oid.length > DESIGN_COMPONENT_RECORD_LIMITS.layerId || INHERITED_NAMES.has(oid) || INHERITED_NAMES.has(name)) return;
@@ -1038,7 +1079,7 @@ function recordHost(
   }
   record.hosts.set(oid, { component: name, attributes: Object.fromEntries(attributes), ...(extra.failed ? { failed: true as const } : {}),
     ...(ignored.size ? { ignored: Object.fromEntries(ignored) } : {}), ...(overrides.size ? { overrides: Object.fromEntries(overrides) } : {}),
-    ...(extra.text !== undefined ? { text: extra.text } : {}) });
+    ...(extra.text !== undefined ? { text: extra.text } : {}), ...(extra.slotted ? { slotted: extra.slotted } : {}) });
 }
 
 /** A top-level instance of a name no definition answers to, so the panel and

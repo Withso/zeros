@@ -20,6 +20,7 @@ import {
   isDesignRuntimeFrameChanges,
   isDesignRuntimeComponentOptionsPreview,
   designComponentPartOf,
+  designComponentSlotOf,
   DESIGN_RUNTIME_INSTANCE_TARGET,
   type DesignRuntimeComponentOptionsPreview,
   isDesignRuntimeNodeState,
@@ -863,7 +864,8 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
     if (!this.supports("getComponentPartAtLoc")) throw runtimeError("getComponentPartAtLoc is not supported", "METHOD_NOT_SUPPORTED");
     const result = await this.request("getComponentPartAtLoc", { x, y, hostNodeId }, signal);
     if (result === null) return null;
-    if (!isNodeDetails(result) || result.sourceVersion !== this.expectedSourceVersion || !designComponentPartOf(result.oid)) {
+    if (!isNodeDetails(result) || result.sourceVersion !== this.expectedSourceVersion ||
+      (!designComponentPartOf(result.oid) && !designComponentSlotOf(result.oid))) {
       throw runtimeError("getComponentPartAtLoc returned malformed data");
     }
     return result;

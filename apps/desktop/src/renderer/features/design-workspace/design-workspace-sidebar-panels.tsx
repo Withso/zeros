@@ -28,6 +28,7 @@ import {
   ListCollapse,
   Scan,
   Spline,
+  SquareDashed,
   StretchHorizontal,
   StretchVertical,
   Type,
@@ -214,6 +215,7 @@ export function DesignLayerRowIcon({ kind, node }: {
   node: DesignRuntimeTreeNode;
 }) {
   if (kind === "instance") return <Diamond data-design-layer-instance="" aria-hidden="true" />;
+  if (kind === "slot") return <SquareDashed data-design-layer-slot="" aria-hidden="true" />;
   if (node.absolute) return <Scan data-design-layer-absolute="" aria-hidden="true" />;
   return (
     <LayerTypeIcon
@@ -1177,7 +1179,7 @@ function OwnedDesignWorkspaceSidebarPanels({
 
   const beginRename = (row: DesignPanelRow) => {
     if (!treeActive || !layerOwnerKey || row.kind === "pending") return;
-    if (row.kind === "layer" && designLayerRowKind(row.frame, row.layer.node.oid) === "part") return;
+    if (row.kind === "layer" && ["part", "slot"].includes(designLayerRowKind(row.frame, row.layer.node.oid))) return;
     if (!isPreparedDesignFrame(row.frame)) { chooseFrame(row.frame); return; }
     if (savedEditing && !savedEditing.enter()) {
       toast.info("Saved source is still restoring. Try the edit again when the preview has cleared.");

@@ -1,5 +1,6 @@
 import type { DesignRuntimeNodeDetails, DesignRuntimeNodeInsert } from "@zeros/protocol/design-runtime";
 import type { DesignOperation } from "@zeros/design-core";
+import { designComponentPartOf, designComponentSlotOf } from "@zeros/protocol/design-runtime";
 import { designRuntimeLayerLabel } from "./design-layer-label";
 
 type Point = { x: number; y: number };
@@ -38,11 +39,44 @@ const NON_FRAME_CONTAINERS = new Set([
 export function canInsertDesignFrame(
   parent: DesignRuntimeNodeDetails,
 ): boolean {
+  // An instance's layers are its main's; only a slot the main marks takes
+  // the instance's own.
+  if (designComponentSlotOf(parent.oid) !== null) return parent.styles.display !== "contents";
+  if (designComponentPartOf(parent.oid) !== null || parent.tag.toLowerCase().startsWith("zd-")) return false;
   return (
     designRuntimeLayerLabel(parent) === "Frame" &&
     !NON_FRAME_CONTAINERS.has(parent.tag.toLowerCase()) &&
     parent.styles.display !== "contents"
   );
+}
+
+/** What the canvas asks a frame's runtime to find the frame a drawn layer
+ * joins. */
+export interface DesignDrawParentRuntime {
+  supports?(method: string): boolean;
+  getElementAtLoc(x: number, y: number, options: { mode: "deepest" }): Promise<DesignRuntimeNodeDetails | null>;
+  getComponentPartAtLoc?(x: number, y: number, hostNodeId: string): Promise<DesignRuntimeNodeDetails | null>;
+  getNodeDetails(nodeId: string): Promise<DesignRuntimeNodeDetails | null>;
+}
+
+/** The nearest drawable frame under a point. Hit testing stops at an
+ * instance, so over one the part under the point is asked for: a slot it
+ * sits in takes the layer, and otherwise the layer goes beside the instance.
+ * Text and images are passed for their nearest frame, never entered. */
+export async function designDrawParentAt(runtime: DesignDrawParentRuntime, point: Point): Promise<DesignRuntimeNodeDetails | null> {
+  let parent = await runtime.getElementAtLoc(point.x, point.y, { mode: "deepest" });
+  if (parent?.tag.toLowerCase().startsWith("zd-") && runtime.supports?.("getComponentPartAtLoc") && runtime.getComponentPartAtLoc) {
+    const host = parent;
+    let part = await runtime.getComponentPartAtLoc(point.x, point.y, host.oid);
+    for (let depth = 0; part && !canInsertDesignFrame(part) && part.oid !== host.oid && depth < 32; depth++) {
+      part = part.layout?.parentId ? await runtime.getNodeDetails(part.layout.parentId) : null;
+    }
+    if (part && canInsertDesignFrame(part)) return part;
+  }
+  for (let depth = 0; parent && !canInsertDesignFrame(parent) && depth < 32; depth++) {
+    parent = parent.layout?.parentId ? await runtime.getNodeDetails(parent.layout.parentId) : null;
+  }
+  return parent;
 }
 
 /** Insertion remains in the exact parent's coordinates even when the canvas
@@ -90,7 +124,9 @@ export function designFrameInsertion(
   const height = Math.max(1, Math.round(Math.max(from.y, to.y)) - y);
   if (![x, y, width, height].every(Number.isFinite))
     throw new Error("The frame's drawable bounds are invalid.");
-  const flow = ["flex", "inline-flex", "grid", "inline-grid"].includes(
+  // A slot's frame is the main's to style, so a layer drawn into one
+  // joins its flow rather than asking it to be positioned.
+  const flow = designComponentSlotOf(parent.oid) !== null || ["flex", "inline-flex", "grid", "inline-grid"].includes(
     parent.styles.display ?? "",
   );
   const operations: DesignOperation[] = [];

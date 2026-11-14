@@ -22,6 +22,7 @@ import {
   type ComponentExpressionValue,
 } from "@zeros/design-core/components";
 import { DESIGN_COMPONENT_BOUND_TEXT_LIMIT, DESIGN_COMPONENT_RECORD_LIMITS } from "@zeros/protocol/design-catalog";
+import { designSlotOptionElement, designSlotsOfNodes, withDesignSlotOptions } from "./component-slots";
 
 export const COMPONENT_TEMPLATE_LIMITS = Object.freeze({
   /** Holes one rendering may fill. */
@@ -351,9 +352,12 @@ export function designComponentSummaryOf(source: string): DesignComponentSummary
     (node) => "tagName" in node && node.tagName === "template" && node.attrs.some((attribute) => attribute.name === "data-zd-options"),
   ) as Template | undefined;
   if (!template) return null;
-  const elements = template.content.childNodes
+  const declared = template.content.childNodes
     .filter((node): node is Element => "tagName" in node)
     .map((element) => ({ tag: element.tagName, attributes: element.attrs.map(({ name, value }) => ({ name, value })) }));
+  // A frame the main marks as a slot is one of its options.
+  const body = html?.childNodes.find((node) => "tagName" in node && node.tagName === "body") as Element | undefined;
+  const elements = withDesignSlotOptions(declared, body ? designSlotsOfNodes(body.childNodes) : [], designSlotOptionElement);
   const { declaration } = readComponentDeclaration(elements.map((element) => ({ ...element, offset: 0 })));
   const names = new Set<string>();
   for (const expression of componentTemplateExpressions(source, { document: true })) {

@@ -4,7 +4,8 @@
 // works out an instance's values, and writes the values that reach CSS.
 // Values enter CSS only in strict forms: a finite number with a known unit,
 // a colour from a fixed grammar or var(--token), and an easing from a fixed
-// grammar. Text, choices and booleans never reach CSS.
+// grammar. Text, choices and booleans never reach CSS. A slot takes layers,
+// not a value: the instance's own layers placed in it.
 
 import {
   COMPONENT_EXPRESSION_RESERVED_NAMES,
@@ -28,8 +29,8 @@ export const COMPONENT_OPTION_LIMITS = Object.freeze({
   text: 2_048,
 });
 
-export type ComponentOptionKind = "number" | "boolean" | "choice" | "color" | "text" | "easing";
-const KINDS: readonly ComponentOptionKind[] = ["number", "boolean", "choice", "color", "text", "easing"];
+export type ComponentOptionKind = "number" | "boolean" | "choice" | "color" | "text" | "easing" | "slot";
+const KINDS: readonly ComponentOptionKind[] = ["number", "boolean", "choice", "color", "text", "easing", "slot"];
 
 export interface ComponentEasing {
   /** As written: a keyword, cubic-bezier(), steps() or spring(bounce). */
@@ -51,7 +52,10 @@ export type ComponentOption =
   | (OptionBase & { kind: "choice"; default: string; choices: string[]; choiceLabels: string[] })
   | (OptionBase & { kind: "color"; default: string })
   | (OptionBase & { kind: "text"; default: string })
-  | (OptionBase & { kind: "easing"; default: ComponentEasing });
+  | (OptionBase & { kind: "easing"; default: ComponentEasing })
+  /** Its default is what the main's slot layer holds; an instance fills it
+   * with layers that carry slot="<name>". */
+  | (OptionBase & { kind: "slot"; default: "" });
 
 export interface ComponentDerived {
   name: string;
@@ -222,6 +226,8 @@ export function parseComponentOptionValue(option: ComponentOption, raw: string):
       const value = strictEasing(raw);
       return value ? { ok: true, value } : misfit('an easing and a duration, such as "ease-out 150ms", "cubic-bezier(0.2, 0, 0, 1) 200ms" or "spring(0.2) 300ms"');
     }
+    case "slot":
+      return { ok: false, message: `${option.name} is a slot: place layers in it, with slot="${option.name}", rather than setting a value.` };
   }
 }
 
@@ -250,6 +256,10 @@ function readOption(element: ComponentDeclarationElement, problem: (message: str
     return problem(`The option ${name}'s group must be 1 to ${COMPONENT_OPTION_LIMITS.label} characters.`), null;
   const base = { name, label, ...(group ? { group } : {}), offset: element.offset };
   const raw = attributes.get("default");
+  if (kind === "slot") {
+    if (raw !== undefined) return problem(`The slot ${name} takes no default: its default is what the main's slot layer holds.`), null;
+    return { ...base, kind, default: "" };
+  }
   if (raw === undefined && kind !== "text") return problem(`The option ${name} needs a default.`), null;
   let option: ComponentOption;
   if (kind === "number") {
@@ -469,12 +479,12 @@ export function componentOptionValues(
     }
     const parsed = parseComponentOptionValue(option, raw);
     if (parsed.ok) values.set(name, parsed.value);
-    else problems.push({ message: parsed.message, severity: "error" });
+    else problems.push({ message: parsed.message, severity: option.kind === "slot" ? "warning" : "error" });
   }
   return { values, problems };
 }
 
-/** The names a template's expressions see: every option but an easing, then
+/** The names a template's expressions see: every option but an easing or a slot, then
  * each derived value in order. Throws ComponentExpressionError. */
 export function componentExpressionScope(
   declaration: ComponentDeclaration,
@@ -484,7 +494,7 @@ export function componentExpressionScope(
   const scope = new Map<string, ComponentExpressionValue>();
   for (const option of declaration.options) {
     const value = values.get(option.name) ?? option.default;
-    if (option.kind !== "easing") scope.set(option.name, value as ComponentExpressionValue);
+    if (option.kind !== "easing" && option.kind !== "slot") scope.set(option.name, value as ComponentExpressionValue);
   }
   for (const derived of declaration.derived) {
     const value = evaluateComponentExpression(derived.expression, scope, budget);
