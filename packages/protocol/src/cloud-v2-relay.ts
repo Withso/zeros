@@ -235,8 +235,6 @@ export const CloudV2ControlFrameSchema = z.discriminatedUnion("t", [
     /** creator-commit-identity-v1 only: "creator" = gitIdentity is the current Creator's (null: none stored, commits refuse);
      * "actor" = no Creator, each context commits as its own person. Absent: N−1 behaviour. */
     gitIdentitySource: z.enum(["creator", "actor"]).optional(),
-    /** push-signals-v1 only: the control plane accepts the R1 cadences (see PUSH_SIGNALS_FEATURE). */
-    pushSignals: z.literal(1).optional(),
   githubPullRequests: z.literal(1).optional(),
     githubUserTokens: z.literal(1).optional(),
     /** local-commands-v1 workers only, while the organization allows local
