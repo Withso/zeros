@@ -95,11 +95,12 @@ describe("history-digest-v1 (worker half)", () => {
     for (const chatId of ["chat-0", "chat-1", "chat-2"]) f.relay.digests.set(chatId, "f".repeat(64));
     f.state.restored = true;
     f.mirror.connect(); await f.mirror.flush();
-    expect(f.relay.reads).toBe(0);
+    // The read still runs (it proves the route), but its digests are ignored on a restored boot's first connect.
+    expect(f.relay.reads).toBe(1);
     expect(f.replaced()).toEqual(["chat-0", "chat-1", "chat-2"]);
     // Only the boot's first connect is forced; its replacement stamped fresh digests, so the next reconnect skips.
     await f.reconnect();
-    expect(f.relay.reads).toBe(1); expect(f.replaced()).toEqual([]);
+    expect(f.relay.reads).toBe(2); expect(f.replaced()).toEqual([]);
     f.relay.digests.clear();
     await f.reconnect();
     expect(f.replaced()).toEqual(["chat-0", "chat-1", "chat-2"]);
@@ -111,8 +112,15 @@ describe("history-digest-v1 (worker half)", () => {
     for (const fail of [new Error("socket hang up"), Object.assign(new Error("not found"), { status: 404 })]) {
       f.relay.fail = fail; await f.reconnect();
       expect(f.replaced()).toEqual(["chat-0", "chat-1", "chat-2"]);
+      // A failed read proves nothing about the control plane: the replacement carries no optional digest field.
+      expect(JSON.stringify(f.relay.frames)).not.toContain("digest");
     }
     f.relay.fail = undefined;
+    // A good read (nothing stamped yet) re-stamps every chat.
+    await f.reconnect();
+    expect(f.replaced()).toEqual(["chat-0", "chat-1", "chat-2"]);
+    await f.reconnect();
+    expect(f.replaced()).toEqual([]);
     f.relay.digests.set("chat-0", "0".repeat(64)); f.relay.digests.delete("chat-1");
     await f.reconnect();
     expect(f.replaced()).toEqual(["chat-0", "chat-1"]);

@@ -39,10 +39,11 @@ export class HistoryMirror {
     for (const chatId of chatDeletions) this.pending.set(chatId, { deleted: true, revision: 0, rows: new Map(), due: 0 });
     // A boot restored from a checkpoint (possibly older than the control plane's rows) replaces everything once.
     const restored = this.firstConnect && !!this.digests?.restored(); this.firstConnect = false;
-    if (!restored && this.stamping() && this.transport.historyDigests) {
-      // One read of the stored digests; only chats whose content differs are replaced. flush() and runtimeBusy wait for it.
+    if (this.negotiated() && this.transport.historyDigests) {
+      // One read of the stored digests; only chats whose content differs are replaced (a restored boot replaces all, but
+      // the read still proves the route). flush() and runtimeBusy wait for it.
       const epoch = this.epoch;
-      this.sending = this.reconcile(epoch).finally(() => { if (epoch === this.epoch) { this.sending = undefined; this.drain(); } });
+      this.sending = this.reconcile(epoch, restored).finally(() => { if (epoch === this.epoch) { this.sending = undefined; this.drain(); } });
       return;
     }
     for (const chat of chats) this.pending.set(chat.id, this.snapshot(chat));
@@ -50,7 +51,12 @@ export class HistoryMirror {
   }
 
   private firstConnect = true;
-  private stamping(): boolean { return !!this.digests?.enabled() && this.replacement(); }
+  /** The connection epoch whose digests read succeeded with a valid reply (an empty one included). */
+  private stampEpoch = -1;
+  private negotiated(): boolean { return !!this.digests?.enabled() && this.replacement(); }
+  /** Digests go out only after this connection's read proved the control plane serves them: after a failed or invalid
+   * read the replacement carries no optional field, so an older control plane's strict schema still accepts it. */
+  private stamping(): boolean { return this.negotiated() && this.stampEpoch === this.epoch; }
   private snapshot(chat: ChatRow): Pending {
     return { chat, ...(this.replacement() ? { replace: true, historyState: this.store.historyState(chat.id) } : {}),
       revision: this.store.historyRevision(chat.id), rows: new Map(this.store.history(chat.id).map((row) => [row.msgId, row])), due: 0 };
@@ -65,12 +71,14 @@ export class HistoryMirror {
     }
     return hash.digest("hex");
   }
-  private async reconcile(epoch: number): Promise<void> {
+  private async reconcile(epoch: number, restored: boolean): Promise<void> {
     let stored: Map<string, string | null> | undefined;
-    // Any doubt (error, 404, an older control plane, an invalid reply) means today's full replacement.
+    // Any doubt (error, 404, an older control plane, an invalid reply) means today's full replacement, unstamped.
     try { stored = new Map(CloudV2HistoryDigestsReplySchema.parse(await this.transport.historyDigests!()).chats.map(entry => [entry.chatId, entry.digest])); }
     catch { stored = undefined; }
     if (epoch !== this.epoch || !this.online) return;
+    if (stored) this.stampEpoch = epoch;
+    if (restored) stored = undefined;
     for (const chat of this.store.list().chats) {
       const full = this.snapshot(chat), digest = stored?.get(chat.id);
       if (digest && digest === this.digestOf(full.chat!, full.historyState, full.rows.values())) continue;
