@@ -153,7 +153,8 @@ export class LocalCommandService {
         const reply = await this.deps.control.register(this.deps.identity.deviceId(accountId), { ...registration, name: await this.deps.identity.name() });
         if (signal.aborted) return;
         this.device = reply.device; attempt = 0;
-        this.log("registered");
+        // Closed diagnostics only: how many capabilities this registration carries (device-liveness-v1 is the 3rd).
+        this.log(`registered capabilities=${registration.capabilities.length}`);
         this.setPresence(reply.presence);
       } catch (error) {
         if (signal.aborted) return;
@@ -234,6 +235,8 @@ export class LocalCommandService {
   /** The interval the latest ready named (device-liveness-v1: 5 min); an older control plane always says 25 s. */
   private heartbeatMs = 25_000;
   private onEvent(event: DeviceEvent): void {
+    // Closed diagnostics on every channel open: the interval and features the ready named (no ids or tokens).
+    if (event.event === "ready") this.log(`ready heartbeat_interval_ms=${event.data.heartbeatIntervalMs} features=${(event.data as { features?: readonly string[] }).features?.join(",") || "none"}`);
     if (event.event === "ready" && event.data.heartbeatIntervalMs !== this.heartbeatMs) {
       this.heartbeatMs = event.data.heartbeatIntervalMs;
       if (this.heartbeat) { clearInterval(this.heartbeat); this.heartbeat = undefined; }

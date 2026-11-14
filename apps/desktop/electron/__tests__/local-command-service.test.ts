@@ -314,3 +314,20 @@ describe("idle is quiet: the device stream hints sync only when something it rea
     await service.stop();
   });
 });
+
+describe("device ready diagnostics", () => {
+  it("logs the ready's heartbeat interval and features on every channel open, with no ids or tokens", async () => {
+    const root = await mkdtemp(join(tmpdir(), "local-command-ready-log-")); directories.push(root);
+    const h = harness({ journalRoot: root });
+    const lines: string[] = [];
+    const service = new LocalCommandService({ ...h.deps, log: line => { lines.push(line); } });
+    await service.start();
+    await vi.waitFor(() => expect(h.calls).toContain("register"));
+    h.push({ event: "ready", data: { deviceId, registrationId: device.registrationId, instanceId: device.instanceId, presence: { presenceRequired: false, reachableUntil: null },
+      heartbeatIntervalMs: 300_000, features: ["device-liveness-v1"] } });
+    await vi.waitFor(() => expect(lines).toContain("ready heartbeat_interval_ms=300000 features=device-liveness-v1"));
+    expect(lines.some(line => line.startsWith("registered capabilities=3"))).toBe(true);
+    expect(lines.join("\n")).not.toContain(device.registrationId);
+    await service.stop();
+  });
+});
