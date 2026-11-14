@@ -10,6 +10,29 @@ suite("chat cache migration with the deployment role", () => {
   beforeAll(() => { pool = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL, max: 4 }); });
   afterAll(async () => pool.end());
 
+  it("grants runtime reads without inheriting the original creator's default privileges", async () => {
+    await teamSharingFixture(pool);
+    const sql = readFileSync(new URL("../../migrations/0252_cloud_chat_cache.sql", import.meta.url), "utf8");
+    const role = `cache_migrator_${randomUUID().replaceAll("-", "")}`;
+    const tx = await pool.connect();
+    try {
+      await tx.query("BEGIN");
+      await tx.query(`DROP TABLE cloud_v2_history_cache,cloud_v2_history_changes,cloud_v2_prompt_cache;
+        DROP FUNCTION advance_cloud_history_cache(uuid,text,boolean,bigint),track_cloud_message_cache(),track_cloud_message_count(),track_cloud_chat_cache(),track_cloud_prompt_cache() CASCADE`);
+      await tx.query(`CREATE ROLE ${role} NOSUPERUSER NOINHERIT NOBYPASSRLS;
+        GRANT USAGE,CREATE ON SCHEMA public TO ${role};
+        GRANT ALL ON cloud_v2_workspaces,cloud_v2_chats,cloud_v2_messages,cloud_v2_prompt_chats,cloud_v2_prompt_outbox TO ${role};
+        SET LOCAL ROLE ${role}`);
+      await tx.query(sql);
+      await tx.query("RESET ROLE; SET LOCAL ROLE zeros_app; SELECT set_config('app.system','on',true)");
+      for (const table of ["cloud_v2_history_cache", "cloud_v2_history_changes", "cloud_v2_prompt_cache"]) {
+        expect((await tx.query(`SELECT * FROM ${table}`)).rows).toEqual([]);
+      }
+    } finally {
+      await tx.query("ROLLBACK"); tx.release();
+    }
+  });
+
   it("applies without superuser and restores the writer's RLS settings after tracking", async () => {
     const f = await teamSharingFixture(pool);
     await f.store.writeHistory(f.workspace.id, { chats: [{ id: "chat" }] });

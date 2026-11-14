@@ -46,7 +46,7 @@ suite("chat cache revisions alongside worker history digests", () => {
       history_replacement_sequence: "2", history_replacement_started: true });
     f.fetcher.mockClear();
     f.unavailable.add(f.viewer.id); f.unavailable.add(f.creator.id);
-    expect(await read("messages.range", { chatId: "chat", fromIndex: 0, toIndex: 500 })).toEqual(before);
+    expect(await read("messages.range", { chatId: "chat", fromIndex: 0, toIndex: 500 })).toEqual({ ...before, senders: { m0: null } });
     expect(await read("messages.since", { chatId: "chat", revision: before.revision }))
       .toMatchObject({ resync: false, revision: before.revision, rows: [] });
     expect((await read("chats.list")).chats).toEqual([{ id: "chat", historyState: { revision: 0 },

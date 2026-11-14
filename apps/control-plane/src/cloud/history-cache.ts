@@ -1,13 +1,13 @@
 import { HttpError } from "../authz.js";
 import type { Tx } from "../db.js";
 import { CloudV2HistoryStateSchema, type CloudV2HistoryState, type CloudV2MessageRow } from "./contract.js";
-import { isUserMessage, mirrorTurnOpening } from "./history.js";
+import { isUserMessage, mirrorMessageSenders, mirrorTurnOpening, type MessageSenders } from "./history.js";
 
 export type IndexedMessage = CloudV2MessageRow & { index: number };
 export type HistoryRange = { revision: number; messageCount: number; fromIndex: number; toIndex: number;
-  rows: IndexedMessage[]; historyState?: CloudV2HistoryState; turnOpening?: CloudV2MessageRow };
+  rows: IndexedMessage[]; historyState?: CloudV2HistoryState; turnOpening?: CloudV2MessageRow; senders?: MessageSenders };
 export type HistoryDelta = { resync: true; revision: number; messageCount: number }
-  | { resync: false; fromRevision: number; revision: number; messageCount: number; rows: IndexedMessage[]; historyState?: CloudV2HistoryState };
+  | { resync: false; fromRevision: number; revision: number; messageCount: number; rows: IndexedMessage[]; historyState?: CloudV2HistoryState; senders?: MessageSenders };
 type Message = { ord: string; msg_id: string; kind: string; payload: string; created_at_ms: string };
 const indexed = (row: Message, index: number): IndexedMessage => ({ index, msgId: row.msg_id, kind: row.kind, payload: row.payload, createdAt: Number(row.created_at_ms) });
 
@@ -30,17 +30,20 @@ async function snapshot(tx: Tx, workspaceId: string, chatId: string) {
     messageCount: cacheCounter(row.message_count), ...(state.success ? { historyState: state.data } : {}) };
 }
 
-export async function mirrorMessageRange(tx: Tx, workspaceId: string, chatId: string, from: number, to: number): Promise<HistoryRange> {
+export async function mirrorMessageRange(tx: Tx, workspaceId: string, chatId: string, from: number, to: number, includeSenders = false): Promise<HistoryRange> {
   const { revision, messageCount, historyState } = await snapshot(tx, workspaceId, chatId);
   const fromIndex = Math.min(from, messageCount), toIndex = Math.min(to, messageCount);
   const { rows } = await tx.query<Message>(`SELECT ord,msg_id,kind,payload,created_at_ms FROM cloud_v2_messages
     WHERE workspace_id=$1 AND chat_id=$2 ORDER BY ord,msg_id OFFSET $3 LIMIT $4`, [workspaceId, chatId, fromIndex, toIndex - fromIndex]);
   const first = rows[0], opening = first && !isUserMessage(first) ? await mirrorTurnOpening(tx, workspaceId, chatId, first.ord) : undefined;
-  return { revision, messageCount, fromIndex, toIndex, rows: rows.map((row, index) => indexed(row, fromIndex + index)),
-    ...(historyState ? { historyState } : {}), ...(opening ? { turnOpening: opening } : {}) };
+  const messages = rows.map((row, index) => indexed(row, fromIndex + index));
+  const ids = [...messages, ...(opening ? [opening] : [])].filter(row => isUserMessage(row)).map(row => row.msgId);
+  return { revision, messageCount, fromIndex, toIndex, rows: messages,
+    ...(historyState ? { historyState } : {}), ...(opening ? { turnOpening: opening } : {}),
+    ...(includeSenders ? { senders: await mirrorMessageSenders(tx, workspaceId, chatId, ids) } : {}) };
 }
 
-export async function mirrorMessageDelta(tx: Tx, workspaceId: string, chatId: string, fromRevision: number): Promise<HistoryDelta> {
+export async function mirrorMessageDelta(tx: Tx, workspaceId: string, chatId: string, fromRevision: number, includeSenders = false): Promise<HistoryDelta> {
   const { revision, messageCount, resyncRevision, historyState } = await snapshot(tx, workspaceId, chatId);
   const resync = { resync: true as const, revision, messageCount };
   if (fromRevision > revision || fromRevision < resyncRevision) return resync;
@@ -55,6 +58,8 @@ export async function mirrorMessageDelta(tx: Tx, workspaceId: string, chatId: st
     ) SELECT m.ord,m.msg_id,m.kind,m.payload,m.created_at_ms,p.index
       FROM positions p JOIN cloud_v2_messages m ON m.workspace_id=$1 AND m.chat_id=$2 AND m.msg_id=p.msg_id
       WHERE p.msg_id=ANY($3::text[]) ORDER BY p.index`, [workspaceId, chatId, changes.map(row => row.msg_id)])).rows : [];
-  return { resync: false, fromRevision, revision, messageCount, rows: rows.map(row => indexed(row, cacheCounter(row.index))),
-    ...(historyState ? { historyState } : {}) };
+  const messages = rows.map(row => indexed(row, cacheCounter(row.index)));
+  return { resync: false, fromRevision, revision, messageCount, rows: messages,
+    ...(historyState ? { historyState } : {}),
+    ...(includeSenders ? { senders: await mirrorMessageSenders(tx, workspaceId, chatId, messages.filter(row => isUserMessage(row)).map(row => row.msgId)) } : {}) };
 }

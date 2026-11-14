@@ -135,12 +135,12 @@ export async function readCloudV2History(store: HistoryStore,
   if (op === "messages.range") {
     const range = RangeSchema.safeParse(params);
     if (!range.success) throw new HttpError(400, "invalid_request", "Invalid message range");
-    return store.messageRange(workspaceId, range.data.chatId, range.data.fromIndex, range.data.toIndex);
+    return store.messageRange(workspaceId, range.data.chatId, range.data.fromIndex, range.data.toIndex, !!options.includeSenders);
   }
   if (op === "messages.since") {
     const since = SinceSchema.safeParse(params);
     if (!since.success) throw new HttpError(400, "invalid_request", "Invalid history revision");
-    return store.messageSince(workspaceId, since.data.chatId, since.data.revision);
+    return store.messageSince(workspaceId, since.data.chatId, since.data.revision, !!options.includeSenders);
   }
   const chatId = id.safeParse(params.chatId);
   if (!chatId.success) throw new HttpError(400, "invalid_request", "chatId is required");

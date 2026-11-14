@@ -15,8 +15,14 @@ const functions = [
 
 it("permits only the reviewed chat cache migration", () => {
   expect(createHash("sha256").update(sql).digest("hex"))
-    .toBe("500188601a6a4c784c5a5f318f618e49b027f5c08569bde283b79bbec8c4f8f4");
+    .toBe("ed80ca60662294a8fcd398740ca842aca7bb4fa80ebb069871b73d2e2a29d92f");
   expect(lintMigrationPhase(file, sql)).toEqual([]);
+});
+
+it("requires the explicit table privilege tightening", () => {
+  const statement = "REVOKE ALL ON cloud_v2_history_cache, cloud_v2_history_changes, cloud_v2_prompt_cache FROM PUBLIC, zeros_app;";
+  expect(sql).toContain(statement);
+  expect(lintMigrationPhase(file, sql.replace(statement, statement.replace("PUBLIC, zeros_app", "PUBLIC"))).length).toBeGreaterThan(0);
 });
 
 it.each(functions)("rejects unreviewed privileges for %s", signature => {
@@ -28,10 +34,15 @@ it.each(functions)("rejects unreviewed privileges for %s", signature => {
 
 it("requires a separate annotation for each reviewed exception", () => {
   const annotations = [...sql.matchAll(/^-- zeros-expand-exception:[^\n]+\n/gm)];
-  expect(annotations).toHaveLength(5);
+  expect(annotations).toHaveLength(7);
   for (const [annotation] of annotations) {
     expect(lintMigrationPhase(file, sql.replace(annotation, "")).length).toBeGreaterThan(0);
   }
+});
+
+it("does not exempt changes to the fixed transition-table queries", () => {
+  expect(lintMigrationPhase(file, sql.replace("FOR changed IN EXECUTE changes_sql LOOP",
+    "FOR changed IN EXECUTE 'DELETE FROM cloud_v2_messages' LOOP")).length).toBeGreaterThan(0);
 });
 
 it("does not exempt another file or a destructive append", () => {

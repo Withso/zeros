@@ -1097,6 +1097,11 @@ scan or backfill their messages. Counts change with the same transaction as
 the rows, including mixed inserts/updates and deletes from older writers.
 Confirmed chat deletion returns `404 chat_not_found`. Cache reads never wake
 the VM or report activity, and saved rows do not grant execution authority.
+With the sharing opt-in, range and non-resync delta replies include window's
+`senders` map, under the same current-viewer authority. It covers returned
+user rows and a range's separate turn opening; unknown attribution is `null`.
+Without the opt-in, and on resync, the field is absent. Older servers' absent
+sender maps remain unknown to the cache, rather than becoming explicit nulls.
 
 Receipt caching opts into `GET .../prompts` with `X-Zeros-Chat-Cache: 1` and
 `includePayload=true`. This returns only the caller's receipts, with a chat's
@@ -1107,6 +1112,16 @@ Without the header, the existing live response is unchanged. An older server's
 response without a revision cannot populate the receipt cache. Account or
 workspace access loss retires cached material; temporary unavailability keeps
 the last confirmed view marked as cached.
+Prompt writers take the workspace row before outbox and per-chat cache rows.
+Retention takes candidate workspace locks in ID order with `SKIP LOCKED`.
+The cache trigger also takes `FOR NO KEY UPDATE NOWAIT`: an older compactor
+that starts at a child row rolls back with `55P03` on contention, so it cannot
+hold cache locks while waiting on a foreground workspace writer. The lifecycle
+scheduler retries that background work on its next poll. Runtime cache-table
+access is SELECT-only; definer triggers own the writes.
+If a prompt cache fence violation reaches an HTTP request, the server logs
+`prompt_cache_workspace_fence_missed` with the matched route template and
+SQLSTATE, without PostgreSQL context, request values or workspace identifiers.
 
 Chat search uses the connected worker when available and the HTTP history
 mirror while the VM sleeps, without waking it. Search is scoped to the selected

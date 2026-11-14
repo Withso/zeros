@@ -470,8 +470,15 @@ export class CloudV2PromptOutbox {
   /** Compaction retains the hash/receipt until erasure. Never forget a message
    * ID and thereby turn a late HTTP retry into a fresh provider execution. */
   async prune(): Promise<void> {
-    await withSystemTx(this.pool, tx => tx.query(`UPDATE cloud_v2_prompt_outbox SET payload=NULL,payload_bytes=0
-      WHERE (workspace_id,user_message_id) IN (SELECT workspace_id,user_message_id FROM cloud_v2_prompt_outbox
-        WHERE payload IS NOT NULL AND terminal_at<clock_timestamp()-interval '7 days' ORDER BY terminal_at LIMIT 1000)`));
+    // Different outbox rows share a per-chat revision. Take their workspace
+    // fences first, and let foreground work keep every lock it already owns.
+    await withSystemTx(this.pool, tx => tx.query(`WITH candidates AS MATERIALIZED (
+      SELECT workspace_id,user_message_id FROM cloud_v2_prompt_outbox
+      WHERE payload IS NOT NULL AND terminal_at<clock_timestamp()-interval '7 days' ORDER BY terminal_at LIMIT 1000),
+      workspaces AS MATERIALIZED (SELECT w.id FROM cloud_v2_workspaces w
+        WHERE w.id IN (SELECT workspace_id FROM candidates) ORDER BY w.id FOR UPDATE OF w SKIP LOCKED)
+      UPDATE cloud_v2_prompt_outbox p SET payload=NULL,payload_bytes=0
+      FROM workspaces w WHERE p.workspace_id=w.id AND (p.workspace_id,p.user_message_id) IN (SELECT workspace_id,user_message_id FROM candidates)
+        AND p.payload IS NOT NULL AND p.terminal_at<clock_timestamp()-interval '7 days'`));
   }
 }

@@ -1,6 +1,7 @@
 
 import { Hono, type Context } from "hono";
 import { HTTPException } from "hono/http-exception";
+import { routePath } from "hono/route";
 import { cors } from "hono/cors";
 import { bodyLimit } from "hono/body-limit";
 import { isIP } from "node:net";
@@ -460,6 +461,12 @@ export function createApp(
     // every deployment channel, including development and qualification.
     const sqlState = "code" in err && typeof err.code === "string" &&
       /^[A-Z0-9]{5}$/.test(err.code) ? err.code : undefined;
+    if (sqlState === "55P03" && "where" in err && typeof err.where === "string" &&
+      /(?:^|\n)PL\/pgSQL function (?:public\.)?track_cloud_prompt_cache\(\) line [0-9]+ at /.test(err.where)) {
+      console.warn("[cloud-v2] prompt_cache_workspace_fence_missed", {
+        method: /^[A-Z]{3,7}$/.test(c.req.method) ? c.req.method : "OTHER", route: routePath(c) || "unmatched", sqlState,
+      });
+    }
     console.error("[error]", { code: "internal", ...(sqlState ? { sqlState } : {}) });
     return c.json(
       {

@@ -1577,12 +1577,12 @@ export class CloudV2Store {
     return withSystemTx(this.pool, tx => mirrorMessageWindow(tx, workspaceId, chatId, options), { consistentRead: true });
   }
 
-  messageRange(workspaceId: string, chatId: string, fromIndex: number, toIndex: number) {
-    return withSystemTx(this.pool, tx => mirrorMessageRange(tx, workspaceId, chatId, fromIndex, toIndex), { consistentRead: true });
+  messageRange(workspaceId: string, chatId: string, fromIndex: number, toIndex: number, includeSenders = false) {
+    return withSystemTx(this.pool, tx => mirrorMessageRange(tx, workspaceId, chatId, fromIndex, toIndex, includeSenders), { consistentRead: true });
   }
 
-  messageSince(workspaceId: string, chatId: string, revision: number) {
-    return withSystemTx(this.pool, tx => mirrorMessageDelta(tx, workspaceId, chatId, revision), { consistentRead: true });
+  messageSince(workspaceId: string, chatId: string, revision: number, includeSenders = false) {
+    return withSystemTx(this.pool, tx => mirrorMessageDelta(tx, workspaceId, chatId, revision, includeSenders), { consistentRead: true });
   }
 
   messageSenders(workspaceId: string, chatId: string, userMessageIds: string[]) {

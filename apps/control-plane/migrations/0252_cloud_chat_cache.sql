@@ -43,6 +43,10 @@ ALTER TABLE cloud_v2_prompt_cache ENABLE ROW LEVEL SECURITY;
 ALTER TABLE cloud_v2_prompt_cache FORCE ROW LEVEL SECURITY;
 CREATE POLICY system_only ON cloud_v2_prompt_cache USING (app_is_system()) WITH CHECK (app_is_system());
 
+-- zeros-expand-exception: privilege-tightening Runtime reads new cache state; only the definer triggers may write it
+REVOKE ALL ON cloud_v2_history_cache, cloud_v2_history_changes, cloud_v2_prompt_cache FROM PUBLIC, zeros_app;
+GRANT SELECT ON cloud_v2_history_cache, cloud_v2_history_changes, cloud_v2_prompt_cache TO zeros_app;
+
 -- One committed transaction is one revision, including multi-statement
 -- replacement. Rolled-back and intermediate row revisions cannot be bases.
 -- Custom GUCs in a function's SET clause require superuser at CREATE time.
@@ -111,6 +115,7 @@ CREATE TRIGGER cloud_v2_message_cache AFTER INSERT OR UPDATE OR DELETE ON cloud_
 -- Count once per changed chat, then apply statement deltas. The first
 -- transaction recomputes: one UPSERT can fire both UPDATE and INSERT triggers,
 -- and both transition tables are already visible to the first count.
+-- zeros-expand-exception: cache-count-transition Executes only fixed transition-table SELECTs for per-chat message count deltas
 CREATE FUNCTION track_cloud_message_count() RETURNS trigger
 LANGUAGE plpgsql SECURITY DEFINER
 SET search_path = pg_catalog, public, pg_temp AS $$
@@ -186,9 +191,12 @@ BEGIN
       (CASE WHEN TG_OP<>'DELETE' THEN NEW.workspace_id END,CASE WHEN TG_OP<>'DELETE' THEN NEW.chat_id END)) AS keys(workspace_id,chat_id)
       WHERE workspace_id IS NOT NULL ORDER BY workspace_id,chat_id
   LOOP
+    -- Older compaction starts at an outbox row. It must yield instead of
+    -- holding a cache row while a foreground writer owns the workspace.
+    PERFORM 1 FROM public.cloud_v2_workspaces WHERE id=target.workspace_id FOR NO KEY UPDATE NOWAIT;
+    IF NOT FOUND THEN CONTINUE; END IF;
     INSERT INTO public.cloud_v2_prompt_cache(workspace_id,chat_id,revision,last_txid)
-      SELECT target.workspace_id,target.chat_id,1,txid_current()
-      WHERE EXISTS (SELECT 1 FROM public.cloud_v2_workspaces WHERE id=target.workspace_id)
+      VALUES(target.workspace_id,target.chat_id,1,txid_current())
       ON CONFLICT (workspace_id,chat_id) DO UPDATE SET
         revision=cloud_v2_prompt_cache.revision+1,last_txid=txid_current()
       WHERE cloud_v2_prompt_cache.last_txid<>txid_current();

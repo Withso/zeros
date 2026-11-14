@@ -53,10 +53,10 @@ suite("passive cloud chat cache through PostgreSQL and HTTP", () => {
     await mirror([row("noise")], "other");
     await mirror([row("m1", "edited"), row("m2")]);
     const snapshot = await range(1, 10);
-    expect(snapshot).toEqual({ revision: expect.any(Number), messageCount: 3, fromIndex: 1, toIndex: 3,
+    expect(snapshot).toEqual({ revision: expect.any(Number), messageCount: 3, fromIndex: 1, toIndex: 3, senders: {},
       rows: [{ index: 1, ...row("m1", "edited") }, { index: 2, ...row("m2") }] });
     expect(snapshot.revision).toBeGreaterThan(0);
-    expect(await range(50, 60)).toEqual({ revision: snapshot.revision, messageCount: 3, fromIndex: 3, toIndex: 3, rows: [] });
+    expect(await range(50, 60)).toEqual({ revision: snapshot.revision, messageCount: 3, fromIndex: 3, toIndex: 3, rows: [], senders: {} });
     expect((await result("chats.list")).chats.find((chat: { id: string }) => chat.id === "chat"))
       .toMatchObject({ historyCache: { revision: snapshot.revision, messageCount: 3 } });
     await f.store.writeHistory(f.workspace.id, { chats: [{ id: "chat", title: "Live title" }] });
@@ -79,10 +79,10 @@ suite("passive cloud chat cache through PostgreSQL and HTTP", () => {
     await mirror([row("m0", "first edit"), row("m2")]);
     await mirror([row("m0", "final edit"), row("m2")]);
     const delta = await since(base.revision);
-    expect(delta).toEqual({ resync: false, fromRevision: base.revision, revision: base.revision + 2, messageCount: 3,
+    expect(delta).toEqual({ resync: false, fromRevision: base.revision, revision: base.revision + 2, messageCount: 3, senders: {},
       rows: [{ index: 0, ...row("m0", "final edit") }, { index: 2, ...row("m2") }] });
     await mirror([row("m0", "final edit"), row("m2")]);
-    expect(await since(delta.revision)).toEqual({ resync: false, fromRevision: delta.revision, revision: delta.revision, messageCount: 3, rows: [] });
+    expect(await since(delta.revision)).toEqual({ resync: false, fromRevision: delta.revision, revision: delta.revision, messageCount: 3, rows: [], senders: {} });
     expect(await since(delta.revision + 1)).toEqual({ resync: true, revision: delta.revision, messageCount: 3 });
   });
 
@@ -312,7 +312,7 @@ suite("passive cloud chat cache through PostgreSQL and HTTP", () => {
     await mirror([row("m0")]);
     for (const table of ["cloud_v2_history_cache", "cloud_v2_history_changes", "cloud_v2_prompt_cache"]) {
       expect((await withUserTx(pool, f.creator.id, tx => tx.query(`SELECT * FROM ${table}`))).rowCount).toBe(0);
-      expect((await withUserTx(pool, f.creator.id, tx => tx.query(`DELETE FROM ${table}`))).rowCount).toBe(0);
+      await expect(withUserTx(pool, f.creator.id, tx => tx.query(`DELETE FROM ${table}`))).rejects.toMatchObject({ code: "42501" });
     }
     for (const statement of [
       "INSERT INTO cloud_v2_history_cache(workspace_id,chat_id,revision,resync_revision,last_txid,last_ord,base_ord) VALUES($1,'forbidden',1,1,0,0,0)",
