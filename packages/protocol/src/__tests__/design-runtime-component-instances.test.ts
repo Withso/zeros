@@ -19,7 +19,8 @@ const HEAD = `<style data-zeros-options>:where([data-zd-instance="1"]) { --zd-wi
 button, span, b { display: inline-block; width: 40px; height: 20px; }</style>`;
 const BODY = `<div data-oid="root">
 <zd-chat data-oid="i1" data-zd-instance="1" width="300"><div class="c" data-zd-part="c"><button data-zd-part="send">S</button><span data-zd-part="chip">A</span><span data-zd-part="chip#1">B</span><zd-inner data-zd-part="inner" data-zd-instance="3"><b class="c" data-zd-part="send">x</b></zd-inner></div></zd-chat>
-<zd-chat data-oid="i2" data-zd-instance="2"><div class="c" data-zd-part="c">two</div></zd-chat>
+<zd-chat data-oid="i2" data-zd-instance="2"><div class="c" data-zd-part="c">two <em data-oid="slotted">here</em></div></zd-chat>
+<zd-old data-oid="i3" data-zd-instance="4"><section><i data-oid="kept">k</i></section></zd-old>
 <ul data-oid="list"><li data-oid="item">1</li><li data-zd-copy="item#1">2</li></ul>
 <p data-oid="plain">plain</p>
 </div>`;
@@ -74,6 +75,8 @@ const centre = (page: Page, selector: string) =>
     return { x: box.left + box.width / 2, y: box.top + box.height / 2 };
   }, selector);
 const oidOf = (reply: { result?: unknown }) => (reply.result as { oid?: string } | null)?.oid ?? null;
+interface LayerTree { oid: string; children: LayerTree[] }
+const outline = (node: LayerTree): Record<string, unknown[]> => ({ [node.oid]: node.children.map(outline) });
 
 describe("component instances in the frame runtime", () => {
   let browser: Browser;
@@ -147,15 +150,20 @@ describe("component instances in the frame runtime", () => {
     }
   });
 
-  it("keeps an instance as one layer and selects a repeated copy's source", async () => {
+  it("lists an instance's parts under it in Layers, with the layers the frame slots into them, and selects a repeated copy's source", async () => {
     const page = await fixture(browser);
     try {
-      const snapshot = (await request(page, "getSnapshot")).result as { tree: Array<{ oid: string; children: Array<{ oid: string; children: unknown[] }> }> };
-      const root = JSON.stringify(snapshot.tree);
-      expect(root).toContain('"oid":"i1"');
-      expect(root).not.toContain("send");
-      const host = snapshot.tree[0]!.children.find((child) => child.oid === "i1")!;
-      expect(host.children).toEqual([]);
+      const snapshot = (await request(page, "getSnapshot")).result as { tree: LayerTree[] };
+      const hosts = snapshot.tree[0]!.children;
+      const part = (host: string, id: string) => designComponentPartNodeId(host, id);
+      expect(outline(hosts.find((child) => child.oid === "i1")!)).toEqual({ i1: [{ [part("i1", "c")]: [
+        { [part("i1", "send")]: [] }, { [part("i1", "chip")]: [] }, { [part("i1", "chip#1")]: [] },
+        // A nested instance is one part; its insides are its own.
+        { [part("i1", "inner")]: [] },
+      ] }] });
+      expect(outline(hosts.find((child) => child.oid === "i2")!)).toEqual({ i2: [{ [part("i2", "c")]: [{ slotted: [] }] }] });
+      // A definition without data-zid has no parts; the frame's own layers in it still show.
+      expect(outline(hosts.find((child) => child.oid === "i3")!)).toEqual({ i3: [{ kept: [] }] });
       const copy = await centre(page, '[data-zd-copy="item#1"]');
       expect(oidOf(await request(page, "getElementAtLoc", { ...copy, mode: "deepest" }))).toBe("item");
     } finally {
@@ -172,6 +180,8 @@ describe("component instances in the frame runtime", () => {
       expect((await request(page, "getNodeDetails", { nodeId: designComponentPartNodeId("i1", "send") })).error).toBeDefined();
       const copy = await centre(page, '[data-zd-copy="item#1"]');
       expect(oidOf(await request(page, "getElementAtLoc", { ...copy, mode: "deepest" }))).toBe("list");
+      const snapshot = (await request(page, "getSnapshot")).result as { tree: LayerTree[] };
+      expect(outline(snapshot.tree[0]!.children.find((child) => child.oid === "i1")!)).toEqual({ i1: [] });
     } finally {
       await page.close();
     }

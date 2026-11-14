@@ -63,12 +63,22 @@ describe("an instance whose component is gone", () => {
     const node = (oid: string, tag: string, name = tag) => ({ oid, tag, name, children: [] });
     expect(designLayerDisplayName(frame, node("gone", "zd-chip"))).toBe("zd-chip");
     expect(designLayerDisplayName(frame, { ...node("gone", "zd-chip"), layerName: "Status" })).toBe("zd-chip");
-    expect(designLayerDisplayName(frame, node("kept", "zd-card"))).toBe("Frame");
+    // A resolved instance is named by its component, unless a person named it.
+    expect(designLayerDisplayName(frame, node("kept", "zd-card"))).toBe("Card");
+    expect(designLayerDisplayName(frame, node("kept", "zd-card"), (file) => (file === "page-1/card.html" ? "Pricing card" : undefined))).toBe("Pricing card");
+    expect(designLayerDisplayName(frame, { ...node("kept", "zd-card"), layerName: "Hero" })).toBe("Hero");
     expect(designLayerDisplayName(frame, node("p", "p", "Before"))).toBe("Before");
     expect(designLayerDisplayName({}, node("gone", "zd-chip"))).toBe("Frame");
     const panels = readFileSync(resolve(process.cwd(), "apps/desktop/src/renderer/features/design-workspace/design-workspace-sidebar-panels.tsx"), "utf8");
-    expect(panels).toContain("designLayerDisplayName(frame, layer.node)");
-    expect(panels).toContain("designLayerDisplayName(selectedFrame, node)");
+    // Names follow the subscribed snapshot, so renaming a main renames its instances' rows.
+    expect(panels).toContain("displayName={designLayerDisplayName(frame, layer.node, mainTitle)}");
+    expect(panels).toContain("designLayerDisplayName(selectedFrame, node, mainTitle)");
+    expect(panels).not.toContain("peekSnapshot(workspaceId).data?.frames");
+    // An instance row carries the component mark; a part row is neither hidden nor renamed from Layers.
+    expect(panels).toContain('kind === "instance") return <Diamond data-design-layer-instance=""');
+    expect(panels).toContain('{kind === "part" ? null : <IconButton');
+    expect(panels).toContain('designLayerRowKind(row.frame, row.layer.node.oid) === "part") return;');
+    expect(panels).toContain('designLayerRowKind(frame, layer.node.oid) === "part") return;');
   });
 });
 
@@ -240,6 +250,29 @@ describe("a component whose declaration is too large to show", () => {
     const optionsSource = readFileSync(resolve(process.cwd(), "apps/desktop/src/renderer/features/design-workspace/design-component-options.tsx"), "utf8");
     expect(optionsSource).toContain("designComponentRecordProblem(target.component, title)");
     expect(optionsSource).toContain("data-design-options-too-large");
+  });
+});
+
+describe("the Options section of a plain component's instance", () => {
+  it("offers each attribute slot as a text row and the slot text as Text", () => {
+    const html = renderToStaticMarkup(createElement(DesignComponentOptions, {
+      workspaceId: "local", directory: "Zeros - Design", lint: null, disabled: false,
+      target: { kind: "instance", nodeId: "tour-1", title: "Card",
+        host: { component: "card", attributes: { heading: "Start here" }, text: "How to move" },
+        component: { elements: [
+          { tag: "zd-option", attributes: [{ name: "name", value: "meta" }, { name: "type", value: "text" }, { name: "default", value: "Card" }] },
+          { tag: "zd-option", attributes: [{ name: "name", value: "heading" }, { name: "type", value: "text" }, { name: "default", value: "Untitled" }] },
+        ], reach: {}, file: "components/card.html", frame: false } },
+      frame: { file: "start/welcome.html", frameId: "welcome", pageId: "page", title: "Welcome", kind: "frame", x: 0, y: 0, width: 100, height: 100,
+        z: 0, nodeCount: 1, modifiedAt: 0, sourceVersion: "a".repeat(24) } as DesignCanvasFrameWire,
+    }));
+    const section = document.createElement("div");
+    section.innerHTML = html;
+    const value = (label: string) => (section.querySelector(`input[aria-label="${label}"]`) as HTMLInputElement | null)?.value;
+    expect(value("Meta")).toBe("Card");
+    expect(value("Heading")).toBe("Start here");
+    expect(value("Text")).toBe("How to move");
+    expect(section.querySelector("[data-design-options-variant]")).toBeNull();
   });
 });
 

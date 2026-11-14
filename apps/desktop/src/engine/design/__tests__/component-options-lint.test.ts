@@ -138,6 +138,29 @@ describe("linting components with options", () => {
     expect(violations.filter((violation) => violation.ruleId === "unknown-token").map((violation) => violation.message)).toEqual(['Unknown design token "--zd-label".']);
   });
 
+  it("a class built from a template hole is not split into unknown classes", async () => {
+    const main = await createDesignFrame(root, { title: "Chip" });
+    await write(main.file, doc(
+      '<span data-oid="b" class="badge badge--soft badge--{{ tone }} {{tone}}-x no-such-class">x</span>',
+      '<style>.badge, .badge--success, .badge--soft { color: inherit; }</style>' +
+        options(['<zd-option name="tone" type="choice" choices="success danger" default="success"></zd-option>']),
+    ));
+    await register(main.file, "chip");
+    const violations = (await lintDesignDocument(root, main.file, { healOids: false, includeRuntimeAudits: false })).violations;
+    expect(violations.filter((violation) => violation.ruleId === "unknown-class").map((violation) => violation.message))
+      .toEqual(['Class "no-such-class" has no CSS in this frame\'s styles.']);
+  });
+
+  it("a token named in text or a comment is not an unknown token", async () => {
+    const frame = await createDesignFrame(root, { title: "Prose" });
+    await write(frame.file, doc(
+      '<p data-oid="p">Write <code data-oid="c">var(--gap-xl)</code> in the CSS.</p><!-- var(--gap-comment) --><div data-oid="d" style="gap: var(--gap-inline)"></div>',
+      '<style>.x { gap: var(--gap-style); }</style>',
+    ));
+    const violations = (await lintDesignDocument(root, frame.file, { healOids: false, includeRuntimeAudits: false })).violations;
+    expect(violations.filter((violation) => violation.ruleId === "unknown-token").map((violation) => violation.message).sort())
+      .toEqual(['Unknown design token "--gap-inline".', 'Unknown design token "--gap-style".']);
+  });
   it("body declaration warns: an options template outside <head> is not read", async () => {
     const main = await createDesignFrame(root, { title: "Chip" });
     await write(main.file, doc(`<div data-oid="c">x</div>\n${options(['<zd-option name="width" type="number" default="1"></zd-option>'])}`));

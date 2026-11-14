@@ -303,6 +303,8 @@ import { useDesignFoundation } from "./state/use-design-foundation";
 
 import { DesignFrameCover, DesignFrameRenderSurface } from "./design-frame-render-surface";
 import { DesignFrameLoadError, DesignFrameProblemLabel, DesignFrameProblemMark } from "./design-frame-load-error";
+import { DesignFrameLintBadge } from "./design-frame-lint-badge";
+import { designLintFindingsByFrame } from "./design-lint-summary";
 import { designGpuRuntime, useDesignFrameColorScheme, useDesignGpuCanvas, useDesignGpuCanvasEnabled, useDesignGpuFailedFrames,
   useDesignGpuSceneFrames } from "./gpu/design-gpu-canvas";
 import { hasAsyncCanvasWheel } from "../../platform/runtime";
@@ -381,6 +383,7 @@ const HIGH_RESOLUTION_TILE_OVERSCAN = 96;
 const EMPTY_DESIGN_TREE: readonly DesignRuntimeTreeNode[] = Object.freeze([]);
 const EMPTY_DESIGN_KEYFRAME_DEFINITIONS: readonly DesignAuthoredKeyframes[] =
   Object.freeze([]);
+const EMPTY_LINT_FINDINGS: readonly never[] = Object.freeze([]);
 const EMPTY_NODE_DETAILS: readonly DesignRuntimeNodeDetails[] = Object.freeze(
   [],
 );
@@ -567,6 +570,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
   const canvasPageOwner = useMemo(() => workspaceId ? { workspaceId, directoryId: canvasDirectoryId, pageId: view.activePageId, revision: view.ownerRevision ?? 0 } : undefined,
     [workspaceId, canvasDirectoryId, view.activePageId, view.ownerRevision]);
   const canvasDocumentOwner = `${workspaceId ?? ""}\0${canvasDirectoryId ?? ""}\0${view.activePageId ?? ""}`;
+  const lintByFrame = useMemo(() => designLintFindingsByFrame(snapshot?.lint.violations ?? []), [snapshot?.lint.violations]);
   const canvasDocumentOwnerRef = useRef(canvasDocumentOwner);
   canvasDocumentOwnerRef.current = canvasDocumentOwner;
   const canvasFolderRef = useRef(folder);
@@ -8328,6 +8332,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                           }}
                         />
                       ) : (
+                        <>
                         <button
                           type="button"
                           data-design-frame-label=""
@@ -8372,6 +8377,17 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                             {frame.title}
                           </span>
                         </button>
+                        <DesignFrameLintBadge
+                          title={frame.title}
+                          violations={lintByFrame.get(frame.file) ?? EMPTY_LINT_FINDINGS}
+                          onSelectLayer={(nodeId) => {
+                            if (!workspaceId || !folder) return;
+                            void selectDesignNode({ workspaceId, folder, frame, nodeId, owner: canvasPageOwner }).catch((selectionError) => {
+                              toast.error("Couldn't select that design layer", { description: errorMessage(selectionError) });
+                            });
+                          }}
+                        />
+                        </>
                       )}
                     </div>
                     <div

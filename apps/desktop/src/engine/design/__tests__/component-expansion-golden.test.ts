@@ -6,7 +6,30 @@ import { expandDesignComponents, expandDesignComponentsHtml } from "../component
 // Generated once by the expander before options existed; never regenerate it
 // to make a change pass.
 const golden = JSON.parse(readFileSync(new URL("./fixtures/component-expansion-golden.json", import.meta.url), "utf8")) as Record<string, unknown>;
-const matchesGolden = (name: string, value: unknown) => expect(value).toEqual(golden[name]);
+// The intended differences since: a component's style element is limited to
+// its instances, and an instance is marked as one (data-zd-instance on its
+// host, data-zd-part where its definition wrote data-zid).
+const SCOPED: Record<string, string> = {
+  ".card { padding: 8px; }": ":is(.card):where(zd-card, zd-card *) { padding: 8px; }",
+  ".i { color: blue; }": ":is(.i):where(zd-inner, zd-inner *) { color: blue; }",
+  ".o { color: red; }": ":is(.o):where(zd-outer, zd-outer *) { color: red; }",
+  '.f { background: url("../assets/b.png"); }': ':is(.f):where(zd-media, zd-media *) { background: url("../assets/b.png"); }',
+};
+const scopedGolden = (value: unknown) => {
+  if (!value || typeof value !== "object" || typeof (value as { html?: unknown }).html !== "string") return value;
+  const html = (value as { html: string }).html.replace(/<style data-zeros-component="([^"]+)">([\s\S]*?)<\/style>/g,
+    (_match, name: string, css: string) => {
+      if (!(css in SCOPED)) throw new Error(`No scoped form for the golden style ${css}`);
+      return `<style data-zeros-component="${name}">${SCOPED[css]}</style>`;
+    })
+    .replace(/ data-zid="/g, ' data-zd-part="');
+  return { ...value, html };
+};
+const unmarked = (value: unknown) => {
+  if (!value || typeof value !== "object" || typeof (value as { html?: unknown }).html !== "string") return value;
+  return { ...value, html: (value as { html: string }).html.replace(/ data-zd-instance="\d+"/g, "") };
+};
+const matchesGolden = (name: string, value: unknown) => expect(unmarked(value)).toEqual(scopedGolden(golden[name]));
 
 // The expander's output for components that declare no options, frozen from
 // the build before options existed. Options must not change a byte of it.

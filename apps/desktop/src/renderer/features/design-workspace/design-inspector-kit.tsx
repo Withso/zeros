@@ -327,12 +327,15 @@ export function InspectorSegmented<T extends string>({
 export function InspectorCheckboxRow({
   label,
   checked,
+  mixed = false,
   disabled,
   title,
   onChange,
 }: {
   label: string;
   checked: boolean;
+  /** Several selected layers differ: drawn as a dash, neither on nor off. */
+  mixed?: boolean;
   disabled?: boolean;
   /** Explains the setting on hover, including on a disabled row. */
   title?: string;
@@ -350,6 +353,10 @@ export function InspectorCheckboxRow({
         type="checkbox"
         className="peer sr-only"
         aria-label={label}
+        aria-checked={mixed ? "mixed" : undefined}
+        ref={(input) => {
+          if (input) input.indeterminate = mixed;
+        }}
         checked={checked}
         disabled={disabled}
         onChange={onChange}
@@ -358,12 +365,14 @@ export function InspectorCheckboxRow({
         aria-hidden="true"
         className={cn(
           "peer-focus-visible:ring-highlighted-bright/50 grid size-3.5 shrink-0 place-items-center rounded-sm border peer-focus-visible:ring-[3px]",
-          checked
+          checked || mixed
             ? "bg-inverted-bg border-inverted-bg text-inverted-fg"
             : "border-border4",
         )}
       >
-        {checked ? (
+        {mixed ? (
+          <span className="h-0.5 w-2 rounded-full bg-current" />
+        ) : checked ? (
           <svg
             viewBox="0 0 16 16"
             className="size-2.5"

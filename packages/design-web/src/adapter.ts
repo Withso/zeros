@@ -30,7 +30,6 @@ import {
   assertSafeDesignHtmlFragment,
   designHtmlUsesComponent,
   healDesignHtmlIdentities,
-  nativeDesignIdentityBase,
   mutateDesignNodeAttributeSource,
   mutateDesignNodeDeleteSource,
   mutateDesignNodeDuplicateSource,
@@ -976,12 +975,19 @@ export const designWebTransactionAdapter: DesignTransactionAdapter<DesignWebDocu
     revision: (state) => state.revision,
     apply: (state, operation) => {
       // Hydrate identities only for an explicit semantic edit. Its inverse
-      // includes the hydration so undo restores the exact original HTML.
+      // includes the hydration so undo restores the exact original HTML. An
+      // edit within one layer writes only that layer's id; one that moves,
+      // adds or removes layers shifts where the others sit, so it first
+      // writes every derived id.
       const identified = operation.type.startsWith("node.")
-        ? healDesignHtmlIdentities(
-            state.files[state.entryFile]!,
-            nativeDesignIdentityBase,
-          )
+        ? healDesignHtmlIdentities(state.files[state.entryFile]!, {
+            native: true,
+            ...(operation.type === "node.set-styles" ||
+            operation.type === "node.set-text" ||
+            operation.type === "node.set-attribute"
+              ? { only: new Set([operation.nodeId]) }
+              : {}),
+          })
         : null;
       const working = identified?.changed
         ? updateDesignWebState(state, {

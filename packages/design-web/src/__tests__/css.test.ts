@@ -34,6 +34,15 @@ describe("CSS provenance and mutation", () => {
       expect(parse.mock.calls.some(([source]) => String(source).includes("unrelated-sheet-marker"))).toBe(false);
     } finally { parse.mockRestore(); }
   });
+
+  it("removes the style attribute when its last declaration is cleared", () => {
+    const html = '<html><body><span class="badge" style="opacity:0.8;" data-oid="badge">New</span><p style="color: red; opacity:0.5" data-oid="text"></p></body></html>';
+    const state = createDesignWebDocumentState({ documentId: "inline-clear", entryFile: "index.html", files: { "index.html": html } });
+    const cleared = mutateDesignNodeStyles(state, { nodeId: "badge", scope: "inline", styles: { opacity: null } });
+    expect(cleared.files["index.html"]).toContain('<span class="badge" data-oid="badge">New</span>');
+    const kept = mutateDesignNodeStyles(state, { nodeId: "text", scope: "inline", styles: { opacity: null } });
+    expect(kept.files["index.html"]).toContain('<p style="color: red;" data-oid="text">');
+  });
   it.each(["inline", "auto", "rule"] as const)(
     "validates %s styles against the containing page frame",
     (scope) => {

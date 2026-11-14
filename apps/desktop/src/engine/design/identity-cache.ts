@@ -32,7 +32,7 @@ export interface DesignFrameIdentity {
 // parse-heavy preparation for unchanged frames.
 
 /** Bump whenever preparation computes a different identity from the same inputs. */
-const DESIGN_IDENTITY_PIPELINE = 1;
+const DESIGN_IDENTITY_PIPELINE = 2;
 const MAX_PAGE_ENTRIES = DESIGN_MAX_FRAMES_PER_PAGE * 2;
 const MAX_PAGES = 256;
 const WRITE_DELAY_MS = 1_000;

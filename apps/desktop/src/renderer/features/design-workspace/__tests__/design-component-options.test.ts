@@ -11,6 +11,7 @@ import {
   commitDesignComponentOption,
   commitDesignComponentVariant,
   commitDesignInstanceAttributes,
+  commitDesignInstanceText,
   createDesignComponentPreview,
   designComponentVariantName,
   designInstanceOptionState,
@@ -118,6 +119,14 @@ describe("variants and instances", () => {
       expect.objectContaining({ type: "node.set-attribute", nodeId: "inst", attribute: "label", value: null }),
       expect.objectContaining({ type: "node.set-attribute", nodeId: "inst", attribute: "zd-variant", value: null }),
     ]);
+  });
+
+  it("writes a plain component instance's slot text as its host's text, in one transaction", async () => {
+    const frame = { file: "start/welcome.html", sourceVersion: V1 } as never;
+    await commitDesignInstanceText("w", frame, "tour-1", "How to move");
+    expect(calls()[0]![1]).toBe(frame);
+    expect(calls()[0]![2].intent).toBe("Set text");
+    expect(calls()[0]![2].operations).toEqual([expect.objectContaining({ type: "node.set-text", nodeId: "tour-1", text: "How to move" })]);
   });
 });
 

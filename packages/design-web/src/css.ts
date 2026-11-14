@@ -273,7 +273,7 @@ function inlineStyleForNode(
   nodeId: string,
 ): InlineStyleAttribute | null {
   const document = parse(source, { sourceCodeLocationInfo: true });
-  identifyDesignHtmlNodes(document, source);
+  identifyDesignHtmlNodes(document);
   const matches =
     nodeId === DESIGN_DOCUMENT_BODY_ID
       ? [designDocumentBody(document)]
@@ -410,6 +410,10 @@ function mutateInlineStyles(
           `${property}:${escapeStyleValue(value, attribute.quote)};`,
       )
       .join(" ")}`;
+  }
+  if (!content.trim()) {
+    const start = source.slice(0, location.startOffset).trimEnd().length;
+    return `${source.slice(0, start)}${source.slice(location.endOffset)}`;
   }
   const replacement = `${attribute.before}${content}${attribute.after}`;
   return `${source.slice(0, location.startOffset)}${replacement}${source.slice(location.endOffset)}`;

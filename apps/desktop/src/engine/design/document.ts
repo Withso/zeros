@@ -1760,6 +1760,33 @@ async function designKnownTokens(
   return { names: (file) => forFrame(file).names, colors: (file) => forFrame(file).colors };
 }
 
+/** The source with every text and comment node outside `<style>` blanked,
+ * keeping offsets, lines and columns: prose that names a token is not CSS. */
+function sourceWithoutProse(source: string, document: DefaultTreeAdapterTypes.Document): string {
+  const ranges: Array<[number, number]> = [];
+  const pending: Array<{ node: DefaultTreeAdapterTypes.Node; css: boolean }> = [{ node: document, css: false }];
+  while (pending.length) {
+    const { node, css } = pending.pop()!;
+    if ((node.nodeName === "#text" && !css) || node.nodeName === "#comment") {
+      const location = node.sourceCodeLocation;
+      if (location) ranges.push([location.startOffset, location.endOffset]);
+      continue;
+    }
+    const inner = "tagName" in node ? node.tagName === "style" : css;
+    if ("childNodes" in node) for (const child of node.childNodes) pending.push({ node: child, css: inner });
+    if ("tagName" in node && node.tagName === "template" && "content" in node)
+      pending.push({ node: (node as DefaultTreeAdapterTypes.Template).content, css: false });
+  }
+  if (!ranges.length) return source;
+  let masked = "";
+  let at = 0;
+  for (const [start, end] of ranges.sort((left, right) => left[0] - right[0])) {
+    if (start < at) continue;
+    masked += source.slice(at, start) + source.slice(start, end).replace(/[^\n]/g, " ");
+    at = end;
+  }
+  return masked + source.slice(at);
+}
 function collectDeclaredCustomProperties(
   css: string,
   names: Set<string>,
@@ -2019,7 +2046,7 @@ async function lintFrame(
     ...frameCustomPropertyNames(document),
     ...designFrameOptionPropertyNames(source, document),
   ]);
-  for (const match of source.matchAll(/var\(\s*(--[A-Za-z0-9_-]+)\s*(,)?/g)) {
+  for (const match of sourceWithoutProse(source, document).matchAll(/var\(\s*(--[A-Za-z0-9_-]+)\s*(,)?/g)) {
     const token = match[1];
     // A fallback marks an optional hook (the app's icons paint with
     // var(--zeros-fi, var(--zeros-fi-blue))); declaring it would change the
@@ -2060,8 +2087,9 @@ async function lintFrame(
     for (const record of records) {
       const value = record.element.attrs.find((attribute) => attribute.name === "class")?.value;
       if (!value) continue;
-      for (const name of value.split(/[\t\n\f\r ]+/)) {
-        if (!name || checked.has(name)) continue;
+      // A hole such as badge--{{ tone }} names its class only once drawn.
+      for (const name of value.replace(/\{\{[^}]*\}\}/g, "{{}}").split(/[\t\n\f\r ]+/)) {
+        if (!name || name.includes("{{") || checked.has(name)) continue;
         checked.add(name);
         if (!availableClasses.has(name)) unknown.set(name, record);
       }

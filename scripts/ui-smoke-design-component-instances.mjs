@@ -271,7 +271,8 @@ export async function runDesignComponentInstancesSmoke({ page, check }) {
     elements.filter((element) => !element.closest("[inert]")).map((element) => element.getAttribute("aria-label") || element.textContent.trim()));
   const editing = buttons.filter((name) => !reading.has(name) && !name.startsWith("Canvas zoom"));
   check("no control of a part's Style panel can edit it", editing.length === 0, JSON.stringify(editing));
-  check("Layers keeps the instance as one row", (await page.locator('[data-design-layer-id^="::zeros-part"]').count()) === 0 && (await layer("home-composer").count()) === 1);
+  check("Layers lists the selected part once, under its one instance row",
+    (await page.locator('[data-design-layer-id="::zeros-part:home-composer:cc-send"]').count()) === 1 && (await layer("home-composer").count()) === 1);
   check("a part has no resize, spacing or rotation handle",
     (await page.locator("[data-design-selected-element] [data-design-resize-handle], [data-design-selected-element] button").count()) === 0);
 

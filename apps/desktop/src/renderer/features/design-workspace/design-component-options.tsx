@@ -4,7 +4,9 @@
 // (personal view state) and a row writes that variant's line, or the default
 // with Default shown; "Save current as variant…" adds one line. On an
 // instance in another frame each row writes the host's attribute, a dot marks
-// a value that differs from what it inherits, and Reset removes them all.
+// a value that differs from what it inherits, and Reset removes them all. A
+// plain component's instance whose default slot holds only text also offers
+// that text, which is the host's own.
 // Mounted only for one selected component frame or instance; a folded group
 // mounts no rows. Local only.
 
@@ -50,6 +52,7 @@ import {
   commitDesignComponentOption,
   commitDesignComponentVariant,
   commitDesignInstanceAttributes,
+  commitDesignInstanceText,
   createDesignComponentPreview,
   designComponentAttributeText,
   designComponentPreviewProperties,
@@ -311,6 +314,16 @@ export function DesignComponentOptions({
       ) : null}
       {naming && !tooLarge ? <OptionEntryRow label="Name" inputLabel="Variant name" placeholder="Compact" onSubmit={saveVariant} onCancel={() => setNaming(false)} /> : null}
       {rows}
+      {instance && instance.host.text !== undefined ? (
+        <OptionTextRow
+          label="Text"
+          value={instance.host.text}
+          disabled={disabled}
+          onCommit={(next) => {
+            if (next !== instance.host.text) void commitDesignInstanceText(workspaceId, frame, instance.nodeId, next).catch(failed("the text"));
+          }}
+        />
+      ) : null}
       {/* Options are the main's to change, so an instance does not offer it. */}
       {instance ? null : (
         <OptionActionRow disabled={!askToChange} onClick={askToChange} data-design-options-ask="">

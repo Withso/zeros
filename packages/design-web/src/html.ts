@@ -162,23 +162,67 @@ function oid(element: Element): string | null {
   return value?.trim() || null;
 }
 
-/** Exact-source identity shared with the desktop preview. Explicit IDs remain
- * authoritative, so existing documents keep their persisted identities. */
-export function nativeDesignIdentityBase(tag: string, offset: number, source: string): string {
-  const digest = sha256(new TextEncoder().encode(`${tag}:${offset}:${source.slice(offset, offset + 80)}`));
-  return `o-${Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join("").slice(0, 9)}`;
+/** A derived identity, shared by the engine and the canvas, names an element
+ * by its tag and element-sibling index at every level from the document root,
+ * plus its own attributes and direct text. Writing one layer's id, or changing
+ * one layer's text or attributes, changes no other layer's derived id, so such
+ * an edit persists only that layer's id. Adding, moving or removing elements
+ * shifts places, so those edits persist every id first. A layer that shifts
+ * gets a new id rather than the one its neighbour had, so a held selection is
+ * dropped, not moved to another layer. Explicit IDs remain authoritative. */
+export function nativeDesignIdentities(document: Document): (element: Element) => string {
+  const places = new Map<Element, { parent: Element | null; step: string }>();
+  const pending: Array<{ node: Document | DocumentFragment | Element; parent: Element | null; prefix: string }> = [
+    { node: document, parent: null, prefix: "" },
+  ];
+  while (pending.length) {
+    const { node, parent, prefix } = pending.pop()!;
+    let index = 0;
+    for (const child of node.childNodes) {
+      if (!("tagName" in child)) continue;
+      places.set(child, { parent, step: `${prefix}/${child.tagName}:${index++}` });
+      pending.push({ node: child, parent: child, prefix: "" });
+      if (child.tagName === "template" && "content" in child)
+        pending.push({ node: (child as DefaultTreeAdapterTypes.Template).content, parent: child, prefix: "#content" });
+    }
+  }
+  const encoder = new TextEncoder();
+  const ids = new Map<Element, string>();
+  // Hashing waits until an element needs a derived id; most already carry one.
+  return (element) => {
+    const known = ids.get(element);
+    if (known) return known;
+    const steps: string[] = [];
+    for (let place = places.get(element); place; place = place.parent ? places.get(place.parent) : undefined)
+      steps.push(place.step);
+    const attributes = element.attrs
+      .filter((attribute) => attribute.name !== "data-oid")
+      .map((attribute) => `${attribute.name}=${attribute.value}`)
+      .join("\u0000");
+    const text = element.childNodes
+      .map((child) => (child.nodeName === "#text" ? (child as DefaultTreeAdapterTypes.TextNode).value : ""))
+      .join("")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 80);
+    const digest = sha256(encoder.encode(`${steps.reverse().join("")}\u0000${attributes}\u0000${text}`));
+    const id = `o-${Array.from(digest.subarray(0, 5), (byte) => byte.toString(16).padStart(2, "0")).join("").slice(0, 9)}`;
+    ids.set(element, id);
+    return id;
+  };
 }
 
 /** Attach derived IDs to the parsed tree only. Locations still address the
  * original file; explicit duplicates retain their validation errors. */
-export function identifyDesignHtmlNodes(document: Document, source: string): void {
+export function identifyDesignHtmlNodes(document: Document): void {
   const used = new Set<string>();
+  const derived = nativeDesignIdentities(document);
   for (const element of designElements(document).filter(isDesignElement)) {
     const location = element.sourceCodeLocation;
     if (!location?.startTag) continue;
     const current = oid(element);
     if (current && !used.has(current)) { used.add(current); continue; }
-    const base = nativeDesignIdentityBase(element.tagName, location.startOffset, source);
+    const base = derived(element);
     let next = base;
     for (let suffix = 2; used.has(next); suffix++) next = `${base}-${suffix}`;
     used.add(next);
@@ -226,7 +270,7 @@ export function parseDesignWebProjection(input: {
     sourceCodeLocationInfo: true,
     onParseError: (error) => parseErrors.push(error),
   });
-  identifyDesignHtmlNodes(document, input.source);
+  identifyDesignHtmlNodes(document);
   const diagnostics: DesignWebDiagnostic[] = parseErrors.map((error) => ({
     severity: "error",
     code: "html-parse",
@@ -331,7 +375,7 @@ function shadowContentRefusal(nodeId: string): Error {
 
 function isShadowContent(source: string, nodeId: string): boolean {
   const document = parse(source, { sourceCodeLocationInfo: true });
-  identifyDesignHtmlNodes(document, source);
+  identifyDesignHtmlNodes(document);
   const light = new Set(elements(document));
   return designElements(document).some(
     (element) => !light.has(element) && isDesignElement(element) && oid(element) === nodeId,
@@ -901,13 +945,22 @@ function identityBase(tag: string, offset: number, source: string): string {
 
 /** Minimal identity repair. Once written, generated IDs no longer depend on
  * offsets; offsets are used only to seed a previously unidentified element. */
-export function healDesignHtmlIdentities(source: string, identity = identityBase): {
+export function healDesignHtmlIdentities(
+  source: string,
+  options: {
+    /** Write the ids the canvas derives, instead of new offset-seeded ones. */
+    native?: boolean;
+    /** Write only these derived ids; every other element keeps its bytes. */
+    only?: ReadonlySet<string>;
+  } = {},
+): {
   source: string;
   changed: boolean;
   healed: number;
 } {
   const document = parse(source, { sourceCodeLocationInfo: true });
   const records = designElements(document).filter(isDesignElement);
+  const derived = options.native ? nativeDesignIdentities(document) : null;
   const used = new Set<string>();
   const edits: Array<{ start: number; end: number; text: string }> = [];
   for (const element of records) {
@@ -918,11 +971,12 @@ export function healDesignHtmlIdentities(source: string, identity = identityBase
       used.add(current);
       continue;
     }
-    const base = identity(element.tagName, location.startOffset, source);
+    const base = derived ? derived(element) : identityBase(element.tagName, location.startOffset, source);
     let next = base;
     for (let suffix = 2; used.has(next); suffix += 1)
       next = `${base}-${suffix}`;
     used.add(next);
+    if (options.only && !options.only.has(next)) continue;
     const attributeLocation = element.sourceCodeLocation?.attrs?.["data-oid"];
     if (attributeLocation) {
       edits.push({

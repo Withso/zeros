@@ -30,6 +30,8 @@ export type DesignLayoutAction =
   | { type: "center"; target?: DesignLayoutActionTarget }
   /** Out of its parent's auto layout, at the box it occupies now. */
   | { type: "place-freely" }
+  /** Back into its parent's auto layout, which places it; its size stays. */
+  | { type: "join-auto-layout" }
   /** `bases`: each layer's own rotation when the Mixed scrub began, so a
    * preview followed by its commit turns by the delta once. */
   | { type: "rotate"; delta: number; bases?: Readonly<Record<string, number>> }
@@ -101,6 +103,8 @@ export interface DesignLayoutFieldOptions {
   mixed?: boolean;
   /** The text style row owns this value's token; the field shows its value. */
   tokenHidden?: boolean;
+  /** Shown but not editable, such as X and Y of a layer auto layout places. */
+  disabled?: boolean;
 }
 
 export function roundDesignLayoutValue(value: string): string {
@@ -109,13 +113,33 @@ export function roundDesignLayoutValue(value: string): string {
 }
 
 /** A layer in flow inside a flex or grid parent: the parent's auto layout
- * decides where it sits, so Position offers Place freely instead of pins. */
+ * decides where it sits, so Position locks X and Y and offers Absolute
+ * position instead of pins. */
 export function designLayoutPlacedByParent(
   details: DesignRuntimeNodeDetails,
 ): boolean {
   if (!details.layout?.parentId) return false;
-  if (["absolute", "fixed"].includes(style(details, "position"))) return false;
+  if (positioned(details)) return false;
   return designLayoutMode(details.layout.parentDisplay) !== "none";
+}
+
+/** Absolute position for layers of auto layout parents: "on" when every
+ * selected layer is out of its parent's flow, "off" when auto layout places
+ * them all. Null where any parent has no auto layout to leave. */
+export function designLayoutAbsolutePosition(
+  selection: readonly DesignRuntimeNodeDetails[],
+): "on" | "off" | "mixed" | null {
+  if (selection.length === 0) return null;
+  let absolute = 0;
+  for (const node of selection) {
+    if (!node.layout?.parentId || designLayoutMode(node.layout.parentDisplay) === "none") return null;
+    if (positioned(node)) absolute += 1;
+  }
+  return absolute === 0 ? "off" : absolute === selection.length ? "on" : "mixed";
+}
+
+function positioned(details: DesignRuntimeNodeDetails): boolean {
+  return ["absolute", "fixed"].includes(style(details, "position"));
 }
 
 export function designLayoutMode(display: string): "none" | "flex" | "grid" {
@@ -405,6 +429,10 @@ export function designLayoutActionUpdates(
 ): Map<string, Record<string, string | null>> {
   const updates = new Map<string, Record<string, string | null>>();
   for (const node of details) {
+    // A mixed selection's ticked layers stay where they are, and its
+    // unticked ones stay in the flow.
+    if (action.type === "place-freely" && !designLayoutPlacedByParent(node)) continue;
+    if (action.type === "join-auto-layout" && designLayoutAbsolutePosition([node]) !== "on") continue;
     if (
       (action.type === "constraint" ||
         action.type === "align" ||
@@ -525,6 +553,30 @@ export function designLayoutActionStyles(
       ...(offset ? { transform: offset.pose } : {}),
       "--zeros-layout-x": "start",
       "--zeros-layout-y": "start",
+    };
+  }
+  if (action.type === "join-auto-layout") {
+    const authored = details.authoredStyles;
+    const floats = (value: string | undefined) => value === "absolute" || value === "fixed";
+    const position = authored?.position;
+    const ownOnly = !position || (position.scope === "inline" && !floats(position.replaced?.value));
+    // Removing only the layer's own declaration would leave a rule's absolute
+    // and offsets. relative overrides it and, unlike static, stays the box
+    // the layer's own absolute layers are placed in.
+    const inset = (property: "left" | "top" | "right" | "bottom") => {
+      const entry = authored?.[property];
+      if (ownOnly || !entry) return null;
+      const ruled = entry.scope === "inline" ? entry.replaced && entry.replaced.value !== "auto" : entry.value !== "auto";
+      return ruled ? "auto" : null;
+    };
+    return {
+      position: ownOnly ? null : "relative",
+      left: inset("left"),
+      top: inset("top"),
+      right: inset("right"),
+      bottom: inset("bottom"),
+      "--zeros-layout-x": null,
+      "--zeros-layout-y": null,
     };
   }
   if (action.type === "resize-fill") {

@@ -72,6 +72,7 @@ describe("the committed component fixture through WorkspaceService", () => {
     expect(host!.instances!.hosts).toEqual({
       "inst-set": { component: "fx-chip", attributes: { label: "Hello", width: "200", tone: "loud" } },
       "inst-ignored": { component: "fx-chip", attributes: {}, ignored: { shape: "round" } },
+      "inst-badge": { component: "fx-badge", attributes: { text: "New" } },
     });
     const shown = (await frame("screens/hosts.html")).srcDoc!;
     expect(shown).toContain('<b data-zd-part="chip-label">Hello</b>');
@@ -80,8 +81,8 @@ describe("the committed component fixture through WorkspaceService", () => {
     // The derived pad follows each instance's width.
     expect(shown).toMatch(/--zd-width: 200px;[^}]*--zd-pad: 20px;/);
     expect(shown).toMatch(/--zd-width: 160px;[^}]*--zd-pad: 16px;/);
-    // The legacy components/ definition expands too, with its attribute slot.
-    expect(shown).toContain('<span data-zid="badge" class="badge">New</span>');
+    // The legacy components/ definition expands too, as an instance with its attribute slot.
+    expect(shown).toContain('<zd-fx-badge data-oid="inst-badge" text="New" data-zd-instance="1"><span data-zd-part="badge" class="badge">New</span></zd-fx-badge>');
     // The ignored attribute is reported at the instance that carries it.
     expect(await lint()).toEqual([expect.objectContaining({
       ruleId: "component-value-invalid", severity: "warning", file: "screens/hosts.html", line: 11, oid: "inst-ignored",
@@ -116,11 +117,9 @@ describe("the committed component fixture through WorkspaceService", () => {
     expect(read("library/chip.html")).toBe(main0.replace('default="160"', 'default="120"'));
     expect((await frame("screens/hosts.html")).srcDoc).toMatch(/--zd-width: 120px;[^}]*--zd-pad: 12px;/);
 
-    // The scene write keeps the file's escapes, inline arrays and key order,
-    // and only appends the foundation registering the legacy component.
-    const canvas1 = read("meta/canvas.json");
-    expect(canvas1.startsWith(canvas0.slice(0, -"\n}\n".length))).toBe(true);
-    expect(JSON.parse(canvas1).foundation.components).toEqual([expect.objectContaining({ id: "fx-badge", file: "components/fx-badge.html" })]);
+    // The legacy components/ definition is still read from its file, so the
+    // edits leave meta/canvas.json byte for byte.
+    expect(read("meta/canvas.json")).toBe(canvas0);
 
     await call("design.history.undo");
     expect(read("library/chip.html")).toBe(main0);
@@ -183,12 +182,8 @@ describe("the committed component fixture through WorkspaceService", () => {
     await call("design.canvas.update", { frame: "screens/hosts.html", x: 50, y: 0, w: 800, h: 600, z: 0 });
     const moved = read("meta/canvas.json");
     const at = '"source": "screens/hosts.html",\n      "title": "Hosts",\n      "x": ';
-    // A frame transaction also registers the legacy components/ definition
-    // in the foundation it persists; that block follows the existing members.
-    const registered = canvas0.slice(0, -"\n}\n".length).replace(`${at}0`, `${at}50`);
-    expect(moved.startsWith(registered)).toBe(true);
-    expect(moved.slice(registered.length)).toMatch(/^,\n {2}"foundation": \{\n/);
+    expect(moved).toBe(canvas0.replace(`${at}0`, `${at}50`));
     await call("design.history.undo");
-    expect(read("meta/canvas.json")).toBe(moved.replace(`${at}50`, `${at}0`));
+    expect(read("meta/canvas.json")).toBe(canvas0);
   });
 });

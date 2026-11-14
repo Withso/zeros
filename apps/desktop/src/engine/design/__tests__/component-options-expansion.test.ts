@@ -65,6 +65,27 @@ describe("an instance of a component with options", () => {
     expect(result.html).toContain('url("../assets/bg.png")');
   });
 
+  it("expands an instance that a template wrapper keeps, in a main frame and in a component", async () => {
+    const card = doc('<article data-zid="card"><h3 data-zid="heading"><slot data-zd-attr="heading"></slot></h3><slot></slot></article>');
+    const frame = doc(
+      '<main data-oid="m"><template data-zd-if="show"><zd-card data-oid="wrapped" heading="Kept">Body</zd-card></template>' +
+        '<template data-zd-for="i in range(2)"><zd-card data-oid="looped" heading="Row">Each</zd-card></template></main>',
+      options('<zd-option name="show" type="boolean" default="true"></zd-option>'),
+    );
+    const result = await expand(frame, { "components/card.html": card }, "home/index.html", {});
+    expect(result.errors).toEqual([]);
+    expect(result.usedComponents).toEqual(["card"]);
+    expect(result.html).toContain('<zd-card data-oid="wrapped" heading="Kept" data-zd-instance="3"><article data-zd-part="card"><h3 data-zd-part="heading">Kept</h3>Body</article></zd-card>');
+    expect(result.html.match(/<article data-zd-part="card"><h3 data-zd-part="heading">Row<\/h3>Each<\/article>/g)).toHaveLength(2);
+
+    const panel = doc('<section data-zid="panel"><template data-zd-if="card"><zd-card data-zid="inner" heading="Nested">In</zd-card></template></section>',
+      options('<zd-option name="card" type="boolean" default="true"></zd-option>'));
+    const nested = await expand(doc('<zd-panel data-oid="p"></zd-panel>'), { "components/card.html": card, "components/panel.html": panel }, "home/index.html", {});
+    expect(nested.errors).toEqual([]);
+    expect(nested.usedComponents).toEqual(["card", "panel"]);
+    expect(nested.html).toContain('<h3 data-zd-part="heading">Nested</h3>In</article></zd-card>');
+  });
+
   it("keeps nested instances' values apart, even for options with the same name", async () => {
     const card = doc('<div data-zid="card"><zd-badge data-zid="inner"></zd-badge></div>', options('<zd-option name="width" type="number" default="300" unit="px"></zd-option>'));
     const badge = doc('<b data-zid="badge">B</b>', options('<zd-option name="width" type="number" default="24" unit="px"></zd-option>'));

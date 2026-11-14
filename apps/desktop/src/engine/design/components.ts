@@ -3,6 +3,7 @@ import { realpath } from "node:fs/promises";
 import path from "node:path";
 
 import { parse, parseFragment, type DefaultTreeAdapterTypes } from "parse5";
+import postcss, { type AtRule } from "postcss";
 import { sharedDesignParse } from "./shared-parse";
 
 import { assertDesignComponentDefinitionIdentities, rebaseDesignCssReferences, rebaseDesignHtmlReferences } from "@zeros/design-web";
@@ -14,6 +15,7 @@ import {
   componentOptionValues,
   componentIgnoresAttribute,
   componentInheritedValues,
+  componentOptionNameProblem,
   readComponentDeclaration,
   COMPONENT_VARIANT_ATTRIBUTE,
   type ComponentDeclaration,
@@ -84,6 +86,9 @@ interface ComponentDefinition {
     /** What the Style panel shows for its instances; read on first use. */
     summary?: () => DesignComponentSummary | null;
   };
+  /** A plain definition's slots: each attribute slot an option may name,
+   * with its fallback text, and whether it has a default slot. */
+  slots?: { options: { name: string; fallback: string }[]; content: boolean };
 }
 
 export type DesignComponentExpansionCode =
@@ -188,10 +193,26 @@ function stripDefinitionOids(source: string): string {
   return source.replace(/\s+data-oid\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, "");
 }
 
+/** A template wrapper's content is drawn in its place, so the instances in it
+ * need their definitions; a data-zd-options template's zd-option tags do not. */
+function elementsThroughWrappers(node: ParentNode): DefaultTreeAdapterTypes.Element[] {
+  const result: DefaultTreeAdapterTypes.Element[] = [];
+  const pending: ParentNode[] = [node];
+  while (pending.length) {
+    for (const element of elements(pending.pop()!)) {
+      if (result.length >= 50_000) throw new ComponentBudgetExceeded();
+      result.push(element);
+      if (element.tagName === "template" && element.attrs.some((attribute) => attribute.name === "data-zd-if" || attribute.name === "data-zd-for"))
+        pending.push((element as DefaultTreeAdapterTypes.Template).content);
+    }
+  }
+  return result;
+}
+
 function referencedComponentNames(node: ParentNode): string[] {
   return [
     ...new Set(
-      elements(node)
+      elementsThroughWrappers(node)
         .filter((element) => element.tagName.startsWith("zd-"))
         .map((element) => element.tagName.slice(3))
         .filter((name) => /^[a-z][a-z0-9-]*$/.test(name)),
@@ -464,11 +485,40 @@ function analyzeDefinition(name: string, registered: string | undefined, source:
   // definition. The composed-frame sanitizer and CSP remain the rendering
   // boundary, while component-invalid stays a blocking save/PR diagnostic;
   // dropping the whole definition here would hide useful repair context.
-  return { nested, errors, definition: {
-    name,
-    body: body ? stripDefinitionOids(innerSource(source, body)) : "",
-    styles,
-  } };
+  const plain = slotDefinitionBody(body ? innerSource(source, body) : "", declaresDefinitionIdentity);
+  return { nested, errors, definition: { name, body: plain.body, styles, slots: plain.slots } };
+}
+
+function textOf(node: ParentNode): string {
+  let text = "";
+  for (const child of node.childNodes) {
+    if (child.nodeName === "#text") text += (child as DefaultTreeAdapterTypes.TextNode).value;
+    else if ("tagName" in child) text += textOf(child);
+  }
+  return text;
+}
+
+/** A plain definition's body as its instances draw it: a definition-local
+ * data-zid names the layer as the instance's part, as a templated
+ * definition's does. */
+function slotDefinitionBody(body: string, identified: boolean): { body: string; slots: NonNullable<ComponentDefinition["slots"]> } {
+  const fragment = parseFragment(body, { sourceCodeLocationInfo: true });
+  const options: { name: string; fallback: string }[] = [];
+  let content = false;
+  const identities: number[] = [];
+  for (const element of elements(fragment)) {
+    if (element.tagName === "slot") {
+      const name = element.attrs.find((attribute) => attribute.name === "data-zd-attr")?.value;
+      if (!name) content = true;
+      else if (!componentOptionNameProblem(name) && !options.some((option) => option.name === name)) options.push({ name, fallback: textOf(element) });
+    }
+    const identity = identified ? element.sourceCodeLocation?.attrs?.["data-zid"] : undefined;
+    if (identity) identities.push(identity.startOffset);
+  }
+  let marked = body;
+  for (const offset of identities.sort((left, right) => right - left))
+    marked = `${marked.slice(0, offset)}data-zd-part${marked.slice(offset + "data-zid".length)}`;
+  return { body: stripDefinitionOids(marked), slots: { options, content } };
 }
 
 /** The <zd-option>, <zd-derive> and <zd-variant> lines of a file's
@@ -585,6 +635,53 @@ function fillSlots(
   return result;
 }
 
+const PSEUDO_ELEMENT_TAIL = /(?:::[\w-]+(?:\([^()]*\))?|:(?:before|after|first-line|first-letter)(?![\w-]))(?::[\w-]+(?:\([^()]*\))?)*$/i;
+const scopedStyles = new Map<string, string>();
+
+/**
+ * Limits a component's style element to its instances: each selector keeps its
+ * specificity but matches only the zd-<name> host or what is inside it, and
+ * :root or :host means the host. The design runtime reads these two forms back
+ * as the authored selector (`authoredComponentSelector`), so keep them in step.
+ * @scope is not used: inside it a plain selector cannot match the host.
+ */
+export function scopeDesignComponentStyle(name: string, css: string): string {
+  const key = `${name}\u0000${css}`;
+  const cached = scopedStyles.get(key);
+  if (cached !== undefined) return cached;
+  const host = `zd-${name}`;
+  let scoped = css;
+  try {
+    const root = postcss.parse(css);
+    root.walkRules((rule) => {
+      let parent = rule.parent;
+      while (parent?.type === "atrule") {
+        const at = (parent as AtRule).name.toLowerCase();
+        if (at.endsWith("keyframes") || at === "scope" || at === "page" || at === "font-feature-values") return;
+        parent = parent.parent;
+      }
+      // A nested rule is relative to its parent, which is already scoped.
+      if (parent?.type !== "root") return;
+      rule.selectors = rule.selectors.map((selector) => {
+        const complex = selector.trim();
+        if (/^(?::root|:host)$/i.test(complex)) return `:is(${complex}, ${host}):where(${host})`;
+        const tail = PSEUDO_ELEMENT_TAIL.exec(complex);
+        const subject = tail ? complex.slice(0, tail.index) : complex;
+        // `.field ::placeholder` names the descendants' pseudo-element; a
+        // bare combinator at the end of :is() would drop it to .field's own.
+        const compound = !subject ? "*" : /[\s>+~]$/.test(subject) ? `${subject}:where(*)` : subject;
+        return `:is(${compound}):where(${host}, ${host} *)${tail?.[0] ?? ""}`;
+      });
+    });
+    scoped = root.toString();
+  } catch {
+    // CSS PostCSS cannot read is copied as written; the browser drops what it cannot parse either.
+  }
+  if (scopedStyles.size >= 256) scopedStyles.clear();
+  scopedStyles.set(key, scoped);
+  return scoped;
+}
+
 function injectComponentStyles(
   source: string,
   used: readonly string[],
@@ -593,9 +690,17 @@ function injectComponentStyles(
   extra: { rules: readonly string[]; entryFile: string; entryLinks: readonly string[] } = { rules: [], entryFile: "", entryLinks: [] },
 ): string {
   let bytes = Buffer.byteLength(source);
-  for (const name of used) for (const style of definitions.get(name)?.styles ?? []) {
-    bytes += Buffer.byteLength(style) + Buffer.byteLength(name) + 40;
-    budget.output(bytes);
+  const styles = new Map<string, string[]>();
+  for (const name of used) {
+    const scoped: string[] = [];
+    for (const style of definitions.get(name)?.styles ?? []) {
+      budget.charge(style.length);
+      const text = scopeDesignComponentStyle(name, style);
+      bytes += Buffer.byteLength(text) + Buffer.byteLength(name) + 40;
+      budget.output(bytes);
+      scoped.push(text);
+    }
+    styles.set(name, scoped);
   }
   // A templated component's own stylesheets come along once each, rebased to
   // the frame, unless the frame already links the same file.
@@ -616,7 +721,7 @@ function injectComponentStyles(
   budget.output(bytes);
   const styleMarkup = linkMarkup + used
     .flatMap((name) =>
-      (definitions.get(name)?.styles ?? []).map(
+      (styles.get(name) ?? []).map(
         (style) => `<style data-zeros-component="${name}">${style}</style>`,
       ),
     )
@@ -770,7 +875,10 @@ const resolveFrom = (file: string, href: string) => posix.normalize(posix.join(p
  * rendering, each instance's generated rule, and whether anything failed. */
 interface OptionsWork {
   budget: ComponentTemplateBudget;
+  /** Instances marked so far, templated or not; the next one's data-zd-instance. */
   instances: number;
+  /** A templated definition rendered. */
+  templated?: boolean;
   rules: string[];
   failed: boolean;
   /** The frame's own template failed: it renders an empty body. */
@@ -860,18 +968,50 @@ function recordInstance(
   instance: DefaultTreeAdapterTypes.Element,
   failed: boolean,
 ): void {
+  const { declaration, file } = definition.template;
+  recordHost(usage, definition.name, instance, new Set([...declaration.options.map((option) => option.name), COMPONENT_VARIANT_ATTRIBUTE]), () => {
+    const summary = definition.template.summary?.() ?? null;
+    return { elements: summary?.elements ?? [], reach: summary?.reach ?? {}, file, frame: registry.get(definition.name) === file };
+  }, failed ? { failed: true } : {});
+}
+
+/** A plain definition's instance: each attribute slot is a text option with
+ * its fallback as the default, and a default slot filled with text alone
+ * reports that text, which the host's own text sets. */
+function recordSlotInstance(
+  usage: DesignComponentExpansionUsage,
+  definition: ComponentDefinition & { slots: NonNullable<ComponentDefinition["slots"]> },
+  instance: DefaultTreeAdapterTypes.Element,
+): void {
+  const { options, content } = definition.slots;
+  const text = content && instance.childNodes.every((child) => child.nodeName === "#text")
+    ? instance.childNodes.map((child) => (child as DefaultTreeAdapterTypes.TextNode).value).join("")
+    : undefined;
+  recordHost(usage, definition.name, instance, new Set(options.map((option) => option.name)), () => ({
+    elements: options.map((option) => ({ tag: "zd-option", attributes: [{ name: "name", value: option.name }, { name: "type", value: "text" },
+      { name: "default", value: option.fallback }] })),
+    reach: {},
+    file: `components/${definition.name}.html`,
+    frame: false,
+  }), text !== undefined && text.length <= DESIGN_COMPONENT_RECORD_LIMITS.attributeValue ? { text } : {});
+}
+
+function recordHost(
+  usage: DesignComponentExpansionUsage,
+  name: string,
+  instance: DefaultTreeAdapterTypes.Element,
+  names: ReadonlySet<string>,
+  component: () => DesignFrameInstances["components"][string],
+  extra: { failed?: true; text?: string },
+): void {
   const oid = instance.attrs.find((attribute) => attribute.name === "data-oid")?.value;
-  if (!oid || oid.length > DESIGN_COMPONENT_RECORD_LIMITS.layerId || INHERITED_NAMES.has(oid) || INHERITED_NAMES.has(definition.name)) return;
+  if (!oid || oid.length > DESIGN_COMPONENT_RECORD_LIMITS.layerId || INHERITED_NAMES.has(oid) || INHERITED_NAMES.has(name)) return;
   const record = usage.instances ??= { components: new Map(), hosts: new Map() };
   if (record.hosts.size >= DESIGN_FRAME_INSTANCE_LIMITS.hosts) return;
-  const { declaration, file } = definition.template;
-  if (!record.components.has(definition.name)) {
+  if (!record.components.has(name)) {
     if (record.components.size >= DESIGN_FRAME_INSTANCE_LIMITS.components) return;
-    const summary = definition.template.summary?.() ?? null;
-    record.components.set(definition.name, designComponentRecordWithinLimits({ elements: summary?.elements ?? [], reach: summary?.reach ?? {}, file,
-      frame: registry.get(definition.name) === file }, designFrameInstanceComponentSchema));
+    record.components.set(name, designComponentRecordWithinLimits(component(), designFrameInstanceComponentSchema));
   }
-  const names = new Set([...declaration.options.map((option) => option.name), COMPONENT_VARIANT_ATTRIBUTE]);
   const attributes = new Map<string, string>();
   const ignored = new Map<string, string>();
   for (const attribute of instance.attrs) {
@@ -885,8 +1025,8 @@ function recordInstance(
     if (attribute.value.length > DESIGN_COMPONENT_RECORD_LIMITS.attributeValue) return;
     attributes.set(attribute.name, attribute.value);
   }
-  record.hosts.set(oid, { component: definition.name, attributes: Object.fromEntries(attributes), ...(failed ? { failed: true as const } : {}),
-    ...(ignored.size ? { ignored: Object.fromEntries(ignored) } : {}) });
+  record.hosts.set(oid, { component: name, attributes: Object.fromEntries(attributes), ...(extra.failed ? { failed: true as const } : {}),
+    ...(ignored.size ? { ignored: Object.fromEntries(ignored) } : {}), ...(extra.text !== undefined ? { text: extra.text } : {}) });
 }
 
 /** A top-level instance of a name no definition answers to, so the panel and
@@ -977,7 +1117,7 @@ async function expandBoundedComponents(
       const name = instance.tagName.slice(3);
       const definition = definitions.get(name);
       if (!definition) {
-        if (depth === 0 && usage && !loaded.unavailable.has(name)) recordMissingInstance(usage, name, instance);
+        if (usage && !loaded.unavailable.has(name)) recordMissingInstance(usage, name, instance);
         continue;
       }
       if (stack.includes(name) || depth === MAX_EXPANSION_DEPTH) {
@@ -991,18 +1131,24 @@ async function expandBoundedComponents(
       const location = instance.sourceCodeLocation!;
       let startTag = location.startTag ? result.slice(location.startTag.startOffset, location.startTag.endOffset) : result.slice(location.startOffset, location.endOffset);
       let filled: string;
+      const id = String(++work.instances);
+      startTag = startTag.replace(/\s*\/?>$/, (end) => ` data-zd-instance="${id}"${end.trim() === "/>" ? " />" : ">"}`);
       if (definition.template) {
         const attributes = new Map(instance.attrs.map((attribute) => [attribute.name, attribute.value]));
         const templated = definition as ComponentDefinition & { template: NonNullable<ComponentDefinition["template"]> };
-        const oid = depth === 0 ? attributes.get("data-oid") : undefined;
+        // Only the frame's own layers keep a data-oid through expansion (a
+        // definition's become parts), so one here is an instance the frame
+        // placed, at the top or in another instance's slot.
+        const oid = attributes.get("data-oid");
         const rendered = renderInstance(templated, attributes, work, errors, oid);
-        if (depth === 0 && usage) recordInstance(usage, registry, templated, instance, rendered.failed === true);
+        if (usage) recordInstance(usage, registry, templated, instance, rendered.failed === true);
         if (depth === 0 && rendered.empty) work.instancesEmpty = true;
-        const id = String(++work.instances);
+        work.templated = true;
         if (rendered.css) work.rules.push(`:where([data-zd-instance="${id}"]) { ${rendered.css} }`);
-        startTag = startTag.replace(/\s*\/?>$/, (end) => ` data-zd-instance="${id}"${end.trim() === "/>" ? " />" : ">"}`);
         filled = rendered.body ? fillSlots(rendered.body, markup, instance, budget) : "";
       } else {
+        if (usage && definition.slots)
+          recordSlotInstance(usage, definition as ComponentDefinition & { slots: NonNullable<ComponentDefinition["slots"]> }, instance);
         filled = fillSlots(definition.body, markup, instance, budget);
       }
       const expanded = expand(filled, [...stack, name], depth + 1);
@@ -1010,11 +1156,13 @@ async function expandBoundedComponents(
       // Charge construction before allocating; the exact output is checked below.
       budget.output(Buffer.byteLength(result) + Buffer.byteLength(expanded));
       if (location.startTag && location.endTag) {
-        result = definition.template
-          ? `${result.slice(0, location.startTag.startOffset)}${startTag}${expanded}${result.slice(location.endTag.startOffset)}`
-          : `${result.slice(0, location.startTag.endOffset)}${expanded}${result.slice(location.endTag.startOffset)}`;
+        result = `${result.slice(0, location.startTag.startOffset)}${startTag}${expanded}${result.slice(location.endTag.startOffset)}`;
       } else {
-        startTag = (definition.template ? startTag : result.slice(location.startOffset, location.endOffset)).replace(/\/\s*>$/, ">");
+        // A plain definition's unclosed instance keeps the shape it always had,
+        // marked as an instance like any other.
+        if (!definition.template)
+          startTag = location.startTag ? `${startTag}${result.slice(location.startTag.endOffset, location.endOffset)}` : result.slice(location.startOffset, location.endOffset);
+        startTag = startTag.replace(/\/\s*>$/, ">");
         result = `${result.slice(0, location.startOffset)}${startTag}${expanded}</${instance.tagName}>${result.slice(location.endOffset)}`;
       }
       if (Buffer.byteLength(result, "utf8") > MAX_EXPANSION_BYTES) {
@@ -1025,7 +1173,7 @@ async function expandBoundedComponents(
   };
 
   const expandedEntry = expand(entry, [], 0);
-  if (usage) usage.templated = entryDeclared !== null || work.instances > 0;
+  if (usage) usage.templated = entryDeclared !== null || work.templated === true;
   const usedNames = [...used].sort();
   const carriesLinks = usedNames.some((name) => definitions.get(name)?.template?.links.length);
   const html = injectComponentStyles(

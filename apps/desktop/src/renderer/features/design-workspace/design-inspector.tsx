@@ -160,7 +160,7 @@ import {
   type DesignLayoutAction,
   type DesignLayoutFieldOptions,
 } from "./design-layout-values";
-import { blockingDesignLintReason } from "./design-lint-summary";
+import { blockingDesignLintReason, frameBlockingDesignLintErrors } from "./design-lint-summary";
 import { beginDesignPointerGesture } from "./design-pointer-gesture";
 import { DesignStyleEditor } from "./design-style-editor";
 import {
@@ -1338,7 +1338,7 @@ const InspectorStyleField = React.memo(function InspectorStyleField({
           ? () => onDetachToken([property, ...(options?.linkedProperties ?? [])])
           : undefined
       }
-      disabled={disabled}
+      disabled={disabled || options?.disabled}
       applied={applied}
       motion={
         motionModeActive
@@ -1553,9 +1553,10 @@ export const DesignInspector = React.memo(function DesignInspector({
   const frameStyleTarget =
     frameSelected && !selectedNodeId && styleTargetNodeId !== null;
   const elementDetails = styleTargetNodeId ? details : null;
-  const errors =
-    lint?.violations.filter((violation) => violation.severity === "error") ??
-    [];
+  const errors = useMemo(
+    () => frameBlockingDesignLintErrors(lint?.violations ?? [], frame?.file),
+    [lint, frame?.file],
+  );
   const firstBlockingReason = errors[0]
     ? blockingDesignLintReason(errors[0])
     : null;

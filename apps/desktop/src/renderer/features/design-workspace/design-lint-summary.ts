@@ -74,6 +74,37 @@ export function lintReviewBadgeLabel(
   return `Review ${groups.length} ${groups.length === 1 ? "rule" : "rules"}`;
 }
 
+export function designLintFindingsByFrame(
+  violations: readonly DesignLintViolationWire[],
+): ReadonlyMap<string, DesignLintViolationWire[]> {
+  const byFrame = new Map<string, DesignLintViolationWire[]>();
+  for (const violation of violations) {
+    const rows = byFrame.get(violation.file);
+    if (rows) rows.push(violation);
+    else byFrame.set(violation.file, [violation]);
+  }
+  return byFrame;
+}
+
+const counted = (count: number, noun: string) => `${count} ${noun}${count === 1 ? "" : "s"}`;
+
+export function designFrameLintBadgeLabel(
+  violations: readonly DesignLintViolationWire[],
+): string {
+  const errors = violations.filter((violation) => violation.severity === "error").length;
+  const warnings = violations.length - errors;
+  const parts = [errors ? counted(errors, "error") : "", warnings ? counted(warnings, "warning") : ""].filter(Boolean);
+  return `${parts.join(" and ")} to review`;
+}
+
+export function frameBlockingDesignLintErrors(
+  violations: readonly DesignLintViolationWire[],
+  frameFile: string | undefined,
+): DesignLintViolationWire[] {
+  if (!frameFile) return [];
+  return violations.filter((violation) => violation.severity === "error" && violation.file === frameFile);
+}
+
 /** Name the first exact blocking location in compact button/alert copy. */
 export function blockingDesignLintReason(
   violation: DesignLintViolationWire,

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { DesignRuntimeNodeDetails } from "@zeros/protocol/design-runtime";
 
 import {
+  designLayoutAbsolutePosition,
   designLayoutActionUpdates,
   designLayoutConstraint,
   designLayoutPlacedByParent,
@@ -209,5 +210,84 @@ describe("Place freely", () => {
     const updates = designLayoutActionUpdates([first, second, third], { type: "place-freely" });
     expect(updates.get("parent")).toEqual({ position: "relative" });
     expect(["first", "second", "third"].map((id) => updates.get(id)?.top)).toEqual(["0px", "60px", "120px"]);
+  });
+});
+
+describe("Absolute position", () => {
+  const inFlex = (
+    oid: string,
+    styles: Record<string, string> = {},
+    position: "inline" | "element" = "inline",
+  ) => {
+    const layer = node(
+      { "--zeros-layout-x": "start", "--zeros-layout-y": "start", ...styles },
+      { parentDisplay: "flex", parentPosition: "relative", isContainingBlock: true },
+    );
+    layer.oid = oid;
+    layer.authoredStyles = {
+      position: { origin: position === "inline" ? "inline" : "frame", scope: position, value: "absolute" },
+    };
+    return layer;
+  };
+  const flow = (oid: string) => {
+    const layer = flowChild("relative");
+    layer.oid = oid;
+    return layer;
+  };
+
+  it("is offered to layers of an auto layout parent, and reads ticked, unticked or mixed", () => {
+    expect(designLayoutAbsolutePosition([flow("a")])).toBe("off");
+    expect(designLayoutAbsolutePosition([inFlex("a")])).toBe("on");
+    expect(designLayoutAbsolutePosition([inFlex("a"), flow("b")])).toBe("mixed");
+    // A free layout already places every child where it is drawn.
+    expect(designLayoutAbsolutePosition([node()])).toBeNull();
+    expect(designLayoutAbsolutePosition([inFlex("a"), node()])).toBeNull();
+    expect(designLayoutAbsolutePosition([node({}, { parentId: undefined })])).toBeNull();
+  });
+
+  it("unticked, gives the layer back to the auto layout, which places it now, and keeps its size", () => {
+    const updates = designLayoutActionUpdates([inFlex("child")], { type: "join-auto-layout" });
+    expect([...updates.keys()]).toEqual(["child"]);
+    expect(updates.get("child")).toEqual({
+      position: null,
+      left: null,
+      top: null,
+      right: null,
+      bottom: null,
+      "--zeros-layout-x": null,
+      "--zeros-layout-y": null,
+    });
+  });
+
+  it("unticked, overrides a stylesheet that makes the layer absolute, and stays the box its own absolute layers sit in", () => {
+    const updates = designLayoutActionUpdates([inFlex("child", {}, "element")], { type: "join-auto-layout" });
+    // Removing the layer's own declaration would leave the rule's absolute.
+    expect(updates.get("child")).toMatchObject({ position: "relative", left: null, top: null });
+  });
+
+  it("unticked, overrides the rule its own absolute replaced, and the rule's offsets", () => {
+    const layer = inFlex("child");
+    layer.authoredStyles = {
+      position: { origin: "inline", scope: "inline", value: "absolute", replaced: { origin: "frame", scope: "element", value: "absolute", selector: ".pin" } },
+      left: { origin: "inline", scope: "inline", value: "10px" },
+      top: { origin: "frame", scope: "element", value: "4px", selector: ".pin" },
+    };
+    expect(designLayoutActionUpdates([layer], { type: "join-auto-layout" }).get("child")).toMatchObject({
+      position: "relative", left: null, top: "auto", right: null, bottom: null,
+    });
+    // Over a rule that keeps the layer in the flow, removing its own is enough.
+    layer.authoredStyles = {
+      position: { origin: "inline", scope: "inline", value: "absolute", replaced: { origin: "frame", scope: "element", value: "relative", selector: ".card" } },
+    };
+    expect(designLayoutActionUpdates([layer], { type: "join-auto-layout" }).get("child")).toMatchObject({ position: null });
+  });
+
+  it("ticks or unticks only the layers not already there", () => {
+    const selection = [inFlex("placed"), flow("flowing")];
+    const ticked = designLayoutActionUpdates(selection, { type: "place-freely" });
+    expect([...ticked.keys()]).toEqual(["flowing"]);
+    expect(ticked.get("flowing")).toMatchObject({ position: "absolute" });
+    const unticked = designLayoutActionUpdates(selection, { type: "join-auto-layout" });
+    expect([...unticked.keys()]).toEqual(["placed"]);
   });
 });

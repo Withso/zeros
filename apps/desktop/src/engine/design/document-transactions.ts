@@ -455,14 +455,45 @@ async function readDesignWebDocumentStateUnlocked(
     }
   }
   const canvas = await readCanvas(workspacePath);
-  const components = [...canvas.foundation.components];
+  const foundation = deriveDesignFoundation(canvas.foundation, Object.keys(files));
+  const meta = readFrameMeta(document, file, canvas);
+  const geometry = canvas.frames[file] ?? {
+    x: 0,
+    y: 0,
+    w: meta.width,
+    h: meta.height,
+    z: 0,
+  };
+  return createDesignWebDocumentState({
+    documentId: designWebDocumentId(file),
+    entryFile: file,
+    files,
+    manifest: foundation,
+    frames: {
+      [file]: {
+        x: geometry.x,
+        y: geometry.y,
+        width: geometry.w,
+        height: geometry.h,
+        z: geometry.z,
+      },
+    },
+  });
+}
+
+/** Component files the canvas does not list are read as components named after their file. */
+function deriveDesignFoundation(
+  canvasFoundation: CanvasDocument["foundation"],
+  sourceFiles: readonly string[],
+): DesignTransactionJournal["foundation"] {
+  const components = [...canvasFoundation.components];
   const registeredComponentFiles = new Set(
     components.map((component) => component.file),
   );
   const registeredComponentIds = new Set(
     components.map((component) => component.id),
   );
-  for (const componentFile of Object.keys(files)
+  for (const componentFile of sourceFiles
     .filter((sourceFile) => sourceFile.startsWith("components/"))
     .sort(comparePortableNames)) {
     if (registeredComponentFiles.has(componentFile)) continue;
@@ -490,33 +521,31 @@ async function readDesignWebDocumentStateUnlocked(
       slots: [],
     });
   }
-  const foundation = migrateDesignFoundationManifest({
-    ...canvas.foundation,
+  return migrateDesignFoundationManifest({
+    ...canvasFoundation,
     components,
   });
-  const meta = readFrameMeta(document, file, canvas);
-  const geometry = canvas.frames[file] ?? {
-    x: 0,
-    y: 0,
-    w: meta.width,
-    h: meta.height,
-    z: 0,
-  };
-  return createDesignWebDocumentState({
-    documentId: designWebDocumentId(file),
-    entryFile: file,
-    files,
-    manifest: foundation,
-    frames: {
-      [file]: {
-        x: geometry.x,
-        y: geometry.y,
-        width: geometry.w,
-        height: geometry.h,
-        z: geometry.z,
-      },
-    },
-  });
+}
+
+/**
+ * The foundation canvas.json should hold after a transaction. When reading the
+ * current canvas already derives the transaction's manifest, the file keeps its
+ * own entries, so an unrelated edit never registers unlisted component files.
+ */
+function persistedDesignFoundation(
+  canvasFoundation: CanvasDocument["foundation"],
+  manifest: DesignTransactionJournal["foundation"],
+): CanvasDocument["foundation"] {
+  try {
+    const derived = deriveDesignFoundation(
+      canvasFoundation,
+      manifest.components.map((component) => component.file),
+    );
+    if (JSON.stringify(derived) === JSON.stringify(manifest)) return canvasFoundation;
+  } catch {
+    // An unlisted file whose id conflicts cannot be derived; persist the manifest.
+  }
+  return manifest;
 }
 
 function parseDesignTransactionJournal(
@@ -657,7 +686,7 @@ async function applyDesignTransactionJournalUnlocked(
         );
     }
   }
-  canvas.foundation = journal.foundation;
+  canvas.foundation = persistedDesignFoundation(canvas.foundation, journal.foundation);
   canvas.frames[journal.entryFile] = {
     ...canvas.frames[journal.entryFile],
     ...journal.geometry,
@@ -1018,7 +1047,7 @@ export async function commitDesignWebDocumentState(
     const canvasBefore = await readCanvas(workspacePath);
     const canvasAfter = {
       ...canvasBefore,
-      foundation: normalized.manifest,
+      foundation: persistedDesignFoundation(canvasBefore.foundation, normalized.manifest),
       frames: {
         ...canvasBefore.frames,
         [file]: {

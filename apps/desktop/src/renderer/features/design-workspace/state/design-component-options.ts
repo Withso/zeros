@@ -160,6 +160,12 @@ export function commitDesignInstanceAttributes(
     ({ operationId: `set-attribute-${index}`, type: "node.set-attribute", nodeId, attribute, value }))));
 }
 
+/** Set the text a plain component's instance fills its default slot with:
+ * its host's own text. */
+export function commitDesignInstanceText(workspaceId: string, frame: { file: string; sourceVersion: string }, nodeId: string, text: string) {
+  return applyDesignEditCached(workspaceId, frame, edit("Set text", [{ operationId: "set-text", type: "node.set-text", nodeId, text }]));
+}
+
 let messages = 0;
 
 /** One frame's preview while a row is adjusted. The latest values go to the

@@ -434,6 +434,10 @@ export const designFrameInstancesSchema = z.object({
      * component error instead. Such a host has no entry in `components` and
      * renders as an empty element. */
     missing: z.literal(true).optional(),
+    /** A plain component's instance whose default slot it fills with text
+     * alone: that text, as written (decoded). Absent when it places elements
+     * there, or its component has no default slot. */
+    text: z.string().max(LIMITS.attributeValue).optional(),
   }).strict(), DESIGN_FRAME_INSTANCE_LIMITS.hosts),
   /** What the frame shows when some instance's values did not apply. */
   notApplied: notAppliedSchema.optional(),

@@ -17,6 +17,8 @@ import { designDirectoryEntry } from "../metadata";
 import { getWorkspaceDesignApi, DesignDraftStore } from "../design-api";
 import { DesignRequestStore } from "../request-store";
 import { withDesignWorkspaceMutation } from "../document-write-lock";
+import { resetDesignRuntimeAuditsForTests, setDesignRuntimeAudit } from "../runtime-audits";
+import { readDesignFrameRenderIdentity } from "../document";
 import type { DesignTransaction } from "@zeros/design-core";
 
 describe("Code-session Design tools", () => {
@@ -159,6 +161,17 @@ describe("Code-session Design tools", () => {
       });
     },
   );
+
+  it("lints with the canvas's audit of the frame's current revision", async () => {
+    resetDesignRuntimeAuditsForTests();
+    const { sourceVersion } = await readDesignFrameRenderIdentity(root, frame);
+    setDesignRuntimeAudit({ workspacePath: root, frame, sourceVersion, warnings: [
+      { ruleId: "overflow", severity: "warning", message: "Text overflows its box.", file: frame, line: 1, column: 1, oid: nodeId, fix: "Let it wrap." },
+    ] });
+    const lint = await call("design_lint", { documentId: `frame:${frame}`, expectedRevision: revision });
+    expect(lint.violations).toEqual(expect.arrayContaining([expect.objectContaining({ ruleId: "overflow", oid: nodeId })]));
+    resetDesignRuntimeAuditsForTests();
+  });
 
   it("completes list/open/propose/apply/render through MCP without a renderer", async () => {
     const server = new DesignAgentMcpServer({ handler, token: handler.token });

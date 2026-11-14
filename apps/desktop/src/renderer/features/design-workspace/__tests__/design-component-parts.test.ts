@@ -5,6 +5,7 @@ import {
   designComponentPartHost,
   designFrameIsComponent,
   designComponentTextLock,
+  designLayerRowKind,
   isDesignComponentPartNodeId,
   refuseDesignComponentPartWrite,
 } from "../state/design-component-parts";
@@ -53,6 +54,15 @@ describe("where the canvas marks a component", () => {
     },
   };
   const mainTitle = (file: string) => (file === "home/composer.html" ? "Chat composer" : undefined);
+
+  it("tells Layers which rows are instances and which are their read-only parts", () => {
+    expect(designLayerRowKind({ instances }, "inst-b")).toBe("instance");
+    expect(designLayerRowKind({ instances }, designComponentPartNodeId("inst-b", "chip"))).toBe("part");
+    // A host whose component is gone is not offered as an instance.
+    expect(designLayerRowKind({ instances }, "inst-c")).toBe("layer");
+    expect(designLayerRowKind({ instances }, "constructor")).toBe("layer");
+    expect(designLayerRowKind({}, "inst-b")).toBe("layer");
+  });
 
   it("marks a main component frame by its own record, and nothing else as a frame", () => {
     expect(designFrameIsComponent({ component })).toBe(true);

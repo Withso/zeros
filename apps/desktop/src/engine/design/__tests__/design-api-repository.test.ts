@@ -484,7 +484,7 @@ describe("filesystem Design API repository", () => {
     ).rejects.toMatchObject({ code: "ENOENT" });
   });
 
-  it("adopts legacy component files into the manifest on the next transaction", async () => {
+  it("reads an unlisted component file without writing it into canvas.json on an unrelated edit", async () => {
     const frame = await createDesignFrame(root, { title: "Legacy component" });
     await writeFile(
       path.join(root, DESIGN_DIRECTORY_NAME, "components", "legacy-card.html"),
@@ -501,6 +501,8 @@ describe("filesystem Design API repository", () => {
         slots: [],
       },
     ]);
+    const canvasPath = designDocumentMetadataPath(root, DESIGN_DIRECTORY_NAME);
+    const canvasBefore = await readFile(canvasPath, "utf8");
     const nodeId = /<main data-oid="([^"]+)"/.exec(
       current.files[frame.file]!,
     )?.[1];
@@ -534,13 +536,10 @@ describe("filesystem Design API repository", () => {
       current.revision,
       outcome.state,
     );
-    const canvas = parseCanvasFixture(
-      await readFile(
-        designDocumentMetadataPath(root, DESIGN_DIRECTORY_NAME),
-        "utf8",
-      ),
-    ) as { foundation?: { components?: Array<{ id?: string }> } };
-    expect(canvas.foundation?.components?.[0]?.id).toBe("legacy-card");
+    expect(await readFile(canvasPath, "utf8")).toBe(canvasBefore);
+    const committed = await readDesignWebDocumentState(root, frame.file);
+    expect(committed.revision).toBe(outcome.state.revision);
+    expect(committed.manifest.components.map((component) => component.id)).toEqual(["legacy-card"]);
   });
 
   it("does not delete a shared component still instantiated by another frame", async () => {

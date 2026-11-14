@@ -460,7 +460,7 @@ function sameTree(
       a.oid !== b.oid || a.tag !== b.tag || a.name !== b.name ||
       a.layerName !== b.layerName || a.text !== b.text || a.visible !== b.visible ||
       a.display !== b.display || a.flexDirection !== b.flexDirection ||
-      !sameTree(a.children, b.children)
+      a.absolute !== b.absolute || !sameTree(a.children, b.children)
     ) return false;
   }
   return true;

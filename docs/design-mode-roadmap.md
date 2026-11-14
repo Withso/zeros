@@ -697,7 +697,11 @@ execute the emitted shell prefix, including paths with spaces and quotes.
 Optional
 `--revision` requires an exact render revision; omit it after an edit to validate
 and capture current source. Validation reports existing file/line diagnostics
-without healing source and exits nonzero for errors. Capture writes an ordinary
+without healing source and exits nonzero for errors. It also reports, as
+warnings, the canvas's runtime audits (contrast, overflow, spacing scale) of
+the frame's current source when the open canvas has audited that exact
+generation (`runtime-audits.ts`); the agent's `design_lint` reads the same
+rows. Audit warnings never change the exit status. Capture writes an ordinary
 PNG and reports revision, dimensions, capture time and reduced-motion behavior.
 Fractional frame dimensions round up to whole CSS viewport pixels. Frames above
 2048 pixels retain that layout viewport (up to the canvas's 16384-pixel bound)
@@ -1147,7 +1151,9 @@ records pass unknown fields through:
   directives (`@tailwind`, `@source`, `@plugin`, `@config`, `@apply`, …),
   lifts Tailwind `@theme` custom properties into `:root`, drops comments, and
   rewrites each `themes` selector to `[data-zd-theme="<name>"]` so the canvas
-  Themes control applies it. A `themes` value of `@media (prefers-color-scheme:
+  Themes control applies it. Only the whole class is rewritten: `.dark`
+  leaves `.darker` and an escaped name that starts with it, such as
+  Tailwind's `.dark\:bg-zinc-900`, as they are. A `themes` value of `@media (prefers-color-scheme:
   dark|light)` instead rewrites those media blocks to rules scoped by
   `:where([data-zd-theme="<name>"])`, which keeps specificity; Tailwind's
   nested default dark variant becomes `:where(…) &`. Any other `@media` mapping
@@ -1228,6 +1234,9 @@ records pass unknown fields through:
   unchanged.
   The render generation hashes the result, so an edit to a source file gives
   its frames new generations through the ordinary worktree event.
+- Lint's `unknown-token` warning reads `var(--name)` only in markup and CSS:
+  text and comments outside `<style>` are prose, so a sentence that names a
+  token is not a finding (`sourceWithoutProse`).
 - Lint's `unknown-token` warning counts a frame's `var(--name)` as known when
   `tokens.css`, Design-folder CSS, the frame's own styles or any source the
   frame receives (its `styles` list, App fonts included) declares it. A
@@ -1239,7 +1248,9 @@ records pass unknown fields through:
   places are known too (`designFrameOptionPropertyNames`); text, choice and
   boolean options have none.
 - Lint's `unknown-class` warning reports each distinct class on the frame's
-  own elements that none of its available styles defines. Recognition is
+  own elements that none of its available styles defines. A class that
+  contains a template hole (`badge--{{ tone }}`) names its class only once
+  drawn and is skipped. Recognition is
   case-sensitive, decodes CSS escapes, and includes selectors inside
   functional pseudo-classes, the frame's and expanded components' `<style>`
   elements, linked Design CSS, and the full unpruned imported sources that
@@ -1510,6 +1521,13 @@ or renderer owners.
 - Plain HTML inspection derives missing/duplicate markers without writing source.
   An explicit visual or semantic edit persists required identity repairs with
   minimal source changes. A source offset is location metadata, never identity.
+  A derived marker (`nativeDesignIdentities`, shared by the engine and
+  design-web) hashes the element's tag and sibling index at each level plus its
+  own attributes and direct text, computed only for elements without a usable
+  `data-oid`. A style, text or attribute edit therefore writes only the edited
+  layer's `data-oid`; adding, moving or removing layers writes every missing one
+  first. After an outside edit a shifted layer gets a new marker, never its
+  neighbour's, so a held selection is dropped rather than moved.
 - Layers follow the rendered (flat) tree. Content of a declarative shadow root
   (`<template shadowrootmode>`, common in markup serialized from web
   components) renders as its host's layers. design-web's `shadow.ts` holds the
@@ -1742,6 +1760,29 @@ URLs resolve from its own file. An instance's inner elements carry
 `data-zd-part` (the main frame's `data-oid`, or a `components/` file's
 `data-zid`), with `#n` on repeats after the first; on a main frame the first
 repeat keeps its `data-oid` and the others carry `data-zd-copy`.
+A component's own `<style>` elements style only its instances: the engine
+wraps each selector as `:is(S):where(zd-<name>, zd-<name> *)` (a selector
+naming the host keeps matching it) with `scopeDesignComponentStyle`, so a
+component's `.title` rule never restyles another frame's `.title`. A
+pseudo-element after a combinator (`.field ::placeholder`) keeps its subject
+as `:where(*)` there. `@scope` rules are copied unscoped. The
+runtime reads the selector back as authored for Style origins
+(`authoredComponentSelector`).
+
+A plain `components/<name>.html` without a declaration, whose markup reads
+its host through `<slot data-zd-attr="…">` and a default `<slot>`, is a
+slot component. Its instances are instances too: each carries
+`data-zd-instance`, its `data-zid` elements become `data-zd-part` (when the
+definition declares them), each `data-zd-attr` name that is a valid option
+name becomes a text option whose default is the slot's fallback, and a host
+whose default-slot content is text alone offers that text as a Text row in
+Options (`node.set-text` on the host). A reserved attribute such as `title`
+is not offered. Instances are recorded at any depth when the host has its own
+`data-oid`, so a card placed inside another component's slot is one too.
+A `components/` file `meta/canvas.json` does not list is still read as a
+component named after its file; an edit that changes nothing about the
+components keeps `canvas.json`'s own list (`persistedDesignFoundation`), so
+saving a frame never registers those files as a side effect.
 
 Budgets, on top of the expander's own: 64 options, 32 variants and 32 derived
 values per component, 16 choices; text up to 2,048 characters; an expression of
@@ -1860,7 +1901,7 @@ template" for a loop's own name; `component.boundText` in the record), and a
 click on a repeated copy selects its source layer.
 
 A frame's prepared record also names the instances it places at its top
-level (`instances`: their components' declarations and reach, each host's
+level, and deeper hosts that carry their own `data-oid` (`instances`: their components' declarations and reach, each host's
 option attributes and `zd-variant`, whether its values applied, and a key
 that changes with any of it; at most 32 components and 256 hosts). One
 selected instance shows "Instance of …" under its header, Edit main (or Open
@@ -1879,7 +1920,11 @@ instance and Edit main (the main with the layer of the same id) sit under the
 header, a click inside the instance picks another part and Escape or a click
 outside leaves it. Every node write the workspace cache sends refuses a part
 before anything is sent, and the engine finds no such layer either. Layers
-keeps an instance as one row; an agent's selection names its host.
+names an instance by its component (an authored layer name wins) with the
+component mark, and, where the runtime offers `getComponentPartAtLoc`, lists
+its parts beneath it; elements without ids inside an instance pass their
+children through. A part row has no eye, rename or visibility actions: the
+main component owns them. An agent's selection names its host.
 
 A host's record also lists attributes that name no option (`ignored`, as
 written), shown in its Options section as one wrapped warning note each, and marks a
@@ -1896,6 +1941,13 @@ how many instances in how many frames use it), and the canvas confirms with
 mains nobody places still delete at once. Undo restores the frame at its
 place in the page's frame order and among the canvas file's frame entries, so
 `meta/canvas.json` returns byte for byte.
+
+Each frame's label also carries a count of that frame's lint findings
+(`data-design-frame-lint`, yellow for warnings, red when any is an error),
+read from the page's lint report, runtime audits included. Clicking it
+opens the findings grouped by rule, each rule's in line order and bounded to
+its first 20 with a count of the rest; a finding on a layer selects that layer.
+A frame without findings shows nothing.
 
 The canvas marks components by the same record that titles the header
 Component: a main component's frame label shows the Component glyph before
@@ -2525,11 +2577,19 @@ a frame's own document (`canvas-items-exports.test.ts`).
   Align horizontally / Align vertically (within its parent), two constraint
   selects (Left, Right, Center, Left and right, Scale; Top, Bottom, Center,
   Top and bottom, Scale) beside a pinned-edges diagram, and Stacking order
-  (`z-index`). A layer its parent's auto layout places shows "Placed by its
-  parent's auto layout." and Place freely instead: one undoable update that
-  writes `position: absolute` at the current box (left/top less margins,
-  border-box width/height, start markers) and makes the parent `relative`
-  only when it is static. A canvas frame's root has no constraints. Fit to
+  (`z-index`). A layer of a parent with auto layout shows an Absolute
+  position checkbox. Unticked, auto layout places the layer and X and Y are
+  locked. Ticking it is one undoable update that writes `position: absolute`
+  at the current box (left/top less margins, border-box width/height, start
+  markers) and makes the parent `relative` only when it is static. Unticking
+  removes the layer's position, insets and markers. When a stylesheet also makes
+  it absolute, including under its own inline value, it writes `relative` (which
+  stays the box its absolute children sit in) and `auto` for the rule's insets,
+  so auto layout places it where it now
+  belongs; its size stays. Several layers that differ read Mixed, and a
+  click ticks the ones not yet absolute. In Layers, an absolute layer of an
+  auto layout parent shows the absolute mark (`absolute` on the runtime's
+  tree node) in place of its type icon. A canvas frame's root has no constraints. Fit to
   content (a free-layout container with children) sits in the header. With
   several layers selected, each aligns or constrains within its own parent,
   and a constraint that differs reads Mixed. Scale stores left/top and

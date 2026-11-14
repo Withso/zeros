@@ -102,17 +102,32 @@ export function designMissingComponentOf(frame: { instances?: DesignFrameInstanc
   return host.missing ? host.component : null;
 }
 
-/** A layer's name in Layers and in the selection path. An instance of a
- * component that is gone is named by the component it asks for: it renders
- * nothing, so the generic "Frame" would say nothing about it. A frame still
- * revalidating answers from the generation it shows. */
+/** The frame a layer row reads instances from: a frame still revalidating
+ * answers from the generation it shows. */
+const presentedInstances = (frame: object) =>
+  ((Object.hasOwn(frame, "instances") ? frame : (frame as { previous?: object }).previous ?? frame) as { instances?: DesignFrameInstances });
+
+/** A layer's name in Layers and in the selection path. An instance is named
+ * by its component unless a person named the layer; one whose component is
+ * gone is named by the component it asks for, as it renders nothing and the
+ * generic "Frame" would say nothing about it. */
 export function designLayerDisplayName(
   frame: object,
   node: Parameters<typeof designRuntimeLayerDisplayName>[0] & { oid: string },
+  mainTitle: (file: string) => string | undefined = () => undefined,
 ): string {
-  const presented = (Object.hasOwn(frame, "instances") ? frame : (frame as { previous?: object }).previous ?? frame) as { instances?: DesignFrameInstances };
+  const presented = presentedInstances(frame);
   const missing = designMissingComponentOf(presented, node.oid);
-  return missing ? `zd-${missing}` : designRuntimeLayerDisplayName(node);
+  if (missing) return `zd-${missing}`;
+  const instance = node.layerName?.trim() ? null : designComponentInstanceMark(presented, node.oid, mainTitle);
+  return instance ? instance.title : designRuntimeLayerDisplayName(node);
+}
+
+/** What a Layers row is: an instance of a component, one of an instance's
+ * parts (read-only: it is neither renamed nor hidden), or any other layer. */
+export function designLayerRowKind(frame: object, nodeId: string): "instance" | "part" | "layer" {
+  if (isDesignComponentPartNodeId(nodeId)) return "part";
+  return designComponentInstanceMark(presentedInstances(frame), nodeId, () => undefined) ? "instance" : "layer";
 }
 
 const NO_MISSING: readonly string[] = Object.freeze([]);
