@@ -5,5 +5,5 @@
   "fixedBy": "dbe817d4cb0753a45cb903b8ac144ea68960bcf0",
   "symptom": "The dynamic regex guard missed the escaped history.mjs expression on a noisy CI runner. Three inflated baseline measurements hid its growth; isolated large-input delays could also flag a linear scan.",
   "rule": "Keep the native escaped-pattern corpus and timeout containment. Each input shape has at most seven paired 5,000/20,000-character scans with four agreeing votes, tolerating any three finite timing-outlier pairs when clean pairs agree, not arbitrary sustained noise. Growth must exceed 8x and 30 ms; a 2 s/4 s VM timeout rejects immediately. Restore the single min-of-three baseline growth decision.",
-  "check": "pnpm test:git scripts/__tests__/zstack-linear-regex.test.ts -t 'noisy|timing outliers'"
+  "check": "pnpm test:git scripts/__tests__/zstack-linear-regex.test.ts"
 }
