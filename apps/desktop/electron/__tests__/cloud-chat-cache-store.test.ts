@@ -368,6 +368,34 @@ describe("main-owned cloud chat SQLite cache", () => {
     expect(first.metadata(key)?.revision).toBe(1);
   });
 
+  it("a cached read takes no write lock: it returns the confirmed snapshot while a peer holds the writer", () => {
+    const root = directory(), file = path.join(root, "cloud-cache.db"), store = open(root);
+    store.putRange(key, range());
+    const writer = new Database(file);
+    writer.exec("BEGIN IMMEDIATE");
+    try {
+      expect(store.readTail(key, 200)?.rows).toEqual(range().rows);
+      expect(store.readRange(key, 0, 4)?.revision).toBe(1);
+    } finally { writer.exec("ROLLBACK"); writer.close(); }
+  });
+
+  it("eviction still honours read recency kept in memory between mutations", () => {
+    const root = directory(), file = path.join(root, "cloud-cache.db");
+    const probe = open(root); probe.putRange(key, range());
+    const raw = new Database(file, { readonly: true });
+    const one = (raw.prepare("SELECT bytes FROM chats").get() as { bytes: number }).bytes; raw.close(); probe.close();
+    fs.rmSync(root, { recursive: true, force: true }); fs.mkdirSync(root);
+    let now = 1;
+    const store = open(root, { now: () => now, limits: { channelBytes: Math.floor(one * 2.5) } });
+    const a = { ...key, chatId: "a" }, b = { ...key, chatId: "b" }, c = { ...key, chatId: "c" };
+    store.putRange(a, range()); now = 2; store.putRange(b, range());
+    now = 3; expect(store.readTail(a, 200)).not.toBeNull();
+    now = 4; store.putRange(c, range());
+    // b is the least recently read: it goes; a, read at 3, stays.
+    expect(store.metadata(b)).toBeNull();
+    expect(store.metadata(a)?.revision).toBe(1);
+  });
+
   it("binds SQLite to the held original: a pathname swapped only during the native open is refused", () => {
     const root = directory(), file = path.join(root, "cloud-cache.db"), first = open(root);
     first.putRange(key, range()); first.close();

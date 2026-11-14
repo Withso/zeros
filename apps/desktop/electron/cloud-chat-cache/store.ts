@@ -89,6 +89,7 @@ export class CloudChatCacheStore {
   private readonly now: () => number;
   private closed = false;
   private readonly openChats = new Map<string, string>();
+  private readonly recency = new Map<string, number>();
 
   private readonly openNative: (filename: string) => Database.Database;
 
@@ -194,11 +195,19 @@ export class CloudChatCacheStore {
   }
   private chat(key: string): Chat | undefined { return this.database().prepare("SELECT * FROM chats WHERE key=?").get(key) as Chat | undefined; }
   private segments(key: string): Segment[] { return this.database().prepare("SELECT start_index,end_index,opening FROM segments WHERE chat_key=? ORDER BY start_index").all(key) as Segment[]; }
+  /** Inside a write transaction: persist the read recency gathered since the last mutation (eviction orders by it). */
+  private flushRecency(): void {
+    if (!this.recency.size) return;
+    const update = this.database().prepare("UPDATE chats SET last_read=max(last_read,?) WHERE key=?");
+    for (const [key, at] of this.recency) update.run(at, key);
+    this.recency.clear();
+  }
+
   private transaction(work: () => void, preserve?: string): boolean {
     const db = this.database();
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
-        db.transaction(work).immediate();
+        db.transaction(() => { this.flushRecency(); work(); }).immediate();
         db.pragma("wal_checkpoint(TRUNCATE)");
         return true;
       } catch (error) {
@@ -213,9 +222,10 @@ export class CloudChatCacheStore {
   private reclaim(preserve: string): boolean {
     // SQLite's page overhead can fill the file before the payload budget does.
     const db = this.database(), protectedKeys = new Set([...this.openChats.values(), preserve]);
-    const ordered = db.prepare("SELECT key,bytes FROM chats ORDER BY last_read,key").all() as Array<{ key: string; bytes: number }>;
     let freed = 0;
     db.transaction(() => {
+      this.flushRecency();
+      const ordered = db.prepare("SELECT key,bytes FROM chats ORDER BY last_read,key").all() as Array<{ key: string; bytes: number }>;
       for (const chat of ordered) {
         if (protectedKeys.has(chat.key)) continue;
         db.prepare("DELETE FROM chats WHERE key=?").run(chat.key);
@@ -415,7 +425,9 @@ export class CloudChatCacheStore {
         ...(senders ? { senders } : {}) });
     } catch { this.forget(input); return null; }
     if (!result.success) { this.forget(input); return null; }
-    this.database().prepare("UPDATE chats SET last_read=? WHERE key=?").run(this.now(), key);
+    // Recency is kept in memory and written with the next mutation: a read never contends for the writer lock.
+    this.recency.delete(key); this.recency.set(key, this.now());
+    while (this.recency.size > 4096) this.recency.delete(this.recency.keys().next().value!);
     return result.data;
   }
 
