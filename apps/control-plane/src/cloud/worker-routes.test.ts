@@ -275,7 +275,7 @@ it("reports the committed login revision for poll repair and retains native hist
   expect(f.deps.store.markActive).toHaveBeenCalledTimes(1);
   const history = { t: "history", bootId: f.bootId, sequence: 1, chats: [{ id: "native-chat" }] };
   expect((await f.request("history", history)).status).toBe(200);
-  expect(f.deps.store.writeWorkerHistory).toHaveBeenCalledWith(f.token, f.bootId, 1, { chats: [{ id: "native-chat" }] });
+  expect(f.deps.store.writeWorkerHistory).toHaveBeenCalledWith(f.token, f.bootId, 1, { chats: [{ id: "native-chat" }] }, false);
   expect((await f.request("history", { ...history, chats: Array.from({ length: 501 }, () => ({ id: "x" })) })).status).toBe(400);
 });
 
@@ -512,4 +512,40 @@ it("negotiates history replacement only with supporting workers on both config c
     expect(legacyWorkerFrame.safeParse(legacy).success).toBe(true);
     expect((await (await f.request(path, body, { "x-zeros-worker-features": "history-replace-v1" })).json()).config.historyReplacement).toBe(1);
   }
+});
+
+it("negotiates digests only with both history capabilities on each configuration carrier", async () => {
+  const f = fixture();
+  f.deps.store.workerHistoryDigests = vi.fn(async () => ({ chats: [] }));
+  for (const [path, body] of [["hello", { bootId: f.bootId, protocol: 2, runtimeSha256: "a".repeat(64) }], ["config", undefined]] as const) {
+    for (const features of ["", "history-replace-v1", "history-digest-v1"]) {
+      const config = (await (await f.request(path, body, { "x-zeros-worker-features": features })).json()).config;
+      expect(config).not.toHaveProperty("historyDigest");
+    }
+    const config = (await (await f.request(path, body, { "x-zeros-worker-features": "history-replace-v1,history-digest-v1" })).json()).config;
+    expect(config).toMatchObject({ historyReplacement: 1, historyDigest: 1 });
+  }
+});
+
+it("validates digest reads without adding a separate worker-session lookup", async () => {
+  const f = fixture();
+  f.deps.store.workerHistoryDigests = vi.fn(async () => ({ chats: [] }));
+  const headers = { "x-zeros-worker-features": "history-replace-v1,history-digest-v1" };
+  expect((await f.request("history/digests", {})).status).toBe(404);
+  expect((await f.request("history/digests", { workspaceId: "foreign" }, headers)).status).toBe(400);
+  expect((await f.request("history/digests", {}, { ...headers, "x-zeros-worker-boot": "invalid" })).status).toBe(401);
+  expect(f.deps.store.workerHistoryDigests).not.toHaveBeenCalled();
+  expect(await (await f.request("history/digests", {}, headers)).json()).toEqual({ chats: [] });
+  expect(f.deps.store.workerHistoryDigests).toHaveBeenCalledExactlyOnceWith(f.token, f.bootId);
+  expect(f.deps.store.workerSession).not.toHaveBeenCalled();
+  vi.mocked(f.deps.store.workerHistoryDigests).mockResolvedValue(null);
+  expect((await f.request("history/digests", {}, headers)).status).toBe(401);
+});
+
+it("refuses unadvertised history digests before writing", async () => {
+  const f = fixture();
+  const input = { t: "history", bootId: f.bootId, sequence: 1, messages: { chatId: "chat", rows: [], replace: true, digest: "a".repeat(64) } };
+  for (const features of ["", "history-replace-v1", "history-digest-v1"])
+    expect((await f.request("history", input, { "x-zeros-worker-features": features })).status).toBe(400);
+  expect(f.deps.store.writeWorkerHistory).not.toHaveBeenCalled();
 });

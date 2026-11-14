@@ -2,7 +2,7 @@ import { Hono, type Context } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
 import { HttpError } from "../authz.js";
-import { CLOUD_V2_MAX_FRAME_BYTES, CloudV2WorkerActivitySchema, CloudV2WorkerHelloSchema, CloudV2WorkerHistorySchema, CloudV2WorkerTimingSchema, CloudV2RenewRequestSchema, CloudV2TurnLeaseRequestSchema, CloudV2TerminalLeaseRequestSchema, CloudV2ClientLeaseRequestSchema, CloudV2BootstrapLeaseRequestSchema, CloudV2RetiredRequestSchema, CloudV2BootCleanRequestSchema, ACTING_USER_FEATURE, type CloudV2ControlFrame } from "./contract.js";
+import { CLOUD_V2_MAX_FRAME_BYTES, CloudV2WorkerActivitySchema, CloudV2WorkerHelloSchema, CloudV2WorkerHistorySchema, CloudV2WorkerTimingSchema, CloudV2RenewRequestSchema, CloudV2TurnLeaseRequestSchema, CloudV2TerminalLeaseRequestSchema, CloudV2ClientLeaseRequestSchema, CloudV2BootstrapLeaseRequestSchema, CloudV2RetiredRequestSchema, CloudV2BootCleanRequestSchema, ACTING_USER_FEATURE, HISTORY_DIGEST_FEATURE, type CloudV2ControlFrame } from "./contract.js";
 import { emitCloudV2Timing, type CloudV2TimingRecord } from "./lifecycle.js";
 import type { CloudV2Store, CloudV2WorkerSession, CloudV2Workspace } from "./store.js";
 import { isCloudV2Token } from "./tokens.js";
@@ -42,7 +42,7 @@ export type CloudV2WorkerRouteDeps = {
     hello(token: string, bootId: string, runtime: string, capable: boolean, id: string): Promise<boolean>;
     setup(token: string, bootId: string, id: string, report: z.infer<typeof CloudV2SetupStatusSchema>): Promise<void>;
   };
-  store: Pick<CloudV2Store, "beginWorkerHello" | "acceptWorkerHello" | "workerSession" | "accessEpoch" | "loginRevision" | "markActive" | "writeWorkerHistory" | "failWorkerCheckout"> & Partial<Pick<CloudV2Store, "prompts" | "workerHelloIdentity" | "chatEdits" | "reportWorkerSetup">>;
+  store: Pick<CloudV2Store, "beginWorkerHello" | "acceptWorkerHello" | "workerSession" | "accessEpoch" | "loginRevision" | "markActive" | "writeWorkerHistory" | "failWorkerCheckout"> & Partial<Pick<CloudV2Store, "prompts" | "workerHelloIdentity" | "chatEdits" | "reportWorkerSetup" | "workerHistoryDigests">>;
   runtimeSha256: string;
   execution?: CloudExecutionContexts;
   runtimeSha256ForWorkspace?(workspace: CloudV2Workspace): Promise<string>;
@@ -139,7 +139,7 @@ async function configuration(deps: CloudV2WorkerRouteDeps, workspace: CloudV2Wor
     if (!after || !sameMaterialAuthority(before, after)) throw unauthorized();
     const revision = before.loginRevision;
     if (revision === after.loginRevision) {
-      const { api, agentLogins, agentModels, localCommands: _localCommands, localCommandReason: _localCommandReason, notifyUser: _notifyUser, mcpServers, githubPullRequests, githubUserTokens, gitIdentity: _gitIdentity, gitIdentitySource: _gitIdentitySource, agentInteractions, codeReview, historyReplacement: _historyReplacement, environment, runtimeUpdate: _runtimeUpdate, pushSignals, ...legacy } = config;
+      const { api, agentLogins, agentModels, localCommands: _localCommands, localCommandReason: _localCommandReason, notifyUser: _notifyUser, mcpServers, githubPullRequests, githubUserTokens, gitIdentity: _gitIdentity, gitIdentitySource: _gitIdentitySource, agentInteractions, codeReview, historyReplacement: _historyReplacement, historyDigest: _historyDigest, environment, runtimeUpdate: _runtimeUpdate, pushSignals, ...legacy } = config;
       if (environment && !features.has("workspace-environment-v1"))
         throw new HttpError(409, "cloud_environment_runtime_required", "Update the cloud runtime before opening this workspace.");
       const { setup, setupScript, baseCommit, github, ...workspaceConfig } = config.workspace;
@@ -161,6 +161,7 @@ async function configuration(deps: CloudV2WorkerRouteDeps, workspace: CloudV2Wor
         ...(features.has("runtime-update-v1") && deps.runtimeUpdates ? { runtimeUpdate: 1 } : {}),
         ...(features.has("push-signals-v1") && deps.promptOutbox && pushSignals === 1 ? { pushSignals } : {}),
         loginRevision: revision, ...(features.has("history-replace-v1") ? { historyReplacement: 1 } : {}),
+        ...(features.has("history-replace-v1") && features.has(HISTORY_DIGEST_FEATURE) && deps.store.workerHistoryDigests ? { historyDigest: 1 } : {}),
         ...workerGitIdentity(config, features.has("git-identity-v1"), features.has("creator-commit-identity-v1")),
         ...(features.has("code-review-v1") && codeReview ? { codeReview } : {}),
         ...(features.has("github-user-token-v1") && githubUserTokens === 1 ? { githubUserTokens } : {}),
@@ -394,9 +395,22 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
     if (input.bootId !== auth.bootId) throw unauthorized();
     if (input.chatEditAcks !== undefined && !workerFeatures(c).has("chat-edit-v1"))
       throw new HttpError(400, "invalid_request", "Unsupported worker history fields");
+    if (input.messages?.digest !== undefined && (!workerFeatures(c).has(HISTORY_DIGEST_FEATURE) || !workerFeatures(c).has("history-replace-v1")))
+      throw new HttpError(400, "invalid_request", "Unsupported worker history fields");
     const { t: _t, bootId, sequence, ...history } = input;
-    await deps.store.writeWorkerHistory(auth.token, bootId, sequence, history);
+    await deps.store.writeWorkerHistory(auth.token, bootId, sequence, history,
+      workerFeatures(c).has(HISTORY_DIGEST_FEATURE) && workerFeatures(c).has("history-replace-v1"));
     return c.json({ sequence });
+  });
+  app.post(`${CLOUD_V2_WORKER_API}/history/digests`, async c => {
+    if (!workerFeatures(c).has(HISTORY_DIGEST_FEATURE) || !workerFeatures(c).has("history-replace-v1") || !deps.store.workerHistoryDigests)
+      throw new HttpError(404, "not_found", "History digests are unavailable");
+    const bootId = c.req.header("x-zeros-worker-boot");
+    if (!bootId || !z.string().uuid().safeParse(bootId).success) throw unauthorized();
+    await body(c, z.object({}).strict());
+    const reply = await deps.store.workerHistoryDigests(bearer(c), bootId);
+    if (!reply) throw unauthorized();
+    return c.json(reply);
   });
   app.post(`${CLOUD_V2_WORKER_API}/activity`, async c => {
     // Activity releases no source or credential. Its current worker/boot proof

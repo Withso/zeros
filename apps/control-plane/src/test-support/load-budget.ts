@@ -24,6 +24,8 @@ export const LOAD_BUDGETS = [
   { phase: "R3", scenario: "running-stream", metric: "writeStatements", baseline: 106, maximum: 150, expectedFailure: false },
   { phase: "R3", scenario: "running-stream", metric: "maxWriteStatementsPerTransaction", baseline: 2, maximum: 5, expectedFailure: false },
   { phase: "R3", scenario: "running-stream", metric: "maxWriteTransactionsPer2s", baseline: 2, maximum: 1, expectedFailure: true },
+  { phase: "R1", scenario: "clean-wake", metric: "requests", baseline: 1, maximum: 1, expectedFailure: false },
+  { phase: "R1", scenario: "wake-replacements", metric: "requests", baseline: 0, maximum: 0, expectedFailure: false },
 ] as const;
 
 // Startup, notification-driven presence, and teardown are bounded separately
@@ -189,6 +191,7 @@ const templates = [
   "/v1/cloud-v2/devices/:deviceId/connections", "/v1/cloud-v2/devices/:deviceId/events", "/v1/cloud-v2/devices/:deviceId/heartbeat",
   "/v2/cloud/worker/prompts/pull", "/v2/cloud/worker/prompts/ack", "/v2/cloud/worker/prompts/begin",
   "/v2/cloud/worker/turn-lease", "/v2/cloud/worker/execution-leases/renew", "/v2/cloud/worker/history", "/v2/cloud/worker/activity",
+  "/v2/cloud/worker/history/digests",
   "/v2/cloud/worker/prompts/outcome", "/v2/cloud/worker/execution-leases/:id/retired",
   "/_load-budget/:id",
 ];
@@ -260,6 +263,7 @@ export class LoadBudgetProbe {
   private statementDelayMs = 0;
   private writeCensusError: Error | undefined;
   private lockObservationError: Error | undefined;
+  private routeObservationError: Error | undefined;
 
   constructor(private readonly pool: pg.Pool) {
     this.attach = client => this.wrapClient(client);
@@ -448,7 +452,9 @@ export class LoadBudgetProbe {
 
   async request(request: Request, send: () => Response | Promise<Response>, validateResponse = true): Promise<Response> {
     if (!this.active) return send();
-    const route = routeTemplate(new URL(request.url).pathname);
+    let route: string;
+    try { route = routeTemplate(new URL(request.url).pathname); }
+    catch (error) { this.routeObservationError ??= error as Error; throw error; }
     const entry: LoadRequest = { ...emptySql(), method: request.method, route, status: 0, simulatedAtMs: this.simulatedAtMs,
       elapsedMs: 0, open: true, streaming: route.endsWith("/events") };
     this.active.requests.push(entry);
@@ -470,16 +476,17 @@ export class LoadBudgetProbe {
     if (this.active) throw new Error("Load scenarios must not overlap");
     const cost: LoadScenario = { name, requests: [], background: emptySql(), backgroundOperations: [], elapsedMs: 0,
       writesObserved: options.writes === true, locksObserved: options.locks === true };
-    this.active = cost; this.writeCensusError = undefined; this.lockObservationError = undefined;
+    this.active = cost; this.writeCensusError = undefined; this.lockObservationError = undefined; this.routeObservationError = undefined;
     const started = performance.now();
     try {
       const value = await work(); await this.drain(cost);
       if (this.writeCensusError) throw this.writeCensusError;
       if (this.lockObservationError) throw this.lockObservationError;
+      if (this.routeObservationError) throw this.routeObservationError;
       if (cost.requests.some(request => request.status < 200 || request.status >= 300)) throw new Error("Load replay included an unsuccessful request");
       return { value, cost };
     }
-    catch (error) { throw this.writeCensusError ?? error; }
+    catch (error) { throw this.routeObservationError ?? this.writeCensusError ?? error; }
     finally { cost.elapsedMs = performance.now() - started; this.active = undefined; this.simulatedAtMs = 0; }
   }
 

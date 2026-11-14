@@ -1051,6 +1051,7 @@ persists chat/session state under `/home/user/.local/share/zeros/cloud-worker`.
 It mirrors chat metadata, deletions and message rows to the control plane.
 The app can read that history while the VM sleeps. This history mirror is
 separate from repository files; there is no Mac checkout synchronization.
+History writers, including retention jobs, must lock the workspace row before changing chat or message rows to avoid deadlocks with history ingestion.
 
 Chat search uses the connected worker when available and the HTTP history
 mirror while the VM sleeps, without waking it. Search is scoped to the selected

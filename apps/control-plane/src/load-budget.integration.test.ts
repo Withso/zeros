@@ -334,6 +334,15 @@ database("load-budget workload", () => {
       const sample = await probe.measure(`cold-${operation}`, () => fixture!.admission(operation));
       scenarios.set(`cold-${operation}`, sample.cost);
     }
+    // Preserve the existing idle fixture's one-chat cardinality. Backfill and
+    // reconnect have their own measured cost, including digest discovery.
+    const wake = await fixture.cleanWake();
+    const backfill = await probe.measure("wake-backfill", wake.prepare, { writes: true });
+    scenarios.set("wake-backfill", backfill.cost);
+    const resumed = await probe.measure("clean-wake", wake.resume, { writes: true });
+    scenarios.set("clean-wake", resumed.cost);
+    scenarios.set("wake-replacements", selectLoadRequests(resumed.cost, request => request.route === "/v2/cloud/worker/history"));
+    console.info("Clean wake:", await wake.verify());
     expect(fixture.pollWaits(), "real empty-poll waiter/recheck branch").toBe(OBSERVED_IDLE_REPLAY.find(row => row.operation === "pull")!.count + R1_IDLE_REPLAY.find(row => row.operation === "pull")!.count);
     expect(fixture.observerStatus()).toEqual({ enabled: true, pending: 0, dropped: 0, errors: 0 });
     await fixture.close(); fixture = undefined;
@@ -343,7 +352,7 @@ database("load-budget workload", () => {
     console.info(`Idle profile: observed Alpha; 300000 simulated ms; ${wallClock && wallProfile === "observed" ? "wall-paced" : "compressed request replay (periodic server work is a lower bound)"}`);
     console.info(`R1 idle profile: server cost at the approved fallback rates; renewals excluded; ${wallClock && wallProfile === "r1" ? "wall-paced" : "compressed request replay (periodic server work is a lower bound)"}. This proves SQL per route mix, not timer rates.`);
     for (const [name, cost] of scenarios) {
-      if (["turn-lease", "running-stream", "periodic-renewals"].includes(name)) continue;
+      if (["turn-lease", "running-stream", "periodic-renewals", "wake-replacements"].includes(name)) continue;
       console.info(`Load scenario: ${name}; statement delay ${statementDelayMs} ms; write census ${cost.writesObserved ? "enabled (diagnostic queries excluded)" : "disabled"}`);
       console.table(routeTable(cost));
       console.table([{ scope: "background", ...cost.background, elapsedMs: Math.round(cost.elapsedMs) }]);
