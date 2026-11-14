@@ -319,6 +319,7 @@ function CloudProviderConnection({
         credentialRevision: chosen.revision,
         models: models.slice(0, 32).map((row) => row.value),
         allModels: true,
+        // Ignored by current control planes (no consent concept); older ones still read it on connect.
         consent: "zeros-managed",
       });
       if (current()) {
@@ -364,7 +365,9 @@ function CloudProviderConnection({
           // refresh grant. N-1 servers leave it absent; do not invent readiness.
           const status = !isSelected ? "Saved" : !health ? "Selected · Status unavailable"
             : health.status === "ready" ? ready ? "Connected" : "Account changed"
-            : ({ not_selected: "Status unavailable", consent_required: "Permission required",
+            // Agent logins need no consent (owner decision 2026-11-14): current control planes never report
+            // consent_required; an older one's is shown neutrally, never as a request for permission.
+            : ({ not_selected: "Status unavailable", consent_required: "Status unavailable",
                 credential_unavailable: "Account unavailable", credential_changed: "Account changed",
                 expiring: "Connection expires soon", expired: "Connection expired" })[health.status];
           const kind = credential.connectionMethod === "account" ||
