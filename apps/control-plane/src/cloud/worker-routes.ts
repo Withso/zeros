@@ -2,6 +2,7 @@ import { Hono, type Context } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
 import { HttpError } from "../authz.js";
+import type { Tx } from "../db.js";
 import { CLOUD_V2_MAX_FRAME_BYTES, CloudV2WorkerActivitySchema, CloudV2WorkerHelloSchema, CloudV2WorkerHistorySchema, CloudV2WorkerTimingRequestSchema, CloudV2RenewRequestSchema, CloudV2TurnLeaseRequestSchema, CloudV2TerminalLeaseRequestSchema, CloudV2ClientLeaseRequestSchema, CloudV2BootstrapLeaseRequestSchema, CloudV2RetiredRequestSchema, CloudV2BootCleanRequestSchema, ACTING_USER_FEATURE, BOOT_TIMINGS_FEATURE, HISTORY_DIGEST_FEATURE, HISTORY_DIGEST_DELETIONS_FEATURE, type CloudV2ControlFrame } from "./contract.js";
 import { emitCloudV2Timing, type CloudV2TimingRecord } from "./lifecycle.js";
 import type { CloudV2Store, CloudV2WorkerSession, CloudV2Workspace } from "./store.js";
@@ -53,6 +54,8 @@ export type CloudV2WorkerRouteDeps = {
   notifications?: CloudNotifyUser;
   workspaceSync?: Pick<CloudWorkspaceSync, "advertise">;
   timing?: (record: CloudV2TimingRecord) => void;
+  appliedReady?(workspaceId: string, bootId: string): Promise<void>;
+  helloTransaction?<T>(work: (tx?: Tx) => Promise<T>): Promise<T>;
   logger?: Pick<Console, "warn">;
   waitForPrompts?(workspaceId: string, waitMs: number, signal: AbortSignal): { wait: Promise<void>; dispose(): void };
   config(workspace: CloudV2Workspace, mode?: "admission" | "continuation", proof?: CloudSourceProof): Promise<ConfigFrame>;
@@ -126,7 +129,8 @@ async function configuration(deps: CloudV2WorkerRouteDeps, workspace: CloudV2Wor
         const api = await deps.apiConfiguration(before.id);
         if (api) config = { ...config, api };
       }
-      localCommandsEnabled = Boolean(features.has(LOCAL_COMMANDS_FEATURE) && deps.promptOutbox && await deps.localCommands?.requests.enabled(before.id));
+      localCommandsEnabled = Boolean(features.has(LOCAL_COMMANDS_FEATURE) && deps.promptOutbox &&
+        (active ? config.localCommands === 1 : await deps.localCommands?.requests.enabled(before.id)));
     }
     catch (error) {
       if (!(error instanceof HttpError) || error.code !== "github_authorization_changed") throw error;
@@ -210,10 +214,11 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
       return c.json(await execution.renew(auth, input.contextIds));
     });
     app.post(`${CLOUD_V2_WORKER_API}/bootstrap-lease`, async c => {
-      const auth = await session(c, deps);
+      const token = bearer(c), bootId = c.req.header("x-zeros-worker-boot");
+      if (!bootId || !z.string().uuid().safeParse(bootId).success) throw unauthorized();
       if (!workerFeatures(c).has(ACTING_USER_FEATURE)) throw executionWorkerRequired();
       const input = await body(c, CloudV2BootstrapLeaseRequestSchema);
-      return c.json(leaseReply(c, await execution.bootstrapLease(auth, input.contextId)));
+      return c.json(leaseReply(c, await execution.bootstrapLease({ token, bootId }, input.contextId)));
     });
     app.post(`${CLOUD_V2_WORKER_API}/execution-leases/:id/retired`, async c => {
       const auth = await session(c, deps);
@@ -297,15 +302,21 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
   app.post(`${CLOUD_V2_WORKER_API}/hello`, async c => {
     const input = await body(c, CloudV2WorkerHelloSchema);
     const token = bearer(c);
+    const features = workerFeatures(c);
+    const transaction = <T>(work: (tx?: Tx) => Promise<T>) => deps.helloTransaction ? deps.helloTransaction(work) : work();
+    const advertise = async (handoff?: string, tx?: Tx) => {
+      if (deps.workspaceSync && !await deps.workspaceSync.advertise(token, input.bootId, features.has(SYNC_FEATURE), handoff,
+        features.has(SYNC_CONTEXT_FEATURE) && features.has(ACTING_USER_FEATURE), tx)) throw unauthorized();
+      if (deps.store.chatEdits && !await deps.store.chatEdits.advertise(token, input.bootId, features.has("chat-edit-v1"), handoff, tx)) throw unauthorized();
+      if (deps.localCommands && features.has(LOCAL_COMMANDS_FEATURE)
+        && !await deps.localCommands.requests.advertise(token, input.bootId, true, handoff, tx)) throw unauthorized();
+    };
     const handoff = c.req.header("x-zeros-runtime-handoff");
     if (handoff) {
       if (!workerFeatures(c).has("runtime-update-v1") || !z.string().uuid().safeParse(handoff).success || !deps.runtimeUpdates) throw unauthorized();
       const identity = await deps.runtimeUpdates.session(token, input.bootId, handoff, input.runtimeSha256);
       if (!identity) throw unauthorized();
-      if (deps.workspaceSync && !await deps.workspaceSync.advertise(token, input.bootId, workerFeatures(c).has(SYNC_FEATURE), handoff, workerFeatures(c).has(SYNC_CONTEXT_FEATURE) && workerFeatures(c).has("acting-user-v1"))) throw unauthorized();
-      if (deps.store.chatEdits && !await deps.store.chatEdits.advertise(token, input.bootId, workerFeatures(c).has("chat-edit-v1"), handoff)) throw unauthorized();
-      if (deps.localCommands && workerFeatures(c).has(LOCAL_COMMANDS_FEATURE)
-        && !await deps.localCommands.requests.advertise(token,input.bootId,true,handoff)) throw unauthorized();
+      await transaction(tx => advertise(handoff, tx));
       return c.json({ config: await configuration(deps, identity, token, input.bootId, workerFeatures(c), "admission", handoff) });
     }
     let runtimeSha256 = deps.runtimeSha256, identity: CloudV2WorkerSession | null = null;
@@ -323,20 +334,24 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
     const recoveryCapable = workerFeatures(c).has(CLOUD_RECOVERY_QUIESCE_FEATURE);
     if (identity?.recoveryAttemptId && (!deps.recovery || !await deps.recovery.hello(token, input.bootId, input.runtimeSha256, recoveryCapable, identity.recoveryAttemptId)))
       throw unauthorized();
-    const workspace = await deps.store.beginWorkerHello(token, input.bootId, workerFeatures(c).has(ACTING_USER_FEATURE), input.runtimeSha256, workerFeatures(c).has(SYNC_CONTEXT_FEATURE), recoveryCapable);
-    if (!workspace) throw unauthorized();
-    if (deps.workspaceSync && !await deps.workspaceSync.advertise(token, input.bootId, workerFeatures(c).has(SYNC_FEATURE), undefined, workerFeatures(c).has(SYNC_CONTEXT_FEATURE) && workerFeatures(c).has("acting-user-v1"))) throw unauthorized();
-    if (deps.store.chatEdits && !await deps.store.chatEdits.advertise(token, input.bootId, workerFeatures(c).has("chat-edit-v1"))) throw unauthorized();
-    if (deps.localCommands && workerFeatures(c).has(LOCAL_COMMANDS_FEATURE)
-      && !await deps.localCommands.requests.advertise(token,input.bootId,true)) throw unauthorized();
+    const workspace = await transaction(async tx => {
+      const bound = await deps.store.beginWorkerHello(token, input.bootId, features.has(ACTING_USER_FEATURE), input.runtimeSha256,
+        features.has(SYNC_CONTEXT_FEATURE), recoveryCapable, features.has(BOOT_TIMINGS_FEATURE), tx);
+      if (!bound) throw unauthorized();
+      await advertise(undefined, tx);
+      return bound;
+    });
     const configStarted = Date.now();
     const config = await configuration(deps, workspace, token, input.bootId, workerFeatures(c));
     const configMs = Math.max(0, Date.now() - configStarted);
-    const ready = await deps.store.acceptWorkerHello(token, input.bootId, {
-      accessEpoch: workspace.accessEpoch, loginRevision: config.loginRevision ?? workspace.loginRevision,
+    const ready = await transaction(async tx => {
+      const accepted = await deps.store.acceptWorkerHello(token, input.bootId, {
+        accessEpoch: workspace.accessEpoch, loginRevision: config.loginRevision ?? workspace.loginRevision,
+      }, tx);
+      if (!accepted) throw unauthorized();
+      if (features.has("runtime-update-v1")) await deps.runtimeHandoffs?.recordRuntime(token, input.bootId, input.runtimeSha256, tx);
+      return accepted;
     });
-    if (!ready) throw unauthorized();
-    if (workerFeatures(c).has("runtime-update-v1")) await deps.runtimeHandoffs?.recordRuntime(token, input.bootId, input.runtimeSha256);
     if (ready.helloTiming) emitCloudV2Timing(deps.timing, { workspaceId: ready.id.slice(0, 8), phase: "worker_hello", ...ready.helloTiming, configMs });
     if (ready.boatSandboxId) void deps.outboundProof?.({ workspaceId: ready.id, bootId: input.bootId,
       sandboxId: ready.boatSandboxId, accessEpoch: workspace.accessEpoch }).catch(() => {});
@@ -369,6 +384,7 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
       if (phases.has(record.phase)) continue;
       phases.add(record.phase);
       emitCloudV2Timing(deps.timing, { workspaceId: auth.workspace.id.slice(0, 8), ...record });
+      if (record.phase === "worker_applied_ready") await deps.appliedReady?.(auth.workspace.id, auth.bootId).catch(() => {});
     }
     return c.json({ ok: true });
   });

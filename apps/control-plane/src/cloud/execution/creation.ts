@@ -1,5 +1,6 @@
 import type pg from "pg";
-import { withSystemTx, type Tx } from "../../db.js";
+import { withSystemStatement, type Tx } from "../../db.js";
+import { sql, SqlFragment } from "../../sql-fragment.js";
 import type { RuntimeCapabilities } from "../runtime-capabilities.js";
 import type { CloudV2Runtime } from "../runtime.js";
 import type { ExecutionWorkspace } from "./store.js";
@@ -18,11 +19,11 @@ export async function recordExecutionCreation(tx: Tx, id: string, runtime: Runti
 
 export async function executionCreationRuntime(pool: pg.Pool, id: string, current: CloudV2Runtime,
   qualify: () => Promise<RuntimeCapabilities>): Promise<CloudV2Runtime | null> {
-  const row = (await withSystemTx(pool, tx => tx.query<{ runtime_sha256: string; pinned: boolean }>(`SELECT c.runtime_sha256,
+  const row = (await withSystemStatement<{ runtime_sha256: string; pinned: boolean }>(pool, sql`SELECT c.runtime_sha256,
     ((c.intent_id=w.execution_intent_id AND c.clean_at IS NULL) OR EXISTS (
       SELECT 1 FROM cloud_v2_runtime_canaries k WHERE k.workspace_id=w.id)) AS pinned
     FROM cloud_v2_execution_creations c JOIN cloud_v2_workspaces w ON w.id=c.workspace_id
-    WHERE c.workspace_id=$1 AND w.execution_mode='active'`, [id]))).rows[0];
+    WHERE c.workspace_id=${SqlFragment.uuid(id.toLowerCase())} AND w.execution_mode='active'`)).rows[0];
   if (!row) return null;
   if (row.pinned) return { sha256: row.runtime_sha256, url: () => current.url(row.runtime_sha256) };
   await qualify();

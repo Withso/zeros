@@ -80,6 +80,7 @@ export type CloudV2TimingRecord = {
   /** relay_ready: the worker socket dial, and the time from it to readiness.
    * worker_hello: configMs is the control plane's configuration inside hello. */
   dialMs?: number; configMs?: number;
+  readyWaitMs?: number; routeReads?: number; gatewayFailures?: number; gatewayWaitMs?: number;
   /** relay_ready: route reads until the worker was ready, including the successful one. */
   attempts?: number;
 } & ({

@@ -111,7 +111,6 @@ export class HybridTransport implements Transport {
       onInbound: status => this.inbound(status) });
   }
 
-  // ── boot-timings-v1: one wake on one timing line ──
   private bootTimings = false;
   private helloSequence = 0;
   private inboundSeen = false;

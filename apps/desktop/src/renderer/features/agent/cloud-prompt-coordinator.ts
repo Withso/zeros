@@ -51,8 +51,8 @@ export class CloudPromptCoordinator {
     const result = new Promise<void>((resolve, reject) => { job.waiters.push({ resolve, reject }); });
     job.requested = true; job.due = 0; void this.tick(); return result;
   }
-  refreshPending(): void {
-    for (const job of this.jobs.values()) if (job.channel.pending) { job.requested = true; job.due = 0; }
+  refreshPending(matches: (owner: CloudPromptOwner) => boolean = () => true): void {
+    for (const job of this.jobs.values()) if (job.channel.pending && matches(job.channel.owner)) { job.requested = true; job.due = 0; }
     this.schedule(0);
   }
   async erase(owner: CloudPromptOwner): Promise<void> {

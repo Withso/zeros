@@ -30,9 +30,9 @@ describe("worker carrier dial", () => {
     await vi.advanceTimersByTimeAsync(10_000);
     socket.end("HTTP/1.1 502 Bad Gateway\r\nX-Private: synthetic-header-canary\r\nContent-Length: 21\r\n\r\nsynthetic-body-canary");
     const error = await result;
-    expect(error).toMatchObject({ reason: "gateway", statusClass: "5xx" });
-    expect(String(error)).not.toMatch(/synthetic|502|header|body/);
-    expect(JSON.stringify(error)).not.toMatch(/synthetic|502|header|body/);
+    expect(error).toMatchObject({ reason: "gateway", statusClass: "5xx", status: 502, responseBodyClass: "text" });
+    expect(String(error)).not.toMatch(/synthetic|header|body/);
+    expect(JSON.stringify(error)).not.toMatch(/synthetic|canary/);
   });
 
   it.each([
@@ -40,7 +40,30 @@ describe("worker carrier dial", () => {
     [401, "refused", "4xx"], [403, "refused", "4xx"], [302, "refused", "3xx"], [500, "refused", "5xx"],
   ])("classifies HTTP %s without retaining response metadata", async (status, reason, statusClass) => {
     server.on("upgrade", (_request, socket) => socket.end(`HTTP/1.1 ${status} Refused\r\nLocation: https://example.test/?token=synthetic-canary\r\nContent-Length: 0\r\n\r\n`));
-    await expect(dialWorker(route, "synthetic-grant")).rejects.toMatchObject({ reason, statusClass });
+    await expect(dialWorker(route, "synthetic-grant")).rejects.toMatchObject({ reason, statusClass, status, responseBodyClass: "empty" });
+  });
+
+  it.each([
+    ["<html><body>synthetic-private-canary</body></html>", "html"],
+    ['{"message":"synthetic-private-canary"}', "json"],
+    ["upstream synthetic-private-canary", "text"],
+    ["x".repeat(2048), "truncated"],
+  ])("retains only a bounded closed class for a gateway body", async (body, responseBodyClass) => {
+    server.on("upgrade", (_request, socket) => socket.end(`HTTP/1.1 502 Bad Gateway\r\nContent-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`));
+    const error = await dialWorker(route, "synthetic-grant").catch(value => value);
+    expect(error).toMatchObject({ reason: "gateway", status: 502, responseBodyClass });
+    expect(`${String(error)} ${JSON.stringify(error)}`).not.toMatch(/synthetic|upstream|<html>|message/);
+  });
+
+  it("bounds a refusal body that never ends inside the original dial deadline", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const upgrade = once(server, "upgrade");
+    const result = dialWorker(route, "synthetic-grant", { timeoutMs: 200 }).catch(error => error);
+    const [, socket] = await upgrade;
+    socket.write("HTTP/1.1 502 Bad Gateway\r\nContent-Length: 50\r\n\r\npartial");
+    await new Promise<void>(resolve => setImmediate(resolve));
+    await vi.advanceTimersByTimeAsync(200);
+    expect(await result).toMatchObject({ reason: "gateway", status: 502, responseBodyClass: "incomplete" });
   });
 
   it("anchors a shortened dial to the remaining connection window", async () => {

@@ -23,8 +23,6 @@ import { permissionModeIdForDisplay } from "./permission-mode-display";
 import { watchStoredProgress } from "./cloud-stored-progress";
 import { getActiveBridge } from "../../platform/bridge/active-bridge";
 
-/** Process-owned delivery, independent of React's retained chat surfaces and
- * the current bridge. Hooks only subscribe it to exact account/catalog changes. */
 const promptWorkspaceKey = (owner: Pick<CloudPromptOwner, "organizationId" | "workspaceId">) =>
   cloudWorkspaceKey({ organizationId: owner.organizationId, workspaceId: owner.workspaceId });
 /** Ready to answer status (running): only ready or busy. Unknown (no document yet) is treated as ready, as today. */
@@ -33,6 +31,8 @@ function workspaceReady(owner: Pick<CloudPromptOwner, "organizationId" | "worksp
   return !doc || ["ready", "busy"].includes(doc.status);
 }
 
+/** Process-owned delivery, independent of React's retained chat surfaces and
+ * the current bridge. Hooks only subscribe it to exact account/catalog changes. */
 export class CloudPromptRuntime {
   constructor(private readonly historyChanged: (chatId: string) => void = () => {}) {}
   private readonly journal = createCloudPromptJournal();
@@ -46,9 +46,9 @@ export class CloudPromptRuntime {
   private noticeReadiness(): void {
     const ready = new Set<string>();
     for (const channel of this.channels.values()) if (workspaceReady(channel.owner)) ready.add(promptWorkspaceKey(channel.owner));
-    const became = [...ready].some(key => !this.readyWorkspaces.has(key));
+    const became = new Set([...ready].filter(key => !this.readyWorkspaces.has(key)));
     this.readyWorkspaces = ready;
-    if (became) this.coordinator.refreshPending();
+    if (became.size) this.coordinator.refreshPending(owner => became.has(promptWorkspaceKey(owner)));
   }
   private owners: CloudPromptOwner[] = [];
   private restoredAccount?: string;

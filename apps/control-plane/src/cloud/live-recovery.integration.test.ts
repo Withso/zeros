@@ -32,22 +32,19 @@ suite("live route recovery with PostgreSQL", () => {
     const token = await store.rotateWorkerToken(workspace.id);
     await store.beginWorkerHello(token, boot); await store.acceptWorkerHello(token, boot);
     const route: WorkerRoute = { ...(await store.workerRoute(workspace.id))!, token: "synthetic-port-token" };
-    const repair = new LiveRecoveryStore(pool, value => ({ value }));
+    const repair = new LiveRecoveryStore(pool);
     return { user, workspace, store, repair, route, token, boot };
   }
 
-  it("keeps the running workspace and public document, while publishing only a sealed private route", async () => {
+  it("keeps the running workspace and private route while publishing a closed failure condition", async () => {
     const f = await fixture(), before = await f.store.get(f.workspace.id, f.user);
     expect(await f.repair.condition(f.route, true)).toBe(true);
     const failed = await f.store.get(f.workspace.id, f.user);
     expect(failed).toMatchObject({ id: before.id, name: before.name, state: "running", errorCode: "live_connection_unavailable" });
     expect(failed.updatedAt).not.toBe(before.updatedAt);
-    expect(await f.repair.publish(f.route, { url: "https://repaired-41783.on.boat.dev", token: "synthetic-new-port" })).toBe(true);
-    const current: WorkerRoute = { ...(await f.store.workerRoute(f.workspace.id))!, token: "synthetic-new-port" };
-    expect(current.portToken).toEqual({ value: "synthetic-new-port" });
+    expect((await f.store.workerRoute(f.workspace.id))!.portToken).toEqual(f.route.portToken);
     expect(JSON.stringify(await f.store.get(f.workspace.id, f.user))).not.toMatch(/synthetic|on\.boat\.dev/);
-    expect(await f.repair.condition(f.route, false)).toBe(false);
-    expect(await f.repair.condition(current, false)).toBe(true);
+    expect(await f.repair.condition(f.route, false)).toBe(true);
     expect((await f.store.get(f.workspace.id, f.user)).errorCode).toBeNull();
   });
 
@@ -55,10 +52,9 @@ suite("live route recovery with PostgreSQL", () => {
     ["Stop", "state='stopping'"], ["boot", "worker_boot_id=gen_random_uuid()"], ["access", "access_epoch=access_epoch+1"],
     ["sandbox", "boat_sandbox_id='bx_successor1234'"], ["token", "worker_token_hash=decode(repeat('b',64),'hex')"],
     ["route credential", "worker_port_token='{\"value\":\"synthetic-successor\"}'::jsonb"], ["archive", "archived_at=clock_timestamp()"],
-  ])("does not overwrite a concurrent %s change after provider I/O", async (_name, change) => {
+  ])("does not overwrite a concurrent %s change after verification", async (_name, change) => {
     const f = await fixture();
     await pool.query(`UPDATE cloud_v2_workspaces SET ${change} WHERE id=$1`, [f.workspace.id]);
-    expect(await f.repair.publish(f.route, { url: "https://late-41783.on.boat.dev", token: "synthetic-late-port" })).toBe(false);
     expect(await f.repair.condition(f.route, true)).toBe(false);
     expect((await pool.query("SELECT worker_route_url,error_code FROM cloud_v2_workspaces WHERE id=$1", [f.workspace.id])).rows[0])
       .toEqual({ worker_route_url: f.route.url, error_code: null });

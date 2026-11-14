@@ -23,7 +23,7 @@ async function body<T>(c: Context, schema: z.ZodType<T>, optional = false): Prom
 const empty = z.object({}).strict();
 
 export function createCloudTeamRoutes(sharing: CloudTeamSharing, document: (value: Awaited<ReturnType<CloudTeamSharing["get"]>>) => unknown,
-  connectActive?: (c: Context, workspaceId: string) => Promise<boolean>): Hono {
+  executionActive?: (c: Context, workspaceId: string) => Promise<boolean>): Hono {
   const app = new Hono(), path = "/v1/cloud-v2/workspaces/:id";
   const owns = (c: Context) => c.req.header(TEAM_SHARING_HEADER) === "1" && c.req.header(TEAM_OWNERSHIP_HEADER) === "1";
   const marker = (c: Context) => owns(c) ? { teamOwnership: 1 as const } : {};
@@ -97,8 +97,7 @@ export function createCloudTeamRoutes(sharing: CloudTeamSharing, document: (valu
   }));
   const creator = share(async (c,next) => {
     const id = uuid(c.req.param("id")!), user = c.get("user");
-    if (c.req.path.endsWith("/connect") && connectActive
-      ? await connectActive(c,id) : await sharing.workspaces.prompts.execution?.active(id)) return next();
+    if (executionActive ? await executionActive(c,id) : await sharing.workspaces.prompts.execution?.active(id)) return next();
     if (await sharing.authority.isCreator(id,user.id)) return next();
     const proof = await sharing.authority.admit(id,user);
     if (proof.view.role !== "creator") throw teamReadOnly();
@@ -108,7 +107,7 @@ export function createCloudTeamRoutes(sharing: CloudTeamSharing, document: (valu
   for (const action of ["stop","archive"] as const) app.post(`${path}/${action}`,share(async (c,next) => {
     await body(c,empty,true);
     const id = uuid(c.req.param("id")!), user = c.get("user");
-    if (action === "stop" && await sharing.workspaces.prompts.execution?.active(id)) return next();
+    if (action === "stop" && (executionActive ? await executionActive(c,id) : await sharing.workspaces.prompts.execution?.active(id))) return next();
     const result = await sharing.manage(id,user,action);
     return c.json({ workspace: document(await sharing.get(id,user,owns(c))),teamSharing: 1,...marker(c) },result.moved ? 202 : 200);
   }));

@@ -52,6 +52,7 @@ export type CloudV2RelayDeps = {
   authorizeSource?(workspace: CloudV2Workspace): Promise<void>;
   continueSource?(workspace: CloudV2Workspace, proof?: CloudSourceProof): Promise<CloudSourceContinuation>;
   workerRoute(workspaceId: string): Promise<WorkerRoute | null>;
+  waitReady?(workspace: CloudV2Workspace, signal: AbortSignal, timeoutMs: number): Promise<void>;
   liveRecovery?: Pick<CloudLiveRecovery, "failed" | "connected" | "exhausted">;
   workerActivity?(binding: CloudV2WorkerBinding, idle: boolean): Promise<ActivityReply | null>;
   mintWorkerToken(workspaceId: string, bootId: string): string;
@@ -77,6 +78,7 @@ type Room = {
   authorizedUntil?: number; authorizedRevision?: number; authorizedProof?: CloudSourceProof;
   /** Ends a connect retry wait early; a hint that lands outside the wait is kept. */
   retryNow?: () => void; readyHinted?: boolean;
+  readyWaitAbort?: AbortController;
   clients: Map<string, { ws: WebSocket; sessionId: string | null; grant?: CloudV2AppGrant; contextId?: string; tokenTimer?: NodeJS.Timeout; rollover?: boolean; authSent?: boolean; readProof?: ClientReadProof }>; queued: Map<string, unknown[]>;
   admitting: Map<string, WebSocket>;
   delivered: Map<string, Map<string, DeliveredPrompt>>;
@@ -201,6 +203,7 @@ export class CloudV2Relay {
     if (epoch === null || this.closed) return false;
     const room = this.room(workspace, epoch);
     if (!room) return false;
+    room.readyWaitAbort?.abort();
     clearTimeout(room.idleTimer); delete room.idleTimer;
     return new Promise(resolve => {
       const id = randomUUID();
@@ -369,12 +372,25 @@ export class CloudV2Relay {
   private async connect(room: Room): Promise<void> {
     const started = this.deps.now?.() ?? Date.now();
     const deadline = Date.now() + 60_000;
+    const boundedRoute = Boolean(this.deps.waitReady) && room.stops.size === 0;
+    let snapshot: WorkerRoute | undefined;
+    let routeReads = 0, gatewayFailures = 0, gatewayStarted: number | undefined;
+    const waiting = this.deps.now?.() ?? Date.now();
+    if (boundedRoute) {
+      if (room.wakeAllowed) this.wake(room);
+      const abort = new AbortController(); room.readyWaitAbort = abort;
+      try { await this.deps.waitReady!(room.workspace, AbortSignal.any([room.abort.signal, abort.signal]), 50_000); }
+      catch { this.revoke(room); return; }
+      finally { if (room.readyWaitAbort === abort) delete room.readyWaitAbort; }
+    }
+    const readyWaitMs = Math.max(0, (this.deps.now?.() ?? Date.now()) - waiting);
     let lastFailure: { route: WorkerRoute; error: WorkerConnectionFailure } | undefined;
     for (let attempt = 0, attempts = 0; this.wanted(room) && Date.now() < deadline; attempt++, attempts++) {
       if (await this.current(room) !== "allowed") return;
       let ws: WebSocket | undefined;
       try {
-        const route = await this.deps.workerRoute(room.workspace.id);
+        if (!snapshot) routeReads++;
+        const route = snapshot ?? await this.deps.workerRoute(room.workspace.id);
         if (!route || route.accessEpoch !== room.accessEpoch) { this.revoke(room); return; }
         room.workspace = route.workspace; room.acting = route.executionMode === "active";
         if (!acceptsWork(route.workspace)) this.closeExplicitClients(room);
@@ -389,6 +405,10 @@ export class CloudV2Relay {
         // A stopped Boat route hangs instead of refusing; never dial it.
         // Running can precede the worker applying its initial configuration.
         const bootId = room.stops.size && route.stopBootIds?.length ? route.stopBootIds[attempts % route.stopBootIds.length] : route.bootId;
+        if (boundedRoute) {
+          if (!route.url || !route.token || !bootId || !(route.workspace.state === "running" || route.workspace.state === "stopping" && room.stops.size)) break;
+          snapshot = route;
+        }
         if (route.url && route.token && bootId && (route.workspace.state === "running" || (route.workspace.state === "stopping" && room.stops.size))) {
           const dialStarted = this.deps.now?.() ?? Date.now();
           try {
@@ -397,8 +417,11 @@ export class CloudV2Relay {
           } catch (error) {
             if (error instanceof WorkerConnectionFailure) {
               lastFailure = { route, error };
+              if (error.reason === "gateway") { gatewayFailures++; gatewayStarted ??= dialStarted; }
               this.deps.logger?.warn("[cloud-v2] carrier dial", { workspaceId: room.workspace.id.slice(0, 8), reason: error.reason,
-                statusClass: error.statusClass, durationMs: Math.max(0, Math.round((this.deps.now?.() ?? Date.now()) - dialStarted)), attempt: attempts + 1 });
+                atMs: this.deps.now?.() ?? Date.now(), bootId,
+                statusClass: error.statusClass, ...(error.status === undefined ? {} : { status: error.status, responseBodyClass: error.responseBodyClass }),
+                durationMs: Math.max(0, Math.round((this.deps.now?.() ?? Date.now()) - dialStarted)), attempt: attempts + 1 });
               if (room.clients.size && route.workspace.state === "running") this.deps.liveRecovery?.failed(route, error);
             }
             throw error;
@@ -407,6 +430,18 @@ export class CloudV2Relay {
           void this.deps.liveRecovery?.connected(route).catch(() => {});
           const dialed = this.deps.now?.() ?? Date.now();
           if (!this.wanted(room) || await this.current(room) !== "allowed") { ws.terminate(); return; }
+          if (boundedRoute) {
+            routeReads++;
+            const current = await this.deps.workerRoute(room.workspace.id);
+            if (!current || current.bootId !== route.bootId || current.workerTokenHash !== route.workerTokenHash ||
+                current.executionMode !== route.executionMode || current.recoveryAttemptId !== route.recoveryAttemptId ||
+                current.accessEpoch !== route.accessEpoch || current.workspace.boatSandboxId !== route.workspace.boatSandboxId ||
+                current.url !== route.url || current.token !== route.token ||
+                !(current.workspace.state === "running" || current.workspace.state === "stopping" && room.stops.size)) {
+              ws.terminate(); this.revoke(room); return;
+            }
+            room.workspace = current.workspace;
+          }
           room.worker = ws; room.loginRevision = null;
           if (route.workerTokenHash && route.bootId === bootId) room.workerBinding = {
             workspaceId: room.workspace.id, bootId, accessEpoch: room.accessEpoch, workerTokenHash: route.workerTokenHash,
@@ -420,6 +455,8 @@ export class CloudV2Relay {
             const at = this.deps.now?.() ?? Date.now();
             emitCloudV2Timing(this.deps.timing, { workspaceId: room.workspace.id.slice(0, 8), phase: "relay_ready",
               durationMs: Math.max(0, Math.round(at - started)), dialMs: Math.max(0, Math.round(dialed - dialStarted)), configMs: Math.max(0, Math.round(at - dialed)),
+              ...(boundedRoute ? { readyWaitMs: Math.round(readyWaitMs), routeReads, gatewayFailures,
+                gatewayWaitMs: gatewayStarted === undefined ? 0 : Math.max(0, Math.round(dialed - gatewayStarted)) } : {}),
               attempts: attempts + 1 });
             const forwarding: Promise<void>[] = [];
             for (const [clientId, client] of room.clients) {
@@ -434,8 +471,13 @@ export class CloudV2Relay {
             return;
           }
           ws.terminate();
+          if (boundedRoute) break;
         }
-      } catch { ws?.terminate(); /* Errors can include route headers; never log them. */ }
+      } catch {
+        ws?.terminate();
+        if (boundedRoute && (ws || !snapshot)) { this.revoke(room); return; }
+        // Errors can include route headers; never log them.
+      }
       const ms = Math.min(this.deps.retryMaxMs ?? (room.workspace.state === "running" ? 500 : 2000),
         (this.deps.retryBaseMs ?? 250) * 2 ** Math.min(attempt, 4));
       // A worker that has just become ready is retried from the base delay.
@@ -517,6 +559,7 @@ export class CloudV2Relay {
       this.failDelivered(room, ws);
       if (room.worker !== ws) return;
       this.deps.logger?.warn("[cloud-v2] carrier closed", { workspaceId: room.workspace.id.slice(0, 8), code,
+        atMs: this.deps.now?.() ?? Date.now(), bootId: room.workerBinding?.bootId,
         stage: room.ready ? "connected" : "configuration" });
       room.worker = null; room.ready = false; room.loginRevision = null; delete room.workerBinding;
       // A close during initial configuration is handled by connect's retry.

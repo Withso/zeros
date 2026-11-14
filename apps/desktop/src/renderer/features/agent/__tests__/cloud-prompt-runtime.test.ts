@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { CloudV2Prompt, CloudV2PromptStatus } from "@zeros/protocol/cloud-v2-prompts";
 import { emptyPromptJournal, promptOwnerKey, type CloudPromptJournal, type PromptJournalRecord } from "../cloud-prompt-channel";
 const f = vi.hoisted(() => ({ generation: 1, ownerGeneration: 1, apis: new Map<string, any>(), doc: undefined as any, accountId: "account", allowed: true,
-  listeners: new Set<() => void>(), workspace: { activeChatId: null as string | null, chats: [] as any[] },
+  listeners: new Set<() => void>(), docs: new Map<string, any>(), workspace: { activeChatId: null as string | null, chats: [] as any[] },
   journal: undefined as unknown as CloudPromptJournal, api: undefined as any }));
 vi.mock("../cloud-prompt-journal", () => ({ createCloudPromptJournal: () => f.journal }));
 vi.mock("../../../platform/cloud-prompt-api", () => ({ cloudPromptApi: (_target: unknown, chat: string) => f.apis.get(chat) ?? f.api }));
@@ -11,7 +11,8 @@ vi.mock("../../team/team-store", () => ({ getOrganizationStoreGeneration: () => 
   getTeamStoreState: () => ({ me: { user: { id: f.accountId } } }), subscribeOrganizationSnapshots: (cb: () => void) => { f.listeners.add(cb); return () => f.listeners.delete(cb); } }));
 vi.mock("../../team/cloud-workspace-account-access", () => ({ hasCloudWorkspaceAccountAccess: () => f.allowed }));
 vi.mock("../../../state/cloud-workspace-catalog", () => ({ cloudCatalogGeneration: () => f.generation, cloudWorkspaceOwnerGeneration: () => f.ownerGeneration,
-  cloudWorkspaceDocument: () => f.doc, subscribeCloudWorkspaces: (cb: () => void) => { f.listeners.add(cb); return () => f.listeners.delete(cb); } }));
+  cloudWorkspaceDocument: (target: { workspaceId: string }) => f.docs.get(target.workspaceId) ?? f.doc,
+  subscribeCloudWorkspaces: (cb: () => void) => { f.listeners.add(cb); return () => f.listeners.delete(cb); } }));
 vi.mock("../../../state/workspace-store", () => ({ useWorkspaceStore: { getState: () => f.workspace, subscribe: () => () => {} } }));
 import { eraseCloudPrompts } from "../../../platform/cloud-prompt-erasure";
 import { cloudPromptView, projectCloudPromptSession, cloudPromptTurnActivity } from "../cloud-prompt-presentation";
@@ -28,7 +29,7 @@ const chatId = cloudScopedId(target, "chat"), cwd = cloudWorkspaceKey(target);
 let cleanup: (() => void) | undefined;
 beforeEach(() => {
   vi.useFakeTimers(); vi.stubGlobal("window", new EventTarget());
-  f.generation = 1; f.ownerGeneration = 1; f.apis.clear(); f.accountId = "account"; f.allowed = true; f.listeners.clear();
+  f.generation = 1; f.ownerGeneration = 1; f.apis.clear(); f.docs.clear(); f.accountId = "account"; f.allowed = true; f.listeners.clear();
   f.doc = { status: "ready", capabilities: { promptOutbox: 1 }, deletedAt: null };
   f.workspace = { activeChatId: chatId, chats: [{ id: chatId, folder: cwd, agentId: "codex", model: "gpt-6-luna", effort: "low" }] };
   useSessionsStore.setState({ sessions: { [chatId]: { ...BLANK, agentId: "codex", cwd, transcriptState: "resident" } }, executionToChatId: {}, pendingLocalTurns: {}, cancellingChats: new Set() });
@@ -43,6 +44,33 @@ beforeEach(() => {
   }), list: vi.fn(async () => ({ epoch: "0", items: rows, nextAfter: null })), stop: vi.fn(async () => ({ chatId: "chat", epoch: "1" })) };
 });
 afterEach(() => { cleanup?.(); cleanup = undefined; vi.useRealTimers(); vi.unstubAllGlobals(); });
+
+it("releases parked status reads only for the workspace that became ready", async () => {
+  const second = { ...target, workspaceId: "33333333-3333-4333-8333-333333333333" };
+  const secondChat = cloudScopedId(second, "other"), secondCwd = cloudWorkspaceKey(second);
+  f.doc = { ...f.doc, status: "starting" };
+  f.workspace.chats.push({ id: secondChat, folder: secondCwd, agentId: "codex" });
+  useSessionsStore.setState({ sessions: { ...useSessionsStore.getState().sessions,
+    [secondChat]: { ...BLANK, agentId: "codex", cwd: secondCwd, transcriptState: "resident" } } });
+  const rows: CloudV2PromptStatus[] = [];
+  const other = { enqueue: vi.fn(async (payload: CloudV2Prompt) => {
+    const receipt = { workspaceId: second.workspaceId, chatId: "other", userMessageId: payload.userMessageId,
+      epoch: "0", sequence: "1", acceptedAt: new Date(1).toISOString(), workspaceState: "starting" as const };
+    rows.push({ payload, receipt, state: "queued", cancelRequested: false }); return receipt;
+  }), list: vi.fn(async () => ({ epoch: "0", items: rows, nextAfter: null })), stop: vi.fn() };
+  f.apis.set("other", other);
+  const runtime = new CloudPromptRuntime(); cleanup = runtime.start();
+  await runtime.send(chatId, { text: "first" }, { id: "first" });
+  await runtime.send(secondChat, { text: "second" }, { id: "second" });
+  for (const listener of f.listeners) listener();
+  await vi.advanceTimersByTimeAsync(20_000);
+  f.api.list.mockClear(); other.list.mockClear();
+  f.docs.set(target.workspaceId, { ...f.doc, status: "ready" });
+  for (const listener of f.listeners) listener();
+  await vi.advanceTimersByTimeAsync(1);
+  expect(f.api.list).toHaveBeenCalledTimes(1);
+  expect(other.list).not.toHaveBeenCalled();
+});
 
 it("saves the frozen selection without a live execution, accepts only after the committed HTTPS receipt, and sends exactly once", async () => {
   const runtime = new CloudPromptRuntime(); cleanup = runtime.start(); const accepted = vi.fn();

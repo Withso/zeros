@@ -1,4 +1,5 @@
 import pg from "pg";
+import { randomUUID } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LoadBudgetProbe, scenarioTotals } from "../../test-support/load-budget.js";
 import { executionFixture, type ExecutionFixture } from "./test-fixture.js";
@@ -21,10 +22,10 @@ database("execution wake request costs", () => {
   });
   afterEach(async () => { await f?.close(); probe.close(); await pool.end(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
-  async function measure(name: string, path: string, send: () => Promise<Response>) {
+  async function measure(name: string, path: string, send: () => Promise<Response>, status = 200) {
     const { value, cost } = await probe.measure(name, () => probe.request(new Request(`https://api.example.test${path}`, { method: "POST" }), send));
     expect(cost.background.queries).toBe(0);
-    expect(value.status).toBe(200);
+    expect(value.status).toBe(status);
     const totals = scenarioTotals(cost);
     expect(totals.queries).toBeGreaterThan(0);
     console.log(`[wake-cost] ${name} queries=${totals.queries} transactions=${totals.transactions}`);
@@ -41,22 +42,35 @@ database("execution wake request costs", () => {
     const result = await value.json();
     expect(result.protocols).toHaveLength(2);
     expect(result.features).toContain("relay-presence-v1");
+    expect(result.features).toContain("connect-ready-v1");
     expect(totals.transactions).toBeLessThanOrEqual(2);
     expect(totals.queries).toBeLessThanOrEqual(25);
   });
 
-  it("builds the initial worker configuration within the hello query budget", async () => {
+  it.each([{ current: false, computer: false }, { current: true, computer: false }, { current: true, computer: true }])(
+    "builds the initial worker configuration within the hello query budget (current=$current, Computer=$computer)", async ({ current, computer }) => {
+    if (computer) {
+      const build = randomUUID();
+      await pool.query(`INSERT INTO cloud_v2_computer_builds(id,org_id,version,recipe,state,snapshot_id,created_by,source_policy_version,source_targets)
+        VALUES($1,$2,1,$4,'succeeded','fixture-snapshot',$3,2,$5)`, [build, f.organizationId, f.creator.id,
+        { repositories: [{ repository: f.workspace.repository, branch: "main", setup: "echo fixture-ready" }] },
+        JSON.stringify([{ repository: f.workspace.repository, repositoryId: "42" }])]);
+      await pool.query("UPDATE cloud_v2_workspaces SET computer_build_id=$2 WHERE id=$1", [f.workspace.id, build]);
+    }
     const { value, totals } = await measure("hello", "/v2/cloud/worker/hello", () => f.worker("hello", {
       protocol: 2, bootId: f.boot, runtimeSha256: "b".repeat(64),
-    }));
+    }, current ? { features: `${f.features},workspace-setup-v1,runtime-update-v1,boot-timings-v1,sync-v1,sync-context-v1,chat-edit-v1,creator-agent-logins-v1,creator-agent-models-v1,creator-commit-identity-v1` } : {}));
     const { config } = await value.json();
     expect(config.actingUser).toBe(1);
     expect(config.bootstrapContextId).toEqual(expect.any(String));
-    expect(totals.transactions).toBeLessThanOrEqual(18);
-    expect(totals.queries).toBeLessThanOrEqual(70);
+    if (computer) expect(config.workspace.setup).toBe("echo fixture-ready");
+    expect(totals.transactions).toBeLessThanOrEqual(8);
+    expect(totals.queries).toBeLessThanOrEqual(40);
   });
 
-  it("delivers clean-worker bootstrap material in at most four transactions", async () => {
+  it.each([false, true])("delivers clean-worker bootstrap material in at most two transactions and twenty calls (environment: %s)", async environment => {
+    if (environment) await f.cp.routes.environments!.patch(f.organizationId, f.creator.id, "42", f.workspace.repository,
+      { expectedRevision: 0, variables: { FIXTURE_VALUE: "private" }, files: [] });
     const hello = await f.hello();
     expect(hello.status).toBe(200);
     const { config } = await hello.json();
@@ -66,9 +80,21 @@ database("execution wake request costs", () => {
     const lease = await value.json();
     expect(lease.contextId).toBe(config.bootstrapContextId);
     expect(lease.userId).toBe(f.creator.id);
+    if (environment) expect(lease.environment.variables).toEqual({ FIXTURE_VALUE: "private" });
     expect(lease.expiresAt).toBeGreaterThan(Date.now());
-    expect(totals.transactions).toBeLessThanOrEqual(4);
-    expect(totals.queries).toBeLessThanOrEqual(40);
+    expect(totals.transactions).toBeLessThanOrEqual(2);
+    expect(totals.queries).toBeLessThanOrEqual(20);
+  });
+
+  it.each([false, true])("starts a stopped workspace within three transactions and eighteen calls (team headers: %s)", async team => {
+    expect((await f.hello()).status).toBe(200);
+    await pool.query("UPDATE cloud_v2_workspaces SET state='stopped' WHERE id=$1", [f.workspace.id]);
+    const path = `/v1/cloud-v2/workspaces/${f.workspace.id}/start`;
+    const { value, totals } = await measure("start", path, () => f.call(path, "POST", {}, f.viewer,
+      team ? { "X-Zeros-Team-Sharing": "1", "X-Zeros-Team-Ownership": "1" } : {}), 202);
+    expect((await value.json()).workspace.state).toBe("starting");
+    expect(totals.transactions).toBeLessThanOrEqual(3);
+    expect(totals.queries).toBeLessThanOrEqual(18);
   });
 
   it.each(["membership", "session", "stop"])("refuses a ticket when %s changes after the workspace read", async change => {
@@ -83,5 +109,24 @@ database("execution wake request costs", () => {
     const result = await f.call(`/v1/cloud-v2/workspaces/${f.workspace.id}/connect`, "POST", { wake: false }, f.viewer);
     expect(result.status).not.toBe(200);
     expect((await pool.query("SELECT 1 FROM cloud_v2_tokens WHERE workspace_id=$1 AND user_id=$2", [f.workspace.id, f.viewer.id])).rowCount).toBe(0);
+  });
+
+  it.each(["membership", "session"])("refuses Start after a %s revocation while its workspace lock is held", async change => {
+    expect((await f.hello()).status).toBe(200);
+    await pool.query("UPDATE cloud_v2_workspaces SET state='stopped' WHERE id=$1", [f.workspace.id]);
+    const blocker = await pool.connect();
+    await blocker.query("BEGIN");
+    const holder = (await blocker.query("SELECT pg_backend_pid() AS pid")).rows[0].pid;
+    await blocker.query("SELECT 1 FROM cloud_v2_workspaces WHERE id=$1 FOR UPDATE", [f.workspace.id]);
+    const start = f.call(`/v1/cloud-v2/workspaces/${f.workspace.id}/start`, "POST", {}, f.viewer);
+    try {
+      await expect.poll(async () => (await pool.query("SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND $1=ANY(pg_blocking_pids(pid))", [holder])).rowCount)
+        .toBeGreaterThan(0);
+      if (change === "membership") await blocker.query("DELETE FROM organization_members WHERE org_id=$1 AND user_id=$2", [f.organizationId, f.viewer.id]);
+      else await blocker.query("UPDATE auth_sessions SET status='revoked',revoked_at=clock_timestamp() WHERE user_id=$1", [f.viewer.id]);
+      await blocker.query("COMMIT");
+    } finally { await blocker.query("ROLLBACK"); blocker.release(); }
+    expect([401, 403, 409]).toContain((await start).status);
+    expect((await pool.query("SELECT state FROM cloud_v2_workspaces WHERE id=$1", [f.workspace.id])).rows[0].state).toBe("stopped");
   });
 });

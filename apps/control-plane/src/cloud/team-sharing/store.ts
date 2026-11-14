@@ -83,10 +83,14 @@ export class CloudTeamSharing {
   async get(id: string, user: AuthedUser, ownership = false) { return this.document(await this.authority.admit(id,user),ownership); }
 
   async lifecycleDocument(id: string, user: AuthedUser) {
-    const view = await withSystemTx(this.pool, tx => this.authority.snapshot(tx,id,user));
-    if (view.executionMode !== "active") throw teamUnavailable();
-    // Stop needs no repository check; its reply contains only local metadata.
-    return this.document({ user,view,source: null },true);
+    return withSystemTx(this.pool, async tx => {
+      const view = await this.authority.snapshot(tx,id,user);
+      if (view.executionMode !== "active") throw teamUnavailable();
+      // Stop needs no repository check; its reply contains only local metadata.
+      const result = (await this.documents([{ user,view,source: null }],false,true,tx))[0];
+      if (!result) throw teamOwnershipRequired();
+      return result;
+    });
   }
 
   async requireOwnershipAfterHiddenRead(user: AuthedUser, target: { id: string } | { organization: string; number: number }) {

@@ -45,9 +45,9 @@ export const RUNTIME_HANDOFF_SESSION = `(
 export class RuntimeHandoffStore {
   constructor(private readonly pool: pg.Pool) {}
 
-  async recordRuntime(token: string, bootId: string, sha256: string): Promise<void> {
+  async recordRuntime(token: string, bootId: string, sha256: string, transaction?: Tx): Promise<void> {
     if (!/^[a-f0-9]{64}$/.test(sha256)) throw unavailable();
-    await withSystemTx(this.pool, async tx => {
+    const record = async (tx: Tx) => {
       const changed = await tx.query<{ id: string }>(`UPDATE cloud_v2_workspaces w SET worker_runtime_sha256=$3,
         worker_runtime_unknown_activity=CASE WHEN worker_runtime_boot_id IS DISTINCT FROM $2::uuid THEN false ELSE worker_runtime_unknown_activity END,
         worker_runtime_handoff_id=CASE WHEN worker_runtime_boot_id IS DISTINCT FROM $2::uuid THEN NULL ELSE worker_runtime_handoff_id END,
@@ -59,7 +59,8 @@ export class RuntimeHandoffStore {
           WHERE workspace_id=$1 AND state IN ('prepared','committed','activating','rolling_back')
           AND (old_boot_id<>$2::uuid OR token_hash<>$3)`, [changed.rows[0].id, bootId, hashCloudV2Token(token)]);
       }
-    });
+    };
+    await (transaction ? record(transaction) : withSystemTx(this.pool, record));
   }
 
   async runtime(token: string, bootId: string): Promise<string | null> {

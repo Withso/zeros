@@ -3,6 +3,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import type pg from "pg";
 import { HttpError } from "../authz.js";
 import { withSystemTx, type Tx } from "../db.js";
+import { githubGitAuthor } from "../github-git-author.js";
 import type { CloudAgentCredentialKeys } from "../agent-credentials/agent-credential-envelope.js";
 import {
   openGithubCredential,
@@ -179,6 +180,21 @@ export class CloudGithubConnectionStore {
       identity: { id: row.github_user_id, login: row.github_login },
       assertCurrent,
     };
+  }
+  async gitAuthor(scope: CloudGithubConnectionScope, tx: Tx) {
+    // One snapshot binds the selected account and optional display name to
+    // membership, without reading or decrypting credential material.
+    const row = (await tx.query<{ selected_id: string | null; selected_login: string | null;
+      github_user_id: string | null; github_login: string; git_author_name: string | null }>(`SELECT
+        c.github_user_id AS selected_id,c.github_login AS selected_login,a.github_user_id,a.github_login,a.git_author_name
+      FROM organization_members m JOIN users u ON u.id=m.user_id JOIN organizations o ON o.id=m.org_id
+      LEFT JOIN cloud_github_selections s ON s.org_id=m.org_id AND s.owner_user_id=m.user_id
+      LEFT JOIN cloud_github_credentials c ON c.org_id=m.org_id AND c.owner_user_id=m.user_id AND c.method=s.selected_method
+      LEFT JOIN github_authorizations a ON a.owner_user_id=m.user_id AND a.app_variant='github.com'
+      WHERE m.org_id=$1 AND m.user_id=$2 AND u.auth_status='active' AND u.deleted_at IS NULL
+        AND o.deleted_at IS NULL AND NOT o.is_personal AND o.cloud_workspaces_allowed`, [scope.organizationId, scope.userId])).rows[0];
+    if (!row) throw new HttpError(404, "not_found", "Organization not found.");
+    return row.selected_id && row.selected_login ? githubGitAuthor(row, { id: row.selected_id, login: row.selected_login }) : null;
   }
   async fingerprint(scope: CloudGithubConnectionScope, tx?: Tx): Promise<string> {
     return (await (tx ? this.snapshot(tx, scope) : this.read(scope))).generation;

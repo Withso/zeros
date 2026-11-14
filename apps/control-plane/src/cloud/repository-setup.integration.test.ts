@@ -6,6 +6,8 @@ import { grantTestPro } from "../test-pro.js";
 import { CloudV2Computers } from "./computer.js";
 import { createCloudGithubServices } from "./github-composition.js";
 import { CloudV2Store, type CloudV2Workspace } from "./store.js";
+import { withSystemTx } from "../db.js";
+import { workerSourceConfiguration } from "./worker-source.js";
 
 const suite = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 suite("repository setup selection through restore", () => {
@@ -45,6 +47,9 @@ suite("repository setup selection through restore", () => {
     expect(restored).not.toBeNull(); expect(restored).not.toBe("no_computer");
     return { workspace: await store.get(workspace.id, user), attempt, restored };
   }
+  async function batchedSetup(workspace: CloudV2Workspace) {
+    return (await withSystemTx(pool, tx => workerSourceConfiguration(tx, workspace))).setup;
+  }
   it.each([
     { setup: "echo original", setupScript: "fixture-setup/original.sh" },
     { setup: "echo original" },
@@ -53,10 +58,12 @@ suite("repository setup selection through restore", () => {
     const original = await workspace(selection);
     const before = await services.workspaceSetup(original, computers);
     expect(before).toEqual(Object.keys(selection).length ? selection : null);
+    expect(await batchedSetup(original)).toEqual(before);
     await build({ setup: "echo replacement", setupScript: "fixture-setup/replacement.sh" });
     const current = await restore(original);
     expect(current.workspace.computerBuildId).not.toBe(original.computerBuildId);
     expect(await services.workspaceSetup(current.workspace, computers)).toEqual(before);
+    expect(await batchedSetup(current.workspace)).toEqual(before);
   });
   it("retains the first selection through two replacement disks", async () => {
     const original = await workspace({ setup: "echo original", setupScript: "fixture-setup/first.sh" });
@@ -68,6 +75,7 @@ suite("repository setup selection through restore", () => {
     await build({ setup: "echo third", setupScript: "fixture-setup/third.sh" });
     const second = await restore(first.workspace, "bx_setup001");
     expect(await services.workspaceSetup(second.workspace, computers)).toEqual(before);
+    expect(await batchedSetup(second.workspace)).toEqual(before);
   });
   it("never takes a reused name's replacement source", async () => {
     const original = await workspace({ setup: "echo original", setupScript: "fixture-setup/original.sh" });
@@ -76,6 +84,7 @@ suite("repository setup selection through restore", () => {
     await build({ setup: "echo replacement", setupScript: "fixture-setup/replacement.sh" });
     const current = await restore(original);
     expect(await services.workspaceSetup(current.workspace, computers)).toBeNull();
+    expect(await batchedSetup(current.workspace)).toBeNull();
     expect((await services.identities.primary(current.workspace)).repositoryId).toBe("42");
   });
   it("keeps setup pins internal to the restore journal", async () => {
@@ -95,18 +104,23 @@ suite("repository setup selection through restore", () => {
     await pool.query("UPDATE cloud_v2_workspaces SET restore_create=$2::jsonb WHERE id=$1", [original.id,
       JSON.stringify({ from: "old-snapshot", name: "old-restore", env: {}, requestedAt: new Date().toISOString() })]);
     await expect(services.workspaceSetup(original, computers)).rejects.toMatchObject({ code: "cloud_repository_setup_review_required" });
+    await expect(batchedSetup(original)).rejects.toMatchObject({ code: "cloud_repository_setup_review_required" });
     await build({ setupScript: "fixture-setup/replacement.sh" });
     const current = await restore(original);
     await expect(services.workspaceSetup(current.workspace, computers)).rejects.toMatchObject({ code: "cloud_repository_setup_review_required" });
+    await expect(batchedSetup(current.workspace)).rejects.toMatchObject({ code: "cloud_repository_setup_review_required" });
   });
   it("preserves an explicitly empty original pin and refuses malformed pins", async () => {
     const original = await workspace({ setupScript: "fixture-setup/current.sh" });
     await pool.query("UPDATE cloud_v2_workspaces SET restore_create=$2::jsonb WHERE id=$1", [original.id, JSON.stringify({ setupBuildId: null })]);
     expect(await services.workspaceSetup(original, computers)).toBeNull();
+    expect(await batchedSetup(original)).toBeNull();
     await build({ setupScript: "fixture-setup/replacement.sh" });
     const current = await restore(original);
     expect(await services.workspaceSetup(current.workspace, computers)).toBeNull();
+    expect(await batchedSetup(current.workspace)).toBeNull();
     await pool.query("UPDATE cloud_v2_workspaces SET restore_create=$2::jsonb WHERE id=$1", [original.id, JSON.stringify({ setupBuildId: "not-a-build" })]);
     await expect(services.workspaceSetup(current.workspace, computers)).rejects.toMatchObject({ code: "cloud_repository_setup_review_required" });
+    await expect(batchedSetup(current.workspace)).rejects.toMatchObject({ code: "cloud_repository_setup_review_required" });
   });
 });
