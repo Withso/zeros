@@ -1,5 +1,5 @@
 import type pg from "pg";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { EmailConfig } from "./email.js";
 import type { WorkOSManagementProvider } from "./workos-provider.js";
@@ -62,6 +62,31 @@ function options(
     ...overrides,
   } as WorkOSSyncRuntimeOptions;
 }
+
+afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
+
+it("keeps empty WorkOS queues quiet for sixty seconds while retaining notification wakes", async () => {
+  vi.useFakeTimers();
+  vi.spyOn(Math, "random").mockReturnValue(0);
+  const query = vi.fn(async () => ({ rows: [] }));
+  const runtime = startWorkOSSyncRuntime(options({
+    pool: { connect: async () => ({ query, release: vi.fn() }) } as unknown as pg.Pool,
+    commandIntervalMs: undefined, notificationIntervalMs: undefined, deletionIntervalMs: undefined,
+  }));
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    const initial = query.mock.calls.length;
+    expect(initial).toBeGreaterThan(0);
+    await vi.advanceTimersByTimeAsync(59_999);
+    expect(query).toHaveBeenCalledTimes(initial);
+    await vi.advanceTimersByTimeAsync(1);
+    const periodic = query.mock.calls.length;
+    expect(periodic).toBeGreaterThan(initial);
+    runtime.notify();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(query.mock.calls.length).toBeGreaterThan(periodic);
+  } finally { await runtime.stop(); }
+});
 
 describe("WorkOS sync runtime migration boundary", () => {
   beforeEach(() => {

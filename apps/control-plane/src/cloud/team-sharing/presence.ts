@@ -6,7 +6,7 @@ import { CLOUD_V2_LIVE_ACCESS } from "../workspace-access.js";
 import type { CloudTeamAuthority, TeamAdmission } from "./authority.js";
 import { teamNotFound } from "./contract.js";
 
-export const TEAM_PRESENCE_TTL_MS = 65_000, TEAM_PRESENCE_RENEW_MS = 30_000;
+export const TEAM_PRESENCE_TTL_MS = 65_000, TEAM_PRESENCE_RENEW_MS = 60_000;
 const presentPeople = `SELECT DISTINCT p.user_id
   FROM cloud_v2_workspace_presence p
   JOIN cloud_v2_workspaces w ON w.id=p.workspace_id AND w.org_id=p.org_id AND w.access_epoch=p.access_epoch

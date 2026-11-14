@@ -3,7 +3,7 @@
 import type { CloudExecutionContexts } from "./execution/store.js";
 import { CloudWorkspaceCreateSchema, createCloudWorkspaceOperations } from "./workspace-create.js";
 import { rateLimit } from "../ratelimit.js";
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
 import { CLOUD_CLIENT_ROLLOVER_FEATURE } from "./client-auth-contract.js";
@@ -103,7 +103,17 @@ function workspaceDocument(workspace: CloudGithubWorkspaceDocument, promptOutbox
 export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
   const app = new Hono();
   const chatEdits = deps.store.chatEdits;
-  if (deps.teamSharing) app.route("/",createCloudTeamRoutes(deps.teamSharing,value => workspaceDocument(value,deps.promptOutbox === true,!!chatEdits)));
+  const connections = new WeakMap<Context, Promise<Awaited<ReturnType<CloudExecutionContexts["connectionWorkspace"]>>>>();
+  const connectionWorkspace = (c: Context, id: string) => {
+    let pending = connections.get(c);
+    if (!pending) {
+      pending = deps.execution?.connectionWorkspace(id, c.get("user")) ?? Promise.resolve(undefined);
+      connections.set(c, pending);
+    }
+    return pending;
+  };
+  if (deps.teamSharing) app.route("/",createCloudTeamRoutes(deps.teamSharing,value => workspaceDocument(value,deps.promptOutbox === true,!!chatEdits),
+    async (c,id) => Boolean(await connectionWorkspace(c,id))));
   if (deps.localDevices) app.route("/", createCloudLocalDeviceRoutes(deps.localDevices));
   if (deps.workspaceSync) app.route("/", createCloudWorkspaceSyncRoutes(deps.workspaceSync));
   if (deps.workspaceGithubReadTokens) app.route("/", createCloudWorkspaceGithubReadTokenRoutes(deps.workspaceGithubReadTokens));
@@ -209,8 +219,8 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
     if (!parsed.success) throw new HttpError(400, "invalid_request", "Invalid cloud workspace connection request");
     const { wake } = parsed.data;
     const userId = c.get("user").id;
-    const active = deps.execution && await deps.execution.active(id.data);
-    const acting = active ? await deps.execution!.workspace(id.data, userId, c.get("user")) : undefined;
+    const acting = await connectionWorkspace(c, id.data);
+    const active = Boolean(acting);
     const workspace = acting?.workspace ?? await deps.store.get(id.data, userId);
     const explicitWake = c.req.query("wakePolicy") === "explicit";
     if (explicitWake && (workspace.archivedAt || workspace.state === "stopping" || (!wake && workspace.state === "stopped")))
@@ -231,7 +241,8 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
       if (!instance.success) throw new HttpError(400, "invalid_request", "Invalid cloud connection binding");
       clientInstanceId = instance.data;
     }
-    const ticket = active ? await deps.execution!.clients.ticket(workspace.id, c.get("user"), wake, clientInstanceId) : await deps.store.issueToken({ workspaceId: workspace.id, kind: "connect", userId, ttlMs: CONNECT_TICKET_TTL_MS, authority: c.get("user"), wake });
+    const ticket = active ? await deps.execution!.clients.ticket(workspace.id, c.get("user"), wake, clientInstanceId,
+      wake && workspace.state === "stopped" ? undefined : acting!.proof) : await deps.store.issueToken({ workspaceId: workspace.id, kind: "connect", userId, ttlMs: CONNECT_TICKET_TTL_MS, authority: c.get("user"), wake });
     return c.json({
       url: `${deps.bridgeBaseUrl.replace(/\/+$/, "")}/v2/cloud/workspaces/${workspace.id}/bridge`,
       protocols: [CLOUD_V2_BRIDGE_PROTOCOL, `ticket.${ticket.token}`],

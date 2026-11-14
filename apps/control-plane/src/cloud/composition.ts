@@ -199,26 +199,19 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
       const result = await mcp.oauth.authorizationForRepository(context.org_id, context.user_id!, workspace.repository, id, force, target);
       await check(); return result;
     } } satisfies Pick<import("./execution/store.js").ExecutionDeps, "mcpAuthorization"> : {}),
-    material: async (context, check) => {
-      const { workspace, gitIdentity, primary } = await withSystemTx(pool, async tx => {
-        const row = (await tx.query<Parameters<typeof cloudV2WorkspaceFromRow>[0]>(
-          "SELECT * FROM cloud_v2_workspaces WHERE id=$1", [context.workspace_id])).rows[0];
-        if (!row) throw new HttpError(409, "actor_changed", "Execution workspace changed");
-        const workspace = cloudV2WorkspaceFromRow(row);
-        const gitIdentity = await storedGitIdentity(tx, { organizationId: context.org_id, userId: context.user_id! });
-        const primary = await github.identities.primary(workspace, tx);
-        await check(tx);
-        return { workspace, gitIdentity, primary };
-      });
-      const material = await withSystemTx(pool, async tx => {
-        const environment = context.kind === "client" ? undefined : await environments.resolveExecution(workspace, context.user_id!, context.id, tx);
-        const mcpServers = context.kind === "turn" && mcp ? await mcp.store.resolve(context.org_id, context.user_id!, workspace.repository,
-          primary, tx) : undefined;
-        await check(tx);
-        return { ...(environment ? { environment } : {}), ...(mcpServers ? { mcpServers } : {}) };
-      });
-      return { ...material, gitIdentity };
-    },
+    material: (context, check) => withSystemTx(pool, async tx => {
+      const row = (await tx.query<Parameters<typeof cloudV2WorkspaceFromRow>[0]>(
+        "SELECT * FROM cloud_v2_workspaces WHERE id=$1", [context.workspace_id])).rows[0];
+      if (!row) throw new HttpError(409, "actor_changed", "Execution workspace changed");
+      const workspace = cloudV2WorkspaceFromRow(row);
+      const gitIdentity = await storedGitIdentity(tx, { organizationId: context.org_id, userId: context.user_id! });
+      await check(tx);
+      const environment = context.kind === "client" ? undefined : await environments.resolveExecution(workspace, context.user_id!, context.id, tx);
+      const mcpServers = context.kind === "turn" && mcp ? await mcp.store.resolve(context.org_id, context.user_id!, workspace.repository,
+        await github.identities.primary(workspace, tx), tx) : undefined;
+      await check(tx);
+      return { ...(environment ? { environment } : {}), ...(mcpServers ? { mcpServers } : {}), gitIdentity };
+    }),
   });
   store.prompts.execution = execution;
   store.api.execution = execution;
@@ -232,10 +225,12 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   const workerConfig = async (workspace: CloudV2Workspace & Partial<Pick<CloudV2WorkerSession, "loginRevision" | "executionMode">>, mode: "admission" | "continuation" = "admission",
     proof?: CloudSourceProof): Promise<ConfigFrame> => {
     if (workspace.executionMode === "active" || workspace.executionMode === undefined && await execution.active(workspace.id)) {
-      await execution.deps.logins.refreshAvailability(workspace.id);
+      const availability = await execution.deps.logins.refreshPresentation(workspace.id);
       const bootstrapContextId = await execution.bootstrap(workspace.id);
-      const [setup, target, baseCommit, presentation, commitIdentity] = await Promise.all([github.workspaceSetup(workspace, computers), github.identities.primary(workspace),
-        store.baseCommit(workspace.id), execution.deps.logins.presentation(workspace.id), withSystemTx(pool, async tx => {
+      const [setup, { target, baseCommit, commitIdentity }] = await Promise.all([
+        github.workspaceSetup(workspace, computers), withSystemTx(pool, async tx => {
+          const target = await github.identities.primary(workspace, tx);
+          const baseCommit = await store.baseCommit(workspace.id, tx);
           // A relay room can retain its workspace snapshot across Reassign.
           const current = (await tx.query<{ creator_user_id: string | null }>("SELECT creator_user_id FROM cloud_v2_workspaces WHERE id=$1", [workspace.id])).rows[0];
           if (!current) throw new HttpError(409, "actor_changed", "Execution workspace changed");
@@ -245,10 +240,11 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
               if (error instanceof HttpError && error.status === 404 && error.code === "not_found") return null;
               throw error;
             }) : null;
-          return { gitIdentitySource: current.creator_user_id ? "creator" as const : "actor" as const,
-            gitIdentity };
+          return { target, baseCommit,
+            commitIdentity: { gitIdentitySource: current.creator_user_id ? "creator" as const : "actor" as const, gitIdentity } };
         })]);
-      return { t: "config", actingUser: 1, bootstrapContextId, agents: {}, ...presentation, ...commitIdentity, loginRevision: workspace.loginRevision ?? "0",
+      return { t: "config", actingUser: 1, bootstrapContextId, agents: {}, ...availability?.presentation, ...commitIdentity,
+        loginRevision: availability?.loginRevision ?? workspace.loginRevision ?? "0",
         promptOutbox: 1, pushSignals: 1, notifyUser: 1, githubPullRequests: 1, githubUserTokens: 1, agentInteractions: 1, runtimeUpdate: 1,
         workspace: { id: workspace.id, organizationId: workspace.organizationId, repository: workspace.repository,
           checkoutPath: `${CLOUD_V2_HOME}/${workspace.repository}`, branch: workspace.branch, baseBranch: workspace.baseBranch,

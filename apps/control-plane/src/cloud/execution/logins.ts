@@ -90,17 +90,22 @@ export class CloudExecutionLogins {
   }
 
   async refreshAvailability(workspaceId: string, transaction?: Tx): Promise<string | null> {
+    return (await this.refreshPresentation(workspaceId, transaction))?.loginRevision ?? null;
+  }
+
+  async refreshPresentation(workspaceId: string, transaction?: Tx): Promise<{ loginRevision: string; presentation: AgentPresentation } | null> {
     const refresh = async (tx: Tx) => {
       const row = (await tx.query<{ login_revision: string; org_id: string }>(
         "SELECT login_revision::text,org_id FROM cloud_v2_workspaces WHERE id=$1 AND execution_mode='active' AND state<>'deleted'", [workspaceId])).rows[0];
       if (!row) return null;
-      const available = await this.availability(workspaceId, tx);
+      const presentation = await this.presentation(workspaceId, tx);
+      const available = presentation.agentLogins;
       const updated = await tx.query<{ revision: string }>(`UPDATE cloud_v2_workspaces
         SET creator_agent_logins=$2,login_revision=login_revision+1
         WHERE id=$1 AND creator_agent_logins IS DISTINCT FROM $2::jsonb RETURNING login_revision::text AS revision`, [workspaceId, available]);
       if (updated.rowCount) await tx.query("SELECT pg_notify('zeros_cloud_v2_logins',$1)",
         [JSON.stringify({ ownerUserId: null, organizationId: row.org_id, availabilityOnly: true })]);
-      return updated.rows[0]?.revision ?? row.login_revision;
+      return { loginRevision: updated.rows[0]?.revision ?? row.login_revision, presentation };
     };
     if (transaction) return refresh(transaction);
     // Only a changed public map writes. Serializable snapshots prevent a late

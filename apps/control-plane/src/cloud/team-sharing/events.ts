@@ -7,7 +7,7 @@ import { CloudTeamSignals, type TeamHint } from "./signals.js";
 import { teamUnavailable } from "./contract.js";
 import type { TeamAdmission } from "./authority.js";
 
-const AUTHORITY_INTERVAL_MS = 5_000, TOKEN_END_MARGIN_MS = 2_000, TOKEN_END_SKEW_MS = 10_000, HEARTBEAT_MS = 25_000;
+const AUTHORITY_INTERVAL_MS = 60_000, TOKEN_END_MARGIN_MS = 2_000, TOKEN_END_SKEW_MS = 10_000, HEARTBEAT_MS = 60_000;
 
 /** A reader receives only invalidations and presence. HTTP mirror reads own
  * content authorization; this channel never opens the executable bridge. */
@@ -61,7 +61,13 @@ export class CloudTeamEvents {
             if (encoded !== previousPresence) await stream.writeSSE({ event: "presence",data: encoded });
             previousPresence = encoded;
           }
-          if (pending.delete("changed")) await stream.writeSSE({ event: "changed",data: JSON.stringify({ workspaceId }) });
+          if (pending.delete("changed")) {
+            // Idle sockets carry no data. A content hint needs a current check
+            // even when a separate revocation notification was lost.
+            await this.sharing.authority.assert(proof);
+            if (this.now()>=tokenEnd-TOKEN_END_MARGIN_MS) break;
+            await stream.writeSSE({ event: "changed",data: JSON.stringify({ workspaceId }) });
+          }
           if (this.now()>=nextHeartbeat) { await stream.writeSSE({ event: "heartbeat",data: "{}" }); nextHeartbeat = this.now()+HEARTBEAT_MS; }
           first = false;
           if (pending.size) continue;

@@ -100,8 +100,15 @@ const frame = z.unknown();
 export const HISTORY_DIGEST_FEATURE = "history-digest-v1";
 export const CLOUD_V2_MAX_DIGEST_CHATS = 4096;
 export const CloudV2HistoryDigestSchema = z.string().regex(/^[0-9a-f]{64}$/);
+/** history-digest-deletions-v1: the reply also names the control plane's soft-deleted chats (kept until the workspace
+ * is deleted), sent only to a worker that advertised it. */
+export const HISTORY_DIGEST_DELETIONS_FEATURE = "history-digest-deletions-v1";
 export const CloudV2HistoryDigestsReplySchema = z.object({ chats: z.array(z.object({
-  chatId: z.string().min(1).max(256), digest: CloudV2HistoryDigestSchema.nullable() }).strict()).max(CLOUD_V2_MAX_DIGEST_CHATS) }).strict();
+  chatId: z.string().min(1).max(256), digest: CloudV2HistoryDigestSchema.nullable() }).strict()).max(CLOUD_V2_MAX_DIGEST_CHATS),
+  deleted: z.array(z.string().min(1).max(256)).max(CLOUD_V2_MAX_DIGEST_CHATS).optional() }).strict()
+  .refine(value => value.chats.length + (value.deleted?.length ?? 0) <= CLOUD_V2_MAX_DIGEST_CHATS, "Too many chats")
+  .refine(value => { const live = new Set(value.chats.map(chat => chat.chatId)); return !(value.deleted ?? []).some(id => live.has(id)); },
+    "A chat cannot be both live and deleted");
 export type CloudV2HistoryDigestsReply = z.infer<typeof CloudV2HistoryDigestsReplySchema>;
 export const CloudV2MessageRowSchema = z.object({
   msgId: z.string().min(1).max(256),

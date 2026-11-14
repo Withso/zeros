@@ -17,14 +17,30 @@ import { EXECUTION_MINIMUM_LIFETIME_MS, assertExecutionLifetime, withExecutionLi
 export type ExecutionConnectAuthority = VersionedExecutionAuthority & { signature: string; stopGeneration: string; tokenEnd: number; clientInstanceId?: string };
 const record = z.object({ type: z.string(), id: CloudV2PromptIdSchema.optional(), op: z.string().optional(),
   sessionId: CloudV2PromptIdSchema.optional(), params: z.unknown().optional() }).passthrough();
+const READ_OPERATIONS: ReadonlySet<string> = new Set([
+  "workspace.list", "workspace.get", "workspace.resources", "skills.list",
+  "file.read", "file.readRange", "file.tree", "file.ignored", "fs.listDir",
+  "chats.list", "chats.titleSeeds", "chats.summariesForFolder", "messages.window", "messages.windowOlder", "messages.search",
+  "turns.get", "turns.list", "turns.diff", "turns.commits",
+  "git.status", "git.changeCounts", "git.changeLineCounts", "git.hasChanges", "git.diff", "git.show", "git.log",
+  "git.branches", "git.remoteBranches", "git.listAllBranches", "git.stashList", "git.tagList", "git.repoBranchCatalog",
+]);
+
+/** New and unknown operations retain current admission until their worker behavior is reviewed. */
+export function cloudClientReadFrame(frame: unknown): boolean {
+  const parsed = record.safeParse(frame);
+  if (!parsed.success || parsed.data.type !== "WORKSPACE_REQUEST" || !parsed.data.id || !parsed.data.op || !READ_OPERATIONS.has(parsed.data.op)) return false;
+  return parsed.data.op !== "git.repoBranchCatalog" || (parsed.data.params as { fetch?: unknown } | null)?.fetch !== true;
+}
 
 export class CloudExecutionClients {
   constructor(readonly contexts: CloudExecutionContexts) {}
 
-  async ticket(workspaceId: string, user: AuthedUser, wake: boolean, clientInstanceId?: string) {
+  async ticket(workspaceId: string, user: AuthedUser, wake: boolean, clientInstanceId?: string, admitted?: ExecutionAdmission) {
     if (clientInstanceId && (!user.authentication.sessionId || !z.uuid().safeParse(clientInstanceId).success))
       throw new HttpError(400, "invalid_request", "Invalid cloud connection binding");
-    const proof = await this.contexts.deps.authority.admit(workspaceId, user.id, { user, minimumSourceMs: EXECUTION_MINIMUM_LIFETIME_MS });
+    if (admitted && (admitted.user !== user || admitted.person.workspaceId !== workspaceId || admitted.person.userId !== user.id)) throw actorChanged();
+    const proof = admitted ?? await this.contexts.deps.authority.admit(workspaceId, user.id, { user, minimumSourceMs: EXECUTION_MINIMUM_LIFETIME_MS });
     const tokenEnd = user.authentication.tokenExpiresAt ? user.authentication.tokenExpiresAt * 1000 : proof.until;
     const expiresAt = new Date(Math.min(Date.now() + 60_000, tokenEnd));
     const token = newCloudV2Token("connect");

@@ -9,6 +9,7 @@ import { requestTiming } from "./request-timing.js";
 import { resetMigratedTestDatabase } from "./test-database.js";
 import { backgroundBudgetTable, budgetTable, deferred, holdLoadStream, LOAD_BUDGETS, LoadBudgetProbe, routeTable, scenarioTotals, selectLoadRequests, type LoadScenario } from "./test-support/load-budget.js";
 import { loadBudgetFixture, loadBudgetReadFrame, OBSERVED_IDLE_REPLAY, R1_IDLE_REPLAY } from "./test-support/load-budget-fixture.js";
+import { CENSUS_CAPTURE, CENSUS_PROFILES, CENSUS_ROUTES, censusCaptureTable } from "./test-support/load-budget-census.js";
 
 const database = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 describe("load replay stream lifetime", () => {
@@ -174,7 +175,7 @@ database("control-plane load budgets through the router and PostgreSQL", () => {
       });
       expect(cost.requests[0]).toMatchObject({ statements: 1, transactions: 0 });
       expect(cost.background).toMatchObject({ statements: calls * (extraStatement ? 6 : 5) + Number(unattributed), transactions: calls, inFlight: 0 });
-      return { ...cost, elapsedMs: 5000 };
+      return { ...cost, elapsedMs: 60_000 };
     };
     for (const calls of [1, 2]) {
       const rows = backgroundBudgetTable(new Map([["idle", await sample(calls)]]));
@@ -281,6 +282,33 @@ database("control-plane load budgets through the router and PostgreSQL", () => {
   });
 });
 
+database("captured app census replay", () => {
+  it.each(CENSUS_PROFILES)("replays $name through successful routes without changing workspace state", async profile => {
+    const pool = createPool(process.env.TEST_DATABASE_URL!, { maxConnections: 10 });
+    const probe = new LoadBudgetProbe(pool);
+    let fixture: Awaited<ReturnType<typeof loadBudgetFixture>> | undefined;
+    try {
+      fixture = await loadBudgetFixture(pool, probe);
+      const census = await fixture.census(profile);
+      const { cost } = await probe.measure(profile.name, () => census.replay());
+      expect(scenarioTotals(cost)).toMatchObject({ requests: profile.routes.reduce((sum, row) => sum + row.requests, 0), failures: 0, inFlight: 0 });
+      const routes = routeTable(cost);
+      expect(routes).toHaveLength(profile.routes.length);
+      for (const row of profile.routes) {
+        const identity = CENSUS_ROUTES[row.operation];
+        expect(routes.find(route => route.route === identity.route && route.method === identity.method)).toMatchObject({ ...identity, requests: row.requests });
+      }
+      expect(await census.verify()).toMatchObject({ state: profile.state, liveClients: Number(profile.state === "running"), liveTurns: 0, historyRows: 4 });
+      console.info("Census control counts:", JSON.stringify({ name: profile.name, routes,
+        background: backgroundBudgetTable(new Map([[profile.name, cost]])) }));
+      expect(backgroundBudgetTable(new Map([[profile.name, cost]])).filter(row => row.ratchet === "FAIL")).toEqual([]);
+    } finally {
+      try { await fixture?.close(); }
+      finally { probe.close(); await pool.end(); vi.restoreAllMocks(); vi.unstubAllGlobals(); }
+    }
+  }, 60_000);
+});
+
 database("load-budget workload", () => {
   let pool: pg.Pool, probe: LoadBudgetProbe;
   let fixture: Awaited<ReturnType<typeof loadBudgetFixture>> | undefined;
@@ -301,7 +329,7 @@ database("load-budget workload", () => {
     probe.setDelay(statementDelayMs);
     const wallClock = process.env.LOAD_BUDGET_WALL_CLOCK === "1";
     const wallProfile = process.env.LOAD_BUDGET_WALL_PROFILE ?? "observed";
-    expect(["observed", "r1"]).toContain(wallProfile);
+    expect(["observed", "r1", ...CENSUS_PROFILES.map(profile => profile.name)]).toContain(wallProfile);
     const scenarios = new Map<string, LoadScenario>();
     const list = await probe.measure("workspace-list", () => fixture!.workspaceList());
     scenarios.set("workspace-list", list.cost);
@@ -346,11 +374,30 @@ database("load-budget workload", () => {
     expect(fixture.pollWaits(), "real empty-poll waiter/recheck branch").toBe(OBSERVED_IDLE_REPLAY.find(row => row.operation === "pull")!.count + R1_IDLE_REPLAY.find(row => row.operation === "pull")!.count);
     expect(fixture.observerStatus()).toEqual({ enabled: true, pending: 0, dropped: 0, errors: 0 });
     await fixture.close(); fixture = undefined;
+    vi.restoreAllMocks(); vi.unstubAllGlobals();
+    for (const profile of CENSUS_PROFILES) {
+      fixture = await loadBudgetFixture(pool, probe);
+      const census = await fixture.census(profile);
+      const sample = await probe.measure(profile.name, () => census.replay(wallClock && wallProfile === profile.name));
+      scenarios.set(profile.name, sample.cost);
+      const routes = routeTable(sample.cost);
+      expect(routes).toHaveLength(profile.routes.length);
+      for (const row of profile.routes) {
+        const identity = CENSUS_ROUTES[row.operation];
+        expect(routes.find(route => route.route === identity.route && route.method === identity.method)).toMatchObject({ ...identity, requests: row.requests });
+      }
+      console.info(`Captured app profile: ${profile.name}; ${CENSUS_CAPTURE.scope}`, await census.verify());
+      expect(fixture.observerStatus()).toEqual({ enabled: true, pending: 0, dropped: 0, errors: 0 });
+      await fixture.close(); fixture = undefined;
+      vi.restoreAllMocks(); vi.unstubAllGlobals();
+    }
     const readFrame = await loadBudgetReadFrame(pool, probe);
     scenarios.set("read-frame", readFrame.cost);
 
     console.info(`Idle profile: observed Alpha; 300000 simulated ms; ${wallClock && wallProfile === "observed" ? "wall-paced" : "compressed request replay (periodic server work is a lower bound)"}`);
     console.info(`R1 idle profile: server cost at the approved fallback rates; renewals excluded; ${wallClock && wallProfile === "r1" ? "wall-paced" : "compressed request replay (periodic server work is a lower bound)"}. This proves SQL per route mix, not timer rates.`);
+    console.info("App census provenance and body assumptions:", CENSUS_CAPTURE);
+    console.table(censusCaptureTable());
     for (const [name, cost] of scenarios) {
       if (["turn-lease", "running-stream", "periodic-renewals", "wake-replacements"].includes(name)) continue;
       console.info(`Load scenario: ${name}; statement delay ${statementDelayMs} ms; write census ${cost.writesObserved ? "enabled (diagnostic queries excluded)" : "disabled"}`);
@@ -368,10 +415,10 @@ database("load-budget workload", () => {
     measured = budgetTable(scenarios);
     background = backgroundBudgetTable(scenarios);
     expect(measured.map(row => [row.scenario, row.metric])).toEqual(LOAD_BUDGETS.map(row => [row.scenario, row.metric]));
-    console.info("Idle ratchets measure HTTP requests only. Idle targets include background SQL. Background calls are bounded by startup/teardown plus the maximum ticks in the measured wall-clock window; each call also has its own cost ceiling.");
+    console.info("Idle ratchets and transaction ceilings count HTTP work; SQL statement targets include background work. Background calls are bounded by startup/teardown plus the maximum ticks in the measured wall-clock window; each call also has its own cost ceiling.");
     console.table(measured, ["phase", "scenario", "metric", "observed", "baseline", "ratchet", "targetObserved", "maximum", "result"]);
     console.table(background);
-    if (reportPath) await writeFile(reportPath, JSON.stringify({ version: 1, profile: "load-budget-r1-background", wallClock, wallProfile, statementDelayMs, budgets: measured, backgroundBudgets: background,
+    if (reportPath) await writeFile(reportPath, JSON.stringify({ version: 1, profile: "load-budget-r1-background-census", census: CENSUS_CAPTURE, wallClock, wallProfile, statementDelayMs, budgets: measured, backgroundBudgets: background,
       scenarios: [...scenarios].map(([name, cost]) => ({ name, elapsedMs: cost.elapsedMs, totals: scenarioTotals(cost), routes: routeTable(cost), background: cost.background })) }, null, 2) + "\n", { flag: "wx", mode: 0o600 });
   }, 600_000);
 

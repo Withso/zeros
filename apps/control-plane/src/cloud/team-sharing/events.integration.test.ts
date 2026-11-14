@@ -103,7 +103,7 @@ database("passive team transcript events", () => {
     await first.wait("changed"); await second.wait("changed");
     const firstFrom = first.frames.length, secondFrom = second.frames.length;
     for (let cycle=1;cycle<=2;cycle++) {
-      now += 30_000; const a = first.frames.length, b = second.frames.length; await tick();
+      now += 60_000; const a = first.frames.length, b = second.frames.length; await tick();
       await first.wait("heartbeat",() => true,a); await second.wait("heartbeat",() => true,b);
       await vi.waitFor(() => expect(renew).toHaveBeenCalledTimes(cycle*2),{ interval: 5 });
     }
@@ -157,7 +157,7 @@ database("passive team transcript events", () => {
     await first.close(); expect((await f.sharing.events.presence.snapshot(proof)).total).toBe(1);
     await pool.query("UPDATE cloud_v2_workspace_presence SET expires_at=now()-interval '1 second' WHERE workspace_id=$1",[f.workspace.id]);
     expect((await f.sharing.events.presence.snapshot(proof)).total).toBe(0);
-    now += 30_000; await tick();
+    now += 60_000; await tick();
     await vi.waitFor(() => expect(second.ended()).toBe(true),{ interval: 5 });
   });
 

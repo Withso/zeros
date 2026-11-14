@@ -11,7 +11,7 @@ export function startLocalCommandMaintenance(requests: CloudLocalCommands, signa
   }, () => logger.error("[local-commands] maintenance_unavailable"), async () => {
     const due = (await Promise.all([requests.nextDue(),notifications?.nextDue()])).filter((value): value is number => value != null);
     return due.length ? Math.min(...due) : null;
-  }, { readBeforeRun: true, jitter: true });
+  }, { readBeforeRun: true });
   const unsubscribe = signals.subscribe(() => scheduler.notify());
   void signals.start().catch(() => logger.error("[local-commands] notifications_unavailable"));
   scheduler.start();

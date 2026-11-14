@@ -2,7 +2,7 @@ import { Hono, type Context } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
 import { HttpError } from "../authz.js";
-import { CLOUD_V2_MAX_FRAME_BYTES, CloudV2WorkerActivitySchema, CloudV2WorkerHelloSchema, CloudV2WorkerHistorySchema, CloudV2WorkerTimingSchema, CloudV2RenewRequestSchema, CloudV2TurnLeaseRequestSchema, CloudV2TerminalLeaseRequestSchema, CloudV2ClientLeaseRequestSchema, CloudV2BootstrapLeaseRequestSchema, CloudV2RetiredRequestSchema, CloudV2BootCleanRequestSchema, ACTING_USER_FEATURE, HISTORY_DIGEST_FEATURE, type CloudV2ControlFrame } from "./contract.js";
+import { CLOUD_V2_MAX_FRAME_BYTES, CloudV2WorkerActivitySchema, CloudV2WorkerHelloSchema, CloudV2WorkerHistorySchema, CloudV2WorkerTimingSchema, CloudV2RenewRequestSchema, CloudV2TurnLeaseRequestSchema, CloudV2TerminalLeaseRequestSchema, CloudV2ClientLeaseRequestSchema, CloudV2BootstrapLeaseRequestSchema, CloudV2RetiredRequestSchema, CloudV2BootCleanRequestSchema, ACTING_USER_FEATURE, HISTORY_DIGEST_FEATURE, HISTORY_DIGEST_DELETIONS_FEATURE, type CloudV2ControlFrame } from "./contract.js";
 import { emitCloudV2Timing, type CloudV2TimingRecord } from "./lifecycle.js";
 import type { CloudV2Store, CloudV2WorkerSession, CloudV2Workspace } from "./store.js";
 import { isCloudV2Token } from "./tokens.js";
@@ -137,7 +137,7 @@ async function configuration(deps: CloudV2WorkerRouteDeps, workspace: CloudV2Wor
     }
     const after = await currentSession(deps, token, bootId, handoff);
     if (!after || !sameMaterialAuthority(before, after)) throw unauthorized();
-    const revision = before.loginRevision;
+    const revision = active ? config.loginRevision ?? before.loginRevision : before.loginRevision;
     if (revision === after.loginRevision) {
       const { api, agentLogins, agentModels, localCommands: _localCommands, localCommandReason: _localCommandReason, notifyUser: _notifyUser, mcpServers, githubPullRequests, githubUserTokens, gitIdentity: _gitIdentity, gitIdentitySource: _gitIdentitySource, agentInteractions, codeReview, historyReplacement: _historyReplacement, historyDigest: _historyDigest, environment, runtimeUpdate: _runtimeUpdate, pushSignals, ...legacy } = config;
       if (environment && !features.has("workspace-environment-v1"))
@@ -403,12 +403,13 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
     return c.json({ sequence });
   });
   app.post(`${CLOUD_V2_WORKER_API}/history/digests`, async c => {
-    if (!workerFeatures(c).has(HISTORY_DIGEST_FEATURE) || !workerFeatures(c).has("history-replace-v1") || !deps.store.workerHistoryDigests)
+    const features = workerFeatures(c);
+    if (!features.has(HISTORY_DIGEST_FEATURE) || !features.has("history-replace-v1") || !deps.store.workerHistoryDigests)
       throw new HttpError(404, "not_found", "History digests are unavailable");
     const bootId = c.req.header("x-zeros-worker-boot");
     if (!bootId || !z.string().uuid().safeParse(bootId).success) throw unauthorized();
     await body(c, z.object({}).strict());
-    const reply = await deps.store.workerHistoryDigests(bearer(c), bootId);
+    const reply = await deps.store.workerHistoryDigests(bearer(c), bootId, features.has(HISTORY_DIGEST_DELETIONS_FEATURE));
     if (!reply) throw unauthorized();
     return c.json(reply);
   });

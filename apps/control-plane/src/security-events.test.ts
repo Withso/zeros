@@ -2,7 +2,7 @@ import { EventEmitter } from "node:events";
 import type pg from "pg";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { PostgresSecurityEventBroker, waitForSecurityEventWake } from "./security-events.js";
+import { PostgresSecurityEventBroker, SecurityEventPublisher, waitForSecurityEventWake } from "./security-events.js";
 
 function fixture(query = vi.fn(async (_sql: string) => ({ rows: [] }))) {
   const client = Object.assign(new EventEmitter(), { query, release: vi.fn() });
@@ -11,9 +11,53 @@ function fixture(query = vi.fn(async (_sql: string) => ({ rows: [] }))) {
   return { client, connect, broker: new PostgresSecurityEventBroker(pool) };
 }
 
-afterEach(() => vi.useRealTimers());
+afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
+
+it("keeps an empty security outbox quiet for sixty seconds and wakes on a change", async () => {
+  vi.useFakeTimers();
+  vi.spyOn(Math, "random").mockReturnValue(0);
+  let pending = false;
+  const query = vi.fn(async (sql: string) => {
+    if (sql.includes(" AS delay_ms ")) return { rows: [{ delay_ms: pending ? 0 : null }], rowCount: 1 };
+    const published = pending && sql.includes("UPDATE security_events e SET delivery_sequence");
+    if (published) pending = false;
+    return { rows: [], rowCount: published ? 1 : 0 };
+  });
+  const client = { query, release: vi.fn() };
+  const publisher = new SecurityEventPublisher({ connect: async () => client } as unknown as pg.Pool);
+  const stop = publisher.start();
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    const initial = query.mock.calls.length;
+    expect(initial).toBeGreaterThan(0);
+    await vi.advanceTimersByTimeAsync(59_999);
+    expect(query).toHaveBeenCalledTimes(initial);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(query.mock.calls.length).toBeGreaterThan(initial);
+    pending = true;
+    publisher.notify();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(pending).toBe(false);
+  } finally { await stop(); }
+});
 
 describe("security event listener lifecycle", () => {
+  it("waits sixty seconds when idle and wakes immediately for a notification", async () => {
+    vi.useFakeTimers();
+    const { client, broker } = fixture();
+    await broker.start();
+    const wake = vi.fn();
+    const waiting = waitForSecurityEventWake(broker, new AbortController().signal, broker.revision()).then(wake);
+    await vi.advanceTimersByTimeAsync(59_999);
+    expect(wake).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1); await waiting;
+    expect(wake).toHaveBeenCalledOnce();
+    const notified = waitForSecurityEventWake(broker, new AbortController().signal, broker.revision()).then(wake);
+    client.emit("notification", { channel: "zeros_security_event" });
+    await notified;
+    expect(wake).toHaveBeenCalledTimes(2);
+    await broker.stop();
+  });
   it("wakes catalog replay without repeating authority checks, and wakes both on a gap", async () => {
     const { client, broker } = fixture(), feed = vi.fn(), authority = vi.fn();
     broker.subscribe(feed);

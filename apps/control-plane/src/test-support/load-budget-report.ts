@@ -5,16 +5,17 @@ import { mkdir, mkdtemp, open, readdir, readFile, realpath, symlink, writeFile }
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import ts from "typescript";
-import type { BackgroundDefinition, backgroundBudgetTable } from "./load-budget.js";
+import { backgroundLimitFor, type BackgroundDefinition, type backgroundBudgetTable } from "./load-budget.js";
+import { CENSUS_CAPTURE, CENSUS_PROFILES, censusCaptureTable } from "./load-budget-census.js";
 
 export type BudgetDefinition = { phase: string; scenario: string; metric: string; baseline: number; maximum: number; expectedFailure: boolean };
 export type LoadReport = { version: 1; profile: string; wallClock: boolean; wallProfile?: string; statementDelayMs: number;
   budgets: Array<BudgetDefinition & { observed: number; targetObserved?: number }>;
-  backgroundBudgets?: ReturnType<typeof backgroundBudgetTable>; scenarios: unknown[] };
+  backgroundBudgets?: ReturnType<typeof backgroundBudgetTable>; census?: typeof CENSUS_CAPTURE; scenarios: unknown[] };
 type Comparison = BudgetDefinition & { before: number; after: number; delta: number; targetObserved: number; ratchet: "PASS" | "FAIL"; target: "PASS" | "FAIL" };
 export const LOAD_BUDGET_SOURCE = "apps/control-plane/src/test-support/load-budget.ts";
 export const LOAD_HARNESS_FILES = [LOAD_BUDGET_SOURCE, "apps/control-plane/src/test-support/load-budget-fixture.ts",
-  "apps/control-plane/src/load-budget.integration.test.ts"] as const;
+  "apps/control-plane/src/test-support/load-budget-census.ts", "apps/control-plane/src/load-budget.integration.test.ts"] as const;
 const key = (row: Pick<BudgetDefinition, "scenario" | "metric">) => `${row.scenario}:${row.metric}`;
 const integer = (value: unknown): value is number => Number.isSafeInteger(value) && Number(value) >= 0;
 function unique<T extends Pick<BudgetDefinition, "scenario" | "metric">>(rows: readonly T[]): Map<string, T> {
@@ -98,7 +99,10 @@ export function assertBaselineRatchet(base: readonly BudgetDefinition[], head: r
 
 export function compareReports(before: LoadReport, after: LoadReport, definitions: readonly BudgetDefinition[]): Comparison[] {
   if (before.version !== 1 || after.version !== 1 || before.profile !== after.profile ||
-      before.wallClock !== after.wallClock || before.wallProfile !== after.wallProfile || before.statementDelayMs !== after.statementDelayMs) throw new Error("Load comparison profiles differ");
+      before.wallClock !== after.wallClock || before.wallProfile !== after.wallProfile || before.statementDelayMs !== after.statementDelayMs ||
+      JSON.stringify(before.census) !== JSON.stringify(after.census)) throw new Error("Load comparison profiles differ");
+  if (definitions.some(row => CENSUS_PROFILES.some(profile => profile.name === row.scenario)) &&
+      JSON.stringify(after.census) !== JSON.stringify(CENSUS_CAPTURE)) throw new Error("Load comparison census provenance missing or changed");
   const prior = unique(before.budgets), next = unique(after.budgets);
   return definitions.map(budget => {
     const first = prior.get(key(budget)), second = next.get(key(budget));
@@ -112,7 +116,7 @@ export function compareReports(before: LoadReport, after: LoadReport, definition
 
 export function renderComparison(rows: readonly Comparison[], base: string, head: string): string {
   return [`Load budget: ${base} → ${head}. Same harness, isolated checkouts, serial PostgreSQL runs.`, "",
-    "R1 idle: server cost at the approved fallback rates, with renewals excluded. Idle ratchets count HTTP work; target observations include background SQL. Request frequency is qualified separately by scheduler tests and live idle counts.", "",
+    "R1 idle: server cost at the approved fallback rates, with renewals excluded. Idle ratchets and transaction ceilings count HTTP work; SQL statement targets include background work. Request frequency is qualified separately by scheduler tests and live idle counts.", "",
     "| Phase | Scenario | Metric | Before | After | Delta | Baseline | Target observation | Target | Ratchet | Target result |",
     "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |",
     ...rows.map(row => `| ${row.phase} | ${row.scenario} | ${row.metric} | ${row.before} | ${row.after} | ${row.delta > 0 ? "+" : ""}${row.delta} | ${row.baseline} | ${row.targetObserved} | ${row.maximum} | ${row.ratchet} | ${row.target} |`), ""].join("\n");
@@ -122,7 +126,8 @@ export function compareBackground(before: LoadReport, after: LoadReport, limits:
   const first = before.backgroundBudgets, second = after.backgroundBudgets;
   if (!first || !second) throw new Error("Missing background measurements");
   const id = (row: typeof first[number]) => `${row.scenario}:${row.operation}:${row.metric}`;
-  const expected = ["idle", "r1-fallback-idle"].flatMap(scenario => [
+  const names = ["idle", "r1-fallback-idle", ...CENSUS_PROFILES.filter(profile => after.budgets.some(row => row.scenario === profile.name)).map(profile => profile.name)];
+  const expected = names.flatMap(scenario => [
     ...limits.flatMap(limit => ["calls", "queriesPerCall", "statementsPerCall", "transactionsPerCall"].map(metric => `${scenario}:${limit.operation}:${metric}`)),
     ...["queries", "statements", "transactions", "githubCalls", "failures", "inFlight"].map(metric => `${scenario}:unattributed:${metric}`),
   ]);
@@ -132,7 +137,8 @@ export function compareBackground(before: LoadReport, after: LoadReport, limits:
     throw new Error("Incomplete background measurements");
   return second.map(row => {
     const prior = first.find(value => id(value) === id(row))!;
-    const limit = limits.find(value => value.operation === row.operation);
+    const definition = limits.find(value => value.operation === row.operation);
+    const limit = definition ? backgroundLimitFor(row.scenario, definition) : undefined;
     const scenario = after.scenarios.find(value => (value as { name?: string })?.name === row.scenario) as { elapsedMs?: number } | undefined;
     if (!scenario || !Number.isFinite(scenario.elapsedMs) || scenario.elapsedMs! < 0 ||
         ![row.observed, row.baseline, prior.observed].every(integer)) throw new Error("Invalid background measurement");
@@ -143,6 +149,19 @@ export function compareBackground(before: LoadReport, after: LoadReport, limits:
     if (baseline === undefined) throw new Error("Unknown background measurement");
     return { ...row, baseline, before: prior.observed, ratchet: row.observed <= baseline ? "PASS" : "FAIL" };
   });
+}
+
+export function renderCensus(report: LoadReport): string {
+  if (!report.census) return "";
+  if (JSON.stringify(report.census) !== JSON.stringify(CENSUS_CAPTURE)) throw new Error("Invalid census provenance");
+  return ["", `Captured app census: build ${CENSUS_CAPTURE.build}; one minute per profile. ${CENSUS_CAPTURE.scope}.`, "",
+    `Counts-only source SHA-256: ${CENSUS_CAPTURE.sourceSha256}.`,
+    ...CENSUS_PROFILES.map(profile => `${profile.name}: ${profile.capturedAt}.`), "",
+    "Captured Alpha transactions below are informational; replay costs are measured separately with assumed bodies. Unknown request counts stay unknown. Excluded traffic is not replayed.", "",
+    "| Scenario | Route | Captured HTTP | Captured transactions | Replayed | Scope |",
+    "| --- | --- | ---: | ---: | --- | --- |",
+    ...censusCaptureTable().map(row => `| ${row.scenario} | ${row.method} ${row.route} | ${row.requests ?? "unknown"} | ${row.capturedTransactions} | ${row.replayed ? "yes" : "no"} | ${row.reason} |`), "",
+    ...CENSUS_CAPTURE.assumptions.map(value => `- ${value}.`), ""].join("\n");
 }
 
 function renderBackground(rows: ReturnType<typeof compareBackground>): string {
@@ -294,7 +313,7 @@ export async function compareRevisions(options: { cwd: string; base: string; hea
   }
   const rows = compareReports(samples[0]!, samples[1]!, limits);
   const background = compareBackground(samples[0]!, samples[1]!, backgroundLimits);
-  const markdown = renderComparison(rows, base, head) + renderBackground(background) + renderRouteComparison(samples[0]!, samples[1]!);
+  const markdown = renderComparison(rows, base, head) + renderBackground(background) + renderCensus(samples[1]!) + renderRouteComparison(samples[0]!, samples[1]!);
   await writeFile(join(directory, "comparison.md"), markdown, { flag: "wx" });
   await writeFile(join(directory, "comparison.json"), JSON.stringify(rows, null, 2) + "\n", { flag: "wx" });
   await writeFile(join(directory, "background.json"), JSON.stringify(background, null, 2) + "\n", { flag: "wx" });
@@ -303,7 +322,7 @@ export async function compareRevisions(options: { cwd: string; base: string; hea
 
 async function main(args: string[]): Promise<void> {
   if (args.includes("--help")) {
-    console.info("TEST_DATABASE_URL=<local test database> node --import tsx apps/control-plane/src/test-support/load-budget-report.ts --base origin/main --head HEAD [--output .context]\nRuns both revisions serially with the same harness; the test database is reset. Optional LOAD_BUDGET_WALL_CLOCK=1, LOAD_BUDGET_WALL_PROFILE=r1 (default observed), and LOAD_BUDGET_STATEMENT_DELAY_MS=5 apply to both.");
+    console.info("TEST_DATABASE_URL=<local test database> node --import tsx apps/control-plane/src/test-support/load-budget-report.ts --base origin/main --head HEAD [--output .context]\nRuns both revisions serially with the same harness; the test database is reset. Optional LOAD_BUDGET_WALL_CLOCK=1, LOAD_BUDGET_WALL_PROFILE=r1|census-stopped|census-connected (default observed), and LOAD_BUDGET_STATEMENT_DELAY_MS=5 apply to both.");
     return;
   }
   const flags = new Map<string, string>();

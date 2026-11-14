@@ -22,7 +22,7 @@ export class HistoryMirror {
   constructor(private readonly store: SessionStore, private readonly transport: Transport, private readonly replacement = () => false,
     private readonly sanitize: <T>(value: T) => T = value => value,
     /** history-digest-v1: enabled when the control plane serves digests; `restored` (a boot from a checkpoint, possibly
-     * older than the control plane's rows) always replaces everything. */
+     * older than the control plane's rows) replaces every remaining live chat. */
     private readonly digests?: { enabled(): boolean; restored(): boolean }) {
     this.unsubscribe = store.onChange((change) => this.change(change));
   }
@@ -36,16 +36,21 @@ export class HistoryMirror {
     this.online = true;
     this.epoch++;
     this.pending.clear();
-    for (const chatId of chatDeletions) this.pending.set(chatId, { deleted: true, revision: 0, rows: new Map(), due: 0 });
+    const tombstone = (chatId: string) => this.pending.set(chatId, { deleted: true, revision: 0, rows: new Map(), due: 0 });
     // A boot restored from a checkpoint (possibly older than the control plane's rows) replaces everything once.
     const restored = this.firstConnect && !!this.digests?.restored(); this.firstConnect = false;
     if (this.negotiated() && this.transport.historyDigests) {
       // One read of the stored digests; only chats whose content differs are replaced (a restored boot replaces all, but
       // the read still proves the route). flush() and runtimeBusy wait for it.
       const epoch = this.epoch;
-      this.sending = this.reconcile(epoch, restored).finally(() => { if (epoch === this.epoch) { this.sending = undefined; this.drain(); } });
+      const sending = this.reconcile(epoch, restored, chatDeletions).finally(() => {
+        if (this.sending !== sending) return;
+        this.sending = undefined; this.drain();
+      });
+      this.sending = sending;
       return;
     }
+    for (const chatId of chatDeletions) tombstone(chatId);
     for (const chat of chats) this.pending.set(chat.id, this.snapshot(chat));
     this.drain();
   }
@@ -71,13 +76,29 @@ export class HistoryMirror {
     }
     return hash.digest("hex");
   }
-  private async reconcile(epoch: number, restored: boolean): Promise<void> {
-    let stored: Map<string, string | null> | undefined;
+  private async reconcile(epoch: number, restored: boolean, tombstones: readonly string[]): Promise<void> {
+    let stored: Map<string, string | null> | undefined, deleted: Set<string> | undefined;
     // Any doubt (error, 404, an older control plane, an invalid reply) means today's full replacement, unstamped.
-    try { stored = new Map(CloudV2HistoryDigestsReplySchema.parse(await this.transport.historyDigests!()).chats.map(entry => [entry.chatId, entry.digest])); }
-    catch { stored = undefined; }
+    try {
+      const reply = CloudV2HistoryDigestsReplySchema.parse(await this.transport.historyDigests!());
+      stored = new Map(reply.chats.map(entry => [entry.chatId, entry.digest]));
+      if (reply.deleted) deleted = new Set(reply.deleted);
+    } catch { stored = undefined; }
     if (epoch !== this.epoch || !this.online) return;
     if (stored) this.stampEpoch = epoch;
+    // Explicit deletions survive checkpoint rollback; absence alone never deletes a live local chat.
+    if (deleted) for (const chat of this.store.list().chats) {
+      if (!deleted.has(chat.id)) continue;
+      await this.store.delete(chat.id);
+      await this.store.forgetTombstone(chat.id);
+      if (epoch !== this.epoch || !this.online) return;
+      this.pending.delete(chat.id);
+    }
+    // Only deletion-list support proves the server retains tombstones after local pruning.
+    for (const chatId of tombstones) {
+      if (!stored || restored || stored.has(chatId)) { this.pending.set(chatId, { deleted: true, revision: 0, rows: new Map(), due: 0 }); continue; }
+      if (deleted) { await this.store.forgetTombstone(chatId); if (epoch !== this.epoch || !this.online) return; }
+    }
     if (restored) stored = undefined;
     for (const chat of this.store.list().chats) {
       const full = this.snapshot(chat), digest = stored?.get(chat.id);
@@ -142,7 +163,7 @@ export class HistoryMirror {
       return;
     }
     const epoch = this.epoch;
-    this.sending = Promise.resolve().then(async () => {
+    const sending = Promise.resolve().then(async () => {
       while (this.online && epoch === this.epoch && this.pending.size) {
         const entry = ready();
         if (!entry) break;
@@ -181,6 +202,10 @@ export class HistoryMirror {
         }
       }
     }).catch(() => { if (epoch === this.epoch) this.disconnect(); })
-      .finally(() => { this.sending = undefined; if (this.online && this.pending.size) this.drain(); });
+      .finally(() => {
+        if (this.sending !== sending) return;
+        this.sending = undefined; this.drain();
+      });
+    this.sending = sending;
   }
 }

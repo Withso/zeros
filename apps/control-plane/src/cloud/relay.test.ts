@@ -365,6 +365,17 @@ describe("cloud v2 relay", () => {
 
   describe("relay readiness", () => {
     const opened = (frames: any[]) => frames.filter(frame => frame.t === "open").length;
+    it("retries a running worker still initializing at sub-second intervals", async () => {
+      delete deps.retryBaseMs; delete deps.retryMaxMs;
+      let dials = 0;
+      workerServer.options.verifyClient = () => ++dials >= 5;
+      const waits: number[] = [], target = relay as unknown as { retryWait(room: unknown, ms: number): Promise<boolean> };
+      vi.spyOn(target, "retryWait").mockImplementation(async (_room, ms) => { waits.push(ms); return false; });
+      await app();
+      await vi.waitFor(() => expect(connectedWorkers).toHaveLength(1));
+      expect(dials).toBe(5);
+      expect(waits).toEqual([250, 500, 500, 500]);
+    });
     it("reads authority once for a first dial while its window is fresh", async () => {
       let now = 1000; deps.now = () => now;
       const frames: any[] = [];

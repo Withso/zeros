@@ -986,11 +986,11 @@ export class CloudV2Store {
     });
   }
 
-  async workerHistoryDigests(token: string, bootId: string) {
-    const { rows } = await withSystemStatement<{ chat_id: string | null; history_digest: string | null }>(this.pool, sql`
-      SELECT h.chat_id,h.history_digest FROM cloud_v2_workspaces w
+  async workerHistoryDigests(token: string, bootId: string, includeDeleted = false) {
+    const { rows } = await withSystemStatement<{ chat_id: string | null; history_digest: string | null; deleted: boolean | null }>(this.pool, sql`
+      SELECT h.chat_id,h.history_digest,h.deleted FROM cloud_v2_workspaces w
       LEFT JOIN LATERAL (
-        SELECT c.chat_id,CASE WHEN c.deleted_at IS NULL AND NOT EXISTS (SELECT 1 FROM cloud_v2_chat_edits e
+        SELECT c.chat_id,c.deleted_at IS NOT NULL AS deleted,CASE WHEN c.deleted_at IS NULL AND NOT EXISTS (SELECT 1 FROM cloud_v2_chat_edits e
           WHERE e.workspace_id=c.workspace_id AND e.chat_id=c.chat_id AND e.version>e.acknowledged_version)
           THEN c.history_digest ELSE NULL END AS history_digest
         FROM cloud_v2_chats c WHERE c.workspace_id=w.id ORDER BY c.chat_id LIMIT 4097
@@ -998,8 +998,11 @@ export class CloudV2Store {
       WHERE w.worker_token_hash=decode(${SqlFragment.text(hashCloudV2Token(token).toString("hex"), /^[0-9a-f]{64}$/)},'hex')
         AND w.worker_boot_id=${SqlFragment.uuid(bootId)} AND w.state IN ('running','stopping') AND ${CLOUD_V2_LIVE_ACCESS_SQL}`);
     if (!rows.length) return null;
-    const reply = CloudV2HistoryDigestsReplySchema.safeParse({ chats: rows.filter(row => row.chat_id !== null)
-      .map(row => ({ chatId: row.chat_id, digest: row.history_digest })) });
+    const mirrored = rows.filter(row => row.chat_id !== null);
+    const reply = CloudV2HistoryDigestsReplySchema.safeParse({
+      chats: mirrored.filter(row => !includeDeleted || !row.deleted).map(row => ({ chatId: row.chat_id, digest: row.history_digest })),
+      ...(includeDeleted ? { deleted: mirrored.filter(row => row.deleted).map(row => row.chat_id) } : {}),
+    });
     if (!reply.success) throw new HttpError(503, "history_digest_limit", "History digests are unavailable");
     return reply.data;
   }
