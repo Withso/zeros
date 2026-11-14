@@ -27,8 +27,11 @@ import { clearWorkspaceSettling } from "./pending-workspaces";
 import { selectActiveFolder, useWorkspaceStore } from "./store";
 import { useSessionsStore } from "../features/agent/sessions-store";
 import { warmCloudWorkspaceDestination } from "./cloud-workspace-warmup";
+import { attachSelectedCloudWorkspace } from "./selected-cloud-workspace-attach";
 import { clearWorkbenchConnectionFailure, recordWorkbenchConnectionFailure } from "./workbench-availability";
-import { CATALOG_HINT_COALESCE_MS, catalogRefreshDelayMs, watchCloudCatalogEvents } from "./cloud-catalog-events";
+import {
+  CATALOG_HINT_COALESCE_MS, catalogFocusRefreshDue, catalogMembershipKey, catalogRefreshDelayMs, watchCloudCatalogEvents,
+} from "./cloud-catalog-events";
 
 function recordCloudOpenFailure(key: string, error: unknown): void {
   const target = parseCloudWorkspaceKey(key), doc = target ? cloudWorkspaceDocument(target) : undefined;
@@ -127,25 +130,34 @@ function ActiveCloudWorkspaceLifecycle() {
     });
     const install = (session: AuthSessionInfo | null) => {
       if (!alive) return;
-      account = session?.user.accountId ?? session?.user.sub ?? storedAccount();
+      const next = session?.user.accountId ?? session?.user.sub ?? storedAccount();
+      // The same account re-announced (launch restores the session, then auth confirms it): one read already covers it.
+      const same = next === account && lastRefresh !== undefined;
+      account = next;
+      if (same) { schedule(); return; }
       lastRefresh = undefined;
       refresh();
       schedule();
     };
     const offAuth = onAuthStateChange(session => { authVersion++; install(session); });
     const offIdentity = onStoredIdentityChange(() => { authVersion++; install(null); });
-    let memberships = getTeamStoreState().me;
+    let memberships = catalogMembershipKey(getTeamStoreState().me);
     const offOrganizations = subscribeOrganizationSnapshots(() => {
-      const next = getTeamStoreState().me;
+      const next = catalogMembershipKey(getTeamStoreState().me);
       if (next === memberships) return;
       memberships = next;
       lastRefresh = undefined;
       refresh();
       schedule();
     });
+    // With pushed catalog events a focus or return reads only after a long gap; without them, as before.
+    const returned = () => {
+      if (catalogFocusRefreshDue(catalogEvents.active(), lastRefresh, performance.now())) void refresh();
+      else schedule();
+    };
     const visibility = () => {
       if (document.visibilityState === "hidden") runtime()?.cancelSpeculativeWarmups();
-      refresh();
+      returned();
     };
     const initial = authVersion;
     void getSession().then(session => { if (initial === authVersion) install(session); }).catch(() => {});
@@ -155,13 +167,13 @@ function ActiveCloudWorkspaceLifecycle() {
       refresh();
     }).catch(() => {});
     document.addEventListener("visibilitychange", visibility);
-    window.addEventListener("focus", refresh);
+    window.addEventListener("focus", returned);
     return () => {
       alive = false;
       if (timer !== undefined) window.clearTimeout(timer);
       offSchedule(); offRows(); offAuth(); offIdentity(); offOrganizations(); catalogEvents.stop();
       document.removeEventListener("visibilitychange", visibility);
-      window.removeEventListener("focus", refresh);
+      window.removeEventListener("focus", returned);
     };
   }, []);
 
@@ -171,23 +183,19 @@ function ActiveCloudWorkspaceLifecycle() {
     const target = parseCloudWorkspaceKey(folder);
     const bridge = runtime();
     if (!target || !bridge || !folder) return;
-    let cancelled = false, attaching = false;
-    const attach = () => {
-      if (cancelled || attaching || document.visibilityState === "hidden") return;
-      const doc = cloudWorkspaceDocument(target);
-      if (!canReadCloudWorkspace(doc)) return;
-      void bridge.warmHistoryWorkspace(target).catch(() => {});
-      if (!doc || !["ready", "busy"].includes(doc.status)) return;
-      attaching = true;
-      void warmCloudWorkspaceDestination(folder)
-        .then(() => { if (!cancelled) { clearWorkspaceSettling(folder); clearWorkbenchConnectionFailure(folder); } })
-        .catch(error => { if (!cancelled) recordWorkbenchConnectionFailure(folder, error, "connect"); })
-        .finally(() => { attaching = false; });
-    };
-    attach();
-    const off = subscribeCloudWorkspaces(attach);
-    document.addEventListener("visibilitychange", attach);
-    return () => { cancelled = true; off(); document.removeEventListener("visibilitychange", attach); };
+    return attachSelectedCloudWorkspace({
+      document: () => cloudWorkspaceDocument(target),
+      hidden: () => document.visibilityState === "hidden",
+      warmHistory: () => bridge.warmHistoryWorkspace(target),
+      connect: () => warmCloudWorkspaceDestination(folder),
+      subscribe: subscribeCloudWorkspaces,
+      onVisibility: listener => {
+        document.addEventListener("visibilitychange", listener);
+        return () => document.removeEventListener("visibilitychange", listener);
+      },
+      connected: () => { clearWorkspaceSettling(folder); clearWorkbenchConnectionFailure(folder); },
+      failed: error => recordWorkbenchConnectionFailure(folder, error, "connect"),
+    });
   }, [folder]);
 
   // Navigation and trusted input share one intent before child editors handle

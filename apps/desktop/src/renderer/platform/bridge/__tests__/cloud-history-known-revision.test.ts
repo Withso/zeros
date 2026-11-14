@@ -9,7 +9,7 @@ const chat = (id: string, historyCache?: unknown) => ({ id, folder: "/home/user/
 // local transcript cache answers an unchanged chat with no read and continues a changed one once.
 describe("mirror transcript reads carry the chats.list revision", () => {
   it("passes historyCache for a listed chat, and nothing for an unlisted chat, an older page or an N-1 row", async () => {
-    const readHistory = vi.fn(async (_target: unknown, op: string) => op === "chats.list"
+    const readHistory = vi.fn(async (_target: unknown, op: string, _params?: Record<string, unknown>, _options?: unknown) => op === "chats.list"
       ? { chats: [chat("fresh", { revision: 7, messageCount: 12 }), chat("legacy"), chat("bad", { revision: -1, messageCount: 1 })] }
       : { messages: [] });
     const client = new WorkspaceRuntimeClient({ open: vi.fn(), readHistory, historyRoot: () => "/home/user/Owner/repo", workspaces: () => [] });

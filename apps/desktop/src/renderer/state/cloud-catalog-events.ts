@@ -52,3 +52,16 @@ export function watchCloudCatalogEvents(listen: Listen, on: { refresh(): Promise
   });
   return { active: () => active, stop: () => { stopped = true; clearTimeout(timer); timer = undefined; for (const off of offs.splice(0)) off(); } };
 }
+
+/** A window focus or return to visible re-reads the catalog only when the account stream does not push its changes,
+ * or the last read is this old (a stream gap). */
+export const CATALOG_FOCUS_REFRESH_MS = 60_000;
+export function catalogFocusRefreshDue(catalogEvents: boolean, lastRefresh: number | undefined, now: number): boolean {
+  return !catalogEvents || lastRefresh === undefined || now - lastRefresh >= CATALOG_FOCUS_REFRESH_MS;
+}
+
+/** Every `/v1/me` reply is a new object, so object identity would re-list every organization on each account read.
+ * Compare what the reply says (account and its organizations, as returned) instead. */
+export function catalogMembershipKey(me: { user?: { id?: unknown } | null; organizations?: unknown; teams?: unknown } | null): string | null {
+  return me ? JSON.stringify([me.user?.id ?? null, me.organizations ?? me.teams ?? []]) : null;
+}

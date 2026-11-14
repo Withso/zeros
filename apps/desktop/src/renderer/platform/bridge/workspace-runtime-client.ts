@@ -588,7 +588,8 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
         // Translate exactly as for the worker: the mirror holds its native rows.
         const scope = this.mirrorScope(target);
         const native = record(cloudOutgoing(scope, { type: "WORKSPACE_REQUEST", op, params }).params);
-        const reply = await this.routing.readHistory!(target, op, native, this.knownHistory(target, op, params));
+        const known = this.knownHistory(target, op, params);
+        const reply = await (known ? this.routing.readHistory!(target, op, native, known) : this.routing.readHistory!(target, op, native));
         result = record(cloudIncoming(scope, { type: "WORKSPACE_RESPONSE", op, result: reply }).result);
       }
       assertAccess();
