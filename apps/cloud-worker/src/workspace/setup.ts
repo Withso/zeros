@@ -51,7 +51,9 @@ interface SetupOptions {
   report?(status: CloudV2SetupStatus): Promise<void>;
   recordNoop?: boolean;
   beforeRun?(): Promise<void>;
-  onAdmitted?(): Promise<void>;
+  /** `setup`: a selected setup (or LFS pull) was durably admitted. `noop`: nothing is selected and the recovery
+   * no-op proof is durable; that is not a restored boot's completion (see `selected`). */
+  onAdmitted?(kind: "setup" | "noop"): Promise<void>;
 }
 
 /** A clone made without git-lfs holds pointer files. Fetch the real files
@@ -120,6 +122,13 @@ export class WorkspaceSetup {
   private lfs = false;
   private noop = false;
   private noopRecorded = false;
+
+  /** Whether this workspace has a setup to run (a selected script or command, or Git LFS). A workspace without one has
+   * no setup admission, so its restore marker is cleared by the restored history delivery instead. */
+  selected(): boolean {
+    return !!selectRepositorySetup({ setupScript: this.options.workspace.setupScript, inlineCommand: this.options.workspace.setup }) ||
+      usesGitLfs(this.options.workspace.checkoutPath);
+  }
 
   start(createdBranch: boolean): void {
     if (this.operation || this.controller.signal.aborted || !createdBranch) return;
@@ -219,7 +228,7 @@ export class WorkspaceSetup {
         const parent = await open(path, "r");
         try { await parent.sync(); } finally { await parent.close(); }
       }
-      await this.options.onAdmitted?.();
+      await this.options.onAdmitted?.("noop");
       this.noopRecorded = true;
       void this.reportCurrent();
     } catch { this.options.onStorageError?.(); }
@@ -242,7 +251,7 @@ export class WorkspaceSetup {
       await mkdir(directory, { recursive: true, mode: 0o700 });
       try { statusFile = await open(join(directory, `${workspace.id}.json`), constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600); }
       catch (error) {
-        if ((error as NodeJS.ErrnoException).code === "EEXIST") { await this.options.onAdmitted?.(); return; }
+        if ((error as NodeJS.ErrnoException).code === "EEXIST") { await this.options.onAdmitted?.("setup"); return; }
         throw error;
       }
       const status: SetupStatus = { workspaceId: workspace.id, state: "running", startedAt: new Date().toISOString() };
@@ -253,7 +262,7 @@ export class WorkspaceSetup {
         const parent = await open(path, "r");
         try { await parent.sync(); } finally { await parent.close(); }
       }
-      await this.options.onAdmitted?.();
+      await this.options.onAdmitted?.("setup");
       void this.enqueueReport(() => ({ ...status }));
       // Keep descriptors throughout execution: a checkout cannot redirect an
       // already admitted status/log write by replacing its pathname.

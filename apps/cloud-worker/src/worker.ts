@@ -756,6 +756,14 @@ export class CloudWorker {
         if (error.code !== "ENOENT") throw error;
         return false;
       });
+      // The marker has one meaning: this restored boot still owes something. It clears only when the restored history
+      // replacement was delivered AND, if a setup is selected, that setup was admitted. A crash before either keeps
+      // it, so the next boot repeats the forced replacement (the safe direction).
+      let restoredHistoryDelivered = false, restoredSetupAdmitted = false;
+      const settleRestoreMarker = async () => {
+        if (!restored || !restoredHistoryDelivered || !(restoredSetupAdmitted || setup?.selected() === false)) return;
+        await rm(restoreMarker, { force: true }).catch(() => {});
+      };
       // Before setup starts, so a restart mid-setup still holds new turns.
       const holdTurns = await openRecoveryTurnHold(this.options.directory);
       store = await storeOpening;
@@ -830,7 +838,8 @@ export class CloudWorker {
         files: action => workspace!.git.mutate(action),
       });
       history = new HistoryMirror(store, this.options.transport, () => this.historyReplacementEnabled, value => application.value(value),
-        { enabled: () => this.historyDigestEnabled, restored: () => restored });
+        { enabled: () => this.historyDigestEnabled, restored: () => restored,
+          delivered: () => { restoredHistoryDelivered = true; void settleRestoreMarker(); } });
       unsubscribers.push(store.onChange((change) => {
         this.runtimeGate.activity();
         if (!change.chat && !change.deleted && !change.rows.length && !change.replace) return;
@@ -849,7 +858,10 @@ export class CloudWorker {
           if (refresh?.mayFastForward) await refreshing;
           await refresh?.touch();
         },
-        onAdmitted: async () => { this.initialSetupNeeded = false; await rm(restoreMarker, { force: true }).catch(() => {}); },
+        onAdmitted: async kind => {
+          this.initialSetupNeeded = false;
+          if (kind === "setup") { restoredSetupAdmitted = true; await settleRestoreMarker(); }
+        },
       });
       if (config.environment) await this.options.transport.reportEnvironment!({ versionId: config.environment.versionId, sequence: 1, state: "ready" }, this.environmentLifetime.signal);
       if (this.disposed || this.stopping) return false;

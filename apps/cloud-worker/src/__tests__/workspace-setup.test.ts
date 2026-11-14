@@ -7,7 +7,9 @@ import { CloudWorker } from "../worker";
 import type { SetupRunner } from "../workspace/setup";
 import type { CheckoutResult } from "../workspace/checkout";
 import type { WorkspaceServiceOptions } from "../workspace/service";
-import { CLIENT_A, WORKSPACE_ID, FakeRelay, browserFrame, config } from "./worker-fixtures";
+import { CLIENT_A, WORKSPACE_ID, WORKSPACE_KEY, FakeRelay, browserFrame, config } from "./worker-fixtures";
+import { SessionStore } from "../sessions/session-store";
+import type { CloudV2WorkerFrame } from "@zeros/protocol/cloud-v2-relay";
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -208,4 +210,87 @@ it.each([{ createdBranch: false }, { setup: "" }])("skips setup when checkout do
   expect(runner).not.toHaveBeenCalled();
   expect(f.idle()).toEqual({ t: "idle", idle: true });
   await expect(stat(f.statusPath)).rejects.toMatchObject({ code: "ENOENT" });
+});
+
+// A workspace with no setup script or LFS has no setup admission to clear the restore marker. Without its own point,
+// every later wake read as a restored boot and replaced every chat (cancelling history-digest-v1 for good). It clears
+// once the restored boot's replacement was delivered, and not before.
+class HistoryGate extends FakeRelay {
+  blocked = true;
+  override async send(frame: CloudV2WorkerFrame): Promise<boolean> {
+    if (frame.t === "history" && this.blocked) return false;
+    return super.send(frame);
+  }
+}
+async function restoredNoSetup(directory: string, relay: HistoryGate, setup = "", runner = vi.fn<SetupRunner>(async () => 0)) {
+  const marker = join(directory, "restored-from-checkpoint");
+  const worker = new CloudWorker({ directory, transport: relay, drivers: {}, onError: vi.fn(), setupRunner: runner,
+    prepareCheckout: async () => ({ createdBranch: false }) });
+  cleanups.push(() => worker.dispose());
+  const configuration = { ...config, historyReplacement: 1, workspace: { ...config.workspace, setup } };
+  worker.start(); await relay.receive(configuration);
+  return { worker, marker, configuration, present: () => stat(marker).then(() => true, () => false) };
+}
+
+it("a restored no-setup workspace clears its marker only after the restored replacement was delivered", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "zeros-restore-nosetup-"));
+  cleanups.push(() => rm(directory, { recursive: true, force: true }));
+  await writeFile(join(directory, "restored-from-checkpoint"), "");
+  const store = await SessionStore.open(join(directory, "sessions"), WORKSPACE_KEY);
+  await store.upsert({ id: "chat-0", folder: WORKSPACE_KEY, title: "Saved" }); await store.flush();
+  const relay = new HistoryGate();
+  const first = await restoredNoSetup(directory, relay);
+  await expect.poll(() => relay.frames.some(frame => frame.t === "idle")).toBe(true);
+  // The replacement could not be delivered: a crash here must boot as restored again.
+  await new Promise(resolve => setTimeout(resolve, 50));
+  expect(await first.present()).toBe(true);
+  await first.worker.dispose();
+  const again = new HistoryGate(); again.blocked = false;
+  const second = await restoredNoSetup(directory, again);
+  await expect.poll(second.present).toBe(false);
+  expect(again.frames.some(frame => frame.t === "history" && frame.messages?.replace && frame.messages.chatId === "chat-0")).toBe(true);
+});
+
+async function restoredDirectory() {
+  const directory = await mkdtemp(join(tmpdir(), "zeros-restore-order-"));
+  cleanups.push(() => rm(directory, { recursive: true, force: true }));
+  await writeFile(join(directory, "restored-from-checkpoint"), "");
+  const store = await SessionStore.open(join(directory, "sessions"), WORKSPACE_KEY);
+  await store.upsert({ id: "chat-0", folder: WORKSPACE_KEY, title: "Saved" }); await store.flush();
+  return directory;
+}
+
+it("a selected setup admitted first keeps the marker until the restored history is delivered (a crash between repeats it)", async () => {
+  const directory = await restoredDirectory(), runner = vi.fn<SetupRunner>(async () => 0);
+  const first = await restoredNoSetup(directory, new HistoryGate(), "pnpm install", runner);
+  await expect.poll(() => runner.mock.calls.length).toBe(1);
+  await new Promise(resolve => setTimeout(resolve, 50));
+  expect(await first.present()).toBe(true);
+  // Crash between setup admission and history delivery: the next boot is restored again, does not re-run the
+  // admitted setup, and clears the marker once its replacement is delivered.
+  await first.worker.dispose();
+  const relay = new HistoryGate(); relay.blocked = false;
+  const second = await restoredNoSetup(directory, relay, "pnpm install", runner);
+  await expect.poll(second.present).toBe(false);
+  expect(runner).toHaveBeenCalledOnce();
+  expect(relay.frames.some(frame => frame.t === "history" && frame.messages?.replace && frame.messages.chatId === "chat-0")).toBe(true);
+});
+
+it("history delivered first keeps the marker until the selected setup is admitted", async () => {
+  const directory = await restoredDirectory();
+  // Setup cannot be durably admitted on this boot (its status directory is a file).
+  await writeFile(join(directory, "workspace-setup"), "not a directory");
+  const relay = new HistoryGate(); relay.blocked = false;
+  const runner = vi.fn<SetupRunner>(async () => 0);
+  const first = await restoredNoSetup(directory, relay, "pnpm install", runner);
+  await expect.poll(() => relay.frames.some(frame => frame.t === "history" && frame.messages?.replace)).toBe(true);
+  await new Promise(resolve => setTimeout(resolve, 50));
+  expect(await first.present()).toBe(true);
+  expect(runner).not.toHaveBeenCalled();
+  await first.worker.dispose();
+  await rm(join(directory, "workspace-setup"));
+  const again = new HistoryGate(); again.blocked = false;
+  const second = await restoredNoSetup(directory, again, "pnpm install", runner);
+  await expect.poll(second.present).toBe(false);
+  expect(runner).toHaveBeenCalledOnce();
 });
