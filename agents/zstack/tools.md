@@ -48,21 +48,6 @@ Local receipts are unsigned. Source fingerprints bind an observation, not a
 trusted CI attestation. Tokens/cost are `null` when the host does not provide
 them; no estimate is invented. Keep receipts outside the checkout.
 
-## Regular-expression growth
-
-`scripts/zstack/linear-regex.mjs` runs native JavaScript regexes against generic
-inputs and repeated literal words from each pattern. The growth decision takes
-at most seven paired scans at 5,000 and 20,000 characters; four agreeing pairs
-decide. This tolerates up to three noisy pairs per input shape when the remaining
-pairs agree. It does not promise correctness under arbitrary sustained timing
-noise. The existing threshold is over 8× growth with a large scan above 30 ms.
-A small or large scan exceeding its 2 s or 4 s VM timeout is rejected immediately.
-
-`zstack-linear-regex.test.ts` preserves the escaped-pattern corpus and native
-catastrophic-pattern check. Injected measurements cover false negatives, false
-positives and all 64 placements of up to three outliers within seven pairs;
-elapsed wall time is not an assertion in those decision regressions.
-
 ## Local UI and live cloud proof
 
 ```sh
