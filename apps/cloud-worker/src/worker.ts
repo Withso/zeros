@@ -161,7 +161,7 @@ export class CloudWorker {
   private readonly githubCredentials: GithubCredentialRecovery;
   private githubUserTokensEnabled = false;
   private historyReplacementEnabled = false;
-  /** history-digest-v1 (the control plane opts in with config.historyDigest; not advertised yet). */
+  /** The control plane must opt in before digest fields enter history frames. */
   private historyDigestEnabled = false;
   /** Read when a native execution's tools are admitted. */
   private localCommandsEnabled = false;
