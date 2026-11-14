@@ -1,11 +1,12 @@
 import { NativeCloudCacheError, type NativeCloudChatCacheClient } from "./cloud-chat-cache-client";
-import { CloudCacheTargetSchema, type CloudCacheTarget } from "../../../shared/cloud-chat-cache";
+import { CloudCacheTargetSchema, type CloudCacheKnown, type CloudCacheTarget } from "../../../shared/cloud-chat-cache";
 
 export async function readNativeCloudHistory(
   native: NativeCloudChatCacheClient,
   target: Omit<CloudCacheTarget, "chatId">,
   op: string,
   params: Record<string, unknown>,
+  known?: CloudCacheKnown,
 ): Promise<Record<string, unknown> | null> {
   if (!native.owner || !["messages.window", "messages.windowOlder"].includes(op) || params.before !== undefined) return null;
   const parsed = CloudCacheTargetSchema.safeParse({ ...target, chatId: params.chatId });
@@ -14,12 +15,14 @@ export async function readNativeCloudHistory(
       op === "messages.windowOlder" && typeof params.beforeMsgId !== "string") return null;
   const epoch = native.epoch;
   try {
-    const range = op === "messages.window"
-      ? (await native.refresh(parsed.data, limit)).range
-      : await native.refreshBefore(parsed.data, params.beforeMsgId as string, limit);
+    const refreshed = op === "messages.window"
+      ? await native.refresh(parsed.data, limit, known)
+      : { range: await native.refreshBefore(parsed.data, params.beforeMsgId as string, limit) };
     if (epoch !== native.epoch) throw new NativeCloudCacheError("owner_changed");
-    if (!range) return null;
-    if (op === "messages.window") void native.refreshPending(parsed.data).catch(() => {});
+    if (!refreshed.range) return null;
+    const range = refreshed.range;
+    // An unchanged chat makes no read at all; the prompt queue has its own reader (cloudPrompts) for live state.
+    if (op === "messages.window" && !("cached" in refreshed && refreshed.cached)) void native.refreshPending(parsed.data).catch(() => {});
     return { messages: range.rows.map(({ index: _index, ...row }) => row),
       ...(range.historyState ? { historyState: range.historyState } : {}),
       ...(range.turnOpening ? { turnOpening: range.turnOpening } : {}),

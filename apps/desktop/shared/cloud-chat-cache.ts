@@ -49,11 +49,14 @@ export const cloudCacheKey = (key: CloudCacheKey): string => {
 
 const leased = { lease: z.string().uuid() };
 const limited = { target: CloudCacheTargetSchema, limit: z.number().int().min(1).max(500) };
+/** A chat's {revision, messageCount} as the chats.list read that proved access reported it. */
+export const CloudCacheKnownSchema = z.object({ revision: counter, messageCount: counter }).strict();
+export type CloudCacheKnown = z.infer<typeof CloudCacheKnownSchema>;
 export const CloudCacheRequestSchema = z.discriminatedUnion("op", [
   z.object({ op: z.literal("bind"), owner: z.string().min(1).max(2048), client: z.string().min(1).max(128) }).strict(),
   z.object({ op: z.literal("read"), ...leased, ...limited }).strict(),
   z.object({ op: z.literal("read-before"), ...leased, ...limited, revision: counter, before: CloudV2PromptIdSchema }).strict(),
-  z.object({ op: z.literal("refresh"), ...leased, ...limited }).strict(),
+  z.object({ op: z.literal("refresh"), ...leased, ...limited, known: CloudCacheKnownSchema.optional() }).strict(),
   z.object({ op: z.literal("refresh-before"), ...leased, ...limited, before: CloudV2PromptIdSchema }).strict(),
   z.object({ op: z.literal("refresh-pending"), ...leased, target: CloudCacheTargetSchema }).strict(),
   z.object({ op: z.literal("protect"), ...leased, target: CloudCacheTargetSchema.nullable() }).strict(),

@@ -1,7 +1,7 @@
 import { z } from "zod";
 import {
   CloudCachePendingSchema, CloudCacheRangeSchema, CloudCacheReplySchema, CloudCacheTargetSchema,
-  type CloudCachePending, type CloudCacheRange, type CloudCacheReply, type CloudCacheRequest, type CloudCacheTarget,
+  type CloudCachePending, type CloudCacheKnown, type CloudCacheRange, type CloudCacheReply, type CloudCacheRequest, type CloudCacheTarget,
 } from "../../../shared/cloud-chat-cache";
 
 type Failure = Extract<CloudCacheReply, { ok: false }>;
@@ -9,7 +9,7 @@ type WithoutLease<T> = T extends { lease: string } ? Omit<T, "lease"> : never;
 type Operation = WithoutLease<CloudCacheRequest>;
 const snapshotSchema = z.object({ range: CloudCacheRangeSchema.nullable(), pending: CloudCachePendingSchema.nullable() }).strict();
 export type NativeCloudCacheSnapshot = z.infer<typeof snapshotSchema>;
-const refreshSchema = z.object({ range: CloudCacheRangeSchema, replaced: z.boolean() }).strict();
+const refreshSchema = z.object({ range: CloudCacheRangeSchema, replaced: z.boolean(), cached: z.literal(true).optional() }).strict();
 const listSchema = z.object({ items: z.array(CloudCacheTargetSchema).max(500), nextAfter: z.string().max(16_384).nullable() }).strict();
 export class NativeCloudCacheError extends Error {
   constructor(readonly reason: Failure["reason"]) { super("Cloud chat cache unavailable."); }
@@ -121,8 +121,8 @@ export class NativeCloudChatCacheClient {
     return this.request({ op: "read-before", target, revision, before, limit }, CloudCacheRangeSchema.nullable())
       .then(page => page?.revision === revision ? page : null).catch(() => null);
   }
-  refresh(target: CloudCacheTarget, limit = 200): Promise<{ range: CloudCacheRange; replaced: boolean }> {
-    return this.request({ op: "refresh", target, limit }, refreshSchema);
+  refresh(target: CloudCacheTarget, limit = 200, known?: CloudCacheKnown): Promise<{ range: CloudCacheRange; replaced: boolean; cached?: true }> {
+    return this.request({ op: "refresh", target, limit, ...(known ? { known } : {}) }, refreshSchema);
   }
   refreshBefore(target: CloudCacheTarget, before: string, limit = 200): Promise<CloudCacheRange | null> {
     return this.request({ op: "refresh-before", target, before, limit }, CloudCacheRangeSchema.nullable());

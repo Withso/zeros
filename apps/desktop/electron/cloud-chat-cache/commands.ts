@@ -24,7 +24,7 @@ export function createCloudChatCacheCommand<Event>(deps: {
           result = { range: service.read(window, input.lease, input.target, input.limit), pending }; break;
         }
         case "read-before": result = service.readBefore(window, input.lease, input.target, input.revision, input.before, input.limit); break;
-        case "refresh": result = await service.refresh(window, input.lease, input.target, input.limit); break;
+        case "refresh": result = await service.refresh(window, input.lease, input.target, input.limit, input.known); break;
         case "refresh-before": result = await service.refreshBefore(window, input.lease, input.target, input.before, input.limit); break;
         case "refresh-pending": result = await service.refreshPending(window, input.lease, input.target); break;
         case "protect": service.protect(window, input.lease, input.target); result = null; break;

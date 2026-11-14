@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import {
   CloudCacheDeltaSchema, CloudCachePendingSchema, CloudCacheRangeSchema, CloudCacheTargetSchema, cloudCacheKey,
-  type CloudCacheDelta, type CloudCacheKey, type CloudCachePending, type CloudCacheRange, type CloudCacheTarget,
+  type CloudCacheDelta, type CloudCacheKey, type CloudCacheKnown, type CloudCachePending, type CloudCacheRange, type CloudCacheTarget,
 } from "../../shared/cloud-chat-cache";
 import type { CloudChatCacheStore } from "./store";
 
@@ -22,7 +22,7 @@ export interface CloudChatCacheSource {
   pending(target: CloudCacheKey, context: CloudCacheRequestContext): Promise<CloudCachePending | null>;
 }
 interface Binding { owner: string; session: string; client: string; lease: string; stop: AbortController }
-interface Refresh { range: CloudCacheRange; replaced: boolean }
+interface Refresh { range: CloudCacheRange; replaced: boolean; cached?: true }
 interface Flight<T> {
   key: CloudCacheKey; owner: string; session: string; variant: string; stop: AbortController;
   readers: Map<Binding, Promise<T>>; result: Promise<T>;
@@ -116,9 +116,19 @@ export class CloudChatCacheService {
     return result;
   }
 
-  refresh(window: number, lease: string, target: CloudCacheTarget, limit: number): Promise<Refresh> {
+  /** `known` is the chat's {revision, messageCount} from a chats.list read that just proved access. A matching cache
+   * answers with no network read; a different one continues once from the cached revision. */
+  refresh(window: number, lease: string, target: CloudCacheTarget, limit: number, known?: CloudCacheKnown): Promise<Refresh> {
     if (!Number.isInteger(limit) || limit < 1 || limit > 500) return Promise.reject(unavailable());
-    return this.start(window, lease, target, this.flights, String(limit), (key, context) => this.update(key, limit, context));
+    if (known) try {
+      const key = this.key(this.binding(window, lease), target), saved = this.deps.store.metadata(key);
+      if (saved?.revision === known.revision && saved.messageCount === known.messageCount) {
+        const cached = this.deps.store.readRange(key, Math.max(0, known.messageCount - limit), known.messageCount);
+        if (cached?.revision === known.revision) return Promise.resolve({ range: cached, replaced: false, cached: true });
+      }
+    } catch (error) { return Promise.reject(error); }
+    return this.start(window, lease, target, this.flights, known ? `${limit}:known` : String(limit),
+      (key, context) => this.update(key, limit, context, !!known));
   }
 
   refreshPending(window: number, lease: string, target: CloudCacheTarget): Promise<CloudCachePending | null> {
@@ -188,8 +198,8 @@ export class CloudChatCacheService {
     if (workspace.id !== key.workspaceId || workspace.organizationId !== key.organizationId) throw unavailable();
   }
 
-  private async update(key: CloudCacheKey, limit: number, context: CloudCacheRequestContext): Promise<Refresh> {
-    await this.workspace(key, context);
+  private async update(key: CloudCacheKey, limit: number, context: CloudCacheRequestContext, verified = false): Promise<Refresh> {
+    if (!verified) await this.workspace(key, context);
     let metadata = this.deps.store.metadata(key), replaced = false;
     if (metadata) {
       const delta = CloudCacheDeltaSchema.parse(await this.deps.source.since(key, metadata.revision, context)); context.current();

@@ -43,6 +43,20 @@ function fixture() {
 }
 
 describe("main cloud cache admission and refresh", () => {
+  it("a chat whose chats.list revision matches the cache opens with no network read; a changed one continues once", async () => {
+    const f = fixture(), key = { owner, ...target };
+    f.store.putRange(key, page(3));
+    const counts = () => [f.source.workspace, f.source.range, f.source.since, f.source.pending].map(fn => vi.mocked(fn).mock.calls.length);
+    const hit = await f.service.refresh(1, f.binding, target, 200, { revision: 3, messageCount: 1 });
+    expect(hit).toEqual({ range: page(3), replaced: false, cached: true });
+    expect(counts()).toEqual([0, 0, 0, 0]);
+    vi.mocked(f.source.since).mockImplementationOnce(async () => ({ resync: false, fromRevision: 3, revision: 4, messageCount: 2, rows: [row(1)] }));
+    const changed = await f.service.refresh(1, f.binding, target, 200, { revision: 4, messageCount: 2 });
+    expect(changed.range.rows).toEqual([row(0), row(1)]);
+    // The chats.list read that carried the revision already proved access: one continuation, no workspace read.
+    expect(counts()).toEqual([0, 0, 1, 0]);
+  });
+
   it("keeps receipt snapshots separately from history and joins their refresh across windows", async () => {
     const f = fixture(); f.store.putRange({ owner, ...target }, page());
     const pending = held<CloudCachePending>(), started = held<void>();

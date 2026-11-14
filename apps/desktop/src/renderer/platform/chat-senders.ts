@@ -39,8 +39,8 @@ export function acceptHistorySenders(target: CloudWorkspaceTarget, nativeChatId:
   acceptChatSenders(chatKeyFor(target, nativeChatId), value);
 }
 /** Wraps the bridge's history read: a reply's sender map is kept for the chat it was read for. */
-export function keepHistorySenders<T extends Record<string, unknown>>(read: (target: CloudWorkspaceTarget, op: string, params: Record<string, unknown>) => Promise<T>) {
-  return (target: CloudWorkspaceTarget, op: string, params: Record<string, unknown>) => read(target, op, params).then(result => {
+export function keepHistorySenders<T extends Record<string, unknown>, O>(read: (target: CloudWorkspaceTarget, op: string, params: Record<string, unknown>, options?: O) => Promise<T>) {
+  return (target: CloudWorkspaceTarget, op: string, params: Record<string, unknown>, options?: O) => read(target, op, params, options).then(result => {
     if (result.senders !== undefined && typeof params.chatId === "string" && params.chatId) acceptHistorySenders(target, params.chatId, result.senders);
     return result;
   });

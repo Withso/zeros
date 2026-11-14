@@ -1,3 +1,5 @@
+import { CloudCacheKnownSchema } from "../../../../shared/cloud-chat-cache";
+import type { CloudHistoryReadOptions } from "../cloud-v2";
 import type { BridgeMessage } from "./messages";
 import { CloudWorkspaceReadOnlyError } from "../cloud-workspace-read-only";
 import { RuntimeClient, runtimeExecutionKey, type ConnectionStatus } from "./ws-client";
@@ -63,7 +65,7 @@ export interface WorkspaceRuntimeOptions {
   manage?: (target: CloudWorkspaceTarget, op: string, params?: WireRecord) => Promise<WireRecord>;
   /** Authorized database reads that do not require a worker connection. The
    * mirror stores the worker's native rows, so they are scoped like its replies. */
-  readHistory?: (target: CloudWorkspaceTarget, op: string, params: WireRecord) => Promise<WireRecord>;
+  readHistory?: (target: CloudWorkspaceTarget, op: string, params: WireRecord, options?: CloudHistoryReadOptions) => Promise<WireRecord>;
   /** The workspace's native checkout path, used to scope mirror rows before a
    * worker has confirmed it in this session. */
   historyRoot?: (target: CloudWorkspaceTarget) => string | undefined;
@@ -536,6 +538,16 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     return { ...target, root, engineWorkspaceId: target.workspaceId };
   }
 
+  /** The chat's historyCache from the confirmed chats.list snapshot: the local transcript cache answers an unchanged
+   * chat without a read and continues a changed one once. Absent (N-1 control plane, no snapshot): the normal read. */
+  private knownHistory(target: CloudWorkspaceTarget, op: string, params: WireRecord): CloudHistoryReadOptions | undefined {
+    if (op !== "messages.window" || params.before !== undefined || typeof params.chatId !== "string") return undefined;
+    const chats = this.history.peekSnapshot(this.historyKey(target, "chats.list", {})).data?.chats;
+    const row = Array.isArray(chats) ? chats.find(chat => record(chat).id === params.chatId) : undefined;
+    const known = CloudCacheKnownSchema.safeParse(record(row).historyCache);
+    return known.success ? { known: known.data } : undefined;
+  }
+
   private historyKey(target: CloudWorkspaceTarget, op: string, params: WireRecord): string {
     return `${cloudWorkspaceKey(target)}\0${this.identity(target)}\0${op}\0${JSON.stringify(params)}`;
   }
@@ -576,7 +588,7 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
         // Translate exactly as for the worker: the mirror holds its native rows.
         const scope = this.mirrorScope(target);
         const native = record(cloudOutgoing(scope, { type: "WORKSPACE_REQUEST", op, params }).params);
-        const reply = await this.routing.readHistory!(target, op, native);
+        const reply = await this.routing.readHistory!(target, op, native, this.knownHistory(target, op, params));
         result = record(cloudIncoming(scope, { type: "WORKSPACE_RESPONSE", op, result: reply }).result);
       }
       assertAccess();
