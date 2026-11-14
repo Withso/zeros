@@ -55,7 +55,7 @@ const vmCommand = (f: { compute: CloudV2Compute }, marker: string) => vi.mocked(
 function setup(claimed: (CloudV2LifecycleWorkspace & { attempts: number })[], options: { snapshot?: string | null; prune?: string[]; stock?: true; checkout?: true; idle?: CloudV2Workspace[]; stopIdle?: CloudV2LifecycleDeps["stopIdle"]; timing?: CloudV2LifecycleDeps["timing"]; now?: () => number;
   checkpoints?: ReturnType<typeof checkpointsFake>; remoteHead?: CloudV2LifecycleDeps["remoteHead"]; githubToken?: CloudV2LifecycleDeps["githubToken"]; uploadHorizon?: string;
   checkpointRetry?: boolean; retries?: RetryRow[]; prepareRepository?: CloudV2LifecycleDeps["prepareRepository"]; pruneEnvironments?: () => Promise<void>;
-  runtimeForWorkspace?: CloudV2LifecycleDeps["runtimeForWorkspace"]; bootEnv?: CloudV2LifecycleDeps["bootEnv"]; builds?: CloudV2LifecycleDeps["builds"];
+  runtimeForWorkspace?: CloudV2LifecycleDeps["runtimeForWorkspace"]; bootEnv?: CloudV2LifecycleDeps["bootEnv"]; builds?: CloudV2LifecycleDeps["builds"]; recovery?: CloudV2LifecycleDeps["recovery"];
   authorizeWorkspace?: CloudV2LifecycleDeps["authorizeWorkspace"]; resolvePendingSource?: CloudV2LifecycleDeps["resolvePendingSource"] } = {}) {
   const retries = [...options.retries ?? []];
   const compute: CloudV2Compute = {
@@ -115,6 +115,7 @@ function setup(claimed: (CloudV2LifecycleWorkspace & { attempts: number })[], op
   const stopWorker = vi.fn(async () => true);
   const logs: { warn: string[]; error: string[] } = { warn: [], error: [] };
   const lifecycle = new CloudV2Lifecycle({
+    ...(options.recovery ? { recovery: options.recovery } : {}),
     store, compute, now: options.now ?? (() => NOW), sleep: async () => {},
     ...(options.checkpointRetry ? { checkpointRetry: true, logger: { warn: (line: string) => logs.warn.push(line), error: (line: string) => logs.error.push(line) } } : {}),
     ...(options.timing ? { timing: options.timing } : {}),
@@ -832,6 +833,16 @@ describe("cloud v2 lifecycle", () => {
       release(); await stopped;
       expect(drained).toBe(true);
     } finally { release(); await (stopped ?? stop()); vi.useRealTimers(); }
+  });
+
+  it("starts recovery only with the lifecycle loop and drains it on shutdown", async () => {
+    const drained = vi.fn(async () => {}), recovery = { start: vi.fn(() => drained) };
+    const f = setup([], { recovery });
+    expect(recovery.start).not.toHaveBeenCalled();
+    const stop = f.lifecycle.start();
+    expect(recovery.start).toHaveBeenCalledOnce();
+    await stop();
+    expect(drained).toHaveBeenCalledOnce();
   });
 
   it("lets the pending-work-aware idle transition run without revoking the worker before its final flush", async () => {

@@ -30,6 +30,23 @@ function fixture() {
 const gateway = () => new WorkerConnectionFailure("gateway", "5xx");
 
 describe("live route recovery", () => {
+  it("escalates only a freshly witnessed failed rehost and suppresses the named condition while B owns it", async () => {
+    const f = fixture();
+    f.deps.rebuild = vi.fn(async () => true);
+    vi.mocked(f.deps.dial!).mockRejectedValue(gateway());
+    f.recovery.failed(f.original, gateway());
+    await vi.waitFor(() => expect(f.deps.rebuild).toHaveBeenCalledOnce());
+    expect(f.deps.witness).toHaveBeenCalledTimes(3); expect(f.deps.compute.hostPort).toHaveBeenCalledOnce();
+    expect(f.deps.condition).not.toHaveBeenCalledWith(expect.anything(), true);
+    await f.recovery.close();
+  });
+  it("keeps the named failure for an N-1 worker when B declines", async () => {
+    const f = fixture(); f.deps.rebuild = vi.fn(async () => false);
+    vi.mocked(f.deps.dial!).mockRejectedValue(gateway());
+    f.recovery.failed(f.original, gateway());
+    await vi.waitFor(() => expect(f.deps.condition).toHaveBeenCalledWith(expect.anything(), true));
+    expect(f.deps.rebuild).toHaveBeenCalledOnce(); await f.recovery.close();
+  });
   it("requires two non-overlapping minute windows and repairs only the route", async () => {
     const f = fixture(), started = f.now(); f.recovery.failed(f.original, gateway());
     await vi.waitFor(() => expect(f.deps.ready).toHaveBeenCalledExactlyOnceWith(workspaceId));

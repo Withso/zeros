@@ -3,6 +3,7 @@ import type pg from "pg";
 import type { AuthedUser } from "../../auth.js";
 import { withSystemTx, type Tx } from "../../db.js";
 import { HttpError } from "../../authz.js";
+import { CLOUD_RECOVERY_TURN_HOLD, assertRecoveryTurnReady } from "../recovery-state.js";
 import type { CloudAgentCredentialKeys, CloudAgentCredentialMaterial } from "../../agent-credentials/agent-credential-envelope.js";
 import { CloudV2TurnLeaseSchema, CloudV2BootstrapLeaseSchema, CloudV2TerminalLeaseSchema, CloudV2ClientLeaseSchema, type CloudV2Agent, type CloudV2ContextReason, type CloudV2ControlFrame, type RuntimeMcpServer } from "../contract.js";
 import type { CloudWorkspaceEnvironment } from "../environment-contract.js";
@@ -25,6 +26,7 @@ export { EXECUTION_LEASE_MS } from "./lifetime.js";
 export const BOOTSTRAP_MINIMUM_LIFETIME_MS = EXECUTION_MINIMUM_LIFETIME_MS;
 export type ExecutionWorker = { token: string; bootId: string };
 export type ExecutionWorkspace = { id: string; org_id: string; creator_user_id: string | null; repository: string; state: string;
+  recovery_held?: boolean;
   access_epoch: string; stop_generation: string; worker_boot_id: string; worker_token_hash: Buffer; execution_mode: string;
   acting_user_boot_ids: string[]; execution_initiator_user_id: string | null; execution_intent_id: string | null; api_access: boolean };
 export type ExecutionContext = { id: string; workspace_id: string; org_id: string; user_id: string | null; kind: "turn" | "terminal" | "client" | "bootstrap";
@@ -180,7 +182,8 @@ export class CloudExecutionContexts {
 
   async worker(tx: Tx, identity: ExecutionWorker, lock = false, cleanup = false): Promise<ExecutionWorkspace> {
     const read = () => tx.query<ExecutionWorkspace>(`SELECT w.id,w.org_id,w.creator_user_id,w.repository,w.state,w.access_epoch::text,w.stop_generation::text,
-        w.worker_boot_id,w.worker_token_hash,w.execution_mode,w.acting_user_boot_ids,w.execution_initiator_user_id,w.execution_intent_id,w.api_access
+        w.worker_boot_id,w.worker_token_hash,w.execution_mode,w.acting_user_boot_ids,w.execution_initiator_user_id,w.execution_intent_id,w.api_access,
+        (${CLOUD_RECOVERY_TURN_HOLD}) AS recovery_held
       FROM cloud_v2_workspaces w WHERE worker_token_hash=$1 AND worker_boot_id=$2
         AND state IN ('creating','starting','running','stopping') AND ${CLOUD_V2_LIVE_ACCESS} ${lock ? "FOR UPDATE OF w" : ""}`,
       [hashCloudV2Token(identity.token), identity.bootId]);
@@ -257,6 +260,7 @@ export class CloudExecutionContexts {
   async begin(identity: ExecutionWorker, input: { userMessageId: string; deliveryId: string; dispatchId: string }) {
     const initial = await withSystemTx(this.pool, async tx => {
       const workspace = await this.worker(tx, identity, true);
+      assertRecoveryTurnReady(workspace.recovery_held);
       await this.maintenance.cancelQueued(tx, workspace.id);
       return { workspace, prompt: await this.prompt(tx, workspace.id, input.userMessageId) };
     });
@@ -269,6 +273,7 @@ export class CloudExecutionContexts {
       const result = await withSystemTx(this.pool, async tx => {
         await tx.query("SELECT id FROM users WHERE id=$1 FOR KEY SHARE", [proof.person.userId]);
         const workspace = await this.worker(tx, identity, true);
+        assertRecoveryTurnReady(workspace.recovery_held);
         await this.maintenance.cancelQueued(tx, workspace.id);
         const row = await this.prompt(tx, workspace.id, input.userMessageId);
         const chat = (await tx.query<{ epoch: string; acting_user_id: string | null; acting_generation: string; active_context_id: string | null }>(

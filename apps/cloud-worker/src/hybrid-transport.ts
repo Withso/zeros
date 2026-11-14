@@ -16,7 +16,7 @@ import { mcpFailure, mcpFailureError } from "./mcp/failure";
 import { CloudGithubUnavailableReasonSchema, type CloudGithubUnavailableReason } from "@zeros/protocol/cloud-github-connection";
 import { GITHUB_HTTP_TIMEOUT_MS } from "./credentials/github-failure";
 import { CloudEnvironmentReportSchema, CloudV2SetupStatusSchema, type CloudEnvironmentReport, type CloudV2SetupStatus } from "@zeros/protocol/cloud-v2-relay";
-import { CloudRuntimeUpdateReplySchema, type CloudRuntimeUpdateRequest, type CloudRuntimeUpdateReply } from "@zeros/protocol/cloud-v2-relay";
+import { CloudRecoveryReplySchema, CloudRecoveryRequestSchema, CloudRuntimeUpdateReplySchema, type CloudRecoveryReply, type CloudRecoveryRequest, type CloudRuntimeUpdateRequest, type CloudRuntimeUpdateReply } from "@zeros/protocol/cloud-v2-relay";
 import { PUSH_SIGNALS_REPORT_MS } from "@zeros/protocol/cloud-v2-relay";
 
 type ConfigFrame = Extract<CloudV2ControlFrame, { t: "config" }>;
@@ -200,6 +200,10 @@ export class HybridTransport implements Transport {
   }
   async runtimeUpdate(input: CloudRuntimeUpdateRequest, signal?: AbortSignal): Promise<CloudRuntimeUpdateReply> {
     return CloudRuntimeUpdateReplySchema.parse(await this.request("runtime", input, signal, input.op === "prepare" ? 310_000 : input.op === "ready" ? 30_000 : 10_000));
+  }
+  /** recovery-quiesce-v1: seal or confirm a recovery binding. A 409 recovery_binding_changed rejects (the worker stays frozen). */
+  async recovery(input: CloudRecoveryRequest, signal?: AbortSignal): Promise<CloudRecoveryReply> {
+    return CloudRecoveryReplySchema.parse(await this.request("recovery", CloudRecoveryRequestSchema.parse(input), signal, 10_000));
   }
   async readyRuntime(): Promise<void> {
     if (!this.options.runtimeHandoff || this.runtimeReady) return;

@@ -77,6 +77,8 @@ const initialized = (agentId: CloudV2Agent): InitializeResponse => ({
  * to half); about 15 s in total before the turn fails. Mutable for tests only. */
 export const turnLeaseRetry = { delaysMs: [1_000, 2_000, 4_000, 8_000] };
 
+export const WORKSPACE_STARTING_MESSAGE = "The workspace is getting ready. Try again shortly.";
+
 export class Agents {
   readonly turns: TurnService;
   private readonly routes = new Map<string, Runtime>();
@@ -87,6 +89,8 @@ export class Agents {
   private readonly models: CodexModelAvailability;
   /** Set by the worker (creator-commit-identity-v1): a turn context's Git author env, following the Creator rule. */
   commitIdentity?: (contextId: string, identity: Parameters<typeof gitIdentityEnvironment>[0]) => Record<string, string>;
+  /** Set by the worker: a recovery replacement holds new turns until its restored setup succeeds. */
+  turnsHeld?: () => boolean;
   private outboxDispatch?: OutboxDispatch;
   private contexts?: ExecutionContexts;
   private personal?: PersonalEnvironments;
@@ -391,6 +395,16 @@ export class Agents {
   }
 
   async handle(client: AppClient, message: BridgeMessage): Promise<void> {
+    if (this.turnsHeld?.() && (message.type === "AGENT_NEW_SESSION" || message.type === "AGENT_LOAD_SESSION" ||
+        message.type === "AGENT_PROMPT" || message.type === "AGENT_STEER")) {
+      // Retryable admission refusal (the desktop's session-admission path), never auth or session expiry.
+      const agentId = message.agentId === "claude" || message.agentId === "codex" || message.agentId === "cursor" ? message.agentId : undefined;
+      const stage = message.type === "AGENT_NEW_SESSION" ? "newSession" as const : message.type === "AGENT_LOAD_SESSION" ? "loadSession" as const : "prompt" as const;
+      const failure = { kind: "transport-closed" as const, stage, ...(agentId ? { agentId } : {}), message: WORKSPACE_STARTING_MESSAGE };
+      await client.send(createMessage({ type: "AGENT_ERROR", source: "engine", requestId: message.id, ...(agentId ? { agentId } : {}),
+        code: "WORKSPACE_STARTING", message: WORKSPACE_STARTING_MESSAGE, failure }));
+      return;
+    }
     try {
       switch (message.type) {
         case "AGENT_LIST_AGENTS":

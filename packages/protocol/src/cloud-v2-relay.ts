@@ -9,6 +9,7 @@ import { z } from "zod";
 import { CloudWorkspaceEnvironmentSchema } from "./cloud-workspace-environment";
 export * from "./cloud-workspace-environment";
 export * from "./cloud-runtime-update";
+export * from "./cloud-recovery-quiesce";
 export * from "./cloud-workspace-resources";
 import { MAX_BRIDGE_FRAME_BYTES } from "./schemas";
 import { CloudV2ChatEditAckSchema, CloudV2PromptCounterSchema, CloudV2PromptIdSchema, CloudV2PromptStateSchema } from "./cloud-v2-prompts";

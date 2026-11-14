@@ -5,7 +5,7 @@ import type { CloudV2Workspace } from "./store.js";
 /** Port credentials stay out of ordinary documents; only an authorized sync
  * grant may also deliver them to the person's Mac. */
 export type WorkerRoute = { workspace: CloudV2Workspace; accessEpoch: string; url: string | null; token: string | null; bootId: string | null;
-  executionMode?: "legacy" | "prepared" | "active"; workerTokenHash?: string | null; stopBootIds?: readonly string[]; portToken?: unknown };
+  executionMode?: "legacy" | "prepared" | "active"; recoveryAttemptId?: string; workerTokenHash?: string | null; stopBootIds?: readonly string[]; portToken?: unknown };
 const peerFeatures = new WeakMap<WebSocket, ReadonlySet<string>>();
 export const workerSupportsActingUser = (socket: WebSocket): boolean => peerFeatures.get(socket)?.has("acting-user-v1") ?? false;
 export const workerSupportsCreatorLogins = (socket: WebSocket): boolean => peerFeatures.get(socket)?.has("creator-agent-logins-v1") ?? false;

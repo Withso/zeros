@@ -129,6 +129,7 @@ export type CloudV2LifecycleDeps = {
   /** Cloud Computer builds share this loop; one runs at a time. */
   builds?: { tick(): Promise<void>; cleanup?(): Promise<void>; close?(): void };
   runtimeUpdates?: { tick(): Promise<void>; close(): void };
+  recovery?: { start(): () => Promise<void> };
   executionActivations?: { tick(): Promise<void> };
   /** Retries a stop's failed checkpoint on a fork of the stopped VM. */
   checkpointRetry?: boolean;
@@ -214,9 +215,11 @@ export class CloudV2Lifecycle {
 
   start(): () => Promise<void> {
     this.started = true; this.stopped = false;
+    const stopRecovery = this.deps.recovery?.start();
     this.schedule(this.intervalMs);
     return async () => {
       this.stopped = true;
+      const recoveryStopped = stopRecovery?.();
       this.deps.runtimeUpdates?.close();
       this.deps.builds?.close?.();
       if (this.timer) clearTimeout(this.timer);
@@ -227,6 +230,7 @@ export class CloudV2Lifecycle {
       await this.retrying;
       await this.building;
       await this.cleaning;
+      await recoveryStopped;
     };
   }
 

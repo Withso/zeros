@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 // Each reviewed migration lists its exact exempted statements by rule.
 const reviewed: Readonly<Record<string, Readonly<Record<string, readonly string[]>>>> = {
+  "0250_cloud_workspace_recovery.sql": {},
   "0249_organization_seat_state.sql": {},
   "0248_cloud_push_signals.sql": {},
   "0247_cloud_membership_access.sql": {},
@@ -537,6 +538,12 @@ function statements(sql: string): { text: string; header: string }[] {
   return result;
 }
 
+const cloudWorkspaceRecoveryDigests: Readonly<Record<string, readonly string[]>> = {
+  "privilege-tightening": [
+    "8f6eb420e5cd2b1b73f46b9b6e2629c9e3dd937caa51e48c59155de5c063debc",
+    "9a7372040640bd57095cfd4361c7707723076ce167615303435091ab43bee787",
+  ],
+};
 const cloudPushSignalsDigests: Readonly<Record<string, readonly string[]>> = {
   "catalog-notification-channel": ["976954fcbaadbb9bd483ab049b34bfb12a6db5ab71ea6b88f4179c06e850dd1d"],
   "privilege-tightening": ["af0d8ba056b2a04ee390886ef057732b2e0ace426122847922fcef3d028ce504"],
@@ -623,6 +630,7 @@ export function applyReviewedExpandExceptions(file: string, sql: string): string
     const rule = annotations[0]![1]!;
     const statement = text.replace(/\r\n/g, "\n").trim();
     const allowed = exact[rule]?.includes(statement) ||
+      (file === "0250_cloud_workspace_recovery.sql" && cloudWorkspaceRecoveryDigests[rule]?.includes(createHash("sha256").update(statement).digest("hex"))) ||
       (file === "0249_organization_seat_state.sql" && organizationSeatStateDigests[rule]?.includes(createHash("sha256").update(statement).digest("hex"))) ||
       (file === "0248_cloud_push_signals.sql" && cloudPushSignalsDigests[rule]?.includes(createHash("sha256").update(statement).digest("hex"))) ||
       (file === "0247_cloud_membership_access.sql" && cloudMembershipAccessDigests[rule]?.includes(createHash("sha256").update(statement).digest("hex"))) ||

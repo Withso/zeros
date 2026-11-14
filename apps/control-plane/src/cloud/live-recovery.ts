@@ -18,6 +18,8 @@ export type LiveRecoveryDeps = {
   witness(binding: LiveRecoveryProofBinding, expiresAt: number): Promise<LiveRecoveryWitness>;
   publish(route: WorkerRoute, hosted: { url: string; token: string }): Promise<boolean>;
   condition(route: WorkerRoute, unavailable: boolean): Promise<boolean>;
+  rebuild?(route: WorkerRoute): Promise<boolean>;
+  recovered?(route: WorkerRoute): Promise<void>;
   mint(workspaceId: string, bootId: string): string;
   ready(workspaceId: string): void;
   logger?: Pick<Console, "warn">;
@@ -68,6 +70,7 @@ export class CloudLiveRecovery {
       attempt.abort.abort(); await attempt.flight;
     }
     this.finished.delete(route.workspace.id);
+    if (route.recoveryAttemptId) await this.deps.recovered?.(route);
     if (attempt || route.workspace.errorCode === LIVE_CONNECTION_UNAVAILABLE) await this.deps.condition(route, false);
   }
 
@@ -166,6 +169,7 @@ export class CloudLiveRecovery {
     if (!sameLiveRoute({ ...route, ...hosted }, repaired)) return;
     const result = await this.verify(repaired, signal);
     if (result === "changed") return;
+    if (result === "gateway" && await this.deps.rebuild?.(repaired)) return;
     if (result !== "connected") { await this.unavailable(repaired, "route_repair_exhausted"); return; }
     await this.deps.condition(repaired, false);
     this.log(repaired, "ready", "route_repaired"); this.deps.ready(repaired.workspace.id);

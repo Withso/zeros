@@ -30,7 +30,7 @@ export const CLOUD_V2_RESTORED_MARKER = `${CLOUD_V2_WORKER_STATE}/restored-from-
 /** Never saved from the session paths: setup status, partial uploads, the
  * broker socket, the restore marker and credential files. The archive and its
  * fingerprint both leave out exactly these. */
-const SESSION_EXCLUDED_PATHS = ["workspace-setup", "attachment-uploads", "github.sock", "restored-from-checkpoint"].map(name => `${CLOUD_V2_WORKER_STATE}/${name}`);
+const SESSION_EXCLUDED_PATHS = ["workspace-setup", "attachment-uploads", "github.sock", "restored-from-checkpoint", "recovery-turn-hold"].map(name => `${CLOUD_V2_WORKER_STATE}/${name}`);
 const SESSION_EXCLUDED_NAMES = [".credentials.json", "auth.json"];
 const IGNORED_FILE_BYTES = 1024 * 1024, IGNORED_TOTAL_BYTES = 32 * 1024 * 1024;
 
@@ -506,7 +506,7 @@ export function checkpointCommand(input: ArchiveInput & { uploadUrl: string }): 
     "sudo -n systemctl disable zeros-worker.service >/dev/null 2>&1 || true", ...script].join("\n"))}`;
 }
 
-export type RestoreInput = CheckpointPaths & { key: Buffer; sha256: string; githubToken?: string; repositoryUrl?: string; active?: boolean };
+export type RestoreInput = CheckpointPaths & { key: Buffer; sha256: string; githubToken?: string; repositoryUrl?: string; active?: boolean; recovery?: boolean };
 
 /** Verifies and applies the checkpoint that `fetch` places at
  * `$work/checkpoint.zck`, before the worker starts. */
@@ -656,7 +656,8 @@ export function checkpointRestoreSteps(input: RestoreInput, fetch: readonly stri
     "  done < <(grep '^upstream ' \"$m\" || true)",
     "fi",
     "step=marker",
-    "mkdir -p \"$home/$state\"; : > \"$home/$state/restored-from-checkpoint\"",
+    "mkdir -p \"$home/$state\"",
+    `printf %s ${quote(input.recovery ? "recovery" : "")} > "$home/$state/restored-from-checkpoint"`,
   ];
 }
 

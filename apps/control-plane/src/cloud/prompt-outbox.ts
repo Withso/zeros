@@ -16,6 +16,7 @@ import type { CloudExecutionContexts, PromptExecutionAdmission } from "./executi
 import { executionIntentAuthority } from "./execution/authority.js";
 import { memberOnHoldSql } from "../organization-seats.js";
 import { assertNoExecutionTransition } from "./execution/activation-state.js";
+import { CLOUD_RECOVERY_TURN_HOLD, assertRecoveryTurnReady } from "./recovery-state.js";
 
 export type CloudApiPrompt = {
   chatId: string; userMessageId: string; agentId: CloudV2Prompt["agentId"];
@@ -34,7 +35,7 @@ type Row = { user_message_id: string; chat_id: string; creator_user_id: string; 
   payload_hash: string; payload: CloudV2Prompt | null; receipt: CloudV2PromptReceipt; state: CloudV2PromptState;
   created_by_session_id: string | null;
   cancel_requested: boolean; delivery_id: string | null; worker_boot_id: string | null; dispatch_id: string | null };
-type WorkerSnapshot = Workspace & { handoff: boolean; prompt?: Row; chatEpoch: string | null; chatDeleted: boolean };
+type WorkerSnapshot = Workspace & { handoff: boolean; recoveryHeld: boolean; prompt?: Row; chatEpoch: string | null; chatDeleted: boolean };
 const notFound = () => new HttpError(404, "not_found", "Cloud workspace not found");
 const unauthorized = () => new HttpError(401, "worker_unauthorized", "Worker authorization is no longer current");
 const conflict = () => new HttpError(409, "prompt_conflict", "This message id was already used for a different send");
@@ -76,8 +77,9 @@ export class CloudV2PromptOutbox {
       FROM cloud_v2_workspaces w WHERE worker_token_hash=$1 AND worker_boot_id=$2
         AND state IN ('running','stopping') AND ${CLOUD_V2_LIVE_ACCESS} FOR UPDATE OF w`, [hashCloudV2Token(token), bootId]);
     if (!rows[0]) throw unauthorized();
-    const current = (await tx.query<Row & { live: boolean; handoff: boolean; chat_epoch: string | null; chat_deleted: boolean }>(
+    const current = (await tx.query<Row & { live: boolean; handoff: boolean; recovery_held: boolean; chat_epoch: string | null; chat_deleted: boolean }>(
       `SELECT p.*,${CLOUD_V2_LIVE_ACCESS} AS live,
+        (${CLOUD_RECOVERY_TURN_HOLD}) AS recovery_held,
         EXISTS (SELECT 1 FROM cloud_worker_runtime_handoffs WHERE workspace_id=w.id AND state IN ('committed','activating','rolling_back')) AS handoff,
         c.epoch::text AS chat_epoch,h.deleted_at IS NOT NULL AS chat_deleted
       FROM cloud_v2_workspaces w
@@ -86,7 +88,7 @@ export class CloudV2PromptOutbox {
       LEFT JOIN cloud_v2_chats h ON h.workspace_id=w.id AND h.chat_id=p.chat_id
       WHERE w.id=$1`, [rows[0].id, messageId ?? null])).rows[0];
     if (!current?.live) throw unauthorized();
-    return { ...rows[0], handoff: current.handoff, ...(current.user_message_id ? { prompt: current } : {}),
+    return { ...rows[0], handoff: current.handoff, recoveryHeld: current.recovery_held, ...(current.user_message_id ? { prompt: current } : {}),
       chatEpoch: current.chat_epoch, chatDeleted: current.chat_deleted };
   }
 
@@ -326,7 +328,7 @@ export class CloudV2PromptOutbox {
     return withSystemTx(this.pool, async tx => {
       const workspace = await this.worker(tx, token, bootId), id = workspace.id;
       if (workspace.state !== "running") return { prompts: [], stops: [] };
-      if (workspace.handoff) return { prompts: [], stops: [] };
+      if (workspace.handoff || workspace.recoveryHeld) return { prompts: [], stops: [] };
       // The old process might have passed a request to its provider. Only an
       // explicit new send can recover it: a new boot is never a replay permit.
       await tx.query(`UPDATE cloud_v2_prompt_outbox SET state=CASE WHEN cancel_requested THEN 'cancelled' ELSE 'interrupted' END,
@@ -384,6 +386,7 @@ export class CloudV2PromptOutbox {
   async begin(token: string, bootId: string, input: { userMessageId: string; deliveryId: string; dispatchId: string }): Promise<{ dispatch: boolean; state: CloudV2PromptState }> {
     return withSystemTx(this.pool, async tx => {
       const workspace = await this.worker(tx, token, bootId, input.userMessageId), row = this.row(workspace);
+      assertRecoveryTurnReady(workspace.recoveryHeld);
       if (terminal(row.state)) return { dispatch: false, state: row.state };
       if (workspace.chatDeleted) throw new HttpError(409, "conversation_deleted", "This conversation was deleted");
       const chat = workspace.chatEpoch === null ? await this.chat(tx, workspace.id, row.chat_id) : { epoch: workspace.chatEpoch };

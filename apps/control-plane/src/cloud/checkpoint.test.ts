@@ -116,6 +116,27 @@ process.exit(result.status??1);
 }
 
 describe("cloud v2 checkpoints", () => {
+  it.each([false, true])("restores native context without carrying a prior turn hold (recovery=%s)", recovery => {
+    const w = workspaces(), key = randomBytes(32), archive = join(w.root, "checkpoint.zck");
+    const state = ".local/share/zeros/cloud-worker";
+    const saved = {
+      [`${state}/sessions/chats.db`]: "worker chat and native-session bindings\n",
+      ".claude/projects/project/session.jsonl": "claude context\n",
+      ".codex/sessions/session.jsonl": "codex context\n",
+      ".cursor/chats/chat.json": "cursor context\n",
+    };
+    for (const [path, content] of Object.entries(saved)) w.write(join(w.oldHome, path), content);
+    w.write(join(w.oldHome, state, "recovery-turn-hold"), "");
+    w.write(join(w.oldHome, state, "restored-from-checkpoint"), "recovery");
+    expect(checkpoint({ home: w.oldHome, repo: w.oldRepo, key, out: archive }, w.env).parsed.ok).toBe(true);
+    w.git(w.root, "clone", "-q", w.origin, w.newRepo);
+    expect(restore({ home: w.newHome, repo: w.newRepo, key, sha256: sha(archive), from: archive, ...{ recovery } }, w.env).parsed)
+      .toEqual({ ok: true });
+    for (const [path, content] of Object.entries(saved)) expect(readFileSync(join(w.newHome, path), "utf8")).toBe(content);
+    expect(existsSync(join(w.newHome, state, "recovery-turn-hold"))).toBe(false);
+    expect(readFileSync(join(w.newHome, state, "restored-from-checkpoint"), "utf8")).toBe(recovery ? "recovery" : "");
+  });
+
   it.each([1, 2])("restores v%s managed environment bytes only for legacy workspaces", version => {
     const w = workspaces(), key = randomBytes(32), archive = join(w.root, "checkpoint.zck");
     const files = [".env.fixture", "nested/.env.fixture", "staged/.env.fixture"];
