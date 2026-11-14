@@ -47,7 +47,11 @@ export class CloudTeamEvents {
             await this.sharing.authority.assert(proof);
             nextAuthority = this.now()+AUTHORITY_INTERVAL_MS;
           }
-          if (this.now()>=nextRenew) { await this.presence.renew(connectionId,proof); nextRenew = this.now()+TEAM_PRESENCE_RENEW_MS; }
+          if (this.now()>=nextRenew) {
+            // An expired registration needs fresh admission, not a permanent access-revoked notice.
+            if (!await this.presence.renew(connectionId,proof)) break;
+            nextRenew = this.now()+TEAM_PRESENCE_RENEW_MS;
+          }
           if (this.now()>=tokenEnd-TOKEN_END_MARGIN_MS) break;
           if (first || pending.delete("presence") || this.now()>=nextHeartbeat) {
             const presence = await this.presence.snapshot(proof), encoded = JSON.stringify(presence);

@@ -283,6 +283,23 @@ database("control-plane load budgets through the router and PostgreSQL", () => {
 });
 
 database("captured app census replay", () => {
+  it("rejects an expired client even while its context still says active", async () => {
+    const pool = createPool(process.env.TEST_DATABASE_URL!, { maxConnections: 10 });
+    const probe = new LoadBudgetProbe(pool);
+    let fixture: Awaited<ReturnType<typeof loadBudgetFixture>> | undefined;
+    try {
+      fixture = await loadBudgetFixture(pool, probe);
+      const census = await fixture.census(CENSUS_PROFILES.find(profile => profile.state === "running")!);
+      expect(await census.verify()).toMatchObject({ liveClients: 1 });
+      const expired = await pool.query("UPDATE cloud_v2_execution_contexts SET expires_at=clock_timestamp()-interval '1 second' WHERE kind='client' AND state='active'");
+      expect(expired.rowCount).toBe(1);
+      await expect(census.verify()).rejects.toThrow("census state or client/turn cardinality changed");
+    } finally {
+      try { await fixture?.close(); }
+      finally { probe.close(); await pool.end(); vi.restoreAllMocks(); vi.unstubAllGlobals(); }
+    }
+  }, 60_000);
+
   it.each(CENSUS_PROFILES)("replays $name through successful routes without changing workspace state", async profile => {
     const pool = createPool(process.env.TEST_DATABASE_URL!, { maxConnections: 10 });
     const probe = new LoadBudgetProbe(pool);

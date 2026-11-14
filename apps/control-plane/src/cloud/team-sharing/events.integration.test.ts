@@ -63,6 +63,28 @@ database("passive team transcript events", () => {
     await f.sharing.events.presence.close(connection);
   });
 
+  it("ends an expired presence registration for reconnect without revoking a current member", async () => {
+    const stream = await open();
+    await pool.query("UPDATE cloud_v2_workspace_presence SET expires_at=clock_timestamp()-interval '1 second' WHERE workspace_id=$1", [f.workspace.id]);
+    now += 60_001;
+    await tick();
+    await vi.waitFor(() => expect(stream.ended()).toBe(true), { interval: 5, timeout: 3000 });
+    expect(stream.frames.some(frame => frame.event === "revoked")).toBe(false);
+    const reconnected = await open();
+    expect(reconnected.frames.some(frame => frame.event === "ready")).toBe(true);
+    expect((await f.sharing.events.presence.snapshot(await f.sharing.authority.admit(f.workspace.id, f.viewer))).userIds).toEqual([f.viewer.id]);
+  });
+
+  it("still revokes a removed member on the same stream when its presence registration expires", async () => {
+    const stream = await open();
+    await pool.query("UPDATE cloud_v2_workspace_presence SET expires_at=clock_timestamp()-interval '1 second' WHERE workspace_id=$1", [f.workspace.id]);
+    await pool.query("DELETE FROM organization_members WHERE org_id=$1 AND user_id=$2", [f.organizationId, f.viewer.id]);
+    now += 60_001;
+    await tick();
+    await stream.wait("revoked", data => data.code === "workspace_access_changed");
+    await vi.waitFor(() => expect(stream.ended()).toBe(true), { interval: 5, timeout: 3000 });
+  });
+
   it.each(["signout","membership","fingerprint"])("applies membership and session changes, but not %s GitHub changes, during a presence read", async change => {
     const viewer = await f.sharing.authority.admit(f.workspace.id,f.viewer);
     await f.sharing.events.presence.open(viewer);

@@ -171,7 +171,7 @@ suite("negotiated history deletion reconciliation", () => {
     expect(await f.cp.store.windowMessages(f.workspace.id, "gone", 10)).toEqual([]);
   });
 
-  it("skips and durably prunes seven acknowledged tombstones on a clean wake", async () => {
+  it("skips seven acknowledged tombstone POSTs and retains their durable rejection guards", async () => {
     const deleted = Array.from({ length: 7 }, (_, index) => `deleted-${index}`);
     const native = await nativeMirror({ ids: ["keep", ...deleted] });
     await native.connect();
@@ -181,10 +181,12 @@ suite("negotiated history deletion reconciliation", () => {
     expect(await (await read()).json()).toMatchObject({ deleted });
     await native.reconnect();
     expect(native.reads()).toBe(1); expect(native.frames).toEqual([]);
-    expect(native.store.list().chatDeletions).toEqual([]);
+    expect(native.store.list().chatDeletions.sort()).toEqual(deleted);
     await native.store.flush();
     const reopened = await SessionStore.open(native.directory, native.key);
-    expect(reopened.list().chatDeletions).toEqual([]);
+    expect(reopened.list().chatDeletions.sort()).toEqual(deleted);
+    for (const id of deleted)
+      await expect(reopened.upsert({ id, folder: native.key, title: "Delayed row" })).rejects.toThrow("deleted");
     expect(reopened.list().chats.map(chat => chat.id)).toEqual(["keep"]);
     expect(await (await read()).json()).toMatchObject({ deleted });
   });
@@ -239,7 +241,7 @@ suite("negotiated history deletion reconciliation", () => {
       });
       if (failure === "disabled") native.state.enabled = false;
       await native.connect();
-      expect(native.deleted()).toEqual(["gone"]);
+      expect(native.deleted()).toEqual(failure === "restored" ? [] : ["gone"]);
       expect(native.replaced()).toEqual(["keep", "other"]);
       expect(native.store.list().chatDeletions).toContain("gone");
       expect(native.store.list().chats.map(chat => chat.id).sort()).toEqual(["keep", "other"]);

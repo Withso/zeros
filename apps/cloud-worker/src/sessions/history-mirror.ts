@@ -38,18 +38,24 @@ export class HistoryMirror {
     this.pending.clear();
     const tombstone = (chatId: string) => this.pending.set(chatId, { deleted: true, revision: 0, rows: new Map(), due: 0 });
     // A boot restored from a checkpoint (possibly older than the control plane's rows) replaces everything once.
-    const restored = this.firstConnect && !!this.digests?.restored(); this.firstConnect = false;
+    const restored = this.firstConnect && !!this.digests?.restored();
     if (this.negotiated() && this.transport.historyDigests) {
       // One read of the stored digests; only chats whose content differs are replaced (a restored boot replaces all, but
       // the read still proves the route). flush() and runtimeBusy wait for it.
       const epoch = this.epoch;
-      const sending = this.reconcile(epoch, restored, chatDeletions).finally(() => {
+      const sending = this.reconcile(epoch, restored, chatDeletions).then(() => {
+        if (epoch === this.epoch && this.online) this.firstConnect = false;
+      }).catch(() => {
+        if (epoch !== this.epoch) return;
+        this.disconnect();
+      }).finally(() => {
         if (this.sending !== sending) return;
         this.sending = undefined; this.drain();
       });
       this.sending = sending;
       return;
     }
+    this.firstConnect = false;
     for (const chatId of chatDeletions) tombstone(chatId);
     for (const chat of chats) this.pending.set(chat.id, this.snapshot(chat));
     this.drain();
@@ -90,14 +96,13 @@ export class HistoryMirror {
     if (deleted) for (const chat of this.store.list().chats) {
       if (!deleted.has(chat.id)) continue;
       await this.store.delete(chat.id);
-      await this.store.forgetTombstone(chat.id);
       if (epoch !== this.epoch || !this.online) return;
       this.pending.delete(chat.id);
     }
-    // Only deletion-list support proves the server retains tombstones after local pruning.
+    // Keep the durable local guard against delayed upserts; server acknowledgement only suppresses its POST.
     for (const chatId of tombstones) {
+      if (deleted?.has(chatId)) continue;
       if (!stored || restored || stored.has(chatId)) { this.pending.set(chatId, { deleted: true, revision: 0, rows: new Map(), due: 0 }); continue; }
-      if (deleted) { await this.store.forgetTombstone(chatId); if (epoch !== this.epoch || !this.online) return; }
     }
     if (restored) stored = undefined;
     for (const chat of this.store.list().chats) {

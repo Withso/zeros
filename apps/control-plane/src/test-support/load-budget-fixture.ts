@@ -554,7 +554,7 @@ export async function loadBudgetFixture(pool: pg.Pool, probe: LoadBudgetProbe) {
         },
         verify: async () => {
           const value = (await pool.query<{ state: string; clients: string; turns: string }>(`SELECT w.state,
-            (SELECT count(*) FROM cloud_v2_execution_contexts c WHERE c.workspace_id=w.id AND c.kind='client' AND c.state='active')::text AS clients,
+            (SELECT count(*) FROM cloud_v2_execution_contexts c WHERE c.workspace_id=w.id AND c.kind='client' AND c.state='active' AND c.expires_at>clock_timestamp())::text AS clients,
             (SELECT count(*) FROM cloud_v2_execution_contexts c WHERE c.workspace_id=w.id AND c.kind='turn' AND c.state='active')::text AS turns
             FROM cloud_v2_workspaces w WHERE w.id=$1`, [f.workspace.id])).rows[0];
           requireValue(value?.state === profile.state && Number(value.clients) === Number(profile.state === "running") && Number(value.turns) === 0,

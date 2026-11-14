@@ -536,19 +536,6 @@ export class SessionStore {
     }, null, true);
   }
 
-  /** Prune only after the control plane has acknowledged durable deletion; a concurrent live chat stays intact. */
-  async forgetTombstone(chatId: string): Promise<boolean> {
-    return this.serialize(chatId, async () => {
-      const data = this.sessions.get(chatId);
-      if (!data || data.chat) return false;
-      await rm(join(this.directory, this.filename(chatId)), { force: true });
-      const directory = await open(this.directory, constants.O_RDONLY);
-      try { await directory.sync(); } finally { await directory.close(); }
-      this.sessions.delete(chatId);
-      return true;
-    });
-  }
-
   window(chatId: string, limit = 200, before?: number): MessageWindow {
     return messageWindow(this.sessions.get(chatId)?.rows ?? [], limit, before);
   }

@@ -1,7 +1,7 @@
-import { mkdtemp, readdir, rm } from "node:fs/promises";
+import { cp, mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { CloudV2HistoryDigestsReplySchema, HISTORY_DIGEST_DELETIONS_FEATURE, type CloudV2HistoryDigestsReply, type CloudV2WorkerFrame } from "@zeros/protocol/cloud-v2-relay";
 import { SessionStore } from "../session-store";
 import { HistoryMirror } from "../history-mirror";
@@ -71,14 +71,14 @@ describe("history-digest-deletions-v1 (worker half)", () => {
     expect(f.relay.tombstones()).toEqual(["gone"]);
   });
 
-  it("a server row that is soft-deleted is treated as absent: no tombstone, and the local one is pruned", async () => {
+  it("keeps the rejection guard after server acknowledgement without sending the tombstone again", async () => {
     const f = await setup(); cleanups.push(f.close);
     f.mirror.connect(); await f.mirror.flush();
     await f.store.delete("gone"); await f.mirror.flush();
     expect(f.relay.softDeleted.has("gone")).toBe(true);
     await f.reconnect();
     expect(f.relay.tombstones()).toEqual([]);
-    expect(f.store.list().chatDeletions).not.toContain("gone");
+    expect(f.store.list().chatDeletions).toContain("gone");
     await f.reconnect();
     expect(f.relay.tombstones()).toEqual([]);
   });
@@ -86,21 +86,25 @@ describe("history-digest-deletions-v1 (worker half)", () => {
   it("an older checkpoint restored after the prune cannot resurrect the chat; unnamed chats are never deleted", async () => {
     const f = await setup(); cleanups.push(f.close);
     f.mirror.connect(); await f.mirror.flush();
+    const checkpoint = await mkdtemp(join(tmpdir(), "worker-deletion-checkpoint-"));
+    await cp(f.dir, checkpoint, { recursive: true });
+    cleanups.push(() => rm(checkpoint, { recursive: true, force: true }));
     await f.store.delete("gone"); await f.mirror.flush();
     await f.reconnect();
     // The checkpoint predates the deletion; the original mirror stays offline.
     f.mirror.disconnect();
-    await f.store.upsert({ id: "gone", folder: WORKSPACE_KEY, title: "gone" });
-    await f.store.upsert({ id: "fresh", folder: WORKSPACE_KEY, title: "fresh" });
-    f.state.restored = true;
-    const restored = new HistoryMirror(f.store, f.relay, () => true, value => value, { enabled: () => true, restored: () => true });
+    const store = await SessionStore.open(checkpoint, WORKSPACE_KEY);
+    expect(store.list().chats.map(chat => chat.id)).toContain("gone");
+    await store.upsert({ id: "fresh", folder: WORKSPACE_KEY, title: "fresh" });
+    const restored = new HistoryMirror(store, f.relay, () => true, value => value, { enabled: () => true, restored: () => true });
+    cleanups.unshift(() => restored.dispose());
     f.relay.frames.length = 0;
     restored.connect(); await restored.flush();
     expect(f.relay.resent()).not.toContain("gone");
     expect(f.relay.softDeleted.has("gone")).toBe(true);
-    expect(f.store.list().chats.map(chat => chat.id)).not.toContain("gone");
+    expect(store.list().chats.map(chat => chat.id)).not.toContain("gone");
     expect(f.relay.resent()).toEqual(["fresh", "keep", "other"]);
-    expect(f.store.list().chats.map(chat => chat.id).sort()).toEqual(["fresh", "keep", "other"]);
+    expect(store.list().chats.map(chat => chat.id).sort()).toEqual(["fresh", "keep", "other"]);
     await restored.dispose();
   });
 
@@ -128,14 +132,76 @@ describe("history-digest-deletions-v1 (worker half)", () => {
     expect(f.store.list().chatDeletions).toContain("gone");
   });
 
-  it("pruning removes only the tombstone file, never a live chat", async () => {
+  it("retains only compact deletion evidence without the deleted chat's content", async () => {
     const f = await setup(); cleanups.push(f.close);
-    expect(await f.store.forgetTombstone("keep")).toBe(false);
+    f.mirror.connect(); await f.mirror.flush();
     await f.store.delete("gone");
-    const before = (await readdir(f.dir)).length;
-    expect(await f.store.forgetTombstone("gone")).toBe(true);
-    expect((await readdir(f.dir)).length).toBe(before - 1);
+    await f.mirror.flush(); await f.reconnect();
+    const saved = await Promise.all((await readdir(f.dir)).filter(name => name.endsWith(".json"))
+      .map(async name => JSON.parse(await readFile(join(f.dir, name), "utf8"))));
+    expect(saved.find(row => row.chatId === "gone")).toMatchObject({ chat: null, rows: [], inbox: [], steers: [], turns: [], resets: [] });
+    expect(saved.find(row => row.chatId === "gone")).not.toHaveProperty("nativeSessionId");
     expect(f.store.list().chats.map(chat => chat.id).sort()).toEqual(["keep", "other"]);
+  });
+
+  it.each([false, true])("keeps acknowledged deleted IDs fenced against a delayed upsert (restart: %s)", async restart => {
+    const f = await setup(); cleanups.push(f.close);
+    f.mirror.connect(); await f.mirror.flush();
+    await f.store.delete("gone"); await f.mirror.flush();
+    await f.reconnect();
+    const store = restart ? await SessionStore.open(f.dir, WORKSPACE_KEY) : f.store;
+    await expect(store.upsert({ id: "gone", folder: WORKSPACE_KEY, title: "Delayed renderer row" })).rejects.toThrow("deleted");
+    expect(store.list().chats.map(chat => chat.id)).not.toContain("gone");
+    expect(f.relay.softDeleted.has("gone")).toBe(true);
+    expect(f.relay.resent()).not.toContain("gone");
+  });
+
+  it.each([false, true])("ends a failed local deletion reconciliation and retries it on the next connect (restored: %s)", async restored => {
+    const f = await setup(); cleanups.push(f.close);
+    f.mirror.connect(); await f.mirror.flush(); f.mirror.disconnect();
+    const mirror = new HistoryMirror(f.store, f.relay, () => true, value => value, { enabled: () => true, restored: () => restored });
+    cleanups.unshift(() => mirror.dispose());
+    f.relay.digests.delete("gone"); f.relay.softDeleted.add("gone");
+    await f.store.upsert({ id: "keep", folder: WORKSPACE_KEY, title: "Changed while offline" });
+    const remove = vi.spyOn(f.store, "delete").mockRejectedValueOnce(new Error("Fixture persistence unavailable"));
+    mirror.connect();
+    await expect(mirror.flush()).resolves.toBe(false);
+    expect(f.store.list().chats.map(chat => chat.id)).toContain("gone");
+    f.relay.frames.length = 0;
+    mirror.connect();
+    expect(await mirror.flush()).toBe(true);
+    expect(remove).toHaveBeenCalledTimes(2);
+    expect(f.store.list().chats.map(chat => chat.id)).not.toContain("gone");
+    expect(f.relay.resent()).toEqual(restored ? ["keep", "other"] : ["keep"]);
+    expect(f.relay.softDeleted.has("gone")).toBe(true);
+  });
+
+  it.each([false, true])("does not let an old local deletion failure disconnect a newer discovery (restored: %s)", async restored => {
+    const f = await setup(); cleanups.push(f.close);
+    f.mirror.connect(); await f.mirror.flush(); f.mirror.disconnect();
+    const mirror = new HistoryMirror(f.store, f.relay, () => true, value => value, { enabled: () => true, restored: () => restored });
+    cleanups.unshift(() => mirror.dispose());
+    f.relay.digests.delete("gone"); f.relay.softDeleted.add("gone");
+    const oldEntered = deferred(), newEntered = deferred(), newRelease = deferred();
+    let failOld!: () => void;
+    vi.spyOn(f.store, "delete").mockImplementationOnce(() => new Promise<void>((_resolve, reject) => {
+      failOld = () => reject(new Error("Previous connection's persistence failed")); oldEntered.resolve();
+    }));
+    mirror.connect(); await oldEntered.promise;
+    const draining = mirror.flush();
+    const discover = f.relay.historyDigests.bind(f.relay);
+    f.relay.historyDigests = async () => { newEntered.resolve(); await newRelease.promise; return discover(); };
+    try {
+      mirror.disconnect(); mirror.connect(); await newEntered.promise;
+      failOld(); await settled(); f.relay.frames.length = 0;
+      await f.store.upsert({ id: "keep", folder: WORKSPACE_KEY, title: "Changed during new discovery" });
+      await settled(); expect(f.relay.frames).toEqual([]);
+      newRelease.resolve();
+      expect(await draining).toBe(true);
+      expect(await mirror.flush()).toBe(true);
+      expect(f.relay.resent()).toEqual(restored ? ["keep", "other"] : ["keep"]);
+      expect(f.relay.softDeleted.has("gone")).toBe(true);
+    } finally { failOld(); newRelease.resolve(); await draining; }
   });
 
   it("can flush through a legacy reconnect after disconnecting during digest discovery", async () => {

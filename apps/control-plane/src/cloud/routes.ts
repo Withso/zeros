@@ -107,7 +107,7 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
   const connectionWorkspace = (c: Context, id: string) => {
     let pending = connections.get(c);
     if (!pending) {
-      pending = deps.execution?.connectionWorkspace(id, c.get("user")) ?? Promise.resolve(undefined);
+      pending = deps.execution ? deps.execution.connectionWorkspace(id, c.get("user")) : Promise.resolve(undefined);
       connections.set(c, pending);
     }
     return pending;

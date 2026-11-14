@@ -25,7 +25,7 @@ async function open() {
   const events = new CloudTeamEvents({ authority } as unknown as CloudTeamSharing, signals as unknown as CloudTeamSignals);
   vi.spyOn(events.presence, "open").mockResolvedValue("connection");
   vi.spyOn(events.presence, "close").mockResolvedValue();
-  const renew = vi.spyOn(events.presence, "renew").mockResolvedValue();
+  const renew = vi.spyOn(events.presence, "renew").mockResolvedValue(true);
   const snapshot = vi.spyOn(events.presence, "snapshot").mockResolvedValue({ workspaceId, userIds: [user.id], total: 1 });
   const app = new Hono();
   app.get("/events", c => { c.set("user", user); return events.open(c, workspaceId); });

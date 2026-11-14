@@ -101,6 +101,11 @@ describe("activated relay read admission", () => {
   const send = (id: string, op = "messages.windowOlder", params: unknown = {}) => app.send(JSON.stringify({ type: "WORKSPACE_REQUEST", id, op, params }));
   const forwarded = (id: string) => frames.some(frame => frame.t === "frame" && frame.frame.id === id);
   const read = async (id: string, op?: string, params?: unknown) => { send(id, op, params); await expect.poll(() => forwarded(id)).toBe(true); };
+  const nextReceipt = () => {
+    const room = (relay as unknown as { rooms: Map<string, { clients: Map<string, { ws: WebSocket }> }> }).rooms.get(workspaceId)!;
+    const socket = [...room.clients.values()][0]!.ws;
+    return new Promise<void>(resolve => socket.once("message", () => resolve()));
+  };
 
   it("serves an admitted burst of history, file and Git reads without per-frame execution admission", async () => {
     for (const [id, op] of [["history", "messages.windowOlder"], ["file", "file.read"], ["git", "git.status"]]) await read(id!, op);
@@ -157,7 +162,9 @@ describe("activated relay read admission", () => {
     });
     notify();
     await expect.poll(() => typeof resume).toBe("function");
+    const received = nextReceipt();
     send("after-hint");
+    await received;
     expect(forwarded("after-hint")).toBe(false);
     resume();
     await expect.poll(() => app.readyState).toBe(WebSocket.CLOSED);
@@ -215,7 +222,9 @@ describe("activated relay read admission", () => {
     clients.forward.mockImplementationOnce(() => new Promise<void>(resolve => { resume = resolve; }));
     send("held-write", "file.write");
     await expect.poll(() => typeof resume).toBe("function");
+    const received = nextReceipt();
     send("queued-read");
+    await received;
     allowed = false; now += 30_000; resume();
     await expect.poll(() => app.readyState).toBe(WebSocket.CLOSED);
     expect(forwarded("queued-read")).toBe(false);
