@@ -89,7 +89,7 @@ it("does not re-read a committed prompt's status while its workspace is not read
     const value = api();
     const receipt = { workspaceId: owner.workspaceId, chatId: owner.chatId, userMessageId: "saved", sequence: "1", epoch: "0", acceptedAt: new Date(0).toISOString(), workspaceState: "stopped" as const };
     vi.mocked(value.enqueue).mockResolvedValue(receipt);
-    vi.mocked(value.list).mockResolvedValue({ epoch: "0", nextAfter: null, items: [{ receipt, state: "queued", cancelRequested: false }] });
+    vi.mocked(value.list).mockResolvedValue({ epoch: "0", nextAfter: null, items: [{ receipt, state: "queued", cancelRequested: false, payload: null }] });
     const chat = coordinator.channel(owner, value, () => true, vi.fn());
     await chat.enqueue(async () => ({ chatId: owner.chatId, userMessageId: "saved", agentId: "codex", prompt: [{ type: "text", text: "ok" }], startedAt: 1 }));
     coordinator.wake(chat); await vi.advanceTimersByTimeAsync(0);
