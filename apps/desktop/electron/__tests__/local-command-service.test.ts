@@ -331,3 +331,48 @@ describe("device ready diagnostics", () => {
     await service.stop();
   });
 });
+
+describe("idle is quiet: a token-rollover reopen", () => {
+  const readyFrame = (heartbeatIntervalMs: 25_000 | 300_000) => ({ event: "ready" as const, data: { deviceId, registrationId: device.registrationId, instanceId: device.instanceId,
+    presence: { presenceRequired: true, reachableUntil: null }, heartbeatIntervalMs } });
+
+  it("sends no extra heartbeat when the last beat is still inside its interval", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
+    const s = await setup();
+    const beats = () => s.calls.filter(call => call === "heartbeat").length;
+    s.push(readyFrame(25_000));
+    await vi.waitFor(() => expect(beats()).toBe(1));
+    await vi.advanceTimersByTimeAsync(10_000);
+    s.push(null);                                   // the server ends the stream at token expiry
+    await vi.advanceTimersByTimeAsync(1);
+    s.push(readyFrame(25_000));
+    await vi.advanceTimersByTimeAsync(1);
+    expect(beats()).toBe(1);
+    await vi.advanceTimersByTimeAsync(25_000);
+    expect(beats()).toBe(2);
+    await s.service.stop();
+  });
+
+  it("re-offers device-liveness-v1 after a downgrade, at most every 30 min, on a clean reopen", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
+    const root = await mkdtemp(join(tmpdir(), "local-command-renegotiate-")); directories.push(root);
+    const h = harness({ journalRoot: root });
+    const offered: number[] = [];
+    let refuse = true;
+    (h.deps.control.register as ReturnType<typeof vi.fn>).mockImplementation(async (_name: unknown, registration: { capabilities: string[] }) => {
+      offered.push(registration.capabilities.length);
+      if (refuse && registration.capabilities.length === 3) { refuse = false; throw new DeviceControlError(400, "invalid_request"); }
+      return { device, presence: { presenceRequired: false, reachableUntil: null }, heartbeatIntervalMs: 25_000 as const };
+    });
+    const lines: string[] = [];
+    const service = new LocalCommandService({ ...h.deps, log: line => { lines.push(line); } }); await service.start();
+    await vi.waitFor(() => expect(offered).toEqual([3, 2]));
+    const reopen = async () => { h.push(readyFrame(25_000)); await vi.advanceTimersByTimeAsync(6_000); h.push(null); await vi.advanceTimersByTimeAsync(1); };
+    await reopen();
+    expect(offered).toEqual([3, 2]);               // a reopen inside 30 min keeps the registration
+    await vi.advanceTimersByTimeAsync(31 * 60_000);
+    await reopen(); await vi.advanceTimersByTimeAsync(200_000);
+    await vi.waitFor(() => expect(offered).toEqual([3, 2, 3]));
+    await service.stop();
+  });
+});

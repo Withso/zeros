@@ -43,6 +43,9 @@ interface Pending { view: LocalCommandApprovalView; notice: LocalCommandPendingN
  * the account-level channel, and each request from notice to result. Nothing
  * runs without this Mac's own decision (or its Always allow for the chat's own
  * target), and a request runs at most once, across reconnects and restarts. */
+/** How long a capability downgrade (an older control plane's 400) stands before a clean reopen offers the full set. */
+const RENEGOTIATE_MS = 30 * 60_000;
+
 export class LocalCommandService {
   private lifetime?: AbortController;
   private device?: LocalCommandDevice;
@@ -53,6 +56,8 @@ export class LocalCommandService {
   private readonly chains = new Map<string, Promise<void>>();
   private heartbeat?: ReturnType<typeof setInterval>;
   private lastBeatAt = 0;
+  /** The stream reopened after a clean end (token rollover): a beat still inside its interval needs no repeat. */
+  private quietReopen = false;
   /** A stream is open and said ready: only then is this Mac deliverable, so only then does it beat. */
   private streamLive = false;
   private loop?: Promise<void>;
@@ -137,7 +142,10 @@ export class LocalCommandService {
   private async channel(session: { accountId: string; sessionId: string }, signal: AbortSignal): Promise<void> {
     const { accountId } = session;
     // One request id is only ever sent with one exact body: the id and the capability set change together.
-    let registration = { requestId: randomUUID(), capabilities: [LOCAL_COMMANDS_FEATURE, LOCAL_COMMANDS_REASON_FEATURE, DEVICE_LIVENESS_FEATURE] as readonly string[] }, attempt = 0;
+    const FULL = [LOCAL_COMMANDS_FEATURE, LOCAL_COMMANDS_REASON_FEATURE, DEVICE_LIVENESS_FEATURE] as readonly string[];
+    let registration = { requestId: randomUUID(), capabilities: FULL }, attempt = 0;
+    // A 400 downgrade sticks to the registration; a later clean reopen offers the full set again (at most every 30 min).
+    let downgradedAt: number | null = null;
     const stillSignedIn = async () => {
       const current = await this.deps.session().catch(() => null);
       return !!current && current.accountId === session.accountId && current.sessionId === session.sessionId;
@@ -164,7 +172,7 @@ export class LocalCommandService {
         // An older control plane refuses a capability it does not know: drop the newest one and register again under a
         // new id (device-liveness-v1, then the v1.3 reason capability, leaving v1 alone).
         if (error instanceof DeviceControlError && error.status === 400 && registration.capabilities.length > 1) {
-          registration = { requestId: randomUUID(), capabilities: registration.capabilities.slice(0, -1) }; continue;
+          registration = { requestId: randomUUID(), capabilities: registration.capabilities.slice(0, -1) }; downgradedAt = Date.now(); continue;
         }
         // That id was committed with another body: never loop on it.
         if (code === "device_registration_conflict") registration = { ...registration, requestId: randomUUID() };
@@ -172,6 +180,7 @@ export class LocalCommandService {
       }
       await this.recover();
       // Stream until it ends; reconnect without registering again.
+      let cleanReopen = false;
       for (;;) {
         if (signal.aborted) return;
         const opened = Date.now(), stream = new AbortController();
@@ -188,8 +197,9 @@ export class LocalCommandService {
             this.onEvent(event);
             if (first) {
               first = false; attempt = 0;
-              // A reconnect reports presence at once instead of 25 s later.
-              if (this.presence.presenceRequired) void this.beat();
+              // A reconnect reports presence at once instead of 25 s later, unless the last beat is still inside its
+              // interval (a token-rollover reopen a few seconds later).
+              if (this.presence.presenceRequired && (!cleanReopen || Date.now() - this.lastBeatAt >= this.heartbeatMs)) void this.beat();
             }
           }
         } catch (error) {
@@ -203,8 +213,12 @@ export class LocalCommandService {
         this.log(`channel closed reason=${reason} open_s=${Math.round((Date.now() - opened) / 1000)}`);
         if (reason === "device_registration_changed") { registration = { ...registration, requestId: randomUUID() }; break; }
         if (authFailure(reason) && !await stillSignedIn()) { this.log("channel stopped reason=signed_out"); return; }
+        if (downgradedAt !== null && Date.now() - downgradedAt >= RENEGOTIATE_MS) {
+          this.log("renegotiate capabilities"); registration = { requestId: randomUUID(), capabilities: FULL }; downgradedAt = null; break;
+        }
         // The server ends a healthy stream cleanly just before its token expires (every few minutes):
         // reconnect at once, or a request sent in the gap misses its delivery deadline.
+        cleanReopen = reason === "ended" && !first; this.quietReopen = cleanReopen;
         await backoff(reason === "ended" && !first && Date.now() - opened >= 5_000);
       }
     }
@@ -218,8 +232,8 @@ export class LocalCommandService {
     if (presence.presenceRequired && this.streamLive && !this.heartbeat) {
       this.heartbeat = setInterval(() => { void this.beat(); }, this.heartbeatMs);
       this.heartbeat.unref?.();
-      // Becoming a command target is reported at once, not at the next tick.
-      void this.beat();
+      // Becoming a command target is reported at once, not at the next tick (unless a beat is still current).
+      if (!this.quietReopen || Date.now() - this.lastBeatAt >= this.heartbeatMs) void this.beat();
     } else if (!presence.presenceRequired && this.heartbeat) { clearInterval(this.heartbeat); this.heartbeat = undefined; }
   }
   private async beat(): Promise<void> {
