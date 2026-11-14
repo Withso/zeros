@@ -5,15 +5,15 @@ type Doc = { status: string; deletedAt: null | string; generation?: { number: nu
 function fixture(initial: Doc | undefined) {
   let doc = initial, hidden = false;
   const listeners = new Set<() => void>(), visibility = new Set<() => void>();
-  const warmHistory = vi.fn(async () => {}), connect = vi.fn(async () => {});
+  const warmHistory = vi.fn(async () => {}), connect = vi.fn(async () => {}), connected = vi.fn(), failed = vi.fn();
   const stop = attachSelectedCloudWorkspace({
     document: () => doc as never, hidden: () => hidden, warmHistory, connect,
     subscribe: listener => { listeners.add(listener); return () => listeners.delete(listener); },
     onVisibility: listener => { visibility.add(listener); return () => visibility.delete(listener); },
-    connected: vi.fn(), failed: vi.fn(),
+    connected, failed,
   });
   return {
-    warmHistory, connect, stop,
+    warmHistory, connect, connected, failed, stop,
     set(next: Doc | undefined) { doc = next; for (const listener of [...listeners]) listener(); },
     notify() { for (const listener of [...listeners]) listener(); },
     show(value: boolean) { hidden = !value; for (const listener of [...visibility]) listener(); },
@@ -67,5 +67,29 @@ describe("selected cloud workspace attach", () => {
     f.notify(); f.notify();
     expect(f.warmHistory).toHaveBeenCalledTimes(2);
     f.stop();
+  });
+
+  it("a connect that settles after the document changed reports nothing for the replaced state", async () => {
+    for (const outcome of ["resolve", "reject"] as const) {
+      const ready = { ...stopped, status: "ready" };
+      const f = fixture(ready);
+      // Let the mount's own connect settle, so the next notify starts a fresh attempt.
+      await vi.waitFor(() => expect(f.connected).toHaveBeenCalledOnce());
+      f.connected.mockClear();
+      let settle!: (ok: boolean) => void;
+      f.connect.mockImplementationOnce(() => new Promise<void>((resolve, reject) => { settle = ok => ok ? resolve() : reject(new Error("old")); }));
+      f.notify();
+      expect(f.connect).toHaveBeenCalledTimes(2);
+      // The workspace moved to a new generation while the old connect was pending.
+      f.set({ ...ready, generation: { number: 2 } });
+      settle(outcome === "resolve");
+      await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+      expect(f.connected).not.toHaveBeenCalled();
+      expect(f.failed).not.toHaveBeenCalled();
+      // The replacement state gets its own attempt as soon as the stale one settles.
+      await vi.waitFor(() => expect(f.connect).toHaveBeenCalledTimes(3));
+      await vi.waitFor(() => expect(f.connected).toHaveBeenCalledOnce());
+      f.stop();
+    }
   });
 });

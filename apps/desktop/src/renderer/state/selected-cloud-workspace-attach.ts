@@ -35,10 +35,17 @@ export function attachSelectedCloudWorkspace(sources: Sources): () => void {
     }
     if (attaching || !["ready", "busy"].includes(doc.status)) return;
     attaching = true;
+    // A result belongs to the document state that started it: a generation change, a stop or lost access meanwhile
+    // makes it report nothing (fenced at completion as well as admission).
+    const current = () => {
+      if (cancelled) return false;
+      const now = sources.document();
+      return !!now && canReadCloudWorkspace(now) && ["ready", "busy"].includes(now.status) && servingState(now) === state;
+    };
     void sources.connect()
-      .then(() => { if (!cancelled) sources.connected(); })
-      .catch(error => { if (!cancelled) sources.failed(error); })
-      .finally(() => { attaching = false; });
+      .then(() => { if (current()) sources.connected(); })
+      .catch(error => { if (current()) sources.failed(error); })
+      .finally(() => { attaching = false; if (!cancelled && !current()) attach(); });
   };
   attach();
   const off = sources.subscribe(() => attach());
