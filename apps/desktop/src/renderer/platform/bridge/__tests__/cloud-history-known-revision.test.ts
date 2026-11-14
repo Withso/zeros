@@ -75,5 +75,42 @@ describe("mirror transcript reads carry the chats.list revision", () => {
       expect(lastKnown()).toBeUndefined();
     } finally { client.dispose(); }
   });
+
+  it("invalidations of uncached workspaces never evict a cached list's unconfirmed marker", async () => {
+    let revision = 7;
+    const readHistory = vi.fn(async (_target: unknown, op: string, _params?: Record<string, unknown>, _options?: unknown) =>
+      op === "chats.list" ? { chats: [chat("a", { revision, messageCount: revision })] } : { messages: [] });
+    const client = new WorkspaceRuntimeClient({ open: vi.fn(), readHistory, historyRoot: () => "/home/user/Owner/repo", workspaces: () => [] });
+    const lastKnown = () => readHistory.mock.calls.filter(([, op]) => op === "messages.window").at(-1)?.[3];
+    try {
+      await client.request({ type: "WORKSPACE_REQUEST", op: "messages.window", params: { chatId: cloudScopedId(target, "a"), limit: 200 } });
+      revision = 8; client.refreshHistoryWorkspace(target);
+      for (let i = 0; i < 70; i++)
+        client.refreshHistoryWorkspace({ ...target, workspaceId: `33333333-3333-4333-8333-${String(i).padStart(12, "0")}` });
+      await client.request({ type: "WORKSPACE_REQUEST", op: "messages.window", params: { chatId: cloudScopedId(target, "a"), limit: 199 } });
+      expect(lastKnown()).toEqual({ known: { revision: 8, messageCount: 8 } });
+    } finally { client.dispose(); }
+  });
+
+  it("a first list read in flight across an invalidation does not confirm its result", async () => {
+    let release!: () => void, admitted!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    const started = new Promise<void>(resolve => { admitted = resolve; });
+    let calls = 0;
+    const readHistory = vi.fn(async (_target: unknown, op: string, _params?: Record<string, unknown>, _options?: unknown) => {
+      if (op !== "chats.list") return { messages: [] };
+      if (++calls === 1) { admitted(); await held; return { chats: [chat("a", { revision: 7, messageCount: 7 })] }; }
+      return { chats: [chat("a", { revision: 8, messageCount: 8 })] };
+    });
+    const client = new WorkspaceRuntimeClient({ open: vi.fn(), readHistory, historyRoot: () => "/home/user/Owner/repo", workspaces: () => [] });
+    try {
+      const warm = client.warmHistoryWorkspace(target);
+      await started;
+      client.refreshHistoryWorkspace(target);
+      release(); await warm.catch(() => {});
+      await client.request({ type: "WORKSPACE_REQUEST", op: "messages.window", params: { chatId: cloudScopedId(target, "a"), limit: 200 } });
+      expect(readHistory.mock.calls.filter(([, op]) => op === "messages.window").at(-1)?.[3]).toEqual({ known: { revision: 8, messageCount: 8 } });
+    } finally { client.dispose(); }
+  });
 });
 

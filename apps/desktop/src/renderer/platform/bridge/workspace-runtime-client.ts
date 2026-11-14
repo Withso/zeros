@@ -640,7 +640,8 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
         currentPeer.client.status === "connected")
       return this.readHistory(target, op, params);
     if (op === "chats.list") {
-      // Only a list read that started after the latest invalidation confirms it.
+      // Only a list read that started after the latest invalidation confirms it. (One in flight across an invalidation
+      // is followed by the shared cache's queued re-read.)
       if (listGeneration === this.listInvalidations) this.unconfirmedLists.delete(this.historyKey(target, op, params));
       this.historyWorkspaces.delete(key);
       this.historyWorkspaces.set(key, target);
@@ -669,8 +670,12 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
   private invalidateHistory(target: CloudWorkspaceTarget): void {
     const prefix = `${cloudWorkspaceKey(target)}\0`;
     for (const key of this.history.keys()) if (key.startsWith(prefix)) this.history.invalidate(key);
-    this.unconfirmedLists.add(this.historyKey(target, "chats.list", {})); this.listInvalidations++;
-    while (this.unconfirmedLists.size > 64) this.unconfirmedLists.delete(this.unconfirmedLists.values().next().value!);
+    this.listInvalidations++;
+    // A marker guards a cached list; a workspace with no cached list has nothing stale (its next read loads first).
+    // Markers leave only with their snapshot, so they are bounded by the history cache, never evicted while stale.
+    const listKey = this.historyKey(target, "chats.list", {});
+    if (this.history.peekSnapshot(listKey).data !== undefined) this.unconfirmedLists.add(listKey);
+    for (const marker of this.unconfirmedLists) if (this.history.peekSnapshot(marker).data === undefined) this.unconfirmedLists.delete(marker);
   }
 
   hasChatSnapshot(folder: string): boolean {
