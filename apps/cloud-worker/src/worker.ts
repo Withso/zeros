@@ -640,6 +640,16 @@ export class CloudWorker {
       this.configurationRevision = revision;
       return;
     }
+    if (this.acting && this.options.runtimeResume && this.contexts) {
+      // An acting handoff boot skips bootstrapLease, the only other wait on this boot's clean attestation. Its private
+      // ready (readyRuntime, then runtimeResume.ready completing the handoff marker) waits for an ACCEPTED attestation
+      // on top of the configuration applied above; a refused, unproven or failed clean never promotes or clears it.
+      this.options.log?.("runtime-ready waiting=boot-clean");
+      const accepted = await this.contexts.ready().then(() => true, () => false);
+      if (!accepted) { this.options.log?.("runtime-ready refused=boot-clean"); return; }
+      // Stop, dispose or a newer configuration while waiting own readiness now.
+      if (this.disposed || this.stopping || this.acceptedConfigurationRevision !== revision) return;
+    }
     await measureStartup("worker_reconfigure_ready", async () => { await this.options.transport.readyRuntime?.(); }, initial ? undefined : timing);
     if (this.disposed || this.stopping) return;
     this.options.runtimeResume?.ready?.();
