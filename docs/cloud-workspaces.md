@@ -74,18 +74,14 @@ Repeated 502/504 responses start two consecutive 60-second verification windows;
 each must also observe a newly authenticated outbound hello or prompt pull for
 the same sandbox, boot and access epoch. A successful dial or changed binding
 ends that attempt. Timeouts, 503s and authentication/configuration refusals do
-not authorize a route repair.
+not authorize checkpoint recovery.
 
-After both windows, the control plane hides and recreates the protected
-localhost route once. A per-boot receipt is flushed to disk before hide, and a
-new, boot-bound host idempotency key survives retries. An uncertain hide reply
-is reconciled from that receipt; it never triggers another hide. Publication
-checks the current sandbox, boot, access epoch, worker and route credentials,
-and excludes lifecycle and runtime handoffs. The worker process, workspace
-identity, history and outbound prompt delivery continue. One more 60-second
-window verifies the repaired route. Another witnessed gateway failure can
-start checkpoint recovery only for an active workspace whose current worker
-advertised `recovery-quiesce-v1`. Older workers retain the named
+After both windows, the control plane checks the same sandbox, boot, access
+epoch, worker and route credentials and excludes lifecycle and runtime
+handoffs. It can then start checkpoint recovery for an active workspace whose
+current worker advertised `recovery-quiesce-v1`. Recovery creates a new machine
+from the checkpoint: a stop/start can return the same Boat machine, so it is
+not a repair for a bad host. Older workers retain the named
 `error.code: "live_connection_unavailable"` condition; a successful connection
 clears it. Local workspaces use their existing engine.
 
@@ -150,6 +146,14 @@ owner replacement, and an explicit Stop cancel pending requests and prevent
 late checkout publication. Reconnect tickets always use `wake: false`.
 Terminal refusals end the attempt immediately. The API keeps masking cloud
 5xx responses, while logging only a known cause code and status server-side.
+
+A ticket advertising `connect-ready-v1` keeps that one opening flight while
+the relay waits for worker readiness. Socket churn before the first ready frame
+ends the attempt without minting another ticket; a later explicit open can try
+again. Established connections retain their existing reconnect behavior, and
+older tickets retain their existing retry behavior. Prompts and workspace event
+streams wait for the workspace's accepted ready state instead of repeatedly
+reading while it starts. Local connections keep their existing lifecycle.
 
 App tickets and open clients retain the creator's verified WorkOS session ID.
 Signing out closes only that session's clients and expires its unused tickets;
@@ -1738,8 +1742,13 @@ resume, runtime installation (including whether it changed), protected route,
 token delivery, first hello, worker checkout/session/services and relay readiness.
 Records contain a shortened workspace ID, closed phase name and duration,
 without commands, paths, URLs or credentials. Optional worker timings use a
-separate HTTPS endpoint with no retries; the control plane caps reports per
-boot and phase in bounded memory. Diagnostics never determine startup success.
+separate HTTPS endpoint with no retries; workers that negotiate `boot-timings-v1`
+batch process load, listener, hello and applied-ready phases. The control plane
+caps reports per boot and phase in bounded memory. Ready notifications schedule
+the relay's dial; a fresh route and authority check still gate forwarding, and
+a bounded fallback covers a missing notification. Diagnostics never determine
+startup success. Dial diagnostics include the gateway status and a closed body
+class, never the body itself.
 Some phases overlap or nest. `runtime_install` includes the wait for a new VM's
 first command: Boat holds that command until the VM is up, about 2 s from a
 snapshot. `worker_hello` runs from the workspace row's last update, so for a

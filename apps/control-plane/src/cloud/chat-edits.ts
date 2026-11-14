@@ -62,9 +62,9 @@ export class CloudV2ChatEdits {
     });
   }
 
-  async advertise(token: string, bootId: string, supported: boolean, handoff?: string): Promise<boolean> {
+  async advertise(token: string, bootId: string, supported: boolean, handoff?: string, transaction?: Tx): Promise<boolean> {
     // A current-boot hello can finish after the candidate's hello, before promotion.
-    const result = await withSystemTx(this.pool, tx => tx.query(`UPDATE cloud_v2_workspaces w SET chat_edit_boot_ids=ARRAY(
+    const advertise = (tx: Tx) => tx.query(`UPDATE cloud_v2_workspaces w SET chat_edit_boot_ids=ARRAY(
       SELECT DISTINCT id FROM unnest(chat_edit_boot_ids || CASE WHEN $5 THEN ARRAY[$2::uuid] ELSE '{}'::uuid[] END) AS boots(id)
       WHERE (id=w.worker_boot_id OR id=$2::uuid OR ($3::uuid IS NULL AND id=(
         SELECT CASE WHEN h.state='rolling_back' THEN h.rollback_boot_id ELSE h.next_boot_id END
@@ -73,7 +73,8 @@ export class CloudV2ChatEdits {
         AND (id<>$2::uuid OR $5))
       WHERE worker_token_hash=$1 AND state IN ('creating','starting','running') AND ${CLOUD_V2_LIVE_ACCESS}
         AND (($3::uuid IS NULL AND worker_boot_id=$2) OR ($3::uuid IS NOT NULL AND ${RUNTIME_HANDOFF_SESSION}))`,
-    [hashCloudV2Token(token), bootId, handoff ?? null, null, supported]));
+    [hashCloudV2Token(token), bootId, handoff ?? null, null, supported]);
+    const result = await (transaction ? advertise(transaction) : withSystemTx(this.pool, advertise));
     return Boolean(result.rowCount);
   }
 }

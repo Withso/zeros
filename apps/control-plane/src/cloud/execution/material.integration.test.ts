@@ -106,7 +106,7 @@ database("execution material ownership and pins", () => {
       const query = tx.query.bind(tx);
       const spy = vi.spyOn(tx, "query").mockImplementation((async (sql: unknown, ...args: unknown[]) => {
         const result = await (query as any)(sql, ...args);
-        if (!intercepted && typeof sql === "string" && sql.startsWith("SELECT version_id FROM cloud_environment_heads")) {
+        if (!intercepted && typeof sql === "string" && sql.includes("coalesce(c.environment_version_id,p.version_id,h.version_id) AS version_id")) {
           intercepted = true; entered(); await held;
         }
         return result;

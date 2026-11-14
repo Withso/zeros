@@ -13,6 +13,10 @@ type Boot = { boot_id: string; access_epoch: string; stop_generation: string; wo
   retirement_id: string | null; retirement_hash: Buffer | null; retired_count: number | null; clean_at: Date | null;
   legacy_material: "none" | "removed" | "refused" | null; first_failed_at: Date | null };
 
+export const CLEAN_EXECUTION_BOOT = `EXISTS(SELECT 1 FROM cloud_v2_execution_boots b WHERE b.workspace_id=w.id
+  AND b.boot_id=w.worker_boot_id AND b.clean_at IS NOT NULL AND b.legacy_material IN ('none','removed')
+  AND b.replaced_by IS NULL AND b.access_epoch=w.access_epoch AND b.stop_generation=w.stop_generation AND b.worker_token_hash=w.worker_token_hash)`;
+
 export class CloudExecutionBoots {
   constructor(readonly contexts: CloudExecutionContexts) {}
 
@@ -29,12 +33,12 @@ export class CloudExecutionBoots {
     const stale = (await tx.query<{ id: string }>(`SELECT id FROM cloud_v2_execution_contexts WHERE workspace_id=$1
       AND worker_boot_id<>$2 AND state='active' ORDER BY id`, [workspace.id, identity.bootId])).rows;
     for (const row of stale) await this.contexts.revoke(tx, row.id, "worker_changed");
+    return workspace;
   }
 
   async assertClean(tx: Tx, workspace: Pick<ExecutionWorkspace, "id" | "worker_boot_id" | "access_epoch" | "stop_generation" | "worker_token_hash">) {
-    if (!(await tx.query(`SELECT 1 FROM cloud_v2_execution_boots WHERE workspace_id=$1 AND boot_id=$2 AND clean_at IS NOT NULL
-      AND legacy_material IN ('none','removed')
-      AND replaced_by IS NULL AND access_epoch=$3 AND stop_generation=$4 AND worker_token_hash=$5`,
+    if (!(await tx.query(`SELECT 1 FROM cloud_v2_workspaces w WHERE w.id=$1 AND w.worker_boot_id=$2
+      AND w.access_epoch=$3 AND w.stop_generation=$4 AND w.worker_token_hash=$5 AND ${CLEAN_EXECUTION_BOOT}`,
     [workspace.id, workspace.worker_boot_id, workspace.access_epoch, workspace.stop_generation, workspace.worker_token_hash])).rowCount) throw actorBusy();
   }
 

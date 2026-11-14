@@ -1,7 +1,5 @@
 import { setTimeout as delay } from "node:timers/promises";
 import type WebSocket from "ws";
-import type { CloudV2Compute } from "./boat.js";
-import { LIVE_RECOVERY_PORT, liveRecoveryHideCommand, liveRecoveryHideState, liveRecoveryKey } from "./live-recovery-command.js";
 import type { LiveRecoveryProofBinding, LiveRecoveryWitness } from "./live-recovery-signals.js";
 import { dialWorker, WorkerConnectionFailure, type WorkerRoute } from "./worker-connection.js";
 
@@ -9,14 +7,12 @@ export const LIVE_CONNECTION_UNAVAILABLE = "live_connection_unavailable";
 export const LIVE_RECOVERY_WINDOW_MS = 60_000;
 const DIAL_MS = 15_000, RETRY_MS = 2_000;
 type BoundRoute = WorkerRoute & { url: string; token: string; bootId: string; workerTokenHash: string };
-type Recovery = { route: BoundRoute; abort: AbortController; flight: Promise<void>; repaired: boolean };
+type Recovery = { route: BoundRoute; abort: AbortController; flight: Promise<void>; escalated: boolean };
 type Verification = "connected" | "gateway" | "unavailable" | "changed";
 
 export type LiveRecoveryDeps = {
   route(id: string): Promise<WorkerRoute | null>;
-  compute: Pick<CloudV2Compute, "exec" | "hostPort">;
   witness(binding: LiveRecoveryProofBinding, expiresAt: number): Promise<LiveRecoveryWitness>;
-  publish(route: WorkerRoute, hosted: { url: string; token: string }): Promise<boolean>;
   condition(route: WorkerRoute, unavailable: boolean): Promise<boolean>;
   rebuild?(route: WorkerRoute): Promise<boolean>;
   recovered?(route: WorkerRoute): Promise<void>;
@@ -39,7 +35,7 @@ export function sameLiveRoute(a: WorkerRoute, b: WorkerRoute | null): b is Bound
 
 /** An attempted live connection starts bounded verification; passive catalog
  * reads never start it. Only explicit gateway refusals plus a fresh outbound
- * worker proof in each window authorize the non-destructive route repair. */
+ * worker proof in each window permit admission to checkpoint recovery. */
 export class CloudLiveRecovery {
   private readonly attempts = new Map<string, Recovery>();
   private readonly finished = new Map<string, { boot: string; at: number }>();
@@ -54,13 +50,13 @@ export class CloudLiveRecovery {
     if (this.finished.get(route.workspace.id)?.boot === route.bootId) return;
     for (const [id, value] of this.finished) if (value.at + 3_600_000 < this.now()) this.finished.delete(id);
     if (this.attempts.size >= 4 || this.finished.size >= 1024) return;
-    const attempt: Recovery = { route, abort: new AbortController(), flight: Promise.resolve(), repaired: false };
+    const attempt: Recovery = { route, abort: new AbortController(), flight: Promise.resolve(), escalated: false };
     this.attempts.set(route.workspace.id, attempt);
     attempt.flight = this.run(attempt).catch(async () => {
       if (!this.closed && !attempt.abort.signal.aborted) await this.unavailable(route, "verification_unavailable");
     }).catch(() => {}).finally(() => {
       if (this.attempts.get(route.workspace.id) === attempt) this.attempts.delete(route.workspace.id);
-      if (!attempt.abort.signal.aborted && attempt.repaired) this.finished.set(route.workspace.id, { boot: route.bootId, at: this.now() });
+      if (!attempt.abort.signal.aborted && attempt.escalated) this.finished.set(route.workspace.id, { boot: route.bootId, at: this.now() });
     });
   }
 
@@ -135,43 +131,9 @@ export class CloudLiveRecovery {
       if (result !== "gateway") { await this.unavailable(route, "gateway_not_proven"); return; }
     }
     if (!await this.current(route, signal)) return;
-    attempt.repaired = true;
-    this.log(route, "repair", "gateway");
-    const sandbox = route.workspace.boatSandboxId!, deadline = this.now() + LIVE_RECOVERY_WINDOW_MS;
-    const repairSignal = AbortSignal.any([signal, AbortSignal.timeout(Math.max(1, deadline - this.now()))]);
-    const command = liveRecoveryHideCommand(sandbox, route.bootId, deadline);
-    let hidden = false;
-    while (this.now() < deadline && !repairSignal.aborted) {
-      if (!await this.current(route, signal)) return;
-      let state: ReturnType<typeof liveRecoveryHideState> = "pending";
-      try { state = liveRecoveryHideState(await this.deps.compute.exec(sandbox, command, 30, repairSignal)); }
-      catch { /* Replaying the same receipt never repeats an uncertain hide. */ }
-      if (state === "hidden") { hidden = true; break; }
-      if (state === "binding_changed") return;
-      if (state === "refused") break;
-      if (!repairSignal.aborted) await this.wait(Math.min(RETRY_MS, Math.max(0, deadline - this.now())), repairSignal);
-    }
-    if (!await this.current(route, signal)) return;
-    if (!hidden || repairSignal.aborted) { await this.unavailable(route, "route_hide_unconfirmed"); return; }
-    let hosted: { url: string; token: string } | undefined;
-    while (this.now() < deadline && !repairSignal.aborted) {
-      if (!await this.current(route, signal)) return;
-      try {
-        hosted = await this.deps.compute.hostPort(sandbox, { port: LIVE_RECOVERY_PORT, localhost: true, title: "Zeros worker",
-          key: liveRecoveryKey(sandbox, route.bootId), signal: repairSignal });
-        break;
-      } catch { if (!repairSignal.aborted) await this.wait(Math.min(RETRY_MS, Math.max(0, deadline - this.now())), repairSignal); }
-    }
-    if (!await this.current(route, signal)) return;
-    if (!hosted || repairSignal.aborted) { await this.unavailable(route, "route_host_unconfirmed"); return; }
-    if (!await this.deps.publish(route, hosted) || signal.aborted) return;
-    const repaired = await this.deps.route(route.workspace.id);
-    if (!sameLiveRoute({ ...route, ...hosted }, repaired)) return;
-    const result = await this.verify(repaired, signal);
-    if (result === "changed") return;
-    if (result === "gateway" && await this.deps.rebuild?.(repaired)) return;
-    if (result !== "connected") { await this.unavailable(repaired, "route_repair_exhausted"); return; }
-    await this.deps.condition(repaired, false);
-    this.log(repaired, "ready", "route_repaired"); this.deps.ready(repaired.workspace.id);
+    attempt.escalated = true;
+    this.log(route, "rebuild", "gateway");
+    if (await this.deps.rebuild?.(route)) return;
+    if (await this.current(route, signal)) await this.unavailable(route, "rebuild_unavailable");
   }
 }

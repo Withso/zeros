@@ -117,6 +117,41 @@ describe("cloud v2 relay", () => {
     return ws;
   };
 
+  it("holds the one connect flight for applied readiness and keeps gateway retries to two route reads", async () => {
+    state = "starting";
+    const held = Promise.withResolvers<void>();
+    Object.assign(deps, { waitReady: vi.fn(() => held.promise) });
+    let attempts = 0;
+    workerServer.options.verifyClient = (_info, done) => {
+      attempts++; done(attempts > 3, attempts > 3 ? undefined : 502);
+    };
+    const frames: any[] = [];
+    workerServer.on("connection", ws => ws.on("message", raw => frames.push(JSON.parse(String(raw)))));
+    await app();
+    try {
+      await expect.poll(() => vi.mocked(deps.waitReady!).mock.calls.length).toBe(1);
+      expect(deps.workerRoute).not.toHaveBeenCalled();
+      expect(attempts).toBe(0);
+    } finally { state = "running"; held.resolve(); }
+    await expect.poll(() => frames.some(frame => frame.t === "config")).toBe(true);
+    expect(attempts).toBe(4);
+    expect(deps.workerRoute).toHaveBeenCalledTimes(2);
+    expect(deps.store.consumeConnectTicket).toHaveBeenCalledOnce();
+  });
+
+  it("does not configure a carrier whose boot changed during the gateway wait", async () => {
+    Object.assign(deps, { waitReady: vi.fn(async () => {}) });
+    const route = await deps.workerRoute(workspaceId);
+    vi.mocked(deps.workerRoute).mockReset().mockResolvedValueOnce(route)
+      .mockResolvedValue({ ...route!, bootId: "a".repeat(36) });
+    const frames: any[] = [];
+    workerServer.on("connection", ws => ws.on("message", raw => frames.push(JSON.parse(String(raw)))));
+    const client = await app();
+    await expect.poll(() => client.readyState).toBe(WebSocket.CLOSED);
+    expect(frames).toEqual([]);
+    expect(deps.workerRoute).toHaveBeenCalledTimes(2);
+  });
+
   it("reports a closed gateway failure to recovery, then clears it on a successful carrier", async () => {
     const refused = createServer();
     refused.on("upgrade", (_request, socket) => socket.end("HTTP/1.1 502 Bad Gateway\r\nX-Private: synthetic-private-canary\r\nContent-Length: 0\r\n\r\n"));
@@ -130,8 +165,8 @@ describe("cloud v2 relay", () => {
       await worker();
       expect(deps.liveRecovery.failed).toHaveBeenCalledExactlyOnceWith(failedRoute, expect.objectContaining({ reason: "gateway", statusClass: "5xx" }));
       expect(deps.liveRecovery.connected).toHaveBeenCalledWith(expect.objectContaining({ url: workerUrl }));
-      expect(deps.logger.warn).toHaveBeenCalledWith("[cloud-v2] carrier dial", expect.objectContaining({ reason: "gateway", statusClass: "5xx" }));
-      expect(JSON.stringify(vi.mocked(deps.logger.warn).mock.calls)).not.toMatch(/synthetic-private|502/);
+      expect(deps.logger.warn).toHaveBeenCalledWith("[cloud-v2] carrier dial", expect.objectContaining({ reason: "gateway", statusClass: "5xx", status: 502, responseBodyClass: "empty" }));
+      expect(JSON.stringify(vi.mocked(deps.logger.warn).mock.calls)).not.toMatch(/synthetic-private|synthetic-port|synthetic-grant/);
     } finally { await new Promise<void>(resolve => refused.close(() => resolve())); }
   });
 
@@ -831,6 +866,20 @@ describe("cloud v2 relay", () => {
     expect(frames.filter(frame => frame.t === "config").at(-1)).not.toHaveProperty("localCommandReason");
     if (local) expect(deps.localCommandsEnabled).toHaveBeenCalledWith(workspaceId);
     else expect(deps.localCommandsEnabled).not.toHaveBeenCalled();
+  });
+
+  it.each(["", "boot-timings-v10", "boot-timings-v1"])("negotiates boot timing marks on initial and refreshed relay config: %s", async features => {
+    workerServer.on("headers", headers => { headers.push(`X-Zeros-Worker-Features: ${features}`); });
+    const original = deps.config;
+    deps.config = async workspace => ({ ...await original(workspace), bootTimings: 1 });
+    const frames: any[] = [];
+    workerServer.on("connection", ws => ws.on("message", raw => frames.push(JSON.parse(String(raw)))));
+    await app();
+    await vi.waitFor(() => expect(frames.filter(frame => frame.t === "config")).toHaveLength(1));
+    loginRevision = "1"; await relay.refreshLogins();
+    await vi.waitFor(() => expect(frames.filter(frame => frame.t === "config")).toHaveLength(2));
+    for (const frame of frames.filter(frame => frame.t === "config"))
+      expect(frame.bootTimings).toBe(features === "boot-timings-v1" ? 1 : undefined);
   });
 
   it.each(["","notify-user-v10","notify-user-v1"])("negotiates NotifyUser with durable outbox on initial and refreshed config: %s",async features => {

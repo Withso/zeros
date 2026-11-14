@@ -24,6 +24,7 @@ const github = vi.hoisted(() => ({
 vi.mock("./github-composition.js", () => ({ createCloudGithubServices: () => github }));
 vi.mock("../postgres-notifications.js", () => ({ postgresNotificationSubscription: () => ({ start: async () => {}, stop: async () => {} }) }));
 vi.mock("../db.js", async original => ({ ...await original<typeof import("../db.js")>(),
+  withSystemStatement: async () => ({ rows: [], rowCount: 0 }),
   withSystemTx: async (_pool: pg.Pool, read: (tx: unknown) => unknown) => read({ query: vi.fn(async () => ({ rows: [], rowCount: 0 })) }) }));
 vi.mock("./agent-logins.js", async original => ({ ...await original<typeof import("./agent-logins.js")>(),
   createCloudV2AgentLogins: () => Object.assign(async () => null, { all: async () => ({ codex: null, claude: null, cursor: null }) }) }));
