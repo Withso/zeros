@@ -4,9 +4,8 @@ import { withSystemTx } from "../../db.js";
 import { memberOnHoldSql } from "../../organization-seats.js";
 import { CLOUD_V2_LIVE_ACCESS } from "../workspace-access.js";
 import type { CloudTeamAuthority, TeamAdmission } from "./authority.js";
-import { teamNotFound } from "./contract.js";
 
-export const TEAM_PRESENCE_TTL_MS = 65_000, TEAM_PRESENCE_RENEW_MS = 30_000;
+export const TEAM_PRESENCE_TTL_MS = 65_000, TEAM_PRESENCE_RENEW_MS = 60_000;
 const presentPeople = `SELECT DISTINCT p.user_id
   FROM cloud_v2_workspace_presence p
   JOIN cloud_v2_workspaces w ON w.id=p.workspace_id AND w.org_id=p.org_id AND w.access_epoch=p.access_epoch
@@ -43,14 +42,14 @@ export class CloudTeamPresence {
     });
   }
 
-  async renew(id: string, proof: TeamAdmission): Promise<void> {
-    await withSystemTx(this.authority.pool,async tx => {
+  async renew(id: string, proof: TeamAdmission): Promise<boolean> {
+    return withSystemTx(this.authority.pool,async tx => {
       const view = await this.authority.assert(proof,tx);
       const result = await tx.query(`UPDATE cloud_v2_workspace_presence SET expires_at=clock_timestamp()+interval '65 seconds'
         WHERE connection_id=$1 AND workspace_id=$2 AND user_id=$3 AND provider_session_id=$4 AND access_epoch=$5
           AND expires_at>clock_timestamp()`,[id,view.workspace.id,proof.user.id,proof.user.authentication.sessionId,view.epoch]);
-      if (!result.rowCount) throw teamNotFound();
       await this.authority.assert(proof,tx);
+      return Boolean(result.rowCount);
     });
   }
 

@@ -5,16 +5,17 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { assertBackgroundRatchet, assertBaselineRatchet, compareBackground, compareReports, compareRevisions, LOAD_BUDGET_SOURCE, readBackgroundDefinitions, readBudgetDefinitions, renderComparison, renderRouteComparison } from "./load-budget-report.js";
+import { assertBackgroundRatchet, assertBaselineRatchet, compareBackground, compareReports, compareRevisions, LOAD_BUDGET_SOURCE, readBackgroundDefinitions, readBudgetDefinitions, renderCensus, renderComparison, renderRouteComparison } from "./load-budget-report.js";
 import type { BackgroundDefinition } from "./load-budget.js";
+import { CENSUS_CAPTURE, CENSUS_PROFILES } from "./load-budget-census.js";
 
 const definitions = [{ phase: "R1", scenario: "workspace-list", metric: "transactions", baseline: 10, maximum: 3, expectedFailure: true }] as const;
 const report = (observed: number, baseline = 10) => ({ version: 1 as const, profile: "load-budget-r1", wallClock: false, statementDelayMs: 0,
   budgets: [{ ...definitions[0], baseline, observed }], scenarios: [] });
-const backgroundReport = (limits: readonly BackgroundDefinition[]) => ({
-  scenarios: ["idle", "r1-fallback-idle"].map(name => ({ name, elapsedMs: 5000, routes: [],
+const backgroundReport = (limits: readonly BackgroundDefinition[], names = ["idle", "r1-fallback-idle"]) => ({
+  scenarios: names.map(name => ({ name, elapsedMs: 5000, routes: [],
     background: { requests: 0, statements: 0, transactions: 0, githubCalls: 0, workspaceUpdateLocks: 0 } })),
-  backgroundBudgets: ["idle", "r1-fallback-idle"].flatMap(scenario => [
+  backgroundBudgets: names.flatMap(scenario => [
     ...limits.flatMap(limit => ["calls", "queriesPerCall", "statementsPerCall", "transactionsPerCall"].map(metric =>
       ({ scenario, operation: limit.operation, metric, observed: 0, baseline: 0, ratchet: "PASS" as const }))),
     ...["queries", "statements", "transactions", "githubCalls", "failures", "inFlight"].map(metric =>
@@ -83,6 +84,21 @@ describe("load comparison ratchet", () => {
     expect(() => compareReports(report(10), { ...report(3), statementDelayMs: 5 }, definitions)).toThrow("profiles differ");
   });
 
+  it("requires matching census provenance and prints assumptions separately from measurements", () => {
+    const budgets = [{ phase: "R1", scenario: "census-connected", metric: "requests", baseline: 41, maximum: 10, expectedFailure: true }];
+    const captured = { ...report(41), census: CENSUS_CAPTURE, budgets: budgets.map(row => ({ ...row, observed: 41 })) };
+    expect(compareReports(captured, captured, budgets)).toMatchObject([{ before: 41, after: 41, ratchet: "PASS", target: "FAIL" }]);
+    expect(() => compareReports({ ...captured, census: undefined }, captured, budgets)).toThrow("profiles differ");
+    expect(() => compareReports({ ...captured, census: undefined }, { ...captured, census: undefined }, budgets)).toThrow("provenance");
+    const text = renderCensus(captured);
+    expect(text).toContain("assumed bodies");
+    expect(text).toContain("POST /v2/cloud/worker/prompts/pull | unknown | 12 | no");
+    expect(text).toContain("GET /v1/release-identity | unknown | 4 | no");
+    expect(text).toContain("messages.windowOlder");
+    expect(text).toContain("gh.prSync");
+    expect(text).toContain(CENSUS_CAPTURE.sourceSha256);
+  });
+
   it("prints changed per-route counts, retaining background lock costs", () => {
     const counts = { requests: 0, statements: 0, transactions: 0, githubCalls: 0, workspaceUpdateLocks: 0 };
     const first = { ...report(10), scenarios: [{ name: "r1-fallback-idle", background: counts,
@@ -140,7 +156,8 @@ describe("before/after command isolation", () => {
         const value = Number(await readFile(join(checkout, "cost.txt"), "utf8")); visits.push(String(value));
         expect((await exec(process.execPath, [join(checkout, "read-package.cjs")], { cwd: checkout })).stdout).toBe(String(value));
         overlays.push(await readFile(join(checkout, LOAD_BUDGET_SOURCE), "utf8"));
-        await writeFile(path, JSON.stringify({ ...report(value), ...backgroundReport(background), budgets: shared.map(row => ({ ...row,
+        await writeFile(path, JSON.stringify({ ...report(value), census: CENSUS_CAPTURE,
+          ...backgroundReport(background, ["idle", "r1-fallback-idle", ...CENSUS_PROFILES.map(profile => profile.name)]), budgets: shared.map(row => ({ ...row,
           observed: row.scenario === "workspace-list" ? value : row.baseline })) }));
         running = false;
       } });

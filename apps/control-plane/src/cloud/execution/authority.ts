@@ -99,14 +99,17 @@ export class CloudExecutionAuthority {
       ...signatures, targets: parsed.data, role: row.role, databaseNow: Number(row.database_now), verifications: row.verifications };
   }
 
-  async admit(workspaceId: string, userId: string, options: { continuation?: boolean; user?: AuthedUser | undefined; sourceError?: "github_access_required"; minimumSourceMs?: number } = {}): Promise<ExecutionAdmission> {
+  async admit(workspaceId: string, userId: string, options: { continuation?: boolean; user?: AuthedUser | undefined; sourceError?: "github_access_required"; minimumSourceMs?: number; transaction?: Tx } = {}): Promise<ExecutionAdmission> {
     const started = Date.now();
-    const person = await withSystemTx(this.pool, async tx => {
+    const read = async (tx: Tx) => {
       if (options.user) await this.session(tx, options.user, userId);
       return this.snapshot(tx, workspaceId, userId);
-    });
+    };
+    const person = await (options.transaction ? read(options.transaction) : withSystemTx(this.pool, read));
     const proof: ExecutionAdmission = { person, source: null, until: started + EXECUTION_LEASE_MS, user: options.user };
-    await this.assert(proof);
+    // An owned transaction fences its result before delivery. Standalone
+    // callers still recheck after releasing the admission snapshot.
+    if (!options.transaction) await this.assert(proof);
     return proof;
   }
 

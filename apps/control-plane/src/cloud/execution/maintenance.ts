@@ -154,12 +154,12 @@ export class CloudExecutionMaintenance {
   }
 
   start(push: (id: string, frames: Revocation[]) => void | Promise<void>, logger: Pick<Console,"error"> = console) {
-    const scheduler = new CloudWorkerScheduler(10_000, () => this.sweep(push), () => logger.error("[cloud-v2] execution_maintenance_unavailable"),
+    const scheduler = new CloudWorkerScheduler(60_000, () => this.sweep(push), () => logger.error("[cloud-v2] execution_maintenance_unavailable"),
       async () => withSystemTx(this.contexts.pool, async tx => {
         const row = (await tx.query<{ delay: number | null }>(`SELECT CASE WHEN EXISTS(SELECT 1 FROM cloud_v2_execution_invalidations) THEN 0
           ELSE extract(epoch FROM (min(expires_at)-clock_timestamp()))*1000 END AS delay FROM cloud_v2_execution_contexts WHERE state='active'`)).rows[0];
         return row?.delay === null || row?.delay === undefined ? null : Number(row.delay);
-      }), { jitter: true });
+      }));
     scheduler.start();
     return () => scheduler.stop();
   }

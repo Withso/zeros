@@ -21,7 +21,8 @@ async function body<T>(c: Context, schema: z.ZodType<T>, optional = false): Prom
 }
 const empty = z.object({}).strict();
 
-export function createCloudTeamRoutes(sharing: CloudTeamSharing, document: (value: Awaited<ReturnType<CloudTeamSharing["get"]>>) => unknown): Hono {
+export function createCloudTeamRoutes(sharing: CloudTeamSharing, document: (value: Awaited<ReturnType<CloudTeamSharing["get"]>>) => unknown,
+  connectActive?: (c: Context, workspaceId: string) => Promise<boolean>): Hono {
   const app = new Hono(), path = "/v1/cloud-v2/workspaces/:id";
   const owns = (c: Context) => c.req.header(TEAM_SHARING_HEADER) === "1" && c.req.header(TEAM_OWNERSHIP_HEADER) === "1";
   const marker = (c: Context) => owns(c) ? { teamOwnership: 1 as const } : {};
@@ -97,7 +98,8 @@ export function createCloudTeamRoutes(sharing: CloudTeamSharing, document: (valu
   }));
   const creator = share(async (c,next) => {
     const id = uuid(c.req.param("id")!), user = c.get("user");
-    if (await sharing.workspaces.prompts.execution?.active(id)) return next();
+    if (c.req.path.endsWith("/connect") && connectActive
+      ? await connectActive(c,id) : await sharing.workspaces.prompts.execution?.active(id)) return next();
     if (await sharing.authority.isCreator(id,user.id)) return next();
     const proof = await sharing.authority.admit(id,user);
     if (proof.view.role !== "creator") throw teamReadOnly();

@@ -201,7 +201,7 @@ describe("idle account maintenance", () => {
         f.due([]);
         return 1;
       });
-      await vi.advanceTimersByTimeAsync(41_849);
+      await vi.advanceTimersByTimeAsync(56_849);
       expect(ticks.commands).toHaveBeenCalledOnce();
       await vi.advanceTimersByTimeAsync(1);
       expect(ticks.commands).toHaveBeenCalledTimes(2);
@@ -225,7 +225,7 @@ describe("idle account maintenance", () => {
       );
       f.due([{ kind: "commands", delay_ms: 0 }]);
       ticks.commands.mockImplementationOnce(async () => { f.due([]); return 1; });
-      await vi.advanceTimersByTimeAsync(45_000);
+      await vi.advanceTimersByTimeAsync(60_000);
       expect(ticks.commands).toHaveBeenCalledOnce();
       expect(JSON.stringify(f.options.logger.error.mock.calls)).not.toContain("private");
     } finally { await runtime.stop(); }

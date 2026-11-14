@@ -445,7 +445,7 @@ database("real team-sharing desktop clients against the router and PostgreSQL", 
     await pool.query("INSERT INTO cloud_v2_chats(workspace_id,chat_id,row) VALUES($1,'chat',$2)", [f.workspace.id, { id: "chat", title: "Changed" }]);
     await member.wait(event => event.event === "changed");
     await expect.poll(() => member.handlers.invalidate.mock.calls.length).toBeGreaterThanOrEqual(2);
-    now += 25_001; await tick();
+    now += 60_001; await tick();
     await member.wait(event => event.event === "heartbeat");
     const invalidations = member.handlers.invalidate.mock.calls.length;
     await admin.close();

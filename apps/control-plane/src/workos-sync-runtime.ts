@@ -147,7 +147,6 @@ export function startWorkOSSyncRuntime(options: WorkOSSyncRuntimeOptions): {
     },
     {
       readBeforeRun: true,
-      jitter: options.intervalMs === undefined && overrides.length === 0,
     },
   );
   const eventScheduler = new CloudWorkerScheduler(

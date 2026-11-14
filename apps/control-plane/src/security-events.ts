@@ -9,7 +9,7 @@ import { withSystemTx, type Tx } from "./db.js";
 import { CloudWorkerScheduler } from "./worker-scheduler.js";
 
 const EVENT_PAGE_SIZE = 100;
-const HEARTBEAT_MS = 25_000;
+const HEARTBEAT_MS = 60_000;
 const TOKEN_END_MARGIN_MS = 2_000, TOKEN_END_SKEW_MS = 10_000;
 const MAX_CURSOR = Number.MAX_SAFE_INTEGER;
 const activePublications=new WeakMap<pg.Pool,Promise<number>>();
@@ -60,7 +60,7 @@ export class SecurityEventPublisher {
       const row = (await tx.query<{ delay_ms: string | null }>(`SELECT extract(epoch FROM (min(CASE WHEN delivery_sequence IS NULL THEN now() ELSE expires_at END)-now()))*1000 AS delay_ms FROM security_events`)).rows[0];
       return row?.delay_ms == null ? null : Number(row.delay_ms);
     }, { consistentRead: true }),
-    { readBeforeRun: true, jitter: options.intervalMs === undefined });
+    { readBeforeRun: true });
   }
 
   notify(): void { this.scheduler.notify(); }

@@ -2,7 +2,8 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import pg from "pg";
 import WebSocket, { WebSocketServer } from "ws";
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { LoadBudgetProbe, scenarioTotals } from "../../test-support/load-budget.js";
 import { CloudV2ControlFrameSchema } from "../contract.js";
 import { CLOUD_V2_BRIDGE_PROTOCOL } from "../relay.js";
 import { sealPortToken } from "../worker-port-token.js";
@@ -10,10 +11,11 @@ import { executionFixture, type ExecutionFixture } from "./test-fixture.js";
 
 const database = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 database("activated relay authority through real sockets, routes and PostgreSQL", () => {
-  let pool: pg.Pool, f: ExecutionFixture, server: Server, worker: WebSocketServer, url: string;
+  let pool: pg.Pool, probe: LoadBudgetProbe, f: ExecutionFixture, server: Server, worker: WebSocketServer, url: string;
   let frames: any[], apps: WebSocket[];
-  beforeAll(() => { pool = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL, max: 10, statement_timeout: 4000 }); });
   beforeEach(async () => {
+    pool = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL, max: 10, statement_timeout: 4000 });
+    probe = new LoadBudgetProbe(pool);
     frames = []; apps = [];
     f = await executionFixture(pool, { relay: true });
     await f.login(); await f.login(f.viewer); await f.activate(); expect((await f.hello()).status).toBe(200);
@@ -39,9 +41,9 @@ database("activated relay authority through real sockets, routes and PostgreSQL"
     for (const ws of worker?.clients ?? []) ws.terminate();
     if (worker) await new Promise<void>(resolve => worker.close(() => resolve()));
     if (server) await new Promise<void>(resolve => server.close(() => resolve()));
+    probe.close(); await pool.end();
     vi.restoreAllMocks(); vi.unstubAllGlobals();
   });
-  afterAll(() => pool.end());
   const connect = async (user = f.viewer) => {
     const response = await f.call(`/v1/cloud-v2/workspaces/${f.workspace.id}/connect`, "POST", { wake: false }, user, { "X-Zeros-Team-Sharing": "1" });
     expect(response.status).toBe(200);
@@ -79,6 +81,59 @@ database("activated relay authority through real sockets, routes and PostgreSQL"
     await expect.poll(() => frames.some(value => value.t === "frame" && value.frame.id === "after-github-loss")).toBe(true);
     expect(onClose).not.toHaveBeenCalled();
     expect(ws.readyState).toBe(WebSocket.OPEN);
+  });
+
+  it("bounds read admission after a committed member removal even when its notice is lost", async () => {
+    await f.cp.loginChanges.stop();
+    let now = Date.now(); vi.spyOn(Date, "now").mockImplementation(() => now);
+    const { ws } = await connect();
+    const read = async (id: string) => {
+      ws.send(JSON.stringify({ type: "WORKSPACE_REQUEST", id, op: "file.read", params: { path: "fixture" } }));
+      await expect.poll(() => frames.some(frame => frame.t === "frame" && frame.frame.id === id)).toBe(true);
+    };
+    await read("before-removal");
+    const removed = await pool.query("DELETE FROM organization_members WHERE org_id=$1 AND user_id=$2", [f.organizationId, f.viewer.id]);
+    expect(removed.rowCount).toBe(1);
+    now += 29_999;
+    await read("before-deadline");
+    const ending = closed(ws);
+    now += 1;
+    ws.send(JSON.stringify({ type: "WORKSPACE_REQUEST", id: "at-deadline", op: "file.read", params: { path: "fixture" } }));
+    expect(await ending).toEqual({ code: 4001, reason: "access_revoked" });
+    expect(frames.some(frame => frame.t === "frame" && frame.frame.id === "at-deadline")).toBe(false);
+  });
+
+  it("does no read work at five seconds and prices the actual expiry refresh", async () => {
+    await f.cp.loginChanges.stop();
+    let now = Date.now(); vi.spyOn(Date, "now").mockImplementation(() => now);
+    const { ws, open } = await connect();
+    const read = async (id: string) => {
+      ws.send(JSON.stringify({ type: "WORKSPACE_REQUEST", id, op: "file.read", params: { path: "fixture" } }));
+      await expect.poll(() => frames.some(frame => frame.t === "frame" && frame.frame.id === id)).toBe(true);
+    };
+    await read("warm");
+    now += 6_000;
+    const warm = scenarioTotals((await probe.measure("read-inside-proof", () => read("after-five"), { locks: true })).cost);
+    expect(warm).toMatchObject({ queries: 0, statements: 0, transactions: 0, workspaceUpdateLocks: 0, failures: 0, inFlight: 0 });
+    now += 18_000;
+    expect((await f.worker("execution-leases/renew", { contextIds: [open.contextId] })).status).toBe(200);
+    now += 6_000;
+    const expired = scenarioTotals((await probe.measure("read-expiry-refresh", () => read("after-expiry"), { locks: true })).cost);
+    expect(expired).toMatchObject({ queries: 16, statements: 26, transactions: 5, workspaceUpdateLocks: 0, failures: 0, inFlight: 0 });
+  });
+
+  it("refuses a mutation immediately after committed removal while the read proof is still fresh", async () => {
+    await f.cp.loginChanges.stop();
+    const now = Date.now(); vi.spyOn(Date, "now").mockReturnValue(now);
+    const { ws } = await connect();
+    ws.send(JSON.stringify({ type: "WORKSPACE_REQUEST", id: "warm-read", op: "file.read", params: { path: "fixture" } }));
+    await expect.poll(() => frames.some(frame => frame.t === "frame" && frame.frame.id === "warm-read")).toBe(true);
+    const removed = await pool.query("DELETE FROM organization_members WHERE org_id=$1 AND user_id=$2", [f.organizationId, f.viewer.id]);
+    expect(removed.rowCount).toBe(1);
+    const refused = new Promise<{ type: string; requestId: string }>(resolve => ws.once("message", raw => resolve(JSON.parse(String(raw)))));
+    ws.send(JSON.stringify({ type: "WORKSPACE_REQUEST", id: "write-after-removal", op: "file.write", params: { path: "fixture", content: "changed" } }));
+    expect(await refused).toMatchObject({ type: "WORKSPACE_ERROR", requestId: "write-after-removal" });
+    expect(frames.some(frame => frame.t === "frame" && frame.frame.id === "write-after-removal")).toBe(false);
   });
 
   it("uses a retryable close when the control plane shuts down", async () => {

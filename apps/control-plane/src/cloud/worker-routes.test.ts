@@ -536,7 +536,7 @@ it("validates digest reads without adding a separate worker-session lookup", asy
   expect((await f.request("history/digests", {}, { ...headers, "x-zeros-worker-boot": "invalid" })).status).toBe(401);
   expect(f.deps.store.workerHistoryDigests).not.toHaveBeenCalled();
   expect(await (await f.request("history/digests", {}, headers)).json()).toEqual({ chats: [] });
-  expect(f.deps.store.workerHistoryDigests).toHaveBeenCalledExactlyOnceWith(f.token, f.bootId);
+  expect(f.deps.store.workerHistoryDigests).toHaveBeenCalledExactlyOnceWith(f.token, f.bootId, false);
   expect(f.deps.store.workerSession).not.toHaveBeenCalled();
   vi.mocked(f.deps.store.workerHistoryDigests).mockResolvedValue(null);
   expect((await f.request("history/digests", {}, headers)).status).toBe(401);

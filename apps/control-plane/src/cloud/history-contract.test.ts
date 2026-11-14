@@ -48,3 +48,18 @@ it("keeps the digest reply strict and bounded in both mirrors", () => {
     expect(schema.safeParse({ chats: Array.from({ length: 4097 }, () => value.chats[0]) }).success).toBe(false);
   }
 });
+
+it.each([
+  { name: "empty deletion list", value: { chats: [], deleted: [] }, valid: true },
+  { name: "disjoint live and deleted chats", value: { chats: [{ chatId: "live", digest: null }], deleted: ["deleted"] }, valid: true },
+  { name: "overlapping chat identities", value: { chats: [{ chatId: "same", digest: null }], deleted: ["same"] }, valid: false },
+  { name: "empty deleted identity", value: { chats: [], deleted: [""] }, valid: false },
+  { name: "oversized deleted identity", value: { chats: [], deleted: ["d".repeat(257)] }, valid: false },
+  { name: "combined overflow", value: { chats: [{ chatId: "live", digest: null }], deleted: Array.from({ length: 4096 }, (_, id) => `deleted-${id}`) }, valid: false },
+  { name: "full deletion list", value: { chats: [], deleted: Array.from({ length: 4096 }, (_, id) => `deleted-${id}`) }, valid: true },
+  { name: "unexpected deletion metadata", value: { chats: [], deleted: [], cursor: 1 }, valid: false },
+])("validates negotiated deletion replies identically: $name", ({ value, valid }) => {
+  const controlPlane = CloudV2HistoryDigestsReplySchema.safeParse(value), worker = protocolDigests.safeParse(value);
+  expect(controlPlane.success).toBe(valid); expect(worker.success).toBe(valid);
+  if (controlPlane.success && worker.success) expect(controlPlane.data).toEqual(worker.data);
+});

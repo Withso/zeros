@@ -26,6 +26,7 @@ export function localRouteError(error: Error, c: Context): Response {
   return c.json({ error: { code: failure.code, message: failure.message } },failure.status);
 }
 const TOKEN_END_MARGIN_MS = 2_000, TOKEN_END_SKEW_MS = 10_000;
+const STREAM_FALLBACK_MS = 60_000;
 const empty = z.object({}).strict();
 export const localUuid = (value: string) => {
   if (!z.string().uuid().safeParse(value).success) throw new HttpError(404, "not_found", "Local command resource not found");
@@ -159,8 +160,10 @@ export function createCloudLocalDeviceRoutes(deps: CloudLocalDeviceRoutes): Hono
       }) : undefined;
       try {
         while (!stream.aborted && !signal.aborted && Date.now() < tokenEnd-TOKEN_END_MARGIN_MS) {
+          const heartbeat = Date.now()-lastHeartbeat >= STREAM_FALLBACK_MS;
+          if (heartbeat) lastHeartbeat = Date.now();
           const waiter = deps.signals.wait(deviceSignal(user.id, identity.deviceId),
-            Math.max(0, Math.min(DEVICE_HEARTBEAT_MS-(Date.now()-lastHeartbeat), tokenEnd-TOKEN_END_MARGIN_MS-Date.now())), signal);
+            Math.max(0, Math.min(STREAM_FALLBACK_MS-(Date.now()-lastHeartbeat), tokenEnd-TOKEN_END_MARGIN_MS-Date.now())), signal);
           try {
             const observedChange = deviceChanged; deviceChanged = false;
             const snapshot = await deps.devices.snapshot(user, identity, initial.streamId ?? undefined);
@@ -197,9 +200,8 @@ export function createCloudLocalDeviceRoutes(deps: CloudLocalDeviceRoutes): Hono
               const notifications = await deps.notifications.read(user,identity,hints,initial.checkedAt);
               for (const notification of notifications) await stream.writeSSE({ event: "notify",data: JSON.stringify(notification) });
             }
-            if (Date.now()-lastHeartbeat >= DEVICE_HEARTBEAT_MS) {
+            if (heartbeat) {
               await stream.writeSSE({ event: "heartbeat", data: JSON.stringify({ at: new Date().toISOString(), presence: snapshot.presence }) });
-              lastHeartbeat = Date.now();
             }
             if (!deps.signals.healthy()) { closeReason = "signals_unhealthy"; break; }
             await waiter.wait;

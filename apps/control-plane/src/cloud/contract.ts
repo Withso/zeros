@@ -13,9 +13,15 @@ export const CLOUD_V2_MAX_FRAME_BYTES = 16 * 1024 * 1024;
 /** Rows per history frame; larger backfills are split by the sender. */
 export const CLOUD_V2_MAX_HISTORY_ROWS = 500;
 export const HISTORY_DIGEST_FEATURE = "history-digest-v1";
+export const HISTORY_DIGEST_DELETIONS_FEATURE = "history-digest-deletions-v1";
 export const CloudV2HistoryDigestsReplySchema = z.object({
   chats: z.array(z.object({ chatId: z.string().min(1).max(256), digest: z.string().length(64).regex(/^[a-f0-9]{64}$/).nullable() }).strict()).max(4096),
-}).strict();
+  deleted: z.array(z.string().min(1).max(256)).max(4096).optional(),
+}).strict().refine(value => {
+  if (!value.deleted) return true;
+  const live = new Set(value.chats.map(chat => chat.chatId));
+  return value.chats.length + value.deleted.length <= 4096 && value.deleted.every(chatId => !live.has(chatId));
+}, "History digest chat sets must be bounded and disjoint");
 
 export const CloudV2AgentSchema = z.enum(["codex", "claude", "cursor"]);
 export type CloudV2Agent = z.infer<typeof CloudV2AgentSchema>;

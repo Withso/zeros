@@ -54,7 +54,10 @@ Boat's route hangs rather than refusing while the VM sleeps.
 Hello binds the worker boot before building configuration, but keeps a new
 create or wake in `creating` or `starting` until the configuration is authorized
 for that exact boot, access epoch and login revision. The relay waits for
-`running` before dialing. A lifecycle token-delivery step must still own the
+`running` before dialing. While that worker applies its configuration, retry
+backoff is capped at 500 ms within the original connection deadline; route
+reads and each dial also consume that deadline.
+A lifecycle token-delivery step must still own the
 allocation and stop generation, with no bound boot; a late step cannot rotate
 the credential or restart a worker already configuring. Stop and checkout
 failure can end a bound first boot before readiness is published.
@@ -443,6 +446,21 @@ repository. A denial, a disconnected credential or a changed connection
 generation refuses only that operation; it never retires the person's contexts,
 sessions or other work. Organization membership, worker boot and app session
 checks apply independently.
+
+An activated client's read-only file, history and Git frames share its admitted
+relay authority until the earliest proof, execution-context or sign-in expiry,
+without an additional periodic recheck. A received security notification
+invalidates it immediately. The current execution proof and context each last
+at most 30 seconds; renewal does not extend a proof the relay already read.
+If a removal notification is lost, new read admission therefore ends within
+30 seconds of that authority read, or sooner at an earlier expiry. This bounds
+admission, not completion of a read already forwarded to the worker. The
+one-use connect ticket's 60-second redemption deadline is separate from the
+sign-in-token expiry retained by an admitted connection. Older connections
+without an execution grant retain their existing authority checks.
+Mutations, terminals, legacy sends and unknown operations still require the
+current execution transaction. A cached branch-catalog read uses the read
+window only when it does not request a fetch.
 
 The relay's 30-second transport heartbeat sends only socket pings; it does not
 poll GitHub, login revisions or per-workspace database authority. Security and
@@ -1052,6 +1070,17 @@ It mirrors chat metadata, deletions and message rows to the control plane.
 The app can read that history while the VM sleeps. This history mirror is
 separate from repository files; there is no Mac checkout synchronization.
 History writers, including retention jobs, must lock the workspace row before changing chat or message rows to avoid deadlocks with history ingestion.
+
+Workers advertising `history-digest-deletions-v1` receive separate live-chat
+digests and explicit deleted chat IDs, capped at 4,096 entries in total. The
+worker removes only chats named as deleted, including after restoring an older
+checkpoint, and skips tombstones already acknowledged by that reply. Missing or
+invalid replies keep the full history replacement and tombstone behavior.
+The control plane retains soft-deleted chat rows until workspace deletion;
+messages and pending edits are removed, and there is no timed chat-row purge.
+Older workers keep the original digest reply, including deleted rows with null
+digests. Their ordinary chat upsert can still revive a deleted row; the new
+worker avoids that resend after an explicit deletion reply.
 
 Chat search uses the connected worker when available and the HTTP history
 mirror while the VM sleeps, without waking it. Search is scoped to the selected
@@ -1800,11 +1829,24 @@ A device offering `device-liveness-v1` receives that feature and
 `heartbeatIntervalMs:300000` only in a bound stream's ready frame. The current
 registration instance and stream nonce own its reachability refresh; an older
 stream's late close cannot clear its successor. The stream retains its
-25-second authority checks and heartbeats, and the lease expires 65 seconds
+60-second authority checks and heartbeats, and the lease expires 65 seconds
 after server refreshes stop. Silent client-side stalls still depend on
 connection and token expiry. Reachability does not grant command authority.
 Registrations and streams without the feature keep the 25-second client beat.
 Local workspaces retain their existing engine and device authority.
+
+Account, workspace-viewer and device streams use a 60-second idle fallback.
+Notifications wake them immediately. Workspace presence and changed hints
+recheck the viewer's authority before delivery; a lost removal notification
+can leave an otherwise idle viewer stream open until the fallback, without
+authorizing a content read. Token expiry and known revocation still end it.
+Viewer presence renews every 60 seconds and expires after 65 seconds.
+
+Execution cleanup, device-command cleanup, account event publication and
+WorkOS synchronization wake on committed notifications and retain a
+60-second fallback when no work is due. An earlier durable deadline still
+wakes the owning job. Execution lease expiry and renewals keep their existing
+shorter bounds.
 
 ## Durable prompt delivery
 

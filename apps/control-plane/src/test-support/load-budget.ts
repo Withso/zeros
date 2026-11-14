@@ -3,6 +3,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import type pg from "pg";
 import type { RequestDatabaseCost } from "../request-timing.js";
 import { DATABASE_CONTEXT_STATEMENTS } from "../db-context.js";
+import { CENSUS_PROFILES } from "./load-budget-census.js";
 
 export const IDLE_WINDOW_MS = 300_000;
 export const LOAD_BUDGETS = [
@@ -10,6 +11,12 @@ export const LOAD_BUDGETS = [
   { phase: "R1", scenario: "idle", metric: "statements", baseline: 4425, maximum: 200, expectedFailure: true },
   { phase: "R1", scenario: "r1-fallback-idle", metric: "requests", baseline: 20, maximum: 30, expectedFailure: false },
   { phase: "R1", scenario: "r1-fallback-idle", metric: "statements", baseline: 441, maximum: 200, expectedFailure: true },
+  { phase: "R1", scenario: "census-stopped", metric: "requests", baseline: 18, maximum: 6, expectedFailure: true },
+  { phase: "R1", scenario: "census-stopped", metric: "statements", baseline: 377, maximum: 40, expectedFailure: true },
+  { phase: "R1", scenario: "census-stopped", metric: "transactions", baseline: 49, maximum: 49, expectedFailure: false },
+  { phase: "R1", scenario: "census-connected", metric: "requests", baseline: 41, maximum: 10, expectedFailure: true },
+  { phase: "R1", scenario: "census-connected", metric: "statements", baseline: 1478, maximum: 40, expectedFailure: true },
+  { phase: "R1", scenario: "census-connected", metric: "transactions", baseline: 199, maximum: 199, expectedFailure: false },
   { phase: "R2", scenario: "turn-lease", metric: "transactions", baseline: 9, maximum: 6, expectedFailure: true },
   { phase: "R2", scenario: "turn-path", metric: "transactions", baseline: 31, maximum: 20, expectedFailure: true },
   { phase: "R2", scenario: "renewal", metric: "transactions", baseline: 5, maximum: 2, expectedFailure: true },
@@ -17,8 +24,11 @@ export const LOAD_BUDGETS = [
   { phase: "R1", scenario: "cold-list", metric: "githubCalls", baseline: 0, maximum: 0, expectedFailure: false },
   { phase: "R1", scenario: "cold-open", metric: "githubCalls", baseline: 0, maximum: 0, expectedFailure: false },
   { phase: "R1", scenario: "cold-connect", metric: "githubCalls", baseline: 0, maximum: 0, expectedFailure: false },
+  { phase: "R1", scenario: "cold-connect", metric: "transactions", baseline: 3, maximum: 3, expectedFailure: false },
   { phase: "R1", scenario: "cold-history", metric: "githubCalls", baseline: 0, maximum: 0, expectedFailure: false },
-  { phase: "R1", scenario: "read-frame", metric: "workspaceUpdateLocks", baseline: 1, maximum: 0, expectedFailure: true },
+  { phase: "R1", scenario: "read-frame", metric: "workspaceUpdateLocks", baseline: 0, maximum: 0, expectedFailure: false },
+  { phase: "R1", scenario: "read-frame", metric: "queries", baseline: 0, maximum: 0, expectedFailure: false },
+  { phase: "R1", scenario: "read-frame", metric: "transactions", baseline: 0, maximum: 0, expectedFailure: false },
   { phase: "R2", scenario: "periodic-renewals", metric: "requests", baseline: 27, maximum: 0, expectedFailure: true },
   { phase: "R3", scenario: "running-stream", metric: "writeTransactions", baseline: 53, maximum: 30, expectedFailure: true },
   { phase: "R3", scenario: "running-stream", metric: "writeStatements", baseline: 106, maximum: 150, expectedFailure: false },
@@ -31,16 +41,29 @@ export const LOAD_BUDGETS = [
 // Startup, notification-driven presence, and teardown are bounded separately
 // from periodic work. Periods are recorded ceilings, not imported timer values.
 export const LOAD_BACKGROUND_BUDGETS = [
-  { operation: "team-authority", initialCalls: 1, periodsMs: [5000], queries: 3, statements: 5, transactions: 1 },
-  { operation: "team-presence", initialCalls: 2, periodsMs: [25000, 30000], queries: 5, statements: 7, transactions: 1 },
-  { operation: "team-renew", initialCalls: 0, periodsMs: [30000], queries: 5, statements: 7, transactions: 1 },
+  { operation: "team-authority", initialCalls: 1, periodsMs: [60000], queries: 3, statements: 5, transactions: 1 },
+  { operation: "team-presence", initialCalls: 2, periodsMs: [60000, 60000], queries: 5, statements: 7, transactions: 1 },
+  { operation: "team-renew", initialCalls: 0, periodsMs: [60000], queries: 5, statements: 7, transactions: 1 },
   { operation: "team-close", initialCalls: 1, periodsMs: [], queries: 3, statements: 5, transactions: 1 },
-  { operation: "device-snapshot", initialCalls: 1, periodsMs: [25000], queries: 4, statements: 6, transactions: 1 },
+  { operation: "device-snapshot", initialCalls: 1, periodsMs: [60000], queries: 4, statements: 6, transactions: 1 },
+  { operation: "auth-read", initialCalls: 1, periodsMs: [60000], queries: 4, statements: 6, transactions: 1 },
+  { operation: "auth-publish", initialCalls: 1, periodsMs: [60000], queries: 5, statements: 7, transactions: 1 },
 ] as const;
 type BackgroundName = typeof LOAD_BACKGROUND_BUDGETS[number]["operation"];
 type BackgroundOperation = { name: BackgroundName; cost: SqlCost; open: boolean };
 export type BackgroundDefinition = { operation: string; initialCalls: number; periodsMs: readonly number[]; queries: number; statements: number; transactions: number };
-const idleScenario = (name: string) => name === "idle" || name === "r1-fallback-idle";
+export const idleScenario = (name: string) => name === "idle" || name === "r1-fallback-idle" || CENSUS_PROFILES.some(profile => profile.name === name);
+
+export function backgroundLimitFor(scenario: string, limit: BackgroundDefinition): BackgroundDefinition {
+  const profile = CENSUS_PROFILES.find(value => value.name === scenario);
+  const operation = limit.operation.startsWith("team-") ? "workspaceEvents" : limit.operation === "device-snapshot" ? "deviceEvents" : "authEvents";
+  const opens = profile ? profile.routes.find(row => row.operation === operation)?.requests ?? 0
+    : limit.operation.startsWith("auth-") ? 0 : 1;
+  // Reconnects are sequential: startup/teardown repeat, but their timer
+  // windows do not overlap. A profile with no stream permits no stream SQL.
+  return { ...limit, initialCalls: limit.initialCalls * opens, periodsMs: opens ? limit.periodsMs : [],
+    queries: opens ? limit.queries : 0, statements: opens ? limit.statements : 0, transactions: opens ? limit.transactions : 0 };
+}
 
 export type SqlCost = { queries: number; statements: number; transactions: number; commits: number; rollbacks: number;
   failures: number; inFlight: number; injectedDelayMs: number; writeTransactions: number; writeStatements: number;
@@ -185,9 +208,11 @@ function readCensus(result: pg.QueryResult<CensusRow>): number {
 }
 
 const templates = [
-  "/auth/browser/session", "/v1/me", "/v1/cloud-v2/workspaces",
+  "/v2/cloud/worker/hello", "/v2/cloud/worker/bootstrap-lease",
+  "/auth/browser/session", "/v1/me", "/v1/auth/snapshot", "/v1/auth/events", "/v1/cloud-v2/workspaces",
   "/v1/cloud-v2/workspaces/:id", "/v1/cloud-v2/workspaces/:id/events", "/v1/cloud-v2/workspaces/:id/prompts",
   "/v1/cloud-v2/workspaces/:id/connect", "/v1/cloud-v2/workspaces/:id/history", "/v1/cloud-v2/workspaces/:id/activity",
+  "/v1/cloud-v2/workspaces/:id/github",
   "/v1/cloud-v2/devices/:deviceId/connections", "/v1/cloud-v2/devices/:deviceId/events", "/v1/cloud-v2/devices/:deviceId/heartbeat",
   "/v2/cloud/worker/prompts/pull", "/v2/cloud/worker/prompts/ack", "/v2/cloud/worker/prompts/begin",
   "/v2/cloud/worker/turn-lease", "/v2/cloud/worker/execution-leases/renew", "/v2/cloud/worker/history", "/v2/cloud/worker/activity",
@@ -299,9 +324,9 @@ export class LoadBudgetProbe {
     return send();
   }
 
-  async backgroundOperation<T>(name: BackgroundName, work: () => Promise<T>): Promise<T> {
+  async backgroundOperation<T>(name: BackgroundName, work: () => Promise<T>, route?: string): Promise<T> {
     const scenario = this.active, request = this.scope.getStore();
-    if (!scenario || !request?.streaming || this.backgroundScope.getStore()?.open) return work();
+    if (!scenario || !request?.streaming || route && request.route !== route || this.backgroundScope.getStore()?.open) return work();
     const beganBeforeHeaders = request.open;
     const operation: BackgroundOperation = { name, cost: emptySql(), open: true };
     scenario.backgroundOperations.push(operation);
@@ -540,7 +565,7 @@ export function budgetTable(scenarios: ReadonlyMap<string, LoadScenario>) {
     const total = scenarioTotals(cost);
     if (total.failures || total.inFlight) throw new Error(`Incomplete SQL observation: ${budget.scenario}`);
     const observed = (idleScenario(budget.scenario) ? scenarioTotals(selectLoadRequests(cost, () => true)) : total)[budget.metric];
-    const targetObserved = total[budget.metric];
+    const targetObserved = idleScenario(budget.scenario) && budget.metric !== "statements" ? observed : total[budget.metric];
     return { ...budget, observed, ratchet: observed <= budget.baseline ? "PASS" : "FAIL",
       targetObserved, result: targetObserved <= budget.maximum ? "PASS" : "FAIL" };
   });
@@ -554,7 +579,8 @@ export function backgroundBudgetTable(scenarios: ReadonlyMap<string, LoadScenari
     if (!idleScenario(name)) continue;
     if (!Number.isFinite(cost.elapsedMs) || cost.elapsedMs < 0 || cost.backgroundOperations.some(operation => operation.open))
       throw new Error(`Incomplete background observation: ${name}`);
-    for (const limit of limits) {
+    for (const definition of limits) {
+      const limit = backgroundLimitFor(name, definition);
       const operations = cost.backgroundOperations.filter(operation => operation.name === limit.operation);
       const ticks = limit.periodsMs.reduce((sum, period) => sum + Math.floor(cost.elapsedMs / period), 0);
       add(name, limit.operation, "calls", operations.length, limit.initialCalls + ticks);

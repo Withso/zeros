@@ -11,6 +11,8 @@ import type pg from "pg";
 import { vi } from "vitest";
 import WebSocket, { WebSocketServer } from "ws";
 import { createApp } from "../app.js";
+import * as database from "../db.js";
+import { PostgresSecurityEventBroker, publishPendingSecurityEvents } from "../security-events.js";
 import type { Config } from "../config.js";
 import { workosTestAuth } from "../test-workos-env.js";
 import { RailwayWorkOSProvider, type WorkOSExchange } from "../workos-provider.js";
@@ -19,7 +21,8 @@ import { executionFixture } from "../cloud/execution/test-fixture.js";
 import { CloudV2BeginActiveReplySchema, type CloudV2MessageRow } from "../cloud/contract.js";
 import { CloudV2PromptPullReplySchema } from "../cloud/prompt-contract.js";
 import { sealPortToken } from "../cloud/worker-port-token.js";
-import { deferred, holdLoadStream, IDLE_WINDOW_MS, type LoadBudgetProbe } from "./load-budget.js";
+import { deferred, holdLoadStream, IDLE_WINDOW_MS, selectLoadRequests, type LoadBudgetProbe, type LoadScenario } from "./load-budget.js";
+import { CENSUS_CAPTURE, censusSchedule, type CensusOperation, type CensusProfile } from "./load-budget-census.js";
 
 // Counts supplied from Alpha. Unspecified stream/discovery counts contribute
 // one initial open/read each; these are a lower bound, not invented polling.
@@ -39,6 +42,7 @@ export const R1_IDLE_REPLAY: ReadonlyArray<{ operation: typeof OBSERVED_IDLE_REP
 ];
 type Device = { deviceId: string; registrationId: string; instanceId: string };
 type DeviceClient = { register(id: string, input: unknown): Promise<{ device: Device }>; connect(device: Device, workspace: string): Promise<unknown>;
+  disconnect(device: Device, workspace: string, targetDevice: string): Promise<unknown>;
   heartbeat(device: Device): Promise<unknown>; syncConnections(device: Device): Promise<unknown>;
   events(device: Device, signal: AbortSignal): Promise<ReadableStream<Uint8Array>> };
 type WorkerClient = { bootId: string; promptRequest(operation: string, body: unknown): Promise<unknown>;
@@ -47,10 +51,10 @@ type PromptClient = { enqueue(body: unknown): Promise<unknown>; list(after: stri
 type StreamStore = { upsert(chat: unknown): Promise<void>; enqueue(chatId: string, input: unknown): Promise<unknown>;
   claim(chatId: string): Promise<unknown>; importMessages(chatId: string, rows: CloudV2MessageRow[]): Promise<unknown>;
   fold(chatId: string, update: unknown): Promise<unknown>; finish(chatId: string, requestId: string, result: unknown): Promise<unknown>;
-  history(chatId: string): readonly CloudV2MessageRow[]; flush(): Promise<void> };
+  delete(chatId: string): Promise<void>; history(chatId: string): readonly CloudV2MessageRow[]; flush(): Promise<void> };
 type StreamMirror = { connect(): void; disconnect(): void; flush(): Promise<boolean>; dispose(): Promise<void> };
 export const RUNNING_TURN = { milliseconds: 60_000, deltas: 300, deltaCharacters: 100 } as const;
-export const WAKE_HISTORY = { chats: 12, rowsPerChat: 4 } as const;
+export const WAKE_HISTORY = { chats: 12, rowsPerChat: 4, tombstones: 7 } as const;
 const requireValue = (condition: unknown, reason: string): void => { if (!condition) throw new Error(`Load fixture: ${reason}`); };
 const baseUrl = "https://api.example.test";
 async function closeAll(cleanups: Array<() => Promise<void>>): Promise<void> {
@@ -61,6 +65,11 @@ async function closeAll(cleanups: Array<() => Promise<void>>): Promise<void> {
   if (errors.length) throw errors[0];
 }
 
+export function censusReplayCosts(cost: LoadScenario) {
+  const renewals = selectLoadRequests(cost, request => request.route === "/v2/cloud/worker/execution-leases/renew");
+  return { captured: { ...cost, requests: cost.requests.filter(request => !renewals.requests.includes(request)) }, renewals };
+}
+
 export async function loadBudgetFixture(pool: pg.Pool, probe: LoadBudgetProbe) {
   const nativeFetch = globalThis.fetch;
   const f = await executionFixture(pool, { teamOwnership: true });
@@ -69,6 +78,14 @@ export async function loadBudgetFixture(pool: pg.Pool, probe: LoadBudgetProbe) {
   const cleanups: Array<() => Promise<void>> = [() => f.close(), () => f.cp.teamSharing.signals.close()];
   const close = () => closeAll(cleanups);
   try {
+    const security = new PostgresSecurityEventBroker(pool);
+    cleanups.push(() => security.stop());
+    const systemTx = database.withSystemTx, systemStatement = database.withSystemStatement;
+    const authTx = vi.spyOn(database, "withSystemTx").mockImplementation((...args) =>
+      probe.backgroundOperation(args[2]?.consistentRead ? "auth-read" : "auth-publish", () => systemTx(...args), "/v1/auth/events"));
+    const authStatement = vi.spyOn(database, "withSystemStatement").mockImplementation((...args) =>
+      probe.backgroundOperation("auth-read", () => systemStatement(...args), "/v1/auth/events"));
+    cleanups.push(async () => { authTx.mockRestore(); authStatement.mockRestore(); });
     let presenceClosed: ReturnType<typeof deferred<void>> | undefined;
     const authority = f.cp.teamSharing.authority, presence = f.cp.teamSharing.events.presence;
     const assert = authority.assert.bind(authority), snapshot = presence.snapshot.bind(presence), renewPresence = presence.renew.bind(presence), closePresence = presence.close.bind(presence);
@@ -131,7 +148,7 @@ export async function loadBudgetFixture(pool: pg.Pool, probe: LoadBudgetProbe) {
         // Keep the real long-poll branch, including its second authority/read
         // pass. Only the signal's transport timer advances immediately.
         return f.cp.workers.waitForPrompts!(id, 0, signal);
-      } } }, cloudApi: f.cp.api, workosProvider: provider, requestCostObserver: probe.observe });
+      } } }, cloudApi: f.cp.api, workosProvider: provider, securityEventBroker: security, requestCostObserver: probe.observe });
     const listening = deferred<number>(), serving = new Set<Promise<Response>>();
     const server = serve({ hostname: "127.0.0.1", port: 0, fetch: async request => {
       const reply = probe.request(request, () => app.fetch(request), false);
@@ -167,6 +184,9 @@ export async function loadBudgetFixture(pool: pg.Pool, probe: LoadBudgetProbe) {
     const source = (path: string) => new URL(path, root).href;
     const renderer = "apps/desktop/src/renderer/";
     let deviceContext: { deviceId: string; headers: Record<string, string> } | null = null;
+    // Each isolated fixture signs a new session and registers a new device.
+    // Cached renderer modules would retain the previous fixture's auth mocks.
+    vi.resetModules();
     vi.doMock(new URL(`${renderer}platform/runtime.ts`, root).pathname, () => ({ isElectron: () => true, isLocalDevelopment: () => false,
       nativeInvoke: async (command: string) => command === "local_commands_device" ? deviceContext : { version: "1.0.0", runtimeMode: "dev" },
       nativeListen: async () => () => {} }));
@@ -182,6 +202,7 @@ export async function loadBudgetFixture(pool: pg.Pool, probe: LoadBudgetProbe) {
     const promptModule = await import(source(`${renderer}platform/cloud-prompt-api.ts`)) as {
       cloudPromptApi(target: { organizationId: string; workspaceId: string }, chatId: string): PromptClient };
     const { CLOUD_WORKER_FEATURES } = await import(source("apps/cloud-worker/src/worker-features.ts")) as { CLOUD_WORKER_FEATURES: string };
+    const { CONTEXT_RENEW_MS } = await import(source("apps/cloud-worker/src/sharing/execution-contexts.ts")) as { CONTEXT_RENEW_MS: number };
     const { CLOUD_V2_PROMPT_POLL_MS } = await import(source("packages/protocol/src/cloud-v2-prompts.ts")) as { CLOUD_V2_PROMPT_POLL_MS: number };
     const control = new deviceModule.DeviceControl({ fetch: fetcher, baseUrl: () => baseUrl, token: async () => desktopToken });
     const { device } = await control.register(randomUUID(), { requestId: randomUUID(), name: "Load fixture", capabilities: ["local-commands-v1", "local-commands-reason-v1"] });
@@ -205,7 +226,8 @@ export async function loadBudgetFixture(pool: pg.Pool, probe: LoadBudgetProbe) {
     const token = (connected.protocols as string[])[1]!.slice(7);
     const grant = await f.cp.store.consumeConnectTicket(token, f.workspace.id);
     if (!grant) throw new Error("Load fixture: client grant unavailable");
-    const client = await f.cp.execution.clients.open(f.workspace.id, randomUUID(), grant);
+    const clientId = randomUUID();
+    const client = await f.cp.execution.clients.open(f.workspace.id, clientId, grant);
     const prompts = promptModule.cloudPromptApi({ organizationId: f.organizationId, workspaceId: f.workspace.id }, "chat");
     const workspaceList = async () => {
       const reply = await desktop(`/v1/cloud-v2/workspaces?organizationId=${f.organizationId}`).then(json);
@@ -361,6 +383,8 @@ export async function loadBudgetFixture(pool: pg.Pool, probe: LoadBudgetProbe) {
           payload: JSON.stringify({ id: `${chatId}-row-${row}`, kind: "text", role: "assistant", text: `${chat}/${row}`, createdAt: row }),
         })));
       }
+      const deletedChats = Array.from({ length: WAKE_HISTORY.tombstones }, (_, chat) => `wake-deleted-${chat}`);
+      for (const id of deletedChats) await store.upsert({ id, folder: workspaceKey, title: id });
       const configuration = hello.config as { historyReplacement?: 1; historyDigest?: 1 };
       let failed: unknown;
       const mirror = new HistoryMirror(store, {
@@ -381,7 +405,12 @@ export async function loadBudgetFixture(pool: pg.Pool, probe: LoadBudgetProbe) {
         requireValue(connected, "wake history mirror did not finish");
       };
       return {
-        prepare: connect,
+        prepare: async () => {
+          await connect();
+          for (const id of deletedChats) await store.delete(id);
+          requireValue(await mirror.flush(), "wake tombstones did not reach the control plane");
+          mirror.disconnect();
+        },
         resume: async () => { mirror.disconnect(); await connect(); },
         verify: async () => {
           for (let chat = 0; chat < WAKE_HISTORY.chats; chat++) {
@@ -389,6 +418,9 @@ export async function loadBudgetFixture(pool: pg.Pool, probe: LoadBudgetProbe) {
             const actual = await f.cp.store.windowMessages(f.workspace.id, chatId, 1000);
             requireValue(JSON.stringify(actual) === JSON.stringify(store.history(chatId)), "wake changed mirrored history");
           }
+          const deleted = await pool.query(`SELECT chat_id FROM cloud_v2_chats
+            WHERE workspace_id=$1 AND chat_id=ANY($2::text[]) AND deleted_at IS NOT NULL`, [f.workspace.id, deletedChats]);
+          requireValue(deleted.rowCount === WAKE_HISTORY.tombstones, "wake revived or lost a retained deleted chat");
           return { ...WAKE_HISTORY, negotiated: configuration.historyDigest === 1 };
         },
       };
@@ -441,13 +473,116 @@ export async function loadBudgetFixture(pool: pg.Pool, probe: LoadBudgetProbe) {
         await pace(IDLE_WINDOW_MS);
       } finally { await closeAll(streams); presenceClosed = undefined; }
     };
+    const census = async (profile: CensusProfile) => {
+      const chatId = "census-chat";
+      const rows = Array.from({ length: 4 }, (_, index) => ({ msgId: `census-row-${index}`, kind: "text", createdAt: index + 1,
+        payload: JSON.stringify({ id: `census-row-${index}`, kind: "text", role: "assistant", text: `Fixture ${index}`, createdAt: index + 1 }) }));
+      await workerJson("history", { t: "history", bootId: worker.bootId, sequence: ++sequence,
+        chats: [{ id: chatId, title: "Census" }], messages: { chatId, rows } });
+      const githubFetch = f.fetcher.getMockImplementation()!;
+      f.fetcher.mockImplementation((input, init) => {
+        const url = new URL(input instanceof Request ? input.url : String(input));
+        return url.origin === "https://api.github.com" && url.pathname.endsWith("/pulls")
+          ? probe.githubRequest(async () => Response.json([])) : githubFetch(input, init);
+      });
+      if (profile.state === "stopped") {
+        await f.cp.execution.clients.close(f.workspace.id, clientId);
+        await control.disconnect(device, f.workspace.id, device.deviceId);
+        await pool.query("UPDATE cloud_v2_workspaces SET state='stopped' WHERE id=$1", [f.workspace.id]);
+      }
+      await publishPendingSecurityEvents(pool);
+      // Stop/join notification work caused by fixture mutations before the
+      // route-cost window. Global maintenance has separate scheduler coverage.
+      await f.cp.loginChanges.stop();
+      await security.start();
+      if (profile.state === "running") await renew();
+      return {
+        replay: async (wallClock = false) => {
+          const streams: Array<() => Promise<void>> = [];
+          let closeWorkspace: (() => Promise<void>) | undefined, cursor: number | undefined;
+          const startedAt = performance.now();
+          const pace = async (at: number) => { const wait = startedAt + at - performance.now(); if (wallClock && wait > 0) await delay(wait); };
+          const openStream = async (path: string) => {
+            const abort = new AbortController();
+            const response = await desktop(path, undefined, { accept: "text/event-stream" }, abort.signal);
+            requireValue(response.ok && response.body, "census stream unavailable");
+            return holdLoadStream(response.body!, abort, path.startsWith(`${workspacePath}/events`) ? presenceClosed?.promise : undefined);
+          };
+          try {
+            const schedule: Array<{ operation: CensusOperation | "renew"; at: number }> = censusSchedule(profile);
+            if (wallClock && profile.state === "running") {
+              for (let at = CONTEXT_RENEW_MS; at < CENSUS_CAPTURE.windowMs; at += CONTEXT_RENEW_MS) schedule.push({ operation: "renew", at });
+              schedule.sort((left, right) => left.at - right.at);
+            }
+            for (const { operation, at } of schedule) {
+              await pace(at);
+              await probe.at(at, async () => {
+                switch (operation) {
+                  case "renew": await renew(); break;
+                  case "workspace": {
+                    const reply = await desktop(workspacePath).then(json);
+                    requireValue((reply.workspace as { id: string; state: string }).id === f.workspace.id &&
+                      (reply.workspace as { state: string }).state === profile.state, "census workspace state changed"); break;
+                  }
+                  case "list": await workspaceList(); break;
+                  case "connections": await control.syncConnections(device); break;
+                  case "heartbeat": await control.heartbeat(device); break;
+                  case "connect": {
+                    const reply = await desktop(`${workspacePath}/connect`, { wake: false }).then(json);
+                    requireValue(Array.isArray(reply.protocols) && reply.protocols.length === 2, "census connect did not issue a ticket"); break;
+                  }
+                  case "history": {
+                    const reply = await desktop(`${workspacePath}/history`, { op: "messages.windowOlder", params: { chatId, beforeMsgId: rows.at(-1)!.msgId, limit: 20 } }).then(json);
+                    requireValue((reply.result as { messages: unknown[] })?.messages?.length === rows.length - 1, "census history did not read the mirrored rows"); break;
+                  }
+                  case "github": {
+                    const reply = await desktop(`${workspacePath}/github`, { op: "gh.prSync", params: {} }).then(json);
+                    requireValue(reply.result === null, "census GitHub did not return the empty pull request result"); break;
+                  }
+                  case "snapshot": {
+                    const reply = await desktop("/v1/auth/snapshot").then(json);
+                    requireValue(Number.isSafeInteger(reply.cursor), "census snapshot cursor missing"); cursor = Number(reply.cursor); break;
+                  }
+                  case "workspaceEvents": {
+                    await closeWorkspace?.();
+                    presenceClosed = deferred<void>(); void presenceClosed.promise.catch(() => {});
+                    closeWorkspace = (await openStream(`${workspacePath}/events`)).stop; break;
+                  }
+                  case "deviceEvents": {
+                    const abort = new AbortController();
+                    streams.push((await holdLoadStream(await control.events(device, abort.signal), abort)).stop); break;
+                  }
+                  case "authEvents": {
+                    requireValue(cursor !== undefined, "census auth stream needs its snapshot cursor");
+                    streams.push((await openStream(`/v1/auth/events?after=${cursor}`)).stop); break;
+                  }
+                }
+              });
+            }
+            await pace(CENSUS_CAPTURE.windowMs);
+          } finally {
+            if (closeWorkspace) streams.push(closeWorkspace);
+            await closeAll(streams); presenceClosed = undefined;
+          }
+        },
+        verify: async () => {
+          const value = (await pool.query<{ state: string; clients: string; turns: string }>(`SELECT w.state,
+            (SELECT count(*) FROM cloud_v2_execution_contexts c WHERE c.workspace_id=w.id AND c.kind='client' AND c.state='active' AND c.expires_at>clock_timestamp())::text AS clients,
+            (SELECT count(*) FROM cloud_v2_execution_contexts c WHERE c.workspace_id=w.id AND c.kind='turn' AND c.state='active')::text AS turns
+            FROM cloud_v2_workspaces w WHERE w.id=$1`, [f.workspace.id])).rows[0];
+          requireValue(value?.state === profile.state && Number(value.clients) === Number(profile.state === "running") && Number(value.turns) === 0,
+            "census state or client/turn cardinality changed");
+          return { state: value!.state, liveClients: Number(value!.clients), liveTurns: Number(value!.turns), historyRows: rows.length };
+        },
+      };
+    };
     const assertTransportCancellation = async () => {
       let cancelled = false;
       try { const response = await desktop("/v1/me", undefined, {}, AbortSignal.abort()); await response.body?.cancel(); }
       catch (error) { cancelled = error instanceof Error && error.name === "AbortError"; }
       requireValue(cancelled, "HTTP transport ignored cancellation");
     };
-    return { close, workspaceList, coldSource, admission, turnStart, finishTurn, runningTurn, cleanWake, renew, idleReplay, assertTransportCancellation, pollWaits: () => pollWaits,
+    return { close, workspaceList, coldSource, admission, turnStart, finishTurn, runningTurn, cleanWake, renew, idleReplay, census, assertTransportCancellation, pollWaits: () => pollWaits,
       observerStatus: () => app.requestCostObserverStatus!() };
   } catch (error) { await close(); throw error; }
 }

@@ -478,7 +478,7 @@ it("ignores an older control plane that rejects a newer timing phase", async () 
 });
 it("advertises outbox support without changing the strict hello body, and rereads credentials on pull", async () => {
   const f = await fixture();
-  expect(new Headers(vi.mocked(f.fetcher).mock.calls[0]![1]?.headers).get("x-zeros-worker-features")).toBe("prompt-outbox-v1,mcp-v1,workspace-setup-v1,checkout-v2,agent-interactions-v1,github-pr-v1,git-identity-v1,github-user-token-v1,code-review-v1,history-replace-v1,workspace-environment-v1,repository-setup-v1,runtime-update-v1,worker-push-v1,workspace-api-v1,session-name-v1,chat-edit-v1,local-commands-v1,setup-status-v1,notify-user-v1,sync-v1,local-commands-reason-v1,acting-user-v1,sync-context-v1,creator-agent-logins-v1,creator-agent-models-v1,creator-commit-identity-v1,push-signals-v1,recovery-quiesce-v1,history-digest-v1");
+  expect(new Headers(vi.mocked(f.fetcher).mock.calls[0]![1]?.headers).get("x-zeros-worker-features")).toBe("prompt-outbox-v1,mcp-v1,workspace-setup-v1,checkout-v2,agent-interactions-v1,github-pr-v1,git-identity-v1,github-user-token-v1,code-review-v1,history-replace-v1,workspace-environment-v1,repository-setup-v1,runtime-update-v1,worker-push-v1,workspace-api-v1,session-name-v1,chat-edit-v1,local-commands-v1,setup-status-v1,notify-user-v1,sync-v1,local-commands-reason-v1,acting-user-v1,sync-context-v1,creator-agent-logins-v1,creator-agent-models-v1,creator-commit-identity-v1,push-signals-v1,recovery-quiesce-v1,history-digest-v1,history-digest-deletions-v1");
   expect(Object.keys(f.requests[0]!.body).sort()).toEqual(["bootId", "protocol", "runtimeSha256"]);
   await f.rotate();
   vi.mocked(f.fetcher).mockImplementationOnce(async (_url, init) => {
@@ -639,14 +639,17 @@ it("R1: a negotiated 60 s pull keeps its HTTP request open past 35 s and is boun
   const f = await fixture();
   let abortedAt: number | undefined;
   const started = { at: 0 };
+  let requestStarted!: () => void;
+  const ready = new Promise<void>(resolve => { requestStarted = resolve; });
   vi.mocked(f.fetcher).mockImplementationOnce(async (_url, init) => new Promise<Response>((_, reject) => {
     started.at = Date.now();
     init!.signal!.addEventListener("abort", () => { abortedAt = Date.now(); reject(new DOMException("Aborted", "AbortError")); }, { once: true });
+    requestStarted();
   }));
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
   try {
     const pending = f.transport.promptRequest("pull", { waitMs: 60_000, held: [] }).catch(() => "aborted");
-    for (let i = 0; i < 50 && !started.at; i++) { await vi.advanceTimersByTimeAsync(0); await new Promise(resolve => setImmediate(resolve)); }
+    await ready;
     expect(started.at).toBeGreaterThan(0);
     await vi.advanceTimersByTimeAsync(40_000);
     expect(abortedAt).toBeUndefined();

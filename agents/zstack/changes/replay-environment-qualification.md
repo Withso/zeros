@@ -16,6 +16,12 @@ Scope newer Git options to object replay, not the shared workspace verifier.
 Lease cleanup must never wait behind installation or replace a completed replay's
 result; release only the owned lease and let dead-PID cleanup reclaim leftovers.
 
+Before retiring scratch dependencies, inspect active checkouts' nested package
+and `.bin` symlinks as well as process cwd, PATH and open files. A real
+`node_modules` directory can still depend on another worktree. Preserve receipts
+and refs, remove worktrees through Git, and measure actual free bytes: shared
+storage means a large `du` count may reclaim little space.
+
 Held by the zstack-source and zstack-replay suites and the
 zstack-replay-historical-dependencies, zstack-replay-promisor-prefetch and
 zstack-replay-canonical-scratch evals. Operational bounds are in tools.md.

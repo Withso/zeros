@@ -69,16 +69,22 @@ export class CloudExecutionContexts {
     return transaction ? read(transaction) : withSystemTx(this.pool, read);
   }
 
-  async workspace(id: string, userId: string, user?: AuthedUser) {
-    const proof = await this.deps.authority.admit(id, userId, { user });
-    const workspace = await withSystemTx(this.pool, async tx => {
-      await this.deps.authority.assert(proof, tx);
+  async workspace(id: string, userId: string, user?: AuthedUser, transaction?: Tx) {
+    const read = async (tx: Tx) => {
+      const proof = await this.deps.authority.admit(id, userId, { user, transaction: tx });
       const row = (await tx.query<Parameters<typeof cloudV2WorkspaceFromRow>[0]>("SELECT * FROM cloud_v2_workspaces WHERE id=$1", [id])).rows[0];
       if (!row) throw actorChanged();
       await this.deps.authority.assert(proof, tx);
-      return cloudV2WorkspaceFromRow(row);
+      return { workspace: cloudV2WorkspaceFromRow(row), proof };
+    };
+    return transaction ? read(transaction) : withSystemTx(this.pool, read);
+  }
+
+  async connectionWorkspace(id: string, user: AuthedUser) {
+    return withSystemTx(this.pool, async tx => {
+      if (!await this.active(id, tx)) return undefined;
+      return this.workspace(id, user.id, user, tx);
     });
-    return { workspace, proof };
   }
 
   async authorizedContext(identity: ExecutionWorker, id: string | undefined, kinds?: readonly ExecutionContext["kind"][]) {
@@ -374,11 +380,12 @@ export class CloudExecutionContexts {
     return row;
   }
 
-  async admission(context: ExecutionContext, minimumSourceMs = 0): Promise<ExecutionAdmission> {
+  async admission(context: ExecutionContext, minimumSourceMs = 0, transaction?: Tx): Promise<ExecutionAdmission> {
     if (context.state !== "active" && context.reason === "access_revoked") throw new ExecutionContextRevoked();
     if (!context.user_id || context.state !== "active" || context.expires_at.getTime() <= Date.now()) throw actorChanged();
-    const proof = await this.deps.authority.admit(context.workspace_id, context.user_id, { continuation: true, minimumSourceMs });
-    await withSystemTx(this.pool, tx => this.assertContext(tx, context, proof));
+    const proof = await this.deps.authority.admit(context.workspace_id, context.user_id, { continuation: true, minimumSourceMs,
+      ...(transaction ? { transaction } : {}) });
+    await (transaction ? this.assertContext(transaction, context, proof) : withSystemTx(this.pool, tx => this.assertContext(tx, context, proof)));
     return proof;
   }
 
@@ -480,55 +487,52 @@ export class CloudExecutionContexts {
     if (done(initial.existing)) return undefined;
     if (!current.execution_initiator_user_id) throw executionWorkerRequired();
     const pending = initial.existing?.state === "active" && initial.existing.expires_at.getTime() > Date.now();
-    return withExecutionLifetimeRetry(async () => {
+    return withExecutionLifetimeRetry(() => withSystemTx(this.pool, async tx => {
+      await tx.query("SELECT id FROM users WHERE id=$1 FOR KEY SHARE", [current.execution_initiator_user_id]);
+      if (!(await tx.query(`SELECT 1 FROM cloud_v2_workspaces WHERE id=$1 AND execution_intent_id=$2
+        AND execution_initiator_user_id=$3 AND worker_boot_id=$4 FOR UPDATE`,
+        [workspaceId, current.execution_intent_id, current.execution_initiator_user_id, current.worker_boot_id])).rowCount) throw actorChanged();
       const proof = await this.deps.authority.admit(workspaceId, current.execution_initiator_user_id!,
-        { minimumSourceMs: pending ? 0 : EXECUTION_MINIMUM_LIFETIME_MS });
+        { minimumSourceMs: pending ? 0 : EXECUTION_MINIMUM_LIFETIME_MS, transaction: tx });
       assertExecutionIntent(current.execution_intent_authority, proof);
-      return withSystemTx(this.pool, async tx => {
-        await tx.query("SELECT id FROM users WHERE id=$1 FOR KEY SHARE", [proof.person.userId]);
-        await tx.query("SELECT 1 FROM cloud_v2_workspaces WHERE id=$1 FOR UPDATE", [workspaceId]);
-        await this.deps.authority.assert(proof, tx);
-        if (!(await tx.query("SELECT 1 FROM cloud_v2_workspaces WHERE id=$1 AND execution_intent_id=$2 AND execution_initiator_user_id=$3 AND worker_boot_id=$4",
-          [workspaceId, current.execution_intent_id, current.execution_initiator_user_id, current.worker_boot_id])).rowCount) throw actorChanged();
-        const existing = (await tx.query<ExecutionContext>(`SELECT * FROM cloud_v2_execution_contexts
-          WHERE workspace_id=$1 AND intent_id=$2 AND worker_boot_id=$3 AND kind='bootstrap' FOR UPDATE`,
-          [workspaceId, current.execution_intent_id, current.worker_boot_id])).rows[0];
-        if (done(existing)) return undefined;
-        if (existing?.state === "active" && existing.expires_at.getTime() > Date.now()) {
-          await this.assertContext(tx, existing, proof); return existing.id;
-        }
-        if (existing && (existing.bootstrap_material_issued !== false || existing.retirement_id || existing.material !== null ||
-          existing.expires_at.getTime() > Date.now() || existing.state !== "active" && existing.reason !== "expired" ||
-          !matchesExecutionSignature(existing.authority, existing.authority.signature, proof.person, "signature"))) throw actorChanged();
-        assertExecutionLifetime(proof.until);
-        if (existing) {
-          const deleted = await tx.query(`DELETE FROM cloud_v2_execution_contexts c WHERE c.id=$1
-            AND NOT EXISTS(SELECT 1 FROM cloud_v2_execution_contexts child WHERE child.parent_context_id=c.id)
-            AND NOT EXISTS(SELECT 1 FROM cloud_v2_execution_tokens t WHERE t.context_id=c.id)`, [existing.id]);
-          if (deleted.rowCount !== 1) throw actorChanged();
-        }
-        const id = randomUUID();
-        await tx.query(`INSERT INTO cloud_v2_execution_contexts(id,workspace_id,org_id,user_id,kind,intent_id,access_epoch,stop_generation,worker_boot_id,worker_token_hash,authority,source_fingerprint,expires_at,bootstrap_material_issued)
-          VALUES($1,$2,$3,$4,'bootstrap',$5,$6,$7,$8,decode($9,'hex'),$10,$11,$12,false)`,
-        [id, workspaceId, proof.person.organizationId, proof.person.userId, current.execution_intent_id, proof.person.accessEpoch, proof.person.stopGeneration,
-          proof.person.bootId, proof.person.workerTokenHash, executionContextAuthority(proof.person), proof.source?.fingerprint ?? null, new Date(proof.until)]);
-        await this.deps.authority.assert(proof, tx);
-        assertExecutionLifetime(proof.until);
-        return id;
-      });
-    });
+      const existing = (await tx.query<ExecutionContext>(`SELECT * FROM cloud_v2_execution_contexts
+        WHERE workspace_id=$1 AND intent_id=$2 AND worker_boot_id=$3 AND kind='bootstrap' FOR UPDATE`,
+        [workspaceId, current.execution_intent_id, current.worker_boot_id])).rows[0];
+      if (done(existing)) return undefined;
+      if (existing?.state === "active" && existing.expires_at.getTime() > Date.now()) {
+        await this.assertContext(tx, existing, proof); return existing.id;
+      }
+      if (existing && (existing.bootstrap_material_issued !== false || existing.retirement_id || existing.material !== null ||
+        existing.expires_at.getTime() > Date.now() || existing.state !== "active" && existing.reason !== "expired" ||
+        !matchesExecutionSignature(existing.authority, existing.authority.signature, proof.person, "signature"))) throw actorChanged();
+      assertExecutionLifetime(proof.until);
+      if (existing) {
+        const deleted = await tx.query(`DELETE FROM cloud_v2_execution_contexts c WHERE c.id=$1
+          AND NOT EXISTS(SELECT 1 FROM cloud_v2_execution_contexts child WHERE child.parent_context_id=c.id)
+          AND NOT EXISTS(SELECT 1 FROM cloud_v2_execution_tokens t WHERE t.context_id=c.id)`, [existing.id]);
+        if (deleted.rowCount !== 1) throw actorChanged();
+      }
+      const id = randomUUID();
+      await tx.query(`INSERT INTO cloud_v2_execution_contexts(id,workspace_id,org_id,user_id,kind,intent_id,access_epoch,stop_generation,worker_boot_id,worker_token_hash,authority,source_fingerprint,expires_at,bootstrap_material_issued)
+        VALUES($1,$2,$3,$4,'bootstrap',$5,$6,$7,$8,decode($9,'hex'),$10,$11,$12,false)`,
+      [id, workspaceId, proof.person.organizationId, proof.person.userId, current.execution_intent_id, proof.person.accessEpoch, proof.person.stopGeneration,
+        proof.person.bootId, proof.person.workerTokenHash, executionContextAuthority(proof.person), proof.source?.fingerprint ?? null, new Date(proof.until)]);
+      await this.deps.authority.assert(proof, tx);
+      assertExecutionLifetime(proof.until);
+      return id;
+    }));
   }
 
   async bootstrapLease(identity: ExecutionWorker, id: string) { return this.identityLease(identity, id, "bootstrap"); }
 
   async identityLease(identity: ExecutionWorker, id: string, kind: "bootstrap" | "terminal" | "client") {
-    const context = await withSystemTx(this.pool, async tx => {
-      const workspace = await this.worker(tx, identity), context = await this.context(tx, id, workspace.id);
-      if (context.kind !== kind || kind === "client" && (!context.operation || context.operation === "terminal.create")) throw actorChanged();
-      return context;
-    });
     return withExecutionLifetimeRetry(async () => {
-      const proof = await this.admission(context, EXECUTION_MINIMUM_LIFETIME_MS);
+      const { context, proof } = await withSystemTx(this.pool, async tx => {
+        const workspace = await this.worker(tx, identity), context = await this.context(tx, id, workspace.id);
+        if (context.kind !== kind || kind === "client" && (!context.operation || context.operation === "terminal.create")) throw actorChanged();
+        const proof = await this.admission(context, EXECUTION_MINIMUM_LIFETIME_MS, tx);
+        return { context, proof };
+      });
       assertExecutionLifetime(proof.until);
       const check = async (tx?: Tx) => { await (tx ? this.assertContext(tx, context, proof) : withSystemTx(this.pool, value => this.assertContext(value, context, proof))); };
       const material = context.material ? null : await this.deps.material(context, check);
@@ -543,7 +547,6 @@ export class CloudExecutionContexts {
               FROM cloud_api_access_settings WHERE org_id=$1 AND user_id=$2),true) AS allowed`, [context.org_id, context.user_id])).rows[0]!.allowed
               ? { api: { url: this.deps.apiUrl, token: await this.token(tx, current, "api") } } : {}) };
         if (!current.material) await tx.query("UPDATE cloud_v2_execution_contexts SET material=$2 WHERE id=$1", [id, sealExecution(value, envelopeBinding(current), this.deps.keys)]);
-        await check(tx);
         current = await this.issueLease(tx, current, proof);
         return (kind === "bootstrap" ? CloudV2BootstrapLeaseSchema : kind === "terminal" ? CloudV2TerminalLeaseSchema : CloudV2ClientLeaseSchema).parse({ ...value, expiresAt: current.expires_at.getTime() });
       });
