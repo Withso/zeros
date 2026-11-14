@@ -203,10 +203,14 @@ database("workspace agent cost through real history routes and PostgreSQL", () =
       await lock.query("BEGIN"); await lock.query("SET LOCAL ROLE zeros_app");
       await lock.query("SELECT set_config('app.system','on',true)");
       expect((await lock.query("SELECT id FROM cloud_v2_workspaces WHERE id=$1 FOR UPDATE", [f.workspaceId])).rowCount).toBe(1);
+      const blocker = (await lock.query<{ pid: number }>("SELECT pg_backend_pid() AS pid")).rows[0]!.pid;
       pending = post(input([row("cost", { totalCostUsd: 3 })]));
-      await expect.poll(async () => Number((await pool.query(`SELECT count(*) FROM pg_stat_activity
-        WHERE datname=current_database() AND wait_event_type='Lock'
-        AND query LIKE '%worker_history_sequence%worker_token_hash=$1%FOR UPDATE%'`)).rows[0].count)).toBe(1);
+      // Activity text is truncated; use the held backend and actual parent lock.
+      await expect.poll(async () => Number((await pool.query(`SELECT count(*) FROM pg_stat_activity a
+        WHERE a.datname=current_database() AND $1=ANY(pg_blocking_pids(a.pid))
+          AND a.query LIKE 'SELECT id, worker_boot_id, worker_history_sequence%'
+          AND EXISTS (SELECT 1 FROM pg_locks l WHERE l.pid=a.pid AND l.relation='cloud_v2_workspaces'::regclass
+            AND l.mode='RowShareLock' AND l.granted)`, [blocker])).rows[0].count)).toBe(1);
       // The waiting history writer cannot hold a message lock before its parent.
       await lock.query("SELECT msg_id FROM cloud_v2_messages WHERE workspace_id=$1 FOR UPDATE NOWAIT", [f.workspaceId]);
       await lock.query("UPDATE cloud_v2_messages SET payload=$2 WHERE workspace_id=$1", [f.workspaceId, row("cost", { totalCostUsd: 2 }).payload]);
