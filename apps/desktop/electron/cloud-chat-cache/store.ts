@@ -61,6 +61,22 @@ const userPrompt = (kind: string, payload: string): boolean => {
   catch { return false; }
 };
 const native = (row: Message): CloudCacheRow => ({ index: row.idx, msgId: row.msg_id, kind: row.kind, payload: row.payload, createdAt: row.created_at });
+/** How many of this process's descriptors are open on `file`'s inode, or null where the platform cannot list them
+ * (the open is then refused rather than trusted). */
+function heldDescriptors(file: fs.Stats): number | null {
+  for (const root of process.platform === "linux" ? ["/proc/self/fd", "/dev/fd"] : ["/dev/fd", "/proc/self/fd"]) {
+    let entries: string[];
+    try { entries = fs.readdirSync(root); } catch { continue; }
+    let count = 0;
+    for (const entry of entries) {
+      const fd = Number(entry);
+      if (!Number.isInteger(fd)) continue;
+      try { const info = fs.fstatSync(fd); if (info.dev === file.dev && info.ino === file.ino) count++; } catch { /* closed meanwhile */ }
+    }
+    return count;
+  }
+  return null;
+}
 class Capacity extends Error {}
 class Incompatible extends Error {}
 
@@ -74,12 +90,17 @@ export class CloudChatCacheStore {
   private closed = false;
   private readonly openChats = new Map<string, string>();
 
-  constructor(directory: string, options: { limits?: Partial<typeof DEFAULT_LIMITS>; now?: () => number } = {}) {
+  private readonly openNative: (filename: string) => Database.Database;
+
+  constructor(directory: string, options: { limits?: Partial<typeof DEFAULT_LIMITS>; now?: () => number;
+    /** Test seam for the native open; production opens the pathname with a 500 ms busy timeout. */
+    openNative?: (filename: string) => Database.Database } = {}) {
     fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
     this.filename = path.join(fs.realpathSync(directory), "cloud-cache.db");
     this.limits = { ...DEFAULT_LIMITS, ...options.limits };
     for (const value of Object.values(this.limits)) if (!Number.isSafeInteger(value) || value <= 0) throw unavailable();
     this.now = options.now ?? Date.now;
+    this.openNative = options.openNative ?? (filename => new Database(filename, { timeout: 500 }));
   }
 
   private checkFiles(): void {
@@ -101,7 +122,12 @@ export class CloudChatCacheStore {
       this.file = fs.fstatSync(this.descriptor);
       if (!this.file.isFile() || this.file.nlink !== 1) throw unavailable();
       this.checkFiles();
-      this.db = new Database(this.filename, { timeout: 500 });
+      // SQLite opens by pathname. Bind it to the held original: the native open must add a descriptor on the custody
+      // inode; a pathname swapped (and restored) around the open adds none, and the open is refused.
+      const before = heldDescriptors(this.file);
+      this.db = this.openNative(this.filename);
+      const after = heldDescriptors(this.file);
+      if (before === null || after === null || after <= before) throw unavailable();
       this.checkFiles();
       this.db.pragma("trusted_schema=OFF");
       const version = this.db.pragma("user_version", { simple: true });

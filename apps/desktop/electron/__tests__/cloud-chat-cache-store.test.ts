@@ -349,6 +349,43 @@ describe("main-owned cloud chat SQLite cache", () => {
     expect([...first.items, ...last.items].every(item => !("owner" in item))).toBe(true);
   });
 
+  it("closing a store never releases a live peer connection's lock on the same file (second-process exclusion)", async () => {
+    const root = directory(), file = path.join(root, "cloud-cache.db"), first = open(root);
+    first.putRange(key, range());
+    // A second store on the same file closes while the first stays open and in use.
+    const second = open(root);
+    expect(second.metadata(key)?.revision).toBe(1);
+    second.close();
+    expect(first.metadata(key)?.revision).toBe(1);
+    // Leaving WAL needs exclusive access to the main file; a live connection in this process must still block it.
+    const child = await promisify(execFile)(process.execPath, ["-e", `
+      const Database=require('better-sqlite3');const db=new Database(process.argv[1],{timeout:0});
+      try{const mode=db.pragma('journal_mode=DELETE',{simple:true});process.stdout.write(String(mode));}
+      catch(error){process.stdout.write(error.code==='SQLITE_BUSY'?'blocked':'unexpected');}
+      finally{db.close();}
+    `, file], { cwd: process.cwd() });
+    expect(["wal", "blocked"]).toContain(child.stdout);
+    expect(first.metadata(key)?.revision).toBe(1);
+  });
+
+  it("binds SQLite to the held original: a pathname swapped only during the native open is refused", () => {
+    const root = directory(), file = path.join(root, "cloud-cache.db"), first = open(root);
+    first.putRange(key, range()); first.close();
+    const substitute = path.join(root, "substitute.db"), parked = path.join(root, "parked.db");
+    new Database(substitute).close();
+    let swapped = false;
+    const store = open(root, { openNative: filename => {
+      // The replacement window is open exactly during the native open, then the original is restored.
+      fs.renameSync(file, parked); fs.renameSync(substitute, file); swapped = true;
+      try { return new Database(filename, { timeout: 500 }); }
+      finally { fs.renameSync(file, substitute); fs.renameSync(parked, file); }
+    } });
+    expect(() => store.metadata(key)).toThrow();
+    expect(swapped).toBe(true);
+    // An honest reopen still reads the original.
+    expect(open(root).metadata(key)?.revision).toBe(1);
+  });
+
   it("keeps the custody descriptor open while SQLite owns a process lock", async () => {
     const root = directory(), file = path.join(root, "cloud-cache.db"), first = open(root);
     first.putRange(key, range()); first.close();
