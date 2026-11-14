@@ -71,8 +71,9 @@ export class CloudChatCacheService {
     }
   }
   unbind(window: number, lease: string): void { this.binding(window, lease); this.release(window); }
-  sessionChanged(): void { for (const window of this.bindings.keys()) this.release(window); }
+  sessionChanged(): void { this.retirements++; for (const window of this.bindings.keys()) this.release(window); }
   retireOwner(owner: string, session?: string): void {
+    this.retirements++;
     for (const [window, binding] of this.bindings) if (binding.owner === owner &&
       (session === undefined || binding.session === session)) this.release(window);
     this.deps.store.retireOwner(owner, session);
@@ -101,8 +102,19 @@ export class CloudChatCacheService {
     for (const flights of [this.flights, this.pendingFlights, this.beforeFlights]) for (const [id, flight] of flights)
       if (!keep(flight)) { flight.stop.abort(); flights.delete(id); }
   }
+  /** Advances on any forget of a target or owner-wide retirement; queued continuations compare it. */
+  private readonly forgotten = new Map<string, number>();
+  private retirements = 0;
+  private generation(id: string): string { return `${this.retirements}:${this.forgotten.get(id) ?? 0}`; }
+  private forgetGeneration(id: string): void {
+    this.forgotten.delete(id); this.forgotten.set(id, (this.forgotten.get(id) ?? 0) + 1);
+    // Evicting a record could reset a target's generation, so an eviction cancels every queued continuation instead.
+    while (this.forgotten.size > 4096) { this.forgotten.delete(this.forgotten.keys().next().value!); this.retirements++; }
+  }
+
   forget(window: number, lease: string, target: CloudCacheTarget): void {
     const key = this.key(this.binding(window, lease), target), id = cloudCacheKey(key);
+    this.forgetGeneration(id);
     this.cancel(flight => cloudCacheKey(flight.key) !== id);
     this.deps.store.forget(key);
   }
@@ -131,9 +143,17 @@ export class CloudChatCacheService {
     // A newer known revision never completes from an observation started for older metadata, and never cancels it:
     // it waits for that flight, then continues from what it stored.
     try {
-      const previous = this.flights.get(cloudCacheKey(this.key(this.binding(window, lease), target)));
-      if (known && previous && previous.variant !== variant && previous.variant.startsWith(`${limit}:known:`))
-        return previous.result.then(() => undefined, () => undefined).then(() => this.refresh(window, lease, target, limit, known));
+      const id = cloudCacheKey(this.key(this.binding(window, lease), target));
+      const previous = this.flights.get(id);
+      if (known && previous && previous.variant !== variant && previous.variant.startsWith(`${limit}:known:`)) {
+        // The queued continuation belongs to its target: a forget (or owner/session change) while it waits cancels it,
+        // so it can never recreate what was just forgotten.
+        const generation = this.generation(id);
+        return previous.result.then(() => undefined, () => undefined).then(() => {
+          if (this.generation(id) !== generation) throw changed();
+          return this.refresh(window, lease, target, limit, known);
+        });
+      }
     } catch (error) { return Promise.reject(error); }
     return this.start(window, lease, target, this.flights, variant, (key, context) => this.update(key, limit, context, !!known));
   }
@@ -188,8 +208,10 @@ export class CloudChatCacheService {
       current();
       if (error instanceof CloudCacheAccessLost) {
         if (error.scope === "chat") {
+          this.forgetGeneration(cloudCacheKey(key));
           this.cancel(other => cloudCacheKey(other.key) !== cloudCacheKey(key)); this.deps.store.forget(key);
         } else {
+          this.retirements++;
           this.cancel(other => other.key.owner !== key.owner || other.key.organizationId !== key.organizationId || other.key.workspaceId !== key.workspaceId);
           this.deps.store.forgetWorkspace(key.owner, key.organizationId, key.workspaceId);
         }

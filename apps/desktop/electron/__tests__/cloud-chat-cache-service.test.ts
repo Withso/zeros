@@ -43,6 +43,23 @@ function fixture() {
 }
 
 describe("main cloud cache admission and refresh", () => {
+  it("a queued newer-revision refresh never recreates a chat forgotten while it waited", async () => {
+    const f = fixture(), key = { owner, ...target };
+    f.store.putRange(key, page(1));
+    const first = held<void>(), started = held<void>();
+    vi.mocked(f.source.since).mockImplementationOnce(async () => { started.resolve(); await first.promise;
+      return { resync: false, fromRevision: 1, revision: 2, messageCount: 2, rows: [row(1)] }; });
+    const older = f.service.refresh(1, f.binding, target, 200, { revision: 2, messageCount: 2 });
+    await started.promise;
+    const newer = f.service.refresh(1, f.binding, target, 200, { revision: 3, messageCount: 3 });
+    f.service.forget(1, f.binding, target);
+    first.resolve();
+    await expect(older).rejects.toThrow("changed");
+    await expect(newer).rejects.toThrow("changed");
+    expect(f.source.since).toHaveBeenCalledTimes(1);
+    expect(f.store.metadata(key)).toBeNull();
+  });
+
   it("a refresh for a newer known revision never joins a flight started for an older one", async () => {
     const f = fixture(), key = { owner, ...target };
     f.store.putRange(key, page(1));
