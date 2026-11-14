@@ -40,6 +40,7 @@ import {
   captureHistoryPageScrollPosition,
   prependHistoryPage,
   scheduleHistoryPageScrollRestore,
+  bottomTrimPatch,
 } from "./transcript-paging";
 import { useOpenPrUrlInReviewTab } from "@/renderer/shell/pr/use-open-review-tab";
 import { warmWorkspaceFiles } from "@/renderer/shell/workspace-files-cache";
@@ -300,7 +301,6 @@ import {
   type Checkpoint,
 } from "./checkpoint-rail";
 import {
-  MAX_MESSAGES_PER_CHAT,
   usePendingLocalTurnId,
   useSessionsStore,
 } from "./sessions-store";
@@ -2637,13 +2637,7 @@ function AgentChatBody({
     if (!chatId || !isAtBottom) return;
     const slot = useSessionsStore.getState().sessions[chatId];
     if (!slot?.historyExpanded) return;
-    useSessionsStore.getState().patchSession(chatId, {
-      historyExpanded: false,
-      messages:
-        slot.messages.length > MAX_MESSAGES_PER_CHAT
-          ? slot.messages.slice(-MAX_MESSAGES_PER_CHAT)
-          : slot.messages,
-    });
+    useSessionsStore.getState().patchSession(chatId, bottomTrimPatch(slot));
   }, [chatId, isAtBottom]);
 
   // Older builds persisted mode_switch rows; drop them before grouping so they

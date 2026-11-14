@@ -1,6 +1,7 @@
 import { CHAT_SCROLL_NAVIGATION_EVENT } from "./chat-scroll-navigation";
 import type { AgentMessage, AgentSessionState } from "./use-agent-session";
 import { reconcileHistoryMessages } from "./history-message-identity";
+import { MAX_MESSAGES_PER_CHAT } from "./sessions-store";
 import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
 import {
   resolveAnchorTop,
@@ -25,6 +26,18 @@ export function canApplyHistoryPage(
     current.sessionId === before.sessionId &&
     current.messages[0]?.id === before.messages[0]?.id,
   );
+}
+
+/** Back at the bottom: trim to the live window again and clear historyExpanded. A message patch defaults a slot to
+ * resident, so a non-resident (cached) slot passes its provenance through and stays cached until confirmed. */
+export function bottomTrimPatch(slot: AgentSessionState): Partial<AgentSessionState> {
+  return {
+    historyExpanded: false,
+    messages: slot.messages.length > MAX_MESSAGES_PER_CHAT ? slot.messages.slice(-MAX_MESSAGES_PER_CHAT) : slot.messages,
+    ...(slot.transcriptState !== "resident" ? {
+      transcriptState: slot.transcriptState, transcriptPresentation: slot.transcriptPresentation, transcriptDirty: slot.transcriptDirty,
+    } : {}),
+  };
 }
 
 /** The current tail owns its rows and references, including renderer-only
