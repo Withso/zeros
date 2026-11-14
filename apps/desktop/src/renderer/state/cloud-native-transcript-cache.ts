@@ -1,5 +1,5 @@
 import { cloudScopedId, cloudWorkspaceKey, parseCloudScopedId } from "../platform/bridge/cloud-workspace-key";
-import type { CloudCacheTarget } from "../../../shared/cloud-chat-cache";
+import type { CloudCacheKnown, CloudCacheTarget } from "../../../shared/cloud-chat-cache";
 import type { NativeCloudChatCacheClient, NativeCloudCacheSnapshot } from "../platform/cloud-chat-cache-client";
 import type { LocalTranscriptCache, LocalTranscriptWindow } from "./local-transcript-cache";
 
@@ -14,6 +14,8 @@ export function createNativeCloudTranscriptCache(
   Base: typeof LocalTranscriptCache,
   native: NativeCloudChatCacheClient,
   decode: (snapshot: NativeCloudCacheSnapshot, owner: string, epoch: number) => LocalTranscriptWindow | null,
+  /** The chat's revision from the confirmed chats.list snapshot: an unchanged chat revalidates with no read. */
+  known: (chatId: string) => Promise<CloudCacheKnown | undefined> = async () => undefined,
 ): LocalTranscriptCache {
   return new class extends Base {
     private nativeEpoch = -1;
@@ -35,7 +37,11 @@ export function createNativeCloudTranscriptCache(
         return;
       }
       const epoch = native.epoch;
-      const flight = native.refresh(key, 200).then(() => {
+      const flight = known(chatId).catch(() => undefined).then(revision => {
+        if (epoch !== native.epoch || this.warming.get(chatId) !== flight) return null;
+        return native.refresh(key, 200, revision);
+      }).then(refreshed => {
+        if (!refreshed || refreshed.cached) return;
         if (epoch === native.epoch && this.warming.get(chatId) === flight) return native.refreshPending(key);
       }).catch(() => {}).finally(() => {
         if (this.warming.get(chatId) !== flight) return;

@@ -1,4 +1,4 @@
-import { CloudCacheKnownSchema } from "../../../../shared/cloud-chat-cache";
+import { CloudCacheKnownSchema, type CloudCacheKnown } from "../../../../shared/cloud-chat-cache";
 import type { CloudHistoryReadOptions } from "../cloud-v2";
 import type { BridgeMessage } from "./messages";
 import { CloudWorkspaceReadOnlyError } from "../cloud-workspace-read-only";
@@ -538,6 +538,21 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     return { ...target, root, engineWorkspaceId: target.workspaceId };
   }
 
+  /** The scoped chat's historyCache for the local transcript cache (one chats.list per workspace, never per chat). */
+  async chatHistoryRevision(chatId: string): Promise<CloudCacheKnown | undefined> {
+    const target = parseCloudScopedId(chatId);
+    return target ? (await this.knownHistoryReady(target, "messages.window", { chatId }))?.known : undefined;
+  }
+
+  /** At launch a restored transcript can be read before its workspace's chats.list: join (or start) that one read
+   * so every chat of the workspace revalidates against it. A failed list read leaves the normal path. */
+  private async knownHistoryReady(target: CloudWorkspaceTarget, op: string, params: WireRecord): Promise<CloudHistoryReadOptions | undefined> {
+    if (op !== "messages.window" || params.before !== undefined || typeof params.chatId !== "string" || !this.routing.readHistory) return undefined;
+    if (!this.history.peekSnapshot(this.historyKey(target, "chats.list", {})).data)
+      await this.warmHistorySnapshot(target).catch(() => undefined);
+    return this.knownHistory(target, op, params);
+  }
+
   /** The chat's historyCache from the confirmed chats.list snapshot: the local transcript cache answers an unchanged
    * chat without a read and continues a changed one once. Absent (N-1 control plane, no snapshot): the normal read. */
   private knownHistory(target: CloudWorkspaceTarget, op: string, params: WireRecord): CloudHistoryReadOptions | undefined {
@@ -588,7 +603,7 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
         // Translate exactly as for the worker: the mirror holds its native rows.
         const scope = this.mirrorScope(target);
         const native = record(cloudOutgoing(scope, { type: "WORKSPACE_REQUEST", op, params }).params);
-        const known = this.knownHistory(target, op, params);
+        const known = await this.knownHistoryReady(target, op, params);
         const reply = await (known ? this.routing.readHistory!(target, op, native, known) : this.routing.readHistory!(target, op, native));
         result = record(cloudIncoming(scope, { type: "WORKSPACE_RESPONSE", op, result: reply }).result);
       }

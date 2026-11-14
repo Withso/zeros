@@ -25,6 +25,8 @@
 // ──────────────────────────────────────────────────────────
 
 import { cloudScopedId, cloudWorkspaceKey, isCloudWorkspace, parseCloudScopedId } from "../platform/bridge/cloud-workspace-key";
+import { getActiveBridge } from "../platform/bridge/active-bridge";
+import { WorkspaceRuntimeClient } from "../platform/bridge/workspace-runtime-client";
 import {
   createIndexedDbTranscriptStore,
   type LocalTranscriptIndexEntry,
@@ -981,7 +983,8 @@ export class LocalTranscriptCache {
 
 /** The renderer's single Local transcript cache. */
 export const localTranscriptCache = new LocalTranscriptCache();
-export const cloudTranscriptCache = createNativeCloudTranscriptCache(LocalTranscriptCache, nativeCloudChatCache, decodeNativeCloudTranscriptWindow);
+export const cloudTranscriptCache = createNativeCloudTranscriptCache(LocalTranscriptCache, nativeCloudChatCache, decodeNativeCloudTranscriptWindow,
+  async chatId => { const bridge = getActiveBridge(); return bridge instanceof WorkspaceRuntimeClient ? bridge.chatHistoryRevision(chatId) : undefined; });
 
 export function transcriptCacheFor(chatId: string, folder?: string | null): LocalTranscriptCache | null {
   if (isCloudTranscriptChat(chatId, folder ?? undefined)) return cloudTranscriptCache;

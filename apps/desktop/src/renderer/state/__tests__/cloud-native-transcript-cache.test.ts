@@ -13,7 +13,7 @@ const page = { revision: 6, messageCount: 1, fromIndex: 0, toIndex: 1, rows: [{ 
 const ok = (result: unknown) => ({ ok: true, result });
 const caches: Array<LocalTranscriptCache> = [];
 afterEach(() => { for (const cache of caches.splice(0)) cache.resetForTesting(); });
-function fixture() {
+function fixture(known?: (chatId: string) => Promise<{ revision: number; messageCount: number } | undefined>) {
   const invoke = vi.fn(async (input: CloudCacheRequest): Promise<unknown> => {
     if (input.op === "bind") return ok({ lease });
     if (input.op === "read") return ok({ range: page, pending: null });
@@ -24,12 +24,24 @@ function fixture() {
     messages: snapshot.range.rows.map(row => JSON.parse(row.payload)), leadingPrompt: null, source: "control-plane",
     cloudCache: { owner, epoch, revision: snapshot.range.revision },
   } : null;
-  const cache = createNativeCloudTranscriptCache(LocalTranscriptCache, native, decode);
+  const cache = createNativeCloudTranscriptCache(LocalTranscriptCache, native, decode, known);
   cache.bindOwner(owner, false); caches.push(cache);
   return { cache, native, invoke };
 }
 
 describe("cloud native disk and renderer memory tiers", () => {
+  it("revalidates an unchanged chat with its chats.list revision and no receipts read", async () => {
+    for (const cached of [true, false]) {
+      const f = fixture(async id => id === chatId ? { revision: 6, messageCount: 1 } : undefined);
+      f.invoke.mockImplementation(async input => input.op === "bind" ? ok({ lease }) : input.op === "read" ? ok({ range: page, pending: null }) :
+        input.op === "refresh" ? ok({ range: page, replaced: false, ...(cached ? { cached: true } : {}) }) : ok(null));
+      await f.cache.read(chatId);
+      await vi.waitFor(() => expect(f.invoke).toHaveBeenCalledWith(expect.objectContaining({ op: "refresh", known: { revision: 6, messageCount: 1 } })));
+      await new Promise(resolve => setTimeout(resolve, 0));
+      expect(f.invoke.mock.calls.some(([input]) => input.op === "refresh-pending")).toBe(!cached);
+      f.cache.resetForTesting();
+    }
+  });
   it("paints a native cached tail while its passive refresh is still held", async () => {
     const f = fixture();
     let release!: (value: unknown) => void;

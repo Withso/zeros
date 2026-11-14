@@ -27,4 +27,25 @@ describe("mirror transcript reads carry the chats.list revision", () => {
       expect(options("fresh", 3)).toBeUndefined();
     } finally { client.dispose(); }
   });
+
+  it("restored transcripts read before any chats.list join one list read for their workspace", async () => {
+    let release!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    const readHistory = vi.fn(async (_target: unknown, op: string, _params?: Record<string, unknown>, _options?: unknown) => {
+      if (op !== "chats.list") return { messages: [] };
+      await held;
+      return { chats: ["a", "b", "c"].map(id => chat(id, { revision: 1, messageCount: 1 })) };
+    });
+    const client = new WorkspaceRuntimeClient({ open: vi.fn(), readHistory, historyRoot: () => "/home/user/Owner/repo", workspaces: () => [] });
+    try {
+      const reads = ["a", "b", "c"].map(id => client.request({ type: "WORKSPACE_REQUEST", op: "messages.window",
+        params: { chatId: cloudScopedId(target, id), limit: 200 } }));
+      await new Promise(resolve => setTimeout(resolve, 0));
+      expect(readHistory.mock.calls.filter(([, op]) => op === "messages.window")).toEqual([]);
+      release(); await Promise.all(reads);
+      expect(readHistory.mock.calls.filter(([, op]) => op === "chats.list")).toHaveLength(1);
+      expect(readHistory.mock.calls.filter(([, op]) => op === "messages.window").map(call => call[3]))
+        .toEqual(Array(3).fill({ known: { revision: 1, messageCount: 1 } }));
+    } finally { client.dispose(); }
+  });
 });
