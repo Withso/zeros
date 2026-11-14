@@ -408,6 +408,10 @@ function exactEventStream(response: Response): boolean {
   );
 }
 
+/** The account stream's current catalog-events-v1 state, for a renderer that subscribes after it was announced. */
+let catalogEventsNow = false;
+export function cloudCatalogStreamState(): { catalogEvents: boolean } { return { catalogEvents: catalogEventsNow }; }
+
 export class WorkOSDesktopSecurityMonitor {
   private readonly fetchImpl: typeof fetch;
   private readonly now: () => number;
@@ -704,6 +708,7 @@ export class WorkOSDesktopSecurityMonitor {
 
   private catalogEvents = false;
   private setCatalogEvents(on: boolean): void {
+    catalogEventsNow = on;
     if (on === this.catalogEvents) return;
     this.catalogEvents = on;
     this.options.emit("cloud-catalog-stream", { catalogEvents: on });

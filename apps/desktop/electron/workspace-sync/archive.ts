@@ -9,10 +9,13 @@ export const ArchiveWorkspaceReplySchema = z.object({ workspace: z.object({
 }) });
 
 const NOT_VISIBLE_MS = 5 * 60_000, MAX_NOT_VISIBLE = 10_000;
+/** Idle is quiet: a workspace seen unarchived is read again at most this often, however many device hints arrive. */
+const NOT_ARCHIVED_MS = 5 * 60_000;
 
 export class CloudContextArchiver {
   private backoffOwner: string | null = null;
   private readonly notVisibleUntil = new Map<string, number>();
+  private readonly notArchivedUntil = new Map<string, number>();
   constructor(private readonly deps: {
     ownerKey(): string | null;
     now?(): number;
@@ -21,15 +24,18 @@ export class CloudContextArchiver {
     channel: string;
   }) {}
 
-  async inspect(workspaceId: string, isCurrent = () => true): Promise<boolean> {
+  /** `force`: read now (the workspace left this Mac's connections); otherwise an unarchived answer is reused for 5 min. */
+  async inspect(workspaceId: string, isCurrent = () => true, options: { force?: boolean } = {}): Promise<boolean> {
     const owner = this.deps.ownerKey();
-    if (owner !== this.backoffOwner) { this.notVisibleUntil.clear(); this.backoffOwner = owner; }
+    if (owner !== this.backoffOwner) { this.notVisibleUntil.clear(); this.notArchivedUntil.clear(); this.backoffOwner = owner; }
     if (!owner) throw new Error("Context archive owner is unavailable.");
     const current = () => this.deps.ownerKey() === owner && isCurrent();
     if (!current()) throw new Error("Context archive owner changed.");
     const now = () => this.deps.now?.() ?? Date.now();
     if ((this.notVisibleUntil.get(workspaceId) ?? Number.NEGATIVE_INFINITY) > now()) return false;
     this.notVisibleUntil.delete(workspaceId);
+    if (!options.force && (this.notArchivedUntil.get(workspaceId) ?? Number.NEGATIVE_INFINITY) > now()) return false;
+    this.notArchivedUntil.delete(workspaceId);
     let reply: z.infer<typeof ArchiveWorkspaceReplySchema>;
     try { reply = await this.deps.read(workspaceId); }
     catch (error) {
@@ -45,7 +51,11 @@ export class CloudContextArchiver {
     const workspace = reply.workspace;
     if (workspace.id !== workspaceId) throw new Error("Context archive workspace changed.");
     // Sleep and connection expiry are not archive intent.
-    if (!workspace.archivedAt) return false;
+    if (!workspace.archivedAt) {
+      if (this.notArchivedUntil.size >= MAX_NOT_VISIBLE) this.notArchivedUntil.delete(this.notArchivedUntil.keys().next().value!);
+      this.notArchivedUntil.set(workspaceId, now() + NOT_ARCHIVED_MS);
+      return false;
+    }
     await this.deps.manager.archive(workspaceId, (sourceRoot, identity, stillCurrent) => archiveContext({
       sourceRoot, channelRoot: this.deps.channel, repository: workspace.repository.split("/")[1]!,
       workspace: workspace.number ? `w-${workspace.number}` : workspace.name,

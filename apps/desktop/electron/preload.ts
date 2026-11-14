@@ -74,6 +74,7 @@ const ALLOWED_COMMANDS = new Set<string>([
   "auth_sign_out_everywhere",
   "auth_start_signin",
   "auth_switch_account",
+  "cloud_catalog_stream_state",
   "cloud_workspace_capability",
   "detect_open_apps",
   "native_app_icons",

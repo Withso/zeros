@@ -11,7 +11,9 @@ type Listen = (name: string, handler: (payload: unknown) => void) => Promise<() 
  * arrive while a read is in flight give one trailing read this long after it ends. */
 export const CATALOG_HINT_COALESCE_MS = 1_000;
 
-export function watchCloudCatalogEvents(listen: Listen, on: { refresh(): Promise<void> | void; modeChanged(): void }): { active(): boolean; stop(): void } {
+export function watchCloudCatalogEvents(listen: Listen, on: { refresh(): Promise<void> | void; modeChanged(): void },
+  /** The current state, asked once: main announces it only on change, so a renderer that subscribed later would never learn it. */
+  query?: () => Promise<{ catalogEvents?: unknown }>): { active(): boolean; stop(): void } {
   let active = false, stopped = false;
   const offs: Array<() => void> = [];
   let timer: ReturnType<typeof setTimeout> | undefined, reading = false, again = false;
@@ -33,13 +35,17 @@ export function watchCloudCatalogEvents(listen: Listen, on: { refresh(): Promise
   const subscribe = (name: string, handler: (payload: unknown) => void) => {
     void listen(name, handler).then(off => { if (stopped) off(); else offs.push(off); }, () => {});
   };
-  subscribe("cloud-catalog-stream", payload => {
+  let announced = false;
+  const apply = (payload: unknown) => {
     const next = (payload as { catalogEvents?: unknown } | null)?.catalogEvents === true;
     if (next === active) return;
     active = next;
     on.modeChanged();
     if (active) now();
-  });
+  };
+  subscribe("cloud-catalog-stream", payload => { announced = true; apply(payload); });
+  // An announcement that arrives first is newer than the answer; a failed query changes nothing.
+  void query?.().then(state => { if (!stopped && !announced) apply(state); }, () => {});
   subscribe("cloud-catalog-changed", payload => {
     const change = payload as { organizationId?: unknown; workspaceId?: unknown } | null;
     if (active && typeof change?.organizationId === "string" && typeof change.workspaceId === "string") hint();

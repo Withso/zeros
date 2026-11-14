@@ -210,3 +210,25 @@ describe("SyncManager after this person lost access (team sharing 3A)", () => {
     expect(f.manager.folderFor(WS)).toBe("/real/f");
   });
 });
+
+describe("idle is quiet: a paused run tells the follower once", () => {
+  it("reports unavailable when a run becomes paused or not connected, not on every retry", async () => {
+    let unavailable = 0, attempts = 0, kind: "paused" | "not_connected" = "paused";
+    const manager = new SyncManager({
+      settings: { get: () => undefined, set: () => {} },
+      identity: () => ({ accountId: "acct-a", deviceId: "22222222-2222-4222-8222-222222222222" }),
+      connect: async () => { attempts++; throw new SyncConnectError(kind); },
+      setSyncing: async () => {}, publish: () => {}, log: () => {}, unavailable: () => { unavailable++; },
+      open: (async (folder: string) => ({ root: folder, pull: async () => ({ state: "in_sync", problems: [], skipped: [] }) })) as unknown as typeof SyncEngine.open,
+      wait: () => new Promise<void>(resolve => setTimeout(resolve, 1)),
+    });
+    await manager.enable("33333333-3333-4333-8333-333333333333", "/tmp/zeros-sync-quiet");
+    await vi.waitFor(() => expect(attempts).toBeGreaterThan(20));
+    expect(unavailable).toBe(1);
+    kind = "not_connected";
+    const before = attempts;
+    await vi.waitFor(() => expect(attempts).toBeGreaterThan(before + 20));
+    expect(unavailable).toBe(2);
+    await manager.stop();
+  });
+});

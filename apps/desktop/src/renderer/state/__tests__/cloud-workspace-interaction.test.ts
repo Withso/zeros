@@ -12,7 +12,7 @@ beforeAll(async () => {
   const root = path.resolve("apps/desktop/src/renderer");
   const mocks: Record<string, string> = {
     "platform/runtime": `export const isLocalDevelopment = () => true; export const isNativeRuntime = () => false;
-      export const isExpectedElectron = () => false; export const isElectron = () => false; export const nativeInvoke = async () => null; export const nativeListen = () => () => {};`,
+      export const isExpectedElectron = () => false; export const isElectron = () => false; export const nativeInvoke = async () => null; export const nativeListen = async () => () => {};`,
     "features/auth/auth-token": `export const getAuthAccessToken = async () => null;`,
     "features/auth/auth-store": `export const getSession = async () => null; export const getStoredAuthUser = () => null;
       export const onAuthStateChange = () => () => {}; export const onStoredIdentityChange = () => () => {};`,

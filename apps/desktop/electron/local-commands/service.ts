@@ -239,8 +239,11 @@ export class LocalCommandService {
       if (this.heartbeat) { clearInterval(this.heartbeat); this.heartbeat = undefined; }
     }
     if (event.event === "ready" || event.event === "presence") {
+      const was = this.presence.presenceRequired;
       this.setPresence(event.event === "ready" ? event.data.presence : event.data);
-      this.deps.syncHint?.();
+      // Idle is quiet: sync re-reads its connections after a (re)connect or when presence actually flips, never on a
+      // presence frame that only extends reachableUntil.
+      if (event.event === "ready" || this.presence.presenceRequired !== was) this.deps.syncHint?.();
     }
     else if (event.event === "heartbeat") this.setPresence(event.data.presence);
     // notify-user-v1 shares this channel; it never touches the journal or approvals.

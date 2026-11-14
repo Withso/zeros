@@ -82,7 +82,7 @@ export function installWorkspaceSync(local: { enabled: boolean; control: DeviceC
     folderFor: workspaceId => manager.folderFor(workspaceId),
     enable: (workspaceId, folder) => manager.enable(workspaceId, folder),
     disable: workspaceId => manager.disable(workspaceId),
-    archive: (workspaceId, isCurrent) => archives.inspect(workspaceId, isCurrent),
+    archive: (workspaceId, isCurrent, options) => archives.inspect(workspaceId, isCurrent, options),
     identityKey: ownerKey,
     mkdir: folder => mkdir(folder, { recursive: true, mode: 0o755 }).then(() => {}),
     channel: syncChannelFolder(zerosWorkspacesRoot()), now: Date.now, log: line => console.info(`[workspace-sync] ${line}`),

@@ -59,7 +59,9 @@ describe("cloud archive through the passive workspace read and native sync manag
       expect(await f.archiver.inspect(workspaceId)).toBe(false);
       expect(f.manager.folderFor(workspaceId)).toBe(f.folder);
       f.mark();
-      expect(await f.archiver.inspect(workspaceId)).toBe(true);
+      // Idle-is-quiet: a workspace seen unarchived is not re-read on every device hint; a forced check (it left this
+      // Mac's connections) reads at once.
+      expect(await f.archiver.inspect(workspaceId, () => true, { force: true })).toBe(true);
       expect(f.manager.folderFor(workspaceId)).toBeUndefined();
       const destination = path.join(f.channel, "archived-contexts", "project", "w-7");
       expect(await readFile(path.join(destination, "notes.md"), "utf8")).toBe("cloud notes");
@@ -79,6 +81,18 @@ describe("cloud archive through the passive workspace read and native sync manag
       expect(f.requests).toEqual([{ method: "GET", path: `/v1/cloud-v2/workspaces/${workspaceId}` }]);
       expect(await readFile(path.join(f.channel, "archived-contexts", "project", "w-7", "notes.md"), "utf8")).toBe("cloud notes");
       expect(f.manager.folderFor(workspaceId)).toBeUndefined();
+    } finally { await f.manager.stop(); }
+  });
+
+  it("re-reads a workspace seen unarchived at most every five minutes, however many hints arrive", async () => {
+    const f = await fixture();
+    try {
+      expect(await f.archiver.inspect(workspaceId)).toBe(false);
+      for (let hint = 0; hint < 11; hint++) { f.advance(25_000); expect(await f.archiver.inspect(workspaceId)).toBe(false); }
+      expect(f.requests).toHaveLength(1);
+      f.mark(); f.advance(25_000);
+      expect(await f.archiver.inspect(workspaceId)).toBe(true);
+      expect(f.requests).toHaveLength(2);
     } finally { await f.manager.stop(); }
   });
 

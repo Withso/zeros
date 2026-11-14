@@ -17,7 +17,7 @@ export interface SyncWantedDeps {
   folderFor(workspaceId: string): string | undefined;
   enable(workspaceId: string, folder: string): Promise<void>;
   disable(workspaceId: string): Promise<void>;
-  archive?(workspaceId: string, isCurrent: () => boolean): Promise<boolean>;
+  archive?(workspaceId: string, isCurrent: () => boolean, options?: { force?: boolean }): Promise<boolean>;
   identityKey?(): string | null;
   /** The app's channel folder (12.zz). */
   channel: string;
@@ -118,7 +118,8 @@ export class SyncWantedFollower {
     for (const workspaceId of running) {
       if (listed.has(workspaceId) || !unchanged(workspaceId)) continue;
       try {
-        if (await this.deps.archive?.(workspaceId, () => unchanged(workspaceId))) continue;
+        // It left this Mac's connections: check archive intent now rather than after the five-minute reuse.
+        if (await this.deps.archive?.(workspaceId, () => unchanged(workspaceId), { force: true })) continue;
         if (!unchanged(workspaceId)) continue;
         await this.deps.disable(workspaceId);
         this.deps.log(`wanted stop workspace=${workspaceId.slice(0, 8)} reason=not_connected`);

@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import { isFeatureEnabled } from "../config/release-channel";
-import { isLocalDevelopment, nativeListen } from "../platform/runtime";
+import { isLocalDevelopment, nativeInvoke, nativeListen } from "../platform/runtime";
 import { cloudWorkspaceCapability } from "../platform/cloud-capability";
 import { getActiveBridge } from "../platform/bridge/active-bridge";
 import { WorkspaceRuntimeClient } from "../platform/bridge/workspace-runtime-client";
@@ -60,7 +60,8 @@ function ActiveCloudWorkspaceLifecycle() {
     let authVersion = 0, lastRefresh: number | undefined, refreshing = false;
     let timer: number | undefined, refreshAgain = false, flight: Promise<void> | undefined;
     // R1 catalog-events-v1: the account stream's events drive refreshes; the timer is then a 60 s fallback.
-    const catalogEvents = watchCloudCatalogEvents(nativeListen, { refresh: () => refresh(), modeChanged: () => schedule() });
+    const catalogEvents = watchCloudCatalogEvents(nativeListen, { refresh: () => refresh(), modeChanged: () => schedule() },
+      () => nativeInvoke<{ catalogEvents?: unknown }>("cloud_catalog_stream_state", {}));
     const pruneChats = (confirmedRemovals: readonly string[] = []) => {
       const state = useWorkspaceStore.getState();
       const removed = new Set(confirmedRemovals);

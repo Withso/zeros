@@ -293,3 +293,24 @@ describe("R1 device-liveness-v1", () => {
     await s.service.stop();
   });
 });
+
+describe("idle is quiet: the device stream hints sync only when something it reads changed", () => {
+  it("hints on ready and on a presenceRequired flip, never on a presence frame that only extends reachableUntil", async () => {
+    const root = await mkdtemp(join(tmpdir(), "local-command-hints-")); directories.push(root);
+    const h = harness({ journalRoot: root });
+    let hints = 0;
+    const service = new LocalCommandService({ ...h.deps, syncHint: () => { hints++; } });
+    await service.start();
+    await vi.waitFor(() => expect(h.calls).toContain("register"));
+    const presence = (presenceRequired: boolean, at: number) => ({ event: "presence" as const, data: { presenceRequired, reachableUntil: new Date(at).toISOString() } });
+    h.push({ event: "ready", data: { deviceId, registrationId: device.registrationId, instanceId: device.instanceId, presence: { presenceRequired: false, reachableUntil: null }, heartbeatIntervalMs: 25_000 } });
+    await vi.waitFor(() => expect(hints).toBe(1));
+    for (let i = 1; i <= 5; i++) h.push(presence(false, 1_000 * i));
+    h.push(presence(true, 10_000));
+    await vi.waitFor(() => expect(hints).toBe(2));
+    for (let i = 11; i <= 15; i++) h.push(presence(true, 1_000 * i));
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(hints).toBe(2);
+    await service.stop();
+  });
+});

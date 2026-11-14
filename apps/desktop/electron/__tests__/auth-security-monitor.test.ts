@@ -255,3 +255,17 @@ describe("R1 catalog-events-v1 on the account events stream", () => {
     expect(cloudCatalogChange({ ...base, organizationId: null, payload: { resource: "cloud_workspace", workspaceId: "ws", change: "document" } })).toBeNull();
   });
 });
+
+describe("R1 catalog-events-v1 current state", () => {
+  it("reports the stream's current catalog-events state to a renderer that subscribes late", async () => {
+    const { cloudCatalogStreamState } = await import("../auth-security-monitor");
+    const emit = vi.fn();
+    const monitor = new WorkOSDesktopSecurityMonitor({ baseUrl: "https://api.example.test", connectStreams: false, emit } as never);
+    expect(cloudCatalogStreamState()).toEqual({ catalogEvents: false });
+    (monitor as unknown as { setCatalogEvents(on: boolean): void }).setCatalogEvents(true);
+    expect(cloudCatalogStreamState()).toEqual({ catalogEvents: true });
+    expect(emit).toHaveBeenCalledWith("cloud-catalog-stream", { catalogEvents: true });
+    (monitor as unknown as { setCatalogEvents(on: boolean): void }).setCatalogEvents(false);
+    expect(cloudCatalogStreamState()).toEqual({ catalogEvents: false });
+  });
+});

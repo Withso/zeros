@@ -139,6 +139,9 @@ export class SyncManager {
     let connects = 0, lastState = "", unreachable = 0;
     // Paused and error lines only when they change, so a minute's retry is not a log line.
     const note = (state: string, reason: string) => { const key = `${state}:${reason}`; if (key !== lastState) { lastState = key; this.log(`${state} workspace=${id} reason=${reason}`); } };
+    // Idle is quiet: the follower re-reads this Mac's connections when a run BECOMES unavailable, not on every retry.
+    let unavailable = "";
+    const becameUnavailable = (reason: string) => { if (reason !== unavailable) { unavailable = reason; this.deps.unavailable?.(); } };
     const stop = new AbortController();
     let wake!: () => void;
     const run: Run = { stop, wake: () => wake(), wakePromise: Promise.resolve(), status: { workspaceId, state: "syncing", problems: 0 }, done: Promise.resolve() };
@@ -167,7 +170,7 @@ export class SyncManager {
           const opened = connection;
           stop.signal.addEventListener("abort", () => opened.close(), { once: true });
           if (stop.signal.aborted) opened.close();
-          lastState = "";
+          lastState = ""; unavailable = "";
           let open = true;
           while (open && !stop.signal.aborted) {
             set({ state: "syncing", problems: run.status.problems });
@@ -187,14 +190,14 @@ export class SyncManager {
           }
         } catch (error) {
           if (stop.signal.aborted) break;
-          if (error instanceof SyncConnectError && error.kind === "paused") { note("paused", "workspace_stopped"); set({ state: "paused", problems: run.status.problems }); this.deps.unavailable?.(); await wait(PAUSED_MS); }
+          if (error instanceof SyncConnectError && error.kind === "paused") { note("paused", "workspace_stopped"); set({ state: "paused", problems: run.status.problems }); becameUnavailable("paused"); await wait(PAUSED_MS); }
           else if (error instanceof SyncConnectError && error.kind === "signed_out") { this.log(`stopped workspace=${id} reason=signed_out`); break; }
           // This person lost access: stop for good; the folder's files stay on this Mac.
           else if (error instanceof SyncConnectError && error.kind === "access_revoked") {
             this.log(`stopped workspace=${id} reason=access_revoked`); set({ state: "error", reason: "access_revoked", problems: 0 }); break;
           }
           else if (error instanceof SyncConnectError && error.kind === "update_required") { note("error", "update_required"); set({ state: "error", reason: "update_required", problems: 0 }); await wait(UPDATE_MS); }
-          else if (error instanceof SyncConnectError && error.kind === "not_connected") { note("error", "not_connected"); set({ state: "error", reason: "not_connected", problems: 0 }); this.deps.unavailable?.(); await wait(ERROR_MS); }
+          else if (error instanceof SyncConnectError && error.kind === "not_connected") { note("error", "not_connected"); set({ state: "error", reason: "not_connected", problems: 0 }); becameUnavailable("not_connected"); await wait(ERROR_MS); }
           else if (error instanceof SyncRootError) { note("error", `folder_${error.code}`); set({ state: "error", reason: `folder_${error.code}`, problems: 0 }); await wait(ERROR_MS); engine = undefined; }
           else if (error instanceof SyncConnectError) {
             // Running but unreachable (a failed dial, a closed socket, a timeout): its own words, a growing wait, then an error.
