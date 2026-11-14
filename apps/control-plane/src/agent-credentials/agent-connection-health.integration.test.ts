@@ -5,6 +5,7 @@ import { resetMigratedTestDatabase } from "../test-database.js";
 import { seedCredentialOwner } from "./test-fixtures.js";
 import { DatabaseCloudAgentCredentialService } from "./agent-credentials.js";
 import { syntheticCodexCache } from "./codex-auth-test-fixture.js";
+import { ingestWorkOSManagementEvent } from "../workos-sync-events.js";
 
 const suite=process.env.TEST_DATABASE_URL?describe:describe.skip;
 suite("selected organization account health observations",()=>{
@@ -83,13 +84,39 @@ suite("selected organization account health observations",()=>{
     expect((await read()).connections).toMatchObject([{connected:false,health:{status:"credential_changed",
       selectedCredentialRevision:1,credentialRevision:2,materialVersion:2,refresh:"unavailable"}}]);
   });
-  it("keeps organization consent and membership ahead of any credential health observation",async()=>{
+  it("keeps a selected credential ready across member revisions while enforcing its owner and organization",async()=>{
     const credential=await account();await select(credential.id);
     await pool.query("UPDATE organization_members SET authorization_revision=authorization_revision+1 WHERE org_id=$1 AND user_id=$2",[fixture.organizationId,fixture.userId]);
-    expect((await read()).connections).toMatchObject([{connected:false,health:{status:"consent_required",refresh:"unavailable"}}]);
+    expect((await read()).connections).toMatchObject([{connected:true,health:{status:"ready",refresh:"idle"}}]);
     const other=await seedCredentialOwner(pool);
     await expect(service.organizationConnections(other.userId,fixture.organizationId)).rejects.toMatchObject({status:404});
     await expect(service.organizationConnections(fixture.userId,other.organizationId)).rejects.toMatchObject({status:404});
+  });
+  it.each(["another member joins","another member leaves","the WorkOS membership ID converges"])("keeps the selected login ready when %s",async change=>{
+    const other=await seedCredentialOwner(pool),membershipId=`om_${randomUUID()}`;
+    await pool.query("UPDATE user_identities SET provider_sub='user_health_'||user_id::text WHERE user_id=ANY($1::uuid[])",[[fixture.userId,other.userId]]);
+    await pool.query("INSERT INTO workos_organization_links(organization_id,workos_organization_id,external_id,state) VALUES($1::uuid,'org_health',$1::text,'active')",[fixture.organizationId]);
+    const converges=change==="the WorkOS membership ID converges",userId=converges?fixture.userId:other.userId;
+    const deliver=async(event:string)=>{
+      const at=new Date().toISOString();
+      expect(await ingestWorkOSManagementEvent(pool,{id:`event_${randomUUID()}`,event,createdAt:at,data:{
+        id:membershipId,organizationId:"org_health",userId:`user_health_${userId}`,status:"active",
+        directoryManaged:!converges,role:{slug:converges?"owner":"member"},updatedAt:at,
+      }},"webhook")).toEqual({status:"applied"});
+    };
+    if(change==="another member leaves")await deliver("organization_membership.created");
+    const credential=await account();await select(credential.id);
+    const selection=async()=>(await pool.query("SELECT * FROM cloud_agent_organization_connections WHERE org_id=$1 AND owner_user_id=$2",[fixture.organizationId,fixture.userId])).rows;
+    const saved=await selection();
+    const revision=async()=>Number((await pool.query("SELECT authorization_revision FROM organizations WHERE id=$1",[fixture.organizationId])).rows[0].authorization_revision);
+    const before=await revision();
+    await deliver(change==="another member leaves"?"organization_membership.deleted":converges?"organization_membership.updated":"organization_membership.created");
+    expect(await revision()).toBeGreaterThan(before);
+    const members=(await pool.query("SELECT workos_membership_id,authorization_revision FROM organization_members WHERE org_id=$1 AND user_id=$2",[fixture.organizationId,userId])).rows;
+    if(change==="another member leaves")expect(members).toEqual([]);
+    else expect(members).toMatchObject([{workos_membership_id:membershipId,...(converges?{authorization_revision:"2"}:{})}]);
+    expect((await read()).connections).toMatchObject([{credentialId:credential.id,connected:true,health:{status:"ready",refresh:"idle"}}]);
+    expect(await selection()).toEqual(saved);
   });
   it("reports disconnection without retaining selected credential or refresh metadata",async()=>{
     const credential=await account();await select(credential.id);

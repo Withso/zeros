@@ -319,8 +319,16 @@ describe("selected cloud account health and reconnect", () => {
     expect(text(tree())).toContain("Account changed");
   });
 
+  it("never asks for permission or consent: an older control plane's consent_required reads as status unavailable", () => {
+    selectedCodex("consent_required");
+    expect(text(tree())).toContain("Status unavailable");
+    expect(text(tree())).not.toMatch(/permission|consent/i);
+    expect(text(tree())).not.toContain("Connected");
+    expect(action("Configure")).toBeDefined();
+    expect(f.request).not.toHaveBeenCalled();
+  });
+
   it.each([
-    ["consent_required", "Permission required", "Configure"],
     ["credential_changed", "Account changed", "Configure"],
     ["credential_unavailable", "Account unavailable", "Reconnect"],
   ] as const)("keeps %s as a closed observation with an explicit action", (status, label, actionLabel) => {

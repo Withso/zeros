@@ -6,7 +6,6 @@ export interface CloudAgentConnectionHealthRow {
   provider: string;
   credential_id: string | null;
   credential_revision: string | null;
-  consent_fingerprint: string;
   live_credential_revision: string | null;
   credential_kind: string | null;
   material_version: number | null;
@@ -19,7 +18,7 @@ export interface CloudAgentConnectionHealthRow {
   observed_at: Date;
 }
 
-export function cloudAgentConnectionHealth(row: CloudAgentConnectionHealthRow, consentFingerprint: string): CloudAgentConnectionHealth {
+export function cloudAgentConnectionHealth(row: CloudAgentConnectionHealthRow): CloudAgentConnectionHealth {
   const selected = row.credential_id !== null;
   const present = selected && row.live_credential_revision !== null && row.material_version !== null &&
     row.credential_kind?.startsWith(`${row.provider}-`) === true;
@@ -29,7 +28,6 @@ export function cloudAgentConnectionHealth(row: CloudAgentConnectionHealthRow, c
   // uses the existing thirty-second admission floor.
   const floor = row.credential_kind === "cursor-api-key" ? 60_000 : 30_000;
   const status: CloudAgentConnectionHealth["status"] = !selected ? "not_selected"
-    : row.consent_fingerprint !== consentFingerprint ? "consent_required"
     : !present ? "credential_unavailable"
     : row.live_credential_revision !== row.credential_revision ? "credential_changed"
     : remaining !== null && remaining <= 0 ? "expired"

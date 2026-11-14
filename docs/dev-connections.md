@@ -36,7 +36,7 @@ Provider revocation, expiry, and uncertain refresh outcomes can require reconnec
   membership in the explicitly configured Dev organization. No fixture, email,
   local user UUID, or backend identity assertion substitutes for this check.
 - The backend owns current product actor, model, workspace, compute and image
-  admission. The broker independently intersects current member consent with the
+  admission. The broker independently intersects the member's selected scopes with the
   requested model/repository. GitHub also checks the actual token's application
   and account plus current installation/repository and user permissions. A
   generation credential alone cannot mint a grant.
@@ -50,17 +50,26 @@ All tables below are in `dev_connections`; the checksummed migration ledger is
 | --- | --- |
 | `members` | Unique `(issuer, subject)`; local database UUIDs are not identity. |
 | `connections`, `connection_versions` | Member, provider kind/account/app scope, revision, material version, encrypted material and expiry. AES-GCM AAD binds all those identities and key version; only current ciphertext is retained. |
-| `organization_consents` | Stable WorkOS org, connection, model/repository/action allowlists, revision and revocation. |
-| `generations`, `bindings`, `generation_revocations` | Exact generation plus member, connection and consent revisions; bounded expiry, credential hash and key revision. Permanent archive tombstones also fence registrations that arrive late. |
+| `organization_consents` | Stable WorkOS org, connection, selected models and repository/action scopes, revision and revocation. The table name is a compatibility contract. |
+| `generations`, `bindings`, `generation_revocations` | Exact generation plus member, connection and selection/scope revisions; bounded expiry, credential hash and key revision. Permanent archive tombstones also fence registrations that arrive late. |
 | `refresh_attempts` | Fenced attempt, material version, `reserved/dispatched/published/uncertain/abandoned`; one pending attempt per connection. |
 | `fingerprint_keys`, `refresh_fingerprints` | Key checks and keyed seed tombstones prevent reimport across members, connections, restarts and key rotation. Never prune these to recover a login. |
 | `grant_audit` | Member/binding, workspace/model/repository/action, revisions, grant and actual provider expiry. No tokens, JWTs, request bodies or provider errors. Retained 30 days. |
-| `revocation_outbox` | Durable generation-scoped cursor stream for archive, disconnect, consent or generation-key invalidation. Consumers keep their cursor; revoked generations receive denial. |
+| `revocation_outbox` | Durable generation-scoped cursor stream for archive, disconnect, selection/scope or generation-key invalidation. Consumers keep their cursor; revoked generations receive denial. |
+
+Agent logins require no consent or confirmation when members join, leave or
+converge from WorkOS. Connection health uses the selected credential's presence,
+revision and expiry. The legacy `consent` request field is optional and ignored;
+the retained `consent_fingerprint` column no longer controls selection, health or
+restore. New writes store an inert value. Broker wire fields named `consent` and
+`consentRevision` retain their selection/scope data for compatibility, without a
+user consent step. Account, membership, Hold and credential revocation checks
+still apply.
 
 ## Flows
 
-**First connect.** The member signs in normally and explicitly supplies a new
-provider connection plus organization consent. GitHub validates the token's real
+**First connect.** The member signs in normally and supplies a new
+provider connection, then selects it for the organization. GitHub validates the token's real
 app/client and user; Codex validates the native cache account binding and uses the
 pinned native keeper. The broker encrypts centrally and records the seed fence.
 Claude setup tokens and API keys, Codex API keys, and Cursor keys use the same
@@ -70,20 +79,22 @@ account label; image qualification still proves actual usability.
 **Reconnect.** A new GitHub OAuth completion or explicit agent authorization
 sends `replaceExisting: true` to the member-authenticated broker connect
 operation. For the same member/provider/account/app, one transaction revokes
-the former connection and consents, abandons its pending renewal, removes its
+the former connection and selections, abandons its pending renewal, removes its
 material, emits invalidations and installs the fresh authorization. Late
 publication by the former owner is rejected. Seed fingerprints remain forever;
 supplying an already-used seed rejects and rolls back the entire replacement.
 The same connection operation ID is replayable. Normal restore never replaces
 authorization, and connect without explicit replacement still rejects duplicates.
-New model/repository consent must be selected for the new authorization.
+Model selection and repository scopes belong to the new authorization.
 
 **Fresh generation.** Provisioning journals a random generation credential in its
 encrypted receipt before registration. After WorkOS sign-in, `client.ts` sends
 only that generation authority and the member bearer. Restore returns metadata
 and references for that exact member/org. The database restore port
 rechecks local identity/membership revisions and atomically replaces references
-and fresh local consent. It cannot copy old consent fingerprints, grants, quota,
+and selected logins. Its identity/session fingerprint fences the network restore
+and encrypted broker bearer; it does not determine agent-login health or revise
+an unchanged selection. Restore cannot copy grants, quota,
 workspace data, runtime approvals or image qualification. An outage retains the
 last local metadata but prevents new issuance.
 
@@ -100,7 +111,7 @@ access token is still expired. It denies access and applies the native keeper's
 one-minute renewal cooldown; it never discards the known replacement seed just
 because access is not usable yet.
 
-**Grant.** Recheck generation, member, consent, connection and binding after
+**Grant.** Recheck generation, member, selected scopes, connection and binding after
 refresh/network permission checks. Issue only access material; never a Codex
 native cache or GitHub/Codex refresh token. Grant expiry is at most five minutes
 and no later than member JWT, generation, binding or actual provider expiry.
@@ -119,7 +130,7 @@ and its [authorization API](https://docs.github.com/en/rest/apps/oauth-applicati
 **Revoke.** Disconnect immediately prevents future broker grants for every
 binding, deletes current ciphertext, increments revision, and records outbox
 invalidations. Revocation racing refresh wins before issuance. Organization
-consent removal invalidates that organization's bindings. It does not promise
+selection removal invalidates that organization's bindings. It does not promise
 to erase a credential already delivered to a running native client.
 All event writers acquire a shared transaction lock before their identity/row
 locks and retain it through commit. The sequence watermark cannot overtake an
@@ -214,7 +225,7 @@ checks before requesting broker access. Restore creates no image approval. The
 Dev qualifier uses broker access; forced Codex renewal uses the same persistent
 reservation/dispatch journal, verifies changed access and stable account identity,
 and tests adoption on the exact disposable image. Only one agent per provider
-has selected model consent across generations. Repeating the selection is idempotent.
+has a selected model scope across generations. Repeating the selection is idempotent.
 
 The hosted monitor also discovers the fixture organization's attested Cloud
 Computer images, including the active image, for the current base and Boat
@@ -245,7 +256,7 @@ Removal scopes are explicit:
 | Operation | Effect |
 | --- | --- |
 | Existing organization credential Remove / Dev desktop GitHub Disconnect | Suppress this generation's local binding, retaining the shared connection; automatic restore respects removal. |
-| Organization agent Disconnect | Withdraw broker consent for this WorkOS organization and clear selected local consent. |
+| Organization agent Disconnect | Remove the broker's selection for this WorkOS organization and clear the selected local login. |
 | Agent `DELETE /v1/cloud-agent-credentials/:credentialId/dev-reference` with `{organizationId,scope}` | `local`, `organization`, or `global`; global deletes shared material and invalidates all generations. |
 | GitHub `POST /v1/github/dev-reference/remove` with `{bindingId,scope}` | The same three scopes; cloud installation disconnect remains an installation-association operation. |
 | Agent `POST /v1/cloud-agent-credentials/:credentialId/dev-reference/reattach` with `{organizationId}` | Explicitly reattach that still-active broker binding after local removal; requires the current member session and fresh broker metadata. |

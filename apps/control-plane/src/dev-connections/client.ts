@@ -53,7 +53,7 @@ export type RestoreMapping = {
   fingerprint?: string;
 };
 export type RestorePort = {
-  /** Must recheck current local identity/member revisions, create fresh consent and
+  /** Must recheck current local identity/member revisions, restore selections and
    * atomically replace this exact owner's references (including an empty list).
    * Never restore grants, qualification, quota, workspaces or refresh material. */
   replace(

@@ -1,4 +1,4 @@
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { resetMigratedTestDatabase } from "../test-database.js";
@@ -109,10 +109,34 @@ d("organization agent accounts", () => {
     expect(result.connections).toMatchObject([{connected:false,credentialId:null,revision:3}]);
     expect(result.credentials).toHaveLength(2);
   });
-  it("requires renewed consent after membership authority changes",async()=>{
+  it("keeps a selected login ready after membership authority changes",async()=>{
     const credential=await account();await select(credential.id);
     await pool.query("UPDATE organization_members SET authorization_revision=authorization_revision+1 WHERE org_id=$1 AND user_id=$2",[fixture.organizationId,fixture.userId]);
-    expect((await service.organizationConnections(fixture.userId,fixture.organizationId)).connections[0]?.connected).toBe(false);
+    expect((await service.organizationConnections(fixture.userId,fixture.organizationId)).connections[0]).toMatchObject({connected:true,revision:1,health:{status:"ready"}});
+  });
+  it.each([undefined,"zeros-managed"])("selects without a consent requirement and accepts the legacy field %s",async consent=>{
+    const credential=await account();
+    expect(await service.setOrganizationConnection(fixture.userId,fixture.organizationId,"claude",{
+      expectedRevision:0,credentialId:credential.id,credentialRevision:1,models:["claude-haiku-4-5"],...(consent?{consent}:{}),
+    })).toEqual({revision:1,replayed:false});
+    expect((await service.organizationConnections(fixture.userId,fixture.organizationId)).connections[0]).toMatchObject({connected:true,health:{status:"ready"}});
+    expect((await pool.query("SELECT consent_fingerprint FROM cloud_agent_organization_connections WHERE org_id=$1",[fixture.organizationId])).rows)
+      .toEqual([{consent_fingerprint:"0".repeat(64)}]);
+  });
+  it.each([false,true])("replays a released selection after membership drift without accepting changed fields (allModels=%s)",async allModels=>{
+    const credential=await account(),models=["claude-haiku-4-5"];
+    const input={expectedRevision:0,credentialId:credential.id,credentialRevision:1,models,allModels,consent:"zeros-managed"};
+    await service.setOrganizationConnection(fixture.userId,fixture.organizationId,"claude",input);
+    const legacyFingerprint="a".repeat(64),legacyHash=createHash("sha256")
+      .update(JSON.stringify([credential.id,1,models,legacyFingerprint,...(allModels?["all-models"]:[])])).digest();
+    await pool.query("UPDATE cloud_agent_organization_connections SET consent_fingerprint=$2,request_sha256=$3 WHERE org_id=$1",[fixture.organizationId,legacyFingerprint,legacyHash]);
+    await pool.query("UPDATE organization_members SET authorization_revision=authorization_revision+1 WHERE org_id=$1 AND user_id=$2",[fixture.organizationId,fixture.userId]);
+    const stored=async()=>(await pool.query("SELECT * FROM cloud_agent_organization_connections WHERE org_id=$1",[fixture.organizationId])).rows;
+    const before=await stored();
+    expect(await service.setOrganizationConnection(fixture.userId,fixture.organizationId,"claude",input)).toEqual({revision:1,replayed:true});
+    for(const changed of [{models:["claude-sonnet-4-5"]},{allModels:!allModels},{credentialRevision:2},{credentialId:randomUUID()}])
+      await expect(service.setOrganizationConnection(fixture.userId,fixture.organizationId,"claude",{...input,...changed})).rejects.toMatchObject({status:409});
+    expect(await stored()).toEqual(before);
   });
   it("rejects another member's organization scope and another owner's credential selection",async()=>{
     const credential=await account(),other=await seedCredentialOwner(pool);
