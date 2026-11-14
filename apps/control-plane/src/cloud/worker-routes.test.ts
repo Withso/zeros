@@ -56,6 +56,19 @@ it("accepts outbound hello and returns configuration, refusing stale runtimes", 
   expect(await response.json()).toMatchObject({ config: { t: "config", loginRevision: "0" } });
   expect((await f.request("hello", { ...body, runtimeSha256: "b".repeat(64) })).status).toBe(409);
 });
+it("admits a fallback only from the workspace's current supported runtime policy", async () => {
+  const f = fixture(), current = "a".repeat(64), previous = "b".repeat(64), foreign = "c".repeat(64);
+  const policy = vi.fn(async () => ({ sha256: current, supportedSha256: [current, previous] }));
+  Object.assign(f.deps, { runtimeForWorkspace: policy });
+  const hello = (sha256: string) => f.request("hello", { bootId: f.bootId, protocol: 2, runtimeSha256: sha256 });
+  expect((await hello(previous)).status).toBe(200);
+  expect(f.deps.store.beginWorkerHello).toHaveBeenCalledWith(f.token, f.bootId, false, previous, false, false);
+  expect((await hello(foreign)).status).toBe(409);
+  policy.mockResolvedValue({ sha256: current, supportedSha256: [current] });
+  expect((await hello(previous)).status).toBe(409);
+  f.revoke();
+  expect((await hello(current)).status).toBe(401);
+});
 it("delivers a recovery hint only to the advertising worker and withholds prompts while fenced", async () => {
   const f = fixture(true), id = randomUUID();
   const auth = await f.deps.store.workerSession(f.token, f.bootId);

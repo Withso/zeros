@@ -46,6 +46,7 @@ export type CloudV2WorkerRouteDeps = {
   runtimeSha256: string;
   execution?: CloudExecutionContexts;
   runtimeSha256ForWorkspace?(workspace: CloudV2Workspace): Promise<string>;
+  runtimeForWorkspace?(workspace: CloudV2Workspace): Promise<{ sha256: string; supportedSha256?: readonly string[] }>;
   runtimeUpdates?: RuntimeAdoption;
   runtimeHandoffs?: RuntimeHandoffStore;
   promptOutbox?: boolean;
@@ -308,14 +309,17 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
         && !await deps.localCommands.requests.advertise(token,input.bootId,true,handoff)) throw unauthorized();
       return c.json({ config: await configuration(deps, identity, token, input.bootId, workerFeatures(c), "admission", handoff) });
     }
-    let runtimeSha256 = deps.runtimeSha256, identity: CloudV2WorkerSession | null = null;
-    if (deps.runtimeSha256ForWorkspace) {
+    let supported: readonly string[] = [deps.runtimeSha256], identity: CloudV2WorkerSession | null = null;
+    if (deps.runtimeForWorkspace || deps.runtimeSha256ForWorkspace) {
       if (!deps.store.workerHelloIdentity) throw new HttpError(503, "worker_runtime_unavailable", "Worker runtime could not be verified");
       identity = await deps.store.workerHelloIdentity(token);
       if (!identity) throw unauthorized();
-      runtimeSha256 = await deps.runtimeSha256ForWorkspace(identity);
+      if (deps.runtimeForWorkspace) {
+        const runtime = await deps.runtimeForWorkspace(identity);
+        supported = runtime.supportedSha256 ?? [runtime.sha256];
+      } else supported = [await deps.runtimeSha256ForWorkspace!(identity)];
     }
-    if (input.runtimeSha256 !== runtimeSha256 && !(workerFeatures(c).has("runtime-update-v1") && deps.runtimeHandoffs &&
+    if (!supported.includes(input.runtimeSha256) && !(workerFeatures(c).has("runtime-update-v1") && deps.runtimeHandoffs &&
         await deps.runtimeHandoffs.runtime(token, input.bootId) === input.runtimeSha256))
       throw new HttpError(409, "worker_runtime_mismatch", "Worker runtime requires an update");
     if (deps.promptOutbox && !(c.req.header("x-zeros-worker-features") ?? "").split(",").map(value => value.trim()).includes("prompt-outbox-v1"))

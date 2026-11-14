@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { RuntimeCanaryClaimsSchema } from "../../apps/control-plane/src/cloud/runtime-canary";
 import { RuntimeReleaseSchema } from "../../apps/control-plane/src/cloud/runtime-release";
+import { RuntimeSupportSchema } from "../../apps/control-plane/src/cloud/runtime-support";
 import { RuntimeReleaseConfigSchema, type RuntimeReleaseConfig } from "./runtime-contracts";
 import { RuntimeDatabaseJournalSchema } from "./runtime-database";
 import { requireCheck } from "./contracts";
@@ -10,9 +11,10 @@ const pin = z.object({ sha256: z.string().regex(/^[a-f0-9]{64}$/), release: Runt
 const lease = z.object({ version: z.literal(1), id: z.string().uuid(), runId: z.string(),
   liveCpSha: z.string().regex(/^[a-f0-9]{40}$/), priorRuntimeSha256: z.string().regex(/^[a-f0-9]{64}$/), expiresAt: z.string().datetime() }).strict();
 const deploymentId = z.string().regex(/^[A-Za-z0-9_-]{1,128}$/);
+const support = z.object({ previous: RuntimeSupportSchema.nullable(), next: RuntimeSupportSchema }).strict().optional();
 export const RuntimeProviderIntentSchema = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("stage"), phase: z.enum(["requested", "confirmed"]), previous: pin, retainedPrevious: pin.nullable(), next: pin, lease, servingDeploymentId: deploymentId }).strict(),
-  z.object({ kind: z.literal("restore"), phase: z.enum(["requested", "confirmed"]), previous: pin, retainedPrevious: pin.nullable(), next: pin, lease, servingDeploymentId: deploymentId }).strict(),
+  z.object({ kind: z.literal("stage"), phase: z.enum(["requested", "confirmed"]), previous: pin, retainedPrevious: pin.nullable(), next: pin, lease, servingDeploymentId: deploymentId, support }).strict(),
+  z.object({ kind: z.literal("restore"), phase: z.enum(["requested", "confirmed"]), previous: pin, retainedPrevious: pin.nullable(), next: pin, lease, servingDeploymentId: deploymentId, support }).strict(),
   z.object({ kind: z.literal("deploy"), phase: z.enum(["requested", "confirmed", "ready"]), cpSha: z.string().regex(/^[a-f0-9]{40}$/),
     next: pin, lease, deploymentId: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/).nullable() }).strict(),
 ]);

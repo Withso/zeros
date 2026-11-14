@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { RuntimeReleaseSchema } from "../../apps/control-plane/src/cloud/runtime-release";
+import { loadRuntimeSupport, RuntimeSupportSchema, type RuntimeSupport } from "../../apps/control-plane/src/cloud/runtime-support";
 import type { CloudV2RuntimeStore } from "../../apps/control-plane/src/cloud/runtime";
 import { validateDatabaseConnections } from "../../apps/control-plane/src/database-config";
 import { parseDatabaseTarget } from "../../apps/control-plane/src/database-target";
@@ -35,6 +36,17 @@ function variablePin(variables: Record<string, unknown>, previous = false): Runt
   return { sha256, release };
 }
 
+function variableSupport(variables: Record<string, unknown>): RuntimeSupport | null {
+  const raw = variables.CLOUD_V2_RUNTIME_SUPPORT;
+  if (!raw) return null;
+  try {
+    if (typeof raw !== "string") throw new Error();
+    const current = variablePin(variables)!;
+    loadRuntimeSupport(raw, { sha256: current.sha256, release: current.release ?? undefined });
+    return RuntimeSupportSchema.parse(JSON.parse(raw));
+  } catch { requireCheck(false, "Runtime support policy is invalid"); }
+}
+
 export function runtimeProvider(config: RuntimeReleaseConfig, env: NodeJS.ProcessEnv, storage: CloudV2RuntimeStore, options: {
   fetch?: typeof fetch; cleanupFetch?: typeof fetch; pause?: typeof sleep; signal?: AbortSignal;
   recovery?: RuntimeProviderRecovery;
@@ -62,6 +74,8 @@ export function runtimeProvider(config: RuntimeReleaseConfig, env: NodeJS.Proces
   let stagedTarget: RuntimePin | undefined, stagedPrevious: RuntimePin | undefined, deployAttempted = false, oldDeployment: string | undefined;
   let stageDispatched = false, deployDispatched = false, deploymentId: string | undefined, deploymentDeadline: number | undefined;
   let observedPrevious: RuntimePin | null | undefined;
+  let observedSupport: RuntimeSupport | null | undefined;
+  let supportIntent: { previous: RuntimeSupport | null; next: RuntimeSupport } | undefined;
   let recoveryLease: RuntimeDrainLease | undefined;
   if (options.recovery) {
     const stage = RuntimeProviderIntentSchema.parse(options.recovery.stage), deploy = options.recovery.deploy && RuntimeProviderIntentSchema.parse(options.recovery.deploy);
@@ -69,6 +83,7 @@ export function runtimeProvider(config: RuntimeReleaseConfig, env: NodeJS.Proces
       "Runtime cleanup has no owned staged intent");
     recoveryLease = boundRuntimeDrainLease(config, stage.lease);
     stagedTarget = stage.next; stagedPrevious = stage.previous; observedPrevious = stage.retainedPrevious; oldDeployment = stage.servingDeploymentId; stageDispatched = true;
+    supportIntent = stage.support; observedSupport = stage.support?.previous ?? null;
     if (deploy) {
       requireCheck(deploy.kind === "deploy" && deploy.cpSha === config.expectedCpSha && runtimeJson(deploy.next) === runtimeJson(stage.next) &&
         runtimeJson(deploy.lease) === runtimeJson(stage.lease) && (deploy.phase === "requested" ? deploy.deploymentId === null : deploy.deploymentId !== null),
@@ -131,6 +146,9 @@ export function runtimeProvider(config: RuntimeReleaseConfig, env: NodeJS.Proces
   function exactSource(deployment: Deployment) {
     requireCheck(deployment.meta?.commitHash === config.expectedCpSha && deployment.meta.branch === config.branch, "Railway deployed a different control-plane source");
   }
+  function assertStagedSupport(variables: Record<string, unknown>) {
+    requireCheck(runtimeJson(variableSupport(variables)) === runtimeJson(supportIntent?.next ?? null), "Runtime support policy changed during release");
+  }
   async function readinessIdentity(): Promise<unknown | null> {
     let response: Response;
     try {
@@ -155,6 +173,10 @@ export function runtimeProvider(config: RuntimeReleaseConfig, env: NodeJS.Proces
     if (!staged && observedPrevious !== undefined) {
       requireCheck(runtimeJson(previous) === runtimeJson(observedPrevious), "Runtime previous pin changed during release");
     }
+    const support = variableSupport(state.variables);
+    if (staged) assertStagedSupport(state.variables);
+    else if (observedSupport !== undefined)
+      requireCheck(runtimeJson(support) === runtimeJson(observedSupport), "Runtime support policy changed during release");
     const live = { identity: RuntimeLiveIdentity.parse(raw), branch: state.branch, current: pin, previous };
     assertRuntimeLive(config, live);
     const active = (await inventory(cleanup)).filter(row => !stopped.has(row.status));
@@ -162,7 +184,7 @@ export function runtimeProvider(config: RuntimeReleaseConfig, env: NodeJS.Proces
     exactSource(active[0]);
     requireCheck(!oldDeployment || oldDeployment === active[0].id, "Serving control-plane deployment changed during runtime release");
     oldDeployment = active[0].id;
-    if (!staged) observedPrevious = previous;
+    if (!staged) { observedPrevious = previous; observedSupport = support; }
     return live;
   }
   return {
@@ -182,7 +204,9 @@ export function runtimeProvider(config: RuntimeReleaseConfig, env: NodeJS.Proces
       requireCheck(checked.success && checked.data.sha256 === next.sha256, "A runtime pin requires matching qualification");
       stagedTarget = next; stagedPrevious = previous;
       await current();
-      await options.record({ kind: "stage", phase: "requested", previous, retainedPrevious: observedPrevious!, next, lease, servingDeploymentId: oldDeployment! });
+      supportIntent = { previous: observedSupport!, next: RuntimeSupportSchema.parse({ version: 1, currentSha256: next.sha256,
+        releases: [checked.data, ...(previous.release && previous.sha256 !== next.sha256 ? [previous.release] : [])] }) };
+      await options.record({ kind: "stage", phase: "requested", previous, retainedPrevious: observedPrevious!, next, lease, servingDeploymentId: oldDeployment!, support: supportIntent });
       // The empty lease fences new work while serving ownership is refreshed after the drain wait.
       const drain = await options.inspectDrain(lease);
       assertEmptyRuntimeDrain(config, lease, drain);
@@ -195,11 +219,12 @@ export function runtimeProvider(config: RuntimeReleaseConfig, env: NodeJS.Proces
         input: { ...target, replace: false, skipDeploys: true, variables: {
           CLOUD_V2_RUNTIME_SHA256: next.sha256, CLOUD_V2_RUNTIME_RELEASE_METADATA: JSON.stringify(checked.data),
           CLOUD_V2_RUNTIME_PREVIOUS_SHA256: previous.sha256, CLOUD_V2_RUNTIME_PREVIOUS_RELEASE_METADATA: previous.release ? JSON.stringify(previous.release) : "",
+          CLOUD_V2_RUNTIME_SUPPORT: JSON.stringify(supportIntent.next),
         } },
       });
       requireCheck(result.variableCollectionUpsert === true, "Runtime pin staging is unconfirmed");
       await current(next);
-      await options.record({ kind: "stage", phase: "confirmed", previous, retainedPrevious: observedPrevious!, next, lease, servingDeploymentId: oldDeployment! });
+      await options.record({ kind: "stage", phase: "confirmed", previous, retainedPrevious: observedPrevious!, next, lease, servingDeploymentId: oldDeployment!, support: supportIntent });
     },
     async deploy(cpSha: string, lease: RuntimeDrainLease) {
       requireCheck(!options.recovery, "Runtime cleanup cannot initiate deployment");
@@ -233,6 +258,7 @@ export function runtimeProvider(config: RuntimeReleaseConfig, env: NodeJS.Proces
         requireCheck(rows.every(row => row.id === id || row.id === oldDeployment || stopped.has(row.status)), "A competing deployment appeared during runtime readiness");
         requireCheck(runtimeJson(variablePin(state.variables)) === runtimeJson(next), "Runtime pin changed during deployed readiness");
         requireCheck(stagedPrevious && runtimeJson(variablePin(state.variables, true)) === runtimeJson(stagedPrevious), "Previous runtime pin changed during deployed readiness");
+        assertStagedSupport(state.variables);
         if (targetDeployment.status !== "SUCCESS" || rows.some(row => row.id === oldDeployment && !stopped.has(row.status))) return false;
         const raw = await readinessIdentity();
         if (raw === null) return false;
@@ -261,6 +287,7 @@ export function runtimeProvider(config: RuntimeReleaseConfig, env: NodeJS.Proces
         if (targetDeployment.status === "SUCCESS" && rows.every(row => row.id === deploymentId || stopped.has(row.status))) {
           const state = await inspect(true), raw = await cleanupJson(`${origin}/v1/release-identity`), pin = identityPin(raw);
           const identity = RuntimeLiveIdentity.parse(raw);
+          assertStagedSupport(state.variables);
           requireCheck(runtimeJson(variablePin(state.variables)) === runtimeJson(stagedTarget) && runtimeJson(variablePin(state.variables, true)) === runtimeJson(stagedPrevious) && runtimeJson(pin) === runtimeJson(stagedTarget) &&
             identity.sourceSha === config.expectedCpSha && identity.channel === config.channel, "Runtime recovery observed another serving release");
           return { releaseDrain: true };
@@ -270,7 +297,7 @@ export function runtimeProvider(config: RuntimeReleaseConfig, env: NodeJS.Proces
       let previous: RuntimePin;
       try { previous = (await current(stagedTarget, true)).current; }
       catch { await current(undefined, true); return { releaseDrain: true }; }
-      await options.record({ kind: "restore", phase: "requested", previous, retainedPrevious: observedPrevious, next: stagedTarget, lease, servingDeploymentId: oldDeployment! });
+      await options.record({ kind: "restore", phase: "requested", previous, retainedPrevious: observedPrevious, next: stagedTarget, lease, servingDeploymentId: oldDeployment!, ...(supportIntent ? { support: supportIntent } : {}) });
       const drain = await options.inspectDrain(lease);
       assertRuntimeDrainRecovery(config, lease, drain);
       await current(stagedTarget, true);
@@ -280,11 +307,12 @@ export function runtimeProvider(config: RuntimeReleaseConfig, env: NodeJS.Proces
           CLOUD_V2_RUNTIME_SHA256: previous.sha256, CLOUD_V2_RUNTIME_RELEASE_METADATA: previous.release ? JSON.stringify(previous.release) : "",
           CLOUD_V2_RUNTIME_PREVIOUS_SHA256: observedPrevious?.sha256 ?? "",
           CLOUD_V2_RUNTIME_PREVIOUS_RELEASE_METADATA: observedPrevious?.release ? JSON.stringify(observedPrevious.release) : "",
+          ...(supportIntent ? { CLOUD_V2_RUNTIME_SUPPORT: supportIntent.previous ? JSON.stringify(supportIntent.previous) : "" } : {}),
         } },
       }, true);
       requireCheck(result.variableCollectionUpsert === true, "Runtime staged-pin restoration is unconfirmed");
       await current(undefined, true);
-      await options.record({ kind: "restore", phase: "confirmed", previous, retainedPrevious: observedPrevious, next: stagedTarget, lease, servingDeploymentId: oldDeployment! });
+      await options.record({ kind: "restore", phase: "confirmed", previous, retainedPrevious: observedPrevious, next: stagedTarget, lease, servingDeploymentId: oldDeployment!, ...(supportIntent ? { support: supportIntent } : {}) });
       return { releaseDrain: true };
       } finally { cleanupDeadline = undefined; }
     },

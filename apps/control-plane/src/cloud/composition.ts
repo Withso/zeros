@@ -115,7 +115,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   if (!keys) throw new Error("Cloud v2 requires the credential encryption keyring");
   const store = new CloudV2Store(pool, keys);
   const recoveryStore = new CloudRecoveryStore(pool);
-  const runtime = cloudV2Runtime(v2.runtime.sha256, v2.runtime.store);
+  const runtime = cloudV2Runtime(v2.runtime.sha256, v2.runtime.store, v2.runtime.supportedSha256);
   const activeCreateRuntime = activeRuntimeQualification(config.deploymentChannel, v2.runtime);
   const runtimeCanary = config.deploymentChannel === "alpha" && v2.runtimeCanary ? new RuntimeCanaryAuthority(v2.runtimeCanary) : undefined;
   const defaultRuntimeForWorkspace = workspaceRuntimeResolver(pool, runtime, runtimeCanary?.policy);
@@ -326,10 +326,10 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
       token: route.portToken ? openPortToken(route.portToken, id, keys) : null };
   };
   const liveSignals = new LiveRecoverySignals(pool, listenerPool);
-  const liveStore = new LiveRecoveryStore(pool, (token, id) => sealPortToken(token, id, keys));
-  const liveRecovery = roles.relay ? new CloudLiveRecovery({ route: workerRoute, compute,
+  const liveStore = new LiveRecoveryStore(pool);
+  const liveRecovery = roles.relay ? new CloudLiveRecovery({ route: workerRoute,
     witness: (binding, until) => liveSignals.watch(binding, until),
-    publish: (route, hosted) => liveStore.publish(route, hosted), condition: (route, failed) => liveStore.condition(route, failed),
+    condition: (route, failed) => liveStore.condition(route, failed),
     rebuild: async route => !!await recoveryStore.begin(route),
     recovered: route => recoveryStore.cancel(route.recoveryAttemptId!, route),
     mint: (id, boot) => signer.mint(id, boot), ready: id => connections?.hintReady(id), logger: console }) : null;
@@ -364,7 +364,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     notifications,
     workspaceSync,
     runtimeUpdates, runtimeHandoffs,
-    runtimeSha256ForWorkspace: async workspace => (await runtimeForWorkspace(workspace)).sha256,
+    runtimeForWorkspace,
     environmentReport: (token, bootId, value) => environments.report(token, bootId, value),
     githubCheckout: (token,bootId,value) => github.metadata.checkout(token,bootId,value),
     ...(mcp ? { mcpAuthorization: async (workspace, id, force) => {

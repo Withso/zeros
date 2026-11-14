@@ -74,20 +74,17 @@ Repeated 502/504 responses start two consecutive 60-second verification windows;
 each must also observe a newly authenticated outbound hello or prompt pull for
 the same sandbox, boot and access epoch. A successful dial or changed binding
 ends that attempt. Timeouts, 503s and authentication/configuration refusals do
-not authorize a route repair.
+not authorize a rebuild.
 
-After both windows, the control plane hides and recreates the protected
-localhost route once. A per-boot receipt is flushed to disk before hide, and a
-new, boot-bound host idempotency key survives retries. An uncertain hide reply
-is reconciled from that receipt; it never triggers another hide. Publication
-checks the current sandbox, boot, access epoch, worker and route credentials,
-and excludes lifecycle and runtime handoffs. The worker process, workspace
-identity, history and outbound prompt delivery continue. One more 60-second
-window verifies the repaired route. Another witnessed gateway failure can
-start checkpoint recovery only for an active workspace whose current worker
-advertised `recovery-quiesce-v1`. Older workers retain the named
+After both windows, the control plane requests checkpoint recovery directly;
+it does not hide or recreate the protected route. Recovery admission checks
+that the workspace is active, its current worker advertised
+`recovery-quiesce-v1`, and the sandbox, boot, access epoch and credentials still
+match. It retains the limit of one automatic attempt per workspace per hour.
+Older workers and declined recovery retain the named
 `error.code: "live_connection_unavailable"` condition; a successful connection
-clears it. Local workspaces use their existing engine.
+clears it. A reachable worker's route stays intact throughout verification.
+Local workspaces use their existing engine.
 
 Checkpoint recovery waits up to ten minutes for queued and running turns and
 setup to finish. It checks the recorded initiator's GitHub access before

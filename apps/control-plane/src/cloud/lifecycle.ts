@@ -8,6 +8,7 @@ import { CLOUD_V2_LEASE_SECONDS, type CloudV2Compute, type CloudV2CommandResult 
 import { BoatBootPendingError, BoatCreateRejectedError, BoatForkRefusedError, BoatSnapshotExpiredError } from "./boat-client.js";
 import { CloudProviderError } from "./provider-error.js";
 import { installRuntimeCommand, type CloudV2Runtime } from "./runtime.js";
+import { readRuntimeInstallTimings, type RuntimeInstallPhase } from "./runtime-timing.js";
 import { GIT_LFS_INSTALL_COMMAND } from "./computer.js";
 import { pruneCloudRepositories } from "./source-authority.js";
 import type { PendingSourceOutcome } from "./pending-create.js";
@@ -75,6 +76,7 @@ export type CloudV2TimingRecord = {
   workspaceId: string;
   state?: CloudV2Workspace["state"];
   runtimeChanged?: boolean;
+  runtimeResult?: "ok" | "failed";
   /** Whether a checkpoint command uploaded a new object or kept the last one. */
   checkpoint?: "saved" | "unchanged";
   /** relay_ready: the worker socket dial, and the time from it to readiness.
@@ -83,7 +85,7 @@ export type CloudV2TimingRecord = {
   /** relay_ready: route reads until the worker was ready, including the successful one. */
   attempts?: number;
 } & ({
-  phase: LifecyclePhase | CloudV2WorkerTiming["phase"] | "worker_hello" | "relay_ready";
+  phase: LifecyclePhase | CloudV2WorkerTiming["phase"] | `runtime_${RuntimeInstallPhase}` | "runtime_unattributed" | "worker_hello" | "relay_ready";
   durationMs: number;
 } | CloudV2WorkerBootTiming);
 type TimingDetail = Pick<CloudV2TimingRecord, "runtimeChanged" | "checkpoint">;
@@ -184,7 +186,7 @@ export const CHECKOUT_WARMUP_SCRIPT = `${READ_ONLY_GIT} ls-tree -r -z HEAD >/dev
   `${READ_ONLY_GIT} -c core.checkStat=minimal -c core.trustctime=false diff-files --quiet --ignore-submodules >/dev/null 2>&1; wait`;
 
 /** Writes the worker credential and its boot settings owner-only, re-enables
- * the unit a stop disabled so a reboot keeps it, then restarts the worker.
+ * the unit and admits this machine boot, then starts it idempotently.
  * Values are single-quoted base64 literals the shell never expands. Boat's
  * sandbox environment does not reach systemd, so the boot settings travel with
  * the credential. */
@@ -199,8 +201,10 @@ export function deliverWorkerTokenCommand(token: string, bootEnv: Readonly<Recor
     `sudo -n rm -f /opt/zeros/worker-runtime.env && ` +
     `printf %s '${b64(envFile)}' | base64 -d > ${CLOUD_V2_WORKER_ENV_PATH}.tmp && mv -f ${CLOUD_V2_WORKER_ENV_PATH}.tmp ${CLOUD_V2_WORKER_ENV_PATH} && ` +
     `printf %s '${b64(token)}' | base64 -d > ${CLOUD_V2_WORKER_TOKEN_PATH}.tmp && mv -f ${CLOUD_V2_WORKER_TOKEN_PATH}.tmp ${CLOUD_V2_WORKER_TOKEN_PATH} && ` +
+    `cat /proc/sys/kernel/random/boot_id | sudo -n tee /run/zeros-worker.boot.next >/dev/null && ` +
+    `sudo -n chown root:root /run/zeros-worker.boot.next && sudo -n chmod 0644 /run/zeros-worker.boot.next && sudo -n mv -T /run/zeros-worker.boot.next /run/zeros-worker.boot && ` +
     `(systemctl is-enabled --quiet zeros-worker.service || sudo -n systemctl enable zeros-worker.service >/dev/null 2>&1 || true) && ` +
-    `(sudo -n systemctl restart zeros-worker.service || true))`;
+    `sudo -n systemctl start zeros-worker.service)`;
 }
 
 export class CloudV2Lifecycle {
@@ -388,6 +392,8 @@ export class CloudV2Lifecycle {
         await this.deps.store.transition(workspace.id, [workspace.state], "failed", { errorCode: "sandbox_missing", revoke: true, ...fence });
       } else if ((code === "cloud_source_checkout_failed" || code === "github_access_required") && (workspace.state === "creating" || workspace.state === "starting")) {
         await this.deps.store.transition(workspace.id, [workspace.state], "failed", { errorCode: code });
+      } else if (code === "worker_runtime_install_failed" && (workspace.state === "creating" || workspace.state === "starting")) {
+        await this.deps.store.transition(workspace.id, [workspace.state], "failed", { errorCode: code, stopGeneration: workspace.stopGeneration, revoke: true });
       } else if (workspace.attempts >= MAX_ATTEMPTS) {
         // A restore that gives up keeps its checkpoint; Start tries again.
         const restore = workspace.state === "starting" && workspace.restorePending && !(CLOUD_V2_CHECKPOINT_ERRORS as readonly string[]).includes(code);
@@ -449,7 +455,8 @@ export class CloudV2Lifecycle {
         // route while the VM boots overlaps the two.
         const routed = this.measure(workspace, "protected_route", () => this.host(workspace, sandboxId));
         routed.catch(() => {});
-        await this.measure(workspace, "runtime_install", () => this.ensureRuntime(sandboxId, boot.runtime), runtimeChanged => ({ runtimeChanged }));
+        const selected = await this.measure(workspace, "runtime_install", () => this.ensureRuntime(workspace, sandboxId, boot.runtime), result => ({ runtimeChanged: result.changed }));
+        boot.env = await this.selectedBootEnv(workspace, boot, selected.sha256);
         // Boat exec waited ~6 s for a 6 s child with trailing "&"; braces + echo returned in ~120 ms.
         // Still unawaited so a slow or failed launch cannot hold up worker startup.
         const warmup = image.checkout ? checkoutWarmupCommand(`${CLOUD_V2_HOME}/${workspace.repository}`) : null;
@@ -493,8 +500,7 @@ export class CloudV2Lifecycle {
           if (!sandboxId) return;
           restoring = true;
         } else {
-          // Resume and protected hosting are idempotent. Rotate the HTTP token
-          // and restart every wake to register a new process boot identity.
+          // The unit waits for this boot's token delivery before starting.
           const renewedAt = new Date(this.deps.now?.() ?? Date.now());
           try {
             await this.measure(workspace, "boat_resume", () => compute.resume(sandboxId!));
@@ -513,8 +519,8 @@ export class CloudV2Lifecycle {
         const route = () => this.measure(workspace, "protected_route", () => this.host(workspace, sandboxId!));
         const routed = restoring ? undefined : route();
         routed?.catch(() => {});
-        // A runtime shipped while the VM slept is installed now.
-        await this.measure(workspace, "runtime_install", () => this.ensureRuntime(sandboxId, boot.runtime), runtimeChanged => ({ runtimeChanged }));
+        const selected = await this.measure(workspace, "runtime_install", () => this.ensureRuntime(workspace, sandboxId, boot.runtime), result => ({ runtimeChanged: result.changed }));
+        boot.env = await this.selectedBootEnv(workspace, boot, selected.sha256);
         if (restoring) {
           // Replayed as recorded: no lookup of a build that deletion may be retiring.
           const recorded = this.recordedRestores.get(workspace.id) ?? workspace.restoreCreate;
@@ -858,11 +864,36 @@ export class CloudV2Lifecycle {
     return this.deps.store.setWorkerRoute(workspace.id, sandboxId, route.url, this.deps.sealPortToken(route.token, workspace.id));
   }
 
-  /** Quick when the VM already has the runtime; otherwise downloads it. */
-  private async ensureRuntime(sandboxId: string, runtime: CloudV2Runtime): Promise<boolean> {
-    const result = await this.execWhenReady(sandboxId, installRuntimeCommand({ sha256: runtime.sha256, url: await runtime.url(), publicKeys: this.deps.publicKeys }), 300);
-    if (result.exitCode !== 0 || result.timedOut) throw Object.assign(new Error("runtime install failed"), { code: "worker_runtime_install_failed" });
-    return result.stdout.split(/\r?\n/).includes("runtime-changed");
+  private async ensureRuntime(workspace: CloudV2Workspace, sandboxId: string, runtime: CloudV2Runtime): Promise<{ changed: boolean; sha256: string }> {
+    const start = this.deps.now?.() ?? Date.now();
+    const signal = AbortSignal.timeout(30_000), deadline = start + 30_000;
+    const refused = () => Object.assign(new Error("runtime install failed"), { code: "worker_runtime_install_failed" });
+    let expired!: () => void;
+    const expiry = new Promise<never>((_, reject) => { expired = () => reject(refused()); signal.addEventListener("abort", expired, { once: true }); });
+    let result: CloudV2CommandResult | undefined;
+    try {
+      result = await Promise.race([(async () => this.execWhenReady(sandboxId,
+        installRuntimeCommand({ sha256: runtime.sha256, ...(runtime.supportedSha256 ? { supportedSha256: runtime.supportedSha256 } : {}),
+          url: await runtime.url(), publicKeys: this.deps.publicKeys, timeoutSeconds: 30 }), 30, { deadline, signal }))(), expiry]);
+    } catch (error) { if (sandboxLost(error)) throw error; throw refused();
+    } finally {
+      signal.removeEventListener("abort", expired);
+      const records = readRuntimeInstallTimings(result?.stdout ?? "");
+      const base = { workspaceId: workspace.id.slice(0, 8), state: workspace.state };
+      for (const record of records) emitCloudV2Timing(this.deps.timing, { ...base, phase: `runtime_${record.phase}`,
+        durationMs: record.durationMs, runtimeResult: record.result });
+      // Missing/truncated provider output stays unattributed; it is not proof of a fast phase.
+      emitCloudV2Timing(this.deps.timing, { ...base, phase: "runtime_unattributed",
+        durationMs: Math.max(0, Math.round((this.deps.now?.() ?? Date.now()) - start) - records.reduce((sum, record) => sum + record.durationMs, 0)),
+        runtimeResult: result && result.exitCode === 0 && !result.timedOut ? "ok" : "failed" });
+    }
+    if (!result || result.exitCode !== 0 || result.timedOut || signal.aborted || (this.deps.now?.() ?? Date.now()) >= deadline) throw refused();
+    const pins = runtime.supportedSha256 ?? [runtime.sha256];
+    const selected = result.stdout.split(/\r?\n/).filter(line => line.startsWith("runtime-selected "));
+    // A lost provider stdout is unambiguous only for a single exact pin.
+    const sha256 = selected.length === 0 && pins.length === 1 ? runtime.sha256 : selected.length === 1 ? selected[0]!.slice(17) : undefined;
+    if (!sha256 || !/^[a-f0-9]{64}$/.test(sha256) || !pins.includes(sha256)) throw refused();
+    return { changed: result.stdout.split(/\r?\n/).includes("runtime-changed"), sha256 };
   }
 
   /** A v3 image keeps only this workspace's checkout; the stock image gets the
@@ -881,6 +912,10 @@ export class CloudV2Lifecycle {
     return { runtime, env: await this.deps.bootEnv(workspace, runtime) };
   }
 
+  private async selectedBootEnv(workspace: CloudV2Workspace, boot: { runtime: CloudV2Runtime; env: Record<string, string> }, sha256: string) {
+    return sha256 === boot.runtime.sha256 ? boot.env : this.deps.bootEnv(workspace, { sha256, url: () => boot.runtime.url(sha256) });
+  }
+
   private async measure<T>(workspace: CloudV2Workspace, phase: LifecyclePhase, run: () => Promise<T>, detail?: (value: T) => TimingDetail): Promise<T> {
     const start = this.deps.now?.() ?? Date.now();
     const value = await run();
@@ -890,13 +925,16 @@ export class CloudV2Lifecycle {
   }
 
   /** A VM that has just started or resumed can refuse commands for a few seconds. */
-  private async execWhenReady(sandboxId: string, command: string, timeoutSeconds: number): Promise<CloudV2CommandResult> {
+  private async execWhenReady(sandboxId: string, command: string, timeoutSeconds: number, budget?: { deadline: number; signal: AbortSignal }): Promise<CloudV2CommandResult> {
     for (let attempt = 1; ; attempt++) {
+      const remaining = budget ? budget.deadline - (this.deps.now?.() ?? Date.now()) : timeoutSeconds * 1000;
+      if (remaining <= 0 || budget?.signal.aborted) throw new Error("Provider command deadline expired");
       try {
-        return await this.deps.compute.exec(sandboxId, command, timeoutSeconds);
+        return budget ? await this.deps.compute.exec(sandboxId, command, Math.min(timeoutSeconds, Math.ceil(remaining / 1000)), budget.signal)
+          : await this.deps.compute.exec(sandboxId, command, timeoutSeconds);
       } catch (error) {
-        if (attempt >= 6) throw error;
-        await (this.deps.sleep ?? (ms => new Promise(resolve => setTimeout(resolve, ms))))(2_000);
+        if (attempt >= 6 || budget?.signal.aborted || budget && budget.deadline <= (this.deps.now?.() ?? Date.now())) throw error;
+        await (this.deps.sleep ?? (ms => new Promise(resolve => setTimeout(resolve, ms))))(Math.min(2_000, budget ? Math.max(0, budget.deadline - (this.deps.now?.() ?? Date.now())) : 2_000));
       }
     }
   }
