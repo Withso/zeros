@@ -163,7 +163,9 @@ export interface DesignStyleMutationDecision {
     | "explicit-inline"
     | "single-authored-rule"
     | "inline-fallback-no-rule"
-    | "inline-fallback-ambiguous-rule";
+    | "inline-fallback-ambiguous-rule"
+    /** A component instance's part: its host's zd-style-<part>. */
+    | "part-override";
 }
 
 export interface DesignParameterResolution {

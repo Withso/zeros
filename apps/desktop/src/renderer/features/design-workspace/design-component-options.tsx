@@ -6,7 +6,8 @@
 // instance in another frame each row writes the host's attribute, a dot marks
 // a value that differs from what it inherits, and Reset removes them all. A
 // plain component's instance whose default slot holds only text also offers
-// that text, which is the host's own.
+// that text, which is the host's own. An instance whose parts carry style
+// overrides offers to reset them.
 // Mounted only for one selected component frame or instance; a folded group
 // mounts no rows. Local only.
 
@@ -63,7 +64,7 @@ import {
   readDesignFrameComponent,
   sameDesignComponentValue,
 } from "./state/design-component-options";
-import { DESIGN_OPTIONS_NOT_APPLIED_MESSAGES } from "./state/design-component-parts";
+import { DESIGN_OPTIONS_NOT_APPLIED_MESSAGES, designPartOverrideAttribute } from "./state/design-component-parts";
 import { showDesignComponentVariant, useDesignShownComponentVariant } from "./state/design-component-variants";
 
 const EASINGS = [
@@ -205,6 +206,13 @@ export function DesignComponentOptions({
         void commitDesignInstanceAttributes(workspaceId, frame, instance.nodeId, removed, `Reset ${instance.title}`).catch(failed("the options"));
       }
     : undefined;
+  const overridden = instance ? Object.keys(instance.host.overrides ?? {}) : [];
+  const resetOverrides = instance && overridden.length
+    ? () => {
+        const removed: Record<string, null> = Object.fromEntries(overridden.map((part) => [designPartOverrideAttribute(part), null]));
+        void commitDesignInstanceAttributes(workspaceId, frame, instance.nodeId, removed, "Reset overrides").catch(failed("the overrides"));
+      }
+    : undefined;
   const saveVariant = (typed: string) => {
     const named = designComponentVariantName(declaration, typed);
     if ("error" in named) return named.error;
@@ -323,6 +331,12 @@ export function DesignComponentOptions({
             if (next !== instance.host.text) void commitDesignInstanceText(workspaceId, frame, instance.nodeId, next).catch(failed("the text"));
           }}
         />
+      ) : null}
+      {resetOverrides ? (
+        <OptionActionRow disabled={disabled} onClick={resetOverrides} data-design-overrides-reset={overridden.length}>
+          <RotateCcw aria-hidden="true" />
+          {overridden.length === 1 ? "Reset 1 part override" : `Reset ${overridden.length} part overrides`}
+        </OptionActionRow>
       ) : null}
       {/* Options are the main's to change, so an instance does not offer it. */}
       {instance ? null : (

@@ -208,7 +208,8 @@ import {
   settleDesignHistorySelection,
 } from "./state/design-selection";
 import { designComponentPartOf } from "@zeros/protocol/design-runtime";
-import { designComponentDisplayTitle, designComponentTextLock, designMissingComponentOf, isDesignComponentPartNodeId } from "./state/design-component-parts";
+import { designComponentDisplayTitle, designComponentTextLock, designMissingComponentOf, designPartOverrideAttribute, designPartOverrideKey,
+  isDesignComponentPartNodeId } from "./state/design-component-parts";
 import { MessageRow } from "../../shared/ui/primitives/message-row";
 import type { DesignComponentOptionsTarget } from "./design-component-options";
 import {
@@ -1570,9 +1571,10 @@ export const DesignInspector = React.memo(function DesignInspector({
   const [frameAction, setFrameAction] = useState<"export" | null>(null);
   const [exportScale, setExportScale] = useState(1);
   const [pendingHistoryActions, setPendingHistoryActions] = useState(0);
-  // An instance's part is read only: the panel shows its values, inert.
+  // An instance's part takes style writes, as overrides on its instance; a
+  // held state has no override to write.
   const partSelected = isDesignComponentPartNodeId(selectedNodeId);
-  const editsDisabled = !active || pendingHistoryActions > 0 || partSelected;
+  const editsDisabled = !active || pendingHistoryActions > 0;
   const [cssMode, setCssMode] = useState(false);
   const inspectorRef = useRef<HTMLElement | null>(null);
   const inspectorId = workspaceId
@@ -2990,6 +2992,20 @@ export const DesignInspector = React.memo(function DesignInspector({
     void selectDesignTargets({ workspaceId, folder, targets: [{ frame: component.file, ...(nodeId ? { nodeId } : {}) }] })
       .catch((error) => toast.error("Couldn't open the main component", { description: errorMessage(error) }));
   };
+  const partOverridden = !!(componentHeader?.part && instanceHost?.overrides &&
+    Object.hasOwn(instanceHost.overrides, designPartOverrideKey(componentHeader.part)));
+  const resetPart = () => {
+    if (!workspaceId || !frame || !componentHeader?.part) return;
+    void applyDesignEditCached(workspaceId, frame, {
+      schemaVersion: 1,
+      transactionId: `desktop:${crypto.randomUUID()}`,
+      actor: { kind: "human", id: "desktop" },
+      intent: "Reset part",
+      createdAt: Date.now(),
+      operations: [{ operationId: "reset-part", type: "node.set-attribute", nodeId: componentHeader.host,
+        attribute: designPartOverrideAttribute(componentHeader.part), value: null }],
+    }).catch((error) => toast.error("Couldn't reset the part", { description: errorMessage(error) }));
+  };
   const selectInstance = () => {
     if (!workspaceId || !folder || !frame || !componentHeader) return;
     void selectDesignTargets({ workspaceId, folder, targets: [{ frame: frame.file, nodeId: componentHeader.host }] }).catch(() => {});
@@ -3081,9 +3097,14 @@ export const DesignInspector = React.memo(function DesignInspector({
           className="border-border1 text-fg3 flex min-h-7 min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1 border-t py-1 pr-1.5 pl-3 text-xs leading-4">
           <ComponentGlyph className="size-3 shrink-0" aria-hidden="true" />
           {/* Its own width first, so a narrow panel moves the buttons to a line of their own. */}
-          <span className="min-w-0 grow basis-auto truncate">{componentHeader.part ? `Part of ${componentHeader.title}.` : `Instance of ${componentHeader.title}`}</span>
+          <span className="min-w-0 grow basis-auto truncate">
+            {componentHeader.part ? `Part of ${componentHeader.title}${partOverridden ? ", overridden" : ""}.` : `Instance of ${componentHeader.title}`}
+          </span>
           {componentHeader.part ? (
             <span className="flex shrink-0 items-center gap-1">
+              {partOverridden ? (
+                <Button type="button" variant="secondary" size="compact" data-design-part-reset="" disabled={editsDisabled} onClick={resetPart}>Reset</Button>
+              ) : null}
               <Button type="button" variant="secondary" size="compact" data-design-select-instance="" onClick={selectInstance}>Select instance</Button>
               <Button type="button" variant="secondary" size="compact" data-design-edit-main="" disabled={!componentHeader.component.frame && !onOpenFile} onClick={editMain}>
                 {componentHeader.component.frame ? "Edit main" : "Open in Files"}
@@ -3293,7 +3314,7 @@ export const DesignInspector = React.memo(function DesignInspector({
                   ownerKey={styleOwnerKey}
                   origins={fieldOrigins}
                   disabled={editsDisabled}
-                  readOnly={holding || partSelected}
+                  readOnly={holding}
                   apiRef={overlaysApiRef}
                   onChooseToken={chooseFieldToken}
                   onReset={resetField}

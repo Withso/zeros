@@ -2,7 +2,7 @@ import { useDesignWorkspaceUiStore } from "./design-workspace-ui";
 import type { DesignMovementGuard } from "@zeros/protocol/design-relocation";
 import { normalizeDesignPagesSnapshot } from "@zeros/protocol/design-pages";
 import { isDesignComponentVariantName } from "@zeros/protocol/design-path";
-import { refuseDesignComponentPartWrite } from "./design-component-parts";
+import { isDesignComponentPartNodeId, refuseDesignComponentPartWrite } from "./design-component-parts";
 import { forgetDesignLayerDisclosure } from "./design-layer-disclosure";
 import { rememberDesignDirectoryIdentity, setDesignKnownPagesReader, type DesignCanvasItemInput } from "../../../platform/bridge/design-bridge";
 // Canvas, inspector and the Layers panel consume one aggregate engine response.
@@ -1863,7 +1863,6 @@ export async function updateDesignNodeStylesCached(
     styles: Record<string, string | null>;
   },
 ): Promise<DesignMutationResultWire> {
-  refuseDesignComponentPartWrite(input.nodeId);
   return runLocalDesignMutation(workspaceId, async (assertOwner) =>
     executeWithFreshGenerationRetry(
       workspaceId,
@@ -2624,6 +2623,9 @@ async function adoptDesignStyleGeneration(
     !nextSourceVersion ||
     nextSourceVersion === previousSourceVersion ||
     (updates.length < 1 && !patch) ||
+    // A part's override styles every repeated copy of it, and adds to its
+    // own inline style rather than replacing it: only the new render has it.
+    updates.some((update) => isDesignComponentPartNodeId(update.nodeId)) ||
     designRuntimeFrameState(workspaceId, frame)?.sourceVersion !==
       previousSourceVersion
   ) {

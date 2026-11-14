@@ -367,6 +367,12 @@ function elementForMutation(
   return matches[0];
 }
 
+/** A layer's tag and attributes as written (decoded). */
+export function designNodeAttributes(source: string, nodeId: string): { tag: string; attributes: ReadonlyMap<string, string> } {
+  const element = elementForMutation(source, nodeId, undefined, { shadow: true });
+  return { tag: element.tagName, attributes: new Map(element.attrs.map((attribute) => [attribute.name, attribute.value])) };
+}
+
 function shadowContentRefusal(nodeId: string): Error {
   return new Error(
     `Design element ${nodeId} is inside a shadow root: restyle or retext it here, and move, duplicate or delete it by editing the HTML.`,

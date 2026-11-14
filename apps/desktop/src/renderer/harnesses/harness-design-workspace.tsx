@@ -29,6 +29,8 @@ import {
 } from "@zeros/design-core/components";
 import { appendComponentVariant, mutateComponentOption } from "@zeros/design-web/component-options";
 import { createComponentTemplateBudget, designComponentSummaryOf, renderComponentTemplate } from "@zeros/design-web/component-template";
+import { applyDesignPartStyleOverrides, designPartOfNodeId, designPartStyleAttribute, designPartStyleOverrides, mergeDesignPartStyleOverride }
+  from "@zeros/design-web/component-overrides";
 import { designComponentPreviewMessagesForTests } from "../features/design-workspace/state/design-component-options";
 import { mutateDesignNodeAttributeSource, mutateDesignNodeDuplicateSource, mutateDesignNodeDeleteSource } from "@zeros/design-web/html";
 import {
@@ -327,7 +329,8 @@ function renderHarnessComponentFrame(source: string, variant: string | null = nu
 
 // The home frame places one Chat composer, expanded as the engine expands an
 // instance: the definition's markup with the instance's values, its inner
-// layers as parts, and its values on a zero-specificity rule for its host.
+// layers as parts with its part overrides, and its values on a
+// zero-specificity rule for its host.
 const HARNESS_INSTANCE = '<zd-chat-composer data-oid="home-composer" width="800" mode="plan"></zd-chat-composer>';
 let harnessComponentDefinition = COMPONENT_OPTIONS_SOURCE;
 const harnessInstanceFailures = new Set<string>();
@@ -351,21 +354,39 @@ function renderHarnessInstances(source: string): string {
   const html = source.replace(/<zd-chat-composer\b([^>]*)><\/zd-chat-composer>/g, (_match, attributes: string) => {
     const id = String(++count);
     const oid = /data-oid="([^"]+)"/.exec(attributes)?.[1] ?? "";
-    const values = componentOptionValues(declaration, hosts.get(oid) ?? new Map()).values;
+    const hostAttributes = hosts.get(oid) ?? new Map<string, string>();
+    const values = componentOptionValues(declaration, hostAttributes).values;
     const scope = componentExpressionScope(declaration, values);
     rules.push(`:where([data-zd-instance="${id}"]) { ${componentOptionCss(declaration, values, scope)} }`);
-    const inner = renderComponentTemplate(body, { scope, ids: "part", budget: createComponentTemplateBudget() });
+    const inner = applyDesignPartStyleOverrides(renderComponentTemplate(body, { scope, ids: "part", budget: createComponentTemplateBudget() }),
+      harnessPartOverrides(hostAttributes));
     return `<zd-chat-composer${attributes} data-zd-instance="${id}" style="display:block">${inner}</zd-chat-composer>`;
   });
   return html.replace(/<\/head>/i, `<style data-zeros-component="chat-composer">${styles}</style><style data-zeros-options>${rules.join("\n")}</style></head>`);
 }
 
+function harnessPartOverrides(attributes: ReadonlyMap<string, string>): Map<string, string> {
+  return designPartStyleOverrides([...attributes].map(([name, value]) => ({ name, value })));
+}
+
+/** A part's style write as the adapter stores it: its host's zd-style-<part>. */
+function harnessPartStyleSource(source: string, nodeId: string, styles: Record<string, string | null>): string {
+  const part = designPartOfNodeId(nodeId)!;
+  const attribute = designPartStyleAttribute(part.part)!;
+  const existing = harnessInstanceAttributes(source).get(part.host)?.get(attribute);
+  return mutateDesignNodeAttributeSource(source, part.host, attribute, mergeDesignPartStyleOverride(existing, new Map(Object.entries(styles))), "home.html");
+}
+
 /** What the engine reports about the home frame's instance. */
 function harnessInstancesRecord(source: string, notApplied?: "last-good" | "defaults") {
   const summary = designComponentSummaryOf(harnessComponentDefinition)!;
-  const hosts = Object.fromEntries([...harnessInstanceAttributes(source)].map(([oid, attributes]) => [oid, {
-    component: "chat-composer", attributes: Object.fromEntries(attributes), ...(harnessInstanceFailures.has(oid) ? { failed: true as const } : {}),
-  }]));
+  const hosts = Object.fromEntries([...harnessInstanceAttributes(source)].map(([oid, attributes]) => {
+    const overrides = harnessPartOverrides(attributes);
+    return [oid, {
+      component: "chat-composer", attributes: Object.fromEntries(attributes), ...(harnessInstanceFailures.has(oid) ? { failed: true as const } : {}),
+      ...(overrides.size ? { overrides: Object.fromEntries(overrides) } : {}),
+    }];
+  }));
   if (!Object.keys(hosts).length) return undefined;
   const record = { components: { "chat-composer": { elements: summary.elements, reach: summary.reach, file: "pricing.html", frame: true } }, hosts,
     ...(notApplied ? { notApplied } : {}) };
@@ -1808,6 +1829,25 @@ async function main() {
           },
         };
       }
+      if (componentOptionsHarness && message.op === "design.node.styles" && designPartOfNodeId(String(message.params?.nodeId ?? ""))) {
+        const current = currentWorkspaceSnapshot.frames.find((frame) => frame.file === "home.html")!;
+        if (String(message.params?.sourceVersion ?? "") !== current.sourceVersion) throw new Error("The part's frame changed before the write.");
+        componentUndo.push({ source: currentPricingSource, home: currentHomeSource, frame: "home.html", snapshot: currentWorkspaceSnapshot });
+        componentRedo.length = 0;
+        const { before, after } = publishHomeFrame(harnessPartStyleSource(currentHomeSource, String(message.params!.nodeId),
+          (message.params?.styles ?? {}) as Record<string, string | null>));
+        applyDesignWorkspaceRefreshVersion(workspaceId, 500 + componentGeneration);
+        const home = currentWorkspaceSnapshot.frames.find((frame) => frame.file === "home.html")!;
+        return {
+          type: "WORKSPACE_RESPONSE",
+          result: {
+            mutation: { changed: true, frame: { ...home, source: currentHomeSource, srcDoc: withDesignRuntime(currentHomeSource, after), tree: [] },
+              lint: currentWorkspaceSnapshot.lint },
+            snapshot: currentWorkspaceSnapshot,
+            foundationRevision: { before: `harness:${before}`, after: `harness:${after}` },
+          },
+        };
+      }
       if (message.op === "design.node.styles") {
         const requestedSourceVersion = String(
           message.params?.sourceVersion ?? "",
@@ -2011,7 +2051,8 @@ async function main() {
         }
         const componentWrite = transaction?.operations?.length && transaction.operations.every((operation) => operation.type === "component.set-option" || operation.type === "component.save-variant");
         const instanceWrite = transaction?.operations?.length && transaction.documentId === "harness:home.html" &&
-          transaction.operations.every((operation) => operation.type === "node.set-attribute");
+          transaction.operations.every((operation) => operation.type === "node.set-attribute" ||
+            (operation.type === "node.set-styles" && !!designPartOfNodeId(String(operation.nodeId ?? ""))));
         if (componentOptionsHarness && (componentWrite || instanceWrite)) {
           const file = componentWrite ? "pricing.html" : "home.html";
           const current = currentWorkspaceSnapshot.frames.find((frame) => frame.file === file)!;
@@ -2023,6 +2064,7 @@ async function main() {
           for (const operation of (transaction.operations ?? []) as unknown as Array<Record<string, never>>) {
             if (operation.type === "component.set-option") next = mutateComponentOption(next, operation.file, operation as never);
             else if (operation.type === "component.save-variant") next = appendComponentVariant(next, operation.file, operation as never);
+            else if (operation.type === "node.set-styles") next = harnessPartStyleSource(next, operation.nodeId, operation.styles);
             else next = mutateDesignNodeAttributeSource(next, operation.nodeId, operation.attribute, operation.value, "home.html");
           }
           const { before, after } = componentWrite ? publishComponentFrame(next) : publishHomeFrame(next);

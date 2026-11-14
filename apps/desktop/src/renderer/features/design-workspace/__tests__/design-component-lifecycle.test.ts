@@ -74,11 +74,11 @@ describe("an instance whose component is gone", () => {
     expect(panels).toContain("displayName={designLayerDisplayName(frame, layer.node, mainTitle)}");
     expect(panels).toContain("designLayerDisplayName(selectedFrame, node, mainTitle)");
     expect(panels).not.toContain("peekSnapshot(workspaceId).data?.frames");
-    // An instance row carries the component mark; a part row is neither hidden nor renamed from Layers.
+    // An instance row carries the component mark; a part row is hidden like any layer, never renamed.
     expect(panels).toContain('kind === "instance") return <Diamond data-design-layer-instance=""');
-    expect(panels).toContain('{kind === "part" ? null : <IconButton');
+    expect(panels).not.toContain('{kind === "part" ? null : <IconButton');
     expect(panels).toContain('designLayerRowKind(row.frame, row.layer.node.oid) === "part") return;');
-    expect(panels).toContain('designLayerRowKind(frame, layer.node.oid) === "part") return;');
+    expect(panels).not.toContain('designLayerRowKind(frame, layer.node.oid) === "part") return;');
   });
 });
 

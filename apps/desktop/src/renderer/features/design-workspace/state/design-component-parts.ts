@@ -1,8 +1,10 @@
-// PURPOSE: An instance's inner parts can be selected and read, never written:
-// what a component offers is in its Options, and the rest is changed on the
-// main component. Every node write the canvas and the Style panel make goes
-// through the workspace cache, which refuses one that names a part before
-// anything is sent; the engine would find no such layer either.
+// PURPOSE: An instance's inner parts can be selected, restyled and hidden,
+// as in Figma: a style write on a part becomes an override on its instance
+// (the host's zd-style-<part>), and the Layers eye hides it on the canvas.
+// Its layers, structure and text belong to the main component (text that
+// an option sets is changed in Options). Every node write the canvas and the
+// Style panel make goes through the workspace cache, which refuses any other
+// write that names a part before anything is sent.
 
 import type { DesignFrameComponent, DesignFrameInstances } from "@zeros/protocol/design-catalog";
 import { designComponentPartOf } from "@zeros/protocol/design-runtime";
@@ -18,18 +20,28 @@ export function designComponentPartHost(nodeId: string): string {
 
 export class DesignComponentPartWriteError extends Error {
   constructor() {
-    super("That layer is part of a component instance. Change it with the instance's Options, or on the main component.");
+    super("That layer is part of a component instance. Change its style here, its text with the instance's Options, and anything else on the main component.");
     this.name = "DesignComponentPartWriteError";
   }
 }
 
-/** Throw when a write's input names a part anywhere a layer id can go. */
+/** The key an instance's record gives a part's override, and the host
+ * attribute that holds it: shared by a part's repeated copies ("chip#1"),
+ * lowercased as HTML names attributes. */
+export function designPartOverrideKey(part: string): string {
+  return part.replace(/#\d+$/, "").toLowerCase();
+}
+export const designPartOverrideAttribute = (part: string) => `zd-style-${designPartOverrideKey(part)}`;
+
+/** Throw when a write's input names a part anywhere a layer id can go,
+ * except a style write, which the engine stores as the instance's override. */
 export function refuseDesignComponentPartWrite(input: unknown, depth = 0): void {
   if (typeof input === "string") {
     if (isDesignComponentPartNodeId(input)) throw new DesignComponentPartWriteError();
     return;
   }
   if (!input || typeof input !== "object" || depth > 3) return;
+  if ((input as { type?: unknown }).type === "node.set-styles") return;
   for (const value of Array.isArray(input) ? input : Object.values(input)) refuseDesignComponentPartWrite(value, depth + 1);
 }
 
@@ -124,7 +136,7 @@ export function designLayerDisplayName(
 }
 
 /** What a Layers row is: an instance of a component, one of an instance's
- * parts (read-only: it is neither renamed nor hidden), or any other layer. */
+ * parts (hidden and restyled, never renamed), or any other layer. */
 export function designLayerRowKind(frame: object, nodeId: string): "instance" | "part" | "layer" {
   if (isDesignComponentPartNodeId(nodeId)) return "part";
   return designComponentInstanceMark(presentedInstances(frame), nodeId, () => undefined) ? "instance" : "layer";

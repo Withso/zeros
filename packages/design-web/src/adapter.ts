@@ -44,6 +44,7 @@ import type {
   DesignWebMutation,
 } from "./model";
 import { updateDesignWebState } from "./revision";
+import { designPartOfNodeId } from "./component-overrides";
 import {
   appendComponentVariant,
   designSourceDeclaresComponentOptions,
@@ -985,7 +986,7 @@ export const designWebTransactionAdapter: DesignTransactionAdapter<DesignWebDocu
             ...(operation.type === "node.set-styles" ||
             operation.type === "node.set-text" ||
             operation.type === "node.set-attribute"
-              ? { only: new Set([operation.nodeId]) }
+              ? { only: new Set([designPartOfNodeId(operation.nodeId)?.host ?? operation.nodeId]) }
               : {}),
           })
         : null;

@@ -6,7 +6,8 @@ import { parse, parseFragment, type DefaultTreeAdapterTypes } from "parse5";
 import postcss, { type AtRule } from "postcss";
 import { sharedDesignParse } from "./shared-parse";
 
-import { assertDesignComponentDefinitionIdentities, rebaseDesignCssReferences, rebaseDesignHtmlReferences } from "@zeros/design-web";
+import { applyDesignPartStyleOverrides, assertDesignComponentDefinitionIdentities, designPartStyleOverrides, DESIGN_PART_STYLE_ATTRIBUTE_PREFIX,
+  rebaseDesignCssReferences, rebaseDesignHtmlReferences } from "@zeros/design-web";
 import {
   ComponentExpressionError,
   componentExpressionScope,
@@ -1014,7 +1015,17 @@ function recordHost(
   }
   const attributes = new Map<string, string>();
   const ignored = new Map<string, string>();
+  const overrides = new Map<string, string>();
   for (const attribute of instance.attrs) {
+    if (attribute.name.startsWith(DESIGN_PART_STYLE_ATTRIBUTE_PREFIX)) {
+      const part = attribute.name.slice(DESIGN_PART_STYLE_ATTRIBUTE_PREFIX.length);
+      if (part && attribute.name.length <= DESIGN_COMPONENT_RECORD_LIMITS.attributeName && overrides.size < DESIGN_COMPONENT_RECORD_LIMITS.attributes) {
+        // An override too long to report would mislead, as an option's would.
+        if (attribute.value.length > DESIGN_COMPONENT_RECORD_LIMITS.attributeValue) return;
+        if (attribute.value.trim()) overrides.set(part, attribute.value.trim());
+      }
+      continue;
+    }
     if (!names.has(attribute.name)) {
       if (componentIgnoresAttribute(attribute.name) && attribute.name.length <= DESIGN_COMPONENT_RECORD_LIMITS.attributeName &&
         attribute.value.length <= DESIGN_COMPONENT_RECORD_LIMITS.attributeValue && ignored.size < DESIGN_COMPONENT_RECORD_LIMITS.attributes)
@@ -1026,7 +1037,8 @@ function recordHost(
     attributes.set(attribute.name, attribute.value);
   }
   record.hosts.set(oid, { component: name, attributes: Object.fromEntries(attributes), ...(extra.failed ? { failed: true as const } : {}),
-    ...(ignored.size ? { ignored: Object.fromEntries(ignored) } : {}), ...(extra.text !== undefined ? { text: extra.text } : {}) });
+    ...(ignored.size ? { ignored: Object.fromEntries(ignored) } : {}), ...(overrides.size ? { overrides: Object.fromEntries(overrides) } : {}),
+    ...(extra.text !== undefined ? { text: extra.text } : {}) });
 }
 
 /** A top-level instance of a name no definition answers to, so the panel and
@@ -1133,6 +1145,12 @@ async function expandBoundedComponents(
       let filled: string;
       const id = String(++work.instances);
       startTag = startTag.replace(/\s*\/?>$/, (end) => ` data-zd-instance="${id}"${end.trim() === "/>" ? " />" : ">"}`);
+      const overrides = designPartStyleOverrides(instance.attrs);
+      const overridden = (body: string) => {
+        if (!overrides.size) return body;
+        budget.charge(body.length);
+        return applyDesignPartStyleOverrides(body, overrides);
+      };
       if (definition.template) {
         const attributes = new Map(instance.attrs.map((attribute) => [attribute.name, attribute.value]));
         const templated = definition as ComponentDefinition & { template: NonNullable<ComponentDefinition["template"]> };
@@ -1145,11 +1163,11 @@ async function expandBoundedComponents(
         if (depth === 0 && rendered.empty) work.instancesEmpty = true;
         work.templated = true;
         if (rendered.css) work.rules.push(`:where([data-zd-instance="${id}"]) { ${rendered.css} }`);
-        filled = rendered.body ? fillSlots(rendered.body, markup, instance, budget) : "";
+        filled = rendered.body ? fillSlots(overridden(rendered.body), markup, instance, budget) : "";
       } else {
         if (usage && definition.slots)
           recordSlotInstance(usage, definition as ComponentDefinition & { slots: NonNullable<ComponentDefinition["slots"]> }, instance);
-        filled = fillSlots(definition.body, markup, instance, budget);
+        filled = fillSlots(overridden(definition.body), markup, instance, budget);
       }
       const expanded = expand(filled, [...stack, name], depth + 1);
       budget.charge(result.length + expanded.length);

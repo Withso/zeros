@@ -28,7 +28,14 @@ describe("what a person may not type over in a component", () => {
     expect(designComponentTextLock({}, "cc-send")).toBeNull();
   });
 
-  it("refuses every part of an instance, and knows its host", () => {
+  it("lets a style write name a part, as the instance's override, and refuses any other write", () => {
+    const part = designComponentPartNodeId("inst", "cc-send");
+    expect(() => refuseDesignComponentPartWrite([{ operationId: "s", type: "node.set-styles", nodeId: part, styles: { color: "red" } }])).not.toThrow();
+    expect(() => refuseDesignComponentPartWrite([{ operationId: "t", type: "node.set-text", nodeId: part, text: "x" }])).toThrow();
+    expect(() => refuseDesignComponentPartWrite([{ operationId: "m", type: "node.move", nodeId: "a", parentId: part, beforeId: null }])).toThrow();
+  });
+
+  it("refuses every other write to a part of an instance, and knows its host", () => {
     const part = designComponentPartNodeId("inst", "cc-send#1");
     expect(isDesignComponentPartNodeId(part)).toBe(true);
     expect(isDesignComponentPartNodeId("cc-send")).toBe(false);
@@ -55,7 +62,7 @@ describe("where the canvas marks a component", () => {
   };
   const mainTitle = (file: string) => (file === "home/composer.html" ? "Chat composer" : undefined);
 
-  it("tells Layers which rows are instances and which are their read-only parts", () => {
+  it("tells Layers which rows are instances and which are their parts", () => {
     expect(designLayerRowKind({ instances }, "inst-b")).toBe("instance");
     expect(designLayerRowKind({ instances }, designComponentPartNodeId("inst-b", "chip"))).toBe("part");
     // A host whose component is gone is not offered as an instance.

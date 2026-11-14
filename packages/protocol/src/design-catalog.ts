@@ -428,6 +428,9 @@ export const designFrameInstancesSchema = z.object({
     /** Attributes it sets that name no option of its component, as written;
      * the component ignores them. */
     ignored: boundedRecord(z.string().min(1).max(LIMITS.attributeName), z.string().max(LIMITS.attributeValue), LIMITS.attributes).optional(),
+    /** Its part overrides: each part (lowercased, without a repeat's "#n")
+     * to the declarations its zd-style-<part> attribute sets, as written. */
+    overrides: boundedRecord(z.string().min(1).max(LIMITS.attributeName), z.string().max(LIMITS.attributeValue), LIMITS.attributes).optional(),
     /** No component source has this name any more: its main frame or file
      * was deleted, renamed or registered under another name. A source that is
      * there but unusable (too large, unsafe, or named twice) is reported as a

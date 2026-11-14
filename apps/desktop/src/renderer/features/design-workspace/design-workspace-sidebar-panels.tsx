@@ -428,8 +428,7 @@ const DesignLayerNodeRow = React.memo(function DesignLayerNodeRow({
           <DesignLayerRowName rename={rename} name={displayName} actions={actions} />
         </div>
       </Button>
-      {/* A part is the main component's to hide. */}
-      {kind === "part" ? null : <IconButton
+      <IconButton
         type="button"
         size="inline"
         className={cn(
@@ -443,7 +442,7 @@ const DesignLayerNodeRow = React.memo(function DesignLayerNodeRow({
         onClick={() => actions.toggleVisibility(frame, layer)}
       >
         {layer.node.visible ? <Eye /> : <EyeClosed />}
-      </IconButton>}
+      </IconButton>
     </div>
   );
 });
@@ -1161,7 +1160,7 @@ function OwnedDesignWorkspaceSidebarPanels({
     frame: DesignCanvasFrameWire,
     layer: FlatDesignLayer,
   ) => {
-    if (!workspaceId || !folder || designLayerRowKind(frame, layer.node.oid) === "part") return;
+    if (!workspaceId || !folder) return;
     void setDesignNodeVisibility({
       workspaceId,
       folder,
