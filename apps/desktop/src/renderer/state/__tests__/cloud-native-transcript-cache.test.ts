@@ -31,6 +31,25 @@ function fixture(known?: (chatId: string) => Promise<{ revision: number; message
 }
 
 describe("cloud native disk and renderer memory tiers", () => {
+  it("retain forgets every admitted warm-up in one native forget, beyond 500 (one mutation generation)", async () => {
+    // Warm-ups waiting on their workspace's chats.list (the revision lookup) are admitted renderer flights; more than
+    // 500 can wait at once while the native client has few requests in flight.
+    const lookup = new Promise<{ revision: number; messageCount: number } | undefined>(() => {});
+    const f = fixture(() => lookup);
+    const forgotten: unknown[] = [];
+    f.invoke.mockImplementation(async input => {
+      if (input.op === "bind") return ok({ lease });
+      if (input.op === "read") return ok({ range: page, pending: null });
+      if (input.op === "forget") { forgotten.push(...input.targets); return ok(null); }
+      if (input.op === "list") return ok({ items: [], nextAfter: null });
+      return ok(null);
+    });
+    for (let i = 0; i < 501; i++) await f.cache.read(`cloud:${target.organizationId}:${target.workspaceId}:chat-${i}`);
+    f.cache.releaseMemory();
+    f.cache.retain(() => false);
+    await vi.waitFor(() => expect(forgotten).toHaveLength(501), { timeout: 5_000 });
+  });
+
   it("retain cancels an excluded chat's admitted native refresh so it cannot commit after the list pass", async () => {
     const f = fixture(async () => ({ revision: 9, messageCount: 1 }));
     let refreshing!: () => void;

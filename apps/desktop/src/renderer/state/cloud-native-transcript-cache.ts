@@ -106,7 +106,8 @@ export function createNativeCloudTranscriptCache(
         if (key && this.warming.has(chatId)) admitted.push(key);
         this.nativeReads.delete(chatId); this.warming.delete(chatId); this.refreshAgain.delete(chatId);
       }
-      for (let start = 0; start < admitted.length; start += 500) void native.forget(admitted.slice(start, start + 500)).catch(() => {});
+      // One call: native.forget batches by 500 under one mutation generation (separate calls would cancel each other).
+      if (admitted.length) void native.forget(admitted).catch(() => {});
       const owner = native.owner, epoch = native.epoch, memoryEpoch = this.epoch;
       if (!owner || !this.isOwner(owner)) return;
       const current = () => owner === native.owner && epoch === native.epoch && memoryEpoch === this.epoch && this.isOwner(owner);
