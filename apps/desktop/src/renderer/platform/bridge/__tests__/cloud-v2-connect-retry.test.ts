@@ -49,6 +49,7 @@ vi.mock("../ws-client", () => ({
 
 import { ControlPlaneError } from "../../../features/team/control-plane";
 import { openCloudV2Runtime } from "../open-cloud-v2-runtime";
+import { relayPresenceActive } from "../relay-presence";
 import { cloudConnectBackoffKey, cloudConnectWaitMs, recordCloudConnectFailure, resetCloudConnectBackoffForTests } from "../cloud-connect-backoff";
 
 const target = { organizationId: "11111111-1111-4111-8111-111111111111", workspaceId: "22222222-2222-4222-8222-222222222222" };
@@ -263,5 +264,20 @@ describe("bounded cloud connect ticket retries", () => {
     expect(await attempt.result).toBeInstanceOf(Error);
     await vi.advanceTimersByTimeAsync(5_000); expect(mocks.connect).not.toHaveBeenCalled();
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("R1 relay-presence-v1: a connection admitted with the feature counts as presence while open; without it, never", async () => {
+    mocks.connect.mockResolvedValueOnce({ ...ticket, features: ["relay-presence-v1"] } as never);
+    const attempt = opening(); await flush();
+    const peer = await attempt.result;
+    if (peer instanceof Error) throw peer;
+    expect(relayPresenceActive(target)).toBe(true);
+    peer.release();
+    expect(relayPresenceActive(target)).toBe(false);
+    const plain = opening(); await flush();
+    const other = await plain.result;
+    if (other instanceof Error) throw other;
+    expect(relayPresenceActive(target)).toBe(false);
+    other.release();
   });
 });

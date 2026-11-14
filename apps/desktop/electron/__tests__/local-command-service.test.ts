@@ -249,3 +249,47 @@ describe("local command service", () => {
     expect(s.service.deviceHeaders()).toBeNull();
   });
 });
+
+describe("R1 device-liveness-v1", () => {
+  const ready = (heartbeatIntervalMs: 25_000 | 300_000) => ({ event: "ready" as const, data: { deviceId, registrationId: device.registrationId, instanceId: device.instanceId,
+    presence: { presenceRequired: true, reachableUntil: null }, heartbeatIntervalMs, ...(heartbeatIntervalMs === 300_000 ? { features: ["device-liveness-v1" as const] } : {}) } });
+
+  it("offers device-liveness-v1 and falls back one capability at a time on an older control plane", async () => {
+    const root = await mkdtemp(join(tmpdir(), "local-command-liveness-")); directories.push(root);
+    const h = harness({ journalRoot: root });
+    const offered: string[][] = [];
+    let refusals = 2;
+    (h.deps.control.register as ReturnType<typeof vi.fn>).mockImplementation(async (_name: unknown, registration: { capabilities: string[] }) => {
+      offered.push([...registration.capabilities]);
+      if (refusals-- > 0) throw new DeviceControlError(400, "invalid_request");
+      return { device, presence: { presenceRequired: false, reachableUntil: null }, heartbeatIntervalMs: 25_000 as const };
+    });
+    const service = new LocalCommandService(h.deps); await service.start();
+    await vi.waitFor(() => expect(offered).toHaveLength(3));
+    expect(offered).toEqual([["local-commands-v1", "local-commands-reason-v1", "device-liveness-v1"], ["local-commands-v1", "local-commands-reason-v1"], ["local-commands-v1"]]);
+    await service.stop();
+  });
+
+  it("heartbeats at the interval the ready frame names: 5 min with the feature, 25 s without", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
+    const s = await setup();
+    const beats = () => s.calls.filter(call => call === "heartbeat").length;
+    s.push(ready(300_000));
+    await vi.waitFor(() => expect(beats()).toBeGreaterThan(0));
+    await vi.advanceTimersByTimeAsync(1);
+    const initial = beats();
+    // The server's own stream heartbeats keep the channel alive; the Mac's presence beat is what changes.
+    const serverPulse = async (ms: number) => {
+      for (let left = ms; left > 0; left -= 30_000) {
+        s.push({ event: "heartbeat", data: { at: new Date(Date.now()).toISOString(), presence: { presenceRequired: true, reachableUntil: null } } });
+        await vi.advanceTimersByTimeAsync(Math.min(30_000, left));
+      }
+    };
+    // No 25 s beat any more.
+    await serverPulse(60_000);
+    expect(beats()).toBe(initial);
+    await serverPulse(240_000);
+    expect(beats()).toBe(initial + 1);
+    await s.service.stop();
+  });
+});

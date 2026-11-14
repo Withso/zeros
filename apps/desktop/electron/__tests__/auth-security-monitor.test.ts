@@ -6,6 +6,8 @@ import {
   consumeSecurityEventStream,
   securityStreamEndLog,
   desktopSecurityEventAction,
+  readyAnnouncesCatalogEvents,
+  cloudCatalogChange,
 } from "../auth-security-monitor";
 
 function stream(chunks: string[]): ReadableStream<Uint8Array> {
@@ -230,5 +232,26 @@ describe("desktop WorkOS security lifecycle", () => {
       level: "warn",
       message: "[auth-security] stream ended: Error",
     });
+  });
+});
+
+describe("R1 catalog-events-v1 on the account events stream", () => {
+  it("reads the feature from the ready frame only", () => {
+    expect(readyAnnouncesCatalogEvents('{"cursor":4,"features":["catalog-events-v1"]}')).toBe(true);
+    expect(readyAnnouncesCatalogEvents('{"cursor":4}')).toBe(false);
+    expect(readyAnnouncesCatalogEvents('{"features":"catalog-events-v1"}')).toBe(false);
+    expect(readyAnnouncesCatalogEvents("not json")).toBe(false);
+    expect(readyAnnouncesCatalogEvents("")).toBe(false);
+  });
+
+  it("turns organization.data_changed for a cloud workspace into a catalog change carrying no content", () => {
+    const base = { sequence: 5, kind: "organization.data_changed" as const, organizationId: "org", workspaceId: null, accountRevision: null,
+      authorizationRevision: null, dataRevision: 3, createdAt: "2026-11-13T00:00:00Z" };
+    for (const change of ["created", "document", "lifecycle", "pull_request", "deleted"])
+      expect(cloudCatalogChange({ ...base, payload: { resource: "cloud_workspace", workspaceId: "ws", change } })).toEqual({ organizationId: "org", workspaceId: "ws", change });
+    expect(cloudCatalogChange({ ...base, payload: { resource: "members" } })).toBeNull();
+    expect(cloudCatalogChange({ ...base, payload: { resource: "cloud_workspace", workspaceId: "ws", change: "renamed" } })).toBeNull();
+    expect(cloudCatalogChange({ ...base, kind: "organization.access_revoked" as never, payload: { resource: "cloud_workspace", workspaceId: "ws", change: "document" } })).toBeNull();
+    expect(cloudCatalogChange({ ...base, organizationId: null, payload: { resource: "cloud_workspace", workspaceId: "ws", change: "document" } })).toBeNull();
   });
 });

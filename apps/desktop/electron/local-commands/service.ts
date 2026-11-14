@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import {
-  LOCAL_COMMAND_DEVICE_HEADERS, LOCAL_COMMAND_LIMITS, LOCAL_COMMANDS_FEATURE, LOCAL_COMMANDS_REASON_FEATURE,
+  LOCAL_COMMAND_DEVICE_HEADERS, LOCAL_COMMAND_LIMITS, LOCAL_COMMANDS_FEATURE, LOCAL_COMMANDS_REASON_FEATURE, DEVICE_LIVENESS_FEATURE,
   type LocalCommandDevice, type LocalCommandMacResult, type LocalCommandNotice, type LocalCommandPendingNotice, type LocalCommandPresence,
 } from "@zeros/protocol/local-commands";
 import type { NotifyUserEvent } from "@zeros/protocol/notify-user";
@@ -137,7 +137,7 @@ export class LocalCommandService {
   private async channel(session: { accountId: string; sessionId: string }, signal: AbortSignal): Promise<void> {
     const { accountId } = session;
     // One request id is only ever sent with one exact body: the id and the capability set change together.
-    let registration = { requestId: randomUUID(), capabilities: [LOCAL_COMMANDS_FEATURE, LOCAL_COMMANDS_REASON_FEATURE] as readonly string[] }, attempt = 0;
+    let registration = { requestId: randomUUID(), capabilities: [LOCAL_COMMANDS_FEATURE, LOCAL_COMMANDS_REASON_FEATURE, DEVICE_LIVENESS_FEATURE] as readonly string[] }, attempt = 0;
     const stillSignedIn = async () => {
       const current = await this.deps.session().catch(() => null);
       return !!current && current.accountId === session.accountId && current.sessionId === session.sessionId;
@@ -160,9 +160,10 @@ export class LocalCommandService {
         const code = codeOf(error);
         this.log(`register failed code=${code}`);
         if (authFailure(code) && !await stillSignedIn()) { this.log("channel stopped reason=signed_out"); return; }
-        // A control plane from before wire v1.3 refuses the reason capability: register as v1 alone, under a new id.
+        // An older control plane refuses a capability it does not know: drop the newest one and register again under a
+        // new id (device-liveness-v1, then the v1.3 reason capability, leaving v1 alone).
         if (error instanceof DeviceControlError && error.status === 400 && registration.capabilities.length > 1) {
-          registration = { requestId: randomUUID(), capabilities: [LOCAL_COMMANDS_FEATURE] }; continue;
+          registration = { requestId: randomUUID(), capabilities: registration.capabilities.slice(0, -1) }; continue;
         }
         // That id was committed with another body: never loop on it.
         if (code === "device_registration_conflict") registration = { ...registration, requestId: randomUUID() };
@@ -214,7 +215,7 @@ export class LocalCommandService {
     if (was !== presence.presenceRequired) this.log(`presence required ${presence.presenceRequired ? "on" : "off"}`);
     // A Mac connected nowhere, or without a live stream, sends no presence heartbeat.
     if (presence.presenceRequired && this.streamLive && !this.heartbeat) {
-      this.heartbeat = setInterval(() => { void this.beat(); }, 25_000);
+      this.heartbeat = setInterval(() => { void this.beat(); }, this.heartbeatMs);
       this.heartbeat.unref?.();
       // Becoming a command target is reported at once, not at the next tick.
       void this.beat();
@@ -230,7 +231,13 @@ export class LocalCommandService {
     catch (error) { this.log(`heartbeat failed code=${codeOf(error)}`); /* The next beat or presence event repairs it. */ }
   }
 
+  /** The interval the latest ready named (device-liveness-v1: 5 min); an older control plane always says 25 s. */
+  private heartbeatMs = 25_000;
   private onEvent(event: DeviceEvent): void {
+    if (event.event === "ready" && event.data.heartbeatIntervalMs !== this.heartbeatMs) {
+      this.heartbeatMs = event.data.heartbeatIntervalMs;
+      if (this.heartbeat) { clearInterval(this.heartbeat); this.heartbeat = undefined; }
+    }
     if (event.event === "ready" || event.event === "presence") {
       this.setPresence(event.event === "ready" ? event.data.presence : event.data);
       this.deps.syncHint?.();

@@ -282,6 +282,25 @@ function parseSecurityEvent(value: string): SecurityEvent | null {
   };
 }
 
+/** R1 catalog-events-v1: the account stream's ready frame says it reports every cloud workspace change, so the
+ * renderer refreshes the catalog on those events and keeps only a 60 s fallback. */
+export function readyAnnouncesCatalogEvents(data: string): boolean {
+  if (!data || data.length > MAX_SSE_EVENT_BYTES) return false;
+  try {
+    const features = (JSON.parse(data) as { features?: unknown } | null)?.features;
+    return Array.isArray(features) && features.includes("catalog-events-v1");
+  } catch { return false; }
+}
+
+const CATALOG_CHANGES = new Set(["created", "document", "lifecycle", "pull_request", "deleted"]);
+/** organization.data_changed for one cloud workspace (ids and the kind of change only, no workspace content). */
+export function cloudCatalogChange(event: SecurityEvent): { organizationId: string; workspaceId: string; change: string } | null {
+  if (event.kind !== "organization.data_changed" || !event.organizationId || event.payload.resource !== "cloud_workspace") return null;
+  const { workspaceId, change } = event.payload;
+  if (typeof workspaceId !== "string" || workspaceId.length > 64 || typeof change !== "string" || !CATALOG_CHANGES.has(change)) return null;
+  return { organizationId: event.organizationId, workspaceId, change };
+}
+
 export function desktopSecurityEventAction(
   kind: string,
 ): "sign_out" | "refresh" | "none" {
@@ -617,6 +636,8 @@ export class WorkOSDesktopSecurityMonitor {
           return;
         }
         this.streamAbort = null;
+        // Until the next ready says otherwise, the renderer is back on its own catalog timers.
+        this.setCatalogEvents(false);
         this.scheduleReconnect();
       });
   }
@@ -659,6 +680,7 @@ export class WorkOSDesktopSecurityMonitor {
       if (frame.event === "ready" || frame.event === "heartbeat") {
         this.lastContactAt = this.now();
         this.reconnectAttempt = 0;
+        if (frame.event === "ready") this.setCatalogEvents(readyAnnouncesCatalogEvents(frame.data));
         return;
       }
       const event = parseSecurityEvent(frame.data);
@@ -666,6 +688,9 @@ export class WorkOSDesktopSecurityMonitor {
       this.lastContactAt = this.now();
       this.reconnectAttempt = 0;
       this.cursor = Math.max(this.cursor, event.sequence);
+      // A cloud workspace change on a catalog-events-v1 stream refreshes that organization's catalog, not /v1/me.
+      const catalog = this.catalogEvents ? cloudCatalogChange(event) : null;
+      if (catalog) { this.options.emit("cloud-catalog-changed", catalog); return; }
       const action = desktopSecurityEventAction(event.kind);
       if (action === "sign_out") {
         this.terminate(binding, event.kind);
@@ -675,6 +700,13 @@ export class WorkOSDesktopSecurityMonitor {
         this.options.emit("auth-security-event", event);
       }
     });
+  }
+
+  private catalogEvents = false;
+  private setCatalogEvents(on: boolean): void {
+    if (on === this.catalogEvents) return;
+    this.catalogEvents = on;
+    this.options.emit("cloud-catalog-stream", { catalogEvents: on });
   }
 
   private scheduleReconnect(): void {
