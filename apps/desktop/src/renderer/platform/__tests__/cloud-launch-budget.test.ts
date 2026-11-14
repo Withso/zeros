@@ -94,7 +94,7 @@ async function launch(cp: ReturnType<typeof controlPlane>, restored: string[]) {
   const { readCloudV2History } = await import("../cloud-v2");
   const { nativeCloudChatCache } = await import("../cloud-chat-cache");
   const { cloudTranscriptCache } = await import("../../state/local-transcript-cache");
-  const { cloudScopedId } = await import("../bridge/cloud-workspace-key");
+  const { cloudScopedId, cloudWorkspaceKey } = await import("../bridge/cloud-workspace-key");
   nativeCloudChatCache.bindOwner(owner, session);
   cloudTranscriptCache.bindOwner(owner, false);
   const client = new WorkspaceRuntimeClient({ open: vi.fn(), readHistory: readCloudV2History, historyRoot: () => root, workspaces: () => [] });
@@ -103,6 +103,17 @@ async function launch(cp: ReturnType<typeof controlPlane>, restored: string[]) {
   // Launch entry points: every restored workspace warms its history (lifecycle + selected attach, as census K saw), and
   // the restored transcripts paint from the cache, then the open ones read their window.
   await Promise.all([...targets.map(target => client.warmHistoryWorkspace(target)), client.warmHistoryWorkspace(targets[0]!)]);
+  // Later peer opens re-warm the same workspaces after the first flight settled (census K: 1569 ms and 2342 ms).
+  const now = Date.now.bind(Date);
+  let offset = 0;
+  const clock = vi.spyOn(Date, "now").mockImplementation(() => now() + offset);
+  try {
+    // A workspace request opens its peer, and the peer open warms history first (its connect fails here: no worker).
+    for (const target of [targets[0]!, targets[1]!, targets[0]!]) {
+      offset += 1_200;
+      await client.request({ type: "WORKSPACE_REQUEST", op: "git.status", params: { cwd: cloudWorkspaceKey(target) } }).catch(() => {});
+    }
+  } finally { clock.mockRestore(); }
   const scoped = restored.map(id => { const [n] = /chat-(\d)/.exec(id)!.slice(1); return cloudScopedId(targets[Number(n) - 1]!, id); });
   await Promise.all(scoped.map(id => cloudTranscriptCache.read(id)));
   await Promise.all(scoped.map(id => client.request({ type: "WORKSPACE_REQUEST", op: "messages.window", params: { chatId: id, limit: 200 } })));
