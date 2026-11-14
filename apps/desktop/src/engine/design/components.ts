@@ -44,6 +44,7 @@ import { diagnoseSafeRegularFile, readSafeRegularFile, type SafeRegularFileProbl
 
 const MAX_COMPONENTS_PER_FRAME = 1_024;
 const MAX_COMPONENT_BYTES = 512 * 1024;
+export const MAX_DESIGN_COMPONENT_BYTES = MAX_COMPONENT_BYTES;
 const MAX_COMPONENT_SOURCE_BYTES_PER_FRAME = 16 * 1024 * 1024;
 const MAX_EXPANSION_BYTES = 2 * 1024 * 1024;
 const MAX_EXPANSION_DEPTH = 8;
@@ -386,6 +387,11 @@ function analyzedDefinition(name: string, registered: string | undefined, source
 export function resetDesignComponentDefinitionsForTests(): void {
   analyzedDefinitions.clear();
   analyzedDefinitionBytes = 0;
+}
+
+/** Why components/<name>.html cannot be used as written, as lint reports it. */
+export function designComponentDefinitionProblems(name: string, source: string): string[] {
+  return analyzeDefinition(name, undefined, source).errors.map((error) => error.message);
 }
 
 function analyzeDefinition(name: string, registered: string | undefined, source: string): AnalyzedDefinition {

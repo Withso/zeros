@@ -11,7 +11,8 @@ import { openLayersDrawer } from "./ui-smoke-design-helpers.mjs";
 // double-click enters the instance and selects a part, whose style edits are
 // overrides on the instance (shared by repeated copies, reset and undone)
 // while its place, structure and text stay the main's; a slot the main marks
-// takes layers drawn or dropped into it, and Reset to default removes them.
+// takes layers drawn or dropped into it, and Reset to default removes them;
+// a main kept in components/ moves to the canvas, and is then Edit main.
 export async function runDesignComponentInstancesSmoke({ page, check }) {
   await page.clock.resume().catch(() => {});
   const origin = new URL(page.url()).origin;
@@ -476,4 +477,20 @@ export async function runDesignComponentInstancesSmoke({ page, check }) {
   }
   await page.evaluate(() => window.__zerosHarnessInstanceNotApplied(null));
   await expect(section.getByRole("alert")).toHaveCount(0);
+
+  // ── A main kept in components/: Move main to canvas ──
+  await page.goto(`${origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html?styleOrigins&componentOptions&legacyMain`, { waitUntil: "networkidle" });
+  await openLayersDrawer(page);
+  await selectInstance();
+  const legacyHeader = await header.innerText();
+  check("an instance whose main is a components/ file offers Move main to canvas, not Open in Files",
+    legacyHeader.includes("Move main to canvas") && !legacyHeader.includes("Open in Files") && !legacyHeader.includes("Edit main"), legacyHeader);
+  await page.locator("[data-design-edit-main]").click();
+  await expect(frameRow("pricing.html")).toHaveAttribute("aria-selected", "true");
+  const mainMoves = await page.evaluate(() => window.__zerosHarnessComponentMoves);
+  check("Move main to canvas asks the engine once for that component and selects the new main",
+    mainMoves.length === 1 && mainMoves[0].component === "chat-composer" && (await section.getAttribute("data-design-component-options")) === "main",
+    JSON.stringify(mainMoves));
+  await selectInstance();
+  check("the instance then offers Edit main", (await header.innerText()).includes("Edit main"));
 }

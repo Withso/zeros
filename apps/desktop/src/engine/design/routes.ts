@@ -130,6 +130,7 @@ import { stickyRecognizedDesignDirectories } from "./recognition-store";
 import { withDesignWorkspaceMutation } from "./document-write-lock";
 import { withMeasuredDesignMovement } from "./movement-guard";
 import { upsertDesignTheme } from "./theme-lifecycle";
+import { moveDesignComponentToCanvas } from "./component-move";
 import { restoreDesignCatalogChange } from "./page-history";
 import { setDesignRuntimeAudit } from "./runtime-audits";
 import { normalizeDesignScreenshot, setDesignScreenshot } from "./screenshots";
@@ -300,6 +301,7 @@ const DESIGN_WORKSPACE_ROUTES = new Set([
   "design.canvas.item.put",
   "design.canvas.item.delete",
   "design.themes.update",
+  "design.component.move",
   "design.frame.rename",
   "design.frame.duplicate",
   "design.frame.delete",
@@ -735,7 +737,9 @@ export async function handleDesignWorkspaceRoute(
             else source.push(entry);
             throw error;
           }
-          forgetWorkspaceDesignApiFrames(workspace.path, changedFiles.filter(file => !after.canvas.frames[file]));
+          // A step may also add or remove a source that is not a frame, such as a
+          // components/ definition moved onto the canvas.
+          forgetWorkspaceDesignApiFrames(workspace.path, changedFiles.filter(file => before.canvas.frames[file] && !after.canvas.frames[file]));
           const restored = direction === "undo" ? entry.beforeHistory : entry.afterHistory;
           for (const checkpoint of restored) await api.restoreLocalHistory(checkpoint).catch(() => false);
           if (direction === "undo") entry.afterHistory = currentHistory.checkpoints;
@@ -1446,6 +1450,18 @@ export async function handleDesignWorkspaceRoute(
         const itemId = "item" in result ? result.item?.id : result.deleted?.id;
         if (change && itemId) host.recordDesignHistory(workspace.path, catalogDesignHistoryEntry(change, pageId, [], true, itemId));
         return { ...result, snapshot: await host.readDesignSnapshot(workspace, remote, { hostLocalResources, fresh: true }) };
+      });
+    }
+    case "design.component.move": {
+      // A components/<name>.html definition becomes a registered main frame:
+      // one catalog write and one shared history step, like a page rename.
+      const workspace = host.resolveDesignWorkspace(reqStr(params, "workspaceId"), remote);
+      return withDesignWorkspaceMutation(workspace.path, async () => {
+        const pageId = params.pageId === undefined || params.pageId === null ? undefined : designPageIdSchema.parse(params.pageId);
+        const frame = await moveDesignComponentToCanvas(workspace.path, { component: reqStr(params, "component"), ...(pageId ? { pageId } : {}) },
+          change => host.recordDesignHistory(workspace.path, catalogDesignHistoryEntry(change, change.after.canvas.pages?.find(page =>
+            page.frames.some(id => !change.before.canvas.pages?.some(previous => previous.frames.includes(id))))?.id)));
+        return { frame, snapshot: await host.readDesignSnapshot(workspace, remote, { hostLocalResources, fresh: true }) };
       });
     }
     case "design.themes.update": {

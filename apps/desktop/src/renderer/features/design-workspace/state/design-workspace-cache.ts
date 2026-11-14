@@ -21,6 +21,7 @@ import {
   designPutCanvasItem,
   designDeleteCanvasItem,
   designUpdateTheme,
+  designMoveComponent,
   designRefreshStyles,
   designDeletePage,
   designFrame,
@@ -1796,6 +1797,19 @@ export async function updateDesignThemeCached(
     assertOwner();
     const snapshot = publishDesignWorkspaceSnapshot(workspaceId, result.snapshot);
     recordCatalogHistory(workspaceId, before, snapshot);
+    return { ...result, snapshot };
+  }, "edit", undefined, { catalog: true });
+}
+
+/** Make components/<name>.html a registered main frame on a page: one
+ * engine write and one Undo step, which selects the new main. */
+export async function moveDesignComponentCached(workspaceId: string, component: string, pageId?: string) {
+  return runLocalDesignMutation(workspaceId, async (assertOwner) => {
+    const before = designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data;
+    const result = await designMoveComponent(workspaceId, component, pageId);
+    assertOwner();
+    const snapshot = publishDesignWorkspaceSnapshot(workspaceId, result.snapshot);
+    recordCatalogHistory(workspaceId, before, snapshot, { pageId: result.frame.pageId, frame: result.frame.file });
     return { ...result, snapshot };
   }, "edit", undefined, { catalog: true });
 }

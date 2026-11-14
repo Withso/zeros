@@ -219,6 +219,7 @@ import {
   saveDesigns,
   updateDesignFrameGeometryCached,
   updateDesignNodeStylesCached,
+  moveDesignComponentCached,
 } from "./state/design-workspace-cache";
 import {
   DEFAULT_DESIGN_WORKSPACE_VIEW,
@@ -1508,7 +1509,6 @@ export const DesignInspector = React.memo(function DesignInspector({
   zoomActionsRef,
   onAskAgent,
   panelVisible = true,
-  onOpenFile,
 }: DesignInspectorProps) {
   const styleOriginLabel = useDesignStyleOriginLabel(workspaceId);
   const tokenCatalog = useDesignFrameTokenCatalog(workspaceId, frame?.file);
@@ -2981,20 +2981,24 @@ export const DesignInspector = React.memo(function DesignInspector({
     ? "Component"
     : missingComponent ? "Missing component"
     : selectionTitle && selectionTitle !== selectionName ? selectionName : null;
-  const editMain = () => {
-    if (!workspaceId || !folder || !componentHeader) return;
-    const { component, part } = componentHeader;
-    if (!component.frame) {
-      onOpenFile?.(`${designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.directory ?? ""}/${component.file}`.replace(/^\//, ""));
-      return;
-    }
+  const openMain = (file: string, part: string | null, pageId?: string) => {
+    if (!workspaceId || !folder) return;
     const snapshot = designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data;
-    const pageId = snapshot?.pages?.find((page) => page.frameFiles.includes(component.file))?.id;
-    zoomActionsRef.current?.revealFrames?.({ files: [component.file], pageId });
+    zoomActionsRef.current?.revealFrames?.({ files: [file], pageId: pageId ?? snapshot?.pages?.find((page) => page.frameFiles.includes(file))?.id });
     // A part's layer on the main has the id the part was made from.
     const nodeId = part ? part.replace(/#.*$/, "") : null;
-    void selectDesignTargets({ workspaceId, folder, targets: [{ frame: component.file, ...(nodeId ? { nodeId } : {}) }] })
+    void selectDesignTargets({ workspaceId, folder, targets: [{ frame: file, ...(nodeId ? { nodeId } : {}) }] })
       .catch((error) => toast.error("Couldn't open the main component", { description: errorMessage(error) }));
+  };
+  // A components/ file is not on the canvas; moving it there makes it a main
+  // frame like any other, which Edit main then opens.
+  const editMain = () => {
+    if (!workspaceId || !folder || !componentHeader || !instanceHost) return;
+    const { component, part } = componentHeader;
+    if (component.frame) return openMain(component.file, part);
+    void moveDesignComponentCached(workspaceId, instanceHost.component, activePageId ?? undefined)
+      .then((moved) => openMain(moved.frame.file, part, moved.frame.pageId))
+      .catch((error) => toast.error("Couldn't move the main to the canvas", { description: errorMessage(error) }));
   };
   const partOverridden = !!(componentHeader?.part && instanceHost?.overrides &&
     Object.hasOwn(instanceHost.overrides, designPartOverrideKey(componentHeader.part)));
@@ -3062,8 +3066,8 @@ export const DesignInspector = React.memo(function DesignInspector({
             {componentHeader && !headerInner ? componentHeader.title : missingComponent ? `zd-${missingComponent}` : selectionTitle ?? selectionName}
           </span>
           {componentHeader && !headerInner ? (
-            <Button type="button" variant="ghost" size="compact" data-design-edit-main="" disabled={!componentHeader.component.frame && !onOpenFile} onClick={editMain}>
-              {componentHeader.component.frame ? "Edit main" : "Open in Files"}
+            <Button type="button" variant="ghost" size="compact" data-design-edit-main="" disabled={!componentHeader.component.frame && (!active || pendingHistoryActions > 0)} onClick={editMain}>
+              {componentHeader.component.frame ? "Edit main" : "Move main to canvas"}
             </Button>
           ) : selectionType ? (
             <span className="text-fg3 shrink-0 text-3xxs leading-4 tabular-nums">{selectionType}</span>
@@ -3112,8 +3116,8 @@ export const DesignInspector = React.memo(function DesignInspector({
                 <Button type="button" variant="secondary" size="compact" data-design-part-reset="" disabled={editsDisabled} onClick={resetPart}>Reset</Button>
               ) : null}
               <Button type="button" variant="secondary" size="compact" data-design-select-instance="" onClick={selectInstance}>Select instance</Button>
-              <Button type="button" variant="secondary" size="compact" data-design-edit-main="" disabled={!componentHeader.component.frame && !onOpenFile} onClick={editMain}>
-                {componentHeader.component.frame ? "Edit main" : "Open in Files"}
+              <Button type="button" variant="secondary" size="compact" data-design-edit-main="" disabled={!componentHeader.component.frame && (!active || pendingHistoryActions > 0)} onClick={editMain}>
+                {componentHeader.component.frame ? "Edit main" : "Move main to canvas"}
               </Button>
             </span>
           ) : null}

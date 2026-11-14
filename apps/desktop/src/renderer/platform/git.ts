@@ -110,6 +110,7 @@ import {
   bridgeDesignPutCanvasItem,
   bridgeDesignDeleteCanvasItem,
   bridgeDesignUpdateTheme,
+  bridgeDesignMoveComponent,
   bridgeDesignDeletePage,
   bridgeDesignSelectPage,
   bridgeDesignApplyTransaction,
@@ -713,6 +714,10 @@ export async function designDeleteCanvasItem(workspaceId: string, pageId: string
 
 export async function designUpdateTheme(workspaceId: string, theme: { id: string; label: string; base?: boolean }) {
   return bridgeDesignUpdateTheme(requireBridge("name a design theme"), workspaceId, theme);
+}
+
+export async function designMoveComponent(workspaceId: string, component: string, pageId?: string) {
+  return bridgeDesignMoveComponent(requireBridge("move a component onto the canvas"), workspaceId, component, pageId);
 }
 
 export async function designDeletePage(workspaceId: string, pageId: string, expectedFrameIds: readonly string[]) {

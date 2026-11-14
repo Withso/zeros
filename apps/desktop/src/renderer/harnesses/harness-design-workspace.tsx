@@ -272,6 +272,7 @@ const styleOriginsHarness = new URLSearchParams(window.location.search).has(
 // A component frame (pricing.html becomes "Chat composer") that declares
 // every option kind, rendered with the engine's own template layer.
 const componentOptionsHarness = new URLSearchParams(window.location.search).has("componentOptions");
+const legacyMainHarness = componentOptionsHarness && new URLSearchParams(window.location.search).has("legacyMain");
 const COMPONENT_OPTIONS_SOURCE = `<!doctype html>
 <html lang="en">
   <head>
@@ -337,6 +338,9 @@ function renderHarnessComponentFrame(source: string, variant: string | null = nu
 // zero-specificity rule for its host.
 const HARNESS_INSTANCE = '<zd-chat-composer data-oid="home-composer" width="800" mode="plan"></zd-chat-composer>';
 let harnessComponentDefinition = COMPONENT_OPTIONS_SOURCE;
+// With ?legacyMain the composer starts as a components/ file, not a main frame.
+let harnessMainMoved = false;
+const harnessComponentMoves: Array<{ component: string; pageId?: string }> = [];
 const harnessInstanceFailures = new Set<string>();
 
 function harnessInstanceAttributes(source: string): Map<string, Map<string, string>> {
@@ -435,7 +439,9 @@ function harnessInstancesRecord(source: string, notApplied?: "last-good" | "defa
     }];
   }));
   if (!Object.keys(hosts).length) return undefined;
-  const record = { components: { "chat-composer": { elements: summary.elements, reach: summary.reach, file: "pricing.html", frame: true } }, hosts,
+  const legacy = legacyMainHarness && !harnessMainMoved;
+  const record = { components: { "chat-composer": { elements: summary.elements, reach: summary.reach,
+    file: legacy ? "components/chat-composer.html" : "pricing.html", frame: !legacy } }, hosts,
     ...(notApplied ? { notApplied } : {}) };
   let hash = 0x811c9dc5;
   for (const character of JSON.stringify(record)) hash = Math.imul(hash ^ character.charCodeAt(0), 0x01000193) >>> 0;
@@ -1266,6 +1272,7 @@ async function main() {
     harness.__zerosHarnessComponentNotApplied = (shows) => { publishComponentFrame(currentPricingSource, shows ?? undefined); };
     harness.__zerosHarnessComponentPreviewMessages = () => designComponentPreviewMessagesForTests();
     harness.__zerosHarnessComponentSource = () => currentPricingSource;
+    (harness as unknown as Record<string, unknown>).__zerosHarnessComponentMoves = harnessComponentMoves;
     (harness as unknown as Record<string, unknown>).__zerosHarnessHomeSource = () => currentHomeSource;
     (harness as unknown as Record<string, unknown>).__zerosHarnessInstanceNotApplied = (shows: "last-good" | "defaults" | null) => {
       if (shows) harnessInstanceFailures.add("home-composer");
@@ -1623,6 +1630,21 @@ async function main() {
           ...frame, source, srcDoc: withDesignRuntime(source, sourceVersion), tree: [],
         });
         return { type: "WORKSPACE_RESPONSE", result: { frame, snapshot: currentWorkspaceSnapshot } };
+      }
+      // A components/ definition moved onto the canvas: the harness's main
+      // frame stands in for the new one, and the instance now names it.
+      if (legacyMainHarness && message.op === "design.component.move") {
+        harnessComponentMoves.push({ component: String(message.params?.component), pageId: message.params?.pageId as string | undefined });
+        harnessMainMoved = true;
+        publishHomeFrame(currentHomeSource);
+        const files = currentWorkspaceSnapshot.frames.map((frame) => frame.file);
+        currentWorkspaceSnapshot = { ...currentWorkspaceSnapshot,
+          pages: currentWorkspaceSnapshot.pages ?? [{ id: "main", title: "Design", folder: "", frameFiles: files }] };
+        designWorkspaceSnapshotCache.setData(workspaceId, currentWorkspaceSnapshot);
+        const pageId = currentWorkspaceSnapshot.pages!.find((page) => page.frameFiles.includes("pricing.html"))!.id;
+        return { type: "WORKSPACE_RESPONSE", result: {
+          frame: { file: "pricing.html", frameId: "frame_pricing", pageId, title: "Chat composer", component: "chat-composer" },
+          snapshot: currentWorkspaceSnapshot } };
       }
       // A free layer released over an instance's slot: the engine's
       // same-frame relocation, placed in the slot as the adapter places it.

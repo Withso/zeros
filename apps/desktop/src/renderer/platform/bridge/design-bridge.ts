@@ -1128,6 +1128,28 @@ export async function bridgeDesignUpdateTheme(
   return { themes: result.themes, snapshot: normalizeDesignWorkspaceSnapshotPages(result.snapshot) };
 }
 
+/** Make components/<name>.html a registered main frame on a page. */
+export async function bridgeDesignMoveComponent(
+  bridge: RuntimeClient,
+  workspaceId: string,
+  component: string,
+  pageId?: string,
+): Promise<{ frame: { file: string; pageId: string; title: string; component: string }; snapshot: DesignWorkspaceSnapshotWire }> {
+  const result = await workspaceOp(bridge, "design.component.move", { workspaceId, component, ...(pageId ? { pageId } : {}) }) as {
+    frame?: { file?: unknown; pageId?: unknown; title?: unknown; component?: unknown }; snapshot?: DesignWorkspaceSnapshotWire;
+  } | null;
+  const frame = result?.frame;
+  const snapshot = result?.snapshot;
+  if (!frame || typeof frame.file !== "string" || typeof frame.pageId !== "string" || typeof frame.title !== "string" ||
+    frame.component !== component || !snapshot?.pages || !isDesignWorkspaceSnapshotWire(snapshot) ||
+    !snapshot.pages.some((page) => page.id === frame.pageId && page.frameFiles.includes(frame.file as string)))
+    throw new Error("design.component.move: malformed engine response");
+  return {
+    frame: { file: frame.file, pageId: frame.pageId, title: frame.title, component },
+    snapshot: normalizeDesignWorkspaceSnapshotPages(snapshot),
+  };
+}
+
 export async function bridgeDesignDeletePage(bridge: RuntimeClient, workspaceId: string, pageId: string, expectedFrameIds: readonly string[]): Promise<{
   deleted: { pageId: string };
   snapshot: DesignWorkspaceSnapshotWire;

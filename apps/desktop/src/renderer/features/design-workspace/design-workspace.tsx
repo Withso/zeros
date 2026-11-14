@@ -578,7 +578,6 @@ export function DesignWorkspaceColumn({
               zoomActionsRef={zoomActionsRef}
               onAskAgent={askAgent}
               panelVisible={panelVisible}
-              onOpenFile={onOpenFile}
             />
           }
         />

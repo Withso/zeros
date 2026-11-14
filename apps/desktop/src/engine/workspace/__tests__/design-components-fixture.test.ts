@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { cp, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -36,6 +36,13 @@ describe("the committed component fixture through WorkspaceService", () => {
     });
     expect(result.result.receipt.status).toBe("applied");
     return result;
+  };
+  const prepare = async (file: string) => {
+    const navigation = await service.handle("design.navigation.read", params) as { directoryId: string; catalogRevision: string };
+    const prepared = await service.handle("design.frames.prepare", {
+      ...params, directoryId: navigation.directoryId, catalogRevision: navigation.catalogRevision, files: [file], componentOptions: true,
+    }) as { frames: Array<Frame & { instances?: { components: Record<string, { file: string; frame: boolean; elements: unknown[] }> } }> };
+    return prepared.frames[0]!;
   };
   const lint = async () => ((await call("design.lint")) as { report: { violations: Violation[] } }).report.violations;
 
@@ -185,5 +192,55 @@ describe("the committed component fixture through WorkspaceService", () => {
     expect(moved).toBe(canvas0.replace(`${at}0`, `${at}50`));
     await call("design.history.undo");
     expect(read("meta/canvas.json")).toBe(canvas0);
+  });
+
+  it("moves a components/ definition onto the canvas as its registered main in one undo step", async () => {
+    const canvas0 = read("meta/canvas.json");
+    const badge0 = read("components/fx-badge.html");
+    const exists = (file: string) => existsSync(path.join(root, "design", file));
+    expect((await prepare("screens/hosts.html")).instances!.components["fx-badge"]).toMatchObject({ file: "components/fx-badge.html", frame: false });
+    const moved = await call("design.component.move", { component: "fx-badge", pageId: "page_library" });
+    expect(moved.frame).toMatchObject({ file: "library/fx-badge.html", pageId: "page_library", title: "Fx badge" });
+    expect(exists("components/fx-badge.html")).toBe(false);
+    const main = read("library/fx-badge.html");
+    // The attribute slot becomes a text option with its fallback as the
+    // default, and the definition's ids name the main's layers.
+    expect(main).toBe(badge0.replace("<html>\n", [
+      "<html>",
+      "  <head>",
+      "    <title>Fx badge</title>",
+      "    <template data-zd-options>",
+      '<zd-option name="text" type="text" default="Badge"></zd-option>',
+      "    </template>",
+      "  </head>\n",
+    ].join("\n")).replace('data-zid="badge"', 'data-oid="badge"').replace('<slot data-zd-attr="text">Badge</slot>', "{{ text }}"));
+    const canvas = JSON.parse(read("meta/canvas.json"));
+    expect(canvas.pages[0].frames).toHaveLength(2);
+    expect(Object.values(canvas.frames)).toContainEqual(expect.objectContaining({ source: "library/fx-badge.html", component: "fx-badge" }));
+    // The instance keeps its value, now through the main's option.
+    expect((await frame("screens/hosts.html")).srcDoc).toContain('<span data-zd-part="badge" class="badge">New</span>');
+    // Its Options now come from the main, and Edit main opens it.
+    expect((await prepare("screens/hosts.html")).instances!.components["fx-badge"]).toMatchObject({
+      file: "library/fx-badge.html", frame: true,
+      elements: [{ tag: "zd-option", attributes: [{ name: "name", value: "text" }, { name: "type", value: "text" }, { name: "default", value: "Badge" }] }],
+    });
+    // Only the fixture's own findings: the badge's class has no stylesheet here either.
+    expect((await lint()).map((violation) => [violation.file, violation.ruleId])).toEqual([
+      ["library/fx-badge.html", "unknown-class"], ["screens/hosts.html", "component-value-invalid"],
+    ]);
+
+    await call("design.history.undo");
+    expect(read("components/fx-badge.html")).toBe(badge0);
+    expect(read("meta/canvas.json")).toBe(canvas0);
+    expect(exists("library/fx-badge.html")).toBe(false);
+    expect((await frame("screens/hosts.html")).srcDoc).toContain('<span data-zd-part="badge" class="badge">New</span>');
+    await call("design.history.redo");
+    expect(read("library/fx-badge.html")).toBe(main);
+    expect(exists("components/fx-badge.html")).toBe(false);
+  });
+
+  it("refuses to move a component that is already a main or has no components/ file", async () => {
+    await expect(call("design.component.move", { component: "fx-chip" })).rejects.toThrow(/already a main/);
+    await expect(call("design.component.move", { component: "fx-none" })).rejects.toThrow(/components\/fx-none\.html/);
   });
 });
