@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { cp, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -239,6 +239,51 @@ describe("the committed component fixture through WorkspaceService", () => {
     expect(exists("components/fx-badge.html")).toBe(false);
   });
 
+  it("moves a main that foundation registers, then edits its instance and the main, and an instance override outlives main edits", async () => {
+    const write = (file: string, body: string) => writeFileSync(path.join(root, "design", file), body);
+    const canvas0 = JSON.parse(read("meta/canvas.json"));
+    canvas0.foundation = {
+      schemaVersion: 1, parameters: [], variants: [],
+      components: [{ id: "fx-badge", name: "Fx badge", file: "components/fx-badge.html", props: [], slots: [] }],
+    };
+    write("meta/canvas.json", `${JSON.stringify(canvas0, null, 2)}\n`);
+    await call("design.component.move", { component: "fx-badge", pageId: "page_library" });
+    expect(JSON.parse(read("meta/canvas.json")).foundation?.components ?? []).toEqual([]);
+    const part = "::zeros-part:inst-badge:badge";
+    const badge = async () => /<span data-zd-part="badge"[^>]*>/.exec((await frame("screens/hosts.html")).srcDoc!)![0];
+
+    // Absolute position, and any other Style edit, on the instance.
+    await apply("screens/hosts.html", "absolute", [{ type: "node.set-styles", nodeId: "inst-badge", styles: { position: "absolute" } }]);
+    expect(read("screens/hosts.html")).toContain('<zd-fx-badge data-oid="inst-badge" text="New" style="position:absolute;">');
+    // An edit on the main reaches the instance.
+    await apply("library/fx-badge.html", "main-color", [{ type: "node.set-styles", nodeId: "badge", styles: { color: "rgb(1, 2, 3)" } }]); // check:ui ignore-line -- authored frame colour fixture.
+    expect(await badge()).toContain("color:rgb(1, 2, 3)"); // check:ui ignore-line -- authored frame colour fixture.
+    // The instance overrides the part; a later main edit leaves the override.
+    await apply("screens/hosts.html", "override", [{ type: "node.set-styles", nodeId: part, styles: { color: "rgb(4, 5, 6)" } }]); // check:ui ignore-line -- authored frame colour fixture.
+    await apply("library/fx-badge.html", "main-color-2", [{ type: "node.set-styles", nodeId: "badge", styles: { color: "rgb(7, 8, 9)" } }]); // check:ui ignore-line -- authored frame colour fixture.
+    expect(await badge()).toMatch(/color:rgb\(7, 8, 9\);?\s*color:\s*rgb\(4, 5, 6\)/); // check:ui ignore-line -- authored frame colour fixture.
+    // Removing the override shows the main's newest value.
+    await apply("screens/hosts.html", "reset", [{ type: "node.set-styles", nodeId: part, styles: { color: null } }]);
+    expect(read("screens/hosts.html")).not.toContain("zd-style-badge");
+    const shown = await badge();
+    expect(shown).toContain("color:rgb(7, 8, 9)"); // check:ui ignore-line -- authored frame colour fixture.
+    expect(shown).not.toContain("rgb(4, 5, 6)"); // check:ui ignore-line -- authored frame colour fixture.
+  });
+
+  it("edits a folder whose foundation still lists a moved main's old components/ file, and drops that entry", async () => {
+    await call("design.component.move", { component: "fx-badge", pageId: "page_library" });
+    // An earlier build moved the main but left its foundation entry behind.
+    const canvas = JSON.parse(read("meta/canvas.json"));
+    canvas.foundation = {
+      schemaVersion: 1, parameters: [], variants: [],
+      components: [{ id: "fx-badge", name: "Fx badge", file: "components/fx-badge.html", props: [], slots: [] }],
+    };
+    writeFileSync(path.join(root, "design/meta/canvas.json"), `${JSON.stringify(canvas, null, 2)}\n`);
+    await apply("screens/hosts.html", "stale", [{ type: "node.set-styles", nodeId: "hosts-title", styles: { color: "red" } }]); // check:ui ignore-line -- authored frame colour fixture.
+    await apply("library/fx-badge.html", "main", [{ type: "node.set-styles", nodeId: "badge", styles: { opacity: "0.5" } }]);
+    expect(JSON.parse(read("meta/canvas.json")).foundation?.components ?? []).toEqual([]);
+    expect((await frame("screens/hosts.html")).srcDoc).toMatch(/<span data-zd-part="badge"[^>]*opacity:0\.5/);
+  });
   it("refuses to move a component that is already a main or has no components/ file", async () => {
     await expect(call("design.component.move", { component: "fx-chip" })).rejects.toThrow(/already a main/);
     await expect(call("design.component.move", { component: "fx-none" })).rejects.toThrow(/components\/fx-none\.html/);

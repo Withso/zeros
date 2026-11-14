@@ -1799,8 +1799,8 @@ is not offered. Instances are recorded at any depth when the host has its own
 the rules or the skill. A selected instance of one offers Move main to canvas
 in place of Edit main (`design.component.move`, Local only): one canvas write
 places a 480×320 frame `<page folder>/<name>.html` on the active page with
-`"component": "<name>"` on its record, removes the file and records one
-history step, so undo and redo restore both byte for byte, and then opens the
+`"component": "<name>"` on its record, removes the file and its
+`foundation.components` entry, and records one history step, so undo and redo restore both byte for byte, and then opens the
 main. The conversion (`designMainFromComponentSource`) turns `data-zid` into
 `data-oid` (so the part names instances override keep), each
 `<slot data-zd-attr>` into a `{{ name }}` hole with a text option whose
@@ -1808,7 +1808,9 @@ default is the fallback, adds a `<title>`, rebases the file's URLs to its new
 place and leaves a bare `<slot>` as the default slot. It refuses, with a
 reason, a slot name no option can take (such as `title`), markup in an
 attribute slot's fallback, `{{` in a file without options, a definition with
-errors, and a component that already has a main.
+errors, and a component that already has a main. A `foundation.components`
+entry whose file is gone while a main frame registers its name is read as
+replaced by that main, and the next edit drops it from `canvas.json`.
 
 A `components/` file `meta/canvas.json` does not list is still read as a
 component named after its file; an edit that changes nothing about the

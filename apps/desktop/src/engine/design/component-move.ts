@@ -170,6 +170,11 @@ export async function moveDesignComponentToCanvas(
     const frameId = `frame_${randomUUID().replace(/-/g, "")}`;
     canvas.frames[file] = nextFrameGeometry(files.map((known) => canvas.frames[known]!), { width: MAIN_WIDTH, height: MAIN_HEIGHT });
     canvas.frame_info[file] = { id: frameId, title, kind: "frame", component: name } as CanvasDocument["frame_info"][string];
+    // The main frame now registers the name; a foundation entry for the old
+    // file would make every later edit look for it.
+    const registered = canvas.foundation.components.filter((component) => component.file !== `components/${name}.html`);
+    if (registered.length !== canvas.foundation.components.length)
+      canvas.foundation = { ...canvas.foundation, components: registered };
     const sources: DesignStorageChange[] = [
       { file: legacyFile, before: legacy, after: null },
       { file: `${directoryName}/${file}`, before: null, after: source },

@@ -102,6 +102,7 @@ import { parseDesignSource, withSharedDesignParses } from "./shared-parse";
 import { safeLocalReference } from "./assets";
 import type { DesignMovementGuard } from "@zeros/protocol/design-relocation";
 import { readDesignFrameRenderIdentityFromSource } from "./frame-lifecycle";
+import { designComponentRegistry } from "./component-registry";
 
 async function unlinkDesignArtifact(target: string): Promise<void> {
   await unlink(target);
@@ -455,7 +456,10 @@ async function readDesignWebDocumentStateUnlocked(
     }
   }
   const canvas = await readCanvas(workspacePath);
-  const foundation = deriveDesignFoundation(canvas.foundation, Object.keys(files));
+  const foundation = deriveDesignFoundation(
+    withoutSupersededComponents(canvas, new Set(Object.keys(files))),
+    Object.keys(files),
+  );
   const meta = readFrameMeta(document, file, canvas);
   const geometry = canvas.frames[file] ?? {
     x: 0,
@@ -479,6 +483,22 @@ async function readDesignWebDocumentStateUnlocked(
       },
     },
   });
+}
+
+/** The canvas foundation without an entry whose file is gone while a main
+ * frame registers the same name: Move main to canvas replaced it, and an
+ * older build left the entry behind. Every other entry stays as written. */
+function withoutSupersededComponents(
+  canvas: Pick<CanvasDocument, "foundation" | "frame_info">,
+  sourceFiles: ReadonlySet<string>,
+): CanvasDocument["foundation"] {
+  const mains = designComponentRegistry(canvas).files;
+  const components = canvas.foundation.components.filter(
+    (component) => sourceFiles.has(component.file) || !mains.has(component.id),
+  );
+  return components.length === canvas.foundation.components.length
+    ? canvas.foundation
+    : { ...canvas.foundation, components };
 }
 
 /** Component files the canvas does not list are read as components named after their file. */
@@ -533,9 +553,13 @@ function deriveDesignFoundation(
  * own entries, so an unrelated edit never registers unlisted component files.
  */
 function persistedDesignFoundation(
-  canvasFoundation: CanvasDocument["foundation"],
+  canvas: Pick<CanvasDocument, "foundation" | "frame_info">,
   manifest: DesignTransactionJournal["foundation"],
 ): CanvasDocument["foundation"] {
+  const canvasFoundation = withoutSupersededComponents(
+    canvas,
+    new Set(manifest.components.map((component) => component.file)),
+  );
   try {
     const derived = deriveDesignFoundation(
       canvasFoundation,
@@ -686,7 +710,7 @@ async function applyDesignTransactionJournalUnlocked(
         );
     }
   }
-  canvas.foundation = persistedDesignFoundation(canvas.foundation, journal.foundation);
+  canvas.foundation = persistedDesignFoundation(canvas, journal.foundation);
   canvas.frames[journal.entryFile] = {
     ...canvas.frames[journal.entryFile],
     ...journal.geometry,
@@ -1047,7 +1071,7 @@ export async function commitDesignWebDocumentState(
     const canvasBefore = await readCanvas(workspacePath);
     const canvasAfter = {
       ...canvasBefore,
-      foundation: persistedDesignFoundation(canvasBefore.foundation, normalized.manifest),
+      foundation: persistedDesignFoundation(canvasBefore, normalized.manifest),
       frames: {
         ...canvasBefore.frames,
         [file]: {
