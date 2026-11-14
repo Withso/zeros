@@ -1,0 +1,5 @@
+{
+  "file": "scripts/release/migration-command.ts",
+  "before": "console.log(migrationVersionDiagnostic(version));",
+  "after": "void version;"
+}

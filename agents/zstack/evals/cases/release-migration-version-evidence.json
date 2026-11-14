@@ -1,0 +1,9 @@
+{
+  "id": "release-migration-version-evidence",
+  "kind": "seeded",
+  "area": "control-plane-data",
+  "fixedBy": "pr:1066",
+  "symptom": "A migration version guard passes locally but its version measurement disappears when the hosted release suppresses child process output, including on failure.",
+  "rule": "Test the actual subprocess boundary and carry only a validated version number to the release log on both success and refusal; never expose arbitrary driver diagnostics.",
+  "check": "pnpm exec vitest run --config scripts/release/vitest.config.ts scripts/release/migration-command.test.ts scripts/release/migration-cli.test.ts"
+}

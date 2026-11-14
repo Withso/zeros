@@ -1,4 +1,5 @@
 import { SYSTEM_DATABASE_CONTEXT } from "./db-context.js";
+import { migrationServerVersion, migrationVersionDiagnostic, MINIMUM_POSTGRES_VERSION } from "./migration-version.js";
 // ──────────────────────────────────────────────────────────
 // Migrations runner — plain numbered .sql files, forward-only,
 // each applied in its own transaction, recorded with a content checksum.
@@ -390,7 +391,10 @@ export type ServiceBootMigrationResult = {
   status: MigrationStatus;
 };
 
-type RunMigrationOptions = { env?: NodeJS.ProcessEnv };
+type RunMigrationOptions = {
+  env?: NodeJS.ProcessEnv;
+  onServerVersion?: (version: number | null) => void;
+};
 
 export type ServiceBootMigrationOptions = RunMigrationOptions & {
   cloudWorkspacesEnabled: boolean;
@@ -579,6 +583,7 @@ export async function assertAllControlledMigrationsApproved(
 async function withMigrationClient<T>(
   pool: pg.Pool,
   work: (client: pg.PoolClient) => Promise<T>,
+  onServerVersion: (version: number | null) => void = version => console.log(migrationVersionDiagnostic(version)),
 ): Promise<T> {
   const client = await pool.connect();
   let originalStatementTimeout: string | null = null;
@@ -589,9 +594,14 @@ async function withMigrationClient<T>(
   let operationError: unknown;
 
   try {
-    const version = await client.query<{ server_version_num: string }>("SHOW server_version_num");
-    const versionNumber = Number(version.rows[0]?.server_version_num);
-    if (!Number.isSafeInteger(versionNumber) || versionNumber < 160000) {
+    let versionNumber: number | null = null;
+    try {
+      const version = await client.query<{ server_version_num: string }>("SHOW server_version_num");
+      versionNumber = migrationServerVersion(version.rows[0]?.server_version_num);
+    } finally {
+      onServerVersion(versionNumber);
+    }
+    if (versionNumber === null || versionNumber < MINIMUM_POSTGRES_VERSION) {
       throw new MigrationDiagnosticError(
         "PostgreSQL 16 or newer is required for cloud history reads; upgrade the database before release.",
       );
@@ -866,6 +876,7 @@ async function executeMigrations(
   pool: pg.Pool,
   policy: MigrationPolicy,
   env: NodeJS.ProcessEnv,
+  onServerVersion?: RunMigrationOptions["onServerVersion"],
 ): Promise<ServiceBootMigrationResult> {
   const migrations = await loadMigrations();
   return withMigrationClient(pool, async (client) => {
@@ -973,7 +984,7 @@ async function executeMigrations(
     }
 
     return { ran, status: { state: "current" } };
-  });
+  }, onServerVersion);
 }
 
 /** Strict operator/programmatic runner: a controlled boundary is never skipped. */
@@ -985,6 +996,7 @@ export async function runMigrations(
     pool,
     { mode: "explicit" },
     options.env ?? process.env,
+    options.onServerVersion,
   );
   return result.ran;
 }
@@ -1054,6 +1066,7 @@ export async function runServiceBootMigrations(
       cloudWorkspacesEnabled: options.cloudWorkspacesEnabled,
     },
     options.env ?? process.env,
+    options.onServerVersion,
   );
 }
 

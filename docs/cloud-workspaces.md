@@ -1105,6 +1105,11 @@ sender maps remain unknown to the cache, rather than becoming explicit nulls.
 The control plane requires PostgreSQL 16 or newer for guarded native JSON
 validation. The migrator checks `server_version_num` before taking the schema
 lock or changing the ledger, including when no migrations are pending.
+Each execution logs the measured integer and its accepted/refused result;
+missing or malformed values log as `unknown` and refuse migration. Hosted
+releases carry this measurement through a private file so suppressing driver
+output cannot hide the version check. Provider startup banners are supporting
+evidence; this release-time check enforces the minimum.
 Turn-opening reads keep opaque payloads intact and use the worker's JSON
 classification. After the ordinary one-row lookup, exceptional candidates are
 read in batches of 128, with unsteered openings preferred over steers. For 513

@@ -36,7 +36,8 @@ Requirements:
 
 - Node.js 22
 - pnpm
-- A disposable PostgreSQL 16+ database; the migrator rejects older versions before schema work
+- A disposable PostgreSQL 16+ database; the migrator logs `server_version_num`
+  and rejects older or unknown versions before schema work
 
 ```bash
 cd apps/control-plane
