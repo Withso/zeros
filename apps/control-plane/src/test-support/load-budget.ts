@@ -7,9 +7,9 @@ import { DATABASE_CONTEXT_STATEMENTS } from "../db-context.js";
 export const IDLE_WINDOW_MS = 300_000;
 export const LOAD_BUDGETS = [
   { phase: "R1", scenario: "idle", metric: "requests", baseline: 211, maximum: 30, expectedFailure: true },
-  { phase: "R1", scenario: "idle", metric: "statements", baseline: 4450, maximum: 200, expectedFailure: true },
+  { phase: "R1", scenario: "idle", metric: "statements", baseline: 4425, maximum: 200, expectedFailure: true },
   { phase: "R1", scenario: "r1-fallback-idle", metric: "requests", baseline: 20, maximum: 30, expectedFailure: false },
-  { phase: "R1", scenario: "r1-fallback-idle", metric: "statements", baseline: 476, maximum: 200, expectedFailure: true },
+  { phase: "R1", scenario: "r1-fallback-idle", metric: "statements", baseline: 441, maximum: 200, expectedFailure: true },
   { phase: "R2", scenario: "turn-lease", metric: "transactions", baseline: 9, maximum: 6, expectedFailure: true },
   { phase: "R2", scenario: "turn-path", metric: "transactions", baseline: 31, maximum: 20, expectedFailure: true },
   { phase: "R2", scenario: "renewal", metric: "transactions", baseline: 5, maximum: 2, expectedFailure: true },
@@ -26,13 +26,28 @@ export const LOAD_BUDGETS = [
   { phase: "R3", scenario: "running-stream", metric: "maxWriteTransactionsPer2s", baseline: 2, maximum: 1, expectedFailure: true },
 ] as const;
 
+// Startup, notification-driven presence, and teardown are bounded separately
+// from periodic work. Periods are recorded ceilings, not imported timer values.
+export const LOAD_BACKGROUND_BUDGETS = [
+  { operation: "team-authority", initialCalls: 1, periodsMs: [5000], queries: 3, statements: 5, transactions: 1 },
+  { operation: "team-presence", initialCalls: 2, periodsMs: [25000, 30000], queries: 5, statements: 7, transactions: 1 },
+  { operation: "team-renew", initialCalls: 0, periodsMs: [30000], queries: 5, statements: 7, transactions: 1 },
+  { operation: "team-close", initialCalls: 1, periodsMs: [], queries: 3, statements: 5, transactions: 1 },
+  { operation: "device-snapshot", initialCalls: 1, periodsMs: [25000], queries: 4, statements: 6, transactions: 1 },
+] as const;
+type BackgroundName = typeof LOAD_BACKGROUND_BUDGETS[number]["operation"];
+type BackgroundOperation = { name: BackgroundName; cost: SqlCost; open: boolean };
+export type BackgroundDefinition = { operation: string; initialCalls: number; periodsMs: readonly number[]; queries: number; statements: number; transactions: number };
+const idleScenario = (name: string) => name === "idle" || name === "r1-fallback-idle";
+
 export type SqlCost = { queries: number; statements: number; transactions: number; commits: number; rollbacks: number;
   failures: number; inFlight: number; injectedDelayMs: number; writeTransactions: number; writeStatements: number;
   rowMutations: number; maxWriteStatementsPerTransaction: number; censusQueries: number; writeTransactionTimes: number[];
   githubCalls: number; workspaceUpdateLocks: number };
 export type LoadRequest = SqlCost & { method: string; route: string; status: number; simulatedAtMs: number; elapsedMs: number;
   open: boolean; streaming: boolean; observer?: RequestDatabaseCost };
-export type LoadScenario = { name: string; requests: LoadRequest[]; background: SqlCost; elapsedMs: number; writesObserved: boolean; locksObserved: boolean };
+export type LoadScenario = { name: string; requests: LoadRequest[]; background: SqlCost; backgroundOperations: BackgroundOperation[];
+  elapsedMs: number; writesObserved: boolean; locksObserved: boolean };
 const emptySql = (): SqlCost => ({ queries: 0, statements: 0, transactions: 0, commits: 0, rollbacks: 0, failures: 0, inFlight: 0, injectedDelayMs: 0,
   writeTransactions: 0, writeStatements: 0, rowMutations: 0, maxWriteStatementsPerTransaction: 0, censusQueries: 0, writeTransactionTimes: [],
   githubCalls: 0, workspaceUpdateLocks: 0 });
@@ -190,7 +205,7 @@ export function deferred<T>() {
   return { promise, resolve, reject };
 }
 
-export async function holdLoadStream(body: ReadableStream<Uint8Array>, abort: AbortController) {
+export async function holdLoadStream(body: ReadableStream<Uint8Array>, abort: AbortController, serverClosed: Promise<void> = Promise.resolve()) {
   const reader = body.getReader(), ready = deferred<void>();
   const ownAbort = (error: unknown) => abort.signal.aborted && error instanceof Error && error.name === "AbortError";
   const cancel = async () => {
@@ -217,7 +232,19 @@ export async function holdLoadStream(body: ReadableStream<Uint8Array>, abort: Ab
   try { await ready.promise; }
   catch (error) { await cancel().catch(() => {}); await done.catch(() => {}); throw error; }
   finally { clearTimeout(timer); }
-  return { done, stop: async () => { await cancel(); await done; } };
+  return { done, stop: async () => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const results = await Promise.allSettled([
+        (async () => { await cancel(); await done; })(),
+        Promise.race([serverClosed, new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => reject(new Error("Load fixture: server stream cleanup timed out")), 10_000);
+        })]),
+      ]);
+      const failure = results.find(result => result.status === "rejected");
+      if (failure?.status === "rejected") throw failure.reason;
+    } finally { clearTimeout(timer); }
+  } };
 }
 
 /** The lower pg port observes detached stream/background work too. Completion
@@ -225,6 +252,7 @@ export async function holdLoadStream(body: ReadableStream<Uint8Array>, abort: Ab
  * pool.query and its checked-out client twice. */
 export class LoadBudgetProbe {
   private readonly scope = new AsyncLocalStorage<LoadRequest | undefined>();
+  private readonly backgroundScope = new AsyncLocalStorage<BackgroundOperation | undefined>();
   private active: LoadScenario | undefined;
   private simulatedAtMs = 0;
   private readonly restore: Array<() => void> = [];
@@ -237,13 +265,13 @@ export class LoadBudgetProbe {
     this.attach = client => this.wrapClient(client);
     pool.on("connect", this.attach);
     const original = pool.connect;
-    const scopes = this.scope;
+    const scopes = this.scope, backgrounds = this.backgroundScope;
     pool.connect = function (this: unknown, ...args: unknown[]) {
-      const owner = scopes.getStore(), callback = args.at(-1);
+      const owner = scopes.getStore(), operation = backgrounds.getStore(), callback = args.at(-1);
       // pg-pool can invoke a checkout callback on a socket born in an older
       // request. Re-enter the submitting scope before pool.query calls query.
       if (typeof callback === "function") args[args.length - 1] = function (this: unknown, ...values: unknown[]) {
-        return scopes.run(owner, () => Reflect.apply(callback, this, values));
+        return backgrounds.run(operation, () => scopes.run(owner, () => Reflect.apply(callback, this, values)));
       };
       return Reflect.apply(original, this, args);
     } as typeof pool.connect;
@@ -261,9 +289,27 @@ export class LoadBudgetProbe {
   };
 
   githubRequest<T>(send: () => Promise<T>): Promise<T> {
-    const owner = this.scope.getStore(), cost = owner?.open ? owner : this.active?.background;
+    const owner = this.scope.getStore(), operation = this.backgroundScope.getStore();
+    const cost = owner?.open ? owner : operation?.open ? operation.cost : this.active?.background;
     if (cost) cost.githubCalls++;
     return send();
+  }
+
+  async backgroundOperation<T>(name: BackgroundName, work: () => Promise<T>): Promise<T> {
+    const scenario = this.active, request = this.scope.getStore();
+    if (!scenario || !request?.streaming || this.backgroundScope.getStore()?.open) return work();
+    const beganBeforeHeaders = request.open;
+    const operation: BackgroundOperation = { name, cost: emptySql(), open: true };
+    scenario.backgroundOperations.push(operation);
+    try { return await this.backgroundScope.run(operation, work); }
+    finally {
+      operation.open = false;
+      if (beganBeforeHeaders && additiveSql.every(key => operation.cost[key] === 0))
+        scenario.backgroundOperations.splice(scenario.backgroundOperations.indexOf(operation), 1);
+      for (const key of additiveSql) scenario.background[key] += operation.cost[key];
+      scenario.background.maxWriteStatementsPerTransaction = Math.max(scenario.background.maxWriteStatementsPerTransaction, operation.cost.maxWriteStatementsPerTransaction);
+      scenario.background.writeTransactionTimes.push(...operation.cost.writeTransactionTimes);
+    }
   }
 
   private wrapClient(client: pg.PoolClient): void {
@@ -275,8 +321,8 @@ export class LoadBudgetProbe {
     };
     const lockFailed = (error: unknown) => { this.lockObservationError ??= error as Error; };
     const capture = () => {
-      const owner = this.scope.getStore();
-      return { owner, cost: owner?.open ? owner : this.active?.background, statementDelayMs: this.statementDelayMs,
+      const owner = this.scope.getStore(), operation = this.backgroundScope.getStore();
+      return { owner, cost: owner?.open ? owner : operation?.open ? operation.cost : this.active?.background, statementDelayMs: this.statementDelayMs,
         writes: this.active?.writesObserved, locks: this.active?.locksObserved };
     };
     const scopes = this.scope;
@@ -422,7 +468,8 @@ export class LoadBudgetProbe {
 
   async measure<T>(name: string, work: () => Promise<T>, options: { writes?: boolean; locks?: boolean } = {}): Promise<{ value: T; cost: LoadScenario }> {
     if (this.active) throw new Error("Load scenarios must not overlap");
-    const cost: LoadScenario = { name, requests: [], background: emptySql(), elapsedMs: 0, writesObserved: options.writes === true, locksObserved: options.locks === true };
+    const cost: LoadScenario = { name, requests: [], background: emptySql(), backgroundOperations: [], elapsedMs: 0,
+      writesObserved: options.writes === true, locksObserved: options.locks === true };
     this.active = cost; this.writeCensusError = undefined; this.lockObservationError = undefined;
     const started = performance.now();
     try {
@@ -444,7 +491,8 @@ export class LoadBudgetProbe {
   private async drain(cost: LoadScenario): Promise<void> {
     await delay(0);
     for (let attempt = 0; attempt < 500; attempt++) {
-      if (cost.background.inFlight + cost.requests.reduce((sum, request) => sum + request.inFlight, 0) === 0) return;
+      if (!cost.backgroundOperations.some(operation => operation.open) &&
+          cost.background.inFlight + cost.requests.reduce((sum, request) => sum + request.inFlight, 0) === 0) return;
       await delay(10);
     }
     throw new Error("Load observation ended with SQL in flight");
@@ -457,7 +505,7 @@ export class LoadBudgetProbe {
 }
 
 export function selectLoadRequests(cost: LoadScenario, predicate: (request: LoadRequest) => boolean): LoadScenario {
-  return { ...cost, requests: cost.requests.filter(predicate), background: emptySql() };
+  return { ...cost, requests: cost.requests.filter(predicate), background: emptySql(), backgroundOperations: [] };
 }
 
 export function scenarioTotals(cost: LoadScenario): SqlCost & { requests: number; maxWriteTransactionsPer2s: number } {
@@ -484,10 +532,36 @@ export function budgetTable(scenarios: ReadonlyMap<string, LoadScenario>) {
     if (budget.metric === "workspaceUpdateLocks" && !cost.locksObserved) throw new Error("Missing lock observation");
     const total = scenarioTotals(cost);
     if (total.failures || total.inFlight) throw new Error(`Incomplete SQL observation: ${budget.scenario}`);
-    const observed = total[budget.metric];
+    const observed = (idleScenario(budget.scenario) ? scenarioTotals(selectLoadRequests(cost, () => true)) : total)[budget.metric];
+    const targetObserved = total[budget.metric];
     return { ...budget, observed, ratchet: observed <= budget.baseline ? "PASS" : "FAIL",
-      result: observed <= budget.maximum ? "PASS" : "FAIL" };
+      targetObserved, result: targetObserved <= budget.maximum ? "PASS" : "FAIL" };
   });
+}
+
+export function backgroundBudgetTable(scenarios: ReadonlyMap<string, LoadScenario>, limits: readonly BackgroundDefinition[] = LOAD_BACKGROUND_BUDGETS) {
+  const rows: Array<{ scenario: string; operation: string; metric: string; observed: number; baseline: number; ratchet: "PASS" | "FAIL" }> = [];
+  const add = (scenario: string, operation: string, metric: string, observed: number, baseline: number) =>
+    rows.push({ scenario, operation, metric, observed, baseline, ratchet: observed <= baseline ? "PASS" : "FAIL" });
+  for (const [name, cost] of scenarios) {
+    if (!idleScenario(name)) continue;
+    if (!Number.isFinite(cost.elapsedMs) || cost.elapsedMs < 0 || cost.backgroundOperations.some(operation => operation.open))
+      throw new Error(`Incomplete background observation: ${name}`);
+    for (const limit of limits) {
+      const operations = cost.backgroundOperations.filter(operation => operation.name === limit.operation);
+      const ticks = limit.periodsMs.reduce((sum, period) => sum + Math.floor(cost.elapsedMs / period), 0);
+      add(name, limit.operation, "calls", operations.length, limit.initialCalls + ticks);
+      for (const metric of ["queries", "statements", "transactions"] as const)
+        add(name, limit.operation, `${metric}PerCall`, Math.max(0, ...operations.map(operation => operation.cost[metric])), limit[metric]);
+    }
+    for (const metric of ["queries", "statements", "transactions", "githubCalls", "failures", "inFlight"] as const) {
+      const known = cost.backgroundOperations.filter(operation => limits.some(limit => limit.operation === operation.name))
+        .reduce((sum, operation) => sum + operation.cost[metric], 0);
+      if (known > cost.background[metric]) throw new Error(`Overcounted background observation: ${name}`);
+      add(name, "unattributed", metric, cost.background[metric] - known, 0);
+    }
+  }
+  return rows;
 }
 
 export function routeTable(cost: LoadScenario) {

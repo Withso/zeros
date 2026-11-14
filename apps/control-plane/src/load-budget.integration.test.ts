@@ -7,11 +7,26 @@ import { createPool, withSystemTx } from "./db.js";
 import { configuredDatabaseContext, SYSTEM_DATABASE_CONTEXT } from "./db-context.js";
 import { requestTiming } from "./request-timing.js";
 import { resetMigratedTestDatabase } from "./test-database.js";
-import { budgetTable, deferred, holdLoadStream, LOAD_BUDGETS, LoadBudgetProbe, routeTable, scenarioTotals, selectLoadRequests, type LoadScenario } from "./test-support/load-budget.js";
+import { backgroundBudgetTable, budgetTable, deferred, holdLoadStream, LOAD_BUDGETS, LoadBudgetProbe, routeTable, scenarioTotals, selectLoadRequests, type LoadScenario } from "./test-support/load-budget.js";
 import { loadBudgetFixture, loadBudgetReadFrame, OBSERVED_IDLE_REPLAY, R1_IDLE_REPLAY } from "./test-support/load-budget-fixture.js";
 
 const database = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 describe("load replay stream lifetime", () => {
+  it("joins the server cleanup after client cancellation before ending the scenario", async () => {
+    const serverClosed = deferred<void>(), stopped = vi.fn();
+    const body = new ReadableStream<Uint8Array>({ start(controller) {
+      controller.enqueue(new TextEncoder().encode("event: ready\ndata: {}\n\n"));
+    } });
+    const stream = await holdLoadStream(body, new AbortController(), serverClosed.promise);
+    const closing = stream.stop().then(stopped);
+    try {
+      await stream.done;
+      await new Promise<void>(resolve => setImmediate(resolve));
+      expect(stopped).not.toHaveBeenCalled();
+    } finally { serverClosed.resolve(); await closing; }
+    expect(stopped).toHaveBeenCalledOnce();
+  });
+
   it("rejects an early EOF after ready instead of silently measuring a disconnected desktop", async () => {
     let controller!: ReadableStreamDefaultController<Uint8Array>;
     const body = new ReadableStream<Uint8Array>({ start(value) {
@@ -139,6 +154,61 @@ database("control-plane load budgets through the router and PostgreSQL", () => {
     expect(scenarioTotals(cost)).toMatchObject({ workspaceUpdateLocks: 4, transactions: 1, failures: 0, inFlight: 0 });
   });
 
+  it("bounds background call cost and tick count independently of HTTP costs", async () => {
+    const sample = async (calls: number, extraStatement = false, unattributed = false) => {
+      const release = deferred<void>();
+      let work!: Promise<void>;
+      const { cost } = await probe.measure("idle", async () => {
+        const request = new Request(`https://api.example.test/v1/cloud-v2/workspaces/${randomUUID()}/events`);
+        await probe.request(request, async () => {
+          await pool.query("SELECT 1");
+          work = release.promise.then(async () => {
+            await Promise.all(Array.from({ length: calls }, () => probe.backgroundOperation("team-authority", () => withSystemTx(pool, async tx => {
+              await tx.query(extraStatement ? "SELECT 1; SELECT 2" : "SELECT 1");
+            }))));
+            if (unattributed) await pool.query("SELECT 1");
+          });
+          return new Response();
+        });
+        release.resolve(); await work;
+      });
+      expect(cost.requests[0]).toMatchObject({ statements: 1, transactions: 0 });
+      expect(cost.background).toMatchObject({ statements: calls * (extraStatement ? 6 : 5) + Number(unattributed), transactions: calls, inFlight: 0 });
+      return { ...cost, elapsedMs: 5000 };
+    };
+    for (const calls of [1, 2]) {
+      const rows = backgroundBudgetTable(new Map([["idle", await sample(calls)]]));
+      expect(rows.every(row => row.ratchet === "PASS")).toBe(true);
+    }
+    const expensive = backgroundBudgetTable(new Map([["idle", await sample(1, true)]]));
+    expect(expensive.filter(row => row.ratchet === "FAIL")).toMatchObject([{ operation: "team-authority", metric: "statementsPerCall", observed: 6, baseline: 5 }]);
+    const tooFrequent = backgroundBudgetTable(new Map([["idle", await sample(3)]]));
+    expect(tooFrequent.filter(row => row.ratchet === "FAIL")).toMatchObject([{ operation: "team-authority", metric: "calls", observed: 3, baseline: 2 }]);
+    const unknown = backgroundBudgetTable(new Map([["idle", await sample(1, false, true)]]));
+    expect(unknown.filter(row => row.ratchet === "FAIL")).toMatchObject([
+      { operation: "unattributed", metric: "queries", observed: 1 }, { operation: "unattributed", metric: "statements", observed: 1 },
+    ]);
+  });
+
+  it("attributes stream work started before headers that reaches PostgreSQL after headers", async () => {
+    const release = deferred<void>();
+    let pending!: Promise<void>;
+    const { cost } = await probe.measure("idle", async () => {
+      const request = new Request(`https://api.example.test/v1/cloud-v2/workspaces/${randomUUID()}/events`);
+      await probe.request(request, async () => {
+        pending = probe.backgroundOperation("team-authority", async () => {
+          await release.promise;
+          await withSystemTx(pool, tx => tx.query("SELECT 1"));
+        });
+        return new Response();
+      });
+      release.resolve(); await pending;
+    });
+    expect(cost.requests[0]!.statements).toBe(0);
+    expect(cost.background).toMatchObject({ queries: 3, statements: 5, transactions: 1 });
+    expect(backgroundBudgetTable(new Map([["idle", cost]])).every(row => row.ratchet === "PASS")).toBe(true);
+  });
+
   it("counts writing transactions and hidden CTE/trigger mutations without charging its census queries", async () => {
     const schema = `load_writes_${randomUUID().replaceAll("-", "")}`;
     await pool.query(`CREATE SCHEMA ${schema};
@@ -215,6 +285,7 @@ database("load-budget workload", () => {
   let pool: pg.Pool, probe: LoadBudgetProbe;
   let fixture: Awaited<ReturnType<typeof loadBudgetFixture>> | undefined;
   let measured: ReturnType<typeof budgetTable>;
+  let background: ReturnType<typeof backgroundBudgetTable>;
   const reportPath = process.env.LOAD_BUDGET_REPORT_PATH;
   afterAll(async () => {
     try { await fixture?.close(); }
@@ -286,10 +357,13 @@ database("load-budget workload", () => {
       }
     }
     measured = budgetTable(scenarios);
+    background = backgroundBudgetTable(scenarios);
     expect(measured.map(row => [row.scenario, row.metric])).toEqual(LOAD_BUDGETS.map(row => [row.scenario, row.metric]));
-    console.table(measured, ["phase", "scenario", "metric", "observed", "baseline", "ratchet", "maximum", "result"]);
-    if (reportPath) await writeFile(reportPath, JSON.stringify({ version: 1, profile: "load-budget-r1", wallClock, wallProfile, statementDelayMs, budgets: measured,
-      scenarios: [...scenarios].map(([name, cost]) => ({ name, totals: scenarioTotals(cost), routes: routeTable(cost), background: cost.background })) }, null, 2) + "\n", { flag: "wx", mode: 0o600 });
+    console.info("Idle ratchets measure HTTP requests only. Idle targets include background SQL. Background calls are bounded by startup/teardown plus the maximum ticks in the measured wall-clock window; each call also has its own cost ceiling.");
+    console.table(measured, ["phase", "scenario", "metric", "observed", "baseline", "ratchet", "targetObserved", "maximum", "result"]);
+    console.table(background);
+    if (reportPath) await writeFile(reportPath, JSON.stringify({ version: 1, profile: "load-budget-r1-background", wallClock, wallProfile, statementDelayMs, budgets: measured, backgroundBudgets: background,
+      scenarios: [...scenarios].map(([name, cost]) => ({ name, elapsedMs: cost.elapsedMs, totals: scenarioTotals(cost), routes: routeTable(cost), background: cost.background })) }, null, 2) + "\n", { flag: "wx", mode: 0o600 });
   }, 600_000);
 
   if (reportPath) it("MEASURE produces a complete report; the comparison command enforces the candidate ratchet", () => {
@@ -302,11 +376,17 @@ database("load-budget workload", () => {
       }
     });
 
+    it("BACKGROUND stays within each call cost and the maximum ticks for the measured window", () => {
+      expect(background).not.toHaveLength(0);
+      for (const budget of background)
+        expect.soft(budget.observed, `BACKGROUND ${budget.scenario}: ${budget.operation} ${budget.metric}`).toBeLessThanOrEqual(budget.baseline);
+    });
+
     for (const budget of LOAD_BUDGETS) {
       const target = budget.expectedFailure ? it.fails : it;
       target(`${budget.phase} TARGET ${budget.scenario}: ${budget.metric} <= ${budget.maximum}${budget.expectedFailure ? " — set expectedFailure=false when met" : ""}`, () => {
         const result = measured.find(row => row.scenario === budget.scenario && row.metric === budget.metric)!;
-        expect(result.observed).toBeLessThanOrEqual(budget.maximum);
+        expect(result.targetObserved).toBeLessThanOrEqual(budget.maximum);
       });
     }
   }

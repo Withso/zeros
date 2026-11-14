@@ -68,6 +68,19 @@ export async function loadBudgetFixture(pool: pg.Pool, probe: LoadBudgetProbe) {
   const cleanups: Array<() => Promise<void>> = [() => f.close(), () => f.cp.teamSharing.signals.close()];
   const close = () => closeAll(cleanups);
   try {
+    let presenceClosed: ReturnType<typeof deferred<void>> | undefined;
+    const authority = f.cp.teamSharing.authority, presence = f.cp.teamSharing.events.presence;
+    const assert = authority.assert.bind(authority), snapshot = presence.snapshot.bind(presence), renewPresence = presence.renew.bind(presence), closePresence = presence.close.bind(presence);
+    vi.spyOn(authority, "assert").mockImplementation((...args) => probe.backgroundOperation("team-authority", () => assert(...args)));
+    vi.spyOn(presence, "snapshot").mockImplementation((...args) => probe.backgroundOperation("team-presence", () => snapshot(...args)));
+    vi.spyOn(presence, "renew").mockImplementation((...args) => probe.backgroundOperation("team-renew", () => renewPresence(...args)));
+    vi.spyOn(presence, "close").mockImplementation(async (...args) => {
+      const done = presenceClosed;
+      try { await probe.backgroundOperation("team-close", () => closePresence(...args)); done?.resolve(); }
+      catch (error) { done?.reject(error); throw error; }
+    });
+    const devices = f.cp.routes.localDevices!.devices, deviceSnapshot = devices.snapshot.bind(devices);
+    vi.spyOn(devices, "snapshot").mockImplementation((...args) => probe.backgroundOperation("device-snapshot", () => deviceSnapshot(...args)));
     await pool.query("DELETE FROM cloud_v2_workspaces WHERE id=$1", [f.own.id]);
     await f.login(); await f.activate();
     const pair = await generateKeyPair("RS256");
@@ -333,6 +346,8 @@ export async function loadBudgetFixture(pool: pg.Pool, probe: LoadBudgetProbe) {
     };
     const idleReplay = async (wallClock = false, profile: typeof R1_IDLE_REPLAY = OBSERVED_IDLE_REPLAY) => {
       const streams: Array<() => Promise<void>> = [];
+      presenceClosed = deferred<void>();
+      void presenceClosed.promise.catch(() => {});
       const startedAt = performance.now();
       const pace = async (at: number) => {
         const wait = at - (performance.now() - startedAt);
@@ -344,7 +359,7 @@ export async function loadBudgetFixture(pool: pg.Pool, probe: LoadBudgetProbe) {
         const workspaceAbort = new AbortController();
         const response = await desktop(`${workspacePath}/events`, undefined, { accept: "text/event-stream" }, workspaceAbort.signal);
         requireValue(response.body, "workspace stream missing");
-        streams.push((await holdLoadStream(response.body!, workspaceAbort)).stop);
+        streams.push((await holdLoadStream(response.body!, workspaceAbort, presenceClosed.promise)).stop);
         const schedule = profile.flatMap(({ operation, count }) => Array.from({ length: count }, (_, i) =>
           ({ operation, at: Math.floor(i * IDLE_WINDOW_MS / count) }))).sort((left, right) => left.at - right.at);
         for (const { operation, at } of schedule) {
@@ -375,7 +390,7 @@ export async function loadBudgetFixture(pool: pg.Pool, probe: LoadBudgetProbe) {
           });
         }
         await pace(IDLE_WINDOW_MS);
-      } finally { await closeAll(streams); }
+      } finally { await closeAll(streams); presenceClosed = undefined; }
     };
     const assertTransportCancellation = async () => {
       let cancelled = false;
