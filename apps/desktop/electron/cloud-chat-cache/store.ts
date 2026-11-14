@@ -399,6 +399,13 @@ export class CloudChatCacheStore {
     }, key);
   }
 
+  /** Counts only, for the main.log open line. */
+  stats(): { chats: number; messages: number } {
+    const db = this.database(), count = (table: "chats" | "messages") =>
+      Number((db.prepare(`SELECT count(*) AS n FROM ${table}`).get() as { n: number }).n);
+    return { chats: count("chats"), messages: count("messages") };
+  }
+
   readTail(input: CloudCacheKey, limit = 200): CloudCacheRange | null {
     const key = cloudCacheKey(input), chat = this.chat(key);
     if (!chat || !Number.isInteger(limit) || limit < 1 || limit > 500) return null;

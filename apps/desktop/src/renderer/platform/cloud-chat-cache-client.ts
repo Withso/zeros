@@ -1,7 +1,7 @@
 import { z } from "zod";
 import {
   CloudCachePendingSchema, CloudCacheRangeSchema, CloudCacheReplySchema, CloudCacheTargetSchema,
-  type CloudCachePending, type CloudCacheKnown, type CloudCacheRange, type CloudCacheReply, type CloudCacheRequest, type CloudCacheTarget,
+  type CloudCachePending, type CloudCacheKnown, type CloudCacheRendererDecline, type CloudCacheRange, type CloudCacheReply, type CloudCacheRequest, type CloudCacheTarget,
 } from "../../../shared/cloud-chat-cache";
 
 type Failure = Extract<CloudCacheReply, { ok: false }>;
@@ -138,6 +138,10 @@ export class NativeCloudChatCacheClient {
       this.current(binding);
       await this.request({ op: "forget", targets: targets.slice(start, start + 500) }, z.null(), binding);
     }
+  }
+  /** Launch diagnostics for main.log: reads this renderer answered without main, by closed class. Best effort. */
+  report(declines: Partial<Record<CloudCacheRendererDecline, number>>): Promise<void> {
+    return this.deps.invoke({ op: "report", declines }).then(() => undefined, () => undefined);
   }
   list(after: string | null = null): Promise<z.infer<typeof listSchema>> {
     return this.request({ op: "list", after }, listSchema);

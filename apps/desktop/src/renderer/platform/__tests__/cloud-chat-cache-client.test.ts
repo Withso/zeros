@@ -98,7 +98,7 @@ describe("renderer native cloud cache owner boundary", () => {
     let current = lease;
     f.invoke.mockImplementation(async input => {
       if (input.op === "bind") return ok({ lease: current });
-      if (input.lease !== current) return { ok: false, reason: "owner_changed" };
+      if (input.op === "report" || input.lease !== current) return { ok: false, reason: "owner_changed" };
       return ok(input.op === "protect" ? null : { range: snapshot.range, replaced: false });
     });
     await f.client.protect(target);

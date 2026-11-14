@@ -97,6 +97,34 @@ describe("a failing cache is visible in main.log, counted, with a closed reason 
     expect(out.lines.join("\n")).not.toMatch(/viewer-a|api\.example|\/tmp|[0-9a-f]{8}-[0-9a-f]{4}/);
   });
 
+  it("logs the opened rows once, and one launch line: outcomes, declines by op/reason/stage, and renderer declines", async () => {
+    const f = fixture(), out = logged();
+    let summary: (() => void) | undefined, delay: number | undefined;
+    const command = createCloudChatCacheCommand({ service: f.load, log: out.log, admit: () => ({ window: 1, current: () => true }),
+      schedule: (run, milliseconds) => { summary = run; delay = milliseconds; } });
+    const lease = (await command({ op: "bind", owner, client: "renderer-a" }, f.event) as { result: { lease: string } }).result.lease;
+    await command({ op: "refresh", lease, target, limit: 200 }, f.event);
+    await command({ op: "refresh", lease, target, limit: 200, known: { revision: 2, messageCount: 1 } }, f.event);
+    await command({ op: "refresh", lease, target, limit: 200 }, f.event);
+    await command({ op: "refresh", lease, target, limit: 501 }, f.event);
+    await command({ op: "report", declines: { no_owner: 2, fallback_unavailable: 1 } }, f.event);
+    expect(out.lines.filter(line => line.startsWith("opened"))).toEqual(["opened chats=0 messages=0"]);
+    expect(delay).toBe(60_000);
+    summary!();
+    expect(out.lines.at(-1)).toBe("launch outcomes=continued=1,filled=1,served=1,without_known=2 " +
+      "declined=refresh/unavailable/request=1 renderer=fallback_unavailable=1,no_owner=2");
+    expect(out.lines.join("\n")).not.toMatch(/viewer-a|api\.example|\/tmp|[0-9a-f]{8}-[0-9a-f]{4}/);
+  });
+
+  it("a launch whose renderer never asks main still logs its launch line", () => {
+    const out = logged();
+    let summary: (() => void) | undefined;
+    createCloudChatCacheCommand({ service: async () => { throw new Error("unused"); }, log: out.log,
+      admit: () => ({ window: 1, current: () => true }), schedule: run => { summary = run; } });
+    summary!();
+    expect(out.lines).toEqual(["launch outcomes=none declined=none renderer=none"]);
+  });
+
   it("a store whose native open is not bound to the held file reports stage=store_bind", async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-cache-bind-")), out = logged();
     const file = path.join(root, "cloud-cache.db");
@@ -112,6 +140,7 @@ describe("a failing cache is visible in main.log, counted, with a closed reason 
     const command = createCloudChatCacheCommand({ service: async () => service, log: out.log, admit: () => ({ window: 1, current: () => true }) });
     cleanup.push(() => { service.close(); store.close(); fs.rmSync(root, { recursive: true, force: true }); });
     await expect(command({ op: "bind", owner, client: "renderer-a" }, {})).resolves.toEqual({ ok: false, reason: "unavailable" });
+    expect(out.lines).toContain("open failed stage=store_bind");
     expect(out.lines).toContain("failure op=bind reason=unavailable stage=store_bind count=1");
   });
 });

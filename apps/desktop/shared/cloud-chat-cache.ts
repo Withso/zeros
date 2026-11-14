@@ -56,6 +56,10 @@ const limited = { target: CloudCacheTargetSchema, limit: z.number().int().min(1)
 /** A chat's {revision, messageCount} as the chats.list read that proved access reported it. */
 export const CloudCacheKnownSchema = z.object({ revision: counter, messageCount: counter }).strict();
 export type CloudCacheKnown = z.infer<typeof CloudCacheKnownSchema>;
+/** Why the renderer answered a cloud history read without asking main (cloud-chat-cache-history.ts). */
+export const CLOUD_CACHE_RENDERER_DECLINES = ["no_owner", "index_page", "target", "limit", "older_cursor", "older_uncached",
+  "fallback_unavailable", "fallback_unsupported"] as const;
+export type CloudCacheRendererDecline = typeof CLOUD_CACHE_RENDERER_DECLINES[number];
 export const CloudCacheRequestSchema = z.discriminatedUnion("op", [
   z.object({ op: z.literal("bind"), owner: z.string().min(1).max(2048), client: z.string().min(1).max(128) }).strict(),
   z.object({ op: z.literal("read"), ...leased, ...limited }).strict(),
@@ -67,6 +71,8 @@ export const CloudCacheRequestSchema = z.discriminatedUnion("op", [
   z.object({ op: z.literal("forget"), ...leased, targets: z.array(CloudCacheTargetSchema).min(1).max(500) }).strict(),
   z.object({ op: z.literal("list"), ...leased, after: z.string().max(16_384).nullable() }).strict(),
   z.object({ op: z.literal("release"), ...leased }).strict(),
+  // Launch diagnostics: the renderer's own declines (reads it never sent to main), counts by closed class only.
+  z.object({ op: z.literal("report"), declines: z.partialRecord(z.enum(CLOUD_CACHE_RENDERER_DECLINES), z.number().int().min(1).max(1_000_000)) }).strict(),
 ]);
 export type CloudCacheRequest = z.infer<typeof CloudCacheRequestSchema>;
 export const CloudCacheReplySchema = z.discriminatedUnion("ok", [

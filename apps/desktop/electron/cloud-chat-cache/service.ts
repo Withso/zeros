@@ -29,7 +29,10 @@ interface Flight<T> {
   readers: Map<Binding, Promise<T>>; result: Promise<T>;
 }
 const changed = () => new CloudCacheChanged();
-const unavailable = () => Object.assign(new Error("Cloud history cache unavailable."), { stage: "service_check" });
+/** `stage` is a closed class for main.log (commands.ts): never a path, id or value. */
+const unavailable = (stage = "service_check") => Object.assign(new Error("Cloud history cache unavailable."), { stage });
+/** Per-process refresh outcomes for the launch summary line: closed names, counts only. */
+export type CloudCacheOutcome = "served" | "continued" | "replaced" | "filled" | "unstored" | "without_known";
 
 export class CloudChatCacheService {
   private readonly bindings = new Map<number, Binding>();
@@ -37,6 +40,11 @@ export class CloudChatCacheService {
   private readonly pendingFlights = new Map<string, Flight<CloudCachePending | null>>();
   private readonly beforeFlights = new Map<string, Flight<CloudCacheRange | null>>();
   private closed = false;
+  private readonly counts = new Map<CloudCacheOutcome, number>();
+  private count(outcome: CloudCacheOutcome): void { this.counts.set(outcome, (this.counts.get(outcome) ?? 0) + 1); }
+  outcomes(): ReadonlyMap<CloudCacheOutcome, number> { return this.counts; }
+  /** Rows held for the open line: chats and messages, counts only. */
+  stats(): { chats: number; messages: number } { return this.deps.store.stats(); }
   constructor(private readonly deps: {
     store: CloudChatCacheStore; source: CloudChatCacheSource;
     identity(): { owner: string; session: string } | null;
@@ -144,7 +152,7 @@ export class CloudChatCacheService {
       const key = this.key(this.binding(window, lease), target), saved = this.deps.store.metadata(key);
       if (saved?.revision === known.revision && saved.messageCount === known.messageCount) {
         const cached = this.deps.store.readRange(key, Math.max(0, known.messageCount - limit), known.messageCount);
-        if (cached?.revision === known.revision) return Promise.resolve({ range: cached, replaced: false, cached: true });
+        if (cached?.revision === known.revision) { this.count("served"); return Promise.resolve({ range: cached, replaced: false, cached: true }); }
       }
     } catch (error) { return Promise.reject(error); }
     const variant = known ? `${limit}:known:${known.revision}:${known.messageCount}` : String(limit);
@@ -169,7 +177,10 @@ export class CloudChatCacheService {
         });
       }
     } catch (error) { return Promise.reject(error); }
-    return this.start(window, lease, target, this.flights, variant, (key, context) => this.update(key, limit, context, !!known));
+    return this.start(window, lease, target, this.flights, variant, (key, context) => {
+      if (!known) this.count("without_known");
+      return this.update(key, limit, context, !!known);
+    });
   }
 
   refreshPending(window: number, lease: string, target: CloudCacheTarget): Promise<CloudCachePending | null> {
@@ -238,7 +249,7 @@ export class CloudChatCacheService {
   private async workspace(key: CloudCacheKey, context: CloudCacheRequestContext): Promise<void> {
     context.current();
     const workspace = await this.deps.source.workspace(key, context); context.current();
-    if (workspace.id !== key.workspaceId || workspace.organizationId !== key.organizationId) throw unavailable();
+    if (workspace.id !== key.workspaceId || workspace.organizationId !== key.organizationId) throw unavailable("service_workspace");
   }
 
   private async update(key: CloudCacheKey, limit: number, context: CloudCacheRequestContext, verified = false): Promise<Refresh> {
@@ -256,22 +267,25 @@ export class CloudChatCacheService {
         }
         replaced = true;
       } else if (delta.fromRevision !== metadata.revision || !this.deps.store.applyDelta(key, delta)) {
-        throw unavailable();
+        throw unavailable("service_delta");
       }
       metadata = { revision: delta.revision, messageCount: delta.messageCount };
     } else {
       const probe = CloudCacheRangeSchema.parse(await this.deps.source.range(key, 0, 0, context)); context.current();
-      if (probe.fromIndex !== 0 || probe.toIndex !== 0) throw unavailable();
+      if (probe.fromIndex !== 0 || probe.toIndex !== 0) throw unavailable("service_probe");
       metadata = probe;
     }
+    const outcome: CloudCacheOutcome = replaced ? "replaced" : this.deps.store.metadata(key) ? "continued" : "filled";
     const from = Math.max(0, metadata.messageCount - limit);
     const cached = this.deps.store.readRange(key, from, metadata.messageCount);
-    if (cached?.revision === metadata.revision) { context.current(); return { range: cached, replaced }; }
+    if (cached?.revision === metadata.revision) { context.current(); this.count(outcome); return { range: cached, replaced }; }
     const page = CloudCacheRangeSchema.parse(await this.deps.source.range(key, from, metadata.messageCount, context)); context.current();
-    if (page.revision !== metadata.revision || page.fromIndex !== from || page.toIndex !== metadata.messageCount || page.messageCount !== metadata.messageCount) throw unavailable();
-    this.deps.store.putRange(key, page);
+    if (page.revision !== metadata.revision || page.fromIndex !== from || page.toIndex !== metadata.messageCount || page.messageCount !== metadata.messageCount) throw unavailable("service_page_moved");
+    // A refused store (capacity) still answers this read from the page; it is counted, never silent.
+    const stored = this.deps.store.putRange(key, page);
     context.current();
     if ((this.deps.store.metadata(key)?.revision ?? page.revision) > page.revision) throw changed();
+    this.count(stored ? outcome : "unstored");
     return { range: page, replaced };
   }
 }
