@@ -74,3 +74,31 @@ it("commits Send without waiting for an already-running history/status read", as
   expect(value.enqueue).toHaveBeenCalledOnce(); expect(committed).toBe(true);
   history.resolve(emptyPage); await sending; f.coordinator.stop();
 });
+
+it("does not re-read a committed prompt's status while its workspace is not ready, and resumes on readiness", async () => {
+    vi.useFakeTimers();
+    let waking = true;
+    const records = new Map<string, PromptJournalRecord>();
+    const journal: CloudPromptJournal = {
+      read: async key => records.get(promptOwnerKey(key)) ?? emptyPromptJournal(key),
+      change: async (key, update) => { const value = update(records.get(promptOwnerKey(key)) ?? emptyPromptJournal(key)); records.set(promptOwnerKey(key), value); return value; },
+      owners: async () => [...records.values()].map(record => record.owner),
+      erase: async key => { records.delete(promptOwnerKey(key)); },
+    };
+    const coordinator = new CloudPromptCoordinator(journal, () => {}, () => waking);
+    const value = api();
+    const receipt = { workspaceId: owner.workspaceId, chatId: owner.chatId, userMessageId: "saved", sequence: "1", epoch: "0", acceptedAt: new Date(0).toISOString(), workspaceState: "stopped" as const };
+    vi.mocked(value.enqueue).mockResolvedValue(receipt);
+    vi.mocked(value.list).mockResolvedValue({ epoch: "0", nextAfter: null, items: [{ receipt, state: "queued", cancelRequested: false }] });
+    const chat = coordinator.channel(owner, value, () => true, vi.fn());
+    await chat.enqueue(async () => ({ chatId: owner.chatId, userMessageId: "saved", agentId: "codex", prompt: [{ type: "text", text: "ok" }], startedAt: 1 }));
+    coordinator.wake(chat); await vi.advanceTimersByTimeAsync(0);
+    // Delivery still happens while waking; only the status re-reads park.
+    expect(value.enqueue).toHaveBeenCalledTimes(1);
+    const reads = vi.mocked(value.list).mock.calls.length;
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(vi.mocked(value.list).mock.calls.length).toBe(reads);
+    waking = false; coordinator.refreshPending(); await vi.advanceTimersByTimeAsync(0);
+    expect(vi.mocked(value.list).mock.calls.length).toBe(reads + 1);
+    coordinator.stop();
+  });

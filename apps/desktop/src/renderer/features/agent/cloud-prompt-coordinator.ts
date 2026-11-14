@@ -11,7 +11,11 @@ export class CloudPromptCoordinator {
   private timer?: ReturnType<typeof setTimeout>;
   private closed = false;
   private inFlight = 0;
-  constructor(readonly journal: CloudPromptJournal, private readonly idle: () => void = () => {}) {}
+  /** `waiting`: the owner's workspace is not ready (stopped, waking, provisioning). Committed prompts then wait for
+   * readiness (refreshPending) instead of re-reading their status every 2 s; undelivered prompts still deliver. */
+  constructor(readonly journal: CloudPromptJournal, private readonly idle: () => void = () => {},
+    private readonly waiting: (owner: CloudPromptOwner) => boolean = () => false) {}
+  private parked(job: Job): boolean { return !job.channel.needsDelivery && this.waiting(job.channel.owner); }
   owns(channel: CloudPromptChannel): boolean {
     const job = this.jobs.get(promptOwnerKey(channel.owner));
     return job?.channel === channel && job.current();
@@ -95,7 +99,7 @@ export class CloudPromptCoordinator {
         finally {
           if (commitOnly) job.committing = false; else { job.running = false; job.refreshing = false; }
           this.inFlight--;
-          job.due = job.requested ? 0 : Date.now() + 2_000;
+          job.due = job.requested ? 0 : this.parked(job) ? Infinity : Date.now() + 2_000;
           if (job.current() && !job.running && !job.committing && !job.channel.pending) this.idle();
           if ([...this.jobs.values()].some(candidate => candidate.current() && !candidate.committing &&
               (!candidate.running && (candidate.channel.pending || candidate.requested) || candidate.refreshing && candidate.waiters.length)))
@@ -103,6 +107,6 @@ export class CloudPromptCoordinator {
         }
       })();
     }
-    if ([...this.jobs.values()].some(job => !job.running && !job.committing && (job.channel.pending || job.requested))) this.schedule(2_000);
+    if ([...this.jobs.values()].some(job => !job.running && !job.committing && (job.channel.pending || job.requested) && job.due !== Infinity)) this.schedule(2_000);
   }
 }
