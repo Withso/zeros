@@ -63,6 +63,30 @@ suite("Dev reference persistence",()=>{
     await restore.replace(mapping(),generation,[ref]);
     expect((await pool.query("SELECT * FROM cloud_agent_organization_connections")).rows).toEqual(before);
   });
+  it.each<[string,string[]]>([
+    ["reordered", ["model-b", "model-a"]],
+    ["duplicated", ["model-a", "model-b", "model-a"]],
+  ])("keeps the selection revision when a restored model set is %s",async(_kind,models)=>{
+    const ref=reference();ref.consent.models=["model-a","model-b"];
+    await restore.replace(mapping(),generation,[ref]);
+    const before=(await pool.query("SELECT * FROM cloud_agent_organization_connections")).rows;
+    await restore.replace(mapping(),generation,[{...ref,consent:{...ref.consent,models}}]);
+    expect((await pool.query("SELECT * FROM cloud_agent_organization_connections")).rows).toEqual(before);
+  });
+  it("replays an exact normalized selection after restoring an unordered duplicate model set",async()=>{
+    vi.stubEnv("ZEROS_DEV_CONNECTIONS_ENABLED","false");
+    const ref=reference();ref.consent.models=["model-b","model-a","model-b"];
+    await restore.replace(mapping(),generation,[ref]);
+    const service=new DatabaseCloudAgentCredentialService(pool,keys);
+    const selection={credentialId:ref.bindingId,credentialRevision:1,expectedRevision:0,models:["model-a","model-b"]};
+    await expect(service.setOrganizationConnection(fixture.userId,fixture.organizationId,"claude",selection))
+      .resolves.toEqual({revision:1,replayed:true});
+    const expectedHash=createHash("sha256").update(JSON.stringify([ref.bindingId,1,selection.models])).digest();
+    expect((await pool.query("SELECT models,request_sha256 FROM cloud_agent_organization_connections")).rows)
+      .toEqual([{models:selection.models,request_sha256:expectedHash}]);
+    await expect(service.setOrganizationConnection(fixture.userId,fixture.organizationId,"claude",{...selection,models:["model-a"]}))
+      .rejects.toMatchObject({status:409,code:"agent_connection_conflict"});
+  });
   it("rejects a changed member revision between discovery and replacement",async()=>{
     const snapshot=await restore.mapping(fixture.userId,"https://identity.example.test","user_dev","org_dev");
     await pool.query("UPDATE organization_members SET authorization_revision=authorization_revision+1 WHERE user_id=$1",[fixture.userId]);
