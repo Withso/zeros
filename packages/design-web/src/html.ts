@@ -169,7 +169,8 @@ function oid(element: Element): string | null {
  * plus its own attributes and direct text. Writing one layer's id, or changing
  * one layer's text or attributes, changes no other layer's derived id, so such
  * an edit persists only that layer's id. Adding, moving or removing elements
- * shifts places, so those edits persist every id first. A layer that shifts
+ * shifts places, so those edits also persist the ids of the layers they shift
+ * (healDesignHtmlIdentitiesForEdit). A layer that shifts
  * gets a new id rather than the one its neighbour had, so a held selection is
  * dropped, not moved to another layer. Explicit IDs remain authoritative. */
 export function nativeDesignIdentities(document: Document): (element: Element) => string {
@@ -870,10 +871,21 @@ export function mutateDesignNodeHtmlSource(
   mode: "append" | "replace-inner" = "replace-inner",
   sourceFile = "",
 ): string {
+  return designNodeHtmlInsertion(source, nodeId, html, mode, sourceFile).source;
+}
+
+/** The edited source and where the new content sits in it. */
+export function designNodeHtmlInsertion(
+  source: string,
+  nodeId: string,
+  html: string,
+  mode: "append" | "replace-inner" = "replace-inner",
+  sourceFile = "",
+): { source: string; start: number; end: number } {
   const slot = designSlotOfNodeId(nodeId);
   if (slot) {
     if (mode !== "append") throw new Error("A slot's layers can only be added to.");
-    return mutateDesignNodeHtmlSource(source, slot.host, designSlottedFragment(html, slot.name), "append", sourceFile);
+    return designNodeHtmlInsertion(source, slot.host, designSlottedFragment(html, slot.name), "append", sourceFile);
   }
   assertSafeDesignHtmlFragment(html, sourceFile);
   if (nodeId === DESIGN_DOCUMENT_BODY_ID) {
@@ -895,7 +907,7 @@ export function mutateDesignNodeHtmlSource(
     mode === "append"
       ? location.endTag.startOffset
       : location.startTag.endOffset;
-  return `${source.slice(0, start)}${html}${source.slice(location.endTag.startOffset)}`;
+  return { source: `${source.slice(0, start)}${html}${source.slice(location.endTag.startOffset)}`, start, end: start + html.length };
 }
 
 function attributeRemovalStart(source: string, start: number): number {
@@ -991,6 +1003,8 @@ export function healDesignHtmlIdentities(
     native?: boolean;
     /** Write only these derived ids; every other element keeps its bytes. */
     only?: ReadonlySet<string>;
+    /** Write ids only on elements that start within this span. */
+    within?: { start: number; end: number };
   } = {},
 ): {
   source: string;
@@ -1016,6 +1030,7 @@ export function healDesignHtmlIdentities(
       next = `${base}-${suffix}`;
     used.add(next);
     if (options.only && !options.only.has(next)) continue;
+    if (options.within && (location.startOffset < options.within.start || location.startOffset >= options.within.end)) continue;
     const attributeLocation = element.sourceCodeLocation?.attrs?.["data-oid"];
     if (attributeLocation) {
       edits.push({
@@ -1038,4 +1053,97 @@ export function healDesignHtmlIdentities(
   }
   const result = applySourceEdits(source, edits);
   return { source: result, changed: result !== source, healed: edits.length };
+}
+
+/** A placeholder data-oid that stands for an element's derived id while an
+ * edit is tried, so each element can be followed through it. The "::zeros-"
+ * namespace is one no authored layer takes. */
+const PENDING_IDENTITY = "::zeros-pending:";
+
+/** The id every element that heal would identify gets, keyed by its
+ * placeholder, given the ids `written` would put on some of them. */
+function pendingIdentities(source: string, written: ReadonlyMap<string, string>): Map<string, string> {
+  const document = parse(source, { sourceCodeLocationInfo: true });
+  const derived = nativeDesignIdentities(document);
+  const used = new Set<string>();
+  const result = new Map<string, string>();
+  for (const element of designElements(document).filter(isDesignElement)) {
+    if (!element.sourceCodeLocation?.startTag) continue;
+    const value = oid(element);
+    const pending = value?.startsWith(PENDING_IDENTITY) ? value : null;
+    // A copy of a pending element (a duplicate's) is new and has no id yet.
+    const current = pending ? written.get(pending) ?? null : value?.includes(PENDING_IDENTITY) ? null : value;
+    if (current && !used.has(current)) {
+      used.add(current);
+      if (pending) result.set(pending, current);
+      continue;
+    }
+    const base = derived(element);
+    let next = base;
+    for (let suffix = 2; used.has(next); suffix += 1) next = `${base}-${suffix}`;
+    used.add(next);
+    if (pending) result.set(pending, next);
+  }
+  return result;
+}
+
+/** Before a structural edit (a move, delete, duplicate or new content), write
+ * the derived ids of the layers the edit shifts, so each keeps its own id and
+ * none takes another's, and of the layers it names; every other layer keeps
+ * its bytes. `edit` applies the edit to a source and may throw, in which case
+ * every derived id is written, as the edit's own failure will report. */
+export function healDesignHtmlIdentitiesForEdit(
+  source: string,
+  operands: ReadonlySet<string>,
+  edit: (source: string) => string,
+): { source: string; changed: boolean } {
+  const named = healDesignHtmlIdentities(source, { native: true, only: operands }).source;
+  const document = parse(named, { sourceCodeLocationInfo: true });
+  const edits: Array<{ start: number; end: number; text: string }> = [];
+  const used = new Set<string>();
+  let count = 0;
+  for (const element of designElements(document).filter(isDesignElement)) {
+    const location = element.sourceCodeLocation;
+    if (!location?.startTag) continue;
+    const current = oid(element);
+    if (current && !used.has(current)) { used.add(current); continue; }
+    const marker = `${PENDING_IDENTITY}${count++}`;
+    const attribute = location.attrs?.["data-oid"];
+    if (attribute) { edits.push({ start: attribute.startOffset, end: attribute.endOffset, text: `data-oid="${marker}"` }); continue; }
+    const close = named.lastIndexOf(">", location.startTag.endOffset - 1);
+    if (close < location.startTag.startOffset) continue;
+    const slash = named.slice(location.startTag.startOffset, close).match(/\/\s*$/);
+    const insertAt = slash?.index === undefined ? close : location.startTag.startOffset + slash.index;
+    edits.push({ start: insertAt, end: insertAt, text: ` data-oid="${marker}"` });
+  }
+  const everything = () => {
+    const healed = healDesignHtmlIdentities(source, { native: true }).source;
+    return { source: healed, changed: healed !== source };
+  };
+  const marked = applySourceEdits(named, edits);
+  const before = pendingIdentities(marked, new Map());
+  let edited: string;
+  try {
+    edited = edit(marked);
+  } catch {
+    return everything();
+  }
+  // Writing one id can change which of two alike layers takes a suffix, so
+  // look again until no other layer shifts.
+  const keep = new Map<string, string>();
+  for (let round = 0; round < 8; round += 1) {
+    const after = pendingIdentities(edited, keep);
+    let grew = false;
+    for (const [marker, id] of before) {
+      const now = after.get(marker);
+      if (now === undefined || now === id || keep.has(marker)) continue;
+      keep.set(marker, id);
+      grew = true;
+    }
+    if (!grew) {
+      const result = keep.size ? healDesignHtmlIdentities(named, { native: true, only: new Set(keep.values()) }).source : named;
+      return { source: result, changed: result !== source };
+    }
+  }
+  return everything();
 }
