@@ -25,7 +25,9 @@ export async function readNativeCloudHistory(
   if (!["messages.window", "messages.windowOlder"].includes(op)) return null;
   if (!native.owner) return decline(native, "no_owner");
   if (params.before !== undefined) return decline(native, "index_page");
-  const parsed = CloudCacheTargetSchema.safeParse({ ...target, chatId: params.chatId });
+  // Only the three key fields: the runtime client's request target is parsed from a scoped id ({id}) or a folder
+  // ({relativePath}), and the strict schema refused those, so build 968 sent every transcript read past main.
+  const parsed = CloudCacheTargetSchema.safeParse({ organizationId: target.organizationId, workspaceId: target.workspaceId, chatId: params.chatId });
   const limit = params.limit;
   if (!parsed.success) return decline(native, "target");
   if (typeof limit !== "number" || !Number.isInteger(limit) || limit < 1 || limit > 500) return decline(native, "limit");

@@ -79,3 +79,14 @@ describe("reads the renderer answers without main are reported to main.log, by c
     } finally { vi.useRealTimers(); }
   });
 });
+
+describe("the runtime client's request target reaches the native cache (build 968: every transcript read fell back)", () => {
+  it("a target parsed from a scoped chat id ({id}) or a folder ({relativePath}) still reads natively", async () => {
+    for (const extra of [{ id: "chat" }, { relativePath: "src" }]) {
+      const { native, invoke } = fixture(undefined, true);
+      expect(await readNativeCloudHistory(native, { ...target, ...extra } as typeof target, "messages.window", { chatId: "chat", limit: 200 },
+        { revision: 12, messageCount: 1 })).toEqual({ messages: [row] });
+      expect(invoke.mock.calls.map(([input]) => input.op)).toContain("refresh");
+    }
+  });
+});
