@@ -1,4 +1,4 @@
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import pg from "pg";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { resetMigratedTestDatabase } from "../test-database.js";
@@ -27,22 +27,41 @@ suite("Dev reference persistence",()=>{
     restore=new DatabaseDevConnectionRestore(pool);
   });
   const mapping=()=>({issuer:"https://identity.example.test",subject:"user_dev",workosOrganizationId:"org_dev",localUserId:fixture.userId,localOrganizationId:fixture.organizationId});
-  it("restores metadata and fresh consent without material or image qualification, then prunes an empty exact-owner result",async()=>{
+  it("restores metadata and a selected login without material or image qualification, then prunes an empty exact-owner result",async()=>{
     const ref=reference(); await restore.replace(mapping(),generation,[ref]);
     const service=new DatabaseCloudAgentCredentialService(pool,keys);
     expect(await service.organizationConnections(fixture.userId,fixture.organizationId)).toMatchObject({connections:[{connected:true,credentialId:ref.bindingId}]});
+    expect((await pool.query("SELECT consent_fingerprint FROM cloud_agent_organization_connections")).rows).toEqual([{consent_fingerprint:"0".repeat(64)}]);
     const versions=(await pool.query("SELECT * FROM cloud_agent_credential_versions")).rows;
     expect(versions).toHaveLength(1); expect(versions[0]).toMatchObject({material_mode:"dev-reference",ciphertext:null,nonce:null,key_version:null});
     await restore.replace(mapping(),generation,[]);
     expect(await service.organizationConnections(fixture.userId,fixture.organizationId)).toMatchObject({credentials:[]});
   });
-  it("restores explicit all-model consent without widening an older explicit list", async () => {
+  it("restores an all-model selection without widening an older explicit list", async () => {
     const ref = reference();
     await restore.replace(mapping(), generation, [ref]);
     const service = new DatabaseCloudAgentCredentialService(pool, keys);
     expect((await service.organizationConnections(fixture.userId, fixture.organizationId)).connections[0]).toMatchObject({ allModels: false });
     await restore.replace(mapping(), generation, [{ ...ref, consentRevision: 2, consent: { ...ref.consent, allModels: true } }]);
     expect((await service.organizationConnections(fixture.userId, fixture.organizationId)).connections[0]).toMatchObject({ allModels: true });
+  });
+  it("keeps a restored login ready across membership drift without changing the selection on a fresh restore",async()=>{
+    const ref=reference();await restore.replace(mapping(),generation,[ref]);
+    const service=new DatabaseCloudAgentCredentialService(pool,keys);
+    await pool.query("UPDATE organizations SET authorization_revision=authorization_revision+1 WHERE id=$1",[fixture.organizationId]);
+    expect((await service.organizationConnections(fixture.userId,fixture.organizationId)).connections[0])
+      .toMatchObject({credentialId:ref.bindingId,revision:1,connected:true,health:{status:"ready"}});
+    await restore.replace(mapping(),generation,[ref]);
+    expect((await service.organizationConnections(fixture.userId,fixture.organizationId)).connections[0])
+      .toMatchObject({credentialId:ref.bindingId,revision:1,connected:true,health:{status:"ready"}});
+  });
+  it("does not revise an unchanged restored selection just to replace a released consent hash",async()=>{
+    const ref=reference();await restore.replace(mapping(),generation,[ref]);
+    const fingerprint="a".repeat(64),hash=createHash("sha256").update(JSON.stringify([ref.bindingId,1,ref.consent.models,fingerprint])).digest();
+    await pool.query("UPDATE cloud_agent_organization_connections SET consent_fingerprint=$1,request_sha256=$2",[fingerprint,hash]);
+    const before=(await pool.query("SELECT * FROM cloud_agent_organization_connections")).rows;
+    await restore.replace(mapping(),generation,[ref]);
+    expect((await pool.query("SELECT * FROM cloud_agent_organization_connections")).rows).toEqual(before);
   });
   it("rejects a changed member revision between discovery and replacement",async()=>{
     const snapshot=await restore.mapping(fixture.userId,"https://identity.example.test","user_dev","org_dev");
@@ -128,7 +147,7 @@ suite("Dev reference persistence",()=>{
     await expect(restore.replace(mapping(),generation,[ref])).rejects.toThrow();
     expect((await pool.query("SELECT material_mode FROM cloud_agent_credential_versions")).rows).toEqual([{material_mode:"local"}]);
   });
-  it("withdraws broker consent through the existing organization disconnect operation",async()=>{
+  it("removes the broker's organization selection through the existing disconnect operation",async()=>{
     const ref=reference(),service=new DatabaseCloudAgentCredentialService(pool,keys);
     await restore.replace(mapping(),generation,[ref]);
     for(const [name,value] of Object.entries({ZEROS_DEPLOY_ENV:'dev',ZEROS_DEV_ENVIRONMENT:'hosted',ZEROS_DEV_CONNECTIONS_ENABLED:'true',ZEROS_DEV_GENERATION:generation,

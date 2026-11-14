@@ -26,10 +26,10 @@ const uuid=z.string().uuid().transform(value=>value.toLowerCase()),revision=z.nu
 export const CloudAgentModelSchema=z.string().max(256).regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]*(?:\[1m\])?$/);
 type Credential={id:string;owner_user_id:string;kind:CloudAgentCredentialKind;display_name:string;revision:string;current_version:number;
   revoked_at:Date|null;last_operation_id:string;last_request_sha256:Buffer;connection_method:"api"|"account"};
-type OrganizationConnection={provider:string;revision:string;credential_id:string|null;credential_revision:string|null;models:string[];all_models:boolean;consent_fingerprint:string;request_sha256:Buffer};
+type OrganizationConnection={provider:string;revision:string;credential_id:string|null;credential_revision:string|null;models:string[];all_models:boolean};
 const organizationConnectionInput=z.union([
   z.object({expectedRevision:z.number().int().nonnegative().safe(),credentialId:uuid,credentialRevision:revision,
-    models:z.array(CloudAgentModelSchema).min(1).max(32),allModels:z.boolean().optional(),consent:z.literal("zeros-managed")}).strict(),
+    models:z.array(CloudAgentModelSchema).min(1).max(32),allModels:z.boolean().optional(),consent:z.literal("zeros-managed").optional()}).strict(),
   z.object({expectedRevision:z.number().int().nonnegative().safe(),credentialId:z.null()}).strict(),
 ]);
 function invalid():never{throw new HttpError(422,"invalid_agent_credential_request","Invalid agent credential request");}
@@ -94,16 +94,14 @@ export class DatabaseCloudAgentCredentialService {
     });
   }
 
-  private async organizationConsent(tx:Tx,ownerUserId:string,organizationId:string):Promise<string>{
+  private async requireOrganizationMembership(tx:Tx,ownerUserId:string,organizationId:string):Promise<void>{
     if(!uuid.safeParse(organizationId).success)invalid();
-    const row=(await tx.query<{fingerprint:string}>(`SELECT encode(digest(jsonb_build_array(
-      organization.id,organization.authorization_revision,account.id,account.auth_revision,
-      member.authorization_revision,member.role,member.created_at)::text,'sha256'),'hex') AS fingerprint
+    const row=(await tx.query(`SELECT 1
       FROM organization_members member JOIN organizations organization ON organization.id=member.org_id
       JOIN users account ON account.id=member.user_id
       WHERE member.org_id=$1 AND member.user_id=$2 AND organization.deleted_at IS NULL AND NOT organization.is_personal
       FOR SHARE OF organization,member`,[organizationId,ownerUserId])).rows[0];
-    if(!row)unavailable();return row.fingerprint;
+    if(!row)unavailable();
   }
 
   private async associateOrganization(tx:Tx,ownerUserId:string,organizationId:string,credentialId:string){
@@ -115,7 +113,7 @@ export class DatabaseCloudAgentCredentialService {
     return withSystemTx(this.pool,async tx=>{
       await this.owner(tx,ownerUserId);
       await serializeCloudAgentCredentialSourceMutation(tx,ownerUserId);
-      const fingerprint=await this.organizationConsent(tx,ownerUserId,organizationId);
+      await this.requireOrganizationMembership(tx,ownerUserId,organizationId);
       const credentials=(await tx.query<Credential>(`SELECT credential.*
         FROM cloud_agent_credential_organizations association
         JOIN cloud_agent_credentials credential ON credential.id=association.credential_id AND credential.owner_user_id=association.owner_user_id
@@ -139,7 +137,7 @@ export class DatabaseCloudAgentCredentialService {
         LEFT JOIN cloud_codex_auth_caches cache ON cache.credential_id=credential.id AND credential.kind='codex-chatgpt'
         WHERE connection.org_id=$1 AND connection.owner_user_id=$2 ORDER BY connection.provider`,[organizationId,ownerUserId])).rows;
       return {credentials:credentials.map(metadata),connections:connections.map(row=>{
-        const health=cloudAgentConnectionHealth(row,fingerprint);
+        const health=cloudAgentConnectionHealth(row);
         return {provider:row.provider,revision:Number(row.revision),credentialId:row.credential_id,
           models:[...cloudAgentModels(row.provider)],allModels:row.all_models,connected:health.status==="ready",health};
       })};
@@ -170,13 +168,17 @@ export class DatabaseCloudAgentCredentialService {
     return withSystemTx(this.pool,async tx=>{
       await this.owner(tx,ownerUserId,input.credentialId!==null);
       await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1,837412)) /*lock_purpose='agent-credential-owner'*/",[ownerUserId]);
-      const fingerprint=await this.organizationConsent(tx,ownerUserId,organizationId);
+      await this.requireOrganizationMembership(tx,ownerUserId,organizationId);
       if (input.credentialId) await assertCloudAgentCredentialMutationAllowed(tx,ownerUserId,{credentialId:input.credentialId,organizationId});
-      // Preserve released request hashes when the additive flag is absent/false.
-      const hash=createHash("sha256").update(JSON.stringify([input.credentialId,input.credentialId?input.credentialRevision:null,models,fingerprint,...(allModels?["all-models"]:[])])).digest();
+      const credentialRevision=input.credentialId?input.credentialRevision:null;
+      const hash=createHash("sha256").update(JSON.stringify([input.credentialId,credentialRevision,models,...(allModels?["all-models"]:[])])).digest();
       const previous=(await tx.query<OrganizationConnection>(`SELECT * FROM cloud_agent_organization_connections
         WHERE org_id=$1 AND owner_user_id=$2 AND provider=$3 FOR UPDATE`,[organizationId,ownerUserId,provider])).rows[0];
-      if(previous&&Number(previous.revision)===input.expectedRevision+1&&previous.request_sha256.equals(hash)){
+      // Released hashes included membership consent. Compare the selected fields
+      // so a lost response remains replayable across upgrades and member changes.
+      if(previous&&Number(previous.revision)===input.expectedRevision+1&&previous.credential_id===input.credentialId&&
+        (previous.credential_revision===null?null:Number(previous.credential_revision))===credentialRevision&&
+        JSON.stringify(previous.models)===JSON.stringify(models)&&previous.all_models===allModels){
 
         return {revision:Number(previous.revision),replayed:true};
       }
@@ -191,11 +193,12 @@ export class DatabaseCloudAgentCredentialService {
         if(Number(credential.revision)!==input.credentialRevision)throw new HttpError(409,"agent_credential_conflict","Agent credential changed");
       }
       const next=input.expectedRevision+1;
+      // The retained NOT NULL column has no authority meaning on this writer.
       await tx.query(`INSERT INTO cloud_agent_organization_connections(org_id,owner_user_id,provider,revision,credential_id,credential_revision,models,consent_fingerprint,request_sha256,all_models)
-        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT(org_id,owner_user_id,provider) DO UPDATE SET
+        VALUES($1,$2,$3,$4,$5,$6,$7,repeat('0',64),$8,$9) ON CONFLICT(org_id,owner_user_id,provider) DO UPDATE SET
         revision=EXCLUDED.revision,credential_id=EXCLUDED.credential_id,credential_revision=EXCLUDED.credential_revision,models=EXCLUDED.models,all_models=EXCLUDED.all_models,
         consent_fingerprint=EXCLUDED.consent_fingerprint,request_sha256=EXCLUDED.request_sha256,updated_at=now()`,
-      [organizationId,ownerUserId,provider,next,input.credentialId,input.credentialId?input.credentialRevision:null,models,fingerprint,hash,allModels]);
+      [organizationId,ownerUserId,provider,next,input.credentialId,credentialRevision,models,hash,allModels]);
 
       return {revision:next,replayed:false};
     });
@@ -212,7 +215,7 @@ export class DatabaseCloudAgentCredentialService {
     return withSystemTx(this.pool,async tx=>{
       await this.owner(tx,ownerUserId);
       await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1,837412)) /*lock_purpose='agent-credential-owner'*/",[ownerUserId]);
-      await this.organizationConsent(tx,ownerUserId,organizationId);
+      await this.requireOrganizationMembership(tx,ownerUserId,organizationId);
       await assertCloudAgentCredentialMutationAllowed(tx,ownerUserId,{credentialId,organizationId});
       await tx.query(`UPDATE cloud_agent_organization_connections SET credential_id=NULL,credential_revision=NULL,models='{}',revision=revision+1,request_sha256=digest(request_sha256,'sha256'),updated_at=now()
         WHERE org_id=$1 AND owner_user_id=$2 AND credential_id=$3`,[organizationId,ownerUserId,credentialId]);
@@ -241,7 +244,7 @@ export class DatabaseCloudAgentCredentialService {
     const hash=createHash("sha256").update(JSON.stringify(hashValues)).digest();
     return withSystemTx(this.pool,async tx=>{
       await this.owner(tx,input.ownerUserId,true);
-      if(input.organizationId)await this.organizationConsent(tx,input.ownerUserId,input.organizationId);
+      if(input.organizationId)await this.requireOrganizationMembership(tx,input.ownerUserId,input.organizationId);
       // A per-owner transaction lock bounds concurrent creation without taking
       // mutable user authorization locks or allowing duplicate count checks.
       await tx.query("SELECT pg_advisory_xact_lock(hashtextextended($1,837412)) /*lock_purpose='agent-credential-owner'*/",[input.ownerUserId]);

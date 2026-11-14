@@ -5,8 +5,8 @@ import { denied, type ConnectionReference } from "./types.js";
 import { ReferenceSchema, type RestoreMapping, type RestorePort } from "./client.js";
 import {serializeCloudAgentCredentialSourceMutation,assertCloudAgentCredentialMutationAllowed} from "../agent-credentials/agent-credential-mutations.js";
 
-/** Same consent fingerprint as the released credential service. Member and
- * identity locks fence a network restore against local authorization changes. */
+/** This fingerprint binds the encrypted Dev session and its broker references.
+ * Member and identity locks fence a network restore against authorization changes. */
 export async function currentMapping(tx: Tx, mapping: RestoreMapping) {
   const row = (await tx.query<{fingerprint:string}>(`SELECT encode(digest(jsonb_build_array(
     o.id,o.authorization_revision,u.id,u.auth_revision,m.authorization_revision,m.role,m.created_at)::text,'sha256'),'hex') AS fingerprint
@@ -85,13 +85,15 @@ export class DatabaseDevConnectionRestore implements RestorePort {
         await tx.query("INSERT INTO cloud_agent_credential_organizations(credential_id,owner_user_id,org_id) VALUES($1,$2,$3) ON CONFLICT DO NOTHING",[ref.bindingId,mapping.localUserId,mapping.localOrganizationId]);
         if(!ref.consent.scopes.includes('agent')||!ref.consent.models.length)continue;
         const provider=ref.kind.split('-')[0]!;
-        const consentHash=createHash('sha256').update(JSON.stringify([ref.bindingId,Number(credential.revision),ref.consent.models,fingerprint,...(ref.consent.allModels?["all-models"]:[])])).digest();
+        const selectionHash=createHash('sha256').update(JSON.stringify([ref.bindingId,Number(credential.revision),ref.consent.models,...(ref.consent.allModels?["all-models"]:[])])).digest();
         await tx.query(`INSERT INTO cloud_agent_organization_connections(org_id,owner_user_id,provider,revision,credential_id,credential_revision,models,consent_fingerprint,request_sha256,all_models)
-          VALUES($1,$2,$3,1,$4,$5,$6,$7,$8,$9) ON CONFLICT(org_id,owner_user_id,provider) DO UPDATE SET
+          VALUES($1,$2,$3,1,$4,$5,$6,repeat('0',64),$7,$8) ON CONFLICT(org_id,owner_user_id,provider) DO UPDATE SET
           revision=cloud_agent_organization_connections.revision+1,credential_id=EXCLUDED.credential_id,credential_revision=EXCLUDED.credential_revision,
           models=EXCLUDED.models,all_models=EXCLUDED.all_models,consent_fingerprint=EXCLUDED.consent_fingerprint,request_sha256=EXCLUDED.request_sha256,updated_at=now()
-          WHERE cloud_agent_organization_connections.request_sha256 IS DISTINCT FROM EXCLUDED.request_sha256`,
-        [mapping.localOrganizationId,mapping.localUserId,provider,ref.bindingId,credential.revision,ref.consent.models,fingerprint,consentHash,ref.consent.allModels===true]);
+          WHERE (cloud_agent_organization_connections.credential_id,cloud_agent_organization_connections.credential_revision,
+            cloud_agent_organization_connections.models,cloud_agent_organization_connections.all_models)
+            IS DISTINCT FROM (EXCLUDED.credential_id,EXCLUDED.credential_revision,EXCLUDED.models,EXCLUDED.all_models)`,
+        [mapping.localOrganizationId,mapping.localUserId,provider,ref.bindingId,credential.revision,ref.consent.models,selectionHash,ref.consent.allModels===true]);
       }
     });
   }
