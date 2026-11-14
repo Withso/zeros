@@ -114,7 +114,7 @@ export class CloudChatCacheStore {
       try {
         const info = fs.lstatSync(this.filename + suffix);
         if (!info.isFile() || info.nlink !== 1 || suffix === "" && this.file &&
-          (this.file.dev !== info.dev || this.file.ino !== info.ino)) throw unavailable();
+          (this.file.dev !== info.dev || this.file.ino !== info.ino)) throw Object.assign(unavailable(), { stage: "store_files" });
       } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
     }
   }
@@ -133,7 +133,7 @@ export class CloudChatCacheStore {
       const before = heldDescriptors(this.file);
       this.db = this.openNative(this.filename);
       const after = heldDescriptors(this.file);
-      if (before === null || after === null || after <= before) throw unavailable();
+      if (before === null || after === null || after <= before) throw Object.assign(unavailable(), { stage: "store_bind" });
       this.checkFiles();
       this.db.pragma("trusted_schema=OFF");
       const version = this.db.pragma("user_version", { simple: true });
@@ -163,7 +163,7 @@ export class CloudChatCacheStore {
         return this.database();
       }
       fs.closeSync(this.descriptor); this.descriptor = undefined; this.file = undefined;
-      throw unavailable();
+      throw Object.assign(unavailable(), { stage: (error as { stage?: string })?.stage ?? "store_open" });
     }
   }
 
@@ -397,6 +397,13 @@ export class CloudChatCacheStore {
       this.rebuildSegments(key, segments);
       this.bound(key);
     }, key);
+  }
+
+  /** Counts only, for the main.log open line. */
+  stats(): { chats: number; messages: number } {
+    const db = this.database(), count = (table: "chats" | "messages") =>
+      Number((db.prepare(`SELECT count(*) AS n FROM ${table}`).get() as { n: number }).n);
+    return { chats: count("chats"), messages: count("messages") };
   }
 
   readTail(input: CloudCacheKey, limit = 200): CloudCacheRange | null {

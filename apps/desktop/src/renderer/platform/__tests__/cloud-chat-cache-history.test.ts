@@ -58,3 +58,35 @@ describe("passive native history integration", () => {
     expect(invoke).not.toHaveBeenCalled();
   });
 });
+
+describe("reads the renderer answers without main are reported to main.log, by closed class", () => {
+  it("batches one report per burst: no owner, a failed refresh, an uncached older page", async () => {
+    vi.useFakeTimers();
+    try {
+      const failing = fixture("unavailable");
+      const reports = () => failing.invoke.mock.calls.map(([input]) => input).filter(input => input.op === "report");
+      expect(await readNativeCloudHistory(failing.native, target, "messages.window", { chatId: "chat", limit: 200 })).toBeNull();
+      expect(await readNativeCloudHistory(failing.native, target, "messages.window", { chatId: "chat", limit: 200 })).toBeNull();
+      expect(await readNativeCloudHistory(failing.native, target, "messages.windowOlder", { chatId: "chat", limit: 200 })).toBeNull();
+      expect(reports()).toEqual([]);
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(reports()).toEqual([{ op: "report", declines: { fallback_unavailable: 2, older_cursor: 1 } }]);
+      const unboundInvoke = vi.fn(async () => ({ ok: true, result: null }));
+      const silent = new NativeCloudChatCacheClient({ invoke: unboundInvoke });
+      expect(await readNativeCloudHistory(silent, target, "messages.window", { chatId: "chat", limit: 200 })).toBeNull();
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(unboundInvoke.mock.calls).toEqual([[{ op: "report", declines: { no_owner: 1 } }]]);
+    } finally { vi.useRealTimers(); }
+  });
+});
+
+describe("the runtime client's request target reaches the native cache (build 968: every transcript read fell back)", () => {
+  it("a target parsed from a scoped chat id ({id}) or a folder ({relativePath}) still reads natively", async () => {
+    for (const extra of [{ id: "chat" }, { relativePath: "src" }]) {
+      const { native, invoke } = fixture(undefined, true);
+      expect(await readNativeCloudHistory(native, { ...target, ...extra } as typeof target, "messages.window", { chatId: "chat", limit: 200 },
+        { revision: 12, messageCount: 1 })).toEqual({ messages: [row] });
+      expect(invoke.mock.calls.map(([input]) => input.op)).toContain("refresh");
+    }
+  });
+});

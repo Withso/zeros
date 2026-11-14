@@ -26,6 +26,9 @@ import {
 type Message = Partial<BridgeMessage> & { type: string };
 const MAX_CLOUD_CONNECTIONS = 16;
 const MAX_RETIRED_SNAPSHOTS = 64;
+/** A peer open's history warm reuses a confirmed, un-invalidated chats.list this long (the catalog poll interval).
+ * The lifecycle poll (warmHistoryWorkspace) keeps its own cadence. */
+export const WARM_LIST_REUSE_MS = 60_000;
 /** Renderer-only refresh ownership; never sent to an engine. */
 export type ChatSnapshotRefresh = "all" | "local" | "retained" | readonly string[];
 type RequestOptions = Exclude<
@@ -514,14 +517,17 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     return JSON.stringify([cloudWorkspaceKey(target), this.accountEpoch, owner?.account, owner?.stopVersion, this.routing.canAccess?.(target)]);
   }
 
-  private warmHistorySnapshot(target: CloudWorkspaceTarget): Promise<WireRecord> {
+  private warmHistorySnapshot(target: CloudWorkspaceTarget, reuseMs = 0): Promise<WireRecord> {
     const key = cloudWorkspaceKey(target);
     const historyKey = this.historyKey(target, "chats.list", {});
     const pending = this.historyWarmups.get(historyKey);
     if (pending) return pending;
     if (this.historyWarmups.size >= 32) return Promise.reject(new Error("Too many cloud history reads"));
     const before = this.history.peekSnapshot(historyKey).data;
-    const flight = this.readHistory(target, "chats.list", {}).then(snapshot => {
+    // Census K: six of seven launch list reads came from peer opens, each re-reading a list confirmed a second earlier.
+    // A confirmed list that no change event has invalidated is still the server's answer (an unconfirmed one is re-read).
+    const reuse = this.unconfirmedLists.has(historyKey) ? 0 : reuseMs;
+    const flight = this.readHistory(target, "chats.list", {}, reuse).then(snapshot => {
       // Catalog polling is not a database change. Repeated warm reads must not
       // invalidate every retained transcript, file and Git surface.
       if (snapshot !== before && this.history.peekSnapshot(historyKey).data === snapshot)
@@ -574,7 +580,8 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
   private historyKey(target: CloudWorkspaceTarget, op: string, params: WireRecord): string {
     return `${cloudWorkspaceKey(target)}\0${this.identity(target)}\0${op}\0${JSON.stringify(params)}`;
   }
-  private async readHistory(target: CloudWorkspaceTarget, op: string, params: WireRecord): Promise<WireRecord> {
+  /** `reuseMs`: a passive warm accepts a confirmed snapshot this old (an invalidation still forces a re-read). */
+  private async readHistory(target: CloudWorkspaceTarget, op: string, params: WireRecord, reuseMs = 0): Promise<WireRecord> {
     const epoch = this.accountEpoch, listGeneration = this.listInvalidations;
     const identity = this.identity(target);
     const assertAccess = () => {
@@ -622,7 +629,7 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
         if (previous && JSON.stringify(previous) === JSON.stringify(result)) return previous;
       }
       return result;
-    }, { maxAgeMs: (this.historyIntents.get(cacheKey) ?? -1) >= performance.now() ? 15_000 : 1000 }); }
+    }, { maxAgeMs: Math.max(reuseMs, (this.historyIntents.get(cacheKey) ?? -1) >= performance.now() ? 15_000 : 1000) }); }
     catch (error) {
       // A temporary GitHub verification failure keeps the confirmed transcript and re-reads quietly; anything else
       // (a refusal, no transcript yet) fails as before.
@@ -875,7 +882,7 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     };
     // Publish durable history independently, including while admission/connect
     // is slow. Keep this exact read for initial hydration even after its TTL.
-    const history = this.routing.readHistory ? this.warmHistorySnapshot(target) : undefined;
+    const history = this.routing.readHistory ? this.warmHistorySnapshot(target, WARM_LIST_REUSE_MS) : undefined;
     void history?.catch(() => {});
     let opening: Promise<CloudPeer>;
     let admitted: PeerEntry | undefined;

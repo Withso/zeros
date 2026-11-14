@@ -152,3 +152,24 @@ describe("passive native cloud cache transport", () => {
     }
   });
 });
+
+describe("each transport failure carries a closed stage for main.log", () => {
+  const stageOf = (promise: Promise<unknown>) => promise.then(() => "resolved", (error: { stage?: string }) => error.stage ?? "none");
+  it("names schema, status, identity, network and body-size failures", async () => {
+    const f = setup();
+    f.request.mockResolvedValueOnce(json({ result: { ...page, rows: [{ index: 0, msgId: "m", kind: "", payload: "{}", createdAt: 1 }], toIndex: 1, messageCount: 1 } }));
+    expect(await stageOf(f.source.range(key, 0, 1, f.context))).toBe("source_schema");
+    f.request.mockResolvedValueOnce(json({ error: { code: "history_unavailable" } }, 503));
+    expect(await stageOf(f.source.range(key, 0, 0, f.context))).toBe("source_http_5xx");
+    f.request.mockResolvedValueOnce(json({ error: { code: "unauthorized" } }, 401));
+    expect(await stageOf(f.source.range(key, 0, 0, f.context))).toBe("source_http_401");
+    f.request.mockRejectedValueOnce(new TypeError("fetch failed"));
+    expect(await stageOf(f.source.range(key, 0, 0, f.context))).toBe("source_network");
+    f.request.mockResolvedValueOnce(new Response("{}", { headers: { "content-length": String(65 * 1024 ** 2) } }));
+    expect(await stageOf(f.source.range(key, 0, 0, f.context))).toBe("source_body_size");
+    f.session.mockResolvedValueOnce({ accountId: "viewer-b", sessionId: "session-a", accessToken: "fixture-bearer" });
+    expect(await stageOf(f.source.range(key, 0, 0, f.context))).toBe("source_identity");
+    f.session.mockResolvedValueOnce(null as never);
+    expect(await stageOf(f.source.range(key, 0, 0, f.context))).toBe("source_session");
+  });
+});

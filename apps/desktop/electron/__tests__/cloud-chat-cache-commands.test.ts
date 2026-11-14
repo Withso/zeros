@@ -72,3 +72,75 @@ describe("native cloud cache IPC boundary", () => {
     await expect(f.command({ op: "refresh", lease, target, limit: 200 }, f.event)).resolves.toEqual({ ok: false, reason: "access_lost", scope: "chat" });
   });
 });
+
+describe("a failing cache is visible in main.log, counted, with a closed reason class", () => {
+  function logged() {
+    const lines: string[] = [];
+    return { lines, log: (line: string) => lines.push(line) };
+  }
+  it("logs ready once, and each failure class with its stage at counts 1, 2, 4, 8...", async () => {
+    const f = fixture(), out = logged();
+    let session = true;
+    const command = createCloudChatCacheCommand({ service: f.load, log: out.log,
+      admit: () => { if (!session) throw Object.assign(new Error("no session"), { stage: "no_session" }); return { window: 1, current: () => true }; } });
+    await command({ op: "bind", owner, client: "renderer-a" }, f.event);
+    await command({ op: "bind", owner, client: "renderer-a" }, f.event);
+    expect(out.lines.filter(line => line.startsWith("ready"))).toEqual(["ready"]);
+    session = false;
+    for (let i = 0; i < 5; i++) await expect(command({ op: "bind", owner, client: "renderer-a" }, f.event)).resolves.toEqual({ ok: false, reason: "unavailable" });
+    expect(out.lines.filter(line => line.startsWith("failure"))).toEqual([
+      "failure op=bind reason=unavailable stage=no_session count=1",
+      "failure op=bind reason=unavailable stage=no_session count=2",
+      "failure op=bind reason=unavailable stage=no_session count=4",
+    ]);
+    // No paths, ids, owners or values ever appear.
+    expect(out.lines.join("\n")).not.toMatch(/viewer-a|api\.example|\/tmp|[0-9a-f]{8}-[0-9a-f]{4}/);
+  });
+
+  it("logs the opened rows once, and one launch line: outcomes, declines by op/reason/stage, and renderer declines", async () => {
+    const f = fixture(), out = logged();
+    let summary: (() => void) | undefined, delay: number | undefined;
+    const command = createCloudChatCacheCommand({ service: f.load, log: out.log, admit: () => ({ window: 1, current: () => true }),
+      schedule: (run, milliseconds) => { summary = run; delay = milliseconds; } });
+    const lease = (await command({ op: "bind", owner, client: "renderer-a" }, f.event) as { result: { lease: string } }).result.lease;
+    await command({ op: "refresh", lease, target, limit: 200 }, f.event);
+    await command({ op: "refresh", lease, target, limit: 200, known: { revision: 2, messageCount: 1 } }, f.event);
+    await command({ op: "refresh", lease, target, limit: 200 }, f.event);
+    await command({ op: "refresh", lease, target, limit: 501 }, f.event);
+    await command({ op: "report", declines: { no_owner: 2, fallback_unavailable: 1 } }, f.event);
+    expect(out.lines.filter(line => line.startsWith("opened"))).toEqual(["opened chats=0 messages=0"]);
+    expect(delay).toBe(60_000);
+    summary!();
+    expect(out.lines.at(-1)).toBe("launch outcomes=continued=1,filled=1,served=1,without_known=2 " +
+      "declined=refresh/unavailable/request=1 renderer=fallback_unavailable=1,no_owner=2");
+    expect(out.lines.join("\n")).not.toMatch(/viewer-a|api\.example|\/tmp|[0-9a-f]{8}-[0-9a-f]{4}/);
+  });
+
+  it("a launch whose renderer never asks main still logs its launch line", () => {
+    const out = logged();
+    let summary: (() => void) | undefined;
+    createCloudChatCacheCommand({ service: async () => { throw new Error("unused"); }, log: out.log,
+      admit: () => ({ window: 1, current: () => true }), schedule: run => { summary = run; } });
+    summary!();
+    expect(out.lines).toEqual(["launch outcomes=none declined=none renderer=none"]);
+  });
+
+  it("a store whose native open is not bound to the held file reports stage=store_bind", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-cache-bind-")), out = logged();
+    const file = path.join(root, "cloud-cache.db");
+    new CloudChatCacheStore(root).close();
+    const Database = (await import("better-sqlite3")).default;
+    const store = new CloudChatCacheStore(root, { openNative: filename => {
+      const parked = `${file}.parked`, substitute = `${file}.substitute`;
+      new Database(substitute).close();
+      fs.renameSync(file, parked); fs.renameSync(substitute, file);
+      try { return new Database(filename); } finally { fs.renameSync(file, substitute); fs.renameSync(parked, file); }
+    } });
+    const service = new CloudChatCacheService({ store, source: fixture().source, identity: () => ({ owner, session: "session-a" }) });
+    const command = createCloudChatCacheCommand({ service: async () => service, log: out.log, admit: () => ({ window: 1, current: () => true }) });
+    cleanup.push(() => { service.close(); store.close(); fs.rmSync(root, { recursive: true, force: true }); });
+    await expect(command({ op: "bind", owner, client: "renderer-a" }, {})).resolves.toEqual({ ok: false, reason: "unavailable" });
+    expect(out.lines).toContain("open failed stage=store_bind");
+    expect(out.lines).toContain("failure op=bind reason=unavailable stage=store_bind count=1");
+  });
+});
