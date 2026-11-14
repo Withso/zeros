@@ -1,5 +1,5 @@
 import type pg from "pg";
-import { withSystemTx } from "../db.js";
+import { withSystemTx, type Tx } from "../db.js";
 import { HttpError } from "../authz.js";
 import type { CloudV2Workspace } from "./store.js";
 
@@ -20,10 +20,11 @@ export function originalSetupBuild(current: string | null, restore: unknown): Se
   return { setupBuildId: record.setupBuildId as string | null, ...(record.setupLegacy === true ? { setupLegacy: true } : {}) };
 }
 
-export async function workspaceSetupBuild(pool: pg.Pool, workspace: CloudV2Workspace): Promise<SetupBuildPin | null> {
-  const { rows } = await withSystemTx(pool, tx => tx.query<{ computer_build_id: string | null; restore_create: unknown }>(
+export async function workspaceSetupBuild(pool: pg.Pool, workspace: CloudV2Workspace, transaction?: Tx): Promise<SetupBuildPin | null> {
+  const read = (tx: Tx) => tx.query<{ computer_build_id: string | null; restore_create: unknown }>(
     `SELECT computer_build_id,restore_create FROM cloud_v2_workspaces
      WHERE id=$1 AND org_id=$2 AND creator_user_id=$3 AND state NOT IN ('deleted','deleting')`,
-    [workspace.id, workspace.organizationId, workspace.creatorUserId]));
+    [workspace.id, workspace.organizationId, workspace.creatorUserId]);
+  const { rows } = await (transaction ? read(transaction) : withSystemTx(pool, read));
   return rows[0] ? originalSetupBuild(rows[0].computer_build_id, rows[0].restore_create) : null;
 }

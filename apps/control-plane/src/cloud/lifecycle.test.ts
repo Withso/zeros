@@ -4,11 +4,13 @@ import { GithubTemporaryError } from "../github-availability.js";
 import type { CloudV2Compute } from "./boat.js";
 import { CLOUD_V2_IDLE_STOP_MS, CLOUD_V2_WORKER_TOKEN_PATH, CloudV2Lifecycle, checkoutWarmupCommand, deliverWorkerTokenCommand, type CloudV2LifecycleDeps } from "./lifecycle.js";
 import type { CloudV2CheckpointFork, CloudV2CheckpointRetry, CloudV2Workspace, CloudV2LifecycleWorkspace } from "./store.js";
+
 import { generateKeyPairSync } from "node:crypto";
 
 const NOW = Date.parse("2026-10-21T12:00:00Z");
 const token = `zw2w_${"a".repeat(43)}`;
 const runtime = `/opt/zeros/runtime/${"b".repeat(64)}`;
+
 const publicKeys = [generateKeyPairSync("ed25519").publicKey.export({ type: "spki", format: "pem" }).toString()];
 
 function workspace(state: CloudV2Workspace["state"], extra: Partial<CloudV2LifecycleWorkspace & { attempts: number }> = {}): CloudV2LifecycleWorkspace & { attempts: number } {
@@ -55,7 +57,7 @@ const vmCommand = (f: { compute: CloudV2Compute }, marker: string) => vi.mocked(
 function setup(claimed: (CloudV2LifecycleWorkspace & { attempts: number })[], options: { snapshot?: string | null; prune?: string[]; stock?: true; checkout?: true; idle?: CloudV2Workspace[]; stopIdle?: CloudV2LifecycleDeps["stopIdle"]; timing?: CloudV2LifecycleDeps["timing"]; now?: () => number;
   checkpoints?: ReturnType<typeof checkpointsFake>; remoteHead?: CloudV2LifecycleDeps["remoteHead"]; githubToken?: CloudV2LifecycleDeps["githubToken"]; uploadHorizon?: string;
   checkpointRetry?: boolean; retries?: RetryRow[]; prepareRepository?: CloudV2LifecycleDeps["prepareRepository"]; pruneEnvironments?: () => Promise<void>;
-  runtimeForWorkspace?: CloudV2LifecycleDeps["runtimeForWorkspace"]; bootEnv?: CloudV2LifecycleDeps["bootEnv"]; builds?: CloudV2LifecycleDeps["builds"]; recovery?: CloudV2LifecycleDeps["recovery"];
+  runtimeForWorkspace?: CloudV2LifecycleDeps["runtimeForWorkspace"]; runtimeUpdates?: CloudV2LifecycleDeps["runtimeUpdates"]; bootEnv?: CloudV2LifecycleDeps["bootEnv"]; builds?: CloudV2LifecycleDeps["builds"]; recovery?: CloudV2LifecycleDeps["recovery"];
   authorizeWorkspace?: CloudV2LifecycleDeps["authorizeWorkspace"]; resolvePendingSource?: CloudV2LifecycleDeps["resolvePendingSource"] } = {}) {
   const retries = [...options.retries ?? []];
   const compute: CloudV2Compute = {
@@ -124,6 +126,7 @@ function setup(claimed: (CloudV2LifecycleWorkspace & { attempts: number })[], op
     runtime: { sha256: "b".repeat(64), url: async () => "https://r2.example.test/runtime.tar.gz?sig=1" },
     bootEnv: options.bootEnv ?? (ws => ({ CLOUD_V2_API_URL: "https://api.example.test", ZEROS_WORKSPACE_ID: ws.id })),
     ...(options.runtimeForWorkspace ? { runtimeForWorkspace: options.runtimeForWorkspace } : {}),
+    ...(options.runtimeUpdates ? { runtimeUpdates: options.runtimeUpdates } : {}),
     sandboxName: ws => `zeros-alpha-${ws.id.slice(0, 8)}`,
     ...(options.checkpoints ? { checkpoints: options.checkpoints } : {}),
     ...(options.remoteHead ? { remoteHead: options.remoteHead } : {}),
@@ -136,6 +139,31 @@ function setup(claimed: (CloudV2LifecycleWorkspace & { attempts: number })[], op
   });
   return { lifecycle, compute, store, stopWorker, logs };
 }
+
+it("attempts idle runtime preparation before the fresh idle-stop fence without holding other lifecycle work", async () => {
+  const held = Promise.withResolvers<void>(), idle = workspace("running", { boatSandboxId: "bx_idle" });
+  const runtimeUpdates = { tick: vi.fn(async () => {}), close: vi.fn(), beforeIdleStop: vi.fn(() => held.promise), cancelStaging: vi.fn() };
+  const stopIdle = vi.fn(async () => {});
+  const f = setup([workspace("creating")], { idle: [idle], runtimeUpdates, stopIdle });
+  const task = f.lifecycle.tick();
+  try {
+    await expect.poll(() => vi.mocked(f.compute.create).mock.calls.length).toBe(1);
+    expect(runtimeUpdates.beforeIdleStop).toHaveBeenCalledExactlyOnceWith(idle);
+    expect(stopIdle).not.toHaveBeenCalled();
+  } finally { held.resolve(); await task; }
+  expect(stopIdle).toHaveBeenCalledWith(idle.id, expect.any(Date));
+});
+
+it.each(["stopping", "deleting"] as const)("cancels staging before %s provider work", async state => {
+  const row = workspace(state, { boatSandboxId: "bx_staging" });
+  const runtimeUpdates = { tick: vi.fn(async () => {}), close: vi.fn(), cancelStaging: vi.fn() };
+  const f = setup([row], { runtimeUpdates });
+  const call = state === "stopping" ? f.stopWorker : vi.mocked(f.compute.delete);
+  await f.lifecycle.tick();
+  expect(runtimeUpdates.cancelStaging).toHaveBeenCalledExactlyOnceWith(row.id);
+  expect(call).toHaveBeenCalledOnce();
+  expect(runtimeUpdates.cancelStaging.mock.invocationCallOrder[0]).toBeLessThan(call.mock.invocationCallOrder[0]!);
+});
 
 describe("a create that returned before its GitHub checks", () => {
   const pending = (extra: Partial<CloudV2LifecycleWorkspace & { attempts: number }> = {}) => workspace("creating", { sourcePending: true, computerBuildId: "build", ...extra });

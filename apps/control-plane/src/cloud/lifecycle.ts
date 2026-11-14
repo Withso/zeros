@@ -82,6 +82,7 @@ export type CloudV2TimingRecord = {
   /** relay_ready: the worker socket dial, and the time from it to readiness.
    * worker_hello: configMs is the control plane's configuration inside hello. */
   dialMs?: number; configMs?: number;
+  readyWaitMs?: number; routeReads?: number; gatewayFailures?: number; gatewayWaitMs?: number;
   /** relay_ready: route reads until the worker was ready, including the successful one. */
   attempts?: number;
 } & ({
@@ -131,7 +132,7 @@ export type CloudV2LifecycleDeps = {
   prepareRepository?(workspace: CloudV2LifecycleWorkspace, sandboxId: string): Promise<void>;
   /** Cloud Computer builds share this loop; one runs at a time. */
   builds?: { tick(): Promise<void>; cleanup?(): Promise<void>; close?(): void };
-  runtimeUpdates?: { tick(): Promise<void>; close(): void };
+  runtimeUpdates?: { tick(): Promise<void>; close(): void; beforeIdleStop?(workspace: CloudV2Workspace): Promise<void>; cancelStaging?(workspaceId: string): void };
   recovery?: { start(): () => Promise<void> };
   executionActivations?: { tick(): Promise<void> };
   /** Retries a stop's failed checkpoint on a fork of the stopped VM. */
@@ -213,6 +214,7 @@ export class CloudV2Lifecycle {
   private running: Promise<void> | null = null;
   private readonly inFlight = new Map<string, Promise<void>>();
   private readonly stopping = new Set<string>();
+  private readonly idleStops = new Map<string, Promise<void>>();
   /** A restore begun in this step, until the same step applies its checkpoint. */
   private readonly recordedRestores = new Map<string, CloudV2RestoreCreate>();
 
@@ -231,6 +233,7 @@ export class CloudV2Lifecycle {
       this.timer = null;
       await this.running;
       await Promise.all(this.inFlight.values());
+      await Promise.all(this.idleStops.values());
       await this.renewing;
       await this.retrying;
       await this.building;
@@ -281,7 +284,7 @@ export class CloudV2Lifecycle {
       await Promise.race([Promise.allSettled(background), new Promise(resolve => { timer = setTimeout(resolve, BACKGROUND_SETTLE_MS); })]);
       clearTimeout(timer);
     }
-    if (this.inFlight.size || this.building || this.cleaning || this.retrying || this.renewing) return this.intervalMs;
+    if (this.inFlight.size || this.idleStops.size || this.building || this.cleaning || this.retrying || this.renewing) return this.intervalMs;
     const due = await this.deps.store.nextLifecycleDue();
     return due === null ? IDLE_SWEEP_MS : Math.min(IDLE_SWEEP_MS, Math.max(this.intervalMs, due));
   }
@@ -297,6 +300,7 @@ export class CloudV2Lifecycle {
   async tick(): Promise<void> {
     await this.poll();
     await Promise.all(this.inFlight.values());
+    await Promise.all(this.idleStops.values());
     await this.retrying;
   }
 
@@ -320,8 +324,16 @@ export class CloudV2Lifecycle {
     if (this.deps.builds && !this.building)
       this.building = this.deps.builds.tick().catch(() => {}).finally(() => { this.building = null; });
     for (const idle of await this.deps.store.idleSince(new Date(now - CLOUD_V2_IDLE_STOP_MS))) {
-      if (this.deps.stopIdle) await this.deps.stopIdle(idle.id, new Date(now - CLOUD_V2_IDLE_STOP_MS));
-      else await this.deps.store.transition(idle.id, ["running"], "stopping");
+      if (this.idleStops.has(idle.id) || this.idleStops.size >= STOPPING_SLOTS) continue;
+      const task = (async () => {
+        await this.deps.runtimeUpdates?.beforeIdleStop?.(idle).catch(() => {});
+        if (this.stopped) return;
+        // Staging crosses provider I/O; only the fresh idle predicate may stop it.
+        if (this.deps.stopIdle) await this.deps.stopIdle(idle.id, new Date(now - CLOUD_V2_IDLE_STOP_MS));
+        else await this.deps.store.transition(idle.id, ["running"], "stopping");
+      })().catch(() => this.deps.logger?.warn("[cloud-v2] idle stop deferred"))
+        .finally(() => { this.idleStops.delete(idle.id); this.wake(); });
+      this.idleStops.set(idle.id, task);
     }
     if (!this.renewing && now - this.lastLeaseScan >= MAINTENANCE_SCAN_MS) {
       this.lastLeaseScan = now;
@@ -536,6 +548,7 @@ export class CloudV2Lifecycle {
         return;
       }
       case "stopping": {
+        this.deps.runtimeUpdates?.cancelStaging?.(workspace.id);
         let sandboxId = workspace.boatSandboxId;
         if (workspace.restorePending && !sandboxId) sandboxId = await this.replacement(workspace, undefined, { find: true });
         if (sandboxId) {
@@ -556,6 +569,7 @@ export class CloudV2Lifecycle {
         return;
       }
       case "deleting": {
+        this.deps.runtimeUpdates?.cancelStaging?.(workspace.id);
         let sandboxId = workspace.boatSandboxId;
         if (workspace.restorePending && !sandboxId) sandboxId = await this.replacement(workspace, undefined, { find: true });
         // A retry's fork first: finding one whose reply was lost needs its source.

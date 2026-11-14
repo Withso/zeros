@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type pg from "pg";
-import { withSystemTx, type Tx } from "../db.js";
+import { withSystemStatement, withSystemTx, type Tx } from "../db.js";
+import { sql, SqlFragment } from "../sql-fragment.js";
 import { RuntimeCanaryStatusSchema, refuseRuntimeCanary, type RuntimeCanaryAdmission, type RuntimeCanaryPolicy, type RuntimeCanaryStatus } from "./runtime-canary.js";
 import type { CloudV2Runtime } from "./runtime.js";
 import type { CloudV2Workspace } from "./store.js";
@@ -42,15 +43,15 @@ export async function readRuntimeCanary(pool: pg.Pool, policy: RuntimeCanaryPoli
 export function workspaceRuntimeResolver(pool: pg.Pool, runtime: CloudV2Runtime, policy?: RuntimeCanaryPolicy) {
   return async (workspace: CloudV2Workspace): Promise<CloudV2Runtime> => {
     const fixture = policy?.fixture;
-    const pin = await withSystemTx(pool, async tx => (await tx.query<{
+    const pin = (await withSystemStatement<{
       runtime_sha256: string; creator_user_id: string | null; org_id: string | null; repository_id: string; bound: boolean;
-    }>(`SELECT p.runtime_sha256,p.creator_user_id,p.org_id,p.repository_id::text,
+    }>(pool, sql`SELECT p.runtime_sha256,p.creator_user_id,p.org_id,p.repository_id::text,
          (w.creator_user_id=p.creator_user_id AND w.org_id=p.org_id AND w.state <> 'deleted'
           AND s.repository_id=p.repository_id) IS TRUE AS bound
        FROM cloud_v2_runtime_canaries p
        LEFT JOIN cloud_v2_workspaces w ON w.id=p.workspace_id
        LEFT JOIN cloud_v2_github_sources s ON s.workspace_id=w.id AND s.source_repository=lower(w.repository)
-       WHERE p.workspace_id=$1`, [workspace.id])).rows[0], { consistentRead: true });
+       WHERE p.workspace_id=${SqlFragment.uuid(workspace.id.toLowerCase())}`)).rows[0];
     if (!pin) return runtime;
     if (!fixture || !pin.bound || pin.creator_user_id !== workspace.creatorUserId || pin.org_id !== workspace.organizationId ||
         pin.creator_user_id !== fixture.creatorUserId || pin.org_id !== fixture.organizationId || pin.repository_id !== fixture.repositoryId) throw refuseRuntimeCanary();

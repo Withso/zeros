@@ -218,28 +218,29 @@ export class CloudEnvironments {
     // Selection and pruning share this lock. The context pin (including an
     // empty selection) is fixed before a competing material fetch can read it.
     await lockScope(tx, { organizationId: workspace.organizationId, userId });
-    const context = (await tx.query<{ environment_version_id: string | null; environment_repository_id: string | null }>(
-      "SELECT environment_version_id,environment_repository_id::text FROM cloud_v2_execution_contexts WHERE id=$1 AND workspace_id=$2 AND org_id=$3 AND user_id=$4 AND state='active' FOR UPDATE",
-      [contextId, workspace.id, workspace.organizationId, userId])).rows[0];
+    const context = (await tx.query<{ environment_version_id: string | null; environment_repository_id: string | null;
+      repository_id: string | null; version_id: string | null; revision: string | null; envelope: CloudEnvironmentEnvelope | null }>(`SELECT
+        c.environment_version_id,c.environment_repository_id::text,s.repository_id::text,
+        coalesce(c.environment_version_id,p.version_id,h.version_id) AS version_id,v.revision::text,v.envelope
+      FROM cloud_v2_execution_contexts c
+      LEFT JOIN cloud_v2_github_sources s ON s.workspace_id=c.workspace_id AND s.source_repository=lower($5)
+      LEFT JOIN cloud_workspace_environment_pins p ON p.workspace_id=c.workspace_id AND p.owner_user_id=c.user_id
+      LEFT JOIN cloud_environment_heads h ON h.org_id=c.org_id AND h.owner_user_id=c.user_id AND h.repository_id=s.repository_id
+      LEFT JOIN cloud_environment_versions v ON v.id=coalesce(c.environment_version_id,p.version_id,h.version_id)
+        AND v.org_id=c.org_id AND v.owner_user_id=c.user_id AND v.repository_id=s.repository_id
+      WHERE c.id=$1 AND c.workspace_id=$2 AND c.org_id=$3 AND c.user_id=$4 AND c.state='active' FOR UPDATE OF c`,
+      [contextId, workspace.id, workspace.organizationId, userId, workspace.repository])).rows[0];
     if (!context) throw notFound();
     if (context.environment_repository_id && !context.environment_version_id) return undefined;
-    const primary = (await tx.query<{ repository_id: string }>(
-      "SELECT repository_id::text FROM cloud_v2_github_sources WHERE workspace_id=$1 AND source_repository=lower($2)", [workspace.id, workspace.repository])).rows[0];
-    if (!primary) throw notFound();
+    if (!context.repository_id) throw notFound();
     // A legacy pin belongs to its person even after the workspace is reassigned.
-    const version = context.environment_version_id ??
-      (await tx.query<{ version_id: string }>("SELECT version_id FROM cloud_workspace_environment_pins WHERE workspace_id=$1 AND owner_user_id=$2", [workspace.id, userId])).rows[0]?.version_id ??
-      (await tx.query<{ version_id: string }>("SELECT version_id FROM cloud_environment_heads WHERE org_id=$1 AND owner_user_id=$2 AND repository_id=$3",
-        [workspace.organizationId, userId, primary.repository_id])).rows[0]?.version_id;
+    const version = context.version_id;
     await tx.query("UPDATE cloud_v2_execution_contexts SET environment_version_id=$2,environment_repository_id=$3 WHERE id=$1 AND environment_repository_id IS NULL",
-      [contextId, version ?? null, primary.repository_id]);
+      [contextId, version, context.repository_id]);
     if (!version) return undefined;
-    const row = (await tx.query<{ revision: string; envelope: CloudEnvironmentEnvelope }>(
-      "SELECT revision::text,envelope FROM cloud_environment_versions WHERE id=$1 AND org_id=$2 AND owner_user_id=$3 AND repository_id=$4",
-      [version, workspace.organizationId, userId, primary.repository_id])).rows[0];
-    if (!row) throw unreadable();
-    try { return { versionId: version, repositoryId: primary.repository_id, ...openCloudEnvironment(row.envelope,
-      { organizationId: workspace.organizationId, userId, repositoryId: primary.repository_id, versionId: version, revision: Number(row.revision) }, this.keys) }; }
+    if (!context.envelope || !context.revision) throw unreadable();
+    try { return { versionId: version, repositoryId: context.repository_id, ...openCloudEnvironment(context.envelope,
+      { organizationId: workspace.organizationId, userId, repositoryId: context.repository_id, versionId: version, revision: Number(context.revision) }, this.keys) }; }
     catch { throw unreadable(); }
   }
 

@@ -21,10 +21,10 @@ database("execution wake request costs", () => {
   });
   afterEach(async () => { await f?.close(); probe.close(); await pool.end(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
-  async function measure(name: string, path: string, send: () => Promise<Response>) {
+  async function measure(name: string, path: string, send: () => Promise<Response>, status = 200) {
     const { value, cost } = await probe.measure(name, () => probe.request(new Request(`https://api.example.test${path}`, { method: "POST" }), send));
     expect(cost.background.queries).toBe(0);
-    expect(value.status).toBe(200);
+    expect(value.status).toBe(status);
     const totals = scenarioTotals(cost);
     expect(totals.queries).toBeGreaterThan(0);
     console.log(`[wake-cost] ${name} queries=${totals.queries} transactions=${totals.transactions}`);
@@ -41,22 +41,25 @@ database("execution wake request costs", () => {
     const result = await value.json();
     expect(result.protocols).toHaveLength(2);
     expect(result.features).toContain("relay-presence-v1");
+    expect(result.features).toContain("connect-ready-v1");
     expect(totals.transactions).toBeLessThanOrEqual(2);
     expect(totals.queries).toBeLessThanOrEqual(25);
   });
 
-  it("builds the initial worker configuration within the hello query budget", async () => {
+  it.each([false, true])("builds the initial worker configuration within the hello query budget (current features: %s)", async current => {
     const { value, totals } = await measure("hello", "/v2/cloud/worker/hello", () => f.worker("hello", {
       protocol: 2, bootId: f.boot, runtimeSha256: "b".repeat(64),
-    }));
+    }, current ? { features: `${f.features},runtime-update-v1,boot-timings-v1,runtime-staging-v1,sync-v1,sync-context-v1,chat-edit-v1,creator-agent-logins-v1,creator-agent-models-v1,creator-commit-identity-v1` } : {}));
     const { config } = await value.json();
     expect(config.actingUser).toBe(1);
     expect(config.bootstrapContextId).toEqual(expect.any(String));
-    expect(totals.transactions).toBeLessThanOrEqual(18);
-    expect(totals.queries).toBeLessThanOrEqual(70);
+    expect(totals.transactions).toBeLessThanOrEqual(8);
+    expect(totals.queries).toBeLessThanOrEqual(40);
   });
 
-  it("delivers clean-worker bootstrap material in at most four transactions", async () => {
+  it.each([false, true])("delivers clean-worker bootstrap material in at most two transactions and twenty calls (environment: %s)", async environment => {
+    if (environment) await f.cp.routes.environments!.patch(f.organizationId, f.creator.id, "42", f.workspace.repository,
+      { expectedRevision: 0, variables: { FIXTURE_VALUE: "private" }, files: [] });
     const hello = await f.hello();
     expect(hello.status).toBe(200);
     const { config } = await hello.json();
@@ -66,9 +69,21 @@ database("execution wake request costs", () => {
     const lease = await value.json();
     expect(lease.contextId).toBe(config.bootstrapContextId);
     expect(lease.userId).toBe(f.creator.id);
+    if (environment) expect(lease.environment.variables).toEqual({ FIXTURE_VALUE: "private" });
     expect(lease.expiresAt).toBeGreaterThan(Date.now());
-    expect(totals.transactions).toBeLessThanOrEqual(4);
-    expect(totals.queries).toBeLessThanOrEqual(40);
+    expect(totals.transactions).toBeLessThanOrEqual(2);
+    expect(totals.queries).toBeLessThanOrEqual(20);
+  });
+
+  it.each([false, true])("starts a stopped workspace within three transactions and twenty calls (team headers: %s)", async team => {
+    expect((await f.hello()).status).toBe(200);
+    await pool.query("UPDATE cloud_v2_workspaces SET state='stopped' WHERE id=$1", [f.workspace.id]);
+    const path = `/v1/cloud-v2/workspaces/${f.workspace.id}/start`;
+    const { value, totals } = await measure("start", path, () => f.call(path, "POST", {}, f.viewer,
+      team ? { "X-Zeros-Team-Sharing": "1", "X-Zeros-Team-Ownership": "1" } : {}), 202);
+    expect((await value.json()).workspace.state).toBe("starting");
+    expect(totals.transactions).toBeLessThanOrEqual(3);
+    expect(totals.queries).toBeLessThanOrEqual(20);
   });
 
   it.each(["membership", "session", "stop"])("refuses a ticket when %s changes after the workspace read", async change => {

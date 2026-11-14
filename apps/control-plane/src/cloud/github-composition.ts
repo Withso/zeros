@@ -18,7 +18,7 @@ import type { CloudV2ComputerSourceResolver } from "./computer-provenance.js";
 import type { CloudV2Computers } from "./computer.js";
 import { z } from "zod";
 import { setupSelectionUnavailable, workspaceSetupBuild } from "./setup-selection.js";
-import { withSystemTx } from "../db.js";
+import { withSystemTx, type Tx } from "../db.js";
 import { cloudGithubRequestContext } from "./github-request-context.js";
 import { createCloudGithubWorkerConfig } from "./github-worker-config.js";
 import { createCloudGithubCatalog } from "./github-catalog.js";
@@ -73,23 +73,26 @@ export function createCloudGithubServices(
       CloudV2Computers,
       "buildSourceTargets" | "recipeForRepositoryId"
     >,
+    transaction?: Tx,
   ) => {
     if (!workspace.computerBuildId) return null;
-    const target = await identities.primary(workspace);
+    const target = await identities.primary(workspace, transaction);
     const sources = await computers.buildSourceTargets(
       workspace.organizationId,
       workspace.computerBuildId,
+      transaction,
     );
     // Restored files keep their original ledger. A newer clean base may have
     // a different recipe; never run a reused name's setup on the old source.
     if (!sources.some((source) => source.repositoryId === target.repositoryId))
       return null;
-    const original = await workspaceSetupBuild(pool, workspace);
+    const original = await workspaceSetupBuild(pool, workspace, transaction);
     if (!original?.setupBuildId) return null;
     const recipe = await computers.recipeForRepositoryId(
       workspace.organizationId,
       original.setupBuildId,
       target.repositoryId,
+      transaction,
     );
     if (recipe.setupScript && original.setupLegacy) throw setupSelectionUnavailable();
     if (recipe.setup === undefined && recipe.setupScript === undefined) return null;

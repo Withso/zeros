@@ -14,17 +14,22 @@ export type ExecutionSelection = { source: "personal" | "shared"; credentialId: 
 export type ExecutionLogin = { selection: ExecutionSelection; material: CloudAgentCredentialMaterial };
 export type SharedExecutionLogin = (organizationId: string, agent: CloudV2Agent, tx?: Tx) => Promise<ExecutionLogin | null>;
 type AgentPresentation = { agentLogins: Partial<Record<CloudV2Agent, true>>; agentModels: Partial<Record<CloudV2Agent, string[]>> };
+type PresentedConnection = { provider: CloudV2Agent; models: string[]; all_models: boolean };
 
 export async function selectedAgentLoginAvailability(tx: Tx, organizationId: string, userId: string): Promise<Partial<Record<CloudV2Agent, true>>> {
   return (await selectedAgentPresentation(tx, organizationId, userId)).agentLogins;
 }
 
 async function selectedAgentPresentation(tx: Tx, organizationId: string, userId: string): Promise<AgentPresentation> {
-  const rows = (await tx.query<{ provider: CloudV2Agent; models: string[]; all_models: boolean }>(`SELECT c.provider,c.models,c.all_models FROM cloud_agent_organization_connections c
+  const rows = (await tx.query<PresentedConnection>(`SELECT c.provider,c.models,c.all_models FROM cloud_agent_organization_connections c
     JOIN cloud_agent_credentials k ON k.id=c.credential_id AND k.owner_user_id=c.owner_user_id
     JOIN cloud_agent_credential_versions v ON v.credential_id=k.id AND v.version=k.current_version
     WHERE c.org_id=$1 AND c.owner_user_id=$2 AND k.revoked_at IS NULL AND c.credential_revision=k.revision
       AND (v.material_mode IS NULL OR v.material_mode='local')`, [organizationId, userId])).rows;
+  return agentPresentation(rows);
+}
+
+function agentPresentation(rows: readonly PresentedConnection[]): AgentPresentation {
   return {
     agentLogins: Object.fromEntries(rows.map(row => [row.provider, true as const])),
     agentModels: Object.fromEntries(rows.map(row => [row.provider, [...new Set(row.all_models ? cloudAgentModels(row.provider) : row.models)]])),
@@ -80,13 +85,22 @@ export class CloudExecutionLogins {
   }
 
   async presentation(workspaceId: string, transaction?: Tx): Promise<AgentPresentation> {
-    const read = async (tx: Tx): Promise<AgentPresentation> => {
-      let current: Awaited<ReturnType<CloudExecutionLogins["creator"]>>;
-      try { current = await this.creator(tx, workspaceId); }
-      catch (error) { if (error instanceof Error && "code" in error && error.code === "workspace_creator_required") return { agentLogins: {}, agentModels: {} }; throw error; }
-      return selectedAgentPresentation(tx, current.organizationId, current.payer.userId);
-    };
+    const read = async (tx: Tx) => (await this.presentationSnapshot(tx, workspaceId))?.presentation ?? agentPresentation([]);
     return transaction ? read(transaction) : withSystemTx(this.pool, read, { consistentRead: true });
+  }
+
+  private async presentationSnapshot(tx: Tx, workspaceId: string) {
+    const row = (await tx.query<{ login_revision: string; org_id: string; connections: PresentedConnection[] }>(`SELECT w.login_revision::text,w.org_id,
+      coalesce((SELECT jsonb_agg(jsonb_build_object('provider',c.provider,'models',c.models,'all_models',c.all_models))
+        FROM organization_members m JOIN users u ON u.id=m.user_id
+        JOIN cloud_agent_organization_connections c ON c.org_id=m.org_id AND c.owner_user_id=m.user_id
+        JOIN cloud_agent_credentials k ON k.id=c.credential_id AND k.owner_user_id=c.owner_user_id
+        JOIN cloud_agent_credential_versions v ON v.credential_id=k.id AND v.version=k.current_version
+        WHERE m.org_id=w.org_id AND m.user_id=w.creator_user_id AND u.auth_status='active' AND u.deleted_at IS NULL
+          AND NOT ${memberOnHoldSql("m.org_id", "m.user_id")} AND k.revoked_at IS NULL AND c.credential_revision=k.revision
+          AND (v.material_mode IS NULL OR v.material_mode='local')),'[]'::jsonb) AS connections
+      FROM cloud_v2_workspaces w WHERE w.id=$1 AND w.execution_mode='active' AND w.state<>'deleted'`, [workspaceId])).rows[0];
+    return row ? { ...row, presentation: agentPresentation(row.connections) } : null;
   }
 
   async refreshAvailability(workspaceId: string, transaction?: Tx): Promise<string | null> {
@@ -95,10 +109,9 @@ export class CloudExecutionLogins {
 
   async refreshPresentation(workspaceId: string, transaction?: Tx): Promise<{ loginRevision: string; presentation: AgentPresentation } | null> {
     const refresh = async (tx: Tx) => {
-      const row = (await tx.query<{ login_revision: string; org_id: string }>(
-        "SELECT login_revision::text,org_id FROM cloud_v2_workspaces WHERE id=$1 AND execution_mode='active' AND state<>'deleted'", [workspaceId])).rows[0];
+      const row = await this.presentationSnapshot(tx, workspaceId);
       if (!row) return null;
-      const presentation = await this.presentation(workspaceId, tx);
+      const presentation = row.presentation;
       const available = presentation.agentLogins;
       const updated = await tx.query<{ revision: string }>(`UPDATE cloud_v2_workspaces
         SET creator_agent_logins=$2,login_revision=login_revision+1

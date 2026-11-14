@@ -157,8 +157,10 @@ export function installRuntimeCommand(runtime: { sha256: string; url: string; pu
 }
 
 /** Preparation cannot move the active link or touch the unit's credentials. */
-export function prepareRuntimeCommand(runtime: { sha256: string; url: string }): string {
-  return `timeout --signal=TERM --kill-after=1 300s bash -c ${quote(["set -eu", ...runtimeTimingScript, verifyFunction, ...runtimePreparation(runtime)].join("\n"))}`;
+export function prepareRuntimeCommand(runtime: { sha256: string; url: string; timeoutSeconds?: number }): string {
+  const seconds = runtime.timeoutSeconds ?? 300;
+  if (!Number.isInteger(seconds) || seconds < 1 || seconds > 300) throw new Error("Invalid runtime preparation deadline");
+  return `timeout --signal=TERM --kill-after=1 ${seconds}s bash -c ${quote(["set -eu", ...runtimeTimingScript, verifyFunction, ...runtimePreparation(runtime)].join("\n"))}`;
 }
 
 function runtimePreparation(runtime: { sha256: string; url: string }): string[] {

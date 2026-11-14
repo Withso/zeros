@@ -2,6 +2,11 @@ import { z } from "zod";
 
 export const CLOUD_CLIENT_ROLLOVER_FEATURE = "client-token-rollover-v1";
 export const CLOUD_CLIENT_ROLLOVER_PROTOCOL = `zeros.cloud.v2.${CLOUD_CLIENT_ROLLOVER_FEATURE}`;
+export const CARRIER_HOLD_FEATURE = "carrier-hold-v1";
+export const CARRIER_HOLD_MAX_MS = 20_000;
+export const CloudConnectionHoldFrameSchema = z.object({ type: z.literal("CLOUD_CONNECTION_HOLD"),
+  remainingMs: z.number().int().min(1).max(CARRIER_HOLD_MAX_MS) }).strict();
+export const CloudConnectionResumedFrameSchema = z.object({ type: z.literal("CLOUD_CONNECTION_RESUMED") }).strict();
 const time = z.number().int().positive().safe();
 const schedule = { expiresAt: time, refreshAt: time, retryUntil: time };
 export const CloudConnectionRenewSchema = z.object({ type: z.literal("CLOUD_CONNECTION_RENEW"), id: z.uuid(),

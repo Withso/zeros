@@ -7,6 +7,7 @@ import type { CloudV2Workspace } from "./store.js";
 export type WorkerRoute = { workspace: CloudV2Workspace; accessEpoch: string; url: string | null; token: string | null; bootId: string | null;
   executionMode?: "legacy" | "prepared" | "active"; recoveryAttemptId?: string; workerTokenHash?: string | null; stopBootIds?: readonly string[]; portToken?: unknown };
 const peerFeatures = new WeakMap<WebSocket, ReadonlySet<string>>();
+export const workerSupportsCarrierDetach = (socket: WebSocket): boolean => peerFeatures.get(socket)?.has("carrier-detach-v1") ?? false;
 export const workerSupportsActingUser = (socket: WebSocket): boolean => peerFeatures.get(socket)?.has("acting-user-v1") ?? false;
 export const workerSupportsCreatorLogins = (socket: WebSocket): boolean => peerFeatures.get(socket)?.has("creator-agent-logins-v1") ?? false;
 export const workerSupportsCreatorModels = (socket: WebSocket): boolean => peerFeatures.get(socket)?.has("creator-agent-models-v1") ?? false;
@@ -28,6 +29,7 @@ export const workerSupportsGitIdentity = (socket: WebSocket): boolean => peerFea
 export const workerSupportsCodeReview = (socket: WebSocket): boolean => peerFeatures.get(socket)?.has("code-review-v1") ?? false;
 export const workerSupportsEnvironment = (socket: WebSocket): boolean => peerFeatures.get(socket)?.has("workspace-environment-v1") ?? false;
 export const workerSupportsRuntimeUpdate = (socket: WebSocket): boolean => peerFeatures.get(socket)?.has("runtime-update-v1") ?? false;
+export const workerSupportsRuntimeStaging = (socket: WebSocket): boolean => peerFeatures.get(socket)?.has("runtime-staging-v1") ?? false;
 export const workerSupportsPushSignals = (socket: WebSocket): boolean => peerFeatures.get(socket)?.has("push-signals-v1") ?? false;
 export const workerSupportsPush = (socket: WebSocket): boolean => peerFeatures.get(socket)?.has("worker-push-v1") ?? false;
 
@@ -35,10 +37,20 @@ export const workerSupportsAgentInteractions = (socket: WebSocket): boolean => p
 
 export type WorkerConnectionReason = "route_unavailable" | "route_invalid" | "gateway" | "server_unavailable" | "refused" | "transport" | "timeout" | "cancelled";
 export type WorkerConnectionStatusClass = "none" | "2xx" | "3xx" | "4xx" | "5xx";
+export type WorkerResponseBodyClass = "empty" | "text" | "html" | "json" | "binary" | "truncated" | "incomplete";
 export class WorkerConnectionFailure extends Error {
-  constructor(readonly reason: WorkerConnectionReason, readonly statusClass: WorkerConnectionStatusClass = "none") {
+  constructor(readonly reason: WorkerConnectionReason, readonly statusClass: WorkerConnectionStatusClass = "none",
+    readonly status?: number, readonly responseBodyClass?: WorkerResponseBodyClass) {
     super("Worker connection unavailable.");
   }
+}
+
+function bodyClass(body: Buffer): WorkerResponseBodyClass {
+  if (!body.length) return "empty";
+  if (body.includes(0)) return "binary";
+  const text = body.toString("utf8").trim();
+  if (/^(?:<!doctype\s+html|<html(?:\s|>))/i.test(text)) return "html";
+  try { JSON.parse(text); return "json"; } catch { return "text"; }
 }
 
 export function dialWorker(route: WorkerRoute, grant: string, options: { timeoutMs?: number; signal?: AbortSignal } = {}): Promise<WebSocket> {
@@ -57,11 +69,12 @@ export function dialWorker(route: WorkerRoute, grant: string, options: { timeout
       headers: { Cookie: `_port_auth=${route.token}`, "X-Zeros-Worker-Auth": grant },
       maxPayload: CLOUD_V2_MAX_FRAME_BYTES, perMessageDeflate: false, followRedirects: false,
     });
-    let settled = false;
-    const cleanup = () => { clearTimeout(timer); options.signal?.removeEventListener("abort", abort); };
+    let settled = false, refusal: WorkerConnectionFailure | undefined, bodyTimer: NodeJS.Timeout | undefined;
+    let closeResponse: (() => void) | undefined;
+    const cleanup = () => { clearTimeout(timer); clearTimeout(bodyTimer); closeResponse?.(); options.signal?.removeEventListener("abort", abort); };
     const fail = (reason: WorkerConnectionReason, statusClass: WorkerConnectionStatusClass = "none") => {
       if (settled) return;
-      settled = true; cleanup(); reject(new WorkerConnectionFailure(reason, statusClass)); ws.terminate();
+      settled = true; cleanup(); reject(refusal ?? new WorkerConnectionFailure(reason, statusClass)); ws.terminate();
     };
     const abort = () => fail("cancelled");
     // An explicit refusal can take ten seconds at the provider. The caller's
@@ -76,8 +89,26 @@ export function dialWorker(route: WorkerRoute, grant: string, options: { timeout
       const status = response.statusCode ?? 0;
       const statusClass: WorkerConnectionStatusClass = status >= 500 && status < 600 ? "5xx" : status >= 400 && status < 500 ? "4xx"
         : status >= 300 && status < 400 ? "3xx" : status >= 200 && status < 300 ? "2xx" : "none";
-      fail(status === 502 || status === 504 ? "gateway" : status === 503 ? "server_unavailable" : "refused", statusClass);
-      response.destroy();
+      const reason = status === 502 || status === 504 ? "gateway" : status === 503 ? "server_unavailable" : "refused";
+      refusal = new WorkerConnectionFailure(reason, statusClass, status, "incomplete");
+      closeResponse = () => response.destroy();
+      let bytes = 0;
+      const chunks: Buffer[] = [];
+      const finish = (responseBodyClass: WorkerResponseBodyClass) => {
+        if (settled) return;
+        refusal = new WorkerConnectionFailure(reason, statusClass, status, responseBodyClass); fail(reason, statusClass);
+      };
+      // A provider response never becomes a log payload, and its body cannot
+      // extend the original dial deadline or grow an unbounded buffer.
+      bodyTimer = setTimeout(() => finish("incomplete"), 500);
+      response.on("data", (chunk: Buffer) => {
+        bytes += chunk.byteLength;
+        if (bytes > 1024) finish("truncated");
+        else chunks.push(chunk);
+      });
+      response.once("end", () => finish(bodyClass(Buffer.concat(chunks))));
+      response.once("error", () => finish("incomplete"));
+      response.once("aborted", () => finish("incomplete"));
     });
     ws.once("open", () => { if (settled) { ws.terminate(); return; } settled = true; cleanup(); resolve(ws); });
   });

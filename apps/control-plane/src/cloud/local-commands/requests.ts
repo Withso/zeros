@@ -113,16 +113,17 @@ export class CloudLocalCommands {
     },{ consistentRead: enabled === undefined });
   }
 
-  enabled(workspaceId: string): Promise<boolean> {
-    return withSystemTx(this.pool, async tx => Boolean((await tx.query(`SELECT 1 FROM cloud_v2_workspaces w
+  enabled(workspaceId: string, transaction?: Tx): Promise<boolean> {
+    const read = async (tx: Tx) => Boolean((await tx.query(`SELECT 1 FROM cloud_v2_workspaces w
       JOIN organizations o ON o.id=w.org_id WHERE w.id=$1 AND o.local_commands_allowed AND w.archived_at IS NULL
-        AND w.state IN ('creating','starting','running') AND ${CLOUD_V2_LIVE_ACCESS}`,[workspaceId])).rowCount),{ consistentRead: true });
+        AND w.state IN ('creating','starting','running') AND ${CLOUD_V2_LIVE_ACCESS}`,[workspaceId])).rowCount);
+    return transaction ? read(transaction) : withSystemTx(this.pool, read, { consistentRead: true });
   }
 
-  async advertise(token: string, bootId: string, supported: boolean, handoff?: string): Promise<boolean> {
+  async advertise(token: string, bootId: string, supported: boolean, handoff?: string, transaction?: Tx): Promise<boolean> {
     // Preserve the private candidate if a current-boot hello finishes later;
     // only the promoted boot can use the worker request routes.
-    const result = await withSystemTx(this.pool, tx => tx.query(`UPDATE cloud_v2_workspaces w SET local_command_boot_ids=ARRAY(
+    const advertise = (tx: Tx) => tx.query(`UPDATE cloud_v2_workspaces w SET local_command_boot_ids=ARRAY(
       SELECT DISTINCT id FROM unnest(local_command_boot_ids || CASE WHEN $5 THEN ARRAY[$2::uuid] ELSE '{}'::uuid[] END) AS boots(id)
       WHERE (id=w.worker_boot_id OR id=$2::uuid OR ($3::uuid IS NULL AND id=(
         SELECT CASE WHEN h.state='rolling_back' THEN h.rollback_boot_id ELSE h.next_boot_id END
@@ -131,7 +132,8 @@ export class CloudLocalCommands {
         AND (id<>$2::uuid OR $5))
       WHERE worker_token_hash=$1 AND state IN ('creating','starting','running') AND ${CLOUD_V2_LIVE_ACCESS}
         AND (($3::uuid IS NULL AND worker_boot_id=$2) OR ($3::uuid IS NOT NULL AND ${RUNTIME_HANDOFF_SESSION}))`,
-    [hashCloudV2Token(token),bootId,handoff ?? null,null,supported]));
+    [hashCloudV2Token(token),bootId,handoff ?? null,null,supported]);
+    const result = await (transaction ? advertise(transaction) : withSystemTx(this.pool, advertise));
     return Boolean(result.rowCount);
   }
 

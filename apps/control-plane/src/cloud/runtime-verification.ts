@@ -20,7 +20,7 @@ try {
   const stat = lstatSync(root); if (!stat.isDirectory() || stat.isSymbolicLink()) fail();
   const archive = provided || join(root, '.runtime.tar.gz');
   if (regular(archive).size > 1024 ** 3 || hash(archive) !== expected) fail();
-  const member = name => execFileSync('tar', ['-xOzf', archive, './' + name],
+  const member = name => execFileSync('tar', ['--occurrence=1', '-xOzf', archive, './' + name],
     { maxBuffer: 16 * 1024 * 1024, timeout: 15000, stdio: ['ignore', 'pipe', 'pipe'] });
   const manifestBytes = member('runtime-manifest.json');
   regular(join(root, 'runtime-manifest.json'));

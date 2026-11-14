@@ -62,12 +62,19 @@ it("admits a fallback only from the workspace's current supported runtime policy
   Object.assign(f.deps, { runtimeForWorkspace: policy });
   const hello = (sha256: string) => f.request("hello", { bootId: f.bootId, protocol: 2, runtimeSha256: sha256 });
   expect((await hello(previous)).status).toBe(200);
-  expect(f.deps.store.beginWorkerHello).toHaveBeenCalledWith(f.token, f.bootId, false, previous, false, false);
+  expect(f.deps.store.beginWorkerHello).toHaveBeenCalledWith(f.token, f.bootId, false, previous, false, false, false, undefined);
   expect((await hello(foreign)).status).toBe(409);
   policy.mockResolvedValue({ sha256: current, supportedSha256: [current] });
   expect((await hello(previous)).status).toBe(409);
   f.revoke();
   expect((await hello(current)).status).toBe(401);
+});
+it("does not let a recorded old boot override the release's current supported set", async () => {
+  const f = fixture(), old = "b".repeat(64);
+  Object.assign(f.deps, { runtimeHandoffs: { runtime: vi.fn(async () => old), recordRuntime: vi.fn(async () => true) } });
+  const response = await f.request("hello", { bootId: f.bootId, protocol: 2, runtimeSha256: old }, { "x-zeros-worker-features": "runtime-update-v1" });
+  expect(response.status).toBe(409);
+  expect(f.deps.store.beginWorkerHello).not.toHaveBeenCalled();
 });
 it("delivers a recovery hint only to the advertising worker and withholds prompts while fenced", async () => {
   const f = fixture(true), id = randomUUID();
@@ -133,6 +140,25 @@ it.each(["", "boot-timings-v10", "boot-timings-v1"])("negotiates boot timing mar
     if (!feature) expect(legacyWorkerFrame.safeParse(body.config).success).toBe(true);
   }
 });
+it.each(["", "runtime-update-v1", "runtime-update-v1,runtime-staging-v10", "runtime-update-v1,runtime-staging-v1"])(
+  "negotiates runtime staging without extending an older worker's strict config: %s", async features => {
+    const f = fixture(), request = vi.fn(async () => ({ status: "staged", sha256: "b".repeat(64) }));
+    Object.assign(f.deps, { runtimeUpdates: { request } });
+    const config = await f.deps.config({} as CloudV2Workspace);
+    vi.mocked(f.deps.config).mockResolvedValue({ ...config, runtimeStaging: 1 } as typeof config);
+    const headers = { "x-zeros-worker-features": features };
+    const capable = features.split(",").includes("runtime-staging-v1");
+    for (const [path, input] of [["hello", { bootId: f.bootId, protocol: 2, runtimeSha256: "a".repeat(64) }], ["config", undefined]] as const) {
+      const response = await f.request(path, input, headers);
+      expect(response.status).toBe(200);
+      const reply = await response.json();
+      expect(reply.config.runtimeStaging).toBe(capable ? 1 : undefined);
+      if (!features) expect(legacyWorkerFrame.safeParse(reply.config).success).toBe(true);
+    }
+    const staged = await f.request("runtime", { op: "stage" }, headers);
+    expect(staged.status).toBe(capable ? 200 : 404);
+    expect(request).toHaveBeenCalledTimes(capable ? 1 : 0);
+  });
 it("records authorized boot timing marks without changing activity or accepting a foreign boot", async () => {
   const f = fixture(); f.deps.timing = vi.fn();
   const headers = { "x-zeros-worker-features": "boot-timings-v1" };

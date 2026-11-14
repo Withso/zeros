@@ -248,7 +248,7 @@ export const CloudV2ControlFrameSchema = z.discriminatedUnion("t", [
     /** The worker's own inbound bridge only: the control plane's id for this client, its lease authority, kept beside the per-carrier local routing id. */
     authorityClientId: clientId.optional(),
     /** Activated acting-user-v1 only: the CP-authored person and client context; a worker never trusts a client's claim. */
-    userId: z.uuid().optional(), contextId: z.uuid().optional() }).strict(),
+    userId: z.uuid().optional(), contextId: z.uuid().optional(), carrierHold: z.literal(true).optional() }).strict(),
   /** Activated acting-user-v1 only: end that context now (a lost push is caught by renew or expiry). */
   z.object({ t: z.literal("revoke-context"), contextId: z.uuid(), reason: CloudV2ContextReasonSchema }).strict(),
   z.object({ t: z.literal("close"), clientId }).strict(),
