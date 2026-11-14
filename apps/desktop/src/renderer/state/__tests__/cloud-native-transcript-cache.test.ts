@@ -31,6 +31,25 @@ function fixture(known?: (chatId: string) => Promise<{ revision: number; message
 }
 
 describe("cloud native disk and renderer memory tiers", () => {
+  it("retain cancels an excluded chat's admitted native refresh so it cannot commit after the list pass", async () => {
+    const f = fixture(async () => ({ revision: 9, messageCount: 1 }));
+    let refreshing!: () => void;
+    const admitted = new Promise<void>(resolve => { refreshing = resolve; });
+    f.invoke.mockImplementation(async input => {
+      if (input.op === "bind") return ok({ lease });
+      if (input.op === "read") return ok({ range: page, pending: null });
+      if (input.op === "refresh") { refreshing(); return new Promise(() => {}); }
+      if (input.op === "list") return ok({ items: [], nextAfter: null });
+      return ok(null);
+    });
+    await f.cache.read(chatId);
+    await admitted;
+    // Memory pressure dropped the chat's memory entry; only its admitted warm-up remains.
+    f.cache.releaseMemory();
+    f.cache.retain(() => false);
+    await vi.waitFor(() => expect(f.invoke).toHaveBeenCalledWith(expect.objectContaining({ op: "forget", targets: [target] })));
+  });
+
   it("a native read in flight when retain drops its chat never writes the chat back into memory", async () => {
     const f = fixture();
     let release!: (value: unknown) => void;

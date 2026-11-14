@@ -97,11 +97,16 @@ export function createNativeCloudTranscriptCache(
       super.retain(keep);
       // A read or warm-up already past admission must not write a dropped chat back: forget its flight, so its
       // completion (which checks flight identity) returns nothing.
-      for (const chatId of [...this.nativeReads.keys(), ...this.warming.keys()]) {
+      const admitted: CloudCacheTarget[] = [];
+      for (const chatId of new Set([...this.nativeReads.keys(), ...this.warming.keys()])) {
         const key = target(chatId);
         if (key && keep(chatId, cloudWorkspaceKey(key))) continue;
+        // An admitted native refresh lives on in main until forgotten there: cancel it, so it cannot commit the
+        // excluded chat's rows after the list pass below has passed its key.
+        if (key && this.warming.has(chatId)) admitted.push(key);
         this.nativeReads.delete(chatId); this.warming.delete(chatId); this.refreshAgain.delete(chatId);
       }
+      for (let start = 0; start < admitted.length; start += 500) void native.forget(admitted.slice(start, start + 500)).catch(() => {});
       const owner = native.owner, epoch = native.epoch, memoryEpoch = this.epoch;
       if (!owner || !this.isOwner(owner)) return;
       const current = () => owner === native.owner && epoch === native.epoch && memoryEpoch === this.epoch && this.isOwner(owner);
