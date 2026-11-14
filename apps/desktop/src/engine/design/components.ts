@@ -686,16 +686,48 @@ const scopedStyles = new Map<string, string>();
  * specificity but matches only the zd-<name> host or what is inside it, and
  * :root or :host means the host. The design runtime reads these two forms back
  * as the authored selector (`authoredComponentSelector`), so keep them in step.
- * @scope is not used: inside it a plain selector cannot match the host.
+ * An authored @scope keeps its rules as written and has its root limited the
+ * same way; one without a root, whose root would be the element holding the
+ * style, is rooted at the host.
  */
 export function scopeDesignComponentStyle(name: string, css: string): string {
   const key = `${name}\u0000${css}`;
   const cached = scopedStyles.get(key);
   if (cached !== undefined) return cached;
   const host = `zd-${name}`;
+  const scopeSelector = (selector: string) => {
+    const complex = selector.trim();
+    if (/^(?::root|:host)$/i.test(complex)) return `:is(${complex}, ${host}):where(${host})`;
+    const tail = PSEUDO_ELEMENT_TAIL.exec(complex);
+    const subject = tail ? complex.slice(0, tail.index) : complex;
+    // `.field ::placeholder` names the descendants' pseudo-element; a
+    // bare combinator at the end of :is() would drop it to .field's own.
+    const compound = !subject ? "*" : /[\s>+~]$/.test(subject) ? `${subject}:where(*)` : subject;
+    return `:is(${compound}):where(${host}, ${host} *)${tail?.[0] ?? ""}`;
+  };
   let scoped = css;
   try {
     const root = postcss.parse(css);
+    root.walkAtRules((rule) => {
+      if (rule.name.toLowerCase() !== "scope") return;
+      for (let parent = rule.parent; parent && parent.type !== "root"; parent = parent.parent)
+        if (parent.type === "rule" || (parent.type === "atrule" && (parent as AtRule).name.toLowerCase() === "scope")) return;
+      const params = rule.params.trim();
+      if (!params.startsWith("(")) {
+        rule.params = params ? `(${host}) ${params}` : `(${host})`;
+        if (!rule.raws.afterName) rule.raws.afterName = " ";
+        return;
+      }
+      let depth = 0;
+      let end = -1;
+      for (let index = 0; index < params.length && end < 0; index += 1) {
+        if (params[index] === "(") depth += 1;
+        else if (params[index] === ")" && --depth === 0) end = index;
+      }
+      if (end < 0) return;
+      const start = postcss.list.comma(params.slice(1, end)).map(scopeSelector).join(", ");
+      rule.params = `(${start})${params.slice(end + 1)}`;
+    });
     root.walkRules((rule) => {
       let parent = rule.parent;
       while (parent?.type === "atrule") {
@@ -705,16 +737,7 @@ export function scopeDesignComponentStyle(name: string, css: string): string {
       }
       // A nested rule is relative to its parent, which is already scoped.
       if (parent?.type !== "root") return;
-      rule.selectors = rule.selectors.map((selector) => {
-        const complex = selector.trim();
-        if (/^(?::root|:host)$/i.test(complex)) return `:is(${complex}, ${host}):where(${host})`;
-        const tail = PSEUDO_ELEMENT_TAIL.exec(complex);
-        const subject = tail ? complex.slice(0, tail.index) : complex;
-        // `.field ::placeholder` names the descendants' pseudo-element; a
-        // bare combinator at the end of :is() would drop it to .field's own.
-        const compound = !subject ? "*" : /[\s>+~]$/.test(subject) ? `${subject}:where(*)` : subject;
-        return `:is(${compound}):where(${host}, ${host} *)${tail?.[0] ?? ""}`;
-      });
+      rule.selectors = rule.selectors.map(scopeSelector);
     });
     scoped = root.toString();
   } catch {

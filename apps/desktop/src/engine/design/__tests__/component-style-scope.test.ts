@@ -43,6 +43,31 @@ body { background: rgb(200, 0, 0); } /* check:ui ignore-line -- authored frame c
     }
   });
 
+  it("limits an @scope rule's root to the component's instances", async () => {
+    expect(scopeDesignComponentStyle("card", "@scope (.card) to (.slot) { .title { color: red; } }"))
+      .toBe("@scope (:is(.card):where(zd-card, zd-card *)) to (.slot) { .title { color: red; } }");
+    expect(scopeDesignComponentStyle("card", "@scope (.a, :is(.b, .c)) { p { color: red; } }"))
+      .toBe("@scope (:is(.a):where(zd-card, zd-card *), :is(:is(.b, .c)):where(zd-card, zd-card *)) { p { color: red; } }");
+    expect(scopeDesignComponentStyle("card", "@scope { p { color: red; } }")).toBe("@scope (zd-card) { p { color: red; } }");
+    expect(scopeDesignComponentStyle("card", "@scope to (.slot) { p { color: red; } }")).toBe("@scope (zd-card) to (.slot) { p { color: red; } }");
+    expect(scopeDesignComponentStyle("card", "@media (min-width: 1px) { @scope (.card) { p { color: red; } } }"))
+      .toBe("@media (min-width: 1px) { @scope (:is(.card):where(zd-card, zd-card *)) { p { color: red; } } }");
+    const card = doc('<article class="card" data-zid="card"><h3 class="title" data-zid="title">T</h3></article>',
+      "<style>@scope (.card) { .title { color: rgb(1, 2, 3); } }</style>"); // check:ui ignore-line -- authored frame colour fixture.
+    const frame = doc('<main data-oid="m"><article class="card" data-oid="plain-card"><h3 class="title" data-oid="plain">Plain</h3></article><zd-card data-oid="c"></zd-card></main>');
+    const result = await expandDesignComponents("/work/scoped-at-scope", frame, { "components/card.html": card }, "home/index.html", {});
+    expect(result.errors).toEqual([]);
+    const page = await browser.newPage();
+    try {
+      await page.setContent(result.html);
+      const color = (selector: string) => page.locator(selector).evaluate((element) => getComputedStyle(element).color);
+      expect(await color("zd-card .title")).toBe("rgb(1, 2, 3)"); // check:ui ignore-line -- authored frame colour fixture.
+      expect(await color('[data-oid="plain"]')).toBe("rgb(0, 0, 0)"); // check:ui ignore-line -- authored frame colour fixture.
+    } finally {
+      await page.close();
+    }
+  });
+
   it("keeps a pseudo-element written after a combinator on the descendants it names", async () => {
     expect(scopeDesignComponentStyle("field", ".field ::placeholder { color: red; }"))
       .toBe(":is(.field :where(*)):where(zd-field, zd-field *)::placeholder { color: red; }");
