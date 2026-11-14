@@ -1,6 +1,28 @@
 import pg from "pg";
 import { describe, expect, it } from "vitest";
-import { LoadBudgetProbe, scenarioTotals, workspaceUpdateLocks } from "./load-budget.js";
+import { budgetTable, LOAD_BUDGETS, LoadBudgetProbe, scenarioTotals, workspaceUpdateLocks } from "./load-budget.js";
+
+describe("request and background ratchets", () => {
+  it("keeps the recorded HTTP cost independent of a background timer landing in the window", async () => {
+    const pool = new pg.Pool(), probe = new LoadBudgetProbe(pool);
+    try {
+      const { cost } = await probe.measure("idle", async () => {
+        await probe.request(new Request("https://api.example.test/_load-budget/request"), async () => new Response());
+      }, { writes: true, locks: true });
+      cost.requests[0]!.statements = 4425;
+      for (const statements of [25, 30]) {
+        cost.background.statements = statements;
+        const measured = budgetTable(new Map(LOAD_BUDGETS.map(row => [row.scenario, cost])));
+        expect(measured.find(row => row.scenario === "idle" && row.metric === "statements"))
+          .toMatchObject({ observed: 4425, baseline: 4425, ratchet: "PASS", targetObserved: 4425 + statements });
+      }
+      cost.requests[0]!.statements++;
+      expect(budgetTable(new Map(LOAD_BUDGETS.map(row => [row.scenario, cost])))
+        .find(row => row.scenario === "idle" && row.metric === "statements"))
+        .toMatchObject({ observed: 4426, ratchet: "FAIL" });
+    } finally { probe.close(); await pool.end(); }
+  });
+});
 
 describe("workspace update-lock measurement", () => {
   it.each([

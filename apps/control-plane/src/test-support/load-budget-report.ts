@@ -5,11 +5,13 @@ import { mkdir, mkdtemp, open, readdir, readFile, realpath, symlink, writeFile }
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import ts from "typescript";
+import type { BackgroundDefinition, backgroundBudgetTable } from "./load-budget.js";
 
 export type BudgetDefinition = { phase: string; scenario: string; metric: string; baseline: number; maximum: number; expectedFailure: boolean };
 export type LoadReport = { version: 1; profile: string; wallClock: boolean; wallProfile?: string; statementDelayMs: number;
-  budgets: Array<BudgetDefinition & { observed: number }>; scenarios: unknown[] };
-type Comparison = BudgetDefinition & { before: number; after: number; delta: number; ratchet: "PASS" | "FAIL"; target: "PASS" | "FAIL" };
+  budgets: Array<BudgetDefinition & { observed: number; targetObserved?: number }>;
+  backgroundBudgets?: ReturnType<typeof backgroundBudgetTable>; scenarios: unknown[] };
+type Comparison = BudgetDefinition & { before: number; after: number; delta: number; targetObserved: number; ratchet: "PASS" | "FAIL"; target: "PASS" | "FAIL" };
 export const LOAD_BUDGET_SOURCE = "apps/control-plane/src/test-support/load-budget.ts";
 export const LOAD_HARNESS_FILES = [LOAD_BUDGET_SOURCE, "apps/control-plane/src/test-support/load-budget-fixture.ts",
   "apps/control-plane/src/load-budget.integration.test.ts"] as const;
@@ -25,14 +27,15 @@ function unique<T extends Pick<BudgetDefinition, "scenario" | "metric">>(rows: r
   return result;
 }
 
-export function readBudgetDefinitions(source: string): BudgetDefinition[] {
+function literalRows(source: string, name: string, optional = false): Record<string, unknown>[] {
   const tree = ts.createSourceFile("load-budget.ts", source, ts.ScriptTarget.Latest, true);
   const declaration = tree.statements.filter(ts.isVariableStatement).flatMap(statement => [...statement.declarationList.declarations])
-    .find(value => ts.isIdentifier(value.name) && value.name.text === "LOAD_BUDGETS");
+    .find(value => ts.isIdentifier(value.name) && value.name.text === name);
+  if (!declaration && optional) return [];
   let expression = declaration?.initializer;
   while (expression && (ts.isAsExpression(expression) || ts.isSatisfiesExpression(expression) || ts.isParenthesizedExpression(expression))) expression = expression.expression;
   if (!expression || !ts.isArrayLiteralExpression(expression)) throw new Error("Budgets must be a literal array");
-  const rows = expression.elements.map(element => {
+  return expression.elements.map(element => {
     if (!ts.isObjectLiteralExpression(element)) throw new Error("Budgets must contain literal objects");
     const row: Record<string, unknown> = {};
     for (const property of element.properties) {
@@ -40,8 +43,15 @@ export function readBudgetDefinitions(source: string): BudgetDefinition[] {
       const value = property.initializer;
       if (Object.hasOwn(row, property.name.text)) throw new Error("Duplicate budget field");
       row[property.name.text] = ts.isNumericLiteral(value) ? Number(value.text) : ts.isStringLiteral(value) ? value.text
-        : value.kind === ts.SyntaxKind.TrueKeyword ? true : value.kind === ts.SyntaxKind.FalseKeyword ? false : undefined;
+        : value.kind === ts.SyntaxKind.TrueKeyword ? true : value.kind === ts.SyntaxKind.FalseKeyword ? false
+        : ts.isArrayLiteralExpression(value) && value.elements.every(ts.isNumericLiteral) ? value.elements.filter(ts.isNumericLiteral).map(value => Number(value.text)) : undefined;
     }
+    return row;
+  });
+}
+
+export function readBudgetDefinitions(source: string): BudgetDefinition[] {
+  const rows = literalRows(source, "LOAD_BUDGETS").map(row => {
     if (Object.keys(row).sort().join() !== "baseline,expectedFailure,maximum,metric,phase,scenario" ||
         !integer(row.baseline) || !integer(row.maximum) || typeof row.expectedFailure !== "boolean" ||
         ![row.phase, row.scenario, row.metric].every(value => typeof value === "string" && /^[a-zA-Z0-9-]+$/.test(value)))
@@ -49,6 +59,30 @@ export function readBudgetDefinitions(source: string): BudgetDefinition[] {
     return row as BudgetDefinition;
   });
   unique(rows); return rows;
+}
+
+export function readBackgroundDefinitions(source: string): BackgroundDefinition[] {
+  const names = new Set<string>();
+  return literalRows(source, "LOAD_BACKGROUND_BUDGETS", true).map(row => {
+    if (Object.keys(row).sort().join() !== "initialCalls,operation,periodsMs,queries,statements,transactions" ||
+        typeof row.operation !== "string" || !/^[a-z-]+$/.test(row.operation) || names.has(row.operation) ||
+        ![row.initialCalls, row.queries, row.statements, row.transactions].every(integer) ||
+        !Array.isArray(row.periodsMs) || !row.periodsMs.every(value => integer(value) && value > 0))
+      throw new Error("Invalid background budget");
+    names.add(row.operation);
+    return row as BackgroundDefinition;
+  });
+}
+
+export function assertBackgroundRatchet(base: readonly BackgroundDefinition[], head: readonly BackgroundDefinition[]): void {
+  for (const row of base) {
+    const next = head.find(value => value.operation === row.operation);
+    if (!next) throw new Error(`Background budget removed: ${row.operation}`);
+    if ((["initialCalls", "queries", "statements", "transactions"] as const).some(key => next[key] > row[key]) ||
+        next.periodsMs.length > row.periodsMs.length || [...next.periodsMs].sort((a, b) => a - b)
+          .some((period, index) => period < [...row.periodsMs].sort((a, b) => a - b)[index]!))
+      throw new Error(`Background ceiling increased: ${row.operation}`);
+  }
 }
 
 export function assertBaselineRatchet(base: readonly BudgetDefinition[], head: readonly BudgetDefinition[]): void {
@@ -69,18 +103,53 @@ export function compareReports(before: LoadReport, after: LoadReport, definition
   return definitions.map(budget => {
     const first = prior.get(key(budget)), second = next.get(key(budget));
     if (!first || !second) throw new Error(`Missing measurement: ${key(budget)}`);
-    if (!integer(first.observed) || !integer(second.observed)) throw new Error(`Invalid measurement: ${key(budget)}`);
+    const targetObserved = second.targetObserved ?? second.observed;
+    if (!integer(first.observed) || !integer(second.observed) || !integer(targetObserved)) throw new Error(`Invalid measurement: ${key(budget)}`);
     return { ...budget, before: first.observed, after: second.observed, delta: second.observed - first.observed,
-      ratchet: second.observed <= budget.baseline ? "PASS" : "FAIL", target: second.observed <= budget.maximum ? "PASS" : "FAIL" };
+      targetObserved, ratchet: second.observed <= budget.baseline ? "PASS" : "FAIL", target: targetObserved <= budget.maximum ? "PASS" : "FAIL" };
   });
 }
 
 export function renderComparison(rows: readonly Comparison[], base: string, head: string): string {
   return [`Load budget: ${base} → ${head}. Same harness, isolated checkouts, serial PostgreSQL runs.`, "",
-    "R1 idle: server cost at the approved fallback rates, with renewals excluded. Request frequency is qualified separately by scheduler tests and live idle counts.", "",
-    "| Phase | Scenario | Metric | Before | After | Delta | Baseline | Target | Ratchet | Target result |",
-    "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | --- | --- |",
-    ...rows.map(row => `| ${row.phase} | ${row.scenario} | ${row.metric} | ${row.before} | ${row.after} | ${row.delta > 0 ? "+" : ""}${row.delta} | ${row.baseline} | ${row.maximum} | ${row.ratchet} | ${row.target} |`), ""].join("\n");
+    "R1 idle: server cost at the approved fallback rates, with renewals excluded. Idle ratchets count HTTP work; target observations include background SQL. Request frequency is qualified separately by scheduler tests and live idle counts.", "",
+    "| Phase | Scenario | Metric | Before | After | Delta | Baseline | Target observation | Target | Ratchet | Target result |",
+    "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |",
+    ...rows.map(row => `| ${row.phase} | ${row.scenario} | ${row.metric} | ${row.before} | ${row.after} | ${row.delta > 0 ? "+" : ""}${row.delta} | ${row.baseline} | ${row.targetObserved} | ${row.maximum} | ${row.ratchet} | ${row.target} |`), ""].join("\n");
+}
+
+export function compareBackground(before: LoadReport, after: LoadReport, limits: readonly BackgroundDefinition[]) {
+  const first = before.backgroundBudgets, second = after.backgroundBudgets;
+  if (!first || !second) throw new Error("Missing background measurements");
+  const id = (row: typeof first[number]) => `${row.scenario}:${row.operation}:${row.metric}`;
+  const expected = ["idle", "r1-fallback-idle"].flatMap(scenario => [
+    ...limits.flatMap(limit => ["calls", "queriesPerCall", "statementsPerCall", "transactionsPerCall"].map(metric => `${scenario}:${limit.operation}:${metric}`)),
+    ...["queries", "statements", "transactions", "githubCalls", "failures", "inFlight"].map(metric => `${scenario}:unattributed:${metric}`),
+  ]);
+  if (new Set(first.map(id)).size !== first.length || new Set(second.map(id)).size !== second.length ||
+      first.length !== expected.length || second.length !== expected.length ||
+      expected.some(key => !first.some(row => id(row) === key) || !second.some(row => id(row) === key)))
+    throw new Error("Incomplete background measurements");
+  return second.map(row => {
+    const prior = first.find(value => id(value) === id(row))!;
+    const limit = limits.find(value => value.operation === row.operation);
+    const scenario = after.scenarios.find(value => (value as { name?: string })?.name === row.scenario) as { elapsedMs?: number } | undefined;
+    if (!scenario || !Number.isFinite(scenario.elapsedMs) || scenario.elapsedMs! < 0 ||
+        ![row.observed, row.baseline, prior.observed].every(integer)) throw new Error("Invalid background measurement");
+    const metric = row.metric.replace(/PerCall$/, "");
+    const baseline = row.operation === "unattributed" ? 0 : !limit ? undefined : row.metric === "calls"
+      ? limit.initialCalls + limit.periodsMs.reduce((sum, period) => sum + Math.floor(scenario.elapsedMs! / period), 0)
+      : ["queries", "statements", "transactions"].includes(metric) ? limit[metric as "queries"] : undefined;
+    if (baseline === undefined) throw new Error("Unknown background measurement");
+    return { ...row, baseline, before: prior.observed, ratchet: row.observed <= baseline ? "PASS" : "FAIL" };
+  });
+}
+
+function renderBackground(rows: ReturnType<typeof compareBackground>): string {
+  return ["", "Background: call counts are bounded by startup/teardown plus the maximum timer ticks in each measured wall-clock window. SQL cost is capped per call; unattributed SQL has a zero budget.", "",
+    "| Scenario | Operation | Metric | Before | After | Ceiling | Ratchet |",
+    "| --- | --- | --- | ---: | ---: | ---: | --- |",
+    ...rows.map(row => `| ${row.scenario} | ${row.operation} | ${row.metric} | ${row.before} | ${row.observed} | ${row.baseline} | ${row.ratchet} |`), ""].join("\n");
 }
 
 export function renderRouteComparison(before: LoadReport, after: LoadReport): string {
@@ -179,12 +248,18 @@ export async function compareRevisions(options: { cwd: string; base: string; hea
   const git = (args: string[]) => command("git", args, root);
   const base = await git(["rev-parse", "--verify", "--end-of-options", `${options.base}^{commit}`]);
   const head = await git(["rev-parse", "--verify", "--end-of-options", `${options.head}^{commit}`]);
-  const previous = readBudgetDefinitions(await git(["show", `${base}:${LOAD_BUDGET_SOURCE}`]));
-  const candidate = readBudgetDefinitions(await git(["show", `${head}:${LOAD_BUDGET_SOURCE}`]));
+  const previousSource = await git(["show", `${base}:${LOAD_BUDGET_SOURCE}`]);
+  const candidateSource = await git(["show", `${head}:${LOAD_BUDGET_SOURCE}`]);
+  const previous = readBudgetDefinitions(previousSource), candidate = readBudgetDefinitions(candidateSource);
+  const previousBackground = readBackgroundDefinitions(previousSource), candidateBackground = readBackgroundDefinitions(candidateSource);
   assertBaselineRatchet(previous, candidate);
+  assertBackgroundRatchet(previousBackground, candidateBackground);
   const harnessRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../../..");
   const harness = await Promise.all(LOAD_HARNESS_FILES.map(async path => ({ path, content: await readFile(join(harnessRoot, path), "utf8") })));
   const definitions = readBudgetDefinitions(harness.find(file => file.path === LOAD_BUDGET_SOURCE)!.content);
+  const backgroundDefinitions = readBackgroundDefinitions(harness.find(file => file.path === LOAD_BUDGET_SOURCE)!.content);
+  const backgroundLimits = backgroundDefinitions.map(row => candidateBackground.find(value => value.operation === row.operation) ?? row);
+  assertBackgroundRatchet(previousBackground, backgroundLimits);
   // A newer harness can add measurements to an older revision. Its new rows
   // use their first recorded ceilings; existing rows use the candidate's.
   const limits = definitions.map(row => candidate.find(value => key(value) === key(row)) ?? row);
@@ -218,10 +293,12 @@ export async function compareRevisions(options: { cwd: string; base: string; hea
     } finally { await git(["worktree", "remove", "--force", checkout]); }
   }
   const rows = compareReports(samples[0]!, samples[1]!, limits);
-  const markdown = renderComparison(rows, base, head) + renderRouteComparison(samples[0]!, samples[1]!);
+  const background = compareBackground(samples[0]!, samples[1]!, backgroundLimits);
+  const markdown = renderComparison(rows, base, head) + renderBackground(background) + renderRouteComparison(samples[0]!, samples[1]!);
   await writeFile(join(directory, "comparison.md"), markdown, { flag: "wx" });
   await writeFile(join(directory, "comparison.json"), JSON.stringify(rows, null, 2) + "\n", { flag: "wx" });
-  return { markdown, directory, passed: rows.every(row => row.ratchet === "PASS") };
+  await writeFile(join(directory, "background.json"), JSON.stringify(background, null, 2) + "\n", { flag: "wx" });
+  return { markdown, directory, passed: [...rows, ...background].every(row => row.ratchet === "PASS") };
 }
 
 async function main(args: string[]): Promise<void> {

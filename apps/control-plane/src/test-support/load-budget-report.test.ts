@@ -5,11 +5,22 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { assertBaselineRatchet, compareReports, compareRevisions, LOAD_BUDGET_SOURCE, readBudgetDefinitions, renderComparison, renderRouteComparison } from "./load-budget-report.js";
+import { assertBackgroundRatchet, assertBaselineRatchet, compareBackground, compareReports, compareRevisions, LOAD_BUDGET_SOURCE, readBackgroundDefinitions, readBudgetDefinitions, renderComparison, renderRouteComparison } from "./load-budget-report.js";
+import type { BackgroundDefinition } from "./load-budget.js";
 
 const definitions = [{ phase: "R1", scenario: "workspace-list", metric: "transactions", baseline: 10, maximum: 3, expectedFailure: true }] as const;
 const report = (observed: number, baseline = 10) => ({ version: 1 as const, profile: "load-budget-r1", wallClock: false, statementDelayMs: 0,
   budgets: [{ ...definitions[0], baseline, observed }], scenarios: [] });
+const backgroundReport = (limits: readonly BackgroundDefinition[]) => ({
+  scenarios: ["idle", "r1-fallback-idle"].map(name => ({ name, elapsedMs: 5000, routes: [],
+    background: { requests: 0, statements: 0, transactions: 0, githubCalls: 0, workspaceUpdateLocks: 0 } })),
+  backgroundBudgets: ["idle", "r1-fallback-idle"].flatMap(scenario => [
+    ...limits.flatMap(limit => ["calls", "queriesPerCall", "statementsPerCall", "transactionsPerCall"].map(metric =>
+      ({ scenario, operation: limit.operation, metric, observed: 0, baseline: 0, ratchet: "PASS" as const }))),
+    ...["queries", "statements", "transactions", "githubCalls", "failures", "inFlight"].map(metric =>
+      ({ scenario, operation: "unattributed", metric, observed: 0, baseline: 0, ratchet: "PASS" as const })),
+  ]),
+});
 
 describe("load comparison ratchet", () => {
   it("reads literal budgets without evaluating a revision's JavaScript", () => {
@@ -31,8 +42,37 @@ describe("load comparison ratchet", () => {
   it("reports actual measurements and checks the candidate against its recorded ceiling", () => {
     const compared = compareReports(report(10), report(3, 3), [{ ...definitions[0], baseline: 3, expectedFailure: false }]);
     expect(compared).toMatchObject([{ before: 10, after: 3, delta: -7, ratchet: "PASS", target: "PASS" }]);
-    expect(renderComparison(compared, "a".repeat(40), "b".repeat(40))).toContain("| R1 | workspace-list | transactions | 10 | 3 | -7 | 3 | 3 | PASS | PASS |");
+    expect(renderComparison(compared, "a".repeat(40), "b".repeat(40))).toContain("| R1 | workspace-list | transactions | 10 | 3 | -7 | 3 | 3 | 3 | PASS | PASS |");
     expect(compareReports(report(10), report(11), definitions)[0]?.ratchet).toBe("FAIL");
+  });
+
+  it("uses the full SQL observation for the target even when the request ratchet passes", () => {
+    const after = { ...report(3, 3), budgets: [{ ...definitions[0], observed: 3, targetObserved: 5 }] };
+    expect(compareReports(report(10), after, [{ ...definitions[0], baseline: 3 }]))
+      .toMatchObject([{ after: 3, ratchet: "PASS", targetObserved: 5, target: "FAIL" }]);
+  });
+
+  it("pins background call costs and timer rates without executing revision code", () => {
+    const limits = [{ operation: "authority", initialCalls: 1, periodsMs: [5000], queries: 3, statements: 5, transactions: 1 }];
+    const source = `throw new Error('must not execute'); export const LOAD_BACKGROUND_BUDGETS = ${JSON.stringify(limits)} as const;`;
+    expect(readBackgroundDefinitions(source)).toEqual(limits);
+    expect(readBackgroundDefinitions("export const LOAD_BUDGETS = [];")).toEqual([]);
+    expect(() => readBackgroundDefinitions(source.replace("[5000]", "[0]"))).toThrow("Invalid background budget");
+    expect(() => assertBackgroundRatchet(limits, [{ ...limits[0]!, statements: 6 }])).toThrow("ceiling increased");
+    expect(() => assertBackgroundRatchet(limits, [{ ...limits[0]!, initialCalls: 2 }])).toThrow("ceiling increased");
+    expect(() => assertBackgroundRatchet(limits, [{ ...limits[0]!, periodsMs: [4000] }])).toThrow("ceiling increased");
+    expect(() => assertBackgroundRatchet(limits, [])).toThrow("budget removed");
+    expect(() => assertBackgroundRatchet(limits, [{ ...limits[0]!, statements: 4, periodsMs: [10000] }])).not.toThrow();
+    const before = { ...report(3), ...backgroundReport(limits) };
+    const after = structuredClone(before);
+    after.backgroundBudgets.find(row => row.scenario === "idle" && row.metric === "calls")!.observed = 2;
+    expect(compareBackground(before, after, limits).every(row => row.ratchet === "PASS")).toBe(true);
+    after.backgroundBudgets.find(row => row.scenario === "idle" && row.metric === "calls")!.observed = 3;
+    expect(compareBackground(before, after, limits).filter(row => row.ratchet === "FAIL"))
+      .toMatchObject([{ scenario: "idle", metric: "calls", observed: 3, baseline: 2 }]);
+    after.backgroundBudgets.find(row => row.scenario === "idle" && row.metric === "statementsPerCall")!.observed = 6;
+    expect(compareBackground(before, after, limits).filter(row => row.ratchet === "FAIL")).toHaveLength(2);
+    expect(() => compareBackground(before, { ...after, backgroundBudgets: [] }, limits)).toThrow("Incomplete");
   });
 
   it("rejects incomplete, duplicate, incomparable or nonnumeric observations", () => {
@@ -91,6 +131,7 @@ describe("before/after command isolation", () => {
     await writeFile(join(repo.directory, "cost.txt"), "caller-edit");
     const source = fileURLToPath(new URL("./load-budget.ts", import.meta.url));
     const shared = readBudgetDefinitions(await readFile(source, "utf8"));
+    const background = readBackgroundDefinitions(await readFile(source, "utf8"));
     const visits: string[] = [], overlays: string[] = [];
     let running = false;
     const result = await compareRevisions({ cwd: repo.directory, base: repo.base, head: repo.head,
@@ -99,7 +140,7 @@ describe("before/after command isolation", () => {
         const value = Number(await readFile(join(checkout, "cost.txt"), "utf8")); visits.push(String(value));
         expect((await exec(process.execPath, [join(checkout, "read-package.cjs")], { cwd: checkout })).stdout).toBe(String(value));
         overlays.push(await readFile(join(checkout, LOAD_BUDGET_SOURCE), "utf8"));
-        await writeFile(path, JSON.stringify({ ...report(value), budgets: shared.map(row => ({ ...row,
+        await writeFile(path, JSON.stringify({ ...report(value), ...backgroundReport(background), budgets: shared.map(row => ({ ...row,
           observed: row.scenario === "workspace-list" ? value : row.baseline })) }));
         running = false;
       } });
