@@ -27,6 +27,7 @@ const SCHEMA = `
   CREATE TABLE messages (
     chat_key TEXT NOT NULL REFERENCES chats(key) ON DELETE CASCADE, idx INTEGER NOT NULL, msg_id TEXT NOT NULL,
     kind TEXT NOT NULL, payload TEXT NOT NULL, created_at INTEGER NOT NULL, bytes INTEGER NOT NULL, user_prompt INTEGER NOT NULL,
+    steered INTEGER NOT NULL,
     PRIMARY KEY(chat_key,idx), UNIQUE(chat_key,msg_id)
   );
   CREATE TABLE senders (
@@ -47,7 +48,7 @@ const schemaText = (statements: string[]): string => JSON.stringify(statements.m
 const expectedSchema = schemaText(SCHEMA.split(";"));
 type Chat = { revision: number; message_count: number; history_state: string | null; queue_revision: number | null; queue_epoch: string | null; last_read: number };
 type Segment = { start_index: number; end_index: number; opening: string | null };
-type Message = { idx: number; msg_id: string; kind: string; payload: string; created_at: number; bytes: number; user_prompt: number };
+type Message = { idx: number; msg_id: string; kind: string; payload: string; created_at: number; bytes: number; user_prompt: number; steered: number };
 const SenderSchema = z.union([z.object({ userId: z.string().uuid() }).transform(({ userId }) => ({ userId })), z.null()]);
 /** A user message's sender as stored: '{"userId":…}' or 'null' (a known-unknown legacy attribution); no row means
  * never answered. A stored sender never changes. */
@@ -57,12 +58,13 @@ const storedSender = (senders: Record<string, unknown> | undefined, msgId: strin
   return parsed.success ? JSON.stringify(parsed.data) : null;
 };
 /** The control plane's rule (history.ts isUserMessage): a text row whose payload's role is user. A minimal payload
- * without its own `kind` still counts. `opening` also excludes steered prompts, which never open a turn. */
-const userPrompt = (kind: string, payload: string, opening = false): boolean => {
-  if (kind !== "text") return false;
-  try { const value = JSON.parse(payload); return value?.role === "user" && (!opening || value.steeredTurnId == null); }
-  catch { return false; }
+ * without its own `kind` still counts. `steered` is a user row carrying a steeredTurnId. */
+const promptKind = (kind: string, payload: string): { user: boolean; steered: boolean } => {
+  if (kind !== "text") return { user: false, steered: false };
+  try { const value = JSON.parse(payload); const user = value?.role === "user"; return { user, steered: user && value.steeredTurnId != null }; }
+  catch { return { user: false, steered: false }; }
 };
+const userPrompt = (kind: string, payload: string): boolean => promptKind(kind, payload).user;
 const native = (row: Message): CloudCacheRow => ({ index: row.idx, msgId: row.msg_id, kind: row.kind, payload: row.payload, createdAt: row.created_at });
 /** How many of this process's descriptors are open on `file`'s inode, or null where the platform cannot list them
  * (the open is then refused rather than trusted). */
@@ -252,21 +254,31 @@ export class CloudChatCacheStore {
   }
 
   private upsertRows(key: string, rows: CloudCacheRow[]): void {
-    const statement = this.database().prepare(`INSERT INTO messages VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(chat_key,idx) DO UPDATE SET
-      msg_id=excluded.msg_id,kind=excluded.kind,payload=excluded.payload,created_at=excluded.created_at,bytes=excluded.bytes,user_prompt=excluded.user_prompt`);
+    const statement = this.database().prepare(`INSERT INTO messages VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(chat_key,idx) DO UPDATE SET
+      msg_id=excluded.msg_id,kind=excluded.kind,payload=excluded.payload,created_at=excluded.created_at,bytes=excluded.bytes,
+      user_prompt=excluded.user_prompt,steered=excluded.steered`);
     for (const row of rows) {
       const size = bytes(row.payload) + bytes(row.msgId) + bytes(row.kind) + 64;
       if (size > this.limits.chatBytes) throw new Capacity();
       // Opaque malformed native payloads are not user prompts here; presentation refuses them.
-      const user = userPrompt(row.kind, row.payload, true);
-      statement.run(key, row.index, row.msgId, row.kind, row.payload, row.createdAt, size, Number(user));
+      const { user, steered } = promptKind(row.kind, row.payload);
+      statement.run(key, row.index, row.msgId, row.kind, row.payload, row.createdAt, size, Number(user), Number(steered));
     }
   }
 
+  /** The control plane's opening rule: the nearest unsteered user before the range, else the nearest user. The
+   * segment's server-delivered opening precedes every cached row, so it ranks after a cached unsteered candidate. */
   private opening(key: string, from: number, segment: Segment): string | null {
-    const row = this.database().prepare("SELECT * FROM messages WHERE chat_key=? AND idx>=? AND idx<? AND user_prompt=1 ORDER BY idx DESC LIMIT 1")
-      .get(key, segment.start_index, from) as Message | undefined;
-    return row ? JSON.stringify(native(row)) : segment.opening;
+    const nearest = (steered: boolean) => this.database().prepare(
+      `SELECT * FROM messages WHERE chat_key=? AND idx>=? AND idx<? AND user_prompt=1${steered ? "" : " AND steered=0"} ORDER BY idx DESC LIMIT 1`,
+    ).get(key, segment.start_index, from) as Message | undefined;
+    const unsteered = nearest(false);
+    if (unsteered) return JSON.stringify(native(unsteered));
+    const delivered = segment.opening ? (() => { try { const value = JSON.parse(segment.opening!) as { kind: string; payload: string };
+      return promptKind(value.kind, value.payload); } catch { return undefined; } })() : undefined;
+    if (delivered?.user && !delivered.steered) return segment.opening;
+    const steered = nearest(true);
+    return steered ? JSON.stringify(native(steered)) : segment.opening;
   }
 
   private rebuildSegments(key: string, previous: Segment[]): void {

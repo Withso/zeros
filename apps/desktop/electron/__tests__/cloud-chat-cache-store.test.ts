@@ -463,13 +463,22 @@ describe("senders travel with their cached rows (Team sharing)", () => {
     expect(open(root).readRange(key, 1, 4)).toMatchObject({ turnOpening: { msgId: "opening" }, senders: { opening: null } });
   });
 
-  it("a steered prompt never becomes a cached turn opening (the control plane's opening rule)", () => {
-    const store = open();
+  it("turn openings follow the control plane's rule: prefer the nearest unsteered user, fall back to the nearest user", () => {
     const user = (index: number, extra: Record<string, unknown> = {}) => ({ index, msgId: `u-${index}`, kind: "text", createdAt: index + 1,
       payload: JSON.stringify({ id: `u-${index}`, kind: "text", role: "user", text: "prompt", createdAt: index + 1, ...extra }) });
     const agent = (index: number) => ({ index, msgId: `a-${index}`, kind: "text", createdAt: index + 1,
       payload: JSON.stringify({ id: `a-${index}`, kind: "text", role: "agent", text: "reply", createdAt: index + 1 }) });
-    store.putRange(key, { revision: 1, messageCount: 3, fromIndex: 0, toIndex: 3, rows: [user(0), user(1, { steeredTurnId: "turn" }), agent(2)] });
+    const steer = { steeredTurnId: "turn" };
+    const put = (rows: ReturnType<typeof user>[]) => { const store = open(); store.putRange(key, { revision: 1, messageCount: rows.length, fromIndex: 0, toIndex: rows.length, rows }); return store; };
+    // A preceding steered prompt never wins over an unsteered one before it.
+    expect(put([user(0), user(1, steer), agent(2)]).readRange(key, 2, 3)?.turnOpening?.msgId).toBe("u-0");
+    // A first returned user row (steered or not) is its own opening: none is added.
+    expect(put([user(0), user(1, steer), agent(2)]).readRange(key, 1, 3)?.turnOpening).toBeUndefined();
+    // With no unsteered user before the range, the nearest steered one is the opening.
+    expect(put([user(0, steer), agent(1)]).readRange(key, 1, 2)?.turnOpening?.msgId).toBe("u-0");
+    // The server-delivered opening (unsteered, before the cached segment) beats a nearer cached steered prompt.
+    const store = open();
+    store.putRange(key, { revision: 1, messageCount: 3, fromIndex: 1, toIndex: 3, rows: [user(1, steer), agent(2)], turnOpening: user(0) });
     expect(store.readRange(key, 2, 3)?.turnOpening?.msgId).toBe("u-0");
   });
 
