@@ -107,6 +107,9 @@ export class RuntimeAdoption {
       return await handoffs.commit(token, bootId, input.id, input.revision, input.generation, runtime.sha256)
         ? { status: "committed", id: input.id } : { status: "unavailable" };
     }
+    // runtime-staging-v1: G's stage admission replaces this. Until then the control plane never opts a worker in
+    // (config.runtimeStaging), and an unexpected stage request is refused, which the worker treats as not staged.
+    if (input.op === "stage") return { status: "unavailable" };
     const pending = await handoffs.inspect(token, input.id);
     if (!pending || pending.workspace_id !== workspace.id || pending.old_boot_id !== bootId.toLowerCase() || pending.target_sha256 !== runtime.sha256) {
       return await handoffs.cancel(token, input.id, bootId) ? { status: "cancelled", id: input.id } : { status: "unavailable" };
