@@ -53,9 +53,9 @@ async function setup(options: { chats?: number; rows?: number } = {}) {
 }
 
 describe("history-digest-v1 (worker half)", () => {
-  it("is not advertised until the control plane's half lands", () => {
+  it("is advertised; the control plane opts in with config.historyDigest", () => {
     expect(HISTORY_DIGEST_FEATURE).toBe("history-digest-v1");
-    expect(CLOUD_WORKER_FEATURES.split(",")).not.toContain(HISTORY_DIGEST_FEATURE);
+    expect(CLOUD_WORKER_FEATURES.split(",")).toContain(HISTORY_DIGEST_FEATURE);
   });
 
   it("a clean reconnect is one digests read and zero history frames", async () => {
