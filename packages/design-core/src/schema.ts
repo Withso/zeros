@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { COMPONENT_OPTION_LIMITS } from "./component-options";
+import { COMPONENT_OPTION_LIMITS, COMPONENT_VARIANT_STATES } from "./component-options";
 
 export const DESIGN_FOUNDATION_SCHEMA_VERSION = 1 as const;
 export const DESIGN_TRANSACTION_MAX_OPERATIONS = 256;
@@ -828,6 +828,8 @@ export const designOperationSchema = z.discriminatedUnion("type", [
         .refine((values) => Object.keys(values).length <= COMPONENT_OPTION_LIMITS.options, {
           message: `A variant may set at most ${COMPONENT_OPTION_LIMITS.options} options`,
         }),
+      /** A state variant: the CSS state it shows. */
+      state: z.enum(COMPONENT_VARIANT_STATES).optional(),
     })
     .strict(),
 ]);

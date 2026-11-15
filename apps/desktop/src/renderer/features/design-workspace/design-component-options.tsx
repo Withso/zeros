@@ -2,7 +2,10 @@
 // is its control. Agents create options; a person only adjusts them here.
 // On the main component frame the Variant row picks which variant it shows
 // (personal view state) and a row writes that variant's line, or the default
-// with Default shown; "Save current as variant…" adds one line. On an
+// with Default shown. Add variant adds one line: a state the main lacks
+// (Hover, Pressed, Focus, Disabled, each a CSS state), or the shown values
+// saved as a variant. A state lists after the others; an instance cannot pick
+// one, since it shows while the instance is in that state. On an
 // instance in another frame each row writes the host's attribute, a dot marks
 // a value that differs from what it inherits, and Reset removes them all. A
 // plain component's instance whose default slot holds only text also offers
@@ -14,7 +17,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { Plus, RotateCcw, Sparkles } from "lucide-react";
-import { componentInheritedValues } from "@zeros/design-core/component-options";
+import { COMPONENT_STATE_PRESETS, componentInheritedValues } from "@zeros/design-core/component-options";
 import type { DesignFrameComponent, DesignFrameInstances } from "@zeros/protocol/design-catalog";
 import type { ComponentEasing, ComponentOption, ComponentOptionValue } from "@zeros/design-core/component-options";
 
@@ -52,6 +55,7 @@ import { DesignColorSwatch } from "./design-color-swatch";
 import { InspectorIconButton, InspectorSection } from "./design-inspector-kit";
 import {
   commitDesignComponentOption,
+  commitDesignComponentStateVariant,
   commitDesignComponentVariant,
   commitDesignInstanceAttributes,
   commitDesignInstanceSlotReset,
@@ -220,6 +224,11 @@ export function DesignComponentOptions({
   };
   // The default slot is no declared option; it has a row once it holds layers.
   const defaultSlotted = instance?.host.slotted?.[""];
+  const addState = (preset: (typeof COMPONENT_STATE_PRESETS)[number]) => {
+    void commitDesignComponentStateVariant(workspaceId, frame, preset)
+      .then(() => showDesignComponentVariant(workspaceId, frame.file, preset.name))
+      .catch((error) => toast.error(`Couldn't add the ${preset.label} state`, { description: errorMessage(error) }));
+  };
   const saveVariant = (typed: string) => {
     const named = designComponentVariantName(declaration, typed);
     if ("error" in named) return named.error;
@@ -288,7 +297,11 @@ export function DesignComponentOptions({
       />,
     );
   }
-  const variants = declaration.variants.map((entry) => entry.name);
+  // A state shows while an instance is hovered, pressed, focused or disabled,
+  // so an instance picks only among the others.
+  const variants = declaration.variants.filter((entry) => !entry.state).map((entry) => entry.name);
+  const states = instance ? [] : declaration.variants.filter((entry) => entry.state).map((entry) => entry.name);
+  const addable = COMPONENT_STATE_PRESETS.filter((preset) => !declaration.variants.some((entry) => entry.state === preset.state || entry.name === preset.name));
   const ignored = useMemo(() => (host ? designInstanceIgnoredAttributes(host) : []), [host]);
   const tooLarge = designComponentRecordProblem(target.component, title);
 
@@ -327,8 +340,11 @@ export function DesignComponentOptions({
         <OptionVariantRow
           variant={variant}
           variants={variants}
+          states={states}
+          addable={instance ? [] : addable}
           disabled={disabled}
           onChoose={chooseVariant}
+          onAddState={addState}
           onSave={instance ? undefined : () => setNaming(true)}
         />
       ) : null}
@@ -379,10 +395,12 @@ function OptionsNotice({ tone, className, children, ...props }: React.HTMLAttrib
 }
 
 /** Which variant shows (the main) or applies (an instance): Default, then
- * the declared variants; on the main, a way to save the shown values as one. */
-function OptionVariantRow({ variant, variants, disabled, onChoose, onSave }: {
-  variant: string | null; variants: readonly string[]; disabled: boolean;
-  onChoose: (variant: string | null) => void; onSave?: () => void;
+ * the declared variants, then on the main its states. The main's Add
+ * variant menu offers the states it lacks and saving the shown values. */
+function OptionVariantRow({ variant, variants, states, addable, disabled, onChoose, onAddState, onSave }: {
+  variant: string | null; variants: readonly string[]; states: readonly string[];
+  addable: readonly (typeof COMPONENT_STATE_PRESETS)[number][]; disabled: boolean;
+  onChoose: (variant: string | null) => void; onAddState: (preset: (typeof COMPONENT_STATE_PRESETS)[number]) => void; onSave?: () => void;
 }) {
   const menu = (
     <DropdownMenu>
@@ -397,16 +415,11 @@ function OptionVariantRow({ variant, variants, disabled, onChoose, onSave }: {
           {variants.map((name) => (
             <DropdownMenuRadioItem key={name} value={name}>{variantLabel(name)}</DropdownMenuRadioItem>
           ))}
+          {states.length ? <DropdownMenuSeparator /> : null}
+          {states.map((name) => (
+            <DropdownMenuRadioItem key={name} value={name} data-design-options-state={name}>{variantLabel(name)}</DropdownMenuRadioItem>
+          ))}
         </DropdownMenuRadioGroup>
-        {onSave ? (
-          <>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem onSelect={onSave}>
-              <Plus aria-hidden="true" />
-              Save current as variant…
-            </DropdownMenuItem>
-          </>
-        ) : null}
       </DropdownMenuContent>
     </DropdownMenu>
   );
@@ -414,9 +427,22 @@ function OptionVariantRow({ variant, variants, disabled, onChoose, onSave }: {
   return (
     <div className="flex items-center gap-1.5">
       <div className="min-w-0 flex-1">{menu}</div>
-      <InspectorIconButton label="Save as variant" size="row" className="bg-bg2 size-8 rounded-md" disabled={disabled} onClick={onSave}>
-        <Plus />
-      </InspectorIconButton>
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <InspectorIconButton label="Add variant" size="row" className="bg-bg2 size-8 rounded-md" disabled={disabled} data-design-options-add-variant="">
+            <Plus />
+          </InspectorIconButton>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end" className="w-52">
+          {addable.map((preset) => (
+            <DropdownMenuItem key={preset.name} onSelect={() => onAddState(preset)} data-design-options-add-state={preset.name}>
+              {preset.label}
+            </DropdownMenuItem>
+          ))}
+          {addable.length ? <DropdownMenuSeparator /> : null}
+          <DropdownMenuItem onSelect={onSave}>Save current as variant…</DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
     </div>
   );
 }

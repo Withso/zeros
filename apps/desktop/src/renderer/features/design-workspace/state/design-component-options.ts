@@ -16,6 +16,7 @@ import {
   type ComponentDeclaration,
   type ComponentEasing,
   type ComponentOptionValue,
+  type ComponentVariantState,
 } from "@zeros/design-core/component-options";
 import {
   designComponentRecordLimitMessage,
@@ -131,6 +132,17 @@ export function commitDesignComponentVariant(
   );
   return applyDesignEditCached(workspaceId, frame,
     edit(`Save variant ${name}`, [{ operationId: "save-variant", type: "component.save-variant", file: frame.file, name, values }]));
+}
+
+/** Add one of the state variants (Hover, Pressed, Focus, Disabled): a line
+ * that names its CSS state and sets no option. */
+export function commitDesignComponentStateVariant(
+  workspaceId: string,
+  frame: { file: string; sourceVersion: string },
+  preset: { name: string; state: ComponentVariantState; label: string },
+) {
+  return applyDesignEditCached(workspaceId, frame,
+    edit(`Add ${preset.label} state`, [{ operationId: "save-state-variant", type: "component.save-variant", file: frame.file, name: preset.name, values: {}, state: preset.state }]));
 }
 
 /** An instance's options as its host's attributes give them: its values,

@@ -68,7 +68,32 @@ export interface ComponentDerived {
 export interface ComponentVariant {
   name: string;
   values: Map<string, ComponentOptionValue>;
+  /** A state variant shows the main's root layer in this CSS state. */
+  state?: ComponentVariantState;
   offset: number;
+}
+
+/** The CSS states a variant can show, as the pseudo-class names them. */
+export const COMPONENT_VARIANT_STATES = ["hover", "active", "focus-visible", "disabled"] as const;
+export type ComponentVariantState = (typeof COMPONENT_VARIANT_STATES)[number];
+/** The <zd-variant> attribute that makes it a state variant. */
+export const COMPONENT_VARIANT_STATE_ATTRIBUTE = "zd-state";
+/** The state variants a person adds, in menu order. */
+export const COMPONENT_STATE_PRESETS: readonly { name: string; state: ComponentVariantState; label: string }[] = Object.freeze([
+  { name: "hover", state: "hover", label: "Hover" },
+  { name: "pressed", state: "active", label: "Pressed" },
+  { name: "focus", state: "focus-visible", label: "Focus" },
+  { name: "disabled", state: "disabled", label: "Disabled" },
+]);
+
+export function isComponentVariantState(value: unknown): value is ComponentVariantState {
+  return typeof value === "string" && (COMPONENT_VARIANT_STATES as readonly string[]).includes(value);
+}
+
+/** The state variant of this name, or null for any other. */
+export function componentStateVariantOf(declaration: ComponentDeclaration, name: string | null | undefined): (ComponentVariant & { state: ComponentVariantState }) | null {
+  const variant = name ? declaration.variants.find((entry) => entry.name === name) : undefined;
+  return variant?.state ? (variant as ComponentVariant & { state: ComponentVariantState }) : null;
 }
 
 export interface ComponentDeclaration {
@@ -374,9 +399,19 @@ export function readComponentDeclaration(
         problem(`The variant ${name} is declared twice.`);
         continue;
       }
+      const state = attributes.get(COMPONENT_VARIANT_STATE_ATTRIBUTE);
+      if (state !== undefined && !isComponentVariantState(state)) {
+        problem(`The variant ${name}'s ${COMPONENT_VARIANT_STATE_ATTRIBUTE} must be one of ${formatList([...COMPONENT_VARIANT_STATES])}.`);
+        continue;
+      }
+      const showing = state ? declaration.variants.find((variant) => variant.state === state) : undefined;
+      if (showing) {
+        problem(`The variant ${name} shows ${state}, which the variant ${showing.name} already shows.`);
+        continue;
+      }
       const values = new Map<string, ComponentOptionValue>();
       for (const [attribute, raw] of attributes) {
-        if (attribute === "name") continue;
+        if (attribute === "name" || attribute === COMPONENT_VARIANT_STATE_ATTRIBUTE) continue;
         const option = declaration.options.find((entry) => entry.name === attribute);
         if (!option) {
           problem(`The variant ${name} sets ${attribute}, but there is no option ${attribute}.`);
@@ -386,7 +421,7 @@ export function readComponentDeclaration(
         if (!parsed.ok) problem(`The variant ${name}: ${parsed.message}`);
         else values.set(attribute, parsed.value);
       }
-      declaration.variants.push({ name, values, offset: element.offset });
+      declaration.variants.push({ name, values, ...(state ? { state } : {}), offset: element.offset });
       continue;
     }
     problem(`Use zd-option, zd-derive or zd-variant inside <template data-zd-options>, not <${element.tag}>.`);

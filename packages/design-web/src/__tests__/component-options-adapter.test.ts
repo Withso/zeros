@@ -124,6 +124,24 @@ describe("saving a variant", () => {
     expect(undone.state.files["chat/composer.html"]).toBe(initial.files["chat/composer.html"]);
   });
 
+  it("adds a state variant that names its CSS state, and refuses a second one for that state", () => {
+    const { file } = apply([{ ...save("hover", {}), state: "hover" } as DesignOperation]);
+    expect(file).toContain('<zd-variant name="compact" width="800"></zd-variant>\n      <zd-variant name="hover" zd-state="hover"></zd-variant>\n    </template>');
+    const hovered = createDesignWebDocumentState({ documentId: "chat/composer.html", entryFile: "chat/composer.html", files: { "chat/composer.html": file } });
+    expect(() => apply([{ ...save("over", {}), state: "hover" } as DesignOperation], hovered)).toThrow("The variant hover already shows hover.");
+  });
+
+  it("writes a style edit made while a state variant shows into the main's rule for that state, undone exactly", () => {
+    const hovered = createDesignWebDocumentState({ documentId: "chat/composer.html", entryFile: "chat/composer.html",
+      files: { "chat/composer.html": apply([{ ...save("hover", {}), state: "hover" } as DesignOperation]).file } });
+    const { initial, outcome, file } = apply([{ operationId: "hover-fill", type: "node.set-styles", nodeId: "root", styles: { background: "navy" },
+      scope: "auto", responsiveContext: "base", stateContext: "hover" }], hovered);
+    expect(outcome.receipt.status).toBe("applied");
+    expect(file).toContain('    </template>\n  <style>\n  :is([data-oid="root"], [data-zd-part="root"]):hover { background: navy !important; }\n  </style>\n  </head>');
+    const undone = applyDesignTransaction(outcome.state, webTransaction(outcome.state, "undo", outcome.inverseOperations), designWebTransactionAdapter);
+    expect(undone.state.files["chat/composer.html"]).toBe(initial.files["chat/composer.html"]);
+  });
+
   it("refuses a name in use, Default, an unknown option or a value that does not fit", () => {
     expect(() => apply([save("compact", {})])).toThrow("The variant compact already exists.");
     expect(() => apply([save("default", {})])).toThrow(/Default is the declared defaults/);

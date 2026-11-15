@@ -4,6 +4,7 @@
 // variant; it is shown only while the frame declares that variant, and an
 // entry for a variant or a frame that has gone is dropped. Local only.
 
+import { COMPONENT_VARIANT_STATE_ATTRIBUTE, isComponentVariantState, type ComponentVariantState } from "@zeros/design-core/component-options";
 import { isDesignComponentVariantName, isDesignFrameFile } from "@zeros/protocol/design-path";
 import type { DesignFrameComponent } from "@zeros/protocol/design-catalog";
 import type { DesignWorkspaceSnapshotWire } from "../../../platform/bridge/design-bridge";
@@ -84,6 +85,22 @@ export function designDeclaredVariants(component: DesignFrameComponent | undefin
     .filter((element) => element.tag === "zd-variant")
     .map((element) => element.attributes.find((attribute) => attribute.name === "name")?.value ?? "")
     .filter(isDesignComponentVariantName);
+}
+
+/** The CSS state a declared variant shows, or null for one of option values. */
+export function designDeclaredVariantState(component: DesignFrameComponent | undefined, variant: string | null): ComponentVariantState | null {
+  if (!component || !variant) return null;
+  const element = component.elements.find((entry) => entry.tag === "zd-variant" &&
+    entry.attributes.some((attribute) => attribute.name === "name" && attribute.value === variant));
+  const state = element?.attributes.find((attribute) => attribute.name === COMPONENT_VARIANT_STATE_ATTRIBUTE)?.value;
+  return isComponentVariantState(state) ? state : null;
+}
+
+/** The state a main frame shows through its state variant, or null; a
+ * style edit meanwhile writes that state's rule. */
+export function useDesignShownComponentState(workspaceId: string, frame: { file: string; component?: DesignFrameComponent } | null): ComponentVariantState | null {
+  return useDesignComponentVariantStore((state) =>
+    frame?.component ? designDeclaredVariantState(frame.component, shownFrom(state.byWorkspace, workspaceId, frame)) : null);
 }
 
 function shownFrom(stored: Stored, workspaceId: string, frame: { file: string; component?: DesignFrameComponent }): string | null {

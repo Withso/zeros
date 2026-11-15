@@ -1,75 +1,45 @@
-// PURPOSE: The Style panel's view-only layer states: the State menu in the
-// selection header, the note under it while a state is held, and the rule
-// that keeps every field read-only meanwhile. The canvas shows the state;
-// nothing here writes source.
+// PURPOSE: The Style panel's states. A main component showing one of its
+// state variants says so, and its edits write that state. A layer held in a
+// state (the runtime's view-only hold) has a note and a rule that keeps every
+// field read-only meanwhile; nothing held writes source.
 
-import { useEffect, useState, type RefObject } from "react";
-import { ChevronDown } from "lucide-react";
+import { useEffect, type RefObject } from "react";
 
+import type { ComponentVariantState } from "@zeros/design-core/component-options";
 import type { DesignRuntimeNodeState } from "@zeros/protocol/design-runtime";
 
-import {
-  Button,
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuRadioGroup,
-  DropdownMenuRadioItem,
-  DropdownMenuTrigger,
-} from "../../shared/ui/primitives";
+import { Button } from "../../shared/ui/primitives";
 import { designStateLabel } from "./design-style-origins";
 
-const DEFAULT = "default";
+const STATE_NOTES: Record<ComponentVariantState, { label: string; when: string }> = {
+  hover: { label: "Hover", when: "hovered" },
+  active: { label: "Pressed", when: "pressed" },
+  "focus-visible": { label: "Focus", when: "focused from the keyboard" },
+  disabled: { label: "Disabled", when: "disabled" },
+};
 
-/** The header's State button and its menu: Default, then the states the
- * layer offers, in that order. Picking never waits for the frame. */
-export function DesignLayerStateMenu({
-  states,
-  held,
-  active,
-  disabled = false,
-  onPick,
-}: {
-  states: readonly DesignRuntimeNodeState[];
-  held: DesignRuntimeNodeState | null;
-  /** The surface is shown; a hidden one keeps no menu open. */
-  active: boolean;
-  disabled?: boolean;
-  onPick: (state: DesignRuntimeNodeState | null) => void;
-}) {
-  const [open, setOpen] = useState(false);
-  useEffect(() => {
-    if (!active) setOpen(false);
-  }, [active]);
+/** What a main component showing one of its states says: edits write that
+ * state, not Default. */
+export function designStateVariantNote(state: ComponentVariantState): { lead: string; rest: string } {
+  const note = STATE_NOTES[state];
+  return { lead: note.label, rest: ` shows. Edits apply while the component is ${note.when}.` };
+}
+
+export function DesignStateVariantNote({ state, onBack }: { state: ComponentVariantState; onBack: () => void }) {
+  const note = designStateVariantNote(state);
   return (
-    <DropdownMenu open={open && active} onOpenChange={setOpen}>
-      <DropdownMenuTrigger asChild>
-        <Button
-          type="button"
-          variant="ghost"
-          size="compact"
-          aria-label="Layer state"
-          data-design-state-control=""
-          data-design-state-button=""
-          disabled={disabled || !active}
-        >
-          {held ? designStateLabel(held) : "Default"}
-          <ChevronDown aria-hidden="true" />
-        </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="w-40" data-design-state-menu="">
-        <DropdownMenuRadioGroup
-          value={held ?? DEFAULT}
-          onValueChange={(value) => onPick(value === DEFAULT ? null : (value as DesignRuntimeNodeState))}
-        >
-          <DropdownMenuRadioItem value={DEFAULT}>Default</DropdownMenuRadioItem>
-          {states.map((state) => (
-            <DropdownMenuRadioItem key={state} value={state}>
-              {designStateLabel(state)}
-            </DropdownMenuRadioItem>
-          ))}
-        </DropdownMenuRadioGroup>
-      </DropdownMenuContent>
-    </DropdownMenu>
+    <div
+      data-design-state-variant={state}
+      className="border-border1 text-fg3 flex min-h-7 flex-wrap items-center gap-x-2 gap-y-0.5 border-b py-0.5 pr-2 pl-3 text-3xxs leading-4"
+    >
+      <span className="min-w-0 flex-[1_1_14rem]">
+        <b className="text-fg2 font-medium">{note.lead}</b>
+        {note.rest}
+      </span>
+      <Button type="button" variant="ghost" size="compact" className="ml-auto" onClick={onBack}>
+        Back to Default
+      </Button>
+    </div>
   );
 }
 

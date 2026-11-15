@@ -187,6 +187,23 @@ describe("instances and variants through the engine", () => {
     expect(fallback.srcDoc).toContain("--zd-width: 700px");
   });
 
+  it("renders the main in the state its state variant shows, and its instances as they are", async () => {
+    const { main, host } = await setUp();
+    await writeFile(path.join(root, DESIGN_DIRECTORY_NAME, main.file), VARIANT_MAIN
+      .replace("</template>", `<zd-variant name="hover" zd-state="hover"></zd-variant>\n</template>`)
+      .replace("</style>", " .c:hover { outline: 2px solid red; }</style>"));
+    const listed = (await readDesignWorkspaceSnapshot(root)).frames.find((candidate) => candidate.file === main.file)!;
+    const html = (await readDesignProtocolResource(root, { path: main.file, sourceVersion: listed.sourceVersion, variant: "hover" })).body.toString("utf8");
+    expect(html).toContain('data-oid="root" data-many="false" data-zd-shown-state="hover"');
+    expect(html).toContain('<style data-zd-shown-state>.c[data-zd-shown-state~="hover"] { outline: 2px solid red; }</style>');
+    // Its defaults, since the variant sets no option.
+    expect(html).toContain("--zd-width: 1120px");
+    const plain = (await readDesignProtocolResource(root, { path: main.file, sourceVersion: listed.sourceVersion })).body.toString("utf8");
+    expect(plain).not.toContain("data-zd-shown-state");
+    const instance = (await readDesignFrame(root, host.file, 4)).srcDoc;
+    expect(instance).not.toContain("data-zd-shown-state");
+  });
+
   it("writes an instance's value as one attribute and refuses a write to one of its parts", async () => {
     const { host } = await setUp();
     const api = getWorkspaceDesignApi(root);

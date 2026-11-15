@@ -5,8 +5,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { TooltipProvider } from "../../../shared/ui/primitives";
 import {
-  DesignLayerStateMenu,
   designHeldStateNote,
+  DesignStateVariantNote,
+  designStateVariantNote,
   useDesignHeldReadOnly,
 } from "../design-state-picker";
 
@@ -51,31 +52,19 @@ describe("the held state note", () => {
   });
 });
 
-describe("the State menu", () => {
-  const menu = (active: boolean, held: "hover" | null = null) =>
-    createElement(DesignLayerStateMenu, { states: ["hover", "disabled"], held, active, onPick: () => {} });
-
-  it("is named Layer state, reads the held state, and offers no tooltip", () => {
-    render(menu(true, "hover"));
-    const button = host.querySelector<HTMLButtonElement>('button[aria-label="Layer state"]')!;
-    expect(button.textContent).toBe("Hover");
-    expect(button.hasAttribute("title")).toBe(false);
-    render(menu(true));
-    expect(button.textContent).toBe("Default");
+describe("a main component's state variant", () => {
+  it("names the state it shows and when its edits apply", () => {
+    expect(designStateVariantNote("hover")).toEqual({ lead: "Hover", rest: " shows. Edits apply while the component is hovered." });
+    expect(designStateVariantNote("active").lead).toBe("Pressed");
+    expect(designStateVariantNote("focus-visible").rest).toContain("focused from the keyboard");
   });
 
-  it("closes when the surface stops being shown", () => {
-    render(menu(true));
-    const button = host.querySelector<HTMLButtonElement>('button[aria-label="Layer state"]')!;
-    act(() => {
-      button.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, button: 0, pointerType: "mouse" }));
-    });
-    expect(document.querySelector("[data-design-state-menu]")).not.toBeNull();
-    render(menu(false));
-    expect(document.querySelector("[data-design-state-menu]")).toBeNull();
-    // Shown again, it stays closed until asked.
-    render(menu(true));
-    expect(document.querySelector("[data-design-state-menu]")).toBeNull();
+  it("goes back to Default", () => {
+    const back = vi.fn();
+    render(createElement(DesignStateVariantNote, { state: "disabled", onBack: back }));
+    expect(host.querySelector("[data-design-state-variant]")?.getAttribute("data-design-state-variant")).toBe("disabled");
+    act(() => host.querySelector<HTMLButtonElement>("button")!.click());
+    expect(back).toHaveBeenCalledTimes(1);
   });
 });
 

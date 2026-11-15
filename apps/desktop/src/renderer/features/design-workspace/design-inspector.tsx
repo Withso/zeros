@@ -107,7 +107,8 @@ import { DesignFieldOverlays, readDesignCardField } from "./design-style-card";
 import { designInputResetsOnAltBackspace, useDesignFieldOverlays, type DesignFieldOverlaysApi } from "./design-field-overlays";
 import { designForcedValueBrief } from "./design-agent-brief";
 import { DesignStyledByLine } from "./design-styled-by";
-import { DesignHeldStateNote, DesignLayerStateMenu, useDesignHeldReadOnly } from "./design-state-picker";
+import { DesignHeldStateNote, DesignStateVariantNote, useDesignHeldReadOnly } from "./design-state-picker";
+import { showDesignComponentVariant, useDesignShownComponentState } from "./state/design-component-variants";
 import { designHeldStateChanges, designStylePropertyLabel } from "./design-style-origins";
 import {
   designHeldStateEntry,
@@ -209,7 +210,7 @@ import {
 } from "./state/design-selection";
 import { designComponentPartOf, designComponentSlotOf } from "@zeros/protocol/design-runtime";
 import { designComponentDisplayTitle, designComponentSlotLabel, designComponentTextLock, designMissingComponentOf, designPartOverrideAttribute,
-  designPartOverrideKey, isDesignComponentPartNodeId } from "./state/design-component-parts";
+  designPartOverrideKey } from "./state/design-component-parts";
 import { MessageRow } from "../../shared/ui/primitives/message-row";
 import type { DesignComponentOptionsTarget } from "./design-component-options";
 import {
@@ -1571,9 +1572,6 @@ export const DesignInspector = React.memo(function DesignInspector({
   const [frameAction, setFrameAction] = useState<"export" | null>(null);
   const [exportScale, setExportScale] = useState(1);
   const [pendingHistoryActions, setPendingHistoryActions] = useState(0);
-  // An instance's part takes style writes, as overrides on its instance; a
-  // held state has no override to write.
-  const partSelected = isDesignComponentPartNodeId(selectedNodeId);
   // A slot takes layers, not styles: its frame is the main's.
   const slotSelected = !!selectedNodeId && designComponentSlotOf(selectedNodeId) !== null;
   const editsDisabled = !active || pendingHistoryActions > 0 || slotSelected;
@@ -1816,6 +1814,9 @@ export const DesignInspector = React.memo(function DesignInspector({
     ? designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.directoryId ??
       designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.directory ?? ""
     : "";
+  // A main component showing one of its states: style edits write that
+  // state's rule in the main, not the layers' own style.
+  const shownState = useDesignShownComponentState(workspaceId ?? "", frame ?? null);
   const styleEditContextRef = useRef({
     active,
     pageId: activePageId,
@@ -1827,6 +1828,7 @@ export const DesignInspector = React.memo(function DesignInspector({
     selectedNodeId: styleTargetNodeId,
     elementDetails,
     layoutRootId,
+    stateContext: shownState,
   });
   styleEditContextRef.current = {
     active,
@@ -1839,6 +1841,7 @@ export const DesignInspector = React.memo(function DesignInspector({
     selectedNodeId: styleTargetNodeId,
     elementDetails,
     layoutRootId,
+    stateContext: shownState,
   };
   const styleOwnerKey = `${workspaceId ?? ""}\u0000${styleDirectoryKey}\u0000${activePageId ?? ""}\u0000${frame?.file ?? ""}\u0000${styleNodeIds.join("\u0000")}`;
   // A keyed editor's cleanup runs after the new selection has rendered. Keep
@@ -1922,8 +1925,8 @@ export const DesignInspector = React.memo(function DesignInspector({
   useDesignHeldReadOnly(inspectorRef, holding);
   const latestPickRef = useRef({ heldKey, elementDetails });
   latestPickRef.current = { heldKey, elementDetails };
-  /** Pick from the State menu: one request, painted when it answers. Back to
-   * Default paints the retained Default box at once. Never awaited. */
+  /** Hold a layer state: one request, painted when it answers. Letting go
+   * (null) paints the retained Default box at once. Never awaited. */
   const pickLayerState = useCallback((state: DesignRuntimeNodeState | null) => {
     const { heldKey: key, elementDetails: rest } = latestPickRef.current;
     if (!key || !rest) return;
@@ -2141,7 +2144,7 @@ export const DesignInspector = React.memo(function DesignInspector({
           new Error("Select one or more design layers first."),
         );
       }
-      const { workspaceId, frame, styleNodeIds } = context;
+      const { workspaceId, frame, styleNodeIds, stateContext } = context;
       const updates = designSelectionStyleUpdates(styleNodeIds, styles, perNode).map(
         (update) => ({ nodeId: update.nodeId, styles: stylesForNode(update.nodeId, update.styles) }),
       );
@@ -2172,8 +2175,10 @@ export const DesignInspector = React.memo(function DesignInspector({
             }),
           ).then(() => null);
         let resizedFrame: DesignOperation | null = null;
+        // A state's size is the main's in that state; the frame keeps Default's.
         if (
           root &&
+          !stateContext &&
           hasDesignIntrinsicSize(root) &&
           Object.keys(styles).some(designStylePropertyAffectsLayout)
         ) {
@@ -2205,7 +2210,7 @@ export const DesignInspector = React.memo(function DesignInspector({
         }
         // Nothing is written once a hold has met the edit.
         if (held.blocked()) return dropPreview();
-        if (updates.length === 1 && !resizedFrame) {
+        if (updates.length === 1 && !resizedFrame && !stateContext) {
           return {
             persist: updateDesignNodeStylesCached(workspaceId, {
               frame: frame.file,
@@ -2220,7 +2225,9 @@ export const DesignInspector = React.memo(function DesignInspector({
             schemaVersion: 1,
             transactionId: `desktop:${crypto.randomUUID()}`,
             actor: { kind: "human", id: "desktop" },
-            intent: `Set ${properties.join(", ")} on ${updates.length} layers`,
+            intent: stateContext
+              ? `Set ${properties.join(", ")} in the ${stateContext} state`
+              : `Set ${properties.join(", ")} on ${updates.length} layers`,
             createdAt: Date.now(),
             coalesceKey: designStyleCommitCoalesceKey(styleNodeIds, properties, intent),
             operations: [
@@ -2230,7 +2237,7 @@ export const DesignInspector = React.memo(function DesignInspector({
                 ...update,
                 scope: "auto" as const,
                 responsiveContext: "base",
-                stateContext: "default" as const,
+                stateContext: stateContext ?? "default",
               })),
               ...(resizedFrame ? [resizedFrame] : []),
             ],
@@ -2390,7 +2397,7 @@ export const DesignInspector = React.memo(function DesignInspector({
       // later selection, and every relative rotation reads its own latest value.
       const context = styleEditContextRef.current;
       const task = layoutActionQueueRef.current.then(async () => {
-        const { workspaceId, frame, styleNodeIds } = context;
+        const { workspaceId, frame, styleNodeIds, stateContext } = context;
         if (!workspaceId || !frame || styleNodeIds.length === 0) return;
         const runtime = designFrameRuntime(workspaceId, frame.file);
         if (!runtime) throw new Error("The selected frame is still loading.");
@@ -2543,7 +2550,7 @@ export const DesignInspector = React.memo(function DesignInspector({
         if (updates.size === 0 || held.blocked()) return;
         const currentFrame = { ...frame, sourceVersion: runtime.sourceVersion };
         const fittedRoot =
-          action.type === "resize-fit"
+          action.type === "resize-fit" && !stateContext
             ? details.find(
                 (node) =>
                   node.oid === context.layoutRootId && updates.has(node.oid),
@@ -2568,7 +2575,7 @@ export const DesignInspector = React.memo(function DesignInspector({
             styles,
             scope: "auto",
             responsiveContext: "base",
-            stateContext: "default",
+            stateContext: stateContext ?? "default",
           }),
         );
         if (fittedGeometry)
@@ -3089,15 +3096,6 @@ export const DesignInspector = React.memo(function DesignInspector({
           ) : hiddenBy === "ancestor" ? (
             <span data-design-hidden="ancestor" className="text-fg3 shrink-0 text-3xxs leading-4">In a hidden layer</span>
           ) : null}
-          {heldKey && elementDetails?.states?.length && !cssMode ? (
-            <DesignLayerStateMenu
-              states={elementDetails.states}
-              held={heldState}
-              active={active}
-              disabled={pendingHistoryActions > 0 || partSelected}
-              onPick={pickLayerState}
-            />
-          ) : null}
         </>}
       </div>
       {componentHeader ? (
@@ -3288,6 +3286,9 @@ export const DesignInspector = React.memo(function DesignInspector({
                 />
                 </React.Suspense>
               </DesignTokenCatalogContext.Provider>
+            ) : null}
+            {shownState && frame && workspaceId ? (
+              <DesignStateVariantNote state={shownState} onBack={() => showDesignComponentVariant(workspaceId, frame.file, null)} />
             ) : null}
             {heldState && heldChanges ? (
               <DesignHeldStateNote state={heldState} count={heldChanges.count} onBack={() => pickLayerState(null)} />

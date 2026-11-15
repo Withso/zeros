@@ -165,7 +165,9 @@ export interface DesignStyleMutationDecision {
     | "inline-fallback-no-rule"
     | "inline-fallback-ambiguous-rule"
     /** A component instance's part: its host's zd-style-<part>. */
-    | "part-override";
+    | "part-override"
+    /** A main component's state variant: its rule for the layer in that state. */
+    | "state-rule";
 }
 
 export interface DesignParameterResolution {

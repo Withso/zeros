@@ -25,9 +25,11 @@ import {
   componentInheritedValues,
   componentOptionCss,
   componentOptionValues,
+  componentStateVariantOf,
   readComponentDeclaration,
 } from "@zeros/design-core/components";
 import { appendComponentVariant, mutateComponentOption } from "@zeros/design-web/component-options";
+import { mutateDesignComponentStateStyles, showDesignComponentState } from "@zeros/design-web/component-states";
 import { createComponentTemplateBudget, designComponentSummaryOf, renderComponentTemplate } from "@zeros/design-web/component-template";
 import { applyDesignPartStyleOverrides, designPartOfNodeId, designPartStyleAttribute, designPartStyleOverrides, mergeDesignPartStyleOverride }
   from "@zeros/design-web/component-overrides";
@@ -328,7 +330,9 @@ function renderHarnessComponentFrame(source: string, variant: string | null = nu
   const { declaration } = readComponentDeclaration(summary.elements.map((element) => ({ ...element, offset: 0 })));
   const values = componentInheritedValues(declaration, variant);
   const scope = componentExpressionScope(declaration, values);
-  const html = renderComponentTemplate(source, { scope, ids: "copy", budget: createComponentTemplateBudget(), document: true });
+  const rendered = renderComponentTemplate(source, { scope, ids: "copy", budget: createComponentTemplateBudget(), document: true });
+  const shownState = componentStateVariantOf(declaration, variant)?.state;
+  const html = shownState ? showDesignComponentState(rendered, shownState) : rendered;
   return html.replace(/<\/head>/i, `<style data-zeros-options>:root { ${componentOptionCss(declaration, values, scope)} }</style></head>`);
 }
 
@@ -2064,6 +2068,7 @@ async function main() {
                 html?: string;
                 mode?: string;
                 styles?: Record<string, string>;
+                stateContext?: string;
                 file?: string;
                 name?: string;
                 theme?: string | null;
@@ -2131,7 +2136,10 @@ async function main() {
             },
           };
         }
-        const componentWrite = transaction?.operations?.length && transaction.operations.every((operation) => operation.type === "component.set-option" || operation.type === "component.save-variant");
+        // A state variant's style is written on the main, in its state rule.
+        const componentWrite = transaction?.operations?.length && transaction.operations.every((operation) =>
+          operation.type === "component.set-option" || operation.type === "component.save-variant" ||
+          (operation.type === "node.set-styles" && transaction.documentId === "harness:pricing.html" && (operation.stateContext ?? "default") !== "default"));
         // A slot's writes as the adapter makes them: a layer moved or drawn
         // into it, and the layers a Reset to default deletes.
         const slotted = new Set([...harnessSlottedLayers(currentHomeSource).values()].flatMap((slots) => Object.values(slots).flat()));
@@ -2154,6 +2162,8 @@ async function main() {
           for (const operation of (transaction.operations ?? []) as unknown as Array<Record<string, never>>) {
             if (operation.type === "component.set-option") next = mutateComponentOption(next, operation.file, operation as never);
             else if (operation.type === "component.save-variant") next = appendComponentVariant(next, operation.file, operation as never);
+            else if (operation.type === "node.set-styles" && componentWrite) next = mutateDesignComponentStateStyles(next, "pricing.html",
+              { nodeId: operation.nodeId, state: operation.stateContext, styles: Object.entries(operation.styles) }).source;
             else if (operation.type === "node.set-styles") next = designPartOfNodeId(operation.nodeId)
               ? harnessPartStyleSource(next, operation.nodeId, operation.styles) : harnessInlineStyleSource(next, operation.nodeId, operation.styles);
             else if (operation.type === "node.move") next = mutateDesignNodeMoveSource(next, operation.nodeId, operation.parentId, operation.beforeId ?? null);

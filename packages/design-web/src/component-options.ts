@@ -5,11 +5,13 @@
 
 import {
   COMPONENT_OPTION_LIMITS,
+  COMPONENT_VARIANT_STATE_ATTRIBUTE,
   componentOptionValues,
   parseComponentOptionValue,
   readComponentDeclaration,
   type ComponentDeclaration,
   type ComponentDeclarationElement,
+  type ComponentVariantState,
 } from "@zeros/design-core/components";
 import { parse, type DefaultTreeAdapterTypes } from "parse5";
 
@@ -100,20 +102,23 @@ export function mutateComponentOption(
 export function appendComponentVariant(
   source: string,
   file: string,
-  input: { name: string; values: Readonly<Record<string, string | number | boolean>> },
+  input: { name: string; values: Readonly<Record<string, string | number | boolean>>; state?: ComponentVariantState },
 ): string {
   const { declaration, template, elements } = declaredIn(source, file);
   if (input.name === "default") throw new Error("A variant cannot be named default: Default is the declared defaults.");
   if (!/^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/.test(input.name) || input.name.length > COMPONENT_OPTION_LIMITS.name)
     throw new Error(`The variant name ${JSON.stringify(input.name)}: use lowercase letters, digits and single hyphens.`);
   if (declaration.variants.some((entry) => entry.name === input.name)) throw new Error(`The variant ${input.name} already exists.`);
+  const showing = input.state ? declaration.variants.find((entry) => entry.state === input.state) : undefined;
+  if (showing) throw new Error(`The variant ${showing.name} already shows ${input.state}.`);
   const attributes = new Map(Object.entries(input.values).map(([name, value]) => [name, componentOptionAttributeValue(value)]));
   for (const name of attributes.keys())
     if (!declaration.options.some((option) => option.name === name)) throw new Error(`This component has no option ${name}.`);
   const { problems } = componentOptionValues(declaration, attributes);
   const refused = problems.find((problem) => problem.severity === "error");
   if (refused) throw new Error(refused.message);
-  const line = `<zd-variant name="${input.name}"${[...attributes].map(([name, value]) => ` ${name}="${escapeAttribute(value)}"`).join("")}></zd-variant>`;
+  const state = input.state ? ` ${COMPONENT_VARIANT_STATE_ATTRIBUTE}="${input.state}"` : "";
+  const line = `<zd-variant name="${input.name}"${state}${[...attributes].map(([name, value]) => ` ${name}="${escapeAttribute(value)}"`).join("")}></zd-variant>`;
   const after = [...elements].reverse().find((entry) => entry.tagName === "zd-variant") ?? elements.at(-1);
   if (!after?.sourceCodeLocation) {
     const end = template.sourceCodeLocation?.endTag?.startOffset;

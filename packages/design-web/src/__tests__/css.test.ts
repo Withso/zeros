@@ -633,7 +633,7 @@ describe("CSS provenance and mutation", () => {
     ).toContain("color: purple");
   });
 
-  it("fails closed for unimplemented responsive and pseudo-state mutation contexts", () => {
+  it("fails closed for unimplemented responsive contexts and a state the frame does not declare", () => {
     expect(() =>
       mutateDesignNodeStyles(webState(), {
         nodeId: "card",
@@ -647,7 +647,7 @@ describe("CSS provenance and mutation", () => {
         styles: { color: "blue" },
         stateContext: "hover",
       }),
-    ).toThrow("State-specific style mutation");
+    ).toThrow("Only a component with a hover variant has that state");
   });
 
   it("keeps an existing inline declaration in its authored location", () => {

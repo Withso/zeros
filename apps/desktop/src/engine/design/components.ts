@@ -10,6 +10,7 @@ import { applyDesignPartStyleOverrides, assertDesignComponentDefinitionIdentitie
   rebaseDesignCssReferences, rebaseDesignHtmlReferences } from "@zeros/design-web";
 import { DESIGN_SLOT_ATTRIBUTE, designComponentBodySlotShape, designInstanceSlottedLayers, designSlotOptionElement, isDesignSlotName,
   withDesignSlotOptions } from "@zeros/design-web/component-slots";
+import { showDesignComponentState } from "@zeros/design-web/component-states";
 import {
   ComponentExpressionError,
   componentExpressionScope,
@@ -19,6 +20,7 @@ import {
   componentIgnoresAttribute,
   componentInheritedValues,
   componentOptionNameProblem,
+  componentStateVariantOf,
   readComponentDeclaration,
   COMPONENT_VARIANT_ATTRIBUTE,
   type ComponentDeclaration,
@@ -1162,6 +1164,8 @@ async function expandBoundedComponents(
     try {
       const scope = componentExpressionScope(declaration, values, work.budget.expression);
       entry = renderComponentTemplate(source, { scope, ids: "copy", budget: work.budget, document: true });
+      const shownState = componentStateVariantOf(declaration, options.variant)?.state;
+      if (shownState) entry = showDesignComponentState(entry, shownState);
       const css = componentOptionCss(declaration, values, scope);
       if (css) work.rules.push(`:root { ${css} }`);
     } catch (error) {

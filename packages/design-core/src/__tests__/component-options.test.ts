@@ -2,7 +2,10 @@ import { describe, expect, it } from "vitest";
 
 import {
   COMPONENT_OPTION_LIMITS,
+  COMPONENT_STATE_PRESETS,
+  componentInheritedValues,
   componentOptionCss,
+  componentStateVariantOf,
   componentOptionValues,
   parseComponentOptionValue,
   readComponentDeclaration,
@@ -87,6 +90,30 @@ describe("a component's declared options", () => {
     expect(problems(variants)).toEqual([`A component may declare at most ${COMPONENT_OPTION_LIMITS.variants} variants.`]);
     expect(problems([option({ name: "t", type: "text", default: "x".repeat(2_049) })])[0]).toMatch(/2,048/);
     expect(problems([option({ name: "t", type: "text", default: "", label: "L".repeat(65) })])[0]).toMatch(/label/);
+  });
+});
+
+describe("a component's state variants", () => {
+  it("are variants that name the CSS state they show, Hover, Pressed, Focus and Disabled", () => {
+    expect(COMPONENT_STATE_PRESETS.map((preset) => [preset.name, preset.state, preset.label])).toEqual([
+      ["hover", "hover", "Hover"], ["pressed", "active", "Pressed"], ["focus", "focus-visible", "Focus"], ["disabled", "disabled", "Disabled"],
+    ]);
+    const { declaration, problems } = read([...COMPOSER, element("zd-variant", { name: "hover", "zd-state": "hover" }),
+      element("zd-variant", { name: "pressed", "zd-state": "active", width: "900" })]);
+    expect(problems).toEqual([]);
+    expect(declaration.variants.map((variant) => [variant.name, variant.state ?? null])).toEqual([
+      ["compact", null], ["wide-plan", null], ["hover", "hover"], ["pressed", "active"],
+    ]);
+    expect(componentStateVariantOf(declaration, "pressed")?.state).toBe("active");
+    expect(componentStateVariantOf(declaration, "compact")).toBeNull();
+    // A state variant may also set options, as any variant does.
+    expect(componentInheritedValues(declaration, "pressed").get("width")).toBe(900);
+  });
+
+  it("refuses an unknown state or a second variant for one state", () => {
+    expect(problems([element("zd-variant", { name: "hover", "zd-state": "visited" })])[0]).toMatch(/hover, active, focus-visible or disabled/);
+    expect(problems([element("zd-variant", { name: "hover", "zd-state": "hover" }), element("zd-variant", { name: "over", "zd-state": "hover" })])[0])
+      .toMatch(/The variant over shows hover, which the variant hover already shows./);
   });
 });
 

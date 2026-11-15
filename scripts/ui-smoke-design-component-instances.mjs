@@ -80,9 +80,16 @@ export async function runDesignComponentInstancesSmoke({ page, check }) {
   await expect(variantRow()).toContainText("Default");
   await variantRow().click();
   const items = await page.getByRole("menuitemradio").allInnerTexts();
-  const save = page.getByRole("menuitem", { name: "Save current as variant…" });
-  check("the Variant menu offers Default, the declared variants, and saving the current values",
-    JSON.stringify(items) === JSON.stringify(["Default", "Compact", "Wide plan"]) && (await save.count()) === 1, JSON.stringify(items));
+  await page.keyboard.press("Escape");
+  const addVariant = () => section.locator("[data-design-options-add-variant]").click();
+  await addVariant();
+  const adds = await page.getByRole("menuitem").allInnerTexts();
+  await page.keyboard.press("Escape");
+  check("the Variant menu offers Default and the declared variants; Add variant the four states and saving the current values",
+    JSON.stringify(items) === JSON.stringify(["Default", "Compact", "Wide plan"]) &&
+      JSON.stringify(adds) === JSON.stringify(["Hover", "Pressed", "Focus", "Disabled", "Save current as variant…"]),
+    JSON.stringify({ items, adds }));
+  await variantRow().click();
   const writesBeforeShow = await writes();
   const mainBeforeShow = await main();
   await page.getByRole("menuitemradio", { name: "Compact" }).click();
@@ -103,7 +110,7 @@ export async function runDesignComponentInstancesSmoke({ page, check }) {
   await expect.poll(() => style("pricing.html", ".composer", "width")).toBe("801px");
 
   const writesBeforeSave = await writes();
-  await variantRow().click();
+  await addVariant();
   await page.getByRole("menuitem", { name: "Save current as variant…" }).click();
   const name = section.getByLabel("Variant name", { exact: true });
   await name.fill("Compact");

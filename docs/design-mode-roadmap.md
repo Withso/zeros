@@ -1933,6 +1933,27 @@ on the main is read only ("Set by option Label", or "Set by the component's
 template" for a loop's own name; `component.boundText` in the record), and a
 click on a repeated copy selects its source layer.
 
+**States as variants.** A state is a variant of the main, as in Figma. Add
+variant (the + beside the Variant row) offers the presets the main lacks,
+Hover, Pressed, Focus and Disabled, then "Save current as variant…". A preset
+writes `<zd-variant name="hover" zd-state="hover">` (Pressed is `active`,
+Focus `focus-visible`, Disabled `disabled`; `COMPONENT_STATE_PRESETS`), one
+per state, and the Variant menu lists the states after a separator. States
+exist only on a main; a plain layer has no State control. Showing a state,
+the engine renders the main with every root layer carrying
+`data-zd-shown-state` (Pressed also applies Hover, Focus also `:focus`) and a
+copy of each rule that names the state written against that attribute
+(`showDesignComponentState`), so the canvas shows it without a pointer. The
+Style panel then says "Hover shows. Edits apply while the component is
+hovered." with Back to Default, and a style edit on any layer of the main
+writes `:is([data-oid="root"], [data-zd-part="root"]):hover
+:is([data-oid="layer"], [data-zd-part="layer"]) { … !important }` in the
+main's last `<head>` style, or a new one (`mutateDesignComponentStateStyles`,
+`stateContext` on `node.set-styles`, decision reason `state-rule`). Instances
+match it through their parts, so a real hover shows it everywhere. Hug and
+fit resizes are skipped while a state shows; an instance's part refuses a
+state edit ("A part's states are its main component's").
+
 A frame's prepared record also names the instances it places at its top
 level, and deeper hosts that carry their own `data-oid` (`instances`: their components' declarations and reach, each host's
 option attributes and `zd-variant`, its part overrides, the layers each slot
@@ -2339,14 +2360,15 @@ a frame's own document (`canvas-items-exports.test.ts`).
   Detach, a forced value names its rule. The token picker is likewise one
   instance per panel. The engine's per-field `design.provenance` read and its
   hint dot are gone.
-- **Layer states (view only):** a layer whose own rules give it `:hover`,
+- **Layer state holds (runtime only):** the Style panel no longer offers a
+  State control (states are component variants, above); the runtime's
+  view-only hold stays, with no caller in the panel. A layer whose own rules give it `:hover`,
   `:focus`, `:focus-visible`, `:active` or `:disabled` reports `states` on its
   details (menu order; Focus and Focus visible only for a focusable element,
   Disabled only for one that can be disabled), found from the rule index by
   matching each selector branch without its state, with no
   `querySelectorAll`: 5 `element.matches` for a class-styled button with five
-  states, none for a layer no state rule names. The header's State button
-  ("Layer state"; Default, then the offered states) holds one: the runtime
+  states, none for a layer no state rule names. A hold of one: the runtime
   copies each matching rule into a runtime-owned `<style
   data-zeros-runtime-state>` with the state written as
   `[data-zd-state~="hover"]`, keeping the rule's `@layer`, `@media` and
