@@ -691,15 +691,16 @@ An active boot whose worker advertises `message-authority-v1` takes that mode at
 first hello (`cloud_v2_execution_boots.authority_mode`, fixed for the boot;
 `CLOUD_V2_MESSAGE_AUTHORITY_ENABLED=false` stops new ones) and never renews its
 contexts. Every revocation and person cut-off advances the workspace's authority
-sequence in `cloud_v2_authority_heads` in the revoking transaction (migration 0253).
-Each control-plane instance runs one barrier transaction every 10 seconds: it reads
+sequence by appending to `cloud_v2_authority_events` in the revoking transaction
+(migration 0253; append-only, so it adds no lock).
+Each control-plane instance runs one barrier transaction every 5 seconds: it reads
 every R2 boot with its head and extends, in one statement, the contexts of boots that
-have acknowledged the current sequence and have no re-check due, to at most 600
-seconds. Workers post `execution-leases/authority` every 10 seconds; the reply comes
+have acknowledged the current sequence, with no cut-off pending and no re-check due,
+to at most 600 seconds and at most 60 seconds past the next re-check. Workers post `execution-leases/authority` every 5 seconds; the reply comes
 from the barrier's memory. Only while a revocation is unacknowledged does it read the
 boot's ended contexts and write its acknowledgement. A cut with no write of its own
 (a Hold window edge, a session or client token expiry, the 10-minute source answer)
-sets the head's `recheck_at`; maintenance re-admits that workspace's people then, and
+appends a time to `cloud_v2_authority_rechecks`; maintenance re-admits that workspace's people then, and
 the barrier never extends past it. Non-system entitlement and seat writes mark the
 affected workspaces for re-check. The worker refuses new GitHub credentials and MCP
 connections after 45 seconds without fresh authority; running work keeps its deadline.
