@@ -105,15 +105,14 @@ it("R3: sends a streaming item to the control plane only when it is whole, never
   vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
   vi.setSystemTime(0);
   try {
-    // 300 deltas across 60 seconds: the live relay carries them, the durable mirror waits for the whole item.
+    // 300 deltas across 60 seconds: the live relay carries them; the server copy gets progress at most every 10 s.
     for (let i = 0; i < 300; i++) { await store.fold("chat", chunk()); await vi.advanceTimersByTimeAsync(200); }
-    expect(relay.frames.filter(frame => frame.t === "history")).toEqual([]);
-    // The next item starts: the previous one is whole and goes within the one-second gather.
+    expect(relay.frames.filter(frame => frame.t === "history").length).toBeLessThanOrEqual(6);
+    // The next item starts: the previous one is whole and its final version goes within the one-second gather.
     await store.fold("chat", { sessionId: "exec", update: { sessionUpdate: "tool_call", toolCallId: "tool", title: "Read", status: "pending" } } as never);
     await vi.advanceTimersByTimeAsync(1000);
-    const rows = relay.frames.filter(frame => frame.t === "history").flatMap(frame => frame.messages?.rows ?? []);
-    expect(rows.map(row => row.msgId)).toEqual(["answer"]);
-    expect(JSON.parse(rows[0]!.payload).text).toBe("x".repeat(30_000));
+    const versions = relay.frames.filter(frame => frame.t === "history").flatMap(frame => frame.messages?.rows ?? []).filter(row => row.msgId === "answer");
+    expect(JSON.parse(versions.at(-1)!.payload).text).toBe("x".repeat(30_000));
     // The turn's end releases the new tail.
     await store.finish("chat", "turn", { stopReason: "end_turn" });
     await mirror.flush();
@@ -150,5 +149,35 @@ it("R3: a burst of completed tool items gathers into one write", async () => {
     const frames = relay.frames.flatMap(frame => frame.t === "history" && frame.messages ? [frame.messages] : []);
     expect(frames.length).toBeLessThanOrEqual(2);
     expect(frames.flatMap(messages => messages.rows).filter(row => row.kind === "tool").length).toBeGreaterThanOrEqual(9);
+  } finally { await cleanup(); }
+});
+
+it("R3: a store edit mid-item sends the item once and keeps holding the rest of its stream", async () => {
+  const { store, relay, chunk, cleanup } = await setup();
+  vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+  vi.setSystemTime(0);
+  try {
+    for (let i = 0; i < 10; i++) { await store.fold("chat", chunk()); await vi.advanceTimersByTimeAsync(200); }
+    // The outbox accept and report are store edits at the start of every delivered turn.
+    await store.update("chat", draft => { draft.chat!.title = "Renamed"; });
+    await vi.advanceTimersByTimeAsync(1000);
+    const atBoundary = relay.frames.filter(frame => frame.t === "history").length;
+    for (let i = 0; i < 40; i++) { await store.fold("chat", chunk()); await vi.advanceTimersByTimeAsync(200); }
+    // Eight more seconds of tokens after the edit: no write until the 10-second progress mark.
+    expect(relay.frames.filter(frame => frame.t === "history").length).toBe(atBoundary);
+  } finally { await cleanup(); }
+});
+
+it("R3: a row folded with nothing after it reaches the control plane within the quiet window", async () => {
+  const { store, relay, chunk, cleanup } = await setup();
+  vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+  vi.setSystemTime(0);
+  try {
+    await store.fold("chat", chunk());
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(relay.frames.filter(frame => frame.t === "history")).toEqual([]);
+    await vi.advanceTimersByTimeAsync(2_500);
+    const answer = relay.frames.filter(frame => frame.t === "history").flatMap(frame => frame.messages?.rows ?? []).find(row => row.msgId === "answer");
+    expect(JSON.parse(answer!.payload).text).toBe("x".repeat(100));
   } finally { await cleanup(); }
 });

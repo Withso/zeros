@@ -1131,6 +1131,23 @@ persists chat/session state under `/home/user/.local/share/zeros/cloud-worker`.
 It mirrors chat metadata, deletions and message rows to the control plane.
 The app can read that history while the VM sleeps. This history mirror is
 separate from repository files; there is no Mac checkout synchronization.
+
+R3 splits the two channels the way Conductor does. Connected viewers get every
+token live from the worker over the relay. The control plane gets whole items
+and state, not token-by-token versions. A chat's last row, the one a turn
+streams into, is held while the turn runs. It goes:
+
+- when the next row starts, or with an edit that carries rows;
+- when the turn ends, or when the worker flushes (Stop, shutdown, runtime
+  handoff);
+- 3 seconds after its last token;
+- as progress at most every 10 seconds.
+
+The progress writes exist for readers of the server copy: read-only teammates,
+devices not connected to that workspace, the API and search. Edits that carry
+no rows while a turn runs, such as an outbox accept or report, keep the row
+held. Completed items gather for one second. A 60-second, 300-token stream
+writes 5 history transactions instead of 53.
 History writers, including retention jobs, must lock the workspace row before changing chat or message rows to avoid deadlocks with history ingestion.
 
 Workers advertising `history-digest-deletions-v1` receive separate live-chat

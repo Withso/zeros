@@ -356,9 +356,12 @@ export async function runCloudV2Gate0(options: CloudV2Gate0Options): Promise<Clo
 
     // Wait for every final row to reach the mirror before a deliberate stop.
     startedAt = now();
+    // Compare with the VM's current rows each time: a stopped turn's last row can still settle after the snapshot above.
     for (const [chatId, rows] of transcripts) await until("history_mirror", timeoutMs, pollMs, async () => {
+      const current = parse(Rows, await bridge!.op("messages.window", { chatId }), "history_mirror").messages;
+      requireCheck(current.length >= rows.length, "history_mirror");
       const mirrored = parse(z.object({ result: Rows }), await request(`${base}/${workspace!.id}/history`, "history_mirror", "POST", { op: "messages.window", params: { chatId } }), "history_mirror");
-      return sameRows(rows, mirrored.result.messages);
+      return sameRows(current, mirrored.result.messages);
     });
     measure("history_mirror", startedAt);
     bridge.close(); bridge = undefined;

@@ -9,20 +9,20 @@ interface Pending { chat?: ChatRow; deleted?: true; replace?: true; revision: nu
   ack?: string }
 
 /** R3 durable channel. Live viewers get every token over bridge frames; the control plane gets whole items and state
- * only (Conductor's split). A chat's streaming row is held until the next row starts or a durable boundary (turn end,
- * Stop, any store edit), so its token-by-token versions never reach the database. Sends are single-flight; whole items a
- * stream completes gather for one second so a burst of tool calls stays one write, and boundaries go at once. Reconnect
- * takes a current snapshot instead of buffering offline streams. */
+ * (Conductor's split). The row a turn streams into (the chat's last row) is held: it goes when the next row starts, at
+ * a durable boundary (any store edit, turn end, Stop), 3 s after its last fold, or as progress at most every 10 s for
+ * readers of the server copy (read-only teammates, other devices). Sends are single-flight; whole items gather for one
+ * second so a burst of tool calls stays one write. Reconnect takes a current snapshot instead of buffering offline. */
+export const HELD_QUIET_MS = 3_000;
+export const HELD_PROGRESS_MS = 10_000;
 export class HistoryMirror {
   private online = false;
   private epoch = 0;
   private pending = new Map<string, Pending>();
   private sending?: Promise<void>;
   private timer?: ReturnType<typeof setTimeout>;
-  /** Per chat, the row a turn is streaming into; it reaches the control plane once whole. */
-  private readonly held = new Map<string, CloudV2MessageRow>();
-  /** Per chat, rows this connection has seen, so a fold can tell a new item from an update to an older one. */
-  private readonly known = new Map<string, Set<string>>();
+  /** Per chat, the row a turn is streaming into, since when it has been held, and its release timer. */
+  private readonly held = new Map<string, { row: CloudV2MessageRow; since: number; last: number; timer?: ReturnType<typeof setTimeout> }>();
   private unsubscribe: () => void;
 
   constructor(private readonly store: SessionStore, private readonly transport: Transport, private readonly replacement = () => false,
@@ -137,19 +137,34 @@ export class HistoryMirror {
     this.drain();
   }
 
-  get runtimeBusy(): boolean { return !this.online || this.pending.size > 0 || !!this.sending; }
+  get runtimeBusy(): boolean { return !this.online || this.pending.size > 0 || this.held.size > 0 || !!this.sending; }
   disconnect(): void {
-    this.online = false; this.epoch++; this.pending.clear(); this.held.clear(); this.known.clear();
+    this.online = false; this.epoch++; this.pending.clear();
+    for (const entry of this.held.values()) clearTimeout(entry.timer);
+    this.held.clear();
     clearTimeout(this.timer); this.timer = undefined;
   }
-  /** A final mirror (Stop, shutdown, runtime handoff) includes the streaming rows held so far. */
+  /** Moves held rows (one chat, or all for a final mirror: Stop, shutdown, runtime handoff) into the next send. */
   private release(chatId?: string): void {
-    for (const [id, row] of [...this.held]) {
+    for (const [id, entry] of [...this.held]) {
       if (chatId !== undefined && id !== chatId) continue;
-      this.held.delete(id);
+      clearTimeout(entry.timer); this.held.delete(id);
       const pending: Pending = this.pending.get(id) ?? { rows: new Map(), revision: this.store.historyRevision(id), due: 0 };
-      if (!pending.deleted) { pending.rows.set(row.msgId, row); this.pending.set(id, pending); }
+      pending.due = 0;
+      if (!pending.deleted) { pending.rows.set(entry.row.msgId, entry.row); this.pending.set(id, pending); }
     }
+  }
+  private hold(chatId: string, row: CloudV2MessageRow): void {
+    const now = Date.now(), previous = this.held.get(chatId);
+    const entry = { row, since: previous?.row.msgId === row.msgId ? previous.since : now, last: now, timer: previous?.timer };
+    clearTimeout(entry.timer);
+    const epoch = this.epoch;
+    entry.timer = setTimeout(() => {
+      if (epoch !== this.epoch || this.held.get(chatId) !== entry) return;
+      this.release(chatId); this.drain();
+    }, Math.max(0, Math.min(entry.last + HELD_QUIET_MS, entry.since + HELD_PROGRESS_MS) - now));
+    entry.timer.unref?.();
+    this.held.set(chatId, entry);
   }
   async flush(): Promise<boolean> {
     if (this.online) this.release();
@@ -167,28 +182,27 @@ export class HistoryMirror {
     if (change.replace && !this.replacement()) { this.disconnect(); return; }
     const { chatId } = change;
     let rows = change.rows;
-    if (change.deleted || change.replace) { this.held.delete(chatId); this.known.delete(chatId); }
+    if (change.deleted || change.replace) { clearTimeout(this.held.get(chatId)?.timer); this.held.delete(chatId); }
     else if (!change.flush && !change.chat) {
-      // A token fold: hold the row being streamed into; an earlier row it completes or updates goes now.
-      let known = this.known.get(chatId);
-      if (!known) { known = new Set(this.store.history(chatId).map(row => row.msgId)); for (const row of rows) if (row.msgId !== this.held.get(chatId)?.msgId) known.delete(row.msgId); this.known.set(chatId, known); }
+      // A token fold: the chat's last row is the one being streamed into and is held; earlier rows are whole.
+      const last = this.store.history(chatId).at(-1)?.msgId, tail = this.held.get(chatId);
       const settled: CloudV2MessageRow[] = [];
-      for (const row of rows) {
-        const tail = this.held.get(chatId);
-        if (tail?.msgId === row.msgId) { this.held.set(chatId, row); continue; }
-        if (known.has(row.msgId)) { settled.push(row); continue; }
-        if (tail) settled.push(tail);
-        known.add(row.msgId); this.held.set(chatId, row);
+      if (tail && tail.row.msgId !== last) {
+        // A new item started: the held one is whole (its newest version may ride in this fold).
+        clearTimeout(tail.timer); this.held.delete(chatId);
+        if (!rows.some(row => row.msgId === tail.row.msgId)) settled.push(tail.row);
       }
+      for (const row of rows) { if (row.msgId === last) this.hold(chatId, row); else settled.push(row); }
       if (!settled.length) return;
       rows = settled;
     } else {
-      // A durable boundary: everything held for this chat goes with it.
+      // An edit with nothing of its own to send while the turn runs (an outbox accept or report) keeps holding; the
+      // turn's end releases the row at once.
+      if (!rows.length && !change.chat && !change.deleted && !change.replace && this.store.running(chatId)) return;
+      // A durable boundary carrying rows: the held version rides in the same frame; later folds are held again.
       const tail = this.held.get(chatId);
-      this.held.delete(chatId);
-      if (tail && !rows.some(row => row.msgId === tail.msgId)) rows = [tail, ...rows];
-      const known = this.known.get(chatId);
-      if (known) for (const row of rows) known.add(row.msgId);
+      clearTimeout(tail?.timer); this.held.delete(chatId);
+      if (tail && !rows.some(row => row.msgId === tail.row.msgId)) rows = [tail.row, ...rows];
     }
     const boundary = !!(change.flush || change.chat || change.deleted || change.replace);
     const pending: Pending = this.pending.get(chatId) ?? { rows: new Map(), revision: this.store.historyRevision(chatId), due: boundary ? 0 : Date.now() + 1000 };
