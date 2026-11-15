@@ -6,8 +6,9 @@ import { hashCloudV2Token } from "../tokens.js";
 export const AUTHORITY_BARRIER_MS = 5_000;
 /** Running work outlives the last fresh barrier by at most this much (owner decision, 2026-11-14). */
 export const AUTHORITY_RUNNING_CUTOFF_MS = 600_000;
-/** A context is rewritten only when its expiry would fall within this much of the cutoff (≈ one row write a minute). */
-const EXTEND_WITHIN_MS = 540_000;
+/** A context is rewritten only when the barrier moves its expiry later by at least this much (≈ one row write a minute).
+ * Measured against the capped target: before a near re-check the target stays put and the row is not rewritten. */
+const EXTEND_GAIN_MS = 60_000;
 /** Maintenance re-admits at the re-check; contexts outlive it by this much so a timely re-check never expires them. */
 export const AUTHORITY_RECHECK_GRACE_MS = 60_000;
 
@@ -55,12 +56,13 @@ export class AuthorityBarrier {
           WHERE b.authority_mode='message-authority-v1' AND b.replaced_by IS NULL AND c.state='active'
             AND b.authority_acked_sequence>=${SEQUENCE("b")} AND coalesce(${RECHECK("b")},'infinity')>clock_timestamp()
             AND NOT EXISTS(SELECT 1 FROM cloud_v2_execution_invalidations i WHERE i.workspace_id=b.workspace_id)
-            AND c.expires_at<clock_timestamp()+make_interval(secs=>$2::double precision/1000)
+            AND c.expires_at<least(clock_timestamp()+make_interval(secs=>$1::double precision/1000),
+              coalesce(${RECHECK("b")},'infinity')+make_interval(secs=>$3::double precision/1000))-make_interval(secs=>$2::double precision/1000)
           ORDER BY c.id FOR UPDATE OF c SKIP LOCKED)
         UPDATE cloud_v2_execution_contexts c SET expires_at=least(clock_timestamp()+make_interval(secs=>$1::double precision/1000),
           coalesce(${RECHECK("c")},'infinity')
             +make_interval(secs=>$3::double precision/1000))
-        WHERE c.id IN (SELECT id FROM target)`, [AUTHORITY_RUNNING_CUTOFF_MS, EXTEND_WITHIN_MS, AUTHORITY_RECHECK_GRACE_MS]);
+        WHERE c.id IN (SELECT id FROM target)`, [AUTHORITY_RUNNING_CUTOFF_MS, EXTEND_GAIN_MS, AUTHORITY_RECHECK_GRACE_MS]);
       return state.rows;
     });
     const next = new Map<string, AuthorityBootState & { tokenHash: Buffer }>();

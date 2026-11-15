@@ -299,6 +299,21 @@ suite("new organization workspaces start with personal execution", () => {
     expect(await maintenance.due()).not.toContain(id);
   });
 
+  it("rewrites an R2 context only when the barrier moves its expiry, not on every tick before a near re-check", async () => {
+    const { id } = await fresh(), w = await worker(id);
+    const features = `${f!.features},sync-v1,sync-context-v1,message-authority-v1`;
+    expect((await w.hello(features)).status).toBe(200);
+    expect((await w.call("execution-leases/boot-clean", { retirementId: randomUUID(), processes: 0, legacyMaterial: "none" }, features)).status).toBe(200);
+    await f!.cp.execution.maintenance.workspace(id);
+    await withSystemTx(pool, tx => tx.query("UPDATE cloud_v2_authority_rechecks SET at=clock_timestamp()+interval '5 minutes' WHERE workspace_id=$1", [id]));
+    const versions = async () => (await pool.query("SELECT id,xmin::text AS version FROM cloud_v2_execution_contexts WHERE workspace_id=$1 AND state='active' ORDER BY id", [id])).rows;
+    await f!.cp.authorityBarrier.tick();
+    const first = await versions();
+    expect(first.length).toBeGreaterThan(0);
+    await f!.cp.authorityBarrier.tick();
+    expect(await versions()).toEqual(first);
+  });
+
   it("leaves the authority head alone when the worker retires its own contexts, and on lease boots", async () => {
     const { id } = await fresh(), w = await worker(id);
     const features = `${f!.features},sync-v1,sync-context-v1,message-authority-v1`;
