@@ -15,8 +15,6 @@ import {
   GITHUB_GIT_HTTP_USERNAME,
 } from "@zeros/protocol/github-auth";
 import { NativeCommandError } from "@zeros/protocol/native-error";
-import { channel } from "../../../src/engine/runtime";
-import { workspaceDevAuthProfile } from "../../dev-workos-auth-policy";
 
 import {
   detectGhCli,
@@ -470,18 +468,13 @@ export function withNativeErrors(handler: CommandHandler): CommandHandler {
 }
 
 /** Begin the control-plane-bound browser authorization. Release first connects
- * use the App install URL; reconnects and isolated Dev use OAuth + S256 PKCE.
+ * use the App install URL; reconnects use OAuth + S256 PKCE.
  * A completed empty inventory may explicitly force the install URL so an
  * authorization-only account can recover. */
 export const ghAppConnect: CommandHandler = async (args) => {
   try {
-    // An isolated Dev database has no prior installation projection. The shared
-    // App's installation URL returns to its fixed release callback, losing this
-    // workspace's OAuth state. Authorize with the explicit Dev redirect first;
-    // the normal callback then discovers installations already granted by GitHub.
-    const workspaceDev = channel() === "dev" && workspaceDevAuthProfile() !== undefined;
     const flowKind = await beginGithubAppConnection(
-      !workspaceDev && args.installFlow !== false,
+      args.installFlow !== false,
       args.forceInstall === true,
       args.preserveSelectedMethod === true,
     );
