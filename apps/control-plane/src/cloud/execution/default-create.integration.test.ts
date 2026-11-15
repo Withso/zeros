@@ -4,7 +4,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest
 import { CloudV2Computers } from "../computer.js";
 import * as runtime from "../runtime-capabilities.js";
 import { HttpError } from "../../authz.js";
-import { withUserTx } from "../../db.js";
+import { withSystemTx, withUserTx } from "../../db.js";
 import { executionFixture, type ExecutionFixture } from "./test-fixture.js";
 
 const suite = process.env.TEST_DATABASE_URL ? describe : describe.skip;
@@ -225,6 +225,43 @@ suite("new organization workspaces start with personal execution", () => {
     expect((await w.hello(undefined, "e".repeat(64))).status).toBe(409);
     expect((await pool.query("SELECT worker_boot_id FROM cloud_v2_workspaces WHERE id=$1", [id])).rows[0].worker_boot_id).toBeNull();
     expect((await pool.query("SELECT count(*)::int n FROM cloud_v2_execution_contexts WHERE workspace_id=$1", [id])).rows[0].n).toBe(0);
+  });
+
+  it("advances the authority head on every revocation and cut-off, not on a worker's own retirement", async () => {
+    const { id } = await fresh(), w = await worker(id);
+    expect((await w.hello()).status).toBe(200);
+    expect((await w.call("execution-leases/boot-clean", { retirementId: randomUUID(), processes: 0, legacyMaterial: "none" })).status).toBe(200);
+    const head = async () => (await withSystemTx(pool, tx => tx.query("SELECT sequence::int,recheck_at FROM cloud_v2_authority_heads WHERE workspace_id=$1", [id]))).rows[0];
+    const contexts = (await pool.query("SELECT id FROM cloud_v2_execution_contexts WHERE workspace_id=$1 AND state='active' ORDER BY id", [id])).rows;
+    expect(contexts.length).toBeGreaterThan(0);
+    expect(await head()).toBeUndefined();
+    const revoked = await withSystemTx(pool, tx => tx.query(`UPDATE cloud_v2_execution_contexts SET state='revoked',reason='access_revoked',revoked_at=clock_timestamp()
+      WHERE workspace_id=$1 AND state='active'`, [id]));
+    expect(await head()).toMatchObject({ sequence: revoked.rowCount, recheck_at: null });
+    await withSystemTx(pool, tx => tx.query("INSERT INTO cloud_v2_execution_invalidations(workspace_id,user_id) VALUES($1,NULL)", [id]));
+    expect((await head()).sequence).toBe(revoked.rowCount! + 1);
+    await withUserTx(pool, f!.creator.id, async tx => {
+      expect((await tx.query("SELECT * FROM cloud_v2_authority_heads")).rows).toEqual([]);
+    });
+  });
+
+  it("leaves the authority head alone when the worker retires its own contexts", async () => {
+    const { id } = await fresh(), w = await worker(id);
+    expect((await w.hello()).status).toBe(200);
+    expect((await w.call("execution-leases/boot-clean", { retirementId: randomUUID(), processes: 0, legacyMaterial: "none" })).status).toBe(200);
+    const retired = await withSystemTx(pool, tx => tx.query(`UPDATE cloud_v2_execution_contexts SET state='retired',reason='completed',retired_at=clock_timestamp()
+      WHERE workspace_id=$1 AND state='active'`, [id]));
+    expect(retired.rowCount).toBeGreaterThan(0);
+    expect((await withSystemTx(pool, tx => tx.query("SELECT 1 FROM cloud_v2_authority_heads WHERE workspace_id=$1", [id]))).rowCount).toBe(0);
+  });
+
+  it("marks running active workspaces for re-evaluation when an entitlement changes outside a system transaction", async () => {
+    const { id } = await fresh(), w = await worker(id);
+    expect((await w.hello()).status).toBe(200);
+    expect((await w.call("execution-leases/boot-clean", { retirementId: randomUUID(), processes: 0, legacyMaterial: "none" })).status).toBe(200);
+    await pool.query("INSERT INTO staff_pro_benefits(user_id) VALUES($1) ON CONFLICT (user_id) DO UPDATE SET revision=staff_pro_benefits.revision+1", [f!.creator.id]);
+    const row = (await withSystemTx(pool, tx => tx.query("SELECT recheck_at FROM cloud_v2_authority_heads WHERE workspace_id=$1", [id]))).rows[0];
+    expect(row?.recheck_at).toBeInstanceOf(Date);
   });
 
   it("clears an earlier boot's failure when a clean boot makes the workspace running", async () => {
