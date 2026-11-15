@@ -38,7 +38,15 @@ export type ExecutionContext = { id: string; workspace_id: string; org_id: strin
   provider_session_id: string | null; access_epoch: string; stop_generation: string; worker_boot_id: string; worker_token_hash: Buffer;
   authority: VersionedExecutionAuthority & { signature: string }; source_fingerprint: string | null; agent: CloudV2Agent | null; selection: ExecutionSelection | null;
   state: "active" | "revoked" | "retired"; reason: CloudV2ContextReason | null; expires_at: Date; material: unknown; bootstrap_material_issued: boolean | null;
-  retirement_id: string | null; retirement_hash: Buffer | null; environment_version_id: string | null; mcp_fingerprint: string | null; intent_id: string | null };
+  retirement_id: string | null; retirement_hash: Buffer | null; environment_version_id: string | null; mcp_fingerprint: string | null; intent_id: string | null;
+  sender_ended_at?: Date | null };
+/** A started turn (its material issued) that a different payer funds survives its sender's access loss (0254). */
+export const senderContinuable = (row: ExecutionContext) => row.kind === "turn" && row.material !== null && row.material !== undefined &&
+  row.selection?.version === 2 && row.user_id !== null && row.selection.payer.userId !== row.user_id;
+/** One-way: once the sender's access ended, the turn answers to its pinned payer and nothing sender-scoped is issued. */
+export const senderEnded = (row: ExecutionContext) => row.kind === "turn" && row.sender_ended_at != null && row.selection?.version === 2;
+export const continuationPrincipal = (row: ExecutionContext) => senderEnded(row) ? row.selection!.payer!.userId : row.user_id;
+const senderAccessEnded = () => new HttpError(403, "github_cloud_access_denied", "The person who sent this message no longer has access");
 export type PromptExecutionAdmission = ExecutionAdmission & { agent: CloudV2Agent; selection: ExecutionSelection | null; parentContextId?: string };
 type Config = Extract<CloudV2ControlFrame, { t: "config" }>;
 type Material = { gitIdentity: Config["gitIdentity"]; environment?: CloudWorkspaceEnvironment; mcpServers?: RuntimeMcpServer[] };
@@ -106,6 +114,8 @@ export class CloudExecutionContexts {
     const { context, check } = await this.authorizedContext(identity, id);
     if (context.kind === "client" && !context.operation || !this.deps.githubToken) throw actorChanged();
     if (context.kind === "bootstrap" && context.material === null) throw actorChanged();
+    // The payer keeps a started turn running, never the sender's GitHub.
+    if (senderEnded(context)) throw senderAccessEnded();
     try {
       const result = await this.deps.githubToken(context, check, purpose, failedTokenSha256);
       await check();
@@ -115,6 +125,7 @@ export class CloudExecutionContexts {
 
   async mcpAuthorization(identity: ExecutionWorker, contextId: string | undefined, id: string, force: boolean) {
     const { context, check } = await this.authorizedContext(identity, contextId, ["turn"]);
+    if (senderEnded(context)) throw new HttpError(403, "mcp_access_denied", "The person who sent this message no longer has access");
     const material = context.material ? openExecution(context.material, envelopeBinding(context), this.deps.keys) as { mcpServers?: RuntimeMcpServer[] } : null;
     if (!material?.mcpServers?.some(server => server.id === id) || !this.deps.mcpAuthorization) throw actorChanged();
     try { const result = await this.deps.mcpAuthorization(context, check, id, force); await check(); return result; }
@@ -131,7 +142,7 @@ export class CloudExecutionContexts {
           AND w.state IN ('creating','starting','running') AND w.archived_at IS NULL
           AND c.access_epoch=w.access_epoch AND c.stop_generation=w.stop_generation AND c.worker_boot_id=w.worker_boot_id
           AND c.worker_token_hash=w.worker_token_hash AND c.worker_boot_id=ANY(w.acting_user_boot_ids) AND ${CLOUD_V2_LIVE_ACCESS}
-          AND ($1<>'api' OR (w.api_access AND coalesce((SELECT workspace_api_access FROM cloud_api_access_settings
+          AND ($1<>'api' OR (c.sender_ended_at IS NULL AND w.api_access AND coalesce((SELECT workspace_api_access FROM cloud_api_access_settings
             WHERE org_id=c.org_id AND user_id=c.user_id),true)))`, [kind, "token" in value ? hashCloudV2Token(value.token) : null, "id" in value ? value.id : null]);
       const context = result.rows[0];
       if (!context) throw new HttpError(401, "unauthorized", "Execution credential expired or was revoked");
@@ -140,6 +151,8 @@ export class CloudExecutionContexts {
     const context = transaction ? await read(transaction) : await withSystemTx(this.pool, read);
     try {
       const proof = await this.admission(context);
+      // Admission may have just moved the turn to its payer: the sender's API token ends with their access.
+      if (kind === "api" && senderEnded(context)) throw actorChanged();
       if (context.agent && context.selection) await this.deps.logins.select(context.org_id, context.user_id!, context.agent, context.selection, transaction);
       if (transaction) await this.assertContext(transaction, context, proof);
       else await withSystemTx(this.pool, tx => this.assertContext(tx, context, proof));
@@ -180,6 +193,7 @@ export class CloudExecutionContexts {
             WHERE org_id=w.org_id AND user_id=$4),true)))`, [tokenId, contextId, kind, proof.person.userId]);
       if (!found.rowCount) throw actorChanged();
       const context = await this.context(tx, contextId, proof.person.workspaceId);
+      if (kind === "api" && senderEnded(context)) throw actorChanged();
       await this.assertContext(tx, context, proof);
       if (context.agent && context.selection) await this.deps.logins.select(context.org_id, context.user_id!, context.agent, context.selection, tx);
       await this.assertContext(tx, context, proof);
@@ -231,7 +245,7 @@ export class CloudExecutionContexts {
     const parent = !existing.rowCount && input.mode === "steer" ? await withSystemTx(this.pool, async tx => {
       const context = (await tx.query<ExecutionContext>(`SELECT c.* FROM cloud_v2_prompt_chats chat JOIN cloud_v2_execution_contexts c
         ON c.id=chat.active_context_id AND c.workspace_id=chat.workspace_id WHERE chat.workspace_id=$1 AND chat.chat_id=$2
-          AND c.user_id=$3 AND c.kind='turn' AND c.state='active' AND c.agent=$4`, [id, input.chatId, userId, agent])).rows[0];
+          AND c.user_id=$3 AND c.kind='turn' AND c.state='active' AND c.agent=$4 AND c.sender_ended_at IS NULL`, [id, input.chatId, userId, agent])).rows[0];
       if (context) await this.assertContext(tx, context, proof);
       return context;
     }) : undefined;
@@ -305,7 +319,8 @@ export class CloudExecutionContexts {
           if (pending(parent.state)) throw actorBusy();
           active = null;
         }
-        const steer = row.payload?.mode === "steer" && active?.user_id === row.creator_user_id;
+        // A rejoined sender's steer waits as an ordinary message: their earlier access ended this turn's steering.
+        const steer = row.payload?.mode === "steer" && active?.user_id === row.creator_user_id && !active.sender_ended_at;
         if (active && !steer) throw actorBusy();
         const older = (await tx.query(`SELECT 1 FROM cloud_v2_prompt_outbox WHERE workspace_id=$1 AND chat_id=$2 AND sequence<$3
           AND state IN ('queued','inboxed','dispatching','accepted') AND ($4::text IS NULL OR user_message_id<>$4) LIMIT 1`,
@@ -374,8 +389,10 @@ export class CloudExecutionContexts {
     if (row.state !== "active") throw new ExecutionContextEnded(row.reason ?? "actor_changed");
     if (row.expires_at.getTime() <= Date.now() || row.client_token_expires_at && row.client_token_expires_at.getTime() <= Date.now())
       throw new ExecutionContextEnded("expired");
-    if (!row.user_id || row.user_id !== proof.person.userId ||
-        !matchesExecutionSignature(row.authority, row.authority.signature, proof.person, "signature")) throw actorChanged();
+    // A sponsored turn answers to its payer: assertPayer below and the snapshot carry what the sender's signature did.
+    const sponsored = senderEnded(row);
+    if (!row.user_id || continuationPrincipal(row) !== proof.person.userId ||
+        !sponsored && !matchesExecutionSignature(row.authority, row.authority.signature, proof.person, "signature")) throw actorChanged();
     if (row.access_epoch !== proof.person.accessEpoch || row.stop_generation !== proof.person.stopGeneration || row.worker_boot_id !== proof.person.bootId ||
         row.worker_token_hash.toString("hex") !== proof.person.workerTokenHash) throw actorChanged();
     if (row.selection) await this.deps.logins.assertPayer(tx, row.org_id, row.selection);
@@ -386,10 +403,37 @@ export class CloudExecutionContexts {
   async admission(context: ExecutionContext, minimumSourceMs = 0, transaction?: Tx): Promise<ExecutionAdmission> {
     if (context.state !== "active" && context.reason === "access_revoked") throw new ExecutionContextRevoked();
     if (!context.user_id || context.state !== "active" || context.expires_at.getTime() <= Date.now()) throw actorChanged();
-    const proof = await this.deps.authority.admit(context.workspace_id, context.user_id, { continuation: true, minimumSourceMs,
+    const admit = () => this.deps.authority.admit(context.workspace_id, continuationPrincipal(context)!, { continuation: true, minimumSourceMs,
       ...(transaction ? { transaction } : {}) });
-    await (transaction ? this.assertContext(transaction, context, proof) : withSystemTx(this.pool, tx => this.assertContext(tx, context, proof)));
+    let proof: ExecutionAdmission;
+    try { proof = await admit(); }
+    catch (error) {
+      // A clock-driven Hold has no write for the fence to see: the first check after it ends the sender here.
+      if (transaction || !(error instanceof HttpError) || error.code !== "member_access_revoked" || senderEnded(context) || !senderContinuable(context)) throw error;
+      Object.assign(context, await this.endSender(context));
+      proof = await admit();
+    }
+    try { await (transaction ? this.assertContext(transaction, context, proof) : withSystemTx(this.pool, tx => this.assertContext(tx, context, proof))); }
+    catch (error) {
+      // The fence moved the turn to its payer after the sender was admitted: answer to the payer once.
+      if (transaction || senderEnded(context) || !(error instanceof HttpError) || error.status >= 500) throw error;
+      const current = await withSystemTx(this.pool, tx => this.context(tx, context.id, context.workspace_id));
+      if (!senderEnded(current)) throw error;
+      Object.assign(context, current);
+      return this.admission(context, minimumSourceMs);
+    }
     return proof;
+  }
+
+  /** Marks a started turn's sender as ended in its own transaction (workspace, then the context: the maintenance order). */
+  private async endSender(context: ExecutionContext): Promise<ExecutionContext> {
+    return withSystemTx(this.pool, async tx => {
+      await tx.query("SELECT 1 FROM cloud_v2_workspaces WHERE id=$1 FOR UPDATE", [context.workspace_id]);
+      const row = await this.context(tx, context.id, context.workspace_id, true);
+      if (row.state !== "active" || !senderContinuable(row)) throw memberAccessRevoked();
+      return (await tx.query<ExecutionContext>(`UPDATE cloud_v2_execution_contexts SET sender_ended_at=coalesce(sender_ended_at,clock_timestamp())
+        WHERE id=$1 RETURNING *`, [row.id])).rows[0]!;
+    });
   }
 
   /** A live context may renew under this newly checked proof before delivery;
@@ -436,6 +480,8 @@ export class CloudExecutionContexts {
       const workspace = await this.worker(tx, identity);
       const current = await this.context(tx, input.contextId, workspace.id);
       await dispatch(tx, current);
+      // Another lease would re-deliver the sender's environment, MCP and API material.
+      if (senderEnded(current)) throw actorChanged();
       return current;
     });
     return withExecutionLifetimeRetry(async () => {
@@ -603,6 +649,15 @@ export class CloudExecutionContexts {
       const proofs = new Map<string, ExecutionAdmission>();
       const people = new Map<string, ExecutionAdmission>();
       const refused = new Map<string, CloudV2ContextReason>();
+      const sponsor = new Set<string>();
+      const person = async (workspaceId: string, userId: string) => {
+        let proof = people.get(userId);
+        if (!proof) {
+          proof = await this.deps.authority.admit(workspaceId, userId, { continuation: true, minimumSourceMs: EXECUTION_MINIMUM_LIFETIME_MS });
+          people.set(userId, proof);
+        }
+        return proof;
+      };
       for (const id of ids) {
         const row = contexts.get(id);
         if (!row || row.state !== "active") { refused.set(id, row?.reason ?? "actor_changed"); continue; }
@@ -611,11 +666,12 @@ export class CloudExecutionContexts {
         if (initial.workspace.state === "stopping") { refused.set(id, "cancelled"); continue; }
         try {
           if (!row.user_id) throw memberAccessRevoked();
-          let proof = people.get(row.user_id);
-          if (!proof) {
-            proof = await this.deps.authority.admit(row.workspace_id, row.user_id,
-              { continuation: true, minimumSourceMs: EXECUTION_MINIMUM_LIFETIME_MS });
-            people.set(row.user_id, proof);
+          let proof: ExecutionAdmission;
+          try { proof = await person(row.workspace_id, continuationPrincipal(row)!); }
+          catch (error) {
+            if (!(error instanceof HttpError) || error.code !== "member_access_revoked" || senderEnded(row) || !senderContinuable(row)) throw error;
+            sponsor.add(id);
+            proof = await person(row.workspace_id, row.selection!.payer!.userId);
           }
           assertExecutionLifetime(proof.until);
           proofs.set(id, proof);
@@ -629,19 +685,31 @@ export class CloudExecutionContexts {
         const leases: Array<{ contextId: string; expiresAt: number } | { contextId: string; refused: CloudV2ContextReason }> = [];
         // Authority triggers take context locks in UUID order too.
         for (const id of [...ids].sort()) {
-          const proof = proofs.get(id);
-          if (proof && !refused.has(id)) {
+          const admitted = proofs.get(id);
+          if (admitted && !refused.has(id)) {
             try {
               const row = await this.context(tx, id, workspace.id, true);
               if (row.state !== "active") refused.set(id, row.reason ?? "actor_changed");
               else if (row.expires_at.getTime() <= Date.now() || row.client_token_expires_at && row.client_token_expires_at.getTime() <= Date.now()) refused.set(id, "expired");
               else if (workspace.state === "stopping") refused.set(id, "cancelled");
               else {
-                await this.assertContext(tx, row, proof);
+                let current = row;
+                if (sponsor.has(id) && senderContinuable(row)) current = (await tx.query<ExecutionContext>(`UPDATE cloud_v2_execution_contexts
+                  SET sender_ended_at=coalesce(sender_ended_at,clock_timestamp()) WHERE id=$1 RETURNING *`, [id])).rows[0]!;
+                // The fence may have moved the turn to its payer after the sender was admitted above: answer to the payer.
+                let proof = admitted;
+                if (senderEnded(current) && proof.person.userId !== continuationPrincipal(current)) {
+                  proof = await this.deps.authority.admit(current.workspace_id, continuationPrincipal(current)!,
+                    { continuation: true, minimumSourceMs: EXECUTION_MINIMUM_LIFETIME_MS, transaction: tx });
+                  assertExecutionLifetime(proof.until);
+                }
+                await this.assertContext(tx, current, proof);
                 if (row.agent && row.selection) await this.deps.logins.select(row.org_id, row.user_id!, row.agent, row.selection, tx);
                 const until = Math.min(proof.until, row.client_token_expires_at?.getTime() ?? Infinity);
                 assertExecutionLifetime(until, row.client_token_expires_at?.getTime());
-                await tx.query("UPDATE cloud_v2_execution_contexts SET expires_at=$2,authority=$3,source_fingerprint=$4 WHERE id=$1",
+                // A sponsored turn keeps the sender's recorded authority: the payer's proof only extends it.
+                if (senderEnded(current)) await tx.query("UPDATE cloud_v2_execution_contexts SET expires_at=$2 WHERE id=$1", [id, new Date(until)]);
+                else await tx.query("UPDATE cloud_v2_execution_contexts SET expires_at=$2,authority=$3,source_fingerprint=$4 WHERE id=$1",
                   [id, new Date(until), executionContextAuthority(proof.person), proof.source?.fingerprint ?? null]);
                 await this.assertContext(tx, row, proof);
                 assertExecutionLifetime(until, row.client_token_expires_at?.getTime());

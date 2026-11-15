@@ -72,7 +72,11 @@ database("execution fences across held material and database locks", () => {
     expect([200, 401, 403, 409]).toContain(response.status);
     const after = await f.worker("turn-lease", turn.lease);
     expect([401, 403, 409]).toContain(after.status);
-    expect((await pool.query("SELECT material FROM cloud_v2_execution_contexts WHERE id=$1", [turn.begun.contextId])).rows[0].material).toBeNull();
+    const final = (await pool.query("SELECT material IS NULL AS erased,state,sender_ended_at IS NOT NULL AS sender_ended FROM cloud_v2_execution_contexts WHERE id=$1",
+      [turn.begun.contextId])).rows[0];
+    // A turn that won the race started on the Creator's login and survives its sender (0254); a payer cut always erases it.
+    if (kind === "credential") expect(final.erased).toBe(true);
+    else expect(final).toSatisfy((row: typeof final) => row.erased ? row.state !== "active" : row.state === "active" && row.sender_ended);
   });
 
   it("shares workspace-first locking with history, Stop and boot cleanup", async () => {

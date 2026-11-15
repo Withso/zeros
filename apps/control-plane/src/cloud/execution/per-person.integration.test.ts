@@ -65,11 +65,12 @@ database("active workspace per-person access loss", () => {
     return { signature: hash([person,row.worker_boot_id,row.worker_token_hash.toString("hex")]) };
   };
 
-  it("renews the surviving person's turn after the real member-removal route", async () => {
+  it("keeps the removed sender's started turn on the Creator and renews the survivor after the real member-removal route", async () => {
     const removed = await begin(f.viewer), survivor = await begin(), before = await workspace();
     const response = await f.call(`/v1/organizations/${f.organizationId}/members/${f.viewer.id}`, "DELETE", undefined, f.creator);
     expect(response.status).toBe(200);
-    expect(await context(removed.begun.contextId)).toMatchObject({ state: "revoked", has_material: false });
+    // The Creator pays for B's started turn, so it survives B's removal (0254).
+    expect(await context(removed.begun.contextId)).toMatchObject({ state: "active", has_material: true });
     expect(await workspace()).toEqual(before);
     const renewed = await f.worker("execution-leases/renew", { contextIds: [survivor.begun.contextId] });
     expect(renewed.status).toBe(200);
@@ -172,7 +173,7 @@ database("active workspace per-person access loss", () => {
     ]));
   });
 
-  it("denies an N-1 member removal at admission and renewal, then reconciles its hidden workspace resources", async () => {
+  it("denies an N-1 member removal at admission, keeps its started turn on the Creator, then reconciles its hidden workspace resources", async () => {
     await f.cp.loginChanges.stop();
     await mac();
     const removed = await begin(f.viewer), survivor = await begin(), before = await workspace();
@@ -184,11 +185,11 @@ database("active workspace per-person access loss", () => {
       await old.query("COMMIT");
     } finally { await old.query("ROLLBACK"); old.release(); }
     expect(await workspace()).toEqual(before);
-    expect(await context(removed.begun.contextId)).toMatchObject({ state: "revoked", has_material: false });
+    expect(await context(removed.begun.contextId)).toMatchObject({ state: "active", has_material: true });
     await expect(f.cp.execution.deps.authority.admit(f.workspace.id, f.viewer.id)).rejects.toMatchObject({ code: "member_access_revoked" });
     const renewed = await f.worker("execution-leases/renew", { contextIds: [removed.begun.contextId, survivor.begun.contextId] });
     expect((await renewed.json()).leases).toEqual(expect.arrayContaining([
-      { contextId: removed.begun.contextId, refused: "access_revoked" },
+      { contextId: removed.begun.contextId, expiresAt: expect.any(Number) },
       { contextId: survivor.begun.contextId, expiresAt: expect.any(Number) },
     ]));
     await f.cp.execution.maintenance.workspace(f.workspace.id);

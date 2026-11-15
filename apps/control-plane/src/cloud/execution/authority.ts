@@ -50,7 +50,8 @@ export class CloudExecutionAuthority {
       coalesce((SELECT jsonb_agg(jsonb_build_object('repository',s.source_repository,'repositoryId',s.repository_id::text) ORDER BY s.source_repository)
         FROM cloud_v2_github_sources s WHERE s.workspace_id=w.id),'[]'::jsonb) AS sources,
       extract(epoch FROM clock_timestamp())*1000 AS database_now,
-      ($4::uuid IS NULL OR EXISTS(SELECT 1 FROM cloud_v2_execution_contexts c WHERE c.id=$4 AND c.workspace_id=w.id AND c.user_id=$2
+      ($4::uuid IS NULL OR EXISTS(SELECT 1 FROM cloud_v2_execution_contexts c WHERE c.id=$4 AND c.workspace_id=w.id
+        AND CASE WHEN c.kind='turn' AND c.sender_ended_at IS NOT NULL AND c.selection->>'version'='2' THEN (c.selection#>>'{payer,userId}')::uuid ELSE c.user_id END=$2
         AND c.state='active' AND c.expires_at>clock_timestamp()
         AND w.state IN ('creating','starting','running') AND w.archived_at IS NULL
         AND c.access_epoch=w.access_epoch AND c.stop_generation=w.stop_generation
