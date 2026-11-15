@@ -608,3 +608,28 @@ it("refuses unadvertised history digests before writing", async () => {
     expect((await f.request("history", input, { "x-zeros-worker-features": features })).status).toBe(400);
   expect(f.deps.store.writeWorkerHistory).not.toHaveBeenCalled();
 });
+it("accepts the release's previous runtime only for a workspace that runs the channel pin", async () => {
+  const f = fixture(), previous = "c".repeat(64);
+  const body = { bootId: f.bootId, protocol: 2, runtimeSha256: previous };
+  expect((await f.request("hello", body)).status).toBe(409);
+  f.deps.previousRuntimeSha256 = previous;
+  expect((await f.request("hello", body)).status).toBe(200);
+  expect((await f.request("hello", { ...body, runtimeSha256: "d".repeat(64) })).status).toBe(409);
+  f.deps.runtimeSha256ForWorkspace = vi.fn(async () => "e".repeat(64));
+  expect((await f.request("hello", body)).status).toBe(409);
+  f.deps.runtimeSha256ForWorkspace = vi.fn(async () => ({ sha256: "a".repeat(64), channel: false }));
+  expect((await f.request("hello", body)).status).toBe(409);
+  f.deps.runtimeSha256ForWorkspace = vi.fn(async () => ({ sha256: "a".repeat(64), channel: true }));
+  expect((await f.request("hello", body)).status).toBe(200);
+});
+it("marks a starting workspace whose worker runtime is refused, so its next step installs the pin", async () => {
+  const f = fixture(true);
+  f.deps.store.refuseWorkerRuntime = vi.fn(async () => {});
+  const body = { bootId: f.bootId, protocol: 2, runtimeSha256: "a".repeat(64) };
+  expect((await f.request("hello", { ...body, runtimeSha256: "b".repeat(64) })).status).toBe(409);
+  expect((await f.request("hello", body)).status).toBe(409);
+  expect(f.deps.store.refuseWorkerRuntime).toHaveBeenCalledTimes(2);
+  expect(f.deps.store.refuseWorkerRuntime).toHaveBeenCalledWith(f.token);
+  expect((await f.request("hello", body, { "x-zeros-worker-features": "prompt-outbox-v1" })).status).toBe(200);
+  expect(f.deps.store.refuseWorkerRuntime).toHaveBeenCalledTimes(2);
+});

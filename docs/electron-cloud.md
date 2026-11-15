@@ -199,7 +199,8 @@ pnpm electron:run                                # start without file watching
 Each also works as `pnpm electron:cloud …`.
 
 `ZEROS_CLOUD_V2_RUNTIME_SHA256` remains an explicit override like `--runtime`;
-leave both unset for source-based selection. `--run-only` disables file watching.
+leave both unset for source-based selection. `ZEROS_CLOUD_V2_RUNTIME_PREVIOUS_SHA256`
+names the release's previous pin, so a wake of a VM still holding it keeps it. `--run-only` disables file watching.
 
 On its first healthy start, the stack seeds its database once: the verified
 WorkOS test user and organization, the Alpha GitHub installation and test

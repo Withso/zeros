@@ -7,7 +7,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { CLOUD_V2_LEASE_SECONDS, type CloudV2Compute, type CloudV2CommandResult } from "./boat.js";
 import { BoatBootPendingError, BoatCreateRejectedError, BoatForkRefusedError, BoatSnapshotExpiredError } from "./boat-client.js";
 import { CloudProviderError } from "./provider-error.js";
-import { installRuntimeCommand, type CloudV2Runtime } from "./runtime.js";
+import { installRuntimeCommand, prepareRuntimeCommand, type CloudV2Runtime } from "./runtime.js";
 import { GIT_LFS_INSTALL_COMMAND } from "./computer.js";
 import { pruneCloudRepositories } from "./source-authority.js";
 import type { PendingSourceOutcome } from "./pending-create.js";
@@ -25,6 +25,8 @@ const LEASE_MS = 2 * 60_000;
 /** Configured hello publishes readiness; a poll only re-delivers the credential
  * while no worker boot has bound it. */
 const HELLO_POLL_MS = 30_000;
+/** Set by a refused worker hello while starting; the next step installs the pin. */
+export const CLOUD_V2_RUNTIME_REFUSED = "worker_runtime_mismatch";
 const BOOT_DEADLINE_MS = 10 * 60_000;
 /** A restore also creates a VM and applies a checkpoint of up to 4 GiB. */
 const RESTORE_DEADLINE_MS = 25 * 60_000;
@@ -75,6 +77,8 @@ export type CloudV2TimingRecord = {
   workspaceId: string;
   state?: CloudV2Workspace["state"];
   runtimeChanged?: boolean;
+  /** runtime_install: the VM kept the release's previous runtime and stages the pin afterwards. */
+  runtimeKept?: boolean;
   /** Whether a checkpoint command uploaded a new object or kept the last one. */
   checkpoint?: "saved" | "unchanged";
   /** relay_ready: the worker socket dial, and the time from it to readiness.
@@ -87,7 +91,7 @@ export type CloudV2TimingRecord = {
   phase: LifecyclePhase | CloudV2WorkerTiming["phase"] | "worker_hello" | "relay_ready";
   durationMs: number;
 } | CloudV2WorkerBootTiming);
-type TimingDetail = Pick<CloudV2TimingRecord, "runtimeChanged" | "checkpoint">;
+type TimingDetail = Pick<CloudV2TimingRecord, "runtimeChanged" | "runtimeKept" | "checkpoint">;
 export function emitCloudV2Timing(observer: ((record: CloudV2TimingRecord) => void) | undefined, record: CloudV2TimingRecord): void {
   try { observer?.(record); } catch { /* Optional diagnostics cannot change lifecycle authority. */ }
 }
@@ -104,6 +108,9 @@ export type CloudV2LifecycleDeps = {
   compute: CloudV2Compute;
   /** The channel runtime; an admitted canary resolves its own pin. */
   runtime: CloudV2Runtime;
+  /** The pin the channel's current release replaced. A wake may start it from
+   * disk instead of installing the channel pin inside the wake. */
+  previousRuntimeSha256?: string;
   runtimeForWorkspace?(workspace: CloudV2Workspace): Promise<CloudV2Runtime>;
   publicKeys: readonly string[];
   sealPortToken(token: string, workspaceId: string): unknown;
@@ -450,7 +457,7 @@ export class CloudV2Lifecycle {
         // route while the VM boots overlaps the two.
         const routed = this.measure(workspace, "protected_route", () => this.host(workspace, sandboxId));
         routed.catch(() => {});
-        await this.measure(workspace, "runtime_install", () => this.ensureRuntime(sandboxId, boot.runtime), runtimeChanged => ({ runtimeChanged }));
+        await this.measure(workspace, "runtime_install", () => this.ensureRuntime(sandboxId, boot.runtime), installed => ({ runtimeChanged: installed.changed }));
         // Boat exec waited ~6 s for a 6 s child with trailing "&"; braces + echo returned in ~120 ms.
         // Still unawaited so a slow or failed launch cannot hold up worker startup.
         const warmup = image.checkout ? checkoutWarmupCommand(`${CLOUD_V2_HOME}/${workspace.repository}`) : null;
@@ -514,8 +521,14 @@ export class CloudV2Lifecycle {
         const route = () => this.measure(workspace, "protected_route", () => this.host(workspace, sandboxId!));
         const routed = restoring ? undefined : route();
         routed?.catch(() => {});
-        // A runtime shipped while the VM slept is installed now.
-        await this.measure(workspace, "runtime_install", () => this.ensureRuntime(sandboxId, boot.runtime), runtimeChanged => ({ runtimeChanged }));
+        // A runtime shipped while the VM slept is installed now, unless the VM
+        // already holds the release it replaced: that starts at once and the
+        // pin is staged after the worker starts, for the next wake.
+        const keep = restoring ? undefined : this.keepableRuntime(workspace, boot.runtime);
+        const installed = await this.measure(workspace, "runtime_install", () => this.ensureRuntime(sandboxId, boot.runtime, keep),
+          result => ({ runtimeChanged: result.changed, ...(result.kept ? { runtimeKept: true } : {}) }));
+        const bootEnv = installed.kept && keep
+          ? await this.deps.bootEnv(workspace, { sha256: keep, url: async (target = keep) => boot.runtime.url(target) }) : boot.env;
         if (restoring) {
           // Replayed as recorded: no lookup of a build that deletion may be retiring.
           const recorded = this.recordedRestores.get(workspace.id) ?? workspace.restoreCreate;
@@ -526,7 +539,8 @@ export class CloudV2Lifecycle {
           if (!await store.finishRestore(workspace.id, sandboxId)) return;
         }
         if (!await (routed ?? route())) return;
-        await this.measure(workspace, "token_delivery", () => this.deliverToken(workspace, sandboxId, boot.env));
+        const delivered = await this.measure(workspace, "token_delivery", () => this.deliverToken(workspace, sandboxId, bootEnv));
+        if (installed.kept && delivered) this.stageRuntime(sandboxId, boot.runtime);
         await store.defer(workspace.id, "starting", HELLO_POLL_MS);
         return;
       }
@@ -834,14 +848,16 @@ export class CloudV2Lifecycle {
     } catch { return null; } finally { clearTimeout(timer); }
   }
 
-  private async deliverToken(workspace: CloudV2LifecycleWorkspace, sandboxId: string, bootEnv: Record<string, string>): Promise<void> {
+  /** False when a worker already holds this start (hello bound its boot). */
+  private async deliverToken(workspace: CloudV2LifecycleWorkspace, sandboxId: string, bootEnv: Record<string, string>): Promise<boolean> {
     await this.deps.authorizeWorkspace?.(workspace);
     const token = await this.deps.store.rotateWorkerToken(workspace.id, { state: workspace.state, sandboxId, stopGeneration: workspace.stopGeneration });
-    if (!token) return;
+    if (!token) return false;
     await this.deps.assertExecution?.(workspace);
     const result = await this.execWhenReady(sandboxId, deliverWorkerTokenCommand(token, bootEnv), 30);
     await this.deps.assertExecution?.(workspace);
     if (result.exitCode !== 0 || result.timedOut) throw Object.assign(new Error("token delivery failed"), { code: "worker_token_delivery_failed" });
+    return true;
   }
 
   private async host(workspace: CloudV2LifecycleWorkspace, sandboxId: string): Promise<boolean> {
@@ -859,11 +875,33 @@ export class CloudV2Lifecycle {
     return this.deps.store.setWorkerRoute(workspace.id, sandboxId, route.url, this.deps.sealPortToken(route.token, workspace.id));
   }
 
-  /** Quick when the VM already has the runtime; otherwise downloads it. */
-  private async ensureRuntime(sandboxId: string, runtime: CloudV2Runtime): Promise<boolean> {
-    const result = await this.execWhenReady(sandboxId, installRuntimeCommand({ sha256: runtime.sha256, url: await runtime.url(), publicKeys: this.deps.publicKeys }), 300);
+  /** Quick when the VM already has the runtime (or may keep `keep`); otherwise
+   * downloads it. Token delivery restarts the worker, so this never does. */
+  private async ensureRuntime(sandboxId: string, runtime: CloudV2Runtime, keep?: string): Promise<{ changed: boolean; kept: boolean }> {
+    const result = await this.execWhenReady(sandboxId, installRuntimeCommand({ sha256: runtime.sha256, url: await runtime.url(), publicKeys: this.deps.publicKeys },
+      { ...(keep ? { keep } : {}), restart: false }), 300);
     if (result.exitCode !== 0 || result.timedOut) throw Object.assign(new Error("runtime install failed"), { code: "worker_runtime_install_failed" });
-    return result.stdout.split(/\r?\n/).includes("runtime-changed");
+    const lines = result.stdout.split(/\r?\n/);
+    return { changed: lines.includes("runtime-changed"), kept: !!keep && lines.includes("runtime-kept") };
+  }
+
+  /** The release's previous pin, for a workspace on the channel runtime itself
+   * (the same object, not an equal digest: canary, creation, activation and
+   * recovery pins are never replaced). A refused hello installs the pin. */
+  private keepableRuntime(workspace: CloudV2LifecycleWorkspace, runtime: CloudV2Runtime): string | undefined {
+    const previous = this.deps.previousRuntimeSha256;
+    if (!previous || previous === runtime.sha256 || runtime !== this.deps.runtime) return undefined;
+    if (workspace.executionTransitionId || workspace.recoveryAttemptId || workspace.errorCode === CLOUD_V2_RUNTIME_REFUSED) return undefined;
+    return previous;
+  }
+
+  /** Unpacks the pin beside the running worker without switching to it; the
+   * next wake's install then only moves the link. */
+  private stageRuntime(sandboxId: string, runtime: CloudV2Runtime): void {
+    void (async () => {
+      const result = await this.deps.compute.execLong(sandboxId, prepareRuntimeCommand({ sha256: runtime.sha256, url: await runtime.url() }), 300);
+      if (result.exitCode !== 0 || result.timedOut) throw new Error("runtime staging failed");
+    })().catch(() => this.deps.logger?.warn("[cloud-v2] runtime staging deferred to the next wake"));
   }
 
   /** A v3 image keeps only this workspace's checkout; the stock image gets the

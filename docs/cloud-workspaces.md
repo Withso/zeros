@@ -223,7 +223,22 @@ from object storage, verifies its SHA-256 and caches it under
 `/opt/zeros/runtime/<sha256>`. `/opt/zeros/worker` points to that directory.
 The runtime is root-owned; `zeros-worker.service` runs `worker.mjs` as `user`.
 A resumed VM that already has the pinned runtime, unit, profile and keys exits
-the install step after comparing them, with no lock, `sudo` or rewrite. The unit
+the install step after comparing them, with no lock, `sudo` or rewrite.
+
+A wake after a release does not install inside the wake. When the VM still runs
+the pin that release replaced (`CLOUD_V2_RUNTIME_PREVIOUS_SHA256`, written by the
+release on every promotion and restore) with matching unit, profile and keys, and
+the current pin is not yet unpacked beside it, the wake starts that runtime as is
+and delivers its digest in `worker.env`. After token delivery the control plane
+unpacks the current pin beside it without switching (`prepareRuntimeCommand`); the
+next wake's install then only moves the link. Only a workspace on the channel
+runtime itself qualifies: canary, creation, activation and recovery pins are never
+replaced. Hello accepts the previous pin only for such a workspace; the worker
+reports the digest of the runtime directory it executes from. A refused hello on a
+starting workspace records `worker_runtime_mismatch` and steps it at once, and that
+step installs the current pin. Clearing `CLOUD_V2_RUNTIME_PREVIOUS_SHA256` and
+redeploying withdraws the previous pin. Token delivery is the one worker restart
+on create and wake; the install step no longer restarts it. The unit
 keeps Node's compile cache in `/home/user/.cache/zeros/node-compile-cache`, and
 the worker loads the Claude Agent SDK on its first Claude turn rather than at
 start, so a wake parses less on a cold restored disk. Node writes that cache

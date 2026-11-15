@@ -87,6 +87,37 @@ d("cloud v2 store", () => {
     expect((await store.get(w.id, creator)).state).toBe("running");
   });
 
+  it("marks a refused runtime once for an unbound starting boot and wakes the lifecycle", async () => {
+    const workspace = await create();
+    const token = await store.rotateWorkerToken(workspace.id);
+    await pool.query("UPDATE cloud_v2_workspaces SET state='starting', next_attempt_at=clock_timestamp()+interval '30 seconds' WHERE id=$1", [workspace.id]);
+    const listener = new pg.Client({ connectionString: process.env.TEST_DATABASE_URL });
+    await listener.connect();
+    let notices = 0;
+    listener.on("notification", () => { notices++; });
+    await listener.query("LISTEN zeros_cloud_v2_lifecycle");
+    try {
+      await store.refuseWorkerRuntime(token);
+      await store.refuseWorkerRuntime(token);
+      const row = (await pool.query("SELECT error_code, next_attempt_at <= clock_timestamp() AS due FROM cloud_v2_workspaces WHERE id=$1", [workspace.id])).rows[0];
+      expect(row).toEqual({ error_code: "worker_runtime_mismatch", due: true });
+      await listener.query("SELECT 1");
+      expect(notices).toBe(1);
+      await pool.query("UPDATE cloud_v2_workspaces SET error_code=NULL, worker_boot_id=$2 WHERE id=$1", [workspace.id, randomUUID()]);
+      await store.refuseWorkerRuntime(token);
+      expect((await pool.query("SELECT error_code FROM cloud_v2_workspaces WHERE id=$1", [workspace.id])).rows[0].error_code).toBeNull();
+    } finally { await listener.end(); }
+  });
+
+  it("clears an earlier boot's failure code once a fresh boot is running, but keeps a running boot's own condition", async () => {
+    const workspace = await create();
+    await pool.query("UPDATE cloud_v2_workspaces SET error_code='execution_not_retired' WHERE id=$1", [workspace.id]);
+    const token = await store.rotateWorkerToken(workspace.id), boot = randomUUID();
+    expect((await store.acceptWorkerHello(token, boot))?.errorCode).toBeNull();
+    await pool.query("UPDATE cloud_v2_workspaces SET error_code='live_connection_unavailable' WHERE id=$1", [workspace.id]);
+    expect((await store.acceptWorkerHello(token, boot))?.errorCode).toBe("live_connection_unavailable");
+  });
+
   it("keeps a restarted worker's bound boot and route while lifecycle polls its held configuration", async () => {
     const w = await create(), sandboxId = "bx_fixture";
     const routeUrl = "https://fixture-41783.on.boat.dev", portToken = { encrypted: "synthetic-port-material" };

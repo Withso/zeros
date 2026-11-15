@@ -43,10 +43,13 @@ export type CloudV2WorkerRouteDeps = {
     hello(token: string, bootId: string, runtime: string, capable: boolean, id: string): Promise<boolean>;
     setup(token: string, bootId: string, id: string, report: z.infer<typeof CloudV2SetupStatusSchema>): Promise<void>;
   };
-  store: Pick<CloudV2Store, "beginWorkerHello" | "acceptWorkerHello" | "workerSession" | "accessEpoch" | "loginRevision" | "markActive" | "writeWorkerHistory" | "failWorkerCheckout"> & Partial<Pick<CloudV2Store, "prompts" | "workerHelloIdentity" | "chatEdits" | "reportWorkerSetup" | "workerHistoryDigests">>;
+  store: Pick<CloudV2Store, "beginWorkerHello" | "acceptWorkerHello" | "workerSession" | "accessEpoch" | "loginRevision" | "markActive" | "writeWorkerHistory" | "failWorkerCheckout"> & Partial<Pick<CloudV2Store, "prompts" | "workerHelloIdentity" | "chatEdits" | "reportWorkerSetup" | "workerHistoryDigests" | "refuseWorkerRuntime">>;
   runtimeSha256: string;
+  /** The pin the channel's release replaced; a wake may start it from disk. */
+  previousRuntimeSha256?: string;
   execution?: CloudExecutionContexts;
-  runtimeSha256ForWorkspace?(workspace: CloudV2Workspace): Promise<string>;
+  /** `channel`: the workspace runs the channel runtime itself, not a pin that equals it. */
+  runtimeSha256ForWorkspace?(workspace: CloudV2Workspace): Promise<string | { sha256: string; channel: boolean }>;
   runtimeUpdates?: RuntimeAdoption;
   runtimeHandoffs?: RuntimeHandoffStore;
   promptOutbox?: boolean;
@@ -319,18 +322,28 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
       await transaction(tx => advertise(handoff, tx));
       return c.json({ config: await configuration(deps, identity, token, input.bootId, workerFeatures(c), "admission", handoff) });
     }
-    let runtimeSha256 = deps.runtimeSha256, identity: CloudV2WorkerSession | null = null;
+    let runtimeSha256 = deps.runtimeSha256, channel = true, identity: CloudV2WorkerSession | null = null;
     if (deps.runtimeSha256ForWorkspace) {
       if (!deps.store.workerHelloIdentity) throw new HttpError(503, "worker_runtime_unavailable", "Worker runtime could not be verified");
       identity = await deps.store.workerHelloIdentity(token);
       if (!identity) throw unauthorized();
-      runtimeSha256 = await deps.runtimeSha256ForWorkspace(identity);
+      const selected = await deps.runtimeSha256ForWorkspace(identity);
+      runtimeSha256 = typeof selected === "string" ? selected : selected.sha256;
+      channel = typeof selected === "string" ? selected === deps.runtimeSha256 : selected.channel;
     }
-    if (input.runtimeSha256 !== runtimeSha256 && !(workerFeatures(c).has("runtime-update-v1") && deps.runtimeHandoffs &&
+    // A wake may start the release's previous pin from disk; never in place of
+    // a canary, activation, creation or recovery pin.
+    const previous = channel && input.runtimeSha256 === deps.previousRuntimeSha256;
+    const outdated = async () => {
+      // A start whose worker is refused installs the pin on its next step, now.
+      await deps.store.refuseWorkerRuntime?.(token);
+      return new HttpError(409, "worker_runtime_mismatch", "Worker runtime requires an update");
+    };
+    if (input.runtimeSha256 !== runtimeSha256 && !previous && !(workerFeatures(c).has("runtime-update-v1") && deps.runtimeHandoffs &&
         await deps.runtimeHandoffs.runtime(token, input.bootId) === input.runtimeSha256))
-      throw new HttpError(409, "worker_runtime_mismatch", "Worker runtime requires an update");
+      throw await outdated();
     if (deps.promptOutbox && !(c.req.header("x-zeros-worker-features") ?? "").split(",").map(value => value.trim()).includes("prompt-outbox-v1"))
-      throw new HttpError(409, "worker_runtime_mismatch", "Worker runtime requires an update");
+      throw await outdated();
     const recoveryCapable = workerFeatures(c).has(CLOUD_RECOVERY_QUIESCE_FEATURE);
     if (identity?.recoveryAttemptId && (!deps.recovery || !await deps.recovery.hello(token, input.bootId, input.runtimeSha256, recoveryCapable, identity.recoveryAttemptId)))
       throw unauthorized();

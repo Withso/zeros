@@ -828,6 +828,16 @@ export class CloudV2Store {
       ...(row.recovery_attempt_id ? { recoveryAttemptId: row.recovery_attempt_id } : {}) } : null;
   }
 
+  /** A starting workspace whose worker hello was refused for its runtime: the
+   * lifecycle steps it now and installs the pin instead of keeping that runtime. */
+  async refuseWorkerRuntime(token: string): Promise<void> {
+    await withSystemTx(this.pool, tx => tx.query(`WITH refused AS (UPDATE cloud_v2_workspaces
+        SET error_code='worker_runtime_mismatch', next_attempt_at=clock_timestamp()
+        WHERE worker_token_hash=$1 AND state='starting' AND worker_boot_id IS NULL
+          AND error_code IS DISTINCT FROM 'worker_runtime_mismatch' RETURNING id)
+      SELECT pg_notify('zeros_cloud_v2_lifecycle', '') FROM refused`, [hashCloudV2Token(token)]));
+  }
+
   async acceptWorkerHello(token: string, bootId: string, proof?: { accessEpoch: string; loginRevision: string }, transaction?: Tx): Promise<CloudV2WorkerSession | null> {
     const accept = async (tx: Tx) => {
       const result = await tx.query<Row & { execution_mode: "legacy" | "prepared" | "active"; access_epoch: string; login_revision: string; prior_state: "creating" | "starting" | "running"; hello_ms: number }>(
@@ -846,6 +856,8 @@ export class CloudV2Store {
          worker_history_sequence=CASE WHEN worker_boot_id=$2 THEN worker_history_sequence ELSE 0 END,
          worker_history_digest=CASE WHEN worker_boot_id=$2 THEN worker_history_digest ELSE NULL END,
          worker_boot_id=$2, state=CASE WHEN prior.environment_ready THEN 'running' ELSE 'starting' END, attempts=0, next_attempt_at=NULL,
+         -- A boot that reaches running supersedes an earlier boot's failure; a running boot keeps its own condition.
+         error_code=CASE WHEN prior.environment_ready AND prior.prior_state<>'running' THEN NULL ELSE error_code END,
          active_at=CASE WHEN state='running' OR NOT prior.environment_ready THEN active_at ELSE clock_timestamp() END,
          updated_at=CASE WHEN state='running' OR (state='starting' AND NOT prior.environment_ready) THEN updated_at ELSE clock_timestamp() END
        FROM prior WHERE w.id=prior.prior_id

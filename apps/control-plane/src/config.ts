@@ -257,7 +257,7 @@ export type CloudV2Config = {
   workerSigningKey: string;
   workerSigningKeyPrevious?: string;
   /** The ordinary channel runtime pin and its storage. */
-  runtime: { sha256: string; release?: RuntimeRelease; store: { endpoint: string; bucket: string; accessKeyId: string; secretAccessKey: string } };
+  runtime: { sha256: string; release?: RuntimeRelease; previousSha256?: string; store: { endpoint: string; bucket: string; accessKeyId: string; secretAccessKey: string } };
   runtimeCanary?: RuntimeCanaryPolicy;
 };
 
@@ -291,6 +291,10 @@ function loadCloudV2Config(env: NodeJS.ProcessEnv, channel: string): CloudV2Conf
   };
   const sha256 = env.CLOUD_V2_RUNTIME_SHA256?.trim() ?? "";
   if (!/^[0-9a-f]{64}$/.test(sha256)) throw new Error("Invalid environment: CLOUD_V2_RUNTIME_SHA256 must name a published worker runtime");
+  // The release keeps the pin it replaced; a wake may start it from disk. Clearing it withdraws that permission.
+  const previousSha256 = env.CLOUD_V2_RUNTIME_PREVIOUS_SHA256?.trim() || undefined;
+  if (previousSha256 !== undefined && !/^[0-9a-f]{64}$/.test(previousSha256))
+    throw new Error("Invalid environment: CLOUD_V2_RUNTIME_PREVIOUS_SHA256 must name a published worker runtime");
   const required = (name: string) => {
     const value = env[name]?.trim();
     if (!value) throw new Error(`Invalid environment: CLOUD_V2_ENABLED requires ${name}`);
@@ -316,7 +320,7 @@ function loadCloudV2Config(env: NodeJS.ProcessEnv, channel: string): CloudV2Conf
     apiUrl: origin("CLOUD_V2_API_URL", "https:"),
     realtimeUrl: origin("CLOUD_V2_REALTIME_URL", "wss:"),
     ...(runtimeCanary ? { runtimeCanary } : {}),
-    runtime: { sha256, ...(release ? { release } : {}), store: {
+    runtime: { sha256, ...(release ? { release } : {}), ...(previousSha256 && previousSha256 !== sha256 ? { previousSha256 } : {}), store: {
       endpoint, bucket: required("CLOUD_V2_RUNTIME_STORE_BUCKET"),
       accessKeyId: required("CLOUD_V2_RUNTIME_STORE_ACCESS_KEY_ID"), secretAccessKey: required("CLOUD_V2_RUNTIME_STORE_SECRET_ACCESS_KEY"),
     } },
