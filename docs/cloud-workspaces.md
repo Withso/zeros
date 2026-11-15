@@ -2325,5 +2325,7 @@ older desktop's memory queue.
 Live qualification includes receipt latency, app quit and reconnect with queued
 messages, stopped-VM FIFO delivery, same-ID replay, Stop racing delivery,
 sign-out versus real access loss, wake into the same chat and a mid-turn worker
-restart. Existing gate0 provider turns still exercise the legacy bridge path;
-test the new HTTPS path separately without silently adding provider turns.
+restart. gate0 sends and stops its provider turns through this HTTPS path
+whenever the workspace advertises it, so its turns cover receipts, completion
+and Stop. Test the remaining cases separately, without silently adding
+provider turns.

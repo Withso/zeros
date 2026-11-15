@@ -82,6 +82,9 @@ export const KNOWN_KEYS = Object.freeze([
   "ZEROS_DEV_GITHUB_INSTALLATION_ID",
   "ZEROS_DEV_SESSION_ID",
   "ZEROS_DEV_TOKEN_EXPIRES_AT",
+  "ZEROS_ALPHA_PROBE_ORGANIZATION",
+  "ZEROS_ALPHA_PROBE_REPOSITORY",
+  "ZEROS_ALPHA_PROBE_VM_DOLLARS_PER_HOUR",
 ]);
 
 /** Parse a dotenv file. Lines that are neither comments nor `KEY=value` are
