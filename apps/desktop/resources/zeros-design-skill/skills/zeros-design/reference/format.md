@@ -47,7 +47,7 @@ To create a frame:
     <meta charset="utf-8" />
     <title>Home — Default</title>
     <link rel="stylesheet" href="../tokens.css" />
-    <style>.card { padding: var(--space-4); border-radius: var(--radius-md); }</style>
+    <link rel="stylesheet" href="../styles.css" />
   </head>
   <body>
     <main class="card">
@@ -57,6 +57,7 @@ To create a frame:
 </html>
 ```
 
+- **Classes** are global or a component's. `.card` above is global: it lives in `styles.css` at the Design root, which every frame that uses it links. A component's classes live in its main frame's `<style>` and are used only inside it and its instances. Other frames' `<style>` holds no class rules (`:root`, element and `[data-oid]` rules are fine); `design validate` warns with `frame-class` and `component-class`.
 - **IDs** start with a letter, use letters, digits, `_` or `-`, and are at most 128 characters. Never change an existing directory, page or frame ID. Renaming a file changes only its `source`.
 - **Geometry.** `width`/`height` (1–16,384) are the frame's viewport; `x`/`y` stay within ±1,000,000; optional `z` is 0–1,000 within its page.
 - **`data-oid`** is optional: the canvas derives selection identities for plain HTML, and visual edits save the IDs they need. Keep existing values when you edit; add stable, unique ones when selection must survive a large restructure. Document plumbing (`html`, `head`, `body`, `meta`, `link`, `title`, `style`, `script`, `template`) never takes one.
@@ -129,7 +130,7 @@ Declare options in `<head>`, one element per line, each closed with its end tag.
 
 - **Kinds.** `slot` (below), `number` (`min`, `max`, `step`, `unit` of px, %, rem, em, ch, vw, vh, fr, deg, ms or s; it is a slider only with both `min` and `max`), `boolean`, `choice` (2–16 lowercase values in `choices`; labels come from the values, or `choice-labels="Ask|Plan"`), `color` (a colour or `var(--token)`), `text`, `easing` (a keyword, `cubic-bezier()`, `steps()` or `spring(bounce)`, then a duration). `group` folds consecutive options under one heading. `label` defaults to the name.
 - **Names.** Lowercase letters, digits and single hyphens, at most 32 characters. Not `name`, an HTML attribute an element keeps (`class`, `style`, `id`, `hidden`, `title` and the like), anything starting `data-`, `aria-`, `on` or `zd-`, or a function name.
-- **Variants** are named sets of values (`default` is taken: it is the declared defaults). **Derived values** are expressions over options, worked out in order.
+- **Variants** are named sets of values (`default` is taken: it is the declared defaults). A **state variant** adds `zd-state`: `hover`, `active` (Pressed), `focus-visible` (Focus) or `disabled`, at most one variant per state, such as `<zd-variant name="hover" zd-state="hover"></zd-variant>`. Its look is the main's own `:hover` (and so on) rules, rooted at the main's root layer: `.composer:hover .send { opacity: 0.8; }`. Showing it on the canvas applies those rules without a pointer, and instances get them for real. **Derived values** are expressions over options, worked out in order.
 - **Values in CSS.** Number, colour, easing and numeric derived options are custom properties: `var(--zd-width)`, `var(--zd-accent)`, `var(--zd-motion-easing)` and `var(--zd-motion-duration)`, `var(--zd-gutter)`. These names count as known tokens in lint. Text, choices and booleans reach the markup only through the template.
 - **Template.** In a declaring file, `{{ expression }}` fills text and attribute values (escaped), `data-zd-if="expression"` keeps an element only when true, and `data-zd-for="item in list"` repeats it (`range(n)` or `["a", "b"]`, up to 256 times, nested 3 deep). A `<template data-zd-if>` or `<template data-zd-for>` wraps without adding an element. Holes do not work in `<style>`, `<script>`, comments, the options block, or in `style`, `href`, `src`, `srcset`, `action`, `formaction`, `poster`, `srcdoc`, `data`, `xlink:href`, `ping`, `background`, `cite`, `manifest`, `codebase`, `id`, `data-oid`, `data-zid`, `data-zd-*`, `on*` attributes or a `<meta>` `content`. Write a literal `{{` as `{{ "{{" }}`.
 - **Expressions.** Numbers, `"text"`, `true`/`false`, lists, names, `( )`, `!`, `-`, `* / %`, `+ -` (`+` joins text), `< <= > >=`, `== !=`, `&& ||`, and `a ? b : c`; functions `range`, `min`, `max`, `clamp`, `round`, `floor`, `ceil`, `len`. Types never convert: `"2" + 1` is text, `mode + 1 > 2` is an error. Put spaces around a minus (`width - 1`), since names may contain hyphens.

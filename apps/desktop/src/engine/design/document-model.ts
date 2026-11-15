@@ -43,6 +43,8 @@ export interface DesignLintViolation {
     | "repeated-inline-style"
     | "literal-token-value"
     | "repeated-markup"
+    | "frame-class"
+    | "component-class"
     | "no-external-url"
     | "component-undefined"
     | "component-invalid"

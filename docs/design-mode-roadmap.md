@@ -1276,12 +1276,13 @@ records pass unknown fields through:
   using each name, at most 50 per frame; past 50 classes, the 50th warning
   counts the rest. They never change `design validate`'s exit status. No persisted keys
   change; the wire rule ID remains a string, and cloud v2 has no Design path.
-- Three advisory warnings check the authoring contract
-  (`authoring-lint.ts`, run by `lintFrame`). Like `unknown-class` they report
+- Five advisory warnings check the authoring contract
+  (`authoring-lint.ts`, run by `lintFrame`; `component-class` sits beside
+  `unknown-class` in `lintFrame`, whose class catalogs it compares). Like `unknown-class` they report
   a finding once, name its first three lines, cap per frame with a final
   remaining-count warning, and never change the exit status or block a save.
   An element carrying `data-zd-captured` (`DESIGN_CAPTURED_ATTRIBUTE`) marks
-  itself and its subtree as captured: the three checks neither count nor
+  itself and its subtree as captured: the five checks neither count nor
   report it, a captured element is one opaque leaf in the shape of authored
   markup around it, and authored markup elsewhere in the frame is still
   checked. On `<html>` or `<body>` the whole frame is captured and its
@@ -1304,6 +1305,19 @@ records pass unknown fields through:
     instances and inline `<svg>` are leaves, shadow content is not compared,
     and a repeat inside a reported repeat is not reported again. At most 10
     per frame.
+  - `frame-class`: classes are global (a Design stylesheet the frames link,
+    or a style source) or a component's (its main frame's `<style>`), so a
+    frame that is not a main and defines class selectors in its own
+    `<style>` gets one warning naming the first three. A main, element,
+    `:root` and `[data-oid]` rules, and `<style>` inside templates, shadow
+    roots or captured markup are not counted; with the canvas unread (a
+    mutation's before/after comparison) the check is skipped.
+  - `component-class`: a layer outside every instance (and outside
+    captured markup) whose class only the expansion's component styles
+    define, not the frame's own styles, linked stylesheets or style sources.
+    Slotted layers count as inside their instance. Runs only when
+    `unknown-class` runs and the frame places an instance. At most 10 per
+    frame.
 - The workspace snapshot adds optional `styleSources` (status, messages,
   themes, tokens and an optional `rules` count, without CSS) and
   `styleSourceErrors`. The theme editor lists Manual (`tokens.css`, editable)

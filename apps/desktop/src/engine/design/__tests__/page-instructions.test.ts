@@ -14,6 +14,7 @@ import {
   PREVIOUS_PAGED_DESIGN_RULES,
   PREVIOUS_PER_PAGE_DESIGN_RULES,
   PREVIOUS_CONTRACT_DESIGN_RULES,
+  PREVIOUS_MAIN_FRAME_DESIGN_RULES,
   upgradedDesignRules,
 } from "../design-rules";
 
@@ -55,6 +56,11 @@ describe("page authoring guidance", () => {
       "7ae3af3ced5113aaad90dee21fcd26c85338e7b4a09338746b04caf55e8c0153",
     );
     expect(GENERATED_DESIGN_RULES).toContain(PREVIOUS_CONTRACT_DESIGN_RULES);
+    // The main-frame contract, whose rule 1 asked for one class vocabulary.
+    expect(createHash("sha256").update(PREVIOUS_MAIN_FRAME_DESIGN_RULES).digest("hex")).toBe(
+      "81632af0c14ea995c968834d14a3c80c8f6a898b317c746d39b3ea062cdbd55d",
+    );
+    expect(GENERATED_DESIGN_RULES).toContain(PREVIOUS_MAIN_FRAME_DESIGN_RULES);
     for (const previous of [
       ROOT_DESIGN_RULES,
       LEGACY_DESIGN_RULES,
@@ -62,6 +68,7 @@ describe("page authoring guidance", () => {
       PREVIOUS_PAGED_DESIGN_RULES,
       PREVIOUS_PER_PAGE_DESIGN_RULES,
       PREVIOUS_CONTRACT_DESIGN_RULES,
+      PREVIOUS_MAIN_FRAME_DESIGN_RULES,
     ])
       expect(upgradedDesignRules(previous + "\nKeep our brand.\n", 2)).toBe(
         DESIGN_RULES + "\nKeep our brand.\n",
@@ -72,7 +79,11 @@ describe("page authoring guidance", () => {
 
   it("carries the authoring contract into upgraded directories and leaves edited rules alone", () => {
     for (const rule of [
-      "One class vocabulary per directory",
+      "Classes are global or a component's",
+      "Other frames define no classes of their own",
+      "used only inside that component and its instances",
+      "rule 1, 3, 4 or 8",
+      '<zd-variant name="hover" zd-state="hover">',
       "never a second copy",
       "var(--name)",
       "Inline style is for one-off values",

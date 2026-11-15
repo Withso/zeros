@@ -142,7 +142,7 @@ import {
 } from "./style-sources";
 import { readDesignFontCatalog } from "./style-fonts";
 import { designKnownClasses, type DesignKnownClasses } from "./style-classes";
-import { designTokenColorIndex, lintDesignAuthoringContract, type DesignTokenColorIndex } from "./authoring-lint";
+import { DESIGN_CAPTURED_ATTRIBUTE, designTokenColorIndex, lintDesignAuthoringContract, type DesignTokenColorIndex } from "./authoring-lint";
 import { mergeDesignThemes, readDesignThemeCatalog } from "./themes";
 
 export { listDesignAssets,type DesignAssetSummary } from "./assets";
@@ -2105,11 +2105,50 @@ async function lintFrame(
           severity: "warning",
           oid: oid ?? undefined,
           fix: remainder
-            ? "Use existing classes or utilities from the application's styles, define them in the frame's <style> or a Design stylesheet, or remove them."
-            : `Use an existing class or utility from the application's styles, define .${name} in the frame's <style> or a Design stylesheet, or remove it.`,
+            ? "Use existing classes or utilities from the application's styles, define them in a Design stylesheet (or a component's main frame), or remove them."
+            : `Use an existing class or utility from the application's styles, define .${name} in a Design stylesheet (or a component's main frame), or remove it.`,
         },
       ));
       if (remainder) break;
+    }
+    // A component's class (its main's <style>, which the expansion brings)
+    // belongs inside that component and its instances, not on other layers.
+    const globalClasses = componentExpansion.usedComponents.length && componentExpansion.html !== source
+      ? await knownClasses(file, source, document)
+      : null;
+    if (globalClasses) {
+      const borrowed = new Map<string, (typeof records)[number]>();
+      for (const record of records) {
+        // Inside an instance (its slotted layers) or captured markup, which
+        // keeps the classes it came with.
+        let skipped = false;
+        for (let at: DefaultTreeAdapterTypes.ParentNode | null = record.element; at && "tagName" in at;
+          at = at.parentNode as DefaultTreeAdapterTypes.ParentNode | null)
+          if ((at !== record.element && at.tagName.startsWith("zd-")) || at.attrs.some((attribute) => attribute.name === DESIGN_CAPTURED_ATTRIBUTE)) { skipped = true; break; }
+        if (skipped) continue;
+        const value = record.element.attrs.find((attribute) => attribute.name === "class")?.value;
+        for (const name of (value ?? "").replace(/\{\{[^}]*\}\}/g, "{{}}").split(/[\t\n\f\r ]+/)) {
+          if (!name || name.includes("{{") || borrowed.has(name)) continue;
+          if (availableClasses.has(name) && !globalClasses.has(name)) borrowed.set(name, record);
+        }
+      }
+      for (const [index, [name, { element, oid }]] of [...borrowed].entries()) {
+        const remainder = borrowed.size > 10 && index === 9;
+        violations.push(violationAt(
+          file,
+          "component-class",
+          remainder
+            ? `${borrowed.size - 9} more component classes are used outside their components.`
+            : `Class "${name}" is a component's; use it only inside that component and its instances.`,
+          element.sourceCodeLocation?.attrs?.class ?? element.sourceCodeLocation?.startTag,
+          {
+            severity: "warning",
+            oid: oid ?? undefined,
+            fix: "Place an instance of the component, or define the class in a Design stylesheet so every frame can use it.",
+          },
+        ));
+        if (remainder) break;
+      }
     }
   }
   for (const { element, inHead } of designIgnoredOptionsTemplates(source, document)) {
@@ -2122,12 +2161,15 @@ async function lintFrame(
         fix: inHead ? "Merge the option templates into one." : "Move the options template into the frame's <head>.",
       }));
   }
+  const registryCanvas = canvas === null ? null : canvas ?? await readCanvas(workspacePath).catch(() => null);
+  const registry = registryCanvas ? designComponentRegistry(registryCanvas) : null;
   violations.push(...lintDesignAuthoringContract({
     file,
     source,
     records,
     tokenColors,
     lineAt: (offset) => lineAndColumnAt(source, offset),
+    main: registry ? [...registry.files.values()].includes(file) || registry.problems.some((problem) => problem.file === file) : null,
   }));
   const usedComponents = new Set(componentExpansion.usedComponents);
   // Components expand in light content only; the expander never enters a

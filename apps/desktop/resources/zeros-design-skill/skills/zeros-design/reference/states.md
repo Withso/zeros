@@ -2,7 +2,9 @@
 
 Reviewers usually want every state of a surface side by side: default, hover, selected, focus-visible, disabled, loading, empty, error, and long or missing content, plus the workspace variants where the product differs. Frames do not run scripts, so each state is drawn rather than toggled. These are patterns that work well on the canvas; choose whichever fits the request.
 
-A state is an attribute or a state class on the same markup, never a second version of it: `is-hover`, `is-disabled`, `aria-pressed="true"`, `aria-expanded="true"`, `data-state="open"`, styled by the frame's or the directory's CSS.
+A state is an attribute or a state class on the same markup, never a second version of it: `is-hover`, `is-disabled`, `aria-pressed="true"`, `aria-expanded="true"`, `data-state="open"`, styled by the directory's CSS or the component's main.
+
+A component's interaction states are its **state variants**: `<zd-variant name="hover" zd-state="hover"></zd-variant>` (also `active` for Pressed, `focus-visible` for Focus, `disabled`) with the main's own `:hover` rules (`reference/format.md`, Components). People add them with Add variant and edit them in the Style panel while the state shows; the edit writes a rule such as `:is([data-oid="root"], [data-zd-part="root"]):hover :is([data-oid="send"], [data-zd-part="send"]) { opacity: 0.8 !important; }`. Keep those rules when you edit the main.
 
 ## One frame per state
 
@@ -19,7 +21,7 @@ A state is an attribute or a state class on the same markup, never a second vers
 
 ## Interaction and motion
 
-- A drawn hover, pressed or focus state appears in captures and on the canvas. `:hover` and `:focus-visible` rules apply only while someone actually hovers or focuses the element.
+- A drawn hover, pressed or focus state appears in captures and on the canvas. `:hover` and `:focus-visible` rules apply only while someone actually hovers or focuses the element, except on a main showing its state variant.
 - Animate state changes with CSS transitions and `@keyframes`. The motion timeline edits and previews keyframes from source, and captures stop animations.
 
 ## Themes

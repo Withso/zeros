@@ -250,7 +250,7 @@ describe("authoring contract lint", () => {
         line: 2,
         column: 6,
         message: 'Move the inline style "display: flex; gap: 8px", repeated on 4 elements (lines 2, 3, 4 and 1 more), into one class.',
-        fix: "Declare it once as a class in the frame's <style> or a Design stylesheet and use that class on each element; keep inline style for one-off values.",
+        fix: "Declare it once as a class in a Design stylesheet, or in the main frame's <style> when the elements are a component's, and use that class on each element; keep inline style for one-off values.",
       },
     ]);
   });
