@@ -9,12 +9,15 @@ interface Pending { chat?: ChatRow; deleted?: true; replace?: true; revision: nu
   ack?: string }
 
 /** R3 durable channel. Live viewers get every token over bridge frames; the control plane gets whole items and state
- * (Conductor's split). The row a turn streams into (the chat's last row) is held: it goes when the next row starts, at
- * a durable boundary (any store edit, turn end, Stop), 3 s after its last fold, or as progress at most every 10 s for
- * readers of the server copy (read-only teammates, other devices). Sends are single-flight; whole items gather for one
- * second so a burst of tool calls stays one write. Reconnect takes a current snapshot instead of buffering offline. */
-export const HELD_QUIET_MS = 3_000;
+ * (Conductor's split). The row a turn streams into (the chat's last row) is held: it goes when the next row starts,
+ * with an edit that carries rows, at turn end or a flush (Stop), 5 s after its last fold, or as progress at most every
+ * 10 s for readers of the server copy (read-only teammates, other devices, API, search). An edit with no rows while the
+ * turn runs (outbox accept/report) keeps holding. Sends are single-flight; whole items a stream completes gather for two
+ * seconds, the approved ceiling of one ingest write per two seconds per running chat. Reconnect takes a current snapshot
+ * instead of buffering offline streams. */
+export const HELD_QUIET_MS = 5_000;
 export const HELD_PROGRESS_MS = 10_000;
+export const SETTLED_GATHER_MS = 2_000;
 export class HistoryMirror {
   private online = false;
   private epoch = 0;
@@ -145,12 +148,14 @@ export class HistoryMirror {
     clearTimeout(this.timer); this.timer = undefined;
   }
   /** Moves held rows (one chat, or all for a final mirror: Stop, shutdown, runtime handoff) into the next send. */
-  private release(chatId?: string): void {
+  private release(chatId?: string, gathered = false): void {
     for (const [id, entry] of [...this.held]) {
       if (chatId !== undefined && id !== chatId) continue;
       clearTimeout(entry.timer); this.held.delete(id);
-      const pending: Pending = this.pending.get(id) ?? { rows: new Map(), revision: this.store.historyRevision(id), due: 0 };
-      pending.due = 0;
+      const existing = this.pending.get(id);
+      const pending: Pending = existing ?? { rows: new Map(), revision: this.store.historyRevision(id), due: 0 };
+      // A timer release joins a gather already running rather than cutting it short.
+      if (!gathered || !existing) pending.due = 0;
       if (!pending.deleted) { pending.rows.set(entry.row.msgId, entry.row); this.pending.set(id, pending); }
     }
   }
@@ -161,7 +166,7 @@ export class HistoryMirror {
     const epoch = this.epoch;
     entry.timer = setTimeout(() => {
       if (epoch !== this.epoch || this.held.get(chatId) !== entry) return;
-      this.release(chatId); this.drain();
+      this.release(chatId, true); this.drain();
     }, Math.max(0, Math.min(entry.last + HELD_QUIET_MS, entry.since + HELD_PROGRESS_MS) - now));
     entry.timer.unref?.();
     this.held.set(chatId, entry);
@@ -205,7 +210,7 @@ export class HistoryMirror {
       if (tail && !rows.some(row => row.msgId === tail.row.msgId)) rows = [tail.row, ...rows];
     }
     const boundary = !!(change.flush || change.chat || change.deleted || change.replace);
-    const pending: Pending = this.pending.get(chatId) ?? { rows: new Map(), revision: this.store.historyRevision(chatId), due: boundary ? 0 : Date.now() + 1000 };
+    const pending: Pending = this.pending.get(chatId) ?? { rows: new Map(), revision: this.store.historyRevision(chatId), due: boundary ? 0 : Date.now() + SETTLED_GATHER_MS };
     if (boundary) pending.due = 0;
     if (change.deleted) { pending.deleted = true; pending.chat = undefined; pending.rows.clear(); }
     else {

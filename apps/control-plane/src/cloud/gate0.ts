@@ -361,7 +361,9 @@ export async function runCloudV2Gate0(options: CloudV2Gate0Options): Promise<Clo
       const current = parse(Rows, await bridge!.op("messages.window", { chatId }), "history_mirror").messages;
       requireCheck(current.length >= rows.length, "history_mirror");
       const mirrored = parse(z.object({ result: Rows }), await request(`${base}/${workspace!.id}/history`, "history_mirror", "POST", { op: "messages.window", params: { chatId } }), "history_mirror");
-      return sameRows(current, mirrored.result.messages);
+      if (!sameRows(current, mirrored.result.messages)) return false;
+      // Later offline and wake checks compare with these settled rows.
+      transcripts.set(chatId, current); return true;
     });
     measure("history_mirror", startedAt);
     bridge.close(); bridge = undefined;

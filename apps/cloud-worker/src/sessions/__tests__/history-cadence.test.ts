@@ -108,9 +108,9 @@ it("R3: sends a streaming item to the control plane only when it is whole, never
     // 300 deltas across 60 seconds: the live relay carries them; the server copy gets progress at most every 10 s.
     for (let i = 0; i < 300; i++) { await store.fold("chat", chunk()); await vi.advanceTimersByTimeAsync(200); }
     expect(relay.frames.filter(frame => frame.t === "history").length).toBeLessThanOrEqual(6);
-    // The next item starts: the previous one is whole and its final version goes within the one-second gather.
+    // The next item starts: the previous one is whole and its final version goes within the two-second gather.
     await store.fold("chat", { sessionId: "exec", update: { sessionUpdate: "tool_call", toolCallId: "tool", title: "Read", status: "pending" } } as never);
-    await vi.advanceTimersByTimeAsync(1000);
+    await vi.advanceTimersByTimeAsync(2000);
     const versions = relay.frames.filter(frame => frame.t === "history").flatMap(frame => frame.messages?.rows ?? []).filter(row => row.msgId === "answer");
     expect(JSON.parse(versions.at(-1)!.payload).text).toBe("x".repeat(30_000));
     // The turn's end releases the new tail.
@@ -144,7 +144,7 @@ it("R3: a burst of completed tool items gathers into one write", async () => {
       await store.fold("chat", { sessionId: "exec", update: { sessionUpdate: "tool_call", toolCallId: `tool-${i}`, title: "Read", status: "pending" } } as never);
       await vi.advanceTimersByTimeAsync(50);
     }
-    await vi.advanceTimersByTimeAsync(1000);
+    await vi.advanceTimersByTimeAsync(2000);
     // Nine whole items (the tenth is still the streaming tail) in at most two frames, never one per item.
     const frames = relay.frames.flatMap(frame => frame.t === "history" && frame.messages ? [frame.messages] : []);
     expect(frames.length).toBeLessThanOrEqual(2);
@@ -152,19 +152,35 @@ it("R3: a burst of completed tool items gathers into one write", async () => {
   } finally { await cleanup(); }
 });
 
-it("R3: a store edit mid-item sends the item once and keeps holding the rest of its stream", async () => {
+it("R3: an edit with no rows while the turn runs (outbox accept/report) keeps holding; the turn's end sends at once", async () => {
   const { store, relay, chunk, cleanup } = await setup();
   vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
   vi.setSystemTime(0);
   try {
     for (let i = 0; i < 10; i++) { await store.fold("chat", chunk()); await vi.advanceTimersByTimeAsync(200); }
-    // The outbox accept and report are store edits at the start of every delivered turn.
-    await store.update("chat", draft => { draft.chat!.title = "Renamed"; });
-    await vi.advanceTimersByTimeAsync(1000);
-    const atBoundary = relay.frames.filter(frame => frame.t === "history").length;
-    for (let i = 0; i < 40; i++) { await store.fold("chat", chunk()); await vi.advanceTimersByTimeAsync(200); }
-    // Eight more seconds of tokens after the edit: no write until the 10-second progress mark.
-    expect(relay.frames.filter(frame => frame.t === "history").length).toBe(atBoundary);
+    // Changes saved session state only, as acceptOutbox and reportOutbox do: no row, no chat row.
+    await store.update("chat", draft => { draft.continuation = (draft.continuation ?? 0) + 1; });
+    for (let i = 0; i < 30; i++) { await store.fold("chat", chunk()); await vi.advanceTimersByTimeAsync(200); }
+    // Eight seconds of tokens and an edit: nothing until the 10-second progress mark.
+    expect(relay.frames.filter(frame => frame.t === "history")).toEqual([]);
+    await store.finish("chat", "turn", { stopReason: "end_turn" });
+    await vi.advanceTimersByTimeAsync(0);
+    const answer = relay.frames.filter(frame => frame.t === "history").flatMap(frame => frame.messages?.rows ?? []).filter(row => row.msgId === "answer").at(-1);
+    expect(JSON.parse(answer!.payload).text).toBe("x".repeat(4000));
+  } finally { await cleanup(); }
+});
+
+it("R3: an edit with no rows after the turn ended releases the held row at once", async () => {
+  const { store, relay, chunk, cleanup } = await setup();
+  vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+  vi.setSystemTime(0);
+  try {
+    await store.finish("chat", "turn", { stopReason: "end_turn" });
+    await vi.advanceTimersByTimeAsync(0); relay.frames = [];
+    await store.fold("chat", chunk());
+    await store.update("chat", draft => { draft.continuation = (draft.continuation ?? 0) + 1; });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(relay.frames.filter(frame => frame.t === "history").flatMap(frame => frame.messages?.rows ?? []).some(row => row.msgId === "answer")).toBe(true);
   } finally { await cleanup(); }
 });
 
@@ -174,9 +190,9 @@ it("R3: a row folded with nothing after it reaches the control plane within the 
   vi.setSystemTime(0);
   try {
     await store.fold("chat", chunk());
-    await vi.advanceTimersByTimeAsync(2_000);
+    await vi.advanceTimersByTimeAsync(4_000);
     expect(relay.frames.filter(frame => frame.t === "history")).toEqual([]);
-    await vi.advanceTimersByTimeAsync(2_500);
+    await vi.advanceTimersByTimeAsync(1_500);
     const answer = relay.frames.filter(frame => frame.t === "history").flatMap(frame => frame.messages?.rows ?? []).find(row => row.msgId === "answer");
     expect(JSON.parse(answer!.payload).text).toBe("x".repeat(100));
   } finally { await cleanup(); }
