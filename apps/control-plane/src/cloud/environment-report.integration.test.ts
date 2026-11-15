@@ -15,7 +15,7 @@ d("environment report boot identity", () => {
   beforeAll(() => { pool = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL, max: 3 }); });
   beforeEach(async () => { await resetMigratedTestDatabase(pool); });
   afterAll(async () => { await pool.end(); });
-  async function fixture() {
+  async function fixture(staleError?: string) {
     const org = randomUUID(), owner = randomUUID();
     await pool.query("INSERT INTO users(id,email,display_name) VALUES($1,$2,'Fixture')", [owner, `${owner}@example.test`]);
     await grantTestPro(pool, owner);
@@ -28,6 +28,7 @@ d("environment report boot identity", () => {
       name: "workspace", repository: "fixture/repo", sourceRepositoryId: "42", branch: "workspace/one", baseBranch: "main", computerBuildId: null });
     const token = await store.rotateWorkerToken(workspace.id), boot = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
     await store.beginWorkerHello(token, boot); await store.acceptWorkerHello(token, boot);
+    if (staleError) await pool.query("UPDATE cloud_v2_workspaces SET error_code=$2 WHERE id=$1", [workspace.id, staleError]);
     await environments.report(token, boot, { versionId: saved.versionId, sequence: 2, state: "ready" });
     const app = new Hono();
     app.onError((error, c) => error instanceof HttpError ? c.json({ code: error.code }, error.status) : c.json({ code: "internal" }, 500));
@@ -72,5 +73,11 @@ d("environment report boot identity", () => {
     expect(await response.json()).toEqual({ sequence: 2 });
     expect(row).toEqual({ report_boot_id: f.boot, ready_boot_id: f.boot, report_sequence: "2", report_state: "ready" });
     expect((await f.store.get(f.workspace.id, f.owner)).state).toBe("running");
+  });
+
+  it("clears an earlier boot's failure when the ready report makes the workspace running", async () => {
+    const f = await fixture("execution_not_retired");
+    expect((await pool.query("SELECT state,error_code FROM cloud_v2_workspaces WHERE id=$1", [f.workspace.id])).rows[0])
+      .toEqual({ state: "running", error_code: null });
   });
 });
