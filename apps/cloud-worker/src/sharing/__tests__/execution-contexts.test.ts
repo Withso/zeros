@@ -263,6 +263,31 @@ describe("message-authority-v1 (R2)", () => {
     expect(f.contexts.live(A)).toBe(false);
   });
 
+  it("admits a turn started after an idle spell at once: one immediate pull, not the next 5-second tick", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "setTimeout", "clearTimeout"] });
+    let leaseUntil = 1_030_000;
+    const f = fixture((path, body) => path === "turn-lease" ? lease(String(body.contextId), leaseUntil)
+      : { sequence: "0", fresh: true, ageMs: 0, untilMs: 600_000, ended: [] });
+    f.contexts.setMessageAuthority(true);
+    await f.contexts.turnLease({ chatId: "c", userMessageId: "m1", dispatchId: A, generation: "1", contextId: A });
+    await f.contexts.pull();
+    expect(f.contexts.admits(A)).toBe(true);
+    leaseUntil = 1_150_000;
+    // The VM goes quiet: no context, no pulls, so freshness ages past the cutoff.
+    await f.contexts.retire(A, "operation_done", 0).catch(() => {});
+    f.advance(120_000);
+    await f.contexts.turnLease({ chatId: "c2", userMessageId: "m2", dispatchId: B, generation: "1", contextId: B });
+    expect(f.contexts.admits(B)).toBe(false);
+    const pulls = f.calls.filter(call => call.path === "execution-leases/authority").length;
+    expect(await f.contexts.admitted(B)).toBe(true);
+    expect(f.calls.filter(call => call.path === "execution-leases/authority").length).toBe(pulls + 1);
+    // Concurrent callers share one pull.
+    f.advance(46_000);
+    const [one, two] = await Promise.all([f.contexts.admitted(B), f.contexts.admitted(B)]);
+    expect([one, two]).toEqual([true, true]);
+    expect(f.calls.filter(call => call.path === "execution-leases/authority").length).toBe(pulls + 2);
+  });
+
   it("asks about a context tracked after the acknowledgement, and renews again when the control plane has no authority route", async () => {
     let status = 200;
     const f = fixture((path, body) => path === "turn-lease" ? lease(String(body.contextId), 1_030_000)

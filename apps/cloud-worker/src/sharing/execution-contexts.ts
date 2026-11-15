@@ -54,6 +54,18 @@ export class ExecutionContexts {
     if (!this.live(contextId)) return false;
     return !this.messageAuthority || (this.freshAt !== undefined && this.now() - this.freshAt <= AUTHORITY_SILENCE_CUTOFF_MS);
   }
+  /** As admits(), but a live context whose freshness aged while the VM was quiet (pulls run only while contexts live)
+   * asks once at once instead of failing the first turn after an idle spell. Concurrent callers share that pull. */
+  async admitted(contextId: string): Promise<boolean> {
+    if (this.admits(contextId)) return true;
+    if (!this.messageAuthority || !this.live(contextId)) return false;
+    await this.pullNow();
+    return this.admits(contextId);
+  }
+  private pulling?: Promise<void>;
+  private pullNow(): Promise<void> {
+    return this.pulling ??= this.pull().catch(() => {}).finally(() => { this.pulling = undefined; });
+  }
 
   /** §7a: this boot's clean attestation, once. Every lease waits for it; unproven cleanup (or a refused receipt) grants none. */
   clean(attest: () => Promise<number | { processes: number; legacyMaterial: "none" | "removed" | "refused"; refusals?: readonly CloudV2BootCleanRefusal[] }>): Promise<void> {
@@ -260,7 +272,7 @@ export class ExecutionContexts {
   private arm(): void {
     const any = [...this.entries.values()].some(entry => !entry.ended);
     if (any && !this.timer) {
-      this.timer = this.messageAuthority ? setInterval(() => { void this.pull(); }, AUTHORITY_PULL_MS)
+      this.timer = this.messageAuthority ? setInterval(() => { void this.pullNow(); }, AUTHORITY_PULL_MS)
         : setInterval(() => { void this.renew(); }, this.deps.renewMs ?? CONTEXT_RENEW_MS);
       this.timer.unref?.();
     }
