@@ -1,7 +1,7 @@
 import path from "node:path";
 import { cloudV2WorkerSigningKey } from "./cloud-v2-keys.mjs";
 import { isDeepStrictEqual } from "node:util";
-import { readPrivateJson, privateDirectory, writePrivateFile } from "./state.mjs";
+import { readPrivateJson, writePrivateFile } from "./state.mjs";
 import { developmentProfilePath, profileExists, PROFILE_NAME, assertIgnoredProfileDestination } from "./profile-path.mjs";
 import { portableProfileIssues, publicDevProfile } from "./profile.mjs";
 
@@ -69,17 +69,6 @@ export function hostedProfileIssues(p) {
 }
 
 export const hostedPublicProfile = (state, profile) => publicDevProfile({ state }, profile);
-
-export function hostedDesktopEnvironment(state, profile, directory) {
-  const p = hostedPublicProfile(state, profile);
-  return { ...(profile.connections?.enabled?{ZEROS_DEV_CONNECTIONS_ENABLED:"true",ZEROS_DEV_GITHUB_REFERENCE_MODE:"true",ZEROS_DEV_GENERATION:state.generation}:{}), ZEROS_DEV_ENVIRONMENT: "hosted", ZEROS_DEV_AUTH_PROFILE: JSON.stringify(p),
-    ZEROS_DEV: "1", ZEROS_CHANNEL: "dev", VITE_ZEROS_CHANNEL: "dev", ZEROS_ISOLATE: "1",
-    ZEROS_DEV_NODE_EXECUTABLE: process.execPath,
-    ZEROS_INSTANCE: `dev-${state.owner}-${state.generation}`, ZEROS_DATA_DIR: privateDirectory(directory, `desktop-${state.generation}`),
-    ZEROS_CONTROL_PLANE_URL: p.apiOrigin, AUTH_PROVIDER: "workos", AUTH_DESKTOP_CLIENT_ID: p.desktopClientId,
-    AUTH_ISSUER: p.issuer, AUTH_JWKS_URL: p.jwksUrl, AUTH_AUDIENCE: p.audience,
-    VITE_APP_BASE_URL: p.appOrigin, VITE_CONTROL_PLANE_URL: p.apiOrigin, ZEROS_CLOUD_WORKSPACES_ENABLED: "true" };
-}
 
 /** Cloud workspace v2 worker runtime, published into this Dev's storage by
  * `pnpm --dir apps/control-plane cloud-v2:publish-runtime`. VMs download it. */

@@ -1,10 +1,7 @@
 import { createPrivateKey, createPublicKey, sign, verify } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { newHostedGeneration } from "../dev-environment/hosted-state.mjs";
-import { hostedBackendEnvironment, hostedDesktopEnvironment, hostedPublicProfile, hostedWebEnvironment } from "../dev-environment/hosted-profile.mjs";
+import { hostedBackendEnvironment, hostedPublicProfile, hostedWebEnvironment } from "../dev-environment/hosted-profile.mjs";
 
 function fixture() {
   const state: any = newHostedGeneration({ owner: "a".repeat(24), identity: "test" });
@@ -39,11 +36,6 @@ describe("hosted Dev cloud v2 worker signing key", () => {
     // Distinct from every other backend secret and absent from public surfaces.
     const backend = hostedBackendEnvironment(state, profile, source, undefined, env);
     expect(Object.entries(backend).filter(([name, value]) => name !== "CLOUD_V2_WORKER_SIGNING_KEY" && value === first)).toEqual([]);
-    const directory = mkdtempSync(path.join(tmpdir(), "zeros-dev-signing-"));
-    try {
-      const publicValues = JSON.stringify([hostedPublicProfile(state, profile), hostedWebEnvironment(state, profile),
-        hostedDesktopEnvironment(state, profile, directory)]);
-      expect(publicValues).not.toContain(first);
-    } finally { rmSync(directory, { recursive: true, force: true }); }
+    expect(JSON.stringify([hostedPublicProfile(state, profile), hostedWebEnvironment(state, profile)])).not.toContain(first);
   });
 });

@@ -95,22 +95,13 @@ describe("GitHub method disconnect commit order", () => {
     expect(mocks.beginApp).toHaveBeenCalledWith(true, true, false);
   });
 
-  it.each(["local", "hosted"])(
-    "authorizes the workspace callback before installation for an isolated %s Dev backend",
-    async (mode) => {
-      vi.stubEnv("ZEROS_CHANNEL", "dev");
-      vi.stubEnv("ZEROS_DEV_ENVIRONMENT", mode);
-      vi.stubEnv("ZEROS_ISOLATE", "1");
-      await ghAppConnect({ installFlow: true }, {} as never);
-      expect(mocks.beginApp).toHaveBeenCalledWith(false, false, false);
-    },
-  );
-
-  it.each(["alpha", "beta", "stable"])(
-    "preserves the installation flow for %s even with ambient Dev variables",
+  it.each(["dev", "alpha", "beta", "stable"])(
+    "preserves the installation flow for %s even with former workspace Dev variables",
     async (channel) => {
       vi.stubEnv("ZEROS_CHANNEL", channel);
-      vi.stubEnv("ZEROS_DEV_ENVIRONMENT", "hosted");
+      vi.stubEnv("ZEROS_DEV_ENVIRONMENT", "local");
+      vi.stubEnv("ZEROS_DEV_AUTH_PROFILE", "{}");
+      vi.stubEnv("ZEROS_ISOLATE", "1");
       await ghAppConnect({ installFlow: true }, {} as never);
       expect(mocks.beginApp).toHaveBeenCalledWith(true, false, false);
     },

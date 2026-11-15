@@ -1,7 +1,7 @@
 import { channel, schemeForChannel } from "../../../src/engine/runtime";
 import { controlPlaneFetch } from "../../control-plane-fetch";
 import { appBaseUrl } from "../../app-base-url";
-import { devWorkOSConfigurationIssue, workspaceDevAuthProfile } from "../../dev-workos-auth-policy";
+import { devWorkOSConfigurationIssue } from "../../dev-workos-auth-policy";
 import { desktopAuthConfig } from "../../workos-desktop-config";
 import {
   controlPlaneBaseUrl,
@@ -14,16 +14,9 @@ import { emitEvent } from "../events";
 import type { CommandHandler } from "../router";
 import { persistWorkOSSession } from "./auth-session";
 import { WorkOSDevCallbackRelay } from "../../workos-dev-callback-relay";
-import { localDevCallbackStore } from "../../local-dev-callback-store";
 
 let flow: WorkOSDesktopAuthorizationFlow | null = null;
 let callbackRelay: WorkOSDevCallbackRelay | null = null;
-let localCallbackRelay: WorkOSDevCallbackRelay | null = null;
-
-function isolatedDevCallbackRelay(): WorkOSDevCallbackRelay | null {
-  if (channel() !== "dev") return null;
-  return (localCallbackRelay ??= new WorkOSDevCallbackRelay(localDevCallbackStore()));
-}
 
 /** Share callback routing only for Dev instances using the shared secret store. */
 function sharedDevCallbackRelay(): WorkOSDevCallbackRelay | null {
@@ -46,7 +39,7 @@ function workOSFlow(): WorkOSDesktopAuthorizationFlow {
     resolveAccountId: (accessToken) => resolveWorkOSDesktopAccountId(accessToken, controlPlaneFetch),
     persistSession: persistWorkOSSession,
     registerCallback: (state, expiresAt, accept) =>
-      (workspaceDevAuthProfile() !== undefined ? isolatedDevCallbackRelay() : sharedDevCallbackRelay())?.register(state, expiresAt, accept) ??
+      sharedDevCallbackRelay()?.register(state, expiresAt, accept) ??
       (() => undefined),
     revokeSession: async (accessToken) => {
       if (!(await requestWorkOSDesktopRevocation("current", accessToken, controlPlaneFetch))) {
@@ -68,12 +61,6 @@ export function acceptWorkOSDesktopCallback(input: {
   error?: string | null;
 }): boolean {
   const relay = sharedDevCallbackRelay();
-  // Any Dev window may receive zeros-dev://. Routing is shared independently
-  // from credentials so an isolated workspace can finish its own PKCE flow.
-  if (channel() === "dev") {
-    try { if (isolatedDevCallbackRelay()?.deliver(input)) return true; }
-    catch { console.warn("[auth] Local Dev callback relay unavailable"); }
-  }
   return relay?.deliver(input) || (flow?.acceptCallback(input) ?? false);
 }
 
@@ -96,8 +83,6 @@ export const authStartSignIn: CommandHandler = async (args) => {
         auth: config,
         appOrigin: appBaseUrl(),
         controlPlaneOrigin: controlPlaneBaseUrl(),
-        localProfile: workspaceDevAuthProfile(),
-        isolated: process.env.ZEROS_ISOLATE === "1",
       });
     } catch {
       issue = "token_contract";
