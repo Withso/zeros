@@ -1,12 +1,12 @@
 #!/usr/bin/env node
-// pnpm electron:cloud — this branch's cloud workspaces on one machine, the cloud
-// counterpart of electron:local. It runs the local Dev launcher: an isolated
-// PostgreSQL with this branch's migrations, this branch's control plane, a
-// named Cloudflare tunnel that Boat VMs reach, and the desktop app pointed at
-// it. Nothing is created in Railway or PlanetScale.
+// pnpm electron:cloud (also electron:dev) — this branch's cloud stack on one
+// machine, headless: an isolated PostgreSQL with this branch's migrations, this
+// branch's control plane, the auth web facade and a named Cloudflare tunnel
+// that Boat VMs reach. No desktop app opens; agents drive it with gate0, and
+// `pnpm electron:alpha` or `pnpm alpha:probe` cover deployed Alpha. Nothing is
+// created in Railway or PlanetScale.
 //
-//   pnpm electron:cloud                      start everything and open the app
-//   pnpm electron:cloud --headless           backend only, for agents and gate0
+//   pnpm electron:cloud                      start the stack (--headless is accepted and implied)
 //   pnpm electron:cloud --seed               seed a running stack's test organization
 //   pnpm electron:cloud --stop | --doctor
 //   pnpm electron:cloud --reset [--yes]      delete this checkout's VMs and data
@@ -17,7 +17,7 @@ import { spawn } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const MODES = { "--headless": "backend", "--stop": "stop", "--doctor": "doctor", "--seed": "seed", "--reset": "archive" };
+const MODES = { "--stop": "stop", "--doctor": "doctor", "--seed": "seed", "--reset": "archive" };
 const SHA256 = /^[0-9a-f]{64}$/;
 
 /** Pure flag parsing; `defaultRuntime` is for tests and callers that pin one. */
@@ -36,6 +36,7 @@ export function electronCloudCommand(argv, env = process.env, defaultRuntime = u
       continue;
     }
     if (arg === "--run-only") { args.push(arg); continue; }
+    if (arg === "--headless" && action === "start") continue;
     if (arg === "--yes" && action === "archive") { args.push(arg); continue; }
     throw new Error(`Unknown electron:cloud option ${arg}`);
   }

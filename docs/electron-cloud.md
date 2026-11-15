@@ -1,17 +1,19 @@
 # Zeros Dev: `pnpm electron:dev`
 
-Zeros Dev runs a branch's whole cloud v2 stack on one machine: this branch's
-control plane, its worker runtime on real Boat VMs, and the desktop app. Use it
-to test sign-in, organizations, backend, migration and cloud workspace changes
-before they reach `main`. It is the cloud counterpart of
+Zeros Dev runs a branch's whole cloud v2 stack on one machine, headless: this
+branch's control plane and its worker runtime on real Boat VMs. No desktop app
+opens. Agents drive it with gate0 to test sign-in, organizations, backend,
+migration and cloud workspace changes before they reach `main`. It is the cloud counterpart of
 [Zeros Local](local-development.md) (`pnpm electron:local`), which stays
 account-free and Local-only. Nothing is created in Railway or PlanetScale.
-After merge, Alpha is the shared cloud environment.
+After merge, Alpha is the shared cloud environment: measure it headlessly with
+[`pnpm alpha:probe`](#measuring-alpha), and use the Mac app against it with
+`pnpm electron:alpha`.
 
 `pnpm electron:cloud` is the same launcher; scripts, archive hooks and agent
 checks keep using that name. In Conductor, the **Zeros Dev** entry starts it on
-a Mac and **Zeros Dev backend** starts it with `--headless` in a cloud
-workspace. The earlier per-checkout Railway/PlanetScale Dev environment has been
+a Mac or in a cloud workspace. `--headless` is still accepted and changes
+nothing. The earlier per-checkout Railway/PlanetScale Dev environment has been
 retired.
 
 ## What runs
@@ -23,15 +25,13 @@ retired.
 - This branch's control plane on loopback, as the `development` channel. It
   verifies Alpha's WorkOS tokens and runs cloud v2 with this checkout's own
   worker signing key, vault key and Codex keyring.
-- The auth web facade for desktop sign-in pages.
+- The auth web facade for sign-in pages.
 - A named Cloudflare tunnel with stable hostnames per checkout:
   `api-dev-<owner>.<domain>` and `app-dev-<owner>.<domain>`. Boat VMs reach the
   control plane's worker API and Codex proxy through it; named tunnels stream
   server-sent events, which quick tunnels do not. The control plane reaches
   each VM outbound through Boat's protected route, so nothing listens on your
   machine's public interfaces.
-- The desktop app built from this branch, pointed at the tunnel origin, unless
-  you pass `--headless`.
 
 Boat VMs are real and billed while they run. The worker runtime is a published
 build pinned by its SHA-256.
@@ -60,7 +60,7 @@ then confirm that a fork saves it and is deleted afterwards.
 - For seeding and agent checks, `.env.agent` entries: `ZEROS_DEV_REPOSITORY` and
   `ZEROS_DEV_GITHUB_INSTALLATION_ID` (the test repository and its Alpha GitHub App
   installation), `ZEROS_DEV_PASSWORD` (the fixture user's Alpha WorkOS password;
-  required for headless seeding and gate0, optional when you sign in to the app),
+  required for seeding and gate0),
   and test agent keys `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN`,
   `OPENAI_API_KEY` and `CURSOR_API_KEY`.
 
@@ -104,7 +104,7 @@ contents. Never commit the profile or paste it into chat.
 
 Zeros Dev reuses Alpha's WorkOS and GitHub registrations, so identities,
 organization management, repository installations and permissions are shared;
-the database, keys, object prefixes and desktop session are this checkout's own.
+the database, keys and object prefixes are this checkout's own.
 Authorize these WorkOS callback patterns for the configured domain:
 
 - `https://app-dev-*.example.com/auth/callback` for the Web application.
@@ -114,9 +114,10 @@ The GitHub OAuth redirect is
 `https://api-dev-<owner>.example.com/v1/github/oauth/callback`. Configure exact
 callbacks, or enable GitHub's wildcard matching for a fully controlled domain.
 GitHub's “redirect_uri is not associated with this application” page means that
-registration is missing; retrying from the desktop cannot fix it.
+registration is missing; retrying cannot fix it.
 
-Unpackaged Dev desktops share the `zeros-dev` URL scheme. Starting GitHub or
+Unpackaged development desktops (`pnpm electron:alpha`) share the `zeros-dev`
+URL scheme. Starting GitHub or
 WorkOS sign-in reclaims that handler for the current instance, and a callback is
 relayed to the process that began that exact attempt.
 
@@ -186,8 +187,7 @@ must include the packager's `BUILD.json` source hash to be indexed.
 ## Commands
 
 ```sh
-pnpm electron:dev                                # start and open the app
-pnpm electron:dev --headless                     # backend only, for agents
+pnpm electron:dev                                # start the headless stack
 pnpm electron:dev --runtime <sha256>              # explicit runtime override
 pnpm electron:dev --seed                         # seed a running stack's test organization
 pnpm electron:dev --stop                         # stop a running stack
@@ -207,21 +207,14 @@ repository, and the test agent keys through the vault. The exact fixture user
 also receives the `developer` staff role through the audited staff-management
 path, enabling Settings' Internal tab in this local database. Existing fixture
 receipts are upgraded once on the next start; a stronger staff role is kept.
-Alpha's database is never changed. Without
-`ZEROS_DEV_PASSWORD`, sign in to the app first and then run `--seed`. A missing
-input is reported without stopping the stack.
+Alpha's database is never changed. Seeding needs `ZEROS_DEV_PASSWORD`; set it,
+then run `--seed`. A missing input is reported without stopping the stack.
 
-The desktop session persists in this instance's `environments/<owner>/desktop`
-directory under `~/.zeros-dev`; the `dev-instances/local-<owner>` directory holds
-the app bundle. With `ZEROS_DEV_PASSWORD`, the launcher signs the fixture user
-into the desktop automatically if there is no saved session. It uses the Alpha
-Desktop client and the fixture organization, verifies the token in Electron
-main, and consumes a private 0600 handoff before opening the window. Passwords
-and API keys stay in the launcher; tokens never enter argv or environment.
-An existing session is reused, and an unavailable or different saved account
-is preserved. This path is inert in packaged builds and `electron:local`.
+Earlier versions also opened a Dev desktop app with an automatic fixture
+sign-in. Their `desktop` and `desktop-sign-in` directories under
+`~/.zeros-dev/environments/<owner>/` are unused, and `--reset` removes them.
 
-Agents run `--headless`, then gate0 against this checkout's tunnel:
+With the stack running, agents run gate0 against this checkout's tunnel:
 
 ```sh
 pnpm --dir apps/control-plane cloud-v2:gate0 --local --agents codex,claude,cursor --runtime <sha256>
@@ -237,8 +230,8 @@ prompt outbox when the workspace advertises `capabilities.promptOutbox`, which
 this stack enables by default, and over the bridge otherwise. A control plane
 with active execution contexts refuses bridge sends with
 `client_update_required`. gate0 covers send, completion and Stop receipts only.
-To qualify the outbox, separately check the app's running-VM Send
-presentation, quit and reopen with pending messages, Stop during wake, and a
+To qualify the outbox, separately check in the app (`pnpm electron:alpha`,
+after merge) the running-VM Send presentation, quit and reopen with pending messages, Stop during wake, and a
 worker restart during a turn. The last case must settle as interrupted without
 automatically repeating provider work. Use the same cheap model/effort pins and
 count every explicit test turn.
@@ -276,17 +269,16 @@ workspace is deleted even on failure unless `--keep` is passed.
 ## Data and cleanup
 
 State persists between runs under `~/.zeros-dev/environments/<owner>/`: the
-database, the derived keys and the desktop profile. Service output stays in
+database and the derived keys. Service output stays in
 private logs there: `logs/control-plane.log`, `logs/auth-web.log` and
 `logs/cloudflared.log`, with the previous run's copy as `*.previous.log`. Because the worker signing
 key derives from that state, VMs keep trusting the control plane across
 restarts. Boat sandbox, builder and snapshot names carry the checkout's owner,
 so two checkouts never share a provider resource.
 
-`--stop` waits for this checkout's desktop app, its Vite/watch processes and the
-backend services to exit. Shutdown gives each owned process group time to exit
+`--stop` waits for this checkout's backend services and their watchers to exit. Shutdown gives each owned process group time to exit
 gracefully, then escalates within a bounded deadline and confirms it is gone.
-Other checkouts and their apps stay running. A second start refuses an earlier
+Other checkouts stay running. A second start refuses an earlier
 run whose shutdown is unconfirmed; its private receipt and data are kept.
 
 The checkout's WorkOS webhook is paused while Dev is offline. Startup provisions
@@ -304,7 +296,7 @@ crash or machine shutdown cannot run provider cleanup, so use `--stop` after
 reboot recovery or `--reset` when retiring the checkout. Other Dev and hosted
 Alpha endpoints are never paused by this launcher.
 
-`--reset` asks for the owner ID (or `--yes`) and confirms the same app/backend
+`--reset` asks for the owner ID (or `--yes`) and confirms the same backend
 shutdown before cleanup. It then runs this checkout's migrator,
 then drains: it fences the database, deletes only this checkout's VMs, builders
 and snapshots, and confirms each is gone. Only then does it remove the

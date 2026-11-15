@@ -415,7 +415,7 @@ function assertCheckoutAvailable(root, listProcesses) {
     const escaped = script.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     if (new RegExp(`(?:^|[\\s"'])${escaped}(?:$|[\\s"'])`, "m").test(processes))
       throw new Error(
-        "Zeros Dev is running from this checkout. Local and Dev share build outputs; stop Dev or use a separate checkout before launching Zeros Local.",
+        "Zeros Alpha (electron:alpha) is running from this checkout. Local and Alpha share build outputs; quit it or use a separate checkout before launching Zeros Local.",
       );
   }
 }

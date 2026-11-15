@@ -103,8 +103,9 @@ fi
 '''
 run_mode = "concurrent"
 
+# This branch's cloud stack, headless, on a Mac or in a cloud workspace.
 [scripts.run."Zeros Dev"]
-available_in = ["local"]
+available_in = ["local", "cloud"]
 command = '''
 set -e
 if [ -f scripts/dev-environment/hook.sh ]; then exec sh scripts/dev-environment/hook.sh dev; fi
@@ -112,20 +113,9 @@ if [ -d "$HOME/.zeros-dev/tools/bin" ]; then export PATH="$HOME/.zeros-dev/tools
 exec pnpm electron:dev
 '''
 default = true
-icon = "play"
-
-[scripts.run."Zeros Dev backend"]
-available_in = ["cloud"]
-command = '''
-set -e
-if [ -f scripts/dev-environment/hook.sh ]; then exec sh scripts/dev-environment/hook.sh backend; fi
-if [ -d "$HOME/.zeros-dev/tools/bin" ]; then export PATH="$HOME/.zeros-dev/tools/bin:$PATH"; fi
-exec pnpm electron:dev
-'''
-default = true
 icon = "cloud"
 
-# Account-free native UI/feature testing; the Zeros Dev entries stay default.
+# Account-free native UI/feature testing; the Zeros Dev entry stays default.
 [scripts.run."Zeros Local"]
 available_in = ["local"]
 command = '''

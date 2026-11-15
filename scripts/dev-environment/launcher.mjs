@@ -8,7 +8,7 @@ import { createInterface } from "node:readline/promises";
 import { once } from "node:events";
 import { setTimeout as delay } from "node:timers/promises";
 import { ensureWorkspace, acquireWorkspaceLock, systemEnvironment, privateDirectory, writePrivateFile, saveWorkspace, readPrivateJson } from "./state.mjs";
-import { loadProfile, profileIssues, publicDevProfile, desktopEnvironment, backendEnvironment, webEnvironment } from "./profile.mjs";
+import { loadProfile, profileIssues, publicDevProfile, backendEnvironment, webEnvironment } from "./profile.mjs";
 import { ensureTunnel, configureTunnel, deleteTunnel } from "./cloudflare.mjs";
 import { ensureWorkosWebhook, enableWorkosWebhook, pauseWorkosWebhook, deleteWorkosWebhook } from "./workos.mjs";
 import { startPostgres, pickServicePorts, migratePostgres, databaseCommand } from "./postgres.mjs";
@@ -16,11 +16,11 @@ import { DevelopmentProcesses, run, waitForHttp, waitForDevSignIn } from "./proc
 import { ensureDevAuthEnvironment } from "../dev-auth-profile.mjs";
 import { cloudSeedMessage, cloudSeedNeeded, recordCloudSeed } from "./cloud-local-seed-state.mjs";
 import { REBOOT_RECOVERED, currentBoot, recoverLaunchAfterReboot } from "./reboot-recovery.mjs";
-import { createDesktopSignIn } from "./desktop-sign-in.mjs";
 import { resolveLocalRuntime } from "./cloud-local-runtime.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
-const action = process.argv[2] ?? "start";
+// `backend` is the former headless action; Zeros Dev now always runs headless.
+const action = process.argv[2] === "backend" ? "start" : process.argv[2] ?? "start";
 const watch = !process.argv.includes("--run-only");
 
 async function verifyAlpha(profile) {
@@ -101,12 +101,12 @@ async function stop(workspace) {
   if (current.owner !== workspace.state.owner || current.instanceId !== workspace.state.instanceId || current.launcher)
     throw new Error("Development shutdown could not be confirmed; existing state was preserved. Retry --stop after inspecting the supervisor.");
   await pauseStoppedWebhook({ ...workspace, state: current });
-  console.log("[zeros-dev] Desktop and backend processes stopped for this checkout.");
+  console.log("[zeros-dev] Backend processes stopped for this checkout.");
 }
 
 async function start(workspace, profile) {
   if (workspace.state.status !== "active") throw new Error("This development workspace is archived or awaiting cleanup; finish pnpm electron:cloud --reset before restarting it");
-  // A dead supervisor PID alone does not prove that its desktop descendants
+  // A dead supervisor PID alone does not prove that its service descendants
   // exited. Do not recover the lock and overwrite that run's only receipt,
   // unless the machine has rebooted since, which ends every process.
   if (recoverLaunchAfterReboot(workspace)) console.log(REBOOT_RECOVERED);
@@ -116,13 +116,12 @@ async function start(workspace, profile) {
   if (issues.length) throw new Error(issues.join("\n"));
   const release = acquireWorkspaceLock(workspace), processes = new DevelopmentProcesses();
   const env = systemEnvironment(), runId = randomUUID(), token = randomUUID();
-  let postgres, server, desktopSignIn;
+  let postgres, server;
   const abort = () => processes.controller.abort(new Error("Development shutdown requested"));
   for (const signal of ["SIGINT", "SIGTERM"]) process.on(signal, abort);
   const signal = processes.controller.signal;
   try {
     server = createServer(async (request, response) => {
-      if (desktopSignIn && await desktopSignIn.handle(request, response)) return;
       const actual = Buffer.from(request.headers.authorization ?? ""), expected = Buffer.from(`Bearer ${token}`);
       if (request.method !== "POST" || request.url !== "/stop" || actual.length !== expected.length || !timingSafeEqual(actual, expected)) {
         response.writeHead(404).end(); return;
@@ -192,13 +191,7 @@ async function start(workspace, profile) {
     signal.throwIfAborted();
     console.log(`[zeros-dev] Ready: ${publicProfile.apiOrigin}`);
     console.log(`[zeros-dev] Identity: ${publicProfile.authEnvironment}; cloud v2 worker runtime ${apiEnv.CLOUD_V2_RUNTIME_SHA256.slice(0, 12)}. Data persists after shutdown.`);
-    if (action !== "backend") {
-      const desktopEnv = { ...env, ...desktopEnvironment(workspace, profile) };
-      await run("pnpm", ["electron:dev:prep"], { cwd: root, env: desktopEnv, signal, inherit: true, timeout: 300_000, label: "Desktop build" });
-      desktopSignIn = createDesktopSignIn(workspace, profile, { port: server.address().port, runId, root });
-      processes.start("Zeros Dev", process.execPath, [path.join(root, "scripts/dev-instance.mjs"), watch ? "--watch" : "--run-only"],
-        { cwd: root, env: { ...desktopEnv, ...desktopSignIn.environment }, stdio: "inherit" });
-    }
+    console.log("[zeros-dev] Headless: run gate0 with --local against this stack; pnpm electron:cloud --stop shuts it down.");
     if (!signal.aborted) await new Promise(resolve => signal.addEventListener("abort", resolve, { once: true }));
     if (signal.reason?.message !== "Development shutdown requested") throw signal.reason;
   } finally {
@@ -209,7 +202,6 @@ async function start(workspace, profile) {
       console.warn("[zeros-dev] WorkOS webhook pause is pending; owned processes will still stop. Retry pnpm electron:cloud --stop.");
     }
     await processes.stop();
-    await desktopSignIn?.close().catch(() => console.warn("[zeros-dev] An unused automatic sign-in session could not be revoked; private handoff files were removed"));
     if (postgres) await postgres.stop();
     if (server) { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); }
     delete workspace.state.launcher; saveWorkspace(workspace); release();
@@ -227,7 +219,7 @@ async function main() {
     await run(process.execPath, [path.join(root, "scripts/dev-instance.mjs"), watch ? "--watch" : "--run-only"], { cwd: root, env, inherit: true, timeout: 12 * 3600_000 });
     return;
   }
-  if (!["start", "backend", "doctor", "stop", "seed", "archive"].includes(action)) throw new Error("Use start, backend, doctor, stop, seed, archive or alpha");
+  if (!["start", "doctor", "stop", "seed", "archive"].includes(action)) throw new Error("Use start, doctor, stop, seed, archive or alpha");
   const workspace = ensureWorkspace({ repositoryRoot: root });
   if (action === "stop") return stop(workspace);
   const profile = loadProfile(undefined, { root });
@@ -263,6 +255,7 @@ async function main() {
         throw new Error(`Cloud cleanup is not complete (${drain?.pending ?? "unknown"} pending); data, keys and tunnel were kept. Rerun pnpm electron:cloud --reset.`);
       await deleteWorkosWebhook(current, profile); await deleteTunnel(current, profile.cloudflare);
       await postgres.stop(); postgres = undefined;
+      // `desktop` and `desktop-sign-in` remain from runs that still opened the Dev app.
       for (const name of ["postgres", "desktop", "desktop-sign-in", "web", "objects", "backups"]) {
         const directory = path.join(current.directory, name);
         if (fs.existsSync(directory)) {

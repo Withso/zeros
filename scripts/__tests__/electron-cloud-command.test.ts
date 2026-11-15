@@ -5,7 +5,7 @@ import { electronCloudCommand } from "../electron-cloud.mjs";
 const SHA = "a".repeat(64);
 
 describe("pnpm electron:cloud", () => {
-  it("publishes the cloud desktop entry point without a retired command alias", () => {
+  it("publishes the Zeros Dev entry point without a retired command alias", () => {
     const { scripts } = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8"));
     expect(scripts["electron:cloud"]).toBe("node scripts/electron-cloud.mjs");
     expect(scripts).not.toHaveProperty("cloud:local");
@@ -15,7 +15,9 @@ describe("pnpm electron:cloud", () => {
   });
   it("maps each mode to the local Dev launcher with this branch's runtime pin", () => {
     expect(electronCloudCommand([], { ZEROS_CLOUD_V2_RUNTIME_SHA256: SHA })).toEqual({ action: "start", args: [], runtime: SHA });
-    expect(electronCloudCommand(["--headless"], {}, SHA)).toEqual({ action: "backend", args: [], runtime: SHA });
+    // Zeros Dev is backend-only; --headless remains accepted for older hooks and scripts.
+    expect(electronCloudCommand(["--headless"], {}, SHA)).toEqual({ action: "start", args: [], runtime: SHA });
+    expect(electronCloudCommand(["--headless", "--run-only"], {}, SHA)).toEqual({ action: "start", args: ["--run-only"], runtime: SHA });
     expect(electronCloudCommand(["--runtime", SHA, "--run-only"], {})).toEqual({ action: "start", args: ["--run-only"], runtime: SHA });
     // Stopping, inspecting and resetting never need a runtime.
     expect(electronCloudCommand(["--stop"], {})).toEqual({ action: "stop", args: [], runtime: undefined });
@@ -33,6 +35,6 @@ describe("pnpm electron:cloud", () => {
     expect(() => electronCloudCommand(["--stop", "--reset"], {})).toThrow(/one of/);
     // Only a reset accepts --yes.
     expect(() => electronCloudCommand(["--yes"], { ZEROS_CLOUD_V2_RUNTIME_SHA256: SHA })).toThrow(/--yes/);
-    expect(() => electronCloudCommand(["--headless", "--stop"], { ZEROS_CLOUD_V2_RUNTIME_SHA256: SHA })).toThrow(/one of/);
+    expect(() => electronCloudCommand(["--headless", "--stop"], { ZEROS_CLOUD_V2_RUNTIME_SHA256: SHA })).toThrow(/--headless/);
   });
 });

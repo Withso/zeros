@@ -57,21 +57,6 @@ export function publicDevProfile(workspace, profile) {
   };
 }
 
-export function desktopEnvironment(workspace, profile) {
-  const p = publicDevProfile(workspace, profile);
-  return {
-    ZEROS_DEV_ENVIRONMENT: "local", ZEROS_DEV_AUTH_PROFILE: JSON.stringify(p),
-    ZEROS_DEV: "1", ZEROS_CHANNEL: "dev", ZEROS_ISOLATE: "1",
-    VITE_ZEROS_CHANNEL: "dev", ZEROS_CONTROL_PLANE_URL: p.apiOrigin,
-    ZEROS_INSTANCE: `local-${workspace.state.owner}`,
-    ZEROS_DATA_DIR: privateDirectory(workspace.directory, "desktop"),
-    AUTH_PROVIDER: "workos", AUTH_DESKTOP_CLIENT_ID: p.desktopClientId,
-    AUTH_ISSUER: p.issuer, AUTH_JWKS_URL: p.jwksUrl, AUTH_AUDIENCE: p.audience,
-    VITE_APP_BASE_URL: p.appOrigin, VITE_CONTROL_PLANE_URL: p.apiOrigin,
-    ZEROS_CLOUD_WORKSPACES_ENABLED: "true",
-  };
-}
-
 /** electron:cloud runs this branch's cloud v2 against its own tunnel origin. The
  * Boat key and runtime store stay in the backend; the VM fetches the pinned
  * runtime by presigned URL and trusts only this workspace's signing key. */

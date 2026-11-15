@@ -1,10 +1,10 @@
 # Development restarts and active agent turns
 
-`pnpm electron:dev` (Zeros Dev) and `pnpm electron:alpha` rebuild Electron main/preload
-and the engine, while Vite updates the renderer. Primary and named development
-instances use `scripts/dev-main-supervisor.mjs`. A main-process restart also
-ends its engine and provider processes, so it must respect active turns just
-as an engine-only reload does.
+`pnpm electron:alpha` rebuilds Electron main/preload and the engine, while Vite
+updates the renderer. Primary and named development instances use
+`scripts/dev-main-supervisor.mjs`. A main-process restart also ends its engine
+and provider processes, so it must respect active turns just as an engine-only
+reload does.
 
 Before an automatic main restart, the supervisor asks its own child over
 private Node IPC for restart readiness. The main process checks the current

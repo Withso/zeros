@@ -62,7 +62,7 @@ PostgreSQL, and the shared renderer suites under `platform/bridge`. The branch's
 live proof is the isolated local stack and gate0 probe:
 
 ```sh
-pnpm electron:cloud --headless --runtime <runtime-sha256>
+pnpm electron:cloud --runtime <runtime-sha256>
 pnpm --dir apps/control-plane cloud-v2:gate0 --local --runtime <runtime-sha256>
 ```
 
@@ -77,6 +77,7 @@ pnpm --dir apps/control-plane cloud-v2:gate0 --local --runtime <runtime-sha256>
 - It starts a real VM: run it once per tested change, never in a loop. It
   reports only the failing stage; capture the control-plane logs and the
   workspace row through the API before any cleanup.
+- After deploy, `pnpm alpha:probe` measures Alpha (`docs/electron-cloud.md`).
 - Provider keys stay in `.env.agent` (Alpha and test only) or Actions; never
   copy them into the checkout or into output.
 - Run a control-plane-generated VM script (runtime install, checkpoint,

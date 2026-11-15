@@ -173,7 +173,7 @@ describe("electron:cloud launcher shutdown proof", () => {
     h.fetch.mockImplementation(async () => { delete h.workspace.state.launcher; saveWorkspace(h.workspace); return { ok: true }; });
     const prior = structuredClone(h.workspace);
     await h.callbacks.stop(prior);
-    expect(h.context.console.log).toHaveBeenCalledWith(expect.stringMatching(/desktop.*stopped/i));
+    expect(h.context.console.log).toHaveBeenCalledWith(expect.stringMatching(/Backend processes stopped/));
   });
   it("clears a launch from an earlier boot on stop and start, instead of waiting on its dead supervisor", async () => {
     const stopped = launcher({ boot: "earlier-boot" });

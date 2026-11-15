@@ -4,7 +4,7 @@ import path from "node:path";
 import { createPrivateKey } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 import { ensureWorkspace } from "../dev-environment/state.mjs";
-import { backendEnvironment, desktopEnvironment, publicDevProfile, webEnvironment } from "../dev-environment/profile.mjs";
+import { backendEnvironment, publicDevProfile, webEnvironment } from "../dev-environment/profile.mjs";
 
 const RUNTIME = "d".repeat(64);
 const roots: string[] = [];
@@ -33,8 +33,7 @@ describe("electron:cloud control plane", () => {
       .CLOUD_V2_PROMPT_OUTBOX_ENABLED).toBe("false");
     expect(backendEnvironment(w, p, ports, run, { ...runtime, CLOUD_V2_PROMPT_OUTBOX_ENABLED: "true" })
       .CLOUD_V2_PROMPT_OUTBOX_ENABLED).toBe("true");
-    // The server's advertised capability owns rollout, never a desktop flag.
-    expect(desktopEnvironment(w, p)).not.toHaveProperty("CLOUD_V2_PROMPT_OUTBOX_ENABLED");
+    // The server's advertised capability owns rollout, never a client flag.
     expect(webEnvironment(w, p, ports.api)).not.toHaveProperty("CLOUD_V2_PROMPT_OUTBOX_ENABLED");
   });
 
@@ -43,7 +42,7 @@ describe("electron:cloud control plane", () => {
     const runtime = { ZEROS_CLOUD_V2_RUNTIME_SHA256: RUNTIME };
     expect(backendEnvironment(w, p, ports, run, runtime)).not.toHaveProperty("CLOUD_V2_CHECKPOINT_RETRY_ENABLED");
     expect(backendEnvironment(w, p, ports, run, { ...runtime, CLOUD_V2_CHECKPOINT_RETRY_ENABLED: "true" }).CLOUD_V2_CHECKPOINT_RETRY_ENABLED).toBe("true");
-    expect(desktopEnvironment(w, p)).not.toHaveProperty("CLOUD_V2_CHECKPOINT_RETRY_ENABLED");
+    expect(webEnvironment(w, p, ports.api)).not.toHaveProperty("CLOUD_V2_CHECKPOINT_RETRY_ENABLED");
   });
 
   it("runs cloud v2 on this workspace's tunnel origin with its own stable keys", () => {
@@ -72,13 +71,12 @@ describe("electron:cloud control plane", () => {
       JSON.parse(api.CLOUD_CODEX_REFRESH_FINGERPRINT_KEYS_JSON)["1"]]).size).toBe(3);
   });
 
-  it("opens cloud workspaces in the desktop without giving it any backend credential", () => {
+  it("keeps every backend credential out of the public web facade", () => {
     const { workspace: w, profile: p } = fixture();
     const api = backendEnvironment(w, p, ports, run, { ZEROS_CLOUD_V2_RUNTIME_SHA256: RUNTIME });
-    const desktop = desktopEnvironment(w, p), web = webEnvironment(w, p, ports.api);
-    expect(desktop.ZEROS_CLOUD_WORKSPACES_ENABLED).toBe("true");
+    const web = webEnvironment(w, p, ports.api);
     for (const value of [p.boat.apiKey, p.storage.secretAccessKey, api.CLOUD_V2_WORKER_SIGNING_KEY, api.CLOUD_WORKSPACE_SECRET_KEY_V1])
-      expect(JSON.stringify({ desktop, web })).not.toContain(value);
+      expect(JSON.stringify(web)).not.toContain(value);
   });
 
   it("names what is missing instead of starting a control plane without cloud", () => {

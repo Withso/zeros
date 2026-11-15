@@ -166,7 +166,7 @@ describe("Local launch ownership", () => {
             return "/unused";
           },
         }),
-      ).rejects.toThrow(/Zeros Dev.*checkout/);
+      ).rejects.toThrow(/Zeros Alpha.*checkout/);
       expect(ran).toBe(false);
       expect(fs.existsSync(path.join(root, ".context"))).toBe(false);
     }
@@ -196,7 +196,7 @@ describe("Local launch ownership", () => {
       "zeros_dev_select_tools",
     );
     expect(settings.scripts.run["Zeros Dev"].default).toBe(true);
-    expect(settings.scripts.run["Zeros Dev backend"].default).toBe(true);
+    expect(settings.scripts.run).not.toHaveProperty("Zeros Dev backend");
   });
 
   it("does not let a second launcher rebuild the same checkout", async () => {
