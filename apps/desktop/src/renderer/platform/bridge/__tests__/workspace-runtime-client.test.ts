@@ -466,24 +466,42 @@ describe("workspace runtime routing", () => {
       const first = await client.request(request);
       await client.warmHistoryWorkspace(b);
       changed.mockClear();
-      now += 2_000;
+      now += 6_000;
       await Promise.all([client.warmHistoryWorkspace(a), client.warmHistoryWorkspace(a)]);
       expect(readHistory).toHaveBeenCalledTimes(3);
       expect(changed).not.toHaveBeenCalled();
       expect((await client.request(request) as unknown as { result: unknown }).result)
         .toBe((first as unknown as { result: unknown }).result);
       revision++;
-      now += 2_000;
+      now += 6_000;
       await client.warmHistoryWorkspace(a);
       expect(changed).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ workspaceId: cloudWorkspaceKey(a) }));
       expect(open).not.toHaveBeenCalled();
       changed.mockClear();
-      now += 2_000;
+      now += 6_000;
       readHistory.mockRejectedValueOnce(new Error("offline"));
       await expect(client.warmHistoryWorkspace(a)).rejects.toThrow("offline");
       expect(changed).not.toHaveBeenCalled();
       expect(client.hasChatSnapshot(cloudWorkspaceKey(a))).toBe(true);
     } finally { client.dispose(); }
+  });
+
+  it("lets the selected workspace's passive warm reuse a list confirmed seconds earlier at launch", async () => {
+    let now = 1_000;
+    vi.spyOn(performance, "now").mockImplementation(() => now);
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    const readHistory = vi.fn(async (_target: CloudWorkspaceTarget) => ({ revision: 1, chats: [], chatDeletions: [] }));
+    const client = new WorkspaceRuntimeClient({ open: vi.fn(), readHistory, historyRoot: () => MIRROR_ROOT, workspaces: () => [] });
+    try {
+      await client.warmHistoryWorkspace(a);
+      now += 1_500; await client.warmHistoryWorkspace(a);
+      now += 3_000; await client.warmHistoryWorkspace(a);
+      expect(readHistory).toHaveBeenCalledOnce();
+      now += 1_000; await client.warmHistoryWorkspace(a);
+      expect(readHistory).toHaveBeenCalledTimes(2);
+      client.refreshHistoryWorkspace(a); await client.warmHistoryWorkspace(a);
+      expect(readHistory).toHaveBeenCalledTimes(3);
+    } finally { client.dispose(); vi.restoreAllMocks(); }
   });
 
   it("fences a late history warm after account replacement without disturbing its replacement read", async () => {

@@ -110,7 +110,7 @@ it("Local restart and recovery publish independently while preserving confirmed 
     });
     status("disconnected");
     request.mockRejectedValue(new Error("Restarting"));
-    now += 2000;
+    now += 6000;
     revision++;
     await bridge.warmHistoryWorkspace(target);
     await new Promise((resolve) => setTimeout(resolve, 0));

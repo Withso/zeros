@@ -69,6 +69,9 @@ let state: TeamStoreState = { me: null, presentation: null, status: "idle", erro
 let presentationOwner: string | null = null;
 const listeners = new Set<() => void>();
 let inflight: Promise<Me | null> | null = null;
+/** The last accepted account snapshot, for readers that start right after it. */
+let confirmed: { me: Me; generation: number; at: number } | null = null;
+const RECENT_SNAPSHOT_MS = 5_000;
 // Bumped by clearTeamStore (sign-out): an in-flight fetch started under the
 // PREVIOUS account discards its result instead of re-emitting account A's
 // organizations after the store was cleared for account B.
@@ -235,7 +238,18 @@ export function acceptOrganizationSnapshot(
   presentationOwner = getAccountPresentationOwner();
   emit({ me, presentation: null, status: "ready", error: null });
   persistPresentation();
+  confirmed = { me, generation, at: performance.now() };
   return true;
+}
+
+/** The account snapshot this store generation is reading now or accepted in
+ *  the last few seconds, so a reader started by that same read (launch, then
+ *  the courier's resync) does not ask the control plane again. */
+export async function recentOrganizationSnapshot(storeGeneration: number): Promise<Me | undefined> {
+  if (storeGeneration !== generation) return undefined;
+  if (inflight) await inflight.catch(() => null);
+  return confirmed && confirmed.generation === storeGeneration && storeGeneration === generation &&
+    performance.now() - confirmed.at <= RECENT_SNAPSHOT_MS ? confirmed.me : undefined;
 }
 
 /** Fetch `/v1/me` (single-flight) and reconcile the active organization.
@@ -300,6 +314,7 @@ export function clearTeamStore(
 ): void {
   generation += 1;
   inflight = null;
+  confirmed = null;
   presentationOwner = null;
   const previousId = getActiveTeamId();
   const previousHint = getActiveOrganizationIsPersonalHint();

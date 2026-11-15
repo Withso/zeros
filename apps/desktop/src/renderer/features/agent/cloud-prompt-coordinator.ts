@@ -2,7 +2,9 @@ import { CloudPromptChannel, promptOwnerKey, type CloudPromptApi, type CloudProm
   type PromptJournalRecord } from "./cloud-prompt-channel";
 
 type Waiter = { resolve(): void; reject(error: Error): void };
-type Job = { waiters: Waiter[]; channel: CloudPromptChannel; current(): boolean; retired: boolean; running: boolean; refreshing: boolean; committing: boolean; due: number; recover: boolean; requested: boolean };
+type Job = { waiters: Waiter[]; channel: CloudPromptChannel; current(): boolean; retired: boolean; running: boolean; refreshing: boolean; committing: boolean; due: number; recover: boolean; requested: boolean; readStartedAt: number };
+/** Refresh signals that land together (hydrate, ENGINE_READY, chat focus) share one follow-up read. */
+const REFRESH_SPACING_MS = 1_000;
 
 /** One bounded scheduler for explicit durable work, shared by every chat view.
  * It never opens a bridge or wakes a VM. Idle conversations have no timer. */
@@ -32,7 +34,7 @@ export class CloudPromptCoordinator {
       for (const [key, job] of this.jobs) if (!job.running && !job.committing && (!job.current() || !job.requested && !job.channel.pending)) { this.retire(job); this.jobs.delete(key); break; }
       if (this.jobs.size >= 64) throw new Error("Finish an active cloud conversation before opening another.");
     }
-    const job: Job = { waiters: [], retired: false, running: false, refreshing: false, committing: false, due: 0, recover: false, requested: false,
+    const job: Job = { waiters: [], retired: false, running: false, refreshing: false, committing: false, due: 0, recover: false, requested: false, readStartedAt: -Infinity,
       current: () => !this.closed && !job.retired && current(),
       channel: new CloudPromptChannel(owner, this.journal, api, () => job.current(), changed),
     };
@@ -41,7 +43,13 @@ export class CloudPromptCoordinator {
   wake(channel: CloudPromptChannel, recover = false): void {
     const job = this.jobs.get(promptOwnerKey(channel.owner));
     if (!job || job.channel !== channel || !job.current()) return;
-    job.requested = true; job.recover ||= recover; job.due = 0; this.schedule(0);
+    job.requested = true; job.recover ||= recover;
+    job.due = this.followUp(job);
+    this.schedule(Math.max(0, job.due - Date.now()));
+  }
+  /** Work to send or confirm goes at once; a plain status refresh waits out the spacing. */
+  private followUp(job: Job): number {
+    return job.recover && !job.waiters.length && !job.channel.pending ? job.readStartedAt + REFRESH_SPACING_MS : 0;
   }
   /** Foreground Send starts its HTTPS commit immediately, within the same
    * global concurrency bound as recovery. Resolves before status/history reads. */
@@ -84,7 +92,7 @@ export class CloudPromptCoordinator {
       if (commitOnly) job.committing = true; else job.running = true;
       this.inFlight++;
       const waiters = job.waiters.splice(0), recover = job.recover;
-      if (!commitOnly) { job.recover = false; job.requested = false; }
+      if (!commitOnly) { job.recover = false; job.requested = false; job.readStartedAt = Date.now(); }
       void (async () => {
         try {
           await job.channel.flush();
@@ -99,7 +107,7 @@ export class CloudPromptCoordinator {
         finally {
           if (commitOnly) job.committing = false; else { job.running = false; job.refreshing = false; }
           this.inFlight--;
-          job.due = job.requested ? 0 : this.parked(job) ? Infinity : Date.now() + 2_000;
+          job.due = job.requested ? this.followUp(job) : this.parked(job) ? Infinity : Date.now() + 2_000;
           if (job.current() && !job.running && !job.committing && !job.channel.pending) this.idle();
           if ([...this.jobs.values()].some(candidate => candidate.current() && !candidate.committing &&
               (!candidate.running && (candidate.channel.pending || candidate.requested) || candidate.refreshing && candidate.waiters.length)))

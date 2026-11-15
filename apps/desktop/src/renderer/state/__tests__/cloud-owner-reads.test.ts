@@ -65,7 +65,7 @@ it("a cloud-only history revision does not re-read Local through the persistence
     local.mockClear();
     history.mockClear();
     revision++;
-    vi.spyOn(Date, "now").mockReturnValue(Date.now() + 2000);
+    vi.spyOn(Date, "now").mockReturnValue(Date.now() + 6000);
     await bridge.warmHistoryWorkspace(target);
     await flush();
     expect(snapshots.mock.lastCall?.[0].confirmedCloudWorkspaces).toEqual(
