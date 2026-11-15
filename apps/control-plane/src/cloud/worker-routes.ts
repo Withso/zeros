@@ -3,7 +3,8 @@ import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
 import { HttpError } from "../authz.js";
 import type { Tx } from "../db.js";
-import { CLOUD_V2_MAX_FRAME_BYTES, CloudV2WorkerActivitySchema, CloudV2WorkerHelloSchema, CloudV2WorkerHistorySchema, CloudV2WorkerTimingRequestSchema, CloudV2RenewRequestSchema, CloudV2TurnLeaseRequestSchema, CloudV2TerminalLeaseRequestSchema, CloudV2ClientLeaseRequestSchema, CloudV2BootstrapLeaseRequestSchema, CloudV2RetiredRequestSchema, CloudV2BootCleanRequestSchema, ACTING_USER_FEATURE, BOOT_TIMINGS_FEATURE, HISTORY_DIGEST_FEATURE, HISTORY_DIGEST_DELETIONS_FEATURE, type CloudV2ControlFrame } from "./contract.js";
+import { CLOUD_V2_MAX_FRAME_BYTES, CloudV2WorkerActivitySchema, CloudV2WorkerHelloSchema, CloudV2WorkerHistorySchema, CloudV2WorkerTimingRequestSchema, CloudV2RenewRequestSchema, CloudV2TurnLeaseRequestSchema, CloudV2TerminalLeaseRequestSchema, CloudV2ClientLeaseRequestSchema, CloudV2BootstrapLeaseRequestSchema, CloudV2RetiredRequestSchema, CloudV2BootCleanRequestSchema, CloudV2AuthorityRequestSchema, ACTING_USER_FEATURE, BOOT_TIMINGS_FEATURE, MESSAGE_AUTHORITY_FEATURE, HISTORY_DIGEST_FEATURE, HISTORY_DIGEST_DELETIONS_FEATURE, type CloudV2ControlFrame } from "./contract.js";
+import type { AuthorityPull } from "./execution/authority-pull.js";
 import { emitCloudV2Timing, type CloudV2TimingRecord } from "./lifecycle.js";
 import type { CloudV2Store, CloudV2WorkerSession, CloudV2Workspace } from "./store.js";
 import { isCloudV2Token } from "./tokens.js";
@@ -45,6 +46,9 @@ export type CloudV2WorkerRouteDeps = {
   };
   store: Pick<CloudV2Store, "beginWorkerHello" | "acceptWorkerHello" | "workerSession" | "accessEpoch" | "loginRevision" | "markActive" | "writeWorkerHistory" | "failWorkerCheckout"> & Partial<Pick<CloudV2Store, "prompts" | "workerHelloIdentity" | "chatEdits" | "reportWorkerSetup" | "workerHistoryDigests" | "refuseWorkerRuntime">>;
   runtimeSha256: string;
+  /** R2: new active boots that advertise message-authority-v1 take it (CLOUD_V2_MESSAGE_AUTHORITY_ENABLED). */
+  messageAuthority?: boolean;
+  authority?: Pick<AuthorityPull, "reply">;
   /** The pin the channel's release replaced; a wake may start it from disk. */
   previousRuntimeSha256?: string;
   execution?: CloudExecutionContexts;
@@ -174,6 +178,7 @@ async function configuration(deps: CloudV2WorkerRouteDeps, workspace: CloudV2Wor
         ...(features.has("code-review-v1") && codeReview ? { codeReview } : {}),
         ...(features.has("github-user-token-v1") && githubUserTokens === 1 ? { githubUserTokens } : {}),
         ...(features.has("github-pr-v1") && githubPullRequests === 1 ? { githubPullRequests } : {}), ...(features.has("mcp-v1") && mcpServers ? { mcpServers } : {}),
+        ...(workspace.authorityMode === "message-authority-v1" ? { messageAuthority: 1 } : {}),
         ...(deps.promptOutbox ? { promptOutbox: 1 } : {}) };
     }
   }
@@ -349,7 +354,8 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
       throw unauthorized();
     const workspace = await transaction(async tx => {
       const bound = await deps.store.beginWorkerHello(token, input.bootId, features.has(ACTING_USER_FEATURE), input.runtimeSha256,
-        features.has(SYNC_CONTEXT_FEATURE), recoveryCapable, features.has(BOOT_TIMINGS_FEATURE), tx);
+        features.has(SYNC_CONTEXT_FEATURE), recoveryCapable, features.has(BOOT_TIMINGS_FEATURE), tx,
+        deps.messageAuthority === true && features.has(MESSAGE_AUTHORITY_FEATURE));
       if (!bound) throw unauthorized();
       await advertise(undefined, tx);
       return bound;
@@ -369,6 +375,14 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
     if (ready.boatSandboxId) void deps.outboundProof?.({ workspaceId: ready.id, bootId: input.bootId,
       sandboxId: ready.boatSandboxId, accessEpoch: workspace.accessEpoch }).catch(() => {});
     return c.json({ config });
+  });
+  app.post(`${CLOUD_V2_WORKER_API}/authority`, async c => {
+    if (!workerFeatures(c).has(MESSAGE_AUTHORITY_FEATURE) || !deps.authority) throw new HttpError(404, "not_found", "Authority freshness is unavailable.");
+    const token = bearer(c), bootId = c.req.header("x-zeros-worker-boot");
+    if (!bootId || !z.string().uuid().safeParse(bootId).success) throw unauthorized();
+    const reply = await deps.authority.reply(token, bootId, await body(c, CloudV2AuthorityRequestSchema));
+    // Not yet in this instance's barrier (a new boot, a restarted instance): no freshness, never a database read.
+    return c.json(reply ?? { sequence: "0", fresh: false, ageMs: 0, untilMs: 0, ended: [] });
   });
   app.post(`${CLOUD_V2_WORKER_API}/runtime`, async c => {
     if (!workerFeatures(c).has("runtime-update-v1") || !deps.runtimeUpdates) throw new HttpError(404, "not_found", "Runtime update is unavailable.");

@@ -245,6 +245,36 @@ suite("new organization workspaces start with personal execution", () => {
     });
   });
 
+  it("serves R2 freshness from one barrier: extends acknowledged boots, withholds it across a revocation until the worker acknowledges", async () => {
+    const { id } = await fresh(), w = await worker(id);
+    const features = `${f!.features},sync-v1,sync-context-v1,message-authority-v1`;
+    const hello = await w.hello(features); expect(hello.status).toBe(200);
+    expect((await hello.json()).config.messageAuthority).toBe(1);
+    expect((await w.call("execution-leases/boot-clean", { retirementId: randomUUID(), processes: 0, legacyMaterial: "none" }, features)).status).toBe(200);
+    expect((await pool.query("SELECT authority_mode FROM cloud_v2_execution_boots WHERE boot_id=$1", [w.boot])).rows[0].authority_mode).toBe("message-authority-v1");
+    const live = (await pool.query("SELECT id FROM cloud_v2_execution_contexts WHERE workspace_id=$1 AND state='active'", [id])).rows.map(row => row.id as string);
+    expect(live.length).toBeGreaterThan(0);
+    const pull = async (acked: string) => (await w.call("authority", { acked, contextIds: live }, features)).json();
+    expect(await pull("0")).toMatchObject({ fresh: false, ended: [] });
+    const barrier = f!.cp.authorityBarrier;
+    await barrier.tick();
+    const expiry = async () => (await pool.query("SELECT min(expires_at) AS at FROM cloud_v2_execution_contexts WHERE id=ANY($1::uuid[])", [live])).rows[0].at as Date;
+    expect((await expiry()).getTime() - Date.now()).toBeGreaterThan(500_000);
+    expect(await pull("0")).toMatchObject({ sequence: "0", fresh: true, ended: [] });
+    await withSystemTx(pool, tx => tx.query(`UPDATE cloud_v2_execution_contexts SET state='revoked',reason='access_revoked',revoked_at=clock_timestamp()
+      WHERE id=$1`, [live[0]]));
+    await barrier.tick();
+    const pending = await pull("0");
+    expect(pending).toMatchObject({ fresh: false, ended: [{ contextId: live[0], reason: "access_revoked" }] });
+    expect(await pull(pending.sequence)).toMatchObject({ fresh: false });
+    expect((await pool.query("SELECT authority_acked_sequence::text AS acked FROM cloud_v2_execution_boots WHERE boot_id=$1", [w.boot])).rows[0].acked).toBe(pending.sequence);
+    await barrier.tick();
+    expect(await pull(pending.sequence)).toMatchObject({ fresh: true, ended: [] });
+    const other = await worker(id);
+    const unknown = await other.call("authority", { acked: "0", contextIds: [] }, features);
+    expect({ status: unknown.status, body: await unknown.json() }).toEqual({ status: 200, body: { sequence: "0", fresh: false, ageMs: 0, untilMs: 0, ended: [] } });
+  });
+
   it("leaves the authority head alone when the worker retires its own contexts", async () => {
     const { id } = await fresh(), w = await worker(id);
     expect((await w.hello()).status).toBe(200);

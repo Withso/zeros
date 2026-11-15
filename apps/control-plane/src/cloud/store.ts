@@ -67,6 +67,8 @@ export type CloudV2WorkerSession = CloudV2Workspace & {
   accessEpoch: string; loginRevision: string; executionMode?: "legacy" | "prepared" | "active";
   executionTransitionId?: string;
   recoveryAttemptId?: string;
+  /** R2: fixed for this boot at its first hello. */
+  authorityMode?: "message-authority-v1";
   /** Present only on the hello that actually changes a booting state to running. */
   helloTiming?: { state: "creating" | "starting"; durationMs: number };
 };
@@ -797,7 +799,8 @@ export class CloudV2Store {
 
   /** Bind the boot before configuration I/O, without publishing readiness.
    * Lifecycle delivery must not replace a credential once this boot claims it. */
-  async beginWorkerHello(token: string, bootId: string, actingUser = false, runtimeSha256?: string, syncContext = false, recovery = false, bootTimings = false, transaction?: Tx): Promise<CloudV2WorkerSession | null> {
+  async beginWorkerHello(token: string, bootId: string, actingUser = false, runtimeSha256?: string, syncContext = false, recovery = false, bootTimings = false, transaction?: Tx, messageAuthority = false): Promise<CloudV2WorkerSession | null> {
+    let authorityMode: "message-authority-v1" | undefined;
     const begin = async (tx: Tx) => {
       const result = await tx.query<Row & { execution_mode: "legacy" | "prepared" | "active"; recovery_attempt_id: string | null; access_epoch: string; login_revision: string; previous_boot_id: string | null }>(
       `WITH prior AS MATERIALIZED (
@@ -816,8 +819,9 @@ export class CloudV2Store {
       if (current?.execution_mode === "active") {
         if (!actingUser || !this.prompts.execution) throw new HttpError(409, "worker_update_required", "Update the worker before shared execution");
         await assertExecutionCreationBoot(tx, current.id, syncContext);
-        const bound = await this.prompts.execution.boots.bind(tx, { token, bootId }, current.previous_boot_id);
+        const bound = await this.prompts.execution.boots.bind(tx, { token, bootId }, current.previous_boot_id, messageAuthority);
         await bindExecutionActivationBoot(tx, bound, runtimeSha256);
+        if (bound.authority_mode === "message-authority-v1") authorityMode = "message-authority-v1";
       }
       if (current && current.previous_boot_id !== bootId) await notifyCloudV2WorkerBoot(tx, current.id, bootId, bootTimings ? "hello" : "legacy");
       return result;
@@ -825,7 +829,7 @@ export class CloudV2Store {
     const { rows } = await (transaction ? begin(transaction) : withSystemTx(this.pool, begin));
     const row = rows[0];
     return row ? { ...workspace(row), accessEpoch: row.access_epoch, loginRevision: row.login_revision, executionMode: row.execution_mode,
-      ...(row.recovery_attempt_id ? { recoveryAttemptId: row.recovery_attempt_id } : {}) } : null;
+      ...(row.recovery_attempt_id ? { recoveryAttemptId: row.recovery_attempt_id } : {}), ...(authorityMode ? { authorityMode } : {}) } : null;
   }
 
   /** A starting workspace whose worker hello was refused for its runtime: the

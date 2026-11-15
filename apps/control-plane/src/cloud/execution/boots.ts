@@ -9,7 +9,7 @@ import { completeExecutionActivation } from "./activation.js";
 import { failExecutionActivation } from "./activation-state.js";
 import { completeExecutionCreation, failExecutionCreation } from "./creation.js";
 
-type Boot = { boot_id: string; access_epoch: string; stop_generation: string; worker_token_hash: Buffer; replaced_by: string | null;
+type Boot = { boot_id: string; authority_mode: "lease-v1" | "message-authority-v1"; access_epoch: string; stop_generation: string; worker_token_hash: Buffer; replaced_by: string | null;
   retirement_id: string | null; retirement_hash: Buffer | null; retired_count: number | null; clean_at: Date | null;
   legacy_material: "none" | "removed" | "refused" | null; first_failed_at: Date | null };
 
@@ -20,20 +20,22 @@ export const CLEAN_EXECUTION_BOOT = `EXISTS(SELECT 1 FROM cloud_v2_execution_boo
 export class CloudExecutionBoots {
   constructor(readonly contexts: CloudExecutionContexts) {}
 
-  async bind(tx: Tx, identity: ExecutionWorker, previous: string | null) {
+  /** The authority mode is chosen once, at the boot's first hello, and never changes for that boot. */
+  async bind(tx: Tx, identity: ExecutionWorker, previous: string | null, messageAuthority = false) {
     const workspace = await this.contexts.worker(tx, identity, false, true);
     const existing = (await tx.query<Boot>("SELECT * FROM cloud_v2_execution_boots WHERE workspace_id=$1 AND boot_id=$2", [workspace.id, identity.bootId])).rows[0];
     if (existing && (previous !== identity.bootId || existing.replaced_by || existing.stop_generation !== workspace.stop_generation ||
       existing.access_epoch !== workspace.access_epoch || !existing.worker_token_hash.equals(workspace.worker_token_hash)))
       throw new HttpError(401, "worker_boot_changed", "A replaced worker boot cannot return");
-    if (!existing) await tx.query(`INSERT INTO cloud_v2_execution_boots(workspace_id,org_id,boot_id,access_epoch,stop_generation,worker_token_hash)
-      VALUES($1,$2,$3,$4,$5,$6)`, [workspace.id, workspace.org_id, identity.bootId, workspace.access_epoch, workspace.stop_generation, workspace.worker_token_hash]);
+    if (!existing) await tx.query(`INSERT INTO cloud_v2_execution_boots(workspace_id,org_id,boot_id,access_epoch,stop_generation,worker_token_hash,authority_mode)
+      VALUES($1,$2,$3,$4,$5,$6,$7)`, [workspace.id, workspace.org_id, identity.bootId, workspace.access_epoch, workspace.stop_generation, workspace.worker_token_hash,
+      messageAuthority ? "message-authority-v1" : "lease-v1"]);
     await tx.query(`UPDATE cloud_v2_execution_boots SET replaced_by=$2 WHERE workspace_id=$1 AND boot_id<>$2 AND stop_generation=$3
       AND replaced_by IS DISTINCT FROM $2`, [workspace.id, identity.bootId, workspace.stop_generation]);
     const stale = (await tx.query<{ id: string }>(`SELECT id FROM cloud_v2_execution_contexts WHERE workspace_id=$1
       AND worker_boot_id<>$2 AND state='active' ORDER BY id`, [workspace.id, identity.bootId])).rows;
     for (const row of stale) await this.contexts.revoke(tx, row.id, "worker_changed");
-    return workspace;
+    return { ...workspace, authority_mode: existing?.authority_mode ?? (messageAuthority ? "message-authority-v1" as const : "lease-v1" as const) };
   }
 
   async assertClean(tx: Tx, workspace: Pick<ExecutionWorkspace, "id" | "worker_boot_id" | "access_epoch" | "stop_generation" | "worker_token_hash">) {
