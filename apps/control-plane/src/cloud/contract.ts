@@ -320,6 +320,8 @@ export type CloudV2RenewReply = z.infer<typeof CloudV2RenewReplySchema>;
 export const CloudV2AuthorityRequestSchema = z.object({
   acked: z.string().regex(/^(0|[1-9][0-9]{0,18})$/),
   contextIds: z.array(z.uuid()).max(128),
+  /** Some listed contexts were tracked after the last reply: report any that have ended even with nothing to acknowledge. */
+  check: z.literal(true).optional(),
 }).strict().refine(value => new Set(value.contextIds).size === value.contextIds.length, "Unique context ids");
 export const CloudV2AuthorityReplySchema = z.object({
   sequence: z.string().regex(/^(0|[1-9][0-9]{0,18})$/),

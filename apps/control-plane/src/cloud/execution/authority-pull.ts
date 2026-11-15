@@ -9,14 +9,14 @@ import type { AuthorityBarrier } from "./authority-barrier.js";
 export class AuthorityPull {
   constructor(private readonly pool: pg.Pool, readonly barrier: AuthorityBarrier, private readonly now: () => number = Date.now) {}
 
-  async reply(token: string, bootId: string, input: { acked: string; contextIds: readonly string[] }): Promise<CloudV2AuthorityReply | null> {
+  async reply(token: string, bootId: string, input: { acked: string; contextIds: readonly string[]; check?: true | undefined }): Promise<CloudV2AuthorityReply | null> {
     const state = this.barrier.lookup(token, bootId);
     if (!state) return null;
     const acked = BigInt(input.acked);
     if (acked > state.acked && acked <= state.sequence && await this.acknowledge(token, bootId, acked))
       this.barrier.acknowledged(token, bootId, acked);
     const pending = acked < state.sequence;
-    const ended = pending && input.contextIds.length ? await this.ended(token, bootId, input.contextIds) : [];
+    const ended = (pending || input.check) && input.contextIds.length ? await this.ended(token, bootId, input.contextIds) : [];
     const now = this.now();
     return { sequence: state.sequence.toString(), fresh: state.fresh && !pending, ageMs: Math.max(0, now - state.observedAt),
       untilMs: Math.max(-86_400_000, Math.min(86_400_000, state.until - now)), ended };

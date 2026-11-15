@@ -21,7 +21,7 @@ interface Entry { lease: Lease; expiresAt: number; ended?: CloudV2ContextReason;
 /** Renewal cadence (team-sharing-2-wire.md Slice B shapes 6): one batch every 10 s while any context lives. */
 export const CONTEXT_RENEW_MS = 10_000;
 /** R2 (message-authority-v1): one pull replaces every renewal; the reply comes from the control plane's memory. */
-export const AUTHORITY_PULL_MS = 10_000;
+export const AUTHORITY_PULL_MS = 5_000;
 /** R2: no new work (new GitHub credentials, MCP connections) after this long without fresh authority (owner decision). */
 export const AUTHORITY_SILENCE_CUTOFF_MS = 45_000;
 const MAX_BATCH = 128;
@@ -38,6 +38,8 @@ export class ExecutionContexts {
   private messageAuthority = false;
   private acked = 0n;
   private freshAt?: number;
+  /** Tracked since the last reply: the next pull asks whether any of them already ended. */
+  private readonly unchecked = new Set<string>();
   constructor(private readonly deps: ContextsDeps) {}
 
   /** Fixed for this boot once its hello configuration selects it; a later configuration cannot turn it off. */
@@ -197,16 +199,25 @@ export class ExecutionContexts {
     for (const [contextId, entry] of this.entries) if (!entry.ended && now >= entry.expiresAt) this.end(contextId, "expired");
     const live = [...this.entries].filter(([, entry]) => !entry.ended).map(([contextId]) => contextId);
     const contextIds = live.slice(0, MAX_BATCH);
+    const asked = contextIds.filter(contextId => this.unchecked.has(contextId));
+    // Freshness is timed from the request, so a slow reply never stretches either bound.
+    const sent = this.now();
     let reply: z.infer<typeof CloudV2AuthorityReplySchema>;
-    try { reply = CloudV2AuthorityReplySchema.parse(await this.deps.post("execution-leases/authority", { acked: this.acked.toString(), contextIds })); }
-    catch { return; }   // unreachable: deadlines stay as they are and new work stops after the silence cutoff
+    try {
+      reply = CloudV2AuthorityReplySchema.parse(await this.deps.post("execution-leases/authority",
+        { acked: this.acked.toString(), contextIds, ...(asked.length ? { check: true } : {}) }));
+    } catch (error) {
+      // A control plane without the route (rolled back): renew again rather than letting every context lapse.
+      if ((error as { status?: unknown }).status === 404) this.leaseAgain();
+      return;   // unreachable: deadlines stay as they are and new work stops after the silence cutoff
+    }
+    for (const contextId of asked) this.unchecked.delete(contextId);
     for (const ended of reply.ended) if (contextIds.includes(ended.contextId)) this.end(ended.contextId, ended.reason);
     const sequence = BigInt(reply.sequence);
     if (contextIds.length === live.length && sequence > this.acked) this.acked = sequence;
     if (!reply.fresh) return;
-    const at = this.now();
-    this.freshAt = at - reply.ageMs;
-    const until = at + reply.untilMs;
+    this.freshAt = sent - reply.ageMs;
+    const until = sent + reply.untilMs;
     for (const [contextId, entry] of this.entries) if (!entry.ended && until > entry.expiresAt) this.expire(contextId, entry, until);
   }
 
@@ -225,6 +236,7 @@ export class ExecutionContexts {
 
   private track(contextId: string, entry: Entry): void {
     this.entries.set(contextId, entry);
+    if (this.messageAuthority) this.unchecked.add(contextId);
     this.expire(contextId, entry, entry.expiresAt);
   }
   /** The control plane's latest accepted deadline, exactly: it may clamp one shorter (token or source horizon); a failed renewal never calls this. */
@@ -234,6 +246,14 @@ export class ExecutionContexts {
     if (entry.ended) return;
     entry.deadline = setTimeout(() => { if (this.entries.get(contextId) === entry) this.live(contextId); }, Math.max(0, expiresAt - this.now()));
     entry.deadline.unref?.();
+  }
+
+  private leaseAgain(): void {
+    this.messageAuthority = false;
+    this.freshAt = undefined;
+    if (this.timer) { clearInterval(this.timer); this.timer = undefined; }
+    this.arm();
+    void this.renew();
   }
 
   /** Renewal runs only while contexts exist. */

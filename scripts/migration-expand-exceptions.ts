@@ -5,6 +5,7 @@ const reviewed: Readonly<Record<string, Readonly<Record<string, readonly string[
   "0253_cloud_authority_heads.sql": {
     "privilege-tightening": [
       "REVOKE ALL ON FUNCTION advance_cloud_authority_head() FROM PUBLIC;",
+      "REVOKE ALL ON FUNCTION recheck_cloud_authority_context() FROM PUBLIC;",
       "REVOKE ALL ON FUNCTION recheck_cloud_authority_heads() FROM PUBLIC;",
     ],
   },

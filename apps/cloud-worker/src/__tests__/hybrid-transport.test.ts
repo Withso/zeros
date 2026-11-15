@@ -587,7 +587,7 @@ describe("worker → control plane context parity", () => {
       send: (transport, sample) => transport.send(sample) },
     "CloudV2BootstrapLeaseRequestSchema": { schema: relayProtocol.CloudV2BootstrapLeaseRequestSchema, path: "bootstrap-lease", sample: { contextId: C },
       send: (transport, sample) => transport.contextRequest("bootstrap-lease", sample) },
-    "CloudV2AuthorityRequestSchema": { schema: relayProtocol.CloudV2AuthorityRequestSchema, path: "authority", sample: { acked: "3", contextIds: [C, M] },
+    "CloudV2AuthorityRequestSchema": { schema: relayProtocol.CloudV2AuthorityRequestSchema, path: "authority", sample: { acked: "3", contextIds: [C, M], check: true },
       send: (transport, sample) => transport.contextRequest("execution-leases/authority", sample) },
     "CloudV2RenewRequestSchema": { schema: relayProtocol.CloudV2RenewRequestSchema, path: "renew", sample: { contextIds: [C, M] },
       send: (transport, sample) => transport.contextRequest("execution-leases/renew", sample) },
