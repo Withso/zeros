@@ -30,10 +30,10 @@ export const LOAD_BUDGETS = [
   { phase: "R1", scenario: "read-frame", metric: "queries", baseline: 0, maximum: 0, expectedFailure: false },
   { phase: "R1", scenario: "read-frame", metric: "transactions", baseline: 0, maximum: 0, expectedFailure: false },
   { phase: "R2", scenario: "periodic-renewals", metric: "requests", baseline: 27, maximum: 0, expectedFailure: true },
-  { phase: "R3", scenario: "running-stream", metric: "writeTransactions", baseline: 53, maximum: 30, expectedFailure: true },
+  { phase: "R3", scenario: "running-stream", metric: "writeTransactions", baseline: 53, maximum: 30, expectedFailure: false },
   { phase: "R3", scenario: "running-stream", metric: "writeStatements", baseline: 106, maximum: 150, expectedFailure: false },
   { phase: "R3", scenario: "running-stream", metric: "maxWriteStatementsPerTransaction", baseline: 2, maximum: 5, expectedFailure: false },
-  { phase: "R3", scenario: "running-stream", metric: "maxWriteTransactionsPer2s", baseline: 2, maximum: 1, expectedFailure: true },
+  { phase: "R3", scenario: "running-stream", metric: "maxWriteTransactionsPer2s", baseline: 2, maximum: 1, expectedFailure: false },
   { phase: "R1", scenario: "clean-wake", metric: "requests", baseline: 1, maximum: 1, expectedFailure: false },
   { phase: "R1", scenario: "wake-replacements", metric: "requests", baseline: 0, maximum: 0, expectedFailure: false },
 ] as const;
