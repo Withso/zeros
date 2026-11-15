@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, readlinkSync, rmSync,
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { installRuntimeCommand } from "./runtime.js";
+import { installRuntimeCommand, prepareRuntimeCommand } from "./runtime.js";
 
 const sha256 = "a".repeat(64);
 const url = "https://r2.example.test/bucket/cloud-v2/runtime/aaa.tar.gz?X-Amz-Signature=abc&X-Amz-Expires=900";
@@ -72,6 +72,50 @@ describe("cloud v2 runtime install", () => {
       const afterRepair = readFileSync(log, "utf8");
       run();
       expect(readFileSync(log, "utf8")).toBe(afterRepair);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it("keeps the previous runtime on disk with no privileged command until the pin is staged beside it, then switches without a download or restart", () => {
+    const root = mkdtempSync(join(tmpdir(), "zeros-runtime-keep-")), bin = join(root, "bin"), log = join(root, "commands.log");
+    try {
+      for (const dir of [bin, join(root, "opt/zeros"), join(root, "etc/systemd/system"), join(root, "etc/profile.d")]) mkdirSync(dir, { recursive: true });
+      const archive = (name: string) => {
+        mkdirSync(join(root, name), { recursive: true }); writeFileSync(join(root, name, "worker.mjs"), `export const runtime = "${name}";\n`);
+        execFileSync("tar", ["-czf", join(root, `${name}.tar.gz`), "-C", join(root, name), "."]);
+        return createHash("sha256").update(readFileSync(join(root, `${name}.tar.gz`))).digest("hex");
+      };
+      const previous = archive("previous"), pin = archive("pin");
+      writeFileSync(join(bin, "sudo"), `#!/bin/bash\necho "sudo $*" >> ${log}\n[ "$1" = -n ] && shift\nexec "$@"\n`, { mode: 0o755 });
+      writeFileSync(join(bin, "systemctl"), `#!/bin/bash\necho "systemctl $*" >> ${log}\n`, { mode: 0o755 });
+      writeFileSync(join(bin, "chown"), "#!/bin/bash\nexit 0\n", { mode: 0o755 });
+      writeFileSync(join(bin, "curl"), `#!/bin/bash\necho "curl $*" >> ${log}\nwhile [ $# -gt 0 ]; do case "$1" in -o) out=$2;; https://*) src=$1;; esac; shift; done\ncase "$src" in *${previous}*) cp ${join(root, "previous.tar.gz")} "$out";; *) cp ${join(root, "pin.tar.gz")} "$out";; esac\n`, { mode: 0o755 });
+      const local = (command: string) => execFileSync("bash", ["-c", `set -- ${command.slice("bash -c ".length)}; printf %s "$1"`], { encoding: "utf8" })
+        .replaceAll("/opt/zeros", join(root, "opt/zeros")).replaceAll("/etc/systemd/system", join(root, "etc/systemd/system"))
+        .replaceAll("/etc/profile.d", join(root, "etc/profile.d")).replaceAll("/home/user/.cache", join(root, "cache"));
+      const run = (command: string) => execFileSync("bash", ["-c", local(command)], { encoding: "utf8", env: { ...process.env, PATH: `${bin}:${process.env.PATH}` } });
+      const source = (sha: string) => `https://r2.example.test/bucket/cloud-v2/runtime/${sha}.tar.gz?X-Amz-Signature=abc`;
+      const link = () => readlinkSync(join(root, "opt/zeros/worker"));
+      const commands = () => existsSync(log) ? readFileSync(log, "utf8") : "";
+      expect(run(installRuntimeCommand({ sha256: previous, url: source(previous) }))).toContain("runtime-changed");
+      const installed = commands();
+      const wake = installRuntimeCommand({ sha256: pin, url: source(pin) }, { keep: previous, restart: false });
+      expect(run(wake)).toContain("runtime-kept");
+      expect(link()).toBe(join(root, `opt/zeros/runtime/${previous}`));
+      expect(commands()).toBe(installed);
+      run(prepareRuntimeCommand({ sha256: pin, url: source(pin) }));
+      expect(existsSync(join(root, `opt/zeros/runtime/${pin}/.complete`))).toBe(true);
+      expect(link()).toBe(join(root, `opt/zeros/runtime/${previous}`));
+      const staged = commands();
+      const next = run(wake);
+      expect(next).toContain("runtime-changed"); expect(next).not.toContain("runtime-kept");
+      expect(link()).toBe(join(root, `opt/zeros/runtime/${pin}`));
+      const switched = commands().slice(staged.length);
+      expect(switched).not.toContain("curl ");
+      expect(switched).not.toMatch(/(?:try-restart|restart) zeros-worker/);
+      expect(readFileSync(join(root, "opt/zeros/worker/worker.mjs"), "utf8")).toContain('"pin"');
+      const settled = commands();
+      expect(run(wake)).not.toMatch(/runtime-(?:kept|changed)/);
+      expect(commands()).toBe(settled);
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
