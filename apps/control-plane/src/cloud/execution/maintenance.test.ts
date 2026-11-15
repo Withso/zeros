@@ -6,7 +6,7 @@ beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(0); });
 afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
 
 function fixture(delays: Array<number | null> = []) {
-  const query = vi.fn(async (text: string) => ({ rows: text.includes(" AS delay ") ? [{ delay: delays.shift() ?? null }] : [], rowCount: 0 }));
+  const query = vi.fn(async (text: string) => ({ rows: / AS delay\b/.test(text) ? [{ delay: delays.shift() ?? null }] : [], rowCount: 0 }));
   const client = { query, release: vi.fn(), on: vi.fn(), once: vi.fn(), removeListener: vi.fn() };
   const pool = { connect: vi.fn(async () => client) };
   return { query, maintenance: new CloudExecutionMaintenance({ pool } as unknown as CloudExecutionContexts) };
