@@ -1,4 +1,4 @@
-// Hosted or local Dev gate0. Reads the private Dev profile and .env.agent in memory;
+// Hosted or local Dev gate0, or the Alpha probe (--alpha, gate0-alpha.ts). Reads the private Dev profile and .env.agent in memory;
 // credentials, provider output and remote error bodies never enter logs.
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -134,13 +134,19 @@ async function main() {
   const { values } = parseArgs({ options: {
     api: { type: "string" }, profile: { type: "string" }, "agent-env": { type: "string" }, organization: { type: "string" },
     repository: { type: "string" }, agents: { type: "string" }, runtime: { type: "string" }, keep: { type: "boolean" }, help: { type: "boolean" },
-    local: { type: "boolean" },
+    local: { type: "boolean" }, alpha: { type: "boolean" }, report: { type: "string" },
   } });
   if (values.help) {
     console.log("cloud-v2:gate0 [--local | --api <Dev API origin>] [--profile <private JSON>] [--agent-env <private .env.agent>] [--organization <UUID>] [--repository owner/name] [--runtime <sha256>] [--agents codex,claude,cursor] [--keep]");
     console.log("--local uses the running electron:cloud instance and its private signing key; --api may select its exact loopback port. Hosted mode reads the encrypted Dev registry. Requires an installed Computer, connected provider logins and the dedicated .env.agent test password. Creates one workspace and deletes it unless --keep is set.");
+    console.log("--alpha measures deployed Alpha (`pnpm alpha:probe`): needs --organization <test org slug or UUID> or ZEROS_ALPHA_PROBE_ORGANIZATION, defaults to that organization's connected agents, and --report <path> writes the JSON metrics report.");
     console.log("Models: gpt-6-luna, claude-haiku-5-5, Cursor default. Override in .env.agent with ZEROS_GATE0_{CODEX,CLAUDE,CURSOR}_MODEL. All probe chats select low effort; Cursor Auto has no native effort control.");
     return;
+  }
+  if (values.alpha) {
+    if (values.local || values.api || values.runtime) throw new Gate0Failure("alpha_target");
+    const { runAlphaProbe } = await import("./gate0-alpha.js");
+    return runAlphaProbe(values);
   }
   const root = resolve(import.meta.dirname, "../../../..");
   let profile: z.infer<typeof CommonProfile>, hosted: z.infer<typeof Profile> | undefined;

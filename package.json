@@ -59,6 +59,7 @@
     "electron:cloud": "node scripts/electron-cloud.mjs",
     "electron:run": "node scripts/electron-cloud.mjs --run-only",
     "electron:alpha": "node scripts/dev-environment/launcher.mjs alpha",
+    "alpha:probe": "pnpm --dir apps/control-plane cloud-v2:gate0 --alpha",
     "dev:setup": "bash scripts/setup-zeros-dev.sh",
     "electron:rebuild": "node scripts/electron-rebuild-sqlite.cjs",
     "doctor": "node scripts/doctor.mjs",

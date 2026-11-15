@@ -10,7 +10,8 @@ const cleanup: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); });
 
 type Faults = { cancelAck?: "missing" | "request" | "chat" | "state"; completedBeforeStop?: boolean; older?: "anchor" | "wrong"; answer?: string;
-  canaryStatus?: "missing" | "wrong" | "inaccessible" | "not-deleted"; wakeRuntime?: false; lostCreate?: true };
+  canaryStatus?: "missing" | "wrong" | "inaccessible" | "not-deleted"; wakeRuntime?: false; lostCreate?: true;
+  outbox?: true; outboxStop?: "ignored" | "settled" };
 async function fixture(failAgent?: string, protocolVersion = 21, faults: Faults = {}) {
   const id = randomUUID(), organizationId = randomUUID();
   const repository = "example/project", root = `/home/user/${repository}`, branch = "zeros/gate0";
@@ -24,7 +25,10 @@ async function fixture(failAgent?: string, protocolVersion = 21, faults: Faults 
     runId: "456", runAttempt: 1, creatorUserId: randomUUID(), organizationId, repositoryId: "42", createKey: randomUUID(),
     runtimeSha256: "a".repeat(64), sourceSha: "b".repeat(40) } };
   const canaryHeaders: { path: string; token: string | undefined; key: string | undefined }[] = [];
-  const workspace = () => ({ id, organizationId, repository, branch, baseBranch: "master", name, state, boatSandboxId: "bx_23456789" });
+  const workspace = () => ({ id, organizationId, repository, branch, baseBranch: "master", name, state, boatSandboxId: "bx_23456789",
+    agentCost: faults.outbox ? { totalUsd: 0.0042, estimated: false } : null, ...(faults.outbox ? { capabilities: { promptOutbox: 1 } } : {}) });
+  const prompts: { chatId: string; userMessageId: string; agentId: string; epoch: string; state: string }[] = [];
+  let liveSend: ((frame: Record<string, unknown>) => void) | undefined;
   const server = createServer(async (request, response) => {
     const chunks = [];
     for await (const chunk of request) chunks.push(chunk);
@@ -57,6 +61,35 @@ async function fixture(failAgent?: string, protocolVersion = 21, faults: Faults 
       const ticket = `ticket.${randomUUID()}`; tickets.add(ticket);
       return json({ url: `ws://127.0.0.1:${(server.address() as AddressInfo).port}/bridge`, protocols: ["zeros.cloud.v2", ticket] });
     }
+    if (faults.outbox && method === "POST" && path === `/v1/cloud-v2/workspaces/${id}/prompts`) {
+      const row = { chatId: body.chatId, userMessageId: body.userMessageId, agentId: body.agentId, epoch: "1", state: "accepted" };
+      prompts.push(row);
+      const update = (sessionUpdate: string, text: string) => liveSend!({ type: "AGENT_SESSION_UPDATE", chatId: body.chatId,
+        notification: { sessionId: body.chatId, update: { sessionUpdate, content: { type: "text", text } } } });
+      if (body.chatId.startsWith("gate0-stop-")) {
+        chats.set(body.chatId, [{ msgId: body.userMessageId, kind: "text", payload: JSON.stringify({ role: "user", text: body.prompt[0].text }), createdAt: 1 }]);
+        if (faults.outboxStop === "settled") row.state = "completed"; else update("agent_thought_chunk", "Waiting");
+      } else {
+        const marker = /^Reply with exactly:? ([^.\n]+)/.exec(body.prompt[0].text)![1]!;
+        chats.set(body.chatId, [
+          { msgId: body.userMessageId, kind: "text", payload: JSON.stringify({ role: "user", text: body.prompt[0].text }), createdAt: 1 },
+          { msgId: randomUUID(), kind: "text", payload: JSON.stringify({ role: "agent", text: marker }), createdAt: 2 },
+        ]);
+        update("agent_message_chunk", marker);
+        row.state = body.agentId === failAgent ? "failed" : "completed";
+      }
+      return json({ receipt: { workspaceId: id, chatId: body.chatId, userMessageId: body.userMessageId, sequence: String(prompts.length), epoch: row.epoch,
+        acceptedAt: new Date().toISOString(), workspaceState: state } }, 201);
+    }
+    if (faults.outbox && method === "GET" && path.startsWith(`/v1/cloud-v2/workspaces/${id}/prompts?`)) {
+      const chatId = new URL(path, "http://fake").searchParams.get("chatId");
+      return json({ epoch: "1", nextAfter: null, items: prompts.filter(row => row.chatId === chatId).map(row => ({
+        receipt: { userMessageId: row.userMessageId, chatId: row.chatId, epoch: row.epoch }, state: row.state, payload: null, cancelRequested: false })) });
+    }
+    if (faults.outbox && method === "POST" && path === `/v1/cloud-v2/workspaces/${id}/prompts/stop`) {
+      if (faults.outboxStop !== "ignored") for (const row of prompts) if (row.chatId === body.chatId && Number(row.epoch) <= Number(body.throughEpoch)) row.state = "cancelled";
+      return json({ chatId: body.chatId, epoch: "2" });
+    }
     if (path.endsWith("/stop")) { state = "stopped"; return json({ workspace: workspace() }, 202); }
     if (path.endsWith("/start")) { state = "running"; return json({ workspace: workspace() }, 202); }
     if (path.endsWith("/history")) {
@@ -84,7 +117,7 @@ async function fixture(failAgent?: string, protocolVersion = 21, faults: Faults 
   });
   wss.on("connection", ws => {
     const send = (frame: Record<string, unknown>) => ws.send(JSON.stringify({ id: randomUUID(), source: "engine", timestamp: Date.now(), ...frame }));
-    send({ type: "ENGINE_READY", protocolVersion, minProtocolVersion: 2 });
+    send({ type: "ENGINE_READY", protocolVersion, minProtocolVersion: 2 }); liveSend = send;
     ws.on("message", raw => {
       const frame = JSON.parse(String(raw)); frames.push(frame);
       const reply = (type: string, fields: object = {}) => send({ type, requestId: frame.id, ...fields });
@@ -121,6 +154,8 @@ async function fixture(failAgent?: string, protocolVersion = 21, faults: Faults 
         const sessionId = randomUUID(); sessions.set(sessionId, frame.chatId);
         return reply("AGENT_SESSION_CREATED", { session: { sessionId } });
       }
+      // An active execution context refuses bridge sends; the outbox is the only path.
+      if (frame.type === "AGENT_PROMPT" && faults.outbox) return reply("AGENT_ERROR", { code: "client_update_required", message: "Update the desktop" });
       if (frame.type === "AGENT_PROMPT") {
         const chatId = sessions.get(frame.sessionId)!;
         if (frame.agentId === failAgent) return reply("AGENT_PROMPT_FAILED", { message: "provider-secret-must-not-appear" });
@@ -167,7 +202,7 @@ async function fixture(failAgent?: string, protocolVersion = 21, faults: Faults 
   });
   const options = { apiOrigin: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, organizationId, repository,
     accessToken: async () => "synthetic-gate0-access", log: (line: string) => logs.push(line), pollMs: 1, timeoutMs: 2_000 };
-  return { options, calls, frames, logs, sessions, canary, canaryHeaders, connections: () => connections, state: () => state };
+  return { options, calls, frames, logs, sessions, canary, prompts, canaryHeaders, connections: () => connections, state: () => state };
 }
 
 describe("cloud v2 gate0 through a fake HTTP control plane and relay", () => {
@@ -375,6 +410,57 @@ describe("cloud v2 gate0 through a fake HTTP control plane and relay", () => {
     expect(f.state()).toBe("deleted");
     expect(f.calls.filter(c => c.method === "POST" && c.path === "/v1/cloud-v2/workspaces")).toHaveLength(1);
   });
+
+  it("reports each phase's duration and the VM's observed running time, in order", async () => {
+    const f = await fixture(), metrics: { name: string; ms: number }[] = [];
+    const result = await runCloudV2Gate0({ ...f.options, agents: ["codex", "claude"], onMetric: metric => metrics.push(metric) });
+    expect(metrics.map(metric => metric.name)).toEqual([
+      "create_request", "create_to_running", "connect", "terminal", "files_git", "turn_codex", "turn_claude", "stop_turn",
+      "history_mirror", "stop_request", "stop_to_stopped", "offline_history", "wake_request", "wake_to_running", "wake_connect",
+      "wake_checks", "delete_to_deleted",
+    ]);
+    for (const metric of metrics) expect(metric.ms).toEqual(expect.any(Number));
+    expect(result.metrics).toEqual(metrics);
+    expect(result.vmRunningMs).toBeGreaterThanOrEqual(0);
+    expect(result.turns).toBe(3);
+  });
+
+  it("reports the metrics it completed when a phase fails", async () => {
+    const f = await fixture("cursor"), metrics: string[] = [];
+    await expect(runCloudV2Gate0({ ...f.options, onMetric: metric => metrics.push(metric.name) })).rejects.toThrow("agent_cursor_turn");
+    expect(metrics).toEqual(["create_request", "create_to_running", "connect", "terminal", "files_git", "turn_codex", "turn_claude", "delete_to_deleted"]);
+  });
+
+  it("logs unavailable worker timings without failing when they are optional", async () => {
+    const f = await fixture();
+    await expect(runCloudV2Gate0({ ...f.options, readTimings: async () => [], timingsOptional: true })).resolves.toMatchObject({ deleted: true });
+    expect(f.logs).toContain("worker timings incomplete; not required for this target");
+  });
+
+  it("sends and stops turns over the HTTPS outbox when the workspace advertises it, and reads its provider cost", async () => {
+    const f = await fixture(undefined, 21, { outbox: true });
+    const result = await runCloudV2Gate0(f.options);
+    expect(result).toMatchObject({ deleted: true, turns: 4, agentCost: { totalUsd: 0.0042, estimated: false } });
+    expect(f.frames.some(frame => frame.type === "AGENT_PROMPT" || frame.type === "AGENT_CANCEL")).toBe(false);
+    expect(f.prompts.map(row => [row.agentId, row.state])).toEqual([["codex", "completed"], ["claude", "completed"], ["cursor", "completed"], ["claude", "cancelled"]]);
+    const sent = f.calls.filter(call => call.method === "POST" && call.path.endsWith("/prompts"));
+    for (const call of sent) expect(call.body).toMatchObject({ effort: "low", model: expect.any(String), startedAt: expect.any(Number) });
+    expect(f.calls.filter(call => call.path.endsWith("/prompts/stop"))).toEqual([expect.objectContaining({ body: { chatId: f.prompts[3]!.chatId, throughEpoch: "1" } })]);
+    expect(f.logs).toContain("turns use the HTTPS prompt outbox");
+  });
+
+  it("fails a failed outbox turn and still deletes the workspace", async () => {
+    const f = await fixture("claude", 21, { outbox: true });
+    await expect(runCloudV2Gate0(f.options)).rejects.toThrow("agent_claude_turn");
+    expect(f.state()).toBe("deleted");
+  });
+
+  it.each([["settled", "agent_stop_live"], ["ignored", "agent_stop_complete"]] as const)(
+    "rejects an outbox Stop whose turn %s and still deletes the workspace", async (outboxStop, stage) => {
+      const f = await fixture(undefined, 21, { outbox: true, outboxStop });
+      await expect(runCloudV2Gate0({ ...f.options, timeoutMs: 200 })).rejects.toThrow(stage);
+      expect(f.state()).toBe("deleted");
+    });
 
   it("keeps the resource only when explicitly requested", async () => {
     const f = await fixture();

@@ -232,12 +232,46 @@ running stack's owner and run before it creates one workspace. It signs in with
 `ZEROS_DEV_PASSWORD` and needs the seeded organization's Cloud Computer to be
 built.
 
-gate0's provider turns use the bridge path. To qualify the outbox, separately
-check HTTP receipt latency and the app's running-VM Send presentation, quit and
-reopen with pending messages, Stop during wake, and a worker restart during a
-turn. The last case must settle as interrupted without automatically repeating
-provider work. Use the same cheap model/effort pins and count every explicit
-test turn; a gate0 pass alone does not qualify the new HTTP send path.
+gate0 sends and stops provider turns the way the desktop does: over the HTTPS
+prompt outbox when the workspace advertises `capabilities.promptOutbox`, which
+this stack enables by default, and over the bridge otherwise. A control plane
+with active execution contexts refuses bridge sends with
+`client_update_required`. gate0 covers send, completion and Stop receipts only.
+To qualify the outbox, separately check the app's running-VM Send
+presentation, quit and reopen with pending messages, Stop during wake, and a
+worker restart during a turn. The last case must settle as interrupted without
+automatically repeating provider work. Use the same cheap model/effort pins and
+count every explicit test turn.
+
+## Measuring Alpha
+
+After a change merges and deploys, agents measure deployed Alpha headlessly;
+nothing runs locally except the probe:
+
+```sh
+pnpm alpha:probe --organization <test org slug> [--agents claude] [--report .context/alpha-probe/run.json]
+```
+
+It checks `/v1/release-identity` (channel, readiness, cloud health) and records
+the deployed source and worker digests. Then it signs in as the profile's
+fixture login and runs the gate0 sequence once in the named organization:
+create, connect, terminal, files and Git, one turn per agent, Stop, offline
+history, stop, wake and delete. The fixture login also belongs to real team
+organizations on Alpha, so the probe refuses to run without an explicit
+`--organization` or `ZEROS_ALPHA_PROBE_ORGANIZATION`. It never picks one. By
+default it runs every agent connected in that organization and reports the
+rest as not checked.
+
+Each phase's wall-clock duration prints as it completes. The JSON report adds:
+
+- worker stage timings, when the operator's Boat key can read Alpha's VM;
+- the VM's observed running time, an upper bound on billed time;
+- the control plane's `agentCost` for the workspace;
+- a dollar estimate, only if `ZEROS_ALPHA_PROBE_VM_DOLLARS_PER_HOUR` is set.
+
+The hybrid transport probe is not run, because Alpha's worker signing key stays
+in Railway. Every run creates one real VM and spends provider turns. The
+workspace is deleted even on failure unless `--keep` is passed.
 
 ## Data and cleanup
 
