@@ -62,7 +62,7 @@ describe("a slot component's instances", () => {
     const { instances, html } = await expandDesignComponentsForRender("/work/slots",
       doc('<zd-panel data-oid="outer"><zd-pill data-oid="slotted" label="On"></zd-pill><zd-badge data-oid="tone" tone="warn"></zd-badge></zd-panel>'),
       { "components/pill.html": pill, "components/badge.html": badge, "components/panel.html": panel }, "start/welcome.html", { registry: new Map() }, false);
-    expect(html).toContain('<b data-zd-part="badge">warn</b>');
+    expect(html).toContain('<b data-zd-part="badge" data-zd-root="">warn</b>');
     expect(Object.keys(instances?.hosts ?? {}).sort()).toEqual(["outer", "slotted", "tone"]);
     expect(instances?.hosts.slotted).toEqual({ component: "pill", attributes: { label: "On" } });
     expect(instances?.hosts.tone).toEqual({ component: "badge", attributes: { tone: "warn" } });

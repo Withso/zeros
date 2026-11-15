@@ -28,6 +28,7 @@ import { DESIGN_RUNTIME_INSTANCE_TARGET } from "@zeros/protocol/design-runtime";
 
 import { designFrameRuntime } from "../../../platform/bridge/design-frame-runtime";
 import { designBackgroundWork } from "./design-background-work";
+import { designPartOverrideAttribute } from "./design-component-parts";
 import { applyDesignEditCached } from "./design-workspace-cache";
 
 export interface DesignFrameComponentView {
@@ -170,6 +171,51 @@ export function commitDesignInstanceAttributes(
 ) {
   return applyDesignEditCached(workspaceId, frame, edit(intent, Object.entries(attributes).map(([attribute, value], index) =>
     ({ operationId: `set-attribute-${index}`, type: "node.set-attribute", nodeId, attribute, value }))));
+}
+
+/** The properties a declaration list sets, as written: split at its
+ * top-level semicolons, so a value's own (in quotes or parentheses) stays. */
+export function designDeclaredProperties(list: string): string[] {
+  const properties: string[] = [];
+  let depth = 0;
+  let quote: string | null = null;
+  let start = 0;
+  const take = (end: number) => {
+    const text = list.slice(start, end);
+    const colon = text.indexOf(":");
+    const property = colon > 0 ? text.slice(0, colon).trim() : "";
+    if (property) properties.push(property.startsWith("--") ? property : property.toLowerCase());
+    start = end + 1;
+  };
+  for (let index = 0; index < list.length; index += 1) {
+    const character = list[index]!;
+    if (quote) {
+      if (character === "\\") index += 1;
+      else if (character === quote) quote = null;
+    } else if (character === '"' || character === "'") quote = character;
+    else if (character === "(") depth += 1;
+    else if (character === ")") depth = Math.max(0, depth - 1);
+    else if (character === ";" && depth === 0) take(index);
+  }
+  take(list.length);
+  return properties;
+}
+
+/** Reset an instance's overrides in one step: each part's zd-style-<part>,
+ * and the style the instance sets on its root (its host's own style). */
+export function commitDesignInstanceOverridesReset(
+  workspaceId: string,
+  frame: { file: string; sourceVersion: string },
+  nodeId: string,
+  parts: readonly string[],
+  style: string | undefined,
+) {
+  const properties = style ? designDeclaredProperties(style) : [];
+  return applyDesignEditCached(workspaceId, frame, edit("Reset overrides", [
+    ...parts.map((part, index) => ({ operationId: `reset-part-${index}`, type: "node.set-attribute", nodeId, attribute: designPartOverrideAttribute(part), value: null })),
+    ...(properties.length ? [{ operationId: "reset-style", type: "node.set-styles", nodeId, styles: Object.fromEntries(properties.map((property) => [property, null])),
+      scope: "inline", responsiveContext: "base", stateContext: "default" }] : []),
+  ]));
 }
 
 /** Set the text a plain component's instance fills its default slot with:

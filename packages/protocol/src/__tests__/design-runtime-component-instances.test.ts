@@ -26,6 +26,7 @@ const BODY = `<div data-oid="root">
 <zd-card data-oid="i4" data-zd-instance="5"><div data-zd-part="frame" data-zd-slot="content" style="display: block; min-height: 20px"><p data-oid="put" slot="content">P</p></div><footer data-zd-part="foot"><i data-oid="rest">r</i></footer></zd-card>
 <ul data-oid="list"><li data-oid="item">1</li><li data-zd-copy="item#1">2</li></ul>
 <p data-oid="plain">plain</p>
+<div data-oid="row" style="display: flex; gap: 10px; align-items: flex-start"><zd-box data-oid="b1" data-zd-instance="6" style="display: contents"><section class="box" data-zd-part="box" data-zd-root="" style="display: flex; box-sizing: border-box; width: 120px; height: 40px; padding: 4px"><button data-zd-part="go">Go</button><em data-oid="b1-put">p</em></section></zd-box><p data-oid="after" style="width: 30px; height: 10px; margin: 0">a</p></div>
 </div>`;
 
 const ALL = ["previewComponentOptions", "previewComponentInstanceOptions", "getComponentPartAtLoc"];
@@ -174,6 +175,45 @@ describe("component instances in the frame runtime", () => {
     }
   });
 
+  it("reads a main's instance as one box: its root is the instance's own layer, row, size and preview", async () => {
+    const page = await fixture(browser);
+    try {
+      const part = (host: string, id: string) => designComponentPartNodeId(host, id);
+      const snapshot = (await request(page, "getSnapshot")).result as { tree: LayerTree[] };
+      expect(outline(snapshot.tree[0]!.children.find((child) => child.oid === "row")!)).toEqual({ row: [
+        { b1: [{ [part("b1", "go")]: [] }, { "b1-put": [] }] }, { after: [] },
+      ] });
+      const details = (await request(page, "getNodeDetails", { nodeId: "b1" })).result as Record<string, unknown>;
+      expect(details).toMatchObject({ oid: "b1", tag: "zd-box", textEditable: false, rect: { width: 120, height: 40 },
+        styles: { display: "flex" }, layout: { parentId: "row" } });
+      expect(details.hiddenBy).toBeUndefined();
+      const row = (await request(page, "getNodeDetails", { nodeId: "row" })).result as { childrenLayout: { nodeIds: string[] } };
+      expect(row.childrenLayout.nodeIds).toEqual(["b1", "after"]);
+      // Its root's own area hits the instance, never a part.
+      const corner = await page.evaluate(() => {
+        const box = document.querySelector("[data-zd-root]")!.getBoundingClientRect();
+        return { x: box.right - 3, y: box.bottom - 3 };
+      });
+      expect(oidOf(await request(page, "getElementAtLoc", { ...corner, mode: "deepest" }))).toBe("b1");
+      expect((await request(page, "getComponentPartAtLoc", { ...corner, hostNodeId: "b1" })).result).toBeNull();
+      const go = await centre(page, '[data-zd-part="go"]');
+      expect(oidOf(await request(page, "getComponentPartAtLoc", { ...go, hostNodeId: "b1" }))).toBe(part("b1", "go"));
+      const targets = (await request(page, "getLayoutTargets", { nodeId: "b1" })).result as Array<{ oid: string; rect: { width: number } }>;
+      expect(targets.filter((target) => target.oid === "b1").map((target) => target.rect.width)).toEqual([120]);
+      const geometry = (await request(page, "previewGeometry", { nodeId: "row", children: true })).result as { children: Array<{ oid: string; rect: { width: number } }> };
+      expect(geometry.children.find((child) => child.oid === "b1")?.rect.width).toBe(120);
+      // A preview on the instance sizes its root; the host keeps no box.
+      await request(page, "previewStyles", { nodeId: "b1", styles: { width: "200px" } });
+      expect(await widthOf(page, "[data-zd-root]")).toBe("200px");
+      expect(await page.evaluate(() => getComputedStyle(document.querySelector('[data-oid="b1"]')!).display)).toBe("contents");
+      await request(page, "clearPreviewStyles", { nodeId: "b1" });
+      expect(await widthOf(page, "[data-zd-root]")).toBe("120px");
+      await request(page, "setNodeVisibility", { nodeId: "b1", visible: false });
+      expect(((await request(page, "getNodeDetails", { nodeId: "b1" })).result as { hiddenBy?: string }).hiddenBy).toBe("self");
+    } finally {
+      await page.close();
+    }
+  });
   it("answers only a host that asked, and resolves no part id or copy for one that did not", async () => {
     const page = await fixture(browser, ["previewComponentOptions"]);
     try {

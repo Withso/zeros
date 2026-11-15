@@ -58,6 +58,7 @@ import {
   commitDesignComponentStateVariant,
   commitDesignComponentVariant,
   commitDesignInstanceAttributes,
+  commitDesignInstanceOverridesReset,
   commitDesignInstanceSlotReset,
   commitDesignInstanceText,
   createDesignComponentPreview,
@@ -70,7 +71,7 @@ import {
   readDesignFrameComponent,
   sameDesignComponentValue,
 } from "./state/design-component-options";
-import { DESIGN_OPTIONS_NOT_APPLIED_MESSAGES, designComponentSlotLabel, designPartOverrideAttribute } from "./state/design-component-parts";
+import { DESIGN_OPTIONS_NOT_APPLIED_MESSAGES, designComponentSlotLabel } from "./state/design-component-parts";
 import { showDesignComponentVariant, useDesignShownComponentVariant } from "./state/design-component-variants";
 
 const EASINGS = [
@@ -213,10 +214,12 @@ export function DesignComponentOptions({
       }
     : undefined;
   const overridden = instance ? Object.keys(instance.host.overrides ?? {}) : [];
-  const resetOverrides = instance && overridden.length
+  // The instance's own style is what it overrides on its root, its box.
+  const ownStyle = instance?.host.style;
+  const overrideCount = overridden.length + (ownStyle ? 1 : 0);
+  const resetOverrides = instance && overrideCount
     ? () => {
-        const removed: Record<string, null> = Object.fromEntries(overridden.map((part) => [designPartOverrideAttribute(part), null]));
-        void commitDesignInstanceAttributes(workspaceId, frame, instance.nodeId, removed, "Reset overrides").catch(failed("the overrides"));
+        void commitDesignInstanceOverridesReset(workspaceId, frame, instance.nodeId, overridden, ownStyle).catch(failed("the overrides"));
       }
     : undefined;
   const resetSlot = (label: string, layers: readonly string[]) => {
@@ -365,9 +368,9 @@ export function DesignComponentOptions({
         />
       ) : null}
       {resetOverrides ? (
-        <OptionActionRow disabled={disabled} onClick={resetOverrides} data-design-overrides-reset={overridden.length}>
+        <OptionActionRow disabled={disabled} onClick={resetOverrides} data-design-overrides-reset={overrideCount}>
           <RotateCcw aria-hidden="true" />
-          {overridden.length === 1 ? "Reset 1 part override" : `Reset ${overridden.length} part overrides`}
+          {overrideCount === 1 ? "Reset 1 override" : `Reset ${overrideCount} overrides`}
         </OptionActionRow>
       ) : null}
       {/* Options are the main's to change, so an instance does not offer it. */}

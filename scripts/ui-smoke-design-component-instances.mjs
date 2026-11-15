@@ -77,6 +77,14 @@ export async function runDesignComponentInstancesSmoke({ page, check }) {
 
   // ── The main component's variants ──
   await selectMain();
+  // One box on the main: its frame row is its root layer, the component.
+  if (!(await layer("cc-chips").count())) await frameRow("pricing.html").locator("[data-layer-disclosure]").click();
+  await expect(layer("cc-chips")).toHaveCount(1);
+  check("a main's frame row is its root layer: the root has no row of its own and its layers sit under the frame",
+    (await layer("cc-root").count()) === 0);
+  check("selecting a main edits its root: W reads the root's width, which its Width option sets",
+    (await page.locator('[data-design-inspector] [data-design-size-axis="x"]').innerText()).includes("zd-width"),
+    await page.locator('[data-design-inspector] [data-design-size-axis="x"]').innerText());
   await expect(variantRow()).toContainText("Default");
   await variantRow().click();
   const items = await page.getByRole("menuitemradio").allInnerTexts();
@@ -187,6 +195,34 @@ export async function runDesignComponentInstancesSmoke({ page, check }) {
   check("the instance's rows show its values", (await slider("Width").getAttribute("aria-valuenow")) === "800");
   check("an instance has no info foot", (await page.locator("[data-design-frame-info]").count()) === 0);
 
+  // ── One box: the instance is its main's root layer ──
+  const rootBox = frame("home.html").locator('[data-oid="home-composer"] > [data-zd-root]');
+  if (!(await page.locator('[data-design-layer-id^="::zeros-part:home-composer:"]').count())) await layer("home-composer").locator("[data-layer-disclosure]").click();
+  await expect(page.locator('[data-design-layer-id="::zeros-part:home-composer:cc-chips"]')).toHaveCount(1);
+  check("an instance is one Layers row: its main's root layer has no row of its own, and its layers sit under the instance",
+    (await page.locator('[data-design-layer-id="::zeros-part:home-composer:cc-root"]').count()) === 0);
+  check("the host lays out no box of its own; the root is the instance's box",
+    (await frame("home.html").locator('[data-oid="home-composer"]').evaluate((element) => getComputedStyle(element).display)) === "contents" &&
+      (await rootBox.count()) === 1);
+  const inspectorPanel = page.locator("[data-design-inspector]");
+  check("the instance's width reads its root's, which its Width option sets",
+    (await inspectorPanel.locator('[data-design-size-axis="x"]').innerText()).includes("zd-width"),
+    await inspectorPanel.locator('[data-design-size-axis="x"]').innerText());
+  const instanceHeight = inspectorPanel.getByLabel("H", { exact: true });
+  const rootHeight = await rootBox.evaluate((element) => element.offsetHeight);
+  check("the instance's height reads its root's", Math.abs(Number(await instanceHeight.inputValue()) - rootHeight) <= 1, `${await instanceHeight.inputValue()} root ${rootHeight}`);
+  await instanceHeight.fill("300");
+  await instanceHeight.press("Enter");
+  await expect.poll(home).toMatch(/<zd-chat-composer data-oid="home-composer"[^>]*style="[^"]*height: 300px/);
+  await expect.poll(() => rootBox.evaluate((element) => getComputedStyle(element).height)).toBe("300px");
+  await expect(section.locator("[data-design-overrides-reset]")).toHaveAttribute("data-design-overrides-reset", "1");
+  check("resizing an instance sizes its root, as an override its Options offer to reset", true);
+  await section.locator("[data-design-overrides-reset]").click();
+  await expect.poll(home).not.toMatch(/<zd-chat-composer data-oid="home-composer"[^>]*style=/);
+  await expect.poll(() => rootBox.evaluate((element) => getComputedStyle(element).height)).toBe(`${rootHeight}px`);
+  await expect(section.locator("[data-design-overrides-reset]")).toHaveCount(0);
+  check("Reset overrides gives the instance its main's size back", true);
+
   // Mode back to what it inherits removes the attribute, and the dot.
   const writesBeforeMode = await writes();
   await section.getByRole("radiogroup", { name: "Mode" }).getByRole("radio", { name: "Ask" }).click();
@@ -236,7 +272,7 @@ export async function runDesignComponentInstancesSmoke({ page, check }) {
   // The selection's outline follows the instance's box at the restored generation.
   const outlineMatches = async () => {
     const outline = await page.locator("[data-design-selected-element]").first().boundingBox().catch(() => null);
-    const painted = await frame("home.html").locator('[data-oid="home-composer"]').boundingBox().catch(() => null);
+    const painted = await frame("home.html").locator('[data-oid="home-composer"] > [data-zd-root]').boundingBox().catch(() => null);
     return !!outline && !!painted && Math.abs(outline.width - painted.width) <= 2 && Math.abs(outline.height - painted.height) <= 2;
   };
   await expect.poll(outlineMatches, { timeout: 3_000 }).toBe(true).catch(() => {});
@@ -308,7 +344,7 @@ export async function runDesignComponentInstancesSmoke({ page, check }) {
   // The instance offers to reset its overrides; undo takes back one.
   await selectInstance();
   await expect(section.locator("[data-design-overrides-reset]")).toHaveAttribute("data-design-overrides-reset", "2");
-  check("an instance's Options offer to reset its part overrides", (await section.locator("[data-design-overrides-reset]").innerText()).includes("Reset 2 part overrides"));
+  check("an instance's Options offer to reset its part overrides", (await section.locator("[data-design-overrides-reset]").innerText()).includes("Reset 2 overrides"));
   await undo();
   await expect.poll(home).not.toContain("zd-style-cc-chip");
   await expect(section.locator("[data-design-overrides-reset]")).toHaveAttribute("data-design-overrides-reset", "1");

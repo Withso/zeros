@@ -356,6 +356,24 @@ describe("layer states in Chromium", () => {
     await request(page, "setTheme", { theme: null });
   });
 
+  it("takes a main component frame's one root as the frame, so the frame is the component's box", async () => {
+    const options = `<template data-zd-options><zd-option name="width" type="number" default="200"></zd-option></template>`;
+    const frameOf = async (head: string, body: string) => {
+      const page = await fixture(browser, head, body);
+      try {
+        return ((await request(page, "getSnapshot", {})).result as { frame: DesignRuntimeNodeDetails }).frame.oid;
+      } finally {
+        await page.close();
+      }
+    };
+    expect(await frameOf(options, `<main data-oid="cc-root"><p data-oid="cc-copy">Copy</p></main>`)).toBe("cc-root");
+    // Two roots, or a page that declares no options, keep the body as the frame.
+    expect(await frameOf(options, `<main data-oid="a"></main><main data-oid="b"></main>`)).not.toMatch(/^(?:a|b)$/);
+    expect(await frameOf("", `<main data-oid="page-root"><p data-oid="page-copy">Copy</p></main>`)).not.toBe("page-root");
+    // Only the head's declaration names a component.
+    expect(await frameOf("", `<main data-oid="page-root"><template data-zd-options></template></main>`)).not.toBe("page-root");
+  });
+
   it("keeps a held frame root's values out of every snapshot, and keeps holding after one", async () => {
     const scoped = await fixture(
       browser,

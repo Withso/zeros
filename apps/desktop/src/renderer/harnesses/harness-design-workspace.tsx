@@ -31,7 +31,7 @@ import {
 import { appendComponentVariant, mutateComponentOption } from "@zeros/design-web/component-options";
 import { mutateDesignComponentStateStyles, showDesignComponentState } from "@zeros/design-web/component-states";
 import { createComponentTemplateBudget, designComponentSummaryOf, renderComponentTemplate } from "@zeros/design-web/component-template";
-import { applyDesignPartStyleOverrides, designPartOfNodeId, designPartStyleAttribute, designPartStyleOverrides, mergeDesignPartStyleOverride }
+import { applyDesignPartStyleOverrides, designInstanceRootBody, designPartOfNodeId, designPartStyleAttribute, designPartStyleOverrides, mergeDesignPartStyleOverride }
   from "@zeros/design-web/component-overrides";
 import { designComponentPreviewMessagesForTests } from "../features/design-workspace/state/design-component-options";
 import { mutateDesignNodeAttributeSource, mutateDesignNodeDuplicateSource, mutateDesignNodeDeleteSource, mutateDesignNodeHtmlSource,
@@ -372,6 +372,11 @@ function renderHarnessInstances(source: string): string {
     rules.push(`:where([data-zd-instance="${id}"]) { ${componentOptionCss(declaration, values, scope)} }`);
     const inner = fillHarnessSlots(applyDesignPartStyleOverrides(renderComponentTemplate(body, { scope, ids: "part", budget: createComponentTemplateBudget() }),
       harnessPartOverrides(hostAttributes)), children);
+    // One box, as the engine renders a main's instance: its root is the box
+    // and carries the host's own style and classes.
+    const boxed = designInstanceRootBody(inner, { style: hostAttributes.get("style"), className: hostAttributes.get("class") });
+    if (boxed !== null)
+      return `<zd-chat-composer${attributes.replace(/\s(?:style|class)="[^"]*"/g, "")} style="display: contents" data-zd-instance="${id}">${boxed}</zd-chat-composer>`;
     return `<zd-chat-composer${attributes} data-zd-instance="${id}" style="display:block">${inner}</zd-chat-composer>`;
   });
   return html.replace(/<\/head>/i, `<style data-zeros-component="chat-composer">${styles}</style><style data-zeros-options>${rules.join("\n")}</style></head>`);
@@ -416,6 +421,7 @@ function harnessInlineStyleSource(source: string, nodeId: string, styles: Record
     if (value === null) target.style.removeProperty(property);
     else target.style.setProperty(property, value);
   }
+  if (!target.style.length) target.removeAttribute("style");
   return `<!doctype html>${parsed.documentElement.outerHTML}`;
 }
 
@@ -437,9 +443,11 @@ function harnessInstancesRecord(source: string, notApplied?: "last-good" | "defa
   const slotted = harnessSlottedLayers(source);
   const hosts = Object.fromEntries([...harnessInstanceAttributes(source)].map(([oid, attributes]) => {
     const overrides = harnessPartOverrides(attributes);
+    const style = attributes.get("style")?.trim();
     return [oid, {
-      component: "chat-composer", attributes: Object.fromEntries(attributes), ...(harnessInstanceFailures.has(oid) ? { failed: true as const } : {}),
-      ...(overrides.size ? { overrides: Object.fromEntries(overrides) } : {}), ...(slotted.has(oid) ? { slotted: slotted.get(oid)! } : {}),
+      component: "chat-composer", attributes: Object.fromEntries([...attributes].filter(([name]) => name !== "style" && name !== "class")),
+      ...(harnessInstanceFailures.has(oid) ? { failed: true as const } : {}),
+      ...(overrides.size ? { overrides: Object.fromEntries(overrides) } : {}), ...(style ? { style } : {}), ...(slotted.has(oid) ? { slotted: slotted.get(oid)! } : {}),
     }];
   }));
   if (!Object.keys(hosts).length) return undefined;
@@ -1974,6 +1982,8 @@ async function main() {
                   ...frame,
                   sourceVersion: nextSourceVersion,
                   modifiedAt: frame.modifiedAt + 1,
+                  ...(componentOptionsHarness && frame.instances
+                    ? { instances: harnessInstancesRecord(currentHomeSource) ?? frame.instances } : {}),
                 }
               : frame,
           ),
@@ -2322,6 +2332,8 @@ async function main() {
             )) {
               target.style.setProperty(property, value ?? "");
             }
+            // Mirror the adapter: a style with nothing left is removed.
+            if (!target.getAttribute("style")?.trim()) target.removeAttribute("style");
           }
           const savedSource = transaction?.operations?.some((operation) => operation.type !== "frame.set-geometry")
             ? `<!doctype html>${parsed.documentElement.outerHTML}` : transactionSource;
@@ -2346,6 +2358,9 @@ async function main() {
                     )?.geometry,
                     sourceVersion: nextSourceVersion,
                     modifiedAt: frame.modifiedAt + 1,
+                    // An instance's own style is part of what it reports.
+                    ...(componentOptionsHarness && frame.file === "home.html" && frame.instances
+                      ? { instances: harnessInstancesRecord(savedSource) ?? frame.instances } : {}),
                   }
                 : frame,
             ),

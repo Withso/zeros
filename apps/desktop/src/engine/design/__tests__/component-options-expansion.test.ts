@@ -49,8 +49,8 @@ describe("an instance of a component with options", () => {
     expect(result.errors).toEqual([]);
     expect(result.usedComponents).toEqual(["chat-composer"]);
     expect(result.html).toContain(
-      '<zd-chat-composer data-oid="ws" zd-variant="compact" attachments="1" toolbar="false" data-zd-instance="1">' +
-        '<div class="composer" data-zd-part="cc-root" data-density="compact"><span class="chip" data-zd-part="cc-chip">File 1</span></div></zd-chat-composer>',
+      '<zd-chat-composer data-oid="ws" zd-variant="compact" attachments="1" toolbar="false" style="display: contents" data-zd-instance="1">' +
+        '<div class="composer" data-zd-part="cc-root" data-density="compact" data-zd-root=""><span class="chip" data-zd-part="cc-chip">File 1</span></div></zd-chat-composer>',
     );
     expect(result.html).toContain('<style data-zeros-options>:where([data-zd-instance="1"]) { --zd-width: 800px; --zd-attachments: 1; --zd-accent: var(--blue-primary); }</style>');
   });
@@ -94,7 +94,7 @@ describe("an instance of a component with options", () => {
     expect(result.html).toContain(':where([data-zd-instance="1"]) { --zd-width: 320px; }');
     // The inner badge, at its default, sets its own width rather than inheriting 320px.
     expect(result.html).toContain(':where([data-zd-instance="2"]) { --zd-width: 24px; }');
-    expect(result.html).toContain('<zd-badge data-zd-part="inner" data-zd-instance="2"><b data-zd-part="badge">B</b></zd-badge>');
+    expect(result.html).toContain('<zd-badge data-zd-part="inner" style="display: contents" data-zd-instance="2"><b data-zd-part="badge" data-zd-root="">B</b></zd-badge>');
   });
 
   it("keeps the inherited value of an attribute that does not fit, and says so", async () => {
@@ -113,7 +113,7 @@ describe("an instance of a component with options", () => {
     const result = await expand(doc('<zd-fragile data-oid="f" count="0"></zd-fragile><zd-broken data-oid="b"></zd-broken>'),
       { "components/fragile.html": fragile, "components/broken.html": broken }, "home/index.html", {});
     expect(result.optionsFailed).toBe(true);
-    expect(result.html).toContain('<zd-fragile data-oid="f" count="0" data-zd-instance="2"><p data-zd-part="p">25</p></zd-fragile>');
+    expect(result.html).toContain('<zd-fragile data-oid="f" count="0" style="display: contents" data-zd-instance="2"><p data-zd-part="p" data-zd-root="">25</p></zd-fragile>');
     expect(result.html).toContain('<zd-broken data-oid="b" data-zd-instance="1"></zd-broken>');
     expect(result.errors.map((error) => [error.component, error.code, error.message])).toEqual([
       ["broken", "component-expression-invalid", "Unknown name missing."],

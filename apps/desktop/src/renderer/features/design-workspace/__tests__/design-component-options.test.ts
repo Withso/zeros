@@ -11,6 +11,7 @@ import {
   commitDesignComponentOption,
   commitDesignComponentVariant,
   commitDesignInstanceAttributes,
+  commitDesignInstanceOverridesReset,
   commitDesignInstanceText,
   createDesignComponentPreview,
   designComponentVariantName,
@@ -119,6 +120,19 @@ describe("variants and instances", () => {
       expect.objectContaining({ type: "node.set-attribute", nodeId: "inst", attribute: "label", value: null }),
       expect.objectContaining({ type: "node.set-attribute", nodeId: "inst", attribute: "zd-variant", value: null }),
     ]);
+  });
+
+  it("resets an instance's overrides in one transaction: each part's attribute, and each property its own style sets on its root", async () => {
+    const frame = { file: "home.html", sourceVersion: V1 } as never;
+    await commitDesignInstanceOverridesReset("w", frame, "inst", ["cc-send", "chip#1"], 'width: 300px; background: url("a;b.png"); --Gap: 2px');
+    expect(calls()[0]![2].intent).toBe("Reset overrides");
+    expect(calls()[0]![2].operations).toEqual([
+      expect.objectContaining({ type: "node.set-attribute", nodeId: "inst", attribute: "zd-style-cc-send", value: null }),
+      expect.objectContaining({ type: "node.set-attribute", nodeId: "inst", attribute: "zd-style-chip", value: null }),
+      expect.objectContaining({ type: "node.set-styles", nodeId: "inst", scope: "inline", styles: { width: null, background: null, "--Gap": null } }),
+    ]);
+    await commitDesignInstanceOverridesReset("w", frame, "inst", ["cc-send"], undefined);
+    expect(calls()[1]![2].operations).toHaveLength(1);
   });
 
   it("writes a plain component instance's slot text as its host's text, in one transaction", async () => {

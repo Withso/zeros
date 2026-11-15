@@ -1999,13 +1999,32 @@ only through options, and structure only on the main: every other node write
 the workspace cache sends refuses a part before anything is sent (naming
 what to do instead), and the engine finds no such layer either. Reset under
 the header of an overridden part removes its override, and the instance's Options section
-ends with "Reset N part overrides". Canvas drag and resize on a part stay
+ends with "Reset N overrides" (its part overrides, plus its own style). Canvas drag and resize on a part stay
 blocked. Layers names an instance by its component (an authored layer name
 wins) with the component mark, and, where the runtime offers
 `getComponentPartAtLoc`, lists its parts and slots beneath it; elements
 without ids inside an instance pass their children through. A part row cannot
 be renamed; its eye hides it on the canvas only, like any layer. An agent's
 selection names its host.
+
+**One box.** As in Figma, an instance of a main frame or a component with
+options is its main's root layer. When the expanded body is one
+`data-zd-part` element (not a slot, `slot` or `template`, with no text
+beside it), expansion marks it `data-zd-root`, gives it the host's classes
+after its own and the host's `style` after its own and its part override,
+and writes `style="display: contents"` on the host in place of the host's
+own `style` and `class` (`designInstanceRootBody`). The instance record
+carries the host's own style. The runtime measures, previews and outlines
+the root for the host (`layerBoxOf`); a hit on the root is the instance, so
+Layers shows no root row and a double-click enters a layer inside it. Size
+and position edits on an instance write the host's `style`, an override
+"Reset N overrides" removes with its part overrides in one transaction.
+Host CSS such as `zd-card { display: inline-block }` no longer boxes such an
+instance; plain `components/*.html` slot components expand as before. On a
+main frame, a body holding one layer while its head declares
+`<template data-zd-options>` makes that root the frame (as a seeded frame
+shell is): the frame row is the component, selecting the root selects the
+main, and its W and H edit the root's own size rather than the canvas frame.
 
 **Slots.** A frame the main marks `data-zd-slot="<name>"` is a slot option
 (declaring `<zd-option type="slot">` only adds a label, group or order; it

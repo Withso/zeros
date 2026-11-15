@@ -1666,6 +1666,8 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
 
   function targetOidOf(element) {
     if (element === document.body) return ${JSON.stringify(DESIGN_RUNTIME_DOCUMENT_BODY_ID)};
+    var instance = rootInstanceOf(element);
+    if (instance) return targetOidOf(instance);
     var oid = oidOf(element);
     return !oid && componentAddressing() && element && element.getAttribute ? partIdOf(element) : oid;
   }
@@ -1689,6 +1691,30 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     var parent = element.parentElement;
     while (parent && !parent.hasAttribute("data-zd-instance")) parent = parent.parentElement;
     return parent;
+  }
+
+  // A main frame's instance is one box, as in Figma: its main's root layer
+  // (data-zd-root) lays out in the host's place and the host, display:
+  // contents, has no box. The root is read, measured and previewed as the
+  // instance itself, under the host's id, and has no row of its own.
+  function instanceRootOf(element) {
+    var root = element && element.hasAttribute && element.hasAttribute("data-zd-instance") ? element.firstElementChild : null;
+    return root && root.hasAttribute("data-zd-root") ? root : null;
+  }
+
+  function rootInstanceOf(element) {
+    var host = element && element.hasAttribute && element.hasAttribute("data-zd-root") ? element.parentElement : null;
+    return host && host.hasAttribute("data-zd-instance") ? host : null;
+  }
+
+  /** The element that renders a layer's box. */
+  function layerBoxOf(element) {
+    return instanceRootOf(element) || element;
+  }
+
+  /** The layer an element's box belongs to. */
+  function layerOwnerOf(element) {
+    return rootInstanceOf(element) || element;
   }
 
   // A frame the main marks as a slot is addressed as its slot, so a layer
@@ -1767,6 +1793,8 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     visitElementsFromPoint(x, y, function (element) {
       if (element === host || !host.contains(element)) return false;
       for (var current = element; current && current !== host; current = current.parentElement) {
+        // The root is the instance's own box, not a part inside it.
+        if (rootInstanceOf(current) === host) return true;
         if ((current.hasAttribute("data-zd-part") || current.hasAttribute("data-zd-slot")) && partOwnerOf(current) === host) {
           found = current;
           return true;
@@ -1820,7 +1848,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
    * so assigned elements lay out in the slot's parent box. */
   function layoutParentOf(element) {
     var parent = composedParentOf(element);
-    while (parent && parent.localName === "slot" && getComputedStyle(parent).display === "contents") {
+    while (parent && ((parent.localName === "slot" && getComputedStyle(parent).display === "contents") || instanceRootOf(parent) === element)) {
       parent = composedParentOf(parent);
     }
     return parent;
@@ -1965,7 +1993,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   }
 
   function rectOf(element) {
-    var rect = element.getBoundingClientRect();
+    var rect = layerBoxOf(element).getBoundingClientRect();
     return {
       x: rect.left,
       y: rect.top,
@@ -3489,9 +3517,10 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     }
     budget.count += 1;
     var oid = layerIdOf(element);
-    var computed = getComputedStyle(element);
+    var box = layerBoxOf(element);
+    var computed = getComputedStyle(box);
     var children = [];
-    var layerChildren = treeChildrenOf(element, depth, []);
+    var layerChildren = treeChildrenOf(box, depth, []);
     if (depth >= MAX_TREE_DEPTH) {
       if (layerChildren.length > 0) budget.truncated = true;
     } else {
@@ -3507,7 +3536,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       name: nameOf(element),
       layerName: layerNameOf(element),
       text: directText(element),
-      visible: visibleOf(element, computed),
+      visible: visibleOf(box, computed),
       display: computed.display || "",
       flexDirection: computed.flexDirection || "",
       children: children
@@ -3663,6 +3692,8 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       var child = layoutChildren[index];
       if (oidOf(child)) children.push(child);
     }
+    var nodeIds = children.map(oidOf);
+    children = children.map(layerBoxOf);
     var result = { count: children.length, nodeIds: [], x: "start", y: "start", truncated: children.length > ${DESIGN_LAYOUT_CHILD_LIMIT} };
     if (result.truncated) {
       result.x = result.y = "mixed";
@@ -3679,7 +3710,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       var y = childConstraintOf(child, childComputed, authored, "y");
       result.x = result.nodeIds.length === 0 ? x : result.x === x ? x : "mixed";
       result.y = result.nodeIds.length === 0 ? y : result.y === y ? y : "mixed";
-      result.nodeIds.push(oidOf(child));
+      result.nodeIds.push(nodeIds[index]);
     }
     return result;
   }
@@ -3740,34 +3771,37 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   }
 
   function detailsOf(element, layoutOnly, relocation) {
+    var layer = layerOwnerOf(element);
+    element = layerBoxOf(layer);
     // A held state can move and resize layers outside it (a wider flex item
     // pushes its siblings). Those are read with the state set aside, so no
     // unmarked reply carries its geometry; the held subtree reads marked.
     if (heldState && !heldStateAside && element !== heldState.element && !heldState.element.contains(element)) {
       return withoutHeldState(function () { return detailsOf(element, layoutOnly, relocation); });
     }
-    var oid = targetOidOf(element);
+    var oid = targetOidOf(layer);
     if (!oid) throw new Error("The selected element has no stable data-oid.");
     var escaped = window.CSS && typeof window.CSS.escape === "function"
       ? window.CSS.escape(oid)
       : oid.replace(/["\\]/g, "\\$&");
-    var textEditable = textEditableOf(element);
+    // An instance's text belongs to its main and its options.
+    var textEditable = layer === element && textEditableOf(element);
     var computed = getComputedStyle(element);
     var authoredStyleProperties = layoutOnly ? [] : authoredStylePropertiesOf(element);
     var rect = rectOf(element);
-    var hiddenBy = hiddenByOf(element, computed);
+    var hiddenBy = layer === element ? hiddenByOf(element, computed) : hiddenByOf(layer) || (hiddenByOf(element, computed) ? "self" : null);
     var result = {
       sourceVersion: SOURCE_VERSION,
       oid: oid,
-      tag: element.tagName.toLowerCase(),
-      name: nameOf(element),
-      text: textEditable ? editableTextOf(element) : directText(element),
+      tag: layer.tagName.toLowerCase(),
+      name: nameOf(layer),
+      text: textEditable ? editableTextOf(element) : directText(layer),
       textEditable: textEditable,
-      selector: element === document.body ? "body" : oidOf(element) ? "[data-oid=\"" + escaped + "\"]" : element.hasAttribute("data-zd-part")
-        ? "[data-zd-part=\"" + cssEscaped(element.getAttribute("data-zd-part") || "") + "\"]"
-        : "[data-zd-slot=\"" + cssEscaped(element.getAttribute("data-zd-slot") || "") + "\"]",
+      selector: layer === document.body ? "body" : oidOf(layer) ? "[data-oid=\"" + escaped + "\"]" : layer.hasAttribute("data-zd-part")
+        ? "[data-zd-part=\"" + cssEscaped(layer.getAttribute("data-zd-part") || "") + "\"]"
+        : "[data-zd-slot=\"" + cssEscaped(layer.getAttribute("data-zd-slot") || "") + "\"]",
       visible: hiddenBy === null,
-      breadcrumb: layoutOnly ? [] : breadcrumbOf(element),
+      breadcrumb: layoutOnly ? [] : breadcrumbOf(layer),
       rect: rect,
       box: boxOf(element, computed, rect),
       layout: layoutOf(element, computed),
@@ -3941,7 +3975,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     var seen = new Set();
     var styled = document.querySelectorAll("[style]");
     for (var styledIndex = 0; styledIndex < styled.length; styledIndex += 1) {
-      var candidate = styled[styledIndex];
+      var candidate = layerOwnerOf(styled[styledIndex]);
       if (!targetOidOf(candidate) || seen.has(candidate)) continue;
       seen.add(candidate);
       candidates.push(candidate);
@@ -3962,7 +3996,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       examined += 1;
       var layer = candidates[layerIndex];
       var layerOid = targetOidOf(layer);
-      var found = ownChangesOf(layer, layerOid);
+      var found = ownChangesOf(layerBoxOf(layer), layerOid);
       if (found.length > 0) layers.push({ oid: layerOid, name: nameOf(layer), changes: found });
     }
     var result = { sourceVersion: SOURCE_VERSION, examined: examined, truncated: candidates.length > examined, layers: layers };
@@ -4017,7 +4051,10 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       var roots = Array.from(body.children).filter(function (child) { return !!oidOf(child); });
       // Only explicitly seeded frame shells share the canvas row. An authored
       // main/div may be a small visible layer with its own children and styles.
-      if (roots.length === 1 && roots[0].hasAttribute("data-zeros-frame-root")) return roots[0];
+      // A main component's one root is the component itself, so its frame is
+      // that root's box, as in Figma.
+      if (roots.length === 1 && (roots[0].hasAttribute("data-zeros-frame-root") ||
+        (document.head && document.head.querySelector(":scope > template[data-zd-options]")))) return roots[0];
     }
     return body || document.documentElement;
   }
@@ -4721,7 +4758,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   }
 
   function previewStyles(oid, styles) {
-    var element = elementForOid(oid);
+    var element = layerBoxOf(elementForOid(oid));
     applyPreviewStyles(element, oid, styles);
     return detailsAfterLayout(element);
   }
@@ -4742,6 +4779,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
    * reflects the styles just applied — and every later read in this same task is
    * free, which is what lets the children come along without a second reflow. */
   function geometryOf(element, includeChildren) {
+    element = layerBoxOf(element);
     var oid = targetOidOf(element);
     if (!oid) throw new Error("The selected element has no stable data-oid.");
     var computed = getComputedStyle(element);
@@ -4753,9 +4791,9 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       var geometryChildren = composedChildrenOf(element);
       for (var index = 0; index < geometryChildren.length; index += 1) {
         if (children.length >= GEOMETRY_CHILD_LIMIT || index >= ${DESIGN_LAYOUT_CHILD_LIMIT}) break;
-        var child = geometryChildren[index];
-        var childOid = oidOf(child);
-        if (!childOid || child.hidden) continue;
+        var childOid = oidOf(geometryChildren[index]);
+        var child = layerBoxOf(geometryChildren[index]);
+        if (!childOid || geometryChildren[index].hidden) continue;
         var childComputed = getComputedStyle(child);
         // Layout participation, not paint: a visibility:hidden item still holds
         // its slot, while display:none and display:contents boxes hold none.
@@ -4806,7 +4844,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   }
 
   function previewGeometry(oid, styles, includeChildren) {
-    var element = elementForOid(oid);
+    var element = layerBoxOf(elementForOid(oid));
     if (styles !== undefined && styles !== null) {
       applyPreviewStyles(element, oid, styles);
     }
@@ -5251,7 +5289,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
    * live insert preview still claims; other previews keep their baseline. */
   function restoreInsertParentStyles(parentStyles) {
     parentStyles.forEach(function (entry) {
-      var element = elementsByOid.get(entry.oid);
+      var element = layerBoxOf(elementsByOid.get(entry.oid));
       var priorByProperty = previewStyleOverridesByOid.get(entry.oid);
       if (!element || !priorByProperty) return;
       var claimed = new Set();
@@ -5311,7 +5349,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
           !update.styles || typeof update.styles !== "object" || Array.isArray(update.styles)) {
         throw new Error("Invalid insert parent style.");
       }
-      return { oid: update.nodeId, element: elementForOid(update.nodeId), styles: update.styles, properties: Object.keys(update.styles) };
+      return { oid: update.nodeId, element: layerBoxOf(elementForOid(update.nodeId)), styles: update.styles, properties: Object.keys(update.styles) };
     });
     var inserted = [];
     withoutObservedMutations(function () {
@@ -5349,6 +5387,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     var style = document.createElement("style");
     style.setAttribute("data-zeros-drag-paint", "");
     var selector = element === document.body ? "body" : '[data-oid="' + CSS.escape(oid) + '"]';
+    if (instanceRootOf(element)) selector += ", " + selector + " > [data-zd-root]";
     style.textContent = selector + "{opacity:0!important}";
     document.head.appendChild(style);
     dragPaintStyle = style;
@@ -5362,6 +5401,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     var selected = args.nodeId ? elementForOid(args.nodeId) : null;
     var found = new Set();
     function add(element) {
+      element = element && layerOwnerOf(element);
       if (!element || found.size >= 512 || found.has(element) || !targetOidOf(element)) return;
       if (!(element instanceof HTMLElement) && element.tagName.toLowerCase() !== "svg") return;
       if (visibleOf(element)) found.add(element);
@@ -5606,7 +5646,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       if (!update || !update.styles || typeof update.styles !== "object" || Array.isArray(update.styles)) throw new Error("Invalid layout styles.");
       var entries = Object.entries(update.styles);
       if (entries.length > 64 || entries.some(function (entry) { return !/^(--[A-Za-z0-9_-]+|-?[a-z][a-z0-9-]*)$/.test(entry[0]) || (entry[1] !== null && (typeof entry[1] !== "string" || entry[1].length > 2048)); })) throw new Error("Invalid layout styles.");
-      return elementForOid(update.nodeId);
+      return layerBoxOf(elementForOid(update.nodeId));
     });
     var measured = nodeIds.map(elementForOid);
     if (args.suppressNodeId !== undefined && args.suppressNodeId !== null) elementForOid(args.suppressNodeId);
@@ -5799,7 +5839,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
           throw new Error("Invalid committed style: " + property);
         }
       });
-      var element = structure.elements.get(oid) || elementForOid(oid);
+      var element = structure.elements.get(oid) || layerBoxOf(elementForOid(oid));
       if (structure.deletes.some(function (deleted) { return deleted.element === element || deleted.element.contains(element); })) throw new Error("Cannot style a deleted subtree.");
       var preview = previewStyleOverridesByOid.get(oid);
       if (preview) {
@@ -5949,7 +5989,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   }
 
   function previewMotion(oid, input) {
-    var element = elementForOid(oid);
+    var element = layerBoxOf(elementForOid(oid));
     if (!input || typeof input !== "object" || Array.isArray(input)) {
       throw new Error("motion preview must be an object.");
     }
@@ -6031,7 +6071,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   }
 
   function clearPreviewStyles(oid) {
-    var element = elementForOid(oid);
+    var element = layerBoxOf(elementForOid(oid));
     var priorByProperty = previewStyleOverridesByOid.get(oid);
     var previewAnimation = previewAnimationsByOid.get(oid);
     if (previewAnimation) {
@@ -6167,7 +6207,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   }
 
   function getMatchedStyles(oid, rawProperty) {
-    var element = elementForOid(oid);
+    var element = layerBoxOf(elementForOid(oid));
     var raw = String(rawProperty || "").trim();
     var property = raw.indexOf("--") === 0 ? raw : raw.toLowerCase();
     if (!/^(--[A-Za-z0-9_-]+|-?[a-z][a-z0-9-]*)$/.test(property)) {
@@ -6639,6 +6679,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     previewStyleOverridesByOid.forEach(function (properties, oid) {
       var element = elementsByOid.get(oid);
       if (!element) return;
+      element = layerBoxOf(element);
       properties.forEach(function (prior) { restorePreviewStyle(element, prior); });
     });
     visibilityOverridesByOid.forEach(function (prior, oid) {

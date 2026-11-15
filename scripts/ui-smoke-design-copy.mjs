@@ -170,7 +170,7 @@ async function runDesignCopyChecks({ page, check }) {
   await settled(page);
   check("Option drag outside the selection copies the layer the press selects: a sibling, or the parent from its own empty area", true);
   frame = await load(page, "home-composer", "styleOrigins&componentOptions");
-  const host = await designFrameElementBox(page.locator(displayed), frame.locator('[data-oid="home-composer"]'));
+  const host = await designFrameElementBox(page.locator(displayed), frame.locator('[data-oid="home-composer"] > [data-zd-root]'));
   await page.keyboard.down("Alt");
   await page.mouse.move(host.x + host.width / 2, host.y + host.height / 2);
   await page.mouse.down();
@@ -185,7 +185,8 @@ async function runDesignCopyChecks({ page, check }) {
   await expect(frame.locator('[data-oid^="copy-"]')).toHaveCount(0);
   check("Option drag inside a selected instance copies the instance", true);
   frame = await load(page, "home-composer", "styleOrigins&componentOptions");
-  const instance = await designFrameElementBox(page.locator(displayed), frame.locator('[data-oid="home-composer"]'));
+  // The root is the instance's own box, so a double-click enters a layer inside it.
+  const instance = await designFrameElementBox(page.locator(displayed), frame.locator('[data-oid="home-composer"] [data-zd-part="cc-prompt"]'));
   await page.mouse.dblclick(instance.x + instance.width / 2, instance.y + instance.height / 2);
   await expect.poll(() => selection(page)).toMatch(/^::zeros-part:home-composer:/);
   const instanceBefore = await frame.locator('[data-oid="home-composer"]').evaluate(node => node.outerHTML);

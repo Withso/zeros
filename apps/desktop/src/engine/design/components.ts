@@ -6,7 +6,7 @@ import { parse, parseFragment, type DefaultTreeAdapterTypes } from "parse5";
 import postcss, { type AtRule } from "postcss";
 import { sharedDesignParse } from "./shared-parse";
 
-import { applyDesignPartStyleOverrides, assertDesignComponentDefinitionIdentities, designPartStyleOverrides, DESIGN_PART_STYLE_ATTRIBUTE_PREFIX,
+import { applyDesignPartStyleOverrides, assertDesignComponentDefinitionIdentities, designInstanceRootBody, designPartStyleOverrides, DESIGN_PART_STYLE_ATTRIBUTE_PREFIX,
   rebaseDesignCssReferences, rebaseDesignHtmlReferences } from "@zeros/design-web";
 import { DESIGN_SLOT_ATTRIBUTE, designComponentBodySlotShape, designInstanceSlottedLayers, designSlotOptionElement, isDesignSlotName,
   withDesignSlotOptions } from "@zeros/design-web/component-slots";
@@ -1218,10 +1218,10 @@ async function expandBoundedComponents(
       }
       used.add(name);
       const location = instance.sourceCodeLocation!;
+      const tagStart = location.startTag?.startOffset ?? location.startOffset;
       let startTag = location.startTag ? result.slice(location.startTag.startOffset, location.startTag.endOffset) : result.slice(location.startOffset, location.endOffset);
       let filled: string;
       const id = String(++work.instances);
-      startTag = startTag.replace(/\s*\/?>$/, (end) => ` data-zd-instance="${id}"${end.trim() === "/>" ? " />" : ">"}`);
       const overrides = designPartStyleOverrides(instance.attrs);
       const overridden = (body: string) => {
         if (!overrides.size) return body;
@@ -1246,6 +1246,26 @@ async function expandBoundedComponents(
           recordSlotInstance(usage, definition as ComponentDefinition & { slots: NonNullable<ComponentDefinition["slots"]> }, instance);
         filled = fillSlots(overridden(definition.body), markup, instance, budget);
       }
+      const hostStyle = instance.attrs.find((attribute) => attribute.name === "style")?.value;
+      budget.charge(filled.length);
+      // A plain components/ file expands exactly as it always has: its host
+      // keeps its box.
+      const boxed = filled && definition.template ? designInstanceRootBody(filled, { style: hostStyle, className: instance.attrs.find((attribute) => attribute.name === "class")?.value }) : null;
+      if (boxed !== null) {
+        filled = boxed;
+        // The root is the instance's box; the host keeps no style or class.
+        const spans = (["style", "class"] as const).flatMap((name) => location.attrs?.[name] ? [location.attrs[name]!] : [])
+          .sort((left, right) => right.startOffset - left.startOffset);
+        for (const span of spans) {
+          let start = span.startOffset - tagStart;
+          while (start > 0 && /\s/.test(startTag[start - 1]!)) start -= 1;
+          startTag = `${startTag.slice(0, start)}${startTag.slice(span.endOffset - tagStart)}`;
+        }
+        const oid = instance.attrs.find((attribute) => attribute.name === "data-oid")?.value;
+        const record = oid ? usage?.instances?.hosts.get(oid) : undefined;
+        if (record && hostStyle?.trim() && hostStyle.length <= DESIGN_COMPONENT_RECORD_LIMITS.attributeValue) record.style = hostStyle.trim();
+      }
+      startTag = startTag.replace(/\s*\/?>$/, (end) => `${boxed !== null ? ' style="display: contents"' : ""} data-zd-instance="${id}"${end.trim() === "/>" ? " />" : ">"}`);
       const expanded = expand(filled, [...stack, name], depth + 1);
       budget.charge(result.length + expanded.length);
       // Charge construction before allocating; the exact output is checked below.

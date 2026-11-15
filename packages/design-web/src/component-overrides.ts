@@ -101,6 +101,50 @@ export function applyDesignPartStyleOverrides(body: string, overrides: ReadonlyM
   return result;
 }
 
+export const DESIGN_INSTANCE_ROOT_ATTRIBUTE = "data-zd-root";
+
+/** An instance's rendered body when it is one part, its main's root layer:
+ * that layer is the instance's box, as a Figma instance is its component's
+ * frame. The host's own style follows the root's overrides and its classes
+ * follow the root's, the root is marked, and the host lays out no box of
+ * its own. Null for a body of several layers, text beside one, a root no
+ * part names, a slot (layers are put in it, so it keeps its own row) or a
+ * nested instance: that host keeps its box. */
+export function designInstanceRootBody(body: string, host: { style?: string | undefined; className?: string | undefined }): string | null {
+  const fragment = parseFragment(body, { sourceCodeLocationInfo: true });
+  let root: Element | null = null;
+  for (const child of fragment.childNodes) {
+    if ("tagName" in child) {
+      if (root) return null;
+      root = child;
+    } else if (child.nodeName === "#text" && (child as DefaultTreeAdapterTypes.TextNode).value.trim()) return null;
+  }
+  const location = root?.sourceCodeLocation?.startTag;
+  if (!root || !location || root.tagName.startsWith("zd-") || root.tagName === "slot" || root.tagName === "template" ||
+    !root.attrs.some((attribute) => attribute.name === "data-zd-part") || root.attrs.some((attribute) => attribute.name === "data-zd-slot")) return null;
+  const edits: Array<{ start: number; end: number; text: string }> = [];
+  const added: string[] = [];
+  const merge = (name: "class" | "style", extra: string | undefined, join: (own: string, extra: string) => string) => {
+    const value = extra?.trim();
+    if (!value) return;
+    const own = root!.attrs.find((attribute) => attribute.name === name)?.value.trim();
+    const text = `${name}="${escapeAttribute(own ? join(own, value) : value)}"`;
+    const span = root!.sourceCodeLocation?.attrs?.[name];
+    if (span) edits.push({ start: span.startOffset, end: span.endOffset, text });
+    else added.push(text);
+  };
+  merge("class", host.className, (own, extra) => `${own} ${extra}`);
+  merge("style", host.style, (own, extra) => `${own.replace(/;\s*$/, "")}; ${extra}`);
+  added.push(`${DESIGN_INSTANCE_ROOT_ATTRIBUTE}=""`);
+  const close = body.lastIndexOf(">", location.endOffset - 1);
+  const slash = /\s*\/\s*$/.exec(body.slice(location.startOffset, close));
+  const at = slash ? location.startOffset + slash.index : close;
+  edits.push({ start: at, end: at, text: ` ${added.join(" ")}` });
+  let result = body;
+  for (const edit of edits.sort((left, right) => right.start - left.start))
+    result = `${result.slice(0, edit.start)}${edit.text}${result.slice(edit.end)}`;
+  return result;
+}
 /** Split a declaration list at its top-level semicolons. */
 function declarations(list: string): Array<{ property: string; value: string }> {
   const result: Array<{ property: string; value: string }> = [];

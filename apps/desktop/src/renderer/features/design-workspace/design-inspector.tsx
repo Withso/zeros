@@ -2512,8 +2512,9 @@ export const DesignInspector = React.memo(function DesignInspector({
             });
         } else updates = designLayoutActionUpdates(details, action);
         // A fixed canvas frame is sized by its viewport metadata. Its shell
-        // continues to follow that viewport after later canvas resizes.
-        const rootStyles = context.layoutRootId
+        // continues to follow that viewport after later canvas resizes. A
+        // main's root is the component, sized as itself, not a shell.
+        const rootStyles = context.layoutRootId && !frame.component
           ? updates.get(context.layoutRootId)
           : undefined;
         const rootDetails = details.find(
@@ -2750,7 +2751,10 @@ export const DesignInspector = React.memo(function DesignInspector({
     options?: DesignLayoutFieldOptions,
   ) => {
     if (!styleContext) return null;
-    const frameGeometryProperty = frameStyleTarget
+    // A main's W and H are its root's, the component's own size; its X and Y
+    // still place the frame.
+    const frameGeometryProperty = frameStyleTarget &&
+      !(styleContext.frame.component && (property === "width" || property === "height"))
       ? (
           {
             left: ["x", styleContext.frame.x],
@@ -2965,7 +2969,8 @@ export const DesignInspector = React.memo(function DesignInspector({
     : null;
   const optionsTarget: DesignComponentOptionsTarget | null = !workspaceId || !active || !panelVisible || !frame
     ? null
-    : frameSelected && frame.component && !selectedNodeId && styleNodeIds.length <= 1
+    // The main's root is the component, so selecting it selects the main.
+    : frameSelected && frame.component && (!selectedNodeId || selectedNodeId === layoutRootId) && styleNodeIds.length <= 1
       ? { kind: "main", component: frame.component }
       : !selectedPart && !selectedSlot && instanceNodeId && instanceHost && instanceComponent && instanceTitle && styleNodeIds.length === 1
         ? { kind: "instance", nodeId: instanceNodeId, title: instanceTitle, host: instanceHost, component: instanceComponent,
