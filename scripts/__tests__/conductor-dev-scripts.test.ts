@@ -313,19 +313,13 @@ describe("Conductor Dev actions", () => {
     expect(f.log()).toHaveLength(3);
   });
 
-  it("runs Zeros Dev on the Mac and its headless backend in the cloud", () => {
+  it("runs the same headless Zeros Dev on the Mac and in the cloud, including older backend hooks", () => {
     const f = fixture();
-    const local = Object.values(scripts.run).find((entry) =>
-      entry.available_in.includes("local"),
-    )!;
-    const cloud = Object.values(scripts.run).find((entry) =>
-      entry.available_in.includes("cloud"),
-    )!;
-    expect(f.run(local.command).status).toBe(0);
-    expect(f.run(cloud.command).status).toBe(0);
-    expect(f.log()).toEqual(["pnpm electron:cloud", "pnpm electron:cloud --headless"]);
-    expect(scripts.run["Zeros Dev"].available_in).toEqual(["local"]);
-    expect(scripts.run["Zeros Dev backend"].available_in).toEqual(["cloud"]);
+    expect(scripts.run["Zeros Dev"].available_in).toEqual(["local", "cloud"]);
+    expect(scripts.run).not.toHaveProperty("Zeros Dev backend");
+    expect(f.run(scripts.run["Zeros Dev"].command).status).toBe(0);
+    expect(f.run("exec sh scripts/dev-environment/hook.sh backend").status).toBe(0);
+    expect(f.log()).toEqual(["pnpm electron:cloud", "pnpm electron:cloud"]);
   });
 });
 

@@ -69,9 +69,10 @@ devices.
 
 `pnpm dev:setup --check` checks local prerequisites and profile format.
 `pnpm electron:dev --reset` deletes this checkout's Zeros Dev VMs and data; the
-next launch starts fresh. On Linux, `pnpm electron:dev --headless` runs the
-backend only; the desktop requires macOS. For an account-free app without a
-backend, use `pnpm electron:local`.
+next launch starts fresh. Zeros Dev is headless on macOS and Linux; use
+`pnpm electron:alpha` for the Mac app against Alpha, `pnpm alpha:probe` to
+measure Alpha, and `pnpm electron:local` for an account-free app without a
+backend.
 
 Useful checks:
 

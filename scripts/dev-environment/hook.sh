@@ -15,7 +15,7 @@ case "${1:-}" in
       node scripts/dev-environment/setup.mjs --profile-only
     fi
     node scripts/dev-environment/dependencies.mjs --install ;;
-  dev) exec pnpm electron:cloud ;;
-  backend) exec pnpm electron:cloud --headless ;;
+  # Zeros Dev is headless; `backend` remains for older Conductor settings.
+  dev|backend) exec pnpm electron:cloud ;;
   *) echo 'Unknown Dev hook' >&2; exit 1 ;;
 esac

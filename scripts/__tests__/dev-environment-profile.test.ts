@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { ensureWorkspace } from "../dev-environment/state.mjs";
-import { backendEnvironment, desktopEnvironment, publicDevProfile, webEnvironment } from "../dev-environment/profile.mjs";
+import { backendEnvironment, publicDevProfile, webEnvironment } from "../dev-environment/profile.mjs";
 import { validateDatabaseRequest } from "../dev-environment/database.mjs";
 import { databaseUrl } from "../dev-environment/postgres.mjs";
 import { ensureWorkosWebhook, deleteWorkosWebhook, WORKOS_DEV_EVENTS } from "../dev-environment/workos.mjs";
@@ -31,16 +31,15 @@ describe("local Dev integration boundaries", () => {
     expect(environment()).not.toHaveProperty("ZEROS_CLOUD_ACTING_USER_DEFAULT");
     expect(environment("1")).toHaveProperty("ZEROS_CLOUD_ACTING_USER_DEFAULT", "1");
     expect(environment("0")).toHaveProperty("ZEROS_CLOUD_ACTING_USER_DEFAULT", "0");
-    expect(desktopEnvironment(w, p)).not.toHaveProperty("ZEROS_CLOUD_ACTING_USER_DEFAULT");
     expect(webEnvironment(w, p, 21001)).not.toHaveProperty("ZEROS_CLOUD_ACTING_USER_DEFAULT");
   });
-  it("projects only public auth into the desktop/web while keeping migration and provider authority out", () => {
+  it("projects only public auth into the web facade while keeping migration and provider authority out", () => {
     const { workspace: w, profile: p } = fixture();
     w.state.workosWebhook = { secret: "webhook-credential-sentinel" };
-    const desktop = desktopEnvironment(w, p), web = webEnvironment(w, p, 21001);
+    const web = webEnvironment(w, p, 21001);
     for (const value of [p.cloudflare.apiToken, p.workos.apiKey, p.github.clientSecret, p.github.privateKeyBase64, w.state.database.runtimePassword, w.state.workosWebhook.secret,
       p.boat.apiKey, p.storage.secretAccessKey]) {
-      expect(JSON.stringify({ desktop, web })).not.toContain(value);
+      expect(JSON.stringify(web)).not.toContain(value);
     }
     const api = backendEnvironment(w, p, { database: 21000, api: 21001 }, "fb87f8dd-6161-463b-981c-d039c675e0ca", { ZEROS_CLOUD_V2_RUNTIME_SHA256: "d".repeat(64) });
     expect(api.AUTH_AUDIENCE).toBe("https://api-alpha.zeros.build");

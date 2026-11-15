@@ -7,8 +7,8 @@
 // SIGTERM enters normal Electron quit cleanup; bounded escalation waits for the
 // old process to exit before launching its replacement.
 //
-// Zeros Dev (electron:dev, also electron:cloud) and electron:alpha use this
-// supervisor. electron:run builds once without backend reloaders. ZEROS_NO_MAIN_HMR=1 disables this
+// electron:alpha uses this supervisor; Zeros Dev (electron:dev) is headless
+// and opens no desktop. ZEROS_NO_MAIN_HMR=1 disables this
 // watcher independently of engine HMR. Restart the development command once
 // after changing the launcher or supervisor itself.
 // See docs/development-restarts.md for lifecycle and recovery behavior.

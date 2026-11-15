@@ -513,9 +513,10 @@ trust domain.
 
 ## Testing a branch
 
-[`pnpm electron:cloud`](electron-cloud.md) runs a branch's control plane, worker
-runtime and desktop app together, with an isolated database and a named
-tunnel for Boat VMs. Agents run it headless and then gate0 with `--local`.
+[`pnpm electron:cloud`](electron-cloud.md) runs a branch's control plane and
+worker runtime headless, with an isolated database and a named tunnel for Boat
+VMs. Agents then run gate0 with `--local`. After merge, `pnpm alpha:probe`
+measures deployed Alpha.
 
 ## Application variables and environment files
 

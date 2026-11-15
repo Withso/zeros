@@ -3,6 +3,16 @@
 Each entry records the lesson behind the change as symptom → cause → rule →
 where it is encoded.
 
+## 0.3.5
+
+- **gate0 could not run a turn on Alpha.** Alpha refused the probe's bridge
+  `AGENT_PROMPT` with `client_update_required`: once execution contexts are
+  active, only the HTTPS prompt outbox accepts sends, and the desktop already
+  used it. gate0 now sends and stops over the outbox when a workspace
+  advertises it, and `pnpm alpha:probe` measures deployed Alpha headlessly.
+  Rule: probes send through the same path as the desktop. Encoded in
+  `gate0.test.ts`; `zstack-verify` points at the probe.
+
 ## 0.3.4
 
 - **A reviewer's armed merge landed a force-pushed head.** #953 was armed at
