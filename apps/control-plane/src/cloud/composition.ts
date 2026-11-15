@@ -362,7 +362,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   }) : null;
   const relay = roles.relay ? connections : null;
   const promptSignals = new CloudV2PromptSignals();
-  const workers: CloudV2WorkerRouteDeps = { store, execution, timing, logger: console, authorizeSource, continueSource, config: workerConfig, githubToken, runtimeSha256: v2.runtime.sha256,
+  const workers: CloudV2WorkerRouteDeps = { store, execution, timing, logger: console, authorizeSource, continueSource, config: workerConfig, githubToken, runtimeSha256: v2.runtime.sha256, ...(v2.runtime.previousSha256 ? { previousRuntimeSha256: v2.runtime.previousSha256 } : {}),
     helloTransaction: work => withSystemTx(pool, work),
     appliedReady: async (id, boot) => {
       readySignals.applied(id, boot);
@@ -375,7 +375,10 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     notifications,
     workspaceSync,
     runtimeUpdates, runtimeHandoffs,
-    runtimeSha256ForWorkspace: async workspace => (await runtimeForWorkspace(workspace)).sha256,
+    runtimeSha256ForWorkspace: async workspace => {
+      const selected = await runtimeForWorkspace(workspace);
+      return { sha256: selected.sha256, channel: selected === runtime };
+    },
     environmentReport: (token, bootId, value) => environments.report(token, bootId, value),
     githubCheckout: (token,bootId,value) => github.metadata.checkout(token,bootId,value),
     ...(mcp ? { mcpAuthorization: async (workspace, id, force) => {
@@ -536,6 +539,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     timing,
     compute,
     runtime,
+    ...(v2.runtime.previousSha256 ? { previousRuntimeSha256: v2.runtime.previousSha256 } : {}),
     runtimeForWorkspace,
     authorizeWorkspace: async workspace => {
       if (await lifecycleExecution(execution, workspace)) return;

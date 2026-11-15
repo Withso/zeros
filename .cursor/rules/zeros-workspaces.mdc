@@ -70,6 +70,8 @@ Zeros runs the same product against two runtimes. Handle both on every change.
      Several devices belonging to the creator may attach and must converge.
    - Create and wake install the control plane's SHA-pinned runtime under
      `/opt/zeros/runtime/<sha256>`, reached through `/opt/zeros/worker`.
+     A wake keeps the release's previous pin when the VM already holds it
+     and stages the current pin in the background.
      Cloud Computer builds start from Boat's stock image and capture a clean
      runtime snapshot before credentials, source or setup reach the builder.
      Each workspace then hydrates its authorized repository and runs setup

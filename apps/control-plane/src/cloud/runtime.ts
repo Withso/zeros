@@ -71,8 +71,12 @@ const quote = (value: string) => `'${value.replace(/'/g, "'\\''")}'`;
 
 /** Installs the runtime if this VM does not have it, points the worker at it
  * and restarts a running worker onto it. Prints `runtime-changed` when it
- * switched versions. Root owns the runtime, so agents cannot modify it. */
-export function installRuntimeCommand(runtime: { sha256: string; url: string; publicKeys?: readonly string[] }): string {
+ * switched versions. Root owns the runtime, so agents cannot modify it.
+ * `keep` names an older supported runtime the VM may keep running instead
+ * (prints `runtime-kept`); `restart: false` leaves the restart to the caller. */
+export function installRuntimeCommand(runtime: { sha256: string; url: string; publicKeys?: readonly string[] },
+  options: { keep?: string; restart?: boolean } = {}): string {
+  if (options.keep !== undefined && (!SHA256.test(options.keep) || options.keep === runtime.sha256)) throw new Error("Invalid kept runtime");
   const prepare = runtimePreparation(runtime);
   const b64 = (value: string) => Buffer.from(value, "utf8").toString("base64");
   const keys = runtime.publicKeys;
@@ -86,11 +90,15 @@ export function installRuntimeCommand(runtime: { sha256: string; url: string; pu
     `unit=$(printf %s ${quote(b64(UNIT))} | base64 -d)`,
     `profile=$(printf %s ${quote(b64(PROFILE))} | base64 -d)`,
     ...(keysJson ? [`keys=$(printf %s ${quote(b64(keysJson))} | base64 -d)`] : []),
-    `if [ -f ${RUNTIMES}/${runtime.sha256}/.complete ] && [ "$(readlink ${CURRENT} 2>/dev/null || true)" = ${RUNTIMES}/${runtime.sha256} ] \\`,
-    "  && [ ! -e /opt/zeros/worker-runtime.env ] \\",
-    '  && [ "$(cat /etc/systemd/system/zeros-worker.service 2>/dev/null || true)" = "$unit" ] \\',
-    '  && [ "$(cat /etc/profile.d/zeros-worker.sh 2>/dev/null || true)" = "$profile" ]'
-      + (keysJson ? ' \\\n  && [ "$(cat /opt/zeros/worker-auth.json 2>/dev/null || true)" = "$keys" ]' : "") + "; then exit 0; fi",
+    ...[runtime.sha256, ...(options.keep ? [options.keep] : [])].map(sha =>
+      `if [ -f ${RUNTIMES}/${sha}/.complete ] && [ "$(readlink ${CURRENT} 2>/dev/null || true)" = ${RUNTIMES}/${sha} ] \\\n`
+      + "  && [ ! -e /opt/zeros/worker-runtime.env ] \\\n"
+      + '  && [ "$(cat /etc/systemd/system/zeros-worker.service 2>/dev/null || true)" = "$unit" ] \\\n'
+      + '  && [ "$(cat /etc/profile.d/zeros-worker.sh 2>/dev/null || true)" = "$profile" ]'
+      + (keysJson ? ' \\\n  && [ "$(cat /opt/zeros/worker-auth.json 2>/dev/null || true)" = "$keys" ]' : "")
+      // Keeping stops once the pin is staged beside it: the next wake switches.
+      + (sha === runtime.sha256 ? "" : ` \\\n  && [ ! -f ${RUNTIMES}/${runtime.sha256}/.complete ]`)
+      + `; then ${sha === runtime.sha256 ? "" : "echo runtime-kept; "}exit 0; fi`),
     ...prepare,
     "sudo -n rm -f /opt/zeros/worker-runtime.env",
     ...(keys ? [
@@ -108,7 +116,7 @@ export function installRuntimeCommand(runtime: { sha256: string; url: string; pu
     `  if [ -e ${CURRENT} ] && [ ! -L ${CURRENT} ]; then sudo -n rm -rf ${CURRENT}; fi`,
     `  sudo -n ln -sfn "$dir" ${CURRENT}.next && sudo -n mv -T ${CURRENT}.next ${CURRENT}`,
     `  rm -rf ${COMPILE_CACHE} 2>/dev/null || true`,
-    "  sudo -n systemctl try-restart zeros-worker.service || true",
+    ...(options.restart === false ? [] : ["  sudo -n systemctl try-restart zeros-worker.service || true"]),
     `  for old in ${RUNTIMES}/*; do [ "$old" = "$dir" ] || [ "$old" = "$previous" ] || sudo -n rm -rf "$old"; done`,
     "  echo runtime-changed",
     "fi",

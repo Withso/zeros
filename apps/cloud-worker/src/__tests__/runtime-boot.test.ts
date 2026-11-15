@@ -20,3 +20,10 @@ it("keeps crashed private boots fenced until readiness, then allows an ordinary 
     expect(() => consumeRuntimeHandoff(directory, { ...handoff, bootId: "../other" })).toThrow();
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
+it("reports the runtime it executes from, not only the one it was configured with", () => {
+  const environment = { CLOUD_V2_API_URL: "https://fixture.example.test", CLOUD_V2_RUNTIME_SHA256: "a".repeat(64), ZEROS_WORKSPACE_ID: randomUUID() };
+  expect(readBootEnvironment(environment, `/opt/zeros/runtime/${"c".repeat(64)}/worker.mjs`).runtimeSha256).toBe("c".repeat(64));
+  expect(readBootEnvironment(environment, "/home/user/zeros/apps/cloud-worker/dist/worker.mjs").runtimeSha256).toBe("a".repeat(64));
+  expect(readBootEnvironment(environment, undefined).runtimeSha256).toBe("a".repeat(64));
+  expect(() => readBootEnvironment({ ...environment, CLOUD_V2_RUNTIME_SHA256: "" }, "/tmp/worker.mjs")).toThrow();
+});

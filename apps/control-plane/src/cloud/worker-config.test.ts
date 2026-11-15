@@ -61,3 +61,12 @@ it("uses only a dedicated public canary key on Alpha and never accepts the worke
   for (const channel of ["beta", "production"]) expect(() => loadConfig({ ...base, RAILWAY_ENVIRONMENT_NAME: channel, CLOUD_V2_RUNTIME_CANARY_CONFIG: policy(canary) })).toThrow("Alpha-only");
   expect(() => loadConfig({ ...base, RAILWAY_ENVIRONMENT_NAME: "development", CLOUD_V2_RUNTIME_CANARY_CONFIG: policy(canary) })).toThrow("Alpha-only");
 });
+it("reads the release's previous runtime pin only when it is a distinct published digest", () => {
+  const key = generateKeyPairSync("ed25519").privateKey.export({ format: "der", type: "pkcs8" }).toString("base64");
+  const base = { ...env, CLOUD_V2_WORKER_SIGNING_KEY: key };
+  expect(loadConfig(base).cloudV2?.runtime.previousSha256).toBeUndefined();
+  expect(loadConfig({ ...base, CLOUD_V2_RUNTIME_PREVIOUS_SHA256: "" }).cloudV2?.runtime.previousSha256).toBeUndefined();
+  expect(loadConfig({ ...base, CLOUD_V2_RUNTIME_PREVIOUS_SHA256: "b".repeat(64) }).cloudV2?.runtime.previousSha256).toBe("b".repeat(64));
+  expect(loadConfig({ ...base, CLOUD_V2_RUNTIME_PREVIOUS_SHA256: "a".repeat(64) }).cloudV2?.runtime.previousSha256).toBeUndefined();
+  expect(() => loadConfig({ ...base, CLOUD_V2_RUNTIME_PREVIOUS_SHA256: "previous" })).toThrow("CLOUD_V2_RUNTIME_PREVIOUS_SHA256");
+});

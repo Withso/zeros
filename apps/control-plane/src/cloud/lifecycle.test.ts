@@ -56,7 +56,7 @@ function setup(claimed: (CloudV2LifecycleWorkspace & { attempts: number })[], op
   checkpoints?: ReturnType<typeof checkpointsFake>; remoteHead?: CloudV2LifecycleDeps["remoteHead"]; githubToken?: CloudV2LifecycleDeps["githubToken"]; uploadHorizon?: string;
   checkpointRetry?: boolean; retries?: RetryRow[]; prepareRepository?: CloudV2LifecycleDeps["prepareRepository"]; pruneEnvironments?: () => Promise<void>;
   runtimeForWorkspace?: CloudV2LifecycleDeps["runtimeForWorkspace"]; bootEnv?: CloudV2LifecycleDeps["bootEnv"]; builds?: CloudV2LifecycleDeps["builds"]; recovery?: CloudV2LifecycleDeps["recovery"];
-  authorizeWorkspace?: CloudV2LifecycleDeps["authorizeWorkspace"]; resolvePendingSource?: CloudV2LifecycleDeps["resolvePendingSource"] } = {}) {
+  authorizeWorkspace?: CloudV2LifecycleDeps["authorizeWorkspace"]; resolvePendingSource?: CloudV2LifecycleDeps["resolvePendingSource"]; previousRuntimeSha256?: string } = {}) {
   const retries = [...options.retries ?? []];
   const compute: CloudV2Compute = {
     create: vi.fn(async () => ({ sandboxId: "bx_new1" })),
@@ -124,6 +124,7 @@ function setup(claimed: (CloudV2LifecycleWorkspace & { attempts: number })[], op
     runtime: { sha256: "b".repeat(64), url: async () => "https://r2.example.test/runtime.tar.gz?sig=1" },
     bootEnv: options.bootEnv ?? (ws => ({ CLOUD_V2_API_URL: "https://api.example.test", ZEROS_WORKSPACE_ID: ws.id })),
     ...(options.runtimeForWorkspace ? { runtimeForWorkspace: options.runtimeForWorkspace } : {}),
+    ...(options.previousRuntimeSha256 ? { previousRuntimeSha256: options.previousRuntimeSha256 } : {}),
     sandboxName: ws => `zeros-alpha-${ws.id.slice(0, 8)}`,
     ...(options.checkpoints ? { checkpoints: options.checkpoints } : {}),
     ...(options.remoteHead ? { remoteHead: options.remoteHead } : {}),
@@ -649,6 +650,63 @@ describe("cloud v2 lifecycle", () => {
       { workspaceId: "6f2b7c1e", state, phase: "total", durationMs: 70 },
     ]));
     expect(JSON.stringify(records)).not.toMatch(/never-log|credential never logged|private\.example/);
+  });
+
+  describe("a wake after a release", () => {
+    const PIN = "b".repeat(64), PREVIOUS = "c".repeat(64);
+    const bootEnv: CloudV2LifecycleDeps["bootEnv"] = (ws, selected) => ({ CLOUD_V2_API_URL: "https://api.example.test",
+      CLOUD_V2_RUNTIME_SHA256: selected?.sha256 ?? PIN, ZEROS_WORKSPACE_ID: ws.id });
+    const command = (f: ReturnType<typeof setup>, index: number) => String(vi.mocked(f.compute.exec).mock.calls[index]![1]);
+    const decoded = (text: string) => [...text.matchAll(/'([A-Za-z0-9+/=]{8,})'/g)].map(([, value]) => Buffer.from(value!, "base64").toString("utf8")).join("\n");
+
+    it("starts the previous release's runtime from disk, delivers its digest, then stages the pin in the background", async () => {
+      const timing = vi.fn();
+      const f = setup([workspace("starting", { boatSandboxId: "bx_test" })], { previousRuntimeSha256: PREVIOUS, bootEnv, timing });
+      vi.mocked(f.compute.exec).mockResolvedValueOnce({ exitCode: 0, stdout: "runtime-kept\n", timedOut: false });
+      await f.lifecycle.tick();
+      const install = command(f, 0);
+      expect(install).toContain(`/opt/zeros/runtime/${PREVIOUS}/.complete`);
+      expect(install).toContain(`[ ! -f /opt/zeros/runtime/${PIN}/.complete ]`);
+      expect(install).not.toContain("try-restart");
+      expect(decoded(command(f, 1))).toContain(`CLOUD_V2_RUNTIME_SHA256=${PREVIOUS}`);
+      await vi.waitFor(() => expect(f.compute.execLong).toHaveBeenCalledWith("bx_test", expect.stringContaining(`/opt/zeros/runtime/${PIN}`), 300));
+      const stage = String(vi.mocked(f.compute.execLong).mock.calls[0]![1]);
+      expect(stage).not.toContain("ln -sfn");
+      expect(vi.mocked(f.compute.execLong).mock.invocationCallOrder[0]).toBeGreaterThan(vi.mocked(f.compute.exec).mock.invocationCallOrder[1]!);
+      expect(timing.mock.calls.map(([record]) => record)).toContainEqual(expect.objectContaining({ phase: "runtime_install", runtimeChanged: false, runtimeKept: true }));
+    });
+
+    it("stages nothing when a worker already holds this start", async () => {
+      const f = setup([workspace("starting", { boatSandboxId: "bx_test" })], { previousRuntimeSha256: PREVIOUS, bootEnv });
+      vi.mocked(f.compute.exec).mockResolvedValueOnce({ exitCode: 0, stdout: "runtime-kept\n", timedOut: false });
+      vi.mocked(f.store.rotateWorkerToken).mockResolvedValueOnce(null);
+      await f.lifecycle.tick();
+      expect(f.compute.exec).toHaveBeenCalledOnce();
+      expect(f.compute.execLong).not.toHaveBeenCalled();
+    });
+
+    it("installs the pin with one worker start when the VM holds no supported runtime", async () => {
+      const f = setup([workspace("starting", { boatSandboxId: "bx_test" })], { previousRuntimeSha256: PREVIOUS, bootEnv });
+      vi.mocked(f.compute.exec).mockResolvedValueOnce({ exitCode: 0, stdout: "runtime-changed\n", timedOut: false });
+      await f.lifecycle.tick();
+      expect(command(f, 0)).not.toContain("try-restart");
+      expect(decoded(command(f, 1))).toContain(`CLOUD_V2_RUNTIME_SHA256=${PIN}`);
+      expect(f.compute.execLong).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ["no previous pin is configured", {}, {}],
+      ["the workspace runs its own pin", { previousRuntimeSha256: PREVIOUS, runtimeForWorkspace: async () => ({ sha256: "d".repeat(64), url: async () => "https://r2.example.test/d" }) }, {}],
+      ["an activation owns the boot", { previousRuntimeSha256: PREVIOUS }, { executionTransitionId: "77777777-7777-4777-8777-777777777777" }],
+      ["a recovery owns the boot", { previousRuntimeSha256: PREVIOUS }, { recoveryAttemptId: "88888888-8888-4888-8888-888888888888" }],
+      ["its runtime only equals the channel pin", { previousRuntimeSha256: PREVIOUS, runtimeForWorkspace: async () => ({ sha256: PIN, url: async () => "https://r2.example.test/b" }) }, {}],
+      ["that runtime's hello was refused", { previousRuntimeSha256: PREVIOUS }, { errorCode: "worker_runtime_mismatch" }],
+    ] as const)("never keeps an older runtime when %s", async (_name, options, extra) => {
+      const f = setup([workspace("starting", { boatSandboxId: "bx_test", ...extra })], { ...options, bootEnv });
+      await f.lifecycle.tick();
+      expect(command(f, 0)).not.toContain(`/opt/zeros/runtime/${PREVIOUS}`);
+      expect(f.compute.execLong).not.toHaveBeenCalled();
+    });
   });
 
   it("never lets a timing observer prevent a workspace from starting", async () => {

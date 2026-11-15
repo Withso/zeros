@@ -16,8 +16,11 @@ interface BootOptions { apiUrl: string; workspaceId: string; runtimeSha256: stri
 
 /** The service receives only non-secret boot configuration. Model configuration
  * and the checkout arrive over authenticated HTTPS after hello. */
-export function readBootEnvironment(environment: NodeJS.ProcessEnv = process.env): BootOptions {
-  const apiUrl = environment.CLOUD_V2_API_URL, workspaceId = environment.ZEROS_WORKSPACE_ID, runtimeSha256 = environment.CLOUD_V2_RUNTIME_SHA256;
+export function readBootEnvironment(environment: NodeJS.ProcessEnv = process.env, executedFrom = executedPath()): BootOptions {
+  const apiUrl = environment.CLOUD_V2_API_URL, workspaceId = environment.ZEROS_WORKSPACE_ID;
+  // Hello names the runtime actually executing: its root-owned directory is
+  // named by the digest it was verified against when installed.
+  const runtimeSha256 = /^\/opt\/zeros\/runtime\/([a-f0-9]{64})\//.exec(executedFrom ?? "")?.[1] ?? environment.CLOUD_V2_RUNTIME_SHA256;
   if (!apiUrl || !runtimeSha256 || !/^[a-f0-9]{64}$/.test(runtimeSha256) || !workspaceId || !/^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i.test(workspaceId))
     throw new Error("Worker boot configuration is missing or invalid.");
   const { ZEROS_RUNTIME_HANDOFF: id, ZEROS_RUNTIME_BOOT: bootId, ZEROS_RUNTIME_INSTANCE: instanceId } = environment;
@@ -99,6 +102,10 @@ export function completeRuntimeHandoff(directory: string, handoff: NonNullable<B
   try { fsyncSync(fd); } finally { closeSync(fd); }
   const parent = openSync(path, constants.O_RDONLY | constants.O_DIRECTORY);
   try { fsyncSync(parent); } finally { closeSync(parent); }
+}
+
+function executedPath(): string | undefined {
+  try { return realpathSync(fileURLToPath(import.meta.url)); } catch { return undefined; }
 }
 
 // Node resolves ESM URLs through the version-cache symlink; argv keeps the

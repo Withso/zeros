@@ -50,9 +50,9 @@ suite("default-active release canary scope", () => {
     expect((await pool.query("SELECT execution_mode FROM cloud_v2_workspaces WHERE id=$1", [workspace.id])).rows[0].execution_mode).toBe("active");
     expect((await pool.query("SELECT runtime_sha256 FROM cloud_v2_execution_creations WHERE workspace_id=$1", [workspace.id])).rows[0].runtime_sha256).toBe(candidate);
     const expected = f.cp.workers.runtimeSha256ForWorkspace!;
-    expect(await expected(workspace)).toBe(candidate);
+    expect(await expected(workspace)).toEqual({ sha256: candidate, channel: false });
     await pool.query("UPDATE cloud_v2_execution_creations SET clean_at=clock_timestamp(),clean_boot_id=$2 WHERE workspace_id=$1", [workspace.id, randomUUID()]);
-    expect(await expected(workspace)).toBe(candidate);
+    expect(await expected(workspace)).toEqual({ sha256: candidate, channel: false });
     const replay = await create(signed); expect(replay.status).toBe(201); expect(await receipts()).toBe(1);
   });
 

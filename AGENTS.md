@@ -71,7 +71,9 @@ Cursor receive their selected credentials; Codex uses the control-plane proxy.
 Access is limited to the creator while they remain an organization member.
 Each organization has one Cloud Computer recipe and active snapshot. On
 create and wake, the runtime is fetched at boot and verified against its
-SHA-256 pin before the worker starts.
+SHA-256 pin before the worker starts. A wake may instead start the release's
+previous pin when that VM already holds it, verified at its own install, and
+stages the current pin in the background for the next wake.
 Cloud supports chat, files, Git and terminals; Browser, Design and simulators
 are unavailable. Local Personal and organization-local provider tools,
 permissions and Host lifecycle stay unchanged. See

@@ -828,6 +828,16 @@ export class CloudV2Store {
       ...(row.recovery_attempt_id ? { recoveryAttemptId: row.recovery_attempt_id } : {}) } : null;
   }
 
+  /** A starting workspace whose worker hello was refused for its runtime: the
+   * lifecycle steps it now and installs the pin instead of keeping that runtime. */
+  async refuseWorkerRuntime(token: string): Promise<void> {
+    await withSystemTx(this.pool, tx => tx.query(`WITH refused AS (UPDATE cloud_v2_workspaces
+        SET error_code='worker_runtime_mismatch', next_attempt_at=clock_timestamp()
+        WHERE worker_token_hash=$1 AND state='starting' AND worker_boot_id IS NULL
+          AND error_code IS DISTINCT FROM 'worker_runtime_mismatch' RETURNING id)
+      SELECT pg_notify('zeros_cloud_v2_lifecycle', '') FROM refused`, [hashCloudV2Token(token)]));
+  }
+
   async acceptWorkerHello(token: string, bootId: string, proof?: { accessEpoch: string; loginRevision: string }, transaction?: Tx): Promise<CloudV2WorkerSession | null> {
     const accept = async (tx: Tx) => {
       const result = await tx.query<Row & { execution_mode: "legacy" | "prepared" | "active"; access_epoch: string; login_revision: string; prior_state: "creating" | "starting" | "running"; hello_ms: number }>(
