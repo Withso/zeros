@@ -176,15 +176,6 @@ revision in the same checkout and compare failing test names.
   point inside a frame with `page.mouse` at the element's `boundingBox()`.
 - A gesture painting inline sizes restores React's values, not `""`: React
   never reapplies an unchanged style prop.
-- The Design workspace harness has several write paths (`design.node.styles`,
-  the generic `design.transaction.apply` branch and the component branch).
-  Each must mirror the adapter: refresh `frame.instances` after any write to
-  a frame with instances, and drop a `style` attribute left empty. A smoke
-  that waits for an instance record or a removed attribute times out
-  otherwise, though the source is right.
-- A field bound to a token renders a chip, not an input, so
-  `getByLabel("W")` times out on an option-sized layer. Read the axis
-  (`[data-design-size-axis="x"]`) or use a field the option does not set.
 
 ## Process, CI and delivery
 
