@@ -87,6 +87,15 @@ d("cloud v2 store", () => {
     expect((await store.get(w.id, creator)).state).toBe("running");
   });
 
+  it("clears an earlier boot's failure code once a fresh boot is running, but keeps a running boot's own condition", async () => {
+    const workspace = await create();
+    await pool.query("UPDATE cloud_v2_workspaces SET error_code='execution_not_retired' WHERE id=$1", [workspace.id]);
+    const token = await store.rotateWorkerToken(workspace.id), boot = randomUUID();
+    expect((await store.acceptWorkerHello(token, boot))?.errorCode).toBeNull();
+    await pool.query("UPDATE cloud_v2_workspaces SET error_code='live_connection_unavailable' WHERE id=$1", [workspace.id]);
+    expect((await store.acceptWorkerHello(token, boot))?.errorCode).toBe("live_connection_unavailable");
+  });
+
   it("keeps a restarted worker's bound boot and route while lifecycle polls its held configuration", async () => {
     const w = await create(), sandboxId = "bx_fixture";
     const routeUrl = "https://fixture-41783.on.boat.dev", portToken = { encrypted: "synthetic-port-material" };

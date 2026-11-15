@@ -98,6 +98,8 @@ interface PeerEntry extends CloudPeer {
   epoch: number;
   identity: string;
   snapshotRevision: number;
+  /** The wake that opened this peer. Its worker is the one that wake started. */
+  wakeOwner?: WakeOwner;
 }
 interface LocalListEntry {
   result?: WireRecord;
@@ -838,7 +840,11 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     }
     const existing = this.peers.get(key);
     const connected = existing && existing.identity === identity && !existing.retired && existing.client.status === "connected";
-    if (connected && (this.routing.canReuseForWork ? this.routing.canReuseForWork(target) : !wake)) {
+    // The catalog can still read "starting" after the worker this wake started
+    // reported ready; that connection is current, not an old socket to reuse.
+    const ownWake = connected && !!existing.wakeOwner && this.routing.wakeOwner?.(target)?.lifecyclePending === true &&
+      this.continuesWake(target, existing.wakeOwner);
+    if (connected && (ownWake || (this.routing.canReuseForWork ? this.routing.canReuseForWork(target) : !wake))) {
       existing.lastUsed = ++this.peerUseSequence;
       return Promise.resolve(existing);
     }
@@ -932,6 +938,7 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
           retired: false,
           opening: true,
           lastUsed: ++this.peerUseSequence,
+          ...(owner ? { wakeOwner: owner } : {}),
         };
         admitted = entry;
         this.peers.set(key, entry);

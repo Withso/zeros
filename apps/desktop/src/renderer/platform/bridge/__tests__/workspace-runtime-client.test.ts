@@ -162,6 +162,22 @@ describe("workspace runtime routing", () => {
     } finally { client.dispose(); }
   });
 
+  it("reuses the connection its own wake opened while the catalog still reads starting, and re-admits after a stop", async () => {
+    let stopVersion = 0;
+    const peer = fakePeer(a), replacement = fakePeer(a);
+    const open = vi.fn().mockResolvedValueOnce(peer.peer).mockResolvedValueOnce(replacement.peer);
+    const client = new WorkspaceRuntimeClient({ open, workspaces: () => [], canReuseForWork: () => false,
+      wakeOwner: () => ({ account: "account", generation: 1, stopVersion, lifecyclePending: true }) });
+    try {
+      await client.openWorkspace(a);
+      await client.openWorkspace(a);
+      expect(open).toHaveBeenCalledOnce(); expect(peer.release).not.toHaveBeenCalled();
+      stopVersion++;
+      await client.openWorkspace(a);
+      expect(open).toHaveBeenCalledTimes(2); expect(peer.release).toHaveBeenCalledOnce();
+    } finally { client.dispose(); }
+  });
+
   it("never reuses a disconnected or differently owned peer for queued work", async () => {
     let identity = "account-1";
     const old = fakePeer(a), next = fakePeer(a), last = fakePeer(a);

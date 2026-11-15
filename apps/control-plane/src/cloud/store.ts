@@ -846,6 +846,8 @@ export class CloudV2Store {
          worker_history_sequence=CASE WHEN worker_boot_id=$2 THEN worker_history_sequence ELSE 0 END,
          worker_history_digest=CASE WHEN worker_boot_id=$2 THEN worker_history_digest ELSE NULL END,
          worker_boot_id=$2, state=CASE WHEN prior.environment_ready THEN 'running' ELSE 'starting' END, attempts=0, next_attempt_at=NULL,
+         -- A boot that reaches running supersedes an earlier boot's failure; a running boot keeps its own condition.
+         error_code=CASE WHEN prior.environment_ready AND prior.prior_state<>'running' THEN NULL ELSE error_code END,
          active_at=CASE WHEN state='running' OR NOT prior.environment_ready THEN active_at ELSE clock_timestamp() END,
          updated_at=CASE WHEN state='running' OR (state='starting' AND NOT prior.environment_ready) THEN updated_at ELSE clock_timestamp() END
        FROM prior WHERE w.id=prior.prior_id
