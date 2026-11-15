@@ -69,6 +69,8 @@ import { lifecycleExecution } from "./execution/lifecycle.js";
 import { claimExecutionRestore } from "./execution/restore.js";
 import { CloudExecutionActivations, executionActivationRuntime } from "./execution/activation.js";
 import { CloudExecutionAuthority } from "./execution/authority.js";
+import { AuthorityBarrier } from "./execution/authority-barrier.js";
+import { AuthorityPull } from "./execution/authority-pull.js";
 import { CloudExecutionLogins } from "./execution/logins.js";
 
 const PROXY_TOKEN_TTL_MS = 24 * 60 * 60_000;
@@ -362,7 +364,10 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   }) : null;
   const relay = roles.relay ? connections : null;
   const promptSignals = new CloudV2PromptSignals();
-  const workers: CloudV2WorkerRouteDeps = { store, execution, timing, logger: console, authorizeSource, continueSource, config: workerConfig, githubToken, runtimeSha256: v2.runtime.sha256, ...(v2.runtime.previousSha256 ? { previousRuntimeSha256: v2.runtime.previousSha256 } : {}),
+  // Every instance answers worker pulls from its own barrier, so each one runs it (one transaction per 10 s).
+  const authorityBarrier = new AuthorityBarrier(pool, Date.now, console);
+  const authorityPull = new AuthorityPull(pool, authorityBarrier);
+  const workers: CloudV2WorkerRouteDeps = { store, execution, timing, logger: console, authorizeSource, continueSource, config: workerConfig, githubToken, runtimeSha256: v2.runtime.sha256, messageAuthority: v2.messageAuthority !== false, authority: authorityPull, ...(v2.runtime.previousSha256 ? { previousRuntimeSha256: v2.runtime.previousSha256 } : {}),
     helloTransaction: work => withSystemTx(pool, work),
     appliedReady: async (id, boot) => {
       readySignals.applied(id, boot);
@@ -589,8 +594,9 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     onNotification: notice => { if (notice.channel === RECOVERY_CHANNEL) recovery?.wake(); else lifecycle.wake(); },
   }) : null;
   void lifecycleChanges?.start().catch(() => {});
-  return { store, execution, compute, routes, proxy, workers, api, relay, connections, lifecycle, runtimeUpdates, loginChanges, promptChanges, lifecycleChanges, promptSignals, localCommandSignals, teamSharing,
+  return { store, execution, authorityBarrier, compute, routes, proxy, workers, api, relay, connections, lifecycle, runtimeUpdates, loginChanges, promptChanges, lifecycleChanges, promptSignals, localCommandSignals, teamSharing,
     stopLiveRecovery: async () => { await liveRecovery?.close(); await liveSignals.stop(); },
+    startAuthority: () => { authorityBarrier.start(); return () => authorityBarrier.close(); },
     startLocalCommands: () => {
       if (!roles.lifecycle) return async () => {};
       const local = startLocalCommandMaintenance(localCommands,localCommandSignals,console,notifications);

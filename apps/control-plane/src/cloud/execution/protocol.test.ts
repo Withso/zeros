@@ -39,6 +39,12 @@ describe("acting-user standalone protocol parity", () => {
     ["CloudV2BootstrapLeaseSchema", [base, { ...base, api: { url: "https://api.example.test", token: `zw2x_${"a".repeat(43)}` } }]],
     ["CloudV2RenewRequestSchema", [{ contextIds: [uuid] }, { contextIds: [uuid, uuid] }, { contextIds: [] }, { contextIds: Array.from({ length: 129 }, () => randomUUID()) }]],
     ["CloudV2RenewReplySchema", [{ leases: [{ contextId: uuid, expiresAt: 123 }] }, { leases: [{ contextId: uuid, refused: "cancelled" }] }, { leases: [{ contextId: uuid, expiresAt: 123, refused: "cancelled" }] }]],
+    ["CloudV2AuthorityRequestSchema", [{ acked: "0", contextIds: [] }, { acked: "12", contextIds: [uuid] }, { acked: "01", contextIds: [] },
+      { acked: "1", contextIds: [uuid, uuid] }, { acked: 1, contextIds: [] }, { acked: "1" },
+      { acked: "1", contextIds: [uuid], check: true }, { acked: "1", contextIds: [uuid], check: false }]],
+    ["CloudV2AuthorityReplySchema", [{ sequence: "3", fresh: true, ageMs: 10, untilMs: 600_000, ended: [] },
+      { sequence: "3", fresh: false, ageMs: 0, untilMs: -5, ended: [{ contextId: uuid, reason: "access_revoked" }] },
+      { sequence: "3", fresh: true, ageMs: -1, untilMs: 0, ended: [] }, { sequence: "3", fresh: true, ageMs: 0, untilMs: 0, ended: [], extra: 1 }]],
     ["CloudV2RetiredRequestSchema", [{ retirementId: uuid, reason: "outcome", processes: 0 }, { retirementId: uuid, reason: "revoked", processes: 2147483647 }, { retirementId: uuid, reason: "stop", processes: -1 }]],
     ["CloudV2RetiredReplySchema", [{ retired: true }, { retired: false }, { retired: 1 }]],
     ["CloudV2BootCleanRequestSchema", [

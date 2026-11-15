@@ -4,7 +4,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest
 import { CloudV2Computers } from "../computer.js";
 import * as runtime from "../runtime-capabilities.js";
 import { HttpError } from "../../authz.js";
-import { withUserTx } from "../../db.js";
+import { withSystemTx, withUserTx } from "../../db.js";
 import { executionFixture, type ExecutionFixture } from "./test-fixture.js";
 
 const suite = process.env.TEST_DATABASE_URL ? describe : describe.skip;
@@ -225,6 +225,104 @@ suite("new organization workspaces start with personal execution", () => {
     expect((await w.hello(undefined, "e".repeat(64))).status).toBe(409);
     expect((await pool.query("SELECT worker_boot_id FROM cloud_v2_workspaces WHERE id=$1", [id])).rows[0].worker_boot_id).toBeNull();
     expect((await pool.query("SELECT count(*)::int n FROM cloud_v2_execution_contexts WHERE workspace_id=$1", [id])).rows[0].n).toBe(0);
+  });
+
+  it("advances an R2 boot's authority head on every authority revocation and cut-off", async () => {
+    const { id } = await fresh(), w = await worker(id);
+    const features = `${f!.features},sync-v1,sync-context-v1,message-authority-v1`;
+    expect((await w.hello(features)).status).toBe(200);
+    expect((await w.call("execution-leases/boot-clean", { retirementId: randomUUID(), processes: 0, legacyMaterial: "none" }, features)).status).toBe(200);
+    const head = async () => (await withSystemTx(pool, tx => tx.query("SELECT count(*)::int AS sequence FROM cloud_v2_authority_events WHERE workspace_id=$1", [id]))).rows[0];
+    const contexts = (await pool.query("SELECT id FROM cloud_v2_execution_contexts WHERE workspace_id=$1 AND state='active' ORDER BY id", [id])).rows;
+    expect(contexts.length).toBeGreaterThan(0);
+    expect((await head())?.sequence ?? 0).toBe(0);
+    const revoked = await withSystemTx(pool, tx => tx.query(`UPDATE cloud_v2_execution_contexts SET state='revoked',reason='access_revoked',revoked_at=clock_timestamp()
+      WHERE workspace_id=$1 AND state='active'`, [id]));
+    expect((await head()).sequence).toBe(revoked.rowCount);
+    await withSystemTx(pool, tx => tx.query("INSERT INTO cloud_v2_execution_invalidations(workspace_id,user_id) VALUES($1,NULL)", [id]));
+    expect((await head()).sequence).toBe(revoked.rowCount! + 1);
+    await withUserTx(pool, f!.creator.id, async tx => {
+      expect((await tx.query("SELECT * FROM cloud_v2_authority_events")).rows).toEqual([]);
+      expect((await tx.query("SELECT * FROM cloud_v2_authority_rechecks")).rows).toEqual([]);
+    });
+  });
+
+  it("serves R2 freshness from one barrier: extends acknowledged boots, withholds it across a revocation until the worker acknowledges", async () => {
+    const { id } = await fresh(), w = await worker(id);
+    const features = `${f!.features},sync-v1,sync-context-v1,message-authority-v1`;
+    const hello = await w.hello(features); expect(hello.status).toBe(200);
+    expect((await hello.json()).config.messageAuthority).toBe(1);
+    expect((await w.call("execution-leases/boot-clean", { retirementId: randomUUID(), processes: 0, legacyMaterial: "none" }, features)).status).toBe(200);
+    expect((await pool.query("SELECT authority_mode FROM cloud_v2_execution_boots WHERE boot_id=$1", [w.boot])).rows[0].authority_mode).toBe("message-authority-v1");
+    const live = (await pool.query("SELECT id FROM cloud_v2_execution_contexts WHERE workspace_id=$1 AND state='active'", [id])).rows.map(row => row.id as string);
+    expect(live.length).toBeGreaterThan(0);
+    const pull = async (acked: string) => (await w.call("execution-leases/authority", { acked, contextIds: live }, features)).json();
+    expect(await pull("0")).toMatchObject({ fresh: false, ended: [] });
+    const barrier = f!.cp.authorityBarrier;
+    await barrier.tick();
+    const expiry = async () => (await pool.query("SELECT min(expires_at) AS at FROM cloud_v2_execution_contexts WHERE id=ANY($1::uuid[])", [live])).rows[0].at as Date;
+    expect((await expiry()).getTime() - Date.now()).toBeGreaterThan(500_000);
+    expect(await pull("0")).toMatchObject({ sequence: "0", fresh: true, ended: [] });
+    await withSystemTx(pool, tx => tx.query(`UPDATE cloud_v2_execution_contexts SET state='revoked',reason='access_revoked',revoked_at=clock_timestamp()
+      WHERE id=$1`, [live[0]]));
+    await barrier.tick();
+    const pending = await pull("0");
+    expect(pending).toMatchObject({ fresh: false, ended: [{ contextId: live[0], reason: "access_revoked" }] });
+    expect(await pull(pending.sequence)).toMatchObject({ fresh: false });
+    expect((await pool.query("SELECT authority_acked_sequence::text AS acked FROM cloud_v2_execution_boots WHERE boot_id=$1", [w.boot])).rows[0].acked).toBe(pending.sequence);
+    await barrier.tick();
+    expect(await pull(pending.sequence)).toMatchObject({ fresh: true, ended: [] });
+    const other = await worker(id);
+    const unknown = await other.call("execution-leases/authority", { acked: "0", contextIds: [] }, features);
+    expect({ status: unknown.status, body: await unknown.json() }).toEqual({ status: 200, body: { sequence: "0", fresh: false, ageMs: 0, untilMs: 0, ended: [] } });
+  });
+
+  it("re-admits an R2 boot's people at the next clock boundary and never extends a context past it", async () => {
+    const { id } = await fresh(), w = await worker(id);
+    const features = `${f!.features},sync-v1,sync-context-v1,message-authority-v1`;
+    expect((await w.hello(features)).status).toBe(200);
+    expect((await w.call("execution-leases/boot-clean", { retirementId: randomUUID(), processes: 0, legacyMaterial: "none" }, features)).status).toBe(200);
+    const maintenance = f!.cp.execution.maintenance;
+    await maintenance.workspace(id);
+    const recheck = async () => (await withSystemTx(pool, tx => tx.query("SELECT min(at) AS recheck_at FROM cloud_v2_authority_rechecks WHERE workspace_id=$1", [id]))).rows[0]?.recheck_at as Date;
+    const first = await recheck();
+    expect(first.getTime() - Date.now()).toBeGreaterThan(9 * 60_000);
+    expect(first.getTime() - Date.now()).toBeLessThanOrEqual(10 * 60_000);
+    await f!.cp.authorityBarrier.tick();
+    const latest = (await pool.query("SELECT max(expires_at) AS at FROM cloud_v2_execution_contexts WHERE workspace_id=$1 AND state='active'", [id])).rows[0].at as Date;
+    expect(latest.getTime()).toBeLessThanOrEqual(first.getTime() + 60_000);
+    expect(latest.getTime()).toBeGreaterThan(first.getTime());
+    await withSystemTx(pool, tx => tx.query("INSERT INTO cloud_v2_authority_rechecks(workspace_id,at) VALUES($1,clock_timestamp()-interval '1 second')", [id]));
+    expect(await maintenance.due()).toContain(id);
+    await maintenance.workspace(id);
+    expect((await recheck()).getTime()).toBeGreaterThan(Date.now() + 9 * 60_000);
+    expect(await maintenance.due()).not.toContain(id);
+  });
+
+  it("leaves the authority head alone when the worker retires its own contexts, and on lease boots", async () => {
+    const { id } = await fresh(), w = await worker(id);
+    const features = `${f!.features},sync-v1,sync-context-v1,message-authority-v1`;
+    expect((await w.hello(features)).status).toBe(200);
+    expect((await w.call("execution-leases/boot-clean", { retirementId: randomUUID(), processes: 0, legacyMaterial: "none" }, features)).status).toBe(200);
+    const sequence = async () => (await withSystemTx(pool, tx => tx.query("SELECT count(*)::int AS n FROM cloud_v2_authority_events WHERE workspace_id=$1", [id]))).rows[0].n;
+    const live = (await pool.query("SELECT id FROM cloud_v2_execution_contexts WHERE workspace_id=$1 AND state='active'", [id])).rows.map(row => row.id as string);
+    expect(live.length).toBeGreaterThan(0);
+    for (const [index, contextId] of live.entries())
+      expect((await w.call(`execution-leases/${contextId}/retired`, { retirementId: randomUUID(), reason: index ? "revoked" : "operation_done", processes: 0 }, features)).status).toBe(200);
+    expect(await sequence()).toBe(0);
+    await pool.query("UPDATE cloud_v2_execution_boots SET authority_mode='lease-v1' WHERE boot_id=$1", [w.boot]);
+    await withSystemTx(pool, tx => tx.query("INSERT INTO cloud_v2_execution_invalidations(workspace_id,user_id) VALUES($1,NULL)", [id]));
+    expect(await sequence()).toBe(0);
+  });
+
+  it("marks running R2 workspaces for re-evaluation when an entitlement changes outside a system transaction", async () => {
+    const { id } = await fresh(), w = await worker(id);
+    const features = `${f!.features},sync-v1,sync-context-v1,message-authority-v1`;
+    expect((await w.hello(features)).status).toBe(200);
+    expect((await w.call("execution-leases/boot-clean", { retirementId: randomUUID(), processes: 0, legacyMaterial: "none" }, features)).status).toBe(200);
+    await pool.query("INSERT INTO staff_pro_benefits(user_id) VALUES($1) ON CONFLICT (user_id) DO UPDATE SET revision=staff_pro_benefits.revision+1", [f!.creator.id]);
+    const due = (await withSystemTx(pool, tx => tx.query("SELECT count(*)::int AS n FROM cloud_v2_authority_rechecks WHERE workspace_id=$1 AND at<=clock_timestamp()", [id]))).rows[0].n;
+    expect(due).toBeGreaterThan(0);
   });
 
   it("clears an earlier boot's failure when a clean boot makes the workspace running", async () => {

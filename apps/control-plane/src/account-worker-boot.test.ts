@@ -82,6 +82,7 @@ beforeEach(() => {
     lifecycle: roles.lifecycle ? f.lifecycle : null, loginChanges: roles.relay ? f.loginChanges : null,
     runtimeUpdates: f.runtimeUpdates, stopLiveRecovery: f.stopLiveRecovery,
     startLocalCommands: roles.lifecycle ? f.startLocalCommands : () => async () => {}, localCommandSignals: f.localCommandSignals,
+    startAuthority: () => async () => {},
     teamSharing: f.teamSharing,
     promptChanges: config.cloudV2.promptOutbox ? f.promptChanges : null, promptSignals: f.promptSignals,
   } : null);

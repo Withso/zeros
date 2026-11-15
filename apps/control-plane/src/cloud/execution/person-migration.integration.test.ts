@@ -60,7 +60,7 @@ database("0243 signature metadata and live migration cost", () => {
     const client = await pool.connect();
     try {
       await client.query("BEGIN");
-      for (const [table, trigger] of [["cloud_v2_execution_contexts", "execution_legacy_context_basis"], ["cloud_v2_tokens", "execution_legacy_ticket_basis"],
+      for (const [table, trigger] of [["cloud_v2_execution_contexts", "execution_legacy_context_basis"], ["cloud_v2_execution_contexts", "authority_recheck_context"], ["cloud_v2_tokens", "execution_legacy_ticket_basis"],
         ["cloud_v2_prompt_outbox", "execution_legacy_prompt_basis"], ["cloud_v2_workspaces", "execution_legacy_intent_basis"]])
         await client.query(`ALTER TABLE ${table} DISABLE TRIGGER ${trigger}`);
       await client.query(`INSERT INTO cloud_v2_execution_contexts(id,workspace_id,org_id,user_id,kind,client_id,access_epoch,stop_generation,worker_boot_id,
@@ -77,7 +77,7 @@ database("0243 signature metadata and live migration cost", () => {
         SELECT $1,'old-'||n,'migration',$2,n,0,0,repeat('a',64),0,'{}',CASE WHEN n<=1000 THEN 'queued' ELSE 'completed' END,
           CASE WHEN n>1000 THEN clock_timestamp() END,'{"permissionSignature":"legacy"}' FROM generate_series(1,10000) n`, [f.workspace.id, f.viewer.id]);
       await client.query("UPDATE cloud_v2_workspaces SET execution_intent_authority='{\"permissionSignature\":\"legacy\"}' WHERE id=$1", [f.workspace.id]);
-      for (const [table, trigger] of [["cloud_v2_execution_contexts", "execution_legacy_context_basis"], ["cloud_v2_tokens", "execution_legacy_ticket_basis"],
+      for (const [table, trigger] of [["cloud_v2_execution_contexts", "execution_legacy_context_basis"], ["cloud_v2_execution_contexts", "authority_recheck_context"], ["cloud_v2_tokens", "execution_legacy_ticket_basis"],
         ["cloud_v2_prompt_outbox", "execution_legacy_prompt_basis"], ["cloud_v2_workspaces", "execution_legacy_intent_basis"]]) {
         await client.query(`ALTER TABLE ${table} ENABLE TRIGGER ${trigger}`);
         await client.query(`ANALYZE ${table}`);

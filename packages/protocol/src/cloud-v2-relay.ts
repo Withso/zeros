@@ -79,6 +79,8 @@ export const CREATOR_COMMIT_IDENTITY_FEATURE = "creator-commit-identity-v1";
 /** R1 push, not poll: with config pushSignals: 1 the worker long-polls prompts 60 s, reports busy/idle on change plus
  * every 5 min, sends its activity pulse every 5 min and checks for runtime updates on a pushed hint (15 min fallback). */
 export const PUSH_SIGNALS_FEATURE = "push-signals-v1";
+/** R2: the worker holds who may act from the control plane's authority freshness instead of renewing each context. */
+export const MESSAGE_AUTHORITY_FEATURE = "message-authority-v1";
 export const PUSH_SIGNALS_REPORT_MS = 300_000;
 export const PUSH_SIGNALS_RUNTIME_CHECK_MS = 900_000;
 const creatorModelIds = z.array(z.string().max(256).regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]*(?:\[1m\])?$/)).max(128)
@@ -244,6 +246,7 @@ export const CloudV2ControlFrameSchema = z.discriminatedUnion("t", [
     t: z.literal("config"),
     environment: CloudWorkspaceEnvironmentSchema.optional(),
     promptOutbox: z.literal(1).optional(),
+    messageAuthority: z.literal(1).optional(),
     runtimeUpdate: z.literal(1).optional(),
     pushSignals: z.literal(1).optional(),
     agentInteractions: z.literal(1).optional(),
@@ -412,6 +415,22 @@ export const CloudV2RenewReplySchema = z.object({ leases: z.array(z.union([
   z.object({ contextId: z.uuid(), refused: CloudV2ContextReasonSchema }).strict(),
 ])).min(1).max(128) }).strict();
 export type CloudV2RenewReply = z.infer<typeof CloudV2RenewReplySchema>;
+/** R2 pull: the boot's acknowledged authority sequence and the contexts it holds; the reply carries freshness and any of
+ * those contexts that have ended. Times are durations so the two clocks never meet. */
+export const CloudV2AuthorityRequestSchema = z.object({
+  acked: z.string().regex(/^(0|[1-9][0-9]{0,18})$/),
+  contextIds: z.array(z.uuid()).max(128),
+  /** Some listed contexts were tracked after the last reply: report any that have ended even with nothing to acknowledge. */
+  check: z.literal(true).optional(),
+}).strict().refine(value => new Set(value.contextIds).size === value.contextIds.length, "Unique context ids");
+export const CloudV2AuthorityReplySchema = z.object({
+  sequence: z.string().regex(/^(0|[1-9][0-9]{0,18})$/),
+  fresh: z.boolean(),
+  ageMs: z.number().int().nonnegative().max(86_400_000),
+  untilMs: z.number().int().min(-86_400_000).max(86_400_000),
+  ended: z.array(z.object({ contextId: z.uuid(), reason: CloudV2ContextReasonSchema }).strict()).max(128),
+}).strict();
+export type CloudV2AuthorityReply = z.infer<typeof CloudV2AuthorityReplySchema>;
 export const CloudV2RetirementReasonSchema = z.enum(["outcome", "stop", "revoked", "generation_changed", "terminal_closed", "operation_done", "expired", "setup_done"]);
 export const CloudV2RetiredRequestSchema = z.object({ retirementId: z.uuid(), reason: CloudV2RetirementReasonSchema,
   processes: z.number().int().min(0).max(2147483647) }).strict();

@@ -239,6 +239,8 @@ export type CloudV2Config = {
   teamOwnership?: boolean;
   /** Enable only after publishing the matching outbox-capable runtime. */
   promptOutbox?: boolean;
+  /** R2 for new active boots that advertise it; off only with CLOUD_V2_MESSAGE_AUTHORITY_ENABLED=false. */
+  messageAuthority?: boolean;
   /** Retries a stop's failed checkpoint on a fork of the stopped VM. Enable
    * only once forking a stopped VM is qualified on the deployment's Boat account. */
   checkpointRetry?: boolean;
@@ -272,6 +274,8 @@ function loadCloudV2Config(env: NodeJS.ProcessEnv, channel: string): CloudV2Conf
   const billingOrg = env.BOAT_BILLING_ORG?.trim();
   const promptOutbox = env.CLOUD_V2_PROMPT_OUTBOX_ENABLED?.trim().toLowerCase();
   if (promptOutbox && !["true", "false"].includes(promptOutbox)) throw new Error("Invalid environment: CLOUD_V2_PROMPT_OUTBOX_ENABLED must be true or false");
+  const messageAuthority = env.CLOUD_V2_MESSAGE_AUTHORITY_ENABLED?.trim().toLowerCase();
+  if (messageAuthority && !["true", "false"].includes(messageAuthority)) throw new Error("Invalid environment: CLOUD_V2_MESSAGE_AUTHORITY_ENABLED must be true or false");
   const checkpointRetry = env.CLOUD_V2_CHECKPOINT_RETRY_ENABLED?.trim().toLowerCase();
   if (checkpointRetry && !["true", "false"].includes(checkpointRetry)) throw new Error("Invalid environment: CLOUD_V2_CHECKPOINT_RETRY_ENABLED must be true or false");
   const asyncCreate = env.CLOUD_V2_ASYNC_CREATE_ENABLED?.trim().toLowerCase();
@@ -312,6 +316,7 @@ function loadCloudV2Config(env: NodeJS.ProcessEnv, channel: string): CloudV2Conf
   return {
     boat: { apiKey, ...(billingOrg ? { billingOrg } : {}) },
     promptOutbox: promptOutbox === "true",
+    messageAuthority: messageAuthority !== "false",
     checkpointRetry: checkpointRetry === "true",
     asyncCreate: asyncCreate !== "false",
     actingUserDefault: actingUserDefault === "1",

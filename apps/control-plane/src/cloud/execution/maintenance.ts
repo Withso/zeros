@@ -9,6 +9,8 @@ import type { CloudExecutionContexts, ExecutionContext } from "./store.js";
 import { matchesExecutionSignature } from "./signatures.js";
 
 type Revocation = { contextId: string; reason: CloudV2ContextReason; bootId: string };
+/** The source answer's approved 10-minute window: the longest an R2 boot goes without re-admitting its people. */
+export const AUTHORITY_SOURCE_RECHECK_MS = 10 * 60_000;
 export class CloudExecutionMaintenance {
   constructor(readonly contexts: CloudExecutionContexts) {}
 
@@ -44,9 +46,35 @@ export class CloudExecutionMaintenance {
         if (reason) await this.contexts.revoke(tx, row.id, reason);
       }
       await this.cancelQueued(tx, id);
+      await this.scheduleRecheck(tx, id);
       return this.revocations(tx, id);
     });
   }
+
+  /** R2 boots are never renewed, so a cut with no database write (a Hold window opening, a session or client token
+   * expiring, the source answer's 10-minute window) needs its own evaluation: the earliest of them. The barrier never
+   * extends a context past it. Lease boots keep their renewals and get none. */
+  private async scheduleRecheck(tx: Tx, id: string) {
+    await tx.query("DELETE FROM cloud_v2_authority_rechecks WHERE workspace_id=$1", [id]);
+    await tx.query(`WITH live AS MATERIALIZED (
+        SELECT c.* FROM cloud_v2_execution_contexts c JOIN cloud_v2_workspaces w ON w.id=c.workspace_id
+        JOIN cloud_v2_execution_boots b ON b.workspace_id=w.id AND b.boot_id=w.worker_boot_id AND b.authority_mode='message-authority-v1'
+        WHERE c.workspace_id=$1 AND c.state='active' AND c.worker_boot_id=w.worker_boot_id),
+      people AS (SELECT user_id FROM live WHERE user_id IS NOT NULL
+        UNION SELECT (selection#>>'{payer,userId}')::uuid FROM live WHERE selection->>'version'='2')
+      INSERT INTO cloud_v2_authority_rechecks(workspace_id,at)
+        SELECT $1,least(
+          clock_timestamp()+make_interval(secs=>$2::double precision/1000),
+          (SELECT min(client_token_expires_at) FROM live),
+          (SELECT min(s.provider_session_expires_at) FROM auth_sessions s JOIN live l ON l.provider_session_id=s.provider_session_id
+            AND s.user_id=l.user_id AND s.provider='workos'),
+          (SELECT min(edge) FROM organization_member_seat_periods p CROSS JOIN LATERAL unnest(p.hold_periods) r
+            CROSS JOIN LATERAL (VALUES (lower(r)),(upper(r))) v(edge)
+            WHERE p.org_id=(SELECT org_id FROM cloud_v2_workspaces WHERE id=$1) AND p.user_id IN (SELECT user_id FROM people)
+              AND edge>clock_timestamp()))
+        WHERE EXISTS(SELECT 1 FROM live)`, [id, AUTHORITY_SOURCE_RECHECK_MS]);
+  }
+
 
   private async revocations(tx: Tx, id: string, after?: string): Promise<Revocation[]> {
     const rows = (await tx.query<{ id: string; reason: CloudV2ContextReason; worker_boot_id: string }>(
@@ -103,6 +131,7 @@ export class CloudExecutionMaintenance {
     return withSystemTx(this.contexts.pool, async tx => (await tx.query<{ id: string }>(`SELECT id FROM (
       SELECT workspace_id AS id FROM cloud_v2_execution_contexts WHERE state='active' AND expires_at<=clock_timestamp()
       UNION SELECT workspace_id FROM cloud_v2_execution_invalidations
+      UNION SELECT workspace_id FROM cloud_v2_authority_rechecks WHERE at<=clock_timestamp()
       ${cloudTeamOwnershipEnabled(this.contexts.pool) ? `UNION SELECT w.id FROM cloud_v2_workspaces w WHERE w.execution_mode='active'
         AND w.creator_user_id IS NOT NULL AND w.state<>'deleted' AND NOT EXISTS(
           SELECT 1 FROM organization_members m JOIN users u ON u.id=m.user_id
@@ -157,7 +186,8 @@ export class CloudExecutionMaintenance {
     const scheduler = new CloudWorkerScheduler(60_000, () => this.sweep(push), () => logger.error("[cloud-v2] execution_maintenance_unavailable"),
       async () => withSystemTx(this.contexts.pool, async tx => {
         const row = (await tx.query<{ delay: number | null }>(`SELECT CASE WHEN EXISTS(SELECT 1 FROM cloud_v2_execution_invalidations) THEN 0
-          ELSE extract(epoch FROM (min(expires_at)-clock_timestamp()))*1000 END AS delay FROM cloud_v2_execution_contexts WHERE state='active'`)).rows[0];
+          ELSE extract(epoch FROM (least((SELECT min(expires_at) FROM cloud_v2_execution_contexts WHERE state='active'),
+            (SELECT min(at) FROM cloud_v2_authority_rechecks))-clock_timestamp()))*1000 END AS delay`)).rows[0];
         return row?.delay === null || row?.delay === undefined ? null : Number(row.delay);
       }));
     scheduler.start();

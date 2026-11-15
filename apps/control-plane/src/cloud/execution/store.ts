@@ -581,6 +581,8 @@ export class CloudExecutionContexts {
         if (context.retirement_id !== input.retirementId || !context.retirement_hash?.equals(digest)) throw actorChanged();
         return { retired: true as const };
       }
+      // The worker's own retirement is not an authority change (0253 counts only those).
+      await tx.query("SELECT set_config('app.cloud_authority_retirement','on',true)");
       await this.revoke(tx, id, input.reason === "outcome" || input.reason === "setup_done" || input.reason === "operation_done" ? "completed" :
         input.reason === "expired" ? "expired" : input.reason === "stop" ? "cancelled" : "actor_changed");
       await tx.query(`UPDATE cloud_v2_execution_contexts SET state='retired',retired_at=clock_timestamp(),retirement_id=$2,retirement_hash=$3,

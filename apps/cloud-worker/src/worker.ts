@@ -218,7 +218,7 @@ export class CloudWorker {
 
   private contextGateway(context: { contextId: string; servers: readonly RuntimeMcpServer[] }, workspaceRoot: string, agents: Agents): Promise<McpGateway> {
     const { contextId } = context;
-    if (!this.contexts?.live(contextId)) return Promise.reject(new Error("This context has ended."));
+    if (!this.contexts?.admits(contextId)) return Promise.reject(new Error("This context has ended."));
     let gateway = this.contextMcp.get(contextId);
     if (!gateway) {
       const transport = this.options.transport;
@@ -284,7 +284,7 @@ export class CloudWorker {
   /** An activated workspace never gives a credential outside a live context: no Creator fallback. */
   private githubToken(purpose: "git" | "gh", failed: string | undefined, contextId: string | undefined): Promise<GithubToken> {
     if (!this.acting) return this.githubCredentials.get(purpose, failed);
-    if (!contextId || !this.contexts?.live(contextId)) return Promise.reject(githubAuthenticationError("connection-changed"));
+    if (!contextId || !this.contexts?.admits(contextId)) return Promise.reject(githubAuthenticationError("connection-changed"));
     let flight = this.contextGithub.get(contextId);
     if (!flight) {
       const tokens = new GithubTokens((frame, timeoutMs) => this.send(frame, timeoutMs), { contextId });
@@ -631,6 +631,7 @@ export class CloudWorker {
     }
     if (this.disposed) return;
     this.applyPushSignals(config.pushSignals === 1);
+    this.contexts?.setMessageAuthority(config.messageAuthority === 1);
     if (this.stopping) {
       // Stop can need refreshed credentials to finish its final mirror receipt.
       this.history!.connect();

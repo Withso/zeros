@@ -219,3 +219,65 @@ it("J-3A1: ends a context at its own deadline between renewal ticks, honours a s
   expect(contexts.expiresAt(third)).toBe(now + 5_000);
   contexts.dispose();
 });
+
+describe("message-authority-v1 (R2)", () => {
+  it("never renews; one pull ends revoked contexts, moves every live deadline to the horizon and acknowledges what it saw", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "setTimeout", "clearTimeout"] });
+    let reply: Record<string, unknown> = { sequence: "4", fresh: false, ageMs: 0, untilMs: 0, ended: [{ contextId: B, reason: "access_revoked" }] };
+    const f = fixture((path, body) => path === "turn-lease" ? lease(String(body.contextId), 1_030_000) : reply);
+    f.contexts.setMessageAuthority(true);
+    f.contexts.setMessageAuthority(false);
+    await f.contexts.turnLease({ chatId: "c", userMessageId: "m1", dispatchId: A, generation: "1", contextId: A });
+    await f.contexts.turnLease({ chatId: "c2", userMessageId: "m2", dispatchId: B, generation: "1", contextId: B });
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(f.calls.filter(call => call.path === "execution-leases/renew")).toEqual([]);
+    expect(f.calls.at(-1)).toEqual({ path: "execution-leases/authority", body: { acked: "0", contextIds: [A, B], check: true } });
+    expect(f.contexts.live(B)).toBe(false);
+    expect(f.contexts.admits(A)).toBe(false);
+    reply = { sequence: "4", fresh: true, ageMs: 2_000, untilMs: 598_000, ended: [] };
+    await f.contexts.pull();
+    expect(f.calls.at(-1)!.body).toEqual({ acked: "4", contextIds: [A] });
+    expect(f.contexts.expiresAt(A)).toBe(1_000_000 + 598_000);
+    expect(f.contexts.expiresAt(A)).toBe(1_000_000 + 598_000);
+    expect(f.contexts.admits(A)).toBe(true);
+    f.advance(43_001);
+    expect(f.contexts.live(A)).toBe(true);
+    expect(f.contexts.admits(A)).toBe(false);
+  });
+
+  it("keeps deadlines and stops new work when the control plane cannot be reached", async () => {
+    let fail = false;
+    const f = fixture((path, body) => path === "turn-lease" ? lease(String(body.contextId), 1_030_000)
+      : fail ? Object.assign(new Error("unavailable"), { status: 503 }) : { sequence: "0", fresh: true, ageMs: 0, untilMs: 600_000, ended: [] });
+    f.contexts.setMessageAuthority(true);
+    await f.contexts.turnLease({ chatId: "c", userMessageId: "m1", dispatchId: A, generation: "1", contextId: A });
+    await f.contexts.pull();
+    expect(f.contexts.admits(A)).toBe(true);
+    fail = true;
+    f.advance(46_000);
+    await f.contexts.pull();
+    expect(f.contexts.expiresAt(A)).toBe(1_600_000);
+    expect(f.contexts.live(A)).toBe(true);
+    expect(f.contexts.admits(A)).toBe(false);
+    f.advance(600_000);
+    expect(f.contexts.live(A)).toBe(false);
+  });
+
+  it("asks about a context tracked after the acknowledgement, and renews again when the control plane has no authority route", async () => {
+    let status = 200;
+    const f = fixture((path, body) => path === "turn-lease" ? lease(String(body.contextId), 1_030_000)
+      : path === "execution-leases/renew" ? { leases: [{ contextId: A, expiresAt: 1_040_000 }] }
+      : status === 404 ? Object.assign(new Error("not found"), { status: 404 })
+      : { sequence: "2", fresh: true, ageMs: 0, untilMs: 600_000, ended: body.check ? [{ contextId: A, reason: "access_revoked" }] : [] });
+    f.contexts.setMessageAuthority(true);
+    await f.contexts.pull();
+    await f.contexts.turnLease({ chatId: "c", userMessageId: "m1", dispatchId: A, generation: "1", contextId: A });
+    await f.contexts.pull();
+    expect(f.calls.at(-1)!.body).toMatchObject({ acked: "2", contextIds: [A], check: true });
+    expect(f.contexts.live(A)).toBe(false);
+    await f.contexts.turnLease({ chatId: "c2", userMessageId: "m2", dispatchId: B, generation: "1", contextId: B });
+    status = 404;
+    await f.contexts.pull();
+    await vi.waitFor(() => expect(f.calls.some(call => call.path === "execution-leases/renew")).toBe(true));
+  });
+});
