@@ -706,6 +706,27 @@ affected workspaces for re-check. The worker refuses new GitHub credentials and 
 connections after 45 seconds without fresh authority; running work keeps its deadline.
 Lease boots keep 10-second renewals unchanged.
 
+### A started turn survives its sender
+
+A turn whose material has been issued and whose pinned payer
+(`selection.payer.userId`) is someone other than its sender keeps running when the
+sender is removed, put on Hold or otherwise loses access. It ends on the payer's
+loss, on Stop or when it finishes. The fence (migration 0254) sets the one-way
+`cloud_v2_execution_contexts.sender_ended_at` instead of revoking the turn. A cut
+with no write the fence can see, such as a Hold window opening on the clock, sets it
+at the next renewal, maintenance pass or Codex proxy check. From then on, renewal,
+maintenance and the proxy admit the payer. The sender's GitHub tokens, MCP
+authorization, API token, another turn lease, steers into that turn and local
+commands to the sender's Mac are refused, even if the sender rejoins. A removal's
+cascade into the sender's MCP sign-ins and personal MCP extensions marks the turn
+too; a current member signing out of an MCP server still ends their turn.
+
+The sender's connections, terminals, client contexts and unstarted messages end
+as before. A turn that has begun but has no material yet is revoked. Commits keep
+the sender's git identity. Material already delivered (environment values, MCP
+headers, a GitHub token minted before the cut) cannot be recalled. Hard-deleting
+the sender's user row still ends the turn.
+
 Deploy expand-only migration `0218_cloud_workspace_environment.sql` and the control
 plane before publishing the worker runtime. The optional `environment` config is
 negotiated by `workspace-environment-v1`; an old worker is refused when a workspace

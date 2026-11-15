@@ -10,7 +10,7 @@ export type CloudChatSender = { creator_user_id: string | null; user_message_id:
 export async function cloudChatSender(tx: Tx, workspace: { id: string; org_id: string; access_epoch: string }, chatId: string, contextId?: string) {
   if (contextId) return (await tx.query<CloudChatSender>(`SELECT x.user_id AS creator_user_id,x.user_message_id,p.sequence::text,c.epoch::text,
     x.sender_binding_generation::text AS local_command_generation,x.sender_binding_generation::text,x.sender_device_id,x.sender_registration_id,d.name,
-    coalesce(x.state='active' AND x.expires_at>clock_timestamp() AND c.active_context_id=x.id AND x.chat_epoch=c.epoch
+    coalesce(x.state='active' AND x.sender_ended_at IS NULL AND x.expires_at>clock_timestamp() AND c.active_context_id=x.id AND x.chat_epoch=c.epoch
       AND p.epoch=c.epoch AND p.access_epoch=$3 AND NOT p.cancel_requested AND x.sender_device_id IS NOT NULL
       AND x.sender_registration_id IS NOT NULL AND h.deleted_at IS NULL AND u.auth_status='active' AND u.deleted_at IS NULL
       AND EXISTS(SELECT 1 FROM organization_members m WHERE m.org_id=$4 AND m.user_id=x.user_id

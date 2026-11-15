@@ -19,11 +19,14 @@ database("durable execution revocation", () => {
     return active;
   };
 
-  it("revokes a removed member immediately, erases credentials, and leaves another actor alone", async () => {
+  it("keeps a removed member's Creator-paid turn, then revokes it and erases credentials when the payer leaves", async () => {
     const active = await turn(), other = await f.dispatch(f.prompt(randomUUID(), { chatId: "other" }));
     expect((await pool.query("DELETE FROM organization_members WHERE org_id=$1 AND user_id=$2", [f.organizationId, f.viewer.id])).rowCount).toBe(1);
-    expect(await read(active.begun.contextId)).toMatchObject({ state: "revoked", reason: "access_revoked", material: null, environment_version_id: null });
+    // A started turn survives its sender (0254); its payer's loss still cuts it at once.
+    expect(await read(active.begun.contextId)).toMatchObject({ state: "active", reason: null });
     expect((await read(other.begun.contextId)).state).toBe("active");
+    expect((await pool.query("DELETE FROM organization_members WHERE org_id=$1 AND user_id=$2", [f.organizationId, f.creator.id])).rowCount).toBe(1);
+    expect(await read(active.begun.contextId)).toMatchObject({ state: "revoked", reason: "access_revoked", material: null, environment_version_id: null });
     expect((await pool.query("SELECT 1 FROM cloud_v2_execution_tokens WHERE context_id=$1", [active.begun.contextId])).rowCount).toBe(0);
   });
 
@@ -50,7 +53,7 @@ database("durable execution revocation", () => {
     expect((await read(earlier.begun.contextId)).state).toBe("active");
   });
 
-  it("revokes a member put on Hold by an entitlement change while keeping another person's turn", async () => {
+  it("keeps a member's started turn on its payer when an entitlement change puts them on Hold", async () => {
     for (let n = 0; n < 5; n++) {
       const id = randomUUID();
       await pool.query("INSERT INTO users(id,email,display_name) VALUES($1,$2,'Fixture')", [id, `${id}@example.test`]);
@@ -64,12 +67,13 @@ database("durable execution revocation", () => {
       await operator.query("COMMIT");
     } catch (error) { await operator.query("ROLLBACK"); throw error; }
     finally { operator.release(); }
-    expect(await read(active.begun.contextId)).toMatchObject({ state: "revoked", reason: "access_revoked", material: null });
+    expect(await read(active.begun.contextId)).toMatchObject({ state: "active", reason: null });
     expect((await read(other.begun.contextId)).state).toBe("active");
+    // Another lease would re-deliver the held member's material.
     const refused = await f.worker("turn-lease", active.lease);
     expect(refused.status).toBe(409); expect(await refused.json()).toMatchObject({ error: { code: "actor_changed" } });
     expect(await (await f.worker("execution-leases/renew", { contextIds: [active.begun.contextId] })).json())
-      .toEqual({ leases: [{ contextId: active.begun.contextId, refused: "access_revoked" }] });
+      .toEqual({ leases: [{ contextId: active.begun.contextId, expiresAt: expect.any(Number) }] });
   });
 
   it("keeps queued work cancelled across the real operator's Pro revoke and restore during a listener gap", async () => {

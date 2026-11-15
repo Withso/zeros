@@ -5,9 +5,17 @@ import { memberOnHoldSql } from "../../organization-seats.js";
 import { CloudWorkerScheduler } from "../../worker-scheduler.js";
 import type { CloudV2ContextReason } from "../contract.js";
 import { CLOUD_V2_LIVE_ACCESS } from "../workspace-access.js";
-import type { CloudExecutionContexts, ExecutionContext } from "./store.js";
+import { continuationPrincipal, senderContinuable, senderEnded, type CloudExecutionContexts, type ExecutionContext } from "./store.js";
 import { matchesExecutionSignature } from "./signatures.js";
 
+/** Work delivered on a started turn that another person pays for. Sender loss never cancels it: the loop below moves the
+ * turn to its payer or revokes it, and a revoked turn's work is cancelled on the next pass. */
+const STARTED = (prompt: string) => `EXISTS(SELECT 1 FROM cloud_v2_execution_contexts s WHERE s.id=${prompt}.execution_context_id
+  AND s.state='active' AND s.kind='turn' AND s.material IS NOT NULL
+  AND coalesce(s.selection->>'version'='2' AND s.selection#>>'{payer,userId}'<>s.user_id::text,false))`;
+/** Already moved to its payer: no longer the sender's inventory, so it never re-invalidates them. */
+const SPONSORED = (prompt: string) => `EXISTS(SELECT 1 FROM cloud_v2_execution_contexts s WHERE s.id=${prompt}.execution_context_id
+  AND s.state='active' AND s.sender_ended_at IS NOT NULL)`;
 type Revocation = { contextId: string; reason: CloudV2ContextReason; bootId: string };
 /** The source answer's approved 10-minute window: the longest an R2 boot goes without re-admitting its people. */
 export const AUTHORITY_SOURCE_RECHECK_MS = 10 * 60_000;
@@ -24,19 +32,31 @@ export class CloudExecutionMaintenance {
       await this.contexts.deps.logins.refreshAvailability(id, tx);
       await this.cancelQueued(tx, id);
       const rows = (await tx.query<ExecutionContext>("SELECT * FROM cloud_v2_execution_contexts WHERE workspace_id=$1 AND state='active' ORDER BY id", [id])).rows;
-      for (const row of rows) {
+      for (const listed of rows) {
+        // A fence that committed since the list may have moved a started turn to its payer: read it again, locked at its turn.
+        let row = senderContinuable(listed) && !senderEnded(listed)
+          ? (await tx.query<ExecutionContext>("SELECT * FROM cloud_v2_execution_contexts WHERE id=$1 FOR UPDATE", [listed.id])).rows[0] : listed;
+        if (!row || row.state !== "active") continue;
         let reason: CloudV2ContextReason | null = row.expires_at.getTime() <= Date.now() ? "expired" : null;
         if (!reason) {
           try {
             if (!row.user_id) reason = "access_revoked";
             else {
-              const person = await this.contexts.deps.authority.snapshot(tx, id, row.user_id, undefined, row.id);
-              if (!matchesExecutionSignature(row.authority, row.authority.signature, person, "signature") || person.state === "stopping") reason = "actor_changed";
+              let person;
+              try { person = await this.contexts.deps.authority.snapshot(tx, id, continuationPrincipal(row)!, undefined, row.id); }
+              catch (error) {
+                // The sender lost access with no write the fence saw (a Hold window opening): a started turn moves to its payer.
+                if (!(error instanceof HttpError) || error.code !== "member_access_revoked" || senderEnded(row) || !senderContinuable(row)) throw error;
+                row = (await tx.query<ExecutionContext>(`UPDATE cloud_v2_execution_contexts SET sender_ended_at=coalesce(sender_ended_at,clock_timestamp())
+                  WHERE id=$1 RETURNING *`, [row.id])).rows[0]!;
+                person = await this.contexts.deps.authority.snapshot(tx, id, continuationPrincipal(row)!, undefined, row.id);
+              }
+              if (!senderEnded(row) && !matchesExecutionSignature(row.authority, row.authority.signature, person, "signature") || person.state === "stopping") reason = "actor_changed";
               if (row.provider_session_id && !(await tx.query(`SELECT 1 FROM auth_sessions WHERE user_id=$1 AND provider='workos' AND provider_session_id=$2
                 AND status='active' AND revoked_at IS NULL AND (provider_session_expires_at IS NULL OR provider_session_expires_at>clock_timestamp())`, [row.user_id,row.provider_session_id])).rowCount)
                 reason = "access_revoked";
               if (row.client_token_expires_at && row.client_token_expires_at.getTime() <= Date.now()) reason = "client_closed";
-              if (row.agent && row.selection) await this.contexts.deps.logins.select(row.org_id, row.user_id, row.agent, row.selection, tx);
+              if (row.agent && row.selection) await this.contexts.deps.logins.select(row.org_id, row.user_id!, row.agent, row.selection, tx);
             }
           } catch (error) {
             if (error instanceof HttpError && error.status < 500) reason = error.code === "member_access_revoked" ? "access_revoked" : "actor_changed";
@@ -102,8 +122,9 @@ export class CloudExecutionMaintenance {
     // policy. Reconcile it under the same personal cutoff as a visible writer.
     await tx.query(`INSERT INTO cloud_v2_execution_invalidations(workspace_id,user_id)
       SELECT w.id,person.user_id FROM cloud_v2_workspaces w CROSS JOIN LATERAL (
-        SELECT user_id FROM cloud_v2_execution_contexts WHERE workspace_id=w.id AND state='active'
-        UNION SELECT creator_user_id FROM cloud_v2_prompt_outbox WHERE workspace_id=w.id AND state IN ('queued','inboxed','dispatching','accepted')
+        SELECT user_id FROM cloud_v2_execution_contexts WHERE workspace_id=w.id AND state='active' AND sender_ended_at IS NULL
+        UNION SELECT creator_user_id FROM cloud_v2_prompt_outbox p WHERE workspace_id=w.id AND state IN ('queued','inboxed','dispatching','accepted')
+          AND NOT ${SPONSORED("p")}
         UNION SELECT user_id FROM cloud_v2_tokens WHERE workspace_id=w.id AND expires_at>clock_timestamp()
         UNION SELECT user_id FROM cloud_v2_connected_macs WHERE workspace_id=w.id AND disconnected_at IS NULL
         UNION SELECT user_id FROM cloud_v2_chat_sender_bindings WHERE workspace_id=w.id AND NOT retired
@@ -116,7 +137,8 @@ export class CloudExecutionMaintenance {
       state=CASE WHEN p.state IN ('dispatching','accepted') AND EXISTS(SELECT 1 FROM cloud_v2_execution_contexts c
         WHERE c.id=p.execution_context_id AND c.reason IN ('worker_changed','expired')) THEN 'interrupted' ELSE 'cancelled' END,
       terminal_at=coalesce(terminal_at,clock_timestamp()),updated_at=clock_timestamp(),payload=NULL,payload_bytes=0
-      FROM cloud_v2_workspaces w WHERE w.id=$1 AND p.workspace_id=w.id AND p.state IN ('queued','inboxed','dispatching','accepted') AND (
+      FROM cloud_v2_workspaces w WHERE w.id=$1 AND p.workspace_id=w.id AND p.state IN ('queued','inboxed','dispatching','accepted')
+        AND NOT ${STARTED("p")} AND (
         NOT ${CLOUD_V2_LIVE_ACCESS} OR NOT EXISTS(SELECT 1 FROM organization_members m JOIN users u ON u.id=m.user_id
           WHERE m.org_id=w.org_id AND m.user_id=p.creator_user_id AND u.auth_status='active' AND u.deleted_at IS NULL
             AND NOT ${memberOnHoldSql("m.org_id","m.user_id")})
