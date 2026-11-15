@@ -216,9 +216,11 @@ export class CloudWorker {
       ended: (contextId, listener) => contexts.onEnd(contextId, listener), release: contextId => contexts.release(contextId), live: contextId => contexts.live(contextId) });
   }
 
-  private contextGateway(context: { contextId: string; servers: readonly RuntimeMcpServer[] }, workspaceRoot: string, agents: Agents): Promise<McpGateway> {
+  private async contextGateway(context: { contextId: string; servers: readonly RuntimeMcpServer[] }, workspaceRoot: string, agents: Agents): Promise<McpGateway> {
     const { contextId } = context;
-    if (!this.contexts?.admits(contextId)) return Promise.reject(new Error("This context has ended."));
+    // R2: the first turn after a quiet spell asks for fresh authority at once rather than failing its driver.
+    if (!this.contexts || !await this.contexts.admitted(contextId))
+      throw new ClosedFailure("context_not_admitted", this.contexts?.live(contextId) ? "authority_stale" : "context_ended");
     let gateway = this.contextMcp.get(contextId);
     if (!gateway) {
       const transport = this.options.transport;
@@ -284,7 +286,9 @@ export class CloudWorker {
   /** An activated workspace never gives a credential outside a live context: no Creator fallback. */
   private githubToken(purpose: "git" | "gh", failed: string | undefined, contextId: string | undefined): Promise<GithubToken> {
     if (!this.acting) return this.githubCredentials.get(purpose, failed);
-    if (!contextId || !this.contexts?.admits(contextId)) return Promise.reject(githubAuthenticationError("connection-changed"));
+    if (!contextId || !this.contexts) return Promise.reject(githubAuthenticationError("connection-changed"));
+    if (!this.contexts.admits(contextId)) return this.contexts.admitted(contextId).then(admitted => admitted
+      ? this.githubToken(purpose, failed, contextId) : Promise.reject(githubAuthenticationError("connection-changed")));
     let flight = this.contextGithub.get(contextId);
     if (!flight) {
       const tokens = new GithubTokens((frame, timeoutMs) => this.send(frame, timeoutMs), { contextId });
