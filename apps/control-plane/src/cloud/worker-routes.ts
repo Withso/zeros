@@ -376,7 +376,7 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
       sandboxId: ready.boatSandboxId, accessEpoch: workspace.accessEpoch }).catch(() => {});
     return c.json({ config });
   });
-  app.post(`${CLOUD_V2_WORKER_API}/authority`, async c => {
+  app.post(`${CLOUD_V2_WORKER_API}/execution-leases/authority`, async c => {
     if (!workerFeatures(c).has(MESSAGE_AUTHORITY_FEATURE) || !deps.authority) throw new HttpError(404, "not_found", "Authority freshness is unavailable.");
     const token = bearer(c), bootId = c.req.header("x-zeros-worker-boot");
     if (!bootId || !z.string().uuid().safeParse(bootId).success) throw unauthorized();

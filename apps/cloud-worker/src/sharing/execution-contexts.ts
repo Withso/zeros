@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { tagged } from "./closed-failure";
 import type { z } from "zod";
-import { type CloudV2BootCleanRefusal, CloudV2BootCleanReplySchema, CloudV2BootCleanRequestSchema, CloudV2BootstrapLeaseSchema, CloudV2ClientLeaseSchema, CloudV2RenewReplySchema, CloudV2RetiredReplySchema, CloudV2TerminalLeaseSchema,
+import { CloudV2AuthorityReplySchema, type CloudV2BootCleanRefusal, CloudV2BootCleanReplySchema, CloudV2BootCleanRequestSchema, CloudV2BootstrapLeaseSchema, CloudV2ClientLeaseSchema, CloudV2RenewReplySchema, CloudV2RetiredReplySchema, CloudV2TerminalLeaseSchema,
   CloudV2TurnLeaseSchema, type CloudV2BootstrapLease, type CloudV2ClientLease, type CloudV2ContextReason, type CloudV2TerminalLease,
   type CloudV2TurnLease } from "@zeros/protocol/cloud-v2-relay";
 
@@ -20,6 +20,10 @@ interface Entry { lease: Lease; expiresAt: number; ended?: CloudV2ContextReason;
 
 /** Renewal cadence (team-sharing-2-wire.md Slice B shapes 6): one batch every 10 s while any context lives. */
 export const CONTEXT_RENEW_MS = 10_000;
+/** R2 (message-authority-v1): one pull replaces every renewal; the reply comes from the control plane's memory. */
+export const AUTHORITY_PULL_MS = 10_000;
+/** R2: no new work (new GitHub credentials, MCP connections) after this long without fresh authority (owner decision). */
+export const AUTHORITY_SILENCE_CUTOFF_MS = 45_000;
 const MAX_BATCH = 128;
 
 /** Team sharing slice B: the execution contexts this worker holds, in memory
@@ -31,7 +35,23 @@ export class ExecutionContexts {
   private readonly entries = new Map<string, Entry>();
   private timer?: ReturnType<typeof setInterval>;
   private gate?: Promise<void>;
+  private messageAuthority = false;
+  private acked = 0n;
+  private freshAt?: number;
   constructor(private readonly deps: ContextsDeps) {}
+
+  /** Fixed for this boot once its hello configuration selects it; a later configuration cannot turn it off. */
+  setMessageAuthority(on: boolean): void {
+    if (this.messageAuthority || !on) return;
+    this.messageAuthority = true;
+    if (this.timer) { clearInterval(this.timer); this.timer = undefined; }
+    this.arm();
+  }
+  /** A live context that may start new work: under R2 only while authority freshness is recent. */
+  admits(contextId: string): boolean {
+    if (!this.live(contextId)) return false;
+    return !this.messageAuthority || (this.freshAt !== undefined && this.now() - this.freshAt <= AUTHORITY_SILENCE_CUTOFF_MS);
+  }
 
   /** §7a: this boot's clean attestation, once. Every lease waits for it; unproven cleanup (or a refused receipt) grants none. */
   clean(attest: () => Promise<number | { processes: number; legacyMaterial: "none" | "removed" | "refused"; refusals?: readonly CloudV2BootCleanRefusal[] }>): Promise<void> {
@@ -169,6 +189,27 @@ export class ExecutionContexts {
     }
   }
 
+  /** R2: contexts the control plane ended stop now; a fresh reply moves every live deadline to its horizon. The
+   * acknowledgement covers a sequence only after every live context was listed and its ended ones were stopped. */
+  async pull(): Promise<void> {
+    if (this.gate && !(await this.gate.then(() => true, () => false))) return;
+    const now = this.now();
+    for (const [contextId, entry] of this.entries) if (!entry.ended && now >= entry.expiresAt) this.end(contextId, "expired");
+    const live = [...this.entries].filter(([, entry]) => !entry.ended).map(([contextId]) => contextId);
+    const contextIds = live.slice(0, MAX_BATCH);
+    let reply: z.infer<typeof CloudV2AuthorityReplySchema>;
+    try { reply = CloudV2AuthorityReplySchema.parse(await this.deps.post("execution-leases/authority", { acked: this.acked.toString(), contextIds })); }
+    catch { return; }   // unreachable: deadlines stay as they are and new work stops after the silence cutoff
+    for (const ended of reply.ended) if (contextIds.includes(ended.contextId)) this.end(ended.contextId, ended.reason);
+    const sequence = BigInt(reply.sequence);
+    if (contextIds.length === live.length && sequence > this.acked) this.acked = sequence;
+    if (!reply.fresh) return;
+    const at = this.now();
+    this.freshAt = at - reply.ageMs;
+    const until = at + reply.untilMs;
+    for (const [contextId, entry] of this.entries) if (!entry.ended && until > entry.expiresAt) this.expire(contextId, entry, until);
+  }
+
   /** After the owner has killed its processes and removed its handles: the retirement receipt (same id on retry). */
   async retire(contextId: string, reason: RetirementReason, processes: number): Promise<void> {
     const entry = this.entries.get(contextId);
@@ -198,7 +239,11 @@ export class ExecutionContexts {
   /** Renewal runs only while contexts exist. */
   private arm(): void {
     const any = [...this.entries.values()].some(entry => !entry.ended);
-    if (any && !this.timer) { this.timer = setInterval(() => { void this.renew(); }, this.deps.renewMs ?? CONTEXT_RENEW_MS); this.timer.unref?.(); }
+    if (any && !this.timer) {
+      this.timer = this.messageAuthority ? setInterval(() => { void this.pull(); }, AUTHORITY_PULL_MS)
+        : setInterval(() => { void this.renew(); }, this.deps.renewMs ?? CONTEXT_RENEW_MS);
+      this.timer.unref?.();
+    }
     else if (!any && this.timer) { clearInterval(this.timer); this.timer = undefined; }
   }
   dispose(): void { clearInterval(this.timer); this.timer = undefined; for (const contextId of [...this.entries.keys()]) this.end(contextId, "worker_changed"); }
