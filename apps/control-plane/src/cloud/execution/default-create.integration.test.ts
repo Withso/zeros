@@ -227,6 +227,14 @@ suite("new organization workspaces start with personal execution", () => {
     expect((await pool.query("SELECT count(*)::int n FROM cloud_v2_execution_contexts WHERE workspace_id=$1", [id])).rows[0].n).toBe(0);
   });
 
+  it("clears an earlier boot's failure when a clean boot makes the workspace running", async () => {
+    const { id } = await fresh(), w = await worker(id);
+    await pool.query("UPDATE cloud_v2_workspaces SET error_code='execution_not_retired' WHERE id=$1", [id]);
+    expect((await w.hello()).status).toBe(200);
+    expect((await w.call("execution-leases/boot-clean", { retirementId: randomUUID(), processes: 0, legacyMaterial: "none" })).status).toBe(200);
+    expect((await pool.query("SELECT state,error_code FROM cloud_v2_workspaces WHERE id=$1", [id])).rows[0]).toEqual({ state: "running", error_code: null });
+  });
+
   it("retains the first failure, requests Stop and admits a retry only with a new boot", async () => {
     const { id, fixture } = await fresh(), first = await worker(id);
     const hello = await first.hello(); expect(hello.status).toBe(200);
