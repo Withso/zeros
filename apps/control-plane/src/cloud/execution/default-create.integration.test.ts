@@ -275,6 +275,27 @@ suite("new organization workspaces start with personal execution", () => {
     expect({ status: unknown.status, body: await unknown.json() }).toEqual({ status: 200, body: { sequence: "0", fresh: false, ageMs: 0, untilMs: 0, ended: [] } });
   });
 
+  it("re-admits an R2 boot's people at the next clock boundary and never extends a context past it", async () => {
+    const { id } = await fresh(), w = await worker(id);
+    const features = `${f!.features},sync-v1,sync-context-v1,message-authority-v1`;
+    expect((await w.hello(features)).status).toBe(200);
+    expect((await w.call("execution-leases/boot-clean", { retirementId: randomUUID(), processes: 0, legacyMaterial: "none" }, features)).status).toBe(200);
+    const maintenance = f!.cp.execution.maintenance;
+    await maintenance.workspace(id);
+    const recheck = async () => (await withSystemTx(pool, tx => tx.query("SELECT recheck_at FROM cloud_v2_authority_heads WHERE workspace_id=$1", [id]))).rows[0]?.recheck_at as Date;
+    const first = await recheck();
+    expect(first.getTime() - Date.now()).toBeGreaterThan(9 * 60_000);
+    expect(first.getTime() - Date.now()).toBeLessThanOrEqual(10 * 60_000);
+    await f!.cp.authorityBarrier.tick();
+    const latest = (await pool.query("SELECT max(expires_at) AS at FROM cloud_v2_execution_contexts WHERE workspace_id=$1 AND state='active'", [id])).rows[0].at as Date;
+    expect(latest.getTime()).toBeLessThanOrEqual(first.getTime());
+    await withSystemTx(pool, tx => tx.query("UPDATE cloud_v2_authority_heads SET recheck_at=clock_timestamp()-interval '1 second' WHERE workspace_id=$1", [id]));
+    expect(await maintenance.due()).toContain(id);
+    await maintenance.workspace(id);
+    expect((await recheck()).getTime()).toBeGreaterThan(Date.now() + 9 * 60_000);
+    expect(await maintenance.due()).not.toContain(id);
+  });
+
   it("leaves the authority head alone when the worker retires its own contexts", async () => {
     const { id } = await fresh(), w = await worker(id);
     expect((await w.hello()).status).toBe(200);
