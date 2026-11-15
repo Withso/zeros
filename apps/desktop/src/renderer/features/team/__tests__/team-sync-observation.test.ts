@@ -14,6 +14,7 @@ const state = vi.hoisted(() => ({
   settings: vi.fn(),
   courier: vi.fn(),
   accept: vi.fn(),
+  recent: vi.fn(),
   repair: vi.fn(),
 }));
 vi.mock("react", async (importOriginal) => ({
@@ -48,6 +49,7 @@ vi.mock("../active-team", () => ({
 vi.mock("../team-store", () => ({
   getOrganizationStoreGeneration: () => state.generation,
   acceptOrganizationSnapshot: state.accept,
+  recentOrganizationSnapshot: state.recent,
 }));
 vi.mock("../organization-membership-history", () => ({
   reconcilePersonalWorkspaceOwnership: async () => {},
@@ -122,6 +124,7 @@ beforeEach(() => {
     }));
   state.courier.mockReset().mockResolvedValue(undefined);
   state.accept.mockReset().mockReturnValue(true);
+  state.recent.mockReset().mockResolvedValue(undefined);
   state.repair.mockReset().mockResolvedValue(undefined);
   windowEvents = new EventTarget();
   documentEvents = new EventTarget();
@@ -142,6 +145,19 @@ afterEach(() => {
 });
 
 describe("organization engine sync observation", () => {
+  it("reuses the store's just-confirmed account snapshot instead of reading /v1/me again", async () => {
+    state.recent.mockResolvedValue(snapshot());
+    mount();
+    await flush();
+    expect(state.recent).toHaveBeenCalledWith(0);
+    expect(state.me).not.toHaveBeenCalled();
+    expect(state.accept).toHaveBeenCalledWith(snapshot(), 0);
+    expect(settingsWrites()).toEqual([expect.objectContaining({ teamId: "org-a" })]);
+    state.recent.mockResolvedValue(undefined);
+    await vi.advanceTimersByTimeAsync(INTERVAL);
+    expect(state.me).toHaveBeenCalledOnce();
+  });
+
   it("clears unknown local context while initially hidden without starting CP reads or a timer", async () => {
     hidden = true;
     mount();

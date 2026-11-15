@@ -35,6 +35,24 @@ describe("cloud prompt coordinator", () => {
     expect(apis.every(value => vi.mocked(value.list).mock.calls.length === 1)).toBe(true);
     f.coordinator.stop();
   });
+  it("folds refresh requests that arrive within a second of a status read into one follow-up read", async () => {
+    vi.useFakeTimers();
+    const f = fixture(), value = api(), gate = defer<typeof emptyPage>();
+    vi.mocked(value.list).mockImplementationOnce(() => gate.promise);
+    const chat = f.coordinator.channel(owner, value, () => true, vi.fn());
+    f.coordinator.wake(chat, true); await vi.advanceTimersByTimeAsync(0);
+    expect(value.list).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(200); f.coordinator.wake(chat, true);
+    gate.resolve(emptyPage); await vi.advanceTimersByTimeAsync(100);
+    f.coordinator.wake(chat, true); await vi.advanceTimersByTimeAsync(100);
+    expect(value.list).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(value.list).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(5_000);
+    f.coordinator.wake(chat, true); await vi.advanceTimersByTimeAsync(0);
+    expect(value.list).toHaveBeenCalledTimes(3);
+    f.coordinator.stop();
+  });
   it("does not poll idle chats, and fences a pending response after owner erasure", async () => {
     vi.useFakeTimers();
     const f = fixture(), value = api(), changed = vi.fn(), chat = f.coordinator.channel(owner, value, () => true, changed);

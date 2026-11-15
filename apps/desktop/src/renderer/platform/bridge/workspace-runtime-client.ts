@@ -29,6 +29,9 @@ const MAX_RETIRED_SNAPSHOTS = 64;
 /** A peer open's history warm reuses a confirmed, un-invalidated chats.list this long (the catalog poll interval).
  * The lifecycle poll (warmHistoryWorkspace) keeps its own cadence. */
 export const WARM_LIST_REUSE_MS = 60_000;
+/** Launch confirms each list once; the selected workspace's warm on the catalog's
+ * arrival a second later must not read it again. A later poll still does. */
+const PASSIVE_WARM_REUSE_MS = 5_000;
 /** Renderer-only refresh ownership; never sent to an engine. */
 export type ChatSnapshotRefresh = "all" | "local" | "retained" | readonly string[];
 type RequestOptions = Exclude<
@@ -481,7 +484,7 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
   async warmHistoryWorkspace(target: CloudWorkspaceTarget, options?: { intent: boolean }): Promise<void> {
     if (!this.routing.readHistory) return;
     if (options?.intent) this.rememberHistoryIntent(target);
-    await this.warmHistorySnapshot(target);
+    await this.warmHistorySnapshot(target, PASSIVE_WARM_REUSE_MS);
   }
 
   /** Team sharing: a reader's events stream said the workspace changed. Drop

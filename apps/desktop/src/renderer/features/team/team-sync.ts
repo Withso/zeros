@@ -43,6 +43,7 @@ import { desktopOrganizationChoices } from "./personal-organization";
 import {
   acceptOrganizationSnapshot,
   getOrganizationStoreGeneration,
+  recentOrganizationSnapshot,
 } from "./team-store";
 
 const RESYNC_INTERVAL_MS = 15 * 60_000;
@@ -200,7 +201,7 @@ export function useTeamEngineSync(): void {
       try {
         await clearEngine(getActiveTeamId(), storeGeneration);
         if (!current()) return;
-        const me = await controlPlane.me();
+        const me = (await recentOrganizationSnapshot(storeGeneration)) ?? await controlPlane.me();
         if (!current()) return;
         let accepted = false;
         publishingOrganizationSnapshot = true;
