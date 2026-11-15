@@ -269,6 +269,8 @@ export class SessionStore {
   }
 
   history(chatId: string): readonly CloudV2MessageRow[] { return this.sessions.get(chatId)?.rows ?? []; }
+  /** Whether a turn is running in this chat (R3: the history mirror keeps holding its streaming row only then). */
+  running(chatId: string): boolean { return !!this.sessions.get(chatId)?.inbox.some(entry => entry.state === "running"); }
   historyRevision(chatId: string): number { return this.sessions.get(chatId)?.historyRevision ?? 0; }
   historyState(chatId: string): CloudV2HistoryState {
     const value = this.sessions.get(chatId);

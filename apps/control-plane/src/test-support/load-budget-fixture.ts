@@ -51,7 +51,8 @@ type PromptClient = { enqueue(body: unknown): Promise<unknown>; list(after: stri
 type StreamStore = { upsert(chat: unknown): Promise<void>; enqueue(chatId: string, input: unknown): Promise<unknown>;
   claim(chatId: string): Promise<unknown>; importMessages(chatId: string, rows: CloudV2MessageRow[]): Promise<unknown>;
   fold(chatId: string, update: unknown): Promise<unknown>; finish(chatId: string, requestId: string, result: unknown): Promise<unknown>;
-  delete(chatId: string): Promise<void>; history(chatId: string): readonly CloudV2MessageRow[]; flush(): Promise<void> };
+  delete(chatId: string): Promise<void>; history(chatId: string): readonly CloudV2MessageRow[]; flush(): Promise<void>;
+  update(chatId: string, edit: (draft: Record<string, unknown>) => void): Promise<void> };
 type StreamMirror = { connect(): void; disconnect(): void; flush(): Promise<boolean>; dispose(): Promise<void> };
 export const RUNNING_TURN = { milliseconds: 60_000, deltas: 300, deltaCharacters: 100 } as const;
 export const WAKE_HISTORY = { chats: 12, rowsPerChat: 4, tombstones: 7 } as const;
@@ -343,6 +344,9 @@ export async function loadBudgetFixture(pool: pg.Pool, probe: LoadBudgetProbe) {
               }
               await store.fold(chatId, { sessionId: "load-execution", update: { sessionUpdate: "agent_message_chunk", messageId,
                 content: { type: "text", text: "x".repeat(RUNNING_TURN.deltaCharacters) } } });
+              // A delivered turn's outbox accept and report are store edits early in the stream (R3 must keep holding after them).
+              // Like those, this edit changes the chat's saved state but neither its row nor its messages.
+              if (index === 2 || index === 6) await store.update(chatId, draft => { draft.loadStreamMarker = index; });
             });
           }
           await pace(RUNNING_TURN.milliseconds);

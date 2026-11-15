@@ -11,7 +11,9 @@ afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await c
 
 type Faults = { cancelAck?: "missing" | "request" | "chat" | "state"; completedBeforeStop?: boolean; older?: "anchor" | "wrong"; answer?: string;
   canaryStatus?: "missing" | "wrong" | "inaccessible" | "not-deleted"; wakeRuntime?: false; lostCreate?: true;
-  outbox?: true; outboxStop?: "ignored" | "settled" };
+  outbox?: true; outboxStop?: "ignored" | "settled";
+  /** The stopped chat's last row settles after the probe's snapshot (seen on Alpha). */
+  stopRowSettlesLater?: true };
 async function fixture(failAgent?: string, protocolVersion = 21, faults: Faults = {}) {
   const id = randomUUID(), organizationId = randomUUID();
   const repository = "example/project", root = `/home/user/${repository}`, branch = "zeros/gate0";
@@ -19,7 +21,7 @@ async function fixture(failAgent?: string, protocolVersion = 21, faults: Faults 
   const frames: any[] = [], chats = new Map<string, any[]>(), files = new Map<string, string>();
   const sessions = new Map<string, string>(), tickets = new Set<string>(), activePrompts = new Map<string, any>();
   const logs: string[] = [];
-  let state = "absent", name = "", staged = false, connections = 0;
+  let state = "absent", name = "", staged = false, connections = 0, stopReads = 0;
   const canary = { token: "synthetic-runtime-grant", claims: { version: 1 as const, iss: "zeros-runtime-release" as const, aud: "zeros-cloud-runtime-canary" as const,
     channel: "alpha" as const, jti: randomUUID(), iat: Math.floor(Date.now() / 1000), exp: Math.floor(Date.now() / 1000) + 900,
     runId: "456", runAttempt: 1, creatorUserId: randomUUID(), organizationId, repositoryId: "42", createKey: randomUUID(),
@@ -135,7 +137,12 @@ async function fixture(failAgent?: string, protocolVersion = 21, faults: Faults 
             case "git.unstage": staged = false; return { ok: true };
             case "git.diff": return { patch: `+${[...files.values()].join("")}`, hunks: [{}] };
             case "chats.upsert": chats.set(p.chat.id, []); return {};
-            case "messages.window": return { messages: chats.get(p.chatId) ?? [] };
+            case "messages.window": {
+              const rows = chats.get(p.chatId) ?? [];
+              if (faults.stopRowSettlesLater && p.chatId.startsWith("gate0-stop-") && ++stopReads === 2 && rows[1])
+                rows[1] = { ...rows[1], payload: JSON.stringify({ role: "agent", text: "Stopped (settled after the snapshot)" }) };
+              return { messages: rows };
+            }
           }
           throw new Error(`Unexpected fake op ${frame.op}`);
         })();
@@ -206,6 +213,12 @@ async function fixture(failAgent?: string, protocolVersion = 21, faults: Faults 
 }
 
 describe("cloud v2 gate0 through a fake HTTP control plane and relay", () => {
+  it("waits for the mirror to match the VM's current rows when a stopped turn's last row settles after the snapshot", async () => {
+    const f = await fixture(undefined, 21, { stopRowSettlesLater: true });
+    const result = await runCloudV2Gate0({ ...f.options, timeoutMs: 5_000 });
+    expect(result.deleted).toBe(true);
+  });
+
   it("uses one grant-bound create, proves the candidate on create and wake, and requires bound deletion", async () => {
     const f = await fixture();
     const result = await runCloudV2Gate0({ ...f.options, runtimeSha: f.canary.claims.runtimeSha256, canary: f.canary });
