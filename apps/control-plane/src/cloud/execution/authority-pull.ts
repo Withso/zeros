@@ -26,7 +26,7 @@ export class AuthorityPull {
     const result = await withSystemTx(this.pool, tx => tx.query(`UPDATE cloud_v2_execution_boots b SET authority_acked_sequence=$3::bigint
       FROM cloud_v2_workspaces w WHERE w.id=b.workspace_id AND w.worker_token_hash=$1 AND w.worker_boot_id=$2::uuid AND b.boot_id=$2::uuid
         AND b.authority_mode='message-authority-v1' AND b.replaced_by IS NULL AND $3::bigint>b.authority_acked_sequence
-        AND $3::bigint<=coalesce((SELECT h.sequence FROM cloud_v2_authority_heads h WHERE h.workspace_id=b.workspace_id),0)`,
+        AND $3::bigint<=coalesce((SELECT max(e.id) FROM cloud_v2_authority_events e WHERE e.workspace_id=b.workspace_id),0)`,
     [hashCloudV2Token(token), bootId, acked.toString()]));
     return result.rowCount === 1;
   }

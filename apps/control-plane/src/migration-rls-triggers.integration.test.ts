@@ -21,8 +21,11 @@ const url = process.env.TEST_DATABASE_URL, d = url ? describe : describe.skip;
 /** Every non-internal trigger on a table with a policy that admits a
  * non-system write, as of this suite's cases. */
 const COVERED_TRIGGERS: Record<string, readonly string[]> = {
-  organizations: ["organizations_personal_classification_immutable", "local_command_setting_changed", "execution_organization_update", "execution_organization_personal"],
-  organization_members: ["a1_organization_seat_refresh", "execution_member_delete", "execution_member_update", "execution_member_insert", "cloud_creator_member_loss"],
+  // authority_recheck_*: definer functions that only mark running R2 workspaces for re-evaluation (0253).
+  organizations: ["organizations_personal_classification_immutable", "local_command_setting_changed", "execution_organization_update", "execution_organization_personal",
+    "authority_recheck_organization"],
+  organization_members: ["a1_organization_seat_refresh", "execution_member_delete", "execution_member_update", "execution_member_insert", "cloud_creator_member_loss",
+    "authority_recheck_seats"],
   users: ["cloud_actor_staff_revision", "a0_staff_pro_benefit_sync", "execution_user_fence", "cloud_creator_account_loss", "cloud_creator_account_erasure"],
 };
 

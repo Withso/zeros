@@ -232,7 +232,7 @@ suite("new organization workspaces start with personal execution", () => {
     const features = `${f!.features},sync-v1,sync-context-v1,message-authority-v1`;
     expect((await w.hello(features)).status).toBe(200);
     expect((await w.call("execution-leases/boot-clean", { retirementId: randomUUID(), processes: 0, legacyMaterial: "none" }, features)).status).toBe(200);
-    const head = async () => (await withSystemTx(pool, tx => tx.query("SELECT sequence::int,recheck_at FROM cloud_v2_authority_heads WHERE workspace_id=$1", [id]))).rows[0];
+    const head = async () => (await withSystemTx(pool, tx => tx.query("SELECT count(*)::int AS sequence FROM cloud_v2_authority_events WHERE workspace_id=$1", [id]))).rows[0];
     const contexts = (await pool.query("SELECT id FROM cloud_v2_execution_contexts WHERE workspace_id=$1 AND state='active' ORDER BY id", [id])).rows;
     expect(contexts.length).toBeGreaterThan(0);
     expect((await head())?.sequence ?? 0).toBe(0);
@@ -242,7 +242,8 @@ suite("new organization workspaces start with personal execution", () => {
     await withSystemTx(pool, tx => tx.query("INSERT INTO cloud_v2_execution_invalidations(workspace_id,user_id) VALUES($1,NULL)", [id]));
     expect((await head()).sequence).toBe(revoked.rowCount! + 1);
     await withUserTx(pool, f!.creator.id, async tx => {
-      expect((await tx.query("SELECT * FROM cloud_v2_authority_heads")).rows).toEqual([]);
+      expect((await tx.query("SELECT * FROM cloud_v2_authority_events")).rows).toEqual([]);
+      expect((await tx.query("SELECT * FROM cloud_v2_authority_rechecks")).rows).toEqual([]);
     });
   });
 
@@ -283,7 +284,7 @@ suite("new organization workspaces start with personal execution", () => {
     expect((await w.call("execution-leases/boot-clean", { retirementId: randomUUID(), processes: 0, legacyMaterial: "none" }, features)).status).toBe(200);
     const maintenance = f!.cp.execution.maintenance;
     await maintenance.workspace(id);
-    const recheck = async () => (await withSystemTx(pool, tx => tx.query("SELECT recheck_at FROM cloud_v2_authority_heads WHERE workspace_id=$1", [id]))).rows[0]?.recheck_at as Date;
+    const recheck = async () => (await withSystemTx(pool, tx => tx.query("SELECT min(at) AS recheck_at FROM cloud_v2_authority_rechecks WHERE workspace_id=$1", [id]))).rows[0]?.recheck_at as Date;
     const first = await recheck();
     expect(first.getTime() - Date.now()).toBeGreaterThan(9 * 60_000);
     expect(first.getTime() - Date.now()).toBeLessThanOrEqual(10 * 60_000);
@@ -291,7 +292,7 @@ suite("new organization workspaces start with personal execution", () => {
     const latest = (await pool.query("SELECT max(expires_at) AS at FROM cloud_v2_execution_contexts WHERE workspace_id=$1 AND state='active'", [id])).rows[0].at as Date;
     expect(latest.getTime()).toBeLessThanOrEqual(first.getTime() + 60_000);
     expect(latest.getTime()).toBeGreaterThan(first.getTime());
-    await withSystemTx(pool, tx => tx.query("UPDATE cloud_v2_authority_heads SET recheck_at=clock_timestamp()-interval '1 second' WHERE workspace_id=$1", [id]));
+    await withSystemTx(pool, tx => tx.query("INSERT INTO cloud_v2_authority_rechecks(workspace_id,at) VALUES($1,clock_timestamp()-interval '1 second')", [id]));
     expect(await maintenance.due()).toContain(id);
     await maintenance.workspace(id);
     expect((await recheck()).getTime()).toBeGreaterThan(Date.now() + 9 * 60_000);
@@ -303,7 +304,7 @@ suite("new organization workspaces start with personal execution", () => {
     const features = `${f!.features},sync-v1,sync-context-v1,message-authority-v1`;
     expect((await w.hello(features)).status).toBe(200);
     expect((await w.call("execution-leases/boot-clean", { retirementId: randomUUID(), processes: 0, legacyMaterial: "none" }, features)).status).toBe(200);
-    const sequence = async () => (await withSystemTx(pool, tx => tx.query("SELECT sequence::int FROM cloud_v2_authority_heads WHERE workspace_id=$1", [id]))).rows[0]?.sequence ?? 0;
+    const sequence = async () => (await withSystemTx(pool, tx => tx.query("SELECT count(*)::int AS n FROM cloud_v2_authority_events WHERE workspace_id=$1", [id]))).rows[0].n;
     const live = (await pool.query("SELECT id FROM cloud_v2_execution_contexts WHERE workspace_id=$1 AND state='active'", [id])).rows.map(row => row.id as string);
     expect(live.length).toBeGreaterThan(0);
     for (const [index, contextId] of live.entries())
@@ -314,13 +315,14 @@ suite("new organization workspaces start with personal execution", () => {
     expect(await sequence()).toBe(0);
   });
 
-  it("marks running active workspaces for re-evaluation when an entitlement changes outside a system transaction", async () => {
+  it("marks running R2 workspaces for re-evaluation when an entitlement changes outside a system transaction", async () => {
     const { id } = await fresh(), w = await worker(id);
-    expect((await w.hello()).status).toBe(200);
-    expect((await w.call("execution-leases/boot-clean", { retirementId: randomUUID(), processes: 0, legacyMaterial: "none" })).status).toBe(200);
+    const features = `${f!.features},sync-v1,sync-context-v1,message-authority-v1`;
+    expect((await w.hello(features)).status).toBe(200);
+    expect((await w.call("execution-leases/boot-clean", { retirementId: randomUUID(), processes: 0, legacyMaterial: "none" }, features)).status).toBe(200);
     await pool.query("INSERT INTO staff_pro_benefits(user_id) VALUES($1) ON CONFLICT (user_id) DO UPDATE SET revision=staff_pro_benefits.revision+1", [f!.creator.id]);
-    const row = (await withSystemTx(pool, tx => tx.query("SELECT recheck_at FROM cloud_v2_authority_heads WHERE workspace_id=$1", [id]))).rows[0];
-    expect(row?.recheck_at).toBeInstanceOf(Date);
+    const due = (await withSystemTx(pool, tx => tx.query("SELECT count(*)::int AS n FROM cloud_v2_authority_rechecks WHERE workspace_id=$1 AND at<=clock_timestamp()", [id]))).rows[0].n;
+    expect(due).toBeGreaterThan(0);
   });
 
   it("clears an earlier boot's failure when a clean boot makes the workspace running", async () => {
