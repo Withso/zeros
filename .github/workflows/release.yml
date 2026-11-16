@@ -7,11 +7,17 @@ name: Release
 # Pipeline: exact-source CI and BUILD + sign run in parallel. After CI, hosted
 # promotion runs while the signed artifact is submitted, notarized and verified.
 # Only the final PUBLISH job can write a feed, after all lanes succeed.
-# That release is BOTH the durable per-version
-# archive and the serving layer: the auto-updater polls
+#
+# This workflow publishes a RELEASE CANDIDATE: the rolling `rc` prerelease, with
+# a receipt of its exact files (scripts/release/candidate.ts). Hosted services and
+# the cloud runtime already serve Production at that point; only staff Production
+# apps that opted in update to the candidate. release-promote.yml then publishes
+# the same files as vX.Y.Z Latest:
+#   gh workflow run release-promote.yml --ref release/X.Y.Z
+# GitHub Releases is the serving layer: the ordinary updater polls
 # /releases/latest/download/latest-mac.yml, which follows whatever is marked
-# Latest (`--latest` below). No separate CDN and no storage secrets — the repo
-# is public, so anonymous clients can read release assets directly.
+# Latest. No separate CDN and no storage secrets — the repo is public, so
+# anonymous clients can read release assets directly.
 #
 # WHY the build and the notarize-wait are SEPARATE jobs: Apple's notary service
 # periodically backs up for tens of minutes to several HOURS (see Apple DTS
@@ -746,7 +752,29 @@ jobs:
         with:
           name: zeros-macos-arm64-release
           path: release
-      - name: Publish GitHub release
+      - name: Record release candidate
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          # This run publishes a release CANDIDATE: the rolling `rc` prerelease that a
+          # staff Production app follows (Settings → Internal → Release candidates).
+          # release-promote.yml later publishes these exact files as vX.Y.Z Latest,
+          # without rebuilding, after the receipt still matches.
+          # rc-mac.yml is a byte copy of latest-mac.yml: the same versioned zip, read
+          # through the `rc` channel name the opted-in updater asks for.
+          cp "release/latest-mac.yml" "release/rc-mac.yml"
+          pnpm exec tsx scripts/release/candidate-cli.ts --write
+      - name: Save release candidate receipt
+        # Release assets are editable by any contents:write token; this run's own
+        # artifact is not. Promotion requires the rc receipt to equal it.
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release/rc-candidate.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Publish release candidate
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_TOKEN: ${{ github.token }}
@@ -755,82 +783,93 @@ jobs:
         run: |
           set -euo pipefail
           pnpm exec tsx scripts/release/publication-cli.ts
-          TAG="v${VERSION}"
-          pnpm exec tsx scripts/release/release-ledger-cli.ts --build
 
-          # Auto-generated, PR-based notes grouped per .github/release.yml.
-          GENERATED=$(gh api "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
-            -f tag_name="$TAG" \
-            -f target_commitish="$GITHUB_SHA" \
-            --jq .body 2>/dev/null || true)
-
-          # Strip @-handle credits before the body is published. The
-          # generate-notes API emits one "* <PR title> by @<handle> in <url>" line
-          # per PR plus a "## New Contributors" block. This repo does not
-          # currently review outside contributions, so every merged
-          # PR is a maintainer or a dependency bot: the handle adds no information
-          # the PR link doesn't already carry, and baking it into a permanent,
-          # world-readable release body turns it into a standing ping target on
-          # every future release. The PR title, number and link all survive.
-          if [ -n "$GENERATED" ]; then
-            GENERATED=$(printf '%s\n' "$GENERATED" \
-              | sed -E 's/ by @[A-Za-z0-9][A-Za-z0-9-]*( in )/\1/g' \
-              | sed -E '/^\*? ?@[A-Za-z0-9][A-Za-z0-9-]* made their first contribution/d' \
-              | sed -E '/^#+ New Contributors[[:space:]]*$/d')
+          TAG="rc"
+          # Never move rc back: a rerun of an older run's publish job must not replace
+          # a newer candidate (sort -V puts the newer version last).
+          CURRENT=$(gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern rc-candidate.json --output - 2>/dev/null \
+            | jq -r '.releaseVersion // empty' 2>/dev/null || true)
+          if [ -n "$CURRENT" ] && [ "$CURRENT" != "$VERSION" ] && \
+            [ "$(printf '%s\n%s\n' "$CURRENT" "$VERSION" | sort -V | tail -n 1)" = "$CURRENT" ]; then
+            echo "::error::The rc release already carries newer candidate $CURRENT; refusing to replace it with $VERSION."
+            exit 1
           fi
+          TITLE="Zeros v${VERSION} (release candidate)"
+          NOTES=$(
+            sed -e "s|__VERSION__|${VERSION}|g" -e "s|__SHA__|${GITHUB_SHA}|g" <<'EOF'
+          Release candidate **v__VERSION__** at `__SHA__`, notarized and identical to
+          what `release-promote.yml` will publish as the Latest release.
 
-          # Install header. Stable is always notarized (see "Require signing
-          # credentials"), so there is no quarantine step to explain — Gatekeeper
-          # launches it clean. Quoted heredoc keeps markdown literal; VERSION after.
-          INSTALL=$(cat <<'EOF'
-          ## Install
-
-          1. Download `Zeros-__V__-arm64.dmg` below.
-          2. Open it and drag **Zeros.app** into `/Applications`.
-          3. Launch from Spotlight / Finder.
-
-          Installed apps update in place via the built-in auto-updater.
+          Its backend, database migrations and cloud runtime already serve Production.
+          Only Production apps with **Settings → Internal → Release candidates** on
+          update to it. Everyone else gets it when it is promoted.
           EOF
           )
-          INSTALL="${INSTALL//__V__/$VERSION}"
-
-          # These are the per-release, auto-generated technical notes. The
-          # curated, milestone-only story lives on the public changelog — link to
-          # it so readers know where the human-written highlights are.
-          FOOTER=$'\n\n---\n'"📝 Curated highlights & media: https://zeros.build/changelog"
-          BODY="${INSTALL}"$'\n\n'"${GENERATED}${FOOTER}"
-
-          # Idempotent: drop any prior release + tag of the same version, then
-          # recreate. Marks this the Latest release even though the new 0.0.x
-          # line sorts BELOW the retired 0.1.x tags.
-          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release delete "$TAG" --yes --cleanup-tag --repo "$GITHUB_REPOSITORY" || true
+          # The versioned files go first and the feed and receipt last, so an opted-in
+          # app never reads an rc-mac.yml whose zip is not there yet.
+          FILES=(
+            "release/Zeros-${VERSION}-arm64.dmg"
+            "release/Zeros-${VERSION}-arm64-mac.zip"
+            "release/Zeros-${VERSION}-arm64-mac.zip.blockmap"
+          )
+          FEED=("release/rc-mac.yml" "release/rc-candidate.json")
+          # An interrupted first create can leave a draft with no tag; start over.
+          if [ "$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>/dev/null || true)" = "true" ]; then
+            gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --yes
           fi
+          # ONE rolling prerelease, never marked Latest: the ordinary Production updater
+          # reads /releases/latest and never sees a candidate.
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" \
+              --prerelease --title "$TITLE" --notes "$NOTES" --target "$GITHUB_SHA"
+            gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber "${FILES[@]}"
+            gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber "${FEED[@]}"
+          else
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
+              --prerelease --title "$TITLE" --notes "$NOTES" --target "$GITHUB_SHA" "${FILES[@]}" "${FEED[@]}"
+          fi
+          # Updating a release's target_commitish does not move an existing tag, and
+          # promotion requires the tag at this commit. An immediate read can return
+          # the old commit, so read it back with a short retry.
+          gh api --method PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/$TAG" \
+            -f sha="$GITHUB_SHA" -F force=true --silent
+          for attempt in 1 2 3 4 5 6; do
+            tag_sha=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" --jq .object.sha) || tag_sha=""
+            if [ "$tag_sha" = "$GITHUB_SHA" ]; then break; fi
+            if [ "$attempt" -eq 6 ]; then
+              echo "::error::The $TAG tag reads back as ${tag_sha:-unavailable}, not $GITHUB_SHA, after moving it."
+              exit 1
+            fi
+            sleep $(( attempt * 5 ))
+          done
+          echo "✓ published $TITLE → release '$TAG' (prerelease, rc-mac.yml feed)"
+          echo "Promote it to everyone with: gh workflow run release-promote.yml --ref ${GITHUB_REF_NAME}"
 
-          # Stable-named copy so the website Download button can point at a fixed
-          # URL — /releases/latest/download/Zeros-arm64.dmg — that always serves
-          # the newest build, no per-release edits (apps/marketing/src/lib/site.ts).
-          # The versioned dmg + latest-mac.yml feed the in-app auto-updater.
-          cp "release/Zeros-${VERSION}-arm64.dmg" "release/Zeros-arm64.dmg"
-
-          # --target pins the NEW tag to the commit that was actually built,
-          # notarized and verified above. Without it `gh release create` creates
-          # vX.Y.Z on the DEFAULT branch's HEAD rather than the required
-          # `release/X.Y.Z` ref: the tag would point at main HEAD while the shipped
-          # artifacts came from the release branch, silently breaking the "the bytes
-          # tested in Beta are the bytes shipped" property this pipeline exists for.
-          # release-alpha.yml / release-beta.yml already pass --target for the same
-          # reason.
-          gh release create "$TAG" \
-            --repo "$GITHUB_REPOSITORY" \
-            --target "$GITHUB_SHA" \
-            --title "Zeros v${VERSION}" \
-            --latest \
-            --notes "$BODY" \
-            "release/Zeros-${VERSION}-arm64.dmg" \
-            "release/Zeros-arm64.dmg" \
-            "release/Zeros-${VERSION}-arm64-mac.zip" \
-            "release/Zeros-${VERSION}-arm64-mac.zip.blockmap" \
-            "release/latest-mac.yml" \
-            "release/release-ledger.json"
-          pnpm exec tsx scripts/release/release-ledger-cli.ts --verify
+      - name: Prune old candidate assets (keep newest 3 versions)
+        # Best-effort retention — never fail a published candidate over cleanup.
+        # Versioned files carry "Zeros-<X.Y.Z>-arm64"; rc-mac.yml and the receipt
+        # have no version and are always kept.
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+          TAG="rc"
+          KEEP=3
+          NAMES=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')
+          KEEP_VERSIONS=$(printf '%s\n' "$NAMES" \
+            | sed -n 's/^Zeros-\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)-arm64.*/\1/p' \
+            | sort -t. -k1,1nr -k2,2nr -k3,3nr -u | awk -v k="$KEEP" 'NR<=k')
+          if [ -z "$KEEP_VERSIONS" ]; then
+            echo "No versioned candidate assets parsed — nothing to prune."
+            exit 0
+          fi
+          printf '%s\n' "$NAMES" | while IFS= read -r ASSET; do
+            [ -n "$ASSET" ] || continue
+            V=$(printf '%s\n' "$ASSET" | sed -n 's/^Zeros-\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)-arm64.*/\1/p')
+            [ -n "$V" ] || continue
+            if ! printf '%s\n' "$KEEP_VERSIONS" | grep -qx "$V"; then
+              echo "Pruning $ASSET ($V)"
+              gh release delete-asset "$TAG" "$ASSET" --repo "$GITHUB_REPOSITORY" --yes || true
+            fi
+          done

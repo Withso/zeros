@@ -61,6 +61,24 @@ describe("V6b existing rolling-tag bootstrap", () => {
     fixture.job.steps[0].name = "Publish GitHub release";
     expect((await fixture.client.lastPublication("production"))?.sourceSha).toBe(fixture.published.sha);
   });
+  it("recognizes Production publication by release-promote.yml, and never counts a release candidate", async () => {
+    const fixture = harness("beta");
+    Object.assign(fixture.run, { path: ".github/workflows/release-promote.yml", event: "workflow_dispatch" });
+    fixture.job.name = "Promote to Production";
+    fixture.job.steps[0].name = "Publish GitHub release";
+    expect((await fixture.client.lastPublication("production"))?.sourceSha).toBe(fixture.published.sha);
+    expect(fixture.requests.some(url => url.includes("/actions/workflows/release-promote.yml/runs?"))).toBe(true);
+    // release.yml now only publishes the rc candidate.
+    Object.assign(fixture.run, { path: ".github/workflows/release.yml" });
+    fixture.job.name = "Publish Production feed";
+    fixture.job.steps[0].name = "Publish release candidate";
+    expect(await fixture.client.lastPublication("production")).toBeNull();
+    // A promote job name from another workflow is not Production provenance.
+    Object.assign(fixture.run, { path: ".github/workflows/release-beta.yml" });
+    fixture.job.name = "Promote to Production";
+    fixture.job.steps[0].name = "Publish GitHub release";
+    expect(await fixture.client.lastPublication("production")).toBeNull();
+  });
   it.each(["alpha", "beta"] as const)("allows the already published %s schema despite the saved stale remote tag", async channel => {
     const f = harness(channel);
     const result = await disabledGuard([], f.candidate, f.deps);

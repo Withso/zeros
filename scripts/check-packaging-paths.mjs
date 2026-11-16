@@ -28,6 +28,12 @@ const stableReleaseWorkflow = readFileSync(
   ".github/workflows/release.yml",
   "utf8",
 );
+// release.yml publishes Production to the rolling `rc` candidate; this workflow
+// promotes the same files to the Latest release the ordinary updater reads.
+const stablePromoteWorkflow = readFileSync(
+  ".github/workflows/release-promote.yml",
+  "utf8",
+);
 // Both PRE-RELEASE channel workflows. Alpha (every merge to main) and Beta (a
 // release/* stabilization cut) keep the same feed/blockmap handoff, so they get
 // the SAME asset assertions. Alpha additionally gates its writers on explicit
@@ -113,28 +119,47 @@ requireWorkflowToken(
   "stable release workflow",
   "release/Zeros-*-arm64-mac.zip.blockmap",
 );
-// Twice: the emit assertion, and the `gh release create` upload list. Dropping
-// either leaves differential updates fetching a blockmap that 404s, which
-// silently degrades every update to a full ~180 MB download.
+// Twice: the emit assertion, and the candidate upload list; once more in the
+// promotion's `gh release create`. Dropping any leaves differential updates
+// fetching a blockmap that 404s, which silently degrades every update to a full
+// ~180 MB download.
 requireWorkflowToken(
   stableReleaseWorkflow,
   "stable release workflow",
   '"release/Zeros-${VERSION}-arm64-mac.zip.blockmap"',
   2,
 );
-// The feed itself must be ON the release, or /releases/latest/download/latest-mac.yml
-// 404s and no installed app ever learns a new version exists.
+requireWorkflowToken(
+  stablePromoteWorkflow,
+  "stable promote workflow",
+  '"release/Zeros-${VERSION}-arm64-mac.zip.blockmap"',
+);
+// The candidate feed must be ON the rc release, or an opted-in app's
+// /releases/download/rc/rc-mac.yml 404s and it stays on Latest
+// (apps/desktop/electron/release-candidates.ts). Promotion downloads it back.
 requireWorkflowToken(
   stableReleaseWorkflow,
   "stable release workflow",
+  '"release/rc-mac.yml"',
+  2,
+);
+requireWorkflowToken(stablePromoteWorkflow, "stable promote workflow", '"rc-mac.yml"');
+// The Latest feed must be ON the promoted release, or
+// /releases/latest/download/latest-mac.yml 404s and no installed app ever learns
+// a new version exists.
+requireWorkflowToken(
+  stablePromoteWorkflow,
+  "stable promote workflow",
   '"release/latest-mac.yml"',
+  2,
 );
 // The constant-named dmg the website Download button points at
 // (apps/marketing/src/lib/site.ts DOWNLOAD_URL).
 requireWorkflowToken(
-  stableReleaseWorkflow,
-  "stable release workflow",
+  stablePromoteWorkflow,
+  "stable promote workflow",
   '"release/Zeros-arm64.dmg"',
+  2,
 );
 for (const { label, text, file, parent, publication } of channelReleaseWorkflows) {
   // `alpha` | `beta` — the rolling release tag AND the artifact basename. They

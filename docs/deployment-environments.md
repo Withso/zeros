@@ -1021,8 +1021,26 @@ step and fails if a dependency change stops it storing links for macOS.
    An earlier hosted attempt of the same run remains valid after a successful
    desktop-only retry. The Production human approval, notarization and all
    macOS gates remain; disabled legacy mode does not enforce the Beta receipt.
-5. Keep the branch fixed until desktop publication completes. The whole release
-   workflow holds a non-cancelling, channel-global publication lock.
+   `release.yml` publishes a **release candidate**: the rolling `rc`
+   prerelease (never Latest) with `rc-mac.yml` and `rc-candidate.json`, a
+   receipt of the exact files' SHA-256 digests, run and commit
+   (`scripts/release/candidate.ts`), also saved as the run's own
+   `release-candidate-<run>-<attempt>` artifact. It refuses to replace a newer
+   candidate. Hosted services and the runtime already
+   serve Production; only staff Production apps with Release candidates on
+   update to it.
+5. Promote it with `gh workflow run release-promote.yml --ref release/X.Y.Z`
+   (one approval, no rebuild). It downloads the candidate and refuses another
+   version or commit, changed bytes, a receipt that differs from the run's own
+   artifact, a moved `rc` tag, a release.yml run whose `Publish release
+   candidate` step did not succeed, or a live Production identity at another
+   source. That identity check needs hosted promotion enabled, so the candidate
+   run deployed the backend; with it disabled, promotion always refuses. It then publishes the same files as `vX.Y.Z`
+   Latest, builds and reads back the Production ledger, and prints the
+   `pnpm client-contract:release X.Y.Z` follow-up. A fix after a candidate is a
+   new version, cut from the release branch plus the cherry-pick.
+6. Keep the branch fixed until promotion completes. Both workflows share the
+   non-cancelling, channel-global `release-production` lock.
 
 The release graph deliberately has no repeated Linux quality job: exact-SHA
 Preflight already covers typechecks, lint, Vitest, release contracts and the
@@ -1616,7 +1634,9 @@ require manual cutover regardless of legacy-tag bootstrap.
 Alpha/Beta advance the actual rolling Git tag ref only after their assets upload
 successfully. Updating a release's `--target` alone does not move an existing
 tag ([GitHub release API](https://docs.github.com/en/rest/releases/releases#update-a-release)).
-Production continues publishing `v${VERSION}`. Its highest stable tag may differ
+Production publishes `v${VERSION}` from `release-promote.yml` (earlier releases
+from `release.yml`, whose runs now publish only the `rc` candidate and never
+count as a Production publication). Its highest stable tag may differ
 from GitHub's `Latest` flag when retired higher-version tags remain; the same
 successful-publication cross-check applies. Do not manufacture or move a
 baseline tag to bypass a cutover.
