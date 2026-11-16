@@ -17,6 +17,9 @@ export const CANDIDATE_RECEIPT = "rc-candidate.json";
 export const CANDIDATE_FEED = "rc-mac.yml";
 export const PUBLISH_JOB = "Publish Production feed";
 export const PUBLISH_STEP = "Publish release candidate";
+/** The receipt is also saved as an artifact of the run that wrote it: release
+ * assets are editable by any `contents: write` token, run artifacts are not. */
+export const receiptArtifact = (runId: string, attempt: number) => `release-candidate-${runId}-${attempt}`;
 const VERSION = /^\d+\.\d+\.\d+$/;
 
 /** The files a candidate ships, in upload order. `rc-mac.yml` is a byte copy of
@@ -55,10 +58,14 @@ export type PromotionDependencies = {
   read(path: string): Promise<any>;
   /** The live Production control plane's `/v1/release-identity`. */
   identity(): Promise<any>;
+  /** The receipt text release.yml saved as `receiptArtifact(runId, attempt)` of that run, or null. */
+  attested(runId: string, attempt: number): Promise<string | null>;
 };
 
 /** Everything promotion checks before it may publish vX.Y.Z Latest. */
-export async function verifyCandidate(value: unknown, input: PromotionInput, deps: PromotionDependencies): Promise<CandidateReceipt> {
+export async function verifyCandidate(raw: string, input: PromotionInput, deps: PromotionDependencies): Promise<CandidateReceipt> {
+  let value: unknown = null;
+  try { value = JSON.parse(raw); } catch { /* refused below */ }
   const parsed = CandidateReceipt.safeParse(value);
   requireCheck(parsed.success, "Release candidate receipt is invalid");
   const receipt = parsed.data, version = input.branch.slice("release/".length);
@@ -81,6 +88,9 @@ export async function verifyCandidate(value: unknown, input: PromotionInput, dep
     job.name === PUBLISH_JOB && String(job.run_id) === receipt.runId && job.head_sha === input.sourceSha && job.status === "completed" &&
     job.conclusion === "success" && job.steps?.some((step: any) => step.name === PUBLISH_STEP && step.status === "completed" && step.conclusion === "success")),
   "Release candidate publication job did not succeed");
+  // The digests above are only as good as the receipt: require the run's own copy.
+  requireCheck(await deps.attested(receipt.runId, receipt.runAttempt) === raw,
+    "Release candidate receipt differs from the one its release.yml run recorded");
 
   const identity = await deps.identity();
   requireCheck(identity?.channel === "production" && identity.sourceSha === input.sourceSha && identity.ready === true,

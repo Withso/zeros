@@ -1024,14 +1024,18 @@ step and fails if a dependency change stops it storing links for macOS.
    `release.yml` publishes a **release candidate**: the rolling `rc`
    prerelease (never Latest) with `rc-mac.yml` and `rc-candidate.json`, a
    receipt of the exact files' SHA-256 digests, run and commit
-   (`scripts/release/candidate.ts`). Hosted services and the runtime already
+   (`scripts/release/candidate.ts`), also saved as the run's own
+   `release-candidate-<run>-<attempt>` artifact. It refuses to replace a newer
+   candidate. Hosted services and the runtime already
    serve Production; only staff Production apps with Release candidates on
    update to it.
 5. Promote it with `gh workflow run release-promote.yml --ref release/X.Y.Z`
    (one approval, no rebuild). It downloads the candidate and refuses another
-   version or commit, changed bytes, a moved `rc` tag, a release.yml run whose
-   `Publish release candidate` step did not succeed, or a live Production
-   identity at another source. It then publishes the same files as `vX.Y.Z`
+   version or commit, changed bytes, a receipt that differs from the run's own
+   artifact, a moved `rc` tag, a release.yml run whose `Publish release
+   candidate` step did not succeed, or a live Production identity at another
+   source. That identity check needs hosted promotion enabled, so the candidate
+   run deployed the backend; with it disabled, promotion always refuses. It then publishes the same files as `vX.Y.Z`
    Latest, builds and reads back the Production ledger, and prints the
    `pnpm client-contract:release X.Y.Z` follow-up. A fix after a candidate is a
    new version, cut from the release branch plus the cherry-pick.

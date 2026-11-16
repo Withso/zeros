@@ -13,8 +13,9 @@ async function candidate() {
   const directory = await mkdtemp(join(tmpdir(), "zeros-candidate-")); directories.push(directory);
   for (const name of candidateAssets("0.1.31")) await writeFile(join(directory, name), `bytes of ${name}\n`);
   const receipt = await writeCandidateReceipt({ releaseVersion: "0.1.31", repository, branch, sourceSha: sha, runId: "42", runAttempt: 2 }, directory);
+  const raw = `${JSON.stringify(receipt, null, 2)}\n`;
   const state = { tag: sha, path: ".github/workflows/release.yml", event: "workflow_dispatch", status: "completed", job: PUBLISH_JOB, step: PUBLISH_STEP,
-    conclusion: "success", identity: { channel: "production", sourceSha: sha, ready: true } as Record<string, unknown> };
+    conclusion: "success", identity: { channel: "production", sourceSha: sha, ready: true } as Record<string, unknown>, attested: raw as string | null };
   const deps = {
     read: vi.fn(async (path: string) => {
       if (path === "/git/ref/tags/rc") return { object: { sha: state.tag } };
@@ -25,8 +26,9 @@ async function candidate() {
       throw new Error(`unexpected ${path}`);
     }),
     identity: vi.fn(async () => state.identity),
+    attested: vi.fn(async (runId: string, attempt: number) => runId === "42" && attempt === 2 ? state.attested : null),
   };
-  return { directory, receipt, state, deps, input: { repository, branch, sourceSha: sha, directory } };
+  return { directory, receipt, raw, state, deps, input: { repository, branch, sourceSha: sha, directory } };
 }
 
 describe("release candidate receipt", () => {
@@ -47,18 +49,18 @@ describe("release candidate receipt", () => {
 describe("promoting a release candidate", () => {
   it("accepts the published bytes of this commit while Production serves its backend", async () => {
     const f = await candidate();
-    await expect(verifyCandidate(f.receipt, f.input, f.deps)).resolves.toEqual(f.receipt);
+    await expect(verifyCandidate(f.raw, f.input, f.deps)).resolves.toEqual(f.receipt);
   });
 
   it("refuses changed bytes", async () => {
     const f = await candidate();
     await writeFile(join(f.directory, "Zeros-0.1.31-arm64-mac.zip"), "tampered\n");
-    await expect(verifyCandidate(f.receipt, f.input, f.deps)).rejects.toThrow(/differs from the candidate/);
+    await expect(verifyCandidate(f.raw, f.input, f.deps)).rejects.toThrow(/differs from the candidate/);
   });
 
   it.each([["another branch", { branch: "release/0.1.32" }], ["another commit", { sourceSha: "b".repeat(40) }]])("refuses %s", async (_name, patch) => {
     const f = await candidate();
-    await expect(verifyCandidate(f.receipt, { ...f.input, ...patch }, f.deps)).rejects.toThrow(/not this branch's commit/);
+    await expect(verifyCandidate(f.raw, { ...f.input, ...patch }, f.deps)).rejects.toThrow(/not this branch's commit/);
   });
 
   it.each([
@@ -70,17 +72,35 @@ describe("promoting a release candidate", () => {
     ["a renamed publication step", { step: "Publish GitHub release" }, /publication job/],
   ])("refuses %s", async (_name, patch, error) => {
     const f = await candidate(); Object.assign(f.state, patch);
-    await expect(verifyCandidate(f.receipt, f.input, f.deps)).rejects.toThrow(error);
+    await expect(verifyCandidate(f.raw, f.input, f.deps)).rejects.toThrow(error);
   });
 
   it.each([{ sourceSha: "b".repeat(40) }, { ready: false }, { channel: "beta" }])("refuses while Production serves %j", async patch => {
     const f = await candidate(); Object.assign(f.state.identity, patch);
-    await expect(verifyCandidate(f.receipt, f.input, f.deps)).rejects.toThrow(/not serving this candidate/);
+    await expect(verifyCandidate(f.raw, f.input, f.deps)).rejects.toThrow(/not serving this candidate/);
   });
 
   it("refuses a receipt listing different files", async () => {
     const f = await candidate();
-    await expect(verifyCandidate({ ...f.receipt, files: { ...f.receipt.files, "extra.bin": "c".repeat(64) } }, f.input, f.deps)).rejects.toThrow(/different files/);
+    await expect(verifyCandidate(JSON.stringify({ ...f.receipt, files: { ...f.receipt.files, "extra.bin": "c".repeat(64) } }), f.input, f.deps))
+      .rejects.toThrow(/different files/);
+  });
+
+  it("refuses bytes and a receipt both replaced on the rc release after the run recorded its own", async () => {
+    const f = await candidate();
+    await writeFile(join(f.directory, "Zeros-0.1.31-arm64-mac.zip"), "replaced\n");
+    const forged = await writeCandidateReceipt({ releaseVersion: "0.1.31", repository, branch, sourceSha: sha, runId: "42", runAttempt: 2 }, f.directory);
+    await expect(verifyCandidate(`${JSON.stringify(forged, null, 2)}\n`, f.input, f.deps)).rejects.toThrow(/differs from the one its release\.yml run recorded/);
+  });
+
+  it("refuses when the run's own receipt is missing or expired", async () => {
+    const f = await candidate(); f.state.attested = null;
+    await expect(verifyCandidate(f.raw, f.input, f.deps)).rejects.toThrow(/release\.yml run recorded/);
+  });
+
+  it("refuses an unparseable receipt", async () => {
+    const f = await candidate();
+    await expect(verifyCandidate("not json", f.input, f.deps)).rejects.toThrow(/invalid/);
   });
 });
 

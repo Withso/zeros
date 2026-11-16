@@ -127,6 +127,13 @@ describe("release dependency and authority contracts", () => {
     expect(publish).toContain("--prerelease");
     expect(publish.indexOf("candidate-cli.ts --write")).toBeLessThan(publish.indexOf('gh release upload "$TAG"'));
     expect(publish).toContain('"release/rc-candidate.json"');
+    // The run's own receipt artifact is saved before anything is published.
+    expect(publish).toContain("name: release-candidate-${{ github.run_id }}-${{ github.run_attempt }}");
+    expect(publish.indexOf("Save release candidate receipt")).toBeGreaterThan(publish.indexOf("candidate-cli.ts --write"));
+    expect(publish.indexOf("Save release candidate receipt")).toBeLessThan(publish.indexOf("- name: Publish release candidate"));
+    // The feed is uploaded after the files it names, and a newer candidate is never replaced.
+    expect(publish.lastIndexOf('"${FEED[@]}"')).toBeGreaterThan(publish.indexOf('--clobber "${FILES[@]}"'));
+    expect(publish).toContain("refusing to replace it");
     expect(promote).toContain("needs: approve");
     expect(promote).toContain("environment: production");
     expect(promote.indexOf("candidate-cli.ts --verify")).toBeGreaterThan(promote.indexOf("gh release download rc"));

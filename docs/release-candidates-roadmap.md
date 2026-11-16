@@ -59,8 +59,10 @@ main ─────────────────────────
 | 3 | Remove Beta: the candidate receipt replaces the Beta receipt in `scripts/release/` and `cutover-cli.ts`, after one candidate → promote cycle | planned |
 | — | Tear down Beta services (order below), then delete old release branches | planned |
 
-0.1.30 ships through the existing Beta flow. 0.1.31 is the first candidate,
-and Beta stays until it has been promoted.
+Each run uses its release branch's own copy of the workflows. A branch cut
+before step 2 merged ships through the existing Beta flow; a branch cut after
+it publishes a candidate that must be promoted with `release-promote.yml`.
+Beta stays until one candidate has been promoted.
 
 ## Beta teardown order
 

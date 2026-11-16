@@ -1,10 +1,13 @@
 // release.yml: `candidate-cli.ts --write` records the candidate receipt beside the
 // notarized files. release-promote.yml: `candidate-cli.ts --verify` checks the
 // downloaded candidate before any vX.Y.Z publication (see candidate.ts).
-import { readFile, writeFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { execFile } from "node:child_process";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
-import { CANDIDATE_RECEIPT, verifyCandidate, writeCandidateReceipt } from "./candidate";
+import { CANDIDATE_RECEIPT, receiptArtifact, verifyCandidate, writeCandidateReceipt } from "./candidate";
 import { PromotionError, releaseSource, requireCheck } from "./contracts";
 import { jsonClient } from "./io";
 import { runtimeOrigin } from "./runtime-contracts";
@@ -25,13 +28,34 @@ export async function candidateMain(args = process.argv.slice(2), env = process.
   requireCheck(env.GITHUB_WORKFLOW_REF === `${source.repository}/.github/workflows/release-promote.yml@refs/heads/${source.branch}`,
     "Only release-promote.yml promotes release candidates");
   const json = jsonClient(fetcher);
-  const receipt = await verifyCandidate(JSON.parse(await readFile(`${directory}/${CANDIDATE_RECEIPT}`, "utf8")), { ...source, directory }, {
-    read: path => json(`https://api.github.com/repos/${source.repository}${path}`, {
-      headers: { authorization: `Bearer ${env.GH_TOKEN}`, accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28" } }),
+  const read = (path: string) => json(`https://api.github.com/repos/${source.repository}${path}`, {
+    headers: { authorization: `Bearer ${env.GH_TOKEN}`, accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28" } });
+  const receipt = await verifyCandidate(await readFile(`${directory}/${CANDIDATE_RECEIPT}`, "utf8"), { ...source, directory }, {
+    read,
     identity: () => json(`${runtimeOrigin("production")}/v1/release-identity`, { cache: "no-store" }),
+    attested: (runId, attempt) => download(source.repository, runId, attempt, read, env),
   });
   console.log(`Release candidate ${receipt.releaseVersion} verified at ${receipt.sourceSha}; promoting the same files.`);
   return receipt;
+}
+
+/** The run's own receipt artifact, or null when it is missing, expired or ambiguous. */
+async function download(repository: string, runId: string, attempt: number, read: (path: string) => Promise<any>, env: NodeJS.ProcessEnv) {
+  const name = receiptArtifact(runId, attempt);
+  const list = await read(`/actions/runs/${runId}/artifacts?per_page=100`);
+  if (!Array.isArray(list?.artifacts) || list.artifacts.filter((a: any) => a.name === name && a.expired === false).length !== 1) return null;
+  const directory = await mkdtemp(join(tmpdir(), "zeros-candidate-receipt-"));
+  try {
+    await promisify(execFile)("gh", ["run", "download", runId, "--repo", repository, "--name", name, "--dir", directory],
+      { env: { PATH: env.PATH, HOME: env.HOME, GH_TOKEN: env.GH_TOKEN }, timeout: 60_000 });
+    const file = join(directory, CANDIDATE_RECEIPT);
+    if (!(await stat(file)).isFile() || (await stat(file)).size > 64 * 1024) return null;
+    return await readFile(file, "utf8");
+  } catch {
+    return null;
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) void candidateMain().catch(error => {
