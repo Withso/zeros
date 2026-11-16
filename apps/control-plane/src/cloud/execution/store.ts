@@ -236,24 +236,27 @@ export class CloudExecutionContexts {
     return requested;
   }
 
+  /** One transaction for every admission read (each statement still sees the latest commits); the final assert there
+   * catches an authority change that lands while it runs. The enqueue transaction asserts again before it writes. */
   async preflightPrompt(id: string, userId: string, input: CloudV2Prompt, user?: AuthedUser): Promise<PromptExecutionAdmission | undefined> {
-    if (!await this.active(id)) return undefined;
-    const proof = await this.deps.authority.admit(id, userId, { user });
-    const agent = await withSystemTx(this.pool, tx => this.agent(tx, id, input.chatId, input.agentId));
-    await this.deps.authority.assert(proof);
-    const existing = await withSystemTx(this.pool, tx => tx.query("SELECT 1 FROM cloud_v2_prompt_outbox WHERE workspace_id=$1 AND user_message_id=$2 AND creator_user_id=$3", [id, input.userMessageId, userId]));
-    const parent = !existing.rowCount && input.mode === "steer" ? await withSystemTx(this.pool, async tx => {
-      const context = (await tx.query<ExecutionContext>(`SELECT c.* FROM cloud_v2_prompt_chats chat JOIN cloud_v2_execution_contexts c
-        ON c.id=chat.active_context_id AND c.workspace_id=chat.workspace_id WHERE chat.workspace_id=$1 AND chat.chat_id=$2
-          AND c.user_id=$3 AND c.kind='turn' AND c.state='active' AND c.agent=$4 AND c.sender_ended_at IS NULL`, [id, input.chatId, userId, agent])).rows[0];
-      if (context) await this.assertContext(tx, context, proof);
-      return context;
-    }) : undefined;
-    const selection = existing.rowCount ? null : parent
-      ? (await this.deps.logins.select(proof.person.organizationId, userId, agent, parent.selection!)).selection
-      : (await this.deps.logins.forWorkspace(id, userId, agent)).selection;
-    await this.deps.authority.assert(proof);
-    return { ...proof, runBound: false, agent, selection, ...(parent ? { parentContextId: parent.id } : {}) };
+    return withSystemTx(this.pool, async tx => {
+      if (!await this.active(id, tx)) return undefined;
+      const proof = await this.deps.authority.admit(id, userId, { user, transaction: tx });
+      const agent = await this.agent(tx, id, input.chatId, input.agentId);
+      const existing = await tx.query("SELECT 1 FROM cloud_v2_prompt_outbox WHERE workspace_id=$1 AND user_message_id=$2 AND creator_user_id=$3", [id, input.userMessageId, userId]);
+      let parent: ExecutionContext | undefined;
+      if (!existing.rowCount && input.mode === "steer") {
+        parent = (await tx.query<ExecutionContext>(`SELECT c.* FROM cloud_v2_prompt_chats chat JOIN cloud_v2_execution_contexts c
+          ON c.id=chat.active_context_id AND c.workspace_id=chat.workspace_id WHERE chat.workspace_id=$1 AND chat.chat_id=$2
+            AND c.user_id=$3 AND c.kind='turn' AND c.state='active' AND c.agent=$4 AND c.sender_ended_at IS NULL`, [id, input.chatId, userId, agent])).rows[0];
+        if (parent) await this.assertContext(tx, parent, proof);
+      }
+      const selection = existing.rowCount ? null : parent
+        ? (await this.deps.logins.select(proof.person.organizationId, userId, agent, parent.selection!, tx)).selection
+        : (await this.deps.logins.forWorkspace(id, userId, agent, undefined, tx)).selection;
+      await this.deps.authority.assert(proof, tx);
+      return { ...proof, runBound: false, agent, selection, ...(parent ? { parentContextId: parent.id } : {}) };
+    });
   }
 
   async creationPrompt(tx: Tx, proof: ExecutionAdmission, input: Pick<CloudV2Prompt, "chatId" | "agentId">): Promise<PromptExecutionAdmission> {
@@ -289,10 +292,15 @@ export class CloudExecutionContexts {
     });
     if (!pending(initial.prompt.state)) return { dispatch: false as const, state: initial.prompt.state };
     return withExecutionLifetimeRetry(async () => {
-      const proof = await this.deps.authority.admit(initial.workspace.id, initial.prompt.creator_user_id, { minimumSourceMs: EXECUTION_MINIMUM_LIFETIME_MS });
+      // Admission reads share one transaction; the final assert there catches a change that lands while it runs.
+      const { proof, agent } = await withSystemTx(this.pool, async tx => {
+        const admitted = await this.deps.authority.admit(initial.workspace.id, initial.prompt.creator_user_id,
+          { minimumSourceMs: EXECUTION_MINIMUM_LIFETIME_MS, transaction: tx });
+        const chosen = await this.agent(tx, initial.workspace.id, initial.prompt.chat_id, initial.prompt.payload!.agentId);
+        await this.deps.authority.assert(admitted, tx);
+        return { proof: admitted, agent: chosen };
+      });
       assertExecutionLifetime(proof.until);
-      const agent = await withSystemTx(this.pool, tx => this.agent(tx, initial.workspace.id, initial.prompt.chat_id, initial.prompt.payload!.agentId));
-      await this.deps.authority.assert(proof);
       const result = await withSystemTx(this.pool, async tx => {
         await tx.query("SELECT id FROM users WHERE id=$1 FOR KEY SHARE", [proof.person.userId]);
         const workspace = await this.worker(tx, identity, true);
@@ -485,17 +493,24 @@ export class CloudExecutionContexts {
       return current;
     });
     return withExecutionLifetimeRetry(async () => {
-      const proof = await this.admission(context, EXECUTION_MINIMUM_LIFETIME_MS);
-      assertExecutionLifetime(proof.until);
+      let proof!: ExecutionAdmission;
       const check = async (tx?: Tx) => {
         const read = async (value: Tx) => { await this.assertContext(value, context, proof); await dispatch(value, context); };
         await (tx ? read(tx) : withSystemTx(this.pool, read));
       };
-      const login = await this.deps.logins.select(context.org_id, context.user_id!, context.agent!, context.selection!);
+      // Admission and the login are short reads in one transaction. Material stays in its own: resolving it must never
+      // hold locks a revocation is waiting for (concurrency.integration.test.ts).
+      const login = await withSystemTx(this.pool, async tx => {
+        proof = await this.admission(context, EXECUTION_MINIMUM_LIFETIME_MS, tx);
+        assertExecutionLifetime(proof.until);
+        return this.deps.logins.select(context.org_id, context.user_id!, context.agent!, context.selection!, tx);
+      });
       const material = context.material ? null : await this.deps.material(context, check);
       return withSystemTx(this.pool, async tx => {
         const workspace = await this.worker(tx, identity, true);
         let current = await this.context(tx, context.id, workspace.id, true);
+        // A turn moved to its payer while this lease was prepared: never re-deliver the sender's material.
+        if (senderEnded(current)) throw actorChanged();
         await check(tx);
         let value: Record<string, unknown>;
         if (current.material) value = openExecution(current.material, envelopeBinding(current), this.deps.keys) as Record<string, unknown>;
