@@ -5,7 +5,7 @@ on:
       channel:
         description: Destination channel
         type: choice
-        options: [alpha, beta, production]
+        options: [alpha, production]
         default: alpha
         required: true
       action:

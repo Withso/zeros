@@ -52,7 +52,7 @@ function fixture(channel: "alpha" | "beta" | "production" = "alpha") {
 
 describe("runtime release source and workflow provenance", () => {
   it.each([
-    ["alpha", "release-alpha.yml", "push"], ["beta", "release-beta.yml", "push"], ["production", "release.yml", "workflow_dispatch"],
+    ["alpha", "release-alpha.yml", "push"], ["production", "release.yml", "workflow_dispatch"],
   ] as const)("authenticates the %s automatic caller and its approval", async (channel, file, event) => {
     const f = fixture(channel); Object.assign(f.config, { workflowFile: file });
     f.run.path = `.github/workflows/${file}`; f.run.event = event;
@@ -102,13 +102,11 @@ describe("runtime release source and workflow provenance", () => {
     const f = fixture(); Object.assign(f.run, patch); await expect(f.client.source()).rejects.toThrow();
   });
   it("requires a protected release branch to remain at the dispatched source", async () => {
-    const f = fixture("beta"); await f.client.source(); f.state.moved = true; await expect(f.client.source()).rejects.toThrow(/moved/);
+    const f = fixture("production"); await f.client.source(); f.state.moved = true; await expect(f.client.source()).rejects.toThrow(/moved/);
   });
-  it("keeps Beta's branch and CI fences without requiring a human approval job", async () => {
-    const f = fixture("beta"); f.state.approval = false;
-    await expect(f.client.source()).resolves.toBeUndefined();
-    expect(f.seen.some(path => path.includes("/jobs?"))).toBe(false);
-    f.state.ci = "failure"; await expect(f.client.source()).rejects.toThrow();
+  it("refuses the retired Beta channel before reading any run", async () => {
+    const f = fixture("beta");
+    await expect(f.client.source()).rejects.toThrow(/Beta is retired/);
   });
   it.each(["failure", "old-attempt"])("refuses %s approval evidence for promotion", async change => {
     const f = fixture("production");

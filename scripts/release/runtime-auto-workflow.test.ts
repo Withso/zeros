@@ -32,9 +32,9 @@ describe("automatic runtime release graph", () => {
     expect(transaction.jobs.runtime.name).toBe("Cloud runtime");
     expect(transaction.jobs.runtime.concurrency).toBeUndefined();
   });
-  it.each(["alpha-publication", "release-beta", "release"])("gates %s feed on runtime completion or a verified no-op", name => {
+  it.each(["alpha-publication", "release"])("gates %s feed on runtime completion or a verified no-op", name => {
     const release = workflow(name), publish = release.jobs.publish;
-    expect(release.jobs["runtime-resolve"].env.RELEASE_CHANNEL).toBe(name === "alpha-publication" ? "alpha" : name === "release-beta" ? "beta" : "production");
+    expect(release.jobs["runtime-resolve"].env.RELEASE_CHANNEL).toBe(name === "alpha-publication" ? "alpha" : "production");
     expect(release.jobs["runtime-resolve"].permissions).toEqual({ contents: "read", actions: "read" });
     expect(release.jobs["runtime-resolve"].env.GH_TOKEN).toBe("${{ github.token }}");
     expect(JSON.stringify(release.jobs["runtime-resolve"])).not.toContain("secrets.");

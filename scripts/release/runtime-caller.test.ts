@@ -15,14 +15,17 @@ function environment(channel: "alpha" | "beta" | "production", file: string, eve
 
 describe("runtime caller admission", () => {
   it.each([
-    ["alpha", "release-alpha.yml", "push"], ["beta", "release-beta.yml", "push"], ["production", "release.yml", "workflow_dispatch"],
+    ["alpha", "release-alpha.yml", "push"], ["production", "release.yml", "workflow_dispatch"],
   ] as const)("admits the exact %s release parent", (channel, file, event) => {
     const env = environment(channel, file, event);
     expect(runtimeReleaseConfig(env)).toMatchObject({ channel, workflowFile: file, runId: "123", runAttempt: 2 });
     if (channel === "alpha") expect(runtimeBuildConfig(env)).toMatchObject({ workflowFile: file });
   });
-  it.each(["alpha", "beta", "production"] as const)("retains manual %s dispatch", channel => {
+  it.each(["alpha", "production"] as const)("retains manual %s dispatch", channel => {
     expect(runtimeReleaseConfig(environment(channel, "runtime-release.yml", "workflow_dispatch"))).toMatchObject({ channel });
+  });
+  it.each([["runtime-release.yml", "workflow_dispatch"], ["release-beta.yml", "push"]])("refuses the retired Beta channel from %s", (file, event) => {
+    expect(() => runtimeReleaseConfig(environment("beta", file, event))).toThrow();
   });
   it.each([
     { GITHUB_EVENT_NAME: "pull_request" }, { GITHUB_EVENT_NAME: "workflow_call" }, { GITHUB_WORKFLOW_SHA: "2".repeat(40) },

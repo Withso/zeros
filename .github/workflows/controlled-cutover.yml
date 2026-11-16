@@ -11,17 +11,17 @@ on:
   workflow_dispatch:
     inputs:
       channel:
-        description: Channel to cut over (alpha from main; beta or production from release/X.Y.Z)
+        description: Channel to cut over (alpha from main; production from release/X.Y.Z)
         required: true
         type: choice
-        options: [alpha, beta, production]
+        options: [alpha, production]
       approvals:
         description: Comma-separated controlled migrations to approve; must equal the pending set exactly (empty when none)
         required: false
         type: string
         default: ""
       confirm:
-        description: Type the channel database name, for example zeros-control-plane-beta
+        description: Type the channel database name, for example zeros-control-plane-production
         required: true
         type: string
 permissions:

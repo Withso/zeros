@@ -5,7 +5,7 @@ import { runRuntimeController } from "./runtime-controller";
 import { prepareRuntimePublication, completeRuntimePublication } from "./runtime-proof";
 
 function fixture(action: "publish" | "promote" | "rollback" = "publish") {
-  const channel = action === "promote" ? "beta" : "alpha", branch = channel === "alpha" ? "main" : "release/1.2.3";
+  const channel = action === "promote" ? "production" : "alpha", branch = channel === "alpha" ? "main" : "release/1.2.3";
   const env = { RUNNER_ENVIRONMENT: "github-hosted", ZEROS_RUNTIME_RELEASE: "enabled", ZEROS_HOSTED_PROMOTION: "enabled", RUNTIME_RELEASE_CHANNEL: channel, RUNTIME_RELEASE_ACTION: action,
     ...(action === "publish" ? { RUNTIME_RELEASE_SOURCE_SHA: "2".repeat(40) } : action === "promote" ? { RUNTIME_RELEASE_SHA256: "b".repeat(64), RUNTIME_RELEASE_ALPHA_RUN_ID: "100", RUNTIME_RELEASE_ALPHA_RUN_ATTEMPT: "1" } : {}),
     RUNTIME_RELEASE_EXPECTED_CP_SHA: "3".repeat(40), RUNTIME_RELEASE_EXPECTED_SHA256: "a".repeat(64),
