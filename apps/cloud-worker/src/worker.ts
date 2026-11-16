@@ -110,7 +110,9 @@ const stableJson = (value: unknown): string => Array.isArray(value) ? `[${value.
 /** Digests per closed schema path. The control plane mints a new Codex proxy
  * token for every configuration it builds, so that token is not compared. */
 function configurationSections(config: WorkerConfig): Map<string, string> {
-  const { agents: { codex, ...agents }, workspace, ...rest } = config;
+  // Transport flags applied directly (messageAuthority is one-way; historyBatch only picks the history route): a
+  // configuration differing only in them, as the relay's and HTTP's may, is not a change that reconfigures agents.
+  const { agents: { codex, ...agents }, workspace, messageAuthority: _authority, historyBatch: _batch, ...rest } = config;
   const digest = (value: unknown) => createHash("sha256").update(stableJson(value)).digest("hex");
   const sections = new Map<string, string>();
   for (const [key, value] of Object.entries(rest)) sections.set(key, digest(value));
@@ -163,6 +165,7 @@ export class CloudWorker {
   private historyReplacementEnabled = false;
   /** The control plane must opt in before digest fields enter history frames. */
   private historyDigestEnabled = false;
+  private historyBatchEnabled = false;
   /** Read when a native execution's tools are admitted. */
   private localCommandsEnabled = false;
   private localCommandReason = false;
@@ -609,6 +612,7 @@ export class CloudWorker {
     }
     this.historyReplacementEnabled = config.historyReplacement === 1;
     this.historyDigestEnabled = config.historyDigest === 1;
+    this.historyBatchEnabled = config.historyBatch === 1;
     this.localCommandsEnabled = config.localCommands === 1;
     this.localCommandReason = config.localCommandReason === 1;
     this.notifyUserEnabled = config.notifyUser === 1;
@@ -840,7 +844,8 @@ export class CloudWorker {
       });
       history = new HistoryMirror(store, this.options.transport, () => this.historyReplacementEnabled, value => application.value(value),
         { enabled: () => this.historyDigestEnabled, restored: () => restored,
-          delivered: () => { restoredHistoryDelivered = true; void settleRestoreMarker(); } });
+          delivered: () => { restoredHistoryDelivered = true; void settleRestoreMarker(); } },
+        () => this.historyBatchEnabled && !this.options.transport.historyBatchRefused);
       unsubscribers.push(store.onChange((change) => {
         this.runtimeGate.activity();
         if (!change.chat && !change.deleted && !change.rows.length && !change.replace) return;

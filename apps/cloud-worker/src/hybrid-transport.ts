@@ -78,8 +78,11 @@ export class HybridTransport implements Transport {
   private busyRepeatMs = 30_000;
   private readonly promptPolls = new Set<AbortController>();
   private historySequence = 0;
-  private pendingHistory?: { sequence: number; frame: Extract<CloudV2WorkerFrame, { t: "history" }> };
+  private pendingHistory?: { sequence: number; frame: Extract<CloudV2WorkerFrame, { t: "history" }> }
+    | { sequence: number; frames: Array<Extract<CloudV2WorkerFrame, { t: "history" }>> };
   private historyFlight: Promise<boolean> = Promise.resolve(true);
+  /** history-batch-v1 answered 404 (a rolled-back control plane): batches stop for the rest of this boot. */
+  historyBatchRefused = false;
   private requests = new Set<AbortController>();
   private readonly reportedTimings = new Set<CloudV2WorkerTiming["phase"]>();
 
@@ -416,9 +419,46 @@ export class HybridTransport implements Transport {
       if (this.recoverRequested) { this.recoverRequested = false; this.recover(); }
     });
   }
+  /** history-batch-v1: frames from any chats in one request (sequences first..first+n-1), one control-plane transaction. */
+  async sendHistoryBatch(frames: Array<Extract<CloudV2WorkerFrame, { t: "history" }>>): Promise<boolean> {
+    if (this.stopped || !this.registered || !frames.length || frames.some(frame => !CloudV2WorkerFrameSchema.safeParse(frame).success)) return false;
+    this.historyFlight = this.historyFlight.catch(() => false).then(async () => {
+      if (this.pendingHistory) return false;
+      this.pendingHistory = { sequence: this.historySequence + 1, frames: structuredClone(frames) };
+      try { await this.commitHistory(); return true; }
+      catch (error) { this.failed(error); return false; }
+    });
+    return this.historyFlight;
+  }
   private async commitHistory(): Promise<void> {
     const pending = this.pendingHistory;
     if (!pending) return;
+    if ("frames" in pending) {
+      const last = pending.sequence + pending.frames.length - 1;
+      if (!this.historyBatchRefused) {
+        try {
+          const reply = await this.request("history/batch", { bootId: this.bootId, sequence: pending.sequence,
+            frames: pending.frames.map(({ t: _t, ...frame }) => frame) });
+          if (reply.sequence !== last) throw new Error("Invalid history acknowledgement.");
+          this.historySequence = last; this.pendingHistory = undefined;
+          return;
+        } catch (error) {
+          if (!(error instanceof HttpFailure && error.status === 404)) throw error;
+          // A control plane rolled back past history-batch-v1: no more batches this boot.
+          this.historyBatchRefused = true;
+        }
+      }
+      // The same frames at the same sequences, one request each: the server applies exactly this per frame.
+      for (const [index, frame] of pending.frames.entries()) {
+        const sequence = pending.sequence + index;
+        if (sequence <= this.historySequence) continue;
+        const reply = await this.request("history", { ...frame, bootId: this.bootId, sequence });
+        if (reply.sequence !== sequence) throw new Error("Invalid history acknowledgement.");
+        this.historySequence = sequence;
+      }
+      this.pendingHistory = undefined;
+      return;
+    }
     const reply = await this.request("history", { ...pending.frame, bootId: this.bootId, sequence: pending.sequence });
     if (reply.sequence !== pending.sequence) throw new Error("Invalid history acknowledgement.");
     this.historySequence = pending.sequence; this.pendingHistory = undefined;

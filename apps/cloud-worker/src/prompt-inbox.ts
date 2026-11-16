@@ -55,7 +55,9 @@ export class PromptInbox {
 
   start(): void {
     if (this.task || this.lifetime.signal.aborted) return;
-    this.unsubscribe = this.store.onChange(change => { if (change.flush) this.hint(); });
+    // A turn's own store edits (accept, report, finish) need their outcomes reported, not another pull: pulls follow the
+    // control plane's push signal (hint), the long poll's end and recovery, as Conductor reads its inbox only when told.
+    this.unsubscribe = this.store.onChange(change => { if (change.flush) this.reportSoon(); });
     this.task = this.run();
   }
   hint(): void { this.hinted = true; this.polling?.abort(); }
@@ -77,6 +79,7 @@ export class PromptInbox {
     this.unsubscribe?.(); this.lifetime.abort(); this.polling?.abort();
     this.agents.setOutboxDispatch();
     await this.task;
+    await this.reporting?.catch(() => {});
   }
 
   private async call(operation: PromptOperation, body: unknown): Promise<unknown> {
@@ -119,6 +122,27 @@ export class PromptInbox {
     return begin.parse(body).dispatch;
   }
 
+  private reporting?: Promise<void>;
+  private reportingToken?: object;
+  private reportAgain = false;
+  /** Single-flight: the pull loop and store edits share one reporter; a report failure is retried by the loop. */
+  private reportNow(): Promise<void> {
+    if (this.reporting) { this.reportAgain = true; return this.reporting; }
+    const token = {};
+    this.reportingToken = token;
+    const run = (async () => {
+      try { do { this.reportAgain = false; await this.report(); } while (this.reportAgain && !this.lifetime.signal.aborted); }
+      // Cleared in the same turn the loop decides to stop, so a later edit always starts a new pass.
+      finally { if (this.reportingToken === token) { this.reporting = undefined; this.reportingToken = undefined; } }
+    })();
+    if (this.reportingToken === token) this.reporting = run;
+    return run;
+  }
+  private reportSoon(): void {
+    if (this.lifetime.signal.aborted) return;
+    // A failed report wakes the loop, which reports again before its next pull.
+    this.reportNow().catch(() => this.hint());
+  }
   private async report(): Promise<void> {
     for (const { chatId, entry } of this.store.outboxEntries()) {
       const outbox = entry.outbox!;
@@ -163,7 +187,7 @@ export class PromptInbox {
       try {
         await this.whilePaused();
         if (this.lifetime.signal.aborted) break;
-        await this.report();
+        await this.reportNow();
         const controller = new AbortController(); this.polling = controller;
         const signal = AbortSignal.any([controller.signal, this.lifetime.signal]);
         const longPoll = this.pushSignals && Date.now() >= this.longPollRefusedUntil;

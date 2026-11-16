@@ -197,3 +197,51 @@ it("R3: a row folded with nothing after it reaches the control plane within the 
     expect(JSON.parse(answer!.payload).text).toBe("x".repeat(100));
   } finally { await cleanup(); }
 });
+
+it("R3 history-batch-v1: one drain sends every ready chat's frames in one request, each chat contiguous", async () => {
+  const { store, relay, mirror, cleanup } = await setup();
+  await mirror.dispose();
+  const batches: Array<Array<{ chats?: unknown; messages?: { chatId: string } }>> = [];
+  let hold: Promise<void> | undefined, release!: () => void;
+  // A real request takes a network round trip; changes that queue meanwhile ride in the next request.
+  const transport = { send: async () => true, sendHistoryBatch: async (frames: never[]) => { batches.push(frames); await hold; return true; } } as never;
+  const batched = new HistoryMirror(store, transport, () => true, value => value, undefined, () => true);
+  try {
+    batched.connect(); await batched.flush(); batches.length = 0;
+    hold = new Promise(resolve => { release = resolve; });
+    await store.upsert({ id: "second", folder: WORKSPACE_KEY, title: "Second" });
+    await store.importMessages("second", [{ msgId: "b1", kind: "text", createdAt: 1, payload: JSON.stringify({ id: "b1", kind: "text", role: "agent", messageId: "m", createdAt: 1, text: "b" }) }]);
+    await store.importMessages("chat", [{ msgId: "a1", kind: "text", createdAt: 1, payload: JSON.stringify({ id: "a1", kind: "text", role: "agent", messageId: "m", createdAt: 1, text: "a" }) }]);
+    release();
+    await batched.flush();
+    // The first request was in flight; everything that queued meanwhile, from both chats, went in one more.
+    expect(batches.length).toBe(2);
+    const chats = batches[1]!.map(frame => frame.messages?.chatId ?? "row");
+    expect(new Set(chats.filter(chat => chat !== "row"))).toEqual(new Set(["chat", "second"]));
+    // Each chat's frames are contiguous: no other chat's frame falls between them.
+    const seen: string[] = [];
+    for (const chat of chats) if (seen.at(-1) !== chat) seen.push(chat);
+    expect(new Set(seen).size).toBe(seen.length);
+    expect(relay.frames.filter(frame => frame.t === "history")).toEqual([]);
+  } finally { await batched.dispose(); await cleanup(); }
+});
+
+it("R3 history-batch-v1: a chat larger than one batch goes in order across requests, its replacement only in the first", async () => {
+  const { store, mirror, cleanup } = await setup();
+  await mirror.dispose();
+  await store.importMessages("chat", Array.from({ length: 1000 }, (_, index) => ({ msgId: `big-${String(index).padStart(4, "0")}`, kind: "text", createdAt: index,
+    payload: JSON.stringify({ id: `big-${index}`, kind: "text", role: "agent", messageId: "m", createdAt: index, text: "y".repeat(1000) }) })));
+  const batches: Array<Array<{ messages?: { chatId: string; replace?: true; rows: Array<{ msgId: string }> } }>> = [];
+  const transport = { send: async () => true, sendHistoryBatch: async (frames: never[]) => { batches.push(frames); return true; } } as never;
+  const batched = new HistoryMirror(store, transport, () => true, value => value, undefined, () => true);
+  try {
+    batched.connect(); await batched.flush();
+    expect(batches.length).toBeGreaterThan(1);
+    const messageFrames = batches.flat().filter(frame => frame.messages);
+    expect(messageFrames.filter(frame => frame.messages!.replace).length).toBe(1);
+    expect(messageFrames[0]!.messages!.replace).toBe(true);
+    const ids = messageFrames.flatMap(frame => frame.messages!.rows.map(row => row.msgId)).filter(id => id.startsWith("big-"));
+    expect(ids).toEqual([...ids].sort());
+    expect(ids).toHaveLength(1000);
+  } finally { await batched.dispose(); await cleanup(); }
+});

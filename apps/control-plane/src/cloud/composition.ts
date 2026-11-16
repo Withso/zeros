@@ -343,7 +343,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   void liveSignals.start().catch(() => {});
   const connections = roles.relay || roles.lifecycle ? new CloudV2Relay({
     apiConfiguration, execution,
-    localCommandsEnabled: id => localCommands.enabled(id),
+    localCommandsEnabled: id => localCommands.enabled(id), historyBatch: true,
     retireLocalSender: (id, userId, epoch, sessionId) => store.prompts.retireLocalSender(id, userId, epoch, sessionId),
     store, timing, authorizeSource, continueSource, ...(securityEvents ? { securityEvents } : {}),
     runtimeAdmission: runtimeHandoffs,
