@@ -110,13 +110,33 @@ describe("release dependency and authority contracts", () => {
   });
 
 
-  it.each([["release-alpha", "alpha"], ["release-beta", "beta"], ["release", "production"]])("publishes and anonymously verifies the cumulative ledger in %s", (name, channel) => {
-    const text = job(publicationWorkflow(name), "publish");
+  it.each([["release-alpha", "alpha"], ["release-beta", "beta"], ["release-promote", "production"]])("publishes and anonymously verifies the cumulative ledger in %s", (name, channel) => {
+    // Production's ledger moves only when a candidate is promoted to Latest.
+    const text = name === "release-promote" ? job(workflow(name), "promote") : job(publicationWorkflow(name), "publish");
     expect(text).toContain("scripts/release/release-ledger-cli.ts --build");
     expect(text).toContain("scripts/release/release-ledger-cli.ts --verify");
-    const asset = name === "release" ? "release/release-ledger.json" : `release/${channel}-release-ledger.json`;
+    const asset = name === "release-promote" ? "release/release-ledger.json" : `release/${channel}-release-ledger.json`;
     expect(text).toContain(`"${asset}"`);
     expect(text.indexOf("release-ledger-cli.ts --verify")).toBeGreaterThan(text.indexOf('gh release create "$TAG"'));
+  });
+  it("publishes Production only as an rc candidate, and promotes the same verified files to Latest", () => {
+    const publish = job(workflow("release"), "publish"), promote = job(workflow("release-promote"), "promote");
+    expect(publish).not.toContain("--latest");
+    expect(publish).not.toContain("release-ledger-cli.ts");
+    expect(publish).toContain('TAG="rc"');
+    expect(publish).toContain("--prerelease");
+    expect(publish.indexOf("candidate-cli.ts --write")).toBeLessThan(publish.indexOf('gh release upload "$TAG"'));
+    expect(publish).toContain('"release/rc-candidate.json"');
+    expect(promote).toContain("needs: approve");
+    expect(promote).toContain("environment: production");
+    expect(promote.indexOf("candidate-cli.ts --verify")).toBeGreaterThan(promote.indexOf("gh release download rc"));
+    expect(promote.indexOf("candidate-cli.ts --verify")).toBeLessThan(promote.indexOf('gh release create "$TAG"'));
+    expect(promote).toContain("--latest");
+    expect(promote).not.toMatch(/electron-builder|notarytool|hosted-promotion|railway/i);
+    const text = workflow("release-promote");
+    expect(text).toContain("group: release-production");
+    expect(text).toContain("cancel-in-progress: false");
+    expect(job(text, "approve")).toContain("environment: production-approval");
   });
   it("includes the release controller source in normal Git discovery", () => {
     expect(spawnSync("git", ["check-ignore", "--no-index", "--quiet", "scripts/release/cli.ts"]).status).toBe(1);
@@ -284,7 +304,7 @@ esac
   });
 
   it("V6: revalidates publication in all desktop writers, including notarization-only retries", () => {
-    for (const [name, publish] of [["release-alpha", 'Publish rolling "alpha" prerelease'], ["release-beta", 'Publish rolling "beta" prerelease'], ["release", "Publish GitHub release"]]) {
+    for (const [name, publish] of [["release-alpha", 'Publish rolling "alpha" prerelease'], ["release-beta", 'Publish rolling "beta" prerelease'], ["release", "Publish release candidate"]]) {
       const text = job(publicationWorkflow(name), "publish"), step = text.split(`- name: ${publish}`)[1]?.split(/\n {6}- name:/)[0] ?? "";
       expect(step).toContain("pnpm exec tsx scripts/release/publication-cli.ts");
       expect(text).toContain("actions: read");
@@ -293,7 +313,7 @@ esac
     expect(job(workflow("hosted-promotion"), "guard")).toContain("fetch-tags: true");
   });
   it("V6: advances rolling Git tag refs after their assets are published", () => {
-    for (const name of ["release-alpha", "release-beta"]) {
+    for (const name of ["release-alpha", "release-beta", "release"]) {
       const text = publicationWorkflow(name);
       expect(text).toContain('git/refs/tags/$TAG');
       expect(text.indexOf('git/refs/tags/$TAG')).toBeGreaterThan(text.indexOf('gh release upload "$TAG"'));

@@ -269,7 +269,8 @@ dmg:
 # electron-updater reads latest-mac.yml to decide when an update is available.
 # The feed + artifacts are served from GitHub Releases:
 # /releases/latest/download/ always resolves to whatever release is marked
-# Latest, which release.yml sets explicitly with `--latest`.
+# Latest, which release-promote.yml sets explicitly with `--latest` when it
+# promotes a release candidate (release.yml publishes it to the rolling `rc`).
 #
 # This was Cloudflare R2 until the repo went public. The ONLY reason for R2 was
 # that anonymous clients get HTTP 404 on a PRIVATE repo's release assets, so an

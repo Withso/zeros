@@ -27,9 +27,9 @@ const MIN_OPPORTUNISTIC_CHECK_GAP_MS = 60 * 1000;
 // download, so a staged build waits this long before a newer one replaces it.
 const STAGED_REPLACEMENT_HOLD_MS = 60 * 60 * 1000;
 // GitHub Releases is the serving layer. `/releases/latest/download/<asset>`
-// always resolves to whatever release is marked Latest (release.yml passes
-// `--latest`; prereleases never qualify), and the rolling `alpha` / `beta` tags
-// give the pre-release channels a stable URL of their own.
+// always resolves to whatever release is marked Latest (release-promote.yml passes
+// `--latest`; prereleases never qualify), and the rolling `alpha` / `beta` / `rc`
+// tags give the pre-release channels and Production candidates a stable URL.
 const RELEASES = "https://github.com/Withso/zeros/releases";
 // Raw feed metadata for the staged-update preflight below (no cache-busting
 // query, so GitHub's CDN can serve repeated polls).

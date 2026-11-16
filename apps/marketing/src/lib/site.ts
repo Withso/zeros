@@ -5,7 +5,7 @@
 /**
  * Fixed URL that always serves the newest release's .dmg. No per-release edits:
  * `/releases/latest/download/` follows whatever GitHub marks Latest, and
- * .github/workflows/release.yml uploads a CONSTANT-named `Zeros-arm64.dmg`
+ * .github/workflows/release-promote.yml uploads a CONSTANT-named `Zeros-arm64.dmg`
  * alongside the version-stamped one for exactly this purpose.
  *
  * This was a Cloudflare R2 URL, on the reasoning that github.com release assets

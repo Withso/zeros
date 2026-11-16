@@ -55,8 +55,8 @@ main ─────────────────────────
 | 0 | When Alpha has moved past a release's code, keep the destination's current runtime if CI replays its worker contract (warning, not failure) | #1124 |
 | 0 | One approval per release, covering hosted, runtime and signing | #1125 |
 | 1 | Production app follows the `rc` feed when a staff-only Internal toggle is on, falling back to Latest | #1128 |
-| 2 | `release.yml` publishes candidates to `rc`; new `release-promote.yml`; candidate receipt replaces the Beta receipt in `scripts/release/` and `cutover-cli.ts` | planned |
-| 3 | Remove Beta from code, after one candidate → promote cycle | planned |
+| 2 | `release.yml` publishes candidates to `rc` with a receipt; new `release-promote.yml` publishes the same files as Latest | this PR |
+| 3 | Remove Beta: the candidate receipt replaces the Beta receipt in `scripts/release/` and `cutover-cli.ts`, after one candidate → promote cycle | planned |
 | — | Tear down Beta services (order below), then delete old release branches | planned |
 
 0.1.30 ships through the existing Beta flow. 0.1.31 is the first candidate,

@@ -181,17 +181,21 @@ export function githubClient(config: Pick<PromotionConfig, "repository" | "sourc
     },
     async lastPublication(channel: Channel) {
       requireCheck(/^[\w.-]+\/[\w.-]+$/.test(config.repository), "Publication repository is invalid");
-      const workflow = channel === "production" ? "release.yml" : `release-${channel}.yml`;
       const event = channel === "production" ? "workflow_dispatch" : "push";
       const label = channel === "production" ? "Production" : channel === "alpha" ? "Alpha" : "Beta";
+      // Production is published by release-promote.yml; release.yml published it
+      // before release candidates and now publishes only the `rc` candidate, whose
+      // step has another name, so its new runs never count.
+      const workflows = channel === "production" ? ["release-promote.yml", "release.yml"] : [`release-${channel}.yml`];
       const jobNames = [channel === "production" ? "Notarize + verify + publish (macOS arm64)"
         : `Build + publish ${label} (macOS arm64 · signed · NOT notarized)`, `Publish ${label} feed`];
       if (channel === "alpha") jobNames.push("Alpha publication / Publish Alpha feed");
+      if (channel === "production") jobNames.push("Promote to Production");
       const stepName = channel === "production" ? "Publish GitHub release" : `Publish rolling "${channel}" prerelease`;
       const runs: any[] = [];
       // Read bounded complete retained history: creation order alone misses a
       // later publication from a rerun of an older workflow run.
-      for (let page = 1; page <= 10; page++) {
+      for (const workflow of workflows) for (let page = 1; page <= 10; page++) {
         const result = await read(`/actions/workflows/${workflow}/runs?status=success&event=${event}&per_page=100&page=${page}`);
         requireCheck(Array.isArray(result.workflow_runs) && result.total_count <= 1000, "Publication history is unavailable or exceeds its bound");
         runs.push(...result.workflow_runs);
@@ -200,9 +204,10 @@ export function githubClient(config: Pick<PromotionConfig, "repository" | "sourc
       }
       const trusted = runs.filter(run => Number.isSafeInteger(run.id) && run.id > 0 && SHA.test(run.head_sha ?? "") &&
         run.repository?.full_name === config.repository && run.head_repository?.full_name === config.repository &&
-        run.path === `.github/workflows/${workflow}` && run.event === event && run.status === "completed" && run.conclusion === "success" &&
+        workflows.some(workflow => run.path === `.github/workflows/${workflow}`) && run.event === event && run.status === "completed" && run.conclusion === "success" &&
         (channel === "alpha" ? run.head_branch === "main" : /^release\/\d+\.\d+\.\d+$/.test(run.head_branch ?? "")) &&
-        Number.isFinite(Date.parse(run.updated_at))).sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at));
+        Number.isFinite(Date.parse(run.updated_at))).filter((run, index, all) => all.findIndex(other => other.id === run.id) === index)
+        .sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at));
       let latest: { sourceSha: string; runId: string; publishedAt: number } | null = null;
       for (const run of trusted) {
         if (latest && Date.parse(run.updated_at) < latest.publishedAt) break;
