@@ -1,8 +1,8 @@
 # Release candidates roadmap: retiring Beta
 
-Status: **planned, in progress.** Until this lands, [deployment environments](deployment-environments.md)
-describes the live Alpha → Beta → Production ladder, and code remains
-authoritative.
+Status: **code complete; Beta services await teardown** (order below).
+[Deployment environments](deployment-environments.md) describes the live
+release flow, and code remains authoritative.
 
 ## Why
 
@@ -57,7 +57,7 @@ main ─────────────────────────
 | 1 | Production app follows the `rc` feed when a staff-only Internal toggle is on, falling back to Latest | #1128 |
 | 2 | `release.yml` publishes candidates to `rc` with a receipt; new `release-promote.yml` publishes the same files as Latest | #1129 |
 | 3a | Production waits for Alpha, not Beta: hosted promotion, Apple submission and cutovers require Alpha to have applied the release's migrations | this PR |
-| 3b | Retire the Beta pipeline: no Beta builds or deploys; retired `beta` identifiers stay readable | planned |
+| 3b | Retire the Beta pipeline: no Beta builds or deploys; retired `beta` identifiers stay readable | this PR |
 | — | Tear down Beta services (order below), then delete old release branches | planned |
 
 Each run uses its release branch's own copy of the workflows. A branch cut

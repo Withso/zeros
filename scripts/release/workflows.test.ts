@@ -16,12 +16,12 @@ describe("release dependency and authority contracts", () => {
     expect(job(text, "release-slot")).toBe("");
     expect(job(text, "publication")).toContain("if: github.event.repository.fork == false && needs.ci.outputs.ready == 'true'");
     expect(text).not.toContain("actions: write");
-    for (const name of ["release-beta", "release"]) expect(workflow(name)).not.toContain("release-slot");
+    for (const name of ["release"]) expect(workflow(name)).not.toContain("release-slot");
   });
 
 
 
-  it.each(["release-alpha", "release-beta", "release"])("gates %s mutations on exact-source required CI without delaying the build", name => {
+  it.each(["release-alpha", "release"])("gates %s mutations on exact-source required CI without delaying the build", name => {
     const text = workflow(name), ci = job(text, "ci");
     expect(ci).toContain("actions: read");
     expect(ci).toContain("contents: read");
@@ -79,7 +79,7 @@ describe("release dependency and authority contracts", () => {
     expect(parsed.jobs["source-sync-workload"].name).toBe("source-sync workload (macOS)");
   });
 
-  it.each(["release-beta", "release", "controlled-cutover", "staff-owner-bootstrap"])("retains the full/default CI wiring in %s", name => {
+  it.each(["release", "controlled-cutover", "staff-owner-bootstrap"])("retains the full/default CI wiring in %s", name => {
     expect(workflow(name)).not.toMatch(/ZEROS_ALPHA_CI_FAST_PATH|alpha_ci_fast_path|ZEROS_ALPHA_FORWARD_ONLY|alpha_forward_only|outputs\.ready/);
   });
 
@@ -110,7 +110,7 @@ describe("release dependency and authority contracts", () => {
   });
 
 
-  it.each([["release-alpha", "alpha"], ["release-beta", "beta"], ["release-promote", "production"]])("publishes and anonymously verifies the cumulative ledger in %s", (name, channel) => {
+  it.each([["release-alpha", "alpha"], ["release-promote", "production"]])("publishes and anonymously verifies the cumulative ledger in %s", (name, channel) => {
     // Production's ledger moves only when a candidate is promoted to Latest.
     const text = name === "release-promote" ? job(workflow(name), "promote") : job(publicationWorkflow(name), "publish");
     expect(text).toContain("scripts/release/release-ledger-cli.ts --build");
@@ -145,10 +145,15 @@ describe("release dependency and authority contracts", () => {
     expect(text).toContain("cancel-in-progress: false");
     expect(job(text, "approve")).toContain("environment: production-approval");
   });
+  it("retires the Beta pipeline: no Beta workflow, and no workflow input offers Beta", () => {
+    expect(() => workflow("release-beta")).toThrow();
+    for (const name of ["controlled-cutover", "runtime-release"]) expect(workflow(name)).not.toMatch(/options: \[[^\]]*\bbeta\b/);
+    expect(workflow("runtime-release-run")).not.toContain("inputs.channel == 'beta'");
+  });
   it("includes the release controller source in normal Git discovery", () => {
     expect(spawnSync("git", ["check-ignore", "--no-index", "--quiet", "scripts/release/cli.ts"]).status).toBe(1);
   });
-  it.each([["release-alpha", "alpha"], ["release-beta", "beta"], ["release", "production"]])("publishes %s only after CI, parallel signing, and hosted success", (name, channel) => {
+  it.each([["release-alpha", "alpha"], ["release", "production"]])("publishes %s only after CI, parallel signing, and hosted success", (name, channel) => {
     const text = workflow(name), mutations = publicationWorkflow(name), parsed = load(text) as any;
     expect(channel === "alpha" ? parsed.jobs.publication.concurrency : parsed.concurrency).toEqual({ group: `release-${channel}`, "cancel-in-progress": false });
     const hosted = job(mutations, "hosted");
@@ -173,7 +178,7 @@ describe("release dependency and authority contracts", () => {
     expect(buildSecrets.every(secret => ["CSC_LINK", "CSC_KEY_PASSWORD", "VITE_APP_BASE_URL", "VITE_CONTROL_PLANE_URL", "VITE_POSTHOG_KEY_PROD", "VITE_POSTHOG_HOST"].includes(secret))).toBe(true);
     expect(text.replace(`\n  build:\n${build}`, "")).not.toContain("secrets.CSC_");
   });
-  it.each(["release-alpha", "release-beta", "release"])("retains release-only packaged checks and a retryable signed artifact in %s", name => {
+  it.each(["release-alpha", "release"])("retains release-only packaged checks and a retryable signed artifact in %s", name => {
     const build = job(workflow(name), "build");
     for (const command of ["pnpm smoke:engine", "pnpm smoke:packaged-pty", "scripts/verify-macos-release-artifacts.mjs"])
       expect(build).toContain(command);
@@ -186,7 +191,7 @@ describe("release dependency and authority contracts", () => {
     expect(build).not.toContain("release/notarization-submission-id.txt");
     expect(job(publicationWorkflow(name), "publish")).toContain("uses: actions/download-artifact@");
   });
-  it.each(["release-alpha", "release-beta", "release"])("binds %s publication to the cloud capability its build baked in", name => {
+  it.each(["release-alpha", "release"])("binds %s publication to the cloud capability its build baked in", name => {
     const text = workflow(name), build = job(text, "build"), publish = job(publicationWorkflow(name), "publish");
     expect(build).toContain("cloud_enabled: ${{ steps.capability.outputs.cloud_enabled }}");
     expect(build).toContain("id: capability");
@@ -311,7 +316,7 @@ esac
   });
 
   it("V6: revalidates publication in all desktop writers, including notarization-only retries", () => {
-    for (const [name, publish] of [["release-alpha", 'Publish rolling "alpha" prerelease'], ["release-beta", 'Publish rolling "beta" prerelease'], ["release", "Publish release candidate"]]) {
+    for (const [name, publish] of [["release-alpha", 'Publish rolling "alpha" prerelease'], ["release", "Publish release candidate"]]) {
       const text = job(publicationWorkflow(name), "publish"), step = text.split(`- name: ${publish}`)[1]?.split(/\n {6}- name:/)[0] ?? "";
       expect(step).toContain("pnpm exec tsx scripts/release/publication-cli.ts");
       expect(text).toContain("actions: read");
@@ -320,7 +325,7 @@ esac
     expect(job(workflow("hosted-promotion"), "guard")).toContain("fetch-tags: true");
   });
   it("V6: advances rolling Git tag refs after their assets are published", () => {
-    for (const name of ["release-alpha", "release-beta", "release"]) {
+    for (const name of ["release-alpha", "release"]) {
       const text = publicationWorkflow(name);
       expect(text).toContain('git/refs/tags/$TAG');
       expect(text.indexOf('git/refs/tags/$TAG')).toBeGreaterThan(text.indexOf('gh release upload "$TAG"'));

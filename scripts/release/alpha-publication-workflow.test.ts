@@ -106,7 +106,7 @@ describe("concurrent Alpha preparation and serialized publication", () => {
     expect(publish.permissions).toEqual({ contents: "write", actions: "read" });
     expect(JSON.stringify(workflow("alpha-publication"))).not.toContain("id-token");
   });
-  it.each([["release-beta", "beta"], ["release", "production"]])("retains %s channel locking and full CI", (name, channel) => {
+  it.each([["release", "production"]])("retains %s channel locking and full CI", (name, channel) => {
     const parsed = workflow(name);
     expect(parsed.concurrency).toEqual({ group: `release-${channel}`, "cancel-in-progress": false });
     expect(parsed.jobs.publication).toBeUndefined();

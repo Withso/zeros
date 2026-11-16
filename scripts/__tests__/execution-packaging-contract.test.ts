@@ -10,7 +10,6 @@ const workflows = [
   "ci",
   "preflight",
   "release-alpha",
-  "release-beta",
   "release",
 ] as const;
 

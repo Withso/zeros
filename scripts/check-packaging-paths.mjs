@@ -34,16 +34,13 @@ const stablePromoteWorkflow = readFileSync(
   ".github/workflows/release-promote.yml",
   "utf8",
 );
-// Both PRE-RELEASE channel workflows. Alpha (every merge to main) and Beta (a
-// release/* stabilization cut) keep the same feed/blockmap handoff, so they get
-// the SAME asset assertions. Alpha additionally gates its writers on explicit
-// CI readiness. Adding a channel
+// The PRE-RELEASE channel workflow: Alpha (every merge to main); Beta is retired.
+// Alpha gates its writers on explicit CI readiness. Adding a channel
 // workflow without adding it here would ship a channel whose differential-update
 // blockmap is silently dropped: updates still work, but every client downloads the
 // full ~800 MB zip instead of a delta.
 const channelReleaseWorkflows = [
   ["alpha release workflow", ".github/workflows/release-alpha.yml"],
-  ["beta release workflow", ".github/workflows/release-beta.yml"],
 ].map(([label, file]) => {
   const parent = readFileSync(file, "utf8");
   const publication = file.endsWith("release-alpha.yml") ? readFileSync(".github/workflows/alpha-publication.yml", "utf8") : parent;

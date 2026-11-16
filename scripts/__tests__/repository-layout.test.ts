@@ -730,14 +730,13 @@ describe("repository layout contracts", () => {
   it("limits release credentials to protected channel environments", () => {
     const alpha = read(".github/workflows/release-alpha.yml");
     const alphaPublication = read(".github/workflows/alpha-publication.yml");
-    const beta = read(".github/workflows/release-beta.yml");
     const stable = read(".github/workflows/release.yml");
 
     expect(alpha).toContain("environment: alpha");
     expect(alphaPublication).toContain("environment: alpha");
-    expect(beta).toContain("environment: beta");
     expect(alpha).not.toContain("workflow_dispatch:");
-    expect(beta).not.toContain("workflow_dispatch:");
+    // Beta is retired: no workflow builds or deploys it.
+    expect(existsSync(".github/workflows/release-beta.yml")).toBe(false);
     // The read-only resolver needs channel variables; the other jobs need secrets.
     const productionJobs = [
       ...stable.matchAll(
@@ -751,9 +750,9 @@ describe("repository layout contracts", () => {
       "runtime-resolve",
       "submit",
     ]);
-    expect(stable).toContain("Require a Beta-validated release branch");
+    expect(stable).toContain("Require a release branch");
     expect(stable).toContain(
-      "Production must be dispatched from 'release/X.Y.Z' after Beta validation",
+      "Production must be dispatched from 'release/X.Y.Z'",
     );
     expect(stable).not.toContain("refs/heads/main|refs/heads/release/*");
   });
@@ -790,7 +789,6 @@ describe("repository layout contracts", () => {
       "if: success() && steps.barrier.outputs.admission_issued == 'true'",
     );
     for (const workflow of [
-      "release-beta",
       "release",
       "controlled-cutover",
       "staff-owner-bootstrap",
@@ -807,7 +805,6 @@ describe("repository layout contracts", () => {
       "ZEROS_CLOUD_WORKSPACES_ENABLED: ${{ vars.ZEROS_CLOUD_WORKSPACES_ENABLED || 'false' }}";
     for (const workflow of [
       ".github/workflows/release-alpha.yml",
-      ".github/workflows/release-beta.yml",
       ".github/workflows/release.yml",
     ]) {
       expect(read(workflow)).toContain(releaseCapability);
@@ -832,12 +829,6 @@ describe("repository layout contracts", () => {
         appName: "Zeros Alpha.app",
         bundleId: "com.zeros.alpha",
         publishStep: 'name: Publish rolling "alpha" prerelease',
-      },
-      {
-        workflow: ".github/workflows/release-beta.yml",
-        appName: "Zeros Beta.app",
-        bundleId: "com.zeros.beta",
-        publishStep: 'name: Publish rolling "beta" prerelease',
       },
       {
         workflow: ".github/workflows/release.yml",

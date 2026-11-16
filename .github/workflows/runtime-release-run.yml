@@ -119,7 +119,6 @@ jobs:
     if: >-
       !cancelled() && github.event.repository.fork == false &&
       ((inputs.channel == 'alpha' && github.ref == 'refs/heads/main' && needs.approve.result == 'skipped') ||
-      (inputs.channel == 'beta' && startsWith(github.ref, 'refs/heads/release/') && needs.approve.result == 'skipped') ||
       (inputs.channel == 'production' && startsWith(github.ref, 'refs/heads/release/') &&
       (needs.approve.result == 'success' || (inputs.release_approved && needs.approve.result == 'skipped')))) &&
       ((inputs.action == 'publish' && needs.build.result == 'success') ||

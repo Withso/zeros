@@ -36,7 +36,7 @@ describe("runtime release workflow authority", () => {
   });
   it("is dispatch-only with closed channel/action choices and read-only GitHub access", () => {
     expect(Object.keys(dispatch.on)).toEqual(["workflow_dispatch"]);
-    expect(dispatch.on.workflow_dispatch.inputs.channel.options).toEqual(["alpha", "beta", "production"]);
+    expect(dispatch.on.workflow_dispatch.inputs.channel.options).toEqual(["alpha", "production"]);
     expect(dispatch.on.workflow_dispatch.inputs.action.options).toEqual(["publish", "promote", "rollback"]);
     expect(workflow.permissions).toEqual({ contents: "read", actions: "read" });
     expect(text).not.toMatch(/contents: write|actions: write|id-token: write|secrets: inherit/);
@@ -70,7 +70,7 @@ describe("runtime release workflow authority", () => {
     expect(release.if).toContain("(inputs.release_approved && needs.approve.result == 'skipped')");
     expect(workflow.on.workflow_call.inputs.release_approved).toEqual(expect.objectContaining({ type: "boolean", default: false }));
     expect(release.environment).toBe("${{ inputs.channel }}");
-    expect(release.if).toContain("inputs.channel == 'beta'"); expect(text).not.toContain("beta-approval");
+    expect(release.if).not.toContain("inputs.channel == 'beta'"); expect(text).not.toContain("beta-approval");
   });
   it("lets only release.yml stand its own approval in for the runner's", () => {
     const callers = (file: string) => Object.values((load(readFileSync(new URL(`../../.github/workflows/${file}`, import.meta.url), "utf8")) as any).jobs)
@@ -79,7 +79,7 @@ describe("runtime release workflow authority", () => {
     expect(production).toHaveLength(1);
     expect((production[0] as any).with.release_approved).toBe(true);
     expect((production[0] as any).needs).toBe("runtime-resolve");
-    for (const file of ["runtime-release.yml", "release-beta.yml", "alpha-publication.yml"])
+    for (const file of ["runtime-release.yml", "alpha-publication.yml"])
       for (const job of callers(file)) expect((job as any).with?.release_approved, file).toBeUndefined();
   });
   it("keeps secrets in the controller and its immediate cleanup step, and binds evidence to the attempt", () => {

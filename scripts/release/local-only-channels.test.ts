@@ -80,8 +80,9 @@ describe.each(["beta", "production"] as const)("%s release while its channel is 
     }
   });
 
-  it("bakes and publishes cloud=false while retaining CI, hosted promotion and platform checks", () => {
-    const workflow = load(readFileSync(`.github/workflows/${channel === "beta" ? "release-beta" : "release"}.yml`, "utf8")) as {
+  // Beta is retired and has no release workflow; its channel policy stays readable.
+  it.skipIf(channel === "beta")("bakes and publishes cloud=false while retaining CI, hosted promotion and platform checks", () => {
+    const workflow = load(readFileSync(".github/workflows/release.yml", "utf8")) as {
       jobs: Record<string, { env?: Record<string, string>; needs?: string[]; steps?: { run?: string }[] }>;
     };
     expect(releaseChannelEnvironment(channel, environment(channel), policy)).toEqual({

@@ -5,25 +5,27 @@ application:
 
 ```text
 main ────────────────> Alpha
-  └─ release/X.Y.Z ─> Beta
-       └─ same SHA ─> Production (manual)
+  └─ release/X.Y.Z ─> release.yml: hosted + runtime to Production, app to the `rc` candidate
+       └─ same files ─> release-promote.yml: vX.Y.Z Latest for everyone
 ```
 
 Merging to `main` is an Alpha action, not a Production action. Production must
-never continuously deploy `main`; it is a manual promotion of the exact commit
-that Beta validated.
+never continuously deploy `main`; it is a manual promotion of a release branch
+whose migrations Alpha has already run.
 
-Beta is planned for retirement in favour of Production-app release candidates;
-see the [release candidates roadmap](release-candidates-roadmap.md). This page
-describes the live ladder until that lands.
+**Beta is retired** ([release candidates roadmap](release-candidates-roadmap.md)).
+No workflow builds or deploys it. Its rows and sections below describe the
+retired stack until its services are torn down; `beta` identifiers that were
+persisted or seen outside the repository (data directories, the `zeros-beta`
+deep-link scheme, client headers, migrations) stay readable.
 
 ## Deployment topology
 
 | Channel    | Source                                 | Railway                                                    | Cloudflare surfaces                     | Public origins                                                             |
 | ---------- | -------------------------------------- | ---------------------------------------------------------- | --------------------------------------- | -------------------------------------------------------------------------- |
 | Alpha      | `main`                                 | `alpha` environment: control plane + isolated PlanetScale Postgres      | `zeros-web-alpha`, `zeros-ops-alpha`    | `api-alpha.zeros.build`, `app-alpha.zeros.build`, `ops-alpha.zeros.build`  |
-| Beta       | current `release/X.Y.Z`                | `beta` environment: control plane + isolated PlanetScale Postgres       | `zeros-web-beta`; **no Ops deployment** | `api-beta.zeros.build`, `app-beta.zeros.build`                             |
-| Production | the same release commit Beta validated | `production` environment: control plane + isolated PlanetScale Postgres | `zeros-web`, `zeros-ops`                | `api.zeros.build`, `app.zeros.build`, `ops.zeros.build`, marketing domains |
+| Beta       | **retired**; no workflow deploys it    | `beta` environment, pending teardown                                    | `zeros-web-beta`, pending teardown      | `api-beta.zeros.build`, `app-beta.zeros.build`                             |
+| Production | a release branch Alpha has run first   | `production` environment: control plane + isolated PlanetScale Postgres | `zeros-web`, `zeros-ops`                | `api.zeros.build`, `app.zeros.build`, `ops.zeros.build`, marketing domains |
 
 This remains one backend codebase and one frontend codebase. Each channel is an
 isolated deployment instance with independent data, credentials, sessions, and
@@ -1006,9 +1008,8 @@ step and fails if a dependency change stops it storing links for macOS.
    and CI. PR checks for a
    different SHA, a fork's checks, or an older successful attempt cannot authorize
    mutation.
-2. Test Alpha, then cut an exact `release/X.Y.Z` branch. Beta uses one global
-   destination lock across every release branch. The controller retargets
-   Railway and Pages metadata to the selected branch and deploys its event SHA.
+2. Test Alpha, then cut an exact `release/X.Y.Z` branch from a commit Alpha has
+   deployed. Nothing deploys on the cut itself.
 3. Stabilize with cherry-picks on that branch. Every resulting SHA needs its own
    required CI evidence (Preflight and CodeQL push on both `main` and
    `release/**`). Superseded same-branch commits
