@@ -107,10 +107,22 @@ supported desktop the way that desktop parses. CI checks this directly:
   enum value, a removed or retyped required field, or a non-2xx reply fails.
   Added fields pass, as they do in the app's parsers.
 
+The cloud worker runtime has the same contract, because the previous pin keeps
+talking to a new control plane during a handover
+([Cloud workspaces](cloud-workspaces.md)).
+`apps/cloud-worker/src/control-plane-contract.ts` lists the boot sequence
+(hello, config, activity), the bodies the transport builds through the same
+helpers, and the advertised `X-Zeros-Worker-Features`. Its committed copy is
+`worker-next.json`, and `pnpm client-contract:release` keeps
+`released/worker-X.Y.Z.json` beside the desktop copy. The replay runs each
+kept runtime's sequence as one boot. Config frames are strict, so a field the
+control plane sends without checking that runtime's advertised features fails
+with `unrecognized_keys`.
+
 Refinements and transforms JSON Schema cannot express are left out, so the
 check can miss a break but does not invent one. It covers the listed cloud
-workspace reads today; extend the list rather than writing per-feature N-1
-tests for calls it can replay.
+workspace reads and the worker boot sequence today; extend the lists rather
+than writing per-feature N-1 tests for calls they can replay.
 
 ## Required update behavior
 
