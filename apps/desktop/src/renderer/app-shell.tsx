@@ -58,6 +58,7 @@ import {
 } from "./features/agent/agents-cache";
 import { migrateDefaultModelSelection } from "./features/agent/model-favorites";
 import { UpdateNotifications } from "./features/update/update-notifications";
+import { ReleaseCandidatesSync } from "./features/update/release-candidates-sync";
 import { useCopyLogsHotkey } from "./shell/use-copy-logs-hotkey";
 import { useNewTabHotkeys } from "./shell/use-new-chat-hotkey";
 import { useOpenBrowserHotkey } from "./shell/use-open-browser-hotkey";
@@ -1311,6 +1312,7 @@ export function AppShell() {
             renderer; useAnyAgentRunning reads a global Zustand store, so no
             provider below the gate is required. */}
         <UpdateNotifications />
+        <ReleaseCandidatesSync />
         <KeepAwakeController />
         <InviteDeepLinkHandler />
         <AuthSecurityEventHandler />

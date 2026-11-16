@@ -160,6 +160,7 @@ const commandTable: Record<string, CommandHandler> = {
   updater_install: notImpl("updater_install", 8),
   updater_status: notImpl("updater_status", 8),
   updater_require: notImpl("updater_require", 8),
+  updater_release_candidates: notImpl("updater_release_candidates", 8),
   process_relaunch: notImpl("process_relaunch", 8),
   system_idle_time: notImpl("system_idle_time", 8),
 

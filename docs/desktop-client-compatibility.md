@@ -167,6 +167,25 @@ never replaced while the requirement stands, so the mandatory restart is not
 pushed back. Without automatic restart, the staged build installs on the next
 quit, as before.
 
+## Release candidates (Production app)
+
+Settings → Internal → **Release candidates** lets a staff account's Production
+app follow the rolling `rc` prerelease, where each release is published before
+it becomes Latest ([release candidates roadmap](release-candidates-roadmap.md)).
+The renderer reports the effective value (staff role AND the Internal flag) to
+Electron main through `updater_release_candidates` only once `/v1/me` has
+resolved, so a signed-out launch keeps main's last choice. Main persists it in
+`release-candidates.json` in `userData` and applies it from the launch check.
+
+When it is on, each check reads `rc-mac.yml` and `latest-mac.yml` and follows
+`rc` only when its version is newer; a missing or broken `rc` feed falls back to
+Latest. The staged-build comparison uses the same choice, so a newer candidate
+still replaces a staged Latest build after the hourly hold. Downgrade stays off:
+turning it off keeps the installed candidate until a newer release. An app that
+never opted in keeps its baked feed. Alpha, Beta and Dev ignore the choice.
+Candidates are Production builds, so request headers, analytics and the
+release ledger see `production` and the candidate's version.
+
 ## Update relaunch recovery (macOS)
 
 After installing a staged update, Squirrel's ShipIt relaunches the app through

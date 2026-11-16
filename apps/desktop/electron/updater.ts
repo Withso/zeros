@@ -15,6 +15,7 @@ import { channel, type Channel } from "../src/engine/runtime";
 import { mergeClientUpgradeRequired, parseClientUpgradeRequired, type ClientUpgradeRequired } from "../shared/client-compatibility";
 import { onClientUpgrade } from "./client-upgrade-signal";
 import { startUpdateRelaunchGuard } from "./relaunch-guard";
+import { readReleaseCandidatesEnabled, RELEASE_CANDIDATE_FEED, writeReleaseCandidatesEnabled } from "./release-candidates";
 import type { ChildProcess } from "node:child_process";
 
 let wired = false;
@@ -146,6 +147,10 @@ let checkInFlight: Promise<CheckResult> | null = null;
 let lastCheckStartedAt: number | null = null;
 let lastCheckSucceededAt: number | null = null;
 let stagedFeedPollInFlight: Promise<void> | null = null;
+/** Staff opt-in on the stable channel: follow `rc` whenever it is newer than Latest. */
+let releaseCandidates = false;
+/** The generic feed set over the baked one; null keeps the baked app-update.yml. */
+let stableFeedOverride: "rc" | "latest" | null = null;
 let lastStagedFeedPollAt: number | null = null;
 let lastStagedFeedSucceededAt: number | null = null;
 let automaticCheckTimer: ReturnType<typeof setTimeout> | null = null;
@@ -266,11 +271,40 @@ function automaticCheckThrottled(startedAt: number | null, succeededAt: number |
   return recent(startedAt, MIN_OPPORTUNISTIC_CHECK_GAP_MS) || recent(succeededAt, CHECK_INTERVAL_MS);
 }
 
+async function feedVersion(url: string): Promise<string | null> {
+  const response = await net.fetch(url, { headers: { "Cache-Control": "no-cache" } });
+  if (!response.ok) throw new Error(`feed metadata returned HTTP ${response.status}`);
+  return parseFeedVersion(await response.text());
+}
+
+/** The newest version a stable build may take: Latest, or `rc` when opted in and newer. */
+async function stableCandidateVersion(): Promise<{ feed: "rc" | "latest"; version: string | null }> {
+  const latest = await feedVersion(STABLE_FEED_METADATA_URL);
+  if (!releaseCandidates) return { feed: "latest", version: latest };
+  // A missing or broken candidate feed must never stop ordinary updates.
+  const candidate = await feedVersion(RELEASE_CANDIDATE_FEED.metadataUrl).catch(() => null);
+  return candidate && (!latest || isVersionNewer(candidate, latest)) ? { feed: "rc", version: candidate } : { feed: "latest", version: latest };
+}
+
+const followsSelectedFeed = () => channel() === "stable" && (releaseCandidates || stableFeedOverride !== null);
+
+/** Point a stable build at `rc` or Latest before a check. Once overridden, Latest is
+ * the same generic feed the metadata preflight reads, never a return to the baked one. */
+async function selectStableFeed(): Promise<void> {
+  const feed = releaseCandidates ? (await stableCandidateVersion().catch(() => ({ feed: "latest" as const }))).feed : "latest";
+  if (feed === stableFeedOverride) return;
+  const target = feed === "rc" ? RELEASE_CANDIDATE_FEED : UPDATER_FEED_BY_CHANNEL.stable!;
+  autoUpdater.setFeedURL({ provider: "generic", url: target.url, channel: target.channel });
+  autoUpdater.allowDowngrade = false;
+  stableFeedOverride = feed;
+  console.log(`[updater] following the ${feed === "rc" ? "release candidate" : "Latest"} feed`);
+}
+
 function checkForUpdatesShared(): Promise<CheckResult> {
   if (checkInFlight) return checkInFlight;
   clearAutomaticCheckTimer();
   lastCheckStartedAt = Date.now();
-  const request = autoUpdater.checkForUpdates();
+  const request = followsSelectedFeed() ? selectStableFeed().then(() => autoUpdater.checkForUpdates()) : autoUpdater.checkForUpdates();
   checkInFlight = request;
   const clear = () => {
     if (checkInFlight !== request) return;
@@ -315,16 +349,9 @@ function checkForNewerThanStaged(reason: string, force = false): void {
   lastStagedFeedPollAt = Date.now();
   const previousVersion = stagedVersion;
   stagedFeedPollInFlight = (async () => {
-    const metadataUrl =
-      UPDATER_FEED_BY_CHANNEL[channel()]?.metadataUrl ??
-      STABLE_FEED_METADATA_URL;
-    const response = await net.fetch(metadataUrl, {
-      headers: { "Cache-Control": "no-cache" },
-    });
-    if (!response.ok) {
-      throw new Error(`feed metadata returned HTTP ${response.status}`);
-    }
-    const candidate = parseFeedVersion(await response.text());
+    const candidate = channel() === "stable"
+      ? (await stableCandidateVersion()).version
+      : await feedVersion(UPDATER_FEED_BY_CHANNEL[channel()]?.metadataUrl ?? STABLE_FEED_METADATA_URL);
     if (candidate) lastStagedFeedSucceededAt = Date.now();
     if (!candidate || !isVersionNewer(candidate, previousVersion)) return;
     if (!stagedReplacementDue(previousVersion)) return;
@@ -391,7 +418,7 @@ function checkAutomatically(reason: string): void {
   // The interval timer is itself the cadence: it is armed only when a check
   // completes, so its own tick is never throttled. A small wall-clock step
   // could otherwise read the tick as "too soon" and end the background chain.
-  const due = reason === "required" || reason === "interval";
+  const due = reason === "required" || reason === "interval" || reason === "feed";
   if (updateDownloaded) {
     checkForNewerThanStaged(reason, due);
     return;
@@ -579,6 +606,8 @@ export function setupUpdater(): void {
   // Stable deliberately keeps the baked app-update.yml as its feed source, so only
   // the downgrade policy is applied here.
   autoUpdater.allowDowngrade = feed?.allowDowngrade ?? true;
+  // The staff opt-in applies from the launch check, before the renderer reports it again.
+  if (channel() === "stable") releaseCandidates = readReleaseCandidatesEnabled();
 
   autoUpdater.on("checking-for-update", () =>
     publishUnlessReady({ kind: "checking" }),
@@ -754,6 +783,19 @@ export const updaterStatus: CommandHandler = () => currentStatus;
 /** Seconds since the last keyboard, mouse or trackpad input anywhere on the Mac. */
 export const systemIdleTime: CommandHandler = () => powerMonitor.getSystemIdleTime();
 export const updaterRequire: CommandHandler = (args) => requireClientUpgrade(args);
+/** `updater_release_candidates` — the renderer reports the effective staff opt-in
+ * (staff role AND the Internal flag) once the role is known. Stable builds only:
+ * Alpha, Beta and Dev have their own feeds. Turning it off never downgrades. */
+export const updaterReleaseCandidates: CommandHandler = (args) => {
+  const enabled = (args as { enabled?: unknown } | undefined)?.enabled;
+  if (typeof enabled !== "boolean") throw new Error("Invalid release candidate choice");
+  if (channel() !== "stable") return { applied: false };
+  if (enabled === releaseCandidates) return { applied: true, enabled };
+  releaseCandidates = enabled;
+  writeReleaseCandidatesEnabled(enabled);
+  if (wired) checkAutomatically("feed");
+  return { applied: true, enabled };
+};
 
 /** Explicit process relaunch. Kept for any caller that still needs an in-place
  *  restart after external state change. */
