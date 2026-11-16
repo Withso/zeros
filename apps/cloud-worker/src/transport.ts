@@ -43,6 +43,8 @@ export interface Transport {
   reportSetup?: (status: CloudV2SetupStatus) => Promise<void>;
   /** history-digest-v1: each chat's stored digest (one read on reconnect). */
   historyDigests?: () => Promise<unknown>;
+  /** history-batch-v1: several history frames in one request (accepted only when the configuration offers historyBatch). */
+  sendHistoryBatch?: (frames: Array<Extract<CloudV2WorkerFrame, { t: "history" }>>) => Promise<boolean>;
   runtimeUpdate?: (request: CloudRuntimeUpdateRequest, signal?: AbortSignal) => Promise<CloudRuntimeUpdateReply>;
   /** recovery-quiesce-v1 (outbound): seal or confirm a recovery binding. */
   recovery?: (request: CloudRecoveryRequest, signal?: AbortSignal) => Promise<CloudRecoveryReply>;

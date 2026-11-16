@@ -100,6 +100,9 @@ const frame = z.unknown();
 /** history-digest-v1 (not advertised until the control plane's half lands): on reconnect the worker reads each chat's
  * stored digest once and re-sends only chats whose content differs. Any doubt means today's full replacement. */
 export const HISTORY_DIGEST_FEATURE = "history-digest-v1";
+/** history-batch-v1: frames that queued together, from any chats, in one request and one control-plane transaction. */
+export const HISTORY_BATCH_FEATURE = "history-batch-v1";
+export const CLOUD_V2_MAX_HISTORY_BATCH_FRAMES = 50;
 /** boot-timings-v1: the worker reports when it listens, sends and gets its hello acknowledged, and first accepts an
  * inbound relay, so one wake reads on one timing line. Opt-in by config.bootTimings for workers that advertise it. */
 export const BOOT_TIMINGS_FEATURE = "boot-timings-v1";
@@ -257,6 +260,8 @@ export const CloudV2ControlFrameSchema = z.discriminatedUnion("t", [
     historyReplacement: z.literal(1).optional(),
     /** history-digest-v1: the control plane stores per-chat digests and serves history/digests. */
     historyDigest: z.literal(1).optional(),
+    /** history-batch-v1: the control plane accepts history/batch. */
+    historyBatch: z.literal(1).optional(),
     /** boot-timings-v1: the control plane accepts CloudV2WorkerBootTimingSchema on the timing route. */
     bootTimings: z.literal(1).optional(),
     gitIdentity: CloudV2GitIdentitySchema.nullable().optional(),
@@ -322,6 +327,8 @@ export const CloudV2WorkerHelloSchema = z.object({
   runtimeSha256: z.string().regex(/^[0-9a-f]{64}$/), bootId: z.uuid(),
 }).strict();
 export const CloudV2WorkerHistorySchema = CloudV2HistoryFrameSchema.extend({ bootId: z.uuid(), sequence: z.number().int().positive().max(Number.MAX_SAFE_INTEGER) });
+export const CloudV2WorkerHistoryBatchSchema = z.object({ bootId: z.uuid(), sequence: z.number().int().positive().max(Number.MAX_SAFE_INTEGER - CLOUD_V2_MAX_HISTORY_BATCH_FRAMES),
+  frames: z.array(CloudV2HistoryFrameSchema.omit({ t: true }).strict()).min(1).max(CLOUD_V2_MAX_HISTORY_BATCH_FRAMES) }).strict();
 export const CloudV2WorkerActivitySchema = z.object({ idle: z.boolean() }).strict();
 export const CloudV2WorkerActivityReplySchema = z.object({
   loginRevision: z.string().regex(/^(0|[1-9][0-9]{0,19})$/),

@@ -197,3 +197,31 @@ it("R3: a row folded with nothing after it reaches the control plane within the 
     expect(JSON.parse(answer!.payload).text).toBe("x".repeat(100));
   } finally { await cleanup(); }
 });
+
+it("R3 history-batch-v1: one drain sends every ready chat's frames in one request, each chat contiguous", async () => {
+  const { store, relay, mirror, cleanup } = await setup();
+  await mirror.dispose();
+  const batches: Array<Array<{ chats?: unknown; messages?: { chatId: string } }>> = [];
+  let hold: Promise<void> | undefined, release!: () => void;
+  // A real request takes a network round trip; changes that queue meanwhile ride in the next request.
+  const transport = { send: async () => true, sendHistoryBatch: async (frames: never[]) => { batches.push(frames); await hold; return true; } } as never;
+  const batched = new HistoryMirror(store, transport, () => true, value => value, undefined, () => true);
+  try {
+    batched.connect(); await batched.flush(); batches.length = 0;
+    hold = new Promise(resolve => { release = resolve; });
+    await store.upsert({ id: "second", folder: WORKSPACE_KEY, title: "Second" });
+    await store.importMessages("second", [{ msgId: "b1", kind: "text", createdAt: 1, payload: JSON.stringify({ id: "b1", kind: "text", role: "agent", messageId: "m", createdAt: 1, text: "b" }) }]);
+    await store.importMessages("chat", [{ msgId: "a1", kind: "text", createdAt: 1, payload: JSON.stringify({ id: "a1", kind: "text", role: "agent", messageId: "m", createdAt: 1, text: "a" }) }]);
+    release();
+    await batched.flush();
+    // The first request was in flight; everything that queued meanwhile, from both chats, went in one more.
+    expect(batches.length).toBe(2);
+    const chats = batches[1]!.map(frame => frame.messages?.chatId ?? "row");
+    expect(new Set(chats.filter(chat => chat !== "row"))).toEqual(new Set(["chat", "second"]));
+    // Each chat's frames are contiguous: no other chat's frame falls between them.
+    const seen: string[] = [];
+    for (const chat of chats) if (seen.at(-1) !== chat) seen.push(chat);
+    expect(new Set(seen).size).toBe(seen.length);
+    expect(relay.frames.filter(frame => frame.t === "history")).toEqual([]);
+  } finally { await batched.dispose(); await cleanup(); }
+});

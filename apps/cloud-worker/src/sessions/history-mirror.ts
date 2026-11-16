@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { CLOUD_V2_MAX_FRAME_BYTES, CLOUD_V2_MAX_HISTORY_ROWS, CloudV2HistoryDigestsReplySchema, type CloudV2HistoryState, type CloudV2MessageRow, type CloudV2WorkerFrame } from "@zeros/protocol/cloud-v2-relay";
+import { CLOUD_V2_MAX_FRAME_BYTES, CLOUD_V2_MAX_HISTORY_BATCH_FRAMES, CLOUD_V2_MAX_HISTORY_ROWS, CloudV2HistoryDigestsReplySchema, type CloudV2HistoryState, type CloudV2MessageRow, type CloudV2WorkerFrame } from "@zeros/protocol/cloud-v2-relay";
 import type { Transport } from "../transport";
 import type { ChatRow } from "./chat-history";
 import type { SessionChange, SessionStore } from "./session-store";
@@ -18,6 +18,8 @@ interface Pending { chat?: ChatRow; deleted?: true; replace?: true; revision: nu
 export const HELD_QUIET_MS = 5_000;
 export const HELD_PROGRESS_MS = 10_000;
 export const SETTLED_GATHER_MS = 2_000;
+/** history-batch-v1: like Conductor's ~80% of 1 MiB per notification request; a single larger frame still goes alone. */
+export const HISTORY_BATCH_TARGET_BYTES = 800 * 1024;
 export class HistoryMirror {
   private online = false;
   private epoch = 0;
@@ -32,7 +34,9 @@ export class HistoryMirror {
     private readonly sanitize: <T>(value: T) => T = value => value,
     /** history-digest-v1: enabled when the control plane serves digests; `restored` (a boot from a checkpoint, possibly
      * older than the control plane's rows) replaces every remaining live chat. */
-    private readonly digests?: { enabled(): boolean; restored(): boolean; delivered?(): void }) {
+    private readonly digests?: { enabled(): boolean; restored(): boolean; delivered?(): void },
+    /** history-batch-v1 negotiated: every ready chat's frames go in one request per drain. */
+    private readonly batching: () => boolean = () => false) {
     this.unsubscribe = store.onChange((change) => this.change(change));
   }
 
@@ -237,12 +241,33 @@ export class HistoryMirror {
     }
     const epoch = this.epoch;
     const sending = Promise.resolve().then(async () => {
+      if (this.batching() && this.transport.sendHistoryBatch) { await this.sendBatches(epoch, ready); return; }
       while (this.online && epoch === this.epoch && this.pending.size) {
         const entry = ready();
         if (!entry) break;
         const [chatId, pending] = entry;
         this.pending.delete(chatId);
-        const frames: CloudV2WorkerFrame[] = [];
+        const frames = this.framesFor(chatId, pending);
+        for (const frame of frames) {
+          if (!this.online || epoch !== this.epoch) break;
+          // A cut supersedes every unsent chunk of an older backfill. The
+          // in-flight chunk precedes its replacement on the ordered carrier.
+          if (!pending.deleted && (this.store.historyRevision(chatId) !== pending.revision || !this.store.metadata(chatId)?.chat)) break;
+          if (frame.t === "history" && frame.messages?.replace && !this.replacement()) { this.disconnect(); break; }
+          if (!await this.transport.send(frame)) { if (epoch === this.epoch) this.disconnect(); break; }
+        }
+      }
+    }).catch(() => { if (epoch === this.epoch) this.disconnect(); })
+      .finally(() => {
+        if (this.sending !== sending) return;
+        this.sending = undefined; this.drain();
+      });
+    this.sending = sending;
+  }
+
+  /** One chat's pending change as ordered history frames (chat row first, then message chunks; digest on the last). */
+  private framesFor(chatId: string, pending: Pending): Array<Extract<CloudV2WorkerFrame, { t: "history" }>> {
+        const frames: Array<Extract<CloudV2WorkerFrame, { t: "history" }>> = [];
         if (pending.deleted) frames.push({ t: "history", chatDeletions: [chatId] });
         else {
           if (pending.chat) frames.push({ t: "history", chats: [{ ...this.sanitize(pending.chat) }],
@@ -265,20 +290,49 @@ export class HistoryMirror {
           const last = frames.at(-1);
           if (digest && last?.t === "history" && last.messages) last.messages = { ...last.messages, digest };
         }
-        for (const frame of frames) {
-          if (!this.online || epoch !== this.epoch) break;
-          // A cut supersedes every unsent chunk of an older backfill. The
-          // in-flight chunk precedes its replacement on the ordered carrier.
-          if (!pending.deleted && (this.store.historyRevision(chatId) !== pending.revision || !this.store.metadata(chatId)?.chat)) break;
-          if (frame.t === "history" && frame.messages?.replace && !this.replacement()) { this.disconnect(); break; }
-          if (!await this.transport.send(frame)) { if (epoch === this.epoch) this.disconnect(); break; }
+        return frames;
+  }
+
+  /** history-batch-v1: drains every ready chat into as few requests as fit (each chat's frames stay contiguous and in order,
+   * so a replacement's chat frame and message frames keep consecutive sequences), single-flight like Conductor's. */
+  private async sendBatches(epoch: number, ready: () => [string, Pending] | undefined): Promise<void> {
+    const size = (frame: CloudV2WorkerFrame) => Buffer.byteLength(JSON.stringify(frame));
+    while (this.online && epoch === this.epoch && this.pending.size) {
+      const batch: Array<Extract<CloudV2WorkerFrame, { t: "history" }>> = [];
+      let bytes = 0;
+      for (let entry = ready(); entry; entry = ready()) {
+        const [chatId, pending] = entry;
+        // A cut supersedes an unsent backfill; the next change for this chat carries current rows.
+        if (!pending.deleted && (this.store.historyRevision(chatId) !== pending.revision || !this.store.metadata(chatId)?.chat)) { this.pending.delete(chatId); continue; }
+        const frames = this.framesFor(chatId, pending);
+        if (frames.some(frame => frame.messages?.replace) && !this.replacement()) { this.disconnect(); return; }
+        const total = frames.reduce((sum, frame) => sum + size(frame), 0);
+        if (batch.length && (batch.length + frames.length > CLOUD_V2_MAX_HISTORY_BATCH_FRAMES || bytes + total > HISTORY_BATCH_TARGET_BYTES)) break;
+        this.pending.delete(chatId);
+        if (!batch.length && (frames.length > CLOUD_V2_MAX_HISTORY_BATCH_FRAMES || total > HISTORY_BATCH_TARGET_BYTES)) {
+          // One chat larger than a batch: its frames go in order across several requests.
+          let chunk: typeof frames = [], chunkBytes = 0;
+          for (const frame of frames) {
+            const frameBytes = size(frame);
+            if (chunk.length && (chunk.length === CLOUD_V2_MAX_HISTORY_BATCH_FRAMES || chunkBytes + frameBytes > HISTORY_BATCH_TARGET_BYTES)) {
+              if (!await this.sendBatch(epoch, chunk)) return;
+              chunk = []; chunkBytes = 0;
+            }
+            chunk.push(frame); chunkBytes += frameBytes;
+          }
+          if (chunk.length && !await this.sendBatch(epoch, chunk)) return;
+          continue;
         }
+        batch.push(...frames); bytes += total;
       }
-    }).catch(() => { if (epoch === this.epoch) this.disconnect(); })
-      .finally(() => {
-        if (this.sending !== sending) return;
-        this.sending = undefined; this.drain();
-      });
-    this.sending = sending;
+      if (!batch.length) break;
+      if (!await this.sendBatch(epoch, batch)) return;
+    }
+  }
+  private async sendBatch(epoch: number, frames: Array<Extract<CloudV2WorkerFrame, { t: "history" }>>): Promise<boolean> {
+    if (!this.online || epoch !== this.epoch) return false;
+    if (await this.transport.sendHistoryBatch!(frames)) return true;
+    if (epoch === this.epoch) this.disconnect();
+    return false;
   }
 }
