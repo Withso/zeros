@@ -13,6 +13,10 @@ Merging to `main` is an Alpha action, not a Production action. Production must
 never continuously deploy `main`; it is a manual promotion of the exact commit
 that Beta validated.
 
+Beta is planned for retirement in favour of Production-app release candidates;
+see the [release candidates roadmap](release-candidates-roadmap.md). This page
+describes the live ladder until that lands.
+
 ## Deployment topology
 
 | Channel    | Source                                 | Railway                                                    | Cloudflare surfaces                     | Public origins                                                             |
