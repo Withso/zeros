@@ -5,7 +5,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { main } from "./cli";
 import { env } from "./test-fixtures";
 
-const deps = vi.hoisted(() => ({ providers: vi.fn(), github: vi.fn(), checkout: vi.fn(), command: vi.fn() }));
+const deps = vi.hoisted(() => ({ providers: vi.fn(), github: vi.fn(), checkout: vi.fn(), command: vi.fn(), alphaRanFirst: vi.fn() }));
+vi.mock("./alpha-first", () => ({ alphaIdentity: () => async () => ({}), requireAlphaRanFirst: deps.alphaRanFirst }));
 vi.mock("./providers", () => ({ createProviders: deps.providers }));
 vi.mock("./github", () => ({ githubClient: deps.github }));
 vi.mock("./source", () => ({ assertCheckout: deps.checkout,
@@ -37,7 +38,7 @@ function fixture() {
     waitDeployment: vi.fn(async () => {}), waitIdentity: vi.fn(async () => backend), verifyPages: vi.fn(async () => {}),
     publishPages: vi.fn(async (surface: string) => ({ id: surface, surface })), verifyWorkOS: vi.fn(async () => workos) };
   const github = { assertRequiredChecks: vi.fn(async () => {}), assertCurrent: vi.fn(async () => {}),
-    betaReceipt: vi.fn(async () => {}), ownServicesReceipt: vi.fn(async () => services) };
+    ownServicesReceipt: vi.fn(async () => services) };
   deps.providers.mockReturnValue(providers); deps.github.mockReturnValue(github);
   deps.command.mockImplementation(async (_command: string, args: string[], options) => {
     if (options?.env?.MIGRATION_VERSION_FILE) {
@@ -54,6 +55,8 @@ describe("hosted release CLI", () => {
     expect(f.github.assertRequiredChecks).toHaveBeenCalledOnce(); expect(f.github.assertCurrent).toHaveBeenCalledOnce();
     expect(f.providers.inspect).toHaveBeenCalledOnce(); expect(f.providers.deploy).not.toHaveBeenCalled();
     expect(deps.command).not.toHaveBeenCalled();
+    // Alpha is the stage Production waits on, never the other way round.
+    expect(deps.alphaRanFirst).not.toHaveBeenCalled();
   });
   it.each([["--services", "hosted-services", "services-ready"], ["--execute", "hosted-receipt", "success"]])(
     "writes a complete %s receipt for the v2 API", async (mode, file, status) => {

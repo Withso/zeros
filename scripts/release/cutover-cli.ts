@@ -1,4 +1,5 @@
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { alphaIdentity, requireAlphaRanFirst } from "./alpha-first";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { PromotionError, promotionConfig, requireCheck } from "./contracts";
@@ -19,13 +20,12 @@ async function main() {
   requireCheck(process.env.CUTOVER_CONFIRM === config.database, `Type ${config.database} to confirm this cutover`);
   await assertCheckout(config.sourceSha);
   const providers = createProviders(config, process.env), github = githubClient(config, process.env);
-  if (config.channel === "production") {
-    // The reviewer's approval is not qualification: Beta must have published
-    // this exact source first.
-    const beta = await github.lastPublication("beta");
-    requireCheck(beta?.sourceSha === config.sourceSha, "Production cutover requires a successful Beta publication of this exact SHA first");
-  }
   const manifest = await migrationManifest();
+  if (config.channel === "production") {
+    // The reviewer's approval is not qualification: Alpha must already have
+    // applied every migration this cutover carries, controlled ones included.
+    await requireAlphaRanFirst([manifest.head, ...approvals], alphaIdentity());
+  }
   const journal = newCutoverJournal();
   await mkdir(".context/release", { recursive: true, mode: 0o700 });
   const failureFile = path.resolve(".context/release/migration-failure.json");

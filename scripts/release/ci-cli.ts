@@ -10,13 +10,15 @@ const DESTINATION_WAIT_MS = 45 * 60_000;
 import { waitForRequiredCI } from "./ci";
 import { githubClient } from "./github";
 import { command } from "./io";
+import { alphaIdentity, requireAlphaRanFirst } from "./alpha-first";
+import { migrationManifest } from "./source";
 
 async function main() {
   const mode = process.argv[2];
-  requireCheck(mode === "--wait" || mode === "--verify", "Usage: ci-cli.ts --wait|--verify [--beta]");
+  requireCheck(mode === "--wait" || mode === "--verify", "Usage: ci-cli.ts --wait|--verify [--alpha-first]");
   const source = releaseSource(process.env);
-  requireCheck(process.argv.length <= 4 && (process.argv[3] === undefined || mode === "--verify" && process.argv[3] === "--beta" && source.channel === "production"),
-    "Beta proof is available only with Production --verify --beta");
+  requireCheck(process.argv.length <= 4 && (process.argv[3] === undefined || mode === "--verify" && process.argv[3] === "--alpha-first" && source.channel === "production"),
+    "Alpha-first proof is available only with Production --verify --alpha-first");
   requireCheck((await command("git", ["rev-parse", "HEAD"])).trim() === source.sourceSha, "CI gate checkout differs from the event SHA");
   const github = githubClient(source, process.env);
   const automaticAlpha = source.channel === "alpha" && await github.automaticAlpha();
@@ -76,7 +78,9 @@ async function main() {
     }
     throw error;
   }
-  if (process.argv[3] === "--beta" && process.env.ZEROS_HOSTED_PROMOTION === "enabled") await github.betaReceipt();
+  // Before Apple submission: Alpha has applied every migration this release carries.
+  if (process.argv[3] === "--alpha-first" && process.env.ZEROS_HOSTED_PROMOTION === "enabled")
+    await requireAlphaRanFirst([(await migrationManifest()).head], alphaIdentity());
   const admissionMode = alphaForwardOnlyMode(process.env);
   if (barrier && admissionMode !== "off") {
     const receipt = AlphaAdmissionReceipt.parse({ version: 1, ...source, runId: process.env.GITHUB_RUN_ID,

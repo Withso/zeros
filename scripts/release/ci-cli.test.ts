@@ -5,7 +5,7 @@ import path from "node:path";
 
 const mocked = vi.hoisted(() => ({
   source: { channel: "production", sourceSha: "a".repeat(40), repository: "Withso/zeros", branch: "release/0.1.20" },
-  command: vi.fn(), assertRequiredChecks: vi.fn(), assertCurrent: vi.fn(), betaReceipt: vi.fn(), requiredChecks: vi.fn(), waitForRequiredCI: vi.fn(),
+  command: vi.fn(), assertRequiredChecks: vi.fn(), assertCurrent: vi.fn(), alphaRanFirst: vi.fn(), requiredChecks: vi.fn(), waitForRequiredCI: vi.fn(),
   automaticAlpha: vi.fn(), alphaBarrierUnmutated: vi.fn(), requiredWorkflows: vi.fn(),
 }));
 vi.mock("./github", () => ({ githubClient: () => mocked }));
@@ -15,6 +15,10 @@ vi.mock("./contracts", async importOriginal => ({
 }));
 vi.mock("./io", async importOriginal => ({
   ...await importOriginal<typeof import("./io")>(), command: mocked.command,
+}));
+vi.mock("./alpha-first", () => ({ alphaIdentity: () => async () => ({}), requireAlphaRanFirst: mocked.alphaRanFirst }));
+vi.mock("./source", async importOriginal => ({
+  ...await importOriginal<typeof import("./source")>(), migrationManifest: async () => ({ head: "0254_last.sql", sha256: "c".repeat(64) }),
 }));
 
 const originalArgv = process.argv, originalExitCode = process.exitCode;
@@ -30,7 +34,7 @@ beforeEach(() => {
   mocked.command.mockResolvedValue(mocked.source.sourceSha);
   mocked.assertRequiredChecks.mockResolvedValue(undefined);
   mocked.assertCurrent.mockResolvedValue(undefined);
-  mocked.betaReceipt.mockResolvedValue(undefined);
+  mocked.alphaRanFirst.mockResolvedValue("0260_alpha_head.sql");
   mocked.requiredChecks.mockResolvedValue(["Preflight", "CodeQL"].map(workflow => ({ workflow, runId: 100, attempt: 1, succeeded: true })));
   mocked.waitForRequiredCI.mockImplementation(async (read: () => Promise<unknown>) => read());
   mocked.automaticAlpha.mockResolvedValue(false);
@@ -106,30 +110,37 @@ describe("exact-source CI CLI mutation authority", () => {
     expect(console.log).not.toHaveBeenCalled();
     expect(process.exitCode).toBe(1);
   });
-  it("requires the exact-SHA Beta receipt before a Production Apple submission with hosted promotion enabled", async () => {
-    process.argv.push("--beta");
+  it("requires Alpha to have run this release's migrations before a Production Apple submission with hosted promotion enabled", async () => {
+    process.argv.push("--alpha-first");
     vi.stubEnv("ZEROS_HOSTED_PROMOTION", "enabled");
     await import("./ci-cli");
-    await vi.waitFor(() => expect(mocked.betaReceipt).toHaveBeenCalledOnce());
-    expect(mocked.betaReceipt.mock.invocationCallOrder[0]).toBeGreaterThan(mocked.assertCurrent.mock.invocationCallOrder[0]);
+    await vi.waitFor(() => expect(mocked.alphaRanFirst).toHaveBeenCalledOnce());
+    expect(mocked.alphaRanFirst.mock.calls[0]![0]).toEqual(["0254_last.sql"]);
+    expect(mocked.alphaRanFirst.mock.invocationCallOrder[0]).toBeGreaterThan(mocked.assertCurrent.mock.invocationCallOrder[0]);
     expect(console.log).toHaveBeenCalledOnce();
   });
-  it("does not authorize Apple submission when the required Beta receipt is absent", async () => {
-    process.argv.push("--beta");
+  it("does not authorize Apple submission when Alpha has not run them", async () => {
+    process.argv.push("--alpha-first");
     vi.stubEnv("ZEROS_HOSTED_PROMOTION", "enabled");
-    mocked.betaReceipt.mockRejectedValue(new Error("private-beta-artifact-diagnostic"));
+    mocked.alphaRanFirst.mockRejectedValue(new Error("private-alpha-diagnostic"));
     await import("./ci-cli");
     await vi.waitFor(() => expect(console.error).toHaveBeenCalledOnce());
     expect(console.log).not.toHaveBeenCalled();
     expect(process.exitCode).toBe(1);
   });
-  it("preserves the disabled legacy lane without silently requiring an unavailable hosted Beta receipt", async () => {
-    process.argv.push("--beta");
+  it("preserves the disabled legacy lane without requiring an Alpha identity", async () => {
+    process.argv.push("--alpha-first");
     vi.stubEnv("ZEROS_HOSTED_PROMOTION", "disabled");
     await import("./ci-cli");
     await vi.waitFor(() => expect(console.log).toHaveBeenCalledOnce());
-    expect(mocked.betaReceipt).not.toHaveBeenCalled();
+    expect(mocked.alphaRanFirst).not.toHaveBeenCalled();
     expect(console.error).not.toHaveBeenCalled();
+  });
+  it("refuses the retired --beta proof", async () => {
+    process.argv.push("--beta");
+    await import("./ci-cli");
+    await vi.waitFor(() => expect(process.exitCode).toBe(1));
+    expect(mocked.assertCurrent).not.toHaveBeenCalled();
   });
 
   it.each(["enabled", "disabled"])("writes ready=true after successful automatic Alpha CI with flag %s", async flag => {

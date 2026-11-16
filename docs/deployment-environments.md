@@ -1015,12 +1015,12 @@ step and fails if a dependency change stops it storing links for macOS.
    and branches older than an already-selected release version are rejected
    before mutation. Never cancel an active migration/cutover.
 4. Dispatch `release.yml` from the frozen release branch. With hosted promotion
-   enabled, Production requires a successful `release-beta.yml` push run and
-   its unexpired success receipt for the same repository/branch/SHA. The
-   receipt's recorded attempt must contain a successful hosted mutation job.
-   An earlier hosted attempt of the same run remains valid after a successful
-   desktop-only retry. The Production human approval, notarization and all
-   macOS gates remain; disabled legacy mode does not enforce the Beta receipt.
+   enabled, Production requires Alpha's live identity to be ready with every
+   migration this release carries already applied (`scripts/release/alpha-first.ts`):
+   Alpha, not a Beta deployment, runs a release's migrations first. Hosted
+   promotion, the Apple submission guard and controlled cutovers all check it.
+   The Production human approval, notarization and all macOS gates remain;
+   disabled legacy mode does not require the Alpha identity.
    `release.yml` publishes a **release candidate**: the rolling `rc`
    prerelease (never Latest) with `rc-mac.yml` and `rc-candidate.json`, a
    receipt of the exact files' SHA-256 digests, run and commit
@@ -1061,7 +1061,7 @@ Production only: CI + build ──► Apple submit ──► notarize + verify �
 
 Production's Apple submission is a separate **CI-gated** job, never part of the
 parallel build. With hosted promotion enabled, its read-only guard also requires
-the existing unexpired exact-SHA Beta success receipt before submitting; it does
+Alpha to have applied every migration in the release before submitting; it does
 not wait for Production's hosted lane. It saves the submission ID separately
 from the signed build;
 notarization retries poll that same submission and artifact without rebuilding
@@ -1794,7 +1794,8 @@ the channel environment's promotion secrets and variables and shares the
 In order, it:
 
 1. Checks exact-source CI and branch freshness. Production also requires
-   Beta's latest successful publication to be this exact SHA.
+   Alpha's live identity to have applied the release's migration head and
+   every approved controlled migration.
 2. Plans the migration and refuses any mismatch between the plan's controlled
    set and `approvals`.
 3. Validates every Railway and Pages destination read-only, and requires the

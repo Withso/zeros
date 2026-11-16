@@ -1,4 +1,5 @@
 import { mkdir, writeFile } from "node:fs/promises";
+import { alphaIdentity, requireAlphaRanFirst } from "./alpha-first";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { HostedReceipt, HostedServicesReceipt, PromotionError, promotionConfig, requireCheck } from "./contracts";
@@ -18,7 +19,7 @@ export async function main() {
   const manifest = await migrationManifest();
   if (mode === "--plan") {
     await assertCurrent(); await providers.inspect();
-    if (config.channel === "production") await github.betaReceipt();
+    if (config.channel === "production") await requireAlphaRanFirst([manifest.head], alphaIdentity());
     console.log(JSON.stringify({ mode: "read-only-plan", channel: config.channel, sourceSha: config.sourceSha, migrationManifest: manifest,
       stages: ["migration-role-plan", "backup-and-expand-migration", "exact-sha-railway", "identity-readiness", "pages-upload", "workos-handshake", "final-receipt"] }));
     return;
@@ -28,7 +29,7 @@ export async function main() {
         ...providers, assertCurrent, waitIdentity: () => providers.waitIdentity(manifest),
       })
     : await (mode === "--services" ? promoteServices : promote)(config, { ...providers, assertCurrent,
-        betaReceipt: async () => { await github.betaReceipt(); },
+        alphaRanFirst: async () => { await requireAlphaRanFirst([manifest.head], alphaIdentity()); },
         migration: execute => migrationReceipt(execute, { ...process.env, NODE_ENV: "production", CONTROL_PLANE_MIGRATION_APPROVALS: "" }),
         waitIdentity: () => providers.waitIdentity(manifest),
       });
