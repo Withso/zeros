@@ -405,10 +405,10 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - name: Recheck CI, current source, and Beta before Apple submission
+      - name: Recheck CI, current source, and Alpha before Apple submission
         env:
           GH_TOKEN: ${{ github.token }}
-        run: pnpm exec tsx scripts/release/ci-cli.ts --verify --beta
+        run: pnpm exec tsx scripts/release/ci-cli.ts --verify --alpha-first
       - name: Download signed build artifact
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:

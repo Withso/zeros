@@ -196,7 +196,7 @@ describe("release dependency and authority contracts", () => {
     const text = workflow("release"), submit = job(text, "submit"), notarize = job(text, "notarize");
     expect(submit).toContain("needs: [approve, ci, build]");
     expect(submit).toContain("scripts/release/ci-cli.ts --verify");
-    expect(submit).toContain("scripts/release/ci-cli.ts --verify --beta");
+    expect(submit).toContain("scripts/release/ci-cli.ts --verify --alpha-first");
     expect(submit).toContain("ZEROS_HOSTED_PROMOTION: ${{ vars.ZEROS_HOSTED_PROMOTION }}");
     expect(submit).toContain("notarytool submit");
     expect(submit).toContain("secrets.APPLE_");

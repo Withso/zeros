@@ -3,7 +3,8 @@ import { assertCloudChannelState, HostedReceipt, HostedServicesReceipt, Migratio
 export type PromotionDependencies = {
   assertCurrent(): Promise<void>;
   inspect(): Promise<void>;
-  betaReceipt(): Promise<void>;
+  /** Production only: Alpha has applied every migration this release carries. */
+  alphaRanFirst(): Promise<void>;
   migration(execute: boolean): Promise<unknown>;
   retarget(): Promise<void>;
   deploy(): Promise<string>;
@@ -15,9 +16,9 @@ export type PromotionDependencies = {
 /** No rollback after schema advancement. Every ambiguous mutation stops this
  * chain; a human reconciles provider state before retrying a failed run. */
 export async function promoteServices(config: PromotionConfig, deps: PromotionDependencies) {
-  let stage = "Beta receipt";
+  let stage = "Alpha ran it first";
   try {
-    if (config.channel === "production") await deps.betaReceipt();
+    if (config.channel === "production") await deps.alphaRanFirst();
     stage = "preflight";
     await deps.assertCurrent();
     await deps.inspect();

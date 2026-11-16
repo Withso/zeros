@@ -17,7 +17,7 @@ function harness(config: PromotionConfig = promotionConfig(env)) {
       channel: config.channel, maintenance: false, migrations: { state: "current", head: "0121_example.sql", expectedHead: "0121_example.sql", manifestSha256: "b".repeat(64) },
       cloud: { enabled: false, ready: true, state: "disabled" }, worker: null }; },
     publishPages: async surface => { calls.push(`pages:${surface}`); return { id: `pages-${surface}`, surface }; },
-    betaReceipt: () => record("beta"),
+    alphaRanFirst: () => record("alpha-first"),
     verifyWorkOS: async () => { calls.push("workos"); return { kind: "workos-handshake-v1", surfaces: config.surfaces, verifiedAt: new Date().toISOString() }; },
   };
   return { calls, deps, config };
@@ -61,13 +61,13 @@ describe("ordered hosted promotion", () => {
     await expect(promote(config, deps)).rejects.toThrow("controlled");
     expect(calls).not.toContain("migrate");
   });
-  it("requires Beta proof before Production touches providers", async () => {
+  it("requires Alpha to have run the release's migrations before Production touches providers", async () => {
     const config = promotionConfig({ ...env, RELEASE_CHANNEL: "production", RELEASE_BRANCH: "release/1.2.3",
       PLANETSCALE_DATABASE: "zeros-control-plane-production", CF_PAGES_APP_PROJECT: "zeros-web", CF_PAGES_OPS_PROJECT: "zeros-ops" });
     const { deps, calls } = harness(config);
-    deps.betaReceipt = async () => { calls.push("beta"); throw new Error("no receipt"); };
+    deps.alphaRanFirst = async () => { calls.push("alpha-first"); throw new Error("Alpha has not run it"); };
     await expect(promote(config, deps)).rejects.toThrow();
-    expect(calls).toEqual(["beta"]);
+    expect(calls).toEqual(["alpha-first"]);
   });
   it("withholds the success receipt after a WorkOS verification failure", async () => {
     const { config, deps, calls } = harness();
