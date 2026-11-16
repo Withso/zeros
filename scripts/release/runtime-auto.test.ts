@@ -14,7 +14,8 @@ function fixture(channel: Channel = "alpha") {
     ...runtimeReleaseIdentity({ sha256: qualified ? digest : previousDigest, ...(qualified ? { release } : {}) }) });
   const current = identity(channel, channel === "alpha"), alpha = identity("alpha");
   const deps = { identity: vi.fn(async (target: Channel): Promise<unknown> => target === channel ? current : alpha),
-    ancestor: vi.fn(async () => true), changes: vi.fn(async (): Promise<string[]> => []), published: vi.fn(async () => true) };
+    ancestor: vi.fn(async () => true), changes: vi.fn(async (): Promise<string[]> => []), published: vi.fn(async () => true),
+    keptContract: vi.fn(async (): Promise<boolean> => false) };
   const input = { channel, sourceSha: source, cloudEnabled: true };
   return { current, alpha, deps, input, identity, release };
 }
@@ -95,7 +96,53 @@ describe("automatic runtime resolution", () => {
     const f = fixture("production"); Object.assign(f.current, f.identity("production"));
     f.deps.ancestor.mockResolvedValue(false);
     await expect(resolveRuntimeRelease(f.input, f.deps)).rejects.toThrow(/newer/);
-    expect(f.deps.published).not.toHaveBeenCalled();
+    expect(f.deps.changes).not.toHaveBeenCalled();
+  });
+  describe("when Alpha has moved past this release", () => {
+    // Production's pin is from an older source; Alpha now serves a newer, unrelated one.
+    const moved = (channel: "beta" | "production") => {
+      const f = fixture(channel); Object.assign(f.current, f.identity(channel));
+      f.deps.ancestor.mockImplementation(async (before: string) => before === previousSource);
+      f.deps.changes.mockResolvedValue(["apps/control-plane/src/index.ts"]);
+      return f;
+    };
+    it.each(["beta", "production"] as const)("keeps %s's current runtime when Alpha's qualifying code differs and CI replays its contract", async channel => {
+      const f = moved(channel); f.deps.keptContract.mockResolvedValue(true);
+      expect(await resolveRuntimeRelease(f.input, f.deps)).toEqual({ action: "skip", reason: "kept" });
+      expect(f.deps.keptContract).toHaveBeenCalledExactlyOnceWith(previousSource);
+      expect(f.deps.published).toHaveBeenCalledWith(f.release.qualification);
+    });
+    it("keeps the current runtime when Alpha's pin is newer than or unrelated to this release", async () => {
+      // First the destination's own pin (related, qualifying code changed), then Alpha's (unrelated).
+      const f = moved("production"); f.deps.ancestor.mockReset().mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+      f.deps.keptContract.mockResolvedValue(true);
+      expect(await resolveRuntimeRelease(f.input, f.deps)).toEqual({ action: "skip", reason: "kept" });
+    });
+    it("fails when the current runtime's contract is not one this release replays", async () => {
+      const f = moved("production");
+      await expect(resolveRuntimeRelease(f.input, f.deps)).rejects.toThrow(/differ/);
+    });
+    it("fails when the current runtime has no qualified provenance", async () => {
+      const f = moved("production"); Object.assign(f.current, f.identity("production", false)); f.deps.keptContract.mockResolvedValue(true);
+      await expect(resolveRuntimeRelease(f.input, f.deps)).rejects.toThrow(/differ/);
+      expect(f.deps.keptContract).not.toHaveBeenCalled();
+    });
+    it("fails when the current runtime's Alpha publication failed", async () => {
+      const f = moved("production"); f.deps.keptContract.mockResolvedValue(true); f.deps.published.mockResolvedValue(false);
+      await expect(resolveRuntimeRelease(f.input, f.deps)).rejects.toThrow(/differ/);
+    });
+    it("still promotes when Alpha serves this release's code", async () => {
+      const f = fixture("production"); f.deps.keptContract.mockResolvedValue(true);
+      expect(await resolveRuntimeRelease(f.input, f.deps)).toMatchObject({ action: "promote" });
+      expect(f.deps.keptContract).not.toHaveBeenCalled();
+    });
+    it.each(["legacy", "offline", "maintenance"])("does not keep when Alpha itself is %s", async state => {
+      const f = moved("production"); f.deps.keptContract.mockResolvedValue(true);
+      if (state === "legacy") Object.assign(f.alpha, f.identity("alpha", false));
+      if (state === "offline") f.deps.identity.mockImplementation(async (target: Channel) => { if (target === "alpha") throw new Error("offline"); return f.current; });
+      if (state === "maintenance") f.alpha.maintenance = true;
+      await expect(resolveRuntimeRelease(f.input, f.deps)).rejects.toThrow();
+    });
   });
   it.each(["alpha", "beta", "production"] as const)("refuses destination drift on %s", async channel => {
     const f = fixture(channel); f.current.sourceSha = "3".repeat(40);

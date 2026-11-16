@@ -5,7 +5,7 @@ import { identityPin } from "./runtime-identity";
 import { runtimeJson } from "./runtime-proof";
 import type { RuntimeRelease } from "../../apps/control-plane/src/cloud/runtime-release";
 
-export type RuntimeAutoPlan = { action: "skip"; reason: "cloud_disabled" | "unchanged" | "current" } | {
+export type RuntimeAutoPlan = { action: "skip"; reason: "cloud_disabled" | "unchanged" | "current" | "kept" } | {
   action: "publish" | "promote"; reason: "unqualified" | "inputs_changed" | "qualification_changed" | "promotion";
   expected_cp_sha: string; expected_runtime_sha256: string; source_sha?: string; runtime_sha256?: string;
   alpha_run_id?: string; alpha_run_attempt?: string;
@@ -15,6 +15,8 @@ export type RuntimeAutoDependencies = {
   ancestor(before: string, after: string): Promise<boolean>;
   changes(before: string, after: string): Promise<string[]>;
   published(proof: RuntimeRelease["qualification"]): Promise<boolean>;
+  /** Whether the worker contract at this source is one the release tree keeps, so CI replays it against this control plane. */
+  keptContract(sourceSha: string): Promise<boolean>;
 };
 const qualificationChanged = (files: string[]) => files.some(file => file.startsWith("apps/control-plane/") || file.startsWith("packages/protocol/"));
 
@@ -48,10 +50,18 @@ export async function resolveRuntimeRelease(input: { channel: Channel; sourceSha
   }
   const alphaRaw = await deps.identity("alpha"), alphaIdentity = RuntimeLiveIdentity.parse(alphaRaw), alpha = identityPin(alphaRaw);
   requireCheck(alphaIdentity.channel === "alpha" && alpha.release, "Alpha has no qualified runtime; publish and qualify Alpha before releasing");
-  requireCheck(await deps.ancestor(alpha.release.sourceSha, input.sourceSha), "Alpha runtime is newer than or unrelated to this release");
-  const files = await deps.changes(alpha.release.sourceSha, input.sourceSha);
-  requireCheck(!runtimeSourcePaths(files).length && !qualificationChanged(files),
-    "Alpha runtime inputs or qualifying code differ from this release; publish and qualify the matching Alpha source");
+  const related = await deps.ancestor(alpha.release.sourceSha, input.sourceSha);
+  const files = related ? await deps.changes(alpha.release.sourceSha, input.sourceSha) : [];
+  if (!related || runtimeSourcePaths(files).length || qualificationChanged(files)) {
+    // Alpha has moved past this release's code, so nothing current qualifies it. Keep the
+    // destination's own published pin when CI replays its worker contract against this
+    // control plane (released-clients.integration.test.ts); the new backend gates any
+    // newer configuration on that runtime's advertised features.
+    if (current.release && await deps.published(current.release.qualification) && await deps.keptContract(current.release.sourceSha))
+      return { action: "skip", reason: "kept" };
+    requireCheck(related, "Alpha runtime is newer than or unrelated to this release");
+    requireCheck(false, "Alpha runtime inputs or qualifying code differ from this release; publish and qualify the matching Alpha source");
+  }
   requireCheck(await deps.published(alpha.release.qualification), "Alpha publication has not succeeded; qualify Alpha before releasing");
   if (current.release && runtimeJson(current.release) === runtimeJson(alpha.release)) return { action: "skip", reason: "current" };
   const proof = alpha.release.qualification;

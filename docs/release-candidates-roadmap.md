@@ -37,9 +37,11 @@ main ─────────────────────────
   promoted.
 - Production controlled cutovers require that Alpha's live identity already
   includes the migration, replacing "Beta ran this first".
-- Control-plane or protocol fixes cannot be cherry-picked while cloud is on:
-  the runtime rule needs Alpha to have qualified the same control-plane and
-  protocol trees. They land on `main` and ship in a new cut.
+- A release whose code Alpha has moved past keeps Production's current cloud
+  runtime, with a warning, when CI replays that runtime's worker contract
+  against the release's control plane. A control-plane or protocol cherry-pick
+  therefore ships its backend and keeps the runtime; the new runtime follows in
+  a later release cut where Alpha still serves matching code.
 
 ## Pull requests
 
@@ -49,8 +51,9 @@ main ─────────────────────────
 | 0 | Runtime resolver keeps the destination's own qualified pin when nothing it was qualified with changed | #1119 |
 | 0 | The engine copies `zeros.db` before applying pending migrations, keeping two copies | #1120 |
 | 0 | Old-app check: replay each supported desktop's requests and parsers against the new backend | #1121 (five cloud workspace reads; extend the list) |
-| 0 | Old-runtime check: replay each kept runtime's boot sequence (hello, config, activity) against the new backend | this PR |
-| 0 | Runtime promotion accepts a retained Alpha qualification of the same trees, not only Alpha's live pin; one approval per release | planned |
+| 0 | Old-runtime check: replay each kept runtime's boot sequence (hello, config, activity) against the new backend | #1122 |
+| 0 | When Alpha has moved past a release's code, keep the destination's current runtime if CI replays its worker contract (warning, not failure) | this PR |
+| 0 | One approval per release, covering hosted, runtime and signing | planned |
 | 1 | Production app follows the `rc` feed when a staff-only Internal toggle is on, falling back to Latest | planned |
 | 2 | `release.yml` publishes candidates to `rc`; new `release-promote.yml`; candidate receipt replaces the Beta receipt in `scripts/release/` and `cutover-cli.ts` | planned |
 | 3 | Remove Beta from code, after one candidate → promote cycle | planned |
