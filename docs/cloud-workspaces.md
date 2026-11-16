@@ -1156,8 +1156,15 @@ about 800 KB, like Conductor's batched session notifications. Each chat's frames
 stay contiguous and in order; a chat larger than a batch is split across
 requests, still in order. The control plane applies the frames in one
 transaction, frame *i* at sequence *first + i*. The replay, gap and
-replacement-marker rules are those of single frames. Unnegotiated workers and
-control planes keep one frame per request.
+replacement-marker rules are those of single frames. Both HTTP and relay
+configurations offer the flag. If a rolled-back control plane answers the batch
+route with 404, the worker sends the same frames one per request at the same
+sequences and stops batching for that boot. Unnegotiated workers and control
+planes keep one frame per request. Worker routes whose handlers verify the
+worker inside their own transaction skip the separate session read: history,
+the batch route, ack, outcome, stop-ack, stop, turn-lease and retirement. The
+small routes refuse bodies over 64 KB before parsing. The history routes read
+the session first when a body is over 64 KB or of unknown size.
 History writers, including retention jobs, must lock the workspace row before changing chat or message rows to avoid deadlocks with history ingestion.
 
 Workers advertising `history-digest-deletions-v1` receive separate live-chat

@@ -45,6 +45,8 @@ export interface Transport {
   historyDigests?: () => Promise<unknown>;
   /** history-batch-v1: several history frames in one request (accepted only when the configuration offers historyBatch). */
   sendHistoryBatch?: (frames: Array<Extract<CloudV2WorkerFrame, { t: "history" }>>) => Promise<boolean>;
+  /** Set when the control plane no longer serves history/batch; the mirror then sends single frames. */
+  readonly historyBatchRefused?: boolean;
   runtimeUpdate?: (request: CloudRuntimeUpdateRequest, signal?: AbortSignal) => Promise<CloudRuntimeUpdateReply>;
   /** recovery-quiesce-v1 (outbound): seal or confirm a recovery binding. */
   recovery?: (request: CloudRecoveryRequest, signal?: AbortSignal) => Promise<CloudRecoveryReply>;

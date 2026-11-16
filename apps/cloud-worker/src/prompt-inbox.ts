@@ -79,6 +79,7 @@ export class PromptInbox {
     this.unsubscribe?.(); this.lifetime.abort(); this.polling?.abort();
     this.agents.setOutboxDispatch();
     await this.task;
+    await this.reporting?.catch(() => {});
   }
 
   private async call(operation: PromptOperation, body: unknown): Promise<unknown> {
@@ -122,15 +123,19 @@ export class PromptInbox {
   }
 
   private reporting?: Promise<void>;
+  private reportingToken?: object;
   private reportAgain = false;
   /** Single-flight: the pull loop and store edits share one reporter; a report failure is retried by the loop. */
   private reportNow(): Promise<void> {
     if (this.reporting) { this.reportAgain = true; return this.reporting; }
+    const token = {};
+    this.reportingToken = token;
     const run = (async () => {
-      do { this.reportAgain = false; await this.report(); } while (this.reportAgain && !this.lifetime.signal.aborted);
+      try { do { this.reportAgain = false; await this.report(); } while (this.reportAgain && !this.lifetime.signal.aborted); }
+      // Cleared in the same turn the loop decides to stop, so a later edit always starts a new pass.
+      finally { if (this.reportingToken === token) { this.reporting = undefined; this.reportingToken = undefined; } }
     })();
-    this.reporting = run;
-    run.then(() => { if (this.reporting === run) this.reporting = undefined; }, () => { if (this.reporting === run) this.reporting = undefined; });
+    if (this.reportingToken === token) this.reporting = run;
     return run;
   }
   private reportSoon(): void {

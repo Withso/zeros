@@ -225,3 +225,23 @@ it("R3 history-batch-v1: one drain sends every ready chat's frames in one reques
     expect(relay.frames.filter(frame => frame.t === "history")).toEqual([]);
   } finally { await batched.dispose(); await cleanup(); }
 });
+
+it("R3 history-batch-v1: a chat larger than one batch goes in order across requests, its replacement only in the first", async () => {
+  const { store, mirror, cleanup } = await setup();
+  await mirror.dispose();
+  await store.importMessages("chat", Array.from({ length: 1000 }, (_, index) => ({ msgId: `big-${String(index).padStart(4, "0")}`, kind: "text", createdAt: index,
+    payload: JSON.stringify({ id: `big-${index}`, kind: "text", role: "agent", messageId: "m", createdAt: index, text: "y".repeat(1000) }) })));
+  const batches: Array<Array<{ messages?: { chatId: string; replace?: true; rows: Array<{ msgId: string }> } }>> = [];
+  const transport = { send: async () => true, sendHistoryBatch: async (frames: never[]) => { batches.push(frames); return true; } } as never;
+  const batched = new HistoryMirror(store, transport, () => true, value => value, undefined, () => true);
+  try {
+    batched.connect(); await batched.flush();
+    expect(batches.length).toBeGreaterThan(1);
+    const messageFrames = batches.flat().filter(frame => frame.messages);
+    expect(messageFrames.filter(frame => frame.messages!.replace).length).toBe(1);
+    expect(messageFrames[0]!.messages!.replace).toBe(true);
+    const ids = messageFrames.flatMap(frame => frame.messages!.rows.map(row => row.msgId)).filter(id => id.startsWith("big-"));
+    expect(ids).toEqual([...ids].sort());
+    expect(ids).toHaveLength(1000);
+  } finally { await batched.dispose(); await cleanup(); }
+});

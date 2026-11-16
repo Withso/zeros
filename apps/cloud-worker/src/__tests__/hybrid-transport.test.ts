@@ -16,7 +16,7 @@ import * as notifyProtocol from "@zeros/protocol/notify-user";
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); vi.useRealTimers(); });
-async function fixture(options: { hello?: Promise<void>; onFrame?: (frame: any) => void; heartbeatPhase?: number; config?: Record<string, unknown> } = {}) {
+async function fixture(options: { hello?: Promise<void>; onFrame?: (frame: any) => void; heartbeatPhase?: number; config?: Record<string, unknown>; batch?: boolean } = {}) {
   const directory = await mkdtemp(join(tmpdir(), "hybrid-transport-")), tokenFile = join(directory, "token");
   let expected = "synthetic-worker-token", revision = "0", failHistory = false, lostReply = false;
   await writeFile(tokenFile, expected, { mode: 0o600 });
@@ -40,6 +40,7 @@ async function fixture(options: { hello?: Promise<void>; onFrame?: (frame: any) 
       if (lostReply) { lostReply = false; throw new Error("Lost committed response"); }
       return failHistory ? new Response(null, { status: 503 }) : Response.json({ sequence: body.sequence });
     }
+    if (path === "batch" && options.batch) return Response.json({ sequence: body.sequence + body.frames.length - 1 });
     if (path === "github-token") return Response.json({ token: "synthetic-github-token", expiresAt: Date.now() + 60_000 });
     return new Response(null, { status: 404 });
   });
@@ -488,6 +489,29 @@ it("advertises outbox support without changing the strict hello body, and reread
   });
   expect(await f.transport.promptRequest("pull", { waitMs: 25_000 })).toEqual({ prompts: [], stops: [] });
 });
+it("history-batch-v1: a batch takes consecutive sequences and a single frame continues after it", async () => {
+  const f = await fixture({ batch: true });
+  expect(await f.transport.sendHistoryBatch([{ t: "history", chats: [{ id: "a" }] }, { t: "history", messages: { chatId: "a", rows: [] } },
+    { t: "history", chats: [{ id: "b" }] }])).toBe(true);
+  const batch = f.requests.find(request => request.path === "batch")!.body;
+  expect(batch).toMatchObject({ sequence: 1 });
+  expect(batch.frames).toHaveLength(3);
+  expect(batch.frames.every((frame: object) => !("t" in frame))).toBe(true);
+  expect(await f.transport.send({ t: "history", chatDeletions: ["c"] })).toBe(true);
+  expect(f.requests.filter(request => request.path === "history").at(-1)!.body.sequence).toBe(4);
+});
+
+it("history-batch-v1: a rolled-back control plane (404) gets the same frames at the same sequences, then no more batches", async () => {
+  const f = await fixture();
+  expect(await f.transport.sendHistoryBatch([{ t: "history", chats: [{ id: "a" }] }, { t: "history", chats: [{ id: "b" }] }])).toBe(true);
+  expect(f.requests.filter(request => request.path === "batch")).toHaveLength(1);
+  expect(f.requests.filter(request => request.path === "history").map(request => request.body.sequence)).toEqual([1, 2]);
+  expect(f.transport.historyBatchRefused).toBe(true);
+  expect(await f.transport.sendHistoryBatch([{ t: "history", chats: [{ id: "c" }] }])).toBe(true);
+  expect(f.requests.filter(request => request.path === "batch")).toHaveLength(1);
+  expect(f.requests.filter(request => request.path === "history").at(-1)!.body.sequence).toBe(3);
+});
+
 it("retries a lost history acknowledgement with the same boot, sequence and rows before sending a new snapshot", async () => {
   const f = await fixture(); f.loseReply();
   expect(await f.transport.send({ t: "history", chats: [{ id: "chat" }] })).toBe(false);

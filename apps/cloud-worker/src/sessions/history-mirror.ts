@@ -317,10 +317,13 @@ export class HistoryMirror {
             if (chunk.length && (chunk.length === CLOUD_V2_MAX_HISTORY_BATCH_FRAMES || chunkBytes + frameBytes > HISTORY_BATCH_TARGET_BYTES)) {
               if (!await this.sendBatch(epoch, chunk)) return;
               chunk = []; chunkBytes = 0;
+              // A cut while a chunk was in flight supersedes the rest of this backfill, as for single frames.
+              if (!pending.deleted && (this.store.historyRevision(chatId) !== pending.revision || !this.store.metadata(chatId)?.chat)) break;
             }
             chunk.push(frame); chunkBytes += frameBytes;
           }
-          if (chunk.length && !await this.sendBatch(epoch, chunk)) return;
+          if (chunk.length && (pending.deleted || this.store.historyRevision(chatId) === pending.revision && this.store.metadata(chatId)?.chat)
+            && !await this.sendBatch(epoch, chunk)) return;
           continue;
         }
         batch.push(...frames); bytes += total;

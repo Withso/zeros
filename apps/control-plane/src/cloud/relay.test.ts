@@ -914,6 +914,21 @@ describe("cloud v2 relay", () => {
       }
     });
 
+  it.each([{ features: "", served: true }, { features: "history-batch-v1", served: false }, { features: "history-batch-v1", served: true }])(
+    "offers history batches on initial and refreshed relay configuration: $features, served=$served", async ({ features, served }) => {
+      workerServer.on("headers", headers => { headers.push(`X-Zeros-Worker-Features: ${features}`); });
+      deps.historyBatch = served;
+      const frames: any[] = [];
+      workerServer.on("connection", ws => ws.on("message", raw => frames.push(JSON.parse(String(raw)))));
+      await app();
+      await vi.waitFor(() => expect(frames.filter(frame => frame.t === "config")).toHaveLength(1));
+      loginRevision = "1"; await relay.refreshLogins();
+      await vi.waitFor(() => expect(frames.filter(frame => frame.t === "config")).toHaveLength(2));
+      // The relay's configuration must agree with HTTP's, or each dial would switch the worker's batching off.
+      for (const frame of frames.filter(frame => frame.t === "config"))
+        expect(frame.historyBatch).toBe(features === "history-batch-v1" && served ? 1 : undefined);
+    });
+
   it.each([false, true])("gates managed identity on WebSocket upgrade support=%s for initial and refreshed config", async supported => {
     workerServer.on("headers", headers => { headers.push(`X-Zeros-Worker-Features: mcp-v1${supported ? ",git-identity-v1" : ""}`); });
     const original = deps.config, gitIdentity = { name: "Fixture Contributor", email: "123+contributor@users.noreply.github.com" };

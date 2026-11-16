@@ -116,6 +116,16 @@ async function currentSession(deps: CloudV2WorkerRouteDeps, token: string, bootI
 function credentials(c: Context): { token: string; bootId: string } {
   const token = bearer(c), bootId = c.req.header("x-zeros-worker-boot");
   if (!bootId || !z.string().uuid().safeParse(bootId).success) throw unauthorized();
+  // These routes carry small bodies: never parse a large one from a caller not yet authenticated.
+  if (Number(c.req.header("content-length") ?? 0) > SMALL_WORKER_BODY_BYTES) throw new HttpError(413, "payload_too_large", "Worker request is too large");
+  return { token, bootId };
+}
+const SMALL_WORKER_BODY_BYTES = 64 * 1024;
+/** History bodies can be large: above the small bound (or of unknown size) the credential is read before the body. */
+async function historyCredentials(c: Context, deps: CloudV2WorkerRouteDeps): Promise<{ token: string; bootId: string }> {
+  const length = Number(c.req.header("content-length"));
+  if (Number.isFinite(length) && length <= SMALL_WORKER_BODY_BYTES) return credentials(c);
+  const { token, bootId } = await session(c, deps);
   return { token, bootId };
 }
 async function session(c: Context, deps: CloudV2WorkerRouteDeps, privateBoot = false): Promise<{ token: string; bootId: string; workspace: CloudV2WorkerSession }> {
@@ -453,7 +463,7 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
   });
   app.post(`${CLOUD_V2_WORKER_API}/history`, async c => {
     // writeWorkerHistory checks the token, boot, state and live access under the workspace lock.
-    const auth = credentials(c), input = await body(c, CloudV2WorkerHistorySchema);
+    const auth = await historyCredentials(c, deps), input = await body(c, CloudV2WorkerHistorySchema);
     if (input.bootId !== auth.bootId) throw unauthorized();
     if (input.chatEditAcks !== undefined && !workerFeatures(c).has("chat-edit-v1"))
       throw new HttpError(400, "invalid_request", "Unsupported worker history fields");
@@ -468,7 +478,7 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
     const features = workerFeatures(c);
     if (!features.has(HISTORY_BATCH_FEATURE) || !deps.store.writeWorkerHistoryBatch) throw new HttpError(404, "not_found", "History batches are unavailable");
     // writeWorkerHistoryBatch checks the token, boot, state and live access under the workspace lock, per frame.
-    const auth = credentials(c), input = await body(c, CloudV2WorkerHistoryBatchSchema);
+    const auth = await historyCredentials(c, deps), input = await body(c, CloudV2WorkerHistoryBatchSchema);
     if (input.bootId !== auth.bootId) throw unauthorized();
     const digests = features.has(HISTORY_DIGEST_FEATURE) && features.has("history-replace-v1");
     for (const frame of input.frames) {

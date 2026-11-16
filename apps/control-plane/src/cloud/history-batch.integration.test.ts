@@ -60,6 +60,22 @@ suite("history-batch-v1: frames from several chats in one request and one transa
     expect(await digests.json()).toEqual({ chats: [{ chatId: "native", digest }] });
   });
 
+  it("commits all or nothing: a failing frame rolls back the frames before it", async () => {
+    const response = await batch(1, [{ chats: [{ id: "a" }] }, { messages: { chatId: "a", rows: [row("a1")] } },
+      { chatEditAcks: [{ chatId: "missing", version: "1" }] }]);
+    expect(response.ok).toBe(false);
+    expect(await historySequence()).toBe(0);
+    expect(await window("a")).toEqual([]);
+  });
+
+  it("stamps each chat's digest when several replacements share one batch", async () => {
+    const other = "c".repeat(64);
+    expect((await batch(1, [{ chats: [{ id: "x" }] }, { messages: { chatId: "x", replace: true, historyState: { revision: 0 }, rows: [row("x1")], digest } },
+      { chats: [{ id: "y" }] }, { messages: { chatId: "y", replace: true, historyState: { revision: 0 }, rows: [row("y1")], digest: other } }])).status).toBe(200);
+    const digests = await (await f.worker("history/digests", {}, { features: capabilities() })).json();
+    expect(digests.chats).toEqual(expect.arrayContaining([{ chatId: "x", digest }, { chatId: "y", digest: other }]));
+  });
+
   it("refuses a batch when the worker did not advertise history-batch-v1, and a gap in the sequence", async () => {
     expect((await batch(1, [{ chats: [{ id: "a" }] }], false)).status).toBe(404);
     expect((await batch(1, [{ chats: [{ id: "a" }] }])).status).toBe(200);
