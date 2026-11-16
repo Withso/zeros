@@ -1152,6 +1152,22 @@ no rows while a turn runs, such as an outbox accept or report, keep the row
 held. Completed items gather for two seconds, the approved ceiling of one ingest write
 per two seconds per running chat. A 60-second, 300-token stream
 writes 5 history transactions instead of 53.
+
+Workers advertising `history-batch-v1` receive `historyBatch:1` and send every
+ready chat's frames in one `POST history/batch`. A batch holds up to 50 frames,
+about 800 KB, like Conductor's batched session notifications. Each chat's frames
+stay contiguous and in order; a chat larger than a batch is split across
+requests, still in order. The control plane applies the frames in one
+transaction, frame *i* at sequence *first + i*. The replay, gap and
+replacement-marker rules are those of single frames. Both HTTP and relay
+configurations offer the flag. If a rolled-back control plane answers the batch
+route with 404, the worker sends the same frames one per request at the same
+sequences and stops batching for that boot. Unnegotiated workers and control
+planes keep one frame per request. Worker routes whose handlers verify the
+worker inside their own transaction skip the separate session read: history,
+the batch route, ack, outcome, stop-ack, stop, turn-lease and retirement. The
+small routes refuse bodies over 64 KB before parsing. The history routes read
+the session first when a body is over 64 KB or of unknown size.
 History writers, including retention jobs, must lock the workspace row before changing chat or message rows to avoid deadlocks with history ingestion.
 
 Workers advertising `history-digest-deletions-v1` receive separate live-chat
@@ -2019,7 +2035,9 @@ initial drain, an empty inbox waits locally for a hint; the safety pulse
 repairs a missed hint without leasing an empty batch. A LISTEN gap or loss of
 the last negotiated relay resumes HTTPS long polling immediately;
 reconnection drains once before waiting again. Payloads, inbox ACKs, dispatch
-and Stop receipts always use the same durable HTTPS routes.
+and Stop receipts always use the same durable HTTPS routes. A turn's own store
+edits (accept, report, finish) report outcomes through a single-flight reporter
+and never cut the long poll short, so a turn costs no extra pulls.
 
 `push-signals-v1` workers receive `pushSignals:1` only when the control plane
 accepts the feature. They may hold a prompt pull for 60 seconds, send idle

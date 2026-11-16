@@ -3,7 +3,7 @@ import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
 import { HttpError } from "../authz.js";
 import type { Tx } from "../db.js";
-import { CLOUD_V2_MAX_FRAME_BYTES, CloudV2WorkerActivitySchema, CloudV2WorkerHelloSchema, CloudV2WorkerHistorySchema, CloudV2WorkerTimingRequestSchema, CloudV2RenewRequestSchema, CloudV2TurnLeaseRequestSchema, CloudV2TerminalLeaseRequestSchema, CloudV2ClientLeaseRequestSchema, CloudV2BootstrapLeaseRequestSchema, CloudV2RetiredRequestSchema, CloudV2BootCleanRequestSchema, CloudV2AuthorityRequestSchema, ACTING_USER_FEATURE, BOOT_TIMINGS_FEATURE, MESSAGE_AUTHORITY_FEATURE, HISTORY_DIGEST_FEATURE, HISTORY_DIGEST_DELETIONS_FEATURE, type CloudV2ControlFrame } from "./contract.js";
+import { CLOUD_V2_MAX_FRAME_BYTES, CloudV2WorkerActivitySchema, CloudV2WorkerHelloSchema, CloudV2WorkerHistorySchema, CloudV2WorkerTimingRequestSchema, CloudV2RenewRequestSchema, CloudV2TurnLeaseRequestSchema, CloudV2TerminalLeaseRequestSchema, CloudV2ClientLeaseRequestSchema, CloudV2BootstrapLeaseRequestSchema, CloudV2RetiredRequestSchema, CloudV2BootCleanRequestSchema, CloudV2AuthorityRequestSchema, ACTING_USER_FEATURE, BOOT_TIMINGS_FEATURE, MESSAGE_AUTHORITY_FEATURE, HISTORY_DIGEST_FEATURE, HISTORY_DIGEST_DELETIONS_FEATURE, HISTORY_BATCH_FEATURE, CloudV2WorkerHistoryBatchSchema, type CloudV2ControlFrame } from "./contract.js";
 import type { AuthorityPull } from "./execution/authority-pull.js";
 import { emitCloudV2Timing, type CloudV2TimingRecord } from "./lifecycle.js";
 import type { CloudV2Store, CloudV2WorkerSession, CloudV2Workspace } from "./store.js";
@@ -45,7 +45,7 @@ export type CloudV2WorkerRouteDeps = {
     hello(token: string, bootId: string, runtime: string, capable: boolean, id: string): Promise<boolean>;
     setup(token: string, bootId: string, id: string, report: z.infer<typeof CloudV2SetupStatusSchema>): Promise<void>;
   };
-  store: Pick<CloudV2Store, "beginWorkerHello" | "acceptWorkerHello" | "workerSession" | "accessEpoch" | "loginRevision" | "markActive" | "writeWorkerHistory" | "failWorkerCheckout"> & Partial<Pick<CloudV2Store, "prompts" | "workerHelloIdentity" | "chatEdits" | "reportWorkerSetup" | "workerHistoryDigests" | "refuseWorkerRuntime">>;
+  store: Pick<CloudV2Store, "beginWorkerHello" | "acceptWorkerHello" | "workerSession" | "accessEpoch" | "loginRevision" | "markActive" | "writeWorkerHistory" | "failWorkerCheckout"> & Partial<Pick<CloudV2Store, "prompts" | "workerHelloIdentity" | "chatEdits" | "reportWorkerSetup" | "workerHistoryDigests" | "refuseWorkerRuntime" | "writeWorkerHistoryBatch">>;
   runtimeSha256: string;
   /** R2: new active boots that advertise message-authority-v1 take it (CLOUD_V2_MESSAGE_AUTHORITY_ENABLED). */
   messageAuthority?: boolean;
@@ -111,6 +111,23 @@ async function currentSession(deps: CloudV2WorkerRouteDeps, token: string, bootI
   }
   return deps.store.workerSession(token, bootId);
 }
+/** The worker's bearer and boot, unchecked: only for handlers that verify both again inside their own transaction (the
+ * outbox's worker lock, the history write), so a separate session read would cost a transaction and prove nothing. */
+function credentials(c: Context): { token: string; bootId: string } {
+  const token = bearer(c), bootId = c.req.header("x-zeros-worker-boot");
+  if (!bootId || !z.string().uuid().safeParse(bootId).success) throw unauthorized();
+  // These routes carry small bodies: never parse a large one from a caller not yet authenticated.
+  if (Number(c.req.header("content-length") ?? 0) > SMALL_WORKER_BODY_BYTES) throw new HttpError(413, "payload_too_large", "Worker request is too large");
+  return { token, bootId };
+}
+const SMALL_WORKER_BODY_BYTES = 64 * 1024;
+/** History bodies can be large: above the small bound (or of unknown size) the credential is read before the body. */
+async function historyCredentials(c: Context, deps: CloudV2WorkerRouteDeps): Promise<{ token: string; bootId: string }> {
+  const length = Number(c.req.header("content-length"));
+  if (Number.isFinite(length) && length <= SMALL_WORKER_BODY_BYTES) return credentials(c);
+  const { token, bootId } = await session(c, deps);
+  return { token, bootId };
+}
 async function session(c: Context, deps: CloudV2WorkerRouteDeps, privateBoot = false): Promise<{ token: string; bootId: string; workspace: CloudV2WorkerSession }> {
   const token = bearer(c), bootId = c.req.header("x-zeros-worker-boot");
   if (!bootId || !z.string().uuid().safeParse(bootId).success) throw unauthorized();
@@ -175,6 +192,7 @@ async function configuration(deps: CloudV2WorkerRouteDeps, workspace: CloudV2Wor
         ...(features.has("push-signals-v1") && deps.promptOutbox && pushSignals === 1 ? { pushSignals } : {}),
         loginRevision: revision, ...(features.has("history-replace-v1") ? { historyReplacement: 1 } : {}),
         ...(features.has("history-replace-v1") && features.has(HISTORY_DIGEST_FEATURE) && deps.store.workerHistoryDigests ? { historyDigest: 1 } : {}),
+        ...(features.has(HISTORY_BATCH_FEATURE) && deps.store.writeWorkerHistoryBatch ? { historyBatch: 1 } : {}),
         ...workerGitIdentity(config, features.has("git-identity-v1"), features.has("creator-commit-identity-v1")),
         ...(features.has("code-review-v1") && codeReview ? { codeReview } : {}),
         ...(features.has("github-user-token-v1") && githubUserTokens === 1 ? { githubUserTokens } : {}),
@@ -205,7 +223,8 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
       return c.json(await execution.boots.clean(auth, input, deps.logger));
     });
     app.post(`${CLOUD_V2_WORKER_API}/turn-lease`, async c => {
-      const auth = await session(c, deps);
+      // Like bootstrap-lease: turnLease verifies the worker in its own first transaction.
+      const auth = credentials(c);
       if (!workerFeatures(c).has(ACTING_USER_FEATURE)) throw executionWorkerRequired();
       return c.json(leaseReply(c, await execution.turnLease(auth, await body(c, CloudV2TurnLeaseRequestSchema))));
     });
@@ -231,7 +250,8 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
       return c.json(leaseReply(c, await execution.bootstrapLease({ token, bootId }, input.contextId)));
     });
     app.post(`${CLOUD_V2_WORKER_API}/execution-leases/:id/retired`, async c => {
-      const auth = await session(c, deps);
+      // retired() verifies the worker under its own workspace lock.
+      const auth = credentials(c);
       if (!workerFeatures(c).has(ACTING_USER_FEATURE)) throw executionWorkerRequired();
       const id = z.uuid().safeParse(c.req.param("id"));
       if (!id.success) throw new HttpError(400, "invalid_request", "Invalid execution context");
@@ -442,7 +462,8 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
     return c.body(null, 204);
   });
   app.post(`${CLOUD_V2_WORKER_API}/history`, async c => {
-    const auth = await session(c, deps), input = await body(c, CloudV2WorkerHistorySchema);
+    // writeWorkerHistory checks the token, boot, state and live access under the workspace lock.
+    const auth = await historyCredentials(c, deps), input = await body(c, CloudV2WorkerHistorySchema);
     if (input.bootId !== auth.bootId) throw unauthorized();
     if (input.chatEditAcks !== undefined && !workerFeatures(c).has("chat-edit-v1"))
       throw new HttpError(400, "invalid_request", "Unsupported worker history fields");
@@ -452,6 +473,20 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
     await deps.store.writeWorkerHistory(auth.token, bootId, sequence, history,
       workerFeatures(c).has(HISTORY_DIGEST_FEATURE) && workerFeatures(c).has("history-replace-v1"));
     return c.json({ sequence });
+  });
+  app.post(`${CLOUD_V2_WORKER_API}/history/batch`, async c => {
+    const features = workerFeatures(c);
+    if (!features.has(HISTORY_BATCH_FEATURE) || !deps.store.writeWorkerHistoryBatch) throw new HttpError(404, "not_found", "History batches are unavailable");
+    // writeWorkerHistoryBatch checks the token, boot, state and live access under the workspace lock, per frame.
+    const auth = await historyCredentials(c, deps), input = await body(c, CloudV2WorkerHistoryBatchSchema);
+    if (input.bootId !== auth.bootId) throw unauthorized();
+    const digests = features.has(HISTORY_DIGEST_FEATURE) && features.has("history-replace-v1");
+    for (const frame of input.frames) {
+      if (frame.chatEditAcks !== undefined && !features.has("chat-edit-v1")) throw new HttpError(400, "invalid_request", "Unsupported worker history fields");
+      if (frame.messages?.digest !== undefined && !digests) throw new HttpError(400, "invalid_request", "Unsupported worker history fields");
+    }
+    await deps.store.writeWorkerHistoryBatch(auth.token, input.bootId, input.sequence, input.frames, digests);
+    return c.json({ sequence: input.sequence + input.frames.length - 1 });
   });
   app.post(`${CLOUD_V2_WORKER_API}/history/digests`, async c => {
     const features = workerFeatures(c);
@@ -569,7 +604,7 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
       } finally { waiter?.dispose(); }
     });
     app.post(`${CLOUD_V2_WORKER_API}/prompts/ack`, async c => {
-      const auth = await session(c, deps);
+      const auth = credentials(c);
       return c.json(await outbox.ack(auth.token, auth.bootId, await body(c, CloudV2PromptAckSchema)));
     });
     app.post(`${CLOUD_V2_WORKER_API}/prompts/begin`, async c => {
@@ -582,16 +617,16 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
       return c.json(await outbox.begin(auth.token, auth.bootId, input));
     });
     app.post(`${CLOUD_V2_WORKER_API}/prompts/outcome`, async c => {
-      const auth = await session(c, deps);
+      const auth = credentials(c);
       return c.json(await outbox.outcome(auth.token, auth.bootId, await body(c, CloudV2PromptOutcomeSchema)));
     });
     app.post(`${CLOUD_V2_WORKER_API}/prompts/stop-ack`, async c => {
-      const auth = await session(c, deps);
+      const auth = credentials(c);
       await outbox.ackStop(auth.token, auth.bootId, await body(c, CloudV2PromptStopReplySchema));
       return c.json({ ok: true });
     });
     app.post(`${CLOUD_V2_WORKER_API}/prompts/stop`, async c => {
-      const auth = await session(c, deps);
+      const auth = credentials(c);
       return c.json(await outbox.stopWorker(auth.token, auth.bootId, await body(c, CloudV2PromptStopSchema)));
     });
   }

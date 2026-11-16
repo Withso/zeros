@@ -961,8 +961,20 @@ export class CloudV2Store {
   /** Sequence and rows commit together. A retry after a lost HTTP response is
    * a no-op, while a gap or a conflicting reuse cannot overwrite newer rows. */
   async writeWorkerHistory(token: string, bootId: string, sequence: number, input: HistoryInput, historyDigests = false): Promise<void> {
-    const digest = createHash("sha256").update(JSON.stringify(input)).digest("hex");
+    await withSystemTx(this.pool, tx => this.applyWorkerHistory(tx, token, bootId, sequence, input, historyDigests));
+  }
+
+  /** history-batch-v1: frames that queued together (any chats) commit in one transaction. Frame i takes sequence
+   * first + i, so every per-frame rule (replay, gaps, replacement markers) applies exactly as for single frames. */
+  async writeWorkerHistoryBatch(token: string, bootId: string, first: number, frames: readonly HistoryInput[], historyDigests = false): Promise<void> {
     await withSystemTx(this.pool, async tx => {
+      for (const [index, frame] of frames.entries()) await this.applyWorkerHistory(tx, token, bootId, first + index, frame, historyDigests);
+    });
+  }
+
+  private async applyWorkerHistory(tx: Tx, token: string, bootId: string, sequence: number, input: HistoryInput, historyDigests: boolean): Promise<void> {
+    const digest = createHash("sha256").update(JSON.stringify(input)).digest("hex");
+    {
       // Invalidation may preserve only this boot's immediately preceding
       // replacement. Other writers clear it without knowing this protocol.
       const { rows } = await tx.query<{ id: string; worker_boot_id: string | null; worker_history_sequence: string; worker_history_digest: string | null; history_replacement: boolean }>(
@@ -1008,7 +1020,7 @@ export class CloudV2Store {
         [row.id, batch.chatId, batch.digest ?? null, bootId, sequence, batch.replace === true]);
       }
       await tx.query("UPDATE cloud_v2_workspaces SET worker_history_sequence=$2, worker_history_digest=$3 WHERE id=$1", [row.id, sequence, digest]);
-    });
+    }
   }
 
   async workerHistoryDigests(token: string, bootId: string, includeDeleted = false) {

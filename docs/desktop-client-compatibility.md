@@ -115,7 +115,10 @@ talking to a new control plane during a handover
 helpers, and the advertised `X-Zeros-Worker-Features`. Its committed copy is
 `worker-next.json`, and `pnpm client-contract:release` keeps
 `released/worker-X.Y.Z.json` beside the desktop copy. The replay runs each
-kept runtime's sequence as one boot. Config frames are strict, so a field the
+kept runtime's sequence as one boot. `main` has no merge queue, so two PRs
+that each pass can still merge into a stale committed contract (a worker
+feature added on a branch cut before the contract existed); the sync test then
+turns `main` red, and the fix is `pnpm client-contract:update`. Config frames are strict, so a field the
 control plane sends without checking that runtime's advertised features fails
 with `unrecognized_keys`.
 

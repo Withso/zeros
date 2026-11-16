@@ -253,6 +253,21 @@ it("keeps provider acceptance separate from the inbox ACK and publishes it once"
   await until(() => relay.calls.filter(call => call.op === "outcome" && call.body.state === "completed").length).toBe(1);
 });
 
+it("reports a turn's outcomes without re-pulling on every store edit (one pull per server signal)", async () => {
+  const relay = new PullRelay(), item = delivery(); relay.enqueue({ prompts: [item], stops: [] });
+  const f = await setup({ relay });
+  await until(() => f.driver.prompts.length).toBe(1);
+  const pulls = () => relay.calls.filter(call => call.op === "pull").length, before = pulls();
+  for (let i = 0; i < 10; i++) f.driver.emit({ sessionUpdate: "agent_message_chunk", messageId: "answer", content: { type: "text", text: "ok" } });
+  await until(() => relay.calls.filter(call => call.op === "outcome" && call.body.state === "accepted").length).toBe(1);
+  f.driver.complete();
+  await until(() => relay.calls.filter(call => call.op === "outcome" && call.body.state === "completed").length).toBe(1);
+  await new Promise(resolve => setTimeout(resolve, 50));
+  // The turn's own store edits (accept, report, finish) cost no pulls; the long poll stays open for the next signal.
+  expect(pulls() - before).toBe(0);
+  expect(relay.waiting).toBeDefined();
+});
+
 it.each<[string, SessionUpdate]>([
   ["context snapshot", { sessionUpdate: "usage_update", size: 100, used: 20, categories: [] }],
   ["wake-up notice", { sessionUpdate: "wakeup_notice", noticeId: "wakeup", source: "loop_wakeup" }],

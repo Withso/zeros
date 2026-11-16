@@ -13,6 +13,9 @@ export const CLOUD_V2_MAX_FRAME_BYTES = 16 * 1024 * 1024;
 /** Rows per history frame; larger backfills are split by the sender. */
 export const CLOUD_V2_MAX_HISTORY_ROWS = 500;
 export const HISTORY_DIGEST_FEATURE = "history-digest-v1";
+/** history-batch-v1: frames that queued together, from any chats, in one request and one control-plane transaction. */
+export const HISTORY_BATCH_FEATURE = "history-batch-v1";
+export const CLOUD_V2_MAX_HISTORY_BATCH_FRAMES = 50;
 export const BOOT_TIMINGS_FEATURE = "boot-timings-v1";
 /** R2: the worker holds who may act from authority freshness instead of renewing each context. */
 export const MESSAGE_AUTHORITY_FEATURE = "message-authority-v1";
@@ -183,6 +186,8 @@ export const CloudV2ControlFrameSchema = z.discriminatedUnion("t", [
     }).strict().optional(),
     historyReplacement: z.literal(1).optional(),
     historyDigest: z.literal(1).optional(),
+    /** history-batch-v1: the control plane accepts history/batch. */
+    historyBatch: z.literal(1).optional(),
     bootTimings: z.literal(1).optional(),
     gitIdentity: CloudV2GitIdentitySchema.nullable().optional(),
     gitIdentitySource: z.enum(["creator", "actor"]).optional(),
@@ -222,6 +227,8 @@ export const CloudV2WorkerHelloSchema = z.object({
   runtimeSha256: z.string().regex(/^[0-9a-f]{64}$/), bootId: z.string().uuid(),
 }).strict();
 export const CloudV2WorkerHistorySchema = CloudV2HistoryFrameSchema.extend({ bootId: z.string().uuid(), sequence: z.number().int().positive().max(Number.MAX_SAFE_INTEGER) });
+export const CloudV2WorkerHistoryBatchSchema = z.object({ bootId: z.string().uuid(), sequence: z.number().int().positive().max(Number.MAX_SAFE_INTEGER - CLOUD_V2_MAX_HISTORY_BATCH_FRAMES),
+  frames: z.array(CloudV2HistoryFrameSchema.omit({ t: true }).strict()).min(1).max(CLOUD_V2_MAX_HISTORY_BATCH_FRAMES) }).strict();
 export const CloudV2WorkerActivitySchema = z.object({ idle: z.boolean() }).strict();
 export const CloudV2WorkerActivityReplySchema = z.object({
   loginRevision: z.string().regex(/^(0|[1-9][0-9]{0,19})$/),
