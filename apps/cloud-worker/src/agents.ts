@@ -914,7 +914,8 @@ export class Agents {
         // The sender no longer has access (phase 3): their message is cancelled, never a failed turn.
         if (contextCode(error) === "member_access_revoked") return false;
         if (contextCode(error) !== "actor_busy" || route.closed || stopping !== route.stopping || this.lifetime.signal.aborted) throw error;
-        await new Promise(resolve => setTimeout(resolve, Math.min(5_000, 250 * 2 ** Math.min(attempt, 5))));
+        // Each refusal costs the control plane several transactions: back off to 30 s, so a busy workspace (or ten) stays cheap.
+        await new Promise(resolve => setTimeout(resolve, Math.min(30_000, 500 * 2 ** Math.min(attempt, 6))));
         if (route.closed || stopping !== route.stopping || this.lifetime.signal.aborted) return false;
       }
     }

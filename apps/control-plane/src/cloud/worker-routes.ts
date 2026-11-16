@@ -30,7 +30,8 @@ import type { CloudWorkspaceSync } from "./workspace-sync/store.js";
 import { SYNC_FEATURE, SYNC_CONTEXT_FEATURE } from "./workspace-sync/contract.js";
 
 import type { CloudExecutionContexts } from "./execution/store.js";
-import { executionWorkerRequired } from "./execution/errors.js";
+import { ActorBusy, executionWorkerRequired } from "./execution/errors.js";
+import { BusyLog } from "./execution/busy-log.js";
 import { activationBusy } from "./execution/activation-state.js";
 import { workerGitIdentity } from "./worker-git-identity.js";
 
@@ -188,6 +189,7 @@ async function configuration(deps: CloudV2WorkerRouteDeps, workspace: CloudV2Wor
 /** Mounted before user authentication. Every request is scoped by the worker
  * credential and current boot, never by an id supplied in the body. */
 export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
+  const busy = new BusyLog(deps.logger);
   const app = new Hono();
   // The VM can read its bearer token. Do not trust its client-side diagnostic
   // throttle; bound both log volume per boot and retained admission state.
@@ -573,7 +575,10 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
     app.post(`${CLOUD_V2_WORKER_API}/prompts/begin`, async c => {
       const auth = await session(c, deps);
       const input = await body(c, CloudV2PromptBeginSchema);
-      if (auth.workspace.executionMode === "active") return c.json(await deps.execution!.begin(auth, input));
+      if (auth.workspace.executionMode === "active") {
+        try { return c.json(await deps.execution!.begin(auth, input)); }
+        catch (error) { if (error instanceof ActorBusy) busy.record("begin", auth.workspace.id, error.reason); throw error; }
+      }
       return c.json(await outbox.begin(auth.token, auth.bootId, input));
     });
     app.post(`${CLOUD_V2_WORKER_API}/prompts/outcome`, async c => {

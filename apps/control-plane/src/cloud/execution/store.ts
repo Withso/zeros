@@ -215,7 +215,7 @@ export class CloudExecutionContexts {
     if (!row) throw new HttpError(401, "worker_unauthorized", "Worker authorization is no longer current");
     if (row.execution_mode !== "active" || !row.acting_user_boot_ids.includes(identity.bootId)) throw executionWorkerRequired();
     if (!cleanup && row.state === "stopping") throw new HttpError(409, "workspace_stopping", "The workspace is stopping");
-    if (!row.clean) throw actorBusy();
+    if (!row.clean) throw actorBusy("boot_not_clean");
     return row;
   }
 
@@ -316,16 +316,16 @@ export class CloudExecutionContexts {
         let active = chat.active_context_id ? await this.context(tx, chat.active_context_id, workspace.id) : null;
         if (active?.state === "retired") {
           const parent = await this.prompt(tx, workspace.id, active.user_message_id!);
-          if (pending(parent.state)) throw actorBusy();
+          if (pending(parent.state)) throw actorBusy("turn_retiring");
           active = null;
         }
         // A rejoined sender's steer waits as an ordinary message: their earlier access ended this turn's steering.
         const steer = row.payload?.mode === "steer" && active?.user_id === row.creator_user_id && !active.sender_ended_at;
-        if (active && !steer) throw actorBusy();
+        if (active && !steer) throw actorBusy("chat_busy");
         const older = (await tx.query(`SELECT 1 FROM cloud_v2_prompt_outbox WHERE workspace_id=$1 AND chat_id=$2 AND sequence<$3
           AND state IN ('queued','inboxed','dispatching','accepted') AND ($4::text IS NULL OR user_message_id<>$4) LIMIT 1`,
         [workspace.id, row.chat_id, row.sequence, steer ? active!.user_message_id : null])).rowCount;
-        if (older) throw actorBusy();
+        if (older) throw actorBusy("older_queued");
         if (steer) {
           await this.assertContext(tx, active!, proof);
           await this.deps.logins.select(workspace.org_id, row.creator_user_id, active!.agent!, active!.selection!, tx);

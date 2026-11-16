@@ -2,7 +2,12 @@ import { HttpError } from "../../authz.js";
 import type { CloudV2Agent, CloudV2ContextReason } from "../contract.js";
 
 export const actorChanged = () => new HttpError(409, "actor_changed", "Execution authority changed");
-export const actorBusy = () => new HttpError(409, "actor_busy", "The preceding turn is still retiring");
+/** Why a begin, lease or renewal had to wait (closed set; logged, never sent as a value). */
+export type ActorBusyReason = "boot_not_clean" | "turn_retiring" | "chat_busy" | "older_queued";
+export class ActorBusy extends HttpError {
+  constructor(readonly reason: ActorBusyReason) { super(409, "actor_busy", "The preceding turn is still retiring"); }
+}
+export const actorBusy = (reason: ActorBusyReason) => new ActorBusy(reason);
 export const executionUnavailable = () => new HttpError(503, "agent_credentials_unavailable", "Execution credentials are temporarily unavailable");
 export const executionWorkerRequired = () => new HttpError(409, "worker_update_required", "This workspace requires an updated worker before shared execution");
 export const memberAccessRevoked = () => new HttpError(403, "member_access_revoked", "Workspace access has been removed");
