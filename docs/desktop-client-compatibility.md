@@ -86,6 +86,32 @@ authentication routes live outside `/v1`; `/v1/auth/snapshot`, devices and cloud
 workspace operations remain user routes and are not exempt. Normal bearer
 authentication, authorization and rate limits still apply to allowed requests.
 
+## Released-client contract replay
+
+The support window only holds if a new control plane still answers every
+supported desktop the way that desktop parses. CI checks this directly:
+
+- `apps/desktop/src/renderer/platform/control-plane-contract.ts` lists the
+  requests the app sends (method, path with `{organizationId}`, `{workspaceId}`
+  or `{chatId}` placeholders, and opt-in headers) and the exact zod schema each
+  call site parses the reply with. Call sites import those schemas and header
+  constants, so the list cannot describe a different request.
+- Its JSON form, with each schema written by `z.toJSONSchema` in input mode, is
+  committed as `apps/control-plane/src/client-contracts/desktop-next.json`. A
+  desktop test fails until `pnpm client-contract:update` regenerates it.
+- When a release ships, `pnpm client-contract:release X.Y.Z` copies that tag's
+  `desktop-next.json` to `released/desktop-X.Y.Z.json` and keeps the newest two.
+- `released-clients.integration.test.ts` boots the control plane in-process on
+  the execution fixture's Postgres data, sends every kept contract's requests,
+  and checks each reply with `z.fromJSONSchema` of that release's schema. A new
+  enum value, a removed or retyped required field, or a non-2xx reply fails.
+  Added fields pass, as they do in the app's parsers.
+
+Refinements and transforms JSON Schema cannot express are left out, so the
+check can miss a break but does not invent one. It covers the listed cloud
+workspace reads today; extend the list rather than writing per-feature N-1
+tests for calls it can replay.
+
 ## Required update behavior
 
 A 426 immediately opens the non-dismissable **Update required** screen above

@@ -6,6 +6,9 @@ import { sharingFor } from "./team-sharing-registry";
 import { localCommandDevice } from "./local-commands";
 import type { CloudWorkspaceTarget } from "./bridge/cloud-workspace-key";
 
+export const CloudV2PromptPageReplySchema = z.object({ epoch: CloudV2PromptCounterSchema,
+  items: z.array(CloudV2PromptStatusSchema).max(100), nextAfter: CloudV2PromptCounterSchema.nullable() });
+
 export function cloudPromptApi(target: CloudWorkspaceTarget, chatId: string) {
   const path = `/v1/cloud-v2/workspaces/${z.string().uuid().parse(target.workspaceId)}/prompts`;
   CloudV2PromptIdSchema.parse(chatId);
@@ -25,8 +28,7 @@ export function cloudPromptApi(target: CloudWorkspaceTarget, chatId: string) {
     },
     async list(after: string, includePayload: boolean) {
       const query = new URLSearchParams({ chatId, after: CloudV2PromptCounterSchema.parse(after), includePayload: String(includePayload) });
-      const page = await cloudAccountRequest(`${path}?${query}`, z.object({ epoch: CloudV2PromptCounterSchema,
-        items: z.array(CloudV2PromptStatusSchema).max(100), nextAfter: CloudV2PromptCounterSchema.nullable() }), undefined, { ...sharingFor(target.workspaceId), promptRecovery: true });
+      const page = await cloudAccountRequest(`${path}?${query}`, CloudV2PromptPageReplySchema, undefined, { ...sharingFor(target.workspaceId), promptRecovery: true });
       for (const row of page.items) check(row.receipt);
       return page;
     },

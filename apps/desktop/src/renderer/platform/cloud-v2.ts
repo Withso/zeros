@@ -163,8 +163,11 @@ export function cloudV2CheckoutPath(document: Pick<CloudWorkspaceDocument, "repo
   return document.checkoutPath ?? `/home/user/${document.repository.owner}/${document.repository.name}`;
 }
 
-const one = z.object({ workspace: CloudV2WorkspaceSchema });
+export const CloudV2WorkspaceReplySchema = z.object({ workspace: CloudV2WorkspaceSchema });
+const one = CloudV2WorkspaceReplySchema;
 const key = () => crypto.randomUUID();
+export const CloudV2WorkspaceListReplySchema = z.object({ workspaces: z.array(CloudV2WorkspaceSchema).max(200), teamSharing: z.unknown().optional(),
+  nextCursor: z.unknown().optional() }).passthrough();
 
 /** Team sharing phase 1: the organization's workspaces this account may see, in keyset pages. A control plane
  * without sharing ignores the opt-in and answers its creator-only list (teamSharing false). */
@@ -174,8 +177,7 @@ export async function listCloudV2Workspaces(organizationId: string): Promise<{ w
   for (let page = 0; ; page++) {
     const query = `organizationId=${uuid.parse(organizationId)}&archived=include&limit=200${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`;
     const reply: { workspaces: CloudV2Workspace[]; teamSharing?: unknown; nextCursor?: unknown } = await cloudAccountRequest(`/v1/cloud-v2/workspaces?${query}`,
-      z.object({ workspaces: z.array(CloudV2WorkspaceSchema).max(200), teamSharing: z.unknown().optional(), nextCursor: z.unknown().optional() }).passthrough(),
-      undefined, { teamSharing: true });
+      CloudV2WorkspaceListReplySchema, undefined, { teamSharing: true });
     if (reply.workspaces.some(row => row.organizationId !== organizationId)) throw new Error("Cloud catalog returned another organization");
     workspaces.push(...reply.workspaces);
     teamSharing = reply.teamSharing === 1;
@@ -329,20 +331,20 @@ export const CloudV2BuildSchema = z.object({
 }).passthrough();
 export type CloudV2Build = z.infer<typeof CloudV2BuildSchema>;
 const RecipeSchema = z.object({ repositories: z.array(CloudV2RepositoryDraftSchema) });
-const ComputerSchema = z.object({
+export const CloudV2ComputerReplySchema = z.object({
   activeBuildId: uuid.nullable(), snapshotName: z.string().nullable(), builds: z.array(CloudV2BuildSchema),
   /** The configured repositories and their revision; older control planes
    * have neither, and the app then edits locally and sends the selection. */
   recipe: RecipeSchema.optional(),
   recipeRevision: z.number().int().nonnegative().optional(),
 });
-export type CloudV2Computer = z.infer<typeof ComputerSchema>;
+export type CloudV2Computer = z.infer<typeof CloudV2ComputerReplySchema>;
 const SavedRecipeSchema = z.object({ recipe: RecipeSchema, recipeRevision: z.number().int().nonnegative() });
 
 /** A repository on the organization's live Cloud Computer. `id` is the
  * lowercase owner/name, which stays the same across builds. */
 export type CloudV2InstalledRepository = { id: string; owner: string; name: string; defaultBranch: string | null };
-const InstalledSchema = z.object({
+export const CloudV2InstalledRepositoriesReplySchema = z.object({
   repositories: z.array(z.object({
     repository: CloudV2RepositorySchema.shape.repository.max(200),
     defaultBranch: z.string().min(1).max(255).nullable().optional(),
@@ -352,7 +354,7 @@ const InstalledSchema = z.object({
 /** Readable by every member; null until the organization has a live build. */
 export async function getCloudV2InstalledRepositories(organizationId: string): Promise<CloudV2InstalledRepository[] | null> {
   const { repositories } = await cloudAccountRequest(
-    `/v1/cloud-v2/organizations/${uuid.parse(organizationId)}/computer/repositories`, InstalledSchema);
+    `/v1/cloud-v2/organizations/${uuid.parse(organizationId)}/computer/repositories`, CloudV2InstalledRepositoriesReplySchema);
   return repositories?.map(row => {
     const [owner, name] = row.repository.split("/") as [string, string];
     return { id: row.repository.toLowerCase(), owner, name, defaultBranch: row.defaultBranch ?? null };
@@ -368,7 +370,7 @@ export async function warmCloudV2RepositoryAccess(organizationId: string, reposi
 }
 
 export async function getCloudV2Computer(organizationId: string) {
-  return cloudAccountRequest(`/v1/cloud-v2/organizations/${uuid.parse(organizationId)}/computer`, ComputerSchema);
+  return cloudAccountRequest(`/v1/cloud-v2/organizations/${uuid.parse(organizationId)}/computer`, CloudV2ComputerReplySchema);
 }
 
 /** Older control planes: build exactly these repositories. */

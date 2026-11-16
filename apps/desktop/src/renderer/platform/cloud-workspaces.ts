@@ -1,6 +1,7 @@
 export * from "./cloud-workspace-contract";
 import type { CloudWorkspaceDocument } from "./cloud-workspace-contract";
 import { z } from "zod";
+import { SYNC_FIELD_HEADERS, TEAM_SHARING_HEADERS } from "./control-plane-headers";
 import { getSession } from "../features/auth/auth-store";
 import { CLIENT_TOKEN_ROLLOVER_FEATURE } from "@zeros/protocol/cloud-v2-relay";
 import { controlPlaneFetch } from "../features/update/control-plane-fetch";
@@ -105,9 +106,9 @@ export async function cloudAccountRequest<T>(
       authorization: `Bearer ${session.access_token}`,
       ...pickDeviceHeaders(options?.deviceHeaders),
       // 12.z: syncWanted has its own opt-in (released apps parse the Mac strictly); both travel together here.
-      ...(options?.syncField ? { "X-Zeros-Sync": "1", "X-Zeros-Sync-Wanted": "1" } : {}),
+      ...(options?.syncField ? SYNC_FIELD_HEADERS : {}),
       // 3B: team ownership travels with team sharing (a workspace may have no Creator; this app reads it).
-      ...(options?.teamSharing ? { "X-Zeros-Team-Sharing": "1", "X-Zeros-Team-Ownership": "1" } : {}),
+      ...(options?.teamSharing ? TEAM_SHARING_HEADERS : {}),
       ...(withRollover ? { "X-Zeros-Client-Features": CLIENT_TOKEN_ROLLOVER_FEATURE, "X-Zeros-Client-Instance": options!.clientInstance! } : {}),
       ...(input
         ? {
