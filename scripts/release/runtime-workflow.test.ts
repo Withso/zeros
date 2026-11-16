@@ -65,8 +65,22 @@ describe("runtime release workflow authority", () => {
     expect(JSON.stringify(approve)).not.toContain("secrets."); expect(JSON.stringify(approve)).not.toContain("actions/checkout");
     expect(step(approve, "Record runtime approval")).toBeDefined();
     expect(release.needs).toEqual(["approve", "build"]); expect(release.if).toContain("needs.approve.result == 'success'");
+    // One approval per release: only release.yml's own approval may stand in for the runner's.
+    expect(approve.if).toContain("!inputs.release_approved");
+    expect(release.if).toContain("(inputs.release_approved && needs.approve.result == 'skipped')");
+    expect(workflow.on.workflow_call.inputs.release_approved).toEqual(expect.objectContaining({ type: "boolean", default: false }));
     expect(release.environment).toBe("${{ inputs.channel }}");
     expect(release.if).toContain("inputs.channel == 'beta'"); expect(text).not.toContain("beta-approval");
+  });
+  it("lets only release.yml stand its own approval in for the runner's", () => {
+    const callers = (file: string) => Object.values((load(readFileSync(new URL(`../../.github/workflows/${file}`, import.meta.url), "utf8")) as any).jobs)
+      .filter((job: any) => job.uses === "./.github/workflows/runtime-release-run.yml");
+    const production = callers("release.yml");
+    expect(production).toHaveLength(1);
+    expect((production[0] as any).with.release_approved).toBe(true);
+    expect((production[0] as any).needs).toBe("runtime-resolve");
+    for (const file of ["runtime-release.yml", "release-beta.yml", "alpha-publication.yml"])
+      for (const job of callers(file)) expect((job as any).with?.release_approved, file).toBeUndefined();
   });
   it("keeps secrets in the controller and its immediate cleanup step, and binds evidence to the attempt", () => {
     const release = workflow.jobs.release, execute = step(release, "Qualify and pin runtime"), cleanup = step(release, "Retire runtime release authority");

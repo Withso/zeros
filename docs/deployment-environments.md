@@ -566,11 +566,14 @@ the manual wrapper remains available for recovery, promotion and rollback.
 
 Only the caller holds `release-<channel>`. The reusable runner has no workflow
 lock and takes `hosted-mutation-<channel>` only for its mutation job, after
-hosted promotion has released it. Production retains the protected runtime
-approval, so an automatic Production release may need another approval after
-the initial hosted/signing approval. Caller paths, events, exact attempts and
-nested producer/approval names are checked together; historic manual proofs
-remain readable.
+hosted promotion has released it. An automatic Production release needs one
+approval: `release.yml` passes `release_approved: true`, the runner skips its
+own approval job, and the controller requires `release.yml`'s protected
+`Approve Production release` job in the same attempt, identified by the run's
+actual workflow path. A manual Production runtime release through
+`runtime-release.yml` keeps its own `Approve runtime promotion` job. Caller
+paths, events, exact attempts and nested producer/approval names are checked
+together; historic manual proofs remain readable.
 
 Beta and Production promotion copies and re-hashes the same archive without
 rebuilding it. Archives, source manifests and qualification receipts are

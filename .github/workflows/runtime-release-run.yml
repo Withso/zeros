@@ -26,6 +26,12 @@ on:
       alpha_run_attempt:
         type: string
         default: ""
+      release_approved:
+        # release.yml only: its own protected approval job authorizes this runtime
+        # step (one approval per release). runtime-github.ts verifies that job by the
+        # run's actual workflow path, so another caller cannot skip its approval.
+        type: boolean
+        default: false
 permissions:
   contents: read
   actions: read
@@ -41,7 +47,7 @@ env:
 jobs:
   approve:
     name: Approve runtime promotion
-    if: github.event.repository.fork == false && inputs.channel == 'production' && startsWith(github.ref, 'refs/heads/release/')
+    if: github.event.repository.fork == false && inputs.channel == 'production' && startsWith(github.ref, 'refs/heads/release/') && !inputs.release_approved
     runs-on: ubuntu-latest
     environment: production-approval
     permissions: {}
@@ -114,7 +120,8 @@ jobs:
       !cancelled() && github.event.repository.fork == false &&
       ((inputs.channel == 'alpha' && github.ref == 'refs/heads/main' && needs.approve.result == 'skipped') ||
       (inputs.channel == 'beta' && startsWith(github.ref, 'refs/heads/release/') && needs.approve.result == 'skipped') ||
-      (inputs.channel == 'production' && startsWith(github.ref, 'refs/heads/release/') && needs.approve.result == 'success')) &&
+      (inputs.channel == 'production' && startsWith(github.ref, 'refs/heads/release/') &&
+      (needs.approve.result == 'success' || (inputs.release_approved && needs.approve.result == 'skipped')))) &&
       ((inputs.action == 'publish' && needs.build.result == 'success') ||
       (inputs.action != 'publish' && needs.build.result == 'skipped'))
     runs-on: ubuntu-latest

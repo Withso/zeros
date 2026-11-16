@@ -704,6 +704,8 @@ jobs:
       runtime_sha256: ${{ needs.runtime-resolve.outputs.runtime_sha256 }}
       alpha_run_id: ${{ needs.runtime-resolve.outputs.alpha_run_id }}
       alpha_run_attempt: ${{ needs.runtime-resolve.outputs.alpha_run_attempt }}
+      # The `approve` job above is this release's one approval; the runner skips its own.
+      release_approved: true
     secrets: inherit
 
   publish:
