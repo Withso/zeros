@@ -4,8 +4,8 @@ import type { NotifyUserDelivery } from "./notify-user/service";
 import { randomInt, randomUUID } from "node:crypto";
 import type { LocalCommandInput } from "@zeros/protocol/local-commands";
 import { requestLocalCommand } from "./local-commands/client";
-import { CLOUD_WORKER_FEATURES } from "./worker-features";
-import { CLOUD_V2_MAX_FRAME_BYTES, CLOUD_V2_RELAY_PROTOCOL, CloudV2ControlFrameSchema, CloudV2WorkerActivityReplySchema,
+import { activityBody, helloBody, WORKER_FEATURES_HEADER, WorkerConfigReplySchema } from "./control-plane-contract";
+import { CLOUD_V2_MAX_FRAME_BYTES, CloudV2ControlFrameSchema, CloudV2WorkerActivityReplySchema,
   CloudV2WorkerFrameSchema, CloudV2WorkerTimingSchema, type CloudV2WorkerTiming, CloudV2WorkerBootTimingSchema, type CloudV2WorkerBootTiming, CloudV2WorkerTimingRequestSchema, type CloudV2ControlFrame, type CloudV2WorkerFrame, CloudV2ContextErrorCodeSchema } from "@zeros/protocol/cloud-v2-relay";
 import { InboundBridge, type SyncContexts } from "./inbound-bridge";
 import { readWorkerToken, WORKER_TOKEN_FILE } from "./worker-token";
@@ -392,7 +392,7 @@ export class HybridTransport implements Transport {
       }
       if (!this.registered) {
         this.helloSequence++; this.mark("worker_hello_sent");
-        const reply = await this.request("hello", { protocol: CLOUD_V2_RELAY_PROTOCOL, runtimeSha256: this.options.runtimeSha256, bootId: this.bootId }, undefined, 30_000);
+        const reply = await this.request("hello", helloBody(this.options.runtimeSha256, this.bootId), undefined, 30_000);
         this.mark("worker_hello_acked");
         this.registered = true;
         await this.handlers!.open();
@@ -424,7 +424,7 @@ export class HybridTransport implements Transport {
     this.historySequence = pending.sequence; this.pendingHistory = undefined;
   }
   private async configuration(value: Record<string, unknown>): Promise<void> {
-    const frame = CloudV2ControlFrameSchema.parse(value.config);
+    const frame = WorkerConfigReplySchema.parse(value).config;
     if (frame.t !== "config") throw new Error("Invalid worker configuration.");
     this.bootTimings = frame.bootTimings === 1; this.flushBootMarks();
     await this.control(frame);
@@ -452,7 +452,7 @@ export class HybridTransport implements Transport {
         this.activityRequested = false;
         if (!this.idle) this.lastBusy = Date.now();
         const pushed = await this.listener.activity(this.idle);
-        const reply = pushed ?? CloudV2WorkerActivityReplySchema.parse(await this.request("activity", { idle: this.idle }));
+        const reply = pushed ?? CloudV2WorkerActivityReplySchema.parse(await this.request("activity", activityBody(this.idle)));
         if (pushed?.prompts) await this.handlers!.frame({ t: "prompts" });
         if (["stopped", "failed", "deleting", "deleted"].includes(reply.state)) { this.options.onStatus?.("stopped"); return; }
         if (reply.loginRevision !== this.applied?.loginRevision || Date.now() - this.configAt >= 12 * 60 * 60_000)
@@ -504,7 +504,7 @@ export class HybridTransport implements Transport {
         method: payload === undefined ? "GET" : "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", "X-Zeros-Worker-Boot": this.bootId,
           // An HTTP header is ignored by older control planes; adding a JSON
           // field would break their strict hello schema before configuration.
-          "X-Zeros-Worker-Features": CLOUD_WORKER_FEATURES,
+          ...WORKER_FEATURES_HEADER,
           ...(this.options.runtimeHandoff ? { "X-Zeros-Runtime-Handoff": this.options.runtimeHandoff.id } : {}) },
         ...(payload === undefined ? {} : { body: payload }), redirect: "error", signal: controller.signal,
       });

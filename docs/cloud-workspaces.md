@@ -237,7 +237,10 @@ replaced. Hello accepts the previous pin only for such a workspace; the worker
 reports the digest of the runtime directory it executes from. A refused hello on a
 starting workspace records `worker_runtime_mismatch` and steps it at once, and that
 step installs the current pin. Clearing `CLOUD_V2_RUNTIME_PREVIOUS_SHA256` and
-redeploying withdraws the previous pin. Token delivery is the one worker restart
+redeploying withdraws the previous pin. CI replays each kept release's runtime
+boot sequence against the current control plane, so that previous pin still
+boots ([released-client contract replay](desktop-client-compatibility.md#released-client-contract-replay)).
+Token delivery is the one worker restart
 on create and wake; the install step no longer restarts it. The unit
 keeps Node's compile cache in `/home/user/.cache/zeros/node-compile-cache`, and
 the worker loads the Claude Agent SDK on its first Claude turn rather than at
