@@ -15,7 +15,8 @@ import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { openSqlite } from "./sqlite";
 import { zerosDbPath } from "./paths";
-import { runMigrations } from "./migrations";
+import { latestSchemaVersion, runMigrations } from "./migrations";
+import { backupBeforeMigrations } from "./migration-backup";
 import { restoreWorkspaceNumberFloor } from "./workspace-number-floor";
 
 let db: Database.Database | null = null;
@@ -54,6 +55,7 @@ export function openZerosDb(): Database.Database {
   handle.pragma("synchronous = NORMAL");
   handle.pragma("foreign_keys = ON");
   handle.pragma("busy_timeout = 5000");
+  backupBeforeMigrations(handle, file, latestSchemaVersion());
   runMigrations(handle);
   // A database recreated beside a surviving floor resumes its numbering.
   restoreWorkspaceNumberFloor(handle, file);
