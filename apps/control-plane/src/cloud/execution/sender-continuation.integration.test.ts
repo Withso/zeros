@@ -197,6 +197,29 @@ database("a started turn survives its sender's access loss on its pinned payer",
     expect(await row(turn.begun.contextId)).toMatchObject({ state: "active", sender_ended: true });
   });
 
+  it("re-delivers no sender material when another lease follows a silent cut; the next renewal moves the turn", async () => {
+    const turn = await started();
+    await silentlyRemove(f.viewer.id);
+    const again = await f.worker("turn-lease", turn.lease);
+    expect(again.status).not.toBe(200);
+    const refused = await again.json();
+    for (const field of ["agents", "mcpServers", "api", "environment"]) expect(refused).not.toHaveProperty(field);
+    expect(await row(turn.begun.contextId)).toMatchObject({ state: "active" });
+    expect(await renew(turn.begun.contextId)).toEqual({ contextId: turn.begun.contextId, expiresAt: expect.any(Number) });
+    expect(await row(turn.begun.contextId)).toMatchObject({ state: "active", sender_ended: true });
+    expect((await f.worker("turn-lease", turn.lease)).status).toBe(409);
+  });
+
+  it("re-delivers no sender material when the removal commits while another lease is prepared", async () => {
+    const turn = await started();
+    afterAdmit(f.viewer.id, () => remove(f.viewer.id));
+    const again = await f.worker("turn-lease", turn.lease);
+    expect(again.status).toBe(409);
+    const refused = await again.json();
+    for (const field of ["agents", "mcpServers", "api", "environment"]) expect(refused).not.toHaveProperty(field);
+    expect(await row(turn.begun.contextId)).toMatchObject({ state: "active", sender_ended: true });
+  });
+
   it("refuses MCP authorization on the sponsored turn without ending it", async () => {
     const turn = await started();
     await remove(f.viewer.id);
