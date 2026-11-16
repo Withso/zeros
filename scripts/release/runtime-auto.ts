@@ -38,6 +38,14 @@ export async function resolveRuntimeRelease(input: { channel: Channel; sourceSha
     if (!await deps.published(current.release.qualification)) return publish("unqualified");
     return { action: "skip", reason: "unchanged" };
   }
+  // Keep the destination's own Alpha-qualified pin when this release has the same
+  // archive inputs and CP/protocol trees as that pin's source. Alpha moves on many
+  // times a day, so later pushes to a release branch cannot match its live pin.
+  if (current.release && await deps.ancestor(current.release.sourceSha, input.sourceSha)) {
+    const files = await deps.changes(current.release.sourceSha, input.sourceSha);
+    if (!runtimeSourcePaths(files).length && !qualificationChanged(files) && await deps.published(current.release.qualification))
+      return { action: "skip", reason: "current" };
+  }
   const alphaRaw = await deps.identity("alpha"), alphaIdentity = RuntimeLiveIdentity.parse(alphaRaw), alpha = identityPin(alphaRaw);
   requireCheck(alphaIdentity.channel === "alpha" && alpha.release, "Alpha has no qualified runtime; publish and qualify Alpha before releasing");
   requireCheck(await deps.ancestor(alpha.release.sourceSha, input.sourceSha), "Alpha runtime is newer than or unrelated to this release");
