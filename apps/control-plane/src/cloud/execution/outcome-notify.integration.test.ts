@@ -58,6 +58,20 @@ database("a terminal outcome wakes the worker only for a message waiting behind 
       { retirementId: randomUUID(), reason: "outcome", processes: 0 })).status).toBe(200))).toBe(0);
   });
 
+  it("an inboxed (already held) follower and another person's steer both get the wake", async () => {
+    expect((await f.hello()).status).toBe(200);
+    const turn = await f.dispatch(f.prompt(), f.viewer);
+    // Another person's steer waits behind the turn (pull withholds it while the other person's turn is pending).
+    const steer = f.prompt(randomUUID(), { mode: "steer" });
+    expect((await f.send(steer, f.creator)).status).toBe(201);
+    const held = (await (await f.worker("prompts/pull", { waitMs: 0, held: [turn.input.userMessageId] })).json()).prompts;
+    expect(held).toHaveLength(0);
+    expect(await notified(async () => expect((await f.worker("prompts/outcome",
+      { userMessageId: turn.begin.userMessageId, dispatchId: turn.begin.dispatchId, state: "completed" })).status).toBe(200))).toBe(1);
+    const offered = (await (await f.worker("prompts/pull", { waitMs: 0, held: [] })).json()).prompts;
+    expect(offered.map((item: { payload: { userMessageId: string } }) => item.payload.userMessageId)).toEqual([steer.userMessageId]);
+  });
+
   it("a message waiting in another chat does not make it wake", async () => {
     const turn = await f.dispatch();
     // Not blocked by this turn: it was offered at send time, so the finished turn has nothing to release.

@@ -614,8 +614,10 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
       if (deps.execution) {
         try {
           if (!workerFeatures(c).has(BEGIN_LEASE_FEATURE)) return c.json(await deps.execution.begin(auth, input));
-          const begun = await deps.execution.beginWithLease(auth, input);
-          return c.json("lease" in begun && begun.lease ? { ...begun, lease: leaseReply(c, begun.lease) } : begun);
+          const { reply, missed } = await deps.execution.beginWithLease(auth, input);
+          // A begin that could not carry its lease costs the old path plus a wasted attempt: make that visible.
+          if (missed) busy.record("begin_lease", missed.workspaceId, missed.code);
+          return c.json("lease" in reply && reply.lease ? { ...reply, lease: leaseReply(c, reply.lease) } : reply);
         } catch (error) {
           if (error instanceof ActorBusy && error.workspaceId) busy.record("begin", error.workspaceId, error.reason);
           if (!(error instanceof ExecutionInactive)) throw error;

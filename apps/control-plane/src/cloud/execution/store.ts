@@ -286,22 +286,23 @@ export class CloudExecutionContexts {
   }
 
   /** begin-lease-v1: a new turn's begin, then its lease in the same request. The lease reuses the context row begin just
-   * inserted and begin's admission of its sender (stricter than a continuation), so it skips its own setup read and
+   * inserted and begin's admission of its sender (the same principal a continuation would admit), so it skips its own setup read and
    * admission; its final transaction still re-checks worker, context, dispatch and authority, and material stays in its
    * own transaction. Only a freshly dispatched turn qualifies; a retried begin or a steer leases as before. A lease that
-   * cannot be issued now leaves the reply without one, and the worker leases on its own. */
+   * cannot be issued now leaves the reply without one, and the worker leases on its own; `missed` names why (a closed
+   * code) for the route's journal line. */
   async beginWithLease(identity: ExecutionWorker, input: { userMessageId: string; deliveryId: string; dispatchId: string }) {
     const prepared: { context?: ExecutionContext; proof?: ExecutionAdmission } = {};
     const begun = await this.begin(identity, input, prepared);
-    if (!("dispatch" in begun) || !begun.dispatch || !prepared.context || !prepared.proof) return begun;
+    if (!("dispatch" in begun) || !begun.dispatch || !prepared.context || !prepared.proof) return { reply: begun };
     try {
       const lease = await this.turnLease(identity, { chatId: prepared.context.chat_id!, userMessageId: input.userMessageId, dispatchId: input.dispatchId,
         generation: begun.actingUser.generation, contextId: begun.contextId }, { context: prepared.context, proof: prepared.proof });
-      return { ...begun, lease };
-    } catch {
+      return { reply: { ...begun, lease } };
+    } catch (error) {
       // begin has committed: any lease failure (a refusal, credentials not deliverable yet, a lost transaction) leaves
       // the reply without one, and the worker's own turn-lease meets the same condition with its usual handling.
-      return begun;
+      return { reply: begun, missed: { workspaceId: prepared.context.workspace_id, code: error instanceof HttpError ? error.code : "error" } };
     }
   }
 

@@ -1177,7 +1177,12 @@ re-checks the worker, context, dispatch and authority, and material resolves in
 its own transaction. A retried begin, a steer, or a lease that cannot be issued
 yet answers without one; the worker then calls turn-lease as before. The reply
 field is the offer, so there is no config flag. An old control plane never sends
-it and an old worker never asks.
+it and an old worker never asks. Material is sealed at begin, so for 0254 the
+turn counts as started from begin: a sender removed after it keeps the turn on
+its payer. A begun turn that settles without running in its context (cancelled,
+lease refused or rejected) retires that context, so the chat does not stay
+busy. A begin that tried for a lease and answered without one writes a
+throttled `begin_lease` journal line with a closed code.
 
 The prompt channel wakes the worker's long poll and sends a relay hint. Each
 wake costs an empty pull and a new long poll when nothing is waiting. A
