@@ -45,10 +45,11 @@ main ─────────────────────────
 
 | Step | Change | Status |
 |---|---|---|
-| 0 | Local migration check accepts a release branch whose ladder is a prefix of `main`'s | this PR series |
-| 0 | Runtime resolver keeps the destination's own qualified pin when nothing it was qualified with changed | this PR series |
-| 0 | The engine copies `zeros.db` before applying pending migrations, keeping two copies | this PR series |
-| 0 | Old-app compatibility check: the last shipped desktop and runtime against the new backend | design |
+| 0 | Local migration check accepts a release branch whose ladder is a prefix of `main`'s | #1118 |
+| 0 | Runtime resolver keeps the destination's own qualified pin when nothing it was qualified with changed | #1119 |
+| 0 | The engine copies `zeros.db` before applying pending migrations, keeping two copies | #1120 |
+| 0 | Old-app check: replay each supported desktop's requests and parsers against the new backend | #1121 (five cloud workspace reads; extend the list) |
+| 0 | Old-runtime check: the previous cloud worker runtime's handshake against the new backend | planned |
 | 0 | Runtime promotion accepts a retained Alpha qualification of the same trees, not only Alpha's live pin; one approval per release | planned |
 | 1 | Production app follows the `rc` feed when a staff-only Internal toggle is on, falling back to Latest | planned |
 | 2 | `release.yml` publishes candidates to `rc`; new `release-promote.yml`; candidate receipt replaces the Beta receipt in `scripts/release/` and `cutover-cli.ts` | planned |
