@@ -33,8 +33,8 @@ const PROD_REQUIRED = [
 // VITE_ZEROS_CHANNEL: release.yml does NOT inject it — Production's renderer channel
 // comes from the `import.meta.env.DEV ? "dev" : "stable"` fallback in
 // apps/desktop/src/renderer/config/release-channel.ts. (An earlier version of this comment claimed release.yml
-// injected "stable". It never did.) The alpha + beta workflows DO inject it
-// explicitly, and CHANNEL_WORKFLOWS below asserts that.
+// injected "stable". It never did.) The alpha workflow DOES inject it
+// explicitly, and CHANNEL_WORKFLOWS below asserts that. Beta is retired.
 //
 // There is deliberately NO entry for internal features. Settings → Internal is
 // gated on `users.staff_role` from the control plane, not on a build-time var:
@@ -55,7 +55,6 @@ const DEV_ONLY = ["VITE_POSTHOG_KEY_DEV"];
 // two then disagree about feature gating and the deep-link scheme it builds.
 const CHANNEL_WORKFLOWS = {
   ".github/workflows/release-alpha.yml": "alpha",
-  ".github/workflows/release-beta.yml": "beta",
 };
 
 const names = (text) => [...text.matchAll(/VITE_[A-Z0-9_]+/g)].map((m) => m[0]);
