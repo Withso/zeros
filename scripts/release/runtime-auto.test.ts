@@ -69,6 +69,34 @@ describe("automatic runtime resolution", () => {
     Object.assign(f.current, runtimeReleaseIdentity({ sha256: digest }));
     expect(await resolveRuntimeRelease(f.input, f.deps)).toMatchObject({ action: "promote", expected_runtime_sha256: digest });
   });
+  it.each(["beta", "production"] as const)("keeps %s's own qualified pin for a later push with unchanged runtime and qualifying code", async channel => {
+    // rc.2, a final rebuild or a desktop-only cherry-pick days after the cut: Alpha has moved on.
+    const f = fixture(channel); Object.assign(f.current, f.identity(channel));
+    f.deps.ancestor.mockImplementation(async (before: string) => before === previousSource);
+    f.deps.changes.mockResolvedValue(["apps/desktop/src/renderer/app.tsx"]);
+    expect(await resolveRuntimeRelease(f.input, f.deps)).toEqual({ action: "skip", reason: "current" });
+    expect(f.deps.identity).not.toHaveBeenCalledWith("alpha");
+    expect(f.deps.published).toHaveBeenCalledExactlyOnceWith(f.release.qualification);
+  });
+  it.each(["pnpm-lock.yaml", "apps/cloud-worker/src/worker.ts", "apps/control-plane/src/index.ts", "packages/protocol/README.md"])(
+    "falls back to Alpha when the destination pin's qualifying code differs: %s", async path => {
+      const f = fixture("production"); Object.assign(f.current, f.identity("production"));
+      f.deps.ancestor.mockImplementation(async (before: string) => before === previousSource);
+      f.deps.changes.mockResolvedValue([path]);
+      await expect(resolveRuntimeRelease(f.input, f.deps)).rejects.toThrow(/differ/);
+      expect(f.deps.identity).toHaveBeenCalledWith("alpha");
+    });
+  it("does not keep a destination pin whose Alpha publication failed", async () => {
+    const f = fixture("production"); Object.assign(f.current, f.identity("production"));
+    f.deps.published.mockResolvedValue(false);
+    await expect(resolveRuntimeRelease(f.input, f.deps)).rejects.toThrow(/publication/);
+  });
+  it("does not keep a destination pin from an unrelated source", async () => {
+    const f = fixture("production"); Object.assign(f.current, f.identity("production"));
+    f.deps.ancestor.mockResolvedValue(false);
+    await expect(resolveRuntimeRelease(f.input, f.deps)).rejects.toThrow(/newer/);
+    expect(f.deps.published).not.toHaveBeenCalled();
+  });
   it.each(["alpha", "beta", "production"] as const)("refuses destination drift on %s", async channel => {
     const f = fixture(channel); f.current.sourceSha = "3".repeat(40);
     await expect(resolveRuntimeRelease(f.input, f.deps)).rejects.toThrow(/destination/);

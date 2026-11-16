@@ -547,7 +547,10 @@ qualified pin from an ancestor with the same archive inputs and qualifying
 code as their release source. Unavailable, unqualified, newer or incompatible
 Alpha state fails the release; it does not silently keep a different old pin.
 A disabled cloud capability or a matching qualified pin can skip the runtime
-job. Feed publication waits for a successful runtime job or that verified skip.
+job. The destination's own pin also skips when its Alpha publication succeeded
+and its source is an ancestor of the release with the same archive inputs and
+control-plane/protocol trees, so a later push to a release branch does not need
+Alpha's live pin, which moves on with `main`. Feed publication waits for a successful runtime job or that verified skip.
 Pin metadata alone cannot authorize a skip: the resolver also checks the
 recorded Alpha attempt and its successful build/publication jobs. A known
 incomplete or failed enclosing Alpha attempt causes fresh Alpha publication;
