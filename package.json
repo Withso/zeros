@@ -74,6 +74,8 @@
     "check:preload": "node scripts/check-preload-allowlist.mjs",
     "check:cursor-asar": "node scripts/check-cursor-asar-unpack.mjs",
     "check:migrations": "tsx scripts/check-migrations-forward-only.mts",
+    "client-contract:update": "UPDATE_CLIENT_CONTRACT=1 vitest run apps/desktop/src/renderer/platform/__tests__/control-plane-contract.test.ts",
+    "client-contract:release": "node scripts/client-contract-release.mjs",
     "check:secrets": "node scripts/check-secrets.mjs",
     "agent:check": "node scripts/agent-env-check.mjs",
     "agent:git": "node scripts/agent-github.mjs git",
