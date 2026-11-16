@@ -41,7 +41,7 @@ export class CloudExecutionBoots {
   async assertClean(tx: Tx, workspace: Pick<ExecutionWorkspace, "id" | "worker_boot_id" | "access_epoch" | "stop_generation" | "worker_token_hash">) {
     if (!(await tx.query(`SELECT 1 FROM cloud_v2_workspaces w WHERE w.id=$1 AND w.worker_boot_id=$2
       AND w.access_epoch=$3 AND w.stop_generation=$4 AND w.worker_token_hash=$5 AND ${CLEAN_EXECUTION_BOOT}`,
-    [workspace.id, workspace.worker_boot_id, workspace.access_epoch, workspace.stop_generation, workspace.worker_token_hash])).rowCount) throw actorBusy();
+    [workspace.id, workspace.worker_boot_id, workspace.access_epoch, workspace.stop_generation, workspace.worker_token_hash])).rowCount) throw actorBusy("boot_not_clean");
   }
 
   async clean(identity: ExecutionWorker, input: { retirementId: string; processes: number; legacyMaterial?: "none" | "removed" | "refused" | undefined;
