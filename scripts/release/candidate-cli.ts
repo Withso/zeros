@@ -2,7 +2,8 @@
 // notarized files. release-promote.yml: `candidate-cli.ts --verify` checks the
 // downloaded candidate before any vX.Y.Z publication (see candidate.ts).
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { mkdtemp, open, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
@@ -48,9 +49,14 @@ async function download(repository: string, runId: string, attempt: number, read
   try {
     await promisify(execFile)("gh", ["run", "download", runId, "--repo", repository, "--name", name, "--dir", directory],
       { env: { PATH: env.PATH, HOME: env.HOME, GH_TOKEN: env.GH_TOKEN }, timeout: 60_000 });
-    const file = join(directory, CANDIDATE_RECEIPT);
-    if (!(await stat(file)).isFile() || (await stat(file)).size > 64 * 1024) return null;
-    return await readFile(file, "utf8");
+    // One handle for the check and the read, so the file cannot change between them.
+    const file = await open(join(directory, CANDIDATE_RECEIPT), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    try {
+      const info = await file.stat();
+      if (!info.isFile() || info.size > 64 * 1024) return null;
+      const bytes = await file.readFile();
+      return bytes.length <= 64 * 1024 ? bytes.toString("utf8") : null;
+    } finally { await file.close(); }
   } catch {
     return null;
   } finally {
