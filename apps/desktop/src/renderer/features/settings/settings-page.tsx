@@ -179,7 +179,7 @@ import { useDefaultAgent, pickDefaultAgentId } from "./default-agent";
 import type { AgentMemorySettings } from "@zeros/protocol/agent-events";
 
 import { popoverBoundaryProps } from "@/renderer/shared/ui/popover-boundary";
-import { isFeatureEnabled } from "../../config/release-channel";
+import { CHANNEL, isFeatureEnabled } from "../../config/release-channel";
 import { CloudWorkspacePausedNotice } from "../team/cloud-workspace-pause";
 type SectionId =
   | "general"
@@ -1616,6 +1616,7 @@ function InternalPanel() {
   const [copyLogs, setCopyLogs] = useInternalFeature("copyLogs");
   const [resourceSummary, setResourceSummary] = useInternalFeature("resourceSummary");
   const [designGpuCanvas, setDesignGpuCanvas] = useInternalFeature("designGpuCanvas");
+  const [releaseCandidates, setReleaseCandidates] = useInternalFeature("releaseCandidates");
   const agentControlFeatures = agentControlFeaturesAt("internal");
   return (
     <div className="flex flex-col gap-8">
@@ -1650,6 +1651,18 @@ function InternalPanel() {
             aria-label="Draw Design frames from recordings"
           />
         </SettingsRow>
+        {CHANNEL === "stable" ? (
+          <SettingsRow
+            label="Release candidates"
+            hint="Update this app to each release before it reaches everyone. Turning this off keeps the current version until a newer release."
+          >
+            <Switch
+              checked={releaseCandidates}
+              onCheckedChange={setReleaseCandidates}
+              aria-label="Receive release candidates"
+            />
+          </SettingsRow>
+        ) : null}
       </SettingsGroup>
       {agentControlFeatures.length > 0 ? (
         <SettingsGroup title="Agent control">

@@ -76,6 +76,7 @@ import {
   updaterInstall,
   updaterStatus,
   updaterRequire,
+  updaterReleaseCandidates,
 } from "../../updater";
 // Single-writer migration: the DB-touching git/workspace IPC handlers were
 // MOVED onto the engine bridge (apps/desktop/src/renderer/platform/git.ts now routes them through the
@@ -216,6 +217,7 @@ export function registerAllCommands(): void {
   setCommand("updater_install", updaterInstall);
   setCommand("updater_status", updaterStatus);
   setCommand("updater_require", updaterRequire);
+  setCommand("updater_release_candidates", updaterReleaseCandidates);
   setCommand("process_relaunch", processRelaunch);
   setCommand("system_idle_time", systemIdleTime);
 
