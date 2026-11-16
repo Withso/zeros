@@ -12,7 +12,7 @@ import type { CloudV2Prompt, CloudV2PromptState } from "../prompt-contract.js";
 import { hashCloudV2Token } from "../tokens.js";
 import { CLOUD_V2_LIVE_ACCESS } from "../workspace-access.js";
 import { cloudV2WorkspaceFromRow } from "../store.js";
-import { actorBusy, actorChanged, executionUnavailable, executionWorkerRequired, memberAccessRevoked, AgentLoginRequired, ExecutionContextRevoked, ExecutionContextEnded } from "./errors.js";
+import { actorBusy, actorChanged, executionUnavailable, executionWorkerRequired, ExecutionInactive, memberAccessRevoked, AgentLoginRequired, ExecutionContextRevoked, ExecutionContextEnded } from "./errors.js";
 import { assertExecutionIntent, CloudExecutionAuthority, type ExecutionAdmission, type ExecutionIntentAuthority } from "./authority.js";
 import { CloudExecutionLogins, type ExecutionSelection } from "./logins.js";
 import { CloudExecutionClients } from "./clients.js";
@@ -203,7 +203,8 @@ export class CloudExecutionContexts {
     }
   }
 
-  async worker(tx: Tx, identity: ExecutionWorker, lock = false, cleanup = false): Promise<ExecutionWorkspace> {
+  /** inactive: a workspace outside active execution mode throws ExecutionInactive (begin's route falls back to the outbox). */
+  async worker(tx: Tx, identity: ExecutionWorker, lock = false, cleanup = false, inactive = false): Promise<ExecutionWorkspace> {
     const read = () => tx.query<ExecutionWorkspace & { clean: boolean }>(`SELECT w.id,w.org_id,w.creator_user_id,w.repository,w.state,w.access_epoch::text,w.stop_generation::text,
         w.worker_boot_id,w.worker_token_hash,w.execution_mode,w.acting_user_boot_ids,w.execution_initiator_user_id,w.execution_intent_id,w.api_access,
         (${CLOUD_RECOVERY_TURN_HOLD}) AS recovery_held,${cleanup ? "true" : CLEAN_EXECUTION_BOOT} AS clean
@@ -213,9 +214,10 @@ export class CloudExecutionContexts {
     let row = (await read()).rows[0];
     if (lock) row = (await read()).rows[0];
     if (!row) throw new HttpError(401, "worker_unauthorized", "Worker authorization is no longer current");
+    if (inactive && row.execution_mode !== "active") throw new ExecutionInactive();
     if (row.execution_mode !== "active" || !row.acting_user_boot_ids.includes(identity.bootId)) throw executionWorkerRequired();
     if (!cleanup && row.state === "stopping") throw new HttpError(409, "workspace_stopping", "The workspace is stopping");
-    if (!row.clean) throw actorBusy("boot_not_clean");
+    if (!row.clean) throw actorBusy("boot_not_clean", row.id);
     return row;
   }
 
@@ -283,9 +285,31 @@ export class CloudExecutionContexts {
     return row;
   }
 
-  async begin(identity: ExecutionWorker, input: { userMessageId: string; deliveryId: string; dispatchId: string }) {
+  /** begin-lease-v1: a new turn's begin, then its lease in the same request. The lease reuses the context row begin just
+   * inserted and begin's admission of its sender (stricter than a continuation), so it skips its own setup read and
+   * admission; its final transaction still re-checks worker, context, dispatch and authority, and material stays in its
+   * own transaction. Only a freshly dispatched turn qualifies; a retried begin or a steer leases as before. A lease that
+   * cannot be issued now leaves the reply without one, and the worker leases on its own. */
+  async beginWithLease(identity: ExecutionWorker, input: { userMessageId: string; deliveryId: string; dispatchId: string }) {
+    const prepared: { context?: ExecutionContext; proof?: ExecutionAdmission } = {};
+    const begun = await this.begin(identity, input, prepared);
+    if (!("dispatch" in begun) || !begun.dispatch || !prepared.context || !prepared.proof) return begun;
+    try {
+      const lease = await this.turnLease(identity, { chatId: prepared.context.chat_id!, userMessageId: input.userMessageId, dispatchId: input.dispatchId,
+        generation: begun.actingUser.generation, contextId: begun.contextId }, { context: prepared.context, proof: prepared.proof });
+      return { ...begun, lease };
+    } catch {
+      // begin has committed: any lease failure (a refusal, credentials not deliverable yet, a lost transaction) leaves
+      // the reply without one, and the worker's own turn-lease meets the same condition with its usual handling.
+      return begun;
+    }
+  }
+
+  async begin(identity: ExecutionWorker, input: { userMessageId: string; deliveryId: string; dispatchId: string },
+    prepared?: { context?: ExecutionContext; proof?: ExecutionAdmission }) {
     const initial = await withSystemTx(this.pool, async tx => {
-      const workspace = await this.worker(tx, identity, true);
+      // The route reads no worker session first: this locked read is the worker check (and the mode the route needs).
+      const workspace = await this.worker(tx, identity, true, false, true);
       assertRecoveryTurnReady(workspace.recovery_held);
       await this.maintenance.cancelQueued(tx, workspace.id);
       return { workspace, prompt: await this.prompt(tx, workspace.id, input.userMessageId) };
@@ -324,16 +348,16 @@ export class CloudExecutionContexts {
         let active = chat.active_context_id ? await this.context(tx, chat.active_context_id, workspace.id) : null;
         if (active?.state === "retired") {
           const parent = await this.prompt(tx, workspace.id, active.user_message_id!);
-          if (pending(parent.state)) throw actorBusy("turn_retiring");
+          if (pending(parent.state)) throw actorBusy("turn_retiring", workspace.id);
           active = null;
         }
         // A rejoined sender's steer waits as an ordinary message: their earlier access ended this turn's steering.
         const steer = row.payload?.mode === "steer" && active?.user_id === row.creator_user_id && !active.sender_ended_at;
-        if (active && !steer) throw actorBusy("chat_busy");
+        if (active && !steer) throw actorBusy("chat_busy", workspace.id);
         const older = (await tx.query(`SELECT 1 FROM cloud_v2_prompt_outbox WHERE workspace_id=$1 AND chat_id=$2 AND sequence<$3
           AND state IN ('queued','inboxed','dispatching','accepted') AND ($4::text IS NULL OR user_message_id<>$4) LIMIT 1`,
         [workspace.id, row.chat_id, row.sequence, steer ? active!.user_message_id : null])).rowCount;
-        if (older) throw actorBusy("older_queued");
+        if (older) throw actorBusy("older_queued", workspace.id);
         if (steer) {
           await this.assertContext(tx, active!, proof);
           await this.deps.logins.select(workspace.org_id, row.creator_user_id, active!.agent!, active!.selection!, tx);
@@ -371,6 +395,7 @@ export class CloudExecutionContexts {
         await this.deps.logins.forWorkspace(workspace.id, row.creator_user_id, agent, selection, tx);
         await this.deps.authority.assert(proof, tx);
         assertExecutionLifetime(context.expires_at.getTime());
+        if (prepared) { prepared.context = context; prepared.proof = proof; }
         return this.begun(context, "dispatching", false);
       });
       // Keep the failed receipt even when dispatch loses its payer while queued.
@@ -475,7 +500,8 @@ export class CloudExecutionContexts {
     return token;
   }
 
-  async turnLease(identity: ExecutionWorker, input: { chatId: string; userMessageId: string; dispatchId: string; generation: string; contextId: string }) {
+  async turnLease(identity: ExecutionWorker, input: { chatId: string; userMessageId: string; dispatchId: string; generation: string; contextId: string },
+    prepared?: { context: ExecutionContext; proof: ExecutionAdmission }) {
     // A steer's own dispatch may end while its parent context is still live.
     const dispatch = async (tx: Tx, current: ExecutionContext) => {
       const row = await this.prompt(tx, current.workspace_id, input.userMessageId);
@@ -484,7 +510,7 @@ export class CloudExecutionContexts {
           row.execution_context_id !== current.id || row.creator_user_id !== current.user_id || row.worker_boot_id !== identity.bootId ||
           !["dispatching", "accepted"].includes(row.state)) throw actorChanged();
     };
-    const context = await withSystemTx(this.pool, async tx => {
+    const context = prepared?.context ?? await withSystemTx(this.pool, async tx => {
       const workspace = await this.worker(tx, identity);
       const current = await this.context(tx, input.contextId, workspace.id);
       await dispatch(tx, current);
@@ -492,6 +518,8 @@ export class CloudExecutionContexts {
       if (senderEnded(current)) throw actorChanged();
       return current;
     });
+    // begin's proof serves the first attempt only; a lifetime retry admits afresh.
+    let reuse = prepared?.proof;
     return withExecutionLifetimeRetry(async () => {
       let proof!: ExecutionAdmission;
       const check = async (tx?: Tx) => {
@@ -500,7 +528,9 @@ export class CloudExecutionContexts {
       };
       // Admission and the login are short reads in one transaction. Material stays in its own: resolving it must never
       // hold locks a revocation is waiting for (concurrency.integration.test.ts).
-      const login = await withSystemTx(this.pool, async tx => {
+      let login: Awaited<ReturnType<CloudExecutionLogins["select"]>> | undefined;
+      if (reuse) { proof = reuse; reuse = undefined; assertExecutionLifetime(proof.until); }
+      else login = await withSystemTx(this.pool, async tx => {
         proof = await this.admission(context, EXECUTION_MINIMUM_LIFETIME_MS, tx);
         assertExecutionLifetime(proof.until);
         return this.deps.logins.select(context.org_id, context.user_id!, context.agent!, context.selection!, tx);
@@ -512,10 +542,11 @@ export class CloudExecutionContexts {
         // A turn moved to its payer while this lease was prepared: never re-deliver the sender's material.
         if (senderEnded(current)) throw actorChanged();
         await check(tx);
+        const selected = await this.deps.logins.select(current.org_id, current.user_id!, current.agent!, current.selection!, tx);
         let value: Record<string, unknown>;
         if (current.material) value = openExecution(current.material, envelopeBinding(current), this.deps.keys) as Record<string, unknown>;
         else {
-          const agents = await this.deps.agentConfig({ [current.agent!]: login.material }, this.deps.proxyBase,
+          const agents = await this.deps.agentConfig({ [current.agent!]: (login ?? selected).material }, this.deps.proxyBase,
             async () => ({ token: await this.token(tx, current, "proxy"), expiresAt: current.expires_at.getTime() }));
           const apiAllowed = workspace.api_access && (await tx.query<{ allowed: boolean }>(`SELECT coalesce((SELECT workspace_api_access
             FROM cloud_api_access_settings WHERE org_id=$1 AND user_id=$2),true) AS allowed`, [current.org_id, current.user_id])).rows[0]!.allowed;
@@ -523,7 +554,6 @@ export class CloudExecutionContexts {
             ...(apiAllowed ? { api: { url: this.deps.apiUrl, token: await this.token(tx, current, "api") } } : {}) };
           await tx.query("UPDATE cloud_v2_execution_contexts SET material=$2 WHERE id=$1", [current.id, sealExecution(value, envelopeBinding(current), this.deps.keys)]);
         }
-        await this.deps.logins.select(current.org_id, current.user_id!, current.agent!, current.selection!, tx);
         current = await this.issueLease(tx, current, proof);
         await dispatch(tx, current);
         assertExecutionLifetime(current.expires_at.getTime());
@@ -648,7 +678,7 @@ export class CloudExecutionContexts {
         input.reason === "expired" ? "expired" : input.reason === "stop" ? "cancelled" : "actor_changed");
       await tx.query(`UPDATE cloud_v2_execution_contexts SET state='retired',retired_at=clock_timestamp(),retirement_id=$2,retirement_hash=$3,
         material=NULL,environment_version_id=NULL WHERE id=$1`, [id, input.retirementId, digest]);
-      await notify(tx, workspace.id);
+      // No prompt wake: what pull offers depends on prompt states only, and the outcome already woke any waiting message.
       return { retired: true as const };
     });
   }

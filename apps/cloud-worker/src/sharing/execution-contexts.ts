@@ -99,6 +99,10 @@ export class ExecutionContexts {
   turnLease(request: { chatId: string; userMessageId: string; dispatchId: string; generation: string; contextId: string }): Promise<CloudV2TurnLease> {
     return this.lease("turn-lease", request, request.contextId, CloudV2TurnLeaseSchema);
   }
+  /** begin-lease-v1: the turn lease already in the begin reply, tracked exactly as a turn-lease reply would be. */
+  acceptTurnLease(lease: CloudV2TurnLease, contextId: string): Promise<CloudV2TurnLease> {
+    return this.lease("turn-lease", undefined, contextId, CloudV2TurnLeaseSchema, lease);
+  }
   terminalLease(request: { clientId: string; terminalId: string; requestId: string }): Promise<CloudV2TerminalLease> {
     return this.lease("terminal-lease", request, undefined, CloudV2TerminalLeaseSchema);
   }
@@ -109,9 +113,9 @@ export class ExecutionContexts {
     return this.lease("bootstrap-lease", { contextId }, contextId, CloudV2BootstrapLeaseSchema);
   }
 
-  private async lease<T extends Lease>(route: string, body: unknown, expected: string | undefined, schema: z.ZodType<T>): Promise<T> {
+  private async lease<T extends Lease>(route: string, body: unknown, expected: string | undefined, schema: z.ZodType<T>, given?: T): Promise<T> {
     await this.ready();
-    const lease = schema.parse(await this.deps.post(route, body));
+    const lease = schema.parse(given ?? await this.deps.post(route, body));
     if (expected !== undefined && lease.contextId !== expected) throw new Error("The control plane answered for another context.");
     const known = this.entries.get(lease.contextId);
     if (known?.ended) throw new Error("This context has ended.");

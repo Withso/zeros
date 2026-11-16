@@ -15,7 +15,8 @@ export class AuthorityPull {
     const acked = BigInt(input.acked);
     if (acked > state.acked && acked <= state.sequence && await this.acknowledge(token, bootId, acked))
       this.barrier.acknowledged(token, bootId, acked);
-    const pending = acked < state.sequence;
+    // The boot's stored acknowledgement counts too (a new boot starts acknowledged; a worker may not know that yet).
+    const pending = (acked > state.acked ? acked : state.acked) < state.sequence;
     const ended = (pending || input.check) && input.contextIds.length ? await this.ended(token, bootId, input.contextIds) : [];
     const now = this.now();
     return { sequence: state.sequence.toString(), fresh: state.fresh && !pending, ageMs: Math.max(0, now - state.observedAt),

@@ -27,8 +27,11 @@ export class CloudExecutionBoots {
     if (existing && (previous !== identity.bootId || existing.replaced_by || existing.stop_generation !== workspace.stop_generation ||
       existing.access_epoch !== workspace.access_epoch || !existing.worker_token_hash.equals(workspace.worker_token_hash)))
       throw new HttpError(401, "worker_boot_changed", "A replaced worker boot cannot return");
-    if (!existing) await tx.query(`INSERT INTO cloud_v2_execution_boots(workspace_id,org_id,boot_id,access_epoch,stop_generation,worker_token_hash,authority_mode)
-      VALUES($1,$2,$3,$4,$5,$6,$7)`, [workspace.id, workspace.org_id, identity.bootId, workspace.access_epoch, workspace.stop_generation, workspace.worker_token_hash,
+    // An R2 boot starts acknowledged up to the workspace's newest authority event: earlier events were about earlier boots'
+    // contexts, all revoked (worker_changed) by this bind, so a wake is fresh at its first pull.
+    if (!existing) await tx.query(`INSERT INTO cloud_v2_execution_boots(workspace_id,org_id,boot_id,access_epoch,stop_generation,worker_token_hash,authority_mode,authority_acked_sequence)
+      VALUES($1,$2,$3,$4,$5,$6,$7,coalesce((SELECT max(id) FROM cloud_v2_authority_events WHERE workspace_id=$1),0))`,
+      [workspace.id, workspace.org_id, identity.bootId, workspace.access_epoch, workspace.stop_generation, workspace.worker_token_hash,
       messageAuthority ? "message-authority-v1" : "lease-v1"]);
     await tx.query(`UPDATE cloud_v2_execution_boots SET replaced_by=$2 WHERE workspace_id=$1 AND boot_id<>$2 AND stop_generation=$3
       AND replaced_by IS DISTINCT FROM $2`, [workspace.id, identity.bootId, workspace.stop_generation]);
@@ -41,7 +44,7 @@ export class CloudExecutionBoots {
   async assertClean(tx: Tx, workspace: Pick<ExecutionWorkspace, "id" | "worker_boot_id" | "access_epoch" | "stop_generation" | "worker_token_hash">) {
     if (!(await tx.query(`SELECT 1 FROM cloud_v2_workspaces w WHERE w.id=$1 AND w.worker_boot_id=$2
       AND w.access_epoch=$3 AND w.stop_generation=$4 AND w.worker_token_hash=$5 AND ${CLEAN_EXECUTION_BOOT}`,
-    [workspace.id, workspace.worker_boot_id, workspace.access_epoch, workspace.stop_generation, workspace.worker_token_hash])).rowCount) throw actorBusy("boot_not_clean");
+    [workspace.id, workspace.worker_boot_id, workspace.access_epoch, workspace.stop_generation, workspace.worker_token_hash])).rowCount) throw actorBusy("boot_not_clean", workspace.id);
   }
 
   async clean(identity: ExecutionWorker, input: { retirementId: string; processes: number; legacyMaterial?: "none" | "removed" | "refused" | undefined;

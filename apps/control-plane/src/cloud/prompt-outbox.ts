@@ -435,7 +435,10 @@ export class CloudV2PromptOutbox {
         terminal_at=CASE WHEN $3='accepted' THEN NULL ELSE clock_timestamp() END
         WHERE workspace_id=$1 AND user_message_id=$2`, [workspace.id, input.userMessageId, input.state]);
       if (input.state !== "accepted") await this.execution?.ended(tx, workspace.id, row.chat_id, row.user_message_id);
-      if (input.state !== "accepted") await notify(tx, workspace.id);
+      // A finished turn releases only the messages queued behind it in its chat (pull offers one turn per chat). With
+      // none, a wake would cost the worker an empty pull and a fresh long poll, for nothing.
+      if (input.state !== "accepted" && (await tx.query(`SELECT 1 FROM cloud_v2_prompt_outbox WHERE workspace_id=$1 AND chat_id=$2
+        AND state IN ('queued','inboxed') AND user_message_id<>$3 LIMIT 1`, [workspace.id, row.chat_id, row.user_message_id])).rowCount) await notify(tx, workspace.id);
       return { state: input.state };
     });
   }

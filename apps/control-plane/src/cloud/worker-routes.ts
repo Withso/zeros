@@ -3,7 +3,7 @@ import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
 import { HttpError } from "../authz.js";
 import type { Tx } from "../db.js";
-import { CLOUD_V2_MAX_FRAME_BYTES, CloudV2WorkerActivitySchema, CloudV2WorkerHelloSchema, CloudV2WorkerHistorySchema, CloudV2WorkerTimingRequestSchema, CloudV2RenewRequestSchema, CloudV2TurnLeaseRequestSchema, CloudV2TerminalLeaseRequestSchema, CloudV2ClientLeaseRequestSchema, CloudV2BootstrapLeaseRequestSchema, CloudV2RetiredRequestSchema, CloudV2BootCleanRequestSchema, CloudV2AuthorityRequestSchema, ACTING_USER_FEATURE, BOOT_TIMINGS_FEATURE, MESSAGE_AUTHORITY_FEATURE, HISTORY_DIGEST_FEATURE, HISTORY_DIGEST_DELETIONS_FEATURE, HISTORY_BATCH_FEATURE, CloudV2WorkerHistoryBatchSchema, type CloudV2ControlFrame } from "./contract.js";
+import { CLOUD_V2_MAX_FRAME_BYTES, CloudV2WorkerActivitySchema, CloudV2WorkerHelloSchema, CloudV2WorkerHistorySchema, CloudV2WorkerTimingRequestSchema, CloudV2RenewRequestSchema, CloudV2TurnLeaseRequestSchema, CloudV2TerminalLeaseRequestSchema, CloudV2ClientLeaseRequestSchema, CloudV2BootstrapLeaseRequestSchema, CloudV2RetiredRequestSchema, CloudV2BootCleanRequestSchema, CloudV2AuthorityRequestSchema, ACTING_USER_FEATURE, BOOT_TIMINGS_FEATURE, MESSAGE_AUTHORITY_FEATURE, HISTORY_DIGEST_FEATURE, HISTORY_DIGEST_DELETIONS_FEATURE, HISTORY_BATCH_FEATURE, BEGIN_LEASE_FEATURE, CloudV2WorkerHistoryBatchSchema, type CloudV2ControlFrame } from "./contract.js";
 import type { AuthorityPull } from "./execution/authority-pull.js";
 import { emitCloudV2Timing, type CloudV2TimingRecord } from "./lifecycle.js";
 import type { CloudV2Store, CloudV2WorkerSession, CloudV2Workspace } from "./store.js";
@@ -30,7 +30,7 @@ import type { CloudWorkspaceSync } from "./workspace-sync/store.js";
 import { SYNC_FEATURE, SYNC_CONTEXT_FEATURE } from "./workspace-sync/contract.js";
 
 import type { CloudExecutionContexts } from "./execution/store.js";
-import { ActorBusy, executionWorkerRequired } from "./execution/errors.js";
+import { ActorBusy, ExecutionInactive, executionWorkerRequired } from "./execution/errors.js";
 import { BusyLog } from "./execution/busy-log.js";
 import { activationBusy } from "./execution/activation-state.js";
 import { workerGitIdentity } from "./worker-git-identity.js";
@@ -608,11 +608,18 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
       return c.json(await outbox.ack(auth.token, auth.bootId, await body(c, CloudV2PromptAckSchema)));
     });
     app.post(`${CLOUD_V2_WORKER_API}/prompts/begin`, async c => {
-      const auth = await session(c, deps);
+      // Both begins verify the worker in their own first transaction (worker-credentials.integration.test.ts).
+      const auth = credentials(c);
       const input = await body(c, CloudV2PromptBeginSchema);
-      if (auth.workspace.executionMode === "active") {
-        try { return c.json(await deps.execution!.begin(auth, input)); }
-        catch (error) { if (error instanceof ActorBusy) busy.record("begin", auth.workspace.id, error.reason); throw error; }
+      if (deps.execution) {
+        try {
+          if (!workerFeatures(c).has(BEGIN_LEASE_FEATURE)) return c.json(await deps.execution.begin(auth, input));
+          const begun = await deps.execution.beginWithLease(auth, input);
+          return c.json("lease" in begun && begun.lease ? { ...begun, lease: leaseReply(c, begun.lease) } : begun);
+        } catch (error) {
+          if (error instanceof ActorBusy && error.workspaceId) busy.record("begin", error.workspaceId, error.reason);
+          if (!(error instanceof ExecutionInactive)) throw error;
+        }
       }
       return c.json(await outbox.begin(auth.token, auth.bootId, input));
     });

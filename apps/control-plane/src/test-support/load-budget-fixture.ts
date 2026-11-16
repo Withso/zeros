@@ -277,7 +277,8 @@ export async function loadBudgetFixture(pool: pg.Pool, probe: LoadBudgetProbe) {
       await worker.promptRequest("ack", { userMessageId: input.userMessageId, deliveryId: offered.deliveryId });
       const begin = { userMessageId: input.userMessageId, deliveryId: offered.deliveryId, dispatchId: randomUUID() };
       const begun = CloudV2BeginActiveReplySchema.parse(await worker.promptRequest("begin", begin));
-      const lease = await worker.contextRequest("turn-lease", { chatId: input.chatId, userMessageId: input.userMessageId,
+      // begin-lease-v1: the worker's features take the lease from the begin reply; turn-lease is its fallback.
+      const lease = begun.lease ?? await worker.contextRequest("turn-lease", { chatId: input.chatId, userMessageId: input.userMessageId,
         dispatchId: begin.dispatchId, generation: begun.actingUser.generation, contextId: begun.contextId }) as { contextId: string; expiresAt: number };
       requireValue(lease.contextId === begun.contextId && lease.expiresAt > Date.now(), "turn lease must be usable");
       return { begin, contextId: lease.contextId };

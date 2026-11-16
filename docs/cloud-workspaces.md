@@ -1165,10 +1165,27 @@ route with 404, the worker sends the same frames one per request at the same
 sequences and stops batching for that boot. Unnegotiated workers and control
 planes keep one frame per request. Worker routes whose handlers verify the
 worker inside their own transaction skip the separate session read: history,
-the batch route, ack, outcome, stop-ack, stop, turn-lease and retirement. The
-small routes refuse bodies over 64 KB before parsing. The history routes read
+the batch route, ack, outcome, stop-ack, stop, turn-lease, retirement and
+begin. The small routes refuse bodies over 64 KB before parsing. The history routes read
 the session first when a body is over 64 KB or of unknown size.
 History writers, including retention jobs, must lock the workspace row before changing chat or message rows to avoid deadlocks with history ingestion.
+
+Workers advertising `begin-lease-v1` get a new turn's lease in its begin reply,
+so a turn starts with one request instead of two. The lease reuses the context
+row and sender admission that begin just made. Its final transaction still
+re-checks the worker, context, dispatch and authority, and material resolves in
+its own transaction. A retried begin, a steer, or a lease that cannot be issued
+yet answers without one; the worker then calls turn-lease as before. The reply
+field is the offer, so there is no config flag. An old control plane never sends
+it and an old worker never asks.
+
+The prompt channel wakes the worker's long poll and sends a relay hint. Each
+wake costs an empty pull and a new long poll when nothing is waiting. A
+terminal outcome therefore notifies only when a message waits behind the turn in
+that chat. A context retirement does not notify, because pull offers depend on
+prompt states only. A relay hint that arrives while a long poll waits gives that
+poll two seconds to answer, since its server wait wakes on the same
+notification. The worker aborts and pulls again only when the poll stays silent.
 
 Workers advertising `history-digest-deletions-v1` receive separate live-chat
 digests and explicit deleted chat IDs, capped at 4,096 entries in total. The

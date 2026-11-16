@@ -59,7 +59,8 @@ interface Runtime {
 }
 
 /** An activated begin: the person the control plane chose for this dispatch and its context. */
-export interface OutboxAssignment { actingUser: CloudV2Actor; contextId: string; mode: "prompt" | "steer" }
+/** lease: begin-lease-v1, the new turn's lease from the begin reply (used once, instead of a turn-lease request). */
+export interface OutboxAssignment { actingUser: CloudV2Actor; contextId: string; mode: "prompt" | "steer"; lease?: CloudV2TurnLease }
 type OutboxDispatch = (entry: InboxEntry) => Promise<boolean | OutboxAssignment>;
 const contextCode = (error: unknown) => error && typeof error === "object" && "contextCode" in error ? error.contextCode : undefined;
 
@@ -959,6 +960,8 @@ export class Agents {
     try {
       for (let attempt = 0; ; attempt++) {
         try {
+          // An embedded lease answers the first attempt only; a retry asks turn-lease.
+          if (attempt === 0 && assigned.lease) { lease = await this.contexts.acceptTurnLease(assigned.lease, assigned.contextId); break; }
           lease = await this.contexts.turnLease({ chatId: route.chatId, userMessageId: entry.userMessageId, dispatchId: entry.outbox!.dispatchId!,
             generation: assigned.actingUser.generation, contextId: assigned.contextId });
           break;

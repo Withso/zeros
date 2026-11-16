@@ -5,9 +5,14 @@ export const actorChanged = () => new HttpError(409, "actor_changed", "Execution
 /** Why a begin, lease or renewal had to wait (closed set; logged, never sent as a value). */
 export type ActorBusyReason = "boot_not_clean" | "turn_retiring" | "chat_busy" | "older_queued";
 export class ActorBusy extends HttpError {
-  constructor(readonly reason: ActorBusyReason) { super(409, "actor_busy", "The preceding turn is still retiring"); }
+  /** workspaceId: for the busy log only, never sent to the worker. */
+  constructor(readonly reason: ActorBusyReason, readonly workspaceId?: string) { super(409, "actor_busy", "The preceding turn is still retiring"); }
 }
-export const actorBusy = (reason: ActorBusyReason) => new ActorBusy(reason);
+export const actorBusy = (reason: ActorBusyReason, workspaceId?: string) => new ActorBusy(reason, workspaceId);
+/** begin on a workspace that is not in active execution mode: the route answers with the prompt outbox's begin instead. */
+export class ExecutionInactive extends HttpError {
+  constructor() { const error = executionWorkerRequired(); super(error.status, error.code, error.message); }
+}
 export const executionUnavailable = () => new HttpError(503, "agent_credentials_unavailable", "Execution credentials are temporarily unavailable");
 export const executionWorkerRequired = () => new HttpError(409, "worker_update_required", "This workspace requires an updated worker before shared execution");
 export const memberAccessRevoked = () => new HttpError(403, "member_access_revoked", "Workspace access has been removed");
