@@ -70,10 +70,14 @@ export function runtimeGithub(config: RuntimeReleaseConfig, env: NodeJS.ProcessE
           head_sha: z.string(), name: z.string(), status: z.string(), conclusion: z.string().nullable(),
           steps: z.array(z.object({ name: z.string(), status: z.string(), conclusion: z.string().nullable() })) })) }).safeParse(
           await read(`/actions/runs/${config.runId}/attempts/${config.runAttempt}/jobs?per_page=100`));
+        // One approval per release: release.yml's own protected approval job, in this exact
+        // attempt, authorizes its automatic runtime step; a manual runtime release keeps its own.
+        const approval = file === "release.yml" ? { names: ["Approve Production release"], step: "Record the approved candidate" }
+          : { names: runtimeJobNames(file, "approval"), step: "Record runtime approval" };
         requireCheck(jobs.success && jobs.data.jobs.length === jobs.data.total_count && jobs.data.jobs.filter(job =>
-          runtimeJobNames(file, "approval").includes(job.name) && String(job.run_id) === config.runId && job.run_attempt === config.runAttempt &&
+          approval.names.includes(job.name) && String(job.run_id) === config.runId && job.run_attempt === config.runAttempt &&
           job.head_sha === config.workflowSha && job.status === "completed" && job.conclusion === "success" &&
-          job.steps.some(step => step.name === "Record runtime approval" && step.status === "completed" && step.conclusion === "success")).length === 1,
+          job.steps.some(step => step.name === approval.step && step.status === "completed" && step.conclusion === "success")).length === 1,
           "Production runtime promotion requires this exact attempt's protected approval job");
       }
       if (config.sourceSha && config.sourceSha !== config.workflowSha) await mainSource(config.sourceSha);
