@@ -6,7 +6,8 @@ export class BusyLog {
   private readonly seen = new Map<string, { at: number; count: number }>();
   constructor(private readonly logger?: Pick<Console, "warn">, private readonly now: () => number = Date.now, private readonly windowMs = 60_000) {}
 
-  record(route: string, workspaceId: string, reason: ActorBusyReason): void {
+  /** reason: an ActorBusy reason, or another closed code (begin_lease records why a begin carried no lease). */
+  record(route: string, workspaceId: string, reason: ActorBusyReason | string): void {
     const key = `${route}:${workspaceId}:${reason}`, now = this.now(), entry = this.seen.get(key);
     if (entry && now - entry.at < this.windowMs) { entry.count++; return; }
     this.logger?.warn(`[cloud-v2] ${route} busy reason=${reason} workspace=${workspaceId.slice(0, 8)}${entry ? ` refusals=${entry.count + 1}` : ""}`);

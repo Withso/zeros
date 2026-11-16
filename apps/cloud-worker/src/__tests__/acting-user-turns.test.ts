@@ -182,6 +182,57 @@ it("runs an activated turn as its person: begin first, then the exact lease, the
   await until(() => f.relay.calls.some(call => call.op === "outcome" && call.body.state === "completed")).toBe(true);
 });
 
+it("begin-lease-v1: runs the turn on the lease its begin reply carried, with no turn-lease request; it is renewed and retired like any lease", async () => {
+  const f = await setup();
+  f.relay.beginReply = body => {
+    const contextId = randomUUID();
+    return { dispatch: true, state: "dispatching", actingUser: { userId: ALEX, generation: "1", userMessageId: body.userMessageId }, contextId, mode: "prompt",
+      lease: { contextId, userId: ALEX, generation: "1", expiresAt: Date.now() + 30_000, agents: { claude: { apiKey: "alex-embedded-key-0000" } },
+        gitIdentity: { name: "Alex", email: "1+person@users.noreply.github.com" } } };
+  };
+  const item = delivery(ALEX); f.relay.deliver(item);
+  await until(() => f.drivers[0]?.prompts.length ?? 0).toBe(1);
+  expect(f.drivers[0]!.opened).toMatchObject({ apiKey: "alex-embedded-key-0000" });
+  expect(f.relay.calls.some(call => call.op === "turn-lease")).toBe(false);
+  const contextId = f.drivers[0]!.opened!.zerosEnvironment?.ZEROS_EXECUTION_CONTEXT;
+  await until(() => f.relay.calls.some(call => call.op === "execution-leases/renew" && call.body.contextIds.includes(contextId))).toBe(true);
+  f.drivers[0]!.complete();
+  await until(() => f.relay.calls.some(call => call.op === `execution-leases/${contextId}/retired`)).toBe(true);
+});
+
+it("begin-lease-v1: an embedded lease for another person fails the turn closed, and its context is retired", async () => {
+  const f = await setup();
+  let contextId = "";
+  f.relay.beginReply = body => {
+    contextId = randomUUID();
+    return { dispatch: true, state: "dispatching", actingUser: { userId: ALEX, generation: "1", userMessageId: body.userMessageId }, contextId, mode: "prompt",
+      lease: { contextId, userId: SAM, generation: "1", expiresAt: Date.now() + 30_000, agents: { claude: { apiKey: "sam-embedded-key-0000" } }, gitIdentity: null } };
+  };
+  f.relay.deliver(delivery(ALEX));
+  await until(() => f.relay.calls.some(call => call.op === "outcome" && call.body.state === "failed")).toBe(true);
+  expect(f.drivers.every(driver => !driver.opened)).toBe(true);
+  // Else the control plane keeps the chat busy, and the worker keeps renewing a context no turn uses.
+  await until(() => f.relay.calls.some(call => call.op === `execution-leases/${contextId}/retired`)).toBe(true);
+  expect(f.relay.calls.find(call => call.op === `execution-leases/${contextId}/retired`)!.body).toMatchObject({ reason: "revoked", processes: 0 });
+  const renewals = () => f.relay.calls.filter(call => call.op === "execution-leases/renew" && call.body.contextIds.includes(contextId)).length;
+  const before = renewals();
+  await new Promise(resolve => setTimeout(resolve, 100));
+  expect(renewals()).toBe(before);
+});
+
+it("retires the context begin created when its turn-lease is refused, so the chat is not held busy", async () => {
+  const f = await setup();
+  let contextId = "";
+  f.relay.beginReply = body => {
+    contextId = randomUUID();
+    return { dispatch: true, state: "dispatching", actingUser: { userId: ALEX, generation: "1", userMessageId: body.userMessageId }, contextId, mode: "prompt" };
+  };
+  f.relay.leaseReply = () => { throw Object.assign(new Error("refused"), { status: 409, contextCode: "actor_changed" }); };
+  f.relay.deliver(delivery(ALEX));
+  await until(() => f.relay.calls.some(call => call.op === `execution-leases/${contextId}/retired`)).toBe(true);
+  await until(() => f.relay.calls.some(call => call.op === "outcome" && call.body.state === "failed")).toBe(true);
+});
+
 it("restarts the chat's driver for the next person's turn, with that person's login (never the previous one's)", async () => {
   const f = await setup();
   f.relay.deliver(delivery(ALEX));

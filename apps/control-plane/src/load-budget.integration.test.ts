@@ -383,9 +383,11 @@ database("load-budget workload", () => {
     scenarios.set("workspace-list", list.cost);
     const turn = await probe.measure("turn-path", () => fixture!.turnStart(), { writes: true });
     scenarios.set("turn-path", turn.cost);
-    const lease = turn.cost.requests.filter(request => request.route === "/v2/cloud/worker/turn-lease");
+    // begin-lease-v1: the turn's lease rides in its begin reply; no separate turn-lease request.
+    expect(turn.cost.requests.filter(request => request.route === "/v2/cloud/worker/turn-lease")).toHaveLength(0);
+    const lease = turn.cost.requests.filter(request => request.route === "/v2/cloud/worker/prompts/begin");
     expect(lease).toHaveLength(1);
-    scenarios.set("turn-lease", selectLoadRequests(turn.cost, request => lease.includes(request)));
+    scenarios.set("begin-lease", selectLoadRequests(turn.cost, request => lease.includes(request)));
     const renewal = await probe.measure("renewal", () => fixture!.renew());
     scenarios.set("renewal", renewal.cost);
     const running = await fixture.runningTurn(turn.value);
@@ -449,7 +451,7 @@ database("load-budget workload", () => {
     console.info("App census provenance and body assumptions:", CENSUS_CAPTURE);
     console.table(censusCaptureTable());
     for (const [name, cost] of scenarios) {
-      if (["turn-lease", "running-stream", "periodic-renewals", "wake-replacements"].includes(name)) continue;
+      if (["begin-lease", "running-stream", "periodic-renewals", "wake-replacements"].includes(name)) continue;
       console.info(`Load scenario: ${name}; statement delay ${statementDelayMs} ms; write census ${cost.writesObserved ? "enabled (diagnostic queries excluded)" : "disabled"}`);
       console.table(routeTable(cost));
       console.table([{ scope: "background", ...cost.background, elapsedMs: Math.round(cost.elapsedMs) }]);

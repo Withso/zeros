@@ -10,7 +10,7 @@ import { executionFixture, type ExecutionFixture } from "./execution/test-fixtur
 const suite = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 suite("worker routes that verify the worker inside their own transaction", () => {
   let pool: pg.Pool, f: ExecutionFixture;
-  const features = () => `${f.features},history-replace-v1,history-digest-v1,chat-edit-v1,history-batch-v1`;
+  const features = () => `${f.features},history-replace-v1,history-digest-v1,chat-edit-v1,history-batch-v1,begin-lease-v1`;
   beforeAll(() => { pool = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL, max: 8 }); });
   afterAll(async () => pool.end());
   beforeEach(async () => {
@@ -24,6 +24,7 @@ suite("worker routes that verify the worker inside their own transaction", () =>
     ["history", { t: "history", bootId, sequence: 1, chats: [{ id: "stale" }] }],
     ["history/batch", { bootId, sequence: 1, frames: [{ chats: [{ id: "stale" }] }] }],
     ["prompts/ack", { userMessageId: randomUUID(), deliveryId: randomUUID() }],
+    ["prompts/begin", { userMessageId: randomUUID(), deliveryId: randomUUID(), dispatchId: randomUUID() }],
     ["prompts/outcome", { userMessageId: randomUUID(), deliveryId: randomUUID(), state: "failed" }],
     ["prompts/stop-ack", { chatId: "stale", epoch: "1" }],
     ["prompts/stop", { chatId: "stale", throughEpoch: "0" }],

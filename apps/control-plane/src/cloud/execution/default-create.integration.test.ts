@@ -277,6 +277,25 @@ suite("new organization workspaces start with personal execution", () => {
     expect({ status: unknown.status, body: await unknown.json() }).toEqual({ status: 200, body: { sequence: "0", fresh: false, ageMs: 0, untilMs: 0, ended: [] } });
   });
 
+  it("gives a new R2 boot fresh authority at once when earlier boots left authority events behind", async () => {
+    const { id } = await fresh();
+    const features = `${f!.features},sync-v1,sync-context-v1,message-authority-v1`;
+    const first = await worker(id);
+    expect((await first.hello(features)).status).toBe(200);
+    expect((await first.call("execution-leases/boot-clean", { retirementId: randomUUID(), processes: 0, legacyMaterial: "none" }, features)).status).toBe(200);
+    await withSystemTx(pool, tx => tx.query(`UPDATE cloud_v2_execution_contexts SET state='revoked',reason='access_revoked',revoked_at=clock_timestamp()
+      WHERE workspace_id=$1 AND state='active'`, [id]));
+    const sequence = (await withSystemTx(pool, tx => tx.query("SELECT max(id)::text AS n FROM cloud_v2_authority_events WHERE workspace_id=$1", [id]))).rows[0].n;
+    expect(Number(sequence)).toBeGreaterThan(0);
+    // The next boot (a wake): those events were about contexts its bind already revoked.
+    const next = await worker(id);
+    expect((await next.hello(features)).status).toBe(200);
+    expect((await next.call("execution-leases/boot-clean", { retirementId: randomUUID(), processes: 0, legacyMaterial: "none" }, features)).status).toBe(200);
+    await f!.cp.authorityBarrier.tick();
+    const reply = await (await next.call("execution-leases/authority", { acked: "0", contextIds: [] }, features)).json();
+    expect(reply).toMatchObject({ sequence, fresh: true });
+  });
+
   it("re-admits an R2 boot's people at the next clock boundary and never extends a context past it", async () => {
     const { id } = await fresh(), w = await worker(id);
     const features = `${f!.features},sync-v1,sync-context-v1,message-authority-v1`;

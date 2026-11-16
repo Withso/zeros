@@ -13,6 +13,7 @@ import { CLIENT_A, FakeRelay, WORKSPACE_ID, browserFrame, config } from "../../.
 import { CLOUD_INPUT_TIMEOUT_MS } from "../../shared/native-input";
 import { ClaudeDriver } from "../driver";
 import { harness } from "./fake-query";
+import { hintGrace } from "../../../prompt-inbox";
 
 afterEach(() => vi.restoreAllMocks());
 const gate = () => { let resolve!: () => void; const promise = new Promise<void>(done => { resolve = done; }); return { promise, resolve }; };
@@ -128,7 +129,10 @@ it.each(["bridge", "HTTP"])("expires a Full access %s question through Stop befo
     const store = (worker as unknown as { store: SessionStore }).store;
     await expect.poll(() => store.snapshot("chat")?.pendingInteractions?.length).toBe(1);
     if (origin === "HTTP") {
-      relay.prompts.push(second); await relay.receive({ t: "prompts" });
+      // This fake's long poll never wakes on its own: the hint must abort it at once.
+      hintGrace.ms = 1;
+      try { relay.prompts.push(second); await relay.receive({ t: "prompts" }); }
+      finally { hintGrace.ms = 2_000; }
       await expect.poll(() => store.snapshot("chat")?.inbox[1]?.outbox?.acknowledged).toBe(true);
     }
     expect(deadlines).toHaveLength(2);

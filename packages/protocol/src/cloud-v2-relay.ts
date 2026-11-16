@@ -102,6 +102,8 @@ const frame = z.unknown();
 export const HISTORY_DIGEST_FEATURE = "history-digest-v1";
 /** history-batch-v1: frames that queued together, from any chats, in one request and one control-plane transaction. */
 export const HISTORY_BATCH_FEATURE = "history-batch-v1";
+/** A worker that takes a new turn's lease from its begin reply (one request instead of two). */
+export const BEGIN_LEASE_FEATURE = "begin-lease-v1";
 export const CLOUD_V2_MAX_HISTORY_BATCH_FRAMES = 50;
 /** boot-timings-v1: the worker reports when it listens, sends and gets its hello acknowledged, and first accepts an
  * inbound relay, so one wake reads on one timing line. Opt-in by config.bootTimings for workers that advertise it. */
@@ -382,6 +384,8 @@ export const CloudV2BeginLegacyReplySchema = z.object({ state: CloudV2PromptStat
 export const CloudV2BeginActiveReplySchema = z.object({
   dispatch: z.literal(true), state: CloudV2PromptStateSchema, actingUser: CloudV2ActorSchema, contextId: z.uuid(),
   mode: z.enum(["prompt", "steer"]), parentContextId: z.uuid().optional(),
+  /** begin-lease-v1: a new turn's lease, issued in the same request. Absent: lease with turn-lease as before. */
+  lease: z.lazy(() => CloudV2TurnLeaseSchema).optional(),
 }).strict().refine(value => value.mode === "steer" ? value.parentContextId === value.contextId : value.parentContextId === undefined,
   "A steer reuses its parent's context; a prompt has none");
 /** Exactly one agent key: the active turn's. */

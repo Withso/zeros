@@ -59,7 +59,8 @@ interface Runtime {
 }
 
 /** An activated begin: the person the control plane chose for this dispatch and its context. */
-export interface OutboxAssignment { actingUser: CloudV2Actor; contextId: string; mode: "prompt" | "steer" }
+/** lease: begin-lease-v1, the new turn's lease from the begin reply (used once, instead of a turn-lease request). */
+export interface OutboxAssignment { actingUser: CloudV2Actor; contextId: string; mode: "prompt" | "steer"; lease?: CloudV2TurnLease }
 type OutboxDispatch = (entry: InboxEntry) => Promise<boolean | OutboxAssignment>;
 const contextCode = (error: unknown) => error && typeof error === "object" && "contextCode" in error ? error.contextCode : undefined;
 
@@ -959,6 +960,8 @@ export class Agents {
     try {
       for (let attempt = 0; ; attempt++) {
         try {
+          // An embedded lease answers the first attempt only; a retry asks turn-lease.
+          if (attempt === 0 && assigned.lease) { lease = await this.contexts.acceptTurnLease(assigned.lease, assigned.contextId); break; }
           lease = await this.contexts.turnLease({ chatId: route.chatId, userMessageId: entry.userMessageId, dispatchId: entry.outbox!.dispatchId!,
             generation: assigned.actingUser.generation, contextId: assigned.contextId });
           break;
@@ -1055,6 +1058,8 @@ export class Agents {
         let response: PromptResponse | undefined, failure: BridgeAgentFailure | undefined;
         // Activated: the step a failed turn stopped at, for one journal line (closed classes only).
         let stage: TurnFailureClass | undefined;
+        // Activated: the context begin created for this turn, retired below if the turn settles without running in it.
+        let begun: string | undefined;
         try {
           const content = entry.outbox ? await preparePromptFiles(this.scope, entry.prompt) : entry.prompt;
           if (entry.outbox && (route.model !== entry.outbox.model || route.effort !== entry.outbox.effort)) {
@@ -1077,6 +1082,7 @@ export class Agents {
               entry = prepared; route.active = entry;
               stage = "begin_failed";
               const assigned = await this.beginWhenFree(route, entry, stopping);
+              if (assigned && assigned !== true) begun = assigned.contextId;
               if (!assigned || route.closed || stopping !== route.stopping) response = { stopReason: "cancelled" };
               else {
                 // The lease first, so the running turn names its person.
@@ -1144,6 +1150,10 @@ export class Agents {
           if (stage) this.log?.(failureLine("turn", classOf(error) ?? new ClosedFailure(stage, errorCode(error))));
         }
         finally { route.nativeRunning = false; }
+        // Cancelled after begin, or its lease refused or rejected: no one will retire that context through route.context,
+        // and the control plane keeps the chat busy until it is retired.
+        if (begun && route.context?.id !== begun && this.contexts)
+          void retireContext(this.contexts, begun, failure ? "revoked" : "stop", { personal: this.personal, signal: this.lifetime.signal });
         route.settling = (async () => {
           if (route.interactions?.blocking) await route.interactions.dismiss(INPUT_CANCELLED);
           await route.events;

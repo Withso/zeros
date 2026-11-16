@@ -7,6 +7,8 @@ import { CloudV2BeginActiveReplySchema } from "@zeros/protocol/cloud-v2-relay";
 /** N−1 rollback: after an older control plane refuses the negotiated 60 s pull (400), pull 25 s for this long, then
  * offer 60 s again. Only the wait changes; prompt authority and the push-signals setting are untouched. */
 export const PUSH_POLL_FALLBACK_MS = 15 * 60_000;
+/** A relay hint gives a waiting long poll this long to answer (its server wait wakes on the same notification). */
+export const hintGrace = { ms: 2_000 };
 import type { Agents, OutboxAssignment } from "./agents";
 import type { InboxEntry, SessionStore } from "./sessions/session-store";
 import type { PromptOperation, PromptRequest } from "./transport";
@@ -60,7 +62,22 @@ export class PromptInbox {
     this.unsubscribe = this.store.onChange(change => { if (change.flush) this.reportSoon(); });
     this.task = this.run();
   }
-  hint(): void { this.hinted = true; this.polling?.abort(); }
+  hint(): void {
+    const polling = this.polling;
+    // The control plane's wait wakes on the same notification as the relay's hint, and the next poll's first read
+    // sees everything: aborting a waiting poll would only pay for one more pull. Abort only if it does not answer.
+    if (polling && this.pollWaits) {
+      this.hintGrace ??= setTimeout(() => {
+        this.hintGrace = undefined;
+        if (this.polling === polling) { this.hinted = true; polling.abort(); }
+      }, hintGrace.ms);
+      this.hintGrace.unref?.();
+      return;
+    }
+    this.hinted = true; polling?.abort();
+  }
+  private pollWaits = false;
+  private hintGrace: ReturnType<typeof setTimeout> | undefined;
   pause(reason: string): void { this.pauses.add(reason); this.polling?.abort(); }
   resume(reason: string): void {
     if (!this.pauses.delete(reason) || this.pauses.size) return;
@@ -76,7 +93,7 @@ export class PromptInbox {
     }
   }
   async dispose(): Promise<void> {
-    this.unsubscribe?.(); this.lifetime.abort(); this.polling?.abort();
+    this.unsubscribe?.(); this.lifetime.abort(); this.polling?.abort(); clearTimeout(this.hintGrace);
     this.agents.setOutboxDispatch();
     await this.task;
     await this.reporting?.catch(() => {});
@@ -117,7 +134,7 @@ export class PromptInbox {
       deliveryId: input.deliveryId, dispatchId: input.dispatchId });
     if (body && typeof body === "object" && "actingUser" in body) {
       const reply = CloudV2BeginActiveReplySchema.parse(body);
-      return { actingUser: reply.actingUser, contextId: reply.contextId, mode: reply.mode };
+      return { actingUser: reply.actingUser, contextId: reply.contextId, mode: reply.mode, ...(reply.lease ? { lease: reply.lease } : {}) };
     }
     return begin.parse(body).dispatch;
   }
@@ -192,11 +209,11 @@ export class PromptInbox {
         const signal = AbortSignal.any([controller.signal, this.lifetime.signal]);
         const longPoll = this.pushSignals && Date.now() >= this.longPollRefusedUntil;
         const waitMs = this.hinted ? 0 : longPoll ? CLOUD_V2_PROMPT_PUSH_POLL_MS : CLOUD_V2_PROMPT_POLL_MS; this.hinted = false;
-        lastWait = waitMs;
+        lastWait = waitMs; this.pollWaits = waitMs > 0;
         let batch;
         try { batch = CloudV2PromptPullReplySchema.parse(await this.request("pull", { waitMs, held: [...this.held] }, signal)); }
         catch (error) { hintAbortedPoll = controller.signal.aborted; throw error; }
-        finally { this.polling = undefined; }
+        finally { this.polling = undefined; this.pollWaits = false; clearTimeout(this.hintGrace); this.hintGrace = undefined; }
         if (batch.recovery) this.onRecovery?.(batch.recovery);
         this.receiving = batch.stops.length > 0 || batch.prompts.length > 0;
         await Promise.all(batch.stops.map(async stop => {

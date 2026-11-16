@@ -177,7 +177,7 @@ export function renderRouteComparison(before: LoadReport, after: LoadReport): st
     for (const value of report.scenarios) {
       const scenario = value as { name: string; routes: Array<Record<string, unknown>>; background: Record<string, unknown> };
       if (!scenario || typeof scenario.name !== "string" || !/^[a-z0-9-]+$/.test(scenario.name) || !Array.isArray(scenario.routes)) throw new Error("Invalid route measurement");
-      if (["turn-lease", "running-stream", "periodic-renewals"].includes(scenario.name)) continue;
+      if (["begin-lease", "running-stream", "periodic-renewals"].includes(scenario.name)) continue;
       for (const row of [...scenario.routes, { ...scenario.background, method: "", route: "background", requests: 0 }]) {
         const route = `${row.method} ${row.route}`.trim();
         if (!/^(?:GET|POST) \/[a-zA-Z0-9/:_-]+$|^background$/.test(route)) throw new Error("Invalid route measurement");
