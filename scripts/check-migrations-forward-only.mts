@@ -14,6 +14,11 @@
 //   2. Forward-only vs origin/main — every migration on main is present and
 //      BYTE-IDENTICAL on HEAD (same version, name, up); HEAD may only ADD
 //      entries with a version greater than main's current max.
+//   3. On a release/X.Y.Z branch the ladder must instead be an identical PREFIX
+//      of main's. A branch cut before main appended a migration is valid, and a
+//      fix cherry-picked from main is checkable. A migration that never landed on
+//      main is refused: a later release built from main would number a different
+//      migration the same and existing users would skip it.
 //
 // Structural, not regex: it imports the real `MIGRATIONS` array (the `up` bodies
 // are multi-line template literals a regex can't capture). Pure + offline —
@@ -77,7 +82,7 @@ async function mainMigrations(): Promise<Migration[] | null> {
   return importMigrations(pathToFileURL(file).href);
 }
 
-function validateInternal(migs: Migration[]): string[] {
+export function validateInternal(migs: Migration[]): string[] {
   const errs: string[] = [];
   if (migs.length === 0) errs.push("MIGRATIONS is empty");
   const seen = new Set<number>();
@@ -95,7 +100,7 @@ function validateInternal(migs: Migration[]): string[] {
   return errs;
 }
 
-function validateForwardOnly(main: Migration[], head: Migration[]): string[] {
+export function validateForwardOnly(main: Migration[], head: Migration[]): string[] {
   const errs: string[] = [];
   const headByVersion = new Map(head.map((m) => [m.version, m]));
   for (const m of main) {
@@ -128,13 +133,54 @@ function validateForwardOnly(main: Migration[], head: Migration[]): string[] {
   return errs;
 }
 
+export function validateReleasePrefix(main: Migration[], head: Migration[]): string[] {
+  const mainByVersion = new Map(main.map((m) => [m.version, m]));
+  return head.flatMap((h) => {
+    const m = mainByVersion.get(h.version);
+    if (!m) {
+      return [
+        `migration ${h.version} ("${h.name}") is not on origin/main — land a migration on main first, then cherry-pick it onto the release branch in order`,
+      ];
+    }
+    return m.name === h.name && m.up === h.up
+      ? []
+      : [
+          `migration ${h.version} ("${h.name}") differs from origin/main's copy — a release branch may only carry main's migrations byte-for-byte`,
+        ];
+  });
+}
+
+const RELEASE_BRANCH = /^release\/[0-9]+\.[0-9]+\.[0-9]+$/;
+
+/** The release branch this check runs for, or null on main and feature branches. */
+export function releaseBranchOf(
+  env: Partial<Record<"GITHUB_BASE_REF" | "GITHUB_REF_NAME", string>>,
+  localBranch: string | null,
+): string | null {
+  // A pull request's base decides, so a PR back into main is checked as main.
+  const branch = env.GITHUB_BASE_REF || env.GITHUB_REF_NAME || localBranch || "";
+  return RELEASE_BRANCH.test(branch) ? branch : null;
+}
+
+function localBranch(): string | null {
+  try {
+    return execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+  } catch {
+    return null;
+  }
+}
+
 async function main(): Promise<void> {
   const head = await headMigrations();
   const errs = validateInternal(head);
 
   const mainMigs = await mainMigrations();
+  const release = releaseBranchOf(process.env, localBranch());
   if (mainMigs) {
-    errs.push(...validateForwardOnly(mainMigs, head));
+    errs.push(...(release ? validateReleasePrefix(mainMigs, head) : validateForwardOnly(mainMigs, head)));
   } else {
     console.log(
       "ℹ check:migrations — origin/main not available; ran HEAD-internal checks only (in CI use actions/checkout with fetch-depth: 0).",
@@ -149,11 +195,15 @@ async function main(): Promise<void> {
     process.exit(1);
   }
   console.log(
-    `✓ check:migrations — ${head.length} migrations, forward-only ${mainMigs ? "vs origin/main" : "(HEAD-only)"} OK`,
+    `✓ check:migrations — ${head.length} migrations, ${
+      !mainMigs ? "forward-only (HEAD-only)" : release ? `${release} is a prefix of origin/main` : "forward-only vs origin/main"
+    } OK`,
   );
 }
 
-main().catch((err) => {
-  console.error("✖ check:migrations failed:", err);
-  process.exit(1);
-});
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((err) => {
+    console.error("✖ check:migrations failed:", err);
+    process.exit(1);
+  });
+}
