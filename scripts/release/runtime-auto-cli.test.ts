@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { runtimeReleaseIdentity } from "../../apps/control-plane/src/cloud/runtime-release";
 import { runtimeBuildDrainVersion } from "../../apps/control-plane/src/cloud/runtime-build-drain";
-import { runtimeAutoMain } from "./runtime-auto-cli";
+import { keptWorkerContract, runtimeAutoMain } from "./runtime-auto-cli";
 
 const directories: string[] = [];
 afterEach(async () => { await Promise.all(directories.splice(0).map(path => rm(path, { recursive: true, force: true }))); });
@@ -93,5 +93,39 @@ describe("runtime resolver workflow entry", () => {
     const f = await fixture("lockfile");
     await expect(runtimeAutoMain(["--resolve"], { ...f.env, GITHUB_EVENT_NAME: "workflow_call" }, f.options)).rejects.toThrow(/parent/);
     expect(f.options.fetch).not.toHaveBeenCalled();
+  });
+});
+
+describe("kept worker contract", () => {
+  async function repository() {
+    const root = await mkdtemp(join(tmpdir(), "zeros-kept-contract-")); directories.push(root);
+    const git = (...args: string[]) => execFileSync("git", args, { cwd: root, encoding: "utf8" }).trim();
+    git("init", "--quiet", "--initial-branch=main");
+    const dir = join(root, "apps/control-plane/src/client-contracts");
+    await mkdir(join(dir, "released"), { recursive: true });
+    const commit = async (files: Record<string, string>) => {
+      for (const [name, text] of Object.entries(files)) await writeFile(join(dir, name), text);
+      git("add", "."); git("-c", "user.name=Runtime Test", "-c", "user.email=runtime@example.test", "commit", "--quiet", "--allow-empty", "-m", "fixture");
+      return git("rev-parse", "HEAD");
+    };
+    const execute = async (file: string, args: string[]) => execFileSync(file, args, { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+    return { root, dir, commit, execute };
+  }
+
+  it("matches the pin source's contract to the next or a released copy this tree replays", async () => {
+    const r = await repository();
+    const pinned = await r.commit({ "worker-next.json": '{"worker":"0.1.30"}\n' });
+    await r.commit({ "worker-next.json": '{"worker":"newer"}\n', "released/worker-0.1.30.json": '{"worker":"0.1.30"}\n' });
+    expect(await keptWorkerContract(pinned, r.execute, r.root)).toBe(true);
+    await writeFile(join(r.dir, "released/worker-0.1.30.json"), '{"worker":"edited"}\n');
+    expect(await keptWorkerContract(pinned, r.execute, r.root)).toBe(false);
+  });
+
+  it("never keeps a source from before worker contracts", async () => {
+    const r = await repository();
+    const before = await r.commit({ "desktop-next.json": "{}\n" });
+    await r.commit({ "worker-next.json": "{}\n" });
+    expect(await keptWorkerContract(before, r.execute, r.root)).toBe(false);
+    await expect(keptWorkerContract("main", r.execute, r.root)).rejects.toThrow(/immutable/);
   });
 });

@@ -548,8 +548,19 @@ change, or when the pin has no provenance. The runtime waits for full Preflight
 and CodeQL even when the hosted Alpha lane used its faster admission gate.
 Beta and Production resolve after hosted promotion and promote only Alpha's
 qualified pin from an ancestor with the same archive inputs and qualifying
-code as their release source. Unavailable, unqualified, newer or incompatible
-Alpha state fails the release; it does not silently keep a different old pin.
+code as their release source. Unavailable or unqualified Alpha state fails the
+release. When Alpha is healthy but has moved past the release's code (its pin is
+newer, unrelated, or qualified with different control-plane/protocol trees),
+the destination keeps its current pin (`skip/kept`) only if that pin's Alpha
+publication succeeded and the worker contract committed at its source is
+byte-identical to one the release tree keeps (`worker-next.json` or
+`released/worker-X.Y.Z.json`). CI replays every kept contract against the
+release's control plane
+([released-client contract replay](desktop-client-compatibility.md#released-client-contract-replay)),
+and the control plane gates newer configuration on the runtime's advertised
+features, so features that need a newer runtime stay off until a later release
+promotes one. The run reports this as a warning. A pin from before worker
+contracts never qualifies, so the release fails as before.
 A disabled cloud capability or a matching qualified pin can skip the runtime
 job. The destination's own pin also skips when its Alpha publication succeeded
 and its source is an ancestor of the release with the same archive inputs and
