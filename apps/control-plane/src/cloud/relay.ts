@@ -15,7 +15,7 @@ import { isCloudV2Token } from "./tokens.js";
 import type { CloudExecutionContexts } from "./execution/store.js";
 import { ExecutionContextRevoked } from "./execution/errors.js";
 import { cloudClientReadFrame } from "./execution/clients.js";
-import { dialWorker, WorkerConnectionFailure, workerSupportsActingUser, workerSupportsCreatorLogins, workerSupportsCreatorModels, workerSupportsCreatorCommitIdentity, workerSupportsApi, workerSupportsLocalCommands, workerSupportsLocalCommandReason, workerSupportsNotifyUser, workerSupportsCheckout, workerSupportsMcp, workerSupportsSetup, workerSupportsRepositorySetup, workerSupportsGithub, workerSupportsGitIdentity, workerSupportsGithubUserTokens, workerSupportsAgentInteractions, workerSupportsCodeReview, workerSupportsHistoryReplacement, workerSupportsHistoryDigests, workerSupportsHistoryBatch, workerSupportsBootTimings, workerSupportsEnvironment, workerSupportsRuntimeUpdate, workerSupportsPushSignals, workerSupportsPush, type WorkerRoute } from "./worker-connection.js";
+import { dialWorker, WorkerConnectionFailure, workerSupportsActingUser, workerSupportsCreatorLogins, workerSupportsCreatorModels, workerSupportsCreatorCommitIdentity, workerSupportsApi, workerSupportsLocalCommands, workerSupportsLocalCommandReason, workerSupportsNotifyUser, workerSupportsCheckout, workerSupportsMcp, workerSupportsSetup, workerSupportsRepositorySetup, workerSupportsGithub, workerSupportsGitIdentity, workerSupportsGithubUserTokens, workerSupportsAgentInteractions, workerSupportsCodeReview, workerSupportsHistoryReplacement, workerSupportsHistoryDigests, workerSupportsHistoryBatch, workerSupportsTurnEvents, workerSupportsBootTimings, workerSupportsEnvironment, workerSupportsRuntimeUpdate, workerSupportsPushSignals, workerSupportsPush, type WorkerRoute } from "./worker-connection.js";
 import { LIVE_CONNECTION_UNAVAILABLE, type CloudLiveRecovery } from "./live-recovery.js";
 import { workerGitIdentity } from "./worker-git-identity.js";
 import { emitCloudV2Timing, type CloudV2TimingRecord } from "./lifecycle.js";
@@ -45,6 +45,8 @@ export type CloudV2RelayDeps = {
   localCommandsEnabled?(workspaceId: string): Promise<boolean>;
   /** history-batch-v1 is served (the worker routes' history/batch is mounted on this control plane). */
   historyBatch?: boolean;
+  /** turn-events-v1: offered beside historyBatch when the HTTP routes can apply the events (prompt outbox present). */
+  turnEvents?: boolean;
   retireLocalSender?(workspaceId: string, userId: string, accessEpoch: string, sessionId: string | null): Promise<void>;
   runtimeAdmission?: {
     admitClient(workspaceId: string, clientId: string): Promise<boolean>;
@@ -694,7 +696,7 @@ export class CloudV2Relay {
       if (await this.current(room) !== "allowed" || room.worker !== ws) return false;
       if (revision !== await this.deps.store.loginRevision(room.workspace.id)) { flight.requested = true; flight.force = true; continue; }
       if (room.worker !== ws || room.revoked) return false;
-      const { api: _api, agentLogins, agentModels, localCommands: _localCommands, localCommandReason: _localCommandReason, notifyUser, mcpServers, githubPullRequests, githubUserTokens, gitIdentity: _gitIdentity, gitIdentitySource: _gitIdentitySource, agentInteractions, codeReview, historyReplacement: _historyReplacement, historyDigest: _historyDigest, historyBatch: _historyBatch, bootTimings: _bootTimings, environment, runtimeUpdate, pushSignals, ...legacy } = config;
+      const { api: _api, agentLogins, agentModels, localCommands: _localCommands, localCommandReason: _localCommandReason, notifyUser, mcpServers, githubPullRequests, githubUserTokens, gitIdentity: _gitIdentity, gitIdentitySource: _gitIdentitySource, agentInteractions, codeReview, historyReplacement: _historyReplacement, historyDigest: _historyDigest, historyBatch: _historyBatch, turnEvents: _turnEvents, bootTimings: _bootTimings, environment, runtimeUpdate, pushSignals, ...legacy } = config;
       if (environment && !workerSupportsEnvironment(ws)) throw new Error("Cloud environment runtime support is required.");
       const { setup, setupScript, baseCommit, github, ...workspaceConfig } = config.workspace;
       if (setupScript !== undefined && !workerSupportsRepositorySetup(ws)) throw new Error("Repository setup runtime support is required.");
@@ -712,6 +714,7 @@ export class CloudV2Relay {
         ...(workerSupportsHistoryReplacement(ws) && workerSupportsHistoryDigests(ws) ? { historyDigest: 1 } : {}),
         // history-batch-v1: offered on the dial like on HTTP, or each dial would switch batching off again.
         ...(workerSupportsHistoryBatch(ws) && this.deps.historyBatch ? { historyBatch: 1 } : {}),
+        ...(workerSupportsHistoryBatch(ws) && workerSupportsTurnEvents(ws) && this.deps.historyBatch && this.deps.turnEvents ? { turnEvents: 1 } : {}),
         ...(workerSupportsBootTimings(ws) ? { bootTimings: 1 } : {}),
         ...(workerSupportsMcp(ws) && mcpServers ? { mcpServers } : {}),
         ...(workerSupportsAgentInteractions(ws) && agentInteractions === 1 ? { agentInteractions } : {}),

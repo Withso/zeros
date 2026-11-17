@@ -308,23 +308,28 @@ export class CloudExecutionContexts {
 
   async begin(identity: ExecutionWorker, input: { userMessageId: string; deliveryId: string; dispatchId: string },
     prepared?: { context?: ExecutionContext; proof?: ExecutionAdmission }) {
-    const initial = await withSystemTx(this.pool, async tx => {
-      // The route reads no worker session first: this locked read is the worker check (and the mode the route needs).
-      const workspace = await this.worker(tx, identity, true, false, true);
-      assertRecoveryTurnReady(workspace.recovery_held);
-      await this.maintenance.cancelQueued(tx, workspace.id);
-      return { workspace, prompt: await this.prompt(tx, workspace.id, input.userMessageId) };
-    });
-    if (!pending(initial.prompt.state)) return { dispatch: false as const, state: initial.prompt.state };
+    let initial: { workspace: ExecutionWorkspace; prompt: PromptRow } | undefined;
     return withExecutionLifetimeRetry(async () => {
-      // Admission reads share one transaction; the final assert there catches a change that lands while it runs.
-      const { proof, agent } = await withSystemTx(this.pool, async tx => {
-        const admitted = await this.deps.authority.admit(initial.workspace.id, initial.prompt.creator_user_id,
+      // The worker check, the prompt's state and the admission reads share one transaction (the first attempt's also
+      // reads the worker and the prompt); the final assert there catches a change that lands while it runs. The
+      // dispatch transaction below locks and checks everything again.
+      const admitted = await withSystemTx(this.pool, async tx => {
+        if (!initial) {
+          // The route reads no worker session first: this locked read is the worker check (and the mode the route needs).
+          const workspace = await this.worker(tx, identity, true, false, true);
+          assertRecoveryTurnReady(workspace.recovery_held);
+          await this.maintenance.cancelQueued(tx, workspace.id);
+          initial = { workspace, prompt: await this.prompt(tx, workspace.id, input.userMessageId) };
+        }
+        if (!pending(initial.prompt.state)) return undefined;
+        const proof = await this.deps.authority.admit(initial.workspace.id, initial.prompt.creator_user_id,
           { minimumSourceMs: EXECUTION_MINIMUM_LIFETIME_MS, transaction: tx });
-        const chosen = await this.agent(tx, initial.workspace.id, initial.prompt.chat_id, initial.prompt.payload!.agentId);
-        await this.deps.authority.assert(admitted, tx);
-        return { proof: admitted, agent: chosen };
+        const agent = await this.agent(tx, initial.workspace.id, initial.prompt.chat_id, initial.prompt.payload!.agentId);
+        await this.deps.authority.assert(proof, tx);
+        return { proof, agent };
       });
+      if (!admitted) return { dispatch: false as const, state: initial!.prompt.state };
+      const { proof, agent } = admitted;
       assertExecutionLifetime(proof.until);
       const result = await withSystemTx(this.pool, async tx => {
         await tx.query("SELECT id FROM users WHERE id=$1 FOR KEY SHARE", [proof.person.userId]);
@@ -664,9 +669,14 @@ export class CloudExecutionContexts {
   }
 
   async retired(identity: ExecutionWorker, id: string, input: { retirementId: string; reason: string; processes: number }) {
+    return withSystemTx(this.pool, tx => this.retiredIn(tx, identity, id, input));
+  }
+
+  /** turn-events-v1: the same retirement inside the caller's transaction (a history batch). */
+  async retiredIn(tx: Tx, identity: ExecutionWorker, id: string, input: { retirementId: string; reason: string; processes: number }) {
     if (input.processes !== 0) throw new HttpError(409, "execution_not_retired", "Execution processes are still running");
     const digest = createHash("sha256").update(JSON.stringify([input.retirementId, input.reason, input.processes])).digest();
-    return withSystemTx(this.pool, async tx => {
+    {
       const workspace = await this.worker(tx, identity, true, true), context = await this.context(tx, id, workspace.id, true);
       if (context.worker_boot_id !== identity.bootId) throw actorChanged();
       if (context.retirement_id) {
@@ -679,9 +689,12 @@ export class CloudExecutionContexts {
         input.reason === "expired" ? "expired" : input.reason === "stop" ? "cancelled" : "actor_changed");
       await tx.query(`UPDATE cloud_v2_execution_contexts SET state='retired',retired_at=clock_timestamp(),retirement_id=$2,retirement_hash=$3,
         material=NULL,environment_version_id=NULL WHERE id=$1`, [id, input.retirementId, digest]);
+      // Only this retirement. Defensive: no event batched after it counts as an authority change today (an outcome
+      // revokes with reason 'completed'), but a later one in the same transaction must not inherit the flag.
+      await tx.query("SELECT set_config('app.cloud_authority_retirement','',true)");
       // No prompt wake: what pull offers depends on prompt states only, and the outcome already woke any waiting message.
       return { retired: true as const };
-    });
+    }
   }
 
   async renew(identity: ExecutionWorker, ids: readonly string[]) {

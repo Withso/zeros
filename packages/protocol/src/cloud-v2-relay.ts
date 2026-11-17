@@ -12,7 +12,7 @@ export * from "./cloud-runtime-update";
 export * from "./cloud-recovery-quiesce";
 export * from "./cloud-workspace-resources";
 import { MAX_BRIDGE_FRAME_BYTES } from "./schemas";
-import { CloudV2ChatEditAckSchema, CloudV2PromptCounterSchema, CloudV2PromptIdSchema, CloudV2PromptStateSchema } from "./cloud-v2-prompts";
+import { CloudV2ChatEditAckSchema, CloudV2PromptCounterSchema, CloudV2PromptIdSchema, CloudV2PromptOutcomeSchema, CloudV2PromptStateSchema } from "./cloud-v2-prompts";
 import { RepositorySetupPathSchema } from "./repository-setup";
 export { RepositorySetupPathSchema, REPOSITORY_SETUP_MAX_BYTES } from "./repository-setup";
 export { CloudFailureSchema, CloudProviderFailureSchema, CloudMcpFailureSchema, cloudFailureMessage } from "./cloud-failure";
@@ -264,6 +264,8 @@ export const CloudV2ControlFrameSchema = z.discriminatedUnion("t", [
     historyDigest: z.literal(1).optional(),
     /** history-batch-v1: the control plane accepts history/batch. */
     historyBatch: z.literal(1).optional(),
+    /** turn-events-v1: outcomes and retirements ride in the history batch (only with historyBatch). */
+    turnEvents: z.literal(1).optional(),
     /** boot-timings-v1: the control plane accepts CloudV2WorkerBootTimingSchema on the timing route. */
     bootTimings: z.literal(1).optional(),
     gitIdentity: CloudV2GitIdentitySchema.nullable().optional(),
@@ -329,8 +331,27 @@ export const CloudV2WorkerHelloSchema = z.object({
   runtimeSha256: z.string().regex(/^[0-9a-f]{64}$/), bootId: z.uuid(),
 }).strict();
 export const CloudV2WorkerHistorySchema = CloudV2HistoryFrameSchema.extend({ bootId: z.uuid(), sequence: z.number().int().positive().max(Number.MAX_SAFE_INTEGER) });
+export const CLOUD_V2_MAX_TURN_EVENTS = 50;
 export const CloudV2WorkerHistoryBatchSchema = z.object({ bootId: z.uuid(), sequence: z.number().int().positive().max(Number.MAX_SAFE_INTEGER - CLOUD_V2_MAX_HISTORY_BATCH_FRAMES),
-  frames: z.array(CloudV2HistoryFrameSchema.omit({ t: true }).strict()).min(1).max(CLOUD_V2_MAX_HISTORY_BATCH_FRAMES) }).strict();
+  frames: z.array(CloudV2HistoryFrameSchema.omit({ t: true }).strict()).max(CLOUD_V2_MAX_HISTORY_BATCH_FRAMES),
+  /** turn-events-v1 (config.turnEvents): prompt outcomes and context retirements, applied after the frames in the same
+   * transaction, each in its own savepoint. A batch may carry only events (no frames; the sequence does not move). */
+  events: z.array(z.lazy(() => CloudV2TurnEventSchema)).max(CLOUD_V2_MAX_TURN_EVENTS).optional() }).strict()
+  .refine(value => value.frames.length > 0 || (value.events?.length ?? 0) > 0, "A batch carries frames or events");
+/** turn-events-v1: what Conductor's worker sends as session notifications, here in the history batch. */
+export const TURN_EVENTS_FEATURE = "turn-events-v1";
+export const CloudV2TurnEventSchema = z.discriminatedUnion("t", [
+  z.object({ t: z.literal("outcome"), outcome: CloudV2PromptOutcomeSchema }).strict(),
+  z.object({ t: z.literal("retired"), contextId: z.uuid(), retired: z.lazy(() => CloudV2RetiredRequestSchema) }).strict(),
+]);
+export type CloudV2TurnEvent = z.infer<typeof CloudV2TurnEventSchema>;
+/** One result per event, in order: its reply, or the refusal its own route would have answered (4xx only). */
+export const CloudV2TurnEventResultSchema = z.union([
+  z.object({ ok: z.literal(true), value: z.record(z.string(), z.unknown()) }).strict(),
+  z.object({ ok: z.literal(false), status: z.number().int().min(400).max(499), code: z.string().regex(/^[a-z0-9_]{1,64}$/).optional() }).strict(),
+]);
+export const CloudV2WorkerHistoryBatchReplySchema = z.object({ sequence: z.number().int().nonnegative(),
+  events: z.array(CloudV2TurnEventResultSchema).max(CLOUD_V2_MAX_TURN_EVENTS).optional() }).strict();
 export const CloudV2WorkerActivitySchema = z.object({ idle: z.boolean() }).strict();
 export const CloudV2WorkerActivityReplySchema = z.object({
   loginRevision: z.string().regex(/^(0|[1-9][0-9]{0,19})$/),

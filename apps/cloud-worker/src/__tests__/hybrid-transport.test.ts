@@ -1,3 +1,4 @@
+import { getEventListeners } from "node:events";
 import { generateKeyPairSync, randomUUID, sign } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -16,7 +17,8 @@ import * as notifyProtocol from "@zeros/protocol/notify-user";
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); vi.useRealTimers(); });
-async function fixture(options: { hello?: Promise<void>; onFrame?: (frame: any) => void; heartbeatPhase?: number; config?: Record<string, unknown>; batch?: boolean } = {}) {
+async function fixture(options: { hello?: Promise<void>; onFrame?: (frame: any) => void; heartbeatPhase?: number; config?: Record<string, unknown>; batch?: boolean;
+  eventResult?: (event: any) => unknown; batchStatus?: (body: any) => number | undefined } = {}) {
   const directory = await mkdtemp(join(tmpdir(), "hybrid-transport-")), tokenFile = join(directory, "token");
   let expected = "synthetic-worker-token", revision = "0", failHistory = false, lostReply = false;
   await writeFile(tokenFile, expected, { mode: 0o600 });
@@ -40,7 +42,14 @@ async function fixture(options: { hello?: Promise<void>; onFrame?: (frame: any) 
       if (lostReply) { lostReply = false; throw new Error("Lost committed response"); }
       return failHistory ? new Response(null, { status: 503 }) : Response.json({ sequence: body.sequence });
     }
-    if (path === "batch" && options.batch) return Response.json({ sequence: body.sequence + body.frames.length - 1 });
+    if (path === "batch" && options.batchStatus?.(body)) return Response.json({ error: { code: "invalid_request" } }, { status: options.batchStatus(body)! });
+    if (path === "batch" && options.batch) {
+      if (lostReply) { lostReply = false; throw new Error("Lost committed response"); }
+      return Response.json({ sequence: body.sequence + body.frames.length - 1,
+        ...(body.events ? { events: body.events.map((event: any) => options.eventResult?.(event) ?? { ok: true, value: event.t === "outcome" ? { state: event.outcome.state } : { retired: true } }) } : {}) });
+    }
+    if (path === "outcome") return Response.json({ state: body.state });
+    if (path === "retired") return Response.json({ retired: true });
     if (path === "github-token") return Response.json({ token: "synthetic-github-token", expiresAt: Date.now() + 60_000 });
     return new Response(null, { status: 404 });
   });
@@ -479,7 +488,7 @@ it("ignores an older control plane that rejects a newer timing phase", async () 
 });
 it("advertises outbox support without changing the strict hello body, and rereads credentials on pull", async () => {
   const f = await fixture();
-  expect(new Headers(vi.mocked(f.fetcher).mock.calls[0]![1]?.headers).get("x-zeros-worker-features")).toBe("prompt-outbox-v1,mcp-v1,workspace-setup-v1,checkout-v2,agent-interactions-v1,github-pr-v1,git-identity-v1,github-user-token-v1,code-review-v1,history-replace-v1,workspace-environment-v1,repository-setup-v1,runtime-update-v1,worker-push-v1,workspace-api-v1,session-name-v1,chat-edit-v1,local-commands-v1,setup-status-v1,notify-user-v1,sync-v1,local-commands-reason-v1,acting-user-v1,sync-context-v1,creator-agent-logins-v1,creator-agent-models-v1,creator-commit-identity-v1,push-signals-v1,recovery-quiesce-v1,history-digest-v1,history-digest-deletions-v1,boot-timings-v1,message-authority-v1,history-batch-v1,begin-lease-v1");
+  expect(new Headers(vi.mocked(f.fetcher).mock.calls[0]![1]?.headers).get("x-zeros-worker-features")).toBe("prompt-outbox-v1,mcp-v1,workspace-setup-v1,checkout-v2,agent-interactions-v1,github-pr-v1,git-identity-v1,github-user-token-v1,code-review-v1,history-replace-v1,workspace-environment-v1,repository-setup-v1,runtime-update-v1,worker-push-v1,workspace-api-v1,session-name-v1,chat-edit-v1,local-commands-v1,setup-status-v1,notify-user-v1,sync-v1,local-commands-reason-v1,acting-user-v1,sync-context-v1,creator-agent-logins-v1,creator-agent-models-v1,creator-commit-identity-v1,push-signals-v1,recovery-quiesce-v1,history-digest-v1,history-digest-deletions-v1,boot-timings-v1,message-authority-v1,history-batch-v1,begin-lease-v1,turn-events-v1");
   expect(Object.keys(f.requests[0]!.body).sort()).toEqual(["bootId", "protocol", "runtimeSha256"]);
   await f.rotate();
   vi.mocked(f.fetcher).mockImplementationOnce(async (_url, init) => {
@@ -499,6 +508,209 @@ it("history-batch-v1: a batch takes consecutive sequences and a single frame con
   expect(batch.frames.every((frame: object) => !("t" in frame))).toBe(true);
   expect(await f.transport.send({ t: "history", chatDeletions: ["c"] })).toBe(true);
   expect(f.requests.filter(request => request.path === "history").at(-1)!.body.sequence).toBe(4);
+});
+
+const CONTEXT = "11111111-1111-4111-8111-111111111111", MESSAGE = "22222222-2222-4222-8222-222222222222", DISPATCH = "33333333-3333-4333-8333-333333333333";
+const outcome = (state = "completed") => ({ userMessageId: MESSAGE, dispatchId: DISPATCH, state });
+const retirement = { retirementId: "44444444-4444-4444-8444-444444444444", reason: "outcome", processes: 0 };
+
+it("turn-events-v1: a turn's outcome and retirement ride in one history batch, and each answers as its route would", async () => {
+  const f = await fixture({ batch: true }); f.transport.setTurnEvents(true);
+  const [state, retired] = await Promise.all([f.transport.promptRequest("outcome", outcome()), f.transport.contextRequest(`execution-leases/${CONTEXT}/retired`, retirement)]);
+  expect(state).toEqual({ state: "completed" });
+  expect(retired).toEqual({ retired: true });
+  const batches = f.requests.filter(request => request.path === "batch");
+  expect(batches).toHaveLength(1);
+  expect(batches[0]!.body).toEqual({ bootId: f.transport.bootId, sequence: 1, frames: [],
+    events: [{ t: "outcome", outcome: outcome() }, { t: "retired", contextId: CONTEXT, retired: retirement }] });
+  expect(f.requests.some(request => request.path === "outcome" || request.path === "retired")).toBe(false);
+  // History after an events-only batch keeps its sequence: nothing was consumed.
+  expect(await f.transport.sendHistoryBatch([{ t: "history", chats: [{ id: "a" }] }])).toBe(true);
+  expect(f.requests.filter(request => request.path === "batch").at(-1)!.body).toMatchObject({ sequence: 1 });
+});
+
+it("turn-events-v1: a refused event rejects with its route's status and closed code; the others still settle", async () => {
+  const f = await fixture({ batch: true, eventResult: event => event.t === "retired" ? { ok: false, status: 409, code: "actor_changed" } : undefined });
+  f.transport.setTurnEvents(true);
+  const [state, retired] = await Promise.allSettled([f.transport.promptRequest("outcome", outcome()), f.transport.contextRequest(`execution-leases/${CONTEXT}/retired`, retirement)]);
+  expect(state).toEqual({ status: "fulfilled", value: { state: "completed" } });
+  expect(retired.status).toBe("rejected");
+  expect((retired as PromiseRejectedResult).reason).toMatchObject({ status: 409, contextCode: "actor_changed" });
+});
+
+it("turn-events-v1: a lost reply sends the events again through their own routes (a duplicate is harmless), not later with the batch", async () => {
+  const f = await fixture({ batch: true }); f.transport.setTurnEvents(true); f.loseReply();
+  expect(await f.transport.promptRequest("outcome", outcome())).toEqual({ state: "completed" });
+  expect(f.requests.filter(request => request.path === "batch")).toHaveLength(1);
+  expect(f.requests.filter(request => request.path === "outcome").map(request => request.body)).toEqual([outcome()]);
+  // Events stay on: the next ones ride in a batch again.
+  expect(await f.transport.promptRequest("outcome", outcome("failed"))).toEqual({ state: "failed" });
+  expect(f.requests.filter(request => request.path === "batch")).toHaveLength(2);
+});
+
+it("turn-events-v1: an N-1 control plane refusing events (400) gets the frames alone and each event through its own route, then no more events", async () => {
+  const f = await fixture({ batch: true, batchStatus: body => body.events || !body.frames.length ? 400 : undefined }); f.transport.setTurnEvents(true);
+  const sent = f.transport.promptRequest("outcome", outcome());
+  expect(await f.transport.sendHistoryBatch([{ t: "history", chats: [{ id: "a" }] }])).toBe(true);
+  expect(await sent).toEqual({ state: "completed" });
+  expect(f.requests.filter(request => request.path === "outcome")).toHaveLength(1);
+  const accepted = f.requests.filter(request => request.path === "batch" && !request.body.events);
+  expect(accepted.at(-1)!.body).toMatchObject({ sequence: 1, frames: [{ chats: [{ id: "a" }] }] });
+  expect(await f.transport.contextRequest(`execution-leases/${CONTEXT}/retired`, retirement)).toEqual({ retired: true });
+  expect(f.requests.filter(request => request.path === "retired")).toHaveLength(1);
+});
+
+it("turn-events-v1: an outcome never waits behind a failing history batch", async () => {
+  const f = await fixture({ batch: true, batchStatus: body => body.frames.length ? 409 : undefined }); f.transport.setTurnEvents(true);
+  expect(await f.transport.sendHistoryBatch([{ t: "history", chats: [{ id: "a" }] }])).toBe(false);
+  expect(await f.transport.promptRequest("outcome", outcome())).toEqual({ state: "completed" });
+});
+
+it("turn-events-v1: the caller's abort and dispose settle queued and in-flight events; a batch-level 401 reaches the caller", async () => {
+  const aborted = await fixture({ batch: true, batchStatus: () => 503 }); aborted.transport.setTurnEvents(true);
+  const controller = new AbortController();
+  const pending = aborted.transport.promptRequest("outcome", outcome(), controller.signal);
+  await expect.poll(() => aborted.requests.filter(request => request.path === "batch").length).toBeGreaterThan(0);
+  controller.abort();
+  await expect(Promise.race([pending.then(() => "resolved", () => "rejected"), new Promise(resolve => setTimeout(() => resolve("pending"), 500))])).resolves.not.toBe("pending");
+  const disposed = await fixture({ batch: true, batchStatus: body => body.frames.length ? 503 : undefined }); disposed.transport.setTurnEvents(true);
+  void disposed.transport.sendHistoryBatch([{ t: "history", chats: [{ id: "a" }] }]);
+  const waiting = disposed.transport.contextRequest(`execution-leases/${CONTEXT}/retired`, retirement);
+  await disposed.transport.dispose();
+  await expect(Promise.race([waiting.then(() => "resolved", () => "rejected"), new Promise(resolve => setTimeout(() => resolve("pending"), 500))])).resolves.not.toBe("pending");
+  const unauthorized = await fixture({ batch: true, batchStatus: () => 401 }); unauthorized.transport.setTurnEvents(true);
+  await expect(unauthorized.transport.promptRequest("outcome", outcome())).rejects.toMatchObject({ status: 401 });
+});
+
+const settledWithin = (promise: Promise<unknown>, ms = 600) => Promise.race([promise.then(() => "resolved", () => "rejected"), new Promise(resolve => setTimeout(() => resolve("pending"), ms))]);
+
+it("turn-events-v1 (review 2, A): a 404 batch carrying events, then a failing per-frame history: the event must not wait", async () => {
+  const f = await fixture(); f.transport.setTurnEvents(true); f.failHistory(true);
+  const waiting = f.transport.contextRequest(`execution-leases/${CONTEXT}/retired`, retirement);
+  await new Promise(resolve => setTimeout(resolve, 60));
+  void f.transport.sendHistoryBatch([{ t: "history", chats: [{ id: "a" }] }]);
+  const state = await settledWithin(waiting);
+  expect(state).not.toBe("pending");
+});
+
+it("turn-events-v1 (review 2, A2): same, event queued in the same tick as the frames", async () => {
+  const f = await fixture(); f.transport.setTurnEvents(true); f.failHistory(true);
+  const waiting = f.transport.contextRequest(`execution-leases/${CONTEXT}/retired`, retirement);
+  const sent = f.transport.sendHistoryBatch([{ t: "history", chats: [{ id: "a" }] }]);
+  expect(await sent).toBe(false);
+  const state = await settledWithin(waiting);
+  expect(state).not.toBe("pending");
+});
+
+it("turn-events-v1 (review 2, B): more than 50 events behind a failing events-only batch all settle", async () => {
+  const f = await fixture({ batch: true, batchStatus: () => 503 }); f.transport.setTurnEvents(true);
+  const all = Array.from({ length: 51 }, () => f.transport.promptRequest("outcome", outcome()));
+  const states = await Promise.all(all.map(p => settledWithin(p, 1500)));
+  expect(states.filter(s => s === "pending")).toHaveLength(0);
+});
+
+it("turn-events-v1 (review 2, B2): more than 50 events, batch with frames failing 503", async () => {
+  const f = await fixture({ batch: true, batchStatus: () => 503 }); f.transport.setTurnEvents(true);
+  const all = Array.from({ length: 51 }, () => f.transport.promptRequest("outcome", outcome()));
+  void f.transport.sendHistoryBatch([{ t: "history", chats: [{ id: "a" }] }]);
+  const states = await Promise.all(all.map(p => settledWithin(p, 1500)));
+  expect(states.filter(s => s === "pending")).toHaveLength(0);
+});
+
+it("turn-events-v1 (review 2, B3): more than 50 events, batch-level 401", async () => {
+  const f = await fixture({ batch: true, batchStatus: () => 401 }); f.transport.setTurnEvents(true);
+  const all = Array.from({ length: 51 }, () => f.transport.promptRequest("outcome", outcome()));
+  const states = await Promise.all(all.map(p => settledWithin(p, 1500)));
+  expect(states.filter(s => s === "pending")).toHaveLength(0);
+});
+
+it("turn-events-v1 (review 2, C): a settled event leaves no abort listener on the caller's long-lived signal", async () => {
+  const f = await fixture({ batch: true }); f.transport.setTurnEvents(true);
+  const lifetime = new AbortController();
+  for (let i = 0; i < 12; i++) await f.transport.promptRequest("outcome", outcome(), lifetime.signal);
+  expect(getEventListeners(lifetime.signal, "abort")).toHaveLength(0);
+});
+
+it("turn-events-v1 (review 2, D): detached events go one after another: a hung outcome route delays the retirement", async () => {
+  const f = await fixture({ batch: true, batchStatus: () => 503 }); f.transport.setTurnEvents(true);
+  const original = vi.mocked(f.fetcher).getMockImplementation()!;
+  vi.mocked(f.fetcher).mockImplementation((url, init) => {
+    if (String(url).endsWith("/prompts/outcome")) { f.requests.push({ path: "outcome", body: null, authorized: true });
+      return new Promise((_r, reject) => init?.signal?.addEventListener("abort", () => reject(new Error("timeout")), { once: true })); }
+    return original(url, init);
+  });
+  void f.transport.promptRequest("outcome", outcome()).catch(() => {});
+  const retired = f.transport.contextRequest(`execution-leases/${CONTEXT}/retired`, retirement);
+  const state = await settledWithin(retired, 1000);
+  expect(state).not.toBe("pending");
+});
+
+it("turn-events-v1 (review 2, E): events wait behind a hanging (not yet failed) batch on the wire", async () => {
+  const f = await fixture({ batch: true }); f.transport.setTurnEvents(true);
+  const original = vi.mocked(f.fetcher).getMockImplementation()!;
+  let hang = true;
+  vi.mocked(f.fetcher).mockImplementation((url, init) => {
+    if (hang && String(url).endsWith("/history/batch")) { f.requests.push({ path: "batch", body: JSON.parse(String(init!.body)), authorized: true });
+      return new Promise((_r, reject) => init?.signal?.addEventListener("abort", () => reject(new Error("timeout")), { once: true })); }
+    return original(url, init);
+  });
+  void f.transport.sendHistoryBatch([{ t: "history", chats: [{ id: "a" }] }]);
+  await new Promise(resolve => setTimeout(resolve, 20));
+  const sent = f.transport.promptRequest("outcome", outcome());
+  const state = await settledWithin(sent, 1000);
+  expect(state).not.toBe("pending");
+});
+
+it("turn-events-v1 (review 2, F): a persistent 400 on every batch: request counts stay bounded by the backoff, events are sent once", async () => {
+  const f = await fixture({ batch: true, batchStatus: () => 400 }); f.transport.setTurnEvents(true);
+  const sent = f.transport.promptRequest("outcome", outcome());
+  const first = f.transport.sendHistoryBatch([{ t: "history", chats: [{ id: "a" }] }]);
+  expect(await first).toBe(false);
+  expect(await sent).toEqual({ state: "completed" });
+  await new Promise(resolve => setTimeout(resolve, 400));
+  const batches = f.requests.filter(r => r.path === "batch");
+  expect(batches.filter(r => r.body.events)).toHaveLength(1);
+});
+
+it("turn-events-v1 (review 2, G): an acknowledgement without event results (frames committed): frames replay at the same sequence, next history is +1", async () => {
+  const f = await fixture({ batch: true }); f.transport.setTurnEvents(true);
+  const original = vi.mocked(f.fetcher).getMockImplementation()!;
+  vi.mocked(f.fetcher).mockImplementation(async (url, init) => {
+    if (String(url).endsWith("/history/batch")) { const body = JSON.parse(String(init!.body)); f.requests.push({ path: "batch", body, authorized: true });
+      return Response.json({ sequence: body.sequence + body.frames.length - 1 }); }
+    return original(url, init);
+  });
+  const sent = f.transport.promptRequest("outcome", outcome());
+  expect(await f.transport.sendHistoryBatch([{ t: "history", chats: [{ id: "a" }] }, { t: "history", chats: [{ id: "b" }] }])).toBe(true);
+  expect(await sent).toEqual({ state: "completed" });
+  expect(await f.transport.sendHistoryBatch([{ t: "history", chats: [{ id: "c" }] }])).toBe(true);
+  const batches = f.requests.filter(r => r.path === "batch").map(r => ({ s: r.body.sequence, n: r.body.frames.length, e: r.body.events?.length ?? 0 }));
+  expect(batches).toEqual([{ s: 1, n: 2, e: 1 }, { s: 1, n: 2, e: 0 }, { s: 3, n: 1, e: 0 }]);
+});
+
+it("turn-events-v1 (review 2, H): a lost reply for frames+events: frames replay alone at the same sequence, events once through their routes", async () => {
+  const f = await fixture({ batch: true }); f.transport.setTurnEvents(true); f.loseReply();
+  const sent = f.transport.promptRequest("outcome", outcome());
+  expect(await f.transport.sendHistoryBatch([{ t: "history", chats: [{ id: "a" }] }])).toBe(false);
+  expect(await sent).toEqual({ state: "completed" });
+  await expect.poll(() => f.requests.filter(r => r.path === "batch").length).toBe(2);
+  expect(await f.transport.sendHistoryBatch([{ t: "history", chats: [{ id: "c" }] }])).toBe(true);
+  const batches = f.requests.filter(r => r.path === "batch").map(r => ({ s: r.body.sequence, n: r.body.frames.length, e: r.body.events?.length ?? 0 }));
+  expect(batches).toEqual([{ s: 1, n: 1, e: 1 }, { s: 1, n: 1, e: 0 }, { s: 2, n: 1, e: 0 }]);
+});
+
+it("turn-events-v1: off (not offered) or refused by the control plane (404), each event goes through its own route", async () => {
+  const off = await fixture({ batch: true });
+  expect(await off.transport.promptRequest("outcome", outcome())).toEqual({ state: "completed" });
+  expect(off.requests.map(request => request.path)).toContain("outcome");
+  expect(off.requests.some(request => request.path === "batch")).toBe(false);
+  const rolledBack = await fixture(); rolledBack.transport.setTurnEvents(true);
+  expect(await rolledBack.transport.contextRequest(`execution-leases/${CONTEXT}/retired`, retirement)).toEqual({ retired: true });
+  expect(rolledBack.requests.filter(request => request.path === "batch")).toHaveLength(1);
+  expect(rolledBack.requests.filter(request => request.path === "retired")).toHaveLength(1);
+  expect(rolledBack.transport.historyBatchRefused).toBe(true);
+  expect(await rolledBack.transport.promptRequest("outcome", outcome("accepted"))).toEqual({ state: "accepted" });
+  expect(rolledBack.requests.filter(request => request.path === "batch")).toHaveLength(1);
 });
 
 it("history-batch-v1: a rolled-back control plane (404) gets the same frames at the same sequences, then no more batches", async () => {
@@ -604,7 +816,9 @@ describe("worker → control plane context parity", () => {
   /** Control plane → worker shapes (replies and control frames): nothing to forward. */
   const INBOUND = new Set(["CloudV2BeginActiveReplySchema", "CloudV2BootstrapLeaseSchema", "CloudV2ClientLeaseSchema", "CloudV2ControlFrameSchema[t=open]",
     "CloudV2ControlFrameSchema[t=revoke-context]", "CloudV2RenewReplySchema.leases", "CloudV2TerminalLeaseSchema", "CloudV2TurnLeaseSchema", "CloudV2AuthorityReplySchema.ended"]);
-  type Case = { schema: any; sample: Record<string, unknown>; framing?: string[]; path: string; send: (transport: HybridTransport, sample: any) => Promise<unknown> };
+  type Case = { schema: any; sample: Record<string, unknown>; framing?: string[]; path: string; send: (transport: HybridTransport, sample: any) => Promise<unknown>;
+    /** Where the sample sits in the request body when it is not the body itself. */
+    within?: (body: any) => unknown };
   const REQUESTS: Record<string, Case> = {
     "CloudV2WorkerFrameSchema[t=request]": { schema: relayProtocol.CloudV2WorkerFrameSchema, framing: ["t", "id", "kind"], path: "github-token",
       sample: { t: "request", id: M, kind: "github-token", purpose: "gh", failedTokenSha256: "a".repeat(64), contextId: C },
@@ -618,6 +832,10 @@ describe("worker → control plane context parity", () => {
     "CloudV2TurnLeaseRequestSchema": { schema: relayProtocol.CloudV2TurnLeaseRequestSchema, path: "turn-lease",
       sample: { chatId: "chat", userMessageId: M, dispatchId: M, generation: "1", contextId: C },
       send: (transport, sample) => transport.contextRequest("turn-lease", sample) },
+    "CloudV2TurnEventSchema[t=retired]": { schema: relayProtocol.CloudV2TurnEventSchema, path: "batch",
+      sample: { t: "retired", contextId: C, retired: { retirementId: M, reason: "operation_done", processes: 0 } },
+      send: (transport, sample) => { transport.setTurnEvents(true); return transport.contextRequest(`execution-leases/${C}/retired`, sample.retired); },
+      within: body => body.events[0] },
     "NotifyUserWorkerRequestSchema": { schema: notifyProtocol.NotifyUserWorkerRequestSchema, path: "notifications",
       sample: { title: "Done", message: "Ready", kind: "review", notificationId: M, chatId: "chat", userMessageId: M, executionId: "execution", contextId: C },
       send: (transport, sample) => transport.notifyUser(sample) },
@@ -630,7 +848,7 @@ describe("worker → control plane context parity", () => {
   });
 
   it.each(Object.keys(REQUESTS))("forwards %s to the control plane with every field, contextId included", async label => {
-    const { schema, sample, framing = [], path, send } = REQUESTS[label]!;
+    const { schema, sample, framing = [], path, send, within = (body: unknown) => body } = REQUESTS[label]!;
     expect(schema.safeParse(sample).success).toBe(true);
     const shape = (schema._zod.def.type === "object" ? schema : schema._zod.def.options.find((option: any) => [...(option._zod.def.shape.t?._zod.def.values ?? [])].includes(sample.t)))._zod.def.shape;
     // The sample sets every field the schema allows, so a new field is compared too.
@@ -639,7 +857,7 @@ describe("worker → control plane context parity", () => {
     await send(f.transport, sample).catch(() => {});
     await expect.poll(() => f.requests.find(request => request.path === path)).toBeDefined();
     const expected = Object.fromEntries(Object.entries(sample).filter(([key]) => !framing.includes(key)));
-    expect(f.requests.find(request => request.path === path)!.body).toEqual(expected);
+    expect(within(f.requests.find(request => request.path === path)!.body)).toEqual(expected);
   });
 
   it("forwards the context of the requests whose shapes live outside the protocol: terminal, client and retirement leases, local commands, MCP authorization", async () => {
