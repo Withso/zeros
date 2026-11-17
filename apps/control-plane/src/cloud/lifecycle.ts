@@ -41,6 +41,7 @@ const UPLOAD_HORIZON_MS = 25 * 60_000;
 const CREATE_KEY_MS = 23 * 60 * 60_000;
 const MAX_ATTEMPTS = 8;
 const LEASE_RENEW_MS = 12 * 60 * 60_000;
+const STAGE_ATTEMPTS = 3, STAGE_RETRY_MS = 20_000;
 const MAINTENANCE_SCAN_MS = 60_000;
 /** An idle control plane sweeps this often; lifecycle notifications and due
  * deferrals wake it sooner. */
@@ -899,9 +900,19 @@ export class CloudV2Lifecycle {
    * next wake's install then only moves the link. */
   private stageRuntime(sandboxId: string, runtime: CloudV2Runtime): void {
     void (async () => {
-      const result = await this.deps.compute.execLong(sandboxId, prepareRuntimeCommand({ sha256: runtime.sha256, url: await runtime.url() }), 300);
-      if (result.exitCode !== 0 || result.timedOut) throw new Error("runtime staging failed");
-    })().catch(() => this.deps.logger?.warn("[cloud-v2] runtime staging deferred to the next wake"));
+      // Alpha's woken VMs kept their previous runtime on every wake when one staging attempt failed (2026-11-17).
+      // Retry a few times, apart; the reason logged is a closed class, never command output.
+      let cause = "unknown";
+      for (let attempt = 1; attempt <= STAGE_ATTEMPTS; attempt++) {
+        try {
+          const result = await this.deps.compute.execLong(sandboxId, prepareRuntimeCommand({ sha256: runtime.sha256, url: await runtime.url() }), 300);
+          if (result.exitCode === 0 && !result.timedOut) return;
+          cause = result.timedOut ? "timeout" : `exit_${Number.isInteger(result.exitCode) ? result.exitCode : "other"}`;
+        } catch (error) { cause = errorCode(error); }
+        if (attempt < STAGE_ATTEMPTS) await (this.deps.sleep ?? (ms => new Promise(resolve => setTimeout(resolve, ms))))(STAGE_RETRY_MS * attempt);
+      }
+      this.deps.logger?.warn(`[cloud-v2] runtime staging deferred to the next wake (${cause}, attempts=${STAGE_ATTEMPTS})`);
+    })().catch(() => {});
   }
 
   /** A v3 image keeps only this workspace's checkout; the stock image gets the

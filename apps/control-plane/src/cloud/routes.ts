@@ -140,7 +140,7 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
     if (!deps.store.prompts) throw new Error("Cloud prompt store is required");
     app.route("/", createCloudV2PromptRoutes(deps.store.prompts, async (id, userId) => {
       await deps.store.promptContext(id, userId);
-    }));
+    }, activeWorkspace));
   }
   const json = bodyLimit({ maxSize: 16 * 1024, onError: c => c.json({ error: { code: "payload_too_large", message: "Request is too large" } }, 413) });
   const { create: createWorkspace, buildRepository, computerUnavailable } = createCloudWorkspaceOperations(deps);

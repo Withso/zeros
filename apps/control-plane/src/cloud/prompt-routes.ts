@@ -1,4 +1,4 @@
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
 import { HttpError } from "../authz.js";
@@ -9,7 +9,10 @@ import { promptStatusQuery } from "./prompt-status-query.js";
 
 /** Admission precedes durable enqueue; returning a receipt never waits for
  * the worker to connect or execute the message. */
-export function createCloudV2PromptRoutes(outbox: CloudV2PromptOutbox, authorizeSource?: (id: string, userId: string) => Promise<void>): Hono {
+/** executionActive: the request's memoized mode read (routes.ts), shared with the team-sharing middleware, so one
+ * request reads it once. */
+export function createCloudV2PromptRoutes(outbox: CloudV2PromptOutbox, authorizeSource?: (id: string, userId: string) => Promise<void>,
+  executionActive?: (c: Context, workspaceId: string) => Promise<boolean>): Hono {
   const app = new Hono(), path = "/v1/cloud-v2/workspaces/:id/prompts";
   const body = bodyLimit({ maxSize: CLOUD_V2_MAX_PROMPT_BYTES, onError: c => c.json({ error: { code: "payload_too_large" } }, 413) });
   const id = (input: string) => {
@@ -19,7 +22,9 @@ export function createCloudV2PromptRoutes(outbox: CloudV2PromptOutbox, authorize
   app.use(`${path}*`, async (c, next) => {
     c.header("Cache-Control", "no-store");
     // Stop remains possible after repository access is lost.
-    if (!c.req.path.endsWith("/stop") && !await outbox.execution?.active(id(c.req.param("id")!))) await authorizeSource?.(id(c.req.param("id")!), c.get("user").id);
+    const workspaceId = id(c.req.param("id")!);
+    if (!c.req.path.endsWith("/stop") && !await (executionActive ? executionActive(c, workspaceId) : outbox.execution?.active(workspaceId)))
+      await authorizeSource?.(workspaceId, c.get("user").id);
     await next();
   });
   app.post(path, body, async c => {
