@@ -56,7 +56,7 @@ function setup(claimed: (CloudV2LifecycleWorkspace & { attempts: number })[], op
   checkpoints?: ReturnType<typeof checkpointsFake>; remoteHead?: CloudV2LifecycleDeps["remoteHead"]; githubToken?: CloudV2LifecycleDeps["githubToken"]; uploadHorizon?: string;
   checkpointRetry?: boolean; retries?: RetryRow[]; prepareRepository?: CloudV2LifecycleDeps["prepareRepository"]; pruneEnvironments?: () => Promise<void>;
   runtimeForWorkspace?: CloudV2LifecycleDeps["runtimeForWorkspace"]; bootEnv?: CloudV2LifecycleDeps["bootEnv"]; builds?: CloudV2LifecycleDeps["builds"]; recovery?: CloudV2LifecycleDeps["recovery"];
-  authorizeWorkspace?: CloudV2LifecycleDeps["authorizeWorkspace"]; resolvePendingSource?: CloudV2LifecycleDeps["resolvePendingSource"]; previousRuntimeSha256?: string } = {}) {
+  authorizeWorkspace?: CloudV2LifecycleDeps["authorizeWorkspace"]; resolvePendingSource?: CloudV2LifecycleDeps["resolvePendingSource"]; previousRuntimeSha256?: string; logs?: true } = {}) {
   const retries = [...options.retries ?? []];
   const compute: CloudV2Compute = {
     create: vi.fn(async () => ({ sandboxId: "bx_new1" })),
@@ -117,7 +117,8 @@ function setup(claimed: (CloudV2LifecycleWorkspace & { attempts: number })[], op
   const lifecycle = new CloudV2Lifecycle({
     ...(options.recovery ? { recovery: options.recovery } : {}),
     store, compute, now: options.now ?? (() => NOW), sleep: async () => {},
-    ...(options.checkpointRetry ? { checkpointRetry: true, logger: { warn: (line: string) => logs.warn.push(line), error: (line: string) => logs.error.push(line) } } : {}),
+    ...(options.checkpointRetry ? { checkpointRetry: true } : {}),
+    ...(options.checkpointRetry || options.logs ? { logger: { warn: (line: string) => logs.warn.push(line), error: (line: string) => logs.error.push(line) } } : {}),
     ...(options.timing ? { timing: options.timing } : {}),
     ...(options.stopIdle ? { stopIdle: options.stopIdle } : {}),
     publicKeys, sealPortToken: () => ({ encrypted: true }), stopWorker,
@@ -674,6 +675,26 @@ describe("cloud v2 lifecycle", () => {
       expect(stage).not.toContain("ln -sfn");
       expect(vi.mocked(f.compute.execLong).mock.invocationCallOrder[0]).toBeGreaterThan(vi.mocked(f.compute.exec).mock.invocationCallOrder[1]!);
       expect(timing.mock.calls.map(([record]) => record)).toContainEqual(expect.objectContaining({ phase: "runtime_install", runtimeChanged: false, runtimeKept: true }));
+    });
+
+    it("retries a failed staging, then names why it gave up (closed classes only)", async () => {
+      const f = setup([workspace("starting", { boatSandboxId: "bx_test" })], { previousRuntimeSha256: PREVIOUS, bootEnv, logs: true });
+      vi.mocked(f.compute.exec).mockResolvedValueOnce({ exitCode: 0, stdout: "runtime-kept\n", timedOut: false });
+      vi.mocked(f.compute.execLong).mockResolvedValue({ exitCode: 7, stdout: "private curl detail", timedOut: false });
+      await f.lifecycle.tick();
+      await vi.waitFor(() => expect(f.logs.warn).toContainEqual("[cloud-v2] runtime staging deferred to the next wake (exit_7, attempts=3)"));
+      expect(f.compute.execLong).toHaveBeenCalledTimes(3);
+      expect(JSON.stringify(f.logs)).not.toContain("private curl detail");
+    });
+
+    it("a retried staging that succeeds logs nothing", async () => {
+      const f = setup([workspace("starting", { boatSandboxId: "bx_test" })], { previousRuntimeSha256: PREVIOUS, bootEnv, logs: true });
+      vi.mocked(f.compute.exec).mockResolvedValueOnce({ exitCode: 0, stdout: "runtime-kept\n", timedOut: false });
+      vi.mocked(f.compute.execLong).mockResolvedValueOnce({ exitCode: -1, stdout: "", timedOut: true });
+      await f.lifecycle.tick();
+      await vi.waitFor(() => expect(f.compute.execLong).toHaveBeenCalledTimes(2));
+      await new Promise(resolve => setTimeout(resolve, 10));
+      expect(f.logs.warn.filter(line => line.includes("staging"))).toEqual([]);
     });
 
     it("stages nothing when a worker already holds this start", async () => {
