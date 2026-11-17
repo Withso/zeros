@@ -17,6 +17,7 @@ export const GATE0_DEFAULT_MODELS: Readonly<Record<Agent, string>> = Object.free
 const FrameSchema = z.object({ type: z.string(), requestId: z.string().optional() }).passthrough();
 type Frame = z.infer<typeof FrameSchema>;
 const WorkspaceSchema = z.object({ id: z.string().uuid(), name: z.string(), repository: z.string(), branch: z.string(), baseBranch: z.string(), state: z.string(), boatSandboxId: z.string().nullable().optional(),
+  errorCode: z.string().nullable().optional(),
   capabilities: z.object({ promptOutbox: z.literal(1).optional() }).passthrough().optional(),
   agentCost: z.object({ totalUsd: z.number().nonnegative(), estimated: z.boolean() }).nullable().optional() });
 const PromptReceipt = z.object({ receipt: z.object({ userMessageId: z.string(), epoch: z.string() }).passthrough() });
@@ -29,14 +30,21 @@ const ProviderActivity = z.object({ notification: z.object({ update: z.object({
   sessionUpdate: z.enum(["agent_message_chunk", "agent_thought_chunk", "tool_call", "tool_call_update"]),
 }) }) });
 
-/** Deliberately excludes response bodies, socket errors, URLs and credentials. */
+/** Deliberately excludes response bodies, socket errors, URLs and credentials. `cause` is a closed class
+ * (http_503, timeout, schema:workspace.branch, state_failed:<error code>, bridge_closed_1006, reply_<type>). */
 export class Gate0Failure extends Error {
-  constructor(readonly stage: string) { super(`Cloud v2 gate0 failed: ${stage}`); }
+  readonly cause?: string;
+  constructor(readonly stage: string, cause?: string) {
+    const closed = cause === undefined ? undefined : /^[A-Za-z0-9_:.]{1,80}$/.test(cause) ? cause : "other";
+    super(`Cloud v2 gate0 failed: ${stage}${closed ? ` (${closed})` : ""}`);
+    if (closed) this.cause = closed;
+  }
 }
-function requireCheck(value: unknown, stage: string): asserts value { if (!value) throw new Gate0Failure(stage); }
+function requireCheck(value: unknown, stage: string, cause?: string): asserts value { if (!value) throw new Gate0Failure(stage, cause); }
 function parse<T>(schema: z.ZodType<T>, value: unknown, stage: string): T {
   const result = schema.safeParse(value);
-  if (!result.success) throw new Gate0Failure(stage);
+  // The failing field's path (schema keys and indexes only), never its value.
+  if (!result.success) throw new Gate0Failure(stage, `schema:${result.error.issues[0]?.path.map(String).join(".") ?? ""}`);
   return result.data;
 }
 async function until<T>(stage: string, timeoutMs: number, pollMs: number, probe: () => Promise<T | false | undefined>): Promise<T> {
@@ -44,7 +52,7 @@ async function until<T>(stage: string, timeoutMs: number, pollMs: number, probe:
   for (;;) {
     const result = await probe();
     if (result) return result;
-    if (Date.now() >= deadline) throw new Gate0Failure(stage);
+    if (Date.now() >= deadline) throw new Gate0Failure(stage, "timeout");
     await sleep(pollMs);
   }
 }
@@ -52,15 +60,18 @@ async function until<T>(stage: string, timeoutMs: number, pollMs: number, probe:
 class BridgeProbe {
   readonly frames: Frame[] = [];
   private failed = false;
+  /** Why the bridge stopped being usable: the first of a close (with its code), a socket error or an unusable frame. */
+  private failure?: string;
+  private fail(cause: string): void { this.failed = true; this.failure ??= cause; }
   private constructor(readonly socket: WebSocket, private readonly timeoutMs: number, private readonly pollMs: number) {
-    socket.on("error", () => { this.failed = true; });
-    socket.on("close", () => { this.failed = true; });
+    socket.on("error", () => { this.fail("bridge_error"); });
+    socket.on("close", code => { this.fail(`bridge_closed_${code}`); });
     socket.on("message", raw => {
       try {
         const parsed = FrameSchema.safeParse(JSON.parse(String(raw)));
-        if (!parsed.success || this.frames.length >= 4096) { this.failed = true; return; }
+        if (!parsed.success || this.frames.length >= 4096) { this.fail(parsed.success ? "bridge_frames_full" : "bridge_frame_invalid"); return; }
         this.frames.push(parsed.data);
-      } catch { this.failed = true; }
+      } catch { this.fail("bridge_frame_invalid"); }
     });
   }
   static async open(ticket: { url: string; protocols: string[] }, timeoutMs: number, pollMs: number): Promise<BridgeProbe> {
@@ -74,7 +85,7 @@ class BridgeProbe {
   }
   send(type: string, fields: Record<string, unknown> = {}): string {
     const id = randomUUID();
-    if (this.socket.readyState !== WebSocket.OPEN) throw new Gate0Failure("bridge_disconnected");
+    if (this.socket.readyState !== WebSocket.OPEN) throw new Gate0Failure("bridge_disconnected", this.failure);
     this.socket.send(JSON.stringify({ id, source: "browser", timestamp: Date.now(), type, ...fields }));
     return id;
   }
@@ -82,7 +93,7 @@ class BridgeProbe {
     return until(stage, this.timeoutMs, this.pollMs, async () => {
       const found = this.frames.find(predicate);
       if (found) return found;
-      requireCheck(!this.failed, stage);
+      requireCheck(!this.failed, stage, this.failure);
       return false;
     });
   }
@@ -92,7 +103,7 @@ class BridgeProbe {
   }
   async op(op: string, params: Record<string, unknown> = {}): Promise<unknown> {
     const reply = await this.request("WORKSPACE_REQUEST", { op, params }, op);
-    requireCheck(reply.type === "WORKSPACE_RESPONSE", op);
+    requireCheck(reply.type === "WORKSPACE_RESPONSE", op, `reply_${reply.type}`);
     return reply.result;
   }
   close(): void { this.socket.terminate(); }
@@ -176,9 +187,9 @@ export async function runCloudV2Gate0(options: CloudV2Gate0Options): Promise<Clo
           ? { "idempotency-key": canary?.claims.createKey ?? runId, ...(canary ? { [RUNTIME_CANARY_HEADER]: canary.token } : {}) } : {}) },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
       if (response.status === 404 && allowMissing) { await response.body?.cancel(); return null; }
-      if (!response.ok) { await response.body?.cancel(); throw new Gate0Failure(stage); }
+      if (!response.ok) { await response.body?.cancel(); throw new Gate0Failure(stage, `http_${response.status}`); }
       return await response.json();
-    } catch { throw new Gate0Failure(stage); }
+    } catch (error) { throw error instanceof Gate0Failure ? error : new Gate0Failure(stage, "network"); }
   };
   const installed = parse(z.object({ repositories: z.array(z.object({ repository: z.string() })).nullable() }),
     await request(`/v1/cloud-v2/organizations/${options.organizationId}/computer/repositories`, "installed_repositories"), "installed_repositories");
@@ -200,7 +211,7 @@ export async function runCloudV2Gate0(options: CloudV2Gate0Options): Promise<Clo
   const current = async (stage: string) => parse(WorkspaceReply, await request(`${base}/${workspace!.id}`, stage), stage).workspace;
   const waitState = async (state: string) => until(state, timeoutMs, pollMs, async () => {
     const row = await current(state);
-    requireCheck(row.state !== "failed" && row.state !== "deleting", state);
+    requireCheck(row.state !== "failed" && row.state !== "deleting", state, row.state === "failed" ? `state_failed:${row.errorCode ?? "none"}` : "state_deleting");
     return row.state === state ? row : false;
   });
   const connect = async () => {

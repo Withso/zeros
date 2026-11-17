@@ -48,6 +48,7 @@ describe("Alpha probe target", () => {
     expect(alphaProbeReport({ ...base, dollarsPerHour: 0.4, result: { workspaceId: "w", agents: ["claude"], deleted: true, metrics: [], vmRunningMs: 90_000, turns: 2 } }).vm)
       .toEqual({ runningSeconds: 90, dollarsPerHour: 0.4, estimatedDollars: 0.01 });
     expect(alphaProbeReport({ ...base, failure: "agent_claude_turn" })).toMatchObject({ outcome: "failed", failure: "agent_claude_turn", metrics: base.metrics });
+    expect(alphaProbeReport({ ...base, failure: "history_mirror", failureCause: "bridge_closed_1006" })).toMatchObject({ failure: "history_mirror", failureCause: "bridge_closed_1006" });
     expect(JSON.stringify(passed)).not.toContain("\"w\"");
   });
 });

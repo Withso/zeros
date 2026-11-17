@@ -45,7 +45,7 @@ export function alphaProbeAgents(requested: string | undefined, connections: { p
 export function alphaProbeReport(input: {
   identity: { sourceSha: string; workerSha256: string }; organization: string; agents: readonly Agent[]; skipped: readonly Agent[];
   metrics: Gate0Metric[]; workerTimings: Gate0Timing[]; startedAt: string; dollarsPerHour?: number;
-  result?: CloudV2Gate0Result; failure?: string;
+  result?: CloudV2Gate0Result; failure?: string; failureCause?: string;
 }) {
   const vm = input.result ? (() => {
     const runningSeconds = Math.round(input.result.vmRunningMs / 1000);
@@ -55,7 +55,7 @@ export function alphaProbeReport(input: {
   return {
     version: 1, target: "alpha", startedAt: input.startedAt, ...input.identity, organization: input.organization,
     agents: input.agents, skipped: input.skipped, outcome: input.failure ? "failed" : "passed",
-    ...(input.failure ? { failure: input.failure } : { deleted: input.result?.deleted ?? false, turns: input.result?.turns ?? 0, vm,
+    ...(input.failure ? { failure: input.failure, ...(input.failureCause ? { failureCause: input.failureCause } : {}) } : { deleted: input.result?.deleted ?? false, turns: input.result?.turns ?? 0, vm,
       // The control plane's own provider cost for this workspace; null when it reported none.
       agentCost: input.result?.agentCost ?? null }),
     metrics: input.metrics, workerTimings: input.workerTimings,
@@ -129,7 +129,8 @@ export async function runAlphaProbe(values: { profile?: string; "agent-env"?: st
         log: message => console.log(`[alpha-probe] ${message}`) });
       report = alphaProbeReport({ ...base, result });
     } catch (error) {
-      report = alphaProbeReport({ ...base, failure: error instanceof Gate0Failure ? error.stage : "unexpected_failure" });
+      report = alphaProbeReport({ ...base, failure: error instanceof Gate0Failure ? error.stage : "unexpected_failure",
+        ...(error instanceof Gate0Failure && error.cause ? { failureCause: error.cause } : {}) });
       throw error;
     } finally {
       if (report) {

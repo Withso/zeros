@@ -49,9 +49,7 @@ it("R1: the FIRST negotiated configuration already gives the prompt inbox the 60
 });
 
 it("R1 N−1: an older control plane that refuses the 60 s pull (400) gets 25 s pulls for a bounded time, with no other downgrade", async () => {
-  const { PromptInbox, PUSH_POLL_FALLBACK_MS, hintGrace } = await import("../prompt-inbox");
-  // This fake's long poll never wakes on its own: each hint must abort it.
-  hintGrace.ms = 1; cleanups.push(async () => { hintGrace.ms = 2_000; });
+  const { PromptInbox, PUSH_POLL_FALLBACK_MS } = await import("../prompt-inbox");
   const waits: number[] = [];
   let refuse = true;
   const store = { onChange: () => () => {}, outboxEntries: () => [] } as never;
@@ -111,36 +109,24 @@ it("R1 live gate: the first configuration completes within seconds while a negot
   expect(Date.now() - again).toBeLessThan(5_000);
 }, 15_000);
 
-it("a relay hint lets a waiting long poll answer (its server wait wakes on the same notification); it aborts only one that stays silent", async () => {
-  const { PromptInbox, hintGrace } = await import("../prompt-inbox");
-  hintGrace.ms = 50; cleanups.push(async () => { hintGrace.ms = 2_000; });
-  const waits: number[] = [], aborted: number[] = [];
-  let answer: (() => void) | undefined, wakes = true;
+it("a relay hint pulls at once, even while a long poll waits: with the relay up that poll is parked on the VM, so only the hint can end it", async () => {
+  const { PromptInbox } = await import("../prompt-inbox");
+  const waits: Array<{ waitMs: number; at: number }> = [];
   const store = { onChange: () => () => {}, outboxEntries: () => [] } as never;
   const agents = { setOutboxDispatch: () => {} } as never;
+  // Like HybridTransport.promptRequest while the relay is connected: a long poll never reaches the control plane.
   const inbox = new PromptInbox(store, agents, async (op, body, signal) => {
     if (op !== "pull") return {};
-    const waitMs = (body as { waitMs: number }).waitMs; waits.push(waitMs);
+    const waitMs = (body as { waitMs: number }).waitMs; waits.push({ waitMs, at: Date.now() });
     if (waitMs === 0) return { prompts: [], stops: [] };
-    return new Promise((resolve, reject) => {
-      answer = () => resolve({ prompts: [], stops: [] });
-      signal?.addEventListener("abort", () => { aborted.push(waits.length); reject(new DOMException("Aborted", "AbortError")); }, { once: true });
-    });
+    return new Promise((_, reject) => signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true }));
   });
   inbox.pushSignals = true;
   inbox.start();
   cleanups.push(() => inbox.dispose());
-  await vi.waitFor(() => expect(waits).toEqual([0, 60_000]));
-  // The server's wait wakes at once: no abort, and no extra short pull before the next long poll.
+  await vi.waitFor(() => expect(waits.map(w => w.waitMs)).toEqual([0, 60_000]));
+  const hinted = Date.now();
   inbox.hint();
-  if (wakes) answer!();
-  await vi.waitFor(() => expect(waits).toEqual([0, 60_000, 60_000]));
-  await new Promise(resolve => setTimeout(resolve, 120));
-  expect(aborted).toEqual([]);
-  expect(waits).toEqual([0, 60_000, 60_000]);
-  // A poll that stays silent past the grace is aborted, and the inbox pulls at once.
-  wakes = false;
-  inbox.hint();
-  await vi.waitFor(() => expect(waits.slice(3)).toEqual([0, 60_000]));
-  expect(aborted).toEqual([3]);
+  await vi.waitFor(() => expect(waits.map(w => w.waitMs).slice(2, 3)).toEqual([0]), { timeout: 1_000 });
+  expect(waits[2]!.at - hinted).toBeLessThan(300);
 });
