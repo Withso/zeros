@@ -39,12 +39,16 @@ class HttpFailure extends Error {
     readonly loginRequiredFrom?: "self" | "creator") { super("Worker control request failed."); }
 }
 /** settled: answered (or abandoned by its caller); a later delivery of the same event is harmless (every event is idempotent). */
-type QueuedTurnEvent = { event: CloudV2TurnEvent; settled: boolean; resolve(value: Record<string, unknown>): void; reject(error: unknown): void };
+type QueuedTurnEvent = { event: CloudV2TurnEvent; settled: boolean; resolve(value: Record<string, unknown>): void; reject(error: unknown): void;
+  /** Removes the caller's abort listener once settled (the inbox passes one long-lived signal for every outcome). */
+  release?: () => void };
 /** A turn's outcome and its retirement arrive within milliseconds; one short window batches them (Conductor: 500 ms). */
 const TURN_EVENTS_COALESCE_MS = 50;
+/** How long events queued behind a batch already on the wire wait for it before they take their own routes. */
+const TURN_EVENTS_WAIT_MS = 500;
 function settleEvent(queued: QueuedTurnEvent, value: Record<string, unknown> | undefined, error?: unknown): void {
   if (queued.settled) return;
-  queued.settled = true;
+  queued.settled = true; queued.release?.();
   if (error === undefined) queued.resolve(value!); else queued.reject(error);
 }
 /** An acknowledgement without one result per event: a control plane that ignored them. */
@@ -337,11 +341,12 @@ export class HybridTransport implements Transport {
       const queued: QueuedTurnEvent = { event, settled: false, resolve, reject };
       if (signal?.aborted) { reject(new Error("Worker request cancelled.")); return; }
       // The caller stops waiting; the event may still be delivered, which is harmless.
-      signal?.addEventListener("abort", () => {
+      const abort = () => {
         const index = this.queuedEvents.indexOf(queued);
         if (index >= 0) this.queuedEvents.splice(index, 1);
         settleEvent(queued, undefined, new Error("Worker request cancelled."));
-      }, { once: true });
+      };
+      if (signal) { signal.addEventListener("abort", abort, { once: true }); queued.release = () => signal.removeEventListener("abort", abort); }
       this.queuedEvents.push(queued);
       this.scheduleEvents();
     });
@@ -354,6 +359,15 @@ export class HybridTransport implements Transport {
       this.eventsTimer = undefined;
       if (!this.queuedEvents.length) return;
       if (this.pendingHistory && !this.historyRequestActive) { this.detachEvents(this.queuedEvents.splice(0)); return; }
+      // A batch on the wire: these follow it, but not for longer than a short bound (its own timeout is 10 s).
+      if (this.historyRequestActive) {
+        const waiting = [...this.queuedEvents];
+        setTimeout(() => {
+          const late = waiting.filter(queued => !queued.settled && this.queuedEvents.includes(queued));
+          for (const queued of late) this.queuedEvents.splice(this.queuedEvents.indexOf(queued), 1);
+          this.detachEvents(late);
+        }, TURN_EVENTS_WAIT_MS).unref?.();
+      }
       this.historyFlight = this.historyFlight.catch(() => false).then(async () => {
         if (this.pendingHistory) { this.detachEvents(this.queuedEvents.splice(0)); return false; }
         if (!this.queuedEvents.length) return true;
@@ -380,9 +394,9 @@ export class HybridTransport implements Transport {
     const open = events.filter(queued => !queued.settled);
     if (open.length) void this.sendEventsAlone(open);
   }
+  /** Concurrently, as each had its own request before turn events. */
   private async sendEventsAlone(events: readonly QueuedTurnEvent[]): Promise<void> {
-    for (const queued of events) {
-      if (queued.settled) continue;
+    await Promise.all(events.filter(queued => !queued.settled).map(async queued => {
       try {
         settleEvent(queued, queued.event.t === "outcome" ? await this.request("prompts/outcome", queued.event.outcome)
           : await this.request(`execution-leases/${queued.event.contextId}/retired`, queued.event.retired));
@@ -390,7 +404,7 @@ export class HybridTransport implements Transport {
         if (error instanceof HttpFailure && error.status === 401) this.failed(error);
         settleEvent(queued, undefined, error);
       }
-    }
+    }));
   }
 
   async notifyUser(request: NotifyUserWorkerRequest, signal?: AbortSignal): Promise<NotifyUserDelivery> {
@@ -553,20 +567,26 @@ export class HybridTransport implements Transport {
           return;
         } catch (error) {
           if (error instanceof HttpFailure && error.status === 404) {
-            // A control plane rolled back past history-batch-v1: no more batches (or batched events) this boot.
-            this.historyBatchRefused = true; break;
+            // A control plane rolled back past history-batch-v1: no more batches (or batched events) this boot, and
+            // the events must not wait for the per-frame fallback below to succeed.
+            this.historyBatchRefused = true;
+            pending.events = [];
+            this.detachEvents([...events, ...this.queuedEvents.splice(0)]);
+            break;
           }
           if (error instanceof HttpFailure && error.status === 401) {
-            for (const queued of events) settleEvent(queued, undefined, error);
+            for (const queued of [...events, ...this.queuedEvents.splice(0)]) settleEvent(queued, undefined, error);
             throw error;
           }
-          if (!events.length) throw error;
-          // The events leave this batch whatever went wrong: they must never wait for it to succeed.
+          // The events leave this batch whatever went wrong, with any left beyond its cap: they never wait for it.
+          const rest = this.queuedEvents.splice(0);
+          if (!events.length) { this.detachEvents(rest); throw error; }
           pending.events = [];
-          this.detachEvents(events);
-          const refused = error instanceof EventsRefused || error instanceof HttpFailure && error.status >= 400 && error.status < 500;
-          // An N-1 control plane (strict schema, 400) or a withdrawn offer: the frames again alone, no more events.
-          if (refused) { this.eventsRefused = true; this.detachEvents(this.queuedEvents.splice(0)); continue; }
+          this.detachEvents([...events, ...rest]);
+          // An N-1 control plane (its strict schema answers 400) or one that ignored the events: frames again alone, no
+          // more events this boot. Another refusal (a 409 gap, a 429) keeps events on.
+          const refused = error instanceof EventsRefused || error instanceof HttpFailure && error.status === 400;
+          if (refused) { this.eventsRefused = true; continue; }
           if (!pending.frames.length) { this.pendingHistory = undefined; return; }
           throw error;
         }

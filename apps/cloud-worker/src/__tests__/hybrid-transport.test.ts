@@ -1,3 +1,4 @@
+import { getEventListeners } from "node:events";
 import { generateKeyPairSync, randomUUID, sign } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -579,6 +580,123 @@ it("turn-events-v1: the caller's abort and dispose settle queued and in-flight e
   await expect(Promise.race([waiting.then(() => "resolved", () => "rejected"), new Promise(resolve => setTimeout(() => resolve("pending"), 500))])).resolves.not.toBe("pending");
   const unauthorized = await fixture({ batch: true, batchStatus: () => 401 }); unauthorized.transport.setTurnEvents(true);
   await expect(unauthorized.transport.promptRequest("outcome", outcome())).rejects.toMatchObject({ status: 401 });
+});
+
+const settledWithin = (promise: Promise<unknown>, ms = 600) => Promise.race([promise.then(() => "resolved", () => "rejected"), new Promise(resolve => setTimeout(() => resolve("pending"), ms))]);
+
+it("turn-events-v1 (review 2, A): a 404 batch carrying events, then a failing per-frame history: the event must not wait", async () => {
+  const f = await fixture(); f.transport.setTurnEvents(true); f.failHistory(true);
+  const waiting = f.transport.contextRequest(`execution-leases/${CONTEXT}/retired`, retirement);
+  await new Promise(resolve => setTimeout(resolve, 60));
+  void f.transport.sendHistoryBatch([{ t: "history", chats: [{ id: "a" }] }]);
+  const state = await settledWithin(waiting);
+  expect(state).not.toBe("pending");
+});
+
+it("turn-events-v1 (review 2, A2): same, event queued in the same tick as the frames", async () => {
+  const f = await fixture(); f.transport.setTurnEvents(true); f.failHistory(true);
+  const waiting = f.transport.contextRequest(`execution-leases/${CONTEXT}/retired`, retirement);
+  const sent = f.transport.sendHistoryBatch([{ t: "history", chats: [{ id: "a" }] }]);
+  expect(await sent).toBe(false);
+  const state = await settledWithin(waiting);
+  expect(state).not.toBe("pending");
+});
+
+it("turn-events-v1 (review 2, B): more than 50 events behind a failing events-only batch all settle", async () => {
+  const f = await fixture({ batch: true, batchStatus: () => 503 }); f.transport.setTurnEvents(true);
+  const all = Array.from({ length: 51 }, () => f.transport.promptRequest("outcome", outcome()));
+  const states = await Promise.all(all.map(p => settledWithin(p, 1500)));
+  expect(states.filter(s => s === "pending")).toHaveLength(0);
+});
+
+it("turn-events-v1 (review 2, B2): more than 50 events, batch with frames failing 503", async () => {
+  const f = await fixture({ batch: true, batchStatus: () => 503 }); f.transport.setTurnEvents(true);
+  const all = Array.from({ length: 51 }, () => f.transport.promptRequest("outcome", outcome()));
+  void f.transport.sendHistoryBatch([{ t: "history", chats: [{ id: "a" }] }]);
+  const states = await Promise.all(all.map(p => settledWithin(p, 1500)));
+  expect(states.filter(s => s === "pending")).toHaveLength(0);
+});
+
+it("turn-events-v1 (review 2, B3): more than 50 events, batch-level 401", async () => {
+  const f = await fixture({ batch: true, batchStatus: () => 401 }); f.transport.setTurnEvents(true);
+  const all = Array.from({ length: 51 }, () => f.transport.promptRequest("outcome", outcome()));
+  const states = await Promise.all(all.map(p => settledWithin(p, 1500)));
+  expect(states.filter(s => s === "pending")).toHaveLength(0);
+});
+
+it("turn-events-v1 (review 2, C): a settled event leaves no abort listener on the caller's long-lived signal", async () => {
+  const f = await fixture({ batch: true }); f.transport.setTurnEvents(true);
+  const lifetime = new AbortController();
+  for (let i = 0; i < 12; i++) await f.transport.promptRequest("outcome", outcome(), lifetime.signal);
+  expect(getEventListeners(lifetime.signal, "abort")).toHaveLength(0);
+});
+
+it("turn-events-v1 (review 2, D): detached events go one after another: a hung outcome route delays the retirement", async () => {
+  const f = await fixture({ batch: true, batchStatus: () => 503 }); f.transport.setTurnEvents(true);
+  const original = vi.mocked(f.fetcher).getMockImplementation()!;
+  vi.mocked(f.fetcher).mockImplementation((url, init) => {
+    if (String(url).endsWith("/prompts/outcome")) { f.requests.push({ path: "outcome", body: null, authorized: true });
+      return new Promise((_r, reject) => init?.signal?.addEventListener("abort", () => reject(new Error("timeout")), { once: true })); }
+    return original(url, init);
+  });
+  void f.transport.promptRequest("outcome", outcome()).catch(() => {});
+  const retired = f.transport.contextRequest(`execution-leases/${CONTEXT}/retired`, retirement);
+  const state = await settledWithin(retired, 1000);
+  expect(state).not.toBe("pending");
+});
+
+it("turn-events-v1 (review 2, E): events wait behind a hanging (not yet failed) batch on the wire", async () => {
+  const f = await fixture({ batch: true }); f.transport.setTurnEvents(true);
+  const original = vi.mocked(f.fetcher).getMockImplementation()!;
+  let hang = true;
+  vi.mocked(f.fetcher).mockImplementation((url, init) => {
+    if (hang && String(url).endsWith("/history/batch")) { f.requests.push({ path: "batch", body: JSON.parse(String(init!.body)), authorized: true });
+      return new Promise((_r, reject) => init?.signal?.addEventListener("abort", () => reject(new Error("timeout")), { once: true })); }
+    return original(url, init);
+  });
+  void f.transport.sendHistoryBatch([{ t: "history", chats: [{ id: "a" }] }]);
+  await new Promise(resolve => setTimeout(resolve, 20));
+  const sent = f.transport.promptRequest("outcome", outcome());
+  const state = await settledWithin(sent, 1000);
+  expect(state).not.toBe("pending");
+});
+
+it("turn-events-v1 (review 2, F): a persistent 400 on every batch: request counts stay bounded by the backoff, events are sent once", async () => {
+  const f = await fixture({ batch: true, batchStatus: () => 400 }); f.transport.setTurnEvents(true);
+  const sent = f.transport.promptRequest("outcome", outcome());
+  const first = f.transport.sendHistoryBatch([{ t: "history", chats: [{ id: "a" }] }]);
+  expect(await first).toBe(false);
+  expect(await sent).toEqual({ state: "completed" });
+  await new Promise(resolve => setTimeout(resolve, 400));
+  const batches = f.requests.filter(r => r.path === "batch");
+  expect(batches.filter(r => r.body.events)).toHaveLength(1);
+});
+
+it("turn-events-v1 (review 2, G): an acknowledgement without event results (frames committed): frames replay at the same sequence, next history is +1", async () => {
+  const f = await fixture({ batch: true }); f.transport.setTurnEvents(true);
+  const original = vi.mocked(f.fetcher).getMockImplementation()!;
+  vi.mocked(f.fetcher).mockImplementation(async (url, init) => {
+    if (String(url).endsWith("/history/batch")) { const body = JSON.parse(String(init!.body)); f.requests.push({ path: "batch", body, authorized: true });
+      return Response.json({ sequence: body.sequence + body.frames.length - 1 }); }
+    return original(url, init);
+  });
+  const sent = f.transport.promptRequest("outcome", outcome());
+  expect(await f.transport.sendHistoryBatch([{ t: "history", chats: [{ id: "a" }] }, { t: "history", chats: [{ id: "b" }] }])).toBe(true);
+  expect(await sent).toEqual({ state: "completed" });
+  expect(await f.transport.sendHistoryBatch([{ t: "history", chats: [{ id: "c" }] }])).toBe(true);
+  const batches = f.requests.filter(r => r.path === "batch").map(r => ({ s: r.body.sequence, n: r.body.frames.length, e: r.body.events?.length ?? 0 }));
+  expect(batches).toEqual([{ s: 1, n: 2, e: 1 }, { s: 1, n: 2, e: 0 }, { s: 3, n: 1, e: 0 }]);
+});
+
+it("turn-events-v1 (review 2, H): a lost reply for frames+events: frames replay alone at the same sequence, events once through their routes", async () => {
+  const f = await fixture({ batch: true }); f.transport.setTurnEvents(true); f.loseReply();
+  const sent = f.transport.promptRequest("outcome", outcome());
+  expect(await f.transport.sendHistoryBatch([{ t: "history", chats: [{ id: "a" }] }])).toBe(false);
+  expect(await sent).toEqual({ state: "completed" });
+  await expect.poll(() => f.requests.filter(r => r.path === "batch").length).toBe(2);
+  expect(await f.transport.sendHistoryBatch([{ t: "history", chats: [{ id: "c" }] }])).toBe(true);
+  const batches = f.requests.filter(r => r.path === "batch").map(r => ({ s: r.body.sequence, n: r.body.frames.length, e: r.body.events?.length ?? 0 }));
+  expect(batches).toEqual([{ s: 1, n: 1, e: 1 }, { s: 1, n: 1, e: 0 }, { s: 2, n: 1, e: 0 }]);
 });
 
 it("turn-events-v1: off (not offered) or refused by the control plane (404), each event goes through its own route", async () => {

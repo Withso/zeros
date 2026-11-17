@@ -1194,10 +1194,12 @@ own savepoint. A refused event is answered as its own route would answer it and
 rolls back only itself. Events never wait behind a batch that fails. Except
 for a 401, which reaches their callers, any failure (a lost reply, a 5xx, a
 stuck history sequence) detaches the events and sends each through its own
-route at once; every event is idempotent, so a duplicate is harmless. A 4xx for
-a batch carrying events (an N-1 control plane's strict schema, a withdrawn
-offer) also turns events off for the boot and resends the frames alone. The
-caller's abort and worker shutdown settle pending events. A turn's last rows,
+route at once, concurrently; every event is idempotent, so a duplicate is
+harmless. Events queued behind a batch already on the wire wait for it at most
+500 ms. A 400 for a batch carrying events (an N-1 control plane's strict
+schema, a withdrawn offer), or a reply without per-event results, also turns
+events off for the boot and resends the frames alone. The caller's abort and
+worker shutdown settle pending events. A turn's last rows,
 its outcome and its retirement cost one transaction when they share a batch.
 A control plane that refuses batches (404), or a configuration without the
 offer, sends each event through its own route again.
