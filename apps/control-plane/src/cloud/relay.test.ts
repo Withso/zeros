@@ -170,6 +170,16 @@ describe("cloud v2 relay", () => {
     } finally { await new Promise<void>(resolve => refused.close(() => resolve())); }
   });
 
+  it("logs each app bridge close with its code and a closed reason, never a free-text one", async () => {
+    deps.logger = { warn: vi.fn() };
+    await worker();
+    const client = await app();
+    client.close(4000, "synthetic-private-canary");
+    await vi.waitFor(() => expect(deps.logger!.warn).toHaveBeenCalledWith("[cloud-v2] client closed",
+      expect.objectContaining({ workspaceId: workspaceId.slice(0, 8), code: 4000, reason: "other", heartbeat: false })));
+    expect(JSON.stringify(vi.mocked(deps.logger.warn).mock.calls)).not.toContain("synthetic-private");
+  });
+
   it("logs a carrier protocol refusal without treating it as a gateway failure or retaining its reason", async () => {
     deps.logger = { warn: vi.fn() };
     deps.liveRecovery = { failed: vi.fn(), connected: vi.fn(async () => {}), exhausted: vi.fn(async () => {}) };

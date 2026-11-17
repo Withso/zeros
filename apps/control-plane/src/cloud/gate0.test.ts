@@ -410,6 +410,25 @@ describe("cloud v2 gate0 through a fake HTTP control plane and relay", () => {
     expect(f.logs.join("\n")).not.toContain("provider-secret");
   });
 
+  it("names a failure's closed cause: the workspace's error code, an HTTP status, a schema path", async () => {
+    const reshape = (change: (workspace: Record<string, unknown>) => Record<string, unknown> | number): typeof fetch => async (input, init) => {
+      const response = await fetch(input, init);
+      if ((init?.method ?? "GET") !== "GET" || !/^\/v1\/cloud-v2\/workspaces\/[0-9a-f-]{36}$/.test(new URL(String(input)).pathname)) return response;
+      const body = await response.json() as { workspace: Record<string, unknown> }, changed = change(body.workspace);
+      return typeof changed === "number" ? new Response("{}", { status: changed }) : Response.json({ workspace: changed });
+    };
+    for (const [change, cause] of [
+      [(w: Record<string, unknown>) => w.state === "running" ? { ...w, state: "failed", errorCode: "worker_boot_timeout" } : w, "state_failed:worker_boot_timeout"],
+      [(w: Record<string, unknown>) => w.state === "running" ? 503 : w, "http_503"],
+      [(w: Record<string, unknown>) => w.state === "running" ? { ...w, branch: null } : w, "schema:workspace.branch"],
+    ] as const) {
+      const f = await fixture();
+      const failure = await runCloudV2Gate0({ ...f.options, fetch: reshape(change) }).catch(error => error);
+      expect([failure.stage, failure.cause]).toEqual(["running", cause]);
+      expect(failure.message).toBe(`Cloud v2 gate0 failed: running (${cause})`);
+    }
+  });
+
   it("recovers an ambiguous create response by its unique name for cleanup without retrying create", async () => {
     const f = await fixture();
     const lostResponse: typeof fetch = async (input, init) => {

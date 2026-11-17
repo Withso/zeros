@@ -8,7 +8,6 @@ import { CloudWorker } from "../worker";
 import type { Agents } from "../agents";
 import type { CheckoutRefresh } from "../workspace/checkout";
 import { SessionStore, type SessionData } from "../sessions/session-store";
-import { hintGrace } from "../prompt-inbox";
 import { TurnService } from "../workspace/turns";
 import { CLIENT_A, FakeDriver, FakeRelay, WORKSPACE_ID, WORKSPACE_KEY, browserFrame, config } from "./worker-fixtures";
 
@@ -77,7 +76,6 @@ async function persisted(directory: string) {
   return Promise.all((await readdir(folder)).filter(file => file.endsWith(".json")).map(async file => JSON.parse(await readFile(join(folder, file), "utf8"))));
 }
 const until = (read: () => unknown) => expect.poll(read, { timeout: 1500, interval: 5 });
-afterEach(() => { hintGrace.ms = 2_000; });
 afterEach(async () => {
   await Promise.all(workers.splice(0).map(worker => worker.dispose()));
   await Promise.all(directories.splice(0).map(directory => rm(directory, { recursive: true, force: true })));
@@ -329,8 +327,6 @@ it.each(["open", "prompt"] as const)("keeps a failed %s outcome unreported until
     if (stage === "prompt") { await until(() => driver.prompts.length).toBe(1); driver.fail(); }
     await until(() => savingNotice).toBe(true);
     const pulls = relay.calls.filter(call => call.op === "pull").length;
-    // This fake's long poll never wakes on its own: the hint must abort it.
-    hintGrace.ms = 1;
     await relay.receive({ t: "prompts" });
     // Join the reporting loop while the actual notice write is held. An
     // unrelated hint must not let the failed receipt overtake that write.

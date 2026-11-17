@@ -112,6 +112,8 @@ export class CloudV2Relay {
   private securityRevision = 0;
   private readonly unsubscribeSecurity: (() => void) | undefined;
   private readonly alive = new WeakSet<WebSocket>();
+  /** Sockets the heartbeat ended for a missed pong (their close is a 1006 with no reason). */
+  private readonly unanswered = new WeakSet<WebSocket>();
   private closed = false;
   private promptNotificationsHealthy = false;
 
@@ -344,7 +346,7 @@ export class CloudV2Relay {
     void this.deps.securityEvents?.start().catch(() => {});
     for (const room of this.rooms.values()) for (const socket of [room.worker, ...[...room.clients.values()].map(client => client.ws)]) {
       if (!socket || socket.readyState !== WebSocket.OPEN) continue;
-      if (!this.alive.has(socket)) { socket.terminate(); continue; }
+      if (!this.alive.has(socket)) { this.unanswered.add(socket); socket.terminate(); continue; }
       this.alive.delete(socket); socket.ping();
     }
     if (this.deps.runtimeAdmission) for (const room of this.rooms.values()) for (const [id, { ws }] of room.clients) {
@@ -754,7 +756,7 @@ export class CloudV2Relay {
     const room = this.room(workspace, epoch);
     if (!room) { ws.close(1013, "workspace_verification_unavailable"); return; }
     if (grant?.execution) room.acting = true;
-    const clientId = randomUUID(); this.watch(ws);
+    const clientId = randomUUID(), openedAt = Date.now(); this.watch(ws);
     let inboundFrames = 0, inboundBytes = 0;
     room.admitting.set(clientId, ws);
     let inbound = this.authorized(room, sessionId, true).then(async allowed => {
@@ -805,7 +807,14 @@ export class CloudV2Relay {
       inbound = inbound.then(() => ws.readyState === WebSocket.OPEN ? this.fromApp(room, clientId, ws, data) : undefined)
         .catch(() => ws.close(1011, "relay_unavailable")).finally(() => { inboundFrames--; inboundBytes -= bytes; });
     });
-    ws.on("close", () => { this.detachApp(room, clientId); });
+    ws.on("close", (code, reason) => {
+      // Why app bridges end (load and probe runs lose them mid-turn): closed reasons only, never free text.
+      const text = reason.toString();
+      this.deps.logger?.warn("[cloud-v2] client closed", { workspaceId: room.workspace.id.slice(0, 8), code,
+        reason: /^[a-z_]{1,48}$/.test(text) ? text : text ? "other" : "", heartbeat: this.unanswered.has(ws),
+        attached: room.clients.has(clientId), workerReady: room.ready, openMs: Date.now() - openedAt });
+      this.detachApp(room, clientId);
+    });
   }
   private async openClient(room: Room, worker: WebSocket, clientId: string): Promise<boolean> {
     const client = room.clients.get(clientId);

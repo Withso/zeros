@@ -1188,9 +1188,9 @@ The prompt channel wakes the worker's long poll and sends a relay hint. Each
 wake costs an empty pull and a new long poll when nothing is waiting. A
 terminal outcome therefore notifies only when a message waits behind the turn in
 that chat. A context retirement does not notify, because pull offers depend on
-prompt states only. A relay hint that arrives while a long poll waits gives that
-poll two seconds to answer, since its server wait wakes on the same
-notification. The worker aborts and pulls again only when the poll stays silent.
+prompt states only. While the relay is connected the worker's long poll is
+parked on the VM and never reaches the control plane, so the relay's hint is
+its only wake: a hint aborts the parked poll and pulls at once.
 
 Workers advertising `history-digest-deletions-v1` receive separate live-chat
 digests and explicit deleted chat IDs, capped at 4,096 entries in total. The
