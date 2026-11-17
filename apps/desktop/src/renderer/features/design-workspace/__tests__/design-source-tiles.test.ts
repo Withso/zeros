@@ -16,8 +16,41 @@ let browser: Browser;
 beforeAll(async () => { browser = await chromium.launch(); });
 afterAll(async () => { await browser?.close(); });
 
+/** Chromium on a loaded CI runner sometimes answers Page.captureScreenshot with "Unable to capture screenshot" before
+ * any pixels exist (Release alpha 44033191051's Preflight, #1066's shard 2; #1033 did the same for the vector suite).
+ * Retry only that protocol error, after a frame; every other error and every pixel comparison still fails. */
+function retryingScreenshots<T extends Pick<Page, "screenshot" | "evaluate">>(page: T, attempts = 3): T {
+  const capture = page.screenshot.bind(page);
+  page.screenshot = (async (...args: Parameters<Page["screenshot"]>) => {
+    for (let attempt = 1; ; attempt++) {
+      try { return await capture(...args); }
+      catch (error) {
+        if (attempt >= attempts || !String((error as Error)?.message).includes("Unable to capture screenshot")) throw error;
+        await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => resolve(null))));
+      }
+    }
+  }) as Page["screenshot"];
+  return page;
+}
+
+it("retries only Chromium's transient screenshot failure", async () => {
+  const transient = new Error("page.screenshot: Protocol error (Page.captureScreenshot): Unable to capture screenshot");
+  let calls = 0;
+  const flaky = retryingScreenshots({ screenshot: async () => { if (++calls < 3) throw transient; return Buffer.from("png"); }, evaluate: async () => null } as never as Page);
+  expect(String(await flaky.screenshot())).toBe("png");
+  calls = 0;
+  const always = retryingScreenshots({ screenshot: async () => { calls++; throw transient; }, evaluate: async () => null } as never as Page);
+  await expect(always.screenshot()).rejects.toBe(transient);
+  expect(calls).toBe(3);
+  calls = 0;
+  const other = new Error("page.screenshot: Target closed");
+  const broken = retryingScreenshots({ screenshot: async () => { calls++; throw other; }, evaluate: async () => null } as never as Page);
+  await expect(broken.screenshot()).rejects.toBe(other);
+  expect(calls).toBe(1);
+});
+
 async function open(): Promise<Page> {
-  const page = await browser.newPage({ viewport: { width: 480, height: 360 }, deviceScaleFactor: 2 });
+  const page = retryingScreenshots(await browser.newPage({ viewport: { width: 480, height: 360 }, deviceScaleFactor: 2 }));
   await page.setContent(`<style>body{margin:0;background:white} article{position:absolute;background:var(--fixture-background)} img{position:absolute;inset:0;width:100%;height:100%;object-fit:none;object-position:left top}</style>
     <div id="viewport" data-design-canvas-viewport style="position:relative;width:480px;height:360px;overflow:hidden">
       <div id="world" data-design-canvas-world style="position:absolute;inset:0;transform-origin:0 0"></div>
