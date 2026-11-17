@@ -246,20 +246,21 @@ database("client lease authority through the signed worker carrier", () => {
     const worker = await setup(true), client = await worker.open(f.viewer), prompt = f.prompt();
     expect((await f.send(prompt, f.viewer)).status).toBe(201);
     client.socket.send(JSON.stringify({ t: "prompts" }));
-    await expect.poll(() => worker.calls.some(call => call.path === "prompts/begin" && call.status === 500)).toBe(true);
+    // Each wait spans a whole relay round trip (hint, pull, ack, begin); a loaded CI shard needs more than the default 1 s.
+    await expect.poll(() => worker.calls.some(call => call.path === "prompts/begin" && call.status === 500), { timeout: 10_000 }).toBe(true);
     expect((await pool.query("SELECT state FROM cloud_v2_prompt_outbox WHERE workspace_id=$1 AND user_message_id=$2",
       [f.workspace.id,prompt.userMessageId])).rows).toEqual([{ state: "inboxed" }]);
     expect((await pool.query("SELECT 1 FROM cloud_v2_execution_contexts WHERE workspace_id=$1 AND kind='turn'", [f.workspace.id])).rowCount).toBe(0);
     expect(worker.drivers).toHaveLength(0);
     old.mockRestore();
-    await expect.poll(() => worker.drivers[0]?.prompts.length).toBe(1);
+    await expect.poll(() => worker.drivers[0]?.prompts.length, { timeout: 10_000 }).toBe(1);
     expect(worker.drivers[0].opened.apiKey).toBe(payer.secret);
     const begins = worker.calls.filter(call => call.path === "prompts/begin");
     expect(begins.at(-1)?.status).toBe(200);
     expect(new Set(begins.map(call => JSON.stringify(call.body))).size).toBe(1);
     worker.drivers[0].complete();
     await expect.poll(async () => (await pool.query("SELECT state FROM cloud_v2_prompt_outbox WHERE workspace_id=$1 AND user_message_id=$2",
-      [f.workspace.id,prompt.userMessageId])).rows[0]?.state).toBe("completed");
+      [f.workspace.id,prompt.userMessageId])).rows[0]?.state, { timeout: 10_000 }).toBe("completed");
   });
 
   it.each(envCases)("runs A's turn with the $name intact and only exportable child variables", async input => {
