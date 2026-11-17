@@ -3,13 +3,13 @@
 // from main, so Alpha has already applied every migration the release carries
 // unless its own deploy is behind. Production hosted promotion, Apple submission
 // and controlled cutovers require Alpha's live identity to show it.
-import { ReleaseIdentity, requireCheck } from "./contracts";
+import { CHANNELS, ReleaseIdentity, requireCheck } from "./contracts";
 import { jsonClient } from "./io";
-import { runtimeOrigin } from "./runtime-contracts";
 
-/** Alpha's anonymous live identity. */
+/** Alpha's anonymous live identity. Its origin comes from ./contracts, not ./runtime-contracts: release jobs install
+ * only the root workspace, and runtime-contracts loads control-plane modules that need `pg` (import-graph.test.ts). */
 export const alphaIdentity = (fetcher: typeof fetch = fetch) => () =>
-  jsonClient(fetcher)(`${runtimeOrigin("alpha")}/v1/release-identity`, { cache: "no-store" });
+  jsonClient(fetcher)(`${CHANNELS.alpha.api}/v1/release-identity`, { cache: "no-store" });
 
 const number = (name: string) => Number(/^(\d{4})_/.exec(name)?.[1] ?? NaN);
 
