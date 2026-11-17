@@ -112,7 +112,7 @@ const stableJson = (value: unknown): string => Array.isArray(value) ? `[${value.
 function configurationSections(config: WorkerConfig): Map<string, string> {
   // Transport flags applied directly (messageAuthority is one-way; historyBatch only picks the history route): a
   // configuration differing only in them, as the relay's and HTTP's may, is not a change that reconfigures agents.
-  const { agents: { codex, ...agents }, workspace, messageAuthority: _authority, historyBatch: _batch, ...rest } = config;
+  const { agents: { codex, ...agents }, workspace, messageAuthority: _authority, historyBatch: _batch, turnEvents: _events, ...rest } = config;
   const digest = (value: unknown) => createHash("sha256").update(stableJson(value)).digest("hex");
   const sections = new Map<string, string>();
   for (const [key, value] of Object.entries(rest)) sections.set(key, digest(value));
@@ -613,6 +613,7 @@ export class CloudWorker {
     this.historyReplacementEnabled = config.historyReplacement === 1;
     this.historyDigestEnabled = config.historyDigest === 1;
     this.historyBatchEnabled = config.historyBatch === 1;
+    this.options.transport.setTurnEvents?.(config.historyBatch === 1 && config.turnEvents === 1);
     this.localCommandsEnabled = config.localCommands === 1;
     this.localCommandReason = config.localCommandReason === 1;
     this.notifyUserEnabled = config.notifyUser === 1;

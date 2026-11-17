@@ -1184,6 +1184,18 @@ lease refused or rejected) retires that context, so the chat does not stay
 busy. A begin that tried for a lease and answered without one writes a
 throttled `begin_lease` journal line with a closed code.
 
+Workers advertising `turn-events-v1` beside `history-batch-v1` receive
+`turnEvents:1` on HTTP and relay configurations. Like Conductor's single session
+notification stream, a prompt outcome and a context retirement then ride in the
+next history batch. Events queued within 50 ms share one batch, or go in a batch
+of their own with no frames, which leaves the history sequence unchanged. The
+control plane applies them after the frames in the same transaction, each in its
+own savepoint. A refused event is answered as its own route would answer it and
+rolls back only itself. A lost reply replays the whole batch; every event is
+idempotent. A turn's last rows, its outcome and its retirement cost one
+transaction. A control plane that refuses batches (404), or a configuration
+without the offer, sends each event through its own route again.
+
 The prompt channel wakes the worker's long poll and sends a relay hint. Each
 wake costs an empty pull and a new long poll when nothing is waiting. A
 terminal outcome therefore notifies only when a message waits behind the turn in

@@ -3,7 +3,7 @@ import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
 import { HttpError } from "../authz.js";
 import type { Tx } from "../db.js";
-import { CLOUD_V2_MAX_FRAME_BYTES, CloudV2WorkerActivitySchema, CloudV2WorkerHelloSchema, CloudV2WorkerHistorySchema, CloudV2WorkerTimingRequestSchema, CloudV2RenewRequestSchema, CloudV2TurnLeaseRequestSchema, CloudV2TerminalLeaseRequestSchema, CloudV2ClientLeaseRequestSchema, CloudV2BootstrapLeaseRequestSchema, CloudV2RetiredRequestSchema, CloudV2BootCleanRequestSchema, CloudV2AuthorityRequestSchema, ACTING_USER_FEATURE, BOOT_TIMINGS_FEATURE, MESSAGE_AUTHORITY_FEATURE, HISTORY_DIGEST_FEATURE, HISTORY_DIGEST_DELETIONS_FEATURE, HISTORY_BATCH_FEATURE, BEGIN_LEASE_FEATURE, CloudV2WorkerHistoryBatchSchema, type CloudV2ControlFrame } from "./contract.js";
+import { CLOUD_V2_MAX_FRAME_BYTES, CloudV2WorkerActivitySchema, CloudV2WorkerHelloSchema, CloudV2WorkerHistorySchema, CloudV2WorkerTimingRequestSchema, CloudV2RenewRequestSchema, CloudV2TurnLeaseRequestSchema, CloudV2TerminalLeaseRequestSchema, CloudV2ClientLeaseRequestSchema, CloudV2BootstrapLeaseRequestSchema, CloudV2RetiredRequestSchema, CloudV2BootCleanRequestSchema, CloudV2AuthorityRequestSchema, ACTING_USER_FEATURE, BOOT_TIMINGS_FEATURE, MESSAGE_AUTHORITY_FEATURE, HISTORY_DIGEST_FEATURE, HISTORY_DIGEST_DELETIONS_FEATURE, HISTORY_BATCH_FEATURE, BEGIN_LEASE_FEATURE, TURN_EVENTS_FEATURE, CloudV2WorkerHistoryBatchSchema, type CloudV2TurnEvent, type CloudV2ControlFrame } from "./contract.js";
 import type { AuthorityPull } from "./execution/authority-pull.js";
 import { emitCloudV2Timing, type CloudV2TimingRecord } from "./lifecycle.js";
 import type { CloudV2Store, CloudV2WorkerSession, CloudV2Workspace } from "./store.js";
@@ -193,6 +193,7 @@ async function configuration(deps: CloudV2WorkerRouteDeps, workspace: CloudV2Wor
         loginRevision: revision, ...(features.has("history-replace-v1") ? { historyReplacement: 1 } : {}),
         ...(features.has("history-replace-v1") && features.has(HISTORY_DIGEST_FEATURE) && deps.store.workerHistoryDigests ? { historyDigest: 1 } : {}),
         ...(features.has(HISTORY_BATCH_FEATURE) && deps.store.writeWorkerHistoryBatch ? { historyBatch: 1 } : {}),
+        ...(turnEventsOffered(deps, features) ? { turnEvents: 1 } : {}),
         ...workerGitIdentity(config, features.has("git-identity-v1"), features.has("creator-commit-identity-v1")),
         ...(features.has("code-review-v1") && codeReview ? { codeReview } : {}),
         ...(features.has("github-user-token-v1") && githubUserTokens === 1 ? { githubUserTokens } : {}),
@@ -202,6 +203,37 @@ async function configuration(deps: CloudV2WorkerRouteDeps, workspace: CloudV2Wor
     }
   }
   throw new HttpError(503, "configuration_changing", "Worker configuration is changing");
+}
+
+/** turn-events-v1 rides on history batches; outcomes need the prompt outbox. */
+export function turnEventsOffered(deps: Pick<CloudV2WorkerRouteDeps, "store" | "promptOutbox">, features: ReadonlySet<string>): boolean {
+  return features.has(TURN_EVENTS_FEATURE) && features.has(HISTORY_BATCH_FEATURE) && !!deps.store.writeWorkerHistoryBatch && !!deps.promptOutbox && !!deps.store.prompts;
+}
+
+/** Each event in its own savepoint, answered as its own route would: a refusal (4xx) rolls back only that event; anything
+ * else fails the batch, which the worker replays whole (every event is idempotent). */
+async function applyTurnEvents(deps: CloudV2WorkerRouteDeps, tx: Tx, auth: { token: string; bootId: string }, events: readonly CloudV2TurnEvent[],
+  features: ReadonlySet<string>) {
+  const results: Array<{ ok: true; value: Record<string, unknown> } | { ok: false; status: number; code?: string }> = [];
+  for (const event of events) {
+    await tx.query("SAVEPOINT turn_event");
+    try {
+      let value: Record<string, unknown>;
+      if (event.t === "outcome") value = await deps.store.prompts!.outcomeIn(tx, auth.token, auth.bootId, event.outcome);
+      else {
+        if (!deps.execution) throw new HttpError(404, "not_found", "Not found");
+        if (!features.has(ACTING_USER_FEATURE)) throw executionWorkerRequired();
+        value = await deps.execution.retiredIn(tx, auth, event.contextId, event.retired);
+      }
+      await tx.query("RELEASE SAVEPOINT turn_event");
+      results.push({ ok: true, value });
+    } catch (error) {
+      if (!(error instanceof HttpError) || error.status < 400 || error.status >= 500) throw error;
+      await tx.query("ROLLBACK TO SAVEPOINT turn_event");
+      results.push({ ok: false, status: error.status, ...(/^[a-z0-9_]{1,64}$/.test(error.code) ? { code: error.code } : {}) });
+    }
+  }
+  return results;
 }
 
 /** Mounted before user authentication. Every request is scoped by the worker
@@ -485,8 +517,11 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
       if (frame.chatEditAcks !== undefined && !features.has("chat-edit-v1")) throw new HttpError(400, "invalid_request", "Unsupported worker history fields");
       if (frame.messages?.digest !== undefined && !digests) throw new HttpError(400, "invalid_request", "Unsupported worker history fields");
     }
-    await deps.store.writeWorkerHistoryBatch(auth.token, input.bootId, input.sequence, input.frames, digests);
-    return c.json({ sequence: input.sequence + input.frames.length - 1 });
+    const events = input.events ?? [];
+    if (events.length && !turnEventsOffered(deps, features)) throw new HttpError(400, "invalid_request", "Unsupported worker history fields");
+    const results = await deps.store.writeWorkerHistoryBatch(auth.token, input.bootId, input.sequence, input.frames, digests,
+      events.length ? tx => applyTurnEvents(deps, tx, auth, events, features) : undefined);
+    return c.json({ sequence: input.sequence + input.frames.length - 1, ...(results ? { events: results } : {}) });
   });
   app.post(`${CLOUD_V2_WORKER_API}/history/digests`, async c => {
     const features = workerFeatures(c);

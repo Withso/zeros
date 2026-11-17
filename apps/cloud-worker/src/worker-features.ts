@@ -1,4 +1,4 @@
-import { ACTING_USER_FEATURE, BOOT_TIMINGS_FEATURE, CLOUD_RECOVERY_QUIESCE_FEATURE, HISTORY_DIGEST_DELETIONS_FEATURE, HISTORY_DIGEST_FEATURE, CREATOR_AGENT_LOGINS_FEATURE, CREATOR_AGENT_MODELS_FEATURE, CREATOR_COMMIT_IDENTITY_FEATURE, MESSAGE_AUTHORITY_FEATURE, PUSH_SIGNALS_FEATURE, HISTORY_BATCH_FEATURE, BEGIN_LEASE_FEATURE } from "@zeros/protocol/cloud-v2-relay";
+import { ACTING_USER_FEATURE, BOOT_TIMINGS_FEATURE, CLOUD_RECOVERY_QUIESCE_FEATURE, HISTORY_DIGEST_DELETIONS_FEATURE, HISTORY_DIGEST_FEATURE, CREATOR_AGENT_LOGINS_FEATURE, CREATOR_AGENT_MODELS_FEATURE, CREATOR_COMMIT_IDENTITY_FEATURE, MESSAGE_AUTHORITY_FEATURE, PUSH_SIGNALS_FEATURE, HISTORY_BATCH_FEATURE, BEGIN_LEASE_FEATURE, TURN_EVENTS_FEATURE } from "@zeros/protocol/cloud-v2-relay";
 
 /** Advertised on hello and on the relay's inbound dial. The control plane gates
  * each configuration on the list it saw, so the two must be identical. */
@@ -29,4 +29,6 @@ export const CLOUD_WORKER_FEATURES = ["prompt-outbox-v1", "mcp-v1", "workspace-s
   /** R3: every ready chat's history frames in one request and one transaction (with config.historyBatch). */
   HISTORY_BATCH_FEATURE,
   /** A new turn's lease arrives in its begin reply (no config: the reply field is the offer). */
-  BEGIN_LEASE_FEATURE].join(",");
+  BEGIN_LEASE_FEATURE,
+  /** Outcomes and retirements ride in history batches, one transaction with the rows (with config.turnEvents). */
+  TURN_EVENTS_FEATURE].join(",");

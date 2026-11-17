@@ -24,6 +24,8 @@ export interface Transport {
   dispose(): Promise<void>;
   /** push-signals-v1 accepted: the activity pulse and busy repeat move to every 5 min. */
   setPushSignals?(on: boolean): void;
+  /** turn-events-v1 (with historyBatch): prompt outcomes and context retirements ride in history batches. */
+  setTurnEvents?(on: boolean): void;
   /** Durable explicit work has its own typed/idempotent HTTPS channel. */
   promptRequest?: PromptRequest;
   mcpAuthorization?: McpAuthorizationRequest;

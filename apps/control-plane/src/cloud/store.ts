@@ -966,9 +966,13 @@ export class CloudV2Store {
 
   /** history-batch-v1: frames that queued together (any chats) commit in one transaction. Frame i takes sequence
    * first + i, so every per-frame rule (replay, gaps, replacement markers) applies exactly as for single frames. */
-  async writeWorkerHistoryBatch(token: string, bootId: string, first: number, frames: readonly HistoryInput[], historyDigests = false): Promise<void> {
-    await withSystemTx(this.pool, async tx => {
+  /** events (turn-events-v1) run after the frames in the same transaction; a replayed batch (frames already applied)
+   * still runs them, since each event is idempotent. */
+  async writeWorkerHistoryBatch<T = void>(token: string, bootId: string, first: number, frames: readonly HistoryInput[], historyDigests = false,
+    events?: (tx: Tx) => Promise<T>): Promise<T | undefined> {
+    return withSystemTx(this.pool, async tx => {
       for (const [index, frame] of frames.entries()) await this.applyWorkerHistory(tx, token, bootId, first + index, frame, historyDigests);
+      return events ? events(tx) : undefined;
     });
   }
 

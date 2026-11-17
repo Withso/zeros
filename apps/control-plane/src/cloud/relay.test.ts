@@ -939,6 +939,20 @@ describe("cloud v2 relay", () => {
         expect(frame.historyBatch).toBe(features === "history-batch-v1" && served ? 1 : undefined);
     });
 
+  it.each([{ features: "history-batch-v1", served: true, expected: undefined }, { features: "history-batch-v1,turn-events-v1", served: false, expected: undefined },
+    { features: "turn-events-v1", served: true, expected: undefined }, { features: "history-batch-v1,turn-events-v1", served: true, expected: 1 }])(
+    "offers turn events beside history batches, like HTTP: $features, served=$served", async ({ features, served, expected }) => {
+      workerServer.on("headers", headers => { headers.push(`X-Zeros-Worker-Features: ${features}`); });
+      deps.historyBatch = true; deps.turnEvents = served;
+      const frames: any[] = [];
+      workerServer.on("connection", ws => ws.on("message", raw => frames.push(JSON.parse(String(raw)))));
+      await app();
+      await vi.waitFor(() => expect(frames.filter(frame => frame.t === "config")).toHaveLength(1));
+      loginRevision = "1"; await relay.refreshLogins();
+      await vi.waitFor(() => expect(frames.filter(frame => frame.t === "config")).toHaveLength(2));
+      for (const frame of frames.filter(frame => frame.t === "config")) expect(frame.turnEvents).toBe(expected);
+    });
+
   it.each([false, true])("gates managed identity on WebSocket upgrade support=%s for initial and refreshed config", async supported => {
     workerServer.on("headers", headers => { headers.push(`X-Zeros-Worker-Features: mcp-v1${supported ? ",git-identity-v1" : ""}`); });
     const original = deps.config, gitIdentity = { name: "Fixture Contributor", email: "123+contributor@users.noreply.github.com" };

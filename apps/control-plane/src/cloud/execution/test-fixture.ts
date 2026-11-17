@@ -50,11 +50,16 @@ export async function executionFixture(pool: pg.Pool, options: { lifecycle?: boo
   const features = "prompt-outbox-v1,workspace-environment-v1,repository-setup-v1,mcp-v1,github-pr-v1,git-identity-v1,workspace-api-v1,local-commands-v1,notify-user-v1,acting-user-v1";
   await pool.query("UPDATE cloud_v2_workspaces SET state='starting',boat_sandbox_id='bx_fixture1234' WHERE id=$1", [seed.workspace.id]);
   const token = await cp.store.rotateWorkerToken(seed.workspace.id), boot = randomUUID();
-  const worker = (path: string, body?: unknown, options: { features?: string; token?: string; boot?: string; method?: string } = {}) => app.request(`/v2/cloud/worker/${path}`, {
-    method: options.method ?? "POST", headers: { authorization: `Bearer ${options.token ?? token}`, "x-zeros-worker-boot": options.boot ?? boot,
-      "x-zeros-worker-features": options.features ?? features, ...(body === undefined ? {} : { "content-type": "application/json" }) },
-    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-  });
+  // Like the worker's fetch, a body carries its Content-Length (history routes read the session first without one).
+  const worker = (path: string, body?: unknown, options: { features?: string; token?: string; boot?: string; method?: string } = {}) => {
+    const payload = body === undefined ? undefined : JSON.stringify(body);
+    return app.request(`/v2/cloud/worker/${path}`, {
+      method: options.method ?? "POST", headers: { authorization: `Bearer ${options.token ?? token}`, "x-zeros-worker-boot": options.boot ?? boot,
+        "x-zeros-worker-features": options.features ?? features,
+        ...(payload === undefined ? {} : { "content-type": "application/json", "content-length": String(Buffer.byteLength(payload)) }) },
+      ...(payload === undefined ? {} : { body: payload }),
+    });
+  };
   const retirementId = randomUUID();
   const hello = async (capabilities = features) => {
     const response = await worker("hello", { protocol: 2, bootId: boot, runtimeSha256: "b".repeat(64) }, { features: capabilities });

@@ -43,6 +43,8 @@ const unauthorized = () => new HttpError(401, "worker_unauthorized", "Worker aut
 const conflict = () => new HttpError(409, "prompt_conflict", "This message id was already used for a different send");
 const terminal = (state: CloudV2PromptState) => !["queued", "inboxed", "dispatching", "accepted"].includes(state);
 const status = (row: Row): CloudV2PromptStatus => ({ receipt: row.receipt, state: row.state, payload: row.payload, cancelRequested: row.cancel_requested });
+export type CloudV2PromptOutcomeInput = { userMessageId: string; dispatchId?: string | undefined; deliveryId?: string | undefined;
+  state: "accepted" | "completed" | "failed" | "cancelled" | "interrupted" };
 const notify = (tx: Tx, id: string) => tx.query("SELECT pg_notify('zeros_cloud_v2_prompts', $1)", [id]);
 
 /** No VM or provider I/O under these transactions. Workspace-row locking gives
@@ -421,8 +423,13 @@ export class CloudV2PromptOutbox {
     });
   }
 
-  async outcome(token: string, bootId: string, input: { userMessageId: string; dispatchId?: string | undefined; deliveryId?: string | undefined; state: "accepted" | "completed" | "failed" | "cancelled" | "interrupted" }): Promise<{ state: CloudV2PromptState }> {
-    return withSystemTx(this.pool, async tx => {
+  async outcome(token: string, bootId: string, input: CloudV2PromptOutcomeInput): Promise<{ state: CloudV2PromptState }> {
+    return withSystemTx(this.pool, tx => this.outcomeIn(tx, token, bootId, input));
+  }
+
+  /** turn-events-v1: the same outcome inside the caller's transaction (a history batch). */
+  async outcomeIn(tx: Tx, token: string, bootId: string, input: CloudV2PromptOutcomeInput): Promise<{ state: CloudV2PromptState }> {
+    {
       const workspace = await this.worker(tx, token, bootId, input.userMessageId), row = this.row(workspace);
       // The current process may repair a saved terminal result from its old
       // boot. That is evidence from disk, never permission to call a provider.
@@ -440,7 +447,7 @@ export class CloudV2PromptOutbox {
       if (input.state !== "accepted" && (await tx.query(`SELECT 1 FROM cloud_v2_prompt_outbox WHERE workspace_id=$1 AND chat_id=$2
         AND state IN ('queued','inboxed') AND user_message_id<>$3 LIMIT 1`, [workspace.id, row.chat_id, row.user_message_id])).rowCount) await notify(tx, workspace.id);
       return { state: input.state };
-    });
+    }
   }
 
   async ackStop(token: string, bootId: string, input: { chatId: string; epoch: string }): Promise<void> {
