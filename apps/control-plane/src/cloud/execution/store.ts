@@ -689,7 +689,8 @@ export class CloudExecutionContexts {
         input.reason === "expired" ? "expired" : input.reason === "stop" ? "cancelled" : "actor_changed");
       await tx.query(`UPDATE cloud_v2_execution_contexts SET state='retired',retired_at=clock_timestamp(),retirement_id=$2,retirement_hash=$3,
         material=NULL,environment_version_id=NULL WHERE id=$1`, [id, input.retirementId, digest]);
-      // Only this retirement: a revocation later in the same transaction (a batched outcome) is an authority change.
+      // Only this retirement. Defensive: no event batched after it counts as an authority change today (an outcome
+      // revokes with reason 'completed'), but a later one in the same transaction must not inherit the flag.
       await tx.query("SELECT set_config('app.cloud_authority_retirement','',true)");
       // No prompt wake: what pull offers depends on prompt states only, and the outcome already woke any waiting message.
       return { retired: true as const };

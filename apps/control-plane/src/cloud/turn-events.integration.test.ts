@@ -81,22 +81,12 @@ suite("turn-events-v1: outcomes and retirements in the history batch", () => {
     expect(await historySequence()).toBe(1);
   });
 
-  it("a retirement batched before a cancelled outcome still records the cancellation's authority event", async () => {
-    const turn = await f.dispatch(), other = await f.dispatch(f.prompt(randomUUID(), { chatId: "other" }));
-    const events = async () => Number((await pool.query("SELECT count(*) FROM cloud_v2_authority_events WHERE workspace_id=$1", [f.workspace.id])).rows[0].count);
-    // Only an R2 boot records events; the fixture's boot may be lease-v1, in which case both counts stay equal.
-    const before = await events();
-    const separate = await f.worker(`execution-leases/${turn.begun.contextId}/retired`, { retirementId: randomUUID(), reason: "outcome", processes: 0 }, { features: features() });
-    expect(separate.status).toBe(200);
-    const afterRetire = await events();
-    expect(afterRetire).toBe(before);
-    const response = await batch(1, [], [
-      { t: "outcome", outcome: { userMessageId: other.begin.userMessageId, dispatchId: other.begin.dispatchId, state: "cancelled" } }]);
-    expect(response.status).toBe(200);
-    const mode = (await pool.query("SELECT authority_mode FROM cloud_v2_execution_boots WHERE boot_id=$1", [f.boot])).rows[0]?.authority_mode;
-    if (mode === "message-authority-v1") expect(await events()).toBeGreaterThan(afterRetire);
-    const setting = (await pool.query("SELECT current_setting('app.cloud_authority_retirement', true) AS value")).rows[0].value;
-    expect(setting ?? "").toBe("");
+  it("a stale boot's events-only batch is refused per event and writes nothing", async () => {
+    const turn = await f.dispatch();
+    const response = await f.worker("history/batch", { bootId: f.boot, sequence: 1, frames: [], events: turnEnd(turn) }, { features: features(), boot: randomUUID() });
+    expect(response.status).toBe(401);
+    expect(await state(turn.begin.userMessageId)).toBe("dispatching");
+    expect((await context(turn.begun.contextId)).state).toBe("active");
   });
 
   it("refuses events from a worker that did not negotiate turn-events-v1, before writing anything", async () => {

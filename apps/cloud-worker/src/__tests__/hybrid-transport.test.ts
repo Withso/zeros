@@ -17,7 +17,7 @@ import * as notifyProtocol from "@zeros/protocol/notify-user";
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); vi.useRealTimers(); });
 async function fixture(options: { hello?: Promise<void>; onFrame?: (frame: any) => void; heartbeatPhase?: number; config?: Record<string, unknown>; batch?: boolean;
-  eventResult?: (event: any) => unknown } = {}) {
+  eventResult?: (event: any) => unknown; batchStatus?: (body: any) => number | undefined } = {}) {
   const directory = await mkdtemp(join(tmpdir(), "hybrid-transport-")), tokenFile = join(directory, "token");
   let expected = "synthetic-worker-token", revision = "0", failHistory = false, lostReply = false;
   await writeFile(tokenFile, expected, { mode: 0o600 });
@@ -41,6 +41,7 @@ async function fixture(options: { hello?: Promise<void>; onFrame?: (frame: any) 
       if (lostReply) { lostReply = false; throw new Error("Lost committed response"); }
       return failHistory ? new Response(null, { status: 503 }) : Response.json({ sequence: body.sequence });
     }
+    if (path === "batch" && options.batchStatus?.(body)) return Response.json({ error: { code: "invalid_request" } }, { status: options.batchStatus(body)! });
     if (path === "batch" && options.batch) {
       if (lostReply) { lostReply = false; throw new Error("Lost committed response"); }
       return Response.json({ sequence: body.sequence + body.frames.length - 1,
@@ -536,13 +537,48 @@ it("turn-events-v1: a refused event rejects with its route's status and closed c
   expect((retired as PromiseRejectedResult).reason).toMatchObject({ status: 409, contextCode: "actor_changed" });
 });
 
-it("turn-events-v1: a lost reply resends the same events with the same batch", async () => {
+it("turn-events-v1: a lost reply sends the events again through their own routes (a duplicate is harmless), not later with the batch", async () => {
   const f = await fixture({ batch: true }); f.transport.setTurnEvents(true); f.loseReply();
-  const settled = f.transport.promptRequest("outcome", outcome());
-  expect(await settled).toEqual({ state: "completed" });
-  const batches = f.requests.filter(request => request.path === "batch");
-  expect(batches.length).toBeGreaterThanOrEqual(2);
-  expect(batches.at(-1)!.body).toEqual(batches[0]!.body);
+  expect(await f.transport.promptRequest("outcome", outcome())).toEqual({ state: "completed" });
+  expect(f.requests.filter(request => request.path === "batch")).toHaveLength(1);
+  expect(f.requests.filter(request => request.path === "outcome").map(request => request.body)).toEqual([outcome()]);
+  // Events stay on: the next ones ride in a batch again.
+  expect(await f.transport.promptRequest("outcome", outcome("failed"))).toEqual({ state: "failed" });
+  expect(f.requests.filter(request => request.path === "batch")).toHaveLength(2);
+});
+
+it("turn-events-v1: an N-1 control plane refusing events (400) gets the frames alone and each event through its own route, then no more events", async () => {
+  const f = await fixture({ batch: true, batchStatus: body => body.events || !body.frames.length ? 400 : undefined }); f.transport.setTurnEvents(true);
+  const sent = f.transport.promptRequest("outcome", outcome());
+  expect(await f.transport.sendHistoryBatch([{ t: "history", chats: [{ id: "a" }] }])).toBe(true);
+  expect(await sent).toEqual({ state: "completed" });
+  expect(f.requests.filter(request => request.path === "outcome")).toHaveLength(1);
+  const accepted = f.requests.filter(request => request.path === "batch" && !request.body.events);
+  expect(accepted.at(-1)!.body).toMatchObject({ sequence: 1, frames: [{ chats: [{ id: "a" }] }] });
+  expect(await f.transport.contextRequest(`execution-leases/${CONTEXT}/retired`, retirement)).toEqual({ retired: true });
+  expect(f.requests.filter(request => request.path === "retired")).toHaveLength(1);
+});
+
+it("turn-events-v1: an outcome never waits behind a failing history batch", async () => {
+  const f = await fixture({ batch: true, batchStatus: body => body.frames.length ? 409 : undefined }); f.transport.setTurnEvents(true);
+  expect(await f.transport.sendHistoryBatch([{ t: "history", chats: [{ id: "a" }] }])).toBe(false);
+  expect(await f.transport.promptRequest("outcome", outcome())).toEqual({ state: "completed" });
+});
+
+it("turn-events-v1: the caller's abort and dispose settle queued and in-flight events; a batch-level 401 reaches the caller", async () => {
+  const aborted = await fixture({ batch: true, batchStatus: () => 503 }); aborted.transport.setTurnEvents(true);
+  const controller = new AbortController();
+  const pending = aborted.transport.promptRequest("outcome", outcome(), controller.signal);
+  await expect.poll(() => aborted.requests.filter(request => request.path === "batch").length).toBeGreaterThan(0);
+  controller.abort();
+  await expect(Promise.race([pending.then(() => "resolved", () => "rejected"), new Promise(resolve => setTimeout(() => resolve("pending"), 500))])).resolves.not.toBe("pending");
+  const disposed = await fixture({ batch: true, batchStatus: body => body.frames.length ? 503 : undefined }); disposed.transport.setTurnEvents(true);
+  void disposed.transport.sendHistoryBatch([{ t: "history", chats: [{ id: "a" }] }]);
+  const waiting = disposed.transport.contextRequest(`execution-leases/${CONTEXT}/retired`, retirement);
+  await disposed.transport.dispose();
+  await expect(Promise.race([waiting.then(() => "resolved", () => "rejected"), new Promise(resolve => setTimeout(() => resolve("pending"), 500))])).resolves.not.toBe("pending");
+  const unauthorized = await fixture({ batch: true, batchStatus: () => 401 }); unauthorized.transport.setTurnEvents(true);
+  await expect(unauthorized.transport.promptRequest("outcome", outcome())).rejects.toMatchObject({ status: 401 });
 });
 
 it("turn-events-v1: off (not offered) or refused by the control plane (404), each event goes through its own route", async () => {

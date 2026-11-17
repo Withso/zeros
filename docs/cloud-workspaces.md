@@ -1191,10 +1191,16 @@ next history batch. Events queued within 50 ms share one batch, or go in a batch
 of their own with no frames, which leaves the history sequence unchanged. The
 control plane applies them after the frames in the same transaction, each in its
 own savepoint. A refused event is answered as its own route would answer it and
-rolls back only itself. A lost reply replays the whole batch; every event is
-idempotent. A turn's last rows, its outcome and its retirement cost one
-transaction. A control plane that refuses batches (404), or a configuration
-without the offer, sends each event through its own route again.
+rolls back only itself. Events never wait behind a batch that fails. Except
+for a 401, which reaches their callers, any failure (a lost reply, a 5xx, a
+stuck history sequence) detaches the events and sends each through its own
+route at once; every event is idempotent, so a duplicate is harmless. A 4xx for
+a batch carrying events (an N-1 control plane's strict schema, a withdrawn
+offer) also turns events off for the boot and resends the frames alone. The
+caller's abort and worker shutdown settle pending events. A turn's last rows,
+its outcome and its retirement cost one transaction when they share a batch.
+A control plane that refuses batches (404), or a configuration without the
+offer, sends each event through its own route again.
 
 The prompt channel wakes the worker's long poll and sends a relay hint. Each
 wake costs an empty pull and a new long poll when nothing is waiting. A

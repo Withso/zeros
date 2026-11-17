@@ -6,7 +6,7 @@ import type { LocalCommandInput } from "@zeros/protocol/local-commands";
 import { requestLocalCommand } from "./local-commands/client";
 import { activityBody, helloBody, WORKER_FEATURES_HEADER, WorkerConfigReplySchema } from "./control-plane-contract";
 import { CLOUD_V2_MAX_FRAME_BYTES, CloudV2ControlFrameSchema, CloudV2WorkerActivityReplySchema,
-  CloudV2WorkerFrameSchema, CloudV2WorkerTimingSchema, type CloudV2WorkerTiming, CloudV2WorkerBootTimingSchema, type CloudV2WorkerBootTiming, CloudV2WorkerTimingRequestSchema, type CloudV2ControlFrame, type CloudV2WorkerFrame, CloudV2ContextErrorCodeSchema, CLOUD_V2_MAX_TURN_EVENTS, CloudV2WorkerHistoryBatchReplySchema, type CloudV2TurnEvent } from "@zeros/protocol/cloud-v2-relay";
+  CloudV2WorkerFrameSchema, CloudV2WorkerTimingSchema, type CloudV2WorkerTiming, CloudV2WorkerBootTimingSchema, type CloudV2WorkerBootTiming, CloudV2WorkerTimingRequestSchema, type CloudV2ControlFrame, type CloudV2WorkerFrame, CloudV2ContextErrorCodeSchema, CLOUD_V2_MAX_TURN_EVENTS, CloudV2WorkerHistoryBatchReplySchema, CloudV2TurnEventSchema, type CloudV2TurnEvent } from "@zeros/protocol/cloud-v2-relay";
 import { InboundBridge, type SyncContexts } from "./inbound-bridge";
 import { readWorkerToken, WORKER_TOKEN_FILE } from "./worker-token";
 import type { PromptOperation, Transport, TransportHandlers } from "./transport";
@@ -38,9 +38,17 @@ class HttpFailure extends Error {
     /** Creator pays: whose agent login a 409 agent_login_required names (closed). */
     readonly loginRequiredFrom?: "self" | "creator") { super("Worker control request failed."); }
 }
-type QueuedTurnEvent = { event: CloudV2TurnEvent; resolve(value: Record<string, unknown>): void; reject(error: unknown): void };
+/** settled: answered (or abandoned by its caller); a later delivery of the same event is harmless (every event is idempotent). */
+type QueuedTurnEvent = { event: CloudV2TurnEvent; settled: boolean; resolve(value: Record<string, unknown>): void; reject(error: unknown): void };
 /** A turn's outcome and its retirement arrive within milliseconds; one short window batches them (Conductor: 500 ms). */
 const TURN_EVENTS_COALESCE_MS = 50;
+function settleEvent(queued: QueuedTurnEvent, value: Record<string, unknown> | undefined, error?: unknown): void {
+  if (queued.settled) return;
+  queued.settled = true;
+  if (error === undefined) queued.resolve(value!); else queued.reject(error);
+}
+/** An acknowledgement without one result per event: a control plane that ignored them. */
+class EventsRefused extends Error { constructor() { super("Turn events were not applied."); } }
 const isContextPath = (path: string) => /^(turn|terminal|client|bootstrap)-lease$|^execution-leases\//.test(path);
 /** Routes whose refusals carry the closed context codes: the context routes, and an activated begin (actor_busy while a previous person's cleanup holds the chat). */
 const decodesContext = (path: string) => isContextPath(path) || path === "prompts/begin";
@@ -87,6 +95,10 @@ export class HybridTransport implements Transport {
   private turnEvents = false;
   private readonly queuedEvents: QueuedTurnEvent[] = [];
   private eventsTimer: ReturnType<typeof setTimeout> | undefined;
+  /** A control plane refused a batch carrying events (an N-1 schema, a withdrawn offer): no more events this boot. */
+  private eventsRefused = false;
+  /** A history batch request is on the wire (as opposed to pending after a failure). */
+  private historyRequestActive = false;
   private historyFlight: Promise<boolean> = Promise.resolve(true);
   /** history-batch-v1 answered 404 (a rolled-back control plane): batches stop for the rest of this boot. */
   historyBatchRefused = false;
@@ -227,7 +239,9 @@ export class HybridTransport implements Transport {
   async dispose(): Promise<void> {
     if (this.stopped && !this.listening) return;
     this.stopped = true; clearTimeout(this.retry); clearTimeout(this.heartbeat); clearTimeout(this.busyTimer); clearTimeout(this.eventsTimer);
-    for (const queued of this.queuedEvents.splice(0)) queued.reject(new Error("Worker stopped."));
+    const stopped = new Error("Worker stopped.");
+    for (const queued of [...this.queuedEvents.splice(0), ...(this.pendingHistory && "frames" in this.pendingHistory ? this.pendingHistory.events ?? [] : [])])
+      settleEvent(queued, undefined, stopped);
     this.releaseInitial();
     for (const controller of this.requests) controller.abort();
     await this.recovering;
@@ -248,8 +262,10 @@ export class HybridTransport implements Transport {
   }
   async promptRequest(operation: PromptOperation, body: unknown, signal?: AbortSignal): Promise<unknown> {
     // turn-events-v1: an outcome rides in the next history batch (401 is handled where the batch settles).
-    if (operation === "outcome" && this.eventsEnabled())
-      return this.enqueueEvent({ t: "outcome", outcome: body as Extract<CloudV2TurnEvent, { t: "outcome" }>["outcome"] });
+    if (operation === "outcome" && this.eventsEnabled()) {
+      const event = CloudV2TurnEventSchema.safeParse({ t: "outcome", outcome: body });
+      if (event.success) return this.enqueueEvent(event.data, signal);
+    }
     const controller = new AbortController();
     const lifetime = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
     if (operation === "pull") this.promptPolls.add(controller);
@@ -305,32 +321,42 @@ export class HybridTransport implements Transport {
   contextRequest(path: string, body: unknown): Promise<unknown> {
     if (!isContextPath(path)) return Promise.reject(new Error("Not a context route."));
     const retired = /^execution-leases\/([0-9a-f-]{36})\/retired$/.exec(path);
-    if (retired && this.eventsEnabled())
-      return this.enqueueEvent({ t: "retired", contextId: retired[1]!, retired: body as Extract<CloudV2TurnEvent, { t: "retired" }>["retired"] });
+    const event = retired && this.eventsEnabled() ? CloudV2TurnEventSchema.safeParse({ t: "retired", contextId: retired[1], retired: body }) : undefined;
+    if (event?.success) return this.enqueueEvent(event.data);
     return this.request(path, body);
   }
 
-  /** turn-events-v1: on only with history batches, and off for good once the control plane refused a batch (404). */
+  /** turn-events-v1: on only with history batches; off for good once the control plane refused a batch or its events. */
   setTurnEvents(on: boolean): void {
     this.turnEvents = on;
-    if (!on && this.queuedEvents.length) void this.sendEventsAlone(this.queuedEvents.splice(0));
+    if (!on) this.detachEvents(this.queuedEvents.splice(0));
   }
-  private eventsEnabled(): boolean { return this.turnEvents && !this.historyBatchRefused && !this.stopped; }
-  private enqueueEvent(event: CloudV2TurnEvent): Promise<Record<string, unknown>> {
+  private eventsEnabled(): boolean { return this.turnEvents && !this.eventsRefused && !this.historyBatchRefused && !this.stopped; }
+  private enqueueEvent(event: CloudV2TurnEvent, signal?: AbortSignal): Promise<Record<string, unknown>> {
     return new Promise((resolve, reject) => {
-      this.queuedEvents.push({ event, resolve, reject });
+      const queued: QueuedTurnEvent = { event, settled: false, resolve, reject };
+      if (signal?.aborted) { reject(new Error("Worker request cancelled.")); return; }
+      // The caller stops waiting; the event may still be delivered, which is harmless.
+      signal?.addEventListener("abort", () => {
+        const index = this.queuedEvents.indexOf(queued);
+        if (index >= 0) this.queuedEvents.splice(index, 1);
+        settleEvent(queued, undefined, new Error("Worker request cancelled."));
+      }, { once: true });
+      this.queuedEvents.push(queued);
       this.scheduleEvents();
     });
   }
-  /** Coalesces a turn's end (its outcome, then its retirement) into one batch; a history batch already going takes them. */
+  /** Coalesces a turn's end (its outcome, then its retirement) into one batch, or rides on the history batch now on
+   * the wire. Events never wait behind a failed batch: that one goes alone, they go through their own routes. */
   private scheduleEvents(): void {
     if (this.eventsTimer || !this.queuedEvents.length) return;
     this.eventsTimer = setTimeout(() => {
       this.eventsTimer = undefined;
       if (!this.queuedEvents.length) return;
+      if (this.pendingHistory && !this.historyRequestActive) { this.detachEvents(this.queuedEvents.splice(0)); return; }
       this.historyFlight = this.historyFlight.catch(() => false).then(async () => {
-        // A failed batch replays first (recovery); its success schedules these again.
-        if (this.pendingHistory || !this.queuedEvents.length) return true;
+        if (this.pendingHistory) { this.detachEvents(this.queuedEvents.splice(0)); return false; }
+        if (!this.queuedEvents.length) return true;
         this.pendingHistory = { sequence: this.historySequence + 1, frames: [] };
         try { await this.commitHistory(); return true; }
         catch (error) { this.failed(error); return false; }
@@ -342,22 +368,27 @@ export class HybridTransport implements Transport {
   private settleEvents(events: readonly QueuedTurnEvent[], results: ReadonlyArray<{ ok: true; value: Record<string, unknown> } | { ok: false; status: number; code?: string | undefined }>): void {
     for (const [index, queued] of events.entries()) {
       const result = results[index]!;
-      if (result.ok) { queued.resolve(result.value); continue; }
+      if (result.ok) { settleEvent(queued, result.value); continue; }
       const code = CloudV2ContextErrorCodeSchema.safeParse(result.code);
       const failure = new HttpFailure(result.status, undefined, undefined, code.success ? code.data : undefined);
       if (result.status === 401) this.failed(failure);
-      queued.reject(failure);
+      settleEvent(queued, undefined, failure);
     }
   }
-  /** A control plane without turn events (rolled back, or the offer withdrawn): each event through its own route. */
+  /** Each event through its own route, as before turn-events-v1; the caller's own retries take over from there. */
+  private detachEvents(events: readonly QueuedTurnEvent[]): void {
+    const open = events.filter(queued => !queued.settled);
+    if (open.length) void this.sendEventsAlone(open);
+  }
   private async sendEventsAlone(events: readonly QueuedTurnEvent[]): Promise<void> {
     for (const queued of events) {
+      if (queued.settled) continue;
       try {
-        queued.resolve(queued.event.t === "outcome" ? await this.request("prompts/outcome", queued.event.outcome)
+        settleEvent(queued, queued.event.t === "outcome" ? await this.request("prompts/outcome", queued.event.outcome)
           : await this.request(`execution-leases/${queued.event.contextId}/retired`, queued.event.retired));
       } catch (error) {
         if (error instanceof HttpFailure && error.status === 401) this.failed(error);
-        queued.reject(error);
+        settleEvent(queued, undefined, error);
       }
     }
   }
@@ -503,25 +534,44 @@ export class HybridTransport implements Transport {
       const last = pending.sequence + pending.frames.length - 1;
       // Taken once: a replay after a lost reply resends exactly these (each event is idempotent).
       pending.events ??= this.eventsEnabled() ? this.queuedEvents.splice(0, CLOUD_V2_MAX_TURN_EVENTS) : [];
-      const events = pending.events;
-      if (!pending.frames.length && !events.length) { this.pendingHistory = undefined; return; }
-      if (!this.historyBatchRefused) {
+      while (!this.historyBatchRefused) {
+        const events = pending.events;
+        if (!pending.frames.length && !events.length) { this.pendingHistory = undefined; return; }
         try {
-          const raw = await this.request("history/batch", { bootId: this.bootId, sequence: pending.sequence,
-            frames: pending.frames.map(({ t: _t, ...frame }) => frame), ...(events.length ? { events: events.map(queued => queued.event) } : {}) });
+          this.historyRequestActive = true;
+          let raw: Record<string, unknown>;
+          try {
+            raw = await this.request("history/batch", { bootId: this.bootId, sequence: pending.sequence,
+              frames: pending.frames.map(({ t: _t, ...frame }) => frame), ...(events.length ? { events: events.map(queued => queued.event) } : {}) });
+          } finally { this.historyRequestActive = false; }
           const reply = CloudV2WorkerHistoryBatchReplySchema.safeParse(raw);
-          if (!reply.success || reply.data.sequence !== last || (reply.data.events?.length ?? 0) !== events.length)
-            throw new Error("Invalid history acknowledgement.");
+          if (!reply.success || reply.data.sequence !== last) throw new Error("Invalid history acknowledgement.");
+          if ((reply.data.events?.length ?? 0) !== events.length) throw new EventsRefused();
           this.historySequence = last; this.pendingHistory = undefined;
           this.settleEvents(events, reply.data.events ?? []);
           this.scheduleEvents();
           return;
         } catch (error) {
-          if (!(error instanceof HttpFailure && error.status === 404)) throw error;
-          // A control plane rolled back past history-batch-v1: no more batches (or batched events) this boot.
-          this.historyBatchRefused = true;
+          if (error instanceof HttpFailure && error.status === 404) {
+            // A control plane rolled back past history-batch-v1: no more batches (or batched events) this boot.
+            this.historyBatchRefused = true; break;
+          }
+          if (error instanceof HttpFailure && error.status === 401) {
+            for (const queued of events) settleEvent(queued, undefined, error);
+            throw error;
+          }
+          if (!events.length) throw error;
+          // The events leave this batch whatever went wrong: they must never wait for it to succeed.
+          pending.events = [];
+          this.detachEvents(events);
+          const refused = error instanceof EventsRefused || error instanceof HttpFailure && error.status >= 400 && error.status < 500;
+          // An N-1 control plane (strict schema, 400) or a withdrawn offer: the frames again alone, no more events.
+          if (refused) { this.eventsRefused = true; this.detachEvents(this.queuedEvents.splice(0)); continue; }
+          if (!pending.frames.length) { this.pendingHistory = undefined; return; }
+          throw error;
         }
       }
+      const events = pending.events;
       // The same frames at the same sequences, one request each: the server applies exactly this per frame.
       for (const [index, frame] of pending.frames.entries()) {
         const sequence = pending.sequence + index;
@@ -531,8 +581,7 @@ export class HybridTransport implements Transport {
         this.historySequence = sequence;
       }
       this.pendingHistory = undefined;
-      if (events.length) await this.sendEventsAlone(events);
-      if (this.queuedEvents.length) await this.sendEventsAlone(this.queuedEvents.splice(0));
+      this.detachEvents([...events, ...this.queuedEvents.splice(0)]);
       return;
     }
     const reply = await this.request("history", { ...pending.frame, bootId: this.bootId, sequence: pending.sequence });
