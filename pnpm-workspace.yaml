@@ -72,8 +72,14 @@ overrides:
 # Cursor's zod peer now resolves to the patched root version. Keep production
 # audits free of exceptions; scripts/__tests__/audit-exceptions.test.ts guards
 # the locked zod and body-parser floors.
+# One exception, owner-approved 2026-11-18: GHSA-fc5q-39xc-vjpf (picomatch ReDoS,
+# no patched release). Only @parcel/watcher holds picomatch: Sass's optional
+# watcher and Tailwind's CLI, build tooling whose globs come from our own config.
+# No Zeros source imports @parcel/watcher (the engine watches with chokidar).
+# Remove this the day picomatch ships a fix; the test fails if that reach changes.
 auditConfig:
-  ignoreGhsas: []
+  ignoreGhsas:
+    - GHSA-fc5q-39xc-vjpf
 
 # Cursor SDK 1.0.35 bundles its Node transport and no longer installs Undici 5.
 # Its former Busboy override and Undici advisory exceptions have been retired.
