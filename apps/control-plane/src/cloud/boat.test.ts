@@ -140,12 +140,13 @@ describe("cloud v2 Boat compute", () => {
     await new BoatCloudV2Compute(boat).fork("bx_abc12345", { key: "k", ttlSeconds: 60 });
     expect(boat.request.mock.calls[0]![1].body).not.toHaveProperty("name");
     const inspect = client();
-    inspect.request.mockResolvedValueOnce({ ok: true, sandbox: { id: "bx_abc12345", name: "zeros-alpha-ws-6f2b7c1e", state: "archived", extra: 1 } })
+    inspect.request.mockResolvedValueOnce({ ok: true, sandbox: { id: "bx_abc12345", name: "zeros-alpha-ws-6f2b7c1e", state: "archived", stoppedAt: "2026-11-18T12:50:11.033Z", extra: 1 } })
       .mockResolvedValueOnce({ ok: true, sandbox: { id: "bx_abc12345", state: "archiving" } })
       .mockResolvedValueOnce({ ok: true, sandbox: { id: "bx_abc12345" } });
     const compute = new BoatCloudV2Compute(inspect);
-    expect(await compute.inspect("bx_abc12345")).toEqual({ name: "zeros-alpha-ws-6f2b7c1e", state: "archived" });
-    expect(await compute.inspect("bx_abc12345")).toEqual({ name: null, state: "archiving" });
+    // When Boat stopped it: provider-stop.ts records it for the Boat report.
+    expect(await compute.inspect("bx_abc12345")).toEqual({ name: "zeros-alpha-ws-6f2b7c1e", state: "archived", stoppedAt: new Date("2026-11-18T12:50:11.033Z") });
+    expect(await compute.inspect("bx_abc12345")).toEqual({ name: null, state: "archiving", stoppedAt: null });
     await expect(compute.inspect("bx_abc12345")).rejects.toThrow();
     expect(inspect.request).toHaveBeenCalledWith("/sandboxes/bx_abc12345", { method: "GET" });
   });
