@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import pg from "pg";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -55,5 +56,56 @@ database("acting-user Codex proxy", () => {
     await f.worker("prompts/outcome", { userMessageId: turn.input.userMessageId, dispatchId: turn.begin.dispatchId, state: "completed" });
     const next = reader.read(); output.enqueue(new TextEncoder().encode("mustNotEscape"));
     await expect(next).rejects.toThrow();
+  });
+
+  // statements-2: a check is one transaction, and one check covers every chunk already waiting.
+  const transactions = async (run: () => Promise<void>) => {
+    const scope = new AsyncLocalStorage<boolean>(), query = pg.Client.prototype.query;
+    let count = 0;
+    vi.spyOn(pg.Client.prototype, "query").mockImplementation(function (this: pg.Client, ...args: unknown[]) {
+      if (scope.getStore() && typeof args[0] === "string" && /^BEGIN\b/.test(args[0])) count += 1;
+      return (query as (...values: unknown[]) => unknown).apply(this, args);
+    } as never);
+    await scope.run(true, run);
+    return count;
+  };
+
+  it("streams twenty waiting chunks with six transactions", async () => {
+    const chunks = Array.from({ length: 20 }, (_, index) => `chunk-${index};`);
+    const turn = await setup(async () => new Response(new ReadableStream<Uint8Array>({ start(controller) {
+      for (const chunk of chunks) controller.enqueue(new TextEncoder().encode(chunk));
+      controller.close();
+    } })));
+    let text = "";
+    // proxyAccess: token check, login, check; then a check before and after the upstream request; one for the stream.
+    expect(await transactions(async () => {
+      const response = await turn.request(); expect(response.status).toBe(200);
+      text = await response.text();
+    })).toBe(6);
+    expect(text).toBe(chunks.join(""));
+  });
+
+  it("never releases a chunk that arrived after the check covering the earlier chunks started", async () => {
+    let output!: ReadableStreamDefaultController<Uint8Array>;
+    const source = new ReadableStream<Uint8Array>({ start(controller) { output = controller; } });
+    const turn = await setup(async () => new Response(source));
+    const response = await turn.request(); expect(response.status).toBe(200);
+    const reader = response.body!.getReader();
+    const tokenContext = f.cp.execution.tokenContext.bind(f.cp.execution);
+    let raced = false;
+    vi.spyOn(f.cp.execution, "tokenContext").mockImplementation(async (...args) => {
+      const result = await tokenContext(...args);
+      if (!raced) {
+        // This check has passed for "first"; "late" arrives and the turn ends before it reports back.
+        raced = true;
+        output.enqueue(new TextEncoder().encode("late"));
+        await f.worker("prompts/outcome", { userMessageId: turn.input.userMessageId, dispatchId: turn.begin.dispatchId, state: "completed" });
+      }
+      return result;
+    });
+    output.enqueue(new TextEncoder().encode("first"));
+    expect(new TextDecoder().decode((await reader.read()).value)).toBe("first");
+    await expect(reader.read()).rejects.toThrow();
+    expect(raced).toBe(true);
   });
 });
