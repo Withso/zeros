@@ -21,6 +21,7 @@ import { CloudExecutionMaintenance } from "./maintenance.js";
 import { CloudExecutionSync } from "./sync.js";
 import { executionContextAuthority, matchesExecutionSignature, type VersionedExecutionAuthority } from "./signatures.js";
 import { openExecution, sealExecution } from "./envelope.js";
+import type { ExecutionAuthorizationCache } from "./authorization-cache.js";
 import { EXECUTION_MINIMUM_LIFETIME_MS, assertExecutionLifetime, withExecutionLifetimeRetry } from "./lifetime.js";
 
 export { EXECUTION_LEASE_MS } from "./lifetime.js";
@@ -66,11 +67,15 @@ const pending = (state: string) => ["queued", "inboxed", "dispatching", "accepte
 const notify = (tx: Tx, id: string) => tx.query("SELECT pg_notify('zeros_cloud_v2_prompts',$1)", [id]);
 const envelopeBinding = (row: ExecutionContext, kind = "material") => ({ id: row.id, workspaceId: row.workspace_id, organizationId: row.org_id, userId: row.user_id!, kind });
 
+export type CachedTokenContext = { readonly context: Readonly<Omit<ExecutionContext, "material"> & { token_id: string }>; readonly proof: ExecutionAdmission };
+
 export class CloudExecutionContexts {
   readonly clients = new CloudExecutionClients(this);
   readonly boots = new CloudExecutionBoots(this);
   readonly maintenance = new CloudExecutionMaintenance(this);
   readonly sync = new CloudExecutionSync(this);
+  /** Repeated token checks (proxy, workspace API tokens) may be served from memory; see authorization-cache.ts. */
+  authorizations?: ExecutionAuthorizationCache<CachedTokenContext>;
   constructor(readonly pool: pg.Pool, readonly deps: ExecutionDeps) {}
 
   async active(id: string, transaction?: Tx): Promise<boolean> {
@@ -142,6 +147,20 @@ export class CloudExecutionContexts {
     return { ...await this.tokenContextIn(kind, value), login: undefined };
   }
 
+  /** tokenContext for a repeated check of one token, without a caller's transaction. Never returns login material. */
+  async cachedTokenContext(kind: "api" | "proxy", value: { token: string } | { id: string }): Promise<CachedTokenContext> {
+    const load = async () => {
+      const { context: { material: _material, ...context }, proof } = await this.tokenContext(kind, value);
+      const payer = context.selection?.version === 2 ? context.selection.payer.userId : undefined;
+      return { value: Object.freeze({ context: Object.freeze(context), proof: Object.freeze(proof) }),
+        scopes: { workspaceId: context.workspace_id, organizationId: context.org_id, userIds: [context.user_id, payer].filter((id): id is string => !!id) },
+        expiresAt: Math.min(context.expires_at.getTime(), context.client_token_expires_at?.getTime() ?? Infinity) };
+    };
+    if (!this.authorizations) return (await load()).value;
+    const key = `${kind}:${"token" in value ? hashCloudV2Token(value.token).toString("hex") : `id:${value.id}`}`;
+    return this.authorizations.get(key, load);
+  }
+
   private async tokenContextOnce(kind: "api" | "proxy", value: { token: string } | { id: string }, tx: Tx) {
     const context = await this.tokenRow(kind, value, tx);
     if (!context.user_id || context.state !== "active" || context.expires_at.getTime() <= Date.now()) throw actorChanged();
@@ -193,9 +212,9 @@ export class CloudExecutionContexts {
     if (context.kind !== "turn" || context.agent !== "codex" || !context.selection) throw actorChanged();
     const selected = () => this.deps.logins.select(context.org_id, context.user_id!, "codex", context.selection!);
     const check = async () => {
-      const started = performance.now(), current = await this.tokenContext("proxy", { token });
+      const started = performance.now(), current = await this.cachedTokenContext("proxy", { token });
       if (current.context.id !== context.id) throw actorChanged();
-      context = current.context;
+      context = { ...current.context, material: context.material };
       checkedAt = started;
       return context.expires_at.getTime();
     };
@@ -451,7 +470,7 @@ export class CloudExecutionContexts {
 
   /** locked: the row as this transaction holds it FOR UPDATE (or just wrote it); nothing else can change it before
    * COMMIT, so it is not read again (statements-1). The payer and the person are still read: they are not locked. */
-  async assertContext(tx: Tx, context: ExecutionContext, proof: ExecutionAdmission, locked?: ExecutionContext): Promise<ExecutionContext> {
+  async assertContext(tx: Tx, context: Pick<ExecutionContext, "id" | "workspace_id">, proof: ExecutionAdmission, locked?: ExecutionContext): Promise<ExecutionContext> {
     const row = locked ?? await this.context(tx, context.id, context.workspace_id);
     if (row.state !== "active" && row.reason === "access_revoked") throw new ExecutionContextRevoked();
     if (row.state !== "active") throw new ExecutionContextEnded(row.reason ?? "actor_changed");

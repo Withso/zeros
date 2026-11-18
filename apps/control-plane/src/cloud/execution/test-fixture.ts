@@ -18,7 +18,7 @@ import { CloudV2BeginActiveReplySchema } from "../contract.js";
 import { teamSharingFixture } from "../team-sharing/test-fixture.js";
 import { executionIntentAuthority } from "./authority.js";
 
-export async function executionFixture(pool: pg.Pool, options: { lifecycle?: boolean; relay?: boolean; actingUserDefault?: boolean; runtimeCanaryKey?: string; teamOwnership?: boolean } = {}) {
+export async function executionFixture(pool: pg.Pool, options: { lifecycle?: boolean; relay?: boolean; actingUserDefault?: boolean; runtimeCanaryKey?: string; teamOwnership?: boolean; authCache?: "off" | "shadow" | "on" } = {}) {
   const seed = await teamSharingFixture(pool, { ownership: options.teamOwnership === true });
   const keys = { currentKeyVersion: 1, keys: { 1: Buffer.alloc(32, 27).toString("base64url") } };
   const signing = generateKeyPairSync("ed25519");
@@ -29,6 +29,8 @@ export async function executionFixture(pool: pg.Pool, options: { lifecycle?: boo
     cloudV2: { boat: { apiKey: "synthetic-boat-credential" }, apiUrl: "https://api.example.test", realtimeUrl: "https://rt.example.test", promptOutbox: true,
       ...(options.actingUserDefault === undefined ? {} : { actingUserDefault: options.actingUserDefault }),
       ...(options.teamOwnership === undefined ? {} : { teamOwnership: options.teamOwnership }),
+      // TEST_EXECUTION_AUTH_CACHE=on reruns every execution suite with token verdicts served from memory.
+      ...((options.authCache ?? process.env.TEST_EXECUTION_AUTH_CACHE) ? { executionAuthCache: (options.authCache ?? process.env.TEST_EXECUTION_AUTH_CACHE) as "off" | "shadow" | "on" } : {}),
       ...(options.runtimeCanaryKey ? { runtimeCanary: { keys: [{ id: "fixture", publicKey: options.runtimeCanaryKey }],
         fixture: { creatorUserId: seed.creator.id, organizationId: seed.organizationId, repositoryId: "42" } } } : {}),
       workerSigningKey: signing.privateKey.export({ type: "pkcs8", format: "der" }).toString("base64"),

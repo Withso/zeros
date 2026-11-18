@@ -98,7 +98,9 @@ export class CloudApiCredentials {
 
   private async contextCredential(value: { token: string } | { id: string }, transaction?: Tx): Promise<CloudApiCredential> {
     if (!this.execution) throw unauthorized();
-    const { context, proof } = await this.execution.tokenContext("api", value, transaction);
+    // Without a transaction the token verdict may come from memory; the read below still ends with the live fence.
+    const { context, proof } = transaction ? await this.execution.tokenContext("api", value, transaction)
+      : await this.execution.cachedTokenContext("api", value);
     const read = async (tx: Tx) => {
       const row = (await tx.query<CredentialRow>(`SELECT u.email,u.display_name,o.slug AS organization_slug,o.name AS organization_name
         FROM users u JOIN organizations o ON o.id=$2 WHERE u.id=$1`, [context.user_id, context.org_id])).rows[0];
@@ -108,7 +110,14 @@ export class CloudApiCredentials {
         organizationId: context.org_id, organizationSlug: row.organization_slug, organizationName: row.organization_name,
         workspaceId: context.workspace_id, contextId: context.id, executionProof: proof };
     };
-    return transaction ? read(transaction) : withSystemTx(this.pool, read);
+    if (transaction) return read(transaction);
+    // A cached verdict can precede a revocation's notification; the live fence then answers as the token check would.
+    try { return await withSystemTx(this.pool, read); }
+    catch (error) {
+      if (error instanceof HttpError && error.status < 500 && error.status !== 401)
+        throw new HttpError(401, "unauthorized", "Execution credential expired or was revoked");
+      throw error;
+    }
   }
 
   private async member(tx: Tx, org: string, user: string, lock = false): Promise<OrganizationRole> {

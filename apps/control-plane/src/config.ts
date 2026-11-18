@@ -248,6 +248,8 @@ export type CloudV2Config = {
    * before any VM exists. CLOUD_V2_ASYNC_CREATE_ENABLED=false keeps every
    * create synchronous; unset means enabled. */
   asyncCreate?: boolean;
+  /** Execution token verdicts served from memory (cloud/execution/authorization-cache.ts). Default off. */
+  executionAuthCache?: "off" | "shadow" | "on";
   /** How long after start a replica waits before async creates. Defaults to
    * one lifecycle scan interval, or none on the development channel. */
   asyncCreateDelayMs?: number;
@@ -280,6 +282,8 @@ function loadCloudV2Config(env: NodeJS.ProcessEnv, channel: string): CloudV2Conf
   if (checkpointRetry && !["true", "false"].includes(checkpointRetry)) throw new Error("Invalid environment: CLOUD_V2_CHECKPOINT_RETRY_ENABLED must be true or false");
   const asyncCreate = env.CLOUD_V2_ASYNC_CREATE_ENABLED?.trim().toLowerCase();
   if (asyncCreate && !["true", "false"].includes(asyncCreate)) throw new Error("Invalid environment: CLOUD_V2_ASYNC_CREATE_ENABLED must be true or false");
+  const executionAuthCache = env.CLOUD_V2_EXECUTION_AUTH_CACHE?.trim().toLowerCase() || "off";
+  if (!["off", "shadow", "on"].includes(executionAuthCache)) throw new Error("Invalid environment: CLOUD_V2_EXECUTION_AUTH_CACHE must be off, shadow or on");
   const actingUserDefault = env.ZEROS_CLOUD_ACTING_USER_DEFAULT?.trim();
   if (actingUserDefault && !["0", "1"].includes(actingUserDefault)) throw new Error("Invalid environment: ZEROS_CLOUD_ACTING_USER_DEFAULT must be 0 or 1");
   const teamOwnership = readCloudTeamOwnership(env.ZEROS_CLOUD_TEAM_OWNERSHIP);
@@ -319,6 +323,7 @@ function loadCloudV2Config(env: NodeJS.ProcessEnv, channel: string): CloudV2Conf
     messageAuthority: messageAuthority !== "false",
     checkpointRetry: checkpointRetry === "true",
     asyncCreate: asyncCreate !== "false",
+    executionAuthCache: executionAuthCache as "off" | "shadow" | "on",
     actingUserDefault: actingUserDefault === "1",
     teamOwnership,
     workerSigningKey, ...(previous ? { workerSigningKeyPrevious: previous } : {}),

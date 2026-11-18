@@ -1231,6 +1231,24 @@ starts with one transaction (the token check reads the login inside it), whose
 window also covers sending the request upstream. A twenty-chunk reply that
 arrives at once costs about 3 transactions (was 157).
 
+With `CLOUD_V2_EXECUTION_AUTH_CACHE=on` (`off` by default, `shadow` serves the live
+check and counts any cached allow the live check refuses), repeated checks of one
+token (each Codex proxy check, each workspace API token) are served from control-plane
+memory (`src/cloud/execution/authorization-cache.ts`). An entry is a passing
+one-transaction check, kept at most 5 s from when that check started and never past
+the context's expiry, and only while the replica's LISTEN session is healthy;
+refusals and login material are never kept. Removals, Stop and outcomes already end
+the context row in the revoking transaction, which notifies
+`zeros_cloud_v2_execution`; migration 0255 adds column-scoped hints on
+`zeros_cloud_v2_authorization` for the inputs the fence does not turn into a context
+change (workspace API access, acting boots, sources, a person's API setting, the
+sender cut, Hold periods). Each replica drops matching entries on commit, so a removal
+usually stops a stream within tens of milliseconds; a lost notification, or a Hold
+window that opens on the clock, is bounded by the 5 s age. A load overtaken by an
+invalidation of its scope is used for its own check but not kept. A guard test lists
+every table the check reads and fails if one is not classified. The cache's counters
+are logged once a minute as `[cloud-v2] authorization-cache`.
+
 The prompt channel wakes the worker's long poll and sends a relay hint. Each
 wake costs an empty pull and a new long poll when nothing is waiting. A
 terminal outcome therefore notifies only when a message waits behind the turn in
