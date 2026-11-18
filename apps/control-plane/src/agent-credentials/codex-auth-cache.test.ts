@@ -11,6 +11,16 @@ describe("private native Codex cache",()=>{
       {...cache,tokens:{...cache.tokens,account_id:"other"}},{...cache,tokens:{...cache.tokens,id_token:syntheticCodexCache({subject:"other"}).tokens.id_token}}])
       expect(()=>parseCodexNativeCache(value)).toThrow("Invalid Codex native authentication cache");
   });
+  it("accepts a newer Codex token record and keeps only the fields the cloud runtime reads",()=>{
+    // Codex 0.166 (the desktop's sign-in) writes six token fields; the cloud runtime (0.154) reads four.
+    const cache=syntheticCodexCache(),newer={...cache,tokens:{...cache.tokens,login_owner_id:"owner-sentinel",chatgpt_plan_type:"pro"}};
+    const parsed=parseCodexNativeCache(newer);
+    expect(parsed.cache).toEqual(cache);
+    expect(JSON.stringify(parsed.cache)).not.toContain("owner-sentinel");
+    for(const extra of [{nested:{endpoint:"untrusted"}},{list:["x"]},{long:"x".repeat(16_385)},
+      Object.fromEntries(Array.from({length:9},(_,index)=>[`field_${index}`,"x"]))])
+      expect(()=>parseCodexNativeCache({...cache,tokens:{...cache.tokens,...extra}})).toThrow("Invalid Codex native authentication cache");
+  });
   it("separately authenticates owner, consent, material epoch and encryption key",()=>{
     const key=randomBytes(32).toString("base64url"),binding={credentialId:randomUUID(),ownerUserId:randomUUID(),revision:1,version:2,keyVersion:1},cache=syntheticCodexCache();
     const envelope=sealCodexNativeCache(cache,binding,key);
