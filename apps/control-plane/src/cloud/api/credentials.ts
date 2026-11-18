@@ -98,7 +98,9 @@ export class CloudApiCredentials {
 
   private async contextCredential(value: { token: string } | { id: string }, transaction?: Tx): Promise<CloudApiCredential> {
     if (!this.execution) throw unauthorized();
-    const { context, proof } = await this.execution.tokenContext("api", value, transaction);
+    // Without a transaction the token verdict may come from memory; the read below still ends with the live fence.
+    const { context, proof } = transaction ? await this.execution.tokenContext("api", value, transaction)
+      : await this.execution.cachedTokenContext("api", value);
     const read = async (tx: Tx) => {
       const row = (await tx.query<CredentialRow>(`SELECT u.email,u.display_name,o.slug AS organization_slug,o.name AS organization_name
         FROM users u JOIN organizations o ON o.id=$2 WHERE u.id=$1`, [context.user_id, context.org_id])).rows[0];

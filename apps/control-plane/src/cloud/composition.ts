@@ -64,7 +64,8 @@ import { CloudWorkspaceSync } from "./workspace-sync/store.js";
 import { CloudWorkspaceGithubReadTokens } from "./workspace-sync/github-read-token.js";
 import { CLOUD_V2_LIVE_ACCESS, requireWorkspaceCreator } from "./workspace-access.js";
 
-import { CloudExecutionContexts } from "./execution/store.js";
+import { CloudExecutionContexts, type CachedTokenContext } from "./execution/store.js";
+import { ExecutionAuthorizationCache, authorizationHint } from "./execution/authorization-cache.js";
 import { lifecycleExecution } from "./execution/lifecycle.js";
 import { claimExecutionRestore } from "./execution/restore.js";
 import { CloudExecutionActivations, executionActivationRuntime } from "./execution/activation.js";
@@ -466,8 +467,32 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
       } catch { /* Invalid wake hints carry no authority. */ }
     },
   });
-  const loginChanges = { start: () => loginListener.start(), stop: async () => {
-    executionClosing = true; await loginListener.stop();
+  // Token verdicts in memory, dropped by the commit-time hints of removals, Stop, outcomes and the settings in 0255.
+  const authorizationMode = v2.executionAuthCache ?? "off";
+  const authorizationListener = authorizationMode === "off" ? undefined : postgresNotificationSubscription(listenerPool, {
+    channels: ["zeros_cloud_v2_execution", "zeros_cloud_v2_prompts", "zeros_cloud_v2_authorization"],
+    onReady: () => execution.authorizations?.flush(),
+    onDisconnect: () => execution.authorizations?.flush(),
+    onNotification: notice => {
+      const hint = authorizationHint(notice.channel, notice.payload);
+      if (hint === "flush") execution.authorizations?.flush();
+      else if (hint !== "ignore") execution.authorizations?.invalidate(hint);
+    },
+  });
+  let authorizationReport: NodeJS.Timeout | undefined;
+  if (authorizationListener) {
+    const authorizations = new ExecutionAuthorizationCache<CachedTokenContext>({ mode: authorizationMode, healthy: () => authorizationListener.healthy() });
+    execution.authorizations = authorizations;
+    authorizationReport = setInterval(() => {
+      const counters = { ...authorizations.counters };
+      if (!Object.values(counters).some(Boolean)) return;
+      for (const key of Object.keys(authorizations.counters) as (keyof typeof counters)[]) authorizations.counters[key] = 0;
+      console.log(`[cloud-v2] authorization-cache ${JSON.stringify({ mode: authorizationMode, entries: authorizations.size, ...counters })}`);
+    }, 60_000);
+    authorizationReport.unref();
+  }
+  const loginChanges = { start: async () => { await Promise.all([loginListener.start(), authorizationListener?.start()]); }, stop: async () => {
+    executionClosing = true; clearInterval(authorizationReport); await Promise.all([loginListener.stop(), authorizationListener?.stop()]);
     await Promise.all([...executionHints.values()].map(value => value.flight));
   } };
   void loginChanges?.start().catch(() => {}); // The shared listener retries and re-reads onReady.

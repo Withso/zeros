@@ -30,7 +30,8 @@ suite("runtime hello through the production composition", () => {
   afterAll(() => pool.end());
 
   async function fixture(privateBoot = true, secondary = false, api = false, beforeApiColumn = false, localCommands = false) {
-    if (beforeApiColumn) await pool.query("ALTER TABLE cloud_v2_workspaces DROP COLUMN api_access, DROP COLUMN restart_stop_generation");
+    // CASCADE also drops 0255's authorization hint trigger, which did not exist before the column either.
+    if (beforeApiColumn) await pool.query("ALTER TABLE cloud_v2_workspaces DROP COLUMN api_access CASCADE, DROP COLUMN restart_stop_generation");
     const creator = randomUUID(), org = randomUUID();
     await pool.query("INSERT INTO users(id,email,display_name) VALUES($1,$2,'Fixture')", [creator, `${creator}@example.test`]);
     await grantTestPro(pool, creator);
