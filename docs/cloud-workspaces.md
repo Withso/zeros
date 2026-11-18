@@ -1216,6 +1216,19 @@ first with a different code, the refusal first runs the final check, so a
 removed person still sees their own refusal. A turn's begin with its lease is
 3 transactions and about 52 database round trips (was 4 and 67).
 
+An execution token check (each Codex proxy check, each workspace API token) is
+one read-only transaction: the token, the admission snapshot, the login and the
+final context fence. Any refusal replays the earlier multi-transaction path,
+which alone ends a sender whose access lapsed on the clock or moves the turn to
+its payer, so refusal codes and those writes are unchanged. A passing Codex proxy
+check also covers streamed chunks that arrive within 250 ms of the check's start
+(`PROXY_CHECK_COVERS_MS`, owner decision 2026-11-18); a later chunk waits for a new
+check. So reply data can reach the worker at most 250 ms after a removal, Stop or
+outcome commits, and a streaming reply costs at most about four checks a second
+instead of one per upstream read. An idle stream is still re-checked at least
+every 5 s, and every check before and after the upstream request still runs. A
+twenty-chunk reply that arrives at once costs about 6 transactions (was 157).
+
 The prompt channel wakes the worker's long poll and sends a relay hint. Each
 wake costs an empty pull and a new long poll when nothing is waiting. A
 terminal outcome therefore notifies only when a message waits behind the turn in

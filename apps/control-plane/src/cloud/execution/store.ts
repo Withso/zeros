@@ -132,9 +132,28 @@ export class CloudExecutionContexts {
     catch (error) { await check(); throw error; }
   }
 
+  /** Without a transaction, the check is one read-only transaction (statements-2): the token, the admission snapshot, the
+   * login and the final context fence. Any refusal replays the standalone path below, which alone may end a clock-cut
+   * sender or move the turn to its payer, so refusal codes and those writes are unchanged. */
   async tokenContext(kind: "api" | "proxy", value: { token: string } | { id: string }, transaction?: Tx) {
-    const read = async (tx: Tx) => {
-      const result = await tx.query<ExecutionContext & { token_id: string }>(`SELECT c.*,t.id AS token_id FROM cloud_v2_execution_tokens t
+    if (transaction) return this.tokenContextIn(kind, value, transaction);
+    try { return await withSystemTx(this.pool, tx => this.tokenContextOnce(kind, value, tx)); }
+    catch (error) { if (!(error instanceof HttpError)) throw error; }
+    return this.tokenContextIn(kind, value);
+  }
+
+  private async tokenContextOnce(kind: "api" | "proxy", value: { token: string } | { id: string }, tx: Tx) {
+    const context = await this.tokenRow(kind, value, tx);
+    if (!context.user_id || context.state !== "active" || context.expires_at.getTime() <= Date.now()) throw actorChanged();
+    const proof = await this.deps.authority.admit(context.workspace_id, continuationPrincipal(context)!, { continuation: true, minimumSourceMs: 0, transaction: tx });
+    if (kind === "api" && senderEnded(context)) throw actorChanged();
+    if (context.agent && context.selection) await this.deps.logins.select(context.org_id, context.user_id, context.agent, context.selection, tx);
+    await this.assertContext(tx, context, proof);
+    return { context, proof };
+  }
+
+  private async tokenRow(kind: "api" | "proxy", value: { token: string } | { id: string }, tx: Tx) {
+    const result = await tx.query<ExecutionContext & { token_id: string }>(`SELECT c.*,t.id AS token_id FROM cloud_v2_execution_tokens t
         JOIN cloud_v2_execution_contexts c ON c.id=t.context_id AND c.workspace_id=t.workspace_id
         JOIN cloud_v2_workspaces w ON w.id=c.workspace_id
         WHERE t.kind=$1 AND ($2::bytea IS NULL OR t.token_hash=$2) AND ($3::uuid IS NULL OR t.id=$3)
@@ -144,10 +163,13 @@ export class CloudExecutionContexts {
           AND c.worker_token_hash=w.worker_token_hash AND c.worker_boot_id=ANY(w.acting_user_boot_ids) AND ${CLOUD_V2_LIVE_ACCESS}
           AND ($1<>'api' OR (c.sender_ended_at IS NULL AND w.api_access AND coalesce((SELECT workspace_api_access FROM cloud_api_access_settings
             WHERE org_id=c.org_id AND user_id=c.user_id),true)))`, [kind, "token" in value ? hashCloudV2Token(value.token) : null, "id" in value ? value.id : null]);
-      const context = result.rows[0];
-      if (!context) throw new HttpError(401, "unauthorized", "Execution credential expired or was revoked");
-      return context;
-    };
+    const context = result.rows[0];
+    if (!context) throw new HttpError(401, "unauthorized", "Execution credential expired or was revoked");
+    return context;
+  }
+
+  private async tokenContextIn(kind: "api" | "proxy", value: { token: string } | { id: string }, transaction?: Tx) {
+    const read = (tx: Tx) => this.tokenRow(kind, value, tx);
     const context = transaction ? await read(transaction) : await withSystemTx(this.pool, read);
     try {
       const proof = await this.admission(context);
