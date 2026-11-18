@@ -26,6 +26,9 @@ export async function proxyExecution(input: { execution: CloudExecutionContexts;
   try {
     const access = await execution.proxyAccess(token);
     let coveredUntil = access.checkedAt + PROXY_CHECK_COVERS_MS;
+    // With verdicts in memory (authorization-cache.ts) a check is a lookup: every chunk is checked, so a removal stops a
+    // stream as soon as its notification arrives rather than after the window.
+    const everyChunk = execution.authorizations?.mode === "on";
     const check = async () => {
       const started = performance.now(), expiresAt = await access.check();
       coveredUntil = Math.max(coveredUntil, started + PROXY_CHECK_COVERS_MS);
@@ -73,7 +76,7 @@ export async function proxyExecution(input: { execution: CloudExecutionContexts;
           const value = await reader.read();
           if (closed) return;
           // Released only under a check that started at most PROXY_CHECK_COVERS_MS before now.
-          if (performance.now() > coveredUntil) await check();
+          if (everyChunk || performance.now() > coveredUntil) await check();
           if (closed) return;
           if (value.done) { close(); output.close(); } else output.enqueue(value.value);
         } catch { if (!closed) { close(); controller.abort(); void reader.cancel().catch(() => {}); output.error(new Error("Execution authorization ended")); } }

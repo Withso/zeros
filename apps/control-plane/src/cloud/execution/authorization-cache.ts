@@ -33,6 +33,8 @@ export const EXECUTION_AUTHORIZATION_INPUTS = {
   organization_members: ["fence"],
   organizations: ["fence"],
   users: ["fence"],
+  // Read for terminal tokens. Status and revocation are fenced; a shortened expiry hints; a passed one or a deleted row: age.
+  auth_sessions: ["fence", "hint", "age"],
   cloud_agent_organization_connections: ["fence"],
   cloud_agent_credentials: ["fence"],
   cloud_agent_credential_versions: ["age"],
@@ -48,11 +50,13 @@ type Counters = { hits: number; loads: number; stale: number; invalidations: num
 
 export class ExecutionAuthorizationCache<T> {
   private readonly entries = new Map<string, Entry<T>>();
-  private readonly loading = new Map<string, Promise<T>>();
+  private readonly loading = new Map<string, { flight: Promise<T>; sequence: number }>();
   private readonly moved = new Map<string, { sequence: number; at: number }>();
   private sequence = 0;
   private flushedAt = 0;
   readonly counters: Counters = { hits: 0, loads: 0, stale: 0, invalidations: 0, flushes: 0, bypasses: 0, mismatches: 0 };
+  /** Shadow mode: refusals below 500 that a cached allow would have hidden, by error code. */
+  readonly mismatchCodes = new Map<string, number>();
 
   constructor(private readonly options: {
     mode: ExecutionAuthorizationMode;
@@ -71,23 +75,32 @@ export class ExecutionAuthorizationCache<T> {
   async get(key: string, load: () => Promise<ExecutionAuthorizationLoad<T>>): Promise<T> {
     if (this.options.mode === "off") return (await load()).value;
     const healthy = this.options.healthy();
-    if (!healthy) { this.counters.bypasses += 1; this.flush(); return (await load()).value; }
+    if (!healthy) { this.counters.bypasses += 1; if (this.entries.size) this.flush(); return (await load()).value; }
     if (this.options.mode === "on") {
       const entry = this.fresh(key);
       if (entry) { this.counters.hits += 1; return entry.value; }
-      const flight = this.loading.get(key);
-      if (flight) return flight;
+      // Join a load only if nothing was invalidated since it started: a later caller must see a later commit.
+      const joined = this.loading.get(key);
+      if (joined && joined.sequence === this.sequence) return joined.flight;
     }
     const cached = this.options.mode === "shadow" ? this.fresh(key) : undefined;
     const flight = this.load(key, load);
     if (this.options.mode === "on") {
-      this.loading.set(key, flight);
-      void flight.finally(() => { if (this.loading.get(key) === flight) this.loading.delete(key); }).catch(() => {});
+      this.loading.set(key, { flight, sequence: this.sequence });
+      void flight.finally(() => { if (this.loading.get(key)?.flight === flight) this.loading.delete(key); }).catch(() => {});
       return flight;
     }
     // Shadow: the live verdict is served; a cached verdict that the live check refuses is counted.
     try { return await flight; }
-    catch (error) { if (cached) this.counters.mismatches += 1; throw error; }
+    catch (error) {
+      const status = (error as { status?: unknown })?.status, code = (error as { code?: unknown })?.code;
+      if (cached && typeof status === "number" && status < 500) {
+        this.counters.mismatches += 1;
+        const name = typeof code === "string" ? code : String(status);
+        this.mismatchCodes.set(name, (this.mismatchCodes.get(name) ?? 0) + 1);
+      }
+      throw error;
+    }
   }
 
   /** Drops the entries of a workspace, of a person (sender or payer), or of an organization. */

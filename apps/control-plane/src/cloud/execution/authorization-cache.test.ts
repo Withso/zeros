@@ -95,7 +95,7 @@ describe("execution authorization cache", () => {
   it("serves the live verdict in shadow mode and counts a cached allow the live check refuses", async () => {
     const h = harness("shadow");
     await h.cache.get("k", h.load()); await h.cache.get("k", h.load()); expect(h.loads()).toBe(2);
-    await expect(h.cache.get("k", async () => { throw new Error("refused"); })).rejects.toThrow();
+    await expect(h.cache.get("k", async () => { throw Object.assign(new Error("refused"), { status: 403, code: "actor_changed" }); })).rejects.toThrow();
     expect(h.cache.counters.mismatches).toBe(1);
   });
 
@@ -111,5 +111,29 @@ describe("execution authorization cache", () => {
     expect(authorizationHint("zeros_cloud_v2_prompts", W)).toEqual({ workspaceId: W });
     expect(authorizationHint("zeros_cloud_v2_prompts", "")).toBe("flush");
     expect(authorizationHint("zeros_cloud_v2_logins", "{}")).toBe("ignore");
+  });
+
+  it("does not let a caller that arrives after an invalidation join the load that started before it", async () => {
+    const h = harness();
+    let release!: () => void;
+    const first = h.cache.get("k", async () => { await new Promise<void>(resolve => { release = resolve; }); return h.load("before")(); });
+    await Promise.resolve();
+    h.cache.invalidate({ workspaceId: W });
+    const second = h.cache.get("k", h.load("after"));
+    release();
+    expect(await first).toBe("before");
+    expect(await second).toBe("after");
+  });
+
+  it("counts only refusals below 500 as shadow mismatches, by code", async () => {
+    const h = harness("shadow");
+    await h.cache.get("k", h.load());
+    const refused = Object.assign(new Error("gone"), { status: 401, code: "unauthorized" });
+    const failed = Object.assign(new Error("down"), { status: 503, code: "unavailable" });
+    await expect(h.cache.get("k", async () => { throw failed; })).rejects.toBe(failed);
+    await h.cache.get("k", h.load());
+    await expect(h.cache.get("k", async () => { throw refused; })).rejects.toBe(refused);
+    expect(h.cache.counters.mismatches).toBe(1);
+    expect([...h.cache.mismatchCodes]).toEqual([["unauthorized", 1]]);
   });
 });

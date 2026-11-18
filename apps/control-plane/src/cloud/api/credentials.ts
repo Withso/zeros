@@ -110,7 +110,14 @@ export class CloudApiCredentials {
         organizationId: context.org_id, organizationSlug: row.organization_slug, organizationName: row.organization_name,
         workspaceId: context.workspace_id, contextId: context.id, executionProof: proof };
     };
-    return transaction ? read(transaction) : withSystemTx(this.pool, read);
+    if (transaction) return read(transaction);
+    // A cached verdict can precede a revocation's notification; the live fence then answers as the token check would.
+    try { return await withSystemTx(this.pool, read); }
+    catch (error) {
+      if (error instanceof HttpError && error.status < 500 && error.status !== 401)
+        throw new HttpError(401, "unauthorized", "Execution credential expired or was revoked");
+      throw error;
+    }
   }
 
   private async member(tx: Tx, org: string, user: string, lock = false): Promise<OrganizationRole> {

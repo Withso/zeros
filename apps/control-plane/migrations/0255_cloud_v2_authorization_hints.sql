@@ -50,6 +50,13 @@ CREATE TRIGGER zz_cloud_v2_authorization AFTER UPDATE OF sender_ended_at ON clou
   FOR EACH ROW WHEN (OLD.sender_ended_at IS NULL AND NEW.sender_ended_at IS NOT NULL)
   EXECUTE FUNCTION notify_cloud_v2_authorization('w', 'workspace_id');
 
+-- A shortened provider session (read for terminal tokens); extensions keep an entry inside the bound it loaded and do
+-- not notify. Status and revocation are fenced already; a passed expiry or a deleted row is left to the 5 s age.
+CREATE TRIGGER zz_cloud_v2_authorization AFTER UPDATE OF provider_session_expires_at ON auth_sessions
+  FOR EACH ROW WHEN (NEW.provider_session_expires_at IS NOT NULL
+    AND (OLD.provider_session_expires_at IS NULL OR NEW.provider_session_expires_at < OLD.provider_session_expires_at))
+  EXECUTE FUNCTION notify_cloud_v2_authorization('u', 'user_id');
+
 -- Hold windows. A window opening on the clock has no write and is found by the 5 s age bound.
 CREATE TRIGGER zz_cloud_v2_authorization AFTER INSERT OR DELETE ON organization_member_seat_periods
   FOR EACH ROW EXECUTE FUNCTION notify_cloud_v2_authorization('o', 'org_id');
