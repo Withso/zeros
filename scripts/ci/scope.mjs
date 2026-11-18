@@ -394,7 +394,7 @@ function checkPath(file) {
 }
 
 function isMove(status) {
-  return typeof status === "string" && /^[RC](?:100|[1-9]?\d)$/.test(status);
+  return typeof status === "string" && /^[RC](?:100|0\d\d)$/.test(status);
 }
 
 function nulFields(bytes) {
