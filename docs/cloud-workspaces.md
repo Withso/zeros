@@ -1205,6 +1205,17 @@ its outcome and its retirement cost one transaction when they share a batch.
 A control plane that refuses batches (404), or a configuration without the
 offer, sends each event through its own route again.
 
+Begin is one transaction: the sender's row is locked first (users before the
+workspace), then the worker, the prompt, the chat, the admission and the
+dispatch. Inside one transaction an early authority check followed by a later
+superset check only failed sooner, so the early one is gone; the last authority
+read before COMMIT stays the fence, and a removal that commits after it is
+applied by maintenance and the next begin. Rows the transaction holds `FOR
+UPDATE`, or just wrote, are not read again. Where a later step could now refuse
+first with a different code, the refusal first runs the final check, so a
+removed person still sees their own refusal. A turn's begin with its lease is
+3 transactions and about 52 database round trips (was 4 and 67).
+
 The prompt channel wakes the worker's long poll and sends a relay hint. Each
 wake costs an empty pull and a new long poll when nothing is waiting. A
 terminal outcome therefore notifies only when a message waits behind the turn in

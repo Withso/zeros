@@ -1,0 +1,207 @@
+{
+ "B1": {
+  "reply": {
+   "status": 403,
+   "code": "member_access_revoked",
+   "lease": false
+  },
+  "prompt": "inboxed",
+  "contexts": [],
+  "afterMaintenance": {
+   "prompt": "cancelled",
+   "contexts": []
+  }
+ },
+ "B2": {
+  "reply": {
+   "status": 403,
+   "code": "member_access_revoked",
+   "lease": false
+  },
+  "prompt": "inboxed",
+  "contexts": [],
+  "afterMaintenance": {
+   "prompt": "cancelled",
+   "contexts": []
+  }
+ },
+ "B4": {
+  "reply": {
+   "status": 403,
+   "code": "member_access_revoked",
+   "lease": false
+  },
+  "prompt": "inboxed",
+  "contexts": [],
+  "afterMaintenance": {
+   "prompt": "cancelled",
+   "contexts": []
+  }
+ },
+ "B5": {
+  "reply": {
+   "status": 403,
+   "code": "member_access_revoked",
+   "lease": false
+  },
+  "prompt": "inboxed",
+  "contexts": [],
+  "afterMaintenance": {
+   "prompt": "cancelled",
+   "contexts": []
+  }
+ },
+ "L1": {
+  "outcome": {
+   "dispatch": true,
+   "lease": false,
+   "missed": "member_access_revoked"
+  },
+  "prompt": "dispatching",
+  "contexts": [
+   {
+    "state": "active",
+    "reason": null,
+    "material": false,
+    "sender_ended": false
+   }
+  ]
+ },
+ "L2": {
+  "outcome": {
+   "dispatch": true,
+   "lease": false,
+   "missed": "actor_changed"
+  },
+  "prompt": "dispatching",
+  "contexts": [
+   {
+    "state": "revoked",
+    "reason": "access_revoked",
+    "material": false,
+    "sender_ended": false
+   }
+  ]
+ },
+ "L3": {
+  "outcome": {
+   "dispatch": true,
+   "lease": false,
+   "missed": "actor_changed"
+  },
+  "prompt": "dispatching",
+  "contexts": [
+   {
+    "state": "active",
+    "reason": null,
+    "material": false,
+    "sender_ended": false
+   }
+  ]
+ },
+ "L4": {
+  "outcome": {
+   "dispatch": true,
+   "lease": false,
+   "missed": "member_access_revoked"
+  },
+  "prompt": "dispatching",
+  "contexts": [
+   {
+    "state": "active",
+    "reason": null,
+    "material": false,
+    "sender_ended": false
+   }
+  ]
+ },
+ "L5": {
+  "outcome": {
+   "dispatch": true,
+   "lease": false,
+   "missed": "member_access_revoked"
+  },
+  "prompt": "dispatching",
+  "contexts": [
+   {
+    "state": "active",
+    "reason": null,
+    "material": false,
+    "sender_ended": false
+   }
+  ]
+ },
+ "L6": {
+  "outcome": {
+   "dispatch": true,
+   "lease": false,
+   "missed": "error"
+  },
+  "prompt": "dispatching",
+  "contexts": [
+   {
+    "state": "active",
+    "reason": null,
+    "material": false,
+    "sender_ended": false
+   }
+  ]
+ },
+ "S1": {
+  "status": 403,
+  "code": "member_access_revoked",
+  "receipt": false
+ },
+ "S2": {
+  "status": 403,
+  "code": "member_access_revoked",
+  "receipt": false
+ },
+ "S3": {
+  "status": 401,
+  "code": "session_revoked",
+  "receipt": false
+ },
+ "S4": {
+  "status": 401,
+  "code": "session_revoked",
+  "receipt": false
+ },
+ "S5": {
+  "status": 403,
+  "code": "member_access_revoked",
+  "receipt": false
+ },
+ "S6": {
+  "status": 401,
+  "code": "session_revoked",
+  "receipt": false
+ },
+ "S7": {
+  "status": 403,
+  "code": "member_access_revoked",
+  "receipt": false
+ },
+ "D1": {
+  "statuses": [
+   200,
+   200,
+   200,
+   200,
+   200,
+   200,
+   200,
+   200,
+   200,
+   200,
+   200,
+   200,
+   200,
+   200,
+   200,
+   200
+  ],
+  "failures": [],
+  "deadlocks": 0
+ }
+}

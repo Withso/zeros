@@ -1,0 +1,98 @@
+{
+ "T1": {
+  "status": 409,
+  "code": "actor_changed",
+  "contexts": [
+   {
+    "state": "active",
+    "reason": null,
+    "material": false,
+    "sender_ended": false
+   }
+  ],
+  "retry": {
+   "status": 409,
+   "code": "actor_changed"
+  }
+ },
+ "T2": {
+  "status": 409,
+  "code": "actor_changed",
+  "contexts": [
+   {
+    "state": "active",
+    "reason": null,
+    "material": false,
+    "sender_ended": false
+   }
+  ],
+  "retry": {
+   "status": 403,
+   "code": "member_access_revoked"
+  }
+ },
+ "T3": {
+  "status": 403,
+  "code": "member_access_revoked",
+  "contexts": [
+   {
+    "state": "active",
+    "reason": null,
+    "material": false,
+    "sender_ended": false
+   }
+  ],
+  "retry": {
+   "status": 403,
+   "code": "member_access_revoked"
+  }
+ },
+ "T4": {
+  "status": 409,
+  "code": "actor_changed",
+  "contexts": [
+   {
+    "state": "revoked",
+    "reason": "access_revoked",
+    "material": false,
+    "sender_ended": false
+   }
+  ],
+  "retry": {
+   "status": 409,
+   "code": "actor_changed"
+  }
+ },
+ "T5": {
+  "status": 409,
+  "code": "actor_changed",
+  "contexts": [
+   {
+    "state": "revoked",
+    "reason": "access_revoked",
+    "material": false,
+    "sender_ended": false
+   }
+  ],
+  "retry": {
+   "status": 409,
+   "code": "actor_changed"
+  }
+ },
+ "T6": {
+  "status": 409,
+  "code": "actor_changed",
+  "contexts": [
+   {
+    "state": "revoked",
+    "reason": "actor_changed",
+    "material": false,
+    "sender_ended": false
+   }
+  ],
+  "retry": {
+   "status": 409,
+   "code": "actor_changed"
+  }
+ }
+}
