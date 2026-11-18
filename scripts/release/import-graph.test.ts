@@ -22,7 +22,9 @@ function bareImports(entry: string): Set<string> {
 }
 
 describe("release CLIs run with the root workspace's dependencies only", () => {
-  it.each(["scripts/release/ci-cli.ts", "scripts/release/cli.ts", "scripts/release/cutover-cli.ts"])("%s never loads pg", entry => {
+  // candidate-cli: 0.1.30's first rc publication failed on `pg` in release.yml's publish job.
+  it.each(["scripts/release/ci-cli.ts", "scripts/release/cli.ts", "scripts/release/cutover-cli.ts", "scripts/release/candidate-cli.ts",
+    "scripts/release/release-ledger-cli.ts", "scripts/release/publication-cli.ts"])("%s never loads pg", entry => {
     expect(bareImports(entry).has("pg")).toBe(false);
   });
 });

@@ -9,9 +9,8 @@ import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { CANDIDATE_RECEIPT, receiptArtifact, verifyCandidate, writeCandidateReceipt } from "./candidate";
-import { PromotionError, releaseSource, requireCheck } from "./contracts";
+import { CHANNELS, PromotionError, releaseSource, requireCheck } from "./contracts";
 import { jsonClient } from "./io";
-import { runtimeOrigin } from "./runtime-contracts";
 
 export async function candidateMain(args = process.argv.slice(2), env = process.env, fetcher: typeof fetch = fetch, directory = "release") {
   requireCheck(args.length === 1 && ["--write", "--verify"].includes(args[0]!), "Usage: candidate-cli.ts --write | --verify");
@@ -33,7 +32,7 @@ export async function candidateMain(args = process.argv.slice(2), env = process.
     headers: { authorization: `Bearer ${env.GH_TOKEN}`, accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28" } });
   const receipt = await verifyCandidate(await readFile(`${directory}/${CANDIDATE_RECEIPT}`, "utf8"), { ...source, directory }, {
     read,
-    identity: () => json(`${runtimeOrigin("production")}/v1/release-identity`, { cache: "no-store" }),
+    identity: () => json(`${CHANNELS.production.api}/v1/release-identity`, { cache: "no-store" }),
     attested: (runId, attempt) => download(source.repository, runId, attempt, read, env),
   });
   console.log(`Release candidate ${receipt.releaseVersion} verified at ${receipt.sourceSha}; promoting the same files.`);
