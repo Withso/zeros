@@ -1220,11 +1220,14 @@ An execution token check (each Codex proxy check, each workspace API token) is
 one read-only transaction: the token, the admission snapshot, the login and the
 final context fence. Any refusal replays the earlier multi-transaction path,
 which alone ends a sender whose access lapsed on the clock or moves the turn to
-its payer, so refusal codes and those writes are unchanged. A streamed Codex
-reply still releases each chunk only after a check that started once the chunk
-had arrived, so a streamed reply costs one transaction per upstream read, and an
-idle stream is still re-checked at least every 5 s. A twenty-chunk reply costs 27
-transactions (was 157).
+its payer, so refusal codes and those writes are unchanged. A passing Codex proxy
+check also covers streamed chunks that arrive within 250 ms of the check's start
+(`PROXY_CHECK_COVERS_MS`, owner decision 2026-11-18); a later chunk waits for a new
+check. So reply data can reach the worker at most 250 ms after a removal, Stop or
+outcome commits, and a streaming reply costs at most about four checks a second
+instead of one per upstream read. An idle stream is still re-checked at least
+every 5 s, and every check before and after the upstream request still runs. A
+twenty-chunk reply that arrives at once costs about 6 transactions (was 157).
 
 The prompt channel wakes the worker's long poll and sends a relay hint. Each
 wake costs an empty pull and a new long poll when nothing is waiting. A

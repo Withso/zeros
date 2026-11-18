@@ -2,7 +2,9 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import pg from "pg";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { setTimeout as delay } from "node:timers/promises";
 import { createCloudV2ProxyRoutes } from "../proxy.js";
+import { PROXY_CHECK_COVERS_MS } from "./proxy.js";
 import { executionFixture, type ExecutionFixture } from "./test-fixture.js";
 
 const database = process.env.TEST_DATABASE_URL ? describe : describe.skip;
@@ -46,7 +48,7 @@ database("acting-user Codex proxy", () => {
     const response = await pending; expect(response.status).toBe(401); expect(await response.text()).not.toContain("mustNotEscape");
   });
 
-  it("fences each streamed chunk after a context has been revoked", async () => {
+  it("fences streamed chunks once the check window after a revocation has passed", async () => {
     let output!: ReadableStreamDefaultController<Uint8Array>;
     const source = new ReadableStream<Uint8Array>({ start(controller) { output = controller; } });
     const turn = await setup(async () => new Response(source));
@@ -54,6 +56,8 @@ database("acting-user Codex proxy", () => {
     const reader = response.body!.getReader(); output.enqueue(new TextEncoder().encode("first"));
     expect(new TextDecoder().decode((await reader.read()).value)).toBe("first");
     await f.worker("prompts/outcome", { userMessageId: turn.input.userMessageId, dispatchId: turn.begin.dispatchId, state: "completed" });
+    // A passing check covers the next PROXY_CHECK_COVERS_MS; after that every chunk waits for a new check.
+    await delay(PROXY_CHECK_COVERS_MS + 50);
     const next = reader.read(); output.enqueue(new TextEncoder().encode("mustNotEscape"));
     await expect(next).rejects.toThrow();
   });
@@ -82,51 +86,31 @@ database("acting-user Codex proxy", () => {
     expect(await transactions(async () => { await check(); })).toBe(1);
   });
 
-  it("streams twenty chunks with 27 transactions (157 before statements-2)", async () => {
+  it("streams twenty waiting chunks under one check window (157 transactions before statements-2)", async () => {
     const chunks = Array.from({ length: 20 }, (_, index) => `chunk-${index};`);
     const turn = await setup(async () => new Response(waiting(chunks)));
     let text = "";
-    // proxyAccess 3, a check before and after the upstream request and at stream start, then one per chunk and one for the end.
-    expect(await transactions(async () => {
+    // proxyAccess 3, a check before and after the upstream request (and the stream-start check, unless the reply ends
+    // first); the chunks arrive inside the last check's window (a slow runner may need one or two more).
+    const count = await transactions(async () => {
       const response = await turn.request(); expect(response.status).toBe(200);
       text = await response.text();
-    })).toBe(27);
+    });
+    expect(count).toBeGreaterThanOrEqual(5);
+    expect(count).toBeLessThanOrEqual(8);
     expect(text).toBe(chunks.join(""));
   });
 
-  it("releases no waiting chunk whose check starts after the turn has ended", async () => {
+  it("releases no waiting chunk once the check window after the turn's end has passed", async () => {
     const turn = await setup(async () => new Response(waiting(["first", "second", "third"], false)));
     const response = await turn.request(); expect(response.status).toBe(200);
     const reader = response.body!.getReader(), received: string[] = [];
     expect(new TextDecoder().decode((await reader.read()).value)).toBe("first");
     await f.worker("prompts/outcome", { userMessageId: turn.input.userMessageId, dispatchId: turn.begin.dispatchId, state: "completed" });
-    // The stream reads one chunk ahead, so "second" may already have passed its check before the turn ended.
+    await delay(PROXY_CHECK_COVERS_MS + 50);
+    // The stream reads one chunk ahead, so "second" may already have been released under the earlier window.
     await expect((async () => { for (;;) { const value = await reader.read(); if (value.done) return; received.push(new TextDecoder().decode(value.value)); } })())
       .rejects.toThrow();
     expect(received).not.toContain("third");
-  });
-
-  it("never releases a chunk that arrived after the check covering the earlier chunks started", async () => {
-    let output!: ReadableStreamDefaultController<Uint8Array>;
-    const source = new ReadableStream<Uint8Array>({ start(controller) { output = controller; } });
-    const turn = await setup(async () => new Response(source));
-    const response = await turn.request(); expect(response.status).toBe(200);
-    const reader = response.body!.getReader();
-    const tokenContext = f.cp.execution.tokenContext.bind(f.cp.execution);
-    let raced = false;
-    vi.spyOn(f.cp.execution, "tokenContext").mockImplementation(async (...args) => {
-      const result = await tokenContext(...args);
-      if (!raced) {
-        // This check has passed for "first"; "late" arrives and the turn ends before it reports back.
-        raced = true;
-        output.enqueue(new TextEncoder().encode("late"));
-        await f.worker("prompts/outcome", { userMessageId: turn.input.userMessageId, dispatchId: turn.begin.dispatchId, state: "completed" });
-      }
-      return result;
-    });
-    output.enqueue(new TextEncoder().encode("first"));
-    expect(new TextDecoder().decode((await reader.read()).value)).toBe("first");
-    await expect(reader.read()).rejects.toThrow();
-    expect(raced).toBe(true);
   });
 });
