@@ -280,7 +280,7 @@ export class CloudExecutionContexts {
         await this.deps.logins.select(proof.person.organizationId, proof.person.userId, proof.agent, proof.selection!, tx);
       } else if (proof.selection) await this.deps.logins.forWorkspace(proof.person.workspaceId, proof.person.userId, proof.agent, proof.selection, tx);
     } catch (error) {
-      if (error instanceof HttpError && error.status < 500) await this.deps.authority.assert(proof, tx);
+      if (error instanceof HttpError) await this.deps.authority.assert(proof, tx);
       throw error;
     }
     await this.deps.authority.assert(proof, tx);
@@ -558,6 +558,9 @@ export class CloudExecutionContexts {
         try {
         // Only begin's lease (no earlier login read) needs the login's material here.
         const selected = login || current.material ? undefined : await this.deps.logins.select(current.org_id, current.user_id!, current.agent!, current.selection!, tx);
+        // The material UPDATE below fires the payer guard (0245); a payer cut by the clock must refuse as actor_changed
+        // first, not as that trigger's raw error (statements-1 review 2).
+        if (!selected && !current.material && current.selection) await this.deps.logins.assertPayer(tx, current.org_id, current.selection);
         let value: Record<string, unknown>;
         if (current.material) value = openExecution(current.material, envelopeBinding(current), this.deps.keys) as Record<string, unknown>;
         else {
@@ -574,8 +577,9 @@ export class CloudExecutionContexts {
         assertExecutionLifetime(current.expires_at.getTime());
         return CloudV2TurnLeaseSchema.parse({ ...value, expiresAt: current.expires_at.getTime() });
         } catch (error) {
-          // Same precedence as before: an access or context refusal wins over whatever the writes refused with.
-          if (error instanceof HttpError && error.status < 500) await check(tx);
+          // Same precedence as before: an access or context refusal wins over whatever the writes refused with
+          // (a 503 from a login read included).
+          if (error instanceof HttpError) await check(tx);
           throw error;
         }
       });

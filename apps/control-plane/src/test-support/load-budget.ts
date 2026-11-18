@@ -18,6 +18,7 @@ export const LOAD_BUDGETS = [
   { phase: "R1", scenario: "census-connected", metric: "statements", baseline: 1478, maximum: 40, expectedFailure: true },
   { phase: "R1", scenario: "census-connected", metric: "transactions", baseline: 199, maximum: 199, expectedFailure: false },
   { phase: "R2", scenario: "begin-lease", metric: "transactions", baseline: 3, maximum: 3, expectedFailure: false },
+  { phase: "R2", scenario: "begin-lease", metric: "statements", baseline: 56, maximum: 56, expectedFailure: false },
   { phase: "R2", scenario: "turn-path", metric: "transactions", baseline: 10, maximum: 10, expectedFailure: false },
   { phase: "R2", scenario: "renewal", metric: "transactions", baseline: 5, maximum: 2, expectedFailure: true },
   { phase: "R1", scenario: "workspace-list", metric: "transactions", baseline: 3, maximum: 3, expectedFailure: false },
