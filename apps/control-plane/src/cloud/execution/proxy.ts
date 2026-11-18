@@ -25,7 +25,7 @@ export async function proxyExecution(input: { execution: CloudExecutionContexts;
   const release = () => request.signal.removeEventListener("abort", aborted);
   try {
     const access = await execution.proxyAccess(token);
-    let coveredUntil = -Infinity;
+    let coveredUntil = access.checkedAt + PROXY_CHECK_COVERS_MS;
     const check = async () => {
       const started = performance.now(), expiresAt = await access.check();
       coveredUntil = Math.max(coveredUntil, started + PROXY_CHECK_COVERS_MS);
@@ -44,7 +44,7 @@ export async function proxyExecution(input: { execution: CloudExecutionContexts;
       target = `https://chatgpt.com/backend-api/codex${rest}`;
       headers.set("authorization", `Bearer ${login.accessToken}`); headers.set("chatgpt-account-id", login.accountId);
     } else throw new HttpError(401, "agent_login_required", "Connect your Codex account");
-    await check();
+    if (performance.now() > coveredUntil) await check();
     upstream = await input.fetch(target + new URL(request.url).search, { method: request.method, headers,
       ...(request.method === "GET" || request.method === "HEAD" ? {} : { body: request.body, duplex: "half" }),
       redirect: "manual", signal: controller.signal } as RequestInit);

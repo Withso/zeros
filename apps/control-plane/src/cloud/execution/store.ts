@@ -136,10 +136,10 @@ export class CloudExecutionContexts {
    * login and the final context fence. Any refusal replays the standalone path below, which alone may end a clock-cut
    * sender or move the turn to its payer, so refusal codes and those writes are unchanged. */
   async tokenContext(kind: "api" | "proxy", value: { token: string } | { id: string }, transaction?: Tx) {
-    if (transaction) return this.tokenContextIn(kind, value, transaction);
+    if (transaction) return { ...await this.tokenContextIn(kind, value, transaction), login: undefined };
     try { return await withSystemTx(this.pool, tx => this.tokenContextOnce(kind, value, tx)); }
     catch (error) { if (!(error instanceof HttpError)) throw error; }
-    return this.tokenContextIn(kind, value);
+    return { ...await this.tokenContextIn(kind, value), login: undefined };
   }
 
   private async tokenContextOnce(kind: "api" | "proxy", value: { token: string } | { id: string }, tx: Tx) {
@@ -147,9 +147,9 @@ export class CloudExecutionContexts {
     if (!context.user_id || context.state !== "active" || context.expires_at.getTime() <= Date.now()) throw actorChanged();
     const proof = await this.deps.authority.admit(context.workspace_id, continuationPrincipal(context)!, { continuation: true, minimumSourceMs: 0, transaction: tx });
     if (kind === "api" && senderEnded(context)) throw actorChanged();
-    if (context.agent && context.selection) await this.deps.logins.select(context.org_id, context.user_id, context.agent, context.selection, tx);
+    const login = context.agent && context.selection ? await this.deps.logins.select(context.org_id, context.user_id, context.agent, context.selection, tx) : undefined;
     await this.assertContext(tx, context, proof);
-    return { context, proof };
+    return { context, proof, login };
   }
 
   private async tokenRow(kind: "api" | "proxy", value: { token: string } | { id: string }, tx: Tx) {
@@ -185,18 +185,23 @@ export class CloudExecutionContexts {
     }
   }
 
+  /** `checkedAt` (performance.now()) is when the last check this call made started; proxy.ts covers its window from it. */
   async proxyAccess(token: string) {
-    let { context } = await this.tokenContext("proxy", { token });
+    let checkedAt = performance.now();
+    const first = await this.tokenContext("proxy", { token });
+    let { context } = first;
     if (context.kind !== "turn" || context.agent !== "codex" || !context.selection) throw actorChanged();
     const selected = () => this.deps.logins.select(context.org_id, context.user_id!, "codex", context.selection!);
-    let { material: login } = await selected();
     const check = async () => {
-      const current = await this.tokenContext("proxy", { token });
+      const started = performance.now(), current = await this.tokenContext("proxy", { token });
       if (current.context.id !== context.id) throw actorChanged();
       context = current.context;
+      checkedAt = started;
       return context.expires_at.getTime();
     };
-    await check();
+    // The one-transaction check read the login before its final fence; only the replayed path needs the two reads.
+    let login = first.login?.material;
+    if (!login) { login = (await selected()).material; await check(); }
     if (login.kind === "codex-chatgpt" && login.expiresAt * 1000 <= Date.now() + 300_000) {
       await this.deps.logins.refreshCodex(context.org_id, context.user_id!, context.selection!, check);
       login = (await selected()).material;
@@ -204,7 +209,7 @@ export class CloudExecutionContexts {
     }
     if (login.kind === "codex-chatgpt" && login.expiresAt * 1000 <= Date.now() + 30_000)
       throw new AgentLoginRequired("codex", context.selection.version === 2 && context.selection.payer.userId !== context.user_id ? "creator" : "self");
-    return { login, check };
+    return { login, check, checkedAt };
   }
 
   async assertToken(tx: Tx, tokenId: string, contextId: string, kind: "api" | "proxy", proof: ExecutionAdmission) {
