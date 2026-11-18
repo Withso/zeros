@@ -1,4 +1,4 @@
-// The migration suite (migrations.suite.ts) replays the whole ladder in most of its tests, which made its single file the
+// The migration suite (migrations.test-suite.ts) replays the whole ladder in most of its tests, which made its single file the
 // longest CI database shard by far. Each src/migrations-N.test.ts selects one part: it registers every MIGRATION_PARTS-th
 // test of the ladder suite, in registration order, and part 1 also takes the other (short) suites whole, because vitest
 // fails a suite that registers no test. vitest.sequencer.ts pins part N to database shard N.
@@ -33,7 +33,7 @@ export function selectMigrationPart(part: number): void {
 
 function part(): number {
   if (selected === undefined) {
-    throw new Error("Load migrations.suite.ts through a src/migrations-N.test.ts part.");
+    throw new Error("Load migrations.test-suite.ts through a src/migrations-N.test.ts part.");
   }
   return selected;
 }

@@ -206,7 +206,7 @@ intentionally skip when that variable is absent. The Vitest global setup drops,
 recreates and migrates the `public` schema once per run. Between tests,
 `resetMigratedTestDatabase()` restores the migrated rows and sequences, and
 replays the ladder only after a test changed the schema, a privilege or a
-trigger. `src/migrations.suite.ts` (run as `src/migrations-1..8.test.ts`) still replays the ladder itself.
+trigger. `src/migrations.test-suite.ts` (run as `src/migrations-1..8.test.ts`) still replays the ladder itself.
 
 Path-selected PR CI can skip the database suites when none of their inputs
 changed (`scripts/ci/control-plane-scope.mjs`). Selected suites run across eight

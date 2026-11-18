@@ -140,7 +140,7 @@ revision in the same checkout and compare failing test names.
   so a cast such as `::text` there breaks every claim.
 - A new advisory lock needs one `/* lock_purpose='…' */` tag registered in
   `ADVISORY_LOCK_PURPOSES`; only `src/database-lock-tags.test.ts` checks it.
-  Added columns also need the control plane's `src/migrations.suite.ts` (run through `src/migrations-1..8.test.ts`).
+  Added columns also need the control plane's `src/migrations.test-suite.ts` (run through `src/migrations-1..8.test.ts`).
 
 ## Browser, Vite and UI smoke
 
