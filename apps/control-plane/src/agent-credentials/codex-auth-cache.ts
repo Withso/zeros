@@ -26,6 +26,21 @@ function claims(token:string):Record<string,unknown>{
 /** Parsing binds a supplied native bundle; decoded claims are not signature
  * verification. Native refresh uses the pinned provider endpoint, and the
  * provider still validates the access token when a model request is made. */
+/** Why parseCodexNativeCache refused a bundle, as field names and check names only (never values), for the server log:
+ * a new Codex release that changes auth.json otherwise shows up only as "could not save this cloud connection". */
+export function codexNativeCacheRejection(value:unknown):string{
+  let size:number;try{size=Buffer.byteLength(JSON.stringify(value));}catch{return "unserializable";}
+  if(size>MAX)return "too_large";
+  const parsed=native.safeParse(value);
+  if(!parsed.success){
+    const safe=(name:unknown)=>String(name).replace(/[^A-Za-z0-9_]/g,"").slice(0,40);
+    return parsed.error.issues.slice(0,4).map(issue=>{
+      const keys=issue.code==="unrecognized_keys"?`[${issue.keys.slice(0,5).map(safe).join(",")}]`:"";
+      return `${issue.path.map(safe).join(".")||"root"}:${issue.code}${keys}`;
+    }).join(";");
+  }
+  try{parseCodexNativeCache(value);return "accepted";}catch{return "token_claims";}
+}
 export function parseCodexNativeCache(value:unknown){
   let size:number;try{size=Buffer.byteLength(JSON.stringify(value));}catch{invalid();}
   if(size>MAX)invalid();const parsed=native.safeParse(value);if(!parsed.success)invalid();

@@ -1,6 +1,6 @@
 import {randomBytes,randomUUID} from "node:crypto";
 import {describe,it,expect} from "vitest";
-import {parseCodexNativeCache,sealCodexNativeCache,openCodexNativeCache,codexRefreshFingerprint} from "./codex-auth-cache.js";
+import {codexNativeCacheRejection,parseCodexNativeCache,sealCodexNativeCache,openCodexNativeCache,codexRefreshFingerprint} from "./codex-auth-cache.js";
 import {syntheticCodexCache} from "./codex-auth-test-fixture.js";
 describe("private native Codex cache",()=>{
   it("projects access only and requires consistent account, subject and provider identity",()=>{
@@ -20,6 +20,16 @@ describe("private native Codex cache",()=>{
     for(const extra of [{nested:{endpoint:"untrusted"}},{list:["x"]},{long:"x".repeat(16_385)},
       Object.fromEntries(Array.from({length:9},(_,index)=>[`field_${index}`,"x"]))])
       expect(()=>parseCodexNativeCache({...cache,tokens:{...cache.tokens,...extra}})).toThrow("Invalid Codex native authentication cache");
+  });
+  it("names why a bundle was refused with field and check names only, never values",()=>{
+    const cache=syntheticCodexCache();
+    expect(codexNativeCacheRejection(cache)).toBe("accepted");
+    const reason=codexNativeCacheRejection({...cache,config:{endpoint:"value-sentinel"},auth_mode:"chatgptAuthTokens"});
+    expect(reason).toContain("root:unrecognized_keys[config]");
+    expect(reason).toContain("auth_mode:");
+    expect(reason).not.toContain("sentinel");
+    expect(codexNativeCacheRejection({...cache,tokens:{...cache.tokens,account_id:"other"}})).toBe("token_claims");
+    expect(codexNativeCacheRejection({...cache,"bad-key$":"x"})).toContain("[badkey]");
   });
   it("separately authenticates owner, consent, material epoch and encryption key",()=>{
     const key=randomBytes(32).toString("base64url"),binding={credentialId:randomUUID(),ownerUserId:randomUUID(),revision:1,version:2,keyVersion:1},cache=syntheticCodexCache();
