@@ -30,9 +30,9 @@ database("begin-lease-v1: a new turn's lease in its begin reply", () => {
     expect(reply).toMatchObject({ dispatch: true, mode: "prompt", actingUser: { userId: f.creator.id, generation: "1" } });
     expect(reply.lease).toMatchObject({ contextId: reply.contextId, userId: f.creator.id, generation: "1", agents: { claude: { apiKey: login.secret } } });
     expect(reply.lease.expiresAt).toBeGreaterThan(Date.now());
-    // A lost reply: the retried begin answers without a lease, and turn-lease gives the same sealed material.
+    // A lost reply: the retried begin carries the lease again, the same sealed material turn-lease would give.
     const again = await (await f.worker("prompts/begin", begin, { features: withLease() })).json();
-    expect(again.lease).toBeUndefined();
+    expect(again.lease).toMatchObject({ contextId: reply.contextId, agents: reply.lease.agents });
     const lease = await (await f.worker("turn-lease", { chatId: input.chatId, userMessageId: input.userMessageId, dispatchId: begin.dispatchId,
       generation: "1", contextId: reply.contextId }, { features: withLease() })).json();
     expect(lease.agents).toEqual(reply.lease.agents);
