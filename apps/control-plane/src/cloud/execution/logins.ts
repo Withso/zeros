@@ -57,17 +57,19 @@ export class CloudExecutionLogins {
       .some(key => current[key] !== selection.payer[key])) throw actorChanged();
   }
 
-  private async creator(tx: Tx, workspaceId: string) {
-    const workspace = (await tx.query<{ org_id: string; creator_user_id: string | null }>(
+  /** known: the active workspace row this transaction already holds locked (statements-1); its creator cannot change. */
+  private async creator(tx: Tx, workspaceId: string, known?: { org_id: string; creator_user_id: string | null }) {
+    const workspace = known ?? (await tx.query<{ org_id: string; creator_user_id: string | null }>(
       "SELECT org_id,creator_user_id FROM cloud_v2_workspaces WHERE id=$1 AND execution_mode='active'", [workspaceId])).rows[0];
     const payer = workspace?.creator_user_id && await this.payer(tx, workspace.org_id, workspace.creator_user_id);
     if (!workspace || !payer) throw workspaceCreatorRequired();
     return { organizationId: workspace.org_id, payer };
   }
 
-  async forWorkspace(workspaceId: string, actorId: string, agent: CloudV2Agent, expected?: ExecutionSelection, transaction?: Tx): Promise<ExecutionLogin> {
+  async forWorkspace(workspaceId: string, actorId: string, agent: CloudV2Agent, expected?: ExecutionSelection, transaction?: Tx,
+    locked?: { org_id: string; creator_user_id: string | null }): Promise<ExecutionLogin> {
     const read = async (tx: Tx): Promise<ExecutionLogin> => {
-      const { organizationId, payer } = await this.creator(tx, workspaceId);
+      const { organizationId, payer } = await this.creator(tx, workspaceId, transaction ? locked : undefined);
       if (expected && (expected.version !== 2 || expected.payer.userId !== payer.userId)) throw actorChanged();
       let login: ExecutionLogin;
       try { login = await this.select(organizationId, payer.userId, agent, expected, tx); }

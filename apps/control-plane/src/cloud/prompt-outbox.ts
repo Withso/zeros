@@ -161,7 +161,9 @@ export class CloudV2PromptOutbox {
             AND c.deleted_at IS NULL LIMIT 1`, [id, payload.chatId, userId]);
         if (duplicate.rowCount) throw new HttpError(409, "session_conflict", "This session id is already in use");
       }
-      if (authority && (authority.id !== userId || (authority.authentication && !await securityStreamAuthority(tx, authority))))
+      // An active workspace's assertPrompt above checked this same session in this transaction (its assert reads it).
+      const sessionChecked = workspace.execution_mode === "active" && executionAdmission?.user === authority;
+      if (authority && (authority.id !== userId || (authority.authentication && !sessionChecked && !await securityStreamAuthority(tx, authority))))
         throw new HttpError(401, "session_revoked", "Authentication is no longer current");
       const previous = workspace.previous;
       if (options?.device && (!authority || authority.id !== userId))
