@@ -65,6 +65,7 @@ import { requestDesignLayerReveal } from "./design-layer-disclosure";
 import { designSelectionTargetKey, type DesignSelectionTarget } from "../design-selected-targets";
 import {
   resolveDesignFrameBodyTarget,
+  resolveDesignHoverTarget,
   type DesignFrameBodyIntent,
 } from "../design-layer-tree";
 
@@ -1720,6 +1721,8 @@ export async function hoverDesignNodeAtLocation(input: {
   frame: DesignCanvasFrameWire;
   x: number;
   y: number;
+  /** The platform modifier is held: hover the deepest layer, which ⌘-click selects. */
+  deepest?: boolean;
 }): Promise<void> {
   const generation = nextGeneration(
     hoverGenerationByWorkspace,
@@ -1728,16 +1731,46 @@ export async function hoverDesignNodeAtLocation(input: {
   const runtime = designFrameRuntime(input.workspaceId, input.frame.file);
   if (!runtime) return;
   let details: DesignRuntimeNodeDetails | null = null;
-  // Inside an entered instance the hover is the part under the pointer.
   const view = designWorkspaceView(input.workspaceId);
-  const enteredHost = input.frame.instances && view.selectedFrame === input.frame.file && isDesignComponentPartNodeId(view.selectedNodeId)
-    ? designComponentPartHost(view.selectedNodeId) : null;
+  const primaryId = view.selectedFrame === input.frame.file ? view.selectedNodeId : null;
+  const selectedId = view.selectedNodeIds.length <= 1 ? primaryId : null;
+  // Inside an entered instance the hover is the part under the pointer, and
+  // over a selected instance it is the part a double-click would enter.
+  const hosts = input.frame.instances?.hosts;
+  const enteredHost = hosts && primaryId
+    ? isDesignComponentPartNodeId(primaryId)
+      ? designComponentPartHost(primaryId)
+      : selectedId && !input.deepest && Object.hasOwn(hosts, selectedId) && !hosts[selectedId]!.missing ? selectedId : null
+    : null;
   try {
     details = await runtime.getElementAtLoc(input.x, input.y, {
       mode: "deepest",
     });
-    if (enteredHost && details?.oid === enteredHost && runtime.supports?.("getComponentPartAtLoc") && runtime.getComponentPartAtLoc)
+    if (enteredHost && details?.oid === enteredHost && runtime.supports?.("getComponentPartAtLoc") && runtime.getComponentPartAtLoc) {
       details = (await runtime.getComponentPartAtLoc(input.x, input.y, enteredHost)) ?? details;
+    } else if (details) {
+      const snapshot = designRuntimeFrameState(input.workspaceId, input.frame.file)?.snapshot;
+      if (snapshot?.sourceVersion === input.frame.sourceVersion) {
+        const targetId = resolveDesignHoverTarget({
+          nodes: snapshot.tree,
+          deepestNodeId: details.oid,
+          selectedNodeId: selectedId ? designComponentPartHost(selectedId) : null,
+          frameSelected:
+            view.selectedFrame === input.frame.file &&
+            view.frameSelected &&
+            view.selectedNodeIds.length === 0,
+          deepest: input.deepest ?? false,
+          labeledFrame: input.frame.kind !== "text",
+          frameRootId: snapshot.frame.oid,
+        });
+        if (targetId !== details.oid) {
+          const cached = designRuntimeFrameState(input.workspaceId, input.frame.file)?.detailsByNode[targetId];
+          details = cached?.sourceVersion === input.frame.sourceVersion
+            ? cached
+            : await runtime.getNodeDetails(targetId);
+        }
+      }
+    }
   } catch {
     return;
   }

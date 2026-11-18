@@ -303,6 +303,11 @@ export async function runDesignComponentInstancesSmoke({ page, check }) {
     const box = await locator.boundingBox();
     await page.mouse[action](box.x + box.width / 2, box.y + box.height / 2);
   };
+  await at(sendPart, "move");
+  const hoveredPart = () => page.evaluate(() =>
+    [...document.querySelectorAll(".zd-design-hover-outline[data-design-element-overlay]")].map((element) => element.dataset.designElementOverlay));
+  await expect.poll(hoveredPart).toEqual(["::zeros-part:home-composer:cc-send"]);
+  check("hovering a selected instance outlines the part a double-click enters", true);
   await at(sendPart, "dblclick");
   await expect(line).toHaveAttribute("data-design-component-of", "part");
   const partLine = await line.innerText();

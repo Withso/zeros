@@ -178,6 +178,9 @@ export function resolveDesignLayerHit(
 
 export type DesignFrameBodyIntent = "plain" | "descend" | "deepest";
 
+const firstVisibleLayerId = (nodes: readonly DesignRuntimeTreeNode[] | undefined) =>
+  nodes?.find((node) => node.visible)?.oid;
+
 export type DesignFrameBodyTarget =
   | { kind: "node"; nodeId: string }
   | { kind: "frame" }
@@ -219,7 +222,17 @@ export function resolveDesignFrameBodyTarget(input: {
     ((input.intent === "plain" && !input.selectedNodeId) ||
       input.deepestNodeId === input.frameRootId)
   ) {
-    return { kind: "frame" };
+    // Double-clicking a frame where no layer is under the pointer enters it
+    // at its first layer, as a double-click on any other parent does.
+    const first =
+      input.intent === "descend" &&
+      !input.selectedNodeId &&
+      input.deepestNodeId === input.frameRootId
+        ? firstVisibleLayerId(
+            designFrameLayerChildren(input.nodes, input.frameRootId),
+          )
+        : undefined;
+    return first ? { kind: "node", nodeId: first } : { kind: "frame" };
   }
   // Match the visible Layers hierarchy: legacy body/html wrappers and a
   // marked frame root must not introduce invisible levels of selection.
@@ -237,6 +250,18 @@ export function resolveDesignFrameBodyTarget(input: {
   }
   const path = designLayerPathIds(nodes, input.deepestNodeId);
   if (path.length === 0) return { kind: "unresolved" };
+  // The pointer is on the selected layer itself, in its padding or a gap:
+  // double-clicking still enters it, at its first layer.
+  if (
+    input.intent === "descend" &&
+    input.selectedNodeId &&
+    path.at(-1) === input.selectedNodeId
+  ) {
+    const first = firstVisibleLayerId(
+      designLayerPathNodes(nodes, input.deepestNodeId).at(-1)?.children,
+    );
+    if (first) return { kind: "node", nodeId: first };
+  }
   const singleRoot = nodes.length === 1;
   const rootIsFrameBody =
     input.labeledFrame &&
@@ -282,6 +307,37 @@ export function resolveDesignFrameBodyTarget(input: {
       ? floor
       : Math.min(selectedPath.length - 1, path.length - 1);
   return { kind: "node", nodeId: clamp(depthIndex) };
+}
+
+/** The layer canvas hover outlines: inside the selected layer, its child under
+ * the pointer, which a double-click there selects; inside a selected frame,
+ * the top-level layer under the pointer. Elsewhere, and with the platform
+ * modifier held for deep selection, the deepest layer under the pointer. */
+export function resolveDesignHoverTarget(input: {
+  nodes: readonly DesignRuntimeTreeNode[];
+  deepestNodeId: string;
+  selectedNodeId: string | null | undefined;
+  frameSelected: boolean;
+  deepest: boolean;
+  labeledFrame: boolean;
+  frameRootId?: string;
+}): string {
+  if (input.deepest) return input.deepestNodeId;
+  const nodes = input.labeledFrame
+    ? designFrameLayerChildren(input.nodes, input.frameRootId)
+    : input.nodes;
+  const path = designLayerPathIds(nodes, input.deepestNodeId);
+  if (input.selectedNodeId) {
+    const selectedIndex = path.indexOf(input.selectedNodeId);
+    return selectedIndex >= 0 && selectedIndex < path.length - 1
+      ? path[selectedIndex + 1]!
+      : input.deepestNodeId;
+  }
+  // Without the runtime's frame owner the outer root may be the frame body.
+  if (input.frameSelected && input.labeledFrame && input.frameRootId !== undefined) {
+    return path[0] ?? input.deepestNodeId;
+  }
+  return input.deepestNodeId;
 }
 
 /** Whether a frame row offers a disclosure. A live tree answers exactly; until

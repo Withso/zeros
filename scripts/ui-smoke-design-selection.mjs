@@ -106,6 +106,69 @@ export async function runDesignDoubleClickSelectionSmoke({ page, check }) {
   check("double-click and Enter preserve an empty frame as a frame", true);
 }
 
+// Figma's descent: hover outlines what a double-click enters. Inside a
+// selected frame it is the top-level layer under the pointer, inside a
+// selected layer its child under the pointer, and with ⌘ the deepest layer.
+// A double-click on a parent's own area (padding, gaps) enters its first child.
+export async function runDesignDescentHoverSmoke({ page, check }) {
+  const origin = new URL(page.url()).origin;
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto(`${origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html`, { waitUntil: "networkidle" });
+  await openLayersDrawer(page);
+  await page.locator('[data-design-frame="home.html"] iframe[data-design-document-ready]').waitFor();
+  const iframe = page.locator('[data-design-frame="home.html"] iframe[data-design-document-buffer="displayed"]');
+  const runtime = page.frameLocator('[data-design-frame="home.html"] iframe[data-design-document-buffer="displayed"]');
+  const box = (oid) => designFrameElementBox(iframe, runtime.locator(`[data-oid="${oid}"]`));
+  const centre = (rect) => ({ x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 });
+  const hovered = () => page.evaluate(() =>
+    [...document.querySelectorAll(".zd-design-hover-outline[data-design-element-overlay]")].map((element) => element.dataset.designElementOverlay));
+  const selection = () => page.evaluate(() =>
+    [...document.querySelectorAll('[data-design-sidebar-panel] [aria-selected="true"]')].map((element) => element.dataset.designLayerId ?? element.dataset.designFrameRow));
+  const settle = () => page.waitForTimeout(350);
+
+  await page.locator('[data-design-frame-row="home.html"]').click();
+  const mark = centre(await box("home-mark"));
+  await page.mouse.move(mark.x, mark.y, { steps: 3 });
+  await settle();
+  const inFrame = await hovered();
+  await page.keyboard.down("Meta");
+  await settle();
+  const deep = await hovered();
+  await page.keyboard.up("Meta");
+  await settle();
+  const released = await hovered();
+  check(
+    "inside a selected frame, hover outlines the top-level layer under the pointer, and ⌘ the deepest",
+    JSON.stringify(inFrame) === '["home-nav"]' && JSON.stringify(deep) === '["home-mark"]' && JSON.stringify(released) === '["home-nav"]',
+    JSON.stringify({ inFrame, deep, released }),
+  );
+
+  await page.mouse.dblclick(mark.x, mark.y);
+  await expect.poll(selection).toEqual(["home-nav"]);
+  await settle();
+  const entered = await hovered();
+  check(
+    "after a double-click enters a layer, the child under the resting pointer is outlined at once",
+    JSON.stringify(entered) === '["home-mark"]',
+    JSON.stringify(entered),
+  );
+
+  await page.locator('[data-design-sidebar-panel] [data-design-layer-id="home-hero"]').click();
+  const heading = await box("home-heading");
+  const copy = await box("home-copy");
+  // The gap between the hero's heading and copy belongs to the hero itself.
+  const gap = { x: copy.x + copy.width / 2, y: (heading.y + heading.height + copy.y) / 2 };
+  await page.mouse.move(gap.x, gap.y, { steps: 3 });
+  await settle();
+  const overParent = await hovered();
+  await page.mouse.dblclick(gap.x, gap.y);
+  await expect.poll(selection).toEqual(["home-heading"]);
+  check(
+    "double-clicking a selected parent's own area selects its first child",
+    overParent.length === 0,
+    JSON.stringify(overParent),
+  );
+}
 // Layer structure: a selection's parent is dotted, and ⌘/Ctrl-hover dots the
 // hovered layer's parent and direct children, with no edge stroked twice.
 export async function runDesignLayerStructureSmoke({ page, check }) {
@@ -254,6 +317,7 @@ export async function runDesignLayerStructureSmoke({ page, check }) {
 // inspector, including the empty frame that has no selectable child layers.
 export async function runDesignSelectionSmoke({ page, waitFor, check }) {
   await runDesignDoubleClickSelectionSmoke({ page, check });
+  await runDesignDescentHoverSmoke({ page, check });
   await runDesignLayerStructureSmoke({ page, check });
   const origin = new URL(page.url()).origin;
   const open = async (query) => {

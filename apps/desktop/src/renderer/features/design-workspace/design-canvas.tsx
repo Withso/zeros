@@ -362,6 +362,14 @@ import {
   type DesignCanvasZoomActions,
 } from "./design-workspace-types";
 
+type DesignCanvasHoverSample = {
+  workspaceId: string;
+  folder: string;
+  frame: DesignCanvasFrameWire;
+  x: number;
+  y: number;
+  deepest: boolean;
+};
 type FrameGestureMode = "move" | DesignResizeHandle;
 type FrameGeometryPreview = {
   geometry: DesignFrameGeometryWire;
@@ -1231,13 +1239,17 @@ export const DesignCanvas = React.memo(function DesignCanvas({
     folder: string;
     frame: DesignCanvasFrameWire;
   } | null>(null);
-  const canvasHoverSampleRef = useRef<{
-    workspaceId: string;
-    folder: string;
-    frame: DesignCanvasFrameWire;
-    x: number;
-    y: number;
-  } | null>(null);
+  const canvasHoverSampleRef = useRef<DesignCanvasHoverSample | null>(null);
+  // The pointer's last hover sample, resolved again when ⌘/Ctrl changes
+  // between the inside-selection and deepest hover targets.
+  const canvasHoverLastRef = useRef<
+    | (Omit<DesignCanvasHoverSample, "x" | "y" | "deepest"> & {
+        element: HTMLElement;
+        clientX: number;
+        clientY: number;
+      })
+    | null
+  >(null);
   const wheelViewportRef = useRef<DesignViewport | null>(null);
   const wheelPaintFrameRef = useRef<number | null>(null);
   const wheelSettleTimerRef = useRef<number | null>(null);
@@ -6532,6 +6544,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         canvasHoverFrameRef.current = null;
       }
       canvasHoverSampleRef.current = null;
+      canvasHoverLastRef.current = null;
       const hoverOwner = canvasHoverOwnerRef.current;
       canvasHoverOwnerRef.current = null;
       if (hoverOwner) {
@@ -6622,26 +6635,9 @@ export const DesignCanvas = React.memo(function DesignCanvas({
     [active, activeTool, folder, workspaceId],
   );
 
-  const scheduleCanvasHover = useCallback(
-    (event: React.PointerEvent<HTMLElement>, frame: DesignCanvasFrameWire) => {
-      if (
-        !workspaceId ||
-        !folder ||
-        !active ||
-        gestureCancelRef.current ||
-        spacePressedRef.current
-      ) {
-        return;
-      }
-      const bounds = event.currentTarget.getBoundingClientRect();
-      if (bounds.width <= 0 || bounds.height <= 0) return;
-      canvasHoverSampleRef.current = {
-        workspaceId,
-        folder,
-        frame,
-        x: ((event.clientX - bounds.left) * frame.width) / bounds.width,
-        y: ((event.clientY - bounds.top) * frame.height) / bounds.height,
-      };
+  const queueCanvasHover = useCallback(
+    (next: DesignCanvasHoverSample) => {
+      canvasHoverSampleRef.current = next;
       if (
         canvasHoverFrameRef.current !== null ||
         canvasHoverRequestRef.current
@@ -6674,13 +6670,72 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         canvasHoverRequestRef.current = request;
       });
     },
-    [active, folder, workspaceId],
+    [],
   );
+
+  const scheduleCanvasHover = useCallback(
+    (event: React.PointerEvent<HTMLElement>, frame: DesignCanvasFrameWire) => {
+      if (
+        !workspaceId ||
+        !folder ||
+        !active ||
+        gestureCancelRef.current ||
+        spacePressedRef.current
+      ) {
+        return;
+      }
+      const bounds = event.currentTarget.getBoundingClientRect();
+      if (bounds.width <= 0 || bounds.height <= 0) return;
+      canvasHoverLastRef.current = {
+        workspaceId,
+        folder,
+        frame,
+        element: event.currentTarget,
+        clientX: event.clientX,
+        clientY: event.clientY,
+      };
+      queueCanvasHover({
+        workspaceId,
+        folder,
+        frame,
+        x: ((event.clientX - bounds.left) * frame.width) / bounds.width,
+        y: ((event.clientY - bounds.top) * frame.height) / bounds.height,
+        deepest: event.metaKey || event.ctrlKey,
+      });
+    },
+    [active, folder, queueCanvasHover, workspaceId],
+  );
+
+  // The hover target depends on the selection and on ⌘/Ctrl, so a pointer
+  // at rest resolves it again when either changes: after a double-click
+  // enters a layer, the child under the pointer is outlined at once. The
+  // point is measured again because the camera may have moved the frame.
+  const hoverSelectionKey = `${view.selectedFrame ?? ""}\u0000${view.frameSelected}\u0000${view.selectedNodeIds.join("\u0000")}`;
+  useEffect(() => {
+    const last = canvasHoverLastRef.current;
+    if (!last?.element.isConnected || gestureCancelRef.current || spacePressedRef.current) return;
+    const bounds = last.element.getBoundingClientRect();
+    if (
+      bounds.width <= 0 || bounds.height <= 0 ||
+      last.clientX < bounds.left || last.clientX > bounds.right ||
+      last.clientY < bounds.top || last.clientY > bounds.bottom
+    )
+      return;
+    queueCanvasHover({
+      workspaceId: last.workspaceId,
+      folder: last.folder,
+      frame: last.frame,
+      x: ((last.clientX - bounds.left) * last.frame.width) / bounds.width,
+      y: ((last.clientY - bounds.top) * last.frame.height) / bounds.height,
+      deepest: structurePressed,
+    });
+  }, [hoverSelectionKey, queueCanvasHover, structurePressed]);
 
   const clearCanvasHover = useCallback(
     (frame: DesignCanvasFrameWire) => {
       if (!workspaceId || !folder) return;
       canvasHoverSampleRef.current = null;
+      canvasHoverLastRef.current = null;
       if (canvasHoverFrameRef.current !== null) {
         window.cancelAnimationFrame(canvasHoverFrameRef.current);
         canvasHoverFrameRef.current = null;

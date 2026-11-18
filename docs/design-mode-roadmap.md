@@ -2176,7 +2176,15 @@ a frame's own document (`canvas-items-exports.test.ts`).
   child is selected, normal clicks preserve useful nesting depth. Double-click
   descends once and selects the child without skipping containers to edit a
   deeper text node. A further double-click on the selected text layer enters
-  editing; empty frame layers remain frames. The platform modifier deep-selects,
+  editing; empty frame layers remain frames. A double-click on a selected
+  parent's own area (its padding or a gap, or a frame's empty space) selects
+  its first visible child. Hover outlines what a double-click would enter:
+  inside a selected frame the top-level layer under the pointer, inside a
+  selected layer its child under the pointer, over a selected instance the
+  part under the pointer; elsewhere, with nothing selected or with ⌘/Ctrl
+  held, the deepest layer. The outline resolves again when the selection or
+  the modifier changes, so a resting pointer shows the next level at once.
+  The platform modifier deep-selects,
   and Enter/Escape traverse the same visible child/parent hierarchy as Layers.
   Document wrappers and the explicit frame root share the outer frame's identity;
   unmarked authored roots remain real children, even when they fill the viewport.
