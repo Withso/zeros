@@ -2908,9 +2908,12 @@ never torn down, so the frame always ends with a live runtime for the
 generation it shows. A changed engine capability starts a new frame session using the
 current semantic generation, including after an in-place style adoption. A
 failed native handshake revalidates the workspace and hydrates that frame through
-the bounded, exact-version, sanitized bridge cache. Persistent failures offer
-an inline Retry frame action. Recovery timers stop for inactive surfaces and
-retired sessions; mutations are never automatically replayed.
+the bounded, exact-version, sanitized bridge cache. A frame whose document
+still fails to load (its read fails or its handshake never arrives) reloads
+once, silently, after 1.5 seconds; only a failure of that reload is persistent
+and offers an inline Retry frame action, whose own failure shows the error at
+once. Recovery timers stop for inactive surfaces and retired sessions;
+mutations are never automatically replayed.
 
 Movement waits for the exact prepared source generation, including an incoming
 runtime while the outgoing frame still paints. Bounded readiness waits subscribe
