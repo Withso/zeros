@@ -344,8 +344,12 @@ function firstWorkspaceTitle(chats: readonly unknown[]): string | null {
 }
 
 export type CloudV2ProviderStopBinding = { workspaceId: string; sandboxId: string; bootId: string; workerTokenHash: string; accessEpoch: string };
+export type CloudV2ProviderStopOutcome = "observed" | "contradicted" | "braked" | "stopped" | "rewake" | "capped" | "stale";
 export const PROVIDER_STOP_WAKES_PER_HOUR = 2;
 export const PROVIDER_STOP_WAKES_PER_10_MINUTES = 20;
+export const PROVIDER_STOP_BRAKE_PER_10_MINUTES = 20;
+/** Our own activity this long after Boat's stop time contradicts it. */
+export const PROVIDER_STOP_ACTIVITY_MARGIN_MS = 10_000;
 
 export class CloudV2Store {
   readonly prompts: CloudV2PromptOutbox;
@@ -740,23 +744,44 @@ export class CloudV2Store {
   /** Boat archived this running VM on its own (provider-stop.ts). Under the workspace lock, and only for the exact boot
    * that was observed, the stop is finished without the VM: running -> stopped directly (a `stopping` state would
    * cancel the waiting messages), credentials and execution contexts end, turns in flight are interrupted, and waiting
-   * messages ask for one wake unless this workspace already had PROVIDER_STOP_WAKES_PER_HOUR. `observe` records only. */
+   * messages from people who still have access ask for one wake. Boat's answer is evidence only when it says the VM
+   * stopped after our last resume and our own row shows no activity since; anything else is recorded, not acted on.
+   * One row per boot and outcome; `observe` records only. */
   async providerStopped(binding: CloudV2ProviderStopBinding, evidence: { trigger: "dial" | "suspect" | "wake_check"; state: string; stoppedAt: Date | null },
-    mode: "observe" | "on"): Promise<"observed" | "stopped" | "rewake" | "stale"> {
+    mode: "observe" | "on"): Promise<CloudV2ProviderStopOutcome> {
     return withSystemTx(this.pool, async tx => {
       const row = (await tx.query<{ state: string; boat_sandbox_id: string | null; worker_boot_id: string | null; token_hash: string | null;
-        access_epoch: string; stop_generation: string; blocked: boolean }>(`SELECT state,boat_sandbox_id,worker_boot_id,
-          encode(worker_token_hash,'hex') AS token_hash,access_epoch::text,stop_generation::text,
-          (recovery_attempt_id IS NOT NULL OR execution_transition_id IS NOT NULL OR archived_at IS NOT NULL OR EXISTS (
-            SELECT 1 FROM cloud_worker_runtime_handoffs h WHERE h.workspace_id=w.id AND h.state IN ('committed','activating','rolling_back'))) AS blocked
-        FROM cloud_v2_workspaces w WHERE id=$1 FOR UPDATE`, [binding.workspaceId])).rows[0];
-      if (!row || row.state !== "running" || row.blocked || row.boat_sandbox_id !== binding.sandboxId || row.worker_boot_id !== binding.bootId ||
+        access_epoch: string; stop_generation: string; recovery_attempt_id: string | null; execution_transition_id: string | null;
+        archived_at: Date | null; active_at: Date | null; lease_renewed_at: Date | null }>(`SELECT state,boat_sandbox_id,worker_boot_id,
+          encode(worker_token_hash,'hex') AS token_hash,access_epoch::text,stop_generation::text,recovery_attempt_id,execution_transition_id,
+          archived_at,active_at,lease_renewed_at FROM cloud_v2_workspaces WHERE id=$1 FOR UPDATE`, [binding.workspaceId])).rows[0];
+      if (!row || row.state !== "running" || row.recovery_attempt_id || row.execution_transition_id || row.archived_at ||
+          row.boat_sandbox_id !== binding.sandboxId || row.worker_boot_id !== binding.bootId ||
           row.token_hash !== binding.workerTokenHash || row.access_epoch !== binding.accessEpoch) return "stale";
-      const record = (rewake: boolean, generation: string) => tx.query(`INSERT INTO cloud_v2_provider_stops
-        (workspace_id,sandbox_id,worker_boot_id,stop_generation,trigger,mode,provider_state,provider_stopped_at,rewake)
-        VALUES ($1,$2,$3,$4::bigint,$5,$6,$7,$8,$9)`, [binding.workspaceId, binding.sandboxId, binding.bootId, generation, evidence.trigger, mode,
-        evidence.state.slice(0, 32), evidence.stoppedAt, rewake]);
-      if (mode === "observe") { await record(false, row.stop_generation); return "observed"; }
+      // Read after the lock: a statement that waited on the row would have run this on its older snapshot.
+      if ((await tx.query(`SELECT 1 FROM cloud_worker_runtime_handoffs WHERE workspace_id=$1 AND state IN ('committed','activating','rolling_back')`,
+        [binding.workspaceId])).rowCount) return "stale";
+      const record = async (outcome: CloudV2ProviderStopOutcome, generation: string, rewake = false) => {
+        await tx.query(`INSERT INTO cloud_v2_provider_stops (workspace_id,sandbox_id,worker_boot_id,stop_generation,trigger,mode,provider_state,
+            provider_stopped_at,rewake,outcome,active_at,lease_renewed_at)
+          SELECT $1,$2,$3,$4::bigint,$5,$6,$7,$8,$9,$10,$11,$12 WHERE NOT EXISTS (SELECT 1 FROM cloud_v2_provider_stops
+            WHERE workspace_id=$1 AND worker_boot_id=$3 AND outcome=$10)`, [binding.workspaceId, binding.sandboxId, binding.bootId, generation,
+          evidence.trigger, mode, evidence.state.slice(0, 32), evidence.stoppedAt, rewake, outcome, row.active_at, row.lease_renewed_at]);
+        return outcome;
+      };
+      // Boat said archived, but not after our resume, or our worker reported activity after Boat's stop time.
+      const resumedAt = row.lease_renewed_at?.getTime() ?? -Infinity;
+      if (evidence.state === "archived" && (!evidence.stoppedAt || evidence.stoppedAt.getTime() <= resumedAt ||
+          row.active_at && row.active_at.getTime() > evidence.stoppedAt.getTime() + PROVIDER_STOP_ACTIVITY_MARGIN_MS))
+        return record("contradicted", row.stop_generation);
+      if (mode === "observe") return record("observed", row.stop_generation);
+      const recent = (await tx.query<{ stops: number; wakes: number; global_wakes: number }>(`SELECT
+          count(*) FILTER (WHERE outcome IN ('stopped','rewake') AND detected_at>clock_timestamp()-interval '10 minutes')::int AS stops,
+          count(*) FILTER (WHERE outcome='rewake' AND workspace_id=$1 AND detected_at>clock_timestamp()-interval '1 hour')::int AS wakes,
+          count(*) FILTER (WHERE outcome='rewake' AND detected_at>clock_timestamp()-interval '10 minutes')::int AS global_wakes
+        FROM cloud_v2_provider_stops WHERE detected_at>clock_timestamp()-interval '1 hour'`, [binding.workspaceId])).rows[0]!;
+      // Many at once across workspaces means a Boat incident, not this bug: stop nothing more until it passes.
+      if (recent.stops >= PROVIDER_STOP_BRAKE_PER_10_MINUTES) return record("braked", row.stop_generation);
       const generation = (await tx.query<{ stop_generation: string }>(`UPDATE cloud_v2_workspaces SET state='stopped',
           stop_generation=stop_generation+1,stopped_at=clock_timestamp(),restart_stop_generation=NULL,
           error_code=CASE WHEN error_code='live_connection_unavailable' THEN NULL ELSE error_code END,
@@ -771,30 +796,33 @@ export class CloudV2Store {
       // The worker may already have passed these to its provider: never replayed, as when a new boot pulls.
       await tx.query(`UPDATE cloud_v2_prompt_outbox SET state=CASE WHEN cancel_requested THEN 'cancelled' ELSE 'interrupted' END,
         terminal_at=clock_timestamp(),updated_at=clock_timestamp() WHERE workspace_id=$1 AND state IN ('dispatching','accepted')`, [binding.workspaceId]);
-      const counts = (await tx.query<{ waiting: number; recent: number; global: number }>(`SELECT
-          (SELECT count(*)::int FROM cloud_v2_prompt_outbox WHERE workspace_id=$1 AND state IN ('queued','inboxed')
-            AND access_epoch=$2::bigint AND NOT cancel_requested AND payload IS NOT NULL) AS waiting,
-          (SELECT count(*)::int FROM cloud_v2_provider_stops WHERE workspace_id=$1 AND rewake AND detected_at>clock_timestamp()-interval '1 hour') AS recent,
-          (SELECT count(*)::int FROM cloud_v2_provider_stops WHERE rewake AND detected_at>clock_timestamp()-interval '10 minutes') AS global`,
-        [binding.workspaceId, row.access_epoch])).rows[0]!;
-      // Two automatic wakes an hour per workspace; many at once across workspaces is a Boat outage, not this bug.
-      const rewake = counts.waiting > 0 && counts.recent < PROVIDER_STOP_WAKES_PER_HOUR && counts.global < PROVIDER_STOP_WAKES_PER_10_MINUTES;
-      if (rewake) await tx.query(`UPDATE cloud_v2_prompt_outbox SET wake_after_stop=true WHERE workspace_id=$1 AND state IN ('queued','inboxed')
-        AND access_epoch=$2::bigint AND NOT cancel_requested AND payload IS NOT NULL`, [binding.workspaceId, row.access_epoch]);
-      await record(rewake, generation);
-      return rewake ? "rewake" : "stopped";
+      // Only a message whose sender still has access may carry the wake: wakePending takes the intent from the oldest one.
+      const waking = `workspace_id=$1 AND state IN ('queued','inboxed') AND access_epoch=$2::bigint AND NOT cancel_requested AND payload IS NOT NULL
+        AND EXISTS (SELECT 1 FROM cloud_v2_workspaces w WHERE w.id=$1 AND (cloud_v2_prompt_outbox.creator_user_id=w.creator_user_id OR w.execution_mode='active' AND EXISTS (
+          SELECT 1 FROM organization_members m JOIN users u ON u.id=m.user_id WHERE m.org_id=w.org_id AND m.user_id=cloud_v2_prompt_outbox.creator_user_id
+            AND u.auth_status='active' AND u.deleted_at IS NULL AND NOT ${memberOnHoldSql("m.org_id", "m.user_id")})))`;
+      const waiting = (await tx.query<{ n: number }>(`SELECT count(*)::int AS n FROM cloud_v2_prompt_outbox WHERE ${waking}`,
+        [binding.workspaceId, row.access_epoch])).rows[0]!.n;
+      const rewake = waiting > 0 && recent.wakes < PROVIDER_STOP_WAKES_PER_HOUR && recent.global_wakes < PROVIDER_STOP_WAKES_PER_10_MINUTES;
+      if (rewake) await tx.query(`UPDATE cloud_v2_prompt_outbox SET wake_after_stop=true WHERE ${waking}`, [binding.workspaceId, row.access_epoch]);
+      return record(rewake ? "rewake" : waiting > 0 ? "capped" : "stopped", generation, rewake);
     });
   }
 
-  /** Running workspaces whose waiting or in-flight messages suggest a VM that stopped without telling us. Database only. */
+  /** Running workspaces holding a message that pull would deliver now but has not for 90 s: their VM may have stopped
+   * without telling us. Oldest waiting message first. Database only. */
   async providerStopSuspects(limit = 16): Promise<CloudV2ProviderStopBinding[]> {
     const { rows } = await withSystemTx(this.pool, tx => tx.query<{ id: string; boat_sandbox_id: string; worker_boot_id: string; token_hash: string; access_epoch: string }>(
-      `SELECT w.id,w.boat_sandbox_id,w.worker_boot_id,encode(w.worker_token_hash,'hex') AS token_hash,w.access_epoch::text FROM cloud_v2_workspaces w
+      `SELECT w.id,w.boat_sandbox_id,w.worker_boot_id,encode(w.worker_token_hash,'hex') AS token_hash,w.access_epoch::text,min(p.updated_at) AS waiting_since
+       FROM cloud_v2_workspaces w JOIN cloud_v2_prompt_outbox p ON p.workspace_id=w.id
+       JOIN cloud_v2_prompt_chats c ON c.workspace_id=p.workspace_id AND c.chat_id=p.chat_id
        WHERE w.state='running' AND w.archived_at IS NULL AND w.boat_sandbox_id IS NOT NULL AND w.worker_boot_id IS NOT NULL
-         AND w.worker_token_hash IS NOT NULL AND EXISTS (SELECT 1 FROM cloud_v2_prompt_outbox p WHERE p.workspace_id=w.id AND (
-           p.state='queued' AND p.updated_at<clock_timestamp()-interval '90 seconds' AND (p.lease_until IS NULL OR p.lease_until<=clock_timestamp())
-           OR p.state IN ('dispatching','accepted') AND w.active_at<clock_timestamp()-interval '90 seconds'))
-       ORDER BY w.updated_at LIMIT $1`, [limit]));
+         AND w.worker_token_hash IS NOT NULL AND p.state IN ('queued','inboxed') AND p.epoch=c.epoch AND p.access_epoch=w.access_epoch
+         AND NOT p.cancel_requested AND p.payload IS NOT NULL AND (p.lease_until IS NULL OR p.lease_until<=clock_timestamp())
+         AND p.updated_at<clock_timestamp()-interval '90 seconds'
+         AND NOT EXISTS (SELECT 1 FROM cloud_v2_prompt_outbox older WHERE older.workspace_id=p.workspace_id AND older.chat_id=p.chat_id
+           AND older.sequence<p.sequence AND older.state IN ('queued','inboxed','dispatching','accepted'))
+       GROUP BY w.id ORDER BY waiting_since LIMIT $1`, [limit]));
     return rows.map(row => ({ workspaceId: row.id, sandboxId: row.boat_sandbox_id, bootId: row.worker_boot_id, workerTokenHash: row.token_hash, accessEpoch: row.access_epoch }));
   }
 

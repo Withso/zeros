@@ -14,9 +14,15 @@ CREATE TABLE cloud_v2_provider_stops (
   provider_state text NOT NULL,
   provider_stopped_at timestamptz,
   rewake boolean NOT NULL DEFAULT false,
+  -- What the step did: acted (stopped, rewake, capped past the wake cap), only recorded (observed), refused Boat's answer
+  -- because it predates our resume or our worker was active after it (contradicted), or held back by the brake (braked).
+  outcome text NOT NULL CHECK (outcome IN ('observed', 'contradicted', 'braked', 'stopped', 'rewake', 'capped')),
+  -- Our own evidence at detection, for measuring how often Boat's answer was wrong.
+  active_at timestamptz,
+  lease_renewed_at timestamptz,
   detected_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
-CREATE INDEX cloud_v2_provider_stops_workspace ON cloud_v2_provider_stops (workspace_id, detected_at DESC);
+CREATE INDEX cloud_v2_provider_stops_workspace ON cloud_v2_provider_stops (workspace_id, worker_boot_id, outcome);
 CREATE INDEX cloud_v2_provider_stops_recent ON cloud_v2_provider_stops (detected_at DESC);
 ALTER TABLE cloud_v2_provider_stops ENABLE ROW LEVEL SECURITY;
 ALTER TABLE cloud_v2_provider_stops FORCE ROW LEVEL SECURITY;

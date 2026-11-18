@@ -4,18 +4,21 @@
 //
 // Nothing polls a healthy workspace. Boat is asked only about a suspect: a failed dial of a running route, a message
 // that waits too long on a running workspace (database-only scan), and once about 75 s after each wake. Only Boat's
-// own answer (`archived`, or the sandbox gone) leads to CloudV2Store.providerStopped, which is fenced to the observed boot.
+// own answer (`archived`, or the sandbox gone), confirmed by a second read, leads to CloudV2Store.providerStopped, which is
+// fenced to the observed boot and refuses an answer that predates our resume or our worker's latest activity.
 import { CloudProviderError } from "./provider-error.js";
-import type { CloudV2ProviderStopBinding, CloudV2Store } from "./store.js";
+import type { CloudV2ProviderStopBinding, CloudV2ProviderStopOutcome, CloudV2Store } from "./store.js";
 
 export type ProviderStopMode = "off" | "observe" | "on";
 export type ProviderStopTrigger = "dial" | "suspect" | "wake_check";
-export type ProviderStopResult = "skipped" | "running" | "unknown" | "observed" | "stopped" | "rewake" | "stale";
+export type ProviderStopResult = "skipped" | "running" | "unknown" | CloudV2ProviderStopOutcome;
 
 /** Seconds between Boat reads for one boot: a suspect that keeps looking wrong is asked less and less often. */
 const BACKOFF_MS = [15_000, 60_000, 120_000, 300_000];
 export const PROVIDER_STOP_WAKE_CHECK_MS = 75_000;
-const ARCHIVING_RECHECK_MS = 4_000;
+const ARCHIVING_RECHECK_MS = 4_000, ARCHIVING_RECHECKS = 5;
+/** A second read this long after the first, which must agree, before anything is stopped. */
+export const PROVIDER_STOP_CONFIRM_MS = 5_000;
 
 type Deps = {
   mode: ProviderStopMode;
@@ -24,11 +27,13 @@ type Deps = {
   logger?: Pick<Console, "warn">;
   now?: () => number;
   schedule?: (run: () => void, ms: number) => void;
+  wait?: (ms: number) => Promise<void>;
 };
 
 export class ProviderStopCheck {
   private readonly asked = new Map<string, { at: number; step: number }>();
   private readonly running = new Set<string>();
+  private readonly archiving = new Map<string, number>();
   constructor(private readonly deps: Deps) {}
 
   get mode() { return this.deps.mode; }
@@ -43,19 +48,28 @@ export class ProviderStopCheck {
     this.prune(now);
     this.running.add(key);
     try {
-      let inspected: { state: string; stoppedAt?: Date | null };
-      try { inspected = await this.deps.compute.inspect(binding.sandboxId); }
-      catch (error) {
-        if (!(error instanceof CloudProviderError && error.code === "provider_not_found")) return "unknown";
-        inspected = { state: "missing", stoppedAt: null };
-      }
+      const read = async (): Promise<{ state: string; stoppedAt: Date | null } | null> => {
+        try { const value = await this.deps.compute.inspect(binding.sandboxId); return { state: value.state, stoppedAt: value.stoppedAt ?? null }; }
+        catch (error) { return error instanceof CloudProviderError && error.code === "provider_not_found" ? { state: "missing", stoppedAt: null } : null; }
+      };
+      const inspected = await read();
+      if (!inspected) return "unknown";
       if (inspected.state === "archiving") {
-        this.schedule(() => { this.asked.delete(key); void this.check(binding, trigger).catch(() => {}); }, ARCHIVING_RECHECK_MS);
+        const rechecks = (this.archiving.get(key) ?? 0) + 1;
+        this.archiving.set(key, rechecks);
+        if (rechecks <= ARCHIVING_RECHECKS) this.schedule(() => {
+          this.asked.set(key, { at: -Infinity, step: this.asked.get(key)?.step ?? 1 });
+          void this.check(binding, trigger).catch(() => {});
+        }, ARCHIVING_RECHECK_MS);
         return "unknown";
       }
+      this.archiving.delete(key);
       if (inspected.state !== "archived" && inspected.state !== "missing") return "running";
-      const result = await this.deps.store.providerStopped(binding,
-        { trigger, state: inspected.state, stoppedAt: inspected.stoppedAt ?? null }, this.deps.mode);
+      // One answer is not enough to stop a workspace: a second read a few seconds later must agree.
+      await this.wait(PROVIDER_STOP_CONFIRM_MS);
+      const confirmed = await read();
+      if (!confirmed || confirmed.state !== inspected.state || confirmed.stoppedAt?.getTime() !== inspected.stoppedAt?.getTime()) return "unknown";
+      const result = await this.deps.store.providerStopped(binding, { trigger, state: inspected.state, stoppedAt: inspected.stoppedAt }, this.deps.mode);
       if (result !== "stale") this.deps.logger?.warn("[cloud-v2] provider stop", { workspaceId: binding.workspaceId.slice(0, 8),
         sandboxId: binding.sandboxId, trigger, state: inspected.state, stoppedAt: inspected.stoppedAt?.toISOString() ?? null, result });
       return result;
@@ -76,9 +90,10 @@ export class ProviderStopCheck {
 
   private prune(now: number) {
     if (this.asked.size < 1_000) return;
-    for (const [key, value] of this.asked) if (value.at < now - BACKOFF_MS.at(-1)!) this.asked.delete(key);
+    for (const [key, value] of this.asked) if (value.at < now - BACKOFF_MS.at(-1)!) { this.asked.delete(key); this.archiving.delete(key); }
   }
   private now() { return this.deps.now?.() ?? Date.now(); }
+  private wait(ms: number) { return this.deps.wait ? this.deps.wait(ms) : new Promise<void>(resolve => setTimeout(resolve, ms).unref()); }
   private schedule(run: () => void, ms: number) {
     if (this.deps.schedule) return this.deps.schedule(run, ms);
     setTimeout(run, ms).unref();
