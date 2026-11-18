@@ -1,0 +1,1780 @@
+{
+  "version": 1,
+  "client": "worker",
+  "headers": {
+    "X-Zeros-Worker-Features": "prompt-outbox-v1,mcp-v1,workspace-setup-v1,checkout-v2,agent-interactions-v1,github-pr-v1,git-identity-v1,github-user-token-v1,code-review-v1,history-replace-v1,workspace-environment-v1,repository-setup-v1,runtime-update-v1,worker-push-v1,workspace-api-v1,session-name-v1,chat-edit-v1,local-commands-v1,setup-status-v1,notify-user-v1,sync-v1,local-commands-reason-v1,acting-user-v1,sync-context-v1,creator-agent-logins-v1,creator-agent-models-v1,creator-commit-identity-v1,push-signals-v1,recovery-quiesce-v1,history-digest-v1,history-digest-deletions-v1,boot-timings-v1,message-authority-v1,history-batch-v1,begin-lease-v1,turn-events-v1"
+  },
+  "entries": [
+    {
+      "id": "worker.hello",
+      "method": "POST",
+      "path": "hello",
+      "body": {
+        "protocol": 2,
+        "runtimeSha256": "{runtimeSha256}",
+        "bootId": "{bootId}"
+      },
+      "response": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "config": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "t": {
+                    "type": "string",
+                    "const": "push"
+                  },
+                  "prompts": {
+                    "type": "boolean"
+                  },
+                  "runtimeUpdate": {
+                    "type": "boolean",
+                    "const": true
+                  }
+                },
+                "required": [
+                  "t",
+                  "prompts"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "t": {
+                    "type": "string",
+                    "const": "activity-reply"
+                  },
+                  "id": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "prompts": {
+                    "type": "boolean"
+                  },
+                  "loginRevision": {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]{0,19})$"
+                  },
+                  "state": {
+                    "type": "string",
+                    "enum": [
+                      "creating",
+                      "starting",
+                      "running",
+                      "stopping",
+                      "stopped",
+                      "failed",
+                      "deleting",
+                      "deleted"
+                    ]
+                  }
+                },
+                "required": [
+                  "t",
+                  "id",
+                  "prompts",
+                  "loginRevision",
+                  "state"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "t": {
+                    "type": "string",
+                    "const": "prompts"
+                  }
+                },
+                "required": [
+                  "t"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "t": {
+                    "type": "string",
+                    "const": "open"
+                  },
+                  "clientId": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "passive": {
+                    "type": "boolean",
+                    "const": true
+                  },
+                  "device": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "authorityClientId": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "userId": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "contextId": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  }
+                },
+                "required": [
+                  "t",
+                  "clientId"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "t": {
+                    "type": "string",
+                    "const": "revoke-context"
+                  },
+                  "contextId": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "reason": {
+                    "type": "string",
+                    "enum": [
+                      "completed",
+                      "cancelled",
+                      "access_revoked",
+                      "actor_changed",
+                      "expired",
+                      "worker_changed",
+                      "client_closed"
+                    ]
+                  }
+                },
+                "required": [
+                  "t",
+                  "contextId",
+                  "reason"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "t": {
+                    "type": "string",
+                    "const": "close"
+                  },
+                  "clientId": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  }
+                },
+                "required": [
+                  "t",
+                  "clientId"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "t": {
+                    "type": "string",
+                    "const": "frame"
+                  },
+                  "clientId": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "frame": {}
+                },
+                "required": [
+                  "t",
+                  "clientId",
+                  "frame"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "t": {
+                    "type": "string",
+                    "const": "stop"
+                  },
+                  "id": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  }
+                },
+                "required": [
+                  "t",
+                  "id"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "t": {
+                    "type": "string",
+                    "const": "config"
+                  },
+                  "environment": {
+                    "type": "object",
+                    "properties": {
+                      "versionId": {
+                        "type": "string",
+                        "pattern": "^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$"
+                      },
+                      "repositoryId": {
+                        "type": "string",
+                        "maxLength": 16
+                      },
+                      "variables": {},
+                      "files": {}
+                    },
+                    "required": [
+                      "versionId",
+                      "repositoryId",
+                      "variables",
+                      "files"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "promptOutbox": {
+                    "type": "number",
+                    "const": 1
+                  },
+                  "messageAuthority": {
+                    "type": "number",
+                    "const": 1
+                  },
+                  "runtimeUpdate": {
+                    "type": "number",
+                    "const": 1
+                  },
+                  "pushSignals": {
+                    "type": "number",
+                    "const": 1
+                  },
+                  "agentInteractions": {
+                    "type": "number",
+                    "const": 1
+                  },
+                  "codeReview": {
+                    "type": "object",
+                    "properties": {
+                      "userId": {
+                        "type": "string",
+                        "format": "uuid",
+                        "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                      },
+                      "userName": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 256
+                      }
+                    },
+                    "required": [
+                      "userId"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "historyReplacement": {
+                    "type": "number",
+                    "const": 1
+                  },
+                  "historyDigest": {
+                    "type": "number",
+                    "const": 1
+                  },
+                  "historyBatch": {
+                    "type": "number",
+                    "const": 1
+                  },
+                  "turnEvents": {
+                    "type": "number",
+                    "const": 1
+                  },
+                  "bootTimings": {
+                    "type": "number",
+                    "const": 1
+                  },
+                  "gitIdentity": {
+                    "anyOf": [
+                      {
+                        "type": "object",
+                        "properties": {
+                          "name": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 256
+                          },
+                          "email": {
+                            "type": "string",
+                            "pattern": "^[1-9][0-9]{0,15}\\+[A-Za-z0-9_.-]{1,100}@users\\.noreply\\.github\\.com$"
+                          }
+                        },
+                        "required": [
+                          "name",
+                          "email"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "gitIdentitySource": {
+                    "type": "string",
+                    "enum": [
+                      "creator",
+                      "actor"
+                    ]
+                  },
+                  "githubPullRequests": {
+                    "type": "number",
+                    "const": 1
+                  },
+                  "githubUserTokens": {
+                    "type": "number",
+                    "const": 1
+                  },
+                  "localCommands": {
+                    "type": "number",
+                    "const": 1
+                  },
+                  "localCommandReason": {
+                    "type": "number",
+                    "const": 1
+                  },
+                  "notifyUser": {
+                    "type": "number",
+                    "const": 1
+                  },
+                  "loginRevision": {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]{0,19})$"
+                  },
+                  "actingUser": {
+                    "type": "number",
+                    "const": 1
+                  },
+                  "bootstrapContextId": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "agentLogins": {
+                    "type": "object",
+                    "properties": {
+                      "claude": {
+                        "type": "boolean",
+                        "const": true
+                      },
+                      "codex": {
+                        "type": "boolean",
+                        "const": true
+                      },
+                      "cursor": {
+                        "type": "boolean",
+                        "const": true
+                      }
+                    },
+                    "additionalProperties": false
+                  },
+                  "agentModels": {
+                    "type": "object",
+                    "properties": {
+                      "claude": {
+                        "maxItems": 128,
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "maxLength": 256,
+                          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*(?:\\[1m\\])?$"
+                        }
+                      },
+                      "codex": {
+                        "maxItems": 128,
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "maxLength": 256,
+                          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*(?:\\[1m\\])?$"
+                        }
+                      },
+                      "cursor": {
+                        "maxItems": 128,
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "maxLength": 256,
+                          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*(?:\\[1m\\])?$"
+                        }
+                      }
+                    },
+                    "additionalProperties": false
+                  },
+                  "api": {
+                    "type": "object",
+                    "properties": {
+                      "url": {
+                        "type": "string",
+                        "maxLength": 2048,
+                        "format": "uri"
+                      },
+                      "token": {
+                        "type": "string",
+                        "pattern": "^zw2a_[A-Za-z0-9_-]{43}$"
+                      }
+                    },
+                    "required": [
+                      "url",
+                      "token"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "mcpServers": {
+                    "maxItems": 128,
+                    "type": "array",
+                    "items": {
+                      "oneOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "id": {
+                              "type": "string",
+                              "format": "uuid",
+                              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                            },
+                            "name": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 128
+                            },
+                            "transport": {
+                              "type": "string",
+                              "const": "stdio"
+                            },
+                            "command": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 4096
+                            },
+                            "args": {
+                              "maxItems": 128,
+                              "type": "array",
+                              "items": {
+                                "type": "string",
+                                "maxLength": 8192
+                              }
+                            },
+                            "cwd": {
+                              "type": "string",
+                              "maxLength": 4096
+                            },
+                            "env": {
+                              "type": "object",
+                              "propertyNames": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 256
+                              },
+                              "additionalProperties": {
+                                "type": "string",
+                                "maxLength": 16384
+                              }
+                            },
+                            "listen_url": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 4096
+                            }
+                          },
+                          "required": [
+                            "id",
+                            "name",
+                            "transport",
+                            "command"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "id": {
+                              "type": "string",
+                              "format": "uuid",
+                              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                            },
+                            "name": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 128
+                            },
+                            "transport": {
+                              "type": "string",
+                              "const": "http"
+                            },
+                            "url": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 4096
+                            },
+                            "headers": {
+                              "type": "object",
+                              "propertyNames": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 256
+                              },
+                              "additionalProperties": {
+                                "type": "string",
+                                "maxLength": 16384
+                              }
+                            },
+                            "auth": {
+                              "type": "string",
+                              "enum": [
+                                "none",
+                                "header",
+                                "oauth"
+                              ]
+                            },
+                            "disabled_tools": {
+                              "maxItems": 1024,
+                              "type": "array",
+                              "items": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 256
+                              }
+                            }
+                          },
+                          "required": [
+                            "id",
+                            "name",
+                            "transport",
+                            "url"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "id": {
+                              "type": "string",
+                              "format": "uuid",
+                              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                            },
+                            "name": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 128
+                            },
+                            "transport": {
+                              "type": "string",
+                              "const": "sse"
+                            },
+                            "url": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 4096
+                            },
+                            "headers": {
+                              "type": "object",
+                              "propertyNames": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 256
+                              },
+                              "additionalProperties": {
+                                "type": "string",
+                                "maxLength": 16384
+                              }
+                            },
+                            "auth": {
+                              "type": "string",
+                              "enum": [
+                                "none",
+                                "header",
+                                "oauth"
+                              ]
+                            },
+                            "disabled_tools": {
+                              "maxItems": 1024,
+                              "type": "array",
+                              "items": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 256
+                              }
+                            }
+                          },
+                          "required": [
+                            "id",
+                            "name",
+                            "transport",
+                            "url"
+                          ],
+                          "additionalProperties": false
+                        }
+                      ]
+                    }
+                  },
+                  "workspace": {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "string",
+                        "format": "uuid",
+                        "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                      },
+                      "organizationId": {
+                        "type": "string",
+                        "format": "uuid",
+                        "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                      },
+                      "checkoutPath": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 1024
+                      },
+                      "repository": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 512
+                      },
+                      "github": {
+                        "type": "object",
+                        "properties": {
+                          "repositoryId": {
+                            "type": "string",
+                            "pattern": "^[1-9][0-9]{0,15}$"
+                          },
+                          "repository": {
+                            "type": "string",
+                            "pattern": "^[A-Za-z0-9_.-]{1,100}\\/[A-Za-z0-9_.-]{1,100}$"
+                          },
+                          "previousRepositories": {
+                            "maxItems": 102,
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "pattern": "^[A-Za-z0-9_.-]{1,100}\\/[A-Za-z0-9_.-]{1,100}$"
+                            }
+                          }
+                        },
+                        "required": [
+                          "repositoryId",
+                          "repository",
+                          "previousRepositories"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "branch": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 255
+                      },
+                      "baseBranch": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 255
+                      },
+                      "baseCommit": {
+                        "type": "string",
+                        "pattern": "^[0-9a-f]{40}$"
+                      },
+                      "setup": {
+                        "type": "string",
+                        "maxLength": 8000
+                      },
+                      "setupScript": {
+                        "type": "string",
+                        "maxLength": 512
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "organizationId",
+                      "checkoutPath",
+                      "repository",
+                      "branch",
+                      "baseBranch"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "agents": {
+                    "type": "object",
+                    "properties": {
+                      "codex": {
+                        "type": "object",
+                        "properties": {
+                          "baseUrl": {
+                            "type": "string",
+                            "format": "uri"
+                          },
+                          "token": {
+                            "type": "string",
+                            "minLength": 16,
+                            "maxLength": 4096
+                          },
+                          "expiresAt": {
+                            "type": "integer",
+                            "minimum": -9007199254740991,
+                            "maximum": 9007199254740991
+                          }
+                        },
+                        "required": [
+                          "baseUrl",
+                          "token",
+                          "expiresAt"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "claude": {
+                        "anyOf": [
+                          {
+                            "type": "object",
+                            "properties": {
+                              "oauthToken": {
+                                "type": "string",
+                                "minLength": 16,
+                                "maxLength": 16384
+                              }
+                            },
+                            "required": [
+                              "oauthToken"
+                            ],
+                            "additionalProperties": false
+                          },
+                          {
+                            "type": "object",
+                            "properties": {
+                              "apiKey": {
+                                "type": "string",
+                                "minLength": 16,
+                                "maxLength": 16384
+                              }
+                            },
+                            "required": [
+                              "apiKey"
+                            ],
+                            "additionalProperties": false
+                          }
+                        ]
+                      },
+                      "cursor": {
+                        "type": "object",
+                        "properties": {
+                          "apiKey": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 4096
+                          }
+                        },
+                        "required": [
+                          "apiKey"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "t",
+                  "loginRevision",
+                  "workspace",
+                  "agents"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "t": {
+                    "type": "string",
+                    "const": "reply"
+                  },
+                  "id": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "token": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 8192
+                  },
+                  "expiresAt": {
+                    "type": "integer",
+                    "minimum": -9007199254740991,
+                    "maximum": 9007199254740991
+                  }
+                },
+                "required": [
+                  "t",
+                  "id",
+                  "token",
+                  "expiresAt"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "t": {
+                    "type": "string",
+                    "const": "refusal"
+                  },
+                  "id": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "code": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  }
+                },
+                "required": [
+                  "t",
+                  "id",
+                  "code"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          }
+        },
+        "required": [
+          "config"
+        ]
+      }
+    },
+    {
+      "id": "worker.config",
+      "method": "GET",
+      "path": "config",
+      "response": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "config": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "t": {
+                    "type": "string",
+                    "const": "push"
+                  },
+                  "prompts": {
+                    "type": "boolean"
+                  },
+                  "runtimeUpdate": {
+                    "type": "boolean",
+                    "const": true
+                  }
+                },
+                "required": [
+                  "t",
+                  "prompts"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "t": {
+                    "type": "string",
+                    "const": "activity-reply"
+                  },
+                  "id": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "prompts": {
+                    "type": "boolean"
+                  },
+                  "loginRevision": {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]{0,19})$"
+                  },
+                  "state": {
+                    "type": "string",
+                    "enum": [
+                      "creating",
+                      "starting",
+                      "running",
+                      "stopping",
+                      "stopped",
+                      "failed",
+                      "deleting",
+                      "deleted"
+                    ]
+                  }
+                },
+                "required": [
+                  "t",
+                  "id",
+                  "prompts",
+                  "loginRevision",
+                  "state"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "t": {
+                    "type": "string",
+                    "const": "prompts"
+                  }
+                },
+                "required": [
+                  "t"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "t": {
+                    "type": "string",
+                    "const": "open"
+                  },
+                  "clientId": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "passive": {
+                    "type": "boolean",
+                    "const": true
+                  },
+                  "device": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "authorityClientId": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "userId": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "contextId": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  }
+                },
+                "required": [
+                  "t",
+                  "clientId"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "t": {
+                    "type": "string",
+                    "const": "revoke-context"
+                  },
+                  "contextId": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "reason": {
+                    "type": "string",
+                    "enum": [
+                      "completed",
+                      "cancelled",
+                      "access_revoked",
+                      "actor_changed",
+                      "expired",
+                      "worker_changed",
+                      "client_closed"
+                    ]
+                  }
+                },
+                "required": [
+                  "t",
+                  "contextId",
+                  "reason"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "t": {
+                    "type": "string",
+                    "const": "close"
+                  },
+                  "clientId": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  }
+                },
+                "required": [
+                  "t",
+                  "clientId"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "t": {
+                    "type": "string",
+                    "const": "frame"
+                  },
+                  "clientId": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "frame": {}
+                },
+                "required": [
+                  "t",
+                  "clientId",
+                  "frame"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "t": {
+                    "type": "string",
+                    "const": "stop"
+                  },
+                  "id": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  }
+                },
+                "required": [
+                  "t",
+                  "id"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "t": {
+                    "type": "string",
+                    "const": "config"
+                  },
+                  "environment": {
+                    "type": "object",
+                    "properties": {
+                      "versionId": {
+                        "type": "string",
+                        "pattern": "^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$"
+                      },
+                      "repositoryId": {
+                        "type": "string",
+                        "maxLength": 16
+                      },
+                      "variables": {},
+                      "files": {}
+                    },
+                    "required": [
+                      "versionId",
+                      "repositoryId",
+                      "variables",
+                      "files"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "promptOutbox": {
+                    "type": "number",
+                    "const": 1
+                  },
+                  "messageAuthority": {
+                    "type": "number",
+                    "const": 1
+                  },
+                  "runtimeUpdate": {
+                    "type": "number",
+                    "const": 1
+                  },
+                  "pushSignals": {
+                    "type": "number",
+                    "const": 1
+                  },
+                  "agentInteractions": {
+                    "type": "number",
+                    "const": 1
+                  },
+                  "codeReview": {
+                    "type": "object",
+                    "properties": {
+                      "userId": {
+                        "type": "string",
+                        "format": "uuid",
+                        "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                      },
+                      "userName": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 256
+                      }
+                    },
+                    "required": [
+                      "userId"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "historyReplacement": {
+                    "type": "number",
+                    "const": 1
+                  },
+                  "historyDigest": {
+                    "type": "number",
+                    "const": 1
+                  },
+                  "historyBatch": {
+                    "type": "number",
+                    "const": 1
+                  },
+                  "turnEvents": {
+                    "type": "number",
+                    "const": 1
+                  },
+                  "bootTimings": {
+                    "type": "number",
+                    "const": 1
+                  },
+                  "gitIdentity": {
+                    "anyOf": [
+                      {
+                        "type": "object",
+                        "properties": {
+                          "name": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 256
+                          },
+                          "email": {
+                            "type": "string",
+                            "pattern": "^[1-9][0-9]{0,15}\\+[A-Za-z0-9_.-]{1,100}@users\\.noreply\\.github\\.com$"
+                          }
+                        },
+                        "required": [
+                          "name",
+                          "email"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "gitIdentitySource": {
+                    "type": "string",
+                    "enum": [
+                      "creator",
+                      "actor"
+                    ]
+                  },
+                  "githubPullRequests": {
+                    "type": "number",
+                    "const": 1
+                  },
+                  "githubUserTokens": {
+                    "type": "number",
+                    "const": 1
+                  },
+                  "localCommands": {
+                    "type": "number",
+                    "const": 1
+                  },
+                  "localCommandReason": {
+                    "type": "number",
+                    "const": 1
+                  },
+                  "notifyUser": {
+                    "type": "number",
+                    "const": 1
+                  },
+                  "loginRevision": {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]{0,19})$"
+                  },
+                  "actingUser": {
+                    "type": "number",
+                    "const": 1
+                  },
+                  "bootstrapContextId": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "agentLogins": {
+                    "type": "object",
+                    "properties": {
+                      "claude": {
+                        "type": "boolean",
+                        "const": true
+                      },
+                      "codex": {
+                        "type": "boolean",
+                        "const": true
+                      },
+                      "cursor": {
+                        "type": "boolean",
+                        "const": true
+                      }
+                    },
+                    "additionalProperties": false
+                  },
+                  "agentModels": {
+                    "type": "object",
+                    "properties": {
+                      "claude": {
+                        "maxItems": 128,
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "maxLength": 256,
+                          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*(?:\\[1m\\])?$"
+                        }
+                      },
+                      "codex": {
+                        "maxItems": 128,
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "maxLength": 256,
+                          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*(?:\\[1m\\])?$"
+                        }
+                      },
+                      "cursor": {
+                        "maxItems": 128,
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "maxLength": 256,
+                          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*(?:\\[1m\\])?$"
+                        }
+                      }
+                    },
+                    "additionalProperties": false
+                  },
+                  "api": {
+                    "type": "object",
+                    "properties": {
+                      "url": {
+                        "type": "string",
+                        "maxLength": 2048,
+                        "format": "uri"
+                      },
+                      "token": {
+                        "type": "string",
+                        "pattern": "^zw2a_[A-Za-z0-9_-]{43}$"
+                      }
+                    },
+                    "required": [
+                      "url",
+                      "token"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "mcpServers": {
+                    "maxItems": 128,
+                    "type": "array",
+                    "items": {
+                      "oneOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "id": {
+                              "type": "string",
+                              "format": "uuid",
+                              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                            },
+                            "name": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 128
+                            },
+                            "transport": {
+                              "type": "string",
+                              "const": "stdio"
+                            },
+                            "command": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 4096
+                            },
+                            "args": {
+                              "maxItems": 128,
+                              "type": "array",
+                              "items": {
+                                "type": "string",
+                                "maxLength": 8192
+                              }
+                            },
+                            "cwd": {
+                              "type": "string",
+                              "maxLength": 4096
+                            },
+                            "env": {
+                              "type": "object",
+                              "propertyNames": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 256
+                              },
+                              "additionalProperties": {
+                                "type": "string",
+                                "maxLength": 16384
+                              }
+                            },
+                            "listen_url": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 4096
+                            }
+                          },
+                          "required": [
+                            "id",
+                            "name",
+                            "transport",
+                            "command"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "id": {
+                              "type": "string",
+                              "format": "uuid",
+                              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                            },
+                            "name": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 128
+                            },
+                            "transport": {
+                              "type": "string",
+                              "const": "http"
+                            },
+                            "url": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 4096
+                            },
+                            "headers": {
+                              "type": "object",
+                              "propertyNames": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 256
+                              },
+                              "additionalProperties": {
+                                "type": "string",
+                                "maxLength": 16384
+                              }
+                            },
+                            "auth": {
+                              "type": "string",
+                              "enum": [
+                                "none",
+                                "header",
+                                "oauth"
+                              ]
+                            },
+                            "disabled_tools": {
+                              "maxItems": 1024,
+                              "type": "array",
+                              "items": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 256
+                              }
+                            }
+                          },
+                          "required": [
+                            "id",
+                            "name",
+                            "transport",
+                            "url"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "id": {
+                              "type": "string",
+                              "format": "uuid",
+                              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                            },
+                            "name": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 128
+                            },
+                            "transport": {
+                              "type": "string",
+                              "const": "sse"
+                            },
+                            "url": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 4096
+                            },
+                            "headers": {
+                              "type": "object",
+                              "propertyNames": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 256
+                              },
+                              "additionalProperties": {
+                                "type": "string",
+                                "maxLength": 16384
+                              }
+                            },
+                            "auth": {
+                              "type": "string",
+                              "enum": [
+                                "none",
+                                "header",
+                                "oauth"
+                              ]
+                            },
+                            "disabled_tools": {
+                              "maxItems": 1024,
+                              "type": "array",
+                              "items": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 256
+                              }
+                            }
+                          },
+                          "required": [
+                            "id",
+                            "name",
+                            "transport",
+                            "url"
+                          ],
+                          "additionalProperties": false
+                        }
+                      ]
+                    }
+                  },
+                  "workspace": {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "string",
+                        "format": "uuid",
+                        "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                      },
+                      "organizationId": {
+                        "type": "string",
+                        "format": "uuid",
+                        "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                      },
+                      "checkoutPath": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 1024
+                      },
+                      "repository": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 512
+                      },
+                      "github": {
+                        "type": "object",
+                        "properties": {
+                          "repositoryId": {
+                            "type": "string",
+                            "pattern": "^[1-9][0-9]{0,15}$"
+                          },
+                          "repository": {
+                            "type": "string",
+                            "pattern": "^[A-Za-z0-9_.-]{1,100}\\/[A-Za-z0-9_.-]{1,100}$"
+                          },
+                          "previousRepositories": {
+                            "maxItems": 102,
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "pattern": "^[A-Za-z0-9_.-]{1,100}\\/[A-Za-z0-9_.-]{1,100}$"
+                            }
+                          }
+                        },
+                        "required": [
+                          "repositoryId",
+                          "repository",
+                          "previousRepositories"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "branch": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 255
+                      },
+                      "baseBranch": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 255
+                      },
+                      "baseCommit": {
+                        "type": "string",
+                        "pattern": "^[0-9a-f]{40}$"
+                      },
+                      "setup": {
+                        "type": "string",
+                        "maxLength": 8000
+                      },
+                      "setupScript": {
+                        "type": "string",
+                        "maxLength": 512
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "organizationId",
+                      "checkoutPath",
+                      "repository",
+                      "branch",
+                      "baseBranch"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "agents": {
+                    "type": "object",
+                    "properties": {
+                      "codex": {
+                        "type": "object",
+                        "properties": {
+                          "baseUrl": {
+                            "type": "string",
+                            "format": "uri"
+                          },
+                          "token": {
+                            "type": "string",
+                            "minLength": 16,
+                            "maxLength": 4096
+                          },
+                          "expiresAt": {
+                            "type": "integer",
+                            "minimum": -9007199254740991,
+                            "maximum": 9007199254740991
+                          }
+                        },
+                        "required": [
+                          "baseUrl",
+                          "token",
+                          "expiresAt"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "claude": {
+                        "anyOf": [
+                          {
+                            "type": "object",
+                            "properties": {
+                              "oauthToken": {
+                                "type": "string",
+                                "minLength": 16,
+                                "maxLength": 16384
+                              }
+                            },
+                            "required": [
+                              "oauthToken"
+                            ],
+                            "additionalProperties": false
+                          },
+                          {
+                            "type": "object",
+                            "properties": {
+                              "apiKey": {
+                                "type": "string",
+                                "minLength": 16,
+                                "maxLength": 16384
+                              }
+                            },
+                            "required": [
+                              "apiKey"
+                            ],
+                            "additionalProperties": false
+                          }
+                        ]
+                      },
+                      "cursor": {
+                        "type": "object",
+                        "properties": {
+                          "apiKey": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 4096
+                          }
+                        },
+                        "required": [
+                          "apiKey"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "t",
+                  "loginRevision",
+                  "workspace",
+                  "agents"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "t": {
+                    "type": "string",
+                    "const": "reply"
+                  },
+                  "id": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "token": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 8192
+                  },
+                  "expiresAt": {
+                    "type": "integer",
+                    "minimum": -9007199254740991,
+                    "maximum": 9007199254740991
+                  }
+                },
+                "required": [
+                  "t",
+                  "id",
+                  "token",
+                  "expiresAt"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "t": {
+                    "type": "string",
+                    "const": "refusal"
+                  },
+                  "id": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "code": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  }
+                },
+                "required": [
+                  "t",
+                  "id",
+                  "code"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          }
+        },
+        "required": [
+          "config"
+        ]
+      }
+    },
+    {
+      "id": "worker.activity",
+      "method": "POST",
+      "path": "activity",
+      "body": {
+        "idle": true
+      },
+      "response": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "loginRevision": {
+            "type": "string",
+            "pattern": "^(0|[1-9][0-9]{0,19})$"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "creating",
+              "starting",
+              "running",
+              "stopping",
+              "stopped",
+              "failed",
+              "deleting",
+              "deleted"
+            ]
+          }
+        },
+        "required": [
+          "loginRevision",
+          "state"
+        ],
+        "additionalProperties": false
+      }
+    }
+  ]
+}
