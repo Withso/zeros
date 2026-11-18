@@ -31,7 +31,8 @@ const PACKAGE_DIR = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "../../apps/control-plane",
 );
-const MIGRATION_LADDER = { file: "src/migrations.test.ts", suite: "migration ladder" };
+// apps/control-plane/src/migrations-part.ts splits the migration suite into these parts, one per database shard.
+const MIGRATION_LADDER = { file: /^src\/migrations-\d+\.test\.ts$/, suite: "migration ladder" };
 const NOT_RUN = new Set(["skipped", "pending", "todo"]);
 
 /** Package-relative test files, matching vitest.config.ts `src/**\/*.test.ts`. */
@@ -81,7 +82,7 @@ function relativeTestFile(name) {
 export function validateShardReports({ reports, shards, testFiles, databaseFiles }) {
   const problems = [];
   const reportedBy = new Map();
-  let ladderPassed = false;
+  const ladderPassedIn = new Set();
 
   for (let shard = 1; shard <= shards; shard += 1) {
     const report = reports.get(shard);
@@ -110,11 +111,11 @@ export function validateShardReports({ reports, shards, testFiles, databaseFiles
           notRun.push(test);
         }
         if (
-          file === MIGRATION_LADDER.file &&
+          MIGRATION_LADDER.file.test(file) &&
           test.ancestorTitles?.[0] === MIGRATION_LADDER.suite &&
           test.status === "passed"
         ) {
-          ladderPassed = true;
+          ladderPassedIn.add(file);
         }
       }
       if (notRun.length) {
@@ -140,10 +141,14 @@ export function validateShardReports({ reports, shards, testFiles, databaseFiles
   for (const file of reportedBy.keys()) {
     if (!testFiles.includes(file)) problems.push(`${file} is not a known test file.`);
   }
-  if (!ladderPassed) {
-    problems.push(
-      `No "${MIGRATION_LADDER.suite}" test passed in ${MIGRATION_LADDER.file}, so the database suites did not run.`,
-    );
+  const ladderFiles = testFiles.filter((file) => MIGRATION_LADDER.file.test(file));
+  if (ladderFiles.length === 0) {
+    problems.push("No migration suite part (src/migrations-N.test.ts) is a known test file.");
+  }
+  for (const file of ladderFiles) {
+    if (!ladderPassedIn.has(file)) {
+      problems.push(`No "${MIGRATION_LADDER.suite}" test passed in ${file}, so the database suites did not run.`);
+    }
   }
   return problems;
 }

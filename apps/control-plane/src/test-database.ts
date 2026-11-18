@@ -23,7 +23,7 @@
 //
 // Only the public schema is reset, exactly as before. Roles, other schemas
 // and database settings are cluster or database state the old rebuild never
-// touched either. Full migration replay coverage stays in migrations.test.ts,
+// touched either. Full migration replay coverage stays in migrations.suite.ts,
 // which rebuilds and replays the ladder itself and never calls this helper.
 // ──────────────────────────────────────────────────────────
 
