@@ -1,6 +1,6 @@
 import {randomBytes,randomUUID} from "node:crypto";
 import {describe,it,expect} from "vitest";
-import {parseCodexNativeCache,sealCodexNativeCache,openCodexNativeCache,codexRefreshFingerprint} from "./codex-auth-cache.js";
+import {codexNativeCacheRejection,parseCodexNativeCache,sealCodexNativeCache,openCodexNativeCache,codexRefreshFingerprint} from "./codex-auth-cache.js";
 import {syntheticCodexCache} from "./codex-auth-test-fixture.js";
 describe("private native Codex cache",()=>{
   it("projects access only and requires consistent account, subject and provider identity",()=>{
@@ -17,9 +17,22 @@ describe("private native Codex cache",()=>{
     const parsed=parseCodexNativeCache(newer);
     expect(parsed.cache).toEqual(cache);
     expect(JSON.stringify(parsed.cache)).not.toContain("owner-sentinel");
-    for(const extra of [{nested:{endpoint:"untrusted"}},{list:["x"]},{long:"x".repeat(16_385)},
-      Object.fromEntries(Array.from({length:9},(_,index)=>[`field_${index}`,"x"]))])
-      expect(()=>parseCodexNativeCache({...cache,tokens:{...cache.tokens,...extra}})).toThrow("Invalid Codex native authentication cache");
+    expect(parseCodexNativeCache({...newer,tokens:{...newer.tokens,claims:{plan:"pro"}}}).cache).toEqual(cache);
+    // Codex 0.166's other sign-in kinds, present but empty in a ChatGPT bundle.
+    expect(parseCodexNativeCache({...newer,agent_identity:null,personal_access_token:null,bedrock_api_key:null,bedrock_access_keys:null}).cache).toEqual(cache);
+    for(const value of [{...cache,agent_identity:{token:"x"}},{...cache,personal_access_token:"x"},
+      {...cache,tokens:{...cache.tokens,...Object.fromEntries(Array.from({length:9},(_,index)=>[`field_${index}`,"x"]))}}])
+      expect(()=>parseCodexNativeCache(value)).toThrow("Invalid Codex native authentication cache");
+  });
+  it("names why a bundle was refused with field and check names only, never values",()=>{
+    const cache=syntheticCodexCache();
+    expect(codexNativeCacheRejection(cache)).toBe("accepted");
+    const reason=codexNativeCacheRejection({...cache,config:{endpoint:"value-sentinel"},auth_mode:"chatgptAuthTokens"});
+    expect(reason).toContain("root:unrecognized_keys[config]");
+    expect(reason).toContain("auth_mode:");
+    expect(reason).not.toContain("sentinel");
+    expect(codexNativeCacheRejection({...cache,tokens:{...cache.tokens,account_id:"other"}})).toBe("token_claims");
+    expect(codexNativeCacheRejection({...cache,"bad-key$":"x"})).toContain("[badkey]");
   });
   it("separately authenticates owner, consent, material epoch and encryption key",()=>{
     const key=randomBytes(32).toString("base64url"),binding={credentialId:randomUUID(),ownerUserId:randomUUID(),revision:1,version:2,keyVersion:1},cache=syntheticCodexCache();

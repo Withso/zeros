@@ -5,7 +5,7 @@ import {HttpError} from "../authz.js";
 import {withSystemTx,type Tx} from "../db.js";
 import {parseCloudAgentCredential,sealCloudAgentCredential,type CloudAgentCredentialKeys,type CloudAgentCredentialKind,type CloudAgentCredentialMaterial} from "./agent-credential-envelope.js";
 import type {CloudAgentCredentialConfig} from "./agent-credential-config.js";
-import {CODEX_AUTH_RUNTIME_VERSION,parseCodexNativeCache,sealCodexNativeCache,type CodexNativeAuthCache} from "./codex-auth-cache.js";
+import {CODEX_AUTH_RUNTIME_VERSION,codexNativeCacheRejection,parseCodexNativeCache,sealCodexNativeCache,type CodexNativeAuthCache} from "./codex-auth-cache.js";
 import {rememberCodexRefreshSeed} from "./codex-auth-renewal.js";
 import {cloudAgentModels} from "./agent-models.js";
 import {cloudAgentConnectionHealth,type CloudAgentConnectionHealthRow} from "./agent-connection-health.js";
@@ -225,7 +225,8 @@ export class DatabaseCloudAgentCredentialService {
   }
 
   async importCodex(input:{ownerUserId:string;organizationId?:string|undefined;credentialId:string;operationId:string;expectedRevision:number;displayName:string;nativeCache:unknown}){
-    let parsed;try{parsed=parseCodexNativeCache(input.nativeCache);}catch{invalid();}
+    let parsed;try{parsed=parseCodexNativeCache(input.nativeCache);}
+    catch{console.warn("[agent-credentials] codex native cache rejected",{reason:codexNativeCacheRejection(input.nativeCache)});invalid();}
     const dev=input.organizationId?await devConnectionRuntime(this.pool,this.encryption):null;
     if(dev)return dev.connectAgent({...input,organizationId:input.organizationId!,material:{kind:"codex-chatgpt",nativeCache:parsed.cache}});
     return this.put({...input,material:parsed.material},parsed.cache);

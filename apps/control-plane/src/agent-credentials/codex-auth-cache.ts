@@ -5,14 +5,19 @@ import type {CloudAgentCredentialKeys,CloudAgentCredentialMaterial} from "./agen
 export const CODEX_AUTH_RUNTIME_VERSION="0.154.0";
 const token=z.string().min(16).max(16_384).regex(/^[A-Za-z0-9._~+\/-]+={0,2}$/);
 // Newer Codex versions add fields to the token record (0.166, the desktop's sign-in, writes six; 0.154, the cloud runtime,
-// reads four). Unknown token fields are accepted only as bounded plain values and dropped, so the stored cache is exactly
-// what the runtime reads. Unknown top-level fields (for example an endpoint override) are still refused.
-const extraTokenField=z.union([z.string().max(16_384),z.number(),z.boolean(),z.null()]);
+// reads four). Unknown token fields are accepted and dropped, so the stored cache is exactly what the runtime reads.
+// Unknown top-level fields (for example an endpoint override) are still refused.
+// Bounded by the 64 KiB bundle limit; never stored.
+const extraTokenField=z.unknown();
 const tokens=z.object({id_token:token,access_token:token,refresh_token:token,account_id:z.string().regex(/^[A-Za-z0-9_-]{1,256}$/)})
   .catchall(extraTokenField).refine(value=>Object.keys(value).length<=12)
   .transform(({id_token,access_token,refresh_token,account_id})=>({id_token,access_token,refresh_token,account_id}));
+// Codex 0.166 also knows these top-level fields for other sign-in kinds; a ChatGPT bundle may carry them only empty.
+const otherKind=z.null().optional();
 const native=z.object({auth_mode:z.literal("chatgpt"),OPENAI_API_KEY:z.null().optional(),tokens,
-  last_refresh:z.string().datetime({offset:true})}).strict();
+  last_refresh:z.string().datetime({offset:true}),agent_identity:otherKind,personal_access_token:otherKind,bedrock_api_key:otherKind,
+  bedrock_access_keys:otherKind}).strict()
+  .transform(({auth_mode,OPENAI_API_KEY,tokens,last_refresh})=>({auth_mode,...(OPENAI_API_KEY===undefined?{}:{OPENAI_API_KEY}),tokens,last_refresh}));
 export type CodexNativeAuthCache=z.infer<typeof native>;
 type Binding={credentialId:string;ownerUserId:string;revision:number;version:number;keyVersion:number};
 export type CodexCacheEnvelope={nonce:Buffer;ciphertext:Buffer;authTag:Buffer};
@@ -26,6 +31,21 @@ function claims(token:string):Record<string,unknown>{
 /** Parsing binds a supplied native bundle; decoded claims are not signature
  * verification. Native refresh uses the pinned provider endpoint, and the
  * provider still validates the access token when a model request is made. */
+/** Why parseCodexNativeCache refused a bundle, as field names and check names only (never values), for the server log:
+ * a new Codex release that changes auth.json otherwise shows up only as "could not save this cloud connection". */
+export function codexNativeCacheRejection(value:unknown):string{
+  let size:number;try{size=Buffer.byteLength(JSON.stringify(value));}catch{return "unserializable";}
+  if(size>MAX)return "too_large";
+  const parsed=native.safeParse(value);
+  if(!parsed.success){
+    const safe=(name:unknown)=>String(name).replace(/[^A-Za-z0-9_]/g,"").slice(0,40);
+    return parsed.error.issues.slice(0,4).map(issue=>{
+      const keys=issue.code==="unrecognized_keys"?`[${issue.keys.slice(0,5).map(safe).join(",")}]`:"";
+      return `${issue.path.map(safe).join(".")||"root"}:${issue.code}${keys}`;
+    }).join(";");
+  }
+  try{parseCodexNativeCache(value);return "accepted";}catch{return "token_claims";}
+}
 export function parseCodexNativeCache(value:unknown){
   let size:number;try{size=Buffer.byteLength(JSON.stringify(value));}catch{invalid();}
   if(size>MAX)invalid();const parsed=native.safeParse(value);if(!parsed.success)invalid();
