@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { load } from "js-yaml";
@@ -59,8 +60,18 @@ describe("production audit policy", () => {
   const controlPlaneLock = yaml<Lock>("apps/control-plane/pnpm-lock.yaml");
   const ignored = rootWorkspace.auditConfig?.ignoreGhsas ?? [];
 
-  it("keeps the root production audit free of advisory exceptions", () => {
-    expect(ignored).toEqual([]);
+  it("keeps the root production audit's only exception: picomatch, reached through @parcel/watcher alone", () => {
+    expect(ignored).toEqual(["GHSA-fc5q-39xc-vjpf"]);
+    // No Zeros source imports the watcher; the engine uses chokidar.
+    let sources = "";
+    try {
+      sources = execFileSync("git", ["grep", "-l", "-E", "from ['\"]@parcel/watcher['\"]|require\\(['\"]@parcel/watcher['\"]\\)",
+        "--", "apps", "packages", "scripts"], { cwd: root, encoding: "utf8" }).trim();
+    } catch (error) {
+      // git grep exits 1 when nothing matches: the outcome this test wants.
+      if ((error as { status?: number }).status !== 1) throw error;
+    }
+    expect(sources).toBe("");
   });
 
   it("retires the Cursor zod exception and every vulnerable locked copy", () => {
