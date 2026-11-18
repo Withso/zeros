@@ -5183,8 +5183,14 @@ Decoded source pixels and already inverse-scaled control children do not
 inherit wheel-by-wheel camera values. Hidden compact controls also isolate
 these values until hover or keyboard focus restores their screen-sized chrome.
 A frame at least 40 screen pixels wide keeps its name while the page mounts at
-most 64 frames, and hides only its Play control below 128 pixels; a more
-crowded page hides both below 128 pixels, as before.
+most 64 frames; a more crowded page hides names below 128 pixels, as before.
+Play has no fill and shows only while its frame has a selection, the pointer,
+keyboard focus or playback; a playing frame without the pointer or a selection
+shows a grey Stop. A selected frame's edge is one screen pixel, and two while
+the pointer is inside the frame. Inside a camera gesture, frame bodies keep a
+scale held within 15% of the camera, but each frame's name and Play roots take
+the exact scale at every step, so their size and their 8-pixel gap above the
+frame never drift.
 This bounds style work as well as source
 work; it does not establish a universal FPS or memory guarantee.
 Displayed and inactive source-vector images share the loaded-element retention

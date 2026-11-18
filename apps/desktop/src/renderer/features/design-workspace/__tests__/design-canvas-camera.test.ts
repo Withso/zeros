@@ -295,6 +295,102 @@ it("holds frame chrome scale through small steps of a live camera gesture and se
   } finally { await page.close(); }
 });
 
+it("keeps frame names and Play at their exact screen size through every gesture step while frame bodies hold their scale", async () => {
+  // Chrome holding a stale scale grew and shrank the name and its gap by up
+  // to 15% per step, then snapped back at rest: a flicker on every zoom.
+  const page = await open();
+  try {
+    await paint(page, 2, 0, 500);
+    for (const zoom of [2.1, 2.2, 1.9, 1.75, 2.05]) {
+      const [near] = await paint(page, zoom);
+      expect(near.chromeHeight).toBeCloseTo(28, 3);
+      // The frame body keeps the held scale: restyling its subtree per step is
+      // the cost the hold avoids.
+      expect(near.inverse).toBeCloseTo(.5);
+    }
+  } finally { await page.close(); }
+});
+
+it("paints a protected frame's whole chrome at the exact scale during a gesture", async () => {
+  const page = await open();
+  try {
+    await page.locator('[data-design-frame="near"]').evaluate(frame => frame.setAttribute("data-design-frame-chrome-protected", ""));
+    await paint(page, 2, 0, 500);
+    expect((await paint(page, 2.1))[0].inverse).toBeCloseTo(1 / 2.1);
+  } finally { await page.close(); }
+});
+it("shows Play only for a frame with a selection, under the pointer, with keyboard focus or playing", async () => {
+  // The frame an empty selection leaves active kept Play visible after a
+  // click on empty canvas; a click's leftover focus must not hold it either.
+  const page = await open();
+  try {
+    await page.mouse.move(600, 400);
+    // The real token values come from the app's token sheets; any two distinct
+    // colors prove which one the control takes.
+    await page.addStyleTag({ content: ":root { --design-selection-stroke: blue; --fg3: gray; }" });
+    const token = (name: string) => page.evaluate(name => {
+      const probe = document.body.appendChild(document.createElement("i"));
+      probe.style.color = `var(${name})`;
+      const value = getComputedStyle(probe).color;
+      probe.remove();
+      return value;
+    }, name);
+    const blue = await token("--design-selection-stroke"), grey = await token("--fg3");
+    const frame = page.locator('[data-design-frame="near"]');
+    await frame.evaluate(element => element.insertAdjacentHTML("beforeend",
+      '<div data-design-frame-chrome data-design-frame-play-chrome style="position:absolute;right:0;bottom:100%;height:28px"><button class="zd-canvas-tool zd-frame-play" style="height:28px">Play</button></div>'));
+    await paint(page, 2, 0, 500);
+    const shown = () => frame.evaluate(element => getComputedStyle(element.querySelector("[data-design-frame-play-chrome]")!).clip === "auto");
+    const color = () => frame.evaluate(element => getComputedStyle(element.querySelector(".zd-frame-play")!).color);
+    expect(await shown()).toBe(false);
+    await frame.evaluate(element => element.setAttribute("data-design-frame-selected", ""));
+    expect(await shown()).toBe(true);
+    const selectedColor = await color();
+    expect(selectedColor).toBe(blue);
+    await frame.evaluate(element => element.removeAttribute("data-design-frame-selected"));
+    expect(await shown()).toBe(false);
+    await page.mouse.move(80, 90);
+    expect(await shown()).toBe(true);
+    await page.mouse.move(600, 400);
+    expect(await shown()).toBe(false);
+    const play = frame.locator(".zd-frame-play");
+    await play.evaluate(button => { button.setAttribute("data-zeros-focus-visible", "false"); (button as HTMLElement).focus(); });
+    expect(await shown()).toBe(false);
+    await play.evaluate(button => button.setAttribute("data-zeros-focus-visible", "true"));
+    expect(await shown()).toBe(true);
+    await play.evaluate(button => (button as HTMLElement).blur());
+    // An unattended playing frame keeps a quiet Stop; the pointer makes it blue.
+    await frame.evaluate(element => element.setAttribute("data-design-frame-playing", ""));
+    expect(await shown()).toBe(true);
+    await expect.poll(color).toBe(grey);
+    await page.mouse.move(80, 90);
+    await expect.poll(color).toBe(selectedColor);
+  } finally { await page.close(); }
+});
+
+it("draws a selected frame's edge at one screen pixel and two only while the pointer is inside the frame", async () => {
+  const page = await open();
+  try {
+    await page.mouse.move(600, 400);
+    const frame = page.locator('[data-design-frame="near"]');
+    await frame.evaluate(element => {
+      element.classList.add("zd-design-frame", "zd-design-stroke", "zd-design-selection-outline");
+      // The canvas renders frames with `pointer-events-auto`; ready pixels
+      // reveal their chrome.
+      (element as HTMLElement).style.pointerEvents = "auto";
+      element.insertAdjacentHTML("beforeend", "<div data-design-frame-pixels-ready></div>");
+    });
+    await paint(page, 2, 0, 500);
+    const width = () => frame.evaluate(element => getComputedStyle(element).getPropertyValue("--design-stroke-width").trim());
+    expect(await width()).toBe("1");
+    await page.mouse.move(120, 150);
+    expect(await width()).toBe("2");
+    // The name above the frame is not inside it.
+    const name = await frame.locator("[data-design-frame-chrome] button").boundingBox();
+    await page.mouse.move(name!.x + 4, name!.y + name!.height / 2);
+    expect(await width()).toBe("1");
+  } finally { await page.close(); }
+});
 it("keeps a small frame's name on an uncrowded page, hides only its Play control, and keeps crowded overviews compact", async () => {
   const page = await open();
   try {
@@ -324,9 +420,9 @@ it("keeps a small frame's name on an uncrowded page, hides only its Play control
     // 30 px: too small for a name.
     await paint(page, .25);
     expect(await state()).toMatchObject({ compact: true, play: false });
-    // Wide enough for both.
+    // Wide enough for both; Play still waits for intent.
     await paint(page, 2);
-    expect(await state()).toEqual({ compact: false, play: false, label: "auto", control: "auto" });
+    expect(await state()).toEqual({ compact: false, play: false, label: "auto", control: "rect(0px, 0px, 0px, 0px)" });
     // A crowded page keeps the cheap overview path at the old threshold.
     await page.locator("#world").evaluate(world => {
       for (let index = 0; index < 70; index++) world.insertAdjacentHTML("beforeend",

@@ -249,6 +249,8 @@ export async function runDesignOverviewChromeSmoke({ page: parent, check }) {
     await expect.poll(chrome).toEqual({ clip: "auto", pointerEvents: "auto" });
     await page.mouse.move(2, 2);
     await expect.poll(chrome).toEqual({ clip: "rect(0px, 0px, 0px, 0px)", pointerEvents: "none" });
+    // Keyboard navigation reveals Play; a click's leftover focus does not.
+    await page.keyboard.press("Tab");
     await play.focus();
     await expect.poll(chrome).toEqual({ clip: "auto", pointerEvents: "auto" });
     await play.press("Enter");

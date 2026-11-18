@@ -1059,11 +1059,25 @@
   opacity: 0.5;
 }
 
-/* Frame chrome stays 28 screen pixels at every canvas zoom. */
-.zd-canvas-tool.zd-frame-play {
+/* Frame chrome stays 28 screen pixels at every canvas zoom. Play has no fill:
+ * a blue glyph while its frame has a selection or the pointer, and a quiet
+ * Stop while a frame plays unattended. */
+.zd-canvas-tool.zd-frame-play,
+.zd-canvas-tool.zd-frame-play:hover:not(:disabled),
+.zd-canvas-tool.zd-frame-play[aria-pressed="true"],
+.zd-canvas-tool.zd-frame-play[aria-pressed="true"]:hover:not(:disabled) {
   width: 28px;
   height: 28px;
-  background-color: var(--bg2-hover);
+  border-color: transparent;
+  background-color: transparent;
+  color: var(--design-selection-stroke);
+}
+.zd-canvas-tool.zd-frame-play svg {
+  width: 16px;
+  height: 16px;
+}
+[data-design-frame][data-design-frame-playing]:not([data-design-frame-selected]):not(:hover):not([data-design-frame-pointer]) .zd-canvas-tool.zd-frame-play {
+  color: var(--fg3);
 }
 
 /* Camera variables belong to world geometry and inverse-scaled chrome roots.
@@ -1109,13 +1123,15 @@
   pointer-events: none;
 }
 
-/* A small frame keeps its name. Only the Play control, which would cover
- * most of the name, waits for hover or focus; the name takes its room. */
-[data-design-frame-compact-play]:not(:hover):not(:focus-within):not([data-design-frame-pointer]) > [data-design-frame-play-chrome] {
+/* Play appears only for a frame with a selection, under the pointer, playing,
+ * or holding keyboard focus; a click's leftover focus keeps it hidden. The
+ * hidden control drops its layer, and the name takes the room. */
+[data-design-frame]:not([data-design-frame-selected]):not([data-design-frame-playing]):not(:hover):not([data-design-frame-pointer]) > [data-design-frame-play-chrome]:not(:has(:focus-visible:not([data-zeros-focus-visible="false"]))) {
   clip: rect(0px, 0px, 0px, 0px);
   pointer-events: none;
+  will-change: auto;
 }
-[data-design-frame-compact-play]:not(:hover):not(:focus-within):not([data-design-frame-pointer]) > [data-design-frame-chrome]:not([data-design-frame-play-chrome]) {
+[data-design-frame]:not([data-design-frame-selected]):not([data-design-frame-playing]):not(:hover):not([data-design-frame-pointer]):not(:focus-within) > [data-design-frame-chrome]:not([data-design-frame-play-chrome]) {
   max-width: var(--design-frame-label-full-width, none) !important;
 }
 /* A small frame's 28px name row can lie over the frame above it. Only the
@@ -1139,6 +1155,15 @@
 .zd-design-selection-outline {
   outline-color: var(--design-selection-stroke);
   --design-stroke-color: var(--design-selection-stroke);
+}
+
+/* A selected frame's edge is one screen pixel; the pointer inside the frame
+ * (not on its name or Play) thickens it to two. */
+.zd-design-frame.zd-design-selection-outline {
+  --design-stroke-width: 1;
+}
+.zd-design-frame.zd-design-selection-outline:is(:hover, [data-design-frame-pointer]):not(:has(> [data-design-frame-chrome]:hover)) {
+  --design-stroke-width: 2;
 }
 
 /* Canvas chrome strokes keep their screen width at every zoom. Chromium

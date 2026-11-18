@@ -1,5 +1,5 @@
 import { expect } from "@playwright/test";
-import { designFrameElementBox, openLayersDrawer } from "./ui-smoke-design-helpers.mjs";
+import { clickFramePlay, designFrameElementBox, openLayersDrawer } from "./ui-smoke-design-helpers.mjs";
 import { runDesignSavedEditingRaceSmoke, runDesignSavedEditingRevisionSmoke } from "./ui-smoke-design-saved-editing.mjs";
 
 /* global window, getComputedStyle */
@@ -57,6 +57,20 @@ export async function runDesignFramePlaybackSmoke({ page, check }) {
     true,
   );
 
+  // An empty selection keeps the last frame active for Layers; its Play
+  // must still hide, and appear again only for a selection or the pointer.
+  const playShown = () =>
+    play.evaluate((button) => getComputedStyle(button.parentElement).clip === "auto");
+  const emptyCanvas = { x: frameRect.x + 20, y: frameRect.y + frameRect.height + 60 };
+  await page.mouse.click(emptyCanvas.x, emptyCanvas.y);
+  await expect.poll(playShown).toBe(false);
+  await expect(frame).toHaveAttribute("data-design-frame-controls", "automatic");
+  await page.mouse.move(frameRect.x + frameRect.width / 2, frameRect.y + frameRect.height / 2);
+  await expect.poll(playShown).toBe(true);
+  await page.mouse.move(emptyCanvas.x, emptyCanvas.y);
+  await expect.poll(playShown).toBe(false);
+  check("Play hides after an empty-canvas click and returns on hover", true);
+
   await page.locator('[data-design-frame-row="home.html"]').click();
   await page.getByRole("button", { name: "Edit motion wash" }).click();
   const timeline = page.getByRole("region", { name: "Motion timeline" });
@@ -65,7 +79,7 @@ export async function runDesignFramePlaybackSmoke({ page, check }) {
   await timeline
     .getByLabel("Animation duration", { exact: true })
     .press("Enter");
-  await play.click();
+  await clickFramePlay(play);
   await expect(play).toHaveAttribute("aria-pressed", "true");
   await expect.poll(running).toBe(true);
   await expect(frame.locator("iframe")).not.toHaveAttribute("inert", "");
@@ -140,7 +154,7 @@ export async function runDesignFramePlaybackSmoke({ page, check }) {
     true,
   );
 
-  await play.click();
+  await clickFramePlay(play);
   await expect.poll(running).toBe(true);
   await page.locator('[data-design-layer-id="home-heading"]').click();
   await stopped();
@@ -152,25 +166,25 @@ export async function runDesignFramePlaybackSmoke({ page, check }) {
     true,
   );
 
-  await play.click();
+  await clickFramePlay(play);
   await expect.poll(running).toBe(true);
   const pricing = page.locator('[data-design-frame="pricing.html"]');
   const pricingPlay = pricing.getByRole("button", {
     name: "Play Pricing",
     exact: true,
   });
-  await pricingPlay.click();
+  await clickFramePlay(pricingPlay);
   await expect(pricingPlay).toHaveAttribute("aria-pressed", "true");
   await expect(pricing.locator("iframe[data-design-frame-live]")).toBeVisible();
   await stopped();
   await expect(page.locator("[data-design-frame-playing]")).toHaveCount(1);
-  await pricingPlay.click();
+  await clickFramePlay(pricingPlay);
   check(
     "playing another frame retires the first, including frames without authored motion",
     true,
   );
 
-  await play.click();
+  await clickFramePlay(play);
   await expect.poll(running).toBe(true);
   await page.evaluate(() => window.__zerosHarnessDesignSurface.active(false));
   const hiddenPlay = frame.locator("[data-design-frame-play]");
@@ -183,11 +197,11 @@ export async function runDesignFramePlaybackSmoke({ page, check }) {
     true,
   );
 
-  await play.click();
+  await clickFramePlay(play);
   await expect.poll(running).toBe(true);
   await page.locator('[data-design-frame-row="pricing.html"]').click();
   await stopped();
-  await play.click();
+  await clickFramePlay(play);
   await expect.poll(running).toBe(true);
   await page.evaluate(() =>
     window.__zerosHarnessDesignSurface.owner("playback-org-local"),
@@ -201,7 +215,7 @@ export async function runDesignFramePlaybackSmoke({ page, check }) {
     true,
   );
 
-  await play.click();
+  await clickFramePlay(play);
   await expect.poll(running).toBe(true);
   await page.evaluate(() => {
     window.__zerosHarnessDesignSurface.ui
@@ -254,7 +268,7 @@ export async function runDesignFramePlaybackSmoke({ page, check }) {
     ).toBeLessThan(1);
     expect(label.x + label.width).toBeLessThan(button.x);
   }
-  await renamedPlay.click();
+  await clickFramePlay(renamedPlay);
   await expect.poll(running).toBe(true);
   await expect(frame.locator("[data-design-high-resolution-tile]")).toHaveCount(
     0,
@@ -297,7 +311,7 @@ export async function runDesignFramePlaybackSmoke({ page, check }) {
     true,
   );
 
-  await play.click();
+  await clickFramePlay(play);
   await expect.poll(running).toBe(true);
   await page.evaluate(() => {
     const { snapshots } = window.__zerosHarnessDesignSurface;
@@ -336,7 +350,7 @@ export async function runDesignFramePlaybackSmoke({ page, check }) {
       );
     documents.setData(key, { ...document, srcDoc });
   });
-  await play.click();
+  await clickFramePlay(play);
   await expect(
     page.getByText(/Frame playback needs an updated Design runtime/),
   ).toBeVisible();
@@ -357,7 +371,7 @@ export async function runDesignFramePlaybackSmoke({ page, check }) {
     name: "Play Launch home",
     exact: true,
   });
-  await pagePlay.click();
+  await clickFramePlay(pagePlay);
   await expect(
     pageFrame.locator("iframe[data-design-frame-live]"),
   ).toBeVisible();

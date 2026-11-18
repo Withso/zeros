@@ -24,6 +24,7 @@ import {
   MousePointer2,
   Palette,
   Play,
+  Square,
   StickyNote,
   Type,
 } from "lucide-react";
@@ -531,7 +532,7 @@ const DesignFramePlayControl = React.memo(function DesignFramePlayControl({ file
         onToggle(file);
       }}
     >
-      <Play />
+      {playing ? <Square /> : <Play />}
     </DesignToolbarButton>
   );
 });
@@ -8034,6 +8035,10 @@ export const DesignCanvas = React.memo(function DesignCanvas({
             // label, Layers, and keyboard navigation.
             const frameSelectedOnly =
               paintedSelectedTargets.some(target => target.frame === frame.file && !target.nodeId);
+            // The frame itself or a layer in it. `selected` also covers the
+            // active frame an empty selection leaves for Layers and the inspector.
+            const frameHasSelection = frameSelectedOnly ||
+              view.selectedTargets.some(target => target.frame === frame.file);
             const secondaryElements = (prepared ? view.selectedTargets : []).filter(target => target.frame === frame.file && target.nodeId &&
               !selectedElements.some(details => details.oid === target.nodeId)).map(target => secondaryTargetDetails[`${frame.file}\u0000${target.nodeId}`])
               .filter((details): details is DesignRuntimeNodeDetails => Boolean(details && details.sourceVersion === frame.sourceVersion));
@@ -8100,13 +8105,14 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                 onDropCapture={(event) => { if (!prepared) { event.preventDefault(); event.stopPropagation(); } }}
                 data-design-frame-kind={frame.kind ?? "frame"}
                 data-design-frame-playing={framePlaying ? "" : undefined}
+                data-design-frame-selected={frameHasSelection ? "" : undefined}
                 data-design-frame-chrome-protected={selected || frameSelectedOnly || framePlaying ||
                   renamingFrame === frame.file || secondaryElements.length > 0 ? "" : undefined}
                 data-design-frame-stack-protected={framePlaying || renamingFrame === frame.file ||
-                  inlineTextEdit?.frame === frame.file || view.selectedTargets.some(target => target.frame === frame.file) ? "" : undefined}
+                  inlineTextEdit?.frame === frame.file || frameHasSelection ? "" : undefined}
                 // The camera resolves automatic controls against current geometry,
                 // including gestures between React renders. Editing stays expanded.
-                data-design-frame-controls={selected || frameSelectedOnly || framePlaying || renamingFrame === frame.file
+                data-design-frame-controls={frameHasSelection || framePlaying || renamingFrame === frame.file
                   ? "expanded" : "automatic"}
                 className={cn(
                   "zd-design-frame zd-design-stroke pointer-events-auto absolute",
@@ -8121,7 +8127,8 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                   width: paintedFrame?.w ?? description.width,
                   height: paintedFrame?.h ?? description.height,
                   zIndex: paintedFrame?.z ?? description.z,
-                  ...designStrokeWidth(frameSelectedOnly ? 2 : frame.kind === "text" ? 0 : 1),
+                  // A selected frame's width follows the pointer in CSS.
+                  ...(frameSelectedOnly ? null : designStrokeWidth(frame.kind === "text" ? 0 : 1)),
                 }}
                 onPointerDown={(event) => {
                   if (
@@ -8292,7 +8299,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                         {
                           // Reserve the 28px Play control and its 12px gap in screen space.
                           "--design-frame-label-max-width": `max(0px, calc(${frame.width}px * var(--design-canvas-zoom) - 40px))`,
-                          // A small frame hides Play until intent; its name takes the whole width.
+                          // While Play waits for intent, the name takes the whole width.
                           "--design-frame-label-full-width": `calc(${frame.width}px * var(--design-canvas-zoom))`,
                           maxWidth: "var(--design-frame-label-max-width)",
                           transform: `translateY(${designCanvasScreenPixels(-8)}) scale(${DESIGN_CANVAS_INVERSE_ZOOM})`,
@@ -8383,7 +8390,10 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                       data-design-frame-chrome=""
                       data-design-frame-play-chrome=""
                       className="absolute right-0 bottom-full origin-bottom-right"
-                      style={{ transform: `translateY(${designCanvasScreenPixels(-8)}) scale(${DESIGN_CANVAS_INVERSE_ZOOM})` }}
+                      // The 8px gap is padding, not a translation: a pointer
+                      // moving from the frame up to Play keeps the frame
+                      // hovered, so Play does not hide on the way.
+                      style={{ paddingBottom: 8, transform: `scale(${DESIGN_CANVAS_INVERSE_ZOOM})` }}
                     >
                       <DesignFramePlayControl
                         file={frame.file}
