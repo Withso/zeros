@@ -1254,8 +1254,22 @@
 
 .zd-design-selection-handle {
   background-color: var(--design-selection-handle-fill);
-  box-shadow: inset 0 0 0 calc(1px * var(--design-canvas-inverse-zoom))
-    var(--design-selection-stroke);
+  box-shadow: inset 0 0 0 1px var(--design-selection-stroke);
+}
+
+/* Small chrome is laid out at its screen size, then scaled into the world.
+ * Chromium snaps a box to whole device pixels in its own coordinates, before
+ * the camera's scale applies: an 8-screen-pixel square authored as 1/zoom CSS
+ * pixels snapped to one pixel wide and two tall at deep zoom and painted as a
+ * pill. Lengths inside such a box are screen pixels already. */
+.zd-design-screen-box {
+  translate: -50% -50%;
+  scale: var(--design-canvas-inverse-zoom);
+}
+.zd-design-screen-box.zd-design-dashed-box {
+  --design-dash-width: 1px;
+  --design-dash: var(--design-dash-length, 4px);
+  --design-dash-period: var(--design-dash-repeat, 7px);
 }
 
 /* The rotation pivot: a reticle in the selection color. It sits over authored
@@ -1392,12 +1406,13 @@
 }
 
 /* Ticks: a short pill across the drag axis, edged so it reads on any fill.
- * The edge is an inset shadow so it stays one screen pixel at deep zoom. */
+ * Laid out at screen size and scaled into the world, as .zd-design-screen-box
+ * explains; its flex parent centres it, so the default origin keeps it there. */
 .zd-design-inline-spacing-line {
+  scale: var(--design-canvas-inverse-zoom);
   opacity: 0;
   background-color: var(--design-padding-stroke);
-  box-shadow: inset 0 0 0 calc(1px * var(--design-canvas-inverse-zoom))
-    var(--design-spacing-line-border);
+  box-shadow: inset 0 0 0 1px var(--design-spacing-line-border);
 }
 
 .zd-design-inline-gap-handle .zd-design-inline-spacing-line {
@@ -1487,14 +1502,14 @@
 .zd-design-inline-gap-handle[data-active] .zd-design-inline-spacing-line {
   opacity: 1;
   box-shadow:
-    inset 0 0 0 calc(1px * var(--design-canvas-inverse-zoom)) var(--design-spacing-line-border),
-    0 0 0 calc(1px * var(--design-canvas-inverse-zoom)) var(--design-padding-stroke);
+    inset 0 0 0 1px var(--design-spacing-line-border),
+    0 0 0 1px var(--design-padding-stroke);
 }
 
 .zd-design-inline-gap-handle[data-active] .zd-design-inline-spacing-line {
   box-shadow:
-    inset 0 0 0 calc(1px * var(--design-canvas-inverse-zoom)) var(--design-spacing-line-border),
-    0 0 0 calc(1px * var(--design-canvas-inverse-zoom)) var(--design-gap-stroke);
+    inset 0 0 0 1px var(--design-spacing-line-border),
+    0 0 0 1px var(--design-gap-stroke);
 }
 
 /* The readout of a gap drag whose spaces reflow has removed for the moment. */
@@ -1513,8 +1528,8 @@
 .zd-design-inline-spacing-handle:focus-visible:where(:not([data-zeros-focus-visible="false"])) > .zd-design-inline-spacing-line,
 .zd-design-inline-gap-handle:focus-visible:where(:not([data-zeros-focus-visible="false"])) .zd-design-inline-spacing-line {
   box-shadow:
-    inset 0 0 0 calc(1px * var(--design-canvas-inverse-zoom)) var(--design-spacing-line-border),
-    0 0 0 calc(1px * var(--design-canvas-inverse-zoom)) var(--design-spacing-line-border);
+    inset 0 0 0 1px var(--design-spacing-line-border),
+    0 0 0 1px var(--design-spacing-line-border);
 }
 
 /* Typing happens in the readout itself: the same pill, now editable. */
@@ -1719,8 +1734,7 @@
 
 .zd-design-motion-path-point {
   background-color: var(--design-selection-handle-fill);
-  box-shadow: inset 0 0 0 calc(1px * var(--design-canvas-inverse-zoom))
-    var(--design-selection-stroke);
+  box-shadow: inset 0 0 0 1px var(--design-selection-stroke);
 }
 
 .zd-design-motion-path-point:hover,
@@ -1731,8 +1745,8 @@
 
 .zd-design-motion-path-point-selected {
   box-shadow:
-    0 0 0 calc(2px * var(--design-canvas-inverse-zoom)) var(--design-selection-handle-fill),
-    0 0 0 calc(3px * var(--design-canvas-inverse-zoom)) var(--design-selection-stroke);
+    0 0 0 2px var(--design-selection-handle-fill),
+    0 0 0 3px var(--design-selection-stroke);
 }
 
 .zd-design-motion-property-active {
@@ -2125,26 +2139,32 @@
   background: var(--design-selection-stroke);
   border-radius: var(--radius-sm);
 }
+/* Laid out at screen size and scaled into the world, as .zd-design-screen-box
+ * explains; each is placed by its centre. */
+.zd-canvas-item-handle-width,
+.zd-canvas-item-handle-height,
+.zd-canvas-item-handle-corner {
+  translate: -50% -50%;
+  scale: var(--design-canvas-inverse-zoom);
+}
 .zd-canvas-item-handle-width {
   top: 50%;
-  right: calc(-5px * var(--design-canvas-inverse-zoom));
-  width: calc(4px * var(--design-canvas-inverse-zoom));
-  height: calc(16px * var(--design-canvas-inverse-zoom));
-  transform: translateY(-50%);
+  left: calc(100% + 3px * var(--design-canvas-inverse-zoom));
+  width: 4px;
+  height: 16px;
   cursor: ew-resize;
 }
 .zd-canvas-item-handle-height {
   left: 50%;
-  bottom: calc(-5px * var(--design-canvas-inverse-zoom));
-  width: calc(16px * var(--design-canvas-inverse-zoom));
-  height: calc(4px * var(--design-canvas-inverse-zoom));
-  transform: translateX(-50%);
+  top: calc(100% + 3px * var(--design-canvas-inverse-zoom));
+  width: 16px;
+  height: 4px;
   cursor: ns-resize;
 }
 .zd-canvas-item-handle-corner {
-  right: calc(-6px * var(--design-canvas-inverse-zoom));
-  bottom: calc(-6px * var(--design-canvas-inverse-zoom));
-  width: calc(8px * var(--design-canvas-inverse-zoom));
-  height: calc(8px * var(--design-canvas-inverse-zoom));
+  left: calc(100% + 2px * var(--design-canvas-inverse-zoom));
+  top: calc(100% + 2px * var(--design-canvas-inverse-zoom));
+  width: 8px;
+  height: 8px;
   cursor: nwse-resize;
 }

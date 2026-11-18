@@ -785,9 +785,9 @@ export const DesignLayoutTools = React.memo(function DesignLayoutTools({
                 data-design-inline-spacing-line=""
                 className="zd-design-inline-spacing-line pointer-events-none absolute"
                 style={{
-                  width: (band.axis === "y" ? TICK_LONG : TICK_SHORT) / zoom,
-                  height: (band.axis === "x" ? TICK_LONG : TICK_SHORT) / zoom,
-                  borderRadius: 2 / zoom,
+                  width: band.axis === "y" ? TICK_LONG : TICK_SHORT,
+                  height: band.axis === "x" ? TICK_LONG : TICK_SHORT,
+                  borderRadius: 2,
                 }}
                 aria-hidden="true"
               />
@@ -921,9 +921,9 @@ export const DesignLayoutTools = React.memo(function DesignLayoutTools({
                   data-design-inline-spacing-line=""
                   className="zd-design-inline-spacing-line pointer-events-none absolute"
                   style={{
-                    width: (gap.axis === "y" ? TICK_LONG : TICK_SHORT) / zoom,
-                    height: (gap.axis === "x" ? TICK_LONG : TICK_SHORT) / zoom,
-                    borderRadius: 2 / zoom,
+                    width: gap.axis === "y" ? TICK_LONG : TICK_SHORT,
+                    height: gap.axis === "x" ? TICK_LONG : TICK_SHORT,
+                    borderRadius: 2,
                   }}
                   aria-hidden="true"
                 />

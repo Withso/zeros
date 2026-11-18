@@ -609,7 +609,6 @@ export function DesignResizeHandles({
     box && (box.affine || Math.abs(box.rotation) > 0.01)
       ? designResizeHandleCursor(handle, box)
       : cursor;
-  const size = designCanvasScreenPixels(8);
   // Keep a crisp four-screen-pixel resize strip inside the outline. Wider
   // bands steal pointer intent from padding/gap controls that legitimately
   // approach the same edge on small or zero-spacing containers.
@@ -669,13 +668,10 @@ export function DesignResizeHandles({
           key={handle}
           data-design-controls
           type="button"
-          className="zd-design-selection-handle pointer-events-auto absolute rounded-[1px]"
+          className="zd-design-selection-handle zd-design-screen-box pointer-events-auto absolute size-2 rounded-[1px]"
           style={{
-            width: size,
-            height: size,
             left: x === "left" ? 0 : x === "center" ? "50%" : "100%",
             top: y === "top" ? 0 : y === "center" ? "50%" : "100%",
-            transform: "translate(-50%, -50%)",
             cursor: cursorFor(handle, cursor),
           }}
           aria-label={`Resize ${label} from ${handle}`}
@@ -841,7 +837,6 @@ export function DesignOriginHandle({
 /** The nine anchors a dragged origin snaps to, revealed only while dragging so
  * the resting selection stays quiet. */
 export function DesignOriginAnchors() {
-  const size = designCanvasScreenPixels(9);
   return (
     <div
       data-design-origin-anchors=""
@@ -852,13 +847,12 @@ export function DesignOriginAnchors() {
         [0, 0.5, 1].map((x) => (
           <span
             key={`${x}:${y}`}
-            className="zd-design-origin-anchor zd-design-dashed-box absolute block"
+            className="zd-design-origin-anchor zd-design-dashed-box zd-design-screen-box absolute block"
             style={{
               left: `${x * 100}%`,
               top: `${y * 100}%`,
-              width: size,
-              height: size,
-              transform: "translate(-50%, -50%)",
+              width: 9,
+              height: 9,
             }}
           />
         )),
@@ -1306,15 +1300,12 @@ export const DesignMotionCanvasOverlay = React.memo(
                   data-design-motion-path-point={point.offset}
                   type="button"
                   className={cn(
-                    "zd-design-motion-path-point pointer-events-auto absolute z-30 rounded-full",
+                    "zd-design-motion-path-point zd-design-screen-box pointer-events-auto absolute z-30 size-3 rounded-full",
                     selected && "zd-design-motion-path-point-selected",
                   )}
                   style={{
                     left: center.x + point.x,
                     top: center.y + point.y,
-                    width: designCanvasScreenPixels(12),
-                    height: designCanvasScreenPixels(12),
-                    transform: "translate(-50%, -50%)",
                   }}
                   aria-label={`Seek motion to ${designMotionTimeAtOffset(point.offset, duration)}ms`}
                   aria-pressed={selected}
@@ -1333,13 +1324,10 @@ export const DesignMotionCanvasOverlay = React.memo(
             {currentTranslation ? (
               <span
                 data-design-motion-current-point=""
-                className="zd-design-motion-current-point pointer-events-none absolute z-20 rounded-full"
+                className="zd-design-motion-current-point zd-design-screen-box pointer-events-none absolute z-20 size-1.25 rounded-full"
                 style={{
                   left: center.x + currentTranslation.x,
                   top: center.y + currentTranslation.y,
-                  width: designCanvasScreenPixels(5),
-                  height: designCanvasScreenPixels(5),
-                  transform: "translate(-50%, -50%)",
                 }}
               />
             ) : null}

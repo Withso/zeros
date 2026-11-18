@@ -2166,7 +2166,12 @@ a frame's own document (`canvas-items-exports.test.ts`).
 
 - **Selection:** selection outlines follow the element's untransformed border
   box plus accumulated rotation. Handles, strokes, labels, constraint guides,
-  and hit regions retain screen size at every supported zoom. Normal click
+  and hit regions retain screen size at every supported zoom. Small chrome
+  (resize squares, origin anchors, motion points, padding and gap ticks,
+  canvas-item handles) is laid out at its screen size and scaled by the
+  inverse zoom: Chromium snaps a box to device pixels before the camera's
+  scale applies, so a square authored as `8 / zoom` CSS pixels painted
+  uneven or pill-shaped at deep zoom. Normal click
   first selects the outer frame from its body, including empty space. Once a
   child is selected, normal clicks preserve useful nesting depth. Double-click
   descends once and selects the child without skipping containers to edit a
