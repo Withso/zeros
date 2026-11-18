@@ -58,7 +58,8 @@ database("acting-user Codex proxy", () => {
     await f.worker("prompts/outcome", { userMessageId: turn.input.userMessageId, dispatchId: turn.begin.dispatchId, state: "completed" });
     // A passing check covers the next PROXY_CHECK_COVERS_MS; after that every chunk waits for a new check.
     await delay(PROXY_CHECK_COVERS_MS + 50);
-    const next = reader.read(); output.enqueue(new TextEncoder().encode("mustNotEscape"));
+    // The stream-start check may already have seen the end and cancelled the upstream body.
+    const next = reader.read(); try { output.enqueue(new TextEncoder().encode("mustNotEscape")); } catch { /* cancelled */ }
     await expect(next).rejects.toThrow();
   });
 
@@ -81,8 +82,8 @@ database("acting-user Codex proxy", () => {
   it("checks a token in one transaction", async () => {
     const turn = await setup(async () => Response.json({}));
     let check!: () => Promise<number>;
-    // Token check, login read, token check.
-    expect(await transactions(async () => { ({ check } = await f.cp.execution.proxyAccess(turn.token)); })).toBe(3);
+    // The token check reads the login inside its own transaction.
+    expect(await transactions(async () => { ({ check } = await f.cp.execution.proxyAccess(turn.token)); })).toBe(1);
     expect(await transactions(async () => { await check(); })).toBe(1);
   });
 
@@ -90,14 +91,14 @@ database("acting-user Codex proxy", () => {
     const chunks = Array.from({ length: 20 }, (_, index) => `chunk-${index};`);
     const turn = await setup(async () => new Response(waiting(chunks)));
     let text = "";
-    // proxyAccess 3, a check before and after the upstream request (and the stream-start check, unless the reply ends
-    // first); the chunks arrive inside the last check's window (a slow runner may need one or two more).
+    // proxyAccess 1 (its window also covers sending the request), the check after the upstream reply and the stream-start
+    // check unless the reply ends first; the chunks arrive inside the last check's window (a slow runner may need more).
     const count = await transactions(async () => {
       const response = await turn.request(); expect(response.status).toBe(200);
       text = await response.text();
     });
-    expect(count).toBeGreaterThanOrEqual(5);
-    expect(count).toBeLessThanOrEqual(8);
+    expect(count).toBeGreaterThanOrEqual(2);
+    expect(count).toBeLessThanOrEqual(5);
     expect(text).toBe(chunks.join(""));
   });
 

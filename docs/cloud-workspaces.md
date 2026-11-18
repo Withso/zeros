@@ -1226,8 +1226,10 @@ check also covers streamed chunks that arrive within 250 ms of the check's start
 check. So reply data can reach the worker at most 250 ms after a removal, Stop or
 outcome commits, and a streaming reply costs at most about four checks a second
 instead of one per upstream read. An idle stream is still re-checked at least
-every 5 s, and every check before and after the upstream request still runs. A
-twenty-chunk reply that arrives at once costs about 6 transactions (was 157).
+every 5 s, and the check after the upstream reply always runs. A proxied request
+starts with one transaction (the token check reads the login inside it), whose
+window also covers sending the request upstream. A twenty-chunk reply that
+arrives at once costs about 3 transactions (was 157).
 
 The prompt channel wakes the worker's long poll and sends a relay hint. Each
 wake costs an empty pull and a new long poll when nothing is waiting. A
