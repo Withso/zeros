@@ -17,9 +17,12 @@ describe("private native Codex cache",()=>{
     const parsed=parseCodexNativeCache(newer);
     expect(parsed.cache).toEqual(cache);
     expect(JSON.stringify(parsed.cache)).not.toContain("owner-sentinel");
-    for(const extra of [{nested:{endpoint:"untrusted"}},{list:["x"]},{long:"x".repeat(16_385)},
-      Object.fromEntries(Array.from({length:9},(_,index)=>[`field_${index}`,"x"]))])
-      expect(()=>parseCodexNativeCache({...cache,tokens:{...cache.tokens,...extra}})).toThrow("Invalid Codex native authentication cache");
+    expect(parseCodexNativeCache({...newer,tokens:{...newer.tokens,claims:{plan:"pro"}}}).cache).toEqual(cache);
+    // Codex 0.166's other sign-in kinds, present but empty in a ChatGPT bundle.
+    expect(parseCodexNativeCache({...newer,agent_identity:null,personal_access_token:null,bedrock_api_key:null,bedrock_access_keys:null}).cache).toEqual(cache);
+    for(const value of [{...cache,agent_identity:{token:"x"}},{...cache,personal_access_token:"x"},
+      {...cache,tokens:{...cache.tokens,...Object.fromEntries(Array.from({length:9},(_,index)=>[`field_${index}`,"x"]))}}])
+      expect(()=>parseCodexNativeCache(value)).toThrow("Invalid Codex native authentication cache");
   });
   it("names why a bundle was refused with field and check names only, never values",()=>{
     const cache=syntheticCodexCache();

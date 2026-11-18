@@ -68,8 +68,10 @@ database("Boat archived a running VM on its own", () => {
   it("only records in observe mode", async () => {
     const before = await workspace();
     let now = 0;
+    // One Boat answer for both reads: the confirmation read must agree, including the stop time.
+    const answer = archived();
     const observe = new ProviderStopCheck({ mode: "observe", store: f.cp.store, schedule: () => {}, wait: async () => {}, now: () => now,
-      compute: { inspect: async () => archived() } });
+      compute: { inspect: async () => answer } });
     expect(await observe.check(await binding(), "suspect")).toBe("observed");
     now += 3_600_000;
     expect(await observe.check(await binding(), "suspect")).toBe("observed");
