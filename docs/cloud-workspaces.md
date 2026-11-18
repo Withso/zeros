@@ -1606,16 +1606,22 @@ Boat sometimes archives a VM seconds after resuming it, with no stop from Zeros
 the control plane asks Boat (`GET /sandboxes/{id}`) only about a suspect: a
 refused dial of a running route, a message that waits more than 90 s on a running
 workspace (a database-only scan once a minute), and once about 75 s after each
-wake. Reads of one boot back off from 15 s to 5 minutes. Only Boat's own `archived`,
-or the sandbox being gone, finishes the stop, fenced to the observed boot and
-skipped during checkpoint recovery, an execution transition or a runtime handoff:
+wake. The scan counts only messages that delivery would offer now, so a follow-up
+waiting behind a running turn is not a suspect. Reads of one boot back off from
+15 s to 5 minutes. Only Boat's own `archived`, or the sandbox being gone, confirmed
+by a second read 5 s later, finishes the stop. It is refused when Boat's stop time
+is not after our last resume or our worker reported activity after it, held back
+while 20 stops happened in the last 10 minutes (a Boat incident), fenced to the
+observed boot, and skipped during checkpoint recovery, an execution transition or
+a runtime handoff:
 `running` goes straight to `stopped` (so the waiting messages are kept), the stop
 generation advances, credentials and execution contexts end, turns in flight
-become `interrupted`, and waiting messages ask for one wake through the existing
-`wake_after_stop` path. Automatic wakes are capped at two per workspace an hour
+become `interrupted`, and waiting messages from people who still have access ask
+for one wake through the existing `wake_after_stop` path. Automatic wakes are capped at two per workspace an hour
 and 20 across all workspaces in 10 minutes; past that the messages stay queued
-for an explicit Start or send. Each detection is a row in
-`cloud_v2_provider_stops`.
+for an explicit Start or send. Each boot's detection is one row in
+`cloud_v2_provider_stops`, with our own activity times, so `observe` measures how
+often Boat's answer was wrong.
 
 The loop sweeps every 2 seconds only while it has work in flight. Otherwise it
 sleeps until the next deferred step falls due, at most a minute. Database
