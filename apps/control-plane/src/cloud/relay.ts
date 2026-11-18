@@ -58,6 +58,8 @@ export type CloudV2RelayDeps = {
   workerRoute(workspaceId: string): Promise<WorkerRoute | null>;
   waitReady?(workspace: CloudV2Workspace, signal: AbortSignal, timeoutMs: number): Promise<void>;
   liveRecovery?: Pick<CloudLiveRecovery, "failed" | "connected" | "exhausted">;
+  /** A refused dial of a running route may mean Boat archived the VM (cloud/provider-stop.ts). */
+  providerStop?: (route: WorkerRoute) => void;
   workerActivity?(binding: CloudV2WorkerBinding, idle: boolean): Promise<ActivityReply | null>;
   mintWorkerToken(workspaceId: string, bootId: string): string;
   wake(workspace: CloudV2Workspace): Promise<void>;
@@ -429,6 +431,7 @@ export class CloudV2Relay {
                 statusClass: error.statusClass, ...(error.status === undefined ? {} : { status: error.status, responseBodyClass: error.responseBodyClass }),
                 durationMs: Math.max(0, Math.round((this.deps.now?.() ?? Date.now()) - dialStarted)), attempt: attempts + 1 });
               if (room.clients.size && route.workspace.state === "running") this.deps.liveRecovery?.failed(route, error);
+              if (error.reason === "refused" && route.workspace.state === "running") this.deps.providerStop?.(route);
             }
             throw error;
           }

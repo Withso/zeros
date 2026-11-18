@@ -66,6 +66,8 @@ import { CLOUD_V2_LIVE_ACCESS, requireWorkspaceCreator } from "./workspace-acces
 
 import { CloudExecutionContexts, type CachedTokenContext } from "./execution/store.js";
 import { ExecutionAuthorizationCache, authorizationHint } from "./execution/authorization-cache.js";
+import { ProviderStopCheck } from "./provider-stop.js";
+import type { WorkerRoute } from "./worker-connection.js";
 import { lifecycleExecution } from "./execution/lifecycle.js";
 import { claimExecutionRestore } from "./execution/restore.js";
 import { CloudExecutionActivations, executionActivationRuntime } from "./execution/activation.js";
@@ -342,8 +344,16 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     recovered: route => recoveryStore.cancel(route.recoveryAttemptId!, route),
     mint: (id, boot) => signer.mint(id, boot), ready: id => connections?.hintReady(id), logger: console }) : null;
   void liveSignals.start().catch(() => {});
+  // Boat sometimes archives a resumed VM on its own; finish that stop and wake for waiting messages (provider-stop.ts).
+  const providerStop = (v2.providerStopRecovery ?? "off") === "off" ? undefined
+    : new ProviderStopCheck({ mode: v2.providerStopRecovery!, compute, store, logger: console });
+  const providerStopRoute = (route: WorkerRoute) => {
+    if (!providerStop || !route.workspace.boatSandboxId || !route.bootId || !route.workerTokenHash) return;
+    void providerStop.check({ workspaceId: route.workspace.id, sandboxId: route.workspace.boatSandboxId, bootId: route.bootId,
+      workerTokenHash: route.workerTokenHash, accessEpoch: route.accessEpoch }, "dial").catch(() => {});
+  };
   const connections = roles.relay || roles.lifecycle ? new CloudV2Relay({
-    apiConfiguration, execution,
+    apiConfiguration, execution, ...(providerStop ? { providerStop: providerStopRoute } : {}),
     localCommandsEnabled: id => localCommands.enabled(id), historyBatch: true, turnEvents: v2.promptOutbox === true,
     retireLocalSender: (id, userId, epoch, sessionId) => store.prompts.retireLocalSender(id, userId, epoch, sessionId),
     store, timing, authorizeSource, continueSource, ...(securityEvents ? { securityEvents } : {}),
@@ -376,6 +386,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     },
     recovery: recoveryStore,
     outboundProof: binding => liveSignals.worker(binding),
+    ...(providerStop ? { providerStop } : {}),
     apiConfiguration,
     localCommands: { requests: localCommands, signals: localCommandSignals },
     notifications,
@@ -554,6 +565,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     logger: console,
   }) : null;
   const lifecycle = roles.lifecycle ? new CloudV2Lifecycle({
+    ...(providerStop ? { providerStop } : {}),
     ...(recovery ? { recovery } : {}),
     executionActivations: new CloudExecutionActivations(pool, execution),
     runtimeUpdates,
