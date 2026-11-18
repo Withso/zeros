@@ -203,13 +203,25 @@ export async function resetMigratedTestDatabase(
   return "rebuilt";
 }
 
+/** A session left over from the previous test can still hold locks while DROP SCHEMA takes them in its own order;
+ * Postgres then cancels one side with a deadlock. The drop is retried, since the leftover finishes on its own. */
+export async function dropPublicSchema(pool: Pick<pg.Pool, "query">, attempts = 3): Promise<void> {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      await pool.query("DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;");
+      return;
+    } catch (error) {
+      if ((error as { code?: unknown })?.code !== "40P01" || attempt >= attempts) throw error;
+      await new Promise(resolve => setTimeout(resolve, 100 * attempt));
+    }
+  }
+}
+
 /** Drop and replay the whole ladder, then record what the reset restores. */
 export async function rebuildMigratedTestDatabase(
   pool: pg.Pool,
 ): Promise<MigratedTestDatabaseBaseline> {
-  await pool.query(
-    "DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;",
-  );
+  await dropPublicSchema(pool);
   await runMigrations(pool);
   const client = await pool.connect();
   try {
