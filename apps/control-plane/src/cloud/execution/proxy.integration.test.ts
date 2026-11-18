@@ -58,31 +58,52 @@ database("acting-user Codex proxy", () => {
     await expect(next).rejects.toThrow();
   });
 
-  // statements-2: a check is one transaction, and one check covers every chunk already waiting.
+  // statements-2: a token check is one transaction (was about 6); each chunk still waits for its own check.
   const transactions = async (run: () => Promise<void>) => {
     const scope = new AsyncLocalStorage<boolean>(), query = pg.Client.prototype.query;
     let count = 0;
-    vi.spyOn(pg.Client.prototype, "query").mockImplementation(function (this: pg.Client, ...args: unknown[]) {
+    const spy = vi.spyOn(pg.Client.prototype, "query").mockImplementation(function (this: pg.Client, ...args: unknown[]) {
       if (scope.getStore() && typeof args[0] === "string" && /^BEGIN\b/.test(args[0])) count += 1;
       return (query as (...values: unknown[]) => unknown).apply(this, args);
     } as never);
-    await scope.run(true, run);
+    try { await scope.run(true, run); } finally { spy.mockRestore(); }
     return count;
   };
+  const waiting = (chunks: string[], close = true) => new ReadableStream<Uint8Array>({ start(controller) {
+    for (const chunk of chunks) controller.enqueue(new TextEncoder().encode(chunk));
+    if (close) controller.close();
+  } });
 
-  it("streams twenty waiting chunks with six transactions", async () => {
+  it("checks a token in one transaction", async () => {
+    const turn = await setup(async () => Response.json({}));
+    let check!: () => Promise<number>;
+    // Token check, login read, token check.
+    expect(await transactions(async () => { ({ check } = await f.cp.execution.proxyAccess(turn.token)); })).toBe(3);
+    expect(await transactions(async () => { await check(); })).toBe(1);
+  });
+
+  it("streams twenty chunks with 27 transactions (157 before statements-2)", async () => {
     const chunks = Array.from({ length: 20 }, (_, index) => `chunk-${index};`);
-    const turn = await setup(async () => new Response(new ReadableStream<Uint8Array>({ start(controller) {
-      for (const chunk of chunks) controller.enqueue(new TextEncoder().encode(chunk));
-      controller.close();
-    } })));
+    const turn = await setup(async () => new Response(waiting(chunks)));
     let text = "";
-    // proxyAccess: token check, login, check; then a check before and after the upstream request; one for the stream.
+    // proxyAccess 3, a check before and after the upstream request and at stream start, then one per chunk and one for the end.
     expect(await transactions(async () => {
       const response = await turn.request(); expect(response.status).toBe(200);
       text = await response.text();
-    })).toBe(6);
+    })).toBe(27);
     expect(text).toBe(chunks.join(""));
+  });
+
+  it("releases no waiting chunk whose check starts after the turn has ended", async () => {
+    const turn = await setup(async () => new Response(waiting(["first", "second", "third"], false)));
+    const response = await turn.request(); expect(response.status).toBe(200);
+    const reader = response.body!.getReader(), received: string[] = [];
+    expect(new TextDecoder().decode((await reader.read()).value)).toBe("first");
+    await f.worker("prompts/outcome", { userMessageId: turn.input.userMessageId, dispatchId: turn.begin.dispatchId, state: "completed" });
+    // The stream reads one chunk ahead, so "second" may already have passed its check before the turn ended.
+    await expect((async () => { for (;;) { const value = await reader.read(); if (value.done) return; received.push(new TextDecoder().decode(value.value)); } })())
+      .rejects.toThrow();
+    expect(received).not.toContain("third");
   });
 
   it("never releases a chunk that arrived after the check covering the earlier chunks started", async () => {

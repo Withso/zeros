@@ -1221,10 +1221,10 @@ one read-only transaction: the token, the admission snapshot, the login and the
 final context fence. Any refusal replays the earlier multi-transaction path,
 which alone ends a sender whose access lapsed on the clock or moves the turn to
 its payer, so refusal codes and those writes are unchanged. A streamed Codex
-reply still releases a chunk only after a check that started once the chunk had
-arrived; one check now covers every chunk already waiting, and an idle stream is
-re-checked at most every 5 s from the check after the upstream reply. Twenty
-waiting chunks cost 6 transactions (was 157).
+reply still releases each chunk only after a check that started once the chunk
+had arrived, so a streamed reply costs one transaction per upstream read, and an
+idle stream is still re-checked at least every 5 s. A twenty-chunk reply costs 27
+transactions (was 157).
 
 The prompt channel wakes the worker's long poll and sends a relay hint. Each
 wake costs an empty pull and a new long poll when nothing is waiting. A
