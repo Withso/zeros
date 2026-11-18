@@ -657,7 +657,8 @@ it("turn-events-v1 (review 2, E): events wait behind a hanging (not yet failed) 
   void f.transport.sendHistoryBatch([{ t: "history", chats: [{ id: "a" }] }]);
   await new Promise(resolve => setTimeout(resolve, 20));
   const sent = f.transport.promptRequest("outcome", outcome());
-  const state = await settledWithin(sent, 1000);
+  // The bound behind a batch on the wire is 3 s, well before that batch's own 10 s timeout.
+  const state = await settledWithin(sent, 4000);
   expect(state).not.toBe("pending");
 });
 

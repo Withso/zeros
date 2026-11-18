@@ -288,7 +288,7 @@ export class CloudExecutionContexts {
   /** begin-lease-v1: a new turn's begin, then its lease in the same request. The lease reuses the context row begin just
    * inserted and begin's admission of its sender (the same principal a continuation would admit), so it skips its own setup read and
    * admission; its final transaction still re-checks worker, context, dispatch and authority, and material stays in its
-   * own transaction. Only a freshly dispatched turn qualifies; a retried begin or a steer leases as before. A lease that
+   * own transaction. A new or retried turn qualifies; a steer leases as before. A lease that
    * cannot be issued now leaves the reply without one, and the worker leases on its own; `missed` names why (a closed
    * code) for the route's journal line. */
   async beginWithLease(identity: ExecutionWorker, input: { userMessageId: string; deliveryId: string; dispatchId: string }) {
@@ -348,6 +348,9 @@ export class CloudExecutionContexts {
           if (row.dispatch_id !== input.dispatchId || !row.execution_context_id) throw new HttpError(409, "prompt_conflict", "This dispatch is no longer current");
           const context = await this.context(tx, row.execution_context_id, workspace.id);
           await this.assertContext(tx, context, proof);
+          // A retried begin (its reply was lost or timed out) carries the lease too, unless it is a steer: the worker
+          // would otherwise ask turn-lease for the same lease, a second request on an already busy database.
+          if (prepared && row.execution_parent_context_id === null) { prepared.context = context; prepared.proof = proof; }
           return this.begun(context, row.state, row.execution_parent_context_id !== null);
         }
         if (row.state !== "inboxed") throw new HttpError(409, "prompt_inbox_required", "Persist the message before dispatch");

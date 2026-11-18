@@ -1174,8 +1174,9 @@ Workers advertising `begin-lease-v1` get a new turn's lease in its begin reply,
 so a turn starts with one request instead of two. The lease reuses the context
 row and sender admission that begin just made. Its final transaction still
 re-checks the worker, context, dispatch and authority, and material resolves in
-its own transaction. A retried begin, a steer, or a lease that cannot be issued
-yet answers without one; the worker then calls turn-lease as before. The reply
+its own transaction. A retried begin carries it too. A steer, or a lease that
+cannot be issued yet, answers without one; the worker then calls turn-lease as
+before. The worker gives begin 30 s before it retries. The reply
 field is the offer, so there is no config flag. An old control plane never sends
 it and an old worker never asks. Material is sealed at begin, so for 0254 the
 turn counts as started from begin: a sender removed after it keeps the turn on
@@ -1196,7 +1197,7 @@ for a 401, which reaches their callers, any failure (a lost reply, a 5xx, a
 stuck history sequence) detaches the events and sends each through its own
 route at once, concurrently; every event is idempotent, so a duplicate is
 harmless. Events queued behind a batch already on the wire wait for it at most
-500 ms. A 400 for a batch carrying events (an N-1 control plane's strict
+3 s. A 400 for a batch carrying events (an N-1 control plane's strict
 schema, a withdrawn offer), or a reply without per-event results, also turns
 events off for the boot and resends the frames alone. The caller's abort and
 worker shutdown settle pending events. A turn's last rows,

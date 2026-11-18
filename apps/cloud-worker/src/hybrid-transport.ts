@@ -44,8 +44,10 @@ type QueuedTurnEvent = { event: CloudV2TurnEvent; settled: boolean; resolve(valu
   release?: () => void };
 /** A turn's outcome and its retirement arrive within milliseconds; one short window batches them (Conductor: 500 ms). */
 const TURN_EVENTS_COALESCE_MS = 50;
-/** How long events queued behind a batch already on the wire wait for it before they take their own routes. */
-const TURN_EVENTS_WAIT_MS = 500;
+/** How long events queued behind a batch already on the wire wait for it before they take their own routes. Batches
+ * took up to 2 s on a saturated database; detaching sooner only added requests to it (Alpha load, 2026-11-17). */
+const TURN_EVENTS_WAIT_MS = 3_000;
+const BEGIN_TIMEOUT_MS = 30_000;
 function settleEvent(queued: QueuedTurnEvent, value: Record<string, unknown> | undefined, error?: unknown): void {
   if (queued.settled) return;
   queued.settled = true; queued.release?.();
@@ -279,7 +281,9 @@ export class HybridTransport implements Transport {
       // A pull's HTTP deadline follows its own long-poll wait (25 s or a negotiated 60 s), plus 10 s for the reply.
       const waitMs = (body as { waitMs?: unknown } | null)?.waitMs;
       const pullMs = Math.min(CLOUD_V2_PROMPT_PUSH_POLL_MS, typeof waitMs === "number" && Number.isFinite(waitMs) ? Math.max(0, waitMs) : CLOUD_V2_PROMPT_POLL_MS) + 10_000;
-      return await this.request(`prompts/${operation}`, body, lifetime, operation === "pull" ? pullMs : 10_000);
+      // begin (with its lease) runs several transactions: on a saturated database a 10 s deadline turned into a retry
+      // that cost them all again (Alpha load, 2026-11-17). A retry is still safe; it is just rarer.
+      return await this.request(`prompts/${operation}`, body, lifetime, operation === "pull" ? pullMs : operation === "begin" ? BEGIN_TIMEOUT_MS : 10_000);
     }
     catch (error) { if (error instanceof HttpFailure && error.status === 401) this.failed(error); throw error; }
     finally { this.promptPolls.delete(controller); }
