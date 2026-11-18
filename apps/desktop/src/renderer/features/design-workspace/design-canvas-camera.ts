@@ -46,15 +46,16 @@ export function repaintDesignCanvasPixels(world: HTMLDivElement): void {
 // Labels, handles and badges can extend past an artboard. Keep that nearby
 // chrome current as well as the pixels, without retaining a browser observer.
 const CHROME_OVERSCAN_PIXELS = 96;
-/** Screen widths below which a frame's name, and its 28px Play control, no
+/** Screen widths below which a frame's name, and its 16px Play control, no
  * longer fit above it. */
-const FRAME_NAME_MIN_PIXELS = 40;
-const FRAME_PLAY_MIN_PIXELS = 128;
+const FRAME_NAME_MIN_PIXELS = 24;
+const FRAME_PLAY_MIN_PIXELS = 64;
 /** Up to this many mounted frames, a small frame keeps its name. A crowded
- * overview hides names and controls together below the Play width: each
- * visible name is a transformed layer and a DOM hit box per frame, which a
+ * overview hides names and controls together below this width: each visible
+ * name is a transformed layer and a DOM hit box per frame, which a
  * 1,000-frame page cannot afford. */
 const FRAME_NAME_BUDGET = 64;
+const CROWDED_FRAME_NAME_MIN_PIXELS = 128;
 
 /** The scale this module last wrote and the inline style text it left. An
  * unchanged attribute proves no other writer replaced those values, so a camera
@@ -171,7 +172,7 @@ export function paintDesignFrameVisibility(element: HTMLElement, context?: Chrom
     const automatic = controls === "automatic" && !!bounds;
     const width = bounds ? bounds.width * viewport.zoom : 0;
     const hidden = automatic && (outside ||
-      width < (world.childElementCount > FRAME_NAME_BUDGET ? FRAME_PLAY_MIN_PIXELS : FRAME_NAME_MIN_PIXELS));
+      width < (world.childElementCount > FRAME_NAME_BUDGET ? CROWDED_FRAME_NAME_MIN_PIXELS : FRAME_NAME_MIN_PIXELS));
     element.toggleAttribute("data-design-frame-compact-controls", hidden);
     // Between the two widths the name stays and only Play waits for intent.
     element.toggleAttribute("data-design-frame-compact-play", automatic && !hidden && width < FRAME_PLAY_MIN_PIXELS);

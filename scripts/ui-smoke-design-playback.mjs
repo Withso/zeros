@@ -56,6 +56,14 @@ export async function runDesignFramePlaybackSmoke({ page, check }) {
     "every artboard has an accessible Play toggle above its top-right corner",
     true,
   );
+  // Figma's compact chrome: an 11px name and a 16px control, 4px above.
+  const nameRect = await frame.locator("[data-design-frame-name]").boundingBox();
+  expect(controlRect.width).toBeCloseTo(16, 0);
+  expect(controlRect.height).toBeCloseTo(16, 0);
+  expect(frameRect.y - (controlRect.y + controlRect.height)).toBeCloseTo(4, 0);
+  expect(frameRect.y - (nameRect.y + nameRect.height)).toBeCloseTo(4, 0);
+  expect(await frame.locator("[data-design-frame-name]").evaluate((node) => getComputedStyle(node).fontSize)).toBe("11px");
+  check("a frame's name and Play are compact: 11px and 16px, 4px above the frame", true);
 
   // An empty selection keeps the last frame active for Layers; its Play
   // must still hide, and appear again only for a selection or the pointer.
@@ -82,6 +90,14 @@ export async function runDesignFramePlaybackSmoke({ page, check }) {
   await clickFramePlay(play);
   await expect(play).toHaveAttribute("aria-pressed", "true");
   await expect.poll(running).toBe(true);
+  // Stop is filled: blue under the pointer, grey once the pointer leaves.
+  const stopFill = () => play.evaluate((button) => getComputedStyle(button).backgroundColor);
+  await expect.poll(stopFill).not.toBe("rgba(0, 0, 0, 0)");
+  const hoveredFill = await stopFill();
+  await page.mouse.move(emptyCanvas.x, emptyCanvas.y);
+  await expect.poll(stopFill).not.toBe(hoveredFill);
+  expect(await stopFill()).not.toBe("rgba(0, 0, 0, 0)");
+  check("a playing frame's Stop is filled, blue under the pointer and grey without it", true);
   await expect(frame.locator("iframe")).not.toHaveAttribute("inert", "");
   await expect(
     page.getByRole("region", { name: "Motion timeline" }),

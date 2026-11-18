@@ -5182,15 +5182,18 @@ the exact scale before re-entry without layout reads or source replacement.
 Decoded source pixels and already inverse-scaled control children do not
 inherit wheel-by-wheel camera values. Hidden compact controls also isolate
 these values until hover or keyboard focus restores their screen-sized chrome.
-A frame at least 40 screen pixels wide keeps its name while the page mounts at
-most 64 frames; a more crowded page hides names below 128 pixels, as before.
-Play has no fill and shows only while its frame has a selection, the pointer,
-keyboard focus or playback; a playing frame without the pointer or a selection
-shows a grey Stop. A selected frame's edge is one screen pixel, and two while
-the pointer is inside the frame. Inside a camera gesture, frame bodies keep a
-scale held within 15% of the camera, but each frame's name and Play roots take
-the exact scale at every step, so their size and their 8-pixel gap above the
-frame never drift.
+Frame chrome is compact, as in Figma: an 11px name on a 16px row and a 16px
+Play control, both 4 screen pixels above the frame at every zoom. A frame at
+least 24 screen pixels wide keeps its name, and one at least 64 wide shows
+Play without waiting for intent, while the page mounts at most 64 frames; a
+more crowded page hides names below 128 pixels, as before. Play is a bare blue
+glyph and shows only while its frame has a selection, the pointer, keyboard
+focus or playback. While a frame plays it shows Stop, a white square on a
+fill: blue with a selection or the pointer, grey otherwise. A selected frame's
+edge is one screen pixel, and two while the pointer is inside the frame.
+Inside a camera gesture, frame bodies keep a scale held within 15% of the
+camera, but each frame's name and Play roots take the exact scale at every
+step, so their size and their gap above the frame never drift.
 This bounds style work as well as source
 work; it does not establish a universal FPS or memory guarantee.
 Displayed and inactive source-vector images share the loaded-element retention

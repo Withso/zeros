@@ -8294,15 +8294,15 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                     <div
                       data-design-controls
                       data-design-frame-chrome=""
-                      className="absolute bottom-full left-0 flex h-7 origin-bottom-left items-center"
+                      className="absolute bottom-full left-0 flex h-4 origin-bottom-left items-center"
                       style={
                         {
-                          // Reserve the 28px Play control and its 12px gap in screen space.
-                          "--design-frame-label-max-width": `max(0px, calc(${frame.width}px * var(--design-canvas-zoom) - 40px))`,
+                          // Reserve the 16px Play control and its 8px gap in screen space.
+                          "--design-frame-label-max-width": `max(0px, calc(${frame.width}px * var(--design-canvas-zoom) - 24px))`,
                           // While Play waits for intent, the name takes the whole width.
                           "--design-frame-label-full-width": `calc(${frame.width}px * var(--design-canvas-zoom))`,
                           maxWidth: "var(--design-frame-label-max-width)",
-                          transform: `translateY(${designCanvasScreenPixels(-8)}) scale(${DESIGN_CANVAS_INVERSE_ZOOM})`,
+                          transform: `translateY(${designCanvasScreenPixels(-4)}) scale(${DESIGN_CANVAS_INVERSE_ZOOM})`,
                         } as React.CSSProperties
                       }
                     >
@@ -8310,7 +8310,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                         <Input
                           autoFocus
                           value={renameDraft}
-                          className="h-6 w-48 min-w-0 max-w-full"
+                          className="text-2xxs h-5 w-48 min-w-0 max-w-full px-1"
                           aria-label={`Rename ${frame.title}`}
                           onChange={(event) => setRenameDraft(event.target.value)}
                           onPointerDown={(event) => event.stopPropagation()}
@@ -8389,11 +8389,11 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                       data-design-controls
                       data-design-frame-chrome=""
                       data-design-frame-play-chrome=""
-                      className="absolute right-0 bottom-full origin-bottom-right"
-                      // The 8px gap is padding, not a translation: a pointer
+                      className="absolute right-0 bottom-full flex origin-bottom-right"
+                      // The 4px gap is padding, not a translation: a pointer
                       // moving from the frame up to Play keeps the frame
                       // hovered, so Play does not hide on the way.
-                      style={{ paddingBottom: 8, transform: `scale(${DESIGN_CANVAS_INVERSE_ZOOM})` }}
+                      style={{ paddingBottom: 4, transform: `scale(${DESIGN_CANVAS_INVERSE_ZOOM})` }}
                     >
                       <DesignFramePlayControl
                         file={frame.file}

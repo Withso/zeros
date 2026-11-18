@@ -214,11 +214,11 @@ it("updates automatic controls with the actual camera and resize geometry while 
     await page.mouse.move(600, 400);
     const frame = page.locator('[data-design-frame="near"]');
     await frame.evaluate(element => element.setAttribute("data-design-frame-controls", "automatic"));
-    await paint(page, .25, 0, 500);
+    await paint(page, .15, 0, 500);
     expect(await frame.getAttribute("data-design-frame-compact-controls")).toBe("");
     await paint(page, 2);
     expect(await frame.getAttribute("data-design-frame-compact-controls")).toBe(null);
-    await paint(page, .25);
+    await paint(page, .15);
     expect(await frame.getAttribute("data-design-frame-compact-controls")).toBe("");
     await frame.evaluate(element => {
       (element as HTMLElement).style.width = "300px";
@@ -264,7 +264,7 @@ it("paints a camera change that compacts frame controls once, never again for it
       let count = 0;
       const stop = api.observeDesignCanvasPaint(world, () => count++);
       count = 0;
-      api.paintDesignCanvasCamera(world, { zoom: .25, panX: 0, panY: 0 }, true);
+      api.paintDesignCanvasCamera(world, { zoom: .15, panX: 0, panY: 0 }, true);
       await new Promise(requestAnimationFrame); await new Promise(requestAnimationFrame);
       stop();
       return { count, compact: document.querySelector('[data-design-frame="near"]')!.hasAttribute("data-design-frame-compact-controls") };
@@ -327,26 +327,28 @@ it("shows Play only for a frame with a selection, under the pointer, with keyboa
     await page.mouse.move(600, 400);
     // The real token values come from the app's token sheets; any two distinct
     // colors prove which one the control takes.
-    await page.addStyleTag({ content: ":root { --design-selection-stroke: blue; --fg3: gray; }" });
-    const token = (name: string) => page.evaluate(name => {
+    await page.addStyleTag({ content: ":root { --design-selection-stroke: blue; --design-selection-label-fg: white; --fg3: gray; }" });
+    const token = (color: string) => page.evaluate(color => {
       const probe = document.body.appendChild(document.createElement("i"));
-      probe.style.color = `var(${name})`;
+      probe.style.color = color.startsWith("--") ? `var(${color})` : color;
       const value = getComputedStyle(probe).color;
       probe.remove();
       return value;
-    }, name);
-    const blue = await token("--design-selection-stroke"), grey = await token("--fg3");
+    }, color);
+    const blue = await token("--design-selection-stroke"), grey = await token("--fg3"), white = await token("--design-selection-label-fg"),
+      clear = await token("transparent");
     const frame = page.locator('[data-design-frame="near"]');
     await frame.evaluate(element => element.insertAdjacentHTML("beforeend",
       '<div data-design-frame-chrome data-design-frame-play-chrome style="position:absolute;right:0;bottom:100%;height:28px"><button class="zd-canvas-tool zd-frame-play" style="height:28px">Play</button></div>'));
     await paint(page, 2, 0, 500);
     const shown = () => frame.evaluate(element => getComputedStyle(element.querySelector("[data-design-frame-play-chrome]")!).clip === "auto");
     const color = () => frame.evaluate(element => getComputedStyle(element.querySelector(".zd-frame-play")!).color);
+    const fill = () => frame.evaluate(element => getComputedStyle(element.querySelector(".zd-frame-play")!).backgroundColor);
     expect(await shown()).toBe(false);
     await frame.evaluate(element => element.setAttribute("data-design-frame-selected", ""));
     expect(await shown()).toBe(true);
-    const selectedColor = await color();
-    expect(selectedColor).toBe(blue);
+    expect(await color()).toBe(blue);
+    expect(await fill()).toBe(clear);
     await frame.evaluate(element => element.removeAttribute("data-design-frame-selected"));
     expect(await shown()).toBe(false);
     await page.mouse.move(80, 90);
@@ -359,12 +361,18 @@ it("shows Play only for a frame with a selection, under the pointer, with keyboa
     await play.evaluate(button => button.setAttribute("data-zeros-focus-visible", "true"));
     expect(await shown()).toBe(true);
     await play.evaluate(button => (button as HTMLElement).blur());
-    // An unattended playing frame keeps a quiet Stop; the pointer makes it blue.
-    await frame.evaluate(element => element.setAttribute("data-design-frame-playing", ""));
+    // Stop is a white glyph on a fill: grey while its frame plays unattended,
+    // blue under the pointer.
+    await frame.evaluate(element => {
+      element.setAttribute("data-design-frame-playing", "");
+      element.querySelector(".zd-frame-play")!.setAttribute("aria-pressed", "true");
+    });
     expect(await shown()).toBe(true);
-    await expect.poll(color).toBe(grey);
+    await expect.poll(fill).toBe(grey);
+    expect(await color()).toBe(white);
     await page.mouse.move(80, 90);
-    await expect.poll(color).toBe(selectedColor);
+    await expect.poll(fill).toBe(blue);
+    expect(await color()).toBe(white);
   } finally { await page.close(); }
 });
 
@@ -406,7 +414,7 @@ it("keeps a small frame's name on an uncrowded page, hides only its Play control
       label: getComputedStyle(element.querySelector("[data-design-frame-chrome]:not([data-design-frame-play-chrome])")!).clip,
       control: getComputedStyle(element.querySelector("[data-design-frame-play-chrome]")!).clip,
     }));
-    // 60 px on screen: the name stays, the 28 px Play control waits for intent.
+    // 60 px on screen: the name stays, the 16 px Play control waits for intent.
     await paint(page, .5, 0, 500);
     expect(await state()).toEqual({ compact: false, play: true, label: "auto", control: "rect(0px, 0px, 0px, 0px)" });
     // The name row can lie over the frame above: only the name takes the pointer.
@@ -417,8 +425,8 @@ it("keeps a small frame's name on an uncrowded page, hides only its Play control
     await page.mouse.move(40, 40);
     expect((await state()).control).toBe("auto");
     await page.mouse.move(600, 400);
-    // 30 px: too small for a name.
-    await paint(page, .25);
+    // 18 px: too small for a name.
+    await paint(page, .15);
     expect(await state()).toMatchObject({ compact: true, play: false });
     // Wide enough for both; Play still waits for intent.
     await paint(page, 2);

@@ -42,11 +42,11 @@ export function DesignFrameProblemLabel({ title, message, width }: {
   return (
     <div
       data-design-frame-chrome=""
-      className="pointer-events-auto absolute bottom-full left-0 flex h-7 origin-bottom-left items-center"
+      className="pointer-events-auto absolute bottom-full left-0 flex h-4 origin-bottom-left items-center"
       style={{
         // The mark itself stays visible even on a frame narrower than it on screen.
         maxWidth: width === undefined ? undefined : `max(12px, calc(${width}px * var(--design-canvas-zoom, 1)))`,
-        transform: `translateY(${designCanvasScreenPixels(-8)}) scale(${DESIGN_CANVAS_INVERSE_ZOOM})`,
+        transform: `translateY(${designCanvasScreenPixels(-4)}) scale(${DESIGN_CANVAS_INVERSE_ZOOM})`,
       }}
     >
       <span

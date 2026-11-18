@@ -1059,25 +1059,35 @@
   opacity: 0.5;
 }
 
-/* Frame chrome stays 28 screen pixels at every canvas zoom. Play has no fill:
- * a blue glyph while its frame has a selection or the pointer, and a quiet
- * Stop while a frame plays unattended. */
+/* Frame chrome is a compact 16 screen pixels at every canvas zoom, beside an
+ * 11px name. Play is a bare blue glyph. Stop, while a frame plays, is a white
+ * square on a fill: blue while its frame has a selection or the pointer, grey
+ * while it plays unattended. */
 .zd-canvas-tool.zd-frame-play,
-.zd-canvas-tool.zd-frame-play:hover:not(:disabled),
-.zd-canvas-tool.zd-frame-play[aria-pressed="true"],
-.zd-canvas-tool.zd-frame-play[aria-pressed="true"]:hover:not(:disabled) {
-  width: 28px;
-  height: 28px;
-  border-color: transparent;
+.zd-canvas-tool.zd-frame-play:hover:not(:disabled) {
+  width: 16px;
+  height: 16px;
+  border: 0;
+  border-radius: var(--radius-sm);
   background-color: transparent;
   color: var(--design-selection-stroke);
 }
 .zd-canvas-tool.zd-frame-play svg {
-  width: 16px;
-  height: 16px;
+  width: 12px;
+  height: 12px;
+}
+.zd-canvas-tool.zd-frame-play[aria-pressed="true"],
+.zd-canvas-tool.zd-frame-play[aria-pressed="true"]:hover:not(:disabled) {
+  background-color: var(--design-selection-stroke);
+  color: var(--design-selection-label-fg);
+}
+.zd-canvas-tool.zd-frame-play[aria-pressed="true"] svg {
+  width: 10px;
+  height: 10px;
+  stroke-width: 2.5;
 }
 [data-design-frame][data-design-frame-playing]:not([data-design-frame-selected]):not(:hover):not([data-design-frame-pointer]) .zd-canvas-tool.zd-frame-play {
-  color: var(--fg3);
+  background-color: var(--fg3);
 }
 
 /* Camera variables belong to world geometry and inverse-scaled chrome roots.
@@ -1109,7 +1119,7 @@
   will-change: auto;
 }
 
-/* A 28px control must not cover every tiny frame in an overview. Keep its
+/* A screen-size control must not cover every tiny frame in an overview. Keep its
  * keyboard target and reveal it together with the label on hover or focus. */
 [data-design-frame-compact-controls]:not(:hover):not(:focus-within):not([data-design-frame-pointer]) > [data-design-frame-chrome] {
   --design-canvas-zoom: 1;
@@ -1134,7 +1144,7 @@
 [data-design-frame]:not([data-design-frame-selected]):not([data-design-frame-playing]):not(:hover):not([data-design-frame-pointer]):not(:focus-within) > [data-design-frame-chrome]:not([data-design-frame-play-chrome]) {
   max-width: var(--design-frame-label-full-width, none) !important;
 }
-/* A small frame's 28px name row can lie over the frame above it. Only the
+/* A small frame's name row can lie over the frame above it. Only the
  * name itself takes the pointer there; the row around it lets a hover or a
  * click reach the frame beneath. */
 [data-design-frame-compact-play] > [data-design-frame-chrome]:not([data-design-frame-play-chrome]) {
