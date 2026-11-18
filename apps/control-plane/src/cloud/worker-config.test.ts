@@ -39,6 +39,14 @@ it("returns creates before their GitHub checks unless a deployment turns it off,
   expect(loadConfig({ ...base, CLOUD_V2_ASYNC_CREATE_ENABLED: "TRUE" }).cloudV2?.asyncCreate).toBe(true);
   expect(() => loadConfig({ ...base, CLOUD_V2_ASYNC_CREATE_ENABLED: "0" })).toThrow("CLOUD_V2_ASYNC_CREATE_ENABLED");
 });
+it("keeps provider-stop recovery off until a deployment opts in, and refuses ambiguous values", () => {
+  const key = generateKeyPairSync("ed25519").privateKey.export({ format: "der", type: "pkcs8" }).toString("base64");
+  const base = { ...env, CLOUD_V2_WORKER_SIGNING_KEY: key };
+  expect(loadConfig(base).cloudV2?.providerStopRecovery).toBe("off");
+  expect(loadConfig({ ...base, CLOUD_V2_PROVIDER_STOP_RECOVERY: " Observe " }).cloudV2?.providerStopRecovery).toBe("observe");
+  expect(loadConfig({ ...base, CLOUD_V2_PROVIDER_STOP_RECOVERY: "on" }).cloudV2?.providerStopRecovery).toBe("on");
+  expect(() => loadConfig({ ...base, CLOUD_V2_PROVIDER_STOP_RECOVERY: "true" })).toThrow("CLOUD_V2_PROVIDER_STOP_RECOVERY");
+});
 it("keeps execution token verdicts out of memory until a deployment opts in, and refuses ambiguous values", () => {
   const key = generateKeyPairSync("ed25519").privateKey.export({ format: "der", type: "pkcs8" }).toString("base64");
   const base = { ...env, CLOUD_V2_WORKER_SIGNING_KEY: key };

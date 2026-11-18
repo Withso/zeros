@@ -1,3 +1,4 @@
+import type { ProviderStopCheck } from "./provider-stop.js";
 import { Hono, type Context } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
@@ -7,7 +8,7 @@ import { CLOUD_V2_MAX_FRAME_BYTES, CloudV2WorkerActivitySchema, CloudV2WorkerHel
 import type { AuthorityPull } from "./execution/authority-pull.js";
 import { emitCloudV2Timing, type CloudV2TimingRecord } from "./lifecycle.js";
 import type { CloudV2Store, CloudV2WorkerSession, CloudV2Workspace } from "./store.js";
-import { isCloudV2Token } from "./tokens.js";
+import { isCloudV2Token, hashCloudV2Token } from "./tokens.js";
 import type { LiveRecoveryProofBinding } from "./live-recovery-signals.js";
 import { CLOUD_V2_PROMPT_POLL_MS, CloudV2PromptAckSchema, CloudV2PromptBeginSchema, CloudV2PromptOutcomeSchema, CloudV2PromptPullSchema, CloudV2PromptStopReplySchema, CloudV2PromptStopSchema, type CloudV2PromptPullReply } from "./prompt-contract.js";
 import { CloudGithubCheckoutSchema, type CloudGithubCheckout } from "./github-pr-contract.js";
@@ -39,6 +40,8 @@ export const CLOUD_V2_WORKER_API = "/v2/cloud/worker";
 type ConfigFrame = Extract<CloudV2ControlFrame, { t: "config" }>;
 export type CloudV2WorkerRouteDeps = {
   outboundProof?(binding: LiveRecoveryProofBinding): Promise<void>;
+  /** One Boat read about 75 s after each hello (cloud/provider-stop.ts). */
+  providerStop?: Pick<ProviderStopCheck, "afterWake">;
   recovery?: {
     pull(token: string, bootId: string, id: string): Promise<{ hold: boolean; hint?: CloudRecoveryHint }>;
     request(token: string, bootId: string, input: CloudRecoveryRequest): Promise<CloudRecoveryReply>;
@@ -426,6 +429,8 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
       return accepted;
     });
     if (ready.helloTiming) emitCloudV2Timing(deps.timing, { workspaceId: ready.id.slice(0, 8), phase: "worker_hello", ...ready.helloTiming, configMs });
+    if (ready.boatSandboxId) deps.providerStop?.afterWake({ workspaceId: ready.id, sandboxId: ready.boatSandboxId, bootId: input.bootId,
+      workerTokenHash: hashCloudV2Token(token).toString("hex"), accessEpoch: workspace.accessEpoch });
     if (ready.boatSandboxId) void deps.outboundProof?.({ workspaceId: ready.id, bootId: input.bootId,
       sandboxId: ready.boatSandboxId, accessEpoch: workspace.accessEpoch }).catch(() => {});
     return c.json({ config });

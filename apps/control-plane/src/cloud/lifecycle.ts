@@ -98,6 +98,8 @@ export function emitCloudV2Timing(observer: ((record: CloudV2TimingRecord) => vo
 }
 
 export type CloudV2LifecycleDeps = {
+  /** Database-only scan, once a minute, for running workspaces whose messages do not move (cloud/provider-stop.ts). */
+  providerStop?: { scan(): Promise<void> };
   store: Pick<CloudV2Store, "claimPending" | "nextLifecycleDue" | "defer" | "transition" | "rotateWorkerToken" | "workspaceImage" | "revoke" | "idleSince" | "setWorkerRoute" | "leasesDue" | "markLeaseRenewed" | "recordInitialSandbox"
     | "setBaseCommit" | "saveCheckpoint" | "checkpointFailed" | "checkpointUpload" | "checkpointUploadDone" | "checkpointUploadHorizon" | "stopCurrent"
     | "beginRestore" | "replaceSandbox" | "finishRestore" | "checkpointUnchanged" | "claimCheckpointRetry" | "beginCheckpointFork"
@@ -298,6 +300,8 @@ export class CloudV2Lifecycle {
   private lastLeaseScan = -Infinity;
   private retrying: Promise<void> | null = null;
   private nextRetryScan = -Infinity;
+  private lastProviderStopScan = -Infinity;
+  private providerStopScan: Promise<void> | null = null;
 
   async tick(): Promise<void> {
     await this.poll();
@@ -324,6 +328,11 @@ export class CloudV2Lifecycle {
     // A build can take many minutes; it never blocks workspace lifecycle steps.
     if (this.deps.builds && !this.building)
       this.building = this.deps.builds.tick().catch(() => {}).finally(() => { this.building = null; });
+    // Idle stop skips a workspace with pending messages; this finds the ones whose VM Boat stopped underneath them.
+    if (this.deps.providerStop && !this.providerStopScan && now - this.lastProviderStopScan >= 60_000) {
+      this.lastProviderStopScan = now;
+      this.providerStopScan = this.deps.providerStop.scan().catch(() => {}).finally(() => { this.providerStopScan = null; });
+    }
     for (const idle of await this.deps.store.idleSince(new Date(now - CLOUD_V2_IDLE_STOP_MS))) {
       if (this.deps.stopIdle) await this.deps.stopIdle(idle.id, new Date(now - CLOUD_V2_IDLE_STOP_MS));
       else await this.deps.store.transition(idle.id, ["running"], "stopping");

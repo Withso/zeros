@@ -1600,6 +1600,23 @@ they use at most two of the slots, and a slow stop never holds up another
 workspace's creation. Running VMs receive a 24-hour Boat
 lease; a bounded background scan renews it after about 12 hours.
 
+Boat sometimes archives a VM seconds after resuming it, with no stop from Zeros
+(Alpha 2026-11-17/18: 6 to 44 s after hydration). With
+`CLOUD_V2_PROVIDER_STOP_RECOVERY=on` (`off` by default; `observe` records only),
+the control plane asks Boat (`GET /sandboxes/{id}`) only about a suspect: a
+refused dial of a running route, a message that waits more than 90 s on a running
+workspace (a database-only scan once a minute), and once about 75 s after each
+wake. Reads of one boot back off from 15 s to 5 minutes. Only Boat's own `archived`,
+or the sandbox being gone, finishes the stop, fenced to the observed boot and
+skipped during checkpoint recovery, an execution transition or a runtime handoff:
+`running` goes straight to `stopped` (so the waiting messages are kept), the stop
+generation advances, credentials and execution contexts end, turns in flight
+become `interrupted`, and waiting messages ask for one wake through the existing
+`wake_after_stop` path. Automatic wakes are capped at two per workspace an hour
+and 20 across all workspaces in 10 minutes; past that the messages stay queued
+for an explicit Start or send. Each detection is a row in
+`cloud_v2_provider_stops`.
+
 The loop sweeps every 2 seconds only while it has work in flight. Otherwise it
 sleeps until the next deferred step falls due, at most a minute. Database
 triggers notify `zeros_cloud_v2_lifecycle` when a workspace enters `creating`,
