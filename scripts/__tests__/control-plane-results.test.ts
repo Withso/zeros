@@ -26,10 +26,10 @@ type Test = { suite: string; title: string; status: Status };
 
 const testFiles = [
   "src/auth.test.ts",
-  "src/migrations.test.ts",
+  "src/migrations-1.test.ts",
   "src/routes.integration.test.ts",
 ];
-const databaseFiles = new Set(["src/migrations.test.ts", "src/routes.integration.test.ts"]);
+const databaseFiles = new Set(["src/migrations-1.test.ts", "src/routes.integration.test.ts"]);
 
 function fileResult(file: string, tests: Test[]) {
   return {
@@ -64,7 +64,7 @@ function passingReports(status: Status = "passed") {
     [
       2,
       report(
-        fileResult("src/migrations.test.ts", [
+        fileResult("src/migrations-1.test.ts", [
           { suite: "cloud migration regression contracts", title: "is static", status: "passed" },
           { suite: "migration ladder", title: "replays from every intermediate revision", status },
         ]),
@@ -96,6 +96,18 @@ describe("control-plane results", () => {
       'src/routes.integration.test.ts did not run 1 database-backed test, for example "routes signs up" (skipped).',
     );
     expect(problems.join("\n")).toMatch(/No "migration ladder" test passed/);
+  });
+
+  it("requires a passing ladder test in every migration suite part, not just one", () => {
+    const files = [...testFiles, "src/migrations-2.test.ts"];
+    const reports = passingReports();
+    reports.set(1, report(
+      fileResult("src/auth.test.ts", [{ suite: "auth", title: "rejects", status: "passed" }]),
+      fileResult("src/migrations-2.test.ts", [{ suite: "cloud migration regression contracts", title: "is static", status: "passed" }]),
+    ));
+    expect(enforceControlPlaneResults({ env: databaseRun, reports, testFiles: files, databaseFiles })).toEqual([
+      'No "migration ladder" test passed in src/migrations-2.test.ts, so the database suites did not run.',
+    ]);
   });
 
   it.each(["pending", "todo"] as const)("rejects a %s database-backed test", (status) => {
@@ -158,9 +170,9 @@ describe("control-plane results", () => {
   it("classifies the real control-plane files", () => {
     const files = listControlPlaneTestFiles();
     const database = databaseBackedTestFiles(files);
-    expect(files).toContain("src/migrations.test.ts");
+    expect(files).toContain("src/migrations-1.test.ts");
     expect(files).toContain("src/cloud/store.integration.test.ts");
-    expect(database.has("src/migrations.test.ts")).toBe(true);
+    expect(database.has("src/migrations-1.test.ts")).toBe(true);
     expect(database.has("src/test-database.integration.test.ts")).toBe(true);
     expect(database.has("src/auth.test.ts")).toBe(false);
   });
@@ -197,7 +209,7 @@ describe.each(["ci.yml", "preflight.yml"])(
                 fileResult(testFile, [
                   {
                     suite:
-                      testFile === "src/migrations.test.ts"
+                      /^src\/migrations-\d+\.test\.ts$/.test(testFile)
                         ? "migration ladder"
                         : "suite",
                     title: "runs",
@@ -266,7 +278,7 @@ describe("control-plane results command", () => {
     writeFileSync(
       path.join(directory, "shard-1.json"),
       JSON.stringify(report(...files.map((file) => fileResult(file, [{
-        suite: file === "src/migrations.test.ts" ? "migration ladder" : "suite",
+        suite: /^src\/migrations-\d+\.test\.ts$/.test(file) ? "migration ladder" : "suite",
         title: "runs",
         status: database.has(file) ? "skipped" : "passed",
       }])))),
@@ -286,10 +298,10 @@ process.stderr.write = (...args) => { setImmediate(() => write(...args)); return
     expect(result.status).toBe(1);
     expect(result.stdout).not.toContain("Control plane passed");
     expect(result.stderr).toContain(
-      '::error::src/migrations.test.ts did not run 1 database-backed test, for example "migration ladder runs" (skipped).',
+      '::error::src/migrations-1.test.ts did not run 1 database-backed test, for example "migration ladder runs" (skipped).',
     );
     // One annotation per file, not one per skipped test.
     expect(result.stderr.split("\n").filter((line) => line.startsWith("::error::")).length)
-      .toBe(database.size + 1);
+      .toBe(database.size + files.filter((file) => /^src\/migrations-\d+\.test\.ts$/.test(file)).length);
   });
 });

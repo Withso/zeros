@@ -1,6 +1,7 @@
 // Scopes vitest to this package — without this, vitest resolves the repo
 // root's config (the Electron app's test include list) and finds nothing.
 import { defineConfig } from "vitest/config";
+import ControlPlaneSequencer from "./vitest.sequencer.js";
 
 export default defineConfig({
   test: {
@@ -17,5 +18,7 @@ export default defineConfig({
     // with duplicate_object. Keep schema-mutating files serial; CI splits the
     // files across separate Postgres services with `--shard` instead.
     fileParallelism: false,
+    // Pins each migration-suite part to its own `--shard`; see src/migrations-part.ts.
+    sequence: { sequencer: ControlPlaneSequencer },
   },
 });

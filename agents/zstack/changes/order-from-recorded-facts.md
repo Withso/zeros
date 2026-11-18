@@ -14,5 +14,5 @@ only the event.
 
 Held by `organization-seats.integration.test.ts` ("never lets a later
 entitlement write move a member ahead…") and the 0216 contract in
-`src/migrations.test.ts`. The fragment carries the general rule to the review
+`src/migrations.test-suite.ts`. The fragment carries the general rule to the review
 checklist.

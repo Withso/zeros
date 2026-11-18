@@ -976,9 +976,8 @@ jobs:
       - control-plane-scope
     if: ${{ !cancelled() && (needs.scope.result != 'success' || needs.control-plane-scope.result != 'success' || needs.scope.outputs.job-control-plane-db == 'true' || needs.control-plane-scope.outputs.database == 'true') }}
     runs-on: ubuntu-latest
-    # The shard holding src/migrations.test.ts runs the whole ladder per test (about 27 min
-    # by 2026-11-18, growing with each migration); 30 cancelled it mid-run.
-    timeout-minutes: 45
+    # apps/control-plane/vitest.sequencer.ts gives each shard one eighth of the migration ladder.
+    timeout-minutes: 30
     strategy:
       # Every shard reports, so one failure never hides another.
       fail-fast: false

@@ -13,6 +13,8 @@
 // apply the ladder. The upgrade-path test models existing data, independently
 // of which deployment process applies the migrations.
 //
+// Loaded through src/migrations-1..8.test.ts, each running one eighth of the ladder.
+//
 // Runs only when TEST_DATABASE_URL points at a THROWAWAY Postgres — every test
 // drops the public schema. CI provides one (preflight.yml `control-plane` job);
 // locally:
@@ -26,9 +28,10 @@ import {
   beforeEach,
   describe,
   expect,
-  it,
   vi,
 } from "vitest";
+// Each src/migrations-N.test.ts part registers every eighth ladder test; see migrations-part.ts.
+import { firstPart, it, partitioned } from "./migrations-part.js";
 import { readdirSync, readFileSync } from "node:fs";
 import { randomBytes, randomUUID } from "node:crypto";
 import path from "node:path";
@@ -68,7 +71,7 @@ function migrationSource(file: string): string {
   return readFileSync(path.join(MIGRATIONS_DIR, file), "utf8");
 }
 
-describe("cloud migration regression contracts", () => {
+firstPart(describe)("cloud migration regression contracts", () => {
   it("places temporary schemas last in every pg_catalog/public function path", () => {
     const unsafePaths = LADDER.filter((file) => file >= "0020_").flatMap(
       (file) =>
@@ -188,7 +191,7 @@ describe("cloud migration regression contracts", () => {
 // Every case resets the schema and replays the whole ladder, which outgrew the
 // default 5 s on loaded CI runners. Give each case the same bounded 30 s budget
 // the intermediate-revision cases already use.
-d("migration ladder", { timeout: 30_000 }, () => {
+partitioned(d)("migration ladder", { timeout: 30_000 }, () => {
   let pool: pg.Pool;
 
   beforeAll(() => {
@@ -2287,7 +2290,7 @@ d("migration ladder", { timeout: 30_000 }, () => {
 // Only migrations that TRANSFORM existing rows need one of these; most just add
 // a table or column and the generic tests above cover them. 0006 renames every
 // tenant table, moves a foreign key, and rewrites audit_log — so it gets one.
-d("0006 org→team preserves existing data", () => {
+firstPart(d)("0006 org→team preserves existing data", () => {
   let pool: pg.Pool;
   const TEAM = "aaaaaaaa-0000-0000-0000-000000000001";
   const OWNER = "11111111-1111-1111-1111-111111111111";
@@ -2480,7 +2483,7 @@ d("0006 org→team preserves existing data", () => {
   });
 });
 
-d("0009 organization→team hierarchy preserves flat-Team data", () => {
+firstPart(d)("0009 organization→team hierarchy preserves flat-Team data", () => {
   let pool: pg.Pool;
   const ORG = "aaaaaaaa-0000-0000-0000-000000000001";
   const OWNER = "11111111-1111-1111-1111-111111111111";
@@ -2735,7 +2738,7 @@ d("0009 organization→team hierarchy preserves flat-Team data", () => {
   });
 });
 
-d("0019 retires legacy provider backlog without losing audit rows", () => {
+firstPart(d)("0019 retires legacy provider backlog without losing audit rows", () => {
   let pool: pg.Pool;
 
   beforeAll(async () => {

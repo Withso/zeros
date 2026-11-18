@@ -739,6 +739,17 @@ describe("CI scope Git evidence and CLI", () => {
     expect(parseNameStatus(Buffer.from("M\0apps/web/line\nname.ts\0"))).toEqual(
       [change("apps/web/line\nname.ts")],
     );
+    // Git zero-pads the similarity score to three digits for every partial rename or copy.
+    for (const status of ["R099", "R050", "C075", "R000"]) {
+      expect(parseNameStatus(Buffer.from(`${status}\0apps/web/a.ts\0apps/web/b.ts\0`))).toEqual([
+        change("apps/web/b.ts", status, "apps/web/a.ts"),
+      ]);
+    }
+    for (const status of ["R101", "R1000", "R99", "R9"]) {
+      expect(() => parseNameStatus(Buffer.from(`${status}\0apps/web/a.ts\0apps/web/b.ts\0`))).toThrow(
+        "unknown-status",
+      );
+    }
     for (const malformed of [
       Buffer.from("M\0apps/web/a.ts"),
       Buffer.from("U\0apps/web/a.ts\0"),
