@@ -320,6 +320,12 @@ import {
   type DesignAgentRevealTarget,
 } from "./design-agent-drafts";
 import { errorMessage } from "./design-workspace-error";
+import {
+  designSelectionParentId,
+  designStructureModifierPressed,
+  designStructureOutlineShown,
+} from "./design-layer-structure";
+import { DesignLayerStructureOverlay, DesignStructureOutline } from "./design-layer-structure-overlay";
 import { DESIGN_CANVAS_CHIP_CLS } from "./design-canvas-chip";
 import {
   DESIGN_RESIZE_HANDLES,
@@ -714,6 +720,15 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         : null,
     [selectedRuntimeTree, view.selectedNodeId],
   );
+  // The dotted parent a selection shows needs every selected layer to share
+  // it; guides and measurements still anchor on the primary layer's parent.
+  const selectionParentId = useMemo(
+    () =>
+      selectedFrame
+        ? designSelectionParentId(selectedRuntimeTree, view.selectedTargets, selectedFrame.file, view.selectedNodeId ?? null)
+        : null,
+    [selectedFrame, selectedRuntimeTree, view.selectedNodeId, view.selectedTargets],
+  );
   const parentOutlineSelectionOwner = `${selectedFrame?.file ?? ""}\u0000${selectedParentId ?? ""}`;
   const parentOutlineOwner = `${parentOutlineSelectionOwner}\u0000${selectedFrame?.sourceVersion ?? ""}`;
   const [parentOutlineState, setParentOutlineState] = useState<{
@@ -972,6 +987,16 @@ export const DesignCanvas = React.memo(function DesignCanvas({
     if (measurePressedRef.current === pressed) return;
     measurePressedRef.current = pressed;
     setMeasurePressed(pressed);
+  }, []);
+  // ⌘/Ctrl reveals the hovered layer's structure: its parent and children
+  // dotted. A held gesture owns the pointer, so it never shows mid-drag.
+  const [structurePressed, setStructurePressed] = useState(false);
+  const structurePressedRef = useRef(false);
+  const syncStructureModifier = useCallback((pressed: boolean) => {
+    const next = pressed && gestureCancelRef.current === null;
+    if (structurePressedRef.current === next) return;
+    structurePressedRef.current = next;
+    setStructurePressed(next);
   }, []);
   // Current viewport pixels drive the bounded live-iframe window.
   const [viewportSize, setViewportSize] = useState({ width: 0, height: 0 });
@@ -6163,7 +6188,10 @@ export const DesignCanvas = React.memo(function DesignCanvas({
       // Option measures; it never types, moves, or deletes anything. Reading it
       // outside the canvas's own focus scope is what makes the overlay appear
       // right after a Layers row click, where focus lives in the sidebar.
-      if (!editableTarget) syncMeasureModifier(event.altKey);
+      if (!editableTarget) {
+        syncMeasureModifier(event.altKey);
+        syncStructureModifier(designStructureModifierPressed(event));
+      }
       const activeElement = document.activeElement;
       const designSurfaceFocused =
         activeElement instanceof Element &&
@@ -6431,11 +6459,15 @@ export const DesignCanvas = React.memo(function DesignCanvas({
       syncMeasureModifier(
         event.altKey && !isEditableHotkeyTarget(event.target),
       );
+      syncStructureModifier(
+        designStructureModifierPressed(event) && !isEditableHotkeyTarget(event.target),
+      );
     };
     const blur = () => {
       spacePressedRef.current = false;
       setSpacePressed(false);
       syncMeasureModifier(false);
+      syncStructureModifier(false);
       if (nudgeGestureRef.current || queuedNudgeRef.current) finishNodeNudge(true);
     };
     // A hidden window cannot deliver the release, so leaving the app must not
@@ -6481,6 +6513,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
     selectedRuntimeTree,
     frameViews,
     syncMeasureModifier,
+    syncStructureModifier,
     view.frameSelected,
     view.selectedFrame,
     view.selectedNodeId,
@@ -7956,7 +7989,10 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         // Pointer movement carries the authoritative modifier state, so a
         // keydown lost to another focus owner (or pressed before the window was
         // focused) still resolves the moment the pointer enters the canvas.
-        onPointerMove={(event) => syncMeasureModifier(event.altKey)}
+        onPointerMove={(event) => {
+          syncMeasureModifier(event.altKey);
+          syncStructureModifier(designStructureModifierPressed(event));
+        }}
         // Entering a frame's title (or leaving it for anything else) is the
         // intent signal; movement within one element never reaches React state.
         onPointerOver={(event) => {
@@ -8051,6 +8087,46 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                   ? (parentElement?.rect ?? null)
                   : { x: 0, y: 0, width: frame.width, height: frame.height }
                 : null;
+            const constraintGuidesShown = Boolean(
+              parentGuideRect &&
+                selectedElement &&
+                selectedElements.length === 1 &&
+                designConstraintGuidesApply({
+                  hasParent: true,
+                  position: selectedElement.styles.position,
+                  // A fixed box is positioned against the viewport unless an
+                  // ancestor creates its containing block (transform, filter…).
+                  parentIsContainingBlock:
+                    selectedElement.styles.position === "fixed"
+                      ? selectedElement.layout?.fixedContainingBlock !== "ancestor"
+                      : selectedElement.layout?.isContainingBlock,
+                }) &&
+                (!measurePressed || gestureCancelRef.current !== null) &&
+                inlineTextEdit?.frame !== frame.file,
+            );
+            const constraintParentOutlined = Boolean(
+              constraintGuidesShown &&
+                parentElement &&
+                (selectedElement?.styles.position !== "fixed" ||
+                  selectedElement.layout?.fixedContainingBlock === "parent"),
+            );
+            // The selection's parent, dotted, unless the constraint guides
+            // already outline it, Option/Alt is measuring against it, or it is
+            // the frame's own edge.
+            const selectionParentOutline =
+              selected &&
+              selectedElement &&
+              parentElement &&
+              selectionParentId === parentElement.oid &&
+              !framePlaying &&
+              !measurePressed &&
+              !constraintParentOutlined &&
+              inlineTextEdit?.frame !== frame.file &&
+              designStructureOutlineShown(parentElement.rect, frame)
+                ? parentElement
+                : null;
+            const dottedSelectionParentId =
+              selectionParentOutline?.oid ?? (constraintParentOutlined ? parentElement?.oid : undefined);
             const transformElementIds = new Set(
               designLayerTopLevelSelectionIds(
                 selectedRuntimeTree,
@@ -8460,6 +8536,15 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                   />
                 ) : null}
 
+                {selectionParentOutline && selectedElement ? (
+                  <DesignStructureOutline
+                    data-design-structure-parent={selectedElement.oid}
+                    data-design-structure-parent-id={selectionParentOutline.oid}
+                    rect={selectionParentOutline.rect}
+                    geometry={selectionParentOutline}
+                  />
+                ) : null}
+
                 {secondaryElements.map(details => (
                   <div key={details.oid} data-design-secondary-selection={details.oid}
                     className="zd-design-selection-outline zd-design-stroke pointer-events-none absolute z-1"
@@ -8528,6 +8613,28 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                 ) : null}
 
                 {workspaceId &&
+                active &&
+                structurePressed &&
+                prepared &&
+                !framePlaying &&
+                !spacePressed &&
+                activeTool === "select" &&
+                gestureCancelRef.current === null &&
+                inlineTextEdit?.frame !== frame.file ? (
+                  <DesignLayerStructureOverlay
+                    workspaceId={workspaceId}
+                    frame={frame}
+                    excludedNodeIds={
+                      selected
+                        ? dottedSelectionParentId
+                          ? [...view.selectedNodeIds, dottedSelectionParentId]
+                          : view.selectedNodeIds
+                        : EMPTY_NODE_IDS
+                    }
+                  />
+                ) : null}
+
+                {workspaceId &&
                 measurePressed &&
                 gestureCancelRef.current === null &&
                 selectedElement &&
@@ -8541,22 +8648,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                   />
                 ) : null}
 
-                {parentGuideRect &&
-                selectedElement &&
-                selectedElements.length === 1 &&
-                designConstraintGuidesApply({
-                  hasParent: true,
-                  position: selectedElement.styles.position,
-                  // A fixed box is positioned against the viewport unless an
-                  // ancestor creates its containing block (transform, filter…).
-                  parentIsContainingBlock:
-                    selectedElement.styles.position === "fixed"
-                      ? selectedElement.layout?.fixedContainingBlock !==
-                        "ancestor"
-                      : selectedElement.layout?.isContainingBlock,
-                }) &&
-                (!measurePressed || gestureCancelRef.current !== null) &&
-                inlineTextEdit?.frame !== frame.file ? (
+                {constraintGuidesShown && parentGuideRect && selectedElement ? (
                   <DesignConstraintGuides
                     nodeId={selectedElement.oid}
                     box={designSelectionBox(selectedElement)}

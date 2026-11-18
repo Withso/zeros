@@ -795,8 +795,9 @@ describe("design workspace interaction wiring", () => {
     // The overlay is a display affordance, so it follows the live modifier
     // instead of a keydown that the sidebar's focus owner would have kept.
     expect(source).toContain("syncMeasureModifier(event.altKey)");
-    expect(source).toContain(
-      "onPointerMove={(event) => syncMeasureModifier(event.altKey)}",
+    // ⌘/Ctrl structure follows the same live modifier on every pointer move.
+    expect(source).toMatch(
+      /onPointerMove=\{\(event\) => \{\s*syncMeasureModifier\(event\.altKey\);\s*syncStructureModifier\(designStructureModifierPressed\(event\)\);/,
     );
     expect(source).toContain('document.addEventListener("visibilitychange"');
     expect(source).not.toContain('if (event.key === "Alt") {');

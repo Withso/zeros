@@ -72,7 +72,7 @@ export function createDesignDragPresentation(
   const frameChrome = options.selection
     ? [
         ...article.querySelectorAll<HTMLElement>(
-          `[data-design-element-overlay="${CSS.escape(details.oid)}"], [data-design-parent-guides="${CSS.escape(details.oid)}"]`,
+          `[data-design-element-overlay="${CSS.escape(details.oid)}"], [data-design-parent-guides="${CSS.escape(details.oid)}"], [data-design-structure-parent="${CSS.escape(details.oid)}"]`,
         ),
       ]
     : [];

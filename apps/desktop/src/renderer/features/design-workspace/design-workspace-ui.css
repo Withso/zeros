@@ -1299,7 +1299,10 @@
   );
 }
 
-.zd-design-constraint-parent {
+/* Layer structure: a selection's parent, and the parent and children ⌘/Ctrl
+ * reveals around a hovered layer, in the same dots as a constraint parent. */
+.zd-design-constraint-parent,
+.zd-design-structure-outline {
   --design-dash-length: 1px;
   --design-dash-repeat: 3px;
   --design-dash-color: color-mix(

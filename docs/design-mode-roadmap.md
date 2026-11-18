@@ -2676,6 +2676,16 @@ a frame's own document (`canvas-items-exports.test.ts`).
   Constraint runs appear only for absolute/fixed boxes positioned in their
   parent, measured from its padding edge, with a dotted parent outline and a
   short marker on a Center axis; flow children and top-level frames have none.
+  Every selected layer otherwise shows its parent dotted, the same dots,
+  when all selected layers share that parent; a parent that is the frame's own
+  edge, Option/Alt measuring, inline text editing and playback show none.
+  Holding ⌘ (Ctrl elsewhere) while hovering reveals structure: the hovered
+  layer keeps its solid hover outline, and its parent and direct children
+  (`previewGeometry` with children, up to 64) are dotted. Boxes already
+  stroked (selected layers, the selection's dotted parent) are not drawn
+  again; the modifier is read from every key and pointer event, dropped on
+  blur, and ignored while a gesture holds the pointer or another tool is
+  active.
 - **Theme:** the Base/named-mode token editor is persistent, draggable, and
   non-modal. It neither traps focus nor blocks canvas, Layers, or inspector.
   Theme state belongs to the workspace, not an element. A mode override resets
