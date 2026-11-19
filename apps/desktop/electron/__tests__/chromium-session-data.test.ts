@@ -72,7 +72,7 @@ describe("Chromium session data before ready", () => {
       expect(first.switches).toEqual([["disk-cache-size", String(250 * 1024 * 1024)]]);
       expect(fs.readFileSync(path.join(target, "Local Storage", "leveldb", "000003.log"), "utf8")).toBe("draft");
       expect(fs.existsSync(path.join(target, ".zeros-session-migrated"))).toBe(true);
-      expect(fs.existsSync(path.join(old, "Local Storage", "leveldb", "000003.log"))).toBe(true);
+      expect(fs.readFileSync(path.join(old, "Local Storage", "leveldb", "000003.log"), "utf8")).toBe("draft");
       fs.writeFileSync(path.join(old, "Local Storage", "leveldb", "000003.log"), "newer");
       relocate({ cacheRoot, identity: id, channel });
       expect(fs.readFileSync(path.join(target, "Local Storage", "leveldb", "000003.log"), "utf8")).toBe("draft");

@@ -18,6 +18,12 @@ const activeLockTokens = new Set();
  * never blocks (a FIFO in its place) and never follows a link; anything but a
  * regular file throws. */
 export function readRegularFile(file) {
+  return readRegularFileWithStat(file)?.raw ?? null;
+}
+
+/** readRegularFile, with the metadata of the same descriptor the text was read
+ * from, so an age or inode never describes a different file. */
+function readRegularFileWithStat(file) {
   let fd;
   try {
     fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0) | (fs.constants.O_NONBLOCK ?? 0));
@@ -26,8 +32,9 @@ export function readRegularFile(file) {
     throw error;
   }
   try {
-    if (!fs.fstatSync(fd).isFile()) throw Object.assign(new Error(`${file} is not a regular file`), { code: "ENOTREG" });
-    return fs.readFileSync(fd, "utf8");
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile()) throw Object.assign(new Error(`${file} is not a regular file`), { code: "ENOTREG" });
+    return { raw: fs.readFileSync(fd, "utf8"), stat };
   } finally {
     fs.closeSync(fd);
   }
@@ -93,21 +100,15 @@ export function acquireExclusiveLock({
   const token = randomUUID();
   const body = JSON.stringify({ ...record, pid: process.pid, token, at: Date.now() });
   const read = () => {
-    const raw = readRegularFile(file);
-    if (raw === null) return null;
+    const held = readRegularFileWithStat(file);
+    if (held === null) return null;
     let owner = null;
     try {
-      owner = JSON.parse(raw);
+      owner = JSON.parse(held.raw);
     } catch {
       owner = null;
     }
-    let stat = null;
-    try {
-      stat = fs.statSync(file);
-    } catch {
-      stat = null;
-    }
-    return { raw, owner, stat };
+    return { raw: held.raw, owner, stat: held.stat };
   };
   acquire: for (let attempt = 0; attempt < 3; attempt++) {
     const temporary = path.join(directory, `${stem}-${token}.tmp`);
@@ -146,13 +147,20 @@ export function acquireExclusiveLock({
       } catch (error) {
         if (error.code !== "EEXIST") throw error;
         try {
-          const abandoned = fs.lstatSync(recovery);
-          // A fence whose recorded owner is alive is never abandoned.
-          // An unusable fence (not a regular file) is never read or removed.
-          if (!abandoned.isFile()) break;
+          // A fence whose recorded owner is alive is never abandoned. An
+          // unusable fence (a link, not a regular file, unreadable) is never
+          // read further or removed.
+          let fence;
+          try {
+            fence = readRegularFileWithStat(recovery);
+          } catch {
+            break;
+          }
+          if (fence === null) continue;
+          const abandoned = fence.stat;
           let fenceOwner = null;
           try {
-            fenceOwner = JSON.parse(readRegularFile(recovery) ?? "null")?.pid ?? null;
+            fenceOwner = JSON.parse(fence.raw)?.pid ?? null;
           } catch {
             fenceOwner = null;
           }

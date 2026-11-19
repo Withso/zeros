@@ -259,6 +259,18 @@ describe("launcher lock", () => {
     }
   });
 
+  it("keeps a registry lock whose owner cannot be read until it is old", () => {
+    const h = home(), file = registryPath({ ...at, home: h });
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(`${file}.lock`, "{half-written");
+    expect(() => updateRegistry(file, () => {}, { timeoutMs: 0 })).toThrow(/busy/);
+    expect(fs.readFileSync(`${file}.lock`, "utf8")).toBe("{half-written");
+    const old = new Date(Date.now() - 10 * 60_000);
+    fs.utimesSync(`${file}.lock`, old, old);
+    updateRegistry(file, () => {}, { timeoutMs: 0 });
+    expect(exists(`${file}.lock`)).toBe(false);
+  });
+
   it("treats a live launcher as live when its command line cannot be read", () => {
     const classify = launcherOwnerClassifier("electron-local.mjs", "incomplete", "invalid", {
       readCommand: () => { throw new Error("ps unavailable"); },

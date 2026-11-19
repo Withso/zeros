@@ -30,16 +30,33 @@ type Group = { category: string; identity: string; status: string | null; holds:
   items: Array<{ path: string; bytes: number; readable: boolean }> };
 const find = (groups: Group[], category: string, identity: string) => groups.find((g) => g.category === category && g.identity === identity);
 
-/** Every path, its type, bytes and mtime, so a run can be proved read-only. */
+/** Every path, its type, bytes and mtime, so a run can be proved read-only.
+ * Each entry is read through the one descriptor it was opened as. */
 function snapshot(root: string) {
   const out: Record<string, string> = {};
   const walk = (dir: string) => {
     for (const name of fs.readdirSync(dir)) {
       const target = path.join(dir, name);
-      const stat = fs.lstatSync(target);
-      out[path.relative(root, target)] = stat.isSymbolicLink() ? `link:${fs.readlinkSync(target)}`
-        : stat.isDirectory() ? `dir:${stat.mtimeMs}` : `file:${stat.mtimeMs}:${fs.readFileSync(target).toString("base64")}`;
-      if (stat.isDirectory()) walk(target);
+      const key = path.relative(root, target);
+      let fd: number;
+      try {
+        fd = fs.openSync(target, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ELOOP") throw error;
+        out[key] = `link:${fs.readlinkSync(target)}`;
+        continue;
+      }
+      let directory = false;
+      try {
+        const stat = fs.fstatSync(fd);
+        directory = stat.isDirectory();
+        out[key] = directory ? `dir:${stat.mtimeMs}`
+          : stat.isFile() ? `file:${stat.mtimeMs}:${fs.readFileSync(fd).toString("base64")}`
+          : `other:${stat.mode}:${stat.mtimeMs}`;
+      } finally {
+        fs.closeSync(fd);
+      }
+      if (directory) walk(target);
     }
   };
   walk(root);
