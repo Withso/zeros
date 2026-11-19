@@ -1,12 +1,4 @@
-// The control-plane requests this app sends and the parsers it applies to the
-// replies. Its JSON form is committed as
-// apps/control-plane/src/client-contracts/desktop-next.json; each release keeps
-// a copy, and the control plane replays every kept copy so a backend change
-// cannot break an app that is still supported.
-//
-// Entries reuse the exact schemas and headers their call sites use. Paths take
-// {organizationId}, {workspaceId} and {chatId} placeholders that the replay fills
-// from its fixture.
+// The control plane replays desktop-next.json and each kept release's copy of the app's request headers and reply schemas.
 import { z } from "zod";
 import {
   CloudV2ComputerReplySchema,
@@ -65,10 +57,7 @@ export const CONTROL_PLANE_CONTRACT: readonly ContractEntry[] = [
   },
 ];
 
-/** The committed JSON form. Replies are checked against the parser's INPUT
- * schema: what the released app accepts. Refinements and transforms that JSON
- * Schema cannot express are left out, which can miss a break but never invents
- * one. */
+// Export what the app accepts, not transformed output. Omitted rules can hide a break, not invent one.
 export function controlPlaneContractDocument() {
   return {
     version: 1,

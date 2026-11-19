@@ -49,7 +49,7 @@ describe("local commands in the renderer", () => {
     respond({ macs: [mac] });
     expect(await listWorkspaceMacs(ws)).toEqual([mac]);
     expect(fetches[0]!.url).toBe(`https://api.example.test/v1/cloud-v2/workspaces/${ws}/macs`);
-    // Order 3: the list asks for `syncing`; a control plane that sends it only then keeps released desktops' strict parse.
+    // Only opt-in replies may include syncing; released desktops parse the older shape strictly.
     expect(new Headers(fetches[0]!.init.headers).get("x-zeros-sync")).toBe("1");
     respond({ macs: [{ ...mac, syncing: true }] });
     expect(await listWorkspaceMacs(ws)).toEqual([{ ...mac, syncing: true }]);

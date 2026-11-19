@@ -2,8 +2,7 @@ import { useSyncExternalStore } from "react";
 import { WORKSPACE_SYNC_STATUS_EVENT, type WorkspaceSyncStatus } from "../../../shared/workspace-sync";
 import { isElectron, nativeInvoke, nativeListen } from "./runtime";
 
-/** Order 3: this Mac's sync statuses, as main publishes them. The renderer
- * never sees a folder path; main owns the folder, the files and the panel. */
+/** Main chooses and validates sync folders; the renderer does not supply a path. */
 let statuses: readonly WorkspaceSyncStatus[] = [];
 const listeners = new Set<() => void>();
 let started: Promise<() => void> | null = null;
@@ -32,6 +31,7 @@ export function startWorkspaceSyncStatus(): () => void {
     let events = 0;
     started = nativeListen<unknown>(WORKSPACE_SYNC_STATUS_EVENT, next => { if (current === generation) { events++; accept(next); } }).then(stop => {
       if (current !== generation) { stop(); return () => {}; }
+      // Do not overwrite a live event with the status snapshot that raced it.
       const seen = events;
       void nativeInvoke<unknown>("workspace_sync_statuses").then(next => { if (current === generation && events === seen) accept(next); }, () => {});
       return stop;
@@ -54,26 +54,25 @@ export function useWorkspaceSyncStatus(workspaceId: string | null): WorkspaceSyn
 export type ChooseSyncResult = { ok: true } | { ok: false; reason: string };
 export const chooseWorkspaceSyncFolder = (workspaceId: string) => nativeInvoke<ChooseSyncResult>("workspace_sync_choose", { workspaceId });
 export const stopWorkspaceSync = (workspaceId: string) => nativeInvoke<boolean>("workspace_sync_stop", { workspaceId });
-/** 12.z: the switch on, in <channel folder>/cloud-sync/<repository>/<workspace> (~/zeros-alpha on Alpha; main builds and checks the folder). */
+/** Main builds and validates this workspace's folder under the channel's cloud-sync directory. */
 export const enableWorkspaceSync = (workspaceId: string, labels: { repository: string; workspace: string }) =>
   nativeInvoke<ChooseSyncResult>("workspace_sync_enable", { workspaceId, ...labels });
 export const revealWorkspaceSyncFolder = (workspaceId: string) => nativeInvoke<boolean>("workspace_sync_reveal", { workspaceId });
-/** 12.z: another of this person's Macs should (not) sync this workspace. */
+/** Change desired sync on another Mac; that device chooses its own folder. */
 export const setWorkspaceSyncWanted = (workspaceId: string, deviceId: string, wanted: boolean) =>
   nativeInvoke<{ ok: boolean; reason?: string }>("workspace_sync_set_wanted", { workspaceId, deviceId, wanted });
 export const openWorkspaceSyncTerminal = (workspaceId: string) => nativeInvoke<boolean>("workspace_sync_open_terminal", { workspaceId });
 
-/** The popup's words for a status (Off is no status). */
 export function workspaceSyncLabel(status: WorkspaceSyncStatus): string {
   if (status.state === "syncing") return status.files ? `Syncing (${status.files} ${status.files === 1 ? "file" : "files"})` : "Syncing";
   if (status.state === "in_sync") {
-    // Files are in step; a clone that could not update says so (Git LFS is not handled in v1).
+    // Mirrored files can be current while Git history is still pending.
     const git = status.reason === "git_missing" ? " · Git not installed" : status.reason === "git_failed" ? " · Git history pending" : "";
     return `${status.problems ? `In sync · ${status.problems} not mirrored` : "In sync"}${git}`;
   }
-  // Running but not reachable is not asleep: its own words while main retries (with a growing wait).
+  // Unreachable is retryable and does not imply the VM is asleep.
   if (status.state === "paused") return status.reason === "unreachable" ? "Can't reach the workspace, retrying" : "Paused (workspace asleep)";
-  // Team sharing: this person lost access; nothing retries and the folder's files stay.
+  // Access revocation ends retries but leaves existing local files intact.
   if (status.state === "error" && status.reason === "access_revoked") return "Stopped: you no longer have access";
   return `Error (${SYNC_REASONS[status.reason ?? ""] ?? "sync failed"})`;
 }
@@ -83,7 +82,6 @@ const SYNC_REASONS: Record<string, string> = {
   folder_unsafe_root: "folder not usable", write_failed: "could not write files", not_connected: "connect this Mac",
   unreachable: "can't reach the workspace",
 };
-/** Why a chosen folder was refused, for a toast. */
 export const SYNC_CHOOSE_ERRORS: Record<string, string> = {
   not_empty: "Choose an empty folder, or this workspace's earlier sync folder.", other_workspace: "That folder syncs another workspace.",
   not_directory: "That folder is not available.", unsafe_root: "That folder can't be used for sync.", unavailable: "Sync isn't available in this version.",

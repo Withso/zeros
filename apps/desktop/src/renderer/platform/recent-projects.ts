@@ -1,15 +1,3 @@
-// ──────────────────────────────────────────────────────────
-// Recent projects list
-// ──────────────────────────────────────────────────────────
-//
-// Stored in apps/desktop/src/renderer/platform/settings.ts (localStorage under "zeros-recent-
-// projects-v1"). The "Workspace Manager" dropdown in Repository panel reads
-// this list; every time the user opens a folder, we upsert + bump
-// `lastOpened` so the list stays most-recent-first.
-//
-// Entries are bounded to RECENT_LIMIT so the list never grows
-// unboundedly if the user bounces between folders all day.
-// ──────────────────────────────────────────────────────────
 
 import { getSetting, setSetting } from "./settings";
 

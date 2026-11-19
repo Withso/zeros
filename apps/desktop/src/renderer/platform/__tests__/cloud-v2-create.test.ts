@@ -67,8 +67,7 @@ describe("cloud v2 create", () => {
     await expect(createCloudWorkspaceDocument({ organizationId, idempotencyKey: "rejected-intent",
       repository: { owner: "Example", name: "Fixture" }, baseBranch: "missing/topic" })).rejects.toMatchObject({ status, code, message });
   });
-  // The worker runs `git switch -c <branch> origin/<baseBranch>`, so a full
-  // ref such as refs/heads/main can never be checked out.
+  // The worker prepends origin/; a full refs/heads/ name cannot work here.
   it("sends the repository slug and a plain base branch with the caller's idempotency key", async () => {
     const fetch = vi.fn(async (_url: string, _init?: RequestInit) => Response.json({ workspace: workspace("feature/ui") }, { status: 201 }));
     vi.stubGlobal("fetch", fetch);

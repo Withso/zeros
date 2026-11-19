@@ -110,8 +110,7 @@ export function useNativeAppIcon(
   return useCachedArtwork(resource, nativeBundleId(bundleId), active);
 }
 
-/** The installed app's name, or null until Launch Services answers or when
- * the app is not installed. */
+/** Launch Services supplies the installed app name; null means pending or unavailable. */
 export function useNativeAppName(
   bundleId: string | undefined,
   active: boolean,
