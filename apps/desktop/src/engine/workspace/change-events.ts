@@ -1,13 +1,4 @@
-// ──────────────────────────────────────────────────────────
-// Workspace operation → live-data invalidation classifier
-// ──────────────────────────────────────────────────────────
-//
-// Successful bridge mutations are published to the other connected clients as
-// DB_CHANGED. Filesystem watchers still cover terminal/agent/external writes;
-// this map closes the immediate cross-window/device path for engine operations,
-// including local-only lifecycle commands that are intentionally absent from
-// the remote write allowlist.
-// ──────────────────────────────────────────────────────────
+// DB_CHANGED covers engine mutations, including Local-only operations; filesystem watchers cover out-of-band writes.
 
 const CHAT_MUTATIONS = new Set([
   "chats.setComposerMode",
@@ -42,15 +33,12 @@ const SETTINGS_MUTATIONS = new Set([
 ]);
 
 const WORKSPACE_MUTATIONS = new Set([
-  // Workspace metadata, worktree lifecycle, and local-main Git bootstrap.
   "workspace.create",
   "workspace.setStatus",
-  // Legacy presentation receipt; opening the Design tab no longer flips it.
   "workspace.setMode",
   "workspace.setRemoteRestricted",
   "workspace.reassignLocalOrganization",
-  // Rewrites the worktree — folders appear/disappear on disk — so every
-  // file-list and git-status consumer has to re-read.
+  // Changing working directories rewrites the checkout; refresh file lists and Git status.
   "workspace.setWorkingDirectories",
   "workspace.archive",
   "workspace.restore",
@@ -62,9 +50,7 @@ const WORKSPACE_MUTATIONS = new Set([
   "workspace.adoptExisting",
   "workspace.proposeBranchName",
   "workspace.continueOnNewBranch",
-  // First-party design document writes. These mutate tracked files or the
-  // app-owned canvas document, so every preview/lint consumer must advance in
-  // the same exact workspace generation as Files and Changes.
+  // Design writes invalidate the same workspace generation used by Files and Changes.
   "design.frame.create",
   "design.page.create",
   "design.page.rename",
@@ -98,7 +84,6 @@ const WORKSPACE_MUTATIONS = new Set([
   "detach.start",
   "detach.stop",
 
-  // Working tree, index, refs, branches, tags, and remotes.
   "git.stage",
   "git.unstage",
   "git.discard",
@@ -130,7 +115,6 @@ const WORKSPACE_MUTATIONS = new Set([
   "git.tagCreate",
   "git.tagDelete",
 
-  // GitHub operations can change PR/Review metadata or initialize/push a repo.
   "gh.publishRepo",
   "gh.prCreate",
   "gh.prUpdate",
@@ -140,40 +124,20 @@ const WORKSPACE_MUTATIONS = new Set([
   "gh.prRerunFailed",
   "gh.prSync",
 
-  // Turn restore changes both files and the transcript. Message invalidation is
-  // emitted separately with its exact chat id by the engine.
+  // Turn reset and undo emit a separate messages event scoped to the affected chat.
   "turns.reset",
   "turns.undoReset",
 
-  // Files-tab manual save changes content and its Git comparisons.
   "file.write",
 
-  // Context-graph writes: scaffolding the folder skeleton. No-op results are
-  // suppressed in dbChangedKinds so an idempotent re-scaffold doesn't
-  // broadcast a global refresh.
   "context.graph.scaffold",
 ]);
 
-/** Ops whose RPC can legitimately outlive the renderer's request budget. Two
- *  families: worktree lifecycle (network fetch + full checkout / snapshot +
- *  eviction) and network-bound git/GitHub writes (push/pull/fetch/rebase and
- *  the PR create/ready/merge calls — a slow remote or the GitHub API can blow
- *  past even the raised 60s renderer budget). For these the DB_CHANGED
- *  broadcast must INCLUDE the originator: its promise may already have
- *  rejected with "Request timeout" while the engine finished the work, and
- *  without the broadcast nothing tells it the result is real (the created row,
- *  the merged PR) — e.g. a >60s "Merge PR" showed "Couldn't merge PR" and left
- *  a stale card even though GitHub merged it. */
+/** These RPCs can complete after the renderer times out; echo DB_CHANGED to refresh the caller anyway. */
 export const LONG_LIFECYCLE_OPS = new Set([
 
-  // Worktree lifecycle.
-  // Unlinks or materializes every file in the affected folders, so it can run
-  // for many seconds. Listed here so the DB_CHANGED goes to the ORIGINATOR
-  // too: if its request times out, that client is otherwise the only one left
-  // with a stale tree for a change it made itself.
   "workspace.setWorkingDirectories",
-  // Mode switch may initialize/commit Design files and dissolve a legacy cone
-  // (materializing folders), so retain the lifecycle request budget.
+  // Entering Design can initialize a draft; leaving can rematerialize a legacy sparse checkout.
   "workspace.setMode",
   "workspace.create",
   "workspace.createFromBranch",
@@ -183,7 +147,6 @@ export const LONG_LIFECYCLE_OPS = new Set([
   "workspace.archive",
   "workspace.continueOnNewBranch",
 
-  // Network-bound git/GitHub state changes.
   "git.push",
   "git.pull",
   "git.fetch",
@@ -191,59 +154,32 @@ export const LONG_LIFECYCLE_OPS = new Set([
   "gh.prCreate",
   "gh.prMarkReady",
   "gh.prMerge",
-  // Discovery also persists PR metadata. A late response must still refresh
-  // the requesting window after its finite bridge deadline has expired.
+  // PR discovery can persist metadata after the caller times out.
   "gh.prSync",
   "project.reconcileGithubRemote",
 ]);
 
-/** Should the DB_CHANGED broadcast reach the client that CAUSED it?
- *
- *  Normally no — the originator already applied the change locally, so echoing
- *  it back is a wasted refetch. Two families are exceptions:
- *
- *    • LONG_LIFECYCLE_OPS, whose RPC can outlive the renderer's request budget
- *      (see the comment on that set);
- *    • settings writes, because "already applied locally" is only half true.
- *      The write's own result carries the LAYER document, which the renderer
- *      caches — but the RESOLVED tree is a different document merged from four
- *      layers, and nothing in the response describes it. Without the echo the
- *      writer's own `useResolvedSettings` stayed stale until the settings
- *      file-watcher's 3-second poll broadcast to everyone anyway (see
- *      settings/watch.ts POLL_INTERVAL_MS). Settings → Git is where that
- *      showed: its radio group renders `checked` off the resolved tree, so a
- *      click did nothing at all for three seconds and read as a frozen pane.
- *      Every `pick(resolved, …)` provenance tag on the repo settings pages had
- *      the same lag more quietly. Echoing costs one small resolve the poll was
- *      going to force moments later regardless. */
+/** Normally skip the caller's refetch. Settings writes need an echo because the response carries the layer, not resolved settings. */
 export function dbChangedIncludesOriginator(op: string, result?: unknown): boolean {
   return (
-    // The writer saved a chat, not its workspace's new title: only the engine
-    // knows the workspace adopted the chat's name.
+    // The engine can rename a workspace as a side effect of the chat save.
     (CHAT_MUTATIONS.has(op) && chatMutationTitledWorkspaces(result).length > 0) ||
     CODE_REVIEW_MUTATIONS.has(op) ||
     LONG_LIFECYCLE_OPS.has(op) ||
     SETTINGS_MUTATIONS.has(op) ||
-    // Re-adding a removed repo reconciles its old workspace visibility in the
-    // engine. The optimistic renderer registry cannot know the outcome.
+    // Re-adding a repo can reconcile old workspace visibility outside the optimistic state.
     op === "project.upsert" ||
     op === "project.bulkUpsert" ||
     op === "chats.setComposerMode" ||
-    // Initialization primes the Design receipt, but the caller's retained
-    // Files/Changes caches still describe the checkout before those files
-    // existed. Refresh them through the same exact-workspace event as peers.
+    // Design initialization can add files not present in the caller's retained Files and Changes caches.
     op === "design.initialize" ||
-    // The Design surface does not own a Git-status cache to update
-    // optimistically. Echo its index checkpoint so a retained Code/Changes
-    // surface immediately re-reads staged state.
+    // Design does not update the retained Code view's Git-status cache.
     op === "design.stage" ||
-    // This maintenance op has no optimistic renderer mutation; the desktop
-    // that requested it must refresh its workspace collections too.
+    // Ownership reassignment has no optimistic renderer update.
     op === "workspace.reassignLocalOrganization"
   );
 }
 
-/** Workspaces a chat save named (they took the chat's first title). */
 export function chatMutationTitledWorkspaces(result: unknown): string[] {
   const ids = result && typeof result === "object"
     ? (result as { workspaceIds?: unknown }).workspaceIds
@@ -251,7 +187,6 @@ export function chatMutationTitledWorkspaces(result: unknown): string[] {
   return Array.isArray(ids) ? ids.filter((id): id is string => typeof id === "string" && id.length > 0) : [];
 }
 
-/** Which renderer server-state collections a successful operation changed. */
 export function dbChangedKinds(op: string, result?: unknown): string[] | null {
   if (CODE_REVIEW_MUTATIONS.has(op)) return ["codeReview"];
   if (op === "design.transaction.apply" && result && typeof result === "object" &&
@@ -264,21 +199,16 @@ export function dbChangedKinds(op: string, result?: unknown): string[] | null {
   if (op === "project.upsert" || op === "project.bulkUpsert") return ["projects", "workspaces"];
   if (PROJECT_MUTATIONS.has(op)) return ["projects"];
   if (SETTINGS_MUTATIONS.has(op)) return ["settings"];
-  // Restore can adapt to a sibling path. The engine rebinds every exact and
-  // descendant chat folder in the same durable operation, so peers must refresh
-  // chats as well as the workspace row or they keep spawning against the old
-  // missing cwd.
+  // Recovery can rebind exact and descendant chat folders to a sibling path; peers must refresh both collections.
   if (op === "workspace.restore" || op === "workspace.recover" || op === "workspace.locate") return ["workspaces", "chats"];
-  // Design registration changes affect main-checkout Git state and private
-  // selection, so both collections re-read.
+  // Design registration changes affect both main-checkout Git state and private selection.
   if (
     op === "design.renameDirectory" ||
     op === "design.adoptDirectory" ||
     op === "design.removeDirectory"
   )
     return ["workspaces", "settings"];
-  // The periodic PR detector is a read until it actually finds and persists a
-  // PR. Avoid turning a once-per-minute null probe into a global Git refresh.
+  // Periodic PR discovery should invalidate only when it actually persists a PR.
   if (op === "gh.prSync" && result == null) return null;
   if (
     op === "workspace.reassignLocalOrganization" &&
@@ -288,8 +218,6 @@ export function dbChangedKinds(op: string, result?: unknown): string[] | null {
   ) {
     return null;
   }
-  // An idempotent re-scaffold that changed nothing on disk doesn't
-  // invalidate anything.
   if (
     op === "context.graph.scaffold" &&
     !!result &&

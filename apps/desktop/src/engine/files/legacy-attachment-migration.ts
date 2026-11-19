@@ -1,18 +1,4 @@
-// ──────────────────────────────────────────────────────────
-// Legacy transcript image externalization
-// ──────────────────────────────────────────────────────────
-//
-// Two layouts predate the context graph: full data URLs in transcript JSON and
-// disk references under `.context/attachments/<chat>/`. Window reads migrate
-// only the rows being opened: copy each unique image once into the workspace
-// graph, replace both transcript copies with the same stable record id/path,
-// and upsert the compact payload. A failed copy leaves the old reference intact
-// so the chat remains viewable/editable.
-//
-// Current records share the chat layout's flat shape
-// (`.context/attachments/<attachmentId>/`). A flat reference is current only
-// when its folder is the reference's own attachment id.
-// ──────────────────────────────────────────────────────────
+// Older transcripts store inline image data or flat chat-folder paths. A flat path is current only when its folder matches the attachment ID; keep the original reference if migration fails.
 
 import { createHash } from "node:crypto";
 import path from "node:path";
@@ -42,11 +28,9 @@ interface MigratedImage {
 }
 
 const ID_OK = /^[a-zA-Z0-9_-]{1,128}$/;
-/** A persisted reference in the flat shape; tool payloads that merely mention
- *  an attachment path don't match the field name. */
+/** Match the persisted field, not incidental attachment paths in tool text. */
 const FLAT_DISK_PATH_FIELD = /"diskPath"\s*:\s*"\.context\/attachments\//;
 
-/** Cheap raw-payload gate shared with the window handlers. */
 export function payloadNeedsLegacyImageMigration(payload: string): boolean {
   return (
     (payload.includes('"thumbnailUri"') && payload.includes("data:image/")) ||
@@ -84,14 +68,11 @@ function imageRefs(message: Record<string, unknown>): LegacyImageRef[] {
   return refs;
 }
 
-/** Externalize legacy image data in a transcript window and persist successful
- * rewrites. Rows without legacy images retain their original references. */
 export async function externalizeLegacyMessageImages(args: {
   cwd: string;
   chatId: string;
   rows: PersistedMessage[];
-  /** Cloud reads must not rewrite rows from a retired or changed snapshot
-   * after attachment I/O. Local callers retain their existing behavior. */
+  /** If supplied, revalidate the snapshot after attachment I/O and before writing rows. */
   assertCurrent?: () => void;
 }): Promise<PersistedMessage[]> {
   if (!path.isAbsolute(args.cwd) || args.rows.length === 0) return args.rows;
@@ -99,9 +80,7 @@ export async function externalizeLegacyMessageImages(args: {
   const result: PersistedMessage[] = [];
 
   for (const row of args.rows) {
-    // The common path is every newly-written message. Avoid JSON.parse over
-    // large tool payloads unless the raw row can actually contain a legacy
-    // image URI.
+    // Avoid parsing large tool payloads on the normal transcript read path.
     if (!payloadNeedsLegacyImageMigration(row.payload)) {
       result.push(row);
       continue;
@@ -139,7 +118,6 @@ export async function externalizeLegacyMessageImages(args: {
         continue;
       }
 
-      // Anything else in the flat shape is a pre-graph chat folder.
       const legacyDiskPath =
         parsed && !parsed.scope ? (ref.diskPath as string) : null;
       const inline = dataUrlParts(ref.thumbnailUri);

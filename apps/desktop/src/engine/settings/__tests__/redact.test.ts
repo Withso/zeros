@@ -11,8 +11,7 @@ describe("redactDocForRemote — MCP secret masking for relay clients", () => {
             name: "tracker",
             transport: "http",
             url: "https://mcp.tracker.example/mcp",
-            // auth:"none" → the gateway is bypassed, so this Authorization is the
-            // ONLY credential and must never reach a paired remote in cleartext.
+            // With auth = "none", the user-supplied header can be the server's only credential.
             headers: { Authorization: "Bearer sk-secret-123", "X-Org": "acme" },
           },
           {
@@ -36,7 +35,6 @@ describe("redactDocForRemote — MCP secret masking for relay clients", () => {
       API_KEY: REDACTED_SENTINEL,
       DEBUG: REDACTED_SENTINEL,
     });
-    // Names + coordinates stay visible (the UI still shows which server exists).
     expect(out.mcp.servers[0]!).toMatchObject({ name: "tracker", url: "https://mcp.tracker.example/mcp" });
   });
 

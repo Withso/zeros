@@ -1,27 +1,4 @@
-// ──────────────────────────────────────────────────────────
-// context-graph — the workspace's `.context/` folder
-// ──────────────────────────────────────────────────────────
-//
-// Context writes create `.context/` when needed. Workspace creation and reads
-// leave the repository untouched, and Zeros writes no ignore rules: whether
-// `.context/` is committed is the repository's own choice.
-// `.context-graph/` migrates without overwriting files.
-//
-//   .context/
-//     attachments/<attachmentId>/<file>   composer attachments, one folder each
-//     <task>/…                            agents' working files ("docs")
-//     local/, shared/                     scopes written by earlier builds:
-//                                         listed, archived, never created
-//
-// Owner-only and dot-prefixed top-level entries are private tool state. They
-// are neither listed nor swept into archive snapshots.
-//
-// This module is the ONE implementation, shared by the engine bridge ops
-// (context.graph.*) and the electron attachment-write IPC — mirroring how
-// read-file.ts serves both transports. List never throws; mutations return
-// structured results. All paths are lexically confined + realpath-checked so
-// a hostile id or a symlinked graph directory cannot escape the workspace.
-// ──────────────────────────────────────────────────────────
+// Only writes scaffold .context/; the repository owns its ignore rules. Migration preserves conflicting legacy files.
 
 import fs from "node:fs/promises";
 import { constants as fsConstants, type Dirent } from "node:fs";
@@ -53,18 +30,14 @@ const RESERVED_ROOT_ENTRIES = new Set([
   CONTEXT_GRAPH_SHARED,
 ]);
 
-/** Same id alphabet the composer generates and the attachment IPC enforces. */
+/** Keep this alphabet aligned with composer-generated IDs and attachment IPC validation. */
 const ID_OK = /^[a-zA-Z0-9_-]{1,128}$/;
-/** Legacy single-call base64 ceiling. New 500 MB imports use the chunked
- * transfer path; never raise this limit to fit a whole file in one frame.
- * Check the encoded ceiling before allocating a Buffer. */
+/** Legacy single-frame base64 limit; reject oversized encoded input before allocating the Buffer. */
 export const MAX_CONTEXT_GRAPH_ATTACHMENT_BYTES = 5 * 1024 * 1024;
 const MAX_CONTEXT_GRAPH_ATTACHMENT_BASE64_CHARS =
   Math.ceil(MAX_CONTEXT_GRAPH_ATTACHMENT_BYTES / 3) * 4;
 
-// Listing bounds. The canvas is a bounded surface, not a file manager: cap the
-// walk so a graph someone filled with a node_modules-scale tree cannot wedge
-// the engine or flood the wire.
+// Bound canvas listing work; archive discovery must not use these limits.
 const MAX_ITEMS = 400;
 const MAX_DIR_ENTRIES = 2_000;
 const MAX_DEPTH = 6;
@@ -84,8 +57,7 @@ const IMAGE_EXTS = new Set([
 ]);
 const MARKDOWN_EXTS = new Set([".md", ".mdx", ".markdown"]);
 
-/** Wire compatibility: everything Zeros writes now reports `local`; `shared`
- *  marks only records an earlier build's share action moved. */
+/** Wire compatibility: `shared` identifies records moved by the old share action; new records use `local`. */
 export type ContextGraphScope = "local" | "shared";
 export type ContextGraphCategory = "attachment" | "doc";
 export type ContextGraphKind = "image" | "markdown" | "text" | "other";
@@ -93,35 +65,30 @@ export type ContextGraphKind = "image" | "markdown" | "text" | "other";
 export interface ContextGraphItem {
   /** Workspace-relative POSIX path (starts with `.context/` or legacy `.context-graph/`). */
   relPath: string;
-  /** File basename, shown as the card title. */
   name: string;
   scope: ContextGraphScope;
   category: ContextGraphCategory;
   kind: ContextGraphKind;
   bytes: number;
   mtimeMs: number;
-  /** Metadata-change time makes thumbnail revisions exact across rapid,
-   *  same-size atomic replacements. Additive for older renderer clients. */
+  /** Additive wire field for filesystem metadata-change time, independent of mtime. */
   ctimeMs: number;
-  /** The `<attachmentId>` folder for attachment items. */
+  /** Persisted attachment-folder ID, not the filename. */
   attachmentId?: string;
-  /** First ~480 chars for text/markdown cards, so the canvas renders previews
-   *  without one read round-trip per card. */
+  /** Inline preview avoids one read per canvas card. */
   previewText?: string;
 }
 
 export interface ContextGraphListResult {
-  /** False when neither context directory exists yet (canvas empty state). */
   exists: boolean;
   items: ContextGraphItem[];
-  /** True when the walk hit a bound and the canvas is showing a subset. */
+  /** An item or depth limit stopped the canvas walk early. */
   truncated: boolean;
 }
 
 export interface ContextGraphScaffoldResult {
   ok: boolean;
-  /** True when this call created anything (drives DB_CHANGED suppression for
-   *  the common already-scaffolded case). */
+  /** Report false for a no-op scaffold so callers can suppress DB_CHANGED. */
   created: boolean;
   error?: string;
 }
@@ -133,14 +100,11 @@ function graphRoot(
   return path.join(workspaceRoot, directory);
 }
 
-/** A symlinked context directory (or scope dir) must not let graph operations
- *  read or move files outside the workspace. Best-effort realpath containment:
- *  a not-yet-existing path passes (its parent is checked by creation calls). */
+/** Check realpath containment, including creation targets whose nearest existing ancestor is checked. */
 async function isConfined(target: string, root: string): Promise<boolean> {
   const rootReal = await fs.realpath(root).catch(() => null);
   if (!rootReal) return false;
   let probe = target;
-  // Walk up to the nearest existing ancestor so mkdir targets are checkable.
   for (;;) {
     try {
       const real = await fs.realpath(probe);
@@ -153,8 +117,6 @@ async function isConfined(target: string, root: string): Promise<boolean> {
   }
 }
 
-/** Create `.context/attachments/`. Idempotent and quiet: repeated calls report
- *  `created: false` so callers can skip change broadcasts. */
 const scaffolds = new Map<string, Promise<ContextGraphScaffoldResult>>();
 
 export function ensureContextGraph(
@@ -218,8 +180,7 @@ function kindForName(name: string): ContextGraphKind {
   return "other";
 }
 
-/** First PREVIEW_CHARS of a text-like file, reading at most one small chunk.
- *  Control characters (a mis-labelled binary) degrade to no preview. */
+/** Skip previews containing NULs so mislabelled binary files do not render as text. */
 async function readPreview(absPath: string): Promise<string | undefined> {
   let handle: fs.FileHandle | null = null;
   try {
@@ -285,7 +246,6 @@ async function readDirBounded(absDir: string, limit = MAX_DIR_ENTRIES) {
   return entries.slice(0, limit);
 }
 
-/** Collect one level of id folders under `attachmentsAbs`, files directly inside. */
 async function walkAttachments(
   state: WalkState,
   workspaceRoot: string,
@@ -315,8 +275,6 @@ async function walkAttachments(
   }
 }
 
-/** Collect every file below `absDir` as a doc. `skip` applies to the first
- *  level only. Deterministic order: readdir order per level, bounded. */
 async function walkDocs(
   state: WalkState,
   absDir: string,
@@ -345,7 +303,6 @@ async function walkDocs(
   }
 }
 
-/** First-level names an earlier build's scope reserves for its own records. */
 function scopeReservedEntry(
   directory: string,
   scope: ContextGraphScope,
@@ -357,8 +314,6 @@ function scopeReservedEntry(
       name === CONTEXT_MIGRATION_STATE);
 }
 
-/** Walk one scope written by an earlier build. Attachments are collected with
- *  their folder id; everything else in the scope is a "doc". */
 async function walkScope(
   state: WalkState,
   workspaceRoot: string,
@@ -394,9 +349,7 @@ interface ContextEntry {
   directory: boolean;
 }
 
-/** Top-level `.context/` entries holding agents' working files. Dot-prefixed
- *  and owner-only entries are private tool state (device bindings,
- *  credentials); symlinks are never followed. */
+/** Dot-prefixed and owner-only top-level entries are private tool state, excluded from public listing and archive selection. */
 async function workspaceContextEntries(
   workspaceRoot: string,
   limit = MAX_DIR_ENTRIES,
@@ -414,17 +367,14 @@ async function workspaceContextEntries(
   return entries;
 }
 
-/** Everything in the workspace's `.context/`. Sorted oldest-first by mtime
- *  (ties by path) so the listing is stable: new items take the next free slot
- *  instead of reshuffling. */
+/** Sort by mtime and path so newer entries do not reshuffle existing cards. */
 export async function listContextGraph(
   workspaceRoot: string,
 ): Promise<ContextGraphListResult> {
   try {
     const state: WalkState = { items: [], truncated: false };
     let exists = false;
-    // Read-only compatibility also keeps unmigrated/conflicting legacy files
-    // visible. Scaffold and mutations own migration, never this read path.
+    // Keep unmigrated legacy records visible without writing on the list path.
     for (const directory of [CONTEXT_GRAPH_DIR, LEGACY_CONTEXT_DIR]) {
       const root = graphRoot(workspaceRoot, directory);
       const stat = await fs.lstat(root).catch(() => null);
@@ -464,15 +414,11 @@ export interface ContextGraphStageResult {
   absolutePath?: string;
   relativePath?: string;
   bytes?: number;
-  /** True when the target already held these bytes and nothing was written —
-   *  keeps the card's mtime (and so its canvas slot) stable across the
-   *  attach-time write and the send-time safety-net re-write. */
+  /** Skip only after comparing bytes and rechecking file identity, preserving the canvas slot for a retry. */
   skipped?: boolean;
   error?: string;
 }
 
-/** Read and compare through one no-follow handle. A stable inode check keeps a
- * concurrent replacement from being mistaken for the bytes we inspected. */
 type AttachmentContents = Buffer | { file: fs.FileHandle; length: number; verify?: () => Promise<void> };
 
 async function readAttachmentChunk(contents: AttachmentContents, offset: number): Promise<Buffer> {
@@ -518,9 +464,7 @@ async function existingFileMatches(
   }
 }
 
-/** Stage outside the public graph scopes and rename into place. Rename replaces a
- * symlink entry itself instead of following it, eliminating the lstat/write
- * race at the predictable attachment filename. */
+/** Stage outside public graph scopes and publish by rename without following a destination symlink. */
 async function atomicWriteAttachment(
   filePath: string,
   contents: AttachmentContents,
@@ -564,8 +508,7 @@ async function atomicWriteAttachment(
       ) {
         throw err;
       }
-      // A directory may contain user data. Refuse instead of recursively
-      // deleting a collision during an attachment write.
+      // Do not delete a directory collision; it may contain user data.
       throw new Error("An attachment path is occupied by a directory.");
     }
   } finally {
@@ -576,22 +519,11 @@ async function atomicWriteAttachment(
   }
 }
 
-/** Strip directory parts, replace shell-hostile characters, cap the length.
- *  The one filename sanitiser for attachment writes — the IPC used to own a
- *  copy; it lives here so every writer and every test agree on the layout. */
+/** Use the shared protocol sanitizer so all attachment writers preserve the same filename contract. */
 import { safeAttachmentFilename } from "@zeros/protocol/attachment-policy";
 export { safeAttachmentFilename } from "@zeros/protocol/attachment-policy";
 
-/** Write one attachment's bytes into the graph — the composer's attach-time
- *  staging AND the send path's safety net, so it must be idempotent:
- *
- *    • The folder is `attachments/<attachmentId>/`. A record an earlier build
- *      wrote under `shared/` or `local/` keeps its folder, so a re-write
- *      never leaves a second copy next to the paths saved chats point at.
- *    • An existing file is left alone only after its bytes compare equal, so
- *      re-writes don't bump mtime while an external same-size edit is repaired.
- *
- *  Never throws; callers get a structured result like the other mutations. */
+/** Reuse persisted legacy folders so attach/send retries do not duplicate files that existing chats reference. */
 export async function stageContextGraphAttachment(
   workspaceRoot: string,
   args: { attachmentId: string; base64: string; filename: string },
@@ -615,8 +547,7 @@ export async function stageContextGraphAttachment(
   return stageAttachmentContents(workspaceRoot, args, buf);
 }
 
-/** Internal, engine-owned upload handle. Never accepts a renderer-supplied
- * source path. Chunks and completed copies stay bounded in memory. */
+/** Accept only an engine-owned source handle; renderer-supplied source paths are not trusted. */
 export async function stageContextGraphAttachmentFile(
   workspaceRoot: string,
   args: { attachmentId: string; filename: string; file: fs.FileHandle; size: number; verify?: () => Promise<void> },
@@ -668,8 +599,7 @@ async function stageAttachmentContents(
     }
     const safeName = safeAttachmentFilename(args.filename);
     const finalPath = path.join(dir, safeName);
-    // Belt: ID_OK + safeAttachmentFilename already make this true; the check
-    // protects against future regressions letting `..` through.
+    // Keep an independent containment check even if the ID or filename rules change.
     if (!finalPath.startsWith(dir + path.sep)) {
       return {
         ok: false,
@@ -696,14 +626,9 @@ async function stageAttachmentContents(
   }
 }
 
-// There is deliberately no per-attachment delete: the graph is append-only
-// from the app (2026-08-03(3)) — staged records outlive the composer chip,
-// the queued message, and the send that carried them. Files leave the graph
-// only when the user deletes them on disk.
+// Attachments outlive the composer and queued message; the app has no per-attachment delete here.
 
-/** True when the graph holds anything worth preserving (any file beyond its
- *  own scaffolding). Gates the archive force-add so an empty skeleton doesn't
- *  make a clean-tree archive stricter than it is today. */
+/** A bare scaffold must not make a clean-tree archive force-add context files. */
 export async function contextGraphHasContent(
   workspaceRoot: string,
 ): Promise<boolean> {
@@ -715,10 +640,7 @@ export async function contextGraphHasContent(
   );
 }
 
-/** Archive attachments, agents' working files and earlier builds' scopes.
- * Private tool state at the top of `.context/` is excluded: a snapshot cannot
- * restore its permissions. Old archives and workspaces can still contain the
- * complete legacy graph root. */
+/** Exclude private top-level tool state because snapshots cannot restore its permissions; retain legacy roots. */
 export async function contextGraphArchivePaths(
   workspaceRoot: string,
 ): Promise<string[]> {
@@ -782,8 +704,7 @@ async function docsHaveContent(
   absDir: string,
   skip: (name: string) => boolean = () => false,
 ): Promise<boolean> {
-  // Archive eligibility must inspect beyond the UI's depth/entry limits:
-  // an omitted ignored file would disappear when the worktree is removed.
+  // Archive discovery must exceed canvas limits or ignored files may be lost with the worktree.
   for (const entry of await readDirBounded(absDir, Infinity)) {
     if (skip(entry.name)) continue;
     if (entry.isDirectory()) {

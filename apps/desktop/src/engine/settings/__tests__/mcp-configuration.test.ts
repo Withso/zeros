@@ -135,8 +135,7 @@ describe("MCP credential transaction", () => {
     await entered;
     const rotated = { access_token: "rotated-fixture", refresh_token: "rotated-refresh", token_type: "Bearer" };
     const refresh = vault.exclusive(oauthKey, async () => { events.push("refresh"); vault.setTokens(oauthKey, rotated); });
-    // Let the already-enqueued refresh enter if the save failed to claim its
-    // credential lock; then acknowledge the held encrypted write.
+    // Give an unguarded refresh a turn before releasing the held write.
     await Promise.resolve();
     release();
     await Promise.all([save, refresh]);

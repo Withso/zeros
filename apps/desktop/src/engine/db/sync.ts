@@ -1,26 +1,10 @@
-// ──────────────────────────────────────────────────────────
-// Sync primitives — global revision sequence and delete tombstones
-// ──────────────────────────────────────────────────────────
-//
-// The lower half of incremental delta sync: a single monotonic `rev` sequence
-// (sync_meta) that writers stamp onto rows, so a client can pull exactly the rows
-// with `rev > cursor`; and tombstones (sync_tombstones) so deletes — which leave
-// no row to pull — still propagate. `nextRev` hands out the sequence with a
-// single atomic UPDATE … RETURNING so correctness no longer rests on the
-// single-writer-per-file assumption: if a second engine ever opens the same
-// zeros.db, two UPDATE+separate-SELECT pairs could both read the same rev.
-// ──────────────────────────────────────────────────────────
 
 import { openZerosDb } from "./index";
 
-/** Entities that leave tombstones on delete. Extend as more tables join sync.
- *  "msgreset" = a chat whose transcript was cleared/truncated (the id is the
- *  chatId); a puller re-windows that chat to drop the removed tail. */
+/** Persisted kinds: msgreset stores the chat ID so pullers re-window a cleared or truncated transcript. */
 export type TombstoneKind = "chat" | "msgreset";
 
-/** Hand out the next global rev. A writer stamps the row's `rev` with this.
- *  Single statement (UPDATE … RETURNING) so the increment + read are atomic even
- *  if two writers race — no interleave between a separate UPDATE and SELECT. */
+/** Keep the increment and returned revision in one statement so concurrent writers cannot receive the same revision. */
 export function nextRev(): number {
   const db = openZerosDb();
   const row = db
@@ -40,8 +24,7 @@ export function headRev(): number {
   return row?.rev ?? 0;
 }
 
-/** Record (or bump) a delete tombstone so the delete propagates on the next pull.
- *  Call inside the same transaction that removes the row. */
+/** Record the tombstone in the deletion transaction so a pull cannot lose the delete. */
 export function recordTombstone(kind: TombstoneKind, id: string): number {
   const db = openZerosDb();
   const rev = nextRev();
@@ -51,15 +34,13 @@ export function recordTombstone(kind: TombstoneKind, id: string): number {
   return rev;
 }
 
-/** Drop a tombstone — call when a row of this id is (re)created, so a resurrected
- *  entity isn't deleted again by a stale tombstone on the next pull. */
+/** Clear on recreation so a stale tombstone cannot delete the restored row on pull. */
 export function clearTombstone(kind: TombstoneKind, id: string): void {
   openZerosDb()
     .prepare("DELETE FROM sync_tombstones WHERE kind = ? AND id = ?")
     .run(kind, id);
 }
 
-/** Tombstoned ids of a kind with rev > since (the deletes a client must apply). */
 export function tombstonesSince(kind: TombstoneKind, since: number): string[] {
   const rows = openZerosDb()
     .prepare(

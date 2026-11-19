@@ -2,9 +2,7 @@ import fs from "node:fs/promises";
 import { constants } from "node:fs";
 import path from "node:path";
 
-/** Old imports left a dedicated staging scaffold behind. Only an empty folder
- * or its exact generated ignore file is disposable. Unrecognized contents,
- * interrupted copies and links remain available for manual recovery. */
+/** Only an empty legacy staging folder or its exact generated ignore file is disposable. */
 export async function cleanupLegacyAttachmentStaging(
   contextRoot: string,
 ): Promise<void> {
@@ -40,8 +38,7 @@ export async function cleanupLegacyAttachmentStaging(
       handle = undefined;
       await fs.unlink(ignore);
     } else if (entries.length > 0) return;
-    // rmdir refuses anything added concurrently. Never recursively delete this
-    // repository path, even when it looks like an old app-owned staging area.
+    // Use rmdir so concurrent additions keep this repository folder from being deleted.
     const current = await fs.lstat(directory);
     if (current.dev === before.dev && current.ino === before.ino)
       await fs.rmdir(directory);

@@ -6,8 +6,7 @@ export interface ConversationContext {
   replayPending: boolean;
 }
 
-/** Kept out of ordinary chat upserts: only the engine can retire or acknowledge
- * native context. Generation also fences completions from before another reset. */
+/** Ordinary chat upserts leave native context alone; the generation prevents a stale replay from acknowledging a later reset. */
 export function getConversationContext(chatId: string): ConversationContext | null {
   const row = openZerosDb().prepare(
     "SELECT context_generation, context_replay_pending FROM chats WHERE id = ?",
@@ -15,8 +14,7 @@ export function getConversationContext(chatId: string): ConversationContext | nu
   return row ? { generation: row.context_generation, replayPending: row.context_replay_pending === 1 } : null;
 }
 
-/** Call in the same transaction as the transcript mutation. Old native
- * conversations remain at the provider but can no longer be resumed by this chat. */
+/** Reset native context in the same transaction as the transcript mutation. */
 export function resetConversationContext(chatId: string): void {
   openZerosDb().prepare(`
     UPDATE chats SET context_generation = context_generation + 1,

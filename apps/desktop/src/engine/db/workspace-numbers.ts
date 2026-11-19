@@ -1,21 +1,13 @@
-// Workspace numbers — `w-<n>`, permanent within each owner
-//
-// Each owner (an organization id, '' for Local) has one sequence in zeros.db
-// (migration 46). Numbers only move forward: deleting, archiving or failing to
-// create a workspace never returns its number. Creation announces `w-<n>`
-// before the row exists (prepare names the branch and folder from it), so the
-// number is reserved first and the row consumes that reservation when it is
-// inserted. Rows written without a number are numbered by the database.
+// Keep the Local w-<n> stable within its owner: prepare announces it before insert, and failed creation or deletion never returns it to the sequence.
 
 import type Database from "better-sqlite3";
 import { openZerosDb, zerosDbFile } from "./database";
 import { persistWorkspaceNumberFloor } from "./workspace-number-floor";
 
-/** An abandoned prepare stops holding its number after this; the number
- * itself is never handed out again. */
+/** A later allocation may drop an expired reservation; it never recycles the number. */
 export const WORKSPACE_NUMBER_RESERVATION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
-/** The sequence a workspace is numbered in: its organization, '' for Local. */
+/** SQLite uses the empty string as the persisted Personal owner key. */
 export function workspaceNumberOwner(organizationId: string | null | undefined): string {
   return organizationId?.trim() || "";
 }
@@ -30,8 +22,7 @@ function nextNumber(db: Database.Database, owner: string): number {
   ).last_number;
 }
 
-/** Hold the next number for a workspace about to be created. Idempotent for
- * the same workspace and owner, so a retried prepare keeps its number. */
+/** A retried prepare must reuse the reservation for the same workspace and owner. */
 export function reserveWorkspaceNumber(
   workspaceId: string,
   organizationId: string | null | undefined,
@@ -58,7 +49,6 @@ export function reserveWorkspaceNumber(
   return number;
 }
 
-/** The number reserved for this workspace in this owner, if any. */
 export function heldWorkspaceNumber(
   db: Database.Database,
   workspaceId: string,
@@ -70,7 +60,6 @@ export function heldWorkspaceNumber(
   return held?.number ?? null;
 }
 
-/** Is this number already a workspace's in this owner? */
 export function workspaceNumberTaken(
   db: Database.Database,
   organizationId: string | null | undefined,
@@ -81,8 +70,7 @@ export function workspaceNumberTaken(
     .get(workspaceNumberOwner(organizationId), number);
 }
 
-/** Give each row the next numbers of its (new) owner, in their prior order.
- * Owner repair moves rows between sequences; a number belongs to one owner. */
+/** Owner repair uses the destination sequence and preserves the caller's prior workspace order. */
 export function renumberWorkspaces(db: Database.Database, ids: readonly string[], organizationId: string | null): void {
   const owner = workspaceNumberOwner(organizationId);
   const assign = db.prepare("UPDATE workspaces SET number = ? WHERE id = ?");

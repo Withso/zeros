@@ -152,11 +152,6 @@ describe("dbChangedKinds", () => {
     "workspace.restore",
     "workspace.archive",
     "workspace.continueOnNewBranch",
-    // Network-bound git/GitHub writes: a slow remote or the GitHub API can
-    // outlive even the renderer's raised 60s budget. gh.prMerge was the
-    // motivating bug — a slow merge SUCCEEDED on GitHub but the originator saw
-    // "Couldn't merge PR" and a stale card because the completion broadcast
-    // excluded it.
     "git.push",
     "git.pull",
     "git.fetch",
@@ -167,10 +162,7 @@ describe("dbChangedKinds", () => {
   ])(
     "long lifecycle op %s broadcasts DB_CHANGED to the originator too",
     (op) => {
-      // These RPCs can outlive the renderer's request budget; the originator's
-      // promise may already have rejected, so the broadcast must include it.
       expect(LONG_LIFECYCLE_OPS.has(op)).toBe(true);
-      // Sanity: every long lifecycle op is also a workspace mutation.
       expect(dbChangedKinds(op)).toContain("workspaces");
     },
   );
@@ -184,7 +176,6 @@ describe("dbChangedKinds", () => {
 
   it("keeps LONG_LIFECYCLE_OPS a strict subset of workspace mutations", () => {
     for (const op of LONG_LIFECYCLE_OPS) {
-      // Discovery and remote repair publish only after changing metadata.
       const result = op === "gh.prSync" ? { number: 191 } : op === "project.reconcileGithubRemote" ? { changed: true } : undefined;
       expect(dbChangedKinds(op, result)).toContain("workspaces");
     }
@@ -201,13 +192,7 @@ describe("dbChangedIncludesOriginator", () => {
   it.each(["settings.write", "settings.writeRaw", "settings.migrateLegacy"])(
     "echoes %s back to the client that wrote it",
     (op) => {
-      // The writer keeps its own LAYER document (the write result carries it)
-      // but NOT the RESOLVED tree, which the engine merges from four layers and
-      // no response describes. Without the echo, the writer's own
-      // useResolvedSettings stayed stale until the settings file-watcher's 3s
-      // poll broadcast to everyone — which is what made Settings → Git read as
-      // a frozen pane: its radio renders `checked` off that tree, so a click
-      // did nothing at all for three seconds.
+      // The writer caches the changed layer, not the engine's resolved settings.
       expect(dbChangedIncludesOriginator(op)).toBe(true);
     },
   );
@@ -215,8 +200,6 @@ describe("dbChangedIncludesOriginator", () => {
   it.each([...LONG_LIFECYCLE_OPS])(
     "echoes the long-lifecycle op %s back too",
     (op) => {
-      // These can outlive the renderer's request budget, so the originator's
-      // promise may already have rejected while the work succeeded.
       expect(dbChangedIncludesOriginator(op)).toBe(true);
     },
   );

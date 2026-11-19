@@ -47,8 +47,7 @@ describe("mention filesystem index", () => {
     expect(
       await listMentionPaths(root, "wanted.jsonl", 1, "oversized"),
     ).toEqual(["wanted.jsonl"]);
-    // The same revision remembers that indexing is unsuitable and goes
-    // straight to one streaming search, rather than retrying the failed build.
+    // Exactly one additional read proves the failed build was not retried for this revision.
     expect(fs.readdir).toHaveBeenCalledTimes(3);
   });
 
