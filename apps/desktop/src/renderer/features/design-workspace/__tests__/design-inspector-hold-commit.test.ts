@@ -245,6 +245,21 @@ describe("a style commit that refits its frame", () => {
     expect(mocks.state.prepared).toBeNull();
   });
 
+  it("clears the canvas preview of every layer when a layout save fails", async () => {
+    const { connection } = arrangeFixture(2);
+    (mocks.applyEdit as unknown as { mockImplementationOnce: (fn: (...args: unknown[]) => Promise<never>) => void })
+      .mockImplementationOnce(async (_workspaceId, _frame, intent, _undo, options) => {
+      if (typeof intent === "function") await (intent as (input: { assertCurrent: () => void }) => Promise<unknown>)({ assertCurrent: () => {} });
+      await (options as { recover: (input: { assertCurrent: () => void }) => Promise<void> })
+        .recover({ assertCurrent: () => {} });
+      throw new Error("Save failed.");
+    });
+    await act(async () => {
+      await expect(mocks.editor.props!.onLayoutAction({ type: "center" })).rejects.toThrow("Save failed.");
+    });
+    expect((connection.clearPreviewStyles.mock.calls as unknown[][]).map(([nodeId]) => nodeId).sort()).toEqual(["child-0", "child-1", "root"]);
+  });
+
   it("does not measure an empty Arrange child batch", async () => {
     const { connection } = arrangeFixture(0);
     await act(async () => { await mocks.editor.props!.onLayoutAction({ type: "center" }); });

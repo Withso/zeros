@@ -2490,7 +2490,6 @@ export const DesignInspector = React.memo(function DesignInspector({
         styleNodeIds,
       };
       const intent = ++stylePreviewIntentRef.current;
-      let restorePreview: ((assertCurrent: () => void) => Promise<void>) | undefined;
       const previewedNodeIds = new Set<string>();
       const previewPublications = new Map<string, DesignLivePreviewPublication>();
       const historyOwner = captureDesignPageOwner(workspaceId);
@@ -2504,6 +2503,30 @@ export const DesignInspector = React.memo(function DesignInspector({
         stylePreviewIntentRef.current === intent &&
         currentStyleOwnerRef.current === styleOwner &&
         (pendingHistoryByOwnerRef.current.get(historyOwnerKey) ?? 0) === 0;
+      // A failed or skipped save must not leave its scrub painted on the canvas.
+      const restorePreview = async (checkCurrent: () => void): Promise<void> => {
+        const previewCurrent = () =>
+          stylePreviewIntentRef.current === intent && currentStyleOwnerRef.current === styleOwner;
+        if (!previewCurrent()) return;
+        await Promise.all([...new Set([...styleNodeIds, ...previewedNodeIds])].map(async (nodeId) => {
+          try {
+            checkCurrent();
+            if (!previewCurrent()) return;
+            const publication = previewPublications.get(nodeId);
+            if (publication) clearDesignLivePreview(workspaceId, capturedFrame.file, nodeId, publication);
+            const restored = await clearDesignNodeStylePreviewTransient({
+              workspaceId,
+              frame: capturedFrame.file,
+              sourceVersion: capturedFrame.sourceVersion,
+              nodeId,
+            });
+            checkCurrent();
+            if (previewCurrent()) paintDesignInspectorPreviewDetails(workspaceId, capturedFrame.file, restored);
+          } catch {
+            /* The runtime may have been replaced by a newer generation. */
+          }
+        }));
+      };
       return applyDesignEditCached(workspaceId, capturedFrame, async ({ assertCurrent }) => {
         assertCurrent();
         const { frame: currentFrame, runtime, assertFrameCurrent } =
@@ -2710,22 +2733,6 @@ export const DesignInspector = React.memo(function DesignInspector({
             "Select a smaller frame to arrange its children together.",
           );
         for (const nodeId of updates.keys()) previewedNodeIds.add(nodeId);
-        restorePreview = async (checkCurrent): Promise<void> => {
-          checkCurrent();
-          if (stylePreviewIntentRef.current !== intent || currentStyleOwnerRef.current !== styleOwner) return;
-          for (const nodeId of previewedNodeIds) {
-            if (stylePreviewIntentRef.current !== intent || currentStyleOwnerRef.current !== styleOwner) return;
-            checkCurrent();
-            const publication = previewPublications.get(nodeId);
-            if (publication)
-              clearDesignLivePreview(
-                workspaceId,
-                capturedFrame.file,
-                nodeId,
-                publication,
-              );
-          }
-        };
         const batch = [...updates].map(([nodeId, styles]) => ({
           nodeId,
           styles,
@@ -2758,7 +2765,7 @@ export const DesignInspector = React.memo(function DesignInspector({
           assertFrameCurrent();
           const measured = root && !held.blocked() ? root : null;
           if (!measured) {
-            if (stylePreviewIntentRef.current === intent) await restorePreview?.(assertFrameCurrent);
+            if (stylePreviewIntentRef.current === intent) await restorePreview(assertFrameCurrent);
             return null;
           }
           const current =
@@ -2790,7 +2797,7 @@ export const DesignInspector = React.memo(function DesignInspector({
           );
         // Nothing is persisted once a hold has met the edit.
         if (held.blocked()) {
-          if (stylePreviewIntentRef.current === intent) await restorePreview?.(assertFrameCurrent);
+          if (stylePreviewIntentRef.current === intent) await restorePreview(assertFrameCurrent);
           return null;
         }
         assertFrameCurrent();
@@ -2804,7 +2811,7 @@ export const DesignInspector = React.memo(function DesignInspector({
         };
       }, undefined, {
         recover: async ({ assertCurrent }) => {
-          await restorePreview?.(assertCurrent);
+          await restorePreview(assertCurrent);
         },
       }).then(() => {});
     },
