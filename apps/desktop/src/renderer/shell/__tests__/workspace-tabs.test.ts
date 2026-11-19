@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { cloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
 import type { Workspace } from "../../platform/git";
 import type { Project } from "../../state/projects-store";
 import {
@@ -76,6 +77,58 @@ describe("tab strip horizontal overflow", () => {
 });
 
 describe("repository workspace restoration", () => {
+  it("does not reuse a same-basename workspace from another repository root", () => {
+    const target = workspace("target", {
+      repoRoot: "/var/projects/left/same-name",
+      path: "/workspaces/left/target",
+      archivedAt: null,
+      createdAt: 100,
+    });
+    const other = workspace("other", {
+      repoRoot: "/projects/right/same-name",
+      path: "/workspaces/right/other",
+      archivedAt: null,
+      createdAt: 1,
+    });
+
+    expect(
+      resolveRepoWorkspaceDestination({
+        project: {
+          ...project,
+          repoRoot: "/private/var/projects/left/same-name",
+        },
+        rememberedFolder: null,
+        cachedWorkspaces: [target, other],
+      }),
+    ).toBe(target);
+  });
+
+  it("does not restore a remembered workspace from another repository root", () => {
+    const target = workspace("target", {
+      repoRoot: "/var/projects/left/same-name",
+      path: "/workspaces/left/target",
+      archivedAt: null,
+      createdAt: 100,
+    });
+    const foreign = workspace("foreign", {
+      repoRoot: "/projects/right/same-name",
+      path: "/workspaces/right/foreign",
+      archivedAt: null,
+      createdAt: 1,
+    });
+
+    expect(
+      resolveRepoWorkspaceDestination({
+        project: {
+          ...project,
+          repoRoot: "/private/var/projects/left/same-name",
+        },
+        rememberedFolder: foreign.path,
+        cachedWorkspaces: [foreign, target],
+      }),
+    ).toBe(target);
+  });
+
   it("never invents a root workspace for a fresh project, including a cold list", () => {
     for (const cachedWorkspaces of [undefined, []]) {
       expect(
@@ -292,6 +345,94 @@ describe("repository workspace restoration", () => {
 // primary checkout has no tab — the two drifting is what put an add into an
 // untabbed trunk chat.
 describe("leftmostLiveWorkspace", () => {
+  it("scopes before ordering and live filtering", () => {
+    const foreign = workspace("foreign", {
+      repoRoot: "/projects/right/same-name",
+      archivedAt: null,
+      createdAt: 1,
+    });
+    const older = workspace("older", {
+      repoRoot: "/var/projects/left/same-name",
+      archivedAt: null,
+      createdAt: 100,
+    });
+    const newer = workspace("newer", {
+      repoRoot: "/var/projects/left/same-name",
+      archivedAt: null,
+      createdAt: 300,
+    });
+    const archived = workspace("archived", {
+      repoRoot: "/var/projects/left/same-name",
+      createdAt: 1,
+    });
+    const missing = workspace("missing", {
+      repoRoot: "/var/projects/left/same-name",
+      archivedAt: null,
+      present: false,
+      createdAt: 2,
+    });
+
+    expect(
+      leftmostLiveWorkspace([foreign], "/private/var/projects/left/same-name"),
+    ).toBeNull();
+    expect(
+      leftmostLiveWorkspace(
+        [foreign, newer, missing, archived, older],
+        "/private/var/projects/left/same-name",
+      ),
+    ).toBe(older);
+  });
+
+  it("keeps cloud repository identity exact instead of falling back to Local", () => {
+    const target = {
+      organizationId: "11111111-1111-4111-8111-111111111111",
+      workspaceId: "22222222-2222-4222-8222-222222222222",
+    };
+    const foreign = {
+      organizationId: target.organizationId,
+      workspaceId: "33333333-3333-4333-8333-333333333333",
+    };
+    const targetRoot = cloudWorkspaceKey(target);
+    const foreignRoot = cloudWorkspaceKey(foreign);
+    const targetWorkspace = workspace("target", {
+      repoRoot: targetRoot,
+      path: targetRoot,
+      placement: "cloud",
+      organizationId: target.organizationId,
+      archivedAt: null,
+      createdAt: 100,
+    });
+    const foreignWorkspace = workspace("foreign", {
+      repoRoot: foreignRoot,
+      path: foreignRoot,
+      placement: "cloud",
+      organizationId: foreign.organizationId,
+      archivedAt: null,
+      createdAt: 1,
+    });
+
+    expect(
+      resolveRepoWorkspaceDestination({
+        project: { ...project, repoRoot: targetRoot, repoSlug: "cloud-target" },
+        rememberedFolder: foreignRoot,
+        cachedWorkspaces: [foreignWorkspace, targetWorkspace],
+      }),
+    ).toBe(targetWorkspace);
+  });
+
+  it("keeps legacy organization-local rows eligible for their matching root", () => {
+    const legacy = workspace("legacy", {
+      repoRoot: "/var/projects/left/same-name",
+      organizationId: "legacy_team_1",
+      placement: "local",
+      archivedAt: null,
+    });
+
+    expect(
+      leftmostLiveWorkspace([legacy], "/private/var/projects/left/same-name"),
+    ).toBe(legacy);
+  });
+
   it("returns the oldest live worktree, matching the tab strip's order", () => {
     // Engine order is newest-first; the strip is creation-ordered.
     const older = workspace("older", { archivedAt: null, createdAt: 100 });

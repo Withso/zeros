@@ -120,6 +120,22 @@ describe("repoNeedsFirstWorkspace — the auto-create-on-add guard", () => {
     expect(reloadWorkspacesFor).not.toHaveBeenCalled();
   });
 
+  it("needs a first workspace when the warm row belongs to another root", async () => {
+    peekWorkspacesFor.mockReturnValue([
+      workspace({
+        repoSlug: "same-name",
+        repoRoot: "/var/projects/left/same-name",
+      }),
+    ]);
+    expect(
+      await repoNeedsFirstWorkspace(
+        "same-name",
+        "/private/var/projects/right/same-name",
+      ),
+    ).toBe(true);
+    expect(reloadWorkspacesFor).not.toHaveBeenCalled();
+  });
+
   it("says yes for an all-archived repo", async () => {
     // Archiving the last workspace deliberately leaves the repo empty — but a
     // later re-add should still be allowed to fork a fresh one.

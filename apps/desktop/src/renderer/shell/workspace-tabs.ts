@@ -41,9 +41,17 @@ export interface WorkspaceFadeVisibility {
  * "not the trunk" means. */
 export function leftmostLiveWorkspace(
   cachedWorkspaces: readonly Workspace[] | undefined,
+  repoRoot?: string,
 ): Workspace | null {
   if (!cachedWorkspaces) return null;
-  const live = cachedWorkspaces.filter(
+  const scoped = repoRoot
+    ? cachedWorkspaces.filter(
+        (workspace) =>
+          normalizeProjectRoot(workspace.repoRoot) ===
+          normalizeProjectRoot(repoRoot),
+      )
+    : cachedWorkspaces;
+  const live = scoped.filter(
     (w) => w.archivedAt == null && w.present !== false,
   );
   return orderWorkspaceTabs(live)[0] ?? null;
@@ -61,9 +69,14 @@ export function resolveRepoWorkspaceDestination(args: {
   cachedWorkspaces: readonly Workspace[] | undefined;
 }): WorkspaceNavigationTarget | null {
   const { project, cachedWorkspaces } = args;
-  const accessibleCachedWorkspaces = cachedWorkspaces;
+  const accessibleCachedWorkspaces = cachedWorkspaces?.filter(
+    (workspace) =>
+      normalizeProjectRoot(workspace.repoRoot) ===
+      normalizeProjectRoot(project.repoRoot),
+  );
   const rememberedFolder = args.rememberedFolder;
-  if (!rememberedFolder) return leftmostLiveWorkspace(cachedWorkspaces);
+  if (!rememberedFolder)
+    return leftmostLiveWorkspace(accessibleCachedWorkspaces);
   const main = canRestoreFolderWorkspace(project)
     ? buildLocalMainWorkspace(project)
     : null;

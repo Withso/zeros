@@ -44,7 +44,7 @@ import {
   markWorkspaceSettling,
 } from "../state/pending-workspaces";
 import { pendingWorkspaceIdentity } from "../shared/lib/workspace-name";
-import type { Project } from "../state/projects-store";
+import { normalizeProjectRoot, type Project } from "../state/projects-store";
 import { spawnPreparedDefaultChat } from "../state/spawn-default-chat";
 import type { useWorkspaceDispatch } from "../state/store";
 import {
@@ -289,10 +289,18 @@ export async function createWorkspaceForProject(args: {
  *  just means clicking "+". */
 export async function repoNeedsFirstWorkspace(
   repoSlug: string,
+  repoRoot?: string,
 ): Promise<boolean> {
-  const noneLive = (rows: readonly { archivedAt: number | null }[]) =>
+  const normalizedRepoRoot = repoRoot
+    ? normalizeProjectRoot(repoRoot)
+    : undefined;
+  const noneLive = (
+    rows: readonly { archivedAt: number | null; repoRoot: string }[],
+  ) =>
     !rows.some(
       (row) =>
+        (!normalizedRepoRoot ||
+          normalizeProjectRoot(row.repoRoot) === normalizedRepoRoot) &&
         row.archivedAt == null &&
         (row as { kind?: "code" | "design" }).kind !== "design",
     );
