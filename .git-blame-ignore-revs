@@ -15,3 +15,4 @@ f81070b3829d85f8c208d08101f7c41ef02745f1 # Trim narration from eleven Design, ag
 fbb41482e3b95246228ba6437d8fbbc265648ee2 # Trim narration in Settings routing and terminal profiles (#1169)
 b17f04301ed3c64a246b5a46775d575536c3d0e2 # Trim comments around Settings feature gates (#1170)
 2242be6093120f5a954911b00adee907d582a513 # Trim comments in agent and provider settings (#1171)
+238da07f193851502286d3299d5f51e2b33b3fad # Trim redundant comments across Settings (#1179)

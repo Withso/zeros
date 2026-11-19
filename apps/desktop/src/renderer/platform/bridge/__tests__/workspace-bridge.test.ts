@@ -47,8 +47,6 @@ import { clearTeamStore } from "../../../features/team/team-store";
 import { subscribeCloudPromptErasure } from "../../cloud-prompt-erasure";
 import { cloudScopedId, cloudWorkspaceKey } from "../cloud-workspace-key";
 
-/** Minimal RuntimeClient stand-in: request() returns a canned message and
- *  records the outgoing op so we can assert the wire shape. */
 function fakeBridge(resp: unknown, seen: { op?: string; type?: string } = {}) {
   return {
     request: async (msg: { type: string; op?: string }) => {
@@ -743,8 +741,6 @@ describe("workspace archive / restore bridge", () => {
 });
 
 describe("git/gh write timeouts", () => {
-  /** Like fakeBridge, but also captures the timeout passed to request() so we
-   *  can pin each write helper's budget. */
   function timeoutBridge(
     op: string,
     result: unknown,
@@ -761,9 +757,7 @@ describe("git/gh write timeouts", () => {
     } as unknown as RuntimeClient;
   }
 
-  // Network-bound writes (push/pull/fetch/rebase + PR create/ready/merge) used
-  // to ride the 10s workspaceOp default: a slow GitHub merge rejected with
-  // "Request timeout" → "Couldn't merge PR" even though the merge landed.
+  // A network timeout can hide a successful mutation, so these writes use a separate budget.
   it.each([
     [
       "git.push",
@@ -817,8 +811,7 @@ describe("git/gh write timeouts", () => {
     expect(seen.timeoutMs).toBe(60_000);
   });
 
-  // Local index writes never touch the network, but a huge working tree or
-  // hook-heavy repo can outlive the 10s default — 30s is plenty.
+  // Large checkouts or local hooks can exceed the ordinary request budget without touching the network.
   it.each([
     [
       "git.commit",

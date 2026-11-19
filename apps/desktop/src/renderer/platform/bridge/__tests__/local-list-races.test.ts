@@ -32,8 +32,7 @@ it.each(["chats.list", "workspace.list"] as const)(
           const failure = await pending;
           expect(failure).toMatchObject({ kind: "lifecycle-superseded", stage: "loadSession" });
           expect(bindFailureWasSuperseded(failure as ReturnType<typeof classifyRpcError>)).toBe(true);
-          // The next bind can obtain fresh ownership; the retired response is
-          // neither cached nor mistaken for confirmed emptiness.
+          // The retired response must neither populate the cache nor confirm emptiness.
           request.mockResolvedValue({ type: "WORKSPACE_RESPONSE", op,
             result: { [field]: [{ id: "current", folder, path: folder }] } } as never);
           expect(await read()).toMatchObject({ result: { [field]: [{ id: "current" }] } });
@@ -206,8 +205,7 @@ it.each([
       expect(pending[confirmation]).toBe(false);
       finishNew(response([]) as never);
       await flush();
-      // A cloud publication consumes the retained aggregate while its own Local
-      // completion notification must not invalidate or queue a fourth read.
+      // Publishing the retained aggregate must not invalidate its own Local read and queue a fourth request.
       expect(request).toHaveBeenCalledTimes(3);
     } finally {
       bridge.dispose();

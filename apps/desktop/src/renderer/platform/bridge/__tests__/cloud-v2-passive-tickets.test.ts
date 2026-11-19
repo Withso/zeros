@@ -88,10 +88,8 @@ describe("cloud v2 connection tickets", () => {
       const { controller, opening, refresh } = await openThenCancel(wake ? { wake } : {});
       expect(mocks.connect).toHaveBeenLastCalledWith(target, { wake: wake === true, signal: expect.any(AbortSignal), clientInstance: expect.stringMatching(/^[0-9a-f-]{36}$/) });
       const instance = mocks.connect.mock.calls.at(-1)![1].clientInstance;
-      // A laptop wake, network drop or control-plane deploy reconnects with a
-      // fresh ticket; that must not restart a VM that idled to a stop.
+      // Transport recovery must leave a stopped VM stopped.
       await refresh();
-      // §14.7: a reconnect ticket carries the same peer's instance id.
       expect(mocks.connect).toHaveBeenLastCalledWith(target, { wake: false, signal: expect.any(AbortSignal), clientInstance: instance });
       controller.abort();
       await expect(opening).rejects.toThrow("cancelled");

@@ -16,10 +16,7 @@ type Entry = {
   stopIdentityListener: () => void;
 };
 
-/** Bounded, secret-free registry for renderer execution connections. It never
- * persists a descriptor and never keys by URL, token, display name, or current
- * selection. A generation/authority/engine rotation atomically rekeys the
- * client; a collision retires the ambiguous newcomer fail-closed. */
+/** Key by execution identity, never credentials or selection; rotate atomically and never persist descriptors. */
 export class RuntimeConnectionRegistry {
   private readonly entries = new Map<string, Entry>();
   private activeKey: string | null = null;
@@ -120,9 +117,7 @@ export class RuntimeConnectionRegistry {
     }
     const collision = this.entries.get(nextKey);
     if (collision && collision !== entry) {
-      // Two live clients claiming the same execution would let stale handlers
-      // mutate the wrong workspace. Retire the identity-changing client and
-      // retain the already-authoritative exact-key entry.
+      // Keep the authoritative entry; concurrent clients for this execution could deliver stale writes.
       this.remove(entry, true);
       return;
     }

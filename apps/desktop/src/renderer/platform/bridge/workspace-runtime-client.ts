@@ -26,11 +26,9 @@ import {
 type Message = Partial<BridgeMessage> & { type: string };
 const MAX_CLOUD_CONNECTIONS = 16;
 const MAX_RETIRED_SNAPSHOTS = 64;
-/** A peer open's history warm reuses a confirmed, un-invalidated chats.list this long (the catalog poll interval).
- * The lifecycle poll (warmHistoryWorkspace) keeps its own cadence. */
+/** Peer open may reuse a confirmed, uninvalidated list for the catalog poll interval; lifecycle polling keeps its own cadence. */
 export const WARM_LIST_REUSE_MS = 60_000;
-/** Launch confirms each list once; the selected workspace's warm on the catalog's
- * arrival a second later must not read it again. A later poll still does. */
+/** The selection warm at launch can reuse the initial list; later polls still revalidate it. */
 const PASSIVE_WARM_REUSE_MS = 5_000;
 /** Renderer-only refresh ownership; never sent to an engine. */
 export type ChatSnapshotRefresh = "all" | "local" | "retained" | readonly string[];
@@ -43,8 +41,7 @@ export interface CloudPeer {
   scope: CloudRuntimeScope;
   release: () => void;
   runtimeId?: string;
-  /** Native admission's exact generation; renderer-only, never inferred from
-   * a catalog update that can race the connection's final reply. */
+  /** Use native admission's generation, not a catalog update that can race its reply. */
   generation?: number;
 }
 export interface WorkspaceRuntimeOptions {
@@ -58,9 +55,7 @@ export interface WorkspaceRuntimeOptions {
   /** Complete catalog confirmation includes an authoritative empty list. */
   workspacesConfirmed?: () => boolean;
   canAccess?: (target: CloudWorkspaceTarget) => boolean;
-  /** Team sharing: a teammate's workspace this account only reads. It is never
-   * connected or woken; history comes from readHistory and live updates from
-   * the workspace's events stream. */
+  /** A teammate's read-only workspace uses history and events, never a worker connection or wake. */
   readOnly?: (target: CloudWorkspaceTarget) => boolean;
   /** A relay socket can outlive its worker. Reuse it only while the worker is
    * running; background requests must not wake it through that old socket. */
@@ -69,8 +64,7 @@ export interface WorkspaceRuntimeOptions {
    * always protected independently of this optional routing policy. */
   liveWork?: (target: CloudWorkspaceTarget) => boolean;
   manage?: (target: CloudWorkspaceTarget, op: string, params?: WireRecord) => Promise<WireRecord>;
-  /** Authorized database reads that do not require a worker connection. The
-   * mirror stores the worker's native rows, so they are scoped like its replies. */
+  /** The mirror returns native rows; apply the same workspace scoping as for worker replies. */
   readHistory?: (target: CloudWorkspaceTarget, op: string, params: WireRecord, options?: CloudHistoryReadOptions) => Promise<WireRecord>;
   /** The workspace's native checkout path, used to scope mirror rows before a
    * worker has confirmed it in this session. */
@@ -129,16 +123,13 @@ interface RefusedAdmission {
   error: CloudRuntimeAccessError;
 }
 
-/** One renderer protocol boundary, multiple independently owned connections.
- * Unscoped host operations remain local. Every cloud operation carries its
- * semantic owner, so focus changes cannot redirect an outstanding request.
- * Existing transcript/workbench consumers subscribe to this same client. */
 /** The control plane's closed temporary GitHub outcomes (github-availability.ts isGithubTemporary), read by shape. */
 function temporaryGithubFailure(error: unknown): boolean {
   const { status, code } = (error ?? {}) as { status?: unknown; code?: unknown };
   return typeof code === "string" && (status === 503 && code.startsWith("github_") || status === 429 && code === "github_rate_limited");
 }
 
+// Unscoped host operations stay Local; cloud requests carry their owner so focus changes cannot redirect them.
 export class WorkspaceRuntimeClient extends RuntimeClient {
   private readonly peers = new Map<string, PeerEntry>();
   private readonly opening = new Map<string, OpeningPeer>();
@@ -157,14 +148,13 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
   private accountEpoch = 0;
   private workspaceStatusListeners = new Map<string, Set<() => void>>();
   private closed = false;
-  /** §14.5: one quiet re-read per history key after a temporary GitHub verification failure, growing per failure. */
+  /** Allow one quiet retry per history key after temporary GitHub verification failures, backing off across failures. */
   private readonly historyRetries = new Map<string, { timer?: ReturnType<typeof setTimeout>; failures: number }>();
   private readonly history = new KeyedAsyncCache<WireRecord>({
     maxEntries: 64, maxWeight: 24 * 1024 * 1024,
     weightOf: value => JSON.stringify(value).length * 2,
   });
   private readonly historyWorkspaces = new Map<string, CloudWorkspaceTarget>();
-  /** Checkout roots confirmed by a worker's own workspace row. */
   private readonly confirmedRoots = new Map<string, string>();
   private readonly historyWarmups = new Map<string, Promise<WireRecord>>();
   private readonly historySources = new WeakMap<object, "worker" | "control-plane">();
@@ -183,8 +173,7 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
   constructor(private readonly routing: WorkspaceRuntimeOptions) {
     super({ kind: "local" });
     this.stopLocalStatus = super.onStatusChange(() => { this.localEpoch++; });
-    // Subscribe directly to the Local transport before consumer subscriptions.
-    // Renderer snapshot publications use emit(), so cannot invalidate themselves.
+    // Only transport events invalidate Local lists; renderer publications must not invalidate themselves.
     this.stopLocalChanges = super.on("DB_CHANGED", message => {
       const { kinds } = message as unknown as WireRecord;
       for (const entry of this.localLists.values())
@@ -192,9 +181,7 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     });
   }
 
-  /** An explicit Local navigation needs a fresh Local snapshot even when a
-   * warm cloud catalog lets ordinary aggregate reads publish early. These
-   * metadata reads never open or wake a cloud peer. */
+  /** Explicit Local navigation waits for fresh Local metadata; a warm cloud catalog is not a substitute. */
   requestLocalMetadata(op: "project.list" | "workspace.list" | "chats.list"): Promise<BridgeMessage> {
     if (this.executionIdentity.kind !== "local") {
       return Promise.reject(new Error("Local navigation requires the Local engine."));
@@ -230,9 +217,7 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     const epoch = this.localEpoch;
     entry.pendingEpoch = epoch;
     const flight = (async () => {
-      // Like KeyedAsyncCache's queued refresh, one shared flight owns the slot
-      // until the newest mutation is read. A burst queues one successor, and a
-      // later mutation during that successor can queue the following generation.
+      // One flight owns the slot until the latest mutation is read; each flight can queue just one successor.
       while (epoch === this.localEpoch && !this.closed) {
         const mutation = entry.mutation;
         try {
@@ -260,7 +245,6 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
       }
     })().finally(() => {
       if (entry.pending === flight) entry.pending = undefined;
-      // Bound inactive exact-key Local lists without discarding an active read.
       for (const [oldKey, old] of this.localLists) {
         if (this.localLists.size <= 64) break;
         if (oldKey !== key && !old.pending) this.localLists.delete(oldKey);
@@ -277,8 +261,7 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     const localEpoch = this.localEpoch;
     const catalogRows = this.routing.workspaces();
     if (catalogRows.length) this.sawCloudCatalog = true;
-    // Retain bounded ownership for injected/legacy catalogs with opaque slugs.
-    // Production slugs carry their backend independently of row membership.
+    // Legacy opaque slugs need remembered ownership; production slugs encode their backend.
     for (const row of catalogRows) if (typeof row.repoSlug === "string") {
       this.cloudRepositorySlugs.delete(row.repoSlug);
       this.cloudRepositorySlugs.add(row.repoSlug);
@@ -290,8 +273,7 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
       (!params.repoSlug || row.repoSlug === params.repoSlug) &&
       (!params.status || row.status === params.status) &&
       (params.archived === undefined || Boolean(row.archivedAt) === params.archived));
-    // An exact cloud repository listing is already confirmed by the catalog.
-    // Do not ask the Local engine about an organization-owned repository.
+    // A confirmed cloud listing never asks Local about an organization-owned repository.
     const cloudOnly = wire.op === "workspace.list" && typeof params.repoSlug === "string" &&
       (isCloudRepositorySlug(params.repoSlug) || this.cloudRepositorySlugs.has(params.repoSlug));
     if (cloudOnly && !catalogConfirmed && !catalogRows.some(row => row.repoSlug === params.repoSlug))
@@ -308,8 +290,7 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
         }) : [];
     const hasCloud = () => wire.op === "chats.list" ? this.confirmedCloudChats().size > 0 :
       (!params.repoSlug && catalogConfirmed) || cloudRows().length > 0;
-    // A warm snapshot publishes immediately; each cold backend publishes its
-    // own completion nudge. No cold Local read can block confirmed cloud data.
+    // Publish confirmed cloud data without waiting for a cold Local transport.
     if (!hasCloud() && !cloudOnly) {
       // Local-only reads preserve their awaited refresh contract. If cold
       // cloud peers are also loading, publish the first confirmed backend.
@@ -328,10 +309,7 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     }
     if (epoch !== this.accountEpoch || this.closed)
       throw Object.assign(new Error("Cloud account changed while loading conversations"), { code: "WORKSPACE_READ_SUPERSEDED" });
-    // Startup/reconnect retires the Local flight without confirming a result.
-    // Preserve that ownership cancellation so session reattachment retries
-    // silently instead of reporting a missing snapshot as a provider failure.
-    // Independently confirmed cloud data can still publish during Local boot.
+    // Local startup or reconnect is an ownership cancellation, not provider failure; independently confirmed cloud data may still publish.
     if (local && localEpoch !== this.localEpoch && !hasCloud())
       throw Object.assign(new Error("Local engine changed while loading the workspace snapshot"), { code: "WORKSPACE_READ_SUPERSEDED" });
     if (!local?.result && !hasCloud() && !cloudOnly)
@@ -339,9 +317,7 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     const result = local?.result ?? {};
     const confirmedLocal = !!local?.result && local.epoch === this.localEpoch &&
       local.confirmedMutation === local.mutation && !local.error;
-    // Retention is not a new authoritative response. Without another confirmed
-    // backend to publish, surface the failure so consumers retain their newer
-    // mutation receipts and retry instead of committing this older list.
+    // A retained list is not a new confirmation; preserve newer consumer mutation receipts by surfacing failure.
     if (!confirmedLocal && !hasCloud() && !cloudOnly)
       throw local?.error ?? new Error("Local workspace snapshot is not confirmed");
     if (wire.op === "workspace.list") return {
@@ -374,8 +350,7 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     const key = cloudWorkspaceKey(target);
     if (options?.intent) this.rememberHistoryIntent(target);
     if (options?.intent && !this.peers.has(key) && !this.opening.has(key)) {
-      // Speculation owns at most four sockets, and never evicts a selected or
-      // executing peer. A click promotes its in-flight connection synchronously.
+      // Speculation is capped and cannot evict selected or executing peers; a click synchronously promotes its pending connection.
       while (this.speculative.size >= 4) this.discardSpeculative(this.speculative.keys().next().value!);
       this.speculative.set(key, setTimeout(() => this.discardSpeculative(key), 15_000));
     } else if (!options?.intent) this.claimPeer(key);
@@ -402,8 +377,7 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     const cancel = () => controller.abort(options?.signal?.reason);
     options?.signal?.addEventListener("abort", cancel, { once: true });
     if (options?.signal?.aborted) cancel();
-    // Bound the whole intent, including native admission and retargeting N+1;
-    // compute progress never starts a fresh short deadline at each stage.
+    // Native admission and retargeting share one end-to-end intent budget.
     const safety = setTimeout(() => controller.abort(new Error("The cloud workspace is still starting after fifteen minutes. Try again when it is ready.")), 15 * 60_000);
     try { await this.openWorkspaceIntent(target, { signal: controller.signal, reason: options?.reason,
       wakeIntent: options?.wakeIntent ?? { id: crypto.randomUUID() } }); }
@@ -466,8 +440,7 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
       try { await open(); return; }
       catch (error) {
         const next = this.routing.wakeOwner?.(target);
-        // Admission for N can lose to N+1 or a rollback. Dispose the old peer and
-        // retarget the still-undispatched intent; never retry any command here.
+        // Retarget only undispatched intent after a replacement or rollback; never replay a submitted command.
         const admitted = error instanceof CloudAdmissionGenerationChangedError ? error.generation : undefined;
         // N -> N+1 -> N can finish at the original number while a late N+1
         // admission arrives. Retire it and re-admit; bound duplicate stale replies.
@@ -487,8 +460,7 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     await this.warmHistorySnapshot(target, PASSIVE_WARM_REUSE_MS);
   }
 
-  /** Team sharing: a reader's events stream said the workspace changed. Drop
-   * its cached history and tell open views to read again (no connection). */
+  /** Reader events invalidate mirrored history without opening a worker connection. */
   refreshHistoryWorkspace(target: CloudWorkspaceTarget): void {
     if (!this.routing.readHistory) return;
     this.invalidateHistory(target);
@@ -529,12 +501,10 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     if (pending) return pending;
     if (this.historyWarmups.size >= 32) return Promise.reject(new Error("Too many cloud history reads"));
     const before = this.history.peekSnapshot(historyKey).data;
-    // Census K: six of seven launch list reads came from peer opens, each re-reading a list confirmed a second earlier.
-    // A confirmed list that no change event has invalidated is still the server's answer (an unconfirmed one is re-read).
+    // An invalidation forces a re-read even inside the confirmed list's reuse window.
     const reuse = this.unconfirmedLists.has(historyKey) ? 0 : reuseMs;
     const flight = this.readHistory(target, "chats.list", {}, reuse).then(snapshot => {
-      // Catalog polling is not a database change. Repeated warm reads must not
-      // invalidate every retained transcript, file and Git surface.
+      // Polling unchanged catalog data must not invalidate retained workspace surfaces.
       if (snapshot !== before && this.history.peekSnapshot(historyKey).data === snapshot)
         this.changed(key, ["chats", "messages"]);
       return snapshot;
@@ -552,14 +522,12 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     return { ...target, root, engineWorkspaceId: target.workspaceId };
   }
 
-  /** The scoped chat's historyCache for the local transcript cache (one chats.list per workspace, never per chat). */
   async chatHistoryRevision(chatId: string): Promise<CloudCacheKnown | undefined> {
     const target = parseCloudScopedId(chatId);
     return target ? (await this.knownHistoryReady(target, "messages.window", { chatId }))?.known : undefined;
   }
 
-  /** At launch a restored transcript can be read before its workspace's chats.list: join (or start) that one read
-   * so every chat of the workspace revalidates against it. A failed list read leaves the normal path. */
+  /** At launch all restored chats join one workspace list read; on failure use the normal transcript read. */
   private async knownHistoryReady(target: CloudWorkspaceTarget, op: string, params: WireRecord): Promise<CloudHistoryReadOptions | undefined> {
     if (op !== "messages.window" || params.before !== undefined || typeof params.chatId !== "string" || !this.routing.readHistory) return undefined;
     const listKey = this.historyKey(target, "chats.list", {});
@@ -568,13 +536,11 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     return this.knownHistory(target, op, params);
   }
 
-  /** The chat's historyCache from the confirmed chats.list snapshot: the local transcript cache answers an unchanged
-   * chat without a read and continues a changed one once. Absent (N-1 control plane, no snapshot): the normal read. */
+  /** Confirmed list revisions let the local cache reuse or continue a transcript; older mirrors omit them and use the normal read. */
   private knownHistory(target: CloudWorkspaceTarget, op: string, params: WireRecord): CloudHistoryReadOptions | undefined {
     if (op !== "messages.window" || params.before !== undefined || typeof params.chatId !== "string") return undefined;
     const listKey = this.historyKey(target, "chats.list", {});
-    // An invalidated list (a change event) still paints, but its revisions may be behind the server's until a
-    // re-read succeeds; a failed re-read keeps it unconfirmed.
+    // An invalidated list can still paint but cannot prove transcript revisions until re-read.
     if (this.unconfirmedLists.has(listKey)) return undefined;
     const chats = this.history.peekSnapshot(listKey).data?.chats;
     const row = Array.isArray(chats) ? chats.find(chat => record(chat).id === params.chatId) : undefined;
@@ -596,14 +562,12 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     assertAccess();
     const key = cloudWorkspaceKey(target);
     const attached = this.peers.get(key);
-    // A connected worker has the newest history, including a turn still
-    // streaming; the control plane's mirror serves a stopped VM. Separate cache
-    // identities keep a cold mirror read from overwriting streamed text.
+    // Separate worker and mirror cache keys so a late mirror reply cannot overwrite live streamed history.
     const peer = attached && attached.identity === identity && !attached.retired && attached.client.status === "connected"
       ? attached : undefined;
     const rows = op === "chats.list" ? "chats" : op === "messages.search" ? "hits" : "messages";
     const cacheKey = this.historyKey(target, op, params) + (peer ? `\0runtime:${peer.runtimeId}` : "");
-    // §14.5: while a quiet retry is pending after a temporary GitHub failure, the kept transcript answers without a read.
+    // Serve the confirmed transcript during the quiet retry window.
     const kept = this.historyRetries.get(cacheKey)?.timer ? this.history.peekSnapshot(cacheKey).data : undefined;
     if (kept) return kept;
     let snapshot: WireRecord;
@@ -620,7 +584,6 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
           throw cloudHistoryReadError(response, "Could not read the current cloud transcript");
         result = record(cloudIncoming(peer.scope, response as unknown as WireRecord).result);
       } else {
-        // Translate exactly as for the worker: the mirror holds its native rows.
         const scope = this.mirrorScope(target);
         const native = record(cloudOutgoing(scope, { type: "WORKSPACE_REQUEST", op, params }).params);
         const known = await this.knownHistoryReady(target, op, params);
@@ -636,8 +599,7 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
       return result;
     }, { maxAgeMs: Math.max(reuseMs, (this.historyIntents.get(cacheKey) ?? -1) >= performance.now() ? 15_000 : 1000) }); }
     catch (error) {
-      // A temporary GitHub verification failure keeps the confirmed transcript and re-reads quietly; anything else
-      // (a refusal, no transcript yet) fails as before.
+      // Only a temporary GitHub verification failure can reuse a confirmed transcript and retry quietly.
       const confirmed = temporaryGithubFailure(error) ? this.history.peekSnapshot(cacheKey).data : undefined;
       if (!confirmed || this.closed) throw error;
       this.retryHistoryQuietly(cacheKey, () => this.readHistory(target, op, params));
@@ -645,15 +607,13 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     }
     if (!this.historyRetries.get(cacheKey)?.timer) this.historyRetries.delete(cacheKey);
     assertAccess();
-    // A cold mirror read may finish after the worker attaches; reuse that peer,
-    // never open or wake one to reconcile a passive history read.
+    // Prefer an already-connected worker after a late mirror reply; passive reads never open or wake one.
     const currentPeer = this.peers.get(key);
     if (!peer && currentPeer && currentPeer.identity === identity && !currentPeer.retired &&
         currentPeer.client.status === "connected")
       return this.readHistory(target, op, params);
     if (op === "chats.list") {
-      // Only a list read that started after the latest invalidation confirms it. (One in flight across an invalidation
-      // is followed by the shared cache's queued re-read.)
+      // Only a list read started after the latest invalidation can confirm it.
       if (listGeneration === this.listInvalidations) this.unconfirmedLists.delete(this.historyKey(target, op, params));
       this.historyWorkspaces.delete(key);
       this.historyWorkspaces.set(key, target);
@@ -683,8 +643,7 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     const prefix = `${cloudWorkspaceKey(target)}\0`;
     for (const key of this.history.keys()) if (key.startsWith(prefix)) this.history.invalidate(key);
     this.listInvalidations++;
-    // A marker guards a cached list; a workspace with no cached list has nothing stale (its next read loads first).
-    // Markers leave only with their snapshot, so they are bounded by the history cache, never evicted while stale.
+    // Invalidation markers live as long as their retained snapshots, never shorter.
     const listKey = this.historyKey(target, "chats.list", {});
     if (this.history.peekSnapshot(listKey).data !== undefined) this.unconfirmedLists.add(listKey);
     for (const marker of this.unconfirmedLists) if (this.history.peekSnapshot(marker).data === undefined) this.unconfirmedLists.delete(marker);
@@ -698,8 +657,7 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
       entry?.hasChatSnapshot === true);
   }
 
-  /** Existing current peer only. CP mirror revisions and disk cache cannot
-   * prove this native transcript lineage, and this never opens a connection. */
+  /** Only the current connected worker can prove native transcript lineage, not the mirror or disk cache. */
   hasCloudNativeTranscript(chatId: string, executionId: string | null | undefined, limit: number): boolean {
     const target = parseCloudScopedId(chatId);
     if (!target || this.closed || this.routing.canAccess && !this.routing.canAccess(target)) return false;
@@ -810,8 +768,7 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
           if (this.routing.readHistory && Array.isArray(wire.kinds) && wire.kinds.includes("chats"))
             void this.readChats(entry).then(() => this.changed(cloudWorkspaceKey(entry.scope))).catch(() => {});
         }
-        // An agent-wide exit on one engine cannot retire local or other cloud
-        // conversations that happen to use the same provider.
+        // Scope engine-wide exits to this peer so the same provider's other conversations survive.
         if (
           type === "AGENT_AGENT_EXITED" &&
           !wire.sessionId &&
@@ -843,8 +800,7 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     }
     const existing = this.peers.get(key);
     const connected = existing && existing.identity === identity && !existing.retired && existing.client.status === "connected";
-    // The catalog can still read "starting" after the worker this wake started
-    // reported ready; that connection is current, not an old socket to reuse.
+    // The worker from this wake can be ready before its catalog changes from starting.
     const ownWake = connected && !!existing.wakeOwner && this.routing.wakeOwner?.(target)?.lifecyclePending === true &&
       this.continuesWake(target, existing.wakeOwner);
     if (connected && (ownWake || (this.routing.canReuseForWork ? this.routing.canReuseForWork(target) : !wake))) {
@@ -853,14 +809,11 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     }
     if (this.closed)
       return Promise.reject(new Error("Workspace connections are closed"));
-    // A new passive consumer is not new authority. Retain typed terminal
-    // admission refusals across mirror/snapshot polls; explicit work may obtain
-    // fresh authority, and account/owner/generation changes retire the refusal.
+    // Passive reads cannot renew refused admission; explicit work or an authority identity change can.
     const refused = this.refusedAdmissions.get(key);
     if (refused?.identity !== identity) this.refusedAdmissions.delete(key);
     else if (!wake) return Promise.reject(refused.error);
-    // An opening owns one reservation through hydration, even after native
-    // admission returns a peer or its caller cancels before IPC settles.
+    // Keep admission charged through native settlement and hydration, even if a caller cancels.
     const live = [...this.peers.values()].filter(entry => !entry.retired && !entry.opening && entry !== existing);
     const atCapacity = live.length + this.ongoingOpens >= MAX_CLOUD_CONNECTIONS;
     const evicted = atCapacity ? live.filter(entry => !this.routing.liveWork?.(entry.scope))
@@ -873,10 +826,7 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
       );
     this.ongoingOpens++;
     if (evicted) this.retirePeer(evicted);
-    // A stopped/replaced engine can leave its old admission reconnecting.
-    // New work obtains fresh authority once per exact workspace. Preserve the
-    // confirmed snapshot while retiring its transport; never replay a request
-    // whose previous connection may already have executed it.
+    // Fresh work retires old admission without discarding its confirmed snapshot or replaying uncertain requests.
     if (existing) this.retirePeer(existing);
     const epoch = this.accountEpoch;
     const controller = new AbortController();
@@ -889,8 +839,7 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
       while (this.refusedAdmissions.size > 128)
         this.refusedAdmissions.delete(this.refusedAdmissions.keys().next().value!);
     };
-    // Publish durable history independently, including while admission/connect
-    // is slow. Keep this exact read for initial hydration even after its TTL.
+    // Publish durable history before admission settles and reuse this exact read for initial hydration.
     const history = this.routing.readHistory ? this.warmHistorySnapshot(target, WARM_LIST_REUSE_MS) : undefined;
     void history?.catch(() => {});
     let opening: Promise<CloudPeer>;
@@ -957,8 +906,7 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
             .then(() => this.changed(key))
             .catch(() => {});
         });
-        // Read before writes. A stale device boot cache cannot recreate a deleted
-        // chat or overwrite a newer title on its first cloud attachment.
+        // Read before first-attach writes so a stale boot cache cannot recreate a deletion or overwrite a newer title.
         try {
           await this.readChats(entry, history);
           if (controller.signal.aborted || epoch !== this.accountEpoch || identity !== this.identity(target))
@@ -1033,9 +981,7 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
       throw new Error("Cloud connection changed while the request was running");
   }
 
-  /** A settled timing conflict is safe to retry; mutations and uncertain
-   * transport failures are not. The shared history loader owns one sequence,
-   * with the original peer/restore fences and a single elapsed-time budget. */
+  /** Retry only acknowledged history conflicts, within the same elapsed budget and authority fences. */
   private async readNativeHistory(entry: PeerEntry, message: Message, options: number | RequestOptions = 5000): Promise<BridgeMessage> {
     const deadline = performance.now() + 8_000;
     const requestOptions = typeof options === "number" ? { timeoutMs: options } : options;
@@ -1131,8 +1077,7 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
         group.rows.push(chat);
         groups.set(key, group);
       }
-      // Each exact owner settles independently; a rejected cloud write must
-      // not prevent a local draft/title from being saved.
+      // Settle exact owners independently so a refused cloud write cannot block a Local save.
       const results = await Promise.allSettled(
         [...groups.values()].map(async ({ target, rows }) => {
           if (target) {
@@ -1208,8 +1153,7 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     const entry = this.peers.get(cloudWorkspaceKey(target));
     if (this.routing.canAccess && !this.routing.canAccess(target))
       throw new Error("Cloud workspace access changed");
-    // Decisions/Stop must never be replayed later by opening a different
-    // generation. The caller's ordinary disconnected-state recovery applies.
+    // Decisions and Stop must never open or replay into another generation.
     if (!entry || entry.client.status !== "connected")
       throw new Error(
         "Cloud workspace is disconnected; reconnect before sending this action",
@@ -1302,8 +1246,7 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     const current = this.routing.wakeOwner?.(target);
     if (!owner || !current || current.account !== owner.account || current.stopVersion !== owner.stopVersion ||
         current.generation < owner.generation && !current.lifecyclePending) return false;
-    // A complete upgrade/rollback cycle may finish at the original number.
-    // All waiters share these observed retargets, including native failures.
+    // Share observed retargets across waiters: an upgrade and rollback can end at the original generation.
     if (owner.generation !== current.generation) owner.retargetVersion = (owner.retargetVersion ?? 0) + 1;
     owner.generation = current.generation;
     return true;
