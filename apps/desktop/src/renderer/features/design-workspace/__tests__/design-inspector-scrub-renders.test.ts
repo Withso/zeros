@@ -111,7 +111,7 @@ import { TooltipProvider } from "../../../shared/ui/primitives";
 import { DesignInspector } from "../design-inspector";
 import { resetDesignRuntimeStoreForTests, useDesignRuntimeStore } from "../state/design-runtime-store";
 import { resetDesignHeldStateForTests } from "../state/design-held-state";
-import { resetDesignLivePreviewForTests, useDesignLivePreviewStore } from "../state/design-live-preview";
+import { designFrameGeometryLiveValue, publishDesignFrameGeometryLive, resetDesignLivePreviewForTests, useDesignLivePreviewStore } from "../state/design-live-preview";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 vi.stubGlobal("ResizeObserver", class { observe() {} unobserve() {} disconnect() {} });
@@ -166,6 +166,33 @@ async function show() {
       React.createElement(DesignInspector, {
         workspaceId: "w", folder: "/repo", frame, frameSelected: false, selectedNodeId: "card", selectedNodeIds: ["card"],
         details: card, lint: null, active: true, canvasBackground: "white", onCanvasBackgroundChange: () => {},
+        motionTimelineOpen: false, motionProperties: [], onOpenMotionTimeline: () => {}, zoomActionsRef: { current: null },
+      } as never)));
+  });
+  await act(async () => {});
+}
+
+async function showFrameOnlyMain() {
+  mocks.runtime.mockReturnValue({
+    sourceVersion,
+    supports: () => false,
+    previewStyles: vi.fn(async () => card),
+    clearPreviewStyles: vi.fn(async () => card),
+    getNodeDetails: vi.fn(async () => card),
+  });
+  const frame = {
+    file: "home.html", sourceVersion, title: "Home", x: 0, y: 0, z: 0, width: 400, height: 300,
+    componentIdentity: { kind: "main", name: "home" },
+  } as never;
+  const snapshot = { sourceVersion, revision: 1, tree: [], warnings: [], frame: root,
+    viewport: { width: 400, height: 300, scrollX: 0, scrollY: 0 } } as DesignRuntimeSnapshot;
+  useDesignRuntimeStore.getState().publishSnapshot("w", "/repo", "home.html", snapshot, sourceVersion);
+  await act(async () => {
+    reactRoot ??= createRoot(container);
+    reactRoot.render(React.createElement(TooltipProvider, null,
+      React.createElement(DesignInspector, {
+        workspaceId: "w", folder: "/repo", frame, frameSelected: true, selectedNodeId: null, selectedNodeIds: [],
+        details: null, lint: null, active: true, canvasBackground: "white", onCanvasBackgroundChange: () => {},
         motionTimelineOpen: false, motionProperties: [], onOpenMotionTimeline: () => {}, zoomActionsRef: { current: null },
       } as never)));
   });
@@ -271,5 +298,28 @@ describe("an inspector field scrub", () => {
     await release();
     expect(writes()).toBe(1);
     expect(lastWrite()).toContain(`"column-gap":"${shown}px"`);
+  });
+
+  it("keeps frame geometry inert while its Style panel is hidden", async () => {
+    await showFrameOnlyMain();
+    const stylePanel = container.querySelector<HTMLElement>("[data-design-style-panel]")!;
+    const xField = stylePanel.querySelector<HTMLInputElement>('input[aria-label="X"]')!;
+    expect(stylePanel.getAttribute("aria-hidden")).toBe("true");
+    expect(stylePanel.hasAttribute("inert")).toBe(true);
+    expect(xField.value).toBe("0");
+
+    await act(async () => {
+      publishDesignFrameGeometryLive("w", "home.html", { x: 42, y: 0, w: 400, h: 300 }, { settle: true });
+    });
+    expect(designFrameGeometryLiveValue("w", "home.html", "x")).toBe(42);
+    expect(xField.value).toBe("0");
+
+    const styleTab = [...container.querySelectorAll<HTMLButtonElement>('[role="tab"]')]
+      .find((tab) => tab.textContent?.trim() === "Style")!;
+    await act(async () => {
+      styleTab.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0 }));
+    });
+    expect(container.querySelector<HTMLElement>("[data-design-style-panel]")?.getAttribute("aria-hidden")).toBe("false");
+    expect(container.querySelector<HTMLInputElement>('[data-design-style-panel] input[aria-label="X"]')?.value).toBe("42");
   });
 });

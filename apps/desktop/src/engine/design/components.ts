@@ -674,7 +674,7 @@ function fillSlots(
       ? attributes.has(attributeName)
         ? escapeText(attributes.get(attributeName) ?? "")
         : fallback
-      : hasInstanceContent ? instanceChildren : `${fallback}${instanceChildren}`;
+      : hasInstanceContent ? instanceChildren : `${fallback}${instanceChildren.trim()}`;
     edits.push({ start: location.startOffset, end: location.endOffset, text });
   }
   let result = definitionBody;

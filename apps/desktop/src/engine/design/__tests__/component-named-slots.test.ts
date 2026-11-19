@@ -33,6 +33,14 @@ describe("a main component's slots", () => {
     expect(named.html).toContain('<footer data-zd-part="foot">No footer</footer>');
   });
 
+  it("keeps comments and nested children when filling a fallback", async () => {
+    const commented = await expand('<zd-card data-oid="c4">\n  <!-- keep -->\n</zd-card>');
+    expect(commented.html).toContain('<footer data-zd-part="foot">No footer<!-- keep --></footer>');
+
+    const nested = await expand('<zd-card data-oid="c5"><section><em data-oid="nested">Nested</em></section></zd-card>');
+    expect(nested.html).toContain('<footer data-zd-part="foot"><section><em data-oid="nested">Nested</em></section></footer>');
+  });
+
   it("are options of the component, which an attribute cannot set", async () => {
     const declared = designComponentSummaryOf(CARD)!;
     expect(declared.elements).toContainEqual({ tag: "zd-option", attributes: [{ name: "name", value: "content" }, { name: "type", value: "slot" }] });
