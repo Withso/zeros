@@ -277,9 +277,29 @@ describe("a style commit that refits its frame", () => {
       void Promise.resolve(mocks.editor.props!.onLayoutAction(action)).catch(() => {});
       await Promise.resolve();
     });
-    expect(previewLayout).toHaveBeenCalledTimes(paints ? 1 : 0);
+    if (paints) await vi.waitFor(() => expect(previewLayout).toHaveBeenCalledOnce());
+    else expect(previewLayout).not.toHaveBeenCalled();
     if (paints)
       expect((previewLayout.mock.calls[0] as unknown[])[0]).toMatchObject({ updates: [{ nodeId: "root" }], nodeIds: ["root"] });
+  });
+
+  it("paints a Fixed choice from the visible size of an earlier choice still saving", async () => {
+    const { connection, nodes } = arrangeFixture(2);
+    const previewLayout = vi.fn(async () => [root]);
+    Object.assign(connection, {
+      supports: (capability: string) => capability === "measureLayout" || capability === "previewLayout",
+      previewLayout,
+    });
+    const visible = { ...nodes.get("root")!, rect: { ...root.rect, width: 210 } };
+    connection.getNodeDetails.mockImplementation(async (nodeId) => nodeId === "root" ? visible : nodes.get(nodeId)!);
+    (mocks.applyEdit as unknown as { mockImplementationOnce: (fn: () => Promise<never>) => void })
+      .mockImplementationOnce(() => new Promise<never>(() => {}));
+    await act(async () => {
+      void Promise.resolve(mocks.editor.props!.onLayoutAction({ type: "sizing", axis: "x", mode: "fixed" })).catch(() => {});
+      await Promise.resolve();
+    });
+    await vi.waitFor(() => expect(previewLayout).toHaveBeenCalledOnce());
+    expect((previewLayout.mock.calls[0] as unknown[])[0]).toMatchObject({ updates: [{ nodeId: "root", styles: { width: "210px" } }] });
   });
 
   it("does not measure an empty Arrange child batch", async () => {

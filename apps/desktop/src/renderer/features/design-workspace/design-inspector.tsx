@@ -2505,6 +2505,7 @@ export const DesignInspector = React.memo(function DesignInspector({
         (pendingHistoryByOwnerRef.current.get(historyOwnerKey) ?? 0) === 0;
       // A failed or skipped save must not leave its scrub painted on the canvas.
       const restorePreview = async (checkCurrent: () => void): Promise<void> => {
+        admissionPaintOpen = false;
         const previewCurrent = () =>
           stylePreviewIntentRef.current === intent && currentStyleOwnerRef.current === styleOwner;
         if (!previewCurrent()) return;
@@ -2527,30 +2528,30 @@ export const DesignInspector = React.memo(function DesignInspector({
           }
         }));
       };
-      // A sizing choice paints at admission, before any newer preview can
-      // exist; its durable values are still prepared from confirmed state.
+      // A sizing choice paints at admission, from what is visible now
+      // (including an earlier choice still saving), before any newer preview
+      // can exist. Its durable values are still prepared from confirmed state.
+      let admissionPaintOpen = true;
       if (action.type === "sizing" && action.mode !== "relative" && canPaintPreview()) {
         const runtimeState = useDesignRuntimeStore.getState().byWorkspace[workspaceId]?.frames[capturedFrame.file];
+        const frameRuntime = designFrameRuntime(workspaceId, capturedFrame.file);
+        const { axis, mode } = action;
         for (const nodeId of styleNodeIds) {
-          const details =
+          const cached =
             runtimeState?.detailsByNode[nodeId] ??
             (nodeId === currentContext.selectedNodeId ? currentContext.elementDetails : null);
-          if (!details) continue;
-          let styles: Record<string, string | null>;
-          try {
-            styles = designSizingStyles(details, action.axis, action.mode);
-          } catch {
-            continue; // The durable preparation reports the unsupported choice.
-          }
+          if (!cached || !frameRuntime?.supports("previewLayout")) continue;
           previewedNodeIds.add(nodeId);
-          previewPublications.set(nodeId, publishDesignLivePreviewStyles(workspaceId, capturedFrame.file, nodeId, styles));
-          const frameRuntime = designFrameRuntime(workspaceId, capturedFrame.file);
-          if (frameRuntime?.supports("previewLayout"))
-            void frameRuntime.previewLayout({ updates: [{ nodeId, styles }], nodeIds: [nodeId] }).then((geometries) => {
-              if (!canPaintPreview()) return;
-              for (const geometry of geometries)
-                paintDesignInspectorPreviewDetails(workspaceId, capturedFrame.file, geometry);
-            }, () => {});
+          void (async () => {
+            const visible = await frameRuntime.getNodeDetails(nodeId).catch(() => cached);
+            if (!admissionPaintOpen || !canPaintPreview() || designFrameRuntime(workspaceId, capturedFrame.file) !== frameRuntime) return;
+            const styles = designSizingStyles(visible, axis, mode);
+            previewPublications.set(nodeId, publishDesignLivePreviewStyles(workspaceId, capturedFrame.file, nodeId, styles));
+            const geometries = await frameRuntime.previewLayout({ updates: [{ nodeId, styles }], nodeIds: [nodeId] });
+            if (!canPaintPreview()) return;
+            for (const geometry of geometries)
+              paintDesignInspectorPreviewDetails(workspaceId, capturedFrame.file, geometry);
+          })().catch(() => {}); // The durable preparation reports an unsupported choice.
         }
       }
       return applyDesignEditCached(workspaceId, capturedFrame, async ({ assertCurrent }) => {
@@ -2765,6 +2766,7 @@ export const DesignInspector = React.memo(function DesignInspector({
         }));
         assertFrameCurrent();
         if (canPaintPreview()) {
+          admissionPaintOpen = false;
           for (const update of batch) {
             previewPublications.set(update.nodeId, publishDesignLivePreviewStyles(
               workspaceId,
