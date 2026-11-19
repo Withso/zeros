@@ -1056,8 +1056,12 @@ async function readDesignFrameFromSummary(
     workspacePath,
     summary.file,
   );
-  const healed = healDesignOids(source);
-  const document = healed.document ?? parse(healed.html, { sourceCodeLocationInfo: true });
+  const document = includeComponentIdentity
+    ? (() => {
+        const healed = healDesignOids(source);
+        return healed.document ?? parse(healed.html, { sourceCodeLocationInfo: true });
+      })()
+    : parse(source, { sourceCodeLocationInfo: true });
   const composed = await composeFrameSrcDoc(workspacePath, source, {
     width: summary.width,
     height: summary.height,
@@ -1084,8 +1088,12 @@ async function readDesignCanvasFrameFromSummary(
     workspacePath,
     summary.file,
   );
-  const healed = healDesignOids(source);
-  const document = healed.document ?? parseDesignSource(healed.html);
+  const document = includeComponentIdentity
+    ? (() => {
+        const healed = healDesignOids(source);
+        return healed.document ?? parseDesignSource(healed.html);
+      })()
+    : undefined;
   const render = await prepareFrameRenderSource(workspacePath, source, {
     width: summary.width,
     height: summary.height,
@@ -1095,7 +1103,7 @@ async function readDesignCanvasFrameFromSummary(
     ...(component ? { component: designComponentRecordWithinLimits({ ...component,
       ...(render.componentOptions ? { notApplied: render.componentOptions.shows } : {}) }) } : {}),
     ...(render.instances ? { instances: render.instances } : {}),
-    ...(includeComponentIdentity ? { componentIdentity: designComponentIdentityFromDocument(canvas, summary.file, document) } : {}) };
+    ...(includeComponentIdentity ? { componentIdentity: designComponentIdentityFromDocument(canvas, summary.file, document!) } : {}) };
 }
 
 function designComponentIdentityFromDocument(canvas: CanvasDocument, file: string, document: DefaultTreeAdapterTypes.Document): DesignComponentIdentity | null {
