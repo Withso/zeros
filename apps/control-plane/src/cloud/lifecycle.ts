@@ -157,6 +157,8 @@ function sandboxLost(error: unknown): boolean {
   return error instanceof BoatSnapshotExpiredError || (error instanceof CloudProviderError && error.code === "provider_not_found");
 }
 
+/** The checkpoint script's own step names; anything else the VM prints is not logged. */
+const CHECKPOINT_STEPS: ReadonlySet<string> = new Set(["attachments", "bundle", "decrypt", "download", "encrypt", "environment", "files", "fingerprint", "gitdir", "ignored", "marker", "node", "objects", "pack", "refs", "remotes", "repository", "sessions", "start", "stash", "turns", "upload", "upstream", "worktree"]);
 const checkpointError = (code: CloudV2CheckpointError) => Object.assign(new Error("checkpoint failed"), { code });
 const checkpointCode = (error: unknown): CloudV2CheckpointError =>
   (CLOUD_V2_CHECKPOINT_ERRORS as readonly string[]).includes(errorCode(error)) ? errorCode(error) as CloudV2CheckpointError : "checkpoint_failed";
@@ -667,6 +669,8 @@ export class CloudV2Lifecycle {
     const scoped = scope === "stop" ? [] as const : [scope] as const;
     // Whether this upload is known to be over, whatever its outcome.
     let settled = false;
+    // Why it failed, as closed values only: never Boat's or the VM's own text.
+    let cause = "";
     try {
       await before();
       // Recorded before the URL exists. A stop that no longer owns the VM, for
@@ -681,18 +685,22 @@ export class CloudV2Lifecycle {
       }, ({ result, saved }): TimingDetail => saved.ok && result.exitCode === 0 && !result.timedOut ? { checkpoint: saved.unchanged ? "unchanged" : "saved" } : {});
       // A failure before the upload step never started one. A failed upload,
       // a timeout or a lost reply may still land, so its intent stays.
-      if (!saved.ok) { settled = !result.timedOut && saved.step !== "upload" && saved.step !== "unknown"; throw checkpointError(saved.code); }
-      if (result.exitCode !== 0 || result.timedOut) throw checkpointError("checkpoint_failed");
+      if (!saved.ok) {
+        settled = !result.timedOut && saved.step !== "upload" && saved.step !== "unknown";
+        cause = result.timedOut ? "timeout" : CHECKPOINT_STEPS.has(saved.step) ? `step_${saved.step}` : "no_result";
+        throw checkpointError(saved.code);
+      }
+      if (result.exitCode !== 0 || result.timedOut) { cause = result.timedOut ? "timeout" : "exit"; throw checkpointError("checkpoint_failed"); }
       // curl reported the upload complete, or there was nothing to upload, so nothing is in flight.
       settled = true;
       if (saved.unchanged) {
         // Only an answer about the checkpoint it was asked to compare with counts.
-        if (!reuse || !workspace.checkpoint || saved.fingerprint !== reuse.fingerprint) throw checkpointError("checkpoint_failed");
+        if (!reuse || !workspace.checkpoint || saved.fingerprint !== reuse.fingerprint) { cause = "fingerprint"; throw checkpointError("checkpoint_failed"); }
         // Nothing was uploaded under the new name; remove anything that was.
         await checkpoints.storage.delete(workspace.id, object).catch(() => {});
         return await store.checkpointUnchanged(workspace.id, owner, generation, workspace.checkpoint.object, ...scoped) ? "unchanged" : "fenced";
       }
-      if (await checkpoints.storage.size(workspace.id, object) !== saved.bytes) throw checkpointError("checkpoint_upload_failed");
+      if (await checkpoints.storage.size(workspace.id, object) !== saved.bytes) { cause = "size"; throw checkpointError("checkpoint_upload_failed"); }
       // Only this stop, or a retry of it, records it: a late save from an earlier stop is refused.
       const recorded = await store.saveCheckpoint(workspace.id, owner, generation,
         { object, key: checkpoints.seal(key, workspace.id, object), sha256: saved.sha256, bytes: saved.bytes, ...(saved.reuse ? { reuse: saved.reuse } : {}) },
@@ -705,7 +713,8 @@ export class CloudV2Lifecycle {
       return recorded ? "saved" : "fenced";
     } catch (error) {
       const code = checkpointCode(error);
-      this.deps.logger?.warn(`[cloud-v2] checkpoint failed (${code})`);
+      // A provider refusal, such as a command on a VM Boat already stopped, names its own code.
+      this.deps.logger?.warn(`[cloud-v2] checkpoint failed (${code}) workspace=${workspace.id.slice(0, 8)} scope=${scope} cause=${cause || errorCode(error)}`);
       await store.checkpointFailed(workspace.id, owner, generation, code, ...scoped).catch(() => {});
       await checkpoints.storage.delete(workspace.id, object).catch(() => {});
       throw checkpointError(code);

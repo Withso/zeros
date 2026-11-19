@@ -1890,7 +1890,12 @@ deletion has begun. The record is removed when the upload is known to be over.
 A failed transfer, a timeout or a lost reply keeps it, and deletion waits for
 the latest remaining one, then prunes again.
 A failed or oversized checkpoint (over 4 GiB) never blocks the stop: the
-previous checkpoint stays, and the workspace records `checkpoint_error`.
+previous checkpoint stays, and the workspace records `checkpoint_error`. The
+control plane logs `[cloud-v2] checkpoint failed (<code>) workspace=<id>
+scope=<stop|retry> cause=<cause>` with the shortened workspace ID and a closed
+cause: the script step that failed, `timeout`, `exit`, `no_result`, `size`,
+`fingerprint`, or the provider's error code when Boat refused the command, for
+instance on a VM it had already stopped.
 
 With `CLOUD_V2_CHECKPOINT_RETRY_ENABLED`, a stopped workspace whose latest
 stop has no checkpoint is retried on a fork of its stopped VM. The VM itself

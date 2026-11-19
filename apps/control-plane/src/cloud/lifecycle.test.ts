@@ -303,12 +303,13 @@ describe("cloud v2 lifecycle", () => {
   });
 
   it.each([
-    ["the VM reports a failure before uploading", { checkpoint: "zeros-checkpoint-error checkpoint_too_large pack" }, 1234, "checkpoint_too_large", true],
-    ["the upload itself fails", { checkpoint: "zeros-checkpoint-error checkpoint_upload_failed upload" }, 1234, "checkpoint_upload_failed", false],
-    ["the upload is missing", {}, null, "checkpoint_upload_failed", true],
-    ["the upload has another size", {}, 99, "checkpoint_upload_failed", true],
-    ["the command prints nothing", { checkpoint: "" }, 1234, "checkpoint_failed", false],
-  ] as const)("still stops, keeps the previous checkpoint and records why when %s", async (_case, vm, size, code, settled) => {
+    ["the VM reports a failure before uploading", { checkpoint: "zeros-checkpoint-error checkpoint_too_large pack" }, 1234, "checkpoint_too_large", true, "step_pack"],
+    ["the upload itself fails", { checkpoint: "zeros-checkpoint-error checkpoint_upload_failed upload" }, 1234, "checkpoint_upload_failed", false, "step_upload"],
+    ["the upload is missing", {}, null, "checkpoint_upload_failed", true, "size"],
+    ["the upload has another size", {}, 99, "checkpoint_upload_failed", true, "size"],
+    ["the command prints nothing", { checkpoint: "" }, 1234, "checkpoint_failed", false, "no_result"],
+    ["the VM names a step the script does not have", { checkpoint: "zeros-checkpoint-error checkpoint_failed secretname" }, 1234, "checkpoint_failed", true, "no_result"],
+  ] as const)("still stops, keeps the previous checkpoint and records why when %s", async (_case, vm, size, code, settled, cause) => {
     const checkpoints = checkpointsFake(), logs: string[] = [];
     checkpoints.storage.size.mockResolvedValue(size);
     const stopping = workspace("stopping", { boatSandboxId: "bx_abc1", checkpoint: SAVED });
@@ -325,7 +326,25 @@ describe("cloud v2 lifecycle", () => {
     expect(f.store.checkpointUploadDone).toHaveBeenCalledTimes(settled ? 1 : 0);
     expect(f.compute.stop).toHaveBeenCalledWith("bx_abc1");
     expect(f.store.transition).toHaveBeenCalledWith(stopping.id, ["stopping"], "stopped", { stopGeneration: "2", revoke: true });
-    expect(logs).toEqual([`[cloud-v2] checkpoint failed (${code})`]);
+    expect(logs).toEqual([`[cloud-v2] checkpoint failed (${code}) workspace=${stopping.id.slice(0, 8)} scope=stop cause=${cause}`]);
+  });
+
+  it.each([
+    // Boat had already stopped the VM, so it refused the command itself.
+    ["Boat refuses the command", () => { throw Object.assign(new Error("refused"), { code: "provider_conflict" }); }, "provider_conflict"],
+    ["the command times out", () => ({ exitCode: -1, stdout: "", timedOut: true }), "timeout"],
+    ["the command exits non-zero after reporting a save", () => ({ exitCode: 1, stdout: `zeros-checkpoint-saved bytes=1234 sha256=${"e".repeat(64)}`, timedOut: false }), "exit"],
+  ] as const)("names the workspace and why its checkpoint failed when %s", async (_case, reply, cause) => {
+    const checkpoints = checkpointsFake(), logs: string[] = [];
+    const stopping = workspace("stopping", { boatSandboxId: "bx_abc1", checkpoint: SAVED });
+    const f = setup([stopping], { checkpoints });
+    (f.lifecycle as unknown as { deps: { logger: Pick<Console, "warn"> } }).deps.logger = { warn: line => logs.push(String(line)) };
+    vi.mocked(f.compute.exec).mockImplementation(async (_id, command) =>
+      command.includes("zeros-checkpoint-saved") ? reply() : { exitCode: 0, stdout: "", timedOut: false });
+    await f.lifecycle.tick();
+    expect(f.store.checkpointFailed).toHaveBeenCalledWith(stopping.id, "bx_abc1", "2", "checkpoint_failed");
+    expect(f.store.transition).toHaveBeenCalledWith(stopping.id, ["stopping"], "stopped", { stopGeneration: "2", revoke: true });
+    expect(logs).toEqual([`[cloud-v2] checkpoint failed (checkpoint_failed) workspace=${stopping.id.slice(0, 8)} scope=stop cause=${cause}`]);
   });
 
   it("keeps the upload intent when the command's reply is lost, so deletion can wait for it", async () => {
