@@ -68,17 +68,14 @@ async function loadIndex(
         (entry) => {
           const full = entry.path.toLowerCase();
           const baseLength = full.length - full.lastIndexOf("/") - 1;
-          // Bound construction as well as retention. An exceptionally large
-          // tree falls back to bounded streaming ranking instead of allocating
-          // an index that would immediately exceed the cache's memory budget.
+          // Bound index construction too; oversized trees fall back to streaming ranking.
           weight += 200 + full.length * 6 + baseLength * 4;
           if (weight > MAX_INDEX_WEIGHT) throw new MentionIndexTooLarge();
           entries.push(entry);
           if (entry.kind === "file") fileCount += 1;
         },
         () => {
-          // A complete depth with 64 files already determines bare @'s entire
-          // window. Publish it now while this SAME walk indexes deeper paths.
+          // After a completed depth supplies 64 files, deeper results cannot outrank this empty-query preview.
           if (!previewReady && fileCount >= 64) {
             const shallow = new WorkspacePathIndex(
               entries.filter((entry) => entry.kind === "file"),
@@ -118,8 +115,7 @@ async function loadIndex(
       });
   }
   const result = await slot.pending;
-  // Changes during enumeration require one replacement walk. Concurrent
-  // callers share both walks; intermediate generations never become current.
+  // Concurrent callers share the replacement walk; do not return a stale generation.
   return result.generation === slot.generation
     ? result.index
     : loadIndex(cwd, slot);
@@ -145,8 +141,7 @@ function getIndex(
       slot.revisions.delete(slot.revisions.values().next().value!);
     slot.generation += 1;
   }
-  // Remember several renderer revisions so two windows don't invalidate each
-  // other's index merely by sending another query with their unchanged token.
+  // Alternating unchanged window revisions must not invalidate the shared index.
   slot.users += 1;
   const result = loadIndex(key, slot).finally(() => {
     slot.users -= 1;
@@ -162,11 +157,7 @@ function getIndex(
   return result;
 }
 
-/** Search the actual filesystem, including ignored paths, dotfiles and empty
- * directories. Filter/rank BEFORE capping: an attachment must remain findable
- * even when dependencies alone exceed the ordinary file tree's 20k limit.
- * A renderer revision shares the complete name index across typed queries;
- * callers without one retain fresh, uncached listing semantics. */
+/** Rank ignored files, dotfiles and empty folders before capping. A revision shares the index across queries; without one, search the filesystem afresh. */
 export async function listMentionPaths(
   cwd: string,
   query: string,
@@ -185,7 +176,6 @@ export async function listMentionPaths(
       return index.search(query, cap).map(toWirePath);
     } catch (error) {
       if (!(error instanceof MentionIndexTooLarge)) throw error;
-      // Never truncate the searchable set to fit an index budget.
     }
   }
   const q = normalizeWorkspacePathQuery(query);
@@ -224,8 +214,7 @@ async function walkMentionPaths(
   let dirs = [""];
   const visited = new Set<string>();
   const read = async (relative: string) => {
-    // Re-check queued directories too: an agent can replace one with a symlink
-    // between discovery and enumeration. Never walk outside the workspace.
+    // A queued directory may have become a symlink; recheck containment before enumeration.
     let real: string;
     let entries: import("node:fs").Dirent[];
     try {
@@ -242,7 +231,7 @@ async function walkMentionPaths(
       entries = await fs.readdir(real, { withFileTypes: true });
     } catch (error) {
       if (!relative) throw error; // a failed root read is not an empty workspace
-      return; // unreadable or vanished descendant; continue with its siblings
+      return;
     }
     for (const entry of entries) {
       const rel = relative ? `${relative}/${entry.name}` : entry.name;
@@ -255,7 +244,7 @@ async function walkMentionPaths(
         }
       }
       if (entry.isDirectory()) dirs.push(rel);
-      // Symlinks are listed, never traversed (cycles and outside-root aliases).
+      // List symlink entries without enqueueing them for traversal.
       if (!folder && !entry.isFile() && !entry.isSymbolicLink()) continue;
       visit({
         path: rel,
@@ -263,8 +252,7 @@ async function walkMentionPaths(
       });
     }
   };
-  // Bounded parallel directory reads; no recursive promise fan-out on a large
-  // dependency tree, and no per-file stat except to classify symlinks.
+  // Read a bounded batch at each depth rather than fanning out recursively.
   while (dirs.length) {
     const level = dirs;
     dirs = [];

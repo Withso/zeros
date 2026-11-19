@@ -70,8 +70,7 @@ export function decideCloudCredentialRemovalState(state: CloudCredentialRemovalS
   if (action === "confirm" && !cloudCredentialRemovalNeedsConfirmation(state)) return state;
   return Object.freeze({ ...state, decision: Object.freeze({ action, requestId: uuid.parse(requestId), expectedRevision: state.outcome.revision }) });
 }
-/** Unmount may only cancel an undecided, unconfirmed operation. It cannot
- * change a submitted Yes even when the request's reply never arrived. */
+// Unmount may cancel an undecided operation, not replace a recorded decision with a missing ACK.
 export function leaveCloudCredentialRemoval(state: CloudCredentialRemovalState, requestId: string): CloudCredentialRemovalState {
   return decideCloudCredentialRemovalState(state, "cancel", requestId);
 }

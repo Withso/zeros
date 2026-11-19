@@ -31,8 +31,6 @@ beforeEach(async () => {
 });
 afterEach(async () => { await browser?.close(); });
 
-// Wire reply assertions stay close to actual CSS and authority, rather than
-// source-text tests of the implementation. This is a DOM check, not timing.
 const run = async (scenario: "commit" | "history" | "branch" | "refusal") => page.evaluate(async scenario => {
   const ask = (window as unknown as { historyRequest(method: string, args: unknown): Promise<any> }).historyRequest;
   const node = document.querySelector('[data-oid="root"]')!;

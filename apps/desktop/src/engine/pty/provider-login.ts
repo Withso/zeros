@@ -1,5 +1,4 @@
-/** One-shot login runs inside a PTY, with native ANSI output and no shell
- * prompt/echo. The long environment cleanup stays out of the visible terminal. */
+/** Use a one-shot PTY to preserve native ANSI login prompts without echoing the shell setup. */
 export function providerLoginCommand(
   provider: "claude" | "codex",
   binary: string,

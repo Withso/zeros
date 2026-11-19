@@ -4,7 +4,6 @@ import { getAlwaysAllowLocalCommands, setAlwaysAllowLocalCommands } from "../../
 import { isElectron } from "../../platform/runtime";
 import { LocalCommandsSetting } from "./local-commands-setting";
 
-/** This Mac's Always allow, read from and written to main while Settings is shown. */
 export function AlwaysAllowLocalCommands({ surfaceActive }: { surfaceActive: boolean }) {
   const [value, setValue] = useState<boolean | undefined>();
   const [saving, setSaving] = useState(false);

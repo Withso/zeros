@@ -68,8 +68,7 @@ export function githubAppErrorCopy(reason: GithubAppErrorReason): {
   };
 }
 
-/** App-wide listener: the browser may return while Settings is no longer
- * mounted. All transient feedback still uses the one bottom-right toast rail. */
+/** Listen app-wide because the browser callback may arrive after Settings unmounts. */
 export function GithubAppNotifications() {
   useEffect(() => {
     let closed = false;

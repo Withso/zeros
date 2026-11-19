@@ -1,8 +1,4 @@
-// Shared GitHub authentication model.
-//
-// Method selection is non-secret durable state. Credential values are secret
-// and must stay in the host/engine boundary; renderer-facing status objects use
-// GithubCredentialSummary instead.
+// Persist method selection as non-secret state; expose only credential summaries outside the host/engine boundary.
 
 export const GITHUB_AUTH_METHODS = [
   "gh-cli",
@@ -17,10 +13,7 @@ export const GITHUB_GIT_HTTP_USERNAME = "x-access-token";
 const GITHUB_REFRESH_BINDING_RE =
   /^zghrb_v1\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/;
 
-/** Git's HTTPS identity belongs to the credential, not to a host switch in the
- * broker. Other forges use different magic usernames, so persisting both
- * fields now keeps the broker provider-neutral even while GitHub is the only
- * configured forge. */
+/** Persist HTTPS host and username on the credential so Git's broker need not know forge-specific usernames. */
 export interface GitHttpCredentialIdentity {
   /** Lowercase hostname without a port. */
   gitHost: string;

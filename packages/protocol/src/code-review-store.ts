@@ -113,9 +113,7 @@ export class CodeReviewStoreCore {
     const result = this.chunk(db, row, 0, THREAD_BYTE_LIMIT);
     if (!result) throw new CodeReviewError("CODE_REVIEW_INVALID", "Review history could not be read.");
     if (!result.commentsComplete) {
-      // A bounded mutation preview retains the original author and newest reply.
-      // Its cursor still starts after the contiguous original chunk, so the gap
-      // can be read without retaining/replacing all replies in one bridge frame.
+      // Keep the root and newest reply, but resume history after the contiguous prefix, not the newest reply.
       const latest = db.prepare("SELECT * FROM code_review_comments WHERE thread_id = ? ORDER BY seq DESC LIMIT 1").get(threadId) as CommentRow;
       result.comments.push(this.comment(latest));
       if (result.comments.length === result.commentCount) { result.commentsComplete = true; delete result.commentsCursor; delete result.commentsCursorAfter; }
@@ -184,8 +182,7 @@ export class CodeReviewStoreCore {
           .get(input.workspaceId, actorKey, requestId) as { signature: string; thread_id: string } | undefined;
         if (prior) {
           if (prior.signature !== signature && prior.signature !== legacySignature) throw new CodeReviewError("CODE_REVIEW_RETRY_CONFLICT", "This review request ID was already used for different input.");
-          // Return the current snapshot without replaying the write, including
-          // any later replies/state changes by another participant.
+          // Return the latest snapshot without replaying the original write.
           return this.thread(db, input.workspaceId, prior.thread_id);
         }
       }

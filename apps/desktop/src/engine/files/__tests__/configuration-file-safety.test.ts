@@ -12,8 +12,7 @@ afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: 
 it("refuses special settings files without blocking the engine", () => {
   const file = path.join(temporary(), "settings.toml");
   expect(spawnSync("mkfifo", [file]).status).toBe(0);
-  // The root package uses CommonJS. Use tsx's matching loader on Node 22
-  // too, so a missing ESM named export cannot mask the FIFO behavior.
+  // Use the CommonJS loader on Node 22 so an import failure cannot mask FIFO blocking.
   const code = `const { readSettingsFile } = require(${JSON.stringify(path.resolve("apps/desktop/src/engine/settings/files.ts"))});
     const result = readSettingsFile(${JSON.stringify(file)}); process.exit(result.error ? 0 : 1);`;
   const result = spawnSync(process.execPath, ["--require", "tsx/cjs", "-e", code], {

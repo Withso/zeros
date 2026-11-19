@@ -154,8 +154,7 @@ function mapTurnIdentity(
   const identity = turnIdentitySchema.parse(value);
   const row = record(value);
   const chatId = nativeValue(scope, identity.chatId) as string;
-  // Check typed nested owners before replacing native fields with UI keys.
-  // Provider payloads and file rows never participate in routing.
+  // Validate nested owners before replacing native identities with UI keys.
   nativeValue(scope, row.workspaceId);
   nativeValue(scope, row.folder, true);
   const owner: WireRecord = {};
@@ -205,8 +204,7 @@ export function cloudOutgoing(
       params.chatIds = original.chatIds.map((id) => nativeValue(scope, id));
     out.params = params;
   }
-  // Host executable paths and directory grants cannot describe a cloud
-  // runtime. Provider credentials retain the engine's existing admission path.
+  // A Mac executable path has no meaning in the cloud runtime.
   delete out.cliBinary;
   return out;
 }
@@ -230,7 +228,6 @@ export function cloudIncoming(
     out.terminals = message.terminals.map((row) =>
       mapFields(scope, record(row), "in"),
     );
-  // R1: a watching client's pushed resources sample names its workspace by the desktop key.
   if (message.type === "WORKSPACE_RESOURCES") out.workspaceId = cloudWorkspaceKey(scope);
   if (message.type === "DB_CHANGED") {
     out.workspaceId = cloudWorkspaceKey(scope);
@@ -291,8 +288,7 @@ export function cloudIncoming(
         const hit = record(value);
         if (typeof hit.chatId !== "string" || !hit.chatId || parseCloudWorkspaceKey(hit.chatId))
           throw new Error("Invalid cloud search result identity");
-        // Check typed ownership before scoping the hit for page-head validation.
-        // Native message IDs, payload bytes and provider data stay opaque.
+        // Validate the hit's owner before scoping its chat ID; message IDs and payloads stay opaque.
         const chatId = nativeValue(scope, hit.chatId);
         return { ...hit, ...mapFields(scope, { chatId }, "in") };
       });

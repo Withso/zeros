@@ -1,23 +1,3 @@
-// ──────────────────────────────────────────────────────────
-// Terminal Agents — Settings → Terminal Agents tab
-// ──────────────────────────────────────────────────────────
-//
-// The body of the Terminal Agents settings tab (gated behind the
-// `terminalAgents` experimental flag). Configures how coding CLIs
-// launch from the workbench terminal panel.
-//
-// Deliberately minimal. The launch command IS the agent's name (so
-// tabs / the Default picker read "claude", "codex", "droid", …), and
-// each agent exposes only three knobs — Launch command, Additional
-// parameters, Auto-approve CLI flag. Built-ins are always shown
-// (the protected core set carries logos; the rest are name-only).
-// "+ Add agent" lets the user register any CLI by its
-// launch command. No reset — fields are pre-filled defaults the user
-// edits freely. Flat layout, shared design-system primitives.
-//
-// Storage + the launch resolver live in `./terminal-agents.ts`; this
-// file is purely presentational (reads/writes via useTerminalAgents()).
-// ──────────────────────────────────────────────────────────
 
 import React, { useEffect, useMemo, useState } from "react";
 import { Plus, Trash2 } from "lucide-react";
@@ -64,13 +44,10 @@ function persistActiveAgentId(id: string): void {
   }
 }
 
-/** The agent's display label IS its launch command — "the launch command
- *  is the name of the agent". Falls back to name/id for safety. */
 function labelOf(agent: TerminalAgent): string {
   return agent.launchCommand.trim() || agent.name || agent.id;
 }
 
-/** Blank draft for the "+ Add agent" flow. */
 const BLANK_AGENT: TerminalAgent = {
   id: "",
   name: "",
@@ -85,9 +62,6 @@ const BLANK_AGENT: TerminalAgent = {
   imported: false,
 };
 
-/** Derive a stable, unique id from a launch command (first token,
- *  slugified). Custom agents land outside TERMINAL_AGENT_ORDER so they
- *  append after the built-ins. */
 function deriveAgentId(launchCommand: string, taken: Set<string>): string {
   const base =
     (launchCommand.trim().split(/\s+/)[0] || "agent")
@@ -100,17 +74,12 @@ function deriveAgentId(launchCommand: string, taken: Set<string>): string {
   return id;
 }
 
-// ── Section root ─────────────────────────────────────────
 
 export function TerminalAgentsSection() {
   const { agents, defaultId, removedIds, setDefault, upsert, remove } =
     useTerminalAgents();
 
-  // Protected core agents are always shown; other built-ins remain until the
-  // user removes them, and custom agents append after. Saved edits overlay the
-  // built-in seed.
-  // Finally de-dupe by launch command (the display name) so a leftover entry
-  // colliding with a built-in never double-ups.
+  // Seed built-ins first so stale custom entries with the same launch command cannot shadow them.
   const ordered = useMemo(() => {
     const saved = new Map(agents.map((a) => [a.id, a]));
     const removed = new Set(removedIds);
@@ -133,8 +102,7 @@ export function TerminalAgentsSection() {
     });
   }, [agents, removedIds]);
 
-  // Only real agent selections survive reload. The unsaved + Add agent draft
-  // remains deliberately ephemeral and never replaces the last confirmed tab.
+  // The Add agent draft must not replace the last persisted agent selection.
   const [requestedActiveId, setRequestedActiveId] =
     useState<string>(readActiveAgentId);
   const activeId =
@@ -156,12 +124,11 @@ export function TerminalAgentsSection() {
   const handleCreate = (draft: TerminalAgent) => {
     const cmd = draft.launchCommand.trim();
     if (!cmd) return;
-    // No duplicate launch commands — the launch command IS the name.
     if (ordered.some((a) => a.launchCommand.trim() === cmd)) {
       toast.error(`An agent with launch command "${cmd}" already exists.`);
       return;
     }
-    // Reserve built-in ids too so a custom never collides with one.
+    // Reserve hidden built-in IDs so restoring one cannot replace a custom profile.
     const taken = new Set([
       ...ordered.map((a) => a.id),
       ...TERMINAL_AGENT_ORDER,
@@ -234,7 +201,6 @@ export function TerminalAgentsSection() {
   );
 }
 
-// ── Default-agent picker ─────────────────────────────────
 
 function DefaultAgentRow({
   agents,
@@ -269,10 +235,7 @@ function DefaultAgentRow({
   );
 }
 
-// ── Tab strip ────────────────────────────────────────────
 
-/** The shared segmented control, with Add agent as a 24px Ghost button 8px
- *  after it. While a new agent is being drafted no tab is selected. */
 function TerminalAgentTabs({
   agents,
   activeId,
@@ -297,8 +260,6 @@ function TerminalAgentTabs({
             const isActive = !creating && activeId === agent.id;
             return (
               <TabsTrigger key={agent.id} value={agent.id} className="shrink-0">
-                {/* Logo only for agents that carry one; every other agent is
-                    name-only. */}
                 {agent.icon && (
                   <AgentIcon
                     agentId={agent.id}
@@ -326,7 +287,6 @@ function TerminalAgentTabs({
   );
 }
 
-// ── Per-agent card (edit + new) ──────────────────────────
 
 function TerminalAgentCard({
   agent,
@@ -344,8 +304,7 @@ function TerminalAgentCard({
   onCreate?(draft: TerminalAgent): void;
   onRemove?(): void;
 }) {
-  // Local form state — committed on Save so partial edits don't poison
-  // the catalog.
+  // Keep partial launch edits out of the live catalog until Save.
   const [draft, setDraft] = useState<TerminalAgent>(agent);
   useEffect(() => {
     setDraft(agent);
@@ -355,10 +314,7 @@ function TerminalAgentCard({
   const idBase = agent.id || "new";
   const launchOk = draft.launchCommand.trim().length > 0;
   const hasChanges = JSON.stringify(draft) !== JSON.stringify(agent);
-  // Launch command is mandatory (it's the agent's name). New agents need it;
-  // edits need it AND some change to enable Save.
   const canSave = isNew ? launchOk : launchOk && hasChanges;
-  // Non-core agents (and customs) can be removed via the bin near Save.
   const showRemove = !isNew && !protectedAgent && !!onRemove;
 
   const handleSave = () => {
@@ -377,7 +333,6 @@ function TerminalAgentCard({
           }
           spellCheck={false}
           autoComplete="off"
-          // Core agents launch under a fixed command — read-only.
           disabled={protectedAgent}
           className="font-mono text-xs"
           placeholder={agent.binary || "e.g. claude"}
@@ -438,11 +393,8 @@ function TerminalAgentCard({
   );
 }
 
-// ── Small helpers ────────────────────────────────────────
 
-/** Split a space-separated arg string into tokens, dropping empties.
- *  Intentionally simple — no shell-quote awareness — so power users who
- *  need a literal space inside an arg fall back to launchCommand. */
+// Extra arguments are split on whitespace, not parsed as shell syntax; use the launch command for quoted arguments.
 function splitArgs(raw: string): string[] {
   return raw
     .split(/\s+/)

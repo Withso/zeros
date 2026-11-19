@@ -21,13 +21,9 @@ export const designPreviewCancelSchema = z.object({
   deadline: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
 }).strict();
 
-/** Smallest raster a canvas preview may request. */
 export const DESIGN_CAPTURE_MIN_DIMENSION = 16;
 
-/** Raster dimensions stay bounded independently of the frame's CSS viewport.
- * Browsers require whole viewport pixels; round fractional canvas bounds up.
- * Canvas previews pass a smaller `maxDimension`; both capture hosts compute
- * their scale through this one function, so a request and its host agree. */
+/** Round viewport fractions up and share raster sizing across capture hosts so requests and replies agree. */
 export function designCaptureRasterSize(
   viewport: { width: number; height: number },
   maxDimension: number = DESIGN_CAPTURE_MAX_DIMENSION,
@@ -42,14 +38,9 @@ export function designCaptureRasterSize(
     scale,
   };
 }
-/** Passive previews and captures show the canvas's default still state.
- * Authored keyframes remain source; explicit motion playback is separate. */
+/** The default view is still; authored animation remains available to explicit playback. */
 export const DESIGN_STATIC_RENDER_CSS = "*,:before,:after{animation:none!important;transition:none!important;caret-color:transparent!important}";
-/** SVG SMIL timelines, marquees and media loop outside CSS and the Web
- * Animations API; this holds them at their opening state. It is the one
- * definition both capture hosts run (DESIGN_STATIC_RENDER_SCRIPT) and the
- * canvas runtime embeds, so a frame's picture and its live document show the
- * same moment. ES5 source, as the runtime is. */
+/** This shared ES5 script stops timelines outside CSS and the Web Animations API so live surfaces and captures agree. */
 export const DESIGN_STILL_TIMELINES_SOURCE =
   "function stillAuthoredTimelines() {" +
   ' var svgs = document.getElementsByTagName("svg");' +
@@ -69,8 +60,7 @@ export const DESIGN_STILL_TIMELINES_SOURCE =
   "}";
 /** Host-evaluated before every still capture. */
 export const DESIGN_STATIC_RENDER_SCRIPT = `(${DESIGN_STILL_TIMELINES_SOURCE})()`;
-/** Authenticated workspace operation. Renderer coordinates are never accepted
- * from a client; the engine resolves its qualified local capture host. */
+/** The engine resolves the authenticated workspace's capture host; clients cannot supply renderer coordinates. */
 export const designWorkspaceCaptureSchema = z.object({
   workspaceId: z.string().min(1).max(128),
   frame: z.string().min(1).max(255),
@@ -78,10 +68,7 @@ export const designWorkspaceCaptureSchema = z.object({
   width: z.number().int().min(1).max(DESIGN_CAPTURE_MAX_DIMENSION),
   height: z.number().int().min(1).max(DESIGN_CAPTURE_MAX_DIMENSION),
 }).strict();
-/** Canvas preview of a frame's saved source: laid out at the frame's own
- * canvas size, rasterized to fit `maxDimension`, in an optional canvas theme.
- * `sourceVersion` names the exact generation the canvas expects; a changed
- * frame answers `{ stale: true, sourceVersion }` instead of other pixels. */
+/** Lay out saved source at its own viewport; a mismatched sourceVersion returns stale rather than unrelated pixels. */
 export const designPreviewRequestSchema = z.object({
   workspaceId: z.string().min(1).max(128),
   // The directory the canvas shows; a changed active directory is refused.
@@ -114,14 +101,12 @@ export const designCaptureRequestSchema = z
     revision: z.string().min(1).max(128),
     width: z.number().int().min(1).max(DESIGN_CAPTURE_MAX_DIMENSION),
     height: z.number().int().min(1).max(DESIGN_CAPTURE_MAX_DIMENSION),
-    // Optional for existing callers. A large frame keeps its layout viewport;
-    // only the emitted raster is scaled to width/height above.
+    // Optional for legacy callers; scaling affects only the output raster, not layout.
     layoutViewport: z.object({
       width: z.number().int().min(1).max(16_384),
       height: z.number().int().min(1).max(16_384),
     }).strict().optional(),
-    // Optional preview bound: the layout keeps the frame's own viewport and the
-    // raster fits this many pixels on its longest side.
+    // Bounds the raster's longest side without changing the layout viewport.
     maxDimension: z.number().int().min(DESIGN_CAPTURE_MIN_DIMENSION).max(DESIGN_CAPTURE_MAX_DIMENSION).optional(),
     colorScheme: z.enum(["light", "dark"]).default("light"),
   })
@@ -144,18 +129,14 @@ export const designCaptureReplySchema = z
   .strict();
 export type DesignCaptureReply = z.infer<typeof designCaptureReplySchema>;
 
-/** Batched thumbnails: many frames are laid out in one capture document per
- * sheet, and stylesheets shared by those frames are parsed once per capture
- * process. Each item's style blocks are replaced, at their own positions, by
- * links to content-addressed sheets served only from this batch. */
+/** Link content-addressed stylesheets in their original cascade order and serve them only within the batch. */
 export const DESIGN_CAPTURE_SHEET_SCHEME = "zeros-capture";
 export const DESIGN_BATCH_CAPTURE_MAX_ITEMS = 64;
 export const DESIGN_BATCH_CAPTURE_MAX_DIMENSION = 1280;
 export const DESIGN_BATCH_CAPTURE_STYLESHEET_BYTES = 16 * 1024 * 1024;
 export const DESIGN_BATCH_CAPTURE_HTML_BYTES = 32 * 1024 * 1024;
 export const DESIGN_BATCH_CAPTURE_TIMEOUT_MS = 60_000;
-/** A batch's pictures together stay within this many pixels (64 thumbnails
- * fit easily; detail pictures go a few at a time), bounding the reply. */
+/** Bound the aggregate reply even when several large pictures share a batch. */
 export const DESIGN_BATCH_CAPTURE_PIXELS = 16 * 1024 * 1024;
 export const designCaptureSheetUrl = (hash: string) => `${DESIGN_CAPTURE_SHEET_SCHEME}://css/${hash}`;
 const sheetHash = z.string().regex(/^[a-f0-9]{64}$/);
@@ -210,12 +191,7 @@ const thumbnailFrame = z.object({
 }).strict();
 /** Engines that prepare a frame sent without its version while picturing it. */
 export const DESIGN_THUMBNAILS_PREPARE_CAPABILITY = "design.thumbnails.prepare.v1";
-/** design.thumbnails.render: pictures of saved frames at one size, theme and
- * color scheme. A frame whose source moved on comes back as stale, with its
- * current version, rather than as a picture of other content. A frame sent
- * without a version (design.thumbnails.prepare.v1) is pictured as it is now,
- * and its design.frames.prepare record comes back too while the catalog is
- * still at `catalogRevision`. */
+/** A moved source returns stale; a versionless request may also return preparation data while catalogRevision still matches. */
 export const designThumbnailsRenderSchema = z.object({
   workspaceId: z.string().min(1).max(128),
   directoryId: z.string().min(1).max(128),
@@ -233,12 +209,10 @@ export const designThumbnailsRenderSchema = z.object({
   .refine((input) => input.catalogRevision !== undefined || input.frames.every((frame) => frame.sourceVersion !== undefined),
     "A thumbnail frame without a version needs the catalog revision.");
 export type DesignThumbnailsRender = z.infer<typeof designThumbnailsRenderSchema>;
-/** Base64 picture data in one reply. The whole reply must fit one bridge
- * frame (MAX_BRIDGE_FRAME_BYTES, 16 MiB), which a receiver drops when larger. */
+/** Leave room for metadata within the bridge's 16 MiB frame limit. */
 export const DESIGN_THUMBNAILS_REPLY_DATA_BYTES = 12 * 1024 * 1024;
 export const designThumbnailsReplySchema = z.object({
-  /** Identifies how the pictures were made (composer and capture renderer):
-   * stored pictures from another pipeline are not reused. */
+  /** Stored pictures from another composition or capture pipeline cannot be reused as current. */
   pipeline: z.string().min(1).max(256),
   pictures: z.array(thumbnailFrame.extend({
     mimeType: z.literal("image/png"),
@@ -260,9 +234,7 @@ export type DesignThumbnailsReply = z.infer<typeof designThumbnailsReplySchema>;
 
 /** Local engines that keep frame thumbnails across launches. */
 export const DESIGN_THUMBNAILS_STORE_CAPABILITY = "design.thumbnails.store.v1";
-/** design.thumbnails.read: each frame's newest stored picture at one size,
- * theme and color scheme, of any generation: the caller compares
- * `sourceVersion` and `pipeline` to tell a current picture from a cover. */
+/** Reads can return any stored generation; compare sourceVersion and pipeline before treating it as current. */
 export const designThumbnailsReadSchema = z.object({
   workspaceId: z.string().min(1).max(128),
   directoryId: z.string().min(1).max(128),
@@ -293,28 +265,22 @@ export const designThumbnailsReadReplySchema = z.object({
     "Thumbnail pictures exceed one reply.");
 export type DesignThumbnailsReadReply = z.infer<typeof designThumbnailsReadReplySchema>;
 
-/** Local engines that answer with Skia picture recordings of saved frames:
- * vector drawing commands a GPU canvas replays crisply at any zoom. Internal
- * while the recorded canvas is behind its internal feature flag. */
+/** Local engines with this capability return Skia pictures; the recorded canvas is internal-only. */
 export const DESIGN_RECORDINGS_CAPABILITY = "design.recordings.v1";
 /** design.recordings.read accepts `withFailures`. */
 export const DESIGN_RECORDINGS_READ_FAILURES_CAPABILITY = "design.recordings.read-failures.v1";
 /** design.recordings.render and .read accept `colorScheme`. */
 export const DESIGN_RECORDINGS_COLOR_SCHEME_CAPABILITY = "design.recordings.color-scheme.v1";
-/** A recording is stored and sent as content-defined chunks. An id is the
- * first 32 hex characters of the chunk's SHA-256, so identical bytes, such
- * as the font data every recording of a page embeds, travel and persist once. */
+/** Chunk IDs are the first 32 hex digits of SHA-256; identical bytes are transferred and stored once. */
 export const DESIGN_RECORDING_CHUNK_ID_PATTERN = /^[a-f0-9]{32}$/;
 export const DESIGN_RECORDING_CHUNK_MAX_BYTES = 64 * 1024;
-/** One reassembled recording layer at most. Recordings embed the full data of
- * every font they draw with, so a frame using a system font reaches megabytes. */
+/** Bounds a reassembled layer; embedded font data can make one layer several megabytes. */
 export const DESIGN_RECORDING_MAX_BYTES = 64 * 1024 * 1024;
 export const DESIGN_RECORDING_MAX_LAYERS = 16;
 /** Base64 chunk data in one reply, within one bridge frame like thumbnails. */
 export const DESIGN_RECORDINGS_REPLY_DATA_BYTES = 12 * 1024 * 1024;
 export const DESIGN_RECORDINGS_KNOWN_CHUNKS = 4096;
 export const DESIGN_RECORDING_MAX_TYPEFACES = 64;
-/** One font's data at most (an externalized typeface). */
 export const DESIGN_RECORDING_TYPEFACE_MAX_BYTES = 64 * 1024 * 1024;
 const recordingChunkId = z.string().regex(DESIGN_RECORDING_CHUNK_ID_PATTERN);
 const recordingFrame = thumbnailFrame;
@@ -357,9 +323,7 @@ const recordingTypeface = z.object({
 const recordingTypefaces = z.array(recordingTypeface).max(DESIGN_RECORDING_MAX_TYPEFACES * DESIGN_BATCH_CAPTURE_MAX_ITEMS);
 const withinReply = (reply: { chunks: Array<{ data: string }> }) =>
   reply.chunks.reduce((total, chunk) => total + chunk.data.length, 0) <= DESIGN_RECORDINGS_REPLY_DATA_BYTES;
-/** design.recordings.render: recordings of saved frames in one theme, light
- * color scheme, recorded where missing. Chunks the caller names as known are
- * not sent again. Cancelled like thumbnails, through design.preview.cancel. */
+/** Render missing saved frames for one theme and color scheme; skip known chunks and cancel through design.preview.cancel. */
 export const designRecordingsRenderSchema = z.object({
   workspaceId: z.string().min(1).max(128),
   directoryId: z.string().min(1).max(128),
@@ -377,26 +341,21 @@ export const designRecordingsRenderSchema = z.object({
   .refine((input) => (input.jobId === undefined) === (input.deadline === undefined), "Recording job and deadline must be supplied together.");
 export type DesignRecordingsRender = z.infer<typeof designRecordingsRenderSchema>;
 export const designRecordingsReplySchema = z.object({
-  /** How recordings were made (composer and recorder): another pipeline's
-   * recordings are not reused, and a change re-requests. */
+  /** A change to the composer or recorder pipeline makes the client request new recordings. */
   pipeline: z.string().min(1).max(256),
   recordings: z.array(designRecordingSchema).max(DESIGN_BATCH_CAPTURE_MAX_ITEMS),
   /** Every typeface the reply's recordings reference, once. */
   typefaces: recordingTypefaces,
   chunks: recordingChunks,
   stale: z.array(recordingFrame).max(DESIGN_BATCH_CAPTURE_MAX_ITEMS),
-  /** `retryable`: the attempt failed, not the frame (a recorder page that
-   * crashed or stalled, a recorder restart, storage); asking again later can
-   * succeed. Without it the same source and recorder fail the same way. */
+  /** Retryable failures belong to the attempt; otherwise the same source and recorder will fail again. */
   failed: z.array(z.object({ file: z.string().min(1).max(255), error: z.string().min(1).max(500), retryable: z.literal(true).optional() }).strict())
     .max(DESIGN_BATCH_CAPTURE_MAX_ITEMS),
   /** Not answered in this reply, to keep it within one frame: ask again. */
   deferred: z.array(recordingFrame).max(DESIGN_BATCH_CAPTURE_MAX_ITEMS),
 }).strict().refine(withinReply, "Recording chunks exceed one reply.");
 export type DesignRecordingsReply = z.infer<typeof designRecordingsReplySchema>;
-/** design.recordings.read: each frame's newest stored recording of any
- * generation, for drawing at open before frames are prepared. Nothing is
- * recorded. A frame sent with a version is answered only by that version. */
+/** Read stored recordings without rendering; a named version must match exactly. */
 export const designRecordingsReadSchema = z.object({
   workspaceId: z.string().min(1).max(128),
   directoryId: z.string().min(1).max(128),
@@ -417,16 +376,13 @@ export const designRecordingsReadReplySchema = z.object({
   missing: z.array(z.string().min(1).max(255)).max(DESIGN_MAX_FRAMES_PER_PAGE),
   /** Not looked up, to keep the reply within one frame: ask again. */
   deferred: z.array(z.string().min(1).max(255)).max(DESIGN_MAX_FRAMES_PER_PAGE),
-  /** With `withFailures`: missing frames whose newest generation (or the
-   * named one) the current recorder can't record. Also listed in `missing`. */
+  /** With withFailures, missing frames the recorder cannot record also appear here. */
   failed: z.array(z.object({ file: z.string().min(1).max(255), sourceVersion: recordingFrame.shape.sourceVersion,
     error: z.string().min(1).max(500) }).strict()).max(DESIGN_MAX_FRAMES_PER_PAGE).optional(),
 }).strict().refine(withinReply, "Recording chunks exceed one reply.");
 export type DesignRecordingsReadReply = z.infer<typeof designRecordingsReadReplySchema>;
 
-/** Engine to capture host: record frames as Skia pictures. Same documents
- * and content-addressed stylesheets as batch capture, at each frame's own
- * layout viewport; nothing is rasterized. */
+/** Record Skia pictures at the layout viewport using the same content-addressed styles as batch capture. */
 export const designBatchRecordRequestSchema = z.object({
   version: z.literal(1),
   revision: z.string().min(1).max(128),
@@ -443,11 +399,9 @@ export const designBatchRecordRequestSchema = z.object({
     input.items.reduce((sum, item) => sum + item.html.length, 0) <= DESIGN_BATCH_CAPTURE_HTML_BYTES,
     { message: "Batch record exceeds its byte budget." });
 export type DesignBatchRecordRequest = z.infer<typeof designBatchRecordRequestSchema>;
-/** Recording folders the capture host writes into, in the OS temporary
- * directory, start with this; the engine reads layer files only from them. */
+/** The engine only accepts recorder files in matching OS temporary directories. */
 export const DESIGN_RECORDER_FOLDER_PREFIX = "zeros-design-recorder-";
-/** Capture host to engine. A layer's picture is a file the host wrote inside
- * its private recording folder; the engine stores its bytes, then removes it. */
+/** Layer files come from the host's private recording folder and are removed after import. */
 export const designBatchRecordReplySchema = z.object({
   version: z.literal(1),
   revision: z.string().min(1).max(128),
@@ -464,9 +418,7 @@ export const designBatchRecordReplySchema = z.object({
         typefaces: z.array(z.object({ id: recordingChunkId, path: z.string().min(1).max(4096) }).strict()).max(DESIGN_RECORDING_MAX_TYPEFACES),
       }).strict()).min(1).max(DESIGN_RECORDING_MAX_LAYERS),
     }).strict(),
-    /** `permanent`: the frame itself can't be recorded by this recorder (for
-     * example it paints on several composited layers), so asking again for
-     * the same source and recorder gives the same answer. */
+    /** Permanent failures recur on the same source and recorder, unlike transient host failures. */
     z.object({ id: z.string().min(1).max(128), error: z.string().min(1).max(500), permanent: z.literal(true).optional() }).strict(),
   ])).max(DESIGN_BATCH_CAPTURE_MAX_ITEMS),
 }).strict();

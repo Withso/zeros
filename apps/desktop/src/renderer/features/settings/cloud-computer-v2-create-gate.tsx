@@ -17,11 +17,11 @@ export type CloudComputerRepository = CloudV2InstalledRepository;
 type Installed = readonly CloudComputerRepository[] | null;
 
 const MAX_AGE_MS = 30_000;
-/** Keyed by [userId, organizationId]; null means no live build yet. */
 function browserStorage() {
   try { return typeof localStorage === "undefined" ? undefined : localStorage; } catch { return undefined; }
 }
 const savedRepositories = new CloudComputerRepositorySnapshots(browserStorage(), CONTROL_PLANE_URL ?? "");
+// Scope snapshots to account and organization; null is a confirmed missing build.
 export const cloudComputerRepositoriesCache = new KeyedAsyncCache<Installed>({
   maxEntries: 16,
   initialSnapshot: key => savedRepositories.get(key),
@@ -83,8 +83,7 @@ export function useCloudComputerV2CreateGate(active: boolean) {
   const required = enabled && (reason === cloudComputerV2BuildRequired || rebuildRequired(error));
   const refresh = read.refresh;
   useEffect(() => {
-    // An admin can finish the first build elsewhere; observe slowly while the
-    // visible gate is blocked on it.
+    // Check while blocked and visible: an admin can build from another surface.
     if (!enabled || !active || !shown || !required) return;
     const timer = setInterval(refresh, MAX_AGE_MS);
     return () => clearInterval(timer);

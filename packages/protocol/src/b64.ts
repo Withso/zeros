@@ -16,10 +16,7 @@ export function bytesToBase64Url(bytes: Uint8Array): string {
   } else {
     throw new Error("No base64 encoder available in this runtime");
   }
-  // `={1,2}` not `=+`: base64 padding is 0, 1 or 2 chars by definition, so the
-  // unbounded quantifier could never match more — but it made the pattern a
-  // polynomial-backtracking shape over a long `=` run (CodeQL js/polynomial-redos).
-  // Bounding it is both faster and a tighter statement of what padding is.
+  // Base64 padding is at most two characters; bound the match to avoid pathological backtracking.
   return b64.replace(/\+/g, "-").replace(/\//g, "_").replace(/={1,2}$/, "");
 }
 

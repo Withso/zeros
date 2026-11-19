@@ -11,8 +11,7 @@ const prompt = { msgId: "prompt", kind: "text", payload: '{"id":"prompt","kind":
 const range = { revision: 3, messageCount: 1, fromIndex: 0, toIndex: 1, rows: [{ ...prompt, index: 0 }], senders: { prompt: alice } };
 afterEach(() => { clearChatSenders(); resetChatSenderLookupsForTests(); vi.useRealTimers(); });
 
-// Master's ruling (the owner's workspaces are Team-shared): a shared chat opened from a matching cache makes zero
-// requests, attribution included. Only main's cache is asked; nothing reaches the control plane.
+// A matching shared-chat cache must supply attribution over native cache IPC without a control-plane call.
 describe("a Team-shared chat opened from a matching cache", () => {
   it("serves its senders from the cache and never asks messages.senders", async () => {
     vi.useFakeTimers();

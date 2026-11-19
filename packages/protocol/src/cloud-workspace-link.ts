@@ -1,18 +1,4 @@
-// ──────────────────────────────────────────────────────────
-// Cloud workspace links
-// ──────────────────────────────────────────────────────────
-//
-// `zeros[-alpha|-beta|-dev]://cloud-workspace/<organizationId>/<workspaceId>`
-// opens one cloud workspace in the desktop app and switches to its
-// organization. The older web workspace page (app.zeros.build/workspace/<id>)
-// opens it; the numbered page opens `<scheme>://<organization ID>/w/<n>`
-// (local-orchestration.ts). apps/web formats both without this package, and a
-// root test keeps them equal.
-//
-// The link carries the control plane's two UUIDs and nothing else. It grants
-// nothing: the desktop reads the workspace as the signed-in account, and the
-// control plane answers only its creator.
-// ──────────────────────────────────────────────────────────
+// Cloud links grant no access: desktop resolves them as the signed-in account. Web and desktop formatters must stay in sync.
 
 import {
   LOCAL_LINK_SCHEMES,
@@ -62,10 +48,7 @@ export function parseCloudWorkspaceLink(text: string): CloudWorkspaceLink | null
   };
 }
 
-// A cloud workspace's shareable web page is addressed by its organization's
-// slug and the workspace's permanent number: `app.zeros.build/<slug>/w/<n>`.
-// The older `/workspace/<id>` page stays served. apps/web parses this path
-// without importing this package; scripts/__tests__ keep the two equal.
+// Web duplicates numbered-page parsing; legacy /workspace/<id> URLs must still work.
 
 /** Owner segments no organization's page uses: web routes, Local's own owner
  * and link actions. The control plane never gives a new organization one of
@@ -76,7 +59,6 @@ export const RESERVED_WORKSPACE_LINK_OWNERS: readonly string[] = Object.freeze([
   "invite", "local", "open", "personal", "schemas", "w", "workspace",
 ]);
 
-/** Can this organization slug address a numbered workspace page? */
 export function isCloudWorkspacePageOwner(owner: unknown): owner is string {
   return isWorkspaceLinkOwner(owner) && !RESERVED_WORKSPACE_LINK_OWNERS.includes(owner);
 }

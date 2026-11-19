@@ -3,8 +3,7 @@ import { createIndexedDbRecordStore } from "../indexeddb-record-store";
 
 type Handler = (() => void) | null;
 
-/** The IndexedDB surface the record store uses, with a hook for the browser
- * closing a connection (storage cleared, an I/O error). */
+/** Model browser-initiated connection loss such as storage clearing or an I/O error. */
 function fakeIndexedDb() {
   const databases = new Map<string, { stores: Map<string, Map<string, unknown>>; keyPaths: Map<string, string> }>();
   const connections: FakeDatabase[] = [];
@@ -23,7 +22,6 @@ function fakeIndexedDb() {
     close() {
       this.closed = true;
     }
-    /** The browser closes the connection and says so. */
     lose() {
       this.closed = true;
       this.onclose?.();

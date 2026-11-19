@@ -7,8 +7,7 @@ import {
 } from "@zeros/protocol/provider-auth";
 import { getSetting, setSetting } from "../../platform/settings";
 
-// Device-local cache, outside synced personal preferences. Only normalized
-// display data is persisted; native credentials never enter the renderer.
+// This persisted usage cache is device-local and holds normalized display data, not credentials.
 const STORAGE_KEY = "provider-usage-v1";
 const MAX_ENTRIES = 32;
 const RETENTION_MS = 35 * 24 * 60 * 60_000;
@@ -42,8 +41,7 @@ function ownerForKey(key: string): string | undefined {
   try {
     const [provider, method, accountId, , identity] = JSON.parse(key);
     const owner = ownerSchema.parse([provider, method, accountId, identity]);
-    // A CLI without confirmed identity cannot safely restore an earlier
-    // device login. Saved Account profiles have their own durable UUID.
+    // Require confirmed CLI identity for restore; saved Accounts have durable UUIDs.
     if (method === "cli" && (!identity || identity === "[null,null]"))
       return undefined;
     return JSON.stringify(owner);
@@ -58,8 +56,7 @@ function matchesOwner(owner: string, data: ProviderUsageSnapshot): boolean {
     parts[0] === data.provider &&
     parts[1] === data.method &&
     parts[2] === (data.accountId ?? null) &&
-    // Earlier CLI snapshots never confirmed whose token supplied their quota.
-    // Discard those ambiguous records when reading the existing storage key.
+    // Reject legacy CLI snapshots whose quota owner was not confirmed.
     (data.method !== "cli" || parts[3] === data.identity) &&
     (data.identity === undefined || parts[3] === data.identity),
   );

@@ -1,8 +1,4 @@
-// When a provider silently starts fresh ("no rollout found", "session not
-// found"), synthesizeReplayPrompt prepends a compact preamble so the agent can
-// continue without amnesia. It keeps user prompts and final assistant replies,
-// never tool calls, thinking, system notes, earlier replay notices or empty
-// messages, and only the most recent MAX_MESSAGES within MAX_CHARS.
+// Replay restores text context after a provider starts a new session instead of resuming the old one.
 
 import type { AgentMessage, AgentTextMessage } from "./agent-messages";
 
@@ -19,41 +15,24 @@ export function isConversationReplayPreamble(text: string): boolean {
     text.endsWith(CONTINUATION);
 }
 
-/** Cap on how many user/assistant text messages we'll include in the
- *  replay. 60 = ~30 turns of back-and-forth — enough context for the
- *  agent to follow the thread without overflowing the context window
- *  on big-model + big-tool runs. Older messages drop. */
 const MAX_MESSAGES = 60;
 
-/** Total char budget for the replay body (excluding XML wrappers).
- *  16k chars ≈ 4k tokens — a manageable one-time cost. Older messages
- *  drop until the body fits. */
+/** Only framed turns count toward this budget; the first over-budget turn and all later turns are dropped. */
 const MAX_CHARS = 16_000;
 
-/** Per-message char clamp so a single ~30k-char paste in the prior
- *  chat doesn't dominate the replay budget. Truncated with an ellipsis. */
+/** Clamp each turn so one large paste cannot consume the whole turn budget. */
 const PER_MESSAGE_CHARS = 2_000;
 
 export interface ReplayResult {
-  /** The XML-framed preamble. Empty string when there's nothing
-   *  worth replaying (no eligible messages, all empty). The caller
-   *  should check this and skip the replay step in that case. */
   text: string;
-  /** Number of source messages that contributed to the preamble. The
-   *  caller surfaces this in the synthetic system notice ("Replayed
-   *  N prior messages"). 0 when text is empty. */
+  /** Counts replayed turns, not the separate summary. */
   messageCount: number;
-  /** Whether messages were dropped because of the caps. Lets the
-   *  caller surface "(earlier messages omitted)" if they want. */
+  /** Reports omitted turns, not per-turn clipping. */
   truncated: boolean;
 }
 
-/** Pure: produce the replay preamble for a list of prior messages.
- *  Works on the canonical AgentMessage[] from sessions-store, so the
- *  caller can pass `slot.messages` directly. */
 export function synthesizeReplayPrompt(messages: AgentMessage[]): ReplayResult {
-  // Filter to text-only user/assistant messages with content. Skip
-  // tool calls, thinking, system meta-notices, redacted thoughts.
+  // Never replay unsent or redacted text.
   const textOnly = messages.filter((m): m is AgentTextMessage => {
     if (m.kind !== "text") return false;
     if (m.role !== "user" && m.role !== "agent") return false;
@@ -65,16 +44,7 @@ export function synthesizeReplayPrompt(messages: AgentMessage[]): ReplayResult {
     return { text: "", messageCount: 0, truncated: false };
   }
 
-  // If the chat has been summarized at any
-  // point, the latest summary boundary is the "true start" of the
-  // replay. Everything before the summary is folded into the summary
-  // text itself (frame as <previous_conversation_summary>) — replaying
-  // raw history before the boundary would double-count those tokens.
-  //
-  // Search back-to-front for the latest summaryBoundary on an agent
-  // message. The summary text comes FIRST in the synthesized prompt
-  // (so the model sees the compacted history before the live tail);
-  // post-summary messages render as normal <user>/<assistant> pairs.
+  // Use the latest agent summary in place of earlier turns; replaying both duplicates the compacted history.
   let summaryText: string | null = null;
   let postSummaryStart = 0;
   for (let i = textOnly.length - 1; i >= 0; i--) {
@@ -87,19 +57,12 @@ export function synthesizeReplayPrompt(messages: AgentMessage[]): ReplayResult {
   }
   const eligibleForReplay = textOnly.slice(postSummaryStart);
 
-  // Take the most recent MAX_MESSAGES from the eligible window; older
-  // ones drop. Build forward (oldest-first within the kept window)
-  // so the chronological flow is preserved for the agent's reasoning.
   const truncatedByCount = eligibleForReplay.length > MAX_MESSAGES;
   const window = truncatedByCount
     ? eligibleForReplay.slice(eligibleForReplay.length - MAX_MESSAGES)
     : eligibleForReplay;
 
-  // Render each message with a per-message clamp + role tag. We use
-  // <user>/<assistant> XML tags rather than "User: ..." / "Assistant: ..."
-  // prose because every modern LLM treats these tags as turn boundaries
-  // without further prompting (Anthropic, OpenAI, Google all document
-  // this pattern in their prompt-engineering guides).
+  // Role tags distinguish conversation turns from the continuation instruction.
   const parts: string[] = [];
   let charCount = 0;
   let charBudgetExceeded = false;
@@ -118,9 +81,6 @@ export function synthesizeReplayPrompt(messages: AgentMessage[]): ReplayResult {
     charCount += piece.length + 1; // +1 for the join newline
   }
 
-  // Empty post-summary tail is fine when a summary IS present — we
-  // still want to send the summary as context. Only bail when both
-  // are empty.
   if (parts.length === 0 && !summaryText) {
     return { text: "", messageCount: 0, truncated: false };
   }
@@ -130,10 +90,6 @@ export function synthesizeReplayPrompt(messages: AgentMessage[]): ReplayResult {
     ? `(Older messages omitted to fit context budget. Resume from the most recent exchange.)\n`
     : "";
 
-  // If a summary is in scope, prepend it as a separate
-  // <previous_conversation_summary> block. This frames the compacted
-  // history before the live tail. The model sees: summary first,
-  // then any post-summary turns.
   const summaryBlock = summaryText
     ? [
         `<previous_conversation_summary>`,
@@ -142,10 +98,6 @@ export function synthesizeReplayPrompt(messages: AgentMessage[]): ReplayResult {
       ].join("\n")
     : "";
 
-  // The wrapper text is deliberately terse. We don't tell the agent
-  // "this is a replay because the rollout was deleted" — that's UX
-  // implementation detail the model doesn't need. We just frame the
-  // history and ask it to continue.
   const conversationBlock =
     parts.length > 0
       ? [

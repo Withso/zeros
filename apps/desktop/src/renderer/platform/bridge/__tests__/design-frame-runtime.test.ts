@@ -52,9 +52,7 @@ it("waits for the requested generation across an outgoing and incoming document"
 });
 
 it("keeps an outgoing document painting what it shows until its owner lets it go", async () => {
-  // A text or structural commit shows its new document only once it has laid
-  // out. Tearing the outgoing runtime down at the new one's handshake made it
-  // restore its saved text and styles under the editor until that swap.
+  // Tearing down the outgoing runtime on the incoming handshake would revert its visible previews before the buffer swap.
   const workspace = "replacement-paint";
   const host = { setTimeout: (work: () => void, ms: number) => setTimeout(work, ms) as unknown as number,
     clearTimeout: (id: number) => clearTimeout(id) };
@@ -80,9 +78,8 @@ it("keeps an outgoing document painting what it shows until its owner lets it go
     await vi.waitFor(() => expect(designFrameRuntime(workspace, "home.html")).toBe(incoming!.connection));
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(outgoing.teardowns()).toBe(0);
-    // Retired all the same: it takes no further work.
     await expect(outgoing.connection.getSnapshot()).rejects.toBeInstanceOf(DesignFrameRuntimeError);
-    // Its buffer unmounts with the swap, and only then is it torn down.
+    // Destroy stands in for the outgoing buffer's unmount, not the incoming handshake.
     outgoing.connection.destroy();
     await vi.waitFor(() => expect(outgoing.teardowns()).toBe(1));
   } finally {
@@ -233,7 +230,6 @@ describe("design frame runtime client", () => {
       ...snapshot(1).frame, oid: "send", heldState: state, states: ["hover", "focus-visible"], ...overrides,
     });
     try {
-      // An older runtime fails honestly before any request is sent.
       await expect(connection.holdNodeState!("send", "hover", "hold-1")).rejects.toMatchObject({ code: "METHOD_NOT_SUPPORTED" });
       expect(requests).toHaveLength(0);
       port.postMessage({ protocol: DESIGN_RUNTIME_PROTOCOL, version: DESIGN_RUNTIME_VERSION, type: "event", event: "ready",
@@ -242,14 +238,13 @@ describe("design frame runtime client", () => {
       reply = (args) => held(args.state as string);
       await expect(connection.holdNodeState!("send", "hover", "hold-1")).resolves.toMatchObject({ heldState: "hover" });
       expect(requests.at(-1)).toMatchObject({ method: "holdNodeState", args: { nodeId: "send", state: "hover", holdId: "hold-1" } });
-      // A reply that is not the held state, or not that layer, is refused.
       reply = () => held("focus");
       await expect(connection.holdNodeState!("send", "hover", "hold-2")).rejects.toThrow("malformed");
       reply = () => held("hover", { oid: "other" });
       await expect(connection.holdNodeState!("send", "hover", "hold-3")).rejects.toThrow("malformed");
       reply = () => ({ ...snapshot(1).frame, oid: "send" });
       await expect(connection.holdNodeState!("send", "hover", "hold-4")).rejects.toThrow("malformed");
-      // An unreadable held state never passes for Default.
+      // An unreadable state is not the layer's Default state.
       reply = () => held("visited");
       await expect(connection.getNodeDetails("send")).rejects.toThrow("malformed");
       reply = () => ({ released: true });
@@ -370,7 +365,6 @@ describe("design frame runtime client", () => {
       ...overrides,
     });
     try {
-      // A runtime that predates it fails honestly before any request is sent.
       await expect(connection.getFrameChanges!()).rejects.toMatchObject({ code: "METHOD_NOT_SUPPORTED" });
       expect(requests).toHaveLength(0);
       port.postMessage({ protocol: DESIGN_RUNTIME_PROTOCOL, version: DESIGN_RUNTIME_VERSION, type: "event", event: "ready",
@@ -381,7 +375,6 @@ describe("design frame runtime client", () => {
       expect(requests.at(-1)).toMatchObject({ method: "getFrameChanges", args: {} });
       await connection.getFrameChanges!([{ oid: "send", property: "border-radius" }]);
       expect(requests.at(-1)).toMatchObject({ args: { follow: [{ oid: "send", property: "border-radius" }] } });
-      // Another generation's reply, or a malformed one, is refused.
       reply = () => changes({ sourceVersion: NEXT_SOURCE_VERSION });
       await expect(connection.getFrameChanges!()).rejects.toThrow("malformed");
       reply = () => changes({ examined: "many" });
@@ -408,7 +401,6 @@ describe("design frame runtime client", () => {
     };
     port.start();
     try {
-      // Older engines must fail honestly before any request is sent.
       await expect(connection.setPlayback("first", true)).rejects.toMatchObject({ code: "METHOD_NOT_SUPPORTED" });
       port.postMessage({ protocol: DESIGN_RUNTIME_PROTOCOL, version: DESIGN_RUNTIME_VERSION, type: "event", event: "ready",
         payload: { sourceVersion: SOURCE_VERSION, capabilities: { ...capabilities, methods: [...capabilities.methods, "setPlayback"] }, snapshot: snapshot(1) } });
@@ -481,12 +473,11 @@ describe("design frame runtime client", () => {
     const displayed = connect(SOURCE_VERSION);
     try {
       await vi.waitFor(() => expect(designFrameRuntime("undo-workspace", "home.html")).toBe(displayed.connection));
-      // The replacement connects and takes the frame while the old document still paints.
+      // Editable authority moves at readiness, before the outgoing buffer stops painting.
       const incoming = connect(NEXT_SOURCE_VERSION);
       await vi.waitFor(() => expect(designFrameRuntime("undo-workspace", "home.html")).toBe(incoming.connection));
       expect(displayed.connection.isActive!()).toBe(false);
-      // An undo returns to the displayed generation before the swap: the
-      // replacement goes away, and the displayed document takes the frame back.
+      // Undo can reclaim the still-painted document if the incoming buffer never swaps in.
       incoming.connection.destroy(true);
       expect(designFrameRuntime("undo-workspace", "home.html")).toBeNull();
       expect(displayed.connection.reinstate!()).toBe(true);
@@ -494,13 +485,11 @@ describe("design frame runtime client", () => {
       expect(displayed.connection.isActive!()).toBe(true);
       await expect(displayed.connection.getSnapshot()).resolves.toMatchObject({ sourceVersion: SOURCE_VERSION });
       expect(displayed.requests).toContain("getSnapshot");
-      // Taking it back from a replacement still connected retires that one.
       const another = connect(NEXT_SOURCE_VERSION);
       await vi.waitFor(() => expect(designFrameRuntime("undo-workspace", "home.html")).toBe(another.connection));
       expect(displayed.connection.reinstate!()).toBe(true);
       expect(designFrameRuntime("undo-workspace", "home.html")).toBe(displayed.connection);
       expect(another.connection.isActive!()).toBe(false);
-      // A document that was torn down, not retired, cannot come back.
       displayed.connection.destroy();
       expect(displayed.connection.reinstate!()).toBe(false);
       expect(designFrameRuntime("undo-workspace", "home.html")).toBeNull();
@@ -592,8 +581,7 @@ describe("design frame runtime client", () => {
       version: DESIGN_RUNTIME_VERSION,
       type: "handshake",
       sourceVersion: SOURCE_VERSION,
-      // Opt-in methods: a runtime advertises them only when asked, so a host
-      // that predates one still accepts the runtime's capabilities.
+      // The runtime advertises these methods only on request so older hosts still accept its capabilities.
       features: ["previewStylesheet", "setPlayback", "previewInsert", "clearPreviewInserts", "previewHistory", "commitStructure", "previewStructure", "clearPreviewStructure", "holdNodeState", "releaseNodeState", "getFrameChanges", "previewComponentOptions", "previewComponentInstanceOptions", "getComponentPartAtLoc", "measureLayout"],
     });
     expect(handshake?.[1]).toMatchObject({ targetOrigin: "*" });
@@ -640,8 +628,7 @@ describe("design frame runtime client", () => {
     expect(source.postMessage).toHaveBeenCalledTimes(1);
     await expect(pending).resolves.toMatchObject({ revision: 2 });
 
-    // The default theme travels with every theme applied: it can change
-    // without a new handshake.
+    // Each call carries the current default theme because it can change without a new handshake.
     const theme = connection.setTheme("dark", "light");
     await vi.waitFor(() => expect(requests).toHaveLength(2));
     const themeRequest = requests[1] as { requestId: string; args: unknown };
@@ -939,8 +926,7 @@ describe("design frame runtime client", () => {
               )
             : connection.restoreGeneration(NEXT_SOURCE_VERSION, true);
         await vi.waitFor(() => expect(adoptionRequest).not.toBeNull());
-        // The document has changed, but its confirmation has not reached the
-        // host. The next interaction must retain its intent across that gap.
+        // Queue new interactions while the document has adopted the generation but its acknowledgement is still in flight.
         const interacting = Promise.allSettled([
           connection.getNodeDetails("frame"),
           connection.previewLayout({

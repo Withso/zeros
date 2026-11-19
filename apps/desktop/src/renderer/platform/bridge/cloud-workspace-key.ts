@@ -1,6 +1,3 @@
-/** Device UI identity, never a filesystem path or a control-plane identifier.
- * The server UUIDs remain unchanged; this namespace isolates identical remote
- * checkout paths and native conversation/execution ids across runtimes. */
 export interface CloudWorkspaceTarget {
   organizationId: string;
   workspaceId: string;
@@ -12,6 +9,7 @@ const UUID_IDENTITY = new RegExp(`^${UUID}$`, "i");
 const KEY = new RegExp(`^cloud://(${UUID})/(${UUID})(?:/(.*))?$`, "i");
 const ID = new RegExp(`^cloud:(${UUID}):(${UUID}):(.+)$`, "i");
 
+// This UI key namespaces cloud checkouts but is never a filesystem path; server IDs stay unchanged.
 export function cloudWorkspaceKey(target: CloudWorkspaceTarget): string {
   const key = `cloud://${target.organizationId}/${target.workspaceId}`;
   if (

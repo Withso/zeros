@@ -1,6 +1,6 @@
 import { isCloudWorkspace } from "./bridge/cloud-workspace-key";
 
-/** Cloud workspaces have no Browser, previews or port forwarding for now. */
+// Cloud workspaces do not expose browser, preview or port-forwarding surfaces.
 export function workspacePreviewAvailable(folder: string): boolean {
   return !isCloudWorkspace(folder);
 }

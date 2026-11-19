@@ -14,8 +14,7 @@ vi.mock("react", () => ({
     if (!prior?.dependencies || dependencies.some((item, n) => !Object.is(item, prior.dependencies![n]))) f.slots[i] = { value, dependencies };
     return f.slots[i].value;
   },
-  // Deliberately hold passive effect cleanup: hidden/foreign handlers must be
-  // fenced by the new render before its effects run.
+  // Disable passive cleanup so the test exercises render-time fencing of stale handlers.
   useEffect: () => {}, useSyncExternalStore: (_subscribe: unknown, read: () => unknown) => read(),
 }));
 vi.mock("../../team/team-store", () => ({ getOrganizationStoreGeneration: () => f.epoch,

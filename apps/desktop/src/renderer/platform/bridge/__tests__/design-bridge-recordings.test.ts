@@ -45,7 +45,6 @@ describe("Design recordings bridge", () => {
     const render = bridgeReturning(() => ({ ...renderReply, failed: [retryable] }), [DESIGN_PREVIEW_JOBS_CAPABILITY]);
     const reply = await bridgeDesignRecordingsRender(render.bridge, "/work/local", { directoryId: "design_a", theme: null,
       frames, knownChunks: [] });
-    // A retryable failure must not cost the reply's recordings.
     expect(reply.recordings).toHaveLength(1);
     expect(reply.failed).toEqual([retryable]);
     const read = bridgeReturning(() => ({ recordings: [], typefaces: [], chunks: [], missing: [recording.file], deferred: [],

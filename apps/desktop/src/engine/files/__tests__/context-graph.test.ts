@@ -1,7 +1,3 @@
-// Contract tests for the context-graph module: scaffold idempotence (with no
-// ignore rules written), the flat attachment layout and earlier builds'
-// scopes, bounded listing with previews, archive selection, and the
-// path-safety refusals.
 
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs/promises";
@@ -33,7 +29,6 @@ afterEach(async () => {
 const graph = (...parts: string[]) =>
   path.join(root, CONTEXT_GRAPH_DIR, ...parts);
 
-/** Seed a record in the current flat layout, or in an earlier build's scope. */
 async function seedAttachment(
   scope: "flat" | "local" | "shared",
   id: string,
@@ -74,7 +69,6 @@ describe("ensureContextGraph", () => {
     const first = await ensureContextGraph(root);
     expect(first).toEqual({ ok: true, created: true });
     expect((await fs.stat(graph("attachments"))).isDirectory()).toBe(true);
-    // Whether `.context/` is committed is the repository's own choice.
     expect(await fs.readdir(graph())).toEqual(["attachments"]);
   });
 
@@ -177,7 +171,6 @@ describe("listContextGraph", () => {
       category: "doc",
       relPath: ".context/shared/docs/plan.txt",
     });
-    // Earlier scaffolding never shows up as content.
     expect(byName[".gitignore"]).toBeUndefined();
     expect(items).toHaveLength(3);
   });
@@ -345,8 +338,7 @@ describe("stageContextGraphAttachment", () => {
   it.each(["shared", "local"] as const)(
     "keeps a record an earlier build wrote under %s/ in its folder",
     async (scope) => {
-      // A draft attached before the upgrade still names the scoped path. The
-      // send-time re-write must not leave a second copy beside it.
+      // A draft saved before the upgrade still points to the scoped path.
       await seedAttachment(scope, "att-1", "notes.txt", "hello");
       const res = await stageContextGraphAttachment(root, {
         attachmentId: "att-1",
@@ -429,7 +421,6 @@ describe("stageContextGraphAttachment", () => {
     });
     expect(res.ok).toBe(true);
     expect(res.absolutePath).toContain(path.join("attachments", "att-1"));
-    // basename → "passwd"; nothing escaped the folder.
     const entries = await fs.readdir(graph("attachments", "att-1"));
     expect(entries).toEqual(["passwd"]);
   });
@@ -437,8 +428,6 @@ describe("stageContextGraphAttachment", () => {
   it("parks a name that sanitises to nothing on a constant", () => {
     expect(safeAttachmentFilename("///")).toBe("attachment");
     expect(safeAttachmentFilename("..")).toBe("attachment");
-    // Non-ASCII collapses to underscores (pre-existing policy) but keeps any
-    // ASCII extension: "日本語.png" → "_.png"; a bare "日本語" → "_".
     expect(safeAttachmentFilename("日本語.png")).toBe("_.png");
     expect(safeAttachmentFilename("ok name.png")).toBe("ok_name.png");
   });
@@ -463,9 +452,6 @@ describe("stageContextGraphAttachment", () => {
   });
 
   it("replaces a symlink squatting at the write path instead of following it", async () => {
-    // The post-attach path is predictable, so a hostile in-worktree process
-    // could plant a link there before the send-time re-write. writeFile
-    // follows symlinks; the stage must unlink the squatter, not its target.
     await ensureContextGraph(root);
     const target = path.join(root, "precious.txt");
     await fs.writeFile(target, "keep me");
@@ -504,8 +490,7 @@ describe("stageContextGraphAttachment", () => {
   });
 
   it("leaves a PRE-EXISTING two-scope divergence alone", async () => {
-    // An id hand-copied into both earlier scopes: the write refreshes the
-    // shared copy (the one a share action moved) and never deletes the other.
+    // The shared copy is the one the old share action moved.
     await seedAttachment("local", "att-1", "notes.txt", "local copy");
     await seedAttachment("shared", "att-1", "notes.txt", "shared copy");
     const res = await stageContextGraphAttachment(root, {

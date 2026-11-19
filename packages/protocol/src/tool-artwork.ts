@@ -1,14 +1,11 @@
-/** Presentation-only artwork carried inside a tool's existing rawInput. It
- * grants no capability and must never be treated as a trusted status badge. */
+/** Tool-supplied artwork is presentation only, never a trusted status badge. */
 export interface ToolArtwork {
   icon: string;
   iconDark?: string;
   name?: string;
 }
 
-/** Images render in an img element, never as inline SVG/HTML. Reject files,
- * active schemes, credentials and local network destinations. Public HTTPS
- * artwork is loaded anonymously; missing/invalid artwork uses existing icons. */
+/** Render only as an image, never inline markup. Allow approved image data or anonymous HTTPS; reject credentials, IP literals, and local hostnames. */
 export function safeToolImageSource(value: unknown): string | undefined {
   if (typeof value !== "string") return;
   if (value.length <= 96 * 1024) {

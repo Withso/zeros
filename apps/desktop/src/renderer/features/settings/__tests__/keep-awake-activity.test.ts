@@ -132,8 +132,7 @@ describe("global activity reporter", () => {
     expect(native.invoke).toHaveBeenCalledTimes(2);
     for (let i = 0; i < 100; i++) store().patchSession("Local", { usage: { ...BLANK.usage, outputTokens: i } });
     expect(native.invoke).toHaveBeenCalledTimes(2);
-    // Switching/removing Local and organization-local views cannot release
-    // work still owned by a cloud chat in another workspace.
+    // Releasing Personal Local and organization-local work must not release activity a cloud workspace still owns.
     store().patchSession("Local", { status: "ready" });
     store().patchSession("organization-local", { status: "ready" });
     expect(native.invoke).toHaveBeenCalledTimes(2);

@@ -1,23 +1,3 @@
-// ──────────────────────────────────────────────────────────
-// pty-bridge — renderer-side PTY-over-bridge client
-// ──────────────────────────────────────────────────────────
-//
-// The engine owns node-pty sessions (apps/desktop/src/engine/pty/service.ts) and drives them
-// for clients over the bridge: PTY_CREATE → PTY_CREATED (correlated by
-// requestId, so RuntimeClient.request resolves on it), then PTY_WRITE /
-// PTY_RESIZE / PTY_KILL fire-and-forget, with output streaming back as PTY_DATA
-// and termination as PTY_EXIT (both addressed to the owning client). The
-// desktop renderer and optional relay clients share this path; there is no
-// separate Electron PTY IPC implementation. Mirrors the WORKSPACE_REQUEST
-// pattern in workspace-bridge.ts.
-//
-// Reattach scrollback: the engine now keeps a per-session headless-terminal
-// mirror (apps/desktop/src/engine/pty/mirror.ts) and serializes its resolved grid on
-// reattach, so PTY_CREATED carries `reattached` + `replay`; a renderer refresh
-// or panel reopen repaints the exact pre-existing screen.
-// PTY_LIST also carries a PID-only, local process-root census used by the
-// desktop resource monitor; relay clients receive only scoped shared terminals.
-// ──────────────────────────────────────────────────────────
 
 import type { RuntimeClient } from "./ws-client";
 import type { BridgeMessage } from "./messages";
@@ -54,15 +34,7 @@ interface PtyExitLike {
   reason?: PtyExitReason;
 }
 
-/** Request a host PTY over the bridge and map PTY_CREATED → the renderer's
- *  PtySessionInfo. Remote (relay) creation is host-approved engine-side; we just
- *  send and await — a denied create comes back as a PTY_EXIT (no PTY_CREATED),
- *  so request() times out and we surface it to the caller as null.
- *
- *  The engine's PTY_CREATED carries no `shell` (the spawn uses the host login
- *  shell), so we report an empty shell string. On reattach it DOES carry a
- *  serialized scrollback snapshot (`reattached` + `replay`), which we pass
- *  through so the panel repaints the pre-existing screen. */
+/** Remote creation and reattach authorization are enforced by the engine, not the renderer. */
 export async function bridgePtyCreate(
   bridge: RuntimeClient,
   args: {
@@ -95,27 +67,22 @@ export async function bridgePtyCreate(
       sessionId: resp.sessionId,
       pid: resp.pid,
       cwd: resp.cwd,
-      // The engine spawns the host login shell; PTY_CREATED carries no shell
-      // path. The terminal panel doesn't read this field, so "" is safe.
+      // PTY_CREATED omits the host login shell path.
       shell: "",
       cols: resp.cols,
       rows: resp.rows,
-      // Reattach snapshot (engine-side mirror) — present only when the engine
-      // handed back an existing session; the panel writes `replay` into a fresh
-      // xterm before binding live data so scrollback survives a refresh.
+      // Reattach carries a serialized grid for repaint, not raw output history.
       reattached: resp.reattached,
       replay: resp.replay,
       replayTruncated: resp.replayTruncated,
       replayBytes: resp.replayBytes,
     };
   } catch {
-    // Timeout / denied create / transport gone — degrade like the browser
-    // no-op path (panel shows its "unavailable" state).
+    // Local engine refusals emit an uncorrelated PTY_EXIT instead of PTY_CREATED, so those requests time out here.
     return null;
   }
 }
 
-/** Fire-and-forget keystrokes to a host PTY. */
 export function bridgePtyWrite(
   bridge: RuntimeClient,
   args: { sessionId: string; data: string },
@@ -127,7 +94,6 @@ export function bridgePtyWrite(
   } as Partial<BridgeMessage> & { type: string });
 }
 
-/** Fire-and-forget resize of a host PTY. */
 export function bridgePtyResize(
   bridge: RuntimeClient,
   args: { sessionId: string; cols: number; rows: number },
@@ -140,7 +106,6 @@ export function bridgePtyResize(
   } as Partial<BridgeMessage> & { type: string });
 }
 
-/** Fire-and-forget kill of a host PTY. */
 export function bridgePtyKill(
   bridge: RuntimeClient,
   args: { sessionId: string },
@@ -151,10 +116,7 @@ export function bridgePtyKill(
   } as Partial<BridgeMessage> & { type: string });
 }
 
-/** Resolve an agent's on-disk CLI binary path over the bridge (engine-side;
- *  the renderer can't stat the filesystem). The embedded-terminal commands use
- *  it to run the SAME `claude` the agent uses. Falls back to the bare agent id
- *  on timeout / no reply (the login-shell PATH still resolves it). */
+/** Use the engine's resolved CLI so the embedded terminal runs the same binary; otherwise defer to the login shell PATH. */
 export async function bridgeResolveAgentBinary(
   bridge: RuntimeClient,
   agentId: string,
@@ -174,10 +136,7 @@ export async function bridgeResolveAgentBinary(
   }
 }
 
-/** Read the PID-only roots of every live engine-owned PTY. The engine includes
- * this local-only field alongside PTY_LIST_RESULT, covering shared terminals
- * plus Run, Setup, and ephemeral command sessions. A missing field is
- * unavailable/stale (old engine), never an authoritative empty list. */
+/** Only the Local engine exposes PID roots for all its terminals; a missing field does not prove there are none. */
 export async function bridgePtyProcessPids(
   bridge: RuntimeClient,
   timeoutMs = 10_000,
@@ -204,16 +163,13 @@ export async function bridgePtyProcessPids(
   });
 }
 
-/** Legacy native-shape list. Shared terminal metadata lives in
- * bridgePtyTerminals; diagnostics use bridgePtyProcessPids so they do not need
- * to manufacture or expose cwd/session values. */
+/** The legacy native-shape list is not the shared registry or the PID census. */
 export async function bridgePtyList(
   _bridge: RuntimeClient,
 ): Promise<PtySessionInfo[]> {
   return [];
 }
 
-/** One shared terminal as the engine reports it (PTY_LIST_RESULT). */
 export interface PtyTerminalLike {
   sessionId: string;
   workspaceId: string | null;
@@ -223,10 +179,7 @@ export interface PtyTerminalLike {
   exited?: boolean;
 }
 
-/** Fetch the SHARED terminal list (multiplayer): every paired device sees the
- *  SAME terminals, so a device can discover + attach to one another device
- *  created. The engine scopes this for a relay client to non-restricted
- *  workspaces (fail-closed). Optionally scoped to a single workspace. */
+/** The engine filters relay discovery and independently authorizes reattach against the stored workspace. */
 export async function bridgePtyTerminals(
   bridge: RuntimeClient,
   workspaceId?: string,
@@ -245,9 +198,7 @@ export async function bridgePtyTerminals(
   return resp.terminals;
 }
 
-/** Subscribe to "the shared terminal set changed" pushes (a terminal was created
- *  or exited on any device) so the tab strip re-fetches bridgePtyTerminals and
- *  stays in sync across devices. Returns an unsubscribe fn. */
+/** A change push invalidates the shared list; it does not carry the replacement snapshot. */
 export function subscribeBridgePtyTerminalsChanged(
   bridge: RuntimeClient,
   handler: () => void,
@@ -255,9 +206,7 @@ export function subscribeBridgePtyTerminalsChanged(
   return bridge.on("PTY_TERMINALS_CHANGED", () => handler());
 }
 
-/** Subscribe to PTY_DATA chunks for ALL sessions this client owns; map → the
- *  renderer's PtyDataEvent. The caller filters by sessionId (same contract as
- *  the electron `pty-data` listener). Returns an unsubscribe fn. */
+/** Subscribers receive all owned sessions and must filter by sessionId. */
 export function subscribeBridgePtyData(
   bridge: RuntimeClient,
   handler: (evt: PtyDataEvent) => void,
@@ -268,8 +217,6 @@ export function subscribeBridgePtyData(
   });
 }
 
-/** Subscribe to PTY_EXIT events; map → the renderer's PtyExitEvent. Returns an
- *  unsubscribe fn. */
 export function subscribeBridgePtyExit(
   bridge: RuntimeClient,
   handler: (evt: PtyExitEvent) => void,

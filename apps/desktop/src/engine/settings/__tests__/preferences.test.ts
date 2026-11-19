@@ -72,7 +72,7 @@ describe("personal app preference ownership", () => {
     expect(() =>
       syncPersonalPreferences({}, { appearance: { mode: "dark", codeThemes: {}, chatWidth: "huge" } }),
     ).toThrow();
-    // Back to a doc written before the setting existed: no width is invented.
+    // This older appearance fixture must not gain a width on read.
     const plain = { appearance: { mode: "light", codeThemes: {} } };
     expect(syncPersonalPreferences({}, plain)).toEqual(plain);
   });

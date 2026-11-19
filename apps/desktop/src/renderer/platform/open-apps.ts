@@ -1,27 +1,3 @@
-// ──────────────────────────────────────────────────────────
-// "Open in…" apps — detection cache + default-app preference
-// ──────────────────────────────────────────────────────────
-//
-// Backs the Conversation pane topbar split button (logo opens the current default,
-// chevron opens the menu). Two localStorage-persisted pieces of state:
-//
-//   • The DETECTED app list — what `detect_open_apps` found on this Mac
-//     (installed IDEs + Finder/Terminal, each with its real app icon as a
-//     data URL). Re-probed every time a workspace is created (git.ts fires
-//     refreshDetectedOpenApps() after each successful create — the user's
-//     chosen detection point) and once on a cold cache, so the menu lists
-//     exactly what's installed without probing on every paint.
-//
-//   • The DEFAULT app id — which app ⌘O / the logo button opens. Starts as
-//     Finder; picking any menu app except Copy path re-points it. Falls
-//     back to Finder at read time when the stored default is an IDE that's
-//     no longer detected (uninstalled) — the stored value is kept, so a
-//     reinstall restores the user's choice.
-//
-// Same pub/sub-hook shape as panels/default-agent.ts; hooks in apps/desktop/src/renderer/platform
-// follow the runtime.ts precedent (useNativeRuntime).
-// ──────────────────────────────────────────────────────────
-
 import { useEffect, useState } from "react";
 
 import { getSetting, setSetting } from "./settings";
@@ -34,18 +10,14 @@ export interface DetectedOpenApp {
   id: string;
   name: string;
   kind: OpenAppKind;
-  /** PNG data URL of the app's real icon (main-process sips extraction from
-   *  the bundle .icns), or null when extraction failed / the app has no bundle
-   *  (for example, a CLI-only entry). Consumers fall back to a bundled/lucide
-   *  mark. */
+  /** Main may not have a bundle icon for CLI-only entries; consumers supply fallback artwork. */
   iconDataUrl: string | null;
 }
 
 export const FINDER_APP_ID = "finder";
 export const TERMINAL_APP_ID = "terminal";
 
-/** Menu entries that exist on every Mac regardless of detection — also the
- *  render fallback while a cold cache is still probing. */
+/** Finder and Terminal stay available before detection runs. */
 const SYSTEM_APPS: DetectedOpenApp[] = [
   { id: FINDER_APP_ID, name: "Finder", kind: "system", iconDataUrl: null },
   { id: TERMINAL_APP_ID, name: "Terminal", kind: "system", iconDataUrl: null },
@@ -53,8 +25,6 @@ const SYSTEM_APPS: DetectedOpenApp[] = [
 
 const DETECTED_KEY = "open-in-detected-apps";
 const DEFAULT_KEY = "open-in-default-app";
-
-// ── Pub/sub bus (both keys share it — consumers render both) ──
 
 type Listener = () => void;
 const listeners = new Set<Listener>();
@@ -69,8 +39,6 @@ function notify(): void {
   }
 }
 
-// ── Detected list ─────────────────────────────────────────
-
 /** null ⇒ detection has never run on this profile (cold cache). */
 export function getDetectedOpenApps(): DetectedOpenApp[] | null {
   const raw = getSetting<DetectedOpenApp[] | null>(DETECTED_KEY, null);
@@ -79,9 +47,6 @@ export function getDetectedOpenApps(): DetectedOpenApp[] | null {
 
 let refreshInFlight: Promise<void> | null = null;
 
-/** Re-probe installed apps over IPC and persist the result. Coalesces
- *  concurrent calls; never rejects (detection is best-effort — a failed
- *  probe keeps the previous cache). */
 export function refreshDetectedOpenApps(): Promise<void> {
   if (!isNativeRuntime()) return Promise.resolve();
   if (refreshInFlight) return refreshInFlight;
@@ -101,7 +66,6 @@ export function refreshDetectedOpenApps(): Promise<void> {
   return refreshInFlight;
 }
 
-/** Reactive detected-app list (null while never-detected). */
 export function useDetectedOpenApps(): DetectedOpenApp[] | null {
   const [apps, setApps] = useState<DetectedOpenApp[] | null>(() =>
     getDetectedOpenApps(),
@@ -116,17 +80,12 @@ export function useDetectedOpenApps(): DetectedOpenApp[] | null {
   return apps;
 }
 
-/** The IDE rows for the menu (everything between Finder and Terminal),
- *  in detection (= registry = menu) order. */
 export function detectedIdeApps(
   detected: DetectedOpenApp[] | null,
 ): DetectedOpenApp[] {
   return (detected ?? []).filter((a) => a.kind !== "system");
 }
 
-/** Resolve an app id against the detected list, synthesizing the
- *  always-available Finder/Terminal entries when detection hasn't run
- *  (or ran icon-less). Null for an undetected IDE id. */
 export function findOpenApp(
   detected: DetectedOpenApp[] | null,
   id: string,
@@ -135,8 +94,6 @@ export function findOpenApp(
   if (hit) return hit;
   return SYSTEM_APPS.find((a) => a.id === id) ?? null;
 }
-
-// ── Default app (what ⌘O / the logo button opens) ─────────
 
 export function getOpenInDefaultId(): string {
   const id = getSetting<string>(DEFAULT_KEY, FINDER_APP_ID);
@@ -148,7 +105,6 @@ export function setOpenInDefaultId(id: string): void {
   notify();
 }
 
-/** Reactive default-app id (raw stored value — resolve before use). */
 export function useOpenInDefaultId(): string {
   const [id, setId] = useState<string>(() => getOpenInDefaultId());
   useEffect(() => {
@@ -161,8 +117,7 @@ export function useOpenInDefaultId(): string {
   return id;
 }
 
-/** The entry the logo button / ⌘O should act on RIGHT NOW: the stored
- *  default when it's still available, else Finder. */
+/** Fall back at read time without overwriting the user's choice, so reinstalling the app restores it. */
 export function resolveOpenInDefault(
   detected: DetectedOpenApp[] | null,
   defaultId: string,
@@ -172,13 +127,7 @@ export function resolveOpenInDefault(
   );
 }
 
-// ── Open dispatch ─────────────────────────────────────────
-
-/** Open `path` with an app id from the menu. Finder/Terminal keep their
- *  existing dedicated commands (reveal_in_finder / open_in_terminal);
- *  IDE ids go through open_in_app, which resolves the launch target in
- *  the main process from its own probe. Throws on failure so callers
- *  can toast. */
+// For IDEs and CLIs, main resolves the installed launch target from the app ID.
 export async function openPathWithApp(
   appId: string,
   path: string,

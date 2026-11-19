@@ -1,14 +1,4 @@
-// ──────────────────────────────────────────────────────────
-// Zeros DB — the one engine-owned SQLite database (source of truth)
-// ──────────────────────────────────────────────────────────
-//
-// The single source of truth for Zeros app state (repos, workspaces, chats,
-// chat_messages, settings, …). The ENGINE owns it and is the ONLY writer; every
-// surface reaches it through the bridge — so desktop and optional cloud clients
-// see the same engine-owned state.
-//
-// This module owns opening and migrating that unified database.
-// ──────────────────────────────────────────────────────────
+// The engine owns this database; other surfaces reach its state through the bridge.
 
 import type Database from "better-sqlite3";
 import { mkdirSync } from "node:fs";
@@ -23,9 +13,6 @@ let db: Database.Database | null = null;
 let pathOverride: string | null = null;
 let runtimeHandoffSealed = false;
 
-/** Test seam — point the DB at a tmpdir file (or ":memory:") without booting
- *  the engine. Production callers never set this. Closes any open handle so the
- *  next openZerosDb() re-opens at the new path. */
 export function setZerosDbPathForTesting(p: string | null): void {
   pathOverride = p;
   runtimeHandoffSealed = false;
@@ -39,7 +26,6 @@ export function setZerosDbPathForTesting(p: string | null): void {
   }
 }
 
-/** Open (once) the unified Zeros DB, applying pending migrations. Singleton. */
 export function openZerosDb(): Database.Database {
   if (runtimeHandoffSealed) throw new Error("SQLite is sealed for runtime handoff");
   if (db) return db;
@@ -48,9 +34,7 @@ export function openZerosDb(): Database.Database {
     mkdirSync(path.dirname(file), { recursive: true });
   }
   const handle = openSqlite(file);
-  // WAL so the engine (single writer) and many readers coexist; NORMAL trades a
-  // tiny crash window for big write speedups; busy_timeout absorbs brief
-  // contention; foreign_keys for referential integrity.
+  // WAL lets readers coexist with the writer; NORMAL can lose recent commits on a power loss.
   handle.pragma("journal_mode = WAL");
   handle.pragma("synchronous = NORMAL");
   handle.pragma("foreign_keys = ON");
@@ -63,12 +47,10 @@ export function openZerosDb(): Database.Database {
   return handle;
 }
 
-/** The file the unified DB opens (":memory:" under some tests). */
 export function zerosDbFile(): string {
   return pathOverride ?? zerosDbPath();
 }
 
-/** Close on engine shutdown. Best-effort. */
 export function closeZerosDb(): void {
   if (db) {
     try {
@@ -80,9 +62,7 @@ export function closeZerosDb(): void {
   }
 }
 
-/** Only the admitted cloud handoff path calls this after draining engine work
- * and flushing the durable record. Unlike ordinary teardown, a failed close
- * cannot be treated as proof that the old engine no longer owns a writer. */
+/** Call after draining work and flushing durable state. A failed close is not proof that the old engine released the writer. */
 export function sealZerosDbForRuntimeHandoff(): void {
   if (runtimeHandoffSealed) return;
   if (db?.inTransaction) throw new Error("SQLite transaction blocks runtime handoff");
@@ -91,8 +71,7 @@ export function sealZerosDbForRuntimeHandoff(): void {
   runtimeHandoffSealed = true;
 }
 
-/** Cancellation may resume only before root consumes the exact source fence.
- * Open successfully before admission is restored; retain the seal on failure. */
+/** Cancel only before the source fence is consumed. Reopen before restoring admission; retain the seal on failure. */
 export function resumeZerosDbAfterRuntimeHandoff(): void {
   if (!runtimeHandoffSealed) return;
   runtimeHandoffSealed = false;

@@ -1,8 +1,7 @@
 import { closeSync, constants, fstatSync, openSync, readSync, realpathSync, mkdirSync } from "node:fs";
 import path from "node:path";
 
-/** Resolve only the OS-owned aliases macOS puts before temporary/configuration
- * paths. Mutable workspace descendants still reach the no-follow resolver. */
+/** Resolve only macOS system aliases; never canonicalize mutable descendants here. */
 export function resolveSystemPath(file: string): string {
   const target = path.resolve(file);
   if (process.platform === "darwin") {
@@ -14,8 +13,7 @@ export function resolveSystemPath(file: string): string {
   return target;
 }
 
-/** Descriptor-relative directory effects on Linux; Darwin's kernel no-follow
- * resolver covers every component for subsequent rename/unlink/mkdir too. */
+/** Use a held directory descriptor on Linux and Darwin's no-follow path for later rename, unlink and mkdir. */
 export function openBoundedDirectorySync(directory: string, create = false): { fd: number; path: string; close(): void } {
   const target = resolveSystemPath(directory);
   if (process.platform === "darwin") {
@@ -37,9 +35,7 @@ export function openBoundedDirectorySync(directory: string, create = false): { f
   } catch (error) { closeSync(fd); throw error; }
 }
 
-/** Walk canonical directories through held descriptors. Only the caller's
- * independently approved root may be canonicalized; descendant links never
- * widen that authority. Darwin's kernel resolver rejects every symlink. */
+/** Only an independently approved root may be canonicalized; never follow descendant symlinks. */
 export function openBoundedFileSync(file: string, root?: string): number {
   let target = path.resolve(file);
   if (root) {
@@ -63,8 +59,7 @@ export function openBoundedFileSync(file: string, root?: string): number {
   } finally { closeSync(directory); }
 }
 
-/** Read one inspected file generation without reopening its path or reading
- * unbounded growth. The caller owns the descriptor and its current position. */
+/** The caller owns the checked descriptor and its current offset; never reopen its path. */
 export function readBoundedUtf8DescriptorSync(
   fd: number,
   maxBytes: number,
@@ -94,8 +89,7 @@ export function readBoundedBufferDescriptorSync(fd: number, maxBytes: number): B
   return bytes.subarray(0, offset);
 }
 
-/** Symlinks to native configuration files remain supported. Nonblocking opens
- * let the descriptor check reject pipes and devices without waiting for data. */
+/** The default permits symlinks for native configuration; nonblocking open prevents a FIFO from waiting for a writer. */
 export function readBoundedUtf8FileSync(
   file: string,
   maxBytes: number,

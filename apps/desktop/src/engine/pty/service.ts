@@ -1,22 +1,3 @@
-// ──────────────────────────────────────────────────────────
-// PtyService — engine-owned terminal sessions (for remote clients)
-// ──────────────────────────────────────────────────────────
-//
-// Moves PTY ownership into the engine so an optional remote relay client can
-// get a real shell on the host over the bridge. The spawn function is
-// injectable (PtySpawnFn) so this whole service is unit-testable WITHOUT
-// loading the native node-pty binding — production wires in the real
-// node-pty spawn (node-pty-spawn.ts).
-//
-// Security: the cwd is validated against an allowlist (engine root +
-// managed worktrees) before a login shell is forked — a remote client can
-// never point a shell at an arbitrary host path. (Remote PTY creation is
-// additionally gated by the remote-restriction list at the engine layer — a
-// paired device is a trusted operator; there is no per-spawn host prompt.)
-//
-// Deferred vs the desktop PTY: no reattach-snapshot mirror yet (the
-// resilient-resume work is Phase-8/10 territory).
-// ──────────────────────────────────────────────────────────
 
 import os from "node:os";
 import fs from "node:fs";
@@ -38,8 +19,7 @@ import { createShellPathRecovery } from "./shell-path-recovery";
 
 export interface PtyHandle {
   readonly pid: number;
-  /** Fires once when the host reports the real PTY process id. The handle is
-   * returned before that asynchronous protocol frame can arrive. */
+  /** The subprocess reports the real PID after returning the handle. */
   onSpawned(cb: (pid: number) => void): void;
   onData(cb: (data: string) => void): void;
   onExit(
@@ -58,31 +38,17 @@ export interface PtySpawnRequest {
   cwd: string;
   cols: number;
   rows: number;
-  /** When true, the spawned shell's env is scrubbed of host secrets
-   *  (API keys, tokens, connection URLs). Set for shells created on behalf of a
-   *  remote client; local shells inherit the full env for parity. */
+  /** Scrub the inherited environment for remote shells; Local shells keep the normal environment. */
   scrubEnv?: boolean;
-  /** One-shot mode: run this command in a login shell and EXIT when it finishes
-   *  (`zsh -l -c "<command>"`), instead of an interactive login shell. The PTY's
-   *  exit code is the command's. Used for the background setup script — a real
-   *  PTY so output is ANSI-colored, exiting so the caller learns pass/fail. */
+  /** One-shot commands use a login shell and report the command's exit status. */
   command?: string;
-  /** A fully-resolved child env to use VERBATIM (overrides the computed shell
-   *  env). Used by one-shot setup so the command runs with the scrubbed setup
-   *  allowlist + TERM/COLORTERM, not the interactive-terminal env. */
+  /** An explicit environment replaces the computed shell environment, including scrubbing. */
   env?: Record<string, string>;
-  /** One-shot only: run `command` in an INTERACTIVE login shell, so it reads
-   *  ~/.zshrc (nvm/fnm/mise/pnpm PATH setup, aliases) exactly like the Terminal
-   *  tab. Opt-in because that also imports whatever the user's rc exports —
-   *  fine for a user-authored run action, NOT for the repo-resident setup
-   *  script, whose whole point is a narrow allowlist. See buildOneShotArgs. */
+  /** Run opts into interactive startup for Terminal parity; Setup does not, because startup files could widen its scrubbed environment. */
   interactive?: boolean;
-  /** Synchronous, already-prepared process-root wrapper. The PTY host spawns
-   * the returned supervisor command directly, registering ownership before
-   * the repository shell or its startup files run. */
+  /** The prepared supervisor must establish ownership before repository shell startup. */
   wrapSpawn?: PtySpawnWrapper;
-  /** Observe the actual wrapper pid so an execution boundary can own and
-   * prove retirement of the PTY process group. */
+  /** Use the wrapper's actual PID to prove process-group retirement. */
   onSpawned?: (pid: number) => void;
   /** @deprecated Historical internal worker metadata. New cloud terminals
    * inherit the engine identity through their original prepared Host scope. */
@@ -107,26 +73,18 @@ export type PtySpawnFn = (req: PtySpawnRequest) => PtyHandle;
 export interface PtyCreateOptions {
   sessionId: string;
   cwd?: string;
-  /** An already-resolved+validated absolute cwd. When set, create() uses it
-   *  verbatim and does NOT re-run resolveCwd — the caller resolved once (e.g.
-   *  for an approval prompt) and spawns the exact path it approved (no TOCTOU). */
+  /** Only trusted callers supply an already validated cwd; don't re-resolve the path chosen at approval. */
   resolvedCwd?: string;
   cols?: number;
   rows?: number;
-  /** Scrub host secrets from the shell env (set for remote clients). */
   scrubEnv?: boolean;
-  /** One-shot mode: run this command then exit (see PtySpawnRequest.command). */
   command?: string;
-  /** Verbatim child env (see PtySpawnRequest.env). */
   env?: Record<string, string>;
-  /** Interactive one-shot shell (see PtySpawnRequest.interactive). */
   interactive?: boolean;
   /** Local Setup/Run only; retry a positively unstarted command once. */
   recoverShellPath?: boolean;
-  /** Prepared owned-process wrapper for repository-controlled commands. */
   wrapSpawn?: PtySpawnWrapper;
-  /** Observe the actual wrapper pid reported by the asynchronous PTY host so
-   * an execution boundary can adopt and retire the complete process group. */
+  /** Expose the PID and native-exit witness for this exact launch attempt. */
   onSpawned?: (pid: number, leaderExited: () => boolean) => void;
   /** Positive native no-child witness, distinct from a lost host. */
   onSpawnFailed?: (reason: PtyExitReason) => void;
@@ -139,22 +97,16 @@ export interface PtyInfo {
   cwd: string;
   cols: number;
   rows: number;
-  /** True when create() handed back an EXISTING session (reattach) rather than
-   *  spawning. The caller fetches a scrollback snapshot() only in this case. */
+  /** Only on reattach should the client request existing scrollback. */
   reattached?: boolean;
 }
 
-/** A serialized reattach snapshot — the resolved screen + bounded scrollback. */
 export interface PtyMirrorSnapshot {
   data: string;
   truncated: boolean;
   bytes: number;
 }
 
-/** The headless-terminal mirror the engine feeds each PTY's byte stream so a
- *  reattach (refresh / second device) can repaint the exact pre-existing screen.
- *  Injected as a factory so PtyService stays testable WITHOUT loading
- *  @xterm/headless (prod wires the real TerminalMirror from ./mirror). */
 export interface PtyMirror {
   write(data: string): void;
   resize(cols: number, rows: number): void;
@@ -165,8 +117,7 @@ export type PtyMirrorFactory = (cols: number, rows: number) => PtyMirror;
 
 export interface PtyServiceOptions {
   now?: () => number;
-  /** Authenticated cloud engine identity for the repository-free CLI cwd and
-   * cloud input accounting. Omitted on a desktop/relay engine. */
+  /** Enables repository-free auth cwd identity checks and cloud input accounting. */
   agentAuthIdentity?: CloudWorkerIdentity;
 }
 
@@ -178,8 +129,6 @@ interface Session {
   cwd: string;
   cols: number;
   rows: number;
-  /** Per-session scrollback mirror (absent when no factory was injected, e.g.
-   *  in unit tests). */
   mirror?: PtyMirror;
 }
 
@@ -213,8 +162,6 @@ export class PtyService {
   constructor(
     private readonly root: string,
     private readonly spawnFn: PtySpawnFn,
-    /** Optional scrollback-mirror factory. Prod wires the real TerminalMirror;
-     *  tests omit it (sessions then have no mirror and snapshot() is empty). */
     private readonly mirrorFactory?: PtyMirrorFactory,
     private readonly options: PtyServiceOptions = {},
   ) {}
@@ -237,32 +184,10 @@ export class PtyService {
     return this.sessions.has(sessionId);
   }
 
-  /** Allowed roots for a PTY cwd: the engine root + managed worktrees.
-   *
-   *  The worktrees root is sourced from the SAME engine state module the rest of
-   *  git uses (worktreesRoot() = the VISIBLE ~/zeros[-dev]/workspaces tree the
-   *  engine relocates at boot; legacyWorktreesRoot() is the former hidden
-   *  ~/.zeros[-dev]/worktrees tree) — NOT a hardcoded path. Hardcoding only the
-   *  legacy hidden root made every relocated worktree fail isWithin(), so a
-   *  remote terminal silently fell back to the engine root and a remote agent
-   *  cwd-clamp hard-rejected. Both roots are included, and they are dev-aware
-   *  (zerosStateRoot keys off ZEROS_DEV) + honour the test root override.
-   *
-   *  Each root is realpath-resolved so a symlinked root (e.g. a symlinked
-   *  $HOME on macOS, where /var → /private/var) still matches a
-   *  realpath-resolved cwd in resolveCwd — otherwise a legitimate cwd would
-   *  silently fall back to the engine root. */
+  /** Keep legacy worktree roots accepted and compare real paths on both sides, including symlinked home directories. */
   private allowedRoots(): string[] {
     const roots = [this.root, worktreesRoot(), legacyWorktreesRoot()];
-    // Also trust every engine-tracked workspace path AND its repoRoot. A LOCAL
-    // desktop terminal can be opened in ANY managed project — a worktree OUTSIDE
-    // the standard root, a tree adopted from another tool, or a primary checkout
-    // whose repoRoot isn't under worktreesRoot — and must land in that dir, not
-    // fall back to the engine root. (The desktop terminal is engine-owned, so
-    // this PtyService allowlist is the sole cwd gate. Remote clients still
-    // resolve their cwd from a managed workspaceId server-side, so this widens
-    // LOCAL parity without granting a remote client any new path.) Best-effort:
-    // a missing state DB falls back to the static roots above.
+    // Tracked roots let Local terminals open managed paths outside the default tree; new remote terminals still fail closed unless their workspace ID or path resolves inside this allowlist.
     try {
       for (const ws of listWorkspaces()) {
         if (ws.path) roots.push(ws.path);
@@ -271,12 +196,7 @@ export class PtyService {
     } catch {
       /* state.db unavailable — static roots only */
     }
-    // Also trust every REGISTERED project root, even one with no worktree yet.
-    // Adding a repo no longer respawns the engine to re-root at it (the engine
-    // stays put and serves the new repo over the bridge), so a terminal opened
-    // in a just-added repo's root ("Local main") would otherwise not match any
-    // workspace path above and silently fall back to the engine root. The repos
-    // table is the source of truth for "folders the user opened". Read-only.
+    // A registered checkout needs terminal access before it has any managed worktree.
     try {
       for (const root of listKnownRepoRoots()) roots.push(root);
     } catch {
@@ -291,18 +211,12 @@ export class PtyService {
     });
   }
 
-  /** Resolve + validate a requested cwd against the allowlist. Public so the
-   *  engine can surface the ACTUAL resolved cwd in a remote approval prompt
-   *  (the operator approves the path that will really be used, not the raw
-   *  client-supplied string). */
+  /** Remote approval must display the resolved cwd, not the raw request. */
   resolveCwd(input?: string): string {
     const fallback = this.root || os.homedir();
     const raw = typeof input === "string" ? input.trim() : "";
     if (raw === PTY_AGENT_AUTH_CWD) {
-      // Hidden CLI authentication must never inherit a repository cwd: Claude
-      // asks whether to trust project files before showing /login. This
-      // app-owned directory has no project ancestors, so accepting that prompt
-      // cannot enable repository-controlled settings or hooks.
+      // Keep CLI sign-in outside repositories so startup cannot enable repository settings or hooks.
       const authCwd = path.join(zerosStateRoot(), "agent-auth");
       try {
         fs.mkdirSync(authCwd, { recursive: true, mode: 0o700 });
@@ -334,8 +248,7 @@ export class PtyService {
         }
         return fs.realpathSync(authCwd);
       } catch {
-        // Failing closed is safer than silently returning the engine/project
-        // root for a trust-sensitive authentication shell.
+        // Never fall back to a project directory for CLI sign-in.
         throw new Error(
           "Could not create the isolated agent sign-in directory",
         );
@@ -359,11 +272,7 @@ export class PtyService {
     return fallback;
   }
 
-  /** True when an existing absolute dir sits within the allowlist (engine
-   *  root + managed worktrees). Lets the agent-session path clamp a remote
-   *  client's workspace cwd to the SAME boundary the PTY enforces — defence in
-   *  depth on top of resolving the cwd server-side from a managed workspaceId.
-   *  Fails closed: a nonexistent / unreadable path is rejected. */
+  /** The remote agent path reuses this cwd boundary as a fail-closed check. */
   isWithinAllowed(cwd: string): boolean {
     if (typeof cwd !== "string" || cwd.length === 0) return false;
     let real: string;
@@ -378,14 +287,10 @@ export class PtyService {
     return false;
   }
 
-  /** Spawn (or reattach to) a PTY. Reattach returns the live session's info. */
   create(opts: PtyCreateOptions): PtyInfo {
     const existing = this.sessions.get(opts.sessionId);
     if (existing) {
-      // Reattach: reconcile the live PTY (and its mirror) to the attaching
-      // client's dims so the scrollback snapshot is produced at the width the
-      // client's xterm will render it at, then hand back the live session. The
-      // caller fetches the snapshot via snapshot() (async) when reattached.
+      // Match the reattaching client's dimensions before serializing a snapshot.
       const cols = coerceDim(opts.cols, existing.cols);
       const rows = coerceDim(opts.rows, existing.rows);
       if (cols !== existing.cols || rows !== existing.rows) {
@@ -491,11 +396,7 @@ export class PtyService {
     };
   }
 
-  /** A clean reattach snapshot of a live session's resolved screen + bounded
-   *  scrollback (serialized escape sequences to write verbatim into a fresh
-   *  same-size xterm). Null when the session is unknown or has no mirror (e.g.
-   *  no factory was injected). Never throws — the mirror caps + degrades the
-   *  payload internally. */
+  /** Replay the serialized screen into a fresh xterm of the same size. */
   async snapshot(sessionId: string): Promise<PtyMirrorSnapshot | null> {
     const session = this.sessions.get(sessionId);
     if (!session?.mirror) return null;
@@ -503,8 +404,7 @@ export class PtyService {
   }
 
   write(sessionId: string, data: string): void {
-    // A malformed/hostile remote frame can carry a non-string payload; node-pty
-    // throws on anything but a string. Guard the type, not just truthiness.
+    // Malformed remote frames may carry non-strings that node-pty rejects.
     if (typeof data !== "string" || data.length === 0) return;
     const session = this.sessions.get(sessionId);
     if (session) {
@@ -513,8 +413,7 @@ export class PtyService {
     }
   }
 
-  /** Only real input to a live PTY holds this guard. Output, reattach and
-   * scrollback hydration never renew its ten-minute recency window. */
+  /** Only input to a live PTY renews recency, not output or reattach. */
   hasRecentInput(): boolean {
     if (!this.options.agentAuthIdentity) return false;
     const now = (this.options.now ?? (() => performance.now()))();
@@ -531,8 +430,6 @@ export class PtyService {
       s.proc.resize(c, r);
       s.cols = c;
       s.rows = r;
-      // Keep the mirror grid the same size as the live PTY so its resolved
-      // state (and any reattach snapshot) matches.
       s.mirror?.resize(c, r);
     } catch {
       /* pty already exited */
@@ -549,17 +446,12 @@ export class PtyService {
     } catch {
       /* already exiting */
     }
-    // onExit also disposes, but kill may not always fire it — drop the mirror
-    // grid now so it can't leak. dispose() is idempotent.
+    // Dispose here as well as onExit: a killed PTY may never report exit.
     s.mirror?.dispose();
     this.sessions.delete(sessionId);
   }
 
-  /** Register BEFORE asking a manager to stop a PTY, then await the host's real
-   * exit notification. `kill()` intentionally drops the renderer mirror
-   * immediately, but archive/delete must not remove a cwd while its process
-   * group can still write into it. False means the bounded wait elapsed; the
-   * host kill path has already escalated to the process group. */
+  /** Register before kill removes the session. A timed-out wait does not prove the terminal process group retired. */
   waitForExit(sessionId: string, timeoutMs = 2_500): Promise<boolean> {
     if (!this.sessions.has(sessionId)) return Promise.resolve(true);
     return new Promise<boolean>((resolve) => {

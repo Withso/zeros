@@ -4,8 +4,7 @@ import {
 } from "@zeros/protocol/provider-auth";
 import { nativeInvoke } from "../../platform/runtime";
 
-/** Only the active dialog observes a native ceremony. Closing it cancels the
- * native process; no credentials or native file paths enter renderer state. */
+// Retiring the dialog cancels native sign-in; credentials and native file paths stay out of renderer state.
 export async function connectCloudProviderSignIn(
   input: {
     organizationId: string;

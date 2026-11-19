@@ -1,10 +1,3 @@
-// Cloud Computer for cloud workspace v2. An organization owner or admin keeps
-// the repositories to install and their setup as an organization setting; a
-// build makes them the organization's one live snapshot. New cloud
-// workspaces fork it with the repositories already installed. Repositories
-// stay until an admin removes them, and every edit waits for the next build.
-// Older builds stay in the history and can be made active again, which
-// rebuilds them at the same commits.
 import { useCallback, useState } from "react";
 import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import { ChevronDown, ChevronUp, CircleCheck, CircleMinus, CircleX, LoaderCircle, TriangleAlert, X } from "lucide-react";
@@ -47,7 +40,6 @@ function CloudComputerScope({ userId, organizationId, canManage, active, openRep
   const latestBuild = builds[0];
   const running = latestBuild?.state === "queued" || latestBuild?.state === "building";
   const refresh = computer.refresh;
-  // R1: a build takes minutes; re-read on focus and every 60 s while it runs (was every 3 s).
   useFocusRefresh(active && running, refresh);
 
   const [busy, setBusy] = useState(false);
@@ -56,6 +48,7 @@ function CloudComputerScope({ userId, organizationId, canManage, active, openRep
   const draft = useRecipeDraft(organizationId, key, data, refresh, setError);
 
   const activeBuild = builds.find(build => build.id === data?.activeBuildId);
+  // Recipe edits affect only the desired state until a build becomes active.
   const live = editableRepositories(activeBuild);
   const configured = draft.local ?? data?.recipe?.repositories ?? live;
   const changes = computerChanges(configured, live);
@@ -75,8 +68,7 @@ function CloudComputerScope({ userId, organizationId, canManage, active, openRep
     draft.reset();
   });
   const discard = () => run(async () => {
-    // Unsent edits are dropped; a save already sent finishes first, so the
-    // discard names the revision it produced.
+    // Wait for an already-sent save so discard uses the revision it produced.
     draft.reset();
     await draft.settle();
     assertComputerOwner(key, organizationId);

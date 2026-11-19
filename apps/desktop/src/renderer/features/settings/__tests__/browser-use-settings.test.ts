@@ -47,7 +47,6 @@ describe("Browser use settings", () => {
     expect(
       browserRoutesFromEffective({ browser: { claude_enabled: true } }, open),
     ).toEqual({ codex: "zeros", claude: "claude-chrome", cursor: "zeros" });
-    // One switch decides for every agent, Claude's Chrome included.
     expect(
       browserRoutesFromEffective(
         { browser: { enabled: false, claude_enabled: true } },

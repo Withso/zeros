@@ -14,8 +14,6 @@ type RuntimeWindow = Window & {
   runtimeEventMessages: unknown[];
 };
 
-// A class-styled button with every state, a Tailwind v4 variant as the
-// compiler nests it, and the shapes the picker leaves alone.
 const HEAD = `
 <style data-zeros-style-source="app">
   @layer theme, utilities;
@@ -153,7 +151,7 @@ describe("layer states in Chromium", () => {
 
   it("offers the states a layer's own rules give it and it can be in, in menu order", async () => {
     expect((await details(page, "button")).states).toEqual(["hover", "focus", "focus-visible", "active", "disabled"]);
-    // A div cannot take focus or be disabled; its rules for them never apply.
+    // This plain div cannot take focus and has no disabled state.
     expect((await details(page, "card")).states).toEqual(["hover"]);
     expect((await details(page, "drawn")).states).toBeUndefined();
     expect((await details(page, "text")).states).toBeUndefined();
@@ -182,7 +180,6 @@ describe("layer states in Chromium", () => {
     });
     // The transition does not run: the held value is there at once.
     expect(await computed(page, "button", "background-color")).toBe("rgb(0, 0, 255)");
-    // Reads while held come back marked, never as Default.
     expect((await details(page, "button")).heldState).toBe("hover");
     expect((await details(page, "card")).heldState).toBeUndefined();
 
@@ -201,7 +198,7 @@ describe("layer states in Chromium", () => {
 
   it("matches what a real hover shows on the class-styled button", async () => {
     await page.locator('[data-oid="button"]').hover();
-    // The 2s transition has reached its end colour.
+    // Wait for the real hover transition before comparing its final color.
     await page.waitForFunction(() =>
       getComputedStyle(document.querySelector('[data-oid="button"]')!).backgroundColor === "rgb(0, 0, 255)");
     const real = await computed(page, "button", "background-color");
@@ -249,9 +246,7 @@ describe("layer states in Chromium", () => {
     await request(page, "releaseNodeState", {});
   });
 
-  // Known limit: a copy sits after every original rule in its layer, so a
-  // later rule of equal specificity that beats the state for real loses to
-  // the held copy.
+  // Held copies come last in their layer, so they can beat a rule that wins at equal specificity during real hover.
   it("pins the known order case: a later rule of equal specificity", async () => {
     await page.locator('[data-oid="late"]').hover();
     expect(await computed(page, "late", "color")).toBe("rgb(0, 0, 255)");
@@ -278,8 +273,7 @@ describe("layer states in Chromium", () => {
     // Holding another state replaces the hold the host asked for: no event.
     await hold(page, "button", "focus", "second");
     await request(page, "releaseNodeState", {});
-    // Events travel on the reply port: anything these sent is in before the
-    // snapshot's reply.
+    // Events and replies use the same port, so the snapshot reply fences earlier events.
     const after = await request(page, "getSnapshot", {});
     expect(await events(page)).toEqual([]);
     expect((after.result as { revision: number }).revision).toBe((before.result as { revision: number }).revision);
@@ -345,7 +339,6 @@ describe("layer states in Chromium", () => {
     await request(page, "setTheme", { theme: null });
     expect((await events(page))[0]).toBe("stateReleased:same-theme");
     expect(await computed(page, "button", "background-color")).toBe("rgb(0, 0, 128)");
-    // And from no theme: re-applying none keeps it, a theme lets go.
     await hold(page, "button", "hover", "no-theme");
     await events(page);
     await request(page, "setTheme", { theme: null });
@@ -388,14 +381,12 @@ describe("layer states in Chromium", () => {
       expect(taken.frame.heldState).toBeUndefined();
       expect(taken.frame.styles.backgroundColor).toBe("rgb(0, 0, 128)");
       expect(taken.frame.authoredStyles?.["background-color"]?.state).toBeUndefined();
-      // The held view is as it was, and reads of it are still marked.
       expect(await computed(scoped, "shell", "background-color")).toBe("rgb(0, 0, 255)");
       const after = await details(scoped, "shell");
       expect(after.heldState).toBe("hover");
       expect(after.authoredStyles?.["background-color"]).toMatchObject({ selector: ".shell:hover", state: "hover" });
       await request(scoped, "getSnapshot", {});
       expect((await details(scoped, "shell")).authoredStyles?.["background-color"]).toMatchObject({ selector: ".shell:hover", state: "hover" });
-      // The snapshot an observed change publishes is Default too.
       await events(scoped);
       await scoped.evaluate(() => document.querySelector('[data-oid="copy"]')!.textContent = "Changed");
       await vi.waitFor(() => scoped.evaluate(() => (window as unknown as RuntimeWindow).runtimeEventMessages.some(
@@ -420,17 +411,15 @@ describe("layer states in Chromium", () => {
       const before = await details(scoped, "after");
       const row = await details(scoped, "row");
       await hold(scoped, "grow", "hover", "wide");
-      // The canvas shows the sibling pushed along by the wider item.
       expect(await scoped.locator('[data-oid="after"]').evaluate((element) => element.getBoundingClientRect().x)).toBe(before.rect.x + 160);
       const sibling = await details(scoped, "after");
       expect(sibling.heldState).toBeUndefined();
       expect(sibling.rect).toEqual(before.rect);
       expect((await details(scoped, "row")).rect).toEqual(row.rect);
-      // Hit-testing reports what is under the pointer, read as Default too.
+      // Hit-test the painted layout, but return Default details for the hit sibling.
       const hit = (await request(scoped, "getElementAtLoc", { x: before.rect.x + 160 + 5, y: before.rect.y + 5, mode: "deepest" })).result as DesignRuntimeNodeDetails;
       expect(hit.oid).toBe("after");
       expect(hit.rect).toEqual(before.rect);
-      // The held layer and the view keep the state.
       expect((await details(scoped, "grow")).rect.width).toBe(200);
       expect(await scoped.locator('[data-oid="after"]').evaluate((element) => element.getBoundingClientRect().x)).toBe(before.rect.x + 160);
     } finally {
@@ -452,7 +441,6 @@ describe("layer states in Chromium", () => {
       const during = await details(scoped, "box");
       expect(during.heldState).toBeUndefined();
       expect(during.childrenLayout).toEqual(before.childrenLayout);
-      // The held layer still reads held afterwards.
       expect((await details(scoped, "pin")).authoredStyles?.right).toMatchObject({ state: "hover" });
     } finally {
       await scoped.close();
@@ -465,8 +453,7 @@ describe("layer states in Chromium", () => {
       await hold(scoped, "card", "hover", "removed");
       await events(scoped);
       await scoped.evaluate(() => document.querySelector('[data-oid="card"]')!.remove());
-      // After the observer's debounce. A fresh fixture's "painted" may land
-      // at any point and says nothing about the release.
+      // Ignore painted events: they do not signal that the removal observer released the hold.
       await vi.waitFor(async () =>
         expect(await scoped.evaluate(() => (window as unknown as RuntimeWindow).runtimeEvents.filter((name) => name !== "painted"))).toEqual(["stateReleased:removed", "mutation"]),
       { timeout: 5_000 });
@@ -477,7 +464,6 @@ describe("layer states in Chromium", () => {
   });
 });
 
-// Selector lists, at-rules inside nesting, and a rule written for the layer.
 describe("layer states across selector shapes in Chromium", () => {
   let browser: Browser;
   let page: Page;
@@ -504,7 +490,7 @@ describe("layer states across selector shapes in Chromium", () => {
   });
 
   it("offers and copies only the branches of a selector list that name the layer", async () => {
-    // .a:focus names it, but a div cannot take focus; .c:hover does not name it.
+    // The matching focus branch is ineligible for this plain div.
     expect((await details(page, "list")).states).toEqual(["hover"]);
     const held = await hold(page, "list", "hover");
     expect(held.styles.color).toBe("rgb(0, 0, 2)");
@@ -513,7 +499,6 @@ describe("layer states across selector shapes in Chromium", () => {
       Array.from((document.querySelector("style[data-zeros-runtime-state]") as HTMLStyleElement).sheet!.cssRules, (rule) => rule.cssText));
     expect(copies).toHaveLength(1);
     expect(copies[0]).toMatch(/^\.a\[data-zd-state~="hover"\] \{/);
-    // The unrelated outline rule was not copied for a hover.
     expect(await computed(page, "list", "outline-style")).toBe("none");
     await request(page, "releaseNodeState", {});
   });
@@ -532,7 +517,7 @@ describe("layer states across selector shapes in Chromium", () => {
     const held = await hold(page, "nest", "hover");
     expect(held.styles.color).toBe("rgb(0, 0, 5)");
     expect(held.authoredStyles?.color).toMatchObject({ selector: ".nest:hover", state: "hover" });
-    // Nested and conditional: never reported as the layer's own.
+    // The copy keeps its condition; the class rule is not a node-specific Reset target.
     expect(held.authoredStyles?.color?.conditional).toBeUndefined();
     const copies = await page.evaluate(() =>
       Array.from((document.querySelector("style[data-zeros-runtime-state]") as HTMLStyleElement).sheet!.cssRules, (rule) => rule.cssText.replace(/\s+/g, " ")));
@@ -551,9 +536,6 @@ describe("layer states across selector shapes in Chromium", () => {
   });
 });
 
-// The runtime's real output for every new field passes the validator the
-// bridge applies, with selectors and class names written the odd ways CSS
-// allows.
 describe("layer state wire output in Chromium", () => {
   let browser: Browser;
   let page: Page;
@@ -597,11 +579,7 @@ describe("layer state wire output in Chromium", () => {
   });
 });
 
-// element.matches calls per getNodeDetails. The cascade's own per-rule cost
-// is unchanged and cached per element; a second read of the same element
-// therefore counts state detection alone: one stateless match per state rule
-// that names every class its subject requires, none for a layer no state rule
-// names.
+// Warm reads reuse cascade matches, isolating the selector cost of state detection.
 describe("state detection cost per selection", () => {
   let browser: Browser;
   beforeAll(async () => {
@@ -648,8 +626,7 @@ describe("state detection cost per selection", () => {
       text: await counted("text"),
     };
     expect(measured.button.queries + measured.drawn.queries + measured.text.queries).toBe(0);
-    // Seven .btn state rules name its class; detection stops once all five
-    // states are found, after the first five.
+    // Detection stops after all five states are found, before the remaining two rules.
     expect(measured.button.warm).toBe(5);
     expect(measured.button.cold - measured.button.warm).toBe(measured.drawn.cold);
     expect(measured.drawn.warm).toBe(0);

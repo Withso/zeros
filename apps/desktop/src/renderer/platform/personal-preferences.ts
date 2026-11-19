@@ -143,7 +143,6 @@ export function acceptPersonalPreferences(
       volatileKeys.delete(storage);
     } catch {
       volatileKeys.add(storage);
-      /* synchronous memory cache remains */
     }
     for (const listener of listeners.get(storage) ?? []) listener();
   }

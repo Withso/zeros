@@ -13,9 +13,7 @@ interface CaptureTask {
   stop(): void;
 }
 
-/** Canvas native previews and iframe captures share this lane. Cancellation
- * never frees a running slot: work must settle after actual cleanup. Native
- * exports and iframe captures additionally acquire main's shared reservation. */
+/** Native previews and iframe captures share this renderer lane; abort does not release a running slot before cleanup. */
 export class DesignCaptureScheduler {
   private pending = new Map<string, CaptureTask>();
   private running: CaptureTask | null = null;
@@ -24,8 +22,7 @@ export class DesignCaptureScheduler {
   private timer: ReturnType<typeof setTimeout> | null = null;
   private unconfirmed = false;
 
-  /** Fail closed after losing terminal proof. Keep one reservation, but no
-   * queued image/source closures. Only app disposal proves the lost host gone. */
+  /** Unconfirmed cleanup permanently quarantines this scheduler; keep the reservation charged and drop waiting jobs. */
   quarantine(): void {
     this.unconfirmed = true;
     for (const task of this.pending.values()) task.controller.abort(new DesignCaptureCleanupUnconfirmedError());

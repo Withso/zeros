@@ -1,5 +1,4 @@
-// Shared, runtime-free process-metrics wire types. Kept separate from the
-// renderer facade so Electron's DOM-free typecheck never pulls in window APIs.
+// Keep these shared types DOM-free for the Electron typecheck.
 
 export type ProcessResourceKind =
   | "main"
@@ -8,21 +7,15 @@ export type ProcessResourceKind =
   | "utility"
   | "sandbox"
   | "sidecar"
-  /** An agent runtime Zeros launched (Codex, Claude Code, Cursor). */
   | "agent"
-  /** A Zeros helper host: agent supervisor, terminal host. */
   | "helper"
   | "process";
 
-/** One live OS process. Names are executable/service labels or a role/tool
- * name derived in Electron main (for example "Codex" or "vitest run"); the
- * native boundary never sends argv, paths, environment values, or cwd data
- * into the renderer. */
+/** Live metrics send normalized process labels, never argv, paths, environment values or cwd. */
 export interface ProcessResourceMetric {
   id: string;
   pid: number;
-  /** Logical display parent. Electron's Chromium children are hoisted to the
-   * synthetic App root; engine descendants retain their real OS parent. */
+  /** Display Chromium children under the synthetic App root; engine descendants keep their OS parents. */
   parentPid: number | null;
   name: string;
   kind: ProcessResourceKind;
@@ -30,15 +23,12 @@ export interface ProcessResourceMetric {
   cpuPercent: number;
   /** False for a new identity without a complete CPU observation window. */
   cpuSampled?: boolean;
-  /** Physical footprint (Activity Monitor's Memory) when the snapshot's
-   * footprint read covers this process, otherwise resident/working-set bytes. */
+  /** Use physical footprint when measured for this process, otherwise resident bytes. */
   memoryBytes: number;
   /** Per-process provenance: a newly started child can lack a footprint even
    * when the app's earlier processes have one. */
   memorySource?: "footprint" | "resident";
-  /** Highest value observed for this live process identity during sampling. */
   peakCpuPercent: number;
-  /** Highest memory value observed for this live identity. */
   peakMemoryBytes: number;
   /** True for a live PTY shell root or any of its descendants. */
   terminal: boolean;
@@ -58,8 +48,7 @@ export interface ProcessResourceTotals {
 export type SystemMemoryPressure = "normal" | "warning" | "critical";
 export type SystemThermalState = "nominal" | "fair" | "serious" | "critical";
 
-/** Whole-Mac context for reading app usage. Every field is nullable: a value
- * the platform does not expose stays unknown rather than reading as zero. */
+/** Unavailable system measurements stay unknown, not zero. */
 export interface SystemResourceState {
   sampledAt: number;
   memoryPressure: SystemMemoryPressure | null;
@@ -72,9 +61,8 @@ export interface SystemResourceState {
   thermalState: SystemThermalState | null;
 }
 
-/** Another Zeros release-channel app running beside this one. */
+/** A different release-channel app on this Mac. */
 export interface OtherAppResourceUsage {
-  /** Bundle name, e.g. "Zeros Alpha". */
   name: string;
   processCount: number;
   cpuPercent: number;
@@ -85,20 +73,15 @@ export interface ProcessMetricsSnapshot {
   sampledAt: number;
   /** Null until a second, sufficiently-near sample establishes a CPU delta. */
   samplingIntervalMs: number | null;
-  /** Wall time spent collecting and reducing this sample. */
   scanDurationMs: number;
   cpuReady: boolean;
   logicalCpuCount: number;
   systemMemoryBytes: number;
   terminalRootsKnown: boolean;
-  /** How memoryBytes was measured: the physical footprint read, or resident
-   * size while no recent footprint read covers the app. */
+  /** The app summary falls back to resident bytes without a recent footprint read. */
   memorySource: "footprint" | "resident";
-  /** Age of the footprint read applied to this sample, when one was used. */
   footprintAgeMs: number | null;
-  /** Null when the platform read failed or is unavailable. */
   system: SystemResourceState | null;
-  /** Other Zeros channel apps (for example Alpha) competing for this Mac. */
   otherApps: OtherAppResourceUsage[];
   totals: {
     all: ProcessResourceTotals;
@@ -115,8 +98,7 @@ export interface ProcessMetricsRequest {
   detail?: boolean;
 }
 
-/** User-initiated diagnostics copy: the snapshot plus Mac context, scrubbed
- * command lines, and the scrubbed recent app-log tail, as plain text. */
+/** Build the user-requested report with scrubbed commands and scrubbed recent logs. */
 export interface ProcessDiagnosticsReport {
   text: string;
   /** Size of the included log tail, in characters. */

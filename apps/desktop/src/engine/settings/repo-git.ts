@@ -1,13 +1,3 @@
-// ──────────────────────────────────────────────────────────
-// Settings foundation — repo git config (remote + base branch)
-// ──────────────────────────────────────────────────────────
-//
-// Resolves a repo's `git.remote` / `git.base_branch` from its layered TOML.
-// createWorkspace reads this to decide which remote to fetch and which branch a
-// new worktree forks from. Mirrors repo-scripts.ts: synchronous, never throws (a
-// settings problem must never block creating a workspace), falls back to the
-// built-in defaults on any failure.
-// ──────────────────────────────────────────────────────────
 
 import { normalizeBranchPrefix } from "../git/naming";
 import { opSettingsResolve } from "./ops";
@@ -18,24 +8,12 @@ import {
 } from "./schema";
 
 export interface RepoGitConfig {
-  /** Remote to fetch + branch from (default "origin"). */
   remote: string;
-  /** Configured base branch (default "main"). */
   baseBranch: string;
-  /** True when `base_branch` was set by a real layer (user/repo/managed) rather
-   *  than the built-in default — an explicit value overrides `origin/HEAD`
-   *  auto-detection (resolved decision 2026-06-13). */
+  /** An explicit setting outranks remote HEAD detection; a built-in default does not. */
   baseBranchExplicit: boolean;
-  /** How to prefix a NEW workspace branch (Settings → Git). "github" is the
-   *  default: a branch is a person's working namespace, so the connected login
-   *  is the answer that needs no configuring, and Settings → Git has no
-   *  unselected state as a result. "zeros" remains the FALLBACK prefix for
-   *  every path that can't produce a namespace (no login, unusable custom
-   *  string) — see resolveNewBranchPrefix. Only affects branches created from
-   *  now on — existing workspaces keep the prefix they were born with. */
+  /** Only new branches use this preference; unavailable GitHub or custom names fall back to zeros. */
   branchPrefixType: BranchPrefixType;
-  /** The literal prefix for `branchPrefixType === "custom"`, already
-   *  normalized (null when unset or unusable). */
   branchPrefix: string | null;
 }
 
@@ -67,8 +45,6 @@ export function resolveRepoGit(repoRoot: string): RepoGitConfig {
         typeof g.base_branch === "string" && g.base_branch.trim()
           ? g.base_branch.trim()
           : "main";
-      // `sources["git.base_branch"]` is the layer that supplied the value;
-      // "default" (or absent) means the user never set it.
       const src = resolved.sources["git.base_branch"];
       const baseBranchExplicit = src !== undefined && src !== "default";
       return {
@@ -82,7 +58,7 @@ export function resolveRepoGit(repoRoot: string): RepoGitConfig {
       };
     }
   } catch {
-    /* settings are optional — fall back to defaults */
+    // Invalid settings must not block workspace creation.
   }
   return DEFAULTS;
 }

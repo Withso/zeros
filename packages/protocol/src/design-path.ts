@@ -4,8 +4,6 @@ const flatFrame = /^[A-Za-z0-9][A-Za-z0-9._-]*\.html$/i;
 const pageFolder = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const reservedFolders = new Set(["meta", "assets", "components"]);
 
-/** Authored spelling is identity. Never normalize traversal or encoded aliases
- * into a different registered frame. Legacy flat basenames remain accepted. */
 export function isDesignPageFolder(value: unknown): value is string {
   return (
     typeof value === "string" &&
@@ -15,9 +13,7 @@ export function isDesignPageFolder(value: unknown): value is string {
   );
 }
 
-/** Explain why an authored page folder is refused, naming a valid choice for a
- * reserved name, so a native author can correct `meta/canvas.json` itself.
- * Null when the folder is valid. Never used to rewrite authored metadata. */
+/** Suggest a valid authored folder without rewriting canvas metadata. */
 export function designPageFolderProblem(value: unknown): string | null {
   if (isDesignPageFolder(value)) return null;
   const folder = typeof value === "string" ? value : String(value);
@@ -32,6 +28,7 @@ export function designPageFolderProblem(value: unknown): string | null {
   return `Design page folder ${JSON.stringify(folder)} must be one portable segment: 1-64 letters, digits, dots, underscores or hyphens, starting with a letter or digit and not ending in a dot.`;
 }
 
+// Legacy flat paths are accepted; never normalize an authored path into an alias.
 export function isDesignFrameFile(value: unknown): value is string {
   if (typeof value !== "string") return false;
   const parts = value.split("/");
@@ -49,7 +46,7 @@ export function encodeDesignFramePath(file: string): string {
 
 /** Comparison key only; authored path spelling remains the source identity. */
 export function portableDesignName(value: string): string {
-  // NFC leaves ASCII unchanged; skipping it keeps 26k-frame canvases cheap.
+  // Avoid Unicode normalization on the ASCII hot path in large catalogs.
   return (/[\u0080-\uffff]/.test(value) ? value.normalize("NFC") : value).toLowerCase();
 }
 

@@ -53,7 +53,7 @@ it("accepts real new worker failures in the previous strict envelopes, live deco
   const request = async (type: string, fields: Record<string, unknown> = {}) => {
     const frame = browserFrame(type, { agentId: "cursor", ...fields });
     await relay.request(CLIENT_A, frame);
-    // A real worker answers this (session start, MCP gateway, a failing turn); the default 1 s poll is too short on a loaded runner.
+    // Use a worker response budget rather than Vitest's unit-test poll default.
     await expect.poll(() => relay.response(frame.id), { timeout: 10_000 }).toBeDefined();
     await worker.flush();
     return relay.response(frame.id)!;

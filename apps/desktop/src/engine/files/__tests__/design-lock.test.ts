@@ -29,8 +29,6 @@ describe("canSkipPerFileRetry", () => {
   });
 
   it("forces a per-file retry when ANY other chmod error is present", () => {
-    // The dangerous case: one real failure hidden among benign ones must not
-    // let the whole batch be counted as unlocked.
     expect(
       canSkipPerFileRetry(`${noAcl}chmod: Operation not permitted 'x.txt'\n`),
     ).toBe(false);
@@ -53,7 +51,6 @@ describe("normalizeDesignDir", () => {
   });
 
   it("returns empty for anything that escapes or is not a dir", () => {
-    // Empty must mean "no design dir", never "lock everything relative to /".
     expect(normalizeDesignDir("")).toBe("");
     expect(normalizeDesignDir(".")).toBe("");
     expect(normalizeDesignDir("/")).toBe("");
@@ -63,16 +60,10 @@ describe("normalizeDesignDir", () => {
   });
 
   it("returns empty for an absolute path instead of rebasing it", () => {
-    // Regression: the leading-slash strip ran BEFORE the escape check, so
-    // `/Users/me/repo/designs` became the repo-relative
-    // `Users/me/repo/designs` — truthy and matching no tracked file. Historical
-    // ACL builds then treated the Design folder like ordinary code.
     expect(normalizeDesignDir("/abs/designs")).toBe("");
     expect(normalizeDesignDir("/Users/me/repo/styles/Designs")).toBe("");
     expect(normalizeDesignDir("//abs//designs//")).toBe("");
-    // `/designs/` is refused too. Nothing distinguishes a repo-relative path
-    // written with a decorative leading slash from a real absolute one, and the
-    // failure is silent and total, so the ambiguous spelling is not accepted.
+    // A decorative slash cannot be distinguished from an absolute path.
     expect(normalizeDesignDir("/designs/")).toBe("");
   });
 });
@@ -82,10 +73,8 @@ describe("isInsideDir", () => {
     expect(isInsideDir("designs/a.css", "designs")).toBe(true);
     expect(isInsideDir("designs", "designs")).toBe(true);
     expect(isInsideDir("designs/deep/a.css", "designs")).toBe(true);
-    // The bug this guards: a prefix match would wrongly exempt these.
     expect(isInsideDir("designs-old/a.css", "designs")).toBe(false);
     expect(isInsideDir("src/designs/a.css", "designs")).toBe(false);
-    // No design dir ⇒ nothing is exempt (unlock sweeps the whole tree).
     expect(isInsideDir("designs/a.css", "")).toBe(false);
   });
 });
@@ -115,7 +104,6 @@ describe("lockableFiles", () => {
     await writeFile(path.join(repo, "root.ts"), "r\n");
     await git("add", "-A");
     await git("commit", "-q", "-m", "init");
-    // Gitignored build output must never be locked — the dev server writes here.
     await mkdir(path.join(repo, "ignored"), { recursive: true });
     await writeFile(path.join(repo, "ignored", "build.js"), "x\n");
   });
@@ -129,11 +117,8 @@ describe("lockableFiles", () => {
     expect(files).toContain("src/a.ts");
     expect(files).toContain("root.ts");
     expect(files).toContain(".gitignore");
-    // Exempt: the design folder itself.
     expect(files).not.toContain("designs/d.css");
-    // Not exempt: a sibling whose name merely shares the prefix.
     expect(files).toContain("designs-old/o.css");
-    // Never: gitignored build output stays writable so installs/dev servers work.
     expect(files).not.toContain("ignored/build.js");
     expect(files.some((f) => f.startsWith("ignored/"))).toBe(false);
   });
@@ -170,7 +155,6 @@ describe("lockableFiles", () => {
       "designs/drafts/nested/option.html",
       "designs/private/ignored.html",
     ]);
-    // A symlink is fenced as an entry; discovery must never follow it into code.
     expect(entries.files).not.toContain("designs/code-link/a.ts");
   });
 
@@ -201,9 +185,7 @@ describe("lockableFiles", () => {
   });
 
   it("skips files git tracks but that are absent from the worktree", async () => {
-    // A folder excluded via Working directories keeps its index rows with the
-    // skip-worktree bit. chmod would fail on those, so they must be filtered
-    // out rather than reported as lock failures the user cannot act on.
+    // Sparse checkout keeps removed paths in Git's index.
     await setWorkingDirectories(repo, ["src", "designs"]);
     const files = await lockableFiles(repo, "designs");
     expect(files).toContain("src/a.ts");
@@ -212,10 +194,7 @@ describe("lockableFiles", () => {
   });
 
   it("still locks a file pinned with --skip-worktree outside a sparse checkout", async () => {
-    // Regression: the skip-worktree filter was unconditional, but the bit has a
-    // second user — `git update-index --skip-worktree` pins a locally-modified
-    // tracked config, and that file IS on disk. Treating it as absent left it
-    // writable while design mode claimed the whole codebase was read-only.
+    // Outside sparse mode, skip-worktree can pin a file still on disk.
     await git("update-index", "--skip-worktree", "src/a.ts");
     const files = await lockableFiles(repo, "designs");
     expect(files).toContain("src/a.ts");
@@ -228,10 +207,6 @@ describe("lockableFiles", () => {
     expect(files).toContain("root.ts");
   });
 
-  // Validated platform-independently: every one of these inputs would otherwise
-  // exempt NOTHING, so the lock would cover the design folder too and still
-  // report a clean success — design mode with nothing writable at all. The
-  // macOS-only `chmod` never gets a say, so the guard must be tested without it.
   describe("resolveDesignDirForLock", () => {
     it("accepts a real repo-relative folder", async () => {
       await expect(resolveDesignDirForLock(repo, "designs")).resolves.toBe(
@@ -267,11 +242,6 @@ describe("lockableFiles", () => {
     });
 
     it("refuses a case-mismatched spelling and names the real one", async () => {
-      // macOS is case-INSENSITIVE by default, so `fs.stat("designs")` resolves
-      // a folder actually called `Designs` — while isInsideDir compares git's
-      // case-sensitive paths and exempts nothing. Segment-wise matching is what
-      // catches it, and the message has to name the real spelling because the
-      // caller has no other way to tell.
       await expect(resolveDesignDirForLock(repo, "Designs")).rejects.toThrow(
         /spelled exactly as on disk; got "Designs", found "designs"/,
       );

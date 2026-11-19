@@ -1,5 +1,4 @@
-// Private migration provenance and recovery. Records are written before a
-// destructive operation and survive archive/restore with the local scope.
+// Write recovery records before retiring files; archive/restore preserves populated records with the local scope.
 import fs from "node:fs/promises";
 import { constants } from "node:fs";
 import { createHash } from "node:crypto";
@@ -74,8 +73,7 @@ function recordBody(relative: string): string {
   return JSON.stringify({ version: 1, path: relative });
 }
 
-/** Exact files, rather than their parent folders: a migrated docs/a.md must
- * not cause pre-existing docs/private.md to enter an archive. */
+/** Record exact migrated paths rather than granting archive eligibility to their parent folders. */
 export async function recordMigratedRootFiles(
   workspaceRoot: string,
   files: string[],
@@ -141,8 +139,7 @@ async function finishRetirement(
   const target = path.join(workspaceRoot, CONTEXT_DIR, relative);
   await assertContextDirectory(path.dirname(target), workspaceRoot);
   if (!(await matches(retired, target, relative))) {
-    // Rename captured a replacement, or the destination changed. Restore via
-    // an exclusive link so a subsequent save at the old name is never replaced.
+    // Restore via an exclusive link so a concurrent save at the old name is never overwritten.
     const source = path.join(workspaceRoot, LEGACY_CONTEXT_DIR, relative);
     await assertContextDirectory(path.dirname(source), workspaceRoot);
     await fs.mkdir(path.dirname(source), { recursive: true });
@@ -153,24 +150,21 @@ async function finishRetirement(
       await removeEmptyRecovery(directory);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      // Both source and destination changed: the captured version remains in
-      // the private recovery record and is included in archive snapshots.
+      // If both names changed, preserve the captured version in the archiveable recovery record.
       recovery = path.relative(workspaceRoot, retired);
     }
     throw new Error(
       `context changed during migration; resolve ${LEGACY_CONTEXT_DIR}/${relative} and ${CONTEXT_DIR}/${relative} on disk${recovery ? ` (captured copy: ${recovery})` : ""}`,
     );
   }
-  // Only the unpredictable, engine-owned name is ever unlinked. A new file
-  // appearing at the original source name belongs to the next migration.
+  // Only unlink the claimed recovery file; a later save at the legacy name belongs to the next migration.
   await fs.unlink(retired).catch((error: NodeJS.ErrnoException) => {
     if (error.code !== "ENOENT") throw error;
   });
   await removeEmptyRecovery(directory);
 }
 
-/** Claim the source atomically before removing it. A separate lstat followed
- * by unlink would still delete a save that lands between those two syscalls. */
+/** Claim the source atomically so retirement cannot unlink a concurrent save at its old path. */
 export async function retireLegacyContextFile(
   workspaceRoot: string,
   relative: string,
@@ -195,8 +189,7 @@ export async function retireLegacyContextFile(
   await finishRetirement(workspaceRoot, directory, relative, matches);
 }
 
-/** A stopped process may have claimed a file but not removed its recovery
- * entry. Resume from its durable descriptor before considering the old root. */
+/** Finish any interrupted retirement before scanning the legacy root. */
 export async function recoverContextMigration(
   workspaceRoot: string,
   matches: CopiedFileMatches,
@@ -204,8 +197,7 @@ export async function recoverContextMigration(
   let recovered = false;
   for (const directory of await entries(workspaceRoot, "recovery")) {
     await assertContextDirectory(directory, workspaceRoot);
-    // An empty record may still be getting prepared by another process. Leave
-    // it alone; only a record holding file data needs recovery or archiving.
+    // A record without data may belong to a live writer; leave it alone.
     if (!(await statIfPresent(path.join(directory, "file")))) continue;
     const relative = await readRecord(path.join(directory, "record.json"));
     await finishRetirement(workspaceRoot, directory, relative, matches);

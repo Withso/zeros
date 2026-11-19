@@ -1,27 +1,14 @@
-// ──────────────────────────────────────────────────────────
-// Transcript store — IndexedDB backend for the boot presentation caches
-// ──────────────────────────────────────────────────────────
-//
-// The engine's zeros.db is the transcript authority. This store only keeps a
-// bounded presentation copy of recently opened chats in separate Local/cloud
-// namespaces, so a cold tab can paint before authoritative history answers. It lives
-// in Chromium's session profile, which Electron main relocates to the
-// purgeable OS cache directory (`relocateChromiumCache`): losing it costs one
-// cold read, never data. Policy (bounds, eligibility, scheduling) lives in
-// state/local-transcript-cache.ts; this file only moves records.
-// ──────────────────────────────────────────────────────────
+// Local and cloud use separate purgeable presentation caches; the authoritative transcript replaces any cached paint.
 
 import { createIndexedDbRecordStore } from "./indexeddb-record-store";
 
 export interface LocalTranscriptRecord {
   chatId: string;
-  /** Serialized `{ version, messages, leadingPrompt }`. A string keeps the
-   * structured clone cheap and makes the byte budget exact. */
+  /** Store serialized JSON to bound clone work and measure the serialized size. */
   json: string;
 }
 
-/** Small metadata row loaded once per session to enforce bounds and LRU
- * order without reading any transcript bytes. */
+/** Metadata supports eviction without loading transcript bytes. */
 export interface LocalTranscriptIndexEntry {
   chatId: string;
   folder: string;
@@ -58,8 +45,6 @@ function isIndexEntry(value: unknown): value is LocalTranscriptIndexEntry {
   );
 }
 
-/** Boot reads must not pay an open per chat: one long-lived connection
- * (indexeddb-record-store.ts owns its lifecycle). */
 export function createIndexedDbTranscriptStore(
   factory: IDBFactory | undefined = typeof indexedDB === "undefined"
     ? undefined

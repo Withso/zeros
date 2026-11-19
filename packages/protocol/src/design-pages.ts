@@ -11,8 +11,7 @@ import {
   type DesignCanvasItemSummary,
 } from "./design-canvas-items";
 
-/** Frames one page admits; per-page stacking `z` spans 0 through this value.
- * A directory has no frame cap of its own beyond its page count. */
+/** The same per-page limit bounds frame membership and stacking indices. */
 export const DESIGN_MAX_FRAMES_PER_PAGE = 1_000;
 export const DESIGN_MAX_PAGES = 64;
 
@@ -24,8 +23,7 @@ export interface DesignPageSummary {
   frameFiles: string[];
   /** Registered membership, including sources that are missing or cannot render. */
   frameIds?: string[];
-  /** Section titles, notes and link cards drawn on the page; absent when it
-   * has none. Invalid entries in canvas.json are skipped, never sent. */
+  /** Skip invalid canvas.json items; omit the field when none remain. */
   items?: DesignCanvasItemSummary[];
   /** Valid items omitted by the page's item or text cap. Older engines omit it. */
   itemsNotShown?: number;
@@ -146,8 +144,7 @@ export const designPageCatalogSchema = z
     }
   });
 
-/** Compatible wire normalization only; authored canvas documents are never
- * passed here or changed. Ready snapshots and frame objects keep their identity. */
+/** Normalize legacy wire replies without rewriting authored canvas documents or replacing already-correct objects. */
 export function normalizeDesignPagesSnapshot<
   T extends {
     pages?: DesignPageSummary[];

@@ -15,7 +15,8 @@ import {
   designWorkspaceSnapshotCache,
   fetchDesignWorkspaceSnapshot,
 } from "./design-workspace-cache";
-import { designWorkspaceSnapshotMatchesPath } from "./design-workspace-boot-cache";
+import { designWorkspaceSnapshotMatchesPath, isDesignWorkspaceBootPreview } from "./design-workspace-boot-cache";
+import { useDesignWorkspaceUiStore } from "./design-workspace-ui";
 
 /** A persisted snapshot belongs to its confirmed checkout path as well as the
  * stable workspace id. Hide a moved workspace's old pixels, while preserving
@@ -62,8 +63,13 @@ export function useDesignWorkspaceSnapshot(
       enabled: active,
     },
   );
+  const bootPreview = read.data ? isDesignWorkspaceBootPreview(read.data) : false;
+  const currentDirectoryId = useDesignWorkspaceUiStore(state => workspaceId ? state.byWorkspace[workspaceId]?.directoryId : undefined);
+  const wrongBootDirectory = bootPreview && read.data?.directoryId !== currentDirectoryId;
   useLayoutEffect(() => {
-    if (active && workspaceId && read.data && designWorkspaceSnapshotMatchesPath(read.data, workspacePath)) observeDesignDirectory(workspaceId, read.data);
-  }, [active, workspaceId, workspacePath, read.data]);
-  return presentDesignWorkspaceSnapshotRead(read, workspacePath, active);
+    if (active && workspaceId && read.data && !bootPreview && designWorkspaceSnapshotMatchesPath(read.data, workspacePath)) observeDesignDirectory(workspaceId, read.data);
+  }, [active, bootPreview, workspaceId, workspacePath, read.data]);
+  return wrongBootDirectory
+    ? { ...read, data: undefined }
+    : presentDesignWorkspaceSnapshotRead(read, workspacePath, active);
 }

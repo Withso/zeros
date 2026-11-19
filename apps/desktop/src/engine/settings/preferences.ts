@@ -5,8 +5,7 @@ const object = (value: unknown): Record<string, unknown> =>
   value !== null && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : {};
-/** A preference object is one value: removing an optional field in its UI
- * must remove the TOML override too. Other preference keys remain untouched. */
+/** Replacing one preference must delete omitted TOML fields without touching other preferences. */
 function replacementPatch(previous: unknown, value: unknown): unknown {
   if (value === null || typeof value !== "object" || Array.isArray(value))
     return value;

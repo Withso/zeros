@@ -30,8 +30,7 @@ export function getPrInlineReview(
 export function getPrReviewDiff(input: PrReviewTarget & { kind?: string }): Promise<PrReviewDiff> {
   return request("gh.prReviewDiff", input);
 }
-// The existing comment write operation keeps its conversation behavior when
-// kind is absent. Explicit variants also use its actor-bound cloud write grant.
+// The same actor-bound cloud grant covers all comment kinds; an omitted kind remains a conversation comment.
 export function postPrLineComment(
   input: PrLineCommentInput,
 ): Promise<PrCommentResult> {

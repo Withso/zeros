@@ -10,7 +10,6 @@ it("R1: presence is per exact workspace connection and ends with it", () => {
   const end = setRelayPresence(a);
   expect(relayPresenceActive(a)).toBe(true);
   expect(relayPresenceActive(b)).toBe(false);
-  // A second connection to the same workspace keeps presence until both end.
   const second = setRelayPresence(a);
   end(); expect(relayPresenceActive(a)).toBe(true);
   second(); expect(relayPresenceActive(a)).toBe(false);

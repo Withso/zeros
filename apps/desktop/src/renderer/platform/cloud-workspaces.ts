@@ -43,13 +43,12 @@ async function readCloudJson(response: Response, maxBytes = 4 * 1024 * 1024): Pr
 }
 
 const DEVICE_HEADER_NAMES = ["X-Zeros-Device-Id", "X-Zeros-Device-Registration", "X-Zeros-Device-Instance"] as const;
-/** Only the three device headers, and only together: the control plane refuses a partial binding. */
 function pickDeviceHeaders(headers: Record<string, string> | undefined): Record<string, string> {
   if (!headers || !DEVICE_HEADER_NAMES.every(name => typeof headers[name] === "string" && /^[0-9a-f-]{36}$/i.test(headers[name]!))) return {};
   return Object.fromEntries(DEVICE_HEADER_NAMES.map(name => [name, headers[name]!]));
 }
 
-/** The bearer's exp claim in ms, read without verifying (the control plane verifies); null when unreadable. */
+/** Expiry is an unverified scheduling hint; only the control plane authenticates the bearer. */
 function bearerExpiry(token: string): number | null {
   try {
     const payload = token.split(".")[1];
@@ -68,33 +67,30 @@ export async function cloudAccountRequest<T>(
   schema: z.ZodType<T>,
   input?: { body: unknown; idempotencyKey: string; method?: "POST" | "DELETE" | "PUT" | "PATCH" },
   options?: { promptRecovery?: true; signal?: AbortSignal; githubPullRequest?: true; mutationReceipt?: true;
-    /** This Mac's three local-command device headers, all or none. */
+    /** The control plane requires all three local-command device headers or none. */
     deviceHeaders?: Record<string, string>;
-    /** Order 3: ask for the connected-Macs `syncing` field (released desktops parse those replies strictly). */
+    /** Opt in to extra Mac fields so older strict decoders never receive them. */
     syncField?: true;
-    /** Team sharing phase 1: opt in to organization-wide reads and the top-level sharing fields. */
     teamSharing?: true;
-    /** §14.7 client-token-rollover-v1 on POST connect: this open peer's in-memory instance id (binds its tickets). */
+    /** Bind rollover tickets to this open peer's in-memory instance. */
     clientInstance?: string;
-    /** §14.7: the bearer must outlive this instant (a rollover after the JWT it already presented). */
+    /** Renewal requires a bearer that outlives the previous one's expiry. */
     notExpiringBefore?: number;
-    /** §14.7: told the presented bearer's expiry (its exp claim), so a retry can ask for a newer one. Never the token. */
+    /** Report only expiry so a retry can request a newer bearer without seeing the token. */
     presentedTokenExpiry?: (expiresAt: number | null) => void },
 ): Promise<T> {
   if (!isFeatureEnabled("cloud-workspaces"))
     throw new Error("Cloud workspaces are not available in this release channel.");
   if (!CONTROL_PLANE_URL)
     throw new Error("Cloud workspaces are not configured");
-  // Capture the initiating account synchronously, before token refresh or any
-  // other yield can replace it with the next signed-in account.
+  // Capture the account before token refresh can yield to a different sign-in.
   const epoch = getOrganizationStoreGeneration();
   const session = await getSession(options?.notExpiringBefore ? { notExpiringBefore: options.notExpiringBefore } : undefined);
   if (epoch !== getOrganizationStoreGeneration())
     throw new Error("Your account changed while loading cloud workspaces");
   if (!session) throw new Error("Sign in to use cloud workspaces");
   options?.presentedTokenExpiry?.(bearerExpiry(session.access_token));
-  // §14.7: an N-1 control plane's CORS preflight refuses the rollover headers (a browser fetch cannot ignore them).
-  // One retry without them; remembered for this server only when that retry succeeds, and only for a while.
+  // Older control planes can reject rollover during CORS preflight; cache a successful headerless fallback briefly.
   const rollover = !!options?.clientInstance && /^[0-9a-f-]{36}$/i.test(options.clientInstance) &&
     !((rolloverRefused.get(CONTROL_PLANE_URL) ?? -Infinity) > Date.now());
   const send = (withRollover: boolean) => controlPlaneFetch(`${CONTROL_PLANE_URL}${path}`, {
@@ -105,9 +101,9 @@ export async function cloudAccountRequest<T>(
     headers: {
       authorization: `Bearer ${session.access_token}`,
       ...pickDeviceHeaders(options?.deviceHeaders),
-      // 12.z: syncWanted has its own opt-in (released apps parse the Mac strictly); both travel together here.
+      // Released Mac decoders need separate opt-ins for syncing and syncWanted.
       ...(options?.syncField ? SYNC_FIELD_HEADERS : {}),
-      // 3B: team ownership travels with team sharing (a workspace may have no Creator; this app reads it).
+      // Ask for team ownership with sharing so creatorless workspaces can be decoded.
       ...(options?.teamSharing ? TEAM_SHARING_HEADERS : {}),
       ...(withRollover ? { "X-Zeros-Client-Features": CLIENT_TOKEN_ROLLOVER_FEATURE, "X-Zeros-Client-Instance": options!.clientInstance! } : {}),
       ...(input
@@ -124,20 +120,18 @@ export async function cloudAccountRequest<T>(
   let response: Response;
   try { response = await send(rollover); }
   catch (error) {
-    // A preflight refusal looks like any network failure (TypeError) and never reached the server.
+    // A preflight refusal is indistinguishable from other fetch TypeErrors.
     if (!rollover || !(error instanceof TypeError) || options?.signal?.aborted) throw error;
     response = await send(false);
     rolloverRefused.set(CONTROL_PLANE_URL, Date.now() + ROLLOVER_REFUSED_MS);
   }
-  // Recovery can include the outbox's bounded attachment page. Ordinary
-  // account APIs retain their smaller response budget.
+  // Only prompt recovery needs the larger budget for bounded attachment pages.
   const body = await readCloudJson(response, options?.promptRecovery && /^\/v1\/cloud-v2\/workspaces\/[^/]+\/prompts\?/.test(path)
     ? 16 * 1024 * 1024 : 4 * 1024 * 1024);
   if (epoch !== getOrganizationStoreGeneration() && !(response.ok && options?.mutationReceipt))
     throw new Error("Your account changed while loading cloud workspaces");
   if (!response.ok) {
-    // Team sharing: execution on a teammate's workspace. One error for it, and
-    // the workspace's document is read again so the view becomes read-only.
+    // Refresh the workspace document when execution reveals that access is read-only.
     if (response.status === 409 && (body as { error?: { code?: unknown } } | null)?.error?.code === "workspace_read_only") {
       const workspaceId = /^\/v1\/cloud-v2\/workspaces\/([0-9a-f-]{36})(?:[/?]|$)/i.exec(path)?.[1];
       if (workspaceId) reportWorkspaceReadOnly(workspaceId);
@@ -174,7 +168,6 @@ export interface CloudWorkspaceCatalogSnapshot {
   /** A capped or dependency-incomplete observation cannot prove omission. */
   complete?: boolean;
 }
-/** Cloud v2: one read per organization the account can use cloud in. */
 export async function listCloudWorkspaceCatalogSnapshot(organizationId?: string): Promise<CloudWorkspaceCatalogSnapshot> {
   const me = getTeamStoreState().me;
   const generation = getOrganizationStoreGeneration();
@@ -188,8 +181,7 @@ export async function listCloudWorkspaceCatalogSnapshot(organizationId?: string)
     const page = await listCloudV2Workspaces(id);
     if (generation !== getOrganizationStoreGeneration() || organizationId === undefined && me !== getTeamStoreState().me)
       throw new Error("Cloud organization memberships changed while loading");
-    // Keep omitted cached rows until a complete observation or exact deletion: a capped read, or a
-    // creator-only reply (an N-1 replica) for an organization whose shared set was confirmed.
+    // Keep omitted rows on incomplete reads, including creator-only replies after shared rows were confirmed.
     if (!page.complete || recordOrganizationSharing(id, page.teamSharing).keepShared) complete = false;
     workspaces.push(...page.workspaces.map(cloudV2Document));
   }
@@ -202,7 +194,6 @@ export async function getCloudWorkspaceDocument(
   return cloudV2Document(await getCloudV2Workspace(target));
 }
 
-/** The workspace `<organization slug>/w/<n>` names, for the signed-in account. */
 export async function getCloudWorkspaceDocumentByNumber(
   address: WorkspaceAddress,
 ): Promise<CloudWorkspaceDocument> {
@@ -220,7 +211,6 @@ export async function changeCloudWorkspaceLifecycle(
   const workspace = cloudV2Document(await changeCloudV2Workspace(target, action));
   if (workspace.id !== target.workspaceId || workspace.organizationId !== target.organizationId)
     throw new Error("Cloud lifecycle response changed identity");
-  // A successful server deletion stays successful if native cleanup fails.
   return workspace;
 }
 
@@ -233,8 +223,7 @@ export async function createCloudWorkspaceDocument(input: {
   idempotencyKey: string;
 }): Promise<CloudWorkspaceDocument> {
   const epoch = getOrganizationStoreGeneration();
-  // v2 forks the organization's live Cloud Computer, which already has the
-  // repository installed; the server rejects repositories it does not have.
+  // Creation forks the organization's Cloud Computer and requires the repository to be installed there.
   const workspace = await createCloudV2Workspace({
     organizationId: input.organizationId,
     repository: `${input.repository.owner}/${input.repository.name}`,

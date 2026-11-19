@@ -341,7 +341,8 @@ export class DesignFramePreparation {
     while (this.running) await this.running.catch(() => {});
     if (!current()) return null;
     const relint = new Set(snapshot.preparation!.relint);
-    const lintFiles = files.filter(file => relint.has(file));
+    const checked = new Set(snapshot.lint.checkedFiles);
+    const lintFiles = files.filter(file => relint.has(file) || !checked.has(file));
     const running = lintFiles.length
       ? this.deps.prepare(workspaceId, snapshot.directoryId!, snapshot.preparation!.revision, files, lintFiles)
       : this.deps.prepare(workspaceId, snapshot.directoryId!, snapshot.preparation!.revision, files);

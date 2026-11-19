@@ -79,8 +79,7 @@ function processAlive(pid: number): boolean {
   }
 }
 
-/** Only prune recorded, unchanged directories whose owning process exited.
- * PID reuse errs toward retaining data. Never scan temporary folders by prefix. */
+/** Prune only recorded directories with matching filesystem identity and a dead owner; PID reuse retains the directory. */
 export async function pruneAttachmentTemporaryDirectories(): Promise<void> {
   const registry = registryRoot();
   if (!(await fs.lstat(registry).catch(() => null))?.isDirectory()) return;
@@ -138,8 +137,7 @@ export async function pruneAttachmentTemporaryDirectories(): Promise<void> {
       }
       await fs.unlink(file);
     } catch {
-      // Unreadable, malformed or changed ownership records are never authority
-      // to delete a directory. One such record must not block other cleanups.
+      // An unreadable or changed record gives no deletion authority and must not block other cleanup.
     } finally {
       await handle?.close().catch(() => {});
     }

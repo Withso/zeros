@@ -299,7 +299,6 @@ it.each([
   const failure = vi.fn(); h.client.waitUntilReady().catch(failure);
   h.sockets[0].close(4001, reason); await vi.advanceTimersByTimeAsync(0);
   expect(h.client.lastRejection).toBeNull();
-  // Only an access_revoked close is worth a confirming read.
   expect(h.confirmCloudAccessEnded).toHaveBeenCalledTimes(reason === "access_revoked" ? 1 : 0);
   await vi.advanceTimersByTimeAsync(30_000);
   expect(h.sockets.length).toBeGreaterThan(1);

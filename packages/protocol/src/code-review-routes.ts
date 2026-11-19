@@ -21,8 +21,7 @@ export function handleCodeReviewRouteCore(
   host: CodeReviewRouteHost, operation: CodeReviewOperation, raw: unknown,
   options: CodeReviewCoreRouteOptions, store: CodeReviewStoreCore,
 ): unknown {
-  // One synchronous owner snapshot per operation; listing a discussion never
-  // issues a workspace-registry query for each thread or line.
+  // Snapshot the owner roots at most once so filtering threads never queries the registry per path.
   let ownerRoots: readonly string[] | undefined;
   const pathPolicy = { ...options, ownerRoots: () => ownerRoots ??= host.ownerRoots() };
   const rootFor = (workspaceId: string) => host.resolveReadCwd(workspaceId, options.remote === true);

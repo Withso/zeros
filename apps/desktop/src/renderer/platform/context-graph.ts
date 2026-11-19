@@ -1,14 +1,4 @@
-// ──────────────────────────────────────────────────────────
-// Native binding — context graph (the workspace's `.context/` listing)
-// ──────────────────────────────────────────────────────────
-//
-// Renderer-side façade over the engine's `context.graph.*` bridge ops.
-// Bridge-only, like listIgnoredEntries: summaries list once per workspace
-// plus once per refresh signal, so there is no native fast path to keep in
-// sync. DESKTOP ONLY — the engine refuses remote callers (`.context/` holds
-// private workspace material), so remote clients short-circuit here instead
-// of spending a guaranteed-refusal round-trip.
-// ──────────────────────────────────────────────────────────
+// The engine rejects remote access to private .context material; do not send these operations from a remote renderer.
 
 import { isNativeRuntime } from "./runtime";
 import { getActiveBridge } from "./bridge/active-bridge";
@@ -23,7 +13,6 @@ export type ContextGraphScope = "local" | "shared";
 export type ContextGraphCategory = "attachment" | "doc";
 export type ContextGraphKind = "image" | "markdown" | "text" | "other";
 
-/** Wire shape of one canvas card — mirrors the engine's ContextGraphItem. */
 export interface ContextGraphItemWire {
   relPath: string;
   name: string;
@@ -45,17 +34,11 @@ export interface ContextGraphListWire {
   truncated: boolean;
 }
 
-// ── Change signal ───────────────────────────────────────────
-// Attachment staging writes ride a direct electron IPC (no bridge op), so no
-// DB_CHANGED reaches the renderer until the engine's worktree watcher polls
-// or the turn ends. This in-process signal lets the write path nudge the
-// Context tab the moment a file lands, without coupling the composer to the
-// shell's refresh bus.
+// Direct attachment IPC writes do not immediately broadcast an engine change; notify subscribers after the file lands.
 
 type ContextGraphListener = (cwd: string) => void;
 const changeListeners = new Set<ContextGraphListener>();
 
-/** Notify subscribers that `cwd`'s graph changed on disk (post-write). */
 export function notifyContextGraphChanged(cwd: string): void {
   for (const listener of changeListeners) {
     try {
@@ -66,7 +49,6 @@ export function notifyContextGraphChanged(cwd: string): void {
   }
 }
 
-/** Subscribe to graph writes made from this renderer. Returns unsubscribe. */
 export function subscribeContextGraphChanged(
   listener: ContextGraphListener,
 ): () => void {
@@ -90,15 +72,12 @@ async function resolveTarget(cwd: string, action: string) {
   try {
     workspaceId = (await resolveBridgeWorkspaceIdForCwd(bridge, cwd)) ?? cwd;
   } catch {
-    // A registered primary checkout has no workspace row; the engine resolves
-    // its trusted raw root via isKnownRepoRoot (resolveReadCwd).
+    // A registered primary checkout can lack a workspace row; the engine validates its raw root.
   }
   return { bridge, workspaceId };
 }
 
-/** List the workspace's `.context/` contents (both scopes merged).
- *  Transport absence REJECTS (callers retain their confirmed snapshot);
- *  a remote client resolves to the empty non-existent graph. */
+/** Reject on missing transport so a Local reader retains the last confirmed graph. */
 export async function listContextGraph(
   cwd: string,
 ): Promise<ContextGraphListWire> {
@@ -112,7 +91,7 @@ export async function listContextGraph(
   return bridgeContextGraphList(bridge, workspaceId);
 }
 
-/** Idempotently create the graph skeleton. No-op without native graph access. */
+/** Creating the graph skeleton is idempotent. */
 export async function scaffoldContextGraph(
   cwd: string,
 ): Promise<{ ok: boolean; created: boolean; error?: string }> {

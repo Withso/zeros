@@ -1,7 +1,6 @@
 import { z } from "zod";
 
-/** GitHub owns these identities and anchors. Workspace discussions use the
- * separate code-review contract; importing a review never impersonates its author. */
+/** GitHub owns these identities and anchors; imports never impersonate the original author. */
 export interface PrReviewComment {
   id: string;
   databaseId: number | null;
@@ -53,8 +52,7 @@ export interface PrInlineReview {
   annotationsTruncated: boolean;
   /** A failed annotations read must not hide successfully loaded discussions. */
   annotationError: string | null;
-  /** The GitHub account this read used, which a reply posts as. Absent from
-   *  older readers; the reply row then shows no avatar. */
+  /** Replies use this GitHub account; older readers omit it and show no avatar. */
   viewer?: { login: string; avatarUrl: string | null } | null;
 }
 

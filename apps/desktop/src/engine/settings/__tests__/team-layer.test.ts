@@ -1,5 +1,3 @@
-// O4c — the team layer: precedence (user < TEAM < repo) and the
-// in-memory team-context slot the renderer couriers into.
 
 import { describe, expect, it } from "vitest";
 import { resolveSettings } from "../resolve";
@@ -12,11 +10,7 @@ import {
 
 describe("team settings layer", () => {
   it("sits between user and repo in precedence", () => {
-    // Probed with [git] keys — a table every layer still carries (env left the
-    // repo files in the 2026-07-17 slimming, so it can't probe the repo side).
-    // `remote` / `base_branch` are free-form strings, so the layer name doubles
-    // as the value; `branch_prefix_type` is an enum (sanitizeLayer drops
-    // anything else), so it probes the third key with real members instead.
+    // Use Git keys because repo layers do not accept env keys.
     const resolved = resolveSettings({
       user: {
         git: {
@@ -30,8 +24,8 @@ describe("team settings layer", () => {
     });
     const git = resolved.effective.git as Record<string, string>;
     expect(git.remote).toBe("user");
-    expect(git.base_branch).toBe("team"); // team overrides user
-    expect(git.branch_prefix_type).toBe("github"); // repo overrides team
+    expect(git.base_branch).toBe("team");
+    expect(git.branch_prefix_type).toBe("github");
     expect(resolved.sources["git.base_branch"]).toBe("team");
   });
 

@@ -16,7 +16,7 @@ describe("TerminalRegistry", () => {
   it("add is idempotent on sessionId (a reattach doesn't duplicate)", () => {
     const r = new TerminalRegistry();
     expect(r.add(entry("a", "ws1"))).toBe(true);
-    expect(r.add(entry("a", "ws1"))).toBe(false); // reattach — no new entry
+    expect(r.add(entry("a", "ws1"))).toBe(false);
     expect(r.sessionIds()).toEqual(["a"]);
   });
 
@@ -36,8 +36,6 @@ describe("TerminalRegistry", () => {
       cwd: "/w/ws1/packages/app",
       createdAt: 1,
     });
-    // Sibling with a shared string prefix but NOT inside the folder — the
-    // classic prefix-match trap (/w/ws1-other vs /w/ws1/).
     r.add({
       sessionId: "sibling",
       workspaceId: "ws2",
@@ -51,16 +49,14 @@ describe("TerminalRegistry", () => {
   it("visibleTo: local sees everything; remote sees only known non-restricted", () => {
     const r = new TerminalRegistry();
     r.add(entry("a", "ws1", 1));
-    r.add(entry("b", "ws2", 2)); // restricted
-    r.add(entry("c", null, 3)); // unknown workspace
+    r.add(entry("b", "ws2", 2));
+    r.add(entry("c", null, 3));
     const restricted = new Set(["ws2"]);
 
-    // Local desktop: all three, oldest first.
     expect(
       r.visibleTo({ isRemote: false, restricted }).map((t) => t.sessionId),
     ).toEqual(["a", "b", "c"]);
 
-    // Remote: drops the restricted (b) AND the unknown-workspace (c) — fail-closed.
     expect(
       r.visibleTo({ isRemote: true, restricted }).map((t) => t.sessionId),
     ).toEqual(["a"]);
@@ -82,16 +78,13 @@ describe("TerminalRegistry", () => {
   it("markExited / markAlive flip the exited flag and report whether it changed", () => {
     const r = new TerminalRegistry();
     r.add(entry("a", "ws1"));
-    // Natural exit keeps the entry, flags it exited.
     expect(r.markExited("a")).toBe(true);
     expect(r.get("a")?.exited).toBe(true);
-    expect(r.markExited("a")).toBe(false); // already exited → no change
-    expect(r.has("a")).toBe(true); // KEPT (not removed)
-    // Restart un-exits.
+    expect(r.markExited("a")).toBe(false);
+    expect(r.has("a")).toBe(true);
     expect(r.markAlive("a")).toBe(true);
     expect(r.get("a")?.exited).toBe(false);
-    expect(r.markAlive("a")).toBe(false); // already alive → no change
-    // No-ops on an unknown session.
+    expect(r.markAlive("a")).toBe(false);
     expect(r.markExited("missing")).toBe(false);
     expect(r.markAlive("missing")).toBe(false);
   });
@@ -104,8 +97,8 @@ describe("TerminalRegistry", () => {
     const restricted = new Set(["ws2"]);
 
     expect(r.remoteMayOperate("shared", restricted)).toBe(true);
-    expect(r.remoteMayOperate("locked", restricted)).toBe(false); // restricted
-    expect(r.remoteMayOperate("nows", restricted)).toBe(false); // unknown workspace
-    expect(r.remoteMayOperate("missing", restricted)).toBe(false); // unknown session
+    expect(r.remoteMayOperate("locked", restricted)).toBe(false);
+    expect(r.remoteMayOperate("nows", restricted)).toBe(false);
+    expect(r.remoteMayOperate("missing", restricted)).toBe(false);
   });
 });

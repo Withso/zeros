@@ -1,19 +1,4 @@
-// ──────────────────────────────────────────────────────────
-// Auto-updater — in-place download + install
-// ──────────────────────────────────────────────────────────
-//
-// The main process checks GitHub Releases on launch/focus/resume and every five
-// minutes, even while the macOS window is closed. It downloads automatically
-// and publishes `ready` only after the platform installer has staged the file.
-// The update applies automatically on the next natural quit, so it never
-// interrupts a running agent. Clicking the ready toast calls `install()` →
-// `updater_install`, which quits + replaces in place + relaunches (or, if the
-// download is still running, installs the moment it finishes).
-//
-// This is the Developer-ID-signed flow (electron-updater quitAndInstall); see
-// apps/desktop/electron/updater.ts. Under `pnpm dev` (no packaged main) everything no-ops.
-// ──────────────────────────────────────────────────────────
-
+// Main publishes ready only after staging; without an explicit restart, the update applies on normal quit.
 import { useCallback, useEffect, useState } from "react";
 import { isElectron, nativeInvoke, nativeListen } from "./runtime";
 import { parseClientUpgradeRequired, type ClientUpgradeRequired } from "../../../shared/client-compatibility";
@@ -29,8 +14,6 @@ export type UpdaterStatus = RevisionedStatus &
     | { kind: "idle" }
     | { kind: "checking" }
     | { kind: "available"; version: string; notes?: string }
-  // Emitted by apps/desktop/electron/updater.ts as the background download runs and stages:
-  //   available → downloading (with progress) → ready → (quit → relaunch).
     | {
         kind: "downloading";
         version: string;
@@ -47,7 +30,6 @@ function errMsg(err: unknown): string {
   return JSON.stringify(err);
 }
 
-/** Validate the IPC/event payload at the renderer boundary. */
 function parseUpdaterState(payload: unknown): UpdaterStatus | null {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
     return null;
@@ -128,14 +110,9 @@ export function useUpdater(): {
         notes?: string;
       } | null>("updater_check");
       void meta;
-      // If meta is non-null, the main process already fired
-      // `updater-status: available` via the event stream; the
-      // subscriber below handled it.
+      // The revisioned event/snapshot stream owns status, not the check reply.
     } catch (err) {
-      // Background-check failures are common and non-actionable
-      // (offline, no releases yet, transient 5xx). Log, stay idle —
-      // never surface a red "Retry" pill for something the user
-      // didn't initiate.
+      // A failed background check does not replace the last confirmed status.
       console.warn("[updater] background check failed:", errMsg(err));
     }
   }, []);
@@ -143,20 +120,15 @@ export function useUpdater(): {
   const install = useCallback(async (options?: { requireReady: boolean }) => {
     if (!isElectron()) return;
     try {
-      // updater_install either quits + installs immediately (if the background
-      // download already finished) or defensively arms install-on-ready for an
-      // older caller. Main's event stream remains the status source of truth.
+      // Older callers can arm install-on-ready; requireReady refuses an unstaged restart.
       await nativeInvoke<void>("updater_install", options);
     } catch (err) {
-      // Keep the last confirmed ready snapshot visible so the user can retry.
-      // Main publishes a newer error revision when quitAndInstall itself fails.
+      // Preserve the ready snapshot for retry unless main publishes a newer status.
       console.warn("[updater] install failed:", errMsg(err));
     }
   }, []);
 
-  // Subscribe first, then read the monotonic snapshot. This closes both races:
-  // an event that fired before React mounted and an event that lands while the
-  // snapshot IPC is in flight.
+  // Subscribe before reading status, then use the revision to reject an older snapshot racing a live event.
   useEffect(() => {
     if (!isElectron()) return;
     let alive = true;

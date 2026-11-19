@@ -9,8 +9,7 @@ const MAX_ORGANIZATIONS = 64;
 export interface WorkspaceApiAccessState { value: boolean | undefined; saving: boolean; failed: boolean }
 interface Entry extends WorkspaceApiAccessState { reading?: Promise<boolean>; writes: number }
 
-// Keyed by account generation and organization: a value never crosses
-// accounts, and each organization keeps its own confirmed snapshot.
+// Key snapshots by account generation and organization so owner switches never reuse another value.
 const entries = new Map<string, Entry>();
 const listeners = new Set<() => void>();
 const EMPTY: WorkspaceApiAccessState = Object.freeze({ value: undefined, saving: false, failed: false });
@@ -60,7 +59,7 @@ export function loadWorkspaceApiAccess(organizationId: string): Promise<boolean>
   return reading;
 }
 
-/** Shown at once; reverted to the last confirmed value if the server refuses. */
+// Only the latest write may publish or roll back its optimistic value.
 export async function saveWorkspaceApiAccess(organizationId: string, value: boolean): Promise<void> {
   const key = keyFor(organizationId), current = entry(key), previous = current.value, write = ++current.writes;
   current.value = value; current.saving = true; changed(key);

@@ -12,8 +12,7 @@ export { pruneAttachmentTemporaryDirectories } from "./attachment-temporary-reco
 
 const sweptRoots = new Set<string>();
 
-/** A workspace can itself be nested inside another checkout or Design folder.
- * Temporary storage must be outside every enclosing repository/Design boundary. */
+/** Check candidate ancestors because a path outside the workspace can still be inside a marked checkout. */
 async function outsideOwnedFolders(candidate: string): Promise<boolean> {
   for (let parent = candidate; ; parent = path.dirname(parent)) {
     for (const marker of [".git", "design.toml"]) {
@@ -28,9 +27,7 @@ async function outsideOwnedFolders(candidate: string): Promise<boolean> {
   }
 }
 
-// Foundation selects temporary space on the destination volume, including an
-// external disk. The destination is an argv value, never executable source.
-// No application automation or development tools are involved.
+// Foundation finds temp space on the destination volume; pass the workspace as argv, never script source.
 export const MACOS_ATTACHMENT_TEMP_SCRIPT = `
 ObjC.import("Foundation");
 function run(argv) {
@@ -58,9 +55,7 @@ export interface AttachmentTemporaryDirectory {
   dispose: () => Promise<void>;
 }
 
-/** st_dev identifies the filesystem, not the mount. Linux refuses rename
- * across two bind mounts of the same filesystem. Read the kernel's mount ID
- * for an opened directory rather than guessing from path prefixes. */
+/** Linux rejects rename across bind mounts that share st_dev, so compare the opened directories' kernel mount IDs. */
 async function mountId(directory: string): Promise<string | null> {
   if (process.platform !== "linux") return null;
   const handle = await fs.open(directory,
@@ -75,9 +70,7 @@ async function mountId(directory: string): Promise<string | null> {
   }
 }
 
-/** A copy can become visible in one rename only on its destination filesystem.
- * Keep every intermediate byte outside the workspace. Recovery uses the
- * separately persisted source, so these temporary files are disposable. */
+/** Keep temporary bytes outside the workspace but on its mount for atomic publication; recovery retains the source separately. */
 export async function createAttachmentTemporaryDirectory(
   workspaceRoot: string,
 ): Promise<AttachmentTemporaryDirectory> {
@@ -102,8 +95,7 @@ export async function createAttachmentTemporaryDirectory(
     }
   };
   const allocate = async (parent: string, replacementParent = false) => {
-    // mkdtemp creates an unpredictable, owner-only directory. Recheck after
-    // creation so a changed mount or symlink cannot redirect a copy into repo.
+    // Recheck the owner-only directory after allocation in case a mount or symlink changed.
     const directory = await fs.mkdtemp(path.join(parent, "zeros-attachment-"));
     if (!(await suitable(directory))) {
       await fs.rmdir(directory).catch(() => {});
@@ -130,11 +122,9 @@ export async function createAttachmentTemporaryDirectory(
     };
   };
 
-  // Existing private app data is also useful when TMPDIR is on another disk
-  // or points into a checkout. Never create a fallback folder in the repo.
+  // Private app data is a fallback when TMPDIR is on another volume or inside a checkout.
   const candidates = [os.tmpdir()];
-  // The cloud image provides a private sibling of the repository in the same
-  // mount. This hint receives all the usual volume and ownership checks.
+  // A configured path is only a hint and must pass the same mount and ownership checks.
   if (process.env.ZEROS_ATTACHMENT_TEMP_DIR)
     candidates.push(process.env.ZEROS_ATTACHMENT_TEMP_DIR);
   candidates.push(zerosDataDir());
@@ -175,9 +165,7 @@ export async function createAttachmentTemporaryDirectory(
       throw error;
     }
   }
-  // Mounted Linux workspaces and secondary Windows drives may not share a
-  // filesystem with OS/app temporary storage. Allocate a short-lived private
-  // sibling (or ancestor sibling), never a folder inside a surrounding repo.
+  // When OS temp is on another volume, try a sibling outside any enclosing checkout.
   for (
     let ancestor = path.dirname(workspace);
     ancestor !== workspace;
