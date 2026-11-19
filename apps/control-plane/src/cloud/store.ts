@@ -1358,9 +1358,9 @@ export class CloudV2Store {
   }
 
   /** Whether this is still the workspace's current stop. */
-  async stopCurrent(id: string, generation: string): Promise<boolean> {
+  async stopCurrent(id: string, generation: string, state: "stopping" | "stopped" = "stopping"): Promise<boolean> {
     const { rows } = await withSystemTx(this.pool, tx => tx.query(
-      `SELECT 1 FROM cloud_v2_workspaces WHERE id=$1 AND state='stopping' AND stop_generation=$2::bigint`, [id, generation]));
+      `SELECT 1 FROM cloud_v2_workspaces WHERE id=$1 AND state=$3 AND stop_generation=$2::bigint`, [id, generation, state]));
     return rows.length > 0;
   }
 
