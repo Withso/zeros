@@ -1087,6 +1087,9 @@ function sameFrame(
     // A component's own file can change what its instances offer without
     // changing what this frame renders; the record's key follows it.
     left.instances?.key === right.instances?.key &&
+    (left.componentIdentity === right.componentIdentity ||
+      (left.componentIdentity?.kind === "main" && right.componentIdentity?.kind === "main" && left.componentIdentity.name === right.componentIdentity.name) ||
+      (left.componentIdentity?.kind === "instance" && right.componentIdentity?.kind === "instance" && left.componentIdentity.nodeId === right.componentIdentity.nodeId)) &&
     // Boot/legacy frames can gain confirmed costs without a source change.
     // Cost changes and withdrawals must reach the shared admission budget.
     (left.surfaceCost === right.surfaceCost ||

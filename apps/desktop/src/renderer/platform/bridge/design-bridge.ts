@@ -34,7 +34,7 @@ import { isDesignCanvasItemId, type DesignCanvasItem } from "@zeros/protocol/des
 /** What the canvas sends: an item's own fields; no id creates one. */
 export type DesignCanvasItemInput = DesignCanvasItem extends infer Item ? Item extends DesignCanvasItem
   ? Omit<Item, "id"> & { id?: string } : never : never;
-import { DESIGN_LAZY_PREPARATION_CAPABILITY, DESIGN_MUTATION_SNAPSHOTS_CAPABILITY, DESIGN_PAGE_SCOPED_MUTATIONS_CAPABILITY, designMutationCatalogSchema, designPageScopedCatalogSchema, designPreparedFrameSchema, designFramesPrepareSchema, parseDesignFramesPrepareReply, type DesignMutationCatalog, type DesignPageHashes, type DesignPageScopedCatalog } from "@zeros/protocol/design-catalog";
+import { DESIGN_COMPONENT_IDENTITY_CAPABILITY, DESIGN_COMPONENT_IDENTITY_PARAM, DESIGN_LAZY_PREPARATION_CAPABILITY, DESIGN_MUTATION_SNAPSHOTS_CAPABILITY, DESIGN_PAGE_SCOPED_MUTATIONS_CAPABILITY, designMutationCatalogSchema, designPageScopedCatalogSchema, designPreparedFrameSchema, designFramesPrepareSchema, parseDesignFramesPrepareReply, type DesignComponentIdentity, type DesignMutationCatalog, type DesignPageHashes, type DesignPageScopedCatalog } from "@zeros/protocol/design-catalog";
 import { DESIGN_SOURCE_SURFACES_CAPABILITY } from "@zeros/protocol/design-surface";
 import { DESIGN_COMPONENT_OPTIONS_CAPABILITY, DESIGN_FRAMES_LINT_CAPABILITY, DESIGN_FRAMES_PREPARE_LINT_CAPABILITY,
   DESIGN_OPTIONS_SHOW_NOTHING_PARAM, designFramesLintReplySchema, designFramesLintSchema,
@@ -104,6 +104,7 @@ export interface DesignCanvasFrameWire extends DesignFrameSummaryWire {
   component?: import("@zeros/protocol/design-catalog").DesignFrameComponent;
   /** Set when the frame places component instances with options. */
   instances?: import("@zeros/protocol/design-catalog").DesignFrameInstances;
+  componentIdentity?: DesignComponentIdentity | null;
 }
 
 /** Navigation metadata cannot authorize rendering or editing. */
@@ -128,6 +129,7 @@ export async function bridgeDesignPrepareFrames(bridge: RuntimeClient, input: {
   const params = designFramesPrepareSchema.parse({ ...request,
     ...(bridge.supportsEngineCapability?.(DESIGN_SOURCE_SURFACES_CAPABILITY, input.workspaceId) ? { surfaceCosts: true } : {}),
     ...(bridge.supportsEngineCapability?.(DESIGN_COMPONENT_OPTIONS_CAPABILITY, input.workspaceId) ? { componentOptions: true } : {}),
+    ...(bridge.supportsEngineCapability?.(DESIGN_COMPONENT_IDENTITY_CAPABILITY, input.workspaceId) ? { [DESIGN_COMPONENT_IDENTITY_PARAM]: true } : {}),
     ...(lintFiles?.length && bridge.supportsEngineCapability?.(DESIGN_FRAMES_PREPARE_LINT_CAPABILITY, input.workspaceId) ? { lintFiles } : {}),
   });
   if (isCloudWorkspace(params.workspaceId) || !bridge.supportsEngineCapability?.(DESIGN_LAZY_PREPARATION_CAPABILITY, params.workspaceId))
@@ -686,6 +688,7 @@ export async function bridgeDesignFrame(
     frame,
     depth,
     ...(variant ? { variant } : {}),
+    ...(bridge.supportsEngineCapability?.(DESIGN_COMPONENT_IDENTITY_CAPABILITY, workspaceId) ? { [DESIGN_COMPONENT_IDENTITY_PARAM]: true } : {}),
   })) as { frame?: DesignFrameDocumentWire };
   if (!result?.frame || typeof result.frame.file !== "string") {
     throw new Error("design.frame: malformed engine response");
@@ -700,7 +703,7 @@ export async function bridgeDesignSnapshot(
   const result = (await workspaceOp(
     bridge,
     "design.snapshot",
-    { workspaceId },
+    { workspaceId, ...(bridge.supportsEngineCapability?.(DESIGN_COMPONENT_IDENTITY_CAPABILITY, workspaceId) ? { [DESIGN_COMPONENT_IDENTITY_PARAM]: true } : {}) },
     DESIGN_AGGREGATE_READ_TIMEOUT_MS,
   )) as { snapshot?: DesignWorkspaceSnapshotWire };
   if (!isDesignWorkspaceSnapshotWire(result?.snapshot)) {
@@ -1437,7 +1440,8 @@ function scopedMutationSnapshot(bridge: RuntimeClient, workspaceId: string) {
   if (isCloudWorkspace(workspaceId) || !bridge.supportsEngineCapability?.(DESIGN_MUTATION_SNAPSHOTS_CAPABILITY, workspaceId)) return {};
   const knownPages = bridge.supportsEngineCapability(DESIGN_PAGE_SCOPED_MUTATIONS_CAPABILITY, workspaceId)
     ? knownPagesReader?.(workspaceId) : undefined;
-  return { snapshotMode: "scoped", ...(knownPages ? { knownPages } : {}) };
+  return { snapshotMode: "scoped", ...(knownPages ? { knownPages } : {}),
+    ...(bridge.supportsEngineCapability?.(DESIGN_COMPONENT_IDENTITY_CAPABILITY, workspaceId) ? { [DESIGN_COMPONENT_IDENTITY_PARAM]: true } : {}) };
 }
 
 export async function bridgeDesignUpdateStyles(

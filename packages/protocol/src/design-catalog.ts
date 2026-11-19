@@ -185,6 +185,8 @@ export type DesignCatalogReply = z.infer<typeof designCatalogReplySchema>;
 /** Local navigation and bounded authoritative preparation; opt in only after
  * capability negotiation. Catalog revisions never stand in for source hashes. */
 export const DESIGN_LAZY_PREPARATION_CAPABILITY = "design.preparation.v1";
+export const DESIGN_COMPONENT_IDENTITY_CAPABILITY = "design.component-identity.v1";
+export const DESIGN_COMPONENT_IDENTITY_PARAM = "includeComponentIdentity";
 export const DESIGN_MUTATION_SNAPSHOTS_CAPABILITY = "design.mutation-snapshots.v1";
 /** Complete metadata plus only the source generations affected by a write.
  * Other documents must be prepared on demand before they authorize edits. */
@@ -256,6 +258,8 @@ export const designFramesPrepareSchema = z.object({
   surfaceCosts: z.literal(true).optional(),
   /** Only requested after design.component-options.v1 capability negotiation. */
   componentOptions: z.literal(true).optional(),
+  /** Only requested after design.component-identity.v1 capability negotiation. */
+  includeComponentIdentity: z.literal(true).optional(),
   /** Of `files`, those whose source lint rows the reply should carry. Only
    * requested after design.frames.prepare-lint.v1 capability negotiation. */
   lintFiles: z.array(designFrameFileSchema).min(1).max(16).optional(),
@@ -455,6 +459,12 @@ export const designFrameInstancesSchema = z.object({
 }).strict();
 export type DesignFrameInstances = z.infer<typeof designFrameInstancesSchema>;
 
+export const designComponentIdentitySchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("main"), name: componentNameSchema }).strict(),
+  z.object({ kind: z.literal("instance"), nodeId: z.string().min(1).max(LIMITS.layerId) }).strict(),
+]);
+export type DesignComponentIdentity = z.infer<typeof designComponentIdentitySchema>;
+
 export const designPreparedFrameSchema = designCatalogFrameSchema.pick({
   title: true, x: true, y: true, width: true, height: true, z: true,
 }).extend({
@@ -473,6 +483,7 @@ export const designPreparedFrameSchema = designCatalogFrameSchema.pick({
   }).strict().nullable().optional(),
   component: designFrameComponentSchema.optional(),
   instances: designFrameInstancesSchema.optional(),
+  componentIdentity: designComponentIdentitySchema.nullable().optional(),
 }).strict();
 const PREPARE_REPLY_ERRORS = 16;
 /** Source lint rows a preparation carries per frame; past this a frame's

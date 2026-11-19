@@ -103,6 +103,10 @@ describe("Design preparation workers", () => {
     const hits = designIdentityCacheStatsForTests().hits;
     expect(await prepareDesignNavigationFrames(root, navigation.catalogRevision, files)).toEqual(single);
     expect(designIdentityCacheStatsForTests().hits - hits).toBe(files.length);
+    const negotiatedHits = designIdentityCacheStatsForTests().hits;
+    const negotiated = await prepareDesignNavigationFrames(root, navigation.catalogRevision, files, undefined, { includeComponentIdentity: true });
+    expect(negotiated.frames.every((frame) => frame.componentIdentity === null)).toBe(true);
+    expect(designIdentityCacheStatsForTests().hits - negotiatedHits).toBe(files.length);
   }, 60_000);
 
   it("composes capture batches on workers byte for byte as the engine's own thread does", async () => {
