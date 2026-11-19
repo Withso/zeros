@@ -14,11 +14,32 @@ vi.mock("../../../engine/git", async (importOriginal) => {
 });
 
 const cloneRepoMock = vi.mocked(cloneRepo);
-const syntheticUrl = "https://auth-marker.invalid/repository?marker=private";
+const syntheticUrl =
+  "https://fake-user-sentinel:fake-password-sentinel@auth-marker.invalid/repository?marker=private";
+const sensitiveMarkers = [
+  "fake-user-sentinel",
+  "fake-password-sentinel",
+  "auth-marker.invalid",
+  "marker=private",
+  "stderr-marker",
+  "remediation-marker",
+  "git clone",
+];
 const commandContext = {} as Parameters<typeof workspaceClone>[1];
 
 function asElectronRejection(error: Error): Error {
   return new Error(`Error invoking remote method 'zeros:invoke': ${error}`);
+}
+
+function errorDetails(error: Error): string {
+  const cause = error.cause;
+  const causeDetails =
+    cause instanceof Error
+      ? errorDetails(cause)
+      : cause === undefined
+        ? ""
+        : String(cause);
+  return [error.name, error.message, error.stack, causeDetails].join(" ");
 }
 
 async function cloneErrorRoundTrip(stderr: string) {
@@ -72,27 +93,15 @@ describe("workspace clone error IPC surface", () => {
         "Check credentials for the repository host and confirm the account can access the repository, then try again.",
       );
       expect(cloneErrorGuidance(result.rendererError, "cloud")).toBeNull();
-      const causeMessage =
-        result.rendererError.cause instanceof Error
-          ? result.rendererError.cause.message
-          : "";
       const surfaced = [
-        result.mainError.name,
-        result.mainError.message,
-        result.rendererError.message,
+        errorDetails(result.mainError),
+        errorDetails(result.rendererError),
         result.rendererError.rawMessage,
-        causeMessage,
         guidance,
       ].join(" ");
-      expect(
-        [
-          "auth-marker.invalid",
-          "marker=private",
-          "stderr-marker",
-          "remediation-marker",
-          "git clone",
-        ].some((marker) => surfaced.includes(marker)),
-      ).toBe(false);
+      for (const marker of sensitiveMarkers) {
+        expect(surfaced).not.toContain(marker);
+      }
     },
   );
 
@@ -105,9 +114,19 @@ describe("workspace clone error IPC surface", () => {
     expect(result.rendererError.message).toBe(
       "The repository host could not be reached.",
     );
-    expect(cloneErrorGuidance(result.rendererError, "local")).toBe(
+    const guidance = cloneErrorGuidance(result.rendererError, "local");
+    expect(guidance).toBe(
       "Couldn't reach the repository host. Check your connection, then try again.",
     );
+    const surfaced = [
+      errorDetails(result.mainError),
+      errorDetails(result.rendererError),
+      result.rendererError.rawMessage,
+      guidance,
+    ].join(" ");
+    for (const marker of sensitiveMarkers) {
+      expect(surfaced).not.toContain(marker);
+    }
   });
 
   it("preserves the generic fallback for unknown GitError codes", async () => {
