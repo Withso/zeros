@@ -49,10 +49,11 @@ export class CloudExecutionLogins {
     [organizationId, userId])).rows[0];
   }
 
-  async assertPayer(tx: Tx, organizationId: string, selection: ExecutionSelection) {
+  /** known: the payer row this transaction just read (statements-3); no I/O happened since, so it is not read again. */
+  async assertPayer(tx: Tx, organizationId: string, selection: ExecutionSelection, known?: ExecutionPayer) {
     if (selection.version === undefined) return;
     if (selection.version !== 2 || !selection.payer) throw actorChanged();
-    const current = await this.payer(tx, organizationId, selection.payer.userId);
+    const current = known?.userId === selection.payer.userId ? known : await this.payer(tx, organizationId, selection.payer.userId);
     if (!current || (["userId", "accountRevision", "memberRevision", "memberCreatedAt"] as const)
       .some(key => current[key] !== selection.payer[key])) throw actorChanged();
   }
@@ -72,7 +73,7 @@ export class CloudExecutionLogins {
       const { organizationId, payer } = await this.creator(tx, workspaceId, transaction ? locked : undefined);
       if (expected && (expected.version !== 2 || expected.payer.userId !== payer.userId)) throw actorChanged();
       let login: ExecutionLogin;
-      try { login = await this.select(organizationId, payer.userId, agent, expected, tx); }
+      try { login = await this.select(organizationId, payer.userId, agent, expected, tx, payer); }
       catch (error) {
         if (error instanceof AgentLoginRequired) throw new AgentLoginRequired(agent, payer.userId === actorId ? "self" : "creator");
         throw error;
@@ -152,10 +153,10 @@ export class CloudExecutionLogins {
     await check();
   }
 
-  async select(organizationId: string, userId: string, agent: CloudV2Agent, expected?: ExecutionSelection, transaction?: Tx): Promise<ExecutionLogin> {
+  async select(organizationId: string, userId: string, agent: CloudV2Agent, expected?: ExecutionSelection, transaction?: Tx, knownPayer?: ExecutionPayer): Promise<ExecutionLogin> {
     const ownerId = expected?.version === 2 ? expected.payer.userId : userId;
     const read = async (tx: Tx): Promise<ExecutionLogin> => {
-      if (expected) await this.assertPayer(tx, organizationId, expected);
+      if (expected) await this.assertPayer(tx, organizationId, expected, transaction ? knownPayer : undefined);
       let selected: ExecutionLogin | null;
       try { selected = await this.shared?.(organizationId, agent, tx) ?? null; }
       catch { throw executionUnavailable(); }

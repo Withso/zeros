@@ -276,11 +276,14 @@ export class CloudExecutionContexts {
     });
   }
 
-  private async agent(tx: Tx, id: string, chatId: string, requested: CloudV2Agent): Promise<CloudV2Agent> {
+  /** send: a person's request answers chat_agent_mismatch; the worker's begin keeps actor_changed, which it settles on. */
+  private async agent(tx: Tx, id: string, chatId: string, requested: CloudV2Agent, caller: "send" | "begin" = "send"): Promise<CloudV2Agent> {
     const row = (await tx.query<{ agent: string | null; deleted_at: Date | null }>(
       "SELECT row->>'agentId' AS agent,deleted_at FROM cloud_v2_chats WHERE workspace_id=$1 AND chat_id=$2", [id, chatId])).rows[0];
     if (row?.deleted_at) throw new HttpError(409, "conversation_deleted", "This conversation was deleted");
-    if (row?.agent && row.agent !== requested) throw actorChanged();
+    // A conversation keeps the agent it was created with; say so instead of the generic actor_changed.
+    if (row?.agent && row.agent !== requested)
+      throw caller === "send" ? new HttpError(409, "chat_agent_mismatch", "This conversation uses a different agent") : actorChanged();
     return requested;
   }
 
@@ -383,7 +386,7 @@ export class CloudExecutionContexts {
           "SELECT epoch::text,acting_user_id,acting_generation::text,active_context_id FROM cloud_v2_prompt_chats WHERE workspace_id=$1 AND chat_id=$2 FOR UPDATE", [workspace.id, row.chat_id])).rows[0];
         const proof = await this.deps.authority.admit(workspace.id, row.creator_user_id, { minimumSourceMs: EXECUTION_MINIMUM_LIFETIME_MS, transaction: tx });
         assertExecutionLifetime(proof.until);
-        const agent = await this.agent(tx, workspace.id, row.chat_id, row.payload!.agentId);
+        const agent = await this.agent(tx, workspace.id, row.chat_id, row.payload!.agentId, "begin");
         if (!chat || row.cancel_requested || row.epoch !== chat.epoch || row.access_epoch !== workspace.access_epoch || workspace.state !== "running")
           return { dispatch: false as const, state: "cancelled" as const };
         if (row.worker_boot_id !== identity.bootId || row.delivery_id !== input.deliveryId) throw new HttpError(409, "prompt_conflict", "This dispatch is no longer current");
