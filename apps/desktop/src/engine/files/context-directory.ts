@@ -80,8 +80,7 @@ async function copiedFileMatches(
   return (await readTextFile(target)).includes(await readTextFile(source));
 }
 
-/** Preserve existing ignore text. No-follow append also refuses symlinked
- * ignore files; sharing must not edit a file outside this checkout. */
+/** Append to preserve repository rules; refuse symlinks so sharing cannot modify an external ignore file. */
 async function appendIgnore(target: string, body: string): Promise<boolean> {
   const handle = await fs.open(
     target,
@@ -105,10 +104,7 @@ async function appendIgnore(target: string, body: string): Promise<boolean> {
   }
 }
 
-/** Merge without replacing a destination. Preflight catches ordinary conflicts
- * before moving anything; exclusive hard links preserve bytes, modes and mtime.
- * Source removal uses a recoverable rename so a concurrent atomic save cannot
- * be deleted between the copy and unlink. */
+/** Preflight before moving files. Exclusive links preserve metadata, and recoverable rename protects concurrent saves during retirement. */
 export async function migrateLegacyContextDirectory(
   workspaceRoot: string,
 ): Promise<boolean> {
@@ -138,8 +134,7 @@ export async function migrateLegacyContextDirectory(
         throw new Error(
           `context migration conflict at ${CONTEXT_DIR}/${relative}: destination is not a directory`,
         );
-      // The share API is keyed by id, not path. Do not create ambiguous ids in
-      // opposite scopes even when the filenames themselves do not collide.
+      // Legacy attachment scopes share an ID namespace even when their filenames differ.
       const attachment = /^(local|shared)\/attachments\/([^/]+)$/.exec(
         relative.split(path.sep).join("/"),
       );
@@ -185,9 +180,7 @@ export async function migrateLegacyContextDirectory(
     await assertContextDirectory(target, workspaceRoot);
     await fs.mkdir(target, { recursive: true });
   }
-  // Preserve the visibility of previously shared files. Already-ignored
-  // scratch within shared stays ignored; tracked files count as shared even
-  // when an ignore rule also matches their old path.
+  // Keep tracked shared files visible even when an ignore rule matches; keep intentionally ignored scratch private.
   const sharedFiles = files.filter(
     (relative) =>
       relative.startsWith(`shared${path.sep}`) &&
@@ -200,9 +193,7 @@ export async function migrateLegacyContextDirectory(
     await ignoredPaths(workspaceRoot, sourcePaths, false),
   );
 
-  // Install ALL incoming ignore rules before testing destination visibility,
-  // but keep the legacy copies until every shared file passes. The root and
-  // local scaffold rules are merged, not treated as user-file collisions.
+  // Install incoming ignore rules before checking visibility, and keep legacy files until the check passes. Merge the root and local scaffold rules.
   for (const relative of files.filter(
     (file) => path.basename(file) === ".gitignore",
   )) {
@@ -253,8 +244,6 @@ export async function migrateLegacyContextDirectory(
       }
     }
     await retireLegacyContextFile(workspaceRoot, relative, copiedFileMatches);
-    // Until retirement the destination can still alias the legacy inode.
-    // Publication refuses that hardlink, so grant ownership only afterward.
   }
   for (const relative of directories.reverse()) {
     await fs
@@ -316,15 +305,11 @@ async function ignored(
   }
 }
 
-/** Called only while migrating `.context-graph/` content that an earlier
- * build's share action made visible to Git, so it stays visible at its new
- * path. Re-open an ignored parent while keeping every sibling private. Ignore
- * rules inside shared subfolders are user-owned and still take precedence. */
+/** Retain Git visibility for earlier shared content without exposing private siblings or overriding nested user rules. */
 async function exposeSharedContext(
   workspaceRoot: string,
   targets: string[],
 ): Promise<void> {
-  // Some attachment users are ordinary folders, with no Git checkout at all.
   try {
     await runFile(
       "git",

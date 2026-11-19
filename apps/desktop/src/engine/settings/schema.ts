@@ -1,22 +1,3 @@
-// ──────────────────────────────────────────────────────────
-// Settings foundation — zod schemas (single source of truth)
-// ──────────────────────────────────────────────────────────
-//
-// One zod definition per layer shape; the published JSON-schema artifacts
-// (zeros.build/schemas/*.json, built by scripts/build-settings-schemas.ts)
-// and the engine's runtime validation both derive from here.
-//
-// Layer files:
-//   ~/.zeros/settings.toml              user    (dev: ~/.zeros-dev)
-//   ~/.zeros/settings.managed.toml      managed (admin policy; resolver stub in v1)
-//   <repo>/.zeros/settings.toml         legacy migration input only
-//   <repo>/.zeros/settings.local.toml   repo-local (personal — gitignored)
-//   <worktree>/.zeros/settings.toml     workspace-local (tracked-name fallback: settings.local.toml)
-//
-// Validation is per-leaf, not per-file: a bad value drops that one key with a
-// warning, never the whole document. Writers preserve unknown text on disk;
-// repository/workspace resolution exposes only supported, scope-appropriate keys.
-// ──────────────────────────────────────────────────────────
 
 import { z } from "zod";
 import { foldRetiredAgentControl } from "./retired-agent-control";
@@ -38,12 +19,7 @@ export const PROVIDER_AUTH_METHODS = [
   "api-key",
   "subscription",
 ] as const;
-/** How a new workspace's branch name is prefixed (Settings → Git). "zeros" is
- *  the historical value and stays the FALLBACK PREFIX: every workspace created
- *  before this setting existed is on a `zeros/` branch, and that prefix is
- *  what marks a ref as workspace-owned. It is no longer the default TYPE — see
- *  DEFAULT_BRANCH_PREFIX_TYPE — but remains accepted, so a settings.toml (or a
- *  team layer) that pins it keeps working. */
+/** Keep the persisted zeros option for existing settings even though github is now the default. */
 export const BRANCH_PREFIX_TYPES = [
   "zeros",
   "github",
@@ -51,16 +27,9 @@ export const BRANCH_PREFIX_TYPES = [
   "none",
 ] as const;
 export type BranchPrefixType = (typeof BRANCH_PREFIX_TYPES)[number];
-/** What an UNSET `git.branch_prefix_type` means. The connected GitHub login,
- *  not `zeros`: a branch namespace is a person, so
- *  this is the answer that needs no configuring, and it is why Settings → Git
- *  can show a selected row from the first launch instead of three empty radios
- *  standing for a default it declined to name. Not signed in still yields
- *  `zeros/` branches — resolveNewBranchPrefix substitutes DEFAULT_BRANCH_PREFIX
- *  rather than dropping the namespace — so this changes the default ANSWER, not
- *  the guarantee that new branches are recognisably workspace-owned. */
+/** Unset means the connected GitHub login; without a usable login, new branches still use zeros/. */
 export const DEFAULT_BRANCH_PREFIX_TYPE: BranchPrefixType = "github";
-/** Reasoning-effort levels — mirror of the renderer's ChatEffort union. */
+/** Keep in sync with the renderer's ChatEffort union. */
 export const EFFORT_LEVELS = [
   "low",
   "medium",
@@ -79,9 +48,6 @@ export const SCHEMA_URL_WORKSPACE =
 
 export const RUN_ACTION_PLATFORMS = ["mac", "linux", "win"] as const;
 
-/** One named run action (`[[scripts.run_actions]]`). Multiple actions may run
- *  concurrently, each in its own Run sub-tab. The normalized/migrated view both
- *  sides consume is @zeros/protocol/run-actions parseRunActions(). */
 const runActionSchema = z.object({
   id: z
     .string()
@@ -205,27 +171,6 @@ const promptsSchema = z
   })
   .partial();
 
-// ── MCP servers (unified registry; "configure once → all agents") ──
-//
-// A user/repo settings.toml may declare MCP servers as an array of tables:
-//
-//   [[mcp.servers]]
-//   name = "context7"
-//   transport = "stdio"
-//   command = "npx"
-//   args = ["-y", "@upstash/context7-mcp"]
-//
-//   [[mcp.servers]]
-//   name = "tracker"
-//   transport = "http"
-//   url = "https://mcp.tracker.example/mcp"
-//
-// The engine boot-loads these into the AgentGateway registry, which fans them
-// out to all three adapters in each one's native shape. `enabled = false`
-// keeps an entry in the file but drops it from the registry (Customize → MCP
-// per-server toggle). Secrets: prefer non-secret coordinates + env-var refs
-// here; raw tokens in a *committed* repo file would leak (same caution as the
-// repo `[env]` table) — keychain-backed secret refs land with the panel UI.
 
 function isLoopbackHttpUrl(value: string): boolean {
   try {
@@ -235,8 +180,7 @@ function isLoopbackHttpUrl(value: string): boolean {
     return false; // zod still runs refinements after .url() fails
   }
 }
-// isLoopbackHttpUrl is the rule; editors only get its usual spellings
-// (lowercase, no IPv4 shorthand), each with a valid port.
+// The runtime parses URLs; the published pattern advertises only common loopback spellings.
 const LOOPBACK_HTTP_URL_PATTERN = String.raw`^http://(?:127\.0\.0\.1|localhost|\[::1\])(?::(?:6553[0-5]|655[0-2]\d|65[0-4]\d{2}|6[0-4]\d{3}|[1-5]\d{4}|\d{1,4}))?(?:[/?][^#]*)?$`;
 
 const mcpStdioServerSchema = z.object({
@@ -329,39 +273,8 @@ const mcpSchema = z
   })
   .partial();
 
-/** A single validated MCP server entry as written in settings.toml. */
 export type McpSettingsServer = z.infer<typeof mcpServerSchema>;
 
-/** Keys a repo may configure — safe for a committed, team-shared file.
- *
- *  Repo-scoped settings files carry
- *  scripts config first and foremost — setup / archive / run actions — plus
- *  the two tables live repo-page tabs still edit (`git` for the Git tab,
- *  `prompts` for the Actions tab). Everything else left the repo files:
- *  `env` / `env_files` (env vars are Keychain-only now — env-vault.ts),
- *  `mcp` (user-level only until the settings consolidation), and
- *  `file_include_globs` (a repo-root `.worktreeinclude` file, or the personal
- *  repo-local file, configures per-project seeding).
- *  Those keys are ignored with a warning in the COMMITTED repo file (see
- *  REPO_FILE_UNSUPPORTED_KEYS); `mcp` and `file_include_globs` are read from
- *  the personal repo-local file, and all four from the user layer.
- *
- *  NOTE: `providers` is intentionally USER-ONLY (see userSettingsSchema +
- *  USER_ONLY_KEYS) — NOT a repo key. Per-repo provider overrides
- *  (executable_path / base_url) were removed: a committed/clone-borne repo
- *  file must not be able to redirect the spawned agent binary or its
- *  credential-bearing gateway. */
-/** The `[design]` table — design-workspace configuration for a repo.
- *
- *  `directory` is the POINTER to the active design folder: repo-relative,
- *  POSIX separators, nesting allowed (`apps/web/designs`). The folder itself
- *  is committed repo content (recognizable by its committed
- *  `.zeros-canvas.json` marker); this key only selects WHICH one is active.
- *  The personal main-checkout file selects the directory for all linked local
- *  workspaces. Absent = "Zeros Design". */
-/** One Design style build a person approved: Zeros runs `command` in the
- *  checkout to produce `output`, which a `build` style source imports. Read
- *  only from the person's own layers (see sanitizeLayer). */
 const designStyleBuildSchema = z.object({
   output: z
     .string()
@@ -457,12 +370,6 @@ export const repoSettingsSchema = z.object({
   design: designSchema.optional(),
 });
 
-// Per-agent model knobs, one table per agent: [models.claude_code] /
-// [models.codex]. The key names follow each agent's own vocabulary — Claude
-// calls it "effort", Codex calls it "thinking" — so the TOML reads the way the
-// agent's own docs do. Unknown sub-keys (e.g. a future review_effort_level)
-// are preserved in the file by the in-place writer; only validated keys surface
-// in the resolved view.
 const claudeModelsSchema = z
   .object({
     default_effort_level: z
@@ -571,8 +478,7 @@ const modelsSchema = z
       .describe(
         "Bounded per-agent permission-mode memory. Exact native ids preserve modes that share the same coarse posture.",
       ),
-    // Retired selection, readable for settings compatibility. The renderer
-    // ignores it and removes it on the next model-preference save.
+    // Keep reading this retired key until model preference writes clear it.
     chat_title_model: z
       .string()
       .describe("Model used to generate chat titles."),
@@ -587,12 +493,6 @@ const workspacesSchema = z
   })
   .partial();
 
-/** Browser-use policy. Every key has a row in
- * Settings > Browser. Every agent uses the in-app Zeros browser; Claude uses
- * its official Chrome integration instead when chosen. Keep the machine trust
- * posture in the engine-owned settings file; unknown keys in this table are
- * never projected, and retired keys are folded into their replacements as
- * each layer is read (`foldRetiredAgentControl`). */
 const browserSchema = z
   .object({
     enabled: z
@@ -613,11 +513,6 @@ const browserSchema = z
   })
   .partial();
 
-/** Computer-use policy. Every key has a row in
- * Settings > General. Zeros computer use drives Mac apps through the bundled
- * Cua Driver for every agent, Codex included. Like `[browser]`, unknown keys
- * are never projected, so no hand-written switch can widen what agents may
- * control. */
 const computerUseSchema = z
   .object({
     enabled: z
@@ -653,13 +548,6 @@ const simulatorsSchema = z
   })
   .partial();
 
-/** User layer = repo keys + user-only keys. A repo must never set models,
- *  approvals, machine paths, or providers: those are per-user or per-machine,
- *  and a committed repo file would silently reconfigure every teammate.
- *  `providers` (agent auth + executable_path + gateway base_url)
- *  lives here ONLY: it's per-user/per-machine, never per-repo. `env` /
- *  `env_files` / `mcp` / `file_include_globs` also live here only since the
- *  2026-07-17 repo-file slimming (they used to be repo keys too). */
 export const userSettingsSchema = repoSettingsSchema.extend({
   preferences: personalPreferencesSchema.optional(),
   preferences_version: z.literal(1).optional(),
@@ -689,7 +577,6 @@ export const userSettingsSchema = repoSettingsSchema.extend({
   providers: z.record(z.string(), providerSchema).optional(),
 });
 
-/** The personal repository file shares validated user preference shapes. */
 export const repoLocalSettingsSchema = userSettingsSchema
   .omit({
     preferences: true,
@@ -711,20 +598,17 @@ export const repoLocalSettingsSchema = userSettingsSchema
   })
   .strict();
 
-/** Per-checkout execution overrides; provisioning and account choices keep
- * their broader repository/user owners. */
+/** A single checkout's override cannot change provisioning for other workspaces. */
 export const workspaceLocalSettingsSchema = repoLocalSettingsSchema.omit({
   file_include_globs: true,
   workspaces: true,
 });
 
-/** Managed (admin policy) layer can set anything a user can. Stub in v1. */
 export const managedSettingsSchema = userSettingsSchema;
 
 export type RepoSettingsDoc = z.infer<typeof repoSettingsSchema>;
 export type UserSettingsDoc = z.infer<typeof userSettingsSchema>;
 
-/** A parsed-but-untrusted settings document (raw TOML parse output). */
 export type RawSettingsDoc = Record<string, unknown>;
 
 export type SettingsLayerName =
@@ -736,11 +620,7 @@ export type SettingsLayerName =
   | "workspace-local"
   | "managed";
 
-/** Ownership restrictions for active personal settings and legacy migration
- *  inputs. The published repo schema describes repo-local, including its
- *  workspaces.path override. Agent authentication and executable/gateway
- *  choices remain user-owned. `repo` and `workspace-local` validation shapes
- *  below are retained for migration; their bridge names alias repo-local. */
+/** Team and shared repository layers cannot set these personal keys, including agent credentials, executables and gateways; repo-local may still set `workspaces.path`. */
 export const USER_ONLY_KEYS = [
   "preferences",
   "preferences_version",
@@ -769,7 +649,6 @@ const USER_ONLY_BY_LAYER: Record<string, readonly string[]> = {
     "providers",
     "github",
   ],
-  // Workspace overrides cannot change where other worktrees are created.
   "workspace-local": [
     "preferences",
     "preferences_version",
@@ -785,9 +664,7 @@ const USER_ONLY_BY_LAYER: Record<string, readonly string[]> = {
   ],
 };
 
-/** Unsupported keys in retired shared/worktree files. Migration must not
- *  activate previously dormant MCP commands, host environment, or copy rules.
- *  Legacy bytes remain in their recovery files. */
+/** Legacy migration must not activate dormant MCP commands, environment overrides or copy rules. */
 export const REPO_FILE_UNSUPPORTED_KEYS = [
   "env",
   "env_files",
@@ -795,37 +672,29 @@ export const REPO_FILE_UNSUPPORTED_KEYS = [
   "file_include_globs",
 ] as const;
 
-/** Active repo-local supports MCP and files-to-copy preferences. The reader
- *  verifies local Git exclusion and refuses tracked personal settings before
- *  using this shape. Environment secrets retain their vault ownership. */
+/** Repo-local files can own MCP and copy rules, workspace files only MCP; environment settings stay out of repository layers. */
 const REPO_UNSUPPORTED_BY_LAYER: Record<string, readonly string[]> = {
   repo: REPO_FILE_UNSUPPORTED_KEYS,
   "repo-local": ["env", "env_files"],
   "workspace-local": ["env", "env_files", "file_include_globs"],
 };
 
-/** The layers backed by in-repo files (`.zeros/settings*.toml`). */
 const REPO_SCOPED_LAYERS: ReadonlySet<SettingsLayerName> = new Set([
   "repo",
   "repo-local",
   "workspace-local",
 ]);
 
-/** Keys that can poison Object.prototype via the parsed (null-proto) TOML doc.
- *  Dropped from every layer before merge/write. */
+/** Reject prototype-polluting keys when projecting untrusted parsed TOML. */
 const DANGEROUS_KEYS = new Set(["__proto__", "constructor", "prototype"]);
 
-/** Own-property check that works pre-ES2022 (no `Object.hasOwn`). */
 function hasOwn(obj: object, key: string): boolean {
   return Object.prototype.hasOwnProperty.call(obj, key);
 }
 
-// ── per-leaf sanitization ──────────────────────────────────
 
 export interface SanitizeResult {
-  /** Valid known keys + unknown keys preserved verbatim. */
   doc: RawSettingsDoc;
-  /** Human-readable notes for every dropped key. */
   warnings: string[];
 }
 
@@ -838,8 +707,7 @@ function firstIssue(error: z.ZodError): string {
   return issue ? issue.message : "invalid value";
 }
 
-/** Validate each field of a table independently against `shape`; keep valid
- *  fields, preserve unknown fields, drop invalid ones with a warning. */
+/** Validate fields separately so a bad value cannot discard its valid siblings. */
 function sanitizeTable(
   shape: Record<string, z.ZodType>,
   value: unknown,
@@ -853,14 +721,10 @@ function sanitizeTable(
   }
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(value)) {
-    if (DANGEROUS_KEYS.has(k)) continue; // prototype-pollution guard
-    // own-key check (NOT `shape[k]`): a key named `constructor`/`toString`/etc.
-    // resolves up the prototype chain to a function, which would bypass the
-    // unknown-key branch and throw `field.safeParse is not a function`.
+    if (DANGEROUS_KEYS.has(k)) continue;
+    // Never treat inherited properties as schema entries.
     const field = hasOwn(shape, k) ? shape[k] : undefined;
     if (!field) {
-      // Nested per-model tables intentionally expose only validated fields;
-      // their in-place TOML writer still preserves unknown keys on disk.
       if (preserveUnknown) out[k] = v;
       else warnings.push(`${basePath}.${k}: unsupported key — ignored`);
       continue;
@@ -872,7 +736,6 @@ function sanitizeTable(
   return out;
 }
 
-/** Validate a record per-entry so one bad entry doesn't drop its siblings. */
 function sanitizeRecord(
   entrySchema: z.ZodType,
   value: unknown,
@@ -892,9 +755,6 @@ function sanitizeRecord(
   return out;
 }
 
-/** Models contains nested per-agent tables. Sanitize those leaf-by-leaf too:
- * one invalid hand-edited idle timeout must not erase a valid fallback,
- * budget, or effort sibling. */
 function sanitizeModels(
   value: unknown,
   warnings: string[],
@@ -957,7 +817,7 @@ function sanitizeModels(
           continue;
         }
         const identity = `${parsed.data.agent}\u0000${parsed.data.model}`;
-        // The later row is the last user choice and therefore authoritative.
+        // The last valid row for an agent and exact model is authoritative.
         if (seen.has(identity)) continue;
         seen.add(identity);
         if (newestFirst.length < 128) newestFirst.push(parsed.data);
@@ -1014,10 +874,7 @@ function sanitizeModels(
   return out;
 }
 
-/** Validate the `[mcp]` table: `servers` is an array-of-tables, each a
- *  stdio|http discriminated union. One bad server entry is dropped with a
- *  warning, never the whole list; order is preserved (= registry precedence).
- *  Unknown keys under `[mcp]` are preserved verbatim (forward-compat). */
+/** Drop malformed entries without changing the registry order of valid servers. */
 function sanitizeMcp(
   value: unknown,
   warnings: string[],
@@ -1066,8 +923,6 @@ const TABLE_SHAPES: Record<string, Record<string, z.ZodType>> = {
  * settings until they have an explicit schema and review. */
 const CLOSED_TABLES = new Set(["browser", "computer_use", "simulators"]);
 
-/** Per-leaf sanitize of one raw layer document. Layer-aware: user-only keys
- *  found in repo-scoped layers are dropped with a warning. */
 const PERSONAL_DESIGN_BUILD_LAYERS: ReadonlySet<SettingsLayerName> = new Set([
   "user",
   "repo-local",
@@ -1095,7 +950,7 @@ export function sanitizeLayer(
   }
 
   for (const [key, value] of Object.entries(source)) {
-    if (DANGEROUS_KEYS.has(key)) continue; // prototype-pollution guard
+    if (DANGEROUS_KEYS.has(key)) continue;
     if (userOnly.includes(key)) {
       warnings.push(`${key}: user-only key — ignored in ${layer} settings`);
       continue;
@@ -1109,7 +964,6 @@ export function sanitizeLayer(
       );
       continue;
     }
-    // Version is migration metadata, never a runtime preference.
     if (key === "settings_version" || key === "settings_migration_notes")
       continue;
     if (key === "preferences_version" || key === "agent_preferences_version") {
@@ -1146,12 +1000,7 @@ export function sanitizeLayer(
       continue;
     }
     if (key === "file_include_globs") {
-      // Written by the "Files to copy" settings pane (user layer = all
-      // projects, repo-local = this project). Validated here rather than left
-      // to the "unknown key → preserve verbatim" fallthrough: a hand-edited
-      // `file_include_globs = ".env*"` (a string, not an array) would
-      // otherwise sit in the file looking correct while seeding silently fell
-      // back to the default.
+      // Report malformed copy patterns so seeding cannot silently fall back to defaults.
       if (!Array.isArray(value)) {
         warnings.push(
           `file_include_globs: expected an array of patterns — ignored`,
@@ -1218,8 +1067,7 @@ export function sanitizeLayer(
         warnings,
         !repositoryScoped,
       );
-      // Running a build is the person's consent: a tracked legacy file or a
-      // team/managed policy layer cannot approve one for them.
+      // A tracked legacy file or policy layer cannot approve a build for the person.
       if (table && hasOwn(table, "style_builds") && !PERSONAL_DESIGN_BUILD_LAYERS.has(layer)) {
         delete table.style_builds;
         warnings.push(
@@ -1231,10 +1079,6 @@ export function sanitizeLayer(
     }
     const shape = hasOwn(TABLE_SHAPES, key) ? TABLE_SHAPES[key] : undefined;
     if (shape) {
-      // Browser and computer-use policy are privileged product boundaries.
-      // Unlike ordinary forward-compatible tables, do not project unknown
-      // switches (for example a hand-written raw-CDP or unrestricted-driver
-      // escape hatch) into effective settings.
       const table = sanitizeTable(
         shape,
         value,

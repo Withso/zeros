@@ -1,11 +1,4 @@
-// Browser and computer-use settings used to have switches with no Settings
-// row (per-app approval, website approval, Codex's built-in browser and
-// computer use, per-provider browser switches). Every key now has a row. The
-// retired keys are folded into the keys that replaced them when each layer is
-// read, so an opt-out stays in force in the layer that set it (an
-// organization's managed file included). The user's file loses them at engine
-// start (agent-control-migration.ts) and on any Settings change, which then
-// wins over them. An explicit opt-out never turns into access.
+// Fold retired keys in the layer that set them so an existing opt-out never grants access.
 
 import type { RawSettingsDoc, SettingsLayerName } from "./schema";
 
@@ -29,18 +22,12 @@ function table(value: unknown): Record<string, unknown> | null {
 export interface RetiredAgentControlKeys {
   readonly browser: readonly string[];
   readonly computerUse: readonly string[];
-  /** Turn browser use off for every agent in this layer. */
   readonly browserOff: boolean;
-  /** Hide the agent cursor in this layer. */
   readonly cursorOff: boolean;
-  /** Why `browserOff`, for the layer's warning. */
   readonly browserOffBecause: string | null;
 }
 
-/** What one layer's retired keys still decide. `layer` matters only for
- * `navigation_approval`: an organization that required asking before every
- * website keeps browser use off, since Zeros no longer asks; the user's own
- * file follows the product's choice not to ask. */
+/** A managed always-ask website policy becomes a denial because per-site prompts no longer exist. */
 export function retiredAgentControlKeys(
   doc: RawSettingsDoc,
   layer: SettingsLayerName,
@@ -58,17 +45,13 @@ export function retiredAgentControlKeys(
   return {
     browser: RETIRED_BROWSER_KEYS.filter((key) => Object.hasOwn(browser, key)),
     computerUse: RETIRED_COMPUTER_USE_KEYS.filter((key) => Object.hasOwn(computer, key)),
-    // One switch now covers every agent: browser use some agent was denied
-    // stays off for all of them.
+    // An opt-out for either old browser route disables the shared switch.
     browserOff: optOut !== null || askEveryWebsite,
     browserOffBecause: optOut ?? (askEveryWebsite ? "navigation_approval" : null),
-    // "Show agent cursor" now covers the browser's pointer too.
     cursorOff: browser.show_agent_cursor === false,
   };
 }
 
-/** One raw layer with its retired keys folded into their replacements and
- * removed. Pure: the input is never mutated. */
 export function foldRetiredAgentControl(
   raw: unknown,
   layer: SettingsLayerName,
@@ -110,8 +93,7 @@ export function foldRetiredAgentControl(
   return { doc: out, warnings };
 }
 
-/** The patch that retires the old keys in the user's raw settings document,
- * or null when it has none. `null` values delete keys in `opSettingsWrite`. */
+/** Null values instruct the settings writer to delete retired keys. */
 export function retiredAgentControlPatch(doc: RawSettingsDoc): RawSettingsDoc | null {
   const retired = retiredAgentControlKeys(doc, "user");
   if (retired.browser.length === 0 && retired.computerUse.length === 0) return null;
@@ -127,9 +109,7 @@ export function retiredAgentControlPatch(doc: RawSettingsDoc): RawSettingsDoc | 
   return patch;
 }
 
-/** A user-file write that also retires any old keys still in the file, with
- * the caller's own values winning: turning browser use on in Settings sticks
- * even if a hand edit brought `in_app_enabled = false` back mid-session. */
+/** Explicit user edits take precedence if retired keys reappear after startup. */
 export function withRetiredAgentControlCleared(
   current: RawSettingsDoc,
   patch: RawSettingsDoc,

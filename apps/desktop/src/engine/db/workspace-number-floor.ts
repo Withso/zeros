@@ -1,14 +1,4 @@
-// Workspace number floor — numbering that outlives a lost database
-//
-// zeros.db holds each owner's workspace sequence (migration 46). Recovery can
-// rebuild a lost database from worktree seeds, but a seed only remembers its
-// own workspace: numbers of workspaces deleted before the loss would come back.
-// This small file beside the database keeps every owner's highest number, so a
-// database recreated next to it continues where the old one stopped. Losing
-// both is losing all Local data, and numbering starts again at 1.
-//
-// Best-effort by contract: a missing, unreadable or malformed floor never
-// blocks opening the database or creating a workspace.
+// Keep owner high-water marks outside the database: worktree seeds cannot recover the numbers of deleted workspaces. An unreadable floor must not block opening the database or creating a workspace.
 
 import type Database from "better-sqlite3";
 import { readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
@@ -21,7 +11,6 @@ const MAX_OWNER_CHARS = 200;
 
 type Floor = Map<string, number>;
 
-/** The floor beside a database file, or null for an in-memory database. */
 export function workspaceNumberFloorPath(dbFile: string): string | null {
   return dbFile === ":memory:" ? null : path.join(path.dirname(dbFile), FLOOR_FILE);
 }
@@ -61,7 +50,6 @@ function readSequences(db: Database.Database): Floor {
   return new Map(rows.map((row) => [row.owner, row.last_number]));
 }
 
-/** Raise each owner's sequence to the floor's value. */
 export function restoreWorkspaceNumberFloor(db: Database.Database, dbFile: string): void {
   const file = workspaceNumberFloorPath(dbFile);
   if (!file) return;
@@ -81,7 +69,6 @@ export function restoreWorkspaceNumberFloor(db: Database.Database, dbFile: strin
   }
 }
 
-/** Record every owner's current sequence, never lowering a recorded floor. */
 export function persistWorkspaceNumberFloor(db: Database.Database, dbFile: string): void {
   const file = workspaceNumberFloorPath(dbFile);
   if (!file) return;

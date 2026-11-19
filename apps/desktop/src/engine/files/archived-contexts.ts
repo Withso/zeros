@@ -137,7 +137,7 @@ async function recoverPublications(root: Directory, records: Directory): Promise
   }
 }
 
-// Local engines and Electron main share a channel; retention and publication have one writer.
+// Local engines and Electron main share this directory, so serialize publication and retention across processes.
 async function lock(root: Directory): Promise<() => Promise<void>> {
   const name = ".archive-lock", target = path.join(root.path, name), deadline = Date.now() + 30_000;
   for (;;) {

@@ -239,7 +239,6 @@ it("rejects a separate Linux bind mount even when its device matches the workspa
   try {
     expect(path.dirname(temporary.path)).toBe(staging);
     expect(await fs.readdir(workspace)).toEqual([]);
-    // Publication remains one atomic rename, with no partial repository copy.
     await fs.writeFile(path.join(temporary.path, "payload"), "complete bytes");
     await fs.rename(path.join(temporary.path, "payload"), path.join(workspace, "attachment"));
     expect(await fs.readFile(path.join(workspace, "attachment"), "utf8")).toBe("complete bytes");

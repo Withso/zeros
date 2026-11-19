@@ -40,8 +40,7 @@ const refused = () =>
 const fingerprint = (info: fs.Stats) =>
   `${info.dev}:${info.ino}:${info.size}:${info.mtimeMs}:${info.ctimeMs}:${info.mode}`;
 
-/** A guarded edit cannot switch owners or disguise Design source through a
- * symlink/hardlink. Resolve the trusted root, then inspect each real entry. */
+/** Resolve the trusted root but reject aliases that could cross owners or disguise Design source. */
 export function assertGuardedWorkspaceFilePath(
   cwd: string,
   relative: string,
@@ -61,8 +60,7 @@ export function assertGuardedWorkspaceFilePath(
       } else if (!info.isFile()) throw refused();
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      // An absent suffix is safe only for an explicitly absent snapshot. The
-      // content comparison below owns that distinction.
+      // Only an explicitly absent snapshot permits this missing suffix.
       current = path.join(current, ...segments.slice(i + 1));
       break;
     }
@@ -70,9 +68,7 @@ export function assertGuardedWorkspaceFilePath(
   return current;
 }
 
-/** Compare bounded UTF-8 bytes through one non-following descriptor. Return a
- * generation identity so an identical-content inode replacement also fails
- * closed between temporary-file preparation and final atomic rename. */
+/** Return a descriptor-checked generation for the caller to detect same-content inode swaps at its pre-publication rechecks. */
 export function inspectExpectedFileContent(
   target: string,
   expected: string | null,

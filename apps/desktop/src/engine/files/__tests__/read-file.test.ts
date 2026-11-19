@@ -75,9 +75,6 @@ describe("isSensitiveRepoPath (remote-boundary secret denylist)", () => {
     expect(isSensitiveRepoPath(".env.local")).toBe(true);
     expect(isSensitiveRepoPath(".env.production")).toBe(true);
     expect(isSensitiveRepoPath("config/.env.staging")).toBe(true);
-    // Suffix-style env files were leaking to remote clients before the fix:
-    // only `.env`/`.env.*` matched, so `prod.env` / `local.env` / `.flaskenv`
-    // were served + enumerated.
     expect(isSensitiveRepoPath("prod.env")).toBe(true);
     expect(isSensitiveRepoPath("config/local.env")).toBe(true);
     expect(isSensitiveRepoPath(".flaskenv")).toBe(true);
@@ -109,7 +106,7 @@ describe("isSensitiveRepoPath (remote-boundary secret denylist)", () => {
   it("allows ordinary source + public keys", () => {
     expect(isSensitiveRepoPath("src/index.ts")).toBe(false);
     expect(isSensitiveRepoPath("README.md")).toBe(false);
-    expect(isSensitiveRepoPath("id_ed25519.pub")).toBe(false); // public key is fine
+    expect(isSensitiveRepoPath("id_ed25519.pub")).toBe(false);
     expect(isSensitiveRepoPath("certs/site.crt")).toBe(false);
     expect(isSensitiveRepoPath("package.json")).toBe(false);
     expect(isSensitiveRepoPath("")).toBe(false);
@@ -121,8 +118,6 @@ describe("isSensitiveRepoPath (remote-boundary secret denylist)", () => {
   });
 
   it("collapses '.'/'..'/redundant separators BEFORE the check (no smuggling)", () => {
-    // path.resolve collapses these before opening the file; the denylist must
-    // see the SAME canonical path or the secret leaks.
     expect(isSensitiveRepoPath(".env/.")).toBe(true);
     expect(isSensitiveRepoPath(".env/x/..")).toBe(true);
     expect(isSensitiveRepoPath("./.env")).toBe(true);

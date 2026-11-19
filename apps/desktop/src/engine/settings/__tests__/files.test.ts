@@ -223,7 +223,7 @@ describe("applySettingsPatch", () => {
       env: { A: "1", C: "3" },
       env_files: [".env.agent"],
     });
-    expect(doc.env).toEqual({ A: "1", B: "2" }); // input untouched
+    expect(doc.env).toEqual({ A: "1", B: "2" });
   });
 
   it("removes a table that becomes empty after deletes", () => {
@@ -299,7 +299,7 @@ describe("updateSettingsFile", () => {
     expect(() => updateSettingsFile(file, { scripts: { run: "x" } })).toThrow(
       /malformed/,
     );
-    expect(readFileSync(file, "utf8")).toBe("this is [not toml"); // untouched
+    expect(readFileSync(file, "utf8")).toBe("this is [not toml");
   });
 
   it("preserves comments and layout when editing an existing value", () => {
@@ -342,8 +342,8 @@ describe("updateSettingsFile", () => {
     });
     const text = readFileSync(file, "utf8");
     expect(text).toContain("# header");
-    expect(text).not.toContain('A = "1"'); // deleted
-    expect(text).toContain('B = "2"'); // sibling kept
+    expect(text).not.toContain('A = "1"');
+    expect(text).toContain('B = "2"');
     expect(readSettingsFile(file).doc.env).toEqual({ B: "2" });
   });
 
@@ -363,11 +363,9 @@ describe("updateSettingsFile", () => {
       },
     ];
     updateSettingsFile(file, { mcp: { servers } }, { schemaUrl: null });
-    // Serialized as a real array-of-tables that parses straight back.
     expect(
       (readSettingsFile(file).doc.mcp as { servers: unknown[] }).servers,
     ).toEqual(servers);
-    // Arrays replace whole — re-patching with a different list swaps it cleanly.
     const replaced = [
       { name: "figma", transport: "http", url: "https://figma/mcp" },
     ];
@@ -383,7 +381,6 @@ describe("updateSettingsFile", () => {
 
   it("reshapes a hand-written inline servers array in place, keeping comments", () => {
     const file = path.join(dir, "settings.toml");
-    // A hand-written / imported file with a single-line INLINE array-of-tables.
     writeFileSync(
       file,
       '# keep me\n[mcp]\nservers = [{name="a",transport="stdio",command="x"}]\n',
@@ -436,10 +433,7 @@ describe("updateSettingsFile", () => {
   });
 
   it("keeps comment-preserving writes for a float the round trip reformats", () => {
-    // The guard compares the PARSED patch against the plain JS doc, so a
-    // faithful representation change must still compare equal — otherwise a
-    // correct patch is discarded and this write loses the file's comments.
-    // `2` written into a float field comes back as `2` from a `2.0` literal.
+    // Treat numeric reformats as equal so a faithful patch keeps the original comments.
     const file = path.join(dir, "settings.toml");
     writeFileSync(
       file,
@@ -531,7 +525,7 @@ describe("opSettingsWriteRaw (the raw 'Edit settings.toml' editor)", () => {
       path.join(dir, ".zeros", "settings.local.toml"),
       "utf8",
     );
-    expect(onDisk).toBe(`settings_version = 2\n${text}`); // byte-for-byte
+    expect(onDisk).toBe(`settings_version = 2\n${text}`);
     expect(onDisk).toContain("# my note");
     expect(onDisk).toContain("# inline");
   });

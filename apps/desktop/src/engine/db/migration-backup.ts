@@ -1,9 +1,4 @@
-// Copy zeros.db before an update applies pending local migrations.
-//
-// Migrations are forward-only and the database has no "newer than this binary"
-// guard, so a bad migration in a release candidate would otherwise leave the
-// owner's daily-driver data with no way back. The copy is a recovery aid only:
-// failing to write it never blocks migration or launch.
+// Local migrations are forward-only; this recovery copy is best effort and must not block launch.
 
 import type Database from "better-sqlite3";
 import { chmodSync, readdirSync, rmSync } from "node:fs";
@@ -22,7 +17,7 @@ function appliedVersion(db: Database.Database): number {
 
 const backupName = (file: string) => new RegExp(`^${path.basename(file).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\.pre-migration-v[0-9]+-[0-9TZ]+\\.bak$`);
 
-/** Existing copies beside `file`, oldest first. */
+/** Oldest first so retention removes the oldest copies. */
 export function migrationBackups(file: string): string[] {
   const pattern = backupName(file), dir = path.dirname(file);
   let names: string[];
@@ -35,8 +30,6 @@ export function migrationBackups(file: string): string[] {
   return names.filter(name => pattern.test(name)).sort((a, b) => stamp(a).localeCompare(stamp(b))).map(name => path.join(dir, name));
 }
 
-/** Copy an existing database that is about to migrate, keeping the newest two
- * copies. Returns the copy's path, or null when nothing was copied. */
 export function backupBeforeMigrations(db: Database.Database, file: string, latest: number, now = () => new Date()): string | null {
   if (file === ":memory:") return null;
   try {
@@ -46,7 +39,7 @@ export function backupBeforeMigrations(db: Database.Database, file: string, late
     const target = `${file}.pre-migration-v${applied}-${stamp}.bak`;
     // VACUUM INTO writes a consistent single-file copy, WAL contents included.
     db.prepare("VACUUM INTO ?").run(target);
-    chmodSync(target, 0o600); // Chat history: owner-only, like the number floor beside it.
+    chmodSync(target, 0o600);
     for (const old of migrationBackups(file).slice(0, -KEEP)) rmSync(old, { force: true });
     return target;
   } catch (error) {

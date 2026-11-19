@@ -58,8 +58,7 @@ function git(root: string, args: string[]): string {
       const operation = args[0] === "worktree" ? "worktree_list"
         : args[0] === "ls-files" ? "ls_files"
         : args[0] === "check-ignore" ? "check_ignore" : "rev_parse";
-      // Retry the raw observation before discarding its private stderr. No
-      // mutation is repeated, and the public error never retains those bytes.
+      // Classify private stderr before sanitizing it; only a read can retry here.
       if (operation === "worktree_list" && attempt < 2 && isTransientWorktreeRegistryRead(String(failure.stderr ?? ""))) continue;
       if (operation === "check_ignore" && failure.status === 1)
         throw Object.assign(new Error("Git ignore check found no match."), { status: 1 });
@@ -68,16 +67,12 @@ function git(root: string, args: string[]): string {
   }
 }
 
-/** `git worktree list` opens every registered worktree's admin entry, so it can
- * die on one a concurrent `git worktree add` is still writing. That read is
- * safe to repeat at once (starting Git again outlasts the window); any other
- * failure, or a third one, reaches the caller unchanged. */
+/** Git can observe partially written registry entries during a concurrent worktree add. */
 function listWorktreesPorcelain(root: string): string {
   return git(root, ["worktree", "list", "--porcelain", "-z"]);
 }
 
-/** Git owns the checkout identity, including linked worktrees and submodules.
- * Plain folders retain their own settings scope. Never key this by basename. */
+/** Use the nearest enclosing Git checkout, including linked worktrees and submodules; folders outside any checkout keep their own scope. */
 export function personalWorkspaceRoot(root: string): string {
   let candidate = path.resolve(root);
   try {
@@ -129,9 +124,7 @@ export function personalRepoRoot(root: string): string {
   return path.resolve(root);
 }
 
-// A worktree can still check out the retired shared settings.toml. Never
-// reinterpret that tracked file as personal, or hide it with skip-worktree.
-// Cache only against its own index identity, invalidated by checkout/staging.
+// Keep tracked legacy settings separate from personal state; cache the choice only for the current worktree index.
 const workspaceFileChoices = new Map<
   string,
   { signature: string; file: string }
@@ -163,8 +156,7 @@ export function workspaceSettingsPath(root: string): string {
   return file;
 }
 
-/** Rename only ignored, untracked personal state. The legacy shared tracked
- * filename is handled by workspaceSettingsPath's fallback, without Git edits. */
+/** Rename only ignored, untracked personal state; never hide or rename tracked legacy settings. */
 export function migrateWorkspaceSettings(root: string): string {
   const checkout = personalWorkspaceRoot(root);
   const target = workspaceSettingsPath(checkout);
@@ -187,8 +179,7 @@ export function migrateWorkspaceSettings(root: string): string {
 
 const localChecks = new Map<string, string>();
 function localCheckSignature(root: string): string {
-  // Replaced indexes and edited ignore files invalidate a prior verdict.
-  // Submodules use an external Git directory, so they do not cache verdicts.
+  // Index or ignore changes invalidate the verdict; external Git directories are not cached.
   if (!existsSync(path.join(root, ".git/index"))) return "";
   return [
     ".git/index",
@@ -233,11 +224,9 @@ export function assertRegularSettingsPath(
   }
 }
 
-/** Exclude locally, before creating the settings file. A tracked file or a
- * higher-priority negation is an error, never a best-effort privacy promise. */
+/** Before creating the file, require it to be untracked and effectively ignored; a higher-priority negation is an error. */
 export function ensureLocalSettingsIgnored(
   repoRoot: string,
-  // Folder rules end in "/": private skills and Design style build outputs.
   relative: PersonalSettingsPath | ".zeros/skills/" | ".zeros/design-styles/" = LOCAL_FILE,
 ): void {
   const root = personalWorkspaceRoot(repoRoot);
@@ -253,8 +242,7 @@ export function ensureLocalSettingsIgnored(
     return;
   let exclude: string;
   try {
-    // Git's absolute path mode resolves the final symlink before O_NOFOLLOW
-    // can reject it. Resolve its lexical path against the checkout instead.
+    // Preserve the final symlink for O_NOFOLLOW: Git's absolute path mode would resolve it first.
     exclude = path.resolve(
       root,
       git(root, ["rev-parse", "--git-path", "info/exclude"]),
@@ -277,8 +265,7 @@ export function ensureLocalSettingsIgnored(
       throw error;
     }
   };
-  // Keep an explicit local rule even when another ignore source already
-  // covers this path. Global ignore settings can change independently.
+  // Write a local exclusion even if a separate ignore source currently covers the path.
   mkdirSync(path.dirname(exclude), { recursive: true });
   const fd = openSync(
     exclude,
@@ -312,11 +299,7 @@ export function ensureLocalSettingsIgnored(
   if (relative === LOCAL_FILE) rememberLocalCheck(root);
 }
 
-/** Read/plan the one-time migration. The old file is migration input only;
- * its bytes are retained as a recovery copy, including when Git tracks it.
- * Only previously supported shared keys migrate, never dormant MCP/env keys.
- * Existing personal values win, and the version prevents deleted overrides
- * being resurrected by a later checkout of the legacy file. */
+/** Preserve legacy bytes, import only supported keys beneath personal overrides, and version the import so deletions stay deleted. */
 export function readPersonalRepoSettings(
   repoRoot: string,
   persist = true,
@@ -339,9 +322,7 @@ export function readPersonalRepoSettings(
     if (current.exists && persist) ensureLocalSettingsIgnored(root);
     if (current.doc.settings_version === PERSONAL_SETTINGS_VERSION)
       return current;
-    // Auxiliary provider requests commonly use the home directory as cwd.
-    // Its .zeros/settings.toml is the user layer, never migration input (also
-    // when a development channel uses a different user settings directory).
+    // Provider requests may use home as cwd; its settings are never repository migration input, even under another channel.
     const legacy = isUserFile
       ? { doc: {}, exists: false, text: "", error: undefined }
       : readSettingsFile(legacyPath);
@@ -355,8 +336,6 @@ export function readPersonalRepoSettings(
     for (const key of ["scripts", "git", "prompts", "design"]) {
       if (supported[key] !== undefined) inherited[key] = supported[key];
     }
-    // Workspace files have their own owner. Never fold their values into the
-    // repository defaults, even when this is the first migration/read.
     const doc = applySettingsPatch(inherited, current.doc);
     doc.settings_version = PERSONAL_SETTINGS_VERSION;
     if (!persist) return { ...current, doc };
@@ -374,7 +353,6 @@ export function readPersonalRepoSettings(
   }
 }
 
-/** Read the checkout's own file, without importing repository defaults. */
 export function readPersonalWorkspaceSettings(
   root: string,
   persist = true,
@@ -414,7 +392,7 @@ export function readPersonalWorkspaceSettings(
   }
 }
 
-/** New workspaces inherit live defaults; the file contains overrides only. */
+/** Write only overrides so new workspaces inherit changes to repository defaults. */
 export function initializeWorkspaceSettings(root: string): void {
   const checkout = personalWorkspaceRoot(root);
   const file = migrateWorkspaceSettings(checkout);

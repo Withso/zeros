@@ -1,20 +1,4 @@
-// ──────────────────────────────────────────────────────────
-// Settings foundation — file watcher (external-edit detection)
-// ──────────────────────────────────────────────────────────
-//
-// Notifies the engine when any settings.toml changes on disk so it can
-// broadcast DB_CHANGED kinds:["settings"] and clients refetch. Reads are
-// always fresh from disk (no cache), so this is purely a notification path.
-//
-// Deliberately a stat POLL, not fs.watch/chokidar/@parcel-watcher:
-//   • the engine runs under bun — native watcher addons are exactly the
-//     class of dependency that broke node-pty (see terminal-bun-nodepty);
-//   • macOS FSEvents phantom events caused the engine respawn loop — the
-//     metadata-signature real-change guard below is the same fix sidecar.ts uses;
-//   • the watch set is tiny (2 user files + 1 per repo), so a 1s stat poll
-//     is microseconds of work.
-// ──────────────────────────────────────────────────────────
-
+// Stat polling avoids phantom macOS events and native watcher addons under Bun. Reads go directly to disk; this only notifies clients.
 import { statSync } from "node:fs";
 import { personalRepoRoot, personalWorkspaceRoot } from "./personal-repo";
 import {
@@ -39,7 +23,6 @@ export interface SettingsWatcher {
 }
 
 export interface SettingsWatcherOptions {
-  /** Test seam; production uses the bounded one-second recognition poll. */
   pollIntervalMs?: number;
 }
 
@@ -54,7 +37,7 @@ function signature(filePath: string): FileSig | null {
       ino: s.ino,
     };
   } catch {
-    return null; // missing file — a valid state (appears later = a change)
+    return null; // Remember absence so later creation is a change.
   }
 }
 
@@ -69,10 +52,7 @@ function sigEqual(a: FileSig | null, b: FileSig | null): boolean {
   );
 }
 
-/** Start polling every settings file for real changes. `repoRoots` is
- *  re-evaluated each tick so newly opened repos are picked up without a
- *  restart. `onChange` fires once per tick at most, with the paths that
- *  actually changed (mtime/ctime/size/device/inode, not just an event). */
+/** Re-enumerate open repos each tick and batch real metadata changes into one notification. */
 export function startSettingsWatcher(
   repoRoots: () => string[],
   onChange: (changedPaths: string[]) => void,
@@ -112,7 +92,7 @@ export function startSettingsWatcher(
     if (changed.length > 0) onChange(changed);
   };
 
-  tick(); // prime the signatures so the first interval doesn't fire spuriously
+  tick(); // Existing files establish a baseline, not a change.
   const timer = setInterval(tick, options.pollIntervalMs ?? POLL_INTERVAL_MS);
   // Never keep the engine process alive just for settings polling.
   timer.unref?.();

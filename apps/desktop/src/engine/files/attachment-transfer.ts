@@ -82,8 +82,7 @@ async function resolveAttachment(
       candidates.add(diskPath as string);
     }
   }
-  // Try the confirmed path first. If it moved, accept only one surviving
-  // identity; conflicting copies must never silently substitute other bytes.
+  // Prefer the confirmed path; fallback may have only one match to avoid substituting different bytes.
   for (const relativePath of contextAttachmentLocations(attachmentId, safeFilename))
     candidates.add(relativePath);
   let resolved: AttachmentWriteResult | undefined;
@@ -106,10 +105,7 @@ async function resolveAttachment(
   throw new Error("The saved attachment is not available — attach it again");
 }
 
-/** Shared trust-boundary implementation for Electron IPC and the authenticated
- * workspace bridge. The caller authorizes root; no client-supplied source path
- * is accepted. Incomplete uploads live in private temporary directories, never
- * among completed graph records. Only the final operation changes the graph. */
+/** The caller authorizes the workspace root. Accept no client-supplied native path and keep incomplete uploads outside the attachment graph. */
 export async function transferContextAttachment(
   workspaceRoot: string,
   args: Record<string, unknown>,

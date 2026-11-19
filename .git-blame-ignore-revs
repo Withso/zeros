@@ -18,3 +18,4 @@ b17f04301ed3c64a246b5a46775d575536c3d0e2 # Trim comments around Settings feature
 238da07f193851502286d3299d5f51e2b33b3fad # Trim redundant comments across Settings (#1179)
 96cf6fe0310620d551954589a0c57c8ef6281978 # Trim redundant comments across the renderer bridge (#1183)
 8fbd8a8a6e42b3249557c0ee332928fa32a34d4b # Trim redundant comments across the renderer platform (#1188)
+75469c3612e92c089c1ff9ef8f98607236066000 # Trim redundant comments across the shared protocol (#1191)
