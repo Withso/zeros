@@ -1,8 +1,7 @@
 import { DESIGN_STATIC_RENDER_CSS, DESIGN_STILL_TIMELINES_SOURCE } from "./design-capture";
 import { DESIGN_SURFACE_VECTOR_SOURCE } from "./design-surface-vector";
 
-/** Admission estimates for passive HTML, separate from editing runtimes and
- * raster leases. Missing/unknown costs keep the existing preview path. */
+/** Missing passive-surface estimates keep the existing preview path. */
 export interface DesignSurfaceCost {
   sourceBytes: number;
   nodes: number;
@@ -17,8 +16,7 @@ export const DESIGN_SURFACE_LAYOUT = "zeros-design-surface-layout";
 export const DESIGN_SURFACE_LAYOUT_REQUEST = "zeros-design-surface-layout-request";
 export const DESIGN_SOURCE_SURFACES_CAPABILITY = "design.source-surfaces.v1";
 
-// The first important layer wins over later authored layers, including rules
-// that become active after a viewport resize. Insert before authored styles.
+// Insert before authored styles so the first important layer wins even after viewport changes.
 export const DESIGN_SURFACE_STATIC_CSS = `@layer{${DESIGN_STATIC_RENDER_CSS}}`;
 
 /** No observers, recurring work, editing commands or captures. The host checks

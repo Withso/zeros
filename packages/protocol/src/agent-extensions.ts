@@ -139,8 +139,7 @@ export type SessionToolsSnapshot = z.infer<typeof sessionToolsSnapshotSchema>;
 export const SESSION_TOOL_GROUPS = ["plugins", "apps", "mcp"] as const;
 export type SessionToolGroupKind = (typeof SESSION_TOOL_GROUPS)[number];
 
-/** Inventory is opt-in through tools.session.inventory. The legacy list
- * response remains unchanged for clients whose connection schema is strict. */
+/** Inventory is opt-in through tools.session.inventory; the list reply stays unchanged for clients that parse it strictly. */
 export const sessionToolInventoryEntrySchema = z
   .object({
     id: z.string().min(1).max(512),
@@ -159,9 +158,7 @@ export const sessionToolInventoryEntrySchema = z
     ]),
     detail: z.string().max(1000).optional(),
     canAuthenticate: z.boolean().optional(),
-    /** `local`: declared in the provider's own configuration files on this
-     *  machine (for example a repository `.mcp.json`), not in the Zeros
-     *  registry or an account. Composer Tools lists these in a Local folder. */
+    /** Local means provider files on this device, not registry or account inventory. */
     source: z.enum(["local"]).optional(),
   })
   .strict();
@@ -194,8 +191,7 @@ export type SessionToolsInventorySnapshot = z.infer<
   typeof sessionToolsInventorySnapshotSchema
 >;
 
-/** Older engines and providers without category inventory still expose their
- * confirmed MCP connections. An unavailable inventory is never a zero count. */
+/** Keep legacy MCP connections visible without interpreting unsupported groups as empty. */
 export function sessionToolGroups(
   snapshot: SessionToolsInventorySnapshot,
 ): SessionToolGroup[] {

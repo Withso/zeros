@@ -30,8 +30,7 @@ const f = vi.hoisted(() => ({
   error: vi.fn(),
 }));
 
-// Preserve state and refs across explicit renders so real form handlers run
-// against the same component instance. Child primitives are inspected as JSX.
+// Preserve hook slots so explicit renders exercise handlers on the same component instance.
 vi.mock("react", async original => {
   function slot<T>(initialize: () => T): { slots: unknown[]; index: number; value: T } {
     const slots = f.hooks.get(f.scope) ?? [];
@@ -105,7 +104,6 @@ function elements(node: ReactNode): Element[] {
   });
   return found;
 }
-// A settings row carries its name and status as props, not children.
 function text(node: ReactNode): string {
   return Children.toArray(node).map(child => {
     if (!isValidElement(child)) return String(child);
@@ -117,7 +115,6 @@ function tree(): ReactNode {
   f.scope = "outer";
   f.cursor = 0;
   const outer = CloudProviderConnections({ organizationId: f.organizationId, surfaceActive: f.active });
-  // Every agent is on the page; drive the one the case names.
   const inner = elements(outer).find(element => typeof element.type === "function" &&
     element.type.name === "CloudProviderConnection" && (element.props as { agent?: { id: string } }).agent?.id === f.provider)!;
   f.scope = String(inner.key);

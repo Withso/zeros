@@ -73,7 +73,6 @@ describe("paused cloud entry points", () => {
     expect(html).toMatch(/<h1[^>]*>General<\/h1>/);
     expect(html).toContain("Computer use");
     expect(html).not.toMatch(/<span class="truncate">Computer use<\/span>/);
-    // Unknown sections still land on Agents for an organization.
     state.section = "user:retired-page";
     expect(settings()).toContain("agents-fixture");
   });

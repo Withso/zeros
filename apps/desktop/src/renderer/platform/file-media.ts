@@ -15,8 +15,7 @@ function listen() {
   return listening ??= nativeListen<RangeRequest>("file-media-range", request => {
     const read = readers.get(request.sourceId);
     if (!read) {
-      // Delivery can trail renderer cleanup. Drain the native request's slot
-      // immediately instead of holding the global read budget until timeout.
+      // Reply even after renderer cleanup so the native read slot does not wait for timeout.
       void nativeInvoke("file_media_reply", { requestId: request.requestId, error: true }).catch(() => {});
       return;
     }
@@ -27,8 +26,7 @@ function listen() {
   });
 }
 
-/** Only native Chromium owns encoded buffers/decoder work. Renderer forwards
- * bounded range strings from its already-authorized exact workspace bridge. */
+// Chromium owns decoding; the renderer only forwards bounded ranges from the captured workspace reader.
 export async function openWorkspaceMedia(input: { cwd: string; path: string; bytes: number; media: FileMediaDescriptor }): Promise<FileMediaLease> {
   if (!isNativeRuntime()) throw new Error("Open this file in the desktop app to stream its preview.");
   const descriptor = fileMediaDescriptorSchema.parse(input.media);

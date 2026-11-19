@@ -37,8 +37,7 @@ async function resetPath(
   const currentOid = await host.diskBlobOid(path);
 
   if (currentOid === baseOid) {
-    // Leaving the reverted blob staged would resurrect it on commit; other
-    // staged bytes belong to the user's partial staging and remain untouched.
+    // Reverting the matching staged blob prevents resurrection on commit; preserve other partial staging.
     const stagedSameBlob =
       currentOid != null && (await host.indexBlobOid(path)) === currentOid;
     if (stagedSameBlob && host.restoreStaged) {
@@ -90,19 +89,16 @@ async function resetPath(
 }
 
 export interface TurnResetResult {
-  /** Files actually changed on disk (restored / merged / deleted). */
   applied: ResetFileOutcome[];
-  /** Files a concurrent/overlapping edit blocked — left as-is, not clobbered. */
+  /** Overlapping edits stay untouched. */
   conflicts: ResetFileOutcome[];
-  /** Unavailable snapshots or unsupported contents require a separate warning. */
   skipped: ResetFileOutcome[];
   preResetSnapshot: string | null;
   /** Undo's merge base distinguishes reset output from edits made afterward. */
   postResetSnapshot: string | null;
 }
 
-/** Restore authored paths toward `targetCommit`, using the chat's latest
- * post-image `baseCommit` as the merge ancestor and retaining an Undo snapshot. */
+/** Use the chat post-image as the merge ancestor and retain snapshots for Undo. */
 export async function applyTurnReset(
   host: TurnResetHost,
   paths: string[],
@@ -146,9 +142,7 @@ export interface TurnResetStep {
   postSnapshot: string | null;
 }
 
-/** Oldest-first steps unwind newest-first, each with its own authored pre/post
- * pair, preserving interleaved edits. A missing snapshot blocks the whole path
- * before mutation so the reset cannot leave it partially reverted. */
+/** Unwind oldest-first steps in reverse with each turn's own snapshots; a missing snapshot blocks that path before any write. */
 export async function applyTurnSpanReset(
   host: TurnResetHost,
   steps: TurnResetStep[],
@@ -205,8 +199,7 @@ export async function applyTurnSpanReset(
         };
       }
       outcomes.set(path, outcome);
-      // A failed inverse invalidates earlier merge bases for this path. Roll
-      // back any newer inverses so a conflict cannot leave it partially reset.
+      // A failed inverse invalidates earlier merge bases for this path; roll back its newer inverses to avoid a partial reset.
       if (outcome.result === "conflict" || outcome.result === "skipped") {
         if (touched.has(path) && preResetSnapshot) {
           const [rollback] = await undoTurnReset(host, preResetSnapshot, [path]);
@@ -250,9 +243,7 @@ export async function applyTurnSpanReset(
   };
 }
 
-/** Restore files using the post-reset `mergeBase` to preserve subsequent edits.
- * Without it, legacy Undo records and mid-reset rollback retain forced restore.
- * Transcript restoration remains the caller's responsibility. */
+/** Use the post-reset snapshot as the merge base; legacy Undo and mid-reset rollback force restore. The caller restores the transcript. */
 export async function undoTurnReset(
   host: TurnResetHost,
   snapshot: string,

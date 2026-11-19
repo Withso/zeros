@@ -12,8 +12,7 @@ import {
   SUBSCRIPTION_NAMES,
 } from "./subscription-connection-panel";
 
-/** Feedback/cancellation and Claude's optional code fallback while the system
- * browser owns authentication. Closing the dialog keeps the native attempt. */
+// Dismissal hides the UI; it does not cancel the native browser sign-in.
 export function SubscriptionSignInDialog({
   provider,
   active,

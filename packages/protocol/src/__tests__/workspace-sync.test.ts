@@ -71,7 +71,6 @@ describe("Git and sync metadata names on case-insensitive volumes (APFS, HFS+, N
     for (const path of [".GIT/x", ".Git/config", "a/.Git/x", "a/.GIT/hooks/pre-commit", ".g‌it/x", ".gi﻿t/hooks/x", ".git‏/x", "GIT~1/x",
       ".git./x", ".git /x", ".ZEROS-SYNC/x", ".Zeros-Sync/state.json", ".zeros‌-sync/x", ".context/x/.GIT/config", ".git\u202A/x", ".GIT\u206F/x"])
       expect(isSyncPath(path), JSON.stringify(path)).toBe(false);
-    // Ordinary names that only look alike stay allowed.
     for (const path of ["a/.gitignore", ".github/x", "git/x", "a/.gitkeep", "zeros-sync/x", "a/.zeros-sync/x", ".context/notes.md"]) expect(isSyncPath(path), path).toBe(true);
   });
   it("refuses a link whose target resolves into any spelling of .git or the root's .zeros-sync", () => {
@@ -90,7 +89,6 @@ describe("the remote URL a bootstrap names", () => {
       "https://github.com/o/r?x=1", "https://github.com/o/r#y", "https://-github.com/o/r", "https://github.com/o r", "https://github.com/o/r\n", "ssh://root@github.com/o/r",
       "root@github.com:o/r", "git@github.com:-o/r", "git@-github.com:o/r", "--upload-pack=x", "https://github.com", ""])
       expect(isSafeRemoteUrl(url), JSON.stringify(url)).toBe(false);
-    // Unsafe in a reply becomes null (origin left unset), never a string the Mac would write.
     const reply = (remoteUrl: unknown) => schema.parse({ branch: "main", head: "a".repeat(40), remoteUrl });
     expect(reply("ext::sh -c x").remoteUrl).toBeNull();
     expect(reply("https://github.com/o/r.git").remoteUrl).toBe("https://github.com/o/r.git");

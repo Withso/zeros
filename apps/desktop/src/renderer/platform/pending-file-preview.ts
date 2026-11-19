@@ -20,8 +20,7 @@ function trim() {
   }
 }
 
-/** Borrows the selected File/Blob; no copy, base64 or extra disk snapshot.
- * Completed uploads retire immediately unless an open view holds a lease. */
+/** Borrow the picked Blob without copying; completing the upload retires it unless an open view holds a lease. */
 export function offerPendingFilePreview(cwd: string, path: string, blob: Blob): () => void {
   if (!fileMediaType(path)) return () => {};
   const key = keyFor(cwd, path);
@@ -44,8 +43,7 @@ export function acquirePendingFilePreview(cwd: string, path: string): { blob?: B
   if (!entry) return null;
   entry.viewers++;
   const mime = fileMediaType(path)!.mimeType;
-  // A slice shares the Blob's backing bytes. Only correct picker metadata
-  // (for example text/plain SVGs); never read/copy the file to fix its MIME.
+  // A Blob slice corrects picker MIME metadata without reading the file into memory.
   const source = entry.blob && entry.blob.type !== mime
     ? entry.blob.slice(0, entry.blob.size, mime) : entry.blob;
   const url = source ? URL.createObjectURL(source) : undefined;

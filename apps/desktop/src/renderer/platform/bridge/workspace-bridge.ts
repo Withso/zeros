@@ -4,8 +4,6 @@ import type {
   ChangesHistory,
   TurnHistoryCursor,
 } from "@zeros/protocol/changes-history";
-// Client for the engine's WORKSPACE_REQUEST → WORKSPACE_RESPONSE RPC. Optional
-// remote relay clients use the same bounded contract.
 
 import type { RuntimeClient } from "./ws-client";
 import { cloudTargetForValue, cloudWorkspaceKey, isCloudWorkspace, parseCloudScopedId } from "./cloud-workspace-key";
@@ -70,8 +68,7 @@ interface WorkspaceErrorLike {
   remediation?: string;
 }
 
-/** Carries the engine's `code` and `remediation`, so `isGitErrorShape()` (keyed
- *  on a string `code`) matches and `humanError()` can render the hint. */
+/** Preserve the engine's code and remediation so isGitErrorShape and humanError can surface the recovery hint. */
 export class WorkspaceOpError extends Error {
   readonly code: string;
   readonly remediation?: string;
@@ -83,9 +80,7 @@ export class WorkspaceOpError extends Error {
   }
 }
 
-/** Git writes issued over the bridge → the analytics `git_op` enum, recorded at
- *  this single choke point. gh.* PR ops are excluded because review-tab tracks
- *  `pr_create` itself; agent-shell commits never reach the bridge. */
+/** PR creation is tracked by the review tab, and shell commits never cross this bridge. */
 const GIT_OP_ANALYTICS: Record<
   string,
   "commit" | "push" | "pull" | "stage" | "unstage" | "discard"
@@ -98,33 +93,19 @@ const GIT_OP_ANALYTICS: Record<
   "git.discard": "discard",
 };
 
-/** Network-bound git/GitHub writes (push, pull, fetch, rebase, PR create, ready,
- *  merge, discovery). A slow remote or GitHub's merge API routinely exceeds the
- *  10s default. An op that outlives even this still lands: it is in the engine's
- *  LONG_LIFECYCLE_OPS, so its DB_CHANGED also reaches the originator. */
+/** Remote Git can outlive even this budget; LONG_LIFECYCLE_OPS echoes DB_CHANGED to refresh the writer. */
 const NETWORK_GIT_TIMEOUT_MS = 60_000;
 
-/** Budget for LOCAL-ONLY index writes (stage / commit). No network, but a huge
- *  working tree or hook-heavy repo can outlive the 10s default. */
+/** A large working tree or slow hooks can stretch local index writes beyond the default. */
 const LOCAL_GIT_TIMEOUT_MS = 30_000;
 
-/** Git observations can scan a large working tree while an agent writes it.
- * Keep their reads alive beyond the DB-oriented 10s default: abandoning them
- * early lets refresh successors compete with Git still running in the engine.
- * Callers coalesce refresh generations; this finite budget bounds a stalled
- * read without timing out an ordinary slow diff or status scan. */
+/** Give slow observations time to settle so queued refreshes do not compete with Git still running in the engine. */
 const GIT_READ_TIMEOUT_MS = 60_000;
 
-/** Context-graph mutations can intentionally wait behind workspace creation's
- * app-wide Design-owner publication. Give those queued requests the same
- * budget as the create that owns the transition. Transcript windows are served
- * throughout that transition, but share the budget because reading a legacy
- * image can migrate it into the graph. */
+/** Match create's Design-owner queue budget; a transcript read can join that queue to migrate a legacy image. */
 const CONTEXT_GRAPH_QUEUE_TIMEOUT_MS = 60_000;
 
-/** Send a WORKSPACE_REQUEST and await its WORKSPACE_RESPONSE / WORKSPACE_ERROR
- *  (both echo requestId, so request() resolves on whichever arrives). Throws on
- *  a WORKSPACE_ERROR. */
+/** Both response and error envelopes carry requestId; classify the correlated error here. */
 export async function workspaceOp(
   bridge: RuntimeClient,
   op: string,
@@ -241,9 +222,7 @@ export async function bridgeTurnsUndoReset(
   };
 }
 
-/** Courier the active team's settings doc into the engine's in-memory team
- *  slot. Local-only on the engine side: the operation rejects remote callers
- *  so a paired device can't plant settings on this machine. */
+/** The engine accepts team settings only from its Local client so paired devices cannot plant them. */
 export async function bridgeTeamSetContext(
   bridge: RuntimeClient,
   args: {
@@ -263,15 +242,11 @@ export async function requestWorkspaceList(
   const result = (await workspaceOp(bridge, "workspace.list")) as
     | { workspaces?: Workspace[] }
     | undefined;
-  // `kind` is the visible surface, not a different checkout species. Code
-  // agents remain attached to the same native workspace while Design is
-  // visible, so cwd/add-directory resolution must retain both modes.
+  // Code and Design still share the native checkout and agent cwd; keep both in host workspace lookups.
   return result?.workspaces ?? [];
 }
 
-/** Like requestWorkspaceList but forwards the desktop's `{status, repoSlug}`
- *  filter. The engine PREPENDS the synthetic `local-main` entry (web needs it),
- *  which the desktop façade strips — see native/git.ts workspaceList(). */
+/** The engine prepends synthetic local-main for web clients; the desktop facade strips it. */
 export async function bridgeWorkspaceList(
   bridge: RuntimeClient,
   args: {
@@ -363,9 +338,7 @@ export async function bridgeProjectBulkUpsert(
   await workspaceOp(bridge, "project.bulkUpsert", { projects });
 }
 
-// LOCAL-ONLY (off the engine's remote allowlist): the desktop owner decides what
-// a paired device may see. Default is share-all; a listed workspace and its
-// chats are hidden from every relay client.
+// Only the Local owner can change relay visibility; a restricted workspace hides its chats as well.
 
 export async function bridgeListRemoteRestricted(
   bridge: RuntimeClient,
@@ -395,9 +368,7 @@ export async function bridgeSetRemoteRestricted(
 // Deselecting a folder removes it for the agent, terminal and Files tab at once;
 // reselecting restores it from the object store.
 
-/** Why the picker can't operate on this worktree. Mirrors the engine's union
- *  (`apps/desktop/src/engine/git/sparse-checkout.ts`); duplicated rather than imported so
- *  the renderer bundle never pulls in engine code. */
+/** Mirror the engine union without importing engine code into the renderer bundle. */
 export type WorkingDirectoriesUnsupportedReason =
   | "no-commits"
   | "non-cone"
@@ -409,7 +380,6 @@ const UNSUPPORTED_REASONS = new Set<string>([
   "unrepresentable-name",
 ]);
 
-/** The picker's line for each obstacle, so the empty state names the real one. */
 export const WORKING_DIRECTORIES_UNSUPPORTED_COPY: Record<
   WorkingDirectoriesUnsupportedReason,
   string
@@ -424,11 +394,7 @@ export const WORKING_DIRECTORIES_UNSUPPORTED_COPY: Record<
 export interface WorkingDirectoriesWire {
   /** Every top-level tracked directory — the full candidate set. */
   all: string[];
-  /** Top-level directories holding Design territory. They can never be
-   *  excluded — hiding one takes the canvas off disk — so the picker renders
-   *  them checked and non-interactive. The engine force-includes them anyway,
-   *  so an older renderer that ignores this is corrected server-side rather
-   *  than able to hide the canvas. */
+  /** Design folders stay materialized: the engine force-includes them even for legacy pickers. */
   locked: string[];
   /** The subset currently materialized on disk. */
   included: string[];
@@ -438,9 +404,7 @@ export interface WorkingDirectoriesWire {
   /** Present exactly when `supported` is false — which of the three obstacles
    *  it is, so the empty state can name the real one. */
   unsupportedReason?: WorkingDirectoriesUnsupportedReason;
-  /** Paths git declined to remove because they had local edits. Only ever
-   *  populated by a `set` call; non-empty means the worktree does not match
-   *  the selection and the user has to deal with those files first. */
+  /** Only set reports locally edited paths Git could not remove; the resulting checkout may differ from the selection. */
   leftBehind?: string[];
 }
 
@@ -465,16 +429,14 @@ function toWorkingDirs(r: unknown): WorkingDirectoriesWire {
       : undefined;
   return {
     all: v.all.filter((d): d is string => typeof d === "string"),
-    // An engine that predates the field sends nothing; an empty lock set is
-    // the pre-existing behaviour, and the engine still force-includes.
+    // Legacy engines omit the lock set but still force-include Design directories.
     locked: Array.isArray(v.locked)
       ? v.locked.filter((d): d is string => typeof d === "string")
       : [],
     included: v.included.filter((d): d is string => typeof d === "string"),
     sparse: v.sparse === true,
     supported: v.supported === true,
-    // Unsupported always carries a reason, even from an engine that predates
-    // the field — otherwise the empty state would render blank.
+    // Supply a legacy fallback so unsupported pickers never render an empty explanation.
     ...(v.supported === true
       ? {}
       : { unsupportedReason: reason ?? "no-commits" }),
@@ -509,9 +471,7 @@ export async function bridgeSetWorkingDirectories(
       bridge,
       "workspace.setWorkingDirectories",
       { workspaceId, directories },
-      // 60s: this unlinks or materializes every file in the affected folders. A
-      // timeout is worse than slow, because the engine's DB_CHANGED skips the
-      // originator and leaves it showing a stale tree.
+      // Materializing files can outlast the request; a completed change broadcasts DB_CHANGED to the writer too.
       60_000,
     ),
   );
@@ -544,16 +504,11 @@ export async function bridgeListDir(
   };
 }
 
-/** Create a workspace (worktree) over the engine bridge. Returns the engine's
- * created-workspace record (shape mirrors the native workspace_create). */
 export async function bridgeWorkspaceCreate(
   bridge: RuntimeClient,
   args: Record<string, unknown>,
 ): Promise<unknown> {
-  // `git worktree add` is a full checkout whose cost scales with repo size; 30s
-  // was exceeded in the field. The engine keeps working past a client timeout, so
-  // a short cap only shows a spurious "Request timeout" before the workspace
-  // appears.
+  // A full checkout can outlive the default, and the engine continues even after the client times out.
   return workspaceOp(bridge, "workspace.create", { ...args }, 60_000);
 }
 
@@ -566,9 +521,7 @@ export interface PreparedWorkspaceCreateWire {
   number?: number;
 }
 
-/** Reserve a workspace identity + final path BEFORE the heavy create runs, so
- *  the desktop can navigate on click. Metadata-only by contract (validation +
- *  naming, no mkdir/checkout), so a disconnected prepare leaks nothing. */
+/** Reserve identity and final path for navigation; prepare creates no files, so disconnecting cannot leave a checkout. */
 export async function bridgeWorkspacePrepareCreate(
   bridge: RuntimeClient,
   args: {
@@ -619,7 +572,6 @@ export interface ChatSnapshotWire {
   confirmedLocalChats?: boolean;
 }
 
-/** Full chat snapshot plus deletion identities in one engine turn. */
 export async function bridgeChatSnapshot(
   bridge: RuntimeClient,
   refresh?: ChatSnapshotRefresh,
@@ -693,11 +645,7 @@ export async function bridgeChatSummaries(
     folder,
     ...(excludeChatId ? { excludeChatId } : {}),
   })) as { summaries?: ChatSummaryWire[] } | undefined;
-  // Only the two aggregates are coerced. An engine this renderer did not ship
-  // with (a relay client, a stale sidecar) may serve this op, and
-  // `userMessageCount` was `messageCount` until 2026-07-30; a shaped 0 degrades
-  // quietly where `undefined` renders "undefined prompts". Other fields stay a
-  // bare cast so a missing string field remains visible.
+  // Coerce only aggregates: an older engine's messageCount does not substitute for userMessageCount; missing strings stay visible.
   return (r?.summaries ?? []).map((s) => ({
     ...s,
     userMessageCount: Number(s.userMessageCount) || 0,
@@ -737,9 +685,7 @@ export async function bridgeChatTitleSeeds(
   );
 }
 
-/** Local chats ask the Local engine; each cloud workspace's chats ask its own
- * worker. A stopped workspace is never woken for titles: its chats get seeds
- * once it next connects. */
+/** Resolve titles with the owning engine; a stopped cloud workspace waits until its next connection. */
 export async function bridgeChatTitleSeedsByOwner(
   bridge: RuntimeClient,
   chatIds: readonly string[],
@@ -887,7 +833,6 @@ export async function bridgeMessageWindowOlder(
   return messageWindowSnapshot(bridge, chatId, r).messages;
 }
 
-/** Wipe a chat's transcript in the engine (reset). */
 export async function bridgeMessageClear(
   bridge: RuntimeClient,
   chatId: string,
@@ -895,7 +840,6 @@ export async function bridgeMessageClear(
   await workspaceOp(bridge, "messages.clear", { chatId });
 }
 
-/** Delete a message and everything after it in the engine (click-to-edit). */
 export async function bridgeMessageTruncateFrom(
   bridge: RuntimeClient,
   chatId: string,
@@ -970,11 +914,7 @@ export async function bridgeFileTree(
   return r?.files ?? [];
 }
 
-/** The .gitignore'd entries bridgeFileTree omits: without `dir`, the collapsed
- *  ignored roots; with `dir`, one level inside one of them (directories end in
- *  "/"). DESKTOP ONLY: a relay client is refused outright, because with `dir`
- *  this enumerates exactly what .gitignore hides. listIgnoredEntries
- *  short-circuits remote clients before the round-trip. */
+/** Without dir return collapsed ignored roots; with dir list one level. This reveals ignored paths, so relay callers are refused. */
 export async function bridgeIgnoredEntries(
   bridge: RuntimeClient,
   workspaceId: string,
@@ -1026,10 +966,7 @@ export async function bridgeFileWrite(
   })) as WriteFileResult;
 }
 
-/** Persist attachment bytes in the workspace context graph. Transcript
- *  payloads retain the returned relative path, never the base64. Unlike the
- *  context-canvas read/move APIs below, this write is available to paired
- *  clients so remote composer sends can materialize their own attachments. */
+/** Transcripts retain only the returned path; paired clients need this write for attachments, not access to the private context canvas. */
 export async function bridgeAttachmentWrite(
   bridge: RuntimeClient,
   workspaceId: string,
@@ -1055,9 +992,7 @@ export async function bridgeAttachmentWrite(
       workspaceId,
       ...args,
     },
-    // A write accepted during another workspace's creation waits behind the
-    // engine's Design-owner transition instead of failing. Match the create
-    // request budget so the durable queued result can reach this caller.
+    // A durable graph write can queue behind Design-owner publication; match the create budget.
     CONTEXT_GRAPH_QUEUE_TIMEOUT_MS,
   )) as {
     absolutePath: string;
@@ -1073,7 +1008,6 @@ export async function bridgeAttachmentWrite(
 // material, so the engine refuses remote callers. platform/context-graph.ts
 // short-circuits them first.
 
-/** Everything in the workspace's `.context/`. */
 export async function bridgeContextGraphList(
   bridge: RuntimeClient,
   workspaceId: string,
@@ -1088,7 +1022,6 @@ export async function bridgeContextGraphList(
   };
 }
 
-/** Idempotently create the `.context/` skeleton for a workspace. */
 export async function bridgeContextGraphScaffold(
   bridge: RuntimeClient,
   workspaceId: string,
@@ -1124,9 +1057,7 @@ export async function bridgeGitStatus(
   )) as StatusResult;
 }
 
-/** Path-free totals for All / Uncommitted / Staged / Unstaged. The engine
- * computes these from each scope's real comparison and applies remote secret
- * filtering before counting. */
+/** Count each real Git comparison after engine-side remote secret filtering. */
 export async function bridgeGitChangeCounts(
   bridge: RuntimeClient,
   workspaceId: string,
@@ -1139,9 +1070,7 @@ export async function bridgeGitChangeCounts(
   )) as ChangeCounts;
 }
 
-/** ± line totals for the All Changes comparison — what the workspace tabs
- * render. Path-free like the file totals above, and filtered engine-side for a
- * remote client before summing. */
+/** Sum the All Changes comparison only after engine-side remote secret filtering. */
 export async function bridgeGitChangeLineCounts(
   bridge: RuntimeClient,
   workspaceId: string,
@@ -1176,11 +1105,7 @@ export async function bridgeGitHasChanges(
   return result?.hasChanges ?? false;
 }
 
-/** Per-file (or whole-tree) diff over the bridge. Supports both the legacy
- *  `against` selector AND the generalized `mode`/`base`/`head` comparison (e.g.
- *  the Changes/Review "All changes" vs a base branch) + `rawPatch`. The engine
- *  assertSafeGitRef-guards mode:'refs' base/head and drops secret files from
- *  BOTH the structured hunks and the raw patch for a remote client. */
+/** Keep the legacy against selector; ref-mode inputs are guarded and remote secret files are removed from both hunks and raw patch. */
 export async function bridgeGitDiff(
   bridge: RuntimeClient,
   args: {
@@ -1227,11 +1152,7 @@ export async function bridgeGitDiff(
   };
 }
 
-/** Show a single commit (its file list + the raw multi-file patch) over the
- *  bridge. Like git.diff, the engine drops secret files (both the `files`
- *  enumeration and the matching sections of the raw `patch`) for remote
- *  clients, failing closed on any file whose path is unparseable or
- *  sensitive on either side. */
+/** For remote clients, remove commits' sensitive or unparseable paths from both file enumeration and raw patch. */
 export async function bridgeGitShow(
   bridge: RuntimeClient,
   args: { workspaceId: string; sha: string },
@@ -1294,10 +1215,7 @@ export async function bridgeGitRemoteBranches(
   return r?.branches ?? [];
 }
 
-// One helper per engine WRITE op; op names and params match the engine switch
-// exactly. Remote writes are host-approved engine-side, so workspaceOp()
-// resolves with the result or rejects with the WORKSPACE_ERROR (e.g.
-// APPROVAL_DENIED).
+// Relay Git writes use the host's workspace restriction list, not per-write approval; denials arrive as WORKSPACE_ERROR.
 
 export async function bridgeGitStage(
   bridge: RuntimeClient,
@@ -1475,10 +1393,7 @@ export async function bridgeGitCreateBranchFrom(
   });
 }
 
-/** Returns the RESULTING branch — the engine keeps the workspace's existing
- *  prefix, so it is the only party that knows the answer. Null when an older
- *  engine (which returned only `{ok:true}`) is on the other end of the bridge;
- *  callers fall back to their own optimistic guess in that case. */
+/** Only the engine knows the retained branch prefix; an older engine's ok-only reply leaves the caller's optimistic guess. */
 export async function bridgeGitRenameBranch(
   bridge: RuntimeClient,
   args: { workspaceId: string; newName: string },
@@ -1501,10 +1416,7 @@ export async function bridgeGitChangeTargetBranch(
   })) as { baseBranch: string; conflicts: string[] };
 }
 
-// One helper per engine `gh.*` op; the engine resolves workspaceId →
-// owner/repo, and writes follow the git-write contract. PR metadata is not file
-// content, so there is no secret filter. Auth-credential mutations are
-// deliberately not remoted.
+// The engine resolves workspace-scoped PR metadata without the checkout file filter; host credential mutations stay local.
 
 /** Host's GitHub auth status (takes no workspaceId — probes the host token). */
 export async function bridgeGhAuthStatus(
@@ -1520,8 +1432,7 @@ export interface GithubRepositoryOwnerAvatar {
   avatarUrl: string;
 }
 
-/** Best-effort owner avatar for an already-open GitHub checkout. The engine
- *  reads and validates the checkout's origin; callers never send owner/repo. */
+/** The engine validates the checkout's origin; callers do not supply owner/repo. */
 export async function bridgeGhRepositoryOwnerAvatar(
   bridge: RuntimeClient,
   repoRoot: string,
@@ -1531,9 +1442,7 @@ export async function bridgeGhRepositoryOwnerAvatar(
   })) as GithubRepositoryOwnerAvatar | null;
 }
 
-/** Mirrors GithubRepoAccess in apps/desktop/src/engine/git/github.ts. `code` is widened to
- *  `string` here for the same reason every other wire type in this module is
- *  restated: the renderer bundle must not import the engine. */
+/** Mirror the repo-access contract without importing engine code into the renderer. */
 export interface GithubRepoAccess {
   state: "ok" | "blocked" | "unknown";
   connected?: boolean;
@@ -1565,9 +1474,7 @@ export async function bridgeGhPrGet(
   })) as PR;
 }
 
-/** Detect + backfill the workspace's PR from GitHub (for PRs opened outside the
- *  engine — agent `gh pr create`, terminal, github.com). Returns the PR (or null
- *  when there's no open PR / no remote / not authed). */
+/** Backfill PRs opened outside the engine; null also covers missing remote or authentication. */
 export async function bridgeGhPrSync(
   bridge: RuntimeClient,
   workspaceId: string,
@@ -1639,7 +1546,6 @@ export async function bridgeGhPrCreate(
   )) as PR;
 }
 
-/** Owner login + type for the publish dialog's Owner dropdown. */
 export interface GithubOwner {
   login: string;
   type: "user" | "org";
@@ -1785,7 +1691,6 @@ export async function bridgeGhPrList(
   return (await workspaceOp(bridge, "gh.prList", { ...args })) as PR[];
 }
 
-// Pass-throughs to workspace/service.ts; return shapes mirror platform/git.ts.
 
 export async function bridgeGitReset(
   bridge: RuntimeClient,
@@ -1952,8 +1857,7 @@ export async function bridgeGitRepoBranchCatalog(
   bridge: RuntimeClient,
   args: { repoRoot: string; remote?: string; fetch?: boolean },
 ): Promise<RepoBranchCatalog> {
-  // The fetch (freshen) pass may spend up to ~8s on `git fetch` plus a bounded
-  // `ls-remote` HEAD probe — give it headroom over the 10s default budget.
+  // Freshening can spend the default budget on fetch plus the bounded HEAD probe.
   return (await workspaceOp(
     bridge,
     "git.repoBranchCatalog",
@@ -2019,10 +1923,7 @@ export async function bridgeWorkspaceDelete(
   bridge: RuntimeClient,
   args: { workspaceId: string; includeBranch: boolean },
 ): Promise<void> {
-  // Delete reaps workspace processes, evicts large ignored directories, and
-  // removes the worktree before committing the row deletion. Give it the same
-  // lifecycle budget as archive/restore so repository removal does not race
-  // ahead merely because the generic 10s bridge timeout elapsed.
+  // Allow extra time for process and worktree cleanup; repository removal may proceed after a client timeout.
   await workspaceOp(bridge, "workspace.delete", { ...args }, 60_000);
 }
 
@@ -2058,10 +1959,7 @@ export async function bridgeWorkspaceSetMode(
   mode: "code" | "design";
   snapshot?: unknown;
 }> {
-  // Entering Design ensures + commits its foundation; exit may materialize a
-  // legacy sparse cone. Either can take seconds, so use the lifecycle budget
-  // rather than the 10s default. The engine bounds its own admission drain, so
-  // this budget sits above that and lets the real error surface first.
+  // Allow time for uncommitted Design initialization or legacy sparse checkout materialization.
   return (await workspaceOp(
     bridge,
     "workspace.setMode",
@@ -2082,9 +1980,7 @@ export async function bridgeWorkspaceArchive(
   stashRef: string | null;
   workspace?: Workspace;
 }> {
-  // Archiving checkpoints the tree, runs the repo's archive script, evicts
-  // heavy dirs, and removes the worktree — give it the same 60s budget as create
-  // rather than the 10s default so a large worktree doesn't surface a timeout.
+  // Archive scripts and worktree removal need the same lifecycle budget as creation.
   return (await workspaceOp(
     bridge,
     "workspace.archive",
@@ -2101,9 +1997,7 @@ export async function bridgeWorkspaceContinueOnNewBranch(
   bridge: RuntimeClient,
   args: { workspaceId: string; baseBranch?: string; mergedSha?: string },
 ): Promise<{ branch: string; conflicts?: string[] }> {
-  // Fetching the target is bounded engine-side but can outlive the default
-  // request budget on a slow remote, so use the create-class timeout.
-  // `conflicts` lists carried edits left unmerged; older engines omit it.
+  // Allow the bounded remote fetch to settle; legacy engines omit the carried-edit conflicts.
   return (await workspaceOp(
     bridge,
     "workspace.continueOnNewBranch",
@@ -2123,8 +2017,7 @@ export async function bridgeWorkspaceRestore(
   adaptations: string[];
   workspace?: Workspace;
 }> {
-  // Restore recreates the worktree, applies its checkpoint (or legacy stash),
-  // and may adapt its branch/path, so it gets the create-class 60s budget too.
+  // Restore applies its checkpoint or legacy stash after recreating the checkout, so use the create budget.
   return (await workspaceOp(
     bridge,
     "workspace.restore",
@@ -2194,8 +2087,7 @@ export async function bridgeWorkspaceCreateFromBranch(
     prUrl?: string | null;
   },
 ): Promise<CreatedWorkspace> {
-  // Opening a remote-only branch fetches it first, so use the create budget. The
-  // engine bounds that fetch, so a hung remote fails server-side.
+  // Use the create budget for remote-only refs so the engine's bounded fetch fails first.
   return (await workspaceOp(
     bridge,
     "workspace.createFromBranch",
@@ -2220,13 +2112,7 @@ export async function bridgeWorkspaceAdoptExisting(
   })) as CreatedWorkspace;
 }
 
-/** Read a workspace's background-setup output + state (Setup tab). The trunk /
- *  "main" — a synthetic `local:` workspace with no engine row — passes
- *  `repoRoot` so the engine can resolve the repo's setup command anyway.
- *  `statusOnly` skips the log payload + command resolution (the tab-dot
- *  poller); non-state fields come back as placeholders in that mode.
- *  `omitLog` keeps `hasCommand`/`state` honest but drops the (up to 512 KB)
- *  log — for callers that re-poll and never render output. */
+/** Synthetic trunk workspaces need repoRoot; statusOnly skips command resolution and log, whereas omitLog retains real hasCommand and state. */
 export async function bridgeWorkspaceSetupInfo(
   bridge: RuntimeClient,
   args: {
@@ -2253,8 +2139,7 @@ export async function bridgeWorkspaceSetupInfo(
   };
 }
 
-/** (Re)run a workspace's setup command in the background (Setup tab). The
- *  trunk passes `repoRoot` (see bridgeWorkspaceSetupInfo). */
+/** Synthetic trunk workspaces pass repoRoot because they have no engine workspace row. */
 export async function bridgeWorkspaceRerunSetup(
   bridge: RuntimeClient,
   args: { workspaceId: string; repoRoot?: string },
@@ -2274,7 +2159,6 @@ export async function bridgeWorkspaceStopSetup(
   })) as { ok: boolean };
 }
 
-/** One run action's status as the engine reports it (RunManager). */
 export interface RunActionStatusWire {
   state: "running" | "finished" | "failed" | "stopped";
   /** Backed by a live in-memory run (vs a durable last-run row). */
@@ -2296,9 +2180,7 @@ export async function bridgeWorkspaceRunInfo(
   })) as { actions: Record<string, RunActionStatusWire> };
 }
 
-/** What `workspace.startRun` replies. `cancelled` means no PTY was spawned
- *  because a Stop (or the archive reaper) landed while the engine was still
- *  resolving the run's env — the caller must not open a tab for it. */
+/** Cancelled means Stop or archive won during env resolution; no PTY exists to open. */
 export interface RunStartReply {
   ok: boolean;
   hasCommand: boolean;
@@ -2306,9 +2188,7 @@ export interface RunStartReply {
   cancelled?: boolean;
 }
 
-/** Start (or focus) a run action. The engine resolves the COMMAND from the
- *  repo settings by actionId and spawns it as the PTY's foreground process —
- *  the client never supplies a command string. */
+/** The engine resolves actionId to its configured command; the client must not send command text. */
 export async function bridgeWorkspaceStartRun(
   bridge: RuntimeClient,
   args: {
@@ -2333,8 +2213,7 @@ export async function bridgeWorkspaceStopRun(
   })) as { ok: boolean };
 }
 
-/** One run action's buffered output — the terminal replays this when it mounts
- *  too late to attach to a fast-exiting run PTY (its live mirror is gone). */
+/** Replay buffered output when a fast exit removes the live mirror before the terminal mounts. */
 export async function bridgeWorkspaceRunLog(
   bridge: RuntimeClient,
   args: { workspaceId?: string; sessionId: string },
@@ -2397,9 +2276,7 @@ export async function bridgeDetachStatus(bridge: RuntimeClient): Promise<{
   };
 }
 
-// Wire shapes mirror apps/desktop/src/engine/settings: resolve returns the merged
-// document plus a dot-path → layer provenance map; read/write address one layer
-// file. Remote clients receive secret-shaped environment values only masked.
+// Resolve includes provenance; the engine masks secret-shaped environment values for remote clients.
 
 export type SettingsLayer =
   | "user"
@@ -2432,8 +2309,7 @@ export interface SettingsReadWire {
   doc: SettingsDoc;
   exists: boolean;
   error?: string;
-  /** The raw file text — desktop only (stripped on remote: it carries unmasked
-   *  secret-shaped env values). Powers the "Edit settings.toml" raw editor. */
+  /** Raw TOML stays on desktop because it can carry unmasked secret-shaped values. */
   text?: string;
 }
 
@@ -2468,9 +2344,7 @@ export async function bridgeSettingsRead(
   })) as SettingsReadWire;
 }
 
-/** One include-list line plus how many files it matches on its own. A
- *  `matchCount` of 0 on a positive line is the typo signal the UI surfaces;
- *  `null` means attribution was skipped or the scan failed. */
+/** Zero positive matches can flag a typo; null means the scan could not attribute matches. */
 export interface FilesToCopyPatternWire {
   raw: string;
   pattern: string;
@@ -2498,10 +2372,7 @@ export interface FilesToCopyCandidateWire {
 
 export interface FilesToCopyPreviewWire {
   source: "worktreeinclude" | "file_include_globs" | "default";
-  /** Settings layer the patterns resolved from — `repo-local` (this project)
-   *  vs `user` (all projects) is what the scope control reflects. Widened
-   *  beyond SettingsLayer because provenance can also name the non-file
-   *  layers (`team`, `default`). */
+  /** Resolved provenance may be team or default, not just a writable file layer. */
   sourceLayer?: SettingsLayer | "team" | "default";
   /** Absolute path of the repo's `.worktreeinclude`, when that source won. */
   sourcePath?: string;
@@ -2525,14 +2396,11 @@ export interface FilesToCopyPreviewWire {
    *  already selected, so nothing new would be discoverable. */
   candidates: FilesToCopyCandidateWire[];
   warnings: string[];
-  /** False → the scan was cut short. Say "couldn't check", never "0 files":
-   *  zero and unknown are different answers. */
+  /** An incomplete scan cannot confirm that zero files match. */
   complete: boolean;
 }
 
-/** What a new workspace of `repoRoot` would have copied into it. Pass
- *  `patterns` to preview an UNSAVED draft — including an empty array, which
- *  means "the box is cleared", not "use the saved list". */
+/** An explicit empty patterns array previews a cleared draft rather than reusing saved patterns. */
 export async function bridgeFilesToCopyPreview(
   bridge: RuntimeClient,
   repoRoot: string,
@@ -2546,10 +2414,7 @@ export async function bridgeFilesToCopyPreview(
       ...(opts.mainRepoRoot ? { mainRepoRoot: opts.mainRepoRoot } : {}),
       ...(opts.patterns ? { patterns: opts.patterns } : {}),
     },
-    // The engine budgets the scan itself at 15s, and the stats + serialization
-    // sit on top of that. The 10s default would have the renderer give up
-    // BEFORE the engine does, turning a slow-but-successful preview into
-    // "Request timeout" while git kept running.
+    // The 15s engine scan budget excludes stats and serialization; renderer timeout must be longer.
     LOCAL_GIT_TIMEOUT_MS,
   )) as FilesToCopyPreviewWire;
 }
@@ -2582,9 +2447,7 @@ export interface DiscoveredMcpSourceWire {
   warning?: string;
 }
 
-/** Scan the user's home MCP configs (Cursor / Claude / Codex / Factory) for
- *  servers to adopt. Desktop-only (the op reads home config files); returns an
- *  empty list when the native operation is unavailable. */
+/** Scanning home MCP configs is host-local: remote calls fail; a reply without sources reads as empty. */
 export async function bridgeMcpScanNative(
   bridge: RuntimeClient,
   repoRoots: string[] = [],
@@ -2595,8 +2458,6 @@ export async function bridgeMcpScanNative(
   return res.sources ?? [];
 }
 
-/** One server in the MERGED MCP registry, tagged with the layer it came from —
- *  for the Customize → MCP source badges + inherited group. */
 export interface ComposedMcpServerWire {
   name: string;
   transport: "stdio" | "http" | "sse";
@@ -2604,7 +2465,6 @@ export interface ComposedMcpServerWire {
   command?: string;
   cwd?: string;
   args?: string[];
-  /** The settings layer this server was resolved from. */
   source: string;
   /** Gateway-managed (oauth/header) vs directly injected (undefined). */
   auth?: "oauth" | "header";
@@ -2612,8 +2472,7 @@ export interface ComposedMcpServerWire {
   oauth_scopes?: string[];
 }
 
-/** The merged MCP registry (user + managed — repo layers no longer carry MCP)
- * for the badges + inherited view. Host-local; returns [] when unavailable. */
+/** The host-local registry merges user and managed settings only; repo layers no longer supply MCP. */
 export async function bridgeMcpResolveComposed(
   bridge: RuntimeClient,
 ): Promise<ComposedMcpServerWire[]> {
@@ -2627,16 +2486,14 @@ export interface GatewayBackendStatusWire {
   name: string;
   url: string;
   state: "connected" | "needs-auth" | "error";
-  /** Count of ENABLED tools (after the allowlist filter). */
   toolCount: number;
-  /** ALL tool names the backend exposes (pre-filter), for the per-tool checkboxes. */
+  /** Pre-filter tool names are needed so users can re-enable excluded tools. */
   tools?: string[];
   detail?: string;
 }
 export interface McpGatewayStatusWire {
   running: boolean;
-  /** Why the gateway isn't running when it should be (e.g. its port is taken) —
-   *  shown as "Gateway unavailable" so an OAuth server doesn't silently vanish. */
+  /** Expose gateway failure so a backend needing OAuth cannot silently disappear. */
   error: string | null;
   servers: GatewayBackendStatusWire[];
 }
@@ -2697,10 +2554,7 @@ export async function bridgeMcpValidateWorkingDirectory(bridge: RuntimeClient, d
   await workspaceOp(bridge, "mcp.validateWorkingDirectory", { directory, ...(workspace ? { workspace } : {}) });
 }
 
-/** Store a static auth-header secret for an auth:"header" gateway backend. The
- *  value transits the authenticated bridge once, then lives engine-only (the
- *  gateway vault + platform credential store) — never settings.toml or the
- *  renderer's durable state. Works identically for local and cloud engines. */
+/** The auth-header secret crosses the authenticated bridge once and stays in the engine vault, never renderer storage or TOML. */
 export async function bridgeMcpGatewaySetHeaderSecret(
   bridge: RuntimeClient,
   url: string,
@@ -2714,8 +2568,7 @@ export async function bridgeMcpGatewaySetHeaderSecret(
   });
 }
 
-/** Headless sign-in step 1: get the authorization URL for a backend WITHOUT
- *  opening a browser (no-browser / remote environments). */
+/** Headless authorization returns the URL without opening a browser. */
 export async function bridgeMcpGatewayBeginAuth(
   bridge: RuntimeClient,
   server: string,
@@ -2730,8 +2583,7 @@ export async function bridgeMcpGatewayBeginAuth(
   return r.authorizationUrl;
 }
 
-/** Headless sign-in step 2: finish with the code (or full redirect URL) the user
- *  pasted; resolves with the backend's new status. */
+/** Headless completion accepts the code or full redirect URL. */
 export async function bridgeMcpGatewayCompleteAuth(
   bridge: RuntimeClient,
   server: string,
@@ -2762,9 +2614,7 @@ export async function bridgeSettingsWrite(
   })) as SettingsWriteWire;
 }
 
-/** Write a layer file as RAW TOML (the "Edit settings.toml" editor). Validated
- *  + written verbatim (comments/layout preserved). Desktop-only — rejected for
- *  remote clients. Rejects unparseable TOML (SETTINGS_BAD_TOML). */
+/** Validate raw TOML and persist it verbatim; remote clients cannot use this editor. */
 export async function bridgeSettingsWriteRaw(
   bridge: RuntimeClient,
   layer: Exclude<SettingsLayer, "managed">,
@@ -2784,8 +2634,7 @@ export interface SettingsMigrateLegacyResult {
   warnings: string[];
 }
 
-/** One-time import of the legacy localStorage settings blobs (LOCAL-ONLY op;
- *  the engine merges UNDER existing file values, so re-runs can't clobber). */
+/** The Local migration merges beneath existing file values, so a rerun cannot overwrite choices. */
 export async function bridgeSettingsMigrateLegacy(
   bridge: RuntimeClient,
   input: {

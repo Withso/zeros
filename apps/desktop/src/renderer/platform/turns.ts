@@ -1,15 +1,4 @@
-// ──────────────────────────────────────────────────────────
-// Native bindings — turns (footer / per-turn changes / reset)
-// ──────────────────────────────────────────────────────────
-//
-// Renderer-side typed façade for the engine's turn ops (v13). Mirrors the
-// native/git.ts pattern: every call routes over the engine bridge. A missing
-// transport rejects instead of masquerading as an empty turn/diff, allowing
-// exact-key UI caches to retain their last confirmed snapshot. Engine source-of-truth: apps/desktop/src/engine/db/turns.ts +
-// apps/desktop/src/engine/git/turns-git.ts; the types below mirror those exports so the React
-// bundle never imports engine code.
-// ──────────────────────────────────────────────────────────
-
+// Reject missing transport rather than clearing a last-confirmed turn snapshot.
 import { getActiveBridge } from "./bridge/active-bridge";
 import type { TurnHistoryCursor } from "@zeros/protocol/changes-history";
 import {
@@ -38,29 +27,23 @@ export type TurnResetMode =
   | "transcriptOnly";
 
 export interface TurnResetResult {
-  /** Files actually changed on disk (restored / merged / deleted). */
   applied: ResetFileOutcome[];
-  /** Files an overlapping concurrent edit blocked — left as-is, not clobbered. */
+  // Overlapping concurrent edits are left unchanged.
   conflicts: ResetFileOutcome[];
-  /** Files we could NOT restore (no snapshot, binary, unreadable) — surfaced so
-   *  the UI warns rather than silently rolling back only the transcript. */
+  // Report unrestorable files so the UI can warn about a partial rollback.
   skipped: ResetFileOutcome[];
   /** Snapshot of the work tree taken just before the reset (file half of undo). */
   preResetSnapshot: string | null;
   resetPaths: string[];
   truncated: number;
-  /** Handle for turnUndoReset — restores BOTH the files AND the truncated
-   *  transcript (messages, tool calls, outputs) the reset removed. */
+  // Undo handle for both the file snapshot and truncated conversation.
   resetId: string;
 }
 
 export interface TurnUndoResult {
-  /** Per-file outcomes of restoring the working tree. */
   restored: ResetFileOutcome[];
-  /** True when the conversation was re-inserted (only when the chat wasn't
-   *  continued past the reset — else files are undone but the transcript isn't). */
+  // A continued chat keeps its new transcript even if undo restores files.
   transcriptRestored: boolean;
-  /** How many messages were re-inserted. */
   messagesRestored: number;
 }
 
@@ -74,7 +57,7 @@ function requireBridge(action: string) {
   return bridge;
 }
 
-/** File-changing turns in a workspace, newest first (the Changes dropdown). */
+// List file-changing turns newest first.
 export async function turnsList(
   workspaceId: string,
   options?: {
@@ -88,7 +71,6 @@ export async function turnsList(
   return bridgeTurnsList(requireBridge("list turns"), workspaceId, options);
 }
 
-/** Which chat's turn made each of these commits (the Review tab's links). */
 export async function turnCommitLinks(
   workspaceId: string,
   shas: string[],
@@ -97,7 +79,6 @@ export async function turnCommitLinks(
   return bridgeTurnsCommits(requireBridge("read commit chats"), workspaceId, shas);
 }
 
-/** One turn's recorded metadata (footer duration + authored file pills). */
 export async function turnGet(
   chatId: string,
   turnId: string,
@@ -105,7 +86,6 @@ export async function turnGet(
   return bridgeTurnsGet(requireBridge("read the turn"), chatId, turnId);
 }
 
-/** A unified patch for a turn's authored changes (feeds the per-turn diff). */
 export async function turnDiff(args: {
   chatId: string;
   turnId: string;
@@ -114,9 +94,7 @@ export async function turnDiff(args: {
   return bridgeTurnsDiff(requireBridge("read the turn diff"), args);
 }
 
-/** Reset a chat to a turn: restore this turn's (and all later turns') authored
- *  files + truncate the transcript. Returns conflicts (overlapping concurrent
- *  edits that weren't auto-merged) and a snapshot to undo with. */
+// By default, unwind this chat's authored files and transcript from this turn onward.
 export async function turnReset(args: {
   chatId: string;
   turnId: string;
@@ -125,8 +103,6 @@ export async function turnReset(args: {
   return bridgeTurnsReset(requireBridge("reset the turn"), args);
 }
 
-/** Undo a prior reset by its `resetId`: restores the files from the pre-reset
- *  snapshot AND re-inserts the truncated transcript (messages + turns). */
 export async function turnUndoReset(args: {
   resetId: string;
 }): Promise<TurnUndoResult> {

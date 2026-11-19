@@ -1,11 +1,4 @@
-// ──────────────────────────────────────────────────────────
-// Zeros execution-boundary wire contract
-// ──────────────────────────────────────────────────────────
-//
-// This is deliberately diagnostic, not an authority grant. The engine owns
-// the real policy and capability tokens; renderer/relay clients receive only
-// enough redacted state to explain whether a code actor is ready and which
-// compatibility paths are still restricted.
+// Renderers and relays receive diagnostics, not authority; policy and capability tokens stay in the engine.
 
 export const EXECUTION_BOUNDARY_STATUS_VERSION = 1 as const;
 export const EXECUTION_BOUNDARY_PORTS_VERSION = 1 as const;
@@ -27,8 +20,7 @@ export type ExecutionBoundaryState =
   | "revoked"
   | "unavailable";
 
-/** Compatibility differences are explicit and machine-readable. Full native
- * provider parity cannot graduate while any restriction remains. */
+/** Full provider parity requires an empty restrictions list. */
 export type ExecutionBoundaryRestriction =
   | "additional-directories-disabled"
   | "local-mcp-disabled"
@@ -55,13 +47,9 @@ export interface ExecutionBoundaryStatus {
     level: "full" | "restricted";
     restrictions: ExecutionBoundaryRestriction[];
   };
-  /** Session-scoped service façades that were successfully established at
-   * admission. Counts and stable categories only: endpoints, socket paths,
-   * environment values, and broker identities never cross the bridge. */
+  /** Only counts and categories cross the bridge, never endpoints, environment values or broker identities. */
   services?: ExecutionBoundaryServicesStatus;
-  /** Legacy private-ChangeSet status retained for v1 wire compatibility.
-   * Current native Code and API-only Design paths do not publish a ChangeSet;
-   * ref names, object ids, paths, and error text remain engine-local. */
+  /** Retained for v1 ChangeSet compatibility; ref names, object IDs, paths and raw errors stay in the engine. */
   git?: ExecutionBoundaryGitStatus;
   /** Last authority-changing lifecycle transition for this exact execution. */
   lifecycle?: ExecutionBoundaryLifecycleStatus;
@@ -93,12 +81,7 @@ export interface ExecutionBoundaryServicesStatus {
 export type ExecutionBoundaryGitState =
   /** No repository is involved in this session at all. */
   | "not-applicable"
-  /** The session uses the workspace's own repository directly, with no private
-   * projection to promote. This is the local desktop contract: there is nothing
-   * to synchronize because the agent's commits already landed in the real repo.
-   * Distinct from `not-applicable` because the difference is user-visible — a
-   * local session in a real Git repo must not be labelled "not a Git
-   * workspace". */
+  /** Native commits are already in the workspace repo; present this differently from a non-Git workspace. */
   | "native"
   | "ready"
   | "synchronizing"
@@ -120,9 +103,7 @@ export interface ExecutionBoundaryLifecycleStatus {
   transitionedAt: number;
 }
 
-/** Redacted listener-discovery health. Raw process, socket, policy, and host
- * diagnostics remain engine-local; clients receive only a stable category and
- * can offer a safe user action from it. */
+/** Report stable issue categories only; raw listener and host diagnostics stay in the engine. */
 export type ExecutionBoundaryPortDiscoveryState =
   | "idle"
   | "discovering"

@@ -1,12 +1,11 @@
 import { z } from "zod";
 
-/** Order 3 (CONTRACT.md section 12): a one-way mirror of a cloud checkout into
- * a folder on a Mac. Worker ops on the app's cloud bridge; cloud always wins. */
+/** This mirror is one-way: the cloud checkout is authoritative. */
 export const SYNC_FEATURE = "sync-v1";
 export const SYNC_CAPABILITY = "workspace-sync-v1";
-/** On the worker's ENGINE_READY to a sync socket: `sync.readBatch` is served. An older worker never says it, and the Mac reads files one by one. */
+/** Without this ENGINE_READY capability, the Mac reads files individually. */
 export const SYNC_BATCH_CAPABILITY = "sync-batch-v1";
-/** On ENGINE_READY: sync.bootstrap accepts `have` as up to 64 known commit ids (the Mac's shared Git store), not only one. */
+/** Only advertising workers accept multiple known commits in bootstrap. */
 export const SYNC_HAVE_V2_CAPABILITY = "sync-have-v2";
 export const SYNC_LIMITS = {
   fileBytes: 100 * 1024 * 1024,
@@ -22,14 +21,13 @@ export const SYNC_LIMITS = {
   /** A sync socket is re-authorized at least this often, or the worker closes it. */
   renewMs: 10 * 60_000,
   bundleLifetimeMs: 10 * 60_000,
-  /** sync.readBatch: files up to this size go in batches; a reply carries at most this many raw bytes (base64 stays well under a 16 MiB frame). */
+  /** Files up to this size can be fetched in a batch. */
   batchFileBytes: 1024 * 1024,
+  // The raw-byte cap leaves room for base64 encoding within the bridge frame limit.
   batchBytes: 4 * 1024 * 1024,
   batchFiles: 512,
-  /** Requests a Mac keeps in flight on its sync socket. */
   inFlight: 6,
-  /** What a Mac asks for at once, in bytes, so a reply never meets a full send buffer on a slow link (an older
-   * worker ends a sync socket with more than 4 MiB buffered): 1 MiB per batch or chunk, 2 MiB in flight in all. */
+  /** Keep encoded replies below the older worker's send-buffer limit on slow links. */
   macRequestBytes: 1024 * 1024,
   macInFlightBytes: 2 * 1024 * 1024,
   /** A transfer keeps the VM awake this long after its last read, for at most this long in one continuous run. */
@@ -42,11 +40,10 @@ export const SYNC_BRIDGE_PATH = "/v2/worker/sync";
 export const SYNC_BRIDGE_PROTOCOL = "zeros.worker.sync.v1";
 /** The worker answers a passive sync client only these. */
 export const SYNC_PASSIVE_OPS = ["sync.snapshot", "sync.read", "sync.readBatch", "sync.bootstrap", "sync.bundleRead"] as const;
-/** The passive ops that move bytes: a recent one keeps the VM awake (CONTRACT.md 12, 2026-11-11 amendment). */
+/** Only byte transfers extend VM activity; snapshots and hints do not. */
 export const SYNC_TRANSFER_OPS: ReadonlySet<string> = new Set(["sync.read", "sync.readBatch", "sync.bundleRead"]);
 
-/** `POST /v1/cloud-v2/workspaces/:id/sync/grant` (D+H) reply: the route base, its port-auth value and a
- * single-use Ed25519 grant (claims iss, aud, boot, iat, exp <= 60 s, jti, scope "sync", sub, dev). */
+/** The sync grant route returns port auth and a single-use Ed25519 grant valid for at most 60 seconds. */
 export const SyncGrantReplySchema = z.object({
   url: z.string().url().refine(value => { try { const url = new URL(value); return url.protocol === "https:" && url.pathname === "/" && !url.search && !url.hash && !url.username && !url.password; } catch { return false; } }, "Invalid route"),
   portAuth: z.string().regex(/^[A-Za-z0-9._~+/=-]{16,8192}$/),
@@ -91,13 +88,12 @@ export function isSyncLinkTarget(linkPath: string, target: string): boolean {
 const path = z.string().refine(isSyncPath, "Invalid sync path");
 const sha256 = z.string().regex(/^[0-9a-f]{64}$/);
 const gitSha = z.string().regex(/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/);
-/** A branch name Git would accept, bounded; never a path outside refs/heads. */
+/** Keep the branch relative to refs/heads. */
 const branch = z.string().min(1).max(255).regex(/^(?!-)(?!.*\.\.)(?!.*\/\/)(?!.*@\{)[^\s~^:?*[\\\x00-\x1f\x7f]+$/).refine(value => !value.endsWith(".lock") && !value.endsWith("/") && !value.endsWith(".") && !value.startsWith("/"));
 
 export const SyncEntrySchema = z.object({
   path,
   size: z.number().int().min(0).max(SYNC_LIMITS.fileBytes),
-  /** Permission bits only (0o777). */
   mode: z.number().int().min(0).max(0o777),
   mtimeMs: z.number().nonnegative(),
   /** Of the bytes, or of the link target for a symlink. */
@@ -173,8 +169,7 @@ export function isSafeRemoteUrl(value: unknown): value is string {
   return typeof value === "string" && value.length <= 2048 && SAFE_REMOTE.some(pattern => pattern.test(value));
 }
 
-/** Git history for the Mac's real clone: a bundle of the branch (full, or from `have` when that is an ancestor). */
-/** `have`: one commit (every worker), or with sync-have-v2 up to 64 distinct ones the Mac already holds. */
+/** Only known ancestors can make an incremental bundle; older workers accept one known commit. */
 export const SyncBootstrapRequestSchema = z.object({
   have: z.union([gitSha, z.array(gitSha).min(1).max(64).refine(values => new Set(values).size === values.length, "Each commit once")]).optional(),
 }).strict();
@@ -191,8 +186,7 @@ export const SyncBundleReadRequestSchema = z.object({
   id: z.string().uuid(), offset: z.number().int().min(0).max(SYNC_LIMITS.totalBytes), length: z.number().int().min(1).max(SYNC_LIMITS.chunkBytes),
 }).strict();
 
-/** 12.z: GET /v1/cloud-v2/devices/:deviceId/connections (D+H for this device, X-Zeros-Sync-Wanted: 1): this
- * registration's live connections with the person's wanted state, 200 per keyset page. Read leniently. */
+/** Device connections require the signed-in account, this device's registration headers and X-Zeros-Sync-Wanted: 1. Accept additive reply fields. */
 export const DeviceSyncConnectionSchema = z.object({
   workspaceId: z.string().uuid(),
   repository: z.string().min(3).max(201).regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/),

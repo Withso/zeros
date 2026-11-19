@@ -1,49 +1,22 @@
-// ──────────────────────────────────────────────────────────
-// Agent analytics events
-// ──────────────────────────────────────────────────────────
-//
-// Thin, typed wrappers around capture() for the agent-reliability
-// funnel. Emitted from the renderer's sessions layer, which already
-// receives everything over the bridge (failure kind + stage are
-// preserved on the wire). Metadata only — agent id, failure kind,
-// stage, stop reason, model NAME, token counts, cost. Never prompts,
-// completions, file paths, or error text.
-//
-// These power the per-agent reliability dashboard: success vs failure
-// by kind × stage, turn latency, and (where the agent reports it)
-// token/cost trends.
-// ──────────────────────────────────────────────────────────
 
 import { capture, captureException } from "./posthog";
 import type { AgentFailure } from "../../bridge/failure";
 import { logEvent } from "../logging/renderer-log";
 
-// Per-session bookkeeping so agent_session_ended can report duration and
-// turn count without persisting timestamps on the store slot. Keyed by
-// chatId; created on start, bumped per completed turn, read + cleared on
-// end. Bounded by the chat-tab cap, so it can't grow unbounded.
 const sessionMeta = new Map<
   string,
   { startedAt: number; promptCount: number }
 >();
 
-// Per-chat TTFT bookkeeping. A turn ARMS this when its prompt is sent; the
-// first streamed chunk DISARMS it (emitting agent_first_response with the
-// elapsed time), so exactly one event fires per turn. A turn that never
-// streams is overwritten by the next turn's arm or cleared on session end —
-// bounded by the chat-tab cap, so it can't grow unbounded.
 const ttftPending = new Map<string, { agentId: string; startedAt: number }>();
 /** Correlates an approval response with the currently-running prompt without
  * sending the durable chat/session id to analytics. */
 const activePromptIds = new Map<string, string>();
-/** Prevents double `agent_prompt_finished` when both sendPrompt's finally and a
- * terminal turn_state push observe the same durable prompt id after reload. */
+/** The send finally and terminal push can both finish the same prompt after adoption. */
 const finishedPromptIds = new Map<string, number>();
 const FINISHED_PROMPT_ID_CAP = 200;
 
-/** Catalog-shaped identifiers: model ids, agent ids, mode ids, stop reasons.
- * Underscores are allowed only for an explicit enum allowlist below — freeform
- * `alice_private_model` style tokens must not pass through unchanged. */
+/** Do not accept arbitrary underscore-bearing identifiers; only allow the explicit enum values below. */
 const SAFE_METADATA_TOKEN = /^[a-z0-9][a-z0-9.:+-]{0,79}$/i;
 const SAFE_UNDERSCORE_TOKENS = new Set([
   "allow_once",
@@ -69,10 +42,7 @@ const SAFE_UNDERSCORE_TOKENS = new Set([
   "auth_required",
 ]);
 
-/** Model ids and native mode ids normally come from a curated catalog, but
- * adapters can advertise arbitrary strings. Preserve safe identifiers and
- * coarsen everything else to the literal "custom" — never emit free text and
- * never emit a deterministic content hash that would fingerprint the value. */
+/** Coarsen off-format adapter strings to custom instead of sending or fingerprinting them. */
 function safeMetadataToken(
   value: string | null | undefined,
 ): string | undefined {
@@ -113,9 +83,7 @@ export interface AgentPromptStartedArgs {
   protocolVersion?: number;
 }
 
-/** Canonical metadata-only prompt envelope. The exact same safe properties go
- * to app.jsonl and PostHog; prompt text, paths, attachment names, ids, and env
- * values are deliberately absent. */
+/** Share a metadata-only envelope with PostHog and app.jsonl; do not include chat IDs, prompt contents, paths, or environment values. */
 export function trackAgentPromptStarted(args: AgentPromptStartedArgs): void {
   const promptId = safeMetadataToken(args.promptId) ?? "unknown";
   activePromptIds.set(args.chatId, promptId);
@@ -145,8 +113,7 @@ export function trackAgentPromptStarted(args: AgentPromptStartedArgs): void {
   logEvent("agent_prompt_started", props, ["agent", "prompt"]);
 }
 
-/** Re-attach a still-running prompt after renderer reload/adoption. Does not
- * emit `agent_prompt_started` — that event already fired on the original send. */
+/** Restore correlation after reload without emitting a second start event. */
 export function adoptAgentPromptCorrelation(args: {
   chatId: string;
   promptId: string;
@@ -156,8 +123,7 @@ export function adoptAgentPromptCorrelation(args: {
   activePromptIds.set(args.chatId, promptId);
 }
 
-/** Current correlation id for a chat, if any. Used by reload adoption to emit
- * a terminal finish when the original sendPrompt finally no longer exists. */
+/** An adopted prompt can finish without the original sendPrompt finally. */
 export function peekAgentPromptId(chatId: string): string | undefined {
   return activePromptIds.get(chatId);
 }
@@ -224,8 +190,7 @@ export function trackAgentPromptFinished(args: {
   logEvent("agent_prompt_finished", props, ["agent", "prompt"]);
 }
 
-/** User-facing approval telemetry. This records only the decision enum and tool
- * category; native command/file arguments never leave the renderer. */
+/** Record the approval category and outcome, not native command or file arguments. */
 export function trackAgentPermissionDecided(args: {
   chatId: string;
   agentId: string;
@@ -242,8 +207,7 @@ export function trackAgentPermissionDecided(args: {
   logEvent("agent_permission_decided", props, ["agent", "permission"]);
 }
 
-/** Blocking user-input telemetry. Answers and question copy are user content
- * and are never included; only source/outcome/count metadata is retained. */
+/** Never send question copy or answers; only record outcome and counts. */
 export function trackAgentQuestionAnswered(args: {
   chatId: string;
   agentId: string;
@@ -264,7 +228,6 @@ export function trackAgentQuestionAnswered(args: {
   logEvent("agent_question_answered", props, ["agent", "question"]);
 }
 
-/** A new agent session was successfully created. */
 export function trackAgentSessionStarted(
   agentId: string,
   chatId: string,
@@ -273,20 +236,12 @@ export function trackAgentSessionStarted(
   capture("agent_session_started", { agent_id: agentId });
 }
 
-/** A prompt turn was just dispatched — ARM time-to-first-token tracking so the
- *  turn's first streamed chunk emits agent_first_response. Call at the moment
- *  the prompt RPC goes out (the user-perceived turn start). Overwrites any
- *  prior arm for this chat (e.g. an earlier turn that never streamed). */
+/** Arm immediately before sending the prompt RPC so latency starts with the user's turn. */
 export function trackAgentTurnStarted(agentId: string, chatId: string): void {
   ttftPending.set(chatId, { agentId, startedAt: Date.now() });
 }
 
-/** The first streamed output of the current turn arrived (assistant text,
- *  reasoning, or a tool call — whichever lands first). Emits agent_first_response
- *  with the time-to-first-token, then DISARMS so only one fires per turn.
- *  No-op when TTFT isn't armed for this chat (a later chunk in the same turn,
- *  or a session-load replay with no in-flight turn). `firstKind` is metadata
- *  describing which signal arrived first — never content. */
+/** Consume the first text, reasoning, or tool signal only for an armed turn; history replay alone must not count. */
 export function trackAgentFirstResponse(
   chatId: string,
   firstKind: "message" | "thought" | "tool_call",
@@ -301,9 +256,7 @@ export function trackAgentFirstResponse(
   });
 }
 
-/** A prompt turn completed successfully. Usage fields are best-effort:
- *  Claude reports tokens + cost, Codex reports tokens only, others may
- *  report neither (their engine translators don't surface usage yet). */
+/** Usage fields are best effort; not every adapter reports them. */
 export function trackAgentPromptCompleted(args: {
   agentId: string;
   chatId?: string;
@@ -329,10 +282,6 @@ export function trackAgentPromptCompleted(args: {
   });
 }
 
-/** An agent session ended — chat closed, reset, or the agent process was
- *  disposed. Reports session-level duration + turn count (the back half of
- *  the activation funnel). `outcome` is "error" when the session ended on a
- *  failure, else "completed". Metadata only. */
 export function trackAgentSessionEnded(args: {
   agentId: string;
   chatId: string;
@@ -352,9 +301,7 @@ export function trackAgentSessionEnded(args: {
   });
 }
 
-/** A workspace became active — opened from the sidebar or freshly created.
- *  Metadata only: whether it's a real git worktree (vs the synthetic
- *  "Local main" row) and the workspace status enum. NEVER path/branch/slug. */
+/** Do not include workspace paths, branches, or slugs. */
 export function trackWorkspaceOpened(args: {
   isWorktree: boolean;
   status?: string;
@@ -365,10 +312,7 @@ export function trackWorkspaceOpened(args: {
   });
 }
 
-/** A git / GitHub operation was invoked from the UI. Metadata only: the
- *  operation type, whether it succeeded, and — on failure — a classified
- *  `error_kind` (the engine's structured GitError `code`, a fixed enum that
- *  carries no message/branch/diff/path). NEVER raw error text. */
+/** Record only the classified Git error code, never its message, path, or diff. */
 export function trackGitOp(args: {
   op:
     | "commit"
@@ -395,8 +339,6 @@ export function trackGitOp(args: {
     | "workspace_restore"
     | "workspace_delete";
   outcome: "ok" | "error";
-  /** The caught error (failure path only) — classified to a safe enum, never
-   *  sent raw. */
   error?: unknown;
 }): void {
   capture("git_op", {
@@ -406,10 +348,7 @@ export function trackGitOp(args: {
   });
 }
 
-/** Classify a caught git error into a safe enum for analytics. Reuses the
- *  engine's structured GitError `code` (serialized across the bridge via
- *  GitError.toJSON → a plain object with `code`). Returns "unknown" for any
- *  non-GitError. The code is a fixed enum, so it carries no paths/content. */
+/** IPC serializes GitError to a plain object; classify by its code rather than instanceof. */
 function gitErrorKind(error: unknown): string {
   if (
     !!error &&
@@ -422,12 +361,7 @@ function gitErrorKind(error: unknown): string {
   return "unknown";
 }
 
-// Agent failure KINDS that are NOT codebase bugs — environmental, user-
-// correctable, or self-healing. Tracked as `agent_failed` (observability — the
-// reliability funnel) but NOT raised as exceptions, so they never open an
-// issue. Everything else (protocol-error, spawn failures, unknown kinds) is a
-// fix-worthy fault that SHOULD reach the tracker. Keep in step with isRecoverable()
-// + auth handling in ../bridge/failure.ts.
+// Keep user-correctable and recoverable faults out of the issue tracker, including the kinds handled by isRecoverable() in ../bridge/failure.
 const NON_BUG_AGENT_FAILURE_KINDS = new Set<string>([
   "auth-required",
   "session-expired",
@@ -438,24 +372,17 @@ const NON_BUG_AGENT_FAILURE_KINDS = new Set<string>([
   "cancelled",
 ]);
 
-/** Reduce a failure's technical message to a short, stable, non-PII hash.
- *  The UI shows simplified copy ("Cursor Agent: Agent error") and the raw
- *  detail lives only in engine/console logs — this hash keeps field failures
- *  DISTINGUISHABLE in PostHog (two different faults behind the same
- *  kind:stage get different hashes; recurrences of one fault group together)
- *  without ever shipping the message text (which can carry paths).
- *  Volatile fragments (paths, ids, pids, ports, durations) are normalized
- *  away first so the same fault hashes identically across occurrences. */
+/** Normalize volatile fragments before hashing so repeated failures group without exporting the raw message. */
 function failureMessageHash(message: string | undefined): string | undefined {
   if (!message) return undefined;
   const normalized = message
     .toLowerCase()
     .replace(/(?:[a-z]:)?[\\/][^\s'"()]*/gi, "<path>") // abs/rel paths
-    .replace(/[0-9a-f]{8,}/gi, "<id>") // uuids / long hex ids
-    .replace(/\d+/g, "#") // pids, ports, counts, ms
+    .replace(/[0-9a-f]{8,}/gi, "<id>")
+    .replace(/\d+/g, "#")
     .replace(/\s+/g, " ")
     .trim();
-  // FNV-1a 32-bit — cheap, deterministic, no crypto import needed.
+  // Keep the hash stable so existing failure groups remain comparable.
   let h = 0x811c9dc5;
   for (let i = 0; i < normalized.length; i++) {
     h ^= normalized.charCodeAt(i);
@@ -464,16 +391,6 @@ function failureMessageHash(message: string | undefined): string | undefined {
   return (h >>> 0).toString(16).padStart(8, "0");
 }
 
-/** An agent operation failed. `stage` (newSession / loadSession / prompt / …)
- *  is the "where" and `kind` is the "why" — together they are the locks.
- *  `message` (when present) is hashed — never sent raw — so simplified UI
- *  copy doesn't reduce diagnosability in the field.
- *
- *  Two lanes — this is the "capture all agent errors, but only real bugs become
- *  tracked issues" optimization:
- *   • EVERY failure → `agent_failed` event (cheap, observability/funnel).
- *   • Only a fix-worthy fault (kind not in NON_BUG_AGENT_FAILURE_KINDS) → ALSO
- *     an exception → error tracking → the issue-tracker bridge. */
 export function trackAgentFailed(args: {
   agentId: string;
   failure: Pick<AgentFailure, "kind" | "stage"> &
@@ -487,9 +404,7 @@ export function trackAgentFailed(args: {
     message_hash: messageHash,
   });
   if (!NON_BUG_AGENT_FAILURE_KINDS.has(args.failure.kind)) {
-    // Built from enums + the message HASH only — no user content, so no
-    // scrubbing needed. `name` carries the kind so error tracking groups into
-    // one issue per fault kind → one tracked issue per kind, not per occurrence.
+    // Put the failure kind in the exception name so error tracking groups matching faults.
     const err = new Error(
       `agent failure: ${args.failure.kind} @ ${args.failure.stage ?? "unknown"}`,
     );
@@ -507,11 +422,7 @@ export function trackAgentFailed(args: {
   }
 }
 
-/** Map a model name to an OpenRouter-style provider slug so PostHog can
- *  look up pricing and AUTO-COMPUTE cost from tokens. PostHog matches on
- *  `$ai_provider` + `$ai_model`, so the provider must be the real LLM
- *  vendor ("openai" / "anthropic" / …) — NOT the Zeros agent id.
- *  Returns undefined for unknown models (PostHog then can't price it). */
+/** PostHog pricing expects the model vendor, not the Zeros agent ID. */
 function inferProvider(model: string | null | undefined): string | undefined {
   if (!model) return undefined;
   const m = model.toLowerCase();
@@ -534,15 +445,7 @@ function inferProvider(model: string | null | undefined): string | undefined {
   return undefined;
 }
 
-/** Emit PostHog's native `$ai_generation` event so the built-in LLM
- *  Analytics dashboards (cost / tokens / latency by model & provider)
- *  populate. We send the real `$ai_provider` (inferred from the model)
- *  so PostHog auto-computes cost from its pricing DB for agents that
- *  don't report cost (Codex/Cursor); when we DO have a reported
- *  cost (Claude) we pass it and PostHog uses it directly.
- *  `agent_id` is a separate property for per-agent breakdowns;
- *  `$ai_trace_id` groups a session's turns. Skipped when there's
- *  nothing to chart. Metadata only — no prompt/response content. */
+/** Send only generation metadata; trace IDs group turns without sending prompts or responses. */
 export function trackAiGeneration(args: {
   agentId: string;
   provider?: string | null;
@@ -583,8 +486,7 @@ export function trackAiGeneration(args: {
   });
 }
 
-/** Absolute snapshots: analytics must select the latest revision per turn,
- * never sum revisions. Continuations do not emit another $ai_generation. */
+/** Usage snapshots are absolute: use the latest revision per turn, never sum revisions or emit another generation for a continuation. */
 const usageRevisions = new Map<string, number>();
 export function trackAgentTurnUsage(args: {
   executionId: string;

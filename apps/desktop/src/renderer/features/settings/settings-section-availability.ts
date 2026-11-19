@@ -1,10 +1,8 @@
-/** Shared by Settings navigation and command discovery. Internal entries never
- * enter the public command catalog, even when the Settings rail admits them. */
+// Shared rail and command palette gates; the palette catalog separately omits internal entries.
 export interface SettingsSectionAvailability {
   local: boolean;
   cloudEnabled: boolean;
   terminalAgentsEnabled: boolean;
-  /** `computerUseSectionOpen`: the only rows an organization's General has. */
   computerUseSectionActive: boolean;
   simulatorsActive: boolean;
   internalUser: boolean;
@@ -18,8 +16,6 @@ export function isSettingsSectionAvailable(
     (context.local
       ? id !== "cloud-computer"
       : [
-          // An organization's General holds only this Mac's computer use and
-          // privacy controls.
           "general",
           "providers",
           "integrations",

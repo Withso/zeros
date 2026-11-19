@@ -1,15 +1,4 @@
-// ──────────────────────────────────────────────────────────
-// Design preview store — IndexedDB backend for canvas pictures
-// ──────────────────────────────────────────────────────────
-//
-// The Design source is the authority. This store only keeps encoded pictures
-// of saved frames so a reopened canvas paints before anything renders. It
-// lives in Chromium's session profile, which Electron main relocates to the
-// purgeable OS cache directory (`relocateChromiumCache`): losing it costs one
-// render per frame, never data. Policy (keys, bounds, eligibility) lives in
-// features/design-workspace/state/design-frame-previews.ts; this file only
-// moves records.
-// ──────────────────────────────────────────────────────────
+// The Chromium profile is purgeable; losing saved preview pictures rerenders from untouched Design source.
 
 import { createIndexedDbRecordStore } from "./indexeddb-record-store";
 
@@ -18,12 +7,10 @@ export interface DesignPreviewRecord {
   blob: Blob;
 }
 
-/** Small metadata row loaded once per session to enforce bounds, LRU order
- * and stale fallbacks without reading any picture bytes. */
+/** Read the metadata index for bounds and eviction without loading image bytes. */
 export interface DesignPreviewIndexEntry {
   key: string;
-  /** Owner scope, workspace, directory, frame and theme; one picture per
-   * level is kept for each. */
+  /** Owner, workspace, directory, frame and theme; one record per preview level. */
   frameKey: string;
   workspaceId: string;
   level: "mini" | "thumbnail" | "overview" | "detail";
@@ -66,8 +53,6 @@ export function isDesignPreviewIndexEntry(value: unknown): value is DesignPrevie
   );
 }
 
-/** A page open reads its pictures in one transaction over one long-lived
- * connection (indexeddb-record-store.ts owns its lifecycle). */
 export function createIndexedDbDesignPreviewStore(
   factory: IDBFactory | undefined = typeof indexedDB === "undefined"
     ? undefined

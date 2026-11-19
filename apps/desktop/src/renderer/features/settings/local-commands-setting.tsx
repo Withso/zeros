@@ -1,9 +1,7 @@
 import { Switch } from "../../shared/ui/primitives/switch";
 import { SettingsGroup, SettingsRow } from "./settings-ui";
 
-/** Device-local and never synced: it lets this Mac run commands from the
- * person's own cloud agents without asking, only when this Mac is the chat's
- * own target. A command sent here explicitly from another Mac always asks. */
+// This device-only preference waives approval only when this Mac is the chat's default target.
 export function LocalCommandsSetting({ checked, disabled = false, onCheckedChange }: { checked: boolean; disabled?: boolean; onCheckedChange(checked: boolean): void }) {
   return (
     <SettingsGroup title="Advanced">

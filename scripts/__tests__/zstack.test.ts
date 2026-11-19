@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { parseSkill, renderZstackFiles, zstackEntry, zstackSkills } from "../zstack/render.mjs";
 import { readEvalCases, validateEvalCases } from "../zstack/evals.mjs";
@@ -41,6 +43,27 @@ describe("zstack pack", () => {
     expect(zstackEntry("devin")).toBe("agents/zstack/skills/zstack/SKILL.md");
     expect(zstackEntry("portable")).toBe(zstackEntry("devin"));
     expect(() => zstackEntry("unknown-host")).toThrow("zstack_input_invalid");
+  });
+
+  it("applies concise-comment guidance on ordinary task and feature routes", () => {
+    const files = renderZstackFiles(root);
+    const guidance = ["comment-check each diff", "even without `zstack-comments`", "functional/generated/tool/legal comments",
+      "type/lint directives", "security/lifecycle/concurrency/compatibility rationale"];
+    const entries = ["portable", "devin"].map(host => readFileSync(join(root, zstackEntry(host)), "utf8"));
+    for (const host of ["claude", "codex", "cursor"]) {
+      const path = zstackEntry(host), rendered = files[path];
+      expect(rendered).toBeDefined();
+      if (rendered === undefined) throw new Error(`Missing rendered Zstack entry: ${path}`);
+      entries.push(rendered, readFileSync(join(root, path), "utf8"));
+    }
+    for (const entry of entries) {
+      for (const phrase of guidance) expect(entry.toLowerCase()).toContain(phrase);
+    }
+    const feature = readFileSync(join(root, "agents/zstack/playbooks/feature.md"), "utf8").replace(/\s+/g, " ").toLowerCase();
+    for (const phrase of ["cold-scan added or changed comments", "functional, generated, tool and legal comments",
+      "type and lint directives", "security, lifecycle, concurrency and compatibility rationale"])
+      expect(feature).toContain(phrase);
+    expect(feature).toContain("whether or not you invoke `zstack-comments`");
   });
 
   it("routes review and end-of-loop learning without implicit helper invocation", () => {

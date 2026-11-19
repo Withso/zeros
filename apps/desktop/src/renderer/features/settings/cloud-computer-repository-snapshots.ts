@@ -21,8 +21,7 @@ function validInstalled(value: unknown): value is Installed {
     (row.defaultBranch === null || typeof row.defaultBranch === "string" && row.defaultBranch.length <= 255));
 }
 
-/** This is presentation cache, never create authorization. Restored snapshots
- * render synchronously and revalidate in the background against the same owner. */
+// Restore presentation for this account and organization, never authorization to create.
 export class CloudComputerRepositorySnapshots {
   private rows = new Map<string, Snapshot>();
   constructor(private storage: Pick<Storage, "getItem" | "setItem"> | undefined, private backend: string) {
@@ -41,8 +40,7 @@ export class CloudComputerRepositorySnapshots {
   }
   get(key: string): Snapshot | undefined {
     const row = this.rows.get(key);
-    // Revalidation starts immediately after a cold renderer launch, with the
-    // last confirmed rows already visible. Never extend server freshness.
+    // Mark restored rows stale so they paint immediately but never skip revalidation.
     return row ? { data: row.data, updatedAt: 0 } : undefined;
   }
   set(key: string, snapshot: Snapshot): void {
@@ -52,8 +50,7 @@ export class CloudComputerRepositorySnapshots {
     while (this.rows.size > MAX_OWNERS) this.rows.delete(this.rows.keys().next().value!);
     const serialize = () => JSON.stringify({ backend: this.backend, entries: [...this.rows] });
     let serialized = serialize();
-    // Keep writes inside the recovery budget too. Catalogs can be fetched
-    // again, so evict the oldest owner before discarding the newest snapshot.
+    // Evict oldest owners first rather than write a snapshot too large to restore.
     while (serialized.length > MAX_STORAGE_BYTES && this.rows.size > 0) {
       this.rows.delete(this.rows.keys().next().value!);
       serialized = serialize();

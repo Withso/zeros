@@ -160,7 +160,7 @@ describe("metadata-only Design catalog wire", () => {
     expect(designCatalogReadSchema.safeParse({ ...request, limit: DESIGN_CATALOG_WIDE_BATCH_ENTRIES + 1 }).success).toBe(false);
   });
   it("bounds encoded UTF-8 bytes independently of descriptor count", () => {
-    // Past the wide batch's 1 MB: a wide batch may hold more than 256 KB.
+    // The descriptors plus their wire overhead exceed the 1 MiB wide-batch cap.
     const frames = Array.from({ length: 256 }, (_, i) => ({
       ...batch.frames[0],
       id: `f${i}`,
@@ -180,8 +180,7 @@ describe("metadata-only Design catalog wire", () => {
 
 describe("a component record past the declaration limits", () => {
   const oversize = Array.from({ length: DESIGN_COMPONENT_RECORD_LIMITS.elements + 1 }, () => ({ tag: "zd-note", attributes: [] }));
-  // The longest file and option name authored input can reach: a 64-character page folder, a
-  // 255-character file name (the file system's longest), and a 32-character option name.
+  // Use the authored folder and option maxima plus a 255-character filename, a common filesystem limit.
   const longestFile = `${"p".repeat(64)}/${"f".repeat(250)}.html`;
   const longestOption = `o${"-a".repeat(15)}0`;
 

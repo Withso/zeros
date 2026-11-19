@@ -8,8 +8,7 @@ import { isElectron, nativeInvoke, nativeListen } from "./runtime";
 
 export type { LocalCommandApprovalView, LocalCommandDecision };
 
-/** This Mac's device headers for a prompt send, or none (not registered yet,
- * or not the Mac app). Never guessed: all three or nothing. */
+// Use this Mac's registered device headers as a set; never infer missing identity.
 type LocalCommandDeviceInfo = { deviceId: string; headers: Record<string, string> } | null;
 export async function localCommandDevice(): Promise<LocalCommandDeviceInfo> {
   if (!isElectron()) return null;
@@ -17,7 +16,6 @@ export async function localCommandDevice(): Promise<LocalCommandDeviceInfo> {
   catch { return null; }
 }
 
-// ── Approvals raised by main for this Mac ───────────────────────────────
 let approvals: readonly LocalCommandApprovalView[] = [];
 let opened: string | null = null;
 const deciding = new Set<string>();
@@ -26,7 +24,7 @@ const changed = () => { for (const listener of listeners) listener(); };
 const subscribe = (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; };
 let started: Promise<() => void> | undefined;
 
-/** Main is the source of truth; this mirrors its list and the request a notification opened. */
+// Subscribe to main before hydrating approvals; main owns their state.
 export function startLocalCommandApprovals(): void {
   if (started || !isElectron()) return;
   const accept = (next: readonly LocalCommandApprovalView[]) => {
@@ -49,26 +47,26 @@ const openedSnapshot = () => opened;
 export function useOpenedLocalCommand(): string | null { return useSyncExternalStore(subscribe, openedSnapshot, openedSnapshot); }
 export function isDecidingLocalCommand(requestId: string): boolean { return deciding.has(requestId); }
 
-/** Relays the person's choice; main accepts it once, for a request it raised. */
+// Main can accept a decision only for a pending request it owns.
 export async function decideLocalCommand(requestId: string, decision: LocalCommandDecision): Promise<void> {
   if (deciding.has(requestId)) return;
   deciding.add(requestId); changed();
   try { await nativeInvoke("local_commands_decide", { requestId, decision }); }
   catch (error) { deciding.delete(requestId); changed(); throw error; }
 }
-/** Asks main for a macOS notification when the request's workspace is not open here. */
+// Use an OS notification when the approval's workspace is not open here.
 export function notifyLocalCommand(requestId: string): void { void nativeInvoke("local_commands_notify", { requestId }).catch(() => {}); }
 
-// ── Always allow (device-local, main-owned) ─────────────────────────────
+// Always-allow is device-local, not a workspace setting.
 export const getAlwaysAllowLocalCommands = () => nativeInvoke<boolean>("local_commands_always_get");
 export const setAlwaysAllowLocalCommands = (enabled: boolean) => nativeInvoke<boolean>("local_commands_always_set", { enabled });
 
-// ── Connected Macs (no VM wake) ─────────────────────────────────────────
+// List connected Macs without waking the workspace.
 export async function listWorkspaceMacs(workspaceId: string): Promise<readonly LocalCommandMac[]> {
   const { macs } = await cloudAccountRequest(`/v1/cloud-v2/workspaces/${z.string().uuid().parse(workspaceId)}/macs`, LocalCommandMacsReplySchema, undefined, { syncField: true });
   return macs;
 }
-/** Connect is issued by this Mac for itself (main adds the device headers). */
+// Connect only this Mac; main supplies its registered credentials.
 export async function connectThisMac(workspaceId: string) { return LocalCommandConnectReplySchema.parse(await nativeInvoke("local_commands_connect", { workspaceId })); }
 export async function disconnectMac(workspaceId: string, deviceId: string) {
   return LocalCommandDisconnectReplySchema.parse(await nativeInvoke("local_commands_disconnect", { workspaceId, deviceId }));

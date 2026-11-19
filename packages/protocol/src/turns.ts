@@ -1,4 +1,3 @@
-// Recorded file deltas and metadata shared by Local, cloud and the renderer.
 // Optional transcript summaries let sleeping cloud history render without a VM read.
 
 export type TurnFileStatus = "added" | "modified" | "deleted" | "renamed";
@@ -23,8 +22,7 @@ export interface TurnModelUsage {
   costUsd?: number;
 }
 
-/** Per-turn token/cost usage (mirrors engine db/turns.TurnUsageJson).
- *  reasoningTokens is never rendered (2026-07-13 decision). */
+/** This wire shape mirrors the engine's persisted TurnUsageJson. */
 export interface TurnUsageInfo {
   accountingVersion?: 1;
   revision?: number;
@@ -56,12 +54,10 @@ export interface TurnInfo {
   files: TurnFile[];
   /** Tokens/cost this turn billed (null when none was reported). */
   usage?: TurnUsageInfo | null;
-  /** Full SHAs of the commits this turn's own tools made, each resolved in the
-   *  repository when the turn settled. Absent on rows recorded before. */
+  /** Full SHAs from this turn's own tools, resolved when it settled; legacy rows omit this field. */
   commits?: string[];
 }
 
-/** Which chat's turn made a commit (the Review tab's commit and Activity links). */
 export interface TurnCommitLink {
   sha: string;
   chatId: string;

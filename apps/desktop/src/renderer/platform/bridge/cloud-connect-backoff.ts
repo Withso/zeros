@@ -1,7 +1,4 @@
-// §14.5: one connect backoff per exact account + organization + workspace, shared by every opener (the runtime
-// client's reconnects, the lifecycle's re-attach, explicit opens), so a 503 from POST connect or a relay 1013 is
-// never retried on each catalog change. The delay doubles per failure with jitter, grows to at least 30 s, and is
-// cleared only by a ready connection.
+// Share backoff by account and workspace so catalog changes cannot retry a refused connection early; only readiness resets it.
 import { workspaceAccessScope } from "../team-sharing-registry";
 
 const BASE_MS = 1_000, CAP_MS = 60_000, QUIET_MS = 60_000, MAX_RECORDS = 256;
@@ -12,7 +9,6 @@ export function cloudConnectBackoffKey(target: { organizationId: string; workspa
   return `${workspaceAccessScope() ?? ""}|${target.organizationId}|${target.workspaceId}`;
 }
 
-/** Records one failed connect and returns the wait before the next attempt. */
 export function recordCloudConnectFailure(key: string, now = Date.now()): number {
   const previous = records.get(key);
   const failures = (previous?.failures ?? 0) + 1;
@@ -28,13 +24,12 @@ export function cloudConnectWaitMs(key: string, now = Date.now()): number {
   return Math.max(0, (records.get(key)?.notBefore ?? 0) - now);
 }
 
-/** A failing connect stays quiet (no toast) until it has kept failing for a minute. */
+/** Suppress user-facing errors during the first minute of continuous failures. */
 export function cloudConnectFailureQuiet(key: string, now = Date.now()): boolean {
   const record = records.get(key);
   return !!record && now - record.firstFailureAt < QUIET_MS;
 }
 
-/** Whether connects to this key have failed since its last ready connection. */
 export function cloudConnectFailing(key: string): boolean {
   return records.has(key);
 }

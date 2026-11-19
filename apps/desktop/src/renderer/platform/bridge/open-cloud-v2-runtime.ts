@@ -1,7 +1,3 @@
-// Opens a cloud v2 workspace for the shared runtime client: one control-plane
-// relay socket to the workspace worker, authenticated by a short-lived ticket.
-// The worker answers the same bridge frames as a Local engine, so the shared
-// UI needs no cloud-only agent, history or event layer.
 import type { CloudV2ConnectionTarget } from "@zeros/protocol/cloud-runtime-connection";
 import { connectCloudV2Workspace } from "../cloud-v2";
 import { ControlPlaneError } from "../../features/team/control-plane";
@@ -20,8 +16,7 @@ import { cloudConnectBackoffKey, cloudConnectWaitMs, recordCloudConnectFailure }
 import { setRelayPresence } from "./relay-presence";
 
 const RELAY_PRESENCE_FEATURE = "relay-presence-v1";
-/** The control plane holds this ticket's relay socket until the worker is ready (bounded), so a waking workspace costs
- * one connect: churn before ready ends the open instead of minting another ticket. */
+/** With connect-ready-v1, the control plane holds a bounded socket open while its worker becomes ready. */
 const CONNECT_READY_FEATURE = "connect-ready-v1";
 
 const CONNECT_TIMEOUT_MS = 3 * 60_000;
@@ -40,7 +35,7 @@ function connectionWait(assertCurrent: () => void, deadline: number, signal?: Ab
   const off = subscribeCloudWorkspaces(() => {
     try { check(); } catch (error) { controller.abort(error); }
   });
-  // An unbounded wait (Infinity) arms no timer: an over-large delay would fire at once.
+  // Do not arm a timer for Infinity; an oversized delay fires immediately.
   const timer = Number.isFinite(deadline) ? setTimeout(timeout, Math.max(0, deadline - performance.now())) : undefined;
   signal?.addEventListener("abort", abort, { once: true });
   if (signal?.aborted) abort();
@@ -63,8 +58,7 @@ function transientTicketFailure(error: unknown): boolean {
   return error instanceof TypeError || error instanceof DOMException && ["NetworkError", "TimeoutError"].includes(error.name);
 }
 
-/** §14.5: waits out this workspace's shared connect backoff before any POST connect, bounded only by the open's own
- * deadline and cancellation (not the 30 s ticket window, which a grown backoff would always exceed). */
+/** Shared backoff waits outside the ticket window but still respects the open deadline. */
 async function backoffGate(key: string, assertCurrent: () => void, deadline: number, signal?: AbortSignal): Promise<void> {
   const delay = cloudConnectWaitMs(key);
   if (delay <= 0) return;
@@ -93,7 +87,6 @@ async function ticketTarget(
       } catch (error) {
         waiting.check();
         if (!transientTicketFailure(error)) throw error;
-        // Every transient failure (503 included) grows the shared backoff; only a ready connection resets it.
         const delay = recordCloudConnectFailure(backoff);
         if (attempt + 1 >= TICKET_ATTEMPTS || performance.now() + delay >= windowEnd) throw error;
         let timer: ReturnType<typeof setTimeout> | undefined;
@@ -105,7 +98,7 @@ async function ticketTarget(
   return {
     kind: "cloud",
     channel: "v2-websocket",
-    // The workspace is its own runtime identity in v2; there are no generations.
+    // V2 uses the workspace ID as the runtime identity and a fixed generation.
     runtimeId: target.workspaceId,
     organizationId: target.organizationId,
     workspaceId: target.workspaceId,
@@ -139,9 +132,7 @@ function connected(client: RuntimeClient, signal: AbortSignal): Promise<void> {
   });
 }
 
-/** Connecting starts a stopped VM, so only an explicit open may do that.
- * Passive warm-ups (hover, a retained tab) leave it stopped; its history is
- * read from the control plane meanwhile. */
+/** Only explicit opens may wake a VM; passive readers use control-plane history while it is stopped. */
 export async function openCloudV2Runtime(
   target: CloudWorkspaceTarget,
   options?: { signal?: AbortSignal; wake?: boolean },
@@ -164,19 +155,18 @@ export async function openCloudV2Runtime(
   assertCurrent();
   let sequence = 1;
   let opened = false;
-  // §14.7: one instance id per opened peer, in memory only; it binds this peer's connect and renewal tickets.
+  // Keep one memory-only instance ID to bind this peer's initial and renewal tickets.
   const clientInstance = crypto.randomUUID();
   const { features, ...ticket } = await ticketTarget(target, sequence, options?.wake === true, assertCurrent, deadline, signal, clientInstance);
   assertCurrent();
-  // R1 relay-presence-v1: an admission with the feature makes this live connection count as presence.
   let presenceAdmitted = features?.includes(RELAY_PRESENCE_FEATURE) === true;
   const readyHeld = features?.includes(CONNECT_READY_FEATURE) === true;
   const beforeReady = new AbortController();
   let endPresence: (() => void) | undefined;
   const client = new RuntimeClient(ticket, {
-    // D2: a 4001 access_revoked ends access only once the workspace document confirms it.
+    // A relay 4001 revocation is terminal only after the workspace document confirms it.
     confirmCloudAccessEnded: workspace => confirmCloudWorkspaceAccessEnded(workspace),
-    // §14.7: a renewal ticket for the SAME socket: never wakes, same instance, a bearer newer than the one presented.
+    // Renew the same socket without waking the VM, using a bearer newer than the one presented.
     renewCloudConnectionTicket: async notExpiringBefore => {
       assertCurrent();
       const presented = { expiresAt: null as number | null };
@@ -185,19 +175,15 @@ export async function openCloudV2Runtime(
       assertCurrent();
       return { ticket: minted.protocols[1].slice("ticket.".length), tokenExpiresAt: presented.expiresAt };
     },
-    // Each reconnect presents a fresh ticket. A reconnect after a laptop wake,
-    // network drop or control-plane deploy is not explicit work, so it never
-    // restarts a VM that stopped meanwhile. Fresh user input owns the next wake.
+    // Network recovery is not user intent and must not wake a VM that stopped meanwhile.
     refreshCloudConnectionTarget: async () => {
       assertCurrent();
       if (readyHeld && !opened) {
-        // connect-ready-v1: the one socket was the whole wait. Its loss before ready ends this open (no new connect
-        // while the workspace is still waking); fresh user input owns the next attempt.
+        // With connect-ready-v1, losing the socket before ready ends this open instead of minting another ticket.
         const error = new Error("The cloud workspace connection ended before it was ready. Try again.");
         beforeReady.abort(error);
         throw error;
       }
-      // After the open, the ticket window starts once the shared backoff has passed (Infinity: no outer deadline).
       const { features: renewed, ...refreshed } = await ticketTarget(target, sequence + 1, false, assertCurrent, opened ? Infinity : deadline, signal, clientInstance);
       sequence = refreshed.connectionSequence;
       presenceAdmitted = renewed?.includes(RELAY_PRESENCE_FEATURE) === true;
@@ -222,9 +208,7 @@ export async function openCloudV2Runtime(
     if (!workspace?.path || !workspace.path.startsWith("/"))
       throw new Error("Cloud workspace did not confirm its checkout");
     acceptCloudEngineWorkspace(target, workspace, account);
-    // The worker answered, so the control plane already has it running. Read
-    // that now rather than at the catalog's next poll (every 2 s, and paused
-    // while the window is hidden), which left Running ~25 s late on Alpha.
+    // The worker has answered; refresh the pending catalog state without waiting for its next poll.
     if (isCloudWorkspaceLifecyclePending(cloudWorkspaceDocument(target))) void refreshCloudWorkspace(target).catch(() => {});
     opened = true;
     return {
@@ -236,7 +220,7 @@ export async function openCloudV2Runtime(
     };
   } catch (error) {
     release();
-    // connect-ready-v1: name why the open ended (the socket was lost before ready), not a generic cancellation.
+    // Surface a lost readiness socket rather than the generic cancellation it triggered.
     throw beforeReady.signal.aborted ? beforeReady.signal.reason : error;
   } finally { waiting.dispose(); }
 }

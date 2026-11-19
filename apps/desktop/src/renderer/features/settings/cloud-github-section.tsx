@@ -86,7 +86,7 @@ export function CloudGithubSection({
       }
     }
   };
-  // R1: the sign-in finishes in the browser; re-read when the person comes back (focus), else every 60 s.
+  // Authorization finishes in the browser; refresh when the app regains focus.
   useFocusRefresh(surfaceActive && !!waiting, () => {
     if (!waiting || Date.now() >= waiting.expires) return;
     void cloudGithubConnectionCache
@@ -135,8 +135,7 @@ export function CloudGithubSection({
       install,
     );
     if (!current()) return;
-    // Publish this attempt before polling so an older rendered snapshot cannot
-    // be mistaken for completion of the browser authorization.
+    // Publish the attempt before waiting so a stale generation cannot signal completion.
     const fresh = await readCloudGithubConnection(userId, organizationId);
     if (!current()) return;
     cloudGithubConnectionCache.setData(key, fresh);
@@ -189,7 +188,6 @@ export function CloudGithubSection({
               aria-label={label(method)}
               className={cn(
                 "border-border2 flex flex-col gap-3 rounded-md border p-3.5",
-                // Chosen fills and keeps its resting edge.
                 selected ? "bg-bg1-hover" : "bg-bg1",
               )}
             >

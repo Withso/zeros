@@ -1,9 +1,4 @@
 import type { ChangesHistory } from "@zeros/protocol/changes-history";
-// Renderer façade for git, GitHub, detach and cross-tool operations. Most route
-// through the engine WorkspaceService; a few use native IPC. Engine-backed reads
-// never synthesize empty success: a disconnected transport is not proof that a
-// repository has no data. Types mirror apps/desktop/src/engine/git/index.ts so
-// the React bundle never imports the engine.
 
 import { isNativeRuntime, nativeInvoke, nativeListen } from "./runtime";
 import type {
@@ -167,8 +162,6 @@ import type { DesignTransaction } from "@zeros/design-core";
 import type { DesignStyleProvenance } from "@zeros/design-web";
 import type { DesignRuntimeMatchedDeclaration } from "@zeros/protocol/design-runtime";
 
-// Re-export the publish types so the publish dialog consumes them via the
-// native/git façade rather than reaching into the bridge module.
 export type {
   GithubOwner,
   GithubRepoAccess,
@@ -238,20 +231,15 @@ export type ConflictState =
 
 export interface Workspace {
   id: string;
-  /** Optional for rolling compatibility with an older engine. Missing means
-   * code; current engines always return an explicit kind. */
+  /** Missing kind from an older engine means Code. */
   kind?: "code" | "design";
-  /** Semantic tenant owner. Null/missing rows predate organizations and belong
-   * to Personal; current engines always return an explicit nullable value. */
+  /** Null or omitted owner means Personal. */
   organizationId?: string | null;
-  /** Where execution is provisioned. Optional only for rolling compatibility;
-   * legacy rows are local. */
+  /** Omitted placement on a legacy row means Local. */
   placement?: "local" | "cloud";
-  /** Permanent number within its owner (`w-310`), never reused. Absent from an
-   * older engine or control plane. */
+  /** Permanent within the owner; older engines and control planes omit it. */
   number?: number | null;
-  /** The first title one of its chats received; null is "Untitled". Absent
-   * (undefined) from an older engine, which still names it by its branch. */
+  /** Null means Untitled; omission from an older engine keeps the branch label. */
   title?: string | null;
   repoSlug: string;
   repoRoot: string;
@@ -262,43 +250,31 @@ export interface Workspace {
   createdAt: number;
   archivedAt: number | null;
   stashRef: string | null;
-  /** Exact branch-tip recovery anchor captured by archive. Optional only for
-   * rolling compatibility with engines predating the lifecycle journal. */
+  /** Branch-tip recovery anchor; absent before the lifecycle journal. */
   archivedHead?: string | null;
-  /** Durable whole-tree archive checkpoint ref target. Optional only for older
-   * engine rows; current engines return null or a commit OID. */
+  /** Durable whole-tree snapshot; older engines can omit it. */
   archiveSnapshot?: string | null;
   prNumber: number | null;
   prState: PrState | null;
   prUrl: string | null;
   agentId: string | null;
   lastActiveAt: number | null;
-  /** Background setup-script state: "running" while the setup PTY is live, then
-   *  "passed"/"failed" on exit — or "stopped" when the run ended without a
-   *  result (Stop setup, or an engine quit mid-run). Null/undefined when no
-   *  setup is configured or it never ran. Surfaced in the Setup tab. */
+  /** Stopped means the run ended without a result; null or omitted means no known run. */
   setupState?: "running" | "passed" | "failed" | "stopped" | null;
-  /** Stamped by the engine at list/get time — `false` means the
-   *  worktree folder at `path` is gone from disk and the renderer
-   *  should swap in the "Worktree missing" placeholder. */
+  /** False confirms the checkout is missing; an omitted probe is not proof. */
   present?: boolean;
-  /** Exact "anything worth a PR?" flag from the All Changes net comparison.
-   *  Present ONLY when the list was fetched with `withChanges` (Dashboard);
-   *  undefined otherwise. Gates Create PR on cards + the PR status row. */
+  /** Known only for withChanges reads; counts the All Changes net comparison. */
   hasChanges?: boolean;
 }
 
-/** Setup tab payload from `workspace.setupInfo`. */
 export interface WorkspaceSetupInfo {
-  /** Does the repo have a setup command configured (even if it never ran)? */
   hasCommand: boolean;
-  /** The command (most-recent run's, else the configured one), or null. */
+  /** Prefer the most recent run's command over today's settings. */
   command: string | null;
   /** Last-run state (persisted for a real workspace; in-memory for the trunk). */
   state: "running" | "passed" | "failed" | "stopped" | null;
-  /** Accumulated ANSI output of the most-recent run (empty after restart). */
+  /** Output is in memory and is lost on engine restart. */
   log: string;
-  /** True when older output was dropped from the head of `log`. */
   truncated: boolean;
 }
 
@@ -308,8 +284,7 @@ export interface FileChange {
   oldPath?: string;
 }
 
-/** Content-free row returned when a whole-tree patch is too large to
- * materialize safely. The selected file still loads its exact patch. */
+/** An oversized tree diff still returns file metadata so the exact selected patch can load separately. */
 export interface DiffFileSummary extends FileChange {
   additions: number;
   deletions: number;
@@ -356,27 +331,23 @@ export interface PR {
   headBranch: string;
   /** Absent when connected to an older engine build. */
   headSha?: string;
-  /** owner/name of the head branch's repository: another repository for a fork
-   *  pull request, null when GitHub no longer has it, absent on older engines. */
+  /** Forks use their head repository; null means unavailable, omission means an older engine. */
   headRepository?: string | null;
   mergeableState: string;
   isMergeable: boolean | null;
-  /** Commits the BASE has that this PR's head doesn't (GitHub compare).
-   *  Populated only when `mergeableState` is "behind"; null/undefined =
-   *  unknown. Powers the island's "Require branch to be up to date" count. */
+  /** Only populated for a behind PR; null or omission means unknown. */
   behindBy?: number | null;
   createdAt: number;
   updatedAt: number;
   mergedAt: number | null;
   /** Absent when connected to an older engine build. */
   mergeCommitSha?: string | null;
-  /** Pull-request totals from the host; absent from list reads and older
-   *  engines, where Review counts the published diff. */
+  /** If totals are absent, Review counts the published diff. */
   additions?: number;
   deletions?: number;
   changedFiles?: number;
   authorAvatarUrl?: string | null;
-  /** Review's rail; absent on older engines, empty when there are none. */
+  /** Distinguish missing metadata on older engines from a confirmed empty list. */
   requestedReviewers?: PrPerson[];
   assignees?: PrPerson[];
   labels?: PrLabel[];
@@ -412,29 +383,22 @@ export type CreateWorkspaceArgs = {
   copyPaths?: string[];
   symlinkPaths?: string[];
   agentId?: string;
-  /** Id reserved by workspacePrepareCreate — the engine reuses it instead of
-   *  generating a fresh identity. Must be paired with preparedBranch. */
+  /** Reuse the prepared ID only with its matching preparedBranch. */
   preparedId?: string;
-  /** Branch reserved by workspacePrepareCreate — shown as the workspace name
-   *  from frame one, so the create must reuse it verbatim. */
+  /** Reuse the reserved branch verbatim; the destination is already visible. */
   preparedBranch?: string;
-  /** Exact optimistic chat created for the prepared destination. Local-only;
-   * engine rollback deletes it if provisioning never publishes. */
+  /** Local rollback removes only this optimistic chat if creation never publishes. */
   optimisticChatId?: string;
 };
 
 export interface AuthStatusResult {
   authenticated: boolean;
   login?: string;
-  /** The account's GitHub photo (https only), for "you" in the Review tab. */
+  /** The avatar URL is optional and HTTPS-only. */
   avatarUrl?: string;
 }
 
-// Every DB-touching git, GitHub and workspace op runs on the engine over the
-// bridge, desktop included. The client queues while the local engine connects;
-// with no provider, rejecting keeps the caller's last confirmed snapshot rather
-// than publishing a false empty repository. DB-free ops (clone, inspectFolder,
-// worktree file listing, gh auth) keep native IPC.
+// Reject an absent bridge so callers keep the last confirmed snapshot, not a false empty result.
 function requireBridge(action: string) {
   const bridge = getActiveBridge();
   if (!bridge) {
@@ -449,15 +413,12 @@ export interface PreparedWorkspaceCreate {
   workspaceId: string;
   path: string;
   repoSlug: string;
-  /** The reserved branch name; it also names the workspace's folder. */
   branch: string;
-  /** The number reserved for the workspace (`w-<n>`); absent from older engines. */
+  /** Older engines omit the reserved workspace number. */
   number?: number;
 }
 
-/** Reserve the new workspace's identity and final path without touching disk,
- *  so the UI can navigate immediately without leaking an empty directory when
- *  a request disconnects. Pass both identity fields to workspaceCreate. */
+/** Reserve identity and path without touching disk so early navigation cannot leak an empty checkout. */
 export async function workspacePrepareCreate(args: {
   repoRoot: string;
   kind?: "code" | "design";
@@ -477,8 +438,7 @@ export async function workspaceCreate(
     requireBridge("create a workspace"),
     args as unknown as Record<string, unknown>,
   )) as CreatedWorkspace;
-  // Creation is the re-probe point for the topbar "Open in…" IDE list;
-  // fire-and-forget so it never adds latency.
+  // Refresh detected apps after creation without delaying navigation.
   void refreshDetectedOpenApps();
   return created;
 }
@@ -922,15 +882,11 @@ export async function workspaceList(
   args: {
     repoSlug?: string;
     status?: WorkspaceStatus;
-    /** true → archived only (History); false → non-archived (sidebar + Dashboard);
-     *  omit → all. */
+    /** Omit archive filtering entirely to observe both live and archived rows. */
     archived?: boolean;
-    /** true → engine stamps `hasChanges` per live row (git probes). The Dashboard
-     *  opts in; the sidebar does not, to keep its refetches git-free. */
+    /** Opt in only where exact change flags justify a Git probe per live workspace. */
     withChanges?: boolean;
-    /** Local façade option. Code-only consumers (notably coding-agent cwd
-     *  pickers) stay isolated from Design rows; public workspace stores opt in.
-     *  Never sent to the engine. */
+    /** Filter Design rows locally; do not send this option to the engine. */
     includeDesign?: boolean;
   } = {},
 ): Promise<Workspace[]> {
@@ -944,9 +900,7 @@ export async function workspaceListSnapshot(
   const bridge = requireBridge("list workspaces");
   const { includeDesign = false, ...bridgeArgs } = args;
   const snapshot = await bridgeWorkspaceListSnapshot(bridge, bridgeArgs);
-  // The engine prepends the synthetic `local-main` entry (the web list needs
-  // it); the desktop list returned real worktrees only, so strip it to preserve
-  // behavior — it's the sole entry with an empty repoSlug.
+  // An empty repoSlug identifies the synthetic trunk row used by the web list, not a managed worktree.
   return { ...snapshot, workspaces: snapshot.workspaces.filter(
     (workspace) =>
       workspace.repoSlug !== "" &&
@@ -954,9 +908,7 @@ export async function workspaceListSnapshot(
   ) };
 }
 
-/** Exact local-engine workspace lookup. Unlike workspace.list, this can see a
- * create-journal row that is deliberately hidden from live collections, which
- * lets timeout recovery distinguish "still provisioning" from "rolled back". */
+/** See create-journal rows hidden from lists to distinguish provisioning from rollback. */
 export async function workspaceGet(workspaceId: string): Promise<Workspace> {
   return bridgeWorkspaceGet(requireBridge("read the workspace"), workspaceId);
 }
@@ -974,9 +926,7 @@ export interface WorkspaceLifecycleStatus {
   startedAt: number | null;
 }
 
-/** Exact local lifecycle observation used after a request timeout. It exposes
- * both pre-journal in-flight work and any durable recovery phase, so callers
- * never infer completion or rollback from elapsed time. */
+/** After timeout, observe both pre-journal and durable work instead of inferring an outcome from elapsed time. */
 export async function workspaceLifecycleStatus(
   workspaceId: string,
 ): Promise<WorkspaceLifecycleStatus> {
@@ -990,8 +940,7 @@ export interface CreateWorkspaceFromBranchStatus extends WorkspaceLifecycleStatu
   workspace: Workspace | null;
 }
 
-/** Exact repo+branch timeout observation for creation flows that do not know
- * the engine-generated workspace id until the original response succeeds. */
+/** Recover by repo and branch when the lost create reply had the generated ID. */
 export async function workspaceCreateFromBranchStatus(args: {
   repoRoot: string;
   repoSlug: string;
@@ -1051,34 +1000,27 @@ export async function workspaceDeleteSnapshot(args: {
 export interface ArchiveResult {
   archivedAt: number;
   stashRef: string | null;
-  /** Present on current engines; optional during a rolling dev-engine reload. */
+  /** Older engines can omit the snapshot target. */
   archiveSnapshot?: string | null;
-  /** Present on current engines; optional while a renderer reconnects across a
-   * dev hot-reload to an older compatible engine. */
+  /** Older engines can omit the row; the caller updates its existing row from these fields. */
   workspace?: Workspace;
 }
 
 export interface RestoreResult {
   restoredAt: number;
-  /** Files left with conflict markers by checkpoint application. Empty when clean. */
+  /** Checkpoint conflicts are reported as paths even when restore succeeds. */
   conflicts: string[];
-  /** Where the worktree was restored to — differs from the original when the
-   *  folder was occupied and restore adapted to a fresh sibling. */
+  /** Use the returned path; an occupied destination can force a sibling checkout. */
   path: string;
-  /** The branch checked out after restore — differs from the original when it
-   *  was checked out elsewhere and restore forked a new branch. */
+  /** Use the returned branch; restore can fork when the original is already checked out. */
   branch: string;
-  /** User-facing notes about any adaptation restore made (occupied folder,
-   *  branch taken/missing). Empty on a clean restore to the original path+branch. */
+  /** User-facing recovery notes when restore changed the path or branch. */
   adaptations: string[];
-  /** Present on current engines; optional for rolling-upgrade compatibility. */
+  /** Older engines can omit the restored row. */
   workspace?: Workspace;
 }
 
-/** Archive a workspace: durably checkpoint tracked + untracked work, remove the
- *  worktree folder, and keep the branch + recovery anchor. The legacy
- *  `stashUncommitted` wire flag remains forced on so an older compatible engine
- *  can never silently discard agent-created files. */
+/** Default the legacy stashUncommitted wire flag on so older engines preserve uncommitted files. */
 export async function workspaceArchive(args: {
   workspaceId: string;
   stashUncommitted?: boolean;
@@ -1089,9 +1031,7 @@ export async function workspaceArchive(args: {
   });
 }
 
-/** Manually set a workspace's lifecycle status (right-click → Set status). Any of
- *  the five kanban states; the engine writes it directly (a manual set bypasses
- *  the auto-transition guards). */
+/** Manual changes bypass automatic status transition guards. */
 export async function workspaceSetStatus(args: {
   workspaceId: string;
   status: WorkspaceStatus;
@@ -1102,11 +1042,7 @@ export async function workspaceSetStatus(args: {
   );
 }
 
-/** Switch a workspace between code and design modes (right-click → Switch to
- *  … Mode). One workspace, two views: entering Design keeps the same checkout
- *  and code processes live. On first Design initialization the engine retires
- *  code-agent sessions admitted before that territory existed; Setup, runs,
- *  and human terminals do not block the view transition. */
+/** First Design entry retires earlier code-agent sessions on the same checkout, not Setup, runs, or human terminals. */
 export async function workspaceSetMode(args: {
   workspaceId: string;
   mode: "code" | "design";
@@ -1134,19 +1070,13 @@ export async function workspaceSetMode(args: {
   };
 }
 
-/** Restore (unarchive) a workspace. The engine adapts the path/branch when the
- *  originals are taken or missing. `adaptations` carries user-facing notes;
- *  `conflicts` reports any checkpoint-application conflict markers. */
 export async function workspaceRestore(args: {
   workspaceId: string;
 }): Promise<RestoreResult> {
   return bridgeWorkspaceRestore(requireBridge("restore the workspace"), args);
 }
 
-/** "Continue" after a merged PR (the island's Continue button): create + check
- *  out a fresh generated branch from the target branch in the SAME worktree
- *  and clear the workspace's PR fields. `mergedSha` is GitHub's exact merge
- *  generation and is used when the target cannot be fetched. */
+/** Continue in the same worktree; the exact mergedSha is the fallback when the target cannot be fetched. */
 export async function workspaceContinueOnNewBranch(args: {
   workspaceId: string;
   baseBranch?: string;
@@ -1164,8 +1094,7 @@ export async function workspaceCreateFromBranch(args: {
   organizationId: string | null;
   branchName: string;
   sourceTool?: DetectedTool;
-  /** Attach an existing PR when opening it by its head branch (so the Review
-   *  tab loads it and "Create draft PR" can't fire a duplicate). */
+  /** Attach the existing PR so the imported workspace cannot create a duplicate. */
   prNumber?: number;
   prUrl?: string | null;
 }): Promise<CreatedWorkspace> {
@@ -1177,9 +1106,7 @@ export async function workspaceCreateFromBranch(args: {
   return created;
 }
 
-/** Adopt an existing foreign worktree (at `worktreePath`) as a workspace of the
- *  project rooted at `repoRoot` (the primary checkout). No `git worktree add` —
- *  the worktree already exists; the engine just records a DB row for it. */
+/** Adopt the existing checkout without issuing git worktree add. */
 export async function workspaceAdoptExisting(args: {
   repoRoot: string;
   worktreePath: string;
@@ -1196,17 +1123,12 @@ export async function workspaceAdoptExisting(args: {
   return created;
 }
 
-/** Read a workspace's background-setup output + state (for the Setup tab).
- *  The trunk / "main" (synthetic `local:` workspace, no engine row) must pass
- *  `repoRoot` so the engine can resolve the repo's setup command. `statusOnly`
- *  returns just `state` (log/command placeholders) — for the tab-dot poller. */
+/** Pass repoRoot for rowless trunk setup; statusOnly skips command resolution and returns only meaningful state. */
 export async function workspaceSetupInfo(args: {
   workspaceId: string;
   repoRoot?: string;
   statusOnly?: boolean;
-  /** Keep `hasCommand`/`state` but drop the log payload — for pollers that
-   *  need to distinguish "no setup configured" from "setup ran" and never
-   *  render the output. */
+  /** For readers that need hasCommand but never render the log, use omitLog rather than statusOnly. */
   omitLog?: boolean;
 }): Promise<WorkspaceSetupInfo> {
   return bridgeWorkspaceSetupInfo(
@@ -1215,9 +1137,7 @@ export async function workspaceSetupInfo(args: {
   ) as Promise<WorkspaceSetupInfo>;
 }
 
-/** (Re)run a workspace's setup command in the background (Setup tab). Returns
- *  `{ ok, hasCommand }` — `hasCommand:false` means the repo has no setup to run.
- *  The trunk passes `repoRoot` (see workspaceSetupInfo). */
+/** Pass repoRoot for rowless trunk setup; hasCommand=false means no configured command ran. */
 export async function workspaceRerunSetup(args: {
   workspaceId: string;
   repoRoot?: string;
@@ -1228,7 +1148,7 @@ export async function workspaceRerunSetup(args: {
   ) as Promise<{ ok: boolean; hasCommand: boolean }>;
 }
 
-/** Stop a live setup run — records "stopped", not "failed" (Setup tab). */
+/** A user stop is recorded as stopped, not failed. */
 export async function workspaceStopSetup(args: {
   workspaceId: string;
   repoRoot?: string;
@@ -1239,12 +1159,9 @@ export async function workspaceStopSetup(args: {
   ) as Promise<{ ok: boolean }>;
 }
 
-/** One run action's engine-reported status (see RunManager). */
 export type WorkspaceRunActionStatus = RunActionStatusWire;
 
-/** Per-action run statuses (live + durable last-run), keyed by actionId. The
- *  caller passes the deterministic per-action session ids (runSessionId); the
- *  trunk passes `repoRoot` like the setup ops. */
+/** Use deterministic run session IDs to join live and persisted state; rowless trunk also needs repoRoot. */
 export async function workspaceRunInfo(args: {
   workspaceId: string;
   repoRoot?: string;
@@ -1253,9 +1170,7 @@ export async function workspaceRunInfo(args: {
   return bridgeWorkspaceRunInfo(requireBridge("read run status"), args);
 }
 
-/** Start (or focus) a run action. The engine resolves the command from the
- *  repo settings by actionId — the renderer never sends a command string.
- *  `alreadyRunning:true` = the action's PTY is still live; just focus it. */
+/** Pass actionId, never a shell command; the engine resolves the command from repo settings. */
 export async function workspaceStartRun(args: {
   workspaceId: string;
   repoRoot?: string;
@@ -1265,7 +1180,7 @@ export async function workspaceStartRun(args: {
   return bridgeWorkspaceStartRun(requireBridge("start run"), args);
 }
 
-/** Stop a live run action — records "stopped", not "failed" (Run tab). */
+/** A user stop is recorded as stopped, not failed. */
 export async function workspaceStopRun(args: {
   workspaceId: string;
   sessionId: string;
@@ -1273,8 +1188,7 @@ export async function workspaceStopRun(args: {
   return bridgeWorkspaceStopRun(requireBridge("stop run"), args);
 }
 
-/** Read a run action's buffered output. The terminal replays this when it
- *  mounts too late to attach to a fast-exiting run PTY (Run tab). */
+/** Replay the buffer when a run finishes before the terminal can attach. */
 export async function workspaceRunLog(args: {
   workspaceId?: string;
   sessionId: string;
@@ -1299,9 +1213,6 @@ export interface InitRepoResult {
 export async function workspaceInitRepo(
   args: InitRepoArgs,
 ): Promise<InitRepoResult> {
-  // Creating a local project is a desktop-host operation; remote relay clients
-  // have no direct host filesystem. Guard here so a stray non-native call fails
-  // with a clear message instead of the raw nativeInvoke error.
   if (!isNativeRuntime()) {
     throw new Error(
       "Creating a project is only available in the Zeros desktop app.",
@@ -1324,7 +1235,6 @@ export interface CloneRepoResult {
 export async function workspaceClone(
   args: CloneRepoArgs,
 ): Promise<CloneRepoResult> {
-  // Cloning targets the host filesystem — desktop-only (see workspaceInitRepo).
   if (!isNativeRuntime()) {
     throw new Error(
       "Cloning a repository is only available in the Zeros desktop app.",
@@ -1339,12 +1249,9 @@ export interface InspectFolderResult {
   originUrl: string | null;
   branch: string | null;
   sourceTool: DetectedTool;
-  /** Primary checkout (main working tree) of the repo — the parent repo for a
-   *  linked worktree, or the folder itself for a primary checkout. Null when
-   *  not a repo / unresolvable. */
+  /** A linked worktree reports its primary checkout, not its own folder. */
   mainRoot: string | null;
-  /** True when HEAD resolves to a commit. False for a non-repo OR a repo with
-   *  zero commits (unborn HEAD) — both need initializing before a worktree. */
+  /** An unborn HEAD cannot provision a worktree, even if the folder is already a repo. */
   hasCommits: boolean;
 }
 
@@ -1372,14 +1279,11 @@ export interface StatusResult {
   untracked: string[];
   conflicted: FileChange[];
   conflictState: ConflictState;
-  /** Local commits ahead of the upstream (unpushed); null when no upstream.
-   *  Optional so older engine builds (which don't emit it) degrade gracefully. */
+  /** Null means no upstream; older engines can omit tracking data. */
   ahead?: number | null;
-  /** Commits the upstream has that we don't (unpulled); null when no upstream. */
   behind?: number | null;
-  /** Upstream tracking ref (e.g. `origin/zeros/foo`), or null when unset. */
   upstream?: string | null;
-  /** Present on cloud workers that can report bounded-history fallback. */
+  /** Only cloud workers with bounded-history support report this flag. */
   shallow?: boolean;
   /** Local-only, opt-in branch/base facts; older engines omit this field. */
   summary?: {
@@ -1395,8 +1299,7 @@ export interface ChangeCounts {
   unstaged: number;
 }
 
-/** ± line totals for the same All Changes comparison `ChangeCounts.all`
- *  counts files for. Binary and conflicted paths contribute nothing. */
+/** Use the All Changes comparison; binary and conflicted paths do not add line totals. */
 export interface ChangeLineCounts {
   additions: number;
   deletions: number;
@@ -1422,7 +1325,6 @@ export async function gitChangeCounts(
   );
 }
 
-/** ± line totals for the All Changes net comparison — the workspace tabs' pair. */
 export async function gitChangeLineCounts(
   workspaceId: string,
 ): Promise<ChangeLineCounts> {
@@ -1432,14 +1334,12 @@ export async function gitChangeLineCounts(
   );
 }
 
-/** Exact "anything worth a PR?" boolean from the All Changes net comparison. */
+/** Use the All Changes net comparison, not the worktree dirty bit. */
 export async function gitHasChanges(workspaceId: string): Promise<boolean> {
   return bridgeGitHasChanges(requireBridge("read Git changes"), workspaceId);
 }
 
-/** Resolve `cwd` to the opaque workspace id the engine expects, falling back to
- *  the raw path (which the engine accepts from a local client addressing a repo
- *  root it already knows). Shared by the working-directory ops below. */
+/** The fallback raw path is valid only for a Local client naming a registered root. */
 async function bridgeWorkspaceIdFor(
   bridge: ReturnType<typeof requireBridge>,
   cwd: string,
@@ -1451,9 +1351,7 @@ async function bridgeWorkspaceIdFor(
   }
 }
 
-/** Which top-level tracked folders are materialized in this worktree.
- *  Engine-only (no native IPC fast path). A known workspace id skips the
- *  resolver/list round trip on the Files sidebar's cold path. */
+/** Use the known workspace ID on cold reads to skip resolving it through the workspace list. */
 export async function listWorkingDirectories(
   cwd: string,
   workspaceId?: string | null,
@@ -1465,7 +1363,6 @@ export async function listWorkingDirectories(
   );
 }
 
-/** Apply a folder selection, rewriting the worktree via sparse-checkout. */
 export async function setWorkingDirectories(
   cwd: string,
   directories: string[],
@@ -1479,10 +1376,7 @@ export async function setWorkingDirectories(
   );
 }
 
-/** Repo-relative file paths under `cwd`, for Files and quick-open.
- * Gitignore-respecting (tracked + untracked-not-ignored). Native IPC remains
- * the fast path for a desktop worktree, but a missing/late preload or IPC fault
- * falls through to the engine instead of becoming an authoritative empty list. */
+/** Return tracked and non-ignored untracked files; fall back to the engine after native failure, not to empty. */
 export async function listWorkspaceFiles(
   cwd: string,
   limit?: number,
@@ -1490,8 +1384,7 @@ export async function listWorkspaceFiles(
   return (await readWorkspaceFileListing(cwd, limit, false)).files;
 }
 
-/** Inclusive, query-filtered file/folder names for @ mentions. Directories end
- * in /. The engine refuses this opt-in for remote clients, like file.ignored. */
+/** Directories end in a slash; the Local engine refuses ignored entries over relay. */
 export async function listWorkspaceMentionPaths(
   cwd: string,
   query: string,
@@ -1506,9 +1399,7 @@ export async function listWorkspaceMentionPaths(
       })
     ).files;
   } catch (error) {
-    // Relay clients retain their existing filtered mentions. Only an explicit
-    // remote restriction warrants this fallback; transport/read failures must
-    // remain errors so the cache retains the last confirmed inclusive result.
+    // Only explicit relay denial allows a filtered fallback; other failures must retain the last confirmed inclusive list.
     if (
       error &&
       typeof error === "object" &&
@@ -1553,9 +1444,7 @@ async function readWorkspaceFileListing(
       ? bridgeWorkspaceFileListing(bridge, workspaceId, limit)
       : { files: await bridgeFileTree(bridge, workspaceId, limit, options) };
   };
-  // Local main is outside Electron's trusted worktree roots. Browser development,
-  // optional relay clients, and a renderer whose preload has not appeared yet
-  // also use the bridge.
+  // Registered primary checkouts use engine authorization instead of Electron's worktree allowlist.
   if (isCloudWorkspace(cwd) || isKnownProjectRoot(cwd) || !isNativeRuntime()) return listViaBridge();
   try {
     const res = await nativeInvoke<WorkspaceFileListing>("git_list_files", {
@@ -1573,11 +1462,7 @@ async function readWorkspaceFileListing(
   }
 }
 
-/** The .gitignore'd entries listWorkspaceFiles omits: without `dir`, the
- *  collapsed ignored roots; with `dir`, one level inside one of them
- *  (directories end in "/"). Bridge-only, since it runs once per workspace plus
- *  once per opened directory. DESKTOP ONLY: relay clients get [] here instead
- *  of a guaranteed REMOTE_OP_NOT_ALLOWED round-trip on every open and refresh. */
+/** Return collapsed ignored roots, or one level under dir; non-native clients receive no ignored entries. */
 export async function listIgnoredEntries(
   cwd: string,
   dir?: string,
@@ -1635,8 +1520,6 @@ export async function gitShowCommit(args: {
   return bridgeGitShow(requireBridge("read the commit"), args);
 }
 
-/** Commit log for the workspace (HEAD history, newest first). Powers the
- *  Changes-tab scope picker. */
 export async function gitLog(args: {
   workspaceId: string;
   limit?: number;
@@ -1652,8 +1535,7 @@ export async function gitListBranches(workspaceId: string): Promise<Branch[]> {
   return bridgeGitBranches(requireBridge("list Git branches"), workspaceId);
 }
 
-/** Remote branches (`refs/remotes/origin/*`, plain names) — the valid PR/merge
- *  targets for the target-branch picker. See listRemoteBranches (engine). */
+/** Remote branch names omit refs/remotes/origin/. */
 export async function gitListRemoteBranches(
   workspaceId: string,
 ): Promise<Branch[]> {
@@ -1673,40 +1555,32 @@ export async function gitListAllBranches(args: {
 export interface RepoRemote {
   name: string;
   url: string;
-  /** True when the URL parses as a github.com remote. */
   isGitHub: boolean;
 }
 
 export interface CatalogBranch {
-  /** Plain branch name (no remote prefix). */
+  /** Unqualified branch name, not a remote ref. */
   name: string;
   lastCommitDate: number;
 }
 
-/** Everything the repo page's "Branch new workspaces from" / "Remote origin"
- *  pickers need in one read. See repoBranchCatalog (engine). */
 export interface RepoBranchCatalog {
   remotes: RepoRemote[];
-  /** Settings-effective `git.remote` (default "origin"). */
+  /** Effective git.remote setting, defaulting to origin. */
   effectiveRemote: string;
-  /** The listed remote is configured on the repo (its remote-tracking
-   *  namespace may still be empty — never fetched). */
+  /** A configured remote can exist before any branches are fetched. */
   remoteExists: boolean;
-  /** True when `git.base_branch` is set by a real settings layer. */
+  /** True only when a settings layer supplies git.base_branch. */
   baseExplicit: boolean;
-  /** The branch a new workspace would fork from right now. */
   effectiveBase: string;
-  /** The remote's default branch (HEAD), when detectable. */
   detectedDefault: string | null;
-  /** Remote the branches were listed from, or null → `branches` are local. */
+  /** Null means the catalog lists local branches. */
   listedRemote: string | null;
   branchSource: "remote" | "local";
   branches: CatalogBranch[];
 }
 
-/** Remotes + forkable branches for one repo (no workspace needed). `remote`
- *  previews a different remote's branches; `fetch` freshens from the network
- *  first (bounded, best-effort). Throws GitError NOT_A_REPO / WORKSPACE_NOT_FOUND. */
+/** Fetch, when requested, is bounded and best effort; selecting a remote here does not save it. */
 export async function gitRepoBranchCatalog(args: {
   repoRoot: string;
   remote?: string;
@@ -1718,8 +1592,7 @@ export async function gitRepoBranchCatalog(args: {
   );
 }
 
-/** Resolves to the RESULTING branch (prefix included), or null when the engine
- *  didn't report one. Don't rebuild it from `newName` — see renameBranch. */
+/** Use the returned branch rather than rebuilding it; the engine may add a prefix. */
 export async function gitRenameBranch(args: {
   workspaceId: string;
   newName: string;
@@ -1786,10 +1659,7 @@ export async function gitChangeTargetBranch(args: {
   );
 }
 
-/** Fully discard uncommitted changes to the given TRACKED paths, reverting the
- *  index and working tree to HEAD (`git restore --staged --worktree`). For
- *  untracked / staged-new files there's nothing in HEAD to restore — delete
- *  them with {@link gitClean} instead. */
+/** Restore tracked paths to HEAD; paths with no HEAD entry need gitClean instead. */
 export async function gitDiscard(args: {
   workspaceId: string;
   paths: string[];
@@ -1797,9 +1667,7 @@ export async function gitDiscard(args: {
   await bridgeGitDiscard(requireBridge("discard Git changes"), args);
 }
 
-/** Permanently delete untracked files (`git clean -f`). Discard on an untracked
- *  file routes here — there's nothing in git to restore, so discard == delete.
- *  IRREVERSIBLE; callers MUST confirm with the user first. */
+/** Untracked deletion is irreversible; the caller must confirm with the user. */
 export async function gitClean(args: {
   workspaceId: string;
   paths: string[];
@@ -1825,9 +1693,7 @@ export async function ghAuthStatus(workspaceId?: string): Promise<AuthStatusResu
   return bridgeGhAuthStatus(bridge, workspaceId);
 }
 
-/** Load the user/organization avatar for an open repository's GitHub owner.
- *  Missing bridge/origin/auth/network/avatar is an expected automatic-icon
- *  miss, so this façade degrades to null. */
+/** An unavailable avatar is an expected optional-icon miss, not a failed repository read. */
 export async function ghRepositoryOwnerAvatar(
   repoRoot: string,
 ): Promise<GithubRepositoryOwnerAvatar | null> {
@@ -1886,7 +1752,7 @@ export async function ghPatRestore(
   return nativeInvoke("gh_pat_restore", { undoId });
 }
 
-/** Begin the browser-owned GitHub App authorization/install flow. */
+/** The browser owns GitHub App authorization. */
 export async function ghAppConnect(options?: {
   installFlow?: boolean;
   forceInstall?: boolean;
@@ -1916,9 +1782,7 @@ export interface GithubAppConnectedPayload {
   installationCount: number;
 }
 
-/** Keep in sync with `GithubAppConnectionErrorReason` in
- *  apps/desktop/electron/github-app-controller.ts — main emits these on the
- *  `github-app-error` event AND tags `gh_app_connect` rejections with them. */
+/** Match main's GithubAppConnectionErrorReason for both github-app-error events and gh_app_connect rejections. */
 const GITHUB_APP_ERROR_REASONS = [
   "access_denied",
   "authorization_expired",
@@ -1936,9 +1800,7 @@ export type GithubAppErrorReason = (typeof GITHUB_APP_ERROR_REASONS)[number];
 
 const GITHUB_APP_ERROR_REASON_SET = new Set<string>(GITHUB_APP_ERROR_REASONS);
 
-/** Recover the reason main tagged onto a rejected GitHub App command. Returns
- *  null for errors that carry no reason (a bug, a keychain fault), so the caller
- *  can fall back to the error's own sentence. */
+/** Return null for untagged errors so the caller can display the original message. */
 export function githubAppErrorReason(
   error: unknown,
 ): GithubAppErrorReason | null {
@@ -1978,13 +1840,7 @@ export async function ghPrCreate(args: {
   return bridgeGhPrCreate(requireBridge("create the pull request"), args);
 }
 
-/** Can the selected GitHub connection open a pull request on this workspace's
- *  remote? The Create PR control runs this BEFORE it refuses for any other
- *  reason and before it spends an agent turn.
- *
- *  Deliberately never rejects: this exists to pick the right message, so a
- *  missing bridge or a failed request resolves to `unknown` — "we could not
- *  find out", which callers must treat as "carry on", never as "blocked". */
+/** Unknown is not a denial; probe before other gates or starting a Create PR agent turn. */
 export async function ghRepoAccess(
   workspaceId: string,
 ): Promise<GithubRepoAccess> {
@@ -1999,12 +1855,10 @@ export async function ghRepoAccess(
   }
 }
 
-/** Owners (authed user + orgs) for the publish dialog's dropdown. */
 export async function ghListOwners(): Promise<GithubOwner[]> {
   return bridgeGhListOwners(requireBridge("list GitHub owners"));
 }
 
-/** Is `<owner>/<name>` available to create? */
 export async function ghCheckRepoName(args: {
   owner: string;
   name: string;
@@ -2015,8 +1869,6 @@ export async function ghCheckRepoName(args: {
   );
 }
 
-/** Create a private GitHub repo for a local project + push. Returns the new
- *  origin/browser URLs. Throws (surfaced to the dialog) on failure. */
 export async function ghPublishRepo(args: {
   repoRoot: string;
   name: string;
@@ -2026,9 +1878,7 @@ export async function ghPublishRepo(args: {
   return bridgeGhPublishRepo(requireBridge("publish the repository"), args);
 }
 
-/** Local-only "Initialize Git": `git init` + an initial commit on an EXISTING
- *  folder, no remote. Desktop path; throws (surfaced to the caller) if the
- *  engine bridge isn't connected. */
+/** Initialize an existing Local folder and commit without creating a remote. */
 export async function gitInitInPlace(
   repoRoot: string,
 ): Promise<InitRepoInPlaceResult> {
@@ -2050,7 +1900,6 @@ export async function ghPrMarkReady(args: {
   );
 }
 
-/** Replace a pull request's description. */
 export async function ghPrUpdate(args: {
   workspaceId: string;
   prNumber: number;
@@ -2061,10 +1910,7 @@ export async function ghPrUpdate(args: {
   return bridgeGhPrUpdate(requireBridge("update the pull request"), args);
 }
 
-// The PR-status island and the Review tab both read the same PR on the same
-// refresh signal. Sharing one in-flight promise per key halves those GitHub
-// calls without any staleness risk — entries are removed the moment they
-// settle, so this is concurrency coalescing, never a cache.
+// Coalesce concurrent PR reads per key, never reuse a settled result.
 const inflightPrGets = new Map<string, Promise<PR>>();
 const inflightPrChecks = new Map<string, Promise<PrChecksResult>>();
 const inflightPrSyncs = new Map<string, Promise<PR | null>>();
@@ -2086,10 +1932,7 @@ export async function ghPrGet(args: {
   return request;
 }
 
-/** Detect/reconcile the workspace branch's PR on GitHub, including external
- * draft/ready/closed/merged transitions. This is the durable workspace-row and
- * lifecycle path for activity that bypasses {@link ghPrCreate}. Concurrent
- * discovery/status callers share one request per workspace. */
+/** Reconcile external PR transitions into durable workspace state, including activity outside ghPrCreate. */
 export async function ghPrSync(workspaceId: string): Promise<PR | null> {
   const cloud = cloudTargetForValue(workspaceId);
   if (cloud) return requestCloudGithubPr(cloud, "gh.prSync", {}) as Promise<PR | null>;
@@ -2141,12 +1984,11 @@ export interface PrCheck {
   status: string;
   conclusion: string | null;
   detailsUrl: string | null;
-  /** Epoch ms — check-run timing (null for commit statuses). */
+  /** Epoch milliseconds; commit statuses do not have check-run timing. */
   startedAt: number | null;
   completedAt: number | null;
-  /** The base branch requires it; absent when that couldn't be read. */
+  /** Omitted means branch requirements are unknown, not false. */
   required?: boolean;
-  /** A GitHub Actions run, which Re-run failed can start again. */
   rerunnable?: boolean;
 }
 
@@ -2164,7 +2006,7 @@ export interface PrChecksResult {
   passed: number;
   failed: number;
   pending: number;
-  /** Required checks that haven't reported on the head commit. */
+  /** Required checks that have not reported for the head commit yet. */
   expected?: Array<{ name: string }>;
 }
 
@@ -2181,14 +2023,12 @@ export interface PrCommitSummary {
   authorLogin: string | null;
   authorAvatarUrl: string | null;
   date: number;
-  /** Additional authors (Co-authored-by) beyond the primary one. */
   coAuthors: PrCommitAuthor[];
-  /** Diff stats. Null when the stats lookup fails — the UI hides them. */
+  /** Null means unavailable stats, not zero changes. */
   additions: number | null;
   deletions: number | null;
   changedFiles: number | null;
-  /** The commit's combined check result; null when nothing reported on it
-   *  or the lookup failed. Absent from older readers. */
+  /** Missing or null status does not prove that checks passed. */
   checks?: PrCommitChecks | null;
 }
 
@@ -2222,8 +2062,7 @@ export async function ghPrChecks(args: {
   return request;
 }
 
-/** Start the failed GitHub Actions jobs on `headSha` again. Refused when the
- *  pull request has moved on, so it only re-runs the failures shown. */
+/** Refuse to rerun failures if the pull request no longer points at the displayed head. */
 export async function ghPrRerunFailed(args: {
   workspaceId: string;
   prNumber: number;
@@ -2265,7 +2104,6 @@ export async function ghPrComment(args: {
   );
 }
 
-// Mirrors apps/desktop/src/engine/git/errors.ts.
 
 export interface GitErrorShape {
   name: "GitError";
@@ -2276,9 +2114,7 @@ export interface GitErrorShape {
   causeMessage?: string;
 }
 
-/** Best-effort: does this error look like a structured GitError from
- *  the engine? The IPC bridge serializes via toJSON() so the renderer
- *  sees a plain object with `code` + `remediation`. */
+/** The bridge serializes GitError as a plain object, not an Error instance. */
 export function isGitErrorShape(err: unknown): err is GitErrorShape {
   return (
     !!err &&
@@ -2288,24 +2124,12 @@ export function isGitErrorShape(err: unknown): err is GitErrorShape {
   );
 }
 
-/** The one human-readable line for a failed git/GitHub op — the engine's
- *  remediation when it sent one, else its message, else the raw error. The
- *  shared toast-description mapping (PR island & friends). */
 export function gitErrorDescription(err: unknown): string {
   if (isGitErrorShape(err)) return err.remediation ?? err.message;
   return err instanceof Error ? err.message : String(err);
 }
 
-/** True when a sent workspace lifecycle request lost only its response.
- *
- * A bare WORKSPACE_REQUEST timeout leaves the engine transaction running. An
- * `engine disconnected` rejection comes from the in-flight request map when the
- * watchdog replaces that engine; its journal may complete during restart
- * recovery. Neither is an archive/delete outcome, so callers observe the exact
- * workspace row + lifecycle status before publishing success or failure.
- *
- * Deliberately excludes queue-full/reconnecting variants: those requests were
- * never sent and therefore cannot be progressing in the background. */
+/** A sent lifecycle request can finish in the engine or its journal after timeout; observe exact state. Queue-full and reconnecting requests were never sent. */
 export function isWorkspaceOpStillRunning(err: unknown): boolean {
   if (!(err instanceof Error)) return false;
   return (

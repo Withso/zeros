@@ -1,9 +1,6 @@
 import catalog from "../../../catalogs/models-v1.json";
 
-/** Presentation only, after the adapter classifies a model-access refusal.
- * Native error evidence stays with the adapter. Use catalog labels (or a
- * restricted OpenAI model id for a retired/unknown selection), never arbitrary
- * prose: it can include project ids, proxy URLs and request ids. */
+/** After adapter classification, use only catalog labels or constrained model IDs. Native errors can expose project IDs, proxy URLs, and request IDs. */
 export function codexModelUnavailableMessage(nativeMessage: string): string {
   let label = "the selected model";
   for (const match of nativeMessage.slice(0, 64_000).matchAll(/\bmodel\s*:?\s*(?:[`'"]([^`'"]{1,128})[`'"]|([A-Za-z0-9][A-Za-z0-9._-]{0,127}))/gi)) {

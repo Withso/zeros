@@ -25,8 +25,7 @@ export type SavedSubscriptionAccount = z.infer<
   typeof subscriptionAccountSchema
 >;
 
-/** Native read-only usage request. Identity is checked against the currently
- * selected native account before and after the provider answers. */
+/** Check against the selected native account before the provider request and again before accepting its reply. */
 export const providerUsageRequestSchema = z
   .object({
     provider: browserSubscriptionProviderSchema,
@@ -190,8 +189,7 @@ export const providerCredentialsSchema = z
     codex: credentialSchema.nullable(),
     cursor: credentialSchema.nullable(),
     cursorSubscription: credentialSchema.nullable(),
-    // Device-owned selection travels with its credentials, including to a new
-    // development checkout whose renderer/TOML preferences are still empty.
+    // Carry device-owned auth selection into new checkouts before renderer preferences exist.
     authMethods: z
       .object({
         claude: z.enum(["account", "cli", "apiKey"]).optional(),

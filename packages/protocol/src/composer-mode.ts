@@ -12,20 +12,16 @@ export const composerModeSnapshotSchema = z
 export type ComposerModeSnapshot = z.infer<typeof composerModeSnapshotSchema>;
 
 export const DESIGN_MCP_SERVER = "design-draft";
-/** Local and cloud executions author Design natively. "api" remains for an
- * execution policy that requires semantic API writes; none does today. */
+/** Retain the API-only method for an execution policy that requires semantic writes. */
 export type DesignAuthoringMethod = "native" | "api";
 
-/** Cloud executions author like Local ones; this states their boundary. */
 export const CLOUD_EXECUTION_NOTICE =
   "This execution runs in a cloud workspace VM, which is the isolation boundary. There is no agent sandbox; agents share the non-root engine identity and can read engine and other-conversation state.";
 
-/** A frame's output format is independent of the agent's authoring tools. */
 export const DESIGN_FRAME_AUTHORING_INSTRUCTION =
   "Design frames render HTML, CSS and supported local assets. Use CSS @keyframes for animation and CSS transitions for visual states. Authored scripts, inline event handlers, JSX/TSX and application logic do not run in a frame. Represent controls as visual states; live components will use separate Code layers. Normal shell, Node and Python tools may generate and validate source. Preserve stable frame IDs and viewport dimensions, and verify the actual rendered frame. When implementing an application from a frame reference, follow that application's normal source and runtime conventions.";
 
-/** Kept separate from the format instruction embedded in historical rules.md
- * templates, whose exact text remains a migration compatibility contract. */
+/** Keep this separate from DESIGN_FRAME_AUTHORING_INSTRUCTION; migration matches historical rules.md templates that embed that string. */
 const DESIGN_LAYER_NAMING_INSTRUCTION =
   'Give Design layers meaningful names. Rename a frame through its title in meta/canvas.json; name any element with data-name="Layer name" (up to 80 characters). Preserve its data-oid, HTML id, accessibility labels and source filename. These names appear in the Layers panel and can also be edited inline.';
 

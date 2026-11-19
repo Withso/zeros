@@ -1,16 +1,7 @@
-// PII-contract test for the renderer's analytics EMIT sites (agent-events.ts).
-//
-// The PostHog contract is "metadata-only / anonymous". core's scrub.test.ts proves
-// the scrub PRIMITIVE works in isolation, but nothing proves the renderer actually
-// CALLS it / stays clean at every emit site. This locks that: it mocks ./posthog,
-// drives every builder (with adversarial inputs — a raw error carrying a path +
-// email), and asserts every emitted prop is scalar metadata, never user content.
-// A future edit that forwards a raw error.message, file path, or chat snippet to a
-// PostHog property fails here — a privacy incident caught at PR time.
+// Exercise the metadata-only contract at renderer emit sites, not just the scrubber in isolation.
 
 import { describe, it, expect, beforeEach, vi } from "vitest";
 
-// vi.hoisted so the spies exist before the (hoisted) vi.mock factory runs.
 const { capture, captureException, logEvent } = vi.hoisted(() => ({
   capture: vi.fn(),
   captureException: vi.fn(),
@@ -44,9 +35,7 @@ beforeEach(() => {
   logEvent.mockClear();
 });
 
-// A prop value is "PII-shaped" if it's a string resembling a path, email, or free
-// text — the things that must never reach analytics. Enums, model names, agent
-// ids, numbers, booleans are fine.
+// This string-shape heuristic checks common content leaks, not whether arbitrary strings are safe metadata.
 function piiShaped(value: unknown): boolean {
   if (typeof value !== "string") return false;
   return (
@@ -236,9 +225,6 @@ describe("agent-events PII contract — emits scalar metadata only", () => {
   });
 
   it("trackGitOp scrubs a raw error to a safe enum — a path/email in it never reaches analytics", () => {
-    // A raw Error whose message carries a path + email — the kind of content that
-    // must never be sent. gitErrorKind extracts ONLY a structured `code`, so a raw
-    // Error classifies to "unknown" and the message is dropped.
     trackGitOp({
       op: "commit",
       outcome: "error",
@@ -252,7 +238,6 @@ describe("agent-events PII contract — emits scalar metadata only", () => {
     expect(props.error_kind).toBe("unknown");
     assertCleanProps(props);
 
-    // A structured GitError-like object → its enum `code` passes through (safe).
     capture.mockClear();
     trackGitOp({
       op: "push",
@@ -269,12 +254,10 @@ describe("agent-events PII contract — emits scalar metadata only", () => {
       agentId: "cursor",
       failure: { kind: "protocol-error", stage: "prompt" },
     });
-    // a fix-worthy fault → captureException with enum-only props
     expect(captureException).toHaveBeenCalledTimes(1);
     const [, props] = captureException.mock.calls[0];
     assertCleanProps(props as Record<string, unknown>);
 
-    // a non-bug, user-correctable failure → captured as event but NOT an exception
     captureException.mockClear();
     trackAgentFailed({
       agentId: "cursor",
@@ -284,8 +267,6 @@ describe("agent-events PII contract — emits scalar metadata only", () => {
   });
 
   it("trackAgentFailed hashes the technical message — never sends it raw", () => {
-    // Adversarial message: path + email + volatile pid. Only a short hex hash
-    // may reach analytics.
     trackAgentFailed({
       agentId: "cursor",
       failure: {
@@ -308,8 +289,7 @@ describe("agent-events PII contract — emits scalar metadata only", () => {
       expect(props.message_hash).toMatch(/^[0-9a-f]{8}$/);
     }
 
-    // Same fault with different volatile bits (path, pid) → SAME hash, so
-    // recurrences group in PostHog.
+    // Normalize volatile paths and process IDs so repeat faults group in PostHog.
     capture.mockClear();
     trackAgentFailed({
       agentId: "cursor",
@@ -324,7 +304,6 @@ describe("agent-events PII contract — emits scalar metadata only", () => {
       .message_hash;
     expect(rehashed).toBe(eventProps.message_hash);
 
-    // A genuinely different message → different hash (faults stay distinguishable).
     capture.mockClear();
     trackAgentFailed({
       agentId: "cursor",
@@ -339,7 +318,7 @@ describe("agent-events PII contract — emits scalar metadata only", () => {
     expect(other).toMatch(/^[0-9a-f]{8}$/);
     expect(other).not.toBe(eventProps.message_hash);
 
-    // No message → no hash prop (undefined is fine, never an empty string).
+    // Leave the hash absent when there is no message; don't emit an empty grouping key.
     capture.mockClear();
     trackAgentFailed({
       agentId: "cursor",

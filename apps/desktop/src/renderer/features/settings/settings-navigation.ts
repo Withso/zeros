@@ -7,9 +7,7 @@ export function activeSettingsOwner(): string {
   return settingsOwnerKey(getTeamStoreState().me?.user.id ?? "pending", getActiveOrganizationIdSnapshot());
 }
 
-/** Persist and publish a user-settings destination. Persistence covers a cold
- * Settings mount; the event updates the retained Settings page synchronously
- * when it is already mounted behind another app page. */
+// Persistence replays the destination on a cold mount; the event updates a retained panel synchronously.
 export function requestUserSettingsSection(section: string): void {
   const selection = `user:${section}`;
   const owner = activeSettingsOwner();

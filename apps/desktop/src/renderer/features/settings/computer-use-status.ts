@@ -7,8 +7,7 @@ import {
 import { nativeInvoke } from "../../platform/runtime";
 import { pollWhileForeground } from "../../shared/lib/element-activity";
 
-// This Mac's computer-use grants, shared by General's Computer use rows and
-// its Privacy rows so one poll serves both.
+// Both General and Privacy share one poll for this Mac's grants.
 let current: ComputerUseStatus | null = null;
 const listeners = new Set<() => void>();
 let watchers = 0;
@@ -40,8 +39,6 @@ export async function refreshComputerUseStatus(): Promise<ComputerUseStatus | nu
   }
 }
 
-/** Ask macOS for the missing grants. Its prompt appears only once; the rows
- * show what it answered. */
 export async function requestComputerUsePermissions(): Promise<ComputerUseStatus | null> {
   const next = readComputerUseStatus(
     await nativeInvoke<unknown>("computer_use_permissions_request"),
@@ -50,10 +47,7 @@ export async function requestComputerUsePermissions(): Promise<ComputerUseStatus
   return next;
 }
 
-/** The user flips the macOS toggles in System Settings, outside this window,
- * so the grants are read while a visible surface watches them and again when
- * the window comes back to the front. Every watcher shares one poll; the
- * returned function stops this one. */
+// Users change grants in System Settings; refresh when the window returns to the foreground.
 export function watchComputerUseStatus(): () => void {
   if (watchers++ === 0) {
     stopPolling = pollWhileForeground(() => void refreshComputerUseStatus(), 5000);

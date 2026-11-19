@@ -25,8 +25,7 @@ export async function readNativeCloudHistory(
   if (!["messages.window", "messages.windowOlder"].includes(op)) return null;
   if (!native.owner) return decline(native, "no_owner");
   if (params.before !== undefined) return decline(native, "index_page");
-  // Only the three key fields: the runtime client's request target is parsed from a scoped id ({id}) or a folder
-  // ({relativePath}), and the strict schema refused those, so build 968 sent every transcript read past main.
+  // Project only cache key fields; routing targets may also contain id or relativePath, which the strict schema rejects.
   const parsed = CloudCacheTargetSchema.safeParse({ organizationId: target.organizationId, workspaceId: target.workspaceId, chatId: params.chatId });
   const limit = params.limit;
   if (!parsed.success) return decline(native, "target");
@@ -40,12 +39,12 @@ export async function readNativeCloudHistory(
     if (epoch !== native.epoch) throw new NativeCloudCacheError("owner_changed");
     if (!refreshed.range) return decline(native, "older_uncached");
     const range = refreshed.range;
-    // An unchanged chat makes no read at all; the prompt queue has its own reader (cloudPrompts) for live state.
+    // Cache hits skip this pending-prompt refresh; the prompt queue reads live state independently.
     if (op === "messages.window" && !("cached" in refreshed && refreshed.cached)) void native.refreshPending(parsed.data).catch(() => {});
     return { messages: range.rows.map(({ index: _index, ...row }) => row),
       ...(range.historyState ? { historyState: range.historyState } : {}),
       ...(range.turnOpening ? { turnOpening: range.turnOpening } : {}),
-      // Team sharing: senders stored with the cached rows answer attribution without a messages.senders read.
+      // Cached sender attribution avoids a separate messages.senders request.
       ...(range.senders ? { senders: range.senders } : {}),
     };
   } catch (error) {

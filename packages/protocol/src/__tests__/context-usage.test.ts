@@ -36,8 +36,7 @@ describe("Claude context usage mapping shared by Local and cloud", () => {
       { name: "mcp__loaded__read", serverName: "loaded", tokens: 3, isLoaded: true },
       { name: "mcp__available__read", serverName: "available", tokens: 7, isLoaded: false },
     ] };
-    // Real summary-mode CLI with tool search disabled reports isLoaded=false
-    // even though its used MCP row includes those tool tokens.
+    // With tool search off, Claude can report a tool as unloaded while counting its tokens as used.
     expect(mapClaudeContextUsage(usage)?.categories?.[0].mcpServers).toEqual([
       { serverName: "available", tokens: 7 }, { serverName: "loaded", tokens: 3 },
     ]);

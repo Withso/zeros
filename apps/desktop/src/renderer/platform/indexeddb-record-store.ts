@@ -1,14 +1,4 @@
-// ──────────────────────────────────────────────────────────
-// IndexedDB record store — records plus a small index, one connection
-// ──────────────────────────────────────────────────────────
-//
-// The shared backend of the renderer's purgeable boot caches (Local chat
-// transcripts, Design canvas pictures). Each keeps large records in one object
-// store and a small metadata row per record in another, both under the same
-// key, so a session reads the whole index once and the records it shows. The
-// caches own policy (keys, bounds, eligibility); this only moves records and
-// owns the connection's lifecycle.
-// ──────────────────────────────────────────────────────────
+// Records and metadata share a key in separate stores, so startup scans the index without reading record bytes.
 
 export interface IndexedDbRecordStoreChange<R, E> {
   /** Retire a cache namespace atomically, including malformed index rows. */
@@ -29,11 +19,9 @@ export interface IndexedDbRecordStore<R, E> {
 export interface IndexedDbRecordStoreOptions<R, E> {
   factory: IDBFactory | undefined;
   database: string;
-  /** Object store of the records; the index rows live in `index`. */
   records: string;
   keyPath: string;
   isEntry(value: unknown): value is E;
-  /** The record stored under `key`, or null when it is not a valid one. */
   record(value: unknown, key: string): R | null;
 }
 
@@ -54,10 +42,7 @@ function transactionDone(transaction: IDBTransaction): Promise<void> {
 
 const INDEX = "index";
 
-/** One long-lived connection: reads must not pay an open each. A failed open
- * disables the store for the session (its cache degrades to memory-only). A
- * connection the browser closes (storage cleared, an I/O error) or another
- * window's version change retires it, and the next call opens a new one. */
+/** Reuse the connection. A failed open disables persistence for the session; closure or a version change lets the next operation reopen. */
 export function createIndexedDbRecordStore<R, E>(
   options: IndexedDbRecordStoreOptions<R, E>,
 ): IndexedDbRecordStore<R, E> | null {
@@ -99,8 +84,7 @@ export function createIndexedDbRecordStore<R, E>(
     });
     return connection;
   };
-  // A connection that closed before its event arrived refuses transactions
-  // synchronously; retire it so the next call reopens.
+  // Transactions may refuse a closed connection before its close event; retire it on that error.
   const transaction = (
     db: IDBDatabase,
     stores: string | string[],

@@ -1,5 +1,4 @@
-/** A durable outbox of edited TOML leaves. Browser values are synchronous
- * caches; only an engine acknowledgement retires a pending edit. */
+/** Persist edited TOML leaves until the engine acknowledges them; synchronous browser values are only caches. */
 export interface AgentPreferenceEdit {
   path: string[];
   value: unknown;
@@ -59,7 +58,7 @@ function persist(): void {
   try {
     localStorage.setItem(OUTBOX, JSON.stringify([...pending.values()]));
   } catch {
-    /* retain memory outbox; the sync surface reports failed engine saves */
+    // Keep pending edits in memory if browser persistence fails.
   }
 }
 export function pendingAgentPreferences(): Map<string, AgentPreferenceEdit> {

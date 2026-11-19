@@ -75,7 +75,7 @@ describe("idle is quiet: a read-only PR sync re-reads the workspace only when th
     f.doc = undefined;
     await requestCloudGithubPr(target, "gh.prSync", {});
     expect(f.refresh).toHaveBeenCalledTimes(2);
-    // A write always reads it.
+    // A write re-reads the workspace even when the PR is unchanged.
     f.doc = { github: { prNumber: 7, prState: "ready", prUrl: found.url } };
     f.request.mockResolvedValue({ authority, result: found });
     await requestCloudGithubPr(target, "gh.prMarkReady", { prNumber: 7 });

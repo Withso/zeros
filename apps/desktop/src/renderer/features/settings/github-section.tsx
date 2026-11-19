@@ -113,7 +113,6 @@ const EMPTY_SNAPSHOT: GithubAuthSnapshot = {
   },
 };
 
-/** Short, non-colour statement of a row's health, for assistive tech. */
 const GITHUB_HEALTH_LABEL: Record<GithubCredentialSummary["health"], string> = {
   connected: "connected",
   "not-connected": "not connected",
@@ -134,9 +133,6 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-/** Open an external link without leaving a floating rejection behind. The UI
- *  smoke run asserts no uncaught page errors, and a bare `void shellOpenUrl(…)`
- *  breaks that the first time main refuses. */
 function openUrl(url: string): void {
   void shellOpenUrl(url).catch(() => {
     toast.error("Couldn’t open that link", {
@@ -172,10 +168,7 @@ function IdentityBadge({ summary }: { summary: GithubCredentialSummary }) {
     <span
       className={badgeVariants({ variant: warning ? "warning" : "success" })}
     >
-      {/* An icon, not only the amber fill: for an UNSELECTED row the detail
-          block is not rendered, so colour alone was the entire signal that a
-          connection needs attention (WCAG 1.4.1). The design's borderless,
-          dotless, username-only badge is otherwise unchanged. */}
+      {/* Keep a non-color warning when the unselected row hides its detail. */}
       {warning ? <TriangleAlert aria-hidden="true" /> : null}
       {summary.login}
       {warning ? (
@@ -189,7 +182,6 @@ function HealthDetail({ summary }: { summary: GithubCredentialSummary }) {
   const copy = githubHealthDetailCopy(summary);
   if (copy === null) return null;
 
-  // One 32px row in the card: a tone icon and the line, no filled box.
   return (
     <div className="text-fg2 flex min-h-8 items-center gap-2 text-xs leading-4.5">
       <TriangleAlert
@@ -215,23 +207,14 @@ export function GitHubSection({
     useState<GithubAuthMethod | null>(null);
   const [appWaiting, setAppWaiting] = useState(false);
   const [appError, setAppError] = useState<string | null>(null);
-  // Bumped by Cancel. begin() resolves silently when a cancel lands during its
-  // control-plane round trip, so without this the resolving call re-latched
-  // `appWaiting` and left a "Finish on GitHub" card for a browser that never
-  // opened — a state only Cancel could escape.
+  // Cancellation invalidates the pending browser handoff before its request resolves.
   const appAttemptRef = useRef(0);
-  // The automatic gh-cli setup card is a cold-mount convenience. Once the user
-  // has acted on that row — including choosing "Stop using in Zeros", which
-  // leaves gh-cli selected and unconfigured and so re-satisfies the heuristic —
-  // it stays closed rather than re-opening under the user.
+  // Disconnect and Cancel can leave gh-cli selected but unconfigured; do not reopen automatic setup.
   const [autoSetupDismissed, setAutoSetupDismissed] = useState(false);
   const [disconnectAppOpen, setDisconnectAppOpen] = useState(false);
   const disconnectCancelRef = useRef<HTMLButtonElement>(null);
   const disconnectAppTriggerRef = useRef<HTMLButtonElement>(null);
 
-  // The fetcher ignores the key it is handed: this read's key is the constant
-  // "auth", so the probe's options never vary with it. Passing `ghAuthSnapshot`
-  // bare would hand the key straight to its `options` parameter.
   const connected = useNativeRuntime().ready;
   const connection = useRecoveringRead(
     ghAuthStatusCache,
@@ -246,12 +229,7 @@ export function GitHubSection({
     async (method?: GithubAuthMethod): Promise<GithubAuthSnapshot | null> => {
       if (method) setRefreshingMethod(method);
       try {
-        // Deliberately NOT ghAuthStatusCache.load(): that dedupes against an
-        // in-flight background read and returns ITS promise, so a user's
-        // Refresh on the App row could be answered by a probe that ran with
-        // refreshApp:false — the installation inventory never re-checked, the
-        // spinner stopping on the wrong result. Probe directly, then publish
-        // authoritatively so every subscriber still updates.
+        // Bypass deduplication so an explicit App refresh cannot join a probe that skipped inventory.
         const next = await ghAuthSnapshot({
           refreshApp: method === "github-app",
         });
@@ -342,8 +320,7 @@ export function GitHubSection({
         outcome: "cancelled",
         errorKind: githubConnectErrorKind(error),
       });
-      // Closing/cancelling the CLI is not an error event. Re-probe quietly so
-      // the row reflects whatever the command actually changed.
+      // The login command may have changed auth before closing; re-probe even when cancelled.
       await refreshSnapshot();
     }
   }, [refreshSnapshot, snapshot]);
@@ -358,10 +335,7 @@ export function GitHubSection({
 
   const connectPat = useCallback(async () => {
     const token = pat.trim();
-    // The Enter key reaches this directly, so it repeats the button's own
-    // guards: a second Enter used to fire a concurrent gh_pat_connect (two
-    // success toasts), and Enter on a 5-character token submitted a value the
-    // disabled button was refusing.
+    // Enter bypasses the button's disabled state, so guard submissions here too.
     if (token.length < 12 || busyMethod !== null) return;
     trackGithubConnectStarted({
       method: "pat",
@@ -373,9 +347,7 @@ export function GitHubSection({
       setPat("");
       setShowPat(false);
       setSetupMethod(null);
-      // main returns the authoritative post-write snapshot, so the row cannot
-      // sit on "not connected" under a "Connected as @…" toast just because a
-      // follow-up probe failed (refreshSnapshot() swallows its own errors).
+      // Use the post-write snapshot so a failed follow-up probe cannot hide a successful connection.
       ghAuthStatusCache.setData("auth", result.snapshot);
       trackGithubConnectCompleted({ method: "pat", outcome: "ok" });
       if (snapshot.selectedMethod !== "pat") {
@@ -402,12 +374,11 @@ export function GitHubSection({
     }
   }, [busyMethod, pat, snapshot]);
 
-  /** A confirmed-empty inventory has its own recovery route. Opening the setup
-   * card before the request keeps any control-plane failure visible inline. */
   const connectApp = useCallback(async (options?: {
     forceInstall?: boolean;
   }) => {
     const attempt = appAttemptRef.current;
+    // Open setup before the install request so start failures stay visible inline.
     if (options?.forceInstall) setSetupMethod("github-app");
     setBusyMethod("github-app");
     setAppError(null);
@@ -422,8 +393,6 @@ export function GitHubSection({
     });
     try {
       const started = await ghAppConnect(connectOptions);
-      // Cancelled while the control plane was answering: main already discarded
-      // the handoff, so there is nothing to finish on GitHub.
       if (attempt !== appAttemptRef.current || !started) return;
       if (started.flowKind === "install") {
         trackGithubInstallOpened({
@@ -433,20 +402,14 @@ export function GitHubSection({
       }
       setAppWaiting(true);
     } catch (error) {
-      // Cancel already closed this attempt's funnel entry, so a late failure
-      // must not report a second outcome for the same attempt.
+      // Cancel already recorded the attempt's outcome; ignore a late failure.
       if (attempt !== appAttemptRef.current) return;
       trackGithubConnectCompleted({
         method: "github-app",
         outcome: "error",
         errorKind: githubConnectErrorKind(error),
       });
-      // Inline, not a toast: the user is looking at this card, the message is
-      // often durable ("not available on this control plane"), and the approved
-      // design routes a failure to *open* GitHub inline. The browser-callback
-      // half still toasts, because Settings may be closed by then.
-      // main tags the rejection with the same reason that callback emits, so
-      // both halves of the flow use one vocabulary.
+      // Show start failures inline; callbacks may fail after Settings closes and use the same reason codes.
       const reason = githubAppErrorReason(error);
       const copy = reason ? githubAppErrorCopy(reason) : null;
       if (reason !== "access_denied") {
@@ -462,8 +425,7 @@ export function GitHubSection({
   const cancelApp = useCallback(() => {
     appAttemptRef.current += 1;
     void ghAppCancel().catch(() => {
-      // Cancel is local-first: main clears its own pending handoff, and a failed
-      // IPC must not leave the card stuck in a waiting state.
+      // Reset local UI even if cancelling the native handoff fails.
     });
     trackGithubConnectCompleted({
       method: "github-app",
@@ -472,19 +434,11 @@ export function GitHubSection({
     setAppWaiting(false);
     setAppError(null);
     setSetupMethod(null);
-    // Cancel closes the card, so nothing is left on screen to explain why every
-    // radio is still dead. connectApp's own `finally` only lands when the
-    // control-plane round trip settles — up to the 15 s request timeout, longer
-    // if the account token refresh stalls — and its `attempt` guard already makes
-    // that late result a no-op. Releasing the chooser here is what makes Cancel
-    // mean cancel rather than "wait, silently, for something you dismissed".
+    // Release the chooser immediately; the cancelled request may still be pending.
     setBusyMethod(null);
   }, []);
 
-  // Settings retains visited panels. A hidden Integrations panel must not keep
-  // a login PTY, modal, network subscription, or late browser-start response
-  // alive. The app-wide notification listener still completes an OAuth
-  // callback and invalidates the cache; reactivation reads that exact snapshot.
+  // Make retained Settings inert; the app-wide listener still handles the OAuth callback.
   useEffect(() => {
     if (surfaceActive) return;
     appAttemptRef.current += 1;
@@ -492,10 +446,7 @@ export function GitHubSection({
     setAppWaiting(false);
     setAppError(null);
     setSetupMethod(null);
-    // The card that shows the token is closed here, so the draft behind it is
-    // no longer reachable or visible — and leaving `showPat` set would render
-    // it in cleartext the next time the card opens, the same way Cancel used
-    // to. Both are cleared together, exactly as Cancel does.
+    // Reset visibility with the draft so the next pasted token starts masked.
     setPat("");
     setShowPat(false);
     setBusyMethod(null);
@@ -515,8 +466,7 @@ export function GitHubSection({
         void refreshSnapshot();
       }),
       onGithubAppError(() => {
-        // GithubAppNotifications owns the copy for this one (it stays mounted
-        // when Settings is closed); here we only leave the waiting state.
+        // GithubAppNotifications owns the error toast even when Settings is closed.
         setAppWaiting(false);
         void refreshSnapshot();
       }),
@@ -561,9 +511,6 @@ export function GitHubSection({
         setSetupMethod(null);
         setTerminalOpen(false);
         setAppWaiting(false);
-        // Disconnecting gh-cli leaves it selected and unconfigured, which is
-        // exactly the shape the automatic setup card opens on. Suppress it so
-        // the row doesn't immediately ask the user to sign back in.
         if (method === "gh-cli") setAutoSetupDismissed(true);
         if (method === "github-app") {
           toast.info("GitHub App disconnected", {
@@ -572,9 +519,7 @@ export function GitHubSection({
         } else if (method === "pat") {
           toast.info("Personal Access Token removed", {
             description: "This token is no longer available to Zeros.",
-            // Keep the Undo button on screen for as long as main will actually
-            // honor the handle; the default toast duration is shorter than the
-            // undo window, so the affordance would vanish while it still works.
+            // Match the toast lifetime to the native undo deadline.
             ...(result.undoExpiresAtMs
               ? {
                   duration: Math.max(0, result.undoExpiresAtMs - Date.now()),
@@ -622,11 +567,7 @@ export function GitHubSection({
           </p>
         </div>
 
-        {/* `role="group"`, not `radiogroup`: each row also carries Refresh, a
-            menu, and a "Create token" button, and ARIA allows only radios (plus
-            grouping elements) inside a radiogroup — screen readers commonly drop
-            those buttons from group traversal. The native `name=` on the inputs
-            below is what actually provides arrow-key radio semantics. */}
+        {/* Use a group so screen readers expose row buttons; named native radios keep arrow-key navigation. */}
         <div
           role="group"
           aria-label="GitHub authentication method"
@@ -646,9 +587,6 @@ export function GitHubSection({
               <div
                 key={method}
                 className={cn(
-                  // A selectable card: 12px corners and the RadioGroup card's
-                  // fill. Hover lifts the edge to border3; the chosen card
-                  // fills bg1-hover and keeps its resting edge.
                   "border-border2 relative grid grid-cols-[20px_minmax(0,1fr)_auto] items-start gap-2.5 rounded-[calc(var(--radius-lg)*1.5)] border p-3.5 transition-colors duration-120 ease-out",
                   selected
                     ? "bg-bg1-hover"
@@ -658,8 +596,6 @@ export function GitHubSection({
                 )}
               >
                 <input
-                  // The RadioGroup look: border4 at rest; chosen fills
-                  // inverted-bg around a 6px inverted-fg dot.
                   className="border-border4 hover:border-fg3 checked:border-inverted-bg checked:bg-inverted-fg focus-visible:border-highlighted-bright focus-visible:ring-highlighted-bright/50 mt-px size-4 appearance-none rounded-full border transition-[background-color,border-color,box-shadow] duration-120 ease-out checked:shadow-[inset_0_0_0_4px_var(--inverted-bg)] focus-visible:ring-[3px] focus-visible:outline-none"
                   type="radio"
                   name="github-auth-method"
@@ -672,11 +608,7 @@ export function GitHubSection({
 
                 <button
                   type="button"
-                  // Not a tab stop: the radio beside it is the accessible
-                  // control for the same action, so keeping both focusable made
-                  // every row cost two tab stops and announce its name twice.
-                  // It stays readable to assistive tech, because the status
-                  // badge and description live inside it.
+                  // Only the radio is a tab stop; keep the badge and description exposed to assistive tech.
                   tabIndex={-1}
                   className="min-w-0 cursor-pointer text-left"
                   onClick={() => void selectMethod(method)}
@@ -843,10 +775,6 @@ export function GitHubSection({
                                 aria-hidden="true"
                               />
                             </Button>
-                            {/* Without a Cancel this card was a trap: it
-                                re-opens from the same signed-out state it
-                                describes, so dismissing another row's card
-                                brought it straight back. */}
                             <Button
                               type="button"
                               variant="ghost"
@@ -1004,9 +932,7 @@ export function GitHubSection({
                             size="sm"
                             onClick={() => {
                               setPat("");
-                              // Reset the reveal too — it used to persist, so
-                              // reopening the card rendered the next pasted
-                              // token in cleartext.
+                              // Keep the next pasted token masked.
                               setShowPat(false);
                               setSetupMethod(null);
                             }}
@@ -1018,11 +944,7 @@ export function GitHubSection({
                     )}
                   </div>
                 ) : selected &&
-                  // `configured` alone hid the explanation for the one state
-                  // that most needs it: a probe that errored reports
-                  // health:"unavailable" with configured:false, and the setup
-                  // card is also suppressed for it — so the row showed a lone
-                  // Refresh button and no reason at all.
+                  // An unavailable probe can be unconfigured but still needs a diagnosis.
                   (summary.configured || summary.health !== "not-connected") ? (
                   <div className="border-border1 col-[2/4] mt-2.5 flex min-w-0 flex-col gap-2.5 border-t pt-3">
                     {summary.health === "connected" ? (
@@ -1093,8 +1015,6 @@ export function GitHubSection({
               aria-hidden="true"
             />
             Couldn’t load GitHub authentication settings.
-            {/* A persistent cold failure keeps controls disabled until retry
-                confirms the current authentication methods. */}
             <Button
               type="button"
               variant="ghost"
@@ -1117,8 +1037,7 @@ export function GitHubSection({
           }}
           onCloseAutoFocus={(event) => {
             event.preventDefault();
-            // The selecting menu item has retired. Return to its persistent
-            // trigger, unless Settings was hidden or replaced in the meantime.
+            // The dialog's menu item is gone; return focus to its trigger only while Settings is active.
             if (surfaceActive) disconnectAppTriggerRef.current?.focus();
           }}
         >
