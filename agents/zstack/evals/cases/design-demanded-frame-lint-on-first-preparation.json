@@ -5,5 +5,5 @@
   "fixedBy": "pr:1175",
   "symptom": "After reload, source-lint findings were absent for a demanded frame until its source was edited; lazy first preparation omitted lint for unchecked frames.",
   "rule": "The first bounded preparation must lint each demanded frame that is unchecked or explicitly relint-marked, and skip only already-checked frames.",
-  "check": "pnpm exec vitest run apps/desktop/src/renderer/features/design-workspace/__tests__/design-frames-changes.test.ts -t 'first preparation|skips already checked'"
+  "check": "pnpm exec vitest run apps/desktop/src/renderer/features/design-workspace/__tests__/design-frames-changes.test.ts"
 }
