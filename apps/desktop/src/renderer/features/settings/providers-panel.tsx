@@ -125,7 +125,7 @@ const API_KEY_PROVIDERS = new Set(Object.keys(PROVIDER_VENDOR_CONFIG));
 
 const PROVIDER_ORDER = ["claude", "codex", "cursor"] as const;
 
-// Keep the hint aligned with the runtime's bundled executable resolution.
+// Match bundled executable selection in claude-sdk/adapter.ts and codex/binary-resolver.ts.
 function ExecutablePathHint({
   agentId,
   name,
@@ -301,7 +301,7 @@ function LocalProvidersPanel({ surfaceActive }: { surfaceActive: boolean }) {
     }
   }, [bridgeStatus, visible]);
 
-  // The socket can reconnect before the respawned engine serves agent lists.
+  // A respawn can connect before listing works; ENGINE_READY retries without invalidating fresh data.
   useEffect(() => {
     if (!visible || !bridge) return;
     return bridge.on("ENGINE_READY", () => {
@@ -571,7 +571,7 @@ function ProviderCard({
     if (!trimmed) return;
     setSavingApiKey(true);
     try {
-      // Reject an invalid key without blocking local saves when validation is unavailable.
+      // Reject known invalid keys; keychain saves still work if validation is unavailable.
       if (bridge) {
         try {
           const resp = await bridge.request<AgentKeyValidatedMessage>(

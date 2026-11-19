@@ -17,7 +17,7 @@ export interface ProviderPrefs {
   gatewayBaseUrl?: string;
 }
 
-// Keep the legacy storage prefix readable; API key values live in the native secret store.
+// Preserve this persisted preference prefix; API key values live in the keychain.
 const KEY_PREFIX = "provider-prefs:";
 const listeners = new Set<() => void>();
 const hydrated = new Map<string, ProviderPrefs>();
@@ -168,14 +168,14 @@ const PROVIDER_ENV_CONFIG: Record<string, ProviderEnvConfig> = {
     envVar: "OPENAI_API_KEY",
     secretAccount: SECRET_ACCOUNTS.OPENAI_API_KEY,
   },
-  // Subscription credentials are delivered privately by the native runtime, not as a pasted key.
+  // Electron main sends subscription credentials to the engine's private stdin, not through the renderer.
   cursor: {
     envVar: "CURSOR_API_KEY",
     secretAccount: SECRET_ACCOUNTS.CURSOR_API_KEY,
   },
 };
 
-// Display surfaces get environment variable names, never secret values.
+// The display gets variable names and keychain slots, not key values.
 export const PROVIDER_KEY_ENV_VARS: ReadonlyArray<{
   agentId: string;
   vendor: string;
