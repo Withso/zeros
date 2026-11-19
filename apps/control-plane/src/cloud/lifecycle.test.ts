@@ -372,6 +372,46 @@ describe("cloud v2 lifecycle", () => {
     expect(timedOut.store.checkpointUploadDone).not.toHaveBeenCalled();
   });
 
+  it("marks a stop stopped only once Boat reports the VM archived", async () => {
+    const f = setup([workspace("stopping", { boatSandboxId: "bx_abc1", checkpoint: SAVED })]);
+    vi.mocked(f.compute.inspect).mockResolvedValueOnce({ name: "zeros-alpha-6f2b7c1e", state: "archiving" });
+    await f.lifecycle.tick();
+    expect(f.compute.inspect).toHaveBeenCalledTimes(2);
+    expect(f.compute.stop).toHaveBeenCalledBefore(vi.mocked(f.compute.inspect));
+    expect(f.store.transition).toHaveBeenCalledExactlyOnceWith(WS, ["stopping"], "stopped", { stopGeneration: "2", revoke: true });
+  });
+
+  it("keeps stopping, and asks Boat again, while Boat has not archived the VM after accepting the stop", async () => {
+    for (const states of [["idle"], Array(13).fill("archiving")]) {
+      const f = setup([workspace("stopping", { boatSandboxId: "bx_abc1", checkpoint: SAVED })], { logs: true });
+      for (const state of states) vi.mocked(f.compute.inspect).mockResolvedValueOnce({ name: "zeros-alpha-6f2b7c1e", state });
+      await f.lifecycle.tick();
+      expect(f.store.transition).not.toHaveBeenCalled();
+      expect(f.store.revoke).not.toHaveBeenCalled();
+      expect(f.store.defer).toHaveBeenCalledWith(WS, "stopping", 10_000, { failure: true, stopGeneration: "2" });
+      expect(f.logs.warn).toEqual(["[cloud-v2] stopping step failed (provider_stop_incomplete)"]);
+    }
+    // A stop that never takes ends failed, never stopped with the VM still running.
+    const last = setup([workspace("stopping", { boatSandboxId: "bx_abc1", checkpoint: SAVED, attempts: 8 })]);
+    vi.mocked(last.compute.inspect).mockResolvedValueOnce({ name: "zeros-alpha-6f2b7c1e", state: "idle" });
+    await last.lifecycle.tick();
+    expect(last.store.transition).toHaveBeenCalledExactlyOnceWith(WS, ["stopping"], "failed", { errorCode: "provider_stop_incomplete", stopGeneration: "2" });
+  });
+
+  it("finishes a stop whose VM Boat no longer has once the stop was accepted, keeping its checkpoint", async () => {
+    const { CloudProviderError } = await import("./provider-error.js");
+    const f = setup([workspace("stopping", { boatSandboxId: "bx_abc1", checkpoint: SAVED })]);
+    vi.mocked(f.compute.inspect).mockRejectedValueOnce(new CloudProviderError("provider_not_found", "Boat API request did not succeed", false, { httpStatus: 404 }));
+    await f.lifecycle.tick();
+    expect(f.store.transition).toHaveBeenCalledExactlyOnceWith(WS, ["stopping"], "stopped", { stopGeneration: "2", revoke: true });
+    // So does a first stop, by the checkpoint it has just saved.
+    const first = setup([workspace("stopping", { boatSandboxId: "bx_abc1" })], { checkpoints: checkpointsFake() });
+    vmCommands(first);
+    vi.mocked(first.compute.inspect).mockRejectedValueOnce(new CloudProviderError("provider_not_found", "Boat API request did not succeed", false, { httpStatus: 404 }));
+    await first.lifecycle.tick();
+    expect(first.store.transition).toHaveBeenCalledExactlyOnceWith(WS, ["stopping"], "stopped", { stopGeneration: "2", revoke: true });
+  });
+
   it("leaves the VM to a later stop once this one has been replaced", async () => {
     const f = setup([workspace("stopping", { boatSandboxId: "bx_abc1" })], { checkpoints: checkpointsFake() });
     vmCommands(f);
@@ -1523,6 +1563,7 @@ describe("cloud v2 checkpoint retries", () => {
     await f.lifecycle.tick();
     expect(f.compute.fork).not.toHaveBeenCalled();
     expect(f.store.beginCheckpointFork).not.toHaveBeenCalled();
+    expect(f.compute.stop).not.toHaveBeenCalled();
     expect(f.store.checkpointRetryNext).toHaveBeenCalledExactlyOnceWith(WS, "2", { at: new Date(NOW + 60_000) });
     // Any other state waits out the ordinary backoff.
     const odd = setup([], { checkpoints: checkpointsFake(), checkpointRetry: true, retries: [retryRow({}, { attempts: 2 })] });
@@ -1530,6 +1571,23 @@ describe("cloud v2 checkpoint retries", () => {
     await odd.lifecycle.tick();
     expect(odd.compute.fork).not.toHaveBeenCalled();
     expect(odd.store.checkpointRetryNext).toHaveBeenCalledWith(WS, "2", { at: new Date(NOW + 60 * 60_000) });
+    // A stop Boat accepted but never finished leaves the VM running: ask Boat to stop it again.
+    expect(odd.compute.stop).toHaveBeenCalledExactlyOnceWith("bx_abc1");
+    const { CloudProviderError } = await import("./provider-error.js");
+    const refused = setup([], { checkpoints: checkpointsFake(), checkpointRetry: true, retries: [retryRow()] });
+    vi.mocked(refused.compute.inspect).mockResolvedValueOnce({ name: "zeros-alpha-6f2b7c1e", state: "idle" });
+    vi.mocked(refused.compute.stop).mockRejectedValueOnce(new CloudProviderError("provider_request_failed", "Boat API request did not succeed", false, { httpStatus: 409 }));
+    await refused.lifecycle.tick();
+    expect(refused.compute.fork).not.toHaveBeenCalled();
+    expect(refused.store.checkpointRetryNext).toHaveBeenCalledWith(WS, "2", { at: new Date(NOW + 10 * 60_000) });
+    expect(refused.logs.warn).toEqual(["[cloud-v2] checkpoint retry stop failed (provider_request_failed)"]);
+    // A wake since the claim owns the VM now.
+    const woken = setup([], { checkpoints: checkpointsFake(), checkpointRetry: true, retries: [retryRow()] });
+    vi.mocked(woken.compute.inspect).mockResolvedValueOnce({ name: "zeros-alpha-6f2b7c1e", state: "running" });
+    vi.mocked(woken.store.stopCurrent).mockResolvedValueOnce(false);
+    await woken.lifecycle.tick();
+    expect(woken.store.stopCurrent).toHaveBeenCalledWith(WS, "2", "stopped");
+    expect(woken.compute.stop).not.toHaveBeenCalled();
   });
 
   it("ends the retries when the stopped VM is already gone before forking", async () => {

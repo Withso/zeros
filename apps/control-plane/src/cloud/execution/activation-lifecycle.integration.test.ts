@@ -62,7 +62,7 @@ database("durable activation through provider Stop and real worker routes", () =
     input = { activationId: randomUUID(), action: "prepare", channel: "development", organizationId: f.organizationId,
       workspaceId: f.workspace.id, initiatorUserId: f.viewer.id, operatorUserId: f.admin.id,
       runtimeSha256: "c".repeat(64), reason: "Local fixture qualification of the clean boot gate" };
-    compute = { stop: vi.fn(async () => {}), delete: vi.fn(async () => {}), extendLease: vi.fn(async () => {}) } as unknown as CloudV2Compute;
+    compute = { inspect: vi.fn(async () => ({ name: null, state: "archived" })), stop: vi.fn(async () => {}), delete: vi.fn(async () => {}), extendLease: vi.fn(async () => {}) } as unknown as CloudV2Compute;
     lifecycle = new CloudV2Lifecycle({ store: f.cp.store, compute,
       runtime: { sha256: input.runtimeSha256, url: async () => "https://example.test/runtime" },
       publicKeys: [generateKeyPairSync("ed25519").publicKey.export({ format: "pem", type: "spki" }).toString()],
