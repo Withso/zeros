@@ -10,7 +10,7 @@ Save sources before canvas references. Re-read changed files before edits; do no
 
 ## Zeros product designs
 
-This directory holds mockups of the Zeros desktop app itself. docs/design-system.md is the normative guide (§11 covers this directory); these rules adapt it to frames.
+This directory holds mockups of the Zeros desktop app itself. Use the zeros-ui skill and current renderer primitives for the shared design system; these rules apply it to frames.
 
 - meta/canvas.json imports the app's own styles, read live from this checkout: styles/zeros-tokens.css as a tailwind source (compiled for each frame's classes), styles/semantic-tokens.css, the five styles/global/*.css modules that styles/globals.css imports (in its order: 1px lucide strokes, agent markdown under [data-zeros-root], scrollbars, keyframes), the component stylesheets the renderer imports (composer pills and editor, settings page, conversation summary) and the sonner and xterm vendor CSS, all as css sources (a css source does not follow @import, so each module is declared). Every frame receives them automatically; keep the declarations. Prefer the app's Tailwind utilities (bg-bg2, p-3, rounded-md, text-xs) over custom classes, and never reuse a utility's name for a custom class.
 - The New pages frames are the app's own markup, captured from renderer components mounted with fixture data; they carry its exact classes and data/aria state. Recapture rather than hand-edit them when the app changes.

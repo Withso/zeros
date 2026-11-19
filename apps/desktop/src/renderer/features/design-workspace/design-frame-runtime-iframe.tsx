@@ -112,7 +112,7 @@ function scheduleIdle(work: () => void): () => void {
 
 type DesignDocumentBuffer = "displayed" | "incoming";
 const FRAME_HANDSHAKE_TIMEOUT_MS = 5_000;
-/** A load that fails once is transient (docs/design-system.md): the frame
+/** A load that fails once is transient: the frame
  * reloads once, silently, and shows its error only if that fails too. */
 const FRAME_LOAD_RETRY_DELAY_MS = 1_500;
 

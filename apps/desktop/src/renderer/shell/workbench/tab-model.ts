@@ -43,7 +43,7 @@ export type ReviewSubtab =
   | "commits"
   /** The published pull request diff, where Post to PR works. It has no
    *  sub-tab: the Overview rail's Open changes reaches it until posting
-   *  moves to the Changes tab (docs/design-implementation/plans.md §1.2). */
+   *  moves to the Changes tab. */
   | "changes";
 export type ChangesViewMode = "flat" | "tree";
 export type ViewerMode = "diff" | "preview" | "edit";

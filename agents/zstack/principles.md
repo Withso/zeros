@@ -95,7 +95,7 @@ number instead of repeating them.
     refresh subscribers, install inventories, runtime pins in both placements,
     smoke callers and accessible names. One admission fence covers every entry
     point. After deleting code, search for its path across `scripts/`,
-    `agents/`, `.github/` and `docs/`, and fold retired checks to their Local
+    `agents/` and `.github/`, and fold retired checks to their Local
     branch. Settings pages are listed per owner: a moved control updates every
     owner's list and fallback page.
     Cases: `agent-runtime-pin-parity`, `codex-cloud-pin-parity`,

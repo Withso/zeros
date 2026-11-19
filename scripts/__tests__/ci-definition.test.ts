@@ -47,7 +47,7 @@ describe("CI-definition paths", () => {
   });
 
   it.each([
-    "docs/ci.md",
+    "SECURITY.md",
     "apps/desktop/src/renderer/app-shell.tsx",
     "scripts/__tests__/ci-scope.test.ts",
     "scripts/ui-smoke-design-git-menu.mjs",

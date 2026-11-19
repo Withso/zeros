@@ -96,8 +96,7 @@
 
    ─── USAGE ─────────────────────────────────────────────────
    Which token paints what, the component rules, and the checks that enforce
-   them: docs/design-system.md. Values and contrast per theme (generated):
-   docs/design-tokens.md. Every declared fg/bg pairing must pass
+   them: agents/skills/zeros-ui.md. Every declared fg/bg pairing must pass
    styles/policy/contrast-contract.json in BOTH themes; after editing a value
    in styles/tokens/ run `pnpm design:docs` and `pnpm check:ui`.
    ============================================================ */
@@ -120,7 +119,7 @@
  *     electron/ipc, read as the `!` important modifier plus a utility;
  *   - `[electron:rebuild]`, `[updater:debug]` — package.json script names;
  *   - `bg-white`, `text-gray-500`, `space-y-5`, `mt-3.5` — classes BANNED
- *     by docs/design-system.md and enforced by check:ui, present only
+ *     by the zeros-ui skill and enforced by check:ui, present only
  *     because the docs and the design prototypes under styles/Artifacts
  *     name them. Prose describing a class compiled that class, so the ban
  *     was enforced at the call site and quietly undone at build time.

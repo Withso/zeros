@@ -144,7 +144,7 @@ describe("CI scope job mapping", () => {
   });
 
   it("selects jobs from check predicates while keeping mandatory jobs on", () => {
-    expect(jobs([change("docs/local-development.md")])).toEqual({
+    expect(jobs([change("SECURITY.md")])).toEqual({
       build: false,
       "control-plane-db": false,
       "control-plane-static": true,
@@ -182,7 +182,7 @@ describe("CI scope job mapping", () => {
       );
     }
     expect(
-      jobs([change("docs/local-development.md")], ["ci:ui-smoke"]),
+      jobs([change("SECURITY.md")], ["ci:ui-smoke"]),
     ).toHaveProperty("ui-smoke", true);
   });
 
@@ -316,18 +316,19 @@ describe("CI scope path ownership", () => {
     expect(decide([change(newPath, "R100", "package.json")]).full).toBe(true);
   });
 
-  it("uses the documentation allowlist only for audited modifications", () => {
-    expect(selected(decide([change("docs/local-development.md")]))).toEqual([
+  it("selects layout checks for removed or reintroduced docs and limits the docs-only lane", () => {
+    expect(selected(decide([change("SECURITY.md")]))).toEqual([
       "docs-only",
     ]);
     expect(
-      selected(decide([change("docs/local-development.md", "D")])),
+      selected(decide([change("SECURITY.md", "D")])),
     ).toEqual(["repository-contracts"]);
     expect(selected(decide([change("docs/new-guide.md", "A")]))).toEqual([
       "repository-contracts",
     ]);
-    expect(decide([change("docs/new-guide.md")]).full).toBe(true);
-    expect(selected(decide([change("docs/design-system.md")]))).toEqual([
+    expect(selected(decide([change("docs/new-guide.md")]))).toEqual(["repository-contracts"]);
+    expect(selected(decide([change("docs/legacy.md", "D")]))).toEqual(["repository-contracts"]);
+    expect(selected(decide([change("agents/skills/zeros-ui.md")]))).toEqual([
       "desktop-renderer",
       "repository-contracts",
     ]);
@@ -347,7 +348,7 @@ describe("CI scope path ownership", () => {
       "A",
       ["design-containment", "desktop-engine", "macos", "packaging"],
     ],
-    ["docs/agent-control.md", "M", ["docs-only"]],
+    ["CONTRIBUTING.md", "M", ["docs-only"]],
   ])("owns %s (%s) without the all-lanes fallback", (file, status, lanes) => {
     const decision = decide([change(file, status)]);
     expect(decision.full).toBe(false);
@@ -370,7 +371,7 @@ describe("CI scope path ownership", () => {
       ],
     ).toBe(false);
     expect(
-      decide([change("docs/deployment-environments.md")]).lanes[
+      decide([change("apps/control-plane/.env.example")]).lanes[
         "control-plane-db"
       ],
     ).toBe(true);
@@ -481,7 +482,7 @@ describe("CI scope additive requests", () => {
   });
 
   it("allows only ci:full or ci:ui-smoke to add full composer smoke", () => {
-    const full = decide([change("docs/local-development.md")], ["ci:full"]);
+    const full = decide([change("SECURITY.md")], ["ci:full"]);
     expect(Object.values(full.lanes).every((value) => value === true)).toBe(
       true,
     );
@@ -496,7 +497,7 @@ describe("CI scope additive requests", () => {
       "ci:web",
     ]) {
       expect(
-        decide([change("docs/local-development.md")], [label]).lanes[
+        decide([change("SECURITY.md")], [label]).lanes[
           "ui-smoke"
         ],
       ).toBe(false);
@@ -505,7 +506,7 @@ describe("CI scope additive requests", () => {
 
   it("selects macOS checks when requested above a documentation floor", () => {
     const decision = decide(
-      [change("docs/local-development.md")],
+      [change("SECURITY.md")],
       ["ci:macos"],
     );
     expect(selectChecks(POLICY, decision)).toContain("source-sync-macos");

@@ -26,7 +26,7 @@ export function EmptyStateError({
   );
 }
 
-/** The one empty state (docs/design-system.md §0): a 32px fg3 icon over one
+/** The one empty state: a 32px fg3 icon over one
  *  13/18 fg2 line, centred in the space it fills, plus one action only when
  *  it creates or configures something. A titled state (a named thing that
  *  hasn't started, such as Setup or Dev server) puts a 13 medium fg1 title

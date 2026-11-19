@@ -119,7 +119,7 @@ snapshots/diff/
 
 # Claude Code runtime artifacts (locks, scheduled-task state). The exceptions
 # are the generated, team-shared skills (scripts/design-system/build-design-docs.mjs
-# writes zeros-ui from docs/design-system.md and zeros-workspaces from RULES.md).
+# writes zeros-ui and zeros-workspaces from agents/skills/).
 .claude/*
 !.claude/skills/
 .claude/skills/*

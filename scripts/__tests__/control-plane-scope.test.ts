@@ -106,10 +106,10 @@ describe("control-plane database scope inputs", () => {
   it("covers every repository path the control-plane sources name", () => {
     const named = controlPlaneSources().flatMap((file) => [
       ...readFileSync(path.join(ROOT, file), "utf8").matchAll(
-        /["'`]((?:apps|docs|packages|scripts)\/[\w./-]+\.[a-z]+)["'`]/g,
+        /["'`]((?:apps|packages|scripts)\/[\w./-]+\.[a-z]+)["'`]/g,
       ),
     ]).map((match) => match[1]!);
-    expect(named).toContain("docs/deployment-environments.md");
+    expect(named.length).toBeGreaterThan(0);
     expect(named.filter((file) => !isControlPlaneDatabaseInput(file))).toEqual([]);
   });
 
@@ -204,7 +204,7 @@ describe("control-plane database scope decision", () => {
         changedFiles: [
           "apps/desktop/src/renderer/app-shell.tsx",
           "apps/desktop/src/engine/git/diff.ts",
-          "docs/ui-interaction-performance.md",
+          "SECURITY.md",
           "apps/control-plane-notes.md",
         ],
       }),
@@ -220,7 +220,7 @@ describe("control-plane database scope decision", () => {
     "packages/protocol/src/cloud-v2-relay.ts",
     "pnpm-lock.yaml",
     "patches/ssh2@1.17.0.patch",
-    "docs/deployment-environments.md",
+    "apps/control-plane/.env.example",
     ".github/workflows/preflight.yml",
     "scripts/ci/control-plane-results.mjs",
   ])("runs the database suites when %s changes", (file) => {

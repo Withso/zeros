@@ -18,7 +18,7 @@
 //   • Classes that compile to NOTHING against the app's Tailwind entry
 //     (scripts/design-system/check-compiled-classes.mjs)
 //
-// Rules and rationale: docs/design-system.md. Run: `pnpm check:ui`.
+// Rules and rationale: agents/skills/zeros-ui.md. Run: `pnpm check:ui`.
 // Exit code is 0 (clean) or 1 (violations).
 // ============================================================
 import { execFileSync } from "node:child_process";
@@ -75,7 +75,7 @@ const ALLOWED_FONT_SIZES_PX = new Set([
 ]);
 const ALLOWED_RADII_PX = new Set([0, 4, 6, 8, 12]);
 // Spacing scale for hand-written CSS — the same px steps the Tailwind spacing
-// utilities produce (0.5 → 2px … 12 → 48px), see docs/design-system.md.
+// utilities produce (0.5 → 2px … 12 → 48px), see agents/skills/zeros-ui.md.
 // 1px is also allowed for column seams and dividers.
 const ALLOWED_SPACE_PX = new Set([
   0, 1, 2, 4, 6, 8, 10, 12, 14, 16, 20, 24, 28, 32, 40, 48,
@@ -403,7 +403,7 @@ function scanFile(absPath) {
       push(
         rel,
         ln,
-        "Primitive token referenced outside zeros-tokens.css — use a semantic token (e.g. --bg1, --fg2, --red-primary; see docs/design-system.md).",
+        "Primitive token referenced outside zeros-tokens.css — use a semantic token (e.g. --bg1, --fg2, --red-primary; see agents/skills/zeros-ui.md).",
       );
     }
 
@@ -435,7 +435,7 @@ function scanFile(absPath) {
         push(
           rel,
           ln,
-          `Raw palette ramp "${m[0]}" — numeric steps (red-50…950) are private. Use a family anchor: text-<family>-primary | bg-<family>-bg | text-<family>-fg (see docs/design-system.md).`,
+          `Raw palette ramp "${m[0]}" — numeric steps (red-50…950) are private. Use a family anchor: text-<family>-primary | bg-<family>-bg | text-<family>-fg (see agents/skills/zeros-ui.md).`,
         );
       }
     }
@@ -579,7 +579,7 @@ function scanFile(absPath) {
             push(
               rel,
               ln,
-              `Off-scale ${spaceMatch[1]} value: ${n}px — snap to the spacing scale (docs/design-system.md).`,
+              `Off-scale ${spaceMatch[1]} value: ${n}px — snap to the spacing scale (agents/skills/zeros-ui.md).`,
             );
           }
         }
@@ -1031,6 +1031,6 @@ for (const [file, vs] of [...byFile.entries()].sort()) {
   console.log("");
 }
 console.log(
-  "Fix violations above. docs/design-system.md maps UI needs to components and tokens.",
+  "Fix violations above. agents/skills/zeros-ui.md maps UI needs to components and tokens.",
 );
 process.exit(1);

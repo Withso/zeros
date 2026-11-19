@@ -94,7 +94,7 @@ export async function runKeyboardFocusSmoke({ page, check }) {
       await expect(field).toBeFocused();
       await expect(field).toHaveValue("typing stays here");
       // A click or typing shows only the caret; Tab brings the
-      // highlighted-bright edge (docs/design-system.md, rule 7).
+      // highlighted-bright edge.
       const highlighted = await field.evaluate((element) => {
         const probe = document.createElement("span");
         probe.style.color = "var(--highlighted-bright)";

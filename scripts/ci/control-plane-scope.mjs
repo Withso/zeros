@@ -10,7 +10,7 @@
 // still run on every change.
 //
 // The inputs include the shared protocol parity tests, model catalog and Dev
-// provisioning helpers, plus migration operator documentation.
+// provisioning helpers, plus migration operator files.
 // scripts/__tests__/control-plane-scope.test.ts derives the actual import
 // closure of every control-plane source and test file and fails if a file it
 // reaches is missing below, so the list cannot silently fall behind.
@@ -83,8 +83,6 @@ export const CONTROL_PLANE_DATABASE_INPUTS = Object.freeze([
   "pnpm-lock.yaml",
   "pnpm-workspace.yaml",
   "tsconfig.json",
-  // Operator documents migrate.test.ts checks for complete approval commands.
-  "docs/deployment-environments.md",
   "scripts/migration-expand-exceptions.ts",
   // This gate itself.
   ".github/workflows/preflight.yml",

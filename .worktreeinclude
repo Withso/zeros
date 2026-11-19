@@ -57,9 +57,6 @@
 #                               already materialises it. Seeding a tracked path
 #                               would copy the main checkout's working-tree
 #                               version over the branch's own.
-#   docs/                       same reason — TRACKED as of 2026-07-28. It used
-#                               to be seeded from here, and that is exactly what
-#                               pushed the create request past the cap (above).
 #   node_modules/               installed by the workspace setup script; copying
 #                               a dependency tree is slower and less correct
 #                               than running the install.

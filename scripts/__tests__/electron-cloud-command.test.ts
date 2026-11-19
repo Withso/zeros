@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { electronCloudCommand } from "../electron-cloud.mjs";
 
 const SHA = "a".repeat(64);
@@ -9,9 +9,6 @@ describe("pnpm electron:cloud", () => {
     const { scripts } = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8"));
     expect(scripts["electron:cloud"]).toBe("node scripts/electron-cloud.mjs");
     expect(scripts).not.toHaveProperty("cloud:local");
-    expect(existsSync(new URL("../../docs/electron-cloud.md", import.meta.url))).toBe(true);
-    for (const name of ["local-development", "cloud-workspaces"])
-      expect(readFileSync(new URL(`../../docs/${name}.md`, import.meta.url), "utf8")).toContain("electron-cloud.md");
   });
   it("maps each mode to the local Dev launcher with this branch's runtime pin", () => {
     expect(electronCloudCommand([], { ZEROS_CLOUD_V2_RUNTIME_SHA256: SHA })).toEqual({ action: "start", args: [], runtime: SHA });

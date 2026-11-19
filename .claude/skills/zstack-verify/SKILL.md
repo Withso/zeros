@@ -68,7 +68,7 @@ pnpm --dir apps/control-plane cloud-v2:gate0 --local --runtime <runtime-sha256>
 - Run it only with the task's cloud-provider authorization, against this
   checkout's backend whose `CLOUD_V2_RUNTIME_SHA256` matches `--runtime`
   (`electron:cloud` takes `--runtime` or `ZEROS_CLOUD_V2_RUNTIME_SHA256`). No
-  Railway service or PlanetScale branch is created; see `docs/electron-cloud.md`.
+  Railway service or PlanetScale branch is created; see `scripts/electron-cloud.mjs`.
 - It creates one disposable workspace from the existing Cloud Computer, runs
   native Claude, Codex and Cursor turns and terminal, file and Git round trips,
   reads the mirrored history while the VM is stopped, wakes it once, then
@@ -76,7 +76,7 @@ pnpm --dir apps/control-plane cloud-v2:gate0 --local --runtime <runtime-sha256>
 - It starts a real VM: run it once per tested change, never in a loop. It
   reports only the failing stage; capture the control-plane logs and the
   workspace row through the API before any cleanup.
-- After deploy, `pnpm alpha:probe` measures Alpha (`docs/electron-cloud.md`).
+- After deploy, `pnpm alpha:probe` measures Alpha (`scripts/electron-cloud.mjs`).
 - Provider keys stay in `.env.agent` (Alpha and test only) or Actions; never
   copy them into the checkout or into output.
 - Run a control-plane-generated VM script (runtime install, checkpoint,

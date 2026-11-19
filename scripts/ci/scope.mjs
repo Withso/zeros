@@ -113,8 +113,8 @@ function strings(value, name, { empty = false } = {}) {
   );
 }
 
-function patterns(value, name) {
-  strings(value, name);
+function patterns(value, name, options) {
+  strings(value, name, options);
   for (const glob of value) globToRegExp(glob);
 }
 
@@ -173,7 +173,7 @@ export function validatePolicy(policy) {
     "allowed_statuses",
   ]);
   patterns(policy.documentation.include, "documentation.include");
-  patterns(policy.documentation.exclude, "documentation.exclude");
+  patterns(policy.documentation.exclude, "documentation.exclude", { empty: true });
   strings(policy.documentation.allowed_paths, "documentation.allowed_paths");
   strings(
     policy.documentation.allowed_statuses,

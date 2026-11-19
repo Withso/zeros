@@ -1,7 +1,7 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "description": [
-    "Renovate owns general dependency/security maintenance and monthly GitHub Action pins. The dedicated runtime updater owns the three bundled root SDK/CLI pins and keeps one working PR per provider; see docs/agent-runtime-notifications.md.",
+    "Renovate owns general dependency/security maintenance and monthly GitHub Action pins. The dedicated runtime updater owns the three bundled root SDK/CLI pins and keeps one working PR per provider; see scripts/agent-runtime/.",
     "Keep Dependabot alerts enabled as Renovate input, and Dependabot security-update PRs disabled to avoid duplicate writers. Runtime advisories go to the subscribed tracking issue and require review on the working runtime PR.",
     "Runtime ignoreDeps is scoped to the exact package/file pair and is evaluated before vulnerability overrides. Unrelated direct and transitive advisory fixes retain the existing vulnerabilityAlerts policy. The control-plane Codex auth keeper remains a separate manual migration/qualification boundary.",
     "This open-source repository currently accepts maintainer and automation work. Automated maintenance is labelled automated and excluded from generated release notes.",

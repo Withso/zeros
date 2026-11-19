@@ -8,7 +8,7 @@ import { RadioGroup, RadioGroupItem } from "../radio-group";
 const source = (file: string) =>
   readFileSync(`apps/desktop/src/renderer/shared/ui/primitives/${file}`, "utf8");
 
-// docs/design-system.md: hovered or selected rows step text up one tier, so
+// Hovered or selected rows step text up one tier, so
 // metadata (text-muted-fg) inside a highlighted menu row reads at fg3 — the
 // contrast contract only clears muted-fg on REST surfaces, not on bg3-hover.
 describe("selected menu rows step metadata up a tier", () => {

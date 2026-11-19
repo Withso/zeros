@@ -1,6 +1,6 @@
 // Release candidates: a staff-only opt-in that lets the Production app follow the
 // rolling `rc` prerelease, where every Production release is published before it
-// is promoted to Latest (docs/release-candidates-roadmap.md). The choice is kept in
+// is promoted to Latest. The choice is kept in
 // main so it applies at launch, before any renderer or sign-in exists.
 import { app } from "electron";
 import fs from "node:fs";

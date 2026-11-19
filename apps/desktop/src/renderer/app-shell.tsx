@@ -1301,7 +1301,7 @@ export function AppShell() {
     <AppearanceProvider>
       <AuthProvider onStoredIdentity={installAccountPresentationIdentity}>
         {/* The single app-wide toast surface: never add inline pills or banners for
-            transient feedback (docs/design-system.md, Feedback). Above the AuthGate
+            transient feedback. Above the AuthGate
             so toasts, including auto-update, render on the login screen. */}
         <Toaster />
         {/* Team sharing 3B: one Reassign dialog, opened from a row, the details or a no-Creator refusal. */}

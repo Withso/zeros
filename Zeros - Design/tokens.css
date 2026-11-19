@@ -31,8 +31,8 @@
 }
 
 :root {
-  /* Design-only names for values the app writes as Tailwind utilities
-     (docs/design-system.md §4 and §7). --space-N is Tailwind step N, so
+  /* Design-only names for values the app writes as Tailwind utilities.
+     --space-N is Tailwind step N, so
      padding: var(--space-3) implements as p-3; half steps belong inside
      controls. */
   --text-sm: 0.875rem;

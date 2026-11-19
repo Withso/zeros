@@ -587,7 +587,7 @@ const workspacesSchema = z
   })
   .partial();
 
-/** Browser-use policy (docs/agent-control.md). Every key has a row in
+/** Browser-use policy. Every key has a row in
  * Settings > Browser. Every agent uses the in-app Zeros browser; Claude uses
  * its official Chrome integration instead when chosen. Keep the machine trust
  * posture in the engine-owned settings file; unknown keys in this table are
@@ -613,7 +613,7 @@ const browserSchema = z
   })
   .partial();
 
-/** Computer-use policy (docs/agent-control.md). Every key has a row in
+/** Computer-use policy. Every key has a row in
  * Settings > General. Zeros computer use drives Mac apps through the bundled
  * Cua Driver for every agent, Codex included. Like `[browser]`, unknown keys
  * are never projected, so no hand-written switch can widen what agents may

@@ -15,6 +15,7 @@
 // ============================================================
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { UI_BRIEF_FILE } from "./build-design-docs.mjs";
 
 import {
   cssDefinedClasses,
@@ -24,12 +25,8 @@ import {
   rendererSourceFiles,
 } from "./check-compiled-classes.mjs";
 
-// Agent-facing design docs. A `section` limits a shared file to its UI part.
-// docs/design-system-history.md is deliberately excluded: it records names
-// that no longer exist.
 export const CHECKED_DOCS = [
-  { rel: "docs/design-system.md" },
-  { rel: "docs/design-tokens.md" },
+  { rel: UI_BRIEF_FILE },
   { rel: "RULES.md", section: "## 3. UI and styling" },
 ];
 

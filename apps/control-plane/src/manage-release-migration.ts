@@ -2,7 +2,7 @@
 //
 // Hosted control planes boot with DATABASE_MIGRATIONS_ON_BOOT=false, so a
 // release that adds migrations must apply them with the strict runner before
-// the new build is promoted (docs/deployment-environments.md). This tool does
+// the new build is promoted. This tool does
 // that from an operator workspace with only a PlanetScale service token:
 //
 //   plan (default)  mint a short-lived owner role, print the pending
