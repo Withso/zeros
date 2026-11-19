@@ -19,6 +19,7 @@ import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import {
   ChevronDown,
   ChevronRight,
+  Component as ComponentGlyph,
   Diamond,
   Eye,
   EyeClosed,
@@ -52,7 +53,8 @@ import {
 import { useDesignRuntimeStore } from "./state/design-runtime-store";
 import { useDesignHistoryPresentation, useDesignHistorySelection } from "./state/design-history-presentation";
 import { noteDesignFrameIntent } from "./state/design-frame-intent";
-import { designLayerDisplayName, designLayerRowKind } from "./state/design-component-parts";
+import { designComponentIdentityLabel, designFrameIsComponent, designLayerDisplayName, designLayerRowKind } from "./state/design-component-parts";
+import { designDeclaredVariants, useDesignComponentVariantStore } from "./state/design-component-variants";
 import { useActiveWorkspace } from "../../state/use-active-workspace";
 import { useReadRecovery } from "../../state/use-read-recovery";
 import { useDocumentActive } from "../../state/use-document-active";
@@ -214,7 +216,7 @@ export function DesignLayerRowIcon({ kind, node }: {
   kind: ReturnType<typeof designLayerRowKind>;
   node: DesignRuntimeTreeNode;
 }) {
-  if (kind === "instance") return <Diamond data-design-layer-instance="" aria-hidden="true" />;
+  if (kind === "instance") return <Diamond className="text-violet-primary" data-design-layer-instance="" aria-hidden="true" />;
   if (kind === "slot") return <SquareDashed data-design-layer-slot="" aria-hidden="true" />;
   if (node.absolute) return <Scan data-design-layer-absolute="" aria-hidden="true" />;
   return (
@@ -265,6 +267,8 @@ interface DesignLayerRowActions {
   finishRename(rename: LayerRename, value: string | null): void;
 }
 
+const EMPTY_COMPONENT_VARIANTS: Record<string, string> = Object.freeze({});
+
 function DesignLayerRowName({ rename, name, actions }: {
   rename: LayerRename | null;
   name: string;
@@ -297,7 +301,7 @@ function DesignLayerDisclosure({ open }: { open: boolean }) {
 }
 
 const DesignLayerFrameRow = React.memo(function DesignLayerFrameRow({
-  row, rowIndex, blockRadius, selected, tabbable, layoutKind, rename, actions,
+  row, rowIndex, blockRadius, selected, tabbable, layoutKind, identity, rename, actions,
 }: {
   row: Extract<DesignPanelRow, { kind: "frame" }>;
   rowIndex: number;
@@ -305,6 +309,7 @@ const DesignLayerFrameRow = React.memo(function DesignLayerFrameRow({
   selected: boolean;
   tabbable: boolean;
   layoutKind: DesignFrameLayoutIconKind;
+  identity: string | null;
   rename: LayerRename | null;
   actions: DesignLayerRowActions;
 }) {
@@ -316,6 +321,7 @@ const DesignLayerFrameRow = React.memo(function DesignLayerFrameRow({
       variant="ghost"
       size="sm"
       data-design-frame-row={frame.file}
+      data-design-frame-component={identity ? "" : undefined}
       data-design-panel-row={row.key}
       className={cn(
         "zd-design-layer-row h-7 w-full min-w-0 shrink-0 justify-start gap-1 px-2 text-xs font-normal [&>svg]:size-3.5",
@@ -345,8 +351,9 @@ const DesignLayerFrameRow = React.memo(function DesignLayerFrameRow({
         ) : (
           <span className={DESIGN_LAYER_DISCLOSURE_SPACER} />
         )}
-        {frame.kind === "text" ? <Type /> : <FrameLayoutIcon kind={layoutKind} />}
-        <DesignLayerRowName rename={rename} name={designFrameDisplayName(frame)} actions={actions} />
+        {identity ? <ComponentGlyph className="text-violet-primary fill-current" aria-hidden="true" />
+          : frame.kind === "text" ? <Type /> : <FrameLayoutIcon kind={layoutKind} />}
+        <DesignLayerRowName rename={rename} name={identity ?? designFrameDisplayName(frame)} actions={actions} />
       </div>
     </Button>
   );
@@ -384,6 +391,7 @@ const DesignLayerNodeRow = React.memo(function DesignLayerNodeRow({
         asChild
         data-design-layer-select=""
         data-design-layer-id={layer.node.oid}
+        data-design-layer-component-owner={kind !== "layer" ? "" : undefined}
         data-design-panel-row={row.key}
         role="treeitem"
         variant="ghost"
@@ -581,6 +589,11 @@ function OwnedDesignWorkspaceSidebarPanels({
     : null;
   const [rename, setRename] = useState<LayerRename | null>(null);
   const frames = designFrameViews(pageSnapshot);
+  const componentVariants = useDesignComponentVariantStore((state) =>
+    workspaceId
+      ? state.byWorkspace[workspaceId]?.frames ?? EMPTY_COMPONENT_VARIANTS
+      : EMPTY_COMPONENT_VARIANTS,
+  );
   const selectedFrame =
     frames.find((frame) => frame.file === selectedFrameFile) ??
     frames[0] ??
@@ -1485,6 +1498,12 @@ function OwnedDesignWorkspaceSidebarPanels({
                   );
                 }
                 if (row.kind === "frame") {
+                  const componentFrame = "component" in row.frame ? row.frame : null;
+                  const variant = componentFrame ? componentVariants[componentFrame.file] : null;
+                  const identity = componentFrame && designFrameIsComponent(componentFrame)
+                    ? designComponentIdentityLabel(componentFrame.title,
+                        variant && designDeclaredVariants(componentFrame.component).includes(variant) ? variant : null)
+                    : null;
                   const activeFrame = selectedFrame?.file === row.frame.file;
                   // The frame row is "selected" only when the frame itself is
                   // the canvas selection target — merely showing its tree is
@@ -1498,6 +1517,7 @@ function OwnedDesignWorkspaceSidebarPanels({
                       selected={targetSelected(row.frame.file) || (activeFrame && rootSelected)}
                       tabbable={rovingRowKey === row.key}
                       layoutKind={frameLayoutIconsByFile[row.frame.file] ?? "frame"}
+                      identity={identity}
                       rename={rowRename}
                       actions={rowActions}
                     />

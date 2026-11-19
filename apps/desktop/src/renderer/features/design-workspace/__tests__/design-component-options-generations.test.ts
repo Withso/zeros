@@ -3,7 +3,7 @@ import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DesignFrameComponent, DesignFrameInstances } from "@zeros/protocol/design-catalog";
-import type { DesignRuntimeNodeDetails, DesignRuntimeSnapshot } from "@zeros/protocol/design-runtime";
+import { designComponentPartNodeId, type DesignRuntimeNodeDetails, type DesignRuntimeSnapshot } from "@zeros/protocol/design-runtime";
 
 const mocks = vi.hoisted(() => ({ runtime: vi.fn(), applyEdit: vi.fn(async () => ({})) }));
 vi.mock("../../../platform/bridge/design-frame-runtime", () => ({ designFrameRuntime: mocks.runtime }));
@@ -40,13 +40,13 @@ const root = (sourceVersion: string): DesignRuntimeNodeDetails => ({
   layout: { x: 0, y: 0, parentId: null, parentWidth: 400, parentHeight: 300, parentDisplay: "block", parentPosition: "static",
     isContainingBlock: true, widthValue: "fit-content", heightValue: "fit-content" } as never,
 });
-const host = (sourceVersion: string): DesignRuntimeNodeDetails => ({ ...root(sourceVersion), oid: "chip-1", tag: "zd-chip", name: "zd-chip", selector: '[data-oid="chip-1"]' });
+const host = (sourceVersion: string, oid = "chip-1"): DesignRuntimeNodeDetails => ({ ...root(sourceVersion), oid, tag: "zd-chip", name: "zd-chip", selector: `[data-oid="${oid}"]` });
 
 type Target = { file: string; sourceVersion: string; component?: DesignFrameComponent; instances?: DesignFrameInstances; nodeId?: string };
-const instances = (chip: DesignFrameComponent, attributes: Record<string, string> = {}): DesignFrameInstances => ({
+const instances = (chip: DesignFrameComponent, attributes: Record<string, string> = {}, style?: string): DesignFrameInstances => ({
   key: "0".repeat(16),
   components: { chip: { ...chip, file: "components/chip.html", frame: true } },
-  hosts: { "chip-1": { component: "chip", attributes } },
+  hosts: { "chip-1": { component: "chip", attributes, ...(style ? { style } : {}) } },
 });
 
 let container: HTMLDivElement;
@@ -55,7 +55,7 @@ let reactRoot: Root | null = null;
 function render(target: Target) {
   const frame = { file: target.file, sourceVersion: target.sourceVersion, title: "Chip", x: 0, y: 0, z: 0, width: 400, height: 300,
     ...(target.component ? { component: target.component } : {}), ...(target.instances ? { instances: target.instances } : {}) } as never;
-  const details = target.nodeId ? host(target.sourceVersion) : root(target.sourceVersion);
+  const details = target.nodeId ? host(target.sourceVersion, target.nodeId) : root(target.sourceVersion);
   const snapshot = { sourceVersion: target.sourceVersion, revision: 1, tree: [], warnings: [], frame: root(target.sourceVersion),
     viewport: { width: 400, height: 300, scrollX: 0, scrollY: 0 } } as DesignRuntimeSnapshot;
   useDesignRuntimeStore.getState().publishSnapshot("w", "/repo", target.file, snapshot, target.sourceVersion);
@@ -199,5 +199,47 @@ describe("the Options section across new generations of the same target", () => 
     await show({ file: "home/page.html", nodeId: "chip-1", sourceVersion: V1, instances: instances(CHIP) });
     expect(radiusRow()).not.toBeNull();
     expect(written()).toEqual([]);
+  });
+
+  it("shows inherited provenance on focus and marks even equal explicit overrides", async () => {
+    await show({ file: "home/page.html", nodeId: "chip-1", sourceVersion: V1, instances: instances(CHIP) });
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true }));
+      field("Label")!.focus();
+    });
+    await vi.waitFor(() => {
+      const tooltip = [...document.body.querySelectorAll<HTMLElement>('[role="tooltip"]')]
+        .find((candidate) => candidate.textContent?.includes("Inherited from Chip/Default: Send."));
+      expect(tooltip).toBeDefined();
+    }, { timeout: 2500 });
+
+    await show({ file: "home/page.html", nodeId: "chip-1", sourceVersion: V2, instances: instances(CHIP, { label: "Send" }) });
+    expect(container.querySelector('[data-design-component-options="instance"] [data-option-changed]')).not.toBeNull();
+  });
+
+  it("uses a separate Use Default action to clear only the selected variant", async () => {
+    const primary = element("zd-variant", { name: "primary", label: "Primary" });
+    await show({ file: "home/page.html", nodeId: "chip-1", sourceVersion: V1,
+      instances: instances(component(LABEL, RADIUS, primary), { "zd-variant": "primary" }) });
+    const useDefault = container.querySelector<HTMLButtonElement>("[data-design-options-use-default]")!;
+    act(() => useDefault.click());
+    expect(written()[0]!.operations).toContainEqual(expect.objectContaining({
+      type: "node.set-attribute", nodeId: "chip-1", attribute: "zd-variant", value: null,
+    }));
+  });
+
+  it("offers whole-instance Style reset only from the instance root", async () => {
+    const styled = instances(CHIP, {}, "background: red");
+    await show({ file: "home/page.html", nodeId: "chip-1", sourceVersion: V1, instances: styled });
+    const styleTab = [...container.querySelectorAll<HTMLElement>('[role="tab"]')]
+      .find((tab) => tab.textContent?.trim() === "Style")!;
+    act(() => {
+      styleTab.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0 }));
+      styleTab.click();
+    });
+    expect(container.querySelector("[data-design-reset-style]")).not.toBeNull();
+
+    await show({ file: "home/page.html", nodeId: designComponentPartNodeId("chip-1", "cc-label"), sourceVersion: V1, instances: styled });
+    expect(container.querySelector("[data-design-reset-style]")).toBeNull();
   });
 });

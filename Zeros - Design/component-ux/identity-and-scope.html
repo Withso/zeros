@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Component identity — options and scope</title>
+    <link rel="stylesheet" href="../tokens.css" />
+    <link rel="stylesheet" href="../new-pages/frame.css" />
+  </head>
+  <body>
+    <main data-oid="component-ux-root" class="flex h-screen min-h-0 flex-col overflow-hidden bg-bg1 font-sans text-sm text-fg1">
+      <header data-oid="component-ux-topbar" class="border-border1 flex h-10 shrink-0 items-center gap-3 border-b px-4">
+        <span data-oid="component-ux-mark" class="bg-violet-bg text-violet-fg flex size-6 items-center justify-center rounded-sm">
+          <svg viewBox="0 0 16 16" class="size-3.5" aria-hidden="true"><rect x="2" y="2" width="12" height="12" rx="2" fill="currentColor"></rect><path d="M6 6h4v4H6z" fill="var(--bg1)"></path></svg>
+        </span>
+        <span data-oid="component-ux-app" class="text-fg1 text-xs font-semibold">Zeros</span>
+        <span data-oid="component-ux-separator" class="text-fg3">/</span>
+        <span data-oid="component-ux-workspace" class="text-fg2 text-xs">Design workspace</span>
+        <span data-oid="component-ux-spacer" class="flex-1"></span>
+        <span data-oid="component-ux-local" class="bg-bg2 text-fg3 rounded-sm px-2 py-1 text-3xxs">Local · Design</span>
+      </header>
+
+      <div data-oid="component-ux-body" class="relative flex min-h-0 flex-1 overflow-hidden">
+        <section data-oid="component-ux-canvas" class="bg-bg2 flex min-w-0 flex-1 items-center justify-center gap-10 overflow-hidden p-8 pr-80">
+          <article data-oid="component-ux-main-frame" class="bg-bg1 flex h-80 w-64 flex-col overflow-hidden rounded-lg border border-border1">
+            <div data-oid="component-ux-main-frame-title" class="border-border1 text-violet-primary flex h-8 shrink-0 items-center gap-2 border-b px-3 text-3xxs font-medium">
+              <svg viewBox="0 0 24 24" class="size-3 fill-current" aria-hidden="true"><path d="M15.536 11.293a1 1 0 0 0 0 1.414l2.376 2.377a1 1 0 0 0 1.414 0l2.377-2.377a1 1 0 0 0 0-1.414l-2.377-2.377a1 1 0 0 0-1.414 0z"></path><path d="M2.297 11.293a1 1 0 0 0 0 1.414l2.377 2.377a1 1 0 0 0 1.414 0l2.377-2.377a1 1 0 0 0 0-1.414L6.088 8.916a1 1 0 0 0-1.414 0z"></path><path d="M8.916 17.912a1 1 0 0 0 0 1.415l2.377 2.376a1 1 0 0 0 1.414 0l2.377-2.376a1 1 0 0 0 0-1.415l-2.377-2.376a1 1 0 0 0-1.414 0z"></path><path d="M8.916 4.674a1 1 0 0 0 0 1.414l2.377 2.376a1 1 0 0 0 1.414 0l2.377-2.376a1 1 0 0 0 0-1.414l-2.377-2.377a1 1 0 0 0-1.414 0z"></path></svg>
+              Button/Default
+            </div>
+            <div data-oid="component-ux-main-artboard" class="flex flex-1 items-center justify-center p-6">
+              <button data-oid="component-ux-main-button" type="button" class="bg-bg2 text-fg1 h-8 rounded-md px-4 text-xs font-medium">Continue</button>
+            </div>
+          </article>
+
+          <article data-oid="component-ux-instance-frame" class="bg-bg1 flex h-80 w-64 flex-col overflow-hidden rounded-lg border border-border1">
+            <div data-oid="component-ux-instance-frame-title" class="border-border1 text-violet-primary flex h-8 shrink-0 items-center gap-2 border-b border-b-border1 px-3 text-3xxs font-medium">
+              <svg viewBox="0 0 16 16" class="size-3" aria-hidden="true"><path d="M8 1.5 14.5 8 8 14.5 1.5 8 8 1.5Z" fill="none" stroke="currentColor" stroke-width="1.5"></path></svg>
+              Button/Primary · CTA
+            </div>
+            <div data-oid="component-ux-instance-artboard" class="flex flex-1 items-center justify-center p-6">
+              <button data-oid="component-ux-instance-button" type="button" class="bg-bg2 text-fg1 h-8 rounded-md px-4 text-xs font-medium outline outline-1 outline-violet-primary outline-offset-2">Continue</button>
+            </div>
+            <div data-oid="component-ux-instance-size" class="bg-violet-bg text-violet-fg self-center rounded-sm px-2 py-1 text-3xxs tabular-nums">104 × 32</div>
+          </article>
+        </section>
+
+        <div data-oid="component-ux-floating-panel" class="bg-bg1 border-border1 absolute inset-y-0 right-0 z-10 flex w-80 min-h-0 flex-col border-l">
+        <aside data-oid="component-ux-inspector" class="flex min-h-0 flex-1 flex-col bg-bg1">
+          <div data-oid="component-ux-inspector-header" class="border-border1 flex min-h-12 items-center gap-2 border-b px-3 py-2">
+            <svg viewBox="0 0 16 16" class="text-violet-primary size-4 shrink-0" aria-hidden="true"><path d="M8 1.5 14.5 8 8 14.5 1.5 8 8 1.5Z" fill="none" stroke="currentColor" stroke-width="1.5"></path></svg>
+            <div data-oid="component-ux-inspector-name" class="min-w-0 flex-1">
+              <div data-oid="component-ux-identity" class="text-violet-primary truncate text-xs font-medium">Button/Primary</div>
+              <div data-oid="component-ux-nickname" class="text-fg3 truncate text-3xxs">CTA · Instance · edits apply only here</div>
+            </div>
+            <button data-oid="component-ux-edit-main" type="button" class="bg-bg2 text-fg2 h-6 shrink-0 rounded-md px-2 text-3xxs">Edit main</button>
+          </div>
+
+          <div data-oid="component-ux-tabs" role="tablist" aria-label="Inspector" class="border-border1 flex h-9 shrink-0 items-center gap-1 border-b px-2">
+            <button data-oid="component-ux-tab-options" type="button" role="tab" aria-selected="true" class="bg-selected-bg text-fg1 h-7 rounded-md px-3 text-xs font-medium">Options</button>
+            <button data-oid="component-ux-tab-style" type="button" role="tab" aria-selected="false" class="text-fg2 h-7 rounded-md px-3 text-xs">Style</button>
+            <button data-oid="component-ux-tab-css" type="button" role="tab" aria-selected="false" class="text-fg2 h-7 rounded-md px-3 text-xs">CSS</button>
+          </div>
+
+          <div data-oid="component-ux-options" class="min-h-0 flex-1 overflow-y-auto">
+            <div data-oid="component-ux-options-title" class="border-border1 flex h-9 items-center justify-between border-b px-3 text-xs font-medium">
+              <span>Options</span>
+              <span class="flex items-center gap-1" data-oid="component-ux-actions">
+                <button data-oid="component-ux-use-default" type="button" class="text-violet-primary h-6 rounded-md px-2 text-3xxs">Use Default</button>
+                <button data-oid="component-ux-more" type="button" aria-label="More component actions" aria-expanded="true" class="text-fg2 h-6 rounded-md px-2 text-xs">···</button>
+              </span>
+            </div>
+
+            <div data-oid="component-ux-more-menu" class="bg-bg3 border-border2 mx-2 mb-2 rounded-xl border p-1 shadow-[var(--shadow-dropdown)]">
+              <button data-oid="component-ux-reset-all" type="button" class="text-fg2 h-7 w-full rounded-lg px-2 text-left text-3xxs">Reset all overrides…</button>
+            </div>
+
+            <div data-oid="component-ux-preset-row" class="border-border1 flex min-h-10 items-center justify-between border-b px-3 py-2">
+              <span class="text-fg2 text-3xxs" data-oid="component-ux-preset-label">Option preset</span>
+              <span class="bg-violet-bg text-violet-fg rounded-sm px-2 py-1 text-3xxs" data-oid="component-ux-preset-value">Primary</span>
+            </div>
+
+            <div data-oid="component-ux-label-field" class="border-border1 flex flex-col gap-1.5 border-b px-3 py-3">
+              <div data-oid="component-ux-label-heading" class="flex items-center justify-between">
+                <label for="component-ux-label" class="text-fg2 text-3xxs">Label</label>
+                <button data-oid="component-ux-label-reset" type="button" aria-label="Reset Label to inherited value" class="text-violet-primary rounded-sm px-1 text-xs">↶</button>
+              </div>
+              <input id="component-ux-label" data-oid="component-ux-label-input" type="text" value="Continue" class="bg-bg2 text-fg1 h-7 rounded-md px-2 text-xs outline-none" />
+              <span data-oid="component-ux-label-provenance" class="text-fg3 text-3xxs">Overridden · inherits the latest Primary value after reset</span>
+            </div>
+
+            <div data-oid="component-ux-tone-field" class="border-border1 flex items-center justify-between border-b px-3 py-3">
+              <div data-oid="component-ux-tone-copy" class="flex flex-col gap-1">
+                <span class="text-fg2 text-3xxs">Tone</span>
+                <span class="text-fg3 text-3xxs">Inherited from Button/Primary</span>
+              </div>
+              <span data-oid="component-ux-tone-value" class="bg-bg2 text-fg1 rounded-sm px-2 py-1 text-3xxs">Accent</span>
+            </div>
+
+            <div data-oid="component-ux-text-field" class="border-border1 flex items-center justify-between border-b px-3 py-3">
+              <div data-oid="component-ux-text-copy" class="flex flex-col gap-1">
+                <span class="text-fg2 text-3xxs">Text</span>
+                <span class="text-fg3 text-3xxs">Supplied slot content</span>
+              </div>
+              <button data-oid="component-ux-text-reset" type="button" aria-label="Reset text to the main component's default" class="text-fg2 h-6 rounded-md px-2 text-3xxs">Reset text</button>
+            </div>
+
+            <div data-oid="component-ux-reset-all-row" class="flex flex-col gap-2 px-3 py-3">
+              <span data-oid="component-ux-reset-all-scope" class="text-fg3 text-3xxs">Confirmation names supplied content; one undo restores this instance only.</span>
+            </div>
+
+            <div data-oid="component-ux-style-note" class="border-border1 flex items-center justify-between border-t px-3 py-3">
+              <span data-oid="component-ux-style-scope" class="text-fg3 text-3xxs">Style overrides stay local to this instance.</span>
+              <button data-oid="component-ux-reset-style" type="button" class="text-fg2 h-6 rounded-md px-2 text-3xxs">Style · Reset Style</button>
+            </div>
+
+            <div data-oid="component-ux-base-css" class="border-border1 flex flex-col gap-1.5 border-t px-3 py-3">
+              <div data-oid="component-ux-base-css-heading" class="text-fg1 text-xs font-medium">Base CSS</div>
+              <div data-oid="component-ux-base-css-context" class="text-fg3 text-3xxs">Button · preset Primary · interaction state Default</div>
+              <code data-oid="component-ux-base-css-code" class="bg-bg2 text-fg2 rounded-md px-2 py-2 font-mono text-3xxs">background-color: var(--button-bg);</code>
+              <span data-oid="component-ux-base-css-note" class="text-fg3 text-3xxs">A named option preset alone does not block Base CSS.</span>
+            </div>
+
+            <div data-oid="component-ux-state-example" class="border-border1 bg-bg2 flex items-center justify-between gap-2 border-t px-3 py-3">
+              <span data-oid="component-ux-state-copy" class="text-fg3 min-w-0 text-3xxs">State example · Hover shown. Base CSS editing pauses until Default is restored.</span>
+              <button data-oid="component-ux-return-default" type="button" class="bg-bg1 text-fg1 h-6 shrink-0 rounded-md px-2 text-3xxs">Return to Default</button>
+            </div>
+          </div>
+        </aside>
+        <aside data-oid="component-ux-layers" class="border-border1 relative flex h-60 min-h-0 shrink-0 flex-col border-t bg-bg1">
+          <div data-oid="component-ux-layers-head" class="border-border1 flex h-10 shrink-0 items-center px-3 text-xs font-medium">Layers</div>
+          <div data-oid="component-ux-layers-list" class="min-h-0 flex-1 overflow-y-auto">
+            <div data-oid="component-ux-page" class="text-fg3 flex h-8 items-center gap-2 px-3 text-3xxs">
+              <svg viewBox="0 0 16 16" class="size-3.5" aria-hidden="true"><path d="M2 4h12M2 8h12M2 12h12" fill="none" stroke="currentColor" stroke-width="1.4"></path></svg>
+              Component library
+            </div>
+            <div data-oid="component-ux-main-row" class="text-violet-primary flex h-8 items-center gap-2 rounded-md px-3 text-xs">
+              <svg viewBox="0 0 24 24" class="size-3.5 fill-current" aria-hidden="true"><path d="M15.536 11.293a1 1 0 0 0 0 1.414l2.376 2.377a1 1 0 0 0 1.414 0l2.377-2.377a1 1 0 0 0 0-1.414l-2.377-2.377a1 1 0 0 0-1.414 0z"></path><path d="M2.297 11.293a1 1 0 0 0 0 1.414l2.377 2.377a1 1 0 0 0 1.414 0l2.377-2.377a1 1 0 0 0 0-1.414L6.088 8.916a1 1 0 0 0-1.414 0z"></path><path d="M8.916 17.912a1 1 0 0 0 0 1.415l2.377 2.376a1 1 0 0 0 1.414 0l2.377-2.376a1 1 0 0 0 0-1.415l-2.377-2.376a1 1 0 0 0-1.414 0z"></path><path d="M8.916 4.674a1 1 0 0 0 0 1.414l2.377 2.376a1 1 0 0 0 1.414 0l2.377-2.376a1 1 0 0 0 0-1.414l-2.377-2.377a1 1 0 0 0-1.414 0z"></path></svg>
+              <span data-oid="component-ux-main-title" class="min-w-0 flex-1 truncate">Button/Default</span>
+            </div>
+            <div data-oid="component-ux-instance-row" class="bg-bg2-highlight text-fg1 flex h-8 items-center gap-2 rounded-md px-3 text-xs">
+              <svg viewBox="0 0 16 16" class="text-violet-primary size-3.5" aria-hidden="true"><path d="M8 1.5 14.5 8 8 14.5 1.5 8 8 1.5Z" fill="none" stroke="currentColor" stroke-width="1.5"></path></svg>
+              <span data-oid="component-ux-instance-title" class="text-violet-primary min-w-0 flex-1 truncate">Button/Primary · CTA</span>
+            </div>
+            <div data-oid="component-ux-part-row" class="text-violet-primary flex h-8 items-center gap-2 rounded-md pl-9 pr-3 text-xs">
+              <span data-oid="component-ux-part-icon" class="text-fg3">↳</span>
+              <span data-oid="component-ux-part-title" class="min-w-0 flex-1 truncate">Button/Primary · Label</span>
+            </div>
+            <div data-oid="component-ux-other-row" class="text-fg2 flex h-8 items-center gap-2 rounded-md px-3 text-xs">
+              <svg viewBox="0 0 16 16" class="text-fg3 size-3.5" aria-hidden="true"><rect x="2.5" y="2.5" width="11" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="1.3"></rect></svg>
+              <span data-oid="component-ux-other-title" class="min-w-0 flex-1 truncate">Hero section</span>
+            </div>
+          </div>
+        </aside>
+        </div>
+      </div>
+    </main>
+  </body>
+</html>

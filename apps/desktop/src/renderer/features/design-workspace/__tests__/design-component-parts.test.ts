@@ -3,6 +3,9 @@ import { designComponentPartNodeId, designComponentSlotNodeId } from "@zeros/pro
 import { canInsertDesignFrame, designDrawParentAt, designFrameInsertion } from "../design-frame-insertion";
 import {
   designComponentInstanceMark,
+  designComponentInstanceIdentity,
+  designComponentIdentityLabel,
+  designComponentSelectionIdentity,
   designLayerDisplayName,
   designComponentPartHost,
   designFrameIsComponent,
@@ -20,6 +23,14 @@ const component = {
   reach: { "send-label": "structure" as const, mode: "structure" as const },
   boundText: { "cc-send": ["send-label"], "cc-mode": ["mode"], "cc-chip": [] },
 };
+
+describe("component selection identity", () => {
+  it("colors the single main root and instance, but leaves mixed selections neutral", () => {
+    expect(designComponentSelectionIdentity(true, true, "Button/Default", null)).toBe("Button/Default");
+    expect(designComponentSelectionIdentity(true, false, null, "Button/Primary")).toBe("Button/Primary");
+    expect(designComponentSelectionIdentity(false, true, "Button/Default", "Button/Primary")).toBeNull();
+  });
+});
 
 describe("what a person may not type over in a component", () => {
   it("names the option that sets a layer's text on the main", () => {
@@ -115,12 +126,12 @@ describe("where the canvas marks a component", () => {
   const instances = {
     key: "00000000000000a1",
     components: {
-      "chat-composer": { elements: [], reach: {}, file: "home/composer.html", frame: true },
+      "chat-composer": { elements: [{ tag: "zd-variant", attributes: [{ name: "name", value: "primary" }] }], reach: {}, file: "home/composer.html", frame: true },
       "status-chip": { elements: [], reach: {}, file: "components/status-chip.html", frame: false },
     },
     hosts: {
-      "inst-a": { component: "chat-composer", attributes: {} },
-      "inst-b": { component: "status-chip", attributes: {} },
+      "inst-a": { component: "chat-composer", attributes: { "zd-variant": "primary" } },
+      "inst-b": { component: "status-chip", attributes: { "zd-variant": "gone" } },
       "inst-c": { component: "missing", attributes: {} },
     },
   };
@@ -145,6 +156,16 @@ describe("where the canvas marks a component", () => {
   it("marks a selected instance by its host entry, titled by its component", () => {
     expect(designComponentInstanceMark({ instances }, "inst-a", mainTitle)).toEqual({ component: "chat-composer", title: "Chat composer" });
     expect(designComponentInstanceMark({ instances }, "inst-b", mainTitle)).toEqual({ component: "status-chip", title: "Status chip" });
+  });
+
+  it("labels the current component preset while keeping authored instance names alongside it", () => {
+    expect(designComponentIdentityLabel("Chat composer", null)).toBe("Chat composer/Default");
+    expect(designComponentInstanceIdentity({ instances }, "inst-a", mainTitle)).toBe("Chat composer/Primary");
+    expect(designComponentInstanceIdentity({ instances }, "inst-b", mainTitle)).toBe("Status chip/Default");
+    expect(designLayerDisplayName({ instances }, { oid: "inst-a", tag: "zd-chat-composer", name: "zd-chat-composer", layerName: "CTA" } as never, mainTitle))
+      .toBe("Chat composer/Primary · CTA");
+    expect(designLayerDisplayName({ instances }, { oid: designComponentPartNodeId("inst-a", "cc-label"), tag: "span", name: "span", layerName: "Label" } as never, mainTitle))
+      .toBe("Chat composer/Primary · Label");
   });
 
   it("never marks an ordinary layer, a part, an unknown component or an inherited name", () => {

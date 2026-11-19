@@ -11,7 +11,7 @@ import {
 
 // --- IMPORTS ---
 
-import { Component as ComponentGlyph, Diamond } from "lucide-react";
+import { Diamond } from "lucide-react";
 import React, { useLayoutEffect, useMemo, useRef } from "react";
 
 import type { DesignRuntimeNodeDetails } from "@zeros/protocol/design-runtime";
@@ -1161,7 +1161,7 @@ export function DesignSelectionMeasurements({
         >
           {component ? (
             <>
-              <ComponentGlyph
+              <Diamond
                 data-design-component-mark=""
                 className="size-[11px] shrink-0"
                 aria-hidden="true"

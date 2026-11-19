@@ -1,3 +1,4 @@
+import { useCallback, useSyncExternalStore } from "react";
 import { designBackgroundWork } from "./design-background-work";
 import { create } from "zustand";
 import { useShallow } from "zustand/react/shallow";
@@ -10,6 +11,7 @@ import {
 const MAX_LIVE_NODES = 96;
 let publicationSequence = 0;
 const latestPublicationByProperty = new Map<string, number>();
+const noopSubscribe = () => () => {};
 
 /** Capture at history input, before either the mutation lane or runtime reply. */
 export function designLivePreviewSequence(): number {
@@ -335,14 +337,14 @@ export function useDesignLivePreviewStyles(
   frame: string,
   nodeId: string,
   reads?: (property: string) => boolean,
+  active = true,
 ) {
   const key = ownerKey(workspaceId, frame, nodeId);
-  const history = useDesignHistoryPresentation(workspaceId);
+  const history = useDesignHistoryPresentation(workspaceId, active);
   const cutoff = historyCutoff(history, frame, nodeId);
   // The history cutoff is applied inside the selector: re-entering a value
   // after Undo leaves the styles unchanged but makes them visible again.
-  return useDesignLivePreviewStore(
-    useShallow((state) => {
+  const select = useShallow((state: DesignLivePreviewStore) => {
       const styles = state.byOwner[key]?.styles;
       if (!styles || (!reads && cutoff === undefined)) return styles;
       const entries = Object.entries(styles);
@@ -351,8 +353,18 @@ export function useDesignLivePreviewStyles(
       );
       if (visible.length === entries.length) return styles;
       return visible.length ? Object.fromEntries(visible) : undefined;
-    }),
+    });
+  const subscribe = useCallback(
+    (listener: () => void) => active
+      ? useDesignLivePreviewStore.subscribe(() => listener())
+      : noopSubscribe(),
+    [active],
   );
+  const getSnapshot = useCallback(
+    () => active ? select(useDesignLivePreviewStore.getState()) : undefined,
+    [active, select],
+  );
+  return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
 }
 
 export function useDesignLivePreviewValue(
@@ -360,13 +372,24 @@ export function useDesignLivePreviewValue(
   frame: string,
   nodeId: string,
   property: string,
+  active = true,
 ): string | null | undefined {
   const key = ownerKey(workspaceId, frame, nodeId);
-  const history = useDesignHistoryPresentation(workspaceId);
+  const history = useDesignHistoryPresentation(workspaceId, active);
   const cutoff = historyCutoff(history, frame, nodeId);
-  return useDesignLivePreviewStore(
-    (state) => supersededByHistory(key, property, cutoff) ? undefined : state.byOwner[key]?.styles[property],
+  const subscribe = useCallback(
+    (listener: () => void) => active
+      ? useDesignLivePreviewStore.subscribe(() => listener())
+      : noopSubscribe(),
+    [active],
   );
+  const getSnapshot = useCallback(
+    () => active && !supersededByHistory(key, property, cutoff)
+      ? useDesignLivePreviewStore.getState().byOwner[key]?.styles[property]
+      : undefined,
+    [active, cutoff, key, property],
+  );
+  return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
 }
 
 /** A frame's own canvas geometry while a drag or resize paints it. It is
@@ -407,8 +430,9 @@ export function useDesignFrameGeometryLiveValue(
   workspaceId: string,
   frame: string,
   key: DesignFrameGeometryLiveKey,
+  active = true,
 ): number | undefined {
-  return liveNumber(useDesignLivePreviewValue(workspaceId, frame, FRAME_GEOMETRY_OWNER, key));
+  return liveNumber(useDesignLivePreviewValue(workspaceId, frame, FRAME_GEOMETRY_OWNER, key, active));
 }
 
 export function resetDesignLivePreviewForTests(): void {

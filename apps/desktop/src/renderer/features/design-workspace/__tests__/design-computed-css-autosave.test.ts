@@ -29,7 +29,7 @@ function flushBody(): string {
 describe("computed CSS autosave lifecycle", () => {
   it("never commits a draft after the editor unmounts", () => {
     const body = flushBody();
-    const guard = body.indexOf("if (!mountedRef.current) return;");
+    const guard = body.indexOf("if (!mountedRef.current || !activeRef.current) return;");
     const read = body.indexOf("const target = validTargetRef.current;");
 
     expect(guard).toBeGreaterThan(-1);
@@ -58,10 +58,20 @@ describe("computed CSS autosave lifecycle", () => {
     const end = editorSource.indexOf("const flushValidDraft", start);
     const body = editorSource.slice(start, end);
 
-    expect(body).toContain("if (!mountedRef.current) return;");
-    expect(body.indexOf("if (!mountedRef.current) return;")).toBeLessThan(
+    expect(body).toContain("if (!mountedRef.current || !activeRef.current) return;");
+    expect(body.indexOf("if (!mountedRef.current || !activeRef.current) return;")).toBeLessThan(
       body.indexOf("window.setTimeout("),
     );
+  });
+
+  it("does not resolve CSS language or dispatch line hints while its retained panel is inactive", () => {
+    const languageEffect = editorSource.indexOf('void resolveLanguage("computed.css").then((extension) => {');
+    const createEditor = editorSource.indexOf("onCreateEditor={(view) => {");
+    expect(languageEffect).toBeGreaterThan(-1);
+    expect(editorSource.slice(Math.max(0, languageEffect - 120), languageEffect)).toContain("if (!active) return;");
+    expect(createEditor).toBeGreaterThan(-1);
+    expect(editorSource.indexOf("if (activeRef.current) view.dispatch", createEditor)).toBeGreaterThan(createEditor);
+    expect(editorSource).toContain("if (active) viewRef.current?.dispatch({ effects: setCssLineHints.of(lineHints) });");
   });
 
   it("resolves the commit target from the live selection, which is why the guards matter", () => {

@@ -16,10 +16,10 @@ vi.mock("../../../platform/git", async (original) => ({
   designDeleteFrame: producer.deleteFrame,
 }));
 
-import { designFrameMissingComponents, designFrameOptionsProblem, designLayerDisplayName, designMissingComponentOf } from "../state/design-component-parts";
+import { designFrameIsComponent, designFrameMissingComponents, designFrameOptionsProblem, designLayerDisplayName, designMissingComponentOf } from "../state/design-component-parts";
 import { designComponentRecordProblem, designInstanceIgnoredAttributes } from "../state/design-component-options";
 import { deleteDesignFrameCached, designWorkspaceSnapshotCache, resetDesignWorkspaceCacheForTests } from "../state/design-workspace-cache";
-import { DesignComponentOptions } from "../design-component-options";
+import { DesignComponentOptions, designComponentOptionProvenanceLabel } from "../design-component-options";
 import { DesignFrameDeleteDialog } from "../design-frame-delete-dialog";
 import { DesignFrameLoadError, DesignFrameProblemLabel, DesignFrameProblemMark } from "../design-frame-load-error";
 import { DesignFramePreparation } from "../state/design-workspace-preparation";
@@ -64,9 +64,9 @@ describe("an instance whose component is gone", () => {
     expect(designLayerDisplayName(frame, node("gone", "zd-chip"))).toBe("zd-chip");
     expect(designLayerDisplayName(frame, { ...node("gone", "zd-chip"), layerName: "Status" })).toBe("zd-chip");
     // A resolved instance is named by its component, unless a person named it.
-    expect(designLayerDisplayName(frame, node("kept", "zd-card"))).toBe("Card");
-    expect(designLayerDisplayName(frame, node("kept", "zd-card"), (file) => (file === "page-1/card.html" ? "Pricing card" : undefined))).toBe("Pricing card");
-    expect(designLayerDisplayName(frame, { ...node("kept", "zd-card"), layerName: "Hero" })).toBe("Hero");
+    expect(designLayerDisplayName(frame, node("kept", "zd-card"))).toBe("Card/Default");
+    expect(designLayerDisplayName(frame, node("kept", "zd-card"), (file) => (file === "page-1/card.html" ? "Pricing card" : undefined))).toBe("Pricing card/Default");
+    expect(designLayerDisplayName(frame, { ...node("kept", "zd-card"), layerName: "Hero" })).toBe("Card/Default · Hero");
     expect(designLayerDisplayName(frame, node("p", "p", "Before"))).toBe("Before");
     expect(designLayerDisplayName({}, node("gone", "zd-chip"))).toBe("Frame");
     const panels = readFileSync(resolve(process.cwd(), "apps/desktop/src/renderer/features/design-workspace/design-workspace-sidebar-panels.tsx"), "utf8");
@@ -76,7 +76,7 @@ describe("an instance whose component is gone", () => {
     expect(panels).not.toContain("peekSnapshot(workspaceId).data?.frames");
     // An instance row carries the component mark and a slot row its own; a
     // part or slot row is hidden like any layer, never renamed.
-    expect(panels).toContain('kind === "instance") return <Diamond data-design-layer-instance=""');
+    expect(panels).toContain('kind === "instance") return <Diamond className="text-violet-primary" data-design-layer-instance=""');
     expect(panels).toContain('kind === "slot") return <SquareDashed data-design-layer-slot=""');
     expect(panels).not.toContain('{kind === "part" ? null : <IconButton');
     expect(panels).toContain('["part", "slot"].includes(designLayerRowKind(row.frame, row.layer.node.oid))) return;');
@@ -274,7 +274,53 @@ describe("the Options section of a plain component's instance", () => {
     expect(value("Meta")).toBe("Card");
     expect(value("Heading")).toBe("Start here");
     expect(value("Text")).toBe("How to move");
+    expect(section.querySelector('[data-design-option-inherited="meta"]')).not.toBeNull();
     expect(section.querySelector("[data-design-options-variant]")).toBeNull();
+  });
+
+  it("labels inherited and overridden values with their component and variant source", () => {
+    expect(designComponentOptionProvenanceLabel("Card", "primary", "Continue"))
+      .toBe("Inherited from Card/Primary: Continue.");
+    expect(designComponentOptionProvenanceLabel("Card", null, "Continue", true))
+      .toBe("Overridden here. Reset to inherit Card/Default: Continue.");
+  });
+
+  it("offers a separate Use Default action when an instance variant is active", () => {
+    const host = document.createElement("div");
+    host.innerHTML = renderToStaticMarkup(createElement(DesignComponentOptions, {
+      workspaceId: "local", directory: "Zeros - Design", lint: null, disabled: false,
+      target: { kind: "instance", nodeId: "variant-1", title: "Card",
+        host: { component: "card", attributes: { "zd-variant": "primary" } },
+        component: { elements: [{ tag: "zd-variant", attributes: [{ name: "name", value: "primary" }] }],
+          reach: {}, file: "components/card.html", frame: false } },
+      frame: { file: "start/welcome.html", frameId: "welcome", pageId: "page", title: "Welcome", kind: "frame", x: 0, y: 0, width: 100, height: 100,
+        z: 0, nodeCount: 1, modifiedAt: 0, sourceVersion: "a".repeat(24) } as DesignCanvasFrameWire,
+    }));
+    expect(host.querySelector("[data-design-options-use-default]")?.textContent).toBe("Use Default");
+  });
+
+  it("explains an instance with no options or variants without hiding main declaration controls", () => {
+    const component = { elements: [], reach: {} };
+    const frame = { file: "start/welcome.html", frameId: "welcome", pageId: "page", title: "Welcome", kind: "frame", x: 0, y: 0, width: 100, height: 100,
+      z: 0, nodeCount: 1, modifiedAt: 0, sourceVersion: "a".repeat(24) } as DesignCanvasFrameWire;
+    const markup = (target: Parameters<typeof DesignComponentOptions>[0]["target"]) => {
+      const host = document.createElement("div");
+      host.innerHTML = renderToStaticMarkup(createElement(DesignComponentOptions, {
+        workspaceId: "local", directory: "Zeros - Design", lint: null, disabled: false, target, frame,
+      }));
+      return host;
+    };
+
+    const instance = markup({ kind: "instance", nodeId: "empty-1", title: "Empty",
+      host: { component: "empty", attributes: {} }, component: { ...component, file: "components/empty.html", frame: false } });
+    const empty = instance.querySelector("[data-design-options-empty]");
+    expect(empty).not.toBeNull();
+    expect(empty?.textContent ?? "").toContain("no declared options or variants");
+    expect(instance.querySelector("[data-design-options-variant]")).toBeNull();
+
+    const main = markup({ kind: "main", component });
+    expect(main.querySelector("[data-design-options-variant]")).not.toBeNull();
+    expect(main.querySelector("[data-design-options-empty]")).toBeNull();
   });
 });
 
@@ -317,5 +363,31 @@ describe("the Options section of a component it cannot list", () => {
     expect(ignored.textContent).toBe('This component has no option tone; tone="loud" is ignored.');
     expect(wraps(ignored)).toBe(true);
     expect(section.querySelector("[data-design-options-variant]")).toBeNull();
+  });
+});
+
+describe("an unregistered component declaration", () => {
+  it("keeps main identity and Options access from the declaration alone", () => {
+    const component = {
+      elements: [
+        { tag: "zd-option", attributes: [{ name: "name", value: "label" }, { name: "type", value: "text" }, { name: "default", value: "Continue" }] },
+        { tag: "zd-variant", attributes: [{ name: "name", value: "primary" }, { name: "label", value: "Continue" }] },
+      ],
+      reach: { label: "structure" as const },
+    };
+    const frame = { component };
+    expect(designFrameIsComponent(frame)).toBe(true);
+
+    const html = renderToStaticMarkup(createElement(DesignComponentOptions, {
+      workspaceId: "local", directory: "Zeros - Design", lint: null, disabled: false,
+      target: { kind: "main", component },
+      frame: { file: "components/button.html", frameId: "button", pageId: "components", title: "Button", kind: "frame", x: 0, y: 0, width: 100, height: 100,
+        z: 0, nodeCount: 1, modifiedAt: 0, sourceVersion: "a".repeat(24) } as DesignCanvasFrameWire,
+    }));
+    const section = document.createElement("div");
+    section.innerHTML = html;
+    expect(section.querySelector('[data-design-component-options="main"]')).not.toBeNull();
+    expect(section.querySelector("[data-design-options-variant]")).not.toBeNull();
+    expect(section.textContent).toContain("Label");
   });
 });

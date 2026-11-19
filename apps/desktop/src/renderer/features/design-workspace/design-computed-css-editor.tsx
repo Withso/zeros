@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import CodeMirror from "@uiw/react-codemirror";
 import {
   autocompletion,
@@ -20,6 +20,7 @@ import {
   syntaxHighlighting,
 } from "@codemirror/language";
 import {
+  EditorSelection,
   EditorState,
   RangeSetBuilder,
   StateEffect,
@@ -63,6 +64,7 @@ interface DesignComputedCssEditorProps {
   details: DesignRuntimeNodeDetails;
   /** Names where a winning declaration lives; hints omit sources without it. */
   originLabel?: DesignStyleOriginLabel;
+  active?: boolean;
   disabled?: boolean;
   onPreviewStyles?: (styles: Record<string, string | null>) => Promise<void>;
   onCancelStylePreview?: () => Promise<void>;
@@ -319,6 +321,7 @@ function validateSupportedCss(
 export function DesignComputedCssEditor({
   details,
   originLabel,
+  active = true,
   disabled = false,
   onPreviewStyles,
   onCancelStylePreview,
@@ -340,6 +343,8 @@ export function DesignComputedCssEditor({
   const [cssLanguage, setCssLanguage] = useState<Extension | null>(null);
   const appearance = resolveCodeTheme(useCodeTheme()).appearance;
 
+  const activeRef = useRef(active);
+  activeRef.current = active;
   const mountedRef = useRef(false);
   const baselineRef = useRef<Record<string, string>>(externalDeclarations);
   const validTargetRef = useRef<Record<string, string> | null>(
@@ -372,6 +377,7 @@ export function DesignComputedCssEditor({
   }, []);
 
   useEffect(() => {
+    if (!active) return;
     let cancelled = false;
     void resolveLanguage("computed.css").then((extension) => {
       if (!cancelled) setCssLanguage(extension);
@@ -379,16 +385,31 @@ export function DesignComputedCssEditor({
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [active]);
+
+  useEffect(() => {
+    if (active) return;
+    if (timerRef.current !== null) {
+      window.clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+    void actionsRef.current.onCancelStylePreview?.().catch(() => {});
+  }, [active]);
 
   const scheduleFlush = useCallback((delay: number) => {
     if (timerRef.current !== null) window.clearTimeout(timerRef.current);
-    if (!mountedRef.current) return;
+    if (!mountedRef.current || !activeRef.current) return;
     timerRef.current = window.setTimeout(() => {
       timerRef.current = null;
       flushRef.current();
     }, delay);
   }, []);
+
+  useEffect(() => {
+    if (!active || !dirty || !validTargetRef.current) return;
+    if (Object.keys(diffDesignCssDeclarations(baselineRef.current, validTargetRef.current)).length === 0) return;
+    scheduleFlush(CSS_AUTOSAVE_DELAY_MS);
+  }, [active, dirty, scheduleFlush]);
 
   const flushValidDraft = useCallback(() => {
     if (timerRef.current !== null) {
@@ -400,7 +421,7 @@ export function DesignComputedCssEditor({
     // commit was in flight would move these declarations onto whichever layer
     // the designer selected next. Blur already flushes the real edit before
     // the selection changes.
-    if (!mountedRef.current) return;
+    if (!mountedRef.current || !activeRef.current) return;
     const target = validTargetRef.current;
     if (!target) return;
     if (commitInFlightRef.current) {
@@ -450,6 +471,13 @@ export function DesignComputedCssEditor({
         commitInFlightRef.current = false;
         if (!mountedRef.current) return;
         setSaving(false);
+        if (!activeRef.current) {
+          if (
+            validTargetRef.current &&
+            (rerunRef.current || versionRef.current !== committedVersion)
+          ) rerunRef.current = true;
+          return;
+        }
         if (
           validTargetRef.current &&
           (rerunRef.current || versionRef.current !== committedVersion)
@@ -462,6 +490,7 @@ export function DesignComputedCssEditor({
 
   const handleChange = useCallback(
     (nextDraft: string) => {
+      if (!activeRef.current || disabled) return;
       setDraft(nextDraft);
       versionRef.current += 1;
       if (timerRef.current !== null) {
@@ -508,7 +537,7 @@ export function DesignComputedCssEditor({
         void actionsRef.current.onCancelStylePreview?.().catch(() => {});
       }
     },
-    [scheduleFlush],
+    [disabled, scheduleFlush],
   );
 
   useEffect(() => {
@@ -540,11 +569,22 @@ export function DesignComputedCssEditor({
     [details, externalDeclarations, originLabel],
   );
   const viewRef = useRef<EditorView | null>(null);
+  const scrollTopRef = useRef(0);
+  const selectionRef = useRef<EditorSelection | null>(null);
   const lineHintsRef = useRef(lineHints);
   lineHintsRef.current = lineHints;
+  useLayoutEffect(() => {
+    if (!active) return;
+    return () => {
+      if (!viewRef.current) return;
+      scrollTopRef.current = viewRef.current.scrollDOM.scrollTop;
+      selectionRef.current = viewRef.current.state.selection;
+      viewRef.current = null;
+    };
+  }, [active]);
   useEffect(() => {
-    viewRef.current?.dispatch({ effects: setCssLineHints.of(lineHints) });
-  }, [lineHints]);
+    if (active) viewRef.current?.dispatch({ effects: setCssLineHints.of(lineHints) });
+  }, [active, lineHints]);
 
   const extensions = useMemo(
     () => [
@@ -580,21 +620,35 @@ export function DesignComputedCssEditor({
       }}
     >
       <div className="min-h-0 flex-1">
-        <CodeMirror
-          value={draft}
-          editable={!disabled}
-          readOnly={disabled}
-          basicSetup={false}
-          theme="none"
-          height="100%"
-          style={{ height: "100%" }}
-          extensions={extensions}
-          onChange={handleChange}
-          onCreateEditor={(view) => {
-            viewRef.current = view;
-            view.dispatch({ effects: setCssLineHints.of(lineHintsRef.current) });
-          }}
-        />
+        {active ? (
+          <CodeMirror
+            value={draft}
+            editable={!disabled}
+            readOnly={disabled}
+            basicSetup={false}
+            theme="none"
+            height="100%"
+            style={{ height: "100%" }}
+            extensions={extensions}
+            onChange={handleChange}
+            onCreateEditor={(view) => {
+              viewRef.current = view;
+              const selection = selectionRef.current;
+              if (selection) {
+                const limit = view.state.doc.length;
+                const clamp = (position: number) => Math.min(position, limit);
+                view.dispatch({
+                  selection: EditorSelection.create(
+                    selection.ranges.map(({ anchor, head }) => EditorSelection.range(clamp(anchor), clamp(head))),
+                    Math.min(selection.mainIndex, selection.ranges.length - 1),
+                  ),
+                });
+              }
+              view.scrollDOM.scrollTop = scrollTopRef.current;
+              if (activeRef.current) view.dispatch({ effects: setCssLineHints.of(lineHintsRef.current) });
+            }}
+          />
+        ) : null}
       </div>
       {error ? (
         <div

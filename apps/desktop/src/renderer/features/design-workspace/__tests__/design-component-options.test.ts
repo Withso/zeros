@@ -10,14 +10,18 @@ import type { ComponentOptionValue } from "@zeros/design-core/component-options"
 import {
   commitDesignComponentOption,
   commitDesignComponentVariant,
+  commitDesignInstanceAllOverridesReset,
   commitDesignInstanceAttributes,
   commitDesignInstanceOverridesReset,
+  commitDesignInstanceSlotReset,
   commitDesignInstanceText,
   createDesignComponentPreview,
   designComponentVariantName,
   designInstanceOptionState,
+  designInstanceVisualStyleProperties,
   designComponentPreviewMessagesForTests,
   designComponentPreviewProperties,
+  designInstanceHasSuppliedContent,
   readDesignFrameComponent,
   resetDesignComponentOptionsForTests,
 } from "../state/design-component-options";
@@ -45,6 +49,30 @@ describe("a component frame's options in the panel", () => {
     const first = readDesignFrameComponent(COMPONENT);
     expect(first.declaration.options.map((option) => option.name)).toEqual(["width", "label", "motion"]);
     expect(readDesignFrameComponent(COMPONENT)).toBe(first);
+  });
+
+  it("resets only explicitly written option attributes, not the selected variant", () => {
+    const declaration = readDesignFrameComponent({
+      elements: [
+        element("zd-option", { name: "label", type: "text", default: "Go" }),
+        element("zd-variant", { name: "primary", label: "Go" }),
+      ],
+      reach: { label: "structure" },
+    } as DesignFrameComponent).declaration;
+
+    expect(designInstanceOptionState(declaration, { "zd-variant": "primary" }).resettable).toBe(false);
+    const explicitInherited = designInstanceOptionState(declaration, { "zd-variant": "primary", label: "Go" });
+    expect(explicitInherited.resettable).toBe(true);
+    expect(explicitInherited.overridden).toEqual(new Set(["label"]));
+    expect(explicitInherited.changed.has("label")).toBe(false);
+    expect(designInstanceOptionState(declaration, { "data-zd-unknown": "kept" }).resettable).toBe(false);
+    expect(designInstanceOptionState(declaration, { "zd-variant": "primary", "data-zd-unknown": "kept" }).overridden).toEqual(new Set());
+  });
+
+  it("resets visual size, margins and transforms but preserves canvas positioning", () => {
+    expect(designInstanceVisualStyleProperties(
+      "position: absolute; left: 12px; top: 24px; width: 300px; height: 120px; margin: 8px; transform: rotate(5deg); translate: 2px; background: red",
+    )).toEqual(["width", "height", "margin", "transform", "translate", "background"]);
   });
 
   it("previews the custom properties a value change sets, derived values included, and never text", () => {
@@ -124,15 +152,66 @@ describe("variants and instances", () => {
 
   it("resets an instance's overrides in one transaction: each part's attribute, and each property its own style sets on its root", async () => {
     const frame = { file: "home.html", sourceVersion: V1 } as never;
-    await commitDesignInstanceOverridesReset("w", frame, "inst", ["cc-send", "chip#1"], 'width: 300px; background: url("a;b.png"); --Gap: 2px');
+    await commitDesignInstanceOverridesReset("w", frame, "inst", ["cc-send", "chip#1"],
+      'position: absolute; left: 12px; top: 24px; width: 300px; height: 120px; margin: 8px; transform: rotate(5deg); background: url("a;b.png"); --Gap: 2px');
     expect(calls()[0]![2].intent).toBe("Reset overrides");
     expect(calls()[0]![2].operations).toEqual([
       expect.objectContaining({ type: "node.set-attribute", nodeId: "inst", attribute: "zd-style-cc-send", value: null }),
       expect.objectContaining({ type: "node.set-attribute", nodeId: "inst", attribute: "zd-style-chip", value: null }),
-      expect.objectContaining({ type: "node.set-styles", nodeId: "inst", scope: "inline", styles: { width: null, background: null, "--Gap": null } }),
+      expect.objectContaining({ type: "node.set-styles", nodeId: "inst", scope: "inline", styles: {
+        width: null, height: null, margin: null, transform: null, background: null, "--Gap": null,
+      } }),
     ]);
     await commitDesignInstanceOverridesReset("w", frame, "inst", ["cc-send"], undefined);
     expect(calls()[1]![2].operations).toHaveLength(1);
+  });
+
+  it("resets options, style, part and supplied content in one transaction without resetting variant or placement", async () => {
+    const frame = { file: "home.html", sourceVersion: V1 } as never;
+    await commitDesignInstanceAllOverridesReset("w", frame, "inst", ["label"], ["cc-send"],
+      "position: absolute; left: 12px; top: 24px; width: 300px; background: red", ["slot-content"], true);
+    expect(calls()).toHaveLength(1);
+    expect(calls()[0]![2].intent).toBe("Reset all overrides");
+    expect(calls()[0]![2].operations).toEqual([
+      expect.objectContaining({ type: "node.set-attribute", nodeId: "inst", attribute: "label", value: null }),
+      expect.objectContaining({ type: "node.set-attribute", nodeId: "inst", attribute: "zd-style-cc-send", value: null }),
+      expect.objectContaining({ type: "node.set-styles", nodeId: "inst", styles: { width: null, background: null } }),
+      expect.objectContaining({ type: "node.delete", nodeId: "slot-content" }),
+      expect.objectContaining({ type: "node.set-text", nodeId: "inst", text: "" }),
+    ]);
+    expect(calls()[0]![2].operations).not.toContainEqual(expect.objectContaining({ attribute: "zd-variant" }));
+  });
+
+  it("confirms Reset All only when a slot or host text has supplied content", () => {
+    expect(designInstanceHasSuppliedContent([], undefined)).toBe(false);
+    expect(designInstanceHasSuppliedContent([], "")).toBe(false);
+    expect(designInstanceHasSuppliedContent([], " ")).toBe(true);
+    expect(designInstanceHasSuppliedContent(["slot-layer"], undefined)).toBe(true);
+  });
+
+  it("resets supplied slot layers in one undoable edit and skips an empty slot", async () => {
+    const frame = { file: "home.html", sourceVersion: V1 } as never;
+    await commitDesignInstanceSlotReset("w", frame, ["slot-a", "slot-b"], "Actions");
+    expect(calls()).toHaveLength(1);
+    expect(calls()[0]![2].intent).toBe("Reset Actions");
+    expect(calls()[0]![2].operations).toEqual([
+      expect.objectContaining({ type: "node.delete", nodeId: "slot-a" }),
+      expect.objectContaining({ type: "node.delete", nodeId: "slot-b" }),
+    ]);
+    await expect(commitDesignInstanceSlotReset("w", frame, [], "Actions")).resolves.toBeUndefined();
+    expect(calls()).toHaveLength(1);
+  });
+
+  it("does not submit an empty Reset All transaction", async () => {
+    await expect(commitDesignInstanceAllOverridesReset("w", { file: "home.html", sourceVersion: V1 }, "inst", [], [], undefined, [], false))
+      .resolves.toBeUndefined();
+    expect(mocks.apply).not.toHaveBeenCalled();
+  });
+
+  it("preserves a failed Reset All transaction for the caller to report", async () => {
+    mocks.apply.mockRejectedValueOnce(new Error("stale component instance"));
+    await expect(commitDesignInstanceAllOverridesReset("w", { file: "home.html", sourceVersion: V1 }, "inst", ["label"], [], undefined, [], false))
+      .rejects.toThrow("stale component instance");
   });
 
   it("writes a plain component instance's slot text as its host's text, in one transaction", async () => {

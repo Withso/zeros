@@ -1162,6 +1162,16 @@
 
 /* Canvas selection geometry consumes the synchronously painted inverse-camera
  * variable so these colors remain crisp even before React settles the view. */
+.zd-design-selection-outline[data-design-component-selection],
+[data-design-component-selection],
+[data-design-frame-component][data-design-frame-root-selected] {
+  --design-selection-stroke: var(--violet-primary);
+  --design-selection-soft: var(--violet-bg);
+  --design-selection-handle-fill: var(--violet-bg);
+  --design-selection-label-bg: var(--violet-bg);
+  --design-selection-label-fg: var(--violet-fg);
+}
+
 .zd-design-selection-outline {
   outline-color: var(--design-selection-stroke);
   --design-stroke-color: var(--design-selection-stroke);
@@ -1652,6 +1662,16 @@
 /* The type icon stays quiet beside the name; the selected row lifts it. */
 .zd-design-layer-row > svg {
   color: var(--fg3);
+}
+
+.zd-design-layer-row[data-design-layer-component-owner],
+.zd-design-layer-row[data-design-frame-component] {
+  color: var(--violet-primary);
+}
+
+.zd-design-layer-row[data-design-layer-component-owner] > svg,
+.zd-design-layer-row[data-design-frame-component] > svg {
+  color: var(--violet-primary);
 }
 
 .zd-design-layer-selected > svg {

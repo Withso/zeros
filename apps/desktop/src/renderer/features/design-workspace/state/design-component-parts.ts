@@ -114,6 +114,38 @@ export function designComponentDisplayTitle(
   return words.charAt(0).toUpperCase() + words.slice(1);
 }
 
+/** A component's identity stays explicit even when its layer has a nickname. */
+export function designComponentIdentityLabel(title: string, variant: string | null): string {
+  const label = variant
+    ? variant.replace(/-/g, " ").replace(/^./, (first) => first.toUpperCase())
+    : "Default";
+  return `${title}/${label}`;
+}
+
+export function designComponentSelectionIdentity(
+  singleSelection: boolean,
+  mainRoot: boolean,
+  mainIdentity: string | null,
+  instanceIdentity: string | null,
+): string | null {
+  if (!singleSelection) return null;
+  return mainRoot ? mainIdentity : instanceIdentity;
+}
+
+export function designComponentInstanceVariant(
+  frame: { instances?: DesignFrameInstances },
+  nodeId: string | null,
+): string | null {
+  const mark = designComponentInstanceMark(frame, nodeId, () => undefined);
+  const instances = frame.instances;
+  if (!mark || !instances || !nodeId) return null;
+  const variant = instances.hosts[nodeId]!.attributes["zd-variant"];
+  return variant && instances.components[mark.component]!.elements.some((element) =>
+    element.tag === "zd-variant" && element.attributes.some((attribute) => attribute.name === "name" && attribute.value === variant))
+    ? variant
+    : null;
+}
+
 /** The component a selected layer is an instance of, or null. Own entries
  * only: a layer id such as "constructor" is not a host. A part is not itself
  * an instance. */
@@ -127,6 +159,17 @@ export function designComponentInstanceMark(
   const name = instances.hosts[nodeId]!.component;
   if (!Object.hasOwn(instances.components, name)) return null;
   return { component: name, title: designComponentDisplayTitle(name, instances.components[name]!, mainTitle) };
+}
+
+/** A placed instance's current declared option preset, or Default when its
+ * saved attribute no longer names a declared variant. */
+export function designComponentInstanceIdentity(
+  frame: { instances?: DesignFrameInstances },
+  nodeId: string | null,
+  mainTitle: (file: string) => string | undefined = () => undefined,
+): string | null {
+  const mark = designComponentInstanceMark(frame, nodeId, mainTitle);
+  return mark ? designComponentIdentityLabel(mark.title, designComponentInstanceVariant(frame, nodeId)) : null;
 }
 
 /** The component a selected instance names when no component has that name
@@ -154,12 +197,22 @@ export function designLayerDisplayName(
   mainTitle: (file: string) => string | undefined = () => undefined,
 ): string {
   const slot = designComponentSlotOf(node.oid);
-  if (slot) return `${designComponentSlotLabel(slot.name)} slot`;
   const presented = presentedInstances(frame);
+  if (slot) {
+    const owner = designComponentInstanceIdentity(presented, slot.host, mainTitle);
+    const name = `${designComponentSlotLabel(slot.name)} slot`;
+    return owner ? `${owner} · ${name}` : name;
+  }
   const missing = designMissingComponentOf(presented, node.oid);
   if (missing) return `zd-${missing}`;
-  const instance = node.layerName?.trim() ? null : designComponentInstanceMark(presented, node.oid, mainTitle);
-  return instance ? instance.title : designRuntimeLayerDisplayName(node);
+  if (isDesignComponentPartNodeId(node.oid)) {
+    const owner = designComponentInstanceIdentity(presented, designComponentPartHost(node.oid), mainTitle);
+    const name = designRuntimeLayerDisplayName(node);
+    return owner ? `${owner} · ${name}` : name;
+  }
+  const instance = designComponentInstanceIdentity(presented, node.oid, mainTitle);
+  const name = node.layerName?.trim();
+  return instance ? name ? `${instance} · ${name}` : instance : designRuntimeLayerDisplayName(node);
 }
 
 /** What a Layers row is: an instance of a component, one of an instance's

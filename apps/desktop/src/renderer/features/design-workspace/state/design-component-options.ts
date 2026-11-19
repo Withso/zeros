@@ -156,8 +156,12 @@ export function designInstanceOptionState(declaration: ComponentDeclaration, att
   const inherited = componentInheritedValues(declaration, variant);
   const { values } = componentOptionValues(declaration, written);
   const changed = new Set(declaration.options.filter((option) => !sameDesignComponentValue(values.get(option.name), inherited.get(option.name))).map((option) => option.name));
-  const resettable = [...written.keys()].some((name) => name === COMPONENT_VARIANT_ATTRIBUTE || declaration.options.some((option) => option.name === name));
-  return { variant, inherited, values, changed, resettable };
+  const overridden = new Set(declaration.options.filter((option) => option.kind !== "slot" && written.has(option.name)).map((option) => option.name));
+  return { variant, inherited, values, changed, overridden, resettable: overridden.size > 0 };
+}
+
+export function designInstanceHasSuppliedContent(slottedLayers: readonly string[], text: string | undefined): boolean {
+  return slottedLayers.length > 0 || Boolean(text?.length);
 }
 
 /** Set or remove (null) attributes of one instance's host: one transaction,
@@ -201,6 +205,16 @@ export function designDeclaredProperties(list: string): string[] {
   return properties;
 }
 
+const INSTANCE_PLACEMENT_PROPERTIES = new Set([
+  "bottom", "inset", "inset-block", "inset-block-end", "inset-block-start", "inset-inline",
+  "inset-inline-end", "inset-inline-start", "left", "position", "right", "top",
+]);
+
+/** CSS positioning belongs to the canvas; visual sizing and transforms reset with Style. */
+export function designInstanceVisualStyleProperties(style: string | undefined): string[] {
+  return style ? designDeclaredProperties(style).filter((property) => !INSTANCE_PLACEMENT_PROPERTIES.has(property)) : [];
+}
+
 /** Reset an instance's overrides in one step: each part's zd-style-<part>,
  * and the style the instance sets on its root (its host's own style). */
 export function commitDesignInstanceOverridesReset(
@@ -210,12 +224,37 @@ export function commitDesignInstanceOverridesReset(
   parts: readonly string[],
   style: string | undefined,
 ) {
-  const properties = style ? designDeclaredProperties(style) : [];
+  const properties = designInstanceVisualStyleProperties(style);
   return applyDesignEditCached(workspaceId, frame, edit("Reset overrides", [
     ...parts.map((part, index) => ({ operationId: `reset-part-${index}`, type: "node.set-attribute", nodeId, attribute: designPartOverrideAttribute(part), value: null })),
     ...(properties.length ? [{ operationId: "reset-style", type: "node.set-styles", nodeId, styles: Object.fromEntries(properties.map((property) => [property, null])),
       scope: "inline", responsiveContext: "base", stateContext: "default" }] : []),
   ]));
+}
+
+/** Reset local component values, styles and supplied slots without changing
+ * the selected variant or the instance's canvas placement. */
+export function commitDesignInstanceAllOverridesReset(
+  workspaceId: string,
+  frame: { file: string; sourceVersion: string },
+  nodeId: string,
+  optionAttributes: readonly string[],
+  parts: readonly string[],
+  style: string | undefined,
+  slottedLayers: readonly string[],
+  resetText: boolean,
+) {
+  const properties = designInstanceVisualStyleProperties(style);
+  const operations = [
+    ...optionAttributes.map((attribute, index) => ({ operationId: `reset-option-${index}`, type: "node.set-attribute", nodeId, attribute, value: null })),
+    ...parts.map((part, index) => ({ operationId: `reset-part-${index}`, type: "node.set-attribute", nodeId, attribute: designPartOverrideAttribute(part), value: null })),
+    ...(properties.length ? [{ operationId: "reset-style", type: "node.set-styles", nodeId,
+      styles: Object.fromEntries(properties.map((property) => [property, null])), scope: "inline", responsiveContext: "base", stateContext: "default" }] : []),
+    ...[...new Set(slottedLayers)].map((layer, index) => ({ operationId: `reset-slot-${index}`, type: "node.delete", nodeId: layer })),
+    ...(resetText ? [{ operationId: "reset-text", type: "node.set-text", nodeId, text: "" }] : []),
+  ];
+  if (!operations.length) return Promise.resolve(undefined);
+  return applyDesignEditCached(workspaceId, frame, edit("Reset all overrides", operations));
 }
 
 /** Set the text a plain component's instance fills its default slot with:
@@ -227,6 +266,7 @@ export function commitDesignInstanceText(workspaceId: string, frame: { file: str
 /** Empty an instance's slot back to what its main puts there: delete the
  * frame's own layers it holds, in one step. */
 export function commitDesignInstanceSlotReset(workspaceId: string, frame: { file: string; sourceVersion: string }, layers: readonly string[], label: string) {
+  if (!layers.length) return Promise.resolve(undefined);
   return applyDesignEditCached(workspaceId, frame, edit(`Reset ${label}`, layers.map((nodeId, index) =>
     ({ operationId: `reset-slot-${index}`, type: "node.delete", nodeId }))));
 }
