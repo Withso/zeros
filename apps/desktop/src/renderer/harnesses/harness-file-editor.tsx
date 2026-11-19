@@ -9,9 +9,13 @@ import { createTwoFilesPatch } from "diff";
 import { Toaster, toast } from "sonner";
 import type { Workspace, StatusResult } from "../platform/git";
 import type { BridgeMessage } from "../platform/bridge/messages";
+import { parseCloudWorkspaceKey } from "../platform/bridge/cloud-workspace-key";
+import { BridgeContext } from "../platform/bridge/use-bridge";
 import { WorkspaceRuntimeClient } from "../platform/bridge/workspace-runtime-client";
 import { setActiveBridge } from "../platform/bridge/active-bridge";
+import { accountPresentationOwner, bindAccountPresentationOwner } from "../platform/account-presentation-cache";
 import { setSetting } from "../platform/settings";
+import { acceptCloudWorkspaceDocument } from "../state/cloud-workspace-catalog";
 import { useWorkspaceStore } from "../state/workspace-store";
 import { setWorkspaceRowsForTesting } from "../state/use-projects";
 import { FilesTab } from "../shell/workbench/tabs/files-tab";
@@ -41,6 +45,35 @@ const roots = [
   owner === "cloud" ? cloud : `/${owner}/project`,
   "/organization/other",
 ];
+const cloudTarget = parseCloudWorkspaceKey(roots[0]);
+if (cloudTarget) {
+  const { organizationId, workspaceId } = cloudTarget;
+  const createdBy = "33333333-3333-4333-8333-333333333333";
+  bindAccountPresentationOwner(accountPresentationOwner("https://api.example.test", createdBy));
+  acceptCloudWorkspaceDocument({
+    id: workspaceId,
+    organizationId,
+    teamId: organizationId,
+    createdBy,
+    name: "Files fixture",
+    placement: "cloud",
+    status: "ready",
+    version: 1,
+    error: null,
+    createdAt: "2026-10-15T00:00:00Z",
+    updatedAt: "2026-10-15T00:00:00Z",
+    deletedAt: null,
+    capabilities: { canWrite: true, canManage: false, canStart: true, startUnavailableReason: null },
+    repository: { forge: "github.com", owner: "example", name: "files", revision: "refs/heads/main" },
+    generation: {
+      number: 1,
+      architecture: "x86_64",
+      resources: { cpuMillicores: 2000, memoryMiB: 4096, storageMiB: 20480 },
+      observedState: "running",
+      lastObservedAt: null,
+    },
+  });
+}
 const workspaces = roots.map(
   (root, index) =>
     ({
@@ -166,6 +199,17 @@ class FixtureBridge extends WorkspaceRuntimeClient {
   override async request<T extends BridgeMessage = BridgeMessage>(
     message: Partial<BridgeMessage> & { type: string },
   ): Promise<T> {
+    return this.respond<T>(message, false);
+  }
+  override async requestConnected<T extends BridgeMessage = BridgeMessage>(
+    message: Partial<BridgeMessage> & { type: string },
+  ): Promise<T> {
+    return this.respond<T>(message, true);
+  }
+  private async respond<T extends BridgeMessage>(
+    message: Partial<BridgeMessage> & { type: string },
+    connectedOnly: boolean,
+  ): Promise<T> {
     const request = message as {
       op?: string;
       params?: Record<string, unknown>;
@@ -209,8 +253,11 @@ class FixtureBridge extends WorkspaceRuntimeClient {
         result = { kind: "success", path, bytes: content.length };
       }
     }
-    if (request.op === "file.tree")
+    if (request.op === "file.tree") {
+      if (root === cloud && !connectedOnly)
+        throw new Error("Cloud fixture file listing must use the existing connection");
       result = { files: [...current.keys(), "gone.ts"], designDirectories: [] };
+    }
     if (request.op === "file.ignored") result = { entries: [] };
     if (request.op === "git.status") result = status(root);
     if (request.op === "git.diff")
@@ -231,7 +278,8 @@ class FixtureBridge extends WorkspaceRuntimeClient {
     return { type: "WORKSPACE_RESPONSE", result } as unknown as T;
   }
 }
-setActiveBridge(new FixtureBridge());
+const bridge = new FixtureBridge();
+setActiveBridge(bridge);
 const scopes = Object.fromEntries(
   roots.map((root) => {
     const scope = defaultScopeFor(root);
@@ -362,4 +410,8 @@ function Fixture() {
     </TooltipProvider>
   );
 }
-createRoot(document.getElementById("root")!).render(<Fixture />);
+createRoot(document.getElementById("root")!).render(
+  <BridgeContext.Provider value={bridge}>
+    <Fixture />
+  </BridgeContext.Provider>,
+);
