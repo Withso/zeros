@@ -47,9 +47,7 @@ export function assertCodeReviewPathCore(runtime: CodeReviewPathRuntime, root: s
   const realTarget = physicalPath(runtime, target);
   if (!isInside(target, lexicalRoot) || !isInside(realTarget, realRoot)) throw denied();
   assertReviewName(runtime, path.relative(realRoot, realTarget).split(path.sep).join("/"), policy);
-  // The original path remains the durable privacy/owner boundary even after a
-  // file is deleted. Do not create or expose anchors through a file/directory
-  // alias whose original target could disappear or be redirected later.
+  // Reject aliases: retargeting must never redirect an anchor away from its original owner path.
   if (realTarget !== path.resolve(realRoot, relative)) throw denied();
   let owners: readonly string[];
   try { owners = policy.ownerRoots?.() ?? []; } catch { throw unavailable(); }

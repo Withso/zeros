@@ -1,17 +1,4 @@
-// ──────────────────────────────────────────────────────────
-// Crypto primitives — thin, audited wrappers over @noble
-// ──────────────────────────────────────────────────────────
-//
-// All @noble imports are centralized here so the rest of the codebase
-// depends on a stable local surface (and a version bump only touches
-// this file). Pure JS — runs in Node, the browser, and React Native
-// (RN needs a `crypto.getRandomValues` polyfill loaded at startup).
-//
-//   Identity (long-term):  Ed25519  — sign / verify
-//   Key exchange (ephemeral): X25519 — ECDH
-//   KDF:                   HKDF-SHA256
-//   AEAD:                  ChaCha20-Poly1305
-// ──────────────────────────────────────────────────────────
+// Key generation and randomBytes require the host to provide crypto.getRandomValues.
 
 import { ed25519, x25519 } from "@noble/curves/ed25519.js";
 import { sha256 } from "@noble/hashes/sha2.js";
@@ -25,7 +12,6 @@ export interface KeyPairBytes {
   secretKey: Uint8Array;
 }
 
-// ── Identity (Ed25519) ──────────────────────────────────────
 
 export function generateIdentityKeyPair(): KeyPairBytes {
   const kp = ed25519.keygen();
@@ -48,7 +34,6 @@ export function verify(sig: Uint8Array, message: Uint8Array, publicKey: Uint8Arr
   }
 }
 
-// ── Key exchange (X25519) ───────────────────────────────────
 
 export function generateEphemeralKeyPair(): KeyPairBytes {
   const kp = x25519.keygen();
@@ -59,7 +44,6 @@ export function deriveSharedSecret(ownSecret: Uint8Array, peerPublic: Uint8Array
   return Uint8Array.from(x25519.getSharedSecret(ownSecret, peerPublic));
 }
 
-// ── Hash / KDF / RNG ────────────────────────────────────────
 
 export function sha256Hash(data: Uint8Array): Uint8Array {
   return Uint8Array.from(sha256(data));
@@ -78,7 +62,6 @@ export function randomBytes(length: number): Uint8Array {
   return Uint8Array.from(nobleRandomBytes(length));
 }
 
-// ── AEAD (ChaCha20-Poly1305) ────────────────────────────────
 
 export function aeadSeal(
   key: Uint8Array,
@@ -99,7 +82,6 @@ export function aeadOpen(
   return Uint8Array.from(chacha20poly1305(key, nonce, aad).decrypt(ciphertext));
 }
 
-// ── Encoding helpers ────────────────────────────────────────
 
 export function utf8Encode(s: string): Uint8Array {
   return new TextEncoder().encode(s);

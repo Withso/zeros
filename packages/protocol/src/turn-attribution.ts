@@ -1,5 +1,4 @@
-// Pure tool-to-path attribution shared by the Local engine and cloud worker.
-// Candidates become changes only after comparison with real Git snapshots.
+// Local and cloud intersect these per-turn candidates with Git snapshot differences before recording changes.
 import * as nodePath from "node:path";
 import type { AgentMessage, AgentToolMessage } from "./agent-messages";
 import { authoredPathsFromShellCommand } from "./shell-authored-paths";
@@ -9,15 +8,12 @@ export interface AuthoredPath {
   kind: "edit" | "delete" | "renamed";
 }
 
-/** Resolve a tool's reported path (relative to the agent cwd `fromDir`, or
- *  absolute) and express it relative to the worktree `root` — the frame every
- *  snapshot/diff/reset uses. When `fromDir === root` (the chat folder IS the
- *  worktree top, the common case) this is the old single-cwd behavior. */
+/** Resolve tool paths against the agent cwd but report them relative to the worktree snapshots. */
 function relTo(fromDir: string, root: string, raw: string): string | null {
   if (!raw) return null;
   const abs = nodePath.isAbsolute(raw) ? raw : nodePath.resolve(fromDir, raw);
   const rel = nodePath.relative(root, abs);
-  // Reject paths that escape the work tree (defensive — never restore outside).
+  // Never attribute a path outside the worktree.
   if (rel.startsWith("..") || nodePath.isAbsolute(rel)) return null;
   return rel.split(nodePath.sep).join("/");
 }
@@ -33,10 +29,9 @@ export function pathsFromTool(
     const rel = relTo(fromDir, root, raw);
     if (rel && !out.includes(rel)) out.push(rel);
   };
-  // Priority 1: ACP `locations` (most reliable, cross-adapter).
+  // ACP locations are the primary cross-adapter path evidence.
   const locs = t.locations as Array<{ path?: string }> | undefined;
   if (Array.isArray(locs)) for (const l of locs) push(l?.path);
-  // Priority 2: common rawInput shapes across Claude / Codex / Cursor tools.
   const ri = t.rawInput as Record<string, unknown> | undefined;
   if (ri && typeof ri === "object") {
     const keys = [
@@ -51,11 +46,7 @@ export function pathsFromTool(
       "old_path",
     ];
     for (const k of keys) push(ri[k]);
-    // Codex's `fileChange` tool nests one-or-MORE paths under
-    // `rawInput.changes: [{ path }]` (app-server-translator toolInput) and sets
-    // no scalar key / no `locations` — so without this branch a Codex edit
-    // attributes to NOTHING and the turn records 0 files. Cursor's apply-diff
-    // shapes that surface an `edits`/`files` array land here too.
+    // Read nested arrays for multi-file Codex changes and Cursor diffs.
     for (const key of ["changes", "edits", "files"] as const) {
       const arr = ri[key];
       if (Array.isArray(arr)) {
@@ -73,11 +64,7 @@ export function pathsFromTool(
   return out;
 }
 
-/** The set of files THIS turn's agent edited/deleted/renamed, from its own tool
- *  calls. Concurrency-immune (another chat's tool calls are in another session's
- *  message stream). Dedupes by path, last-writer-wins on kind. A single tool
- *  call may touch several files (e.g. Codex's multi-file patch), so each path it
- *  names is attributed. */
+/** Attribute only this turn's tool stream, with the last operation winning for each path. */
 export function authoredPathsFromMessages(
   messages: AgentMessage[],
   fromDir: string,
@@ -87,13 +74,9 @@ export function authoredPathsFromMessages(
   for (const m of messages) {
     if (m.kind !== "tool") continue;
     const t = m as AgentToolMessage;
-    // A tool that never progressed past pending didn't change anything.
     if (t.status === "pending") continue;
     const kindRaw = (t.toolKind ?? "").toLowerCase();
-    // Shell mutations (notably `rm`) arrive as generic execute tools rather
-    // than file tools. Recover only paths explicitly named by known mutating
-    // commands/redirections; finishTurn intersects them with the real snapshot
-    // diff, so denied and no-op commands still produce no recorded file.
+    // Shell tools supply candidates from known mutations; Git snapshots confirm whether anything changed.
     if (kindRaw === "execute" || kindRaw === "bash" || kindRaw === "shell") {
       const input =
         t.rawInput && typeof t.rawInput === "object"
@@ -113,11 +96,7 @@ export function authoredPathsFromMessages(
       }
       continue;
     }
-    // File-native tools are atomic from the adapter's perspective. A failed
-    // Write/Edit/Delete is a denial or rejected operation, not authorship. Drop
-    // it before path attribution so an unrelated external edit to the same path
-    // during the prompt cannot be mistaken for the denied proposal. (Failed
-    // shell commands stay above: a shell may mutate before exiting non-zero.)
+    // Skip failed file tools to avoid attributing external edits; failed shell commands can still mutate before exit.
     if (t.status === "failed") continue;
     let kind: AuthoredPath["kind"] | null = null;
     if (kindRaw === "edit" || kindRaw === "write") kind = "edit";
@@ -132,8 +111,7 @@ export function authoredPathsFromMessages(
 const SHELL_KINDS = new Set(["execute", "bash", "shell"]);
 const MAX_SCANNED_OUTPUT = 256 * 1024;
 const MAX_TURN_COMMITS = 100;
-// git commit, commit --amend, revert and cherry-pick print `[<branch> <sha>]`;
-// a first commit adds `(root-commit)` and a detached head names itself.
+// Git uses different summary prefixes for root commits and detached HEAD.
 const COMMIT_SUMMARY = /^\[(?:detached HEAD|[^\s\]]+)(?: \(root-commit\))? ([0-9a-f]{7,40})\] \S/gm;
 
 function shellOutputTexts(t: AgentToolMessage): string[] {
@@ -152,10 +130,7 @@ function shellOutputTexts(t: AgentToolMessage): string[] {
   return texts.map((text) => text.slice(0, MAX_SCANNED_OUTPUT));
 }
 
-/** Abbreviated SHAs of the commits THIS turn's shell tools reported making.
- *  Only candidates: callers resolve each against the repository before
- *  recording it, so an amended-away or unreachable commit records nothing.
- *  A failed command still counts, since it may have committed before failing. */
+/** Shell reports are candidates until the caller resolves them to commit objects; a command can commit before failing. */
 export function commitShasFromMessages(messages: AgentMessage[]): string[] {
   const out: string[] = [];
   for (const m of messages) {

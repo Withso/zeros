@@ -9,7 +9,7 @@ describe("ReliableStream — outbound framing + ack", () => {
     expect(f1.s).toBe(1);
     expect(f2.s).toBe(2);
     expect(f1.m).toBe("a");
-    expect(f1.a).toBe(0); // we've received nothing yet
+    expect(f1.a).toBe(0);
     expect(s.unackedCount).toBe(2);
   });
 
@@ -17,9 +17,9 @@ describe("ReliableStream — outbound framing + ack", () => {
     const s = new ReliableStream();
     s.frameFor("a");
     s.frameFor("b");
-    s.frameFor("c"); // seq 1,2,3 buffered
+    s.frameFor("c");
     expect(s.unackedCount).toBe(3);
-    s.accept({ a: 2 }); // peer acked up to 2
+    s.accept({ a: 2 });
     expect(s.unackedCount).toBe(1);
     expect(s.resumeFor(0).map((f) => f.s)).toEqual([3]);
   });
@@ -77,11 +77,9 @@ describe("ReliableStream — full reconnect + replay (no loss, no dupe)", () => 
     }
     expect(receiver.lastReceived).toBe(3);
 
-    // Reconnect: receiver asks to resume from where it left off.
     const req = receiver.resumeRequest();
     expect(req.resume).toBe(3);
 
-    // Sender replays exactly 4,5.
     const replay = sender.resumeFor(req.resume!);
     expect(replay.map((f) => f.s)).toEqual([4, 5]);
 
@@ -98,28 +96,25 @@ describe("ReliableStream — full reconnect + replay (no loss, no dupe)", () => 
     const sender = new ReliableStream();
     const receiver = new ReliableStream();
     const frames = ["m1", "m2", "m3"].map((m) => sender.frameFor(m));
-    for (const f of frames) receiver.accept(f); // receiver at 3
+    for (const f of frames) receiver.accept(f);
 
-    // Sender replays from 2 (stale view) → re-sends 3 (a dup) + nothing after.
     const replay = sender.resumeFor(2);
     expect(replay.map((f) => f.s)).toEqual([3]);
     const r = receiver.accept(replay[0]);
     expect(r.deliver).toBeNull();
     expect(r.duplicate).toBe(true);
-    expect(receiver.lastReceived).toBe(3); // unchanged — no double delivery
+    expect(receiver.lastReceived).toBe(3);
   });
 
   it("survives interleaved bidirectional traffic + acks", () => {
     const a = new ReliableStream();
     const b = new ReliableStream();
-    // a→b: 1,2 ; b delivers + would ack 2 on its next frame.
     b.accept(a.frameFor("a1"));
     b.accept(a.frameFor("a2"));
-    // b→a: a frame carrying b's ack (2) frees a's buffer.
-    const bFrame = b.frameFor("b1"); // { s:1, a:2, m:"b1" }
+    const bFrame = b.frameFor("b1");
     expect(bFrame.a).toBe(2);
     expect(a.accept(bFrame).deliver).toBe("b1");
-    expect(a.unackedCount).toBe(0); // a1,a2 freed by the piggybacked ack
+    expect(a.unackedCount).toBe(0);
   });
 });
 
@@ -137,16 +132,15 @@ describe("ReliableStream — hostile input hardening", () => {
   it("ignores a forged ack beyond what we've sent (no buffer wipe)", () => {
     const s = new ReliableStream();
     s.frameFor("a");
-    s.frameFor("b"); // seq 1,2 buffered
-    s.accept({ a: 999 }); // a client can't have received seq 999
-    expect(s.unackedCount).toBe(2); // buffer intact → resume still works
+    s.frameFor("b");
+    s.accept({ a: 999 });
+    expect(s.unackedCount).toBe(2);
     s.accept({ a: -1 });
     expect(s.unackedCount).toBe(2);
     s.accept({ a: 1.5 });
     expect(s.unackedCount).toBe(2);
     s.accept({ a: NaN });
     expect(s.unackedCount).toBe(2);
-    // An honest in-range ack still frees.
     s.accept({ a: 1 });
     expect(s.unackedCount).toBe(1);
   });
@@ -158,7 +152,6 @@ describe("ReliableStream — hostile input hardening", () => {
     expect(s.resumeFor(-1)).toEqual([]);
     expect(s.resumeFor(NaN)).toEqual([]);
     expect(s.resumeFor(0.5)).toEqual([]);
-    // a valid 0 still replays the whole buffer
     expect(s.resumeFor(0).map((f) => f.s)).toEqual([1, 2]);
   });
 

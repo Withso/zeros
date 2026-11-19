@@ -1,23 +1,8 @@
-// ──────────────────────────────────────────────────────────
-// Runtime validation at the trust boundary
-// ──────────────────────────────────────────────────────────
-//
-// Once the bridge is reachable over a relay, a remote client is
-// UNTRUSTED input. Every frame the engine decrypts must be validated
-// before it reaches the dispatcher. This module owns that gate.
-//
-// V1 validates the envelope (id/source/timestamp/type) and that the
-// type is a known discriminator, preserving the payload via catchall.
-// Per-field schemas for each message can be tightened incrementally
-// without changing the call sites.
-// ──────────────────────────────────────────────────────────
 
 import { z } from "zod";
 import type { BridgeMessage } from "./messages";
 
-/** Every known wire `type` discriminator. Keep in sync with the
- *  BridgeMessage union (the union is the source of truth; this list
- *  is the runtime guard). */
+/** Runtime discriminator allowlist for the BridgeMessage union. */
 export const KNOWN_MESSAGE_TYPES = [
   "CONNECTED",
   "CONNECTION_REJECTED",
@@ -111,11 +96,6 @@ export const KNOWN_MESSAGE_TYPES = [
 
 const knownTypes = new Set<string>(KNOWN_MESSAGE_TYPES);
 
-// Compile-time drift guard: every BridgeMessage `type` literal must appear in
-// KNOWN_MESSAGE_TYPES and vice-versa. If a new union member is added (or a stale
-// entry remains) without updating the list, these assignments fail to compile —
-// catching the exact "Unknown bridge message type" / dropped-frame drift that
-// the hand-maintained list otherwise risks (e.g. DB_CHANGED was missing).
 type _MissingFromKnown = Exclude<
   BridgeMessage["type"],
   (typeof KNOWN_MESSAGE_TYPES)[number]
@@ -139,8 +119,7 @@ const _assertNoExtra: _ExtraInKnown extends never
 void _assertNoMissing;
 void _assertNoExtra;
 
-/** Envelope shared by every bridge message. `catchall` preserves the
- *  per-type payload fields so a validated message round-trips intact. */
+/** Preserve payload fields beyond the envelope so they reach the dispatcher intact. */
 const BridgeEnvelope = z
   .object({
     id: z.string(),
@@ -158,11 +137,9 @@ const isUint = (v: unknown): boolean =>
 const executionRoute = (env: Record<string, unknown>): unknown =>
   env.executionId ?? env.sessionId;
 
-/** Hard wire limits for client-supplied process environment. These sit below
- * normal OS ARG_MAX ceilings while leaving ample room for PEMs and large MCP
- * configuration. They prevent a validly-authenticated peer from turning a
- * spawn request into an unbounded descriptor/allocation. */
+/** Shared byte ceiling for Local bridge and Cloud relay frames. */
 export const MAX_BRIDGE_FRAME_BYTES = 16 * 1024 * 1024;
+// Bound client-supplied environment allocations before runtime spawn handling.
 const MAX_AGENT_ENV_ENTRIES = 512;
 const MAX_AGENT_ENV_NAME_CODE_UNITS = 256;
 const MAX_AGENT_ENV_VALUE_CODE_UNITS = 512 * 1024;
@@ -343,14 +320,7 @@ function isQuestionResponse(value: unknown): boolean {
   });
 }
 
-/** Per-type field validation for the relay-REACHABLE WRITE paths. The envelope
- *  check only guarantees id/source/timestamp/type; the engine's dispatcher then
- *  reads payload fields directly (PTY_RESIZE.cols → coerceDim, AGENT_SET_MODE
- *  .modeId, WORKSPACE_REQUEST.op, PTY_WRITE.data, …). A type-confused payload
- *  from an untrusted relay client must be rejected HERE rather than relying on
- *  each handler being individually defensive. Engine→client, read-only, and
- *  pairing types stay permissive (the default case) so older/extra fields don't
- *  break — only the inbound write set is strict-validated. */
+/** Reject malformed payloads for selected types at ingress instead of relying on individual handlers. */
 function assertInboundPayload(env: Record<string, unknown>): void {
   const bad = (field: string): never => {
     throw new Error(`Invalid ${String(env.type)} payload: ${field}`);
@@ -361,8 +331,7 @@ function assertInboundPayload(env: Record<string, unknown>): void {
   ) {
     bad("agentId");
   }
-  // During the identity-model compatibility window clients send both names. They are two
-  // spellings of one Zeros-owned route, never independent identities.
+  // Legacy sessionId and executionId name the same route, never separate identities.
   if (
     String(env.type).startsWith("AGENT_") &&
     env.executionId !== undefined &&
@@ -449,8 +418,7 @@ function assertInboundPayload(env: Record<string, unknown>): void {
         (!isUint(env.startedAt) || !Number.isSafeInteger(env.startedAt))
       )
         bad("startedAt");
-      // Optional correlation id — metadata only. Reject non-strings so a remote
-      // client cannot smuggle structured payload into the active-turn record.
+      // The active-turn record takes a correlation ID, not caller-supplied structured data.
       if (env.promptId !== undefined && !isStr(env.promptId)) bad("promptId");
       break;
     case "AGENT_OPEN_BOUNDARY_PORT":
@@ -529,10 +497,7 @@ function assertInboundPayload(env: Record<string, unknown>): void {
       if (!isNonEmptyStr(env.model)) bad("model");
       break;
     case "AGENT_UPDATE_CONFIG":
-      // Relay-reachable, and `env` flows into the agent subprocess environment,
-      // so validate its SHAPE here (the engine handler additionally scrubs
-      // hazardous names + clamps dirs for remote clients). It must be a plain
-      // string→string object — reject arrays / nested objects / non-string vals.
+      // Validate the subprocess environment's shape here; the runtime still controls which values it can use.
       if (!isNonEmptyStr(executionRoute(env))) bad("executionId");
       if (!isAgentEnv(env.env)) bad("env");
       break;
@@ -586,9 +551,6 @@ function assertInboundPayload(env: Record<string, unknown>): void {
       )
         bad("params");
       break;
-    // (Removed) WORKSPACE_APPROVAL_RESPONSE — the host-approval broker is gone
-    // from both the engine and the wire union; the type is unknown now, so
-    // parseBridgeMessage rejects it at the envelope stage.
     case "PTY_CREATE":
       if (!isNonEmptyStr(env.sessionId)) bad("sessionId");
       if (env.cols !== undefined && !isUint(env.cols)) bad("cols");
@@ -610,7 +572,6 @@ function assertInboundPayload(env: Record<string, unknown>): void {
       if (!isNonEmptyStr(env.sessionId)) bad("sessionId");
       break;
     case "PTY_LIST":
-      // workspaceId is optional; nothing else is required to enumerate.
       if (env.workspaceId !== undefined && !isStr(env.workspaceId))
         bad("workspaceId");
       break;
@@ -631,9 +592,7 @@ function assertInboundPayload(env: Record<string, unknown>): void {
   }
 }
 
-/** Validate + parse an inbound frame. Throws on a malformed envelope, an
- *  unknown message type, or a type-confused payload on a write-reaching type.
- *  Returns the message typed as BridgeMessage. */
+/** Throws on a malformed envelope, unknown type, or invalid payload for a type checked at ingress. */
 export function parseBridgeMessage(raw: unknown): BridgeMessage {
   const env = BridgeEnvelope.parse(raw);
   if (!knownTypes.has(env.type)) {
@@ -643,7 +602,6 @@ export function parseBridgeMessage(raw: unknown): BridgeMessage {
   return env as unknown as BridgeMessage;
 }
 
-/** Non-throwing variant. Returns null on any validation failure. */
 export function safeParseBridgeMessage(raw: unknown): BridgeMessage | null {
   const r = BridgeEnvelope.safeParse(raw);
   if (!r.success || !knownTypes.has(r.data.type)) return null;
@@ -655,9 +613,7 @@ export function safeParseBridgeMessage(raw: unknown): BridgeMessage | null {
   return r.data as unknown as BridgeMessage;
 }
 
-/** Parse a frame received from a renderer/device. A peer may never self-label a
- * frame as engine-originated; retaining that direction bit at ingress avoids a
- * future handler accidentally trusting an engine-only response as a request. */
+/** Reject peers that label their frames as engine-originated so handlers cannot trust them as engine replies. */
 export function safeParseClientBridgeMessage(
   raw: unknown,
 ): BridgeMessage | null {

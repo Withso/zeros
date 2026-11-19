@@ -61,8 +61,7 @@ function serverTotals(
   for (const entry of value) {
     const row = record(entry);
     if (loadedOnly && row.isLoaded === false) continue;
-    // A partial malformed split cannot safely attribute the whole row. Keep
-    // the category itself, but let the renderer fall back to its ordinary row.
+    // If the server split is invalid, show the category total without a breakdown.
     if (
       typeof row.serverName !== "string" ||
       !row.serverName.trim() ||

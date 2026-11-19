@@ -1,14 +1,4 @@
-// ──────────────────────────────────────────────────────────
-// Shell mutation attribution
-// ──────────────────────────────────────────────────────────
-//
-// File-native tools report their paths structurally. Shell tools do not: an
-// agent deletion arrives as `{ kind: "execute", rawInput: { command: "rm …" } }`.
-// We recover only paths named by well-known mutating commands/redirections, then
-// the caller validates those candidates against the turn's real pre/post Git
-// snapshots. This is intentionally NOT a general shell interpreter. Unknown
-// scripts stay unattributed rather than falling back to a whole-tree diff that
-// could steal a concurrent agent's changes.
+// Leave unrecognized shell work unattributed rather than assigning concurrent changes from a whole-tree diff.
 
 import * as os from "node:os";
 import * as nodePath from "node:path";
@@ -24,7 +14,6 @@ const CONTROL = new Set([";", "&&", "||", "|"]);
 const OUTPUT_REDIRECT = new Set([">", ">>", ">|"]);
 const INPUT_REDIRECT = new Set(["<", "<<"]);
 
-/** Small quote-aware lexer sufficient for command/argument boundaries. */
 function shellTokens(command: string): string[] {
   const out: string[] = [];
   let token = "";
@@ -113,8 +102,7 @@ function shellTokens(command: string): string[] {
 }
 
 function commandName(raw: string): string {
-  // Scan from the edges once. An unanchored trailing-parenthesis regexp can
-  // backtrack quadratically on a tool-supplied run followed by another byte.
+  // Scan once to avoid quadratic backtracking on tool-supplied input.
   let start = 0;
   let end = raw.length;
   while (start < end && raw[start] === "(") start += 1;
@@ -138,7 +126,7 @@ function usablePathArg(raw: string): boolean {
   );
 }
 
-/** Drop flags but retain arguments after `--` (including `-named` files). */
+/** Keep dash-prefixed filenames after the literal argument separator. */
 function pathArgs(args: string[]): string[] {
   const out: string[] = [];
   let literal = false;
@@ -185,10 +173,7 @@ function relativeToRoot(
     : nodePath.resolve(base, expanded);
   const rel = nodePath.relative(root, abs);
   if (rel.startsWith("..") || nodePath.isAbsolute(rel)) return null;
-  // The worktree root itself (`git restore .`, `cp -r x .`, …) would become a
-  // whole-tree pathspec downstream and attribute concurrent agents' changes to
-  // this turn — the exact fallback this module refuses. Named files only;
-  // root-targeting commands stay unattributed.
+  // Reject the worktree root: it would turn a named candidate into a whole-tree pathspec.
   if (!rel) return null;
   return rel.split(nodePath.sep).join("/");
 }
@@ -199,7 +184,6 @@ interface Candidate {
   kind: ShellAuthoredKind;
 }
 
-/** Recover paths from the patch helper's structured begin/end grammar. */
 function applyPatchBodyCandidates(source: string, base: string): Candidate[] {
   const begin = source.indexOf("*** Begin Patch");
   const end = source.indexOf("*** End Patch", begin + 1);
@@ -238,10 +222,7 @@ function applyPatchBodyCandidates(source: string, base: string): Candidate[] {
   return candidates;
 }
 
-/** Agents use this fallback when their native edit tool is unavailable, so the
- * outer tool is a shell execution even though the operation is file-native.
- * Require both a heredoc invocation and the begin/end sentinels: merely
- * printing or discussing a patch must not claim another turn's file. */
+/** Require both a patch heredoc invocation and patch sentinels; a printed patch is not authorship. */
 function inlineApplyPatchCandidates(
   command: string,
   base: string,
@@ -290,11 +271,7 @@ function gitHeaderPath(raw: string, prefix = ""): string | null {
   return prefix ? value.slice(prefix.length) : value;
 }
 
-/** Recover paths from an inline unified diff passed to `git apply`. Codex can
- * choose this route instead of its native fileChange/apply_patch tools. The
- * heredoc requirement keeps prose, echoed examples, and ordinary `git diff`
- * output from claiming files; finishTurn still intersects every candidate with
- * the real pre/post tree delta. */
+/** Require a git apply heredoc so displayed diffs do not supply attribution candidates. */
 function inlineGitApplyCandidates(command: string, base: string): Candidate[] {
   const firstDiff = command.search(/^diff --git /m);
   if (firstDiff < 0) return [];
@@ -363,7 +340,6 @@ function inlineGitApplyCandidates(command: string, base: string): Candidate[] {
   return candidates;
 }
 
-/** Paths explicitly targeted by one simple shell command. */
 function commandCandidates(
   tokens: string[],
   base: string,
@@ -392,8 +368,6 @@ function commandCandidates(
 
   let index = 0;
   while (index < plain.length && isAssignment(plain[index])) index += 1;
-  // Common wrappers. Options/assignments that follow `sudo`/`env` are skipped;
-  // any misclassified value is harmless because the Git diff validates paths.
   while (index < plain.length) {
     const wrapper = commandName(plain[index]);
     if (!["sudo", "env", "command", "builtin", "nohup"].includes(wrapper)) {
@@ -486,11 +460,7 @@ function commandCandidates(
   return { candidates };
 }
 
-/**
- * Recover candidate authored paths from a shell tool. Candidates remain scoped
- * to the named command and are later intersected with the real snapshot diff;
- * a denied/no-op command therefore records nothing.
- */
+/** Shell paths are only candidates; the caller must intersect them with the turn's actual snapshot diff. */
 export function authoredPathsFromShellCommand(
   command: string,
   fromDir: string,

@@ -161,7 +161,6 @@ describe("buildFirstTurnSystemInstruction", () => {
     });
     expect(out).toContain("/x/lewisia");
     expect(out).toContain("Reply in French.");
-    // preamble before dirs before custom
     expect(out.indexOf("working inside Zeros")).toBeLessThan(
       out.indexOf("/x/lewisia"),
     );
@@ -209,14 +208,11 @@ describe("buildFirstTurnSystemInstruction", () => {
       customInstructions: "   ",
     });
     expect(out).toContain("working inside Zeros");
-    // body is just the preamble — no trailing blank custom block
     expect(out.trim().endsWith("</system_instruction>")).toBe(true);
   });
 });
 
 describe("buildFirstTurnInstructionBody", () => {
-  // The UNWRAPPED body for native-channel delivery (Codex
-  // developerInstructions) — same content as the wrapped block, no tags.
   it("is the wrapped block minus the <system_instruction> tags", () => {
     const input = {
       workspaceDir: "/ws",

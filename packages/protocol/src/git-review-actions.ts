@@ -16,7 +16,7 @@ export type {
 
 const utf8 = new TextEncoder();
 
-/** One hash per file snapshot; code review anchors and thread keys reuse it. */
+/** An absent file and empty text have distinct revisions. */
 export function reviewContentRevision(content: string | null): string {
   return bytesToHex(
     sha256(utf8.encode(content === null ? "absent" : `text\0${content}`)),

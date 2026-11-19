@@ -100,7 +100,7 @@ describe("component instances in the frame runtime", () => {
       expect(isDesignRuntimeComponentOptionsPreview(reply.result)).toBe(true);
       expect(await widthOf(page, '[data-zd-instance="1"] > .c')).toBe("420px");
       expect(await widthOf(page, '[data-zd-instance="2"] > .c')).toBe("200px");
-      // An inner instance keeps its own value: its own rule sets it.
+      // The inner instance's generated value overrides inheritance from the outer instance.
       expect(await widthOf(page, '[data-zd-instance="3"] > .c')).toBe("50px");
       await request(page, "previewComponentInstanceOptions", { target: "i1", properties: { "--zd-width": "500px" } });
       expect(await widthOf(page, '[data-zd-instance="1"] > .c')).toBe("500px");
@@ -141,10 +141,8 @@ describe("component instances in the frame runtime", () => {
       // A nested instance is one part of the outer one; its insides are its own.
       const inner = await centre(page, "b");
       expect(oidOf(await request(page, "getComponentPartAtLoc", { ...inner, hostNodeId: "i1" }))).toBe(designComponentPartNodeId("i1", "inner"));
-      // Outside the host there is no part.
       const outside = await centre(page, '[data-oid="plain"]');
       expect((await request(page, "getComponentPartAtLoc", { ...outside, hostNodeId: "i1" })).result).toBeNull();
-      // A part's id reads its details, as a layer's does.
       const details = await request(page, "getNodeDetails", { nodeId: designComponentPartNodeId("i1", "chip#1") });
       expect(details.error).toBeUndefined();
       expect((details.result as { text: string }).text).toBe("B");
@@ -162,11 +160,10 @@ describe("component instances in the frame runtime", () => {
       const part = (host: string, id: string) => designComponentPartNodeId(host, id);
       expect(outline(hosts.find((child) => child.oid === "i1")!)).toEqual({ i1: [{ [part("i1", "c")]: [
         { [part("i1", "send")]: [] }, { [part("i1", "chip")]: [] }, { [part("i1", "chip#1")]: [] },
-        // A nested instance is one part; its insides are its own.
         { [part("i1", "inner")]: [] },
       ] }] });
       expect(outline(hosts.find((child) => child.oid === "i2")!)).toEqual({ i2: [{ [part("i2", "c")]: [{ slotted: [] }] }] });
-      // A definition without data-zid has no parts; the frame's own layers in it still show.
+      // Legacy instances without part markers still expose frame-authored layers.
       expect(outline(hosts.find((child) => child.oid === "i3")!)).toEqual({ i3: [{ kept: [] }] });
       const copy = await centre(page, '[data-zd-copy="item#1"]');
       expect(oidOf(await request(page, "getElementAtLoc", { ...copy, mode: "deepest" }))).toBe("item");
@@ -189,7 +186,6 @@ describe("component instances in the frame runtime", () => {
       expect(details.hiddenBy).toBeUndefined();
       const row = (await request(page, "getNodeDetails", { nodeId: "row" })).result as { childrenLayout: { nodeIds: string[] } };
       expect(row.childrenLayout.nodeIds).toEqual(["b1", "after"]);
-      // Its root's own area hits the instance, never a part.
       const corner = await page.evaluate(() => {
         const box = document.querySelector("[data-zd-root]")!.getBoundingClientRect();
         return { x: box.right - 3, y: box.bottom - 3 };
@@ -202,7 +198,7 @@ describe("component instances in the frame runtime", () => {
       expect(targets.filter((target) => target.oid === "b1").map((target) => target.rect.width)).toEqual([120]);
       const geometry = (await request(page, "previewGeometry", { nodeId: "row", children: true })).result as { children: Array<{ oid: string; rect: { width: number } }> };
       expect(geometry.children.find((child) => child.oid === "b1")?.rect.width).toBe(120);
-      // A preview on the instance sizes its root; the host keeps no box.
+      // A display: contents host delegates geometry to its root.
       await request(page, "previewStyles", { nodeId: "b1", styles: { width: "200px" } });
       expect(await widthOf(page, "[data-zd-root]")).toBe("200px");
       expect(await page.evaluate(() => getComputedStyle(document.querySelector('[data-oid="b1"]')!).display)).toBe("contents");
@@ -241,7 +237,6 @@ describe("component instances in the frame runtime", () => {
       const details = await request(page, "getNodeDetails", { nodeId: slot });
       expect(details.error).toBeUndefined();
       expect(oidOf(details)).toBe(slot);
-      // The default slot is the host's own.
       expect(oidOf(await request(page, "getNodeDetails", { nodeId: designComponentSlotNodeId("i4", "") }))).toBe("i4");
       expect((await request(page, "getNodeDetails", { nodeId: designComponentSlotNodeId("i4", "missing") })).error).toBeDefined();
       expect((await request(page, "getNodeDetails", { nodeId: designComponentSlotNodeId("plain", "content") })).error).toBeDefined();
