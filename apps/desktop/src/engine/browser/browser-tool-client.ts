@@ -28,17 +28,14 @@ import { opSettingsResolve } from "../settings/ops";
 const URL_ENV = "ZEROS_BROWSER_SERVICE_URL";
 const TOKEN_ENV = "ZEROS_BROWSER_SERVICE_TOKEN";
 const ACQUIRE_TIMEOUT_MS = 5_000;
-// One action can wait for a website approval (4 min) and then a download
-// (5 min) inside the host. Stay above both so the host reports the outcome.
+// Outlast the host's download deadline and any pending Browser approval so the host can report the outcome.
 const INVOKE_TIMEOUT_MS = 10 * 60_000;
 const STOP_TIMEOUT_MS = 2_000;
 const MAX_RESPONSE_BYTES = 12 * 1024 * 1024;
 
 type BrowserServiceEnv = Record<string, string | undefined>;
 
-// The service credential is a main→engine capability, not ambient provider
-// configuration. Capture it as this engine module loads, then scrub both names
-// before Codex/Claude/Cursor or their helper subprocesses can inherit them.
+// Capture the main-process capability before scrubbing it from provider subprocess inheritance.
 const inheritedServiceEnv: BrowserServiceEnv = {
   [URL_ENV]: process.env[URL_ENV],
   [TOKEN_ENV]: process.env[TOKEN_ENV],
@@ -87,8 +84,6 @@ interface StopZerosBrowserActionOptions {
 const activeBindings = new Map<string, ActiveBrowserBinding>();
 const ownerGenerations = new Map<string, number>();
 
-/** Read the per-boot service capability. Credentials stay in the engine
- * process and are never forwarded in an agent subprocess environment. */
 export function resolveBrowserServiceConfig(
   env: BrowserServiceEnv = inheritedServiceEnv,
 ): BrowserServiceConfig | null {
@@ -123,9 +118,6 @@ export function stripBrowserServiceCredentials(
   return safe;
 }
 
-/** Whether Claude uses its official Chrome integration here: "Use Claude
- * Code with Chrome" is on, and so is browser use. No other provider has a
- * provider-owned browser in Zeros. */
 export function claudeChromeEnabledForWorkspace(
   workspaceRoot: string,
   mainRepoRoot?: string,
@@ -133,7 +125,6 @@ export function claudeChromeEnabledForWorkspace(
   return browserRouteForWorkspace("claude", workspaceRoot, mainRepoRoot) === "claude-chrome";
 }
 
-/** Which browser `agentFamily` uses in this Local workspace. */
 export function browserRouteForWorkspace(
   agentFamily: string,
   workspaceRoot: string,
@@ -148,8 +139,7 @@ export function browserRouteForWorkspace(
   );
 }
 
-/** Acquire the conversation-owned browser for the `zeros_browser` tools.
- * The caller has already applied the routing table for its agent. */
+/** The caller must apply the agent routing table before acquiring a host session. */
 export async function acquireZerosBrowserToolSession(
   options: Omit<AcquireZerosBrowserHostOptions, "mainRepoRoot">,
 ): Promise<{ browserSessionId: string } | null> {
@@ -184,9 +174,7 @@ export async function acquireZerosBrowserToolSession(
     config,
     fetchImpl,
   };
-  // Conversation deletion may race a slow service acquire. Do not publish an
-  // orphan after the lifecycle owner has detached; close the just-created
-  // record best-effort and let agent startup continue without the capability.
+  // If deletion wins the acquire race, close the new session instead of publishing an orphan.
   if ((ownerGenerations.get(key) ?? 0) !== generation) {
     await closeBinding(binding).catch(() => false);
     return null;
@@ -196,8 +184,7 @@ export async function acquireZerosBrowserToolSession(
   return { browserSessionId: parsed.browserSessionId };
 }
 
-/** Run one `zeros_browser` tool in the conversation's browser. Tool failures
- * come back as `success: false`; transport and contract errors reject. */
+/** Tool failures return success: false; transport and contract failures reject. */
 export async function invokeZerosBrowserTool(
   options: InvokeZerosBrowserToolOptions,
 ): Promise<BrowserToolResult> {
@@ -231,8 +218,7 @@ export async function invokeZerosBrowserTool(
   );
 }
 
-/** Interrupt the agent's current browser action and keep the page, as the
- * Browser tab's Stop button does. */
+/** Stop interrupts the action without closing the page. */
 export async function stopZerosBrowserAction(
   options: StopZerosBrowserActionOptions,
 ): Promise<boolean> {
@@ -257,9 +243,7 @@ export async function stopZerosBrowserAction(
   return result.stopped;
 }
 
-/** Detach the product resource when its Zeros conversation is deleted. Agent
- * execution teardown deliberately does not call this: resume/rebuild must keep
- * the same conversation-owned browser lease. */
+/** Execution teardown must not release the conversation-owned lease; resume and rebuild reuse it. */
 export async function releaseZerosBrowserConversation(
   workspaceId: string,
   conversationId: string,
@@ -272,9 +256,7 @@ export async function releaseZerosBrowserConversation(
     activeBindings.delete(key);
     return closeBinding(active);
   }
-  // Main's browser service survives an engine restart, while this module's
-  // in-memory binding map does not. Release by the durable Zeros owner so an
-  // orphaned live page cannot survive its conversation.
+  // Release by durable owner when an engine restart lost the binding but the host kept the page.
   if (!isBrowserProductId(workspaceId) || !isBrowserProductId(conversationId)) {
     return false;
   }

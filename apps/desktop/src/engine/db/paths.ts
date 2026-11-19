@@ -1,22 +1,3 @@
-// ──────────────────────────────────────────────────────────
-// Zeros DB — on-disk locations (the universal-storage decision)
-// ──────────────────────────────────────────────────────────
-//
-// The unified Zeros DB + identity files live in the per-OS *application-data*
-// directory; the worktrees live in a separate *visible* folder. Splitting the
-// two is deliberate: state the user never edits stays out of the way, while the
-// checkouts they actually open in an editor stay somewhere they can find.
-//
-//   • macOS   → ~/Library/Application Support/com.zeros/   (dev: com.zeros.dev)
-//   • Linux   → $XDG_DATA_HOME/zeros  or  ~/.local/share/zeros   (dev: zeros-dev)
-//   • Windows → %APPDATA%/com.zeros
-//   • Override with ZEROS_DATA_DIR (used by cloud sandboxes + tests).
-//
-// NOTE: the macOS id is `com.zeros`, deliberately NOT `com.zeros.app` — a folder
-// whose name ends in `.app` is mis-typed by Finder as a launchable application
-// (it shows the 🚫 "can't open" icon), so a user who browses into Application
-// Support cannot open their own data folder.
-// ──────────────────────────────────────────────────────────
 
 import { createHash } from "node:crypto";
 import { realpathSync } from "node:fs";
@@ -25,16 +6,10 @@ import path from "node:path";
 import { channel, isLocalDevelopmentRuntime } from "../runtime";
 import { localInstanceStateRoot } from "./local-development-paths.cjs";
 
-/** Reverse-DNS application id for the macOS/Windows app-data folder. */
+/** Keep the persisted app-data ID; Finder treats directories ending in .app as application bundles. */
 const APP_ID = "com.zeros";
 
-/** Per-worktree DEV instance slug (set by scripts/dev-instance.mjs as
- *  ZEROS_INSTANCE) that further isolates the dev data dir so each parallel dev
- *  worktree is its own app: com.zeros.dev → com.zeros.dev.<slug>. Empty for the
- *  primary dev checkout, and IGNORED outside the dev channel (packaged
- *  beta/stable never set it) so those data dirs are unaffected. Re-sanitised here
- *  (defence in depth — the launcher already slugs it) to keep it filesystem-safe
- *  and reverse-DNS-clean. */
+/** Re-sanitize the launcher-provided slug at the filesystem boundary. */
 function devInstanceSlug(): string {
   const raw = process.env.ZEROS_INSTANCE?.trim();
   if (!raw) return "";
@@ -45,7 +20,6 @@ function devInstanceSlug(): string {
     .slice(0, 40);
 }
 
-/** Reverse-DNS id leaf for macOS/Windows: com.zeros[.dev|.beta][.<slug>]. */
 function macWinId(inst: string): string {
   const ch = channel();
   const suffix = isLocalDevelopmentRuntime()
@@ -56,7 +30,6 @@ function macWinId(inst: string): string {
   return `${APP_ID}${suffix}${inst ? `.${inst}` : ""}`;
 }
 
-/** XDG flat name for Linux: zeros[-dev|-beta][-<slug>]. */
 function nixName(inst: string): string {
   const ch = channel();
   const base = isLocalDevelopmentRuntime()
@@ -67,9 +40,7 @@ function nixName(inst: string): string {
   return inst ? `${base}-${inst}` : base;
 }
 
-/** Build the per-OS application-data dir for a given instance slug. macOS/Windows
- *  use the reverse-DNS id, Linux the XDG flat name. ZEROS_DATA_DIR overrides
- *  (cloud sandboxes + tests) and ignores the instance split. */
+/** An explicit ZEROS_DATA_DIR bypasses the per-instance split. */
 function dataDirForInstance(inst: string): string {
   if (process.env.ZEROS_DATA_DIR) return process.env.ZEROS_DATA_DIR;
   const home = homedir();
@@ -81,7 +52,7 @@ function dataDirForInstance(inst: string): string {
         process.env.APPDATA ?? path.join(home, "AppData", "Roaming"),
         macWinId(inst),
       );
-    default: // linux + cloud sandboxes (XDG data dir, env-paths convention)
+    default:
       return path.join(
         process.env.XDG_DATA_HOME ?? path.join(home, ".local", "share"),
         nixName(inst),
@@ -89,71 +60,32 @@ function dataDirForInstance(inst: string): string {
   }
 }
 
-/** The per-worktree instance slug applied to data dirs — dev channel only
- *  (packaged beta/stable never set ZEROS_INSTANCE). */
 function dataDirSlug(): string {
   return channel() === "dev" ? devInstanceSlug() : "";
 }
 
-/** The per-OS application-data directory holding THIS instance's Zeros DB +
- *  identity files (secrets.json, app-settings.json, engines/, worktrees/). In
- *  the dev channel this is per-worktree (com.zeros.dev.<slug>); stable/beta carry
- *  no slug. THE single identity generator: apps/desktop/electron/main.ts redirects Electron's
- *  own userData here too, so the DB and all Electron state share one identifier
- *  (no more com.zeros.* vs name-based "Zeros — <Label>" split). Resolves so the
- *  SAME engine code works locally (macOS) and in a cloud sandbox (Linux).
- *  Override with ZEROS_DATA_DIR. */
+/** Electron userData and the engine database must use the same instance identity. */
 export function zerosDataDir(): string {
   return dataDirForInstance(dataDirSlug());
 }
 
-/** The channel-PRIMARY data dir with the instance slug STRIPPED: com.zeros /
- *  com.zeros.dev / com.zeros.beta. Every dev worktree resolves the SAME value,
- *  so it's the home for state shared across a channel's instances — notably the
- *  shared dev secrets.json (apps/desktop/electron/secret-store.ts + ZEROS_SHARED_SECRETS_DIR),
- *  which is what makes "log in once, every worktree authed" work. */
+/** Omit the instance slug so dev worktrees can share their channel's sign-in. */
 export function zerosChannelDataDir(): string {
   return dataDirForInstance("");
 }
 
-/** The reverse-DNS application identity for THIS (channel, instance):
- *  com.zeros[.dev|.beta][.<slug>]. Electron/main.ts uses it for the macOS
- *  Chromium-cache + logs leaf names, so cache/logs share the SAME identifier as
- *  userData + the DB. (macOS/Windows only; Linux uses nixName for data dirs.) */
+/** Keep Electron's macOS cache and logs keyed to the same identity as userData. */
 export function appIdentity(): string {
   return macWinId(dataDirSlug());
 }
 
-/** The dot-dir LEAF name for THIS channel: `.zeros` | `.zeros-beta` |
- *  `.zeros-dev`. Mirrors nixName()'s channel-suffix convention above.
- *
- *  THE single source of truth for the dot-dir name. Four call sites used to
- *  inline `isDevRuntime() ? ".zeros-dev" : ".zeros"` — a TWO-way split on a
- *  boolean — which meant **Beta and Production shared `~/.zeros`** while every
- *  other identity (data dir, workspaces, ports, keychain, scheme) was split three
- *  ways. Consequences that shipped:
- *
- *    • `~/.zeros/settings.toml` was one file for both apps — changing a setting in
- *      Beta silently changed Production.
- *    • `~/.zeros/detach.lock` is SINGLE-INSTANCE ENFORCEMENT (git/detach.ts).
- *      With Beta holding it, Production could not enter detach mode at all: it
- *      failed with DETACH_LOCKED naming a workspace belonging to the other app.
- *    • `~/.zeros/state.db` + `worktrees` were shared between two concurrently
- *      running apps whose workspaces live in different roots.
- *
- *  The dev instance was immune (it correctly used `.zeros-dev`), which is exactly
- *  why none of this was ever reproducible in dev. Keyed on channel() now, so it
- *  stays correct as channels are added. */
+/** Every channel needs its own dot-dir so settings and single-instance locks cannot cross channels. */
 export function zerosDotDirName(): string {
   if (isLocalDevelopmentRuntime()) return ".zeros-local";
   const ch = channel();
   return ch === "stable" ? ".zeros" : `.zeros-${ch}`;
 }
 
-/** The user-global dot-dir: `~/.zeros` (prod) / `~/.zeros-beta` / `~/.zeros-dev`.
- *  Holds settings.toml, term-zdotdir/, state.db, detach.lock, the default-project
- *  sentinel, and (dev) the per-worktree launcher bundles. Everything channel-scoped
- *  MUST resolve through here so no channel writes into another's state. */
 export function zerosStateRoot(): string {
   if (isLocalDevelopmentRuntime()) {
     return localInstanceStateRoot(devInstanceSlug());
@@ -161,23 +93,16 @@ export function zerosStateRoot(): string {
   return path.join(homedir(), zerosDotDirName());
 }
 
-/** The pre-split shared dot-dir (`~/.zeros`). Used ONLY by the one-time settings
- *  seed (settings/files.ts seedUserSettingsFromLegacyRoot): before the 3-way split
- *  Beta wrote its settings here, so a Beta that upgrades into the split would
- *  otherwise silently start with default settings. */
+/** One-time settings seed for installations that predate channel-specific roots. */
 export function legacySharedStateRoot(): string {
   return path.join(homedir(), ".zeros");
 }
 
-/** The unified Zeros database file. */
 export function zerosDbPath(): string {
   return path.join(zerosDataDir(), "zeros.db");
 }
 
-/** The visible worktrees root: ~/zeros/workspaces/<repo>/<ws>.
- *  Distinct from the hidden app-data dir above; user- and CLI-navigable.
- *  (Worktree relocation off the legacy ~/.zeros/worktrees is a later Phase-0
- *  step; exposed here so callers share one definition.) */
+/** Keep user-edited worktrees outside the hidden app-data directory. */
 export function zerosWorkspacesRoot(): string {
   if (process.env.ZEROS_WORKSPACES_DIR) return process.env.ZEROS_WORKSPACES_DIR;
   const ch = channel();
@@ -186,20 +111,13 @@ export function zerosWorkspacesRoot(): string {
     : ch === "stable"
       ? "zeros"
       : `zeros-${ch}`;
-  // Per-worktree dev instance keeps its own visible worktrees root too, so two
-  // instances never write worktrees into a directory the other's registry owns.
+  // Dev instances must not write worktrees into another instance's registry root.
   const inst = ch === "dev" ? devInstanceSlug() : "";
-  const dir = inst ? `${base}-${inst}` : base; // zeros-dev-<slug>
+  const dir = inst ? `${base}-${inst}` : base;
   return path.join(homedir(), dir, "workspaces");
 }
 
-/** The visible sibling root for design worktrees:
- * `~/zeros[-channel][-instance]/design workspaces`.
- *
- * Keep the space in the leaf: this is user-facing Finder territory, not an
- * internal identifier. Tests/cloud may override it independently, or derive a
- * sibling from ZEROS_WORKSPACES_DIR so one fixture root still isolates both
- * workspace kinds. */
+/** Keep the space in the user-facing Finder path; derive a sibling root when only the Code workspace root is overridden. */
 export function zerosDesignWorkspacesRoot(): string {
   if (process.env.ZEROS_DESIGN_WORKSPACES_DIR) {
     return process.env.ZEROS_DESIGN_WORKSPACES_DIR;
@@ -213,11 +131,7 @@ export function zerosDesignWorkspacesRoot(): string {
   return path.join(path.dirname(zerosWorkspacesRoot()), "design workspaces");
 }
 
-/** A stable, collision-resistant, human-recognizable key for an engine root
- *  (the repo the engine serves). `<basename>-<sha256(realpath)[:12]>` — realpath
- *  so two paths that resolve to the same place (symlinks) share a key; the
- *  basename prefix keeps the on-disk dir recognizable. Falls back to the literal
- *  path when realpath fails (e.g. the root doesn't exist yet). */
+/** This persisted key uses realpath so aliases share a directory; fall back to the input when resolution fails. */
 export function repoKey(root: string): string {
   let canonical = root;
   try {
@@ -234,28 +148,16 @@ export function repoKey(root: string): string {
   return `${base}-${hash}`;
 }
 
-/** The per-engine-root runtime directory inside the app-data home. Holds the
- *  engine bootstrap manifest (`engine.json`: pid/port/instance) + the `busy`
- *  heartbeat — the metadata that USED to be written into the served repo as
- *  `<root>/.zeros/{.port,.token,.busy}`. Keyed by repoKey so concurrent engines
- *  for different repos don't collide; dev vs prod stay separated by the
- *  `com.zeros` / `com.zeros.dev` data-dir split. Override the base with
- *  ZEROS_DATA_DIR (tests/cloud). */
 export function engineRuntimeDir(root: string): string {
   return path.join(zerosDataDir(), "engines", repoKey(root));
 }
 
-/** Root of the per-worktree crash-recovery seeds, in app-data. Each worktree's
- *  `workspace.json` seed used to live at `<worktree>/.zeros/workspace.json` in
- *  the working tree; it moved here so Zeros leaves no `.zeros/` in any worktree.
- *  `seedFromDisk()` scans this dir to rebuild the registry if `zeros.db` is lost. */
+/** Keep recovery seeds outside worktrees so the registry can be rebuilt after database loss. */
 export function worktreeSeedsRoot(): string {
   return path.join(zerosDataDir(), "worktrees");
 }
 
-/** A worktree's crash-recovery seed file (`workspace.json`) in app-data, keyed
- *  by the worktree path. The seed JSON carries the canonical `path`, so recovery
- *  restores the row without depending on this dir name. */
+/** Recovery uses the canonical path in the seed, not this directory key. */
 export function worktreeSeedPath(worktreePath: string): string {
   return path.join(
     worktreeSeedsRoot(),

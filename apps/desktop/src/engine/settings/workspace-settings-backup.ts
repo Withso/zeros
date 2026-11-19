@@ -14,8 +14,7 @@ function backupPath(workspaceId: string): string {
   return path.join(zerosDataDir(), "workspace-settings", `${name}.toml`);
 }
 
-/** Private archive companion, outside Git and any shared repository. Keep
- * exact bytes (including invalid TOML) so archiving never discards editor work. */
+/** Keep workspace settings outside Git, including invalid TOML so archiving does not lose edits. */
 export function backupWorkspaceSettings(
   workspaceId: string,
   root: string,
@@ -45,8 +44,7 @@ export function restoreWorkspaceSettings(
       | ".zeros/settings.local.toml",
   );
   const source = backupPath(workspaceId);
-  // A resumed restore may already have published the file. Keep any edit made
-  // after that publication; the archive copy remains available until deletion.
+  // On resumed restore, leave the published file alone so edits since the first restore survive.
   if (existsSync(source) && !existsSync(target))
     writeSettingsFileRaw(target, readFileSync(source, "utf8"));
   else if (!existsSync(target)) initializeWorkspaceSettings(root);

@@ -1,7 +1,3 @@
-// Workspace numbers (`w-<n>`) are permanent within an owner, and a workspace
-// is "Untitled" until one of its chats is first named. These drive the real
-// SQLite schema (migration 46), the engine's insert/recovery/owner-repair
-// paths and the floor file that survives a lost database.
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -102,7 +98,6 @@ describe("workspace numbers", () => {
     const later = workspace();
     const reserved = reserveWorkspaceNumber(later.id, null);
     expect(reserveWorkspaceNumber(later.id, null)).toBe(reserved);
-    // Another workspace created meanwhile does not take the announced number.
     const other = workspace();
     insertWorkspace(other);
     insertWorkspace(later);
@@ -176,7 +171,6 @@ describe("workspace numbers", () => {
     expect(seedFromDisk().inserted).toBe(1);
     expect(getWorkspaceById(kept.id)).toMatchObject({ number: 1, title: "Add canvas zoom" });
 
-    // A seed claiming a number another row already holds gets the next one.
     const squatter = workspace();
     writeWorktreeSeed({ ...squatter, number: 1 });
     expect(seedFromDisk().inserted).toBe(1);
@@ -230,7 +224,6 @@ describe("workspace titles", () => {
     expect(upsertChat(chat("c1", ws.path, "  Add   canvas zoom "))).toBe(ws.id);
     expect(getWorkspaceById(ws.id)?.title).toBe("Add canvas zoom");
 
-    // Later names never rename the workspace.
     expect(upsertChat(chat("c1", ws.path, "Renamed later"))).toBeNull();
     expect(upsertChat(chat("c2", ws.path, "Second chat"))).toBeNull();
     expect(getWorkspaceById(ws.id)?.title).toBe("Add canvas zoom");
@@ -255,7 +248,7 @@ describe("workspace titles", () => {
   it("names older workspaces from their earliest named chat at startup", () => {
     const ws = workspace();
     insertWorkspace(ws);
-    // Chats saved before workspaces had titles.
+    // Bypass live title adoption to simulate chats persisted before workspace titles.
     setChatWorkspaceResolver(null);
     upsertChat(chat("old-2", ws.path, "Untitled"));
     upsertChat(chat("old-1", ws.path, "Earliest name"));

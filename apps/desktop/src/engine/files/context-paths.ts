@@ -16,8 +16,6 @@ export async function assertContextDirectory(
   target: string,
   workspaceRoot: string,
 ) {
-  // Context lifecycle helpers own this one private recovery directory. Generic
-  // file/mention/list policy still excludes it from every returned surface.
   const relative = path.relative(workspaceRoot, target);
   if (
     relative.startsWith(`..${path.sep}`) ||

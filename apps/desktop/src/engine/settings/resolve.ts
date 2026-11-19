@@ -1,15 +1,3 @@
-// ──────────────────────────────────────────────────────────
-// Settings foundation — layered merge with per-leaf provenance
-// ──────────────────────────────────────────────────────────
-//
-// Pure functions only (no fs). Precedence, weakest → strongest:
-//   defaults < user < team (when present) < repo-local < workspace-local < managed
-// Repo-local belongs to the main checkout. Shared/worktree inputs are retired.
-//
-// Merge semantics: plain tables deep-merge per key; scalars and arrays
-// replace whole. Every winning leaf records WHICH layer set it — that
-// provenance is what renders "Inherited from User" in the repo settings UI.
-// ──────────────────────────────────────────────────────────
 
 import { DEFAULT_COMPUTER_BLOCKED_APPS } from "@zeros/protocol/computer-use-tools";
 import { DEFAULT_SIMULATOR_SETTINGS } from "@zeros/protocol/simulators";
@@ -19,9 +7,6 @@ import {
   type SettingsLayerName,
 } from "./schema";
 
-/** Resolver-level fallbacks. Deliberately minimal: only values the product
- *  treats as universal defaults today; behavior toggles stay undefined until
- *  the feature reading them ships. */
 export const DEFAULT_SETTINGS: RawSettingsDoc = {
   git: {
     remote: "origin",
@@ -38,9 +23,7 @@ export const DEFAULT_SETTINGS: RawSettingsDoc = {
     auto_open: true,
   },
   computer_use: {
-    // Availability starts on, and agents may use any app that is not blocked.
-    // Mac permissions still authorize every use; explicit user/managed
-    // opt-outs take precedence.
+    // Application access still requires macOS permissions; user or managed policy can disable it.
     enabled: true,
     show_agent_cursor: true,
     blocked_apps: [...DEFAULT_COMPUTER_BLOCKED_APPS],
@@ -50,26 +33,20 @@ export const DEFAULT_SETTINGS: RawSettingsDoc = {
 
 export interface SettingsLayers {
   user?: RawSettingsDoc | null;
-  /** Team defaults from the cloud control plane (couriered into the
-   *  engine in-memory — see team-context.ts). Weaker than every repo layer:
-   *  team sets the baseline, a repo can always specialize. */
+  /** Cloud team defaults arrive in memory and personal repository settings can override them. */
   team?: RawSettingsDoc | null;
   /** Retired input retained for source compatibility; never merged. */
   repo?: RawSettingsDoc | null;
-  /** Personal per-repo override from the MAIN checkout — machine-wide for the
-   *  repo, so it reaches every worktree. */
+  /** The main checkout's personal repository settings apply to all worktrees. */
   repoLocal?: RawSettingsDoc | null;
-  /** Private overrides from a distinct workspace checkout. */
   workspaceLocal?: RawSettingsDoc | null;
   managed?: RawSettingsDoc | null;
 }
 
 export interface ResolvedSettings {
-  /** Deep-merged effective document (no $schema, no provenance wrappers). */
   effective: RawSettingsDoc;
   /** Dot-path → the layer that supplied the winning value (leaves only). */
   sources: Record<string, SettingsLayerName>;
-  /** Sanitizer warnings from every layer, prefixed with the layer name. */
   warnings: string[];
 }
 
@@ -77,10 +54,7 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
-/** Keys that, if assigned/recursed-into, can poison Object.prototype. `smol-toml`
- *  parses tables into null-prototype objects where `__proto__` is an OWN
- *  enumerable key, so a committed `[x."__proto__"]` table would otherwise reach
- *  `Object.prototype` during merge/clone. Always skipped. */
+/** TOML can produce own prototype keys in null-prototype tables; never merge them into ordinary objects. */
 const DANGEROUS_KEYS = new Set(["__proto__", "constructor", "prototype"]);
 
 function clone<T>(v: T): T {
@@ -96,8 +70,7 @@ function clone<T>(v: T): T {
   return v;
 }
 
-/** Remove provenance entries at and under `path` (a leaf being replaced by a
- *  table, or a table being replaced by a leaf, must not leave stale entries). */
+/** When a layer replaces a table or leaf, discard provenance for the old shape. */
 function clearSourcesUnder(
   sources: Record<string, SettingsLayerName>,
   path: string,
@@ -134,8 +107,8 @@ function mergeLayer(
   }
   for (const [key, value] of Object.entries(doc)) {
     if (value === undefined) continue;
-    if (DANGEROUS_KEYS.has(key)) continue; // prototype-pollution guard
-    if (basePath === "" && key === "$schema") continue; // file metadata, not a setting
+    if (DANGEROUS_KEYS.has(key)) continue;
+    if (basePath === "" && key === "$schema") continue;
     const path = basePath ? `${basePath}.${key}` : key;
     if (isPlainObject(value)) {
       if (!isPlainObject(target[key])) {
@@ -151,9 +124,7 @@ function mergeLayer(
   }
 }
 
-/** Resolve raw (untrusted) layer documents into the effective settings tree.
- *  Each layer is per-leaf sanitized first; user-only keys in repo layers are
- *  dropped there. Pure: inputs are never mutated. */
+/** Sanitize each untrusted layer before merging values and their provenance. */
 export function resolveSettings(layers: SettingsLayers): ResolvedSettings {
   const effective: RawSettingsDoc = {};
   const sources: Record<string, SettingsLayerName> = {};
@@ -182,4 +153,3 @@ export function resolveSettings(layers: SettingsLayers): ResolvedSettings {
 
   return { effective, sources, warnings };
 }
-

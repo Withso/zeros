@@ -23,7 +23,6 @@ describe("cloud runtime SQLite handoff", () => {
     sealZerosDbForRuntimeHandoff();
     expect(db.open).toBe(false);
     expect(() => openZerosDb()).toThrow("runtime handoff");
-    // Ordinary teardown cannot accidentally clear the handoff barrier.
     closeZerosDb();
     expect(() => openZerosDb()).toThrow("runtime handoff");
     sealZerosDbForRuntimeHandoff(); resumeZerosDbAfterRuntimeHandoff();

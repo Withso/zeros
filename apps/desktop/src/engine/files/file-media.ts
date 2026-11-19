@@ -4,9 +4,7 @@ import { FILE_MEDIA_CHUNK_BYTES, MAX_FILE_MEDIA_BYTES, fileMediaRangeSchema, fil
 import { isInside, isSensitiveRepoPath } from "./read-file";
 import { openBoundedFileSync } from "./bounded-read-sync";
 
-/** A range never trusts a previous successful metadata lookup. Resolve and
- * authorize again, then read a held regular-file descriptor and check revision
- * before AND after I/O. No whole-file buffer, hash or retained descriptor. */
+/** Reauthorize every range; metadata is not a grant, and range reads must keep one descriptor through both version checks. */
 function openMedia(cwd: string, relativePath: string, remote: boolean, canonicalRoot?: string) {
   if (!cwd || !relativePath || relativePath.includes("\0") || !fileMediaType(relativePath)) throw new Error("Invalid media path");
   const root = canonicalRoot ?? fs.realpathSync(cwd), lexicalRoot = path.resolve(cwd), lexical = path.resolve(cwd, relativePath);
@@ -17,8 +15,7 @@ function openMedia(cwd: string, relativePath: string, remote: boolean, canonical
   try {
     const info = fs.fstatSync(fd), current = fs.statSync(target);
     if (!info.isFile() || info.dev !== current.dev || info.ino !== current.ino || fs.realpathSync(lexical) !== target || fs.realpathSync(cwd) !== root) throw new Error("Media file changed");
-    // Linux can additionally prove the descriptor itself didn't move during
-    // lookup. macOS uses identity + repeated realpath checks above.
+    // Linux also checks the held descriptor's path; macOS relies on identity and repeated realpath checks.
     if (process.platform === "linux" && fs.realpathSync(`/proc/self/fd/${fd}`) !== target) throw new Error("Media file moved");
     return { fd, info };
   } catch (error) { fs.closeSync(fd); throw error; }
@@ -29,8 +26,7 @@ export function readWorkspaceMediaMetadata(cwd: string, relativePath: string, re
   try {
     if (info.size > MAX_FILE_MEDIA_BYTES) return { kind: "too-large" as const, path: relativePath, bytes: info.size };
     const type = fileMediaType(relativePath)!;
-    // Documents retain the existing binary wire kind. Older renderers show
-    // their safe fallback; new ones opt into a viewer using the MIME metadata.
+    // Keep the binary document kind for older renderers; MIME metadata opts newer ones into a viewer.
     return { kind: type.kind === "document" ? "binary" as const : type.kind, path: relativePath, bytes: info.size, media: { mimeType: type.mimeType, version: fileMediaVersion(info) } };
   } finally { fs.closeSync(fd); }
 }

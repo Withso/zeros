@@ -1,16 +1,4 @@
-// ──────────────────────────────────────────────────────────
-// PTY host client — integration tests
-// ──────────────────────────────────────────────────────────
-//
-// Exercises the real out-of-process Node PTY host (pty-host.cjs) through the
-// engine-side client. This is the path that fixes the bun regression: the
-// engine drives node-pty in a Node subprocess instead of loading it in-process
-// (where bun's PTY I/O is dead). These run under vitest (Node), so the host
-// child is spawned with `node` from PATH and node-pty works.
-//
-// Real shells + real timing, so timeouts are generous and assertions are
-// liberal (we only need to prove bytes/keystrokes/exit flow end to end).
-// ──────────────────────────────────────────────────────────
+// Uses a real Node PTY host and shell; this does not test Bun's in-process node-pty behavior.
 
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { execFileSync } from "node:child_process";
@@ -40,22 +28,12 @@ const SHELL =
     ? process.env.SHELL
     : "/bin/sh";
 
-/** The host script THIS checkout owns. Resolved from the module URL, not
- *  process.cwd() — vitest's cwd is the repo root today, but the descendant-reap
- *  test below must exercise the source host either way (a desktop test env can
- *  otherwise inherit a packaged ZEROS_PTY_HOST_SCRIPT). */
+/** Use the checkout's host script even if ZEROS_PTY_HOST_SCRIPT points at a packaged copy. */
 const SOURCE_HOST_SCRIPT = fileURLToPath(
   new URL("../pty-host.cjs", import.meta.url),
 );
 
-/** An interactive shell with job control AND `disown`. Rules out /bin/sh
- *  (dash on Linux has neither), so the reap test skips rather than fails on a
- *  runner that ships neither zsh nor bash. `-f`/`--norc` keep user rc files out
- *  of the spawned shell. `prelude` covers the one difference that bites here:
- *  interactive bash has history expansion on, so `$!` dies with "event not
- *  found" instead of yielding the background job's pid. It has to be its OWN
- *  line — expansion is applied when the line is READ, so `set +H` sharing a
- *  line with `$!` is already too late. */
+/** The reap test needs job control and disown; disable Bash history expansion on a separate input line before reading $!. */
 const JOB_CONTROL_SHELL = [
   { shell: "/bin/zsh", args: ["-f", "-i"], prelude: "" },
   {
@@ -65,8 +43,7 @@ const JOB_CONTROL_SHELL = [
   },
 ].find((candidate) => existsSync(candidate.shell));
 
-/** Diagnostics only — never let the failure message itself fail the test on a
- *  runner whose `ps` rejects one of these format specifiers. */
+/** A runner's ps may reject these fields; diagnostics must not mask the assertion. */
 function describeProcess(pid: number | null): string {
   if (!pid) return "no pid";
   try {
@@ -119,7 +96,6 @@ function makeHandle(): {
   return { handle, data: () => buf, exit };
 }
 
-/** Poll until `pred(data())` is true or we time out. */
 async function waitFor(
   data: () => string,
   pred: (s: string) => boolean,
@@ -134,8 +110,7 @@ async function waitFor(
 }
 
 afterEach(() => {
-  // Tear down the shared host between tests so a lingering shell can't bleed
-  // output into the next case.
+  // Dispose the shared host so output cannot reach the next test.
   disposePtyHost();
   vi.mocked(fs.openSync).mockReset();
   vi.restoreAllMocks();
@@ -214,8 +189,7 @@ describe.runIf(process.platform === "linux")("original shared PTY host birth", (
       try {
         await writeFile(artifact, condition === "overflow" ? "0".repeat(4097) : "truncated");
         if (condition === "symlink") await symlink(artifact, path.join(directory, "stat-link"));
-        // Explicit fault injection at the original child's fixed proc-stat
-        // open; the real child still runs with its normal env/argv and IPC.
+        // Inject only the proc-stat read; the real child still uses normal argv, environment, and IPC.
         vi.mocked(fs.openSync).mockImplementation((...args) => {
           const match = /^\/proc\/([1-9][0-9]*)\/stat$/.exec(String(args[0]));
           if (!match) return actual.openSync(...args);
@@ -256,14 +230,11 @@ describe.runIf(process.platform === "linux")("original shared PTY host birth", (
 describe("pty-host-client — out-of-process node-pty", () => {
   it("streams shell output and round-trips keystrokes", async () => {
     const { handle, data } = makeHandle();
-    // Give the shell a moment to draw, then type a command. The PTY echoes the
-    // keystrokes AND the shell prints the result, so the marker shows up.
+    // The PTY may echo the command marker as well as print it.
     await new Promise((r) => setTimeout(r, 400));
     handle.write("echo ZEROS_PTY_OK_123\r");
     const ok = await waitFor(data, (s) => s.includes("ZEROS_PTY_OK_123"));
     expect(ok).toBe(true);
-    // pid is reported asynchronously by the host's "spawned" message; by now
-    // it must be a real, positive pid.
     expect(handle.pid).toBeGreaterThan(0);
   });
 
@@ -353,8 +324,6 @@ describe("pty-host-client — out-of-process node-pty", () => {
   it.runIf(process.platform !== "win32" && JOB_CONTROL_SHELL !== undefined)(
     "reaps a background job when its live terminal is killed",
     async () => {
-      // The desktop test environment can inherit a packaged host path. This
-      // regression must exercise the source host changed by this checkout.
       const priorHostScript = process.env.ZEROS_PTY_HOST_SCRIPT;
       process.env.ZEROS_PTY_HOST_SCRIPT = SOURCE_HOST_SCRIPT;
       let output = "";
@@ -386,10 +355,7 @@ describe("pty-host-client — out-of-process node-pty", () => {
           handle.write(`${JOB_CONTROL_SHELL!.prelude}\r`);
           await new Promise((resolve) => setTimeout(resolve, 200));
         }
-        // `set -m` is the portable spelling of zsh's `setopt monitor`: job
-        // control puts the background job in its OWN process group, which is
-        // exactly what a process-group-only kill misses. nohup + disown then
-        // strip the last two ties to the shell.
+        // Job control gives the descendant a separate process group; nohup and disown keep shell teardown from masking a missed reap.
         handle.write(
           "set -m; nohup sleep 30 </dev/null >/dev/null 2>&1 & child=$!; disown; echo ZEROS_BG_PID:$child\r",
         );
@@ -458,18 +424,14 @@ describe("pty-host-client — out-of-process node-pty", () => {
       exit,
       new Promise<null>((r) => setTimeout(() => r(null), 4000)),
     ]);
-    // kill should drive the shell to exit.
     expect(result).not.toBeNull();
   });
 
   it("synthesizes an exit when the host is disposed under a live session", async () => {
     const { handle, data, exit } = makeHandle();
-    // Wait until the session is genuinely live (the host reported its pid)
-    // before yanking the whole host — a cold respawn can take >300ms.
+    // Wait for the spawn acknowledgment so disposal exercises a live session.
     await waitFor(data, () => handle.pid > 0, 4000);
     expect(handle.pid).toBeGreaterThan(0);
-    // Killing the whole host (not just the session) must still flush a
-    // synthetic exit to the renderer so the tab shows "[process exited]".
     disposePtyHost();
     const result = await Promise.race([
       exit,
@@ -508,13 +470,9 @@ describe("pty-host-client — out-of-process node-pty", () => {
         new Promise<null>((r) => setTimeout(() => r(null), 8000)),
       ]);
       expect(r1?.reason).toBe("host-unavailable");
-      // The fatal-preceded boot death engages the hold-off IMMEDIATELY (a
-      // respawn would fail identically), before the synthetic exits flush.
+      // The fatal load failure must engage hold-off before notifying session listeners.
       expect(ptyHostRespawnHoldOffMsForTests()).toBeGreaterThan(0);
 
-      // A terminal opened during the hold-off fails fast with the same
-      // synthetic exit — ensure() refuses to boot another doomed child, and
-      // the attempt must neither clear nor extend the hold-off.
       const second = makeHandle();
       const r2 = await Promise.race([
         second.exit,
@@ -523,8 +481,6 @@ describe("pty-host-client — out-of-process node-pty", () => {
       expect(r2?.reason).toBe("host-unavailable");
       expect(ptyHostRespawnHoldOffMsForTests()).toBeGreaterThan(0);
 
-      // Intentional teardown (engine stop / test cleanup) is not a crash:
-      // it resets the hold-off so a fresh start isn't blocked.
       disposePtyHost();
       expect(ptyHostRespawnHoldOffMsForTests()).toBe(0);
     } finally {

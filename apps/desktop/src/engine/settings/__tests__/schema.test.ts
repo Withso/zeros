@@ -11,8 +11,6 @@ import {
 
 describe("sanitizeLayer", () => {
   it("keeps a fully valid repo document intact", () => {
-    // The slimmed 2026-07-17 repo shape: $schema + scripts + the two tables the
-    // repo-page tabs edit (git / prompts). env/env_files left the repo files.
     const doc = {
       $schema: "https://zeros.build/schemas/settings.repo.schema.json",
       scripts: {
@@ -29,8 +27,7 @@ describe("sanitizeLayer", () => {
   });
 
   it("keeps personal scripts and MCP overrides while rejecting unsupported local keys", () => {
-    // Workspace overrides can change execution settings. Repository provisioning
-    // (files to copy) stays with the main checkout, and env stays in the vault.
+    // Checkout overrides can change execution but not provisioning or vault ownership.
     const doc = {
       scripts: { setup: "pnpm install" },
       git: { base_branch: "main" },
@@ -76,8 +73,6 @@ describe("sanitizeLayer", () => {
   });
 
   it("KEEPS env / env_files / mcp / file_include_globs at the user layer", () => {
-    // The slimming is repo-scoped only — the user file remains the (file-based)
-    // home for these keys.
     const doc = {
       env: { A: "1" },
       env_files: [".env.agent"],
@@ -153,9 +148,7 @@ describe("sanitizeLayer", () => {
     const valid = { browser: { enabled: false, claude_enabled: false, auto_open: false } };
     expect(sanitizeLayer(valid, "user")).toEqual({ doc: valid, warnings: [] });
 
-    // Retired switches have no Settings row any more and never reach
-    // effective settings; their opt-outs fold into the keys that replaced
-    // them, so an opt-out never turns into access.
+    // Retired opt-outs still win so an upgrade cannot grant browser access.
     const invalid = sanitizeLayer(
       {
         browser: {
@@ -561,8 +554,6 @@ describe("sanitizeLayer", () => {
         ],
       },
     };
-    // mcp is user-level only since the 2026-07-17 slimming — a repo file's
-    // [mcp] table is ignored wholesale with a warning.
     const user = sanitizeLayer(doc, "user");
     expect(user.doc).toEqual(doc);
     expect(user.warnings).toEqual([]);
@@ -578,8 +569,8 @@ describe("sanitizeLayer", () => {
         mcp: {
           servers: [
             { name: "ok1", transport: "stdio", command: "a" },
-            { name: "bad", transport: "stdio" }, // missing command
-            { transport: "http", url: "https://x/mcp" }, // missing name
+            { name: "bad", transport: "stdio" },
+            { transport: "http", url: "https://x/mcp" },
             { name: "ok2", transport: "http", url: "https://y/mcp" },
           ],
         },

@@ -18,20 +18,16 @@ export type McpGatewaySecretChanges = NonNullable<McpSaveInput["secrets"]>;
 export type McpSettingsWrite = ReturnType<typeof opSettingsWrite>;
 export type McpSettingsCommit = (server: McpSettingsServer | null, changes: McpGatewaySecretChanges, repoRoot: string | undefined, write: () => McpSettingsWrite, previous: Record<string, unknown> | null) => Promise<McpSettingsWrite>;
 
-/** Keep the settings mutation and vault publication in the same native turn.
- * Validate retained values first; failed file writes restore only this entry. */
+/** On save, stage valid credentials durably before changing settings; publish to the live vault only after the file write succeeds. */
 export function commitMcpCredentials(vault: OAuthVault, server: McpSettingsServer | null, changes: McpGatewaySecretChanges, repoRoot: string | undefined, write: () => McpSettingsWrite, previous: Record<string, unknown> | null, persist?: (snapshot: Record<string, BackendCredentials>) => Promise<void>): Promise<McpSettingsWrite> {
   const target = server ?? mcpServerSchema.parse(previous);
   const key = mcpCredentialKey(target.credential_id, target.transport === "stdio" ? undefined : target.url, repoRoot);
-  // The settings file is shared across entries; the credential lock is shared
-  // with OAuth refresh across project gateways. Hold both through the durable
-  // acknowledgement so a rotated token cannot be overwritten by this snapshot.
+  // Lock the shared settings array and fence OAuth refresh for this entry through durable acknowledgement.
   return vault.exclusive("mcp-settings-transaction", () => vault.exclusive(key, async () => {
   if (!server) {
     const prior = mcpServerSchema.parse(previous);
     if (!prior.credential_id) return write(); // legacy URI keys may be shared
-    // Remove config first: a crash can leave an unused encrypted value, never
-    // a live configuration whose previous credentials were destroyed.
+    // Remove config first so a crash cannot leave it pointing to deleted credentials.
     const result = write();
     vault.clear(key);
     await persist?.(vault.snapshot());
@@ -74,24 +70,20 @@ export function commitMcpCredentials(vault: OAuthVault, server: McpSettingsServe
     vault.replaceEntry(key, next);
     return result;
   } catch (error) {
-    // The staged durable value was never published in the live vault. Restore
-    // from the latest confirmed entries, including unrelated token refreshes.
+    // Restore the confirmed vault, including unrelated refreshes, not the staged snapshot.
     await persist?.(vault.snapshot());
     throw error;
   }
   }));
 }
 
-/** The editor holds the JSON copy settings.read sent over the bridge, while
- * smol-toml tables have null prototypes and datetimes are Date subclasses.
- * Compare JSON values, never JS prototypes. */
+/** Compare bridge JSON: TOML tables can have null prototypes and datetimes become strings. */
 function sameSavedValue(saved: unknown, edited: unknown): boolean {
   const json = (value: unknown): unknown => value === undefined ? undefined : JSON.parse(JSON.stringify(value));
   return isDeepStrictEqual(json(saved), json(edited));
 }
 
-/** Write back the saved value wherever the edit left its JSON unchanged, so a
- * hand-written datetime stays a datetime rather than its ISO string. */
+/** Reuse unchanged originals so TOML datetimes are not written as ISO strings. */
 function keepUnchangedValues(saved: unknown, edited: unknown): unknown {
   if (sameSavedValue(saved, edited)) return saved;
   const isTable = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value) && !(value instanceof Date);
@@ -99,8 +91,7 @@ function keepUnchangedValues(saved: unknown, edited: unknown): unknown {
   return Object.fromEntries(Object.entries(edited).map(([key, value]) => [key, Object.hasOwn(saved, key) ? keepUnchangedValues(saved[key], value) : value]));
 }
 
-/** Identify an edit by its original identity, then compare the original entry.
- * Unrelated insertions/deletions survive; changing the edited row conflicts. */
+/** Check for stale edits by original identity so unrelated row changes survive. */
 export function replaceMcpServer(servers: unknown[], previous: Record<string, unknown> | null, server: Record<string, unknown>): unknown[] {
   const isRecord = (entry: unknown): entry is Record<string, unknown> => typeof entry === "object" && entry !== null && !Array.isArray(entry);
   const index = previous ? servers.findIndex(entry => isRecord(entry) && (previous.credential_id ? entry.credential_id === previous.credential_id : entry.name === previous.name)) : -1;
@@ -110,8 +101,7 @@ export function replaceMcpServer(servers: unknown[], previous: Record<string, un
   return index === -1 ? [...servers, server] : servers.map((entry, offset) => offset === index ? keepUnchangedValues(entry, server) : entry);
 }
 
-/** All reads and the atomic settings-file replacement are synchronous. No other
- * engine operation can interleave a stale full-array write in this transaction. */
+/** Read and replace synchronously so each engine edit starts from the latest array. */
 export async function opMcpSaveServer(input: McpSaveInput, commit?: McpSettingsCommit): Promise<McpSettingsWrite> {
   const validated = mcpServerSchema.safeParse(input.server);
   if (!validated.success) throw new Error("Invalid MCP configuration. Review the server details.");
@@ -130,7 +120,7 @@ export async function opMcpSaveServer(input: McpSaveInput, commit?: McpSettingsC
 
 export const mcpDeleteInputSchema = mcpSaveInputSchema.omit({ server: true, secrets: true }).extend({ previous: z.record(z.string(), z.unknown()) });
 export function removeMcpServer(servers: unknown[], previous: Record<string, unknown>): unknown[] {
-  // Reuse the exact identity/CAS check before removing, preserving unknown rows.
+  // Use the same conflict check before deleting an entry.
   replaceMcpServer(servers, previous, previous);
   return servers.filter(entry => !sameSavedValue(entry, previous));
 }

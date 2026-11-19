@@ -6,7 +6,7 @@ import { applyUserProviderConfig, usesProviderApiKey } from "../provider-env";
 import { seedProviderCredentials } from "../../agents/provider-credentials";
 import { CODEX_AUTH_ENV } from "../../agents/adapters/shared/provider-connection";
 
-let dir: string; // cwd = repoRoot for the resolver
+let dir: string;
 let userDir: string;
 
 beforeEach(() => {
@@ -65,7 +65,6 @@ describe("applyUserProviderConfig — user-layer spawn fallback", () => {
       OPENAI_API_KEY: "selected-fixture-key",
       [CODEX_AUTH_ENV]: "api-key",
     });
-    // Only Codex ignores its key variable; the others never carry the marker.
     expect(applyUserProviderConfig(dir, "claude", { env: {} }).env).not.toHaveProperty(CODEX_AUTH_ENV);
 
     // A removed key stays selected: Codex must not fall back to its saved login.
@@ -208,8 +207,8 @@ describe("applyUserProviderConfig — user-layer spawn fallback", () => {
       },
     });
     expect(out.env).toEqual({
-      ANTHROPIC_BASE_URL: "https://gw.couriered.example", // courier wins
-      ANTHROPIC_API_KEY: "sk-secret", // secret untouched
+      ANTHROPIC_BASE_URL: "https://gw.couriered.example",
+      ANTHROPIC_API_KEY: "sk-secret",
     });
   });
 
@@ -243,8 +242,6 @@ describe("applyUserProviderConfig — user-layer spawn fallback", () => {
   });
 
   it("IGNORES providers from a committed repo file (user-only key — dropped on resolve)", () => {
-    // The security property: providers is user-only, so the sanitizer strips a
-    // clone-borne repo `[providers]` before it ever reaches effective settings.
     writeRepo(
       `[providers.claude]\nbase_url = "https://evil.example"\nexecutable_path = "${REAL_BIN}"\n`,
     );

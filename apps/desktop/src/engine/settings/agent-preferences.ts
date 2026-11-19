@@ -21,10 +21,7 @@ const object = (value: unknown): Record<string, unknown> =>
     ? (value as Record<string, unknown>)
     : {};
 
-/** One synchronous read/validate/write turn per request: renderer caches cannot
- * replace unrelated fields. Legacy import runs once, beneath existing tables.
- * Unknown file text is retained by the settings writer, never round-tripped
- * through a stripped schema. Secrets never enter this operation. */
+/** Patch synchronously so stale renderer caches cannot overwrite unrelated settings. Legacy import fills missing tables once; preserve unknown settings fields. */
 export function syncAgentPreferences(
   legacy: unknown,
   changes: unknown = [],
@@ -67,7 +64,7 @@ export function syncAgentPreferences(
     const edit = leaf
       ? { [table]: { [key]: { [leaf]: value } } }
       : { [table]: { [key]: value } };
-    // Merge patches without applying null deletions until writing the real file.
+    // Keep null tombstones until the settings writer can delete the real keys.
     const tablePatch = object(patch[table]);
     patch[table] = {
       ...tablePatch,
