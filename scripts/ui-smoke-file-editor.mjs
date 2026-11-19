@@ -9,7 +9,13 @@ export async function runFileEditorSmoke({ page, check = () => {} }) {
     .browser()
     .newPage({ viewport: { width: 1180, height: 850 } });
   await fixture.addInitScript(() => {
-    if (new URL(location.href).searchParams.has("reset")) localStorage.clear();
+    const params = new URL(location.href).searchParams;
+    if (!params.has("reset")) return;
+    localStorage.clear();
+    if (params.get("owner") === "cloud") {
+      localStorage.setItem("zeros-account-presentation-owner:v1", "existing-account");
+      localStorage.setItem("zeros-cloud-file-lists:v1", "existing-file-list");
+    }
   });
   const errors = [];
   fixture.on("pageerror", (error) => errors.push(error.message));
@@ -155,6 +161,15 @@ export async function runFileEditorSmoke({ page, check = () => {} }) {
       await expect(row.locator('[data-item-section="decoration"]')).toHaveText(
         "M",
       );
+      if (owner === "cloud") {
+        expect(
+          await fixture.evaluate(() => [
+            localStorage.getItem("zeros-account-presentation-owner:v1"),
+            localStorage.getItem("zeros-cloud-file-lists:v1"),
+          ]),
+        ).toEqual(["existing-account", "existing-file-list"]);
+        check("The cloud fixture preserves the existing account cache", true);
+      }
       // sample.ts sits in the fixed Files home, which reads Files whatever it
       // shows: no file name, glyph, status letter or close button. The tree
       // row keeps the M.

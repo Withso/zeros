@@ -1524,6 +1524,9 @@ export async function listWorkspaceFileListing(
   cwd: string,
   limit?: number,
 ): Promise<WorkspaceFileListing> {
+  if (isCloudWorkspace(cwd)) {
+    return bridgeWorkspaceFileListing(requireBridge("list repository files"), cwd, limit, true);
+  }
   return readWorkspaceFileListing(cwd, limit, true);
 }
 
@@ -1581,6 +1584,7 @@ export async function listIgnoredEntries(
 ): Promise<string[]> {
   if (!cwd || !isNativeRuntime()) return [];
   const bridge = requireBridge("list ignored files");
+  if (isCloudWorkspace(cwd)) return bridgeIgnoredEntries(bridge, cwd, dir, true);
   let workspaceId = cwd;
   try {
     workspaceId = (await resolveBridgeWorkspaceIdForCwd(bridge, cwd)) ?? cwd;

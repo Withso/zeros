@@ -22,13 +22,22 @@
 
 import { listWorkspaceFileListing } from "@/renderer/platform/git";
 import { invalidateMentionFiles } from "../features/agent/mention-files-cache";
+import { isCloudWorkspace } from "../platform/bridge/cloud-workspace-key";
+import {
+  cloudFileListAccess,
+  peekCloudFileList,
+  rememberCloudFileList,
+  resetCloudFileListsForTests,
+  subscribeCloudFileListAccess,
+} from "../state/cloud-file-list-presentation";
 
 import type { WorkspaceFileListing } from "../platform/bridge/workspace-bridge";
 export type { WorkspaceFileListing } from "../platform/bridge/workspace-bridge";
 
-type Entry = { listing: WorkspaceFileListing; at: number; stale: boolean };
+type Entry = { listing: WorkspaceFileListing; at: number; stale: boolean; readKey?: string; cloudFolder?: string };
 type InflightEntry = {
   generation: number;
+  readKey?: string;
   promise: Promise<WorkspaceFileListing>;
 };
 
@@ -37,18 +46,25 @@ const inflight = new Map<string, InflightEntry>();
 const generations = new Map<string, number>();
 const failures = new Map<string, unknown>();
 const failureListeners = new Map<string, Set<() => void>>();
+let offCloudCacheAccess: (() => void) | undefined;
+
+function listingKey(cwd: string): string | undefined {
+  const folder = workspaceCacheKey(cwd);
+  return isCloudWorkspace(folder) ? cloudFileListAccess(folder)?.key : folder;
+}
 
 export function workspaceFileListingFailure(
   cwd: string | undefined,
 ): unknown | null {
-  return cwd ? (failures.get(workspaceCacheKey(cwd)) ?? null) : null;
+  const key = cwd && listingKey(cwd);
+  return key ? (failures.get(key) ?? null) : null;
 }
 export function subscribeWorkspaceFileListingFailure(
   cwd: string | undefined,
   listener: () => void,
 ): () => void {
-  if (!cwd) return () => {};
-  const key = workspaceCacheKey(cwd);
+  const key = cwd && listingKey(cwd);
+  if (!key) return () => {};
   const listeners = failureListeners.get(key) ?? new Set();
   listeners.add(listener);
   failureListeners.set(key, listeners);
@@ -80,6 +96,13 @@ function touchCacheEntry(key: string, entry: Entry): void {
 }
 
 function writeCacheEntry(key: string, entry: Entry): void {
+  if (entry.cloudFolder && !offCloudCacheAccess) {
+    offCloudCacheAccess = subscribeCloudFileListAccess(() => {
+      for (const [key, entry] of cache) {
+        if (entry.cloudFolder && cloudFileListAccess(entry.cloudFolder)?.key !== key) cache.delete(key);
+      }
+    });
+  }
   touchCacheEntry(key, entry);
   while (cache.size > MAX_ENTRIES) {
     const oldest = cache.keys().next().value as string | undefined;
@@ -121,27 +144,52 @@ export async function loadWorkspaceFiles(cwd: string): Promise<string[]> {
 export async function loadWorkspaceFileListing(
   cwd: string,
 ): Promise<WorkspaceFileListing> {
-  const key = workspaceCacheKey(cwd);
+  const folder = workspaceCacheKey(cwd);
+  const cloud = isCloudWorkspace(folder);
+  const access = cloud ? cloudFileListAccess(folder) : null;
+  const key = cloud ? access?.key : folder;
+  if (!key) throw new Error("Cloud file listing access changed");
+  const retainedListing = () => {
+    const latest = cache.get(key);
+    if (latest) return latest.listing;
+    return access ? peekCloudFileList(folder, access.lineage) : undefined;
+  };
+  if (access && !access.ready) {
+    const retained = peekWorkspaceFileListing(folder);
+    if (retained) return retained;
+    throw new Error("Cloud file listing requires a running workspace");
+  }
+  let accessChanged = false;
+  const current = () => {
+    if (!access) return true;
+    const next = cloudFileListAccess(folder);
+    return !accessChanged && next?.ready && next.readKey === access.readKey;
+  };
   const hit = cache.get(key);
-  if (hit && !hit.stale && Date.now() - hit.at < FRESH_MS) {
+  if (hit && hit.readKey === access?.readKey && !hit.stale && Date.now() - hit.at < FRESH_MS) {
     touchCacheEntry(key, hit);
     return hit.listing;
   }
 
   const generation = generations.get(key) ?? 0;
   const pending = inflight.get(key);
-  if (pending?.generation === generation) return pending.promise;
+  if (pending?.generation === generation && pending.readKey === access?.readKey) return pending.promise;
 
+  let offAccess: (() => void) | undefined;
   const p = listWorkspaceFileListing(cwd)
     .then((listing) => {
+      if (!current()) throw new Error("Cloud file listing access changed");
       // An invalidation may have happened while git ls-files was running. That
       // response describes the OLD disk generation: return it to its original
       // caller, but never publish it into the shared cache.
-      if ((generations.get(key) ?? 0) !== generation) return listing;
+      if ((generations.get(key) ?? 0) !== generation) {
+        if (cloud) throw new Error("Cloud file listing changed");
+        return listing;
+      }
       // Preserve the published array when the listing is byte-for-byte the
       // same. @pierre/trees treats `paths` as model input; handing it a fresh
       // but equal array needlessly resets/reconciles every visible row.
-      const previous = cache.get(key)?.listing;
+      const previous = retainedListing();
       const files = sameFileList(previous?.files, listing.files)
         ? previous!.files
         : listing.files;
@@ -159,24 +207,35 @@ export async function loadWorkspaceFileListing(
               files,
               ...(designDirectories !== undefined ? { designDirectories } : {}),
             };
-      writeCacheEntry(key, { listing: stable, at: Date.now(), stale: false });
+      writeCacheEntry(key, { listing: stable, at: Date.now(), stale: false,
+        ...(access ? { readKey: access.readKey, cloudFolder: folder } : {}) });
+      if (access) rememberCloudFileList(folder, access.lineage, stable);
       publishListingFailure(key, null);
       return stable;
     })
     .catch((error: unknown) => {
+      if (!current() || cloud && (generations.get(key) ?? 0) !== generation) throw error;
       if ((generations.get(key) ?? 0) === generation)
         publishListingFailure(key, error);
-      const retained = cache.get(key)?.listing;
+      const retained = retainedListing();
       if (retained !== undefined) return retained;
       throw error;
     })
     .finally(() => {
+      offAccess?.();
       // A newer generation may already own this cwd's in-flight slot. Never
       // let the old request's finally delete the newer request.
       if (inflight.get(key)?.promise === p) inflight.delete(key);
     });
 
-  inflight.set(key, { generation, promise: p });
+  inflight.set(key, { generation, readKey: access?.readKey, promise: p });
+  if (access) {
+    offAccess = subscribeCloudFileListAccess(() => {
+      accessChanged ||= !current();
+      if (accessChanged && inflight.get(key)?.promise === p) inflight.delete(key);
+    });
+    accessChanged ||= !current();
+  }
   return p;
 }
 
@@ -186,7 +245,8 @@ export async function loadWorkspaceFileListing(
 export function invalidateWorkspaceFiles(cwd: string | undefined): void {
   if (!cwd) return;
   invalidateMentionFiles(cwd);
-  const key = workspaceCacheKey(cwd);
+  const key = listingKey(cwd);
+  if (!key) return;
   generations.set(key, (generations.get(key) ?? 0) + 1);
   const retained = cache.get(key);
   if (retained) retained.stale = true;
@@ -217,6 +277,9 @@ export function resetWorkspaceFilesCacheForTests(): void {
   inflight.clear();
   generations.clear();
   failures.clear();
+  offCloudCacheAccess?.();
+  offCloudCacheAccess = undefined;
+  resetCloudFileListsForTests();
 }
 
 /** Publish a listing directly into the cache (harness/tests) — lets the real
@@ -227,13 +290,19 @@ export function primeWorkspaceFiles(
   files: string[],
   designDirectories?: string[],
 ): void {
-  writeCacheEntry(workspaceCacheKey(cwd), {
-    listing: {
-      files,
-      ...(designDirectories !== undefined ? { designDirectories } : {}),
-    },
+  const folder = workspaceCacheKey(cwd);
+  const access = isCloudWorkspace(folder) ? cloudFileListAccess(folder) : null;
+  const key = isCloudWorkspace(folder) ? access?.key : folder;
+  if (!key) return;
+  const listing = {
+    files,
+    ...(designDirectories !== undefined ? { designDirectories } : {}),
+  };
+  writeCacheEntry(key, {
+    listing,
     at: Date.now(),
     stale: false,
+    ...(access ? { readKey: access.readKey, cloudFolder: folder } : {}),
   });
 }
 
@@ -247,6 +316,16 @@ export function peekWorkspaceFileListing(
   cwd: string,
 ): WorkspaceFileListing | null {
   const key = workspaceCacheKey(cwd);
+  if (isCloudWorkspace(key)) {
+    const access = cloudFileListAccess(key);
+    if (!access) return null;
+    const hit = cache.get(access.key);
+    if (hit) {
+      touchCacheEntry(access.key, hit);
+      return hit.listing;
+    }
+    return peekCloudFileList(key, access.lineage) ?? null;
+  }
   const entry = cache.get(key);
   if (!entry) return null;
   touchCacheEntry(key, entry);

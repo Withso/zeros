@@ -41,9 +41,9 @@ export function registerAccessAccountScope(read: () => string | null): void { ac
 /** The current account session, to bind a confirmation started now. */
 export function workspaceAccessScope(): string | null { return accountScope(); }
 const accessEnded = new Set<string>();
-const accessListeners = new Set<() => void>();
+const accessListeners = new Set<(target: AccessTarget) => void>();
 const accessKey = (scope: string, target: AccessTarget) => `${scope}|${target.organizationId}|${target.workspaceId}`;
-export function subscribeWorkspaceAccessEnded(listener: () => void): () => void {
+export function subscribeWorkspaceAccessEnded(listener: (target: AccessTarget) => void): () => void {
   accessListeners.add(listener);
   return () => { accessListeners.delete(listener); };
 }
@@ -59,11 +59,11 @@ export function reportWorkspaceAccessEnded(target: AccessTarget, scope: string |
   const key = accessKey(scope, target);
   if (accessEnded.has(key)) return;
   accessEnded.add(key);
-  for (const listener of accessListeners) listener();
+  for (const listener of accessListeners) listener(target);
 }
 export function clearWorkspaceAccessEnded(target: AccessTarget): void {
   const scope = accountScope();
   if (!scope || !accessEnded.delete(accessKey(scope, target))) return;
-  for (const listener of accessListeners) listener();
+  for (const listener of accessListeners) listener(target);
 }
 export function resetWorkspaceAccessForTests(): void { accessEnded.clear(); accountScope = () => null; }

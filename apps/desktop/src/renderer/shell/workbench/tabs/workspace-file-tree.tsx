@@ -35,6 +35,7 @@ import {
   subscribeWorkspaceFileListingFailure,
   type WorkspaceFileListing,
 } from "../../workspace-files-cache";
+import { useWorkspaceFileListScope } from "../../use-workspace-file-list-scope";
 import { prefetchWorkspaceFileRead } from "../../workspace-file-data-cache";
 import { useWorkbenchStatusSource } from "../tab-status";
 import { canOpenPathLocally, revealInFinder } from "@/renderer/platform/app";
@@ -388,10 +389,28 @@ export interface WorkspaceFileTreeHandle {
 export const WorkspaceFileTree = React.forwardRef<
   WorkspaceFileTreeHandle,
   WorkspaceFileTreeProps
+>(function ScopedWorkspaceFileTree(props, ref) {
+  const folder = props.cwd;
+  const { key, live } = useWorkspaceFileListScope(folder, props.active !== false);
+  return (
+    <WorkspaceFileTreeForScope
+      key={key}
+      {...props}
+      cwd={key ? folder : undefined}
+      live={live}
+      ref={ref}
+    />
+  );
+});
+
+const WorkspaceFileTreeForScope = React.forwardRef<
+  WorkspaceFileTreeHandle,
+  WorkspaceFileTreeProps & { live: boolean }
 >(function WorkspaceFileTree(
   {
     active = true,
     cwd,
+    live,
     initialSelectedPath,
     selectedPath,
     search,
@@ -444,13 +463,10 @@ export const WorkspaceFileTree = React.forwardRef<
   const failure = useSyncExternalStore(
     useCallback(
       (listener: () => void) =>
-        active ? subscribeWorkspaceFileListingFailure(cwd, listener) : () => {
-        // Keep the last exact-key tree (or a stable cold blank). A reconnect
-        // advances reloadKey and retries without publishing a false empty list.
-      },
-      [active, cwd],
+      active && live ? subscribeWorkspaceFileListingFailure(cwd, listener) : () => {},
+      [active, cwd, live],
     ),
-    useCallback(() => workspaceFileListingFailure(cwd), [cwd]),
+    useCallback(() => live ? workspaceFileListingFailure(cwd) : null, [cwd, live]),
     () => null,
   );
   const loadFolderRef = useRef(cwd);
@@ -462,7 +478,7 @@ export const WorkspaceFileTree = React.forwardRef<
       primary: true,
       hasContent: !!cwd && peekWorkspaceFileListing(cwd) !== null,
       retry: async () => {
-        if (!cwd || !active) return;
+        if (!cwd || !active || !live) return;
         invalidateWorkspaceFiles(cwd);
         const next = await loadWorkspaceFileListing(cwd);
         if (loadFolderRef.current === cwd)
@@ -543,7 +559,7 @@ export const WorkspaceFileTree = React.forwardRef<
     paths: rawIgnoredPaths,
     expandedDirs,
     resolved: ignoredResolved,
-  } = useIgnoredEntries(cwd, reloadKey, model, active, gitStatus);
+  } = useIgnoredEntries(live ? cwd : undefined, reloadKey, model, active && live, gitStatus);
   const ignoredPaths = useMemo(() => {
     const filter = designFilterRef.current;
     if (!filter || rawIgnoredPaths.length === 0) return rawIgnoredPaths;
@@ -637,6 +653,7 @@ export const WorkspaceFileTree = React.forwardRef<
       setPathsSnapshot({ cwd: undefined, listing: EMPTY_FILE_LISTING });
       return;
     }
+    if (!live) return;
     let cancelled = false;
     // Ordinary remounts may reuse the short-lived cache. A real refresh signal
     // invalidates this cwd in useGitRefreshKey BEFORE reloadKey changes, so a
@@ -658,7 +675,7 @@ export const WorkspaceFileTree = React.forwardRef<
     return () => {
       cancelled = true;
     };
-  }, [active, cwd, reloadKey]);
+  }, [active, cwd, live, reloadKey]);
 
   // resetPaths rebuilds from `initialExpansion: "closed"`, collapsing every open
   // directory. A tracked change resets and replays ignored branches through
