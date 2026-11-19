@@ -1456,7 +1456,8 @@ async function main() {
         intent: message.params.intent, binding: "b".repeat(64), revision: lazyRevision, pages: [{ id: "main", title: "Design", folder: "", count: frames.length }],
         total: frames.length, offset: 0, frames, coverage: "complete", nextCursor: null } };
     },
-    request: withScopedMutationSnapshots(async (message: {
+    request: withScopedMutationSnapshots(async (message: { type?: string; op?: string; params?: Record<string, unknown> }) => {
+      const respond = async (message: {
       type?: string;
       op?: string;
       params?: Record<string, unknown>;
@@ -3017,6 +3018,14 @@ async function main() {
           ...(lazyPreparationHarness ? { sourceVersion, violations: warnings } : {}) } };
       }
       return { type: "WORKSPACE_RESPONSE", result: { ok: true } };
+    };
+      try {
+        return await respond(message);
+      } finally {
+        // Smokes wait for a layout save to settle, not merely to start.
+        if (layoutGestureHarness && message.op === "design.transaction.apply")
+          designShortcutOperations.push("transaction:end");
+      }
     }),
   } as never);
 

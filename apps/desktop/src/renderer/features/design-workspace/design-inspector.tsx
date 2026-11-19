@@ -2527,6 +2527,32 @@ export const DesignInspector = React.memo(function DesignInspector({
           }
         }));
       };
+      // A sizing choice paints at admission, before any newer preview can
+      // exist; its durable values are still prepared from confirmed state.
+      if (action.type === "sizing" && action.mode !== "relative" && canPaintPreview()) {
+        const runtimeState = useDesignRuntimeStore.getState().byWorkspace[workspaceId]?.frames[capturedFrame.file];
+        for (const nodeId of styleNodeIds) {
+          const details =
+            runtimeState?.detailsByNode[nodeId] ??
+            (nodeId === currentContext.selectedNodeId ? currentContext.elementDetails : null);
+          if (!details) continue;
+          let styles: Record<string, string | null>;
+          try {
+            styles = designSizingStyles(details, action.axis, action.mode);
+          } catch {
+            continue; // The durable preparation reports the unsupported choice.
+          }
+          previewedNodeIds.add(nodeId);
+          previewPublications.set(nodeId, publishDesignLivePreviewStyles(workspaceId, capturedFrame.file, nodeId, styles));
+          const frameRuntime = designFrameRuntime(workspaceId, capturedFrame.file);
+          if (frameRuntime?.supports("previewLayout"))
+            void frameRuntime.previewLayout({ updates: [{ nodeId, styles }], nodeIds: [nodeId] }).then((geometries) => {
+              if (!canPaintPreview()) return;
+              for (const geometry of geometries)
+                paintDesignInspectorPreviewDetails(workspaceId, capturedFrame.file, geometry);
+            }, () => {});
+        }
+      }
       return applyDesignEditCached(workspaceId, capturedFrame, async ({ assertCurrent }) => {
         assertCurrent();
         const { frame: currentFrame, runtime, assertFrameCurrent } =

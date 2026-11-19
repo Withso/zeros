@@ -266,14 +266,20 @@ export async function runDesignLayoutGesturesSmoke({ page, check }) {
   // A real cross-document transfer takes much longer than a preview. Its
   // pixels must stay at the drop, including every frame before confirmation.
   await select("home-heading");
-  const beforeSizing = await page.evaluate(
+  // Layout choices save as transactions; hold the first one at the host.
+  const designTransactions = () =>
+    page.evaluate(() => window.__zerosHarnessDesignTransactions ?? 0);
+  const beforeSizing = await designTransactions();
+  const settledSizing = await page.evaluate(
     () =>
       window.__zerosHarnessDesignShortcutOperations.filter(
-        (op) => op === "style:end",
+        (op) => op === "transaction:end",
       ).length,
   );
   await page.evaluate(() => {
-    window.__zerosHarnessStyleDelay = 1500;
+    window.__zerosHarnessDesignTransactionGate = new Promise((resolve) => {
+      window.__layoutReleaseSizingSave = resolve;
+    });
   });
   await layout
     .getByRole("button", { name: /^Width sizing: / })
@@ -284,6 +290,7 @@ export async function runDesignLayoutGesturesSmoke({ page, check }) {
   await expect
     .poll(() => heading.evaluate((el) => getComputedStyle(el).flexGrow))
     .toBe("1");
+  await expect.poll(designTransactions).toBe(beforeSizing + 1);
   await layout
     .getByRole("button", { name: /^Width sizing: / })
     .click();
@@ -298,28 +305,25 @@ export async function runDesignLayoutGesturesSmoke({ page, check }) {
     .toBe("0");
   check(
     "a second sizing choice paints while the first choice is still saving",
-    (await page.evaluate(
-      () =>
-        window.__zerosHarnessDesignShortcutOperations.filter(
-          (op) => op === "style:end",
-        ).length,
-    )) === beforeSizing,
+    (await designTransactions()) === beforeSizing + 1,
   );
-  await expect
-    .poll(() =>
-      page.evaluate(() => window.__zerosHarnessDesignShortcutOperations.at(-1)),
-    )
-    .toBe("style:end");
+  await page.evaluate(() => {
+    window.__zerosHarnessDesignTransactionGate = undefined;
+    window.__layoutReleaseSizingSave();
+  });
   await expect
     .poll(() =>
       page.evaluate(
         () =>
           window.__zerosHarnessDesignShortcutOperations.filter(
-            (op) => op === "style:end",
+            (op) => op === "transaction:end",
           ).length,
       ),
     )
-    .toBe(beforeSizing + 2);
+    .toBe(settledSizing + 2);
+  await expect
+    .poll(() => heading.evaluate((el) => getComputedStyle(el).flexGrow))
+    .toBe("0");
   await page.evaluate(() => {
     window.__zerosHarnessStyleDelay = 50;
   });
