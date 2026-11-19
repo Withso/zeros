@@ -334,16 +334,59 @@ it("drops only the denied cached chat on confirmed native access loss", async ()
   expect(m.workspace.useWorkspaceStore.getState().chats.some(chat => chat.id === "local")).toBe(true);
 });
 
-it("a relaunch paints cached cloud chats only for workspaces in the restored catalog", async () => {
+it("a relaunch exposes cached chats and files for the restored workspace before Boat attaches", async () => {
   const m = await seed();
   // A chat of a workspace that is no longer in this account's catalog (it left while the app was closed).
   const gone = { ...target, workspaceId: "99999999-2222-4222-8222-222222222222" };
   const goneChat = m.boot.sanitizeCachedChat({ id: cloudScopedId(gone, "old"), folder: cloudWorkspaceKey(gone), title: "Gone" })!;
   const kept = m.workspace.useWorkspaceStore.getState().chats;
   m.cache.persistWorkspaceChatCache("chats-v1", [...kept, goneChat]);
+  const initialBridge = await import("../../platform/bridge/active-bridge");
+  const initialFiles = await import("../../shell/workspace-files-cache");
+  const read = vi.fn().mockResolvedValue({ type: "WORKSPACE_RESPONSE", result: { files: ["saved.ts"] } });
+  initialBridge.setActiveBridge({ requestConnected: read } as unknown as Parameters<typeof initialBridge.setActiveBridge>[0]);
+  m.catalog.acceptCloudWorkspaceDocument({ ...doc, status: "ready", version: 2 });
+  await expect(initialFiles.loadWorkspaceFiles(folder)).resolves.toEqual(["saved.ts"]);
+  m.catalog.acceptCloudWorkspaceDocument({ ...doc, status: "stopped", version: 3 });
+  initialBridge.setActiveBridge(null);
   vi.resetModules(); vi.clearAllMocks();
   const next = await modules();
+  const { setActiveBridge } = await import("../../platform/bridge/active-bridge");
+  const request = vi.fn(), requestConnected = vi.fn();
+  setActiveBridge({ request, requestConnected } as unknown as Parameters<typeof setActiveBridge>[0]);
+  const { loadWorkspaceFiles, peekWorkspaceFiles } = await import("../../shell/workspace-files-cache");
   next.identity.installAccountPresentationIdentity(user);
   expect(next.workspace.useWorkspaceStore.getState().chats.map(chat => chat.id)).toEqual(["local", id]);
+  expect(peekWorkspaceFiles(folder)).toEqual(["saved.ts"]);
+  await expect(loadWorkspaceFiles(folder)).resolves.toEqual(["saved.ts"]);
   expect(io.me).not.toHaveBeenCalled();
+  expect(request).not.toHaveBeenCalled();
+  expect(requestConnected).not.toHaveBeenCalled();
+
+  next.catalog.acceptCloudWorkspaceDocument({ ...doc, status: "ready", version: 4 });
+  requestConnected.mockRejectedValueOnce(new Error("Cloud workspace is disconnected"));
+  await expect(loadWorkspaceFiles(folder)).resolves.toEqual(["saved.ts"]);
+  requestConnected.mockResolvedValueOnce({ type: "WORKSPACE_RESPONSE", result: { files: ["fresh.ts"] } });
+  await expect(loadWorkspaceFiles(folder)).resolves.toEqual(["fresh.ts"]);
+  expect(requestConnected).toHaveBeenCalledWith(expect.objectContaining({ op: "file.tree", params: expect.objectContaining({ workspaceId: folder }) }), 10_000);
+  expect(request).not.toHaveBeenCalled();
+  next.catalog.acceptCloudWorkspaceDocument({
+    ...doc, status: "archived", version: 5,
+  });
+  requestConnected.mockClear();
+  await expect(loadWorkspaceFiles(folder)).resolves.toEqual(["fresh.ts"]);
+  expect(requestConnected).not.toHaveBeenCalled();
+  next.catalog.acceptCloudWorkspaceDocument({
+    ...doc, status: "ready", version: 6, capabilities: { ...doc.capabilities, canWrite: false },
+  });
+  expect(peekWorkspaceFiles(folder)).toBeNull();
+  next.catalog.acceptCloudWorkspaceDocument({ ...doc, status: "ready", version: 7 });
+  expect(peekWorkspaceFiles(folder)).toBeNull();
+  requestConnected.mockResolvedValueOnce({ type: "WORKSPACE_RESPONSE", result: { files: ["fresh.ts"] } });
+  await expect(loadWorkspaceFiles(folder)).resolves.toEqual(["fresh.ts"]);
+  next.catalog.acceptCloudWorkspaceDocument({ ...doc, status: "deleted", version: 8 });
+  expect(peekWorkspaceFiles(folder)).toBeNull();
+  await expect(loadWorkspaceFiles(folder)).rejects.toThrow("access changed");
+  expect(localStorage.getItem("zeros-cloud-file-lists:v1")).not.toContain("fresh.ts");
+  setActiveBridge(null);
 });

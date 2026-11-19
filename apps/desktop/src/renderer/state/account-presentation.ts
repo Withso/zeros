@@ -12,6 +12,8 @@ import { workspaceListFilterProjectId } from "./workspace-list-filter";
 import { canReadCloudWorkspace, clearCloudWorkspaceCatalog, getCloudWorkspaceDocuments, restoreCloudWorkspaceCatalog, subscribeCloudWorkspaces, subscribeCloudWorkspaceRows } from "./cloud-workspace-catalog";
 import { clearCloudAgentRegistry } from "../features/agent/workspace-agent-registry";
 import { loadCloudCatalogPresentation, persistCloudCatalogPresentation } from "./cloud-catalog-cache";
+import { cloudFileListAccess, forgetCloudWorkspaceFileList, invalidateCloudFileListAccess, pruneCloudFileLists, retireCloudFileLists } from "./cloud-file-list-presentation";
+import { subscribeWorkspaceAccessEnded } from "../platform/team-sharing-registry";
 import { completeCloudChatCacheRestore, loadCloudChatCache, pruneCloudChatCache, setCloudChatCacheOwner } from "./cloud-chat-cache";
 import { pruneOrganizationDestinations } from "./organization-destination-cache";
 import { folderIsWithinRoot } from "./workspace-resolution";
@@ -31,6 +33,7 @@ export function installAccountPresentationIdentity(user: AuthUser | null): void 
   const binding = bindAccountPresentationOwner(owner), retire = binding.retire || replacement;
   void retireLegacyCloudTranscriptStore();
   if (!binding.changed && !replacement) return;
+  if (retire) retireCloudFileLists();
   retireCloudTranscriptSummaries();
   cloudTranscriptCache.bindOwner(owner, retire);
   offCatalog?.();
@@ -98,6 +101,7 @@ export function installAccountPresentationIdentity(user: AuthUser | null): void 
   const offAccess = subscribeCloudChatCacheAccessLoss((lostOwner, target, scope) => {
     if (lostOwner !== owner || nativeCloudChatCache.owner !== owner || nativeCloudChatCache.epoch !== epoch) return;
     const folder = cloudWorkspaceKey(target), id = cloudScopedId(target, target.chatId);
+    if (scope === "workspace") forgetCloudWorkspaceFileList(target);
     const removed = (chatId: string, cwd?: string | null) => cwd === folder && (scope === "workspace" || chatId === id);
     cloudTranscriptCache.retain((chatId, cwd) => !removed(chatId, cwd));
     const sessions = useSessionsStore.getState();
@@ -106,9 +110,16 @@ export function installAccountPresentationIdentity(user: AuthUser | null): void 
         transcriptContentSignatures: undefined, transcriptHistoryState: undefined });
   });
   if (active && !active.archived && active.kind !== "terminal") cloudTranscriptCache.prefetch([active.id]);
-  const offDocuments = subscribeCloudWorkspaces(() => persistCloudCatalogPresentation(
-    owner, getCloudWorkspaceDocuments().filter(canReadCloudWorkspace), selectActiveFolder(useWorkspaceStore.getState()),
-  ));
+  const pruneFiles = () => pruneCloudFileLists((folder, lineage) => cloudFileListAccess(folder)?.lineage !== lineage);
+  pruneFiles();
+  const offFileAccess = subscribeWorkspaceAccessEnded(() => {
+    pruneFiles();
+    invalidateCloudFileListAccess();
+  });
+  const offDocuments = subscribeCloudWorkspaces(() => {
+    pruneFiles();
+    persistCloudCatalogPresentation(owner, getCloudWorkspaceDocuments().filter(canReadCloudWorkspace), selectActiveFolder(useWorkspaceStore.getState()));
+  });
   const offRows = subscribeCloudWorkspaceRows(change => {
     pruneCloudChatCache(change.removedWorkspaceIds);
     if (change.removedWorkspaceIds.length) cloudTranscriptCache.retain((_chatId, folder) =>
@@ -118,5 +129,5 @@ export function installAccountPresentationIdentity(user: AuthUser | null): void 
     if (change.removedWorkspaceIds.length) pruneOrganizationDestinations(destination =>
       change.removedWorkspaceIds.some(folder => folderIsWithinRoot(destination.folder, folder)));
   });
-  offCatalog = () => { offDocuments(); offRows(); offActive(); offAccess(); };
+  offCatalog = () => { offDocuments(); offRows(); offActive(); offAccess(); offFileAccess(); };
 }
