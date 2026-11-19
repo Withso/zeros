@@ -293,6 +293,7 @@ interface InspectorEditFieldProps {
   value: string | number;
   applied?: boolean;
   disabled?: boolean;
+  revalidating?: boolean;
   placeholder?: string;
   styleProperty?: string;
   /** Properties the field writes with styleProperty, such as both sides of
@@ -376,6 +377,7 @@ export function InspectorEditField({
   value: valueProp,
   applied = false,
   disabled = false,
+  revalidating = false,
   placeholder,
   styleProperty,
   linkedProperties,
@@ -394,6 +396,12 @@ export function InspectorEditField({
   mixedSteps,
 }: InspectorEditFieldProps) {
   const id = useId();
+  const disabledRef = useRef(disabled);
+  disabledRef.current = disabled;
+  const revalidatingRef = useRef(revalidating);
+  revalidatingRef.current = revalidating;
+  const pendingCommitRef = useRef<string | null>(null);
+  const commitRef = useRef<((draft?: string) => Promise<void>) | null>(null);
   const origin = useDesignFieldOrigin(styleProperty, linkedProperties);
   // A computed value (calc(), clamp()…) shows as written and is edited in
   // CSS; layers that differ still read Mixed.
@@ -513,7 +521,7 @@ export function InspectorEditField({
   // Finish an unfocused incoming value in this commit. A passive state update
   // can land after the next focus/select-all and overwrite that user's draft.
   useLayoutEffect(() => {
-    if (scrubRef.current) return;
+    if (scrubRef.current || pendingCommitRef.current !== null) return;
     const focused = document.activeElement === inputRef.current;
     // The one focused case that adopts at once: this field's own undo or redo,
     // and only while the field holds no draft the person started.
@@ -542,8 +550,8 @@ export function InspectorEditField({
   );
 
   useEffect(() => {
-    if (disabled) scrubCancelRef.current?.();
-  }, [disabled]);
+    if (disabled && (!revalidating || !scrubRef.current)) scrubCancelRef.current?.();
+  }, [disabled, revalidating]);
 
   useLayoutEffect(() => {
     const input = inputRef.current;
@@ -614,6 +622,15 @@ export function InspectorEditField({
   };
 
   const commit = async (requestedDraft = draftRef.current) => {
+    if (disabledRef.current) {
+      if (revalidatingRef.current) {
+        pendingCommitRef.current = requestedDraft;
+        return;
+      }
+      cancelPreview();
+      setPresentedDraft(baselineRef.current);
+      return;
+    }
     if (skipCommitRef.current) {
       skipCommitRef.current = false;
       cancelPreview();
@@ -677,6 +694,18 @@ export function InspectorEditField({
       });
     }
   };
+  commitRef.current = commit;
+  useLayoutEffect(() => {
+    const pending = pendingCommitRef.current;
+    if (pending === null || revalidating) return;
+    pendingCommitRef.current = null;
+    if (disabled) {
+      cancelPreview();
+      setPresentedDraft(baselineRef.current);
+    } else {
+      void commitRef.current?.(pending);
+    }
+  }, [disabled, revalidating, setPresentedDraft]);
 
   const glyph =
     icon ?? (compact && label === "Rotation" ? ("rotation" as const) : null);
@@ -836,7 +865,7 @@ export function InspectorEditField({
                 }
                 scrubRef.current = null;
                 scrubCancelRef.current = null;
-                void commit(scrub.latestValue);
+                void commitRef.current?.(scrub.latestValue);
               },
               onCancel: restore,
             });
@@ -876,7 +905,7 @@ export function InspectorEditField({
           data-design-draft={draft === String(value) ? "clean" : "dirty"}
           value={presentation.text}
           placeholder={placeholder}
-          disabled={disabled}
+          disabled={disabled && !(revalidating && focused)}
           readOnly={Boolean(origin.lock)}
           spellCheck={false}
           autoComplete="off"
@@ -1159,6 +1188,7 @@ const InspectorStyleField = React.memo(function InspectorStyleField({
   onLayoutAction,
   onPreviewLayoutAction,
   disabled,
+  revalidating,
   applied,
   onPreviewStyles,
   onCancelPreview,
@@ -1186,6 +1216,7 @@ const InspectorStyleField = React.memo(function InspectorStyleField({
   onLayoutAction?: (action: DesignLayoutAction) => Promise<void>;
   onPreviewLayoutAction?: (action: DesignLayoutAction) => Promise<void>;
   disabled?: boolean;
+  revalidating?: boolean;
   active: boolean;
   applied: boolean;
   onPreviewStyles: (
@@ -1355,6 +1386,7 @@ const InspectorStyleField = React.memo(function InspectorStyleField({
           : undefined
       }
       disabled={disabled || options?.disabled}
+      revalidating={revalidating && !options?.disabled}
       applied={applied}
       motion={
         motionModeActive
@@ -2923,6 +2955,7 @@ export const DesignInspector = React.memo(function DesignInspector({
           }
           compact={options?.compact}
           disabled={styleEditsDisabled || !styleActive}
+          revalidating={!elementDetails && !editsDisabled && styleActive}
           applied
           onPreview={(next) => {
             const number = Number(next);
@@ -3058,6 +3091,7 @@ export const DesignInspector = React.memo(function DesignInspector({
         onLayoutAction={commitLayoutAction}
         onPreviewLayoutAction={previewLayoutAction}
         disabled={styleEditsDisabled || !styleActive}
+        revalidating={!elementDetails && !editsDisabled && styleActive}
         applied={applied}
         motionModeActive={motionTimelineOpen}
         motionTrackActive={motionProperties.includes(property)}

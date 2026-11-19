@@ -148,7 +148,7 @@ const card: DesignRuntimeNodeDetails = {
 let container: HTMLDivElement;
 let reactRoot: Root | null = null;
 
-async function show(frameVersion = sourceVersion, details: DesignRuntimeNodeDetails | null = card, workspaceId = "w", nodeId = "card") {
+async function show(frameVersion = sourceVersion, details: DesignRuntimeNodeDetails | null = card, workspaceId = "w", nodeId = "card", active = true) {
   mocks.runtime.mockReturnValue({
     sourceVersion,
     supports: () => false,
@@ -165,7 +165,7 @@ async function show(frameVersion = sourceVersion, details: DesignRuntimeNodeDeta
     reactRoot.render(React.createElement(TooltipProvider, null,
       React.createElement(DesignInspector, {
         workspaceId, folder: "/repo", frame, frameSelected: false, selectedNodeId: nodeId, selectedNodeIds: [nodeId],
-        details, lint: null, active: true, canvasBackground: "white", onCanvasBackgroundChange: () => {},
+        details, lint: null, active, canvasBackground: "white", onCanvasBackgroundChange: () => {},
         motionTimelineOpen: false, motionProperties: [], onOpenMotionTimeline: () => {}, zoomActionsRef: { current: null },
       } as never)));
   });
@@ -201,8 +201,8 @@ async function showFrameOnlyMain() {
 
 const fieldInput = (property: string) =>
   container.querySelector<HTMLInputElement>(`[data-design-style-property="${property}"] input`)!;
-const pointer = (type: string, clientX: number) => {
-  const event = new MouseEvent(type, { bubbles: true, cancelable: true, button: 0, clientX, clientY: 0 });
+const pointer = (type: string, clientX: number, shiftKey = false) => {
+  const event = new MouseEvent(type, { bubbles: true, cancelable: true, button: 0, clientX, clientY: 0, shiftKey });
   Object.defineProperties(event, { pointerId: { value: 1 }, isPrimary: { value: true } });
   return event;
 };
@@ -298,6 +298,77 @@ describe("an inspector field scrub", () => {
     await show(sourceVersion, null, "w", "other-node");
     expect(container.querySelector("[data-design-style-editor]")).toBeNull();
     expect(writes()).toBe(0);
+  });
+
+  it("keeps an admitted Shift scrub through revalidation and writes only after exact-source readback", async () => {
+    const padding = { ...card, styles: { ...card.styles, "padding-left": "22px" } };
+    await show(sourceVersion, padding);
+    expect(fieldInput("padding-left").value).toBe("22");
+    act(() => {
+      container.querySelector<HTMLButtonElement>('button[aria-label="Scrub Left"]')!
+        .dispatchEvent(pointer("pointerdown", 0, true));
+      window.dispatchEvent(pointer("pointermove", 2, true));
+    });
+    await settle();
+    const nextVersion = "2".repeat(24);
+    await show(nextVersion, padding);
+    expect(fieldInput("padding-left").disabled).toBe(true);
+    expect(writes()).toBe(0);
+    await show(nextVersion, { ...padding, sourceVersion: nextVersion });
+    act(() => {
+      window.dispatchEvent(pointer("pointermove", 4, true));
+      window.dispatchEvent(pointer("pointerup", 4, true));
+    });
+    await settle();
+    expect(fieldInput("padding-left").value).toBe("62");
+    expect(writes()).toBe(1);
+    expect(lastWrite()).toContain('"padding-left":"62px"');
+    expect(lastWrite()).toContain(nextVersion);
+  });
+
+  it.each(["revalidating", "inactive"])("does not write when a scrub ends while %s", async (reason) => {
+    const padding = { ...card, styles: { ...card.styles, "padding-left": "22px" } };
+    await show(sourceVersion, padding);
+    act(() => {
+      container.querySelector<HTMLButtonElement>('button[aria-label="Scrub Left"]')!
+        .dispatchEvent(pointer("pointerdown", 0, true));
+      window.dispatchEvent(pointer("pointermove", 4, true));
+    });
+    await settle();
+    expect(fieldInput("padding-left").value).toBe("62");
+    await show("2".repeat(24), padding, "w", "card", reason !== "inactive");
+    act(() => { window.dispatchEvent(pointer("pointerup", 4, true)); });
+    await settle();
+    expect(fieldInput("padding-left").value).toBe(reason === "inactive" ? "22" : "62");
+    expect(writes()).toBe(0);
+    await show("2".repeat(24), { ...padding, sourceVersion: "2".repeat(24) });
+    expect(writes()).toBe(reason === "inactive" ? 0 : 1);
+  });
+
+  it.each(["confirmed", "inactive", "owner", "node"])("settles a pending typed commit only for its active exact-source owner: %s", async (outcome) => {
+    await show();
+    const input = fieldInput("opacity");
+    act(() => input.focus());
+    act(() => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, "75");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(input.value).toBe("75");
+    const nextVersion = "2".repeat(24);
+    await show(nextVersion);
+    expect(document.activeElement).toBe(input);
+    expect(input.disabled).toBe(false);
+    await act(async () => { input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); });
+    expect(writes()).toBe(0);
+    if (outcome === "inactive") await show(nextVersion, card, "w", "card", false);
+    if (outcome === "owner") await show(nextVersion, null, "other");
+    if (outcome === "node") await show(nextVersion, null, "w", "other-node");
+    await show(nextVersion, { ...card, sourceVersion: nextVersion });
+    expect(writes()).toBe(outcome === "confirmed" ? 1 : 0);
+    if (outcome === "confirmed") {
+      expect(lastWrite()).toContain('"opacity":"0.75"');
+      expect(lastWrite()).toContain(nextVersion);
+    }
   });
 
   it("a 120-tick scrub re-renders only the scrubbed field", async () => {
