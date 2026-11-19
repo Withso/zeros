@@ -447,7 +447,7 @@ export const SIMULATOR_FRAME_SLICES = [
 ] as const;
 export type SimulatorFrameSlice = (typeof SIMULATOR_FRAME_SLICES)[number];
 
-/** Frame art comes from local Xcode or Android Studio, never the bundle; coordinates are points from the frame's top-left. */
+/** Frame art comes from local Xcode or Android Studio, never the bundle. Coordinates are in points from the frame's top-left. Supply exactly one of `slices` or `image`. */
 export interface SimulatorDeviceFrame {
   width: number;
   height: number;

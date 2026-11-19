@@ -5,7 +5,7 @@ export interface ToolArtwork {
   name?: string;
 }
 
-/** Render only as an image, never inline HTML or SVG, and fetch HTTPS artwork anonymously. */
+/** Render only as an image, never inline markup. Allow approved image data or anonymous HTTPS; reject credentials, IP literals, and local hostnames. */
 export function safeToolImageSource(value: unknown): string | undefined {
   if (typeof value !== "string") return;
   if (value.length <= 96 * 1024) {

@@ -89,7 +89,6 @@ describe("the remote URL a bootstrap names", () => {
       "https://github.com/o/r?x=1", "https://github.com/o/r#y", "https://-github.com/o/r", "https://github.com/o r", "https://github.com/o/r\n", "ssh://root@github.com/o/r",
       "root@github.com:o/r", "git@github.com:-o/r", "git@-github.com:o/r", "--upload-pack=x", "https://github.com", ""])
       expect(isSafeRemoteUrl(url), JSON.stringify(url)).toBe(false);
-    // Unsafe remote metadata becomes null so the clone leaves origin unset.
     const reply = (remoteUrl: unknown) => schema.parse({ branch: "main", head: "a".repeat(40), remoteUrl });
     expect(reply("ext::sh -c x").remoteUrl).toBeNull();
     expect(reply("https://github.com/o/r.git").remoteUrl).toBe("https://github.com/o/r.git");
