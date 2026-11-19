@@ -91,6 +91,8 @@ interface ComponentDefinition {
     links: string[];
     /** What the Style panel shows for its instances; read on first use. */
     summary?: () => DesignComponentSummary | null;
+    /** The main's html and body style attributes, for a linked frame copy. */
+    documentStyles?: { html?: string; body?: string };
   };
   /** A plain definition's slots: each attribute slot an option may name,
    * with its fallback text, and whether it has a default slot. */
@@ -490,7 +492,7 @@ function analyzeDefinition(name: string, registered: string | undefined, source:
       name,
       body: body ? innerSource(source, body) : "",
       styles,
-      template: { file, declaration: read, links: stylesheetLinksOf(document),
+      template: { file, declaration: read, links: stylesheetLinksOf(document), documentStyles: documentStylesOf(document, body),
         summary: () => (summary === undefined ? (summary = designComponentSummaryOf(source)) : summary) },
     } };
   }
@@ -694,6 +696,27 @@ function fillSlots(
 const PSEUDO_ELEMENT_TAIL = /(?:::[\w-]+(?:\([^()]*\))?|:(?:before|after|first-line|first-letter)(?![\w-]))(?::[\w-]+(?:\([^()]*\))?)*$/i;
 const scopedStyles = new Map<string, string>();
 
+function documentStylesOf(document: DefaultTreeAdapterTypes.Document, body: DefaultTreeAdapterTypes.Element | undefined) {
+  const html = document.childNodes.find((node): node is DefaultTreeAdapterTypes.Element => node.nodeName === "html");
+  const style = (element: DefaultTreeAdapterTypes.Element | undefined) =>
+    element?.attrs.find((attribute) => attribute.name === "style")?.value.trim() || undefined;
+  const result = { html: style(html), body: style(body) };
+  return result.html || result.body ? result : undefined;
+}
+
+/** The registered main a frame is a linked copy of: its body's one layer is
+ * that main's host, marked as the frame's root. */
+function linkedFrameComponent(source: string, registry: ReadonlyMap<string, string>): string | null {
+  const document = sharedDesignParse(source) ?? parse(source);
+  const html = document.childNodes.find((node): node is DefaultTreeAdapterTypes.Element => node.nodeName === "html");
+  const body = html?.childNodes.find((node): node is DefaultTreeAdapterTypes.Element => node.nodeName === "body");
+  const roots = (body?.childNodes ?? []).filter((node): node is DefaultTreeAdapterTypes.Element =>
+    "tagName" in node && node.tagName !== "style");
+  const root = roots.length === 1 ? roots[0]! : null;
+  const name = root?.tagName.startsWith("zd-") ? root.tagName.slice(3) : "";
+  return name && registry.has(name) && root!.attrs.some((attribute) => attribute.name === "data-zeros-frame-root") ? name : null;
+}
+
 /**
  * Limits a component's style element to its instances: each selector keeps its
  * specificity but matches only the zd-<name> host or what is inside it, and
@@ -703,13 +726,15 @@ const scopedStyles = new Map<string, string>();
  * same way; one without a root, whose root would be the element holding the
  * style, is rooted at the host.
  */
-export function scopeDesignComponentStyle(name: string, css: string): string {
-  const key = `${name}\u0000${css}`;
+export function scopeDesignComponentStyle(name: string, css: string, documentContext = false): string {
+  const key = `${name}\u0000${documentContext ? 1 : 0}\u0000${css}`;
   const cached = scopedStyles.get(key);
   if (cached !== undefined) return cached;
   const host = `zd-${name}`;
   const scopeSelector = (selector: string) => {
     const complex = selector.trim();
+    // A linked frame copy renders as its main's document: page rules apply.
+    if (documentContext && /^(?:html|body|:root)$/i.test(complex)) return complex;
     if (/^(?::root|:host)$/i.test(complex)) return `:is(${complex}, ${host}):where(${host})`;
     const tail = PSEUDO_ELEMENT_TAIL.exec(complex);
     const subject = tail ? complex.slice(0, tail.index) : complex;
@@ -769,15 +794,21 @@ function injectComponentStyles(
   used: readonly string[],
   definitions: ReadonlyMap<string, ComponentDefinition>,
   budget: ExpansionBudget,
-  extra: { rules: readonly string[]; entryFile: string; entryLinks: readonly string[] } = { rules: [], entryFile: "", entryLinks: [] },
+  extra: { rules: readonly string[]; entryFile: string; entryLinks: readonly string[]; documentComponent?: string | null } = { rules: [], entryFile: "", entryLinks: [] },
 ): string {
   let bytes = Buffer.byteLength(source);
   const styles = new Map<string, string[]>();
   for (const name of used) {
     const scoped: string[] = [];
-    for (const style of definitions.get(name)?.styles ?? []) {
+    const documentContext = extra.documentComponent === name;
+    const documentStyles = documentContext ? definitions.get(name)?.template?.documentStyles : undefined;
+    const pageStyles = documentStyles
+      ? [...(definitions.get(name)?.styles ?? []), ...(["html", "body"] as const).flatMap((tag) =>
+        documentStyles[tag] ? [`${tag} { ${documentStyles[tag]!.replace(/[{}<]/g, "")} }`] : [])]
+      : definitions.get(name)?.styles ?? [];
+    for (const style of pageStyles) {
       budget.charge(style.length);
-      const text = scopeDesignComponentStyle(name, style);
+      const text = scopeDesignComponentStyle(name, style, documentContext);
       bytes += Buffer.byteLength(text) + Buffer.byteLength(name) + 40;
       budget.output(bytes);
       scoped.push(text);
@@ -1310,7 +1341,8 @@ async function expandBoundedComponents(
     usedNames,
     definitions,
     budget,
-    { rules: work.rules, entryFile, entryLinks: carriesLinks ? stylesheetLinksOf(parse(expandedEntry)) : [] },
+    { rules: work.rules, entryFile, entryLinks: carriesLinks ? stylesheetLinksOf(parse(expandedEntry)) : [],
+      documentComponent: entryDeclared ? null : linkedFrameComponent(source, registry) },
   );
   return {
     html,

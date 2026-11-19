@@ -4967,6 +4967,9 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     var selectorPattern = /^\[\s*data-oid\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\]\s]+))\s*\]$/i;
     for (var sheetIndex = 0; sheetIndex < document.styleSheets.length; sheetIndex += 1) {
       var rules;
+      var owner = document.styleSheets[sheetIndex].ownerNode;
+      // A component's sheet is its main's source, never the frame's own rule.
+      if (owner && owner.hasAttribute && owner.hasAttribute("data-zeros-component")) continue;
       try { rules = document.styleSheets[sheetIndex].cssRules || []; }
       catch (_error) { continue; }
       for (var ruleIndex = 0; ruleIndex < rules.length; ruleIndex += 1) {

@@ -319,6 +319,17 @@ describe("registered linked copies through production expansion and runtime", ()
     }));
   });
 
+  it("g: a linked frame copy keeps the main's document context without owning it", async () => {
+    await setup('<!doctype html><html><head>' + declaration + '<style>body { margin: 0; font-family: Arial, sans-serif; }</style></head>' +
+      '<body style="color: rgb(1, 2, 3)"><main class="root" data-oid="root"><span class="label" data-oid="label">Main</span></main></body></html>');
+    const { page } = await render();
+    expect(await page.evaluate(() => {
+      const root = getComputedStyle(document.querySelector(".root")!);
+      return [getComputedStyle(document.body).marginLeft, root.fontFamily, root.color];
+    })).toEqual(["0px", "Arial, sans-serif", "rgb(1, 2, 3)"]);
+    expect((await changes(page)).layers).toEqual([]);
+  });
+
   it("e: warm-copy invalidation and a variant switch consume edited source and added/renamed variants", async () => {
     const source = doc('<main class="root" data-oid="root"><span class="label" data-oid="label">{{ size }}</span></main>',
       declaration + '<style>.root { padding-left: var(--zd-size); } .label { padding-left: 2px; }</style>');
