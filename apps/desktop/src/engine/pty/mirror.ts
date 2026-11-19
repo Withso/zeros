@@ -22,7 +22,7 @@ const SNAPSHOT_SCROLLBACK_LADDER = [
 export interface TerminalSnapshot {
   /** Write this verbatim into a fresh xterm of the same dimensions. */
   data: string;
-  /** False can also mean serialization failed before producing any bytes. */
+  /** True when history was dropped to fit the payload cap; false can also mean serialization failed before producing any bytes. */
   truncated: boolean;
   bytes: number;
 }
