@@ -1,21 +1,3 @@
-// ──────────────────────────────────────────────────────────
-// Native shell façade (Electron)
-// ──────────────────────────────────────────────────────────
-//
-// Thin adapter over the desktop-shell IPC. Every function routes
-// through `nativeInvoke()` / `nativeListen()` so calls land on
-// Electron main-process handlers (apps/desktop/electron/ipc/router.ts) without
-// the call site knowing about IPC details.
-//
-// In browser-only dev (`pnpm dev` without Electron), read-style
-// functions resolve to empty / null; write-style ones throw so
-// the caller sees a clear "requires the Mac app" error instead
-// of silent failure.
-//
-// File renamed during the Electron migration. The function names are
-// unchanged so consumers only had to update their import path.
-// ──────────────────────────────────────────────────────────
-
 import {
   isElectron,
   isNativeRuntime,
@@ -28,8 +10,6 @@ import { getActiveBridge } from "./bridge/active-bridge";
 import { workspaceOp } from "./bridge/workspace-bridge";
 import { canBackgroundSyncCloudWorkspace } from "../state/cloud-workspace-catalog";
 
-// Re-export the runtime predicates so call sites can pull them
-// from either module.
 export { isElectron, isNativeRuntime, runtimeName } from "./runtime";
 
 export type EditHistoryDirection = "undo" | "redo";
@@ -55,21 +35,17 @@ export type ProjectOpeningPayload = {
   root: string;
 };
 
-/** A `zeros://open?path=…` deep link that never became an open project —
- *  a missing/blocked/non-project path, or a failed engine respawn. `root` is
- *  null when the link carried no path at all. */
+/** A failed zeros://open event has a null root when the link omitted its path. */
 export type ProjectOpenFailedPayload = {
   root: string | null;
   reason: string;
 };
 
-// ── Agent project-context discovery ──
-
 export type AgentContextFile = {
   path: string;
   filename: string;
   size: number;
-  /** mtime in epoch milliseconds; useful for "last edited X ago" UI. */
+  /** Epoch milliseconds. */
   mtime: number;
   /** First ~200 chars of the file. Empty for binary files. */
   preview: string;
@@ -82,9 +58,7 @@ export type AgentContextResult = {
   files: AgentContextFile[];
 };
 
-/** List the project-context files an agent is loading at this cwd —
- *  CLAUDE.md / AGENTS.md / .cursor/rules/* per agent.
- *  Walks cwd → parents → home. Read-only; binary-safe. */
+/** Native context discovery walks from cwd through its parents and also checks the user's home. */
 export async function loadAgentContextFiles(args: {
   cwd: string;
   agentId: string;
@@ -94,12 +68,6 @@ export async function loadAgentContextFiles(args: {
   }
   return nativeInvoke<AgentContextResult>("agent_context_files", args);
 }
-
-// The per-chat policies and plan IPC wrappers were removed: those
-// surfaces now live in renderer localStorage (device-local.ts / policies.ts),
-// and the retired electron/db.ts store backing them is gone.
-
-// ── Skills ───────────────────────────────────────────────
 
 export type Skill = {
   id: string;
@@ -120,8 +88,7 @@ export async function listSkills(
   if (cwd && isCloudWorkspace(cwd)) {
     const target = parseCloudWorkspaceKey(cwd);
     if (!target) throw new Error("Invalid cloud workspace identity.");
-    // Discovery also runs when a composer mounts. A stopped VM's retained
-    // relay can treat a non-history request as work, so do not send it there.
+    // Composer discovery must not wake a stopped VM through a retained relay.
     if (!canBackgroundSyncCloudWorkspace(target))
       throw new Error("Skill sources are available when the cloud workspace is running.");
     const bridge = getActiveBridge();
@@ -139,8 +106,7 @@ export async function listSkills(
       Object.keys(args).length ? args : undefined,
     );
   }
-  // An invalid/old runtime response is a failed read, not an empty library.
-  // The exact-key cache retains its last confirmed catalog on failure.
+  // Treat malformed catalogs as failed reads so the exact-key cache keeps its last confirmed snapshot.
   if (!Array.isArray(result) || result.some(skill => !skill ||
     ["id", "name", "description", "icon", "body", "path"].some(key => typeof skill[key] !== "string") ||
     (skill.content !== undefined && typeof skill.content !== "string")))
@@ -148,7 +114,6 @@ export async function listSkills(
   return result as Skill[];
 }
 
-/** Open an external http(s) URL in the user's default browser. */
 export async function shellOpenUrl(url: string): Promise<void> {
   const normalized = normalizeExternalHttpUrl(url);
   if (!normalized) throw new Error("only valid http(s) URLs are allowed");
@@ -164,31 +129,22 @@ export function canOpenPathLocally(path: string | null | undefined): boolean {
   return !!path && !isCloudWorkspace(path) && isNativeRuntime();
 }
 
-/** Reveal a path in macOS Finder. */
 export async function revealInFinder(path: string): Promise<void> {
   if (!canOpenPathLocally(path)) return;
   await nativeInvoke<void>("reveal_in_finder", { path });
 }
 
-/** Launch macOS Terminal.app at the given directory. */
 export async function openInTerminal(path: string): Promise<void> {
   if (!canOpenPathLocally(path)) return;
   await nativeInvoke<void>("open_in_terminal", { path });
 }
 
-/** Reveal an agent's native config file in Finder (created if missing) —
- *  claude → ~/.claude/settings.json, codex → ~/.codex/config.toml. No-op
- *  outside the native runtime. */
+/** The native command can create a missing provider config before revealing it. */
 export async function openAgentConfig(agent: string): Promise<void> {
   if (!isNativeRuntime()) return;
   await nativeInvoke<void>("open_agent_config", { agent });
 }
 
-/**
- * Subscribe to the main-process `project-changed` event (fired when
- * the user picks a new folder via File > Open Folder). Returns an
- * unsubscribe function; safe to call in all three modes.
- */
 export async function onProjectChanged(
   handler: (payload: ProjectChangedPayload) => void,
 ): Promise<() => void> {
@@ -196,13 +152,7 @@ export async function onProjectChanged(
   return nativeListen<ProjectChangedPayload>("project-changed", handler);
 }
 
-/**
- * Subscribe to the early `project-opening` event — fired the instant the
- * user picks a folder, BEFORE the engine respawns (which can take a few
- * seconds). Lets the sidebar paint a pending/loading project row right away
- * instead of waiting on the respawn. Returns an unsubscribe function; safe
- * to call in all three modes.
- */
+/** Native emits this before engine respawn so the sidebar can show the pending project. */
 export async function onProjectOpening(
   handler: (payload: ProjectOpeningPayload) => void,
 ): Promise<() => void> {
@@ -210,8 +160,6 @@ export async function onProjectOpening(
   return nativeListen<ProjectOpeningPayload>("project-opening", handler);
 }
 
-/** Subscribe to a failed `zeros://open` deep link so the renderer can tell the
- *  user why nothing happened, instead of leaving the click silently dead. */
 export async function onProjectOpenFailed(
   handler: (payload: ProjectOpenFailedPayload) => void,
 ): Promise<() => void> {
@@ -219,17 +167,7 @@ export async function onProjectOpenFailed(
   return nativeListen<ProjectOpenFailedPayload>("project-open-failed", handler);
 }
 
-/**
- * Subscribe to the native File → Open Folder / Cmd+Shift+O menu trigger. The
- * menu lives in the main process and can't run the renderer's add-project flow
- * directly, so it emits this event and the renderer drives `openProject()` —
- * the SAME path as the sidebar "+" and the welcome screen. This is why the
- * shortcut registers the picked folder as a project (upsert + default chat)
- * instead of only respawning the engine and leaving a dangling shimmer. (Plain
- * Cmd+O is the topbar's "open worktree in default app" — see conversation/conversation-header.)
- * Returns an unsubscribe function; no-op outside the native runtime (web has
- * no menu).
- */
+/** Native menu requests go through the same renderer project-registration flow as the sidebar, not a direct engine respawn. */
 export async function onMenuOpenProject(
   handler: () => void,
 ): Promise<() => void> {
@@ -237,51 +175,28 @@ export async function onMenuOpenProject(
   return nativeListen<unknown>("menu-open-project", () => handler());
 }
 
-/**
- * Show the native folder picker for "Open project" WITHOUT respawning the
- * engine. Returns the chosen absolute path, or null on cancel. The caller
- * registers it as a project over the bridge (`upsertProject`) — the running
- * engine serves it without re-rooting. This is the snappy add-a-repo path that
- * replaces the legacy `openProjectFolder` (which killed + respawned the engine).
- */
+/** The picker does not re-root the engine; the renderer registers the chosen folder over the bridge. */
 export async function pickProjectFolder(): Promise<string | null> {
   if (!isNativeRuntime()) {
-    // No native runtime available; treat as a soft cancel.
     return null;
   }
   return nativeInvoke<string | null>("pick_project_folder");
 }
 
-/**
- * Re-root the engine at the default sentinel (~/.zeros/default-project) and
- * reconnect the bridge. Called when the user removes their LAST project so the
- * engine stops serving the now-unregistered repo root to any paired web/remote
- * peer. No-op outside the native runtime. Returns the new engine port (or null
- * when no engine is bound).
- */
+/** After the last project is removed, re-root the engine so paired peers cannot keep using the unregistered checkout. */
 export async function resetEngineToDefault(): Promise<number | null> {
   if (!isNativeRuntime()) return null;
   return nativeInvoke<number | null>("engine_reset_to_default");
 }
 
-// ── Native notifications ──────────────────────────────────
-//
-// notify_send routes to apps/desktop/electron/ipc/commands/notifications.ts
-// which calls `new Notification({title, body}).show()`. macOS
-// surfaces its own permission prompt on first display — no
-// explicit permission API to manage on our side. Browser-only
-// dev mode no-ops because isElectron() is false.
+// macOS requests notification permission on first display; there is no separate permission call.
 
 export async function notify(title: string, body?: string): Promise<void> {
   if (!isElectron()) return;
   await nativeInvoke<void>("notify_send", { title, body });
 }
 
-// ── Deep links ────────────────────────────────────────────
-//
-// The main process handles zeros://open?path=... directly and emits
-// a `deep-link` event for any other routes so React can handle them
-// without a native rebuild.
+// Native handles opening project paths itself; only unhandled links are forwarded to this event.
 
 export async function onDeepLink(
   handler: (url: string) => void,

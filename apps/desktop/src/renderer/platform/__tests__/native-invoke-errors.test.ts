@@ -1,18 +1,10 @@
-// Electron's IPC wrapper must never reach a toast.
-//
-// `ipcRenderer.invoke` rejects with a NEW Error whose message is
-// `Error invoking remote method '<channel>': <name>: <message>`, and only
-// `name`/`message`/`stack` survive the main→renderer hop. The regression this
-// guards: Settings rendered that whole string as a toast description
-// ("Error invoking remote method 'zeros:invoke': GithubAppClientError: Not
-// found"), and every renderer branch on `error.code` was unreachable.
+// Electron wraps rejected handlers in a new Error with a prefixed message; custom fields such as code do not survive.
 
 import { describe, expect, it } from "vitest";
 
 import { NativeCommandError } from "@zeros/protocol/native-error";
 import { normalizeNativeInvokeError } from "../runtime";
 
-/** Reproduce what Electron hands the renderer for a rejected handler. */
 function asElectronRejection(error: Error): Error {
   return new Error(`Error invoking remote method 'zeros:invoke': ${error}`);
 }

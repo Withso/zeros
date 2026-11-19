@@ -4,8 +4,7 @@ import {
 } from "./bridge/cloud-workspace-key";
 import type { CloudWorkspaceDocument } from "./cloud-workspace-contract";
 
-// Capability projection only, owned by the catalog. Keeping this module free
-// of UI/state imports lets every read/write boundary use the same gate.
+// Keep the catalog capability independent of UI and state so reads and writes share one authority.
 type CatalogContext = Readonly<{ signature: string; presentation: string; version: number }>;
 let contexts: ReadonlyMap<string, CatalogContext> = new Map();
 let version = 0;
@@ -46,8 +45,7 @@ export function publishCloudGithubPrCapabilities(
   }
   const previous = contexts;
   contexts = next;
-  // Publish first so mounted consumers and pending requests observe the same
-  // new authority. An A → B → A round trip never restores an old lifetime.
+  // Notify only after publishing new authority; switching A → B → A must not revive the original lifetime.
   for (const key of new Set([...previous.keys(), ...next.keys()])) {
     if (previous.get(key) !== next.get(key))
       for (const listener of listeners) listener(key, !!next.get(key) && previous.get(key)?.presentation === next.get(key)?.presentation);

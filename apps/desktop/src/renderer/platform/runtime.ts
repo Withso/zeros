@@ -1,45 +1,3 @@
-// ──────────────────────────────────────────────────────────
-// Zeros Native Runtime — Electron IPC façade
-// ──────────────────────────────────────────────────────────
-//
-// Every React call site that needs the desktop shell (git,
-// keychain, terminal, folder dialogs, deep links, sidecar engine,
-// etc.) goes through this module. Feature-detects whether we're
-// running inside the packaged Electron app vs a plain browser
-// (`pnpm dev`) and routes IPC accordingly.
-//
-// Detection: `window.__ZEROS_NATIVE__` is set by the preload
-// script (apps/desktop/electron/preload.ts). When present, we're running
-// inside Electron's renderer and all native commands are
-// available. When absent, we're in a browser-only Vite dev
-// harness — read-style façade functions return empty / null,
-// write-style ones throw "requires the Mac app".
-//
-// 2026-05-23 hardening (the "Browser requires the Mac app" bug):
-//
-//   The old `isElectron()` was a non-reactive synchronous check
-//   on `window.__ZEROS_NATIVE__`. React components captured its
-//   value at render time and never updated — so if the preload
-//   bridge hadn't injected yet (build race, HMR refresh, stale
-//   `dist-electron/preload.cjs` after a branch switch, partial
-//   tsup write), the whole app degraded to "browser mode" and
-//   stuck there until something else forced a re-render.
-//
-//   This module now exposes three layers of detection:
-//
-//    1. `isElectron()`              — sync, for non-React code.
-//                                     Reads the bridge directly.
-//    2. `useNativeRuntime()`        — React hook; re-renders the
-//                                     moment the bridge appears,
-//                                     even if it arrives late.
-//    3. `isExpectedElectron()`      — sync, reads navigator.userAgent.
-//                                     Distinguishes "actually in a
-//                                     browser" from "in Electron but
-//                                     preload bridge is missing"
-//                                     (the latter is recoverable —
-//                                     reload the window).
-// ──────────────────────────────────────────────────────────
-
 import { useEffect, useState } from "react";
 
 import { parseNativeErrorMessage } from "@zeros/protocol/native-error";
@@ -73,22 +31,17 @@ declare global {
   }
 }
 
-/** Synchronous one-shot check. Use this only from non-React code
- *  (engine, native fs façade, gateway). React components should
- *  use `useNativeRuntime()` so the UI updates when a late-arriving
- *  preload bridge becomes available. */
+// Use useNativeRuntime in React so late preload injection updates the UI.
 export function isElectron(): boolean {
   return typeof window !== "undefined" && !!window.__ZEROS_NATIVE__;
 }
 
-/** The native main window disables browser visual pinch zoom. Its Design
- * viewport can therefore own a camera without blocking wheel acknowledgments.
- * An older host or a browser keeps the ordinary cancelable input path. */
+// Only a host that disables visual pinch zoom can let Design handle the wheel asynchronously.
 export function hasAsyncCanvasWheel(): boolean {
   return typeof window !== "undefined" && window.__ZEROS_NATIVE__?.asyncCanvasWheel === true;
 }
 
-/** Synchronous, native-main-owned mode, available before the first app render. */
+// Main supplies this mode before the first render.
 export function isLocalDevelopment(): boolean {
   return (
     typeof window !== "undefined" &&
@@ -96,52 +49,29 @@ export function isLocalDevelopment(): boolean {
   );
 }
 
-/** Back-compat alias — same semantics as isElectron() now that
- *  the native shell abstraction is simplified. Kept so existing
- *  call sites keep compiling; prefer isElectron() in new code. */
+// Compatibility alias for isElectron.
 export function isNativeRuntime(): boolean {
   return isElectron();
 }
 
-/** Does navigator.userAgent claim we're in Electron? Used to tell
- *  the two failure modes apart:
- *
- *   - `isExpectedElectron() && !isElectron()` → in Electron, but
- *     the preload bridge didn't inject. This is RECOVERABLE — a
- *     window reload usually re-runs the preload and the bridge
- *     comes back. The UI shows a recovery banner with a Reload
- *     button instead of the dead-end "requires the Mac app"
- *     message.
- *
- *   - `!isExpectedElectron() && !isElectron()` → genuinely
- *     running in a browser (someone opened http://localhost:5193
- *     in Chrome). The dead-end message is correct here. */
+// Distinguish missing preload, which a window reload may recover, from a browser tab.
 export function isExpectedElectron(): boolean {
   if (typeof navigator === "undefined") return false;
   return /Electron/i.test(navigator.userAgent);
 }
 
-/** Short name of the active runtime for diagnostics / log lines. */
 export function runtimeName(): "electron" | "browser" {
   return isElectron() ? "electron" : "browser";
 }
 
-/** A rejection from a main-process command handler, with Electron's transport
- *  wrapper removed and the handler's `code` restored when it threw a
- *  `NativeCommandError`. See packages/protocol/src/native-error.ts. */
+// Electron wraps command rejections; restore a handler code encoded by NativeCommandError.
 export interface NativeInvokeError extends Error {
-  /** Handler-supplied reason code, when the handler supplied one. */
   code?: string;
   /** The untouched `Error invoking remote method …` text, for logs. */
   rawMessage: string;
 }
 
-/** Call a native command. Errors from the underlying bridge
- *  surface via the promise rejection — callers handle them the
- *  same way they did under the old native invoke bridge, except that the
- *  message is the handler's own sentence rather than Electron's
- *  `Error invoking remote method 'zeros:invoke': SomeError: …` wrapper. Toasts
- *  render these messages directly, so the wrapper must never reach them. */
+// Strip Electron's transport wrapper before showing handler rejections in toasts.
 export async function nativeInvoke<T>(
   cmd: string,
   args?: Record<string, unknown>,
@@ -159,8 +89,6 @@ export async function nativeInvoke<T>(
   }
 }
 
-/** Exported for tests: rebuild a renderer-facing error from a bridge rejection.
- *  Non-Error rejections and already-clean messages pass through unharmed. */
 export function normalizeNativeInvokeError(
   error: unknown,
   cmd: string,
@@ -178,10 +106,7 @@ export function normalizeNativeInvokeError(
   return normalized;
 }
 
-/** Subscribe to a named event emitted from the main process.
- *  Returns an unsubscribe function. In browser-only dev mode
- *  no-ops (returns a no-op unsubscribe) so callers don't need
- *  to guard. */
+// Browser callers get a no-op unsubscribe without guarding the subscription.
 export async function nativeListen<T = unknown>(
   event: string,
   handler: (payload: T) => void,
@@ -192,39 +117,10 @@ export async function nativeListen<T = unknown>(
   return () => {};
 }
 
-// ──────────────────────────────────────────────────────────
-// Reactive detection (useNativeRuntime hook)
-// ──────────────────────────────────────────────────────────
-//
-// Why a polling loop instead of a one-time check:
-//
-//   The preload bridge is normally injected before any renderer
-//   script runs (contextBridge.exposeInMainWorld() is synchronous
-//   in the preload context). But there are real edge cases where
-//   the bridge appears AFTER React's first render:
-//
-//    - Vite HMR refresh while preload.cjs is being rebuilt by
-//      tsup (the renderer's JS reloads but the preload window-
-//      global is already there — except when tsup is mid-write
-//      and Electron loaded a partial/old preload).
-//    - Branch-switch dev workflow: pnpm electron:dev keeps
-//      running; user switches branches; tsup picks up new
-//      preload.ts source; brief window where dist-electron/
-//      preload.cjs is being overwritten.
-//    - An external worktree tool triggering a workspace-level
-//      rebuild can leave the renderer loaded against a stale bridge.
-//
-//   Polling every 100ms for the first 3 seconds catches every
-//   one of these without burning power — after the bridge is
-//   detected, we stop polling forever (the bridge can't go
-//   away without a full window reload, which would re-run this
-//   effect anyway).
-
 const READY_POLL_INTERVAL_MS = 100;
 const READY_POLL_DEADLINE_MS = 3_000;
 
-/** A module-level cache so concurrent hook callers share one
- *  detection state. Avoids N timers running in parallel. */
+// A shared poll catches a late preload without a timer per hook.
 let cachedReady: boolean = isElectron();
 const readyListeners = new Set<(ready: boolean) => void>();
 
@@ -235,7 +131,6 @@ function notifyReady(next: boolean) {
     try {
       fn(next);
     } catch (err) {
-      // A bad subscriber shouldn't kill the fan-out.
       console.error("[Zeros] useNativeRuntime listener threw:", err);
     }
   }
@@ -267,49 +162,25 @@ function ensurePollStarted() {
 }
 
 export interface NativeRuntimeState {
-  /** True when `window.__ZEROS_NATIVE__` is present. Flips from
-   *  false → true exactly once per window load (and never back). */
   ready: boolean;
-  /** True when `navigator.userAgent` says "Electron". Means the
-   *  user IS running the Mac app — if `ready` stays false past
-   *  the poll deadline, the preload bridge failed to inject and
-   *  a window reload is the recovery path. */
   expectedElectron: boolean;
-  /** Best-guess failure mode for the recovery banner.
-   *   - "ready"     → bridge present; everything fine.
-   *   - "browser"   → genuinely in a browser tab; no recovery
-   *                   possible from inside the renderer.
-   *   - "preload-missing" → in Electron but bridge missing.
-   *                         Recoverable by reloading the window. */
   status: "ready" | "browser" | "preload-missing";
 }
 
-/** React hook that reactively tracks the native bridge. Subscribes
- *  to a module-level bus that polls for `window.__ZEROS_NATIVE__`
- *  for the first 3 seconds after mount. Once the bridge is
- *  detected, the state is sticky-true for the lifetime of this
- *  window (the bridge can't unload mid-session — only a full
- *  reload would, and that remounts everything). */
+// Native readiness stays true for this window once preload is observed.
 export function useNativeRuntime(): NativeRuntimeState {
   const [ready, setReady] = useState<boolean>(cachedReady);
 
   useEffect(() => {
-    // Subscribe FIRST so we don't miss a state flip that happens
-    // between mount and effect run.
+    // Subscribe before rechecking and replaying readiness so effects cannot miss a late preload.
     const sync = (next: boolean) => setReady(next);
     readyListeners.add(sync);
 
-    // Recheck synchronously — the bridge may have appeared
-    // between render and effect.
     if (!cachedReady && isElectron()) {
       notifyReady(true);
     } else {
-      // Make sure the shared poll is running. Idempotent.
       ensurePollStarted();
     }
-    // A sibling/child effect may have published readiness after this render
-    // but before this subscriber attached. Replay the shared snapshot so a
-    // warm settings page cannot remain stuck in browser mode on reload.
     sync(cachedReady);
 
     return () => {

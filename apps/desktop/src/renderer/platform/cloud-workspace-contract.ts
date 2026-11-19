@@ -3,8 +3,7 @@ import { CloudGithubUnavailableReasonSchema } from "@zeros/protocol/cloud-github
 import { CloudV2AgentCostSchema, CloudV2SetupStatusSchema } from "@zeros/protocol/cloud-v2-relay";
 import { CloudWorkspaceSharingSchema } from "./team-sharing-schema";
 
-/** Read leniently: a field a newer server extends, or one this build cannot
- * read, drops only itself, never the whole document. */
+// An optional field this build cannot parse drops only itself, not the workspace document.
 const lenient = <T extends z.ZodType>(schema: T) => schema.optional().catch(undefined);
 
 // Pure response schemas shared by desktop and the Alpha Linux harness.
@@ -19,7 +18,7 @@ export const CloudWorkspaceDocumentSchema = z.object({
   /** The first title one of its chats received; null is "Untitled". */
   title: z.string().min(1).max(200).nullable().optional(),
   createdBy: z.string().uuid(),
-  /** Null for a team-ownership workspace with no Creator (3B). */
+  // A team-owned workspace can have no Creator.
   ownerUserId: z.string().uuid().nullable().optional(),
   placement: z.literal("cloud"),
   githubUnavailableReason: CloudGithubUnavailableReasonSchema.optional(),
@@ -65,7 +64,6 @@ export const CloudWorkspaceDocumentSchema = z.object({
   setup: lenient(z.object(CloudV2SetupStatusSchema.shape)),
   /** Running total of mirrored turns that reported a cost; absent before any did. */
   agentCost: lenient(z.object(CloudV2AgentCostSchema.shape)),
-  /** Team sharing phase 1 (opt-in): who this account is to the workspace, and its follow/pin state. */
   sharing: lenient(CloudWorkspaceSharingSchema),
   version: z.number().int().nonnegative(),
   error: z.object({ code: z.string(), message: z.string() }).nullable(),

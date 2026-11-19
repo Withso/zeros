@@ -43,8 +43,8 @@ describe("chat senders (team sharing phase 2, slice A)", () => {
         return { senders: Object.fromEntries((params.userMessageIds as string[]).map(id => [id, id === "m0" ? { userId: alex } : null])) };
       });
       for (let index = 0; index < 250; index++) lookupChatSender(target, "chat-7", `m${index}`, read as never);
-      lookupChatSender(target, "chat-7", "m0", read as never);   // asked already
-      lookupChatSender(target, "chat-7", "x".repeat(257), read as never);   // not an id
+      lookupChatSender(target, "chat-7", "m0", read as never);
+      lookupChatSender(target, "chat-7", "x".repeat(257), read as never);
       await vi.advanceTimersByTimeAsync(200);
       expect(calls.map(call => [call.op, call.params.chatId, (call.params.userMessageIds as string[]).length])).toEqual([["messages.senders", "chat-7", 200], ["messages.senders", "chat-7", 50]]);
       expect(chatSender(chatKeyFor(target, "chat-7"), "m0")).toBe(alex);

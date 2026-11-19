@@ -36,7 +36,7 @@ function scorePath(
   kind: WorkspaceEntry["kind"],
 ): number | null {
   if (!query) return kind === "file" ? 0 : 1;
-  // A typed trailing slash refers to the folder itself as well as its children.
+  // A trailing slash gives the matching folder itself top rank.
   if (
     kind === "folder" &&
     query.endsWith("/") &&
@@ -175,9 +175,7 @@ export class WorkspacePathIndex {
     query: string,
     visit: (index: number) => boolean,
   ): void {
-    // Each gap excludes the next required character and the record delimiter:
-    // matches are greedy subsequences, with no ambiguous nested repetitions.
-    // Escape every UTF-16 unit so filenames never become regexp syntax.
+    // Exclude the delimiter and the next required character from each gap so matches stay unambiguous; escape each query unit so it is never regexp syntax.
     if (query.length > 256) {
       for (let i = 0; i < this.entries.length; i++) {
         if (
@@ -311,8 +309,7 @@ export class WorkspacePathIndex {
     });
     if (complete(200)) return finish();
 
-    // Fuzzy scans run in the native string engine and stop as soon as later
-    // equal-score entries cannot improve the bounded result window.
+    // Stop when later entries with the same score cannot improve the bounded result window.
     this.scanFuzzy(this.names, this.nameOffsets, q, (i) => {
       if (complete(200, i)) return true;
       const entry = this.entries[i];

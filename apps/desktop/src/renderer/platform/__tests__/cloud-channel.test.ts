@@ -11,7 +11,6 @@ vi.mock("../../features/team/team-store", () => ({
   useTeams: () => ({ me: fixture.me }),
 }));
 vi.mock("../runtime", () => ({ nativeInvoke: fixture.native }));
-// The checked-in policy allows every channel; these cases exercise its pause.
 vi.mock("../../../../../control-plane/src/cloud/channels.json", () => ({
   default: { development: true, alpha: true, production: false },
 }));

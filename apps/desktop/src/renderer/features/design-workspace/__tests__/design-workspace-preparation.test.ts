@@ -67,7 +67,7 @@ it("prepares only view demand, one bounded batch, while distant descriptors stay
   coordinator.setDemand(token, { workspaceId: "personal", files: ["f0.html", "f1.html"] });
   coordinator.setDemand(token, { workspaceId: "personal", files: ["f0.html", "f1.html"] });
   expect(prepare).toHaveBeenCalledTimes(1);
-  expect(prepare.mock.calls[0]).toEqual(["personal", "design_test", "a".repeat(64), ["f0.html", "f1.html"]]);
+  expect(prepare.mock.calls[0]).toEqual(["personal", "design_test", "a".repeat(64), ["f0.html", "f1.html"], ["f0.html", "f1.html"]]);
   held.resolve(reply(["f0.html", "f1.html"]));
   await vi.waitFor(() => expect(current.preparation!.current).toHaveLength(2));
   expect(designFrameViews(current).filter(isPreparedDesignFrame)).toHaveLength(2);
@@ -133,6 +133,23 @@ it("refuses a response whose geometry belongs to different metadata", async () =
   await vi.waitFor(() => expect(coordinator.usage().running).toBe(0));
   expect(current.preparation!.current).toEqual([]);
   expect(current.preparation!.errors["f0.html"]).toMatch(/metadata/);
+});
+
+it("does not publish lint from a response for a different catalog revision", async () => {
+  let current = snapshot();
+  const file = "f0.html";
+  const prepare = vi.fn(async (_workspace: string, _directory: string, _revision: string, files: readonly string[], lintFiles?: readonly string[]) => ({
+    ...reply(files), catalogRevision: "b".repeat(64),
+    ...(lintFiles ? { lint: { checkedFiles: [...lintFiles], violations: [
+      { ruleId: "unknown-token", severity: "warning" as const, message: "Stale lint", file: lintFiles[0]!, line: 1, column: 1 },
+    ] } } : {}) }));
+  const coordinator = new DesignFramePreparation({ snapshot: () => current, publish: (_, next) => { current = next; }, canPrepare: () => true, prepare });
+  coordinator.setDemand({}, { workspaceId: "personal", files: [file] });
+  await vi.waitFor(() => expect(current.preparation!.errors[file]).toContain("Incomplete"));
+  expect(prepare).toHaveBeenCalledWith("personal", "design_test", "a".repeat(64), [file], [file]);
+  expect(current.preparation!.current).toEqual([]);
+  expect(current.lint.checkedFiles).toEqual([]);
+  expect(current.lint.violations).toEqual([]);
 });
 
 it("does not publish a failed preparation over an in-flight mutation", async () => {

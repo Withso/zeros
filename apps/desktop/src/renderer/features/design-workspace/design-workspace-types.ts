@@ -49,6 +49,8 @@ export interface DesignCanvasProps {
   refresh: () => void;
   /** Whether keyboard, wheel, and pointer interactions are currently allowed. */
   active: boolean;
+  /** Passive canvas publication is allowed only for the current authoritative render. */
+  allowPassiveSelection: boolean;
   /** Concrete workspace-owned color, or the resolved --bg2 default. */
   canvasBackground: string;
   motionTimelineOpen: boolean;

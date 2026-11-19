@@ -2,17 +2,13 @@ import { useSyncExternalStore } from "react";
 import { z } from "zod";
 import type { CloudWorkspaceTarget } from "./bridge/cloud-workspace-key";
 
-/** Team sharing phase 2 (slice A): who sent each user message, from the
- * control plane's durable receipts. Keyed by the workspace and its native chat
- * id (chatKey) and the user message's id (the transcript row's msgId). Type-only
- * imports here: cloud-v2 loads this early, and a value import reorders a cycle. `null` is a known answer
- * ("unknown legacy attribution"); absent means not asked yet. Bounded. */
+/** Attribution is scoped to the owning cloud workspace and exact native chat and message IDs. */
 const MAX_CHATS = 64, MAX_PER_CHAT = 2_000;
 const chats = new Map<string, Map<string, string | null>>();
 const listeners = new Set<() => void>();
 let version = 0;
 
-/** A history reply's bounded sender map, read leniently (unknown fields and bad entries are ignored). */
+/** Ignore malformed attribution entries without rejecting the rest of the history reply. */
 export const ChatSendersSchema = z.record(z.string().min(1).max(256), z.unknown());
 const Entry = z.union([z.object({ userId: z.string().uuid() }).passthrough(), z.null()]);
 
@@ -34,11 +30,9 @@ export function acceptChatSenders(chatKey: string, value: unknown): void {
   if (changed) { version++; for (const listener of listeners) listener(); }
 }
 
-/** A history reply for a native chat id in a cloud workspace. */
 export function acceptHistorySenders(target: CloudWorkspaceTarget, nativeChatId: string, value: unknown): void {
   acceptChatSenders(chatKeyFor(target, nativeChatId), value);
 }
-/** Wraps the bridge's history read: a reply's sender map is kept for the chat it was read for. */
 export function keepHistorySenders<T extends Record<string, unknown>, O>(read: (target: CloudWorkspaceTarget, op: string, params: Record<string, unknown>, options?: O) => Promise<T>) {
   return (target: CloudWorkspaceTarget, op: string, params: Record<string, unknown>, options?: O) => read(target, op, params, options).then(result => {
     if (result.senders !== undefined && typeof params.chatId === "string" && params.chatId) acceptHistorySenders(target, params.chatId, result.senders);
@@ -46,7 +40,6 @@ export function keepHistorySenders<T extends Record<string, unknown>, O>(read: (
   });
 }
 
-/** The store's key for a native chat in a cloud workspace. */
 export const chatKeyFor = (target: CloudWorkspaceTarget, nativeChatId: string) =>
   `${target.organizationId.toLowerCase()}/${target.workspaceId.toLowerCase()}/${nativeChatId}`;
 

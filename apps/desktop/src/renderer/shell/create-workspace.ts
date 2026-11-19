@@ -44,12 +44,14 @@ import {
   markWorkspaceSettling,
 } from "../state/pending-workspaces";
 import { pendingWorkspaceIdentity } from "../shared/lib/workspace-name";
-import type { Project } from "../state/projects-store";
+import { normalizeProjectRoot, type Project } from "../state/projects-store";
+import { isCloudWorkspace } from "../platform/bridge/cloud-workspace-key";
 import { spawnPreparedDefaultChat } from "../state/spawn-default-chat";
 import type { useWorkspaceDispatch } from "../state/store";
 import {
   notifyWorkspacesChanged,
   peekWorkspacesFor,
+  reloadWorkspaceRowsFor,
   reloadWorkspacesFor,
   watchTimedOutWorkspaceCreate,
 } from "../state/use-projects";
@@ -276,9 +278,8 @@ export async function createWorkspaceForProject(args: {
 /** True only when the repo is KNOWN to have zero live (non-archived)
  *  workspaces — the auto-create-on-add guard.
  *
- *  "Cache not loaded yet" and "repo has no workspaces" are the same shape, and
- *  confusing them forks a second worktree onto a repo that already has one. A
- *  warm list answers synchronously; a cold one is loaded first.
+ *  A matching live row in a warm Local cache answers immediately. A Local-root
+ *  miss is revalidated because destination reads may publish only one root.
  *
  *  The retry is not paranoia: a `zeros://open` deep link force-reconnects the
  *  bridge (app-shell's project-changed handler) in the same tick this runs, so
@@ -289,17 +290,33 @@ export async function createWorkspaceForProject(args: {
  *  just means clicking "+". */
 export async function repoNeedsFirstWorkspace(
   repoSlug: string,
+  repoRoot?: string,
 ): Promise<boolean> {
-  const noneLive = (rows: readonly { archivedAt: number | null }[]) =>
+  const normalizedRepoRoot = repoRoot && !isCloudWorkspace(repoRoot)
+    ? normalizeProjectRoot(repoRoot)
+    : undefined;
+  const noneLive = (
+    rows: readonly { archivedAt: number | null; repoRoot: string }[],
+  ) =>
     !rows.some(
       (row) =>
+        (!normalizedRepoRoot ||
+          normalizeProjectRoot(row.repoRoot) === normalizedRepoRoot) &&
         row.archivedAt == null &&
         (row as { kind?: "code" | "design" }).kind !== "design",
-    );
+  );
   const warm = peekWorkspacesFor(repoSlug);
-  if (warm) return noneLive(warm);
+  if (warm) {
+    const needsWorkspace = noneLive(warm);
+    if (!normalizedRepoRoot || !needsWorkspace) return needsWorkspace;
+  }
   for (let attempt = 0; attempt < 3; attempt++) {
     if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 1_000));
+    if (normalizedRepoRoot) {
+      const rows = await reloadWorkspaceRowsFor(repoSlug).catch(() => null);
+      if (rows) return noneLive(rows);
+      continue;
+    }
     const loaded = await reloadWorkspacesFor(repoSlug).catch(() => false);
     const rows = peekWorkspacesFor(repoSlug);
     if (loaded && rows) return noneLive(rows);

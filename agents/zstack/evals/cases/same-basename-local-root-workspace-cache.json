@@ -1,0 +1,9 @@
+{
+  "id": "same-basename-local-root-workspace-cache",
+  "kind": "replay",
+  "area": "renderer-state",
+  "fixedBy": "pr:1190",
+  "symptom": "Distinct Local roots with the same basename share a fallback repo slug. A local-link read can replace that slug's warm cache with rows for only its destination root, causing File > Open Folder to treat another root's absent row as proof that no workspace exists. Cloud catalog siblings also share a repository slug while each row has its own cloud:// workspace root.",
+  "rule": "For Local roots, a matching canonical live row may suppress first-workspace creation; otherwise force an authoritative reload and fail closed if it cannot be confirmed. Scope Local landing and restoration by canonical root, but keep cloud workspace siblings grouped by the caller-scoped repository and owner instead of treating their distinct cloud:// keys as separate repositories.",
+  "check": "pnpm exec vitest run --config vitest.config.ts apps/desktop/src/renderer/shell/__tests__/create-workspace.test.ts apps/desktop/src/renderer/shell/__tests__/workspace-tabs.test.ts apps/desktop/src/renderer/state/__tests__/local-link-cache.test.ts"
+}

@@ -83,14 +83,44 @@ it("replaces a changed frame's source lint rows with those of its new preparatio
   expect(designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data!.preparation?.relint ?? []).toEqual([]);
 });
 
-it("does not lint frames on their first preparation", async () => {
+it.each([
+  { name: "findings", checked: true, violations: [{ ruleId: "unknown-token", severity: "warning" as const, message: "Unknown token", line: 1, column: 1 }] },
+  { name: "no findings", checked: true, violations: [] },
+  { name: "an unavailable lint report", checked: false, violations: [] },
+])("lints only unchecked frames on their first preparation when there are $name", async ({ checked, violations }) => {
   const before = prepared();
   designWorkspaceSnapshotCache.setData(workspaceId, { ...before, frames: [], preparation: { ...before.preparation!, current: [] } });
-  producer.prepare.mockImplementation(async (_workspace: string, _directory: string, _revision: string, files: string[]) => ({
-    catalogRevision: revision, errors: [], frames: before.frames.filter(frame => files.includes(frame.file)) }));
-  designFramePreparation.setDemand(token, { workspaceId, files: before.frames.map(frame => frame.file) });
-  await vi.waitFor(() => expect(designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.preparation?.current).toHaveLength(3));
-  expect(producer.prepare.mock.calls[0]).toHaveLength(4);
+  const file = before.frames[0]!.file;
+  producer.prepare.mockImplementation(async (_workspace: string, _directory: string, _revision: string, files: string[], lintFiles?: string[]) => ({
+    catalogRevision: revision, errors: [], frames: before.frames.filter(frame => files.includes(frame.file)),
+    ...(checked && lintFiles ? { lint: { checkedFiles: lintFiles, violations: violations.map(violation => ({ ...violation, file: lintFiles[0]! })) } } : {}) }));
+  designFramePreparation.setDemand(token, { workspaceId, files: [file] });
+  await vi.waitFor(() => expect(designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.preparation?.current).toEqual([file]));
+  expect(producer.prepare).toHaveBeenCalledWith(workspaceId, "design_test", revision, [file], [file]);
+  expect(designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.lint).toMatchObject({
+    checkedFiles: checked ? [file] : [],
+    violations: violations.map(violation => ({ ...violation, file })),
+  });
+  expect(designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.frames.map(frame => frame.file)).toEqual([file]);
+});
+
+it("lints demanded unchecked and relint frames but skips already checked frames", async () => {
+  const before = prepared();
+  const [unchecked, checked, checkedAndRelint] = before.frames.map(frame => frame.file);
+  const demanded = [unchecked!, checked!, checkedAndRelint!];
+  designWorkspaceSnapshotCache.setData(workspaceId, {
+    ...before,
+    frames: [],
+    lint: { ...before.lint, checkedFiles: [checked!, checkedAndRelint!] },
+    preparation: { ...before.preparation!, current: [], relint: [checkedAndRelint!] },
+  });
+  producer.prepare.mockImplementation(async (_workspace: string, _directory: string, _revision: string, files: string[], lintFiles?: string[]) => ({
+    catalogRevision: revision, errors: [], frames: before.frames.filter(frame => files.includes(frame.file)),
+    ...(lintFiles ? { lint: { checkedFiles: lintFiles, violations: [] } } : {}) }));
+  designFramePreparation.setDemand(token, { workspaceId, files: demanded });
+  await vi.waitFor(() => expect(designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.preparation?.current).toEqual(expect.arrayContaining(demanded)));
+  expect(producer.prepare).toHaveBeenCalledOnce();
+  expect(producer.prepare).toHaveBeenCalledWith(workspaceId, "design_test", revision, demanded, [unchecked, checkedAndRelint]);
 });
 
 /** A scoped write acknowledgement: it prepares `file` again and lints nothing. */

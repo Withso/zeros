@@ -3,10 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-// Launch budget (Node level, no Playwright): the renderer's cloud history modules (WorkspaceRuntimeClient, the cloud
-// transcript cache, readCloudV2History, the native cache client) driven through their launch entry points, over the
-// REAL Electron-main CloudChatCacheService/store/source, against a counting fake control plane: 4 workspaces,
-// 100 chats, every chat existing before migration 0252 with no upload since (revision 0, counted messageCount).
+// Warm restored renderer history through the real main cache against a counting control-plane fake; pre-migration chats have revision 0 and no upload.
 const io = vi.hoisted(() => ({ invoke: undefined as undefined | ((command: string, args: unknown) => Promise<unknown>), fetch: undefined as undefined | typeof fetch }));
 vi.mock("../runtime", async original => ({ ...await original<typeof import("../runtime")>(),
   nativeInvoke: (command: string, args: unknown) => io.invoke!(command, args) }));
@@ -38,7 +35,7 @@ function rows(chat: string): Row[] {
 const chatIds = (workspaceId: string) => Array.from({ length: CHATS_PER_WORKSPACE }, (_, n) => `chat-${workspaceId.slice(7, 8)}-${n}`);
 const history = new Map(workspaces.flatMap(workspaceId => chatIds(workspaceId).map(chat => [`${workspaceId}/${chat}`, rows(chat)] as const)));
 
-/** The shipped control plane's reply shapes (history.ts, history-cache.ts, store.ts listChats) for pre-0252 chats. */
+/** Match the control-plane reply shapes for pre-0252 chats. */
 function controlPlane() {
   const counts = new Map<string, number>();
   const count = (route: string) => counts.set(route, (counts.get(route) ?? 0) + 1);
@@ -74,7 +71,7 @@ let directory: string;
 beforeEach(() => { directory = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-launch-budget-")); });
 afterEach(() => { fs.rmSync(directory, { recursive: true, force: true }); vi.resetModules(); });
 
-/** One app launch: fresh renderer and main modules over the same on-disk cache. */
+/** Reload renderer and main modules without replacing the on-disk cache. */
 async function launch(cp: ReturnType<typeof controlPlane>, restored: string[]) {
   vi.resetModules();
   io.fetch = cp.fetch;
@@ -100,15 +97,14 @@ async function launch(cp: ReturnType<typeof controlPlane>, restored: string[]) {
   const client = new WorkspaceRuntimeClient({ open: vi.fn(), readHistory: readCloudV2History, historyRoot: () => root, workspaces: () => [] });
   setActiveBridge(client);
   const targets = workspaces.map(workspaceId => ({ organizationId, workspaceId }));
-  // Launch entry points: every restored workspace warms its history (lifecycle + selected attach, as census K saw), and
-  // the restored transcripts paint from the cache, then the open ones read their window.
+  // Restore warms all workspaces, including a second warm for the selected workspace.
   await Promise.all([...targets.map(target => client.warmHistoryWorkspace(target)), client.warmHistoryWorkspace(targets[0]!)]);
-  // Later peer opens re-warm the same workspaces after the first flight settled (census K: 1569 ms and 2342 ms).
+  // Advance the clock so peer opens re-warm after the first flight settles.
   const now = Date.now.bind(Date);
   let offset = 0;
   const clock = vi.spyOn(Date, "now").mockImplementation(() => now() + offset);
   try {
-    // A workspace request opens its peer, and the peer open warms history first (its connect fails here: no worker).
+    // The peer-open path starts a history warm even when the stubbed connect fails.
     for (const target of [targets[0]!, targets[1]!, targets[0]!]) {
       offset += 1_200;
       await client.request({ type: "WORKSPACE_REQUEST", op: "git.status", params: { cwd: cloudWorkspaceKey(target) } }).catch(() => {});
@@ -131,7 +127,6 @@ describe("a launch makes a handful of requests, measured against the real main c
     expect(cold.stored.chats).toBe(restored.length);
     const second = controlPlane();
     await launch(second, restored);
-    // Warm launch: one chats.list per workspace, and no transcript, workspace, range, since or prompts read.
     expect(Object.fromEntries(second.counts)).toEqual({ "chats.list": workspaces.length });
   });
 });

@@ -1,27 +1,11 @@
-// ──────────────────────────────────────────────────────────
-// Zeros Local CLI — the agent orchestration contract
-// ──────────────────────────────────────────────────────────
-//
-// `zeros local …` lets an agent that Zeros runs in a Local (Personal) chat open
-// chat tabs and workspaces, message and steer other chats, read their
-// transcripts, follow them and answer their question and permission cards.
-//
-// One engine service implements every command. Two front doors reach it with
-// the same request and the same envelope:
-//   - the CLI (`zeros local <command> …`) POSTs to the engine's loopback
-//     endpoint with the execution-scoped bearer from ZEROS_LOCAL_TOKEN;
-//   - the `zeros_local` provider tool passes the same argv in-process.
-//
-// The contract is Local-only. Cloud workspaces get a separate CLI later.
-// ──────────────────────────────────────────────────────────
+// The Local CLI and in-process zeros_local tool share the engine's call contract.
 
 import { z } from "zod";
 
 /** Bumped when a request, result or error shape changes incompatibly. */
 export const LOCAL_ORCHESTRATION_PROTOCOL = 1 as const;
 
-/** Environment the engine injects into every admitted Local agent execution.
- * The token is a credential: never print, log or pass it on. */
+/** These execution-scoped values are injected at admission; never disclose or forward the bearer. */
 export const LOCAL_ORCHESTRATION_ENV = {
   url: "ZEROS_LOCAL_URL",
   token: "ZEROS_LOCAL_TOKEN",
@@ -35,16 +19,13 @@ export const LOCAL_ORCHESTRATION_ENV = {
   dropbox: "ZEROS_LOCAL_DROPBOX",
 } as const;
 
-/** Every reserved name. Ambient or caller-supplied values are removed before a
- * capability is minted, so a nested Zeros never forwards its parent's grant. */
+/** Strip reserved names before minting a new grant so nested Zeros cannot inherit its parent's grant. */
 export const LOCAL_ORCHESTRATION_ENV_NAMES: readonly string[] = Object.values(
   LOCAL_ORCHESTRATION_ENV,
 );
 
-/** The single loopback call path. */
 export const LOCAL_ORCHESTRATION_CALL_PATH = "/local/v1/call" as const;
 
-/** MCP server name for the provider tool projection. */
 export const LOCAL_ORCHESTRATION_TOOL_SERVER = "zeros_local" as const;
 
 /** Hard service caps for one wait (the CLI is clamped below its shell). */
@@ -59,7 +40,6 @@ export const LOCAL_MAX_TITLE_CHARS = 200;
 export const LOCAL_MAX_PAGE = 100;
 export const LOCAL_MAX_REQUEST_ID_CHARS = 128;
 
-// ── Commands ──────────────────────────────────────────────
 
 export const LOCAL_COMMANDS = [
   "whoami",
@@ -102,7 +82,6 @@ export const LOCAL_REQUEST_ID_COMMANDS: ReadonlySet<LocalCommand> = new Set([
   "message.send",
 ]);
 
-// ── Errors and exit codes ─────────────────────────────────
 
 export const LOCAL_ERROR_CODES = [
   "USAGE",
@@ -127,8 +106,7 @@ export const LOCAL_ERROR_CODES = [
 ] as const;
 export type LocalErrorCode = (typeof LOCAL_ERROR_CODES)[number];
 
-/** Shell exit status for each error. 0 is success (a wait that observed a
- * failed child still succeeds — the child's outcome is data). */
+/** A wait succeeds even if the child failed: the child's outcome is data, not a CLI error. */
 export const LOCAL_EXIT_CODES: Readonly<Record<LocalErrorCode, number>> = {
   INTERNAL: 1,
   USAGE: 2,
@@ -194,12 +172,10 @@ export function localFail(
   };
 }
 
-/** Exit status for an envelope. */
 export function localExitCode(envelope: LocalEnvelope): number {
   return envelope.ok ? 0 : (LOCAL_EXIT_CODES[envelope.error.code] ?? 1);
 }
 
-/** A typed failure thrown inside the service and turned into an envelope. */
 export class LocalOrchestrationError extends Error {
   constructor(
     readonly code: LocalErrorCode,
@@ -211,7 +187,6 @@ export class LocalOrchestrationError extends Error {
   }
 }
 
-// ── Links ─────────────────────────────────────────────────
 
 export const LOCAL_LINK_KINDS = ["chat", "workspace"] as const;
 export type LocalLinkKind = (typeof LOCAL_LINK_KINDS)[number];
@@ -221,16 +196,13 @@ export type LocalLinkKind = (typeof LOCAL_LINK_KINDS)[number];
 export const LOCAL_LINK_SCHEMES = ["zeros", "zeros-alpha", "zeros-dev"] as const;
 export type LocalLinkScheme = (typeof LOCAL_LINK_SCHEMES)[number];
 
-/** A workspace's permanent place: its owner and its number within that owner
- * (`local/w/310`). The owner is `local` for the device's Local collection and
- * an organization's slug otherwise. Numbers are never reused. */
+/** Workspace numbers are permanent and never reused within an owner: local or an organization slug. */
 export interface WorkspaceAddress {
   owner: string;
   number: number;
 }
 
-/** The owner segment of every Local workspace link. Local (Personal) is the
- * only owner that creates Local workspaces; organizations work in the cloud. */
+/** New desktop Local workspaces use this owner; organization links refer to cloud workspaces. */
 export const LOCAL_WORKSPACE_LINK_OWNER = "local" as const;
 
 export interface LocalLink {
@@ -244,9 +216,7 @@ export interface LocalLink {
   address?: WorkspaceAddress;
 }
 
-/** Opaque ids only: letters, digits and `_ - . :` — never paths or queries. */
 const LOCAL_LINK_ID = /^[A-Za-z0-9_.:-]{1,200}$/;
-/** Organization slugs and `local`: lowercase, no edge hyphen. */
 const WORKSPACE_LINK_OWNER = /^[a-z0-9](?:[a-z0-9-]{0,98}[a-z0-9])?$/;
 /** Both stores keep numbers in a signed 32-bit integer column. */
 const MAX_WORKSPACE_NUMBER = 2_147_483_647;
@@ -261,12 +231,10 @@ export function isWorkspaceLinkOwner(value: unknown): value is string {
   return typeof value === "string" && WORKSPACE_LINK_OWNER.test(value);
 }
 
-/** Can this chat id be a numbered link's `?session=`? */
 export function isWorkspaceLinkSession(value: unknown): value is string {
   return typeof value === "string" && LOCAL_LINK_ID.test(value);
 }
 
-/** The name a workspace is known by everywhere: `w-310`. */
 export function workspaceNumberLabel(number: number): string {
   if (!isWorkspaceNumber(number)) throw new Error("Invalid workspace number.");
   return `w-${number}`;
@@ -297,7 +265,7 @@ export function formatLocalLink(scheme: LocalLinkScheme, kind: LocalLinkKind, id
   return `${scheme}://${kind}/${encodeURIComponent(id)}`;
 }
 
-/** The exact string a parsed link was, in canonical form. */
+/** Canonicalize accepted links before forwarding them to navigation. */
 export function formatParsedLocalLink(link: LocalLink): string {
   return link.address
     ? formatWorkspaceLink(link.scheme, link.address, link.kind === "chat" ? link.id : null)
@@ -324,10 +292,7 @@ function parseNumberedLink(text: string): LocalLink | null {
   return { scheme: match[1] as LocalLinkScheme, kind: "chat", id: session, address };
 }
 
-/** Parse exactly one link: a numbered `<owner>/w/<n>` link (with at most a
- * `session` query) or a legacy `chat/<id>` / `workspace/<id>` link. Anything
- * with userinfo, a port, another query or a fragment, or an unknown scheme or
- * kind, is not a Zeros Local link. */
+/** Accept numbered and legacy workspace or chat links; reject URL options outside the contract. */
 export function parseLocalLink(text: string): LocalLink | null {
   const trimmed = text.trim();
   const numbered = parseNumberedLink(trimmed);
@@ -353,10 +318,7 @@ export function isRetiredLocalLink(text: string): boolean {
   return trimmed.startsWith(RETIRED_SCHEME_PREFIX) && parseLocalLink(`zeros://${trimmed.slice(RETIRED_SCHEME_PREFIX.length)}`) !== null;
 }
 
-/** Every distinct Local link inside free text (a pasted message, a brief).
- * Sentence punctuation after a link (`… zeros://chat/abc.`) is not part of
- * it: generated ids never end in `.`, `:` or `-`. Links of every supported
- * channel are returned; callers keep only their own channel's scheme. */
+/** Ignore sentence punctuation after generated IDs; the caller filters links to its own release channel. */
 export function extractLocalLinks(text: string, limit = 64): LocalLink[] {
   const out: LocalLink[] = [];
   const seen = new Set<string>();
@@ -369,8 +331,7 @@ export function extractLocalLinks(text: string, limit = 64): LocalLink[] {
   const pattern =
     /zeros(?:-alpha|-beta|-dev)?:\/\/(?:[A-Za-z0-9-]{1,100}\/w\/[0-9]{1,10}(?:\?session=[A-Za-z0-9_.:%-]+|(?![A-Za-z0-9_%]))|(?:chat|workspace)\/[A-Za-z0-9_.:%-]+)/g;
   for (const match of text.matchAll(pattern)) {
-    // A suffix regexp retries from every punctuation character when a long
-    // internal run ends in a non-punctuation character. Scan only the suffix.
+    // Scan the suffix directly to avoid retrying a regexp at each punctuation character.
     const candidate = match[0];
     let end = candidate.length;
     while (
@@ -391,7 +352,6 @@ export function extractLocalLinks(text: string, limit = 64): LocalLink[] {
   return out;
 }
 
-// ── Permission levels ─────────────────────────────────────
 
 /** Product levels used to compare and translate permission modes across
  * providers. Same provider keeps the exact native mode id. */
@@ -418,7 +378,6 @@ export const LOCAL_MODE_FOR_LEVEL_BY_FAMILY: Readonly<Record<string, Readonly<Re
   cursor: { plan: "plan", ask: "plan", auto: "auto", full: "agent" },
 };
 
-/** Normalize the agent id (`claude`, `claude-acp`, `codex`, …) to its family. */
 export function localAgentFamily(agentId: string | null | undefined): string | null {
   const id = (agentId ?? "").toLowerCase();
   if (id.startsWith("claude")) return "claude";
@@ -440,7 +399,6 @@ export function localModeForLevel(agentId: string | null | undefined, level: Loc
   return LOCAL_MODE_FOR_LEVEL_BY_FAMILY[family]?.[level] ?? null;
 }
 
-// ── Request and argument shapes ───────────────────────────
 
 const requestId = z.string().min(1).max(LOCAL_MAX_REQUEST_ID_CHARS).regex(/^[A-Za-z0-9_.:-]+$/);
 const ref = z.string().min(1).max(512);
@@ -548,7 +506,6 @@ export const localCallRequestSchema = z
   .strict();
 export type LocalCallRequest = z.infer<typeof localCallRequestSchema>;
 
-/** Validate one call; returns a usage failure instead of throwing. */
 export function parseLocalCall(
   raw: unknown,
 ):
@@ -577,7 +534,6 @@ function zodMessage(error: z.ZodError): string {
   return `${where}${issue.message}`;
 }
 
-// ── Result shapes ─────────────────────────────────────────
 
 export type LocalChatState =
   | "idle"
@@ -612,7 +568,6 @@ export interface LocalChatSummary {
   state: LocalChatState;
   lastTurn: LocalTurnSummary | null;
   createdBy: string | null;
-  /** How the caller can see this chat. */
   visibleAs: "self" | "workspace" | "family" | "shared";
   pendingCards: number;
 }
@@ -621,8 +576,7 @@ export interface LocalWorkspaceSummary {
   workspaceId: string;
   link: string;
   name: string;
-  /** Permanent Local number (`w-<n>`); null for a repository folder. Optional
-   * for older engines. */
+  /** Null for a repository folder; older engines may omit the permanent Local number. */
   number?: number | null;
   repoRoot: string;
   path: string;
@@ -673,7 +627,6 @@ export interface LocalMessageRow {
   messageId: string;
   turnId: string | null;
   role: "user" | "agent" | "tool" | "notice";
-  /** Who sent a user-role message: the human, an agent (chat link) or Zeros. */
   from: { kind: "human" } | { kind: "agent"; chatId: string; chatLink: string } | { kind: "zeros" } | null;
   phase: string | null;
   text: string;

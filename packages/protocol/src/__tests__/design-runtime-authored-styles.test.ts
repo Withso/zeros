@@ -11,9 +11,7 @@ type RuntimeWindow = Window & {
   detailsRequest: (nodeId: string) => Promise<DesignRuntimeNodeDetails>;
 };
 
-// The head mirrors a composed frame document: the reset layer-order prelude,
-// an imported Tailwind-like source and a plain CSS source, the linked
-// tokens.css, then the frame's own <style>.
+// Mirror the composed frame's reset layer order and inlined source, linked-file and frame styles.
 const HEAD = `
 <style data-zeros-layer-order="">@layer reset;</style>
 <style data-zeros-style-source="app">
@@ -151,8 +149,6 @@ describe("winning authored declarations in Chromium", () => {
 
   it("separates rules that target a layer from shared resets", async () => {
     const button = await details(page, "button");
-    // The reset layer's type selector reaches every button; the utility
-    // classes name this one.
     expect(button.authoredStyles?.font).toMatchObject({ selector: "button", scope: "base" });
     expect(button.authoredStyles?.color).toMatchObject({ selector: ".text-white", scope: "element" });
     const card = await details(page, "card");
@@ -179,7 +175,6 @@ describe("winning authored declarations in Chromium", () => {
       value: "var(--brand)",
       important: true,
     });
-    // The style attribute wins at the same importance.
     expect(card.authoredStyles?.color).toEqual({ origin: "inline", scope: "inline", value: "green" });
   });
 
@@ -311,8 +306,6 @@ const BASELINE_COST = {
   card: { matches: 11, queries: 0 },
 };
 
-// Where a value comes from: a class, a utility, a component, this layer's own
-// declaration and what it replaced, and a declaration that differs by theme.
 const ORIGINS_HEAD = `
 <style data-zeros-style-source="app">
   @layer theme, utilities;
@@ -370,12 +363,10 @@ describe("where a value comes from, in Chromium", () => {
         others: 3,
       },
     });
-    // A shorthand written on the layer is reported as written.
     expect(changed.authoredStyles?.padding).toMatchObject({
       declared: "padding",
       replaced: { selector: ".btn", value: "8px 12px", others: 3 },
     });
-    // A class value nothing overrides has nothing replaced.
     expect(changed.authoredStyles?.["background-color"]).toEqual({
       origin: "frame",
       selector: ".btn.btn--primary",
@@ -454,9 +445,7 @@ describe("review fixes for where a value comes from, in Chromium", () => {
     await browser?.close();
   });
 
-  // The engine removes a layer's own declaration only from an unconditional
-  // [data-oid] rule (packages/design-web/src/css.ts, mutateDesignNodeStyles);
-  // one inside @media, @supports or @layer is not the layer's to reset.
+  // Without an inline declaration, Reset in auto scope needs one ungrouped [data-oid] rule.
   it("does not report a conditional rule written for the layer as its own change", async () => {
     const page = await fixture(browser, `<style>
       .btn { color: navy; padding: 4px; }
@@ -479,8 +468,6 @@ describe("review fixes for where a value comes from, in Chromium", () => {
     }
   });
 
-  // Regression: the layer's own custom property reported declared "--gap",
-  // the validator refused it and the bridge dropped every origin.
   it("reports what a layer's own custom property replaced in a form its validator accepts", async () => {
     const page = await fixture(browser, `<style>
       .card { --gap: 8px; gap: var(--gap); }
@@ -494,9 +481,7 @@ describe("review fixes for where a value comes from, in Chromium", () => {
     }
   });
 
-  // Reset removes the style attribute's declaration when there is one, and
-  // the layer's own rule only when there is none (mutateDesignNodeStyles);
-  // what it replaced is what shows after Reset.
+  // Reset targets the inline declaration before considering a layer rule.
   it("reports as replaced what shows once Reset removes the declaration it targets", async () => {
     const page = await fixture(browser, `<style>
       .btn { color: navy; }
@@ -515,8 +500,7 @@ describe("review fixes for where a value comes from, in Chromium", () => {
     }
   });
 
-  // The engine reads a nested rule's selector as written (&), so one level
-  // of nesting resolved for provenance is still not the layer's to reset.
+  // Provenance resolves nesting, but Reset matches the selector as written (&).
   it("does not report a nested rule that resolves to the layer as its own change", async () => {
     const page = await fixture(browser, `<style>
       .btn { color: navy; }
@@ -531,8 +515,7 @@ describe("review fixes for where a value comes from, in Chromium", () => {
     }
   });
 
-  // CSSOM writes a class that starts with a digit (2xl:) as \32 xl…; the
-  // space ends the escape, not the compound.
+  // Whitespace after a CSS hex escape terminates the escape, not the compound.
   it("names a class that starts with a digit", async () => {
     const page = await fixture(browser, `<style>
       .\\32xl\\:p-4 { padding: 4px; }
@@ -587,7 +570,6 @@ describe("review fixes for where a value comes from, in Chromium", () => {
       const light = await details(page, "card");
       expect(light.authoredStyles?.["background-color"]).toMatchObject({ value: "white" });
       expect(light.authoredStyles?.["background-color"]?.themeValues).toBeUndefined();
-      // The real dark theme agrees: the class rule still wins there.
       await page.evaluate(() => document.documentElement.setAttribute("data-zd-theme", "dark"));
       expect(await page.locator(".card").evaluate((element) => getComputedStyle(element).backgroundColor)).toBe("rgb(255, 255, 255)");
     } finally {
@@ -635,9 +617,7 @@ describe("review fixes for where a value comes from, in Chromium", () => {
   });
 });
 
-// Selection cost: element.matches and querySelectorAll calls one
-// getNodeDetails makes on a cold element, against the counts measured before
-// this provenance existed (scratchpad probe on the previous runtime).
+// Measure a cold element after warming the rule index, against the previous runtime.
 describe("provenance cost per selection", () => {
   const counted = async (nodeId: string) => {
     const browser = await chromium.launch({ headless: true });
@@ -646,7 +626,6 @@ describe("provenance cost per selection", () => {
       return await page.evaluate(async (nodeId) => {
         const runtime = window as unknown as RuntimeWindow;
         document.documentElement.setAttribute("data-zd-theme", "light");
-        // Build the rule index on another element first.
         await runtime.detailsRequest("other");
         const counts = { matches: 0, queries: 0 };
         const matches = Element.prototype.matches;
@@ -733,8 +712,7 @@ describe("authored style wire validation", () => {
   });
 });
 
-// The engine limits a component's style element to its instances; the panel
-// still reads each rule as it was written, and counts only the instances.
+// Strip component scoping from reported selectors, but keep it when counting matches.
 const SCOPED_COMPONENT_HEAD = `
 <style data-zeros-component="chip">:is(.chip):where(zd-chip, zd-chip *) { gap: 4px; }
 :is(zd-chip):where(zd-chip, zd-chip *) { display: block; }</style>`;

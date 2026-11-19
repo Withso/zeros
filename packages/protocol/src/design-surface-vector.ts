@@ -1,7 +1,4 @@
-/** A bounded static SVG replay of the already laid-out passive document.
- * No screenshot or pixel buffer is created. The caller uses a bounded preview
- * when a timeline or page-canvas paint cannot be represented faithfully.
- * No authored JavaScript is retained in the image. */
+/** Bounded, script-free SVG replay with no pixel buffer; when fidelity cannot be preserved, use the normal preview. */
 export const DESIGN_SURFACE_VECTOR_SOURCE = String.raw`function designSurfaceVector() {
   if (document.querySelector("animate,animateMotion,animateTransform,set,marquee,video,audio,canvas")) return null;
   var viewportWidth = innerWidth, viewportHeight = innerHeight;

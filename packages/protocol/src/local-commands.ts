@@ -1,10 +1,7 @@
 import { z } from "zod";
 import { NotifyUserEventSchema } from "./notify-user";
 
-// RunLocalCommand: a cloud agent runs one shell command on the Mac of the
-// person who asked. Shared by the worker (tool), the desktop (runner and
-// approval) and mirrored by the control plane. The worker <-> control plane
-// request and result transport is defined with the control plane's design.
+// A cloud worker requests one command on the initiating user's Mac through the control plane.
 
 export const LOCAL_COMMANDS_FEATURE = "local-commands-v1";
 /** Wire v1.3: the worker may send, and a Mac may receive, `reason`. */
@@ -17,18 +14,16 @@ export const LOCAL_COMMAND_LIMITS = {
   defaultTimeoutMs: 60_000, timeoutMs: 120_000, extendedTimeoutMs: 1_800_000,
   /** Waiting for the person's decision, on top of the command's own timeout. */
   approvalMs: 120_000,
-  /** Each stream is capped on the Mac (1 MiB of UTF-8 is at most this many characters). */
+  /** The Mac caps each stream at 1 MiB of UTF-8. */
   streamChars: 1_048_576,
   /** Formatted output above this is saved in the VM and the tool returns its path. */
   inlineChars: 32_000,
 } as const;
 
-/** Closed outcomes. An approval timeout is never reported as a denial; a
- * command that could not start is failed, never completed. */
+/** Approval expiry is not denial; a command that never starts is failed, not completed. */
 export const LOCAL_COMMAND_OUTCOMES = ["completed", "failed", "denied", "approval_timed_out", "command_timed_out", "mac_not_connected", "no_target", "disabled", "cancelled", "interrupted"] as const;
 export type LocalCommandOutcome = typeof LOCAL_COMMAND_OUTCOMES[number];
-/** Why a failed command could not start, carried in `error`: exactly one of
- * these, and kept in an erased receipt (wire v1.2). */
+/** An erased receipt retains this closed start-failure reason in error. */
 export const LOCAL_COMMAND_FAILURE_REASONS = ["cwd_not_found", "spawn_failed"] as const;
 
 const text = (max: number) => z.string().min(1).max(max).refine(value => !value.includes("\u0000") && value.trim().length > 0);
@@ -36,7 +31,7 @@ export const LocalCommandInputSchema = z.object({
   command: text(LOCAL_COMMAND_LIMITS.commandChars),
   cwd: text(LOCAL_COMMAND_LIMITS.cwdChars).optional(),
   description: text(LOCAL_COMMAND_LIMITS.textChars).optional(),
-  /** Why the person's Mac and not the cloud VM (v1.3): 1-280 characters after trim, one line, no control characters. */
+  /** Why this needs the person's Mac instead of the cloud VM; sent only when the receiving Mac supports reason. */
   reason: z.string().max(LOCAL_COMMAND_LIMITS.reasonChars + 64).refine(value => !/[\u0000-\u001f\u007f]/.test(value) && value.trim().length > 0 && value.trim().length <= LOCAL_COMMAND_LIMITS.reasonChars).optional(),
   timeoutMs: z.number().int().min(1).max(LOCAL_COMMAND_LIMITS.extendedTimeoutMs).optional(),
   extendedTimeoutReason: text(LOCAL_COMMAND_LIMITS.textChars).optional(),
@@ -81,7 +76,6 @@ export type LocalCommandResult = z.infer<typeof LocalCommandResultSchema>;
 export const LocalCommandMacResultSchema = z.object({ outcome: z.enum(MAC_OUTCOMES), ...resultFields }).strict().refine(failedRule, failedMessage);
 export type LocalCommandMacResult = z.infer<typeof LocalCommandMacResultSchema>;
 
-// Order 2 wire v1.1: control plane routes for the worker (W) and the device (D + H).
 const uuid = z.string().uuid();
 const iso = z.string().datetime();
 const id = z.string().min(1).max(256).refine(value => !/[\u0000-\u001f]/.test(value));
@@ -105,15 +99,15 @@ export type LocalCommandDevice = z.infer<typeof LocalCommandDeviceSchema>;
 export const LocalCommandRegistrationRequestSchema = z.object({ requestId: uuid, name: deviceName, capabilities }).strict();
 export const LocalCommandRegistrationReplySchema = z.object({ device: LocalCommandDeviceSchema, presence: LocalCommandPresenceSchema, heartbeatIntervalMs }).strict();
 export const LocalCommandMacSchema = z.object({ deviceId: uuid, name: deviceName, connected: z.boolean(), active: z.boolean(), reachable: z.boolean(), expiresAt: iso.nullable(),
-  /** Order 3: this Mac mirrors the workspace into a local folder (optional until every control plane sends it). */
+  /** Optional for older backends: the Mac is mirroring the workspace. */
   syncing: z.boolean().optional(),
-  /** 12.z: the person wants that Mac to sync this workspace (only with X-Zeros-Sync-Wanted: 1; released apps never ask). */
+  /** Sent only when the client requests X-Zeros-Sync-Wanted: 1. */
   syncWanted: z.boolean().optional() }).strict();
 export type LocalCommandMac = z.infer<typeof LocalCommandMacSchema>;
 export const LocalCommandMacsReplySchema = z.object({ macs: z.array(LocalCommandMacSchema).max(20) }).strict();
 export const LocalCommandConnectReplySchema = z.object({ mac: LocalCommandMacSchema, presence: LocalCommandPresenceSchema }).strict();
 export const LocalCommandDisconnectReplySchema = z.object({ mac: LocalCommandMacSchema }).strict();
-/** Order 3: `PUT /v1/cloud-v2/workspaces/:id/macs/:deviceId/sync` (D+H, this Mac) answers the updated row. */
+/** The device sync update returns the updated Mac row. */
 export const WorkspaceSyncFlagReplySchema = z.object({ mac: LocalCommandMacSchema }).strict();
 
 const workspaceLabel = z.object({ id: uuid, name: z.string().max(120), title: z.string().max(120).nullable() }).strict();
@@ -139,11 +133,11 @@ export const LocalCommandEventSchemas = {
   request: LocalCommandNoticeSchema,
   heartbeat: z.object({ at: iso, presence: LocalCommandPresenceSchema }).strict(),
   revoked: z.object({ code: z.enum(["session_revoked", "device_registration_changed"]) }).strict(),
-  /** notify-user-v1 (batch B1) shares the account-level device channel. */
+  /** Notification delivery shares the account-level device stream. */
   notify: NotifyUserEventSchema,
 } as const;
 
 export const LocalCommandOrganizationSettingSchema = z.object({ localCommandsEnabled: z.boolean() }).strict();
 
-/** Device headers (H) on every device route except registration, and on a desktop prompt send. */
+/** Device routes except registration, and desktop prompt sends, carry this identity. */
 export const LOCAL_COMMAND_DEVICE_HEADERS = { deviceId: "X-Zeros-Device-Id", registrationId: "X-Zeros-Device-Registration", instanceId: "X-Zeros-Device-Instance" } as const;

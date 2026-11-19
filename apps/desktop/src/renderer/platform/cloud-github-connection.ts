@@ -160,8 +160,7 @@ export async function changeCloudGithubConnection(
   cloudGithubConnectionCache.setData(key, value);
   return value;
 }
-/** `install` opens GitHub's installation page, where choosing repositories and
- * signing in happen on one round trip; otherwise GitHub only signs in. */
+// Install goes through GitHub's repository picker as well as sign-in.
 export async function beginCloudGithubConnection(
   userId: string,
   organizationId: string,

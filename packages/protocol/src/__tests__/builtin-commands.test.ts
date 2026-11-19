@@ -56,8 +56,8 @@ describe("mergeCommands", () => {
     ];
     const b: AvailableCommand[] = [{ name: "a", description: "from b" }];
     const out = mergeCommands(a, b);
-    expect(out.map((c) => c.name)).toEqual(["a", "b"]); // sorted
-    expect(out.find((c) => c.name === "a")?.description).toBe("from b"); // later wins
+    expect(out.map((c) => c.name)).toEqual(["a", "b"]);
+    expect(out.find((c) => c.name === "a")?.description).toBe("from b");
   });
 
   it("skips entries without a name and tolerates empty lists", () => {
@@ -75,22 +75,18 @@ describe("mergeCommands", () => {
 describe("composerCommandsFor", () => {
   it("unions curated built-ins with discovered (discovered wins on clash for non-inline)", () => {
     const discovered: AvailableCommand[] = [
-      { name: "review", description: "DISCOVERED override" }, // clashes; non-inline → discovered wins
-      { name: "my-custom", description: "user command" }, // net-new
+      { name: "review", description: "DISCOVERED override" },
+      { name: "my-custom", description: "user command" },
     ];
     const out = composerCommandsFor("claude", discovered);
     expect(out.find((c) => c.name === "review")?.description).toBe(
       "DISCOVERED override",
     );
     expect(out.some((c) => c.name === "my-custom")).toBe(true);
-    // curated entries still present
     expect(out.some((c) => c.name === "init")).toBe(true);
   });
 
   it("keeps Zeros' curated description for INLINE commands (Zeros owns the behavior)", () => {
-    // /clear + /compact are handled inline by Zeros, so the picker must show
-    // OUR description (what Zeros actually does) — not the agent CLI's text
-    // from supportedCommands(), even though discovered normally wins.
     const discovered: AvailableCommand[] = [
       { name: "clear", description: "CLI: clears the transcript" },
       { name: "compact", description: "CLI: compacts" },
@@ -215,7 +211,6 @@ describe("kind discriminator (command vs skill)", () => {
       { name: "review", description: "cmd", kind: "command" },
       { name: "shared", description: "as command", kind: "command" },
     ];
-    // commands are listed LAST → they win the "shared" clash (kind follows).
     const out = mergeCommands(skills, commands);
     expect(out.find((c) => c.name === "wrangler")?.kind).toBe("skill");
     expect(out.find((c) => c.name === "review")?.kind).toBe("command");

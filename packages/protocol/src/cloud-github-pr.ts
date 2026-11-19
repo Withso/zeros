@@ -1,5 +1,4 @@
-// Cloud PR HTTP contract. Mirrored by the independently deployed control plane
-// in cloud/github-pr-contract.ts; the parity suite covers both parsers.
+// Keep in sync with the control plane's independently deployed cloud/github-pr-contract.ts.
 import { z } from "zod";
 
 const sha = z.string().regex(/^[a-f0-9]{40}$/);

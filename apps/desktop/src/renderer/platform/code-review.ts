@@ -1,5 +1,4 @@
-/** Durable review state always uses the engine bridge, including Electron.
- * Native/preload IPC is reserved for host-only resources. */
+/** Use the engine bridge for durable review state, even in Electron; preload IPC owns host-only resources. */
 export {
   listCodeReviewThreads,
   createCodeReviewThread,

@@ -1,23 +1,4 @@
-// ──────────────────────────────────────────────────────────
-// Native bindings — interactive PTY sessions
-// ──────────────────────────────────────────────────────────
-//
-// The ENGINE owns every interactive PTY (apps/desktop/src/engine/pty/). The
-// desktop renderer reaches it through the module-level RuntimeClient
-// (getActiveBridge()); optional relay clients use the same scoped protocol. The
-// engine keeps a per-session scrollback mirror, so reattach restores the
-// pre-existing screen via PtySessionInfo.replay.
-//
-// The legacy Electron-IPC PTY path (apps/desktop/electron/ipc/commands/pty.ts) was retired
-// once the desktop converged onto the engine — there is no per-process node-pty
-// in the renderer path anymore.
-//
-// With no bridge connected (browser-only renderer development, or the engine
-// momentarily down), degrade to null / [] / no-op so the terminal panel shows
-// its unavailable state instead of throwing. getBridgeReady() smooths the
-// mount-order race where the active bridge is not published on first paint.
-// ──────────────────────────────────────────────────────────
-
+// Both native and relay clients use the engine as terminal authority.
 import type { RuntimeClient } from "./bridge/ws-client";
 import type { PtyExitReason } from "@zeros/protocol/messages";
 import {
@@ -41,11 +22,7 @@ import {
 
 export type { PtyTerminalLike };
 
-/** Resolve the live engine bridge, waiting briefly if it isn't up yet. Handles
- *  the mount-order race: BridgeProvider sets the active bridge in a ROOT effect
- *  that runs AFTER deep children, so a terminal reattaching on mount can see
- *  `null` for a tick. Resolves the moment the bridge appears (or null on
- *  timeout — engine genuinely down). */
+/** A terminal can attach before the root provider publishes its bridge; wait briefly for it. */
 function getBridgeReady(timeoutMs = 4000): Promise<RuntimeClient | null> {
   const now = getActiveBridge();
   if (now) return Promise.resolve(now);
@@ -72,20 +49,11 @@ export interface PtySessionInfo {
   shell: string;
   cols: number;
   rows: number;
-  /** True when the engine found an existing PTY for this sessionId and handed it
-   *  back instead of spawning a fresh one (page refresh / workbench collapse-expand /
-   *  a second device attaching). */
   reattached?: boolean;
-  /** Serialized snapshot of the resolved terminal grid captured on re-attach
-   *  (NOT raw history — that ghosted redraw TUIs). Empty on a fresh spawn;
-   *  byte-capped at ~256 KB. The caller writes this verbatim into a fresh,
-   *  same-size xterm before binding the live data handler so dev-server logs
-   *  survive cmd+R / window-reopen. */
+  /** Reattach gets a bounded snapshot of the resolved grid, not raw history that can replay stale redraws. */
   replay?: string;
-  /** True when the snapshot dropped scrollback to stay under the ~256 KB budget.
-   *  The visible screen is always intact; only older scrollback was trimmed. */
+  /** Only old scrollback is dropped; the visible screen stays intact. */
   replayTruncated?: boolean;
-  /** UTF-8 byte size of `replay` (diagnostics). */
   replayBytes?: number;
 }
 
@@ -107,26 +75,18 @@ export async function ptyCreate(args: {
   cwd: string;
   cols: number;
   rows: number;
-  /** Ephemeral one-shot terminal (the composer's inline `claude /mcp` runner):
-   *  the engine spawns it like any PTY but keeps it OUT of the shared
-   *  multiplayer registry, so it never shows in another device's terminal list
-   *  and leaves no "(exited)" tab. The caller disposes it explicitly. */
+  /** One-shot terminals stay out of the shared registry; their caller must dispose of them. */
   ephemeral?: boolean;
   loginProvider?: "claude" | "codex";
-  /** Cloud plain shell: the worker restores its last screen and directory
-   *  after a restart and answers as a reattach. Local engines ignore it. */
+  /** Only the cloud worker can restore a plain shell's last screen and directory after restart. */
   restore?: boolean;
 }): Promise<PtySessionInfo | null> {
-  // The engine resolves the workspace from `cwd` (an id OR a real path)
-  // server-side, so we pass the folder unchanged — no renderer-side id mapping.
+  // Pass cwd unchanged; the engine resolves either a workspace ID or a path.
   const bridge = await getBridgeReady();
   return bridge ? bridgePtyCreate(bridge, args) : null;
 }
 
-/** Resolve an agent's on-disk CLI binary path (engine-side; the renderer can't
- *  stat the filesystem). Used by the embedded-terminal commands to run the SAME
- *  `claude` the agent uses. Returns the bare agent id as a last resort (no
- *  bridge / engine down) — the login-shell PATH still resolves it. */
+/** Use the engine-selected agent binary; without the bridge, let the shell resolve the bare name. */
 export async function resolveAgentBinary(agentId: string): Promise<string> {
   const bridge = await getBridgeReady();
   if (!bridge) return agentId;
@@ -137,8 +97,6 @@ export async function ptyWrite(args: {
   sessionId: string;
   data: string;
 }): Promise<void> {
-  // Writes only ever follow a successful create, so the bridge is up by now — a
-  // sync read is enough (no need to await).
   const bridge = getActiveBridge();
   if (bridge) bridgePtyWrite(bridge, args);
 }
@@ -162,8 +120,7 @@ export async function ptyList(): Promise<PtySessionInfo[]> {
   return bridge ? bridgePtyList(bridge) : [];
 }
 
-/** PID-only census for accurate resource-monitor terminal ownership. Null means
- * the engine is unavailable; an empty array is an authoritative zero PTYs. */
+/** An empty census authoritatively means no terminal roots; null is unknown. */
 export async function ptyProcessPids(
   timeoutMs = 1_000,
 ): Promise<number[] | null> {
@@ -172,35 +129,25 @@ export async function ptyProcessPids(
   try {
     return await bridgePtyProcessPids(bridge, timeoutMs);
   } catch {
-    // A missing or malformed census is an unavailable snapshot — an engine too
-    // old to send it, or a relay peer that never will. Never a proof of zero
-    // PTYs, which would let terminal CPU leak into an "excluding" total.
+    // An older or relay peer may not provide the census; treating that as empty would misattribute terminal CPU.
     return null;
   }
 }
 
-/** Subscribe to PTY stdout/stderr chunks. The handler receives every session's
- *  output — caller filters by `sessionId`. Re-binds whenever the active bridge
- *  appears or swaps (the root-effect mount-order race, or a relay reconnect):
- *  without this, a router installed before the bridge connected would no-op
- *  forever and the terminal would stay blank. */
+/** Each subscriber receives all sessions; filter by sessionId. */
 export async function onPtyData(
   handler: (evt: PtyDataEvent) => void,
 ): Promise<() => void> {
   return bindBridgeStream(subscribeBridgePtyData, handler);
 }
 
-/** Subscribe to PTY exit events. Same re-bind-on-bridge-swap contract as
- *  onPtyData. */
 export async function onPtyExit(
   handler: (evt: PtyExitEvent) => void,
 ): Promise<() => void> {
   return bindBridgeStream(subscribeBridgePtyExit, handler);
 }
 
-/** Subscribe `handler` to a bridge stream, re-binding on every active-bridge
- *  change so a late or swapped bridge keeps delivering. Returns an unsubscribe
- *  that also stops listening for swaps. */
+/** Bind again when the bridge appears or changes, including after a reconnect. */
 function bindBridgeStream<E>(
   subscribe: (bridge: RuntimeClient, handler: (evt: E) => void) => () => void,
   handler: (evt: E) => void,
@@ -221,17 +168,7 @@ function bindBridgeStream<E>(
   };
 }
 
-// ── Shared terminal list (multiplayer discovery) ──────────
-//
-// The engine owns a registry of all live terminals; these let a device discover
-// terminals OTHER devices created (so the tab strip is the same everywhere) and
-// re-fetch when that set changes.
-
-/** The SHARED terminals the engine knows about (optionally scoped to one
- *  workspace), so a device can show + attach to terminals another device
- *  created. Returns null when the engine ISN'T REACHABLE (no bridge) — distinct
- *  from `[]` (engine reachable, genuinely zero terminals) so a caller doing
- *  remove-on-vanish reconciliation never prunes tabs on a transient disconnect. */
+/** Null is an unavailable shared registry, not permission to prune terminals from a prior snapshot. */
 export async function ptyTerminals(
   workspaceId?: string,
 ): Promise<PtyTerminalLike[] | null> {
@@ -240,15 +177,10 @@ export async function ptyTerminals(
   try {
     return await bridgePtyTerminals(bridge, workspaceId);
   } catch {
-    // A request failure is an unavailable snapshot, never proof that every
-    // terminal vanished. Reconciliation retains the last confirmed registry.
     return null;
   }
 }
 
-/** Subscribe to "the shared terminal set changed" pushes (a terminal was created
- *  or exited on ANY device), re-binding on bridge swap. Returns an unsubscribe
- *  fn. */
 export function onPtyTerminalsChanged(handler: () => void): () => void {
   return bindBridgeStream<void>(
     (bridge, h) => subscribeBridgePtyTerminalsChanged(bridge, () => h()),

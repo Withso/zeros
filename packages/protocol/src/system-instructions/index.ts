@@ -1,13 +1,3 @@
-// ──────────────────────────────────────────────────────────
-// system-instructions — public surface
-// ──────────────────────────────────────────────────────────
-//
-// THE home for everything Zeros injects into agent prompts. Import from here:
-//   import { buildFirstTurnSystemInstruction, prependSystemInstruction }
-//     from "@zeros/protocol/system-instructions";
-//
-// Edit the prose in ./templates.ts; edit the assembly in ./build.ts.
-// ──────────────────────────────────────────────────────────
 
 export {
   ADDITIONAL_DIRS_NOTICE,

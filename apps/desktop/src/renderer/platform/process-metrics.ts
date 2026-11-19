@@ -1,9 +1,3 @@
-// ============================================
-// NATIVE FACADE: Process metrics
-// PURPOSE: Typed, read-only access to the current Zeros process-tree sample.
-// USED IN: The app sidebar's resource monitor.
-// ============================================
-
 import { isElectron, nativeInvoke } from "./runtime";
 import type {
   ProcessDiagnosticsReport,
@@ -23,8 +17,6 @@ export type {
   SystemResourceState,
 } from "./process-metrics-types";
 
-/** Read the next process sample. Browser-only UI harnesses return null; the
- * resource pill is desktop chrome and simply stays absent there. */
 export async function processMetricsSnapshot(
   request: ProcessMetricsRequest,
 ): Promise<ProcessMetricsSnapshot | null> {
@@ -36,9 +28,6 @@ export async function processMetricsSnapshot(
   });
 }
 
-/** Build the copyable diagnostics report in Electron main: the process tree
- * with scrubbed command lines, Mac memory context and the scrubbed recent log
- * tail. Null outside Electron. */
 export async function processDiagnosticsReport(
   request: ProcessMetricsRequest,
 ): Promise<ProcessDiagnosticsReport | null> {
