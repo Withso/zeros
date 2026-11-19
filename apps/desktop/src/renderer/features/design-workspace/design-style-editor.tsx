@@ -96,6 +96,7 @@ interface DesignStyleEditorProps {
   motionProperties?: readonly string[];
   onOpenMotionTimeline: (property?: string, value?: string) => void;
   disabled?: boolean;
+  layoutActionsDisabled?: boolean;
 }
 
 const BLEND_MODES = [
@@ -233,6 +234,7 @@ export function DesignStyleEditor({
   motionProperties = [],
   onOpenMotionTimeline,
   disabled = false,
+  layoutActionsDisabled = false,
 }: DesignStyleEditorProps) {
   const commit = (styles: Record<string, string | null>, label: string) => {
     // Selects and segmented controls do not emit a separate drag/change
@@ -326,7 +328,7 @@ export function DesignStyleEditor({
     <DesignPositionSection
       details={details}
       renderField={renderField}
-      disabled={disabled}
+      disabled={disabled || layoutActionsDisabled}
       frameSelected={frameSelected}
       layoutParents={layoutParents}
       onAction={layoutAction}
@@ -339,7 +341,7 @@ export function DesignStyleEditor({
         actions={
           <DesignLayoutArrangeMenu
             details={details}
-            disabled={disabled}
+            disabled={disabled || layoutActionsDisabled}
             frameSelected={frameSelected}
             autoLayout={designAutoLayoutFlow(details) !== "none"}
             childrenLayout={
@@ -358,7 +360,7 @@ export function DesignStyleEditor({
           details={details}
           livePreviewOwner={livePreviewOwner}
           renderField={renderField}
-          disabled={disabled}
+          disabled={disabled || layoutActionsDisabled}
           frameSelected={frameSelected}
           layoutParents={layoutParents}
           selectionCount={selectionCount}

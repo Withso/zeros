@@ -1488,6 +1488,14 @@ function designMixedSteps(input: {
   };
 }
 
+function designInspectorHistoryOwnerKey(
+  workspaceId: string,
+  directoryId: string | undefined,
+  directoryRevision: number,
+): string {
+  return JSON.stringify([workspaceId, directoryId ?? null, directoryRevision]);
+}
+
 export const DesignInspector = React.memo(function DesignInspector({
   workspaceId,
   pages,
@@ -1518,6 +1526,17 @@ export const DesignInspector = React.memo(function DesignInspector({
   const previewDirectoryId = useDesignWorkspaceUiStore(state =>
     workspaceId ? state.byWorkspace[workspaceId]?.directoryId : undefined,
   );
+  const previewDirectoryRevision = useDesignWorkspaceUiStore(state =>
+    workspaceId ? (state.byWorkspace[workspaceId]?.directoryRevision ?? 0) : 0,
+  );
+  const [pendingHistoryByOwner, setPendingHistoryByOwner] = useState<ReadonlyMap<string, number>>(() => new Map());
+  const pendingHistoryByOwnerRef = useRef(new Map<string, number>());
+  const currentHistoryOwnerKey = workspaceId
+    ? designInspectorHistoryOwnerKey(workspaceId, previewDirectoryId, previewDirectoryRevision)
+    : null;
+  const pendingHistoryActions = currentHistoryOwnerKey
+    ? (pendingHistoryByOwner.get(currentHistoryOwnerKey) ?? 0)
+    : 0;
   const previewOwner = useMemo(() => ({
     active, workspaceId, directoryId: previewDirectoryId,
     file: frame?.file, frameId: frame?.frameId,
@@ -1633,6 +1652,16 @@ export const DesignInspector = React.memo(function DesignInspector({
         directoryId: view?.directoryId,
         directoryRevision: view?.directoryRevision ?? 0,
       };
+      const historyOwnerKey = designInspectorHistoryOwnerKey(
+        workspaceId,
+        historyOwner.directoryId,
+        historyOwner.directoryRevision,
+      );
+      pendingHistoryByOwnerRef.current.set(
+        historyOwnerKey,
+        (pendingHistoryByOwnerRef.current.get(historyOwnerKey) ?? 0) + 1,
+      );
+      setPendingHistoryByOwner(new Map(pendingHistoryByOwnerRef.current));
       // Admit history before later edits; the workspace mutation lane orders
       // its bridge write with inspector and direct canvas mutations.
       void queueInspectorAction(() => {
@@ -1661,6 +1690,12 @@ export const DesignInspector = React.memo(function DesignInspector({
           toast.error(`Couldn't ${direction} the design edit`, {
             description: errorMessage(historyError),
           });
+        })
+        .finally(() => {
+          const pending = pendingHistoryByOwnerRef.current.get(historyOwnerKey) ?? 0;
+          if (pending <= 1) pendingHistoryByOwnerRef.current.delete(historyOwnerKey);
+          else pendingHistoryByOwnerRef.current.set(historyOwnerKey, pending - 1);
+          setPendingHistoryByOwner(new Map(pendingHistoryByOwnerRef.current));
         });
     },
     [frame, workspaceId, queueInspectorAction],
@@ -2346,6 +2381,12 @@ export const DesignInspector = React.memo(function DesignInspector({
       const context = styleOwner.contextRef.current;
       if (currentStyleOwnerRef.current !== styleOwner || !context.active) return;
       if (!context.workspaceId || !context.frame) return;
+      const current = useDesignWorkspaceUiStore.getState().byWorkspace[context.workspaceId];
+      if ((pendingHistoryByOwnerRef.current.get(designInspectorHistoryOwnerKey(
+        context.workspaceId,
+        current?.directoryId,
+        current?.directoryRevision ?? 0,
+      )) ?? 0) > 0) return;
       const intent = ++stylePreviewIntentRef.current;
       const runtimeState =
         useDesignRuntimeStore.getState().byWorkspace[context.workspaceId]
@@ -2391,6 +2432,14 @@ export const DesignInspector = React.memo(function DesignInspector({
       if (currentStyleOwnerRef.current !== styleOwner || !styleEditContextRef.current.active)
         return Promise.resolve();
       const target = styleEditContextRef.current;
+      if (target.workspaceId) {
+        const current = useDesignWorkspaceUiStore.getState().byWorkspace[target.workspaceId];
+        if ((pendingHistoryByOwnerRef.current.get(designInspectorHistoryOwnerKey(
+          target.workspaceId,
+          current?.directoryId,
+          current?.directoryRevision ?? 0,
+        )) ?? 0) > 0) return Promise.resolve();
+      }
       if (target.workspaceId && target.frame && designHeldStateHolds(target.workspaceId, target.frame.file, target.styleNodeIds))
         return Promise.resolve();
       const intent = ++stylePreviewIntentRef.current;
@@ -2782,7 +2831,7 @@ export const DesignInspector = React.memo(function DesignInspector({
               : DESIGN_FRAME_POSITION_RANGE
           }
           compact={options?.compact}
-          disabled={editsDisabled}
+          disabled={editsDisabled || pendingHistoryActions > 0}
           applied
           onPreview={(next) => {
             const number = Number(next);
@@ -2915,7 +2964,7 @@ export const DesignInspector = React.memo(function DesignInspector({
         originLabel={styleOriginLabel}
         onLayoutAction={commitLayoutAction}
         onPreviewLayoutAction={previewLayoutAction}
-        disabled={editsDisabled}
+        disabled={editsDisabled || (!!options?.geometry && pendingHistoryActions > 0)}
         applied={applied}
         motionModeActive={motionTimelineOpen}
         motionTrackActive={motionProperties.includes(property)}
@@ -3358,6 +3407,7 @@ export const DesignInspector = React.memo(function DesignInspector({
                     layoutParents={shownParents}
                     selectionCount={styleNodeIds.length}
                     disabled={editsDisabled}
+                    layoutActionsDisabled={pendingHistoryActions > 0}
                     onPreviewStyles={previewSelectedStyles}
                     onCancelStylePreview={clearSelectedStylePreview}
                     onCommitStyles={commitSelectedStyles}

@@ -121,9 +121,23 @@ import { resetDesignLivePreviewForTests, useDesignLivePreviewStore } from "../st
 vi.stubGlobal("ResizeObserver", class { observe() {} unobserve() {} disconnect() {} });
 vi.stubGlobal("CSS", { supports: () => true, escape: (value: string) => value });
 let frameId = 0;
+let pendingAnimationFrames = 0;
+const animationFrameWaiters = new Set<() => void>();
 vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
   const id = ++frameId;
-  setTimeout(() => callback(performance.now()), 0);
+  pendingAnimationFrames += 1;
+  setTimeout(() => {
+    try {
+      callback(performance.now());
+    } finally {
+      pendingAnimationFrames -= 1;
+      if (pendingAnimationFrames === 0) {
+        const waiters = [...animationFrameWaiters];
+        animationFrameWaiters.clear();
+        waiters.forEach((resolve) => resolve());
+      }
+    }
+  }, 0);
   return id;
 });
 vi.stubGlobal("cancelAnimationFrame", () => {});
@@ -152,14 +166,16 @@ const card: DesignRuntimeNodeDetails = {
 let container: HTMLDivElement;
 let reactRoot: Root | null = null;
 
-async function show() {
-  mocks.runtime.mockReturnValue({
+async function show(details: DesignRuntimeNodeDetails = card, previewLayout = false) {
+  const runtime = {
     sourceVersion,
-    supports: () => false,
-    previewStyles: vi.fn(async () => card),
-    clearPreviewStyles: vi.fn(async () => card),
-    getNodeDetails: vi.fn(async () => card),
-  });
+    supports: (capability: string) => previewLayout && capability === "previewLayout",
+    ...(previewLayout ? { previewLayout: vi.fn(async () => []) } : {}),
+    previewStyles: vi.fn(async () => details),
+    clearPreviewStyles: vi.fn(async () => details),
+    getNodeDetails: vi.fn(async () => details),
+  };
+  mocks.runtime.mockReturnValue(runtime);
   const frame = { file: "home.html", sourceVersion, title: "Home", x: 0, y: 0, z: 0, width: 400, height: 300 } as never;
   const snapshot = { sourceVersion, revision: 1, tree: [], warnings: [], frame: root,
     viewport: { width: 400, height: 300, scrollX: 0, scrollY: 0 } } as DesignRuntimeSnapshot;
@@ -170,11 +186,12 @@ async function show() {
       React.createElement("div", { "data-design-workspace-surface": "" },
         React.createElement(DesignInspector, {
           workspaceId: "w", folder: "/repo", frame, frameSelected: false, selectedNodeId: "card", selectedNodeIds: ["card"],
-          details: card, lint: null, active: true, canvasBackground: "white", onCanvasBackgroundChange: () => {},
+          details, lint: null, active: true, canvasBackground: "white", onCanvasBackgroundChange: () => {},
           motionTimelineOpen: false, motionProperties: [], onOpenMotionTimeline: () => {}, zoomActionsRef: { current: null },
         } as never))));
   });
   await act(async () => {});
+  return runtime;
 }
 
 const fieldInput = (property: string) =>
@@ -192,7 +209,11 @@ const pointer = (type: string, clientX: number) => {
   Object.defineProperties(event, { pointerId: { value: 1 }, isPrimary: { value: true } });
   return event;
 };
-const settle = () => act(async () => { await new Promise((resolve) => setTimeout(resolve, 2)); });
+const settle = () => act(async () => {
+  while (pendingAnimationFrames > 0) {
+    await new Promise<void>((resolve) => animationFrameWaiters.add(resolve));
+  }
+});
 const lastWrite = () =>
   JSON.stringify([...mocks.updateStyles.mock.calls, ...mocks.applyEdit.mock.calls].at(-1) ?? null);
 const writes = () => mocks.updateStyles.mock.calls.length + mocks.applyEdit.mock.calls.length;
@@ -361,6 +382,71 @@ describe("an inspector field scrub", () => {
     }
   });
 
+  it("does not commit a stale Rotate while history is pending", async () => {
+    const beforeUndo = { ...card, styles: { ...card.styles, rotate: "90deg" } };
+    const afterUndo = { ...beforeUndo, styles: { ...beforeUndo.styles, rotate: "0deg" } };
+    let resolveUndo: ((reply: { result: null }) => void) | undefined;
+    mocks.applyHistory.mockImplementationOnce(() => new Promise((resolve) => { resolveUndo = resolve; }));
+    const runtime = await show(beforeUndo, true);
+    const rotate = container.querySelector<HTMLButtonElement>('button[aria-label="Rotate 90° clockwise"]')!;
+    const inspector = container.querySelector("[data-design-inspector]");
+    const opacity = fieldInput("opacity");
+    await act(async () => { opacity.focus(); });
+    try {
+      await act(async () => {
+        window.dispatchEvent(new KeyboardEvent("keydown", { key: "z", metaKey: true, bubbles: true, cancelable: true }));
+        await Promise.resolve();
+      });
+      expect(mocks.applyHistory).toHaveBeenCalledOnce();
+      expect(rotate.disabled).toBe(true);
+      expect(fieldInput("rotate").disabled).toBe(true);
+      expect(opacity.disabled).toBe(false);
+      expect(document.activeElement).toBe(opacity);
+      await act(async () => { rotate.click(); await Promise.resolve(); });
+      expect(mocks.applyEdit).not.toHaveBeenCalled();
+      await act(async () => {
+        runtime.getNodeDetails.mockResolvedValue(afterUndo);
+        resolveUndo?.({ result: null });
+        await Promise.resolve();
+      });
+      await vi.waitFor(() => expect(rotate.disabled).toBe(false));
+      expect(container.querySelector("[data-design-inspector]")).toBe(inspector);
+      expect(fieldInput("opacity")).toBe(opacity);
+      await act(async () => { rotate.click(); await Promise.resolve(); });
+      await vi.waitFor(() => expect(mocks.applyEdit).toHaveBeenCalledOnce());
+      const [, , transaction] = mocks.applyEdit.mock.calls[0] as unknown as [string, unknown, { operations: Array<{ type: string; styles?: Record<string, string | null> }> }];
+      expect(transaction.operations.find((operation) => operation.type === "node.set-styles")?.styles?.rotate).toBe("90deg");
+    } finally {
+      await act(async () => {
+        resolveUndo?.({ result: null });
+        await Promise.resolve();
+      });
+    }
+  });
+
+  it("re-enables layout actions when history fails", async () => {
+    let rejectUndo: ((error: Error) => void) | undefined;
+    mocks.applyHistory.mockImplementationOnce(() => new Promise((_, reject) => { rejectUndo = reject; }));
+    await show();
+    const rotate = container.querySelector<HTMLButtonElement>('button[aria-label="Rotate 90° clockwise"]')!;
+    await act(async () => { fieldInput("opacity").focus(); });
+    try {
+      await act(async () => {
+        window.dispatchEvent(new KeyboardEvent("keydown", { key: "z", metaKey: true, bubbles: true, cancelable: true }));
+        await Promise.resolve();
+      });
+      await vi.waitFor(() => expect(mocks.applyHistory).toHaveBeenCalledOnce());
+      expect(rotate.disabled).toBe(true);
+      await act(async () => {
+        rejectUndo?.(new Error("history failed"));
+        await Promise.resolve();
+      });
+      await vi.waitFor(() => expect(rotate.disabled).toBe(false));
+    } finally {
+      rejectUndo?.(new Error("test cleanup"));
+    }
+  });
+
   it("admits queued history before a direct workspace mutation", async () => {
     const actions: string[] = [];
     const enqueueMutation = serialMutationLane();
@@ -406,7 +492,8 @@ describe("an inspector field scrub", () => {
   it("does not run a queued history callback after the directory changes", async () => {
     useDesignWorkspaceUiStore.getState().bindDirectory("w", "design-a");
     await show();
-    fieldInput("opacity").focus();
+    const rotate = container.querySelector<HTMLButtonElement>('button[aria-label="Rotate 90° clockwise"]')!;
+    await act(async () => { fieldInput("opacity").focus(); });
     mocks.applyHistory.mockResolvedValue({ result: null });
     expect(isDesignHistoryFocusOwner("w", true)).toBe(true);
     await act(async () => {
@@ -415,6 +502,7 @@ describe("an inspector field scrub", () => {
       await Promise.resolve();
     });
     expect(mocks.applyHistory).not.toHaveBeenCalled();
+    expect(rotate.disabled).toBe(false);
     await act(async () => {
       window.dispatchEvent(new KeyboardEvent("keydown", {
         key: "z", metaKey: true, shiftKey: true, bubbles: true, cancelable: true,
