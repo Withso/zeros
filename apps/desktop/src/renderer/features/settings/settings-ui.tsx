@@ -1,16 +1,3 @@
-// ──────────────────────────────────────────────────────────
-// Settings UI primitives — one layout of grouped cards
-// ──────────────────────────────────────────────────────────
-//
-// The shared visual vocabulary for every settings panel (User + Repo):
-// rows in grouped cards — `bg1-bright`, a `border1` edge and dividers, 12px
-// corners and 12 × 14 rows — with 13/18 medium names, 12/16 `fg3` hints and
-// 28px controls right-aligned. Group titles are 13 medium `fg1` with an
-// optional 12 `fg3` description. Flat sections retired with this layout.
-//
-// Build these ONCE; every panel composes them so User and Repo scopes
-// read identically.
-// ──────────────────────────────────────────────────────────
 
 import React from "react";
 import { Lock, Plus } from "lucide-react";
@@ -21,11 +8,7 @@ import { Button } from "@/renderer/shared/ui/primitives/button";
 const NAME_CLS = "text-fg1 text-xs leading-4.5 font-medium";
 const HINT_CLS = "text-fg3 text-3xxs leading-4";
 
-// ── Section ──────────────────────────────────────────────
 
-/** A titled section: a 13 medium heading (with an optional one-line
- *  description and a right-aligned action) 8px above its body, which is
- *  usually a `SettingsList` card. */
 export function SettingsSection({
   title,
   description,
@@ -55,25 +38,13 @@ export function SettingsSection({
   );
 }
 
-/** The settings card: `--bg1-bright` fill (a step above bg1-highlight in
- *  dark, = bg2 in light) with a `--border1` edge and dividers, 12px corners,
- *  and 12 × 14 rows (`px-3.5` on the card, `[&>*]:py-3` on every row). Not
- *  `--bg3`: in light mode bg3 = bg1 = white and the card would vanish
- *  (check:ui guards this). Every `SettingsList` wears it. */
+// Use bg1-bright: bg3 matches the page background in light mode.
 export const SETTINGS_CARD_LIST_CLS =
   "bg-bg1-bright border-border1 divide-border1 rounded-[calc(var(--radius-lg)*1.5)] border px-3.5 [&>*]:py-3";
 
-/** 12px corners for the grouped card, DERIVED from the radius scale like
- *  menu-surface.ts's floating surfaces (1.5 × --radius-lg). Not
- *  `rounded-xl`: zeros-tokens.css resets `--radius-xl` to `initial` on
- *  purpose, so that class compiles to nothing (the card rendered with
- *  square corners, 2026-09-14). The grouped card is a larger surface than
- *  the 8px rows/chips inside it, hence the step up. */
+// Derive this radius from --radius-lg: our token reset removes rounded-xl.
 export const SETTINGS_GROUP_RADIUS = "rounded-[calc(var(--radius-lg)*1.5)]";
 
-/** Grouped settings card: an optional 13 medium `fg1` title and 12 `fg3`
- *  description 8px above the `SETTINGS_CARD_LIST_CLS` card. Groups are
- *  spaced 32px apart by the panel (`gap-8`). */
 export function SettingsGroup({
   title,
   description,
@@ -82,7 +53,6 @@ export function SettingsGroup({
   "aria-label": ariaLabel,
 }: {
   title?: React.ReactNode;
-  /** One short muted line under the heading (same 12px). */
   description?: React.ReactNode;
   children: React.ReactNode;
   className?: string;
@@ -101,8 +71,6 @@ export function SettingsGroup({
   );
 }
 
-/** A card of `SettingsRow` / `SettingsField` children separated by
- *  `border1` dividers. */
 export function SettingsList({
   children,
   className,
@@ -117,10 +85,7 @@ export function SettingsList({
   );
 }
 
-// ── Rows ─────────────────────────────────────────────────
 
-/** Label-left / control-right row. Optional hint sits under the label.
- *  Self-padded so dividers in a `SettingsList` breathe. */
 export function SettingsRow({
   label,
   hint,
@@ -133,11 +98,9 @@ export function SettingsRow({
   label?: React.ReactNode;
   hint?: React.ReactNode;
   htmlFor?: string;
-  /** An avatar or icon 12px before the label block. */
   leading?: React.ReactNode;
   children?: React.ReactNode;
   className?: string;
-  /** Vertical alignment of the control against the label block. */
   align?: "center" | "start";
 }) {
   const labelCls = NAME_CLS;
@@ -175,8 +138,6 @@ export function SettingsRow({
   );
 }
 
-/** Stacked field: label (+ optional hint) on top, full-width control below.
- *  For text inputs that need the row's full width. */
 export function SettingsField({
   label,
   hint,
@@ -203,16 +164,13 @@ export function SettingsField({
   );
 }
 
-/** A right-aligned Save row to close a section. */
 export function SettingsActions({ children }: { children: React.ReactNode }) {
   return (
     <div className="flex items-center justify-end gap-2 pt-1">{children}</div>
   );
 }
 
-/** The last row of a list card, adding an item: the whole 44px row is the
- *  target (the card's `[&>*]:py-3` and the button's border make 44), a 14px
- *  `fg3` plus and 13/18 `fg2` text that lifts to `fg1` on hover. */
+// Make the whole card row the add target, not just its label.
 export function SettingsAddRow({
   label,
   onClick,
@@ -235,8 +193,6 @@ export function SettingsAddRow({
   );
 }
 
-/** The one empty state for a section with nothing configured yet: one
- *  13/18 `fg2` line, with an optional 12 `fg3` hint. */
 export function SettingsEmpty({
   title,
   hint,
@@ -252,8 +208,6 @@ export function SettingsEmpty({
   );
 }
 
-/** An empty collection in its card: one line and the action that creates
- *  the first item. */
 export function SettingsEmptyCard({
   title,
   action,
@@ -274,12 +228,8 @@ export function SettingsEmptyCard({
   );
 }
 
-// ── Inheritance ──────────────────────────────────────────
 
-/** Mirrors the engine's SettingsLayerName (engine/settings/schema.ts) —
- *  including `team`, the cloud layer, which this union used to omit: a
- *  team-sourced value fell through SOURCE_LABEL to `undefined` and rendered
- *  a blank provenance chip. */
+// Keep this provenance union in sync with SettingsLayerName in engine/settings/schema.ts.
 export type SettingsSource =
   | "default"
   | "user"
@@ -289,9 +239,7 @@ export type SettingsSource =
   | "workspace-local"
   | "managed";
 
-/** True when a resolved leaf came from a weaker layer than the repo —
- *  i.e. the repo is inheriting it, not setting it. (repo / repo-local /
- *  workspace-local are overrides, not inherited.) */
+// Inherited means outside the repo override, not lower precedence: managed policy can win.
 export function isInheritedSource(source: SettingsSource | undefined): boolean {
   return (
     source === "user" ||
@@ -311,7 +259,6 @@ const SOURCE_LABEL: Record<SettingsSource, string> = {
   managed: "Managed",
 };
 
-/** A small provenance tag (e.g. "User", "Default") for a resolved value. */
 export function SourceTag({ source }: { source: SettingsSource | undefined }) {
   if (!source) return null;
   return (
@@ -321,9 +268,6 @@ export function SourceTag({ source }: { source: SettingsSource | undefined }) {
   );
 }
 
-/** A quiet group of values inherited from a weaker layer (typically User).
- *  Read-only by default; each child is a locked `InheritedRow`. Matches the
- *  "Inherited from User" pattern in the repo settings reference. */
 export function InheritedGroup({
   label = "Inherited from User",
   children,
@@ -342,8 +286,6 @@ export function InheritedGroup({
   );
 }
 
-/** One inherited (read-only) entry: a name, the effective value, and an
- *  Override affordance that copies it into the repo layer for editing. */
 export function InheritedRow({
   name,
   value,
@@ -368,8 +310,6 @@ export function InheritedRow({
   );
 }
 
-/** A subtle "Reset" link shown next to an overridden value to drop the repo
- *  key and fall back to the inherited one. */
 export function ResetToInherited({ onReset }: { onReset: () => void }) {
   return (
     <Button variant="ghost" size="compact" className="shrink-0" onClick={onReset}>

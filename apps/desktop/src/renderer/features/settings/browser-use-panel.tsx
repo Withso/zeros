@@ -103,8 +103,7 @@ export function BrowserUsePanel() {
 
 function OrganizationBrowserUsePanel({ organizationId }: { organizationId: string }) {
   const { workspace } = useActiveWorkspace();
-  // Ownership alone does not determine placement. Only the selected owner's
-  // confirmed local workspace may expose this device's browser controls.
+  // Only a confirmed local workspace of this organization can expose the Mac's browser controls.
   if (workspace?.organizationId === organizationId &&
       workspace.placement !== "cloud" && !isCloudWorkspace(workspace.path))
     return <LocalBrowserUsePanel />;
@@ -120,7 +119,7 @@ function OrganizationBrowserUsePanel({ organizationId }: { organizationId: strin
 function LocalBrowserUsePanel() {
   const resolved = useResolvedSettings();
   const layer = useSettingsLayer("user");
-  // Without the Zeros browser only Claude in Chrome remains.
+  // When the Zeros browser is unavailable, only the opt-in Claude in Chrome route remains.
   const zerosBrowser = useAgentControlFeatureActive("zerosBrowser");
   const [pending, setPending] = useState<PendingBrowserSettings>({});
   const sequenceRef = useRef(0);
@@ -142,11 +141,7 @@ function LocalBrowserUsePanel() {
   const managed = (key: BrowserBooleanSetting) =>
     browserSettingIsManaged(sources, key);
 
-  // A write updates the layer cache immediately, while the resolved cache is
-  // replaced by the following settings broadcast. Retain the optimistic value
-  // until a matching authoritative resolved object arrives (or managed policy
-  // wins). Serialized writes can still produce an older broadcast, so a newer
-  // optimistic value must not flicker back to that intermediate value.
+  // Resolve events can lag the write acknowledgement; do not discard the optimistic value on an intermediate event.
   useEffect(() => {
     setPending((current) => {
       let changed = false;

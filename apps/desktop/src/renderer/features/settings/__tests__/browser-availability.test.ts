@@ -89,7 +89,6 @@ describe("native browser availability rendering", () => {
     expect(html).toMatch(/aria-checked="true"[^>]*id="browser-use-enabled"/);
     expect(html).toMatch(/aria-checked="false"[^>]*id="browser-use-claude-enabled"/);
     expect(html).toMatch(/aria-checked="true"[^>]*id="browser-use-auto-open"/);
-    // One switch for every agent; no per-agent, approval or cursor rows.
     expect(html.match(/role="switch"/g)).toHaveLength(3);
     for (const retired of ["codex-enabled", "codex-native", "in-app-enabled", "show-agent-cursor"]) {
       expect(html).not.toContain(`id="browser-use-${retired}"`);

@@ -1,13 +1,3 @@
-// ──────────────────────────────────────────────────────────
-// Settings foundation — renderer hooks (bridge-backed)
-// ──────────────────────────────────────────────────────────
-//
-// The renderer never touches settings files: it reads resolved settings (with
-// per-leaf provenance) and raw layer documents over the bridge, and patches a
-// layer through `settings.write`. Live across devices: any engine-side change
-// (another device's write, an external editor, git checkout) arrives as a
-// DB_CHANGED { kinds: ["settings"] } broadcast → hooks refetch.
-// ──────────────────────────────────────────────────────────
 
 import {
   useCallback,
@@ -40,19 +30,14 @@ import {
 import { useReadRecovery } from "../../state/use-read-recovery";
 import { useDocumentActive } from "../../state/use-document-active";
 
-// Settings documents are shared server state, not component state. A bounded
-// renderer cache makes repo/section switches read an already-complete immutable
-// snapshot while a DB_CHANGED broadcast revalidates it in the background.
+// Reuse exact-key snapshots across panels while engine broadcasts revalidate them.
 const resolvedSettingsCache = new KeyedAsyncCache<ResolvedSettingsWire>(48);
 const settingsLayerCache = new KeyedAsyncCache<SettingsReadWire>(48);
 const SETTINGS_CACHE_MAX_AGE_MS = 30_000;
 const MAX_BOOT_PREFETCH_REPOS = 8;
 const scheduledSettingsRefreshes = new Map<string, { refresh: () => void }>();
 
-/** Coalesce the synchronous fan-out from retained settings panels. Every
- * subscriber first marks its exact key stale; one microtask then performs the
- * read. A second DB event during that read is still observed by
- * KeyedAsyncCache and becomes one queued generation. */
+// Coalesce one event's reads after synchronous invalidation; a later event during I/O still queues another generation.
 function scheduleSettingsRefresh(id: string, refresh: () => void): void {
   const queued = scheduledSettingsRefreshes.get(id);
   if (queued) {
@@ -75,12 +60,10 @@ function settingsLayerKey(layerName: SettingsLayer, repoRoot?: string): string {
   return JSON.stringify([layerName, repoRoot ?? null]);
 }
 
-/** Publish a native transactional save to the same keyed settings readers. */
 export function primeSettingsLayer(layer: SettingsLayer, repoRoot: string | undefined, result: Pick<SettingsReadWire, "path" | "doc">): void {
   settingsLayerCache.setData(settingsLayerKey(layer, repoRoot), { ...result, layer, exists: true });
 }
 
-/** Bind a cache key to React with stable, immutable snapshots. */
 function useSettingsSnapshot<T>(
   cache: KeyedAsyncCache<T>,
   key: string,
@@ -113,16 +96,12 @@ function prefetchSettingsDocuments(
     .catch(() => {});
 }
 
-/** Interaction-intent prefetch for repository rows and menus. */
 export function prefetchSettingsForRepo(repoRoot: string): void {
   const bridge = getActiveBridge();
   if (!repoRoot || !bridge || bridge.status !== "connected") return;
   prefetchSettingsDocuments(bridge, repoRoot);
 }
 
-/** Warm the small settings documents that back global and repository forms.
- * Called once from the always-mounted app sidebar after project hydration so a
- * first Settings/repo-section switch can render from a complete snapshot. */
 export function usePrefetchSettings(repoRoots: readonly string[]): void {
   useEffect(() => {
     let cancelWarm = () => {};
@@ -132,10 +111,8 @@ export function usePrefetchSettings(repoRoots: readonly string[]): void {
         initial,
         SETTINGS_CACHE_MAX_AGE_MS,
       );
-      // Global settings are a common first destination and only two small reads.
       prefetchSettingsDocuments(bridge, undefined, maxAgeMs);
-      // Repository warming is useful but nonessential. Keep it out of the bridge
-      // connection's critical path so workspace/chat hydration wins cold start.
+      // Warm repositories off the connection's critical path so workspace and chat hydration go first.
       const roots = [...new Set(repoRoots)].slice(0, MAX_BOOT_PREFETCH_REPOS);
       const warmRepos = () => {
         for (const root of roots) {
@@ -157,9 +134,7 @@ export function usePrefetchSettings(repoRoots: readonly string[]): void {
   }, [repoRoots]);
 }
 
-/** Invoke `onChange` on every engine settings broadcast (another device's
- *  write, an external editor, a git checkout). Shared by the hooks below and
- *  by settings-derived caches (e.g. the repo page's branch catalog). */
+// Settings broadcasts include writes from other clients, external edits, and Git checkouts.
 export function useSettingsChanged(onChange: () => void): void {
   const bridge = useBridge();
   useEffect(() => {
@@ -180,9 +155,7 @@ export interface UseResolvedSettings {
   refresh: () => void;
 }
 
-/** The effective settings tree (+ provenance) for the user scope, or for one
- *  repo when `repoRoot` is given. Pass `mainRepoRoot` to resolve a worktree's
- *  repository view. Linked worktrees share the main checkout's personal file. */
+// Pass the main checkout root so linked worktrees share its personal settings file.
 export function useResolvedSettings(
   repoRoot?: string,
   mainRepoRoot?: string,
@@ -194,8 +167,7 @@ export function useResolvedSettings(
   const key = resolvedSettingsKey(repoRoot, mainRepoRoot);
   const snapshot = useSettingsSnapshot(resolvedSettingsCache, key);
 
-  // A manual or DB-triggered refresh bypasses freshness but never clears a
-  // resolved document while the engine builds its replacement.
+  // A forced refresh must not clear the last confirmed document.
   const refresh = useCallback(() => {
     if (!enabled || !bridge || bridgeStatus !== "connected") return;
     return resolvedSettingsCache
@@ -207,8 +179,6 @@ export function useResolvedSettings(
       });
   }, [enabled, bridge, bridgeStatus, key, repoRoot, mainRepoRoot]);
 
-  // All retained panels for this exact key hear the same broadcast. Mark the
-  // key stale synchronously, then coalesce their reads into one microtask.
   const refreshFromBroadcast = useCallback(() => {
     if (!enabled || !bridge || bridgeStatus !== "connected") return;
     resolvedSettingsCache.invalidate(key);
@@ -267,20 +237,12 @@ export interface UseSettingsLayer {
   /** Raw failure for write safety; presentation may still be recovering. */
   readError: string | null;
   refresh: () => void;
-  /** Patch this layer (`null` leaf deletes a key). Resolves once persisted; the
-   *  refreshed LAYER document is applied here, and the refreshed RESOLVED tree
-   *  follows a moment later over the settings-changed broadcast, which the
-   *  engine now echoes back to the writer too (dbChangedIncludesOriginator).
-   *  A caller holding optimistic state should therefore yield it when a NEW
-   *  resolved snapshot arrives, not when this promise settles. */
+  // Null deletes a leaf. The ACK updates the raw layer; yield optimistic state only to a newer resolved snapshot after the writer's echo (dbChangedIncludesOriginator).
   write: (patch: SettingsDoc) => Promise<void>;
-  /** Overwrite this layer's file with RAW TOML text (the "Edit settings.toml"
-   *  editor). Validated server-side; rejects unparseable TOML. Desktop-only. */
+  // Raw TOML is desktop-only and must parse before the engine writes it.
   writeRaw: (text: string) => Promise<void>;
 }
 
-/** One raw layer document (what the file actually says — not the merged
- *  view), plus a patch-writer. */
 export function useSettingsLayer(
   layerName: SettingsLayer,
   repoRoot?: string,
@@ -291,8 +253,6 @@ export function useSettingsLayer(
   const key = settingsLayerKey(layerName, repoRoot);
   const snapshot = useSettingsSnapshot(settingsLayerCache, key);
 
-  // Shared forced refresh: every mounted consumer observes one replacement
-  // document and duplicate DB_CHANGED listeners coalesce onto one request.
   const refresh = useCallback(() => {
     if (!bridge || bridgeStatus !== "connected") return;
     return settingsLayerCache
@@ -363,8 +323,7 @@ export function useSettingsLayer(
         text,
         repoRoot,
       );
-      // Carry the just-written text so the editor's saved baseline matches (no
-      // false "dirty"); the broadcast refresh re-reads the same bytes.
+      // Keep the exact saved text so the editor does not mark it dirty before revalidation.
       settingsLayerCache.setData(key, {
         layer: layerName,
         path: result.path,
@@ -396,20 +355,12 @@ export function useSettingsLayer(
   };
 }
 
-/** A draft string seeded from a saved value that re-syncs ONLY when the user
- *  hasn't diverged — so a background settings change (another device, an
- *  external editor, an agent) never clobbers an unsaved edit. */
+// Refresh only untouched drafts; a background read must not replace unsaved edits.
 export function useSyncedDraft(saved: string): [string, (v: string) => void] {
   const [draft, setDraft] = useState(saved);
   const lastSaved = useRef(saved);
   useEffect(() => {
-    // Capture the PREVIOUS synced value before advancing the ref. setDraft's
-    // functional updater runs DEFERRED (React calls it during the next render),
-    // while `lastSaved.current = saved` runs synchronously right here — so if the
-    // updater read `lastSaved.current` directly it would always see the
-    // already-advanced value and never adopt (the bug that left the raw editor
-    // blank: saved="<987 chars>" but draft=""). Compare the live draft against
-    // this captured `prev` instead — that's the correct "user hasn't diverged" test.
+    // Capture the prior saved value before the deferred updater can observe the advanced ref.
     const prev = lastSaved.current;
     lastSaved.current = saved;
     setDraft((d) => (d === prev ? saved : d));

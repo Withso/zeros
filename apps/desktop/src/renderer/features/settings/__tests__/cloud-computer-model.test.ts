@@ -42,7 +42,6 @@ describe("Cloud Computer model", () => {
     const added = [...live, { repository: "withso/zeros-dev-fixture" }];
     expect(computerChanges(added, live)).toEqual(["repositories"]);
     expect(describeChanges(computerChanges(added, live))).toBe("Changed: repositories");
-    // Removal only happens when the admin removes it, and it is unbuilt too.
     expect(computerChanges([], live)).toEqual(["repositories"]);
     expect(computerChanges([{ repository: "iamarunrk/0kit", ref: "dev", setup: "make" }], live)).toEqual(["branches", "setup"]);
     expect(computerChanges([{ repository: "b/b" }, { repository: "a/a" }], [{ repository: "a/a" }, { repository: "b/b" }])).toEqual([]);
@@ -110,7 +109,6 @@ describe("Cloud Computer recipe saves", () => {
       expect(queue.revision()).toBe(3);
       await queue.settle();
       expect(save).toHaveBeenCalledExactlyOnceWith("typed", 3);
-      // Idle again: the next edit starts from what the view now shows.
       expect(queue.revision()).toBe(9);
     } finally { vi.useRealTimers(); }
   });
@@ -143,7 +141,6 @@ describe("Cloud Computer recipe saves", () => {
     queue.push("edited");
     await expect(queue.settle()).rejects.toThrow("offline");
     expect(onError).toHaveBeenCalledOnce();
-    // Reported once: the server's version is what is shown and may be built.
     await expect(queue.settle()).resolves.toBeUndefined();
   });
 
