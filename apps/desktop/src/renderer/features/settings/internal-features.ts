@@ -3,60 +3,6 @@ import {
   writePreferenceCache,
   subscribePreferenceCache,
 } from "../../platform/personal-preferences";
-// ──────────────────────────────────────────────────────────
-// Internal features — staff and native Local development feature flags
-// ──────────────────────────────────────────────────────────
-//
-// NOT experimental features. Experimental (experimental-features.ts) is
-// visible to every user as an opt-in; Internal is invisible to everyone
-// except accounts whose database row carries a `developer` or `platform_owner`
-// role, or the trusted account-free native Local development launch. These
-// features may never ship to users — they exist for maintainers to debug/dogfood the app
-// (Settings → Internal, gated in settings-page.tsx `availableSections`).
-//
-// Who counts as internal comes from the DATABASE: `users.staff_role IN
-// ('developer', 'platform_owner')`. The deprecated `support_admin` role is
-// retained only for serialized compatibility and must not expose engineering
-// surfaces.
-// surfaced on `GET /v1/me` and cached by the team store. It used to be a
-// build-time email allowlist (`VITE_INTERNAL_USER_EMAILS`), which was wrong
-// in three ways: Vite inlines VITE_* into the renderer bundle, so the
-// maintainer addresses were readable by anyone who unzipped app.asar from a
-// public build; changing who was internal meant a full rebuild and
-// re-release; and a build that forgot the secret silently lost the tab.
-// A SQL UPDATE now does it, effective on the acting user's next request.
-//
-// Non-negotiable rules:
-//   1. Every runtime surface gates on `useInternalFeatureActive(...)` /
-//      `isInternalFeatureActive(...)` — staff AND flag — never on the raw
-//      flag alone. localStorage is user-editable; the staff check on top
-//      means a forged flag still does nothing for an ordinary account.
-//   2. No discoverability leaks: internal features never appear in the
-//      ⌥⌘/ shortcuts catalog, menus, tooltips, or any surface a
-//      non-internal user can see.
-//   3. The role is resolved SERVER-side from Postgres against the verified
-//      WorkOS token (apps/control-plane/src/auth.ts `ensureUser` runs per request) and
-//      is never read from a JWT claim, so revoking staff takes effect
-//      immediately rather than at token expiry. Outside native Local development,
-//      signed out, control plane
-//      unconfigured, or fetch not yet landed ⇒ null ⇒ everything internal
-//      is off. Fail-closed in every direction.
-//   4. This is a shipped-app rollout gate, not an authority boundary.
-//      `copyLogs` exposes only already-scrubbed local logs. Any future internal
-//      feature that unlocks server data or server-side power must also call
-//      backend `requireStaff` on the endpoint behind it.
-//
-// Per-app scoping comes free: flags persist to localStorage, and each
-// channel (Zeros / Zeros Alpha / Zeros Beta / Zeros Dev, plus per-worktree
-// dev instances) runs with its own userData dir → its own localStorage
-// (apps/desktop/src/engine/db/paths.ts). Enabling a flag in Beta therefore never
-// affects Production, and vice versa — exactly the per-app control the
-// Internal tab promises. The staff role, by contrast, is one row in one
-// database and is therefore the same in every channel.
-//
-// Store mechanics mirror experimental-features.ts: module-level snapshot
-// + useSyncExternalStore so a toggle propagates to mounted consumers in
-// the same render cycle, plus a "storage" listener for multi-window sync.
 
 import { useCallback, useSyncExternalStore } from "react";
 import { isLocalDevelopment } from "../../platform/runtime";
@@ -67,25 +13,14 @@ import {
 
 import { getTeamStoreState, useTeams } from "../team/team-store";
 
-// ── Who counts as internal ──────────────────────────────
-
-/** True for trusted native Local development or a cached `/v1/me` staff role. Synchronous read for
- *  non-React call sites; the store is cleared on sign-out, so this cannot
- *  return account A's answer to account B.
- *
- *  Hosted modes return false in every unresolved state — signed out, control plane unconfigured,
- *  first fetch still in flight — because "not yet known" must behave as
- *  "not internal", never the reverse. */
+// Use the database-backed /v1/me role, not a JWT claim; unresolved accounts fail closed.
+// support_admin is a serialized legacy role, not engineering access.
 export function isInternalUser(): boolean {
   if (isLocalDevelopment()) return true;
   const role = getTeamStoreState().me?.user.staffRole;
   return role === "developer" || role === "platform_owner";
 }
 
-/** Hook: is the signed-in user staff? Gates the Internal settings tab and
- *  composes into `useInternalFeatureActive`. Subscribes to the team store, so
- *  the tab appears/disappears as the role resolves or the account changes.
- *  `useTeams` is single-flight, so calling it here costs no extra request. */
 export function useIsInternalUser(): boolean {
   const { me } = useTeams();
   return (
@@ -95,27 +30,15 @@ export function useIsInternalUser(): boolean {
   );
 }
 
-// ── The flags ───────────────────────────────────────────
-
-/** The set of internal feature flags.
- *  - `copyLogs` — ⇧⌘L copies the scrubbed recent-log tail (the exact
- *    bytes a feedback submission shares) to the clipboard.
- *  - `resourceSummary` — live app memory and the resource inspector.
- *  - `designGpuCanvas` — the recorded GPU Design canvas: Local engines that
- *    record frames as Skia pictures draw them with CanvasKit. Off until a
- *    staff member turns it on.
- *  - `releaseCandidates` — the Production app follows the rolling `rc` feed,
- *    where each release is published before everyone gets it
- *    (release-candidates-sync.ts reports the effective value to main).
- *  - Agent control features while their rollout stage is `internal`
- *    (agent-control-rollout.ts). */
 export type InternalFeature =
+  // Copy Logs may expose only the same scrubbed log tail used by feedback.
   | "copyLogs"
   | "resourceSummary"
   | "designGpuCanvas"
   | "releaseCandidates"
   | AgentControlFeature;
 
+// This persisted key also identifies the preference in the shared cache.
 const STORAGE_KEY = "zeros.internalFeatures";
 
 // A stored retired key must never read as on.
@@ -126,7 +49,6 @@ const KNOWN: ReadonlySet<string> = new Set<InternalFeature>([
   "releaseCandidates",
   ...AGENT_CONTROL_FEATURES,
 ]);
-// Staff dogfood these unless they turn them off.
 const ON_BY_DEFAULT: ReadonlySet<string> = new Set<InternalFeature>([
   "copyLogs",
   "resourceSummary",
@@ -163,7 +85,6 @@ function writePersisted(next: PersistedShape): void {
   }
 }
 
-// ── Shared module-level store ───────────────────────────
 let current: PersistedShape = readPersisted();
 const listeners = new Set<() => void>();
 
@@ -182,15 +103,11 @@ function getSnapshot(): PersistedShape {
   return current;
 }
 
-/** Read the RAW flag synchronously. UI-only (the Internal
- *  panel's switches); runtime behavior must use `isInternalFeatureActive`
- *  so the allowlist is enforced. */
+/** The stored flag is editable locally; use the effective gate for runtime access. */
 export function isInternalFeatureEnabled(feature: InternalFeature): boolean {
   return flagOn(current, feature);
 }
 
-/** Flip a flag and notify every subscriber. Always swaps the snapshot
- *  reference so useSyncExternalStore consumers re-render. */
 export function setInternalFeatureEnabled(
   feature: InternalFeature,
   on: boolean,
@@ -200,16 +117,12 @@ export function setInternalFeatureEnabled(
   emit();
 }
 
-/** The effective gate for non-React call sites: staff AND flag on. Reads the
- *  role from the team store itself rather than taking it as an argument — the
- *  old signature took the session email, which invited exactly the bug it
- *  warned about (a caller caching a stale identity). */
+// Read the current role here so callers cannot supply a stale account.
 export function isInternalFeatureActive(feature: InternalFeature): boolean {
   return isInternalUser() && isInternalFeatureEnabled(feature);
 }
 
-// Cross-window sync — Electron devtools-in-a-separate-window and any
-// future multi-window setup (mirrors experimental-features.ts).
+// Windows share persisted flags but not in-memory snapshots.
 if (typeof window !== "undefined") {
   window.addEventListener("storage", (e) => {
     if (e.key !== STORAGE_KEY) return;
@@ -218,9 +131,7 @@ if (typeof window !== "undefined") {
   });
 }
 
-/** Hook: `[on, setOn]` for one internal feature's RAW flag. For the
- *  Internal panel's switches only — runtime consumers gate on
- *  `useInternalFeatureActive` instead. */
+/** Bind the switch here; runtime consumers must use the effective gate. */
 export function useInternalFeature(
   feature: InternalFeature,
 ): [boolean, (on: boolean) => void] {
@@ -233,10 +144,7 @@ export function useInternalFeature(
   return [on, set];
 }
 
-/** Hook: the EFFECTIVE gate — database-backed staff account AND flag on. This is
- *  the only sanctioned way to enable an internal feature's runtime
- *  surface (hotkeys, panels, commands). Reacts to both sign-in/out and
- *  flag flips. */
+// Gate discoverability and execution here; privileged endpoints must still require staff.
 export function useInternalFeatureActive(feature: InternalFeature): boolean {
   const internalUser = useIsInternalUser();
   const [on] = useInternalFeature(feature);

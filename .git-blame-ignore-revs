@@ -11,3 +11,5 @@ f81070b3829d85f8c208d08101f7c41ef02745f1 # Trim narration from eleven Design, ag
 18bf6455657f12f36996318be1494be747b0ca0a # docs(cloud-worker): condense provider and replay comments (#784)
 9edaa78bb76891b19986fd168e597dee9cb19d31 # docs(control-plane): keep comments focused on invariants (#786)
 64cac84c829b7b8e2a4e8ed13106a8afab64301b # docs(scripts): keep qualification comments focused (#787)
+95de872941748f6d4dd14e6ed47df6c20d8a73fb # Trim narration in Git Defaults settings (#1168)
+fbb41482e3b95246228ba6437d8fbbc265648ee2 # Trim narration in Settings routing and terminal profiles (#1169)
