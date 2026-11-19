@@ -383,6 +383,7 @@ describe("layer states in Chromium", () => {
     try {
       expect(((await request(scoped, "getSnapshot", {})).result as { frame: DesignRuntimeNodeDetails }).frame.oid).toBe("shell");
       await hold(scoped, "shell", "hover", "root");
+      expect((await details(scoped, "shell")).authoredStyles?.["background-color"]).toMatchObject({ selector: ".shell:hover", state: "hover" });
       const taken = (await request(scoped, "getSnapshot", {})).result as { frame: DesignRuntimeNodeDetails };
       expect(taken.frame.heldState).toBeUndefined();
       expect(taken.frame.styles.backgroundColor).toBe("rgb(0, 0, 128)");
@@ -392,6 +393,8 @@ describe("layer states in Chromium", () => {
       const after = await details(scoped, "shell");
       expect(after.heldState).toBe("hover");
       expect(after.authoredStyles?.["background-color"]).toMatchObject({ selector: ".shell:hover", state: "hover" });
+      await request(scoped, "getSnapshot", {});
+      expect((await details(scoped, "shell")).authoredStyles?.["background-color"]).toMatchObject({ selector: ".shell:hover", state: "hover" });
       // The snapshot an observed change publishes is Default too.
       await events(scoped);
       await scoped.evaluate(() => document.querySelector('[data-oid="copy"]')!.textContent = "Changed");

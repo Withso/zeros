@@ -3340,6 +3340,8 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   function withoutHeldState(work) {
     var held = heldState;
     if (!held) return work();
+    var heldCascadeRuleIndex = cascadeRuleIndex;
+    cascadeRuleIndex = null;
     // Each switch also cancels the transition it would start, so the live
     // values the capture copies are Default's, and the held ones return at once.
     withoutObservedMutations(function () {
@@ -3356,6 +3358,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       return work();
     } finally {
       heldStateAside = false;
+      cascadeRuleIndex = heldState === held ? heldCascadeRuleIndex : null;
       if (heldState === held) {
         withoutObservedMutations(function () {
           held.style.disabled = false;
