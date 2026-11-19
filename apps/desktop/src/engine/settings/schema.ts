@@ -620,7 +620,7 @@ export type SettingsLayerName =
   | "workspace-local"
   | "managed";
 
-/** Team and repository layers cannot set these personal keys, including agent credentials, executables and gateways. */
+/** Team and shared repository layers cannot set these personal keys, including agent credentials, executables and gateways; repo-local may still set `workspaces.path`. */
 export const USER_ONLY_KEYS = [
   "preferences",
   "preferences_version",
