@@ -1,9 +1,3 @@
-// Settings → Providers: one tab per coding agent with a single effective auth
-// method. Writes `provider-prefs:<agentId>` (provider-prefs.ts) and the
-// keychain API keys (platform/secrets.ts); reads the live registry over the
-// bridge. CLI vs API key only changes env injection at spawn; the engine runs
-// the same headless subprocess either way.
-
 import React, {
   useCallback,
   useEffect,
@@ -97,22 +91,11 @@ import {
   type ProviderPrefs,
 } from "./provider-prefs";
 
-// ──────────────────────────────────────────────────────────
-// Per-agent vendor enrichment for the API-key path. The settings
-// panel only needs the vendor/env-var/keychain bits (it does not
-// need a full auth React surface).
-// ──────────────────────────────────────────────────────────
-
 interface ProviderVendorConfig {
-  /** Display name, e.g. "Anthropic". */
   vendor: string;
-  /** Env var the CLI reads at spawn time. */
   envVar: string;
-  /** Keychain slot from SECRET_ACCOUNTS. */
   secretAccount: string;
-  /** Where the user gets their key. */
   consoleUrl: string;
-  /** Optional gateway base URL env var (Claude only today). */
   gatewayBaseUrlVar?: string;
 }
 
@@ -130,7 +113,6 @@ const PROVIDER_VENDOR_CONFIG: Record<string, ProviderVendorConfig> = {
     secretAccount: SECRET_ACCOUNTS.OPENAI_API_KEY,
     consoleUrl: "https://platform.openai.com/api-keys",
   },
-  // Cursor supports browser subscription sign-in and a manually supplied key.
   cursor: {
     vendor: "Cursor",
     envVar: "CURSOR_API_KEY",
@@ -139,20 +121,11 @@ const PROVIDER_VENDOR_CONFIG: Record<string, ProviderVendorConfig> = {
   },
 };
 
-// Providers with an API-key option alongside subscription sign-in.
 const API_KEY_PROVIDERS = new Set(Object.keys(PROVIDER_VENDOR_CONFIG));
 
-// Tab ordering — Claude + Codex first (the two API-key candidates), then Cursor.
 const PROVIDER_ORDER = ["claude", "codex", "cursor"] as const;
 
-/** What an empty Executable path resolves to, per agent — mirrors each
- *  adapter's REAL resolution so the hint never implies a $PATH lookup that
- *  doesn't happen:
- *    • claude → the Agent SDK's bundled, pinned claude-code CLI (NOT $PATH).
- *    • codex  → the bundled @openai/codex wrapper, then `codex` on $PATH.
- *  (Cursor runs in-process on the bundled @cursor/sdk and shows no Executable
- *  path field at all.) Keep in sync with claude-sdk/adapter.ts and
- *  codex/binary-resolver.ts. */
+// Match bundled executable selection in claude-sdk/adapter.ts and codex/binary-resolver.ts.
 function ExecutablePathHint({
   agentId,
   name,
@@ -170,28 +143,16 @@ function ExecutablePathHint({
   return <>Blank uses the bundled {name}.</>;
 }
 
-/** Each agent's own native config file — we link out to it (Finder / copy path)
- *  instead of duplicating the agent's settings in our UI. Claude reads tool
- *  permissions / hooks / env from settings.json; Codex reads model / sandbox /
- *  MCP from config.toml. Cursor has no user-editable CLI config (bundled SDK),
- *  so it has no entry. Keep the paths in sync with electron's AGENT_CONFIG_FILES
- *  (ipc/commands/shell.ts). */
+// Keep these paths aligned with Electron's AGENT_CONFIG_FILES.
 const AGENT_CONFIG_FILE: Record<string, { title: string; path: string }> = {
   claude: { title: "Claude settings", path: "~/.claude/settings.json" },
   codex: { title: "Codex config", path: "~/.codex/config.toml" },
 };
 
-/** A card linking to an agent's own config file: reveal it in Finder (created
- *  if missing) or copy the path. Renders nothing for agents without an
- *  AGENT_CONFIG_FILE entry (e.g. Cursor). */
 function AgentConfigCard({ agentId }: { agentId: string }) {
   const cfg = AGENT_CONFIG_FILE[agentId];
-  // Real Finder icon (extracted by open-apps detection) — the same mark the
-  // workspace header's "Open in" menu shows. Falls back to a folder glyph
-  // only while detection hasn't run.
   const finderApp = findOpenApp(useDetectedOpenApps(), FINDER_APP_ID)!;
-  // Cold cache (fresh profile / settings opened before any workspace): probe
-  // once so the icon resolves instead of sitting on the fallback forever.
+  // Preload Finder detection if Settings opens before any workspace has warmed it.
   useEffect(() => {
     if (getDetectedOpenApps() === null) void refreshDetectedOpenApps();
   }, []);
@@ -204,9 +165,6 @@ function AgentConfigCard({ agentId }: { agentId: string }) {
       </div>
       <DropdownMenu>
         <DropdownMenuTrigger
-          // Same chrome as every Select trigger (fit-to-text, 13px label,
-          // 14px chevron) so this action menu reads as "a dropdown", not a
-          // button that happens to open one.
           className={selectTriggerClassName("fit", "text-fg1")}
         >
           Open in
@@ -242,10 +200,6 @@ function AgentConfigCard({ agentId }: { agentId: string }) {
   );
 }
 
-// ──────────────────────────────────────────────────────────
-// Top-level panel
-// ──────────────────────────────────────────────────────────
-
 const PROVIDERS_ACTIVE_TAB_KEY = "providers:active-tab";
 
 function loadInitialProviderTab(): string {
@@ -274,9 +228,6 @@ function LocalProvidersPanel({ surfaceActive }: { surfaceActive: boolean }) {
   const bridge = useBridge();
   const agents = useAgentsSnapshot();
   const visible = useDocumentActive(surfaceActive);
-  // Persisted across reloads — Cmd+R on the Codex tab lands you on
-  // Codex, not Claude. Type-guarded on read so a stale id from a
-  // removed provider can never break the panel.
   const [activeId, setActiveIdState] = useState<string>(loadInitialProviderTab);
   const setActiveId = (next: string) => {
     setActiveIdState(next);
@@ -295,17 +246,13 @@ function LocalProvidersPanel({ surfaceActive }: { surfaceActive: boolean }) {
     [bridge],
   );
 
-  // Read listAgents through a ref so the mount effect never re-binds on identity
-  // changes; re-binding on every bridge transition and HMR remount kept clearing
-  // its timer before it fired.
+  // Follow bridge changes without restarting the focus debounce.
   const listAgentsRef = useRef(listAgents);
   useEffect(() => {
     listAgentsRef.current = listAgents;
   }, [listAgents]);
 
-  // A sibling app can change shared credentials while Settings is hidden or
-  // another owner is selected. Revalidate on reveal, retaining the confirmed
-  // snapshot while the shared refresh waits for any older in-flight read.
+  // A sibling app may change shared credentials while this panel is hidden.
   useEffect(() => {
     if (!visible) return;
     void refreshAgents(listAgentsRef.current).catch(() => {
@@ -321,10 +268,7 @@ function LocalProvidersPanel({ surfaceActive }: { surfaceActive: boolean }) {
     });
   }, [visible]);
 
-  // Window-focus refresh — so coming back from a Terminal sign-in
-  // flips the dot without a manual click. Debounced 300 ms so rapid
-  // focus/blur (alt-tab churn) doesn't fan out probes. Empty deps so
-  // the listener attaches once; we read the latest callback via ref.
+  // Refresh on focus to catch sign-ins completed in an external terminal.
   useEffect(() => {
     if (!visible) return;
     let t: number | null = null;
@@ -344,9 +288,7 @@ function LocalProvidersPanel({ surfaceActive }: { surfaceActive: boolean }) {
     };
   }, [visible]);
 
-  // Refetch on a disconnected → connected transition: a mount-time fetch against
-  // a booting or respawning engine rejects, and nothing else retries it, leaving
-  // "Loading providers…" forever.
+  // A mount-time list can fail before the bridge connects; retry when it becomes reachable.
   const bridgeStatus = useBridgeStatus();
   const lastBridgeStatusRef = useRef(bridgeStatus);
   useEffect(() => {
@@ -359,10 +301,7 @@ function LocalProvidersPanel({ surfaceActive }: { surfaceActive: boolean }) {
     }
   }, [bridgeStatus, visible]);
 
-  // Also reload on ENGINE_READY: after a respawn the socket can connect before
-  // the new engine serves AGENT_LIST_AGENTS, and the status then stays
-  // "connected", so nothing else would retry. No invalidation, so a fresh cache
-  // makes this a no-op.
+  // A respawn can connect before listing works; ENGINE_READY retries without invalidating fresh data.
   useEffect(() => {
     if (!visible || !bridge) return;
     return bridge.on("ENGINE_READY", () => {
@@ -382,9 +321,6 @@ function LocalProvidersPanel({ surfaceActive }: { surfaceActive: boolean }) {
 
   const active = ordered.find((a) => a.id === activeId) ?? ordered[0];
 
-  // Per-provider Refresh re-runs the engine probe sweep (install / auth /
-  // version — and, once wired, the account fetch) for every provider in one
-  // round-trip; the snapshot update re-renders the active card.
   const handleRefresh = useCallback(
     () => refreshAgents(listAgents),
     [listAgents],
@@ -417,11 +353,6 @@ function LocalProvidersPanel({ surfaceActive }: { surfaceActive: boolean }) {
   );
 }
 
-// ──────────────────────────────────────────────────────────
-// Tab strip
-// ──────────────────────────────────────────────────────────
-
-/** The shared segmented control: a 28px track with 24px tabs. */
 function ProviderTabs({
   providers,
 }: {
@@ -441,34 +372,21 @@ function ProviderTabs({
   );
 }
 
-// ──────────────────────────────────────────────────────────
-// One provider card
-// ──────────────────────────────────────────────────────────
-
 function ProviderCard({
   agent,
   surfaceActive,
   onRefresh,
 }: {
   agent: BridgeRegistryAgent;
-  /** False while Settings retains this provider form off-screen. */
   surfaceActive: boolean;
-  /** Re-runs the engine probe sweep for all providers. Wired to the
-   *  per-provider Refresh button in the connection block. */
   onRefresh: () => Promise<unknown>;
 }) {
-  // For the save-time key validation round-trip (AGENT_VALIDATE_KEY).
   const bridge = useBridge();
   const vendor = PROVIDER_VENDOR_CONFIG[agent.id];
   const supportsApiKey = API_KEY_PROVIDERS.has(agent.id);
-  // Authentication capability is separate from executable customization.
-  // Cursor uses the bundled SDK host; a custom CLI path has no effect.
+  // Cursor runs in the bundled SDK, so a custom CLI path has no effect.
   const executableInert = agent.id === "cursor";
-  // Whether this agent shows a gateway base-URL override (Claude only today).
   const showGateway = agent.id === "claude" && !!vendor?.gatewayBaseUrlVar;
-  // Does the "Provider config" block have at least one control? Cursor (bundled
-  // SDK: no spawnable CLI, no gateway, no native config file) has none, so we
-  // skip the wrapper entirely rather than render an empty padded container.
   const hasProviderConfig =
     !executableInert || showGateway || !!AGENT_CONFIG_FILE[agent.id];
 
@@ -579,10 +497,7 @@ function ProviderCard({
     [agent.id, prefs],
   );
 
-  // Probe the keychain slot for PRESENCE only. The saved key is never
-  // hydrated back into the input — that put the plaintext secret in the DOM
-  // (readable via DevTools / a shoulder-surf of the password reveal) for no
-  // benefit. The input is replace-only: blank until the user types a new key.
+  // Check presence only; never put a previously saved API key back in the DOM.
   useEffect(() => {
     if (!keySurfaceActive) return;
     if (!supportsApiKey || !vendor) {
@@ -653,12 +568,10 @@ function ProviderCard({
   const handleSaveApiKey = async () => {
     if (!vendor) return;
     const trimmed = apiKey.trim();
-    if (!trimmed) return; // Save is disabled when blank; Remove deletes.
+    if (!trimmed) return;
     setSavingApiKey(true);
     try {
-      // Validate the key with one cheap authenticated call before saving: a
-      // definitive 401/403 blocks the save with the provider's error; an inconclusive
-      // result (no validator, engine unreachable) saves normally.
+      // Reject known invalid keys; keychain saves still work if validation is unavailable.
       if (bridge) {
         try {
           const resp = await bridge.request<AgentKeyValidatedMessage>(
@@ -681,10 +594,7 @@ function ProviderCard({
       setKeyConfigured(true);
       setApiKey("");
       toast.success(`${vendor.vendor} API key saved to the keychain`);
-      // Re-probe the registry so the agent flips to authenticated/runnable
-      // immediately — without this the composer kept gating sends on the
-      // STALE snapshot ("Sign in required") until the next window-focus
-      // refresh.
+      // Refresh now so the composer doesn't gate sends on the pre-save auth state.
       void onRefresh().catch(() => {});
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Keychain save failed");
@@ -737,10 +647,6 @@ function ProviderCard({
     }
   };
 
-  // Install and login run chained with `&&` in one external Terminal session, so
-  // login runs only after a successful install with the new binary on PATH. Not
-  // an inline PTY: installs can prompt for sudo and logins are interactive (device
-  // codes, paste-token prompts, browser callbacks).
   const buildLoginLine = (): string | null => {
     if (!agent.authBinary) return null;
     const args = agent.loginArgs ?? [];
@@ -749,6 +655,7 @@ function ProviderCard({
       : agent.authBinary;
   };
 
+  // Use external Terminal for interactive installs and start login only after install succeeds.
   const handleRunInstall = async () => {
     const command = agent.installHint?.command;
     if (!command) return;
@@ -781,12 +688,6 @@ function ProviderCard({
 
   return (
     <section className="flex flex-col gap-8">
-      {/* No logo/name/Connected header — the provider tab above already
-          shows the name + icon, and the live "Connected" state now lives on
-          the connection block below (CLI mode). */}
-
-      {/* Install row, only when the CLI isn't on PATH; Run opens Terminal.app for
-          the chained install + login (see above). */}
       {!agent.installed && agent.installHint && (
         <SettingsSection
           title={
@@ -833,7 +734,6 @@ function ProviderCard({
         </SettingsSection>
       )}
 
-      {/* All current providers offer account sign-in and pasted API keys. */}
       {supportsApiKey && vendor && (
         <section className="flex flex-col gap-3">
           <div className="flex items-center justify-between gap-4">
@@ -882,10 +782,6 @@ function ProviderCard({
           >
             {method === "apiKey" ? (
               <div className="flex flex-col gap-2 py-3.5">
-                {/* Header: the key label + a "Key" button (opens the vendor
-                  console) sit together on one row; the configured/not status
-                  sits below with a gap, so the button fits alongside the
-                  title. No keychain hint text — the status carries it. */}
                 <div className="flex flex-col gap-1.5">
                   <div className="flex flex-row items-center gap-2.5">
                     <label
@@ -1016,13 +912,8 @@ function ProviderCard({
         </section>
       )}
 
-      {/* Provider config — every option is shown inline for every agent
-          (no "Advanced" disclosure). Skipped entirely when the agent exposes
-          none (e.g. Cursor) so there's no empty padded container. */}
       {hasProviderConfig && (
         <div className="flex flex-col gap-4 pt-2">
-          {/* Bundled-SDK agents (Cursor) have no spawnable CLI, so they show no
-            Executable path field at all. */}
           {!executableInert && (
             <SettingsField
               label="Executable path"
@@ -1091,9 +982,6 @@ function ProviderCard({
             </SettingsField>
           )}
 
-          {/* Each agent reads its own config natively (Claude: tool permissions /
-            hooks / env; Codex: model / sandbox / MCP) — we link out to that
-            file instead of duplicating those knobs here. */}
           {AGENT_CONFIG_FILE[agent.id] && (
             <AgentConfigCard agentId={agent.id} />
           )}
