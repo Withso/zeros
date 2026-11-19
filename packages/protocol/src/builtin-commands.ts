@@ -1,20 +1,9 @@
-// The curated floor of each agent's documented built-in slash commands. File
-// discovery finds only user-authored commands and the built-ins live inside
-// each CLI (only Claude's SDK lists them), so this keeps the picker populated
-// before a session exists and for agents that under-report. Pure TUI chrome
-// commands are omitted. Discovered entries win on a name clash
-// (composerCommandsFor).
+// The curated floor fills discovery gaps before or during a session; list only supported commands so the picker does not send phantom prompts.
 
 import type { AvailableCommand } from "./agent-events";
 
-/** Curated built-in commands keyed by Zeros agentId. Keep entries
- *  conservative + stable: a name here that the agent does NOT actually
- *  support would send `/<phantom>` as literal text, so only list
- *  documented commands. */
 const BUILTIN_COMMANDS: Record<string, AvailableCommand[]> = {
-  // Claude Code. The SDK's supportedCommands() reports the complete live
-  // list (built-ins + skills + plugins) and overrides these once a session
-  // is alive; this curated set is the pre-session / new-chat floor.
+  // Claude's SDK supplies commands, skills and plugins once a session is live.
   claude: [
     {
       name: "init",
@@ -49,9 +38,7 @@ const BUILTIN_COMMANDS: Record<string, AvailableCommand[]> = {
     { name: "help", description: "Show available commands" },
   ],
 
-  // OpenAI Codex CLI. Driven via the app-server: file-based custom prompts
-  // (~/.codex/prompts) + skills/list are discovered at runtime; these are
-  // the documented built-ins those paths don't enumerate.
+  // Codex runtime discovery finds file prompts and skills, not all CLI built-ins.
   codex: [
     { name: "init", description: "Generate an AGENTS.md scaffold" },
     {
@@ -77,8 +64,7 @@ const BUILTIN_COMMANDS: Record<string, AvailableCommand[]> = {
     { name: "new", description: "Start a fresh conversation" },
   ],
 
-  // Cursor (via @cursor/sdk). Advertises its commands at runtime
-  // (available_commands_update), which overrides these when it arrives.
+  // Cursor discovery arrives through available_commands_update.
   cursor: [
     { name: "compact", description: "Summarize the conversation to free up context" },
     {
@@ -101,11 +87,7 @@ const BUILTIN_COMMANDS: Record<string, AvailableCommand[]> = {
   ],
 };
 
-/** The curated built-in command list for an agent (empty for unknown ids).
- *  Returns a fresh array copy so callers can't mutate the table. Every floor
- *  entry is a command (never a skill), so they are stamped `kind:"command"`
- *  here — the picker's Commands tab then includes them and the Skills tab
- *  never does. */
+/** Curated entries belong in the Commands tab, never Skills. */
 export function getBuiltinCommands(
   agentId: string | null | undefined,
 ): AvailableCommand[] {
@@ -114,9 +96,7 @@ export function getBuiltinCommands(
   return list ? list.map((c) => ({ ...c, kind: "command" as const })) : [];
 }
 
-/** Merge command lists, de-duplicating by `name`. LATER lists win on a
- *  clash (so discovered/authoritative entries override curated ones), and
- *  the result is sorted alphabetically by name. */
+/** Later sources win by name so runtime discovery takes priority over the curated floor. */
 export function mergeCommands(
   ...lists: ReadonlyArray<readonly AvailableCommand[]>
 ): AvailableCommand[] {
@@ -132,22 +112,14 @@ export function mergeCommands(
   );
 }
 
-/** Resolve the commands to show in a composer for `agentId`: the curated
- *  built-in floor unioned with whatever the session discovered at runtime
- *  (discovered wins on name clash). This is what the picker renders, so the
- *  list is never empty for a known agent — typing `/` always shows commands,
- *  even before a session exists (new-chat composer passes []). */
+/** A known provider has commands before a session exists. */
 export function composerCommandsFor(
   agentId: string | null | undefined,
   discovered: readonly AvailableCommand[] = [],
 ): AvailableCommand[] {
   const builtins = getBuiltinCommands(agentId);
   const merged = mergeCommands(builtins, discovered);
-  // Zeros OWNS the behavior of its inline commands (e.g. Claude /clear closes
-  // the chat + opens a fresh one — NOT the CLI's transcript-wipe), so its
-  // curated description must win over the agent CLI's `supportedCommands()`
-  // text; otherwise the picker would describe the CLI's behavior, not ours.
-  // Scoped to floor commands Zeros handles inline (slashCommandKind).
+  // For Zeros-handled inline commands, describe what Zeros does, not the provider's action.
   const curated = new Map(builtins.map((c) => [c.name, c]));
   return merged.map((c) => {
     const floor = curated.get(c.name);
@@ -157,48 +129,19 @@ export function composerCommandsFor(
   });
 }
 
-// ──────────────────────────────────────────────────────────
-// Command behavior classification (Claude only, for now)
-// ──────────────────────────────────────────────────────────
-//
-// A slash command isn't always "text to send" — many are actions Zeros
-// performs locally. Three behaviors (see the slash-commands-claude plan):
-//
-//   - "inline"   Zeros performs the action locally (toggle a composer
-//                control, clear the chat, run compaction). For `/compact`
-//                that means sending the literal `/compact` to the agent
-//                (the CLI intercepts it); for the others nothing is sent.
-//   - "terminal" run `claude /<cmd>` in an embedded ephemeral terminal
-//                (interactive TUI commands). Wired: the chat composer opens an
-//                inline ephemeral PTY (embedded-terminal-command.tsx). Surfaces
-//                that can't host the terminal omit the handler → safe "text".
-//   - "text"     today's behavior: insert `/<cmd> ` and send as literal
-//                text; the agent's CLI parses the `/` itself.
-//
-// Keyed by NAME so it covers both curated built-ins and the SDK's
-// supportedCommands() list. Unknown → "text" (never breaks a custom command).
-// Claude has the full inline+terminal wiring; Codex has `/compact` (real
-// compaction RPC); Cursor has `/compact` through SDK agent.summarize().
 
 export type SlashCommandKind = "inline" | "terminal" | "text";
 
-/** Claude commands Zeros handles as a LOCAL inline action (composer toggle,
- *  folder picker, compaction, or close-and-new-chat) instead of inserting
- *  text. NOTE: `/model` (open the model picker — needs an imperative open
- *  handle) is deliberately NOT here yet; it falls through to "text" until
- *  wired. */
 const CLAUDE_INLINE_ACTIONS = new Set<string>([
-  "plan", // → enter plan permission-mode
-  "fast", // → toggle Fast mode
-  "ultracode", // → set effort to Ultra Code (xhigh + ultracode)
-  "add-dir", // → pick a folder → add to additionalDirectories (context chip)
-  "compact", // → run compaction (sends `/compact` to the agent)
-  "clear", // → close (archive) this chat + open a fresh one; nothing deleted
+  "plan",
+  "fast",
+  "ultracode",
+  "add-dir",
+  "compact", // Claude intercepts the literal command.
+  "clear", // Archive the current chat instead of wiping its transcript.
 ]);
 
-/** Claude commands that need an interactive terminal TUI. The chat composer
- *  runs these as `claude /<cmd>` in an inline ephemeral PTY; surfaces without a
- *  terminal host (or no cwd) fall back to "text". */
+/** These commands require an interactive Claude PTY; the picker can fall back to inserting text when no host is available. */
 const CLAUDE_TERMINAL_COMMANDS = new Set<string>([
   "mcp",
   "agents",
@@ -213,11 +156,7 @@ const CLAUDE_TERMINAL_COMMANDS = new Set<string>([
   "terminal-setup",
 ]);
 
-/** Codex commands Zeros handles as a LOCAL inline action. For `/compact`, the
- *  Codex server does NOT intercept the literal text the way
- *  Claude's CLI does — sending it as a prompt just makes the model role-play
- *  a summary while the real window stays full — so Zeros routes it to the
- *  real `thread/compact/start` RPC instead. */
+/** Codex needs thread/compact/start: sending /compact as text does not compact its context. */
 const CODEX_INLINE_ACTIONS = new Set<string>(["compact", "goal"]);
 
 export function slashCommandKind(
@@ -235,10 +174,7 @@ export function slashCommandKind(
   return "text";
 }
 
-/** Return the command name only when the entire composer payload is an
- * attachment-free inline command. Keeping this predicate shared prevents a
- * provider-owned command from accidentally consuming a normal prompt such as
- * `/goal ship the release` or a `/goal` prompt carrying context files. */
+/** Do not consume slash prompts with arguments or attachments as inline actions. */
 export function bareInlineSlashCommand(
   agentId: string | null | undefined,
   text: string,

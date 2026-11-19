@@ -11,9 +11,7 @@ export function claudeOrganizationStartupMessage(code: string | undefined): stri
     : undefined;
 }
 
-/** Adapter-generated advice has already been selected from a known reason.
- * Retain that reason in the existing optional notice code, alongside the native
- * message, so reloaded Local and cloud transcripts keep the same remedy. */
+/** Persist the known reason in the optional notice code so a reloaded transcript retains the remedy. */
 export function claudeOrganizationStartupCode(advice: string | undefined): string | undefined {
   return Object.entries(CLAUDE_ORGANIZATION_STARTUP_MESSAGES).find(([, message]) => message === advice)?.[0];
 }

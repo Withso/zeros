@@ -96,8 +96,7 @@ describe("relocation context", () => {
               };
             }>
           >((resolve, reject) => {
-            // A Design directory's imported tokens: hundreds of inherited
-            // custom properties every frame shares through the same styles.
+            // Shared imported tokens should not be copied into a moved layer's context.
             const tokens = Array.from({ length: 300 }, (_, index) => `--token-${index}: ${index}px;`).join("");
             document.head.innerHTML = `<style>:root{${tokens}} body{font-family:Georgia;color:rgb(9,9,9)}</style>`;
             document.body.innerHTML =
@@ -164,11 +163,10 @@ describe("relocation context", () => {
         "--accent": "red",
       });
       expect(child.baseStyles).toMatchObject({ "font-family": "Georgia", color: "rgb(9, 9, 9)" });
-      // What the root gives the custom properties the context sets: none here.
       expect(child.rootStyles).toEqual({ "--accent": "" });
       expect(Object.keys(child.inheritedStyles).some((key) => key.startsWith("--token-"))).toBe(false);
       expect(child.unsupported).toEqual([]);
-      // Leaving a faded group is an ordinary move; the layer is no longer faded.
+      // Ancestor opacity stays behind and does not make the move unsupported.
       expect(result[2]!.relocationContext?.unsupported).toEqual([]);
       expect(result[0]!.styles["--zeros-layout-origin-flow"]).toBe("");
       expect(

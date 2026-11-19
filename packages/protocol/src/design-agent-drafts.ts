@@ -1,17 +1,8 @@
 import { z } from "zod";
 
-// ──────────────────────────────────────────────────────────
-// Design agent drafts — transient previews of in-flight native edits
-// ──────────────────────────────────────────────────────────
-//
-// While a Local agent's file tool call that targets the active Design
-// directory is still streaming, the engine sends the trusted local desktop a
-// sanitized, script-free render of the content received so far. Drafts are
-// never persisted, journaled, replayed or relayed to other devices; the saved
-// file and the ordinary snapshot refresh remain authoritative and replace them.
+// Only the trusted Local desktop gets sanitized, live drafts; never persist or relay them. Saved source stays authoritative.
 
 export const DESIGN_AGENT_DRAFT_PHASES = [
-  /** Tool input is still streaming. */
   "writing",
   /** Input is complete; the tool is running or awaiting permission. */
   "saving",
@@ -22,15 +13,12 @@ export const DESIGN_AGENT_DRAFT_PHASES = [
 ] as const;
 export type DesignAgentDraftPhase = (typeof DESIGN_AGENT_DRAFT_PHASES)[number];
 
-/** Largest preview document a draft may carry (sanitized HTML plus CSS). */
 export const MAX_DESIGN_AGENT_DRAFT_PREVIEW_BYTES = 8 * 1024 * 1024;
-/** Most frames one in-flight canvas document may place. */
+/** Bounds frame placements read from one in-flight canvas document. */
 export const MAX_DESIGN_AGENT_DRAFT_REGISTRATIONS = 256;
-/** Largest processed stylesheet text a draft may carry. */
 export const MAX_DESIGN_AGENT_DRAFT_STYLESHEET_CHARS = 4 * 1024 * 1024;
 
-/** A frame an in-flight `meta/canvas.json` registers: where the agent is
- * placing a file the saved canvas may not list yet. */
+/** The pending canvas may register files absent from the saved document. */
 export const designAgentDraftRegistrationSchema = z
   .object({
     /** Design-root-relative frame file, such as `page-1/card.html`. */

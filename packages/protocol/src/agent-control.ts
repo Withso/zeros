@@ -1,9 +1,5 @@
-// Approvals for Zeros-owned control of simulators. Apps need none: agents may
-// use any app except blocked apps.
-//
-// Electron main creates every request; tool arguments never choose its id,
-// owner or subject. The renderer shows it in the chat's PermissionCard next to
-// browser website approvals and answers through a trusted IPC command.
+// Simulator control requires confirmation; allowed apps do not.
+// Main owns request identity, owner and subject; the renderer can respond only over trusted IPC.
 
 import {
   agentControlName,
@@ -71,7 +67,6 @@ export function isAgentControlConfirmationRequest(
   );
 }
 
-/** The PermissionCard question, such as "Allow Codex to use iPhone 16 Pro?" */
 export function agentControlConfirmationTitle(
   request: Pick<AgentControlConfirmationRequest, "kind" | "agent" | "subject">,
 ): string {
@@ -84,7 +79,6 @@ export function agentControlConfirmationTitle(
   }
 }
 
-/** The card's context line under the title. */
 export function agentControlConfirmationContext(
   kind: AgentControlConfirmationKind,
 ): string {

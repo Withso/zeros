@@ -1,8 +1,4 @@
-// Section titles, notes and link cards a person places on a page. They live in
-// canvas.json under `pages[].items` and are canvas chrome: never part of a
-// frame, its source, its exports or its captures. Every check here is a
-// hand-written scan over length-capped text, so authored text costs time
-// linear in its length.
+// Persisted in canvas.json under pages[].items, separate from frame source and captures; scanning bounded text keeps validation linear.
 
 /** A Local engine that writes items with design.canvas.item.put/delete. */
 export const DESIGN_CANVAS_ITEMS_CAPABILITY = "design.canvas-items.v1";
@@ -61,7 +57,6 @@ export type DesignCanvasItemSummary =
   | (DesignCanvasLinkItem & { missing?: true });
 
 export interface DesignCanvasItemIssue {
-  /** Position in the page's items list. */
   index: number;
   id?: string;
   /** invalid and unsafe-link items are skipped; unknown kinds are kept and
@@ -85,7 +80,7 @@ const plainObject = (value: unknown): value is Record<string, unknown> =>
 const isKnownKind = (kind: unknown): kind is DesignCanvasItem["kind"] =>
   kind === "section" || kind === "note" || kind === "link";
 
-/** The frame and page id pattern, `[A-Za-z][A-Za-z0-9_-]{0,127}`. */
+/** Item IDs share the frame and page ID grammar. */
 export function isDesignCanvasItemId(value: unknown): value is string {
   if (typeof value !== "string" || value.length < 1 || value.length > 128) return false;
   for (let index = 0; index < value.length; index++) {
@@ -128,7 +123,6 @@ function utf8Bytes(text: string): number {
   return bytes;
 }
 
-/** One line of 1..limit characters with something besides spaces. */
 function lineProblem(value: unknown, limit: number, name: string): string | null {
   if (typeof value !== "string") return `${name} must be text.`;
   const length = boundedLength(value, limit);
@@ -148,7 +142,6 @@ function noteTextProblem(value: unknown): string | null {
     return `A note's text exceeds ${DESIGN_CANVAS_ITEM_LIMITS.noteText} characters.`;
   for (let index = 0; index < value.length; index++) {
     const code = value.charCodeAt(index);
-    // Line breaks and tabs are the note's own; nothing else invisible.
     if (isControl(code) && code !== 10 && code !== 9) return "A note's text must not contain control characters.";
   }
   return null;
@@ -164,9 +157,7 @@ const sizeProblem = (value: unknown, name: string) =>
 const PRIVATE_SEGMENTS = new Set([".git", ".context", ".conductor", ".zeros", "zeros-dev-env.json", ".env", ".npmrc", ".yarnrc.yml"]);
 const PRIVATE_EXTENSIONS = [".crt", ".pem", ".key", ".p12", ".pfx", ".cer", ".der", ".db", ".sqlite", ".db-wal", ".db-shm"];
 
-/** The same private paths the development servers deny (scripts/
- * dev-server-policy.mjs isPrivateDevPath): VCS, Zeros and agent state,
- * environment files, package credentials, keys and databases. */
+/** Match the development server's private-path restrictions in isPrivateDevPath. */
 export function isDesignCanvasPrivatePath(target: string): boolean {
   for (const part of target.split("/")) {
     const lower = part.toLowerCase();
@@ -176,9 +167,7 @@ export function isDesignCanvasPrivatePath(target: string): boolean {
   return false;
 }
 
-/** Why a target cannot be a link card's file, or null. A workspace-relative
- * path only: never absolute, a home path, a URL or a scheme, never through
- * `.` or `..`, and never a private file. */
+/** Links accept only workspace-relative files, never escapes, schemes or private paths. */
 export function designCanvasLinkTargetProblem(target: unknown): string | null {
   if (typeof target !== "string" || target.length === 0) return "A link card needs a file path.";
   if (target.length > DESIGN_CANVAS_ITEM_LIMITS.linkTarget)
@@ -193,7 +182,6 @@ export function designCanvasLinkTargetProblem(target: unknown): string | null {
     if (index < target.length) {
       if (isControl(code)) return "A link card's path must not contain control characters.";
       if (code === 92) return "A link card's path uses / between folders, not \\.";
-      // A colon before the first folder is a scheme or a drive: never a URL.
       if (code === 58 && firstSlash < 0) return "A link card points to a file, never a URL or another scheme.";
     }
     if (code !== 47) continue;
@@ -212,8 +200,7 @@ type Parsed =
   | { problem: string; unsafe?: true }
   | { unknown: string };
 
-/** Validate one item's known fields. Other keys are allowed here (they are
- * kept in the file); the canvas's own writes are checked more strictly. */
+/** Read known fields without rewriting unknown saved fields; canvas writes are stricter. */
 function parseItem(value: unknown): Parsed {
   if (!plainObject(value)) return { problem: "An item must be an object." };
   if (!isDesignCanvasItemId(value.id)) return { problem: "An item needs an id like a frame's: a letter, then letters, digits, - or _." };
@@ -231,8 +218,7 @@ function parseItem(value: unknown): Parsed {
     return issue ? { problem: issue } : { item: { id, kind: "note", x, y, width, height: value.height as number, text: value.text as string } };
   }
   const target = designCanvasLinkTargetProblem(value.target);
-  // A missing path is malformed; a path that leaves the workspace or names a
-  // private file is unsafe.
+  // A missing target is malformed; a nonempty rejected path is unsafe.
   if (target) return typeof value.target === "string" && value.target ? { problem: target, unsafe: true } : { problem: target };
   if (value.title !== undefined) {
     const title = lineProblem(value.title, DESIGN_CANVAS_ITEM_LIMITS.linkTitle, "A link card's title");
@@ -246,9 +232,7 @@ function itemTextBytes(item: DesignCanvasItem): number {
   return item.kind === "link" ? utf8Bytes(item.target) + utf8Bytes(item.title ?? "") : utf8Bytes(item.text);
 }
 
-/** The drawable items of one page, in order, and what was skipped. `reserved`
- * holds every frame id and the ids earlier pages took; this page's are added.
- * Never throws: an unreadable list reads as no items. */
+/** Reserve IDs against frames and earlier pages, even when the item is not drawn. */
 export function readDesignCanvasPageItems(
   raw: unknown,
   reserved: Set<string>,
@@ -295,8 +279,7 @@ export function readDesignCanvasPageItems(
   return { items, issues };
 }
 
-/** Why an item the canvas sends cannot be written, or null. Exactly its kind's
- * fields; the id is optional when the engine names a new item. */
+/** Writes accept only the kind's own fields and may omit the ID for new items. */
 export function designCanvasItemInputProblem(value: unknown): string | null {
   if (!plainObject(value)) return "An item must be an object.";
   if (!isKnownKind(value.kind)) return "An item's kind must be section, note or link.";
@@ -316,8 +299,7 @@ export function isDesignCanvasItemSummary(value: unknown): value is DesignCanvas
   return isDesignCanvasItemId(rest.id) && designCanvasItemInputProblem(rest) === null;
 }
 
-/** Whether a page's summary items fit a page's caps; ids are checked by the
- * catalog, against frames and every page's items. */
+/** The enclosing catalog checks ID collisions across frames and pages. */
 export function designCanvasItemsWithinLimits(items: readonly DesignCanvasItem[]): boolean {
   if (items.length > DESIGN_CANVAS_ITEM_LIMITS.itemsPerPage) return false;
   let bytes = 0;
@@ -325,7 +307,6 @@ export function designCanvasItemsWithinLimits(items: readonly DesignCanvasItem[]
   return bytes <= DESIGN_CANVAS_ITEM_LIMITS.textBytesPerPage;
 }
 
-/** Text the card shows as its name. */
 export function designCanvasItemTitle(item: DesignCanvasItem): string {
   if (item.kind !== "link") return item.text;
   if (item.title) return item.title;
@@ -333,7 +314,6 @@ export function designCanvasItemTitle(item: DesignCanvasItem): string {
   return slash < 0 ? item.target : item.target.slice(slash + 1);
 }
 
-/** The box an item covers, for culling and hit testing. */
 export function designCanvasItemBounds(item: DesignCanvasItem): { x: number; y: number; width: number; height: number } {
   const height = item.kind === "note" ? item.height : item.kind === "section" ? DESIGN_CANVAS_SECTION_HEIGHT : DESIGN_CANVAS_LINK_HEIGHT;
   return { x: item.x, y: item.y, width: item.width, height };

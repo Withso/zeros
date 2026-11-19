@@ -46,10 +46,7 @@ const PUBLIC_TEMPLATE_INFIX = /\.(example|sample|template|dist)\./i;
 /** True when a repo-relative path points at a credential/secret that must
  *  never be served to a remote client (regardless of .gitignore state). */
 export function isSensitiveWorkspacePath(relPath: string, normalize: (value: string) => string): boolean {
-  // Collapse '.', '..' and redundant separators FIRST. readWorkspaceFile opens
-  // path.resolve(cwd, rel) (which collapses these), so without normalizing here
-  // a trailing './' or 'x/..' would smuggle a denied basename past the segment
-  // check — a universal denylist bypass.
+  // Normalize before classification so the path check agrees with the path the file reader resolves.
   let norm = (relPath ?? "").replace(/\\/g, "/");
   norm = normalize(norm);
   const segments = norm.split("/").filter((s) => s && s !== "." && s !== "..");
@@ -69,9 +66,7 @@ export function isSensitiveWorkspacePath(relPath: string, normalize: (value: str
   const dot = base.lastIndexOf(".");
   const ext = dot > 0 ? base.slice(dot) : "";
   if (SENSITIVE_EXTS.has(ext)) return true;
-  // Match `.env` and `.env.local` (prefix form), `prod.env`/`local.env`
-  // (suffix form), and framework variants like `.flaskenv`. Public templates
-  // (`.env.example`) stay shareable via the ENV_PUBLIC_SUFFIX carve-out.
+  // Keep public .env templates shareable even though they match the .env prefix.
   if (
     base === ".env" ||
     base.startsWith(".env.") ||

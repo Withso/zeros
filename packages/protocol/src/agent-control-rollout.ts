@@ -1,12 +1,9 @@
 import type { BrowserRouteSettings } from "./browser-tools";
 import type { ComputerUseSettings } from "./computer-use-tools";
 
-/** Agent control features that reach users in stages. The Codex browser fixes
- * (plan Phase 0) ship to everyone and are not listed. */
 export const AGENT_CONTROL_FEATURES = [
   /** The in-app browser for Claude Code and Cursor, and Codex's switch to it. */
   "zerosBrowser",
-  /** Zeros computer use on this Mac. */
   "computerUse",
   /** Simulator tabs, agent simulator tools and video key frames. */
   "simulators",
@@ -124,7 +121,6 @@ export function gateBrowserRouteSettings(
     : { ...settings, inAppAvailable: false };
 }
 
-/** While Zeros computer use is closed, no agent gets any computer use. */
 export function gateComputerUseSettings<T extends ComputerUseSettings>(
   settings: T,
   availability: Pick<AgentControlAvailability, "computerUse">,
@@ -132,7 +128,6 @@ export function gateComputerUseSettings<T extends ComputerUseSettings>(
   return availability.computerUse ? settings : { ...settings, enabled: false };
 }
 
-/** While simulators are closed, no agent gets the simulator tools. */
 export function gateSimulatorSettings<T extends { enabled: boolean }>(
   settings: T,
   availability: Pick<AgentControlAvailability, "simulators">,

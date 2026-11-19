@@ -1,17 +1,4 @@
-// ──────────────────────────────────────────────────────────
-// Zeros-owned identity model
-// ──────────────────────────────────────────────────────────
-//
-// These names intentionally describe ownership and lifetime instead of using
-// the overloaded word "session":
-//   workspaceId    — durable Zeros workspace identity
-//   conversationId — durable Zeros chat identity
-//   executionId    — ephemeral Zeros runtime/routing identity
-//   providerBinding — opaque durable provider resume identity
-//
-// Provider bindings are data, never route keys. A provider may replace or
-// refine one while the Zeros conversation stays the same. Likewise an engine
-// may mint a new execution for the same provider binding after restart.
+// Workspace and conversation IDs persist; execution IDs can rotate. Provider bindings are durable resume data, never route keys.
 
 export type WorkspaceId = string;
 export type ConversationId = string;
@@ -203,9 +190,7 @@ export function sameProviderMetadata(
   );
 }
 
-/** Pure lifecycle invariant used at identity-owning boundaries and in tests.
- * Execution/provider identities may rotate; a mounted conversation cannot
- * silently become a different Zeros workspace or conversation. */
+/** An execution or provider binding can change without changing the conversation's workspace or identity. */
 export function validateIdentityTransition(
   previous: ConversationExecutionIdentity,
   next: ConversationExecutionIdentity,
