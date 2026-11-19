@@ -710,11 +710,17 @@ function linkedFrameComponent(source: string, registry: ReadonlyMap<string, stri
   const document = sharedDesignParse(source) ?? parse(source);
   const html = document.childNodes.find((node): node is DefaultTreeAdapterTypes.Element => node.nodeName === "html");
   const body = html?.childNodes.find((node): node is DefaultTreeAdapterTypes.Element => node.nodeName === "body");
-  const roots = (body?.childNodes ?? []).filter((node): node is DefaultTreeAdapterTypes.Element =>
-    "tagName" in node && node.tagName !== "style");
-  const root = roots.length === 1 ? roots[0]! : null;
-  const name = root?.tagName.startsWith("zd-") ? root.tagName.slice(3) : "";
-  return name && registry.has(name) && root!.attrs.some((attribute) => attribute.name === "data-zeros-frame-root") ? name : null;
+  const only = (parent: DefaultTreeAdapterTypes.ParentNode | undefined) => {
+    const elements = (parent?.childNodes ?? []).filter((node): node is DefaultTreeAdapterTypes.Element =>
+      "tagName" in node && node.tagName !== "style");
+    return elements.length === 1 ? elements[0]! : null;
+  };
+  const root = only(body);
+  if (!root?.attrs.some((attribute) => attribute.name === "data-zeros-frame-root")) return null;
+  // Duplication places the host in the frame's root, or makes it the root.
+  const host = root.tagName.startsWith("zd-") ? root : only(root);
+  const name = host?.tagName.startsWith("zd-") ? host.tagName.slice(3) : "";
+  return name && registry.has(name) ? name : null;
 }
 
 /**

@@ -319,9 +319,10 @@ describe("registered linked copies through production expansion and runtime", ()
     }));
   });
 
-  it("g: a linked frame copy keeps the main's document context without owning it", async () => {
+  it.each([false, true])("g: a linked frame copy keeps the main's document context without owning it (frame root wrapper: %s)", async (wrapped) => {
     await setup('<!doctype html><html><head>' + declaration + '<style>body { margin: 0; font-family: Arial, sans-serif; }</style></head>' +
       '<body style="color: rgb(1, 2, 3)"><main class="root" data-oid="root"><span class="label" data-oid="label">Main</span></main></body></html>');
+    if (wrapped) await writeFile(file(copy), doc('<main data-oid="frame" data-zeros-frame-root style="display:block; width:100%"><zd-card data-oid="host"></zd-card></main>'));
     const { page } = await render();
     expect(await page.evaluate(() => {
       const root = getComputedStyle(document.querySelector(".root")!);
