@@ -33,13 +33,9 @@ import {
   invalidateWorkspaceFiles,
   workspaceFileListingFailure,
   subscribeWorkspaceFileListingFailure,
-  workspaceCacheKey,
   type WorkspaceFileListing,
 } from "../../workspace-files-cache";
-import { isCloudWorkspace } from "@/renderer/platform/bridge/cloud-workspace-key";
-import { useBridge } from "@/renderer/platform/bridge/use-bridge";
-import { WorkspaceRuntimeClient } from "@/renderer/platform/bridge/workspace-runtime-client";
-import { cloudFileListAccess, subscribeCloudFileListAccess } from "@/renderer/state/cloud-file-list-presentation";
+import { useWorkspaceFileListScope } from "../../use-workspace-file-list-scope";
 import { prefetchWorkspaceFileRead } from "../../workspace-file-data-cache";
 import { useWorkbenchStatusSource } from "../tab-status";
 import { canOpenPathLocally, revealInFinder } from "@/renderer/platform/app";
@@ -395,30 +391,13 @@ export const WorkspaceFileTree = React.forwardRef<
   WorkspaceFileTreeProps
 >(function ScopedWorkspaceFileTree(props, ref) {
   const folder = props.cwd;
-  const cloud = isCloudWorkspace(folder);
-  const bridge = useBridge();
-  const subscribe = useCallback((listener: () => void) => {
-    if (!cloud || !folder || props.active === false) return () => {};
-    const offAccess = subscribeCloudFileListAccess(listener);
-    const offBridge = bridge instanceof WorkspaceRuntimeClient
-      ? bridge.onWorkspaceStatusChange(folder, listener)
-      : bridge?.onStatusChange(listener);
-    return () => { offAccess(); offBridge?.(); };
-  }, [bridge, cloud, folder, props.active]);
-  const read = () => {
-    if (!cloud || !folder) return "1local";
-    const access = cloudFileListAccess(workspaceCacheKey(folder));
-    if (!access) return "";
-    const status = bridge instanceof WorkspaceRuntimeClient ? bridge.statusForWorkspace(folder) : bridge?.status;
-    return `${access.ready && status === "connected" ? "1" : "0"}${access.key}`;
-  };
-  const snapshot = useSyncExternalStore(subscribe, read, read);
+  const { key, live } = useWorkspaceFileListScope(folder, props.active !== false);
   return (
     <WorkspaceFileTreeForScope
-      key={snapshot.slice(1)}
+      key={key}
       {...props}
-      cwd={snapshot ? folder : undefined}
-      live={snapshot.startsWith("1")}
+      cwd={key ? folder : undefined}
+      live={live}
       ref={ref}
     />
   );
