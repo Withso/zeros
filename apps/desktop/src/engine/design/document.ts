@@ -1107,7 +1107,7 @@ function designComponentIdentityFromDocument(canvas: CanvasDocument, file: strin
     ? html.childNodes.find((node) => "tagName" in node && node.tagName === "body")
     : undefined;
   const roots = body && "childNodes" in body
-    ? body.childNodes.filter((node): node is DefaultTreeAdapterTypes.Element => "tagName" in node)
+    ? body.childNodes.filter((node): node is DefaultTreeAdapterTypes.Element => "tagName" in node && node.tagName !== "style")
     : [];
   if (roots.length !== 1 || !roots[0]!.tagName.startsWith("zd-")) return null;
   const attributes = new Map(roots[0]!.attrs.map((attribute) => [attribute.name, attribute.value]));
