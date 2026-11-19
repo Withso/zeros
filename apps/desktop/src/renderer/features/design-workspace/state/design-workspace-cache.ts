@@ -90,6 +90,7 @@ import {
   setDesignSelectionSnapshotReader,
 } from "./design-selection";
 import {
+  isDesignWorkspaceBootPreview,
   queueDesignWorkspaceBootSnapshot,
   readDesignWorkspaceBootSnapshots,
   resetDesignWorkspaceBootCacheForTests,
@@ -1602,10 +1603,13 @@ export async function fetchDesignWorkspaceSnapshot(
     mutation.deferredRefresh = true;
     return previous;
   }
-  const stable = stabilizeDesignWorkspaceSnapshot(
+  const stabilized = stabilizeDesignWorkspaceSnapshot(
     designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data,
     applyRetainedRuntimeAuditViolations(workspaceId, next),
   );
+  const stable = previous && stabilized === previous && isDesignWorkspaceBootPreview(previous)
+    ? { ...stabilized }
+    : stabilized;
   if (!stable.preparation) queueDesignWorkspaceBootSnapshot(workspaceId, stable);
   return stable;
 }
