@@ -1,6 +1,8 @@
 import { z } from "zod";
 
-// Prompt-free pull replies let workers fence and flush when the live route fails; only a matching cancellation reply releases the fence.
+// recovery-quiesce-v1: before a fresh-checkpoint replacement, the control plane asks a worker whose live route is broken
+// to fence and flush over its outbound path. The hint rides the prompts/pull reply (with no prompts); the worker answers
+// on POST /v2/cloud/worker/recovery. Only an explicit matching `cancelled` reply releases a frozen worker.
 export const CLOUD_RECOVERY_QUIESCE_FEATURE = "recovery-quiesce-v1";
 export const CLOUD_RECOVERY_BINDING_CHANGED = "recovery_binding_changed";
 

@@ -66,7 +66,7 @@ export function isDangerousEnvName(name: string): boolean {
   );
 }
 
-// Block provider credential redirection without banning application-specific base URLs.
+// Only provider routing names are blocked; application-specific base URLs remain valid.
 const CREDENTIAL_REDIRECT_ENV_NAMES = new Set([
 
   "ANTHROPIC_BASE_URL",
