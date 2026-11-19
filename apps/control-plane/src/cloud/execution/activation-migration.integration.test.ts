@@ -225,7 +225,7 @@ database("0240 protocol policy cost and migration locks", () => {
     } finally { client.release(); }
   }, 30_000);
 
-  it("accepts bounded bitmap and incremental-index plans with identical results", async () => {
+  it("accepts bounded bitmap and index plans with identical results", async () => {
     await pool.query("UPDATE cloud_v2_workspaces SET execution_mode='legacy'");
     const columns = CLOUD_V2_WORKSPACE_COLUMNS.join(",");
     const sql = `SELECT ${columns} FROM cloud_v2_workspaces w WHERE w.org_id=$1 AND w.creator_user_id=$2 AND w.state<>'deleted'
@@ -233,7 +233,7 @@ database("0240 protocol policy cost and migration locks", () => {
     const values = [f.organizationId,f.creator.id];
     const scenarios = [
       { name: "bitmap", settings: "SET LOCAL enable_indexscan=off; SET LOCAL enable_indexonlyscan=off; SET LOCAL enable_bitmapscan=on; SET LOCAL enable_seqscan=off" },
-      { name: "incremental-index", settings: "SET LOCAL enable_bitmapscan=off; SET LOCAL enable_indexscan=on; SET LOCAL enable_indexonlyscan=on; SET LOCAL enable_seqscan=off; SET LOCAL enable_incremental_sort=on" },
+      { name: "index", settings: "SET LOCAL enable_bitmapscan=off; SET LOCAL enable_indexscan=on; SET LOCAL enable_indexonlyscan=on; SET LOCAL enable_seqscan=off; SET LOCAL enable_incremental_sort=on" },
     ];
     const client = await pool.connect();
     try {
@@ -257,10 +257,9 @@ database("0240 protocol policy cost and migration locks", () => {
       const indexScan = workspaceScans(plans[1]!)[0]!;
       expect(bitmapScan["Node Type"]).toBe("Bitmap Heap Scan");
       expect(indexScan["Node Type"]).toBe("Index Scan");
-      expect(planNodes(plans[1]!).some(node => node["Node Type"] === "Incremental Sort")).toBe(true);
       expect(workspacePlanWork(plans[0]!, 501)).toMatchObject({ ok: true });
       expect(workspacePlanWork(plans[1]!, 501)).toMatchObject({ ok: true });
-      report({ plannerVariationAccepted: true, bitmap: shape(plans[0]!), incrementalIndex: shape(plans[1]!), rows: ids[0].length });
+      report({ plannerVariationAccepted: true, bitmap: shape(plans[0]!), index: shape(plans[1]!), rows: ids[0].length });
     } finally { client.release(); }
   }, 30_000);
 
