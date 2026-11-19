@@ -17,9 +17,7 @@ const terminal = (state?: CloudCredentialRemovalState) => !!state?.outcome && ["
 const acknowledged = (state?: CloudCredentialRemovalState) => terminal(state) || state?.outcome?.state === "pending" && state.outcome.phase !== "preparing";
 const defaultIo: CloudCredentialRemovalIo = { prepare: prepareCloudCredentialRemoval, read: readCloudCredentialRemoval, decide: decideCloudCredentialRemoval };
 
-/** One account-owned explicit Settings operation. Persist before submission;
- * retries carry the same operation/decision IDs through unknown acknowledgements.
- * Unmount stops observations and can cancel only an unsubmitted decision. */
+// Persist the account's operation and decision IDs before sending so retries survive a lost acknowledgement.
 export function createCloudCredentialRemovalController(options: {
   userId: string;
   isCurrent(): boolean;
@@ -54,8 +52,7 @@ export function createCloudCredentialRemovalController(options: {
     if (!options.isCurrent() || !snapshot.state || terminal(snapshot.state)) return Promise.resolve();
     const original = snapshot.state;
     publish({ state: original, busy: true });
-    // Install the flight before invoking an IO boundary: even a synchronous
-    // validation refusal must clear the same flight and remain retryable.
+    // Record the flight before IO so synchronous validation errors can clear it for retry.
     let finish!: () => void, fail!: (error: unknown) => void;
     const running = new Promise<void>((resolve, reject) => { finish = resolve; fail = reject; });
     flight = running;
@@ -110,8 +107,7 @@ export function createCloudCredentialRemovalController(options: {
     attach() { attached = true; schedule(); },
     async detach() {
       attached = false; stopTimer();
-      // A submitted Yes (including an unknown ACK) survives this surface.
-      // An in-flight prepare may establish the revision needed for cancellation.
+      // Never cancel a recorded decision; an undecided in-flight prepare may supply the revision to cancel.
       if (snapshot.state?.decision) return;
       if (flight) await flight;
       if (options.isCurrent() && !snapshot.state?.decision) await decide("cancel");

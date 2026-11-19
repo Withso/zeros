@@ -8,8 +8,7 @@ interface KeepAwakeSettingsSnapshot {
   error: string | null;
 }
 
-// One device-owned snapshot survives Settings/owner switches. Main persists
-// the preference outside Chromium's purgeable cache; no cloud write is made.
+// Main persists this device preference outside Chromium storage; owner switches reuse the snapshot.
 let snapshot: KeepAwakeSettingsSnapshot = { preferences: null, saving: false, error: null };
 const listeners = new Set<() => void>();
 let read: Promise<void> | null = null;

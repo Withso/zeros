@@ -1,8 +1,3 @@
-// redactLogSecrets — the LOG-payload scrubber (feedback exports / View).
-//
-// Contract: credential material is removed; session UUIDs, file paths, and
-// commit SHAs SURVIVE (that's what makes shared logs debuggable — the
-// aggressive analytics scrubber redactSensitive() would destroy them).
 
 import { describe, it, expect } from "vitest";
 import { redactLogSecrets } from "../scrub";
@@ -33,20 +28,12 @@ describe("redactLogSecrets — removes credentials", () => {
     expect(parsed.nested).toBe("fine");
   });
 
-  // The store writes every record with JSON.stringify, so a secret logged as
-  // an object field lands in the file with the structural quotes BACKSLASH-
-  // escaped (\"access_token\":\"…\"). redactLogSecrets runs over that encoded
-  // tail — not the pretty object — so it must catch the escaped form too.
+  // The log store wraps serialized object text in JSONL, escaping the field quotes a second time.
   it("redacts secrets logged as object fields inside a JSONL text value", () => {
-    // console.log({ access_token }) → the object is stringified into the
-    // record's `text`, which the store re-stringifies — so the field lands
-    // in the file with escaped quotes: "text":"{\"access_token\":\"…\"}".
-    // Invented hex — fixture input proving the redactor rewrites access_token.
     const text = JSON.stringify({ ok: true, access_token: "9f8e7d6c5b4a3210ffee" }); // gitleaks:allow
     const line = JSON.stringify({ origin: "frontend", level: "log", text });
     const out = redactLogSecrets(line);
     expect(out).not.toContain("9f8e7d6c5b4a3210ffee");
-    // The whole line is still valid JSON, and the inner payload too.
     const inner = JSON.parse((JSON.parse(out) as { text: string }).text) as Record<
       string,
       unknown
@@ -69,7 +56,6 @@ describe("redactLogSecrets — removes credentials", () => {
       string,
       unknown
     >;
-    // Both secrets gone, the non-secret field and full 3-key structure intact.
     expect(inner.token).toBe("[redacted]");
     expect(inner.secret).toBe("[redacted]");
     expect(inner.keep).toBe("visible");
@@ -77,8 +63,7 @@ describe("redactLogSecrets — removes credentials", () => {
   });
 
   it("redacts a key=value secret without breaking a following escaped quote", () => {
-    // A log line whose text embeds a literal quote → escaped as \" in the file.
-    // The value class must stop before the backslash so the line stays parseable.
+    // Stopping before the backslash preserves the following escaped quote.
     const line = JSON.stringify({
       origin: "main",
       level: "info",
@@ -98,9 +83,7 @@ describe("redactLogSecrets — removes credentials", () => {
       "openai sk-proj-abcdefghijklmnop123456",
       "github ghp_ABCDEFGHIJKLMNOP1234",
       "stripe sk_live_ABCDEFGHIJKLMNOP1234", // gitleaks:allow — fixture proving the redactor catches it
-      // Split the literal: the redactor still sees a contiguous AKIA<16> at
-      // runtime, but the repo's own check:secrets gate (same shape) won't flag
-      // this fixture — mirrors the deliberately-short bodies above.
+      // Assemble the fake AWS-shaped fixture so the repository secret scanner does not flag a literal.
       "aws AKIA" + "IOSFODNN7EXAMPLE",
       "mail from user@example.com",
     ].join("\n");
@@ -116,9 +99,6 @@ describe("redactLogSecrets — removes credentials", () => {
   });
 
   it("redacts the complete dotted GitHub App installation-token shape", () => {
-    // Current installation tokens can contain multiple dot-separated sections.
-    // Redacting only the legacy alphanumeric prefix would leave credential
-    // material after the first dot in exported logs.
     const installationToken =
       "ghs_" + "1".repeat(8) + "." + "A".repeat(64) + "." + "B".repeat(64);
     const out = redactLogSecrets(`credential ${installationToken} failed`);

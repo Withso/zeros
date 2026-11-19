@@ -88,8 +88,7 @@ describe("active bridge connection subscriptions", () => {
     const stop = onActiveBridgeConnected(connected);
 
     expect(connected).toHaveBeenCalledOnce();
-    // The subscribe-time fire is an ordinary component mount in a healthy
-    // app — callers must be able to tell it apart from a real (re)connect.
+    // A healthy component mount can reuse the existing snapshot; a reconnect cannot.
     expect(connected).toHaveBeenCalledWith(runtimeClient(bridge), {
       initial: true,
     });
@@ -106,7 +105,6 @@ describe("active bridge connection subscriptions", () => {
     bridge.setStatus("connected");
     bridge.setStatus("connected");
     expect(connected).toHaveBeenCalledOnce();
-    // An asynchronous connect transition is never the initial mount fire.
     expect(connected).toHaveBeenLastCalledWith(runtimeClient(bridge), {
       initial: false,
     });

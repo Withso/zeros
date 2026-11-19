@@ -1,6 +1,3 @@
-// One Cloud Computer repository: the branch it installs (Git) and the setup
-// that prepares it (Environment). Edits join the organization's recipe and,
-// like the Cloud Computer page's list, wait for the next build.
 import { useState } from "react";
 import { Button, Input } from "../../shared/ui";
 import { CodeTextarea } from "../../shared/ui/primitives";
@@ -43,6 +40,7 @@ function RepositoryScope({ userId, organizationId, canManage, repository, tab, o
     { enabled: active, maxAgeMs: 30_000 });
   const data = computer.data;
   const [error, setError] = useState<string | null>(null);
+  // Per-repository edits share the organization recipe used by Cloud Computer.
   const draft = useRecipeDraft(organizationId, key, data, computer.refresh, setError);
   const builds = data?.builds ?? [];
   const activeBuild = builds.find(build => build.id === data?.activeBuildId);

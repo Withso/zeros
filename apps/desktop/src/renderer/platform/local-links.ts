@@ -11,8 +11,6 @@ import { isChannel, schemeForChannel } from "../../engine/runtime";
 import { CHANNEL } from "../config/release-channel";
 import { isNativeRuntime, nativeInvoke, nativeListen } from "./runtime";
 
-/** Main's one navigation intent: a Local chat or workspace, or a cloud
- * workspace opened from its web page. */
 export type NavigationLink = LocalLink | CloudWorkspaceLink;
 
 let scheme: Promise<LocalLinkScheme> | null = null;

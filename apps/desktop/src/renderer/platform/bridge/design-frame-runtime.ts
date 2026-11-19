@@ -1,11 +1,4 @@
-// ──────────────────────────────────────────────────────────
-// Sandboxed design-frame runtime client
-// ──────────────────────────────────────────────────────────
-//
-// Every iframe has an opaque origin (`sandbox="allow-scripts"`), so the host
-// never reaches into contentDocument. A one-time, protocol-validated parent
-// handshake transfers a private MessagePort; all document data and subsequent
-// requests stay on that per-document channel.
+// An opaque sandbox origin requires a validated handshake and a private MessagePort per document.
 
 import {
   isDesignRuntimeCoordinateSpace,
@@ -82,13 +75,11 @@ export interface DesignFrameRuntimeCallbacks {
     event: "ready" | "mutation",
   ) => void;
   onReady?: (capabilities: DesignRuntimeCapabilities) => void;
-  /** The ready document has produced a frame; only then may the pixels
-   * beneath it stop painting. Sent when capabilities include `painted`. */
+  /** With the painted capability, keep the outgoing buffer visible until the replacement reports painting. */
   onPainted?: () => void;
   onGenerationChanged?: () => void;
   onPlaybackStopped?: (event: DesignRuntimePlaybackStopped) => void;
-  /** The runtime let go of a held layer state by itself (before an edit, or
-   * when the layer left the document). */
+  /** A held state can be released by an edit or by removal of its layer. */
   onStateReleased?: (event: DesignRuntimeStateReleased) => void;
 }
 
@@ -97,9 +88,7 @@ export interface DesignFrameRuntimeConnection {
   readonly sourceVersion: string;
   /** Optional readback may run only while its retained surface is active. */
   isActive?(): boolean;
-  /** Whether the mounted runtime implements one method. A document painted by
-   * an older engine build negotiates its capabilities at handshake time, so a
-   * caller can choose a leaner path without risking a rejected request. */
+  /** Use handshake capabilities before calling methods an older runtime may not implement. */
   supports(method: DesignRuntimeMethod): boolean;
   getSnapshot(signal?: AbortSignal): Promise<DesignRuntimeSnapshot>;
   getElementAtLoc(
@@ -138,24 +127,20 @@ export interface DesignFrameRuntimeConnection {
     baseTheme?: string | null,
     signal?: AbortSignal,
   ): Promise<DesignRuntimeSnapshot>;
-  /** Show a linked Design stylesheet's in-flight text (an agent draft) in
-   * place of its inlined copy, or restore it with null. Opt-in: check
-   * `supports("previewStylesheet")` first. */
+  /** A draft overrides the linked stylesheet's inlined copy; null restores it. Check capability first. */
   previewStylesheet(
     file: string,
     css: string | null,
     signal?: AbortSignal,
   ): Promise<{ applied: number; snapshot: DesignRuntimeSnapshot }>;
-  /** Whole-frame browser playback. The session fences a late Stop from a
-   * retired playback attempt; older engines do not advertise this method. */
+  /** The playback session fences a late Stop from a retired attempt; check capability first. */
   setPlayback(sessionId: string, playing: boolean, signal?: AbortSignal): Promise<void>;
-  /** Paint a drawn child before its source write confirms. Opt-in: check
-   * `supports("previewInsert")`; a commit carrying the same inserts adopts it. */
+  /** A matching source commit adopts the insert preview. Check capability first. */
   previewInsert(
     input: DesignRuntimeInsertPreview,
     signal?: AbortSignal,
   ): Promise<DesignRuntimeInsertPreviewResult>;
-  /** Remove the named previews (all when omitted). */
+  /** Omitting nodeIds clears all insert previews. */
   clearPreviewInserts(nodeIds?: readonly string[], signal?: AbortSignal): Promise<{ snapshot: DesignRuntimeSnapshot }>;
   previewStructure?(input: DesignRuntimeStructurePreview, signal?: AbortSignal): Promise<DesignRuntimeStructurePreviewResult>;
   clearPreviewStructure?(previewId?: string, signal?: AbortSignal): Promise<void>;
@@ -169,11 +154,9 @@ export interface DesignFrameRuntimeConnection {
     signal?: AbortSignal,
   ): Promise<DesignRuntimeFrameChanges>;
   releaseNodeState?(signal?: AbortSignal): Promise<{ released: boolean }>;
-  /** Show a component's option values as custom properties before they are
-   * written; null clears. Opt-in: check `supports("previewComponentOptions")`. */
+  /** Preview option values as custom properties; null clears them. Check capability first. */
   previewComponentOptions?(properties: Readonly<Record<string, string>> | null, signal?: AbortSignal): Promise<DesignRuntimeComponentOptionsPreview>;
-  /** The same for one instance, named by its host's oid; null clears.
-   * Opt-in: check `supports("previewComponentInstanceOptions")`. */
+  /** Scope an option preview to the instance host ID. Null clears it; check capability first. */
   previewComponentInstanceOptions?(target: string, properties: Readonly<Record<string, string>> | null, signal?: AbortSignal): Promise<DesignRuntimeComponentOptionsPreview>;
   /** The part of an instance under a frame point, as a layer to read but not
    * write. Opt-in: check `supports("getComponentPartAtLoc")`. */
@@ -183,8 +166,7 @@ export interface DesignFrameRuntimeConnection {
     styles: Record<string, string | null>,
     signal?: AbortSignal,
   ): Promise<DesignRuntimeNodeDetails>;
-  /** Apply a gesture's styles and measure only what the canvas paints from.
-   * One round trip, measured in the same task as the write. */
+  /** Write styles and measure canvas geometry in the same runtime task. */
   previewGeometry(
     nodeId: string,
     styles: Record<string, string | null> | null,
@@ -203,7 +185,6 @@ export interface DesignFrameRuntimeConnection {
     targetSourceVersion: string,
     commit: boolean,
     signal?: AbortSignal,
-    /** Extra boxes to measure at the restored generation (the selection). */
     measure?: readonly string[],
   ): Promise<DesignRuntimeStyleCommit>;
   /** Opt-in pending history presentation, isolated from commit baselines. */
@@ -241,8 +222,7 @@ export interface DesignFrameRuntimeConnection {
     scale?: number,
     signal?: AbortSignal,
     priority?: DesignCapturePriority,
-    /** `isolate` pictures the node alone on transparency; older runtimes
-     * ignore it and answer with a crop of the frame. */
+    /** New runtimes isolate the node on transparency; older ones return a frame crop. */
     options?: { isolate?: boolean },
   ): Promise<DesignRuntimeScreenshot>;
   captureViewportScreenshot(
@@ -254,10 +234,7 @@ export interface DesignFrameRuntimeConnection {
   cancelCaptures?(): void;
   /** true only after the iframe document was actually removed/navigated. */
   destroy(documentDisposed?: boolean): void;
-  /** Take the frame back after a replacement that retired this connection
-   * was abandoned (an undo to the generation still displayed). Only a
-   * retired connection, whose runtime was never torn down, can; false
-   * otherwise. */
+  /** Reclaim a retired document only while its port and runtime are still intact. */
   reinstate?(): boolean;
 }
 
@@ -282,8 +259,7 @@ function runtimeError(
   return new DesignFrameRuntimeError(message, code, retryable);
 }
 
-/** Optional provenance is advisory: a malformed value from the untrusted
- * frame is dropped rather than failing the whole details payload. */
+/** Malformed optional provenance from the untrusted frame must not invalidate the rest of the reply. */
 function dropMalformedAuthoredStyles(details: object): void {
   const record = details as { authoredStyles?: unknown };
   if (
@@ -484,7 +460,6 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
   }
 
   supports(method: DesignRuntimeMethod): boolean {
-    // Before the handshake nothing is known; a caller must keep its fallback.
     return this.methods?.has(method) ?? false;
   }
 
@@ -510,8 +485,7 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
         this.callbacks.onReady?.(message.payload.capabilities);
         this.callbacks.onSnapshot?.(message.payload.snapshot, "ready");
       } else if (message.event === "painted") {
-        // This port is the document's identity; a same-document generation
-        // adoption between ready and its next frame still presented it.
+        // The same port still owns the first paint after an in-place generation change.
         if (this.methods !== null) this.callbacks.onPainted?.();
       } else if (message.event === "playbackStopped") {
         if (this.supports("setPlayback") && message.payload.sourceVersion === this.expectedSourceVersion) {
@@ -569,9 +543,7 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
     args: Record<string, unknown>,
     signal?: AbortSignal,
   ): Promise<unknown> {
-    // A commit changes the iframe's version before its reply reaches this
-    // channel. Hold subsequent requests for that local handshake so they carry
-    // the accepted version. File persistence never enters this short lane.
+    // Queue requests only through generation adoption, not file persistence, so they carry the accepted source version.
     return this.generationTransition
       ? this.generationTransition.then(() =>
           this.sendRequest(method, args, signal),
@@ -623,8 +595,7 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
             if (!pending) return;
             if (pending.capture) {
               pending.cancellation = runtimeError("request cancelled", "CANCELLED", false);
-              // Legacy runtimes suppress cancelled replies. Let their already
-              // bounded capture finish; retain admission until response/disposal.
+              // Legacy runtimes drop cancelled replies; wait for their bounded capture to finish before releasing admission.
               if (this.captureCompletion) this.cancel(requestId);
               return;
             }
@@ -1254,8 +1225,6 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
     this.channel.port1.close();
   }
 
-  /** Retired at a handoff, its runtime not yet told to tear down: the
-   * outgoing document still paints until its buffer unmounts. */
   private teardownDeferred = false;
 
   private postTeardown(): void {
@@ -1268,18 +1237,13 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
     this.channel.port1.postMessage(teardown);
   }
 
-  /** Give up authority to a replacement that has connected, while this
-   * document still paints until its buffer is swapped out. Teardown would make
-   * the runtime restore every preview (an edited text, styles) under the
-   * user's eyes for the frames before that swap; it waits for `destroy`. */
+  /** Defer teardown until the outgoing buffer unmounts so its visible previews do not revert before the swap. */
   retire(): void {
     if (this.destroyed) return;
     this.teardownDeferred = true;
     this.destroy();
   }
 
-  /** Undo a retirement: the port is still open and the runtime still holds
-   * this document's handshake, so requests can flow again. */
   revive(): boolean {
     if (!this.destroyed || !this.teardownDeferred) return false;
     this.teardownDeferred = false;
@@ -1300,7 +1264,6 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
       }
       return;
     }
-    // A disposed document has nothing left to restore.
     if (documentDisposed) this.teardownDeferred = false;
     if (!this.destroyed) this.cancelCaptures();
     if (!this.destroyed && !this.teardownDeferred) this.postTeardown();
@@ -1365,9 +1328,7 @@ export function connectDesignFrameRuntime(
       },
     },
   );
-  // An HTTP error document also fires iframe.onload. Only a validated runtime
-  // handshake makes it usable for hit testing and edits. Keep an outgoing
-  // buffered document available until its replacement has actually connected.
+  // Even an HTTP error fires iframe.onload; only a validated handshake can transfer editable authority.
   connectingByFrame.set(key, connection);
   connection.reinstate = () => {
     if (!connection.revive()) return false;
@@ -1399,8 +1360,7 @@ export function designFrameRuntime(
   return connectionsByFrame.get(frameKey(workspaceId, frame)) ?? null;
 }
 
-/** Wait for editable authority, including an incoming replacement while the
- * outgoing document still paints. One bounded event subscription, no polling. */
+/** Wait by subscription for editable authority while the outgoing document may still be visible. */
 export function waitForDesignFrameRuntime(
   workspaceId: string,
   frame: string,

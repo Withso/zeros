@@ -6,9 +6,6 @@ import type { CloudWorkspaceDocument } from "./cloud-workspace-contract";
 import { ControlPlaneError } from "../features/team/control-plane";
 export { CloudWorkspaceSharingSchema, sharingOf, type CloudWorkspaceSharing } from "./team-sharing-schema";
 
-/** Team sharing phase 1 (team-sharing-wire.md section 4). Every route here
- * carries X-Zeros-Team-Sharing: 1; a control plane without sharing answers
- * the old creator-only shapes, which the catalog keeps apart. */
 const uuid = z.string().uuid();
 const key = () => crypto.randomUUID();
 
@@ -21,7 +18,7 @@ export const OrganizationMemberSchema = z.object({
 }).passthrough();
 export interface OrganizationMember { id: string; name: string; avatarUrl: string | null; role: string | null }
 
-/** Every member of the organization (readable by every member): names and avatars for Home, the Team list and avatars. */
+/** The roster is readable by any organization member. */
 export async function listOrganizationMembers(organizationId: string): Promise<OrganizationMember[]> {
   const { members } = await cloudAccountRequest(`/v1/organizations/${encodeURIComponent(uuid.parse(organizationId))}/members`,
     z.object({ members: z.array(OrganizationMemberSchema).max(5000) }).passthrough());
@@ -55,8 +52,7 @@ export async function listCloudWorkspaceFollowers(target: CloudWorkspaceTarget):
   return ids;
 }
 
-/** Team sharing 3B: who the Creator or an admin may make the Creator. agentLogins (presentation only) are the agents that
- * person could run turns with; eligibility never depends on them. */
+/** Agent login availability is presentation-only and never determines Creator eligibility. */
 const revision = z.string().regex(/^[1-9][0-9]{0,18}$/);
 const agentLogins = z.object({ claude: z.literal(true).optional(), codex: z.literal(true).optional(), cursor: z.literal(true).optional() }).strict();
 export const ReassignCandidateSchema = z.union([
@@ -65,7 +61,7 @@ export const ReassignCandidateSchema = z.union([
 ]);
 export type ReassignCandidate = z.infer<typeof ReassignCandidateSchema>;
 
-/** Every page of one Creator revision (up to 200 per page, 5 pages); a page of another revision is creator_changed. */
+/** Reject cross-revision pages rather than presenting candidates for mixed Creator revisions. */
 export async function listReassignCandidates(target: CloudWorkspaceTarget, signal?: AbortSignal): Promise<{ creatorRevision: string; candidates: ReassignCandidate[] }> {
   const candidates: ReassignCandidate[] = [];
   let cursor: string | null = null, held: string | undefined;
@@ -92,7 +88,7 @@ export async function reassignCloudWorkspace(target: CloudWorkspaceTarget, reque
   }).passthrough(), { body: { requestId: uuid.parse(request.requestId), toUserId: uuid.parse(request.toUserId),
     expectedCreatorUserId: request.expectedCreatorUserId === null ? null : uuid.parse(request.expectedCreatorUserId),
     expectedCreatorRevision: revision.parse(request.expectedCreatorRevision) }, idempotencyKey: request.requestId }, { teamSharing: true });
-  // The reply's own workspace carries teamSharing/teamOwnership at the reply's top level.
+  // The server puts negotiation flags on the envelope, not inside the workspace.
   const flags = reply as { teamSharing?: unknown; teamOwnership?: unknown };
   const workspace = cloudV2Document(CloudV2WorkspaceSchema.parse({ ...reply.workspace, ...(flags.teamSharing === 1 ? { teamSharing: 1 } : {}), ...(flags.teamOwnership === 1 ? { teamOwnership: 1 } : {}) }));
   return { workspace, reassignment: reply.reassignment };

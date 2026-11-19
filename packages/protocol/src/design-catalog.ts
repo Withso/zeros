@@ -14,13 +14,11 @@ export const DESIGN_CATALOG_READ_CAPABILITY = "design.catalog.read.v1";
 export const DESIGN_CATALOG_READ_OPERATION = "design.catalog.read";
 export const DESIGN_CATALOG_BATCH_ENTRIES = 256;
 export const DESIGN_CATALOG_BATCH_BYTES = 256 * 1024;
-/** A Local engine with this capability answers wide batches. Every batch
- * revalidates the whole catalog file, so a 26,000-frame directory read 256 at
- * a time spent ~1 s on 102 round trips before its canvas could open. */
+/** Wider batches reduce catalog revalidation and round trips; opt in only for engines advertising support. */
 export const DESIGN_CATALOG_WIDE_BATCHES_CAPABILITY = "design.catalog.read.wide.v1";
 export const DESIGN_CATALOG_WIDE_BATCH_ENTRIES = 4096;
 export const DESIGN_CATALOG_WIDE_BATCH_BYTES = 1024 * 1024;
-/** Every admissible directory fits; byte budgets bound what a read retains. */
+/** The descriptor limit covers every admissible directory; retention also has a byte budget. */
 export const DESIGN_CATALOG_DESCRIPTOR_LIMIT =
   DESIGN_MAX_PAGES * DESIGN_MAX_FRAMES_PER_PAGE;
 
@@ -182,14 +180,12 @@ export type DesignCatalogFrame = z.infer<typeof designCatalogFrameSchema>;
 export type DesignCatalogBatch = z.infer<typeof designCatalogBatchSchema>;
 export type DesignCatalogFailure = z.infer<typeof designCatalogFailureSchema>;
 export type DesignCatalogReply = z.infer<typeof designCatalogReplySchema>;
-/** Local navigation and bounded authoritative preparation; opt in only after
- * capability negotiation. Catalog revisions never stand in for source hashes. */
+/** Negotiate this capability before lazy preparation; catalog revisions cannot replace source hashes. */
 export const DESIGN_LAZY_PREPARATION_CAPABILITY = "design.preparation.v1";
 export const DESIGN_COMPONENT_IDENTITY_CAPABILITY = "design.component-identity.v1";
 export const DESIGN_COMPONENT_IDENTITY_PARAM = "includeComponentIdentity";
 export const DESIGN_MUTATION_SNAPSHOTS_CAPABILITY = "design.mutation-snapshots.v1";
-/** Complete metadata plus only the source generations affected by a write.
- * Other documents must be prepared on demand before they authorize edits. */
+/** Only sources affected by the write are ready; prepare other sources before authorizing edits. */
 export const designMutationCatalogSchema = z.object({
   revision,
   frames: z.array(designCatalogFrameSchema).max(DESIGN_CATALOG_DESCRIPTOR_LIMIT),
@@ -201,8 +197,7 @@ export const designNavigationReadSchema = z.object({
   pageHashes: z.literal(true).optional(),
 }).strict();
 
-/** Write acknowledgements carry every page's summary and content hash, but
- * frame descriptors only for whole pages whose hash the client lacks. */
+/** Write acknowledgements carry every page hash, but frame descriptors only for pages whose hash the reader lacks. */
 export const DESIGN_PAGE_SCOPED_MUTATIONS_CAPABILITY = "design.page-scoped-mutations.v1";
 const pageHash = z.string().regex(/^[a-f0-9]{32}$/);
 export const designPageHashesSchema = z
@@ -260,18 +255,14 @@ export const designFramesPrepareSchema = z.object({
   componentOptions: z.literal(true).optional(),
   /** Only requested after design.component-identity.v1 capability negotiation. */
   includeComponentIdentity: z.literal(true).optional(),
-  /** Of `files`, those whose source lint rows the reply should carry. Only
-   * requested after design.frames.prepare-lint.v1 capability negotiation. */
+  /** Request lint rows for this subset of files only after prepare-lint negotiation. */
   lintFiles: z.array(designFrameFileSchema).min(1).max(16).optional(),
 }).strict();
 
-/** Local engines that lint the frames a preparation names
- * (design.frames.prepare lintFiles) and return their rows. */
+/** Exposes lintFiles on design.frames.prepare. */
 export const DESIGN_FRAMES_PREPARE_LINT_CAPABILITY = "design.frames.prepare-lint.v1";
 
-/** Local engines that answer design.frames.lint: source lint rows for frames
- * a renderer names at the source version it holds. A write acknowledgement
- * carries no rows, so the write lock is never held for lint. */
+/** Read lint rows for specific source versions; write acknowledgements omit rows to keep lint outside the write lock. */
 export const DESIGN_FRAMES_LINT_CAPABILITY = "design.frames.lint.v1";
 const versionedFrameSchema = z.object({ file: designFrameFileSchema, sourceVersion: z.string().regex(/^[a-f0-9]{24}$/) }).strict();
 export const designFramesLintSchema = z.object({
@@ -280,22 +271,13 @@ export const designFramesLintSchema = z.object({
   frames: z.array(versionedFrameSchema).min(1).max(16).refine((frames) => new Set(frames.map((frame) => frame.file)).size === frames.length),
 }).strict();
 
-/** Local engines that name the Design frames a worktree change reaches, as
- * DB_CHANGED "designFrames" (see DbChangedMessage.designFrames). */
+/** DB_CHANGED designFrames names frames reached by a worktree change. */
 export const DESIGN_FRAMES_CHANGES_CAPABILITY = "design.frames.changes.v1";
 
-/** Local engines that report a component frame's declared options, and the
- * instances a frame places, with its prepared record, when asked
- * (design.frames.prepare componentOptions). */
+/** Enables component and instance metadata on design.frames.prepare via componentOptions. */
 export const DESIGN_COMPONENT_OPTIONS_CAPABILITY = "design.component-options.v1";
 
-/** How much of a component's declaration, and of a host's attributes, a
- * record carries. Authored text can exceed any of them; the engine then
- * reports the component without its declaration and names the limit
- * (`exceeds`), so no declaration makes a record fail this schema. The rest
- * of a record is bounded before it gets here: option names by the Design
- * core's own limit, and an instance component's `file` by the frame path
- * rules and the file system's 255-character names, well under 512. */
+/** Over-limit declarations report exceeds rather than losing the component record; non-declaration fields are bounded upstream. */
 export const DESIGN_COMPONENT_RECORD_LIMITS = Object.freeze({
   elements: 160,
   tag: 32,
@@ -305,12 +287,10 @@ export const DESIGN_COMPONENT_RECORD_LIMITS = Object.freeze({
   optionName: 32,
   /** A layer's data-oid, as a bound text or host key. */
   layerId: 256,
-  /** Options one bound text names. */
   boundTextOptions: 8,
 });
 const LIMITS = DESIGN_COMPONENT_RECORD_LIMITS;
 
-/** Which limit a component's declaration exceeds. */
 export const DESIGN_COMPONENT_RECORD_LIMIT_CODES = ["elements", "tag", "attributes", "attribute-name", "attribute-value", "layer-id"] as const;
 export type DesignComponentRecordLimit = (typeof DESIGN_COMPONENT_RECORD_LIMIT_CODES)[number];
 
@@ -323,29 +303,18 @@ const optionReachSchema = z.record(z.string().min(1).max(LIMITS.optionName), z.e
 const boundedRecord = <T extends z.ZodTypeAny>(key: z.ZodString, value: T, max: number) =>
   z.record(key, value).refine((record) => Object.keys(record).length <= max, { message: `At most ${max} entries` });
 const recordLimitSchema = z.enum(DESIGN_COMPONENT_RECORD_LIMIT_CODES);
-/** What a frame shows when options did not apply. "nothing" (no last good
- * render, and the template failed with its defaults too) reaches only a
- * renderer that sent DESIGN_OPTIONS_SHOW_NOTHING_PARAM; older renderers
- * accept only the first two and are told "defaults". */
+/** Send nothing only to a renderer that opted in; older renderers receive defaults instead. */
 const notAppliedSchema = z.enum(["last-good", "defaults", "nothing"]);
 
-/** Local engines that can say a frame shows nothing where options did not
- * apply, to a renderer that asks with DESIGN_OPTIONS_SHOW_NOTHING_PARAM. */
+/** Advertises support for the nothing outcome when options fail. */
 export const DESIGN_OPTIONS_SHOW_NOTHING_CAPABILITY = "design.component-options.shows-nothing.v1";
-/** The Design request parameter a renderer sends once it negotiated
- * DESIGN_OPTIONS_SHOW_NOTHING_CAPABILITY. The engine removes it before the
- * operation reads its parameters. */
+/** Negotiated request flag stripped before the engine dispatches the operation. */
 export const DESIGN_OPTIONS_SHOW_NOTHING_PARAM = "optionsShowNothing";
 
-/** Text a hole fills on a main component frame: the layer (its data-oid)
- * and the options the hole reads (none when it reads only a loop's name),
- * which set it instead of a person. */
+/** Template holes, not the author, set these layers' text; a loop-only binding can list no options. */
 export const DESIGN_COMPONENT_BOUND_TEXT_LIMIT = 512;
 
-/** A frame whose file declares options: the declaration as written (the
- * renderer reads it with the Design core), whether each option reaches the
- * frame only through CSS, and, when its options did not all apply, what the
- * frame shows instead. */
+/** Carries authored options, their CSS or structural reach, and the fallback when values fail. */
 export const designFrameComponentSchema = z.object({
   elements: declarationElementsSchema,
   reach: optionReachSchema,
@@ -367,9 +336,7 @@ const LIMIT_PATHS: ReadonlyArray<[RegExp, DesignComponentRecordLimit]> = [
   [/^boundText(\.|$)/, "layer-id"],
 ];
 
-/** A component record as it may be reported: the record itself, or, past a
- * limit, the record without its declaration naming that limit. Checked
- * against the schema itself, so the two cannot disagree. */
+/** Validate with the wire schema before deciding which declaration limit to report. */
 export function designComponentRecordWithinLimits<T extends { elements: unknown[]; reach: Record<string, unknown>; boundText?: unknown }>(
   record: T, schema: z.ZodType = designFrameComponentSchema,
 ): T | (Omit<T, "boundText"> & { exceeds: DesignComponentRecordLimit }) {
@@ -377,13 +344,12 @@ export function designComponentRecordWithinLimits<T extends { elements: unknown[
   if (parsed.success) return record;
   const issue = parsed.error.issues[0]!;
   const at = issue.path.join(".");
-  // Anything else the schema refuses is the declaration's own shape.
+  // Unmapped issues are treated as declaration-shape errors.
   const exceeds = LIMIT_PATHS.find(([pattern]) => pattern.test(at))?.[1] ?? "elements";
   const { boundText: _omitted, ...rest } = record;
   return { ...rest, elements: [], reach: {}, exceeds };
 }
 
-/** What a person and design validate are told about such a component. */
 export function designComponentRecordLimitMessage(component: string, limit: DesignComponentRecordLimit): string {
   switch (limit) {
     case "elements":
@@ -401,12 +367,9 @@ export function designComponentRecordLimitMessage(component: string, limit: Desi
   }
 }
 
-/** Instances a frame places, at its top level (the layers it owns), and the
- * components they are of. Bounded: a frame past these limits reports none,
- * and its instances show no Options. */
+/** Only instances owned by the frame count; over-limit frames omit their Options record. */
 export const DESIGN_FRAME_INSTANCE_LIMITS = { components: 32, hosts: 256, slots: 16, slotted: 64 } as const;
 const componentNameSchema = z.string().regex(/^[a-z][a-z0-9-]{0,63}$/);
-/** A component an instance is of, as `instances.components` reports it. */
 export const designFrameInstanceComponentSchema = z.object({
   elements: declarationElementsSchema,
   reach: optionReachSchema,
@@ -429,8 +392,7 @@ export const designFrameInstancesSchema = z.object({
     attributes: boundedRecord(z.string().min(1).max(LIMITS.attributeName), z.string().max(LIMITS.attributeValue), LIMITS.attributes),
     /** Some of its values did not apply. */
     failed: z.literal(true).optional(),
-    /** Attributes it sets that name no option of its component, as written;
-     * the component ignores them. */
+    /** Authored attributes the component ignores because they name no option. */
     ignored: boundedRecord(z.string().min(1).max(LIMITS.attributeName), z.string().max(LIMITS.attributeValue), LIMITS.attributes).optional(),
     /** Its part overrides: each part (lowercased, without a repeat's "#n")
      * to the declarations its zd-style-<part> attribute sets, as written. */
@@ -438,19 +400,11 @@ export const designFrameInstancesSchema = z.object({
     /** The host's own style, as written, when its main's root layer is its
      * box: what the instance overrides on that root. */
     style: z.string().min(1).max(LIMITS.attributeValue).optional(),
-    /** No component source has this name any more: its main frame or file
-     * was deleted, renamed or registered under another name. A source that is
-     * there but unusable (too large, unsafe, or named twice) is reported as a
-     * component error instead. Such a host has no entry in `components` and
-     * renders as an empty element. */
+    /** A missing source has no component entry and renders empty; a present but unusable source reports an error instead. */
     missing: z.literal(true).optional(),
-    /** A plain component's instance whose default slot it fills with text
-     * alone: that text, as written (decoded). Absent when it places elements
-     * there, or its component has no default slot. */
+    /** Only a text-only default slot reports its decoded authored text. */
     text: z.string().max(LIMITS.attributeValue).optional(),
-    /** The frame's own layers (data-oid) it places in each slot of its
-     * component, in order; "" is the default slot. A slot holding more than
-     * the limit, or a layer whose id is too long, is left out. */
+    /** Slot layer IDs in order; the empty key means default, and over-limit slots are omitted. */
     slotted: boundedRecord(z.string().max(LIMITS.optionName),
       z.array(z.string().min(1).max(LIMITS.layerId)).min(1).max(DESIGN_FRAME_INSTANCE_LIMITS.slotted), DESIGN_FRAME_INSTANCE_LIMITS.slots).optional(),
   }).strict(), DESIGN_FRAME_INSTANCE_LIMITS.hosts),
@@ -486,8 +440,7 @@ export const designPreparedFrameSchema = designCatalogFrameSchema.pick({
   componentIdentity: designComponentIdentitySchema.nullable().optional(),
 }).strict();
 const PREPARE_REPLY_ERRORS = 16;
-/** Source lint rows a preparation carries per frame; past this a frame's
- * rows are cut to the most severe. */
+/** When per-frame lint rows hit the cap, keep the most severe. */
 export const DESIGN_PREPARED_LINT_ROWS_PER_FRAME = 256;
 const preparedLintSchema = z.object({
   /** Every file linted; a file listed with no rows has none. */
@@ -518,15 +471,11 @@ export const designFramesLintReplySchema = preparedLintSchema.extend({
 }).strict();
 const prepareReplyEnvelopeSchema = designFramesPrepareReplySchema.extend({ frames: z.array(z.unknown()).max(16), lint: z.unknown().optional() });
 
-/** The problem a frame shows when its prepared record does not hold. */
 export const DESIGN_PREPARED_FRAME_INVALID_MESSAGE = "Zeros could not read this frame's prepared record.";
 
-/** A preparation reply, with each frame's record checked on its own: one
- * that does not hold becomes that frame's error and the others are kept. A
- * record that names no frame cannot be placed, so the reply is refused. */
+/** A malformed frame becomes an error if it names a valid file; otherwise reject the reply. */
 export function parseDesignFramesPrepareReply(raw: unknown, negotiated: { optionsShowNothing?: boolean } = {}): z.infer<typeof designFramesPrepareReplySchema> {
-  // The envelope is checked whole and each record once; only the error
-  // bound, which failed records add to, is checked again by hand.
+  // Recheck the error cap because malformed frame records add errors after envelope validation.
   const envelope = prepareReplyEnvelopeSchema.parse(raw);
   const frames: z.infer<typeof designPreparedFrameSchema>[] = [];
   const errors = [...envelope.errors];
@@ -540,7 +489,7 @@ export function parseDesignFramesPrepareReply(raw: unknown, negotiated: { option
     errors.push({ file: designFrameFileSchema.parse((candidate as { file?: unknown } | null)?.file), message: DESIGN_PREPARED_FRAME_INVALID_MESSAGE });
   }
   if (errors.length > PREPARE_REPLY_ERRORS) throw new Error(`A preparation reply reports at most ${PREPARE_REPLY_ERRORS} frame errors.`);
-  // Lint rows are advisory: rows that do not hold are dropped, never the frames.
+  // A malformed advisory lint record never invalidates prepared frames.
   const { lint: rawLint, ...rest } = envelope;
   const lint = rawLint === undefined ? undefined : preparedLintSchema.safeParse(rawLint);
   return { ...rest, frames, errors, ...(lint?.success ? { lint: lint.data } : {}) };

@@ -17,8 +17,6 @@ import type { SettingsDoc } from "../../platform/bridge/workspace-bridge";
 export type SimulatorSettingKey = keyof SimulatorSettings;
 export type SimulatorBooleanSetting = "enabled" | "show_agent_touches";
 
-/** Settings → Agents → Simulators, with its copy beside the keys it writes
- * so the contract stays testable without mounting the settings bridge. */
 export const SIMULATOR_SETTINGS_ROWS = {
   enabled: {
     label: "Let agents use simulators",
@@ -56,8 +54,7 @@ export function simulatorSettingsFromEffective(
   return simulatorSettings(effective?.simulators);
 }
 
-/** What DeviceHub in Electron main applies: idle shutdown, whether agents may
- * use simulators, and agent touch dots. */
+// Apply the rollout gate before sending preferences to the Electron DeviceHub.
 export function simulatorPreferencesFromEffective(
   effective: SettingsDoc | null | undefined,
   availability: Pick<AgentControlAvailability, "simulators">,
@@ -67,7 +64,6 @@ export function simulatorPreferencesFromEffective(
   );
 }
 
-/** The simulator tools route, which is the same for every agent family. */
 export function simulatorToolRouteFromEffective(
   effective: SettingsDoc | null | undefined,
   availability: Pick<AgentControlAvailability, "simulators">,
@@ -92,9 +88,7 @@ export function simulatorSettingIsManaged(
   return sources?.[`simulators.${key}`] === "managed";
 }
 
-/** An optimistic value yields once a newer resolved snapshot shows it, or
- * managed policy takes the key. Serialized writes can broadcast an older
- * intermediate value first, which must not flicker back. */
+// A settled edit yields only to a new matching snapshot or managed policy, not an intermediate write.
 export function simulatorSettingSnapshotSupersedesPending<K extends SimulatorSettingKey>(input: {
   key: K;
   value: SimulatorSettings[K];

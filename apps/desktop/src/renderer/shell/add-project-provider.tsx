@@ -219,6 +219,7 @@ export function AddProjectProvider({
         }
         const existing = leftmostLiveWorkspace(
           peekWorkspacesFor(project.repoSlug),
+          project.repoRoot,
         );
         if (existing) openWorkspace(existing);
         else
@@ -244,7 +245,10 @@ export function AddProjectProvider({
           isGitRepository: inspect.isRepo,
         });
         notifyProjectsChanged();
-        if (autoCreate && (await repoNeedsFirstWorkspace(project.repoSlug))) {
+        if (
+          autoCreate &&
+          (await repoNeedsFirstWorkspace(project.repoSlug, project.repoRoot))
+        ) {
           if (
             await createWorkspaceForProject({
               project,

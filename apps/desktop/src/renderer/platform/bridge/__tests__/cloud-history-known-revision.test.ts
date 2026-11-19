@@ -5,8 +5,7 @@ import { cloudScopedId, cloudWorkspaceKey } from "../cloud-workspace-key";
 const target = { organizationId: "11111111-1111-4111-8111-111111111111", workspaceId: "22222222-2222-4222-8222-222222222222" };
 const chat = (id: string, historyCache?: unknown) => ({ id, folder: "/home/user/Owner/repo", title: id, ...(historyCache ? { historyCache } : {}) });
 
-// Launch slice: a transcript read carries the chat's revision from the chats.list snapshot that proved access, so the
-// local transcript cache answers an unchanged chat with no read and continues a changed one once.
+// Only a list snapshot that proved access can supply a cached revision for the transcript.
 describe("mirror transcript reads carry the chats.list revision", () => {
   it("passes historyCache for a listed chat, and nothing for an unlisted chat, an older page or an N-1 row", async () => {
     const readHistory = vi.fn(async (_target: unknown, op: string, _params?: Record<string, unknown>, _options?: unknown) => op === "chats.list"
@@ -66,7 +65,6 @@ describe("mirror transcript reads carry the chats.list revision", () => {
     try {
       await window(200);
       expect(lastKnown()).toEqual({ known: { revision: 7, messageCount: 7 } });
-      // A change event: the server moved the chat to revision 8.
       revision = 8; client.refreshHistoryWorkspace(target);
       await window(199);
       expect(lastKnown()).toEqual({ known: { revision: 8, messageCount: 8 } });
@@ -113,4 +111,3 @@ describe("mirror transcript reads carry the chats.list revision", () => {
     } finally { client.dispose(); }
   });
 });
-

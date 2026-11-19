@@ -2,9 +2,7 @@ import type { CloudWorkspaceTarget } from "./bridge/cloud-workspace-key";
 import { getCloudV2Workspace } from "./cloud-v2";
 import { reportWorkspaceAccessEnded, workspaceAccessScope } from "./team-sharing-registry";
 
-/** D2: did this person really lose access? One exact read of the workspace document with the renderer's normal team
- * headers (a header-less read 404s for every non-Creator). Only 404, or 403 member_access_revoked, is "ended"; a
- * successful read is "present"; anything else (5xx, 429, network, timeout, another 403) is "unknown", never ended. */
+// Use normal team headers to avoid a false 404 for non-creators. Only 404 and 403 member_access_revoked prove access ended.
 export async function confirmCloudWorkspaceAccessEnded(target: CloudWorkspaceTarget): Promise<"ended" | "present" | "unknown"> {
   try { await getCloudV2Workspace(target); return "present"; }
   catch (error) {
@@ -13,8 +11,7 @@ export async function confirmCloudWorkspaceAccessEnded(target: CloudWorkspaceTar
   }
 }
 
-/** The events stream ended for this person: report access ended only once confirmed, and only for the account session
- * that was signed in when the stream ended (a late reply after an account switch is dropped). */
+// Fence confirmed stream termination to the account session that observed it.
 export async function reportIfCloudWorkspaceAccessEnded(target: CloudWorkspaceTarget,
   confirm: typeof confirmCloudWorkspaceAccessEnded = confirmCloudWorkspaceAccessEnded): Promise<"ended" | "present" | "unknown"> {
   const session = workspaceAccessScope();

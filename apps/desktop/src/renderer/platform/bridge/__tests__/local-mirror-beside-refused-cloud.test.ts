@@ -43,7 +43,6 @@ describe("Local chat mirror beside a refused cloud owner", () => {
       await expect(bridgeChatBulkUpsert(client, [row(a, updatedAt), row(b, updatedAt), row("/personal/local", updatedAt), row("/organization/local", updatedAt)])).rejects.toBe(denied);
     expect(open.mock.calls.filter(([target]) => target.workspaceId === a.workspaceId)).toHaveLength(1);
     expect(open.mock.calls.filter(([target]) => target.workspaceId === b.workspaceId)).toHaveLength(1);
-    // Both Local batches still settle beside the refused cloud batch.
     expect(local).toHaveBeenCalledTimes(2);
     expect(local.mock.calls[1][0]).toMatchObject({ params: { chats: [{ folder: "/personal/local", updatedAt: 30 }, { folder: "/organization/local", updatedAt: 30 }] } });
     expect(other.request.mock.calls.filter(([message]) => message.op === "chats.bulkUpsert")).toHaveLength(2);

@@ -1,6 +1,4 @@
-// Intent prefetch for Settings → Integrations. Keep this free of React so
-// pointer and keyboard-focus handlers can warm the exact auth snapshot before
-// the panel's urgent navigation render.
+// Keep this React-free so pointer and focus handlers can warm the auth cache.
 
 import type { GithubAuthSnapshot } from "@zeros/protocol/github-auth";
 
@@ -16,7 +14,6 @@ export function prefetchGithubAuthSnapshot(
   void ghAuthStatusCache
     .load("auth", fetcher, { maxAgeMs: GITHUB_READ_MAX_AGE_MS })
     .catch(() => {
-      // The cache retains any confirmed snapshot and carries the error for the
-      // panel to render. Intent itself must never reject into an event handler.
+      // The cache records the failure; do not reject into the intent handler.
     });
 }

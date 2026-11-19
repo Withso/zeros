@@ -1,9 +1,4 @@
-// Simulators: the contract between DeviceHub in Electron main and the
-// Simulator tab, Settings > Simulators and the idle-shutdown toasts.
-//
-// Device ids come from the platform's own tools (a CoreSimulator UDID, an
-// Android Virtual Device name). The renderer only ever echoes ids it read in
-// a hub snapshot; main validates every id and input again.
+// Device IDs originate with CoreSimulator or the Android tools; main revalidates any ID and input echoed by the renderer.
 
 export const SIMULATOR_PLATFORMS = ["ios", "android"] as const;
 export type SimulatorPlatform = (typeof SIMULATOR_PLATFORMS)[number];
@@ -19,8 +14,7 @@ export function simulatorPlatformLabel(platform: SimulatorPlatform): string {
   return platform === "ios" ? "iOS Simulator" : "Android Simulator";
 }
 
-// Ids reach simctl and the emulator as arguments, so one never starts like a
-// flag or a relative path.
+// IDs become tool arguments; reject flag and path prefixes.
 const DEVICE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
 export function isSimulatorDeviceId(value: unknown): value is string {
@@ -85,26 +79,17 @@ export function isSimulatorOrientation(value: unknown): value is SimulatorOrient
 export interface SimulatorDevice {
   id: string;
   platform: SimulatorPlatform;
-  /** As the platform names it, such as "iPhone 17". */
   name: string;
-  /** Such as "iOS 27.0". */
   osLabel: string;
   formFactor: SimulatorFormFactor;
   state: SimulatorDeviceState;
-  /** Zeros started it, so only Zeros' idle shutdown may stop it. */
+  /** Idle shutdown may stop only devices started by Zeros. */
   bootedByZeros: boolean;
-  /**
-   * Set only after Zeros turns a booted device. Missing means portrait; the
-   * stream stays a portrait framebuffer either way.
-   */
+  /** Absent orientation defaults to portrait; rotating the view does not rotate the native framebuffer. */
   orientation?: SimulatorOrientation;
 }
 
-/**
- * - `tools-missing`: no Xcode (Command Line Tools alone have no simulators).
- * - `runtime-missing`: Xcode is there but has no runtime for this platform.
- * - `unsupported`: not a Mac.
- */
+/** tools-missing means the platform tools are absent (Command Line Tools alone are not enough for iOS); runtime-missing means the tools exist but a runtime is missing. unsupported means the host is not macOS. */
 export const SIMULATOR_SETUP_STATES = [
   "checking",
   "ready",
@@ -123,15 +108,12 @@ export interface SimulatorRuntimeDownload {
 export interface SimulatorSetupStatus {
   platform: SimulatorPlatform;
   state: SimulatorSetupState;
-  /** Such as "Xcode 27.0", once found. */
   toolLabel: string | null;
   download: SimulatorRuntimeDownload | null;
-  /** Android: what "Create device" makes, such as "Pixel 10 with Android
-   * 17", or null when Zeros can't make one on this Mac. */
+  /** Android: device that Create device would make, or null when unavailable. */
   newDevice?: string | null;
-  /** Android: "Create device" is running. */
   creating?: boolean;
-  /** Android: Android Studio is installed, so setup can open it. */
+  /** Android only: setup can open Android Studio when installed. */
   studioInstalled?: boolean;
 }
 
@@ -265,7 +247,6 @@ export function readSimulatorHubSnapshot(value: unknown): SimulatorHubSnapshot |
   return { version: SIMULATOR_HUB_VERSION, devices, setup, idleWarnings };
 }
 
-/** What the user should hear before a boot starts. */
 export const SIMULATOR_BOOT_WARNINGS = ["low-memory", "many-devices"] as const;
 export type SimulatorBootWarning = (typeof SIMULATOR_BOOT_WARNINGS)[number];
 
@@ -331,8 +312,6 @@ export const DEFAULT_SIMULATOR_SETTINGS: Readonly<SimulatorSettings> = {
   show_agent_touches: true,
 };
 
-/** The `[simulators]` table with the shipped defaults for anything missing
- * or malformed. */
 export function simulatorSettings(raw: unknown): SimulatorSettings {
   const table = plainRecord(raw) ?? {};
   const flag = (key: "enabled" | "show_agent_touches") =>
@@ -384,10 +363,8 @@ export function readSimulatorPreferences(
   };
 }
 
-/** The device screen a live view draws, sent when a view starts. */
 export interface SimulatorScreen {
-  /** Framebuffer pixels in the device's natural orientation: portrait, except
-   * on Android tablets that are landscape by nature. */
+  /** Framebuffer pixels use native orientation, including landscape-first Android tablets. */
   widthPx: number;
   heightPx: number;
   /** Pixels per point. Input coordinates are in points. */
@@ -470,25 +447,18 @@ export const SIMULATOR_FRAME_SLICES = [
 ] as const;
 export type SimulatorFrameSlice = (typeof SIMULATOR_FRAME_SLICES)[number];
 
-/** The device's own frame, from the user's Xcode or Android Studio, laid out
- * for its screen, in points from the frame's top-left. Never bundled with
- * Zeros. A frame has either `slices` or `image`. */
+/** Frame art comes from local Xcode or Android Studio, never the bundle. Coordinates are in points from the frame's top-left. Supply exactly one of `slices` or `image`. */
 export interface SimulatorDeviceFrame {
   width: number;
   height: number;
-  /** Where the screen sits inside the frame. */
   screen: { x: number; y: number; width: number; height: number };
-  /** Xcode's nine-slice pieces; the corners keep their size, edges stretch.
-   * The screen draws over the frame's opaque inner part. */
+  /** Xcode nine-slice corners retain size; edges stretch and the screen overlays the center. */
   slices?: Record<SimulatorFrameSlice, SimulatorFrameImage>;
-  /** Android Studio's picture of the whole device, drawn from the frame's
-   * top-left behind the screen. */
+  /** Android Studio supplies one image drawn behind the screen. */
   image?: SimulatorFrameImage;
-  /** Drawn over the screen, the screen's size: it rounds the corners and
-   * covers the camera. */
+  /** The screen-sized overlay rounds corners and covers the camera. */
   mask?: SimulatorFrameImage;
-  /** Hardware buttons, such as "power" or "home". Side buttons draw behind
-   * the frame and a home button over it. Positions may be negative. */
+  /** Side buttons draw behind the frame and may use negative offsets; the home button draws above it. */
   buttons: Array<{
     name: string;
     image: SimulatorFrameImage;
@@ -496,7 +466,6 @@ export interface SimulatorDeviceFrame {
     y: number;
     onTop: boolean;
   }>;
-  /** Room the buttons need outside the frame. */
   outset: { top: number; left: number; bottom: number; right: number };
 }
 
@@ -579,8 +548,6 @@ export function readSimulatorDeviceFrame(value: unknown): SimulatorDeviceFrame |
   };
 }
 
-/** How the tab draws a device in any state: its screen, and Xcode's frame for
- * it when there is one. */
 export interface SimulatorDeviceShape {
   screen: SimulatorScreen;
   frame: SimulatorDeviceFrame | null;
@@ -749,10 +716,7 @@ export function readSimulatorInput(value: unknown): SimulatorInput | null {
 export const SIMULATOR_TOUCH_PHASES = ["down", "move", "up", "cancel"] as const;
 export type SimulatorTouchPhase = (typeof SIMULATOR_TOUCH_PHASES)[number];
 
-/** Renderer → main: one step of the user's finger on a live view, in device
- * points, sent as it happens so the device follows the finger. `second` is
- * the other finger of an Option-drag pinch. A cancel lifts the finger too,
- * but the press doesn't count as a gesture. */
+/** Stream touches in device points; Option-drag adds a second finger and cancel lifts without logging a gesture. */
 export interface SimulatorTouch {
   phase: SimulatorTouchPhase;
   at: SimulatorPoint;
@@ -769,19 +733,16 @@ export function readSimulatorTouch(value: unknown): SimulatorTouch | null {
   return second ? { phase: record.phase, at, second } : null;
 }
 
-/** Movement under this many points is still a tap. */
 const TAP_SLOP_POINTS = 6;
 const LONG_PRESS_MS = 500;
-/** Two fingers closer than this can't show how far they spread. */
+/** Require enough initial spread to distinguish a pinch from finger motion noise. */
 const MIN_PINCH_SPREAD = 20;
 const MIN_PINCH_CHANGE = 0.05;
 
 const pointDistance = (a: SimulatorPoint, b: SimulatorPoint) => Math.hypot(a.x - b.x, a.y - b.y);
 const clampTo = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 
-/** What a whole press from `start` to `end` did: a tap, a long press (a
- * drag that stays put), a swipe, or with two fingers a pinch. Null for a
- * pinch too small to zoom. */
+/** Represent a long press as a stationary drag; do not emit a negligible pinch. */
 export function simulatorPressGesture(
   start: SimulatorTouch,
   end: SimulatorTouch,

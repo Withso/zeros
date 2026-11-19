@@ -8,7 +8,6 @@ const serialized = () => `${JSON.stringify(controlPlaneContractDocument(), null,
 
 describe("control-plane client contract", () => {
   it("matches the committed copy the control plane replays", () => {
-    // Regenerate with `pnpm client-contract:update` and commit the result.
     if (process.env.UPDATE_CLIENT_CONTRACT === "1") writeFileSync(committed, serialized());
     expect(readFileSync(committed, "utf8"), "run `pnpm client-contract:update` and commit desktop-next.json").toBe(serialized());
   });

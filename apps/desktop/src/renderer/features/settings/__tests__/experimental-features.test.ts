@@ -72,8 +72,7 @@ describe("experimental feature flags", () => {
   });
 
   it("reads off for an existing user who only ever set another flag", async () => {
-    // The rollout contract: widening the union must not turn a new flag on for
-    // anyone. Every shipped install already holds a blob like this one.
+    // A saved blob lacking a newly introduced flag must not opt an existing install in.
     const backing = installLocalStorageStub();
     backing.set(
       "zeros.experimentalFeatures",
@@ -123,7 +122,7 @@ describe("experimental feature flags", () => {
   });
 
   it("degrades to off when localStorage is unavailable", async () => {
-    // No stub installed — the node env genuinely lacks localStorage.
+    // Leave localStorage unstubbed so this exercises the Node test environment without usable storage.
     const store = await freshStore();
     expect(
       store.isExperimentalEnabled("hideArchivedWorkspacesAfter15Days"),

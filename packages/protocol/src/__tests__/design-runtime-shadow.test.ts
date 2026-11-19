@@ -14,8 +14,6 @@ type RuntimeWindow = Window & {
   runtimeRequest: (method: string, args: unknown) => Promise<{ ok: boolean; result?: unknown; message: unknown }>;
 };
 
-// A frame serialized from a web component: its visible content lives in a
-// declarative shadow root with its own linked (placeholder) stylesheet.
 const SHADOW_DOCUMENT = `<!doctype html><html><head>
 <style data-zeros-source="tokens.css">:root { --diff-bg: rgb(23, 23, 23); } body { margin: 0; } main { padding: 8px; }</style>
 </head><body>
@@ -85,8 +83,7 @@ async function request<T>(page: Page, method: string, args: unknown): Promise<{ 
   return { result: response.result as T, message: response.message };
 }
 
-/** Deep snapshots outgrow Playwright's evaluate() serializer, so summarize in
- * the page what a deep-tree assertion needs. */
+/** Summarize in the page: deep snapshots exceed Playwright's evaluate() serializer limit. */
 async function deepSnapshotSummary(page: Page, leaf: string): Promise<{ valid: boolean; limited: boolean; leafText: string | null }> {
   return page.evaluate(async (leafId) => {
     const response = await (window as unknown as RuntimeWindow).runtimeRequest("getSnapshot", {});
@@ -149,8 +146,7 @@ describe("declarative shadow roots in the design runtime", () => {
     expect(isDesignRuntimeFrameMessage(message)).toBe(true);
     expect(pre.styles.backgroundColor).toBe("rgb(23, 23, 23)");
     expect(pre.authoredStyleProperties).toContain("background-color");
-    // A shadow root's own stylesheet styles only its component, so its tag
-    // rules are this layer's design rather than a shared reset.
+    // A shadow-local tag rule counts as element styling, not a document default.
     expect(pre.authoredStyles?.["background-color"]).toEqual({
       origin: "linked",
       file: "page/shadow.css",
@@ -161,7 +157,7 @@ describe("declarative shadow roots in the design runtime", () => {
     });
     expect(pre.layout?.parentId).toBe("host");
     const { result: host } = await request<DesignRuntimeNodeDetails>(page, "getNodeDetails", { nodeId: "host" });
-    // The host's own fill is reported truthfully; its shadow content paints over it.
+    // Shadow paint can cover the host's own fill without changing its readback.
     expect(host.styles.backgroundColor).toBe("rgb(157, 51, 51)");
     expect(host.textEditable).toBe(false);
     expect(host.childrenLayout?.nodeIds).toEqual(["pre"]);
@@ -268,7 +264,7 @@ describe("slots in the design runtime", () => {
     expect(ids("list")).toEqual(["inner", "extra-slot"]);
     expect(ids("slot")).toEqual(["a", "b"]);
     expect(ids("extra-slot")).toEqual(["extra-fallback"]);
-    // Whitespace around the template is assigned to the default slot.
+    // Whitespace assigned to the default slot suppresses fallback.
     expect(ids("spaced-slot")).toEqual([]);
     expect(ids("bare-slot")).toEqual(["bare-fallback"]);
   });

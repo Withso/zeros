@@ -87,12 +87,9 @@ export function ProviderInformation({
         })
         .catch(() => {});
     };
-    // Opening this tab explicitly refreshes the retained snapshot. Concurrent
-    // mounts share the same request; hidden surfaces/windows neither poll nor
-    // focus-read, including a focus event delivered before effect cleanup.
+    // Refresh the retained snapshot on reveal; mounts share a request, and hidden surfaces ignore focus even before cleanup.
     revalidate(true);
-    // Reveal can retain an old snapshot while refreshing; its reset labels
-    // must reflect elapsed hidden time without waiting for the next clock tick.
+    // Retained reset labels must account for hidden time before the next clock tick.
     setNow(Date.now());
     const clock = setInterval(() => setNow(Date.now()), 60_000);
     const timer = setInterval(

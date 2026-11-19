@@ -38,8 +38,92 @@ import {
   prepareGitCredentialShellEnvironment,
   setGitCredentialSourceForTesting,
 } from "../credential-broker";
+import { cloneRepo } from "../init-clone";
 
 const execFileAsync = promisify(execFile);
+
+async function withSystemConfigGitShim<T>(opts: {
+  directory: string;
+  home: string;
+  locale: string;
+  mode: "missing" | "malformed" | "denied";
+  interceptClone?: boolean;
+  run: (logs: { configLocale: string; cloneLocale: string }) => Promise<T>;
+}): Promise<T> {
+  const realGit = (await execFileAsync("which", ["git"])).stdout.trim();
+  const bin = path.join(opts.directory, "system-config-git-bin");
+  const configLocale = path.join(opts.directory, "system-config-locale");
+  const cloneLocale = path.join(opts.directory, "clone-locale");
+  const keys = [
+    "PATH",
+    "LC_ALL",
+    "HOME",
+    "XDG_CONFIG_HOME",
+    "ZEROS_TEST_REAL_GIT",
+    "ZEROS_TEST_SYSTEM_CONFIG_MODE",
+    "ZEROS_TEST_CONFIG_LOCALE_LOG",
+    "ZEROS_TEST_CLONE_LOCALE_LOG",
+    "ZEROS_TEST_INTERCEPT_CLONE",
+  ];
+  const previous = Object.fromEntries(
+    keys.map((key) => [key, process.env[key]]),
+  );
+  await mkdir(bin, { recursive: true });
+  const executable = path.join(bin, "git");
+  await writeFile(
+    executable,
+    `#!/bin/sh
+if [ "\${1:-}" = "config" ] && [ "\${2:-}" = "--system" ]; then
+  printf '%s' "\${LC_ALL:-}" > "$ZEROS_TEST_CONFIG_LOCALE_LOG"
+  case "\${ZEROS_TEST_SYSTEM_CONFIG_MODE:-missing}" in
+    missing)
+      case "\${LC_ALL:-}" in
+        C) printf '%s\\n' "fatal: unable to read config file '/isolated/system.gitconfig': No such file or directory" >&2 ;;
+        fr*) printf '%s\\n' "fatal: lecture du fichier de configuration '/isolated/system.gitconfig' impossible" >&2 ;;
+        de*) printf '%s\\n' "fatal: Konnte Konfigurationsdatei '/isolated/system.gitconfig' nicht lesen." >&2 ;;
+        *) printf '%s\\n' "fatal: unable to read config file '/isolated/system.gitconfig': No such file or directory" >&2 ;;
+      esac
+      ;;
+    malformed) printf '%s\\n' "fatal: bad config line 1 in '/isolated/system.gitconfig'" >&2 ;;
+    denied) printf '%s\\n' "fatal: unable to read config file '/isolated/system.gitconfig': Permission denied" >&2 ;;
+  esac
+  exit 128
+fi
+for arg in "$@"; do
+  if [ "$arg" = "clone" ]; then
+    printf '%s' "\${LC_ALL:-}" > "$ZEROS_TEST_CLONE_LOCALE_LOG"
+    if [ "\${ZEROS_TEST_INTERCEPT_CLONE:-}" = "1" ]; then
+      printf '%s\\n' "fatal: clone intercepted for test" >&2
+      exit 128
+    fi
+    break
+  fi
+done
+exec "$ZEROS_TEST_REAL_GIT" "$@"
+`,
+    "utf8",
+  );
+  await chmod(executable, 0o700);
+
+  process.env.PATH = `${bin}${path.delimiter}${process.env.PATH ?? ""}`;
+  process.env.LC_ALL = opts.locale;
+  process.env.HOME = opts.home;
+  delete process.env.XDG_CONFIG_HOME;
+  process.env.ZEROS_TEST_REAL_GIT = realGit;
+  process.env.ZEROS_TEST_SYSTEM_CONFIG_MODE = opts.mode;
+  process.env.ZEROS_TEST_CONFIG_LOCALE_LOG = configLocale;
+  process.env.ZEROS_TEST_CLONE_LOCALE_LOG = cloneLocale;
+  process.env.ZEROS_TEST_INTERCEPT_CLONE = opts.interceptClone ? "1" : "0";
+  try {
+    return await opts.run({ configLocale, cloneLocale });
+  } finally {
+    for (const key of keys) {
+      const value = previous[key];
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
 
 describe("redacted Git permission remediation", () => {
   it.each([
@@ -126,10 +210,13 @@ async function startAuthenticatedGitServer(opts: {
 }): Promise<{
   url: string;
   observed: Array<{ username: string; password: string }>;
+  requests: string[];
   close(): Promise<void>;
 }> {
   const observed: Array<{ username: string; password: string }> = [];
+  const requests: string[] = [];
   const server = createServer(async (req, res) => {
+    requests.push(req.url ?? "/");
     const authorization = req.headers.authorization;
     if (!authorization?.startsWith("Basic ")) {
       res.writeHead(401, { "WWW-Authenticate": 'Basic realm="Zeros test"' });
@@ -170,6 +257,7 @@ async function startAuthenticatedGitServer(opts: {
   return {
     url: `http://127.0.0.1:${address.port}/remote.git`,
     observed,
+    requests,
     close: () =>
       new Promise<void>((resolve, reject) => {
         server.close((error) => (error ? reject(error) : resolve()));
@@ -909,6 +997,586 @@ describe("runGit — transient lock retry", () => {
       if (previousXdg === undefined) delete process.env.XDG_CONFIG_HOME;
       else process.env.XDG_CONFIG_HOME = previousXdg;
       await server.close();
+    }
+  });
+
+  it("uses the rewritten URL's credential helper when cloning", async () => {
+    const remoteRoot = path.join(dir, "clone-rewrite-root");
+    const bareRemote = path.join(remoteRoot, "remote.git");
+    const hostHome = path.join(dir, "clone-rewrite-home");
+    const helper = path.join(dir, "clone-rewrite-helper");
+    await mkdir(remoteRoot, { recursive: true });
+    await mkdir(hostHome, { recursive: true });
+    await execFileAsync("git", ["clone", "--bare", repo, bareRemote]);
+
+    const source = await startAuthenticatedGitServer({
+      projectRoot: remoteRoot,
+      password: "source-test-credential",
+    });
+    const proxy = await startAuthenticatedGitServer({
+      projectRoot: remoteRoot,
+      password: "proxy-test-credential",
+    });
+    const previousHome = process.env.HOME;
+    const previousXdg = process.env.XDG_CONFIG_HOME;
+    await writeFile(
+      helper,
+      [
+        "#!/bin/sh",
+        '[ "${1:-}" = get ] || exit 0',
+        "printf 'username=x-access-token\\npassword=proxy-test-credential\\n'",
+        "",
+      ].join("\n"),
+    );
+    await chmod(helper, 0o700);
+    process.env.HOME = hostHome;
+    delete process.env.XDG_CONFIG_HOME;
+    try {
+      const config = path.join(hostHome, ".gitconfig");
+      await writeFile(config, "");
+      await execFileAsync("git", [
+        "config",
+        "--file",
+        config,
+        `url.${proxy.url}.insteadOf`,
+        source.url,
+      ]);
+      await execFileAsync("git", [
+        "config",
+        "--file",
+        config,
+        "credential.helper",
+        `!${helper}`,
+      ]);
+      setGitCredentialSourceForTesting({
+        supports({ protocol, authority }) {
+          return protocol === "http" && authority === new URL(source.url).host;
+        },
+        async getCredential() {
+          return {
+            username: "x-access-token",
+            password: "source-test-credential",
+          };
+        },
+      });
+
+      const result = await cloneRepo({
+        url: source.url,
+        parentFolder: dir,
+        directoryName: "clone-rewritten",
+      });
+
+      expect(result.defaultBranch).toBe("main");
+      expect(source.observed).toHaveLength(0);
+      expect(proxy.observed.length).toBeGreaterThan(0);
+      expect(
+        proxy.observed.every(
+          ({ password }) => password === "proxy-test-credential",
+        ),
+      ).toBe(true);
+    } finally {
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      if (previousXdg === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = previousXdg;
+      await Promise.all([source.close(), proxy.close()]);
+    }
+  });
+
+  it("uses Git's first URL base when equal-length insteadOf matches tie", async () => {
+    const remoteRoot = path.join(dir, "clone-rewrite-tie-root");
+    const bareRemote = path.join(remoteRoot, "remote.git");
+    const hostHome = path.join(dir, "clone-rewrite-tie-home");
+    await mkdir(remoteRoot, { recursive: true });
+    await mkdir(hostHome, { recursive: true });
+    await execFileAsync("git", ["clone", "--bare", repo, bareRemote]);
+
+    const source = await startAuthenticatedGitServer({
+      projectRoot: remoteRoot,
+      password: "source-test-credential",
+    });
+    const firstTarget = await startAuthenticatedGitServer({
+      projectRoot: remoteRoot,
+      password: "first-target-credential",
+    });
+    const secondTarget = await startAuthenticatedGitServer({
+      projectRoot: remoteRoot,
+      password: "second-target-credential",
+    });
+    const previousHome = process.env.HOME;
+    const previousXdg = process.env.XDG_CONFIG_HOME;
+    process.env.HOME = hostHome;
+    delete process.env.XDG_CONFIG_HOME;
+    try {
+      const sourcePrefix = `${new URL(source.url).origin}/`;
+      const firstBase = `${new URL(firstTarget.url).origin}/`;
+      const secondBase = `${new URL(secondTarget.url).origin}/`;
+      await writeFile(
+        path.join(hostHome, ".gitconfig"),
+        [
+          `[url "${firstBase}"]`,
+          `  insteadOf = ${sourcePrefix}not-remote/`,
+          `[url "${secondBase}"]`,
+          `  insteadOf = ${sourcePrefix}`,
+          `[url "${firstBase}"]`,
+          `  insteadOf = ${sourcePrefix}`,
+          "",
+        ].join("\n"),
+      );
+
+      const credentialAuthorities: string[] = [];
+      setGitCredentialSourceForTesting({
+        supports({ protocol, authority }) {
+          credentialAuthorities.push(authority);
+          return (
+            protocol === "http" && authority === new URL(firstTarget.url).host
+          );
+        },
+        async getCredential() {
+          return {
+            username: "x-access-token",
+            password: "first-target-credential",
+          };
+        },
+      });
+
+      const result = await cloneRepo({
+        url: source.url,
+        parentFolder: dir,
+        directoryName: "clone-rewrite-tie",
+      });
+
+      expect(result.defaultBranch).toBe("main");
+      expect(credentialAuthorities).toContain(new URL(firstTarget.url).host);
+      expect(credentialAuthorities).not.toContain(
+        new URL(secondTarget.url).host,
+      );
+      expect(source.observed).toHaveLength(0);
+      expect(firstTarget.observed.length).toBeGreaterThan(0);
+      expect(secondTarget.observed).toHaveLength(0);
+      expect(
+        firstTarget.observed.every(
+          ({ password }) => password === "first-target-credential",
+        ),
+      ).toBe(true);
+    } finally {
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      if (previousXdg === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = previousXdg;
+      await Promise.all([
+        source.close(),
+        firstTarget.close(),
+        secondTarget.close(),
+      ]);
+    }
+  });
+
+  it("uses Git's empty insteadOf prefix when resolving clone credentials", async () => {
+    const hostHome = path.join(dir, "clone-empty-prefix-home");
+    await mkdir(hostHome, { recursive: true });
+    const config = path.join(hostHome, ".gitconfig");
+    await writeFile(config, "");
+    await execFileAsync("git", [
+      "config",
+      "--file",
+      config,
+      "url.https://proxy.invalid/mapped/.insteadOf",
+      "",
+    ]);
+    const authorities: string[] = [];
+    setGitCredentialSourceForTesting({
+      supports({ protocol, authority }) {
+        authorities.push(authority);
+        return protocol === "https" && authority === "proxy.invalid";
+      },
+      async getCredential() {
+        return { username: "x-access-token", password: "test" };
+      },
+    });
+    await withSystemConfigGitShim({
+      directory: dir,
+      home: hostHome,
+      locale: "C",
+      mode: "missing",
+      interceptClone: true,
+      run: async ({ cloneLocale }) => {
+        await expect(
+          cloneRepo({
+            url: "https://source.invalid/repo.git",
+            parentFolder: dir,
+            directoryName: "clone-empty-prefix",
+          }),
+        ).rejects.toMatchObject({ code: "GIT_COMMAND_FAILED" });
+        expect(authorities).toContain("proxy.invalid");
+        expect(await readFile(cloneLocale, "utf8")).toBe("C");
+      },
+    });
+  });
+
+  it.each(["fr_FR.UTF-8", "de_DE.UTF-8"])(
+    "pins missing-config diagnostics to C under %s",
+    async (locale) => {
+      const root = path.join(dir, `locale-${locale}`);
+      const home = path.join(dir, `locale-home-${locale}`);
+      const bare = path.join(root, "remote.git");
+      await mkdir(root, { recursive: true });
+      await mkdir(home, { recursive: true });
+      await execFileAsync("git", ["clone", "--bare", repo, bare]);
+      const source = await startAuthenticatedGitServer({
+        projectRoot: root,
+        password: "source",
+      });
+      const proxy = await startAuthenticatedGitServer({
+        projectRoot: root,
+        password: "proxy",
+      });
+      try {
+        const config = path.join(home, ".gitconfig");
+        await writeFile(config, "");
+        await execFileAsync("git", [
+          "config",
+          "--file",
+          config,
+          `url.${proxy.url}.insteadOf`,
+          source.url,
+        ]);
+        setGitCredentialSourceForTesting({
+          supports: ({ authority }) => authority === new URL(proxy.url).host,
+          async getCredential() {
+            return { username: "x-access-token", password: "proxy" };
+          },
+        });
+        await withSystemConfigGitShim({
+          directory: dir,
+          home,
+          locale,
+          mode: "missing",
+          run: async ({ configLocale, cloneLocale }) => {
+            expect(
+              await cloneRepo({
+                url: source.url,
+                parentFolder: dir,
+                directoryName: `clone-${locale}`,
+              }),
+            ).toMatchObject({ defaultBranch: "main" });
+            expect(await readFile(configLocale, "utf8")).toBe("C");
+            expect(await readFile(cloneLocale, "utf8")).toBe(locale);
+          },
+        });
+      } finally {
+        await Promise.all([source.close(), proxy.close()]);
+      }
+    },
+  );
+
+  it.each([
+    ["malformed", "invalid_configuration"],
+    ["denied", "permission_denied"],
+  ] as const)("keeps %s config errors fail-closed", async (mode, reason) => {
+    const home = path.join(dir, `config-error-${mode}`);
+    await mkdir(home, { recursive: true });
+    await writeFile(path.join(home, ".gitconfig"), "");
+    await withSystemConfigGitShim({
+      directory: dir,
+      home,
+      locale: "fr_FR.UTF-8",
+      mode,
+      run: async ({ configLocale }) => {
+        await expect(
+          cloneRepo({
+            url: "https://source.invalid/repo.git",
+            parentFolder: dir,
+            directoryName: `clone-${mode}`,
+          }),
+        ).rejects.toMatchObject({
+          code: "GIT_COMMAND_FAILED",
+          context: { reason },
+        });
+        expect(await readFile(configLocale, "utf8")).toBe("C");
+      },
+    });
+  });
+
+  it("keeps the broker credential path when no clone URL rewrite matches", async () => {
+    const remoteRoot = path.join(dir, "clone-direct-root");
+    const bareRemote = path.join(remoteRoot, "remote.git");
+    const hostHome = path.join(dir, "clone-direct-home");
+    await mkdir(remoteRoot, { recursive: true });
+    await mkdir(hostHome, { recursive: true });
+    await execFileAsync("git", ["clone", "--bare", repo, bareRemote]);
+    const source = await startAuthenticatedGitServer({
+      projectRoot: remoteRoot,
+      password: "source-test-credential",
+    });
+    const previousHome = process.env.HOME;
+    const previousXdg = process.env.XDG_CONFIG_HOME;
+    process.env.HOME = hostHome;
+    delete process.env.XDG_CONFIG_HOME;
+    setGitCredentialSourceForTesting({
+      supports({ protocol, authority }) {
+        return protocol === "http" && authority === new URL(source.url).host;
+      },
+      async getCredential() {
+        return {
+          username: "x-access-token",
+          password: "source-test-credential",
+        };
+      },
+    });
+    try {
+      const result = await cloneRepo({
+        url: source.url,
+        parentFolder: dir,
+        directoryName: "clone-direct",
+      });
+
+      expect(result.defaultBranch).toBe("main");
+      expect(source.observed.length).toBeGreaterThan(0);
+      expect(
+        source.observed.every(
+          ({ password }) => password === "source-test-credential",
+        ),
+      ).toBe(true);
+    } finally {
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      if (previousXdg === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = previousXdg;
+      await source.close();
+    }
+  });
+
+  it("does not send the source credential to an unauthenticated rewrite target", async () => {
+    const remoteRoot = path.join(dir, "clone-rewrite-error-root");
+    const bareRemote = path.join(remoteRoot, "remote.git");
+    const hostHome = path.join(dir, "clone-rewrite-error-home");
+    await mkdir(remoteRoot, { recursive: true });
+    await mkdir(hostHome, { recursive: true });
+    await execFileAsync("git", ["clone", "--bare", repo, bareRemote]);
+    const source = await startAuthenticatedGitServer({
+      projectRoot: remoteRoot,
+      password: "source-test-credential",
+    });
+    const rewritten = await startAuthenticatedGitServer({
+      projectRoot: remoteRoot,
+      password: "proxy-test-credential",
+    });
+    const previousHome = process.env.HOME;
+    const previousXdg = process.env.XDG_CONFIG_HOME;
+    process.env.HOME = hostHome;
+    delete process.env.XDG_CONFIG_HOME;
+    try {
+      const config = path.join(hostHome, ".gitconfig");
+      await writeFile(config, "");
+      await execFileAsync("git", [
+        "config",
+        "--file",
+        config,
+        `url.${rewritten.url}.insteadOf`,
+        source.url,
+      ]);
+      setGitCredentialSourceForTesting({
+        supports({ protocol, authority }) {
+          return protocol === "http" && authority === new URL(source.url).host;
+        },
+        async getCredential() {
+          return {
+            username: "x-access-token",
+            password: "source-test-credential",
+          };
+        },
+      });
+
+      await expect(
+        cloneRepo({
+          url: source.url,
+          parentFolder: dir,
+          directoryName: "clone-rewrite-error",
+        }),
+      ).rejects.toMatchObject({ code: "NOT_AUTHENTICATED" });
+      expect(rewritten.observed).toHaveLength(0);
+      expect(source.observed).toHaveLength(0);
+    } finally {
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      if (previousXdg === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = previousXdg;
+      await Promise.all([source.close(), rewritten.close()]);
+    }
+  });
+
+  it("uses the global include scope that git clone actually applies", async () => {
+    const remoteRoot = path.join(dir, "clone-local-rewrite-root");
+    const bareRemote = path.join(remoteRoot, "remote.git");
+    const caseRemote = path.join(remoteRoot, "Case", "remote.git");
+    const hostHome = path.join(dir, "clone-local-rewrite-home");
+    await mkdir(path.dirname(caseRemote), { recursive: true });
+    await mkdir(hostHome, { recursive: true });
+    await execFileAsync("git", ["clone", "--bare", repo, bareRemote]);
+    await execFileAsync("git", ["clone", "--bare", repo, caseRemote]);
+
+    const source = await startAuthenticatedGitServer({
+      projectRoot: remoteRoot,
+      password: "source-test-credential",
+    });
+    const proxy = await startAuthenticatedGitServer({
+      projectRoot: remoteRoot,
+      password: "proxy-test-credential",
+    });
+    const losingRewrite = await startAuthenticatedGitServer({
+      projectRoot: remoteRoot,
+      password: "losing-test-credential",
+    });
+    const previousHome = process.env.HOME;
+    const previousXdg = process.env.XDG_CONFIG_HOME;
+    process.env.HOME = hostHome;
+    delete process.env.XDG_CONFIG_HOME;
+    try {
+      const includedConfig = path.join(hostHome, "clone-url-rewrites.conf");
+      const globalConfig = path.join(hostHome, ".gitconfig");
+      await writeFile(includedConfig, "");
+      const shortPrefix = source.url.slice(0, source.url.lastIndexOf("/") + 1);
+      const casePreservingBase = proxy.url.replace("/remote.git", "/Case/");
+      await execFileAsync("git", [
+        "config",
+        "--file",
+        includedConfig,
+        `url.${casePreservingBase}.insteadOf`,
+        shortPrefix,
+      ]);
+      await writeFile(
+        globalConfig,
+        `[include]\n\tpath = clone-url-rewrites.conf\n`,
+      );
+      await execFileAsync(
+        "git",
+        ["config", "--local", `url.${losingRewrite.url}.insteadOf`, source.url],
+        { cwd: repo },
+      );
+      setGitCredentialSourceForTesting({
+        supports({ protocol, authority }) {
+          return protocol === "http" && authority === new URL(proxy.url).host;
+        },
+        async getCredential() {
+          return {
+            username: "x-access-token",
+            password: "proxy-test-credential",
+          };
+        },
+      });
+
+      const result = await cloneRepo({
+        url: source.url,
+        parentFolder: repo,
+        directoryName: "clone-local-rewrite",
+      });
+
+      expect(result.defaultBranch).toBe("main");
+      expect(source.requests).toHaveLength(0);
+      expect(losingRewrite.requests).toHaveLength(0);
+      expect(proxy.observed.length).toBeGreaterThan(0);
+      expect(
+        proxy.requests.some((request) => request.startsWith("/Case/")),
+      ).toBe(true);
+      expect(
+        proxy.observed.every(
+          ({ password }) => password === "proxy-test-credential",
+        ),
+      ).toBe(true);
+    } finally {
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      if (previousXdg === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = previousXdg;
+      await Promise.all([source.close(), proxy.close(), losingRewrite.close()]);
+    }
+  });
+
+  it("rejects embedded credentials before and after clone URL rewriting", async () => {
+    const remoteRoot = path.join(dir, "clone-embedded-credential-root");
+    const bareRemote = path.join(remoteRoot, "remote.git");
+    const hostHome = path.join(dir, "clone-embedded-credential-home");
+    await mkdir(remoteRoot, { recursive: true });
+    await mkdir(hostHome, { recursive: true });
+    await execFileAsync("git", ["clone", "--bare", repo, bareRemote]);
+    const source = await startAuthenticatedGitServer({
+      projectRoot: remoteRoot,
+      password: "source-test-credential",
+    });
+    const rewritten = await startAuthenticatedGitServer({
+      projectRoot: remoteRoot,
+      password: "proxy-test-credential",
+    });
+    const previousHome = process.env.HOME;
+    const previousXdg = process.env.XDG_CONFIG_HOME;
+    process.env.HOME = hostHome;
+    delete process.env.XDG_CONFIG_HOME;
+    let credentialChecks = 0;
+    setGitCredentialSourceForTesting({
+      supports() {
+        credentialChecks += 1;
+        return true;
+      },
+      async getCredential() {
+        credentialChecks += 1;
+        return {
+          username: "x-access-token",
+          password: "source-test-credential",
+        };
+      },
+    });
+    try {
+      const config = path.join(hostHome, ".gitconfig");
+      const embeddedSource = source.url.replace(
+        "http://",
+        "http://test-user:placeholder@",
+      );
+      await writeFile(config, "");
+      await execFileAsync("git", [
+        "config",
+        "--file",
+        config,
+        `url.${rewritten.url}.insteadOf`,
+        embeddedSource,
+      ]);
+      await expect(
+        cloneRepo({
+          url: embeddedSource,
+          parentFolder: dir,
+          directoryName: "clone-embedded-source-credential",
+        }),
+      ).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+
+      const embeddedRewrite = rewritten.url.replace(
+        "http://",
+        "http://test-user:placeholder@",
+      );
+      await writeFile(config, "");
+      await execFileAsync("git", [
+        "config",
+        "--file",
+        config,
+        `url.${embeddedRewrite}.insteadOf`,
+        source.url,
+      ]);
+      await expect(
+        cloneRepo({
+          url: source.url,
+          parentFolder: dir,
+          directoryName: "clone-embedded-rewrite-credential",
+        }),
+      ).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+
+      expect(credentialChecks).toBe(0);
+      expect(source.requests).toHaveLength(0);
+      expect(rewritten.requests).toHaveLength(0);
+    } finally {
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      if (previousXdg === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = previousXdg;
+      await Promise.all([source.close(), rewritten.close()]);
     }
   });
 

@@ -40,7 +40,6 @@ export function SubscriptionConnectionPanel({
   provider: BrowserSubscriptionProvider;
   surfaceActive: boolean;
   onChanged?: () => Promise<unknown>;
-  /** Use full-width separated actions when this panel fills a dialog body. */
   dialogFooter?: boolean;
 }) {
   const Actions = dialogFooter ? DialogFooter : "div";

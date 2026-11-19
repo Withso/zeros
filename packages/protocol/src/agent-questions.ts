@@ -146,7 +146,7 @@ export function mapCodexUserInputToQuestion(
           const label =
             typeof o?.label === "string" ? o.label : String(o?.label ?? "");
           return {
-            id: label, // MUST equal label — the Codex answer is a label array
+            id: label,
             label,
             description:
               typeof o?.description === "string" ? o.description : undefined,
@@ -159,10 +159,7 @@ export function mapCodexUserInputToQuestion(
       header: typeof q?.header === "string" ? q.header : undefined,
       multiSelect: typeof q?.multiSelect === "boolean" ? q.multiSelect : false,
       options,
-      // isOther adds the free-text row ALONGSIDE options; a null/absent
-      // options list IS a pure free-text ask, so it must get the row too —
-      // otherwise the card renders no input at all and can never be
-      // submitted (only dismissed).
+      // An ask with no options still needs a free-text row or it cannot be submitted.
       allowOther: q?.isOther === true || options.length === 0,
       secret: q?.isSecret === true,
     };

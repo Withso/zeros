@@ -1,11 +1,4 @@
-// Zeros simulator tools for agents.
-//
-// Electron main owns DeviceHub, the agent-device runner, the per-device
-// approvals and which chat uses which simulator. The engine serves the
-// curated `zeros_device` tools to Claude, Codex and Cursor in Local
-// workspaces while "Let agents use simulators" is on. Every action names one
-// simulator by the ID `list_devices` returns; tool arguments never choose the
-// runner session, its state or a configuration file.
+// Electron main owns simulator sessions and approvals; Local agent tools name a listed device but cannot choose the runner session, state or config.
 
 import {
   agentControlName,
@@ -80,8 +73,7 @@ const MAX_PATH = 4_096;
 /** Snapshot refs such as `@e12`, optionally pinned to one snapshot (`@e12~s4`). */
 export const DEVICE_ELEMENT_REF_PATTERN = "^@?e[0-9]{1,6}(?:~s[0-9]{1,12})?$" as const;
 const ELEMENT_REF = new RegExp(DEVICE_ELEMENT_REF_PATTERN);
-// Reverse-DNS iOS bundle IDs and Android package names. The first character
-// is never "-", so an ID cannot read as a flag.
+// Reject IDs beginning with a hyphen so they cannot be interpreted as flags.
 const APP_ID = /^[A-Za-z0-9_][A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]+)+$/;
 const URL_SCHEME = /^([A-Za-z][A-Za-z0-9+.-]{0,31}):/;
 const REFUSED_URL_SCHEMES = new Set(["file", "javascript", "data", "blob", "vbscript"]);
@@ -105,7 +97,7 @@ const POINT = (axis: "X" | "Y") =>
     description: `${axis} in points of the latest screenshot.`,
   }) as const;
 
-/** The `zeros_device` MCP tool list, advertised verbatim. */
+/** Advertise these definitions verbatim over MCP. */
 export const DEVICE_TOOL_DEFINITIONS: readonly DeviceToolDefinition[] = [
   {
     name: "list_devices",
@@ -351,8 +343,7 @@ export const DEVICE_TOOL_DEFINITIONS: readonly DeviceToolDefinition[] = [
   },
 ] as const;
 
-/** Which simulator tools an agent family gets in a Local workspace. Cloud
- * workspaces get none; callers check placement first. */
+/** Callers must check Local placement before applying the simulator tool policy. */
 export type DeviceToolRoute = "off" | "zeros";
 
 export function resolveDeviceToolRoute(
@@ -362,7 +353,6 @@ export function resolveDeviceToolRoute(
   return isAgentControlFamily(agentFamily) && settings.enabled ? "zeros" : "off";
 }
 
-/** The control bar's second half: "Codex" + "is using iPhone 17". */
 export function deviceControlDetail(deviceName: string): string {
   return `is using ${deviceName}`;
 }
@@ -378,7 +368,6 @@ export function isDeviceAppId(value: unknown): value is string {
   return typeof value === "string" && value.length <= 255 && APP_ID.test(value);
 }
 
-/** A validated call. Main maps it onto DeviceHub and agent-device. */
 export interface DeviceToolCall {
   tool: DeviceToolName;
   deviceId?: string;
@@ -539,8 +528,7 @@ function openableUrl(value: unknown): string {
 
 const APP_PATH_ERROR = "path must be the absolute path of a .app bundle or .apk file.";
 
-/** A .app bundle is a folder, so a trailing slash is fine; an .apk is a
- * file and takes none. */
+/** Accept a trailing slash for a .app directory, not an .apk file. */
 function appBundlePath(value: unknown): string {
   if (
     typeof value !== "string" ||
@@ -701,8 +689,7 @@ function parse(name: DeviceToolName, args: Record<string, unknown>): DeviceToolC
   return fail("Unknown Zeros simulator tool.");
 }
 
-/** Validate untrusted tool arguments against the curated contract. Main runs
- * this again before anything reaches a simulator. */
+/** Main revalidates tool arguments before DeviceHub dispatch. */
 export function parseDeviceToolCall(name: unknown, input: unknown): DeviceToolCallParse {
   if (!isDeviceToolName(name)) {
     return { ok: false, error: "Unknown Zeros simulator tool." };
@@ -727,8 +714,7 @@ export interface DeviceToolInvokeRequest {
   version: typeof DEVICE_TOOLS_SERVICE_VERSION;
   owner: DeviceUseOwner;
   agent: AgentControlFamily;
-  /** A fresh ID per provider turn. After the user stops the agent on a
-   * simulator, main refuses the rest of that turn there. */
+  /** Stopping simulator use blocks this provider turn from returning to that device. */
   turnId: string;
   tool: DeviceToolName;
   arguments: BrowserJsonValue;
@@ -744,8 +730,7 @@ export interface DeviceToolResult {
   content: DeviceToolContent[];
 }
 
-/** Turn end, composer Stop and conversation retirement. `retire` also forgets
- * the chat's simulator approvals. */
+/** Only conversation retirement clears cached simulator approvals. */
 export interface DeviceUseReleaseRequest {
   version: typeof DEVICE_TOOLS_SERVICE_VERSION;
   owner: DeviceUseOwner;
@@ -757,16 +742,14 @@ export interface DeviceUseReleaseResponse {
   released: boolean;
 }
 
-/** A chat that is using one simulator right now. */
 export interface DeviceUseHolder extends DeviceUseOwner {
   agent: AgentControlFamily;
   deviceId: string;
   deviceName: string;
-  /** Which kind of Simulator tab shows the device. */
   platform: SimulatorPlatform;
 }
 
-/** Main → renderer: which chats use which simulators. */
+/** Electron main publishes the holder snapshot to the renderer. */
 export interface DeviceUseStateSnapshot {
   version: typeof DEVICE_TOOLS_SERVICE_VERSION;
   holders: DeviceUseHolder[];
@@ -818,7 +801,6 @@ export function readDeviceUseState(value: unknown): DeviceUseStateSnapshot | nul
   return { version: DEVICE_TOOLS_SERVICE_VERSION, holders };
 }
 
-/** The holder of one simulator, if any chat uses it. */
 export function deviceUseHolder(
   state: DeviceUseStateSnapshot | null,
   deviceId: string,
@@ -826,7 +808,6 @@ export function deviceUseHolder(
   return state?.holders.find((holder) => holder.deviceId === deviceId) ?? null;
 }
 
-/** "Codex is using iPhone 17", for the Simulator tab's control bar. */
 export function deviceUseTitle(holder: DeviceUseHolder): string {
   return `${agentControlName(holder.agent)} ${deviceControlDetail(holder.deviceName)}`;
 }
@@ -840,16 +821,13 @@ export const DEVICE_AGENT_TOUCH_KINDS = [
 ] as const;
 export type DeviceAgentTouchKind = (typeof DEVICE_AGENT_TOUCH_KINDS)[number];
 
-/** Main → renderer: where an agent touched, so the Simulator tab can show
- * it. Points are in the device's portrait screen points, as live-view input
- * is. */
+/** Main sends touch locations in portrait screen points, matching live-view input coordinates. */
 export interface DeviceAgentTouch {
   deviceId: string;
   kind: DeviceAgentTouchKind;
   at: { x: number; y: number };
-  /** Where a swipe ends. */
   to?: { x: number; y: number };
-  /** How far a pinch zooms: above 1 spreads the fingers apart. */
+  /** Pinch scales above one spread the fingers apart. */
   scale?: number;
 }
 

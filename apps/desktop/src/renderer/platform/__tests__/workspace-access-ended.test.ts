@@ -20,11 +20,11 @@ it("keeps one ended state per account, organization and workspace, notifies on e
 
 it("D3: never shows another account's ended state on this Mac (A → B → A), and an account switch clears it", () => {
   reportWorkspaceAccessEnded(a);
-  account = { userId: "creator", generation: 2 };   // switched to the workspace's Creator
+  account = { userId: "creator", generation: 2 };
   expect(workspaceAccessEnded(a)).toBe(false);
   account = { userId: "user-1", generation: 3 };    // and back: a new session must confirm it again
   expect(workspaceAccessEnded(a)).toBe(false);
-  account = null;                                   // signed out: nothing is ever ended
+  account = null;
   reportWorkspaceAccessEnded(a);
   expect(workspaceAccessEnded(a)).toBe(false);
 });

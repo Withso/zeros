@@ -1,5 +1,4 @@
-/** Offsets address the original string. Every preview is assembled from its
- * untouched slices, so line endings, BOMs and unrelated source remain exact. */
+/** Offsets address the original string so unrelated text, BOMs and line endings remain exact. */
 export type ConflictChoice = "current" | "incoming" | "both";
 export interface MergeConflict {
   id: string;
@@ -88,8 +87,7 @@ export function parseMergeConflicts(source: string): MergeConflictParseResult {
       continue;
     }
     if (!open) {
-      // A bare separator can be ordinary source (for example Markdown).
-      // Orphan ancestor/end markers still make a resolution unsafe.
+      // A bare separator may be ordinary Markdown; orphan ancestor and end markers are unsafe.
       if (token.kind !== "=")
         result.errors.push({
           line: line.number,
@@ -159,9 +157,7 @@ export function parseMergeConflicts(source: string): MergeConflictParseResult {
   return result;
 }
 
-/** The text that replaces one block for a choice. Marker-delimited sides end
- * with a newline even when the file does not, so a block that ends the file
- * keeps that boundary. */
+/** Preserve the lack of a trailing newline when the conflict ends the file. */
 export function conflictReplacement(
   source: string,
   conflict: MergeConflict,

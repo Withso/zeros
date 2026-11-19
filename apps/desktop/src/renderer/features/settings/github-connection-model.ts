@@ -20,10 +20,7 @@ export function githubMethodDescription(method: GithubAuthMethod): string {
   return "A token you create on GitHub.";
 }
 
-/** A missing count means the bounded inventory was unavailable or incomplete,
- * so prior server-side setup must still choose direct OAuth. Zero is published
- * only after a complete inventory and is therefore safe to force back through
- * GitHub's installation page. */
+// Only a complete, empty inventory may force reinstall; an unknown count on an existing setup uses direct OAuth.
 export function githubAppConnectOptions(
   summary: GithubCredentialSummary,
   forceInstallRequested = false,
@@ -53,8 +50,6 @@ export function githubMethodStatusCopy(
   return "Validated for API and Git operations.";
 }
 
-/** Settings' diagnosis of a method that is not connected. Surfaces that fail
- * because of the connection repeat it, so users read one explanation. */
 export function githubHealthDetailCopy(
   summary: GithubCredentialSummary,
 ): string | null {
@@ -63,8 +58,7 @@ export function githubHealthDetailCopy(
     return "GitHub is rate-limiting requests. This connection has not been removed.";
   if (summary.health === "sso-required")
     return "Your organization requires SAML authorization for this connection.";
-  // Settings has no "current repository" — this row describes the connection.
-  // Naming one here read as a per-repo verdict the panel cannot make.
+  // Settings has no repository context, so this is a connection-wide diagnosis.
   if (summary.health === "not-installed")
     return summary.detail || "The GitHub App isn’t installed on any account yet.";
   if (summary.health === "suspended")
@@ -74,8 +68,6 @@ export function githubHealthDetailCopy(
   return summary.detail || "Couldn’t check this connection. You may be offline.";
 }
 
-/** The diagnosis for a selected connection that is configured but unusable,
- *  or undefined when it is healthy or simply not set up. */
 export function githubConnectionAttentionCopy(
   summary: GithubCredentialSummary | undefined,
 ): string | undefined {
@@ -104,9 +96,7 @@ export function shouldShowGithubTopRefresh(
   );
 }
 
-/** Keep the product-default gh row selected on a cold mount without briefly
- * claiming that sign-in is required. Setup opens only after a real host
- * snapshot confirms the selected CLI source is disconnected. */
+// Only offer cold-mount setup once the host confirms the selected CLI is disconnected.
 export function githubAutomaticSetup(
   snapshot: GithubAuthSnapshot,
   hasConfirmedSnapshot: boolean,
@@ -120,9 +110,7 @@ export function githubAutomaticSetup(
     : null;
 }
 
-/** A failed user-triggered Refresh is durable row health, not a toast. Keep
- * every last-confirmed identity/access field and mark only the requested
- * method unavailable so the row never lies that its probe just succeeded. */
+// Show a failed explicit refresh as lasting row health rather than a transient toast.
 export function githubRefreshFailureSnapshot(
   snapshot: GithubAuthSnapshot,
   method: GithubAuthMethod,

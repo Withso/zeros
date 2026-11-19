@@ -78,7 +78,7 @@ beforeEach(() => {
   mocks.connect.mockReset().mockResolvedValue(ticket);
   mocks.list.mockReset().mockResolvedValue([workspace]); mocks.accept.mockReset();
   mocks.clients.length = 0; mocks.listeners.clear();
-  // The lower jitter bound: each wait is half its ceiling (500 ms, 1 s, 2 s, 4 s, ...).
+  // Zero random jitter selects half the ceiling for each backoff.
   resetCloudConnectBackoffForTests(); vi.spyOn(Math, "random").mockReturnValue(0);
 });
 afterEach(async () => {
@@ -214,7 +214,7 @@ describe("bounded cloud connect ticket retries", () => {
     await vi.advanceTimersByTimeAsync(7_500);
     expect(await failed).toBeInstanceOf(Error);
     mocks.connect.mockResolvedValue(ticket);
-    // The next ticket waits for the shared backoff (the fifth failure set 8 s).
+    // The exhausted request leaves an 8 s shared cooldown for the next call.
     const next = mocks.clients[0]!.refresh(); await vi.advanceTimersByTimeAsync(8_000);
     expect(await next).toMatchObject({ connectionSequence: 2 });
     expect(vi.getTimerCount()).toBe(0);
@@ -251,7 +251,7 @@ describe("bounded cloud connect ticket retries", () => {
     const attempt = opening(); await flush();
     await vi.advanceTimersByTimeAsync(29_999); expect(mocks.connect).toHaveBeenCalledTimes(0);
     await vi.advanceTimersByTimeAsync(1); expect(mocks.connect).toHaveBeenCalledTimes(1);
-    // The next wait (30 s) cannot fit the ticket window: the open fails without another post.
+    // The next cooldown cannot fit in this ticket window, so no second post is made.
     await vi.advanceTimersByTimeAsync(30_000);
     expect(await attempt.result).toBeInstanceOf(Error); expect(mocks.connect).toHaveBeenCalledTimes(1);
     expect(cloudConnectWaitMs(key)).toBeGreaterThanOrEqual(0);

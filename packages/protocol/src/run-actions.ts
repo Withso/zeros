@@ -1,9 +1,3 @@
-// The shared `[[scripts.run_actions]]` model: named run actions with an icon, a
-// platform filter and a one-shot flag. The engine (repo-scripts.ts) and the
-// renderer (use-run-control.ts) run this one pure parser. A repo with only the
-// legacy `scripts.run` string resolves at read time to one default action with
-// the fixed id "run", which maps back to the legacy session id so persisted run
-// terminals keep matching.
 
 export { selectRepositorySetup, quoteSetupArgument } from "./repository-setup";
 export type { RepositorySetupSelection } from "./repository-setup";
@@ -11,17 +5,13 @@ export type { RepositorySetupSelection } from "./repository-setup";
 export const RUN_ACTION_PLATFORMS = ["mac", "linux", "win"] as const;
 export type RunActionPlatform = (typeof RUN_ACTION_PLATFORMS)[number];
 
-/** The id the legacy single `scripts.run` string migrates to. Fixed so the
- *  migrated action's session id stays the legacy `pty-run-<hash>` (no suffix)
- *  and a pre-migration run terminal reattaches seamlessly. */
+/** Keep the migrated action ID fixed so existing unsuffixed run terminals reattach. */
 export const LEGACY_RUN_ACTION_ID = "run";
 
 export interface RunAction {
-  /** Stable id — React key + session-id suffix + status key. */
+  /** Stable ID used in persisted run terminal identity. */
   id: string;
-  /** Tab / menu / button label, e.g. "Dev". */
   name: string;
-  /** Shell command, e.g. "pnpm dev". */
   command: string;
   /** Lucide icon name (curated registry; unknown names fall back to play). */
   icon?: string;
@@ -30,10 +20,8 @@ export interface RunAction {
   /** true → one-shot verdict (finished/failed by exit code); false →
    *  long-lived (dev server: running/stopped only). Absent = heuristic. */
   oneShot?: boolean;
-  /** Start automatically when a workspace is created. */
   runOnCreate?: boolean;
-  /** The header split-button face + primary (⌘R) shortcut. Exactly one action
-   *  is default after normalization. */
+  /** The header action and shortcut use the normalized default. */
   isDefault?: boolean;
 }
 
@@ -45,8 +33,6 @@ function optionalBool(v: unknown): boolean | undefined {
   return typeof v === "boolean" ? v : undefined;
 }
 
-/** Normalize one raw `[[scripts.run_actions]]` table (snake_case TOML keys).
- *  Null for an entry missing any required field — the caller skips it. */
 function parseOne(raw: unknown): RunAction | null {
   if (!isPlainObject(raw)) return null;
   const id = typeof raw.id === "string" ? raw.id.trim() : "";
@@ -73,15 +59,7 @@ function parseOne(raw: unknown): RunAction | null {
   };
 }
 
-/** Parse the resolved `scripts` table into a normalized action list:
- *   • invalid entries are skipped (never the whole list),
- *   • duplicate ids keep the FIRST occurrence,
- *   • exactly one default (the first flagged one, else the first action),
- *   • with run_actions ABSENT entirely, a legacy `scripts.run` string becomes
- *     one default action (id "run") — the read-time migration. An EXPLICIT
- *     empty array means "none configured": the Run-actions editor writes []
- *     when the user deletes every action, and the legacy string must not
- *     resurrect one (the "removed the script but Rerun still shows" bug). */
+/** An explicit run_actions array, even when empty, suppresses the legacy scripts.run fallback. */
 export function parseRunActions(scripts: unknown): RunAction[] {
   if (!isPlainObject(scripts)) return [];
   const seen = new Set<string>();
@@ -107,7 +85,6 @@ export function parseRunActions(scripts: unknown): RunAction[] {
       });
     }
   }
-  // Exactly one default: the first flagged, else the first action.
   const flagged = actions.findIndex((a) => a.isDefault === true);
   const defaultIndex = flagged >= 0 ? flagged : 0;
   return actions.map((a, i) =>
@@ -115,14 +92,7 @@ export function parseRunActions(scripts: unknown): RunAction[] {
   );
 }
 
-/** Stable, id-shaped PTY session id for one (folder, action) run terminal.
- *  Deterministic, so a repeat Run reattaches to the live process instead of
- *  spawning a duplicate, and the engine + every device land on the SAME id.
- *  The `pty-run-` prefix is the canonical "this is a run terminal" marker
- *  (persisted, reload-stable). The legacy migrated action (id "run") maps to
- *  the UNSUFFIXED legacy id so pre-migration run terminals keep matching.
- *  (The djb2 hash is verbatim from the renderer's original runSessionId —
- *  it MUST stay identical for the same reason.) */
+/** Preserve the pty-run- prefix, folder hash and unsuffixed legacy ID so devices reattach to existing persisted terminals. */
 export function runSessionId(
   folder: string,
   actionId: string = LEGACY_RUN_ACTION_ID,
@@ -132,37 +102,29 @@ export function runSessionId(
     h = ((h << 5) + h + folder.charCodeAt(i)) | 0;
   const base = `pty-run-${(h >>> 0).toString(36)}`;
   if (actionId === LEGACY_RUN_ACTION_ID) return base;
-  // Session ids travel through bridge messages + persistence — keep the
-  // suffix id-shaped whatever the TOML id contains.
+  // Arbitrary TOML IDs must remain valid as persisted session ID suffixes.
   return `${base}-${actionId.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
 }
 
-/** True for any per-action run terminal (prefix-based, reload-stable). */
 export function isRunSessionId(id: string): boolean {
   return id.startsWith("pty-run-");
 }
 
-/** Long-lived (server-ish) command markers — checked FIRST so "vitest --watch"
- *  reads long-lived even though it also matches "test". */
+/** Check long-lived markers first so watch mode wins over test. */
 const LONG_LIVED_RE = /\b(dev|serve|server|start|watch|storybook|preview|tail)\b/i;
-/** One-shot (verdict-ish) command markers. */
 const ONE_SHOT_RE = /\b(test|build|lint|typecheck|tsc|check|format|fmt|compile|ci)\b/i;
 
-/** Heuristic one-shot detection for actions without an explicit flag. Unknown
- *  commands default to LONG-LIVED: a neutral "stopped" for a finished test is
- *  a milder error than a red "failed" for a Ctrl-C'd server. */
+/** Unknown commands default to long-lived to avoid showing a stopped server as failed. */
 export function isOneShotCommand(command: string): boolean {
   if (LONG_LIVED_RE.test(command)) return false;
   return ONE_SHOT_RE.test(command);
 }
 
-/** An action's effective one-shot mode (explicit flag, else the heuristic). */
 export function runActionOneShot(action: RunAction): boolean {
   return action.oneShot ?? isOneShotCommand(action.command);
 }
 
-/** Map a Node `process.platform` / browser UA hint onto the settings platform
- *  vocabulary. Unknown → null (no filtering — better to show than to hide). */
+/** Unknown platforms disable filtering rather than hiding actions. */
 export function normalizeRunPlatform(raw: string): RunActionPlatform | null {
   const v = raw.toLowerCase();
   if (v.includes("darwin") || v.includes("mac")) return "mac";
@@ -171,8 +133,6 @@ export function normalizeRunPlatform(raw: string): RunActionPlatform | null {
   return null;
 }
 
-/** Actions eligible on `platform` (null = no filtering). An action with no
- *  `platforms` list runs everywhere. */
 export function filterRunActionsForPlatform(
   actions: RunAction[],
   platform: RunActionPlatform | null,
@@ -181,8 +141,7 @@ export function filterRunActionsForPlatform(
   const eligible = actions.filter(
     (a) => !a.platforms || a.platforms.length === 0 || a.platforms.includes(platform),
   );
-  // Platform filtering can drop the default — re-normalize so the header
-  // split-button face always has one.
+  // A hidden default must be replaced for the header action.
   if (eligible.length > 0 && !eligible.some((a) => a.isDefault)) {
     return eligible.map((a, i) => (i === 0 ? { ...a, isDefault: true } : a));
   }

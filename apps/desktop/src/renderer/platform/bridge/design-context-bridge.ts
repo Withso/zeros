@@ -9,8 +9,7 @@ import type { RuntimeClient } from "./ws-client";
 import { DESIGN_CAPTURE_TIMEOUT_MS } from "@zeros/protocol/design-capture";
 import { workspaceOp } from "./workspace-bridge";
 
-/** Context creation/inspection are reads; composer attachment delivery is a
- * separate consumer and cannot infer an editing mode from these references. */
+/** Context creation and inspection are reads; the reference alone cannot tell an attachment consumer the editing mode. */
 export async function createDesignFrameContext(
   bridge: RuntimeClient,
   workspaceId: string,

@@ -28,13 +28,11 @@ it("does not publish initial HTML parsing as a mutation after editor readiness",
       channel.port1.start();
       iframe.onload = () => iframe.contentWindow!.postMessage({ protocol: "zeros-design-runtime", version: 2,
         type: "handshake", sourceVersion: version }, "*", [channel.port2]);
-      // Production inserts the runtime in the head, before the HTML parser
-      // constructs the frame body. Evaluating it after setContent misses this.
+      // Run the script before the body parses to cover parser mutations that setContent would miss.
       iframe.srcdoc = `<!doctype html><html><head><script>window.__zerosDesignSourceVersion=${JSON.stringify(version)};${source}</script></head><body><main data-oid="root"><h1 data-oid="heading">Saved heading</h1></main></body></html>`;
       document.body.append(iframe);
     }), DESIGN_RUNTIME_SOURCE);
-    // Observe one complete mutation-debounce window; this is the defect's
-    // delayed publication, not a wait before admitting user input.
+    // Wait past the mutation debounce to catch any delayed publication from the initial parse.
     await page.waitForTimeout(700);
     const quiet = await page.evaluate(async () => {
       const probe = (window as typeof window & { initializationProbe: { read(): Promise<number>; revisions: number[] } }).initializationProbe;

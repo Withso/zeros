@@ -11,9 +11,7 @@ import { cloudScopedId, parseCloudScopedId } from "./bridge/cloud-workspace-key"
 import { openLocalLink, resolveLocalLinkScheme } from "./local-links";
 import { isElectron, nativeInvoke, nativeListen } from "./runtime";
 
-/** notify-user-v1, bridge path: an attached app saw the worker's `attention`
- * update for one of its cloud chats (the renderer's scoped id). Marks it
- * unread unless on screen, and lets main decide the OS notification. */
+/** The renderer marks the chat unread; main decides whether the attached worker update merits an OS notification. */
 export function noteAttention(scopedChatId: string, update: unknown): boolean {
   if (!isAttentionUpdate(update)) return false;
   const chat = parseCloudScopedId(scopedChatId);
@@ -27,7 +25,6 @@ export function noteAttention(scopedChatId: string, update: unknown): boolean {
   return true;
 }
 
-/** The loaded catalog spans organizations; a miss reads it once. */
 async function documentFor(workspaceId: string) {
   const loaded = cloudWorkspaceDocumentById(workspaceId);
   if (loaded) return loaded;
@@ -49,7 +46,6 @@ export async function openNotifiedChat(target: NotifyUserChat, open: (href: stri
   open(formatCloudWorkspaceLink(scheme, { organizationId: doc.organizationId, workspaceId: doc.id }));
 }
 
-/** Main's half: device-channel arrivals, clicks, and which chats are on screen. */
 export function startNotifyUser(): () => void {
   if (!isElectron()) return () => {};
   let stopped = false, lastView = "";
@@ -71,6 +67,7 @@ export function startNotifyUser(): () => void {
   ]).then(offs => {
     if (stopped) { for (const off of offs) off(); return; }
     stops.push(...offs);
+    // Consume any notification click saved while no window existed, after subscribing to live clicks.
     void nativeInvoke<NotifyUserChat | null>("notify_user_take_open").then(target => { if (target && !stopped) void openNotifiedChat(target); }, () => {});
   }, () => {});
   return () => { stopped = true; for (const stop of stops.splice(0)) stop(); };

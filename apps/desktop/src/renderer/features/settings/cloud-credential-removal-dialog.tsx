@@ -1,8 +1,7 @@
 import { Button, Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "../../shared/ui/primitives";
 import { cloudCredentialRemovalNeedsConfirmation, type CloudCredentialRemovalState } from "./cloud-credential-removal";
 
-/** Running work is confirmed by the fenced CP operation, never guessed from
- * the current desktop, cached queue, credential host or workspace mirror. */
+// Use the fenced server outcome to confirm running work, not a local or mirrored snapshot.
 export function CloudCredentialRemovalDialog({ state, active, busy, onDecision }: {
   state?: CloudCredentialRemovalState;
   active: boolean;

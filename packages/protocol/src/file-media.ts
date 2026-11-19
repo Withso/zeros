@@ -45,8 +45,7 @@ export const fileMediaRangeSchema = z.object({
 export type FileMediaRange = z.infer<typeof fileMediaRangeSchema>;
 export interface FileMediaRangeResult { base64: string; bytes: number }
 
-/** HTTP single byte ranges, including suffix and open-ended seeks. Invalid,
- * multiple and unsatisfiable ranges fail closed rather than reading a file. */
+/** Accept a single HTTP byte range, including suffix and open-ended seeks; never serve invalid ranges. */
 export function parseFileMediaRange(value: string | null, size: number): { start: number; end: number; partial: boolean } | null {
   if (!Number.isSafeInteger(size) || size < 0 || size > MAX_FILE_MEDIA_BYTES) return null;
   if (value === null) return { start: 0, end: size - 1, partial: false };

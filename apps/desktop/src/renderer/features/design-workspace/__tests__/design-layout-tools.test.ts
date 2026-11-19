@@ -363,6 +363,51 @@ describe("transformed boxes", () => {
 });
 
 describe("spacing gestures", () => {
+  it.each([
+    {
+      side: "top",
+      axis: "y",
+      inward: { dx: 31.8, dy: 10.6 },
+      outward: { dx: -31.8, dy: -10.6 },
+    },
+    {
+      side: "bottom",
+      axis: "y",
+      inward: { dx: 31.8, dy: -10.6 },
+      outward: { dx: -31.8, dy: 10.6 },
+    },
+  ] as const)(
+    "$side padding increases inward and decreases outward at 106% zoom",
+    ({ side, axis, inward, outward }) => {
+      const band = designPaddingBands({
+        width: 300,
+        height: 300,
+        styles: styles({
+          paddingTop: "24px",
+          paddingRight: "24px",
+          paddingBottom: "24px",
+          paddingLeft: "24px",
+        }),
+      }).find((candidate) => candidate.side === side)!;
+      const drag = ({ dx, dy }: { dx: number; dy: number }) =>
+        designSpacingDragValue({
+          start: band.value,
+          delta: designLocalAxisDelta({
+            dx,
+            dy,
+            axis: band.axis,
+            zoom: 1.06,
+          }),
+          direction: band.direction,
+          step: 1,
+        });
+
+      expect(band.axis).toBe(axis);
+      expect(drag(inward), `${side} inward`).toBe(34);
+      expect(drag(outward), `${side} outward`).toBe(14);
+    },
+  );
+
   it("follows Figma's modifier contract", () => {
     expect(
       designSpacingModifiers({ altKey: true, shiftKey: true }, true),

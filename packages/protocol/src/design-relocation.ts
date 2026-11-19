@@ -2,8 +2,7 @@ import { z } from "zod";
 import { DESIGN_MAX_FRAMES_PER_PAGE } from "./design-pages";
 import { isDesignComponentVariantName } from "./design-path";
 
-/** Optional duplicate identity/placement on Local copy gestures. Older engines
- * must never receive a copy as a move that removes its source. */
+/** Never send a copy to an older engine as a move that would remove its source. */
 export const DESIGN_COPY_PLACEMENT_CAPABILITY = "design.copy-placement.v1";
 export const DESIGN_LINKED_COMPONENT_COPY_CAPABILITY = "design.linked-component-copy.v1";
 
@@ -62,7 +61,6 @@ export const DESIGN_RELOCATION_INHERITED_PROPERTIES = [
   "-webkit-text-stroke-width",
 ] as const;
 
-/** Every style one relocation writes on the moved root. */
 export const DESIGN_RELOCATION_MAX_STYLES = 64;
 
 const relocationDefaults = {
@@ -85,7 +83,6 @@ const relocationDefaults = {
   translate: "none",
 };
 
-/** Inherited values one relocation carries beside its placement styles. */
 export const DESIGN_RELOCATION_MAX_INHERITED_STYLES =
   DESIGN_RELOCATION_MAX_STYLES - Object.keys(relocationDefaults).length;
 
@@ -126,9 +123,7 @@ export type DesignRelocation = z.infer<typeof designRelocationSchema>;
 const relocationPixels = (value: number) =>
   `${Math.round(value * 100_000_000) / 100_000_000 || 0}px`;
 
-/** The pose without its offset, about the layer's corner. The offset is the
- * layer's position, which is left and top: a translate would paint at the
- * same place but read as X 0, Y 0 and carry into a flow as a stray shift. */
+/** Store offsets in left and top so the inspector sees them and they do not become stray shifts in a flow. */
 function relocationPose([a, b, c, d]: DesignRelocation["matrix"]): string {
   const near = (value: number, target: number) => Math.abs(value - target) < 1e-12;
   return near(a, 1) && near(b, 0) && near(c, 0) && near(d, 1)
@@ -153,7 +148,6 @@ export function designRelocationStyles(
   return styles;
 }
 
-/** Flow properties a drop slot may set on a layer joining a flex or grid. */
 const relocationFlowProperties = [
   "order",
   "flex-grow",
@@ -165,11 +159,7 @@ const relocationFlowProperties = [
   "grid-row",
 ] as const;
 
-/** A relocated layer joining an auto layout's flow, as in a design tool: the
- * layout places it, so it keeps its appearance, size and pose (rotation,
- * scale) but none of its free-layout position. `flow` is the drop slot's
- * styles; only its flow properties are taken. Bounded like a relocation:
- * when the bound truncates, the layer's own inherited values come first. */
+/** Flow keeps the layer's appearance, size and pose but drops absolute position; inherited values are considered in their original order. */
 export function designRelocationFlowStyles(
   relocation: DesignRelocation,
   flow: Readonly<Record<string, string | null | undefined>>,
@@ -226,7 +216,7 @@ export const designMovementGuardSchema = z
 
 export type DesignMovementGuard = z.infer<typeof designMovementGuardSchema>;
 
-/** The most frames one canvas move carries, the canvas selection bound. */
+/** Match the canvas selection bound. */
 export const DESIGN_FRAMES_MOVE_LIMIT = 32;
 const frameGeometry = z
   .object({
@@ -237,8 +227,7 @@ const frameGeometry = z
     z: z.number().int().min(0).max(DESIGN_MAX_FRAMES_PER_PAGE),
   })
   .strict();
-/** Several selected canvas frames moved together: each names the geometry
- * it was measured at, so a stale gesture moves nothing. */
+/** Stale source geometry rejects the entire move before the canvas write. */
 export const designFramesMoveSchema = z
   .array(z.object({ frame: z.string().min(1).max(255), from: frameGeometry, to: frameGeometry }).strict())
   .min(1)
@@ -247,28 +236,16 @@ export const designFramesMoveSchema = z
 export type DesignFramesMove = z.infer<typeof designFramesMoveSchema>;
 
 export interface DesignRuntimeRelocationContext {
-  /** Inherited values the layer's own context gives it beyond its frame's
-   * base: standard properties unlike the body's, custom properties unlike
-   * the root's. Shared base values come from the destination's own styles. */
+  /** Store deltas from the source body for standard properties and from the root for custom properties. */
   inheritedStyles: Record<string, string>;
-  /** The frame body's standard inherited values those were compared with.
-   * Older runtimes omit it; they carried every inherited value instead. */
+  /** Older runtimes omit the body's base styles and send all inherited values as deltas. */
   baseStyles?: Record<string, string>;
-  /** The document root's values ("" where it sets none) of the custom
-   * properties in inheritedStyles. As a drop parent, these are what a layer
-   * of the same document that does not set them has. */
+  /** Drop-parent root values for custom properties, empty when unset. */
   rootStyles?: Record<string, string>;
   unsupported: string[];
 }
 
-/** The inherited values a relocation carries so the layer looks the same in
- * its drop parent: each of the layer's values that the parent's own values
- * (its context over its frame's base) would not give it. Within one document
- * (`sameDocument`), a custom property the parent sets and the layer takes
- * from the root travels at the root's value. `parent` null (unmeasured)
- * carries every value; omitted, the parent is a new frame's body, which
- * copies the source's head and so gives the source's base. Bounded, the
- * layer's own context first. */
+/** Carry only what the destination lacks; an unmeasured parent carries everything, an omitted parent shares the source base, and same-document drops can restore root custom properties. */
 export function designRelocationInheritedStyles(
   context: DesignRuntimeRelocationContext,
   parent?: DesignRuntimeRelocationContext | null,

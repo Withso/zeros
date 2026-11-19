@@ -31,7 +31,6 @@ export function useIsInternalUser(): boolean {
 }
 
 export type InternalFeature =
-  // Copy Logs may expose only the same scrubbed log tail used by feedback.
   | "copyLogs"
   | "resourceSummary"
   | "designGpuCanvas"

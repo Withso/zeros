@@ -4,8 +4,7 @@ import {
   parseCloudWorkspaceKey,
 } from "./bridge/cloud-workspace-key";
 
-/** Native paths are references, never workspace identities. Cloud absolute
- * paths require the owning engine's confirmed root; no basename guessing. */
+/** A cloud absolute path needs the owning engine's confirmed root; a native path alone does not identify a workspace. */
 export function relativeWorkspaceFilePath(
   cwd: string | null | undefined,
   rawPath: string,

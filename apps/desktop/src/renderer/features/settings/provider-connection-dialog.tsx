@@ -85,8 +85,6 @@ export function ProviderConnectionDialog({
                   disabled={busy}
                   onClick={() => onMethodChange(entry.id)}
                 >
-                  {/* The RadioGroup look: border4, then inverted-bg around a
-                      6px inverted-fg dot when chosen. */}
                   <span
                     aria-hidden="true"
                     className={cn(

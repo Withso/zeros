@@ -1,8 +1,3 @@
-// Typed renderer bridge for the first-party design document operations.
-//
-// Kept separate from the already-large workspace bridge: transport and error
-// semantics still go through its shared workspaceOp helper, while the design
-// wire vocabulary remains cohesive and cheap for the design shell to import.
 
 import { DESIGN_COPY_PLACEMENT_CAPABILITY, DESIGN_LINKED_COMPONENT_COPY_CAPABILITY, type DesignComponentCopy, type DesignRelocation, type DesignMovementGuard } from "@zeros/protocol/design-relocation";
 import {
@@ -65,10 +60,7 @@ const workspaceOp: typeof rawWorkspaceOp = (bridge, op, params = {}, ...rest) =>
   return rawWorkspaceOp(bridge, op, { ...params, ...(directoryId ? { directoryId } : {}), ...showsNothingParam(bridge, params.workspaceId) }, ...rest);
 };
 
-// A cold aggregate snapshot intentionally parses, lints, and composes every
-// frame's lightweight render identity. Large documents can exceed the generic
-// 10s workspace RPC budget even on a healthy engine; the renderer retains a
-// warm exact-key snapshot while this bounded revalidation runs.
+// A cold aggregate composes every frame; a healthy engine can exceed the generic RPC budget while the renderer revalidates its exact-key snapshot.
 const DESIGN_AGGREGATE_READ_TIMEOUT_MS = 30_000;
 
 export interface DesignFrameSummaryWire {
@@ -100,9 +92,7 @@ export interface DesignFrameTreeNodeWire {
 export interface DesignCanvasFrameWire extends DesignFrameSummaryWire {
   sourceVersion: string;
   surfaceCost?: import("@zeros/protocol/design-surface").DesignSurfaceCost | null;
-  /** Set when the frame's file declares options (component frames). */
   component?: import("@zeros/protocol/design-catalog").DesignFrameComponent;
-  /** Set when the frame places component instances with options. */
   instances?: import("@zeros/protocol/design-catalog").DesignFrameInstances;
   componentIdentity?: DesignComponentIdentity | null;
 }
@@ -137,8 +127,7 @@ export async function bridgeDesignPrepareFrames(bridge: RuntimeClient, input: {
   let retired = false;
   const off = bridge.onStatusChange?.((status) => { if (status !== "connected") retired = true; });
   try {
-    // Preserve the directory that produced the descriptions, even when a new
-    // selection has already updated the bridge's remembered directory.
+    // Use the directory that produced the descriptors, not a later remembered selection.
     const showsNothing = showsNothingParam(bridge, params.workspaceId);
     const raw = await rawWorkspaceOp(bridge, "design.frames.prepare", { ...params, ...showsNothing }, 20_000);
     if (retired) throw new Error("Design preparation connection was retired.");
@@ -200,13 +189,10 @@ export interface DesignTokenWire {
   usageCount: number;
   usageCountKnown?: boolean;
   line: number;
-  /** The comment attached to the declaration in tokens.css, as plain text.
-   * Absent from older engines. */
+  /** Plain-text tokens.css declaration comment; absent from older engines. */
   description?: string;
 }
 
-/** An imported style source declared in meta/canvas.json, as the theme editor
- * shows it. The CSS itself reaches frames through rendering. */
 export interface DesignStyleSourceWire {
   id: string;
   title: string;
@@ -225,8 +211,7 @@ export interface DesignStyleSourceWire {
   revision: string | null;
 }
 
-/** A theme with its display name. `base` marks the default theme, whose
- * values are `:root`; frames carry its id when no other theme is chosen. */
+/** The default theme uses :root values and supplies the frame's theme ID when none is selected. */
 export interface DesignThemeWire {
   id: string;
   label: string;
@@ -281,11 +266,9 @@ export interface DesignWorkspaceSnapshotWire {
     pageHashes?: DesignPageHashes;
     /** Pages kept from an earlier projection that the engine no longer matches. */
     stalePages?: string[];
-    /** Prepared frames whose source changed outside Zeros: their next
-     * preparation carries their lint rows. */
+    /** The next preparation must fetch lint rows for externally changed frames. */
     relint?: string[];
-    /** Frames a write acknowledgement prepared without lint rows; a
-     * background design.frames.lint read supplies them. */
+    /** Read lint separately when the write prepared a frame without it. */
     lintPending?: string[];
   };
   /** Absent only on older engines and pre-migration boot snapshots. */
@@ -357,8 +340,7 @@ export function isDesignWorkspaceSnapshotWire(
     const resent = new Set(catalog.data.frames.map(frame => frame.pageId));
     const pages = new Set(catalog.data.pages.map(page => page.id));
     const files = new Set<string>();
-    // A resent page is complete, so its prepared frames must match it; a
-    // frame on a page that was not resent is checked when it is projected.
+    // A resent page is complete; check non-resent frames only when projecting their page.
     if (snapshot.frames.some(frame => {
       if (!designPreparedFrameSchema.safeParse(frame).success || files.has(frame.file) || !pages.has(frame.pageId!)) return true;
       files.add(frame.file);
@@ -410,17 +392,14 @@ export interface DesignFoundationRevisionWire {
 export interface DesignMutationReplyWire {
   mutation: DesignMutationResultWire;
   snapshot: DesignWorkspaceSnapshotWire;
-  /** Exact authored lineage produced by this compatibility mutation. Older
-   * engines may omit it; the renderer then refreshes the current Foundation
-   * before its next transaction instead of guessing across a revision. */
+  /** If a legacy write omits authored lineage, refresh Foundation before the next transaction rather than guessing the revision. */
   foundationRevision?: DesignFoundationRevisionWire;
 }
 
 export interface DesignSelectionInputWire {
   frame: string;
   sourceVersion: string;
-  /** Wall-clock time used in the public MCP response. This is deliberately
-   * separate from the renderer's synthetic monotonic conflict version. */
+  /** Public MCP uses wall time, not the renderer's synthetic conflict version. */
   updatedAt: number;
   nodeIds: string[];
   breadcrumb: string[];
@@ -507,11 +486,9 @@ function validDesignKeyframes(
 export interface DesignApiMutationReplyWire {
   result: DesignApiApplyResult | null;
   snapshot?: DesignWorkspaceSnapshotWire;
-  /** Structural history can restore/delete a frame independently of the frame
-   * that happened to own keyboard focus when the shortcut was pressed. */
+  /** Structural history can restore or delete a frame other than the one that owned focus. */
   historySelection?: string | null;
-  /** Affected frame for semantic, structural and transfer history, including
-   * removed frames. Its folder lets the renderer reveal the affected page. */
+  /** Retain the removed frame's folder so the affected page can still be revealed. */
   historyFrame?: string;
   /** Catalog history can affect an empty page with no frame to identify it. */
   historyPageId?: string;
@@ -736,8 +713,7 @@ function designMutationReply(
   return reply as DesignMutationReplyWire;
 }
 
-/** One frame's canvas preview, rendered from its saved source by the
- * workspace's capture host. A stale answer names the saved version. */
+/** Preview renders saved source; stale replies name the actual saved version. */
 export async function bridgeDesignPreview(
   bridge: RuntimeClient,
   workspaceId: string,
@@ -761,9 +737,7 @@ export async function bridgeDesignPreview(
     : designCaptureScheduler.schedule(JSON.stringify(["native", workspaceId, input]), options.priority ?? "visible", work, options.signal);
 }
 
-/** A cancellable engine capture job: a job id and deadline when the engine
- * supports jobs, and a cancellation that must be confirmed on the same live
- * connection before its capture slot counts as released. */
+/** Release capture admission only on a terminal job reply or confirmed cancellation on the same live connection. */
 async function runDesignPreviewJob<T>(
   bridge: RuntimeClient,
   workspaceId: string,
@@ -786,8 +760,7 @@ async function runDesignPreviewJob<T>(
   let cancellation: Promise<void> | undefined;
   const cancel = () => {
     if (cancellation) return;
-    // A cancellation on another socket could acknowledge an empty job while
-    // the original connection is still draining. Never use it as proof.
+    // A new socket may see no job while the original drains; only original-socket settlement proves cleanup.
     cancellation = !jobId || lostConnection
       ? Promise.reject(new DesignCaptureCleanupUnconfirmedError())
       : rawWorkspaceOp(bridge, "design.preview.cancel", {
@@ -795,7 +768,7 @@ async function runDesignPreviewJob<T>(
     }, DESIGN_CAPTURE_TIMEOUT_MS + 15_000).then((result) => {
       if (lostConnection || (result as { settled?: unknown })?.settled !== true) throw new DesignCaptureCleanupUnconfirmedError();
     });
-    // Attach immediately; the original job is still awaited below.
+    // Observe cancellation failure immediately while awaiting the original job.
     void cancellation.catch(() => {});
   };
   signal.addEventListener("abort", cancel, { once: true });
@@ -817,7 +790,6 @@ async function runDesignPreviewJob<T>(
   catch {
     if (!terminal) {
       designCaptureScheduler.quarantine();
-      // Keep the operation's own failure for diagnostics.
       throw Object.assign(new DesignCaptureCleanupUnconfirmedError(), "error" in outcome ? { cause: outcome.error } : {});
     }
   } finally { offStatus?.(); }
@@ -825,8 +797,7 @@ async function runDesignPreviewJob<T>(
   return outcome.reply;
 }
 
-/** Pictures of many saved frames at one size, theme and color scheme, in
- * engine batch captures. A frame whose source moved on comes back stale. */
+/** A batch frame whose saved source moved on returns stale instead of rendering the wrong generation. */
 export async function bridgeDesignThumbnailsRender(
   bridge: RuntimeClient,
   workspaceId: string,
@@ -841,8 +812,7 @@ export async function bridgeDesignThumbnailsRender(
 ): Promise<DesignThumbnailsReply> {
   return runDesignPreviewJob(bridge, workspaceId, input.directoryId, "design.thumbnails.render",
     { ...input, frames: input.frames.map(({ file, sourceVersion }) => ({ file, sourceVersion })) },
-    // A batch is an engine preview job: its deadline stays within the job
-    // window the engine accepts (a 64-frame batch takes seconds).
+    // The job deadline must fit the engine's admitted preview window.
     DESIGN_PREVIEW_JOB_TIMEOUT_MS, DESIGN_PREVIEW_JOB_TIMEOUT_MS + 15_000,
     options.signal ?? new AbortController().signal, (result) => {
       const reply = designThumbnailsReplySchema.safeParse(result);
@@ -854,10 +824,7 @@ export async function bridgeDesignThumbnailsRender(
 const LOCAL_RECORDINGS_ONLY = "Design recordings are available in Local workspaces only.";
 const DESIGN_RECORDINGS_READ_TIMEOUT_MS = 30_000;
 
-/** Recordings (Skia pictures) of saved frames in one theme, recorded where
- * missing, from Local engines that advertise design.recordings.v1. Chunks
- * named in `knownChunks` are not sent again. A preview job: cancellation is
- * confirmed on the same connection, like thumbnails. */
+/** Local recording jobs omit chunks the renderer already has by content identity. */
 export async function bridgeDesignRecordingsRender(
   bridge: RuntimeClient,
   workspaceId: string,
@@ -883,14 +850,12 @@ export async function bridgeDesignRecordingsRender(
     });
 }
 
-/** An engine without the capability rejects the field (its request schema is
- * strict) and records light, as before. */
+/** Legacy engines record light and reject an unnegotiated colorScheme field. */
 function recordingsColorScheme(bridge: RuntimeClient, workspaceId: string, colorScheme: "light" | "dark" | undefined) {
   return colorScheme && bridge.supportsEngineCapability?.(DESIGN_RECORDINGS_COLOR_SCHEME_CAPABILITY, workspaceId) ? { colorScheme } : {};
 }
 
-/** Each frame's newest stored recording; a frame sent without a version is
- * answered by any generation. Nothing is recorded. */
+/** Without a requested version, use the newest stored recording; this lookup never records. */
 export async function bridgeDesignRecordingsRead(
   bridge: RuntimeClient,
   workspaceId: string,
@@ -1012,8 +977,7 @@ export async function bridgeDesignSetScreenshot(
   });
 }
 
-/** This workspace's Design tab is showing (`present`), or was left. Showing
- * starts the person's style builds; leaving starts their idle timer. */
+/** Opening Design enables this person's style builds; leaving starts their idle timer. */
 export async function bridgeDesignStyleBuildPresence(
   bridge: RuntimeClient,
   workspaceId: string,
@@ -1025,8 +989,7 @@ export async function bridgeDesignStyleBuildPresence(
   });
 }
 
-/** The theme editor's Update: re-read every imported source and run its
- * builds now. The caller re-reads the snapshot afterwards. */
+/** Update forces imported-source builds; the caller must then refresh the snapshot. */
 export async function bridgeDesignRefreshStyles(
   bridge: RuntimeClient,
   workspaceId: string,
@@ -1088,7 +1051,6 @@ export async function bridgeDesignRenamePage(bridge: RuntimeClient, workspaceId:
 }
 
 export interface DesignCanvasItemReplyWire {
-  /** The item as written, for a put. */
   itemId?: string;
   snapshot: DesignWorkspaceSnapshotWire;
 }
@@ -1105,7 +1067,7 @@ function designCanvasItemReply(value: unknown, operation: string, pageId: string
   return { ...(itemId !== undefined ? { itemId } : {}), snapshot: normalizeDesignWorkspaceSnapshotPages(snapshot) };
 }
 
-/** Create (no id) or replace one canvas item on a page. */
+/** Omitting the ID creates a canvas item rather than replacing one. */
 export async function bridgeDesignPutCanvasItem(bridge: RuntimeClient, workspaceId: string, pageId: string,
   item: DesignCanvasItemInput): Promise<DesignCanvasItemReplyWire> {
   return designCanvasItemReply(await workspaceOp(bridge, "design.canvas.item.put", {
@@ -1137,7 +1099,6 @@ export async function bridgeDesignUpdateTheme(
   return { themes: result.themes, snapshot: normalizeDesignWorkspaceSnapshotPages(result.snapshot) };
 }
 
-/** Make components/<name>.html a registered main frame on a page. */
 export async function bridgeDesignMoveComponent(
   bridge: RuntimeClient,
   workspaceId: string,
@@ -1290,8 +1251,7 @@ export async function bridgeDesignUpdateCanvas(
   };
 }
 
-/** Several selected canvas frames moved together: one canvas write and one
- * undo step. Each move names the geometry it was measured at. */
+/** Multi-frame moves form one undo step and carry the geometry against which each was measured. */
 export async function bridgeDesignMoveFrames(
   bridge: RuntimeClient,
   workspaceId: string,
@@ -1447,7 +1407,7 @@ export async function bridgeDesignTransferNode(
 }
 
 let knownPagesReader: ((workspaceId: string) => DesignPageHashes | undefined) | undefined;
-/** The renderer cache names the page hashes its confirmed projection holds. */
+/** Send only the page hashes proven by the retained engine projection. */
 export function setDesignKnownPagesReader(reader: typeof knownPagesReader): void {
   knownPagesReader = reader;
 }
@@ -1577,22 +1537,17 @@ export async function bridgeDesignCommit(
   })) as { sha: string; branch: string };
 }
 
-/** Every design folder in a checkout (recognized by its committed
- *  `.zeros-canvas.json` marker) plus the resolved `[design] directory`
- *  pointer. `workspaceId` may be a workspace id or a known repo root. */
+/** Discovery accepts a workspace ID or known repo root; registered folders and the resolved preference are separate. */
 export interface DesignDirectoryListingWire {
   /** Stable identities from this checkout's tracked registry. */
   directoryIds?: Record<string, string>;
-  /** Every folder recognized by a committed `.zeros-canvas.json` marker. */
+  /** Discovery includes HEAD, staged, and registry-backed folders, not just legacy markers. */
   directories: string[];
   /** The resolved `[design] directory` pointer ("Zeros Design" when unset). */
   pointer: string;
   /** The folder the engine currently treats as active for this checkout. */
   active: string;
-  /** The folder Design mode WOULD use on entry and whether its Design document
-   *  is initialized. `exists: false` means switching to Design creates the
-   *  document, even if an empty isolation-reservation folder is already on
-   *  disk. Omitted by older engines; null when the engine's preview refused. */
+  /** On entry, exists:false requires initialization even for a reserved folder; legacy omission differs from a refused null preview. */
   target?: { directory: string; exists: boolean } | null;
 }
 

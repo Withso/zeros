@@ -65,7 +65,7 @@ export async function saveCloudEnvironment(key: string, patch: CloudEnvironmentP
   } finally { owner.dispose(); }
 }
 
-/** The file, path and owner are captured before reading bytes or refreshing auth. */
+// Capture the owner, file and path before I/O; recheck the owner after reading and before saving.
 export async function saveCloudEnvironmentFile(key: string, expectedRevision: number, selectedPath: string,
   file: Pick<File, "size" | "text">, signal?: AbortSignal): Promise<CloudEnvironmentMetadata> {
   const owner = intent(key, signal);

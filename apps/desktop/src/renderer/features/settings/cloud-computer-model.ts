@@ -1,19 +1,15 @@
-// Presentation model for Settings → Cloud Computer. The organization's
-// configured repositories are the desired state; the active build is what is
-// live. Unbuilt changes are the difference, ignoring build outputs (pinned
-// commits, observed branches) and repository order.
 import type { CloudV2Build, CloudV2RepositoryDraft } from "../../platform/cloud-v2";
 
 export type ComputerChange = "repositories" | "branches" | "setup";
 const CHANGE_LABEL: Record<ComputerChange, string> = { repositories: "repositories", branches: "branches", setup: "setup" };
 
-/** The editable part of a build's recipe. */
+// Strip build outputs before comparing the live build with the configured recipe.
 export function editableRepositories(build: Pick<CloudV2Build, "recipe"> | null | undefined): CloudV2RepositoryDraft[] {
   return (build?.recipe.repositories ?? []).map(({ repository, ref, setup, setupScript }) =>
     ({ repository, ...(ref ? { ref } : {}), ...(setup ? { setup } : {}), ...(setupScript ? { setupScript } : {}) }));
 }
 
-/** What differs between the configured repositories and the live build. */
+// Repository order and case do not make a recipe unbuilt.
 export function computerChanges(configured: readonly CloudV2RepositoryDraft[], live: readonly CloudV2RepositoryDraft[]): ComputerChange[] {
   const key = (row: CloudV2RepositoryDraft) => row.repository.toLowerCase();
   const before = new Map(live.map(row => [key(row), row]));
@@ -32,7 +28,6 @@ export function describeChanges(changes: readonly ComputerChange[]): string {
   return `Changed: ${changes.map(change => CHANGE_LABEL[change]).join(", ")}`;
 }
 
-/** Short relative age: "just now", "5m ago", "3h ago", "13d ago", "3mo ago", "1y ago". */
 export function relativeAge(iso: string | null | undefined, now: number): string | null {
   const at = iso ? Date.parse(iso) : NaN;
   if (!Number.isFinite(at)) return null;
@@ -99,24 +94,17 @@ export function historyNote(build: CloudV2Build): string | null {
   return null;
 }
 
-/** Saves edits one at a time, in order. The first edit after a quiet period
- * takes the revision the view showed; each save then advances it, so a newer
- * server revision fetched meanwhile (another admin's edit) is a conflict, not
- * a silent overwrite. Edits during a save are coalesced into the next one; an
- * error drops what is queued, since the server's version now wins. */
+// Keep the edit's base revision to detect another admin's save; coalesce later edits onto the acknowledged revision.
 export class RecipeSaveQueue<T> {
   private queued: { value: T } | null = null;
   private flight: Promise<void> | null = null;
   private timer: ReturnType<typeof setTimeout> | undefined;
-  /** The revision pending edits are based on; undefined while nothing is pending. */
   private base: number | undefined;
-  /** Why the last drain stopped; settle() reports it once. */
+  // Report a drain failure once to the caller waiting to build.
   private failure: { error: unknown } | null = null;
 
   constructor(private readonly deps: {
-    /** Saves `value` at `revision` and returns the new revision. */
     save(value: T, revision: number): Promise<number>;
-    /** The revision currently shown when no edit is pending. */
     serverRevision(): number | undefined;
     onError(error: unknown): void;
     onSaved(): void;
@@ -137,8 +125,7 @@ export class RecipeSaveQueue<T> {
     return this.flight;
   }
 
-  /** Resolves once every pushed edit has been saved; rejects when one was not,
-   * so nothing acts on a configuration the server never received. */
+  // Builds wait for this drain so a failed save cannot build an older recipe.
   async settle(): Promise<void> {
     if (this.timer) void this.flush();
     while (this.flight) await this.flight;
@@ -147,7 +134,7 @@ export class RecipeSaveQueue<T> {
     if (failure) throw failure.error;
   }
 
-  /** Drops edits that have not started saving. A save already sent completes. */
+  // Cancel queued edits without pretending an already sent save can be undone.
   cancel(): void { clearTimeout(this.timer); this.timer = undefined; this.queued = null; if (!this.flight) this.base = undefined; }
 
   get waiting(): boolean { return this.timer !== undefined; }
@@ -161,14 +148,13 @@ export class RecipeSaveQueue<T> {
     let saved = false;
     while (this.queued) {
       const { value } = this.queued;
-      // This save takes the edit a typing pause was waiting for.
+      // An in-flight drain can take a queued edit before its typing timer fires.
       this.queued = null; clearTimeout(this.timer); this.timer = undefined;
       const revision = this.base ?? this.deps.serverRevision();
       if (revision === undefined) return;
       try { this.base = await this.deps.save(value, revision); saved = true; }
       catch (error) {
-        // Drop everything that was waiting, typing pause included, so the
-        // next edit takes the revision shown then.
+        // Discard queued edits on failure so the next edit starts from the shown server revision.
         this.queued = null; clearTimeout(this.timer); this.timer = undefined; this.base = undefined;
         this.failure = { error }; this.deps.onError(error); return;
       }
@@ -178,8 +164,7 @@ export class RecipeSaveQueue<T> {
   }
 }
 
-/** A recipe reply merged into the freshest overview; null when that already
- * shows the same or a newer revision, which a late reply must never undo. */
+// A late recipe reply must not replace a revision already seen during refresh.
 export function newerRecipe<T extends { recipeRevision?: number | undefined; recipe?: unknown }>(
   fresh: T | undefined, saved: { recipe: NonNullable<T["recipe"]>; recipeRevision: number },
 ): T | null {

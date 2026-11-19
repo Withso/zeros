@@ -1,5 +1,4 @@
-// Durable cloud sends use HTTPS independently of the live bridge. The control
-// plane mirrors this contract with Zod 3 in cloud/prompt-contract.ts.
+// Durable sends use HTTPS even without the live bridge; keep the Zod 3 mirror in cloud/prompt-contract.ts in sync.
 import { z } from "zod";
 import { CloudRecoveryHintSchema } from "./cloud-recovery-quiesce";
 

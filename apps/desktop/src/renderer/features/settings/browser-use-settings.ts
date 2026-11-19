@@ -19,9 +19,6 @@ export type BrowserAgentFamily = "codex" | "claude" | "cursor";
 
 export type BrowserUseSettingsValue = Record<BrowserBooleanSetting, boolean>;
 
-/** Settings → Browser, with its copy beside the keys it writes so the
- * contract stays testable without mounting the settings bridge. One switch
- * decides for every agent; Claude in Chrome stays opt-in. */
 export const BROWSER_SETTINGS_ROWS: Record<
   BrowserBooleanSetting,
   { label: string; hint?: string }
@@ -49,8 +46,7 @@ function browserTable(
     : {};
 }
 
-/** Which browser each agent uses, by the same table the engine applies when
- * it boots a provider and on every `zeros_browser` call. */
+// Use the engine's route table so the renderer reflects what the provider can actually use.
 export function browserRoutesFromEffective(
   effective: SettingsDoc | null | undefined,
   availability: Pick<AgentControlAvailability, "zerosBrowser">,
@@ -93,9 +89,7 @@ export function browserSettingIsManaged(
   return sources?.[`browser.${key}`] === "managed";
 }
 
-/** An optimistic value yields once a newer resolved snapshot shows it, or
- * managed policy takes the key. Serialized writes can broadcast an older
- * intermediate value first, which must not flicker back. */
+// A settled edit yields only to a new matching snapshot or managed policy, not an intermediate write.
 export function browserSettingSnapshotSupersedesPending(input: {
   key: BrowserBooleanSetting;
   value: boolean;

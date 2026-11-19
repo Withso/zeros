@@ -45,7 +45,6 @@ describe("pty-bridge", () => {
       cols: 80,
       rows: 24,
     });
-    // A FRESH spawn carries no snapshot → reattach fields stay undefined.
     expect((info as { replay?: string }).replay).toBeUndefined();
     expect((info as { reattached?: boolean }).reattached).toBeUndefined();
   });

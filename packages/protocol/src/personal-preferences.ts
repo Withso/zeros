@@ -5,10 +5,7 @@ import { z } from "zod";
 export const personalPreferencesSchema = z
   .object({
     appearance: z.object({
-      // "orka-black" (the retired opt-in warm dark palette, 2026-08 →
-      // 2026-09-14) is accepted from persisted/synced docs and normalized to
-      // "dark" so an old settings.toml or cloud copy keeps validating; the
-      // published JSON schema only advertises the three live modes.
+      // Persisted or synced orka-black reads as dark; the public schema lists only current modes.
       mode: z.preprocess(
         (mode) => (mode === "orka-black" ? "dark" : mode),
         z.enum(["system", "light", "dark"]),
@@ -16,8 +13,7 @@ export const personalPreferencesSchema = z
       codeThemes: z
         .object({ dark: z.string().optional(), light: z.string().optional() })
         .default({}),
-      // Settings → Appearance → Chat width. Optional, so a doc written before
-      // it existed stays as it is and reads as Normal.
+      // Older documents omit chat width and read as Normal.
       chatWidth: z.enum(["narrow", "normal", "wide"]).optional(),
     }),
     experimental: z.record(z.string(), z.boolean()),
