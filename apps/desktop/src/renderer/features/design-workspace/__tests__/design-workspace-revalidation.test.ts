@@ -59,20 +59,26 @@ it.each(["personal", "organization-local"])("keeps %s's confirmed panel source u
   designWorkspaceSnapshotCache.setData(workspaceId, before);
   designFramePreparation.setDemand(token, { workspaceId, files: [before.frames[0]!.file] });
   producer.navigation.mockResolvedValue(navigation(before));
-  const held = deferred<ReturnType<typeof reply>>();
+  const held = deferred<ReturnType<typeof reply> & { lint?: Pick<DesignWorkspaceSnapshotWire["lint"], "checkedFiles" | "violations"> }>();
   producer.prepare.mockReturnValue(held.promise);
   const published: Array<DesignWorkspaceSnapshotWire | undefined> = [];
   const unsubscribe = designWorkspaceSnapshotCache.subscribe(workspaceId, () => published.push(designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data));
   const read = load(workspaceId);
   try {
     await vi.waitFor(() => expect(producer.prepare).toHaveBeenCalledOnce());
-    expect(producer.prepare).toHaveBeenCalledWith(workspaceId, before.directoryId, revision, [before.frames[0]!.file]);
+    expect(producer.prepare).toHaveBeenCalledWith(workspaceId, before.directoryId, revision, [before.frames[0]!.file], [before.frames[0]!.file]);
     expect(designWorkspaceSnapshotCache.peekSnapshot(workspaceId)).toMatchObject({ data: before, refreshing: true });
     expect(published.every(value => value === before)).toBe(true);
-    held.resolve(reply(next, [before.frames[0]!.file]));
+    const file = before.frames[0]!.file;
+    held.resolve({ ...reply(next, [file]), lint: { checkedFiles: [file], violations: [
+      { ruleId: "unknown-token", severity: "warning", message: "Fresh lint", file, line: 1, column: 1 },
+    ] } });
     const after = await read;
     expect(after.preparation?.current).toEqual([before.frames[0]!.file]);
     expect(after.frames[0]!.sourceVersion).toBe("c".repeat(24));
+    expect(after.lint).toMatchObject({ checkedFiles: [file], violations: [
+      expect.objectContaining({ ruleId: "unknown-token", severity: "warning", message: "Fresh lint", file, line: 1, column: 1 }),
+    ] });
     expect(designFrameViews(after).map(isPreparedDesignFrame)).toEqual([true, false]);
     expect(published.every(value => isPreparedDesignFrame(designFrameViews(value)[0]!))).toBe(true);
   } finally { held.resolve(reply(next)); await read; unsubscribe(); }
@@ -98,7 +104,7 @@ it("does not replace a newer mutation or another owner with a held warm preparat
   designWorkspaceSnapshotCache.setData(workspaceId, before);
   designFramePreparation.setDemand(token, { workspaceId, files: [before.frames[0]!.file] });
   producer.navigation.mockResolvedValue(navigation(before));
-  const held = deferred<ReturnType<typeof reply>>();
+  const held = deferred<ReturnType<typeof reply> & { lint?: { checkedFiles: string[]; violations: DesignWorkspaceSnapshotWire["lint"]["violations"] } }>();
   producer.prepare.mockReturnValue(held.promise);
   const read = load(workspaceId);
   try {
@@ -106,7 +112,10 @@ it("does not replace a newer mutation or another owner with a held warm preparat
     const newer = { ...before, frames: before.frames.map(frame => ({ ...frame, sourceVersion: "d".repeat(24) })) };
     designWorkspaceSnapshotCache.setData(workspaceId, newer);
     designFramePreparation.setDemand(token, { workspaceId: "organization-local", files: [before.frames[0]!.file] });
-    held.resolve(reply(before, [before.frames[0]!.file]));
+    const file = before.frames[0]!.file;
+    held.resolve({ ...reply(before, [file]), lint: { checkedFiles: [file], violations: [
+      { ruleId: "unknown-token", severity: "warning", message: "Stale lint", file, line: 1, column: 1 },
+    ] } });
     await read;
     expect(designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data).toBe(newer);
     expect(designWorkspaceSnapshotCache.peekSnapshot("organization-local").data).toBeUndefined();
