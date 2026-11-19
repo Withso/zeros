@@ -1000,6 +1000,95 @@ describe("runGit — transient lock retry", () => {
     }
   });
 
+  it("uses Git's first URL base when equal-length insteadOf matches tie", async () => {
+    const remoteRoot = path.join(dir, "clone-rewrite-tie-root");
+    const bareRemote = path.join(remoteRoot, "remote.git");
+    const hostHome = path.join(dir, "clone-rewrite-tie-home");
+    await mkdir(remoteRoot, { recursive: true });
+    await mkdir(hostHome, { recursive: true });
+    await execFileAsync("git", ["clone", "--bare", repo, bareRemote]);
+
+    const source = await startAuthenticatedGitServer({
+      projectRoot: remoteRoot,
+      password: "source-test-credential",
+    });
+    const firstTarget = await startAuthenticatedGitServer({
+      projectRoot: remoteRoot,
+      password: "first-target-credential",
+    });
+    const secondTarget = await startAuthenticatedGitServer({
+      projectRoot: remoteRoot,
+      password: "second-target-credential",
+    });
+    const previousHome = process.env.HOME;
+    const previousXdg = process.env.XDG_CONFIG_HOME;
+    process.env.HOME = hostHome;
+    delete process.env.XDG_CONFIG_HOME;
+    try {
+      const sourcePrefix = `${new URL(source.url).origin}/`;
+      const firstBase = `${new URL(firstTarget.url).origin}/`;
+      const secondBase = `${new URL(secondTarget.url).origin}/`;
+      await writeFile(
+        path.join(hostHome, ".gitconfig"),
+        [
+          `[url "${firstBase}"]`,
+          `  insteadOf = ${sourcePrefix}not-remote/`,
+          `[url "${secondBase}"]`,
+          `  insteadOf = ${sourcePrefix}`,
+          `[url "${firstBase}"]`,
+          `  insteadOf = ${sourcePrefix}`,
+          "",
+        ].join("\n"),
+      );
+
+      const credentialAuthorities: string[] = [];
+      setGitCredentialSourceForTesting({
+        supports({ protocol, authority }) {
+          credentialAuthorities.push(authority);
+          return (
+            protocol === "http" && authority === new URL(firstTarget.url).host
+          );
+        },
+        async getCredential() {
+          return {
+            username: "x-access-token",
+            password: "first-target-credential",
+          };
+        },
+      });
+
+      const result = await cloneRepo({
+        url: source.url,
+        parentFolder: dir,
+        directoryName: "clone-rewrite-tie",
+      });
+
+      expect(result.defaultBranch).toBe("main");
+      expect(credentialAuthorities).toContain(new URL(firstTarget.url).host);
+      expect(credentialAuthorities).not.toContain(
+        new URL(secondTarget.url).host,
+      );
+      expect(source.observed).toHaveLength(0);
+      expect(firstTarget.observed.length).toBeGreaterThan(0);
+      expect(secondTarget.observed).toHaveLength(0);
+      expect(
+        firstTarget.observed.every(
+          ({ password }) => password === "first-target-credential",
+        ),
+      ).toBe(true);
+    } finally {
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      if (previousXdg === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = previousXdg;
+      await Promise.all([
+        source.close(),
+        firstTarget.close(),
+        secondTarget.close(),
+      ]);
+    }
+  });
+
   it("keeps the broker credential path when no clone URL rewrite matches", async () => {
     const remoteRoot = path.join(dir, "clone-direct-root");
     const bareRemote = path.join(remoteRoot, "remote.git");

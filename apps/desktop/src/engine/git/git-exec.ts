@@ -1669,7 +1669,10 @@ async function resolveCloneUrlWithInsteadOf(
   }
   assertNoCodeWritableConfig(findWorktreeTerritory(cwd), entries, cwd);
 
-  let match: { prefix: string; base: string } | null = null;
+  const rewritesByBase = new Map<
+    string,
+    { base: string; prefixes: string[] }
+  >();
   const suffix = ".insteadof";
   for (const entry of entries) {
     const lowerKey = entry.key.toLowerCase();
@@ -1677,16 +1680,28 @@ async function resolveCloneUrlWithInsteadOf(
       !lowerKey.startsWith("url.") ||
       !lowerKey.endsWith(suffix) ||
       entry.key.length <= 4 + suffix.length ||
-      !entry.value ||
-      !target.startsWith(entry.value)
+      !entry.value
     ) {
       continue;
     }
-    if (!match || entry.value.length > match.prefix.length) {
-      match = {
-        prefix: entry.value,
-        base: entry.key.slice(4, -suffix.length),
-      };
+    const base = entry.key.slice(4, -suffix.length);
+    let rewrite = rewritesByBase.get(base);
+    if (!rewrite) {
+      rewrite = { base, prefixes: [] };
+      rewritesByBase.set(base, rewrite);
+    }
+    rewrite.prefixes.push(entry.value);
+  }
+
+  let match: { prefix: string; base: string } | null = null;
+  for (const rewrite of rewritesByBase.values()) {
+    for (const prefix of rewrite.prefixes) {
+      if (
+        target.startsWith(prefix) &&
+        (!match || prefix.length > match.prefix.length)
+      ) {
+        match = { prefix, base: rewrite.base };
+      }
     }
   }
   return match ? `${match.base}${target.slice(match.prefix.length)}` : target;
