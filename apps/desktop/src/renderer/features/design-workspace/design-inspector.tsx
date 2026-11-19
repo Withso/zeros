@@ -38,7 +38,10 @@ import {
 import type { DesignRuntimeNodeDetails, DesignRuntimeNodeState } from "@zeros/protocol/design-runtime";
 import { DESIGN_SELECTION_NODE_LIMIT } from "@zeros/protocol/design-runtime";
 
-import { designFrameRuntime } from "../../platform/bridge/design-frame-runtime";
+import {
+  designFrameRuntime,
+  waitForDesignFrameRuntime,
+} from "../../platform/bridge/design-frame-runtime";
 import { exportDesignPng } from "../../platform/design";
 import { getActiveBridge } from "../../platform/bridge/active-bridge";
 import { openDesignFramePreview } from "../../platform/bridge/design-context-bridge";
@@ -192,9 +195,11 @@ import {
 import { designFieldMixed, designValuesMixed } from "./design-style-mixed";
 import { dispatchDesignWorkspaceShortcut } from "./design-workspace-shortcuts";
 import {
+  clearDesignLivePreview,
   publishDesignLivePreviewStyles,
   useDesignFrameGeometryLiveValue,
   useDesignLivePreviewValue,
+  type DesignLivePreviewPublication,
   type DesignFrameGeometryLiveKey,
 } from "./state/design-live-preview";
 import { useShallow } from "zustand/react/shallow";
@@ -1526,17 +1531,7 @@ export const DesignInspector = React.memo(function DesignInspector({
   const previewDirectoryId = useDesignWorkspaceUiStore(state =>
     workspaceId ? state.byWorkspace[workspaceId]?.directoryId : undefined,
   );
-  const previewDirectoryRevision = useDesignWorkspaceUiStore(state =>
-    workspaceId ? (state.byWorkspace[workspaceId]?.directoryRevision ?? 0) : 0,
-  );
-  const [pendingHistoryByOwner, setPendingHistoryByOwner] = useState<ReadonlyMap<string, number>>(() => new Map());
   const pendingHistoryByOwnerRef = useRef(new Map<string, number>());
-  const currentHistoryOwnerKey = workspaceId
-    ? designInspectorHistoryOwnerKey(workspaceId, previewDirectoryId, previewDirectoryRevision)
-    : null;
-  const pendingHistoryActions = currentHistoryOwnerKey
-    ? (pendingHistoryByOwner.get(currentHistoryOwnerKey) ?? 0)
-    : 0;
   const previewOwner = useMemo(() => ({
     active, workspaceId, directoryId: previewDirectoryId,
     file: frame?.file, frameId: frame?.frameId,
@@ -1661,19 +1656,12 @@ export const DesignInspector = React.memo(function DesignInspector({
         historyOwnerKey,
         (pendingHistoryByOwnerRef.current.get(historyOwnerKey) ?? 0) + 1,
       );
-      setPendingHistoryByOwner(new Map(pendingHistoryByOwnerRef.current));
       // Admit history before later edits; the workspace mutation lane orders
       // its bridge write with inspector and direct canvas mutations.
-      void queueInspectorAction(() => {
-        const current = useDesignWorkspaceUiStore.getState().byWorkspace[workspaceId];
-        if (current?.directoryId !== historyOwner.directoryId ||
-          (current?.directoryRevision ?? 0) !== historyOwner.directoryRevision)
-          return Promise.resolve(null);
-        beginDesignHistorySelection(workspaceId);
-        return applyDesignHistoryCached(workspaceId, frame?.file ?? null, direction);
-      })
+      beginDesignHistorySelection(workspaceId);
+      void applyDesignHistoryCached(workspaceId, frame?.file ?? null, direction)
         .then((result) => {
-          if (!result) return;
+          if (!result || !isCurrentDesignPageOwner(owner)) return;
           // A frame-level step restores its own frame selection below; an
           // in-document step brings back the node selection of the state it
           // returns to.
@@ -1695,11 +1683,41 @@ export const DesignInspector = React.memo(function DesignInspector({
           const pending = pendingHistoryByOwnerRef.current.get(historyOwnerKey) ?? 0;
           if (pending <= 1) pendingHistoryByOwnerRef.current.delete(historyOwnerKey);
           else pendingHistoryByOwnerRef.current.set(historyOwnerKey, pending - 1);
-          setPendingHistoryByOwner(new Map(pendingHistoryByOwnerRef.current));
         });
     },
-    [frame, workspaceId, queueInspectorAction],
+    [frame, workspaceId],
   );
+
+  const readPreparedLayoutRuntime = useCallback(async (
+    owner: string,
+    file: string,
+    assertCurrent: () => void,
+  ) => {
+    assertCurrent();
+    const currentFrame = designWorkspaceSnapshotCache.peekSnapshot(owner).data?.frames.find(
+      (candidate) => candidate.file === file,
+    );
+    if (!currentFrame) throw new Error("The selected Design frame is no longer available.");
+    let runtime = designFrameRuntime(owner, file);
+    if (!runtime || runtime.sourceVersion !== currentFrame.sourceVersion) {
+      runtime = await waitForDesignFrameRuntime(owner, file, 2_000, {
+        sourceVersion: currentFrame.sourceVersion,
+      });
+    }
+    assertCurrent();
+    const assertFrameCurrent = () => {
+      assertCurrent();
+      const latest = designWorkspaceSnapshotCache.peekSnapshot(owner).data?.frames.find(
+        (candidate) => candidate.file === file,
+      );
+      if (latest?.sourceVersion !== currentFrame.sourceVersion)
+        throw new Error(`Design frame changed before the mutation: ${file}. Re-read it and retry.`);
+    };
+    assertFrameCurrent();
+    if (!runtime || runtime.sourceVersion !== currentFrame.sourceVersion)
+      throw new Error("The selected frame is still loading at the current generation.");
+    return { frame: currentFrame, runtime, assertFrameCurrent };
+  }, []);
 
   const saveDesignChanges = useCallback(() => {
     if (!workspaceId) return;
@@ -2181,110 +2199,137 @@ export const DesignInspector = React.memo(function DesignInspector({
         );
       }
       const { workspaceId, frame, styleNodeIds, stateContext } = context;
+      // Capture each clicked layer's value before admitting the edit. The
+      // shared lane performs only state-relative runtime preparation later.
       const updates = designSelectionStyleUpdates(styleNodeIds, styles, perNode).map(
-        (update) => ({ nodeId: update.nodeId, styles: stylesForNode(update.nodeId, update.styles) }),
+        (update) => ({ nodeId: update.nodeId, styles: stylesForNode(update.nodeId, update.styles, context) }),
       );
-      // Serialize local geometry preparation only. The cache orders durable
-      // writes separately, so a later choice can paint while this one saves.
-      const task = layoutActionQueueRef.current.then(async () => {
-        const root =
-          useDesignRuntimeStore.getState().byWorkspace[workspaceId]?.frames[
-            frame.file
-          ]?.snapshot?.frame;
-        // A hold can begin while the refit below awaits its reads; the edit
-        // then writes nothing and its preview goes.
-        const held = designHeldStateWatch(workspaceId, frame.file, styleNodeIds);
-        const dropPreview = () =>
-          Promise.all(
-            updates.map(async ({ nodeId }) => {
-              try {
-                const restored = await clearDesignNodeStylePreviewTransient({
-                  workspaceId,
-                  frame: frame.file,
-                  sourceVersion: frame.sourceVersion,
-                  nodeId,
-                });
-                paintDesignInspectorPreviewDetails(workspaceId, frame.file, restored);
-              } catch {
-                /* The runtime may have been replaced by a newer generation. */
-              }
-            }),
-          ).then(() => null);
-        let resizedFrame: DesignOperation | null = null;
-        // A state's size is the main's in that state; the frame keeps Default's.
+      const previewIntent = stylePreviewIntentRef.current;
+      const restoreStylePreview = async (assertCurrent: () => void) => {
+        const assertPreviewCurrent = () => {
+          assertCurrent();
+          if (
+            stylePreviewIntentRef.current !== previewIntent ||
+            currentStyleOwnerRef.current !== styleOwner
+          )
+            throw new Error("The style preview owner changed during cleanup.");
+        };
         if (
-          root &&
-          !stateContext &&
-          hasDesignIntrinsicSize(root) &&
-          Object.keys(styles).some(designStylePropertyAffectsLayout)
-        ) {
-          const runtime = designFrameRuntime(workspaceId, frame.file);
-          if (!runtime) throw new Error("The selected frame is still loading.");
-          await Promise.all(
-            updates.map((update) =>
-              previewDesignNodeGeometry({
-                workspaceId,
-                frame: { ...frame, sourceVersion: runtime.sourceVersion },
-                ...update,
-              }),
-            ),
-          );
-          const measured = await measureDesignNodeUnheld(runtime, root.oid, held);
-          if (!measured) return dropPreview();
-          const current =
-            designWorkspaceSnapshotCache
-              .peekSnapshot(workspaceId)
-              .data?.frames.find((entry) => entry.file === frame.file) ?? frame;
-          const size = designHugFrameSize(measured, current);
-          if (size.width !== current.width || size.height !== current.height)
-            resizedFrame = {
-              operationId: `layout:${crypto.randomUUID()}`,
-              type: "frame.set-geometry",
-              frame: frame.file,
-              geometry: { x: current.x, y: current.y, z: current.z, ...size },
-            };
-        }
-        // Nothing is written once a hold has met the edit.
-        if (held.blocked()) return dropPreview();
-        if (updates.length === 1 && !resizedFrame && !stateContext) {
-          return {
-            persist: updateDesignNodeStylesCached(workspaceId, {
+          stylePreviewIntentRef.current !== previewIntent ||
+          currentStyleOwnerRef.current !== styleOwner
+        ) return;
+        await Promise.all(updates.map(async (update) => {
+          try {
+            assertPreviewCurrent();
+            const restored = await clearDesignNodeStylePreviewTransient({
+              workspaceId,
               frame: frame.file,
               sourceVersion: frame.sourceVersion,
-              ...updates[0]!,
-            }).then(() => {}),
-          };
-        }
-        const properties = Object.keys(styles).sort();
-        return {
-          persist: applyDesignEditCached(workspaceId, frame, {
-            schemaVersion: 1,
-            transactionId: `desktop:${crypto.randomUUID()}`,
-            actor: { kind: "human", id: "desktop" },
-            intent: stateContext
-              ? `Set ${properties.join(", ")} in the ${stateContext} state`
-              : `Set ${properties.join(", ")} on ${updates.length} layers`,
-            createdAt: Date.now(),
-            coalesceKey: designStyleCommitCoalesceKey(styleNodeIds, properties, intent),
-            operations: [
+              nodeId: update.nodeId,
+            });
+            assertPreviewCurrent();
+            paintDesignInspectorPreviewDetails(workspaceId, frame.file, restored);
+          } catch {
+            /* The runtime may have been replaced by a newer generation. */
+          }
+        }));
+      };
+      const properties = Object.keys(styles).sort();
+      const needsIntrinsicPreparation =
+        !stateContext && Object.keys(styles).some(designStylePropertyAffectsLayout);
+      const transaction = (operations: DesignOperation[]) => ({
+        schemaVersion: 1 as const,
+        transactionId: `desktop:${crypto.randomUUID()}`,
+        actor: { kind: "human" as const, id: "desktop" as const },
+        intent: stateContext
+          ? `Set ${properties.join(", ")} in the ${stateContext} state`
+          : `Set ${properties.join(", ")} on ${updates.length} layers`,
+        createdAt: Date.now(),
+        coalesceKey: designStyleCommitCoalesceKey(styleNodeIds, properties, intent),
+        operations,
+      });
+      const saved = needsIntrinsicPreparation
+        ? applyDesignEditCached(workspaceId, frame, async ({ assertCurrent }) => {
+            const { frame: currentFrame, runtime, assertFrameCurrent } =
+              await readPreparedLayoutRuntime(workspaceId, frame.file, assertCurrent);
+            const rootFrame =
+              useDesignRuntimeStore.getState().byWorkspace[workspaceId]?.frames[
+                frame.file
+              ]?.snapshot?.frame;
+            const held = designHeldStateWatch(workspaceId, frame.file, styleNodeIds);
+            let resizedFrame: DesignOperation | null = null;
+            if (rootFrame && rootFrame.sourceVersion !== currentFrame.sourceVersion)
+              throw new Error("The selected frame details are stale at the current generation.");
+            const root = rootFrame
+              ? await runtime.getNodeDetails(rootFrame.oid)
+              : null;
+            assertFrameCurrent();
+            if (root && hasDesignIntrinsicSize(root)) {
+              await Promise.all(
+                updates.map((update) =>
+                  previewDesignNodeGeometry({
+                    workspaceId,
+                    frame: currentFrame,
+                    ...update,
+                  }),
+                ),
+              );
+              assertFrameCurrent();
+              const measured = await measureDesignNodeUnheld(runtime, root.oid, held);
+              assertFrameCurrent();
+              if (!measured) {
+                await restoreStylePreview(assertFrameCurrent);
+                return null;
+              }
+              const current = designWorkspaceSnapshotCache
+                .peekSnapshot(workspaceId)
+                .data?.frames.find((entry) => entry.file === frame.file);
+              if (!current || current.sourceVersion !== currentFrame.sourceVersion)
+                throw new Error("The selected frame changed before style measurement completed.");
+              const size = designHugFrameSize(measured, current);
+              if (size.width !== current.width || size.height !== current.height)
+                resizedFrame = {
+                  operationId: `layout:${crypto.randomUUID()}`,
+                  type: "frame.set-geometry",
+                  frame: frame.file,
+                  geometry: { x: current.x, y: current.y, z: current.z, ...size },
+                };
+            }
+            assertFrameCurrent();
+            if (held.blocked()) {
+              await restoreStylePreview(assertFrameCurrent);
+              return null;
+            }
+            return transaction([
               ...updates.map((update) => ({
                 operationId: `styles:${crypto.randomUUID()}`,
                 type: "node.set-styles" as const,
                 ...update,
                 scope: "auto" as const,
-                responsiveContext: "base",
+                responsiveContext: "base" as const,
                 stateContext: stateContext ?? "default",
               })),
               ...(resizedFrame ? [resizedFrame] : []),
-            ],
-          }).then(() => {}),
-        };
-      });
-      layoutActionQueueRef.current = task.then(
-        () => {},
-        () => {},
-      );
-      const saved = task.then((prepared) => prepared?.persist);
+            ]);
+          }, undefined, {
+            recover: async ({ assertCurrent }) => {
+              await restoreStylePreview(assertCurrent);
+            },
+          }).then(() => {})
+        : updates.length === 1 && !stateContext
+          ? updateDesignNodeStylesCached(workspaceId, {
+              frame: frame.file,
+              sourceVersion: frame.sourceVersion,
+              ...updates[0]!,
+            }).then(() => {})
+          : applyDesignEditCached(workspaceId, frame, transaction(updates.map((update) => ({
+              operationId: `styles:${crypto.randomUUID()}`,
+              type: "node.set-styles" as const,
+              ...update,
+              scope: "auto" as const,
+              responsiveContext: "base" as const,
+              stateContext: stateContext ?? "default",
+            })))).then(() => {});
       // A plain value written over values the themes gave apart is one
       // value for all of them now; say so under the field once it saved.
       // Read before the write: after it, the value no longer differs.
@@ -2302,7 +2347,7 @@ export const DesignInspector = React.memo(function DesignInspector({
       }
       return saved;
     },
-    [styleOwner, stylesForNode],
+    [readPreparedLayoutRuntime, styleOwner, stylePreviewIntentRef, stylesForNode],
   );
 
   /** Detach: every selected layer keeps the value its token resolves to on
@@ -2381,12 +2426,15 @@ export const DesignInspector = React.memo(function DesignInspector({
       const context = styleOwner.contextRef.current;
       if (currentStyleOwnerRef.current !== styleOwner || !context.active) return;
       if (!context.workspaceId || !context.frame) return;
-      const current = useDesignWorkspaceUiStore.getState().byWorkspace[context.workspaceId];
-      if ((pendingHistoryByOwnerRef.current.get(designInspectorHistoryOwnerKey(
+      const owner = captureDesignPageOwner(context.workspaceId);
+      const directoryRevision = useDesignWorkspaceUiStore.getState().byWorkspace[context.workspaceId]?.directoryRevision ?? 0;
+      const historyOwnerKey = designInspectorHistoryOwnerKey(
         context.workspaceId,
-        current?.directoryId,
-        current?.directoryRevision ?? 0,
-      )) ?? 0) > 0) return;
+        owner.directoryId,
+        directoryRevision,
+      );
+      const historyPending = () => (pendingHistoryByOwnerRef.current.get(historyOwnerKey) ?? 0) > 0;
+      if (!isCurrentDesignPageOwner(owner) || historyPending()) return;
       const intent = ++stylePreviewIntentRef.current;
       const runtimeState =
         useDesignRuntimeStore.getState().byWorkspace[context.workspaceId]
@@ -2407,7 +2455,9 @@ export const DesignInspector = React.memo(function DesignInspector({
           if (
             stylePreviewIntentRef.current !== intent ||
             currentStyleOwnerRef.current !== styleOwner ||
-            !styleOwner.contextRef.current.active
+            !styleOwner.contextRef.current.active ||
+            !isCurrentDesignPageOwner(owner) ||
+            historyPending()
           ) return;
           const spacingRoot = paintDesignInspectorPreviewDetails(
             context.workspaceId!,
@@ -2431,33 +2481,52 @@ export const DesignInspector = React.memo(function DesignInspector({
     (action: DesignLayoutAction): Promise<void> => {
       if (currentStyleOwnerRef.current !== styleOwner || !styleEditContextRef.current.active)
         return Promise.resolve();
-      const target = styleEditContextRef.current;
-      if (target.workspaceId) {
-        const current = useDesignWorkspaceUiStore.getState().byWorkspace[target.workspaceId];
-        if ((pendingHistoryByOwnerRef.current.get(designInspectorHistoryOwnerKey(
-          target.workspaceId,
-          current?.directoryId,
-          current?.directoryRevision ?? 0,
-        )) ?? 0) > 0) return Promise.resolve();
-      }
-      if (target.workspaceId && target.frame && designHeldStateHolds(target.workspaceId, target.frame.file, target.styleNodeIds))
+      const currentContext = styleEditContextRef.current;
+      const { workspaceId, frame, stateContext } = currentContext;
+      const styleNodeIds = [...currentContext.styleNodeIds];
+      if (!workspaceId || !frame || styleNodeIds.length === 0)
         return Promise.resolve();
+      if (designHeldStateHolds(workspaceId, frame.file, styleNodeIds))
+        return Promise.resolve();
+      const capturedFrame = { ...frame };
+      const context = {
+        ...currentContext,
+        frame: capturedFrame,
+        styleNodeIds,
+      };
       const intent = ++stylePreviewIntentRef.current;
-      // Capture the semantic owner at intent. Queued clicks must never follow a
-      // later selection, and every relative rotation reads its own latest value.
-      const context = styleEditContextRef.current;
-      const task = layoutActionQueueRef.current.then(async () => {
-        const { workspaceId, frame, styleNodeIds, stateContext } = context;
-        if (!workspaceId || !frame || styleNodeIds.length === 0) return;
-        const runtime = designFrameRuntime(workspaceId, frame.file);
-        if (!runtime) throw new Error("The selected frame is still loading.");
+      let restorePreview: ((assertCurrent: () => void) => Promise<void>) | undefined;
+      const previewedNodeIds = new Set<string>();
+      const previewPublications = new Map<string, DesignLivePreviewPublication>();
+      const historyOwner = captureDesignPageOwner(workspaceId);
+      const directoryRevision = useDesignWorkspaceUiStore.getState().byWorkspace[workspaceId]?.directoryRevision ?? 0;
+      const historyOwnerKey = designInspectorHistoryOwnerKey(
+        workspaceId,
+        historyOwner.directoryId,
+        directoryRevision,
+      );
+      const canPaintPreview = () =>
+        stylePreviewIntentRef.current === intent &&
+        currentStyleOwnerRef.current === styleOwner &&
+        (pendingHistoryByOwnerRef.current.get(historyOwnerKey) ?? 0) === 0;
+      return applyDesignEditCached(workspaceId, capturedFrame, async ({ assertCurrent }) => {
+        assertCurrent();
+        const { frame: currentFrame, runtime, assertFrameCurrent } =
+          await readPreparedLayoutRuntime(workspaceId, capturedFrame.file, assertCurrent);
+        assertFrameCurrent();
         // A hold can begin while these reads are awaited: what they return
         // inside it is the state's, never Default to write.
         const held = designHeldStateWatch(workspaceId, frame.file, styleNodeIds);
-        const readDetails = (nodeId: string) => runtime.getNodeDetails(nodeId).then(held.read);
+        const readDetails = async (nodeId: string) => {
+          assertFrameCurrent();
+          const node = await runtime.getNodeDetails(nodeId);
+          assertFrameCurrent();
+          return held.read(node);
+        };
         const details = await Promise.all(
           styleNodeIds.map((nodeId) => readDetails(nodeId)),
         );
+        assertFrameCurrent();
         let updates: Map<string, Record<string, string | null>>;
         if (
           isDesignLayoutChildAction(action) ||
@@ -2491,7 +2560,7 @@ export const DesignInspector = React.memo(function DesignInspector({
           // Shift+A leaves an existing layout, and a layer with nothing to
           // lay out, exactly as they are.
           if (action.type === "auto-layout" && action.infer &&
-            (liveChildren.length === 0 || details.some((node) => designAutoLayoutFlow(node) !== "none"))) return;
+            (liveChildren.length === 0 || details.some((node) => designAutoLayoutFlow(node) !== "none"))) return null;
           updates =
             action.type === "auto-layout"
               ? designAutoLayoutUpdates(details, liveChildren,
@@ -2515,7 +2584,7 @@ export const DesignInspector = React.memo(function DesignInspector({
           );
         } else if (action.type === "sizing") {
           const { mode } = action;
-          if (mode === "relative") return;
+          if (mode === "relative") return null;
           updates = new Map(
             details.map((node) => [
               node.oid,
@@ -2598,8 +2667,7 @@ export const DesignInspector = React.memo(function DesignInspector({
             }),
           );
         }
-        if (updates.size === 0 || held.blocked()) return;
-        const currentFrame = { ...frame, sourceVersion: runtime.sourceVersion };
+        if (updates.size === 0 || held.blocked()) return null;
         const fittedRoot =
           action.type === "resize-fit" && !stateContext
             ? details.find(
@@ -2609,9 +2677,9 @@ export const DesignInspector = React.memo(function DesignInspector({
             : undefined;
         const fittedGeometry = fittedRoot
           ? {
-              x: frame.x,
-              y: frame.y,
-              z: frame.z,
+              x: currentFrame.x,
+              y: currentFrame.y,
+              z: currentFrame.z,
               ...designLayoutResizedFrame(
                 fittedRoot,
                 updates.get(fittedRoot.oid)!,
@@ -2640,19 +2708,50 @@ export const DesignInspector = React.memo(function DesignInspector({
           throw new Error(
             "Select a smaller frame to arrange its children together.",
           );
-        const restorePreview = async (): Promise<void> => {
+        for (const nodeId of updates.keys()) previewedNodeIds.add(nodeId);
+        restorePreview = async (checkCurrent): Promise<void> => {
+          checkCurrent();
+          if (stylePreviewIntentRef.current !== intent || currentStyleOwnerRef.current !== styleOwner) return;
+          for (const nodeId of previewedNodeIds) {
+            if (stylePreviewIntentRef.current !== intent || currentStyleOwnerRef.current !== styleOwner) return;
+            const publication = previewPublications.get(nodeId);
+            if (publication)
+              clearDesignLivePreview(
+                workspaceId,
+                capturedFrame.file,
+                nodeId,
+                publication,
+              );
+          }
+          let latestFrame: typeof currentFrame;
+          let assertLatestFrame: () => void;
+          try {
+            const latest = await readPreparedLayoutRuntime(
+              workspaceId,
+              capturedFrame.file,
+              checkCurrent,
+            );
+            latestFrame = latest.frame;
+            assertLatestFrame = latest.assertFrameCurrent;
+          } catch {
+            return;
+          }
           await Promise.all(
-            [...updates.keys()].map(async (nodeId) => {
+            [...previewedNodeIds].map(async (nodeId) => {
               try {
+                if (stylePreviewIntentRef.current !== intent || currentStyleOwnerRef.current !== styleOwner) return;
+                assertLatestFrame();
                 const restored = await clearDesignNodeStylePreviewTransient({
                   workspaceId,
-                  frame: frame.file,
-                  sourceVersion: runtime.sourceVersion,
+                  frame: capturedFrame.file,
+                  sourceVersion: latestFrame.sourceVersion,
                   nodeId,
                 });
+                assertLatestFrame();
+                if (stylePreviewIntentRef.current !== intent || currentStyleOwnerRef.current !== styleOwner) return;
                 paintDesignInspectorPreviewDetails(
                   workspaceId,
-                  frame.file,
+                  capturedFrame.file,
                   restored,
                 );
               } catch {
@@ -2661,25 +2760,23 @@ export const DesignInspector = React.memo(function DesignInspector({
             }),
           );
         };
-        const recover = async (error: unknown): Promise<never> => {
-          // An earlier failed save must not erase a more recent local choice.
-          if (stylePreviewIntentRef.current !== intent) throw error;
-          await restorePreview();
-          throw error;
-        };
-        try {
-          const batch = [...updates].map(([nodeId, styles]) => ({
-            nodeId,
-            styles,
-          }));
-          for (const update of batch)
-            publishDesignLivePreviewStyles(
+        const batch = [...updates].map(([nodeId, styles]) => ({
+          nodeId,
+          styles,
+        }));
+        assertFrameCurrent();
+        if (canPaintPreview()) {
+          for (const update of batch) {
+            previewPublications.set(update.nodeId, publishDesignLivePreviewStyles(
               workspaceId,
-              frame.file,
+              capturedFrame.file,
               update.nodeId,
               update.styles,
-            );
-          const geometries = runtime.supports("previewLayout")
+            ));
+          }
+        }
+        assertFrameCurrent();
+        const geometries = runtime.supports("previewLayout")
             ? await runtime.previewLayout({
                 updates: batch,
                 nodeIds: styleNodeIds,
@@ -2694,10 +2791,13 @@ export const DesignInspector = React.memo(function DesignInspector({
                   }),
                 ),
               );
+        assertFrameCurrent();
+        if (canPaintPreview()) {
           for (const geometry of geometries) {
+            assertFrameCurrent();
             const spacingRoot = paintDesignInspectorPreviewDetails(
               workspaceId,
-              frame.file,
+              capturedFrame.file,
               geometry,
             );
             if (spacingRoot)
@@ -2708,85 +2808,78 @@ export const DesignInspector = React.memo(function DesignInspector({
                 designWorkspaceView(workspaceId).zoom,
               );
           }
-          const root =
-            useDesignRuntimeStore.getState().byWorkspace[workspaceId]?.frames[
-              frame.file
-            ]?.snapshot?.frame;
-          if (
-            root &&
-            (hasDesignIntrinsicSize(root) ||
-              (action.type === "sizing" && updates.has(root.oid)))
-          ) {
-            // A hold can begin on the root after the preview let go of any.
-            const measured = await measureDesignNodeUnheld(runtime, root.oid, held);
-            if (!measured) {
-              if (stylePreviewIntentRef.current === intent) await restorePreview();
-              return;
-            }
-            const current =
-              designWorkspaceSnapshotCache
-                .peekSnapshot(workspaceId)
-                .data?.frames.find((entry) => entry.file === frame.file) ??
-              frame;
-            const size = designHugFrameSize(measured, current);
-            if (action.type === "sizing" && updates.has(root.oid)) {
-              const box = measured.box ?? measured.rect;
-              const property = action.axis === "x" ? "width" : "height";
-              size[property] = Math.max(
-                1,
-                Math.min(16_384, Math.ceil(box[property])),
-              );
-            }
-            if (size.width !== current.width || size.height !== current.height)
-              operations.push({
-                operationId: `layout:${crypto.randomUUID()}`,
-                type: "frame.set-geometry",
-                frame: frame.file,
-                geometry: { x: current.x, y: current.y, z: current.z, ...size },
-              });
-          }
-          if (operations.length > DESIGN_TRANSACTION_MAX_OPERATIONS)
-            throw new Error(
-              "Select a smaller frame to arrange its children together.",
-            );
-          // Nothing is persisted once a hold has met the edit.
-          if (held.blocked()) {
-            if (stylePreviewIntentRef.current === intent) await restorePreview();
-            return;
-          }
-          if (operations.length === 1) {
-            const [nodeId, styles] = updates.entries().next().value!;
-            return {
-              persist: updateDesignNodeStylesCached(workspaceId, {
-                frame: frame.file,
-                nodeId,
-                sourceVersion: currentFrame.sourceVersion,
-                styles,
-              }).then(() => {}, recover),
-            };
-          } else {
-            return {
-              persist: applyDesignEditCached(workspaceId, currentFrame, {
-                schemaVersion: 1,
-                transactionId: `desktop:${crypto.randomUUID()}`,
-                actor: { kind: "human", id: "desktop" },
-                intent: `Update layout on ${styleNodeIds.length} layers`,
-                createdAt: Date.now(),
-                operations,
-              }).then(() => {}, recover),
-            };
-          }
-        } catch (error) {
-          return recover(error);
         }
-      });
-      layoutActionQueueRef.current = task.then(
-        () => {},
-        () => {},
-      );
-      return task.then((prepared) => prepared?.persist);
+        const rootFrame =
+          useDesignRuntimeStore.getState().byWorkspace[workspaceId]?.frames[
+            capturedFrame.file
+          ]?.snapshot?.frame;
+        if (rootFrame && rootFrame.sourceVersion !== currentFrame.sourceVersion)
+          throw new Error(`Design frame details changed before the mutation: ${capturedFrame.file}.`);
+        const root = rootFrame
+          ? await runtime.getNodeDetails(rootFrame.oid)
+          : null;
+        assertFrameCurrent();
+        if (
+          root &&
+          (hasDesignIntrinsicSize(root) ||
+            (action.type === "sizing" && updates.has(root.oid)))
+        ) {
+          // A hold can begin on the root after the preview let go of any.
+          assertFrameCurrent();
+          const measured = await measureDesignNodeUnheld(runtime, root.oid, held);
+          assertFrameCurrent();
+          if (!measured) {
+            if (stylePreviewIntentRef.current === intent) await restorePreview?.(assertFrameCurrent);
+            return null;
+          }
+          const current =
+            designWorkspaceSnapshotCache
+              .peekSnapshot(workspaceId)
+              .data?.frames.find((entry) => entry.file === capturedFrame.file);
+          if (!current || current.sourceVersion !== currentFrame.sourceVersion)
+            throw new Error(`Design frame changed before the mutation: ${capturedFrame.file}. Re-read it and retry.`);
+          const size = designHugFrameSize(measured, current);
+          if (action.type === "sizing" && updates.has(root.oid)) {
+            const box = measured.box ?? measured.rect;
+            const property = action.axis === "x" ? "width" : "height";
+            size[property] = Math.max(
+              1,
+              Math.min(16_384, Math.ceil(box[property])),
+            );
+          }
+          if (size.width !== current.width || size.height !== current.height)
+            operations.push({
+              operationId: `layout:${crypto.randomUUID()}`,
+              type: "frame.set-geometry",
+              frame: capturedFrame.file,
+              geometry: { x: current.x, y: current.y, z: current.z, ...size },
+            });
+        }
+        if (operations.length > DESIGN_TRANSACTION_MAX_OPERATIONS)
+          throw new Error(
+            "Select a smaller frame to arrange its children together.",
+          );
+        // Nothing is persisted once a hold has met the edit.
+        if (held.blocked()) {
+          if (stylePreviewIntentRef.current === intent) await restorePreview?.(assertFrameCurrent);
+          return null;
+        }
+        assertFrameCurrent();
+        return {
+          schemaVersion: 1,
+          transactionId: `desktop:${crypto.randomUUID()}`,
+          actor: { kind: "human", id: "desktop" },
+          intent: `Update layout on ${styleNodeIds.length} layers`,
+          createdAt: Date.now(),
+          operations,
+        };
+      }, undefined, {
+        recover: async ({ assertCurrent }) => {
+          await restorePreview?.(assertCurrent);
+        },
+      }).then(() => {});
     },
-    [styleOwner, stylePreviewIntentRef],
+    [readPreparedLayoutRuntime, styleOwner, stylePreviewIntentRef],
   );
   useLayoutEffect(() => { layoutShortcutRef.current = commitLayoutAction; }, [commitLayoutAction]);
 
@@ -2831,7 +2924,7 @@ export const DesignInspector = React.memo(function DesignInspector({
               : DESIGN_FRAME_POSITION_RANGE
           }
           compact={options?.compact}
-          disabled={editsDisabled || pendingHistoryActions > 0}
+          disabled={editsDisabled}
           applied
           onPreview={(next) => {
             const number = Number(next);
@@ -2865,19 +2958,17 @@ export const DesignInspector = React.memo(function DesignInspector({
             ) {
               const size = designFrameSizeValue(number);
               const { workspaceId: owner, frame: target } = styleContext;
-              const rootStyles = designFrameRootFixedStyles(elementDetails, {
-                width: geometryKey === "w",
-                height: geometryKey === "h",
-              });
-              // Built in the mutation lane: W then H typed before the first
-              // save replies must each keep the other's confirmed axis.
-              await applyDesignEditCached(owner, target, () => {
-                const latest =
-                  designWorkspaceSnapshotCache
-                    .peekSnapshot(owner)
-                    .data?.frames.find(
-                      (candidate) => candidate.file === target.file,
-                    ) ?? target;
+              const rootNodeId = elementDetails.oid;
+              await applyDesignEditCached(owner, target, async ({ assertCurrent }) => {
+                const { frame: latest, runtime, assertFrameCurrent } =
+                  await readPreparedLayoutRuntime(owner, target.file, assertCurrent);
+                assertFrameCurrent();
+                const rootDetails = await runtime.getNodeDetails(rootNodeId);
+                assertFrameCurrent();
+                const rootStyles = designFrameRootFixedStyles(rootDetails, {
+                  width: geometryKey === "w",
+                  height: geometryKey === "h",
+                });
                 return {
                   schemaVersion: 1,
                   transactionId: `desktop:${crypto.randomUUID()}`,
@@ -2888,7 +2979,7 @@ export const DesignInspector = React.memo(function DesignInspector({
                     {
                       operationId: `layout:${crypto.randomUUID()}`,
                       type: "node.set-styles",
-                      nodeId: elementDetails.oid,
+                      nodeId: rootNodeId,
                       styles: rootStyles,
                       scope: "auto",
                       responsiveContext: "base",
@@ -2964,7 +3055,7 @@ export const DesignInspector = React.memo(function DesignInspector({
         originLabel={styleOriginLabel}
         onLayoutAction={commitLayoutAction}
         onPreviewLayoutAction={previewLayoutAction}
-        disabled={editsDisabled || (!!options?.geometry && pendingHistoryActions > 0)}
+        disabled={editsDisabled}
         applied={applied}
         motionModeActive={motionTimelineOpen}
         motionTrackActive={motionProperties.includes(property)}
@@ -3407,7 +3498,6 @@ export const DesignInspector = React.memo(function DesignInspector({
                     layoutParents={shownParents}
                     selectionCount={styleNodeIds.length}
                     disabled={editsDisabled}
-                    layoutActionsDisabled={pendingHistoryActions > 0}
                     onPreviewStyles={previewSelectedStyles}
                     onCancelStylePreview={clearSelectedStylePreview}
                     onCommitStyles={commitSelectedStyles}

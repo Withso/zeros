@@ -5,6 +5,20 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DesignRuntimeNodeDetails, DesignRuntimeSnapshot } from "@zeros/protocol/design-runtime";
 import { resetDesignWorkspaceUiForTests, useDesignWorkspaceUiStore } from "../state/design-workspace-ui";
 import { isDesignHistoryFocusOwner } from "../state/design-history-commands";
+import * as designSelection from "../state/design-selection";
+
+type MockEditIntent = {
+  operations: Array<{ type: string; styles?: Record<string, string | null> }>;
+};
+type MockEditIntentFactory = (
+  context: { assertCurrent: () => void },
+) => MockEditIntent | null | Promise<MockEditIntent | null>;
+type MockApplyEdit = (
+  workspaceId: string,
+  frame: { file: string; sourceVersion: string },
+  intent: MockEditIntent | MockEditIntentFactory,
+  ...options: unknown[]
+) => Promise<{ result: null }>;
 
 type Fiber = {
   tag: number;
@@ -78,13 +92,26 @@ const renders = vi.hoisted(() => {
   };
 });
 
-const mocks = vi.hoisted(() => ({
+const mocks = vi.hoisted(() => {
+  const state: { lastPreparedIntent: unknown } = { lastPreparedIntent: null };
+  return {
   runtime: vi.fn(),
-  applyEdit: vi.fn(async () => ({})),
+  waitForRuntime: vi.fn(),
+  applyEdit: vi.fn<MockApplyEdit>(async (_workspaceId, _frame, intent) => {
+    state.lastPreparedIntent = typeof intent === "function"
+      ? await intent({ assertCurrent: () => {} })
+      : intent;
+    return { result: null };
+  }),
   applyHistory: vi.fn(),
   updateStyles: vi.fn(async () => ({})),
+  state,
+  };
+});
+vi.mock("../../../platform/bridge/design-frame-runtime", () => ({
+  designFrameRuntime: mocks.runtime,
+  waitForDesignFrameRuntime: mocks.waitForRuntime,
 }));
-vi.mock("../../../platform/bridge/design-frame-runtime", () => ({ designFrameRuntime: mocks.runtime }));
 vi.mock("../../../platform/bridge/active-bridge", () => ({ onActiveBridgeConnected: vi.fn(() => () => {}) }));
 vi.mock("../state/design-workspace-cache", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../state/design-workspace-cache")>()),
@@ -116,6 +143,7 @@ import { DesignInspector } from "../design-inspector";
 import { resetDesignRuntimeStoreForTests, useDesignRuntimeStore } from "../state/design-runtime-store";
 import { resetDesignHeldStateForTests } from "../state/design-held-state";
 import { resetDesignLivePreviewForTests, useDesignLivePreviewStore } from "../state/design-live-preview";
+import { designWorkspaceSnapshotCache } from "../state/design-workspace-cache";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 vi.stubGlobal("ResizeObserver", class { observe() {} unobserve() {} disconnect() {} });
@@ -166,17 +194,32 @@ const card: DesignRuntimeNodeDetails = {
 let container: HTMLDivElement;
 let reactRoot: Root | null = null;
 
-async function show(details: DesignRuntimeNodeDetails = card, previewLayout = false) {
+async function show(
+  details: DesignRuntimeNodeDetails = card,
+  previewLayout = false,
+  runtimeSourceVersion = sourceVersion,
+  selection: {
+    frameSelected?: boolean;
+    selectedNodeId?: string | null;
+    selectedNodeIds?: string[];
+  } = {},
+) {
+  const {
+    frameSelected = false,
+    selectedNodeId = "card",
+    selectedNodeIds = ["card"],
+  } = selection;
   const runtime = {
-    sourceVersion,
+    sourceVersion: runtimeSourceVersion,
     supports: (capability: string) => previewLayout && capability === "previewLayout",
     ...(previewLayout ? { previewLayout: vi.fn(async () => []) } : {}),
     previewStyles: vi.fn(async () => details),
     clearPreviewStyles: vi.fn(async () => details),
-    getNodeDetails: vi.fn(async () => details),
+    getNodeDetails: vi.fn<(nodeId: string) => Promise<DesignRuntimeNodeDetails>>(async () => details),
   };
   mocks.runtime.mockReturnValue(runtime);
   const frame = { file: "home.html", sourceVersion, title: "Home", x: 0, y: 0, z: 0, width: 400, height: 300 } as never;
+  designWorkspaceSnapshotCache.setData("w", { frames: [frame] } as never);
   const snapshot = { sourceVersion, revision: 1, tree: [], warnings: [], frame: root,
     viewport: { width: 400, height: 300, scrollX: 0, scrollY: 0 } } as DesignRuntimeSnapshot;
   useDesignRuntimeStore.getState().publishSnapshot("w", "/repo", "home.html", snapshot, sourceVersion);
@@ -185,7 +228,7 @@ async function show(details: DesignRuntimeNodeDetails = card, previewLayout = fa
     reactRoot.render(React.createElement(TooltipProvider, null,
       React.createElement("div", { "data-design-workspace-surface": "" },
         React.createElement(DesignInspector, {
-          workspaceId: "w", folder: "/repo", frame, frameSelected: false, selectedNodeId: "card", selectedNodeIds: ["card"],
+          workspaceId: "w", folder: "/repo", frame, frameSelected, selectedNodeId, selectedNodeIds,
           details, lint: null, active: true, canvasBackground: "white", onCanvasBackgroundChange: () => {},
           motionTimelineOpen: false, motionProperties: [], onOpenMotionTimeline: () => {}, zoomActionsRef: { current: null },
         } as never))));
@@ -215,7 +258,9 @@ const settle = () => act(async () => {
   }
 });
 const lastWrite = () =>
-  JSON.stringify([...mocks.updateStyles.mock.calls, ...mocks.applyEdit.mock.calls].at(-1) ?? null);
+  mocks.state.lastPreparedIntent
+    ? JSON.stringify(mocks.state.lastPreparedIntent)
+    : JSON.stringify([...mocks.updateStyles.mock.calls, ...mocks.applyEdit.mock.calls].at(-1) ?? null);
 const writes = () => mocks.updateStyles.mock.calls.length + mocks.applyEdit.mock.calls.length;
 
 const lastX = (tick = 120) => 3 + (tick % 40);
@@ -264,8 +309,10 @@ describe("an inspector field scrub", () => {
     resetDesignHeldStateForTests();
     resetDesignLivePreviewForTests();
     mocks.applyEdit.mockClear();
+    mocks.state.lastPreparedIntent = null;
     mocks.applyHistory.mockReset();
     mocks.updateStyles.mockClear();
+    mocks.waitForRuntime.mockReset();
     renders.reset();
   });
   afterEach(() => {
@@ -382,15 +429,90 @@ describe("an inspector field scrub", () => {
     }
   });
 
-  it("does not commit a stale Rotate while history is pending", async () => {
+  it("admits an intrinsic-size Style preparation before a following Undo", async () => {
+    const textCard = {
+      ...card,
+      tag: "p",
+      styles: { ...card.styles, fontSize: "16px" },
+    };
+    const actions: string[] = [];
+    const enqueueMutation = serialMutationLane();
+    let releasePreparation: (() => void) | undefined;
+    const preparationGate = new Promise<void>((resolve) => { releasePreparation = resolve; });
+    mocks.applyHistory.mockImplementation(() => enqueueMutation(async () => {
+      actions.push("undo");
+      return { result: null };
+    }));
+    mocks.applyEdit.mockImplementation((_workspaceId, _frame, intent) =>
+      enqueueMutation(async () => {
+        actions.push("style-preparation");
+        await preparationGate;
+        const transaction = typeof intent === "function"
+          ? await intent({ assertCurrent: () => {} })
+          : intent;
+        if (transaction) actions.push("style");
+        return { result: null };
+      }),
+    );
+    await show(textCard, true);
+    const input = fieldInput("font-size");
+    await act(async () => {
+      input.focus();
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, "18px");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+      await Promise.resolve();
+    });
+    expect(mocks.applyEdit).toHaveBeenCalledOnce();
+    expect(actions).toEqual(["style-preparation"]);
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "z", metaKey: true, bubbles: true, cancelable: true }));
+      await Promise.resolve();
+    });
+    expect(mocks.applyHistory).toHaveBeenCalledOnce();
+    expect(actions).toEqual(["style-preparation"]);
+    await act(async () => {
+      releasePreparation?.();
+      await vi.waitFor(() => expect(actions).toEqual(["style-preparation", "style", "undo"]));
+    });
+  });
+
+  it("prepares Rotate after pending history without blocking controls or later lane work", async () => {
     const beforeUndo = { ...card, styles: { ...card.styles, rotate: "90deg" } };
     const afterUndo = { ...beforeUndo, styles: { ...beforeUndo.styles, rotate: "0deg" } };
-    let resolveUndo: ((reply: { result: null }) => void) | undefined;
-    mocks.applyHistory.mockImplementationOnce(() => new Promise((resolve) => { resolveUndo = resolve; }));
+    let releaseUndo: (() => void) | undefined;
+    let resolveDetails: (() => void) | undefined;
+    let currentDetails = beforeUndo;
+    let prepared: { operations: Array<{ type: string; styles?: Record<string, string | null> }> } | undefined;
+    const actions: string[] = [];
+    const enqueueMutation = serialMutationLane();
+    const undoGate = new Promise<void>((resolve) => { releaseUndo = resolve; });
+    mocks.applyHistory
+      .mockImplementationOnce(() => enqueueMutation(async () => {
+        actions.push("undo");
+        await undoGate;
+        currentDetails = afterUndo;
+        return { result: null };
+      }))
+      .mockImplementationOnce(() => enqueueMutation(async () => {
+        actions.push("redo");
+        return { result: null };
+      }));
+    mocks.applyEdit.mockImplementation((_workspaceId, _frame, intent) => enqueueMutation(async () => {
+      if (typeof intent === "function") {
+        const transaction = await intent({ assertCurrent: () => {} });
+        if (transaction) prepared = transaction;
+        actions.push("rotate");
+      } else {
+        actions.push("canvas");
+      }
+      return { result: null };
+    }));
     const runtime = await show(beforeUndo, true);
     const rotate = container.querySelector<HTMLButtonElement>('button[aria-label="Rotate 90° clockwise"]')!;
     const inspector = container.querySelector("[data-design-inspector]");
     const opacity = fieldInput("opacity");
+    runtime.getNodeDetails.mockClear();
     await act(async () => { opacity.focus(); });
     try {
       await act(async () => {
@@ -398,33 +520,146 @@ describe("an inspector field scrub", () => {
         await Promise.resolve();
       });
       expect(mocks.applyHistory).toHaveBeenCalledOnce();
-      expect(rotate.disabled).toBe(true);
-      expect(fieldInput("rotate").disabled).toBe(true);
+      expect(rotate.disabled).toBe(false);
+      expect(fieldInput("rotate").disabled).toBe(false);
       expect(opacity.disabled).toBe(false);
       expect(document.activeElement).toBe(opacity);
-      await act(async () => { rotate.click(); await Promise.resolve(); });
-      expect(mocks.applyEdit).not.toHaveBeenCalled();
       await act(async () => {
-        runtime.getNodeDetails.mockResolvedValue(afterUndo);
-        resolveUndo?.({ result: null });
+        runtime.getNodeDetails.mockImplementation((nodeId) => {
+          if (nodeId === "root") return Promise.resolve(root);
+          return new Promise((resolve) => {
+            resolveDetails = () => resolve(currentDetails);
+          });
+        });
+        rotate.click();
         await Promise.resolve();
       });
-      await vi.waitFor(() => expect(rotate.disabled).toBe(false));
+      expect(mocks.applyEdit).toHaveBeenCalledOnce();
+      expect(runtime.getNodeDetails).not.toHaveBeenCalled();
+      await act(async () => {
+        window.dispatchEvent(new KeyboardEvent("keydown", {
+          key: "z", metaKey: true, shiftKey: true, bubbles: true, cancelable: true,
+        }));
+        await Promise.resolve();
+      });
+      expect(mocks.applyHistory).toHaveBeenCalledTimes(2);
+      await act(async () => {
+        mocks.applyEdit("w", { file: "home.html", sourceVersion }, { operations: [] });
+        await Promise.resolve();
+      });
+      expect(actions).toEqual(["undo"]);
+      await act(async () => {
+        releaseUndo?.();
+        await vi.waitFor(() => expect(runtime.getNodeDetails).toHaveBeenCalledOnce());
+      });
+      expect(actions).toEqual(["undo"]);
+      await act(async () => {
+        resolveDetails?.();
+        await vi.waitFor(() => expect(actions).toEqual(["undo", "rotate", "redo", "canvas"]));
+      });
       expect(container.querySelector("[data-design-inspector]")).toBe(inspector);
       expect(fieldInput("opacity")).toBe(opacity);
-      await act(async () => { rotate.click(); await Promise.resolve(); });
-      await vi.waitFor(() => expect(mocks.applyEdit).toHaveBeenCalledOnce());
-      const [, , transaction] = mocks.applyEdit.mock.calls[0] as unknown as [string, unknown, { operations: Array<{ type: string; styles?: Record<string, string | null> }> }];
-      expect(transaction.operations.find((operation) => operation.type === "node.set-styles")?.styles?.rotate).toBe("90deg");
+      expect(opacity.disabled).toBe(false);
+      expect(document.activeElement).toBe(opacity);
+      expect(prepared?.operations.filter((operation) => operation.type === "node.set-styles")[0]?.styles?.rotate).toBe("90deg");
     } finally {
       await act(async () => {
-        resolveUndo?.({ result: null });
+        currentDetails = afterUndo;
+        releaseUndo?.();
+        resolveDetails?.();
         await Promise.resolve();
       });
+      mocks.applyEdit.mockReset();
     }
   });
 
-  it("re-enables layout actions when history fails", async () => {
+  it("fails layout preparation instead of reading a stale runtime generation", async () => {
+    const runtime = await show(card, true, "f".repeat(24));
+    mocks.waitForRuntime.mockResolvedValue(null);
+    let preparation: Promise<unknown> | undefined;
+    mocks.applyEdit.mockImplementation((_workspaceId, _frame, intent) => {
+      if (typeof intent !== "function") return Promise.resolve({ result: null });
+      preparation = Promise.resolve(intent({ assertCurrent: () => {} }));
+      return preparation.then(() => ({ result: null }));
+    });
+    const rotate = container.querySelector<HTMLButtonElement>('button[aria-label="Rotate 90° clockwise"]')!;
+    try {
+      await act(async () => { rotate.click(); await Promise.resolve(); });
+      await vi.waitFor(() => expect(preparation).toBeDefined());
+      await expect(preparation).rejects.toThrow(/still loading|matching runtime/i);
+      expect(mocks.waitForRuntime).toHaveBeenCalledWith(
+        "w",
+        "home.html",
+        expect.any(Number),
+        { sourceVersion },
+      );
+      expect(runtime.getNodeDetails).not.toHaveBeenCalled();
+      expect(mocks.applyEdit).toHaveBeenCalledOnce();
+    } finally {
+      mocks.applyEdit.mockReset();
+    }
+  });
+
+  it("derives frame root sizing styles from the latest runtime details", async () => {
+    const staleRoot = {
+      ...root,
+      styles: { ...root.styles, boxSizing: "border-box" },
+    };
+    const freshRoot = {
+      ...root,
+      styles: {
+        ...root.styles,
+        boxSizing: "content-box",
+        paddingLeft: "6px",
+        paddingRight: "6px",
+        borderLeftWidth: "2px",
+        borderRightWidth: "2px",
+      },
+    };
+    const runtime = await show(staleRoot, false, sourceVersion, {
+      frameSelected: true,
+      selectedNodeId: null,
+      selectedNodeIds: [],
+    });
+    runtime.getNodeDetails.mockResolvedValue(freshRoot);
+    let prepared: { operations: Array<{ type: string; styles?: Record<string, string | null> }> } | undefined;
+    mocks.applyEdit.mockImplementation((_workspaceId, _frame, intent) => {
+      if (typeof intent !== "function") return Promise.resolve({ result: null });
+      return Promise.resolve(intent({ assertCurrent: () => {} })).then((transaction) => {
+        if (transaction) prepared = transaction;
+        return { result: null };
+      });
+    });
+
+    const width = container
+      .querySelector<HTMLButtonElement>('button[aria-label="Scrub W"]')
+      ?.closest<HTMLElement>("[data-design-inspector-field]")
+      ?.querySelector<HTMLInputElement>("input");
+    expect(width).toBeInstanceOf(HTMLInputElement);
+    await act(async () => {
+      width!.focus();
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(width, "480");
+      width!.dispatchEvent(new Event("input", { bubbles: true }));
+      width!.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+      await Promise.resolve();
+    });
+    expect(mocks.applyEdit).toHaveBeenCalledOnce();
+    await vi.waitFor(() => expect(prepared).toBeDefined());
+
+    expect(runtime.getNodeDetails).toHaveBeenCalledWith(root.oid);
+    expect(prepared?.operations[0]).toMatchObject({
+      type: "node.set-styles",
+      nodeId: root.oid,
+      styles: { width: "calc(100% - 16px)" },
+    });
+    expect(prepared?.operations[1]).toMatchObject({
+      type: "frame.set-geometry",
+      frame: "home.html",
+      geometry: { x: 0, y: 0, width: 480, height: 300, z: 0 },
+    });
+  });
+
+  it("keeps layout actions enabled when history fails", async () => {
     let rejectUndo: ((error: Error) => void) | undefined;
     mocks.applyHistory.mockImplementationOnce(() => new Promise((_, reject) => { rejectUndo = reject; }));
     await show();
@@ -436,12 +671,12 @@ describe("an inspector field scrub", () => {
         await Promise.resolve();
       });
       await vi.waitFor(() => expect(mocks.applyHistory).toHaveBeenCalledOnce());
-      expect(rotate.disabled).toBe(true);
+      expect(rotate.disabled).toBe(false);
       await act(async () => {
         rejectUndo?.(new Error("history failed"));
         await Promise.resolve();
       });
-      await vi.waitFor(() => expect(rotate.disabled).toBe(false));
+      expect(rotate.disabled).toBe(false);
     } finally {
       rejectUndo?.(new Error("test cleanup"));
     }
@@ -463,7 +698,7 @@ describe("an inspector field scrub", () => {
       }));
     mocks.applyEdit.mockImplementation(() => enqueueMutation(async () => {
       actions.push("canvas");
-      return {};
+      return { result: null };
     }));
     await show();
     await act(async () => { fieldInput("opacity").focus(); });
@@ -480,7 +715,10 @@ describe("an inspector field scrub", () => {
       await vi.waitFor(() => expect(mocks.applyHistory).toHaveBeenCalledTimes(2));
       expect(actions).toEqual(["undo-1"]);
       let canvasEdit!: Promise<unknown>;
-      await act(async () => { canvasEdit = mocks.applyEdit(); await Promise.resolve(); });
+      await act(async () => {
+        canvasEdit = mocks.applyEdit("w", { file: "home.html", sourceVersion }, { operations: [] });
+        await Promise.resolve();
+      });
       expect(actions).toEqual(["undo-1"]);
       await act(async () => { releaseUndo?.(); await canvasEdit; });
       await vi.waitFor(() => expect(actions).toEqual(["undo-1", "undo-2", "canvas"]));
@@ -489,27 +727,35 @@ describe("an inspector field scrub", () => {
     }
   });
 
-  it("does not run a queued history callback after the directory changes", async () => {
+  it("does not publish history selection after the directory changes", async () => {
+    const settleHistorySelection = vi.spyOn(designSelection, "settleDesignHistorySelection");
     useDesignWorkspaceUiStore.getState().bindDirectory("w", "design-a");
     await show();
     const rotate = container.querySelector<HTMLButtonElement>('button[aria-label="Rotate 90° clockwise"]')!;
     await act(async () => { fieldInput("opacity").focus(); });
-    mocks.applyHistory.mockResolvedValue({ result: null });
-    expect(isDesignHistoryFocusOwner("w", true)).toBe(true);
-    await act(async () => {
-      window.dispatchEvent(new KeyboardEvent("keydown", { key: "z", metaKey: true, bubbles: true, cancelable: true }));
-      useDesignWorkspaceUiStore.getState().bindDirectory("w", "design-b");
-      await Promise.resolve();
-    });
-    expect(mocks.applyHistory).not.toHaveBeenCalled();
-    expect(rotate.disabled).toBe(false);
-    await act(async () => {
-      window.dispatchEvent(new KeyboardEvent("keydown", {
-        key: "z", metaKey: true, shiftKey: true, bubbles: true, cancelable: true,
-      }));
-      await Promise.resolve();
-    });
-    await vi.waitFor(() => expect(mocks.applyHistory.mock.calls.some(([, , direction]) => direction === "redo")).toBe(true));
-    expect(mocks.applyHistory.mock.calls.map(([, , direction]) => direction)).toEqual(["redo"]);
+    mocks.applyHistory.mockResolvedValue({ result: null, historyFrame: "home.html" });
+    try {
+      expect(isDesignHistoryFocusOwner("w", true)).toBe(true);
+      await act(async () => {
+        window.dispatchEvent(new KeyboardEvent("keydown", { key: "z", metaKey: true, bubbles: true, cancelable: true }));
+        useDesignWorkspaceUiStore.getState().bindDirectory("w", "design-b");
+        await Promise.resolve();
+      });
+      expect(mocks.applyHistory.mock.calls.map(([, , direction]) => direction)).toEqual(["undo"]);
+      expect(settleHistorySelection).not.toHaveBeenCalled();
+      expect(rotate.disabled).toBe(false);
+      await act(async () => {
+        window.dispatchEvent(new KeyboardEvent("keydown", {
+          key: "z", metaKey: true, shiftKey: true, bubbles: true, cancelable: true,
+        }));
+        await Promise.resolve();
+      });
+      await vi.waitFor(() => expect(mocks.applyHistory.mock.calls.some(([, , direction]) => direction === "redo")).toBe(true));
+      expect(mocks.applyHistory.mock.calls.map(([, , direction]) => direction)).toEqual(["undo", "redo"]);
+      expect(settleHistorySelection).toHaveBeenCalledOnce();
+      expect(settleHistorySelection).toHaveBeenCalledWith("w", "home.html");
+    } finally {
+      settleHistorySelection.mockRestore();
+    }
   });
 });

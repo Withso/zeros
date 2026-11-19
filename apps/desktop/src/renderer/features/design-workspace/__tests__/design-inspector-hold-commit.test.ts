@@ -4,13 +4,25 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DesignRuntimeNodeDetails, DesignRuntimeSnapshot } from "@zeros/protocol/design-runtime";
 
-const mocks = vi.hoisted(() => ({
+const mocks = vi.hoisted(() => {
+  const state: { prepared: unknown } = { prepared: undefined };
+  return {
   runtime: vi.fn(),
   editor: { props: null as null | { onCommitStyles: (styles: Record<string, string | null>) => Promise<void> } },
-  applyEdit: vi.fn(async () => {}),
+  applyEdit: vi.fn(async (_workspaceId: string, _frame: unknown, intent: unknown) => {
+    state.prepared = typeof intent === "function"
+      ? await intent({ assertCurrent: () => {} })
+      : intent;
+    return { result: null };
+  }),
   updateStyles: vi.fn(async () => {}),
+  state,
+  };
+});
+vi.mock("../../../platform/bridge/design-frame-runtime", () => ({
+  designFrameRuntime: mocks.runtime,
+  waitForDesignFrameRuntime: vi.fn(),
 }));
-vi.mock("../../../platform/bridge/design-frame-runtime", () => ({ designFrameRuntime: mocks.runtime }));
 vi.mock("../../../platform/bridge/active-bridge", () => ({ onActiveBridgeConnected: vi.fn(() => () => {}) }));
 vi.mock("../design-style-editor", () => ({
   DesignStyleEditor: (props: { onCommitStyles: (styles: Record<string, string | null>) => Promise<void> }) => {
@@ -28,6 +40,8 @@ import { TooltipProvider } from "../../../shared/ui/primitives";
 import { DesignInspector } from "../design-inspector";
 import { resetDesignRuntimeStoreForTests, useDesignRuntimeStore } from "../state/design-runtime-store";
 import { resetDesignHeldStateForTests } from "../state/design-held-state";
+import { designWorkspaceSnapshotCache } from "../state/design-workspace-cache";
+import { resetDesignWorkspaceUiForTests, useDesignWorkspaceUiStore } from "../state/design-workspace-ui";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 vi.stubGlobal("ResizeObserver", class { observe() {} unobserve() {} disconnect() {} });
@@ -61,6 +75,7 @@ function mount() {
   const snapshot = { sourceVersion: VERSION, revision: 1, tree: [], warnings: [], frame: root,
     viewport: { width: 400, height: 300, scrollX: 0, scrollY: 0 } } as DesignRuntimeSnapshot;
   useDesignRuntimeStore.getState().publishSnapshot("w", "/repo", "home.html", snapshot, VERSION);
+  designWorkspaceSnapshotCache.setData("w", { frames: [FRAME] } as never);
   act(() => {
     reactRoot = createRoot(host);
     reactRoot.render(
@@ -80,8 +95,10 @@ describe("a style commit that refits its frame", () => {
     document.body.append(host);
     resetDesignRuntimeStoreForTests();
     resetDesignHeldStateForTests();
+    resetDesignWorkspaceUiForTests();
     mocks.applyEdit.mockClear();
     mocks.updateStyles.mockClear();
+    mocks.state.prepared = undefined;
     mocks.editor.props = null;
   });
   afterEach(() => {
@@ -101,9 +118,33 @@ describe("a style commit that refits its frame", () => {
     mocks.runtime.mockReturnValue(runtime({ ...root, heldState: "hover", rect: { ...root.rect, width: 900 } }));
     mount();
     await act(async () => { await mocks.editor.props!.onCommitStyles({ padding: "12px" }); });
-    expect(mocks.applyEdit).not.toHaveBeenCalled();
+    expect(mocks.applyEdit).toHaveBeenCalledTimes(1);
     expect(mocks.updateStyles).not.toHaveBeenCalled();
+    expect(mocks.state.prepared).toBeNull();
     // The preview of a value never written goes too.
     expect((mocks.runtime.mock.results.at(-1)!.value as ReturnType<typeof runtime>).clearPreviewStyles).toHaveBeenCalled();
+  });
+
+  it("does not paint a replacement owner after preview cleanup begins", async () => {
+    let releaseClear: (() => void) | undefined;
+    const clearGate = new Promise<void>((resolve) => { releaseClear = resolve; });
+    const oldRuntime = runtime({ ...root, heldState: "hover" });
+    oldRuntime.clearPreviewStyles.mockImplementation(() => clearGate.then(() => root));
+    const replacementRuntime = runtime(root);
+    mocks.runtime.mockReturnValue(oldRuntime);
+    mount();
+    await act(async () => { void mocks.editor.props!.onCommitStyles({ padding: "12px" }); });
+    await vi.waitFor(() => expect(oldRuntime.clearPreviewStyles).toHaveBeenCalledOnce());
+    mocks.runtime.mockReturnValue(replacementRuntime);
+    await act(async () => {
+      useDesignWorkspaceUiStore.getState().bindDirectory("w", "replacement");
+      await Promise.resolve();
+    });
+    await act(async () => {
+      releaseClear?.();
+      await Promise.resolve();
+    });
+    expect(replacementRuntime.clearPreviewStyles).not.toHaveBeenCalled();
+    expect(mocks.state.prepared).toBeNull();
   });
 });
