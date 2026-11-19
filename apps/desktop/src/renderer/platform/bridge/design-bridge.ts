@@ -29,14 +29,16 @@ import {
   type DesignThumbnailsReply,
 } from "@zeros/protocol/design-capture";
 import { designPageCatalogSchema, designPageIdSchema, normalizeDesignPagesSnapshot, type DesignPageSummary } from "@zeros/protocol/design-pages";
-import type { DesignCanvasItem } from "@zeros/protocol/design-canvas-items";
+import { isDesignCanvasItemId, type DesignCanvasItem } from "@zeros/protocol/design-canvas-items";
 
 /** What the canvas sends: an item's own fields; no id creates one. */
 export type DesignCanvasItemInput = DesignCanvasItem extends infer Item ? Item extends DesignCanvasItem
   ? Omit<Item, "id"> & { id?: string } : never : never;
-import { DESIGN_LAZY_PREPARATION_CAPABILITY, DESIGN_MUTATION_SNAPSHOTS_CAPABILITY, DESIGN_PAGE_SCOPED_MUTATIONS_CAPABILITY, designMutationCatalogSchema, designPageScopedCatalogSchema, designPreparedFrameSchema, designFramesPrepareSchema, designFramesPrepareReplySchema, type DesignMutationCatalog, type DesignPageHashes, type DesignPageScopedCatalog } from "@zeros/protocol/design-catalog";
+import { DESIGN_LAZY_PREPARATION_CAPABILITY, DESIGN_MUTATION_SNAPSHOTS_CAPABILITY, DESIGN_PAGE_SCOPED_MUTATIONS_CAPABILITY, designMutationCatalogSchema, designPageScopedCatalogSchema, designPreparedFrameSchema, designFramesPrepareSchema, parseDesignFramesPrepareReply, type DesignMutationCatalog, type DesignPageHashes, type DesignPageScopedCatalog } from "@zeros/protocol/design-catalog";
 import { DESIGN_SOURCE_SURFACES_CAPABILITY } from "@zeros/protocol/design-surface";
-import { DESIGN_COMPONENT_OPTIONS_CAPABILITY } from "@zeros/protocol/design-catalog";
+import { DESIGN_COMPONENT_OPTIONS_CAPABILITY, DESIGN_FRAMES_LINT_CAPABILITY, DESIGN_FRAMES_PREPARE_LINT_CAPABILITY,
+  DESIGN_OPTIONS_SHOW_NOTHING_PARAM, designFramesLintReplySchema, designFramesLintSchema,
+} from "@zeros/protocol/design-catalog";
 import {
   DESIGN_RECORDINGS_COLOR_SCHEME_CAPABILITY,
   DESIGN_RECORDINGS_READ_FAILURES_CAPABILITY,
@@ -48,7 +50,7 @@ import {
 import { isCloudWorkspace } from "./cloud-workspace-key";
 
 import type { RuntimeClient } from "./ws-client";
-import { workspaceOp as rawWorkspaceOp } from "./workspace-bridge";
+import { workspaceOp as rawWorkspaceOp, showsNothingParam } from "./workspace-bridge";
 import { designCaptureScheduler, type DesignCapturePriority } from "./design-capture-scheduler";
 
 const directoryIds = new Map<string, string>();
@@ -60,7 +62,7 @@ export function rememberDesignDirectoryIdentity(workspaceId: string, directoryId
 
 const workspaceOp: typeof rawWorkspaceOp = (bridge, op, params = {}, ...rest) => {
   const directoryId = typeof params.workspaceId === "string" ? directoryIds.get(params.workspaceId) : undefined;
-  return rawWorkspaceOp(bridge, op, { ...params, ...(directoryId ? { directoryId } : {}) }, ...rest);
+  return rawWorkspaceOp(bridge, op, { ...params, ...(directoryId ? { directoryId } : {}), ...showsNothingParam(bridge, params.workspaceId) }, ...rest);
 };
 
 // A cold aggregate snapshot intentionally parses, lints, and composes every
@@ -120,11 +122,13 @@ export interface DesignFrameDocumentWire extends DesignCanvasFrameWire {
 }
 
 export async function bridgeDesignPrepareFrames(bridge: RuntimeClient, input: {
-  workspaceId: string; directoryId: string; catalogRevision: string; files: readonly string[];
+  workspaceId: string; directoryId: string; catalogRevision: string; files: readonly string[]; lintFiles?: readonly string[];
 }) {
-  const params = designFramesPrepareSchema.parse({ ...input,
+  const { lintFiles, ...request } = input;
+  const params = designFramesPrepareSchema.parse({ ...request,
     ...(bridge.supportsEngineCapability?.(DESIGN_SOURCE_SURFACES_CAPABILITY, input.workspaceId) ? { surfaceCosts: true } : {}),
     ...(bridge.supportsEngineCapability?.(DESIGN_COMPONENT_OPTIONS_CAPABILITY, input.workspaceId) ? { componentOptions: true } : {}),
+    ...(lintFiles?.length && bridge.supportsEngineCapability?.(DESIGN_FRAMES_PREPARE_LINT_CAPABILITY, input.workspaceId) ? { lintFiles } : {}),
   });
   if (isCloudWorkspace(params.workspaceId) || !bridge.supportsEngineCapability?.(DESIGN_LAZY_PREPARATION_CAPABILITY, params.workspaceId))
     throw new Error("Design preparation requires a capable Local engine.");
@@ -133,14 +137,36 @@ export async function bridgeDesignPrepareFrames(bridge: RuntimeClient, input: {
   try {
     // Preserve the directory that produced the descriptions, even when a new
     // selection has already updated the bridge's remembered directory.
-    const raw = await rawWorkspaceOp(bridge, "design.frames.prepare", params, 20_000);
+    const showsNothing = showsNothingParam(bridge, params.workspaceId);
+    const raw = await rawWorkspaceOp(bridge, "design.frames.prepare", { ...params, ...showsNothing }, 20_000);
     if (retired) throw new Error("Design preparation connection was retired.");
-    const result = designFramesPrepareReplySchema.parse(raw);
+    const result = parseDesignFramesPrepareReply(raw, { optionsShowNothing: DESIGN_OPTIONS_SHOW_NOTHING_PARAM in showsNothing });
     const files = [...result.frames, ...result.errors].map((frame) => frame.file);
     if (result.directoryId !== params.directoryId || result.catalogRevision !== params.catalogRevision ||
       files.length !== params.files.length || new Set(files).size !== files.length || files.some((file) => !params.files.includes(file)))
       throw new Error("Invalid Design preparation coverage or owner.");
     return result;
+  } finally { off?.(); }
+}
+
+/** Source lint rows for frames at the source versions the renderer holds;
+ * null when the engine cannot answer design.frames.lint. */
+export async function bridgeDesignLintFrames(bridge: RuntimeClient, input: {
+  workspaceId: string; directoryId: string; frames: ReadonlyArray<{ file: string; sourceVersion: string }>;
+}) {
+  if (isCloudWorkspace(input.workspaceId) || !bridge.supportsEngineCapability?.(DESIGN_FRAMES_LINT_CAPABILITY, input.workspaceId)) return null;
+  const params = designFramesLintSchema.parse(input);
+  let retired = false;
+  const off = bridge.onStatusChange?.((status) => { if (status !== "connected") retired = true; });
+  try {
+    const reply = designFramesLintReplySchema.parse(await rawWorkspaceOp(bridge, "design.frames.lint", params, 20_000));
+    if (retired) throw new Error("Design lint connection was retired.");
+    const asked = new Map(params.frames.map((frame) => [frame.file, frame.sourceVersion]));
+    const answered = new Set(reply.frames.map((frame) => frame.file));
+    if (reply.frames.some((frame) => asked.get(frame.file) !== frame.sourceVersion) ||
+      reply.checkedFiles.some((file) => !answered.has(file)) || reply.violations.some((row) => !answered.has(row.file)))
+      throw new Error("Invalid Design lint coverage.");
+    return reply;
   } finally { off?.(); }
 }
 
@@ -253,6 +279,12 @@ export interface DesignWorkspaceSnapshotWire {
     pageHashes?: DesignPageHashes;
     /** Pages kept from an earlier projection that the engine no longer matches. */
     stalePages?: string[];
+    /** Prepared frames whose source changed outside Zeros: their next
+     * preparation carries their lint rows. */
+    relint?: string[];
+    /** Frames a write acknowledgement prepared without lint rows; a
+     * background design.frames.lint read supplies them. */
+    lintPending?: string[];
   };
   /** Absent only on older engines and pre-migration boot snapshots. */
   directoryId?: string;
@@ -481,6 +513,8 @@ export interface DesignApiMutationReplyWire {
   historyFrame?: string;
   /** Catalog history can affect an empty page with no frame to identify it. */
   historyPageId?: string;
+  /** Item history names the item only when it exists in the restored generation. */
+  historyItemId?: string | null;
 }
 
 function designFoundationOpenReply(value: unknown): DesignFoundationOpenWire {
@@ -534,6 +568,8 @@ function designApiMutationReply(
       typeof reply.historyFrame !== "string") ||
     (reply.historyPageId !== undefined &&
       !designPageIdSchema.safeParse(reply.historyPageId).success) ||
+    (reply.historyItemId !== undefined && reply.historyItemId !== null &&
+      !isDesignCanvasItemId(reply.historyItemId)) ||
     (requireSnapshot &&
       (!reply.snapshot ||
         !validMutationSnapshot(reply.snapshot) ||
@@ -1092,6 +1128,28 @@ export async function bridgeDesignUpdateTheme(
   return { themes: result.themes, snapshot: normalizeDesignWorkspaceSnapshotPages(result.snapshot) };
 }
 
+/** Make components/<name>.html a registered main frame on a page. */
+export async function bridgeDesignMoveComponent(
+  bridge: RuntimeClient,
+  workspaceId: string,
+  component: string,
+  pageId?: string,
+): Promise<{ frame: { file: string; pageId: string; title: string; component: string }; snapshot: DesignWorkspaceSnapshotWire }> {
+  const result = await workspaceOp(bridge, "design.component.move", { workspaceId, component, ...(pageId ? { pageId } : {}) }) as {
+    frame?: { file?: unknown; pageId?: unknown; title?: unknown; component?: unknown }; snapshot?: DesignWorkspaceSnapshotWire;
+  } | null;
+  const frame = result?.frame;
+  const snapshot = result?.snapshot;
+  if (!frame || typeof frame.file !== "string" || typeof frame.pageId !== "string" || typeof frame.title !== "string" ||
+    frame.component !== component || !snapshot?.pages || !isDesignWorkspaceSnapshotWire(snapshot) ||
+    !snapshot.pages.some((page) => page.id === frame.pageId && page.frameFiles.includes(frame.file as string)))
+    throw new Error("design.component.move: malformed engine response");
+  return {
+    frame: { file: frame.file, pageId: frame.pageId, title: frame.title, component },
+    snapshot: normalizeDesignWorkspaceSnapshotPages(snapshot),
+  };
+}
+
 export async function bridgeDesignDeletePage(bridge: RuntimeClient, workspaceId: string, pageId: string, expectedFrameIds: readonly string[]): Promise<{
   deleted: { pageId: string };
   snapshot: DesignWorkspaceSnapshotWire;
@@ -1271,22 +1329,40 @@ export async function bridgeDesignDuplicateFrame(
   return { frame: result.frame, snapshot: result.snapshot };
 }
 
+/** A main component frame the engine kept because other frames place it. */
+export interface DesignFrameInUseWire {
+  inUse: { component: string; title: string; instances: number; frames: number };
+}
+
+const validFrameInUse = (value: unknown): value is DesignFrameInUseWire["inUse"] => {
+  const usage = value as Partial<DesignFrameInUseWire["inUse"]> | null;
+  return !!usage && typeof usage.component === "string" && typeof usage.title === "string" &&
+    Number.isInteger(usage.instances) && Number.isInteger(usage.frames);
+};
+
 export async function bridgeDesignDeleteFrame(
   bridge: RuntimeClient,
   workspaceId: string,
   frame: string,
+  options?: { ifUnused?: boolean },
 ): Promise<{
   deleted: { file: string };
   snapshot: DesignWorkspaceSnapshotWire;
-}> {
+} | DesignFrameInUseWire> {
   const result = (await workspaceOp(bridge, "design.frame.delete", {
     workspaceId,
     frame,
+    ...(options?.ifUnused ? { ifUnused: true } : {}),
     ...scopedMutationSnapshot(bridge, workspaceId),
   })) as {
     deleted?: { file: string };
     snapshot?: DesignWorkspaceSnapshotWire;
+    inUse?: unknown;
   };
+  if (options?.ifUnused && result.inUse !== undefined) {
+    if (!validFrameInUse(result.inUse)) throw new Error("design.frame.delete: malformed engine response");
+    return { inUse: result.inUse };
+  }
   if (
     !result.deleted ||
     !result.snapshot ||

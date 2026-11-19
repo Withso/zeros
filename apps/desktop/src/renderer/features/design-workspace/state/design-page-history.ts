@@ -1,4 +1,4 @@
-import { normalizeDesignPagesSnapshot } from "@zeros/protocol/design-pages";
+import { normalizeDesignPagesSnapshot, type DesignPageSummary } from "@zeros/protocol/design-pages";
 import type { DesignApiMutationReplyWire } from "../../../platform/git";
 import { designFrameViews } from "./design-frame-view";
 import { selectDesignFrame } from "./design-selection";
@@ -17,6 +17,7 @@ export async function restoreDesignPageHistorySelection(
   owner: DesignPageOwner,
   result: DesignApiMutationReplyWire,
   direction: "undo" | "redo",
+  onItem?: (itemId: string | null, page: DesignPageSummary) => void,
 ) {
   if (owner.workspaceId !== workspaceId || !isCurrentDesignPageOwner(owner))
     return;
@@ -65,9 +66,13 @@ export async function restoreDesignPageHistorySelection(
     ? (frames.find((frame) => frame.file === result.historySelection) ?? null)
     : null;
   const restoredFrame = direction === "undo" && selected !== null;
+  const selectionOwner = captureDesignPageOwner(workspaceId);
   await selectDesignFrame(workspaceId, selected, {
     selected: restoredFrame,
     reveal: restoredFrame,
-    owner: captureDesignPageOwner(workspaceId),
+    owner: selectionOwner,
   });
+  if (result.historyItemId !== undefined && page && isCurrentDesignPageOwner(selectionOwner))
+    onItem?.(result.historyItemId !== null && page.items?.some(item => item.id === result.historyItemId)
+      ? result.historyItemId : null, page);
 }

@@ -43,6 +43,8 @@ export interface DesignLintViolation {
     | "repeated-inline-style"
     | "literal-token-value"
     | "repeated-markup"
+    | "frame-class"
+    | "component-class"
     | "no-external-url"
     | "component-undefined"
     | "component-invalid"
@@ -93,6 +95,12 @@ export interface DesignFrameRestorePoint {
   source: string;
   geometry: DesignFrameGeometry;
   metadata?: Pick<FrameMeta, "id" | "title" | "kind">;
+  /** Where the frame was listed on its page: restored frames otherwise join
+   * the end, which reorders the page and makes the canvas write a `z`. */
+  pageIndex?: number;
+  /** Its place among all frames, which orders the canvas file's entries of
+   * equal `z` across pages. */
+  frameIndex?: number;
 }
 
 export interface DesignFrameSummary {

@@ -1059,11 +1059,35 @@
   opacity: 0.5;
 }
 
-/* Frame chrome stays 28 screen pixels at every canvas zoom. */
-.zd-canvas-tool.zd-frame-play {
-  width: 28px;
-  height: 28px;
-  background-color: var(--bg2-hover);
+/* Frame chrome is a compact 16 screen pixels at every canvas zoom, beside an
+ * 11px name. Play is a bare blue glyph. Stop, while a frame plays, is a white
+ * square on a fill: blue while its frame has a selection or the pointer, grey
+ * while it plays unattended. */
+.zd-canvas-tool.zd-frame-play,
+.zd-canvas-tool.zd-frame-play:hover:not(:disabled) {
+  width: 16px;
+  height: 16px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background-color: transparent;
+  color: var(--design-selection-stroke);
+}
+.zd-canvas-tool.zd-frame-play svg {
+  width: 12px;
+  height: 12px;
+}
+.zd-canvas-tool.zd-frame-play[aria-pressed="true"],
+.zd-canvas-tool.zd-frame-play[aria-pressed="true"]:hover:not(:disabled) {
+  background-color: var(--design-selection-stroke);
+  color: var(--design-selection-label-fg);
+}
+.zd-canvas-tool.zd-frame-play[aria-pressed="true"] svg {
+  width: 10px;
+  height: 10px;
+  stroke-width: 2.5;
+}
+[data-design-frame][data-design-frame-playing]:not([data-design-frame-selected]):not(:hover):not([data-design-frame-pointer]) .zd-canvas-tool.zd-frame-play {
+  background-color: var(--fg3);
 }
 
 /* Camera variables belong to world geometry and inverse-scaled chrome roots.
@@ -1095,7 +1119,7 @@
   will-change: auto;
 }
 
-/* A 28px control must not cover every tiny frame in an overview. Keep its
+/* A screen-size control must not cover every tiny frame in an overview. Keep its
  * keyboard target and reveal it together with the label on hover or focus. */
 [data-design-frame-compact-controls]:not(:hover):not(:focus-within):not([data-design-frame-pointer]) > [data-design-frame-chrome] {
   --design-canvas-zoom: 1;
@@ -1109,16 +1133,18 @@
   pointer-events: none;
 }
 
-/* A small frame keeps its name. Only the Play control, which would cover
- * most of the name, waits for hover or focus; the name takes its room. */
-[data-design-frame-compact-play]:not(:hover):not(:focus-within):not([data-design-frame-pointer]) > [data-design-frame-play-chrome] {
+/* Play appears only for a frame with a selection, under the pointer, playing,
+ * or holding keyboard focus; a click's leftover focus keeps it hidden. The
+ * hidden control drops its layer, and the name takes the room. */
+[data-design-frame]:not([data-design-frame-selected]):not([data-design-frame-playing]):not(:hover):not([data-design-frame-pointer]) > [data-design-frame-play-chrome]:not(:has(:focus-visible:not([data-zeros-focus-visible="false"]))) {
   clip: rect(0px, 0px, 0px, 0px);
   pointer-events: none;
+  will-change: auto;
 }
-[data-design-frame-compact-play]:not(:hover):not(:focus-within):not([data-design-frame-pointer]) > [data-design-frame-chrome]:not([data-design-frame-play-chrome]) {
+[data-design-frame]:not([data-design-frame-selected]):not([data-design-frame-playing]):not(:hover):not([data-design-frame-pointer]):not(:focus-within) > [data-design-frame-chrome]:not([data-design-frame-play-chrome]) {
   max-width: var(--design-frame-label-full-width, none) !important;
 }
-/* A small frame's 28px name row can lie over the frame above it. Only the
+/* A small frame's name row can lie over the frame above it. Only the
  * name itself takes the pointer there; the row around it lets a hover or a
  * click reach the frame beneath. */
 [data-design-frame-compact-play] > [data-design-frame-chrome]:not([data-design-frame-play-chrome]) {
@@ -1139,6 +1165,15 @@
 .zd-design-selection-outline {
   outline-color: var(--design-selection-stroke);
   --design-stroke-color: var(--design-selection-stroke);
+}
+
+/* A selected frame's edge is one screen pixel; the pointer inside the frame
+ * (not on its name or Play) thickens it to two. */
+.zd-design-frame.zd-design-selection-outline {
+  --design-stroke-width: 1;
+}
+.zd-design-frame.zd-design-selection-outline:is(:hover, [data-design-frame-pointer]):not(:has(> [data-design-frame-chrome]:hover)) {
+  --design-stroke-width: 2;
 }
 
 /* Canvas chrome strokes keep their screen width at every zoom. Chromium
@@ -1219,8 +1254,22 @@
 
 .zd-design-selection-handle {
   background-color: var(--design-selection-handle-fill);
-  box-shadow: inset 0 0 0 calc(1px * var(--design-canvas-inverse-zoom))
-    var(--design-selection-stroke);
+  box-shadow: inset 0 0 0 1px var(--design-selection-stroke);
+}
+
+/* Small chrome is laid out at its screen size, then scaled into the world.
+ * Chromium snaps a box to whole device pixels in its own coordinates, before
+ * the camera's scale applies: an 8-screen-pixel square authored as 1/zoom CSS
+ * pixels snapped to one pixel wide and two tall at deep zoom and painted as a
+ * pill. Lengths inside such a box are screen pixels already. */
+.zd-design-screen-box {
+  translate: -50% -50%;
+  scale: var(--design-canvas-inverse-zoom);
+}
+.zd-design-screen-box.zd-design-dashed-box {
+  --design-dash-width: 1px;
+  --design-dash: var(--design-dash-length, 4px);
+  --design-dash-period: var(--design-dash-repeat, 7px);
 }
 
 /* The rotation pivot: a reticle in the selection color. It sits over authored
@@ -1264,7 +1313,10 @@
   );
 }
 
-.zd-design-constraint-parent {
+/* Layer structure: a selection's parent, and the parent and children ⌘/Ctrl
+ * reveals around a hovered layer, in the same dots as a constraint parent. */
+.zd-design-constraint-parent,
+.zd-design-structure-outline {
   --design-dash-length: 1px;
   --design-dash-repeat: 3px;
   --design-dash-color: color-mix(
@@ -1312,6 +1364,12 @@
   background-color: transparent;
 }
 
+/* Canvas buttons (frame names, frame chrome) keep the canvas cursor instead
+   of the form-control default; handles set their own inline. */
+[data-design-canvas-viewport] button {
+  cursor: inherit;
+}
+
 [data-design-active-tool="frame"]
   :where(
     [data-design-element-overlay],
@@ -1354,12 +1412,13 @@
 }
 
 /* Ticks: a short pill across the drag axis, edged so it reads on any fill.
- * The edge is an inset shadow so it stays one screen pixel at deep zoom. */
+ * Laid out at screen size and scaled into the world, as .zd-design-screen-box
+ * explains; its flex parent centres it, so the default origin keeps it there. */
 .zd-design-inline-spacing-line {
+  scale: var(--design-canvas-inverse-zoom);
   opacity: 0;
   background-color: var(--design-padding-stroke);
-  box-shadow: inset 0 0 0 calc(1px * var(--design-canvas-inverse-zoom))
-    var(--design-spacing-line-border);
+  box-shadow: inset 0 0 0 1px var(--design-spacing-line-border);
 }
 
 .zd-design-inline-gap-handle .zd-design-inline-spacing-line {
@@ -1449,14 +1508,14 @@
 .zd-design-inline-gap-handle[data-active] .zd-design-inline-spacing-line {
   opacity: 1;
   box-shadow:
-    inset 0 0 0 calc(1px * var(--design-canvas-inverse-zoom)) var(--design-spacing-line-border),
-    0 0 0 calc(1px * var(--design-canvas-inverse-zoom)) var(--design-padding-stroke);
+    inset 0 0 0 1px var(--design-spacing-line-border),
+    0 0 0 1px var(--design-padding-stroke);
 }
 
 .zd-design-inline-gap-handle[data-active] .zd-design-inline-spacing-line {
   box-shadow:
-    inset 0 0 0 calc(1px * var(--design-canvas-inverse-zoom)) var(--design-spacing-line-border),
-    0 0 0 calc(1px * var(--design-canvas-inverse-zoom)) var(--design-gap-stroke);
+    inset 0 0 0 1px var(--design-spacing-line-border),
+    0 0 0 1px var(--design-gap-stroke);
 }
 
 /* The readout of a gap drag whose spaces reflow has removed for the moment. */
@@ -1475,8 +1534,8 @@
 .zd-design-inline-spacing-handle:focus-visible:where(:not([data-zeros-focus-visible="false"])) > .zd-design-inline-spacing-line,
 .zd-design-inline-gap-handle:focus-visible:where(:not([data-zeros-focus-visible="false"])) .zd-design-inline-spacing-line {
   box-shadow:
-    inset 0 0 0 calc(1px * var(--design-canvas-inverse-zoom)) var(--design-spacing-line-border),
-    0 0 0 calc(1px * var(--design-canvas-inverse-zoom)) var(--design-spacing-line-border);
+    inset 0 0 0 1px var(--design-spacing-line-border),
+    0 0 0 1px var(--design-spacing-line-border);
 }
 
 /* Typing happens in the readout itself: the same pill, now editable. */
@@ -1681,8 +1740,7 @@
 
 .zd-design-motion-path-point {
   background-color: var(--design-selection-handle-fill);
-  box-shadow: inset 0 0 0 calc(1px * var(--design-canvas-inverse-zoom))
-    var(--design-selection-stroke);
+  box-shadow: inset 0 0 0 1px var(--design-selection-stroke);
 }
 
 .zd-design-motion-path-point:hover,
@@ -1693,8 +1751,8 @@
 
 .zd-design-motion-path-point-selected {
   box-shadow:
-    0 0 0 calc(2px * var(--design-canvas-inverse-zoom)) var(--design-selection-handle-fill),
-    0 0 0 calc(3px * var(--design-canvas-inverse-zoom)) var(--design-selection-stroke);
+    0 0 0 2px var(--design-selection-handle-fill),
+    0 0 0 3px var(--design-selection-stroke);
 }
 
 .zd-design-motion-property-active {
@@ -1831,6 +1889,29 @@
 )) > * {
   visibility: hidden;
 }
+/* A frame that could not be shown. Its problem surface is sized in screen
+   pixels, so the message and Retry appear only where they fit on screen and
+   never spill over neighbouring frames; smaller frames keep the mark. */
+.zd-design-frame-problem-screen {
+  container-type: size;
+}
+.zd-design-frame-problem-screen > [data-design-frame-problem-message] {
+  display: none;
+}
+@container (min-width: 160px) and (min-height: 76px) {
+  .zd-design-frame-problem-screen > [data-design-frame-problem-message] {
+    display: flex;
+  }
+  .zd-design-frame-problem-screen > [data-design-frame-problem] {
+    display: none;
+  }
+}
+@container (max-width: 15.98px), (max-height: 15.98px) {
+  .zd-design-frame-problem-screen > [data-design-frame-problem] {
+    display: none;
+  }
+}
+
 /* Retained HTML and pictures cover editor startup. Painting them beneath a ready editor
    would composite authored alpha twice, but a just-revealed native document can
    composite nothing for a frame: keep them until it reports a produced frame. */
@@ -1970,7 +2051,6 @@
    screen pixel by dividing by the zoom. */
 .zd-canvas-item {
   box-sizing: border-box;
-  cursor: default;
   user-select: none;
 }
 .zd-canvas-item[data-selected] {
@@ -2064,26 +2144,29 @@
   background: var(--design-selection-stroke);
   border-radius: var(--radius-sm);
 }
+/* Laid out at screen size and scaled into the world, as .zd-design-screen-box
+ * explains; each is placed by its centre. */
+.zd-canvas-item-handle-width,
+.zd-canvas-item-handle-height,
+.zd-canvas-item-handle-corner {
+  translate: -50% -50%;
+  scale: var(--design-canvas-inverse-zoom);
+}
 .zd-canvas-item-handle-width {
   top: 50%;
-  right: calc(-5px * var(--design-canvas-inverse-zoom));
-  width: calc(4px * var(--design-canvas-inverse-zoom));
-  height: calc(16px * var(--design-canvas-inverse-zoom));
-  transform: translateY(-50%);
-  cursor: ew-resize;
+  left: calc(100% + 3px * var(--design-canvas-inverse-zoom));
+  width: 4px;
+  height: 16px;
 }
 .zd-canvas-item-handle-height {
   left: 50%;
-  bottom: calc(-5px * var(--design-canvas-inverse-zoom));
-  width: calc(16px * var(--design-canvas-inverse-zoom));
-  height: calc(4px * var(--design-canvas-inverse-zoom));
-  transform: translateX(-50%);
-  cursor: ns-resize;
+  top: calc(100% + 3px * var(--design-canvas-inverse-zoom));
+  width: 16px;
+  height: 4px;
 }
 .zd-canvas-item-handle-corner {
-  right: calc(-6px * var(--design-canvas-inverse-zoom));
-  bottom: calc(-6px * var(--design-canvas-inverse-zoom));
-  width: calc(8px * var(--design-canvas-inverse-zoom));
-  height: calc(8px * var(--design-canvas-inverse-zoom));
-  cursor: nwse-resize;
+  left: calc(100% + 2px * var(--design-canvas-inverse-zoom));
+  top: calc(100% + 2px * var(--design-canvas-inverse-zoom));
+  width: 8px;
+  height: 8px;
 }

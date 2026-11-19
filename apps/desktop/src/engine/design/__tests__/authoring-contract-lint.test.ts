@@ -250,7 +250,7 @@ describe("authoring contract lint", () => {
         line: 2,
         column: 6,
         message: 'Move the inline style "display: flex; gap: 8px", repeated on 4 elements (lines 2, 3, 4 and 1 more), into one class.',
-        fix: "Declare it once as a class in the frame's <style> or a Design stylesheet and use that class on each element; keep inline style for one-off values.",
+        fix: "Declare it once as a class in a Design stylesheet, or in the main frame's <style> when the elements are a component's, and use that class on each element; keep inline style for one-off values.",
       },
     ]);
   });
@@ -275,7 +275,7 @@ describe("authoring contract lint", () => {
     expect(contract("repeated-cards.html")[0]).toMatchObject({
       ruleId: "repeated-markup",
       message: 'Make the <article> markup with class "card", repeated 3 times (lines 1, 1 and 1), one component.',
-      fix: "Define it once as components/<name>.html with <slot> for its content and data-zd-attr for attribute values, then place one <zd-name> per use.",
+      fix: 'Make one copy a main frame ("component": "<name>" on its meta/canvas.json record, with options for the values that change), then place one <zd-name> per use.',
     });
   });
 

@@ -21,7 +21,7 @@ describe("workspace code review routes and trusted attribution", () => {
   let service: WorkspaceService;
   let template: Workspace;
   beforeEach(async () => {
-    directory = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-code-review-routes-"));
+    directory = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "zeros-code-review-routes-")));
     root = path.join(directory, "repo");
     fs.mkdirSync(root);
     fs.writeFileSync(path.join(root, "example.ts"), "original\n");

@@ -1,4 +1,5 @@
 import { expect } from "@playwright/test";
+import { runDesignCanvasCursorSmoke } from "./ui-smoke-design-canvas-cursors.mjs";
 import { designFrameElementBox, openLayersDrawer } from "./ui-smoke-design-helpers.mjs";
 
 export async function runDesignDoubleClickSelectionSmoke({ page, check }) {
@@ -106,10 +107,220 @@ export async function runDesignDoubleClickSelectionSmoke({ page, check }) {
   check("double-click and Enter preserve an empty frame as a frame", true);
 }
 
+// Figma's descent: hover outlines what a double-click enters. Inside a
+// selected frame it is the top-level layer under the pointer, inside a
+// selected layer its child under the pointer, and with ⌘ the deepest layer.
+// A double-click on a parent's own area (padding, gaps) enters its first child.
+export async function runDesignDescentHoverSmoke({ page, check }) {
+  const origin = new URL(page.url()).origin;
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto(`${origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html`, { waitUntil: "networkidle" });
+  await openLayersDrawer(page);
+  await page.locator('[data-design-frame="home.html"] iframe[data-design-document-ready]').waitFor();
+  const iframe = page.locator('[data-design-frame="home.html"] iframe[data-design-document-buffer="displayed"]');
+  const runtime = page.frameLocator('[data-design-frame="home.html"] iframe[data-design-document-buffer="displayed"]');
+  const box = (oid) => designFrameElementBox(iframe, runtime.locator(`[data-oid="${oid}"]`));
+  const centre = (rect) => ({ x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 });
+  const hovered = () => page.evaluate(() =>
+    [...document.querySelectorAll(".zd-design-hover-outline[data-design-element-overlay]")].map((element) => element.dataset.designElementOverlay));
+  const selection = () => page.evaluate(() =>
+    [...document.querySelectorAll('[data-design-sidebar-panel] [aria-selected="true"]')].map((element) => element.dataset.designLayerId ?? element.dataset.designFrameRow));
+  const settle = () => page.waitForTimeout(350);
+
+  await page.locator('[data-design-frame-row="home.html"]').click();
+  const mark = centre(await box("home-mark"));
+  await page.mouse.move(mark.x, mark.y, { steps: 3 });
+  await settle();
+  const inFrame = await hovered();
+  await page.keyboard.down("Meta");
+  await settle();
+  const deep = await hovered();
+  await page.keyboard.up("Meta");
+  await settle();
+  const released = await hovered();
+  check(
+    "inside a selected frame, hover outlines the top-level layer under the pointer, and ⌘ the deepest",
+    JSON.stringify(inFrame) === '["home-nav"]' && JSON.stringify(deep) === '["home-mark"]' && JSON.stringify(released) === '["home-nav"]',
+    JSON.stringify({ inFrame, deep, released }),
+  );
+
+  await page.mouse.dblclick(mark.x, mark.y);
+  await expect.poll(selection).toEqual(["home-nav"]);
+  await settle();
+  const entered = await hovered();
+  check(
+    "after a double-click enters a layer, the child under the resting pointer is outlined at once",
+    JSON.stringify(entered) === '["home-mark"]',
+    JSON.stringify(entered),
+  );
+
+  await page.locator('[data-design-sidebar-panel] [data-design-layer-id="home-hero"]').click();
+  const heading = await box("home-heading");
+  const copy = await box("home-copy");
+  // The gap between the hero's heading and copy belongs to the hero itself.
+  const gap = { x: copy.x + copy.width / 2, y: (heading.y + heading.height + copy.y) / 2 };
+  await page.mouse.move(gap.x, gap.y, { steps: 3 });
+  await settle();
+  const overParent = await hovered();
+  await page.mouse.dblclick(gap.x, gap.y);
+  await expect.poll(selection).toEqual(["home-heading"]);
+  check(
+    "double-clicking a selected parent's own area selects its first child",
+    overParent.length === 0,
+    JSON.stringify(overParent),
+  );
+}
+// Layer structure: a selection's parent is dotted, and ⌘/Ctrl-hover dots the
+// hovered layer's parent and direct children, with no edge stroked twice.
+export async function runDesignLayerStructureSmoke({ page, check }) {
+  const origin = new URL(page.url()).origin;
+  const open = async (query = "") => {
+    await page.goto(
+      `${origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html${query}`,
+      { waitUntil: "networkidle" },
+    );
+    await openLayersDrawer(page);
+    await page.locator('[data-design-frame="home.html"] iframe[data-design-document-ready]').waitFor();
+    await page.locator('[data-design-frame-row="home.html"]').click();
+    await page.keyboard.press("Shift+2");
+    await page.waitForTimeout(500);
+  };
+  const iframe = page.locator('[data-design-frame="home.html"] iframe[data-design-document-buffer="displayed"]');
+  const runtime = page.frameLocator('[data-design-frame="home.html"] iframe[data-design-document-buffer="displayed"]');
+  const box = (oid) => designFrameElementBox(iframe, runtime.locator(`[data-oid="${oid}"]`));
+  const row = (id) => page.locator(`[data-design-sidebar-panel] [data-design-layer-id="${id}"]`);
+  const structure = () =>
+    page.evaluate(() => ({
+      parent: [...document.querySelectorAll("[data-design-structure-parent]")].map((element) => element.dataset.designStructureParentId),
+      hoverParent: [...document.querySelectorAll("[data-design-structure-hover-parent]")].map((element) => element.dataset.designStructureHoverParent),
+      children: [...document.querySelectorAll("[data-design-structure-child]")].map((element) => element.dataset.designStructureChild),
+      constraint: document.querySelectorAll("[data-design-constraint-parent]").length,
+    }));
+  const settle = () => page.waitForTimeout(350);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await open();
+  await row("home-heading").click();
+  await settle();
+  const selected = await structure();
+  const dots = await page.locator("[data-design-structure-parent]").evaluate((element) => {
+    const style = getComputedStyle(element);
+    return { image: style.backgroundImage, pointer: style.pointerEvents };
+  });
+  check(
+    "a selected layer's parent is outlined in dots, and only that parent",
+    JSON.stringify(selected.parent) === '["home-hero"]' && selected.children.length === 0 &&
+      dots.image.includes("repeating-linear-gradient") && dots.pointer === "none",
+    JSON.stringify({ selected, dots }),
+  );
+  await row("home-copy").click({ modifiers: ["Shift"] });
+  await settle();
+  const siblings = await structure();
+  await row("home-services").click({ modifiers: ["Shift"] });
+  await settle();
+  const mixed = await structure();
+  await row("home-hero").click();
+  await settle();
+  const rootChild = await structure();
+  check(
+    "siblings share their dotted parent; layers of different parents, or a parent on the frame edge, show none",
+    JSON.stringify(siblings.parent) === '["home-hero"]' && mixed.parent.length === 0 && rootChild.parent.length === 0,
+    JSON.stringify({ siblings, mixed, rootChild }),
+  );
+
+  const hero = await box("home-hero");
+  const copy = await box("home-copy");
+  const heading = await box("home-heading");
+  await row("home-services").click();
+  await page.mouse.move(5, 5);
+  await page.keyboard.down("Meta");
+  await page.mouse.move(hero.x + hero.width - 4, copy.y + copy.height / 2, { steps: 4 });
+  await settle();
+  const heroStructure = await structure();
+  await page.mouse.move(heading.x + heading.width / 2, heading.y + heading.height / 2, { steps: 4 });
+  await settle();
+  const headingStructure = await structure();
+  await page.keyboard.up("Meta");
+  await settle();
+  const released = await structure();
+  check(
+    "⌘-hover dots the hovered layer's children and parent, and releasing ⌘ clears them",
+    JSON.stringify(heroStructure.children) === '["home-heading","home-copy","home-action"]' &&
+      heroStructure.hoverParent.length === 0 &&
+      JSON.stringify(headingStructure.hoverParent) === '["home-hero"]' && headingStructure.children.length === 0 &&
+      released.hoverParent.length === 0 && released.children.length === 0,
+    JSON.stringify({ heroStructure, headingStructure, released }),
+  );
+  await page.keyboard.down("Control");
+  await settle();
+  const control = await structure();
+  await page.evaluate(() => window.dispatchEvent(new Event("blur")));
+  await settle();
+  const blurred = await structure();
+  await page.keyboard.up("Control");
+  check(
+    "Ctrl reveals the same structure, and leaving the window drops it",
+    JSON.stringify(control.hoverParent) === '["home-hero"]' && blurred.hoverParent.length === 0,
+    JSON.stringify({ control, blurred }),
+  );
+  await row("home-heading").click();
+  await page.mouse.move(heading.x + heading.width / 2, heading.y + heading.height / 2);
+  await page.keyboard.down("Meta");
+  await settle();
+  const overSelection = await structure();
+  await page.keyboard.up("Meta");
+  check(
+    "⌘ over the selection draws its parent once",
+    JSON.stringify(overSelection.parent) === '["home-hero"]' && overSelection.hoverParent.length === 0,
+    JSON.stringify(overSelection),
+  );
+
+  await open("?mixedParents");
+  await row("home-heading").click();
+  await settle();
+  const absolute = await structure();
+  const pinned = await box("home-heading");
+  await page.keyboard.down("Meta");
+  await page.mouse.move(pinned.x + pinned.width / 2, pinned.y + pinned.height / 2, { steps: 3 });
+  await settle();
+  const absoluteHover = await structure();
+  await page.keyboard.up("Meta");
+  check(
+    "a pinned layer's constraint parent is the one dotted parent, never doubled",
+    absolute.constraint === 1 && absolute.parent.length === 0 && absoluteHover.hoverParent.length === 0,
+    JSON.stringify({ absolute, absoluteHover }),
+  );
+  // A held gesture owns the pointer: the hover structure leaves mid-drag.
+  await row("home-panel").click();
+  await settle();
+  const panel = await box("home-panel");
+  const grab = { x: panel.x + panel.width / 2, y: panel.y + panel.height - 10 };
+  await page.mouse.move(grab.x, grab.y);
+  await page.keyboard.down("Meta");
+  await settle();
+  const beforeDrag = await page.locator("[data-design-structure-child]").count();
+  const panelOverlay = page.locator('[data-design-element-overlay="home-panel"][data-design-selected-element]');
+  const startBox = await panelOverlay.boundingBox();
+  await page.mouse.down();
+  await page.mouse.move(grab.x + 40, grab.y + 20, { steps: 6 });
+  await page.waitForTimeout(150);
+  const dragBox = await panelOverlay.boundingBox();
+  const dragging = await page.locator("[data-design-structure-overlay]").count();
+  await page.keyboard.press("Escape");
+  await page.mouse.up();
+  await page.keyboard.up("Meta");
+  check(
+    "a drag hides the ⌘ hover structure while the gesture holds the pointer",
+    beforeDrag === 1 && dragBox.x - startBox.x > 5 && dragging === 0,
+    JSON.stringify({ beforeDrag, startBox, dragBox, dragging }),
+  );
+}
 // Exercise frame identity through real pointer events and the production
 // inspector, including the empty frame that has no selectable child layers.
 export async function runDesignSelectionSmoke({ page, waitFor, check }) {
   await runDesignDoubleClickSelectionSmoke({ page, check });
+  await runDesignDescentHoverSmoke({ page, check });
+  await runDesignLayerStructureSmoke({ page, check });
+  await runDesignCanvasCursorSmoke({ page, check });
   const origin = new URL(page.url()).origin;
   const open = async (query) => {
     await page.goto(
@@ -163,18 +374,19 @@ export async function runDesignSelectionSmoke({ page, waitFor, check }) {
   await clickBody();
   const point = await center();
   check(
-    "selecting the outer frame uses the ordinary cursor without a movable root overlay",
+    "selecting the outer frame uses the canvas arrow without a movable root overlay",
     (await frameSelected()) &&
       (await frame.locator("[data-design-selected-element]").count()) === 0 &&
       (await page.evaluate(
         ({ x, y }) =>
-          getComputedStyle(document.elementFromPoint(x, y)).cursor ===
-          "default",
+          getComputedStyle(document.elementFromPoint(x, y)).cursor.includes(
+            "zd-cursor-arrow",
+          ),
         point,
       )) &&
       (await frame
         .locator("[data-design-frame-label]")
-        .evaluate((el) => getComputedStyle(el).cursor === "default")),
+        .evaluate((el) => getComputedStyle(el).cursor.includes("zd-cursor-arrow"))),
   );
   await page.mouse.dblclick(point.x, point.y);
   await page.keyboard.down("ControlOrMeta");

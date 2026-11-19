@@ -121,7 +121,22 @@ describe("web transaction adapter", () => {
     expect(outcome.inverseOperations).toEqual([]);
   });
 
-  it("includes native identity persistence in a stylesheet edit receipt and undo", () => {
+  it("writes an identity only on the layer an edit changes, and the other layers keep theirs", () => {
+    const html = '<!doctype html><html><head></head><body><main><p>One</p><p>Two</p><section><span>Three</span></section></main></body></html>';
+    const initial = createDesignWebDocumentState({ documentId: "native-one", entryFile: "index.html", files: { "index.html": html } });
+    const ids = (state: typeof initial) => readDesignWebProjection(state).nodes.map((node) => `${node.tag}:${node.id}`);
+    const before = ids(initial);
+    const target = readDesignWebProjection(initial).nodes.find((node) => node.tag === "p")!.id;
+    const session = new DesignTransactionSession(initial, designWebTransactionAdapter);
+    const outcome = session.apply(webTransaction(initial, "first", [{
+      operationId: "style", type: "node.set-styles", nodeId: target, styles: { color: "blue" },
+      scope: "inline", responsiveContext: "base", stateContext: "default",
+    }]));
+    expect(outcome.state.files["index.html"]).toBe(html.replace("<p>One", `<p data-oid="${target}" style="color:blue;">One`));
+    expect(ids(outcome.state)).toEqual(before);
+    expect(session.undo()?.state.files).toEqual(initial.files);
+  });
+  it("keeps a stylesheet edit out of the frame source when the edited layer already has an identity", () => {
     const initial = createDesignWebDocumentState({
       documentId: "native-css",
       entryFile: "index.html",
@@ -151,11 +166,8 @@ describe("web transaction adapter", () => {
         },
       ]),
     );
-    expect(outcome.receipt.affectedFiles.sort()).toEqual([
-      "index.html",
-      "styles.css",
-    ]);
-    expect(outcome.state.files["index.html"]).toContain("data-oid");
+    expect(outcome.receipt.affectedFiles).toEqual(["styles.css"]);
+    expect(outcome.state.files["index.html"]).toBe(initial.files["index.html"]);
     expect(outcome.state.files["styles.css"]).toContain("blue");
     expect(session.undo()?.state.files).toEqual(initial.files);
   });

@@ -225,8 +225,9 @@ describe("design workspace interaction wiring", () => {
 
   it("presents authored names while retaining the type-based layer icons", () => {
     expect(layersSource).toContain("designFrameDisplayName(frame)");
-    expect(layersSource).toContain("designRuntimeLayerDisplayName(layer.node)");
-    expect(layersSource).toContain("designRuntimeLayerLabel(layer.node)");
+    expect(layersSource).toContain("designLayerDisplayName(frame, layer.node, mainTitle)");
+    expect(layersSource).toContain("<DesignLayerRowIcon kind={kind} node={layer.node} />");
+    expect(layersSource).toContain("designRuntimeLayerLabel(node)");
     expect(layersSource).not.toContain("frame.title}");
     expect(layersSource).not.toContain("layer.node.name.trim()");
     expect(layersSource).not.toContain("${layer.node.tag}");
@@ -794,8 +795,9 @@ describe("design workspace interaction wiring", () => {
     // The overlay is a display affordance, so it follows the live modifier
     // instead of a keydown that the sidebar's focus owner would have kept.
     expect(source).toContain("syncMeasureModifier(event.altKey)");
-    expect(source).toContain(
-      "onPointerMove={(event) => syncMeasureModifier(event.altKey)}",
+    // ⌘/Ctrl structure follows the same live modifier on every pointer move.
+    expect(source).toMatch(
+      /onPointerMove=\{\(event\) => \{\s*syncMeasureModifier\(event\.altKey\);\s*syncStructureModifier\(designStructureModifierPressed\(event\)\);/,
     );
     expect(source).toContain('document.addEventListener("visibilitychange"');
     expect(source).not.toContain('if (event.key === "Alt") {');

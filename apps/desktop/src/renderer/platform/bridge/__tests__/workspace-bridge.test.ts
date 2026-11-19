@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import type { ChangesHistory } from "@zeros/protocol/changes-history";
+import { DESIGN_OPTIONS_SHOW_NOTHING_CAPABILITY, DESIGN_OPTIONS_SHOW_NOTHING_PARAM } from "@zeros/protocol/design-catalog";
 import {
   requestWorkspaceList,
   bridgeFileTree,
@@ -44,7 +45,7 @@ import {
 import type { RuntimeClient } from "../ws-client";
 import { clearTeamStore } from "../../../features/team/team-store";
 import { subscribeCloudPromptErasure } from "../../cloud-prompt-erasure";
-import { cloudScopedId } from "../cloud-workspace-key";
+import { cloudScopedId, cloudWorkspaceKey } from "../cloud-workspace-key";
 
 /** Minimal RuntimeClient stand-in: request() returns a canned message and
  *  records the outgoing op so we can assert the wire shape. */
@@ -280,6 +281,26 @@ describe("workspace mode transition budget", () => {
 
     expect(seen.op).toBe("workspace.setMode");
     expect(seen.timeoutMs).toBe(60_000);
+  });
+
+  it("asks a Local engine that negotiated it to say which entry-snapshot frames show nothing", async () => {
+    const sent: unknown[] = [];
+    const bridge = (capable: boolean) => ({
+      supportsEngineCapability: (capability: string) => capable && capability === DESIGN_OPTIONS_SHOW_NOTHING_CAPABILITY,
+      request: async (msg: { params?: unknown }) => {
+        sent.push(msg.params);
+        return { type: "WORKSPACE_RESPONSE", op: "workspace.setMode", result: { ok: true, mode: "design" } };
+      },
+    }) as unknown as RuntimeClient;
+    await bridgeWorkspaceSetMode(bridge(true), { workspaceId: "ws1", mode: "design" });
+    await bridgeWorkspaceSetMode(bridge(false), { workspaceId: "ws1", mode: "design" });
+    const cloud = cloudWorkspaceKey({ organizationId: "11111111-1111-4111-8111-111111111111", workspaceId: "22222222-2222-4222-8222-222222222222" });
+    await bridgeWorkspaceSetMode(bridge(true), { workspaceId: cloud, mode: "design" });
+    expect(sent).toEqual([
+      { workspaceId: "ws1", mode: "design", [DESIGN_OPTIONS_SHOW_NOTHING_PARAM]: true },
+      { workspaceId: "ws1", mode: "design" },
+      { workspaceId: cloud, mode: "design" },
+    ]);
   });
 });
 

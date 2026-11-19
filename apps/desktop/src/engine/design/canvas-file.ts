@@ -166,6 +166,18 @@ export function designCanvasMaterializationsForTests(): number {
   return materializations;
 }
 
+/** Remember `source`, an edit of an authored canvas that reads back as JSON
+ * equal to the encoder output `canonical` (less a default foundation), as
+ * validated, so the next read skips the schema. Sound because the schemas pass
+ * unknown members through, foundation is not one of theirs, and validation
+ * does not depend on key order. */
+export function rememberEquivalentDesignCanvas(source: string, canonical: string): void {
+  if (source === canonical) return;
+  const known = validatedCanvases.get(canvasKey(canonical));
+  if (!known) return;
+  rememberValidatedCanvas(canvasKey(source), { version: known.version, frames: known.frames, canonical: false });
+}
+
 /** Exactly the bytes this encoder produced, so formatting carries no meaning. */
 export function isCanonicalDesignCanvas(source: string): boolean {
   return validatedCanvases.get(canvasKey(source))?.canonical === true;

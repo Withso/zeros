@@ -44,7 +44,7 @@ const transaction = (operation: Record<string, unknown>) => ({
   actor: { kind: "human" as const, id: "desktop" }, intent: "Edit", createdAt: 1, operations: [{ operationId: "o", ...operation }],
 });
 
-describe("an instance's parts never receive writes", () => {
+describe("an instance's parts receive only style writes", () => {
   beforeEach(() => {
     for (const mock of Object.values(bridge)) mock.mockReset();
   });
@@ -53,9 +53,10 @@ describe("an instance's parts never receive writes", () => {
       expect(mock).not.toHaveBeenCalled();
   };
 
-  it("refuses a style commit, a resize or a nudge (styles)", async () => {
-    await expect(updateDesignNodeStylesCached("ws", { ...frame, frame: frame.file, nodeId: part, styles: { width: "10px" } })).rejects.toThrow(refused);
-    nothingSent();
+  it("sends a style commit, which the engine stores as the instance's override", async () => {
+    bridge.updateStyles.mockRejectedValue(new Error("engine reached"));
+    await expect(updateDesignNodeStylesCached("ws", { ...frame, frame: frame.file, nodeId: part, styles: { width: "10px" } })).rejects.toThrow("engine reached");
+    expect(bridge.updateStyles).toHaveBeenCalledWith("ws", expect.objectContaining({ nodeId: part, styles: { width: "10px" } }));
   });
 
   it("refuses a text edit", async () => {

@@ -24,6 +24,7 @@ import {
   MousePointer2,
   Palette,
   Play,
+  Square,
   StickyNote,
   Type,
 } from "lucide-react";
@@ -52,7 +53,6 @@ import {
   type DesignRuntimeTreeNode,
 } from "@zeros/protocol/design-runtime";
 
-import { useWorkbenchStatusSource } from "../../shell/workbench/tab-status";
 import { retainDesignResource } from "./state/design-resource-counters";
 import { designFrameRuntime, waitForDesignFrameRuntime, type DesignFrameRuntimeConnection } from "../../platform/bridge/design-frame-runtime";
 import { applyDesignNodeAction } from "./state/design-node-actions";
@@ -63,11 +63,13 @@ import {
 import { cn } from "../../shared/ui/cn";
 import {
   DesignCanvasItemsLayer,
+  DesignCanvasItemsLimitNotice,
   isDesignCanvasItemTool,
   type DesignCanvasItemTool,
   type DesignCanvasItemsHandle,
 } from "./design-canvas-items";
-import { designPageItems } from "./state/design-canvas-items";
+import { designCanvasItemsPageId, designPageItems } from "./state/design-canvas-items";
+import { setDesignCanvasItemSelection, useDesignCanvasItemSelection } from "./state/design-canvas-item-selection";
 import { DESIGN_CANVAS_ITEMS_CAPABILITY } from "@zeros/protocol/design-canvas-items";
 import { warmWorkspaceFiles } from "../../shell/workspace-files-cache";
 import { createMenuAnchor, type MenuAnchor } from "../../shared/ui/menu-anchor";
@@ -94,7 +96,10 @@ import {
   designSizingMode,
   designSizingStyles,
 } from "./design-auto-layout-values";
+import { DESIGN_ARROW_CURSOR, designResizeCursor, designRotationCursor } from "./design-canvas-cursors";
 import {
+  DESIGN_ROTATION_CORNERS,
+  type DesignRotationCorner,
   clampDesignRectPosition,
   clampDesignResizeRect,
   designAuthoredResizeAxis,
@@ -121,7 +126,7 @@ import {
   designGestureRectUnchanged,
   designSafeViewportRect,
   designRotatedResizeOrigin,
-  designRotationCursor,
+  designRotationCornerCursorAngle,
   designSelectionBox,
   designSelectionBoxBounds,
   designSelectionClickIntent,
@@ -149,6 +154,7 @@ import {
 } from "./design-effect-values";
 import {
   canInsertDesignFrame,
+  designDrawParentAt,
   designFrameInsertion,
 } from "./design-frame-insertion";
 import {
@@ -207,7 +213,7 @@ import {
   type DesignMotionTimelineDraft,
 } from "./design-motion-timeline";
 import { canEditDesignNodeText } from "./design-node-capabilities";
-import { designComponentInstanceMark, designComponentPartHost, designComponentTextLock, designFrameIsComponent, isDesignComponentPartNodeId } from "./state/design-component-parts";
+import { designComponentInstanceMark, designComponentPartHost, designComponentTextLock, designFrameIsComponent, designFrameMissingComponents, designFrameOptionsProblem, isDesignComponentPartNodeId } from "./state/design-component-parts";
 import { resolveDesignSelectionShortcut } from "./design-selection-shortcuts";
 import {
   createDesignTextMarkup,
@@ -236,7 +242,7 @@ import {
 import { useDesignRuntimeStore, waitForDesignRuntimeFrame } from "./state/design-runtime-store";
 import { clearDesignFrameIntent, noteDesignFrameIntent, primeDesignFrameIntent, useDesignFrameIntent } from "./state/design-frame-intent";
 import { useDesignFrameResidency } from "./state/use-design-frame-residency";
-import { designFrameViews, designFramesAtPresentedGeometry, isPreparedDesignFrame, type DesignFrameView } from "./state/design-frame-view";
+import { designFramePreparationProblem, designFrameViews, designFramesAtPresentedGeometry, isPreparedDesignFrame, type DesignFrameView } from "./state/design-frame-view";
 import { DesignPassiveSelectionPublisher } from "./state/design-passive-selection";
 import { getActiveBridge, onActiveBridgeConnected } from "../../platform/bridge/active-bridge";
 import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
@@ -301,6 +307,9 @@ import {
 import { useDesignFoundation } from "./state/use-design-foundation";
 
 import { DesignFrameCover, DesignFrameRenderSurface } from "./design-frame-render-surface";
+import { DesignFrameLoadError, DesignFrameProblemLabel, DesignFrameProblemMark } from "./design-frame-load-error";
+import { DesignFrameLintBadge } from "./design-frame-lint-badge";
+import { designLintFindingsByFrame } from "./design-lint-summary";
 import { designGpuRuntime, useDesignFrameColorScheme, useDesignGpuCanvas, useDesignGpuCanvasEnabled, useDesignGpuFailedFrames,
   useDesignGpuSceneFrames } from "./gpu/design-gpu-canvas";
 import { hasAsyncCanvasWheel } from "../../platform/runtime";
@@ -314,6 +323,12 @@ import {
   type DesignAgentRevealTarget,
 } from "./design-agent-drafts";
 import { errorMessage } from "./design-workspace-error";
+import {
+  designSelectionParentId,
+  designStructureModifierPressed,
+  designStructureOutlineShown,
+} from "./design-layer-structure";
+import { DesignLayerStructureOverlay, DesignStructureOutline } from "./design-layer-structure-overlay";
 import { DESIGN_CANVAS_CHIP_CLS } from "./design-canvas-chip";
 import {
   DESIGN_RESIZE_HANDLES,
@@ -350,6 +365,14 @@ import {
   type DesignCanvasZoomActions,
 } from "./design-workspace-types";
 
+type DesignCanvasHoverSample = {
+  workspaceId: string;
+  folder: string;
+  frame: DesignCanvasFrameWire;
+  x: number;
+  y: number;
+  deepest: boolean;
+};
 type FrameGestureMode = "move" | DesignResizeHandle;
 type FrameGeometryPreview = {
   geometry: DesignFrameGeometryWire;
@@ -379,6 +402,7 @@ const HIGH_RESOLUTION_TILE_OVERSCAN = 96;
 const EMPTY_DESIGN_TREE: readonly DesignRuntimeTreeNode[] = Object.freeze([]);
 const EMPTY_DESIGN_KEYFRAME_DEFINITIONS: readonly DesignAuthoredKeyframes[] =
   Object.freeze([]);
+const EMPTY_LINT_FINDINGS: readonly never[] = Object.freeze([]);
 const EMPTY_NODE_DETAILS: readonly DesignRuntimeNodeDetails[] = Object.freeze(
   [],
 );
@@ -525,10 +549,18 @@ const DesignFramePlayControl = React.memo(function DesignFramePlayControl({ file
         onToggle(file);
       }}
     >
-      <Play />
+      {playing ? <Square /> : <Play />}
     </DesignToolbarButton>
   );
 });
+
+const designMissingComponentsLabel = (components: readonly string[]) =>
+  `${components.length === 1 ? "Missing component" : "Missing components"} ${components.map((name) => `zd-${name}`).join(", ")}`;
+
+// Retry on a frame's problem surface must reach its button; every other
+// press on a frame that is not prepared only selects the frame.
+const isDesignFrameRetry = (target: EventTarget) =>
+  target instanceof Element && target.closest("[data-design-frame-problem-surface] [data-design-frame-retry]") !== null;
 
 const DesignPreparingFrame = React.forwardRef<HTMLElement, React.ComponentPropsWithoutRef<"article">>(function DesignPreparingFrame(props, ref) {
   useLayoutEffect(() => retainDesignResource("frameSurfaces"), []);
@@ -557,6 +589,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
   const canvasPageOwner = useMemo(() => workspaceId ? { workspaceId, directoryId: canvasDirectoryId, pageId: view.activePageId, revision: view.ownerRevision ?? 0 } : undefined,
     [workspaceId, canvasDirectoryId, view.activePageId, view.ownerRevision]);
   const canvasDocumentOwner = `${workspaceId ?? ""}\0${canvasDirectoryId ?? ""}\0${view.activePageId ?? ""}`;
+  const lintByFrame = useMemo(() => designLintFindingsByFrame(snapshot?.lint.violations ?? []), [snapshot?.lint.violations]);
   const canvasDocumentOwnerRef = useRef(canvasDocumentOwner);
   canvasDocumentOwnerRef.current = canvasDocumentOwner;
   const canvasFolderRef = useRef(folder);
@@ -586,11 +619,6 @@ export const DesignCanvas = React.memo(function DesignCanvas({
     [active, confirmedFrameViews, historyGeometry],
   );
   const preparedFrames = useMemo(() => frameViews.filter(isPreparedDesignFrame), [frameViews]);
-  const preparationError = useMemo(() => {
-    const message = Object.values(snapshot?.preparation?.errors ?? {})[0];
-    return message ? new Error(message) : null;
-  }, [snapshot?.preparation?.errors]);
-  useWorkbenchStatusSource({ error: preparationError, pending: false, hasContent: !!snapshot, active, retry: refresh }, workspaceId ?? undefined);
   const selectedDescription = view.selectedFrame === null ? frameViews[0] : frameViews.find((frame) => frame.file === view.selectedFrame);
   const selectedFrame = selectedDescription && isPreparedDesignFrame(selectedDescription) ? selectedDescription : null;
   const canvasFoundation = useDesignFoundation(
@@ -702,6 +730,15 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         ? designLayerParentId(selectedRuntimeTree, view.selectedNodeId)
         : null,
     [selectedRuntimeTree, view.selectedNodeId],
+  );
+  // The dotted parent a selection shows needs every selected layer to share
+  // it; guides and measurements still anchor on the primary layer's parent.
+  const selectionParentId = useMemo(
+    () =>
+      selectedFrame
+        ? designSelectionParentId(selectedRuntimeTree, view.selectedTargets, selectedFrame.file, view.selectedNodeId ?? null)
+        : null,
+    [selectedFrame, selectedRuntimeTree, view.selectedNodeId, view.selectedTargets],
   );
   const parentOutlineSelectionOwner = `${selectedFrame?.file ?? ""}\u0000${selectedParentId ?? ""}`;
   const parentOutlineOwner = `${parentOutlineSelectionOwner}\u0000${selectedFrame?.sourceVersion ?? ""}`;
@@ -962,6 +999,16 @@ export const DesignCanvas = React.memo(function DesignCanvas({
     measurePressedRef.current = pressed;
     setMeasurePressed(pressed);
   }, []);
+  // ⌘/Ctrl reveals the hovered layer's structure: its parent and children
+  // dotted. A held gesture owns the pointer, so it never shows mid-drag.
+  const [structurePressed, setStructurePressed] = useState(false);
+  const structurePressedRef = useRef(false);
+  const syncStructureModifier = useCallback((pressed: boolean) => {
+    const next = pressed && gestureCancelRef.current === null;
+    if (structurePressedRef.current === next) return;
+    structurePressedRef.current = next;
+    setStructurePressed(next);
+  }, []);
   // Current viewport pixels drive the bounded live-iframe window.
   const [viewportSize, setViewportSize] = useState({ width: 0, height: 0 });
   // Disables duplicate frame-create mutations while the exact request runs.
@@ -989,17 +1036,18 @@ export const DesignCanvas = React.memo(function DesignCanvas({
     activeToolRef.current = tool;
     setActiveTool(tool);
   }, []);
-  // Sections, notes and link cards: drawn from the page summary, written only
-  // by an engine that offers them, selected here and never in Layers.
-  const pageItems = designPageItems(snapshot?.pages?.find((page) => page.id === view.activePageId) ??
-    (snapshot?.pages?.length === 1 ? snapshot.pages[0] : undefined));
-  const itemsPageId = snapshot?.pages?.find((page) => page.id === view.activePageId)?.id ??
-    (snapshot?.pages?.length === 1 ? snapshot.pages[0]!.id : null);
+  // Item painting may follow history's page, but mutation ownership stays on
+  // the confirmed page above. Item history is read-only until authority returns.
+  const itemsPageId = designCanvasItemsPageId(view.activePageId, historySelection);
+  const itemsPage = snapshot?.pages?.find((page) => page.id === itemsPageId) ??
+    (snapshot?.pages?.length === 1 ? snapshot.pages[0] : undefined);
+  const pageItems = designPageItems(itemsPage);
+  const itemsHistoryPreview = historySelection?.selectedItemId !== undefined;
   const itemsWritable = !!workspaceId && !!folder && !isCloudWorkspace(workspaceId) &&
     getActiveBridge()?.supportsEngineCapability?.(DESIGN_CANVAS_ITEMS_CAPABILITY, workspaceId) === true;
   const itemsLayerRef = useRef<DesignCanvasItemsHandle | null>(null);
-  const [selectedItem, setSelectedItem] = useState<{ owner: string; id: string } | null>(null);
-  const selectedItemId = selectedItem?.owner === canvasDocumentOwner ? selectedItem.id : null;
+  const confirmedSelectedItemId = useDesignCanvasItemSelection(canvasDocumentOwner);
+  const selectedItemId = itemsHistoryPreview ? historySelection.selectedItemId ?? null : confirmedSelectedItemId;
   // The theme matrix is a persistent non-modal tool window launched from the
   // canvas toolbar, so it may coexist with canvas and inspector work.
   const [themeEditorOpen, setThemeEditorOpen] = useState(false);
@@ -1194,13 +1242,17 @@ export const DesignCanvas = React.memo(function DesignCanvas({
     folder: string;
     frame: DesignCanvasFrameWire;
   } | null>(null);
-  const canvasHoverSampleRef = useRef<{
-    workspaceId: string;
-    folder: string;
-    frame: DesignCanvasFrameWire;
-    x: number;
-    y: number;
-  } | null>(null);
+  const canvasHoverSampleRef = useRef<DesignCanvasHoverSample | null>(null);
+  // The pointer's last hover sample, resolved again when ⌘/Ctrl changes
+  // between the inside-selection and deepest hover targets.
+  const canvasHoverLastRef = useRef<
+    | (Omit<DesignCanvasHoverSample, "x" | "y" | "deepest"> & {
+        element: HTMLElement;
+        clientX: number;
+        clientY: number;
+      })
+    | null
+  >(null);
   const wheelViewportRef = useRef<DesignViewport | null>(null);
   const wheelPaintFrameRef = useRef<number | null>(null);
   const wheelSettleTimerRef = useRef<number | null>(null);
@@ -1569,10 +1621,10 @@ export const DesignCanvas = React.memo(function DesignCanvas({
   // panel shows its empty state; choosing a frame or layer clears it.
   const selectCanvasItem = useCallback((id: string | null) => {
     if (id === null) {
-      setSelectedItem(null);
+      setDesignCanvasItemSelection(canvasDocumentOwnerRef.current, null);
       return;
     }
-    setSelectedItem({ owner: canvasDocumentOwnerRef.current, id });
+    setDesignCanvasItemSelection(canvasDocumentOwnerRef.current, id);
     const current = workspaceId ? designWorkspaceView(workspaceId) : null;
     if (current && (current.frameSelected || current.selectedNodeIds.length > 0)) {
       const frame = current.selectedFrame === null ? null : designFrameViews(designWorkspaceSnapshotCache.peekSnapshot(workspaceId!).data)
@@ -1581,7 +1633,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
     }
   }, [publishSelection, workspaceId]);
   useEffect(() => {
-    if (view.frameSelected || view.selectedNodeIds.length > 0) setSelectedItem(null);
+    if (view.frameSelected || view.selectedNodeIds.length > 0) setDesignCanvasItemSelection(canvasDocumentOwnerRef.current, null);
   }, [view.frameSelected, view.selectedNodeIds]);
 
   const itemsView = useMemo(() => ({ zoom: view.zoom, panX: view.panX, panY: view.panY }), [view.panX, view.panY, view.zoom]);
@@ -1594,7 +1646,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
     const tool = activeToolRef.current;
     if (!isDesignCanvasItemTool(tool) || !active || !event.isPrimary || event.button !== 0) return false;
     const viewport = viewportRef.current;
-    if (!viewport || !itemsWritable) return false;
+    if (!viewport || !itemsWritable || itemsHistoryPreview) return false;
     event.preventDefault();
     event.stopPropagation();
     const bounds = viewport.getBoundingClientRect();
@@ -1605,7 +1657,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
     });
     activateTool("select");
     return true;
-  }, [activateTool, active, itemsWritable, workspaceId]);
+  }, [activateTool, active, itemsHistoryPreview, itemsWritable, workspaceId]);
 
   // The first authoritative fallback is a real activation too: publish it so
   // get_selection agrees with the inspector before the user clicks anything.
@@ -3104,7 +3156,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         );
         if (!moved && Math.hypot(delta.x, delta.y) < 3 / zoom) return;
         moved = true;
-        document.body.style.cursor = "grabbing";
+        document.body.style.cursor = DESIGN_ARROW_CURSOR;
         const moving = { ...box, x: box.x + delta.x, y: box.y + delta.y };
         const snapped =
           pointerEvent.metaKey || pointerEvent.ctrlKey
@@ -3170,7 +3222,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
       gestureCancelRef.current = beginDesignPointerGesture({
         target: event.currentTarget,
         pointerId: event.pointerId,
-        cursor: "default",
+        cursor: DESIGN_ARROW_CURSOR,
         onMove: move,
         onFinish: finish,
         onCancel: cancel,
@@ -3451,7 +3503,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         const dy = delta.y;
         if (!moved && Math.hypot(dx, dy) < 3 / zoom) return;
         moved = true;
-        if (mode === "move") document.body.style.cursor = "grabbing";
+        if (mode === "move") document.body.style.cursor = DESIGN_ARROW_CURSOR;
         latest =
           mode === "move"
             ? (() => {
@@ -3757,9 +3809,9 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         pointerId: event.pointerId,
         cursor:
           mode === "move"
-            ? "default"
+            ? DESIGN_ARROW_CURSOR
             : (DESIGN_RESIZE_HANDLES.find((item) => item.handle === mode)
-                ?.cursor ?? "nwse-resize"),
+                ?.cursor ?? designResizeCursor(45)),
         onMove: move,
         onFinish: finish,
         onCancel: cancel,
@@ -3792,6 +3844,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
       event: React.PointerEvent<HTMLButtonElement>,
       frame: DesignCanvasFrameWire,
       details: DesignRuntimeNodeDetails,
+      corner: DesignRotationCorner,
     ) => {
       if (
         !workspaceId ||
@@ -3857,7 +3910,13 @@ export const DesignCanvas = React.memo(function DesignCanvas({
       );
       let latestTransform = formatDesignTransform(base);
       let latestRotation = overlayFrame.rotation;
-      let latestCursor = designRotationCursor(overlayFrame.rotation - 45);
+      // The glyph keeps wrapping the pressed corner while the drag turns it.
+      const cornerAngle =
+        designRotationCornerCursorAngle(
+          DESIGN_ROTATION_CORNERS.find((item) => item.corner === corner)!,
+          overlayFrame,
+        ) - overlayFrame.rotation;
+      let latestCursor = designRotationCursor(overlayFrame.rotation + cornerAngle);
       let moved = false;
       const previewInput = {
         workspaceId,
@@ -3929,7 +3988,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         if (!measuring) paintPredicted(latestRotation);
         // The cursor keeps pointing the way the drag turns, but each distinct
         // value decodes an SVG image; only assign one the pointer earned.
-        const cursor = designRotationCursor(latestRotation - 45);
+        const cursor = designRotationCursor(latestRotation + cornerAngle);
         if (cursor !== latestCursor) {
           latestCursor = cursor;
           document.body.style.cursor = cursor;
@@ -4177,7 +4236,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
       gestureCancelRef.current = cancel;
       if (anchors) anchors.style.display = "block";
       overlay.setAttribute("data-design-origin-dragging", "");
-      document.body.style.cursor = "move";
+      document.body.style.cursor = DESIGN_ARROW_CURSOR;
       document.body.style.userSelect = "none";
       window.addEventListener("pointermove", move);
       window.addEventListener("pointerup", finish);
@@ -5028,7 +5087,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
       gestureCancelRef.current = beginDesignPointerGesture({
         target: event.currentTarget,
         pointerId: event.pointerId,
-        cursor: "move",
+        cursor: DESIGN_ARROW_CURSOR,
         onMove: move,
         onFinish: finish,
         onCancel: cancel,
@@ -5375,7 +5434,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         pointerId: event.pointerId,
         cursor:
           DESIGN_RESIZE_HANDLES.find((item) => item.handle === handle)?.cursor ??
-          "nwse-resize",
+          designResizeCursor(45),
         onMove: move,
         onFinish: finish,
         onCancel: cancel,
@@ -5998,9 +6057,9 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         pointerId: event.pointerId,
         cursor:
           gestureMode === "move"
-            ? "move"
+            ? DESIGN_ARROW_CURSOR
             : (DESIGN_RESIZE_HANDLES.find((item) => item.handle === gestureMode)
-                ?.cursor ?? "nwse-resize"),
+                ?.cursor ?? designResizeCursor(45)),
         onMove: move,
         onFinish: finish,
         onCancel: cancel,
@@ -6151,7 +6210,10 @@ export const DesignCanvas = React.memo(function DesignCanvas({
       // Option measures; it never types, moves, or deletes anything. Reading it
       // outside the canvas's own focus scope is what makes the overlay appear
       // right after a Layers row click, where focus lives in the sidebar.
-      if (!editableTarget) syncMeasureModifier(event.altKey);
+      if (!editableTarget) {
+        syncMeasureModifier(event.altKey);
+        syncStructureModifier(designStructureModifierPressed(event));
+      }
       const activeElement = document.activeElement;
       const designSurfaceFocused =
         activeElement instanceof Element &&
@@ -6419,11 +6481,15 @@ export const DesignCanvas = React.memo(function DesignCanvas({
       syncMeasureModifier(
         event.altKey && !isEditableHotkeyTarget(event.target),
       );
+      syncStructureModifier(
+        designStructureModifierPressed(event) && !isEditableHotkeyTarget(event.target),
+      );
     };
     const blur = () => {
       spacePressedRef.current = false;
       setSpacePressed(false);
       syncMeasureModifier(false);
+      syncStructureModifier(false);
       if (nudgeGestureRef.current || queuedNudgeRef.current) finishNodeNudge(true);
     };
     // A hidden window cannot deliver the release, so leaving the app must not
@@ -6469,6 +6535,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
     selectedRuntimeTree,
     frameViews,
     syncMeasureModifier,
+    syncStructureModifier,
     view.frameSelected,
     view.selectedFrame,
     view.selectedNodeId,
@@ -6487,6 +6554,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         canvasHoverFrameRef.current = null;
       }
       canvasHoverSampleRef.current = null;
+      canvasHoverLastRef.current = null;
       const hoverOwner = canvasHoverOwnerRef.current;
       canvasHoverOwnerRef.current = null;
       if (hoverOwner) {
@@ -6577,26 +6645,9 @@ export const DesignCanvas = React.memo(function DesignCanvas({
     [active, activeTool, folder, workspaceId],
   );
 
-  const scheduleCanvasHover = useCallback(
-    (event: React.PointerEvent<HTMLElement>, frame: DesignCanvasFrameWire) => {
-      if (
-        !workspaceId ||
-        !folder ||
-        !active ||
-        gestureCancelRef.current ||
-        spacePressedRef.current
-      ) {
-        return;
-      }
-      const bounds = event.currentTarget.getBoundingClientRect();
-      if (bounds.width <= 0 || bounds.height <= 0) return;
-      canvasHoverSampleRef.current = {
-        workspaceId,
-        folder,
-        frame,
-        x: ((event.clientX - bounds.left) * frame.width) / bounds.width,
-        y: ((event.clientY - bounds.top) * frame.height) / bounds.height,
-      };
+  const queueCanvasHover = useCallback(
+    (next: DesignCanvasHoverSample) => {
+      canvasHoverSampleRef.current = next;
       if (
         canvasHoverFrameRef.current !== null ||
         canvasHoverRequestRef.current
@@ -6629,13 +6680,72 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         canvasHoverRequestRef.current = request;
       });
     },
-    [active, folder, workspaceId],
+    [],
   );
+
+  const scheduleCanvasHover = useCallback(
+    (event: React.PointerEvent<HTMLElement>, frame: DesignCanvasFrameWire) => {
+      if (
+        !workspaceId ||
+        !folder ||
+        !active ||
+        gestureCancelRef.current ||
+        spacePressedRef.current
+      ) {
+        return;
+      }
+      const bounds = event.currentTarget.getBoundingClientRect();
+      if (bounds.width <= 0 || bounds.height <= 0) return;
+      canvasHoverLastRef.current = {
+        workspaceId,
+        folder,
+        frame,
+        element: event.currentTarget,
+        clientX: event.clientX,
+        clientY: event.clientY,
+      };
+      queueCanvasHover({
+        workspaceId,
+        folder,
+        frame,
+        x: ((event.clientX - bounds.left) * frame.width) / bounds.width,
+        y: ((event.clientY - bounds.top) * frame.height) / bounds.height,
+        deepest: event.metaKey || event.ctrlKey,
+      });
+    },
+    [active, folder, queueCanvasHover, workspaceId],
+  );
+
+  // The hover target depends on the selection and on ⌘/Ctrl, so a pointer
+  // at rest resolves it again when either changes: after a double-click
+  // enters a layer, the child under the pointer is outlined at once. The
+  // point is measured again because the camera may have moved the frame.
+  const hoverSelectionKey = `${view.selectedFrame ?? ""}\u0000${view.frameSelected}\u0000${view.selectedNodeIds.join("\u0000")}`;
+  useEffect(() => {
+    const last = canvasHoverLastRef.current;
+    if (!last?.element.isConnected || gestureCancelRef.current || spacePressedRef.current) return;
+    const bounds = last.element.getBoundingClientRect();
+    if (
+      bounds.width <= 0 || bounds.height <= 0 ||
+      last.clientX < bounds.left || last.clientX > bounds.right ||
+      last.clientY < bounds.top || last.clientY > bounds.bottom
+    )
+      return;
+    queueCanvasHover({
+      workspaceId: last.workspaceId,
+      folder: last.folder,
+      frame: last.frame,
+      x: ((last.clientX - bounds.left) * last.frame.width) / bounds.width,
+      y: ((last.clientY - bounds.top) * last.frame.height) / bounds.height,
+      deepest: structurePressed,
+    });
+  }, [hoverSelectionKey, queueCanvasHover, structurePressed]);
 
   const clearCanvasHover = useCallback(
     (frame: DesignCanvasFrameWire) => {
       if (!workspaceId || !folder) return;
       canvasHoverSampleRef.current = null;
+      canvasHoverLastRef.current = null;
       if (canvasHoverFrameRef.current !== null) {
         window.cancelAnimationFrame(canvasHoverFrameRef.current);
         canvasHoverFrameRef.current = null;
@@ -6794,20 +6904,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         const runtime = designFrameRuntime(workspaceId, owner.file);
         if (!runtime)
           throw new Error("The frame is still preparing its editable surface.");
-        let parent = await runtime.getElementAtLoc(start.x, start.y, {
-          mode: "deepest",
-        });
-        // Text and images can be hit while drawing; insert beside them inside
-        // their nearest frame, never inside a text node or a void element.
-        for (
-          let depth = 0;
-          parent && !canInsertDesignFrame(parent) && depth < 32;
-          depth++
-        ) {
-          parent = parent.layout?.parentId
-            ? await runtime.getNodeDetails(parent.layout.parentId)
-            : null;
-        }
+        let parent = await designDrawParentAt(runtime, start);
         if (!parent) {
           const snapshot = await runtime.getSnapshot();
           parent = snapshot.frame.oid
@@ -7769,7 +7866,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
       ) {
         return;
       }
-      if (event.target === event.currentTarget) setSelectedItem(null);
+      if (event.target === event.currentTarget) setDesignCanvasItemSelection(canvasDocumentOwnerRef.current, null);
       if (event.target === event.currentTarget && startMarquee(event)) return;
       if (event.target === event.currentTarget) publishSelection(selectedDescription ?? null);
     },
@@ -7945,19 +8042,21 @@ export const DesignCanvas = React.memo(function DesignCanvas({
           "bg-bg2 relative size-full overflow-clip outline-none",
           spacePressed
             ? "cursor-grab"
-            : activeTool !== "select"
-              ? "cursor-crosshair"
-              : "cursor-default",
+            : activeTool !== "select" && "cursor-crosshair",
         )}
         style={{
           // Runtime user color is an intentional canvas boundary.
           backgroundColor: canvasBackground,
+          cursor: spacePressed || activeTool !== "select" ? undefined : DESIGN_ARROW_CURSOR,
         }}
         onPointerDown={handleViewportPointerDown}
         // Pointer movement carries the authoritative modifier state, so a
         // keydown lost to another focus owner (or pressed before the window was
         // focused) still resolves the moment the pointer enters the canvas.
-        onPointerMove={(event) => syncMeasureModifier(event.altKey)}
+        onPointerMove={(event) => {
+          syncMeasureModifier(event.altKey);
+          syncStructureModifier(designStructureModifierPressed(event));
+        }}
         // Entering a frame's title (or leaving it for anything else) is the
         // intent signal; movement within one element never reaches React state.
         onPointerOver={(event) => {
@@ -7987,6 +8086,9 @@ export const DesignCanvas = React.memo(function DesignCanvas({
           {snapshot && mountedFrames.map((description) => {
             const prepared = isPreparedDesignFrame(description);
             const frame = prepared ? description : description.previous;
+            // A frame whose source cannot be read shows that on itself only;
+            // the rest of the page stays usable and a restored file recovers it.
+            const preparationProblem = designFramePreparationProblem(snapshot, description);
             if (!frame) return (
               <DesignPreparingFrame key={`${workspaceId ?? "pending"}:${description.file}`}
                 ref={(element) => {
@@ -8000,12 +8102,19 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                 style={{ left: description.x, top: description.y, width: description.width, height: description.height,
                   zIndex: description.z }}
               >
-                {previewOwner && active && !gpuCanvas ? <DesignFrameCover owner={previewOwner} file={description.file} theme={frameTheme}
+                {preparationProblem !== null && description.kind !== "text" ? (
+                  <>
+                    <DesignFrameProblemLabel title={description.title} message={preparationProblem} width={description.width} />
+                    <DesignFrameLoadError labelled message={preparationProblem} className="pointer-events-auto" onRetry={refresh} />
+                  </>
+                ) : previewOwner && active && !gpuCanvas ? <DesignFrameCover owner={previewOwner} file={description.file} theme={frameTheme}
                   level={coverLevels.get(description.file) ?? "thumbnail"} /> : null}
               </DesignPreparingFrame>
             );
             const framePlaying = currentPlayback?.file === frame.file;
             const frameIsComponent = designFrameIsComponent(frame);
+            const missingComponents = designFrameMissingComponents(frame);
+            const optionsProblem = designFrameOptionsProblem(frame);
             const paintedFrame = frameGeometryPreviewsRef.current.get(
               `${canvasDocumentOwner}\0${frame.file}`,
             )?.geometry;
@@ -8026,6 +8135,10 @@ export const DesignCanvas = React.memo(function DesignCanvas({
             // label, Layers, and keyboard navigation.
             const frameSelectedOnly =
               paintedSelectedTargets.some(target => target.frame === frame.file && !target.nodeId);
+            // The frame itself or a layer in it. `selected` also covers the
+            // active frame an empty selection leaves for Layers and the inspector.
+            const frameHasSelection = frameSelectedOnly ||
+              view.selectedTargets.some(target => target.frame === frame.file);
             const secondaryElements = (prepared ? view.selectedTargets : []).filter(target => target.frame === frame.file && target.nodeId &&
               !selectedElements.some(details => details.oid === target.nodeId)).map(target => secondaryTargetDetails[`${frame.file}\u0000${target.nodeId}`])
               .filter((details): details is DesignRuntimeNodeDetails => Boolean(details && details.sourceVersion === frame.sourceVersion));
@@ -8038,6 +8151,46 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                   ? (parentElement?.rect ?? null)
                   : { x: 0, y: 0, width: frame.width, height: frame.height }
                 : null;
+            const constraintGuidesShown = Boolean(
+              parentGuideRect &&
+                selectedElement &&
+                selectedElements.length === 1 &&
+                designConstraintGuidesApply({
+                  hasParent: true,
+                  position: selectedElement.styles.position,
+                  // A fixed box is positioned against the viewport unless an
+                  // ancestor creates its containing block (transform, filter…).
+                  parentIsContainingBlock:
+                    selectedElement.styles.position === "fixed"
+                      ? selectedElement.layout?.fixedContainingBlock !== "ancestor"
+                      : selectedElement.layout?.isContainingBlock,
+                }) &&
+                (!measurePressed || gestureCancelRef.current !== null) &&
+                inlineTextEdit?.frame !== frame.file,
+            );
+            const constraintParentOutlined = Boolean(
+              constraintGuidesShown &&
+                parentElement &&
+                (selectedElement?.styles.position !== "fixed" ||
+                  selectedElement.layout?.fixedContainingBlock === "parent"),
+            );
+            // The selection's parent, dotted, unless the constraint guides
+            // already outline it, Option/Alt is measuring against it, or it is
+            // the frame's own edge.
+            const selectionParentOutline =
+              selected &&
+              selectedElement &&
+              parentElement &&
+              selectionParentId === parentElement.oid &&
+              !framePlaying &&
+              !measurePressed &&
+              !constraintParentOutlined &&
+              inlineTextEdit?.frame !== frame.file &&
+              designStructureOutlineShown(parentElement.rect, frame)
+                ? parentElement
+                : null;
+            const dottedSelectionParentId =
+              selectionParentOutline?.oid ?? (constraintParentOutlined ? parentElement?.oid : undefined);
             const transformElementIds = new Set(
               designLayerTopLevelSelectionIds(
                 selectedRuntimeTree,
@@ -8081,24 +8234,25 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                 data-design-frame={frame.file}
                 data-design-preparing={!prepared ? "" : undefined}
                 onPointerDownCapture={(event) => {
-                  if (prepared || !active || !workspaceId) return;
+                  if (prepared || !active || !workspaceId || isDesignFrameRetry(event.target)) return;
                   event.stopPropagation();
                   void selectDesignFrame(workspaceId, description, { selected: true, additive: event.shiftKey, owner: canvasPageOwner }).catch(() => {});
                 }}
-                onClickCapture={(event) => { if (!prepared) event.stopPropagation(); }}
+                onClickCapture={(event) => { if (!prepared && !isDesignFrameRetry(event.target)) event.stopPropagation(); }}
                 onDoubleClickCapture={(event) => { if (!prepared) event.stopPropagation(); }}
                 onContextMenuCapture={(event) => { if (!prepared) { event.preventDefault(); event.stopPropagation(); } }}
                 onPointerMoveCapture={(event) => { if (!prepared) event.stopPropagation(); }}
                 onDropCapture={(event) => { if (!prepared) { event.preventDefault(); event.stopPropagation(); } }}
                 data-design-frame-kind={frame.kind ?? "frame"}
                 data-design-frame-playing={framePlaying ? "" : undefined}
+                data-design-frame-selected={frameHasSelection ? "" : undefined}
                 data-design-frame-chrome-protected={selected || frameSelectedOnly || framePlaying ||
                   renamingFrame === frame.file || secondaryElements.length > 0 ? "" : undefined}
                 data-design-frame-stack-protected={framePlaying || renamingFrame === frame.file ||
-                  inlineTextEdit?.frame === frame.file || view.selectedTargets.some(target => target.frame === frame.file) ? "" : undefined}
+                  inlineTextEdit?.frame === frame.file || frameHasSelection ? "" : undefined}
                 // The camera resolves automatic controls against current geometry,
                 // including gestures between React renders. Editing stays expanded.
-                data-design-frame-controls={selected || frameSelectedOnly || framePlaying || renamingFrame === frame.file
+                data-design-frame-controls={frameHasSelection || framePlaying || renamingFrame === frame.file
                   ? "expanded" : "automatic"}
                 className={cn(
                   "zd-design-frame zd-design-stroke pointer-events-auto absolute",
@@ -8113,7 +8267,8 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                   width: paintedFrame?.w ?? description.width,
                   height: paintedFrame?.h ?? description.height,
                   zIndex: paintedFrame?.z ?? description.z,
-                  ...designStrokeWidth(frameSelectedOnly ? 2 : frame.kind === "text" ? 0 : 1),
+                  // A selected frame's width follows the pointer in CSS.
+                  ...(frameSelectedOnly ? null : designStrokeWidth(frame.kind === "text" ? 0 : 1)),
                 }}
                 onPointerDown={(event) => {
                   if (
@@ -8279,15 +8434,15 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                     <div
                       data-design-controls
                       data-design-frame-chrome=""
-                      className="absolute bottom-full left-0 flex h-7 origin-bottom-left items-center"
+                      className="absolute bottom-full left-0 flex h-4 origin-bottom-left items-center"
                       style={
                         {
-                          // Reserve the 28px Play control and its 12px gap in screen space.
-                          "--design-frame-label-max-width": `max(0px, calc(${frame.width}px * var(--design-canvas-zoom) - 40px))`,
-                          // A small frame hides Play until intent; its name takes the whole width.
+                          // Reserve the 16px Play control and its 8px gap in screen space.
+                          "--design-frame-label-max-width": `max(0px, calc(${frame.width}px * var(--design-canvas-zoom) - 24px))`,
+                          // While Play waits for intent, the name takes the whole width.
                           "--design-frame-label-full-width": `calc(${frame.width}px * var(--design-canvas-zoom))`,
                           maxWidth: "var(--design-frame-label-max-width)",
-                          transform: `translateY(${designCanvasScreenPixels(-8)}) scale(${DESIGN_CANVAS_INVERSE_ZOOM})`,
+                          transform: `translateY(${designCanvasScreenPixels(-4)}) scale(${DESIGN_CANVAS_INVERSE_ZOOM})`,
                         } as React.CSSProperties
                       }
                     >
@@ -8295,7 +8450,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                         <Input
                           autoFocus
                           value={renameDraft}
-                          className="h-6 w-48 min-w-0 max-w-full"
+                          className="text-2xxs h-5 w-48 min-w-0 max-w-full px-1"
                           aria-label={`Rename ${frame.title}`}
                           onChange={(event) => setRenameDraft(event.target.value)}
                           onPointerDown={(event) => event.stopPropagation()}
@@ -8312,13 +8467,18 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                           }}
                         />
                       ) : (
+                        <>
                         <button
                           type="button"
                           data-design-frame-label=""
-                          title={frameIsComponent ? `${frame.title}, component` : frame.title}
+                          title={preparationProblem !== null ? `${frame.title}: ${preparationProblem}`
+                            : missingComponents.length
+                            ? `${frame.title}: ${designMissingComponentsLabel(missingComponents)}`
+                            : optionsProblem !== null ? `${frame.title}: ${optionsProblem}`
+                            : frameIsComponent ? `${frame.title}, component` : frame.title}
                           className={cn(
-                            "text-2xxs block max-w-full min-w-0 cursor-default overflow-hidden border-0 bg-transparent p-0 text-left leading-4 font-medium whitespace-nowrap outline-none",
-                            frameIsComponent && "flex items-center gap-1",
+                            "text-2xxs block max-w-full min-w-0 overflow-hidden border-0 bg-transparent p-0 text-left leading-4 font-medium whitespace-nowrap outline-none",
+                            (frameIsComponent || missingComponents.length > 0 || optionsProblem !== null || preparationProblem !== null) && "flex items-center gap-1",
                             frameSelectedOnly
                               ? "text-[var(--design-selection-stroke)]"
                               : "text-muted-fg hover:text-fg2",
@@ -8340,6 +8500,11 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                               aria-hidden="true"
                             />
                           ) : null}
+                          {preparationProblem !== null ? <DesignFrameProblemMark message={preparationProblem} /> : null}
+                          {missingComponents.length ? (
+                            <DesignFrameProblemMark kind="missing-component" message={designMissingComponentsLabel(missingComponents)} />
+                          ) : null}
+                          {optionsProblem !== null ? <DesignFrameProblemMark kind="options-not-applied" message={optionsProblem} /> : null}
                           <span
                             data-design-frame-name=""
                             className="block max-w-full min-w-0 overflow-hidden text-ellipsis"
@@ -8347,14 +8512,28 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                             {frame.title}
                           </span>
                         </button>
+                        <DesignFrameLintBadge
+                          title={frame.title}
+                          violations={lintByFrame.get(frame.file) ?? EMPTY_LINT_FINDINGS}
+                          onSelectLayer={(nodeId) => {
+                            if (!workspaceId || !folder) return;
+                            void selectDesignNode({ workspaceId, folder, frame, nodeId, owner: canvasPageOwner }).catch((selectionError) => {
+                              toast.error("Couldn't select that design layer", { description: errorMessage(selectionError) });
+                            });
+                          }}
+                        />
+                        </>
                       )}
                     </div>
                     <div
                       data-design-controls
                       data-design-frame-chrome=""
                       data-design-frame-play-chrome=""
-                      className="absolute right-0 bottom-full origin-bottom-right"
-                      style={{ transform: `translateY(${designCanvasScreenPixels(-8)}) scale(${DESIGN_CANVAS_INVERSE_ZOOM})` }}
+                      className="absolute right-0 bottom-full flex origin-bottom-right"
+                      // The 4px gap is padding, not a translation: a pointer
+                      // moving from the frame up to Play keeps the frame
+                      // hovered, so Play does not hide on the way.
+                      style={{ paddingBottom: 4, transform: `scale(${DESIGN_CANVAS_INVERSE_ZOOM})` }}
                     >
                       <DesignFramePlayControl
                         file={frame.file}
@@ -8365,6 +8544,9 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                       />
                     </div>
                   </>
+                ) : null}
+                {preparationProblem !== null && frame.kind !== "text" ? (
+                  <DesignFrameLoadError labelled message={preparationProblem} onRetry={refresh} />
                 ) : null}
 
                 {workspaceId && folder ? (
@@ -8415,6 +8597,15 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                     live={prepared && liveFrameFiles.has(frame.file)}
                     active={active}
                     theme={frameTheme}
+                  />
+                ) : null}
+
+                {selectionParentOutline && selectedElement ? (
+                  <DesignStructureOutline
+                    data-design-structure-parent={selectedElement.oid}
+                    data-design-structure-parent-id={selectionParentOutline.oid}
+                    rect={selectionParentOutline.rect}
+                    geometry={selectionParentOutline}
                   />
                 ) : null}
 
@@ -8486,6 +8677,28 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                 ) : null}
 
                 {workspaceId &&
+                active &&
+                structurePressed &&
+                prepared &&
+                !framePlaying &&
+                !spacePressed &&
+                activeTool === "select" &&
+                gestureCancelRef.current === null &&
+                inlineTextEdit?.frame !== frame.file ? (
+                  <DesignLayerStructureOverlay
+                    workspaceId={workspaceId}
+                    frame={frame}
+                    excludedNodeIds={
+                      selected
+                        ? dottedSelectionParentId
+                          ? [...view.selectedNodeIds, dottedSelectionParentId]
+                          : view.selectedNodeIds
+                        : EMPTY_NODE_IDS
+                    }
+                  />
+                ) : null}
+
+                {workspaceId &&
                 measurePressed &&
                 gestureCancelRef.current === null &&
                 selectedElement &&
@@ -8499,22 +8712,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                   />
                 ) : null}
 
-                {parentGuideRect &&
-                selectedElement &&
-                selectedElements.length === 1 &&
-                designConstraintGuidesApply({
-                  hasParent: true,
-                  position: selectedElement.styles.position,
-                  // A fixed box is positioned against the viewport unless an
-                  // ancestor creates its containing block (transform, filter…).
-                  parentIsContainingBlock:
-                    selectedElement.styles.position === "fixed"
-                      ? selectedElement.layout?.fixedContainingBlock !==
-                        "ancestor"
-                      : selectedElement.layout?.isContainingBlock,
-                }) &&
-                (!measurePressed || gestureCancelRef.current !== null) &&
-                inlineTextEdit?.frame !== frame.file ? (
+                {constraintGuidesShown && parentGuideRect && selectedElement ? (
                   <DesignConstraintGuides
                     nodeId={selectedElement.oid}
                     box={designSelectionBox(selectedElement)}
@@ -8592,9 +8790,9 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                               ? "zd-design-selection-outline zd-design-stroke pointer-events-none"
                               : "zd-design-hover-outline zd-design-stroke pointer-events-none"
                           : primarySelection
-                            ? "zd-design-selection-outline zd-design-stroke pointer-events-auto cursor-move"
+                            ? "zd-design-selection-outline zd-design-stroke pointer-events-auto"
                             : additiveSelection
-                              ? "zd-design-selection-outline zd-design-stroke pointer-events-auto cursor-move"
+                              ? "zd-design-selection-outline zd-design-stroke pointer-events-auto"
                               : "zd-design-hover-outline zd-design-stroke pointer-events-none",
                         additiveSelection &&
                           selectionOverlaySuppressed &&
@@ -8754,8 +8952,8 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                                       width: overlayFrame.width * view.zoom,
                                       height: overlayFrame.height * view.zoom,
                                     }).rotationInset}
-                                    onPointerDown={(event) =>
-                                      startNodeRotation(event, frame, details)
+                                    onPointerDown={(event, corner) =>
+                                      startNodeRotation(event, frame, details, corner)
                                     }
                                   />
                                   <DesignOriginAnchors />
@@ -8926,7 +9124,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
               view={itemsView}
               viewport={viewportSize}
               active={active}
-              editable={itemsWritable && active}
+              editable={itemsWritable && active && !itemsHistoryPreview}
               selectedId={selectedItemId}
               onSelect={selectCanvasItem}
               zoom={paintedZoom}
@@ -8993,6 +9191,8 @@ export const DesignCanvas = React.memo(function DesignCanvas({
           />
         </div>
         </div>
+
+        {workspaceId && itemsPage ? <DesignCanvasItemsLimitNotice count={itemsPage.itemsNotShown} /> : null}
 
         <div
           ref={marqueeRef}

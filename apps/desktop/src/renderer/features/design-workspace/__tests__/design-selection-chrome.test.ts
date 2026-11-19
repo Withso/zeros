@@ -157,10 +157,13 @@ describe("selection chrome for transformed layers", () => {
   });
 
   it("points each resize cursor the way its handle sits on screen", () => {
-    expect(designResizeHandleCursor("nw", { rotation: 0 })).toBe("nwse-resize");
-    expect(designResizeHandleCursor("nw", { rotation: 90 })).toBe("nesw-resize");
-    expect(designResizeHandleCursor("e", { rotation: 90 })).toBe("ns-resize");
-    expect(designResizeHandleCursor("nw", { rotation: 180, affine: [-1, 0, 0, 1] })).toBe("nesw-resize");
+    const glyph = (cursor: string) => /zd-cursor-(resize-\d+)/.exec(cursor)?.[1];
+    expect(glyph(designResizeHandleCursor("nw", { rotation: 0 }))).toBe("resize-45");
+    expect(glyph(designResizeHandleCursor("nw", { rotation: 90 }))).toBe("resize-135");
+    expect(glyph(designResizeHandleCursor("e", { rotation: 90 }))).toBe("resize-90");
+    // A turn between the four keyword directions keeps its own angle.
+    expect(glyph(designResizeHandleCursor("e", { rotation: 30 }))).toBe("resize-30");
+    expect(glyph(designResizeHandleCursor("nw", { rotation: 180, affine: [-1, 0, 0, 1] }))).toBe("resize-135");
   });
 });
 

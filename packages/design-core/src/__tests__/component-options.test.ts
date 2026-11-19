@@ -2,7 +2,10 @@ import { describe, expect, it } from "vitest";
 
 import {
   COMPONENT_OPTION_LIMITS,
+  COMPONENT_STATE_PRESETS,
+  componentInheritedValues,
   componentOptionCss,
+  componentStateVariantOf,
   componentOptionValues,
   parseComponentOptionValue,
   readComponentDeclaration,
@@ -90,6 +93,30 @@ describe("a component's declared options", () => {
   });
 });
 
+describe("a component's state variants", () => {
+  it("are variants that name the CSS state they show, Hover, Pressed, Focus and Disabled", () => {
+    expect(COMPONENT_STATE_PRESETS.map((preset) => [preset.name, preset.state, preset.label])).toEqual([
+      ["hover", "hover", "Hover"], ["pressed", "active", "Pressed"], ["focus", "focus-visible", "Focus"], ["disabled", "disabled", "Disabled"],
+    ]);
+    const { declaration, problems } = read([...COMPOSER, element("zd-variant", { name: "hover", "zd-state": "hover" }),
+      element("zd-variant", { name: "pressed", "zd-state": "active", width: "900" })]);
+    expect(problems).toEqual([]);
+    expect(declaration.variants.map((variant) => [variant.name, variant.state ?? null])).toEqual([
+      ["compact", null], ["wide-plan", null], ["hover", "hover"], ["pressed", "active"],
+    ]);
+    expect(componentStateVariantOf(declaration, "pressed")?.state).toBe("active");
+    expect(componentStateVariantOf(declaration, "compact")).toBeNull();
+    // A state variant may also set options, as any variant does.
+    expect(componentInheritedValues(declaration, "pressed").get("width")).toBe(900);
+  });
+
+  it("refuses an unknown state or a second variant for one state", () => {
+    expect(problems([element("zd-variant", { name: "hover", "zd-state": "visited" })])[0]).toMatch(/hover, active, focus-visible or disabled/);
+    expect(problems([element("zd-variant", { name: "hover", "zd-state": "hover" }), element("zd-variant", { name: "over", "zd-state": "hover" })])[0])
+      .toMatch(/The variant over shows hover, which the variant hover already shows./);
+  });
+});
+
 describe("an instance's values", () => {
   const { declaration } = read(COMPOSER);
   const attributes = (values: Record<string, string>) => new Map(Object.entries(values));
@@ -121,7 +148,7 @@ describe("an instance's values", () => {
 
   it("leave host attributes alone and warn about names that are not options", () => {
     const { problems } = componentOptionValues(declaration, attributes({ class: "x", "data-oid": "c1", style: "color: red", widht: "800" }));
-    expect(problems).toEqual([{ message: "This component has no option widht.", severity: "warning" }]);
+    expect(problems).toEqual([{ message: 'This component has no option widht; widht="800" is ignored.', severity: "warning" }]);
   });
 });
 

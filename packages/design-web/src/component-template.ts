@@ -21,6 +21,8 @@ import {
   type ComponentExpressionBudget,
   type ComponentExpressionValue,
 } from "@zeros/design-core/components";
+import { DESIGN_COMPONENT_BOUND_TEXT_LIMIT, DESIGN_COMPONENT_RECORD_LIMITS } from "@zeros/protocol/design-catalog";
+import { designSlotOptionElement, designSlotsOfNodes, withDesignSlotOptions } from "./component-slots";
 
 export const COMPONENT_TEMPLATE_LIMITS = Object.freeze({
   /** Holes one rendering may fill. */
@@ -319,7 +321,7 @@ function boundTextOf(document: DefaultTreeAdapterTypes.Document, declaration: Re
       const element = node as Element;
       if (RAW_TEXT.has(element.tagName)) continue;
       const oid = element.attrs.find((attribute) => attribute.name === "data-oid")?.value;
-      if (oid && count < 512 && oid !== "__proto__" && oid !== "constructor" && oid !== "prototype") {
+      if (oid && count < DESIGN_COMPONENT_BOUND_TEXT_LIMIT && oid !== "__proto__" && oid !== "constructor" && oid !== "prototype") {
         const read = new Set<string>();
         let holes = false;
         for (const child of element.childNodes)
@@ -329,7 +331,7 @@ function boundTextOf(document: DefaultTreeAdapterTypes.Document, declaration: Re
               for (const name of optionsRead(match[1]!, declaration)) read.add(name);
             }
         if (holes) {
-          bound.set(oid, [...read].sort().slice(0, 8));
+          bound.set(oid, [...read].sort().slice(0, DESIGN_COMPONENT_RECORD_LIMITS.boundTextOptions));
           count += 1;
         }
       }
@@ -350,9 +352,12 @@ export function designComponentSummaryOf(source: string): DesignComponentSummary
     (node) => "tagName" in node && node.tagName === "template" && node.attrs.some((attribute) => attribute.name === "data-zd-options"),
   ) as Template | undefined;
   if (!template) return null;
-  const elements = template.content.childNodes
+  const declared = template.content.childNodes
     .filter((node): node is Element => "tagName" in node)
     .map((element) => ({ tag: element.tagName, attributes: element.attrs.map(({ name, value }) => ({ name, value })) }));
+  // A frame the main marks as a slot is one of its options.
+  const body = html?.childNodes.find((node) => "tagName" in node && node.tagName === "body") as Element | undefined;
+  const elements = withDesignSlotOptions(declared, body ? designSlotsOfNodes(body.childNodes) : [], designSlotOptionElement);
   const { declaration } = readComponentDeclaration(elements.map((element) => ({ ...element, offset: 0 })));
   const names = new Set<string>();
   for (const expression of componentTemplateExpressions(source, { document: true })) {

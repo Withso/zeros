@@ -240,7 +240,7 @@ describe("design protocol resources", () => {
     });
     const rendered = response.body.toString("utf8");
     expect(rendered).toContain("<zd-card");
-    expect(rendered.replace(/ data-oid="[^"]*"/g, "")).toContain(
+    expect(rendered.replace(/ data-(?:oid|zd-instance)="[^"]*"/g, "")).toContain(
       '<article>Shipping<zd-badge label="Featured"><span class="badge">Featured</span></zd-badge></article>',
     );
     expect(rendered.match(/class="badge"/g)).toHaveLength(1);

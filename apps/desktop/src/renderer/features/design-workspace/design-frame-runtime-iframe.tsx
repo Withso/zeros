@@ -25,7 +25,7 @@ import {
   type DesignFrameRuntimeConnection,
 } from "../../platform/bridge/design-frame-runtime";
 import { designProtocolFrameUrl } from "../../platform/bridge/design-protocol-url";
-import { Button } from "../../shared/ui/primitives/button";
+import { DesignFrameLoadError } from "./design-frame-load-error";
 import {
   captureDesignRuntimeScreenshot,
   reconcileDesignRuntimeSnapshot,
@@ -33,6 +33,8 @@ import {
 } from "./state/design-selection";
 import { forgetDesignHeldStateRelease } from "./state/design-held-state";
 import {
+  designFrameDocumentCache,
+  designFrameDocumentKey,
   reconcileDesignWorkspaceRuntimeAudit,
   refreshDesignWorkspaceSnapshot,
 } from "./state/design-workspace-cache";
@@ -110,6 +112,9 @@ function scheduleIdle(work: () => void): () => void {
 
 type DesignDocumentBuffer = "displayed" | "incoming";
 const FRAME_HANDSHAKE_TIMEOUT_MS = 5_000;
+/** A load that fails once is transient (docs/design-system.md): the frame
+ * reloads once, silently, and shows its error only if that fails too. */
+const FRAME_LOAD_RETRY_DELAY_MS = 1_500;
 
 interface DesignFrameDocumentBufferProps {
   workspaceId: string;
@@ -656,6 +661,13 @@ function DesignFrameDocumentBuffer({
     if (connection) void syncStylesheetPreviews(connection);
   }, [runtimeActive, savedEditingState, stylesheetPreviews, syncStylesheetPreviews]);
 
+  // A read error cached by an earlier attempt is not this buffer's: enabling
+  // the read fetches again, and only that result decides.
+  const [inheritedReadError] = useState(() =>
+    designFrameDocumentCache.peekSnapshot(
+      designFrameDocumentKey(workspaceId, frame.file, documentSourceVersion, variant),
+    ).error,
+  );
   const fallback = useDesignFrameDocument(
     workspaceId,
     frame.file,
@@ -664,13 +676,14 @@ function DesignFrameDocumentBuffer({
     variant,
   );
   useEffect(() => {
-    if (runtimeActive && !useProtocol && fallback.error && !fallback.data) {
+    if (runtimeActive && !useProtocol && fallback.error && fallback.error !== inheritedReadError && !fallback.data) {
       onLoadFailure(documentSourceVersion);
     }
   }, [
     documentSourceVersion,
     fallback.data,
     fallback.error,
+    inheritedReadError,
     onLoadFailure,
     runtimeActive,
     useProtocol,
@@ -773,10 +786,35 @@ function DesignFrameRuntimeSession({
     null,
   );
   const [retryAttempt, setRetryAttempt] = useState(0);
+  const reloadDocuments = useCallback(() => {
+    setFailedSourceVersion(null);
+    setReadySourceVersions([]);
+    setRetryAttempt((current) => current + 1);
+    void refreshDesignWorkspaceSnapshot(workspaceId).catch(() => {});
+  }, [workspaceId]);
+  // The generation that has had its silent reload; a manual Retry that fails
+  // again shows the error at once, so failures never loop.
+  const silentlyReloadedRef = useRef<string | null>(null);
+  const silentReloadTimerRef = useRef<number | null>(null);
   const handleLoadFailure = useCallback((sourceVersion: string) => {
+    if (!playbackSessionId && silentlyReloadedRef.current !== sourceVersion) {
+      silentlyReloadedRef.current = sourceVersion;
+      if (silentReloadTimerRef.current !== null) window.clearTimeout(silentReloadTimerRef.current);
+      silentReloadTimerRef.current = window.setTimeout(() => {
+        silentReloadTimerRef.current = null;
+        // Recovery timers stop for inactive surfaces: an inactive frame keeps
+        // its error for when it is shown again.
+        if (latestRef.current.active) reloadDocuments();
+        else setFailedSourceVersion(sourceVersion);
+      }, FRAME_LOAD_RETRY_DELAY_MS);
+      return;
+    }
     setFailedSourceVersion(sourceVersion);
     if (playbackSessionId) onPlaybackStopped?.(playbackSessionId, new Error("Couldn't load this frame for playback."));
-  }, [onPlaybackStopped, playbackSessionId]);
+  }, [onPlaybackStopped, playbackSessionId, reloadDocuments]);
+  useEffect(() => () => {
+    if (silentReloadTimerRef.current !== null) window.clearTimeout(silentReloadTimerRef.current);
+  }, []);
   const connectionsByDocumentRef = useRef(
     new Map<string, DesignFrameRuntimeConnection>(),
   );
@@ -902,6 +940,7 @@ function DesignFrameRuntimeSession({
       setFailedSourceVersion((current) =>
         current === sourceVersion ? null : current,
       );
+      if (silentlyReloadedRef.current === sourceVersion) silentlyReloadedRef.current = null;
       const latest = latestRef.current;
       if (
         latest.incomingSourceVersion !== sourceVersion ||
@@ -1077,27 +1116,7 @@ function DesignFrameRuntimeSession({
         )
       ) : null}
       {active && failedSourceVersion === frame.sourceVersion ? (
-        <div
-          data-design-frame-load-error=""
-          className="bg-bg1 text-muted-fg absolute inset-0 z-[2] flex flex-col items-center justify-center gap-2 text-xs [transform:scale(var(--design-canvas-inverse-zoom,1))]"
-          onPointerDown={(event) => event.stopPropagation()}
-          onDoubleClick={(event) => event.stopPropagation()}
-        >
-          <span>Couldn’t load this frame.</span>
-          <Button
-            size="sm"
-            variant="secondary"
-            onClick={(event) => {
-              event.stopPropagation();
-              setFailedSourceVersion(null);
-              setReadySourceVersions([]);
-              setRetryAttempt((current) => current + 1);
-              void refreshDesignWorkspaceSnapshot(workspaceId).catch(() => {});
-            }}
-          >
-            Retry frame
-          </Button>
-        </div>
+        <DesignFrameLoadError onRetry={reloadDocuments} />
       ) : null}
     </div>
   );

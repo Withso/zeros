@@ -124,6 +124,13 @@ describe("catalog history uses the existing retention limits", () => {
     pruneWorkspaceDesignHistory(state);
     expect(state).toEqual({ undo: [], redo: [], bytes: 0 });
   });
+  it("keeps optional item identity inside the same bounded entry and accounts for it", () => {
+    const input = change();
+    const entry = catalogDesignHistoryEntry(input, "a", [], true, "item_1");
+    expect(entry).toMatchObject({ kind: "catalog", pageId: "a", itemId: "item_1" });
+    expect(entry.bytes).toBe(JSON.stringify(input).length * 2 + 256 + ("a".length + "item_1".length) * 2);
+    expect(catalogDesignHistoryEntry(input)).not.toHaveProperty("itemId");
+  });
   it("bounds mixed catalog/document entries across both stacks", () => {
     const catalog = catalogDesignHistoryEntry(change());
     const document = documentDesignHistoryEntry("a/home.html");

@@ -340,9 +340,10 @@ describe("transformed boxes", () => {
   });
 
   it("points the cursor along the turned axis", () => {
-    expect(designLocalAxisCursor("x", 0)).toBe("ew-resize");
-    expect(designLocalAxisCursor("x", 90)).toBe("ns-resize");
-    expect(designLocalAxisCursor("y", 45)).toBe("nesw-resize");
+    const glyph = (cursor: string) => /zd-cursor-(resize-\d+)/.exec(cursor)?.[1];
+    expect(glyph(designLocalAxisCursor("x", 0))).toBe("resize-0");
+    expect(glyph(designLocalAxisCursor("x", 90))).toBe("resize-90");
+    expect(glyph(designLocalAxisCursor("y", 45))).toBe("resize-135");
   });
 
   it("maps children through a quarter turn without inventing size", () => {

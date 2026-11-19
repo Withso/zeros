@@ -1,5 +1,5 @@
 import { expect } from "@playwright/test";
-import { openLayersDrawer } from "./ui-smoke-design-helpers.mjs";
+import { clickFramePlay, openLayersDrawer } from "./ui-smoke-design-helpers.mjs";
 
 /** A CSS-authored background and flow content must survive actual inspector
  * actions, source transactions, layer rename, history and whole-frame Play. */
@@ -168,7 +168,7 @@ export async function runDesignLayeredLayoutSmoke({ page, check }) {
     name: "Play Launch home",
     exact: true,
   });
-  await play.click();
+  await clickFramePlay(play);
   await expect
     .poll(() =>
       heading.evaluate((element) =>
@@ -178,7 +178,7 @@ export async function runDesignLayeredLayoutSmoke({ page, check }) {
       ),
     )
     .toBe(true);
-  await play.click();
+  await clickFramePlay(play);
   await expect
     .poll(() =>
       heading.evaluate((element) => getComputedStyle(element).opacity),

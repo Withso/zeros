@@ -1,3 +1,4 @@
+import { designResizeCursor } from "./design-canvas-cursors";
 import { designConstraintGuides, designSelectionBoxCorners, designSelectionLocalDelta, type DesignCanvasRect, type DesignConstraintSides, type DesignSelectionBox } from "./design-canvas-math";
 import type { DesignRuntimeCoordinateSpace } from "@zeros/protocol/design-runtime";
 
@@ -332,21 +333,8 @@ export function designLocalAxisDelta(input: {
 }
 
 /** The resize cursor that points along a turned local axis. */
-export function designLocalAxisCursor(
-  axis: "x" | "y",
-  rotation = 0,
-): "ew-resize" | "ns-resize" | "nwse-resize" | "nesw-resize" {
-  const angle =
-    ((((axis === "x" ? 0 : 90) + normalizedDegrees(rotation)) % 180) + 180) %
-    180;
-  const sector = Math.round(angle / 45) % 4;
-  return sector === 0
-    ? "ew-resize"
-    : sector === 1
-      ? "nwse-resize"
-      : sector === 2
-        ? "ns-resize"
-        : "nesw-resize";
+export function designLocalAxisCursor(axis: "x" | "y", rotation = 0): string {
+  return designResizeCursor((axis === "x" ? 0 : 90) + normalizedDegrees(rotation));
 }
 
 /** How a spacing drag or entry spreads. Figma's documented contract: Option

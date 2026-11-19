@@ -39,9 +39,13 @@ import { assertDesignWriteAuthorized } from "./write-authority";
 import {
   assertSafeDesignStoragePath as assertStoragePath,
   atomicWriteDesignStorageFile,
+  changedDesignStorageDirectory,
   designPrivateStorageDirectory,
+  makeDurableDesignStorageDirectory,
   readDesignStorageFile,
+  syncDesignStorageDirectories,
   syncDesignStorageDirectory,
+  withDesignStorageListings,
   writePrivateDesignState,
 } from "./metadata-storage";
 
@@ -358,10 +362,14 @@ function cleanPayloads(
       );
     const target = assertSafeDesignStoragePath(root, name + "/" + entry);
     unlinkSync(target);
-    syncDesignStorageDirectory(path.join(root, name));
+    changedDesignStorageDirectory(path.dirname(target));
     afterStep?.("cleanup:" + entry);
   }
+  // Removal is idempotent: a crash before this sync leaves names the next
+  // attempt removes again.
+  syncDesignStorageDirectory(path.join(root, name));
   rmdirSync(path.join(root, name));
+  changedDesignStorageDirectory(root);
   syncDesignStorageDirectory(root);
   afterStep?.("cleanup:directory");
 }
@@ -423,6 +431,7 @@ function applyJournal(
     );
     if (existsSync(temporary)) {
       unlinkSync(temporary);
+      changedDesignStorageDirectory(path.dirname(temporary));
       syncDesignStorageDirectory(path.dirname(temporary));
       afterStep?.("temporary-removed:" + file);
     }
@@ -441,14 +450,19 @@ function applyJournal(
       assertSafeDesignStoragePath(workspace, relative + "/.zeros-validation");
       if (!existsSync(target)) {
         mkdirSync(target);
+        changedDesignStorageDirectory(path.dirname(target));
         syncDesignStorageDirectory(path.dirname(target));
         afterStep?.("directory:" + folder);
       }
     }
     for (const group of ["source", "metadata"] as const) {
+      // Each group's directories are synced once before the next step: a
+      // successor written by an earlier, interrupted attempt is synced too.
+      const written = new Set<string>();
       for (const change of journal.changes.filter(
         (change) => change.group === group,
       )) {
+        written.add(path.dirname(assertSafeDesignStoragePath(workspace, change.file)));
         const current = digest(read(workspace, change.file));
         if (current === change.after) continue;
         if (current !== change.before)
@@ -484,6 +498,7 @@ function applyJournal(
                     change.file,
                 );
             },
+            deferDirectorySync: written,
           },
         );
         if (digest(read(workspace, change.file)) !== change.after)
@@ -498,6 +513,7 @@ function applyJournal(
               : change.file),
         );
       }
+      syncDesignStorageDirectories(written);
       if (["prepared", "sources"].includes(journal.phase))
         persistPhase(
           workspace,
@@ -515,9 +531,11 @@ function applyJournal(
         .filter((change) => change.group !== "delete")
         .map((change) => [change.file, change]),
     );
+    const removed = new Set<string>();
     for (const change of journal.changes.filter(
       (change) => change.group === "delete",
     )) {
+      removed.add(path.dirname(assertSafeDesignStoragePath(workspace, change.file)));
       const current = digest(read(workspace, change.file));
       if (current === null) continue;
       if (current !== change.before)
@@ -547,9 +565,10 @@ function applyJournal(
       payloadSource(workspace, journal, change.beforePayload, change.before);
       const target = assertSafeDesignStoragePath(workspace, change.file);
       unlinkSync(target);
-      syncDesignStorageDirectory(path.dirname(target));
+      changedDesignStorageDirectory(path.dirname(target), removed);
       afterStep?.("delete:" + change.file.slice(journal.directory.length + 1));
     }
+    syncDesignStorageDirectories(removed);
     assertInputs(workspace, journal);
     assertSuccessors(workspace, journal);
     if (!["deleted", "invalidated"].includes(journal.phase))
@@ -592,6 +611,7 @@ function applyJournal(
     designPagesMigrationJournalName(journal.directory),
   );
   unlinkSync(target);
+  changedDesignStorageDirectory(root);
   syncDesignStorageDirectory(root);
   afterStep?.("journal-removed");
   return journal.changes.map((change) => change.file);
@@ -602,7 +622,7 @@ export function recoverDesignPagesMigration(
   directory: string,
 ): string[] {
   const journal = readDesignPagesMigrationJournal(workspace, directory);
-  return journal ? applyJournal(workspace, journal) : [];
+  return journal ? withDesignStorageListings(() => applyJournal(workspace, journal)) : [];
 }
 
 export function recoverWorkspaceDesignPagesMigrations(
@@ -688,6 +708,7 @@ function admitPlan(
         ).test(name)
       ) {
         unlinkSync(assertSafeDesignStoragePath(privateRoot, name));
+        changedDesignStorageDirectory(privateRoot);
         syncDesignStorageDirectory(privateRoot);
       }
     }
@@ -704,9 +725,11 @@ function admitPlan(
     guards,
   };
   const payloadRoot = payloadDirectory(journal);
-  mkdirSync(privateRoot, { recursive: true, mode: 0o700 });
+  makeDurableDesignStorageDirectory(privateRoot);
   mkdirSync(path.join(privateRoot, payloadRoot), { mode: 0o700 });
+  changedDesignStorageDirectory(privateRoot);
   syncDesignStorageDirectory(privateRoot);
+  const payloads = new Set<string>();
   let admitted = false;
   try {
     options.afterStep?.("payload-directory");
@@ -723,6 +746,8 @@ function admitPlan(
             privateRoot,
             payloadRoot + "/" + name,
             source,
+            undefined,
+            { deferDirectorySync: payloads },
           );
           options.afterStep?.("payload:" + name);
         }
@@ -737,6 +762,7 @@ function admitPlan(
         mode: change.mode ?? 0o600,
       });
     }
+    syncDesignStorageDirectories(payloads);
     if (Buffer.byteLength(JSON.stringify(journal)) > MAX_JOURNAL_BYTES)
       throw new Error(
         "Design page migration has too many reference paths for a recovery journal.",
@@ -761,7 +787,11 @@ function admitPlan(
   }
 }
 
-function buildPlan(
+function buildPlan(...input: Parameters<typeof buildPlanUnscoped>): string[] {
+  return withDesignStorageListings(() => buildPlanUnscoped(...input));
+}
+
+function buildPlanUnscoped(
   workspace: string,
   directory: string,
   id: string,

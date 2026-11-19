@@ -163,3 +163,12 @@ export async function designLayoutMenuState(page, name) {
   const row = (await designLayoutMenuRows(page)).find(([text]) => text === name);
   return !row ? "absent" : row[1] ? "disabled" : "enabled";
 }
+
+/** A frame's Play shows only while the frame has a selection or the pointer.
+ * Reach it from inside the frame, as a pointer does. */
+export async function clickFramePlay(play) {
+  const frame = play.locator("xpath=ancestor::article[@data-design-frame][1]");
+  const box = await frame.boundingBox();
+  await play.page().mouse.move(box.x + box.width - 12, box.y + 12);
+  await play.click();
+}

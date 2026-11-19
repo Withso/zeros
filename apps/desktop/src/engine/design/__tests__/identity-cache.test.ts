@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, utimes, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -35,7 +35,10 @@ describe("where Design frame identities persist", () => {
   });
 });
 
-describe("durable Design frame identities", () => {
+// A checkout opened through a symlink (a linked folder, or /tmp on macOS) is
+// named by its link path, while its real path differs.
+describe.each([["its own path", false], ["a symlinked path", true]] as const)("durable Design frame identities, for a checkout at %s", (_where, linked) => {
+  let base: string;
   let root: string;
   let folder: string;
   const frames = ["page-1/a.html", "page-1/b.html"];
@@ -65,7 +68,13 @@ describe("durable Design frame identities", () => {
   };
 
   beforeEach(async () => {
-    root = await mkdtemp(path.join(tmpdir(), "zeros-identity-cache-"));
+    base = await mkdtemp(path.join(tmpdir(), "zeros-identity-cache-"));
+    root = base;
+    if (linked) {
+      await mkdir(path.join(base, "checkout"));
+      root = path.join(base, "link");
+      await symlink(path.join(base, "checkout"), root, "dir");
+    }
     process.env.ZEROS_DATA_DIR = path.join(root, "private");
     folder = path.join(root, DESIGN_DIRECTORY_NAME);
     await initializeDesignDocument(root);
@@ -92,7 +101,7 @@ describe("durable Design frame identities", () => {
     configureDesignIdentityCacheForTests({});
     resetDesignIdentityCacheForTests();
     delete process.env.ZEROS_DATA_DIR;
-    await rm(root, { recursive: true, force: true });
+    await rm(base, { recursive: true, force: true });
   });
 
   it("serves an unchanged frame's identity from its fingerprints without preparing it again", async () => {

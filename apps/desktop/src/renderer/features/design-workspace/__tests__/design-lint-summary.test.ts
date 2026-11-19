@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   blockingDesignLintReason,
+  designLintFindingsByFrame,
+  frameBlockingDesignLintErrors,
   groupDesignLintViolations,
   lintReviewBadgeLabel,
 } from "../design-lint-summary";
@@ -68,6 +70,23 @@ describe("design lint review summary", () => {
       ["repeated-inline-style", "Repeated inline styles"],
       ["repeated-markup", "Repeated markup"],
     ]);
+  });
+
+  it("keeps only the selected frame's errors, so another frame's error never shows on this one", () => {
+    const at = (file: string, severity: "error" | "warning", line: number) => ({ ruleId: "no-script", severity, message: "Script", file, line, column: 1 });
+    const violations = [at("other.html", "error", 1), at("home.html", "warning", 2), at("home.html", "error", 3)];
+    expect(frameBlockingDesignLintErrors(violations, "home.html")).toEqual([violations[2]]);
+    expect(frameBlockingDesignLintErrors(violations, "third.html")).toEqual([]);
+    expect(frameBlockingDesignLintErrors(violations, undefined)).toEqual([]);
+  });
+
+  it("splits one report into each frame's own findings, keeping their order", () => {
+    const at = (file: string, line: number) => ({ ruleId: "contrast", severity: "warning" as const, message: "Contrast", file, line, column: 1 });
+    const violations = [at("a.html", 3), at("b.html", 1), at("a.html", 1)];
+    const byFrame = designLintFindingsByFrame(violations);
+    expect(byFrame.get("a.html")).toEqual([violations[0], violations[2]]);
+    expect(byFrame.get("b.html")).toEqual([violations[1]]);
+    expect(byFrame.get("c.html")).toBeUndefined();
   });
 
   it("names the exact first blocking file, line, and rule", () => {

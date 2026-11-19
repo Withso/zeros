@@ -56,7 +56,7 @@ import {
   designGridTrackCount,
   designSizingMode,
 } from "./design-auto-layout-values";
-import { readDesignComputedStyle } from "./design-style-values";
+import { designStylePropertyAffectsLayout, readDesignComputedStyle } from "./design-style-values";
 import { designLayerHasMargin } from "./design-style-advanced";
 import { designValuesMixed } from "./design-style-mixed";
 import { useDesignLivePreviewStyles } from "./state/design-live-preview";
@@ -78,6 +78,12 @@ interface Props {
   /** How many layers are selected; Mixed needs every one loaded. */
   selectionCount?: number;
   disabled: boolean;
+}
+
+/** Every live property this section's values and helpers read. Alignment
+ * also reads `direction`, which the layout set leaves out. */
+function autoLayoutReads(property: string): boolean {
+  return property === "direction" || designStylePropertyAffectsLayout(property);
 }
 
 const SIZING_WORDS = {
@@ -191,6 +197,7 @@ export function DesignAutoLayoutControls({
     livePreviewOwner?.workspaceId ?? "",
     livePreviewOwner?.frame ?? "",
     livePreviewOwner?.nodeId ?? "",
+    autoLayoutReads,
   );
   const styles = { ...confirmedDetails.styles };
   for (const [property, value] of Object.entries(liveStyles ?? {})) {

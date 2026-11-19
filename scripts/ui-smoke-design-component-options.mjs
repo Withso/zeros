@@ -181,6 +181,34 @@ export async function runDesignComponentOptionsSmoke({ page, check }) {
   await section.getByRole("button", { name: "Send button" }).click();
   await expect(slider("Corner radius")).toBeVisible();
 
+  // A state is a variant: Add variant → Hover shows it on the main, and a
+  // style edit meanwhile writes the main's :hover rule.
+  after = await once("add hover", async () => {
+    await section.locator("[data-design-options-add-variant]").click();
+    await page.locator('[data-design-options-add-state="hover"]').click();
+  });
+  check("Add variant → Hover writes a hover state variant", /<zd-variant name="hover" zd-state="hover"/.test(after), after.match(/<zd-variant name="hover"[^>]*>/)?.[0]);
+  const stateNote = page.locator('[data-design-state-variant="hover"]');
+  await expect(stateNote).toBeVisible();
+  const rootState = () => frame().locator('[data-oid="cc-root"]').getAttribute("data-zd-shown-state", { timeout: 1_000 }).catch(() => null);
+  await expect.poll(rootState).toBe("hover");
+  check("the main shows its hover state: the note and the root's shown state", true);
+  if (!(await layer("cc-prompt").count())) await layer("cc-root").locator("[data-layer-disclosure]").click();
+  await layer("cc-prompt").click();
+  await expect(layer("cc-prompt")).toHaveAttribute("aria-selected", "true");
+  await expect(stateNote).toBeVisible();
+  after = await once("hover opacity", async () => {
+    const opacity = page.locator("[data-design-inspector]").getByLabel("Opacity", { exact: true });
+    await opacity.fill("50");
+    await opacity.press("Enter");
+  });
+  const hoverRule = after.match(/:is\(\[data-oid="cc-root"\], \[data-zd-part="cc-root"\]\):hover :is\(\[data-oid="cc-prompt"\], \[data-zd-part="cc-prompt"\]\) \{[^}]*\}/)?.[0];
+  check("an edit while Hover shows writes the main's :hover rule, not the layer's own style",
+    !!hoverRule && /opacity: (0?\.5|50%) !important/.test(hoverRule) && !/data-oid="cc-prompt"[^>]*style=/.test(after), hoverRule ?? after.slice(0, 400));
+  await stateNote.getByRole("button", { name: "Back to Default" }).click();
+  await expect(stateNote).toHaveCount(0);
+  await expect.poll(rootState).toBe(null);
+  await selectComponent();
   // The one authoring affordance asks the agent.
   const prompts = () => page.evaluate(() => (window.__zerosHarnessAgentPrompts ?? []).length);
   const promptsBefore = await prompts();

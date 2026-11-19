@@ -55,7 +55,14 @@
 //      back / Go forward retrace sidebar destinations, never Settings.
 //
 // Usage: pnpm test:ui-smoke [--shard=k/3]
-//        pnpm test:ui-smoke --list [--shard=k/3] --format=json
+//        pnpm test:ui-smoke --scenario=<id> [--scenario=<id> ...]
+//        pnpm -s test:ui-smoke --list [--shard=k/3 | --scenario=<id> ...] --format=json
+//
+// --scenario runs only the named registry entries (in registry order), each
+// unit in its own page as a shard runs it, and cannot be combined with
+// --shard. Unknown ids fail with the valid ones. JSON listing needs `pnpm -s`
+// (or `node scripts/ui-smoke-composer.mjs`): pnpm otherwise prints a banner
+// on stdout before the JSON.
 // ============================================================
 
 import { spawn } from "node:child_process";
@@ -81,15 +88,17 @@ try {
   process.exit(1);
 }
 if (options.list) {
-  const ids = selectScenarios(options.shard).map(({ id }) => id);
+  const ids = selectScenarios(options.shard, options.scenarios).map(({ id }) => id);
   console.log(options.format === "json" ? JSON.stringify(ids) : ids.join("\n"));
   process.exit(0);
 }
 const { chromium } = await import("@playwright/test");
 const runLabel =
-  options.shard === undefined
-    ? "ui-smoke-composer"
-    : `ui-smoke-composer (shard ${options.shard}/${SHARD_COUNT})`;
+  options.scenarios !== undefined
+    ? `ui-smoke-composer (scenario ${options.scenarios.join(", ")})`
+    : options.shard === undefined
+      ? "ui-smoke-composer"
+      : `ui-smoke-composer (shard ${options.shard}/${SHARD_COUNT})`;
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, "..");
@@ -182,6 +191,7 @@ try {
   const pageErrors = [];
   await runSmokeScenarios({
     shard: options.shard,
+    scenarios: options.scenarios,
     newPage,
     harnessBase,
     pageUrl,

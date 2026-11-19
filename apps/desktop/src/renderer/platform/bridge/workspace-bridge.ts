@@ -8,7 +8,8 @@ import type {
 // remote relay clients use the same bounded contract.
 
 import type { RuntimeClient } from "./ws-client";
-import { cloudTargetForValue, cloudWorkspaceKey, parseCloudScopedId } from "./cloud-workspace-key";
+import { cloudTargetForValue, cloudWorkspaceKey, isCloudWorkspace, parseCloudScopedId } from "./cloud-workspace-key";
+import { DESIGN_OPTIONS_SHOW_NOTHING_CAPABILITY, DESIGN_OPTIONS_SHOW_NOTHING_PARAM } from "@zeros/protocol/design-catalog";
 import { CLOUD_GITHUB_PR_OPERATIONS } from "@zeros/protocol/cloud-github-pr";
 import { isWorkspaceNumber } from "@zeros/protocol/local-orchestration";
 import { requestCloudGithubPr, cloudGithubPrAuthority } from "../cloud-github-pr";
@@ -2043,6 +2044,12 @@ export async function bridgeWorkspaceReassignLocalOrganization(
   )) as { changes: number; repoSlugs: string[] };
 }
 
+/** Frame records may say a frame shows nothing only to a renderer that asks. */
+export function showsNothingParam(bridge: RuntimeClient, workspaceId: unknown) {
+  return typeof workspaceId === "string" && !isCloudWorkspace(workspaceId) &&
+    bridge.supportsEngineCapability?.(DESIGN_OPTIONS_SHOW_NOTHING_CAPABILITY, workspaceId) ? { [DESIGN_OPTIONS_SHOW_NOTHING_PARAM]: true } : {};
+}
+
 export async function bridgeWorkspaceSetMode(
   bridge: RuntimeClient,
   args: { workspaceId: string; mode: "code" | "design" },
@@ -2058,7 +2065,7 @@ export async function bridgeWorkspaceSetMode(
   return (await workspaceOp(
     bridge,
     "workspace.setMode",
-    { ...args },
+    { ...args, ...showsNothingParam(bridge, args.workspaceId) },
     60_000,
   )) as {
     ok: true;

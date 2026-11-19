@@ -139,7 +139,11 @@ try {
         win.setIgnoreMouseEvents(true);
         win.show();
       });
-      await page.addInitScript(() => { globalThis.localStorage.setItem("zeros.column2.ratio", "0.1"); });
+      await page.addInitScript(() => {
+        // Sandboxed Design frames run init scripts too, and their storage throws.
+        if (globalThis.window !== globalThis.window.top) return;
+        globalThis.localStorage.setItem("zeros.column2.ratio", "0.1");
+      });
       await page.reload();
       await page.waitForFunction(() => globalThis.window.__ZEROS_NATIVE__?.localDevelopment === true);
       await waitForNativeRenderer(page, async () => (await import("/apps/desktop/src/renderer/platform/bridge/active-bridge.ts")).getActiveBridge()?.status === "connected");

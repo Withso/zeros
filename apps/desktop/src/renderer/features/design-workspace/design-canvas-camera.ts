@@ -46,15 +46,16 @@ export function repaintDesignCanvasPixels(world: HTMLDivElement): void {
 // Labels, handles and badges can extend past an artboard. Keep that nearby
 // chrome current as well as the pixels, without retaining a browser observer.
 const CHROME_OVERSCAN_PIXELS = 96;
-/** Screen widths below which a frame's name, and its 28px Play control, no
+/** Screen widths below which a frame's name, and its 16px Play control, no
  * longer fit above it. */
-const FRAME_NAME_MIN_PIXELS = 40;
-const FRAME_PLAY_MIN_PIXELS = 128;
+const FRAME_NAME_MIN_PIXELS = 24;
+const FRAME_PLAY_MIN_PIXELS = 64;
 /** Up to this many mounted frames, a small frame keeps its name. A crowded
- * overview hides names and controls together below the Play width: each
- * visible name is a transformed layer and a DOM hit box per frame, which a
+ * overview hides names and controls together below this width: each visible
+ * name is a transformed layer and a DOM hit box per frame, which a
  * 1,000-frame page cannot afford. */
 const FRAME_NAME_BUDGET = 64;
+const CROWDED_FRAME_NAME_MIN_PIXELS = 128;
 
 /** The scale this module last wrote and the inline style text it left. An
  * unchanged attribute proves no other writer replaced those values, so a camera
@@ -66,6 +67,30 @@ const writtenScales = new WeakMap<HTMLElement, { zoom: number; style: string | n
  * step restyled each frame subtree per display frame; rest writes it exactly. */
 const CHROME_SCALE_GESTURE_HOLD = 0.15;
 
+/** A frame's name and Play roots. They take the exact camera scale at every
+ * gesture step: restyling these two small subtrees is cheap, while a held
+ * scale grew and shrank the name and its gap by up to 15%, then snapped. */
+const chromeRoots = new WeakMap<HTMLElement, { count: number; roots: HTMLElement[]; zoom?: number | null }>();
+
+/** Null leaves a root to inherit its frame's scale, as hidden chrome must. */
+function paintFrameChromeRoots(frame: HTMLElement, zoom: number | null): void {
+  let entry = chromeRoots.get(frame);
+  if (!entry || entry.count !== frame.childElementCount || !entry.roots.every(root => root.parentElement === frame)) {
+    entry = { count: frame.childElementCount, roots: [...frame.children].filter((child): child is HTMLElement =>
+      child instanceof HTMLElement && child.hasAttribute("data-design-frame-chrome")) };
+    chromeRoots.set(frame, entry);
+  }
+  // Most frames keep their chrome scale across a step: off-screen and
+  // compact ones stay null. Skip them without reading any declaration.
+  if (entry.zoom === zoom) return;
+  entry.zoom = zoom;
+  for (const root of entry.roots) {
+    for (const [name, value] of [["--design-canvas-zoom", zoom], ["--design-canvas-inverse-zoom", zoom === null ? null : 1 / zoom]] as const) {
+      if (value === null) root.style.removeProperty(name);
+      else root.style.setProperty(name, String(value));
+    }
+  }
+}
 function paintChromeScale(element: HTMLElement, zoom: number, gesture = false): void {
   const style = element.getAttribute("style"), written = writtenScales.get(element);
   if (written && written.zoom === zoom && written.style === style) return;
@@ -147,7 +172,7 @@ export function paintDesignFrameVisibility(element: HTMLElement, context?: Chrom
     const automatic = controls === "automatic" && !!bounds;
     const width = bounds ? bounds.width * viewport.zoom : 0;
     const hidden = automatic && (outside ||
-      width < (world.childElementCount > FRAME_NAME_BUDGET ? FRAME_PLAY_MIN_PIXELS : FRAME_NAME_MIN_PIXELS));
+      width < (world.childElementCount > FRAME_NAME_BUDGET ? CROWDED_FRAME_NAME_MIN_PIXELS : FRAME_NAME_MIN_PIXELS));
     element.toggleAttribute("data-design-frame-compact-controls", hidden);
     // Between the two widths the name stays and only Play waits for intent.
     element.toggleAttribute("data-design-frame-compact-play", automatic && !hidden && width < FRAME_PLAY_MIN_PIXELS);
@@ -156,12 +181,17 @@ export function paintDesignFrameVisibility(element: HTMLElement, context?: Chrom
   // Ready source paint follows the camera in this write, including a return
   // before React runs. Cold documents still lay out and caches stay mounted.
   element.toggleAttribute("data-design-frame-source-outside", sourceOutside);
-  const compact = element.hasAttribute("data-design-frame-tiled") &&
-    element.hasAttribute("data-design-frame-compact-controls") && !element.hasAttribute("data-design-frame-chrome-protected") &&
-    !element.hasAttribute("data-design-nest-target") && !element.hasAttribute("data-design-frame-pointer") &&
-    (context ? context.hoveredFrame !== element : !element.matches(":hover")) && focusedFrame !== element;
+  const intent = element.hasAttribute("data-design-frame-pointer") || focusedFrame === element ||
+    (context ? context.hoveredFrame === element : element.matches(":hover"));
+  const compactControls = element.hasAttribute("data-design-frame-compact-controls") && !intent;
+  const chromeProtected = element.hasAttribute("data-design-frame-chrome-protected");
+  const compact = element.hasAttribute("data-design-frame-tiled") && compactControls && !chromeProtected &&
+    !element.hasAttribute("data-design-nest-target");
+  // A protected frame is one or a few frames whose selection geometry and
+  // size label must not drift either; its subtree is cheap to restyle.
   paintChromeScale(element, outside || compact ? 1 : viewport.zoom,
-    context ? context.gesture : world.hasAttribute("data-design-camera-gesture"));
+    !chromeProtected && (context ? context.gesture : world.hasAttribute("data-design-camera-gesture")));
+  paintFrameChromeRoots(element, outside || compactControls ? null : viewport.zoom);
   if (!paintingWorlds.has(world)) repaintDesignCanvasPixels(world);
 }
 

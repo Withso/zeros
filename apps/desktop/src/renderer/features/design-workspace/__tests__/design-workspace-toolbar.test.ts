@@ -43,7 +43,7 @@ describe("design workspace inspector toolbar", () => {
     expect(inspector).not.toContain("<DesignReviewDialog");
   });
 
-  it("deletes frames and elements immediately without confirmation or success toasts", () => {
+  it("deletes ordinary frames and elements immediately, without success toasts", () => {
     expect(source).toContain("deleteDesignFrameCached(");
     expect(source).not.toContain('toast.success("Design frame deleted")');
     expect(source).not.toContain('"Element deleted"');

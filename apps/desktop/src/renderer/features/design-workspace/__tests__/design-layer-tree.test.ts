@@ -19,6 +19,7 @@ import {
   designFrameRowDiscloses,
   flattenDesignLayerTree,
   resolveDesignFrameBodyTarget,
+  resolveDesignHoverTarget,
   resolveDesignLayerHit,
 } from "../design-layer-tree";
 
@@ -67,8 +68,12 @@ describe("design layer tree", () => {
       nodeId: "hero",
     });
     expect(
-      resolveDesignFrameBodyTarget({ ...input, frameRootId: "hero" }),
+      resolveDesignFrameBodyTarget({ ...input, frameRootId: "hero", intent: "deepest" }),
     ).toEqual({ kind: "frame" });
+    // A double-click on that frame's own area enters it at its first layer.
+    expect(
+      resolveDesignFrameBodyTarget({ ...input, frameRootId: "hero" }),
+    ).toEqual({ kind: "node", nodeId: "heading" });
   });
   it("represents the editable frame root once and exposes only its real children", () => {
     const root = tree[0]!;
@@ -713,5 +718,88 @@ describe("design layer tree", () => {
         viewportHeight: 0,
       }),
     ).toBeNull();
+  });
+});
+
+describe("double-click descent and hover inside a selection", () => {
+  const leaf = (oid: string, visible = true) => ({ oid, tag: "span", name: oid, text: oid, visible, children: [] });
+  const layered = [
+    {
+      oid: "root",
+      tag: "main",
+      name: "Root",
+      text: null,
+      visible: true,
+      children: [
+        {
+          oid: "card",
+          tag: "section",
+          name: "Card",
+          text: null,
+          visible: true,
+          children: [
+            leaf("ghost", false),
+            { oid: "row", tag: "div", name: "Row", text: null, visible: true, children: [leaf("label"), leaf("value")] },
+          ],
+        },
+        leaf("footer"),
+      ],
+    },
+  ];
+  const frameSize = { width: 600, height: 400 };
+  const descend = (deepestNodeId: string, selectedNodeId: string | null, nodes = layered) =>
+    resolveDesignFrameBodyTarget({
+      nodes,
+      deepestNodeId,
+      deepestRect: { x: 10, y: 10, width: 100, height: 40 },
+      selectedNodeId,
+      intent: "descend",
+      frameSize,
+      labeledFrame: true,
+      frameRootId: "root",
+    });
+
+  it("double-clicking a selected layer where no child is under the pointer selects its first visible child", () => {
+    expect(descend("card", "card")).toEqual({ kind: "node", nodeId: "row" });
+    expect(descend("row", "row")).toEqual({ kind: "node", nodeId: "label" });
+    // A child under the pointer still wins, one level at a time.
+    expect(descend("value", "card")).toEqual({ kind: "node", nodeId: "row" });
+    expect(descend("value", "row")).toEqual({ kind: "node", nodeId: "value" });
+    // A layer without children stays selected.
+    expect(descend("label", "label")).toEqual({ kind: "node", nodeId: "label" });
+  });
+
+  it("double-clicking a frame's empty area selects its first layer, and an empty frame stays a frame", () => {
+    expect(descend("root", null)).toEqual({ kind: "node", nodeId: "card" });
+    const empty = [{ ...layered[0]!, children: [] }];
+    expect(descend("root", null, empty)).toEqual({ kind: "frame" });
+    // With a layer selected, empty frame space still means the frame.
+    expect(descend("root", "footer")).toEqual({ kind: "frame" });
+  });
+
+  it("hover inside a selected layer outlines its child under the pointer, as a double-click would select", () => {
+    const hover = (deepestNodeId: string, selection: { node?: string; frame?: boolean; deep?: boolean }) =>
+      resolveDesignHoverTarget({
+        nodes: layered,
+        deepestNodeId,
+        selectedNodeId: selection.node ?? null,
+        frameSelected: selection.frame ?? false,
+        deepest: selection.deep ?? false,
+        labeledFrame: true,
+        frameRootId: "root",
+      });
+    expect(hover("label", { node: "card" })).toBe("row");
+    expect(hover("label", { node: "row" })).toBe("label");
+    // The selection itself and layers outside it keep the deepest hit.
+    expect(hover("card", { node: "card" })).toBe("card");
+    expect(hover("footer", { node: "card" })).toBe("footer");
+    expect(hover("label", { node: "footer" })).toBe("label");
+    // A selected frame outlines its top-level layer under the pointer.
+    expect(hover("label", { frame: true })).toBe("card");
+    expect(hover("root", { frame: true })).toBe("root");
+    // Nothing selected, or the platform modifier held: the deepest layer.
+    expect(hover("label", {})).toBe("label");
+    expect(hover("label", { node: "card", deep: true })).toBe("label");
+    expect(hover("label", { frame: true, deep: true })).toBe("label");
   });
 });

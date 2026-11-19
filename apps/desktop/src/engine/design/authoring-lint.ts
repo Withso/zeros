@@ -3,6 +3,7 @@ import type { DefaultTreeAdapterTypes } from "parse5";
 
 import type { DesignLintViolation } from "./document-model";
 import { isDesignNodeElement, isShadowDesignNodeElement } from "./node-identities";
+import { extractDesignClassCatalog, type DesignClassCatalog } from "./style-class-selectors";
 
 // The Design authoring contract's advisory checks. Each one warns only: a
 // frame that breaks the contract still renders, validates and saves. They are
@@ -152,7 +153,7 @@ function repeatedInlineStyles(
     else groups.set(key, [layer]);
   }
   const repeated = [...groups].filter(([, members]) => members.length >= REPEAT_THRESHOLD);
-  const fix = "Declare it once as a class in the frame's <style> or a Design stylesheet and use that class on each element; keep inline style for one-off values.";
+  const fix = "Declare it once as a class in a Design stylesheet, or in the main frame's <style> when the elements are a component's, and use that class on each element; keep inline style for one-off values.";
   const locate = (element: Element) =>
     element.sourceCodeLocation?.attrs?.style ?? element.sourceCodeLocation?.startTag;
   return capped(
@@ -429,7 +430,7 @@ function repeatedMarkup(
   }
   reported.sort((left, right) =>
     (left[0]!.sourceCodeLocation?.startOffset ?? 0) - (right[0]!.sourceCodeLocation?.startOffset ?? 0));
-  const fix = "Define it once as components/<name>.html with <slot> for its content and data-zd-attr for attribute values, then place one <zd-name> per use.";
+  const fix = 'Make one copy a main frame ("component": "<name>" on its meta/canvas.json record, with options for the values that change), then place one <zd-name> per use.';
   const describe = (element: Element) => {
     const classes = (attribute(element, "class") ?? "").split(/[\t\n\f\r ]+/).filter(Boolean).slice(0, 2).join(" ");
     return classes ? `<${element.tagName}> markup with class "${classes}",` : `<${element.tagName}> markup`;
@@ -456,6 +457,47 @@ function repeatedMarkup(
   );
 }
 
+// ── Classes a frame defines ────────────────────────────────
+
+/** Classes are global (a Design stylesheet or style source every frame can
+ * link) or a component's (its main frame's <style>). A frame that is not a
+ * main defines none of its own: they belong in one or the other. */
+function frameOwnClasses(
+  file: string,
+  records: readonly { element: Element; oid: string | null }[],
+  captured: (element: Element) => boolean,
+): DesignLintViolation[] {
+  const names = new Set<string>();
+  let first: Element | null = null;
+  for (const { element } of records) {
+    if (element.tagName !== "style" || isInTemplate(element) || captured(element)) continue;
+    const css = element.childNodes.map((node) => ("value" in node ? node.value : "")).join("");
+    let catalog: DesignClassCatalog;
+    try {
+      catalog = extractDesignClassCatalog(css);
+    } catch {
+      continue;
+    }
+    if (!catalog.names.size) continue;
+    first ??= element;
+    for (const name of catalog.names) names.add(name);
+  }
+  if (!first) return [];
+  const listed = [...names].slice(0, PLACES_SHOWN).map((name) => `.${name}`);
+  const rest = names.size - listed.length;
+  const list = rest > 0
+    ? `${listed.join(", ")} and ${rest} more`
+    : listed.length > 1 ? `${listed.slice(0, -1).join(", ")} and ${listed.at(-1)}` : listed[0]!;
+  return [violation(
+    file,
+    "frame-class",
+    `This frame defines its own ${names.size === 1 ? "class" : "classes"} ${list}; a class is global or a component's.`,
+    first.sourceCodeLocation?.startTag,
+    null,
+    "Move a class every frame may use into a Design stylesheet the frames link (or a style source), or make the markup a component and define its classes in the main frame's <style>.",
+  )];
+}
+
 /** The authoring contract's warnings for one frame source. */
 export function lintDesignAuthoringContract(input: {
   file: string;
@@ -463,6 +505,8 @@ export function lintDesignAuthoringContract(input: {
   records: readonly { element: Element; oid: string | null }[];
   tokenColors: DesignTokenColorIndex | undefined;
   lineAt: (offset: number) => { startLine: number; startCol: number };
+  /** Whether the frame is a main component; null when the canvas is not read. */
+  main?: boolean | null;
 }): DesignLintViolation[] {
   const captured = capturedLookup();
   const layers = authoredLayers(input.records);
@@ -474,5 +518,6 @@ export function lintDesignAuthoringContract(input: {
     ...repeatedInlineStyles(input.file, own),
     ...literalTokenValues(input.file, input.source, own, input.records, input.tokenColors ?? new Map(), input.lineAt, frameCaptured),
     ...repeatedMarkup(input.file, layers, captured),
+    ...(input.main === false && !frameCaptured ? frameOwnClasses(input.file, input.records, captured) : []),
   ];
 }

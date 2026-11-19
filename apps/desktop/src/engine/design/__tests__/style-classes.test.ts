@@ -77,7 +77,7 @@ describe("unknown classes in Design lint", () => {
       {
         ruleId: "unknown-class", severity: "warning", file: frame, line: 2, column: 26, oid: "first",
         message: 'Class "cardd" has no CSS in this frame\'s styles.',
-        fix: "Use an existing class or utility from the application's styles, define .cardd in the frame's <style> or a Design stylesheet, or remove it.",
+        fix: "Use an existing class or utility from the application's styles, define .cardd in a Design stylesheet (or a component's main frame), or remove it.",
       },
       expect.objectContaining({ message: 'Class "Card" has no CSS in this frame\'s styles.', line: 3, column: 24, oid: "second" }),
     ]);

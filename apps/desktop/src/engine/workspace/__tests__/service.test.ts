@@ -15,6 +15,7 @@ import * as path from "node:path";
 import { execFileSync } from "node:child_process";
 import { runSessionId } from "@zeros/protocol/run-actions";
 import { DESIGN_SELECTION_NODE_LIMIT } from "@zeros/protocol/design-runtime";
+import { DESIGN_OPTIONS_SHOW_NOTHING_PARAM } from "@zeros/protocol/design-catalog";
 import { createDesignWebDocumentState } from "@zeros/design-web";
 import { WorkspaceService, LOCAL_MAIN_WORKSPACE_ID } from "../service";
 import * as mcpRegistry from "../../agents/mcp-registry";
@@ -2144,6 +2145,40 @@ describe("WorkspaceService", () => {
         workspaceId: created.workspaceId,
         includeBranch: true,
       });
+    }
+  });
+
+  it("tells a renderer that never negotiated it no frame of the Design entry snapshot shows nothing", async () => {
+    execFileSync("git", ["config", "user.email", "t@t"], { cwd: dir });
+    execFileSync("git", ["config", "user.name", "t"], { cwd: dir });
+    execFileSync("git", ["add", "hello.txt"], { cwd: dir });
+    execFileSync("git", ["commit", "-q", "-m", "init"], { cwd: dir });
+    const created = await createWorkspace({ repoRoot: dir, repoSlug: "mode-shows-nothing" });
+    const workspaceId = created.workspaceId;
+    try {
+      await svc.handle("workspace.setMode", { workspaceId, mode: "design" });
+      await svc.handle("workspace.setMode", { workspaceId, mode: "code" });
+      // A main whose own template fails, with no last good render.
+      const designDirectory = path.join(created.path, designDirectoryNameFor(created.path));
+      const canvasFile = path.join(designDirectory, "meta/canvas.json");
+      const canvas = JSON.parse(fs.readFileSync(canvasFile, "utf8"));
+      const page = canvas.pages[0];
+      fs.mkdirSync(path.join(designDirectory, page.folder), { recursive: true });
+      fs.writeFileSync(path.join(designDirectory, page.folder, "chip.html"),
+        '<html><head><template data-zd-options>\n<zd-option name="label" type="text" default="Chip"></zd-option>\n</template></head><body data-oid="a"><b data-oid="r">{{ label + }}</b></body></html>');
+      canvas.frames.chip_main = { kind: "html", source: `${page.folder}/chip.html`, title: "Chip", x: 0, y: 0, width: 200, height: 100, component: "chip" };
+      page.frames.push("chip_main");
+      fs.writeFileSync(canvasFile, JSON.stringify(canvas, null, 2));
+      const entered = await svc.handle("workspace.setMode", { workspaceId, mode: "design" }) as {
+        snapshot?: { frames: Array<{ file: string; component?: { notApplied?: string } }> } };
+      expect(entered.snapshot?.frames.find((frame) => frame.file.endsWith("chip.html"))?.component?.notApplied).toBe("defaults");
+      expect(JSON.stringify(entered)).not.toContain('"nothing"');
+      await svc.handle("workspace.setMode", { workspaceId, mode: "code" });
+      const negotiated = await svc.handle("workspace.setMode", { workspaceId, mode: "design", [DESIGN_OPTIONS_SHOW_NOTHING_PARAM]: true }) as {
+        snapshot?: { frames: Array<{ file: string; component?: { notApplied?: string } }> } };
+      expect(negotiated.snapshot?.frames.find((frame) => frame.file.endsWith("chip.html"))?.component?.notApplied).toBe("nothing");
+    } finally {
+      await svc.handle("workspace.delete", { workspaceId, includeBranch: true });
     }
   });
 

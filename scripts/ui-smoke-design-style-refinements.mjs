@@ -446,7 +446,7 @@ export async function runDesignStyleRefinementsSmoke(context) {
   await runDesignStyleTokensSmoke(context);
   await runDesignTokenPillsSmoke(context);
   await runDesignStyleOriginsSmoke(context);
-  // Holding a layer state, view only; reuses the clock the origins smoke installs.
+  // A plain layer has no State control; states are component variants.
   await runDesignStyleStatesSmoke(context);
   // Field behaviour: refused values, restore, Clear, maths, units, Mixed.
   await runDesignFieldStatesSmoke(context);

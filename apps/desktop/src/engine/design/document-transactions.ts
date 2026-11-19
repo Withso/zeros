@@ -98,9 +98,11 @@ import {
   writePrivateDesignState,
 } from "./metadata";
 import { readSafeRegularFile } from "./safe-files";
+import { parseDesignSource, withSharedDesignParses } from "./shared-parse";
 import { safeLocalReference } from "./assets";
 import type { DesignMovementGuard } from "@zeros/protocol/design-relocation";
 import { readDesignFrameRenderIdentityFromSource } from "./frame-lifecycle";
+import { designComponentRegistry } from "./component-registry";
 
 async function unlinkDesignArtifact(target: string): Promise<void> {
   await unlink(target);
@@ -422,7 +424,7 @@ async function readDesignWebDocumentStateUnlocked(
   }
   // Root styles remain available for tokens/provenance. Also retain each CSS
   // link from this entry at its actual source path for immutable composition.
-  const document = parse(files[file]!, { sourceCodeLocationInfo: true });
+  const document = parseDesignSource(files[file]!);
   for (const { element } of elementRecords(document)) {
     if (element.tagName !== "link" || !element.attrs.some((attribute) =>
       attribute.name === "rel" && attribute.value.split(/\s+/).some((value) => value.toLowerCase() === "stylesheet"))) continue;
@@ -454,14 +456,64 @@ async function readDesignWebDocumentStateUnlocked(
     }
   }
   const canvas = await readCanvas(workspacePath);
-  const components = [...canvas.foundation.components];
+  const foundation = deriveDesignFoundation(
+    withoutSupersededComponents(canvas, new Set(Object.keys(files))),
+    Object.keys(files),
+  );
+  const meta = readFrameMeta(document, file, canvas);
+  const geometry = canvas.frames[file] ?? {
+    x: 0,
+    y: 0,
+    w: meta.width,
+    h: meta.height,
+    z: 0,
+  };
+  return createDesignWebDocumentState({
+    documentId: designWebDocumentId(file),
+    entryFile: file,
+    files,
+    manifest: foundation,
+    frames: {
+      [file]: {
+        x: geometry.x,
+        y: geometry.y,
+        width: geometry.w,
+        height: geometry.h,
+        z: geometry.z,
+      },
+    },
+  });
+}
+
+/** The canvas foundation without an entry whose file is gone while a main
+ * frame registers the same name: Move main to canvas replaced it, and an
+ * older build left the entry behind. Every other entry stays as written. */
+function withoutSupersededComponents(
+  canvas: Pick<CanvasDocument, "foundation" | "frame_info">,
+  sourceFiles: ReadonlySet<string>,
+): CanvasDocument["foundation"] {
+  const mains = designComponentRegistry(canvas).files;
+  const components = canvas.foundation.components.filter(
+    (component) => sourceFiles.has(component.file) || !mains.has(component.id),
+  );
+  return components.length === canvas.foundation.components.length
+    ? canvas.foundation
+    : { ...canvas.foundation, components };
+}
+
+/** Component files the canvas does not list are read as components named after their file. */
+function deriveDesignFoundation(
+  canvasFoundation: CanvasDocument["foundation"],
+  sourceFiles: readonly string[],
+): DesignTransactionJournal["foundation"] {
+  const components = [...canvasFoundation.components];
   const registeredComponentFiles = new Set(
     components.map((component) => component.file),
   );
   const registeredComponentIds = new Set(
     components.map((component) => component.id),
   );
-  for (const componentFile of Object.keys(files)
+  for (const componentFile of sourceFiles
     .filter((sourceFile) => sourceFile.startsWith("components/"))
     .sort(comparePortableNames)) {
     if (registeredComponentFiles.has(componentFile)) continue;
@@ -489,37 +541,35 @@ async function readDesignWebDocumentStateUnlocked(
       slots: [],
     });
   }
-  const foundation = migrateDesignFoundationManifest({
-    ...canvas.foundation,
+  return migrateDesignFoundationManifest({
+    ...canvasFoundation,
     components,
   });
-  const meta = readFrameMeta(
-    parse(files[file]!, { sourceCodeLocationInfo: true }),
-    file,
+}
+
+/**
+ * The foundation canvas.json should hold after a transaction. When reading the
+ * current canvas already derives the transaction's manifest, the file keeps its
+ * own entries, so an unrelated edit never registers unlisted component files.
+ */
+function persistedDesignFoundation(
+  canvas: Pick<CanvasDocument, "foundation" | "frame_info">,
+  manifest: DesignTransactionJournal["foundation"],
+): CanvasDocument["foundation"] {
+  const canvasFoundation = withoutSupersededComponents(
     canvas,
+    new Set(manifest.components.map((component) => component.file)),
   );
-  const geometry = canvas.frames[file] ?? {
-    x: 0,
-    y: 0,
-    w: meta.width,
-    h: meta.height,
-    z: 0,
-  };
-  return createDesignWebDocumentState({
-    documentId: designWebDocumentId(file),
-    entryFile: file,
-    files,
-    manifest: foundation,
-    frames: {
-      [file]: {
-        x: geometry.x,
-        y: geometry.y,
-        width: geometry.w,
-        height: geometry.h,
-        z: geometry.z,
-      },
-    },
-  });
+  try {
+    const derived = deriveDesignFoundation(
+      canvasFoundation,
+      manifest.components.map((component) => component.file),
+    );
+    if (JSON.stringify(derived) === JSON.stringify(manifest)) return canvasFoundation;
+  } catch {
+    // An unlisted file whose id conflicts cannot be derived; persist the manifest.
+  }
+  return manifest;
 }
 
 function parseDesignTransactionJournal(
@@ -660,7 +710,7 @@ async function applyDesignTransactionJournalUnlocked(
         );
     }
   }
-  canvas.foundation = journal.foundation;
+  canvas.foundation = persistedDesignFoundation(canvas, journal.foundation);
   canvas.frames[journal.entryFile] = {
     ...canvas.frames[journal.entryFile],
     ...journal.geometry,
@@ -882,10 +932,10 @@ export async function readDesignWebDocumentState(
   workspacePath: string,
   frame: string,
 ): Promise<DesignWebDocumentState> {
-  return withDocumentWrite(workspacePath, async () => {
+  return withSharedDesignParses(() => withDocumentWrite(workspacePath, async () => {
     await recoverPendingDesignTransactionUnlocked(workspacePath);
     return readDesignWebDocumentStateUnlocked(workspacePath, frame);
-  });
+  }));
 }
 
 export async function commitDesignWebDocumentState(
@@ -899,7 +949,7 @@ export async function commitDesignWebDocumentState(
   } = {},
 ): Promise<void> {
   const file = assertFrameFile(frame);
-  await withDocumentWrite(workspacePath, async () => {
+  await withSharedDesignParses(() => withDocumentWrite(workspacePath, async () => {
     options.assertAuthorized?.();
     await recoverPendingDesignTransactionUnlocked(workspacePath);
     // A new transaction must capture its recovery identity in the current
@@ -1021,7 +1071,7 @@ export async function commitDesignWebDocumentState(
     const canvasBefore = await readCanvas(workspacePath);
     const canvasAfter = {
       ...canvasBefore,
-      foundation: normalized.manifest,
+      foundation: persistedDesignFoundation(canvasBefore, normalized.manifest),
       frames: {
         ...canvasBefore.frames,
         [file]: {
@@ -1146,5 +1196,5 @@ export async function commitDesignWebDocumentState(
     if (committed.revision !== normalized.revision) {
       throw new Error("Design transaction did not commit its exact revision.");
     }
-  });
+  }));
 }

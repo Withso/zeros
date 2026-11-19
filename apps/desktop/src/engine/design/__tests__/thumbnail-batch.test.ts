@@ -10,8 +10,10 @@ import {
   designBatchCaptureRequestSchema,
   designCaptureRasterSize,
   designThumbnailsRenderSchema,
+  designThumbnailsReplySchema,
   type DesignBatchCaptureRequest,
 } from "@zeros/protocol/design-capture";
+import { designReplyForOlderRenderer } from "../options-shows-compat";
 import { MAX_BRIDGE_FRAME_BYTES } from "@zeros/protocol/schemas";
 import { setDesignCaptureConfig } from "../capture-client";
 import { DesignCaptureAdmission } from "../capture-admission";
@@ -442,6 +444,25 @@ describe("batch Design thumbnails", () => {
       expect(elsewhere.prepared).toBeUndefined();
       expect(elsewhere.pictures).toHaveLength(2);
       expect(() => designThumbnailsRenderSchema.parse({ ...unversioned, catalogRevision: undefined })).toThrow(/catalog revision/);
+    });
+
+    it("tells a renderer that never negotiated it no prepared record shows nothing", async () => {
+      const canvasFile = path.join(folder, "meta/canvas.json");
+      const canvas = JSON.parse(await readFile(canvasFile, "utf8"));
+      canvas.frames.frame_0.component = "chip";
+      await writeFile(canvasFile, JSON.stringify(canvas, null, 2));
+      // The main's own template fails and it has no last good render.
+      await writeFile(path.join(folder, "page-1/a.html"),
+        '<html><head><template data-zd-options>\n<zd-option name="label" type="text" default="Chip"></zd-option>\n</template></head><body data-oid="a"><b data-oid="r">{{ label + }}</b></body></html>');
+      await writeFile(path.join(folder, "page-1/b.html"), '<html><body data-oid="b"><zd-chip data-oid="ws"></zd-chip></body></html>');
+      const navigation = await readDesignNavigationSnapshot(root);
+      const files = ["page-1/a.html", "page-1/b.html"];
+      const reply = await renderDesignThumbnails(root, { ...input(files.map((file) => ({ file })) as never), catalogRevision: navigation.catalogRevision },
+        { capture: host("fixture") });
+      expect(reply.prepared?.find((entry) => entry.file === "page-1/a.html")?.component?.notApplied).toBe("nothing");
+      const older = designThumbnailsReplySchema.parse(designReplyForOlderRenderer(reply));
+      expect(JSON.stringify(older)).not.toContain('"nothing"');
+      expect(older.prepared?.map((entry) => entry.component?.notApplied ?? entry.instances?.notApplied)).toEqual(["defaults", "defaults"]);
     });
 
     it("lets the host's pipeline win over a wrong name, asking again for pictures stored under the name", async () => {

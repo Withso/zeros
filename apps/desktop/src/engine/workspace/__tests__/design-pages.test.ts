@@ -156,6 +156,49 @@ describe("page operations through WorkspaceService", () => {
     expect(deletedAgain.historySelection).toBeNull();
   });
 
+  it("asks before deleting a main component frame other frames place, and deletes any other frame at once", async () => {
+    const call = (op: string, extra = {}) => service.handle(op, { ...params, ...extra }, options);
+    const pageId = initial.pages[0]!.id;
+    const create = async (title: string) => ((await call("design.frame.create", { title, pageId })) as { frame: Snapshot["frames"][number] }).frame;
+    const main = await create("Chip");
+    const host = await create("Hosts");
+    const other = await create("Other");
+    const plain = await create("Plain");
+    const canvasFile = path.join(root, initial.directory, "meta/canvas.json");
+    const canvas = JSON.parse(readFileSync(canvasFile, "utf8"));
+    canvas.frames[main.frameId].component = "chip";
+    await writeFile(canvasFile, `${JSON.stringify(canvas, null, 2)}\n`);
+    const instance = (oid: string) => `<zd-chip data-oid="${oid}"></zd-chip>`;
+    await writeFile(path.join(root, initial.directory, host.file), `<!doctype html><html><head></head><body>${instance("a")}<div data-oid="d">${instance("b")}</div></body></html>`);
+    await writeFile(path.join(root, initial.directory, other.file), `<!doctype html><html><head></head><body>${instance("c")}<zd-chip-large data-oid="l"></zd-chip-large></body></html>`);
+    const before = readFileSync(canvasFile, "utf8");
+    const refused = await call("design.frame.delete", { frame: main.file, ifUnused: true }) as Record<string, unknown>;
+    expect(refused).toEqual({ inUse: { component: "chip", title: "Chip", instances: 3, frames: 2 } });
+    expect(existsSync(path.join(root, initial.directory, main.file))).toBe(true);
+    expect(readFileSync(canvasFile, "utf8")).toBe(before);
+    expect(await call("design.frame.delete", { frame: plain.file, ifUnused: true })).toMatchObject({ deleted: { file: plain.file } });
+    await call("design.history.undo");
+    expect(readFileSync(canvasFile, "utf8")).toBe(before);
+    expect(await call("design.frame.delete", { frame: main.file })).toMatchObject({ deleted: { file: main.file } });
+    await call("design.history.undo");
+    expect(readFileSync(canvasFile, "utf8")).toBe(before);
+  });
+
+  it("puts a deleted frame back where the canvas file listed it among frames of other pages", async () => {
+    const call = (op: string, extra = {}) => service.handle(op, { ...params, ...extra }, options);
+    const other = (await call("design.page.create", { title: "Other page" }) as { page: Snapshot["pages"][number] }).page;
+    const create = async (title: string, pageId: string) => ((await call("design.frame.create", { title, pageId })) as { frame: Snapshot["frames"][number] }).frame;
+    const first = await create("First", initial.pages[0]!.id);
+    await create("Second", initial.pages[0]!.id);
+    await create("Elsewhere", other.id);
+    await create("Elsewhere too", other.id);
+    const canvasFile = path.join(root, initial.directory, "meta/canvas.json");
+    const before = readFileSync(canvasFile, "utf8");
+    await call("design.frame.delete", { frame: first.file });
+    await call("design.history.undo");
+    expect(readFileSync(canvasFile, "utf8")).toBe(before);
+  });
+
   it("restores deleted page sources, stable metadata and earlier document Undo/Redo", async () => {
     const call = (op: string, extra = {}) => service.handle(op, { ...params, ...extra }, options);
     const created = await call("design.page.create", { title: "Checkout" }) as { page: Snapshot["pages"][number] };

@@ -86,6 +86,7 @@ import { normalizeDesignCanvasBackground } from "./design-canvas-background";
 import { DesignCanvasBackgroundEditor } from "./design-canvas-background-editor";
 import { DesignPagePicker } from "./design-page-picker";
 import { restoreDesignPageHistorySelection } from "./state/design-page-history";
+import { designCanvasItemOwner, setDesignCanvasItemSelection } from "./state/design-canvas-item-selection";
 import { DesignComputedCssEditor } from "./design-computed-css-editor";
 import {
   DesignTokenCatalogContext,
@@ -106,7 +107,8 @@ import { DesignFieldOverlays, readDesignCardField } from "./design-style-card";
 import { designInputResetsOnAltBackspace, useDesignFieldOverlays, type DesignFieldOverlaysApi } from "./design-field-overlays";
 import { designForcedValueBrief } from "./design-agent-brief";
 import { DesignStyledByLine } from "./design-styled-by";
-import { DesignHeldStateNote, DesignLayerStateMenu, useDesignHeldReadOnly } from "./design-state-picker";
+import { DesignHeldStateNote, DesignStateVariantNote, useDesignHeldReadOnly } from "./design-state-picker";
+import { showDesignComponentVariant, useDesignShownComponentState } from "./state/design-component-variants";
 import { designHeldStateChanges, designStylePropertyLabel } from "./design-style-origins";
 import {
   designHeldStateEntry,
@@ -159,7 +161,7 @@ import {
   type DesignLayoutAction,
   type DesignLayoutFieldOptions,
 } from "./design-layout-values";
-import { blockingDesignLintReason } from "./design-lint-summary";
+import { blockingDesignLintReason, frameBlockingDesignLintErrors } from "./design-lint-summary";
 import { beginDesignPointerGesture } from "./design-pointer-gesture";
 import { DesignStyleEditor } from "./design-style-editor";
 import {
@@ -206,8 +208,10 @@ import {
   setDesignNodeVisibility,
   settleDesignHistorySelection,
 } from "./state/design-selection";
-import { designComponentPartOf } from "@zeros/protocol/design-runtime";
-import { designComponentDisplayTitle, designComponentTextLock, isDesignComponentPartNodeId } from "./state/design-component-parts";
+import { designComponentPartOf, designComponentSlotOf } from "@zeros/protocol/design-runtime";
+import { designComponentDisplayTitle, designComponentSlotLabel, designComponentTextLock, designMissingComponentOf, designPartOverrideAttribute,
+  designPartOverrideKey } from "./state/design-component-parts";
+import { MessageRow } from "../../shared/ui/primitives/message-row";
 import type { DesignComponentOptionsTarget } from "./design-component-options";
 import {
   applyDesignEditCached,
@@ -216,6 +220,7 @@ import {
   saveDesigns,
   updateDesignFrameGeometryCached,
   updateDesignNodeStylesCached,
+  moveDesignComponentCached,
 } from "./state/design-workspace-cache";
 import {
   DEFAULT_DESIGN_WORKSPACE_VIEW,
@@ -259,6 +264,12 @@ const DESIGN_FRAME_POSITION_RANGE = {
   min: -DESIGN_FRAME_COORDINATE_LIMIT,
   max: DESIGN_FRAME_COORDINATE_LIMIT,
 };
+/** A percentage field (opacity) writes 0–100% of its value; the field shows
+ * the same bound so a scrub past either end reads what is written. */
+const DESIGN_PERCENTAGE_RANGE = { min: 0, max: 100 };
+/** Only a complete numeric entry is a display percentage; functions, keywords
+ * and tokens are already CSS values and must not become a numeric conversion. */
+const DESIGN_PERCENTAGE_INPUT = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?%?$/i;
 
 function designFrameSizeValue(value: number): number {
   return Math.min(DESIGN_FRAME_MAX_SIZE, Math.max(1, Math.round(value)));
@@ -445,10 +456,10 @@ export function InspectorEditField({
 
   /** A ranged value (opacity) settles inside its range. */
   const withinBounds = (next: string) => {
-    const number = Number(next);
-    if (!range || next.trim() === "" || !Number.isFinite(number)) return next;
-    const bounded = Math.min(range.max, Math.max(range.min, number));
-    return bounded === number ? next : String(bounded);
+    const parts = range ? parseDesignStyleNumericParts(next) : null;
+    if (!range || !parts) return next;
+    const bounded = Math.min(range.max, Math.max(range.min, parts.number));
+    return bounded === parts.number ? next : `${bounded}${parts.unit}`;
   };
   /** A scrub or arrow press also stops at zero where CSS takes no negative;
    * a typed negative is refused instead (refusalOf). */
@@ -475,10 +486,11 @@ export function InspectorEditField({
     const maths = evaluateDesignNumericExpression(next, baseline);
     if (maths && "refused" in maths)
       return maths.refused === "mixed-units" ? "Use CSS for mixed units." : `Cannot divide by zero.${kept}`;
-    if (!styleProperty || designStyleFieldRefusal(styleProperty, typedValue(next, baseline)) === null) return null;
+    const refused = styleProperty ? designStyleFieldRefusal(styleProperty, typedValue(next, baseline)) : null;
+    if (!styleProperty || refused === null) return null;
     const field = messageField();
     const name = field ? readDesignCardField(field, styleProperty).label : label;
-    return `${name} cannot be negative.${kept}`;
+    return refused === "negative" ? `${name} cannot be negative.${kept}` : `${name} does not take ${next.trim()}.${kept}`;
   };
   /** Steps a Mixed field's scrub or arrows have moved its layers. */
   const mixedStepsRef = useRef<{ steps: number; fine: boolean } | null>(null);
@@ -1260,8 +1272,10 @@ const InspectorStyleField = React.memo(function InspectorStyleField({
       : null;
   const styleUpdate = (next: string): Record<string, string | null> => {
     const value =
-      options?.percentage && next.trim()
-        ? String(Math.max(0, Math.min(100, Number.parseFloat(next))) / 100)
+      options?.percentage && next.trim() && DESIGN_PERCENTAGE_INPUT.test(next.trim())
+        ? String(
+            Math.max(DESIGN_PERCENTAGE_RANGE.min, Math.min(DESIGN_PERCENTAGE_RANGE.max, Number.parseFloat(next))) / 100,
+          )
         : next || null;
     return Object.fromEntries(
       [property, ...(options?.linkedProperties ?? [])].map((key) => [
@@ -1307,6 +1321,7 @@ const InspectorStyleField = React.memo(function InspectorStyleField({
       shortLabel={options?.shortLabel}
       suffix={options?.suffix}
       percentage={options?.percentage}
+      range={options?.percentage ? DESIGN_PERCENTAGE_RANGE : undefined}
       placeholder={options?.mixed ? "Mixed" : (options?.placeholder ?? "–")}
       styleProperty={property}
       linkedProperties={options?.linkedProperties}
@@ -1326,7 +1341,7 @@ const InspectorStyleField = React.memo(function InspectorStyleField({
           ? () => onDetachToken([property, ...(options?.linkedProperties ?? [])])
           : undefined
       }
-      disabled={disabled}
+      disabled={disabled || options?.disabled}
       applied={applied}
       motion={
         motionModeActive
@@ -1356,7 +1371,41 @@ const InspectorStyleField = React.memo(function InspectorStyleField({
       mixedSteps={mixedSteps}
     />
   );
-});
+}, sameInspectorStyleFieldProps);
+
+function sameFieldOptions(
+  left: DesignLayoutFieldOptions | undefined,
+  right: DesignLayoutFieldOptions | undefined,
+): boolean {
+  if (left === right) return true;
+  if (!left || !right) return false;
+  const keys = Object.keys(left) as (keyof DesignLayoutFieldOptions)[];
+  if (keys.length !== Object.keys(right).length) return false;
+  return keys.every((key) => {
+    if (!Object.hasOwn(right, key)) return false;
+    if (key !== "linkedProperties") return Object.is(left[key], right[key]);
+    const before = left.linkedProperties;
+    const after = right.linkedProperties;
+    return before === after || (
+      before !== undefined && after !== undefined &&
+      before.length === after.length && before.every((property, index) => property === after[index])
+    );
+  });
+}
+
+/** Sections build each field's options inline, so a section that re-renders
+ * for one live value would otherwise re-render every field it holds. */
+function sameInspectorStyleFieldProps<Props extends { options?: DesignLayoutFieldOptions }>(
+  left: Readonly<Props>,
+  right: Readonly<Props>,
+): boolean {
+  const keys = Object.keys(left) as (keyof Props)[];
+  if (keys.length !== Object.keys(right).length) return false;
+  return keys.every((key) =>
+    Object.hasOwn(right, key) &&
+    (key === "options" ? sameFieldOptions(left.options, right.options) : Object.is(left[key], right[key])),
+  );
+}
 
 /** A Mixed field's steps as per-layer writes: geometry by an amount from
  * each layer's own box, a style from each layer's own value in its own unit.
@@ -1461,7 +1510,6 @@ export const DesignInspector = React.memo(function DesignInspector({
   zoomActionsRef,
   onAskAgent,
   panelVisible = true,
-  onOpenFile,
 }: DesignInspectorProps) {
   const styleOriginLabel = useDesignStyleOriginLabel(workspaceId);
   const tokenCatalog = useDesignFrameTokenCatalog(workspaceId, frame?.file);
@@ -1507,9 +1555,10 @@ export const DesignInspector = React.memo(function DesignInspector({
   const frameStyleTarget =
     frameSelected && !selectedNodeId && styleTargetNodeId !== null;
   const elementDetails = styleTargetNodeId ? details : null;
-  const errors =
-    lint?.violations.filter((violation) => violation.severity === "error") ??
-    [];
+  const errors = useMemo(
+    () => frameBlockingDesignLintErrors(lint?.violations ?? [], frame?.file),
+    [lint, frame?.file],
+  );
   const firstBlockingReason = errors[0]
     ? blockingDesignLintReason(errors[0])
     : null;
@@ -1523,9 +1572,9 @@ export const DesignInspector = React.memo(function DesignInspector({
   const [frameAction, setFrameAction] = useState<"export" | null>(null);
   const [exportScale, setExportScale] = useState(1);
   const [pendingHistoryActions, setPendingHistoryActions] = useState(0);
-  // An instance's part is read only: the panel shows its values, inert.
-  const partSelected = isDesignComponentPartNodeId(selectedNodeId);
-  const editsDisabled = !active || pendingHistoryActions > 0 || partSelected;
+  // A slot takes layers, not styles: its frame is the main's.
+  const slotSelected = !!selectedNodeId && designComponentSlotOf(selectedNodeId) !== null;
+  const editsDisabled = !active || pendingHistoryActions > 0 || slotSelected;
   const [cssMode, setCssMode] = useState(false);
   const inspectorRef = useRef<HTMLElement | null>(null);
   const inspectorId = workspaceId
@@ -1596,7 +1645,9 @@ export const DesignInspector = React.memo(function DesignInspector({
           // in-document step brings back the node selection of the state it
           // returns to.
           settleDesignHistorySelection(workspaceId, result.historySelection === undefined ? result.historyFrame ?? null : null);
-          void restoreDesignPageHistorySelection(workspaceId, owner, result, direction).catch((selectionError: unknown) => {
+          void restoreDesignPageHistorySelection(workspaceId, owner, result, direction, (itemId, page) => {
+            setDesignCanvasItemSelection(designCanvasItemOwner(workspaceId, owner.directoryId, page.id), itemId);
+          }).catch((selectionError: unknown) => {
             toast.error("Couldn't save the restored frame selection", {
               description: errorMessage(selectionError),
             });
@@ -1763,6 +1814,9 @@ export const DesignInspector = React.memo(function DesignInspector({
     ? designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.directoryId ??
       designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.directory ?? ""
     : "";
+  // A main component showing one of its states: style edits write that
+  // state's rule in the main, not the layers' own style.
+  const shownState = useDesignShownComponentState(workspaceId ?? "", frame ?? null);
   const styleEditContextRef = useRef({
     active,
     pageId: activePageId,
@@ -1774,6 +1828,7 @@ export const DesignInspector = React.memo(function DesignInspector({
     selectedNodeId: styleTargetNodeId,
     elementDetails,
     layoutRootId,
+    stateContext: shownState,
   });
   styleEditContextRef.current = {
     active,
@@ -1786,6 +1841,7 @@ export const DesignInspector = React.memo(function DesignInspector({
     selectedNodeId: styleTargetNodeId,
     elementDetails,
     layoutRootId,
+    stateContext: shownState,
   };
   const styleOwnerKey = `${workspaceId ?? ""}\u0000${styleDirectoryKey}\u0000${activePageId ?? ""}\u0000${frame?.file ?? ""}\u0000${styleNodeIds.join("\u0000")}`;
   // A keyed editor's cleanup runs after the new selection has rendered. Keep
@@ -1869,8 +1925,8 @@ export const DesignInspector = React.memo(function DesignInspector({
   useDesignHeldReadOnly(inspectorRef, holding);
   const latestPickRef = useRef({ heldKey, elementDetails });
   latestPickRef.current = { heldKey, elementDetails };
-  /** Pick from the State menu: one request, painted when it answers. Back to
-   * Default paints the retained Default box at once. Never awaited. */
+  /** Hold a layer state: one request, painted when it answers. Letting go
+   * (null) paints the retained Default box at once. Never awaited. */
   const pickLayerState = useCallback((state: DesignRuntimeNodeState | null) => {
     const { heldKey: key, elementDetails: rest } = latestPickRef.current;
     if (!key || !rest) return;
@@ -2088,7 +2144,7 @@ export const DesignInspector = React.memo(function DesignInspector({
           new Error("Select one or more design layers first."),
         );
       }
-      const { workspaceId, frame, styleNodeIds } = context;
+      const { workspaceId, frame, styleNodeIds, stateContext } = context;
       const updates = designSelectionStyleUpdates(styleNodeIds, styles, perNode).map(
         (update) => ({ nodeId: update.nodeId, styles: stylesForNode(update.nodeId, update.styles) }),
       );
@@ -2119,8 +2175,10 @@ export const DesignInspector = React.memo(function DesignInspector({
             }),
           ).then(() => null);
         let resizedFrame: DesignOperation | null = null;
+        // A state's size is the main's in that state; the frame keeps Default's.
         if (
           root &&
+          !stateContext &&
           hasDesignIntrinsicSize(root) &&
           Object.keys(styles).some(designStylePropertyAffectsLayout)
         ) {
@@ -2152,7 +2210,7 @@ export const DesignInspector = React.memo(function DesignInspector({
         }
         // Nothing is written once a hold has met the edit.
         if (held.blocked()) return dropPreview();
-        if (updates.length === 1 && !resizedFrame) {
+        if (updates.length === 1 && !resizedFrame && !stateContext) {
           return {
             persist: updateDesignNodeStylesCached(workspaceId, {
               frame: frame.file,
@@ -2167,7 +2225,9 @@ export const DesignInspector = React.memo(function DesignInspector({
             schemaVersion: 1,
             transactionId: `desktop:${crypto.randomUUID()}`,
             actor: { kind: "human", id: "desktop" },
-            intent: `Set ${properties.join(", ")} on ${updates.length} layers`,
+            intent: stateContext
+              ? `Set ${properties.join(", ")} in the ${stateContext} state`
+              : `Set ${properties.join(", ")} on ${updates.length} layers`,
             createdAt: Date.now(),
             coalesceKey: designStyleCommitCoalesceKey(styleNodeIds, properties, intent),
             operations: [
@@ -2177,7 +2237,7 @@ export const DesignInspector = React.memo(function DesignInspector({
                 ...update,
                 scope: "auto" as const,
                 responsiveContext: "base",
-                stateContext: "default" as const,
+                stateContext: stateContext ?? "default",
               })),
               ...(resizedFrame ? [resizedFrame] : []),
             ],
@@ -2337,7 +2397,7 @@ export const DesignInspector = React.memo(function DesignInspector({
       // later selection, and every relative rotation reads its own latest value.
       const context = styleEditContextRef.current;
       const task = layoutActionQueueRef.current.then(async () => {
-        const { workspaceId, frame, styleNodeIds } = context;
+        const { workspaceId, frame, styleNodeIds, stateContext } = context;
         if (!workspaceId || !frame || styleNodeIds.length === 0) return;
         const runtime = designFrameRuntime(workspaceId, frame.file);
         if (!runtime) throw new Error("The selected frame is still loading.");
@@ -2452,8 +2512,9 @@ export const DesignInspector = React.memo(function DesignInspector({
             });
         } else updates = designLayoutActionUpdates(details, action);
         // A fixed canvas frame is sized by its viewport metadata. Its shell
-        // continues to follow that viewport after later canvas resizes.
-        const rootStyles = context.layoutRootId
+        // continues to follow that viewport after later canvas resizes. A
+        // main's root is the component, sized as itself, not a shell.
+        const rootStyles = context.layoutRootId && !frame.component
           ? updates.get(context.layoutRootId)
           : undefined;
         const rootDetails = details.find(
@@ -2490,7 +2551,7 @@ export const DesignInspector = React.memo(function DesignInspector({
         if (updates.size === 0 || held.blocked()) return;
         const currentFrame = { ...frame, sourceVersion: runtime.sourceVersion };
         const fittedRoot =
-          action.type === "resize-fit"
+          action.type === "resize-fit" && !stateContext
             ? details.find(
                 (node) =>
                   node.oid === context.layoutRootId && updates.has(node.oid),
@@ -2515,7 +2576,7 @@ export const DesignInspector = React.memo(function DesignInspector({
             styles,
             scope: "auto",
             responsiveContext: "base",
-            stateContext: "default",
+            stateContext: stateContext ?? "default",
           }),
         );
         if (fittedGeometry)
@@ -2690,7 +2751,10 @@ export const DesignInspector = React.memo(function DesignInspector({
     options?: DesignLayoutFieldOptions,
   ) => {
     if (!styleContext) return null;
-    const frameGeometryProperty = frameStyleTarget
+    // A main's W and H are its root's, the component's own size; its X and Y
+    // still place the frame.
+    const frameGeometryProperty = frameStyleTarget &&
+      !(styleContext.frame.component && (property === "width" || property === "height"))
       ? (
           {
             left: ["x", styleContext.frame.x],
@@ -2893,7 +2957,8 @@ export const DesignInspector = React.memo(function DesignInspector({
   // One selected instance in another frame shows that instance's; a part of
   // one names the instance and shows nothing to edit.
   const selectedPart = selectedNodeId ? designComponentPartOf(selectedNodeId) : null;
-  const instanceNodeId = selectedPart?.host ?? (styleNodeIds.length <= 1 ? selectedNodeId : null);
+  const selectedSlot = selectedNodeId ? designComponentSlotOf(selectedNodeId) : null;
+  const instanceNodeId = selectedPart?.host ?? selectedSlot?.host ?? (styleNodeIds.length <= 1 ? selectedNodeId : null);
   // Own entries only: a layer id such as "constructor" is not a host.
   const instanceHost = instanceNodeId && frame?.instances && Object.hasOwn(frame.instances.hosts, instanceNodeId)
     ? frame.instances.hosts[instanceNodeId] : undefined;
@@ -2904,36 +2969,62 @@ export const DesignInspector = React.memo(function DesignInspector({
     : null;
   const optionsTarget: DesignComponentOptionsTarget | null = !workspaceId || !active || !panelVisible || !frame
     ? null
-    : frameSelected && frame.component && !selectedNodeId && styleNodeIds.length <= 1
+    // The main's root is the component, so selecting it selects the main.
+    : frameSelected && frame.component && (!selectedNodeId || selectedNodeId === layoutRootId) && styleNodeIds.length <= 1
       ? { kind: "main", component: frame.component }
-      : !selectedPart && instanceNodeId && instanceHost && instanceComponent && instanceTitle && styleNodeIds.length === 1
+      : !selectedPart && !selectedSlot && instanceNodeId && instanceHost && instanceComponent && instanceTitle && styleNodeIds.length === 1
         ? { kind: "instance", nodeId: instanceNodeId, title: instanceTitle, host: instanceHost, component: instanceComponent,
             ...(frame.instances?.notApplied ? { notApplied: frame.instances.notApplied } : {}) }
         : null;
   const optionsFrame = optionsTarget ? frame : null;
+  // An instance whose main is gone renders nothing; it is named by the
+  // component it asks for rather than read as an empty Frame.
+  const missingComponent = frame && instanceNodeId && !selectedPart && !selectedSlot && styleNodeIds.length <= 1
+    ? designMissingComponentOf(frame, instanceNodeId)
+    : null;
   // As in Layers, the header names the instance by its component; the line
   // under it says what it is, and a part's line offers its instance too.
-  const componentHeader = instanceTitle && instanceComponent && instanceNodeId && (selectedPart || optionsTarget?.kind === "instance")
-    ? { title: instanceTitle, component: instanceComponent, host: instanceNodeId, part: selectedPart?.part ?? null }
+  const componentHeader = instanceTitle && instanceComponent && instanceNodeId && (selectedPart || selectedSlot || optionsTarget?.kind === "instance")
+    ? { title: instanceTitle, component: instanceComponent, host: instanceNodeId, part: selectedPart?.part ?? null, slot: selectedSlot?.name ?? null }
     : null;
+  const headerInner = !!componentHeader && (componentHeader.part !== null || componentHeader.slot !== null);
   const textLock = frame && selectedNodeId ? designComponentTextLock(frame, selectedNodeId) : null;
   const selectionType = optionsTarget?.kind === "main"
     ? "Component"
+    : missingComponent ? "Missing component"
     : selectionTitle && selectionTitle !== selectionName ? selectionName : null;
-  const editMain = () => {
-    if (!workspaceId || !folder || !componentHeader) return;
-    const { component, part } = componentHeader;
-    if (!component.frame) {
-      onOpenFile?.(`${designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.directory ?? ""}/${component.file}`.replace(/^\//, ""));
-      return;
-    }
+  const openMain = (file: string, part: string | null, pageId?: string) => {
+    if (!workspaceId || !folder) return;
     const snapshot = designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data;
-    const pageId = snapshot?.pages?.find((page) => page.frameFiles.includes(component.file))?.id;
-    zoomActionsRef.current?.revealFrames?.({ files: [component.file], pageId });
+    zoomActionsRef.current?.revealFrames?.({ files: [file], pageId: pageId ?? snapshot?.pages?.find((page) => page.frameFiles.includes(file))?.id });
     // A part's layer on the main has the id the part was made from.
     const nodeId = part ? part.replace(/#.*$/, "") : null;
-    void selectDesignTargets({ workspaceId, folder, targets: [{ frame: component.file, ...(nodeId ? { nodeId } : {}) }] })
+    void selectDesignTargets({ workspaceId, folder, targets: [{ frame: file, ...(nodeId ? { nodeId } : {}) }] })
       .catch((error) => toast.error("Couldn't open the main component", { description: errorMessage(error) }));
+  };
+  // A components/ file is not on the canvas; moving it there makes it a main
+  // frame like any other, which Edit main then opens.
+  const editMain = () => {
+    if (!workspaceId || !folder || !componentHeader || !instanceHost) return;
+    const { component, part } = componentHeader;
+    if (component.frame) return openMain(component.file, part);
+    void moveDesignComponentCached(workspaceId, instanceHost.component, activePageId ?? undefined)
+      .then((moved) => openMain(moved.frame.file, part, moved.frame.pageId))
+      .catch((error) => toast.error("Couldn't move the main to the canvas", { description: errorMessage(error) }));
+  };
+  const partOverridden = !!(componentHeader?.part && instanceHost?.overrides &&
+    Object.hasOwn(instanceHost.overrides, designPartOverrideKey(componentHeader.part)));
+  const resetPart = () => {
+    if (!workspaceId || !frame || !componentHeader?.part) return;
+    void applyDesignEditCached(workspaceId, frame, {
+      schemaVersion: 1,
+      transactionId: `desktop:${crypto.randomUUID()}`,
+      actor: { kind: "human", id: "desktop" },
+      intent: "Reset part",
+      createdAt: Date.now(),
+      operations: [{ operationId: "reset-part", type: "node.set-attribute", nodeId: componentHeader.host,
+        attribute: designPartOverrideAttribute(componentHeader.part), value: null }],
+    }).catch((error) => toast.error("Couldn't reset the part", { description: errorMessage(error) }));
   };
   const selectInstance = () => {
     if (!workspaceId || !folder || !frame || !componentHeader) return;
@@ -2980,15 +3071,15 @@ export const DesignInspector = React.memo(function DesignInspector({
           <DesignPagePicker workspaceId={workspaceId} directoryId={previewDirectoryId} pages={pages}
             activePageId={activePageId} frames={pageFrames ?? []} active={active} />
         ) : <>
-          {componentHeader || optionsTarget?.kind === "main"
+          {componentHeader || optionsTarget?.kind === "main" || missingComponent
             ? <ComponentGlyph className="text-fg2 size-3.5 shrink-0" aria-hidden="true" />
             : <SelectionGlyph className="text-fg2 size-3.5 shrink-0" aria-hidden="true" />}
           <span data-design-inspector-title="" className="text-fg1 min-w-0 flex-1 truncate text-xs font-medium">
-            {componentHeader && !componentHeader.part ? componentHeader.title : selectionTitle ?? selectionName}
+            {componentHeader && !headerInner ? componentHeader.title : missingComponent ? `zd-${missingComponent}` : selectionTitle ?? selectionName}
           </span>
-          {componentHeader && !componentHeader.part ? (
-            <Button type="button" variant="ghost" size="compact" data-design-edit-main="" disabled={!componentHeader.component.frame && !onOpenFile} onClick={editMain}>
-              {componentHeader.component.frame ? "Edit main" : "Open in Files"}
+          {componentHeader && !headerInner ? (
+            <Button type="button" variant="ghost" size="compact" data-design-edit-main="" disabled={!componentHeader.component.frame && (!active || pendingHistoryActions > 0)} onClick={editMain}>
+              {componentHeader.component.frame ? "Edit main" : "Move main to canvas"}
             </Button>
           ) : selectionType ? (
             <span className="text-fg3 shrink-0 text-3xxs leading-4 tabular-nums">{selectionType}</span>
@@ -3010,32 +3101,41 @@ export const DesignInspector = React.memo(function DesignInspector({
           ) : hiddenBy === "ancestor" ? (
             <span data-design-hidden="ancestor" className="text-fg3 shrink-0 text-3xxs leading-4">In a hidden layer</span>
           ) : null}
-          {heldKey && elementDetails?.states?.length && !cssMode ? (
-            <DesignLayerStateMenu
-              states={elementDetails.states}
-              held={heldState}
-              active={active}
-              disabled={pendingHistoryActions > 0 || partSelected}
-              onPick={pickLayerState}
-            />
-          ) : null}
         </>}
       </div>
       {componentHeader ? (
-        <div data-design-component-of={componentHeader.part ? "part" : "instance"}
+        <div data-design-component-of={componentHeader.slot !== null ? "slot" : componentHeader.part ? "part" : "instance"}
           className="border-border1 text-fg3 flex min-h-7 min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1 border-t py-1 pr-1.5 pl-3 text-xs leading-4">
           <ComponentGlyph className="size-3 shrink-0" aria-hidden="true" />
           {/* Its own width first, so a narrow panel moves the buttons to a line of their own. */}
-          <span className="min-w-0 grow basis-auto truncate">{componentHeader.part ? `Part of ${componentHeader.title}.` : `Instance of ${componentHeader.title}`}</span>
-          {componentHeader.part ? (
+          <span className="min-w-0 grow basis-auto truncate">
+            {componentHeader.slot !== null
+              ? `${designComponentSlotLabel(componentHeader.slot)} slot of ${componentHeader.title}. Drop or draw layers into it.`
+              : componentHeader.part ? `Part of ${componentHeader.title}${partOverridden ? ", overridden" : ""}.` : `Instance of ${componentHeader.title}`}
+          </span>
+          {headerInner ? (
             <span className="flex shrink-0 items-center gap-1">
+              {partOverridden ? (
+                <Button type="button" variant="secondary" size="compact" data-design-part-reset="" disabled={editsDisabled} onClick={resetPart}>Reset</Button>
+              ) : null}
               <Button type="button" variant="secondary" size="compact" data-design-select-instance="" onClick={selectInstance}>Select instance</Button>
-              <Button type="button" variant="secondary" size="compact" data-design-edit-main="" disabled={!componentHeader.component.frame && !onOpenFile} onClick={editMain}>
-                {componentHeader.component.frame ? "Edit main" : "Open in Files"}
+              <Button type="button" variant="secondary" size="compact" data-design-edit-main="" disabled={!componentHeader.component.frame && (!active || pendingHistoryActions > 0)} onClick={editMain}>
+                {componentHeader.component.frame ? "Edit main" : "Move main to canvas"}
               </Button>
             </span>
           ) : null}
         </div>
+      ) : null}
+      {missingComponent ? (
+        <MessageRow
+          tone="error"
+          role="alert"
+          data-design-component-missing={missingComponent}
+          className="border-border1 border-t"
+          title={`The main of zd-${missingComponent} is gone: it was deleted, renamed or unregistered, so this instance shows nothing.`}
+        >
+          {`Component zd-${missingComponent} is missing`}
+        </MessageRow>
       ) : null}
     </section>
   );
@@ -3177,7 +3277,10 @@ export const DesignInspector = React.memo(function DesignInspector({
               <DesignTokenCatalogContext.Provider value={tokenCatalog}>
                 <React.Suspense fallback={null}>
                 <DesignComponentOptions
-                  key={`${optionsFrame.file}:${optionsFrame.sourceVersion}:${optionsTarget.kind === "instance" ? optionsTarget.nodeId : ""}`}
+                  // One target keeps its drafts and folds across generations; the
+                  // section handles a changed declaration itself.
+                  key={JSON.stringify([workspaceId, designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.directoryId ?? "", optionsFrame.file,
+                    optionsTarget.kind === "instance" ? [optionsTarget.nodeId, optionsTarget.host.component] : "main"])}
                   workspaceId={workspaceId}
                   frame={optionsFrame}
                   target={optionsTarget}
@@ -3188,6 +3291,9 @@ export const DesignInspector = React.memo(function DesignInspector({
                 />
                 </React.Suspense>
               </DesignTokenCatalogContext.Provider>
+            ) : null}
+            {shownState && frame && workspaceId ? (
+              <DesignStateVariantNote state={shownState} onBack={() => showDesignComponentVariant(workspaceId, frame.file, null)} />
             ) : null}
             {heldState && heldChanges ? (
               <DesignHeldStateNote state={heldState} count={heldChanges.count} onBack={() => pickLayerState(null)} />
@@ -3224,7 +3330,7 @@ export const DesignInspector = React.memo(function DesignInspector({
                   ownerKey={styleOwnerKey}
                   origins={fieldOrigins}
                   disabled={editsDisabled}
-                  readOnly={holding || partSelected}
+                  readOnly={holding}
                   apiRef={overlaysApiRef}
                   onChooseToken={chooseFieldToken}
                   onReset={resetField}

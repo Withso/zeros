@@ -2,7 +2,9 @@ import { parse, type DefaultTreeAdapterTypes } from "parse5";
 import postcss, { type AtRule, type Declaration, type Rule } from "postcss";
 import { DESIGN_DOCUMENT_BODY_ID } from "@zeros/design-core";
 import { designDocumentBody, withExplicitDesignBody } from "./document-body";
-import { designNodeElements, identifyDesignHtmlNodes } from "./html";
+import { designPartOfNodeId, designPartStyleAttribute, mergeDesignPartStyleOverride } from "./component-overrides";
+import { mutateDesignComponentStateStyles } from "./component-states";
+import { designNodeAttributes, designNodeElements, identifyDesignHtmlNodes, mutateDesignNodeAttributeSource } from "./html";
 import { isContainedDesignReference } from "./references";
 
 import type {
@@ -273,7 +275,7 @@ function inlineStyleForNode(
   nodeId: string,
 ): InlineStyleAttribute | null {
   const document = parse(source, { sourceCodeLocationInfo: true });
-  identifyDesignHtmlNodes(document, source);
+  identifyDesignHtmlNodes(document);
   const matches =
     nodeId === DESIGN_DOCUMENT_BODY_ID
       ? [designDocumentBody(document)]
@@ -410,6 +412,10 @@ function mutateInlineStyles(
           `${property}:${escapeStyleValue(value, attribute.quote)};`,
       )
       .join(" ")}`;
+  }
+  if (!content.trim()) {
+    const start = source.slice(0, location.startOffset).trimEnd().length;
+    return `${source.slice(0, start)}${source.slice(location.endOffset)}`;
   }
   const replacement = `${attribute.before}${content}${attribute.after}`;
   return `${source.slice(0, location.startOffset)}${replacement}${source.slice(location.endOffset)}`;
@@ -887,15 +893,14 @@ export function mutateDesignNodeStyles(
       "Responsive style mutation requires an explicit Foundation context adapter.",
     );
   }
-  if ((input.stateContext ?? "default") !== "default") {
-    throw new Error(
-      "State-specific style mutation requires an explicit Foundation context adapter.",
-    );
-  }
   const normalized = entries.map(([rawProperty, rawValue]) => {
     const property = normalizeDesignCssProperty(rawProperty);
     return [property, rawValue] as const;
   });
+  const stateContext = input.stateContext ?? "default";
+  if (stateContext !== "default") return mutateDesignStateStyles(state, input.nodeId, normalized, stateContext, scope);
+  const part = designPartOfNodeId(input.nodeId);
+  if (part) return mutateDesignPartStyles(state, part, normalized, scope);
   const files = { ...state.files };
   const inlineMutations = new Map<string, DesignStyleMutationValue>();
   const stylesheetEdits = new Map<string, SourceEdit[]>();
@@ -1002,6 +1007,52 @@ export function mutateDesignNodeStyles(
     );
   }
   return { files, decisions };
+}
+
+/** A component state variant's style: the main's rule for that layer in that
+ * state. An instance's parts take it from the main. */
+function mutateDesignStateStyles(
+  state: DesignWebDocumentState,
+  nodeId: string,
+  styles: ReadonlyArray<readonly [string, DesignStyleMutationValue]>,
+  stateContext: string,
+  scope: "auto" | "inline" | "rule",
+): { files: Readonly<Record<string, string>>; decisions: DesignStyleMutationDecision[] } {
+  if (designPartOfNodeId(nodeId)) throw new Error("A part's states are its main component's; edit them there.");
+  if (nodeId === DESIGN_DOCUMENT_BODY_ID) throw new Error("A state belongs to the component's layers, not the frame.");
+  const validated = styles.map(([property, value]) => {
+    const checked = value === null ? null : validateDesignCssValue(property, value, state.entryFile);
+    if (checked !== null && /<\/style[\t\n\f\r />]/i.test(checked)) throw new Error("A CSS value cannot close its containing HTML style element.");
+    return [property, checked] as const;
+  });
+  const { source, selector } = mutateDesignComponentStateStyles(state.files[state.entryFile]!, state.entryFile, { nodeId, state: stateContext, styles: validated });
+  return {
+    files: { ...state.files, [state.entryFile]: source },
+    decisions: styles.map(([property]) => ({ property, requestedScope: scope, appliedScope: "rule", file: state.entryFile, selector, reason: "state-rule" })),
+  };
+}
+
+/** A part's style is its instance's to override: the write sets or removes
+ * declarations in the host's zd-style-<part>, never the component's source. */
+function mutateDesignPartStyles(
+  state: DesignWebDocumentState,
+  part: { host: string; part: string },
+  styles: ReadonlyArray<readonly [string, DesignStyleMutationValue]>,
+  scope: "auto" | "inline" | "rule",
+): { files: Readonly<Record<string, string>>; decisions: DesignStyleMutationDecision[] } {
+  if (scope === "rule") throw new Error("A component part has no rule here; its style is set on the instance.");
+  const attribute = designPartStyleAttribute(part.part);
+  if (!attribute) throw new Error(`The part ${part.part} cannot take an override; change it on the main component.`);
+  const source = state.files[state.entryFile]!;
+  const host = designNodeAttributes(source, part.host);
+  if (!host.tag.startsWith("zd-")) throw new Error(`Design element ${part.host} is not a component instance.`);
+  const validated = new Map(styles.map(([property, value]) =>
+    [property, value === null ? null : validateDesignCssValue(property, value, state.entryFile)] as const));
+  const next = mergeDesignPartStyleOverride(host.attributes.get(attribute), validated);
+  return {
+    files: { ...state.files, [state.entryFile]: mutateDesignNodeAttributeSource(source, part.host, attribute, next, state.entryFile) },
+    decisions: styles.map(([property]) => ({ property, requestedScope: scope, appliedScope: "inline", file: state.entryFile, selector: null, reason: "part-override" })),
+  };
 }
 
 /** Mutate one exact selector/property pair for a parameter binding. Missing

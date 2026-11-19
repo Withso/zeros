@@ -911,7 +911,7 @@ export class DesignCodeTools implements DesignMcpToolHandler {
           await lintDesignDocument(
             this.target.workspacePath,
             this.frame(input.documentId),
-            { healOids: false, includeRuntimeAudits: false },
+            { healOids: false },
           );
         await this.exact(input.documentId, input.expectedRevision);
         return { ...input, ...lint };

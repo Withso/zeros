@@ -1,7 +1,7 @@
 import {
   designComposedChildElements,
   designShadowHostOfContent,
-  nativeDesignIdentityBase,
+  nativeDesignIdentities,
 } from "@zeros/design-web";
 import type { DefaultTreeAdapterTypes } from "parse5";
 import { claimDesignParse, parseDesignSource, shareDesignParse, sharedDesignDerivation } from "./shared-parse";
@@ -142,14 +142,6 @@ export function stripNonDesignOids(source: string): { html: string; removed: str
   return { html: rendered, removed: edits.map(({ start, end }) => source.slice(start, end)) };
 }
 
-function oidForElement(
-  source: string,
-  element: DefaultTreeAdapterTypes.Element,
-): string {
-  const offset = element.sourceCodeLocation?.startOffset ?? 0;
-  return nativeDesignIdentityBase(element.tagName, offset, source);
-}
-
 export interface DesignOidHealing {
   html: string;
   changed: boolean;
@@ -169,6 +161,7 @@ export function healDesignOids(source: string): DesignOidHealing {
 function healUnshared(source: string): DesignOidHealing {
   const document = parseDesignSource(source);
   const records = designNodeRecords(document);
+  const derived = nativeDesignIdentities(document);
   const used = new Set<string>();
   const edits: HealEdit[] = [];
   const fixed: Array<{
@@ -187,7 +180,7 @@ function healUnshared(source: string): DesignOidHealing {
       used.add(usableOid);
       continue;
     }
-    const oidBase = oidForElement(source, record.element);
+    const oidBase = derived(record.element);
     let oid = oidBase;
     for (let suffix = 2; used.has(oid); suffix++) {
       oid = `${oidBase}-${suffix}`;

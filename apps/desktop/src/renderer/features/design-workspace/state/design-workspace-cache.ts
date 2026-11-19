@@ -2,7 +2,7 @@ import { useDesignWorkspaceUiStore } from "./design-workspace-ui";
 import type { DesignMovementGuard } from "@zeros/protocol/design-relocation";
 import { normalizeDesignPagesSnapshot } from "@zeros/protocol/design-pages";
 import { isDesignComponentVariantName } from "@zeros/protocol/design-path";
-import { refuseDesignComponentPartWrite } from "./design-component-parts";
+import { isDesignComponentPartNodeId, refuseDesignComponentPartWrite } from "./design-component-parts";
 import { forgetDesignLayerDisclosure } from "./design-layer-disclosure";
 import { rememberDesignDirectoryIdentity, setDesignKnownPagesReader, type DesignCanvasItemInput } from "../../../platform/bridge/design-bridge";
 // Canvas, inspector and the Layers panel consume one aggregate engine response.
@@ -21,6 +21,7 @@ import {
   designPutCanvasItem,
   designDeleteCanvasItem,
   designUpdateTheme,
+  designMoveComponent,
   designRefreshStyles,
   designDeletePage,
   designFrame,
@@ -33,6 +34,7 @@ import {
   designSetText,
   designSnapshot,
   designPrepareFrames,
+  designLintFrames,
   designUpdateToken,
   designUpdateCanvas,
   designMoveFrames,
@@ -41,6 +43,7 @@ import {
   designWriteHtml,
   type DesignCanvasFrameWire,
   type DesignFrameGeometryWire,
+  type DesignFrameInUseWire,
   type DesignTextFrameSeedWire,
   type DesignFrameDocumentWire,
   type DesignFoundationRevisionWire,
@@ -54,12 +57,13 @@ import {
 import type { DesignTransaction } from "@zeros/design-core";
 import type { DesignRuntimeGenerationPatch, DesignRuntimeNodeInsert } from "@zeros/protocol/design-runtime";
 import { KeyedAsyncCache } from "../../../shared/lib/keyed-async-cache";
-import { DesignFramePreparation, readDesignNavigation, projectDesignMutationSnapshot } from "./design-workspace-preparation";
+import { DesignFramePreparation, readDesignNavigation, projectDesignMutationSnapshot, RUNTIME_AUDIT_RULE_IDS,
+  withSourceLintRows } from "./design-workspace-preparation";
 import { preparedDesignSnapshot } from "./design-frame-view";
 import { onActiveBridgeConnected } from "../../../platform/bridge/active-bridge";
 import { isCloudWorkspace } from "../../../platform/bridge/cloud-workspace-key";
 import { getActiveBridge } from "../../../platform/bridge/active-bridge";
-import { DESIGN_FRAMES_CHANGES_CAPABILITY } from "@zeros/protocol/design-catalog";
+import { DESIGN_FRAMES_CHANGES_CAPABILITY, DESIGN_FRAMES_LINT_CAPABILITY } from "@zeros/protocol/design-catalog";
 import { stableDesignCanvasItems } from "./design-canvas-items";
 import type { DesignPageSummary } from "@zeros/protocol/design-pages";
 import type { DesignFramesChange } from "@zeros/protocol/messages";
@@ -150,13 +154,6 @@ const runtimeAuditSettlementByFrame = new Map<
   string,
   { fingerprint: string; result: Promise<void> }
 >();
-const RUNTIME_AUDIT_RULE_IDS = new Set([
-  "contrast",
-  "overflow",
-  "spacing-scale",
-  "audit-limit",
-  "layer-tree-limit",
-]);
 
 /** Design reads are idempotent and exact-keyed, so a single transport bounce
  * can be retried safely. Keep this boundary away from mutations: their reply
@@ -257,15 +254,17 @@ function recordGeometryHistory(workspaceId: string, before: DesignWorkspaceSnaps
   historyPreview.recordTransition(workspaceId, { kind: "geometry", geometry: geometry.before },
     { kind: "geometry", geometry: geometry.after }, historyStateKey(before), historyStateKey(after));
 }
-function catalogHistorySelection(snapshot: DesignWorkspaceSnapshotWire, hint: { pageId?: string; frame?: string }, frameSelected: boolean) {
+function catalogHistorySelection(snapshot: DesignWorkspaceSnapshotWire, hint: { pageId?: string; frame?: string; itemId?: string }, frameSelected: boolean) {
   const normalized = normalizeDesignPagesSnapshot(snapshot);
   const page = normalized.pages.find(page => page.id === hint.pageId || (hint.frame &&
     (page.frameFiles.includes(hint.frame) || (page.folder ? hint.frame.startsWith(page.folder + "/") : !hint.frame.includes("/"))))) ?? normalized.pages[0];
+  if (hint.itemId !== undefined) return { pageId: page?.id, frame: null, frameSelected: false,
+    itemId: page?.items?.some(item => item.id === hint.itemId) ? hint.itemId : null };
   const frame = hint.frame && page?.frameFiles.includes(hint.frame) ? hint.frame : page?.frameFiles[0] ?? null;
   return { pageId: page?.id, frame, frameSelected: frame !== null && frameSelected };
 }
 function recordCatalogHistory(workspaceId: string, before: DesignWorkspaceSnapshotWire | null | undefined, after: DesignWorkspaceSnapshotWire,
-  hint?: { pageId?: string; frame?: string },
+  hint?: { pageId?: string; frame?: string; itemId?: string },
 ) {
   if (!before) return;
   historyPreview.recordTransition(workspaceId, { kind: "catalog", catalog: new WeakRef(before), ...(hint ? { selection: catalogHistorySelection(before, hint, true) } : {}) },
@@ -1313,7 +1312,7 @@ export function stabilizeDesignWorkspaceSnapshot(
     return items ? { ...rest, items } : rest;
   }) : next.pages;
   const pages = previousPages && nextPages ? stableArray(previousPages, nextPages, (left, right) =>
-    left.items === right.items &&
+    left.items === right.items && left.itemsNotShown === right.itemsNotShown &&
     left.id === right.id && left.title === right.title && left.folder === right.folder &&
     left.frameFiles.length === right.frameFiles.length && left.frameFiles.every((file, index) => file === right.frameFiles[index]) &&
     left.frameIds?.length === right.frameIds?.length && (left.frameIds?.every((id, index) => id === right.frameIds?.[index]) ?? true)) : nextPages;
@@ -1439,7 +1438,49 @@ function publishDesignWorkspaceSnapshot(
   if (stable.preparation?.stalePages?.length) designWorkspaceSnapshotCache.invalidate(workspaceId);
   notifyDesignSelectionSnapshot(workspaceId);
   if (!stable.preparation) queueDesignWorkspaceBootSnapshot(workspaceId, stable);
+  if (stable.preparation?.lintPending?.length) lintWrittenDesignFrames(workspaceId);
   return stable;
+}
+
+const WRITTEN_LINT_BATCH = 16;
+
+/** A write acknowledgement carries no lint rows, so the write lock is never
+ * held for lint; its frames are linted here, off the write path, at the
+ * source version each one has. A reply applies only to frames whose source
+ * version and owner are still the ones asked about. */
+function lintWrittenDesignFrames(workspaceId: string): void {
+  const snapshot = designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data;
+  if (!snapshot?.preparation?.lintPending?.length) return;
+  if (isCloudWorkspace(workspaceId) || !getActiveBridge()?.supportsEngineCapability?.(DESIGN_FRAMES_LINT_CAPABILITY, workspaceId)) {
+    const { lintPending: _pending, ...preparation } = snapshot.preparation;
+    designWorkspaceSnapshotCache.setData(workspaceId, { ...snapshot, preparation });
+    return;
+  }
+  void designBackgroundWork.schedule(`written-lint\0${workspaceId}`, async () => {
+    const asked = designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data;
+    const pending = new Set(asked?.preparation?.lintPending);
+    if (!asked?.directoryId || !pending.size) return;
+    const frames = asked.frames.flatMap((frame) => pending.has(frame.file) && frame.sourceVersion
+      ? [{ file: frame.file, sourceVersion: frame.sourceVersion }] : []).slice(0, WRITTEN_LINT_BATCH);
+    const reply = frames.length ? await designLintFrames(workspaceId, asked.directoryId, frames).catch(() => null) : null;
+    const current = designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data;
+    if (!current?.preparation || current.directoryId !== asked.directoryId || current.lint.workspacePath !== asked.lint.workspacePath ||
+      current.protocolCapability !== asked.protocolCapability) return;
+    const versions = new Map(current.frames.map((frame) => [frame.file, frame.sourceVersion]));
+    const held = (frame: { file: string; sourceVersion: string }) => versions.get(frame.file) === frame.sourceVersion;
+    // A frame asked about at the version it still has is settled even without
+    // rows (the engine saw newer source, or could not lint it); a later write
+    // or change of it asks again. One without a version cannot be asked about.
+    const settled = new Set([...frames.filter(held).map((frame) => frame.file),
+      ...[...pending].filter((file) => !versions.get(file))]);
+    const linted = new Set(reply?.frames.filter(held).map((frame) => frame.file));
+    const lintPending = current.preparation.lintPending?.filter((file) => !settled.has(file)) ?? [];
+    const { lintPending: _pending, ...preparation } = current.preparation;
+    designWorkspaceSnapshotCache.setData(workspaceId, stabilizeDesignWorkspaceSnapshot(current, { ...current,
+      lint: withSourceLintRows(current.lint, linted, reply?.violations ?? []),
+      preparation: { ...preparation, ...(lintPending.length ? { lintPending } : {}) } }));
+    if (lintPending.length) lintWrittenDesignFrames(workspaceId);
+  });
 }
 
 /** Seed the exact aggregate carried by a lifecycle/mutation receipt. Publishing
@@ -1675,11 +1716,13 @@ export async function duplicateDesignFrameCached(
 export async function deleteDesignFrameCached(
   workspaceId: string,
   frame: string,
-): Promise<DesignWorkspaceSnapshotWire> {
+  options?: { ifUnused?: boolean },
+): Promise<DesignWorkspaceSnapshotWire | DesignFrameInUseWire> {
   return runLocalDesignMutation(workspaceId, async (assertOwner) => {
     const beforeSnapshot = designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data;
-    const result = await designDeleteFrame(workspaceId, frame);
+    const result = await designDeleteFrame(workspaceId, frame, options);
     assertOwner();
+    if ("inUse" in result) return result;
     const snapshot = publishDesignWorkspaceSnapshot(
       workspaceId,
       result.snapshot,
@@ -1713,14 +1756,14 @@ export async function renameDesignPageCached(workspaceId: string, pageId: string
 }
 
 /** Place, move, resize, retext or delete one canvas item: one engine write
- * and one Undo step. The canvas keeps its selection on undo. */
+ * and one Undo step with its page and restored item identity. */
 export async function putDesignCanvasItemCached(workspaceId: string, pageId: string, item: DesignCanvasItemInput) {
   return runLocalDesignMutation(workspaceId, async (assertOwner) => {
     const before = designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data;
     const result = await designPutCanvasItem(workspaceId, pageId, item);
     assertOwner();
     const snapshot = publishDesignWorkspaceSnapshot(workspaceId, result.snapshot);
-    recordCatalogHistory(workspaceId, before, snapshot);
+    recordCatalogHistory(workspaceId, before, snapshot, { pageId, itemId: result.itemId });
     return { itemId: result.itemId, snapshot };
   }, "edit", undefined, { catalog: true });
 }
@@ -1731,7 +1774,7 @@ export async function deleteDesignCanvasItemCached(workspaceId: string, pageId: 
     const result = await designDeleteCanvasItem(workspaceId, pageId, itemId);
     assertOwner();
     const snapshot = publishDesignWorkspaceSnapshot(workspaceId, result.snapshot);
-    recordCatalogHistory(workspaceId, before, snapshot);
+    recordCatalogHistory(workspaceId, before, snapshot, { pageId, itemId });
     return snapshot;
   }, "edit", undefined, { catalog: true });
 }
@@ -1754,6 +1797,19 @@ export async function updateDesignThemeCached(
     assertOwner();
     const snapshot = publishDesignWorkspaceSnapshot(workspaceId, result.snapshot);
     recordCatalogHistory(workspaceId, before, snapshot);
+    return { ...result, snapshot };
+  }, "edit", undefined, { catalog: true });
+}
+
+/** Make components/<name>.html a registered main frame on a page: one
+ * engine write and one Undo step, which selects the new main. */
+export async function moveDesignComponentCached(workspaceId: string, component: string, pageId?: string) {
+  return runLocalDesignMutation(workspaceId, async (assertOwner) => {
+    const before = designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data;
+    const result = await designMoveComponent(workspaceId, component, pageId);
+    assertOwner();
+    const snapshot = publishDesignWorkspaceSnapshot(workspaceId, result.snapshot);
+    recordCatalogHistory(workspaceId, before, snapshot, { pageId: result.frame.pageId, frame: result.frame.file });
     return { ...result, snapshot };
   }, "edit", undefined, { catalog: true });
 }
@@ -1821,7 +1877,6 @@ export async function updateDesignNodeStylesCached(
     styles: Record<string, string | null>;
   },
 ): Promise<DesignMutationResultWire> {
-  refuseDesignComponentPartWrite(input.nodeId);
   return runLocalDesignMutation(workspaceId, async (assertOwner) =>
     executeWithFreshGenerationRetry(
       workspaceId,
@@ -2582,6 +2637,9 @@ async function adoptDesignStyleGeneration(
     !nextSourceVersion ||
     nextSourceVersion === previousSourceVersion ||
     (updates.length < 1 && !patch) ||
+    // A part's override styles every repeated copy of it, and adds to its
+    // own inline style rather than replacing it: only the new render has it.
+    updates.some((update) => isDesignComponentPartNodeId(update.nodeId)) ||
     designRuntimeFrameState(workspaceId, frame)?.sourceVersion !==
       previousSourceVersion
   ) {
@@ -2969,7 +3027,10 @@ export function applyDesignFramesChange(workspaceId: string, change: DesignFrame
     mutation.deferredRefresh = true;
     return;
   }
+  // Source changed outside Zeros: its lint rows come with the re-preparation.
+  const relint = [...new Set([...(preparation.relint ?? []), ...preparation.current.filter((file) => changed.has(file))])];
   designWorkspaceSnapshotCache.setData(workspaceId, { ...snapshot, preparation: { ...preparation,
+    ...(relint.length ? { relint } : {}),
     current: preparation.current.filter((file) => !changed.has(file)),
     errors: Object.fromEntries(Object.entries(preparation.errors).filter(([file]) => !changed.has(file))) } });
   designFramePreparation.resume();

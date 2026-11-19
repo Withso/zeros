@@ -1,0 +1,45 @@
+{
+  "version": 2,
+  "id": "main",
+  "title": "Component fixture",
+  "pages": [
+    {
+      "id": "page_library",
+      "title": "Library",
+      "frames": ["fx_chip"],
+      "folder": "library",
+      "items": [
+        { "id": "item_section", "kind": "section", "x": 0, "y": -80, "width": 400, "text": "Chip" },
+        { "id": "item_note", "kind": "note", "x": 600, "y": 0, "width": 240, "height": 120, "text": "The chip's options \u2014 one line each." },
+        { "id": "item_link", "kind": "link", "x": 600, "y": 160, "width": 240, "target": "design/brief.md" }
+      ]
+    },
+    {
+      "id": "page_screens",
+      "title": "Screens",
+      "frames": ["fx_hosts"],
+      "folder": "screens"
+    }
+  ],
+  "frames": {
+    "fx_chip": {
+      "kind": "html",
+      "source": "library/chip.html",
+      "title": "Chip \u2014 main",
+      "x": 0,
+      "y": 0,
+      "width": 480,
+      "height": 240,
+      "component": "fx-chip"
+    },
+    "fx_hosts": {
+      "kind": "html",
+      "source": "screens/hosts.html",
+      "title": "Hosts",
+      "x": 0,
+      "y": 0,
+      "width": 800,
+      "height": 600
+    }
+  }
+}

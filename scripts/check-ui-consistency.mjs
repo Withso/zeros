@@ -261,6 +261,8 @@ const BG3_SURFACE_FILES = new Set([
   // Copy-breakdown buttons rest transparent on the bg3 surface, hover bg3-hover).
   "apps/desktop/src/renderer/features/agent/context-gauge.tsx",
   "apps/desktop/src/renderer/features/agent/turn-footer.tsx",
+  // Frame findings list rows sit on the badge's PopoverContent panel.
+  "apps/desktop/src/renderer/features/design-workspace/design-frame-lint-badge.tsx",
 ]);
 
 // bg3 as a RAW CSS background fill. BG3_FILL_RE above is Tailwind-class-based

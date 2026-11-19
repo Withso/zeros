@@ -9,6 +9,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
+import { rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -817,11 +818,20 @@ describe("recoverable per-directory Design pages migration", () => {
     },
   );
 
-  it("bounds source discovery before reading a directory with too many entries", () => {
+  it("bounds source discovery before reading a directory with too many entries", async () => {
     const crowded = path.join(root, directory, "crowded");
     mkdirSync(crowded);
-    for (let index = 0; index < 20_001; index++)
-      writeFileSync(path.join(crowded, `${index}.txt`), "");
+    // Creating and removing 20,001 files one synchronous call at a time takes
+    // most of the test's time budget on macOS; overlapped writes and an async
+    // removal keep the fixture well inside it.
+    let next = 0;
+    await Promise.all(
+      Array.from({ length: 32 }, async () => {
+        while (next < 20_001)
+          await writeFile(path.join(crowded, `${next++}.txt`), "");
+      }),
+    );
+    expect(readdirSync(crowded)).toHaveLength(20_001);
     expect(() => migrateDesignDirectoryPages(root, directory)).toThrow(
       /source discovery limit/i,
     );
@@ -829,6 +839,7 @@ describe("recoverable per-directory Design pages migration", () => {
       false,
     );
     expect(read("home.html")).toContain('href="tokens.css"');
+    await rm(crowded, { recursive: true, force: true });
   });
 
   it("legacy authoring upgrades all central entries to v2, then only its own directory to v3", async () => {

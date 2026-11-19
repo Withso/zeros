@@ -106,7 +106,29 @@ export async function runDesignLayoutGesturesSmoke({ page, check }) {
       ),
     )
     .toEqual(["home-copy", "home-action", "home-heading"]);
-  await expect.poll(() => heading.evaluate((el) => el.style.left)).toBe("auto");
+  // A reorder in flow saves only the move: the layer already computes every
+  // positional value the drop previewed, and the canvas keeps none of them.
+  const positional = ["position", "left", "top", "right", "bottom", "order"];
+  const unset = positional.map(() => "");
+  await expect
+    .poll(() =>
+      page.evaluate((properties) => {
+        const node = new DOMParser()
+          .parseFromString(window.__zerosHarnessHomeSource(), "text/html")
+          .querySelector('[data-oid="home-heading"]');
+        return properties.map((property) => node.style.getPropertyValue(property));
+      }, positional),
+    )
+    .toEqual(unset);
+  await expect
+    .poll(() =>
+      heading.evaluate(
+        (el, properties) =>
+          properties.map((property) => el.style.getPropertyValue(property)),
+        positional,
+      ),
+    )
+    .toEqual(unset);
   check(
     "dragging a flow child reorders siblings without positional offsets",
     true,

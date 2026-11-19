@@ -32,6 +32,7 @@ import { applyDesignHistoryCached, designWorkspaceSnapshotCache, resetDesignWork
 import { restoreDesignPageHistorySelection } from "../state/design-page-history";
 import { bindDesignWorkspacePages, captureDesignPageOwner, designWorkspaceView, resetDesignWorkspaceUiForTests, useDesignWorkspaceUiStore } from "../state/design-workspace-ui";
 import { resetDesignSelectionWorkflowsForTests } from "../state/design-selection";
+import { designCanvasItemOwner, designCanvasItemSelection, setDesignCanvasItemSelection } from "../state/design-canvas-item-selection";
 
 const DIR = "design-a";
 const version = (n: number) => `${n}`.padStart(24, "0");
@@ -71,6 +72,7 @@ afterEach(() => {
   resetDesignWorkspaceUiForTests();
   resetDesignSelectionWorkflowsForTests();
   platformMocks.history.mockReset();
+  setDesignCanvasItemSelection("test", null);
 });
 
 describe("Undo in a lazily prepared Local workspace", () => {
@@ -86,5 +88,37 @@ describe("Undo in a lazily prepared Local workspace", () => {
     const view = designWorkspaceView(workspaceId);
     expect(view.selectedFrame).toBe(A.file);
     expect(view.frameSelected).toBe(true);
+  });
+
+  it("reveals the item's page and restores generation-sensitive selection across undo and redo", async () => {
+    const workspaceId = "personal-items";
+    const note = { id: "note_1", kind: "note" as const, x: 0, y: 0, width: 200, height: 100, text: "Note" };
+    const pagesWithout = [
+      { id: "a", title: "A", folder: "a", frameFiles: [], frameIds: [], items: [] },
+      { id: "b", title: "B", folder: "b", frameFiles: [], frameIds: [], items: [] },
+    ];
+    const pagesWith = [pagesWithout[0]!, { ...pagesWithout[1]!, items: [note] }];
+    designWorkspaceSnapshotCache.setData(workspaceId, { ...base(), pages: pagesWithout, frames: [] });
+    bindDesignWorkspacePages(workspaceId, DIR, pagesWithout);
+    const itemOwner = designCanvasItemOwner(workspaceId, DIR, "b");
+    const restoreItem = (itemId: string | null) => setDesignCanvasItemSelection(itemOwner, itemId);
+
+    platformMocks.history.mockResolvedValueOnce({ result: null, historyPageId: "b", historyItemId: note.id, historySelection: null,
+      snapshot: { ...base(), pages: pagesWith, frames: [] } });
+    const undoOwner = captureDesignPageOwner(workspaceId);
+    const undo = await applyDesignHistoryCached(workspaceId, null, "undo");
+    await restoreDesignPageHistorySelection(workspaceId, undoOwner, undo, "undo", restoreItem);
+    expect(designWorkspaceView(workspaceId).activePageId).toBe("b");
+    expect(designWorkspaceView(workspaceId).frameSelected).toBe(false);
+    expect(designCanvasItemSelection(itemOwner)).toBe(note.id);
+
+    useDesignWorkspaceUiStore.getState().setActivePage(workspaceId, "a", DIR);
+    platformMocks.history.mockResolvedValueOnce({ result: null, historyPageId: "b", historyItemId: null, historySelection: null,
+      snapshot: { ...base(), pages: pagesWithout, frames: [] } });
+    const redoOwner = captureDesignPageOwner(workspaceId);
+    const redo = await applyDesignHistoryCached(workspaceId, null, "redo");
+    await restoreDesignPageHistorySelection(workspaceId, redoOwner, redo, "redo", restoreItem);
+    expect(designWorkspaceView(workspaceId).activePageId).toBe("b");
+    expect(designCanvasItemSelection(itemOwner)).toBeNull();
   });
 });

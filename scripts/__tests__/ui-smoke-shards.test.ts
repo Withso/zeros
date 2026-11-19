@@ -14,6 +14,7 @@ import {
   validateSmokePartition,
 } from "../ui-smoke/scenarios.mjs";
 import { checkPageErrors, runSmokeScenarios } from "../ui-smoke/runner.mjs";
+import { parseSmokeArgs } from "../ui-smoke/cli.mjs";
 
 // Frozen from the serial runner, including the design-workspace dispatcher's
 // children. Core's later phases stay after file-prefetch in the execution plan.
@@ -190,6 +191,33 @@ describe("UI smoke shard registry", () => {
       }
     }
   });
+
+  it("selects named scenarios in registry order with every step of their units", () => {
+    expect(selectScenarios(undefined, ["design-pages", "core-inline"]).map(({ id }) => id))
+      .toEqual(["core-inline", "design-pages"]);
+    expect(selectScenarioSteps(undefined, ["core-inline"])).toEqual([
+      { id: "core-inline", phase: "model-menu" },
+      { id: "core-inline", phase: "diff-files" },
+      { id: "core-inline", phase: "github-settings" },
+      { id: "core-inline", phase: "browser-retention" },
+    ]);
+    expect(selectScenarioSteps(undefined, ["file-prefetch"])).toEqual([{ id: "file-prefetch" }]);
+    expect(() => selectScenarios(undefined, ["design-nope"])).toThrow(/unknown ui-smoke scenario: design-nope; valid scenarios: full-disk-access, /);
+    expect(() => selectScenarios(1, ["design-pages"])).toThrow(/--scenario cannot be combined with --shard/);
+    expect(() => selectScenarios(undefined, [])).toThrow(/at least one/);
+  });
+});
+
+describe("UI smoke arguments", () => {
+  it("leaves scenarios unset without --scenario, as CI runs it", () => {
+    expect(parseSmokeArgs(["--shard=2/3"])).toEqual({ list: false, format: "text", shard: 2, scenarios: undefined });
+    expect(parseSmokeArgs([])).toEqual({ list: false, format: "text", shard: undefined, scenarios: undefined });
+  });
+
+  it("collects a repeatable --scenario once per id", () => {
+    expect(parseSmokeArgs(["--scenario=design-pages", "--scenario=core-inline", "--scenario=design-pages"]).scenarios)
+      .toEqual(["design-pages", "core-inline"]);
+  });
 });
 
 describe("UI smoke CLI without Vite or Chromium", () => {
@@ -213,6 +241,13 @@ describe("UI smoke CLI without Vite or Chromium", () => {
       );
     },
   );
+
+  it("lists only the named scenarios, in registry order", () => {
+    const result = cli(["--list", "--scenario=design-pages", "--scenario=core-inline", "--format=json"]);
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stderr).toBe("");
+    expect(JSON.parse(result.stdout)).toEqual(["core-inline", "design-pages"]);
+  });
 
   it("lists plain IDs when no format is requested", () => {
     const result = cli(["--list"]);
@@ -239,6 +274,11 @@ describe("UI smoke CLI without Vite or Chromium", () => {
       args: ["--list", "--format=json", "--format=json"],
       message: /duplicate/,
     },
+    { args: ["--scenario"], message: /--scenario=<id>/ },
+    { args: ["--scenario="], message: /--scenario=<id>/ },
+    { args: ["--scenario=design-nope"], message: /unknown ui-smoke scenario: design-nope; valid scenarios: .*design-pages/ },
+    { args: ["--list", "--scenario=design-nope"], message: /unknown ui-smoke scenario/ },
+    { args: ["--scenario=design-pages", "--shard=1/3"], message: /cannot be combined with --shard/ },
   ])("rejects $args before starting a server", ({ args, message }) => {
     const result = cli(args);
     expect(result.error).toBeUndefined();
@@ -251,7 +291,7 @@ describe("UI smoke CLI without Vite or Chromium", () => {
 });
 
 function fakeRun(shard?: number, crashId?: string,
-  { retries, flaky = {}, failCheck = {} }: { retries?: number; flaky?: Record<string, number>; failCheck?: Record<string, number> } = {}) {
+  { retries, flaky = {}, failCheck = {}, scenarios }: { retries?: number; flaky?: Record<string, number>; failCheck?: Record<string, number>; scenarios?: string[] } = {}) {
   const pages: (EventEmitter & {
     viewport: { width: number; height: number };
     goto: ReturnType<typeof vi.fn>;
@@ -270,6 +310,7 @@ function fakeRun(shard?: number, crashId?: string,
   const run = () =>
     runSmokeScenarios({
       shard,
+      ...(scenarios === undefined ? {} : { scenarios }),
       harnessBase: "http://127.0.0.1:4100/apps/desktop/src/renderer/harnesses",
       pageUrl:
         "http://127.0.0.1:4100/apps/desktop/src/renderer/harnesses/harness-model-menu.html",
@@ -414,6 +455,27 @@ describe("UI smoke independent execution", () => {
         expect(page.close).toHaveBeenCalledOnce();
     },
   );
+
+  it("runs named scenarios alone, each unit in its own seeded page, and checks page errors once", async () => {
+    const lines: string[] = [];
+    const log = vi.spyOn(console, "log").mockImplementation((line) => { lines.push(String(line)); });
+    try {
+      const fixture = fakeRun(undefined, undefined, { scenarios: ["design-canvas-refinements", "core-inline"] });
+      await fixture.run();
+      expect(fixture.calls.map(({ id, phase }) => (phase ? { id, phase } : { id })))
+        .toEqual(selectScenarioSteps(undefined, ["core-inline", "design-canvas-refinements"]));
+      const design = fixture.calls.find((call) => call.id === "design-canvas-refinements")!;
+      const core = fixture.calls.filter((call) => call.id === "core-inline");
+      expect(new Set(core.map((call) => call.page)).size).toBe(1);
+      expect(design.page).not.toBe(core[0].page);
+      expect(design.page.viewport).toEqual(scenarioRegistry.find(({ id }) => id === "design-canvas-refinements")!.fixture.viewport);
+      expect(design.page.goto).toHaveBeenCalledWith(expect.stringContaining("/ui-smoke-origin.html"));
+      expect(core[0].page.setViewportSize).toHaveBeenCalledWith({ width: 1440, height: 900 });
+      expect(fixture.check.mock.calls.filter(([name]) => name === "no uncaught page errors")).toEqual([["no uncaught page errors", true, ""]]);
+      for (const page of fixture.pages) expect(page.close).toHaveBeenCalledOnce();
+      expect(lines).toContain("ui-smoke-composer: scenario — design-canvas-refinements");
+    } finally { log.mockRestore(); }
+  });
 
   it("closes every retained page when an interleaved design scenario crashes", async () => {
     const fixture = fakeRun(3, "design-inspector-races");

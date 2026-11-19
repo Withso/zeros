@@ -732,3 +732,33 @@ describe("authored style wire validation", () => {
     ).toBe(false);
   });
 });
+
+// The engine limits a component's style element to its instances; the panel
+// still reads each rule as it was written, and counts only the instances.
+const SCOPED_COMPONENT_HEAD = `
+<style data-zeros-component="chip">:is(.chip):where(zd-chip, zd-chip *) { gap: 4px; }
+:is(zd-chip):where(zd-chip, zd-chip *) { display: block; }</style>`;
+const SCOPED_COMPONENT_BODY = `
+<div data-oid="outside" class="chip">Out</div>
+<zd-chip data-oid="host"><div data-oid="inside" class="chip" style="gap: 2px">In</div><div data-oid="inside-two" class="chip">In</div></zd-chip>`;
+
+describe("a component's scoped style element, in Chromium", () => {
+  let browser: Browser;
+  let page: Page;
+  beforeAll(async () => {
+    browser = await chromium.launch({ headless: true });
+    page = await fixture(browser, SCOPED_COMPONENT_HEAD, SCOPED_COMPONENT_BODY);
+  });
+  afterAll(async () => {
+    await browser?.close();
+  });
+
+  it("reports each rule as authored and counts only the layers inside an instance", async () => {
+    expect((await details(page, "inside-two")).authoredStyles?.gap).toMatchObject({
+      origin: "frame", component: "chip", selector: ".chip", subjectClasses: ["chip"], value: "4px",
+    });
+    expect((await details(page, "inside")).authoredStyles?.gap?.replaced).toMatchObject({ selector: ".chip", others: 1 });
+    expect((await details(page, "host")).authoredStyles?.display).toMatchObject({ component: "chip", selector: "zd-chip" });
+    expect((await details(page, "outside")).authoredStyles?.gap).toBeUndefined();
+  });
+});

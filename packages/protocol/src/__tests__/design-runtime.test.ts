@@ -876,6 +876,61 @@ describe("design runtime protocol", () => {
     }
   }, 20_000);
 
+  it("lists an @scope rule as matched only inside its root and before its limit", async () => {
+    const browser = await chromium.launch({ headless: true });
+    try {
+      const page = await browser.newPage();
+      const result = await page.evaluate(
+        ({ source }) =>
+          new Promise<Record<string, string[]>>((resolve, reject) => {
+            document.head.innerHTML =
+              "<style>@scope (.card) to (.slot) { .title { color: red; } }</style>"; // check:ui ignore-line -- authored frame colour fixture.
+            document.body.innerHTML = [
+              '<h3 class="title" data-oid="outside">Outside</h3>',
+              '<article class="card" data-oid="card"><h3 class="title" data-oid="inside">Inside</h3>',
+              '<div class="slot" data-oid="slot"><h3 class="title" data-oid="limited">Limited</h3></div></article>',
+            ].join("");
+            (window as Window & { __zerosDesignSourceVersion?: string }).__zerosDesignSourceVersion = "c".repeat(24);
+            const ids = ["outside", "inside", "limited"];
+            const found: Record<string, string[]> = {};
+            const channel = new MessageChannel();
+            const timeout = window.setTimeout(() => reject(new Error("runtime lifecycle timed out")), 3_000);
+            const ask = (index: number) =>
+              channel.port1.postMessage({
+                protocol: "zeros-design-runtime",
+                version: 2,
+                type: "request",
+                sourceVersion: "c".repeat(24),
+                requestId: String(index),
+                method: "getMatchedStyles",
+                args: { nodeId: ids[index], property: "color" },
+              });
+            channel.port1.onmessage = (event) => {
+              const message = event.data as { type?: string; event?: string; requestId?: string; result?: { matched?: Array<{ selector?: string }> } };
+              if (message.type === "event" && message.event === "ready") return ask(0);
+              if (message.type !== "response") return;
+              const index = Number(message.requestId);
+              found[ids[index]!] = (message.result?.matched ?? []).map((entry) => entry.selector ?? "");
+              if (index + 1 < ids.length) return ask(index + 1);
+              window.clearTimeout(timeout);
+              resolve(found);
+            };
+            channel.port1.start();
+            new Function(source)();
+            window.postMessage(
+              { protocol: "zeros-design-runtime", version: 2, type: "handshake", sourceVersion: "c".repeat(24) },
+              "*",
+              [channel.port2],
+            );
+          }),
+        { source: DESIGN_RUNTIME_SOURCE },
+      );
+      expect(result).toEqual({ outside: [], inside: [".title"], limited: [] });
+    } finally {
+      await browser.close();
+    }
+  }, 20_000);
+
   it("adopts a confirmed style generation without tearing down the painted document", async () => {
     const browser = await chromium.launch({ headless: true });
     try {

@@ -689,11 +689,16 @@ describe("design document", () => {
         }),
       ]),
     );
+    // A refused definition says why, rather than claiming nothing defines it.
     expect(report.violations).toContainEqual(
       expect.objectContaining({
-        ruleId: "component-undefined",
+        ruleId: "component-invalid",
         oid: "escape",
+        message: expect.stringMatching(/components\/escape\.html cannot be used: it resolves outside the Design folder/),
       }),
+    );
+    expect(report.violations).not.toContainEqual(
+      expect.objectContaining({ ruleId: "component-undefined", oid: "escape" }),
     );
   });
 

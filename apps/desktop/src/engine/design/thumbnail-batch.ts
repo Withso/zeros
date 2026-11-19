@@ -24,6 +24,7 @@ import {
   type DesignThumbnailsReply,
 } from "@zeros/protocol/design-capture";
 import { resolveDesignCaptureConfig, type DesignCaptureConfig } from "./capture-client";
+import { adoptDesignComponentRenderFromWorker, DESIGN_LAST_GOOD_ON_ENGINE, designComponentRenderMark, takeDesignComponentRenderForEngine } from "./component-last-good";
 import { designDirectoryNameFor } from "./directory-registry";
 import { designCatalogRevision, inspectDesignCatalog } from "./catalog-storage";
 import { durableDesignDependenciesCurrent, isDesignDependencyCaptureActive } from "./dependency-read-set";
@@ -196,14 +197,17 @@ export async function composeDesignFrameSourcesInWorker(workspacePath: string,
   frames: ReadonlyArray<{ file: string; width: number; height: number; sourceVersion?: string }>, options: { deferTailwind: boolean }) {
   // An engine call's frames reach a worker one message at a time: they share one canvas read.
   const { canvas } = await designReadScopeValue(`canvas\0${path.resolve(workspacePath)}`, () => readSharedCanvasContext(workspacePath));
-  const results: Array<{ file: string; sourceVersion: string; sanitized: string; sheets?: ComposedRender["sheets"]; reused?: true } |
-    { file: string; error: string }> = [];
+  const results: Array<{ file: string; sourceVersion: string; sanitized: string; sheets?: ComposedRender["sheets"]; reused?: true;
+    lastGood?: string } | { file: string; error: string }> = [];
   for (const frame of frames) {
     try {
       const { sourceVersion, sanitized, sheets, reused } = await composeFrameSource(workspacePath, assertFrameFile(frame.file),
         { width: frame.width, height: frame.height }, canvas, options.deferTailwind, frame.sourceVersion);
-      results.push({ file: frame.file, sourceVersion, sanitized, ...(sheets ? { sheets } : {}), ...(reused ? { reused } : {}) });
+      const lastGood = takeDesignComponentRenderForEngine(workspacePath, frame.file);
+      results.push({ file: frame.file, sourceVersion, sanitized, ...(sheets ? { sheets } : {}), ...(reused ? { reused } : {}),
+        ...(lastGood !== undefined ? { lastGood } : {}) });
     } catch (error) {
+      takeDesignComponentRenderForEngine(workspacePath, frame.file);
       results.push({ file: frame.file, error: error instanceof Error ? error.message : "Could not compose this frame." });
     }
   }
@@ -222,14 +226,21 @@ async function composeInWorkers(root: string, canvas: Awaited<ReturnType<typeof 
   if (designPreparationWorkerCount() === 0 || versioned.length < 2 || isDesignDependencyCaptureActive()) return composed;
   if (await designStyleSourcesUseFonts(root, canvas)) return composed;
   const sized = versioned.map(({ file, sourceVersion }) => ({ file, width: canvas.frames[file]!.w, height: canvas.frames[file]!.h, sourceVersion }));
+  const mark = designComponentRenderMark();
   const results = await composeFrameSourcesInWorkers(root, sized, { deferTailwind });
-  for (const result of results) if ("sanitized" in result) composed.set(result.file, result);
+  for (const result of results) {
+    if (!("sanitized" in result)) continue;
+    const { lastGood, ...render } = result;
+    if (lastGood !== undefined) adoptDesignComponentRenderFromWorker(root, result.file, lastGood, mark);
+    composed.set(result.file, render);
+  }
   // The fallback is silent per frame, so a worker build that can't compose
   // would hide behind it: say so once, path-free.
-  const left = sized.length - composed.size;
+  const handedOver = results.filter((result) => "error" in result && result.error === DESIGN_LAST_GOOD_ON_ENGINE).length;
+  const left = sized.length - composed.size - handedOver;
   if (left > 0 && !composeFallbackNoticed) {
     composeFallbackNoticed = true;
-    const first = results.find((result) => "error" in result);
+    const first = results.find((result) => "error" in result && result.error !== DESIGN_LAST_GOOD_ON_ENGINE);
     console.warn(`[Zeros] Design compose workers left ${left} of ${sized.length} frames to the engine thread; first: ${
       first && "error" in first ? failure(new Error(first.error), root) : "a worker stopped"}`);
   }

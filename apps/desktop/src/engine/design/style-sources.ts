@@ -475,8 +475,9 @@ function importPlainDesignPiece(
       if (mapColorScheme(root, scheme, theme)) facts.matchedThemes.add(theme);
       continue;
     }
-    // `.dark` must not also rewrite `.darker`.
-    const pattern = new RegExp(`${selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w-])`, "g");
+    // `.dark` must not also rewrite `.darker`, or an escaped name that starts
+    // with it, such as a Tailwind `dark:` variant class.
+    const pattern = new RegExp(`${selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w\\\\\\u0080-\\uffff-])`, "g");
     root.walkRules((rule) => {
       const mapped = rule.selector.replace(pattern, `[data-zd-theme="${theme}"]`);
       if (mapped === rule.selector) return;

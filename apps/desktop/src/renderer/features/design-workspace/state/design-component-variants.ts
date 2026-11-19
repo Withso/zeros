@@ -4,8 +4,11 @@
 // variant; it is shown only while the frame declares that variant, and an
 // entry for a variant or a frame that has gone is dropped. Local only.
 
+import { COMPONENT_VARIANT_STATE_ATTRIBUTE, isComponentVariantState, type ComponentVariantState } from "@zeros/design-core/component-options";
 import { isDesignComponentVariantName, isDesignFrameFile } from "@zeros/protocol/design-path";
 import type { DesignFrameComponent } from "@zeros/protocol/design-catalog";
+import type { DesignWorkspaceSnapshotWire } from "../../../platform/bridge/design-bridge";
+import { isDesignWorkspaceBootPreview } from "./design-workspace-boot-cache";
 import { create } from "zustand";
 
 const STORAGE_KEY = "zeros:design-component-variants-v1";
@@ -84,6 +87,22 @@ export function designDeclaredVariants(component: DesignFrameComponent | undefin
     .filter(isDesignComponentVariantName);
 }
 
+/** The CSS state a declared variant shows, or null for one of option values. */
+export function designDeclaredVariantState(component: DesignFrameComponent | undefined, variant: string | null): ComponentVariantState | null {
+  if (!component || !variant) return null;
+  const element = component.elements.find((entry) => entry.tag === "zd-variant" &&
+    entry.attributes.some((attribute) => attribute.name === "name" && attribute.value === variant));
+  const state = element?.attributes.find((attribute) => attribute.name === COMPONENT_VARIANT_STATE_ATTRIBUTE)?.value;
+  return isComponentVariantState(state) ? state : null;
+}
+
+/** The state a main frame shows through its state variant, or null; a
+ * style edit meanwhile writes that state's rule. */
+export function useDesignShownComponentState(workspaceId: string, frame: { file: string; component?: DesignFrameComponent } | null): ComponentVariantState | null {
+  return useDesignComponentVariantStore((state) =>
+    frame?.component ? designDeclaredVariantState(frame.component, shownFrom(state.byWorkspace, workspaceId, frame)) : null);
+}
+
 function shownFrom(stored: Stored, workspaceId: string, frame: { file: string; component?: DesignFrameComponent }): string | null {
   const variant = stored[workspaceId]?.frames[frame.file];
   return variant && designDeclaredVariants(frame.component).includes(variant) ? variant : null;
@@ -122,6 +141,19 @@ export function pruneDesignComponentVariants(
       return !((files !== null && !files.has(file)) || (frame !== undefined && !designDeclaredVariants(frame.component).includes(variant)));
     });
     return kept.length === Object.keys(frames).length ? frames : Object.fromEntries(kept);
+  });
+}
+
+/** Prune against what a directory snapshot confirms. A record that is not
+ * current (the boot preview's, or one of a catalog still being prepared)
+ * cannot say which variants its frame declares, so it removes nothing. */
+export function pruneDesignComponentVariantsFor(workspaceId: string, snapshot: DesignWorkspaceSnapshotWire): void {
+  if (!useDesignComponentVariantStore.getState().byWorkspace[workspaceId] || isDesignWorkspaceBootPreview(snapshot)) return;
+  const current = snapshot.preparation ? new Set(snapshot.preparation.current) : null;
+  pruneDesignComponentVariants(workspaceId, {
+    frames: current ? snapshot.frames.filter((frame) => current.has(frame.file)) : snapshot.frames,
+    files: snapshot.preparation ? snapshot.preparation.descriptions.map((frame) => frame.file)
+      : snapshot.pages?.length ? snapshot.pages.flatMap((page) => page.frameFiles) : snapshot.frames.map((frame) => frame.file),
   });
 }
 

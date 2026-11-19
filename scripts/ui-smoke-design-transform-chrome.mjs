@@ -146,6 +146,15 @@ export async function runDesignFrameResizeLayoutToolsSmoke({ page, check }) {
   await frame.locator("[data-design-frame-label]").click();
   await page.getByRole("button", { name: "Auto layout: Vertical", exact: true }).click();
   await expect(frame.locator("[data-design-frame-layout-owner] [data-design-inline-padding-control]")).toHaveCount(4);
+  const tickSizes = await page.evaluate(() =>
+    [...document.querySelectorAll('[data-design-frame="home.html"] [data-design-frame-layout-owner] [data-design-inline-spacing-line]')]
+      .map((line) => line.getBoundingClientRect())
+      .map((rect) => [rect.width, rect.height].map((value) => Math.round(value * 10) / 10).sort((a, b) => b - a).join("×")));
+  check(
+    "padding ticks keep their screen size at 25%",
+    tickSizes.length === 4 && tickSizes.every((size) => size === "14×4"),
+    JSON.stringify(tickSizes),
+  );
   const ticksInside = () =>
     page.evaluate(() => {
       const article = document.querySelector('[data-design-frame="home.html"]');
@@ -220,6 +229,79 @@ export async function runDesignDeepZoomStrokeSmoke({ page, check }) {
     String(stroke),
   );
   await setCamera(page, START_CAMERA);
+}
+
+// Handles keep one screen size at any zoom. Their boxes were sub-pixel in
+// world space and snapped before the camera scaled them, so some zooms painted
+// a wider-than-tall or shrunken handle. Measured in device pixels on a 2× page.
+export async function runDesignDeepZoomHandleSmoke({ page: parent, check }) {
+  const page = await parent.context().browser().newPage({ viewport: { width: 1440, height: 900 }, deviceScaleFactor: 2 });
+  try {
+    await page.goto(harness(parent, "layoutGestures"), { waitUntil: "networkidle" });
+    await openLayersDrawer(page);
+    await setCamera(page, { zoom: 1, panX: 0, panY: 0 });
+    await expect(
+      page.locator('[data-design-frame="home.html"] iframe[data-design-document-buffer="displayed"][data-design-document-ready]'),
+    ).toHaveCount(1);
+    await selectLayer(page, "home-heading");
+    // A black page leaves only the handles' white fill bright.
+    await runtime(page).locator("body").evaluate(() => {
+      const style = document.createElement("style");
+      style.textContent = "*{background:black!important;color:black!important;border-color:black!important;box-shadow:none!important}";
+      document.head.append(style);
+    });
+    const origin = await page.evaluate(() => {
+      const overlay = document.querySelector('[data-design-element-overlay="home-heading"]').getBoundingClientRect();
+      const world = document.querySelector("[data-design-canvas-world]").parentElement.getBoundingClientRect();
+      return { x: overlay.x - world.x, y: overlay.y - world.y };
+    });
+    const handle = page.locator('[data-design-element-overlay="home-heading"] [aria-label$="from nw"]');
+    const sizes = [];
+    for (const zoom of [1, 2.37, 3.3, 4.6, 6.1, 7.3, 8]) {
+      await setCamera(page, { zoom, panX: 400 - origin.x * zoom + 0.37, panY: 300 - origin.y * zoom + 0.61 });
+      await expect.poll(() => page.evaluate(() => document.querySelector("[data-design-canvas-world]").style.transform)).toContain(`scale(${zoom})`);
+      await page.mouse.move(4, 4);
+      const box = await handle.boundingBox();
+      const shot = await page.screenshot({ clip: { x: box.x + box.width / 2 - 10, y: box.y + box.height / 2 - 10, width: 20, height: 20 } });
+      sizes.push({
+        zoom,
+        painted: await page.evaluate(async (data) => {
+          const image = new Image();
+          image.src = `data:image/png;base64,${data}`;
+          await image.decode();
+          const canvas = document.createElement("canvas");
+          canvas.width = image.width;
+          canvas.height = image.height;
+          const context = canvas.getContext("2d");
+          context.drawImage(image, 0, 0);
+          const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+          let left = Infinity, top = Infinity, right = -1, bottom = -1;
+          for (let y = 0; y < canvas.height; y += 1) {
+            for (let x = 0; x < canvas.width; x += 1) {
+              const at = (y * canvas.width + x) * 4;
+              if (pixels[at] > 225 && pixels[at + 1] > 225 && pixels[at + 2] > 225) {
+                left = Math.min(left, x); right = Math.max(right, x);
+                top = Math.min(top, y); bottom = Math.max(bottom, y);
+              }
+            }
+          }
+          return right < 0 ? null : { width: right - left + 1, height: bottom - top + 1 };
+        }, shot.toString("base64")),
+      });
+    }
+    const [base] = sizes;
+    check(
+      "a corner handle paints the same square at every zoom up to 800%",
+      sizes.every(({ painted }) =>
+        painted && base.painted &&
+        Math.abs(painted.width - base.painted.width) <= 1 &&
+        Math.abs(painted.height - base.painted.height) <= 1 &&
+        Math.abs(painted.width - painted.height) <= 1),
+      JSON.stringify(sizes),
+    );
+  } finally {
+    await page.close();
+  }
 }
 
 export async function runDesignTurnedLayerDragOutSmoke({ page, check }) {
@@ -457,6 +539,7 @@ export async function runDesignTransformChromeSmoke(options) {
   await runDesignMirroredSelectionChromeSmoke(options);
   await runDesignFrameResizeLayoutToolsSmoke(options);
   await runDesignDeepZoomStrokeSmoke(options);
+  await runDesignDeepZoomHandleSmoke(options);
   await runDesignTurnedLayerDragOutSmoke(options);
   await runDesignTinySelectionSmoke(options);
 }

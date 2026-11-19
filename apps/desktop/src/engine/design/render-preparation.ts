@@ -727,6 +727,8 @@ export async function composeFrameSrcDoc(
   viewport: { width: number; height: number },
   entryFile = "",
   variant?: string,
+  /** The source's own generation, when the caller knows it for these bytes. */
+  knownSourceVersion?: string | null,
 ): Promise<{ sourceVersion: string; srcDoc: string }> {
   const rendered = await prepareFrameRenderSource(
     workspacePath,
@@ -740,9 +742,8 @@ export async function composeFrameSrcDoc(
   );
   const { sanitized } = rendered;
   // A variant is a view of the source: its document keeps the source's generation.
-  const sourceVersion = variant
-    ? (await prepareFrameRenderSource(workspacePath, source, viewport, undefined, undefined, entryFile, undefined, { identityOnly: true })).sourceVersion
-    : rendered.sourceVersion;
+  const sourceVersion = !variant ? rendered.sourceVersion : knownSourceVersion
+    ?? (await prepareFrameRenderSource(workspacePath, source, viewport, undefined, undefined, entryFile, undefined, { identityOnly: true })).sourceVersion;
   const runtime = createDesignRuntimeScript(sourceVersion);
   const csp =
     `<meta http-equiv="Content-Security-Policy" ` +

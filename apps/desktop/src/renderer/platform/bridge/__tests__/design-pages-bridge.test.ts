@@ -4,6 +4,7 @@ import {
   bridgeDesignCreatePage,
   bridgeDesignDeletePage,
   bridgeDesignDuplicateFrame,
+  bridgeDesignMoveComponent,
   bridgeDesignRenamePage,
   bridgeDesignSelectPage,
   rememberDesignDirectoryIdentity,
@@ -42,6 +43,18 @@ function client(result: unknown) {
 }
 
 describe("Design page bridge", () => {
+  it("moves a component onto a page and checks the main is on that page", async () => {
+    const moved = { file: "checkout/card.html", pageId: "checkout", title: "Card", component: "card" };
+    const placed = { ...snapshot, pages: [{ ...page, frameFiles: ["checkout/card.html"] }] };
+    const { bridge, request } = client({ frame: moved, snapshot: placed });
+    expect((await bridgeDesignMoveComponent(bridge, "ws_pages", "card", "checkout")).frame).toEqual(moved);
+    expect(request.mock.calls[0]?.[0]).toMatchObject({ op: "design.component.move", params: { workspaceId: "ws_pages", component: "card", pageId: "checkout" } });
+    await expect(bridgeDesignMoveComponent(client({ frame: moved, snapshot }).bridge, "ws_pages", "card"))
+      .rejects.toThrow("design.component.move: malformed engine response");
+    await expect(bridgeDesignMoveComponent(client({ frame: { ...moved, component: "pill" }, snapshot: placed }).bridge, "ws_pages", "card"))
+      .rejects.toThrow("malformed");
+  });
+
   it("forwards lifecycle arguments and returns the confirmed page/snapshot", async () => {
     const { bridge, request } = client({ page, snapshot });
     expect(

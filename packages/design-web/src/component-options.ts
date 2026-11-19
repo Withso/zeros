@@ -4,11 +4,14 @@
 // only the line a person changed.
 
 import {
+  COMPONENT_OPTION_LIMITS,
+  COMPONENT_VARIANT_STATE_ATTRIBUTE,
   componentOptionValues,
   parseComponentOptionValue,
   readComponentDeclaration,
   type ComponentDeclaration,
   type ComponentDeclarationElement,
+  type ComponentVariantState,
 } from "@zeros/design-core/components";
 import { parse, type DefaultTreeAdapterTypes } from "parse5";
 
@@ -30,19 +33,13 @@ interface Declared {
 
 function declaredIn(source: string, file: string): Declared {
   const document = parse(source, { sourceCodeLocationInfo: true });
-  const pending: DefaultTreeAdapterTypes.ParentNode[] = [document];
-  let template: DefaultTreeAdapterTypes.Template | undefined;
-  while (pending.length && !template) {
-    const node = pending.shift()!;
-    for (const child of node.childNodes) {
-      if (!("tagName" in child)) continue;
-      if (child.tagName === "template" && child.attrs.some((attribute) => attribute.name === "data-zd-options")) {
-        template = child as DefaultTreeAdapterTypes.Template;
-        break;
-      }
-      pending.push(child);
-    }
-  }
+  const isElement = (node: DefaultTreeAdapterTypes.ChildNode): node is Element => "tagName" in node;
+  // Only <head> declares options, as the engine reads them; a template
+  // elsewhere is ignored there and must not be written to here.
+  const head = document.childNodes.find(isElement)?.childNodes.find((node): node is Element => isElement(node) && node.tagName === "head");
+  const template = head?.childNodes.find((child) =>
+    isElement(child) && child.tagName === "template" && child.attrs.some((attribute) => attribute.name === "data-zd-options"),
+  ) as DefaultTreeAdapterTypes.Template | undefined;
   if (!template) throw new Error(`${file} declares no options.`);
   const elements = template.content.childNodes.filter((child): child is Element => "tagName" in child);
   const read: ComponentDeclarationElement[] = elements.map((element) => ({
@@ -90,7 +87,9 @@ export function mutateComponentOption(
   }
   if (input.variant === null) {
     if (raw === null) throw new Error("A default cannot be removed; set another value.");
-    const element = elements.find((entry) => entry.tagName === "zd-option" && nameOf(entry) === input.option)!;
+    // The declaration keeps the first valid <zd-option> of a name; an earlier
+    // invalid one with that name is ignored, so the write goes where it kept.
+    const element = elements.find((entry) => entry.tagName === "zd-option" && entry.sourceCodeLocation?.startOffset === option.offset)!;
     return setAttribute(source, element, "default", raw);
   }
   const variant = elements.find((entry) => entry.tagName === "zd-variant" && nameOf(entry) === input.variant);
@@ -103,20 +102,23 @@ export function mutateComponentOption(
 export function appendComponentVariant(
   source: string,
   file: string,
-  input: { name: string; values: Readonly<Record<string, string | number | boolean>> },
+  input: { name: string; values: Readonly<Record<string, string | number | boolean>>; state?: ComponentVariantState },
 ): string {
   const { declaration, template, elements } = declaredIn(source, file);
   if (input.name === "default") throw new Error("A variant cannot be named default: Default is the declared defaults.");
-  if (!/^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/.test(input.name) || input.name.length > 32)
+  if (!/^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/.test(input.name) || input.name.length > COMPONENT_OPTION_LIMITS.name)
     throw new Error(`The variant name ${JSON.stringify(input.name)}: use lowercase letters, digits and single hyphens.`);
   if (declaration.variants.some((entry) => entry.name === input.name)) throw new Error(`The variant ${input.name} already exists.`);
+  const showing = input.state ? declaration.variants.find((entry) => entry.state === input.state) : undefined;
+  if (showing) throw new Error(`The variant ${showing.name} already shows ${input.state}.`);
   const attributes = new Map(Object.entries(input.values).map(([name, value]) => [name, componentOptionAttributeValue(value)]));
   for (const name of attributes.keys())
     if (!declaration.options.some((option) => option.name === name)) throw new Error(`This component has no option ${name}.`);
   const { problems } = componentOptionValues(declaration, attributes);
   const refused = problems.find((problem) => problem.severity === "error");
   if (refused) throw new Error(refused.message);
-  const line = `<zd-variant name="${input.name}"${[...attributes].map(([name, value]) => ` ${name}="${escapeAttribute(value)}"`).join("")}></zd-variant>`;
+  const state = input.state ? ` ${COMPONENT_VARIANT_STATE_ATTRIBUTE}="${input.state}"` : "";
+  const line = `<zd-variant name="${input.name}"${state}${[...attributes].map(([name, value]) => ` ${name}="${escapeAttribute(value)}"`).join("")}></zd-variant>`;
   const after = [...elements].reverse().find((entry) => entry.tagName === "zd-variant") ?? elements.at(-1);
   if (!after?.sourceCodeLocation) {
     const end = template.sourceCodeLocation?.endTag?.startOffset;
@@ -131,7 +133,8 @@ export function appendComponentVariant(
 
 /** Whether a file declares options (so its instances need explicit values). */
 export function designSourceDeclaresComponentOptions(source: string): boolean {
-  return /<template\b[^>]*\sdata-zd-options\b/i.test(source);
+  const end = source.search(/<\/head\b|<body\b/i);
+  return /<template\b[^>]*\sdata-zd-options\b/i.test(end < 0 ? source : source.slice(0, end));
 }
 
 /** The declaration in a component file, for checking instance values. */

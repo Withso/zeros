@@ -4,6 +4,8 @@ import {
   DESIGN_RUNTIME_SOURCE,
   designComponentPartNodeId,
   designComponentPartOf,
+  designComponentSlotNodeId,
+  designComponentSlotOf,
   isDesignRuntimeComponentOptionsPreview,
 } from "../design-runtime";
 
@@ -19,9 +21,12 @@ const HEAD = `<style data-zeros-options>:where([data-zd-instance="1"]) { --zd-wi
 button, span, b { display: inline-block; width: 40px; height: 20px; }</style>`;
 const BODY = `<div data-oid="root">
 <zd-chat data-oid="i1" data-zd-instance="1" width="300"><div class="c" data-zd-part="c"><button data-zd-part="send">S</button><span data-zd-part="chip">A</span><span data-zd-part="chip#1">B</span><zd-inner data-zd-part="inner" data-zd-instance="3"><b class="c" data-zd-part="send">x</b></zd-inner></div></zd-chat>
-<zd-chat data-oid="i2" data-zd-instance="2"><div class="c" data-zd-part="c">two</div></zd-chat>
+<zd-chat data-oid="i2" data-zd-instance="2"><div class="c" data-zd-part="c">two <em data-oid="slotted">here</em></div></zd-chat>
+<zd-old data-oid="i3" data-zd-instance="4"><section><i data-oid="kept">k</i></section></zd-old>
+<zd-card data-oid="i4" data-zd-instance="5"><div data-zd-part="frame" data-zd-slot="content" style="display: block; min-height: 20px"><p data-oid="put" slot="content">P</p></div><footer data-zd-part="foot"><i data-oid="rest">r</i></footer></zd-card>
 <ul data-oid="list"><li data-oid="item">1</li><li data-zd-copy="item#1">2</li></ul>
 <p data-oid="plain">plain</p>
+<div data-oid="row" style="display: flex; gap: 10px; align-items: flex-start"><zd-box data-oid="b1" data-zd-instance="6" style="display: contents"><section class="box" data-zd-part="box" data-zd-root="" style="display: flex; box-sizing: border-box; width: 120px; height: 40px; padding: 4px"><button data-zd-part="go">Go</button><em data-oid="b1-put">p</em></section></zd-box><p data-oid="after" style="width: 30px; height: 10px; margin: 0">a</p></div>
 </div>`;
 
 const ALL = ["previewComponentOptions", "previewComponentInstanceOptions", "getComponentPartAtLoc"];
@@ -74,6 +79,8 @@ const centre = (page: Page, selector: string) =>
     return { x: box.left + box.width / 2, y: box.top + box.height / 2 };
   }, selector);
 const oidOf = (reply: { result?: unknown }) => (reply.result as { oid?: string } | null)?.oid ?? null;
+interface LayerTree { oid: string; children: LayerTree[] }
+const outline = (node: LayerTree): Record<string, unknown[]> => ({ [node.oid]: node.children.map(outline) });
 
 describe("component instances in the frame runtime", () => {
   let browser: Browser;
@@ -147,15 +154,20 @@ describe("component instances in the frame runtime", () => {
     }
   });
 
-  it("keeps an instance as one layer and selects a repeated copy's source", async () => {
+  it("lists an instance's parts under it in Layers, with the layers the frame slots into them, and selects a repeated copy's source", async () => {
     const page = await fixture(browser);
     try {
-      const snapshot = (await request(page, "getSnapshot")).result as { tree: Array<{ oid: string; children: Array<{ oid: string; children: unknown[] }> }> };
-      const root = JSON.stringify(snapshot.tree);
-      expect(root).toContain('"oid":"i1"');
-      expect(root).not.toContain("send");
-      const host = snapshot.tree[0]!.children.find((child) => child.oid === "i1")!;
-      expect(host.children).toEqual([]);
+      const snapshot = (await request(page, "getSnapshot")).result as { tree: LayerTree[] };
+      const hosts = snapshot.tree[0]!.children;
+      const part = (host: string, id: string) => designComponentPartNodeId(host, id);
+      expect(outline(hosts.find((child) => child.oid === "i1")!)).toEqual({ i1: [{ [part("i1", "c")]: [
+        { [part("i1", "send")]: [] }, { [part("i1", "chip")]: [] }, { [part("i1", "chip#1")]: [] },
+        // A nested instance is one part; its insides are its own.
+        { [part("i1", "inner")]: [] },
+      ] }] });
+      expect(outline(hosts.find((child) => child.oid === "i2")!)).toEqual({ i2: [{ [part("i2", "c")]: [{ slotted: [] }] }] });
+      // A definition without data-zid has no parts; the frame's own layers in it still show.
+      expect(outline(hosts.find((child) => child.oid === "i3")!)).toEqual({ i3: [{ kept: [] }] });
       const copy = await centre(page, '[data-zd-copy="item#1"]');
       expect(oidOf(await request(page, "getElementAtLoc", { ...copy, mode: "deepest" }))).toBe("item");
     } finally {
@@ -163,6 +175,45 @@ describe("component instances in the frame runtime", () => {
     }
   });
 
+  it("reads a main's instance as one box: its root is the instance's own layer, row, size and preview", async () => {
+    const page = await fixture(browser);
+    try {
+      const part = (host: string, id: string) => designComponentPartNodeId(host, id);
+      const snapshot = (await request(page, "getSnapshot")).result as { tree: LayerTree[] };
+      expect(outline(snapshot.tree[0]!.children.find((child) => child.oid === "row")!)).toEqual({ row: [
+        { b1: [{ [part("b1", "go")]: [] }, { "b1-put": [] }] }, { after: [] },
+      ] });
+      const details = (await request(page, "getNodeDetails", { nodeId: "b1" })).result as Record<string, unknown>;
+      expect(details).toMatchObject({ oid: "b1", tag: "zd-box", textEditable: false, rect: { width: 120, height: 40 },
+        styles: { display: "flex" }, layout: { parentId: "row" } });
+      expect(details.hiddenBy).toBeUndefined();
+      const row = (await request(page, "getNodeDetails", { nodeId: "row" })).result as { childrenLayout: { nodeIds: string[] } };
+      expect(row.childrenLayout.nodeIds).toEqual(["b1", "after"]);
+      // Its root's own area hits the instance, never a part.
+      const corner = await page.evaluate(() => {
+        const box = document.querySelector("[data-zd-root]")!.getBoundingClientRect();
+        return { x: box.right - 3, y: box.bottom - 3 };
+      });
+      expect(oidOf(await request(page, "getElementAtLoc", { ...corner, mode: "deepest" }))).toBe("b1");
+      expect((await request(page, "getComponentPartAtLoc", { ...corner, hostNodeId: "b1" })).result).toBeNull();
+      const go = await centre(page, '[data-zd-part="go"]');
+      expect(oidOf(await request(page, "getComponentPartAtLoc", { ...go, hostNodeId: "b1" }))).toBe(part("b1", "go"));
+      const targets = (await request(page, "getLayoutTargets", { nodeId: "b1" })).result as Array<{ oid: string; rect: { width: number } }>;
+      expect(targets.filter((target) => target.oid === "b1").map((target) => target.rect.width)).toEqual([120]);
+      const geometry = (await request(page, "previewGeometry", { nodeId: "row", children: true })).result as { children: Array<{ oid: string; rect: { width: number } }> };
+      expect(geometry.children.find((child) => child.oid === "b1")?.rect.width).toBe(120);
+      // A preview on the instance sizes its root; the host keeps no box.
+      await request(page, "previewStyles", { nodeId: "b1", styles: { width: "200px" } });
+      expect(await widthOf(page, "[data-zd-root]")).toBe("200px");
+      expect(await page.evaluate(() => getComputedStyle(document.querySelector('[data-oid="b1"]')!).display)).toBe("contents");
+      await request(page, "clearPreviewStyles", { nodeId: "b1" });
+      expect(await widthOf(page, "[data-zd-root]")).toBe("120px");
+      await request(page, "setNodeVisibility", { nodeId: "b1", visible: false });
+      expect(((await request(page, "getNodeDetails", { nodeId: "b1" })).result as { hiddenBy?: string }).hiddenBy).toBe("self");
+    } finally {
+      await page.close();
+    }
+  });
   it("answers only a host that asked, and resolves no part id or copy for one that did not", async () => {
     const page = await fixture(browser, ["previewComponentOptions"]);
     try {
@@ -172,9 +223,53 @@ describe("component instances in the frame runtime", () => {
       expect((await request(page, "getNodeDetails", { nodeId: designComponentPartNodeId("i1", "send") })).error).toBeDefined();
       const copy = await centre(page, '[data-zd-copy="item#1"]');
       expect(oidOf(await request(page, "getElementAtLoc", { ...copy, mode: "deepest" }))).toBe("list");
+      const snapshot = (await request(page, "getSnapshot")).result as { tree: LayerTree[] };
+      expect(outline(snapshot.tree[0]!.children.find((child) => child.oid === "i1")!)).toEqual({ i1: [] });
     } finally {
       await page.close();
     }
+  });
+
+  it("lists an instance's slot under it by its slot id, with the layers the frame put there, and reads it as a drop target", async () => {
+    const page = await fixture(browser);
+    try {
+      const slot = designComponentSlotNodeId("i4", "content");
+      const snapshot = (await request(page, "getSnapshot")).result as { tree: LayerTree[] };
+      expect(outline(snapshot.tree[0]!.children.find((child) => child.oid === "i4")!)).toEqual({ i4: [
+        { [slot]: [{ put: [] }] }, { [designComponentPartNodeId("i4", "foot")]: [{ rest: [] }] },
+      ] });
+      const details = await request(page, "getNodeDetails", { nodeId: slot });
+      expect(details.error).toBeUndefined();
+      expect(oidOf(details)).toBe(slot);
+      // The default slot is the host's own.
+      expect(oidOf(await request(page, "getNodeDetails", { nodeId: designComponentSlotNodeId("i4", "") }))).toBe("i4");
+      expect((await request(page, "getNodeDetails", { nodeId: designComponentSlotNodeId("i4", "missing") })).error).toBeDefined();
+      expect((await request(page, "getNodeDetails", { nodeId: designComponentSlotNodeId("plain", "content") })).error).toBeDefined();
+      const targets = (await request(page, "getLayoutTargets")).result as Array<{ oid: string }>;
+      expect(targets.map((target) => target.oid)).toContain(slot);
+      const frame = await centre(page, '[data-zd-slot="content"]');
+      expect(oidOf(await request(page, "getComponentPartAtLoc", { x: frame.x, y: frame.y + 8, hostNodeId: "i4" }))).toBe(slot);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it("resolves no slot id for a host that did not ask for parts", async () => {
+    const page = await fixture(browser, ["previewComponentOptions"]);
+    try {
+      expect((await request(page, "getNodeDetails", { nodeId: designComponentSlotNodeId("i4", "content") })).error).toBeDefined();
+    } finally {
+      await page.close();
+    }
+  });
+
+  it("names a slot unambiguously", () => {
+    const id = designComponentSlotNodeId("a:b", "content");
+    expect(id.startsWith("::zeros-slot:")).toBe(true);
+    expect(designComponentSlotOf(id)).toEqual({ host: "a:b", name: "content" });
+    expect(designComponentSlotOf(designComponentSlotNodeId("h", ""))).toEqual({ host: "h", name: "" });
+    expect(designComponentSlotOf(designComponentPartNodeId("h", "p"))).toBeNull();
+    expect(designComponentSlotOf("::zeros-slot:only")).toBeNull();
   });
 
   it("names a part unambiguously", () => {

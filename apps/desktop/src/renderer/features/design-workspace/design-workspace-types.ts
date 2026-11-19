@@ -94,8 +94,6 @@ export interface DesignInspectorProps {
   onAskAgent?: (brief: DesignAgentBrief) => void;
   /** The side panel is shown; a hidden one mounts no Options rows. */
   panelVisible?: boolean;
-  /** Open a Design-directory file in Files (a components/ file's main). */
-  onOpenFile?: (path: string) => void;
 }
 
 export interface DesignCanvasZoomActions {

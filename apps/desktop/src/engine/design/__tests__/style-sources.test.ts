@@ -143,6 +143,17 @@ describe("plain CSS import", () => {
     expect(importPlainDesignCss(":root { --a: 1; }", { light: ".light" }).messages)
       .toEqual([{ level: "warning", text: 'Theme "light": no rule uses the selector .light.', action: "agent" }]);
   });
+
+  it("leaves a utility whose escaped name starts with the theme class, such as dark:bg-zinc-900", () => { // check:ui ignore-line -- Tailwind class names in authored frame CSS.
+    const imported = importPlainDesignCss(String.raw`
+      .dark .dark\:bg-zinc-900 { background-color: black; } /* check:ui ignore-line -- Tailwind class names in authored frame CSS. */
+      .dark\:text-white:where(.dark, .dark *) { color: white; } /* check:ui ignore-line -- Tailwind class names in authored frame CSS. */
+      .dark\:p-1 { padding: 1px; }
+    `, { dark: ".dark" });
+    expect(imported.css).toContain(String.raw`[data-zd-theme="dark"] .dark\:bg-zinc-900`); // check:ui ignore-line -- Tailwind class names in authored frame CSS.
+    expect(imported.css).toContain(String.raw`.dark\:text-white:where([data-zd-theme="dark"], [data-zd-theme="dark"] *)`); // check:ui ignore-line -- Tailwind class names in authored frame CSS.
+    expect(imported.css).toContain(String.raw`.dark\:p-1 {`);
+  });
 });
 
 describe("themes from prefers-color-scheme", () => {

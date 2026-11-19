@@ -3,7 +3,8 @@ import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createDesignFrame, initializeDesignDocument } from "../document";
+import { createDesignFrame, initializeDesignDocument, readDesignFrameRenderIdentity } from "../document";
+import { resetDesignRuntimeAuditsForTests, setDesignRuntimeAudit } from "../runtime-audits";
 import { createDesignContextReference } from "../context";
 import { designDirectoryNameFor, forgetDesignDirectoryName, withDesignDirectoryNameLease } from "../directory-registry";
 import { startDesignVerificationService } from "../verification-service";
@@ -107,6 +108,19 @@ describe("native Design verification", () => {
       expect.objectContaining({ ruleId: "unknown-class", severity: "warning" }),
     ]));
     expect(report.violations.some((issue: { severity: string }) => issue.severity === "error")).toBe(false);
+  });
+
+  it("reports the canvas's audit of the frame's current revision as warnings", async () => {
+    resetDesignRuntimeAuditsForTests();
+    await writeFile(path.join(root, directory, frame), '<!doctype html><html><head></head><body><main data-oid="screen">Phone</main></body></html>');
+    const { sourceVersion } = await readDesignFrameRenderIdentity(root, frame);
+    setDesignRuntimeAudit({ workspacePath: root, frame, sourceVersion, warnings: [
+      { ruleId: "contrast", severity: "warning", message: "Text contrast is 2.0:1.", file: frame, line: 1, column: 1, oid: "screen", fix: "Increase contrast." },
+    ] });
+    const lines: string[] = [];
+    expect(await runDesignVerificationCli(["validate", "--url", url, "--frame", frame], (line) => lines.push(line))).toBe(0);
+    expect(JSON.parse(lines[0]!).report.violations).toEqual([expect.objectContaining({ ruleId: "contrast", severity: "warning", oid: "screen" })]);
+    resetDesignRuntimeAuditsForTests();
   });
 
   it("writes an ordinary PNG with exact source and viewport metadata", async () => {

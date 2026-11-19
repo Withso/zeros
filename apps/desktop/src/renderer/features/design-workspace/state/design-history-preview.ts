@@ -4,6 +4,7 @@ export interface DesignHistorySelectionHint {
   pageId?: string;
   frame: string | null;
   frameSelected: boolean;
+  itemId?: string | null;
 }
 
 export type DesignHistoryTarget = ({
@@ -70,7 +71,8 @@ export class DesignHistoryPreview {
     const previous = session.entries.at(-1);
     const bytes = (beforeState.length + afterState.length) * 2 + 256 +
       ((before.selection?.frame?.length ?? 0) + (after.selection?.frame?.length ?? 0) +
-        (before.selection?.pageId?.length ?? 0) + (after.selection?.pageId?.length ?? 0)) * 2 +
+        (before.selection?.pageId?.length ?? 0) + (after.selection?.pageId?.length ?? 0) +
+        (before.selection?.itemId?.length ?? 0) + (after.selection?.itemId?.length ?? 0)) * 2 +
       ("geometry" in before ? (before.geometry?.size ?? 0) * 192 : 0) +
       ("geometry" in after ? (after.geometry?.size ?? 0) * 192 : 0);
     if (key && previous?.key === key && before.kind === "generation" &&

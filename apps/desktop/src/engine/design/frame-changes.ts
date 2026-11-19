@@ -92,6 +92,14 @@ export class DesignFrameChanges {
     const catalog = [...paths].some((file) => CATALOG_FILES.some((name) => file === path.join(folder, ...name.split("/"))));
     const reading = designFramesReading(root, directory, paths);
     const frames = new Set(reading.frames);
+    // A frame whose own file went missing failed to prepare and has no
+    // remembered reads, so only its catalog entry can name it when it returns.
+    const prepared = lastPreparedDesignCanvas(root);
+    if (prepared) for (const file of paths) {
+      if (!inside(file)) continue;
+      const relative = path.relative(folder, file).split(path.sep).join("/");
+      if (Object.hasOwn(prepared.frame_info, relative)) frames.add(relative);
+    }
     let all = false;
     // A frame whose reads were not recorded may have read anything here.
     if (reading.unknown.length > 0 && [...paths].some(inside)) for (const file of reading.unknown) frames.add(file);

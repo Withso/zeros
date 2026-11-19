@@ -110,6 +110,7 @@ import {
   bridgeDesignPutCanvasItem,
   bridgeDesignDeleteCanvasItem,
   bridgeDesignUpdateTheme,
+  bridgeDesignMoveComponent,
   bridgeDesignDeletePage,
   bridgeDesignSelectPage,
   bridgeDesignApplyTransaction,
@@ -133,6 +134,7 @@ import {
   bridgeDesignRefreshStyles,
   bridgeDesignSnapshot,
   bridgeDesignPrepareFrames,
+  bridgeDesignLintFrames,
   bridgeDesignPreview,
   bridgeDesignMoveFrames,
   bridgeDesignTokens,
@@ -149,6 +151,7 @@ import {
   type DesignFoundationOpenWire,
   type DesignApiMutationReplyWire,
   type DesignFrameGeometryWire,
+  type DesignFrameInUseWire,
   type DesignTextFrameSeedWire,
   type DesignFrameSummaryWire,
   type DesignLintReportWire,
@@ -180,6 +183,7 @@ export type {
   DesignCanvasFrameWire,
   DesignFrameDocumentWire,
   DesignFrameGeometryWire,
+  DesignFrameInUseWire,
   DesignTextFrameSeedWire,
   DesignFrameSummaryWire,
   DesignFoundationRevisionWire,
@@ -580,10 +584,19 @@ export async function designSnapshot(
   );
 }
 
-export async function designPrepareFrames(workspaceId: string, directoryId: string, catalogRevision: string, files: readonly string[]) {
+export async function designPrepareFrames(workspaceId: string, directoryId: string, catalogRevision: string, files: readonly string[],
+  lintFiles?: readonly string[]) {
   const bridge = requireBridge("prepare design frames");
-  const result = await bridgeDesignPrepareFrames(bridge, { workspaceId, directoryId, catalogRevision, files });
+  const result = await bridgeDesignPrepareFrames(bridge, { workspaceId, directoryId, catalogRevision, files, ...(lintFiles ? { lintFiles } : {}) });
   if (getActiveBridge() !== bridge) throw new Error("Design preparation owner was retired.");
+  return result;
+}
+
+export async function designLintFrames(workspaceId: string, directoryId: string,
+  frames: ReadonlyArray<{ file: string; sourceVersion: string }>) {
+  const bridge = requireBridge("lint design frames");
+  const result = await bridgeDesignLintFrames(bridge, { workspaceId, directoryId, frames });
+  if (getActiveBridge() !== bridge) throw new Error("Design lint owner was retired.");
   return result;
 }
 
@@ -703,6 +716,10 @@ export async function designUpdateTheme(workspaceId: string, theme: { id: string
   return bridgeDesignUpdateTheme(requireBridge("name a design theme"), workspaceId, theme);
 }
 
+export async function designMoveComponent(workspaceId: string, component: string, pageId?: string) {
+  return bridgeDesignMoveComponent(requireBridge("move a component onto the canvas"), workspaceId, component, pageId);
+}
+
 export async function designDeletePage(workspaceId: string, pageId: string, expectedFrameIds: readonly string[]) {
   return bridgeDesignDeletePage(requireBridge("delete a design page"), workspaceId, pageId, expectedFrameIds);
 }
@@ -792,14 +809,16 @@ export async function designDuplicateFrame(
 export async function designDeleteFrame(
   workspaceId: string,
   frame: string,
+  options?: { ifUnused?: boolean },
 ): Promise<{
   deleted: { file: string };
   snapshot: DesignWorkspaceSnapshotWire;
-}> {
+} | DesignFrameInUseWire> {
   return bridgeDesignDeleteFrame(
     requireBridge("delete a design frame"),
     workspaceId,
     frame,
+    options,
   );
 }
 

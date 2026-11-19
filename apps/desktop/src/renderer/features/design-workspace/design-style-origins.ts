@@ -300,7 +300,7 @@ const STATE_LABELS: Record<DesignRuntimeNodeState, string> = {
   disabled: "Disabled",
 };
 
-/** A layer state as the State menu names it. */
+/** A layer state as the panel names it. */
 export function designStateLabel(state: DesignRuntimeNodeState): string {
   return STATE_LABELS[state];
 }

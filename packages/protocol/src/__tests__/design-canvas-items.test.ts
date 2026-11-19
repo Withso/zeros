@@ -74,6 +74,15 @@ describe("canvas items as written in canvas.json", () => {
     expect(readDesignCanvasPageItems([section], reserved).items).toEqual([]);
   });
 
+  it("does not let a rejected item reserve its id against a later valid item", () => {
+    const valid = { ...note, id: "shared", text: "Valid after the rejected entry" };
+    const read = readDesignCanvasPageItems([{ ...section, id: "shared", text: "" }, valid], new Set());
+    expect(read.items).toEqual([valid]);
+    expect(read.issues).toEqual([expect.objectContaining({ index: 0, id: "shared", kind: "invalid" })]);
+    // Unknown kinds and valid items past the cap still reserve the ids they keep.
+    expect(readDesignCanvasPageItems([{ id: "shared", kind: "sticker" }, valid], new Set()).items).toEqual([]);
+  });
+
   it("takes an inherited object name as an ordinary id", () => {
     const reserved = new Set<string>();
     const { items } = readDesignCanvasPageItems(["constructor", "toString", "hasOwnProperty"].map((id) => ({ ...section, id })), reserved);
@@ -82,14 +91,16 @@ describe("canvas items as written in canvas.json", () => {
 
   it("reads at most 256 items and 256 KiB of item text on a page", () => {
     const many = Array.from({ length: 258 }, (_, index) => ({ ...section, id: `s${index}` }));
-    const counted = readDesignCanvasPageItems(many, new Set());
+    const reserved = new Set<string>();
+    const counted = readDesignCanvasPageItems(many, reserved);
     expect(counted.items).toHaveLength(256);
-    expect(counted.issues).toEqual([expect.objectContaining({ kind: "limit" })]);
+    expect(counted.issues).toEqual([expect.objectContaining({ kind: "limit", count: 2 })]);
+    expect(readDesignCanvasPageItems([{ ...section, id: "s256" }], reserved).items).toEqual([]);
     // 2,000 four-byte characters a note: 32 notes is 256,000 bytes, the 33rd passes the cap.
     const heavy = Array.from({ length: 34 }, (_, index) => ({ ...note, id: `n${index}`, text: "\u{1F600}".repeat(2_000) }));
     const weighed = readDesignCanvasPageItems(heavy, new Set());
     expect(weighed.items).toHaveLength(32);
-    expect(weighed.issues).toEqual([expect.objectContaining({ kind: "limit" })]);
+    expect(weighed.issues).toEqual([expect.objectContaining({ kind: "limit", count: 2 })]);
   });
 
   it("titles a link card by the file name unless it has its own", () => {
@@ -161,6 +172,13 @@ describe("items on the wire", () => {
     expect(designPageCatalogSchema.parse([{ ...page, items }])[0]!.items).toEqual(items);
     expect(isDesignCanvasItemSummary({ ...link, missing: true })).toBe(true);
     expect(isDesignCanvasItemSummary({ ...section, missing: true })).toBe(false);
+  });
+
+  it("carries a bounded count of items not shown, while older pages omit it", () => {
+    expect(designPageCatalogSchema.parse([{ ...page, itemsNotShown: 2 }])[0]!.itemsNotShown).toBe(2);
+    expect(designPageCatalogSchema.parse([page])[0]!).not.toHaveProperty("itemsNotShown");
+    for (const itemsNotShown of [0, -1, 1.5, "2", null])
+      expect(designPageCatalogSchema.safeParse([{ ...page, itemsNotShown }]).success).toBe(false);
   });
 
   it("refuses a page whose items are invalid, too many, or share an id", () => {

@@ -59,24 +59,36 @@ export function projectDesignMutationSnapshot(previous: DesignWorkspaceSnapshotW
     descriptions = byPage.flat();
     // The catalog has no items; they change only with replies that resend
     // whole pages, so a same-owner page keeps its confirmed ones.
-    const priorItems = new Map((sameOwner ? previous.pages ?? [] : []).flatMap((page) => page.items ? [[page.id, page.items] as const] : []));
+    const priorItems = new Map((sameOwner ? previous.pages ?? [] : []).flatMap((page) =>
+      page.items || page.itemsNotShown !== undefined
+        ? [[page.id, { items: page.items, itemsNotShown: page.itemsNotShown }] as const] : []));
     pages = pageCatalog.pages.map((page, index) => {
-      const items = priorItems.get(page.id);
+      const kept = priorItems.get(page.id);
       return { id: page.id, title: page.title, folder: page.folder,
         frameFiles: byPage[index]!.map((description) => description.file),
-        frameIds: byPage[index]!.map((description) => description.frameId!), ...(items ? { items } : {}) };
+        frameIds: byPage[index]!.map((description) => description.frameId!),
+        ...(kept?.items ? { items: kept.items } : {}),
+        ...(kept?.itemsNotShown !== undefined ? { itemsNotShown: kept.itemsNotShown } : {}) };
     });
     paged = { pageHashes, ...(stalePages.length ? { stalePages } : {}) };
   } else descriptions = mutationCatalog!.frames.map(describeFrame);
   const retained = sameOwner ? new Map(previous.frames.map(frame => [frame.file, frame])) : new Map();
   const prepared = new Map(next.frames.map(frame => [frame.file, frame]));
+  const catalogFiles = new Set(descriptions.map(description => description.file));
+  const checked = new Set(next.lint.checkedFiles);
+  // A frame the reply prepared without linting is linted in the background;
+  // an earlier write's frame still waiting for its rows keeps waiting.
+  const lintPending = [...new Set([...(sameOwner ? previous.preparation?.lintPending ?? [] : []),
+    ...next.frames.map(frame => frame.file).filter(file => !checked.has(file))])].filter(file => catalogFiles.has(file));
+  const relint = (sameOwner ? previous.preparation?.relint ?? [] : []).filter(file => catalogFiles.has(file) && !prepared.has(file));
   return { ...snapshot, ...(pages ? { pages } : {}),
     lint: sameOwner ? scopedLint(previous, next.lint, new Set(descriptions.map(description => description.file))) : next.lint,
     frames: descriptions.flatMap(description => {
     const frame = prepared.get(description.file) ?? retained.get(description.file);
     return frame?.frameId === description.frameId ? [frame] : [];
   }), preparation: { revision: (pageCatalog ?? mutationCatalog)!.revision, epoch: ++intent, descriptions,
-    current: next.frames.map(frame => frame.file), errors: {}, ...paged } };
+    current: next.frames.map(frame => frame.file), errors: {}, ...paged,
+    ...(relint.length ? { relint } : {}), ...(lintPending.length ? { lintPending } : {}) } };
 }
 /** A scoped reply lints only the files it names. Every other file keeps its
  * confirmed rows, except a frame that left the catalog. */
@@ -190,9 +202,29 @@ export interface DesignPreparationDeps {
    * page, so a new batch waits for the camera to rest; work already sent to
    * the engine is never cancelled. Defaults to the shared background lane. */
   quietMs?(): number;
-  prepare(workspaceId: string, directoryId: string, revision: string, files: readonly string[]): Promise<{
+  prepare(workspaceId: string, directoryId: string, revision: string, files: readonly string[], lintFiles?: readonly string[]): Promise<{
     frames: DesignWorkspaceSnapshotWire["frames"]; errors: Array<{ file: string; message: string }>; catalogRevision: string;
+    lint?: { checkedFiles: string[]; violations: DesignWorkspaceSnapshotWire["lint"]["violations"] };
   }>;
+}
+
+/** Rows the renderer's runtime audits own; source lint never replaces them. */
+export const RUNTIME_AUDIT_RULE_IDS: ReadonlySet<string> = new Set([
+  "contrast",
+  "overflow",
+  "spacing-scale",
+  "audit-limit",
+  "layer-tree-limit",
+]);
+
+/** `linted` files take `rows` as their source lint rows; their runtime
+ * audit rows and every other file's rows stay. */
+export function withSourceLintRows(lint: DesignWorkspaceSnapshotWire["lint"], linted: ReadonlySet<string>,
+  rows: DesignWorkspaceSnapshotWire["lint"]["violations"]): DesignWorkspaceSnapshotWire["lint"] {
+  if (!linted.size) return lint;
+  return { ...lint, checkedFiles: [...new Set([...lint.checkedFiles, ...linted])],
+    violations: [...lint.violations.filter(row => !linted.has(row.file) || RUNTIME_AUDIT_RULE_IDS.has(row.ruleId)),
+      ...rows.filter(row => linted.has(row.file) && !RUNTIME_AUDIT_RULE_IDS.has(row.ruleId))] };
 }
 
 type PreparationReply = Awaited<ReturnType<DesignPreparationDeps["prepare"]>>;
@@ -217,10 +249,17 @@ function applyPreparedFrames(snapshot: DesignWorkspaceSnapshotWire, files: reado
   const frames = result.frames.filter(frame => requested.has(frame.file));
   const byFile = new Map(snapshot.frames.map(frame => [frame.file, frame]));
   for (const frame of frames) byFile.set(frame.file, frame);
-  return { ...snapshot,
+  const preparedFiles = new Set(frames.map(frame => frame.file));
+  const linted = new Set(result.lint?.checkedFiles.filter(file => preparedFiles.has(file)));
+  const lint = withSourceLintRows(snapshot.lint, linted, result.lint?.violations ?? []);
+  // An engine without prepare-lint returns no rows; asking again would not
+  // produce any, so a prepared frame always leaves the relint set.
+  const relint = preparation.relint?.filter(file => !preparedFiles.has(file));
+  return { ...snapshot, lint,
     frames: preparation.descriptions.flatMap(frame => byFile.get(frame.file) ?? []),
     preparation: { ...preparation, current: [...new Set([...preparation.current, ...frames.map(frame => frame.file)])],
-      errors: { ...preparation.errors, ...Object.fromEntries(result.errors.filter(frame => requested.has(frame.file)).map(frame => [frame.file, frame.message])) } },
+      errors: { ...preparation.errors, ...Object.fromEntries(result.errors.filter(frame => requested.has(frame.file)).map(frame => [frame.file, frame.message])) },
+      ...(relint ? { relint } : {}) },
   };
 }
 
@@ -301,7 +340,11 @@ export class DesignFramePreparation {
     // begin another engine read, including after an A → B → A round trip.
     while (this.running) await this.running.catch(() => {});
     if (!current()) return null;
-    const running = this.deps.prepare(workspaceId, snapshot.directoryId!, snapshot.preparation!.revision, files);
+    const relint = new Set(snapshot.preparation!.relint);
+    const lintFiles = files.filter(file => relint.has(file));
+    const running = lintFiles.length
+      ? this.deps.prepare(workspaceId, snapshot.directoryId!, snapshot.preparation!.revision, files, lintFiles)
+      : this.deps.prepare(workspaceId, snapshot.directoryId!, snapshot.preparation!.revision, files);
     this.running = running;
     try { return await running; }
     finally { if (this.running === running) this.running = null; }

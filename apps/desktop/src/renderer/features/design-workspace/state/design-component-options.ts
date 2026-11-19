@@ -8,6 +8,7 @@
 
 import {
   COMPONENT_VARIANT_ATTRIBUTE,
+  componentIgnoredAttributeMessage,
   componentInheritedValues,
   componentOptionCss,
   componentOptionValues,
@@ -15,13 +16,19 @@ import {
   type ComponentDeclaration,
   type ComponentEasing,
   type ComponentOptionValue,
+  type ComponentVariantState,
 } from "@zeros/design-core/component-options";
-import type { DesignFrameComponent } from "@zeros/protocol/design-catalog";
+import {
+  designComponentRecordLimitMessage,
+  type DesignFrameComponent,
+  type DesignFrameInstances,
+} from "@zeros/protocol/design-catalog";
 import { isDesignComponentVariantName } from "@zeros/protocol/design-path";
 import { DESIGN_RUNTIME_INSTANCE_TARGET } from "@zeros/protocol/design-runtime";
 
 import { designFrameRuntime } from "../../../platform/bridge/design-frame-runtime";
 import { designBackgroundWork } from "./design-background-work";
+import { designPartOverrideAttribute } from "./design-component-parts";
 import { applyDesignEditCached } from "./design-workspace-cache";
 
 export interface DesignFrameComponentView {
@@ -41,6 +48,16 @@ export function readDesignFrameComponent(component: DesignFrameComponent): Desig
     views.set(component, view);
   }
   return view;
+}
+
+/** Why a component's Options cannot be listed: its declaration is past a
+ * limit of the record, so the engine reported it without one. Null when the
+ * declaration arrived. */
+export function designComponentRecordProblem(
+  component: DesignFrameComponent | DesignFrameInstances["components"][string],
+  title: string,
+): string | null {
+  return component.exceeds ? designComponentRecordLimitMessage(title, component.exceeds) : null;
 }
 
 /** The custom properties these values set, in the strict forms the core
@@ -118,6 +135,17 @@ export function commitDesignComponentVariant(
     edit(`Save variant ${name}`, [{ operationId: "save-variant", type: "component.save-variant", file: frame.file, name, values }]));
 }
 
+/** Add one of the state variants (Hover, Pressed, Focus, Disabled): a line
+ * that names its CSS state and sets no option. */
+export function commitDesignComponentStateVariant(
+  workspaceId: string,
+  frame: { file: string; sourceVersion: string },
+  preset: { name: string; state: ComponentVariantState; label: string },
+) {
+  return applyDesignEditCached(workspaceId, frame,
+    edit(`Add ${preset.label} state`, [{ operationId: "save-state-variant", type: "component.save-variant", file: frame.file, name: preset.name, values: {}, state: preset.state }]));
+}
+
 /** An instance's options as its host's attributes give them: its values,
  * what it inherits (its variant's, else the defaults), which differ, and
  * whether anything is set that Reset would remove. */
@@ -143,6 +171,64 @@ export function commitDesignInstanceAttributes(
 ) {
   return applyDesignEditCached(workspaceId, frame, edit(intent, Object.entries(attributes).map(([attribute, value], index) =>
     ({ operationId: `set-attribute-${index}`, type: "node.set-attribute", nodeId, attribute, value }))));
+}
+
+/** The properties a declaration list sets, as written: split at its
+ * top-level semicolons, so a value's own (in quotes or parentheses) stays. */
+export function designDeclaredProperties(list: string): string[] {
+  const properties: string[] = [];
+  let depth = 0;
+  let quote: string | null = null;
+  let start = 0;
+  const take = (end: number) => {
+    const text = list.slice(start, end);
+    const colon = text.indexOf(":");
+    const property = colon > 0 ? text.slice(0, colon).trim() : "";
+    if (property) properties.push(property.startsWith("--") ? property : property.toLowerCase());
+    start = end + 1;
+  };
+  for (let index = 0; index < list.length; index += 1) {
+    const character = list[index]!;
+    if (quote) {
+      if (character === "\\") index += 1;
+      else if (character === quote) quote = null;
+    } else if (character === '"' || character === "'") quote = character;
+    else if (character === "(") depth += 1;
+    else if (character === ")") depth = Math.max(0, depth - 1);
+    else if (character === ";" && depth === 0) take(index);
+  }
+  take(list.length);
+  return properties;
+}
+
+/** Reset an instance's overrides in one step: each part's zd-style-<part>,
+ * and the style the instance sets on its root (its host's own style). */
+export function commitDesignInstanceOverridesReset(
+  workspaceId: string,
+  frame: { file: string; sourceVersion: string },
+  nodeId: string,
+  parts: readonly string[],
+  style: string | undefined,
+) {
+  const properties = style ? designDeclaredProperties(style) : [];
+  return applyDesignEditCached(workspaceId, frame, edit("Reset overrides", [
+    ...parts.map((part, index) => ({ operationId: `reset-part-${index}`, type: "node.set-attribute", nodeId, attribute: designPartOverrideAttribute(part), value: null })),
+    ...(properties.length ? [{ operationId: "reset-style", type: "node.set-styles", nodeId, styles: Object.fromEntries(properties.map((property) => [property, null])),
+      scope: "inline", responsiveContext: "base", stateContext: "default" }] : []),
+  ]));
+}
+
+/** Set the text a plain component's instance fills its default slot with:
+ * its host's own text. */
+export function commitDesignInstanceText(workspaceId: string, frame: { file: string; sourceVersion: string }, nodeId: string, text: string) {
+  return applyDesignEditCached(workspaceId, frame, edit("Set text", [{ operationId: "set-text", type: "node.set-text", nodeId, text }]));
+}
+
+/** Empty an instance's slot back to what its main puts there: delete the
+ * frame's own layers it holds, in one step. */
+export function commitDesignInstanceSlotReset(workspaceId: string, frame: { file: string; sourceVersion: string }, layers: readonly string[], label: string) {
+  return applyDesignEditCached(workspaceId, frame, edit(`Reset ${label}`, layers.map((nodeId, index) =>
+    ({ operationId: `reset-slot-${index}`, type: "node.delete", nodeId }))));
 }
 
 let messages = 0;
@@ -211,4 +297,10 @@ export function designComponentPreviewMessagesForTests(): number {
 
 export function resetDesignComponentOptionsForTests(): void {
   messages = 0;
+}
+
+/** What an instance sets that its component ignores: one line per attribute
+ * that names no option, as the engine's warning reads. */
+export function designInstanceIgnoredAttributes(host: DesignFrameInstances["hosts"][string]): string[] {
+  return Object.entries(host.ignored ?? {}).map(([name, value]) => componentIgnoredAttributeMessage(name, value));
 }

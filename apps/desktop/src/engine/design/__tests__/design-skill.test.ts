@@ -90,6 +90,22 @@ describe("Zeros Design skill package", () => {
     expect(states).not.toContain("Repeat the same markup once per state");
   });
 
+  it("has agents make components main frames, with slots and part overrides, never new components/ files", () => {
+    const skillFile = path.join(process.cwd(), DESIGN_SKILL_SOURCE, DESIGN_SKILL_FILE);
+    const reference = (page: string) => readFileSync(path.join(path.dirname(skillFile), "reference", page), "utf8");
+    const pages = [readFileSync(skillFile, "utf8"), ...["format.md", "states.md", "styling.md", "editor.md"].map(reference)];
+    for (const page of pages) {
+      expect(page).not.toMatch(/(?:becomes|Define (?:it|the part) (?:as|once as)) `components\/<name>\.html`/);
+      expect(page).not.toContain('<zd-card title="Plans">');
+    }
+    const format = reference("format.md");
+    expect(format).toContain('type="slot"');
+    expect(format).toContain("data-zd-slot");
+    expect(format).toContain("zd-style-<part>");
+    expect(format).toContain("Move main to canvas");
+    expect(reference("editor.md")).not.toContain("Its inner parts never appear in Layers");
+  });
+
   it("keeps SKILL.md a short contract whose table links every shipped reference page", () => {
     const skillFile = path.join(process.cwd(), DESIGN_SKILL_SOURCE, DESIGN_SKILL_FILE);
     const skill = readFileSync(skillFile, "utf8");

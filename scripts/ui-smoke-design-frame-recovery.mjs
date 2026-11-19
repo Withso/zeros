@@ -128,15 +128,23 @@ async function runDesignFrameReloadRecoverySmoke({ page, check }) {
           };
         if (
           message.op === "design.frame" &&
-          window.__designRecoveryUnavailable
+          (window.__designRecoveryUnavailable || window.__designRecoveryFailures > 0)
         ) {
+          if (!window.__designRecoveryUnavailable) window.__designRecoveryFailures -= 1;
           throw new Error("Frame is temporarily unavailable.");
         }
-        if (message.op === "design.frame")
+        if (message.op === "design.frame") {
+          const frame = documents[message.params.frame];
+          const prefix = window.__designRecoveryDocumentPrefix;
           return {
             type: "WORKSPACE_RESPONSE",
-            result: { frame: documents[message.params.frame] },
+            result: {
+              frame: prefix
+                ? { ...frame, srcDoc: frame.srcDoc.replace(/<head[^>]*>/i, (head) => head + prefix) }
+                : frame,
+            },
           };
+        }
         return request(message, ...args);
       };
       cache.setData("ws_design_harness", {
@@ -222,6 +230,72 @@ async function runDesignFrameReloadRecoverySmoke({ page, check }) {
         .isVisible(),
     );
 
+    // A load that fails once is transient: one silent automatic retry brings
+    // the frame back and the error never shows. Two causes reach that path: a
+    // document read that fails, and a document whose handshake never arrives
+    // (a starved renderer reloading many frames at once).
+    await page.evaluate(() => {
+      window.__designRecoverySawError = false;
+      const watch = () => {
+        if (document.querySelector('[data-design-frame="home.html"] [data-design-frame-load-error]'))
+          window.__designRecoverySawError = true;
+      };
+      window.__designRecoveryErrorWatch?.disconnect();
+      window.__designRecoveryErrorWatch = new MutationObserver(watch);
+      window.__designRecoveryErrorWatch.observe(document.body, { subtree: true, childList: true });
+    });
+    const transientRecovery = async (label, arrange) => {
+      await page.evaluate(() => { window.__designRecoverySawError = false; });
+      const startedAt = Date.now();
+      await page.evaluate(arrange);
+      await page.waitForFunction(
+        (selector) => {
+          const iframe = document.querySelector(selector);
+          return iframe?.hasAttribute("srcdoc") && iframe.hasAttribute("data-design-document-ready");
+        },
+        frameSelector,
+        { timeout: 25_000 },
+      ).catch(() => {});
+      const outcome = await page.evaluate((selector) => ({
+        ready: document.querySelector(selector)?.hasAttribute("data-design-document-ready") === true,
+        sawError: window.__designRecoverySawError === true,
+        failuresLeft: window.__designRecoveryFailures ?? 0,
+      }), frameSelector);
+      check(label, outcome.ready && !outcome.sawError && outcome.failuresLeft === 0,
+        JSON.stringify({ ...outcome, ms: Date.now() - startedAt }));
+    };
+    await transientRecovery(
+      "a frame whose document read fails once reloads silently instead of showing Couldn’t load",
+      async () => {
+        const { designWorkspaceSnapshotCache: cache, designFrameDocumentCache } =
+          await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-cache.ts");
+        window.__designRecoveryFailures = 1;
+        designFrameDocumentCache.clear();
+        cache.setData("ws_design_harness", {
+          ...cache.peekSnapshot("ws_design_harness").data,
+          protocolCapability: "a".repeat(64),
+        });
+      },
+    );
+    await transientRecovery(
+      "a frame whose first handshake never arrives reloads silently instead of showing Couldn’t load",
+      async () => {
+        const { designWorkspaceSnapshotCache: cache, designFrameDocumentCache } =
+          await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-cache.ts");
+        // Only documents loaded before this moment ignore the canvas's handshake.
+        window.__designRecoveryDocumentPrefix =
+          `<script>if (Date.now() < ${Date.now() + 3000}) addEventListener("message", (event) => event.stopImmediatePropagation(), true);</script>`;
+        designFrameDocumentCache.clear();
+        cache.setData("ws_design_harness", {
+          ...cache.peekSnapshot("ws_design_harness").data,
+          protocolCapability: null,
+        });
+      },
+    );
+    await page.evaluate(() => {
+      window.__designRecoveryDocumentPrefix = "";
+      window.__designRecoveryErrorWatch?.disconnect();
+    });
     await page.evaluate(async () => {
       const { designWorkspaceSnapshotCache: cache, designFrameDocumentCache } =
         await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-cache.ts");
@@ -235,7 +309,8 @@ async function runDesignFrameReloadRecoverySmoke({ page, check }) {
     const retry = page
       .locator('[data-design-frame="home.html"]')
       .getByRole("button", { name: "Retry frame" });
-    await retry.waitFor({ timeout: 10_000 });
+    // The silent reload fails as well before the error shows.
+    await retry.waitFor({ timeout: 20_000 });
     check(
       "persistent frame failures expose an inline recovery action",
       await retry.isVisible(),
@@ -253,12 +328,12 @@ async function runDesignFrameReloadRecoverySmoke({ page, check }) {
       .locator(`${frameSelector}[data-design-document-ready]`)
       .waitFor({ timeout: 10_000 });
     check(
-      "Retry frame reconnects after a temporary read failure without an automatic retry loop",
+      "Retry frame reconnects after a temporary read failure, after one silent reload and no retry loop",
       requests.filter(
         (url) =>
           url.pathname.endsWith("home.html") &&
           url.pathname.includes("f".repeat(64)),
-      ).length === 2,
+      ).length === 3,
     );
 
     // A live style commit advances the runtime while its immutable iframe URL

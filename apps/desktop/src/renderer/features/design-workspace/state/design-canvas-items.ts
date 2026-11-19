@@ -36,3 +36,11 @@ export function stableDesignCanvasItems(
 export function designPageItems(page: { items?: DesignCanvasItemSummary[] } | undefined): readonly DesignCanvasItemSummary[] {
   return page?.items ?? EMPTY;
 }
+
+export function designCanvasItemsPageId(
+  confirmedPageId: string | undefined,
+  history: { activePageId?: string; selectedItemId?: string | null } | null,
+): string | undefined {
+  // Only item history may move the item layer away from its mutation owner.
+  return history?.selectedItemId !== undefined ? history.activePageId ?? confirmedPageId : confirmedPageId;
+}

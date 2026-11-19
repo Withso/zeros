@@ -65,6 +65,7 @@ describe("dbChangedKinds", () => {
     "design.page.rename",
     "design.page.delete",
     "design.themes.update",
+    "design.component.move",
     "design.transaction.apply",
     "design.history.undo",
     "design.history.redo",

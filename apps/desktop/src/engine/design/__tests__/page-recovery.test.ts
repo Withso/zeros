@@ -3,6 +3,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -56,7 +57,8 @@ describe("journaled page deletion recovery", () => {
       readFileSync(path.join(root, directory, "meta/canvas.json"), "utf8"),
     );
   beforeEach(async () => {
-    root = mkdtempSync(path.join(tmpdir(), "zeros-page-delete-recovery-"));
+    // Faults match the real path the storage layer writes through.
+    root = realpathSync(mkdtempSync(path.join(tmpdir(), "zeros-page-delete-recovery-")));
     process.env.ZEROS_DATA_DIR = path.join(root, "private");
     await run(() => initializeDesignDocument(root));
   });

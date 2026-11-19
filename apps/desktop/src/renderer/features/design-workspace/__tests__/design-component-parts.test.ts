@@ -1,10 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { designComponentPartNodeId } from "@zeros/protocol/design-runtime";
+import { designComponentPartNodeId, designComponentSlotNodeId } from "@zeros/protocol/design-runtime";
+import { canInsertDesignFrame, designDrawParentAt, designFrameInsertion } from "../design-frame-insertion";
 import {
   designComponentInstanceMark,
+  designLayerDisplayName,
   designComponentPartHost,
   designFrameIsComponent,
   designComponentTextLock,
+  designLayerRowKind,
   isDesignComponentPartNodeId,
   refuseDesignComponentPartWrite,
 } from "../state/design-component-parts";
@@ -27,7 +30,14 @@ describe("what a person may not type over in a component", () => {
     expect(designComponentTextLock({}, "cc-send")).toBeNull();
   });
 
-  it("refuses every part of an instance, and knows its host", () => {
+  it("lets a style write name a part, as the instance's override, and refuses any other write", () => {
+    const part = designComponentPartNodeId("inst", "cc-send");
+    expect(() => refuseDesignComponentPartWrite([{ operationId: "s", type: "node.set-styles", nodeId: part, styles: { color: "red" } }])).not.toThrow();
+    expect(() => refuseDesignComponentPartWrite([{ operationId: "t", type: "node.set-text", nodeId: part, text: "x" }])).toThrow();
+    expect(() => refuseDesignComponentPartWrite([{ operationId: "m", type: "node.move", nodeId: "a", parentId: part, beforeId: null }])).toThrow();
+  });
+
+  it("refuses every other write to a part of an instance, and knows its host", () => {
     const part = designComponentPartNodeId("inst", "cc-send#1");
     expect(isDesignComponentPartNodeId(part)).toBe(true);
     expect(isDesignComponentPartNodeId("cc-send")).toBe(false);
@@ -36,6 +46,68 @@ describe("what a person may not type over in a component", () => {
     expect(designComponentTextLock({}, part)?.kind).toBe("part");
     expect(() => refuseDesignComponentPartWrite({ operations: [{ nodeId: "a" }, { parentId: part }] })).toThrow();
     expect(() => refuseDesignComponentPartWrite({ operations: [{ nodeId: "a" }] })).not.toThrow();
+  });
+});
+
+describe("an instance's slot", () => {
+  const slot = designComponentSlotNodeId("inst", "content");
+
+  it("takes a layer moved or drawn into it, and nothing else", () => {
+    expect(() => refuseDesignComponentPartWrite([{ operationId: "m", type: "node.move", nodeId: "a", parentId: slot, beforeId: null }])).not.toThrow();
+    expect(() => refuseDesignComponentPartWrite([{ operationId: "h", type: "node.set-html", nodeId: slot, mode: "append", html: "<div></div>" }])).not.toThrow();
+    expect(() => refuseDesignComponentPartWrite({ frame: "a.html", nodeId: "a", parentId: slot, parentStyles: { position: "relative" } })).not.toThrow();
+    for (const operation of [
+      { operationId: "s", type: "node.set-styles", nodeId: slot, styles: { color: "red" } },
+      { operationId: "r", type: "node.set-html", nodeId: slot, mode: "replace-inner", html: "<b></b>" },
+      { operationId: "d", type: "node.delete", nodeId: slot },
+      { operationId: "m", type: "node.move", nodeId: slot, parentId: "root", beforeId: null },
+    ]) expect(() => refuseDesignComponentPartWrite([operation]), operation.type).toThrow();
+  });
+
+  it("is a part that moves nowhere, named by its slot in Layers, with the instance as its host", () => {
+    expect(isDesignComponentPartNodeId(slot)).toBe(true);
+    expect(designComponentPartHost(slot)).toBe("inst");
+    expect(designLayerRowKind({}, slot)).toBe("slot");
+    expect(designLayerDisplayName({}, { oid: slot, tag: "div", name: "div", text: "" } as never)).toBe("Content slot");
+  });
+
+  it("draws a layer into its flow, without asking the main's frame to be positioned", () => {
+    const parent = { oid: slot, tag: "div", styles: { display: "block", position: "static" }, childCoordinateSpace: [1, 0, 0, 1, 0, 0] };
+    const insertion = designFrameInsertion(parent as never, "drawn", { x: 10, y: 10 }, { x: 60, y: 40 });
+    expect(insertion.parentStyles).toBeNull();
+    expect(insertion.operations).toEqual([expect.objectContaining({ type: "node.set-html", nodeId: slot, mode: "append" })]);
+    expect(insertion.insert.style).toContain("position:relative;width:50px;height:30px");
+  });
+
+  it("is the only place inside an instance a layer can be drawn or dropped", () => {
+    const frame = (oid: string, tag = "div") => ({ oid, tag, name: tag, text: "", styles: { display: "block" } }) as never;
+    expect(canInsertDesignFrame(frame(slot))).toBe(true);
+    expect(canInsertDesignFrame(frame(designComponentPartNodeId("inst", "cc-panel")))).toBe(false);
+    expect(canInsertDesignFrame(frame("inst", "zd-chat-composer"))).toBe(false);
+    expect(canInsertDesignFrame(frame("panel"))).toBe(true);
+  });
+
+  it("takes a layer drawn over it, though hit testing stops at the instance", async () => {
+    const empty = designComponentPartNodeId("inst", "empty");
+    const title = designComponentPartNodeId("inst", "title");
+    const nodes: Record<string, { tag: string; parentId: string | null }> = {
+      main: { tag: "main", parentId: null },
+      inst: { tag: "zd-card", parentId: "main" },
+      [slot]: { tag: "div", parentId: "inst" },
+      [empty]: { tag: "span", parentId: slot },
+      [title]: { tag: "h2", parentId: "inst" },
+    };
+    const details = (oid: string) => ({ oid, tag: nodes[oid]!.tag, name: nodes[oid]!.tag, text: "", styles: { display: "block" },
+      layout: { parentId: nodes[oid]!.parentId } }) as never;
+    const runtime = (part: string | null) => ({
+      supports: (method: string) => method === "getComponentPartAtLoc",
+      getElementAtLoc: async () => details("inst"),
+      getComponentPartAtLoc: async () => (part ? details(part) : null),
+      getNodeDetails: async (oid: string) => details(oid),
+    });
+    expect((await designDrawParentAt(runtime(empty), { x: 1, y: 1 }))?.oid).toBe(slot);
+    expect((await designDrawParentAt(runtime(title), { x: 1, y: 1 }))?.oid).toBe("main");
+    expect((await designDrawParentAt(runtime(null), { x: 1, y: 1 }))?.oid).toBe("main");
   });
 });
 
@@ -53,6 +125,15 @@ describe("where the canvas marks a component", () => {
     },
   };
   const mainTitle = (file: string) => (file === "home/composer.html" ? "Chat composer" : undefined);
+
+  it("tells Layers which rows are instances and which are their parts", () => {
+    expect(designLayerRowKind({ instances }, "inst-b")).toBe("instance");
+    expect(designLayerRowKind({ instances }, designComponentPartNodeId("inst-b", "chip"))).toBe("part");
+    // A host whose component is gone is not offered as an instance.
+    expect(designLayerRowKind({ instances }, "inst-c")).toBe("layer");
+    expect(designLayerRowKind({ instances }, "constructor")).toBe("layer");
+    expect(designLayerRowKind({}, "inst-b")).toBe("layer");
+  });
 
   it("marks a main component frame by its own record, and nothing else as a frame", () => {
     expect(designFrameIsComponent({ component })).toBe(true);

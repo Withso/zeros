@@ -1,12 +1,19 @@
-import { SHARD_COUNT } from "./scenarios.mjs";
+import { SHARD_COUNT, selectScenarios } from "./scenarios.mjs";
 
 export function parseSmokeArgs(args) {
-  const options = { list: false, format: "text", shard: undefined };
+  const options = { list: false, format: "text", shard: undefined, scenarios: undefined };
   const seen = new Set();
   for (const arg of args) {
     const flag = arg.split("=")[0];
-    if (!["--list", "--shard", "--format"].includes(flag)) {
+    if (!["--list", "--shard", "--format", "--scenario"].includes(flag)) {
       throw new Error(`unknown argument: ${arg}`);
+    }
+    if (flag === "--scenario") {
+      const id = /^--scenario=(.+)$/.exec(arg)?.[1];
+      if (!id)
+        throw new Error("expected --scenario=<id>, for example --scenario=design-pages");
+      options.scenarios = [...new Set([...(options.scenarios ?? []), id])];
+      continue;
     }
     if (seen.has(flag)) throw new Error(`duplicate argument: ${flag}`);
     seen.add(flag);
@@ -26,11 +33,12 @@ export function parseSmokeArgs(args) {
       options.format = "json";
     } else {
       throw new Error(
-        `invalid argument: ${arg}; use --list, --shard=k/n or --format=json`,
+        `invalid argument: ${arg}; use --list, --shard=k/n, --scenario=<id> or --format=json`,
       );
     }
   }
   if (seen.has("--format") && !options.list)
     throw new Error("--format=json requires --list");
+  if (options.scenarios) selectScenarios(options.shard, options.scenarios);
   return options;
 }

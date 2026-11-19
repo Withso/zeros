@@ -316,3 +316,32 @@ describe("deep authored trees", () => {
     expect(await deepSnapshotSummary(page, "leaf")).toEqual({ valid: true, limited: true, leafText: null });
   });
 });
+
+const AUDITED_DOCUMENT = `<!doctype html><html><head><style>body { margin: 0; font: 16px/20px sans-serif; } p { margin: 0 0 8px; padding: 4px 8px; }</style></head><body>
+<p data-oid="oklch" style="background-color: oklch(0.968 0.007 247.896); color: oklch(0.208 0.042 265.755)">Dark text on a light oklch fill</p>
+<p data-oid="faint" style="background-color: oklch(0.9 0 0); color: oklch(0.8 0 0)">Faint oklch text</p>
+<p data-oid="lab" style="background-color: lab(97 0 0); color: lch(20 10 270)">Dark lab text</p>
+<p data-oid="p3" style="background-color: color(display-p3 0 0 0); color: color(display-p3 1 1 1)">White on black in display-p3</p>
+<p data-oid="ellipsis" style="width: 100px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis">A long file name that is cut off at the end.pdf</p>
+<p data-oid="clipped" style="width: 100px; overflow: hidden; white-space: nowrap">A long file name that is cut off at the end.pdf</p>
+<p data-oid="clamp" style="width: 100px; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden">A paragraph long enough to need more than the two lines its clamp allows here.</p>
+</body></html>`;
+
+describe("audits of authored colours and clipped text", () => {
+  let browser: Browser;
+  beforeAll(async () => {
+    browser = await chromium.launch({ headless: true });
+  });
+  afterAll(async () => {
+    await browser?.close();
+  });
+
+  it("measures contrast in the colour space each value is written in, and skips text cut off on purpose", async () => {
+    const page = await fixture(browser, AUDITED_DOCUMENT);
+    const { result: snapshot } = await request<DesignRuntimeSnapshot>(page, "getSnapshot", {});
+    const flagged = (ruleId: string) => snapshot.warnings.filter((warning) => warning.ruleId === ruleId).map((warning) => warning.oid).sort();
+    expect(flagged("contrast")).toEqual(["faint"]);
+    expect(flagged("overflow")).toEqual(["clipped"]);
+    await page.close();
+  });
+});

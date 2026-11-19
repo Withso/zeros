@@ -1,4 +1,5 @@
 import { parentPort } from "node:worker_threads";
+import { handDesignComponentRendersToEngine } from "./component-last-good";
 import { withDesignDirectoryNameLease } from "./directory-registry";
 import { prepareDesignFrameIdentitiesInWorker } from "./document";
 import { createDesignReadScope, withDesignReadScope, type DesignReadScope } from "./safe-files";
@@ -8,6 +9,7 @@ import { composeDesignFrameSourcesInWorker } from "./thumbnail-batch";
 // The engine sends a batch only when no App fonts are in play. A worker never
 // downloads one either, so font readiness cannot differ from the engine's.
 configureDesignFonts({ fetch: (async () => { throw new Error("Design preparation workers do not fetch."); }) as unknown as typeof fetch });
+handDesignComponentRendersToEngine();
 
 /** `directory` is the engine's active Design folder: a worker has its own
  * empty directory registry, so it would otherwise read the default one. */

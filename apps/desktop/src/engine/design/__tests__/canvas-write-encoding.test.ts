@@ -2,7 +2,8 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { decodeCanvasFile, encodeCanvasFile } from "../canvas-file";
+import { migrateDesignFoundationManifest } from "@zeros/design-core";
+import { decodeCanvasFile, designCanvasValidationsForTests, encodeCanvasFile, isCanonicalDesignCanvas } from "../canvas-file";
 import type { CanvasDocument } from "../document-model";
 import { readCanvas, writeCanvas } from "../document-storage";
 import { withDesignDirectoryNameLease } from "../directory-registry";
@@ -61,5 +62,54 @@ describe("canvas writes", () => {
     const copied = await write(setup(), false);
     expect(direct).toBe(copied);
     expect(JSON.parse(direct).frames.edge_frame).toMatchObject({ x: 0, y: 10.5, width: 300 });
+  });
+
+  /** A one-page directory whose meta/canvas.json is `text`, with its three frames. */
+  const seedCanvas = (text: string) => {
+    const root = mkdtempSync(path.join(tmpdir(), "zeros-canvas-write-"));
+    roots.push(root);
+    const directory = path.join(root, pagesDirectory);
+    mkdirSync(path.join(directory, "meta"), { recursive: true });
+    writeFileSync(path.join(directory, "meta/design.toml"), pagesManifest);
+    writeFileSync(path.join(directory, "meta/canvas.json"), text);
+    mkdirSync(path.join(directory, "page-1"), { recursive: true });
+    for (let frame = 0; frame < 3; frame++)
+      writeFileSync(path.join(directory, `page-1/frame-${frame}.html`), `<!doctype html><html><body><main data-oid="m${frame}">x</main></body></html>`);
+    process.env.ZEROS_DATA_DIR = path.join(root, "private");
+    return { root, directory };
+  };
+
+  it("validates an authored canvas once: a move and the next read add no validation", async () => {
+    const authored = JSON.stringify(pagedCanvasFixture(1, 3), null, 4) + "\n";
+    expect(JSON.parse(authored)).not.toHaveProperty("foundation");
+    const { root, directory } = seedCanvas(authored);
+    await withDesignDirectoryNameLease(root, pagesDirectory, async () => {
+      const canvas = await readCanvas(root);
+      canvas.frames["page-1/frame-1.html"]!.x = 321;
+      const before = designCanvasValidationsForTests();
+      await writeCanvas(root, canvas);
+      const reread = await readCanvas(root);
+      expect(designCanvasValidationsForTests() - before).toBe(0);
+      expect(reread.frames["page-1/frame-1.html"]!.x).toBe(321);
+    });
+    const written = readFileSync(path.join(directory, "meta/canvas.json"), "utf8");
+    expect(written).toBe(authored.replace('"title": "Frame 2",\n            "x": 640', '"title": "Frame 2",\n            "x": 321'));
+  });
+
+  it("keeps the encoder's own bytes canonical when a move reproduces them", async () => {
+    const authored = JSON.stringify(pagedCanvasFixture(1, 3), null, 2) + "\n";
+    const canonical = encodeCanvasFile(
+      { ...decodeCanvasFile(authored, { version: 2 }), foundation: migrateDesignFoundationManifest(undefined) },
+      { version: 2 },
+    );
+    const { root, directory } = seedCanvas(canonical);
+    await withDesignDirectoryNameLease(root, pagesDirectory, async () => {
+      const canvas = await readCanvas(root);
+      canvas.frames["page-1/frame-1.html"]!.x = 321;
+      await writeCanvas(root, canvas);
+    });
+    const written = readFileSync(path.join(directory, "meta/canvas.json"), "utf8");
+    expect(written).toBe(canonical.replace('"x": 640', '"x": 321'));
+    expect(isCanonicalDesignCanvas(written)).toBe(true);
   });
 });
