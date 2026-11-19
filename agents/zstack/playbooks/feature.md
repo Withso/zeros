@@ -19,6 +19,12 @@ For new or changed behavior. Numbers refer to `agents/zstack/principles.md`.
    cases for shared paths.
 5. **Implement** the smallest change that satisfies the example. New wire fields
    are optional; persisted keys stay compatible.
-6. **Comment pass, verify and review** (`zstack-comments`, `zstack-verify`,
+6. **Comment pass, verify and review.** On every feature diff, cold-scan added
+   or changed comments under `RULES.md` §7, whether or not you invoke
+   `zstack-comments`: remove narration, repetition and dividers; keep only
+   non-obvious reasons. Preserve functional, generated, tool and legal
+   comments, type and lint directives, and concise non-obvious security,
+   lifecycle, concurrency and compatibility rationale. Use `zstack-comments`
+   for dedicated comment cleanups. Verify and review (`zstack-verify`,
    `zstack-review`). UI work also follows `ui-design.md`.
 7. **Deliver and learn** (`integrate-pr.md`, `zstack-learn`).
