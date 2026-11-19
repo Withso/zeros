@@ -2201,7 +2201,7 @@ export function startWatchdog(): void {
 const SENTINEL_DIR_NAME = "default-project";
 
 function sentinelRoot(): string {
-  // Channel- and instance-scoped so a dev run's sentinel never lands in the
+  // Dev-aware dot-dir so a dev run's sentinel lands in ~/.zeros-dev, not the
   // production ~/.zeros (zerosStateRoot honors HOME via os.homedir()).
   const dir = path.join(zerosStateRoot(), SENTINEL_DIR_NAME);
   try {

@@ -13,7 +13,7 @@
 // ──────────────────────────────────────────────────────────
 
 import { defineConfig } from "tsup";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { cloudWorkspaceChannelEnabled } from "../shared/cloud-workspace-channel";
 
 export default defineConfig({
@@ -139,11 +139,5 @@ export default defineConfig({
   // No effect in dev.
   banner: {
     js: readFileSync(new URL("./boot-trace.cjs", import.meta.url), "utf8"),
-  },
-  // scripts/electron-builder-run.mjs refuses to package a main whose bake is
-  // another channel's: a packaged build never takes its channel from its env.
-  async onSuccess() {
-    mkdirSync("dist-electron", { recursive: true });
-    writeFileSync("dist-electron/build-channel.json", `${JSON.stringify({ channel: process.env.ZEROS_CHANNEL || "" })}\n`);
   },
 });

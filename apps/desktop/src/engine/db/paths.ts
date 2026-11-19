@@ -1,13 +1,22 @@
-// Every root Zeros writes comes from here. Two storage families:
-//   - installed (stable `com.zeros`, alpha `com.zeros.alpha`): one app per
-//     channel, data in the per-OS application-data dir, work in `~/zeros[-alpha]`.
-//   - development (the `dev` channel): one identity per instance, shapes and
-//     compatibility contracts in local-development-paths.cjs.
-// The family is a storage decision only; account-free admission stays
-// isLocalDevelopmentRuntime(), decided by Electron main.
+// ──────────────────────────────────────────────────────────
+// Zeros DB — on-disk locations (the universal-storage decision)
+// ──────────────────────────────────────────────────────────
 //
-// The macOS id is `com.zeros`, not `com.zeros.app`: Finder types a folder whose
-// name ends in `.app` as an application and will not open it.
+// The unified Zeros DB + identity files live in the per-OS *application-data*
+// directory; the worktrees live in a separate *visible* folder. Splitting the
+// two is deliberate: state the user never edits stays out of the way, while the
+// checkouts they actually open in an editor stay somewhere they can find.
+//
+//   • macOS   → ~/Library/Application Support/com.zeros/   (dev: com.zeros.dev)
+//   • Linux   → $XDG_DATA_HOME/zeros  or  ~/.local/share/zeros   (dev: zeros-dev)
+//   • Windows → %APPDATA%/com.zeros
+//   • Override with ZEROS_DATA_DIR (used by cloud sandboxes + tests).
+//
+// NOTE: the macOS id is `com.zeros`, deliberately NOT `com.zeros.app` — a folder
+// whose name ends in `.app` is mis-typed by Finder as a launchable application
+// (it shows the 🚫 "can't open" icon), so a user who browses into Application
+// Support cannot open their own data folder.
+// ──────────────────────────────────────────────────────────
 
 import { createHash } from "node:crypto";
 import { realpathSync } from "node:fs";
@@ -15,200 +24,205 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { channel, isLocalDevelopmentRuntime } from "../runtime";
 import {
-  developmentInstanceId,
   developmentLayout,
   developmentPaths,
+  localInstanceStateRoot,
   type DevelopmentPaths,
 } from "./local-development-paths.cjs";
 
-export type StorageFamily = "installed" | "development";
+/** Reverse-DNS application id for the macOS/Windows app-data folder. */
+const APP_ID = "com.zeros";
 
-export function storageFamily(): StorageFamily {
-  return channel() === "dev" ? "development" : "installed";
+/** Per-worktree DEV instance slug (set by scripts/dev-instance.mjs as
+ *  ZEROS_INSTANCE) that further isolates the dev data dir so each parallel dev
+ *  worktree is its own app: com.zeros.dev → com.zeros.dev.<slug>. Empty for the
+ *  primary dev checkout, and IGNORED outside the dev channel (packaged
+ *  alpha/stable never set it) so those data dirs are unaffected. Re-sanitised here
+ *  (defence in depth — the launcher already slugs it) to keep it filesystem-safe
+ *  and reverse-DNS-clean. */
+function devInstanceSlug(): string {
+  const raw = process.env.ZEROS_INSTANCE?.trim();
+  if (!raw) return "";
+  return raw
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/^[-._]+|[-._]+$/g, "")
+    .slice(0, 40);
 }
 
-/** This process's development identity, or null in an installed channel. */
-export function developmentInstance(): string | null {
-  return storageFamily() === "development"
-    ? developmentInstanceId(process.env)
-    : null;
-}
-
-// Hot: Design storage resolves zerosDataDir() per recording chunk. The roots
-// are rebuilt only when one of the exact inputs developmentPaths() reads
-// changes (tests and main change them at runtime).
-let developmentInputs: readonly unknown[] = [];
-let developmentRoots: DevelopmentPaths | null = null;
-
-function development(): DevelopmentPaths {
-  const env = process.env;
-  const platform = process.platform;
-  const inputs = [
-    env.ZEROS_INSTANCE,
-    env.ZEROS_LOCAL_LAYOUT,
-    homedir(),
-    platform,
-    platform === "win32" ? env.APPDATA : platform === "darwin" ? undefined : env.XDG_DATA_HOME,
-    platform === "win32" ? env.LOCALAPPDATA : platform === "darwin" ? undefined : env.XDG_CACHE_HOME,
-  ];
-  if (
-    developmentRoots &&
-    inputs.length === developmentInputs.length &&
-    inputs.every((value, index) => value === developmentInputs[index])
-  )
-    return developmentRoots;
-  const instance = developmentInstanceId(env);
-  developmentRoots = Object.freeze(
-    developmentPaths({
-      instance,
-      layout: developmentLayout(instance, env),
-      home: inputs[2] as string,
-      platform,
-      env,
-    }),
-  );
-  developmentInputs = inputs;
-  return developmentRoots;
-}
-
-/** Another development instance's data dir in the consolidated layout. */
-export function zerosDevelopmentDataDir(instance: string): string {
-  return developmentPaths({
-    instance,
-    home: homedir(),
-    platform: process.platform,
-    env: process.env,
-  }).dataDir;
-}
-
-/** Reverse-DNS id of an installed channel: com.zeros | com.zeros.alpha. */
-function installedId(): string {
+/** Reverse-DNS id leaf for macOS/Windows: com.zeros[.dev|.alpha][.<slug>]. */
+function macWinId(inst: string): string {
   const ch = channel();
-  return ch === "stable" ? "com.zeros" : `com.zeros.${ch}`;
+  const suffix = isLocalDevelopmentRuntime()
+    ? ".local"
+    : ch === "stable"
+      ? ""
+      : `.${ch}`;
+  return `${APP_ID}${suffix}${inst ? `.${inst}` : ""}`;
 }
 
-function installedDataDir(ch: "stable" | "alpha" = channel() as "stable" | "alpha"): string {
+/** XDG flat name for Linux: zeros[-dev|-alpha][-<slug>]. */
+function nixName(inst: string): string {
+  const ch = channel();
+  const base = isLocalDevelopmentRuntime()
+    ? "zeros-local"
+    : ch === "stable"
+      ? "zeros"
+      : `zeros-${ch}`;
+  return inst ? `${base}-${inst}` : base;
+}
+
+/** Build the per-OS application-data dir for a given instance slug. macOS/Windows
+ *  use the reverse-DNS id, Linux the XDG flat name. ZEROS_DATA_DIR overrides
+ *  (cloud sandboxes + tests) and ignores the instance split. */
+function dataDirForInstance(inst: string): string {
+  if (process.env.ZEROS_DATA_DIR) return process.env.ZEROS_DATA_DIR;
   const home = homedir();
-  const id = ch === "stable" ? "com.zeros" : `com.zeros.${ch}`;
   switch (process.platform) {
     case "darwin":
-      return path.join(home, "Library", "Application Support", id);
+      return path.join(home, "Library", "Application Support", macWinId(inst));
     case "win32":
-      return path.join(process.env.APPDATA ?? path.join(home, "AppData", "Roaming"), id);
-    default:
+      return path.join(
+        process.env.APPDATA ?? path.join(home, "AppData", "Roaming"),
+        macWinId(inst),
+      );
+    default: // linux + cloud sandboxes (XDG data dir, env-paths convention)
       return path.join(
         process.env.XDG_DATA_HOME ?? path.join(home, ".local", "share"),
-        ch === "stable" ? "zeros" : `zeros-${ch}`,
+        nixName(inst),
       );
   }
 }
 
-/** Every real profile root on this machine whatever overrides are set
- *  (Stable, Alpha, the development family), and the app-data folder that holds
- *  them and their siblings. */
-export function realProfileRoots(): { profileRoots: string[]; appData: string } {
-  const family = developmentPaths({ instance: "default", home: homedir(), platform: process.platform, env: process.env }).sharedDataDir;
-  return { profileRoots: [installedDataDir("stable"), installedDataDir("alpha"), family], appData: path.dirname(family) };
+/** The per-worktree instance slug applied to data dirs — dev channel only
+ *  (packaged alpha/stable never set ZEROS_INSTANCE). */
+function dataDirSlug(): string {
+  return channel() === "dev" ? devInstanceSlug() : "";
 }
 
-/** This identity's application data: zeros.db, secrets.json, engines/,
- *  worktrees/ and Electron's userData (main redirects it here). */
+/** The per-OS application-data directory holding THIS instance's Zeros DB +
+ *  identity files (secrets.json, app-settings.json, engines/, worktrees/). In
+ *  the dev channel this is per-worktree (com.zeros.dev.<slug>); stable/alpha carry
+ *  no slug. THE single identity generator: apps/desktop/electron/main.ts redirects Electron's
+ *  own userData here too, so the DB and all Electron state share one identifier
+ *  (no more com.zeros.* vs name-based "Zeros — <Label>" split). Resolves so the
+ *  SAME engine code works locally (macOS) and in a cloud sandbox (Linux).
+ *  Override with ZEROS_DATA_DIR. */
 export function zerosDataDir(): string {
   if (process.env.ZEROS_DATA_DIR) return process.env.ZEROS_DATA_DIR;
-  return storageFamily() === "development"
-    ? development().dataDir
-    : installedDataDir();
+  return localV2()?.dataDir ?? dataDirForInstance(dataDirSlug());
 }
 
-/** The family-primary data dir: an installed channel's own data dir, or the
- *  development family's `com.zeros.local`, which holds the shared Local
- *  provider credentials and the instance registry. */
+// A new account-free Local identity's own layout (local-development-paths.cjs);
+// null for a legacy Local profile, hosted development and installed channels,
+// which all resolve exactly as above. Cached per exact input because Design
+// storage resolves zerosDataDir() per recording chunk.
+let localInputs: readonly unknown[] = [];
+let localRoots: DevelopmentPaths | null = null;
+function localV2(): DevelopmentPaths | null {
+  if (!isLocalDevelopmentRuntime()) return null;
+  const instance = devInstanceSlug();
+  if (!instance || developmentLayout(process.env) === "legacy") return null;
+  const env = process.env;
+  const inputs = [instance, homedir(), process.platform, env.APPDATA, env.LOCALAPPDATA, env.XDG_DATA_HOME, env.XDG_CACHE_HOME];
+  if (localRoots && inputs.every((value, index) => value === localInputs[index])) return localRoots;
+  localRoots = Object.freeze(developmentPaths({ instance, layout: "v2", home: inputs[1] as string, platform: process.platform, env }));
+  localInputs = inputs;
+  return localRoots;
+}
+
+/** A new Local identity's Electron session (`<data dir>/electron`), else null:
+ *  every other launch keeps its session where it always was (main.ts). */
+export function zerosLocalSessionDataDir(): string | null {
+  return localV2() ? path.join(zerosDataDir(), "electron") : null;
+}
+
+/** A new Local identity's log folder, else null (main.ts keeps every other
+ *  launch's log folder). */
+export function zerosLocalLogDir(): string | null {
+  const local = localV2();
+  if (!local) return null;
+  return process.platform === "darwin" ? local.logDir : path.join(zerosDataDir(), "logs");
+}
+
+/** Every real profile root on this machine whatever overrides are set
+ *  (Stable, Alpha, hosted Dev, the Local family) and the app-data folder that
+ *  holds them and their per-instance siblings. */
+export function realProfileRoots(): { profileRoots: string[]; appData: string } {
+  const home = homedir();
+  const appData =
+    process.platform === "darwin"
+      ? path.join(home, "Library", "Application Support")
+      : process.platform === "win32"
+        ? (process.env.APPDATA ?? path.join(home, "AppData", "Roaming"))
+        : (process.env.XDG_DATA_HOME ?? path.join(home, ".local", "share"));
+  const names =
+    process.platform === "darwin" || process.platform === "win32"
+      ? ["com.zeros", "com.zeros.alpha", "com.zeros.dev", "com.zeros.local"]
+      : ["zeros", "zeros-alpha", "zeros-dev", "zeros-local"];
+  return { profileRoots: names.map((name) => path.join(appData, name)), appData };
+}
+
+/** The channel-PRIMARY data dir with the instance slug STRIPPED: com.zeros /
+ *  com.zeros.dev / com.zeros.alpha. Every dev worktree resolves the SAME value,
+ *  so it's the home for state shared across a channel's instances — notably the
+ *  shared dev secrets.json (apps/desktop/electron/secret-store.ts + ZEROS_SHARED_SECRETS_DIR),
+ *  which is what makes "log in once, every worktree authed" work. */
 export function zerosChannelDataDir(): string {
-  if (process.env.ZEROS_DATA_DIR) return process.env.ZEROS_DATA_DIR;
-  return storageFamily() === "development"
-    ? development().sharedDataDir
-    : installedDataDir();
+  return dataDirForInstance("");
 }
 
-/** Reverse-DNS identity: an installed channel's id, or the development
- *  instance's macOS bundle id (`com.zeros.local.<inst>`). */
+/** The reverse-DNS application identity for THIS (channel, instance):
+ *  com.zeros[.dev|.alpha][.<slug>]. Electron/main.ts uses it for the macOS
+ *  Chromium-cache + logs leaf names, so cache/logs share the SAME identifier as
+ *  userData + the DB. (macOS/Windows only; Linux uses nixName for data dirs.) */
 export function appIdentity(): string {
-  return storageFamily() === "development"
-    ? development().bundleId
-    : installedId();
+  return macWinId(dataDirSlug());
 }
 
-/** The dot-dir LEAF name: `.zeros` | `.zeros-alpha`, and `.zeros-local` for the
- *  development family (whose state root is an instance below it).
+/** The dot-dir LEAF name for THIS channel: `.zeros` | `.zeros-alpha` |
+ *  `.zeros-dev`. Mirrors nixName()'s channel-suffix convention above.
  *
- *  Keyed on channel(), never a dev/prod boolean: every packaged channel owns its
- *  own settings.toml, `detach.lock` (single-instance enforcement in
- *  git/detach.ts), state.db and worktrees, so concurrently running apps never
- *  share them. */
+ *  THE single source of truth for the dot-dir name. Four call sites used to
+ *  inline `isDevRuntime() ? ".zeros-dev" : ".zeros"` — a TWO-way split on a
+ *  boolean — which meant **Beta and Production shared `~/.zeros`** while every
+ *  other identity (data dir, workspaces, ports, keychain, scheme) was split three
+ *  ways. Consequences that shipped:
+ *
+ *    • `~/.zeros/settings.toml` was one file for both apps — changing a setting in
+ *      Beta silently changed Production.
+ *    • `~/.zeros/detach.lock` is SINGLE-INSTANCE ENFORCEMENT (git/detach.ts).
+ *      With Beta holding it, Production could not enter detach mode at all: it
+ *      failed with DETACH_LOCKED naming a workspace belonging to the other app.
+ *    • `~/.zeros/state.db` + `worktrees` were shared between two concurrently
+ *      running apps whose workspaces live in different roots.
+ *
+ *  The dev instance was immune (it correctly used `.zeros-dev`), which is exactly
+ *  why none of this was ever reproducible in dev. Keyed on channel() now, so it
+ *  stays correct as channels are added. */
 export function zerosDotDirName(): string {
-  if (storageFamily() === "development") return ".zeros-local";
+  if (isLocalDevelopmentRuntime()) return ".zeros-local";
   const ch = channel();
   return ch === "stable" ? ".zeros" : `.zeros-${ch}`;
 }
 
-/** The state root: settings.toml, term-zdotdir/, state.db, detach.lock and the
- *  default-project sentinel. Everything channel-scoped MUST resolve through
- *  here so no channel or instance writes into another's state. */
+/** The user-global dot-dir: `~/.zeros` (prod) / `~/.zeros-alpha` / `~/.zeros-dev`.
+ *  Holds settings.toml, term-zdotdir/, state.db, detach.lock, the default-project
+ *  sentinel, and (dev) the per-worktree launcher bundles. Everything channel-scoped
+ *  MUST resolve through here so no channel writes into another's state. */
 export function zerosStateRoot(): string {
-  if (storageFamily() === "development") return development().stateRoot;
+  if (isLocalDevelopmentRuntime()) {
+    return localInstanceStateRoot(devInstanceSlug());
+  }
   return path.join(homedir(), zerosDotDirName());
 }
 
-/** The Claude refresh lock's root, as each identity has always used it:
- *  hosted development processes share `~/.zeros-dev/credentials`; Local and
- *  installed channels use their own state root. */
-export function zerosCredentialLockRoot(): string {
-  if (storageFamily() === "development" && !isLocalDevelopmentRuntime())
-    return path.join(homedir(), ".zeros-dev", "credentials");
-  return path.join(zerosStateRoot(), "credentials");
-}
-
-/** The pre-split `~/.zeros`, read only by the one-time settings seed
- *  (settings/files.ts seedUserSettingsFromLegacyRoot): an installed non-stable
- *  channel with no settings of its own starts from Production's. */
+/** The pre-split shared dot-dir (`~/.zeros`). Used ONLY by the one-time settings
+ *  seed (settings/files.ts seedUserSettingsFromLegacyRoot): before the 3-way split
+ *  Beta wrote its settings here, so a Beta that upgrades into the split would
+ *  otherwise silently start with default settings. */
 export function legacySharedStateRoot(): string {
   return path.join(homedir(), ".zeros");
-}
-
-/** The visible root: the parent of `workspaces`, `design workspaces` and
- *  `cloud-sync`. */
-export function zerosVisibleRoot(): string {
-  if (process.env.ZEROS_WORKSPACES_DIR)
-    return path.dirname(process.env.ZEROS_WORKSPACES_DIR);
-  if (storageFamily() === "development") return development().visibleRoot;
-  const ch = channel();
-  return path.join(homedir(), ch === "stable" ? "zeros" : `zeros-${ch}`);
-}
-
-/** Electron's sessionData for Electron's cache root `cacheRoot`. Installed
- *  channels keep `<cache>/<id>` (main.ts carries their older profile forward);
- *  a legacy development profile keeps `<cache>/com.zeros.local.<inst>`; a new
- *  development identity, and any one under ZEROS_DATA_DIR, uses
- *  `<data dir>/electron`. */
-export function zerosSessionDataDir(cacheRoot: string): string {
-  if (storageFamily() !== "development") return path.join(cacheRoot, installedId());
-  if (!process.env.ZEROS_DATA_DIR && development().layout === "legacy")
-    return path.join(cacheRoot, development().bundleId);
-  return path.join(zerosDataDir(), "electron");
-}
-
-/** main.log, app.jsonl and engine.log. macOS uses ~/Library/Logs; other
- *  platforms keep logs beside the data dir. */
-export function zerosLogDir(): string {
-  if (process.platform !== "darwin") return path.join(zerosDataDir(), "logs");
-  return storageFamily() === "development"
-    ? development().logDir
-    : path.join(homedir(), "Library", "Logs", installedId());
-}
-
-/** The development instance's native bundle + version marker, else null. */
-export function zerosDevelopmentBundleDir(): string | null {
-  return storageFamily() === "development" ? development().bundleDir : null;
 }
 
 /** The unified Zeros database file. */
@@ -216,15 +230,27 @@ export function zerosDbPath(): string {
   return path.join(zerosDataDir(), "zeros.db");
 }
 
-/** The visible worktrees root: <visible root>/workspaces/<repo>/<ws>.
- *  Distinct from the hidden app-data dir above; user- and CLI-navigable. */
+/** The visible worktrees root: ~/zeros/workspaces/<repo>/<ws>.
+ *  Distinct from the hidden app-data dir above; user- and CLI-navigable.
+ *  (Worktree relocation off the legacy ~/.zeros/worktrees is a later Phase-0
+ *  step; exposed here so callers share one definition.) */
 export function zerosWorkspacesRoot(): string {
   if (process.env.ZEROS_WORKSPACES_DIR) return process.env.ZEROS_WORKSPACES_DIR;
-  return path.join(zerosVisibleRoot(), "workspaces");
+  const ch = channel();
+  const base = isLocalDevelopmentRuntime()
+    ? "zeros-local"
+    : ch === "stable"
+      ? "zeros"
+      : `zeros-${ch}`;
+  // Per-worktree dev instance keeps its own visible worktrees root too, so two
+  // instances never write worktrees into a directory the other's registry owns.
+  const inst = ch === "dev" ? devInstanceSlug() : "";
+  const dir = inst ? `${base}-${inst}` : base; // zeros-dev-<slug>
+  return path.join(homedir(), dir, "workspaces");
 }
 
 /** The visible sibling root for design worktrees:
- * `<visible root>/design workspaces`.
+ * `~/zeros[-channel][-instance]/design workspaces`.
  *
  * Keep the space in the leaf: this is user-facing Finder territory, not an
  * internal identifier. Tests/cloud may override it independently, or derive a
@@ -234,7 +260,13 @@ export function zerosDesignWorkspacesRoot(): string {
   if (process.env.ZEROS_DESIGN_WORKSPACES_DIR) {
     return process.env.ZEROS_DESIGN_WORKSPACES_DIR;
   }
-  return path.join(zerosVisibleRoot(), "design workspaces");
+  if (process.env.ZEROS_WORKSPACES_DIR) {
+    return path.join(
+      path.dirname(process.env.ZEROS_WORKSPACES_DIR),
+      "design workspaces",
+    );
+  }
+  return path.join(path.dirname(zerosWorkspacesRoot()), "design workspaces");
 }
 
 /** A stable, collision-resistant, human-recognizable key for an engine root
@@ -262,8 +294,9 @@ export function repoKey(root: string): string {
  *  engine bootstrap manifest (`engine.json`: pid/port/instance) + the `busy`
  *  heartbeat — the metadata that USED to be written into the served repo as
  *  `<root>/.zeros/{.port,.token,.busy}`. Keyed by repoKey so concurrent engines
- *  for different repos don't collide; identities stay separated by their data
- *  dirs. Override the base with ZEROS_DATA_DIR (tests/cloud). */
+ *  for different repos don't collide; dev vs prod stay separated by the
+ *  `com.zeros` / `com.zeros.dev` data-dir split. Override the base with
+ *  ZEROS_DATA_DIR (tests/cloud). */
 export function engineRuntimeDir(root: string): string {
   return path.join(zerosDataDir(), "engines", repoKey(root));
 }

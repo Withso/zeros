@@ -1,9 +1,10 @@
-// The development family's on-disk shapes (the `dev` channel: `pnpm
-// electron:local`, `pnpm electron:alpha`, test identities). Plain CommonJS with
-// Node built-ins: paths.ts, the launchers and `pnpm storage:inventory` (which
-// runs without node_modules) share this one definition.
+// Account-free Local's on-disk shapes (`pnpm electron:local`, selected by Local
+// admission). Hosted development (`pnpm electron:alpha`, a bare ZEROS_DEV=1
+// engine) keeps the `com.zeros.dev[.<slug>]` identity paths.ts has always
+// resolved. Plain CommonJS with Node built-ins: paths.ts, the launchers and
+// `pnpm storage:inventory` (which runs without node_modules) share it.
 //
-// A new identity (macOS; Linux and Windows use their app-data root):
+// A new Local identity (macOS; Linux and Windows use their app-data root):
 //   data      ~/Library/Application Support/com.zeros.local/instances/<inst>/
 //   session   <data>/electron/  (Electron sessionData; nothing is ever moved in)
 //   logs      ~/Library/Logs/com.zeros.local/<inst>/
@@ -14,12 +15,12 @@
 //             credentials, instances.json)
 //
 // Compatibility contracts:
-// - `ZEROS_LOCAL_LAYOUT=legacy` is exported only by `pnpm electron:local`, when
-//   the identity's pre-registry data folder `com.zeros.local.<inst>` exists. A
-//   legacy identity resolves every root exactly as before (data, session and
-//   logs under `com.zeros.local.<inst>`, bundle in its state root): its DB and
+// - `ZEROS_LOCAL_LAYOUT=legacy` is exported only by `pnpm electron:local`, for
+//   an identity whose established profile is the pre-registry flat
+//   `com.zeros.local.<inst>` (electron-local.mjs localLayout). A legacy
+//   identity resolves every root exactly as before (data, session and logs
+//   under `com.zeros.local.<inst>`, bundle in its state root): its DB and
 //   Keychain-bound provider profiles hold absolute paths, so nothing moves.
-//   Reserved identities never take it.
 // - ZEROS_DATA_DIR, ZEROS_WORKSPACES_DIR and ZEROS_DESIGN_WORKSPACES_DIR replace
 //   the data, workspaces and design-workspaces roots (paths.ts).
 // - The visible root keeps the flat `zeros-local-<inst>` shape the renderer's
@@ -29,31 +30,11 @@ const { homedir } = require("node:os");
 
 const FAMILY_ID = "com.zeros.local";
 const FAMILY_XDG = "zeros-local";
-const RESERVED_INSTANCE_IDS = Object.freeze(["alpha", "default"]);
 const INSTANCE_ID = /^[a-z0-9][a-z0-9._-]{0,39}$/;
 const CHECKOUT_INSTANCE_ID = /^[0-9a-f]{16}$/;
 
-// Same normalization main and paths.ts have always applied to ZEROS_INSTANCE.
-function sanitizeInstanceId(raw) {
-  return String(raw ?? "")
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9._-]+/g, "-")
-    .replace(/^[-._]+|[-._]+$/g, "")
-    .slice(0, 40);
-}
-
-function developmentInstanceId(env = process.env) {
-  return sanitizeInstanceId(env.ZEROS_INSTANCE) || "default";
-}
-
-function isReservedInstanceId(instance) {
-  return RESERVED_INSTANCE_IDS.includes(instance);
-}
-
 /** A Local checkout's id: the first 16 hex characters of the SHA-256 of its
- * canonical path. Hosted development identities never take this shape, so
- * account-free Local and hosted Dev can never resolve to one profile. */
+ * canonical path, the only id account-free Local runs on. */
 function isCheckoutInstanceId(instance) {
   return CHECKOUT_INSTANCE_ID.test(instance);
 }
@@ -63,12 +44,9 @@ function assertInstanceId(instance) {
     throw new Error("Invalid Zeros Local instance id");
 }
 
-/** `legacy` only when the launcher exported it for a non-reserved identity; it
- * never selects itself. */
-function developmentLayout(instance, env = process.env) {
-  return env.ZEROS_LOCAL_LAYOUT === "legacy" && !isReservedInstanceId(instance)
-    ? "legacy"
-    : "v2";
+/** `legacy` only when the launcher exported it; it never selects itself. */
+function developmentLayout(env = process.env) {
+  return env.ZEROS_LOCAL_LAYOUT === "legacy" ? "legacy" : "v2";
 }
 
 function platformRoots({ home, platform, env }) {
@@ -167,11 +145,14 @@ function localInstanceStateRoot(slug, home = homedir()) {
   return path.join(home, ".zeros-local", "instances", slug);
 }
 
+/** A Local identity's native bundle. Without a layout this is the legacy
+ * `<state root>/bundle` it has always been; electron-local.mjs passes the
+ * identity's layout. */
 function localInstanceBundlePaths({
   slug,
   name,
   home = homedir(),
-  layout = "v2",
+  layout = "legacy",
   platform = "darwin",
 }) {
   if (!/^[a-z0-9][a-z0-9._-]*$/i.test(slug) || path.basename(name) !== name)
@@ -188,10 +169,6 @@ function localInstanceBundlePaths({
 
 module.exports = {
   FAMILY_ID,
-  RESERVED_INSTANCE_IDS,
-  sanitizeInstanceId,
-  developmentInstanceId,
-  isReservedInstanceId,
   isCheckoutInstanceId,
   developmentLayout,
   developmentPaths,

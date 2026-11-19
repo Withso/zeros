@@ -32,7 +32,7 @@ describe("repository layout contracts", () => {
     expect(profile).toContain("DEV_AUTH_ENV_KEYS");
     expect(profile).not.toContain('".env.development.local"');
     expect(launcher).toMatch(
-      /const env = alphaInstanceEnvironment\(\{\s+\.\.\.process\.env,(?:.|\n)*?\.\.\.devAuth\.env,/,
+      /const env = \{\s+\.\.\.process\.env,(?:.|\n)*?\.\.\.devAuth\.env,/,
     );
   });
 

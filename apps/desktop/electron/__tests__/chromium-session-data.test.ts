@@ -21,15 +21,17 @@ afterEach(() => {
 function relocate({
   cacheRoot,
   identity,
-  development,
-  sessionDataDir = "",
+  local = false,
+  localSession = null,
   channel,
+  slug = "",
 }: {
   cacheRoot: string;
   identity: string;
-  development: boolean;
-  sessionDataDir?: string;
+  local?: boolean;
+  localSession?: string | null;
   channel: string;
+  slug?: string;
 }) {
   const source = fs.readFileSync("apps/desktop/electron/main.ts", "utf8");
   const start = source.indexOf("function relocateChromiumCache");
@@ -44,8 +46,9 @@ function relocate({
       setPath: (name: string, value: string) => { set[name] = value; },
     },
     appIdentity: () => identity,
-    zerosSessionDataDir: (root: string) => { expect(root).toBe(cacheRoot); return sessionDataDir; },
-    DEVELOPMENT: development,
+    zerosLocalSessionDataDir: () => localSession,
+    IS_LOCAL_DEVELOPMENT: local,
+    INSTANCE_SLUG: slug,
     process: { env: { ZEROS_CHANNEL: channel } },
     fs,
     path,
@@ -63,27 +66,39 @@ describe("Chromium session data before ready", () => {
       fs.mkdirSync(path.join(old, "Local Storage", "leveldb"), { recursive: true });
       fs.writeFileSync(path.join(old, "Local Storage", "leveldb", "000003.log"), "draft");
       fs.mkdirSync(path.join(old, "GPUCache"));
-      const first = relocate({ cacheRoot, identity: id, development: false, channel });
+      const first = relocate({ cacheRoot, identity: id, channel });
       const target = path.join(cacheRoot, id);
       expect(first.sessionData).toBe(target);
       expect(first.switches).toEqual([["disk-cache-size", String(250 * 1024 * 1024)]]);
       expect(fs.readFileSync(path.join(target, "Local Storage", "leveldb", "000003.log"), "utf8")).toBe("draft");
       expect(fs.existsSync(path.join(target, ".zeros-session-migrated"))).toBe(true);
       expect(fs.existsSync(path.join(old, "Local Storage", "leveldb", "000003.log"))).toBe(true);
-      expect(fs.existsSync(path.join(target, "electron"))).toBe(false);
       fs.writeFileSync(path.join(old, "Local Storage", "leveldb", "000003.log"), "newer");
-      relocate({ cacheRoot, identity: id, development: false, channel });
+      relocate({ cacheRoot, identity: id, channel });
       expect(fs.readFileSync(path.join(target, "Local Storage", "leveldb", "000003.log"), "utf8")).toBe("draft");
     },
   );
 
-  it("gives a development identity its own session folder and moves, copies or marks nothing", () => {
+  // Final review: hosted development keeps main's session and its old hop.
+  it.each([["", "com.zeros.dev", "design.zeros.app.dev"], ["feature", "com.zeros.dev.feature", "design.zeros.app.dev.feature"]])(
+    "keeps hosted Dev's session at Caches/<id> and main's hop from its old folder (instance '%s')",
+    (slug, id, oldName) => {
+      const cacheRoot = scratch();
+      fs.mkdirSync(path.join(cacheRoot, oldName, "Local Storage"), { recursive: true });
+      fs.writeFileSync(path.join(cacheRoot, oldName, "Local Storage", "x"), "draft");
+      expect(relocate({ cacheRoot, identity: id, channel: "dev", slug }).sessionData).toBe(path.join(cacheRoot, id));
+      expect(fs.readFileSync(path.join(cacheRoot, id, "Local Storage", "x"), "utf8")).toBe("draft");
+    },
+  );
+
+  it("gives a new Local identity <data>/electron, and a legacy one its cache folder, moving nothing", () => {
     const cacheRoot = scratch();
-    const sessionDataDir = path.join(scratch(), "instances", "a123456789abcdef", "electron");
+    const localSession = path.join(scratch(), "instances", "a123456789abcdef", "electron");
     fs.mkdirSync(path.join(cacheRoot, "design.zeros.app", "Local Storage"), { recursive: true });
-    const result = relocate({ cacheRoot, identity: "com.zeros.local.a123456789abcdef", development: true, sessionDataDir, channel: "dev" });
-    expect(result.sessionData).toBe(sessionDataDir);
-    expect(fs.readdirSync(sessionDataDir)).toEqual([]);
-    expect(fs.readdirSync(cacheRoot)).toEqual(["design.zeros.app"]);
+    const id = "com.zeros.local.a123456789abcdef";
+    expect(relocate({ cacheRoot, identity: id, channel: "dev", local: true, localSession }).sessionData).toBe(localSession);
+    expect(fs.readdirSync(localSession)).toEqual([]);
+    expect(relocate({ cacheRoot, identity: id, channel: "dev", local: true }).sessionData).toBe(path.join(cacheRoot, id));
+    expect(fs.readdirSync(cacheRoot).sort()).toEqual([id, "design.zeros.app"].sort());
   });
 });

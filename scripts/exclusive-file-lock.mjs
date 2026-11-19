@@ -111,8 +111,10 @@ export function acquireExclusiveLock({
   };
   acquire: for (let attempt = 0; attempt < 3; attempt++) {
     const temporary = path.join(directory, `${stem}-${token}.tmp`);
+    let ownedTemporary = false;
     try {
       fs.writeFileSync(temporary, body, { flag: "wx", mode: 0o600 });
+      ownedTemporary = true;
       try {
         fs.linkSync(temporary, file);
         activeLockTokens.add(token);
@@ -127,7 +129,7 @@ export function acquireExclusiveLock({
         if (error.code !== "EEXIST") throw error;
       }
     } finally {
-      fs.rmSync(temporary, { force: true });
+      if (ownedTemporary) fs.rmSync(temporary, { force: true });
     }
     const snapshot = read();
     if (!snapshot) continue;
@@ -144,11 +146,13 @@ export function acquireExclusiveLock({
       } catch (error) {
         if (error.code !== "EEXIST") throw error;
         try {
-          const abandoned = fs.statSync(recovery);
+          const abandoned = fs.lstatSync(recovery);
           // A fence whose recorded owner is alive is never abandoned.
+          // An unusable fence (not a regular file) is never read or removed.
+          if (!abandoned.isFile()) break;
           let fenceOwner = null;
           try {
-            fenceOwner = JSON.parse(fs.readFileSync(recovery, "utf8")).pid;
+            fenceOwner = JSON.parse(readRegularFile(recovery) ?? "null")?.pid ?? null;
           } catch {
             fenceOwner = null;
           }

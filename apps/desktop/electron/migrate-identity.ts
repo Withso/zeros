@@ -3,8 +3,8 @@
 // ──────────────────────────────────────────────────────────
 //
 // Historically Electron's userData fell into the app-NAME default
-// (~/Library/Application Support/"Zeros" / "Zeros Alpha"), disjoint from the
-// engine's reverse-DNS data dir (com.zeros[.alpha]). Installed channels only.
+// (~/Library/Application Support/"Zeros" / "Zeros Dev" / "Zeros — <Label>"),
+// disjoint from the engine's reverse-DNS data dir (com.zeros[.dev][.slug]).
 // apps/desktop/electron/main.ts now redirects userData INTO that id dir. This module carries
 // forward the small amount of state worth keeping, ONCE, before app.setPath runs.
 //
@@ -19,8 +19,8 @@
 //     migration decision), not a copy.
 //   • Chromium session (Local Storage / IndexedDB / Cookies) — regenerable; a
 //     fresh session is acceptable and avoids a fragile cross-dir profile copy.
-//     (The renderer profile moves separately, as one folder, in
-//     session-location.ts.)
+//     (Durable renderer subdirs are migrated separately, from the legacy cache
+//     dir, by relocateChromiumCache() in main.ts.)
 //
 // Best-effort throughout: any failure leaves the legacy dir untouched and the app
 // continues on fresh state. Marker-guarded so it runs at most once per id dir.
@@ -34,8 +34,10 @@ export interface MigrateIdentityOpts {
   appDataDir: string;
   /** zerosDataDir() — the NEW single-identity userData dir. */
   newUserData: string;
-  /** The channel's legacy name-based dir: "Zeros" | "Zeros Alpha". */
+  /** The channel's legacy name-based dir: "Zeros" | "Zeros Dev" | "Zeros Alpha". */
   legacyChannelName: string;
+  /** A dev worktree's legacy per-instance dir ("Zeros — <Label>"), else null. */
+  legacyInstanceName: string | null;
 }
 
 /** Non-secret files worth carrying forward. Secrets/session are intentionally omitted. */
@@ -50,13 +52,16 @@ function safeExists(p: string): boolean {
 }
 
 export function migrateElectronIdentity(opts: MigrateIdentityOpts): void {
-  const { appDataDir, newUserData, legacyChannelName } = opts;
+  const { appDataDir, newUserData, legacyChannelName, legacyInstanceName } = opts;
   const marker = path.join(newUserData, ".zeros-identity-migrated");
   if (safeExists(marker)) return;
 
-  const legacyDirs = [path.join(appDataDir, legacyChannelName)].filter(
-    (d) => path.resolve(d) !== path.resolve(newUserData),
-  );
+  // Prefer the per-instance legacy dir (a dev worktree wrote there); fall back to
+  // the channel dir. Both are Electron's OLD name-based userData defaults.
+  const legacyDirs = [legacyInstanceName, legacyChannelName]
+    .filter((n): n is string => !!n)
+    .map((n) => path.join(appDataDir, n))
+    .filter((d) => path.resolve(d) !== path.resolve(newUserData));
 
   try {
     fs.mkdirSync(newUserData, { recursive: true });

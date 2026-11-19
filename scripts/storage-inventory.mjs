@@ -5,29 +5,33 @@
 // built-ins only, so it runs in a checkout without node_modules.
 //
 // Categories:
-//   dev-desktop    the retired Zeros Dev desktop: com.zeros.dev*, "Zeros Dev",
-//                  "Zeros — <label>", design.zeros.app.dev* in the Library
-//                  folders; ~/zeros-dev*; ~/.zeros-dev/{dev-instances,worktrees}
+//   hosted-dev     the live hosted Dev profile (pnpm electron:alpha, electron:dev):
+//                  com.zeros.dev, ~/.zeros-dev, ~/zeros-dev
+//   dev-worktrees  per-worktree hosted Dev profiles no launcher creates any
+//                  more (com.zeros.dev.<slug>, ~/zeros-dev-<slug>,
+//                  ~/.zeros-dev/dev-instances/<slug>) and the old name-based
+//                  "Zeros Dev" / "Zeros — <label>" folders
 //   beta           the retired Beta channel: com.zeros.beta*, design.zeros.beta*;
 //                  ~/.zeros-beta; ~/zeros-beta
-//   legacy-scheme  the retired design.zeros.app / design.zeros.oCanvas folders
-//   development    development identities (local-development-paths.cjs), in
-//                  either layout, registered or not, with their status
+//   legacy-scheme  the retired design.zeros.app[.dev*] / design.zeros.oCanvas folders
+//   local          account-free Local identities (local-development-paths.cjs),
+//                  in either layout, registered or not, with their status
 //
-// For each identity it reports what it holds that a person may need (a
-// database, provider profiles, worktrees under its state root, entries in its
-// visible root, a renderer profile, a reference from the shared Local
-// provider store) and whether it looks in use (a launcher lock, the app's
-// SingletonLock, a running process naming it). Anything it could not read is
-// reported as unknown. It refuses a home reached through a link and never
-// reads below a linked folder.
+// For each identity it reports the kinds of data it recognises (a database,
+// secrets, provider profiles, Design storage, a Git promotion journal,
+// worktrees, visible workspaces, a renderer profile, a reference from the
+// shared Local provider store) and whether it looks in use (a launcher lock,
+// the app's SingletonLock, a running process naming it). Other data in these
+// folders is not inspected, and anything it could not read is reported as
+// unknown. This report is not evidence that anything is safe to delete. It
+// refuses a home reached through a link and never reads below a linked folder.
 //
 //   --only <category,…>   limit the report
 //   --keychain            also report whether the Zeros Dev / Zeros Beta Safe
 //                         Storage items exist (their contents are never read)
 //   --json                machine-readable output
 //   --help
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
@@ -40,9 +44,9 @@ import { readRegistry, registryPath } from "./local-instance-registry.mjs";
 const require = createRequire(import.meta.url);
 const paths = require("../apps/desktop/src/engine/db/local-development-paths.cjs");
 
-export const CATEGORIES = ["dev-desktop", "beta", "legacy-scheme", "development"];
+export const CATEGORIES = ["hosted-dev", "dev-worktrees", "beta", "legacy-scheme", "local"];
 const KEYCHAIN = [
-  { category: "dev-desktop", service: "Zeros Dev Safe Storage" },
+  { category: "hosted-dev", service: "Zeros Dev Safe Storage" },
   { category: "beta", service: "Zeros Beta Safe Storage" },
 ];
 const INSTANCE = /^[a-z0-9][a-z0-9._-]{0,39}$/;
@@ -67,12 +71,11 @@ function devIdentity(raw) {
 }
 
 const LIBRARY_PATTERNS = {
-  "dev-desktop": [
-    { re: /^com\.zeros\.dev$/, identity: () => "dev" },
+  "hosted-dev": [{ re: /^com\.zeros\.dev$/, identity: () => "dev" }],
+  "dev-worktrees": [
     { re: /^com\.zeros\.dev\.(.+)$/, identity: (m) => devIdentity(m[1]) },
-    { re: /^Zeros Dev$/, identity: () => "dev" },
+    { re: /^Zeros Dev$/, identity: () => "Zeros Dev (name-based)" },
     { re: /^Zeros — (.+)$/, identity: (m) => devIdentity(m[1]) },
-    { re: /^design\.zeros\.app\.dev(?:\.(.+))?$/, identity: (m) => devIdentity(m[1]) },
   ],
   beta: [
     { re: /^com\.zeros\.beta(?:\.(.+))?$/, identity: () => "beta" },
@@ -80,6 +83,7 @@ const LIBRARY_PATTERNS = {
   ],
   "legacy-scheme": [
     { re: /^design\.zeros\.app$/, identity: () => "design.zeros.app" },
+    { re: /^design\.zeros\.app\.dev(?:\.(.+))?$/, identity: (m) => `design.zeros.app.dev${m[1] ? `.${m[1]}` : ""}` },
     { re: /^design\.zeros\.oCanvas$/, identity: () => "design.zeros.oCanvas" },
   ],
 };
@@ -122,7 +126,7 @@ function list(home, directory) {
 /** Allocated bytes (what `du` reports), each inode once across a report.
  * `hardlinked` flags a file with another link, possibly outside every row. */
 function sizeOf(target, { deadline, seen }) {
-  let bytes = 0, hardlinked = false;
+  let bytes = 0, hardlinked = false, complete = true;
   const stack = [target];
   while (stack.length) {
     if (Date.now() > deadline) return { bytes, complete: false, hardlinked };
@@ -130,7 +134,8 @@ function sizeOf(target, { deadline, seen }) {
     let stat;
     try {
       stat = fs.lstatSync(current);
-    } catch {
+    } catch (error) {
+      if (error.code !== "ENOENT") complete = false;
       continue;
     }
     if (!stat.isDirectory() && stat.nlink > 1) hardlinked = true;
@@ -142,11 +147,11 @@ function sizeOf(target, { deadline, seen }) {
     if (!stat.isDirectory()) continue;
     try {
       for (const name of fs.readdirSync(current)) stack.push(path.join(current, name));
-    } catch {
-      /* counted as far as it could be read */
+    } catch (error) {
+      if (error.code !== "ENOENT") complete = false;
     }
   }
-  return { bytes, complete: true, hardlinked };
+  return { bytes, complete, hardlinked };
 }
 
 /** "yes", "no" or "unknown": whether `directory` has entries. */
@@ -219,13 +224,11 @@ function defaultProcessList() {
   }
 }
 
+/** The lookup's exit status (0 found, 44 not found), or null when it could
+ * not run or timed out. */
 function defaultSecurity(args) {
-  try {
-    execFileSync("/usr/bin/security", args, { stdio: "ignore", timeout: 10_000 });
-    return true;
-  } catch {
-    return false;
-  }
+  const result = spawnSync("/usr/bin/security", args, { stdio: "ignore", timeout: 10_000 });
+  return result.error || result.signal ? null : result.status;
 }
 
 /** Every development identity's possible roots, both layouts plus the
@@ -233,9 +236,7 @@ function defaultSecurity(args) {
  * `Caches/com.zeros.local/instances/<inst>`), with the role each plays. */
 function developmentRoots(instance, { home, platform, env, containers }) {
   const v2 = paths.developmentPaths({ instance, layout: "v2", home, platform, env });
-  const legacy = paths.isReservedInstanceId(instance)
-    ? null
-    : paths.developmentPaths({ instance, layout: "legacy", home, platform, env });
+  const legacy = paths.developmentPaths({ instance, layout: "legacy", home, platform, env });
   const rows = [
     [v2.dataDir, "data"], [v2.logDir, "logs"], [v2.bundleDir, "bundle"], [v2.stateRoot, "state"], [v2.visibleRoot, "visible"],
     [path.join(home, "zeros-local", instance), "visible"],
@@ -245,6 +246,15 @@ function developmentRoots(instance, { home, platform, env, containers }) {
   const seen = new Set();
   return rows.filter(([target]) => !seen.has(target) && seen.add(target)).map(([target, role]) => ({ path: target, role }));
 }
+
+const CATEGORY_STATUS = {
+  "hosted-dev": () => "live hosted Dev profile (pnpm electron:alpha, pnpm electron:dev)",
+  "dev-worktrees": (identity) => identity.endsWith("(name-based)")
+    ? "old name-based Zeros Dev folder"
+    : "per-worktree hosted Dev profile; no launcher creates these any more",
+  beta: () => "retired Beta channel",
+  "legacy-scheme": () => "retired design.zeros.* folder",
+};
 
 /** Build the report. */
 export function inventory({
@@ -301,15 +311,17 @@ export function inventory({
     }
   }
   for (const name of scan(home)) {
-    const dev = name.match(/^zeros-dev(?:-(.+))?$/);
-    if (dev) add("dev-desktop", devIdentity(dev[1]), path.join(home, name), "visible");
+    const dev = name.match(/^zeros-dev-(.+)$/);
+    if (dev) add("dev-worktrees", devIdentity(dev[1]), path.join(home, name), "visible");
+    if (name === "zeros-dev") add("hosted-dev", "dev", path.join(home, name), "visible");
+    if (name === ".zeros-dev") add("hosted-dev", "dev", path.join(home, name), "state");
     if (name === "zeros-beta") add("beta", "beta", path.join(home, name), "visible");
     if (name === ".zeros-beta") add("beta", "beta", path.join(home, name), "state");
   }
-  add("dev-desktop", "dev", path.join(home, ".zeros-dev", "dev-instances"), "bundle");
-  add("dev-desktop", "dev", path.join(home, ".zeros-dev", "worktrees"), "worktrees");
+  for (const name of scan(path.join(home, ".zeros-dev", "dev-instances")))
+    add("dev-worktrees", devIdentity(name.replace(/\.app$/, "")), path.join(home, ".zeros-dev", "dev-instances", name), "bundle");
 
-  if (only.includes("development")) {
+  if (only.includes("local")) {
     const containers = paths.developmentContainers({ home, platform, env });
     const file = registryPath({ home, platform, env });
     let registry = { instances: {}, inconsistent: [] };
@@ -339,14 +351,13 @@ export function inventory({
       if (match) ids.add(match[1]);
     }
     for (const name of scan(path.join(home, "zeros-local"))) ids.add(name);
-    add("development", "dev-instances", containers.legacyBundles, "bundle");
+    add("local", "dev-instances", containers.legacyBundles, "bundle");
     for (const instance of ids) {
       if (!INSTANCE.test(instance)) continue;
-      const owner = group("development", instance);
-      for (const root of developmentRoots(instance, { home, platform, env, containers })) add("development", instance, root.path, root.role);
+      const owner = group("local", instance);
+      for (const root of developmentRoots(instance, { home, platform, env, containers })) add("local", instance, root.path, root.role);
       const entry = registry.instances[instance];
       if (registry.inconsistent?.includes(instance)) owner.status = "registry entry inconsistent";
-      else if (entry?.kind === "alpha") owner.status = "registered (hosted alpha)";
       else if (entry?.kind === "checkout") {
         const checkout = typeof entry.checkout === "string" ? entry.checkout : "";
         let gone = !checkout;
@@ -357,9 +368,8 @@ export function inventory({
         }
         owner.status = gone ? `registered checkout, checkout gone (${checkout || "unknown"})` : `registered checkout (${checkout})`;
         owner.checkout = checkout;
-      } else if (paths.isReservedInstanceId(instance)) owner.status = "reserved, not registered";
-      else if (paths.isCheckoutInstanceId(instance)) owner.status = "checkout, not registered";
-      else owner.status = "test or hosted identity, not registered";
+      } else if (paths.isCheckoutInstanceId(instance)) owner.status = "checkout, not registered";
+      else owner.status = "not a Local checkout id (left by a pre-release build)";
       // The state root is the same in both layouts.
       const { stateRoot } = paths.developmentPaths({ instance, home, platform, env });
       for (const lock of ["launcher.lock", "launcher.lease"]) {
@@ -393,6 +403,7 @@ export function inventory({
       }
       const size = Date.now() > deadline ? { bytes: 0, complete: false, hardlinked: false } : sizeOf(item.path, { deadline, seen });
       Object.assign(item, { bytes: size.bytes, complete: size.complete });
+      if (!size.complete) owner.unknown.add("its full size (some entries could not be read in time)");
       report.hardlinked ||= size.hardlinked;
       if (processes === null) owner.inUse.add("the process list is unavailable");
       else if (processes.includes(item.path)) owner.inUse.add("a running process names it");
@@ -404,6 +415,11 @@ export function inventory({
         else if (profiles === "unknown") owner.unknown.add("provider profiles");
         const electron = hasEntries(home, path.join(item.path, "electron"));
         if (electron === "yes") owner.holds.add("a renderer profile");
+        for (const [folder, kind] of [["design-storage", "Design storage (recovery journals, drafts, thumbnails)"], ["git-promotion-journal", "a Git promotion journal"]]) {
+          const entries = hasEntries(home, path.join(item.path, folder));
+          if (entries === "yes") owner.holds.add(kind);
+          else if (entries === "unknown") owner.unknown.add(kind);
+        }
         const lock = singleton(home, item.path, hostname);
         if (lock === "live") owner.inUse.add("its app is running");
         else if (lock === "unknown") owner.inUse.add("its app's profile lock names another process or host");
@@ -427,7 +443,7 @@ export function inventory({
     report.groups.push({
       category: owner.category,
       identity: owner.identity,
-      status: owner.status,
+      status: owner.status ?? CATEGORY_STATUS[owner.category]?.(owner.identity) ?? null,
       holds: [...owner.holds],
       unknown: [...owner.unknown],
       inUse: [...owner.inUse],
@@ -437,7 +453,10 @@ export function inventory({
   report.groups.sort((a, b) => CATEGORIES.indexOf(a.category) - CATEGORIES.indexOf(b.category) || a.identity.localeCompare(b.identity));
   if (keychain && platform === "darwin")
     report.keychain = KEYCHAIN.filter((entry) => only.includes(entry.category))
-      .map((entry) => ({ ...entry, present: security(["find-generic-password", "-s", entry.service]) }));
+      .map((entry) => {
+        const status = security(["find-generic-password", "-s", entry.service]);
+        return { ...entry, present: status === 0 ? true : status === 44 ? false : "unknown" };
+      });
   return report;
 }
 
@@ -451,6 +470,9 @@ function human(bytes) {
   return `${value.toFixed(unit ? 1 : 0)} ${units[unit]}`;
 }
 
+const NOT_EVIDENCE =
+  "Other data in these folders is not inspected. This report is not evidence that anything is safe to delete.";
+
 export function formatInventory(report) {
   if (report.problem) return `Nothing read: ${report.problem}.`;
   const lines = [];
@@ -463,7 +485,7 @@ export function formatInventory(report) {
     for (const owner of rows) {
       const facts = [
         owner.status,
-        owner.holds.length ? `holds ${owner.holds.join(", ")}` : "holds nothing a person needs",
+        owner.holds.length ? `holds ${owner.holds.join(", ")}` : "none of the kinds this report recognises were found",
         owner.unknown.length ? `could not read ${owner.unknown.join(", ")}` : null,
         owner.inUse.length ? `looks in use: ${owner.inUse.join(", ")}` : "not in use",
       ].filter(Boolean);
@@ -477,8 +499,10 @@ export function formatInventory(report) {
   }
   if (report.unlisted.length) lines.push(`Could not list (unreadable or reached through a link): ${report.unlisted.map(where).join(", ")}`);
   if (report.registry) lines.push(`Instance registry: ${report.registry}`);
-  for (const item of report.keychain) lines.push(`keychain: ${item.service} — ${item.present ? "present" : "not present"}`);
+  for (const item of report.keychain)
+    lines.push(`keychain: ${item.service} — ${item.present === true ? "present" : item.present === false ? "not present" : "unknown (the lookup failed)"}`);
   lines.push(`Total on disk: ${human(total)}${report.hardlinked ? " (an upper bound: some files are hardlinked elsewhere)" : ""}`);
+  lines.push(NOT_EVIDENCE);
   lines.push("Read-only: nothing was changed.");
   return lines.join("\n");
 }
@@ -488,13 +512,15 @@ export function helpText() {
     "pnpm storage:inventory — read-only report of Zeros data outside the installed apps.",
     "",
     "Categories:",
-    "  dev-desktop    the retired Zeros Dev desktop's folders",
+    "  hosted-dev     the live hosted Dev profile (pnpm electron:alpha, pnpm electron:dev)",
+    "  dev-worktrees  per-worktree hosted Dev profiles and old name-based Zeros Dev folders",
     "  beta           the retired Beta channel's folders",
-    "  legacy-scheme  the retired design.zeros.app / design.zeros.oCanvas folders",
-    "  development    development identities, registered or not, with what they hold and whether they look in use",
+    "  legacy-scheme  the retired design.zeros.app[.dev*] / design.zeros.oCanvas folders",
+    "  local          account-free Local identities, registered or not, with what they hold and whether they look in use",
     "",
     "Options: --only <category,…>  --keychain  --json  --help",
     "It never deletes, moves or writes anything.",
+    NOT_EVIDENCE,
   ].join("\n");
 }
 

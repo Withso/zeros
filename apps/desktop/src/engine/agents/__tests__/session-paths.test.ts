@@ -363,7 +363,7 @@ describe("sweepDeadSessions", () => {
 });
 
 describe("session paths: dev/prod isolation", () => {
-  it("dev and prod resolve to DISJOINT session roots (only dev's is in the development family)", () => {
+  it("dev and prod resolve to DISJOINT session roots (only dev's contains 'dev')", () => {
     delete process.env.ZEROS_DEV;
     const prodRoot = sessionsRoot();
     process.env.ZEROS_DEV = "1";
@@ -372,9 +372,9 @@ describe("session paths: dev/prod isolation", () => {
     expect(prodRoot).not.toBe(devRoot);
     expect(prodRoot.startsWith(fakeHome)).toBe(true);
     expect(devRoot.startsWith(fakeHome)).toBe(true);
-    // macOS: com.zeros vs com.zeros.local/instances/default · Linux: zeros vs zeros-local/…
-    expect(path.relative(fakeHome, devRoot)).toMatch(/zeros-local|com\.zeros\.local/);
-    expect(path.relative(fakeHome, prodRoot)).not.toMatch(/zeros-local|com\.zeros\.local/);
+    // macOS: com.zeros vs com.zeros.dev · Linux: zeros vs zeros-dev
+    expect(path.relative(fakeHome, devRoot)).toMatch(/dev/);
+    expect(path.relative(fakeHome, prodRoot)).not.toMatch(/dev/);
   });
 
   it("alpha channel resolves to its OWN root, disjoint from dev + prod", () => {
@@ -407,10 +407,10 @@ describe("session paths: dev/prod isolation", () => {
 
     expect(instanceRoot).not.toBe(plainDevRoot);
     expect(instanceRoot.startsWith(fakeHome)).toBe(true);
-    // Carries the instance name (…/instances/san-francisco)…
+    // Carries the instance name (com.zeros.dev.san-francisco / zeros-dev-san-francisco)…
     expect(path.relative(fakeHome, instanceRoot)).toMatch(/san-francisco/);
-    // …and is still a development-family dir, so it never collides with prod or alpha.
-    expect(path.relative(fakeHome, instanceRoot)).toMatch(/zeros-local|com\.zeros\.local/);
+    // …and is still a dev dir, so it never collides with prod or alpha.
+    expect(path.relative(fakeHome, instanceRoot)).toMatch(/dev/);
   });
 
   it("ZEROS_INSTANCE is IGNORED outside the dev channel (alpha stays a single app)", () => {

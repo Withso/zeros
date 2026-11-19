@@ -45,26 +45,7 @@ describe("Local storage compatibility and isolation", () => {
     expect(roots[0]).not.toBe(roots[1]);
   });
 
-  it("gives every dev-channel instance its own state root, hosted or account-free", () => {
-    vi.stubEnv("ZEROS_DEV", "1");
-    vi.stubEnv("ZEROS_CHANNEL", "dev");
-    for (const local of [undefined, "1"]) {
-      vi.stubEnv("ZEROS_LOCAL_DEVELOPMENT", local);
-      for (const [instance, leaf] of [
-        [undefined, "default"],
-        ["alpha", "alpha"],
-        ["a123456789abcdef", "a123456789abcdef"],
-      ]) {
-        vi.stubEnv("ZEROS_INSTANCE", instance);
-        const root = path.join(homedir(), ".zeros-local", "instances", leaf!);
-        expect(gitStateRoot()).toBe(root);
-        expect(detachLockPath()).toBe(path.join(root, "detach.lock"));
-        expect(legacyWorktreesRoot()).toBe(path.join(root, "worktrees"));
-      }
-    }
-  });
-
-  it.each(["stable", "alpha"])(
+  it.each(["stable", "alpha", "dev"])(
     "preserves %s state paths with or without an instance",
     (channel) => {
       vi.stubEnv("ZEROS_DEV", "1");
@@ -137,7 +118,7 @@ describe("Local storage compatibility and isolation", () => {
     expect(zerosWorkspacesRoot()).not.toBe(first.workspaces);
     vi.stubEnv("ZEROS_INSTANCE", "a123456789abcdef");
     expect(zerosDbPath()).toBe(first.db);
-    for (const channel of ["alpha", "stable"]) {
+    for (const channel of ["dev", "alpha", "stable"]) {
       vi.stubEnv("ZEROS_LOCAL_DEVELOPMENT", undefined);
       vi.stubEnv("ZEROS_CHANNEL", channel);
       expect(appIdentity()).not.toBe(first.id);

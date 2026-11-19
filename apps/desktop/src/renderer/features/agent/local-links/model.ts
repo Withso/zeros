@@ -31,7 +31,7 @@ export function localLinkSpans(
   const spans: LocalLinkSpan[] = [];
   // `<owner>/w/<n>` before the legacy kinds, so `chat/w/3` is a numbered link.
   const pattern =
-    /\bzeros(?:-alpha|-dev)?:\/\/(?:[A-Za-z0-9-]{1,100}\/w|chat|workspace)\/[^\s<>"'`()[\]{}]+/g;
+    /\bzeros(?:-alpha|-beta|-dev)?:\/\/(?:[A-Za-z0-9-]{1,100}\/w|chat|workspace)\/[^\s<>"'`()[\]{}]+/g;
   for (const match of text.matchAll(pattern)) {
     if (match.index > 0 && /[\w/:.-]/.test(text[match.index - 1])) continue;
     const href = match[0].replace(/[.,:;!?-]+$/, "");

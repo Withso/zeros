@@ -46,29 +46,41 @@ export function checkoutIdentity(root) {
   return { slug, name: `Zeros Local ${label} ${slug.slice(0, 6)}` };
 }
 
-/** The compatibility decision: a profile that already exists in the
- * pre-registry layout stays there, because its database and Keychain-bound
- * provider profiles hold absolute paths. Everything else is v2. */
-export function localLayout({ slug, home = os.homedir(), platform = process.platform }) {
-  if (developmentPaths.isReservedInstanceId(slug)) return "v2";
-  const legacy = developmentPaths.developmentPaths({
-    instance: slug,
-    layout: "legacy",
-    home,
-    platform,
-    env: {},
-  }).dataDir;
-  try {
-    fs.lstatSync(legacy);
-    return "legacy";
-  } catch (error) {
-    if (error.code === "ENOENT") return "v2";
-    throw error;
+/** Which layout this identity's established profile uses, decided from what
+ * is on disk (the registry is best effort and never consulted):
+ * 1. a v2 data dir holding a database is v2, whatever else exists;
+ * 2. else an existing flat `com.zeros.local.<id>` data dir is legacy (its DB
+ *    and Keychain-bound provider profiles hold absolute paths, so it stays);
+ * 3. else v2. Nothing is moved or deleted; anything unreadable stops the
+ * launch with the folder to fix. */
+export function localLayout({
+  slug,
+  home = os.homedir(),
+  platform = process.platform,
+  warn = (line) => console.warn(`[zeros-local] ${line}`),
+}) {
+  const dataDir = (layout) => developmentPaths.developmentPaths({ instance: slug, layout, home, platform, env: {} }).dataDir;
+  const present = (target) => {
+    try {
+      fs.lstatSync(target);
+      return true;
+    } catch (error) {
+      if (error.code === "ENOENT") return false;
+      throw new Error(`Cannot read ${target} (${error.code}) to choose this checkout's Zeros Local profile. Fix it and relaunch.`);
+    }
+  };
+  const v2 = dataDir("v2"), flat = dataDir("legacy");
+  if (present(path.join(v2, "zeros.db"))) {
+    if (present(path.join(flat, "zeros.db")))
+      warn(`two Zeros Local profiles for this checkout hold a database: using ${v2}; ${flat} is left as it is.`);
+    return "v2";
   }
+  return present(flat) ? "legacy" : "v2";
 }
 
-/** Record this launch for `pnpm storage:inventory`. Bookkeeping only: a busy,
- * missing or unusable registry never delays or changes the launch. */
+/** Record this launch for `pnpm storage:inventory`. Bookkeeping only: one
+ * attempt, so a busy, missing or unusable registry never delays or changes the
+ * launch. */
 export function registerDevelopmentLaunch({
   instance,
   entry,
@@ -77,7 +89,7 @@ export function registerDevelopmentLaunch({
   log = (line) => console.warn(`[zeros-local] ${line}`),
 }) {
   try {
-    upsertInstance(registryPath({ home, platform, env: {} }), instance, entry, { timeoutMs: 250 });
+    upsertInstance(registryPath({ home, platform, env: {} }), instance, entry, { timeoutMs: 0 });
   } catch {
     log("instance registry is busy or unavailable; continuing");
   }

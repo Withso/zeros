@@ -13,7 +13,6 @@ import { launchNativeElectron } from "./design-native-electron.mjs";
 import { waitForNativeOwnerAccess } from "./design-native-owner-access.mjs";
 import { localEnvironment, pickLocalPorts } from "./electron-local.mjs";
 import { ensureDevAuthEnvironment } from "./dev-auth-profile.mjs";
-import { createRequire } from "node:module";
 import { collectNativeSourceManifest, nativeProcessAlive, writeNativeJson } from "./design-native-run.mjs";
 import { nativeProcessSample } from "./design-native-baseline.mjs";
 import { waitForNativeRenderer } from "./design-native-renderer.mjs";
@@ -57,9 +56,7 @@ try {
   const auth = await ensureDevAuthEnvironment({ processEnv: {} });
   assert.equal(auth.issue, null, "A validated public Alpha Dev auth configuration is required.");
   Object.assign(env, auth.env, { ZEROS_NO_ENGINE_HMR: "1", ZEROS_NO_MAIN_HMR: "1", ELECTRON_RENDERER_URL: `http://127.0.0.1:${ports.vitePort}` });
-  const profile = createRequire(import.meta.url)("../apps/desktop/src/engine/db/local-development-paths.cjs")
-    .developmentPaths({ instance: identity.slug, home: os.homedir(), platform: process.platform, env: {} }).dataDir;
-  await fs.mkdir(path.dirname(profile), { recursive: true, mode: 0o700 });
+  const profile = path.join(os.homedir(), "Library", "Application Support", `com.zeros.dev.${identity.slug}`);
   // Exclusive creation proves this is a task-owned instance, not a real profile.
   await fs.mkdir(profile, { mode: 0o700 });
   writeNativeJson(path.join(profile, "design-qualification-owner.json"), { runId: lock.runId, artifacts: root });

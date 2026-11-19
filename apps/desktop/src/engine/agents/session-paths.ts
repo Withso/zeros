@@ -6,9 +6,10 @@
 // crash mid-session leaves a diagnostic breadcrumb. Cleaned on graceful
 // session end or app quit.
 //
-// Lives UNDER the engine data dir (db/paths.ts zerosDataDir()), and
-// ZEROS_DATA_DIR in cloud sandboxes —
-// co-located with zeros.db + the relay identity. This was
+// Lives UNDER the engine data dir (db/paths.ts zerosDataDir()):
+// `~/Library/Application Support/com.zeros` (prod) / `com.zeros.dev` (dev)
+// on macOS, XDG / %APPDATA% elsewhere, and ZEROS_DATA_DIR in cloud
+// sandboxes — co-located with zeros.db + the relay identity. This was
 // previously a hardcoded "Zeros" app-name dir with NO dev/prod split, so a
 // `pnpm electron:dev` build and a packaged /Applications/Zeros.app shared
 // one sessions/ dir, and each engine's boot-time GC swept the OTHER build's

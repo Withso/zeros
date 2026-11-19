@@ -50,18 +50,17 @@ export const ENGINE_BASE_PORT_DEV = 24293;
 
 /** How many ports LocalTransport walks from the base on EADDRINUSE. The
  *  reaper + localhost inspector scan exactly this span: [base, base+span-1].
- *  NOTE: an instance's full footprint is span+2 — the walk range PLUS
- *  base+8/base+9 for the MCP gateway + its OAuth callback (engine/zeros-engine.ts
- *  startGateway). scripts/electron-local.mjs strides instance base ports by
- *  span+2 so adjacent instances never collide on the walk range OR the gateway
- *  ports. */
+ *  NOTE: a per-worktree dev instance's full footprint is span+2 — the walk range
+ *  PLUS base+8/base+9 for the MCP gateway + its OAuth callback (engine/zeros-engine.ts
+ *  startGateway). scripts/dev-instance.mjs strides instance base ports by span+2
+ *  so adjacent instances never collide on the walk range OR the gateway ports. */
 export const ENGINE_PORT_SPAN = 8;
 
 /** The base loopback port for THIS runtime.
  *  Resolution order:
  *   1. ZEROS_ENGINE_BASE_PORT — an explicit per-instance override exported by the
- *      development launchers so two instances bind DISJOINT engine blocks (and
- *      their range-scoped orphan reapers never cross-kill).
+ *      dev-instance launcher so two `pnpm electron:dev` worktrees bind DISJOINT
+ *      engine blocks (and their range-scoped orphan reapers never cross-kill).
  *   2. else the release-channel default (stable → 24193, alpha → 24213,
  *      dev → 24293). */
 export function engineBasePort(): number {

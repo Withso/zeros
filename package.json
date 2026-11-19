@@ -52,6 +52,7 @@
     "serve:engine": "node dist-engine/cli.js",
     "electron:compile": "tsup --config apps/desktop/electron/tsup.config.ts",
     "electron:compile:watch": "tsup --config apps/desktop/electron/tsup.config.ts --watch",
+    "electron:rename-dev": "node scripts/rename-electron-dev-binary.cjs",
     "electron:dev:prep": "node scripts/check-deps-installed.mjs && pnpm electron:rebuild && pnpm build:ripgrep && pnpm build:engine && pnpm electron:compile",
     "electron:dev": "node scripts/electron-cloud.mjs",
     "electron:local": "node scripts/electron-local.mjs",

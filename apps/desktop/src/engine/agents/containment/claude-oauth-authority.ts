@@ -4,7 +4,7 @@ import { chmod, lstat, mkdir, open, rm } from "node:fs/promises";
 import { homedir, userInfo } from "node:os";
 import path from "node:path";
 
-import { zerosCredentialLockRoot } from "../../db/paths";
+import { zerosStateRoot } from "../../db/paths";
 
 const CLAUDE_OAUTH_TOKEN_ENDPOINT =
   "https://platform.claude.com/v1/oauth/token";
@@ -724,7 +724,8 @@ export async function withMacClaudeRefreshLock<T>(
   task: () => Promise<T>,
   options: { readonly lockRoot?: string } = {},
 ): Promise<T> {
-  const lockRoot = options.lockRoot ?? zerosCredentialLockRoot();
+  const lockRoot =
+    options.lockRoot ?? path.join(zerosStateRoot(), "credentials");
   await mkdir(lockRoot, { recursive: true, mode: 0o700 });
   await chmod(lockRoot, 0o700);
   const lockPath = path.join(lockRoot, "claude-oauth-refresh.lock");

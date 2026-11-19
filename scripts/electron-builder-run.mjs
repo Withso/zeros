@@ -27,9 +27,8 @@
 //   ZEROS_CHANNEL=alpha node scripts/electron-builder-run.mjs --publish never
 
 import { spawnSync } from "node:child_process";
-import fs from "node:fs";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
+
+const channel = process.env.ZEROS_CHANNEL || "stable";
 
 const OVERRIDES = {
   // Production: no overrides — use electron-builder.yml exactly as written.
@@ -56,61 +55,31 @@ const OVERRIDES = {
   ],
 };
 
-/** A packaged build takes its channel from the value baked into main at
- * electron:compile, never from its launch environment. Refuse to package a
- * main baked for another channel (an Alpha app with a Stable bake would open
- * Stable's profile). */
-export function assertCompiledChannel(channel, { root = process.cwd() } = {}) {
-  const record = path.join(root, "dist-electron", "build-channel.json");
-  let baked;
-  try {
-    baked = JSON.parse(fs.readFileSync(record, "utf8")).channel;
-  } catch {
-    throw new Error(`[electron-builder-run] ${record} is missing or unreadable; run pnpm electron:compile for this channel first.`);
-  }
-  const allowed = channel === "stable" ? ["", "stable"] : [channel];
-  if (typeof baked !== "string" || !allowed.includes(baked))
-    throw new Error(
-      `[electron-builder-run] main was baked as "${baked}" but this packages "${channel}"; ` +
-        `re-run electron:compile with ZEROS_CHANNEL=${channel}.`,
-    );
+const overrides = OVERRIDES[channel];
+if (!overrides) {
+  console.error(
+    `[electron-builder-run] cannot package channel "${channel}" — use one of: ` +
+      `${Object.keys(OVERRIDES).join(", ")} ` +
+      `(dev is unpackaged: run \`pnpm electron:dev\`).`,
+  );
+  process.exit(1);
 }
 
-function main() {
-  const channel = process.env.ZEROS_CHANNEL || "stable";
-  const overrides = OVERRIDES[channel];
-  if (!overrides) {
-    console.error(
-      `[electron-builder-run] cannot package channel "${channel}" — use one of: ` +
-        `${Object.keys(OVERRIDES).join(", ")} ` +
-        `(dev is unpackaged: run \`pnpm electron:dev\`).`,
-    );
-    return 1;
-  }
-  try {
-    assertCompiledChannel(channel);
-  } catch (error) {
-    console.error(error.message);
-    return 1;
-  }
-  const passthrough = process.argv.slice(2);
-  const args = [
-    "exec",
-    "electron-builder",
-    "--config",
-    "electron-builder.yml",
-    ...overrides,
-    ...passthrough,
-  ];
+const passthrough = process.argv.slice(2);
+const args = [
+  "exec",
+  "electron-builder",
+  "--config",
+  "electron-builder.yml",
+  ...overrides,
+  ...passthrough,
+];
 
-  console.log(`[electron-builder-run] channel=${channel}`);
-  const res = spawnSync("pnpm", args, {
-    stdio: "inherit",
-    // Re-export the resolved channel so the bake (electron:compile, if a caller
-    // chains it) and any nested tooling see the same value.
-    env: { ...process.env, ZEROS_CHANNEL: channel },
-  });
-  return res.status ?? 1;
-}
-
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) process.exit(main());
+console.log(`[electron-builder-run] channel=${channel}`);
+const res = spawnSync("pnpm", args, {
+  stdio: "inherit",
+  // Re-export the resolved channel so the bake (electron:compile, if a caller
+  // chains it) and any nested tooling see the same value.
+  env: { ...process.env, ZEROS_CHANNEL: channel },
+});
+process.exit(res.status ?? 1);

@@ -36,15 +36,8 @@ type PlatformInput = {
 };
 
 export const FAMILY_ID: "com.zeros.local";
-export const RESERVED_INSTANCE_IDS: readonly ["alpha", "default"];
-export function sanitizeInstanceId(raw: unknown): string;
-export function developmentInstanceId(
-  env?: Record<string, string | undefined>,
-): string;
-export function isReservedInstanceId(instance: string): boolean;
 export function isCheckoutInstanceId(instance: string): boolean;
 export function developmentLayout(
-  instance: string,
   env?: Record<string, string | undefined>,
 ): DevelopmentLayout;
 export function developmentPaths(

@@ -9,6 +9,7 @@ import { parse } from "smol-toml";
 import {
   checkoutIdentity,
   localEnvironment,
+  localLayout,
   pickLocalPorts,
   runLocalDevelopment,
   runOwnedProcess,
@@ -375,6 +376,54 @@ describe("Local launch ownership", () => {
     );
     expect(registry.instances[identity.slug]).toMatchObject({
       kind: "checkout", name: identity.name, checkout: fs.realpathSync(root), layout: "v2",
+    });
+  });
+
+  // Final review: an older checkout of the same path creates the flat folder;
+  // an identity with an established v2 database must not switch to it.
+  describe("layout choice", () => {
+    const support = (home: string) => path.join(home, "Library/Application Support");
+    const v2 = (home: string, slug: string) => path.join(support(home), "com.zeros.local/instances", slug);
+    const flat = (home: string, slug: string) => path.join(support(home), `com.zeros.local.${slug}`);
+    const write = (file: string) => { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, "db"); };
+    const slug = "0123456789abcdef";
+
+    it("stays on an established v2 database when the flat folder appears, warning once", () => {
+      const home = directory(), warnings: string[] = [];
+      write(path.join(v2(home, slug), "zeros.db"));
+      expect(localLayout({ slug, home, platform: "darwin", warn: (line: string) => warnings.push(line) })).toBe("v2");
+      fs.mkdirSync(flat(home, slug), { recursive: true });
+      expect(localLayout({ slug, home, platform: "darwin", warn: (line: string) => warnings.push(line) })).toBe("v2");
+      expect(warnings).toEqual([]);
+      write(path.join(flat(home, slug), "zeros.db"));
+      expect(localLayout({ slug, home, platform: "darwin", warn: (line: string) => warnings.push(line) })).toBe("v2");
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toContain(v2(home, slug));
+      expect(warnings[0]).toContain(flat(home, slug));
+      expect(fs.readFileSync(path.join(flat(home, slug), "zeros.db"), "utf8")).toBe("db");
+    });
+
+    it("keeps a true legacy profile legacy, and a fresh identity v2", () => {
+      const home = directory();
+      expect(localLayout({ slug, home, platform: "darwin", warn: () => {} })).toBe("v2");
+      write(path.join(flat(home, slug), "zeros.db"));
+      expect(localLayout({ slug, home, platform: "darwin", warn: () => {} })).toBe("legacy");
+      fs.mkdirSync(v2(home, slug), { recursive: true });
+      expect(localLayout({ slug, home, platform: "darwin", warn: () => {} })).toBe("legacy");
+    });
+
+    it("treats a flat folder holding only a Chromium session as the established legacy profile", () => {
+      const home = directory();
+      fs.mkdirSync(path.join(flat(home, slug), "Local Storage", "leveldb"), { recursive: true });
+      expect(localLayout({ slug, home, platform: "darwin", warn: () => {} })).toBe("legacy");
+    });
+
+    it("stops with a clear message when it cannot tell what is established", () => {
+      const home = directory();
+      fs.mkdirSync(support(home), { recursive: true });
+      fs.mkdirSync(path.join(support(home), "com.zeros.local"));
+      fs.writeFileSync(path.join(support(home), "com.zeros.local", "instances"), "not a folder");
+      expect(() => localLayout({ slug, home, platform: "darwin", warn: () => {} })).toThrow(/instances/);
     });
   });
 

@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   readRegistry,
   registryPath,
@@ -72,8 +72,8 @@ describe("instance registry", () => {
     fs.mkdirSync(path.dirname(file), { recursive: true });
     fs.writeFileSync(file, "{not json");
     expect(readRegistry(file)).toMatchObject({ corrupt: true, instances: {} });
-    upsertInstance(file, "alpha", { kind: "alpha", name: "Zeros Local Alpha", checkout: null, layout: "v2" });
-    expect(Object.keys(readRegistry(file).instances)).toEqual(["alpha"]);
+    upsertInstance(file, CHECKOUT, { kind: "checkout", name: "A", checkout: "/x", layout: "v2" });
+    expect(Object.keys(readRegistry(file).instances)).toEqual([CHECKOUT]);
     const aside = fs.readdirSync(path.dirname(file)).filter((name) => name.startsWith("instances.json.corrupt-"));
     expect(aside).toHaveLength(1);
     expect(fs.readFileSync(path.join(path.dirname(file), aside[0]), "utf8")).toBe("{not json");
@@ -83,11 +83,11 @@ describe("instance registry", () => {
     const h = home(), file = registryPath({ ...at, home: h });
     fs.mkdirSync(path.dirname(file), { recursive: true });
     fs.writeFileSync(`${file}.lock`, JSON.stringify({ pid: DEAD_PID, token: "t", at: Date.now() }));
-    upsertInstance(file, "alpha", { kind: "alpha", name: "A", checkout: null, layout: "v2" });
+    upsertInstance(file, CHECKOUT, { kind: "checkout", name: "A", checkout: "/x", layout: "v2" });
     expect(exists(`${file}.lock`)).toBe(false);
   });
 
-  // Review B finding 15: an impossible kind for a reserved id was accepted.
+  // Review B finding 15: an impossible kind/id pair was accepted.
   it.each([
     ["alpha", "checkout"], ["default", "checkout"], [CHECKOUT, "alpha"], ["design-qual-0011aabb", "checkout"],
     ["alpha", "ephemeral"], ["design-qual-0011aabb", "ephemeral"], [CHECKOUT, "nope"],
@@ -101,12 +101,13 @@ describe("instance registry", () => {
     const h = home(), file = registryPath({ ...at, home: h });
     fs.mkdirSync(path.dirname(file), { recursive: true });
     fs.writeFileSync(file, JSON.stringify({ version: 1, instances: {
-      alpha: { kind: "ephemeral", ownerPid: DEAD_PID }, [CHECKOUT]: { kind: "checkout", checkout: "/x", layout: "v2" },
+      default: { kind: "checkout", checkout: "/x" }, alpha: { kind: "ephemeral", ownerPid: DEAD_PID },
+      [CHECKOUT]: { kind: "checkout", checkout: "/x", layout: "v2" },
     } }));
     const registry = readRegistry(file);
     expect(registry.corrupt).toBe(false);
     expect(Object.keys(registry.instances)).toEqual([CHECKOUT]);
-    expect(registry.inconsistent).toEqual(["alpha"]);
+    expect(registry.inconsistent).toEqual(["default"]);
   });
 
   it("serializes concurrent writers without losing an entry", () => {
@@ -152,6 +153,68 @@ describe("best-effort registration", () => {
     expect(launch.elapsed).toBeLessThan(2_000);
     const stat = fs.lstatSync(`${file}${suffix}`);
     expect(kind === "fifo" ? stat.isFIFO() : stat.isDirectory()).toBe(true);
+  });
+
+  // Final review: a sibling checkout holding the lock must cost a launch nothing.
+  it("skips registration on the first contention, without waiting", () => {
+    const h = home(), file = registryPath({ ...at, home: h });
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const holder = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30_000)"], { stdio: "ignore" });
+    try {
+      fs.writeFileSync(`${file}.lock`, JSON.stringify({ pid: holder.pid, token: "busy" }));
+      const launch = inChild(`const started = Date.now(); registerDevelopmentLaunch({ instance: "${CHECKOUT}", entry: { kind: "checkout", name: "A", checkout: "/x", layout: "v2" }, home: ${JSON.stringify(h)}, platform: "darwin", log: () => {} }); console.log("took " + (Date.now() - started));`);
+      expect(launch.status, launch.stderr).toBe(0);
+      expect(Number(/took (\d+)/.exec(launch.stdout)?.[1])).toBeLessThan(60);
+      expect(exists(file)).toBe(false);
+    } finally {
+      holder.kill("SIGKILL");
+    }
+  });
+
+  it("removes only a temporary file this update created", () => {
+    const h = home(), file = registryPath({ ...at, home: h });
+    upsertInstance(file, CHECKOUT, { kind: "checkout", name: "A", checkout: "/x", layout: "v2" });
+    const now = 1_800_000_000_000;
+    vi.spyOn(Date, "now").mockReturnValue(now);
+    const stranger = `${file}.${process.pid}.${now}.tmp`;
+    fs.writeFileSync(stranger, "not ours");
+    expect(() => upsertInstance(file, CHECKOUT, { kind: "checkout", name: "B", checkout: "/x", layout: "v2" })).toThrow();
+    vi.restoreAllMocks();
+    expect(fs.readFileSync(stranger, "utf8")).toBe("not ours");
+    expect(JSON.parse(fs.readFileSync(file, "utf8")).instances[CHECKOUT].name).toBe("A");
+  });
+
+  it("never replaces an existing corrupt-registry backup", () => {
+    const h = home(), file = registryPath({ ...at, home: h });
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    vi.useFakeTimers({ now: new Date("2026-11-19T12:00:00.000Z"), toFake: ["Date"] });
+    try {
+      const aside = `${file}.corrupt-2026-11-19T12-00-00-000Z`;
+      fs.writeFileSync(aside, "an earlier backup");
+      fs.writeFileSync(file, "{broken");
+      upsertInstance(file, CHECKOUT, { kind: "checkout", name: "A", checkout: "/x", layout: "v2" });
+      expect(fs.readFileSync(aside, "utf8")).toBe("an earlier backup");
+      const backups = fs.readdirSync(path.dirname(file)).filter((name) => name.startsWith("instances.json.corrupt-"));
+      expect(backups).toHaveLength(2);
+      expect(backups.map((name) => fs.readFileSync(path.join(path.dirname(file), name), "utf8")).sort()).toEqual(["an earlier backup", "{broken"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not block on a FIFO where a recovery fence would be", () => {
+    const h = home(), lock = path.join(h, "launcher.lock");
+    fs.writeFileSync(lock, JSON.stringify({ pid: DEAD_PID, token: "old" }));
+    const fence = path.join(h, `recovery-${createHash("sha256").update(fs.readFileSync(lock, "utf8")).digest("hex")}.lock`);
+    expect(spawnSync("mkfifo", [fence]).status).toBe(0);
+    const old = new Date(Date.now() - 10 * 60_000);
+    fs.utimesSync(fence, old, old);
+    const script = `import { acquireExclusiveLock } from ${JSON.stringify(path.resolve("scripts/exclusive-file-lock.mjs"))};
+      try { acquireExclusiveLock({ file: ${JSON.stringify(lock)}, classify: () => "stale" })(); console.log("acquired"); } catch (error) { console.log("refused:" + error.message); }`;
+    const result = spawnSync(process.execPath, ["--input-type=module", "-e", script], { encoding: "utf8", timeout: 3_000 });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toMatch(/refused:/);
+    expect(fs.lstatSync(fence).isFIFO()).toBe(true);
   });
 
   it("gives up on a busy registry within its short bound", () => {

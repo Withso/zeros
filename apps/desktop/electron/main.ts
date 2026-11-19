@@ -39,6 +39,7 @@ import {
   type IpcMainInvokeEvent,
 } from "electron";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { normalizeExternalHttpUrl } from "@zeros/protocol/external-url";
 import { isAgentControlConfirmationDecision } from "@zeros/protocol/agent-control";
@@ -134,17 +135,14 @@ import { WorkOSDesktopSecurityMonitor } from "./auth-security-monitor";
 import { controlPlaneFetch } from "./control-plane-fetch";
 import {
   appIdentity,
-  developmentInstance,
   realProfileRoots,
-  storageFamily,
   zerosChannelDataDir,
   zerosDataDir,
   zerosDesignWorkspacesRoot,
-  zerosDevelopmentDataDir,
-  zerosLogDir,
-  zerosSessionDataDir,
+  zerosLocalLogDir,
+  zerosLocalSessionDataDir,
 } from "../src/engine/db/paths";
-import { assertDevelopmentAdmission, assertDevelopmentOverrideIsolated, sharedSecretsDirectory } from "./storage-identity";
+import { assertLocalAdmission, assertLocalOverrideIsolated } from "./storage-identity";
 import { removeEmptyLegacyDesignFolder } from "./legacy-design-folder";
 // CHANNELS/isChannel only — importing the runtime module is side-effect-free, so
 // this cannot read ZEROS_CHANNEL before the seeding block below sets it.
@@ -216,18 +214,41 @@ registerDesignCaptureSheetPrivileges();
 // engine + db/paths.ts resolve the SAME channel.
 declare const __ZEROS_CHANNEL_BAKED__: string | undefined;
 
-// Seed ZEROS_DEV, then ZEROS_CHANNEL, before resolving the storage family/zerosDataDir
+// scripts/dev-instance.mjs derives ONE name from the git worktree (or an
+// explicit $ZEROS_INSTANCE) and exports it so a `pnpm electron:dev` in each
+// git worktree is its OWN app — distinct name, userData, Chromium cache,
+// engine data dir (com.zeros.dev.<slug>, resolved in apps/desktop/src/engine/db/paths.ts),
+// and single-instance lock (Chromium keys the lock off userData, so a
+// per-instance userData makes the lock per-instance too → instances coexist).
+// Empty for the primary checkout, which keeps the plain "Zeros Dev" identity.
+// The slug is filesystem-/reverse-DNS-safe. INSTANCE_LABEL (a titleized form) is
+// retained ONLY for the one-time legacy-userData migration below; the user-visible
+// Dock + window name is INSTANCE_NAME ("zeros-<worktree>"). Kept in sync with
+// db/paths.ts devInstanceSlug().
+const INSTANCE_SLUG = (process.env.ZEROS_INSTANCE ?? "")
+  .trim()
+  .toLowerCase()
+  .replace(/[^a-z0-9._-]+/g, "-")
+  .replace(/^[-._]+|[-._]+$/g, "")
+  .slice(0, 40);
+const INSTANCE_LABEL = INSTANCE_SLUG
+  ? INSTANCE_SLUG.replace(/[-._]+/g, " ").replace(/\b\w/g, (c) =>
+      c.toUpperCase(),
+    )
+  : "";
+// The Dock/window name for this instance. The launcher (scripts/dev-instance.mjs)
+// passes "zeros-<worktree>" via ZEROS_INSTANCE_NAME; fall back to deriving it from
+// the slug for a bare launch. Empty for the primary checkout (plain "Zeros Dev").
+const INSTANCE_NAME =
+  (process.env.ZEROS_INSTANCE_NAME ?? "").trim() ||
+  (INSTANCE_SLUG ? `zeros-${INSTANCE_SLUG}` : "");
+
+// Seed ZEROS_DEV, then ZEROS_CHANNEL, before resolving appIdentity/zerosDataDir
 // or reading app name/userData. One channel-and-instance identity keeps engine,
 // Electron storage, cache and singleton locks isolated across launches.
 const explicitDevEnv =
   process.env.ZEROS_DEV === "1" || process.env.ZEROS_RUNTIME_MODE === "dev";
-// A packaged build is never development, whatever its environment says: an
-// inherited ZEROS_DEV would otherwise hand it the dev channel's profile.
-const runningDev = IS_DEV || (!IS_PACKAGED && explicitDevEnv);
-if (IS_PACKAGED) {
-  delete process.env.ZEROS_DEV;
-  delete process.env.ZEROS_RUNTIME_MODE;
-}
+const runningDev = IS_DEV || explicitDevEnv;
 
 // (1) ZEROS_DEV — the engine (spawned sidecar OR imported in-process) resolves its
 // data dirs purely from env (apps/desktop/src/engine/runtime.ts isDevRuntime()); seed it so
@@ -236,9 +257,15 @@ if (IS_PACKAGED) {
 // zeros.db / ~/zeros/workspaces, trampling real user data.
 if (runningDev) process.env.ZEROS_DEV = "1";
 
-// Main is the authority: packaged and hosted builds cannot inherit Local
-// admission, even from a parent app's shell.
-if (!IS_LOCAL_DEVELOPMENT) delete process.env.ZEROS_LOCAL_DEVELOPMENT;
+// Main is the authority. Packaged/full Dev cannot inherit Local admission;
+// Local cannot read a hosted Dev account store, even from a parent app shell.
+if (IS_LOCAL_DEVELOPMENT) {
+  // Sharing is resolved below against Local's own channel root. Preserve an
+  // explicit isolation choice, but never inherit a hosted Dev store path.
+  delete process.env.ZEROS_SHARED_SECRETS_DIR;
+} else {
+  delete process.env.ZEROS_LOCAL_DEVELOPMENT;
+}
 
 // (2) ZEROS_CHANNEL — travels by env so the spawned engine AND every in-process
 // db/paths.ts caller resolve the SAME channel. Seed ONCE, before any data-dir /
@@ -254,7 +281,9 @@ if (!IS_LOCAL_DEVELOPMENT) delete process.env.ZEROS_LOCAL_DEVELOPMENT;
 // letting a mislabeled build read and write real user data.
 {
   const baked =
-    typeof __ZEROS_CHANNEL_BAKED__ === "string" ? __ZEROS_CHANNEL_BAKED__ : "";
+    typeof __ZEROS_CHANNEL_BAKED__ === "string"
+      ? __ZEROS_CHANNEL_BAKED__
+      : "";
   // A retired or mistyped bake must not fall through to Production's identity.
   if (baked !== "" && !isChannel(baked)) {
     throw new Error(
@@ -262,28 +291,21 @@ if (!IS_LOCAL_DEVELOPMENT) delete process.env.ZEROS_LOCAL_DEVELOPMENT;
         `(expected one of: ${CHANNELS.join(" | ")}). Rebuild it with a supported channel.`,
     );
   }
-  if (IS_PACKAGED) {
-    // The bake is the packaged build's identity; its environment never is.
-    if (baked === "dev")
-      throw new Error("[Zeros] A packaged build cannot run the dev channel. Rebuild it as alpha or stable.");
-    process.env.ZEROS_CHANNEL = baked || "stable";
-  } else {
-    const fromEnv = process.env.ZEROS_CHANNEL;
-    if (fromEnv !== undefined && fromEnv !== "" && !isChannel(fromEnv)) {
-      throw new Error(
-        `[Zeros] ZEROS_CHANNEL="${fromEnv}" is not a known channel ` +
-          `(expected one of: ${CHANNELS.join(" | ")}). Unset it or fix the value.`,
-      );
-    }
-    if (!fromEnv) process.env.ZEROS_CHANNEL = baked || (runningDev ? "dev" : "stable");
+  const fromEnv = process.env.ZEROS_CHANNEL;
+  if (fromEnv !== undefined && fromEnv !== "" && !isChannel(fromEnv)) {
+    throw new Error(
+      `[Zeros] ZEROS_CHANNEL="${fromEnv}" is not a known channel ` +
+        `(expected one of: ${CHANNELS.join(" | ")}). Unset it or fix the value.`,
+    );
+  }
+  if (!fromEnv) {
+    process.env.ZEROS_CHANNEL = isChannel(baked)
+      ? baked
+      : runningDev
+        ? "dev"
+        : "stable";
   }
 }
-
-// A development override isolates a fixture; it must never select a real
-// profile and, with it, that profile's credential store. Installed channels
-// keep ZEROS_DATA_DIR exactly as it has always behaved.
-if (process.env.ZEROS_CHANNEL === "dev")
-  assertDevelopmentOverrideIsolated(process.env.ZEROS_DATA_DIR, realProfileRoots());
 
 // Cloud workspaces are a release/build capability, not a user preference. A
 // packaged compile replaces the shared resolver's baked constant, then this
@@ -291,69 +313,75 @@ if (process.env.ZEROS_CHANNEL === "dev")
 // cannot enable a release that shipped with the capability off.
 seedCloudWorkspaceDesktopCapabilityEnvironment();
 
-// (3) One identity per storage family. app.getName() picks the macOS
-// safeStorage keychain key ("<name> Safe Storage") and is never the instance:
-// every development instance, Local or `electron:alpha`, decrypts with the one
-// "Zeros Local" key, while its files stay in separate stores (below).
+// Account-free Local runs only on its checkout's own id, and its override may
+// not resolve to a real profile, so it can never open another app's store.
+if (IS_LOCAL_DEVELOPMENT) {
+  assertLocalAdmission(INSTANCE_SLUG);
+  assertLocalOverrideIsolated(process.env.ZEROS_DATA_DIR, realProfileRoots());
+}
+
+// (3) One identity for EVERY channel. app.getName() is pinned to the CHANNEL name
+// only — NEVER the per-worktree slug — so macOS safeStorage derives ONE keychain
+// key per channel ("Zeros Dev Safe Storage"), shared by every dev worktree. The
+// human worktree label is cosmetic: it drives the window title + Dock tooltip only
+// (see WINDOW_TITLE), never userData/app.getName()/the keychain.
 // A total Record keyed on Channel, so adding a channel is a COMPILE ERROR here
 // rather than silently inheriting Production's name — which would also silently
 // share Production's safeStorage keychain key ("Zeros Safe Storage") and sign the
 // new channel's users into the wrong secret store.
 const CHANNEL_DISPLAY_NAME: Record<Channel, string> = {
-  dev: "Zeros Local",
+  dev: "Zeros Dev",
   alpha: "Zeros Alpha",
   stable: "Zeros",
 };
-const CHANNEL_NAME = isChannel(process.env.ZEROS_CHANNEL)
-  ? CHANNEL_DISPLAY_NAME[process.env.ZEROS_CHANNEL]
-  : runningDev
-    ? CHANNEL_DISPLAY_NAME.dev
-    : CHANNEL_DISPLAY_NAME.stable;
-const DEVELOPMENT = storageFamily() === "development";
-assertDevelopmentAdmission({
-  localDevelopment: IS_LOCAL_DEVELOPMENT,
-  instance: developmentInstance(),
-});
-// Window title and Dock tooltip only; never userData or the keychain.
-const WINDOW_TITLE =
-  (DEVELOPMENT && process.env.ZEROS_INSTANCE_NAME?.trim()) || CHANNEL_NAME;
+const CHANNEL_NAME = IS_LOCAL_DEVELOPMENT
+  ? "Zeros Local"
+  : isChannel(process.env.ZEROS_CHANNEL)
+    ? CHANNEL_DISPLAY_NAME[process.env.ZEROS_CHANNEL]
+    : runningDev
+      ? CHANNEL_DISPLAY_NAME.dev
+      : CHANNEL_DISPLAY_NAME.stable;
+const WINDOW_TITLE = INSTANCE_NAME || CHANNEL_NAME;
 
-// One-time carry-over of an installed channel's name-based Electron state into
-// its id dir (best-effort, marker-guarded). Runs with LITERAL legacy names
-// BEFORE the setPath below changes what getPath() returns.
+// One-time relocation of any legacy name-based Electron state into the new id dir
+// (best-effort, marker-guarded). Runs with LITERAL legacy names BEFORE the setPath
+// below changes what getPath() returns. Secrets are NOT migrated (old per-name key
+// can't decrypt into the new shared key → one-time re-login, per the agreed
+// decision); the Chromium session regenerates.
 try {
-  if (!DEVELOPMENT) {
+  if (!IS_LOCAL_DEVELOPMENT) {
     migrateElectronIdentity({
       appDataDir: app.getPath("appData"),
       newUserData: zerosDataDir(),
       legacyChannelName: CHANNEL_NAME,
+      legacyInstanceName: INSTANCE_LABEL ? `Zeros — ${INSTANCE_LABEL}` : null,
     });
   }
 } catch (err) {
   console.warn("[Zeros] identity migration skipped:", err);
 }
 
-// Electron's own userData is the engine's data dir: secrets.json,
-// app-settings.json and the Chromium Singleton lock live beside zeros.db, and a
-// per-instance userData keeps each development instance's single-instance lock
-// (deep-link.ts) distinct so instances coexist.
+// Redirect Electron's OWN userData to the SAME id dir the engine uses for the DB.
+// THE crux: secrets.json / app-settings.json / the Chromium Singleton lock now
+// live beside zeros.db under com.zeros[.dev|.alpha][.<slug>], ending the split
+// where they fell into the name-based "Zeros — <Label>" default. Per-instance
+// userData also keeps each dev worktree's Singleton lock distinct → windows
+// coexist (the single-instance lock in deep-link.ts keys off userData).
 app.setName(CHANNEL_NAME);
 app.setPath("userData", zerosDataDir());
 
-// Set before secret-store or spawnEngine read it; an inherited value never
-// survives (storage-identity.ts decides).
-{
-  const shared = isChannel(process.env.ZEROS_CHANNEL)
-    ? sharedSecretsDirectory({
-        channel: process.env.ZEROS_CHANNEL,
-        localDevelopment: IS_LOCAL_DEVELOPMENT,
-        isolate: process.env.ZEROS_ISOLATE === "1" || Boolean(process.env.ZEROS_DATA_DIR?.trim()),
-        familyDataDir: zerosChannelDataDir(),
-        hostedAccountDataDir: process.env.ZEROS_CHANNEL === "dev" ? zerosDevelopmentDataDir("alpha") : "",
-      })
-    : undefined;
-  if (shared) process.env.ZEROS_SHARED_SECRETS_DIR = shared;
-  else delete process.env.ZEROS_SHARED_SECRETS_DIR;
+// (dev) Shared login: point secrets at the channel-PRIMARY dir (com.zeros.dev
+// or com.zeros.local for account-free Local development),
+// so every worktree shares ONE secrets.json — decrypted by the ONE per-channel
+// keychain key above → log in once, every worktree authed. ZEROS_ISOLATE=1 opts a
+// worktree OUT (its secrets stay in its own per-instance userData). Only
+// meaningful in dev (stable/alpha have a single instance where the two dirs
+// coincide). Set before secret-store or spawnEngine read it.
+if (
+  process.env.ZEROS_CHANNEL === "dev" &&
+  process.env.ZEROS_ISOLATE !== "1"
+) {
+  process.env.ZEROS_SHARED_SECRETS_DIR = zerosChannelDataDir();
 }
 
 // Chromium cache → ~/Library/Caches (macOS-correct, purgeable)
@@ -372,14 +400,16 @@ function relocateChromiumCache(): void {
   // @ts-expect-error - "cache" is a valid runtime path name, absent from the types.
   const cacheRoot = app.getPath("cache");
   // New: cache/session under the SAME reverse-DNS id as userData + the DB
-  // (com.zeros[.alpha]) — the design.zeros.* scheme is retired, so a
+  // (com.zeros[.dev|.alpha][.<slug>]) — the design.zeros.* scheme is retired, so a
   // logical instance is ONE identifier across Application Support, Caches + Logs.
   const newSessionData = path.join(cacheRoot, appIdentity());
 
-  if (DEVELOPMENT) {
-    const sessionData = zerosSessionDataDir(cacheRoot);
-    fs.mkdirSync(sessionData, { recursive: true });
-    app.setPath("sessionData", sessionData);
+  if (IS_LOCAL_DEVELOPMENT) {
+    // A new Local identity keeps its whole profile in <data dir>/electron; a
+    // legacy one keeps the cache-dir session it has always used.
+    const localSessionData = zerosLocalSessionDataDir() ?? newSessionData;
+    fs.mkdirSync(localSessionData, { recursive: true });
+    app.setPath("sessionData", localSessionData);
     return;
   }
 
@@ -387,7 +417,16 @@ function relocateChromiumCache(): void {
   // renderer state (composer drafts / theme / Local Storage) forward ONCE. Named
   // by its LITERAL old value: app.getPath("sessionData") now resolves to the
   // fresh new userData (the Phase-1 redirect ran above), so it can't be the source.
-  const oldSessionData = path.join(cacheRoot, "design.zeros.app");
+  const ch = process.env.ZEROS_CHANNEL;
+  const legacyBase =
+    ch === "dev"
+      ? "design.zeros.app.dev"
+      : "design.zeros.app";
+  const legacyDirName =
+    ch === "dev" && INSTANCE_SLUG
+      ? `${legacyBase}.${INSTANCE_SLUG}`
+      : legacyBase;
+  const oldSessionData = path.join(cacheRoot, legacyDirName);
   if (path.resolve(oldSessionData) === path.resolve(newSessionData)) {
     app.setPath("sessionData", newSessionData);
     return;
@@ -462,21 +501,27 @@ function relocateChromiumCache(): void {
 }
 relocateChromiumCache();
 
-const APP_LABEL = app.getName();
+const APP_LABEL = app.getName(); // "Zeros" in prod, "Zeros Dev" in dev
 // Surface the resolved mode so a misconfigured launch is visible, never silent.
 console.log(
-  `[Zeros] launch mode: ${runningDev ? "dev" : "prod"} (${APP_LABEL}) · packaged=${IS_PACKAGED} · ZEROS_DEV=${process.env.ZEROS_DEV ?? "(unset)"}`,
+  `[Zeros] launch mode: ${runningDev ? "dev (Zeros Dev)" : "prod (Zeros)"} · packaged=${IS_PACKAGED} · ZEROS_DEV=${process.env.ZEROS_DEV ?? "(unset)"}`,
 );
 
 // Packaged GUI apps detach from the terminal so `console.log` /
 // `console.error` vanish. To debug production startup, mirror
 // everything into a rotating log file under the user's app-data
 // directory. Tail it with:
-//   tail -f ~/Library/Logs/com.zeros/main.log                # stable
-//   tail -f ~/Library/Logs/com.zeros.alpha/main.log          # alpha
-//   tail -f ~/Library/Logs/com.zeros.local/<instance>/main.log
+//   tail -f ~/Library/Logs/com.zeros/main.log       # stable
+//   tail -f ~/Library/Logs/com.zeros.alpha/main.log # alpha
+//   tail -f ~/Library/Logs/com.zeros.dev/main.log   # primary dev
 function setupLogFile(): void {
-  const logDir = zerosLogDir();
+  // Logs under the same id as userData/cache. macOS → ~/Library/Logs/<id>;
+  // other platforms keep logs beside the data dir.
+  const logDir =
+    zerosLocalLogDir() ??
+    (process.platform === "darwin"
+      ? path.join(os.homedir(), "Library", "Logs", appIdentity())
+      : path.join(zerosDataDir(), "logs"));
   try {
     fs.mkdirSync(logDir, { recursive: true });
   } catch {
@@ -699,9 +744,9 @@ function createMainWindow(): BrowserWindow {
     // workbench minima cannot disagree with the live window.
     minWidth: MAIN_WINDOW_MIN_WIDTH,
     minHeight: MAIN_WINDOW_MIN_HEIGHT,
-    // Window title carries the development instance's name (or the channel name)
-    // so users can tell instances and channels apart at a glance. Cosmetic ONLY —
-    // it never feeds the app identity or the keychain (see WINDOW_TITLE above).
+    // Window title carries the per-worktree label (or channel name) so users can
+    // tell dev worktrees / dev / prod apart at a glance. Cosmetic ONLY — it never
+    // feeds the app identity or the keychain (see WINDOW_TITLE above).
     title: WINDOW_TITLE,
     titleBarStyle: "hiddenInset",
     // Traffic-light vertical position is shared by EVERY surface that can own

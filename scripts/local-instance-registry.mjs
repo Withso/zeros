@@ -14,7 +14,7 @@ const require = createRequire(import.meta.url);
 const paths = require("../apps/desktop/src/engine/db/local-development-paths.cjs");
 
 export const REGISTRY_VERSION = 1;
-export const INSTANCE_KINDS = Object.freeze(["checkout", "alpha"]);
+export const INSTANCE_KINDS = Object.freeze(["checkout"]);
 const LOCK_STALE_MS = 30_000;
 
 export function registryPath({ home = os.homedir(), platform = process.platform, env = process.env } = {}) {
@@ -36,13 +36,11 @@ function parseRegistry(raw) {
   return doc;
 }
 
-/** `alpha` and `default` are only ever the hosted `alpha` kind, and a 16-hex
- * id only ever a Local checkout: any other pairing was not written by a
- * launcher and proves nothing about its owner. */
+/** The registry records account-free Local checkouts, whose id is always 16
+ * hex characters: any other pairing was not written by a launcher and proves
+ * nothing about its owner. */
 export function possibleEntry(instance, kind) {
-  if (kind === "alpha") return paths.isReservedInstanceId(instance);
-  if (kind === "checkout") return paths.isCheckoutInstanceId(instance);
-  return false;
+  return kind === "checkout" && paths.isCheckoutInstanceId(instance);
 }
 
 /** Read-only view. A missing file is empty; a corrupt one reads as empty and is
@@ -61,8 +59,7 @@ export function readRegistry(file) {
   const instances = {}, inconsistent = [];
   for (const [instance, entry] of Object.entries(doc.instances)) {
     if (possibleEntry(instance, entry.kind)) instances[instance] = entry;
-    else if (INSTANCE_KINDS.includes(entry.kind) || paths.isReservedInstanceId(instance) || paths.isCheckoutInstanceId(instance))
-      inconsistent.push(instance);
+    else if (INSTANCE_KINDS.includes(entry.kind) || paths.isCheckoutInstanceId(instance)) inconsistent.push(instance);
   }
   return { ...doc, instances, corrupt: false, inconsistent };
 }
@@ -71,6 +68,7 @@ function sleep(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
+/** `timeoutMs: 0` makes one attempt and never sleeps (launch registration). */
 function registryLock(file, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
@@ -98,13 +96,33 @@ function registryLock(file, timeoutMs) {
 
 function writeAtomic(file, doc) {
   const temporary = `${file}.${process.pid}.${Date.now()}.tmp`;
+  // Removed only by this invocation, and only while it is still its own file.
+  let owned = false;
   try {
     fs.writeFileSync(temporary, `${JSON.stringify(doc, null, 2)}\n`, { flag: "wx", mode: 0o600 });
+    owned = true;
     fs.renameSync(temporary, file);
+    owned = false;
     fs.chmodSync(file, 0o600);
   } finally {
-    fs.rmSync(temporary, { force: true });
+    if (owned) fs.rmSync(temporary, { force: true });
   }
+}
+
+/** Keep a corrupt registry beside it under a name no other file has: link(2)
+ * never replaces an existing name. */
+function setAside(file) {
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  for (let attempt = 0; attempt < 16; attempt++) {
+    const aside = `${file}.corrupt-${stamp}${attempt ? `-${attempt}` : ""}`;
+    try {
+      fs.linkSync(file, aside);
+      return;
+    } catch (error) {
+      if (error.code !== "EEXIST") throw error;
+    }
+  }
+  throw new Error("Could not set aside the corrupt Zeros Local instance registry.");
 }
 
 /** Apply `mutate(doc)` under the lock and persist the result. */
@@ -118,7 +136,7 @@ export function updateRegistry(file, mutate, { timeoutMs = 5_000 } = {}) {
       try {
         doc = parseRegistry(raw);
       } catch {
-        fs.renameSync(file, `${file}.corrupt-${new Date().toISOString().replace(/[:.]/g, "-")}`);
+        setAside(file);
         doc = emptyRegistry();
       }
     }

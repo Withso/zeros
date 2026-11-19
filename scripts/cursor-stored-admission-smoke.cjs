@@ -1,8 +1,8 @@
 #!/usr/bin/env electron
 "use strict";
 
-// No-model native Cursor admission using the exact encrypted credential Zeros
-// Local shares across checkouts. A plain Node process cannot decrypt Electron safeStorage, which made
+// No-model native Cursor admission using the exact encrypted credential Zeros Dev
+// uses. A plain Node process cannot decrypt Electron safeStorage, which made
 // prior standalone smokes prove only key presence or a caller-exported key.
 // This main-process harness keeps the plaintext in memory, passes it directly
 // to the ordinary live-agent smoke child, and never prints or writes it.
@@ -12,9 +12,6 @@ const { spawn } = require("node:child_process");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const {
-  developmentPaths,
-} = require("../apps/desktop/src/engine/db/local-development-paths.cjs");
 
 const ROOT = path.resolve(__dirname, "..");
 const MAX_SECRETS_FILE_BYTES = 1024 * 1024;
@@ -45,7 +42,7 @@ function readEncryptedCursorCredential(file) {
     }
     const encoded = parsed[CURSOR_ACCOUNT];
     if (typeof encoded !== "string" || encoded.length === 0) {
-      throw new Error("no Cursor API key is saved in Zeros Local");
+      throw new Error("no Cursor API key is saved in Zeros Dev");
     }
     return encoded;
   } finally {
@@ -129,8 +126,8 @@ if (process.platform !== "darwin") {
 }
 
 // safeStorage's macOS Keychain identity follows the channel-level app name.
-// Match apps/desktop/electron/main.ts exactly; never use the instance label.
-app.setName("Zeros Local");
+// Match apps/desktop/electron/main.ts exactly; never use the worktree label.
+app.setName("Zeros Dev");
 app.setPath(
   "userData",
   fs.mkdtempSync(path.join(os.tmpdir(), "zeros-cursor-admission-electron-")),
@@ -149,8 +146,10 @@ app
       const secretsFile =
         process.env.ZEROS_SECRETS_FILE ||
         path.join(
-          developmentPaths({ instance: "default", platform: "darwin", env: {} })
-            .sharedDataDir,
+          os.homedir(),
+          "Library",
+          "Application Support",
+          "com.zeros.dev",
           "secrets.json",
         );
       const encrypted = readEncryptedCursorCredential(secretsFile);
@@ -166,7 +165,7 @@ app
         throw new Error("the saved Cursor API key could not be decrypted");
       }
       console.log(
-        "── Zeros Local stored Cursor credential · no-model native admission ──",
+        "── Zeros Dev stored Cursor credential · no-model native admission ──",
       );
       exitCode = await runAdmission(apiKey, secretsFile);
     } catch (error) {
