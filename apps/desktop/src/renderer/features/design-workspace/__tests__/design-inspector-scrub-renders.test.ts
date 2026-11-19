@@ -209,13 +209,19 @@ async function show(
     selectedNodeId = "card",
     selectedNodeIds = ["card"],
   } = selection;
+  const getNodeDetails = vi.fn<(nodeId: string) => Promise<DesignRuntimeNodeDetails>>(async (nodeId) =>
+    nodeId === "root" && details.oid !== "root" ? root : details,
+  );
   const runtime = {
     sourceVersion: runtimeSourceVersion,
-    supports: (capability: string) => previewLayout && capability === "previewLayout",
+    supports: (capability: string) => capability === "measureLayout" || (previewLayout && capability === "previewLayout"),
     ...(previewLayout ? { previewLayout: vi.fn(async () => []) } : {}),
     previewStyles: vi.fn(async () => details),
     clearPreviewStyles: vi.fn(async () => details),
-    getNodeDetails: vi.fn<(nodeId: string) => Promise<DesignRuntimeNodeDetails>>(async () => details),
+    getNodeDetails,
+    measureLayout: vi.fn(async ({ nodeIds }: { nodeIds: string[] }) =>
+      Promise.all(nodeIds.map((nodeId) => getNodeDetails(nodeId))),
+    ),
   };
   mocks.runtime.mockReturnValue(runtime);
   const frame = { file: "home.html", sourceVersion, title: "Home", x: 0, y: 0, z: 0, width: 400, height: 300 } as never;
@@ -324,7 +330,7 @@ describe("an inspector field scrub", () => {
   });
 
   it("a 120-tick scrub re-renders only the scrubbed field", async () => {
-    await show();
+    const runtime = await show();
     expect(fieldInput("opacity").value).toBe("50");
     const report = await scrub("Opacity");
     expect(report.publishes).toBe(120);
@@ -339,6 +345,18 @@ describe("an inspector field scrub", () => {
     await release();
     expect(writes()).toBe(1);
     expect(lastWrite()).toContain(`"opacity":"${Number(shown) / 100}"`);
+    expect(runtime.measureLayout).not.toHaveBeenCalled();
+  });
+
+  it("does not measure confirmed layout during ordinary pointer position previews", async () => {
+    const runtime = await show();
+    await scrub("X");
+    expect(runtime.previewStyles).toHaveBeenCalled();
+    expect(runtime.measureLayout).not.toHaveBeenCalled();
+    expect(writes()).toBe(0);
+    act(() => { window.dispatchEvent(pointer("pointercancel", lastX())); });
+    await settle();
+    expect(runtime.measureLayout).not.toHaveBeenCalled();
   });
 
   it("a layout scrub still reaches the layout section that reads it", async () => {
@@ -482,6 +500,7 @@ describe("an inspector field scrub", () => {
     const afterUndo = { ...beforeUndo, styles: { ...beforeUndo.styles, rotate: "0deg" } };
     let releaseUndo: (() => void) | undefined;
     let resolveDetails: (() => void) | undefined;
+    const detailsGate = new Promise<void>((resolve) => { resolveDetails = resolve; });
     let currentDetails = beforeUndo;
     let prepared: { operations: Array<{ type: string; styles?: Record<string, string | null> }> } | undefined;
     const actions: string[] = [];
@@ -527,9 +546,7 @@ describe("an inspector field scrub", () => {
       await act(async () => {
         runtime.getNodeDetails.mockImplementation((nodeId) => {
           if (nodeId === "root") return Promise.resolve(root);
-          return new Promise((resolve) => {
-            resolveDetails = () => resolve(currentDetails);
-          });
+          return detailsGate.then(() => currentDetails);
         });
         rotate.click();
         await Promise.resolve();
@@ -550,7 +567,7 @@ describe("an inspector field scrub", () => {
       expect(actions).toEqual(["undo"]);
       await act(async () => {
         releaseUndo?.();
-        await vi.waitFor(() => expect(runtime.getNodeDetails).toHaveBeenCalledOnce());
+        await vi.waitFor(() => expect(runtime.getNodeDetails).toHaveBeenCalledTimes(2));
       });
       expect(actions).toEqual(["undo"]);
       await act(async () => {

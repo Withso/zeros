@@ -4,6 +4,7 @@ import {
   designLayoutMode,
   designLayoutModeStyles,
   designLayoutActionStyles,
+  designLayoutActionForConfirmedDetails,
   designLayoutActionUpdates,
   designLayoutFieldValue,
   designLayoutConstraint,
@@ -60,6 +61,27 @@ function node(styles: Record<string, string> = {}): DesignRuntimeNodeDetails {
 }
 
 describe("designer layout values", () => {
+  it("rebases a durable Mixed delta from restored details, not scrub bases", () => {
+    const action = designLayoutActionForConfirmedDetails({
+      type: "position",
+      axis: "x",
+      value: 5,
+      by: true,
+      bases: { child: 100 },
+    });
+    expect(
+      designLayoutActionStyles(
+        {
+          ...node({ left: "10px" }),
+          layout: { ...node().layout!, x: 10 },
+        },
+        action,
+      ),
+    ).toMatchObject({
+      left: "15px",
+    });
+  });
+
   it("pins selected parents and children independently in either selection order", () => {
     const parent = node({ position: "static" });
     parent.oid = "parent";

@@ -11,6 +11,7 @@ import {
   designHeldStateWatch,
   forgetDesignHeldStateRelease,
   measureDesignNodeUnheld,
+  measureDesignLayoutUnheld,
   holdDesignNodeState,
   noteDesignHeldReplyRefused,
   releaseDesignNodeState,
@@ -154,6 +155,34 @@ describe("held layer state", () => {
     runtime.getNodeDetails.mockImplementationOnce(() => Promise.resolve({ ...details("hover"), oid: "root" }));
     expect(await measureDesignNodeUnheld(runtime, "root", watch)).toBeNull();
     expect(watch.blocked()).toBe(true);
+  });
+
+  it("maps atomic layout measurements by oid and returns no held values", async () => {
+    const root = { ...details(), oid: "root" };
+    const measureLayout = vi.fn(async () => [root, details()]);
+    const watch = designHeldStateWatch("w", "home.html", ["send"]);
+    const input = { updates: [], nodeIds: ["send", "root"] };
+    const measured = await measureDesignLayoutUnheld({ measureLayout }, input, watch);
+    expect(measureLayout).toHaveBeenCalledExactlyOnceWith(input);
+    expect(measured?.get("root")).toBe(root);
+    measureLayout.mockResolvedValueOnce([root, details("hover")]);
+    expect(await measureDesignLayoutUnheld({ measureLayout }, input, watch)).toBeNull();
+    expect(await measureDesignLayoutUnheld({ measureLayout }, input, watch)).toBeNull();
+  });
+
+  it("accepts an empty atomic layout read", async () => {
+    const measureLayout = vi.fn(async () => []);
+    const measured = await measureDesignLayoutUnheld({ measureLayout }, { updates: [], nodeIds: [] }, designHeldStateWatch("w", "home.html", []));
+    expect(measured?.size).toBe(0);
+  });
+
+  it("rejects missing requested layout nodes and propagates measurement errors", async () => {
+    const measureLayout = vi.fn(async () => [details()]);
+    const watch = designHeldStateWatch("w", "home.html", ["send"]);
+    const input = { updates: [], nodeIds: ["send", "root"] };
+    await expect(measureDesignLayoutUnheld({ measureLayout }, input, watch)).rejects.toThrow("root");
+    measureLayout.mockRejectedValueOnce(new Error("measurement failed"));
+    await expect(measureDesignLayoutUnheld({ measureLayout }, input, watch)).rejects.toThrow("measurement failed");
   });
 
   it("drops a reply that arrives after Back to Default and lets go without waiting", async () => {

@@ -60,6 +60,21 @@ export type DesignLayoutAction =
   | { type: "position"; axis: DesignLayoutAxis; value: number; by?: boolean; bases?: Readonly<Record<string, number>> }
   | { type: "size"; axis: DesignLayoutAxis; value: number; by?: boolean; bases?: Readonly<Record<string, number>> };
 
+/** Durable layout edits use the confirmed runtime value as their relative
+ * base. Scrub previews retain `bases` so each tick stays relative to its
+ * origin without applying the delta twice. */
+export function designLayoutActionForConfirmedDetails(
+  action: DesignLayoutAction,
+): DesignLayoutAction {
+  if (
+    action.type !== "position" &&
+    action.type !== "size" &&
+    action.type !== "rotate"
+  )
+    return action;
+  return { ...action, bases: undefined };
+}
+
 /** In-field glyphs the inspector kit draws (design-inspector-kit.tsx). */
 export type InspectorGlyphName =
   | "opacity"

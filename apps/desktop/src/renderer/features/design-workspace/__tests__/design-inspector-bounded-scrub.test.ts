@@ -62,12 +62,16 @@ const card = (sourceVersion: string, opacity: string): DesignRuntimeNodeDetails 
 });
 
 function runtime(sourceVersion: string, details: DesignRuntimeNodeDetails) {
+  const getNodeDetails = vi.fn(async () => details);
   return {
     sourceVersion,
-    supports: () => false,
+    supports: (capability: string) => capability === "measureLayout",
     previewStyles: vi.fn(async () => details),
     clearPreviewStyles: vi.fn(async () => details),
-    getNodeDetails: vi.fn(async () => details),
+    getNodeDetails,
+    measureLayout: vi.fn(async ({ nodeIds }: { nodeIds: string[] }) =>
+      Promise.all(nodeIds.map(() => getNodeDetails())),
+    ),
   };
 }
 
