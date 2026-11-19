@@ -169,6 +169,22 @@ describe("a frame registered as a component", () => {
     const prepared = await readDesignWorkspaceSnapshot(root, { includeComponentIdentity: true });
     expect(prepared.frames.find((candidate) => candidate.file === frame.file)?.componentIdentity).toBeNull();
   });
+
+  it.each([
+    ["missing", '<zd-card data-zeros-frame-root></zd-card>'],
+    ["empty", '<zd-card data-oid="" data-zeros-frame-root></zd-card>'],
+    ["duplicate", '<zd-card data-oid="same" data-zeros-frame-root><b data-oid="same"></b></zd-card>'],
+  ])("uses the healed frame-root identity for aggregate and prepared reads (%s)", async (_label, rootHtml) => {
+    const frame = await createDesignFrame(root, { title: "Healed host" });
+    await writeFile(path.join(root, DESIGN_DIRECTORY_NAME, frame.file), `<!doctype html><html><head></head><body>${rootHtml}</body></html>`);
+    const inspection = inspectDesignCatalog(root, DESIGN_DIRECTORY_NAME);
+    const revision = designCatalogRevision(inspection);
+    const aggregate = (await readDesignWorkspaceSnapshot(root, { includeComponentIdentity: true })).frames.find((candidate) => candidate.file === frame.file)!;
+    const prepared = (await prepareDesignNavigationFrames(root, revision, [frame.file], inspection.layout.manifest.id,
+      { includeComponentIdentity: true })).frames[0]!;
+    expect(aggregate.componentIdentity?.kind).toBe("instance");
+    expect(prepared.componentIdentity).toEqual(aggregate.componentIdentity);
+  });
 });
 
 describe("instances of a component that is no longer there", () => {
