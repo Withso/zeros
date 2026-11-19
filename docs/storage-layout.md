@@ -16,8 +16,8 @@ launchers, the prune and `pnpm storage:sweep` import too. Nothing else builds
 | Shared data dir | `zerosChannelDataDir()` | An installed channel's data dir; the development family's `com.zeros.local` (shared Local provider credentials, instance registry) |
 | State root | `zerosStateRoot()` | `settings.toml`, `term-zdotdir/`, `state.db`, `detach.lock`, `default-project/` |
 | Visible root | `zerosVisibleRoot()` | `workspaces/`, `design workspaces/`, `cloud-sync/` |
-| Session data | `zerosSessionDataDir()` | Electron `sessionData`: `<data dir>/electron` (durable renderer state, plus the caches Chromium will not relocate) |
-| Cache dir | `zerosCacheDir()` | Regenerable caches Electron can relocate (the JS code cache) |
+| Session data | `zerosSessionDataDir()`; `zerosEffectiveSessionDataDir()` for this launch | Electron `sessionData`, the whole Chromium profile, caches included: `<data dir>/electron` once moved (see [Renderer session data](#renderer-session-data)) |
+| Cache dir | `zerosCacheDir()` | The old session location (`Caches/<id>`); nothing new is written there |
 | Log dir | `zerosLogDir()` | `main.log`, `app.jsonl`, `engine.log` |
 | Bundle dir | `zerosDevelopmentBundleDir()` | Development only: the native `.app` clone and its `.version` marker |
 
@@ -34,8 +34,8 @@ Stable is `com.zeros`, Alpha is `com.zeros.alpha`. One app per channel.
 | Data | `~/Library/Application Support/<id>/` | `$XDG_DATA_HOME` or `~/.local/share` + `zeros[-alpha]/` | `%APPDATA%/<id>/` |
 | State root | `~/.zeros[-alpha]/` | same | same |
 | Visible root | `~/zeros[-alpha]/` | same | same |
-| Session data | `~/Library/Application Support/<id>/electron/` | `<data>/electron/` | `<data>/electron/` |
-| Cache | `~/Library/Caches/<id>/` | `~/.cache/<id>/` | `%LOCALAPPDATA%/<id>/` |
+| Session data | `~/Library/Application Support/<id>/electron/` | `<data>/electron/` | The data dir itself, unchanged |
+| Old session location | `~/Library/Caches/<id>/` | `~/.cache/<id>/` | — |
 | Logs | `~/Library/Logs/<id>/` | `<data>/logs/` | `<data>/logs/` |
 
 ## Development family
@@ -51,7 +51,7 @@ mint. One folder per kind; each instance is a subfolder named by its id.
 | Shared Local provider credentials | `~/Library/Application Support/com.zeros.local/` |
 | Instance registry | `~/Library/Application Support/com.zeros.local/instances.json` |
 | Session data | `~/Library/Application Support/com.zeros.local/instances/<inst>/electron/` |
-| Cache | `~/Library/Caches/com.zeros.local/instances/<inst>/` |
+| Old session location (builds of the storage branch before the move; nothing writes there now) | `~/Library/Caches/com.zeros.local/instances/<inst>/` |
 | Native bundle + version marker | `~/Library/Caches/com.zeros.local/bundles/<inst>/` |
 | Logs | `~/Library/Logs/com.zeros.local/<inst>/` |
 | Preferences (written by macOS) | `~/Library/Preferences/com.zeros.local.<inst>.plist` |
@@ -69,8 +69,10 @@ The macOS bundle id is `com.zeros.local.<inst>`.
   `dev` channel with hosted sign-in against Alpha, the dev ports and
   `zeros-dev://`, never account-free. App name `Zeros Local` (keychain item
   `Zeros Local Safe Storage`); window and Dock name `Zeros Local Alpha`. A
-  second concurrent launch fails before building, through the lock at
-  `~/.zeros-local/instances/alpha/launcher.lock`. Moving off the retired
+  second concurrent launch fails before building or refreshing auth, through
+  its lease (`~/.zeros-local/instances/alpha/launcher.lease`), its running
+  app's `SingletonLock`, and the checkout's `.context/zeros-local/launcher.lock`
+  that `electron:local` from the same checkout also takes. Moving off the retired
   `com.zeros.dev` profile (keychain `Zeros Dev Safe Storage`) means signing in
   to Alpha once again; the old account store is not migrated.
 - `default`: a dev-channel process with no instance (a bare run, unit tests).
@@ -108,64 +110,71 @@ keep such a data dir (see below).
 
 ## Renderer session data
 
-Electron's `sessionData` is `<data dir>/electron/` for installed channels and
-consolidated development identities, so durable renderer state is no longer in
-a folder cache cleaners empty. A legacy-layout Local profile keeps its session
-in its cache dir (`Caches/com.zeros.local.<inst>/`). A `ZEROS_DATA_DIR` run
-uses `<ZEROS_DATA_DIR>/electron/` and keeps every cache inside it.
+Electron's `sessionData` is the whole Chromium profile: durable renderer state
+(`Local Storage`, `IndexedDB`, `Cookies`, `Session Storage`, `Partitions/`, …)
+and the caches Chromium keeps beside it (`Cache`, `Code Cache`, `GPUCache`, the
+Dawn caches, …). It lives in `<data dir>/electron/`, as one unit, for
+installed channels and consolidated development identities; no cache is split
+off (`session.setCodeCachePath` is not used: it reinitializes the code-cache
+backend every launch). `--disk-cache-size` caps the HTTP cache at 250 MB.
 
-Observed on Electron 43.8.3 / Chromium 150 (the prototype in the storage PR):
+- **Windows** keeps its old location, which already is the data dir
+  (Electron's cache path there is Roaming AppData).
+- **A legacy-layout Local profile** keeps its session in
+  `Caches/com.zeros.local.<inst>/`; it never moves.
+- **`ZEROS_DATA_DIR`** always wins: `<ZEROS_DATA_DIR>/electron/`, for every
+  family and layout, and nothing is ever imported into an override.
 
-| Entry under `electron/` | Class |
-| --- | --- |
-| `Local Storage`, `IndexedDB`, `Session Storage`, `Cookies`, `WebStorage`, `Service Worker`, `blob_storage`, `Preferences`, `Local State`, `Network Persistent State`, `DIPS`, `Trust Tokens`, `Partitions/`; and any other name (`SharedStorage`, `TransportSecurity`, …) | Durable |
-| `Cache` (HTTP, capped at 250 MB), `GPUCache`, `DawnWebGPUCache`, `DawnGraphiteCache`, `Shared Dictionary`, `Dictionaries` (spell-check downloads); also `GrShaderCache`, `GraphiteDawnCache`, `ShaderCache`, `VideoDecodeStats` where Chromium creates them | Regenerable, cannot be relocated |
-| `Code Cache` | Regenerable; only an empty index here, the cache itself is in the cache dir |
-
-The JS code cache is the one cache Electron can place elsewhere:
-`session.setCodeCachePath()` points it at `<cache dir>/Code Cache` for the
-default session and at `<cache dir>/Partitions/<name>/Code Cache` for any
-persistent partition, applied from `app.on("session-created")`. Chromium
-ignores `--disk-cache-dir`, and the GPU switches only disable those caches.
-The app's other sessions (Browser leases, Design capture and recorder) are
-in-memory partitions that write nothing to disk. The regenerable list is
-`REGENERABLE_SESSION_ENTRIES` in `apps/desktop/src/engine/db/session-entries.ts`.
+`REGENERABLE_SESSION_ENTRIES` in `apps/desktop/src/engine/db/session-entries.ts`
+names the entries Chromium rebuilds (observed on Electron 43 / Chromium 150);
+every other name, unknown ones included, is durable. The storage report, Clear
+and `pnpm storage:sweep` use it; they find the profile through
+`zerosEffectiveSessionDataDir()` (`effectiveSessionDataDir()` for the plain-Node
+scripts): the moved location once its marker is there, otherwise the old one.
 
 ### Moving existing profiles
 
-`apps/desktop/electron/session-data-migration.ts` runs once, before `app` is
-ready, with the marker `electron/.zeros-session-relocated`. Sources, earliest
-wins: the old `Caches/<id>/` session (for consolidated development identities,
-`Caches/com.zeros.local/instances/<inst>/`), then for Stable only, and only
-while the older hop never completed (no `Caches/com.zeros/.zeros-session-migrated`),
-`Caches/design.zeros.app/`. Alpha no longer reads Stable's old folder.
+Before `ready`, `apps/desktop/electron/session-location.ts` chooses this
+launch's profile. Each identity has exactly one old profile: `Caches/<id>/`
+(for consolidated development identities, `Caches/com.zeros.local/instances/<inst>/`);
+for Stable only, the older `Caches/design.zeros.app/` when `Caches/com.zeros`
+does not exist at all. Never both. The marker of the older hop
+(`Caches/com.zeros/.zeros-session-migrated`) recorded an attempt, not a
+complete copy, so when both exist `design.zeros.app` can still hold the only
+copy of some old state: nothing merges it, and it stays on disk until a person
+names it in `pnpm storage:sweep` once Stable's profile has moved.
 
-It runs before the first window on every user's first launch after updating,
-so it never deletes recursively and never copies a cache: each entry is one
-rename (a 334 MB, 3,752-file profile took under 4 ms on the development VM).
+1. `electron/.zeros-session-relocated` is a file → use `electron/`.
+2. No old profile → create `electron/`, write the marker, use it.
+3. Otherwise the whole old profile moves to `electron/` in one `rename(2)`, the
+   marker is written, and `electron/` is used. The old profile is used instead,
+   unchanged, for this launch, with one line in the durable `main.log`, when:
+   another live process has the profile open (Chromium's `SingletonLock` in
+   the data dir names a live pid other than this one, or cannot be read or
+   parsed, or names another host); the old and new locations are on different
+   volumes; any component of either path is a symlink; the old location is not
+   a folder, or links one of its entries to a store elsewhere (a relative link
+   would resolve differently after the move); `electron/` already holds
+   something; or the two locations overlap.
 
-- Every entry not on the regenerable list moves, unknown names included.
-  Moves are a rename or a no-replace hard link. Across volumes a durable entry
-  is copied to a private temporary, verified byte for byte and published; the
-  source stays in the purgeable cache folder. A failed verification publishes
-  nothing.
-- Regenerable caches Chromium will not relocate (`Cache`, `GPUCache`, the Dawn
-  caches, `Shared Dictionary`, …) move into `electron/` the same way, so they
-  stay warm and the canvas keeps its compiled shaders. One that cannot be
-  renamed (another volume, busy) is left behind and does not fail the run.
-- `Code Cache` stays in `Caches/<id>/`, where the code cache now lives.
-- From `Caches/design.zeros.app/` only durable entries move; its caches stay
-  for the sweep and the OS.
-- An existing destination entry is never replaced; that source entry stays.
-- The marker is written only after a run with no failures, so an interrupted
-  or failed run retries next launch, and two processes starting together each
-  move only what the other has not.
-- A failure never stops startup: the app opens whatever `electron/` holds and
-  logs once.
+A launch therefore always runs on one coherent profile, old or new. Nothing is
+merged, copied, filled in, deleted or left half-moved, so there is no partial
+state to recover. Two processes starting together: the second finds the old
+profile gone and `electron/` in place and uses it. A missing marker after a
+successful move only means the next launch writes it. A rename keeps every
+inode, so a moved profile opens warm (verified on Electron 43.8.3: the
+`localStorage` draft, cookies and HTTP cache reopen, with no asset refetch). A
+334 MB, 3,752-file profile moved in 2.4 ms on the development VM; a marked
+launch costs one `lstat`.
 
-**Known limit: downgrade.** A build from before this change reads renderer
-state from `Caches/<id>/` again and finds none (drafts, theme and permissions
-reset). The updater never installs an older build; a manual downgrade does.
+**Cross-volume.** A data dir on another volume than `~/Library/Caches` (a moved
+home or a symlinked Application Support) keeps the old profile in place for
+every launch. That is the previous behavior, never a copy.
+
+**Downgrade.** A build from before this change reads renderer state from the
+old location again and finds none: drafts, theme and permissions look reset in
+that build, while the profile itself is intact in `electron/` and returns on
+upgrade. The updater never installs an older build; a manual downgrade does.
 
 ## Bounded growth inside a profile
 
@@ -221,7 +230,10 @@ gives `zeros-alpha-updater`). It also renames the packaged `package.json`
 
 `ownerPid` is present only for ephemeral identities. The file is owner-only
 (`0600`), rewritten atomically (temporary file and rename) under an exclusive
-lock (`instances.json.lock`) whose dead or old holder is recovered. Unknown
+lock (`instances.json.lock`). A holder is recovered only on positive evidence
+that it is gone: its pid is dead. A live pid keeps the lock however old it is;
+an unreadable owner is retired after 30 seconds. Launchers wait at most 250 ms
+for it and continue unregistered rather than delay a launch. Unknown
 fields and instances survive a rewrite. A corrupt file is renamed aside to
 `instances.json.corrupt-<time>` and rebuilt empty. Each launch upserts its own
 entry and `lastUsedAt`, legacy-layout identities included
@@ -229,44 +241,43 @@ entry and `lastUsedAt`, legacy-layout identities included
 
 ## Prune at launcher start
 
-`scripts/local-instance-prune.mjs` runs after the launcher's lock and
-registration. It never throws or fails a launch, stops at a three-second
-budget, skips the launching identity and any identity whose launcher lock or
-ephemeral owner is live, removes only resolver-derived targets that sit
-directly inside their expected folder under `$HOME`, and follows no symlink.
+`scripts/local-instance-prune.mjs` removes only what is provably regenerable.
+Both launchers start it after the app stack has been spawned; it is
+asynchronous end to end, stops at a three-second budget, never throws and can
+never delay or fail a launch. It never removes an identity's app data, state
+root, visible root, session data or registry entry: durable removal is
+`pnpm storage:sweep`, run by a person.
 
 | Registered identity | Removed |
 | --- | --- |
-| `checkout` whose path is gone and `lastUsedAt` is over 14 days old | Bundle, cache, logs, preferences plist and the bundle-id folders macOS created. When its visible root holds no workspace entries and the shared store does not reference its data dir, also app data, state root, visible root and the registry entry; otherwise data and entry stay |
-| `ephemeral` whose `ownerPid` is dead | Everything and the entry, unless the shared store references its data dir (then the regenerables only) |
+| `checkout` whose path is gone and `lastUsedAt` is over 14 days old | Its native bundle only (`Caches/com.zeros.local/bundles/<inst>/`; legacy `<state root>/bundle/`) |
 | Any identity unused for 14 days whose bundle was built for another Electron | The bundle only |
+| `ephemeral` (v2) whose owner is gone, with no work and no provider-store reference | Everything and then the entry; the entry stays if anything remains |
 
-A visible root holds no workspace entries only when it is missing or contains
-nothing but empty `workspaces`, `design workspaces` and `cloud-sync` folders.
-The shared Local store (`com.zeros.local/secrets.json`) references a data dir
-when it carries that data dir's migration marker; because its records are
-encrypted, an unreadable or malformed store counts as referencing every data
-dir.
+It skips the launching identity, a corrupt registry, and any identity that may
+be in use: its lease (`<state root>/launcher.lease`, held by every launcher for
+the lifetime of its app stack; the state root never moves, so a renamed or
+unmounted checkout cannot hide it), the older `<state root>/launcher.lock`, the
+checkout's `.context/zeros-local/launcher.lock`, the profile's `SingletonLock`,
+or a live ephemeral owner. Anything unreadable counts as in use. An ephemeral
+identity is checked again just before it is removed. Every target is
+resolver-derived, sits directly inside its expected folder under `$HOME`, and
+no symlink is followed.
 
 ## `pnpm storage:sweep`
 
-`scripts/storage-sweep.mjs` removes residue that predates the registry. Node
-built-ins only, so it runs in a checkout without `node_modules`. It is a dry run
-by default: it prints each category, path and allocated size (what `du`
-reports, each hardlinked inode counted once), and a total.
-
-The registry only knows identities launched since it was introduced, so every
-older Local checkout is "unregistered" until its next launch. **Launch each
-checkout you still use once before sweeping.** As a guard, an unregistered
-checkout identity whose `zeros.db` or `zeros.db-wal` changed in the last 14 days
-is skipped whole as "used recently" unless named with `--identity`.
+`scripts/storage-sweep.mjs` removes residue of retired identities and of Local
+identities the registry does not know. Node built-ins only, so it runs in a
+checkout without `node_modules`. It is a dry run by default: it prints each
+category, path, identity and allocated size (what `du` reports, each
+hardlinked inode counted once), and a total.
 
 ```sh
-pnpm storage:sweep                       # dry run
-pnpm storage:sweep --apply               # delete what the dry run lists
+pnpm storage:sweep                         # dry run
+pnpm storage:sweep --apply                 # delete what the dry run lists as removable
 pnpm storage:sweep --only beta,dev-desktop
-pnpm storage:sweep --identity <inst>     # one identity; lifts its "has workspaces" skip
-pnpm storage:sweep --keychain            # also Zeros Dev / Zeros Beta Safe Storage
+pnpm storage:sweep --identity <id>,<id>    # only these identities, including ones that hold data
+pnpm storage:sweep --keychain              # also Zeros Dev / Zeros Beta Safe Storage
 ```
 
 | Category | Matches |
@@ -274,20 +285,52 @@ pnpm storage:sweep --keychain            # also Zeros Dev / Zeros Beta Safe Stor
 | `dev-desktop` | `com.zeros.dev`, `com.zeros.dev.*`, `Zeros Dev`, `Zeros — *`, `design.zeros.app.dev*` in Application Support, Caches, Logs, Preferences (`.plist`), HTTPStorages, WebKit and Saved Application State; `~/.zeros-dev/dev-instances`; `~/zeros-dev*` |
 | `beta` | `com.zeros.beta*`, `design.zeros.beta*` in the same folders; `~/.zeros-beta`; `~/zeros-beta` |
 | `legacy-scheme` | `design.zeros.app`, `design.zeros.oCanvas` in the same folders |
-| `local-unregistered` | Local identities absent from the registry, in both layouts (including the `com.zeros.local.<inst>` entries in HTTPStorages, WebKit and Saved Application State), and `~/.zeros-local/dev-instances` |
+| `local-unregistered` | Local identities absent from the registry, in both layouts (including the `com.zeros.local.<inst>` entries in HTTPStorages, WebKit and Saved Application State, and a legacy `<state root>/bundle`), and `~/.zeros-local/dev-instances` |
 | `local-orphaned` | Registered checkouts whose checkout path is gone |
 
-Safety: an identity whose visible root contains any workspace entry is skipped
-whole and listed as "has workspaces" unless named with `--identity`; `--apply`
-checks each visible root again just before removal and keeps the identity if it
-gained an entry since the dry run. A Local data dir the shared provider store
-references is kept, with its state and visible roots, even with `--identity`;
-its regenerable folders are still removed. Anything a
-running process's command line references is skipped, and everything is
-skipped when the process list cannot be read. Targets match exact patterns and
-must be a real file or directory directly inside its expected folder under
-`$HOME`; symlinks are refused. `--keychain` checks for the two Safe Storage
-items without reading them and deletes them only with `--apply`.
+A Dev identity's slug, display label (`Zeros — Coral Reef`) and folder suffix
+name one identity (`coral-reef`); `dev` is the shared `com.zeros.dev` store.
+
+Unknown is kept:
+
+- **Without `--identity`** only bundles, and identities provably empty of user
+  data, are removed. User data is a database or any other entry in a data,
+  state or session folder that is not on the regenerable list, provider
+  profiles, a visible root with workspace entries (anything beyond empty
+  `workspaces`, `design workspaces` and `cloud-sync` folders), or anything
+  under `<state root>/worktrees`, where the engine keeps archived, adopted and
+  in-recovery worktrees. Such an identity lists "holds user data" or "has
+  workspaces", and only its bundle is removable. Anything unreadable counts.
+- **Reserved identities** (`alpha`, `default`) are kept unless named.
+- **Not evidence of abandonment:** a missing or corrupt registry keeps every
+  `local-unregistered` group; a folder that cannot be listed, or is reached
+  through a symlink, keeps every group it could hide; an unavailable process
+  list keeps everything. Each is shown as the reason.
+- **In use** is kept even when named: a process command line naming a
+  candidate, the identity's lease or launcher locks, or a profile's
+  `SingletonLock`.
+- **Provider profiles** a Local data dir holds stay, with its state, visible
+  and session folders, while the shared provider store references it, or when
+  that store is anything the app's reader would reject.
+- **`legacy-scheme`:** `Caches/design.zeros.app` can be Stable's only renderer
+  profile, so the category is kept, even when named, until Stable's profile has
+  moved (`com.zeros/electron/.zeros-session-relocated` exists).
+- **Dependencies:** while any Dev identity keeps data, the shared `com.zeros.dev`
+  store, `Zeros Dev` and the `Zeros — *` label folders stay too.
+
+`--apply` takes each identity's lease, plans that group again from fresh
+evidence (registry, liveness, provider store, every work root) and removes only
+what is still removable for the same reasons; anything that changed is kept
+and reported. The state root goes last, since it holds the lease. Targets match
+exact patterns and must be a real file or directory directly inside its
+expected folder under a real `$HOME`; nothing below a refused or linked folder
+is listed, sized or removed. The total after `--apply` counts only what was
+removed, and is an upper bound when a removed file had another hardlink (a
+bundle shares inodes with `node_modules`).
+
+`--keychain` checks for the two Safe Storage items without reading them, and
+offers one only for a category being swept. `--apply` deletes it only when no
+file of that app remains, and nothing could be hidden, afterwards.
 
 The sweep never touches `com.zeros` or `com.zeros.alpha` in any Library
 folder, `~/.zeros`, `~/.zeros-alpha`, `~/zeros`, `~/zeros-alpha`, `~/.zeros-dev`

@@ -214,3 +214,31 @@ it("copies a saved legacy text reference without turning its placeholder into a 
   expect(payload.attachments[0].sourceRecoveryId).toBeUndefined();
   expect(legacy.sourceFile).toBeUndefined();
 });
+
+it("keeps the payload when a selection holds a historical zeros-beta link, as inert text", () => {
+  const withRetired = {
+    ...slice,
+    content: [{
+      type: "paragraph",
+      content: [
+        { type: "text", text: "x".repeat(3_001) },
+        { type: "localLink", attrs: { href: "zeros-beta://chat/child" } },
+        { type: "attachment", attrs: { attachmentId: "att-1", name: attachment.name, kind: "file" } },
+      ],
+    }],
+  };
+  const payload = clipboardPayload(withRetired, () => attachment, owner);
+  for (const target of [owner, { runtime: "cloud:org", cwd: "/home/user/repo" }]) {
+    const pasted = prepareClipboardPaste(payload, target);
+    expect(pasted, target.runtime).not.toBeNull();
+    const nodes = JSON.stringify(pasted!.slice);
+    expect(nodes).toContain('{"type":"text","text":"zeros-beta://chat/child"}');
+    expect(nodes).not.toContain('"type":"localLink"');
+  }
+  expect(prepareClipboardPaste(payload, owner)!.attachments).toHaveLength(1);
+  // Validation is not loosened: an arbitrary or malformed scheme still rejects the payload.
+  for (const href of ["zeros-gamma://chat/child", "zeros-beta://chat/", "zeros-beta://chat/a?x=1", "javascript:alert(1)"]) {
+    const forged = { ...payload, slice: { ...payload.slice, content: [{ type: "localLink", attrs: { href } }] } };
+    expect(prepareClipboardPaste(forged, owner), href).toBeNull();
+  }
+});

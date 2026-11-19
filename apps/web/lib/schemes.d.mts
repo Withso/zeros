@@ -8,4 +8,4 @@ export declare function schemeForDeploymentEnvironment(
   requestedScheme: string,
 ): string;
 /** This deployment's app link, for an Open Zeros that carries no callback. */
-export function deploymentAppLink(environment: string | undefined | null): string;
+export function deploymentAppLink(environment: string | undefined | null): string | null;

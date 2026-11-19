@@ -47,6 +47,8 @@ type PlatformInput = {
 };
 
 export const FAMILY_ID: "com.zeros.local";
+export const SESSION_MOVED_MARKER: ".zeros-session-relocated";
+export function effectiveSessionDataDir(roots: DevelopmentPaths): string;
 export const RESERVED_INSTANCE_IDS: readonly ["alpha", "default"];
 export function sanitizeInstanceId(raw: unknown): string;
 export function developmentInstanceId(
@@ -75,6 +77,7 @@ export function localInstanceBundlePaths(identity: {
   layout?: DevelopmentLayout;
   platform?: NodeJS.Platform;
 }): {
+  home: string;
   stateRoot: string;
   bundleDir: string;
   bundlePath: string;

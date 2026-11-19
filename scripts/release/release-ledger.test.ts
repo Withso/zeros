@@ -54,6 +54,8 @@ describe("cumulative desktop release ledger", () => {
     expect(() => buildReleaseLedger("alpha", previous, { ...entry(3), publishedAt: entry(1).publishedAt })).toThrow(/backwards/);
     expect(() => buildReleaseLedger("alpha", previous, entry(1))).toThrow(/monotonically/);
     expect(() => buildReleaseLedger("beta", null, entry(1))).toThrow(/channel/);
+    // A real Beta version matches its own channel pattern, so this reaches the channel refusal.
+    expect(() => buildReleaseLedger("beta" as "alpha", null, { ...entry(1), version: "0.1.20-beta.1" })).toThrow(/channel is unsupported/);
   });
   it("reads the prior ledger from the channel feed release without sending authorization to its asset", async () => {
     const previous = buildReleaseLedger("alpha", null, entry(1)), requests: Array<{ url: string; headers: Headers }> = [];

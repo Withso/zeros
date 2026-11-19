@@ -240,10 +240,10 @@ try {
   process.exitCode = 1;
 } finally {
   clearTimeout(deadline);
-  await app?.close().catch(error => { report.failures.push(`App close: ${error.message}`); process.exitCode = 1; });
+  const retired = await (app ? app.close() : Promise.resolve()).then(() => true, error => { report.failures.push(`App close: ${error.message}`); process.exitCode = 1; return false; });
   if (vite?.pid) { try { vite.kill("SIGTERM"); } catch (error) { if (error.code !== "ESRCH") report.failures.push(`Vite close: ${error.message}`); } }
   await viteLog?.close();
-  ephemeral?.dispose();
+  ephemeral?.dispose({ retired });
   report.finishedAt = new Date().toISOString();
   await save();
   await status(report.failures.length ? "failed" : "complete");

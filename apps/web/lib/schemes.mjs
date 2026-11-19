@@ -52,11 +52,13 @@ export function schemeForDeploymentEnvironment(environment, requestedScheme) {
 }
 
 /** This deployment's app link, for an Open Zeros that carries no callback (an
- * expired or incomplete handoff). An unknown environment opens the packaged app. */
+ * expired or incomplete handoff). Local/preview (unset) and hosted Dev open the
+ * packaged app. A named environment this code does not know (a stale binding
+ * such as the retired `beta`) gets null: callers must not build a link, least
+ * of all one that carries a destination. */
 export function deploymentAppLink(environment) {
-  try {
-    return `${schemeForDeploymentEnvironment(environment)}://`;
-  } catch {
+  if (environment === undefined || environment === null || environment === "" || environment === "dev")
     return `${DEFAULT_SCHEME}://`;
-  }
+  if (!Object.hasOwn(DEPLOYMENT_SCHEMES, environment)) return null;
+  return `${DEPLOYMENT_SCHEMES[environment]}://`;
 }

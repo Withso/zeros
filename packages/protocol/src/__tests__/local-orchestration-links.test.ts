@@ -25,6 +25,28 @@ it("no longer recognizes the retired zeros-beta scheme as a Zeros link", () => {
   ]);
 });
 
+it("bounds the candidates it visits, not only the links it returns", () => {
+  const stable = "zeros://chat/same";
+  const mixed = Array.from({ length: 64 }, (_, i) => `zeros-beta://chat/old${i}`).join(" ") + " " +
+    Array(1_600).fill(stable).join(" ") + " zeros://chat/after";
+  expect(mixed.length).toBeLessThan(120_000);
+  const visited: string[] = [];
+  const links = extractLocalLinks(mixed, 64, { onCandidate: (candidate) => visited.push(candidate) });
+  expect(visited.length).toBeLessThanOrEqual(64 * 4);
+  expect(links).toEqual([{ scheme: "zeros", kind: "chat", id: "same" }]);
+  expect(visited.some((candidate) => candidate.startsWith("zeros-beta"))).toBe(false);
+  // Ordinary distinct links are unaffected.
+  expect(extractLocalLinks("zeros://chat/a zeros-alpha://chat/b zeros-dev://workspace/c")).toHaveLength(3);
+});
+
+it("degrades only a well-formed retired link, through the full parser", async () => {
+  const { isRetiredLocalLink } = await import("../local-orchestration");
+  expect(isRetiredLocalLink("zeros-beta://chat/child")).toBe(true);
+  expect(isRetiredLocalLink("zeros-beta://acme/w/7?session=chat-1")).toBe(true);
+  for (const text of ["zeros-beta://chat/", "zeros-beta://chat/a?x=1", "zeros-gamma://chat/a", "zeros://chat/a", "javascript:alert(1)"])
+    expect(isRetiredLocalLink(text), text).toBe(false);
+});
+
 it("bounds link extraction for long internal punctuation runs", () => {
   // Isolate the adversarial input so a quadratic matcher cannot hang the suite.
   // The budget includes Node/tsx startup and is far above the linear scan cost.
@@ -125,4 +147,10 @@ describe("numbered workspace links", () => {
       { scheme: "zeros", kind: "chat", id: "legacy" },
     ]);
   });
+});
+
+it("never formats a link its own parser rejects", async () => {
+  const { formatLocalLink } = await import("../local-orchestration");
+  expect(() => formatLocalLink("zeros-beta" as "zeros", "chat", "child")).toThrow(/scheme/);
+  expect(parseLocalLink(formatLocalLink("zeros-alpha", "chat", "child"))).toEqual({ scheme: "zeros-alpha", kind: "chat", id: "child" });
 });

@@ -919,6 +919,8 @@ function traceExportUrl(raw: string | undefined): string | undefined {
   return url.toString();
 }
 
+const RETIRED_RAILWAY_ENVIRONMENTS = new Set(["beta"]);
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env, diagnostics: ConfigDiagnostics = console): Config {
   const development = developmentIdentity(env);
   const parsed = EnvSchema.safeParse(env);
@@ -930,6 +932,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, diagnostics: Co
   }
   const e = parsed.data;
   const channel = (env.RAILWAY_ENVIRONMENT_NAME ?? "development").trim().toLowerCase();
+  // A retired release name must not fall through to Development (and Ops).
+  if (RETIRED_RAILWAY_ENVIRONMENTS.has(channel))
+    throw new Error(`Invalid environment: the "${channel}" Railway environment is retired`);
   const deploymentChannel = channel === "alpha" || channel === "production" ? channel : "development";
   const cloudChannel = cloudWorkspaceChannelEnabled(deploymentChannel);
   validateDatabaseConnections(e);

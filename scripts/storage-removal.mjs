@@ -31,12 +31,13 @@ export function removeContained(target, { container, home, kind = "directory" })
 /** Allocated bytes under `target` (what `du` reports), counting links as
  * themselves and each inode once across every call sharing `seen`: development
  * bundles are hardlink clones, so apparent sizes would overstate what a removal
- * frees. */
+ * frees. `hardlinked` reports a file with another link, which may live outside
+ * every target and keep its blocks allocated. */
 export function sizeOf(target, { deadline = Infinity, seen = new Set() } = {}) {
-  let total = 0;
+  let total = 0, hardlinked = false;
   const stack = [target];
   while (stack.length) {
-    if (Date.now() > deadline) return { bytes: total, complete: false };
+    if (Date.now() > deadline) return { bytes: total, complete: false, hardlinked };
     const current = stack.pop();
     let stat;
     try {
@@ -44,6 +45,7 @@ export function sizeOf(target, { deadline = Infinity, seen = new Set() } = {}) {
     } catch {
       continue;
     }
+    if (!stat.isDirectory() && stat.nlink > 1) hardlinked = true;
     const inode = `${stat.dev}:${stat.ino}`;
     if (!seen.has(inode)) {
       seen.add(inode);
@@ -58,7 +60,7 @@ export function sizeOf(target, { deadline = Infinity, seen = new Set() } = {}) {
     }
     for (const entry of entries) stack.push(path.join(current, entry));
   }
-  return { bytes: total, complete: true };
+  return { bytes: total, complete: true, hardlinked };
 }
 
 const EMPTY_WORK_FOLDERS = new Set(["workspaces", "design workspaces", "cloud-sync"]);
@@ -106,7 +108,8 @@ export function providerStoreReferences({ dataDir, sharedDataDir }) {
   const store = path.join(sharedDataDir, "secrets.json");
   let fd;
   try {
-    fd = fs.openSync(store, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+    // Never follow a link, and never block on a FIFO planted in its place.
+    fd = fs.openSync(store, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0) | (fs.constants.O_NONBLOCK ?? 0));
   } catch (error) {
     return error.code !== "ENOENT";
   }
@@ -114,6 +117,9 @@ export function providerStoreReferences({ dataDir, sharedDataDir }) {
     if (!fs.fstatSync(fd).isFile()) return true;
     const doc = JSON.parse(fs.readFileSync(fd, "utf8"));
     if (!doc || typeof doc !== "object" || Array.isArray(doc)) return true;
+    // secret-store.ts readAll() rejects the whole store for any entry that is
+    // not a non-empty string; such a store is unreadable, so assume a reference.
+    if (Object.values(doc).some((value) => typeof value !== "string" || value.length === 0)) return true;
     const marker = `local-provider-migration:${createHash("sha256").update(path.join(dataDir, "secrets.json")).digest("hex")}`;
     return Object.hasOwn(doc, marker);
   } catch {

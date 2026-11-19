@@ -476,8 +476,8 @@ try {
   if (page) { await page.screenshot({ path: path.join(root, "failure.png") }).catch(() => {}); report.failureText = await page.locator("body").innerText().then(text => text.slice(0, 4000), () => "unavailable"); }
 } finally {
   clearTimeout(deadline);
-  await closeApp().catch(error => { report.failures.push(`App close: ${error.message}`); process.exitCode = 1; });
+  const retired = await closeApp().then(() => true, error => { report.failures.push(`App close: ${error.message}`); process.exitCode = 1; return false; });
   vite?.kill("SIGTERM"); await viteLog?.close();
-  for (const ephemeral of ephemeralIdentities) ephemeral.dispose();
+  for (const ephemeral of ephemeralIdentities) ephemeral.dispose({ retired });
   report.finishedAt = new Date().toISOString(); status(report.failures.length ? "failed" : "complete");
 }

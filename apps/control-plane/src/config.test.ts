@@ -677,7 +677,14 @@ describe("Railway deployment environment isolation", () => {
         RAILWAY_ENVIRONMENT_NAME: "beta",
         RAILWAY_GIT_BRANCH: "release/1.2.3",
       }),
-    ).toThrow(/must be named alpha or production/);
+    ).toThrow(/retired/);
+  });
+
+  it("refuses an explicitly retired environment name without a project id or when self-hosted", () => {
+    for (const extra of [{}, { RAILWAY_PROJECT_ID: "project-1", ZEROS_SELF_HOSTED: "true" }])
+      for (const name of ["beta", " Beta "])
+        expect(() => loadConfig({ ...baseEnv(), ...extra, RAILWAY_ENVIRONMENT_NAME: name, OPS_ORIGIN: "https://ops.example.test" }))
+          .toThrow(/retired/);
   });
 
   it("rejects an unknown Railway environment or cross-environment audience", () => {

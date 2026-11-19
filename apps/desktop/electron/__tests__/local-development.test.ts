@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
+import path from "node:path";
 import vm from "node:vm";
 import { transformSync } from "esbuild";
 import { CHANNELS, isChannel } from "../../src/engine/runtime";
@@ -14,16 +15,24 @@ afterEach(() => {
 });
 
 describe("native Local development admission", () => {
-  function initializeIdentity(local: boolean, env: Record<string, string | undefined>) {
+  function initializeIdentity(
+    local: boolean,
+    env: Record<string, string | undefined>,
+    build: { packaged?: boolean; baked?: string } = {},
+  ) {
     const source = fs.readFileSync("apps/desktop/electron/main.ts", "utf8");
     // Include the earlier environment authority, not only the sharing condition.
     const start = source.indexOf("const explicitDevEnv =");
-    const end = source.indexOf("function relocateChromiumCache", start);
+    const end = source.indexOf("function selectSessionData", start);
+    if (start < 0 || end < 0) throw new Error("main.ts identity block markers moved");
     const development = () => env.ZEROS_CHANNEL === "dev";
     const instanceDir = (instance: string) => `/data/com.zeros.local/instances/${instance}`;
     const sharedRoot = development() ? "/data/com.zeros.local" : `/data/com.zeros.${env.ZEROS_CHANNEL}`;
     vm.runInNewContext(transformSync(source.slice(start, end), { loader: "ts" }).code, {
-      IS_DEV: env.ZEROS_CHANNEL === "dev", IS_LOCAL_DEVELOPMENT: local,
+      IS_DEV: build.packaged === undefined ? env.ZEROS_CHANNEL === "dev" : !build.packaged,
+      IS_PACKAGED: build.packaged === undefined ? env.ZEROS_CHANNEL !== "dev" : build.packaged,
+      __ZEROS_CHANNEL_BAKED__: build.baked ?? "",
+      IS_LOCAL_DEVELOPMENT: local,
       process: { env },
       isChannel,
       CHANNELS,
@@ -36,6 +45,8 @@ describe("native Local development admission", () => {
       zerosChannelDataDir: () => sharedRoot,
       zerosDevelopmentDataDir: instanceDir,
       app: { getPath: () => "/data", setName() {}, setPath() {} },
+      realProfileRoots: () => ["/data/com.zeros", "/data/com.zeros.alpha", "/data/com.zeros.local"],
+      path,
     });
     return env;
   }
@@ -63,8 +74,42 @@ describe("native Local development admission", () => {
     expect(env.ZEROS_SHARED_SECRETS_DIR).toBe(isolate === "1" ? undefined : "/data/com.zeros.local");
   });
 
+  it.each([true, false])("refuses a non-empty unknown baked channel before choosing any storage (packaged=%s)", (packaged) => {
+    const env: Record<string, string | undefined> = {};
+    expect(() => initializeIdentity(false, env, { packaged, baked: "beta" })).toThrow(/baked channel "beta"/);
+    expect(env.ZEROS_CHANNEL).toBeUndefined();
+  });
+
+  it("lets the bake, never the environment, choose a packaged build's channel", () => {
+    expect(initializeIdentity(false, {}, { packaged: true, baked: "alpha" }).ZEROS_CHANNEL).toBe("alpha");
+    expect(initializeIdentity(false, {}, { packaged: true }).ZEROS_CHANNEL).toBe("stable");
+    const inherited = initializeIdentity(false, {
+      ZEROS_CHANNEL: "dev", ZEROS_DEV: "1", ZEROS_RUNTIME_MODE: "dev", ZEROS_LOCAL_DEVELOPMENT: "1",
+      ZEROS_INSTANCE: "alpha", ZEROS_SHARED_SECRETS_DIR: "/data/com.zeros.local",
+    }, { packaged: true, baked: "alpha" });
+    expect(inherited).toMatchObject({ ZEROS_CHANNEL: "alpha" });
+    for (const key of ["ZEROS_DEV", "ZEROS_RUNTIME_MODE", "ZEROS_LOCAL_DEVELOPMENT", "ZEROS_SHARED_SECRETS_DIR"])
+      expect(inherited[key], key).toBeUndefined();
+    expect(initializeIdentity(false, { ZEROS_CHANNEL: "dev", ZEROS_DEV: "1" }, { packaged: true }).ZEROS_CHANNEL).toBe("stable");
+    expect(() => initializeIdentity(false, {}, { packaged: true, baked: "dev" })).toThrow(/packaged/);
+    // Unpackaged development keeps its explicit environment channel.
+    expect(initializeIdentity(false, { ZEROS_CHANNEL: "alpha" }, { packaged: false }).ZEROS_CHANNEL).toBe("alpha");
+  });
+
+  it("refuses a ZEROS_DATA_DIR that points into a real Zeros profile, and never shares a store under one", () => {
+    const local = (extra: Record<string, string>) => ({
+      ...localEnvironment({ identity: { slug: "a123456789abcdef", name: "Fixture" }, vitePort: 6400, engineBase: 31000, environment: {} }),
+      ...extra,
+    });
+    for (const dataDir of ["/data/com.zeros.local/instances/alpha", "/data/com.zeros.local", "/data/com.zeros.alpha", "/data/com.zeros/sub"])
+      expect(() => initializeIdentity(true, local({ ZEROS_DATA_DIR: dataDir })), dataDir).toThrow(/ZEROS_DATA_DIR/);
+    expect(initializeIdentity(true, local({ ZEROS_DATA_DIR: "/tmp/fixture" })).ZEROS_SHARED_SECRETS_DIR).toBeUndefined();
+    expect(initializeIdentity(false, { ZEROS_CHANNEL: "dev", ZEROS_INSTANCE: "design-owner-1", ZEROS_DATA_DIR: "/tmp/fixture" }).ZEROS_SHARED_SECRETS_DIR).toBeUndefined();
+  });
+
   it("refuses a retired beta channel at boot like any unknown channel", () => {
-    expect(() => initializeIdentity(false, { ZEROS_CHANNEL: "beta" })).toThrow(/not a known channel/);
+    expect(() => initializeIdentity(false, { ZEROS_CHANNEL: "beta" }, { packaged: false })).toThrow(/not a known channel/);
+    expect(initializeIdentity(false, { ZEROS_CHANNEL: "beta" }, { packaged: true }).ZEROS_CHANNEL).toBe("stable");
   });
 
   it("keeps electron:alpha's account store private and refuses Local admission on it", () => {

@@ -125,6 +125,25 @@ describe("repoSlugFromWorktreePath", () => {
     expect(repoSlugFromWorktreePath("/Users/dev/zeros-local/alpha/cloud-sync/widgets/1")).toBeNull();
   });
 
+  // Phase 2 finding 16: an ordinary project that happens to contain a
+  // `zeros-local/<folder>/design workspaces` segment is not a managed path.
+  it("recognises an instanced root only directly in a home folder, with a valid instance id", () => {
+    for (const folder of [
+      "/Users/me/src/zeros-local/examples/design workspaces/widgets/mockup",
+      "/Users/me/src/zeros-local/examples/workspaces/widgets/mockup",
+      "/Users/me/zeros-local/Not Valid/workspaces/widgets/ws_1",
+      "/Volumes/work/zeros-local/a123456789abcdef/workspaces/widgets/ws_1",
+    ]) {
+      expect(workspaceKindFromManagedPath(folder), folder).toBeNull();
+      expect(isWorktreePath(folder), folder).toBe(false);
+      expect(repoSlugFromWorktreePath(folder), folder).toBeNull();
+    }
+    for (const root of ["/home/dev/zeros-local/a123456789abcdef", "/root/zeros-local/design-qual-0011aabb"]) {
+      expect(repoSlugFromWorktreePath(`${root}/workspaces/widgets/ws_1`), root).toBe("widgets");
+      expect(workspaceKindFromManagedPath(`${root}/design workspaces/widgets/landing`), root).toBe("design");
+    }
+  });
+
   it("returns null for paths outside the worktrees layout", () => {
     expect(repoSlugFromWorktreePath("/Users/dev/code/zeros")).toBeNull();
     expect(repoSlugFromWorktreePath("/Users/dev/.zeros/cache/foo")).toBeNull();

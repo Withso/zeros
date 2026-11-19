@@ -1,6 +1,7 @@
 /** Top-level entries of an Electron session profile that Chromium rebuilds on
- * demand. Everything else, including names this list does not know, is durable
- * renderer state (Local Storage, IndexedDB, Cookies, Session Storage,
+ * demand, for the storage report's classification and Clear (with the app not
+ * running). Everything else, including names this list does not know, is
+ * durable renderer state (Local Storage, IndexedDB, Cookies, Session Storage,
  * WebStorage, Service Worker, Partitions, …). Observed on Electron 43 /
  * Chromium 150; see docs/storage-layout.md. */
 export const REGENERABLE_SESSION_ENTRIES = [
@@ -15,12 +16,10 @@ export const REGENERABLE_SESSION_ENTRIES = [
   "Shared Dictionary",
   "VideoDecodeStats",
   "Dictionaries",
+  // Per-run blob swap (`blob_storage/<run id>`); Chromium removes old runs. Not
+  // IndexedDB's blob store, which lives inside IndexedDB/.
+  "blob_storage",
 ] as const;
-
-/** The regenerable entries main relocates out of the session profile into
- * the cache dir (`session.setCodeCachePath`). The rest cannot be relocated on
- * this Electron and stay in the profile. */
-export const CACHE_DIR_SESSION_ENTRIES = ["Code Cache"] as const;
 
 export function isRegenerableSessionEntry(name: string): boolean {
   return (REGENERABLE_SESSION_ENTRIES as readonly string[]).includes(name);

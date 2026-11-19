@@ -102,8 +102,13 @@ describe("invite page scheme selection", () => {
 
 it("an Open Zeros link without a callback opens this deployment's app", () => {
   assert.equal(deploymentAppLink("alpha"), "zeros-alpha://");
-  assert.equal(deploymentAppLink("beta"), "zeros://");
   assert.equal(deploymentAppLink("production"), "zeros://");
   assert.equal(deploymentAppLink(""), "zeros://");
-  assert.equal(deploymentAppLink("staging"), "zeros://");
+  assert.equal(deploymentAppLink(undefined), "zeros://");
+  // Hosted Dev is a deliberate configuration and keeps its existing link.
+  assert.equal(deploymentAppLink("dev"), "zeros://");
+});
+
+it("a named but unrecognised deployment gets no app link at all", () => {
+  for (const environment of ["beta", "staging", "Production", " alpha"]) assert.equal(deploymentAppLink(environment), null);
 });

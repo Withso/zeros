@@ -43,3 +43,15 @@ describe("async contained removal", () => {
     expect(fs.existsSync(outside)).toBe(true);
   });
 });
+
+describe("the containment anchor", () => {
+  it("refuses everything below a root that is itself a symlink", async () => {
+    const real = scratch(), linkParent = scratch();
+    const home = path.join(linkParent, "home");
+    fs.symlinkSync(real, home);
+    fs.mkdirSync(path.join(real, "store", "entry"), { recursive: true });
+    const options = { container: path.join(home, "store"), root: home };
+    expect(refusal(path.join(home, "store", "entry"), options)).toBe("symlink");
+    expect(await refusalAsync(path.join(home, "store", "entry"), options)).toBe("symlink");
+  });
+});

@@ -6,8 +6,14 @@
 //   --apply                 delete what the dry run lists as removable
 //   --only <category,…>     dev-desktop, beta, legacy-scheme,
 //                           local-unregistered, local-orphaned
-//   --identity <inst>       only that identity; also lifts its "has workspaces" skip
+//   --identity <id,…>       only these identities, including ones that hold data
 //   --keychain              also the Zeros Dev / Zeros Beta Safe Storage items
+//
+// Unknown is kept. Without --identity only bundles, and identities provably
+// empty of user data, are removed. Nothing is removed while it may be in use,
+// nor when a missing or corrupt registry, an unreadable folder or an
+// unavailable process list could hide what it holds. Apply re-validates each
+// group immediately before deleting it, holding the identity's lease.
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
@@ -16,18 +22,28 @@ import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { readRegistry, registryPath, removeInstance } from "./local-instance-registry.mjs";
 import { identityTargets } from "./local-instance-prune.mjs";
+import { acquireLease, identityInUse, profileInUse } from "./local-instance-lease.mjs";
 import { hasWorkspaceEntries, providerStoreReferences, refusal, removeContained, sizeOf } from "./storage-removal.mjs";
 
 const require = createRequire(import.meta.url);
 const paths = require("../apps/desktop/src/engine/db/local-development-paths.cjs");
 
 export const CATEGORIES = ["dev-desktop", "beta", "legacy-scheme", "local-unregistered", "local-orphaned"];
-const KEYCHAIN_SERVICES = ["Zeros Dev Safe Storage", "Zeros Beta Safe Storage"];
+const KEYCHAIN = [
+  { category: "dev-desktop", service: "Zeros Dev Safe Storage" },
+  { category: "beta", service: "Zeros Beta Safe Storage" },
+];
 const INSTANCE = /^[a-z0-9][a-z0-9._-]{0,39}$/;
-const CHECKOUT_ID = /^[0-9a-f]{16}$/;
-const RECENT_MS = 14 * 24 * 60 * 60 * 1000;
 const LOCAL_CATEGORIES = ["local-unregistered", "local-orphaned"];
 const LOCAL_LIBRARY = ["Application Support", "Caches", "Logs", "Preferences", "HTTPStorages", "WebKit", "Saved Application State"];
+/** Must equal REGENERABLE_SESSION_ENTRIES (session-entries.ts); a test holds them equal. */
+export const REGENERABLE_ENTRIES = new Set([
+  "Cache", "Code Cache", "GPUCache", "DawnWebGPUCache", "DawnGraphiteCache", "GrShaderCache", "GraphiteDawnCache",
+  "ShaderCache", "Shared Dictionary", "VideoDecodeStats", "Dictionaries", "blob_storage",
+]);
+const IGNORABLE = new Set([".DS_Store"]);
+const STATE_PLUMBING = new Set(["bundle", "worktrees", "launcher.lease", "launcher.lock"]);
+const DURABLE_ROLES = ["data", "state", "visible", "session"];
 
 // Library folders, and the suffix macOS appends to a bundle id in each.
 const LIBRARY = [
@@ -40,24 +56,32 @@ const LIBRARY = [
   ["Saved Application State", ".savedState"],
 ];
 
-/** Exact name patterns; `slug` names the identity a match belongs to. */
+/** One Dev identity was spelled as a slug, a display label and a folder
+ * suffix; all of them name one group. */
+function devIdentity(raw) {
+  const slug = String(raw ?? "").trim().toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^[-._]+|[-._]+$/g, "");
+  return slug || "dev";
+}
+
+/** Exact name patterns. `shared` marks a folder every Dev identity used. */
 const LIBRARY_PATTERNS = {
   "dev-desktop": [
-    { re: /^com\.zeros\.dev$/, slug: () => "" },
-    { re: /^com\.zeros\.dev\.(.+)$/, slug: (m) => m[1] },
-    { re: /^Zeros Dev$/, slug: () => "" },
-    { re: /^Zeros — (.+)$/, slug: (m) => m[1] },
-    { re: /^design\.zeros\.app\.dev(?:\.(.+))?$/, slug: (m) => m[1] ?? "" },
+    { re: /^com\.zeros\.dev$/, identity: () => "dev", shared: true },
+    { re: /^com\.zeros\.dev\.(.+)$/, identity: (m) => devIdentity(m[1]) },
+    { re: /^Zeros Dev$/, identity: () => "dev", shared: true },
+    { re: /^Zeros — (.+)$/, identity: (m) => devIdentity(m[1]), shared: true },
+    { re: /^design\.zeros\.app\.dev(?:\.(.+))?$/, identity: (m) => devIdentity(m[1]) },
   ],
   beta: [
-    { re: /^com\.zeros\.beta(?:\.(.+))?$/, slug: (m) => m[1] ?? "" },
-    { re: /^design\.zeros\.beta(?:\.(.+))?$/, slug: (m) => m[1] ?? "" },
+    { re: /^com\.zeros\.beta(?:\.(.+))?$/, identity: () => "beta" },
+    { re: /^design\.zeros\.beta(?:\.(.+))?$/, identity: () => "beta" },
   ],
   "legacy-scheme": [
-    { re: /^design\.zeros\.app$/, slug: () => "" },
-    { re: /^design\.zeros\.oCanvas$/, slug: () => "" },
+    { re: /^design\.zeros\.app$/, identity: () => "design.zeros.app" },
+    { re: /^design\.zeros\.oCanvas$/, identity: () => "design.zeros.oCanvas" },
   ],
 };
+const LIBRARY_ROLE = { "Application Support": "data", Caches: "session" };
 
 /** The never-touch list, checked again for every candidate behind the exact
  * patterns above. */
@@ -81,11 +105,43 @@ export function neverTouch(home) {
     (path.dirname(target) === shared && target !== path.join(shared, "instances"));
 }
 
-function list(directory) {
+/** Real (non-link) folders from `home` down to `directory`, or false. */
+function realPathFrom(home, directory) {
+  const relative = path.relative(home, directory);
+  if (relative.startsWith("..") || path.isAbsolute(relative)) return false;
+  let cursor = home;
+  for (const segment of ["", ...relative.split(path.sep).filter(Boolean)]) {
+    cursor = segment ? path.join(cursor, segment) : cursor;
+    let stat;
+    try {
+      stat = fs.lstatSync(cursor);
+    } catch (error) {
+      return error.code === "ENOENT" ? "missing" : false;
+    }
+    if (stat.isSymbolicLink() || !stat.isDirectory()) return false;
+  }
+  return true;
+}
+
+/** Names in `directory`. ok:false when it exists but cannot be listed, or is
+ * reached through a link: what it holds is unknown. */
+function list(home, directory) {
+  const real = realPathFrom(home, directory);
+  if (real === "missing") return { names: [], ok: true };
+  if (!real) return { names: [], ok: false };
   try {
-    return fs.readdirSync(directory);
-  } catch {
-    return [];
+    return { names: fs.readdirSync(directory), ok: true };
+  } catch (error) {
+    return { names: [], ok: error.code === "ENOENT" };
+  }
+}
+
+function exists(target) {
+  try {
+    fs.lstatSync(target);
+    return true;
+  } catch (error) {
+    return error.code !== "ENOENT";
   }
 }
 
@@ -106,77 +162,121 @@ function defaultSecurity(args) {
   }
 }
 
-/** Build the plan: every candidate with its size and whether it may go. */
+/** Whether one candidate may hold user data. Only entries known to be
+ * plumbing or rebuilt caches prove it does not; anything else, or anything
+ * unreadable, counts. `work` is a workspace or worktree a person made. */
+function contents(home, item) {
+  if (item.role === "visible") return { work: hasWorkspaceEntries(item.path), data: false };
+  if (!DURABLE_ROLES.includes(item.role) || item.kind === "file") return { work: false, data: false };
+  const entries = list(home, item.path);
+  if (!entries.ok) return { work: true, data: true };
+  const names = entries.names.filter((name) => !IGNORABLE.has(name));
+  if (item.role === "state") {
+    const worktrees = names.includes("worktrees") ? list(home, path.join(item.path, "worktrees")) : { ok: true, names: [] };
+    const work = !worktrees.ok || worktrees.names.some((name) => !IGNORABLE.has(name));
+    return { work, data: work || names.some((name) => !STATE_PLUMBING.has(name)) };
+  }
+  return { work: false, data: names.some((name) => !REGENERABLE_ENTRIES.has(name)) };
+}
+
+/** Stable's renderer profile has moved once its marker is a file. */
+function stableMoved(home) {
+  try {
+    return fs.lstatSync(path.join(home, "Library", "Application Support", "com.zeros", "electron", paths.SESSION_MOVED_MARKER)).isFile();
+  } catch {
+    return false;
+  }
+}
+
+/** Build the plan: every candidate with its size and whether it may go.
+ * `restrictTo` (group keys) and `measure: false` serve apply's re-validation. */
 export function planSweep({
   home = os.homedir(),
   platform = "darwin",
   env = {},
   only = CATEGORIES,
-  identity = null,
+  identities = null,
   processList = defaultProcessList,
   keychain = false,
   security = defaultSecurity,
   budgetMs = 30_000,
+  restrictTo = null,
+  measure = true,
+  ignoreHeld = false,
 } = {}) {
   const deadline = Date.now() + budgetMs;
+  const named = identities ? new Set(identities) : null;
+  const base = { home, platform, env, only, named, items: [], keychain: [], unlisted: [], problem: null };
+  if (realPathFrom(home, home) !== true) return { ...base, problem: "the home folder is missing, a symlink or not a folder" };
   const library = path.join(home, "Library");
   const isProtected = neverTouch(home);
   const containers = paths.developmentContainers({ home, platform, env });
   const file = registryPath({ home, platform, env });
   const registry = readRegistry(file);
+  const registryProblem = registry.corrupt ? "the instance registry is corrupt" : !exists(file) ? "there is no instance registry" : null;
   const registered = new Set(Object.keys(registry.instances));
+  const unlisted = new Set();
   const groups = new Map();
-  // role: "data" | "state" | "visible" | "regenerable".
-  const add = (category, slug, target, container, { kind = "directory", role = "regenerable", registryEntry } = {}) => {
+  const add = (category, identity, target, container, { kind = "directory", role = "other", shared = false, entry } = {}) => {
     if (!only.includes(category) || isProtected(target)) return;
-    const key = `${category}\0${slug}`;
-    if (!groups.has(key)) groups.set(key, { key, category, identity: slug, items: [], registryEntry: undefined });
+    const key = `${category}\0${identity}`;
+    if (restrictTo && !restrictTo.has(key)) return;
+    if (!groups.has(key)) groups.set(key, { key, category, identity, items: [], entry: undefined });
     const group = groups.get(key);
     if (group.items.some((item) => item.path === target)) return;
-    group.items.push({ path: target, container, kind, role });
-    if (registryEntry) group.registryEntry = registryEntry;
+    group.items.push({ path: target, container, kind, role, shared });
+    if (entry) group.entry = entry;
+  };
+  const scan = (categories, directory) => {
+    const result = list(home, directory);
+    if (!result.ok) for (const category of categories) unlisted.add(category);
+    return result.names;
   };
 
   for (const [folder, suffix] of LIBRARY) {
     const directory = path.join(library, folder);
-    for (const name of list(directory)) {
+    for (const name of scan(CATEGORIES, directory)) {
       if (suffix && !name.endsWith(suffix)) continue;
-      const base = suffix ? name.slice(0, -suffix.length) : name;
+      const stem = suffix ? name.slice(0, -suffix.length) : name;
       const kind = folder === "Preferences" ? "file" : "directory";
+      const role = LIBRARY_ROLE[folder] ?? "other";
       for (const [category, patterns] of Object.entries(LIBRARY_PATTERNS))
         for (const pattern of patterns) {
-          const match = base.match(pattern.re);
-          if (match) add(category, pattern.slug(match), path.join(directory, name), directory, { kind });
+          const match = stem.match(pattern.re);
+          if (match) add(category, pattern.identity(match), path.join(directory, name), directory, { kind, role, shared: pattern.shared });
         }
-      const local = base.match(/^com\.zeros\.local\.(.+)$/);
+      const local = stem.match(/^com\.zeros\.local\.(.+)$/);
       if (local && INSTANCE.test(local[1]) && !registered.has(local[1]) && LOCAL_LIBRARY.includes(folder))
-        add("local-unregistered", local[1], path.join(directory, name), directory,
-          { kind, role: folder === "Application Support" ? "data" : "regenerable" });
+        add("local-unregistered", local[1], path.join(directory, name), directory, { kind, role });
     }
   }
-  for (const name of list(home)) {
+  for (const name of scan(CATEGORIES, home)) {
     const dev = name.match(/^zeros-dev(?:-(.+))?$/);
-    if (dev) add("dev-desktop", dev[1] ?? "", path.join(home, name), home, { role: "visible" });
-    if (name === "zeros-beta") add("beta", "", path.join(home, name), home, { role: "visible" });
-    if (name === ".zeros-beta") add("beta", "", path.join(home, name), home);
+    if (dev) add("dev-desktop", devIdentity(dev[1]), path.join(home, name), home, { role: "visible" });
+    if (name === "zeros-beta") add("beta", "beta", path.join(home, name), home, { role: "visible" });
+    if (name === ".zeros-beta") add("beta", "beta", path.join(home, name), home, { role: "state" });
     const legacyLocal = name.match(/^zeros-local-(.+)$/);
     if (legacyLocal && INSTANCE.test(legacyLocal[1]) && !registered.has(legacyLocal[1]))
       add("local-unregistered", legacyLocal[1], path.join(home, name), home, { role: "visible" });
   }
-  add("dev-desktop", "", path.join(home, ".zeros-dev", "dev-instances"), path.join(home, ".zeros-dev"));
-  add("local-unregistered", "", containers.legacyBundles, path.dirname(containers.legacyBundles));
-  const v2 = [
+  add("dev-desktop", "dev", path.join(home, ".zeros-dev", "dev-instances"), path.join(home, ".zeros-dev"), { role: "bundle", shared: true });
+  add("local-unregistered", "dev-instances", containers.legacyBundles, path.dirname(containers.legacyBundles), { role: "bundle" });
+  for (const [container, role] of [
     [containers.dataInstances, "data"],
-    [containers.cacheInstances, "regenerable"],
-    [containers.bundles, "regenerable"],
-    [containers.logInstances, "regenerable"],
+    [containers.cacheInstances, "session"],
+    [containers.bundles, "bundle"],
+    [containers.logInstances, "other"],
     [containers.stateInstances, "state"],
     [containers.visibleInstances, "visible"],
-  ];
-  for (const [container, role] of v2) {
+  ]) {
     if (!container) continue;
-    for (const name of list(container))
-      if (INSTANCE.test(name) && !registered.has(name)) add("local-unregistered", name, path.join(container, name), container, { role });
+    for (const name of scan(LOCAL_CATEGORIES, container)) {
+      if (!INSTANCE.test(name) || registered.has(name)) continue;
+      add("local-unregistered", name, path.join(container, name), container, { role });
+      // A legacy-layout bundle lives inside the state root.
+      if (role === "state")
+        add("local-unregistered", name, path.join(container, name, "bundle"), path.join(container, name), { role: "bundle" });
+    }
   }
   for (const [instance, entry] of Object.entries(registry.instances)) {
     if (!INSTANCE.test(instance) || entry.kind !== "checkout") continue;
@@ -192,97 +292,173 @@ export function planSweep({
     for (const target of identityTargets(roots, containers))
       add("local-orphaned", instance, target.target, target.container, {
         kind: target.file ? "file" : "directory",
-        role: target.regenerable ? "regenerable" : target.kind,
-        registryEntry: { instance, entry },
+        role: target.kind === "bundle" || DURABLE_ROLES.includes(target.kind) ? target.kind : "other",
+        entry: { instance, entry },
       });
   }
 
-  const processes = processList();
-  const named = identity !== null;
+  const context = { home, platform, env, containers, registryProblem, unlisted, processes: processList(), named, ignoreHeld };
+  for (const group of groups.values()) decide(group, context);
+  // A retained Dev identity keeps what every Dev identity shared.
+  const devGroups = [...groups.values()].filter((group) => group.category === "dev-desktop");
+  if (devGroups.some((group) => group.items.some((item) => !item.shared && item.role !== "bundle" && item.action === "skip")))
+    for (const group of devGroups)
+      for (const item of group.items)
+        if (item.shared && item.role !== "bundle" && item.action === "remove")
+          Object.assign(item, { action: "skip", reason: "another Zeros Dev identity depends on it" });
+
   const seen = new Set();
-  const items = [];
+  let hardlinked = false;
   for (const group of groups.values()) {
-    if (named && group.identity !== identity) continue;
-    const present = group.items.filter((item) => refusal(item.path, { container: item.container, home, kind: item.kind }) !== "missing");
-    if (!present.length) continue;
-    const data = present.filter((item) => item.role === "data");
-    const work = !named && present.some((item) => item.role === "visible" && hasWorkspaceEntries(item.path));
-    // Before the registry existed, a checkout that only opens plain folders
-    // has chats in zeros.db and nothing under its visible root.
-    const recent = !named && group.category === "local-unregistered" && CHECKOUT_ID.test(group.identity) &&
-      data.some((item) => usedWithin(item.path, RECENT_MS));
-    const live = processes === null ? "unknown" : present.some((item) => processes.includes(item.path)) ? "live" : "idle";
-    const referenced = LOCAL_CATEGORIES.includes(group.category) &&
-      data.some((item) => providerStoreReferences({ dataDir: item.path, sharedDataDir: containers.sharedDataDir }));
-    for (const item of present) {
-      const refused = refusal(item.path, { container: item.container, home, kind: item.kind });
-      const reason = refused ?? (work ? "has workspaces"
-        : recent ? "used recently; launch it once to register it, or pass --identity"
-          : live === "live" ? "in use by a running process"
-            : live === "unknown" ? "process list unavailable"
-              : referenced && item.role !== "regenerable" ? "provider profiles referenced by the shared Local store" : null);
-      const size = sizeOf(item.path, { deadline, seen });
-      items.push({ category: group.category, identity: group.identity, group: group.key, role: item.role, path: item.path,
-        container: item.container, kind: item.kind, bytes: size.bytes, sizeComplete: size.complete,
-        action: reason ? "skip" : "remove", reason, registryEntry: group.registryEntry });
+    if (named && !named.has(group.identity)) continue;
+    // Deleting the state root also deletes the lease held over the rest.
+    const ordered = [...group.items].sort((a, b) => (a.role === "state") - (b.role === "state"));
+    for (const item of ordered) {
+      if (item.missing) continue;
+      const size = item.refused || !measure ? { bytes: 0, complete: true, hardlinked: false } : sizeOf(item.path, { deadline, seen });
+      hardlinked ||= size.hardlinked;
+      base.items.push({ category: group.category, identity: group.identity, group: group.key, role: item.role, path: item.path,
+        container: item.container, kind: item.kind, bytes: size.bytes, sizeComplete: size.complete, action: item.action,
+        reason: item.reason, evidence: group.evidence, registryEntry: group.entry });
     }
   }
-  items.sort((a, b) => CATEGORIES.indexOf(a.category) - CATEGORIES.indexOf(b.category) || a.path.localeCompare(b.path));
-  const keychainItems = keychain && platform === "darwin"
-    ? KEYCHAIN_SERVICES.map((service) => ({ service, present: security(["find-generic-password", "-s", service]) }))
+  base.items.sort((a, b) => CATEGORIES.indexOf(a.category) - CATEGORIES.indexOf(b.category) || a.group.localeCompare(b.group));
+  if (keychain && platform === "darwin")
+    base.keychain = KEYCHAIN.filter((entry) => only.includes(entry.category))
+      .map((entry) => ({ ...entry, present: security(["find-generic-password", "-s", entry.service]) }));
+  return { ...base, registryFile: file, unlisted: [...unlisted], hardlinked };
+}
+
+/** Decide every item of one group, in place. */
+function decide(group, { home, platform, env, containers, registryProblem, unlisted, processes, named, ignoreHeld }) {
+  const isNamed = named?.has(group.identity) ?? false;
+  const local = LOCAL_CATEGORIES.includes(group.category) && group.identity !== "dev-instances";
+  const layouts = local
+    ? ["v2", "legacy"].map((layout) => paths.developmentPaths({ instance: group.identity, layout, home, platform, env }))
     : [];
-  return { home, named, registryFile: file, items, keychain: keychainItems };
-}
+  for (const item of group.items) {
+    const refused = refusal(item.path, { container: item.container, home, kind: item.kind });
+    item.missing = refused === "missing";
+    item.refused = refused !== null && !item.missing;
+    item.reason = item.refused ? refused : null;
+  }
+  const present = group.items.filter((item) => !item.missing);
 
-function usedWithin(dataDir, windowMs) {
-  return ["zeros.db", "zeros.db-wal"].some((name) => {
-    try {
-      return Date.now() - fs.lstatSync(path.join(dataDir, name)).mtimeMs < windowMs;
-    } catch (error) {
-      return error.code !== "ENOENT";
+  let groupReason = null;
+  if (processes === null) groupReason = "process list unavailable";
+  else if (unlisted.has(group.category)) groupReason = "a folder could not be listed";
+  else if (group.category === "local-unregistered" && registryProblem) groupReason = registryProblem;
+  else if (local && paths.RESERVED_INSTANCE_IDS.includes(group.identity) && !isNamed) groupReason = "a reserved identity";
+  else if (group.category === "legacy-scheme" && !stableMoved(home))
+    groupReason = "Stable's renderer profile has not moved yet; this may be its only copy";
+  else if (present.some((item) => processes.includes(item.path))) groupReason = "in use by a running process";
+  else {
+    let inUse = null;
+    for (const roots of layouts) inUse ??= identityInUse(roots, group.entry?.entry ?? {}, { ignoreHeld });
+    for (const item of present) if (item.role === "data" && !item.refused) inUse ??= profileInUse(item.path);
+    if (inUse) groupReason = `in use (${inUse})`;
+  }
+
+  // What the identity holds; anything refused or unreadable counts as work.
+  let work = present.some((item) => item.refused), data = work;
+  if (!work) {
+    for (const item of present) {
+      const found = contents(home, item);
+      work ||= found.work;
+      data ||= found.data || found.work;
     }
-  });
+    // Worktrees the engine keeps under the state root, which a scan may not list.
+    for (const roots of layouts) {
+      const state = { path: roots.stateRoot, role: "state", kind: "directory" };
+      if (exists(state.path) && !present.some((item) => item.path === state.path)) {
+        const found = contents(home, state);
+        work ||= found.work;
+        data ||= found.data;
+      }
+    }
+  }
+  const referenced = local && present.some((item) => item.role === "data" && !item.refused &&
+    providerStoreReferences({ dataDir: item.path, sharedDataDir: containers.sharedDataDir }));
+  group.evidence = JSON.stringify({ work, data, referenced });
+
+  for (const item of present) {
+    let reason = item.reason ?? groupReason;
+    if (!reason && item.role !== "bundle") {
+      if (referenced && DURABLE_ROLES.includes(item.role)) reason = "provider profiles referenced by the shared Local store";
+      else if (data && !isNamed) reason = work ? "has workspaces; name it with --identity to remove" : "holds user data; name it with --identity to remove";
+    }
+    item.action = reason ? "skip" : "remove";
+    item.reason = reason;
+  }
 }
 
-/** Delete every removable item in the plan, then registry entries whose
- * identity is completely gone. */
-export function applySweep(plan, { security = defaultSecurity } = {}) {
+/** Delete every removable item, one group at a time: take the identity's
+ * lease, re-plan that group from fresh evidence, and remove only what is still
+ * removable for the same reasons. */
+export function applySweep(plan, { security = defaultSecurity, processList = defaultProcessList } = {}) {
   const results = [];
-  // A visible root that gained work since the plan keeps its whole identity.
-  const gainedWork = (item) => !plan.named && item.role === "visible" && hasWorkspaceEntries(item.path);
-  const heldGroups = new Set(plan.items.filter((item) => item.action === "remove" && gainedWork(item)).map((item) => item.group));
-  for (const item of plan.items) {
-    if (item.action !== "remove") continue;
-    let outcome;
-    try {
-      outcome = heldGroups.has(item.group) || gainedWork(item)
-        ? "has workspaces"
-        : removeContained(item.path, { container: item.container, home: plan.home, kind: item.kind });
-    } catch (error) {
-      outcome = error.code ?? "failed";
+  const groupKeys = [...new Set(plan.items.filter((item) => item.action === "remove").map((item) => item.group))];
+  for (const key of groupKeys) {
+    const planned = plan.items.filter((item) => item.group === key && item.action === "remove");
+    const sample = planned[0];
+    const releases = [];
+    let blocked = null;
+    if (LOCAL_CATEGORIES.includes(sample.category) && sample.identity !== "dev-instances") {
+      const roots = paths.developmentPaths({ instance: sample.identity, home: plan.home, platform: plan.platform, env: plan.env });
+      if (exists(roots.stateRoot)) {
+        try {
+          releases.push(acquireLease(roots, { busyMessage: "in use", record: { instance: sample.identity, sweep: true } }));
+        } catch {
+          blocked = "in use (a launcher holds it)";
+        }
+      }
     }
-    results.push({ path: item.path, outcome });
+    try {
+      const fresh = blocked ? null : planSweep({ home: plan.home, platform: plan.platform, env: plan.env, only: plan.only,
+        identities: plan.named, processList, restrictTo: new Set([key]), measure: false, ignoreHeld: true });
+      const now = new Map((fresh?.items ?? []).map((item) => [item.path, item]));
+      for (const item of planned) {
+        const current = now.get(item.path);
+        const changed = blocked ?? (!current ? "changed since the plan"
+          : current.action !== "remove" ? current.reason
+            : current.evidence !== item.evidence ? "changed since the plan" : null);
+        if (changed) {
+          results.push({ path: item.path, outcome: changed, bytes: 0 });
+          continue;
+        }
+        let outcome;
+        try {
+          outcome = removeContained(item.path, { container: item.container, home: plan.home, kind: item.kind });
+        } catch (error) {
+          outcome = error.code ?? "failed";
+        }
+        results.push({ path: item.path, outcome, bytes: outcome === "removed" ? item.bytes : 0 });
+      }
+    } finally {
+      for (const release of releases) release();
+    }
   }
   const entries = new Map();
   for (const item of plan.items) if (item.registryEntry) entries.set(item.registryEntry.instance, item);
   for (const [instance, sample] of entries) {
     const all = plan.items.filter((item) => item.registryEntry?.instance === instance);
-    const gone = all.every((item) => {
-      try {
-        fs.lstatSync(item.path);
-        return false;
-      } catch (error) {
-        return error.code === "ENOENT";
-      }
-    });
-    if (gone) removeInstance(plan.registryFile, instance, sample.registryEntry.entry);
+    if (all.every((item) => !exists(item.path))) removeInstance(plan.registryFile, instance, sample.registryEntry.entry);
   }
   const keychain = [];
-  for (const item of plan.keychain) {
-    if (!item.present) continue;
-    let removed = 0;
-    while (removed < 16 && security(["delete-generic-password", "-s", item.service])) removed++;
-    keychain.push({ service: item.service, removed });
+  if (plan.keychain.length) {
+    for (const item of plan.keychain) {
+      if (!item.present) continue;
+      // Only once nothing of that app is left, or could be hidden.
+      const after = planSweep({ home: plan.home, platform: plan.platform, env: plan.env, only: [item.category],
+        processList: () => "", measure: false });
+      if (after.problem || after.unlisted.length || after.items.length) {
+        keychain.push({ service: item.service, removed: 0, reason: "files of that app remain" });
+        continue;
+      }
+      let removed = 0;
+      while (removed < 16 && security(["delete-generic-password", "-s", item.service])) removed++;
+      keychain.push({ service: item.service, removed });
+    }
   }
   return { results, keychain };
 }
@@ -297,27 +473,40 @@ function human(bytes) {
   return `${value.toFixed(unit ? 1 : 0)} ${units[unit]}`;
 }
 
-export function formatPlan(plan, { apply = false } = {}) {
+export function formatPlan(plan, outcome = null) {
   const lines = [];
-  let removable = 0;
+  if (plan.problem) lines.push(`Nothing swept: ${plan.problem}.`);
+  const done = outcome ? new Map(outcome.results.map((result) => [result.path, result])) : null;
+  let total = 0;
   for (const category of CATEGORIES) {
     const rows = plan.items.filter((item) => item.category === category);
     if (!rows.length) continue;
     lines.push(`${category}:`);
     for (const row of rows) {
+      const result = done?.get(row.path);
+      const removed = result?.outcome === "removed";
+      const verb = row.action !== "remove" ? "skip" : !done ? "would remove" : removed ? "removed" : "kept";
+      const why = row.reason ?? (result && !removed ? result.outcome : null);
       const size = `${human(row.bytes)}${row.sizeComplete ? "" : "+"}`;
-      lines.push(`  ${row.action === "remove" ? (apply ? "remove" : "would remove") : "skip"}  ${size.padStart(9)}  ${path.join("~", path.relative(plan.home, row.path))}${row.reason ? `  (${row.reason})` : ""}`);
-      if (row.action === "remove") removable += row.bytes;
+      lines.push(`  ${verb.padEnd(12)}  ${size.padStart(9)}  ${path.join("~", path.relative(plan.home, row.path))}  [${row.identity}]${why ? `  (${why})` : ""}`);
+      if (done ? removed : row.action === "remove") total += done ? result.bytes : row.bytes;
     }
   }
-  for (const item of plan.keychain)
-    lines.push(`keychain: ${item.service} — ${item.present ? (apply ? "remove" : "would remove") : "not present"}`);
-  lines.push(`Total ${apply ? "removed" : "removable"}: ${human(removable)}${apply ? "" : " (dry run; pass --apply to delete)"}`);
+  for (const item of plan.keychain) {
+    const result = outcome?.keychain.find((entry) => entry.service === item.service);
+    const state = !item.present ? "not present" : !outcome ? "would remove once nothing of that app remains"
+      : result?.removed ? "removed" : `kept${result?.reason ? ` (${result.reason})` : ""}`;
+    lines.push(`keychain: ${item.service} — ${state}`);
+  }
+  const bound = plan.hardlinked ? "; an upper bound: some files have hardlinks that may keep their space in use" : "";
+  lines.push(outcome
+    ? `Total removed: ${human(total)}${bound ? ` (${bound.slice(2)})` : ""}`
+    : `Total removable: ${human(total)} (dry run; pass --apply to delete${bound})`);
   return lines.join("\n");
 }
 
 export function parseArguments(argv) {
-  const options = { apply: false, only: CATEGORIES, identity: null, keychain: false };
+  const options = { apply: false, only: CATEGORIES, identities: null, keychain: false };
   for (let index = 0; index < argv.length; index++) {
     const arg = argv[index];
     if (arg === "--apply") options.apply = true;
@@ -328,9 +517,10 @@ export function parseArguments(argv) {
       if (!only.length || unknown.length) throw new Error(`--only takes ${CATEGORIES.join(", ")}`);
       options.only = only;
     } else if (arg === "--identity") {
-      const identity = argv[++index] ?? "";
-      if (!INSTANCE.test(identity) && !/^[^/\0]{1,80}$/.test(identity)) throw new Error("--identity needs an instance id");
-      options.identity = identity;
+      const names = (argv[++index] ?? "").split(",").map((value) => value.trim()).filter(Boolean);
+      if (!names.length || names.some((name) => !/^[^/\0]{1,80}$/.test(name)))
+        throw new Error("--identity takes one or more identities from the dry run, comma-separated");
+      options.identities = new Set(names);
     } else throw new Error(`Unknown option ${arg}`);
   }
   return options;
@@ -342,12 +532,15 @@ export function main(argv = process.argv.slice(2), { platform = process.platform
     console.log("storage:sweep inspects macOS Library folders; nothing to sweep on this platform.");
     return 0;
   }
-  const plan = planSweep({ home, platform, only: options.only, identity: options.identity, keychain: options.keychain, ...deps });
+  const plan = planSweep({ home, platform, only: options.only, identities: options.identities, keychain: options.keychain, ...deps });
+  if (plan.problem) {
+    console.log(formatPlan(plan));
+    return 2;
+  }
   if (options.apply) {
     const outcome = applySweep(plan, deps);
-    console.log(formatPlan(plan, { apply: true }));
+    console.log(formatPlan(plan, outcome));
     const failed = outcome.results.filter((result) => result.outcome !== "removed" && result.outcome !== "missing");
-    for (const result of failed) console.log(`  not removed: ${result.path} (${result.outcome})`);
     return failed.length ? 1 : 0;
   }
   console.log(formatPlan(plan));

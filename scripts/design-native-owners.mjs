@@ -215,8 +215,9 @@ try {
   report.failures.push(error.stack ?? String(error)); process.exitCode = 1;
 } finally {
   clearTimeout(deadline);
-  await closeApp().catch(error => { report.failures.push(`App close: ${error.message}`); process.exitCode = 1; });
+  // closeApp waits for the task's engine to exit; only then are its roots free.
+  const retired = await closeApp().then(() => true, error => { report.failures.push(`App close: ${error.message}`); process.exitCode = 1; return false; });
   vite?.kill("SIGTERM"); await viteLog?.close();
-  ephemeral?.dispose();
+  ephemeral?.dispose({ retired });
   report.finishedAt = new Date().toISOString(); status(report.failures.length ? (report.blocked ? "blocked" : "failed") : "complete");
 }

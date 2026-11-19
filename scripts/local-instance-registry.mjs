@@ -62,13 +62,15 @@ function registryLock(file, timeoutMs) {
       return acquireExclusiveLock({
         file: `${file}.lock`,
         busyMessage: "The Zeros Local instance registry is busy.",
-        // Registry updates take milliseconds; an old or dead holder is stale.
+        // Only positive evidence retires a holder: a dead pid. A live one, even
+        // a suspended one, keeps the lock however old it is; an owner that
+        // cannot be read is retired only after it has been old for a while.
         classify: ({ owner, stat }) => {
           const age = stat ? Date.now() - stat.mtimeMs : Infinity;
           if (!owner || !Number.isSafeInteger(owner.pid) || owner.pid <= 0)
             return age > LOCK_STALE_MS ? "stale" : "live";
           if (heldByThisProcess(owner)) return "live";
-          return !pidAlive(owner.pid) || age > LOCK_STALE_MS ? "stale" : "live";
+          return pidAlive(owner.pid) ? "live" : "stale";
         },
       });
     } catch (error) {
@@ -118,7 +120,7 @@ export function updateRegistry(file, mutate, { timeoutMs = 5_000 } = {}) {
 }
 
 /** Create or refresh one entry, keeping every field this version does not own. */
-export function upsertInstance(file, instance, fields, { now = new Date() } = {}) {
+export function upsertInstance(file, instance, fields, { now = new Date(), timeoutMs } = {}) {
   if (!INSTANCE_KINDS.includes(fields.kind)) throw new Error("Invalid Zeros Local instance kind");
   const stamp = now.toISOString();
   return updateRegistry(file, (doc) => {
@@ -127,16 +129,16 @@ export function upsertInstance(file, instance, fields, { now = new Date() } = {}
     if (fields.kind !== "ephemeral") delete next.ownerPid;
     doc.instances[instance] = next;
     return next;
-  });
+  }, { timeoutMs });
 }
 
 /** Remove an entry only if it is still the one the caller inspected. */
-export function removeInstance(file, instance, expected) {
+export function removeInstance(file, instance, expected, { timeoutMs } = {}) {
   return updateRegistry(file, (doc) => {
     const current = doc.instances[instance];
     if (!current) return false;
     if (expected && current.lastUsedAt !== expected.lastUsedAt) return false;
     delete doc.instances[instance];
     return true;
-  });
+  }, { timeoutMs });
 }

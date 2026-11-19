@@ -9,12 +9,14 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import vm from "node:vm";
+import { createRequire } from "node:module";
 // @ts-expect-error — .cjs has no type declarations; it exports plain functions.
 import {
   patchPlist,
   localInstanceBundlePaths,
 } from "../dev-electron-bundle.cjs";
 
+const contained = createRequire(import.meta.url)("../../apps/desktop/src/engine/db/contained-removal.cjs");
 const NAME = "Zeros Local Alpha";
 const BUNDLE_ID = "com.zeros.local.alpha";
 
@@ -40,6 +42,7 @@ describe("Local bundle containment",()=>{
       module:{exports:{} as {prepareLocalInstanceBundle:(identity:object)=>unknown}},process:{platform:"darwin"},os:{homedir:()=>home},path,
       localInstanceBundlePaths:(identity:{slug:string;name:string})=>localInstanceBundlePaths({...identity,home}),
       fs:{...fs,readFileSync:()=>"",existsSync:()=>false,rmSync:(file:string,options:object)=>{if(file===legacy && failure)throw new Error("synthetic cache cleanup failure");fs.rmSync(file,options);},mkdirSync:()=>{},writeFileSync:(file:string)=>{markers.push(file);}},
+      contained:{removeContained:(file:string,options:object)=>{if(file===legacy && failure)throw new Error("synthetic cache cleanup failure");return contained.removeContained(file,options);}},
       findBaseElectronApp:()=>"/base/Electron.app",readElectronVersion:()=>"38.0.0",
       cloneBundleHardlink:(_base:string,dest:string)=>{clones.push(dest);},readPlistValue:()=>"Electron",patchExecutable:()=>{},patchPlist:()=>{},patchIcon:()=>{},
     };
@@ -50,6 +53,34 @@ describe("Local bundle containment",()=>{
     expect(markers).toEqual([`${expected}.version`]);
     expect(fs.existsSync(legacy)).toBe(failure);
   });
+  // Phase 2 finding 8: bundle preparation removes only inside a real, contained
+  // bundle folder; a linked ancestor is refused and nothing beyond it is touched.
+  it.each(["bundle folder","legacy bundle root"])("refuses to remove through a symlinked %s",(linked)=>{
+    const home=fs.realpathSync(tmp()), outside=fs.realpathSync(tmp());
+    const name="Zeros Local test abcdef", slug="a123456789abcdef";
+    const paths=localInstanceBundlePaths({slug,name,home});
+    const linkAt=linked==="bundle folder"?paths.bundleDir:path.dirname(paths.legacyBundleRoot);
+    const precious=path.join(outside,linked==="bundle folder"?`${name}.app`:slug,"precious");
+    fs.mkdirSync(precious,{recursive:true});
+    fs.mkdirSync(path.dirname(linkAt),{recursive:true});
+    fs.symlinkSync(outside,linkAt);
+    const clones:string[]=[];
+    const source=fs.readFileSync("scripts/dev-electron-bundle.cjs","utf8");
+    const context={
+      module:{exports:{} as {prepareLocalInstanceBundle:(identity:object)=>{ok:boolean}}},process:{platform:"darwin"},path,fs,contained,
+      localInstanceBundlePaths:(identity:{slug:string;name:string})=>localInstanceBundlePaths({...identity,home}),
+      findBaseElectronApp:()=>"/base/Electron.app",readElectronVersion:()=>"38.0.0",
+      cloneBundleHardlink:(_base:string,dest:string)=>{clones.push(dest);},readPlistValue:()=>"Electron",patchExecutable:()=>{},patchPlist:()=>{},patchIcon:()=>{},
+    };
+    vm.runInNewContext(source.slice(source.indexOf("function prepareLocalInstanceBundle("))+"\nmodule.exports={prepareLocalInstanceBundle};",context);
+    let result:{ok:boolean}|undefined;
+    try { result=context.module.exports.prepareLocalInstanceBundle({slug,name}); } catch { /* a refusal may surface later */ }
+    expect(fs.existsSync(precious)).toBe(true);
+    if (linked==="bundle folder") {
+      expect(result?.ok).toBe(false);
+      expect(clones).toEqual([]);
+    }
+  });
   it.each([[false,true],[true,false]])("declares the Dev callback scheme only for hosted electron:alpha (callbackScheme=%s → local=%s)",(callbackScheme,local)=>{
     const patched:Array<{local:boolean;bundleId:string}>=[];
     const source=fs.readFileSync("scripts/dev-electron-bundle.cjs","utf8");
@@ -57,6 +88,7 @@ describe("Local bundle containment",()=>{
       module:{exports:{} as {prepareLocalInstanceBundle:(identity:object)=>unknown}},process:{platform:"darwin"},path,
       localInstanceBundlePaths:(identity:{slug:string;name:string})=>localInstanceBundlePaths({...identity,home:"/h"}),
       fs:{...fs,readFileSync:()=>"",existsSync:()=>true,rmSync:()=>{},mkdirSync:()=>{},writeFileSync:()=>{}},
+      contained:{removeContained:()=>"removed"},
       findBaseElectronApp:()=>"/base/Electron.app",readElectronVersion:()=>"",
       cloneBundleHardlink:()=>{},readPlistValue:()=>"Electron",patchExecutable:()=>{},
       patchPlist:(_file:string,identity:{local:boolean;bundleId:string})=>{patched.push(identity);},patchIcon:()=>{},

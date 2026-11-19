@@ -3,8 +3,8 @@ import os from "node:os";
 import path from "node:path";
 import net from "node:net";
 import { once } from "node:events";
-import { execFileSync, spawnSync } from "node:child_process";
-import { afterEach, describe, expect, it } from "vitest";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { parse } from "smol-toml";
 import {
   checkoutIdentity,
@@ -404,6 +404,46 @@ describe("Local launch ownership", () => {
     await launchOnce(root, home);
     expect(fs.existsSync(leftover)).toBe(false);
     expect(Object.keys(JSON.parse(fs.readFileSync(registry, "utf8")).instances)).toEqual([checkoutIdentity(root).slug]);
+  });
+
+  // Phase 2 finding 13: registration and pruning never sit on the launch path.
+  it("starts the prune only after the app stack is spawned, and never waits on it to launch", async () => {
+    const root = directory(), home = directory();
+    const order: string[] = [];
+    let finishPrune!: () => void;
+    const finished = runLocalDevelopment({
+      root, home, platform: "darwin", environment: {},
+      prepareBundle: () => "/local/Electron",
+      prune: () => { order.push("prune"); return new Promise<void>((resolve) => { finishPrune = resolve; }); },
+      run: async (_command: string, args: string[]) => {
+        order.push(args.includes("concurrently") ? "stack" : "build");
+        return { code: 0, cancelled: false };
+      },
+    });
+    await vi.waitFor(() => expect(order).toContain("prune"));
+    expect(order.indexOf("stack")).toBeGreaterThan(-1);
+    expect(order.indexOf("stack")).toBeLessThan(order.indexOf("prune"));
+    finishPrune();
+    await finished;
+  });
+
+  it("registers within a short bound when another process holds the registry lock", async () => {
+    const root = directory(), home = directory();
+    const registry = path.join(home, "Library/Application Support/com.zeros.local/instances.json");
+    fs.mkdirSync(path.dirname(registry), { recursive: true });
+    const holder = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30_000)"], { stdio: "ignore" });
+    try {
+      fs.writeFileSync(`${registry}.lock`, JSON.stringify({ pid: holder.pid, token: "busy" }));
+      const started = Date.now();
+      await runLocalDevelopment({
+        root, home, platform: "darwin", environment: {}, prepareBundle: () => "/local/Electron",
+        prune: async () => {}, run: async () => ({ code: 0, cancelled: false }),
+      });
+      expect(Date.now() - started).toBeLessThan(1_500);
+      expect(fs.existsSync(registry)).toBe(false);
+    } finally {
+      holder.kill("SIGKILL");
+    }
   });
 
   it("rejects Linux before any build, profile or bundle work", async () => {

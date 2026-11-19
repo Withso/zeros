@@ -19,8 +19,8 @@
 //     migration decision), not a copy.
 //   • Chromium session (Local Storage / IndexedDB / Cookies) — regenerable; a
 //     fresh session is acceptable and avoids a fragile cross-dir profile copy.
-//     (Durable renderer state is moved separately, out of the old cache
-//     location, by session-data-migration.ts.)
+//     (The renderer profile moves separately, as one folder, in
+//     session-location.ts.)
 //
 // Best-effort throughout: any failure leaves the legacy dir untouched and the app
 // continues on fresh state. Marker-guarded so it runs at most once per id dir.

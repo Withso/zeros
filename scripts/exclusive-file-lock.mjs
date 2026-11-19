@@ -25,23 +25,26 @@ export function pidAlive(pid) {
   }
 }
 
-/** Lock classification for a launcher whose command line contains `marker`:
- * a recycled PID (including after reboot) is not a launcher owner. */
-export function launcherOwnerClassifier(marker, incompleteMessage, invalidMessage) {
+function readCommandLine(pid) {
+  return execFileSync("ps", ["-o", "command=", "-p", String(pid)], { encoding: "utf8", timeout: 2000 });
+}
+
+/** Lock classification for a launcher whose command line contains any of
+ * `markers`: a recycled PID (including after reboot) is not a launcher owner.
+ * A live PID whose command line cannot be read stays live. */
+export function launcherOwnerClassifier(markers, incompleteMessage, invalidMessage, { readCommand = readCommandLine } = {}) {
+  const names = Array.isArray(markers) ? markers : [markers];
   return ({ owner }) => {
     if (!owner) throw new Error(incompleteMessage);
     if (!Number.isSafeInteger(owner.pid) || owner.pid <= 0) throw new Error(invalidMessage);
     if (!pidAlive(owner.pid)) return "stale";
+    let command;
     try {
-      const command = execFileSync("ps", ["-o", "command=", "-p", String(owner.pid)], {
-        encoding: "utf8",
-        timeout: 2000,
-      });
-      return command.includes(marker) ? "live" : "stale";
+      command = readCommand(owner.pid);
     } catch {
-      // The PID can disappear between kill(0) and this read-only probe.
-      return "stale";
+      return pidAlive(owner.pid) ? "live" : "stale";
     }
+    return names.some((marker) => command.includes(marker)) ? "live" : "stale";
   };
 }
 
@@ -122,12 +125,20 @@ export function acquireExclusiveLock({
     for (let fenceAttempt = 0; fenceAttempt < 3; fenceAttempt++) {
       try {
         fd = fs.openSync(recovery, "wx", 0o600);
+        fs.writeSync(fd, JSON.stringify({ pid: process.pid }));
         break;
       } catch (error) {
         if (error.code !== "EEXIST") throw error;
         try {
           const abandoned = fs.statSync(recovery);
-          if (Date.now() - abandoned.mtimeMs <= 30_000) break;
+          // A fence whose recorded owner is alive is never abandoned.
+          let fenceOwner = null;
+          try {
+            fenceOwner = JSON.parse(fs.readFileSync(recovery, "utf8")).pid;
+          } catch {
+            fenceOwner = null;
+          }
+          if (Number.isSafeInteger(fenceOwner) && fenceOwner > 0 ? pidAlive(fenceOwner) : Date.now() - abandoned.mtimeMs <= 30_000) break;
           if (read()?.raw !== snapshot.raw) continue acquire;
           const current = fs.statSync(recovery);
           if (current.ino === abandoned.ino && current.mtimeMs === abandoned.mtimeMs)
@@ -155,8 +166,9 @@ export function acquireExclusiveLock({
 }
 
 /** Read a lock's owner without taking it: "absent", "live" or "unknown"
- * (unreadable is never proof that nobody holds it). */
-export function lockOwnerState(file) {
+ * (unreadable is never proof that nobody holds it). `ignoreHeld` reads a lock
+ * this process holds as absent. */
+export function lockOwnerState(file, { ignoreHeld = false } = {}) {
   let raw;
   try {
     raw = fs.readFileSync(file, "utf8");
@@ -166,6 +178,7 @@ export function lockOwnerState(file) {
   try {
     const owner = JSON.parse(raw);
     if (!Number.isSafeInteger(owner?.pid) || owner.pid <= 0) return "unknown";
+    if (ignoreHeld && heldByThisProcess(owner)) return "absent";
     return pidAlive(owner.pid) ? "live" : "absent";
   } catch {
     return "unknown";

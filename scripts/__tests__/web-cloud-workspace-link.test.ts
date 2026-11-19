@@ -117,3 +117,21 @@ describe("the web's numbered page opens the desktop's numbered link", () => {
     },
   );
 });
+
+describe("a stale deployment binding", () => {
+  it("opens no app at a workspace address", async () => {
+    const { onRequestGet } = await import("../../apps/web/functions/[org]/w/[number].ts");
+    const call = (ZEROS_DEPLOY_ENV: string) =>
+      (onRequestGet as unknown as (context: unknown) => Response)({
+        request: new Request("https://app.example.test/acme/w/7?session=chat-1"),
+        params: { org: "acme", number: "7" },
+        env: { ZEROS_DEPLOY_ENV },
+      });
+    const stale = call("beta");
+    expect(stale.status).toBe(503);
+    expect(await stale.text()).not.toMatch(/zeros(?:-[a-z]+)?:\/\//);
+    const alpha = call("alpha");
+    expect(alpha.status).toBe(200);
+    expect(await alpha.text()).toContain("zeros-alpha://acme/w/7?session=chat-1");
+  });
+});

@@ -33,12 +33,10 @@ import {
   nativeTheme,
   powerMonitor,
   screen,
-  session,
   shell,
   systemPreferences,
   WebContentsView,
   type IpcMainInvokeEvent,
-  type Session,
 } from "electron";
 import fs from "node:fs";
 import path from "node:path";
@@ -136,16 +134,17 @@ import { WorkOSDesktopSecurityMonitor } from "./auth-security-monitor";
 import { controlPlaneFetch } from "./control-plane-fetch";
 import {
   developmentInstance,
+  realProfileRoots,
   storageFamily,
-  zerosCacheDir,
   zerosChannelDataDir,
   zerosDataDir,
   zerosDesignWorkspacesRoot,
   zerosDevelopmentDataDir,
   zerosLogDir,
+  zerosOldSessionDataDir,
   zerosSessionDataDir,
 } from "../src/engine/db/paths";
-import { codeCachePathFor, migrateSessionData, sessionMigrationSources } from "./session-data-migration";
+import { chooseSessionDataDir } from "./session-location";
 import { assertDevelopmentAdmission, sharedSecretsDirectory } from "./storage-identity";
 import { removeEmptyLegacyDesignFolder } from "./legacy-design-folder";
 // CHANNELS/isChannel only — importing the runtime module is side-effect-free, so
@@ -223,7 +222,13 @@ declare const __ZEROS_CHANNEL_BAKED__: string | undefined;
 // Electron storage, cache and singleton locks isolated across launches.
 const explicitDevEnv =
   process.env.ZEROS_DEV === "1" || process.env.ZEROS_RUNTIME_MODE === "dev";
-const runningDev = IS_DEV || explicitDevEnv;
+// A packaged build is never development, whatever its environment says: an
+// inherited ZEROS_DEV would otherwise hand it the dev channel's profile.
+const runningDev = IS_DEV || (!IS_PACKAGED && explicitDevEnv);
+if (IS_PACKAGED) {
+  delete process.env.ZEROS_DEV;
+  delete process.env.ZEROS_RUNTIME_MODE;
+}
 
 // (1) ZEROS_DEV — the engine (spawned sidecar OR imported in-process) resolves its
 // data dirs purely from env (apps/desktop/src/engine/runtime.ts isDevRuntime()); seed it so
@@ -249,23 +254,40 @@ if (!IS_LOCAL_DEVELOPMENT) delete process.env.ZEROS_LOCAL_DEVELOPMENT;
 // Fail here, at boot, where the message is greppable in main.log, instead of
 // letting a mislabeled build read and write real user data.
 {
-  const fromEnv = process.env.ZEROS_CHANNEL;
-  if (fromEnv !== undefined && fromEnv !== "" && !isChannel(fromEnv)) {
+  const baked =
+    typeof __ZEROS_CHANNEL_BAKED__ === "string" ? __ZEROS_CHANNEL_BAKED__ : "";
+  // A retired or mistyped bake must not fall through to Production's identity.
+  if (baked !== "" && !isChannel(baked)) {
     throw new Error(
-      `[Zeros] ZEROS_CHANNEL="${fromEnv}" is not a known channel ` +
-        `(expected one of: ${CHANNELS.join(" | ")}). Unset it or fix the value.`,
+      `[Zeros] This build's baked channel "${baked}" is not a known channel ` +
+        `(expected one of: ${CHANNELS.join(" | ")}). Rebuild it with a supported channel.`,
     );
   }
-  if (!fromEnv) {
-    const baked =
-      typeof __ZEROS_CHANNEL_BAKED__ === "string"
-        ? __ZEROS_CHANNEL_BAKED__
-        : "";
-    process.env.ZEROS_CHANNEL = isChannel(baked)
-      ? baked
-      : runningDev
-        ? "dev"
-        : "stable";
+  if (IS_PACKAGED) {
+    // The bake is the packaged build's identity; its environment never is.
+    if (baked === "dev")
+      throw new Error("[Zeros] A packaged build cannot run the dev channel. Rebuild it as alpha or stable.");
+    process.env.ZEROS_CHANNEL = baked || "stable";
+  } else {
+    const fromEnv = process.env.ZEROS_CHANNEL;
+    if (fromEnv !== undefined && fromEnv !== "" && !isChannel(fromEnv)) {
+      throw new Error(
+        `[Zeros] ZEROS_CHANNEL="${fromEnv}" is not a known channel ` +
+          `(expected one of: ${CHANNELS.join(" | ")}). Unset it or fix the value.`,
+      );
+    }
+    if (!fromEnv) process.env.ZEROS_CHANNEL = baked || (runningDev ? "dev" : "stable");
+  }
+}
+
+// An override isolates a fixture; it must never select a real profile and,
+// with it, that profile's credential store.
+{
+  const override = process.env.ZEROS_DATA_DIR?.trim();
+  if (override) {
+    const target = path.resolve(override);
+    if (realProfileRoots().some((root) => target === root || target.startsWith(`${root}${path.sep}`)))
+      throw new Error("[Zeros] ZEROS_DATA_DIR points into a real Zeros profile. Use a separate fixture folder.");
   }
 }
 
@@ -331,7 +353,7 @@ app.setPath("userData", zerosDataDir());
     ? sharedSecretsDirectory({
         channel: process.env.ZEROS_CHANNEL,
         localDevelopment: IS_LOCAL_DEVELOPMENT,
-        isolate: process.env.ZEROS_ISOLATE === "1",
+        isolate: process.env.ZEROS_ISOLATE === "1" || Boolean(process.env.ZEROS_DATA_DIR?.trim()),
         familyDataDir: zerosChannelDataDir(),
         hostedAccountDataDir: zerosDevelopmentDataDir("alpha"),
       })
@@ -340,61 +362,39 @@ app.setPath("userData", zerosDataDir());
   else delete process.env.ZEROS_SHARED_SECRETS_DIR;
 }
 
-// Durable renderer state (Local Storage, IndexedDB, Cookies, …) lives in
-// `<data dir>/electron`; only regenerable caches belong in the purgeable OS
-// cache dir. Chromium ignores app.getPath("cache") and --disk-cache-dir, so the
-// JS code cache is the one cache Electron can move (setCodeCachePath); the HTTP,
-// GPU and Dawn caches stay in the profile and are classified regenerable
-// (engine/db/session-entries.ts). Runs before ready: nothing may open the
-// profile before the one-time move out of the old location finishes.
-function relocateChromiumCache(): void {
+// The whole Chromium profile, caches included, lives in `<data dir>/electron`
+// (docs/storage-layout.md). Before ready, session-location.ts either moves the
+// old profile there in one rename or keeps using the old one for this launch.
+function selectSessionData(): void {
   // Bound the HTTP disk cache so it can't grow without limit (250 MB).
   app.commandLine.appendSwitch("disk-cache-size", String(250 * 1024 * 1024));
 
-  // getPath("cache") = ~/Library/Caches (macOS), ~/.cache (Linux),
-  // %LOCALAPPDATA% (Windows). Electron resolves "cache" at runtime but omits it
-  // from getPath()'s typed name union; the suppression bridges that gap (and
+  // getPath("cache") = ~/Library/Caches (macOS), ~/.cache (Linux), Roaming
+  // AppData (Windows). Electron resolves "cache" at runtime but omits it from
+  // getPath()'s typed name union; the suppression bridges that gap (and
   // self-removes if the types ever add it).
   // @ts-expect-error - "cache" is a valid runtime path name, absent from the types.
   const cacheRoot = app.getPath("cache");
-  const sessionDataDir = zerosSessionDataDir(cacheRoot);
-  const cacheDir = zerosCacheDir(cacheRoot);
-  const dataDirOverridden = Boolean(process.env.ZEROS_DATA_DIR);
-  const channelName = process.env.ZEROS_CHANNEL;
-  const sources = sessionMigrationSources({
-    family: storageFamily(),
-    channel: isChannel(channelName) ? channelName : "stable",
-    cacheRoot,
-    cacheDir,
-    sessionDataDir,
-    dataDirOverridden,
-    exists: fs.existsSync,
+  const choice = chooseSessionDataDir({
+    target: zerosSessionDataDir(cacheRoot),
+    old: zerosOldSessionDataDir(cacheRoot),
+    userDataDir: zerosDataDir(),
+    log: durableLog,
   });
-  if (sources.length) migrateSessionData({ destination: sessionDataDir, sources });
-  try {
-    fs.mkdirSync(sessionDataDir, { recursive: true, mode: 0o700 });
-  } catch (err) {
-    // Leave the default profile in place rather than risk a broken one.
-    console.error("[Zeros] session data: cannot create its folder:", err);
-    return;
-  }
-  app.setPath("sessionData", sessionDataDir);
-  if (dataDirOverridden) return;
-  // Every persistent session, including ones created later; in-memory
-  // partitions (Browser, Design capture) write no code cache.
-  const relocate = (target: Session) => {
-    const codeCache = codeCachePathFor(target.getStoragePath(), { sessionDataDir, cacheDir });
-    if (!codeCache) return;
-    try {
-      target.setCodeCachePath(codeCache);
-    } catch (err) {
-      console.warn("[Zeros] session data: code cache stays in the profile:", err);
-    }
-  };
-  app.on("session-created", relocate);
-  void app.whenReady().then(() => relocate(session.defaultSession));
+  app.setPath("sessionData", choice.dir);
 }
-relocateChromiumCache();
+
+/** Appends to main.log before setupLogFile() installs the console mirror. */
+function durableLog(line: string): void {
+  try {
+    const logDir = zerosLogDir();
+    fs.mkdirSync(logDir, { recursive: true });
+    fs.appendFileSync(path.join(logDir, "main.log"), `[${new Date().toISOString()}] [Zeros] ${line}\n`);
+  } catch {
+    /* logging is best-effort */
+  }
+}
+selectSessionData();
 
 const APP_LABEL = app.getName();
 // Surface the resolved mode so a misconfigured launch is visible, never silent.

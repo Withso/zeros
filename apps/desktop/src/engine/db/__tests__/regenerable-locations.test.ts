@@ -10,11 +10,13 @@ describe("regenerable locations", () => {
     vi.stubEnv("ZEROS_DATA_DIR", "/data");
     vi.stubEnv("ZEROS_CHANNEL", "stable");
     const locations = regenerableLocations("/caches");
-    expect(locations.map((location) => location.id)).toEqual(["cache-dir", "session-caches", "engine-runtime", "design-thumbnails"]);
-    expect(locations.find((location) => location.id === "cache-dir")?.path).toBe(path.join("/caches", "com.zeros"));
+    // The old cache-dir profile is a whole Chromium profile until it moves; it
+    // is never "regenerable as a whole".
+    expect(locations.map((location) => location.id)).toEqual(["session-caches", "engine-runtime", "design-thumbnails"]);
     expect(locations.find((location) => location.id === "session-caches")).toMatchObject({
       path: path.join("/data", "electron"), entries: REGENERABLE_SESSION_ENTRIES,
     });
+    expect(REGENERABLE_SESSION_ENTRIES).toContain("blob_storage");
     expect(locations.find((location) => location.id === "engine-runtime")?.path).toBe(path.join("/data", "engines"));
     for (const location of locations) expect(location.path).not.toMatch(/git-promotion-journal/);
     expect(locations.filter((location) => location.path.endsWith("design-storage")).map((location) => location.rule)).toEqual(["store-sweep"]);

@@ -1,9 +1,9 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   readRegistry,
   registryPath,
@@ -162,178 +162,265 @@ describe("contained removal", () => {
   });
 });
 
-describe("launcher prune", () => {
+describe("launcher prune (bundles only, plus dead ephemeral identities)", () => {
   const old = new Date(Date.now() - STALE_INSTANCE_MS - 60_000);
 
   function register(h: string, instance: string, fields: Record<string, unknown>, now = old) {
     upsertInstance(registryPath({ ...at, home: h }), instance, { name: instance, layout: "v2", checkout: null, ...fields }, { now });
   }
   const prune = (h: string, extra: Record<string, unknown> = {}) =>
-    pruneDevelopmentInstances({ ...at, home: h, currentInstance: "a000000000000000", launcherLive: () => false, ...extra });
+    pruneDevelopmentInstances({ ...at, home: h, currentInstance: "a000000000000000", ...extra });
+  const durable = (roots: ReturnType<typeof seed>) => [
+    path.join(roots.dataDir, "zeros.db"), roots.cacheDir, roots.logDir, roots.stateRoot, roots.visibleRoot,
+    roots.preferencesFile, roots.httpStorageDir, roots.webKitDir, roots.savedStateDir,
+  ];
 
-  it("removes a gone, stale, empty checkout completely and its entry", () => {
+  it.each(["v2", "legacy"] as const)("removes only the native bundle of a gone, stale checkout (%s)", async (layout) => {
+    const h = home(), roots = seed(h, "b123456789abcdef", layout);
+    fs.mkdirSync(path.join(roots.cacheDir, "Local Storage", "leveldb"), { recursive: true });
+    fs.writeFileSync(path.join(roots.cacheDir, "Local Storage", "leveldb", "000003.log"), "draft");
+    register(h, "b123456789abcdef", { kind: "checkout", layout, checkout: path.join(h, "deleted-checkout") });
+    expect(await prune(h)).toMatchObject([{ instance: "b123456789abcdef", rule: "checkout-gone-bundle" }]);
+    expect(exists(roots.bundleDir)).toBe(false);
+    for (const target of durable(roots)) expect(exists(target), target).toBe(true);
+    expect(fs.readFileSync(path.join(roots.cacheDir, "Local Storage", "leveldb", "000003.log"), "utf8")).toBe("draft");
+    expect(readRegistry(registryPath({ ...at, home: h })).instances.b123456789abcdef).toBeDefined();
+  });
+
+  it("keeps the only copy of a worktree under the state root", async () => {
     const h = home(), roots = seed(h, "b123456789abcdef");
-    register(h, "b123456789abcdef", { kind: "checkout", checkout: path.join(h, "deleted-checkout") });
-    expect(prune(h)).toMatchObject([{ instance: "b123456789abcdef", rule: "checkout-gone" }]);
-    for (const dir of [roots.dataDir, roots.cacheDir, roots.logDir, roots.stateRoot, roots.bundleDir, roots.visibleRoot, roots.preferencesFile,
-      roots.httpStorageDir, roots.webKitDir, roots.savedStateDir])
-      expect(exists(dir), dir).toBe(false);
-    expect(readRegistry(registryPath({ ...at, home: h })).instances).toEqual({});
-    expect(exists(path.join(h, "Library/Application Support/com.zeros.local/instances"))).toBe(true);
+    const hidden = path.join(roots.stateRoot, "worktrees", "repo", "ws_101", "untracked.txt");
+    fs.mkdirSync(path.dirname(hidden), { recursive: true });
+    fs.writeFileSync(hidden, "only copy");
+    register(h, "b123456789abcdef", { kind: "checkout", checkout: path.join(h, "gone") });
+    await prune(h);
+    expect(fs.readFileSync(hidden, "utf8")).toBe("only copy");
   });
 
-  it("keeps data and the entry when the visible root holds a workspace, in either layout", () => {
-    for (const layout of ["v2", "legacy"] as const) {
-      const h = home(), roots = seed(h, "b123456789abcdef", layout, { work: true });
-      register(h, "b123456789abcdef", { kind: "checkout", layout, checkout: path.join(h, "deleted-checkout") });
-      expect(prune(h)[0].rule).toBe("checkout-gone-kept-work");
-      expect(exists(roots.cacheDir)).toBe(false);
-      expect(exists(roots.bundleDir)).toBe(false);
-      expect(exists(roots.logDir)).toBe(false);
-      expect(exists(path.join(roots.dataDir, "zeros.db"))).toBe(true);
-      expect(exists(roots.stateRoot)).toBe(true);
-      expect(exists(path.join(roots.workspacesRoot, "repo", "ws"))).toBe(true);
-      expect(readRegistry(registryPath({ ...at, home: h })).instances.b123456789abcdef).toBeDefined();
-    }
-  });
-
-  function sharedStore(h: string, contents: string | null) {
-    const file = path.join(h, "Library/Application Support/com.zeros.local/secrets.json");
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    if (contents !== null) fs.writeFileSync(file, contents);
-    return file;
-  }
-  const marker = (dataDir: string) =>
-    `local-provider-migration:${createHash("sha256").update(path.join(dataDir, "secrets.json")).digest("hex")}`;
-
-  it.each([
-    ["referenced by a migration marker", (dataDir: string) => JSON.stringify({ [marker(dataDir)]: "enc", other: "enc" })],
-    ["unreadable", () => "{not json"],
-    ["not an object", () => "[]"],
-  ])("keeps a data dir the shared provider store may reference (%s), removing only regenerables", (_label, store) => {
-    for (const layout of ["v2", "legacy"] as const) {
-      const h = home(), roots = seed(h, "b123456789abcdef", layout);
-      sharedStore(h, store(roots.dataDir));
-      register(h, "b123456789abcdef", { kind: "checkout", layout, checkout: path.join(h, "deleted-checkout") });
-      expect(prune(h)[0].rule).toBe("checkout-gone-kept-provider-profiles");
-      expect(exists(path.join(roots.dataDir, "zeros.db"))).toBe(true);
-      for (const dir of [roots.cacheDir, roots.bundleDir, roots.logDir, roots.preferencesFile, roots.httpStorageDir])
-        expect(exists(dir), dir).toBe(false);
-      expect(readRegistry(registryPath({ ...at, home: h })).instances.b123456789abcdef).toBeDefined();
-    }
-  });
-
-  it("keeps a data dir when the shared store is not a readable file", () => {
+  it("never touches the visible root, even when a Design file appears while it runs", async () => {
     const h = home(), roots = seed(h, "b123456789abcdef");
-    fs.mkdirSync(sharedStore(h, null));
     register(h, "b123456789abcdef", { kind: "checkout", checkout: path.join(h, "gone") });
-    expect(prune(h)[0].rule).toBe("checkout-gone-kept-provider-profiles");
-    expect(exists(roots.dataDir)).toBe(true);
+    const late = path.join(roots.visibleRoot, "design workspaces", "repo", "ws", "index.html");
+    const pending = prune(h);
+    fs.mkdirSync(path.dirname(late), { recursive: true });
+    fs.writeFileSync(late, "<html>");
+    await pending;
+    expect(fs.readFileSync(late, "utf8")).toBe("<html>");
+    expect(exists(path.join(roots.dataDir, "zeros.db"))).toBe(true);
   });
 
-  it("removes a data dir the shared store does not reference", () => {
-    const h = home(), roots = seed(h, "b123456789abcdef"), other = seed(h, "c123456789abcdef");
-    sharedStore(h, JSON.stringify({ [marker(other.dataDir)]: "enc", "anthropic-api-key": "enc" }));
-    register(h, "b123456789abcdef", { kind: "checkout", checkout: path.join(h, "gone") });
-    expect(prune(h)[0].rule).toBe("checkout-gone");
-    expect(exists(roots.dataDir)).toBe(false);
+  it("keeps a renamed checkout's identity while its lease is held", async () => {
+    const h = home(), roots = seed(h, "b123456789abcdef");
+    register(h, "b123456789abcdef", { kind: "checkout", checkout: path.join(h, "renamed-away") });
+    fs.writeFileSync(path.join(roots.stateRoot, "launcher.lease"), JSON.stringify({ pid: process.pid, token: "t" }));
+    expect(await prune(h)).toEqual([]);
+    expect(exists(roots.bundleDir)).toBe(true);
+    fs.writeFileSync(path.join(roots.stateRoot, "launcher.lease"), "{torn");
+    expect(await prune(h)).toEqual([]);
   });
 
-  it("never touches a recent, present, current or live identity", () => {
-    const h = home();
-    const checkout = path.join(h, "checkout");
+  it("keeps an identity whose app is still running (SingletonLock) after its launcher died", async () => {
+    const h = home(), roots = seed(h, "b123456789abcdef");
+    register(h, "b123456789abcdef", { kind: "checkout", checkout: path.join(h, "gone") });
+    fs.symlinkSync(`${os.hostname()}-${process.pid}`, path.join(roots.dataDir, "SingletonLock"));
+    expect(await prune(h)).toEqual([]);
+    expect(exists(roots.bundleDir)).toBe(true);
+  });
+
+  it("does nothing without a readable registry", async () => {
+    const h = home(), roots = seed(h, "b123456789abcdef");
+    expect(await prune(h)).toEqual([]);
+    fs.mkdirSync(path.dirname(registryPath({ ...at, home: h })), { recursive: true });
+    fs.writeFileSync(registryPath({ ...at, home: h }), "{corrupt");
+    expect(await prune(h)).toEqual([]);
+    expect(exists(roots.bundleDir)).toBe(true);
+  });
+
+  it("never touches a recent, present or current identity", async () => {
+    const h = home(), checkout = path.join(h, "checkout");
     fs.mkdirSync(checkout);
-    const kept = [
-      seed(h, "c123456789abcdef"), seed(h, "d123456789abcdef"), seed(h, "a000000000000000"), seed(h, "e123456789abcdef"),
-    ];
+    const kept = [seed(h, "c123456789abcdef"), seed(h, "d123456789abcdef"), seed(h, "a000000000000000")];
     register(h, "c123456789abcdef", { kind: "checkout", checkout: path.join(h, "gone") }, new Date());
     register(h, "d123456789abcdef", { kind: "checkout", checkout });
     register(h, "a000000000000000", { kind: "checkout", checkout: path.join(h, "gone") });
-    register(h, "e123456789abcdef", { kind: "checkout", checkout: path.join(h, "gone") });
-    const actions = prune(h, { launcherLive: (id: string) => id === "e123456789abcdef" });
-    expect(actions).toEqual([]);
-    for (const roots of kept) expect(exists(roots.dataDir)).toBe(true);
+    expect(await prune(h)).toEqual([]);
+    for (const roots of kept) expect(exists(roots.bundleDir)).toBe(true);
   });
 
-  it("removes an ephemeral identity once its owner is dead, and keeps a live one", () => {
-    const h = home(), dead = seed(h, "design-qual-dead0001"), live = seed(h, "design-qual-live0001");
-    register(h, "design-qual-dead0001", { kind: "ephemeral", ownerPid: DEAD_PID }, new Date());
-    register(h, "design-qual-live0001", { kind: "ephemeral", ownerPid: process.pid }, new Date());
-    pruneDevelopmentInstances({ ...at, home: h, currentInstance: "x" });
-    expect(exists(dead.dataDir)).toBe(false);
-    expect(exists(dead.visibleRoot)).toBe(false);
-    expect(exists(live.dataDir)).toBe(true);
-    expect(Object.keys(readRegistry(registryPath({ ...at, home: h })).instances)).toEqual(["design-qual-live0001"]);
+  it("removes a dead ephemeral identity whole, and keeps a live, working or referenced one", async () => {
+    const h = home();
+    const dead = seed(h, "design-qual-dead0001"), live = seed(h, "design-qual-live0001");
+    const working = seed(h, "design-qual-work0001"), referenced = seed(h, "design-qual-refd0001");
+    fs.mkdirSync(path.join(working.stateRoot, "worktrees", "repo", "ws"), { recursive: true });
+    fs.writeFileSync(path.join(h, "Library/Application Support/com.zeros.local/secrets.json"), JSON.stringify({
+      [`local-provider-migration:${createHash("sha256").update(path.join(referenced.dataDir, "secrets.json")).digest("hex")}`]: "enc" }));
+    for (const [id, pid] of [["design-qual-dead0001", DEAD_PID], ["design-qual-live0001", process.pid],
+      ["design-qual-work0001", DEAD_PID], ["design-qual-refd0001", DEAD_PID]] as const)
+      register(h, id, { kind: "ephemeral", ownerPid: pid }, new Date());
+    await prune(h);
+    for (const target of [dead.dataDir, dead.stateRoot, dead.visibleRoot, dead.cacheDir, dead.bundleDir]) expect(exists(target), target).toBe(false);
+    for (const roots of [live, working, referenced]) expect(exists(path.join(roots.dataDir, "zeros.db"))).toBe(true);
+    expect(Object.keys(readRegistry(registryPath({ ...at, home: h })).instances).sort())
+      .toEqual(["design-qual-live0001", "design-qual-refd0001", "design-qual-work0001"]);
   });
 
-  it("drops only a stale identity's bundle built for another Electron", () => {
+  it("drops only a stale identity's bundle built for another Electron", async () => {
     const h = home(), roots = seed(h, "alpha");
     register(h, "alpha", { kind: "alpha" });
-    expect(prune(h, { electronVersion: "40.0.0" })).toEqual([]);
-    expect(prune(h, { electronVersion: "43.8.3" })).toMatchObject([{ rule: "bundle-version" }]);
+    expect(await prune(h, { electronVersion: "40.0.0" })).toEqual([]);
+    expect(await prune(h, { electronVersion: "43.8.3" })).toMatchObject([{ rule: "bundle-version" }]);
     expect(exists(roots.bundleDir)).toBe(false);
     expect(exists(roots.cacheDir)).toBe(true);
-    expect(exists(roots.dataDir)).toBe(true);
   });
 
-  it("refuses symlinked roots and never throws", () => {
+  it("refuses symlinked roots, never throws, and never blocks on a FIFO store", async () => {
     const h = home(), outside = home();
-    const roots = developmentPaths({ instance: "b123456789abcdef", home: h, platform: "darwin", env: {} });
+    const roots = developmentPaths({ instance: "design-qual-link0001", home: h, platform: "darwin", env: {} });
     fs.mkdirSync(path.dirname(roots.dataDir), { recursive: true });
     fs.mkdirSync(path.join(outside, "precious"));
     fs.symlinkSync(path.join(outside, "precious"), roots.dataDir);
-    register(h, "b123456789abcdef", { kind: "checkout", checkout: path.join(h, "gone") });
-    expect(() => prune(h)).not.toThrow();
+    register(h, "design-qual-link0001", { kind: "ephemeral", ownerPid: DEAD_PID }, new Date());
+    execFileSync("mkfifo", [path.join(h, "Library/Application Support/com.zeros.local/secrets.json")]);
+    const started = Date.now();
+    await expect(prune(h)).resolves.toBeDefined();
+    expect(Date.now() - started).toBeLessThan(2_000);
     expect(exists(path.join(outside, "precious"))).toBe(true);
-    expect(readRegistry(registryPath({ ...at, home: h })).instances.b123456789abcdef).toBeDefined();
-    const corrupt = home();
-    fs.mkdirSync(path.dirname(registryPath({ ...at, home: corrupt })), { recursive: true });
-    fs.writeFileSync(registryPath({ ...at, home: corrupt }), "[");
-    expect(prune(corrupt)).toEqual([]);
   });
 
-  it("detects a live launcher from its lock file", () => {
-    const h = home(), checkout = path.join(h, "gone-but-locked");
+  it("does all of its filesystem work asynchronously", async () => {
+    const h = home();
     seed(h, "b123456789abcdef");
-    register(h, "b123456789abcdef", { kind: "checkout", checkout });
-    const roots = developmentPaths({ instance: "b123456789abcdef", home: h, platform: "darwin", env: {} });
-    fs.writeFileSync(path.join(roots.stateRoot, "launcher.lock"), JSON.stringify({ pid: process.pid }));
-    expect(pruneDevelopmentInstances({ ...at, home: h, currentInstance: "x" })).toEqual([]);
-    expect(exists(roots.dataDir)).toBe(true);
+    register(h, "b123456789abcdef", { kind: "checkout", checkout: path.join(h, "gone") });
+    const spies = ["rmSync", "readdirSync", "lstatSync"].map((name) => vi.spyOn(fs, name as "rmSync"));
+    const pending = prune(h);
+    expect(pending).toBeInstanceOf(Promise);
+    await pending;
+    expect(spies[0]).not.toHaveBeenCalled();
+    vi.restoreAllMocks();
   });
 });
 
 describe("ephemeral identities", () => {
-  it("register as ephemeral and remove every root and the entry on dispose", () => {
+  const create = (h: string) => createEphemeralIdentity({ purpose: "design-qual", name: "Q", home: h, platform: "darwin", env: {},
+    random: () => "0123456789ab" });
+
+  it("register as ephemeral and remove every root, both layouts, only once retirement is known", () => {
     const h = home();
-    const identity = createEphemeralIdentity({ purpose: "design-qual", name: "Q", home: h, platform: "darwin", env: {},
-      random: () => "0123456789ab", handleProcessExit: false });
+    const identity = create(h);
     expect(identity.slug).toBe("design-qual-0123456789ab");
     const file = registryPath({ ...at, home: h });
     expect(readRegistry(file).instances[identity.slug]).toMatchObject({ kind: "ephemeral", ownerPid: process.pid, layout: "v2" });
-    seed(h, identity.slug);
-    identity.dispose();
-    identity.dispose();
-    for (const dir of Object.values(identity.roots).filter((v): v is string => typeof v === "string" && v.startsWith(h) && !v.endsWith("instances.json") && v !== identity.roots.sharedDataDir))
-      expect(exists(dir), dir).toBe(false);
+    const v2 = seed(h, identity.slug), flat = seed(h, identity.slug, "legacy");
+    identity.dispose({ retired: false });
+    expect(exists(v2.dataDir)).toBe(true);
+    expect(readRegistry(file).instances[identity.slug]).toBeDefined();
+    identity.dispose({ retired: true });
+    for (const target of [v2.dataDir, v2.stateRoot, v2.visibleRoot, v2.cacheDir, flat.cacheDir, flat.dataDir, flat.visibleRoot])
+      expect(exists(target), target).toBe(false);
     expect(readRegistry(file).instances).toEqual({});
     expect(() => createEphemeralIdentity({ purpose: "Alpha!", name: "x", home: h, platform: "darwin", env: {} })).toThrow();
   });
 
-  it("cleans up when the owning process is terminated by a signal", () => {
+  it("stays registered when a root could not be removed", () => {
+    const h = home(), outside = home();
+    const identity = create(h);
+    fs.mkdirSync(path.dirname(identity.roots.dataDir), { recursive: true });
+    fs.symlinkSync(outside, identity.roots.dataDir);
+    identity.dispose({ retired: true });
+    expect(exists(identity.roots.dataDir)).toBe(true);
+    expect(readRegistry(registryPath({ ...at, home: h })).instances[identity.slug]).toBeDefined();
+  });
+
+  const child = (h: string, body: string) => spawnSync(process.execPath, ["--input-type=module", "-e", `
+    import fs from "node:fs";
+    import { createEphemeralIdentity } from ${JSON.stringify(path.resolve("scripts/ephemeral-local-identity.mjs"))};
+    const make = (n) => createEphemeralIdentity({ purpose: "design-perf", name: "P" + n, home: process.argv[1], platform: "darwin", env: {} });
+    ${body}`, h], { encoding: "utf8", timeout: 30_000 });
+
+  it("leaves a script's own once-handler in charge of shutdown", () => {
     const h = home();
-    const script = `import fs from "node:fs";
-      import { createEphemeralIdentity } from ${JSON.stringify(path.resolve("scripts/ephemeral-local-identity.mjs"))};
-      const id = createEphemeralIdentity({ purpose: "design-perf", name: "P", home: process.argv[1], platform: "darwin", env: {} });
-      fs.mkdirSync(id.roots.dataDir, { recursive: true });
-      console.log(id.roots.dataDir);
+    const result = child(h, `
+      const id = make(1);
+      const done = process.argv[1] + "/finished";
+      process.once("SIGTERM", async () => {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        fs.writeFileSync(done, "retired");
+        id.dispose({ retired: true });
+        process.exit(0);
+      });
       process.kill(process.pid, "SIGTERM");
-      setTimeout(() => {}, 10_000);`;
-    const child = spawnSync(process.execPath, ["--input-type=module", "-e", script, h], { encoding: "utf8", timeout: 30_000 });
-    expect(child.signal).toBe("SIGTERM");
-    const dataDir = child.stdout.trim();
-    expect(dataDir.startsWith(h)).toBe(true);
-    expect(exists(dataDir)).toBe(false);
+      setTimeout(() => {}, 10_000);`);
+    expect(result.status).toBe(0);
+    expect(fs.readFileSync(path.join(h, "finished"), "utf8")).toBe("retired");
     expect(readRegistry(registryPath({ ...at, home: h })).instances).toEqual({});
+  });
+
+  it("does not keep a process alive after SIGTERM, with two identities and no handler of its own", () => {
+    const h = home();
+    const result = child(h, `make(1); make(2); process.kill(process.pid, "SIGTERM"); setTimeout(() => {}, 10_000);`);
+    expect(result.signal).toBe("SIGTERM");
+    // Retirement was never confirmed: both stay registered for the dead-owner prune.
+    expect(Object.keys(readRegistry(registryPath({ ...at, home: h })).instances)).toHaveLength(2);
+  });
+});
+
+describe("provider store references", () => {
+  it("treats a store the app's reader would reject as referencing every data dir, and never blocks on a FIFO", async () => {
+    const { providerStoreReferences } = await import("../storage-removal.mjs");
+    const h = home(), shared = path.join(h, "shared"), dataDir = path.join(h, "data");
+    fs.mkdirSync(shared);
+    const store = path.join(shared, "secrets.json");
+    for (const contents of ['{"provider-accounts-claude":{"nested":true}}', '{"x":""}', '{"x":7}', "[]", "{bad"]) {
+      fs.writeFileSync(store, contents);
+      expect(providerStoreReferences({ dataDir, sharedDataDir: shared }), contents).toBe(true);
+    }
+    fs.writeFileSync(store, '{"anthropic-api-key":"enc"}');
+    expect(providerStoreReferences({ dataDir, sharedDataDir: shared })).toBe(false);
+    fs.rmSync(store);
+    execFileSync("mkfifo", [store]);
+    const started = Date.now();
+    expect(providerStoreReferences({ dataDir, sharedDataDir: shared })).toBe(true);
+    expect(Date.now() - started).toBeLessThan(1_000);
+  });
+});
+
+describe("lock ownership is never decided by age alone", () => {
+  it("keeps a registry lock held by a live process, however old", async () => {
+    const h = home(), file = registryPath({ ...at, home: h });
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const holder = (await import("node:child_process")).spawn(process.execPath, ["-e", "setTimeout(() => {}, 30_000)"], { stdio: "ignore" });
+    try {
+      fs.writeFileSync(`${file}.lock`, JSON.stringify({ pid: holder.pid, token: "suspended", at: 0 }));
+      const old = new Date(Date.now() - 10 * 60_000);
+      fs.utimesSync(`${file}.lock`, old, old);
+      const { updateRegistry } = await import("../local-instance-registry.mjs");
+      expect(() => updateRegistry(file, () => {}, { timeoutMs: 150 })).toThrow(/busy/);
+      expect(JSON.parse(fs.readFileSync(`${file}.lock`, "utf8")).token).toBe("suspended");
+    } finally {
+      holder.kill("SIGKILL");
+    }
+  });
+
+  it("treats a live launcher as live when its command line cannot be read", async () => {
+    const { launcherOwnerClassifier } = await import("../exclusive-file-lock.mjs");
+    const classify = launcherOwnerClassifier("electron-local.mjs", "incomplete", "invalid", {
+      readCommand: () => { throw new Error("ps unavailable"); },
+    });
+    expect(classify({ owner: { pid: process.pid } })).toBe("live");
+    const recycled = launcherOwnerClassifier("electron-local.mjs", "incomplete", "invalid", { readCommand: () => "/usr/bin/other" });
+    expect(recycled({ owner: { pid: process.pid } })).toBe("stale");
+    expect(launcherOwnerClassifier("electron-local.mjs", "i", "v")({ owner: { pid: DEAD_PID } })).toBe("stale");
+  });
+
+  it("does not steal a recovery fence whose owner is alive", async () => {
+    const h = home(), file = path.join(h, "launcher.lock");
+    fs.writeFileSync(file, JSON.stringify({ pid: DEAD_PID, token: "old" }));
+    const { createHash: hash } = await import("node:crypto");
+    const fence = path.join(h, `recovery-${hash("sha256").update(fs.readFileSync(file, "utf8")).digest("hex")}.lock`);
+    fs.writeFileSync(fence, JSON.stringify({ pid: process.pid }));
+    const old = new Date(Date.now() - 10 * 60_000);
+    fs.utimesSync(fence, old, old);
+    expect(() => acquireExclusiveLock({ file, classify: () => "stale" })).toThrow(/recovery/i);
+    expect(fs.existsSync(fence)).toBe(true);
   });
 });

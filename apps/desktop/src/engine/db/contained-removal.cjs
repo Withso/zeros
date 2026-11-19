@@ -14,8 +14,9 @@ function lstatOrNull(target) {
 }
 
 /** Why `target` may not be removed, or null when it may. `target` must sit
- * directly inside `container`, which must be `root` or inside it, and no path
- * component from `root` down to `target` may be a symlink. */
+ * directly inside `container`, which must be `root` or inside it; `root`
+ * itself must be a real directory, and no path component from `root` down to
+ * `target` may be a symlink. */
 function shapeRefusal(target, container, root) {
   if (typeof target !== "string" || !path.isAbsolute(target) || path.resolve(target) !== target)
     return "not an absolute normalized path";
@@ -28,6 +29,10 @@ function shapeRefusal(target, container, root) {
 function refusal(target, { container, root, kind = "directory" }) {
   const shape = shapeRefusal(target, container, root);
   if (shape) return shape;
+  const anchor = lstatOrNull(root);
+  if (!anchor) return "missing";
+  if (anchor.isSymbolicLink()) return "symlink";
+  if (!anchor.isDirectory()) return "not a directory path";
   let cursor = root;
   for (const segment of path.relative(root, target).split(path.sep)) {
     if (!segment || segment === "." || segment === "..") return "outside the home folder";
@@ -65,6 +70,10 @@ async function lstatOrNullAsync(target) {
 async function refusalAsync(target, { container, root, kind = "directory" }) {
   const shape = shapeRefusal(target, container, root);
   if (shape) return shape;
+  const anchor = await lstatOrNullAsync(root);
+  if (!anchor) return "missing";
+  if (anchor.isSymbolicLink()) return "symlink";
+  if (!anchor.isDirectory()) return "not a directory path";
   let cursor = root;
   let stat = null;
   for (const segment of path.relative(root, target).split(path.sep)) {

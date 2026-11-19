@@ -1,23 +1,23 @@
 import path from "node:path";
 import { REGENERABLE_SESSION_ENTRIES } from "./session-entries";
-import { osCacheRoot, zerosCacheDir, zerosDataDir, zerosSessionDataDir } from "./paths";
+import { osCacheRoot, zerosDataDir, zerosEffectiveSessionDataDir } from "./paths";
 
 /** What Zeros can rebuild on demand, for the storage report and its Clear
  * actions. Update staging is judged separately by
  * electron/updater-staging.ts (staleUpdaterStaging in updater.ts). */
 export interface RegenerableLocation {
-  id: "cache-dir" | "session-caches" | "engine-runtime" | "design-thumbnails";
+  id: "session-caches" | "engine-runtime" | "design-thumbnails";
   path: string;
   /** Only these top-level entries of `path` are regenerable. */
   entries?: readonly string[];
   /** How a clear must be done; the whole path is not always removable. */
-  rule: "whole" | "listed-entries" | "stale-entries-only" | "store-sweep";
+  rule: "listed-entries" | "stale-entries-only" | "store-sweep";
 }
 
 export function regenerableLocations(cacheRoot: string = osCacheRoot()): RegenerableLocation[] {
   return [
-    { id: "cache-dir", path: zerosCacheDir(cacheRoot), rule: "whole" },
-    { id: "session-caches", path: zerosSessionDataDir(cacheRoot), entries: REGENERABLE_SESSION_ENTRIES, rule: "listed-entries" },
+    // Wherever the profile is this launch (moved or not); never while it runs.
+    { id: "session-caches", path: zerosEffectiveSessionDataDir(cacheRoot), entries: REGENERABLE_SESSION_ENTRIES, rule: "listed-entries" },
     // pruneEngineRuntimeDirs: a live engine's manifest is how its host finds it.
     { id: "engine-runtime", path: path.join(zerosDataDir(), "engines"), rule: "stale-entries-only" },
     // sweepDesignThumbnails keeps pictures inside their byte budgets.

@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
 import { portFree } from "./dev-ports.mjs";
 import { groupAlive, signalGroup } from "./electron-local-process-group.mjs";
-import { acquireExclusiveLock, launcherOwnerClassifier } from "./exclusive-file-lock.mjs";
+import { acquireCheckoutLock, acquireLease } from "./local-instance-lease.mjs";
 import { registryPath, upsertInstance } from "./local-instance-registry.mjs";
 import { pruneDevelopmentInstances } from "./local-instance-prune.mjs";
 
@@ -68,28 +68,36 @@ export function localLayout({ slug, home = os.homedir(), platform = process.plat
   }
 }
 
-/** Register this launch, then prune other development identities. Neither
- * step may fail or block the launch. */
-export function recordDevelopmentLaunch({
+/** Register this launch with a short lock wait; a busy or unreadable registry
+ * never delays the launch. */
+export function registerDevelopmentLaunch({
   instance,
   entry,
   home = os.homedir(),
   platform = process.platform,
-  prune = pruneDevelopmentInstances,
-  electronVersion = bundle.currentElectronVersion?.() ?? null,
   log = (line) => console.warn(`[zeros-local] ${line}`),
 }) {
   try {
-    upsertInstance(registryPath({ home, platform, env: {} }), instance, entry);
+    upsertInstance(registryPath({ home, platform, env: {} }), instance, entry, { timeoutMs: 250 });
   } catch {
-    log("instance registry is unavailable; continuing");
+    log("instance registry is busy or unavailable; continuing");
   }
+}
+
+/** The launcher prune, started once the app stack has been spawned. */
+export async function pruneAfterLaunch({
+  instance,
+  home = os.homedir(),
+  platform = process.platform,
+  prune = pruneDevelopmentInstances,
+  electronVersion = bundle.currentElectronVersion?.() ?? null,
+}) {
   try {
-    const actions = prune({ home, platform, env: {}, currentInstance: instance, electronVersion });
+    const actions = await prune({ home, platform, env: {}, currentInstance: instance, electronVersion });
     const removed = actions.reduce((total, action) => total + action.removed.length, 0);
-    if (removed) console.log(`[zeros-local] pruned ${removed} stale development folder(s)`);
+    if (removed) console.log(`[zeros-local] pruned ${removed} stale development bundle(s)`);
   } catch {
-    log("development prune skipped");
+    // Pruning is housekeeping; it never affects the launch.
   }
 }
 
@@ -330,21 +338,27 @@ export function runOwnedProcess(
   });
 }
 
-function launcherLock(root, slug) {
-  // A second launch of the same checkout must not rebuild its running app.
-  // Different checkouts never contend, even when they share branch names.
-  return acquireExclusiveLock({
-    file: path.join(root, ".context", "zeros-local", "launcher.lock"),
-    record: { slug },
-    classify: launcherOwnerClassifier(
-      "electron-local.mjs",
-      "Zeros Local launcher lock is incomplete; stop Local before removing .context/zeros-local/launcher.lock.",
-      "Invalid Zeros Local launcher lock.",
-    ),
-    busyMessage: "Zeros Local is already running for this checkout. Stop it before restarting.",
-    recoveryBusyMessage: "Zeros Local lock recovery is already in progress; retry after it completes.",
-    changedMessage: "Zeros Local launcher lock changed; retry.",
-  });
+/** This checkout's builds (shared with electron:alpha), then the identity's
+ * lease, which lives in the state root and so survives a checkout rename. */
+function launcherLock(root, identity, home, layout) {
+  const releaseCheckout = acquireCheckoutLock(root, { slug: identity.slug });
+  try {
+    const roots = developmentPaths.developmentPaths({ instance: identity.slug, layout, home, platform: "darwin", env: {} });
+    const releaseLease = acquireLease(roots, {
+      busyMessage: "This Zeros Local identity is already running. Stop it before restarting.",
+      record: { slug: identity.slug },
+    });
+    return () => {
+      try {
+        releaseLease();
+      } finally {
+        releaseCheckout();
+      }
+    };
+  } catch (error) {
+    releaseCheckout();
+    throw error;
+  }
 }
 
 const quote = (value) => `'${value.replace(/'/g, `'\\''`)}'`;
@@ -374,6 +388,7 @@ export async function runLocalDevelopment({
   run = runOwnedProcess,
   prepareBundle = bundle.prepareLocalInstanceBundle,
   portProber = portFree,
+  prune = pruneAfterLaunch,
   listProcesses = () =>
     execFileSync("ps", ["-axww", "-o", "pid=,command="], {
       encoding: "utf8",
@@ -386,10 +401,11 @@ export async function runLocalDevelopment({
     );
   assertCheckoutAvailable(root, listProcesses);
   const identity = checkoutIdentity(root);
-  const unlock = launcherLock(root, identity.slug);
+  const layout = localLayout({ slug: identity.slug, home, platform });
+  const unlock = launcherLock(root, identity, home, layout);
+  let pruning = null;
   try {
-    const layout = localLayout({ slug: identity.slug, home, platform });
-    recordDevelopmentLaunch({
+    registerDevelopmentLaunch({
       instance: identity.slug,
       entry: { kind: "checkout", name: identity.name, checkout: fs.realpathSync(root), layout },
       home,
@@ -435,7 +451,7 @@ export async function runLocalDevelopment({
       console.log(
         `[electron:local] ${identity.name} · vite=${ports.vitePort} · engine=${ports.engineBase}-${ports.engineBase + 9} · account/cloud services off`,
       );
-      const stack = await run(
+      const stackRun = run(
         "pnpm",
         [
           "exec",
@@ -457,6 +473,8 @@ export async function runLocalDevelopment({
         ],
         { cwd: root, env, signal, startup: ports },
       );
+      pruning ??= prune({ instance: identity.slug, home, platform });
+      const stack = await stackRun;
       if (stack.cancelled || stack.code !== 98) return stack.code;
       excluded.add(ports.vitePort);
       for (let offset = 0; offset < STRIDE; offset++)
@@ -468,6 +486,8 @@ export async function runLocalDevelopment({
     );
     return 98;
   } finally {
+    // Bounded by its own budget; the stack has already exited.
+    await pruning;
     unlock();
   }
 }

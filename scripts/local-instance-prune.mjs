@@ -1,44 +1,51 @@
-// Launcher-start prune for the development family (docs/storage-layout.md).
-// Best effort: it never throws, never fails a launch, stops at its time budget,
-// skips the launching identity and any identity with a live launcher, and
-// removes only resolver-derived targets inside their expected folders.
+// Launcher prune for the development family (docs/storage-layout.md). It
+// removes only what is provably regenerable: a gone checkout's native dev
+// bundle, a bundle built for another Electron, and a dead ephemeral identity
+// that a script registered. App data, state roots, visible roots, session data
+// and registry entries of every other identity are never touched; durable
+// removal is `pnpm storage:sweep`, run by a person.
+//
+// Asynchronous end to end: launchers start it after the app stack has been
+// spawned, and it can never delay or fail a launch.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createRequire } from "node:module";
-import { lockOwnerState, pidAlive } from "./exclusive-file-lock.mjs";
 import { readRegistry, registryPath, removeInstance } from "./local-instance-registry.mjs";
-import { hasWorkspaceEntries, providerStoreReferences, removeContained } from "./storage-removal.mjs";
+import { identityInUse } from "./local-instance-lease.mjs";
+import { providerStoreReferences, removeContained } from "./storage-removal.mjs";
 
 const require = createRequire(import.meta.url);
 const paths = require("../apps/desktop/src/engine/db/local-development-paths.cjs");
+const contained = require("../apps/desktop/src/engine/db/contained-removal.cjs");
 
 export const STALE_INSTANCE_MS = 14 * 24 * 60 * 60 * 1000;
 const INSTANCE_ID = /^[a-z0-9][a-z0-9._-]{0,39}$/;
 
-/** Every removable root of one identity with the folder it must sit in.
- * `regenerable` targets rebuild on the next launch. */
+/** Every root one identity owns, with the folder it must sit directly in.
+ * Only the native bundle is regenerable: the legacy cache dir and the old v2
+ * cache location are Electron session data. */
 export function identityTargets(roots, containers) {
   const legacy = roots.layout === "legacy";
   const darwinLogs = containers.logs !== null;
   const targets = [
     { kind: "bundle", target: roots.bundleDir, container: legacy ? roots.stateRoot : containers.bundles, regenerable: true },
-    { kind: "cache", target: roots.cacheDir, container: legacy ? containers.cache : containers.cacheInstances, regenerable: true },
+    { kind: "session", target: roots.cacheDir, container: legacy ? containers.cache : containers.cacheInstances, regenerable: false },
     {
       kind: "logs",
       target: roots.logDir,
       container: darwinLogs ? (legacy ? containers.logs : containers.logInstances) : roots.dataDir,
-      regenerable: true,
+      regenerable: false,
     },
   ];
   if (roots.preferencesFile)
-    targets.push({ kind: "preferences", target: roots.preferencesFile, container: containers.preferences, regenerable: true, file: true });
+    targets.push({ kind: "preferences", target: roots.preferencesFile, container: containers.preferences, regenerable: false, file: true });
   for (const [kind, target, container] of [
     ["http-storage", roots.httpStorageDir, containers.httpStorages],
     ["webkit", roots.webKitDir, containers.webKit],
     ["saved-state", roots.savedStateDir, containers.savedState],
   ])
-    if (target) targets.push({ kind, target, container, regenerable: true });
+    if (target) targets.push({ kind, target, container, regenerable: false });
   targets.push(
     { kind: "data", target: roots.dataDir, container: legacy ? containers.appData : containers.dataInstances, regenerable: false },
     { kind: "state", target: roots.stateRoot, container: containers.stateInstances, regenerable: false },
@@ -47,18 +54,13 @@ export function identityTargets(roots, containers) {
   return targets;
 }
 
-/** Remove `targets` (all, or only regenerable ones); returns removed paths. */
-export function removeTargets(targets, { home, onlyRegenerable = false, deadline = Infinity, log = () => {} }) {
+/** Synchronous removal, for scripts disposing their own retired identity. */
+export function removeTargets(targets, { home, onlyRegenerable = false, log = () => {} }) {
   const removed = [];
   for (const entry of targets) {
     if (onlyRegenerable && !entry.regenerable) continue;
-    if (Date.now() > deadline) break;
     try {
-      const outcome = removeContained(entry.target, {
-        container: entry.container,
-        home,
-        kind: entry.file ? "file" : "directory",
-      });
+      const outcome = removeContained(entry.target, { container: entry.container, home, kind: entry.file ? "file" : "directory" });
       if (outcome === "removed") removed.push(entry.target);
       else if (outcome !== "missing") log(`kept ${entry.kind} (${outcome})`);
     } catch {
@@ -68,40 +70,70 @@ export function removeTargets(targets, { home, onlyRegenerable = false, deadline
   return removed;
 }
 
-function allGone(targets) {
-  return targets.every((entry) => {
+async function removeTargetsAsync(targets, { home, deadline, log }) {
+  const removed = [];
+  for (const entry of targets) {
+    if (Date.now() > deadline) break;
     try {
-      fs.lstatSync(entry.target);
-      return false;
-    } catch (error) {
-      return error.code === "ENOENT";
+      const outcome = await contained.removeContainedAsync(entry.target, { container: entry.container, root: home, kind: entry.file ? "file" : "directory" });
+      if (outcome === "removed") removed.push(entry.target);
+      else if (outcome !== "missing") log(`kept ${entry.kind} (${outcome})`);
+    } catch {
+      log(`could not remove ${entry.kind}`);
     }
-  });
+  }
+  return removed;
 }
 
-function checkoutState(checkout) {
-  if (typeof checkout !== "string" || !path.isAbsolute(checkout)) return "unknown";
+async function gone(target) {
   try {
-    fs.lstatSync(checkout);
-    return "present";
+    await fs.promises.lstat(target);
+    return false;
   } catch (error) {
-    return error.code === "ENOENT" ? "gone" : "unknown";
+    return error.code === "ENOENT";
   }
 }
 
-function defaultLauncherLive(instance, entry, roots) {
-  if (entry.kind === "ephemeral")
-    return !Number.isSafeInteger(entry.ownerPid) || entry.ownerPid <= 0 || pidAlive(entry.ownerPid);
-  const locks = [path.join(roots.stateRoot, "launcher.lock")];
-  if (typeof entry.checkout === "string" && path.isAbsolute(entry.checkout))
-    locks.push(path.join(entry.checkout, ".context", "zeros-local", "launcher.lock"));
-  return locks.some((lock) => lockOwnerState(lock) !== "absent");
+/** Anything in the visible root or `<state root>/worktrees` (hidden,
+ * archived, adopted or in-recovery worktrees) is work; unreadable is work. */
+export async function holdsWork(roots) {
+  for (const [root, ignorable] of [[roots.visibleRoot, ["workspaces", "design workspaces", "cloud-sync"]], [path.join(roots.stateRoot, "worktrees"), []]]) {
+    let entries;
+    try {
+      const stat = await fs.promises.lstat(root);
+      if (stat.isSymbolicLink() || !stat.isDirectory()) return true;
+      entries = await fs.promises.readdir(root, { withFileTypes: true });
+    } catch (error) {
+      if (error.code === "ENOENT") continue;
+      return true;
+    }
+    for (const entry of entries) {
+      if (entry.name === ".DS_Store") continue;
+      if (!ignorable.includes(entry.name) || !entry.isDirectory()) return true;
+      try {
+        if ((await fs.promises.readdir(path.join(root, entry.name))).some((name) => name !== ".DS_Store")) return true;
+      } catch {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
-function bundleBuiltFor(bundleDir) {
+async function checkoutGone(checkout) {
+  if (typeof checkout !== "string" || !path.isAbsolute(checkout)) return false;
+  try {
+    await fs.promises.lstat(checkout);
+    return false;
+  } catch (error) {
+    return error.code === "ENOENT";
+  }
+}
+
+async function bundleBuiltFor(bundleDir) {
   let entries;
   try {
-    entries = fs.readdirSync(bundleDir);
+    entries = await fs.promises.readdir(bundleDir);
   } catch {
     return null;
   }
@@ -109,7 +141,7 @@ function bundleBuiltFor(bundleDir) {
   for (const name of entries) {
     if (!name.endsWith(".app.version")) continue;
     try {
-      versions.add(fs.readFileSync(path.join(bundleDir, name), "utf8").trim());
+      versions.add((await fs.promises.readFile(path.join(bundleDir, name), "utf8")).trim());
     } catch {
       return null;
     }
@@ -117,7 +149,7 @@ function bundleBuiltFor(bundleDir) {
   return versions.size === 1 ? [...versions][0] : null;
 }
 
-export function pruneDevelopmentInstances({
+export async function pruneDevelopmentInstances({
   home = os.homedir(),
   platform = process.platform,
   env = process.env,
@@ -125,7 +157,7 @@ export function pruneDevelopmentInstances({
   electronVersion = null,
   now = Date.now(),
   budgetMs = 3_000,
-  launcherLive = defaultLauncherLive,
+  inUse = identityInUse,
   log = () => {},
 } = {}) {
   const deadline = Date.now() + budgetMs;
@@ -133,6 +165,7 @@ export function pruneDevelopmentInstances({
   try {
     const file = registryPath({ home, platform, env });
     const registry = readRegistry(file);
+    if (registry.corrupt) return actions;
     const containers = paths.developmentContainers({ home, platform, env });
     for (const [instance, entry] of Object.entries(registry.instances)) {
       if (Date.now() > deadline) break;
@@ -140,39 +173,34 @@ export function pruneDevelopmentInstances({
         if (instance === currentInstance || !INSTANCE_ID.test(instance)) continue;
         if (entry.layout !== "v2" && entry.layout !== "legacy") continue;
         const roots = paths.developmentPaths({ instance, layout: entry.layout, home, platform, env });
-        if (launcherLive(instance, entry, roots)) continue;
-        const lastUsed = Date.parse(entry.lastUsedAt);
-        const stale = Number.isFinite(lastUsed) && now - lastUsed > STALE_INSTANCE_MS;
+        if (inUse(roots, entry)) continue;
         const targets = identityTargets(roots, containers);
-        // Keep the data dir (and the rest of the identity) whenever the shared
-        // Local store may still point at a provider profile inside it.
-        const referenced = () => providerStoreReferences({ dataDir: roots.dataDir, sharedDataDir: containers.sharedDataDir });
         if (entry.kind === "ephemeral") {
-          if (referenced()) {
-            const removed = removeTargets(targets, { home, onlyRegenerable: true, deadline, log });
-            actions.push({ instance, rule: "ephemeral-kept-provider-profiles", removed });
-            continue;
-          }
-          const removed = removeTargets(targets, { home, deadline, log });
-          if (allGone(targets)) removeInstance(file, instance, entry);
+          if (entry.layout !== "v2" || (await holdsWork(roots)) ||
+              providerStoreReferences({ dataDir: roots.dataDir, sharedDataDir: containers.sharedDataDir })) continue;
+          // Recheck just before deleting: a launcher may have started meanwhile.
+          if (inUse(roots, entry)) continue;
+          const removed = await removeTargetsAsync(targets, { home, deadline, log });
+          let complete = true;
+          for (const target of targets) if (!(await gone(target.target))) complete = false;
+          if (complete) removeInstance(file, instance, entry, { timeoutMs: 250 });
           actions.push({ instance, rule: "ephemeral", removed });
           continue;
         }
-        if (entry.kind === "checkout" && stale && checkoutState(entry.checkout) === "gone") {
-          const removed = removeTargets(targets, { home, onlyRegenerable: true, deadline, log });
-          if (referenced()) actions.push({ instance, rule: "checkout-gone-kept-provider-profiles", removed });
-          else if (!hasWorkspaceEntries(roots.visibleRoot)) {
-            removed.push(...removeTargets(targets.filter((t) => !t.regenerable), { home, deadline, log }));
-            if (allGone(targets)) removeInstance(file, instance, entry);
-            actions.push({ instance, rule: "checkout-gone", removed });
-          } else actions.push({ instance, rule: "checkout-gone-kept-work", removed });
+        const lastUsed = Date.parse(entry.lastUsedAt);
+        const stale = Number.isFinite(lastUsed) && now - lastUsed > STALE_INSTANCE_MS;
+        if (!stale) continue;
+        const bundle = targets.filter((target) => target.kind === "bundle");
+        if (entry.kind === "checkout" && (await checkoutGone(entry.checkout))) {
+          const removed = await removeTargetsAsync(bundle, { home, deadline, log });
+          if (removed.length) actions.push({ instance, rule: "checkout-gone-bundle", removed });
           continue;
         }
-        if (stale && electronVersion) {
-          const built = bundleBuiltFor(roots.bundleDir);
+        if (electronVersion) {
+          const built = await bundleBuiltFor(roots.bundleDir);
           if (built && built !== electronVersion) {
-            const removed = removeTargets(targets.filter((t) => t.kind === "bundle"), { home, deadline, log });
-            actions.push({ instance, rule: "bundle-version", removed });
+            const removed = await removeTargetsAsync(bundle, { home, deadline, log });
+            if (removed.length) actions.push({ instance, rule: "bundle-version", removed });
           }
         }
       } catch {

@@ -57,6 +57,17 @@ function matchesRootSegment(
   );
 }
 
+// `zeros-local/<instance>` is a development visible root only directly inside
+// a home folder (`/Users/<user>`, `/home/<user>`, `/root`) and with a valid
+// instance id; elsewhere it is an ordinary folder that happens to share the name.
+const INSTANCE_ID = /^[a-z0-9][a-z0-9._-]{0,39}$/;
+function isHomeChild(parts: readonly string[], index: number): boolean {
+  return (
+    (index === 2 && (parts[0] === "Users" || parts[0] === "home")) ||
+    (index === 1 && parts[0] === "root")
+  );
+}
+
 function worktreePathParts(folder: string): {
   repositoryDirectory: string;
   workspaceDirectory: string;
@@ -70,6 +81,8 @@ function worktreePathParts(folder: string): {
     const instanced =
       root === "zeros-local" &&
       i + 4 < parts.length &&
+      isHomeChild(parts, i) &&
+      INSTANCE_ID.test(parts[i + 1] ?? "") &&
       (parts[i + 2] === "workspaces" || parts[i + 2] === "design workspaces");
     const at = instanced ? i + 1 : i;
     const layout = parts[at + 1] ?? "";

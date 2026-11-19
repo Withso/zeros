@@ -129,8 +129,7 @@ launch-time prune and `pnpm storage:sweep`.
 | SQLite, native settings, single-instance lock              | `~/Library/Application Support/com.zeros.local/instances/<identity>/`        |
 | Shared encrypted provider credentials and account profiles | `~/Library/Application Support/com.zeros.local/`                             |
 | Instance registry                                           | `~/Library/Application Support/com.zeros.local/instances.json`               |
-| Cookies and renderer storage                                | `~/Library/Application Support/com.zeros.local/instances/<identity>/electron/` |
-| Regenerable Chromium code cache                             | `~/Library/Caches/com.zeros.local/instances/<identity>/`                     |
+| Chromium profile: cookies, renderer storage and its caches  | `~/Library/Application Support/com.zeros.local/instances/<identity>/electron/` |
 | Native development bundle and version marker               | `~/Library/Caches/com.zeros.local/bundles/<identity>/`                       |
 | Native logs                                                 | `~/Library/Logs/com.zeros.local/<identity>/`                                 |
 | User settings, default-project sentinel and engine state    | `~/.zeros-local/instances/<identity>/`                                       |
@@ -166,21 +165,33 @@ native Keychain entries depend on it, so the launch-time prune and
 references. Keep those profile directories when removing an old checkout's data
 by hand. See [provider accounts](provider-accounts.md).
 
-Each launch registers its profile, then prunes other development profiles:
-regenerable folders of a checkout that has been gone for 14 days (and its whole
-profile once its visible folder holds no workspaces), test identities whose
-owning process has exited, and stale bundles built for another Electron. It
-never touches a profile with a running launcher. Profiles that predate the
-registry, and the retired Zeros Dev desktop's folders, are listed and removed
-by `pnpm storage:sweep` (a dry run unless `--apply`; it skips any identity whose
-visible folder holds workspaces, or whose database changed in the last 14 days,
-unless named with `--identity`). Launch each checkout you still use once before
-sweeping, so it is registered. The visible
-worktree directory contains project work and uncommitted changes; keep any work
-you need before removing it. The checkout's `.context/zeros-local/` contains
-only launcher coordination state.
-Launcher locks use ownership tokens, verify stale PIDs, and serialize recovery.
-An abandoned recovery fence can be reclaimed after 30 seconds.
+Each launch registers its profile (waiting at most 250 ms for the registry)
+and, once the app stack is running, prunes other development profiles in the
+background. That prune removes only regenerable bundles: those of a checkout
+gone for 14 days, and stale ones built for another Electron. It also removes
+test identities whose owning process has exited and that hold no work. It never
+removes a profile's data, settings, renderer state or worktrees, and never
+touches a profile that may be in use.
+
+Removing an old profile is a person's decision: `pnpm storage:sweep` lists
+profiles that predate the registry, orphaned ones and the retired Zeros Dev
+desktop's folders. It is a dry run unless `--apply`. Without `--identity` it
+removes only bundles and profiles that hold no user data. Launch each checkout
+you still use once before sweeping, so it is registered. The visible worktree
+directory and `~/.zeros-local/instances/<identity>/worktrees/` contain project
+work and uncommitted changes; keep any work you need before naming a profile.
+The checkout's `.context/zeros-local/` contains only launcher coordination
+state.
+
+Every launcher holds its identity's lease, `~/.zeros-local/instances/<identity>/launcher.lease`,
+for the lifetime of its app stack, plus the checkout's
+`.context/zeros-local/launcher.lock`. `electron:local` and `electron:alpha`
+from one checkout therefore exclude each other before either rebuilds. Locks
+use ownership tokens. A launcher lock's holder is retired only when its pid is
+dead or now runs something other than a launcher (a recycled pid); a live pid
+whose command line cannot be read stays the holder. Recovery is
+serialized by a fence that is never taken from a live owner; a fence without a
+readable owner can be reclaimed after 30 seconds.
 
 The bundle path and state root use one shared path resolver. Local uses the same
 containment policy as the hosted and packaged app, including host access for code
@@ -212,5 +223,6 @@ verify retained SQLite state. Check renderer HMR, a real provider-authenticated
 agent and terminal, distinct app names/profiles, and Stop during both cold build
 and the running app, including a terminal hangup. Check that a same-checkout Dev
 run blocks Local and that a rebuild from the other mode exits with the actionable
-mode error. Run `pnpm smoke:engine` on macOS. Linux unit/build/browser
+mode error, and that `electron:local` and `electron:alpha` from one checkout
+refuse each other before building. Run `pnpm smoke:engine` on macOS. Linux unit/build/browser
 checks do not substitute for these native macOS checks.

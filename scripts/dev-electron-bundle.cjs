@@ -3,6 +3,7 @@
 
 const fs = require("node:fs");
 const { localInstanceBundlePaths } = require("../apps/desktop/src/engine/db/local-development-paths.cjs");
+const contained = require("../apps/desktop/src/engine/db/contained-removal.cjs");
 const path = require("node:path");
 const { execFileSync } = require("node:child_process");
 
@@ -222,15 +223,18 @@ function prepareLocalInstanceBundle({ slug, name, callbackScheme = false, paths 
   if (!base) return { ok: false, binPath: null };
   const dest = paths.bundlePath;
   const marker = paths.versionMarker;
-  try { fs.rmSync(paths.legacyBundleRoot, { recursive: true, force: true }); }
-  catch { /* Previous Local bundles were only a cache. */ }
+  // Removals stay inside their real bundle folder under $HOME, never through a link.
+  try {
+    contained.removeContained(paths.legacyBundleRoot, { container: path.dirname(paths.legacyBundleRoot), root: paths.home });
+  } catch { /* Previous Local bundles were only a cache. */ }
   const version = readElectronVersion(base);
   let cached = "";
   try {
     cached = fs.readFileSync(marker, "utf8").trim();
   } catch { /* first launch */ }
   if (!version || cached !== version || !fs.existsSync(dest)) {
-    fs.rmSync(dest, { recursive: true, force: true });
+    const outcome = contained.removeContained(dest, { container: path.dirname(dest), root: paths.home });
+    if (outcome !== "removed" && outcome !== "missing") return { ok: false, binPath: null };
     fs.mkdirSync(path.dirname(dest), { recursive: true });
     cloneBundleHardlink(base, dest);
     if (version) fs.writeFileSync(marker, version);

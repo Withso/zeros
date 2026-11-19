@@ -465,7 +465,7 @@ async function main() {
       report.runtimeRetired = !report.cleanupError && report.retirement.retired;
       if (!report.runtimeRetired) report.cleanupError ??= "An owned native app, engine or helper did not retire.";
     } catch (error) { report.runtimeRetired = false; report.cleanupError ??= error.message; }
-    ephemeral?.dispose();
+    ephemeral?.dispose({ retired: report.runtimeRetired === true });
     clearTimeout(deadline); process.off("SIGINT", cancel); process.off("SIGTERM", cancel);
     report.acceptance = assessDesignPerformance(report);
     report.stage = report.error || report.cleanupError ? "failed" : report.acceptance.passed ? "passed" : "failed-budgets";

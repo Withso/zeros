@@ -326,7 +326,8 @@ async function main() {
     report.finishedAt = new Date().toISOString();
     if (fs.existsSync(root)) save();
     process.removeListener("SIGINT", cancel); process.removeListener("SIGTERM", cancel); release();
-    ephemeral?.dispose();
+    // Every stage is an owned process group awaited to closure.
+    ephemeral?.dispose({ retired: true });
     console.log(`NATIVE_RESULT ${JSON.stringify(report)}`);
   }
 }

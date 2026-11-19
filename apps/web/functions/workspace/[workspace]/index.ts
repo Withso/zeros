@@ -5,6 +5,8 @@ import type {Env} from "../../../lib/session";
 export const onRequestGet:PagesFunction<Env>=({params,env})=>{
   const workspaceId=params.workspace;
   if(typeof workspaceId!=="string"||!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(workspaceId))return new Response("Not found",{status:404});
-  const page=renderWorkspacePage({workspaceId,appLink:deploymentAppLink(env.ZEROS_DEPLOY_ENV),nonce:crypto.randomUUID().replaceAll("-",""),marketingOrigin:marketingOrigin(env)});
+  const appLink=deploymentAppLink(env.ZEROS_DEPLOY_ENV);
+  if(!appLink)return new Response("This deployment is misconfigured.",{status:503});
+  const page=renderWorkspacePage({workspaceId,appLink,nonce:crypto.randomUUID().replaceAll("-",""),marketingOrigin:marketingOrigin(env)});
   return new Response(page.html,{headers:page.headers});
 };

@@ -4,7 +4,7 @@ import { chmod, lstat, mkdir, open, rm } from "node:fs/promises";
 import { homedir, userInfo } from "node:os";
 import path from "node:path";
 
-import { zerosStateRoot } from "../../db/paths";
+import { zerosCredentialLockRoot } from "../../db/paths";
 
 const CLAUDE_OAUTH_TOKEN_ENDPOINT =
   "https://platform.claude.com/v1/oauth/token";
@@ -720,15 +720,21 @@ async function inspectMacClaudeRefreshLock(
   }
 }
 
+/** One lock per Keychain item. The default item keeps the name every earlier
+ * build used, so a still-running older process serializes with this one. */
+export function claudeRefreshLockName(service: string = CLAUDE_KEYCHAIN_SERVICE): string {
+  if (service === CLAUDE_KEYCHAIN_SERVICE) return "claude-oauth-refresh.lock";
+  return `claude-oauth-refresh-${createHash("sha256").update(service).digest("hex").slice(0, 16)}.lock`;
+}
+
 export async function withMacClaudeRefreshLock<T>(
   task: () => Promise<T>,
-  options: { readonly lockRoot?: string } = {},
+  options: { readonly lockRoot?: string; readonly service?: string } = {},
 ): Promise<T> {
-  const lockRoot =
-    options.lockRoot ?? path.join(zerosStateRoot(), "credentials");
+  const lockRoot = options.lockRoot ?? zerosCredentialLockRoot();
   await mkdir(lockRoot, { recursive: true, mode: 0o700 });
   await chmod(lockRoot, 0o700);
-  const lockPath = path.join(lockRoot, "claude-oauth-refresh.lock");
+  const lockPath = path.join(lockRoot, claudeRefreshLockName(options.service));
   const deadline = Date.now() + REFRESH_LOCK_WAIT_MS;
   while (true) {
     const existing = await inspectMacClaudeRefreshLock(lockPath);
@@ -852,7 +858,7 @@ export function defaultMacClaudeOAuthAuthority(
       commitMacClaudeCredential(hostHome, account, previous, next, service),
     refreshToken: (refreshToken, options) =>
       requestClaudeOAuthRefresh(refreshToken, options),
-    withRefreshLock: withMacClaudeRefreshLock,
+    withRefreshLock: (task) => withMacClaudeRefreshLock(task, { service }),
   });
   if (defaultAuthorities.size >= 64) defaultAuthorities.delete(defaultAuthorities.keys().next().value!);
   defaultAuthorities.set(key, authority);

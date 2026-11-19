@@ -3,9 +3,8 @@
 // never account-free; only its on-disk identity lives in the development
 // family (docs/storage-layout.md).
 import os from "node:os";
-import path from "node:path";
 import { createRequire } from "node:module";
-import { acquireExclusiveLock, launcherOwnerClassifier } from "./exclusive-file-lock.mjs";
+import { acquireCheckoutLock, acquireLease, appRunning } from "./local-instance-lease.mjs";
 import { registryPath, upsertInstance } from "./local-instance-registry.mjs";
 import { pruneDevelopmentInstances } from "./local-instance-prune.mjs";
 
@@ -36,43 +35,52 @@ export function alphaInstanceEnvironment(environment) {
   return { ...env, ZEROS_INSTANCE: ALPHA_INSTANCE, ZEROS_INSTANCE_NAME: ALPHA_NAME };
 }
 
-/** Take the single-instance launcher lock, then register and prune. Returns
- * the lock release. Throws before any build when another launch is live. */
+/** Claim the one alpha identity and this checkout's builds, then register.
+ * Throws before any build or auth refresh when either is in use. Returns the
+ * release, to be called once the whole app stack has exited. */
 export function prepareAlphaLaunch({
   home = os.homedir(),
+  root = process.cwd(),
   platform = process.platform,
-  prune = pruneDevelopmentInstances,
   log = (line) => console.warn(`[electron:alpha] ${line}`),
 } = {}) {
   const roots = paths.developmentPaths({ instance: ALPHA_INSTANCE, home, platform, env: {} });
-  const release = acquireExclusiveLock({
-    file: path.join(roots.stateRoot, "launcher.lock"),
-    record: { instance: ALPHA_INSTANCE },
-    classify: launcherOwnerClassifier(
-      "dev-environment/launcher.mjs",
-      `The ${ALPHA_NAME} launcher lock is incomplete; quit ${ALPHA_NAME} before removing ${path.join(roots.stateRoot, "launcher.lock")}.`,
-      `Invalid ${ALPHA_NAME} launcher lock.`,
-    ),
-    busyMessage: `${ALPHA_NAME} (pnpm electron:alpha) is already running. It is one profile for every checkout; quit it before launching again.`,
-    recoveryBusyMessage: `${ALPHA_NAME} lock recovery is already in progress; retry after it completes.`,
-    changedMessage: `${ALPHA_NAME} launcher lock changed; retry.`,
-  });
+  const busy = `${ALPHA_NAME} (pnpm electron:alpha) is already running. It is one profile for every checkout; quit it before launching again.`;
+  if (appRunning(roots)) throw new Error(busy);
+  const releaseCheckout = acquireCheckoutLock(root, { instance: ALPHA_INSTANCE });
+  let releaseLease;
   try {
-    upsertInstance(registryPath({ home, platform, env: {} }), ALPHA_INSTANCE, {
-      kind: "alpha",
-      name: ALPHA_NAME,
-      checkout: null,
-      layout: "v2",
-    });
-  } catch {
-    log("instance registry is unavailable; continuing");
+    releaseLease = acquireLease(roots, { busyMessage: busy, record: { instance: ALPHA_INSTANCE } });
+  } catch (error) {
+    releaseCheckout();
+    throw error;
   }
   try {
-    prune({ home, platform, env: {}, currentInstance: ALPHA_INSTANCE, electronVersion: bundle.currentElectronVersion() });
+    upsertInstance(registryPath({ home, platform, env: {} }), ALPHA_INSTANCE,
+      { kind: "alpha", name: ALPHA_NAME, checkout: null, layout: "v2" }, { timeoutMs: 250 });
   } catch {
-    log("development prune skipped");
+    log("instance registry is busy or unavailable; continuing");
   }
-  return release;
+  return () => {
+    try {
+      releaseLease();
+    } finally {
+      releaseCheckout();
+    }
+  };
+}
+
+/** The launcher prune, started once the app stack is running. Never throws. */
+export async function startAlphaPrune({
+  home = os.homedir(),
+  platform = process.platform,
+  prune = pruneDevelopmentInstances,
+} = {}) {
+  try {
+    return await prune({ home, platform, env: {}, currentInstance: ALPHA_INSTANCE, electronVersion: bundle.currentElectronVersion() });
+  } catch {
+    return [];
+  }
 }
 
 /** Best-effort native bundle with the Dev callback scheme; null falls back to

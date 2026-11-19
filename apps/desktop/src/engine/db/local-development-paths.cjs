@@ -7,6 +7,8 @@ const { homedir } = require("node:os");
 const FAMILY_ID = "com.zeros.local";
 const FAMILY_XDG = "zeros-local";
 const RESERVED_INSTANCE_IDS = Object.freeze(["alpha", "default"]);
+/** Written in `electron/` once the old Chromium profile has moved there. */
+const SESSION_MOVED_MARKER = ".zeros-session-relocated";
 const INSTANCE_ID = /^[a-z0-9][a-z0-9._-]{0,39}$/;
 
 // Same normalization main and paths.ts have always applied to ZEROS_INSTANCE.
@@ -117,7 +119,8 @@ function developmentPaths({
     registryPath: path.join(sharedDataDir, "instances.json"),
     dataDir,
     cacheDir,
-    // A legacy profile keeps its renderer state where it always was.
+    // A legacy profile keeps its renderer state where it always was; a v2
+    // profile's old location is `cacheDir` until it moves.
     sessionDataDir: legacy ? cacheDir : path.join(dataDir, "electron"),
     logDir,
     stateRoot,
@@ -184,6 +187,7 @@ function localInstanceBundlePaths({
   const roots = developmentPaths({ instance: slug, layout, home, platform, env: {} });
   const bundlePath = path.join(roots.bundleDir, `${name}.app`);
   return {
+    home,
     stateRoot: roots.stateRoot,
     bundleDir: roots.bundleDir,
     bundlePath,
@@ -192,7 +196,23 @@ function localInstanceBundlePaths({
   };
 }
 
+/** Where a development identity's Chromium profile is right now. */
+function effectiveSessionDataDir(roots) {
+  if (roots.layout === "legacy") return roots.cacheDir;
+  try {
+    if (require("node:fs").lstatSync(path.join(roots.sessionDataDir, SESSION_MOVED_MARKER)).isFile()) return roots.sessionDataDir;
+  } catch { /* not moved */ }
+  try {
+    require("node:fs").lstatSync(roots.cacheDir);
+    return roots.cacheDir;
+  } catch {
+    return roots.sessionDataDir;
+  }
+}
+
 module.exports = {
+  SESSION_MOVED_MARKER,
+  effectiveSessionDataDir,
   FAMILY_ID,
   RESERVED_INSTANCE_IDS,
   sanitizeInstanceId,

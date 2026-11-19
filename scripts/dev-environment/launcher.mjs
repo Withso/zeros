@@ -17,7 +17,7 @@ import { ensureDevAuthEnvironment } from "../dev-auth-profile.mjs";
 import { cloudSeedMessage, cloudSeedNeeded, recordCloudSeed } from "./cloud-local-seed-state.mjs";
 import { REBOOT_RECOVERED, currentBoot, recoverLaunchAfterReboot } from "./reboot-recovery.mjs";
 import { resolveLocalRuntime } from "./cloud-local-runtime.mjs";
-import { alphaInstanceEnvironment, prepareAlphaLaunch } from "../alpha-instance.mjs";
+import { alphaInstanceEnvironment, prepareAlphaLaunch, startAlphaPrune } from "../alpha-instance.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 // `backend` is the former headless action; Zeros Dev now always runs headless.
@@ -214,16 +214,29 @@ async function start(workspace, profile) {
 
 async function main() {
   if (action === "alpha") {
-    const auth = await ensureDevAuthEnvironment({ processEnv: {} });
-    if (auth.issue || auth.source === "none") throw new Error("A valid Alpha public auth profile is required");
-    // One alpha profile serves every checkout: refuse a second launch before
-    // this one rebuilds anything.
-    const release = prepareAlphaLaunch();
+    // One alpha profile serves every checkout, and Local shares this
+    // checkout's builds: refuse a second launch before any auth or build work.
+    const release = prepareAlphaLaunch({ root });
+    // The lease covers the whole stack: stop the child groups on our signals
+    // and release only after they have exited.
+    const controller = new AbortController();
+    const stop = () => controller.abort(new Error("Development shutdown requested"));
+    for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) process.on(sig, stop);
+    let pruning = Promise.resolve();
     try {
+      const auth = await ensureDevAuthEnvironment({ processEnv: {} });
+      if (auth.issue || auth.source === "none") throw new Error("A valid Alpha public auth profile is required");
       const env = alphaInstanceEnvironment({ ...systemEnvironment(), ...auth.env, ZEROS_DEV: "1", ZEROS_CLOUD_WORKSPACES_ENABLED: "true" });
-      await run("pnpm", ["electron:dev:prep"], { cwd: root, env, inherit: true, timeout: 300_000 });
-      await run(process.execPath, [path.join(root, "scripts/dev-instance.mjs"), watch ? "--watch" : "--run-only"], { cwd: root, env, inherit: true, timeout: 12 * 3600_000 });
-    } finally { release(); }
+      await run("pnpm", ["electron:dev:prep"], { cwd: root, env, inherit: true, timeout: 300_000, signal: controller.signal });
+      const stack = run(process.execPath, [path.join(root, "scripts/dev-instance.mjs"), watch ? "--watch" : "--run-only"],
+        { cwd: root, env, inherit: true, timeout: 12 * 3600_000, signal: controller.signal });
+      pruning = startAlphaPrune();
+      await stack;
+    } finally {
+      for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) process.off(sig, stop);
+      await pruning;
+      release();
+    }
     return;
   }
   if (!["start", "doctor", "stop", "seed", "archive"].includes(action)) throw new Error("Use start, doctor, stop, seed, archive or alpha");

@@ -292,6 +292,7 @@ export function formatWorkspaceLink(
 }
 
 export function formatLocalLink(scheme: LocalLinkScheme, kind: LocalLinkKind, id: string): string {
+  if (!LOCAL_LINK_SCHEMES.includes(scheme)) throw new Error("Unknown Zeros link scheme.");
   if (!LOCAL_LINK_ID.test(id)) throw new Error(`Invalid ${kind} id for a link.`);
   return `${scheme}://${kind}/${encodeURIComponent(id)}`;
 }
@@ -343,22 +344,39 @@ export function parseLocalLink(text: string): LocalLink | null {
   return { scheme: match[1] as LocalLinkScheme, kind: match[2] as LocalLinkKind, id };
 }
 
+/** A well-formed link of a retired channel (`zeros-beta://`). It is never
+ * navigable; importers keep it as plain text instead of rejecting what holds it. */
+export function isRetiredLocalLink(text: string): boolean {
+  const trimmed = text.trim();
+  return trimmed.startsWith("zeros-beta://") && parseLocalLink(`zeros://${trimmed.slice("zeros-beta://".length)}`) !== null;
+}
+
 /** Every distinct Local link inside free text (a pasted message, a brief).
  * Sentence punctuation after a link (`… zeros://chat/abc.`) is not part of
  * it: generated ids never end in `.`, `:` or `-`. Links of every channel are
- * returned; callers keep only their own channel's scheme. */
-export function extractLocalLinks(text: string, limit = 64): LocalLink[] {
+ * returned; callers keep only their own channel's scheme. Work is bounded by
+ * the candidates visited (four per link wanted), not only the links found,
+ * so repeated links cannot drive a long synchronous scan. */
+export function extractLocalLinks(
+  text: string,
+  limit = 64,
+  options: { onCandidate?: (candidate: string) => void } = {},
+): LocalLink[] {
   const out: LocalLink[] = [];
   const seen = new Set<string>();
+  const maxCandidates = limit * 4;
+  let visited = 0;
   // Numbered first: `chat/w/3` is the organization `chat`'s workspace 3, not
   // a legacy chat whose id is `w`.
   // A number runs to its end (`w/31a` names no workspace, not w-31).
   const pattern =
     /zeros(?:-alpha|-dev)?:\/\/(?:[A-Za-z0-9-]{1,100}\/w\/[0-9]{1,10}(?:\?session=[A-Za-z0-9_.:%-]+|(?![A-Za-z0-9_%]))|(?:chat|workspace)\/[A-Za-z0-9_.:%-]+)/g;
   for (const match of text.matchAll(pattern)) {
+    if (++visited > maxCandidates) break;
     // A suffix regexp retries from every punctuation character when a long
     // internal run ends in a non-punctuation character. Scan only the suffix.
     const candidate = match[0];
+    options.onCandidate?.(candidate);
     let end = candidate.length;
     while (
       end > 0 &&
