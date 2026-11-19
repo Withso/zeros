@@ -14,6 +14,10 @@ import {
 import { FRAME_HTML, webState } from "./fixtures";
 
 describe("HTML source adapter", () => {
+  it.each(["data-zd-own-style", "data-zd-source-style"])("refuses render-only %s in authored mutations", (attribute) => {
+    expect(() => mutateDesignNodeAttributeSource('<div data-oid="target"></div>', "target", attribute, "color: red")).toThrow(/Render-only/);
+    expect(() => assertSafeDesignHtmlFragment(`<div ${attribute}="color: red"></div>`)).toThrow(/Render-only/);
+  });
   it("validates URL attribute mutations at the containing page and retains root behavior", () => {
     const source = '<img data-oid="image" src="local.png">';
     expect(

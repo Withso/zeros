@@ -1091,6 +1091,7 @@ function recordHost(
   component: () => DesignFrameInstances["components"][string],
   extra: { failed?: true; text?: string; slotted?: Record<string, string[]> },
 ): void {
+  if (instance.attrs.some((attribute) => attribute.name === "data-zd-part")) return;
   const oid = instance.attrs.find((attribute) => attribute.name === "data-oid")?.value;
   if (!oid || oid.length > DESIGN_COMPONENT_RECORD_LIMITS.layerId || INHERITED_NAMES.has(oid) || INHERITED_NAMES.has(name)) return;
   const record = usage.instances ??= { components: new Map(), hosts: new Map() };
@@ -1130,6 +1131,7 @@ function recordHost(
 /** A top-level instance of a name no definition answers to, so the panel and
  * canvas can say which component is gone instead of showing an empty layer. */
 function recordMissingInstance(usage: DesignComponentExpansionUsage, name: string, instance: DefaultTreeAdapterTypes.Element): void {
+  if (instance.attrs.some((attribute) => attribute.name === "data-zd-part")) return;
   const oid = instance.attrs.find((attribute) => attribute.name === "data-oid")?.value;
   if (!oid || oid.length > DESIGN_COMPONENT_RECORD_LIMITS.layerId || INHERITED_NAMES.has(oid) || !/^[a-z][a-z0-9-]{0,63}$/.test(name)) return;
   const record = usage.instances ??= { components: new Map(), hosts: new Map() };
@@ -1233,19 +1235,18 @@ async function expandBoundedComponents(
       let startTag = location.startTag ? result.slice(location.startTag.startOffset, location.startTag.endOffset) : result.slice(location.startOffset, location.endOffset);
       let filled: string;
       const id = String(++work.instances);
+      const definitionOwned = instance.attrs.some((attribute) => attribute.name === "data-zd-part");
       const overrides = designPartStyleOverrides(instance.attrs);
       const overridden = (body: string) => {
         if (!overrides.size) return body;
         budget.charge(body.length);
-        return applyDesignPartStyleOverrides(body, overrides);
+        return applyDesignPartStyleOverrides(body, overrides, !definitionOwned);
       };
       if (definition.template) {
         const attributes = new Map(instance.attrs.map((attribute) => [attribute.name, attribute.value]));
         const templated = definition as ComponentDefinition & { template: NonNullable<ComponentDefinition["template"]> };
-        // Only the frame's own layers keep a data-oid through expansion (a
-        // definition's become parts), so one here is an instance the frame
-        // placed, at the top or in another instance's slot.
-        const oid = attributes.get("data-oid");
+        // Definition OIDs remain physical CSS identities, not authored hosts.
+        const oid = attributes.has("data-zd-part") ? undefined : attributes.get("data-oid");
         const rendered = renderInstance(templated, attributes, work, errors, oid);
         if (usage) recordInstance(usage, registry, templated, instance, rendered.failed === true);
         if (depth === 0 && rendered.empty) work.instancesEmpty = true;
@@ -1261,7 +1262,9 @@ async function expandBoundedComponents(
       budget.charge(filled.length);
       // A plain components/ file expands exactly as it always has: its host
       // keeps its box.
-      const boxed = filled && definition.template ? designInstanceRootBody(filled, { style: hostStyle, className: instance.attrs.find((attribute) => attribute.name === "class")?.value }) : null;
+      const boxed = filled && definition.template ? designInstanceRootBody(filled, { style: hostStyle, className: instance.attrs.find((attribute) => attribute.name === "class")?.value,
+        ...(definitionOwned ? { ownStyle: instance.attrs.find((attribute) => attribute.name === "data-zd-own-style")?.value ?? "",
+          sourceStyle: instance.attrs.find((attribute) => attribute.name === "data-zd-source-style")?.value ?? hostStyle } : {}) }) : null;
       if (boxed !== null) {
         filled = boxed;
         // The root is the instance's box; the host keeps no style or class.

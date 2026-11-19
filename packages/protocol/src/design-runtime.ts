@@ -1659,6 +1659,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   }
 
   function oidOf(element) {
+    if (element && element.hasAttribute && element.hasAttribute("data-zd-part") && partOwnerOf(element)) return "";
     return element && element.getAttribute
       ? element.getAttribute("data-oid") || ""
       : "";
@@ -1673,7 +1674,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   }
 
   // ── Component instances ───────────────────────────────────
-  // An instance's inner elements carry data-zd-part and no data-oid, so the
+  // An instance's inner elements use data-zd-part for addressing, so the
   // layer tree and hit testing stop at the host. A host that asked for
   // getComponentPartAtLoc can also address a part through its host, and a
   // main component's repeated copy (data-zd-copy) hits as its source layer.
@@ -2781,8 +2782,17 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   function winningDeclaration(element, property, matches, without) {
     // With without (the inline style, or one rule), the best declaration
     // once that one is gone: what the layer's own declaration replaced.
-    var inline = !without || !without.inline ? declarationValue(element.style, property, null) : null;
-    var best = inline ? { inline: true, value: inline.value, important: inline.important } : null;
+    var inlineStyle = without && without.inline ? without.sourceStyle : element.style;
+    var inline = inlineStyle ? declarationValue(inlineStyle, property, null) : null;
+    if (!inline && inlineStyle && without && without.inline) {
+      var longhands = longhandsOf(property);
+      var baseline = declarationProperties(inlineStyle).filter(function (name) { return longhands.indexOf(name) >= 0; });
+      if (baseline.length) inline = { value: baseline.map(function (name) {
+        return name + ": " + inlineStyle.getPropertyValue(name).trim() + (inlineStyle.getPropertyPriority(name) ? " !important" : "");
+      }).join("; "), important: baseline.some(function (name) { return inlineStyle.getPropertyPriority(name) === "important"; }) };
+    }
+    var best = inline ? { inline: true, value: inline.value, important: inline.important,
+      sourceInline: !!(without && without.inline) || !ownsInlineProperty(element, property) } : null;
     for (var index = 0; index < matches.length; index += 1) {
       var match = matches[index];
       if (without && match.entry === without.entry) continue;
@@ -2795,10 +2805,12 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       }
       if (!best || outranks(candidate, best, element)) best = candidate;
     }
+    if (!best && without && without.inline && without.sourceStyle) return { inline: true, sourceInline: true, value: "", important: false };
     return best;
   }
 
   function originOfWinner(winner) {
+    if (winner.sourceInline) return { origin: "frame" };
     if (winner.inline) return { origin: "inline" };
     var origin = winner.match.entry.origin;
     var result = { origin: origin.origin };
@@ -2921,7 +2933,36 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   }
 
   function ownsWinner(winner, oid) {
-    return !!winner.inline || ownRule(winner.match.entry, oid);
+    return winner.inline ? !winner.sourceInline : ownRule(winner.match.entry, oid);
+  }
+
+  var instanceInlineCache = new WeakMap();
+
+  function instanceInlineStyles(element) {
+    if (!element.hasAttribute("data-zd-part") || !partOwnerOf(element)) return null;
+    var ownText = element.getAttribute("data-zd-own-style") || "";
+    var sourceText = element.getAttribute("data-zd-source-style") ?? element.getAttribute("style") ?? "";
+    var cached = instanceInlineCache.get(element);
+    if (cached && cached.ownText === ownText && cached.sourceText === sourceText) return cached;
+    var own = document.createElement("div").style;
+    var source = document.createElement("div").style;
+    own.cssText = ownText;
+    source.cssText = sourceText;
+    var styles = { own: own, source: source, ownText: ownText, sourceText: sourceText };
+    instanceInlineCache.set(element, styles);
+    return styles;
+  }
+
+  function ownsInlineProperty(element, property) {
+    var styles = instanceInlineStyles(element);
+    if (!styles) return true;
+    var names = longhandsOf(property);
+    if (!names.length) names = [property];
+    return names.every(function (name) {
+      var own = declarationValue(styles.own, name, null);
+      var source = declarationValue(styles.source, name, null);
+      return own && (!source || own.important || !source.important);
+    });
   }
 
   /** The declaration Reset removes, as the engine picks it: the style
@@ -2929,7 +2970,10 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
    * rule. Null when that is not the winner (Reset would change nothing shown)
    * or two of the layer's rules set it (the engine refuses to choose). */
   function resetTargetOf(element, property, winner, matches, oid) {
-    if (winner.inline) return { inline: true };
+    if (winner.inline) {
+      var styles = instanceInlineStyles(element);
+      return { inline: true, sourceStyle: styles ? styles.source : null };
+    }
     if (declarationValue(element.style, property, null)) return null;
     for (var index = 0; index < matches.length; index += 1) {
       var entry = matches[index].entry;
@@ -3074,11 +3118,11 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
 
   function replacedStyleOf(element, candidate, index, computed) {
     if (candidate.value.length > ${DESIGN_RUNTIME_AUTHORED_STYLE_LIMITS.value}) return null;
-    var entry = candidate.match.entry;
+    var entry = candidate.match && candidate.match.entry;
     var replaced = originOfWinner(candidate);
     replaced.value = candidate.value;
     if (candidate.important) replaced.important = true;
-    if (entry.selector) {
+    if (entry && entry.selector) {
       replaced.selector = (entry.reportSelector || entry.selector).slice(0, 256);
       replaced.scope = ruleTargetsElement(element, entry) ? "element" : "base";
       var classes = subjectClassesOf(element, candidate.match);
@@ -3423,7 +3467,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       var resetTarget = ownsWinner(winner, oid) ? resetTargetOf(element, property, winner, matches, oid) : null;
       if (resetTarget) {
         var others = winningDeclaration(element, property, matches, resetTarget);
-        var replaced = others && others.value ? replacedStyleOf(element, others, index, computed) : null;
+        var replaced = others && (others.value || resetTarget.sourceStyle) ? replacedStyleOf(element, others, index, computed) : null;
         if (replaced) {
           var declared = declaredNameOf(element, winner, property);
           if (declared) style.declared = declared;
@@ -3852,7 +3896,8 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   function ownChangesOf(element, oid) {
     var index = cascadeRules(styleScopeOf(element));
     var matches = matchingEntries(element, index.rules);
-    var names = declarationProperties(element.style);
+    var inlineStyles = instanceInlineStyles(element);
+    var names = declarationProperties(inlineStyles ? { cssText: inlineStyles.ownText } : element.style);
     var ownRules = styleRulesByOid().get(oid) || [];
     for (var ruleIndex = 0; ruleIndex < ownRules.length; ruleIndex += 1) {
       var declared = declarationProperties(ownRules[ruleIndex].style);
@@ -3868,7 +3913,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       var target = resetTargetOf(element, property, winner, matches, oid);
       if (!target) continue;
       var other = winningDeclaration(element, property, matches, target);
-      if (!other || !other.value) continue;
+      if (!other || (!other.value && !inlineStyles)) continue;
       var replaced = originOfWinner(other);
       replaced.value = other.value.slice(0, ${DESIGN_RUNTIME_FRAME_CHANGE_LIMITS.value});
       var entry = other.match && other.match.entry;
@@ -5494,7 +5539,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       var clone = element.cloneNode(true);
       var copies = [clone].concat(Array.from(clone.getElementsByTagName("*")));
       copies.forEach(function (node, index) {
-        var oldId = node.getAttribute("data-oid");
+        var oldId = oidOf(node);
         if (!oldId) return;
         var id = index === 0 ? operation.duplicateNodeId : duplicateStructureIdentity(operation.duplicateNodeId, oldId, index, used);
         node.setAttribute("data-oid", id);
@@ -6373,6 +6418,11 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     }
     if (disposed || cancelledRequests.has(requestId)) throw typedError("CANCELLED", "Capture cancelled.", false);
     var clone = document.documentElement.cloneNode(true);
+    var provenanceNodes = clone.querySelectorAll("[data-zd-own-style], [data-zd-source-style]");
+    for (var provenanceIndex = 0; provenanceIndex < provenanceNodes.length; provenanceIndex += 1) {
+      provenanceNodes[provenanceIndex].removeAttribute("data-zd-own-style");
+      provenanceNodes[provenanceIndex].removeAttribute("data-zd-source-style");
+    }
     clone.setAttribute("xmlns", "http://www.w3.org/1999/xhtml");
     // A held layer state is set aside around this capture already; these
     // strips keep any copy of it out of the picture regardless.
@@ -6438,7 +6488,11 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     }
 
     if (isolate) {
-      var isolatedTarget = clone.querySelector('[data-oid="' + CSS.escape(nodeId) + '"]');
+      var isolatedTarget = nodeId === ${JSON.stringify(DESIGN_RUNTIME_DOCUMENT_BODY_ID)} ? clone.querySelector("body") : null;
+      var isolateCandidates = clone.querySelectorAll("[data-oid], [data-zd-part], [data-zd-slot]");
+      for (var isolateIndex = 0; !isolatedTarget && isolateIndex < isolateCandidates.length; isolateIndex += 1) {
+        if (targetOidOf(isolateCandidates[isolateIndex]) === nodeId) isolatedTarget = isolateCandidates[isolateIndex];
+      }
       if (!isolatedTarget) throw new Error("The screenshot target is not in the frame document.");
       isolatedTarget.setAttribute("data-zeros-capture-isolate", "");
       var isolateStyle = document.createElement("style");

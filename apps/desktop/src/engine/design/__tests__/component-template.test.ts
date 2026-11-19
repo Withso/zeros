@@ -33,20 +33,20 @@ const refusal = (markup: string, names = scope) => {
 describe("a component's template", () => {
   it("fills holes in text and attributes, escaped", () => {
     expect(render('<p data-oid="p" class="mode-{{ mode }}" title="{{ send-label }}">{{ send-label }} {{ attachments + 1 }}</p>')).toBe(
-      '<p data-zd-part="p" class="mode-plan" title="Send &lt;now&gt; &amp; &quot;then&quot;">Send &lt;now&gt; &amp; "then" 3</p>',
+      '<p data-zd-part="p" data-oid="p" class="mode-plan" title="Send &lt;now&gt; &amp; &quot;then&quot;">Send &lt;now&gt; &amp; "then" 3</p>',
     );
   });
 
   it("keeps or drops an element, or a template wrapper's content, with data-zd-if", () => {
-    expect(render('<div data-oid="a" data-zd-if="toolbar">On</div><div data-oid="b" data-zd-if="!toolbar">Off</div>')).toBe('<div data-zd-part="a">On</div>');
+    expect(render('<div data-oid="a" data-zd-if="toolbar">On</div><div data-oid="b" data-zd-if="!toolbar">Off</div>')).toBe('<div data-zd-part="a" data-oid="a">On</div>');
     expect(render('<template data-zd-if="attachments > 1"><i data-oid="i">many</i></template><template data-zd-if="false">x</template>')).toBe(
-      '<i data-zd-part="i">many</i>',
+      '<i data-zd-part="i" data-oid="i">many</i>',
     );
   });
 
   it("repeats with data-zd-for, giving each copy after the first its own part id", () => {
     expect(render('<ul data-oid="l"><li data-oid="c" data-zd-for="i in range(attachments)"><b data-oid="b">File {{ i + 1 }}</b></li></ul>')).toBe(
-      '<ul data-zd-part="l"><li data-zd-part="c"><b data-zd-part="b">File 1</b></li><li data-zd-part="c#1"><b data-zd-part="b#1">File 2</b></li></ul>',
+      '<ul data-zd-part="l" data-oid="l"><li data-zd-part="c" data-oid="c"><b data-zd-part="b" data-oid="b">File 1</b></li><li data-zd-part="c#1" data-oid="c"><b data-zd-part="b#1" data-oid="b">File 2</b></li></ul>',
     );
     expect(render('<span data-zid="v" data-zd-for="v in [&quot;a&quot;, &quot;b&quot;]">{{ v }}</span>')).toBe(
       '<span data-zd-part="v">a</span><span data-zd-part="v#1">b</span>',

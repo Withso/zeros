@@ -72,7 +72,8 @@ export interface ComponentTemplateOptions {
   scope: ReadonlyMap<string, ComponentExpressionValue>;
   /**
    * part: an instance's copy of a definition. Every data-oid or data-zid
-   * becomes data-zd-part, with "#<copy>" on repeats after the first.
+   * gains data-zd-part, with "#<copy>" on repeats after the first. Source
+   * data-oid stays physical for CSS, not runtime addressing.
    * copy: a main frame rendering itself. The first repeat keeps its
    * data-oid; the others carry data-zd-copy="<oid>#<copy>" instead.
    */
@@ -204,12 +205,13 @@ export function renderComponentTemplate(markup: string, options: ComponentTempla
     if (!startTag) return markup.slice(location.startOffset, location.endOffset);
     const suffix = repeated ? `#${copy.join(".").replace(/^(?:0\.)+/, "")}` : "";
     const rewrite = repeated || element.attrs.some((entry) =>
-      entry.value.includes("{{") || entry.name === "data-zd-if" || entry.name === "data-zd-for" ||
+      entry.value.includes("{{") || entry.name === "data-zd-if" || entry.name === "data-zd-for" || entry.name === "data-zd-own-style" || entry.name === "data-zd-source-style" ||
       (options.ids === "part" && (entry.name === "data-oid" || entry.name === "data-zid")));
     let tag = rewrite ? `<${element.tagName}` : markup.slice(startTag.startOffset, startTag.endOffset);
     let identity = false;
     for (const entry of rewrite ? element.attrs : []) {
       const name = entry.prefix ? `${entry.prefix}:${entry.name}` : entry.name;
+      if (name === "data-zd-own-style" || name === "data-zd-source-style") continue;
       if (name === "data-zd-if" || name === "data-zd-for") continue;
       if (entry.value.includes("{{") &&
         (REFUSED.has(name) || /^on/i.test(name) || /^data-zd-/i.test(name) || (name === "content" && element.tagName === "meta")))
@@ -217,6 +219,7 @@ export function renderComponentTemplate(markup: string, options: ComponentTempla
       if (name === "data-oid" || name === "data-zid") {
         if (options.ids === "part") {
           if (!identity) tag += ` data-zd-part="${escapeAttribute(entry.value + suffix)}"`;
+          if (name === "data-oid") tag += ` data-oid="${escapeAttribute(entry.value)}"`;
           identity = true;
           continue;
         }

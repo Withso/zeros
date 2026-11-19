@@ -20,17 +20,17 @@ describe("a main component's slots", () => {
   it("take the instance's layers named for them, and the rest go to the default slot", async () => {
     const result = await expand('<zd-card data-oid="c1"><p data-oid="mine" slot="content">x</p><em data-oid="rest">y</em></zd-card>');
     expect(result.errors).toEqual([]);
-    expect(result.html).toContain('<div data-zd-part="body" data-zd-slot="content" style="display: flex"><p data-oid="mine" slot="content">x</p></div>');
-    expect(result.html).toContain('<footer data-zd-part="foot"><em data-oid="rest">y</em></footer>');
+    expect(result.html).toContain('<div data-zd-part="body" data-oid="body" data-zd-slot="content" style="display: flex"><p data-oid="mine" slot="content">x</p></div>');
+    expect(result.html).toContain('<footer data-zd-part="foot" data-oid="foot"><em data-oid="rest">y</em></footer>');
   });
 
   it("show what the main puts in them until the instance fills them, whitespace aside", async () => {
     const empty = await expand('<zd-card data-oid="c2"></zd-card>');
-    expect(empty.html).toContain('<div data-zd-part="body" data-zd-slot="content" style="display: flex"><p data-zd-part="placeholder">Empty</p></div>');
-    expect(empty.html).toContain('<footer data-zd-part="foot">No footer</footer>');
+    expect(empty.html).toContain('<div data-zd-part="body" data-oid="body" data-zd-slot="content" style="display: flex"><p data-zd-part="placeholder" data-oid="placeholder">Empty</p></div>');
+    expect(empty.html).toContain('<footer data-zd-part="foot" data-oid="foot">No footer</footer>');
     const named = await expand('<zd-card data-oid="c3">\n  <b data-oid="only" slot="content">b</b>\n</zd-card>');
     expect(named.html).toContain('<b data-oid="only" slot="content">b</b></div>');
-    expect(named.html).toContain('<footer data-zd-part="foot">No footer</footer>');
+    expect(named.html).toContain('<footer data-zd-part="foot" data-oid="foot">No footer</footer>');
   });
 
   it("are options of the component, which an attribute cannot set", async () => {
@@ -56,7 +56,7 @@ describe("a main component's slots", () => {
     const result = await expandDesignComponents("/work/slots", doc('<zd-card data-oid="plans" heading="Plans"><p data-oid="plans-copy" slot="body">Body</p></zd-card>'),
       { "parts/card.html": main }, "home/index.html", { registry });
     expect(result.errors).toEqual([]);
-    expect(result.html).toContain('<h2 data-zd-part="heading">Plans</h2><div data-zd-part="body" data-zd-slot="body"><p data-oid="plans-copy" slot="body">Body</p></div>');
+    expect(result.html).toContain('<h2 data-zd-part="heading" data-oid="heading">Plans</h2><div data-zd-part="body" data-oid="body" data-zd-slot="body"><p data-oid="plans-copy" slot="body">Body</p></div>');
   });
 
   it("work in a components/ file too", async () => {

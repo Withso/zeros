@@ -494,7 +494,7 @@ describe("a frame registered as a component", () => {
     const source = '<!doctype html><html><head></head><body><zd-chat-composer data-oid="ws" width="800"></zd-chat-composer></body></html>';
     const canvas = await readCanvas(root);
     const render = await prepareFrameRenderSource(root, source, { width: 400, height: 300 }, undefined, undefined, host.file, canvas);
-    expect(render.sanitized).toContain('<div class="c" data-zd-part="root" data-zd-root="">Composer</div>');
+    expect(render.sanitized).toContain('<div class="c" data-zd-part="root" data-oid="root" data-zd-root="">Composer</div>');
     expect(render.sanitized).toContain("--zd-width: 800px;");
     expect(render.componentOptions).toBeUndefined();
   });

@@ -15,17 +15,17 @@ describe("an instance is one box", () => {
     const result = await expand(doc('<main data-oid="m"><zd-card data-oid="c1" class="mt-4" style="width: 300px; position: absolute; left: 8px" zd-style-card="padding: 4px; width: 10px"></zd-card></main>'));
     expect(result.errors).toEqual([]);
     expect(result.html).toContain('<zd-card data-oid="c1" zd-style-card="padding: 4px; width: 10px" style="display: contents" data-zd-instance="1">');
-    expect(result.html).toContain('<article class="card mt-4" data-zd-part="card" style="padding: 2px; padding: 4px; width: 10px; width: 300px; position: absolute; left: 8px" data-zd-root="">');
+    expect(result.html).toContain('<article class="card mt-4" data-zd-part="card" data-oid="card" style="padding: 2px; padding: 4px; width: 10px; width: 300px; position: absolute; left: 8px" data-zd-own-style="padding: 4px; width: 10px; width: 300px; position: absolute; left: 8px" data-zd-source-style="padding: 2px" data-zd-root="">');
   });
 
   it("marks the root of an instance with no style of its own", async () => {
     const result = await expand(doc('<zd-card data-oid="c1"></zd-card>'));
-    expect(result.html).toContain('<zd-card data-oid="c1" style="display: contents" data-zd-instance="1"><article class="card" data-zd-part="card" style="padding: 2px" data-zd-root="">');
+    expect(result.html).toContain('<zd-card data-oid="c1" style="display: contents" data-zd-instance="1"><article class="card" data-zd-part="card" data-oid="card" style="padding: 2px" data-zd-root="">');
   });
 
   it("keeps the host's box for a main of several layers", async () => {
     const result = await expand(doc('<zd-pair data-oid="p1" style="width: 300px"></zd-pair>'));
-    expect(result.html).toContain('<zd-pair data-oid="p1" style="width: 300px" data-zd-instance="1"><b data-zd-part="one">1</b><i data-zd-part="two">2</i></zd-pair>');
+    expect(result.html).toContain('<zd-pair data-oid="p1" style="width: 300px" data-zd-instance="1"><b data-zd-part="one" data-oid="one">1</b><i data-zd-part="two" data-oid="two">2</i></zd-pair>');
   });
 
   it("keeps the host's box for a plain components/ file, which expands as it always has", async () => {
