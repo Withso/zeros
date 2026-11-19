@@ -9,7 +9,6 @@ import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { localEnvironment, runOwnedProcess } from "./electron-local.mjs";
-import { createEphemeralIdentity } from "./ephemeral-local-identity.mjs";
 
 const require = createRequire(import.meta.url);
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -223,7 +222,6 @@ async function main() {
       : "This run does not establish a before/after performance comparison or complete performance acceptance.",
       "Product fixtures cover Personal Local. Retained organization-owned Local needs separate compatibility qualification."] };
   const save = () => writeNativeJson(path.join(root, "status.json"), report);
-  let ephemeral;
   try {
     fs.mkdirSync(root, { mode: 0o700 });
     if (recoverV4) fenceLegacyNativeLaunch(repo, runId);
@@ -232,8 +230,7 @@ async function main() {
     save();
     writeNativeJson(path.join(evidenceRoot, "latest.json"), { runId });
     console.log(`Native qualification: ${path.relative(repo, root)}\nSource digest: ${source.digest}`);
-    ephemeral = createEphemeralIdentity({ purpose: "design-qual", name: "Zeros Design Qualification" });
-    const env = { ...localEnvironment({ identity: { slug: ephemeral.slug, name: ephemeral.name },
+    const env = { ...localEnvironment({ identity: { slug: `design-qual-${runId.slice(-8)}`, name: "Zeros Design Qualification" },
       vitePort: 6998, engineBase: 39980 }), ZEROS_ISOLATE: "1", ZEROS_DATA_DIR: path.join(root, "worker-profile") };
     const run = async (name, command, argv, cwd = repo) => {
       const row = { name, startedAt: new Date().toISOString(), running: true };
@@ -326,8 +323,6 @@ async function main() {
     report.finishedAt = new Date().toISOString();
     if (fs.existsSync(root)) save();
     process.removeListener("SIGINT", cancel); process.removeListener("SIGTERM", cancel); release();
-    // Every stage is an owned process group awaited to closure.
-    ephemeral?.dispose({ retired: true });
     console.log(`NATIVE_RESULT ${JSON.stringify(report)}`);
   }
 }

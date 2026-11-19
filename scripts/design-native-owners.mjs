@@ -2,8 +2,9 @@
 // Owns a fresh instance profile; never copies or serializes account credentials.
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
@@ -11,8 +12,8 @@ import { promisify } from "node:util";
 import { launchNativeElectron } from "./design-native-electron.mjs";
 import { waitForNativeOwnerAccess } from "./design-native-owner-access.mjs";
 import { localEnvironment, pickLocalPorts } from "./electron-local.mjs";
-import { createEphemeralIdentity } from "./ephemeral-local-identity.mjs";
 import { ensureDevAuthEnvironment } from "./dev-auth-profile.mjs";
+import { createRequire } from "node:module";
 import { collectNativeSourceManifest, nativeProcessAlive, writeNativeJson } from "./design-native-run.mjs";
 import { nativeProcessSample } from "./design-native-baseline.mjs";
 import { waitForNativeRenderer } from "./design-native-renderer.mjs";
@@ -37,7 +38,7 @@ const save = () => writeNativeJson(path.join(evidence, "owners-report.json"), re
 const status = stage => { writeNativeJson(path.join(evidence, "owners-status.json"), { pid: process.pid, stage, at: new Date().toISOString() }); console.log(`OWNERS_STAGE ${stage}`); save(); };
 const check = (name, condition) => { assert(condition, name); report.checks.push(name); console.log(`PASS ${name}`); };
 const run = async (command, args, options = {}) => (await exec(command, args, { cwd: repo, timeout: 120_000, maxBuffer: 8 * 1024 * 1024, ...options })).stdout;
-let app, page, vite, viteLog, enginePid, ephemeral;
+let app, page, vite, viteLog, enginePid;
 const deadline = setTimeout(() => { console.error("Native owner qualification deadline exceeded"); void app?.close().finally(() => process.exit(124)); if (!app) process.exit(124); }, 12 * 60_000);
 const closeApp = async () => {
   await app?.close(); app = undefined; page = undefined;
@@ -48,8 +49,7 @@ const closeApp = async () => {
 };
 try {
   status("preparing-normal-dev");
-  ephemeral = createEphemeralIdentity({ purpose: "design-owner", name: "Zeros Owner Compatibility" });
-  const identity = { slug: ephemeral.slug, name: ephemeral.name };
+  const identity = { slug: `design-owner-${randomUUID().slice(0, 12)}`, name: "Zeros Owner Compatibility" };
   const ports = await pickLocalPorts(identity.slug);
   // Start with the launcher's sanitized environment, then select ordinary Dev.
   const env = localEnvironment({ identity, ...ports });
@@ -57,9 +57,10 @@ try {
   const auth = await ensureDevAuthEnvironment({ processEnv: {} });
   assert.equal(auth.issue, null, "A validated public Alpha Dev auth configuration is required.");
   Object.assign(env, auth.env, { ZEROS_NO_ENGINE_HMR: "1", ZEROS_NO_MAIN_HMR: "1", ELECTRON_RENDERER_URL: `http://127.0.0.1:${ports.vitePort}` });
-  const profile = ephemeral.roots.dataDir;
-  // Exclusive creation proves this is a task-owned instance, not a real profile.
+  const profile = createRequire(import.meta.url)("../apps/desktop/src/engine/db/local-development-paths.cjs")
+    .developmentPaths({ instance: identity.slug, home: os.homedir(), platform: process.platform, env: {} }).dataDir;
   await fs.mkdir(path.dirname(profile), { recursive: true, mode: 0o700 });
+  // Exclusive creation proves this is a task-owned instance, not a real profile.
   await fs.mkdir(profile, { mode: 0o700 });
   writeNativeJson(path.join(profile, "design-qualification-owner.json"), { runId: lock.runId, artifacts: root });
   report.profile = profile;
@@ -215,9 +216,7 @@ try {
   report.failures.push(error.stack ?? String(error)); process.exitCode = 1;
 } finally {
   clearTimeout(deadline);
-  // closeApp waits for the task's engine to exit; only then are its roots free.
-  const retired = await closeApp().then(() => true, error => { report.failures.push(`App close: ${error.message}`); process.exitCode = 1; return false; });
+  await closeApp().catch(error => { report.failures.push(`App close: ${error.message}`); process.exitCode = 1; });
   vite?.kill("SIGTERM"); await viteLog?.close();
-  ephemeral?.dispose({ retired });
   report.finishedAt = new Date().toISOString(); status(report.failures.length ? (report.blocked ? "blocked" : "failed") : "complete");
 }

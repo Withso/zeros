@@ -57,8 +57,10 @@ export function schemeForDeploymentEnvironment(environment, requestedScheme) {
  * such as the retired `beta`) gets null: callers must not build a link, least
  * of all one that carries a destination. */
 export function deploymentAppLink(environment) {
-  if (environment === undefined || environment === null || environment === "" || environment === "dev")
+  // Trimmed exactly as deployment-env.mjs validates the build.
+  const name = typeof environment === "string" ? environment.trim() : environment;
+  if (name === undefined || name === null || name === "" || name === "dev")
     return `${DEFAULT_SCHEME}://`;
-  if (!Object.hasOwn(DEPLOYMENT_SCHEMES, environment)) return null;
-  return `${DEPLOYMENT_SCHEMES[environment]}://`;
+  if (!Object.hasOwn(DEPLOYMENT_SCHEMES, name)) return null;
+  return `${DEPLOYMENT_SCHEMES[name]}://`;
 }

@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
-import { zerosLogDir } from "../src/engine/db/paths";
+import { appIdentity } from "../src/engine/db/paths";
 
 // LaunchServices can fail Squirrel's post-install relaunch with -600
 // (procNotFound) after launchd has already spawned the new app suspended. That
@@ -108,7 +108,8 @@ export function startUpdateRelaunchGuard(
   if (!bundle) return null;
   const timing = { ...DEFAULT_TIMING, ...options.timing };
   const logPath =
-    options.logPath ?? path.join(zerosLogDir(), "main.log");
+    options.logPath ??
+    path.join(os.homedir(), "Library", "Logs", appIdentity(), "main.log");
   try {
     const child = spawn(
       "/bin/sh",

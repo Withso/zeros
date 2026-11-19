@@ -4,7 +4,7 @@ import path from "node:path";
 import net from "node:net";
 import { once } from "node:events";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { parse } from "smol-toml";
 import {
   checkoutIdentity,
@@ -393,38 +393,17 @@ describe("Local launch ownership", () => {
     expect(registry.instances[identity.slug].layout).toBe("legacy");
   });
 
-  it("prunes dead ephemeral identities at launch without touching its own", async () => {
+  it("never removes another development identity's files at launch", async () => {
     const root = directory(), home = directory();
-    const registry = path.join(home, "Library/Application Support/com.zeros.local/instances.json");
     const leftover = path.join(home, "Library/Application Support/com.zeros.local/instances/design-qual-deadbeef");
     fs.mkdirSync(leftover, { recursive: true });
-    fs.writeFileSync(registry, JSON.stringify({ version: 1, instances: {
-      "design-qual-deadbeef": { kind: "ephemeral", name: "Q", checkout: null, layout: "v2", ownerPid: 2 ** 22 + 99,
-        createdAt: new Date().toISOString(), lastUsedAt: new Date().toISOString() } } }));
+    fs.writeFileSync(path.join(leftover, "zeros.db"), "db");
+    const bundle = path.join(home, "Library/Caches/com.zeros.local/bundles/0123456789abcdef");
+    fs.mkdirSync(bundle, { recursive: true });
     await launchOnce(root, home);
-    expect(fs.existsSync(leftover)).toBe(false);
-    expect(Object.keys(JSON.parse(fs.readFileSync(registry, "utf8")).instances)).toEqual([checkoutIdentity(root).slug]);
-  });
-
-  // Phase 2 finding 13: registration and pruning never sit on the launch path.
-  it("starts the prune only after the app stack is spawned, and never waits on it to launch", async () => {
-    const root = directory(), home = directory();
-    const order: string[] = [];
-    let finishPrune!: () => void;
-    const finished = runLocalDevelopment({
-      root, home, platform: "darwin", environment: {},
-      prepareBundle: () => "/local/Electron",
-      prune: () => { order.push("prune"); return new Promise<void>((resolve) => { finishPrune = resolve; }); },
-      run: async (_command: string, args: string[]) => {
-        order.push(args.includes("concurrently") ? "stack" : "build");
-        return { code: 0, cancelled: false };
-      },
-    });
-    await vi.waitFor(() => expect(order).toContain("prune"));
-    expect(order.indexOf("stack")).toBeGreaterThan(-1);
-    expect(order.indexOf("stack")).toBeLessThan(order.indexOf("prune"));
-    finishPrune();
-    await finished;
+    expect(fs.readFileSync(path.join(leftover, "zeros.db"), "utf8")).toBe("db");
+    expect(fs.existsSync(bundle)).toBe(true);
+    expect(fs.readFileSync("scripts/electron-local.mjs", "utf8")).not.toMatch(/prune/i);
   });
 
   it("registers within a short bound when another process holds the registry lock", async () => {
@@ -437,7 +416,7 @@ describe("Local launch ownership", () => {
       const started = Date.now();
       await runLocalDevelopment({
         root, home, platform: "darwin", environment: {}, prepareBundle: () => "/local/Electron",
-        prune: async () => {}, run: async () => ({ code: 0, cancelled: false }),
+        run: async () => ({ code: 0, cancelled: false }),
       });
       expect(Date.now() - started).toBeLessThan(1_500);
       expect(fs.existsSync(registry)).toBe(false);

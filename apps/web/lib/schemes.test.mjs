@@ -110,5 +110,13 @@ it("an Open Zeros link without a callback opens this deployment's app", () => {
 });
 
 it("a named but unrecognised deployment gets no app link at all", () => {
-  for (const environment of ["beta", "staging", "Production", " alpha"]) assert.equal(deploymentAppLink(environment), null);
+  for (const environment of ["beta", "staging", "Production", " beta "]) assert.equal(deploymentAppLink(environment), null);
+});
+
+// Review A finding 11: deployment-env.mjs accepts a padded name at build time,
+// so the runtime link must read it the same way.
+it("reads a deployment name exactly as the build validation does", () => {
+  assert.equal(deploymentAppLink(" alpha "), deploymentAppLink("alpha"));
+  assert.equal(deploymentAppLink("\tproduction\n"), deploymentAppLink("production"));
+  assert.equal(deploymentAppLink("  "), deploymentAppLink(""));
 });

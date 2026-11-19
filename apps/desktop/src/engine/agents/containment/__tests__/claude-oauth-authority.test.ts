@@ -14,8 +14,6 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   ClaudeOAuthAuthority,
-  claudeCredentialKeychainService,
-  claudeRefreshLockName,
   requestClaudeOAuthRefresh,
   withMacClaudeRefreshLock,
   type ClaudeCredentialReadResult,
@@ -39,35 +37,6 @@ function credential(options: {
 }
 
 describe("Claude OAuth host authority", () => {
-  it("keys the refresh lock by the Keychain item: the default one keeps its old name", async () => {
-    expect(claudeRefreshLockName(claudeCredentialKeychainService())).toBe("claude-oauth-refresh.lock");
-    const isolated = claudeCredentialKeychainService("/tmp/isolated-config");
-    expect(claudeRefreshLockName(isolated)).toMatch(/^claude-oauth-refresh-[0-9a-f]{16}\.lock$/);
-    expect(claudeRefreshLockName(isolated)).not.toBe(claudeRefreshLockName(claudeCredentialKeychainService("/tmp/other")));
-
-    const root = await mkdtemp(path.join(tmpdir(), "zeros-claude-lock-test-"));
-    const lockRoot = path.join(root, "credentials");
-    try {
-      const order: string[] = [];
-      let release!: () => void;
-      const held = withMacClaudeRefreshLock(
-        () => new Promise<void>((resolve) => { order.push("first"); release = resolve; }),
-        { lockRoot, service: claudeCredentialKeychainService() },
-      );
-      await vi.waitFor(() => expect(order).toEqual(["first"]));
-      const same = withMacClaudeRefreshLock(async () => { order.push("same"); }, { lockRoot, service: claudeCredentialKeychainService() });
-      await withMacClaudeRefreshLock(async () => { order.push("other"); }, { lockRoot, service: isolated });
-      await new Promise((resolve) => setTimeout(resolve, 150));
-      expect(order).toEqual(["first", "other"]);
-      release();
-      await held;
-      await same;
-      expect(order).toEqual(["first", "other", "same"]);
-    } finally {
-      await rm(root, { recursive: true, force: true });
-    }
-  });
-
   it("recovers an empty stale refresh lock left by a crashed writer", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "zeros-claude-lock-test-"));
     const lockRoot = path.join(root, "credentials");

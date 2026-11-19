@@ -1,15 +1,37 @@
-// The development family's on-disk shapes. Plain CommonJS with Node built-ins
-// only: paths.ts, the launchers, the prune and `pnpm storage:sweep` (which must
-// run in a checkout without node_modules) all import this one definition.
+// The development family's on-disk shapes (the `dev` channel: `pnpm
+// electron:local`, `pnpm electron:alpha`, test identities). Plain CommonJS with
+// Node built-ins: paths.ts, the launchers and `pnpm storage:inventory` (which
+// runs without node_modules) share this one definition.
+//
+// A new identity (macOS; Linux and Windows use their app-data root):
+//   data      ~/Library/Application Support/com.zeros.local/instances/<inst>/
+//   session   <data>/electron/  (Electron sessionData; nothing is ever moved in)
+//   logs      ~/Library/Logs/com.zeros.local/<inst>/
+//   bundle    ~/Library/Caches/com.zeros.local/bundles/<inst>/
+//   state     ~/.zeros-local/instances/<inst>/
+//   visible   ~/zeros-local-<inst>/{workspaces,design workspaces,cloud-sync}
+//   shared    ~/Library/Application Support/com.zeros.local/  (Local provider
+//             credentials, instances.json)
+//
+// Compatibility contracts:
+// - `ZEROS_LOCAL_LAYOUT=legacy` is exported only by `pnpm electron:local`, when
+//   the identity's pre-registry data folder `com.zeros.local.<inst>` exists. A
+//   legacy identity resolves every root exactly as before (data, session and
+//   logs under `com.zeros.local.<inst>`, bundle in its state root): its DB and
+//   Keychain-bound provider profiles hold absolute paths, so nothing moves.
+//   Reserved identities never take it.
+// - ZEROS_DATA_DIR, ZEROS_WORKSPACES_DIR and ZEROS_DESIGN_WORKSPACES_DIR replace
+//   the data, workspaces and design-workspaces roots (paths.ts).
+// - The visible root keeps the flat `zeros-local-<inst>` shape the renderer's
+//   managed-path matcher already recognises.
 const path = require("node:path");
 const { homedir } = require("node:os");
 
 const FAMILY_ID = "com.zeros.local";
 const FAMILY_XDG = "zeros-local";
 const RESERVED_INSTANCE_IDS = Object.freeze(["alpha", "default"]);
-/** Written in `electron/` once the old Chromium profile has moved there. */
-const SESSION_MOVED_MARKER = ".zeros-session-relocated";
 const INSTANCE_ID = /^[a-z0-9][a-z0-9._-]{0,39}$/;
+const CHECKOUT_INSTANCE_ID = /^[0-9a-f]{16}$/;
 
 // Same normalization main and paths.ts have always applied to ZEROS_INSTANCE.
 function sanitizeInstanceId(raw) {
@@ -27,6 +49,13 @@ function developmentInstanceId(env = process.env) {
 
 function isReservedInstanceId(instance) {
   return RESERVED_INSTANCE_IDS.includes(instance);
+}
+
+/** A Local checkout's id: the first 16 hex characters of the SHA-256 of its
+ * canonical path. Hosted development identities never take this shape, so
+ * account-free Local and hosted Dev can never resolve to one profile. */
+function isCheckoutInstanceId(instance) {
+  return CHECKOUT_INSTANCE_ID.test(instance);
 }
 
 function assertInstanceId(instance) {
@@ -49,44 +78,29 @@ function platformRoots({ home, platform, env }) {
         appData: path.join(home, "Library", "Application Support"),
         cache: path.join(home, "Library", "Caches"),
         logs: path.join(home, "Library", "Logs"),
-        preferences: path.join(home, "Library", "Preferences"),
-        httpStorages: path.join(home, "Library", "HTTPStorages"),
-        webKit: path.join(home, "Library", "WebKit"),
-        savedState: path.join(home, "Library", "Saved Application State"),
       };
     case "win32":
       return {
         appData: env.APPDATA ?? path.join(home, "AppData", "Roaming"),
         cache: env.LOCALAPPDATA ?? path.join(home, "AppData", "Local"),
         logs: null,
-        preferences: null,
-        httpStorages: null,
-        webKit: null,
-        savedState: null,
       };
     default:
       return {
         appData: env.XDG_DATA_HOME ?? path.join(home, ".local", "share"),
         cache: env.XDG_CACHE_HOME ?? path.join(home, ".cache"),
         logs: null,
-        preferences: null,
-        httpStorages: null,
-        webKit: null,
-        savedState: null,
       };
   }
 }
 
-/** Every root one development identity owns. `legacy` is the pre-registry
- * shape whose databases and Keychain-bound provider profiles hold absolute
- * paths, so it is resolved in place rather than moved. */
+/** Every root one development identity owns. */
 function developmentPaths({
   instance,
   layout = "v2",
   home = homedir(),
   platform = process.platform,
   env = process.env,
-  cacheRoot,
 } = {}) {
   assertInstanceId(instance);
   if (layout !== "v2" && layout !== "legacy")
@@ -95,33 +109,25 @@ function developmentPaths({
   const reverseDns = platform === "darwin" || platform === "win32";
   const legacy = layout === "legacy";
   const sharedDataDir = path.join(roots.appData, reverseDns ? FAMILY_ID : FAMILY_XDG);
+  const bundleId = `${FAMILY_ID}.${instance}`;
   const dataDir = legacy
-    ? path.join(roots.appData, reverseDns ? `${FAMILY_ID}.${instance}` : `${FAMILY_XDG}-${instance}`)
+    ? path.join(roots.appData, reverseDns ? bundleId : `${FAMILY_XDG}-${instance}`)
     : path.join(sharedDataDir, "instances", instance);
-  const cacheBase = cacheRoot ?? roots.cache;
-  const cacheDir = legacy
-    ? path.join(cacheBase, `${FAMILY_ID}.${instance}`)
-    : path.join(cacheBase, FAMILY_ID, "instances", instance);
   const logDir = roots.logs
     ? legacy
-      ? path.join(roots.logs, `${FAMILY_ID}.${instance}`)
+      ? path.join(roots.logs, bundleId)
       : path.join(roots.logs, FAMILY_ID, instance)
     : path.join(dataDir, "logs");
   const stateRoot = localInstanceStateRoot(instance, home);
-  const visibleRoot = legacy
-    ? path.join(home, `${FAMILY_XDG}-${instance}`)
-    : path.join(home, FAMILY_XDG, instance);
-  const bundleId = `${FAMILY_ID}.${instance}`;
+  const visibleRoot = path.join(home, `${FAMILY_XDG}-${instance}`);
   return {
     instance,
     layout,
     sharedDataDir,
     registryPath: path.join(sharedDataDir, "instances.json"),
     dataDir,
-    cacheDir,
-    // A legacy profile keeps its renderer state where it always was; a v2
-    // profile's old location is `cacheDir` until it moves.
-    sessionDataDir: legacy ? cacheDir : path.join(dataDir, "electron"),
+    // Main passes Electron's own cache root for a legacy session (paths.ts).
+    sessionDataDir: legacy ? path.join(roots.cache, bundleId) : path.join(dataDir, "electron"),
     logDir,
     stateRoot,
     visibleRoot,
@@ -131,18 +137,10 @@ function developmentPaths({
       ? path.join(stateRoot, "bundle")
       : path.join(roots.cache, FAMILY_ID, "bundles", instance),
     bundleId,
-    preferencesFile: roots.preferences
-      ? path.join(roots.preferences, `${bundleId}.plist`)
-      : null,
-    // macOS creates these from the bundle id; all regenerable.
-    httpStorageDir: roots.httpStorages ? path.join(roots.httpStorages, bundleId) : null,
-    webKitDir: roots.webKit ? path.join(roots.webKit, bundleId) : null,
-    savedStateDir: roots.savedState ? path.join(roots.savedState, `${bundleId}.savedState`) : null,
   };
 }
 
-/** The containers a removal target must sit directly inside, for prune/sweep
- * containment checks. */
+/** The family's shared folders, for the registry and the inventory. */
 function developmentContainers({
   home = homedir(),
   platform = process.platform,
@@ -156,17 +154,11 @@ function developmentContainers({
     appData: roots.appData,
     cache: roots.cache,
     logs: roots.logs,
-    preferences: roots.preferences,
-    httpStorages: roots.httpStorages,
-    webKit: roots.webKit,
-    savedState: roots.savedState,
     sharedDataDir: shared,
     dataInstances: path.join(shared, "instances"),
-    cacheInstances: path.join(roots.cache, FAMILY_ID, "instances"),
     bundles: path.join(roots.cache, FAMILY_ID, "bundles"),
     logInstances: roots.logs ? path.join(roots.logs, FAMILY_ID) : null,
     stateInstances: path.join(home, ".zeros-local", "instances"),
-    visibleInstances: path.join(home, FAMILY_XDG),
     legacyBundles: path.join(home, ".zeros-local", "dev-instances"),
   };
 }
@@ -187,37 +179,20 @@ function localInstanceBundlePaths({
   const roots = developmentPaths({ instance: slug, layout, home, platform, env: {} });
   const bundlePath = path.join(roots.bundleDir, `${name}.app`);
   return {
-    home,
     stateRoot: roots.stateRoot,
-    bundleDir: roots.bundleDir,
     bundlePath,
     versionMarker: `${bundlePath}.version`,
     legacyBundleRoot: path.join(home, ".zeros-local", "dev-instances", slug),
   };
 }
 
-/** Where a development identity's Chromium profile is right now. */
-function effectiveSessionDataDir(roots) {
-  if (roots.layout === "legacy") return roots.cacheDir;
-  try {
-    if (require("node:fs").lstatSync(path.join(roots.sessionDataDir, SESSION_MOVED_MARKER)).isFile()) return roots.sessionDataDir;
-  } catch { /* not moved */ }
-  try {
-    require("node:fs").lstatSync(roots.cacheDir);
-    return roots.cacheDir;
-  } catch {
-    return roots.sessionDataDir;
-  }
-}
-
 module.exports = {
-  SESSION_MOVED_MARKER,
-  effectiveSessionDataDir,
   FAMILY_ID,
   RESERVED_INSTANCE_IDS,
   sanitizeInstanceId,
   developmentInstanceId,
   isReservedInstanceId,
+  isCheckoutInstanceId,
   developmentLayout,
   developmentPaths,
   developmentContainers,

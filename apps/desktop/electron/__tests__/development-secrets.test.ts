@@ -104,7 +104,7 @@ describe("development secret stores", () => {
 
   it("refuses account-free Local on a reserved identity", () => {
     for (const instance of ["alpha", "default"])
-      expect(() => assertDevelopmentAdmission({ localDevelopment: true, instance })).toThrow(/reserved/);
+      expect(() => assertDevelopmentAdmission({ localDevelopment: true, instance })).toThrow(/checkout's own instance/);
     expect(() => assertDevelopmentAdmission({ localDevelopment: false, instance: "alpha" })).not.toThrow();
     expect(() => assertDevelopmentAdmission({ localDevelopment: true, instance: "a123456789abcdef" })).not.toThrow();
   });

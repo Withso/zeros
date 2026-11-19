@@ -14,6 +14,7 @@ import {
 } from "node:fs";
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
+import os from "node:os";
 import path from "node:path";
 import { app } from "electron";
 import { emitEvent } from "./ipc/events";
@@ -24,8 +25,8 @@ import { resolveProductRipgrepPath } from "./ripgrep-runtime-asset";
 import { createEngineWatchdogTick, sameEngineTarget } from "./engine-watchdog";
 import { engineBasePort, ENGINE_PORT_SPAN } from "../src/engine/runtime";
 import {
+  appIdentity,
   engineRuntimeDir,
-  zerosLogDir,
   zerosStateRoot,
 } from "../src/engine/db/paths";
 import { secretsFilePath, getSecret, setSecret } from "./secret-store";
@@ -1448,8 +1449,16 @@ async function doSpawnEngine(
   if (isPackaged) {
     // Side-stream into a raw engine log for deep-dive parsing — useful
     // when the line-buffered forwarding above can't keep up with bursty
-    // codex/claude streams or when inspecting binary blobs. Beside main.log.
-    const engineLogDir = zerosLogDir();
+    // codex/claude streams or when inspecting binary blobs. Keep the SAME
+    // channel identity as main.log (com.zeros / com.zeros.alpha); the old
+    // hard-coded `Logs/Zeros` path mixed channels' output and sent
+    // diagnostics to the wrong directory.
+    const engineLogDir = path.join(
+      os.homedir(),
+      "Library",
+      "Logs",
+      appIdentity(),
+    );
     const engineLogPath = path.join(engineLogDir, "engine.log");
     try {
       mkdirSync(engineLogDir, { recursive: true });

@@ -1,5 +1,5 @@
 // One exclusive lock file shared by the development launchers and the instance
-// registry. Node built-ins only: storage:sweep must run without node_modules.
+// registry. Node built-ins only: storage:inventory runs without node_modules.
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
@@ -13,6 +13,25 @@ export class LockBusyError extends Error {
 }
 
 const activeLockTokens = new Set();
+
+/** The text of a small private file, or null when it does not exist. Opening
+ * never blocks (a FIFO in its place) and never follows a link; anything but a
+ * regular file throws. */
+export function readRegularFile(file) {
+  let fd;
+  try {
+    fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0) | (fs.constants.O_NONBLOCK ?? 0));
+  } catch (error) {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  }
+  try {
+    if (!fs.fstatSync(fd).isFile()) throw Object.assign(new Error(`${file} is not a regular file`), { code: "ENOTREG" });
+    return fs.readFileSync(fd, "utf8");
+  } finally {
+    fs.closeSync(fd);
+  }
+}
 
 export function pidAlive(pid) {
   try {
@@ -74,13 +93,8 @@ export function acquireExclusiveLock({
   const token = randomUUID();
   const body = JSON.stringify({ ...record, pid: process.pid, token, at: Date.now() });
   const read = () => {
-    let raw;
-    try {
-      raw = fs.readFileSync(file, "utf8");
-    } catch (error) {
-      if (error.code === "ENOENT") return null;
-      throw error;
-    }
+    const raw = readRegularFile(file);
+    if (raw === null) return null;
     let owner = null;
     try {
       owner = JSON.parse(raw);
@@ -166,21 +180,52 @@ export function acquireExclusiveLock({
 }
 
 /** Read a lock's owner without taking it: "absent", "live" or "unknown"
- * (unreadable is never proof that nobody holds it). `ignoreHeld` reads a lock
- * this process holds as absent. */
-export function lockOwnerState(file, { ignoreHeld = false } = {}) {
+ * (unreadable is never proof that nobody holds it). */
+export function lockOwnerState(file) {
   let raw;
   try {
-    raw = fs.readFileSync(file, "utf8");
-  } catch (error) {
-    return error.code === "ENOENT" ? "absent" : "unknown";
+    raw = readRegularFile(file);
+  } catch {
+    return "unknown";
   }
+  if (raw === null) return "absent";
   try {
     const owner = JSON.parse(raw);
     if (!Number.isSafeInteger(owner?.pid) || owner.pid <= 0) return "unknown";
-    if (ignoreHeld && heldByThisProcess(owner)) return "absent";
     return pidAlive(owner.pid) ? "live" : "absent";
   } catch {
     return "unknown";
   }
+}
+
+const LAUNCHER_MARKERS = ["electron-local.mjs", "dev-environment/launcher.mjs"];
+
+/** One lock per checkout, shared by `electron:local` and `electron:alpha`:
+ * both rebuild the checkout's dist-electron and dist-engine. */
+export function acquireCheckoutLauncherLock(root, record = {}) {
+  return acquireExclusiveLock({
+    file: path.join(root, ".context", "zeros-local", "launcher.lock"),
+    record,
+    classify: launcherOwnerClassifier(
+      LAUNCHER_MARKERS,
+      "Zeros Local launcher lock is incomplete; stop Local before removing .context/zeros-local/launcher.lock.",
+      "Invalid Zeros Local launcher lock.",
+    ),
+    busyMessage: "A Zeros launcher (electron:local or electron:alpha) is already running from this checkout. Stop it before launching again.",
+    recoveryBusyMessage: "Zeros Local lock recovery is already in progress; retry after it completes.",
+    changedMessage: "Zeros Local launcher lock changed; retry.",
+  });
+}
+
+/** An identity lock for a launcher, recognised as live while either launcher
+ * holds it. */
+export function acquireLauncherLock(file, { record = {}, busyMessage }) {
+  return acquireExclusiveLock({
+    file,
+    record,
+    classify: launcherOwnerClassifier(LAUNCHER_MARKERS, `The launcher lock at ${file} is incomplete; stop that launcher before removing it.`, "Invalid launcher lock."),
+    busyMessage,
+    recoveryBusyMessage: "Lock recovery is already in progress; retry after it completes.",
+    changedMessage: "The launcher lock changed; retry.",
+  });
 }

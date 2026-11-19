@@ -4,6 +4,7 @@
 import assert from "node:assert/strict";
 import { nativeDesignHiddenResourcesRetired } from "./design-native-view.mjs";
 import { execFile, spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import { createServer } from "node:net";
 import path from "node:path";
@@ -14,7 +15,6 @@ import { setTimeout as delay } from "node:timers/promises";
 import { launchNativeElectron } from "./design-native-electron.mjs";
 import { nativeViteConfiguration } from "./design-native-vite.mjs";
 import { localEnvironment, pickLocalPorts } from "./electron-local.mjs";
-import { createEphemeralIdentity } from "./ephemeral-local-identity.mjs";
 import { runNativeDesignBaseline } from "./design-native-baseline.mjs";
 
 import { activateNativeWorkbenchTab } from "./design-native-workbench.mjs";
@@ -58,7 +58,6 @@ const stage = path.join(root, "app");
 await fs.mkdir(stage);
 report.artifacts = path.relative(repo, root);
 let app;
-let ephemeral;
 let vite;
 let viteLog;
 let page;
@@ -67,8 +66,7 @@ try {
   await status("preparing");
   report.sourceDigest = manifest().digest;
   report.revision = (await run("git", ["rev-parse", "HEAD"])).trim();
-  ephemeral = createEphemeralIdentity({ purpose: "design-qual", name: "Zeros Design Qualification" });
-  const identity = { slug: ephemeral.slug, name: ephemeral.name };
+  const identity = { slug: randomUUID().replace(/-/g, "").slice(0, 16), name: "Zeros Design Qualification" };
   const ports = await pickLocalPorts(identity.slug);
   const cdpPort = await freePort();
   const env = { ...localEnvironment({ identity, ...ports }), ZEROS_ISOLATE: "1", ZEROS_NO_ENGINE_HMR: "1", ZEROS_NO_MAIN_HMR: "1", ZEROS_DATA_DIR: path.join(root, "profile"), ELECTRON_RENDERER_URL: `http://127.0.0.1:${ports.vitePort}` };
@@ -240,10 +238,9 @@ try {
   process.exitCode = 1;
 } finally {
   clearTimeout(deadline);
-  const retired = await (app ? app.close() : Promise.resolve()).then(() => true, error => { report.failures.push(`App close: ${error.message}`); process.exitCode = 1; return false; });
+  await app?.close().catch(error => { report.failures.push(`App close: ${error.message}`); process.exitCode = 1; });
   if (vite?.pid) { try { vite.kill("SIGTERM"); } catch (error) { if (error.code !== "ESRCH") report.failures.push(`Vite close: ${error.message}`); } }
   await viteLog?.close();
-  ephemeral?.dispose({ retired });
   report.finishedAt = new Date().toISOString();
   await save();
   await status(report.failures.length ? "failed" : "complete");

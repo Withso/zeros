@@ -133,6 +133,7 @@ import { controlPlaneBaseUrl } from "./workos-desktop-account";
 import { WorkOSDesktopSecurityMonitor } from "./auth-security-monitor";
 import { controlPlaneFetch } from "./control-plane-fetch";
 import {
+  appIdentity,
   developmentInstance,
   realProfileRoots,
   storageFamily,
@@ -141,11 +142,9 @@ import {
   zerosDesignWorkspacesRoot,
   zerosDevelopmentDataDir,
   zerosLogDir,
-  zerosOldSessionDataDir,
   zerosSessionDataDir,
 } from "../src/engine/db/paths";
-import { chooseSessionDataDir } from "./session-location";
-import { assertDevelopmentAdmission, sharedSecretsDirectory } from "./storage-identity";
+import { assertDevelopmentAdmission, assertDevelopmentOverrideIsolated, sharedSecretsDirectory } from "./storage-identity";
 import { removeEmptyLegacyDesignFolder } from "./legacy-design-folder";
 // CHANNELS/isChannel only — importing the runtime module is side-effect-free, so
 // this cannot read ZEROS_CHANNEL before the seeding block below sets it.
@@ -280,16 +279,11 @@ if (!IS_LOCAL_DEVELOPMENT) delete process.env.ZEROS_LOCAL_DEVELOPMENT;
   }
 }
 
-// An override isolates a fixture; it must never select a real profile and,
-// with it, that profile's credential store.
-{
-  const override = process.env.ZEROS_DATA_DIR?.trim();
-  if (override) {
-    const target = path.resolve(override);
-    if (realProfileRoots().some((root) => target === root || target.startsWith(`${root}${path.sep}`)))
-      throw new Error("[Zeros] ZEROS_DATA_DIR points into a real Zeros profile. Use a separate fixture folder.");
-  }
-}
+// A development override isolates a fixture; it must never select a real
+// profile and, with it, that profile's credential store. Installed channels
+// keep ZEROS_DATA_DIR exactly as it has always behaved.
+if (process.env.ZEROS_CHANNEL === "dev")
+  assertDevelopmentOverrideIsolated(process.env.ZEROS_DATA_DIR, realProfileRoots());
 
 // Cloud workspaces are a release/build capability, not a user preference. A
 // packaged compile replaces the shared resolver's baked constant, then this
@@ -355,46 +349,118 @@ app.setPath("userData", zerosDataDir());
         localDevelopment: IS_LOCAL_DEVELOPMENT,
         isolate: process.env.ZEROS_ISOLATE === "1" || Boolean(process.env.ZEROS_DATA_DIR?.trim()),
         familyDataDir: zerosChannelDataDir(),
-        hostedAccountDataDir: zerosDevelopmentDataDir("alpha"),
+        hostedAccountDataDir: process.env.ZEROS_CHANNEL === "dev" ? zerosDevelopmentDataDir("alpha") : "",
       })
     : undefined;
   if (shared) process.env.ZEROS_SHARED_SECRETS_DIR = shared;
   else delete process.env.ZEROS_SHARED_SECRETS_DIR;
 }
 
-// The whole Chromium profile, caches included, lives in `<data dir>/electron`
-// (docs/storage-layout.md). Before ready, session-location.ts either moves the
-// old profile there in one rename or keeps using the old one for this launch.
-function selectSessionData(): void {
+// Chromium cache → ~/Library/Caches (macOS-correct, purgeable)
+// Chromium ignores app.getPath("cache"); redirect sessionData before ready so
+// regenerable data uses the OS cache location. Migrate durable renderer stores
+// before reclaiming old caches; secrets and the engine DB use separate paths.
+function relocateChromiumCache(): void {
   // Bound the HTTP disk cache so it can't grow without limit (250 MB).
   app.commandLine.appendSwitch("disk-cache-size", String(250 * 1024 * 1024));
 
-  // getPath("cache") = ~/Library/Caches (macOS), ~/.cache (Linux), Roaming
-  // AppData (Windows). Electron resolves "cache" at runtime but omits it from
-  // getPath()'s typed name union; the suppression bridges that gap (and
-  // self-removes if the types ever add it).
+  // getPath("cache") = ~/Library/Caches (macOS), ~/.cache (Linux),
+  // %LOCALAPPDATA% (Windows). Keep dev isolated from prod.
+  // Electron resolves "cache" at runtime but omits it from getPath()'s typed
+  // name union; the suppression bridges that gap (and self-removes if the types
+  // ever add it). See the cache-relocation doctrine.
   // @ts-expect-error - "cache" is a valid runtime path name, absent from the types.
   const cacheRoot = app.getPath("cache");
-  const choice = chooseSessionDataDir({
-    target: zerosSessionDataDir(cacheRoot),
-    old: zerosOldSessionDataDir(cacheRoot),
-    userDataDir: zerosDataDir(),
-    log: durableLog,
-  });
-  app.setPath("sessionData", choice.dir);
-}
+  // New: cache/session under the SAME reverse-DNS id as userData + the DB
+  // (com.zeros[.alpha]) — the design.zeros.* scheme is retired, so a
+  // logical instance is ONE identifier across Application Support, Caches + Logs.
+  const newSessionData = path.join(cacheRoot, appIdentity());
 
-/** Appends to main.log before setupLogFile() installs the console mirror. */
-function durableLog(line: string): void {
-  try {
-    const logDir = zerosLogDir();
-    fs.mkdirSync(logDir, { recursive: true });
-    fs.appendFileSync(path.join(logDir, "main.log"), `[${new Date().toISOString()}] [Zeros] ${line}\n`);
-  } catch {
-    /* logging is best-effort */
+  if (DEVELOPMENT) {
+    const sessionData = zerosSessionDataDir(cacheRoot);
+    fs.mkdirSync(sessionData, { recursive: true });
+    app.setPath("sessionData", sessionData);
+    return;
   }
+
+  // Legacy source under the RETIRED design.zeros.* scheme — migrate durable
+  // renderer state (composer drafts / theme / Local Storage) forward ONCE. Named
+  // by its LITERAL old value: app.getPath("sessionData") now resolves to the
+  // fresh new userData (the Phase-1 redirect ran above), so it can't be the source.
+  const oldSessionData = path.join(cacheRoot, "design.zeros.app");
+  if (path.resolve(oldSessionData) === path.resolve(newSessionData)) {
+    app.setPath("sessionData", newSessionData);
+    return;
+  }
+
+  try {
+    fs.mkdirSync(newSessionData, { recursive: true });
+  } catch (err) {
+    // Leave the default profile in place rather than risk a broken one.
+    console.error(`[Zeros] cache: cannot create ${newSessionData}:`, err);
+    return;
+  }
+
+  // Durable renderer state we preserve across the move; the cache dirs
+  // we deliberately abandon (they regenerate) and reclaim from old.
+  const DURABLE = [
+    "Local Storage",
+    "Session Storage",
+    "IndexedDB",
+    "Cookies",
+    "Cookies-journal",
+    "WebStorage",
+    "SharedStorage",
+    "SharedStorage-wal",
+  ];
+  const REGENERABLE = [
+    "Cache",
+    "Code Cache",
+    "GPUCache",
+    "DawnWebGPUCache",
+    "DawnGraphiteCache",
+    "Shared Dictionary",
+    "VideoDecodeStats",
+  ];
+
+  const marker = path.join(newSessionData, ".zeros-session-migrated");
+  const isFreshInstall = !fs.existsSync(
+    path.join(oldSessionData, "Local Storage"),
+  );
+  if (!fs.existsSync(marker) && !isFreshInstall) {
+    for (const sub of DURABLE) {
+      const src = path.join(oldSessionData, sub);
+      const dest = path.join(newSessionData, sub);
+      try {
+        if (fs.existsSync(src) && !fs.existsSync(dest)) {
+          fs.cpSync(src, dest, { recursive: true });
+        }
+      } catch (err) {
+        console.error(`[Zeros] cache: copy "${sub}" failed:`, err);
+      }
+    }
+    // Free the ~430 MB of orphaned cache from Application Support.
+    for (const sub of REGENERABLE) {
+      try {
+        fs.rmSync(path.join(oldSessionData, sub), {
+          recursive: true,
+          force: true,
+        });
+      } catch {
+        /* best-effort reclaim */
+      }
+    }
+  }
+  try {
+    fs.writeFileSync(marker, new Date().toISOString());
+  } catch {
+    /* best-effort; the per-dir existence guard keeps copies idempotent */
+  }
+
+  app.setPath("sessionData", newSessionData);
+  console.log(`[Zeros] sessionData → ${newSessionData} (cache now purgeable)`);
 }
-selectSessionData();
+relocateChromiumCache();
 
 const APP_LABEL = app.getName();
 // Surface the resolved mode so a misconfigured launch is visible, never silent.

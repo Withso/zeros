@@ -3,7 +3,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { BrowserSubscriptionProvider } from "@zeros/protocol/provider-auth";
 import { IS_LOCAL_DEVELOPMENT } from "./runtime-mode";
-import { isReservedInstanceId } from "../src/engine/db/local-development-paths.cjs";
+import { isCheckoutInstanceId } from "../src/engine/db/local-development-paths.cjs";
 
 /** These paths are minted by main, never supplied by a renderer or repository.
  * Keep the UUID path stable: providers may namespace keychain entries by it. */
@@ -56,13 +56,12 @@ export function isOwnedProviderProfileDirectory(
   if (directory === providerProfileDirectory(provider, id)) return true;
   if (!IS_LOCAL_DEVELOPMENT || !/^[0-9a-f-]{36}$/i.test(id)) return false;
   const sharedRoot = path.dirname(secretsFilePath());
-  // An isolated v2 instance: `<shared>/instances/<instance>/provider-accounts/…`.
+  // An isolated v2 checkout: `<shared>/instances/<checkout id>/provider-accounts/…`.
   const instanceRoot = path.resolve(directory, "../../..");
   const instance = path.basename(instanceRoot);
   if (
     path.dirname(instanceRoot) === path.join(sharedRoot, "instances") &&
-    /^[a-z0-9][a-z0-9._-]{0,39}$/.test(instance) &&
-    !isReservedInstanceId(instance) &&
+    isCheckoutInstanceId(instance) &&
     directory === path.join(instanceRoot, "provider-accounts", provider, id)
   )
     return true;

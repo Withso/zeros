@@ -37,11 +37,10 @@ import {
 // the bug that registered worktrees as phantom top-level projects). Matches
 // BOTH layouts:
 //   • current visible root  ~/zeros[-<channel>][-<instance>]/workspaces/<repo>/<name>/
-//   • development family    ~/zeros-local/<instance>/workspaces/<repo>/<name>/
 //   • legacy hidden root    ~/.zeros[-<channel>]/worktrees/<slug>/<wsId>/
-// The engine's zerosVisibleRoot() (apps/desktop/src/engine/db/paths.ts) names the
-// visible root `zeros`, `zeros-alpha`, `zeros-local/<instance>`, or a legacy Local
-// profile's `zeros-local-<instance>`. Older dev builds wrote `zeros-dev-<slug>`.
+// The engine's zerosWorkspacesRoot() (apps/desktop/src/engine/db/paths.ts) names the visible
+// root `zeros-<channel>[-<instance>]` — e.g. `zeros-dev`, `zeros-beta`, and for a
+// per-worktree dev instance `zeros-dev-<slug>` (like `zeros-dev-mogadishu-5486`).
 // Design workspaces use the sibling `design workspaces` segment under that same
 // root; both layouts carry the same repository/workspace owner segments.
 // The suffix after `zeros-` / `.zeros-` is intentionally treated as the rest of
@@ -57,17 +56,6 @@ function matchesRootSegment(
   );
 }
 
-// `zeros-local/<instance>` is a development visible root only directly inside
-// a home folder (`/Users/<user>`, `/home/<user>`, `/root`) and with a valid
-// instance id; elsewhere it is an ordinary folder that happens to share the name.
-const INSTANCE_ID = /^[a-z0-9][a-z0-9._-]{0,39}$/;
-function isHomeChild(parts: readonly string[], index: number): boolean {
-  return (
-    (index === 2 && (parts[0] === "Users" || parts[0] === "home")) ||
-    (index === 1 && parts[0] === "root")
-  );
-}
-
 function worktreePathParts(folder: string): {
   repositoryDirectory: string;
   workspaceDirectory: string;
@@ -76,25 +64,16 @@ function worktreePathParts(folder: string): {
   const parts = folder.split("/").filter(Boolean);
   for (let i = 0; i + 3 < parts.length; i += 1) {
     const root = parts[i] ?? "";
-    // The development family nests each instance one level down:
-    // `zeros-local/<instance>/workspaces/…`.
-    const instanced =
-      root === "zeros-local" &&
-      i + 4 < parts.length &&
-      isHomeChild(parts, i) &&
-      INSTANCE_ID.test(parts[i + 1] ?? "") &&
-      (parts[i + 2] === "workspaces" || parts[i + 2] === "design workspaces");
-    const at = instanced ? i + 1 : i;
-    const layout = parts[at + 1] ?? "";
+    const layout = parts[i + 1] ?? "";
     const matchesLegacyRoot =
-      !instanced && matchesRootSegment(root, ".zeros") && layout === "worktrees";
+      matchesRootSegment(root, ".zeros") && layout === "worktrees";
     const matchesVisibleRoot =
       matchesRootSegment(root, "zeros") &&
       (layout === "workspaces" || layout === "design workspaces");
     if (matchesLegacyRoot || matchesVisibleRoot) {
       return {
-        repositoryDirectory: parts[at + 2] ?? "",
-        workspaceDirectory: parts[at + 3] ?? "",
+        repositoryDirectory: parts[i + 2] ?? "",
+        workspaceDirectory: parts[i + 3] ?? "",
         kind:
           matchesVisibleRoot && layout === "design workspaces"
             ? "design"

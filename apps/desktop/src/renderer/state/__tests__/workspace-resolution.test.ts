@@ -98,50 +98,15 @@ describe("repoSlugFromWorktreePath", () => {
         "/Users/dev/zeros-dev-mogadishu-5486/workspaces/acme-widgets/ws_b47da6-myrtle/src/x.ts",
       ),
     ).toBe("acme-widgets");
-    // Other channels (alpha) + their instanced roots resolve too.
+    // Other channels (beta) + their instanced roots resolve too.
     expect(
-      repoSlugFromWorktreePath("/Users/dev/zeros-alpha/workspaces/widgets/ws_1"),
+      repoSlugFromWorktreePath("/Users/dev/zeros-beta/workspaces/widgets/ws_1"),
     ).toBe("widgets");
     expect(
       repoSlugFromWorktreePath(
-        "/Users/dev/zeros-alpha-abc-99/workspaces/widgets/ws_1",
+        "/Users/dev/zeros-beta-abc-99/workspaces/widgets/ws_1",
       ),
     ).toBe("widgets");
-  });
-
-  it("resolves the development family's instance roots in both layouts", () => {
-    for (const root of [
-      "/Users/dev/zeros-local/a123456789abcdef",
-      "/Users/dev/zeros-local/alpha",
-      "/Users/dev/zeros-local-a123456789abcdef",
-    ]) {
-      expect(repoSlugFromWorktreePath(`${root}/workspaces/widgets/ws_1/src/x.ts`)).toBe("widgets");
-      expect(workspaceIdFromWorktreePath(`${root}/workspaces/widgets/ws_1`)).toBe("ws_1");
-      expect(workspaceKindFromManagedPath(`${root}/design workspaces/widgets/landing`)).toBe("design");
-      expect(isWorktreePath(`${root}/workspaces/widgets/landing`)).toBe(true);
-    }
-    expect(isWorktreePath("/Users/dev/zeros-local/alpha")).toBe(false);
-    expect(repoSlugFromWorktreePath("/Users/dev/zeros-local/workspaces/widgets/ws_1/src")).toBe("widgets");
-    expect(repoSlugFromWorktreePath("/Users/dev/zeros-local/alpha/cloud-sync/widgets/1")).toBeNull();
-  });
-
-  // Phase 2 finding 16: an ordinary project that happens to contain a
-  // `zeros-local/<folder>/design workspaces` segment is not a managed path.
-  it("recognises an instanced root only directly in a home folder, with a valid instance id", () => {
-    for (const folder of [
-      "/Users/me/src/zeros-local/examples/design workspaces/widgets/mockup",
-      "/Users/me/src/zeros-local/examples/workspaces/widgets/mockup",
-      "/Users/me/zeros-local/Not Valid/workspaces/widgets/ws_1",
-      "/Volumes/work/zeros-local/a123456789abcdef/workspaces/widgets/ws_1",
-    ]) {
-      expect(workspaceKindFromManagedPath(folder), folder).toBeNull();
-      expect(isWorktreePath(folder), folder).toBe(false);
-      expect(repoSlugFromWorktreePath(folder), folder).toBeNull();
-    }
-    for (const root of ["/home/dev/zeros-local/a123456789abcdef", "/root/zeros-local/design-qual-0011aabb"]) {
-      expect(repoSlugFromWorktreePath(`${root}/workspaces/widgets/ws_1`), root).toBe("widgets");
-      expect(workspaceKindFromManagedPath(`${root}/design workspaces/widgets/landing`), root).toBe("design");
-    }
   });
 
   it("returns null for paths outside the worktrees layout", () => {

@@ -89,9 +89,9 @@ describe("stable provider profile ownership", () => {
     const id = "00000000-0000-4000-8000-000000000001";
     const v2 = (instance: string, provider = "claude") =>
       path.join(state.root, "com.zeros.local", "instances", instance, "provider-accounts", provider, id);
-    for (const instance of ["0123456789abcdef", "design-qual-0011aabb"])
-      expect(isOwnedProviderProfileDirectory("claude", id, v2(instance)), instance).toBe(true);
+    expect(isOwnedProviderProfileDirectory("claude", id, v2("0123456789abcdef"))).toBe(true);
     for (const directory of [
+      v2("design-qual-0011aabb"),
       v2("alpha"),
       v2("default"),
       v2("Not_Valid"),

@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { spawn } from "node:child_process";
-import { ALPHA_INSTANCE, ALPHA_NAME, alphaInstanceEnvironment, prepareAlphaLaunch, startAlphaPrune } from "../alpha-instance.mjs";
+import { ALPHA_INSTANCE, ALPHA_NAME, alphaInstanceEnvironment, importHostedFontCache, prepareAlphaLaunch } from "../alpha-instance.mjs";
 
 const homes: string[] = [];
 function home() {
@@ -34,18 +34,18 @@ describe("pnpm electron:alpha identity", () => {
   // A real process whose command line names a launcher, as the lock classifier reads it.
   const launcher = (marker: string) => spawn(process.execPath, ["-e", "setTimeout(() => {}, 30_000)", marker], { stdio: "ignore" });
 
-  it("registers itself, holds its lease and refuses a second concurrent launch before any build", () => {
+  it("registers itself, holds its lock and refuses a second concurrent launch before any build", () => {
     const h = home(), root = checkout();
     const release = prepareAlphaLaunch({ home: h, root, platform: "darwin" });
     try {
       const registry = JSON.parse(fs.readFileSync(path.join(h, "Library/Application Support/com.zeros.local/instances.json"), "utf8"));
       expect(registry.instances.alpha).toMatchObject({ kind: "alpha", name: "Zeros Local Alpha", checkout: null, layout: "v2" });
-      expect(JSON.parse(fs.readFileSync(path.join(h, ".zeros-local/instances/alpha/launcher.lease"), "utf8")).pid).toBe(process.pid);
+      expect(JSON.parse(fs.readFileSync(path.join(h, ".zeros-local/instances/alpha/launcher.lock"), "utf8")).pid).toBe(process.pid);
       expect(() => prepareAlphaLaunch({ home: h, root: checkout(), platform: "darwin" })).toThrow(/already running/);
     } finally {
       release();
     }
-    expect(fs.existsSync(path.join(h, ".zeros-local/instances/alpha/launcher.lease"))).toBe(false);
+    expect(fs.existsSync(path.join(h, ".zeros-local/instances/alpha/launcher.lock"))).toBe(false);
     prepareAlphaLaunch({ home: h, root, platform: "darwin" })();
   });
 
@@ -55,7 +55,7 @@ describe("pnpm electron:alpha identity", () => {
     fs.mkdirSync(dataDir, { recursive: true });
     fs.symlinkSync(`${os.hostname()}-${process.pid}`, path.join(dataDir, "SingletonLock"));
     expect(() => prepareAlphaLaunch({ home: h, root: checkout(), platform: "darwin" })).toThrow(/already running/);
-    expect(fs.existsSync(path.join(h, ".zeros-local/instances/alpha/launcher.lease"))).toBe(false);
+    expect(fs.existsSync(path.join(h, ".zeros-local/instances/alpha/launcher.lock"))).toBe(false);
   });
 
   it("excludes Local from the same checkout, in both directions, before either rebuilds", async () => {
@@ -79,7 +79,7 @@ describe("pnpm electron:alpha identity", () => {
     }
   });
 
-  it("registers within a short bound when the registry is busy, and prunes only after the stack starts", async () => {
+  it("registers within a short bound when the registry is busy", () => {
     const h = home(), root = checkout();
     const file = path.join(h, "Library/Application Support/com.zeros.local/instances.json");
     fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -87,14 +87,41 @@ describe("pnpm electron:alpha identity", () => {
     try {
       fs.writeFileSync(`${file}.lock`, JSON.stringify({ pid: holder.pid, token: "busy" }));
       const started = Date.now();
-      prepareAlphaLaunch({ home: h, root, platform: "darwin" })();
+      prepareAlphaLaunch({ home: h, root, platform: "darwin", log: () => {} })();
       expect(Date.now() - started).toBeLessThan(1_000);
     } finally {
       holder.kill("SIGKILL");
     }
-    const order: string[] = [];
-    await startAlphaPrune({ home: h, platform: "darwin", prune: async () => { order.push("prune"); return []; } });
-    expect(order).toEqual(["prune"]);
+  });
+
+  // Review B finding 7: hosted Dev's Design font cache lived in com.zeros.dev.
+  it("carries hosted Dev's cached Design fonts over once, copying only cached stylesheets", () => {
+    const h = home();
+    const support = path.join(h, "Library/Application Support");
+    const old = path.join(support, "com.zeros.dev", "design-fonts");
+    fs.mkdirSync(old, { recursive: true });
+    const cached = `${"a".repeat(32)}.css`;
+    fs.writeFileSync(path.join(old, cached), "@font-face{}");
+    fs.writeFileSync(path.join(old, "notes.txt"), "not a font cache file");
+    fs.writeFileSync(path.join(support, "com.zeros.dev", "secrets.json"), "{}");
+    fs.symlinkSync(path.join(support, "com.zeros.dev", "secrets.json"), path.join(old, `${"b".repeat(32)}.css`));
+    expect(importHostedFontCache({ home: h, platform: "darwin" })).toBe("imported");
+    const target = path.join(support, "com.zeros.local", "design-fonts");
+    expect(fs.readdirSync(target)).toEqual([cached]);
+    expect(fs.readFileSync(path.join(target, cached), "utf8")).toBe("@font-face{}");
+    expect(fs.readdirSync(old).sort()).toEqual([cached, `${"b".repeat(32)}.css`, "notes.txt"].sort());
+    fs.writeFileSync(path.join(target, cached), "newer");
+    fs.writeFileSync(path.join(old, `${"c".repeat(32)}.css`), "later");
+    expect(importHostedFontCache({ home: h, platform: "darwin" })).toBe("kept");
+    expect(fs.readdirSync(target)).toEqual([cached]);
+    expect(fs.readFileSync(path.join(target, cached), "utf8")).toBe("newer");
+    expect(fs.readdirSync(path.dirname(target)).filter((name) => name.includes("import"))).toEqual([]);
+  });
+
+  it("imports nothing when hosted Dev never cached fonts", () => {
+    const h = home();
+    expect(importHostedFontCache({ home: h, platform: "darwin" })).toBe("none");
+    expect(fs.existsSync(path.join(h, "Library/Application Support/com.zeros.local/design-fonts"))).toBe(false);
   });
 
   it("checks for a running instance before refreshing public auth", () => {
@@ -102,6 +129,6 @@ describe("pnpm electron:alpha identity", () => {
     const branch = source.slice(source.indexOf('if (action === "alpha")'));
     expect(branch.indexOf("prepareAlphaLaunch(")).toBeGreaterThan(-1);
     expect(branch.indexOf("prepareAlphaLaunch(")).toBeLessThan(branch.indexOf("ensureDevAuthEnvironment("));
-    expect(branch.indexOf("startAlphaPrune(")).toBeGreaterThan(branch.indexOf("dev-instance.mjs"));
+    expect(branch).not.toContain("Prune");
   });
 });

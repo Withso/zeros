@@ -6,8 +6,8 @@
 // crash mid-session leaves a diagnostic breadcrumb. Cleaned on graceful
 // session end or app quit.
 //
-// Lives UNDER the engine data dir (db/paths.ts zerosDataDir(); see
-// docs/storage-layout.md), and ZEROS_DATA_DIR in cloud sandboxes —
+// Lives UNDER the engine data dir (db/paths.ts zerosDataDir()), and
+// ZEROS_DATA_DIR in cloud sandboxes —
 // co-located with zeros.db + the relay identity. This was
 // previously a hardcoded "Zeros" app-name dir with NO dev/prod split, so a
 // `pnpm electron:dev` build and a packaged /Applications/Zeros.app shared

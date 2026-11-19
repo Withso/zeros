@@ -1,6 +1,7 @@
 // Pins every root the resolver hands out. Installed channels and the explicit
 // overrides (cloud worker, tests) must stay byte-for-byte what they were; the
-// development family and its legacy compatibility shape are the only changes.
+// development family's new identities are the only change, and its legacy
+// shape resolves exactly as before.
 
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -14,15 +15,12 @@ vi.mock("node:os", async (importActual) => {
 import {
   appIdentity,
   storageFamily,
-  zerosCacheDir,
   zerosChannelDataDir,
   zerosCredentialLockRoot,
   zerosDataDir,
   zerosDesignWorkspacesRoot,
   zerosDevelopmentBundleDir,
   zerosLogDir,
-  zerosEffectiveSessionDataDir,
-  zerosOldSessionDataDir,
   zerosSessionDataDir,
   zerosStateRoot,
   zerosVisibleRoot,
@@ -66,6 +64,10 @@ afterEach(() => {
   }
 });
 
+const AS = `${fakeHome}/Library/Application Support`;
+const CACHES = `${fakeHome}/Library/Caches`;
+const LOGS = `${fakeHome}/Library/Logs`;
+
 function roots() {
   return {
     family: storageFamily(),
@@ -76,16 +78,12 @@ function roots() {
     visible: zerosVisibleRoot(),
     workspaces: zerosWorkspacesRoot(),
     design: zerosDesignWorkspacesRoot(),
-    cache: zerosCacheDir(),
-    session: zerosSessionDataDir(),
+    session: zerosSessionDataDir(CACHES),
     logs: zerosLogDir(),
     bundle: zerosDevelopmentBundleDir(),
   };
 }
 
-const AS = `${fakeHome}/Library/Application Support`;
-const CACHES = `${fakeHome}/Library/Caches`;
-const LOGS = `${fakeHome}/Library/Logs`;
 
 describe("installed channels keep their exact layout", () => {
   it.each([
@@ -105,8 +103,7 @@ describe("installed channels keep their exact layout", () => {
         visible: `${fakeHome}/${visible}`,
         workspaces: `${fakeHome}/${visible}/workspaces`,
         design: `${fakeHome}/${visible}/design workspaces`,
-        cache: `${CACHES}/${id}`,
-        session: `${AS}/${id}/electron`,
+        session: `${CACHES}/${id}`,
         logs: `${LOGS}/${id}`,
         bundle: null,
       });
@@ -122,17 +119,21 @@ describe("installed channels keep their exact layout", () => {
     expect(roots()).toMatchObject({
       data: `${fakeHome}/.local/share/${xdg}`,
       shared: `${fakeHome}/.local/share/${xdg}`,
-      cache: `${fakeHome}/.cache/${id}`,
       logs: `${fakeHome}/.local/share/${xdg}/logs`,
     });
+    expect(zerosSessionDataDir(`${fakeHome}/.cache`)).toBe(`${fakeHome}/.cache/${id}`);
     process.env.XDG_DATA_HOME = "/xdg/data";
     expect(zerosDataDir()).toBe(`/xdg/data/${xdg}`);
   });
 
-  it("uses Electron's cache root for caches; session data stays beside the data", () => {
+  it("keeps the session in Electron's own cache root, as before", () => {
     onPlatform("darwin");
-    expect(zerosCacheDir("/electron/cache")).toBe("/electron/cache/com.zeros");
-    expect(zerosSessionDataDir("/electron/cache")).toBe(`${AS}/com.zeros/electron`);
+    expect(zerosSessionDataDir("/electron/cache")).toBe("/electron/cache/com.zeros");
+    process.env.ZEROS_CHANNEL = "alpha";
+    expect(zerosSessionDataDir("/electron/cache")).toBe("/electron/cache/com.zeros.alpha");
+    onPlatform("win32");
+    process.env.APPDATA = "C:/Roaming";
+    expect(zerosSessionDataDir("C:/Roaming")).toBe(path.join("C:/Roaming", "com.zeros.alpha"));
   });
 });
 
@@ -149,7 +150,11 @@ describe("explicit overrides are unchanged for every channel", () => {
     expect(zerosVisibleRoot()).toBe("/home/user/owner");
     expect(zerosDesignWorkspacesRoot()).toBe("/home/user/owner/design workspaces");
     expect(zerosLogDir()).toBe("/home/user/.zeros-data/logs");
-    expect(zerosSessionDataDir()).toBe("/home/user/.zeros-data/electron");
+    // Installed channels keep the session in the cache root under an override,
+    // as before; a development identity's session follows its data.
+    expect(zerosSessionDataDir("/caches")).toBe(
+      channel === "dev" ? "/home/user/.zeros-data/electron" : `/caches/${channel === "stable" ? "com.zeros" : "com.zeros.alpha"}`,
+    );
     process.env.ZEROS_DESIGN_WORKSPACES_DIR = "/srv/design";
     expect(zerosDesignWorkspacesRoot()).toBe("/srv/design");
   });
@@ -196,32 +201,36 @@ describe("development family", () => {
     expect(zerosDataDir()).toBe("/xdg/a/zeros-local-b123456789abcdef");
     process.env.XDG_DATA_HOME = "/xdg/b";
     expect(zerosDataDir()).toBe("/xdg/b/zeros-local-b123456789abcdef");
-    process.env.XDG_CACHE_HOME = "/xdg/cache";
-    expect(zerosCacheDir()).toBe("/xdg/cache/com.zeros.local.b123456789abcdef");
+    expect(zerosSessionDataDir("/xdg/cache")).toBe("/xdg/cache/com.zeros.local.b123456789abcdef");
     onPlatform("win32");
     process.env.APPDATA = "C:/A";
     expect(zerosDataDir()).toBe(path.join("C:/A", "com.zeros.local.b123456789abcdef"));
   });
 
-  // Phase 2 finding 14: hosted Alpha and a hosted qualification share one Claude
-  // Keychain item, so they must share its refresh lock, as they did before.
-  it("keeps one Claude refresh lock root for every development identity and layout", () => {
+  // Review A finding 9: every identity keeps the Claude refresh lock root it
+  // had before, so overlapping old and new engines serialize.
+  it("keeps each identity's Claude refresh lock root as before", () => {
     for (const env of [
       { ZEROS_INSTANCE: "alpha" },
       { ZEROS_INSTANCE: "design-qual-0011aabb" },
       { ZEROS_INSTANCE: "alpha", ZEROS_DATA_DIR: "/tmp/evidence" },
-      { ZEROS_LOCAL_DEVELOPMENT: "1", ZEROS_INSTANCE: "a123456789abcdef" },
-      { ZEROS_LOCAL_DEVELOPMENT: "1", ZEROS_INSTANCE: "a123456789abcdef", ZEROS_LOCAL_LAYOUT: "legacy" },
     ] as Array<Record<string, string>>) {
       for (const key of ENV) delete process.env[key];
       dev(env);
       expect(zerosCredentialLockRoot(), JSON.stringify(env)).toBe(`${fakeHome}/.zeros-dev/credentials`);
     }
+    for (const env of [
+      { ZEROS_LOCAL_DEVELOPMENT: "1", ZEROS_INSTANCE: "a123456789abcdef" },
+      { ZEROS_LOCAL_DEVELOPMENT: "1", ZEROS_INSTANCE: "a123456789abcdef", ZEROS_LOCAL_LAYOUT: "legacy" },
+    ] as Array<Record<string, string>>) {
+      for (const key of ENV) delete process.env[key];
+      dev(env);
+      expect(zerosCredentialLockRoot(), JSON.stringify(env)).toBe(`${fakeHome}/.zeros-local/instances/a123456789abcdef/credentials`);
+    }
     for (const key of ENV) delete process.env[key];
     for (const [channel, root] of [["stable", ".zeros"], ["alpha", ".zeros-alpha"]]) {
       process.env.ZEROS_CHANNEL = channel;
       expect(zerosCredentialLockRoot()).toBe(`${fakeHome}/${root}/credentials`);
-      expect(zerosCredentialLockRoot()).toBe(path.join(zerosStateRoot(), "credentials"));
     }
   });
 
@@ -234,10 +243,9 @@ describe("development family", () => {
       shared: `${AS}/com.zeros.local`,
       identity: `com.zeros.local.${inst}`,
       state: `${fakeHome}/.zeros-local/instances/${inst}`,
-      visible: `${fakeHome}/zeros-local/${inst}`,
-      workspaces: `${fakeHome}/zeros-local/${inst}/workspaces`,
-      design: `${fakeHome}/zeros-local/${inst}/design workspaces`,
-      cache: `${CACHES}/com.zeros.local/instances/${inst}`,
+      visible: `${fakeHome}/zeros-local-${inst}`,
+      workspaces: `${fakeHome}/zeros-local-${inst}/workspaces`,
+      design: `${fakeHome}/zeros-local-${inst}/design workspaces`,
       session: `${AS}/com.zeros.local/instances/${inst}/electron`,
       logs: `${LOGS}/com.zeros.local/${inst}`,
       bundle: `${CACHES}/com.zeros.local/bundles/${inst}`,
@@ -256,7 +264,6 @@ describe("development family", () => {
       visible: `${fakeHome}/zeros-local-${inst}`,
       workspaces: `${fakeHome}/zeros-local-${inst}/workspaces`,
       design: `${fakeHome}/zeros-local-${inst}/design workspaces`,
-      cache: `${CACHES}/com.zeros.local.${inst}`,
       session: `${CACHES}/com.zeros.local.${inst}`,
       logs: `${LOGS}/com.zeros.local.${inst}`,
       bundle: `${fakeHome}/.zeros-local/instances/${inst}/bundle`,
@@ -275,7 +282,7 @@ describe("development family", () => {
       data: `${AS}/com.zeros.local/instances/alpha`,
       identity: "com.zeros.local.alpha",
       state: `${fakeHome}/.zeros-local/instances/alpha`,
-      visible: `${fakeHome}/zeros-local/alpha`,
+      visible: `${fakeHome}/zeros-local-alpha`,
       bundle: `${CACHES}/com.zeros.local/bundles/alpha`,
     });
   });
@@ -304,58 +311,25 @@ describe("development family", () => {
   });
 });
 
-describe("renderer session location (one coherent profile)", () => {
-  const fs = require("node:fs") as typeof import("node:fs");
-  const os = require("node:os") as typeof import("node:os");
-  const p = require("node:path") as typeof import("node:path");
-
-  it("gives ZEROS_DATA_DIR precedence for every family and layout, with nothing to import", () => {
+describe("development session data", () => {
+  it("follows the data dir under ZEROS_DATA_DIR for every development layout", () => {
     for (const env of [
-      { ZEROS_CHANNEL: "stable" }, { ZEROS_CHANNEL: "alpha" },
       { ZEROS_DEV: "1", ZEROS_CHANNEL: "dev", ZEROS_INSTANCE: "a123456789abcdef" },
       { ZEROS_DEV: "1", ZEROS_CHANNEL: "dev", ZEROS_INSTANCE: "a123456789abcdef", ZEROS_LOCAL_LAYOUT: "legacy" },
+      { ZEROS_DEV: "1", ZEROS_CHANNEL: "dev", ZEROS_INSTANCE: "alpha" },
     ]) {
       for (const key of ENV) delete process.env[key];
       onPlatform("darwin");
       Object.assign(process.env, env, { ZEROS_DATA_DIR: "/fixture" });
       expect(zerosSessionDataDir("/caches"), JSON.stringify(env)).toBe("/fixture/electron");
-      expect(zerosOldSessionDataDir("/caches"), JSON.stringify(env)).toBeNull();
     }
   });
 
-  it("keeps Windows and legacy Local where they were", () => {
-    onPlatform("win32");
-    process.env.APPDATA = "C:/Roaming";
-    process.env.ZEROS_CHANNEL = "stable";
-    expect(zerosSessionDataDir("C:/Roaming")).toBe(p.join("C:/Roaming", "com.zeros"));
-    expect(zerosOldSessionDataDir("C:/Roaming")).toBeNull();
+  it("keeps a legacy Local session in Electron's cache root, as before", () => {
     onPlatform("darwin");
     Object.assign(process.env, { ZEROS_DEV: "1", ZEROS_CHANNEL: "dev", ZEROS_INSTANCE: "a123456789abcdef", ZEROS_LOCAL_LAYOUT: "legacy" });
-    expect(zerosSessionDataDir()).toBe(`${CACHES}/com.zeros.local.a123456789abcdef`);
-    expect(zerosOldSessionDataDir()).toBeNull();
-  });
-
-  it("names exactly one authoritative old profile, and the effective location follows the marker", () => {
-    const root = fs.mkdtempSync(p.join(os.tmpdir(), "zeros-session-root-"));
-    try {
-      onPlatform("darwin");
-      process.env.ZEROS_CHANNEL = "stable";
-      const caches = p.join(root, "Caches");
-      fs.mkdirSync(p.join(caches, "design.zeros.app"), { recursive: true });
-      expect(zerosOldSessionDataDir(caches)).toBe(p.join(caches, "design.zeros.app"));
-      fs.mkdirSync(p.join(caches, "com.zeros"));
-      expect(zerosOldSessionDataDir(caches)).toBe(p.join(caches, "com.zeros"));
-      process.env.ZEROS_CHANNEL = "alpha";
-      expect(zerosOldSessionDataDir(caches)).toBe(p.join(caches, "com.zeros.alpha"));
-
-      process.env.ZEROS_CHANNEL = "stable";
-      process.env.ZEROS_DATA_DIR = undefined as unknown as string;
-      delete process.env.ZEROS_DATA_DIR;
-      expect(zerosEffectiveSessionDataDir(caches)).toBe(p.join(caches, "com.zeros"));
-      Object.assign(process.env, { ZEROS_DEV: "1", ZEROS_CHANNEL: "dev", ZEROS_INSTANCE: "a123456789abcdef" });
-      expect(zerosOldSessionDataDir(caches)).toBe(p.join(caches, "com.zeros.local", "instances", "a123456789abcdef"));
-    } finally {
-      fs.rmSync(root, { recursive: true, force: true });
-    }
+    expect(zerosSessionDataDir(CACHES)).toBe(`${CACHES}/com.zeros.local.a123456789abcdef`);
+    delete process.env.ZEROS_LOCAL_LAYOUT;
+    expect(zerosSessionDataDir(CACHES)).toBe(`${AS}/com.zeros.local/instances/a123456789abcdef/electron`);
   });
 });

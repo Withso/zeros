@@ -25,17 +25,52 @@ it("no longer recognizes the retired zeros-beta scheme as a Zeros link", () => {
   ]);
 });
 
-it("bounds the candidates it visits, not only the links it returns", () => {
-  const stable = "zeros://chat/same";
-  const mixed = Array.from({ length: 64 }, (_, i) => `zeros-beta://chat/old${i}`).join(" ") + " " +
-    Array(1_600).fill(stable).join(" ") + " zeros://chat/after";
-  expect(mixed.length).toBeLessThan(120_000);
-  const visited: string[] = [];
-  const links = extractLocalLinks(mixed, 64, { onCandidate: (candidate) => visited.push(candidate) });
-  expect(visited.length).toBeLessThanOrEqual(64 * 4);
-  expect(links).toEqual([{ scheme: "zeros", kind: "chat", id: "same" }]);
-  expect(visited.some((candidate) => candidate.startsWith("zeros-beta"))).toBe(false);
-  // Ordinary distinct links are unaffected.
+// Review A finding 10 / B10. Visits and supported results recorded from the
+// pre-retirement implementation (origin/main) on the reviewers' inputs.
+const MAIN = [
+  {
+    name: "64 retired links then 1,600 copies of one supported link",
+    text: Array.from({ length: 64 }, (_, i) => `zeros-beta://chat/old${i}`).join(" ") + " " +
+      Array(1_600).fill("zeros://chat/same").join(" ") + " zeros://chat/after",
+    visited: 64,
+    links: [],
+  },
+  {
+    name: "256 copies of a link, then one more distinct link",
+    text: Array(256).fill("zeros://chat/source").join(" ") + " zeros://workspace/legitimate",
+    visited: 257,
+    links: [{ scheme: "zeros", kind: "chat", id: "source" }, { scheme: "zeros", kind: "workspace", id: "legitimate" }],
+  },
+  {
+    name: "256 copies of one chat, then the last one",
+    text: Array(256).fill("zeros://chat/first").join(" ") + " zeros://chat/last",
+    visited: 257,
+    links: [{ scheme: "zeros", kind: "chat", id: "first" }, { scheme: "zeros", kind: "chat", id: "last" }],
+  },
+];
+
+it.each(MAIN)("returns main's supported links and scans no further than main: $name", ({ text, visited, links }) => {
+  const original = RegExp.prototype[Symbol.matchAll];
+  let seen = 0;
+  RegExp.prototype[Symbol.matchAll] = function (this: RegExp, input: string) {
+    const iterator = original.call(this, input);
+    return {
+      [Symbol.iterator]() { return this; },
+      next() { const step = iterator.next(); if (!step.done) seen++; return step; },
+    } as RegExpStringIterator<RegExpExecArray>;
+  };
+  try {
+    expect(extractLocalLinks(text)).toEqual(links);
+  } finally {
+    RegExp.prototype[Symbol.matchAll] = original;
+  }
+  expect(seen).toBeLessThanOrEqual(visited);
+});
+
+it("counts distinct retired links toward the limit as before, without returning them", () => {
+  const text = Array.from({ length: 63 }, (_, i) => `zeros-beta://chat/old${i}`).join(" ") +
+    " zeros-beta://chat/old0 zeros://chat/kept zeros://chat/past-the-limit";
+  expect(extractLocalLinks(text)).toEqual([{ scheme: "zeros", kind: "chat", id: "kept" }]);
   expect(extractLocalLinks("zeros://chat/a zeros-alpha://chat/b zeros-dev://workspace/c")).toHaveLength(3);
 });
 

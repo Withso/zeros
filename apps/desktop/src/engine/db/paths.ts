@@ -1,35 +1,20 @@
-// ──────────────────────────────────────────────────────────
-// Zeros on-disk roots — the single resolver
-// ──────────────────────────────────────────────────────────
-//
 // Every root Zeros writes comes from here. Two storage families:
-//
-//   • installed (stable `com.zeros`, alpha `com.zeros.alpha`): one app per
+//   - installed (stable `com.zeros`, alpha `com.zeros.alpha`): one app per
 //     channel, data in the per-OS application-data dir, work in `~/zeros[-alpha]`.
-//   • development (the `dev` channel: `pnpm electron:local`, `electron:alpha`,
-//     ephemeral test identities): one `com.zeros.local` folder per kind with
-//     instances as subfolders. Shapes live in local-development-paths.cjs so the
-//     plain-Node launchers and the sweep resolve them identically.
+//   - development (the `dev` channel): one identity per instance, shapes and
+//     compatibility contracts in local-development-paths.cjs.
+// The family is a storage decision only; account-free admission stays
+// isLocalDevelopmentRuntime(), decided by Electron main.
 //
-// The family is a storage decision only. Account-free admission stays
-// `isLocalDevelopmentRuntime()`, decided by Electron main.
-//
-// ZEROS_DATA_DIR, ZEROS_WORKSPACES_DIR and ZEROS_DESIGN_WORKSPACES_DIR override
-// as always (cloud worker, tests). See docs/storage-layout.md.
-//
-// NOTE: the macOS id is `com.zeros`, deliberately NOT `com.zeros.app` — a folder
-// whose name ends in `.app` is mis-typed by Finder as a launchable application
-// (it shows the 🚫 "can't open" icon), so a user who browses into Application
-// Support cannot open their own data folder.
-// ──────────────────────────────────────────────────────────
+// The macOS id is `com.zeros`, not `com.zeros.app`: Finder types a folder whose
+// name ends in `.app` as an application and will not open it.
 
 import { createHash } from "node:crypto";
-import { lstatSync, realpathSync, type Stats } from "node:fs";
+import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
-import { channel } from "../runtime";
+import { channel, isLocalDevelopmentRuntime } from "../runtime";
 import {
-  SESSION_MOVED_MARKER,
   developmentInstanceId,
   developmentLayout,
   developmentPaths,
@@ -53,9 +38,9 @@ export function developmentInstance(): string | null {
 // are rebuilt only when one of the exact inputs developmentPaths() reads
 // changes (tests and main change them at runtime).
 let developmentInputs: readonly unknown[] = [];
-const developmentRoots = new Map<string | undefined, DevelopmentPaths>();
+let developmentRoots: DevelopmentPaths | null = null;
 
-function development(cacheRoot?: string): DevelopmentPaths {
+function development(): DevelopmentPaths {
   const env = process.env;
   const platform = process.platform;
   const inputs = [
@@ -66,26 +51,24 @@ function development(cacheRoot?: string): DevelopmentPaths {
     platform === "win32" ? env.APPDATA : platform === "darwin" ? undefined : env.XDG_DATA_HOME,
     platform === "win32" ? env.LOCALAPPDATA : platform === "darwin" ? undefined : env.XDG_CACHE_HOME,
   ];
-  if (inputs.length !== developmentInputs.length || inputs.some((value, index) => value !== developmentInputs[index])) {
-    developmentInputs = inputs;
-    developmentRoots.clear();
-  }
-  const cached = developmentRoots.get(cacheRoot);
-  if (cached) return cached;
+  if (
+    developmentRoots &&
+    inputs.length === developmentInputs.length &&
+    inputs.every((value, index) => value === developmentInputs[index])
+  )
+    return developmentRoots;
   const instance = developmentInstanceId(env);
-  const roots = Object.freeze(
+  developmentRoots = Object.freeze(
     developmentPaths({
       instance,
       layout: developmentLayout(instance, env),
       home: inputs[2] as string,
       platform,
       env,
-      cacheRoot,
     }),
   );
-  if (developmentRoots.size >= 8) developmentRoots.clear();
-  developmentRoots.set(cacheRoot, roots);
-  return roots;
+  developmentInputs = inputs;
+  return developmentRoots;
 }
 
 /** Another development instance's data dir in the consolidated layout. */
@@ -120,11 +103,12 @@ function installedDataDir(ch: "stable" | "alpha" = channel() as "stable" | "alph
   }
 }
 
-/** Every real profile root on this machine, whatever overrides are set:
- *  Stable, Alpha and the development family. */
-export function realProfileRoots(): string[] {
+/** Every real profile root on this machine whatever overrides are set
+ *  (Stable, Alpha, the development family), and the app-data folder that holds
+ *  them and their siblings. */
+export function realProfileRoots(): { profileRoots: string[]; appData: string } {
   const family = developmentPaths({ instance: "default", home: homedir(), platform: process.platform, env: process.env }).sharedDataDir;
-  return [installedDataDir("stable"), installedDataDir("alpha"), family];
+  return { profileRoots: [installedDataDir("stable"), installedDataDir("alpha"), family], appData: path.dirname(family) };
 }
 
 /** This identity's application data: zeros.db, secrets.json, engines/,
@@ -175,12 +159,12 @@ export function zerosStateRoot(): string {
   return path.join(homedir(), zerosDotDirName());
 }
 
-/** Where locks over a credential every identity of a family may share live
- *  (the Claude refresh lock). Every development identity, hosted or Local and
- *  whatever its layout or data override, uses `~/.zeros-dev/credentials`, the
- *  one root hosted development processes used before per-instance state roots. */
+/** The Claude refresh lock's root, as each identity has always used it:
+ *  hosted development processes share `~/.zeros-dev/credentials`; Local and
+ *  installed channels use their own state root. */
 export function zerosCredentialLockRoot(): string {
-  if (storageFamily() === "development") return path.join(homedir(), ".zeros-dev", "credentials");
+  if (storageFamily() === "development" && !isLocalDevelopmentRuntime())
+    return path.join(homedir(), ".zeros-dev", "credentials");
   return path.join(zerosStateRoot(), "credentials");
 }
 
@@ -201,67 +185,16 @@ export function zerosVisibleRoot(): string {
   return path.join(homedir(), ch === "stable" ? "zeros" : `zeros-${ch}`);
 }
 
-/** The OS cache root (Electron's getPath("cache") on each platform). */
-export function osCacheRoot(): string {
-  const home = homedir();
-  switch (process.platform) {
-    case "darwin":
-      return path.join(home, "Library", "Caches");
-    case "win32":
-      return process.env.LOCALAPPDATA ?? path.join(home, "AppData", "Local");
-    default:
-      return process.env.XDG_CACHE_HOME ?? path.join(home, ".cache");
-  }
-}
-
-/** Regenerable Chromium caches. Main passes Electron's own cache root. */
-export function zerosCacheDir(cacheRoot: string = osCacheRoot()): string {
-  return storageFamily() === "development"
-    ? development(cacheRoot).cacheDir
-    : path.join(cacheRoot, installedId());
-}
-
-/** Where Electron's sessionData (the whole Chromium profile, caches included)
- *  lives once it has moved: `<data dir>/electron`. `ZEROS_DATA_DIR` always
- *  wins. Windows keeps its old location, which already is the data dir
- *  (Electron's cache path there is Roaming AppData), and so does a legacy Local
- *  profile. Use zerosEffectiveSessionDataDir() for where it is right now. */
-export function zerosSessionDataDir(cacheRoot: string = osCacheRoot()): string {
-  if (process.env.ZEROS_DATA_DIR) return path.join(process.env.ZEROS_DATA_DIR, "electron");
-  if (process.platform === "win32") return zerosCacheDir(cacheRoot);
-  if (storageFamily() === "development" && development().layout === "legacy")
-    return development(cacheRoot).cacheDir;
+/** Electron's sessionData for Electron's cache root `cacheRoot`. Installed
+ *  channels keep `<cache>/<id>` (main.ts carries their older profile forward);
+ *  a legacy development profile keeps `<cache>/com.zeros.local.<inst>`; a new
+ *  development identity, and any one under ZEROS_DATA_DIR, uses
+ *  `<data dir>/electron`. */
+export function zerosSessionDataDir(cacheRoot: string): string {
+  if (storageFamily() !== "development") return path.join(cacheRoot, installedId());
+  if (!process.env.ZEROS_DATA_DIR && development().layout === "legacy")
+    return path.join(cacheRoot, development().bundleId);
   return path.join(zerosDataDir(), "electron");
-}
-
-/** The one authoritative profile from before the move, or null when nothing
- *  moves (an override, Windows, a legacy Local profile). Stable's older
- *  `design.zeros.app` counts only when `com.zeros` does not exist at all. */
-export function zerosOldSessionDataDir(cacheRoot: string = osCacheRoot()): string | null {
-  if (process.env.ZEROS_DATA_DIR || process.platform === "win32") return null;
-  if (storageFamily() === "development")
-    return development().layout === "legacy" ? null : development(cacheRoot).cacheDir;
-  const current = path.join(cacheRoot, installedId());
-  if (channel() !== "stable" || lstatOrNull(current)) return current;
-  const older = path.join(cacheRoot, "design.zeros.app");
-  return lstatOrNull(older) ? older : current;
-}
-
-/** Where the profile is for this launch: the moved location once its marker
- *  is there, otherwise the old profile if one exists. */
-export function zerosEffectiveSessionDataDir(cacheRoot: string = osCacheRoot()): string {
-  const target = zerosSessionDataDir(cacheRoot);
-  if (lstatOrNull(path.join(target, SESSION_MOVED_MARKER))?.isFile()) return target;
-  const old = zerosOldSessionDataDir(cacheRoot);
-  return old && lstatOrNull(old) ? old : target;
-}
-
-function lstatOrNull(target: string): Stats | null {
-  try {
-    return lstatSync(target);
-  } catch {
-    return null;
-  }
 }
 
 /** main.log, app.jsonl and engine.log. macOS uses ~/Library/Logs; other
