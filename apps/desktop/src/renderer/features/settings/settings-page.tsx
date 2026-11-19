@@ -495,7 +495,7 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
     setActive(userSelection("general"));
   }, [projects, active, dispatch, local, setActive]);
 
-  // Inspect the raw value because parsing folds the legacy MCP route into General.
+  // Startup restore normalizes legacy MCP to the owner's fallback; only raw routes can redirect.
   useEffect(() => {
     const bare = active.startsWith("user:")
       ? active.slice("user:".length)
