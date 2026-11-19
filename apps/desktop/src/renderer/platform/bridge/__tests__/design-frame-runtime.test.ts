@@ -594,7 +594,7 @@ describe("design frame runtime client", () => {
       sourceVersion: SOURCE_VERSION,
       // Opt-in methods: a runtime advertises them only when asked, so a host
       // that predates one still accepts the runtime's capabilities.
-      features: ["previewStylesheet", "setPlayback", "previewInsert", "clearPreviewInserts", "previewHistory", "commitStructure", "previewStructure", "clearPreviewStructure", "holdNodeState", "releaseNodeState", "getFrameChanges", "previewComponentOptions", "previewComponentInstanceOptions", "getComponentPartAtLoc"],
+      features: ["previewStylesheet", "setPlayback", "previewInsert", "clearPreviewInserts", "previewHistory", "commitStructure", "previewStructure", "clearPreviewStructure", "holdNodeState", "releaseNodeState", "getFrameChanges", "previewComponentOptions", "previewComponentInstanceOptions", "getComponentPartAtLoc", "measureLayout"],
     });
     expect(handshake?.[1]).toMatchObject({ targetOrigin: "*" });
     const framePort = handshake?.[1]?.transfer?.[0] as MessagePort;
