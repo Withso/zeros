@@ -254,4 +254,25 @@ describe("activated relay read admission", () => {
     expect(forwarded("slow-refresh")).toBe(false);
     expect(clients.forward).not.toHaveBeenCalled();
   });
+
+  it("coalesces a terminal typing burst held behind one write instead of closing the bridge", async () => {
+    await read("warm");
+    let resume!: () => void;
+    clients.forward.mockImplementationOnce(() => new Promise<void>(resolve => { resume = resolve; }));
+    const typed = Array.from({ length: 100 }, (_, index) => String.fromCharCode(97 + index % 26)).join("");
+    const write = (index: number) => app.send(JSON.stringify({ type: "PTY_WRITE", id: `w${index}`, sessionId: "terminal", data: typed[index] }));
+    write(0);
+    await expect.poll(() => typeof resume).toBe("function");
+    const room = (relay as unknown as { rooms: Map<string, { clients: Map<string, { ws: WebSocket }> }> }).rooms.get(workspaceId)!;
+    let received = 0;
+    [...room.clients.values()][0]!.ws.on("message", () => { received++; });
+    for (let index = 1; index < typed.length; index++) write(index);
+    await expect.poll(() => received === typed.length - 1 || app.readyState !== WebSocket.OPEN).toBe(true);
+    expect(app.readyState).toBe(WebSocket.OPEN);
+    resume();
+    const written = () => frames.filter(frame => frame.t === "frame" && frame.frame.type === "PTY_WRITE").map(frame => frame.frame.data).join("");
+    await expect.poll(written).toBe(typed);
+    expect(clients.forward).toHaveBeenCalledTimes(2);
+    expect(app.readyState).toBe(WebSocket.OPEN);
+  });
 });
