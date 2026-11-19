@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseSkill, renderZstackFiles, zstackSkills } from "../zstack/render.mjs";
+import { parseSkill, renderZstackFiles, zstackEntry, zstackSkills } from "../zstack/render.mjs";
 import { readEvalCases, validateEvalCases } from "../zstack/evals.mjs";
 import { checkGeneratedDocs } from "../design-system/build-design-docs.mjs";
 
@@ -11,18 +11,48 @@ describe("zstack pack", () => {
       ["zstack", "zstack-comments", "zstack-correct", "zstack-drive", "zstack-eval", "zstack-learn", "zstack-reflect", "zstack-review", "zstack-verify"]);
     expect(zstackSkills(root).filter(skill => skill.invocation === "user").map(skill => skill.name)).toEqual(
       ["zstack-correct", "zstack-reflect"]);
+    expect(zstackSkills(root).filter(skill => skill.invocation === "model").map(skill => skill.name)).toEqual(["zstack"]);
   });
 
   it("renders every skill for Claude, Codex/Zeros and Cursor", () => {
     const files = renderZstackFiles(root);
     for (const { name, invocation } of zstackSkills(root)) {
       expect(files[`.claude/skills/${name}/SKILL.md`]).toContain(`name: ${name}`);
-      expect(files[`.agents/skills/${name}/SKILL.md`]).toBe(files[`.claude/skills/${name}/SKILL.md`]);
+      expect(files[`.agents/skills/${name}/SKILL.md`]).toContain(`name: ${name}`);
       expect(files[`.agents/skills/${name}/agents/openai.yaml`]).toBe(
         `policy:\n  allow_implicit_invocation: ${invocation === "model"}\n`);
       if (invocation === "model")
         expect(files[`.cursor/rules/${name}.mdc`]).toMatch(/^---\ndescription: .+\nglobs: .+\nalwaysApply: false\n---/);
+      else {
+        expect(files[`.claude/skills/${name}/SKILL.md`]).toContain("disable-model-invocation: true");
+        expect(files[`.cursor/rules/${name}.mdc`]).toMatch(/^---\ndescription:\nglobs:\nalwaysApply: false\n---/);
+      }
     }
+  });
+
+  it("uses one shared loop, distinct host entry points, and a portable fallback", () => {
+    const files = renderZstackFiles(root);
+    const shared = zstackSkills(root).find(skill => skill.name === "zstack")!.body;
+    for (const host of ["claude", "codex", "cursor"]) {
+      const entry = zstackEntry(host);
+      expect(files[entry]).toContain(shared);
+      expect(files[entry]).toContain(`--host ${host}`);
+    }
+    expect(zstackEntry("devin")).toBe("agents/zstack/skills/zstack/SKILL.md");
+    expect(zstackEntry("portable")).toBe(zstackEntry("devin"));
+    expect(() => zstackEntry("unknown-host")).toThrow("zstack_input_invalid");
+  });
+
+  it("routes review and end-of-loop learning without implicit helper invocation", () => {
+    const files = renderZstackFiles(root), skills = zstackSkills(root);
+    const router = skills.find(skill => skill.name === "zstack")!.body;
+    for (const host of ["portable", "devin", "claude", "codex", "cursor"]) {
+      const entry = files[zstackEntry(host)] ?? router;
+      expect(entry).toMatch(/^4\. .*read `agents\/zstack\/skills\/zstack-review\/SKILL\.md` and run the full review/m);
+      expect(entry).toMatch(/^7\. .*read `agents\/zstack\/skills\/zstack-learn\/SKILL\.md`/m);
+    }
+    for (const name of ["zstack-review", "zstack-learn"])
+      expect(skills.find(skill => skill.name === name)?.invocation).toBe("router");
   });
 
   it("keeps user-invoked skills out of every host's automatic selection", async () => {
@@ -56,7 +86,7 @@ describe("zstack pack", () => {
     expect(() => parseSkill("no frontmatter", "x")).toThrow(/frontmatter/);
     expect(() => parseSkill("---\nname: other\ndescription: d\n---\n\nbody", "x")).toThrow(/name must match/);
     expect(() => parseSkill("---\nname: zstack-x\n---\n\nbody", "x")).toThrow(/description is required/);
-    expect(() => parseSkill("---\nname: zstack-x\ndescription: d\ninvocation: never\n---\n\nbody", "x")).toThrow(/invocation must be model or user/);
+    expect(() => parseSkill("---\nname: zstack-x\ndescription: d\ninvocation: never\n---\n\nbody", "x")).toThrow(/invocation must be model, router or user/);
     expect(() => parseSkill("---\nname: zstack-x\ndescription: d\ninvocaton: user\n---\n\nbody", "x")).toThrow(/unknown frontmatter field invocaton/);
   });
 

@@ -1,7 +1,7 @@
 ---
 name: zstack-review
 description: "Independently review a Zeros diff against the repository's invariants: Local and cloud placements, owner switching, stale responses, exact-key state, security boundaries, locks and time windows, compatibility and test determinism. Verify every finding before reporting it."
-globs: "**"
+invocation: router
 ---
 
 # zstack-review

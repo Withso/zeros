@@ -12,8 +12,23 @@ export const ZSTACK_SKILLS_DIR = "agents/zstack/skills";
 const GENERATOR = "scripts/design-system/build-design-docs.mjs";
 const NAME = /^zstack(?:-[a-z]+)*$/;
 const FIELDS = new Set(["name", "description", "globs", "invocation"]);
-// "user" skills run only when the user invokes them; agents never start one.
-const INVOCATIONS = new Set(["model", "user"]);
+const INVOCATIONS = new Set(["model", "router", "user"]);
+const ADAPTERS = new Map([
+  ["claude", { entry: ".claude/skills/zstack/SKILL.md", tools: "Use the active Agent tool only if exposed." }],
+  ["codex", { entry: ".agents/skills/zstack/SKILL.md", tools: "Use subagents only if the active Codex host exposes them." }],
+  ["cursor", { entry: ".cursor/rules/zstack.mdc", tools: "Use subagents only if the active Cursor mode exposes them; open helper rules directly otherwise." }],
+]);
+
+export function zstackEntry(host) {
+  if (host === "devin" || host === "portable") return `${ZSTACK_SKILLS_DIR}/zstack/SKILL.md`;
+  const adapter = ADAPTERS.get(host);
+  if (!adapter) throw new Error("zstack_input_invalid");
+  return adapter.entry;
+}
+
+function hostAdapter(host) {
+  return `\n## Host adapter\n\nRun \`node scripts/zstack/verify.mjs host --host ${host}\` for the execution plan. ${ADAPTERS.get(host).tools} Add \`--can-delegate\` only after checking the host and \`--delegate\` only for an authorized role.\n`;
+}
 
 /** Parse the small frontmatter subset the canonical skills use. */
 export function parseSkill(text, file) {
@@ -32,7 +47,7 @@ export function parseSkill(text, file) {
   if (!NAME.test(fields.name ?? "")) throw new Error(`${file}: name must match ${NAME}`);
   if (!fields.description || fields.description.length > 1024) throw new Error(`${file}: description is required (≤1024 chars)`);
   const invocation = fields.invocation ?? "model";
-  if (!INVOCATIONS.has(invocation)) throw new Error(`${file}: invocation must be model or user`);
+  if (!INVOCATIONS.has(invocation)) throw new Error(`${file}: invocation must be model, router or user`);
   return { name: fields.name, description: fields.description, globs: fields.globs || "**", invocation, body: match[2].trim() };
 }
 
@@ -57,18 +72,19 @@ export function renderZstackFiles(root) {
     const notice = `<!-- GENERATED from ${skill.file} by ${GENERATOR}. Edit it there, then run \`pnpm design:docs\`. -->`;
     const description = JSON.stringify(skill.description);
     const body = `${notice}\n\n${skill.body}\n`;
-    const user = skill.invocation === "user";
-    const copy = `---\nname: ${skill.name}\ndescription: ${description}\n${user ? "disable-model-invocation: true\n" : ""}---\n\n${body}`;
-    files[`.claude/skills/${skill.name}/SKILL.md`] = copy;
-    files[`.agents/skills/${skill.name}/SKILL.md`] = copy;
+    const manual = skill.invocation !== "model", router = skill.name === "zstack";
+    const withAdapter = host => router ? hostAdapter(host) : "";
+    const copy = `---\nname: ${skill.name}\ndescription: ${description}\n${manual ? "disable-model-invocation: true\n" : ""}---\n\n${body}`;
+    files[`.claude/skills/${skill.name}/SKILL.md`] = copy + withAdapter("claude");
+    files[`.agents/skills/${skill.name}/SKILL.md`] = copy + withAdapter("codex");
     // Codex reads its invocation policy here. Every skill gets the file, so
     // switching a skill's invocation never leaves a stale policy behind.
     files[`.agents/skills/${skill.name}/agents/openai.yaml`] =
-      `policy:\n  allow_implicit_invocation: ${!user}\n`;
+      `policy:\n  allow_implicit_invocation: ${!manual}\n`;
     // A Cursor rule with no description or globs applies only when @-mentioned.
-    files[`.cursor/rules/${skill.name}.mdc`] = user
+    files[`.cursor/rules/${skill.name}.mdc`] = manual
       ? `---\ndescription:\nglobs:\nalwaysApply: false\n---\n\n${body}`
-      : `---\ndescription: ${description}\nglobs: ${skill.globs}\nalwaysApply: false\n---\n\n${body}`;
+      : `---\ndescription: ${description}\nglobs: ${skill.globs}\nalwaysApply: false\n---\n\n${body}${withAdapter("cursor")}`;
   }
   return files;
 }

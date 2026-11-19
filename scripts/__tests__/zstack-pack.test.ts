@@ -10,7 +10,7 @@ const tokens = (file: string) => Math.ceil(readFileSync(file, "utf8").length / 4
 
 // Approximate tokens (characters / 4). A failing budget means fold or cut text.
 const SKILL_BUDGETS: Record<string, number> = {
-  zstack: 1800,
+  zstack: 825,
   "zstack-verify": 2000,
   "zstack-review": 1700,
   "zstack-eval": 1500,

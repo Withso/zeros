@@ -1,6 +1,7 @@
 ---
 name: zstack-comments
 description: "Keep Zeros comments to the non-obvious why: run a fresh-context comment pass over a diff before review, apply the Zeros keep-list, and prove comment cleanups change nothing else with scripts/zstack/comments.mjs."
+disable-model-invocation: true
 ---
 
 <!-- GENERATED from agents/zstack/skills/zstack-comments/SKILL.md by scripts/design-system/build-design-docs.mjs. Edit it there, then run `pnpm design:docs`. -->
