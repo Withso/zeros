@@ -217,8 +217,9 @@ describe("the committed component fixture through WorkspaceService", () => {
     const canvas = JSON.parse(read("meta/canvas.json"));
     expect(canvas.pages[0].frames).toHaveLength(2);
     expect(Object.values(canvas.frames)).toContainEqual(expect.objectContaining({ source: "library/fx-badge.html", component: "fx-badge" }));
-    // The instance keeps its value, now through the main's option.
-    expect((await frame("screens/hosts.html")).srcDoc).toContain('<span data-zd-part="badge" class="badge">New</span>');
+    // The instance keeps its value, now through the main's option, and is the
+    // main's root layer.
+    expect((await frame("screens/hosts.html")).srcDoc).toContain('<span data-zd-part="badge" class="badge" data-zd-root="">New</span>');
     // Its Options now come from the main, and Edit main opens it.
     expect((await prepare("screens/hosts.html")).instances!.components["fx-badge"]).toMatchObject({
       file: "library/fx-badge.html", frame: true,
