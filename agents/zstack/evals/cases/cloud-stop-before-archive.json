@@ -5,5 +5,5 @@
   "fixedBy": "pr:1163",
   "symptom": "An Alpha workspace was marked stopped once Boat accepted its stop request, but Boat then failed the stop (no recent snapshot of its own), leaving the VM running while the row said stopped; the checkpoint retry never asked Boat to stop it again.",
   "rule": "A cloud stop is complete only when Boat reports the VM archived; a stopped row whose VM is neither archived nor archiving is stopped again, fenced to its stop.",
-  "check": "pnpm --dir apps/control-plane exec vitest run src/cloud/lifecycle.test.ts -t 'archived'"
+  "check": "pnpm --dir apps/control-plane exec vitest run src/cloud/lifecycle.test.ts -t 'archiv'"
 }
