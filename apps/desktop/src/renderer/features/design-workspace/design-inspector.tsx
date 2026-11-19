@@ -3130,12 +3130,11 @@ export const DesignInspector = React.memo(function DesignInspector({
   const activeTab = storedTab === "options" && !optionsTarget ? defaultTab : storedTab ?? defaultTab;
   const styleActive = activeTab === "style";
   const cssActive = activeTab === "css";
-  const styleResetParts = instanceHost ? Object.keys(instanceHost.overrides ?? {}) : [];
-  const styleResetCount = styleResetParts.length + designInstanceVisualStyleProperties(instanceHost?.style).length;
+  const styleResetCount = instanceHost ? Object.keys(instanceHost.overrides ?? {}).length + designInstanceVisualStyleProperties(instanceHost.style).length : 0;
   const canResetComponentStyle = optionsTarget?.kind === "instance" && styleResetCount > 0;
   const resetComponentStyle = () => {
     if (!workspaceId || !frame || !instanceNodeId || !instanceHost || styleResetCount === 0) return;
-    void commitDesignInstanceOverridesReset(workspaceId, frame, instanceNodeId, styleResetParts, instanceHost.style)
+    void commitDesignInstanceOverridesReset(workspaceId, frame, instanceNodeId)
       .catch((error) => toast.error("Couldn't reset the component style", { description: errorMessage(error) }));
   };
   // An instance whose main is gone renders nothing; it is named by the

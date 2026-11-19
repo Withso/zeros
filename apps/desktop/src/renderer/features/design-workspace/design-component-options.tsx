@@ -248,14 +248,13 @@ export function DesignComponentOptions({
   const ownStyle = instance?.host.style;
   const visualStyleCount = designInstanceVisualStyleProperties(ownStyle).length;
   const slottedLayers = [...new Set(Object.values(instance?.host.slotted ?? {}).flat())];
-  const resetText = instance?.host.text !== undefined;
+  const resetText = Boolean(instance?.host.text?.length);
   const hasSuppliedContent = designInstanceHasSuppliedContent(slottedLayers, instance?.host.text);
   const canResetAll = Boolean(instance && ((instanceState?.overridden.size ?? 0) > 0 || overridden.length > 0 || visualStyleCount > 0 || slottedLayers.length > 0 || resetText));
   const resetAll = () => {
     if (!instance || !canResetAll || !active) return;
     setConfirmResetAll(false);
-    void commitDesignInstanceAllOverridesReset(workspaceId, frame, instance.nodeId,
-      [...(instanceState?.overridden ?? [])], overridden, ownStyle, slottedLayers, resetText)
+    void commitDesignInstanceAllOverridesReset(workspaceId, frame, instance.nodeId)
       .catch(failed("all component overrides"));
   };
   const requestResetAll = () => {
