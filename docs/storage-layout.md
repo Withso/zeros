@@ -140,13 +140,23 @@ wins: the old `Caches/<id>/` session (for consolidated development identities,
 while the older hop never completed (no `Caches/com.zeros/.zeros-session-migrated`),
 `Caches/design.zeros.app/`. Alpha no longer reads Stable's old folder.
 
+It runs before the first window on every user's first launch after updating,
+so it never deletes recursively and never copies a cache: each entry is one
+rename (a 334 MB, 3,752-file profile took under 4 ms on the development VM).
+
 - Every entry not on the regenerable list moves, unknown names included.
-  Moves are a rename or a no-replace hard link. Across volumes the entry is
-  copied to a private temporary, verified byte for byte, published, then
-  removed from the source; a failed verification keeps the source.
+  Moves are a rename or a no-replace hard link. Across volumes a durable entry
+  is copied to a private temporary, verified byte for byte and published; the
+  source stays in the purgeable cache folder. A failed verification publishes
+  nothing.
+- Regenerable caches Chromium will not relocate (`Cache`, `GPUCache`, the Dawn
+  caches, `Shared Dictionary`, …) move into `electron/` the same way, so they
+  stay warm and the canvas keeps its compiled shaders. One that cannot be
+  renamed (another volume, busy) is left behind and does not fail the run.
+- `Code Cache` stays in `Caches/<id>/`, where the code cache now lives.
+- From `Caches/design.zeros.app/` only durable entries move; its caches stay
+  for the sweep and the OS.
 - An existing destination entry is never replaced; that source entry stays.
-- `Code Cache` stays in `Caches/<id>/`, where the code cache now lives; the
-  other regenerable entries there are removed.
 - The marker is written only after a run with no failures, so an interrupted
   or failed run retries next launch, and two processes starting together each
   move only what the other has not.
@@ -156,6 +166,46 @@ while the older hop never completed (no `Caches/com.zeros/.zeros-session-migrate
 **Known limit: downgrade.** A build from before this change reads renderer
 state from `Caches/<id>/` again and finds none (drafts, theme and permissions
 reset). The updater never installs an older build; a manual downgrade does.
+
+## Bounded growth inside a profile
+
+The engine's startup maintenance (`apps/desktop/src/engine/startup-maintenance.ts`,
+after readiness, one task at a time) and the updater prune what they can prove
+is unused. Every removal goes through
+`apps/desktop/src/engine/db/contained-removal.cjs` (shared with the launcher
+prune and `pnpm storage:sweep`). Each target sits directly inside its store and
+nothing follows a symlink.
+
+| Store | Pruned | Kept |
+| --- | --- | --- |
+| `engines/<repoKey>/` (`engine.json` manifest and `busy` heartbeat only) | An entry whose manifest's pid is dead or absent and whose recorded root no longer exists, or which records no root and was untouched for 30 days. At most 200 removals or 2 s per launch | The running engine's own entry; a live pid; a `busy` heartbeat under 30 s old; an unreadable or unparsable manifest; symlinks and non-engine names |
+| `design-storage/` | Nothing new: pictures are kept within their byte budgets by the existing thumbnail sweep | Everything else. It holds Design recovery journals, review receipts, result bundles and retired private drafts, and records its owner only as a hash of the workspace path. `design-storage/recording-chunks/` is a known unbounded store until Design owns a sweep for unreferenced chunks |
+| `git-promotion-journal/` | Nothing, and it has no Clear | All of it. A retired build wrote it; no current code reads it, and its records may describe unfinished work. The storage report counts it as other app data |
+| `Caches/zeros-updater/` (macOS) | `pending/` download and `update-info.json` when the artifact name is this channel's and its version is the running one or older; the root `update.zip`, which this build never reads (differential downloads are off) | A newer download; another channel's download; anything whose file name or metadata cannot be read |
+| `Caches/<bundle id>.ShipIt/update.*/` | A staged app for this bundle whose version is the running one or older | A newer staged app (installs on quit); unreadable or foreign staging; everything while a ShipIt process for this bundle runs; `ShipItState.plist` and logs |
+
+The engine task runs only when the profile's single-instance holder, the
+`SingletonLock` link in the data dir, is this engine's own Electron parent
+(`ZEROS_PARENT_PID`). Standalone engines and `ZEROS_DATA_DIR` test engines
+therefore never prune. The updater cleanup runs 30 s after launch, only in
+packaged Stable or Alpha builds on macOS, only while this process holds the
+single-instance lock and the updater is idle; otherwise it retries every five
+minutes, at most six times.
+
+Both are asynchronous end to end (process listing, reads and removal), so
+neither stalls Electron main or the engine's event loop; on an owner-sized
+profile (1,248 entries) the engine prune's worst event-loop delay was 4 ms.
+
+Stable and Alpha share `Caches/zeros-updater/`: app-builder-lib names it after
+`package.json` `name` (`zeros`), which both channels keep. Downloads are told
+apart by artifact name (`Zeros-<version>-…-mac.zip` and
+`Zeros-Alpha-<version>-…-mac.zip`). ShipIt staging is per bundle id. The
+development family is never auto-updated; its engines prune the same way.
+
+Follow-up, not in this change: give Alpha its own updater cache
+(`-c.extraMetadata.name=zeros-alpha` in `scripts/electron-builder-run.mjs`
+gives `zeros-alpha-updater`). It also renames the packaged `package.json`
+`name`, so it needs a real Alpha release build to verify.
 
 ## Registry
 

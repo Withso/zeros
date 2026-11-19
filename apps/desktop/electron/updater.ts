@@ -12,6 +12,8 @@ import { emitEvent } from "./ipc/events";
 import type { CommandHandler } from "./ipc/router";
 import { IS_PACKAGED } from "./runtime-mode";
 import { channel, type Channel } from "../src/engine/runtime";
+import { appIdentity } from "../src/engine/db/paths";
+import { applyUpdaterStagingCleanup, planUpdaterStagingCleanup, type StagingPlan } from "./updater-staging";
 import { mergeClientUpgradeRequired, parseClientUpgradeRequired, type ClientUpgradeRequired } from "../shared/client-compatibility";
 import { onClientUpgrade } from "./client-upgrade-signal";
 import { startUpdateRelaunchGuard } from "./relaunch-guard";
@@ -19,6 +21,9 @@ import { readReleaseCandidatesEnabled, RELEASE_CANDIDATE_FEED, writeReleaseCandi
 import type { ChildProcess } from "node:child_process";
 
 let wired = false;
+/** Off: the release CDN rejects differential range requests. With it off,
+ * electron-updater never reads or writes the cache's root `update.zip`. */
+const DIFFERENTIAL_DOWNLOADS = false;
 let relaunchGuard: ChildProcess | null = null;
 
 const CHECK_INTERVAL_MS = 5 * 60 * 1000;
@@ -574,7 +579,7 @@ export function setupUpdater(): void {
   autoUpdater.autoDownload = true;
   // The release CDN rejects the multi-range requests a differential download
   // makes (HTTP 501), so every update already ended in a full download.
-  autoUpdater.disableDifferentialDownload = true;
+  autoUpdater.disableDifferentialDownload = !DIFFERENTIAL_DOWNLOADS;
   autoUpdater.autoInstallOnAppQuit = true;
 
   // Point the updater at THIS build's channel feed. Dev never reaches here (the
@@ -694,6 +699,47 @@ export function setupUpdater(): void {
   app.on("browser-window-focus", () => checkAutomatically("focus"));
   powerMonitor.on("resume", () => checkAutomatically("resume"));
   checkAutomatically("launch");
+  scheduleStaleStagingCleanup();
+}
+
+/** What update staging this running app may remove now, or null where there is
+ * none to judge (development, no feed, not macOS). Phase-5 storage Clear reads
+ * the same plan. */
+export async function staleUpdaterStaging(): Promise<StagingPlan | null> {
+  const ch = channel();
+  if (!updaterEnabled() || process.platform !== "darwin" || (ch !== "stable" && ch !== "alpha")) return null;
+  return await planUpdaterStagingCleanup({
+    // @ts-expect-error - "cache" is a valid runtime path name, absent from the types.
+    cacheRoot: app.getPath("cache"),
+    channel: ch,
+    bundleId: appIdentity(),
+    runningVersion: app.getVersion(),
+    differentialDownloads: DIFFERENTIAL_DOWNLOADS,
+  });
+}
+
+/** Only between updater activity, and only while this process owns the
+ * profile: a download or an install in progress keeps every file it uses.
+ * Entirely asynchronous: main serves every window, menu and renderer IPC. */
+function scheduleStaleStagingCleanup(attempt = 0): void {
+  if (attempt >= 6) return;
+  const timer = setTimeout(() => {
+    void (async () => {
+      if (typeof app.hasSingleInstanceLock !== "function" || !app.hasSingleInstanceLock()) return;
+      if (currentStatus.kind !== "idle" || checkInFlight || updateDownloaded) {
+        scheduleStaleStagingCleanup(attempt + 1);
+        return;
+      }
+      const plan = await staleUpdaterStaging();
+      // A check or download may have started while the plan was read.
+      if (!plan || currentStatus.kind !== "idle" || checkInFlight || updateDownloaded) return;
+      const removed = (await applyUpdaterStagingCleanup(plan)).filter((result) => result.outcome === "removed").length;
+      if (removed) console.log(`[updater] removed ${removed} stale staging item(s)`);
+    })().catch(() => {
+      console.warn("[updater] stale staging cleanup deferred until next launch");
+    });
+  }, attempt === 0 ? 30_000 : CHECK_INTERVAL_MS);
+  timer.unref?.();
 }
 
 

@@ -1,10 +1,13 @@
-// Deletion primitives for development-storage cleanup (prune, ephemeral
-// identities, storage:sweep). Every target must sit directly inside an
-// expected container under $HOME, and no component from $HOME down to the
-// target may be a symlink; nothing here follows a link. Node built-ins only.
+// Deletion helpers for development-storage cleanup (prune, ephemeral
+// identities, storage:sweep). Containment comes from the engine's shared
+// contained-removal.cjs with $HOME as the anchor: every target sits directly
+// inside an expected container and nothing follows a link. Node built-ins only.
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { createRequire } from "node:module";
+
+const contained = createRequire(import.meta.url)("../apps/desktop/src/engine/db/contained-removal.cjs");
 
 function lstatOrNull(target) {
   try {
@@ -15,35 +18,14 @@ function lstatOrNull(target) {
   }
 }
 
-/** Why `target` may not be removed, or null when it may. */
+/** Why `target` may not be removed, or null when it may; `home` is the anchor. */
 export function refusal(target, { container, home, kind = "directory" }) {
-  if (typeof target !== "string" || !path.isAbsolute(target) || path.resolve(target) !== target)
-    return "not an absolute normalized path";
-  if (!path.isAbsolute(home) || path.resolve(home) !== home) return "invalid home";
-  if (path.dirname(target) !== container) return "outside its expected folder";
-  if (container !== home && !container.startsWith(`${home}${path.sep}`)) return "outside the home folder";
-  let cursor = home;
-  const relative = path.relative(home, target).split(path.sep);
-  for (const segment of relative) {
-    if (!segment || segment === "." || segment === "..") return "outside the home folder";
-    cursor = path.join(cursor, segment);
-    const stat = lstatOrNull(cursor);
-    if (!stat) return "missing";
-    if (stat.isSymbolicLink()) return "symlink";
-    if (cursor !== target && !stat.isDirectory()) return "not a directory path";
-  }
-  const stat = lstatOrNull(target);
-  if (kind === "directory" && !stat.isDirectory()) return "not a directory";
-  if (kind === "file" && !stat.isFile()) return "not a file";
-  return null;
+  return contained.refusal(target, { container, root: home, kind });
 }
 
 /** Remove one contained target. Returns "removed", "missing" or a refusal. */
-export function removeContained(target, options) {
-  const reason = refusal(target, options);
-  if (reason) return reason;
-  fs.rmSync(target, { recursive: options.kind !== "file", force: false });
-  return "removed";
+export function removeContained(target, { container, home, kind = "directory" }) {
+  return contained.removeContained(target, { container, root: home, kind });
 }
 
 /** Allocated bytes under `target` (what `du` reports), counting links as

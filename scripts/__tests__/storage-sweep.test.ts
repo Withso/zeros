@@ -352,6 +352,7 @@ describe("pnpm storage:sweep", () => {
       "scripts/storage-sweep.mjs", "scripts/local-instance-registry.mjs", "scripts/local-instance-prune.mjs",
       "scripts/storage-removal.mjs", "scripts/exclusive-file-lock.mjs",
       "apps/desktop/src/engine/db/local-development-paths.cjs",
+      "apps/desktop/src/engine/db/contained-removal.cjs",
     ]) {
       fs.mkdirSync(path.dirname(path.join(checkout, relative)), { recursive: true });
       fs.copyFileSync(relative, path.join(checkout, relative));

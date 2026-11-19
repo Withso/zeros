@@ -3,6 +3,11 @@
 // injectable paths; main.ts calls it before `app` is ready and before anything
 // opens the profile.
 //
+// It runs before the first window, on every installed user's first launch
+// after updating, so it never deletes recursively and never copies a cache:
+// each entry is one rename. Regenerable caches that Chromium will not relocate
+// move with the profile so they stay warm (the canvas keeps its shaders).
+//
 // Safe to interrupt and to run concurrently: an entry is published only by an
 // atomic rename or a no-replace link, a copy is published from a private
 // temporary only after it verifies, a destination entry that already exists is
@@ -41,6 +46,9 @@ export interface SessionMigrationSource {
   dir: string;
   /** Regenerable entries left in place because a relocated cache now lives there. */
   keep: readonly string[];
+  /** "move": into the profile by rename only; "leave": untouched (an older
+   * folder whose caches the sweep and the OS own). */
+  regenerables: "move" | "leave";
 }
 
 export interface SessionMigrationResult {
@@ -48,6 +56,10 @@ export interface SessionMigrationResult {
   moved: string[];
   kept: string[];
   failed: string[];
+  /** Regenerable entries moved into the profile, and ones left behind. Neither
+   * affects the status: a cache left behind is in a purgeable folder. */
+  cachesMoved: string[];
+  cachesLeft: string[];
 }
 
 /** Old locations to drain, earliest-wins. None when the session already lives
@@ -65,9 +77,9 @@ export function sessionMigrationSources(input: {
   exists: (file: string) => boolean;
 }): SessionMigrationSource[] {
   if (input.dataDirOverridden || path.resolve(input.sessionDataDir) === path.resolve(input.cacheDir)) return [];
-  const sources: SessionMigrationSource[] = [{ dir: input.cacheDir, keep: [...CACHE_DIR_SESSION_ENTRIES] }];
+  const sources: SessionMigrationSource[] = [{ dir: input.cacheDir, keep: [...CACHE_DIR_SESSION_ENTRIES], regenerables: "move" }];
   if (input.family === "installed" && input.channel === "stable" && !input.exists(path.join(input.cacheDir, OLDER_HOP_MARKER)))
-    sources.push({ dir: path.join(input.cacheRoot, "design.zeros.app"), keep: [] });
+    sources.push({ dir: path.join(input.cacheRoot, "design.zeros.app"), keep: [], regenerables: "leave" });
   return sources;
 }
 
@@ -101,7 +113,7 @@ export function migrateSessionData(input: {
 }): SessionMigrationResult {
   const fs = input.fs ?? nodeFs;
   const log = input.log ?? ((line: string) => console.warn(`[Zeros] session data: ${line}`));
-  const result: SessionMigrationResult = { status: "migrated", moved: [], kept: [], failed: [] };
+  const result: SessionMigrationResult = { status: "migrated", moved: [], kept: [], failed: [], cachesMoved: [], cachesLeft: [] };
   const problems: string[] = [];
   const present = (file: string) => {
     try {
@@ -145,13 +157,9 @@ export function migrateSessionData(input: {
         if (name === SESSION_MIGRATION_MARKER || name === OLDER_HOP_MARKER || PARTIAL.test(name)) continue;
         const from = path.join(source.dir, name);
         if (isRegenerableSessionEntry(name)) {
-          if (!source.keep.includes(name)) {
-            try {
-              fs.rmSync(from, { recursive: true, force: true });
-            } catch {
-              // A regenerable entry left behind costs disk, never state.
-            }
-          }
+          if (source.keep.includes(name) || source.regenerables === "leave") continue;
+          if (moveCache(fs, from, path.join(input.destination, name), present)) result.cachesMoved.push(name);
+          else result.cachesLeft.push(name);
           continue;
         }
         try {
@@ -182,6 +190,18 @@ export function migrateSessionData(input: {
 }
 
 type MoveOutcome = "moved" | "kept" | "gone" | "failed";
+
+/** One rename or no-replace link; never a copy. False leaves it behind. */
+function moveCache(fs: MigrationFs, from: string, to: string, present: (file: string) => boolean): boolean {
+  try {
+    const stat = fs.lstatSync(from);
+    if (present(to)) return false;
+    publish(fs, from, to, stat.isDirectory(), present);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 function moveEntry(fs: MigrationFs, from: string, to: string, present: (file: string) => boolean): MoveOutcome {
   let stat: nodeFs.Stats;
@@ -235,7 +255,8 @@ function copyAcrossVolumes(fs: MigrationFs, from: string, to: string, directory:
       if (code === "EEXIST" || code === "ENOTEMPTY") return "kept";
       throw error;
     }
-    fs.rmSync(from, { recursive: true, force: true });
+    // The verified source stays in the purgeable cache folder: removing it
+    // would be a recursive delete before the first window.
     return "moved";
   } finally {
     fs.rmSync(temporary, { recursive: true, force: true });
