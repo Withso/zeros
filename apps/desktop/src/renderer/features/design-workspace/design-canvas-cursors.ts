@@ -32,20 +32,20 @@ function quantizedDegrees(degrees: number, period: number): number {
   return ((step % period) + period) % period;
 }
 
-// Figma's head at the macOS arrow's size: about 11 by 17 points outlined.
-const ARROW = "M5 4 14 11.3 9.5 13.5 7 18.5Z";
+// The reference glyphs keep their proportions and are scaled as a whole to
+// about the macOS cursors' overall size.
+const ARROW = "M6 5 18.6 12.3 12.4 14.4 8.9 19.3Z";
 
 /** The canvas arrow: a dark grey head in a thick white outline, tip top left. */
 export const DESIGN_ARROW_CURSOR = designSvgCursor(
   "zd-cursor-arrow",
-  `<path d='${ARROW}' fill='%23fff' stroke='%23fff' stroke-width='2.5' stroke-linejoin='round'/>` +
-    `<path d='${ARROW}' fill='%23333' stroke='%23333' stroke-width='0.6' stroke-linejoin='round'/>`,
-  { x: 5, y: 4 },
+  `<path d='${ARROW}' fill='%23fff' stroke='%23fff' stroke-width='3' stroke-linejoin='round'/>` +
+    `<path d='${ARROW}' fill='%23333' stroke='%23333' stroke-width='0.8' stroke-linejoin='round'/>`,
+  { x: 6, y: 5 },
   "default",
 );
 
-// The macOS resize cursors' proportions: 22 points long, 6-point heads.
-const RESIZE = "M6 16 11.5 13V15.1H20.5V13L26 16 20.5 19V16.9H11.5V19Z";
+const RESIZE = "M7.3 16 12.3 11.4V14.7H19.7V11.4L24.7 16 19.7 20.6V17.3H12.3V20.6Z";
 const RESIZE_KEYWORDS = ["ew-resize", "nwse-resize", "ns-resize", "nesw-resize"] as const;
 
 /** A double-headed resize arrow along a screen direction: 0° is horizontal,
@@ -63,8 +63,8 @@ export function designResizeCursor(degrees: number): string {
 }
 
 // A quarter arc wrapping the north-west corner, an arrowhead at each end.
-const ROTATE_ARC = "M12 18V16A4 4 0 0 1 16 12H18";
-const ROTATE_HEADS = ["M9.5 18H14.5L12 22Z", "M18 9.5V14.5L22 12Z"];
+const ROTATE_ARC = "M11.3 19.1V16.8A4.7 4.7 0 0 1 16 12.1H19.1";
+const ROTATE_HEADS = ["M8.2 19.1H14.4L11.3 23Z", "M19.1 9V15.2L23 12.1Z"];
 
 /** The rotation cursor for a corner whose screen direction from the box
  * centre, a quarter turn on, is `degrees`: -45° is an upright box's
@@ -76,9 +76,9 @@ export function designRotationCursor(degrees: number): string {
   return designSvgCursor(
     `zd-cursor-rotate-${angle}`,
     `<g transform='rotate(${angle} 16 16)'>` +
-      `<path d='${ROTATE_ARC}' fill='none' stroke='%23fff' stroke-width='4.3'/>` +
-      heads("fill='%23fff' stroke='%23fff' stroke-width='2.5' stroke-linejoin='round'") +
-      `<path d='${ROTATE_ARC}' fill='none' stroke='%23000' stroke-width='1.8'/>` +
+      `<path d='${ROTATE_ARC}' fill='none' stroke='%23fff' stroke-width='5'/>` +
+      heads("fill='%23fff' stroke='%23fff' stroke-width='2.8' stroke-linejoin='round'") +
+      `<path d='${ROTATE_ARC}' fill='none' stroke='%23000' stroke-width='2.2'/>` +
       heads("fill='%23000'") +
       "</g>",
     { x: 16, y: 16 },
