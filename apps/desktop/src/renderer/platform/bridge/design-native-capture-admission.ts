@@ -13,9 +13,7 @@ function waitForCapacity(ms: number, signal: AbortSignal): Promise<void> {
   });
 }
 
-/** The app shell reserves main's native export slot before an iframe clones
- * its DOM. A cancelled consumer still joins runtime cleanup before releasing.
- * Browser-only development keeps the renderer scheduler's bounded fallback. */
+/** Reserve main's shared slot before cloning the iframe DOM and hold it until runtime cleanup settles. */
 export async function withNativeDesignCaptureAdmission<T>(
   signal: AbortSignal, explicit: boolean, work: () => Promise<T>,
 ): Promise<T> {

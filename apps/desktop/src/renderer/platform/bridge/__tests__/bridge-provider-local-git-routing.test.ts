@@ -12,8 +12,7 @@ const cloud = { organizationId, workspaceId: "22222222-2222-4222-8222-2222222222
 
 afterEach(() => vi.restoreAllMocks());
 
-/** Evaluate the production BridgeProvider routing object from use-bridge.tsx
- * with stubbed catalog accessors, so these controls cover its real wiring. */
+/** Evaluate production routing rather than replicating its Local/cloud predicates in the fixture. */
 function providerRouting(open: WorkspaceRuntimeOptions["open"]) {
   const source = ts.createSourceFile("use-bridge.tsx", readFileSync(new URL("../use-bridge.tsx", import.meta.url), "utf8"),
     ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
@@ -63,8 +62,7 @@ describe("BridgeProvider Local Git routing", () => {
       const client = new WorkspaceRuntimeClient({ ...factory.routing, workspaces: () => [row] });
       try {
         await client.warmWorkspace(cloud);
-        // Let the peer's own background chat read settle; only the Local Git
-        // requests below are under test.
+        // Wait for the peer's background chat read before measuring Local Git requests.
         await vi.waitFor(() => expect(peer.request).toHaveBeenCalled());
         await new Promise((resolve) => setTimeout(resolve, 0));
         open.mockClear();

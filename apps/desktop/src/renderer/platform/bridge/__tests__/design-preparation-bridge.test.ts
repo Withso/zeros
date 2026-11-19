@@ -10,7 +10,6 @@ const input = { workspaceId: "local", directoryId: "design_test", catalogRevisio
 const frame = { file: input.files[0], frameId: "f0", pageId: "page", title: "Frame", kind: "frame", x: 0, y: 0,
   width: 100, height: 100, z: 0, sourceVersion: "b".repeat(24), nodeCount: 1, modifiedAt: 0 };
 const reply = () => ({ directoryId: input.directoryId, catalogRevision: input.catalogRevision, frames: [frame], errors: [] });
-/** What a reply whose only frame's record does not hold resolves to. */
 const refused = () => ({ ...reply(), frames: [], errors: [{ file: frame.file, message: DESIGN_PREPARED_FRAME_INVALID_MESSAGE }] });
 function client(value: unknown, capable = true, surfaces = false, components = false) {
   return { supportsEngineCapability: (capability: string) => capable && (capability === DESIGN_LAZY_PREPARATION_CAPABILITY ||
@@ -24,7 +23,6 @@ it("negotiates a component frame's options through the actual preparation reply 
   const bridge = client(value, true, false, true);
   await expect(bridgeDesignPrepareFrames(bridge as unknown as RuntimeClient, input)).resolves.toEqual(value);
   expect(bridge.request).toHaveBeenCalledWith({ type: "WORKSPACE_REQUEST", op: "design.frames.prepare", params: { ...input, componentOptions: true } }, 20_000);
-  // A record that does not hold the declaration's shape is not admitted.
   await expect(bridgeDesignPrepareFrames(client({ ...reply(), frames: [{ ...frame, component: { ...component, reach: { width: "sometimes" } } }] }, true, false, true) as unknown as RuntimeClient, input)).resolves.toEqual(refused());
 });
 it("carries a frame's component instances through the actual preparation reply decoder", async () => {
@@ -162,7 +160,7 @@ it("drops only a frame whose prepared record does not hold, reporting that frame
   const result = await bridgeDesignPrepareFrames(client(value, true, false, true) as unknown as RuntimeClient, batch);
   expect(result.frames.map(({ file }) => file)).toEqual([files[0], files[2]]);
   expect(result.errors).toEqual([{ file: files[1], message: DESIGN_PREPARED_FRAME_INVALID_MESSAGE }]);
-  // A record that names no frame of the batch cannot be placed: the reply is refused.
+  // A malformed record can be dropped only if it identifies a requested frame.
   await expect(bridgeDesignPrepareFrames(client({ ...value, frames: [record(files[0]!, 0), { ...oversize, file: 42 }, record(files[2]!, 2)] },
     true, false, true) as unknown as RuntimeClient, batch)).rejects.toThrow();
 });

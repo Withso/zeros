@@ -3,7 +3,6 @@ import { CLIENT_TOKEN_ROLLOVER_PROTOCOL } from "@zeros/protocol/cloud-v2-relay";
 import { RuntimeClient, type RuntimeClientEnvironment, type RuntimeTransportSocket } from "../runtime-client";
 import { resetCloudConnectBackoffForTests } from "../cloud-connect-backoff";
 
-// §14.7: the desktop rolls its client token over on the SAME socket before the relay's deadline.
 class Socket implements RuntimeTransportSocket {
   readyState = 0;
   sent: Record<string, any>[] = [];
@@ -135,11 +134,10 @@ it("cancels on close and ignores a reply for another request or a replaced socke
   h.sockets[0].frame({ type: "CLOUD_CONNECTION_RENEWED", requestId: first.id, expiresAt: Date.now() + 300_000, refreshAt: Date.now() + 1_000, retryUntil: Date.now() + 2_000 });
   await vi.advanceTimersByTimeAsync(5_000);
   expect(h.renew).toHaveBeenCalledOnce();
-  // A socket closed before refreshAt never renews.
   const g = fixture(); await g.client.connect(); await g.ready(g.sockets[0]);
   g.auth(g.sockets[0]); g.sockets[0].close(1006); await vi.advanceTimersByTimeAsync(300_000);
   expect(g.renew).not.toHaveBeenCalled();
-  // Dispose (account switch retires the client) cancels a pending rollover too.
+  // Disposal cancels rollover without waiting for a peer disconnect.
   const d = fixture(); await d.client.connect(); await d.ready(d.sockets[0]);
   d.auth(d.sockets[0]); d.client.dispose(); await vi.advanceTimersByTimeAsync(300_000);
   expect(d.renew).not.toHaveBeenCalled();
@@ -165,7 +163,6 @@ it("labels an ENGINE_READY re-sent on an already ready socket as a repeat in dia
   expect(readies()).toHaveLength(2);
   expect(readies()[1]).toContain("\"repeat\":1");
   expect(h.client.status).toBe("connected");
-  // A new socket's first ready is not a repeat.
   socket.close(1013); await vi.advanceTimersByTimeAsync(60_000);
   const next = h.sockets.at(-1)!; if (next !== socket) { await h.ready(next); expect(readies().at(-1)).not.toContain("repeat"); }
 });

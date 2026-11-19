@@ -1,5 +1,4 @@
-// Pure, shared with Electron main. Native exceptions lose custom properties
-// across invoke(); return only this closed code/status envelope, never prose.
+// Carry only allowlisted codes and a bounded status, never remote prose.
 export type CloudRuntimeAccessCategory = "transient" | "retired" | "revoked" | "superseded" | "update-required";
 export const CLOUD_RUNTIME_ACCESS_ERRORS: Readonly<Record<string, { category: CloudRuntimeAccessCategory; message: string }>> = {
   cloud_actor_runtime_unavailable: { category: "transient", message: "The cloud runtime is temporarily unavailable." },

@@ -47,8 +47,7 @@ function runtime() {
       result:
         message.op === "chats.list"
           ? { chats: [], chatDeletions: [] }
-          : // This is the real WorkspaceService's cloud projection, covered by
-            // service.test.ts: "does not treat a cloud read credential ...".
+          : // An ambient cloud read credential is not proof of the human's repository access.
             message.op === "gh.repoAccess"
             ? { state: "unknown" }
             : message.op === "gh.prGet"

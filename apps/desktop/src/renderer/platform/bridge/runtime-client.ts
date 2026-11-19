@@ -16,8 +16,7 @@ import {
 
 /** "ended" only for a 404 or a 403 member_access_revoked of the workspace document; "unknown" for any failed read. */
 export type CloudAccessConfirmer = (target: { organizationId: string; workspaceId: string }) => Promise<"ended" | "present" | "unknown">;
-/** §14.7: mints a renewal ticket for the open socket (wake:false, same instance) whose bearer outlives `notExpiringBefore`,
- * and reports that bearer's expiry. The ticket goes only into the RENEW frame. */
+/** Renew only the current instance without waking it; send its newer bearer only in the RENEW frame. */
 export type CloudConnectionTicketRenewer = (notExpiringBefore: number) => Promise<{ ticket: string; tokenExpiresAt: number | null }>;
 type Rollover = {
   socket: RuntimeTransportSocket; epoch: number; expiresAt: number; retryUntil: number;
@@ -25,7 +24,6 @@ type Rollover = {
   presented: number; attempt: number; timer?: ReturnType<typeof setTimeout>; request?: string; stopped?: boolean;
 };
 const ROLLOVER_ACK_MS = 10_000, ROLLOVER_RETRY_MS = 2_000, ROLLOVER_RETRY_CAP_MS = 20_000;
-/** Ladder for reconnect backoff in ms. Index = consecutive-failure count. */
 const RECONNECT_LADDER = [1_000, 2_000, 4_000, 8_000, 15_000];
 
 /** Local startup reads must outlast a cold engine handshake and reconnect
@@ -33,17 +31,10 @@ const RECONNECT_LADDER = [1_000, 2_000, 4_000, 8_000, 15_000];
 const RECONNECT_GRACE_MS = 20_000;
 const CLOUD_CONNECT_GRACE_MS = 120_000;
 
-/** Queue cap during a disconnect, so a runaway caller can't pin unbounded
- *  memory. 32 was too tight: a project switch disconnects briefly while every
- *  mounting chat sends AGENT_LOAD_SESSION, which surfaced as "queue full"
- *  timeouts. 256 covers every open chat plus registry probes; deadlines still
- *  expire entries. */
+/** Bound disconnect memory while allowing a project switch's burst of chat mounts and registry reads. */
 const MAX_QUEUED_REQUESTS = 256;
 
-/** Parse the untrusted local/cloud WebSocket boundary. The protocol schema
- * keeps per-message validation centralized; unknown future message types are
- * deliberately ignored (as dispatch already did) so a rolling engine update
- * does not sever a mixed-version renderer connection. */
+/** Validate the untrusted bridge frame; ignore unknown message types so rolling upgrades do not disconnect older renderers. */
 export function parseInboundBridgeWebSocketFrame(
   raw: unknown,
 ): BridgeMessage | null {
@@ -61,15 +52,11 @@ export function parseInboundBridgeWebSocketFrame(
   }
 }
 
-/** Per-type queue caps for messages React effects re-fire while disconnected
- *  (every chat-view mount sends AGENT_LOAD_SESSION). The oldest entry drops at
- *  the cap; session state is monotonic, so the newest wins. */
+/** Cap remount traffic by type; keep newer requests so mounts converge on current session state. */
 const PER_TYPE_QUEUE_CAP: Record<string, number> = {
   AGENT_LOAD_SESSION: 50,
   AGENT_LIST_SESSIONS: 50,
-  // Each AGENT_NEW_SESSION spawns an agent subprocess, so a rebuild storm could
-  // fork-bomb the machine; cap it low and let the newest win. AGENT_LIST_AGENTS
-  // re-fires on every error-state flip, so it is capped too.
+  // Each new session spawns a subprocess; cap bursts before they can overwhelm the host.
   AGENT_NEW_SESSION: 12,
   AGENT_LIST_AGENTS: 24,
 };
@@ -182,30 +169,15 @@ export function parseRuntimeConnectionTarget(
   return Object.freeze({ ...target, protocols: Object.freeze([...target.protocols]) as typeof target.protocols });
 }
 
-// CONNECTION_REJECTED is terminal for the reconnect ladder, so BridgeProvider
-// (use-bridge.tsx) must consume it or the app sits silently disconnected. These
-// pure helpers hold its policy.
 
-/** Payload of an engine CONNECTION_REJECTED as recorded by the client. `reason`
- *  is one of ConnectionRejectedMessage's literals, kept as `string` here so an
- *  engine newer than this client can still hand us an unrecognised reason. */
+/** Keep reason open so an older renderer can receive an unfamiliar engine rejection. */
 export interface ConnectionRejection {
   reason: string;
   message: string;
   code?: string;
 }
 
-/** Whether an engine RESPAWN (watchdog `engine-restarted`) can plausibly cure a
- *  rejection, so the recovery layer may clear the latch and retry:
- *    • protocol-too-old / protocol-too-new — version skew against a STALE
- *      engine process; the respawned binary may match. Worst case the fresh
- *      engine re-rejects and the latch re-arms — one retry per respawn, never
- *      a hammer loop.
- *    • auth-required / desktop-unbound — the engine had no (or not-yet-seeded)
- *      owner binding; a respawn re-seeds from the local CONNECTED token.
- *  NOT retryable: auth-invalid / auth-wrong-account — the CLIENT's credential
- *  is the problem, and a new engine process rejects the same token the same
- *  way. Those wait for clearRejection() after a re-login/token refresh. */
+/** A replacement can fix stale protocol or owner binding, but a refused client credential needs a new login or token. */
 export function isRejectionRetryableAfterEngineRestart(
   reason: string | null | undefined,
 ): boolean {
@@ -220,10 +192,7 @@ export function isRejectionRetryableAfterEngineRestart(
   }
 }
 
-/** Map a rejection to user-facing toast copy. Reason-specific so the user gets
- *  an actionable instruction instead of a generic dead "disconnected" state.
- *  The engine's own `message` is developer-facing (protocol numbers etc.), so
- *  it only backs the fallback description for unknown reasons. */
+/** Use engine diagnostic text only for unknown reasons; known reasons get actionable copy. */
 export function describeConnectionRejection(rejection: ConnectionRejection): {
   headline: string;
   description: string;
@@ -283,8 +252,7 @@ interface QueuedRequest {
   reject: (err: Error) => void;
   signal?: AbortSignal;
   onAbort?: () => void;
-  /** Absolute-time deadline. If we're still disconnected at this moment,
-   *  the request rejects with a soft-fail error. */
+  /** This queue deadline is independent of the response budget, which starts on send. */
   deadline: number;
 }
 
@@ -330,9 +298,7 @@ function clearPendingRequest(pending: PendingRequest): void {
 export class RuntimeClient {
   private readonly environment: RuntimeClientEnvironment;
   private ws: RuntimeTransportSocket | null = null;
-  /** A socket created but not yet open. It stops connect() racing itself: orphan
-   *  sockets stayed connected, and the engine broadcasts to every client, so each
-   *  orphan duplicated every chunk. */
+  /** Track unopened sockets too; orphan connections would duplicate engine broadcasts. */
   private pendingWs: RuntimeTransportSocket | null = null;
   private handlers = new Map<string, Set<(msg: BridgeMessage) => void>>();
   private pendingRequests = new Map<string, PendingRequest>();
@@ -342,10 +308,7 @@ export class RuntimeClient {
   private reconnectAttempts = 0;
   private _status: ConnectionStatus = "disconnected";
   private _disposed = false;
-  // Terminal rejection (engine refused the connection: protocol skew or
-  // account-binding). When set, the blind reconnect loop is suspended — retrying
-  // the same client would just be rejected again. Cleared by a successful connect
-  // or clearRejection() (e.g. after a token refresh / re-login).
+  // A terminal rejection suspends blind reconnects until the cause has been addressed.
   private _rejected = false;
   lastRejection: ConnectionRejection | null = null;
   private rejectionListeners = new Set<(r: ConnectionRejection) => void>();
@@ -361,7 +324,7 @@ export class RuntimeClient {
     (identity: RuntimeExecutionIdentity) => void
   >();
   private readonly refreshCloudConnectionTarget?: CloudRuntimeConnectionTargetRefresher;
-  /** D2: one exact read of the workspace document (team headers, this account) to confirm a 4001 access_revoked. */
+  /** Confirm access_revoked with one exact workspace document read in the same account and organization. */
   private readonly confirmCloudAccessEnded?: CloudAccessConfirmer;
   private readonly renewCloudConnectionTicket?: CloudConnectionTicketRenewer;
   private rollover: Rollover | null = null;
@@ -442,8 +405,7 @@ export class RuntimeClient {
     return this._status === "connected" && this.isOpen() && this.engineCapabilities.has(capability);
   }
 
-  /** Passive observations never enter the reconnect queue or start admission.
-   * Check and send in the same synchronous turn at the socket owner. */
+  /** Passive reads must not start admission or reconnect; check and send in one turn. */
   requestConnected<T extends BridgeMessage = BridgeMessage>(
     msg: Partial<BridgeMessage> & { type: string },
     timeoutOrOptions: number | RequestOptions = 5000,
@@ -457,7 +419,6 @@ export class RuntimeClient {
     return this.sendRequest<T>(msg, opts.timeoutMs, opts.signal);
   }
 
-  /** Whether the engine is connected and ready */
   private _engineConnected = false;
   private handshakeReady = false;
   private finishCloudHandshake: (() => void) | null = null;
@@ -469,8 +430,6 @@ export class RuntimeClient {
   async connect(): Promise<void> {
     if (this._disposed || (this.connectionTarget.kind === "cloud" && this._rejected)) return;
     if (this.ws?.readyState === 1) return;
-    // In-flight guard: two concurrent connect() calls would each open a WebSocket,
-    // orphaning one that stays connected and duplicates every broadcast chunk.
     if (this.pendingWs) return;
     if (this.connectionTarget.kind === "cloud") this.cloudConnectWait();
 
@@ -525,9 +484,7 @@ export class RuntimeClient {
         : `ws://localhost:${port}/ws`;
     }
     if (this._disposed || (this.connectionTarget.kind === "cloud" && this._rejected) || targetEpoch !== this.connectionTargetEpoch) return;
-    // Re-check after the async hop — another connect() could have won
-    // the race and we'd duplicate. Read through a method: the early return
-    // above would otherwise narrow `this.ws.readyState` across the awaits.
+    // Another connect can win across the awaits; use a fresh socket check rather than the narrowed earlier state.
     if (this.socketIsOpen()) return;
     if (this.pendingWs) return;
 
@@ -544,8 +501,6 @@ export class RuntimeClient {
     }
     this.pendingWs = ws;
     ws.onopen = () => {
-      // If we were disposed (or another socket beat us to it) while
-      // pending, drop this one rather than promoting it.
       if (this._disposed || this.pendingWs !== ws || targetEpoch !== this.connectionTargetEpoch) {
         try {
           ws.close();
@@ -556,8 +511,7 @@ export class RuntimeClient {
       }
       this.pendingWs = null;
       this.ws = ws;
-      // Actor admission expires before use. Once admitted, the server's live
-      // actor lease governs the stream; ordinary reconnect always mints anew.
+      // Once admitted, the live actor lease replaces the one-use ticket's admission deadline.
       if (this.connectionTarget.kind === "cloud" && this.connectionTargetExpiryTimer) {
         clearTimeout(this.connectionTargetExpiryTimer);
         this.connectionTargetExpiryTimer = null;
@@ -573,24 +527,19 @@ export class RuntimeClient {
     };
 
     ws.onclose = (event) => {
-      // Clear whichever slot held this socket; an orphan that lost the
-      // race could close after the winner promoted itself, and we
-      // don't want to null out the live this.ws.
+      // A late close from a losing socket must not clear the winning connection.
       if (this._disposed || targetEpoch !== this.connectionTargetEpoch) return;
       const wasPending = this.pendingWs === ws;
       if (wasPending) this.pendingWs = null;
       if (this.ws !== ws && !wasPending) return;
       this.cloudDiagnostic("close", { code: event?.code ?? null, stage: wasPending ? "upgrade" : this.handshakeReady ? "ready" : "handshake" });
-      // §14.5: a relay 1013 (try again later) or a refused upgrade is a failed connect: it grows the shared backoff
-      // and is never an immediate reconnect.
+      // A refused upgrade or relay 1013 grows the shared workspace backoff instead of reconnecting immediately.
       const failedConnect = this.connectionTarget.kind === "cloud" && (event?.code === 1013 || wasPending);
       if (failedConnect) recordCloudConnectFailure(this.cloudBackoffKey()!);
       const reconnectImmediately = this.connectionTarget.kind === "cloud" && this.handshakeReady && !failedConnect &&
         event?.code !== 1000 && event?.code !== 4001;
       if (this.ws === ws) { this.ws = null; this.cancelRollover(); }
-      // D2: the relay also closes 4001 for an expired or unrenewable context, a redeploy or worker_unauthorized.
-      // Only "access_revoked" may end access, and only once the workspace document confirms it (404, or 403
-      // member_access_revoked). Anything else reconnects with the normal backoff, against old and new relays.
+      // Confirm access_revoked against the workspace document; other 4001 reasons use normal backoff on old and new relays.
       if (this.connectionTarget.kind === "cloud" && event?.code === 4001) {
         const target = this.connectionTarget;
         if (event.reason !== "access_revoked" || !this.confirmCloudAccessEnded) { this.afterDisconnect(false); return; }
@@ -613,11 +562,9 @@ export class RuntimeClient {
     };
 
     ws.onerror = () => {
-      // onclose will fire after onerror
     };
   }
 
-  /** Send a message (fire-and-forget) over the local socket. */
   send(msg: Partial<BridgeMessage> & { type: string }): void {
     if (!this.isOpen()) return;
 
@@ -630,12 +577,7 @@ export class RuntimeClient {
     this.rawSend(envelope);
   }
 
-  /** Tell the engine the desktop owner signed out, so it forgets the bound owner
-   *  account and drops connected relay devices (account-binding hardening — a
-   *  remote device must not keep access under a signed-out account). Fire-and-
-   *  forget over the LOCAL bridge; the engine ignores it from a relay client.
-   *  Best-effort: if the socket is already closed there is nothing bound to clear
-   *  (a dead engine holds no clients, and the next sign-in re-seeds the owner). */
+  /** Only the Local bridge can revoke relay-device authority on sign-out; the next Local sign-in reseeds the owner. */
   signalOwnerSignedOut(): void {
     this.send({ type: "OWNER_SIGNED_OUT" });
   }
@@ -680,10 +622,7 @@ export class RuntimeClient {
     }
   }
 
-  /** Subscribe to expiry of the exact cloud descriptor currently installed.
-   * The event is secret-free and fires once per descriptor, allowing the
-   * trusted coordinator to mint and install a replacement without a stale
-   * reconnect loop. */
+  /** Emit one secret-free expiry event per descriptor so its coordinator can replace it without a stale reconnect. */
   onConnectionTargetExpired(
     listener: (event: ConnectionTargetExpiredEvent) => void,
   ): () => void {
@@ -702,7 +641,6 @@ export class RuntimeClient {
     const opts = normalizeRequestOptions(timeoutOrOptions);
     if (this.connectionTarget.kind === "cloud" && this._rejected)
       return Promise.reject(new Error(this.lastRejection?.message || "Runtime connection rejected"));
-    // Happy path — transport ready (local socket or relay channel), go now.
     if (this.isOpen() && (this.connectionTarget.kind === "local" || CLOUD_CONTROL_REQUESTS.has(msg.type) ||
         (this.pendingRequests.size < CLOUD_RPC_IN_FLIGHT && !this.queuedRequests.length))) {
       return this.sendRequest<T>(msg, opts.timeoutMs, opts.signal);
@@ -711,17 +649,10 @@ export class RuntimeClient {
       return Promise.reject(makeRequestAbortError(msg.type));
     }
 
-    // Disconnected: queue under the grace window. A connection attempt
-    // is already running (onclose → scheduleReconnect), so we just
-    // wait for onopen → flushQueue() to pick this up.
 
-    // Dedup by (type, sessionId): a newer idempotent request supersedes an older
-    // queued copy, which is rejected as "superseded" so retry loops can decide.
     this.dedupSupersededInQueue(msg);
 
-    // Per-type cap — for message types that can balloon under
-    // a sustained disconnect, drop the oldest of that type rather than
-    // overflowing the global cap and rejecting unrelated traffic.
+    // Drop the oldest of an overloaded type before it consumes the global queue.
     const typeCap = PER_TYPE_QUEUE_CAP[msg.type];
     if (typeCap !== undefined) {
       const sameType = this.queuedRequests.filter(
@@ -775,19 +706,13 @@ export class RuntimeClient {
         opts.signal.addEventListener("abort", q.onAbort, { once: true });
       }
       this.queuedRequests.push(q);
-      // Kick off a best-effort connect if somehow no reconnect is
-      // scheduled yet (e.g. first request before connect() ever ran).
       if (!this.reconnectTimer && !this._disposed) {
         void this.connect();
       }
     });
   }
 
-  /** Reject any queued request that the incoming message supersedes.
-   *  Two queued requests with the same `type` AND same `sessionId`/
-   *  `chatId` are by definition redundant — the newer one carries the
-   *  newer caller's intent. Older copies surface as "superseded" so
-   *  upstream callers know they've been replaced rather than vanishing. */
+  /** Reject superseded copies explicitly so callers can distinguish a newer intent from a dropped request. */
   private dedupSupersededInQueue(
     incoming: Partial<BridgeMessage> & { type: string },
   ): void {
@@ -818,7 +743,6 @@ export class RuntimeClient {
     void before; // helper for future logging if we need to see hit-rate
   }
 
-  /** Subscribe to a specific message type. Returns an unsubscribe function. */
   on(type: string, handler: (msg: BridgeMessage) => void): () => void {
     if (!this.handlers.has(type)) {
       this.handlers.set(type, new Set());
@@ -829,7 +753,6 @@ export class RuntimeClient {
     };
   }
 
-  /** Subscribe to connection status changes. */
   onStatusChange(cb: (status: ConnectionStatus) => void): () => void {
     this.statusListeners.add(cb);
     return () => {
@@ -837,13 +760,7 @@ export class RuntimeClient {
     };
   }
 
-  /** Drop the current connection and reconnect, re-resolving the
-   *  engine port. Used by the in-place project swap when Electron
-   *  respawns the engine on a fresh port. The client object survives
-   *  (consumer hooks keep their ref) — only the underlying socket and
-   *  in-flight state are reset. Pending RPCs and queued requests are
-   *  rejected immediately so callers don't wait on a server that no
-   *  longer knows about them. */
+  /** Preserve the client object across a swap, but invalidate both the cached port and bearer and reject its queued and in-flight RPCs. */
   async forceReconnect(
     options: { refreshCloudTarget?: boolean } = {},
   ): Promise<void> {
@@ -859,10 +776,7 @@ export class RuntimeClient {
     ) {
       this.cloudTargetNeedsRefresh = true;
     }
-    // Reject in-flight requests: their ids belong to a server process about to die,
-    // and the new engine is a different process, so nothing is requeued silently.
-    // `code: "ENGINE_SWAPPING"` lets failure.ts identify them; TRANSPORT_RX also
-    // matches the message as a fallback.
+    // Request IDs belong to the retired engine; ENGINE_SWAPPING keeps this distinct from a terminal agent failure.
     const makeSwapError = (): Error & { code?: string } => {
       const e = new Error("Engine swapping — request aborted") as Error & {
         code?: string;
@@ -879,9 +793,7 @@ export class RuntimeClient {
       q.reject(makeSwapError());
     }
     this.queuedRequests = [];
-    // Close any live or pending socket. Closing flips us to
-    // "disconnected" via onclose, but we set it explicitly here to
-    // cover the (rare) case where neither socket fires the event.
+    // Do not rely on close events to publish disconnection; a socket may never emit one.
     const retiredSocket = this.ws, retiredPending = this.pendingWs;
     this.ws = null;
     this.pendingWs = null;
@@ -892,9 +804,7 @@ export class RuntimeClient {
     this.setStatus("disconnected");
     this.environment.invalidateEnginePort();
     this.environment.invalidateEngineToken();
-    // Kick the reconnect immediately rather than going through the
-    // backoff ladder — the user just clicked "Open Workspace" and is
-    // actively waiting for the new engine.
+    // An explicit handoff dials immediately rather than waiting on the background ladder.
     await this.connect();
   }
 
@@ -924,10 +834,7 @@ export class RuntimeClient {
     this.statusListeners.clear();
     this.connectionTargetExpiryListeners.clear();
     this.executionIdentityListeners.clear();
-    // Close BOTH the active socket and any in-flight pending one — an
-    // un-disposed pendingWs would keep its TCP connection to the engine
-    // open even though this client is gone, and on next mount the new
-    // client would see itself as the 2nd connection.
+    // Retire unopened sockets so they cannot survive disposal as orphan engine connections.
     try {
       this.ws?.close();
     } catch {
@@ -948,7 +855,6 @@ export class RuntimeClient {
       generation: target.generation, authorityEpoch: target.authorityEpoch, engineInstanceId: target.engineInstanceId,
       connectionSequence: target.connectionSequence, channel: target.channel } : undefined;
   }
-  /** The socket whose handshake last reported ready, so a repeat on it is labelled in diagnostics. */
   private readySocket?: unknown;
   private cloudDiagnostic(event: CloudDiagnosticEvent, data: Record<string, string | number | null | undefined>,
     scope = this.diagnosticScope()): void {
@@ -969,31 +875,23 @@ export class RuntimeClient {
     return this.ws?.readyState === 1;
   }
 
-  /** True when the local socket is ready to send. */
   private isOpen(): boolean {
     return this.ws?.readyState === 1 && this.handshakeReady;
   }
 
-  /** Send a pre-built envelope over the local socket as JSON text. */
   private rawSend(envelope: Record<string, unknown>): void {
     if (this.ws?.readyState === 1) {
       this.ws.send(JSON.stringify(envelope));
     }
   }
 
-  /** Shared post-connect handling for both transports: mark connected, reset
-   *  backoff, announce ourselves, and flush the disconnect queue. */
   private onTransportOpen(): void {
     this.handshakeReady = false;
     this.finishCloudHandshake = null;
-    // A successful transport open clears any prior terminal rejection.
     this._rejected = false;
     this.lastRejection = null;
 
-    // Announce ourselves. Locally, the current access token establishes the
-    // engine's owner account (local clients are never gated). A cloud engine was
-    // already admitted through the control plane, so the reusable WorkOS bearer
-    // never crosses into its sandbox.
+    // Only Local CONNECTED seeds the owner with the account bearer; the admitted cloud worker never receives it.
     const authToken =
       this.connectionTarget.kind === "local" ? this.environment.getAuthAccessToken() : "";
     this.rawSend({
@@ -1035,10 +933,7 @@ export class RuntimeClient {
     if (this.connectionTarget.kind === "local") { actorConfirmed = true; ready(); return; }
     this.finishCloudHandshake = ready;
 
-    // Existing engines announce ENGINE_READY before authenticating CONNECTED.
-    // One harmless read proves that their CONNECTED handler has settled. Keep
-    // application requests queued until then, so a 256-request reconnect and
-    // synchronous connected listeners cannot overflow the 64-frame auth queue.
+    // ENGINE_READY can precede CONNECTED authentication; hold reconnect bursts until a workspace.list reply confirms the handshake.
     void this.sendRequest({ type: "WORKSPACE_REQUEST", op: "workspace.list", params: {} }, Math.max(1, this.cloudConnectWait()))
       .then(response => {
         if (response.type !== "WORKSPACE_RESPONSE") throw new Error("Cloud handshake read failed");
@@ -1049,9 +944,6 @@ export class RuntimeClient {
       });
   }
 
-  /** Shared inbound-message handling for both transports. The local socket
-   *  passes a parsed object; the relay channel delivers an already-decrypted
-   *  app message object. */
   private handleIncoming(msg: BridgeMessage): void {
     if (msg.type === "ENGINE_READY") {
       const wire = msg as unknown as { capabilities?: unknown; instanceId?: unknown };
@@ -1060,15 +952,11 @@ export class RuntimeClient {
       this.readyInstanceId = typeof wire.instanceId === "string" && /^[A-Za-z0-9-]{8,64}$/.test(wire.instanceId) ? wire.instanceId : undefined;
       this.finishCloudHandshake?.();
     }
-    // ENGINE_READY confirms the engine is fully initialized.
     if (msg.type === "ENGINE_READY" && (this.connectionTarget.kind === "local" || this.handshakeReady)) {
       this._engineConnected = true;
     }
 
-    // The engine refused the connection (protocol skew or account binding). Stop
-    // the blind reconnect loop, which would only be refused again, and surface it:
-    // BridgeProvider shows reason-specific copy and calls clearRejection() once
-    // there is a path forward.
+    // Surface terminal refusals and stop blind retry until recovery can change the outcome.
     if (msg.type === "CONNECTION_REJECTED") {
       const m = msg as { reason?: string; message?: string };
       this._rejected = true;
@@ -1097,11 +985,7 @@ export class RuntimeClient {
       clearPendingRequest(pending);
       this.pendingRequests.delete(requestId);
       queueMicrotask(() => this.flushQueue());
-      // Correlated protocol envelopes resolve intact. Their owning façade
-      // classifies domain errors: workspaceOp turns WORKSPACE_ERROR into a
-      // structured error with code + remediation, while the agent façade reads
-      // its failure.kind. Rejecting here used to erase that metadata and left
-      // target-branch failures as an unhelpful message-only toast.
+      // Resolve correlated errors intact so workspace and agent callers can read structured failure data.
       pending.resolve(msg);
     }
 
@@ -1118,15 +1002,11 @@ export class RuntimeClient {
     this.setStatus(this.connectionTarget.kind === "cloud" && !this._rejected ? "connecting" : "disconnected");
     this._engineConnected = false;
     const now = Date.now();
-    // In-flight requests after a disconnect can't be replayed safely (the
-    // server lost our request id); reject with the soft-fail shape so the
-    // sessions-provider retry loop re-sends at the application level.
     this.rejectInFlightSoftFail();
     if (this.connectionTarget.kind === "cloud") {
       this.cloudTargetNeedsRefresh = true;
     }
     this.scheduleReconnect(reconnectImmediately);
-    // Reject any queue entries whose deadlines have elapsed.
     this.expireQueue(now);
   }
 
@@ -1189,8 +1069,6 @@ export class RuntimeClient {
         this.queuedRequests.push(q);
         continue;
       }
-      // Re-enter through sendRequest so the new request gets a fresh id
-      // and lands in pendingRequests.
       if (q.signal && q.onAbort) {
         q.signal.removeEventListener("abort", q.onAbort);
         q.onAbort = undefined;
@@ -1216,11 +1094,7 @@ export class RuntimeClient {
   }
 
   private rejectInFlightSoftFail(): void {
-    // Called from onclose. Any request that was already on the wire
-    // when the socket dropped — we can't replay safely (response id
-    // is lost), so we reject with the soft-fail shape. Upstream retry
-    // loops (sessions-provider.ensureSession) recognise this and back
-    // off silently.
+    // Never replay an already-sent request here; its owner must decide whether the operation is safe to retry.
     for (const [id, pending] of this.pendingRequests) {
       this.cloudDiagnostic("request_failed", { ...pending.diagnostic, class: "disconnected",
         elapsedMs: Math.round(performance.now() - pending.startedAt) }, pending.scope);
@@ -1236,25 +1110,16 @@ export class RuntimeClient {
     for (const cb of this.statusListeners) cb(status);
   }
 
-  /** Subscribe to terminal connection rejections (protocol skew / account
-   *  binding). Returns an unsubscribe. The recovery layer (BridgeProvider in
-   *  use-bridge.tsx) uses this to surface reason-specific toast copy. */
   onConnectionRejected(cb: (r: ConnectionRejection) => void): () => void {
     this.rejectionListeners.add(cb);
-    // Replay the latest rejection to a late subscriber so it isn't missed.
+    // Replay to the provider even if it subscribes after a startup rejection.
     if (this.lastRejection) cb(this.lastRejection);
     return () => {
       this.rejectionListeners.delete(cb);
     };
   }
 
-  /** Clear a terminal rejection — call after resolving the cause (a refreshed
-   *  token / re-login / app update / engine respawn). Reconnects immediately by
-   *  default; pass `{ reconnect: false }` when the caller drives its own
-   *  reconnect (e.g. forceReconnect() after an `engine-restarted` respawn —
-   *  a second concurrent connect() here would race it and could latch onto the
-   *  STALE cached port before forceReconnect invalidates it). No-op if not
-   *  rejected. */
+  /** A caller driving forceReconnect must clear without dialing, so it cannot race the cached-port invalidation. */
   clearRejection(opts: { reconnect?: boolean } = {}): void {
     if (!this._rejected) return;
     this._rejected = false;
@@ -1283,13 +1148,9 @@ export class RuntimeClient {
     ) {
       return;
     }
-    // Engine refused us — don't hammer it; wait for clearRejection() to retry.
     if (this._rejected) return;
     if (this.reconnectTimer) return;
-    // A previously healthy cloud socket may be dropped by the network/tunnel.
-    // Refresh its ticket in the next tick; unsuccessful handshakes still use
-    // the bounded ladder, and the Local sidecar keeps its existing cadence.
-    // A cloud reconnect also waits out the workspace's shared connect backoff (§14.5), which outgrows the ladder.
+    // Only a healthy cloud drop gets a next-tick retry; failed handshakes wait the longer of the ladder and shared workspace backoff.
     const delay = immediate ? 0 : Math.max(
       RECONNECT_LADDER[
         Math.min(this.reconnectAttempts, RECONNECT_LADDER.length - 1)
@@ -1377,7 +1238,7 @@ export class RuntimeClient {
     this.scheduleReconnect();
   }
 
-  /** §14.7: the relay's AUTH and RENEWED frames for the current socket; they never reach bridge listeners. */
+  /** Relay AUTH and RENEWED frames stay in the socket transport, never reaching bridge subscribers. */
   private handleRolloverFrame(ws: RuntimeTransportSocket, epoch: number, data: unknown): boolean {
     if (this.connectionTarget.kind !== "cloud" || typeof data !== "string" || data.length > 4096 || !data.includes("\"CLOUD_CONNECTION_")) return false;
     let frame: unknown;
@@ -1428,7 +1289,6 @@ export class RuntimeClient {
     }, ROLLOVER_ACK_MS);
   }
 
-  /** Bounded, jittered, single flight, and only while the relay still accepts a renewal. */
   private retryRollover(rollover: Rollover): void {
     if (!this.rolloverCurrent(rollover)) return;
     const ceiling = Math.min(ROLLOVER_RETRY_CAP_MS, ROLLOVER_RETRY_MS * 2 ** rollover.attempt++);
@@ -1495,7 +1355,7 @@ export class RuntimeClient {
     return this.cloudTargetRefreshPromise;
   }
   private rejectCloudConnection(failure: CloudRuntimeAccessError): void {
-    // §14.5: no ready connection within the grace is a failed connect; the next open waits the shared backoff.
+    // An expired readiness deadline counts as a failed connect for the next workspace open.
     if (failure.code === "cloud_actor_runtime_unavailable") recordCloudConnectFailure(this.cloudBackoffKey()!);
     this._rejected = true;
     this.lastRejection = { reason: `cloud-${failure.category}`, message: failure.message, code: failure.code };

@@ -14,8 +14,7 @@ import { cloudWorkspaceKey } from "./cloud-workspace-key";
 
 export { mergeCodeReviewThreads } from "@zeros/protocol/code-review";
 
-// Renderer-only placement context; strip it before strict Local wire parsing.
-// A native workspace id must not hide a cloud cwd at this boundary.
+// Keep renderer-only cwd out of the wire payload; a native workspace ID must not hide a cloud cwd.
 type ReviewInput<Input> = Input & { cwd?: string };
 
 async function reviewOperation<Input extends { workspaceId: string }, Output extends CodeReviewThread | CodeReviewListResult>(

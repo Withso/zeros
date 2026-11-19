@@ -1,8 +1,6 @@
 import { cloudWorkspaceKey, type CloudWorkspaceTarget } from "./cloud-workspace-key";
 
-/** R1 relay-presence-v1: while a workspace has a live relay connection that the control plane admitted with this
- * feature (POST connect's reply), that connection itself counts as presence for idle stop, so the focused-window
- * ping is not needed. Counted per exact workspace; each connection ends its own share. */
+/** Idle stop counts relay-presence-v1 connections, replacing focus pings until the workspace's last such connection closes. */
 const live = new Map<string, number>();
 
 export function setRelayPresence(target: CloudWorkspaceTarget): () => void {

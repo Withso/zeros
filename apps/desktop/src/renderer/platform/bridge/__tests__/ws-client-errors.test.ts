@@ -254,22 +254,13 @@ describe("untrusted WebSocket frame validation", () => {
   });
 });
 
-// ── CONNECTION_REJECTED recovery ─────────────────────────────
-//
-// The engine's terminal rejection latch used to have NO consumer: ws-client
-// suspended its reconnect ladder and the app silently wedged "disconnected"
-// until relaunch. These tests pin the pure recovery policy (which reasons an
-// engine respawn may retry, what copy the toast shows) and the latch plumbing
-// BridgeProvider relies on.
 
 describe("isRejectionRetryableAfterEngineRestart", () => {
   it.each([
-    // Version skew against a STALE engine process — the respawned binary may
-    // match the client again.
+    // A stale process can reject a protocol the replacement supports.
     "protocol-too-old",
     "protocol-too-new",
-    // The engine had no (or not-yet-seeded) owner binding; a respawn re-seeds
-    // from the local CONNECTED token.
+    // A replacement process can seed a missing owner binding from the Local CONNECTED token.
     "auth-required",
     "desktop-unbound",
   ])("retries %s after a watchdog engine respawn", (reason) => {
@@ -320,7 +311,6 @@ describe("describeConnectionRejection", () => {
 });
 
 describe("RuntimeClient rejection latch", () => {
-  /** Feed a CONNECTION_REJECTED frame through the private inbound path. */
   function rejectClient(client: RuntimeClient, reason: string): void {
     (
       client as unknown as { handleIncoming: (message: unknown) => void }
@@ -344,8 +334,7 @@ describe("RuntimeClient rejection latch", () => {
     expect(client.status).toBe("disconnected");
     expect(seen).toEqual(["auth-required"]);
 
-    // A subscriber that mounts AFTER the rejection must still hear about it —
-    // BridgeProvider's effect can run after a fast startup rejection.
+    // The provider can subscribe after a fast startup rejection.
     const late: string[] = [];
     client.onConnectionRejected((r) => late.push(r.reason));
     expect(late).toEqual(["auth-required"]);
@@ -360,8 +349,7 @@ describe("RuntimeClient rejection latch", () => {
     client.clearRejection({ reconnect: false });
 
     expect(client.lastRejection).toBeNull();
-    // The engine-restarted path drives its own forceReconnect (which must
-    // re-resolve the port first); a second concurrent connect() would race it.
+    // The engine-restart caller dials through forceReconnect; a concurrent connect could use the retired port.
     expect(connect).not.toHaveBeenCalled();
   });
 
@@ -370,7 +358,6 @@ describe("RuntimeClient rejection latch", () => {
     const connect = vi.fn(async () => {});
     (client as unknown as { connect: () => Promise<void> }).connect = connect;
 
-    // Not rejected → nothing happens (a stray call must not spawn sockets).
     client.clearRejection();
     expect(connect).not.toHaveBeenCalled();
 
