@@ -13,15 +13,21 @@ import {
   duplicateDesignFrame,
   listDesignFrames,
   lintDesignDocument,
+  prepareDesignNavigationFrames,
+  readDesignFrame,
+  readDesignMutationSnapshot,
   readDesignFrameRenderIdentity,
+  readDesignWorkspaceSnapshot,
   renameDesignFrame,
   restoreDesignFrame,
   transferDesignNode,
 } from "../document";
+import { designCatalogRevision, inspectDesignCatalog } from "../catalog-storage";
 import { readCanvas, writeCanvas } from "../document-storage";
 import { prepareFrameRenderSource } from "../render-preparation";
 import { DESIGN_RUNTIME_DOCUMENT_BODY_ID } from "@zeros/protocol/design-runtime";
 import { createComponentTemplateBudget, renderComponentTemplate } from "@zeros/design-web/component-template";
+import { designIdentityCacheStatsForTests } from "../identity-cache";
 
 describe("a frame registered as a component", () => {
   let root: string;
@@ -32,6 +38,12 @@ describe("a frame registered as a component", () => {
     await writeCanvas(root, canvas);
   };
   const componentOf = async (file: string) => ((await readCanvas(root)).frame_info[file] as { component?: string } | undefined)?.component;
+  const unregister = async (file: string) => {
+    const canvas = await readCanvas(root);
+    const { component: _component, ...info } = canvas.frame_info[file]! as { component?: string; [key: string]: unknown };
+    canvas.frame_info[file] = info as never;
+    await writeCanvas(root, canvas);
+  };
 
   beforeEach(async () => {
     resetDesignComponentRendersForTests();
@@ -48,6 +60,73 @@ describe("a frame registered as a component", () => {
     expect(records.find((record) => record.source === frame.file)?.component).toBe("chat-composer");
     await renameDesignFrame(root, frame.file, "Composer");
     expect(await componentOf(frame.file)).toBe("chat-composer");
+  });
+
+  it("negotiates component identity on aggregate, document, and lazy prepared reads", async () => {
+    const frame = await createDesignFrame(root, { title: "Component host" });
+    const source = '<!doctype html><html><head></head><body><zd-card data-oid="host" data-zeros-frame-root></zd-card></body></html>';
+    await writeFile(path.join(root, DESIGN_DIRECTORY_NAME, frame.file), source);
+    const inspection = inspectDesignCatalog(root, DESIGN_DIRECTORY_NAME);
+    const catalogRevision = designCatalogRevision(inspection);
+    const directoryId = inspection.layout.manifest.id;
+
+    const oldAggregate = (await readDesignWorkspaceSnapshot(root)).frames.find((candidate) => candidate.file === frame.file)!;
+    expect(Object.hasOwn(oldAggregate, "componentIdentity")).toBe(false);
+    const aggregate = (await readDesignWorkspaceSnapshot(root, { includeComponentIdentity: true })).frames.find((candidate) => candidate.file === frame.file)!;
+    expect(aggregate.componentIdentity).toEqual({ kind: "instance", nodeId: "host" });
+
+    const oldDocument = await readDesignFrame(root, frame.file);
+    expect(Object.hasOwn(oldDocument, "componentIdentity")).toBe(false);
+    expect((await readDesignFrame(root, frame.file, 4, { includeComponentIdentity: true })).componentIdentity)
+      .toEqual({ kind: "instance", nodeId: "host" });
+
+    const oldPrepared = await prepareDesignNavigationFrames(root, catalogRevision, [frame.file], directoryId);
+    expect(Object.hasOwn(oldPrepared.frames[0]!, "componentIdentity")).toBe(false);
+    const beforeWarmNegotiatedRead = designIdentityCacheStatsForTests();
+    const prepared = await prepareDesignNavigationFrames(root, catalogRevision, [frame.file], directoryId, { includeComponentIdentity: true });
+    expect(prepared.frames[0]?.componentIdentity).toEqual({ kind: "instance", nodeId: "host" });
+    expect(designIdentityCacheStatsForTests().hits).toBeGreaterThan(beforeWarmNegotiatedRead.hits);
+    const oldPreparedAfterWarm = await prepareDesignNavigationFrames(root, catalogRevision, [frame.file], directoryId);
+    expect(Object.hasOwn(oldPreparedAfterWarm.frames[0]!, "componentIdentity")).toBe(false);
+
+    const oldMutation = await readDesignMutationSnapshot(root, [frame.file]);
+    expect(Object.hasOwn(oldMutation.frames[0]!, "componentIdentity")).toBe(false);
+    const mutation = await readDesignMutationSnapshot(root, [frame.file], undefined, { includeComponentIdentity: true });
+    expect(mutation.frames[0]?.componentIdentity).toEqual({ kind: "instance", nodeId: "host" });
+  });
+
+  it("tracks registration changes without HTML edits and gives registered mains precedence", async () => {
+    const frame = await createDesignFrame(root, { title: "Registered main" });
+    const source = '<!doctype html><html><head></head><body><zd-card data-oid="host" data-zeros-frame-root></zd-card></body></html>';
+    await writeFile(path.join(root, DESIGN_DIRECTORY_NAME, frame.file), source);
+    const readIdentity = async () => {
+      const inspection = inspectDesignCatalog(root, DESIGN_DIRECTORY_NAME);
+      const prepared = await prepareDesignNavigationFrames(root, designCatalogRevision(inspection), [frame.file], inspection.layout.manifest.id,
+        { includeComponentIdentity: true });
+      return prepared.frames.find((candidate) => candidate.file === frame.file)!;
+    };
+
+    const ordinary = await readIdentity();
+    expect(ordinary.componentIdentity).toEqual({ kind: "instance", nodeId: "host" });
+    await register(frame.file, "card-main");
+    const registered = await readIdentity();
+    expect(registered.component).toBeUndefined();
+    expect(registered.componentIdentity).toEqual({ kind: "main", name: "card-main" });
+    expect(registered.sourceVersion).toBe(ordinary.sourceVersion);
+    await unregister(frame.file);
+    const removed = await readIdentity();
+    expect(removed.componentIdentity).toEqual({ kind: "instance", nodeId: "host" });
+    expect(removed.sourceVersion).toBe(ordinary.sourceVersion);
+  });
+
+  it.each([
+    ["unmarked root", '<zd-card data-oid="host"></zd-card>'],
+    ["non-root host", '<main data-oid="shell" data-zeros-frame-root><zd-card data-oid="host"></zd-card></main>'],
+  ])("does not identify a single %s as a frame-root instance", async (_label, rootHtml) => {
+    const frame = await createDesignFrame(root, { title: "Ordinary" });
+    await writeFile(path.join(root, DESIGN_DIRECTORY_NAME, frame.file), `<!doctype html><html><head></head><body>${rootHtml}</body></html>`);
+    const prepared = await readDesignWorkspaceSnapshot(root, { includeComponentIdentity: true });
+    expect(prepared.frames.find((candidate) => candidate.file === frame.file)?.componentIdentity).toBeNull();
   });
 
   it("does not pass its registration to a duplicate", async () => {

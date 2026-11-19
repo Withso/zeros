@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { setDesignKnownPagesReader, bridgeDesignHistory, bridgeDesignSnapshot, bridgeDesignTransferNode, bridgeDesignDuplicateFrame, bridgeDesignMoveFrames, bridgeDesignUpdateCanvas, bridgeDesignCreateFrame, bridgeDesignDeleteFrame, bridgeDesignUpdateStyles, bridgeDesignSetText, bridgeDesignWriteHtml, bridgeDesignInsertAsset, isDesignWorkspaceSnapshotWire, normalizeDesignWorkspaceSnapshotPages } from "../design-bridge";
+import { setDesignKnownPagesReader, bridgeDesignHistory, bridgeDesignSnapshot, bridgeDesignFrame, bridgeDesignPrepareFrames, bridgeDesignTransferNode, bridgeDesignDuplicateFrame, bridgeDesignMoveFrames, bridgeDesignUpdateCanvas, bridgeDesignCreateFrame, bridgeDesignDeleteFrame, bridgeDesignUpdateStyles, bridgeDesignSetText, bridgeDesignWriteHtml, bridgeDesignInsertAsset, isDesignWorkspaceSnapshotWire, normalizeDesignWorkspaceSnapshotPages } from "../design-bridge";
 import type { RuntimeClient } from "../ws-client";
-import { DESIGN_MUTATION_SNAPSHOTS_CAPABILITY, DESIGN_OPTIONS_SHOW_NOTHING_CAPABILITY, DESIGN_OPTIONS_SHOW_NOTHING_PARAM,
+import { DESIGN_COMPONENT_IDENTITY_CAPABILITY, DESIGN_LAZY_PREPARATION_CAPABILITY, DESIGN_MUTATION_SNAPSHOTS_CAPABILITY, DESIGN_OPTIONS_SHOW_NOTHING_CAPABILITY, DESIGN_OPTIONS_SHOW_NOTHING_PARAM,
   DESIGN_PAGE_SCOPED_MUTATIONS_CAPABILITY } from "@zeros/protocol/design-catalog";
 import { DESIGN_COPY_PLACEMENT_CAPABILITY, DESIGN_LINKED_COMPONENT_COPY_CAPABILITY } from "@zeros/protocol/design-relocation";
 
@@ -18,6 +18,39 @@ function scopedSnapshot() {
 }
 
 describe("Design bridge read budgets", () => {
+  it("opts into component identity only when the Local engine advertises it", async () => {
+    const snapshot = scopedSnapshot();
+    const frame = { ...snapshot.frames[0]!, componentIdentity: null };
+    const snapshotWithIdentity = { ...snapshot, frames: [frame] };
+    const request = vi.fn(async (message: { op: string }) => ({ type: "WORKSPACE_RESPONSE", result:
+      message.op === "design.frames.prepare"
+        ? { directoryId: "design_a", catalogRevision: "a".repeat(64), frames: [frame], errors: [] }
+        : message.op === "design.frame"
+          ? { frame: { ...frame, source: "<main></main>", srcDoc: "<main></main>", tree: [] } }
+          : message.op === "design.history.undo"
+            ? { result: null, snapshot: snapshotWithIdentity }
+            : { snapshot: snapshotWithIdentity },
+    }));
+    const capable = { request, supportsEngineCapability: (capability: string) =>
+      capability === DESIGN_COMPONENT_IDENTITY_CAPABILITY || capability === DESIGN_LAZY_PREPARATION_CAPABILITY } as unknown as RuntimeClient;
+    const legacy = { request, supportsEngineCapability: (capability: string) => capability === DESIGN_LAZY_PREPARATION_CAPABILITY } as unknown as RuntimeClient;
+
+    await bridgeDesignPrepareFrames(capable, { workspaceId: "local", directoryId: "design_a", catalogRevision: "a".repeat(64), files: [frame.file] });
+    expect(request.mock.calls.at(-1)?.[0]).toMatchObject({ op: "design.frames.prepare", params: { includeComponentIdentity: true } });
+    await bridgeDesignPrepareFrames(legacy, { workspaceId: "local", directoryId: "design_a", catalogRevision: "a".repeat(64), files: [frame.file] });
+    expect(request.mock.calls.at(-1)?.[0]).not.toHaveProperty("params.includeComponentIdentity");
+
+    await bridgeDesignFrame(capable, "local", frame.file);
+    expect(request.mock.calls.at(-1)?.[0]).toMatchObject({ op: "design.frame", params: { includeComponentIdentity: true } });
+    expect((await bridgeDesignSnapshot(capable, "local")).frames[0]?.componentIdentity).toBeNull();
+    expect(request.mock.calls.at(-1)?.[0]).toMatchObject({ op: "design.snapshot", params: { includeComponentIdentity: true } });
+
+    const mutationClient = { request, supportsEngineCapability: (capability: string) =>
+      capability === DESIGN_COMPONENT_IDENTITY_CAPABILITY || capability === DESIGN_MUTATION_SNAPSHOTS_CAPABILITY } as unknown as RuntimeClient;
+    await bridgeDesignHistory(mutationClient, "local", frame.file, "undo");
+    expect(request.mock.calls.at(-1)?.[0]).toMatchObject({ op: "design.history.undo", params: { includeComponentIdentity: true } });
+  });
+
   it("validates scoped mutation descriptors against complete page and source identities", () => {
     const snapshot = scopedSnapshot();
     expect(isDesignWorkspaceSnapshotWire(snapshot)).toBe(true);

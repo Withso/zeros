@@ -246,12 +246,14 @@ export interface DesignWorkspaceRouteHost {
       fresh?: boolean;
       affectedFrames?: string[];
       knownPages?: DesignPageHashes;
+      includeComponentIdentity?: boolean;
     },
   ): Promise<DesignWorkspaceSnapshot & { protocolCapability: string | null }>;
   readDesignSnapshotRequest(
     workspaceId: string,
     remote: boolean,
     hostLocalResources: boolean,
+    includeComponentIdentity?: boolean,
   ): Promise<DesignWorkspaceSnapshot & { protocolCapability: string | null }>;
 }
 const DESIGN_WORKSPACE_ROUTES = new Set([
@@ -359,6 +361,7 @@ export async function handleDesignWorkspaceRoute(
       ...(params.snapshotMode === "scoped" && !affectedFiles.some(isSharedDesignSource)
         ? { affectedFrames: [...new Set(frames)], ...knownPagesParam(params) }
         : {}),
+      ...(params.includeComponentIdentity === true ? { includeComponentIdentity: true } : {}),
     });
   switch (op) {
     case "design.navigation.read": {
@@ -371,15 +374,16 @@ export async function handleDesignWorkspaceRoute(
       const input = designFramesPrepareSchema.parse(params);
       const result = await host.withDesignReadWorkspace(input.workspaceId, remote, ({ root }) =>
         prepareDesignNavigationFrames(root, input.catalogRevision, input.files, input.directoryId,
-          input.lintFiles ? { lintFiles: input.lintFiles } : {}));
+          { ...(input.lintFiles ? { lintFiles: input.lintFiles } : {}), ...(input.includeComponentIdentity ? { includeComponentIdentity: true } : {}) }));
       // Older preparation decoders reject unknown fields. Keep their exact
       // reply shape; a new renderer opts in after capability negotiation.
-      if (input.surfaceCosts && input.componentOptions) return result;
-      return { ...result, frames: result.frames.map(({ surfaceCost, component, instances, ...frame }) => ({
+      if (input.surfaceCosts && input.componentOptions && input.includeComponentIdentity) return result;
+      return { ...result, frames: result.frames.map(({ surfaceCost, component, instances, componentIdentity, ...frame }) => ({
         ...frame,
         ...(input.surfaceCosts && surfaceCost !== undefined ? { surfaceCost } : {}),
         ...(input.componentOptions && component ? { component } : {}),
         ...(input.componentOptions && instances ? { instances } : {}),
+        ...(input.includeComponentIdentity && componentIdentity !== undefined ? { componentIdentity } : {}),
       })) };
     }
     case "design.frames.lint": {
@@ -1001,7 +1005,7 @@ export async function handleDesignWorkspaceRoute(
             root,
             reqStr(params, "frame"),
             optNum(params, "depth") ?? 4,
-            { writeBack, ...designFrameVariantParam(params) },
+            { writeBack, ...designFrameVariantParam(params), ...(params.includeComponentIdentity === true ? { includeComponentIdentity: true } : {}) },
           ),
         }),
       );
@@ -1012,6 +1016,7 @@ export async function handleDesignWorkspaceRoute(
           reqStr(params, "workspaceId"),
           remote,
           hostLocalResources,
+          params.includeComponentIdentity === true,
         ),
       };
     }

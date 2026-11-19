@@ -16,6 +16,7 @@ import {
   isDesignNodeElement,
   isShadowDesignNodeElement,
 } from "./node-identities";
+import type { DesignComponentIdentity } from "@zeros/protocol/design-catalog";
 import {
   DesignRenderBudgetError,
   MAX_DESIGN_TEXT_BYTES,
@@ -1029,7 +1030,7 @@ export async function readDesignFrame(
   const context = options.writeBack ? await readCanvasContext(workspacePath) : await readSharedCanvasContext(workspacePath);
   if (!options.writeBack && context.layout?.canvasVersion === 2 && context.canvas.frames[file]) {
     const prepared = await prepareRegisteredDesignFrame(workspacePath, file, context.canvas);
-    return readDesignFrameFromSummary(workspacePath, prepared, depth, options.variant);
+    return readDesignFrameFromSummary(workspacePath, prepared, depth, options.variant, context.canvas, options.includeComponentIdentity === true);
   }
   const summaries = await listDesignFrames(workspacePath, options);
   const summary = summaries.find((candidate) => candidate.file === file);
@@ -1040,7 +1041,7 @@ export async function readDesignFrame(
     await readBoundedDesignFrameSource(workspacePath, file);
     throw new Error(`Design frame not found: ${file}`);
   }
-  return readDesignFrameFromSummary(workspacePath, summary, depth, options.variant);
+  return readDesignFrameFromSummary(workspacePath, summary, depth, options.variant, context.canvas, options.includeComponentIdentity === true);
 }
 
 async function readDesignFrameFromSummary(
@@ -1048,6 +1049,8 @@ async function readDesignFrameFromSummary(
   summary: DesignFrameSummary,
   depth: number,
   variant?: string,
+  canvas?: CanvasDocument,
+  includeComponentIdentity = false,
 ): Promise<DesignFrameDocument> {
   const source = await readBoundedDesignFrameSource(
     workspacePath,
@@ -1067,6 +1070,7 @@ async function readDesignFrameFromSummary(
     source,
     srcDoc: composed.srcDoc,
     tree: frameTree(document, Math.max(0, Math.min(8, Math.round(depth)))),
+    ...(includeComponentIdentity && canvas ? { componentIdentity: designComponentIdentityFromDocument(canvas, summary.file, document) } : {}),
   };
 }
 
@@ -1074,6 +1078,7 @@ async function readDesignCanvasFrameFromSummary(
   workspacePath: string,
   summary: DesignFrameSummary,
   canvas: CanvasDocument,
+  includeComponentIdentity = false,
 ): Promise<DesignCanvasFrame> {
   const source = await readBoundedDesignFrameSource(
     workspacePath,
@@ -1087,7 +1092,25 @@ async function readDesignCanvasFrameFromSummary(
   return { ...summary, sourceVersion: render.sourceVersion, surfaceCost: render.surfaceCost,
     ...(component ? { component: designComponentRecordWithinLimits({ ...component,
       ...(render.componentOptions ? { notApplied: render.componentOptions.shows } : {}) }) } : {}),
-    ...(render.instances ? { instances: render.instances } : {}) };
+    ...(render.instances ? { instances: render.instances } : {}),
+    ...(includeComponentIdentity ? { componentIdentity: designComponentIdentityFromDocument(canvas, summary.file, parse(source)) } : {}) };
+}
+
+function designComponentIdentityFromDocument(canvas: CanvasDocument, file: string, document: DefaultTreeAdapterTypes.Document): DesignComponentIdentity | null {
+  const main = [...designComponentRegistry(canvas).files].find(([, registeredFile]) => registeredFile === file)?.[0];
+  if (main) return { kind: "main", name: main };
+
+  const html = document.childNodes.find((node) => "tagName" in node && node.tagName === "html");
+  const body = html && "childNodes" in html
+    ? html.childNodes.find((node) => "tagName" in node && node.tagName === "body")
+    : undefined;
+  const roots = body && "childNodes" in body
+    ? body.childNodes.filter((node): node is DefaultTreeAdapterTypes.Element => "tagName" in node)
+    : [];
+  if (roots.length !== 1 || !roots[0]!.tagName.startsWith("zd-")) return null;
+  const attributes = new Map(roots[0]!.attrs.map((attribute) => [attribute.name, attribute.value]));
+  const nodeId = attributes.get("data-oid");
+  return attributes.has("data-zeros-frame-root") && nodeId ? { kind: "instance", nodeId } : null;
 }
 
 async function mapDesignFramesBounded<T>(
@@ -1117,7 +1140,7 @@ type DesignNavigationRead = Awaited<ReturnType<typeof readDesignNavigationSnapsh
 const navigationReads = new Map<string, { started: boolean; read: Promise<DesignNavigationRead> }>();
 
 export async function readDesignNavigationSnapshot(workspacePath: string, affectedFiles?: readonly string[],
-  options: { pageHashes?: boolean } = {}): Promise<{
+  options: { pageHashes?: boolean; includeComponentIdentity?: boolean } = {}): Promise<{
   snapshot: DesignWorkspaceSnapshot; catalogRevision: string; directoryId: string; pageHashes?: DesignPageHashes;
 }> {
   if (affectedFiles !== undefined)
@@ -1127,7 +1150,8 @@ export async function readDesignNavigationSnapshot(workspacePath: string, affect
   // at least as new as its own request. A renderer retrying after its own
   // timeout therefore joins the waiting read rather than queueing another
   // behind it. A read that has started is never joined.
-  const key = JSON.stringify([path.resolve(workspacePath), options.pageHashes === true]);
+  const key = JSON.stringify([path.resolve(workspacePath), options.pageHashes === true,
+    ...(options.includeComponentIdentity ? ["component-identity"] : [])]);
   const waiting = navigationReads.get(key);
   if (waiting && !waiting.started) return waiting.read;
   const flight: { started: boolean; read: Promise<DesignNavigationRead> } = { started: false, read: Promise.resolve(null as never) };
@@ -1144,7 +1168,7 @@ export async function readDesignNavigationSnapshot(workspacePath: string, affect
 /** `known` holds each waiting client's page hashes: their acknowledgement
  * then names every page and resends only pages one of them lacks. */
 async function readDesignNavigationSnapshotUnlocked(workspacePath: string, affectedFiles?: readonly string[],
-  options: { pageHashes?: boolean; known?: readonly DesignPageHashes[] } = {}): Promise<{
+  options: { pageHashes?: boolean; known?: readonly DesignPageHashes[]; includeComponentIdentity?: boolean } = {}): Promise<{
   snapshot: DesignWorkspaceSnapshot; catalogRevision: string; directoryId: string; pageHashes?: DesignPageHashes;
 }> {
   {
@@ -1159,7 +1183,10 @@ async function readDesignNavigationSnapshotUnlocked(workspacePath: string, affec
       readDesignTokensDocument(workspacePath, context, { includeUsage: false }),
       listDesignAssets(workspacePath),
       readDesignStyleSources(workspacePath, context.canvas),
-      Promise.all(affected.map(frame => prepareRegisteredDesignFrame(workspacePath, frame.source, context.canvas, pageIds, identities))),
+      Promise.all(affected.map(async (frame) => {
+        return prepareRegisteredDesignFrame(workspacePath, frame.source, context.canvas, pageIds, identities,
+          { includeComponentIdentity: options.includeComponentIdentity });
+      })),
     ]);
     if (!sameDesignCatalogInspection(inspection, inspectDesignCatalog(workspacePath, directory, { revision: false })))
       throw new DesignCatalogError("stale");
@@ -1225,9 +1252,10 @@ export function designMutationSnapshotReadsForTests(): number {
  * Legacy documents retain the aggregate contract; metadata races re-read
  * authoritatively instead of turning an applied write into an apparent failure. */
 export async function readDesignMutationSnapshot(workspacePath: string, files: readonly string[],
-  knownPages?: DesignPageHashes): Promise<DesignWorkspaceSnapshot> {
-  if (files.length > MAX_MUTATION_SNAPSHOT_FILES) return readDesignWorkspaceSnapshot(workspacePath);
-  const key = JSON.stringify([path.resolve(workspacePath), designDirectoryNameFor(workspacePath), knownPages ? "page-scoped" : "complete"]);
+  knownPages?: DesignPageHashes, options: { includeComponentIdentity?: boolean } = {}): Promise<DesignWorkspaceSnapshot> {
+  if (files.length > MAX_MUTATION_SNAPSHOT_FILES) return readDesignWorkspaceSnapshot(workspacePath, options);
+  const key = JSON.stringify([path.resolve(workspacePath), designDirectoryNameFor(workspacePath), knownPages ? "page-scoped" : "complete",
+    ...(options.includeComponentIdentity ? ["component-identity"] : [])]);
   const open = mutationSnapshotBatches.get(key);
   if (open && !open.sealed && new Set([...open.files, ...files]).size <= MAX_MUTATION_SNAPSHOT_FILES) {
     for (const file of files) open.files.add(file);
@@ -1242,11 +1270,11 @@ export async function readDesignMutationSnapshot(workspacePath: string, files: r
       return await withDocumentWrite(workspacePath, async () => {
         batch.sealed = true;
         mutationSnapshotReads++;
-        return (await readDesignNavigationSnapshotUnlocked(workspacePath, [...batch.files], { known: batch.known })).snapshot;
+        return (await readDesignNavigationSnapshotUnlocked(workspacePath, [...batch.files], { known: batch.known, ...options })).snapshot;
       });
     } catch (error) {
       if (!(error instanceof DesignCatalogError)) throw error;
-      return readDesignWorkspaceSnapshot(workspacePath);
+      return readDesignWorkspaceSnapshot(workspacePath, options);
     } finally {
       if (mutationSnapshotBatches.get(key) === batch) mutationSnapshotBatches.delete(key);
     }
@@ -1268,12 +1296,13 @@ function designFramePageIds(canvas: CanvasDocument): ReadonlyMap<string, string>
 
 function prepareRegisteredDesignFrame(workspacePath: string, file: string, canvas: CanvasDocument,
   pageIds = designFramePageIds(canvas),
-  identities = designFrameIdentities(workspacePath, designDirectoryNameFor(workspacePath))): Promise<DesignCanvasFrame> {
-  return withSharedDesignParses(() => prepareSharedRegisteredDesignFrame(workspacePath, file, canvas, pageIds, identities));
+  identities = designFrameIdentities(workspacePath, designDirectoryNameFor(workspacePath)),
+  options: { includeComponentIdentity?: boolean } = {}): Promise<DesignCanvasFrame> {
+  return withSharedDesignParses(() => prepareSharedRegisteredDesignFrame(workspacePath, file, canvas, pageIds, identities, options));
 }
 
 function registeredFrameRecord(canvas: CanvasDocument, file: string, pageIds: ReadonlyMap<string, string>,
-  identity: DesignFrameIdentity, modifiedAt: number): DesignCanvasFrame {
+  identity: DesignFrameIdentity, modifiedAt: number, componentIdentity?: DesignComponentIdentity | null): DesignCanvasFrame {
   const geometry = canvas.frames[file]!;
   const info = canvas.frame_info[file]!;
   return { file, frameId: info.id, pageId: info.id === undefined ? undefined : pageIds.get(info.id),
@@ -1282,7 +1311,8 @@ function registeredFrameRecord(canvas: CanvasDocument, file: string, pageIds: Re
     nodeCount: identity.nodeCount, layerCount: identity.layerCount,
     modifiedAt, sourceVersion: identity.sourceVersion, surfaceCost: identity.surfaceCost,
     ...(identity.component ? { component: identity.component } : {}),
-    ...(identity.instances ? { instances: identity.instances } : {}) };
+    ...(identity.instances ? { instances: identity.instances } : {}),
+    ...(componentIdentity !== undefined ? { componentIdentity } : {}) };
 }
 
 /** A registered frame's identity, from its saved source. Main and worker
@@ -1304,7 +1334,8 @@ async function computeRegisteredFrameIdentity(workspacePath: string, file: strin
     ...(summary ? { component: designComponentRecordWithinLimits({ ...summary,
       ...(render.componentOptions ? { notApplied: render.componentOptions.shows } : {}) }) } : {}),
     ...(render.instances ? { instances: render.instances } : {}) };
-  return { identity, modifiedAt: safe.modifiedAt, retained: render.retained };
+  return { identity: { ...identity, componentIdentity: designComponentIdentityFromDocument(canvas, file, document) },
+    modifiedAt: safe.modifiedAt, retained: render.retained };
 }
 
 /** A frame's identity context on a canvas, as preparation records it. */
@@ -1322,12 +1353,14 @@ function retainCapturedFrame(workspacePath: string, file: string, context: strin
 }
 
 async function prepareSharedRegisteredDesignFrame(workspacePath: string, file: string, canvas: CanvasDocument,
-  pageIds: ReadonlyMap<string, string>, identities: ReturnType<typeof designFrameIdentities>): Promise<DesignCanvasFrame> {
+  pageIds: ReadonlyMap<string, string>, identities: ReturnType<typeof designFrameIdentities>,
+  options: { includeComponentIdentity?: boolean } = {}): Promise<DesignCanvasFrame> {
   const geometry = canvas.frames[file];
   const info = canvas.frame_info[file];
   if (!geometry || !info) throw new Error("The registered Design frame changed.");
   const pageId = info.id === undefined ? undefined : pageIds.get(info.id);
-  const frame = (identity: DesignFrameIdentity, modifiedAt: number) => registeredFrameRecord(canvas, file, pageIds, identity, modifiedAt);
+  const frame = (identity: DesignFrameIdentity, modifiedAt: number, componentIdentity?: DesignComponentIdentity | null) =>
+    registeredFrameRecord(canvas, file, pageIds, identity, modifiedAt, componentIdentity);
   const directory = designDirectory(workspacePath);
   const target = path.join(directory, assertFrameFile(file));
   // A capture already running (a movement guard) must record these reads itself.
@@ -1335,17 +1368,18 @@ async function prepareSharedRegisteredDesignFrame(workspacePath: string, file: s
   if (context) {
     const cached = await identities.read(file, context);
     const metadata = cached && await inspectSafeRegularFile(directory, target, MAX_DESIGN_TEXT_BYTES);
-    if (cached && metadata) return frame(cached, metadata.modifiedAt);
+    if (cached && metadata && cached.componentIdentity !== undefined)
+      return frame(cached, metadata.modifiedAt, options.includeComponentIdentity ? cached.componentIdentity : undefined);
   }
   const compute = () => computeRegisteredFrameIdentity(workspacePath, file, canvas);
   if (!context) {
     const { identity, modifiedAt } = await compute();
-    return frame(identity, modifiedAt);
+    return frame(identity, modifiedAt, options.includeComponentIdentity ? identity.componentIdentity : undefined);
   }
   const read = await captureDurableDesignDependencies(compute);
   identities.remember(file, context, read.value.identity, read);
   retainCapturedFrame(workspacePath, file, context, read, designRecordedCanvasActive(workspacePath));
-  return frame(read.value.identity, read.value.modifiedAt);
+  return frame(read.value.identity, read.value.modifiedAt, options.includeComponentIdentity ? read.value.identity.componentIdentity : undefined);
 }
 
 /** One read of a registered frame for a capture: the record
@@ -1403,7 +1437,8 @@ export async function prepareDesignFrameIdentitiesInWorker(workspacePath: string
  * play: App fonts (download state is per process) or a running dependency
  * capture. Anything a worker did not prepare, main prepares as before. */
 async function prepareColdFramesInWorkers(workspacePath: string, catalogRevision: string, files: readonly string[],
-  canvas: CanvasDocument, pageIds: ReadonlyMap<string, string>, identities: ReturnType<typeof designFrameIdentities>) {
+  canvas: CanvasDocument, pageIds: ReadonlyMap<string, string>, identities: ReturnType<typeof designFrameIdentities>,
+  options: { includeComponentIdentity?: boolean } = {}) {
   const prepared = new Map<string, DesignCanvasFrame>();
   if (designPreparationWorkerCount() === 0 || files.length < 2 || isDesignDependencyCaptureActive()) return prepared;
   if (await designStyleSourcesUseFonts(workspacePath, canvas)) return prepared;
@@ -1418,7 +1453,8 @@ async function prepareColdFramesInWorkers(workspacePath: string, catalogRevision
     const entry = cold.find(({ file }) => file === result.file);
     if (!entry || !("identity" in result)) continue;
     if (result.durable) identities.remember(result.file, entry.context, result.identity, { complete: result.complete, durable: result.durable, current: () => false });
-    prepared.set(result.file, registeredFrameRecord(canvas, result.file, pageIds, result.identity, result.modifiedAt));
+    prepared.set(result.file, registeredFrameRecord(canvas, result.file, pageIds, result.identity, result.modifiedAt,
+      options.includeComponentIdentity ? result.identity.componentIdentity : undefined));
   }
   return prepared;
 }
@@ -1483,7 +1519,7 @@ async function withPreparingBatch<T>(run: () => Promise<T>): Promise<T> {
  * matching context but never publishes one: change attribution diffs the
  * canvas it holds against the current one, as what renderers prepared against. */
 export async function prepareDesignNavigationFrames(workspacePath: string, catalogRevision: string, files: readonly string[], directoryId?: string,
-  options: { forRenderer?: boolean; lintFiles?: readonly string[] } = {}) {
+  options: { forRenderer?: boolean; lintFiles?: readonly string[]; includeComponentIdentity?: boolean } = {}) {
   if (!files.length || files.length > 16 || new Set(files).size !== files.length) throw new Error("Invalid Design preparation batch.");
   const { directory, before, revision, context } = await withDocumentWrite(workspacePath, async () => {
     await recoverPendingDesignTransactionUnlocked(workspacePath);
@@ -1511,12 +1547,18 @@ export async function prepareDesignNavigationFrames(workspacePath: string, catal
     const preparedFiles: string[] = [];
     const pageIds = designFramePageIds(context.canvas);
     const identities = designFrameIdentities(workspacePath, directory);
-    const fromWorkers = await prepareColdFramesInWorkers(workspacePath, revision, files, context.canvas, pageIds, identities);
+    const fromWorkers = await prepareColdFramesInWorkers(workspacePath, revision, files, context.canvas, pageIds, identities,
+      { includeComponentIdentity: options.includeComponentIdentity });
     // One native preparation at a time; optional demand must not fan out large
     // decoder/source buffers across every frame in a batch.
     for (const file of files) {
       try {
-        frames.push(fromWorkers.get(file) ?? await prepareRegisteredDesignFrame(workspacePath, file, context.canvas, pageIds, identities));
+        const workerFrame = fromWorkers.get(file);
+        const frame = workerFrame
+          ? workerFrame
+          : await prepareRegisteredDesignFrame(workspacePath, file, context.canvas, pageIds, identities,
+            { includeComponentIdentity: options.includeComponentIdentity });
+        frames.push(frame);
         preparedFiles.push(file);
       } catch (error) { errors.push({ file, message: error instanceof Error ? error.message : "Could not prepare this frame." }); }
     }
@@ -1569,7 +1611,7 @@ export async function readDesignWorkspaceSnapshot(
     const renderBudgetViolations: DesignLintViolation[] = [];
     const [renderedFrames, tokensDocument, assets, styleSources] = await Promise.all([
       mapDesignFramesBounded(summaries, (summary) =>
-        readDesignCanvasFrameFromSummary(workspacePath, summary, context.canvas).catch(
+        readDesignCanvasFrameFromSummary(workspacePath, summary, context.canvas, options.includeComponentIdentity === true).catch(
           (error: unknown) => {
             if (!(error instanceof DesignRenderBudgetError)) throw error;
             renderBudgetViolations.push(

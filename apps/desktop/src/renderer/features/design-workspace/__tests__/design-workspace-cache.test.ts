@@ -324,6 +324,17 @@ describe("design workspace cache", () => {
     expect(stabilizeDesignWorkspaceSnapshot(previous, relabelled).frames[0]!.instances?.key).toBe("1".repeat(16));
   });
 
+  it("replaces a cached legacy frame when a negotiated identity arrives", () => {
+    const legacy = snapshot();
+    const ordinary = { ...legacy, frames: [{ ...legacy.frames[0]!, componentIdentity: null }] };
+    const refreshed = stabilizeDesignWorkspaceSnapshot(legacy, ordinary);
+    expect(refreshed).not.toBe(legacy);
+    expect(refreshed.frames[0]?.componentIdentity).toBeNull();
+    const registered = { ...ordinary, frames: [{ ...ordinary.frames[0]!, componentIdentity: { kind: "main" as const, name: "card-main" } }] };
+    expect(stabilizeDesignWorkspaceSnapshot(refreshed, registered).frames[0]?.componentIdentity)
+      .toEqual({ kind: "main", name: "card-main" });
+  });
+
   it("publishes a theme rename even when nothing else changed", () => {
     const previous = { ...snapshot([]), themes: [{ id: "dark", label: "Base", base: true as const }] };
     expect(stabilizeDesignWorkspaceSnapshot(previous, structuredClone(previous))).toBe(previous);
