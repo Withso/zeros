@@ -4,8 +4,8 @@
 //
 // The Design source is the authority. This store only keeps encoded pictures
 // of saved frames so a reopened canvas paints before anything renders. It
-// lives in Chromium's session profile, which may be cleared (and is
-// purgeable for a legacy Local profile): losing it costs one
+// lives in Chromium's session profile, which Electron main relocates to the
+// purgeable OS cache directory (`relocateChromiumCache`): losing it costs one
 // render per frame, never data. Policy (keys, bounds, eligibility) lives in
 // features/design-workspace/state/design-frame-previews.ts; this file only
 // moves records.

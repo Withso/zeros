@@ -5,7 +5,6 @@ export type ChooserRepository = CloudGithubRepositoryPage["repositories"][number
 export const fullName = (repository: { owner: string; name: string }) =>
   `${repository.owner}/${repository.name}`;
 
-/** Owners in name order, each with how many of its repositories are chosen. */
 export function repositoryOwners(
   repositories: readonly ChooserRepository[],
   isChosen: (repository: ChooserRepository) => boolean,
@@ -22,15 +21,12 @@ export function repositoryOwners(
   );
 }
 
-/** `owner/name` from a pasted github.com URL (with or without scheme, .git or
- * a trailing path), or null for anything else. */
 export function githubRepositoryFromUrl(text: string): { owner: string; name: string } | null {
   const match = /^(?:https?:\/\/)?(?:www\.)?github\.com\/([A-Za-z0-9-]{1,39})\/([A-Za-z0-9._-]{1,100}?)(?:\.git)?(?:[/?#].*)?$/i.exec(text.trim());
   return match ? { owner: match[1]!, name: match[2]! } : null;
 }
 
-/** The rows the chooser lists: one owner's repositories, or every match for a
- * search or a pasted GitHub URL across owners. */
+// Pasted URLs and search bypass the active owner filter.
 export function chooserRows(
   repositories: readonly ChooserRepository[],
   query: string,

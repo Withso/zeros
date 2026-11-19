@@ -13,8 +13,7 @@ function render(local: boolean) {
   );
   const start = source.indexOf("function AccountPanel()");
   const end = source.indexOf("function PrivacyGroup(");
-  // A missing marker would run the slice to the end of the file and evaluate
-  // unrelated module constants.
+  // Assert both boundaries so an unrecognized layout cannot evaluate unrelated module code.
   expect(start).toBeGreaterThan(0);
   expect(end).toBeGreaterThan(start);
   const panel = source.slice(start, end);

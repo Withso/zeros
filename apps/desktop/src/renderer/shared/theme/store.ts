@@ -110,9 +110,9 @@ function normalizeStored(parsed: unknown): StoredAppearancePrefs {
 
 /** The userData-persisted theme mode, exposed by the Electron preload
  *  (window.ts `appearance_set_mode` → main → additionalArguments →
- *  preload). This is the DURABLE copy: a legacy Local profile keeps
- *  localStorage under the OS-purgeable Caches dir, and a cleared profile
- *  would otherwise silently reset a light-theme user to dark.
+ *  preload). This is the DURABLE copy: localStorage lives under the
+ *  OS-purgeable Caches dir (main.ts relocates sessionData), so a cache
+ *  purge would otherwise silently reset a light-theme user to dark.
  *  Explicit picks (codeThemes) aren't mirrored — after a purge they fall
  *  back to the variant defaults, which are theme-correct. */
 function durableModeFallback(): StoredAppearancePrefs["mode"] | null {

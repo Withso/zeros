@@ -540,7 +540,6 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
     const fallback = fallbackSection?.id;
     if (fallback) setActive(userSelection(fallback));
   }, [availableSections, fallbackSection, selection.scope, selectedSection, local, setActive]);
-  // Keep visited panels mounted to preserve drafts across navigation.
   const availableSectionIds = useMemo(
     () => new Set(availableSections.map((section) => section.id)),
     [availableSections],
@@ -548,6 +547,7 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
   const cloudRepositories = useCloudComputerRepositories(me?.user.id ?? null,
     !local && availableSectionIds.has("cloud-computer") ? organization : null, pageActive);
   const openCloudRepository = useCallback((repository: string) => setActive(cloudRepoSelection(repository, "git")), [setActive]);
+  // Keep visited panels mounted to preserve drafts across navigation.
   const sectionIdsToRender = useRetainedViewKeys(
     activeSection?.id ?? null,
     availableSections.length,
@@ -659,10 +659,9 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
           </nav>
         </div>
 
-        {/* Native overflow, because macOS overlay scrollbars auto-hide. */}
         <div className="border-border1 bg-bg1 relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden border-l">
           <div className="h-10 shrink-0" data-tauri-drag-region aria-hidden="true" />
-          {/* Put padding on the scroller so the column cap is content width. */}
+          {/* Use native macOS overlay scrollbars; the padding keeps the column cap content-only. */}
           <div
             ref={detailScrollRef}
             className="min-h-0 flex-1 overflow-y-auto px-6"
@@ -766,8 +765,6 @@ function GeneralPanel({ surfaceActive = true }: { surfaceActive?: boolean }) {
   const organization = useActiveOrganization();
   // useActiveOrganization re-renders this panel on every team-store change.
   const cloudAccess = !!organization && hasCloudWorkspaceAccountAccess(organization.id);
-  // An organization's General holds only this Mac's controls; the app-wide
-  // preferences belong to the Local owner.
   if (organization ? !organization.isPersonal : Boolean(getActiveOrganizationIdSnapshot())) {
     const sections = organizationGeneralSections(organization, cloudAccess);
     return (
@@ -817,8 +814,6 @@ function LocalGeneralPanel({ surfaceActive }: { surfaceActive: boolean }) {
   );
 }
 
-// The renderer sees bounded identity metadata and a short-lived bearer from
-// useAuth(), never refresh material.
 
 function SignInMethodRow({
   label,
@@ -837,15 +832,14 @@ function SignInMethodRow({
           Connected
         </span>
       ) : (
-        // Linking isn't implemented yet (no linkIdentity flow), so we show a
-        // plain status label rather than an inert, permanently-disabled
-        // "Connect" button that implies an action the user can't take.
+        // Keep this status passive until there is an account-linking flow.
         <span className="text-fg3 shrink-0 text-3xxs leading-4">Not linked</span>
       )}
     </SettingsRow>
   );
 }
 
+// useAuth exposes bounded identity and a short-lived bearer, not refresh material.
 function AccountPanel() {
   const {
     email,
@@ -890,27 +884,24 @@ function AccountPanel() {
   const displayName = session?.user.name ?? null;
   const initial = (email?.[0] ?? "?").toUpperCase();
 
+  // No busy-state reset on success: AuthGate unmounts both handlers' panel.
   const handleSignOut = async () => {
     if (signingOut) return;
     setSigningOut(true);
     await signOut();
-    // The AuthGate flips to the login screen and unmounts this view.
   };
 
   const handleSignOutEverywhere = async () => {
     if (signingOutAll) return;
     setSigningOutAll(true);
     await signOutEverywhere();
-    // The AuthGate flips to the login screen and unmounts this view.
   };
 
   return (
     <div className="flex flex-col gap-8">
       {authed ? (
         <>
-          {/* Identity card. Initials only: we don't load remote provider
-              avatars (web CSP blocks them; fetching leaks the user's IP to
-              Google/GitHub on every Settings open). */}
+          {/* Use initials so opening Settings never contacts an avatar provider. */}
           <SettingsGroup>
             <div className="flex items-center gap-3">
               <Avatar size="lg" aria-hidden>
@@ -1025,8 +1016,6 @@ function AccountPanel() {
               label="Sign out everywhere"
               hint="Signs out every device."
             >
-              {/* Destructive-secondary: this global, hard-to-undo action reads
-                  differently from the this-device Sign out above it. */}
               <Button
                 variant="destructive-secondary"
                 size="sm"
@@ -1051,9 +1040,8 @@ function AccountPanel() {
   );
 }
 
-// Both controls belong to this device, independently of sign-in. Analytics
-// remains opt-out and metadata-only; macOS owns the Full Disk Access grant.
 
+// Privacy controls are device-scoped; analytics is metadata-only and macOS owns Full Disk Access.
 function PrivacyGroup({ surfaceActive }: { surfaceActive: boolean }) {
   const [optedOut, setOptedOut] = useState<boolean>(() =>
     isAnalyticsOptedOut(),
@@ -1091,15 +1079,8 @@ function IntegrationsPanel({ surfaceActive = true }: { surfaceActive?: boolean }
   </div>;
 }
 
-// Every section in SECTIONS renders a real control. Reintroducing a
-// "coming soon" panel is a step backwards: register the section only once it
-// has something to show.
 
-// Agent and model form one global default (one star across the model menu).
-// With no choice, connected providers resolve Codex → Claude → Cursor. Effort
-// and Fast are remembered per exact model in the model menu.
 
-/** The settings card (`SETTINGS_CARD_LIST_CLS`), named for the Models panel. */
 const MODELS_SECTION_CLS = SETTINGS_CARD_LIST_CLS;
 
 function ModelsPanel({ surfaceActive = false }: { surfaceActive?: boolean }) {
@@ -1119,8 +1100,7 @@ function ModelsPanel({ surfaceActive = false }: { surfaceActive?: boolean }) {
     if (!surfaceActive) setResetMemoryOpen(false);
   }, [surfaceActive]);
 
-  // Populate the shared agent-registry cache (same pattern as the "+" menu)
-  // so the model list has data; stale-while-revalidate from the cache.
+  // Warm the same registry cache the New Chat menu uses.
   const listAgentsRef = useRef(sessions.listAgents);
   useEffect(() => {
     listAgentsRef.current = sessions.listAgents;
@@ -1213,7 +1193,6 @@ function ModelsPanel({ surfaceActive = false }: { surfaceActive?: boolean }) {
       setCodexMemoryBusy(false);
     }
   };
-  // The one model a new chat opens on. Selecting it here moves the global star.
   const agentModels = effectiveAgentId
     ? modelsForAgent(effectiveAgentId, null)
     : [];
@@ -1231,8 +1210,7 @@ function ModelsPanel({ surfaceActive = false }: { surfaceActive?: boolean }) {
   const pickAgent = (agentId: string) => {
     if (!agentId) return;
     setDefault(agentId);
-    // Durable mirror → user settings.toml [models] (setDefault only writes
-    // the localStorage cache + pub/sub).
+    // setDefault updates the cache; this mirror persists the choice in user settings.toml.
     mirrorModelsToSettings();
   };
 
@@ -1259,8 +1237,7 @@ function ModelsPanel({ surfaceActive = false }: { surfaceActive?: boolean }) {
                 )}
               </SelectContent>
             </Select>
-            {/* Picking a model moves the one global favorite star. Effort/Fast
-                stay model-owned and are edited from the composer's model menu. */}
+            {/* Set per-model Effort and Fast in the composer's model menu, not on the global favorite. */}
             {effectiveAgentId && currentModel && (
               <Select
                 value={currentModel}
@@ -1424,9 +1401,7 @@ function ModelsPanel({ surfaceActive = false }: { surfaceActive?: boolean }) {
   );
 }
 
-/** Global git defaults. Branch naming lives here (a personal preference —
- *  see git-defaults-section.tsx); remote + base branch stay per-repo on each
- *  repo's own Git pane, because those ARE properties of the repo. */
+// Branch naming is personal; remote and base branch belong to the repository.
 function GitDefaultsPanel() {
   return (
     <div className="flex flex-col gap-9">
@@ -1435,7 +1410,6 @@ function GitDefaultsPanel() {
   );
 }
 
-// Thin wrapper so the launch-profile section component stays presentational.
 function TerminalAgentsPanel() {
   return <TerminalAgentsSection />;
 }
@@ -1513,10 +1487,7 @@ function InternalAgentControlRow({ feature }: { feature: AgentControlFeature }) 
   );
 }
 
-// Allowlisted-account-only switches (settings/internal-features.ts), not
-// experimental features: they may never ship. Each flag applies to this app
-// install only, because every channel has its own localStorage, so a feature can
-// be on in Alpha and off in Production.
+// Internal flags are staff-gated and stored separately by app channel.
 function InternalPanel() {
   const [copyLogs, setCopyLogs] = useInternalFeature("copyLogs");
   const [resourceSummary, setResourceSummary] = useInternalFeature("resourceSummary");
@@ -1580,7 +1551,6 @@ function InternalPanel() {
   );
 }
 
-// Dark and Light are the only themes; System follows macOS.
 
 const THEME_OPTIONS: Array<{ value: ThemeMode; label: string }> = [
   { value: "system", label: "System" },
@@ -1590,10 +1560,7 @@ const THEME_OPTIONS: Array<{ value: ThemeMode; label: string }> = [
 
 function AppearancePanel() {
   const { prefs, setPrefs } = useAppearance();
-  // The picker only lists themes readable on the CURRENT variant's uniform
-  // code bg (dark themes for the dark app, light for light), and each variant
-  // remembers its own pick — prefs.codeTheme is already resolved per variant,
-  // so the Select's value is always present in the filtered list.
+  // Match code themes to the active background; each variant remembers its own choice.
   const variant = useThemeVariant();
   const codeThemes = codeThemesForVariant(variant);
 
@@ -1663,9 +1630,6 @@ function AppearancePanel() {
             </SelectContent>
           </Select>
         </SettingsRow>
-        {/* The preview is its own divided row (the card's `[&>*]:py-3`
-            pads it) so it reads as part of the card rather than a stray
-            block hanging under the picker. */}
         <div>
           <CodeThemePreview />
         </div>

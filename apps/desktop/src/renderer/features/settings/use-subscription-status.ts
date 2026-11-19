@@ -42,8 +42,7 @@ function observe(provider: string): () => void {
 async function readObservedSubscription(provider: string): Promise<ProviderSubscriptionStatus> {
   const observed = observations.get(provider);
   if (!observed || !documentIsVisible()) {
-    // A queued refresh can outlive its visible observer. Keep the retained
-    // value stale for reveal rather than marking that skipped probe fresh.
+    // A skipped refresh must leave the retained result stale for reveal.
     subscriptionCache.invalidate(provider);
     const retained = subscriptionCache.getSnapshot(provider).data;
     if (retained) return retained;
@@ -54,8 +53,7 @@ async function readObservedSubscription(provider: string): Promise<ProviderSubsc
     return await readSubscription(provider);
   } finally {
     const current = observations.get(provider);
-    // The native ACK also writes the cache. Preserve an invalidation that
-    // arrived during that read so it cannot swallow a newer external login.
+    // The native reply writes the cache; reapply invalidations that arrived during its read.
     if (!current || current !== observed || current.revision !== revision)
       subscriptionCache.invalidate(provider);
   }

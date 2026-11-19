@@ -1,22 +1,9 @@
-// ──────────────────────────────────────────────────────────
-// useGitRemote — the repo's effective `git.remote` for UI surfaces
-// ──────────────────────────────────────────────────────────
-//
-// The "Remote origin" setting (repo page → Git) decides where push / pull /
-// PR-create point. Engine-side consumers resolve it themselves
-// (settings/repo-git.ts); renderer surfaces that TALK about the remote (the
-// PR briefs handed to agents, the target-branch label) read it through this
-// hook so the words match the behavior. Live: settings writes broadcast
-// DB_CHANGED{settings} → useResolvedSettings refetches → the value updates.
-
 import { useResolvedSettings } from "./use-settings";
 import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
 
+// Match the fallback in engine/settings/repo-git.ts while the local setting is unresolved.
 export const DEFAULT_GIT_REMOTE = "origin";
 
-/** The effective `git.remote` for a repo (default "origin"). Returns the
- *  default until the resolve lands — briefs built in that window match the
- *  engine's own fallback, so they're never *wrong*, just pre-refresh. */
 export function useGitRemote(repoRoot: string | undefined): string {
   const cloud = isCloudWorkspace(repoRoot);
   const { resolved } = useResolvedSettings(repoRoot, undefined, !cloud);

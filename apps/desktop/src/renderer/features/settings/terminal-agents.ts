@@ -13,7 +13,6 @@ export interface TerminalAgentInstallHint {
 
 export interface TerminalAgentNotificationsSpec {
   enabled: boolean;
-  /** Reserved default OSC IDs for an empty list: 9/99/777. */
   oscSequences: number[];
 }
 
@@ -223,7 +222,6 @@ function saveRemovedTerminalAgentIds(ids: string[]): void {
   notify();
 }
 
-// Tolerate optional fields from persisted profiles; only require the launch identity.
 function isWellFormed(a: unknown): a is TerminalAgent {
   if (!a || typeof a !== "object") return false;
   const r = a as Record<string, unknown>;
@@ -261,7 +259,6 @@ export function buildLaunchLine(opts: BuildLaunchLineOptions): string {
 }
 
 function shellQuote(value: string): string {
-  // Escape POSIX double-quote metacharacters in prompt text.
   const escaped = value.replace(/(["\\$`])/g, "\\$1");
   return `"${escaped}"`;
 }

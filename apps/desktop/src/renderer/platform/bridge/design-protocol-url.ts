@@ -8,8 +8,7 @@ const CAPABILITY_PATTERN = /^[a-f0-9]{64}$/;
 const SOURCE_VERSION_PATTERN = /^[a-f0-9]{24}$/;
 const WORKSPACE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
-/** Build the local custom-protocol frame route only when both authorities are
- * exact. A null result deliberately falls back to the already-sanitized srcDoc. */
+/** Reject malformed workspace, capability, frame and source-version inputs before forming a protocol URL. */
 export function designProtocolFrameUrl(input: {
   workspaceId: string;
   capability: string | null;
@@ -17,7 +16,6 @@ export function designProtocolFrameUrl(input: {
   sourceVersion: string;
   surface?: boolean;
   theme?: string | null;
-  /** The variant a main component frame shows. */
   variant?: string | null;
 }): string | null {
   if (

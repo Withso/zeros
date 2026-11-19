@@ -1,14 +1,3 @@
-// ──────────────────────────────────────────────────────────
-// Settings foundation — one-time localStorage → TOML migration
-// ──────────────────────────────────────────────────────────
-//
-// Ships the renderer's legacy settings blobs (`repo-settings:<projectId>`,
-// `provider-prefs:<agentId>`) to the engine's LOCAL-ONLY `settings.migrateLegacy`
-// op, which writes them into the TOML layers with merge-under semantics (an
-// existing file value always wins — re-runs can never clobber). The legacy
-// blobs are kept (not deleted) as a safety net; they stop being read once the
-// panels are on the bridge.
-// ──────────────────────────────────────────────────────────
 
 import { getSetting, setSetting } from "../../platform/settings";
 import { getSecret } from "../../platform/secrets";
@@ -37,7 +26,7 @@ const MIGRATED_FLAG = "settings:toml-migrated";
 /** Agent ids that historically carried provider prefs (provider-prefs.ts). */
 const LEGACY_PROVIDER_AGENT_IDS = ["claude", "codex", "cursor"];
 
-/** Run the one-time migration if it hasn't run on this device. */
+// The Local engine merges into TOML without overriding saved values; migration does not clear the input keys.
 export async function ensureSettingsTomlMigrated(
   bridge: RuntimeClient | null,
 ): Promise<void> {
@@ -50,7 +39,6 @@ export async function ensureSettingsTomlMigrated(
       repoRoot: p.repoRoot,
       settings: getRepoSettings(p.id) as unknown as Record<string, unknown>,
     }))
-    // Only ship blobs that actually carry something.
     .filter((r) => {
       const s = r.settings as {
         workspacesPath?: string;
@@ -90,8 +78,7 @@ export async function ensureSettingsTomlMigrated(
     setSetting(MIGRATED_FLAG, true);
     if (result.warnings.length > 0) {
       console.warn("[zeros] settings migration notes:", result.warnings);
-      // Surface lossy mappings (e.g. extra scripts that had no setup/run/archive
-      // home) so it isn't silent data loss — a console line nobody reads.
+      // Some legacy scripts have no new slot; tell the user which setup needs attention.
       toast.info(
         `Settings migrated with ${result.warnings.length} note${
           result.warnings.length === 1 ? "" : "s"
@@ -106,30 +93,12 @@ export async function ensureSettingsTomlMigrated(
 
 const ENV_VAULT_MIGRATED_FLAG = "env-vault:legacy-secrets-migrated";
 
-/** One-time import of legacy 🔒 env secrets into the Keychain env vault.
- *
- *  The pre-vault Environment UI stored a locked value under the Keychain
- *  account `env::<NAME>` and wrote the `"${zeros.secret}"` sentinel into the
- *  user settings.toml `[env]` table; the courier that delivered those values
- *  at spawn was deleted with the vault redesign (2026-07-16), so without this
- *  they'd silently stop reaching agents. For each sentinel entry: copy the
- *  recoverable Keychain value into the user vault (existing vault names win),
- *  then null the dead sentinel row out of the file (spawn-env skips sentinels
- *  either way; the row only misleads). The `env::` accounts are left in place
- *  as a safety net, mirroring the localStorage blobs above.
- *
- *  Ordering makes a partial failure safe: the vault write lands FIRST, so if
- *  the file cleanup fails the vault already shadows the sentinel rows and the
- *  unset flag retries (idempotently — planned names already in the vault are
- *  skipped) on the next boot. */
+// Import env:: Keychain accounts named by the legacy TOML sentinel. Existing vault entries win; copy before deleting sentinels so retries cannot lose values.
 export async function ensureEnvSecretsInVault(
   bridge: RuntimeClient | null,
 ): Promise<void> {
   if (!bridge) return;
-  // Desktop only: the `env::` accounts live in THIS machine's secret store. A
-  // web/relay client reads null for every name and would mis-plan the
-  // sentinel rows as unrecoverable — stripping them from the shared user file
-  // before the desktop gets to migrate the real values.
+  // Only this desktop can read env:: accounts; relay clients would mistake them for missing values.
   if (!isNativeRuntime()) return;
   if (getSetting<boolean>(ENV_VAULT_MIGRATED_FLAG, false)) return;
   try {
@@ -144,8 +113,7 @@ export async function ensureEnvSecretsInVault(
       setSetting(ENV_VAULT_MIGRATED_FLAG, true);
       return;
     }
-    // Throws when the vault exists but couldn't be read — abort (flag stays
-    // unset, retried next boot) rather than plan against a map we can't see.
+    // Abort on an unreadable vault rather than migrating as if it were empty.
     const vault = await readEnvVaultForEdit({ kind: "user" });
     const legacyValues: Record<string, string | null> = {};
     for (const name of names) {
@@ -166,8 +134,6 @@ export async function ensureEnvSecretsInVault(
     }
     setSetting(ENV_VAULT_MIGRATED_FLAG, true);
     if (plan.unrecovered.length > 0) {
-      // Not silent data loss: the variable stopped flowing with the old
-      // courier's removal — say so once, with the fix.
       toast.info(
         `Couldn't recover ${plan.unrecovered.join(", ")} from the Keychain — re-add ${
           plan.unrecovered.length === 1 ? "it" : "them"
@@ -183,17 +149,7 @@ export async function ensureEnvSecretsInVault(
   }
 }
 
-/** Prune dead `[providers.<id>]` entries for agents that were REMOVED from the
- *  product — e.g. a leftover `factory-droid` table written into a user's
- *  settings.toml while it was still a supported agent (retired 2026-06-16),
- *  which nothing reads or re-writes once the agent is gone.
- *
- *  Matches the renderer's RETIRED_AGENT_PATTERNS via `isRemovedAgent(id, null)`
- *  — a registry-independent check that's true ONLY for explicitly-retired ids
- *  (current + unknown ids are left alone), so it's safe to run at boot before
- *  the registry has loaded. UNGATED + idempotent: runs every boot but writes
- *  only when a stale entry is actually found, so a FUTURE retirement
- *  self-cleans without another flag. */
+// Run ungated at boot so later retirements self-clean; prune only explicit retirements without needing the registry.
 export async function pruneRetiredProviders(
   bridge: RuntimeClient | null,
 ): Promise<void> {
@@ -207,8 +163,7 @@ export async function pruneRetiredProviders(
       isRemovedAgent(id, null),
     );
     if (stale.length === 0) return;
-    // A null leaf deletes the key (applySettingsPatch). opSettingsWrite applies
-    // the patch BEFORE sanitizing, so the deletion isn't stripped.
+    // Null deletes a leaf; the Local engine applies the patch before sanitizing.
     const patch: Record<string, null> = {};
     for (const id of stale) patch[id] = null;
     await bridgeSettingsWrite(bridge, "user", { providers: patch });
@@ -217,8 +172,7 @@ export async function pruneRetiredProviders(
       stale,
     );
   } catch (err) {
-    // An engine swap aborts this by design; it already says it retries next
-    // boot, so saying it loudly on every swap only hides real failures.
+    // Engine swaps can abort pruning; the next boot retries without a warning.
     const message = err instanceof Error ? err.message : String(err);
     if (isTransportShaped(message)) return;
     console.warn(

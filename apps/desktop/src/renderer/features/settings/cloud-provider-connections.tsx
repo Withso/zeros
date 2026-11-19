@@ -37,8 +37,7 @@ import {
   type CloudProviderCredential,
 } from "./cloud-provider-connection";
 
-// Authentication is available before any VM exists. Each workspace's registry
-// independently checks whether its runtime supports the connected provider.
+// Account connections can exist before a VM; runtime support is checked separately per workspace.
 const PROVIDERS = [
   { id: "claude", name: "Claude Code" },
   { id: "codex", name: "Codex" },
@@ -56,8 +55,7 @@ function connectionErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "Cloud connection failed";
 }
 
-/** Every agent is a titled card on one page, so a request for one agent
- * (a chat's sign-in link) scrolls its card into view once the page shows. */
+// Retain chat sign-in destinations until the requested provider card can be revealed.
 export function CloudProviderConnections({
   organizationId,
   surfaceActive,
@@ -67,7 +65,6 @@ export function CloudProviderConnections({
 }) {
   const { me } = useTeams();
   const owner = settingsOwnerKey(me?.user.id ?? "pending", organizationId);
-  // The same keyed read every card uses; a failure is said once, up top.
   const snapshot = useRecoveringRead(
     cloudOrganizationConnectionsCache,
     me ? owner : null,
@@ -75,7 +72,6 @@ export function CloudProviderConnections({
     { enabled: surfaceActive, maxAgeMs: 30_000 },
   );
   const sections = useRef(new Map<string, HTMLElement>());
-  // The persisted request, read once; null once it has been scrolled to.
   const requested = useRef<string | null | undefined>(undefined);
   if (requested.current === undefined)
     requested.current = readScopedSettingsSelection(owner, "provider", "claude");
@@ -134,11 +130,10 @@ export function CloudProviderConnections({
             </div>
           ))}
       </div>
-      {/* Said once for every agent, not under each card. */}
       <p className="text-fg3 m-0 text-3xxs leading-4">
         {NATIVE_BROWSER_UNAVAILABLE}
       </p>
-      {/* Creator pays: a cloud workspace's turns run on its Creator's agent login, whoever sends them. */}
+      {/* A turn uses the workspace creator's selected credentials even when someone else sends it. */}
       <p className="text-fg3 m-0 text-3xxs leading-4" data-creator-pays-hint="">
         Your login runs every turn in cloud workspaces you created.
       </p>
@@ -234,15 +229,13 @@ function CloudProviderConnection({
   const readyCredential = matching.find(credential => connection?.credentialId === credential.id &&
     connection.connected && connection.health?.status === "ready" &&
     connection.health.credentialRevision === credential.revision && !credential.revoked);
-  // The clicked account is a dialog intent, not a health snapshot. Keep an
-  // unlisted import for explicit retry, but use current metadata for readiness.
+  // Retain a pending import for retry, but derive readiness from current metadata.
   const displayedCredential = matching.find(credential => credential.id === selected?.id) ?? selected;
   const connected = !!selected && readyCredential?.id === selected.id;
   const run = async (action: (current: () => boolean) => Promise<void>) => {
     if (inFlight.current || removal.isPending() || !surfaceActive || !removal.current()) return;
     const epoch = operationEpoch.current;
-    // Capture this render's owner guard. A later owner A-B-A or hidden dialog
-    // cannot turn an old import into a new selection or publish its feedback.
+    // An old import cannot select or report after owner A-B-A or dialog retirement.
     const current = () => mounted.current && active.current && removal.current() && operationEpoch.current === epoch;
     inFlight.current = true;
     setBusy(true);
@@ -264,8 +257,7 @@ function CloudProviderConnection({
   const connect = () =>
     run(async current => {
       if (!snapshot.data) return;
-      // Only the explicit Connect click adopts refreshed source revisions.
-      // Keep a successful import in the dialog across a selection conflict.
+      // Only an explicit Connect adopts refreshed revisions; a conflict keeps the import available for retry.
       let chosen = selected ? snapshot.data.credentials.find(row => row.id === selected.id && !row.revoked) : null;
       if (selected && !chosen) throw new Error("This saved account is unavailable. Refresh accounts and choose again.");
       if (!chosen) {
@@ -319,7 +311,7 @@ function CloudProviderConnection({
         credentialRevision: chosen.revision,
         models: models.slice(0, 32).map((row) => row.value),
         allModels: true,
-        // Ignored by current control planes (no consent concept); older ones still read it on connect.
+        // Send the compatibility field for older control planes.
         consent: "zeros-managed",
       });
       if (current()) {
@@ -361,11 +353,9 @@ function CloudProviderConnection({
           const ready = readyCredential?.id === credential.id;
           const reconnect = isSelected && (credential.revoked || health?.status === "expired" ||
             health?.status === "expiring" || health?.status === "credential_unavailable");
-          // Health is the selected source's last observation, never a model or
-          // refresh grant. N-1 servers leave it absent; do not invent readiness.
+          // Health is an observation, not a model or refresh grant; absent health and legacy consent_required leave readiness unknown.
           const status = !isSelected ? "Saved" : !health ? "Selected · Status unavailable"
             : health.status === "ready" ? ready ? "Connected" : "Account changed"
-            // An older server's consent_required does not establish readiness.
             : ({ not_selected: "Status unavailable", consent_required: "Status unavailable",
                 credential_unavailable: "Account unavailable", credential_changed: "Account changed",
                 expiring: "Connection expires soon", expired: "Connection expired" })[health.status];
@@ -382,7 +372,6 @@ function CloudProviderConnection({
               label={<span className="block truncate">{credential.displayName}</span>}
               hint={`${status} · ${kind}`}
             >
-              {/* One control height per row: both 24px. */}
               <Button
                 variant="secondary"
                 size="compact"

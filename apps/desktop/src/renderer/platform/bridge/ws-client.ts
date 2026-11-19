@@ -1,5 +1,4 @@
-// Desktop environment for the shared RuntimeClient. Keep this released import
-// surface and native cache/default behavior intact for Local and organization-local.
+// Keep the released desktop import surface for Personal and organization-local runtimes.
 import {
   RuntimeClient as SharedRuntimeClient,
   parseRuntimeConnectionTarget as parseSharedTarget,
@@ -18,14 +17,7 @@ import {
 import { getAuthAccessToken } from "../../features/auth/auth-token";
 import { CHANNEL, type Channel } from "../../config/release-channel";
 
-// Fallback only — in the Mac app, native get_engine_port (step 2) always wins
-// and returns the engine's actually-bound port. This matters solely for a
-// plain browser harness, where it must match the engine channel baked into the
-// renderer. Native get_engine_port remains authoritative in every desktop app.
-//
-// A total Record (not a ternary chain) so adding a channel is a COMPILE ERROR
-// here instead of silently falling through to Production's port — which would
-// point an Alpha harness at the Stable engine.
+// Only browser harnesses use this channel-specific fallback; Electron must resolve its bound port.
 const ENGINE_PORT_BY_CHANNEL: Record<Channel, number> = {
   dev: ENGINE_BASE_PORT_DEV,
   alpha: ENGINE_BASE_PORT_ALPHA,
@@ -33,13 +25,6 @@ const ENGINE_PORT_BY_CHANNEL: Record<Channel, number> = {
 };
 const DEFAULT_ENGINE_PORT = ENGINE_PORT_BY_CHANNEL[CHANNEL];
 
-/**
- * Resolve the engine port. Cached at module level so the reconnect
- * timer doesn't hit native IPC on every retry. The cache can be
- * invalidated via `invalidateEnginePort()` — used by the in-place
- * project swap, where Electron respawns the engine on a fresh port
- * and we need to drop the old value before the next connect().
- */
 let cachedPortPromise: Promise<number> | null = null;
 let cachedTokenPromise: Promise<string> | null = null;
 function resolveEnginePort(): Promise<number> {
@@ -65,9 +50,7 @@ function resolveEnginePort(): Promise<number> {
         if (typeof port === "number" && port > 0) return port;
         throw new Error("native engine port is not ready");
       } catch (err) {
-        // A native app must never guess the base port: a previous process or
-        // sibling instance may own it. Clear the rejected promise and retry the
-        // authoritative IPC resolution on the reconnect ladder instead.
+        // Never guess a native port; a sibling instance or an old process may own it.
         console.warn("[Zeros] get_engine_port failed:", err);
         void import("../observability/analytics/posthog").then((m) =>
           m.reportError(err, { source: "get_engine_port" }),
@@ -87,9 +70,7 @@ function resolveEnginePort(): Promise<number> {
   return cachedPortPromise;
 }
 
-/** Drop the cached engine port. Call when the engine respawns on a
- *  new port (in-place project swap) — the next connect() will
- *  re-resolve via native IPC. */
+/** Drop the cached port so the next connect re-resolves it over native IPC. */
 export function invalidateEnginePort(): void {
   cachedPortPromise = null;
 }
@@ -99,12 +80,7 @@ export function invalidateEngineToken(): void {
   cachedTokenPromise = null;
 }
 
-/**
- * Resolve the loopback /ws auth token. The engine requires it on the
- * upgrade so a website that opens a cross-origin ws:// to 127.0.0.1 can't pose
- * as the renderer. Cached for one engine generation; forceReconnect clears it
- * because every replacement engine mints a fresh authority token.
- */
+/** Authenticate loopback upgrades so a webpage cannot impersonate the renderer; cache the bearer only for this sidecar generation. */
 function resolveEngineToken(): Promise<string> {
   if (cachedTokenPromise) return cachedTokenPromise;
   cachedTokenPromise = (async () => {
@@ -121,8 +97,7 @@ function resolveEngineToken(): Promise<string> {
     } catch (err) {
       console.warn("[Zeros] get_engine_token failed:", err);
     }
-    // No token (standalone dev harness against a tokenless engine) → connect
-    // without one; a token-gated engine will simply reject and we retry.
+    // An empty bearer is only accepted by a tokenless standalone harness.
     return "";
   })();
   return cachedTokenPromise;

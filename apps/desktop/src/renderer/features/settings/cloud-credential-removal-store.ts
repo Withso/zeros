@@ -2,9 +2,7 @@ import { z } from "zod";
 import { cloudCredentialRemovalOutcomeSchema, cloudCredentialRemovalTargetSchema,
   type CloudCredentialRemovalState, type CloudCredentialRemovalTarget } from "./cloud-credential-removal";
 
-// Preserve the Settings key namespace, but use strict durable IO. Preference
-// readers intentionally substitute defaults on failure; mutation identities
-// must distinguish an absent entry from an unreadable prior submitted Yes.
+// Preserve this persisted key and distinguish unreadable intents from absent ones.
 const KEY = "zeros-cloud-credential-removal:intents:v1";
 const MAX_INTENTS = 64;
 const uuid = z.string().uuid();
@@ -26,8 +24,7 @@ function entries(): SavedEntry[] {
     value = raw === null ? [] : JSON.parse(raw);
   } catch { throw new Error("Saved cloud removal state is unavailable"); }
   const parsed = savedEntries.safeParse(value);
-  // Corrupt persisted state is not evidence that an unknown-ACK operation never
-  // existed. Refuse creating another mutation identity from that assumption.
+  // Corruption cannot prove that a prior submission never happened; fail instead of allocating a new identity.
   if (!parsed.success) throw new Error("Saved cloud removal state is unavailable");
   return parsed.data;
 }
@@ -39,8 +36,7 @@ function frozen(value: z.infer<typeof savedState>): CloudCredentialRemovalState 
     ...(value.decision ? { decision: Object.freeze(value.decision) } : {}) });
 }
 
-/** Nonsecret durable reconciliation identity only; this grants no authority.
- * Current account authentication still fences every remote request. */
+// Persist only nonsecret reconciliation identity; each remote request still needs current account authentication.
 export function readCloudCredentialRemovalIntent(userId: string, operationId: string): CloudCredentialRemovalState | undefined {
   uuid.parse(userId); uuid.parse(operationId);
   const value = entries().find(row => row.userId === userId && row.state.operationId === operationId)?.state;
@@ -53,8 +49,7 @@ export function findCloudCredentialRemovalIntent(userId: string, target: CloudCr
   return value ? frozen(value) : undefined;
 }
 
-/** Call before prepare and before submitting Yes/No. Read back the exact
- * identity so a dropped preference write cannot lose the only safe retry key. */
+// Read back the persisted identity before sending so a dropped write cannot lose the retry key.
 export function persistCloudCredentialRemovalIntent(userId: string, supplied: CloudCredentialRemovalState): void {
   uuid.parse(userId);
   const state = savedState.parse(supplied);

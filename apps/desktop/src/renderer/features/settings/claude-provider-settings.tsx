@@ -15,8 +15,7 @@ import {
 } from "../agent/reliability-settings";
 import { SettingsRow } from "./settings-ui";
 
-/** The production Claude rows are shared with the offline UI harness. Settings
- * owns applying the complete preference encoder to loaded Local/cloud chats. */
+// The parent applies the complete preference payload to loaded Local and cloud chats.
 export function ClaudeProviderSettings({ onChange }: { onChange: () => void }) {
   const [autoMemoryEnabled, setAutoMemoryEnabled] = useClaudeAutoMemoryEnabled();
   const [idleTimeoutMinutes, setIdleTimeoutMinutes] = useClaudeIdleTimeoutMinutes();

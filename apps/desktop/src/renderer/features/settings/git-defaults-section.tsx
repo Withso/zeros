@@ -74,7 +74,7 @@ export function GitDefaultsSection() {
     return () => clearTimeout(timer);
   }, [pending]);
 
-  // Preview the draft with the engine's prefix rules before it is saved.
+  // Keep the draft in the parent so the engine-rule preview follows unsaved typing.
   const [draft, setDraft] = useSyncedDraft(savedPrefix);
 
   // Restoring a saved Custom selection must not steal focus.

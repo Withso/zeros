@@ -23,7 +23,7 @@ export type CloudRepositorySelection =
   CloudGithubRepositoryPage["repositories"][number];
 const matches = (a: CloudRepositorySelection, b: CloudRepositorySelection) =>
   a.id === b.id;
-/** A repository chosen by its owner/name, which outlives a GitHub selection. */
+// Cloud Computer recipes persist owner/name independently of the active GitHub selection.
 export type CloudRepositoryName = { owner: string; name: string };
 export function CloudRepositoryPicker({
   userId,
@@ -42,10 +42,8 @@ export function CloudRepositoryPicker({
   organizationId: string;
   value?: readonly CloudRepositorySelection[];
   onChange?(value: CloudRepositorySelection[]): void;
-  /** Name-based selection for lists stored by owner/name (Cloud Computer). */
   isSelected?(repository: CloudRepositoryName): boolean;
   onToggle?(repository: CloudRepositorySelection): void;
-  /** Trigger text; defaults to the selection count or name. */
   label?: string;
   multiple?: boolean;
   disabled?: boolean;

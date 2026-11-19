@@ -79,9 +79,7 @@ export function startAgentPreferencesSync(bridge: RuntimeClient): () => void {
           if (!local()) break;
           failures += 1;
           if (failures === 1) {
-            // A passive restore and explicit flush share this flight. Keep
-            // both pending through one retry so a momentary read/save failure
-            // cannot become a terminal chat error before recovery finishes.
+            // Restore and flush share this retry so a transient failure cannot abort chat startup.
             requested = true;
             await new Promise<void>((resolve) => {
               const timer = setTimeout(finish, 1_500);
@@ -158,9 +156,7 @@ export function startAgentPreferencesSync(bridge: RuntimeClient): () => void {
   const offFlush =
     bridge.executionIdentity.kind === "local"
       ? registerAgentPreferencesFlush(async () => {
-          // Restoring a chat can reach provider setup before the Local engine
-          // connects. Wait for readiness, then require the usual settings ACK.
-          // Match the workbench's Local startup grace and retire with this sync.
+          // Restored chats can reach provider setup before Local is ready; match the workbench's WORKBENCH_RECONNECT_ERROR_MS.
           const deadline = Date.now() + 45_000;
           do {
             if (!ownsLocal())
@@ -172,8 +168,7 @@ export function startAgentPreferencesSync(bridge: RuntimeClient): () => void {
               timeoutMs: Math.max(0, deadline - Date.now()),
             });
             await refresh();
-            // A disconnect can retire readiness or the settings response before
-            // this continuation runs. Rejoin within the original startup bound.
+            // If readiness expires on disconnect, rejoin without restarting the deadline.
           } while (!local());
           if (pendingAgentPreferences().size)
             throw new Error("Agent settings are still waiting to be saved.");

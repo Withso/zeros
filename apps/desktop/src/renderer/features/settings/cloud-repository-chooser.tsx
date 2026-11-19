@@ -1,6 +1,3 @@
-// The Cloud Computer's repository choice, as Local's: who is signed in to
-// GitHub, every repository the selected connection can clone grouped by owner,
-// and Connect organization, which adds an owner on GitHub's installation page.
 import { useEffect, useMemo, useState } from "react";
 import { ChevronDown, RefreshCw } from "lucide-react";
 import { Button, GithubIcon, Input } from "../../shared/ui";
@@ -25,7 +22,7 @@ import { useFocusRefresh } from "./use-focus-refresh";
 const PAGE_LIMIT = 10;
 const CONNECT_WAIT_MS = 10 * 60_000;
 
-/** Every page the selected connection lists, read in order under one key. */
+// Keep all pages on one connection generation; a changed connection needs a fresh list.
 async function readAllRepositories(userId: string, organizationId: string, generation: string) {
   const repositories: ChooserRepository[] = [];
   for (let page = 1; page <= PAGE_LIMIT; page++) {
@@ -44,7 +41,6 @@ export function CloudRepositoryChooser({ userId, organizationId, active, disable
   chosenCount: number;
   isChosen(repository: { owner: string; name: string }): boolean;
   onToggle(repository: ChooserRepository): void;
-  /** Chooses every listed repository, or clears them when all are chosen. */
   onChooseAll(repositories: ChooserRepository[], choose: boolean): void;
 }) {
   const dispatch = useWorkspaceDispatch();
@@ -75,9 +71,7 @@ export function CloudRepositoryChooser({ userId, organizationId, active, disable
   const rows = chooserRows(repositories, query, shownOwner);
   const allChosen = rows.length > 0 && rows.every(isChosen);
 
-  // GitHub's installation page reports back through the connection's
-  // generation; poll only while this chooser waits on it.
-  // R1: re-read when the person comes back from GitHub (focus), else every 60 s; stop at the deadline.
+  // The browser install advances the connection generation; stop refreshing on change or timeout.
   useFocusRefresh(active && !!connecting, () => {
     if (!connecting || Date.now() >= connecting.until) return;
     void cloudGithubConnectionCache.load(scope, () => readCloudGithubConnection(userId, organizationId), { maxAgeMs: 0 }).catch(() => {});

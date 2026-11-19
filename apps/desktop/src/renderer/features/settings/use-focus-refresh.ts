@@ -1,8 +1,6 @@
 import { useEffect, useRef } from "react";
 
-/** R1 push-not-poll for a settings wait (a GitHub sign-in or install in the browser, a Cloud Computer build): refresh
- * once now, again when the person comes back to the window, and otherwise only every `fallbackMs`. Nothing while
- * inactive or hidden. */
+// Refresh on return to the app; poll only as a fallback while active and visible.
 export function useFocusRefresh(active: boolean, refresh: () => void, fallbackMs = 60_000): void {
   const latest = useRef(refresh);
   latest.current = refresh;

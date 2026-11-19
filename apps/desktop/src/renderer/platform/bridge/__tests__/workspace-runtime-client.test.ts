@@ -129,8 +129,7 @@ describe("file reference ownership", () => {
 
 
 describe("cloud terminal continuity", () => {
-  // A woken VM restarts its worker and loses every shell. Only a changed engine
-  // instance lets the terminal store keep the tabs and start fresh shells.
+  // Only a changed worker instance tells the terminal store to restart shells without dropping their tabs.
   it("uses the worker process announced by ENGINE_READY, falling back to the workspace for older workers", async () => {
     const peer = fakePeer(a), open = vi.fn(async () => peer.peer);
     Object.assign(peer.peer.client, { executionIdentity: { kind: "cloud", engineInstanceId: a.workspaceId } });
@@ -888,8 +887,7 @@ describe("workspace runtime routing", () => {
   });
 
   it("isolates Personal Local → org-A cloud → org-B cloud → organization-local → Personal Local with delayed frames and replies", async () => {
-    // Equal native roots, workspace IDs and resolver IDs must still be owned
-    // by the exact organization. Both cloud owners initially remain admitted.
+    // The fixtures deliberately collide on native root, workspace and resolver IDs across organizations.
     const other = { ...a, organizationId: "44444444-4444-4444-8444-444444444444" };
     const pa = fakePeer(a), pb = fakePeer(other);
     const subscriptionA = vi.spyOn(pa.peer.client, "on");
@@ -937,8 +935,7 @@ describe("workspace runtime routing", () => {
         { id: cloudScopedId(other, "chat"), folder: cloudWorkspaceKey(other), title: "Org B" },
       ]);
 
-      // A late frame while B is selected still belongs to A. Exact captured
-      // resolver ownership routes each answer to its originating peer.
+      // Route delayed frames and decisions by captured owner, not by the selected workspace.
       const frame = { agentId: "codex", chatId: "chat", executionId: "native", notification: { sessionId: "native",
         update: { sessionUpdate: "agent_message_chunk" as const, content: { type: "text" as const, text: "late" } } } };
       pa.emit("AGENT_SESSION_UPDATE", frame);
@@ -956,8 +953,7 @@ describe("workspace runtime routing", () => {
       expect(pa.send).toHaveBeenCalledOnce();
       expect(pb.send).toHaveBeenCalledOnce();
 
-      // Revoke the old owners and retain callback references to reproduce a
-      // frame already queued before unsubscribe, rather than an empty emitter.
+      // Call the captured listeners to model delivery already queued before revocation.
       const staleA = subscriptionA.mock.calls.find(([type]) => type === "AGENT_SESSION_UPDATE")![1];
       const staleB = subscriptionB.mock.calls.find(([type]) => type === "AGENT_SESSION_UPDATE")![1];
       allowed.delete(a.organizationId);
@@ -1123,7 +1119,6 @@ describe("cloud v2 history ownership", () => {
     const readHistory = vi.fn(async () => ({ chats: [{ id: "mirrored" }], chatDeletions: [] }));
     const client = new WorkspaceRuntimeClient({ open: async () => peer.peer, readHistory, historyRoot: () => MIRROR_ROOT, workspaces: () => [] });
     try {
-      // Before any connection the mirror answers, without opening a peer.
       const offline = await client.request({ type: "WORKSPACE_REQUEST", op: "chats.list", params: { workspaceId: cloudWorkspaceKey(a) } } as never);
       expect(JSON.stringify(offline)).toContain("mirrored");
       await client.warmWorkspace(a);
@@ -1147,7 +1142,6 @@ describe("Team sharing readers", () => {
       await expect(client.warmWorkspace(a)).rejects.toThrow(/read only/i);
       await expect(client.request({ type: "WORKSPACE_REQUEST", op: "git.status", params: { workspaceId: cloudScopedId(a, "local-main") } } as never)).rejects.toThrow(/read only/i);
       expect(open).not.toHaveBeenCalled();
-      // The Creator (or a transfer) can connect as before.
       reader = false;
       await client.warmWorkspace(a);
       expect(open).toHaveBeenCalledOnce();

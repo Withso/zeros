@@ -244,11 +244,10 @@ export const windowSetBackground: CommandHandler = async (args, event) => {
 
 // ── Durable appearance mode + native-chrome theming ────────
 //
-// The renderer's theme prefs live in localStorage (sessionData). A legacy
-// Local profile still keeps that under the purgeable OS cache dir, and a
-// cleared profile would silently reset a light-theme user to dark. The MODE is
-// therefore mirrored here into userData (same durability class as
-// window-background.json):
+// The renderer's theme prefs live in localStorage, which main.ts relocates
+// under ~/Library/Caches (sessionData) — macOS may purge that, silently
+// resetting a light-theme user to dark. The MODE is therefore mirrored here
+// into userData (same durability class as window-background.json):
 //   • createWindow passes it to the preload via additionalArguments, the
 //     preload exposes it to the page, and both the index.html pre-paint
 //     stamp and the appearance store fall back to it when localStorage is

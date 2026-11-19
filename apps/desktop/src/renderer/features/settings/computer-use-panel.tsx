@@ -63,9 +63,7 @@ const PERMISSION_STATUS_FIELD: Record<
   "screen-recording": "screenRecording",
 };
 
-/** Whose controls for this Mac the selected owner shows. Ownership alone does
- * not determine placement: an organization exposes them only in its
- * confirmed local workspace. */
+// An organization can expose this Mac's controls only from its confirmed local workspace.
 function useDevicePlacement(): "local" | "cloud" | "loading" {
   const organization = useActiveOrganization();
   const { workspace } = useActiveWorkspace();
@@ -109,9 +107,7 @@ function ComputerSwitchRow({
   );
 }
 
-/** Settings → General: computer use, the agent cursor it shares with the
- * Zeros browser, and the blocked apps. An organization's General, which has
- * no Privacy card, shows the macOS grants here as well. */
+// Organization General lacks a Privacy card, so it hosts the computer-use grants here.
 export function ComputerUseSettingsSection({
   surfaceActive = true,
   withPermissions = false,
@@ -184,10 +180,7 @@ function LocalComputerUseSettings({
   const managed = (key: ComputerUseSettingKey) =>
     computerUseSettingIsManaged(sources, key);
 
-  // A write updates the layer cache immediately, while the resolved cache is
-  // replaced by the following settings broadcast. Retain the optimistic value
-  // until a matching authoritative resolved object arrives (or managed policy
-  // wins), so serialized writes never flicker back to an intermediate value.
+  // Resolve events can lag writes; wait for the matching value or a managed override.
   useEffect(() => {
     setPending((current) => {
       let changed = false;
@@ -224,9 +217,7 @@ function LocalComputerUseSettings({
     );
   }, [resolved.resolved]);
 
-  // Enabling computer use walks straight into the macOS grants it needs. The
-  // SDK request lists Zeros in both System Settings panes, so the user only
-  // has to turn them on.
+  // The SDK request lists Zeros in both System Settings panes for manual approval.
   const walkthroughPermissions = useCallback(async () => {
     try {
       const current = await refreshComputerUseStatus();
@@ -239,7 +230,7 @@ function LocalComputerUseSettings({
       }
       await requestComputerUsePermissions();
     } catch {
-      // The bridge is gone; the permission rows keep the last known state.
+      // If the native bridge is unavailable, keep the last confirmed grants.
     }
   }, []);
 
@@ -360,7 +351,6 @@ function LocalComputerUseSettings({
     />
   );
 
-  // One section: 12px between its cards, as a single page's cards.
   return (
     <div className="flex flex-col gap-3">
       <SettingsGroup title="Computer use">
@@ -415,8 +405,6 @@ function LocalComputerUseSettings({
   );
 }
 
-/** Settings → General → Privacy: the two macOS grants computer use needs,
- * shaped like Full Disk Access beside them. */
 export function ComputerPermissionRows({
   surfaceActive = true,
 }: {
@@ -471,8 +459,7 @@ function ComputerPermissionRow({
     onRequesting(true);
     try {
       const next = await requestComputerUsePermissions();
-      // The macOS prompt appears only once; a denied grant has to be turned
-      // on by hand, in the pane for exactly this permission.
+      // macOS prompts only once; if still denied, open the pane for that grant.
       if (!next?.[PERMISSION_STATUS_FIELD[kind]]) await openPane();
     } catch (error) {
       toast.error("Couldn't ask macOS for access.", {

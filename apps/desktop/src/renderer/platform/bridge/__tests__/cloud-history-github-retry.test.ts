@@ -9,8 +9,7 @@ const request = { type: "WORKSPACE_REQUEST" as const, op: "messages.window", par
 const page = (text: string) => ({ messages: [{ msgId: "m1", kind: "text", payload: JSON.stringify({ text }), createdAt: 1 }] });
 
 type ReadHistory = NonNullable<ConstructorParameters<typeof WorkspaceRuntimeClient>[0]["readHistory"]>;
-// `readHistory` scripts the transcript reads; the workspace's one chats.list (joined before a first window read) is
-// answered separately so each scripted step stays a transcript read.
+// Answer the prerequisite chats.list separately so the script controls only transcript replies.
 function stopped(readHistory: (...args: unknown[]) => unknown) {
   const open = vi.fn(async () => { throw new Error("VM must stay stopped"); });
   const route = (target: unknown, op: string, params: unknown) => op === "chats.list" ? Promise.resolve({ chats: [] }) : readHistory(target, op, params);

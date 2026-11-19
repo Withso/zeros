@@ -1,21 +1,10 @@
-// The store persists to localStorage at module scope, so each test group
-// installs a fresh in-memory stub and re-imports the module
-// (vi.resetModules) — mirroring how the renderer sees one snapshot per
-// window. Node env has no localStorage; the module must also survive
-// that (readPersisted try/catch), covered by the "no storage" case.
-//
-// Staff-ness is NOT resolved at module scope any more: it is read live from
-// the team store's cached `/v1/me` on every call, so these tests mock that
-// store and mutate its answer between assertions rather than stubbing an env
-// var and re-importing.
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { Me } from "../../team/control-plane";
 
 type Store = typeof import("../internal-features");
 
-// vi.hoisted so the mock factory can close over this without tripping the TDZ
-// (vi.mock is hoisted above the module body).
+// Create the store before the hoisted mock factory reads it.
 const teamStore = vi.hoisted(() => ({ me: null as unknown }));
 
 vi.mock("../../team/team-store", () => {
@@ -30,7 +19,6 @@ vi.mock("../../team/team-store", () => {
   };
 });
 
-/** Point the mocked store at a signed-in user with the given staff role. */
 function signedInAs(
   staffRole: "platform_owner" | "developer" | "support_admin" | null,
 ): void {
@@ -45,8 +33,7 @@ function signedInAs(
   } satisfies Me;
 }
 
-/** Signed out, control plane unconfigured, or first fetch still in flight —
- *  all three present as a null `me`. */
+// Signed out, control plane unconfigured, and first fetch in flight all use a null snapshot.
 function signedOut(): void {
   teamStore.me = null;
 }
@@ -104,7 +91,6 @@ describe("isInternalUser — the staff gate", () => {
     store.setInternalFeatureEnabled("designGpuCanvas", true);
     expect(store.isInternalFeatureActive("designGpuCanvas")).toBe(true);
     expect(JSON.parse(backing.get("zeros.internalFeatures")!)).toEqual({ designGpuCanvas: true });
-    // A flag forged into storage does nothing for an ordinary account.
     signedInAs(null);
     expect(store.isInternalFeatureActive("designGpuCanvas")).toBe(false);
   });
@@ -126,8 +112,7 @@ describe("isInternalUser — the staff gate", () => {
 
   it("fails closed for every unresolved state", async () => {
     const store = await freshStore();
-    // Signed out, control plane unconfigured, or the fetch not yet landed.
-    // "Not yet known" must read as "not internal", never the reverse.
+    // Unknown identity must fail closed.
     signedOut();
     expect(store.isInternalUser()).toBe(false);
   });
@@ -136,8 +121,7 @@ describe("isInternalUser — the staff gate", () => {
     const store = await freshStore();
     signedInAs("developer");
     expect(store.isInternalUser()).toBe(true);
-    // Sign-out clears the team store; the very next call must reflect that,
-    // or account A's staff role would leak into account B's session.
+    // Sign-out must invalidate staff access before a new account can use this window.
     signedOut();
     expect(store.isInternalUser()).toBe(false);
   });
@@ -219,11 +203,10 @@ describe("internal feature flags", () => {
   });
 
   it("retains defaults without granting access when localStorage is unavailable", async () => {
-    // No stub installed — node env genuinely lacks localStorage.
+    // Leave localStorage unstubbed so this exercises the Node test environment without usable storage.
     const store = await freshStore();
     expect(store.isInternalFeatureEnabled("copyLogs")).toBe(true);
     expect(store.isInternalFeatureActive("copyLogs")).toBe(false);
-    // Writes must not throw either.
     expect(() =>
       store.setInternalFeatureEnabled("copyLogs", true),
     ).not.toThrow();
@@ -236,15 +219,13 @@ describe("isInternalFeatureActive — the effective gate", () => {
     const store = await freshStore();
     signedInAs("developer");
 
-    // Flag off: nobody, not even staff.
     store.setInternalFeatureEnabled("copyLogs", false);
     expect(store.isInternalFeatureActive("copyLogs")).toBe(false);
 
     store.setInternalFeatureEnabled("copyLogs", true);
     expect(store.isInternalFeatureActive("copyLogs")).toBe(true);
 
-    // A forged flag (localStorage is user-editable) still does nothing for an
-    // ordinary account — this is the whole point of the second factor.
+    // User-editable storage can enable a flag, not grant a staff role.
     signedInAs(null);
     expect(store.isInternalFeatureActive("copyLogs")).toBe(false);
 

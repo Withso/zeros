@@ -4,11 +4,6 @@ import { githubAppErrorReason } from "../../git";
 import { githubAppErrorCopy } from "../github-app-notifications";
 
 describe("GitHub App notification copy", () => {
-  // The reported failure: a control plane with no GitHub routes answered its
-  // generic 404, and Settings rendered
-  // "Error invoking remote method 'zeros:invoke': GithubAppClientError: Not
-  // found". Retrying can never help, so the copy has to name the real state and
-  // point at the two methods that do work.
   it("explains an unconfigured control plane instead of offering a retry", () => {
     const copy = githubAppErrorCopy("not_configured");
 
@@ -23,8 +18,7 @@ describe("GitHub App notification copy", () => {
       code: "not_configured",
     });
     expect(githubAppErrorReason(tagged)).toBe("not_configured");
-    // A GitError code is a different vocabulary and must not be mistaken for a
-    // flow reason — the caller falls back to the error's own sentence.
+    // GitError codes are not GitHub App connection reasons.
     expect(
       githubAppErrorReason(
         Object.assign(new Error("nope"), { code: "NOT_AUTHENTICATED" }),

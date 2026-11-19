@@ -1,8 +1,6 @@
 import { beforeEach, expect, it, vi } from "vitest";
 
-// The catalog polls a starting workspace every 2 s, and not at all while the
-// window is hidden. In the Alpha app the worker answered 4.3 s after Start,
-// but Running showed only ~25 s later, at the next refresh the window allowed.
+// Worker readiness must refresh the catalog even when a hidden window is not polling.
 const mocks = vi.hoisted(() => ({
   status: "waking",
   refresh: vi.fn(async () => ({})),

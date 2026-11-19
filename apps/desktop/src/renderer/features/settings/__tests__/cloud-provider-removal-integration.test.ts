@@ -42,7 +42,7 @@ function tree() {
     child.type.name === "CloudProviderConnection" && child.props.agent?.id === "claude")!;
   return (component.type as (props: unknown) => ReactNode)(component.props);
 }
-// Remove and Disconnect are menu items: they act on select, like a click.
+// Exercise menu actions through onSelect, not a button click.
 function action(name: string) {
   const element = elements(tree()).find(candidate => candidate.props.children === name)!;
   return { props: { disabled: element.props.disabled, onClick: element.props.onClick ?? element.props.onSelect } };

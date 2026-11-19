@@ -140,9 +140,7 @@ export function connectSubscription(
   if (previous) {
     if (previous.accountId !== accountId)
       return cancelSubscription(provider).then(() => previous.done).then(() => connectSubscription(provider, accountId));
-    // Native completion is published before the old promise's finally clears
-    // this map. A new Add account click in that interval must start a new
-    // ceremony after cleanup, rather than silently rejoining the cancelled one.
+    // Completion can publish before the map clears; start a new attempt after cleanup rather than rejoining a finished one.
     if (
       previous.cancelRequested ||
       subscriptionCache.getSnapshot(provider).data?.state !== "connecting"
@@ -152,8 +150,7 @@ export function connectSubscription(
   }
   const current = subscriptionCache.getSnapshot(provider).data;
   const revision = current?.revision ?? 0;
-  // A reloaded renderer can already know the native ceremony. Keep its ID so
-  // an equal-revision connect ACK can rejoin it instead of losing the waiter.
+  // Preserve the native attempt ID on reload so equal-revision ACKs can rejoin it.
   if (current?.state !== "connecting" || !current.attemptId)
     subscriptionCache.setData(provider, {
       ...current,
@@ -232,8 +229,7 @@ export function connectSubscription(
       const pending = subscriptionCache.getSnapshot(provider).data;
       if (pending?.state === "connecting" && pending.attemptId) {
         retiredAttempts.set(provider, pending.attemptId);
-        // Cancellation is bounded too: a lost IPC response must not keep the
-        // Settings button waiting after the ceremony deadline.
+        // A lost cancel ACK must not keep Settings waiting past timeout recovery.
         await bounded(
           nativeInvoke("provider_subscription", {
             provider,
@@ -292,8 +288,7 @@ export async function cancelSubscription(
       );
       acceptStatus(result, provider);
     } catch {
-      // Retire the local waiter even if the native cancellation ACK is lost.
-      // Late connecting events for this attempt cannot reopen the wait state.
+      // Even without the native ACK, ignore late connecting updates for this retired attempt.
     } finally {
       const current = subscriptionCache.getSnapshot(provider).data;
       if (

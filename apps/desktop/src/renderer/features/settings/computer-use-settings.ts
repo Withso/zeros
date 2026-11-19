@@ -19,9 +19,6 @@ export type ComputerUseBooleanSetting = "enabled" | "show_agent_cursor";
 export type ComputerUseSettingKey = ComputerUseBooleanSetting | "blocked_apps";
 export type ComputerPermissionKind = "accessibility" | "screen-recording";
 
-/** Settings → General, with its copy beside the keys it writes so the
- * contract stays testable without mounting the settings bridge. The agent
- * cursor is one switch for computer use and the Zeros browser. */
 export const COMPUTER_USE_SETTINGS_ROWS = {
   enabled: {
     label: "Enable computer use",
@@ -37,7 +34,6 @@ export const COMPUTER_USE_SETTINGS_ROWS = {
   },
 } as const;
 
-/** Settings → General → Privacy, beside Full Disk Access. */
 export const COMPUTER_PERMISSION_ROWS: Record<
   ComputerPermissionKind,
   { label: string; hint: string }
@@ -52,7 +48,7 @@ export const COMPUTER_PERMISSION_ROWS: Record<
   },
 };
 
-/** Names for the shipped blocked apps, shown until Launch Services answers. */
+// Use the shipped blocked-app labels until Launch Services supplies names.
 export const KNOWN_COMPUTER_APP_NAMES: Readonly<Record<string, string>> = {
   "com.apple.keychainaccess": "Keychain Access",
   "com.apple.Passwords": "Passwords",
@@ -75,16 +71,14 @@ export function computerUseSettingsFromEffective(
   return computerUseSettings(effective?.computer_use);
 }
 
-/** General's Computer use section has rows while computer use or the Zeros
- * browser, whose agent cursor it holds, is open. */
+// Keep the section available to browser-only users because it owns the shared cursor switch.
 export function computerUseSectionOpen(
   availability: Pick<AgentControlAvailability, "computerUse" | "zerosBrowser">,
 ): boolean {
   return availability.computerUse || availability.zerosBrowser;
 }
 
-/** Which computer use each agent gets, by the same table the engine applies
- * when it boots a provider and on every `zeros_computer` call. */
+// Use the engine's route table so the renderer reflects what the provider can actually use.
 export function computerUseRoutesFromEffective(
   effective: SettingsDoc | null | undefined,
   availability: Pick<AgentControlAvailability, "computerUse">,
@@ -100,7 +94,7 @@ export function computerUseRoutesFromEffective(
   };
 }
 
-/** What Electron main enforces on every call. */
+// Send gated preferences to Electron main; main also applies the rollout gate.
 export function computerUsePreferencesFromEffective(
   effective: SettingsDoc | null | undefined,
   availability: Pick<AgentControlAvailability, "computerUse">,
@@ -130,7 +124,6 @@ export function computerUseBlockedAppsPatch(
   return { computer_use: { blocked_apps: [...bundleIds] } };
 }
 
-/** Add a bundle ID unless it is already blocked or not a bundle ID. */
 export function withBlockedApp(
   current: readonly string[],
   bundleId: string,
@@ -189,9 +182,7 @@ function sameValue(a: unknown, b: unknown): boolean {
   return a === b;
 }
 
-/** An optimistic value yields once a newer resolved snapshot shows it, or
- * managed policy takes the key. Serialized writes can broadcast an older
- * intermediate value first, which must not flicker back. */
+// A settled edit yields only to a new matching snapshot or managed policy, not an intermediate write.
 export function computerUseSettingSnapshotSupersedesPending<
   K extends ComputerUseSettingKey,
 >(input: {

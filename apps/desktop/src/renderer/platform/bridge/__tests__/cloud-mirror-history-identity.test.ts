@@ -5,8 +5,7 @@ import { cloudScopedId, cloudWorkspaceKey } from "../cloud-workspace-key";
 const target = { organizationId: "11111111-1111-4111-8111-111111111111", workspaceId: "22222222-2222-4222-8222-222222222222" };
 const root = "/home/user/Owner/repo";
 
-/** The control plane stores the worker's rows as received: native chat IDs
- * and native checkout folders. */
+/** The mirror stores worker IDs and checkout paths, not renderer-scoped keys. */
 function nativeMirror() {
   return vi.fn(async (_target: unknown, op: string, params: Record<string, unknown>) => {
     if (op === "chats.list") return {
