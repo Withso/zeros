@@ -146,7 +146,7 @@ describe("Local link composer atoms", () => {
 
   it("ignores foreign/malformed links and rejects forged clipboard atoms", () => {
     expect(
-      localLinkPasteSlice("zeros-beta://chat/child", schema, "zeros-dev"),
+      localLinkPasteSlice("zeros-alpha://chat/child", schema, "zeros-dev"),
     ).toBeNull();
     expect(
       localLinkPasteSlice(

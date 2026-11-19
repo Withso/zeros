@@ -55,7 +55,6 @@ const VariantSchema = z.literal("github.com");
 const SchemeSchema = z.enum([
   "zeros",
   "zeros-alpha",
-  "zeros-beta",
   "zeros-dev",
 ]);
 const TokenSchema = z.string().trim().min(1).max(4096);

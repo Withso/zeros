@@ -47,9 +47,9 @@ import {
 //      backend `requireStaff` on the endpoint behind it.
 //
 // Per-app scoping comes free: flags persist to localStorage, and each
-// channel (Zeros / Zeros Alpha / Zeros Beta / Zeros Dev, plus per-worktree
+// channel (Zeros / Zeros Alpha / Zeros Dev, plus per-worktree
 // dev instances) runs with its own userData dir → its own localStorage
-// (apps/desktop/src/engine/db/paths.ts). Enabling a flag in Beta therefore never
+// (apps/desktop/src/engine/db/paths.ts). Enabling a flag in Alpha therefore never
 // affects Production, and vice versa — exactly the per-app control the
 // Internal tab promises. The staff role, by contrast, is one row in one
 // database and is therefore the same in every channel.

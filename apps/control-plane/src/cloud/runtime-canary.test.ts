@@ -28,7 +28,7 @@ describe("Alpha runtime canary authority", () => {
   });
 
   it.each([
-    { iss: "other" }, { aud: "worker" }, { channel: "beta" }, { runtimeSha256: "arbitrary" }, { sourceSha: "main" },
+    { iss: "other" }, { aud: "worker" }, { channel: "production" }, { runtimeSha256: "arbitrary" }, { sourceSha: "main" },
     { creatorUserId: randomUUID() }, { organizationId: randomUUID() }, { repositoryId: "43" }, { createKey: "other-key" },
     { iat: now + 31 }, { exp: now }, { iat: now - 1, exp: now + 900 }, { exp: now + 901 }, { iat: now + 30, exp: now + 930 }, { extraAuthority: "admin" },
   ])("refuses a signed grant with mismatched or excessive authority: %j", patch => {
@@ -54,7 +54,7 @@ describe("Alpha runtime canary authority", () => {
       expect(() => authority().verify(token(), { ...request, ...patch })).toThrow();
     });
 
-  it.each(["development", "beta", "production"])("cannot enable canary authority in %s", channel => {
+  it.each(["development", "production"])("cannot enable canary authority in %s", channel => {
     expect(() => loadRuntimeCanaryPolicy(JSON.stringify(policy), channel)).toThrow("Alpha-only");
     expect(loadRuntimeCanaryPolicy(undefined, channel)).toBeUndefined();
   });

@@ -32,7 +32,7 @@ const APP_ID = "com.zeros";
  *  ZEROS_INSTANCE) that further isolates the dev data dir so each parallel dev
  *  worktree is its own app: com.zeros.dev → com.zeros.dev.<slug>. Empty for the
  *  primary dev checkout, and IGNORED outside the dev channel (packaged
- *  beta/stable never set it) so those data dirs are unaffected. Re-sanitised here
+ *  alpha/stable never set it) so those data dirs are unaffected. Re-sanitised here
  *  (defence in depth — the launcher already slugs it) to keep it filesystem-safe
  *  and reverse-DNS-clean. */
 function devInstanceSlug(): string {
@@ -45,7 +45,7 @@ function devInstanceSlug(): string {
     .slice(0, 40);
 }
 
-/** Reverse-DNS id leaf for macOS/Windows: com.zeros[.dev|.beta][.<slug>]. */
+/** Reverse-DNS id leaf for macOS/Windows: com.zeros[.dev|.alpha][.<slug>]. */
 function macWinId(inst: string): string {
   const ch = channel();
   const suffix = isLocalDevelopmentRuntime()
@@ -56,7 +56,7 @@ function macWinId(inst: string): string {
   return `${APP_ID}${suffix}${inst ? `.${inst}` : ""}`;
 }
 
-/** XDG flat name for Linux: zeros[-dev|-beta][-<slug>]. */
+/** XDG flat name for Linux: zeros[-dev|-alpha][-<slug>]. */
 function nixName(inst: string): string {
   const ch = channel();
   const base = isLocalDevelopmentRuntime()
@@ -90,14 +90,14 @@ function dataDirForInstance(inst: string): string {
 }
 
 /** The per-worktree instance slug applied to data dirs — dev channel only
- *  (packaged beta/stable never set ZEROS_INSTANCE). */
+ *  (packaged alpha/stable never set ZEROS_INSTANCE). */
 function dataDirSlug(): string {
   return channel() === "dev" ? devInstanceSlug() : "";
 }
 
 /** The per-OS application-data directory holding THIS instance's Zeros DB +
  *  identity files (secrets.json, app-settings.json, engines/, worktrees/). In
- *  the dev channel this is per-worktree (com.zeros.dev.<slug>); stable/beta carry
+ *  the dev channel this is per-worktree (com.zeros.dev.<slug>); stable/alpha carry
  *  no slug. THE single identity generator: apps/desktop/electron/main.ts redirects Electron's
  *  own userData here too, so the DB and all Electron state share one identifier
  *  (no more com.zeros.* vs name-based "Zeros — <Label>" split). Resolves so the
@@ -108,7 +108,7 @@ export function zerosDataDir(): string {
 }
 
 /** The channel-PRIMARY data dir with the instance slug STRIPPED: com.zeros /
- *  com.zeros.dev / com.zeros.beta. Every dev worktree resolves the SAME value,
+ *  com.zeros.dev / com.zeros.alpha. Every dev worktree resolves the SAME value,
  *  so it's the home for state shared across a channel's instances — notably the
  *  shared dev secrets.json (apps/desktop/electron/secret-store.ts + ZEROS_SHARED_SECRETS_DIR),
  *  which is what makes "log in once, every worktree authed" work. */
@@ -117,40 +117,27 @@ export function zerosChannelDataDir(): string {
 }
 
 /** The reverse-DNS application identity for THIS (channel, instance):
- *  com.zeros[.dev|.beta][.<slug>]. Electron/main.ts uses it for the macOS
+ *  com.zeros[.dev|.alpha][.<slug>]. Electron/main.ts uses it for the macOS
  *  Chromium-cache + logs leaf names, so cache/logs share the SAME identifier as
  *  userData + the DB. (macOS/Windows only; Linux uses nixName for data dirs.) */
 export function appIdentity(): string {
   return macWinId(dataDirSlug());
 }
 
-/** The dot-dir LEAF name for THIS channel: `.zeros` | `.zeros-beta` |
+/** The dot-dir LEAF name for THIS channel: `.zeros` | `.zeros-alpha` |
  *  `.zeros-dev`. Mirrors nixName()'s channel-suffix convention above.
  *
- *  THE single source of truth for the dot-dir name. Four call sites used to
- *  inline `isDevRuntime() ? ".zeros-dev" : ".zeros"` — a TWO-way split on a
- *  boolean — which meant **Beta and Production shared `~/.zeros`** while every
- *  other identity (data dir, workspaces, ports, keychain, scheme) was split three
- *  ways. Consequences that shipped:
- *
- *    • `~/.zeros/settings.toml` was one file for both apps — changing a setting in
- *      Beta silently changed Production.
- *    • `~/.zeros/detach.lock` is SINGLE-INSTANCE ENFORCEMENT (git/detach.ts).
- *      With Beta holding it, Production could not enter detach mode at all: it
- *      failed with DETACH_LOCKED naming a workspace belonging to the other app.
- *    • `~/.zeros/state.db` + `worktrees` were shared between two concurrently
- *      running apps whose workspaces live in different roots.
- *
- *  The dev instance was immune (it correctly used `.zeros-dev`), which is exactly
- *  why none of this was ever reproducible in dev. Keyed on channel() now, so it
- *  stays correct as channels are added. */
+ *  Keyed on channel(), never a dev/prod boolean: every packaged channel owns its
+ *  own settings.toml, `detach.lock` (single-instance enforcement in
+ *  git/detach.ts), state.db and worktrees, so concurrently running apps never
+ *  share them. */
 export function zerosDotDirName(): string {
   if (isLocalDevelopmentRuntime()) return ".zeros-local";
   const ch = channel();
   return ch === "stable" ? ".zeros" : `.zeros-${ch}`;
 }
 
-/** The user-global dot-dir: `~/.zeros` (prod) / `~/.zeros-beta` / `~/.zeros-dev`.
+/** The user-global dot-dir: `~/.zeros` (prod) / `~/.zeros-alpha` / `~/.zeros-dev`.
  *  Holds settings.toml, term-zdotdir/, state.db, detach.lock, the default-project
  *  sentinel, and (dev) the per-worktree launcher bundles. Everything channel-scoped
  *  MUST resolve through here so no channel writes into another's state. */

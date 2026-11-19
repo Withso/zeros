@@ -228,7 +228,7 @@ describe("exact-source CI CLI mutation authority", () => {
     await expect(readFile(output)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
-  it.each(["beta", "production"])("keeps %s supersession red and emits no Alpha output even with the flag enabled", async channel => {
+  it.each(["production"])("keeps %s supersession red and emits no Alpha output even with the flag enabled", async channel => {
     const output = await automaticBarrier();
     mocked.source.channel = channel;
     mocked.source.branch = "release/0.1.20";

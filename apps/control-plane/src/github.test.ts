@@ -191,7 +191,7 @@ describe("GitHub OAuth flow selection", () => {
       githubCompletionUrl(
         "https://app.zeros.build/github/connected",
         {
-          scheme: "zeros-beta",
+          scheme: "zeros-alpha",
           client_nonce: "n".repeat(43),
         },
       ),
@@ -202,7 +202,7 @@ describe("GitHub OAuth flow selection", () => {
     expect(completion.search).toBe("");
     expect(new URLSearchParams(completion.hash.slice(1))).toEqual(
       new URLSearchParams({
-        scheme: "zeros-beta",
+        scheme: "zeros-alpha",
         nonce: "n".repeat(43),
       }),
     );
@@ -262,7 +262,7 @@ const githubConfig: GithubBackendConfig = {
   webBaseUrl: "https://github.example.test",
   apiBaseUrl: "https://api.github.example.test",
   variantKey: "github.com",
-  desktopSchemes: ["zeros", "zeros-alpha", "zeros-beta", "zeros-dev"],
+  desktopSchemes: ["zeros", "zeros-alpha", "zeros-dev"],
 };
 
 describe("GitHub App installation JWT", () => {
@@ -447,6 +447,19 @@ async function connectCredential(
   expect(exchanged.status).toBe(200);
   return (await exchanged.json()) as Record<string, unknown>;
 }
+
+describe("GitHub OAuth desktop scheme", () => {
+  it("refuses the retired zeros-beta scheme before touching the database", async () => {
+    const app = testApp({} as pg.Pool, { id: randomUUID() } as AuthedUser, {});
+    const response = await app.request("/v1/github/oauth/start", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ nonce: "n".repeat(43), variantKey: "github.com", scheme: "zeros-beta" }),
+    });
+    expect(response.status).toBe(422);
+    expect(await response.json()).toMatchObject({ error: { code: "invalid_input" } });
+  });
+});
 
 dbDescribe("GitHub App OAuth handoff", () => {
   let pool: pg.Pool;

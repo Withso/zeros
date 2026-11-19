@@ -1,6 +1,7 @@
 # Release candidates roadmap: retiring Beta
 
-Status: **code complete; Beta services await teardown** (order below).
+Status: **code complete; Beta is no longer a recognised channel; its services
+await teardown** (order below).
 [Deployment environments](deployment-environments.md) describes the live
 release flow, and code remains authoritative.
 
@@ -58,6 +59,7 @@ main ─────────────────────────
 | 2 | `release.yml` publishes candidates to `rc` with a receipt; new `release-promote.yml` publishes the same files as Latest | #1129 |
 | 3a | Production waits for Alpha, not Beta: hosted promotion, Apple submission and cutovers require Alpha to have applied the release's migrations | #1132 |
 | 3b | Retire the Beta pipeline: no Beta builds or deploys; retired `beta` identifiers stay readable | #1133 |
+| 3c | Remove Beta as a live concept: no channel, port block, deep-link scheme, client header, data folder, updater feed, hosted environment or workflow input recognises `beta`; applied migrations still name it | pending |
 | — | Tear down Beta services (order below), then delete old release branches | planned |
 
 Each run uses its release branch's own copy of the workflows. A branch cut

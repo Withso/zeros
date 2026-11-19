@@ -205,7 +205,7 @@ registerFileMediaProtocolPrivileges();
 registerDesignCaptureSheetPrivileges();
 
 // Release channel baked at electron:compile time by apps/desktop/electron/tsup.config.ts's
-// `define`. "" in a normal dev compile; "beta" when the beta release workflow
+// `define`. "" in a normal dev compile; "alpha" when the alpha release workflow
 // sets ZEROS_CHANNEL for the compile step. Seeded into process.env below so the
 // engine + db/paths.ts resolve the SAME channel.
 declare const __ZEROS_CHANNEL_BAKED__: string | undefined;
@@ -270,7 +270,7 @@ if (IS_LOCAL_DEVELOPMENT) {
 //
 // A set-but-INVALID value is rejected here rather than absorbed. The old form was
 // `if (!process.env.ZEROS_CHANNEL) { … }`, which skipped the whole block when the
-// var was set to anything non-empty — so a typo'd `ZEROS_CHANNEL=betaa` survived
+// var was set to anything non-empty — so a typo'd `ZEROS_CHANNEL=alphaa` survived
 // untouched, and channel() then resolved it to "stable". That silently pointed the
 // build at PRODUCTION's data dir, engine ports, update feed and zeros:// scheme.
 // Fail here, at boot, where the message is greppable in main.log, instead of
@@ -314,7 +314,6 @@ seedCloudWorkspaceDesktopCapabilityEnvironment();
 const CHANNEL_DISPLAY_NAME: Record<Channel, string> = {
   dev: "Zeros Dev",
   alpha: "Zeros Alpha",
-  beta: "Zeros Beta",
   stable: "Zeros",
 };
 const CHANNEL_NAME = IS_LOCAL_DEVELOPMENT
@@ -346,7 +345,7 @@ try {
 
 // Redirect Electron's OWN userData to the SAME id dir the engine uses for the DB.
 // THE crux: secrets.json / app-settings.json / the Chromium Singleton lock now
-// live beside zeros.db under com.zeros[.dev|.beta][.<slug>], ending the split
+// live beside zeros.db under com.zeros[.dev|.alpha][.<slug>], ending the split
 // where they fell into the name-based "Zeros — <Label>" default. Per-instance
 // userData also keeps each dev worktree's Singleton lock distinct → windows
 // coexist (the single-instance lock in deep-link.ts keys off userData).
@@ -358,7 +357,7 @@ app.setPath("userData", zerosDataDir());
 // so every worktree shares ONE secrets.json — decrypted by the ONE per-channel
 // keychain key above → log in once, every worktree authed. ZEROS_ISOLATE=1 opts a
 // worktree OUT (its secrets stay in its own per-instance userData). Only
-// meaningful in dev (stable/beta have a single instance where the two dirs
+// meaningful in dev (stable/alpha have a single instance where the two dirs
 // coincide). Set before secret-store or spawnEngine read it.
 if (
   process.env.ZEROS_CHANNEL === "dev" &&
@@ -383,7 +382,7 @@ function relocateChromiumCache(): void {
   // @ts-expect-error - "cache" is a valid runtime path name, absent from the types.
   const cacheRoot = app.getPath("cache");
   // New: cache/session under the SAME reverse-DNS id as userData + the DB
-  // (com.zeros[.dev|.beta][.<slug>]) — the design.zeros.* scheme is retired, so a
+  // (com.zeros[.dev|.alpha][.<slug>]) — the design.zeros.* scheme is retired, so a
   // logical instance is ONE identifier across Application Support, Caches + Logs.
   const newSessionData = path.join(cacheRoot, appIdentity());
 
@@ -398,12 +397,7 @@ function relocateChromiumCache(): void {
   // by its LITERAL old value: app.getPath("sessionData") now resolves to the
   // fresh new userData (the Phase-1 redirect ran above), so it can't be the source.
   const ch = process.env.ZEROS_CHANNEL;
-  const legacyBase =
-    ch === "dev"
-      ? "design.zeros.app.dev"
-      : ch === "beta"
-        ? "design.zeros.beta"
-        : "design.zeros.app";
+  const legacyBase = ch === "dev" ? "design.zeros.app.dev" : "design.zeros.app";
   const legacyDirName =
     ch === "dev" && INSTANCE_SLUG
       ? `${legacyBase}.${INSTANCE_SLUG}`
@@ -494,7 +488,7 @@ console.log(
 // everything into a rotating log file under the user's app-data
 // directory. Tail it with:
 //   tail -f ~/Library/Logs/com.zeros/main.log       # stable
-//   tail -f ~/Library/Logs/com.zeros.beta/main.log  # beta
+//   tail -f ~/Library/Logs/com.zeros.alpha/main.log # alpha
 //   tail -f ~/Library/Logs/com.zeros.dev/main.log   # primary dev
 function setupLogFile(): void {
   // Logs under the same id as userData/cache. macOS → ~/Library/Logs/<id>;
@@ -832,7 +826,7 @@ function createMainWindow(): BrowserWindow {
     ? { url: APP_DOCUMENT_URL, webContentsId: win.webContents.id, csp: CSP } : undefined);
 
   // DevTools policy. Packaged builds USED to force-close DevTools on the same
-  // tick it opened, which is why ⌥⌘I flickered and did nothing in Alpha, Beta
+  // tick it opened, which is why ⌥⌘I flickered and did nothing in Alpha
   // and Production. That block is gone — DevTools now works on every channel,
   // opens detached, and Production prints a self-XSS console banner instead.
   // apps/desktop/electron/devtools.ts states the security trade in full, including what the
@@ -1802,7 +1796,7 @@ app.whenReady().then(async () => {
   // secrets.json (sign-in / sign-out / token refresh), nudge the renderer to
   // re-sync its session so "log in once, every worktree authed" applies WITHOUT a
   // reload. Only when the store is actually shared (ZEROS_SHARED_SECRETS_DIR) —
-  // single-instance stable/beta have no sibling to propagate from. See
+  // single-instance stable/alpha have no sibling to propagate from. See
   // apps/desktop/src/renderer/features/auth/auth-context.tsx (auth-store-changed).
   if (process.env.ZEROS_SHARED_SECRETS_DIR) {
     const disposeSecretsWatch = watchSecrets((changedAccounts) => {

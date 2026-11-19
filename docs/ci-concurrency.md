@@ -42,8 +42,8 @@ scheduling, so jobs can still queue when the shared pool is occupied.
   publishers. A pending publication can be replaced; an active transaction is
   never cancelled by concurrency. See [concurrent Alpha preparation](deployment-environments.md#concurrent-alpha-preparation).
 - **Cloud runtime.** Alpha resolves and publishes its runtime inside that same
-  publication call. Beta and Production promote after hosted success, before
-  the desktop feed. Their reusable runtime runner takes no workflow-level
+  publication call. Production promotes after hosted success, before
+  the desktop feed. Its reusable runtime runner takes no workflow-level
   lock, so it cannot wait on its caller's `release-<channel>` slot. Its mutation
   job retains `hosted-mutation-<channel>`, which hosted promotion has already
   released. Manual runtime dispatch holds the same outer channel lock.
@@ -51,7 +51,7 @@ scheduling, so jobs can still queue when the shared pool is occupied.
   become available. Its critical aggregates can admit Alpha without waiting
   for an older Preflight to finish. Runner capacity and Alpha promotion
   coordination still affect delivery time.
-- **Releases.** Beta and Production read Preflight on their release branch's
+- **Releases.** Production reads Preflight on its release branch's
   exact commit, with the same release-branch cancellation semantics.
 
 ## Validation

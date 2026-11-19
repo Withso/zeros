@@ -208,5 +208,5 @@ comment. No branch mutation or deletion follows such a comment.
 This recovery pilot is not first-parent CI coverage auditing: a commit whose
 Preflight was never created is not discovered from Actions history. It does not
 dispatch historical tests, target release branches, alter CodeQL or Preflight
-identities, or change Beta/Production release evidence. Those remain separate
+identities, or change Production release evidence. Those remain separate
 operational contracts.

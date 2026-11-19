@@ -385,8 +385,8 @@ stay component-owned.
 - Repository and third-party license files are copied into every desktop binary
   release through Electron Builder and into the assembled Cloudflare Pages
   artifact.
-- Release jobs use `alpha`, `beta`, and `production` environments. Alpha/Beta
-  cannot be manually dispatched from arbitrary refs.
+- Release jobs use `alpha` and `production` environments. Alpha cannot be
+  manually dispatched from arbitrary refs.
 - Package manifests for the control plane, web hub, marketing site, worker, and
   protocol declare their license.
 - Community files now include README, CONTRIBUTING, SUPPORT, SECURITY, a code of
@@ -480,7 +480,7 @@ and therefore cannot be completed safely by a source-tree change.
 
 ### 2. Resolve binary redistribution and authentication terms
 
-- Audit every currently downloadable stable, alpha, and beta binary. If an
+- Audit every currently downloadable stable and alpha binary. If an
   artifact contains a runtime whose redistribution has not been authorized,
   pause that download pending counsel/vendor guidance or replace it with a
   compliant build. Do not assume an older public artifact is covered by the new
@@ -507,10 +507,9 @@ and therefore cannot be completed safely by a source-tree change.
 
 ### 3. Configure GitHub protected environments
 
-Create environments named exactly `alpha`, `beta`, and `production`:
+Create environments named exactly `alpha` and `production`:
 
 - Restrict `alpha` deployments to `main`.
-- Restrict `beta` deployments to `release/**`.
 - Restrict `production` to `main` and `release/**`, with required reviewers.
 - Move `CSC_LINK`, `CSC_KEY_PASSWORD`, Apple notarization credentials, production
   `VITE_*` values, and any release-only credentials into the narrowest applicable
@@ -555,7 +554,7 @@ Create environments named exactly `alpha`, `beta`, and `production`:
 
 ### 5. Platform verification
 
-- On Apple silicon macOS, run the signed Alpha/Beta packaging path,
+- On Apple silicon macOS, run the signed Alpha packaging path,
   `pnpm smoke:engine`, and `pnpm smoke:packaged-pty`.
 - Inspect the produced `.app`/DMG for `LICENSE.txt`,
   `THIRD-PARTY-NOTICES.md`, and `THIRD-PARTY-LICENSES.txt`.

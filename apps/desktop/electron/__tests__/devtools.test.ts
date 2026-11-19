@@ -1,7 +1,7 @@
 // Pins the DevTools policy.
 //
 // The regression this guards against is a real one that shipped: packaged
-// builds registered `devtools-opened → closeDevTools()`, so ⌥⌘I in Alpha, Beta
+// builds registered `devtools-opened → closeDevTools()`, so ⌥⌘I in Alpha
 // and Production opened DevTools and tore it down a frame later. It read as a
 // flicker, it left every shipped build undebuggable, and NOTHING in the test
 // suite or in scripts/check-electron-hardening.mjs noticed for as long as it
@@ -97,7 +97,6 @@ describe("shouldWarnOnDevToolsOpen", () => {
 
   it("stays quiet on the maintainer channels — a banner they see daily is a banner they stop reading", () => {
     expect(shouldWarnOnDevToolsOpen(true, "alpha")).toBe(false);
-    expect(shouldWarnOnDevToolsOpen(true, "beta")).toBe(false);
     expect(shouldWarnOnDevToolsOpen(true, "dev")).toBe(false);
   });
 

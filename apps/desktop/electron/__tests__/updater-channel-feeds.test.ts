@@ -1,7 +1,7 @@
 // Pins the per-channel auto-update policy.
 //
 // EVERY packaged channel auto-updates from GitHub Releases: stable follows
-// /releases/latest/download (whatever is marked Latest), alpha and beta read their
+// /releases/latest/download (whatever is marked Latest), alpha reads its
 // own rolling release tag. Each channel MUST point at its own base, or a pre-release
 // install would update itself into Production.
 //
@@ -9,8 +9,8 @@
 //
 //   UPDATER_FEED_BY_CHANNEL[ch] !== null   ⟺   release-<ch>.yml publishes that feed
 //
-// #198 broke exactly this: beta's uploads were removed while the app kept polling
-// beta's feed, producing a stale feed and a false "You're up to date!". The reverse
+// Removing a channel's uploads while the app kept polling its feed once produced a
+// stale feed and a false "You're up to date!". The reverse
 // (uploads with no entry) leaves assets nobody reads. An app polling an unpopulated
 // base would 404 on a 5-minute interval PLUS every window focus and power resume —
 // the "[updater] Error … every ~16 min for 24 h" pattern from the field logs.
@@ -73,11 +73,11 @@ describe("UPDATER_FEED_BY_CHANNEL", () => {
     expect(entryKind("stable")).toBe("object");
   });
 
-  it.each(["alpha", "beta"])("%s has its OWN feed (auto-update enabled)", (ch) => {
+  it.each(["alpha"])("%s has its OWN feed (auto-update enabled)", (ch) => {
     expect(entryKind(ch)).toBe("object");
   });
 
-  it.each(["alpha", "beta"])(
+  it.each(["alpha"])(
     "%s points at its own rolling release tag, never Production's",
     (ch) => {
       const entry = resolved(entryFor(ch));
@@ -105,7 +105,7 @@ describe("UPDATER_FEED_BY_CHANNEL", () => {
     expect(SRC).toContain("https://github.com/Withso/zeros/releases");
     // `?static=1` pins the per-poll noCache query off — dropping it makes every
     // check a CDN cache miss.
-    for (const ch of ["alpha", "beta", "stable"]) {
+    for (const ch of ["alpha", "stable"]) {
       const entry = entryFor(ch);
       expect(entry, `${ch} feed url must pin ?static=1`).toContain("?static=1");
     }
@@ -116,7 +116,7 @@ describe("UPDATER_FEED_BY_CHANNEL", () => {
     // GitHub marks Latest, so downgrade must stay off or mis-marking an old release
     // pushes it to every stable user. The 0.1.x → 0.0.x reset escape hatch that
     // justified `true` here is retired — see the note in source.
-    for (const ch of ["alpha", "beta", "stable"]) {
+    for (const ch of ["alpha", "stable"]) {
       const entry = entryFor(ch);
       expect(entry, `${ch} must not allow downgrade`).toContain("allowDowngrade: false");
     }

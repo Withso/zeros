@@ -117,7 +117,7 @@ independently supported partial designs:
 7. **Qualification and promotion.** Run the complete repository, migration,
    database, Electron, packaging, security, license, and build suites; deploy
    the same SHA to Alpha Railway and Pages; configure WorkOS; execute the real
-   web/macOS matrix; observe; then promote unchanged to Beta/Production.
+   web/macOS matrix; observe; then promote unchanged to Production.
 
 Every phase retains its regression tests in the same PR. A failure in any gate
 blocks merge; rollback changes provider/configuration atomically and never
@@ -288,8 +288,7 @@ operator workstation. Never persist these one-shot variables on the service.
 
 Set `DATABASE_URL` plus these target-bound inputs:
 
-- `CONTROL_PLANE_STAFF_CHANNEL` — `development`, `alpha`, `beta`, or
-  `production`; it must match `RAILWAY_ENVIRONMENT_NAME` when Railway supplies
+- `CONTROL_PLANE_STAFF_CHANNEL` — `development`, `alpha`, or `production`; it must match `RAILWAY_ENVIRONMENT_NAME` when Railway supplies
   one.
 - `CONTROL_PLANE_STAFF_SUBJECT_USER_ID` and
   `CONTROL_PLANE_STAFF_EXPECTED_EMAIL` — both must resolve to the same exact
@@ -324,46 +323,43 @@ revalidates the target, rejects a stale plan, increments `auth_revision`, emits
 `staff_role_changes` record in the same transaction. The ordinary application
 role can neither mutate the staff column nor forge that evidence.
 
-#### Beta and Production Organization owner bootstrap from GitHub
+#### Production Organization owner bootstrap from GitHub
 
-When the owner login exists only in the channel's protected GitHub environment, use
-the manually dispatched `staff-owner-bootstrap.yml` from the current
+When the owner login exists only in Production's protected GitHub environment,
+use the manually dispatched `staff-owner-bootstrap.yml` from the current
 reviewed `release/X.Y.Z` branch. It supports only `platform_owner` on
-`zeros-control-plane-beta/main` or `zeros-control-plane-production/main`;
-it does not deploy, enable cloud, designate
-canaries or change credentials. Exact-source Preflight and CodeQL must pass
-before the privileged job, which shares `hosted-mutation-<channel>` with releases.
-Existing dispatches default to Beta. The historical workflow name, Beta CLI
-entrypoint, version-1 journals, role names and artifact names remain compatible.
+`zeros-control-plane-production/main`; it does not deploy, enable cloud,
+designate canaries or change credentials. Exact-source Preflight and CodeQL must
+pass before the privileged job, which shares `hosted-mutation-production` with
+releases. Version-1 journals, role names and artifact names are unchanged for
+Production.
 
-The operator first stages the reviewed subject's email in that channel's environment
-secret `STAFF_EXPECTED_EMAIL`, never a workflow input or command argument. The
-channel's own PlanetScale variables and service-token secrets supply the owner
-connection. Dispatch a plan with the exact reviewed subject, accountable active
-actor, active nonpersonal Organization owned by that subject, and a nonpersonal
-audit reason:
+The operator first stages the reviewed subject's email in the `production`
+environment secret `STAFF_EXPECTED_EMAIL`, never a workflow input or command
+argument. Production's own PlanetScale variables and service-token secrets
+supply the owner connection. Dispatch a plan with the exact reviewed subject,
+accountable active actor, active nonpersonal Organization owned by that subject,
+and a nonpersonal audit reason:
 
 ```sh
 pnpm -s agent:gh workflow run staff-owner-bootstrap.yml --ref release/X.Y.Z \
-  -f mode=plan -f subject_user_id="$BETA_SUBJECT_USER_ID" \
-  -f actor_user_id="$BETA_ACTOR_USER_ID" \
-  -f owner_organization_id="$BETA_OWNER_ORGANIZATION_ID" \
-  -f reason="Bootstrap the reviewed active Beta Organization owner." \
-  -f confirm=zeros-control-plane-beta
+  -f channel=production -f mode=plan -f subject_user_id="$PRODUCTION_SUBJECT_USER_ID" \
+  -f actor_user_id="$PRODUCTION_ACTOR_USER_ID" \
+  -f owner_organization_id="$PRODUCTION_OWNER_ORGANIZATION_ID" \
+  -f reason="Bootstrap the reviewed active Production Organization owner." \
+  -f confirm=zeros-control-plane-production
 ```
 
-For Production, specify `-f channel=production`, use the separately reviewed
-Production subject/actor/Organization UUIDs, and confirm
-`zeros-control-plane-production`. Its secrets-free `approve` job uses the existing
-human `production-approval` environment; both that job and exact-source CI must
-succeed before the `production` environment is read. The CLI additionally
+Its secrets-free `approve` job uses the existing human `production-approval`
+environment; both that job and exact-source CI must succeed before the
+`production` environment is read. The CLI additionally
 authenticates the current workflow/run/attempt/SHA/ref and the completed approval
 job before privileged preparation, before role creation and before staff apply.
 An input confirmation or a prior run's approval cannot replace that job. Both
 environments retain their `release/*` branch policy. Branch staging and any normal
 release triggered by a push must be reviewed separately from this operator.
 
-Review the sanitized `<channel>-staff-owner-result-<run>-<attempt>` artifact, then
+Review the sanitized `production-staff-owner-result-<run>-<attempt>` artifact, then
 dispatch the same inputs with `mode=apply`. Apply generates a fresh plan and
 uses its exact approval through the same bounded owner pool; it never consumes
 a prior run's approval. The optional Organization UUID is approval-bound and
@@ -393,7 +389,7 @@ the missing response. The grant does not rebind release owner configuration.
 `RUNTIME_QUALIFICATION_ACTOR_USER_ID` and `WORKER_CANARY_ORGANIZATION_ID` need a
 separate reviewed configuration plan and an approved deployment before the
 designation API serves the new owner. Role-only UI visibility is insufficient.
-Keep existing execution holds and normal Alpha/Beta/Production qualification
+Keep existing execution holds and normal Alpha/Production qualification
 gates; staff setup does not authorize a new Production source deployment.
 
 ## Organization management synchronization
@@ -594,7 +590,7 @@ bounded retry; a terminal provider result deletes the local session.
    client ID, and redirects to Hosted AuthKit.
 4. The HTTPS callback emits only a short-lived authorization code, state, or
    bounded provider error to the exact installed channel:
-   `zeros-alpha://`, `zeros-beta://`, or `zeros://`.
+   `zeros-alpha://` or `zeros://`.
 5. Electron validates state with a timing-safe comparison and exchanges the
    code directly with WorkOS using PKCE. It verifies RS256, exact issuer,
    audience, Desktop Application `client_id`, required token identifiers,
@@ -654,12 +650,11 @@ changes which account the app shows. Accounts never share a bearer token.
 ## Environment and Application topology
 
 Authentication data is isolated by release channel. Never share a Production
-user/session boundary with Alpha or Beta.
+user/session boundary with Alpha.
 
 | Zeros channel | WorkOS environment                     | Current Applications                               | Audience                        |
 | ------------- | -------------------------------------- | -------------------------------------------------- | ------------------------------- |
 | Alpha         | isolated staging/test-data environment | `Zeros Web Alpha` (default), `Zeros Desktop Alpha` | `https://api-alpha.zeros.build` |
-| Beta          | isolated staging/test-data environment | `Zeros Web Beta` (default), `Zeros Desktop Beta`   | `https://api-beta.zeros.build`  |
 | Production    | isolated production environment        | `Zeros Web` (default), `Zeros Desktop`             | `https://api.zeros.build`       |
 
 WorkOS Applications share the environment's user base while keeping client
@@ -690,7 +685,6 @@ Register these exact HTTPS redirects:
 | Channel    | Web Application                               | Desktop Application                                   | Post-callback app handoff     |
 | ---------- | --------------------------------------------- | ----------------------------------------------------- | ----------------------------- |
 | Alpha      | `https://app-alpha.zeros.build/auth/callback` | `https://app-alpha.zeros.build/auth/desktop/callback` | `zeros-alpha://auth/callback` |
-| Beta       | `https://app-beta.zeros.build/auth/callback`  | `https://app-beta.zeros.build/auth/desktop/callback`  | `zeros-beta://auth/callback`  |
 | Production | `https://app.zeros.build/auth/callback`       | `https://app.zeros.build/auth/desktop/callback`       | `zeros://auth/callback`       |
 
 Do not register wildcard production redirects. Localhost redirects belong only
@@ -751,7 +745,7 @@ When enabling or changing a production Authentication API domain:
    IDs unchanged unless a separately qualified Application migration requires
    them to change. Sandbox and shared Dev Alpha settings remain independent.
 4. Promote the tested backend and rebuild the signed desktop from the same
-   Beta-validated release commit. Existing installed binaries retain their
+   Alpha-validated release commit. Existing installed binaries retain their
    compiled issuer and API behavior until updated; changing release variables
    does not repair those binaries.
 5. Verify browser login, desktop handoff, API identity, and token refresh on the
@@ -769,7 +763,7 @@ and [AuthKit DNS requirements](https://workos.com/docs/custom-domains/authkit).
 
 ## WorkOS dashboard checklist
 
-Perform this independently for Alpha, Beta, and Production and record the
+Perform this independently for Alpha and Production and record the
 result without copying secrets into tickets or repository files.
 
 1. Confirm the exact environment and make its Web Application the default.
@@ -782,8 +776,7 @@ result without copying secrets into tickets or repository files.
    adds it. Configure MFA/recovery policy in Hosted AuthKit, not in Zeros code.
 5. Keep WorkOS's native **user invitation** email enabled. Under the exact
    channel Application's redirect settings, set **User Invitation URL** to
-   `https://app.zeros.build/invite`,
-   `https://app-beta.zeros.build/invite`, or
+   `https://app.zeros.build/invite` or
    `https://app-alpha.zeros.build/invite` as appropriate. WorkOS appends
    `invitation_token`; the page offers the exact Desktop channel or the
    Railway-owned browser state/PKCE flow, stores the token only in tab-scoped
@@ -890,8 +883,8 @@ override after the terminal starts.
 
 The launcher validates that boundary before starting the stack and Electron
 main validates it again before any browser handoff. Alpha Pages alone accepts
-both `zeros-alpha://` and `zeros-dev://` returns; Beta and Production continue
-to accept only their exact release scheme. First use provisions the profile;
+both `zeros-alpha://` and `zeros-dev://` returns; Production continues
+to accept only its exact release scheme. First use provisions the profile;
 a partial, non-WorkOS, or non-Alpha profile is rejected. Never place `WORKOS_API_KEY` or any WorkOS
 management credential in the profile or a desktop launch environment.
 
@@ -924,9 +917,9 @@ checkout; valid sibling records with larger deadlines or capacity are retained.
    commit. Activate WorkOS only when all three surfaces have their complete
    configuration.
 5. Run automated repository/emulator checks and the manual Alpha matrix below.
-6. Hold an observation window, audit provider and Zeros session/revocation
-   events, then repeat in Beta from the exact promoted SHA.
-7. Promote the exact Beta SHA to Production with Production autodeploy still
+6. Hold an observation window and audit provider and Zeros session/revocation
+   events.
+7. Promote the exact Alpha-validated SHA to Production with Production autodeploy still
    disabled. Do not recreate configuration ad hoc during promotion.
 8. Auth0 code and configuration are removed. Contract migration
    `0217_drop_auth0_tables.sql` drops the unused `0208` tables.

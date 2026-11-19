@@ -2474,7 +2474,7 @@ export class ZerosEngine {
 
     console.log(`[Zeros] Framework: ${this.framework}`);
     // Make the resolved release channel VISIBLE at every boot. A misconfigured
-    // launch (for example, Beta resolving as Stable and taking Stable's engine
+    // launch (for example, Alpha resolving as Stable and taking Stable's engine
     // block/data dirs) shows up here instead of as mysterious cross-channel
     // contamination. See apps/desktop/src/engine/runtime.ts. The channel + base port are
     // non-sensitive; the ABSOLUTE project-root + data-dir paths are

@@ -39,7 +39,7 @@ import {
 //   • current visible root  ~/zeros[-<channel>][-<instance>]/workspaces/<repo>/<name>/
 //   • legacy hidden root    ~/.zeros[-<channel>]/worktrees/<slug>/<wsId>/
 // The engine's zerosWorkspacesRoot() (apps/desktop/src/engine/db/paths.ts) names the visible
-// root `zeros-<channel>[-<instance>]` — e.g. `zeros-dev`, `zeros-beta`, and for a
+// root `zeros-<channel>[-<instance>]` — e.g. `zeros-dev`, `zeros-alpha`, and for a
 // per-worktree dev instance `zeros-dev-<slug>` (like `zeros-dev-mogadishu-5486`).
 // Design workspaces use the sibling `design workspaces` segment under that same
 // root; both layouts carry the same repository/workspace owner segments.

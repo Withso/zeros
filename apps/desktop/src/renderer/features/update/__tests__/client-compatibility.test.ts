@@ -11,7 +11,7 @@ const required = {
 };
 
 describe("desktop control-plane compatibility requests", () => {
-  it.each(["alpha", "beta", "dev", "stable"])(
+  it.each(["alpha", "dev", "stable"])(
     "tags %s without renaming the persisted channel",
     (channel) => {
       expect(desktopClientHeader(channel, "1.2.3")).toBe(
@@ -19,6 +19,10 @@ describe("desktop control-plane compatibility requests", () => {
       );
     },
   );
+
+  it("tags the retired beta channel like any unknown channel", () => {
+    expect(desktopClientHeader("beta", "1.2.3")).toBe("desktop/dev/1.2.3");
+  });
 
   it("preserves auth, idempotency and caller options while attaching the client header", async () => {
     const fetcher = vi.fn<typeof fetch>(async () =>
@@ -146,7 +150,7 @@ describe("desktop control-plane compatibility requests", () => {
     );
     const clientFetch = createClientCompatibilityFetch({
       fetch: fetcher,
-      header: () => "desktop/beta/1.2.3",
+      header: () => "desktop/production/1.2.3",
       requireUpgrade: vi.fn(),
     });
     await clientFetch(
@@ -162,7 +166,7 @@ describe("desktop control-plane compatibility requests", () => {
     ).toBe("Bearer synthetic-session");
     expect(
       new Headers(fetcher.mock.calls[0][1]?.headers).get("X-Zeros-Client"),
-    ).toBe("desktop/beta/1.2.3");
+    ).toBe("desktop/production/1.2.3");
   });
 });
 
@@ -233,9 +237,9 @@ describe("renderer request identity and 426 state", () => {
     ["null", null],
     ["non-object", "invalid"],
     ["array", [{ version: "1.2.3" }]],
-    ["missing version", { channel: "beta" }],
-    ["non-string version", { channel: "beta", version: 123 }],
-    ["invalid version", { channel: "beta", version: "invalid" }],
+    ["missing version", { channel: "stable" }],
+    ["non-string version", { channel: "stable", version: 123 }],
+    ["invalid version", { channel: "stable", version: "invalid" }],
   ])("falls back on %s app-info and retries identity on the next request", async (_name, info) => {
     runtime.nativeInvoke
       .mockResolvedValueOnce(info)

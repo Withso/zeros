@@ -7,10 +7,9 @@ const MAX_CALLBACK_VALUE_LENGTH = 8_192;
 const DEPLOYMENT_SCHEMES = {
   // Local source builds deliberately authenticate against disposable Alpha
   // data. Alpha is the ONLY hosted boundary allowed to return to zeros-dev://;
-  // Beta and Production remain exact-channel so an installed release can never
+  // Production remains exact-channel so an installed release can never
   // lose its callback to a development bundle.
   alpha: new Set(["zeros-alpha", "zeros-dev"]),
-  beta: new Set(["zeros-beta"]),
   production: new Set(["zeros"]),
 };
 

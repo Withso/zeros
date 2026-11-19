@@ -1,11 +1,10 @@
 # Web hub and edge functions
 
-One frontend codebase is deployed as five isolated Cloudflare Pages projects:
-`zeros-web-alpha`, `zeros-web-beta`, `zeros-web`, `zeros-ops-alpha`, and
-`zeros-ops`. Cloudflare Pages exposes
-only Production plus one shared Preview configuration per project, so separate
-projects are required for true Alpha/Beta/Production bindings and secrets. Ops
-deliberately has only Alpha and Production; it is never deployed to Beta.
+One frontend codebase is deployed as four isolated Cloudflare Pages projects:
+`zeros-web-alpha`, `zeros-web`, `zeros-ops-alpha`, and `zeros-ops`. Cloudflare
+Pages exposes only Production plus one shared Preview configuration per
+project, so separate projects are required for true Alpha/Production bindings
+and secrets.
 
 The Production project (**`zeros-web`**) serves **both**:
 
@@ -69,8 +68,8 @@ POST /api/v1/ops/deletions/ZD-.../{lookup,grants,restore,force-purge}
 POST /api/v1/internal/account-recoveries/ZR-.../approve
 ```
 
-Ops has no email/user/organization search, no customer data browser, and no
-Beta deployment. The control plane remains the final authorization boundary;
+Ops has no email/user/organization search and no customer data browser. The
+control plane remains the final authorization boundary;
 Cloudflare Access may be added as defense in depth but cannot replace the
 WorkOS reauthentication, exact support case, expiring grant, and two-person
 approval checks.
@@ -117,7 +116,7 @@ After changing `apps/marketing/package.json`, regenerate that lockfile:
 | **Build command**          | `npm run build`                                               |
 | **Build output directory** | `dist` ← change from `public`                                 |
 | **Root directory**         | `apps/web`                                                    |
-| **Production branch**      | Alpha: `main`; Beta/Production: selected `release/X.Y.Z`      |
+| **Production branch**      | Alpha: `main`; Production: selected `release/X.Y.Z`           |
 | **Custom domains**         | Channel app or Ops domain; only Production web owns marketing |
 
 Disable Preview deployments on these release projects. Configure the following
@@ -125,7 +124,7 @@ in each project's Production environment:
 
 | Name                          | Required | Notes                                                  |
 | ----------------------------- | -------- | ------------------------------------------------------ |
-| `ZEROS_DEPLOY_ENV`            | yes      | `alpha`, `beta`, or `production`; build fails on drift |
+| `ZEROS_DEPLOY_ENV`            | yes      | `alpha` or `production`; build fails on drift          |
 | `AUTH_PROVIDER`               | optional | `workos` or unset                                      |
 | `APP_ORIGIN`                  | yes      | matching channel app origin                            |
 | `APP_HOSTS`                   | optional | comma list; defaults to hostname of `APP_ORIGIN`       |
@@ -142,8 +141,7 @@ select the matching Railway service.
 
 The Ops projects set `APP_ORIGIN` to the exact Ops origin and do not need a
 separate Railway service or database. The
-matching Railway environment must set `OPS_ORIGIN` to that exact origin. Never
-set either Ops variable in Beta.
+matching Railway environment must set `OPS_ORIGIN` to that exact origin.
 
 `CONTROL_PLANE_URL` is never exposed to browser code. The dashboard sends
 same-origin requests through `functions/api/[[path]].ts`; that proxy reads the
@@ -243,7 +241,7 @@ qualified commit.
 
 ## Manual cutover checklist (dashboard)
 
-Do this only after the same release commit has passed Alpha and Beta. Keep
+Do this only after the same release commit has passed Alpha. Keep
 automatic Production deployments disabled:
 
 1. **zeros-web → Settings → Builds**
@@ -255,7 +253,7 @@ automatic Production deployments disabled:
 2. Point the Production branch at the validated, frozen `release/X.Y.Z`. Keep
    automatic Production deployments off and trigger a protected Pages deploy
    hook for that branch (or the Pages deployment API). Confirm its commit is the
-   exact Beta SHA, then confirm:
+   exact Alpha-validated SHA, then confirm:
    - `https://app.zeros.build/` → sign in, then the organization dashboard
    - the deployment's `pages.dev` URL → hub (unknown hosts default to app)
 3. **Custom domains → Add `zeros.build`** (and `www` / `zeros.design` if used)

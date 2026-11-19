@@ -377,24 +377,24 @@ describe("session paths: dev/prod isolation", () => {
     expect(path.relative(fakeHome, prodRoot)).not.toMatch(/dev/);
   });
 
-  it("beta channel resolves to its OWN root, disjoint from dev + prod", () => {
+  it("alpha channel resolves to its OWN root, disjoint from dev + prod", () => {
     // stable: neither ZEROS_CHANNEL nor ZEROS_DEV set.
     const prodRoot = sessionsRoot();
     process.env.ZEROS_DEV = "1";
     const devRoot = sessionsRoot();
     delete process.env.ZEROS_DEV;
-    // beta: ZEROS_CHANNEL wins over the dev/prod signal (channel() reads it first).
-    process.env.ZEROS_CHANNEL = "beta";
-    const betaRoot = sessionsRoot();
+    // alpha: ZEROS_CHANNEL wins over the dev/prod signal (channel() reads it first).
+    process.env.ZEROS_CHANNEL = "alpha";
+    const alphaRoot = sessionsRoot();
 
-    // Three distinct data roots → a Beta build never shares zeros.db / sessions
+    // Three distinct data roots → an Alpha build never shares zeros.db / sessions
     // with the production or dev app.
-    expect(new Set([prodRoot, devRoot, betaRoot]).size).toBe(3);
-    expect(betaRoot.startsWith(fakeHome)).toBe(true);
-    // macOS: com.zeros.beta · Linux: zeros-beta — the segment carries "beta"…
-    expect(path.relative(fakeHome, betaRoot)).toMatch(/beta/);
+    expect(new Set([prodRoot, devRoot, alphaRoot]).size).toBe(3);
+    expect(alphaRoot.startsWith(fakeHome)).toBe(true);
+    // macOS: com.zeros.alpha · Linux: zeros-alpha — the segment carries "alpha"…
+    expect(path.relative(fakeHome, alphaRoot)).toMatch(/alpha/);
     // …and is NOT the dev variant.
-    expect(path.relative(fakeHome, betaRoot)).not.toMatch(/dev/);
+    expect(path.relative(fakeHome, alphaRoot)).not.toMatch(/dev/);
   });
 
   it("a named dev instance (ZEROS_INSTANCE) gets its OWN root, disjoint from plain dev", () => {
@@ -409,18 +409,18 @@ describe("session paths: dev/prod isolation", () => {
     expect(instanceRoot.startsWith(fakeHome)).toBe(true);
     // Carries the instance name (com.zeros.dev.san-francisco / zeros-dev-san-francisco)…
     expect(path.relative(fakeHome, instanceRoot)).toMatch(/san-francisco/);
-    // …and is still a dev dir, so it never collides with prod or beta.
+    // …and is still a dev dir, so it never collides with prod or alpha.
     expect(path.relative(fakeHome, instanceRoot)).toMatch(/dev/);
   });
 
-  it("ZEROS_INSTANCE is IGNORED outside the dev channel (beta stays a single app)", () => {
-    // A packaged beta build would never set ZEROS_INSTANCE, but assert the guard
-    // so a stray env var can't fork beta/prod data dirs.
-    process.env.ZEROS_CHANNEL = "beta";
-    const betaRoot = sessionsRoot();
+  it("ZEROS_INSTANCE is IGNORED outside the dev channel (alpha stays a single app)", () => {
+    // A packaged alpha build would never set ZEROS_INSTANCE, but assert the guard
+    // so a stray env var can't fork alpha/prod data dirs.
+    process.env.ZEROS_CHANNEL = "alpha";
+    const alphaRoot = sessionsRoot();
     process.env.ZEROS_INSTANCE = "san-francisco";
-    const betaWithInstance = sessionsRoot();
-    expect(betaWithInstance).toBe(betaRoot);
+    const alphaWithInstance = sessionsRoot();
+    expect(alphaWithInstance).toBe(alphaRoot);
   });
 });
 

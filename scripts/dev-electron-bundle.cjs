@@ -55,7 +55,7 @@ function readPlistValue(plist, key) {
 
 /** Dev bundles must declare their scheme before LaunchServices can make them
  * the OAuth callback handler. Replace the whole nested array so a cloned or
- * previously patched bundle cannot also claim Alpha, Beta or stable links. */
+ * previously patched bundle cannot also claim Alpha or stable links. */
 function patchDevProtocol(plist, local = false) {
   const declaration = local ? "<key>CFBundleURLTypes</key><array/>" : `<key>CFBundleURLTypes</key>
 \t<array><dict>

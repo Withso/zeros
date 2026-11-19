@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import vm from "node:vm";
 import { transformSync } from "esbuild";
+import { CHANNELS, isChannel } from "../../src/engine/runtime";
 // @ts-expect-error The Node launcher is JavaScript; exercise its real boot environment.
 import { localEnvironment } from "../../../../scripts/electron-local.mjs";
 
@@ -22,8 +23,8 @@ describe("native Local development admission", () => {
       IS_DEV: env.ZEROS_CHANNEL === "dev", IS_LOCAL_DEVELOPMENT: local,
       INSTANCE_NAME: "Fixture", INSTANCE_LABEL: "Fixture",
       process: { env },
-      isChannel: (value: string) => ["dev", "alpha", "beta", "stable"].includes(value),
-      CHANNELS: ["dev", "alpha", "beta", "stable"],
+      isChannel,
+      CHANNELS,
       seedCloudWorkspaceDesktopCapabilityEnvironment() {}, migrateElectronIdentity() {},
       zerosDataDir: () => `${sharedRoot}.${env.ZEROS_INSTANCE ?? "fixture"}`,
       zerosChannelDataDir: () => sharedRoot,
@@ -55,7 +56,11 @@ describe("native Local development admission", () => {
     expect(env.ZEROS_SHARED_SECRETS_DIR).toBe(isolate === "1" ? undefined : "/data/com.zeros.local");
   });
 
-  it.each(["alpha", "beta", "stable"])("never shares a development store with %s", (channel) => {
+  it("refuses a retired beta channel at boot like any unknown channel", () => {
+    expect(() => initializeIdentity(false, { ZEROS_CHANNEL: "beta" })).toThrow(/not a known channel/);
+  });
+
+  it.each(["alpha", "stable"])("never shares a development store with %s", (channel) => {
     const env = initializeIdentity(false, { ZEROS_CHANNEL: channel, ZEROS_LOCAL_DEVELOPMENT: "1" });
     expect(env.ZEROS_SHARED_SECRETS_DIR).toBeUndefined();
     expect(env.ZEROS_LOCAL_DEVELOPMENT).toBeUndefined();
@@ -67,7 +72,6 @@ describe("native Local development admission", () => {
     [true, "true", "dev", false],
     [false, "1", "dev", false],
     [false, "1", "alpha", false],
-    [false, "1", "beta", false],
     [false, "1", "stable", false],
     [true, "1", "alpha", false],
   ])(
@@ -93,10 +97,9 @@ describe("native Local development admission", () => {
             "",
             "dev",
             "alpha",
-            "beta",
             "stable",
           ]) {
-            for (const bakedChannel of ["", "dev", "alpha", "beta", "stable"]) {
+            for (const bakedChannel of ["", "dev", "alpha", "stable"]) {
               vi.resetModules();
               vi.stubGlobal("process", { ...process, defaultApp: !packaged });
               vi.stubGlobal("__ZEROS_LOCAL_DEVELOPMENT_BUILD__", bakedLocal);

@@ -1611,7 +1611,7 @@ function InternalAgentControlRow({ feature }: { feature: AgentControlFeature }) 
 // Allowlisted-account-only switches (settings/internal-features.ts), not
 // experimental features: they may never ship. Each flag applies to this app
 // install only, because every channel has its own localStorage, so a feature can
-// be on in Beta and off in Production.
+// be on in Alpha and off in Production.
 function InternalPanel() {
   const [copyLogs, setCopyLogs] = useInternalFeature("copyLogs");
   const [resourceSummary, setResourceSummary] = useInternalFeature("resourceSummary");

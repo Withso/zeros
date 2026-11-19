@@ -1549,7 +1549,7 @@ internal UUID.
 `app.zeros.build/<organization ID>/w/<n>` is a cloud workspace's shareable
 page, and `?session=<chat id>` names a chat in it. The page reads nothing and
 needs no browser sign-in: it opens
-`zeros[-alpha|-beta|-dev]://<organization ID>/w/<n>[?session=<chat id>]` with
+`zeros[-alpha|-dev]://<organization ID>/w/<n>[?session=<chat id>]` with
 the deployment's scheme as soon as it loads, and keeps Open in Zeros for a
 browser that asks first or blocks the launch
 ([`local-orchestration.ts`](../packages/protocol/src/local-orchestration.ts)
@@ -1557,7 +1557,7 @@ formats the link; a root test keeps the web's copy equal). A malformed or
 repeated `session` is a 404. The older `app.zeros.build/workspace/<id>` page is
 still served: it signs in, reads `GET /v1/cloud-v2/workspaces/<id>` through the
 web's control-plane proxy (which admits only that read), shows the workspace,
-and opens `zeros[-alpha|-beta|-dev]://cloud-workspace/<organizationId>/<workspaceId>`
+and opens `zeros[-alpha|-dev]://cloud-workspace/<organizationId>/<workspaceId>`
 once ([`cloud-workspace-link.ts`](../packages/protocol/src/cloud-workspace-link.ts)),
 the link every desktop release opens.
 
@@ -2350,7 +2350,7 @@ The **Cloud runtime release** runner builds from exact main source, records a
 successful Alpha publication, drains admitted Computer builds and runtime
 handoffs, and changes the channel pin through one redeploy of the unchanged
 control-plane commit. Alpha releases publish when runtime inputs or qualifying
-control-plane/protocol code change. Beta and Production releases promote the
+control-plane/protocol code change. Production releases promote the
 compatible qualified Alpha pin after hosted promotion and before feed
 publication. Invalid or unavailable qualification fails the release; a matching
 qualified pin can skip. The dispatch wrapper remains available for manual

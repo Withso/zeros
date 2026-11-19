@@ -17,6 +17,14 @@ it("preserves Local link punctuation and distinct channel identities", () => {
   ]);
 });
 
+it("no longer recognizes the retired zeros-beta scheme as a Zeros link", () => {
+  expect(parseLocalLink("zeros-beta://chat/one")).toBeNull();
+  expect(parseLocalLink("zeros-beta://workspace/two")).toBeNull();
+  expect(extractLocalLinks("zeros-beta://chat/one zeros-alpha://chat/two")).toEqual([
+    { scheme: "zeros-alpha", kind: "chat", id: "two" },
+  ]);
+});
+
 it("bounds link extraction for long internal punctuation runs", () => {
   // Isolate the adversarial input so a quadratic matcher cannot hang the suite.
   // The budget includes Node/tsx startup and is far above the linear scan cost.
@@ -84,6 +92,7 @@ describe("numbered workspace links", () => {
     "zeros://user@local/w/3",
     "zeros://local:44/w/3",
     "zeros-prod://local/w/3",
+    "zeros-beta://local/w/3",
     "https://local/w/3",
     "zeros://local/x/3",
   ])("refuses %s", (text) => {

@@ -92,7 +92,7 @@ responsible app as an unchecked entry; this is an OS-controlled side effect,
 not a supported API for adding or highlighting an application row. No private
 TCC API, database write, or Accessibility automation is used. If the app is
 missing, use the system pane's `+` button to add the running Zeros, Zeros Alpha,
-Zeros Beta, or checkout-specific Local/Dev bundle. Granting another installed
+or checkout-specific Local/Dev bundle. Granting another installed
 channel, an engine executable, or a terminal is not the same choice.
 
 Electron main launches the Local engine, which launches provider runtimes and

@@ -4612,7 +4612,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       // app (bun-compiled single-file engine: sdk.mjs lives in $bunfs and there
       // is no node_modules on disk), so leaving this unset made `query()` throw
       // "Native CLI binary for darwin-arm64 not found" and every send fail with
-      // "AGENT RESPONSE FAILURE" — in Beta/Production only, since dev runs `bun
+      // "AGENT RESPONSE FAILURE" — in packaged builds only, since dev runs `bun
       // apps/desktop/src/cli.ts` where that lookup works. See binary-resolver.ts for the tier
       // order (user override → staged Contents/Resources/claude → bundled
       // package → the user's own install).

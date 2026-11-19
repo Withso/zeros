@@ -4,7 +4,7 @@
 
 Desktop user-facing control-plane requests carry
 `X-Zeros-Client: desktop/<channel>/<version>`. Channels on this boundary are
-`alpha`, `beta`, `production`, and `dev`. The existing persisted/build channel
+`alpha`, `production`, and `dev`. The existing persisted/build channel
 `stable` is translated to `production` only for this header and analytics;
 application identities, data directories, feeds, IPC names and deep links are
 unchanged. Electron main supplies the installed version and authoritative
@@ -30,7 +30,6 @@ Each channel publishes a cumulative release ledger with its desktop feed:
 | Channel    | Public ledger asset under `https://github.com/withso/zeros/releases` |
 | ---------- | -------------------------------------------------------------------- |
 | Alpha      | `/download/alpha/alpha-release-ledger.json`                          |
-| Beta       | `/download/beta/beta-release-ledger.json`                            |
 | Production | `/latest/download/release-ledger.json`                               |
 
 The asset is versioned JSON, with `version: 1`, its exact channel, and
@@ -182,7 +181,7 @@ When it is on, each check reads `rc-mac.yml` and `latest-mac.yml` and follows
 Latest. The staged-build comparison uses the same choice, so a newer candidate
 still replaces a staged Latest build after the hourly hold. Downgrade stays off:
 turning it off keeps the installed candidate until a newer release. An app that
-never opted in keeps its baked feed. Alpha, Beta and Dev ignore the choice.
+never opted in keeps its baked feed. Alpha and Dev ignore the choice.
 Candidates are Production builds, so request headers, analytics and the
 release ledger see `production` and the candidate's version.
 
@@ -210,7 +209,7 @@ then open the app.
 ## Analytics
 
 All events register the metadata-only `release_channel` super property:
-`alpha`, `beta`, `production`, or `dev`. Registration precedes startup and
+`alpha`, `production`, or `dev`. Registration precedes startup and
 buffered events. Use the existing public `VITE_POSTHOG_KEY_PROD` build variable
 for the single shared project, including Dev; `VITE_POSTHOG_KEY_DEV` remains a
 legacy contributor fallback only when the shared key is absent. Existing

@@ -27,9 +27,9 @@ databaseSuite("staff bootstrap organization ownership", () => {
     await pool.query(`INSERT INTO organizations (id, slug, name, created_by, is_personal)
       VALUES ($1,$2,'Bootstrap organization',$3,false)`, [ownerOrganizationId, `bootstrap-${suffix}`, subject.id]);
     await pool.query("INSERT INTO organization_members (org_id,user_id,role) VALUES ($1,$2,'owner')", [ownerOrganizationId, subject.id]);
-    const input = { databaseUrl: databaseUrl!, channel: "beta", execute: false, subjectUserId: subject.id,
+    const input = { databaseUrl: databaseUrl!, channel: "alpha", execute: false, subjectUserId: subject.id,
       expectedEmail, actorUserId: actor.id, nextRole: "platform_owner", ownerOrganizationId,
-      reason: "Bootstrap the reviewed active Beta organization owner." };
+      reason: "Bootstrap the reviewed active Alpha organization owner." };
     return { input, subject, actor, ownerOrganizationId };
   }
 
@@ -45,7 +45,7 @@ databaseSuite("staff bootstrap organization ownership", () => {
     const result = await manageStaffRole(pool, validateStaffRoleRequest({ ...test.input, execute: true, approval: plan.approval! }));
     expect(result.state).toBe("changed"); expect(result.nextRole).toBe("platform_owner");
     expect((await pool.query("SELECT next_role, deployment_channel, actor_user_id FROM staff_role_changes WHERE subject_user_id=$1", [test.subject.id])).rows)
-      .toEqual([{ next_role: "platform_owner", deployment_channel: "beta", actor_user_id: test.actor.id }]);
+      .toEqual([{ next_role: "platform_owner", deployment_channel: "alpha", actor_user_id: test.actor.id }]);
     const unchanged = await manageStaffRole(pool, validateStaffRoleRequest(test.input));
     expect(unchanged.state).toBe("unchanged"); expect(unchanged.approval).toBeNull();
     expect((await pool.query("SELECT count(*)::int AS count FROM staff_role_changes WHERE subject_user_id=$1", [test.subject.id])).rows[0].count).toBe(1);

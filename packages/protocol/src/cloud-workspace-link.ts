@@ -2,7 +2,7 @@
 // Cloud workspace links
 // ──────────────────────────────────────────────────────────
 //
-// `zeros[-alpha|-beta|-dev]://cloud-workspace/<organizationId>/<workspaceId>`
+// `zeros[-alpha|-dev]://cloud-workspace/<organizationId>/<workspaceId>`
 // opens one cloud workspace in the desktop app and switches to its
 // organization. The older web workspace page (app.zeros.build/workspace/<id>)
 // opens it; the numbered page opens `<scheme>://<organization ID>/w/<n>`
@@ -37,7 +37,7 @@ export interface CloudWorkspaceLink {
 // The renderer's cloud workspace key accepts the same UUIDs.
 const UUID = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}";
 const UUID_ONLY = new RegExp(`^${UUID}$`);
-const LINK = new RegExp(`^(zeros(?:-alpha|-beta|-dev)?)://cloud-workspace/(${UUID})/(${UUID})$`);
+const LINK = new RegExp(`^(zeros(?:-alpha|-dev)?)://cloud-workspace/(${UUID})/(${UUID})$`);
 
 export function formatCloudWorkspaceLink(
   scheme: LocalLinkScheme,

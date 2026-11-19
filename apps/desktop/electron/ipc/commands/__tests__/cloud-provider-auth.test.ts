@@ -44,7 +44,7 @@ vi.mock("../cursor-subscription", () => ({ loginCursorSubscription: deps.cursorL
 vi.mock("../provider-subscription", () => ({ resolveRuntime: deps.runtime }));
 // The checked-in policy allows every channel; this suite exercises its pause.
 vi.mock("../../../../../control-plane/src/cloud/channels.json", () => ({
-  default: { development: true, alpha: true, beta: false, production: false },
+  default: { development: true, alpha: true, production: false },
 }));
 import { cloudProviderAuth, stopCloudProviderAuth } from "../cloud-provider-auth";
 
@@ -84,7 +84,7 @@ beforeEach(() => {
   vi.stubEnv("ZEROS_CLOUD_WORKSPACES_ENABLED", "false");
   vi.spyOn(console, "warn").mockImplementation(() => {});
   deps.session.mockResolvedValue(session);
-  deps.baseUrl.mockReturnValue("https://beta.example.test");
+  deps.baseUrl.mockReturnValue("https://api.example.test");
   deps.mkdir.mockResolvedValue(undefined);
   deps.mkdtemp.mockResolvedValue(directory);
   deps.runtime.mockResolvedValue({ command: "fixture-codex", argsPrefix: [] });
@@ -116,7 +116,7 @@ afterEach(async () => {
 });
 
 describe("cloud account enrollment IPC without workspace execution", () => {
-  it.each(["beta", "stable"])("refuses %s enrollment while its channel is paused, before session or provider access", async channel => {
+  it.each(["stable"])("refuses %s enrollment while its channel is paused, before session or provider access", async channel => {
     vi.stubEnv("ZEROS_CHANNEL", channel);
     await expect(invoke(connection(), event())).rejects.toThrow(/not available.*channel/i);
     expect(deps.session).not.toHaveBeenCalled();
@@ -160,7 +160,7 @@ describe("cloud account enrollment IPC without workspace execution", () => {
     const status = await finish(request, sender, "connected");
     expect(status.credential?.kind).toBe("cursor-api-key");
     expect(deps.cursorLogin).toHaveBeenCalledTimes(1);
-    expect(deps.fetch).toHaveBeenCalledWith(`https://beta.example.test/v1/cloud-agent-credentials/${request.attemptId}`, expect.objectContaining({ method: "PUT" }));
+    expect(deps.fetch).toHaveBeenCalledWith(`https://api.example.test/v1/cloud-agent-credentials/${request.attemptId}`, expect.objectContaining({ method: "PUT" }));
     expect(deps.mkdir).not.toHaveBeenCalled();
     expect(deps.driver).not.toHaveBeenCalled();
     expect(JSON.stringify(status)).not.toContain("fixture-cursor-access");

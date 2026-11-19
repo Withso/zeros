@@ -7,7 +7,7 @@
 // the repository root (template: `.env.agent.example`); Conductor copies that
 // file into every new workspace. This check makes read-only requests for each
 // configured provider and reports what the credential can reach: the Alpha
-// resources it should, whether Beta and Production are refused, and when it
+// resources it should, whether Production is refused, and when it
 // expires. An unset key is reported as not set, never as a failure. Values
 // are never printed.
 //
@@ -263,7 +263,7 @@ export function checkZerosDevValues(values) {
 
 const siblings = (name) =>
   name.endsWith("-alpha")
-    ? ["beta", "production"].map((channel) => name.replace(/-alpha$/, `-${channel}`))
+    ? ["production"].map((channel) => name.replace(/-alpha$/, `-${channel}`))
     : [];
 
 export const PROVIDER_CHECKS = Object.freeze([
@@ -324,7 +324,7 @@ export const PROVIDER_CHECKS = Object.freeze([
       const reachable = [];
       for (const other of siblings(bucket)) if ((await list(other)) === 200) reachable.push(other);
       if (reachable.length) return warn(`lists ${bucket}, but also ${reachable.join(", ")}`);
-      return ok(`lists ${bucket}${siblings(bucket).length ? "; Beta and Production buckets refused" : ""}`);
+      return ok(`lists ${bucket}${siblings(bucket).length ? "; Production bucket refused" : ""}`);
     },
   },
   {
@@ -342,7 +342,7 @@ export const PROVIDER_CHECKS = Object.freeze([
         if ((await request(deps, base + encodeURIComponent(other), { headers })).status === 200) reachable.push(other);
       }
       if (reachable.length) return warn(`reads ${database}, but also ${reachable.join(", ")}`);
-      return ok(`reads ${database}${siblings(database).length ? "; Beta and Production refused" : ""}`);
+      return ok(`reads ${database}${siblings(database).length ? "; Production refused" : ""}`);
     },
   },
   {

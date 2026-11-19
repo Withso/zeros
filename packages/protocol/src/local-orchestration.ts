@@ -218,7 +218,7 @@ export type LocalLinkKind = (typeof LOCAL_LINK_KINDS)[number];
 
 /** One URL scheme per release channel (mirrors DeepLinkScheme in the engine
  * runtime; kept literal so this package has no engine import). */
-export const LOCAL_LINK_SCHEMES = ["zeros", "zeros-alpha", "zeros-beta", "zeros-dev"] as const;
+export const LOCAL_LINK_SCHEMES = ["zeros", "zeros-alpha", "zeros-dev"] as const;
 export type LocalLinkScheme = (typeof LOCAL_LINK_SCHEMES)[number];
 
 /** A workspace's permanent place: its owner and its number within that owner
@@ -251,7 +251,7 @@ const WORKSPACE_LINK_OWNER = /^[a-z0-9](?:[a-z0-9-]{0,98}[a-z0-9])?$/;
 /** Both stores keep numbers in a signed 32-bit integer column. */
 const MAX_WORKSPACE_NUMBER = 2_147_483_647;
 const NUMBERED_LINK =
-  /^(zeros(?:-alpha|-beta|-dev)?):\/\/([A-Za-z0-9-]{1,100})\/w\/([1-9][0-9]{0,9})(?:\?session=([^&#\s]+))?$/;
+  /^(zeros(?:-alpha|-dev)?):\/\/([A-Za-z0-9-]{1,100})\/w\/([1-9][0-9]{0,9})(?:\?session=([^&#\s]+))?$/;
 
 export function isWorkspaceNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value > 0 && value <= MAX_WORKSPACE_NUMBER;
@@ -331,7 +331,7 @@ export function parseLocalLink(text: string): LocalLink | null {
   const trimmed = text.trim();
   const numbered = parseNumberedLink(trimmed);
   if (numbered) return numbered;
-  const match = /^(zeros(?:-alpha|-beta|-dev)?):\/\/(chat|workspace)\/([^/?#\s]+)$/.exec(trimmed);
+  const match = /^(zeros(?:-alpha|-dev)?):\/\/(chat|workspace)\/([^/?#\s]+)$/.exec(trimmed);
   if (!match) return null;
   let id: string;
   try {
@@ -354,7 +354,7 @@ export function extractLocalLinks(text: string, limit = 64): LocalLink[] {
   // a legacy chat whose id is `w`.
   // A number runs to its end (`w/31a` names no workspace, not w-31).
   const pattern =
-    /zeros(?:-alpha|-beta|-dev)?:\/\/(?:[A-Za-z0-9-]{1,100}\/w\/[0-9]{1,10}(?:\?session=[A-Za-z0-9_.:%-]+|(?![A-Za-z0-9_%]))|(?:chat|workspace)\/[A-Za-z0-9_.:%-]+)/g;
+    /zeros(?:-alpha|-dev)?:\/\/(?:[A-Za-z0-9-]{1,100}\/w\/[0-9]{1,10}(?:\?session=[A-Za-z0-9_.:%-]+|(?![A-Za-z0-9_%]))|(?:chat|workspace)\/[A-Za-z0-9_.:%-]+)/g;
   for (const match of text.matchAll(pattern)) {
     // A suffix regexp retries from every punctuation character when a long
     // internal run ends in a non-punctuation character. Scan only the suffix.

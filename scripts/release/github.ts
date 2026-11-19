@@ -10,13 +10,13 @@ import { authenticatedAlphaParent } from "./alpha-build";
 import { previousReleaseLedger } from "./release-ledger";
 import { CutoverReceipt } from "./cutover";
 
-function validateHostedReceipt(receipt: unknown, run: any, config: Pick<PromotionConfig, "sourceSha" | "branch" | "repository">, channel: Channel, jobs: any[], requireOverallSuccess: boolean) {
+function validateHostedReceipt(receipt: unknown, run: any, config: Pick<PromotionConfig, "sourceSha" | "branch" | "repository">, channel: Channel, jobs: any[]) {
   const parsed = HostedReceipt.safeParse(receipt);
   requireCheck(parsed.success, "Hosted receipt is invalid");
   const value = parsed.data;
   const attempt = Number(value.runAttempt), surfaces = CHANNELS[channel].ops ? ["app", "ops"] : ["app"];
   const workflow = channel === "production" ? "release.yml" : `release-${channel}.yml`;
-  requireCheck((!requireOverallSuccess || run.conclusion === "success") && run.event === (channel === "production" ? "workflow_dispatch" : "push") &&
+  requireCheck(run.event === (channel === "production" ? "workflow_dispatch" : "push") &&
     run.head_sha === config.sourceSha && run.head_branch === config.branch && run.path === `.github/workflows/${workflow}` && run.repository?.full_name === config.repository &&
     value.channel === channel && value.sourceSha === config.sourceSha && value.branch === config.branch && value.repository === config.repository &&
     value.runId === String(run.id) && Number.isSafeInteger(attempt) && attempt > 0 && Number.isSafeInteger(run.run_attempt) && attempt <= run.run_attempt && value.migration.ledger === "verified" &&
@@ -32,9 +32,6 @@ function validateHostedReceipt(receipt: unknown, run: any, config: Pick<Promotio
     ["Provider preflight and ordered promotion", "Save success receipt"].every(name => job.steps?.some((step: any) => step.name === name && step.conclusion === "success"))),
   "The receipt's recorded attempt has no successful hosted publication job");
   return value;
-}
-export function validateBetaReceipt(receipt: unknown, run: any, config: Pick<PromotionConfig, "sourceSha" | "branch" | "repository">, jobs: any[] = []) {
-  return validateHostedReceipt(receipt, run, config, "beta", jobs, true);
 }
 function assertArtifactRun(run: any, config: Pick<PromotionConfig, "sourceSha" | "branch" | "repository">, channel: Channel) {
   const workflow = channel === "production" ? "release.yml" : `release-${channel}.yml`;
@@ -101,7 +98,7 @@ export function githubClient(config: Pick<PromotionConfig, "repository" | "sourc
       await assertAlphaAdmission(config, env, read, JSON.parse(bytes.toString("utf8")));
     } finally { await rm(directory, { force: true, recursive: true }); }
   }
-  async function receiptForRun(run: any, channel: Channel, requireOverallSuccess: boolean, kind: "hosted" | "services" = "hosted") {
+  async function receiptForRun(run: any, channel: Channel, kind: "hosted" | "services" = "hosted") {
     requireCheck(Number.isSafeInteger(run.id), "Invalid hosted workflow run");
     const name = `${kind === "services" ? "hosted-services" : "hosted-promotion"}-${channel}-${config.sourceSha}`;
     const list = await read(`/actions/runs/${run.id}/artifacts?per_page=100`);
@@ -122,7 +119,7 @@ export function githubClient(config: Pick<PromotionConfig, "repository" | "sourc
         requireCheck(Array.isArray(result.jobs), "Hosted job evidence is unavailable");
         jobs.push(...result.jobs);
         if (result.jobs.length < 100) return kind === "services" ? validateServicesReceipt(receipt, run, config, channel, jobs)
-          : validateHostedReceipt(receipt, run, config, channel, jobs, requireOverallSuccess);
+          : validateHostedReceipt(receipt, run, config, channel, jobs);
       }
       throw new Error("Hosted job evidence exceeds its bound");
     } finally { await rm(directory, { force: true, recursive: true }); }
@@ -182,7 +179,7 @@ export function githubClient(config: Pick<PromotionConfig, "repository" | "sourc
     async lastPublication(channel: Channel) {
       requireCheck(/^[\w.-]+\/[\w.-]+$/.test(config.repository), "Publication repository is invalid");
       const event = channel === "production" ? "workflow_dispatch" : "push";
-      const label = channel === "production" ? "Production" : channel === "alpha" ? "Alpha" : "Beta";
+      const label = channel === "production" ? "Production" : "Alpha";
       // Production is published by release-promote.yml; release.yml published it
       // before release candidates and now publishes only the `rc` candidate, whose
       // step has another name, so its new runs never count.
@@ -284,7 +281,7 @@ export function githubClient(config: Pick<PromotionConfig, "repository" | "sourc
       requireCheck(/^[1-9]\d*$/.test(runId), "Invalid publication run identity");
       const run = await read(`/actions/runs/${runId}`);
       requireCheck(String(run.id) === runId, "Publication run identity mismatch");
-      const receipt = await receiptForRun(run, channel, false);
+      const receipt = await receiptForRun(run, channel);
       requireCheck(receipt, "Current run has no trusted hosted receipt");
       return receipt;
     },
@@ -292,18 +289,9 @@ export function githubClient(config: Pick<PromotionConfig, "repository" | "sourc
       requireCheck(/^[1-9]\d*$/.test(runId), "Invalid services run identity");
       const run = await read(`/actions/runs/${runId}`);
       requireCheck(String(run.id) === runId, "Services run identity mismatch");
-      const receipt = await receiptForRun(run, channel, false, "services");
+      const receipt = await receiptForRun(run, channel, "services");
       requireCheck(receipt, "Current run has no trusted services receipt");
       return receipt;
-    },
-    async betaReceipt() {
-      const runs = await read(`/actions/workflows/release-beta.yml/runs?head_sha=${config.sourceSha}&status=success&event=push&per_page=100`);
-      for (const run of runs.workflow_runs ?? []) {
-        if (run.head_branch !== config.branch || run.head_sha !== config.sourceSha || run.conclusion !== "success" || run.event !== "push") continue;
-        const receipt = await receiptForRun(run, "beta", true);
-        if (receipt) return receipt;
-      }
-      throw new Error("No trusted Beta promotion receipt");
     },
   };
 }

@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-/** Hosted Dev adapter. Packaged Alpha/Beta/Production cannot select it. */
+/** Hosted Dev adapter. Packaged Alpha/Production cannot select it. */
 export function devGithubReferenceEnabled(options: {
   isPackaged: boolean;
   deployment: string;

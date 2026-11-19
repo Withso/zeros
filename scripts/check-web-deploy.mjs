@@ -7,8 +7,7 @@
 // Defaults qualify both Alpha web surfaces from main:
 //   pnpm check:web-deploy
 //
-// Select one project for Beta/Production or an individual investigation:
-//   CF_PAGES_PROJECT=zeros-web-beta WEB_DEPLOY_REF=origin/release/1.2.3 pnpm check:web-deploy
+// Select one project for Production or an individual investigation:
 //   CF_PAGES_PROJECT=zeros-web WEB_DEPLOY_REF=origin/release/1.2.3 pnpm check:web-deploy
 //
 // Arbitrary projects require an explicit public origin:
@@ -27,7 +26,6 @@ const MANIFEST_PATH = "/zeros-deployment.json";
 const PROJECT_ORIGINS = Object.freeze({
   "zeros-web-alpha": "https://app-alpha.zeros.build",
   "zeros-ops-alpha": "https://ops-alpha.zeros.build",
-  "zeros-web-beta": "https://app-beta.zeros.build",
   "zeros-web": "https://app.zeros.build",
   "zeros-ops": "https://ops.zeros.build",
 });

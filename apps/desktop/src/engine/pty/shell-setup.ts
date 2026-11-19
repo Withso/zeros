@@ -269,7 +269,7 @@ const REMOTE_ENV_ALLOW = new Set<string>([
 
 // Public, but still identity-bearing: these describe the desktop app that
 // spawned the engine. A nested `pnpm electron:dev` must load the current shared
-// Alpha profile itself instead of treating a parent Alpha/Beta/Production
+// Alpha profile itself instead of treating a parent Alpha/Production
 // app's values as an intentional one-run override.
 const DESKTOP_AUTH_SELECTOR_ENV_NAMES = [
   "AUTH_PROVIDER",

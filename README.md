@@ -127,7 +127,7 @@ flowchart LR
 
 See [REPOSITORY-ARCHITECTURE.md](REPOSITORY-ARCHITECTURE.md) for ownership,
 dependency boundaries, deployment roots, and the migration report.
-The hosted Alpha/Beta/Production topology and promotion runbook are in
+The hosted Alpha/Production topology and promotion runbook are in
 [docs/deployment-environments.md](docs/deployment-environments.md).
 
 ## Data, telemetry, and security

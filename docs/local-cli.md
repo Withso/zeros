@@ -249,7 +249,7 @@ the turn) rather than expecting later pages to carry edits.
 Every Local workspace is `w-<n>`: a number that belongs to it permanently
 within its owner (migration 46, `db/workspace-numbers.ts`). Its link is
 `<scheme>://local/w/<n>` and a chat in it is `<scheme>://local/w/<n>?session=<chatId>`,
-with the channel's scheme (`zeros`, `zeros-alpha`, `zeros-beta`, `zeros-dev`)
+with the channel's scheme (`zeros`, `zeros-alpha`, `zeros-dev`)
 ([`local-orchestration.ts`](../packages/protocol/src/local-orchestration.ts)
 `formatWorkspaceLink`). `local` is the owner segment of the Local collection;
 an organization's ID in that place names one of its cloud workspaces, which the

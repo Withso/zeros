@@ -58,7 +58,7 @@ describe("the web workspace page's Open in Zeros link", () => {
     expect([...SCHEMES].sort()).toEqual([...LOCAL_LINK_SCHEMES].sort());
   });
 
-  it.each(["alpha", "beta", "production", undefined] as const)(
+  it.each(["alpha", "production", undefined] as const)(
     "is the desktop's cloud workspace link on %s",
     async (environment) => {
       const appLink = deploymentAppLink(environment);
@@ -96,7 +96,7 @@ describe("the web's numbered workspace page path", () => {
 describe("the web's numbered page opens the desktop's numbered link", () => {
   const address = { owner: "acme-labs", number: 310 };
 
-  it.each(["alpha", "beta", "production", undefined] as const)(
+  it.each(["alpha", "production", undefined] as const)(
     "is the desktop's workspace and chat link on %s",
     (environment) => {
       const appLink = deploymentAppLink(environment);

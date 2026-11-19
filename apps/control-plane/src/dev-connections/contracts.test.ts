@@ -123,7 +123,7 @@ describe("Dev connections contracts", () => {
     ).toThrow();
   });
   it("is unavailable in every release environment even with a true flag", () => {
-    for (const channel of ["alpha", "beta", "production", ""]) {
+    for (const channel of ["alpha", "production", ""]) {
       const env = {
         ZEROS_DEPLOY_ENV: channel,
         ZEROS_DEV_CONNECTIONS_ENABLED: "true",

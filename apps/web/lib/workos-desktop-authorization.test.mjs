@@ -184,9 +184,8 @@ test("Alpha alone permits the local Dev scheme through the WorkOS desktop bounda
   assert.match(callbackBody, /zeros-dev/);
 });
 
-test("Beta and Production reject the local Dev scheme", async () => {
+test("Production rejects the local Dev scheme", async () => {
   for (const [deployment, origin, api] of [
-    ["beta", "https://app-beta.zeros.build", "https://api-beta.zeros.build"],
     ["production", "https://app.zeros.build", "https://api.zeros.build"],
   ]) {
     const response = await renderWorkOSDesktopAuthorizationPage(

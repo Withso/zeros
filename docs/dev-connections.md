@@ -247,7 +247,7 @@ Cutover is **connect once into the broker**, after stopping every old Dev refres
 owner. With the explicit Dev flag present, legacy backend agent material cannot
 be admitted or qualified, desktop GitHub refresh is frozen, and the legacy
 GitHub refresh endpoint returns a reconnect error. Reconnect with fresh provider
-authorization; do not copy a cache still owned by another process. Alpha/Beta/
+authorization; do not copy a cache still owned by another process. Alpha/
 Production and Personal/Local keep their existing paths when the flag is absent.
 Seamless transfer would require a separate recoverable ownership-transfer journal.
 

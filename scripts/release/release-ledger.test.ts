@@ -8,7 +8,7 @@ const day = 24 * 60 * 60 * 1000, now = Date.UTC(2026, 10, 7, 12);
 const dated = (number: number, publishedAt: number) => ({ version: `0.1.20-alpha.${number}`, publishedAt: new Date(publishedAt).toISOString(), sourceSha });
 
 describe("cumulative desktop release ledger", () => {
-  it.each(["alpha", "beta", "production"] as const)("builds the %s contract and channel asset", channel => {
+  it.each(["alpha", "production"] as const)("builds the %s contract and channel asset", channel => {
     const release = { ...entry(1), version: channel === "production" ? "0.1.20" : `0.1.20-${channel}.1` };
     expect(buildReleaseLedger(channel, null, release)).toEqual({ version: 1, channel, releases: [release] });
     expect(releaseLedgerUrl(repository, channel)).toBe(`https://github.com/${repository}/releases/${channel === "production" ? "latest/download" : `download/${channel}`}/${releaseLedgerAsset(channel)}`);

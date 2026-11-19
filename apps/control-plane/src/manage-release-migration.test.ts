@@ -13,7 +13,7 @@ import {
 } from "./manage-release-migration.js";
 
 const PASSWORD = "fixture-role-password-value";
-const BRANCH = "/databases/zeros-control-plane-beta/branches/main";
+const BRANCH = "/databases/zeros-control-plane-alpha/branches/main";
 
 function harness(options: {
   pending?: string[];
@@ -86,19 +86,19 @@ describe("release migration runner", () => {
       options?.onServerVersion?.(180006);
       return [];
     };
-    await releaseMigration({ database: "zeros-control-plane-beta", branch: "main", execute: true,
-      confirm: "zeros-control-plane-beta" }, deps);
+    await releaseMigration({ database: "zeros-control-plane-alpha", branch: "main", execute: true,
+      confirm: "zeros-control-plane-alpha" }, deps);
     expect(record).toHaveBeenCalledExactlyOnceWith(180006);
   });
 
   it("never reflects arbitrary driver diagnostics even without the minted password", async () => {
     const { deps } = harness({ runError: new Error("provider-secret-from-a-driver") });
-    await expect(releaseMigration({ database: "zeros-control-plane-beta", branch: "main", execute: true,
-      confirm: "zeros-control-plane-beta" }, deps)).rejects.toThrow("Migration step failed: database error");
+    await expect(releaseMigration({ database: "zeros-control-plane-alpha", branch: "main", execute: true,
+      confirm: "zeros-control-plane-alpha" }, deps)).rejects.toThrow("Migration step failed: database error");
   });
   it("plans read-only with a short-lived role and always deletes the role", async () => {
     const { calls, deps, poolUrl } = harness();
-    const result = await releaseMigration({ database: "zeros-control-plane-beta", branch: "main", execute: false }, deps);
+    const result = await releaseMigration({ database: "zeros-control-plane-alpha", branch: "main", execute: false }, deps);
 
     expect(calls).toEqual([`GET ${BRANCH}`, `POST ${BRANCH}/roles`, "pool", "plan", "pool.end", `DELETE ${BRANCH}/roles/role1`]);
     expect(result).toMatchObject({ mode: "plan", backup: null, pendingMigrations: [], ledger: "recorded", applied: [] });
@@ -109,7 +109,7 @@ describe("release migration runner", () => {
 
   it("reports pending migrations in a plan without applying them", async () => {
     const { calls, deps } = harness({ pending: ["0101_next.sql"] });
-    const result = await releaseMigration({ database: "zeros-control-plane-beta", branch: "main", execute: false }, deps);
+    const result = await releaseMigration({ database: "zeros-control-plane-alpha", branch: "main", execute: false }, deps);
 
     expect(calls).not.toContain("run");
     expect(calls.some((call) => call.includes("/backups"))).toBe(false);
@@ -118,7 +118,7 @@ describe("release migration runner", () => {
 
   it("refuses to execute unless --confirm repeats the database", async () => {
     const { calls, deps } = harness();
-    await expect(releaseMigration({ database: "zeros-control-plane-beta", branch: "main", execute: true, confirm: "zeros-control-plane-production" }, deps))
+    await expect(releaseMigration({ database: "zeros-control-plane-alpha", branch: "main", execute: true, confirm: "zeros-control-plane-production" }, deps))
       .rejects.toThrow(ReleaseMigrationError);
     expect(calls).toEqual([]);
   });
@@ -126,7 +126,7 @@ describe("release migration runner", () => {
   it("backs up and waits for success before minting the role, then applies and re-plans", async () => {
     const { calls, deps } = harness({ pending: ["0101_next.sql"], backupStates: ["pending", "running", "success"] });
     const result = await releaseMigration(
-      { database: "zeros-control-plane-beta", branch: "main", execute: true, confirm: "zeros-control-plane-beta" },
+      { database: "zeros-control-plane-alpha", branch: "main", execute: true, confirm: "zeros-control-plane-alpha" },
       deps,
     );
 
@@ -154,7 +154,7 @@ describe("release migration runner", () => {
   it("runs the strict runner even when nothing is pending, so every checksum is verified", async () => {
     const { calls, deps } = harness();
     const result = await releaseMigration(
-      { database: "zeros-control-plane-beta", branch: "main", execute: true, confirm: "zeros-control-plane-beta" },
+      { database: "zeros-control-plane-alpha", branch: "main", execute: true, confirm: "zeros-control-plane-alpha" },
       deps,
     );
     expect(calls.filter((call) => call === "run")).toHaveLength(1);
@@ -164,7 +164,7 @@ describe("release migration runner", () => {
   it("fails when migrations remain pending after the runner", async () => {
     const { calls, deps } = harness({ pending: ["0101_next.sql"], pendingAfter: ["0101_next.sql"] });
     await expect(releaseMigration(
-      { database: "zeros-control-plane-beta", branch: "main", execute: true, confirm: "zeros-control-plane-beta" },
+      { database: "zeros-control-plane-alpha", branch: "main", execute: true, confirm: "zeros-control-plane-alpha" },
       deps,
     )).rejects.toThrow("Still pending after apply: 0101_next.sql");
     expect(calls.at(-1)).toBe(`DELETE ${BRANCH}/roles/role1`);
@@ -174,7 +174,7 @@ describe("release migration runner", () => {
     const { deps } = harness({ pending: ["0101_next.sql"], pendingAfter: ["0101_next.sql"],
       runError: new Error(`password authentication failed for migrator.fixture (${PASSWORD})`) });
     const failure = await releaseMigration(
-      { database: "zeros-control-plane-beta", branch: "main", execute: true, confirm: "zeros-control-plane-beta" },
+      { database: "zeros-control-plane-alpha", branch: "main", execute: true, confirm: "zeros-control-plane-alpha" },
       deps,
     ).catch((error: unknown) => error as ReleaseMigrationError);
     expect(failure).toBeInstanceOf(ReleaseMigrationError);
@@ -186,7 +186,7 @@ describe("release migration runner", () => {
     const { deps } = harness({ pending: ["0101_a.sql", "0102_b.sql", "0103_c.sql"], pendingAfter: ["0102_b.sql", "0103_c.sql"],
       runError: new Error("0102 failed") });
     const failure = await releaseMigration(
-      { database: "zeros-control-plane-beta", branch: "main", execute: true, confirm: "zeros-control-plane-beta" }, deps,
+      { database: "zeros-control-plane-alpha", branch: "main", execute: true, confirm: "zeros-control-plane-alpha" }, deps,
     ).catch((error: unknown) => error as ReleaseMigrationError);
     expect(failure.partial).toEqual({ backup: { id: "bk1", state: "success" }, applied: ["0101_a.sql"], roleDeleted: true });
   });
@@ -199,7 +199,7 @@ describe("release migration runner", () => {
       return plan(pool);
     };
     const failure = await releaseMigration(
-      { database: "zeros-control-plane-beta", branch: "main", execute: true, confirm: "zeros-control-plane-beta" }, deps,
+      { database: "zeros-control-plane-alpha", branch: "main", execute: true, confirm: "zeros-control-plane-alpha" }, deps,
     ).catch((error: unknown) => error as ReleaseMigrationError);
     expect(failure.partial?.applied).toBeNull();
     expect(failure.partial?.backup).toEqual({ id: "bk1", state: "success" });
@@ -208,7 +208,7 @@ describe("release migration runner", () => {
   it("keeps the backup in the recovery facts when the owner login is refused", async () => {
     const { deps } = harness({ roleStatus: 403 });
     const failure = await releaseMigration(
-      { database: "zeros-control-plane-beta", branch: "main", execute: true, confirm: "zeros-control-plane-beta" }, deps,
+      { database: "zeros-control-plane-alpha", branch: "main", execute: true, confirm: "zeros-control-plane-alpha" }, deps,
     ).catch((error: unknown) => error as ReleaseMigrationError);
     expect(failure.message).toBe("Migration role was not created (HTTP 403)");
     expect(failure.partial).toEqual({ backup: { id: "bk1", state: "success" }, applied: [], roleDeleted: true });
@@ -220,7 +220,7 @@ describe("release migration runner", () => {
     deps.planetScale = async (method, path, body) => method === "POST" && path === `${BRANCH}/roles`
       ? { status: 201, body: { name: "partial" } } : request(method, path, body);
     const failure = await releaseMigration(
-      { database: "zeros-control-plane-beta", branch: "main", execute: true, confirm: "zeros-control-plane-beta" }, deps,
+      { database: "zeros-control-plane-alpha", branch: "main", execute: true, confirm: "zeros-control-plane-alpha" }, deps,
     ).catch((error: unknown) => error as ReleaseMigrationError);
     expect(failure.message).toBe("Incomplete migration role response; cleanup is unconfirmed");
     expect(failure.partial).toEqual({ backup: { id: "bk1", state: "success" }, applied: [], roleDeleted: false });
@@ -235,7 +235,7 @@ describe("release migration runner", () => {
       return request(method, path, body);
     };
     const failure = await releaseMigration(
-      { database: "zeros-control-plane-beta", branch: "main", execute: true, confirm: "zeros-control-plane-beta" }, deps,
+      { database: "zeros-control-plane-alpha", branch: "main", execute: true, confirm: "zeros-control-plane-alpha" }, deps,
     ).catch((error: unknown) => error as ReleaseMigrationError);
     expect(failure).toBeInstanceOf(ReleaseMigrationError);
     expect(failure.message).toBe("Migration role request failed; allocation is unknown");
@@ -245,7 +245,7 @@ describe("release migration runner", () => {
   it("never mints a role when the backup fails", async () => {
     const { calls, deps } = harness({ backupStates: ["pending", "failed"] });
     await expect(releaseMigration(
-      { database: "zeros-control-plane-beta", branch: "main", execute: true, confirm: "zeros-control-plane-beta" },
+      { database: "zeros-control-plane-alpha", branch: "main", execute: true, confirm: "zeros-control-plane-alpha" },
       deps,
     )).rejects.toThrow("Backup bk1 failed");
     expect(calls.some((call) => call.endsWith("/roles"))).toBe(false);
@@ -254,7 +254,7 @@ describe("release migration runner", () => {
   it("deletes the role and hides driver details when a migration fails", async () => {
     const { calls, deps } = harness({ pending: ["0101_next.sql"], runError: new Error(`password authentication failed for migrator.fixture (${PASSWORD})`) });
     const failure = await releaseMigration(
-      { database: "zeros-control-plane-beta", branch: "main", execute: true, confirm: "zeros-control-plane-beta" },
+      { database: "zeros-control-plane-alpha", branch: "main", execute: true, confirm: "zeros-control-plane-alpha" },
       deps,
     ).catch((error: unknown) => error as Error);
 
@@ -265,19 +265,19 @@ describe("release migration runner", () => {
 
   it("reports a role that could not be deleted with its expiry", async () => {
     const { deps } = harness({ deleteStatus: 500 });
-    const result = await releaseMigration({ database: "zeros-control-plane-beta", branch: "main", execute: false }, deps);
+    const result = await releaseMigration({ database: "zeros-control-plane-alpha", branch: "main", execute: false }, deps);
     expect(result.role).toMatchObject({ deleted: false, expiresAt: "2026-09-25T12:00:00.000Z" });
   });
 
   it("stops when PlanetScale refuses the role", async () => {
     const { calls, deps } = harness({ roleStatus: 403 });
-    await expect(releaseMigration({ database: "zeros-control-plane-beta", branch: "main", execute: false }, deps))
+    await expect(releaseMigration({ database: "zeros-control-plane-alpha", branch: "main", execute: false }, deps))
       .rejects.toThrow("Migration role was not created (HTTP 403)");
     expect(calls).not.toContain("pool");
   });
   it("deletes an acknowledged role even if its credential response is incomplete", async () => {
     const { calls, deps } = harness({ incompleteRole: true });
-    await expect(releaseMigration({ database: "zeros-control-plane-beta", branch: "main", execute: false }, deps)).rejects.toThrow();
+    await expect(releaseMigration({ database: "zeros-control-plane-alpha", branch: "main", execute: false }, deps)).rejects.toThrow();
     expect(calls.at(-1)).toBe(`DELETE ${BRANCH}/roles/role1`);
     expect(calls).not.toContain("pool");
   });
@@ -291,7 +291,7 @@ describe("release migration runner", () => {
   });
 
   it("parses only the supported arguments", () => {
-    expect(parseReleaseMigrationArgs(["--database", "zeros-control-plane-beta"])).toEqual({ database: "zeros-control-plane-beta", branch: "main", execute: false });
+    expect(parseReleaseMigrationArgs(["--database", "zeros-control-plane-alpha"])).toEqual({ database: "zeros-control-plane-alpha", branch: "main", execute: false });
     expect(parseReleaseMigrationArgs(["--database", "db", "--branch", "main", "--execute", "--confirm", "db"]))
       .toEqual({ database: "db", branch: "main", execute: true, confirm: "db" });
     expect(() => parseReleaseMigrationArgs([])).toThrow("--database is required");
@@ -300,7 +300,7 @@ describe("release migration runner", () => {
   });
 
   it("refuses to run without PlanetScale credentials", () => {
-    const result = spawnSync(process.execPath, ["--import", "tsx", fileURLToPath(new URL("./manage-release-migration.ts", import.meta.url)), "--database", "zeros-control-plane-beta"], {
+    const result = spawnSync(process.execPath, ["--import", "tsx", fileURLToPath(new URL("./manage-release-migration.ts", import.meta.url)), "--database", "zeros-control-plane-alpha"], {
       cwd: fileURLToPath(new URL("..", import.meta.url)),
       env: { PATH: process.env.PATH },
       timeout: 20_000,

@@ -67,7 +67,7 @@ export function renderDashboard(state, stateComment) {
   const delivery = Object.entries(PROVIDERS).flatMap(([provider, config]) => {
     const evidence = state.sources[`${provider}-delivery`]?.lastGood?.data;
     return [
-      ...["alpha", "beta", "production"].map((channel) => {
+      ...["alpha", "production"].map((channel) => {
         const item = evidence?.desktop?.[channel];
         return `| ${config.name} | Desktop ${channel} | ${markdown(item?.pin ?? "unknown")} | ${markdown(item?.status ?? "unknown")} | ${channel === "alpha" ? "after release gates" : "maintainer promotion"} |`;
       }),

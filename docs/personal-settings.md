@@ -10,8 +10,8 @@ Settings resolve from user defaults through repository defaults to private works
 | Repository | `<main-checkout>/.zeros/settings.local.toml` | That repository and its linked local worktrees |
 | Workspace  | `<worktree>/.zeros/settings.toml`            | Only that checkout                             |
 
-Stable, beta, and development retain separate user directories (`.zeros`,
-`.zeros-beta`, `.zeros-dev`). `ZEROS_USER_SETTINGS_DIR` remains the test/runtime
+Stable, alpha, and development retain separate user directories (`.zeros`,
+`.zeros-alpha`, `.zeros-dev`). `ZEROS_USER_SETTINGS_DIR` remains the test/runtime
 override. Existing managed policy and cloud organization compatibility are
 separate; this change does not introduce team settings for Personal.
 

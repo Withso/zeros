@@ -65,7 +65,7 @@ describe("promoting a release candidate", () => {
 
   it.each([
     ["a moved rc tag", { tag: "b".repeat(40) }, /rc tag has moved/],
-    ["a run of another workflow", { path: ".github/workflows/release-beta.yml" }, /completed release\.yml run/],
+    ["a run of another workflow", { path: ".github/workflows/release-alpha.yml" }, /completed release\.yml run/],
     ["a pushed run", { event: "push" }, /completed release\.yml run/],
     ["a run still in progress", { status: "in_progress" }, /completed release\.yml run/],
     ["a failed publication job", { conclusion: "failure" }, /publication job/],
@@ -75,7 +75,7 @@ describe("promoting a release candidate", () => {
     await expect(verifyCandidate(f.raw, f.input, f.deps)).rejects.toThrow(error);
   });
 
-  it.each([{ sourceSha: "b".repeat(40) }, { ready: false }, { channel: "beta" }])("refuses while Production serves %j", async patch => {
+  it.each([{ sourceSha: "b".repeat(40) }, { ready: false }, { channel: "alpha" }])("refuses while Production serves %j", async patch => {
     const f = await candidate(); Object.assign(f.state.identity, patch);
     await expect(verifyCandidate(f.raw, f.input, f.deps)).rejects.toThrow(/not serving this candidate/);
   });
@@ -118,6 +118,7 @@ describe("candidate cli", () => {
     const f = await candidate();
     await expect(candidateMain(["--verify"], { ...env, GITHUB_WORKFLOW_REF: `${repository}/.github/workflows/release.yml@refs/heads/${branch}` }, fetch, f.directory))
       .rejects.toThrow(/Only release-promote\.yml/);
-    await expect(candidateMain(["--write"], { ...env, RELEASE_CHANNEL: "beta" }, fetch, f.directory)).rejects.toThrow(/Production builds/);
+    await expect(candidateMain(["--write"], { ...env, RELEASE_CHANNEL: "alpha", RELEASE_BRANCH: "main" }, fetch, f.directory)).rejects.toThrow(/Production builds/);
+    await expect(candidateMain(["--write"], { ...env, RELEASE_CHANNEL: "beta" }, fetch, f.directory)).rejects.toThrow(/Release channel is invalid/);
   });
 });

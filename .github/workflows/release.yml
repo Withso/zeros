@@ -261,7 +261,7 @@ jobs:
         # but never RAN it — so 0.0.1–0.0.3 shipped with an engine that
         # crash-looped on a native-module load (@parcel/watcher's watcher.node
         # can't load from inside a bun binary) and the app never started. A later
-        # beta also bound TCP but deadlocked before it could answer HTTP/WS, so a
+        # build also bound TCP but deadlocked before it could answer HTTP/WS, so a
         # connect-only check is insufficient. Boot the real binary and require an
         # external exact-shape /health response plus create/archive/restore before
         # expensive sign/notarize. This is the macOS runner; preflight's Ubuntu
@@ -339,7 +339,7 @@ jobs:
           echo "✓ differential-update blockmap: $BLOCKMAP"
 
       - name: Smoke-test terminal in the packaged app
-        # Requiring node-pty is insufficient: beta.58 loaded its signed addon but
+        # Requiring node-pty is insufficient: a shipped build loaded its signed addon but
         # every pty.spawn failed. Exercise the exact .app executable + dedicated
         # native resource + shipped PTY host and require real shell output.
         run: pnpm smoke:packaged-pty

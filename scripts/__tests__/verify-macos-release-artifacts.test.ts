@@ -98,7 +98,7 @@ TeamIdentifier=H8MS56JU2Z
 
   it("rejects signed metadata without a secure timestamp", () => {
     const metadata = parseCodeSignMetadata(`
-Identifier=com.zeros.beta
+Identifier=com.zeros.alpha
 CodeDirectory v=20500 size=443 flags=0x10000(runtime) hashes=3+7 location=embedded
 CDHash=0123456789abcdef
 Authority=Developer ID Application: WITHSO TECHNOLOGIES (OPC) PRIVATE LIMITED (H8MS56JU2Z)
@@ -108,7 +108,7 @@ TeamIdentifier=H8MS56JU2Z
     expect(() =>
       assertExpectedMetadata(
         metadata,
-        { bundleId: "com.zeros.beta", teamId: "H8MS56JU2Z" },
+        { bundleId: "com.zeros.alpha", teamId: "H8MS56JU2Z" },
         "DMG app",
       ),
     ).toThrow("secure signing timestamp is missing");

@@ -98,13 +98,13 @@ describe("repoSlugFromWorktreePath", () => {
         "/Users/dev/zeros-dev-mogadishu-5486/workspaces/acme-widgets/ws_b47da6-myrtle/src/x.ts",
       ),
     ).toBe("acme-widgets");
-    // Other channels (beta) + their instanced roots resolve too.
+    // Other channels (alpha) + their instanced roots resolve too.
     expect(
-      repoSlugFromWorktreePath("/Users/dev/zeros-beta/workspaces/widgets/ws_1"),
+      repoSlugFromWorktreePath("/Users/dev/zeros-alpha/workspaces/widgets/ws_1"),
     ).toBe("widgets");
     expect(
       repoSlugFromWorktreePath(
-        "/Users/dev/zeros-beta-abc-99/workspaces/widgets/ws_1",
+        "/Users/dev/zeros-alpha-abc-99/workspaces/widgets/ws_1",
       ),
     ).toBe("widgets");
   });

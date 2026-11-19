@@ -8,7 +8,7 @@ import {
 afterEach(() => vi.unstubAllEnvs());
 
 describe("desktop cloud capability under the checked-in channel policy", () => {
-  it.each(["beta", "stable"])("follows the %s release's baked decision", releaseChannel => {
+  it.each(["alpha", "stable"])("follows the %s release's baked decision", releaseChannel => {
     vi.stubEnv("ZEROS_CHANNEL", releaseChannel);
     expect(cloudWorkspaceDesktopCapabilityEnabled({ bakedCapability: true, environment: {} })).toBe(true);
     expect(cloudWorkspaceDesktopCapabilityEnabled({

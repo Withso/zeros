@@ -6,11 +6,11 @@ import { releaseChannelEnvironment } from "./channel-policy.mjs";
 
 // Every channel allows cloud in the checked-in policy. A case pauses one
 // channel here; the shared policy reads this object on every call.
-const policy = vi.hoisted(() => ({ development: true, alpha: true, beta: true, production: true } as Record<string, boolean>));
+const policy = vi.hoisted(() => ({ development: true, alpha: true, production: true } as Record<string, boolean>));
 vi.mock("../../apps/control-plane/src/cloud/channels.json", () => ({ default: policy }));
 
 const sourceSha = "a".repeat(40);
-function environment(channel: "beta" | "production") {
+function environment(channel: "production") {
   return {
     RELEASE_CHANNEL: channel, RELEASE_SHA: sourceSha, RELEASE_BRANCH: "release/1.2.3", GITHUB_SHA: sourceSha,
     GITHUB_REPOSITORY: "example/zeros", GITHUB_RUN_ID: "123", GITHUB_RUN_ATTEMPT: "1",
@@ -18,8 +18,8 @@ function environment(channel: "beta" | "production") {
     RAILWAY_PROJECT_ID: "11111111-1111-4111-8111-111111111111", RAILWAY_ENVIRONMENT_ID: "22222222-2222-4222-8222-222222222222",
     RAILWAY_SERVICE_ID: "33333333-3333-4333-8333-333333333333", PLANETSCALE_ORG: "example",
     PLANETSCALE_DATABASE: `zeros-control-plane-${channel}`, PLANETSCALE_BRANCH: "main",
-    CLOUDFLARE_ACCOUNT_ID: "b".repeat(32), CF_PAGES_APP_PROJECT: channel === "beta" ? "zeros-web-beta" : "zeros-web",
-    CF_PAGES_OPS_PROJECT: channel === "beta" ? "" : "zeros-ops", AUTH_PROVIDER: "workos",
+    CLOUDFLARE_ACCOUNT_ID: "b".repeat(32), CF_PAGES_APP_PROJECT: "zeros-web",
+    CF_PAGES_OPS_PROJECT: "zeros-ops", AUTH_PROVIDER: "workos",
     RAILWAY_DEPLOY_TOKEN: "synthetic", PLANETSCALE_SERVICE_TOKEN_ID: "synthetic", PLANETSCALE_SERVICE_TOKEN: "synthetic",
     CLOUDFLARE_API_TOKEN: "synthetic",
   };
@@ -37,12 +37,13 @@ describe("release channel environment", () => {
   });
 
   it("makes stale cloud-only settings inert while the channel is paused", () => {
-    expect(releaseChannelEnvironment("beta", { ZEROS_CLOUD_WORKSPACES_ENABLED: "obsolete" }, { ...policy, beta: false }))
+    expect(releaseChannelEnvironment("production", { ZEROS_CLOUD_WORKSPACES_ENABLED: "obsolete" }, { ...policy, production: false }))
       .toEqual({ ZEROS_CLOUD_WORKSPACES_ENABLED: "false" });
     expect(() => releaseChannelEnvironment("unknown", {})).toThrow("Unknown cloud release channel");
+    expect(() => releaseChannelEnvironment("beta", {})).toThrow("Unknown cloud release channel");
   });
 
-  it.each(["beta", "production"])("applies the %s release environment's exact decision", channel => {
+  it.each(["production"])("applies the %s release environment's exact decision", channel => {
     expect(releaseChannelEnvironment(channel, {})).toEqual({ ZEROS_CLOUD_WORKSPACES_ENABLED: "false" });
     expect(releaseChannelEnvironment(channel, { ZEROS_CLOUD_WORKSPACES_ENABLED: "true" }))
       .toEqual({ ZEROS_CLOUD_WORKSPACES_ENABLED: "true" });
@@ -51,7 +52,7 @@ describe("release channel environment", () => {
   });
 });
 
-describe.each(["beta", "production"] as const)("%s cloud release", channel => {
+describe.each(["production"] as const)("%s cloud release", channel => {
   it("requires cloud exactly when the release environment opts in", () => {
     expect(promotionConfig(environment(channel))).toMatchObject({ cloudRequired: true });
     expect(promotionConfig({ ...environment(channel), ZEROS_CLOUD_WORKSPACES_ENABLED: "false" }))
@@ -59,7 +60,7 @@ describe.each(["beta", "production"] as const)("%s cloud release", channel => {
   });
 });
 
-describe.each(["beta", "production"] as const)("%s release while its channel is paused", channel => {
+describe.each(["production"] as const)("%s release while its channel is paused", channel => {
   beforeEach(() => { policy[channel] = false; });
   afterEach(() => { policy[channel] = true; });
 
@@ -80,8 +81,7 @@ describe.each(["beta", "production"] as const)("%s release while its channel is 
     }
   });
 
-  // Beta is retired and has no release workflow; its channel policy stays readable.
-  it.skipIf(channel === "beta")("bakes and publishes cloud=false while retaining CI, hosted promotion and platform checks", () => {
+  it("bakes and publishes cloud=false while retaining CI, hosted promotion and platform checks", () => {
     const workflow = load(readFileSync(".github/workflows/release.yml", "utf8")) as {
       jobs: Record<string, { env?: Record<string, string>; needs?: string[]; steps?: { run?: string }[] }>;
     };
@@ -92,7 +92,7 @@ describe.each(["beta", "production"] as const)("%s release while its channel is 
       expect(job.steps?.some(step => step.run === "node scripts/release/channel-policy.mjs --github-env")).toBe(true);
     }
     expect(workflow.jobs.publish.needs).toEqual(expect.arrayContaining(["ci", "build", "hosted"]));
-    if (channel === "production") expect(workflow.jobs.publish.needs).toEqual(expect.arrayContaining(["approve", "notarize"]));
+    expect(workflow.jobs.publish.needs).toEqual(expect.arrayContaining(["approve", "notarize"]));
     expect(workflow.jobs.ci.steps?.some(step => step.run?.includes("scripts/release/ci-cli.ts --wait"))).toBe(true);
     expect(workflow.jobs.build.steps?.some(step => step.run === "pnpm smoke:engine")).toBe(true);
     expect(workflow.jobs.build.steps?.some(step => step.run === "pnpm smoke:packaged-pty")).toBe(true);

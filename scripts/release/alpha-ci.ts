@@ -82,7 +82,7 @@ function securityVeto(jobs: any[]) {
 }
 
 /** Automatic Alpha's fast path waits only for Preflight's exact-SHA alpha-gate.
- * CodeQL stays required for Beta, Production and every full-policy caller;
+ * CodeQL stays required for Production and every full-policy caller;
  * its findings are advisory, so the disposable Alpha ring does not wait for
  * the scan to finish. */
 export const ALPHA_REQUIRED_CI = [{ file: "preflight.yml", name: "Preflight" }] as const;

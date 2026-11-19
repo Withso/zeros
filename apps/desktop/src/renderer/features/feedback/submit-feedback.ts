@@ -72,7 +72,7 @@ const FEEDBACK_URL = CONTROL_PLANE_URL
  *
  *  Feedback now follows the same environment-specific control-plane URL as
  *  organizations. Auth rides on the user's own session, so there is no second
- *  endpoint or build-time credential to drift across Alpha/Beta/Production. */
+ *  endpoint or build-time credential to drift across Alpha/Production. */
 export function isFeedbackConfigured(): boolean {
   return !!FEEDBACK_URL;
 }

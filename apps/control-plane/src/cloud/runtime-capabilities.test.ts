@@ -39,7 +39,7 @@ it.each([[], ["acting-user-v1"], ["sync-context-v1"]].map(features => [features]
 
 it("requires the completed release to name the exact archive and source on hosted channels", async () => {
   vi.spyOn(storage, "runtimeStorageClient").mockImplementation(() => client());
-  for (const channel of ["alpha", "beta", "production", undefined]) {
+  for (const channel of ["alpha", "production", undefined]) {
     await expect(activeRuntimeQualification(channel, { ...record, store })()).rejects.toMatchObject({ code: "worker_update_required" });
     for (const wrong of [{ sha256: "e".repeat(64) }, { sourceSha: "e".repeat(40) }, { sourceSha256: "e".repeat(64) }])
       await expect(activeRuntimeQualification(channel, { ...record, store, release: { ...release, ...wrong } })()).rejects.toMatchObject({ code: "worker_update_required" });
@@ -55,7 +55,7 @@ it("lets only a verified Alpha canary's exact unexpired candidate replace the re
   expect(await qualify(grant)).toEqual(record);
   for (const wrong of [{ runtimeSha256: "e".repeat(64) }, { sourceSha: "e".repeat(40) }, { exp: 1 }])
     await expect(qualify({ ...grant, ...wrong })).rejects.toMatchObject({ status: expect.any(Number) });
-  for (const channel of ["development", "beta", "production"])
+  for (const channel of ["development", "production"])
     await expect(activeRuntimeQualification(channel, { ...record, store })(grant)).rejects.toMatchObject({ code: "worker_update_required" });
 });
 
@@ -80,7 +80,7 @@ it("qualifies the selected development pin after a repin without changing a runn
 
 it("never accepts a development pin override on a hosted channel", async () => {
   const factory = vi.spyOn(storage, "runtimeStorageClient").mockImplementation(() => client());
-  for (const channel of ["alpha", "beta", "production", undefined])
+  for (const channel of ["alpha", "production", undefined])
     await expect(activeRuntimeQualification(channel, { ...record, store, release })(undefined, record.sha256)).rejects.toMatchObject({ code: "worker_update_required" });
   expect(factory).not.toHaveBeenCalled();
 });

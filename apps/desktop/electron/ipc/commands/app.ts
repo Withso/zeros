@@ -26,8 +26,8 @@ export interface AppInfo {
   runtimeMode: "dev" | "prod";
   localDevelopment: boolean;
   /** Release channel — the authoritative value from the main process (keyed off
-   *  the seeded ZEROS_CHANNEL). `runtimeMode` can't carry it: a Beta build is
-   *  runtimeMode "prod" yet channel "beta". */
+   *  the seeded ZEROS_CHANNEL). `runtimeMode` can't carry it: an Alpha build is
+   *  runtimeMode "prod" yet channel "alpha". */
   channel: Channel;
   version: string;
   platform: NodeJS.Platform;

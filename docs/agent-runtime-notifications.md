@@ -84,7 +84,7 @@ on the acknowledgment commit.
 | Structural API changes | TypeScript declarations from integrity-verified npm archives and committed Codex JSON schemas. Changes inside an existing declaration are detected; comments/formatting are ignored.                                                             |
 | Security               | Public GitHub advisories for the three bundled pins and the separately pinned control-plane Codex auth keeper. Runtime advisories use the working PR; unrelated direct/transitive fixes remain with Renovate.                                    |
 | Models                 | The exact installed bundled runtime lists advertised models for a dedicated test-account configuration. Pagination must complete. No model turn, prompt, agent creation or inference is requested.                                               |
-| Desktop delivery       | Public Alpha, Beta and Production release ledgers identify published source SHAs; manifests at those SHAs identify the pins. Source ancestry recognizes inclusion by a later release. Beta/Production lag is a maintainer promotion decision.    |
+| Desktop delivery       | Public Alpha and Production release ledgers identify published source SHAs; manifests at those SHAs identify the pins. Source ancestry recognizes inclusion by a later release. Production lag is a maintainer promotion decision.              |
 | Cloud delivery         | Standalone worker delivery is currently unobserved. Receipts from the retired runtime-bundle publisher are ignored; desktop release evidence cannot establish v2 worker delivery. |
 
 Catalog entries, names, favorites, aliases and defaults remain curated. A model
@@ -321,7 +321,7 @@ Optional dedicated Alpha/test credentials are stored as
 `AGENT_RUNTIME_ANTHROPIC_API_KEY` or `AGENT_RUNTIME_CLAUDE_CODE_OAUTH_TOKEN`,
 `AGENT_RUNTIME_OPENAI_API_KEY` or `AGENT_RUNTIME_CODEX_AUTH_JSON`, and
 `AGENT_RUNTIME_CURSOR_API_KEY`. Never use a customer credential, read an engine
-vault, or put Beta/Production credentials in `.env.agent`. Missing credentials
+vault, or put Production credentials in `.env.agent`. Missing credentials
 produce unavailable discovery. Listing paths and redaction must be qualified
 with those dedicated accounts before enabling the daily workflow.
 

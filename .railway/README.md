@@ -4,7 +4,7 @@
 `zeros-control-plane` partial. It targets the existing linked project's `zeros`
 service only. It does not provision a database, define secrets, apply itself on
 merge, or replace the release controller's exact-SHA deployment authority.
-Beta/Production planning requires a reviewed `RELEASE_BRANCH=release/X.Y.Z`;
+Production planning requires a reviewed `RELEASE_BRANCH=release/X.Y.Z`;
 Alpha keeps `main`. Unknown environments and an unlinked project fail closed.
 
 The legacy `apps/control-plane/railway.json` is retired: each environment's

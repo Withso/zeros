@@ -13,18 +13,15 @@ Merging to `main` is an Alpha action, not a Production action. Production must
 never continuously deploy `main`; it is a manual promotion of a release branch
 whose migrations Alpha has already run.
 
-**Beta is retired** ([release candidates roadmap](release-candidates-roadmap.md)).
-No workflow builds or deploys it. Its rows and sections below describe the
-retired stack until its services are torn down; `beta` identifiers that were
-persisted or seen outside the repository (data directories, the `zeros-beta`
-deep-link scheme, client headers, migrations) stay readable.
+Beta was retired ([release candidates roadmap](release-candidates-roadmap.md)).
+The repository no longer recognises it as a channel; only applied migrations
+still name it.
 
 ## Deployment topology
 
 | Channel    | Source                                 | Railway                                                    | Cloudflare surfaces                     | Public origins                                                             |
 | ---------- | -------------------------------------- | ---------------------------------------------------------- | --------------------------------------- | -------------------------------------------------------------------------- |
 | Alpha      | `main`                                 | `alpha` environment: control plane + isolated PlanetScale Postgres      | `zeros-web-alpha`, `zeros-ops-alpha`    | `api-alpha.zeros.build`, `app-alpha.zeros.build`, `ops-alpha.zeros.build`  |
-| Beta       | **retired**; no workflow deploys it    | `beta` environment, pending teardown                                    | `zeros-web-beta`, pending teardown      | `api-beta.zeros.build`, `app-beta.zeros.build`                             |
 | Production | a release branch Alpha has run first   | `production` environment: control plane + isolated PlanetScale Postgres | `zeros-web`, `zeros-ops`                | `api.zeros.build`, `app.zeros.build`, `ops.zeros.build`, marketing domains |
 
 This remains one backend codebase and one frontend codebase. Each channel is an
@@ -32,14 +29,15 @@ isolated deployment instance with independent data, credentials, sessions, and
 domains.
 
 Railway supports named persistent environments, so keep one Railway project and
-the same logical control-plane service in all three environments. Each channel uses
+the same logical control-plane service in both environments. Each channel uses
 its own PlanetScale database and runtime login. Never share `DATABASE_URL` across them.
 
 Cloudflare Pages exposes only `production` and one shared `preview`
 configuration inside a project. Preview branches share variables and bindings,
-so a single Pages project cannot safely represent independent Alpha and Beta
-environments. Use five release Pages projects from the same `apps/web` source:
-three customer-app projects plus the Alpha and Production Ops projects. Each
+so a single Pages project cannot safely represent independent Alpha and
+Production environments. Use four release Pages projects from the same
+`apps/web` source: two customer-app projects plus the Alpha and Production Ops
+projects. Each
 channel uses that project's Production configuration; do not treat Pages
 Preview as a Zeros release channel.
 
@@ -61,14 +59,14 @@ Do these first, while the current deployment is still serving:
    Disable Preview deployments unless a separate preview policy is introduced.
 3. Take a restorable Production Postgres backup and record the current Railway
    deployment and Cloudflare deployment commit.
-4. Do not merge the organization migration until Alpha and Beta infrastructure
-   below exists.
+4. Do not merge the organization migration until Alpha infrastructure below
+   exists.
 
 Repository guards are a backstop, not a substitute for those controls:
 
 - Railway detects its injected `RAILWAY_ENVIRONMENT_NAME` and refuses an
-  environment/audience/branch mismatch. Production and Beta reject a
-  Git-connected `main` deployment.
+  environment/audience/branch mismatch. Production rejects a Git-connected
+  `main` deployment.
 - Cloudflare builds require `ZEROS_DEPLOY_ENV` and exact channel URLs.
 - desktop release workflows reject a channel whose web or API origin points at
   another channel.
@@ -77,9 +75,9 @@ Repository guards are a backstop, not a substitute for those controls:
 
 ## Railway setup
 
-Create or rename the persistent environments to exactly `alpha`, `beta`, and
-`production`. Duplicate the existing service configuration to bootstrap Alpha
-and Beta, but provision an isolated PlanetScale PostgreSQL database for each; a
+Create or rename the persistent environments to exactly `alpha` and
+`production`. Duplicate the existing service configuration to bootstrap Alpha,
+but provision an isolated PlanetScale PostgreSQL database for each; a
 configuration duplicate is not permission to copy or share Production data.
 
 For the control-plane service in every environment:
@@ -93,17 +91,16 @@ For the control-plane service in every environment:
 - watch paths restricted to `apps/control-plane/**` when Railway asks for them
 
 Configure sources and deploy controls as follows **when enabling the ordered
-controller**. While it is disabled, existing Alpha/Beta Git autodeploy and
+controller**. While it is disabled, existing Alpha Git autodeploy and
 Wait for CI can remain enabled; the disabled guard does not change them.
 
 | Railway environment | Git source                        | Autodeploy               | Wait for CI                   |
 | ------------------- | --------------------------------- | ------------------------ | ----------------------------- |
 | `alpha`             | `main`                            | **off under the controller** | **off**                     |
-| `beta`              | current `release/X.Y.Z`           | **off under the controller** | **off**                     |
 | `production`        | current validated `release/X.Y.Z` | **off**                      | **off**                     |
 
 Attach each custom API domain to the matching service instance. Confirm all
-three `/healthz` endpoints before configuring a desktop build.
+`/healthz` endpoints before configuring a desktop build.
 
 The ordered controller uses `serviceInstanceDeployV2` with the immutable event
 SHA. It refuses Railway autodeploy or Wait for CI: waiting for the whole desktop
@@ -129,9 +126,9 @@ replaces Config as Code. `.railway/railway.ts` records the same settings with th
 official `railway/iac` TypeScript DSL, checked against SDK `3.12.0`, and is **not
 applied by a release workflow**. Its named `zeros-control-plane` partial
 describes the existing `zeros` service, not a new project, database, or secret
-inventory. It takes the linked project name, allows only Alpha/Beta/Production,
+inventory. It takes the linked project name, allows only Alpha/Production,
 keeps Alpha on `main`, and requires `RELEASE_BRANCH=release/X.Y.Z` for
-Beta/Production. Its repository-root watch pattern `/apps/control-plane/**`
+Production. Its repository-root watch pattern `/apps/control-plane/**`
 differs from Production's promotion-hold pattern, and it omits domains, limits
 and region.
 
@@ -163,7 +160,7 @@ Adopting IaC ownership is optional. For each channel, the owner:
    effective source/root/watch/build/health/restart settings, then uses the
    ordered controller's explicit exact-SHA deployment and verifies anonymous
    `/healthz` and `/v1/release-identity`. Each environment is planned
-   independently; an Alpha plan does not certify Beta or Production.
+   independently; an Alpha plan does not certify Production.
 
 IaC settings application does not replace CI, migrations, source-bound
 readiness, or protected Production approval. Do not apply while the legacy file
@@ -173,25 +170,25 @@ is still effective, and do not delete it merely because authoring tests pass.
 
 Set these independently in every environment:
 
-| Variable                     | Alpha                                    | Beta                                    | Production                                    |
-| ---------------------------- | ---------------------------------------- | --------------------------------------- | --------------------------------------------- |
-| `DATABASE_URL`               | Alpha Postgres private reference         | Beta Postgres private reference         | Production Postgres private reference         |
-| `AUTH_PROVIDER`              | optional; `workos` or unset              | optional; `workos` or unset             | optional; `workos` or unset                   |
-| `AUTH_AUDIENCE`              | `https://api-alpha.zeros.build`          | `https://api-beta.zeros.build`          | `https://api.zeros.build`                     |
-| `AUTH_ISSUER`                | exact Alpha WorkOS issuer                | exact Beta WorkOS issuer                | exact Production WorkOS issuer                |
-| `AUTH_JWKS_URL`              | exact Alpha WorkOS JWKS URL              | exact Beta WorkOS JWKS URL              | exact Production WorkOS JWKS URL              |
-| `AUTH_WEB_CLIENT_ID`         | Alpha Web Application                    | Beta Web Application                    | Production Web Application                    |
-| `AUTH_DESKTOP_CLIENT_ID`     | Alpha Desktop Application                | Beta Desktop Application                | Production Desktop Application                |
-| `APP_ORIGIN`                 | `https://app-alpha.zeros.build`          | `https://app-beta.zeros.build`          | `https://app.zeros.build`                     |
-| `OPS_ORIGIN`                 | `https://ops-alpha.zeros.build`          | unset; startup rejects Ops in Beta      | `https://ops.zeros.build`                     |
-| `WORKOS_API_KEY`             | Alpha server key                         | Beta server key                         | Production server key                         |
-| `WORKOS_COOKIE_PASSWORD`     | unique random Alpha 32+ character secret | unique random Beta 32+ character secret | unique random Production 32+ character secret |
-| `WORKOS_WEBHOOK_SECRET`      | Alpha endpoint signing secret            | Beta endpoint signing secret            | Production endpoint signing secret            |
-| `NODE_ENV`                   | `production`                             | `production`                            | `production`                                  |
-| `INVITE_LINK_BASE`           | `https://app-alpha.zeros.build/invite`   | `https://app-beta.zeros.build/invite`   | `https://app.zeros.build/invite`              |
-| `GITHUB_OAUTH_CALLBACK_URL`  | matching Alpha API callback              | matching Beta API callback              | matching Production API callback              |
-| `GITHUB_COMPLETION_PAGE_URL` | matching Alpha app page                  | matching Beta app page                  | matching Production app page                  |
-| `GITHUB_REFRESH_BINDING_SECRET` | unique Alpha binding key (required)   | unique Beta binding key (required)      | unique Production binding key (required)      |
+| Variable                     | Alpha                                    | Production                                    |
+| ---------------------------- | ---------------------------------------- | --------------------------------------------- |
+| `DATABASE_URL`               | Alpha Postgres private reference         | Production Postgres private reference         |
+| `AUTH_PROVIDER`              | optional; `workos` or unset              | optional; `workos` or unset                   |
+| `AUTH_AUDIENCE`              | `https://api-alpha.zeros.build`          | `https://api.zeros.build`                     |
+| `AUTH_ISSUER`                | exact Alpha WorkOS issuer                | exact Production WorkOS issuer                |
+| `AUTH_JWKS_URL`              | exact Alpha WorkOS JWKS URL              | exact Production WorkOS JWKS URL              |
+| `AUTH_WEB_CLIENT_ID`         | Alpha Web Application                    | Production Web Application                    |
+| `AUTH_DESKTOP_CLIENT_ID`     | Alpha Desktop Application                | Production Desktop Application                |
+| `APP_ORIGIN`                 | `https://app-alpha.zeros.build`          | `https://app.zeros.build`                     |
+| `OPS_ORIGIN`                 | `https://ops-alpha.zeros.build`          | `https://ops.zeros.build`                     |
+| `WORKOS_API_KEY`             | Alpha server key                         | Production server key                         |
+| `WORKOS_COOKIE_PASSWORD`     | unique random Alpha 32+ character secret | unique random Production 32+ character secret |
+| `WORKOS_WEBHOOK_SECRET`      | Alpha endpoint signing secret            | Production endpoint signing secret            |
+| `NODE_ENV`                   | `production`                             | `production`                                  |
+| `INVITE_LINK_BASE`           | `https://app-alpha.zeros.build/invite`   | `https://app.zeros.build/invite`              |
+| `GITHUB_OAUTH_CALLBACK_URL`  | matching Alpha API callback              | matching Production API callback              |
+| `GITHUB_COMPLETION_PAGE_URL` | matching Alpha app page                  | matching Production app page                  |
+| `GITHUB_REFRESH_BINDING_SECRET` | unique Alpha binding key (required)   | unique Production binding key (required)      |
 
 Use separate GitHub App registrations per environment. Keep OAuth secrets,
 refresh-binding secrets, database credentials, Intercom credentials, and Linear
@@ -203,7 +200,7 @@ Desktop GitHub App connections refresh through a refresh binding that the
 control plane signs. Rotating the key that signed outstanding bindings makes
 every connected desktop reconnect, so these secrets rotate with overlap:
 
-- **First adoption.** Alpha, Beta and Production refuse to boot unless
+- **First adoption.** Alpha and Production refuse to boot unless
   `GITHUB_REFRESH_BINDING_SECRET` or `GITHUB_REFRESH_BINDING_KEYS_JSON` is set,
   and `/healthz` keeps the previous deployment serving. Before deploying, set
   `GITHUB_REFRESH_BINDING_SECRET` to the value that signs today's bindings:
@@ -225,7 +222,7 @@ every connected desktop reconnect, so these secrets rotate with overlap:
   the old secret on GitHub.
 - **App registration.** A different App or client ID always requires every
   user to authorize again; change it only as a planned migration.
-- Change Alpha first, confirm `/healthz` and one desktop refresh, then Beta and
+- Change Alpha first, confirm `/healthz` and one desktop refresh, then
   Production. Don't change these variables while a release workflow runs.
 
 The issuer, JWKS URL, audience, and client IDs are public verification values;
@@ -238,14 +235,14 @@ GitHub variables, command arguments, logs, or repository files.
 official Railway environment it must equal `${APP_ORIGIN}/invite`, use HTTPS,
 and contain no credentials, query, or fragment; startup rejects a wrong-channel
 or malformed value. The Pages invitation route derives its installed-app scheme
-from the validated `ZEROS_DEPLOY_ENV` (`zeros-alpha`, `zeros-beta`, or `zeros`),
+from the validated `ZEROS_DEPLOY_ENV` (`zeros-alpha` or `zeros`),
 so a query parameter cannot cross channels. Query-selected schemes remain a
 local-preview convenience only. Desktop accepts pasted invitations only from
 the exact official app hosts or official channel schemes and the exact
 `/invite` action, never a lookalike hostname or nested path.
 
 For the clean-slate identity cutover, prefer provisioning a fresh database and
-running all migrations. An Alpha/Beta in-place reset must use the guarded
+running all migrations. An Alpha in-place reset must use the guarded
 `pnpm --dir apps/control-plane reset:database` procedure in the control-plane
 README. It is dry-run by default, requires a backup confirmation plus an exact
 target fingerprint, uses the strict migration runner, and currently requires
@@ -263,7 +260,6 @@ environment. Register these exact HTTPS redirects:
 | Channel    | Web Application redirects                                                                    | Desktop Application redirect                          | App handoff after the hosted callback |
 | ---------- | -------------------------------------------------------------------------------------------- | ----------------------------------------------------- | ------------------------------------- |
 | Alpha      | `https://app-alpha.zeros.build/auth/callback`, `https://ops-alpha.zeros.build/auth/callback` | `https://app-alpha.zeros.build/auth/desktop/callback` | `zeros-alpha://auth/callback`         |
-| Beta       | `https://app-beta.zeros.build/auth/callback`                                                 | `https://app-beta.zeros.build/auth/desktop/callback`  | `zeros-beta://auth/callback`          |
 | Production | `https://app.zeros.build/auth/callback`, `https://ops.zeros.build/auth/callback`             | `https://app.zeros.build/auth/desktop/callback`       | `zeros://auth/callback`               |
 
 The app handoff is generated by Zeros after WorkOS returns to the HTTPS
@@ -283,8 +279,8 @@ page, a deep link, or renderer code.
 
 ## Cloudflare Pages setup
 
-Create `zeros-web-alpha` and `zeros-web-beta` beside the existing `zeros-web`,
-plus `zeros-ops-alpha` and `zeros-ops` from the same source. All five use:
+Create `zeros-web-alpha` beside the existing `zeros-web`, plus
+`zeros-ops-alpha` and `zeros-ops` from the same source. All four use:
 
 | Build setting    | Value           |
 | ---------------- | --------------- |
@@ -299,13 +295,12 @@ Configure each project:
 | ----------------- | --------------------------------- | --------------------------------- | ------------------------- | --------------------------------------------------- |
 | `zeros-web-alpha` | `main`                            | **off under the controller**       | **off**                   | `app-alpha.zeros.build`                             |
 | `zeros-ops-alpha` | `main`                            | **off under the controller**       | **off**                   | `ops-alpha.zeros.build`                             |
-| `zeros-web-beta`  | current `release/X.Y.Z`           | **off under the controller**       | **off**                   | `app-beta.zeros.build`                              |
 | `zeros-web`       | current validated `release/X.Y.Z` | **off**                           | **off**                   | `app.zeros.build` plus Production marketing domains |
 | `zeros-ops`       | current validated `release/X.Y.Z` | **off**                           | **off**                   | `ops.zeros.build`                                   |
 
 Disable Preview deployments for these release projects. If PR previews are
-needed later, create a sixth preview-only project with preview-only credentials
-and data instead of sharing Alpha/Beta state.
+needed later, create a fifth preview-only project with preview-only credentials
+and data instead of sharing Alpha state.
 
 The controller retargets the project production branch under the channel lock,
 keeps both production and preview autodeploys disabled, then uploads the exact
@@ -316,12 +311,12 @@ existing hosted environment guards run in Actions too.
 
 Set these common values in the project's Production variable configuration:
 
-| Variable            | Alpha                           | Beta                           | Production                |
-| ------------------- | ------------------------------- | ------------------------------ | ------------------------- |
-| `ZEROS_DEPLOY_ENV`  | `alpha`                         | `beta`                         | `production`              |
-| `AUTH_PROVIDER`     | `workos` or unset               | `workos` or unset              | `workos` or unset         |
-| `APP_ORIGIN`        | `https://app-alpha.zeros.build` | `https://app-beta.zeros.build` | `https://app.zeros.build` |
-| `CONTROL_PLANE_URL` | `https://api-alpha.zeros.build` | `https://api-beta.zeros.build` | `https://api.zeros.build` |
+| Variable            | Alpha                           | Production                |
+| ------------------- | ------------------------------- | ------------------------- |
+| `ZEROS_DEPLOY_ENV`  | `alpha`                         | `production`              |
+| `AUTH_PROVIDER`     | `workos` or unset               | `workos` or unset         |
+| `APP_ORIGIN`        | `https://app-alpha.zeros.build` | `https://app.zeros.build` |
+| `CONTROL_PLANE_URL` | `https://api-alpha.zeros.build` | `https://api.zeros.build` |
 
 Pages has no provider-specific secret or binding. It remains a same-origin
 facade using only the common `APP_ORIGIN` and `CONTROL_PLANE_URL`. Remove any
@@ -336,7 +331,6 @@ For `zeros-ops-alpha` and `zeros-ops`, set `ZEROS_SURFACE=ops`,
 Do not configure marketing hosts.
 The corresponding Railway environment uses the same control-plane service and
 database as its customer app, with `OPS_ORIGIN` set to the exact Ops hostname.
-There is intentionally no `zeros-ops-beta` project.
 
 For each WorkOS environment, register the exact channel URL
 `https://<api-host>/auth/workos-webhook` and subscribe to the complete
@@ -352,7 +346,7 @@ A self-hosted template can use platform-provided HTTPS domains instead of
 buying domains. Keep the frontend `APP_ORIGIN` separate from the API origin so
 server-only session responses are never same-origin browser endpoints; two
 services in one Railway project can each use their generated domain. Such a
-template sets `ZEROS_SELF_HOSTED=true`; official Alpha/Beta/Production services
+template sets `ZEROS_SELF_HOSTED=true`; official Alpha/Production services
 must leave it unset so the repository's exact channel and branch checks remain
 active.
 
@@ -398,23 +392,22 @@ WorkOS webhook, and matching desktop build as one coordinated operation. Never
 change only the browser or only the control plane.
 
 Only `zeros-web` owns `zeros.build`, `www.zeros.build`, and `zeros.design`.
-Those marketing domains must never be attached to Alpha or Beta.
+Those marketing domains must never be attached to Alpha.
 
 ## GitHub release environments
 
-The repository already has `alpha`, `beta`, and `production` GitHub
+The repository already has `alpha` and `production` GitHub
 Environments. Add environment-scoped Actions **variables** (secrets remain a
 backward-compatible fallback):
 
 | GitHub environment | `VITE_APP_BASE_URL`             | `VITE_CONTROL_PLANE_URL`        |
 | ------------------ | ------------------------------- | ------------------------------- |
 | `alpha`            | `https://app-alpha.zeros.build` | `https://api-alpha.zeros.build` |
-| `beta`             | `https://app-beta.zeros.build`  | `https://api-beta.zeros.build`  |
 | `production`       | `https://app.zeros.build`       | `https://api.zeros.build`       |
 
 The workflows validate these exact pairs. Both values are baked into the
 renderer, and both are now also available to Electron main for hosted WorkOS
-desktop authorization and GitHub handoffs. A missing Alpha/Beta value
+desktop authorization and GitHub handoffs. A missing Alpha value
 cannot silently fall back to Production.
 
 Desktop release environments recognize these environment-scoped Actions
@@ -472,8 +465,8 @@ Personal and organization-local workspaces stay available.
 
 Allowing a channel changes nothing by itself. The backend still needs
 `CLOUD_V2_ENABLED=true` and its provider configuration, and a desktop build
-needs `ZEROS_CLOUD_WORKSPACES_ENABLED=true`. Turn on Beta first, then
-Production from the same release commit. Every resource and key below is the
+needs `ZEROS_CLOUD_WORKSPACES_ENABLED=true`. Turn on Production from a
+release commit Alpha already runs. Every resource and key below is the
 channel's own; never reuse Alpha's.
 
 1. **Release.** Ship a `main` commit containing the allowing policy through
@@ -540,7 +533,7 @@ channel releases use the same `runtime-release-run.yml` runner. It builds an
 exact main commit with successful Preflight and CodeQL, publishes
 by SHA-256, then pins and deploys it on Alpha. Alpha is the canary: a broken
 runtime reaches Alpha users first, and rollback is the recovery. A successful
-Alpha publish attempt is required before promotion to Beta or Production.
+Alpha publish attempt is required before promotion to Production.
 The workflow redeploys the unchanged live control-plane commit; it does not
 publish a desktop or web release.
 Automatic Alpha publication resolves the runtime after hosted promotion, inside
@@ -548,7 +541,7 @@ the existing `release-alpha` publication lock. It publishes when the canonical
 archive inputs or the complete control-plane/protocol qualification trees
 change, or when the pin has no provenance. The runtime waits for full Preflight
 and CodeQL even when the hosted Alpha lane used its faster admission gate.
-Beta and Production resolve after hosted promotion and promote only Alpha's
+Production resolves after hosted promotion and promotes only Alpha's
 qualified pin from an ancestor with the same archive inputs and qualifying
 code as their release source. Unavailable or unqualified Alpha state fails the
 release. When Alpha is healthy but has moved past the release's code (its pin is
@@ -573,7 +566,7 @@ recorded Alpha attempt and its successful build/publication jobs. A known
 incomplete or failed enclosing Alpha attempt causes fresh Alpha publication;
 unavailable evidence fails resolution. This recovers a pin left behind when a
 later desktop publication failed without accepting that failed attempt for
-Beta or Production.
+Production.
 The hosted control plane may already be deployed when a runtime job fails;
 the manual wrapper remains available for recovery, promotion and rollback.
 
@@ -588,7 +581,7 @@ actual workflow path. A manual Production runtime release through
 paths, events, exact attempts and nested producer/approval names are checked
 together; historic manual proofs remain readable.
 
-Beta and Production promotion copies and re-hashes the same archive without
+Production promotion copies and re-hashes the same archive without
 rebuilding it. Archives, source manifests and qualification receipts are
 retained under `cloud-v2/runtime/releases/`, outside the ordinary publisher's
 pruning namespace. Before a retained archive is selected, the controller
@@ -665,10 +658,9 @@ digest and matching `CLOUD_V2_RUNTIME_RELEASE_METADATA` with Railway
 missing capability, expired lease, nonzero count or unknown result refuses
 pinning.
 
-Beta/Production promotion and rollback require explicit dispatch,
-expected-prior-pin checks and a retained Alpha receipt. Production also requires
-its existing GitHub approval job; Beta follows the app's current policy without
-a human approval gate.
+Production promotion and rollback require explicit dispatch,
+expected-prior-pin checks, a retained Alpha receipt and the existing GitHub
+approval job.
 They never edit an organization's recipe or stop user workspaces.
 
 #### Runtime workflow configuration
@@ -679,7 +671,7 @@ claim/adoption drain. The controller requires the exact live CP
 SHA and `runtimeBuildDrainVersion: 1`; an old or unready service cannot authorize
 a pin even if the database already has the migration.
 
-The `alpha`, `beta` and `production` GitHub environments hold channel
+The `alpha` and `production` GitHub environments hold channel
 configuration. Set both `ZEROS_RUNTIME_RELEASE=enabled` and
 `ZEROS_HOSTED_PROMOTION=enabled` for mutations. Keep Railway autodeploy disabled.
 Use the existing `RAILWAY_PROJECT_ID`, `RAILWAY_ENVIRONMENT_ID`,
@@ -693,7 +685,7 @@ Railway database route, and confirms deletion before publishing success.
 Configure `CLOUD_V2_RUNTIME_STORE_ENDPOINT` and `CLOUD_V2_RUNTIME_STORE_BUCKET`
 as variables, and the corresponding `ACCESS_KEY_ID` and `SECRET_ACCESS_KEY`
 as secrets. They must exactly match the serving channel's runtime store.
-Beta and Production additionally need read-only Alpha store access through
+Production additionally needs read-only Alpha store access through
 `CLOUD_RUNTIME_ALPHA_STORE_ENDPOINT`, `CLOUD_RUNTIME_ALPHA_STORE_BUCKET`,
 `CLOUD_RUNTIME_ALPHA_STORE_ACCESS_KEY_ID` and
 `CLOUD_RUNTIME_ALPHA_STORE_SECRET_ACCESS_KEY`. Destination credentials write
@@ -706,17 +698,14 @@ environment to the existing isolated Linux/Node 24 packager.
 
 The workflow uses the existing `production-approval` environment for Production
 promotion and rollback, and checks that job's exact source, run and attempt.
-Beta follows the current app Beta policy: explicit dispatch and all source,
-qualification and pin checks, with no human gate. There is no `beta-approval`
-dependency. All destination secrets are confined to the one release job,
+All destination secrets are confined to the one release job,
 including its immediate cleanup step.
 
 Recommended hardening for the repository owner is a required reviewer on the
 secret-bearing `production` environment itself, with self-review and
-administrator bypass disabled. A reviewer on `beta` is an optional owner
-decision. These are recommendations, not settings applied by this change.
+administrator bypass disabled. These are recommendations, not settings applied by this change.
 Use selected deployment branches with no tags: `main` for `alpha`, and
-`release/*` for `beta` and `production`; protect `release/*` with the repository
+`release/*` for `production`; protect `release/*` with the repository
 ruleset below. A dispatched branch controls its workflow, so the separate
 approval job alone does not enforce approval against a modified workflow ref.
 GitHub enforces protection on the secret-bearing environment before releasing
@@ -741,7 +730,7 @@ Supply its exact `sourceSha` as `expected_cp_sha` and its `worker.sha256` as
   builds/adoptions, pins the digest and waits for the unchanged control plane to
   serve it. The final successful publish receipt qualifies that digest for
   promotion. Alpha users receive it through normal wake or quiet adoption.
-- **Promote:** dispatch on `release/X.Y.Z` with `channel=beta` or `production`,
+- **Promote:** dispatch on `release/X.Y.Z` with `channel=production`,
   `action=promote`, `runtime_sha256`, `alpha_run_id` and `alpha_run_attempt` from
   the successful Alpha publish attempt. Leave `source_sha` empty. Both its
   archive-build job and release job must have succeeded. The separate build
@@ -762,7 +751,7 @@ Supply its exact `sourceSha` as `expected_cp_sha` and its `worker.sha256` as
   empty. The controller selects only `CLOUD_V2_RUNTIME_PREVIOUS_SHA256` and its
   recorded metadata. Alpha restores that retained archive without a fixture
   probe and records a rollback receipt, which cannot qualify a new promotion.
-  Beta and Production verify the retained proof against the trusted previous
+  Production verifies the retained proof against the trusted previous
   pin and recheck control-plane compatibility, so GitHub artifact expiration
   does not erase rollback capability. This accepts either the version-2
   publication proof or a matching legacy gate0 proof; an unqualified legacy
@@ -777,7 +766,7 @@ effects and committed adoptions without killing them. It does not renew a run.
 Before staging, at least ten minutes must remain. This conservative budget
 uses the observed 6.2-minute maximum of ten successful Alpha hosted-service
 promotion steps, plus readiness and cleanup margin; unchanged-CP redeploy time
-was not measured separately, and Beta/Production use the same budget. Deploy
+was not measured separately, and Production uses the same budget. Deploy
 requires nine minutes remaining, with an eight-minute absolute submission and
 readiness bound and one minute reserved for cleanup. A long-running Computer
 build may therefore cause a clean refusal before any variable changes.
@@ -861,7 +850,7 @@ identities. A consumed run's build-drain receipt is durable across GitHub
 attempts and cannot be renewed by rerunning a job.
 
 Set GitHub Environment deployment-branch protection too: `alpha` permits only
-`main`; `beta` and `production` permit `release/*`.
+`main`; `production` permits `release/*`.
 The stable desktop workflow itself rejects `main` and requires an exact
 `release/X.Y.Z` ref, so a manual dispatch cannot bypass the promotion ladder.
 
@@ -870,10 +859,10 @@ permits only `release/*`, and has no
 secrets or variables. `release.yml` starts with an `approve` job in that
 environment, and every job that can read `production` secrets needs it: build,
 submit, notarize, publish and the hosted lane it calls. A direct Production
-dispatch of `controlled-cutover.yml` needs the same approval; Alpha and Beta
-skip it. The current secret-bearing `production` and `beta` environments have
-branch policies but no required reviewers. A reviewer on `production` is the
-recommended hardening described above; Beta approval remains an owner choice.
+dispatch of `controlled-cutover.yml` needs the same approval; Alpha skips it.
+The current secret-bearing `production` environment has a branch policy but no
+required reviewers. A reviewer on `production` is the recommended hardening
+described above.
 Adding a reviewer to an environment used by several desktop jobs can add
 per-job approvals until those workflows consolidate their secret access.
 
@@ -940,7 +929,7 @@ compatible with the post-migration schema. It must not run as an ordinary
 rolling deploy in any channel, and production service boot intentionally
 ignores migration approvals.
 
-Exercise this procedure in Alpha and Beta before Production. For each channel:
+Exercise this procedure in Alpha before Production. For each channel:
 
 1. Verify the exact release SHA and build the production image that will be
    promoted. Disable autodeploy, take and verify a fresh database backup, and
@@ -1018,7 +1007,7 @@ step and fails if a dependency change stops it storing links for macOS.
 4. Dispatch `release.yml` from the frozen release branch. With hosted promotion
    enabled, Production requires Alpha's live identity to be ready with every
    migration this release carries already applied (`scripts/release/alpha-first.ts`):
-   Alpha, not a Beta deployment, runs a release's migrations first. Hosted
+   Alpha runs a release's migrations first. Hosted
    promotion, the Apple submission guard and controlled cutovers all check it.
    The Production human approval, notarization and all macOS gates remain;
    disabled legacy mode does not require the Alpha identity.
@@ -1089,9 +1078,9 @@ that entire reusable call:
 entry revalidation, hosted services, final hosted receipt and desktop
 feed/ledger/tag/readback/retention.
 Individual hosted locks remain `hosted-mutation-<channel>`; their different
-group avoids nesting the outer lock into itself. Beta and Production retain
-their separate workflow-wide channel locks, full CI, branch gates and
-Production approval/notarization. Their builds already run alongside Alpha.
+group avoids nesting the outer lock into itself. Production retains
+its separate workflow-wide channel lock, full CI, branch gates and
+Production approval/notarization. Its builds already run alongside Alpha.
 
 The read-only `metadata` job computes `<next stable>-alpha.<parent run_number>`
 with the original `compute-version.mjs` and a full tagged exact-SHA checkout.
@@ -1170,7 +1159,7 @@ not a cached failure from the original release attempt.
 The repository variable `ZEROS_ALPHA_CI_FAST_PATH=enabled` opts automatic
 `release-alpha.yml` main pushes into Preflight's early `alpha-gate` alone.
 An unset or other value retains the existing whole-run Preflight + CodeQL
-policy. Beta, Production, manual Alpha operations and direct worker/cutover
+policy. Production, manual Alpha operations and direct worker/cutover
 paths keep that full policy and strict branch-HEAD equality. They do not read
 Alpha authority or consume Alpha readiness outputs.
 
@@ -1191,7 +1180,7 @@ gate depends on successful `quality`, `test`, `build`, `control-plane` and
 failed critical aggregate. Every main Preflight run executes all database
 shards, including a docs-only push after an earlier service change. The fast path does not wait
 for CodeQL: its findings are advisory, the scan still runs on every push, and
-Beta, Production and every full-policy caller keep requiring its exact-SHA
+Production and every full-policy caller keep requiring its exact-SHA
 success. PR, merge-group, fork and older-attempt proof cannot replace the gate, and Preflight from another branch is ineligible; cancellation refuses
 admission. Every main push has its own full Preflight
 ([CI concurrency](ci-concurrency.md)). If a cancelled or failed candidate's gate
@@ -1233,7 +1222,7 @@ selected evidence. Hosted promotion passes the optional Alpha CI input to its
 nested native-worker callable, so that authenticated automatic Alpha parent
 uses the same evidence at the worker wait and every worker checkpoint. Both
 reusable inputs default to empty; direct worker dispatch, controlled cutover,
-staff bootstrap, Beta and Production keep full CI and strict HEAD equality.
+staff bootstrap and Production keep full CI and strict HEAD equality.
 
 Leave the flag unset until the ordered Alpha controller is rehearsed and
 independent Railway/Pages Git autodeploy is held. No repository or provider
@@ -1299,7 +1288,7 @@ pending deadline. Each retry reads all frontiers again; if the mismatch was
 observed after green CI, it also reads CI again before issuing admission. A
 persistent mismatch fails red, without `ready=true` or an admission receipt.
 Malformed, unavailable, newer or divergent identities retain their existing
-closed behavior; downstream, manual, Beta and Production checks gain no retry
+closed behavior; downstream, manual and Production checks gain no retry
 or authority from this exception.
 The publication entry job repeats authentication, CI/admission and fresh
 frontier checks **inside** the encompassing lock before any provider writes.
@@ -1411,7 +1400,7 @@ To roll back Stage 2, pause and drain before setting the variable to `admitted`.
 To restore today's strict policy, pause and drain before unsetting it (or use
 any other value). Existing receipts remain valid for their original protocols;
 there is no tag, feed, provider or schema rollback. An in-flight variable change
-can stop a later checkpoint, so drain before toggling. Beta, Production and
+can stop a later checkpoint, so drain before toggling. Production and
 direct/manual paths keep their existing policy throughout.
 
 When enabled, the hosted controller performs a read-only provider plan, a
@@ -1426,7 +1415,7 @@ parent release's exact repository, branch and SHA and the successful producing
 job. It verifies current provider, Pages, API source and schema before saving
 `hosted-promotion-<channel>-<sha>`. Only that final receipt authorizes the desktop
 publisher and cumulative release ledger.
-There is no Ops deployment in Beta. Every Pages artifact includes Functions
+Every Pages artifact includes Functions
 and the applicable marketing output. Build/install output from provider-facing
 subprocesses is withheld, and receipts contain allowlisted public fields only.
 
@@ -1459,8 +1448,8 @@ writes against these checks; external mutations are outside the workflow lock.
 Each publisher builds a cumulative version-1 desktop release ledger **before**
 altering the feed release, uploads it with the feed, then reads the full expected
 ledger back anonymously before declaring publication successful. The assets are
-`alpha-release-ledger.json` on the rolling `alpha` release,
-`beta-release-ledger.json` on `beta`, and `release-ledger.json` on every stable
+`alpha-release-ledger.json` on the rolling `alpha` release, and
+`release-ledger.json` on every stable
 Production release (`/releases/latest/download/release-ledger.json`). Shape:
 
 ```json
@@ -1506,10 +1495,10 @@ the runner writes phase only when that column exists. No schema-owner mutation
 or ledger alteration happens just because the bridge API boots.
 
 **Step B ships `apps/control-plane/migrations/0122_migration_phases.sql`.** Every
-channel ran the Step A bridge before it (Alpha from `6eabbd78`, Beta and
-Production from `87ee454f`). Alpha's enabled hosted lane applies it as an
-ordinary expand migration. Beta and Production take it with their next release,
-through their hosted lane or a controlled cutover; their disabled guard refuses
+channel ran the Step A bridge before it (Alpha from `6eabbd78`, Production
+from `87ee454f`). Alpha's enabled hosted lane applies it as an ordinary expand
+migration. Production takes it with its next release, through its hosted lane
+or a controlled cutover; its disabled guard refuses
 publication until the schema matches. Migration 0122 adds `schema_migrations.phase`, defaulting
 existing rows to `legacy`; files 0001–0121 and their checksums remain immutable.
 New files (0122 onward) start with exactly `-- zeros-migration: expand` or
@@ -1542,8 +1531,8 @@ without the phase column is read as legacy without changing it at boot.
 The phase-aware release identity applies the same rule to a compatible rollback
 binary: it reports ready with `migrations.head` ahead of `migrations.expectedHead`,
 while publication and promotion still require the exact candidate manifest.
-As of October 1, 2026, Beta and Production run `87ee454f`, which predates this
-identity fix; after they take 0122, that rollback target still serves but reports
+As of October 1, 2026, Production runs `87ee454f`, which predates this
+identity fix; after it takes 0122, that rollback target still serves but reports
 a not-ready identity.
 
 Contract SQL belongs to a later, separately reviewed rollout after backfill,
@@ -1585,7 +1574,7 @@ partially or fully retired schema.
 Auth0 removal is one contract file, `0217_drop_auth0_tables.sql`, which drops
 the four unused `auth0_*` tables from 0208 and may run from `2026-11-02`. Pass
 `approvals=0217_drop_auth0_tables.sql` to `controlled-cutover.yml`: Alpha from
-`main`, Beta and Production from the first release branch that ships it. Once
+`main`, Production from the first release branch that ships it. Once
 it is applied, an API built before 0217 cannot boot against that database.
 
 The first rollout needs a compatible bridge: binaries released before this
@@ -1609,13 +1598,13 @@ against the **published channel baseline**, never an event-local push diff.
 The guard derives the published SHA from a successful same-channel release
 workflow with a successful desktop publish step, checking the exact repository,
 source repository, workflow path, event, channel branch and job SHA. Alpha must
-publish from `main`; Beta/Production must publish from `release/X.Y.Z`. Beta's
+publish from `main`; Production must publish from `release/X.Y.Z`, and its
 previous publication may be on an older release branch because its destination
 is global. The most recent successful publish-step time determines the baseline,
 including a later rerun of an older workflow. This reads retained Actions
 history with `actions:read`; it never trusts release `target_commitish` alone.
 
-That proof is cross-checked against the `alpha` or `beta` rolling tag, or the
+That proof is cross-checked against the `alpha` rolling tag, or the
 numerically highest stable `vX.Y.Z` tag for Production. Existing rolling refs
 can predate their published assets because the old publisher only updated
 release metadata. When the tag disagrees, the successful publication's SHA
@@ -1632,7 +1621,7 @@ An unresolved change remains visible on every descendant push, even when its
 own diff contains only documentation. New migrations on this branch still
 require manual cutover regardless of legacy-tag bootstrap.
 
-Alpha/Beta advance the actual rolling Git tag ref only after their assets upload
+Alpha advances the actual rolling Git tag ref only after its assets upload
 successfully. Updating a release's `--target` alone does not move an existing
 tag ([GitHub release API](https://docs.github.com/en/rest/releases/releases#update-a-release)).
 Production publishes `v${VERSION}` from `release-promote.yml` (earlier releases
@@ -1676,8 +1665,8 @@ See [Railway Wait for CI](https://docs.railway.com/deployments/github-autodeploy
 Before enabling the ordered controller, disable independent autodeploy and
 Wait for CI as below; otherwise the hosted-before-desktop order would deadlock.
 
-The channel lock protects the running transaction (the full workflow for Beta
-and Production, the publication call for Alpha), but GitHub may replace a
+The channel lock protects the running transaction (the full workflow for
+Production, the publication call for Alpha), but GitHub may replace a
 **pending** transaction with a later one. Every desktop writer reruns the complete
 guard decision, so a displaced guard cannot authorize a descendant's desktop
 publication. This is not a provider deployment barrier: Railway can ignore a
@@ -1688,19 +1677,19 @@ alone cannot guarantee ordering for cancelled pending runs. See
 [GitHub concurrency](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency)
 and [Railway's cancellation rules](https://docs.railway.com/deployments/github-autodeploys#wait-for-ci).
 
-Configure these GitHub **environment** variables independently in `alpha`,
-`beta`, and `production` (not in `.env.agent`):
+Configure these GitHub **environment** variables independently in `alpha`
+and `production` (not in `.env.agent`):
 
 | Variable                                                             | Required value or source                                                                             |
 | -------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
 | `ZEROS_HOSTED_PROMOTION`                                             | unset/disabled initially; exactly `enabled` after rehearsal                                          |
 | `RAILWAY_PROJECT_ID`, `RAILWAY_ENVIRONMENT_ID`, `RAILWAY_SERVICE_ID` | target UUIDs; environment name must equal channel; API custom domain and repository/root are checked |
 | `PLANETSCALE_ORG`                                                    | organization owning this channel database                                                            |
-| `PLANETSCALE_DATABASE`                                               | exactly `zeros-control-plane-alpha`, `zeros-control-plane-beta`, or `zeros-control-plane-production` |
-| `PLANETSCALE_BRANCH`                                                 | `main`; each is a separate database, not three branches of one database                              |
+| `PLANETSCALE_DATABASE`                                               | exactly `zeros-control-plane-alpha` or `zeros-control-plane-production`                              |
+| `PLANETSCALE_BRANCH`                                                 | `main`; each is a separate database, not two branches of one database                                |
 | `CLOUDFLARE_ACCOUNT_ID`                                              | account owning the channel's Pages projects                                                          |
-| `CF_PAGES_APP_PROJECT`                                               | `zeros-web-alpha`, `zeros-web-beta`, or `zeros-web`                                                  |
-| `CF_PAGES_OPS_PROJECT`                                               | `zeros-ops-alpha`, empty for Beta, or `zeros-ops`                                                    |
+| `CF_PAGES_APP_PROJECT`                                               | `zeros-web-alpha` or `zeros-web`                                                                     |
+| `CF_PAGES_OPS_PROJECT`                                               | `zeros-ops-alpha` or `zeros-ops`                                                                     |
 | `AUTH_PROVIDER`                                                      | `workos` or unset                                                                                    |
 | `AUTH_ISSUER`, `AUTH_JWKS_URL`                                       | channel's qualified public WorkOS issuer and signing-key URL; HTTPS only                             |
 | `AUTH_WEB_CLIENT_ID`, `AUTH_DESKTOP_CLIENT_ID`                       | distinct channel client IDs; public verification metadata, never client secrets                      |
@@ -1724,14 +1713,12 @@ mutation, and the current branch head is rechecked after the migration plan.
 
 Actions needs `contents:read` and `actions:read` even for the disabled guard's
 publication-history bootstrap. The workflow supplies `GH_TOKEN` from its
-repository-scoped `GITHUB_TOKEN`, never a provider token. The hosted lane also
-reads the successful Beta run and downloads
-that run's named receipt artifact; an arbitrary JSON file or a release branch
-name is insufficient. Artifacts are retained for 90 days. Expired evidence
-requires a new successful Beta run, never a bypass. Job provenance is read from
+repository-scoped `GITHUB_TOKEN`, never a provider token. Desktop publication
+also downloads its own run's named hosted receipt artifact; an arbitrary JSON
+file or a release branch name is insufficient. Artifacts are retained for 90
+days. Job provenance is read from
 `/actions/runs/<id>/attempts/<recorded-attempt>/jobs`, with the named promotion
-and receipt-upload steps both successful; overall Beta success is checked
-separately. Desktop publishing has `actions:read` for this check alongside its
+and receipt-upload steps both successful. Desktop publishing has `actions:read` for this check alongside its
 existing narrowly scoped `contents:write`. No migration/runtime owner URL,
 WorkOS server secret, GitHub App private key or R2 encryption key belongs in a
 Pages or desktop build environment.
@@ -1748,7 +1735,7 @@ controller's no-secret-argv rule, not a verified fix. See
 Owner setup, once per channel before **enabling** the controller:
 
 1. Configure protected environment branch policies (`main` for Alpha,
-   `release/*` for Beta/Production) and keep the Production human reviewer on
+   `release/*` for Production) and keep the Production human reviewer on
    `production-approval`.
    Confirm fork workflows cannot access release environments.
 2. Keep server WorkOS/GitHub App/database/object-store/keyring settings in
@@ -1785,7 +1772,7 @@ Owner setup, once per channel before **enabling** the controller:
 `controlled-cutover.yml` is the dispatched, owner-gated path for migrations
 the automated lane refuses: controlled-downtime and contract boundaries such
 as a first rollout's 0101/0103. Dispatch it from `main` for Alpha or from the
-frozen `release/X.Y.Z` for Beta/Production with `approvals` listing exactly the
+frozen `release/X.Y.Z` for Production with `approvals` listing exactly the
 pending controlled filenames (empty when none) and `confirm` set to the
 channel database name. Production waits for its single approval in
 `production-approval`. It uses

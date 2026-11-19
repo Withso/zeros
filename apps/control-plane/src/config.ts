@@ -64,7 +64,7 @@ const EnvSchema = z.object({
   AUTH_DESKTOP_CLIENT_ID: z.string().trim().min(1).optional(),
   /** Canonical browser application origin used for callbacks and cookies. */
   APP_ORIGIN: z.string().trim().min(1).optional(),
-  /** Optional isolated staff console origin. Deliberately absent in Beta. */
+  /** Optional isolated staff console origin. */
   OPS_ORIGIN: z.string().trim().min(1).optional(),
   /** Exact browser landing page used in organization invitations. */
   INVITE_LINK_BASE: z.string().trim().min(1).optional(),
@@ -111,7 +111,7 @@ const GithubEnvSchema = z.object({
     .string()
     .url()
     .default("https://app.zeros.build/github/connected"),
-  /** Refresh-binding HMAC key version 1. Required in Railway Alpha, Beta and
+  /** Refresh-binding HMAC key version 1. Required in Railway Alpha and
    * Production, so rotating the OAuth client secret leaves bindings valid. */
   GITHUB_REFRESH_BINDING_SECRET: z.string().min(16).optional(),
   /** Versioned refresh-binding keys, `{"<version>":"<secret>"}`. Bindings are
@@ -150,7 +150,7 @@ export type GithubBackendConfig = {
   webBaseUrl: string;
   apiBaseUrl: string;
   variantKey: "github.com";
-  desktopSchemes: readonly ["zeros", "zeros-alpha", "zeros-beta", "zeros-dev"];
+  desktopSchemes: readonly ["zeros", "zeros-alpha", "zeros-dev"];
 };
 
 export type FeedbackBackendConfig = {
@@ -219,7 +219,7 @@ export type Config = {
   host?: string;
   development?: DevelopmentIdentity;
   isProduction: boolean;
-  deploymentChannel: "development" | "alpha" | "beta" | "production";
+  deploymentChannel: "development" | "alpha" | "production";
   desktopReleaseLedgerUrl?: string | null;
   /** Null when no GitHub App is registered for this environment. */
   github: GithubBackendConfig | null;
@@ -692,7 +692,7 @@ function parseGithubConfig(
       { allowPath: true },
     ),
     variantKey: "github.com",
-    desktopSchemes: ["zeros", "zeros-alpha", "zeros-beta", "zeros-dev"],
+    desktopSchemes: ["zeros", "zeros-alpha", "zeros-dev"],
   };
 }
 
@@ -833,12 +833,6 @@ const HOSTED_ENVIRONMENTS = {
     opsOrigin: "https://ops-alpha.zeros.build",
     branch: "main",
   },
-  beta: {
-    audience: "https://api-beta.zeros.build",
-    appOrigin: "https://app-beta.zeros.build",
-    opsOrigin: null,
-    branch: "release/",
-  },
   production: {
     audience: "https://api.zeros.build",
     appOrigin: "https://app.zeros.build",
@@ -873,7 +867,7 @@ function validateRailwayEnvironment(
     HOSTED_ENVIRONMENTS[name as keyof typeof HOSTED_ENVIRONMENTS];
   if (!expected) {
     throw new Error(
-      "Invalid environment: Railway environment must be named alpha, beta, or production",
+      "Invalid environment: Railway environment must be named alpha or production",
     );
   }
   if (audience !== expected.audience) {
@@ -888,9 +882,7 @@ function validateRailwayEnvironment(
   }
   if (opsOrigin !== expected.opsOrigin) {
     throw new Error(
-      expected.opsOrigin
-        ? `Invalid environment: OPS_ORIGIN must be ${expected.opsOrigin} in Railway ${name}`
-        : "Invalid environment: OPS_ORIGIN is not supported in Railway beta",
+      `Invalid environment: OPS_ORIGIN must be ${expected.opsOrigin} in Railway ${name}`,
     );
   }
   const expectedInviteLinkBase = `${expected.appOrigin}/invite`;
@@ -938,7 +930,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, diagnostics: Co
   }
   const e = parsed.data;
   const channel = (env.RAILWAY_ENVIRONMENT_NAME ?? "development").trim().toLowerCase();
-  const deploymentChannel = channel === "alpha" || channel === "beta" || channel === "production" ? channel : "development";
+  const deploymentChannel = channel === "alpha" || channel === "production" ? channel : "development";
   const cloudChannel = cloudWorkspaceChannelEnabled(deploymentChannel);
   validateDatabaseConnections(e);
   const migrationRole = validateMigrationRole(e.DATABASE_MIGRATION_ROLE);

@@ -246,9 +246,9 @@ describe("Local CLI visibility", () => {
   });
 
   it("ignores a link from another channel and links an agent cannot see", async () => {
-    service.onUserMessagePersisted({ chatId: "p", messageId: "m1", text: "zeros-beta://chat/x", human: true });
+    service.onUserMessagePersisted({ chatId: "p", messageId: "m1", text: "zeros-alpha://chat/x", human: true });
     expect(code(await call(parent, "chat.status", { chat: "x" }))).toBe("NOT_FOUND");
-    expect(code(await call(parent, "chat.status", { chat: "zeros-beta://chat/s" }))).toBe("NOT_FOUND");
+    expect(code(await call(parent, "chat.status", { chat: "zeros-alpha://chat/s" }))).toBe("NOT_FOUND");
     // p cannot see x, so mentioning it to the sibling shares nothing.
     ok(await call(parent, "message.send", { chat: "s", message: "see zeros-dev://chat/x" }));
     const sibling: LocalCallerScope = { executionId: "exec-s", chatId: "s", agentId: "claude", surface: "cli" };

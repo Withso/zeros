@@ -1,5 +1,4 @@
-// Production no longer has a Beta stage to run its migrations first
-// (docs/release-candidates-roadmap.md). Alpha is that stage: a release is cut
+// Alpha is the stage that runs a release's migrations first: a release is cut
 // from main, so Alpha has already applied every migration the release carries
 // unless its own deploy is behind. Production hosted promotion, Apple submission
 // and controlled cutovers require Alpha's live identity to show it.

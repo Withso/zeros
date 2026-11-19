@@ -1688,7 +1688,7 @@ Private journals, view state, review receipts and result bundles live under
 `<Zeros app data>/design-storage/<workspace-path hash>/`; quarantined recovery
 records use the adjacent `design-transaction-recovery/` directory. The stable
 macOS app-data default is `~/Library/Application Support/com.zeros/`, with
-separate beta/dev/instance directories and a `ZEROS_DATA_DIR` override for
+separate alpha/dev/instance directories and a `ZEROS_DATA_DIR` override for
 tests and explicit Local instances. Repository `.zeros/` holds private settings and compatibility state;
 it is not the authored autosave store. Undo/redo history is bounded in memory.
 Cloud image upload and cloud document-journal delivery were part of the retired

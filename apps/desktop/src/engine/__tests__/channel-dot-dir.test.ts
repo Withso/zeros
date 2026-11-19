@@ -1,18 +1,8 @@
-// Regression tests for the 3-way `~/.zeros` split.
-//
-// Four call sites used to inline `isDevRuntime() ? ".zeros-dev" : ".zeros"` — a
-// TWO-way split on a boolean — while EVERY other identity (data dir, workspaces,
-// engine ports, keychain service, deep-link scheme) split three ways on
-// `channel()`. Net effect: **Beta and Production shared `~/.zeros`.**
-//
-// That was not cosmetic. `~/.zeros/detach.lock` is single-instance enforcement
-// (git/detach.ts:17), so with Beta holding it Production could not enter detach mode
-// at all — it failed with DETACH_LOCKED naming a workspace belonging to the other
-// app. `settings.toml` was one file for both. `state.db` and `worktrees/` were shared
-// between two concurrently-running apps whose workspaces live in different roots.
-//
-// The dev instance was immune (it correctly used `.zeros-dev`), which is exactly why
-// none of this was reproducible in dev.
+// Regression tests for the per-channel `~/.zeros` split. The dot-dir must derive
+// from `channel()`, never a dev/prod boolean: `detach.lock` is single-instance
+// enforcement (git/detach.ts), and `settings.toml`, `state.db` and `worktrees/`
+// belong to one app, so two concurrently running packaged channels sharing
+// `~/.zeros` corrupt each other. Dev alone cannot reveal the collision.
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { homedir } from "node:os";
@@ -60,16 +50,21 @@ describe("zerosDotDirName — one leaf name per channel", () => {
       seen.set(ch, zerosDotDirName());
     }
     expect(seen.get("stable")).toBe(".zeros");
-    expect(seen.get("beta")).toBe(".zeros-beta");
+    expect(seen.get("alpha")).toBe(".zeros-alpha");
     expect(seen.get("dev")).toBe(".zeros-dev");
   });
 
-  it("THE regression: beta must NOT resolve to Production's `.zeros`", () => {
-    process.env.ZEROS_CHANNEL = "beta";
-    const beta = zerosDotDirName();
+  it("THE regression: a packaged pre-release must NOT resolve to Production's `.zeros`", () => {
+    process.env.ZEROS_CHANNEL = "alpha";
+    const alpha = zerosDotDirName();
     process.env.ZEROS_CHANNEL = "stable";
     const stable = zerosDotDirName();
-    expect(beta).not.toBe(stable);
+    expect(alpha).not.toBe(stable);
+  });
+
+  it("refuses the retired beta channel instead of resolving a dot-dir", () => {
+    process.env.ZEROS_CHANNEL = "beta";
+    expect(() => zerosDotDirName()).toThrow(/not a known channel/);
   });
 
   it("every channel's dot-dir is pairwise distinct", () => {
@@ -97,15 +92,15 @@ describe("all dot-dir consumers agree", () => {
       process.env.ZEROS_CHANNEL = ch;
       expect(userSettingsDir()).toBe(zerosStateRoot());
     }
-    // The load-bearing assertion: Beta's settings.toml is not Production's.
-    process.env.ZEROS_CHANNEL = "beta";
-    const betaSettings = userSettingsPath();
+    // The load-bearing assertion: Alpha's settings.toml is not Production's.
+    process.env.ZEROS_CHANNEL = "alpha";
+    const alphaSettings = userSettingsPath();
     process.env.ZEROS_CHANNEL = "stable";
-    expect(userSettingsPath()).not.toBe(betaSettings);
+    expect(userSettingsPath()).not.toBe(alphaSettings);
   });
 
   it("ZEROS_USER_SETTINGS_DIR still overrides (tests / cloud sandboxes)", () => {
-    process.env.ZEROS_CHANNEL = "beta";
+    process.env.ZEROS_CHANNEL = "alpha";
     process.env.ZEROS_USER_SETTINGS_DIR = "/tmp/zeros-explicit";
     expect(userSettingsDir()).toBe("/tmp/zeros-explicit");
   });
@@ -116,7 +111,7 @@ describe("guard: nothing may reintroduce a 2-way dot-dir split", () => {
     // This exact expression, duplicated across four files, IS the bug. The whole
     // point of zerosDotDirName() is that there is one implementation keyed on
     // channel(). A new call site that inlines the boolean split would silently
-    // recreate the Beta/Production collision — and, as established above, dev
+    // recreate the cross-channel collision — and, as established above, dev
     // could never reveal it. Fail here instead.
     const roots = [
       "apps/desktop/src/engine",

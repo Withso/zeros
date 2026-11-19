@@ -4,7 +4,7 @@ name: Controlled cutover
 # plan and check the typed approvals, hold independent Railway and Pages
 # deploys, retarget sources, fence writers with maintenance mode, back up and
 # migrate, deploy the exact SHA, upload Pages and verify WorkOS. Dispatch from
-# `main` for Alpha or from `release/X.Y.Z` for Beta/Production; Production
+# `main` for Alpha or from `release/X.Y.Z` for Production; Production
 # waits for its single approval in `production-approval`. Afterwards rerun the failed desktop release
 # for the same SHA. See docs/deployment-environments.md.
 on:
@@ -32,7 +32,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   # Production's single human approval; `production-approval` holds the
-  # required reviewer and no secrets. Alpha and Beta skip it.
+  # required reviewer and no secrets. Alpha skips it.
   approve:
     name: Approve Production cutover
     if: github.event.repository.fork == false && inputs.channel == 'production'

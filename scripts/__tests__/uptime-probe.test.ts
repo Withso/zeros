@@ -7,8 +7,8 @@ const json = (status: number, body: unknown) =>
 
 describe("uptime probe", () => {
   it("accepts only plain HTTPS targets", () => {
-    expect(parseTargets(" https://api.zeros.build/healthz, ,https://api-beta.zeros.build/healthz ")).toEqual([
-      "https://api.zeros.build/healthz", "https://api-beta.zeros.build/healthz",
+    expect(parseTargets(" https://api.zeros.build/healthz, ,https://api-alpha.zeros.build/healthz ")).toEqual([
+      "https://api.zeros.build/healthz", "https://api-alpha.zeros.build/healthz",
     ]);
     expect(parseTargets(undefined)).toEqual([]);
     for (const value of ["http://api.zeros.build/healthz", "https://u:p@api.zeros.build/healthz", "https://api.zeros.build/healthz?x=1"])

@@ -48,7 +48,7 @@ merge policy are unchanged. All checks still run on every PR; none move to
 nightly-only coverage. Superseded PR runs retain per-PR cancellation.
 
 CI Recovery continues to observe full main Preflight, not the additional
-extended checks. Beta and Production still require successful exact-source
+extended checks. Production still requires successful exact-source
 Preflight and CodeQL evidence. PR assurance is not release evidence: its event
 and tested merge commit differ from authenticated push runs.
 

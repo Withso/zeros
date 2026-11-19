@@ -20,7 +20,7 @@ export const LegacyRuntimeQualification = z.object({
 }).strict();
 export type LegacyRuntimeQualification = z.infer<typeof LegacyRuntimeQualification>;
 export const RuntimeReleaseReceiptSchema = z.object({
-  version: z.literal(1), status: z.literal("success"), channel: z.enum(["alpha", "beta", "production"]), action: z.enum(["publish", "promote", "rollback"]),
+  version: z.literal(1), status: z.literal("success"), channel: z.enum(["alpha", "production"]), action: z.enum(["publish", "promote", "rollback"]),
   repository: z.string().regex(/^[\w.-]+\/[\w.-]+$/), workflowSha: z.string().regex(SHA),
   runId: z.string().regex(/^[1-9][0-9]{0,19}$/), runAttempt: z.number().int().min(1).max(10_000), cpSourceSha: z.string().regex(SHA),
   previousRuntimeSha256: z.string().regex(DIGEST), runtime: RuntimeReleaseSchema,
@@ -43,7 +43,7 @@ export type RuntimePublication = z.infer<typeof RuntimePublication>;
 export const RuntimeQualification = z.discriminatedUnion("version", [LegacyRuntimeQualification, RuntimePublication]);
 export type RuntimeQualification = z.infer<typeof RuntimeQualification>;
 export const RuntimeLiveIdentity = z.object({
-  version: z.literal(1), channel: z.enum(["alpha", "beta", "production"]), ready: z.literal(true),
+  version: z.literal(1), channel: z.enum(["alpha", "production"]), ready: z.literal(true),
   sourceSha: z.string().regex(SHA), maintenance: z.literal(false),
   migrations: z.object({ state: z.literal("current"), head: z.string(), expectedHead: z.string(), manifestSha256: z.string().regex(DIGEST) }),
   cloud: z.object({ enabled: z.literal(true), ready: z.literal(true), state: z.literal("healthy") }),
@@ -56,7 +56,7 @@ export type RuntimePin = { sha256: string; release: z.infer<typeof RuntimeReleas
 export type RuntimeLiveState = { identity: RuntimeLiveIdentity; previous: RuntimePin | null; current: RuntimePin; branch: string };
 
 export const RuntimeReleaseConfigSchema = z.object({
-  channel: z.enum(["alpha", "beta", "production"]), action: z.enum(["publish", "promote", "rollback"]),
+  channel: z.enum(["alpha", "production"]), action: z.enum(["publish", "promote", "rollback"]),
   workflowFile: z.enum(RUNTIME_WORKFLOWS).optional(),
   repository: z.string().regex(/^[\w.-]+\/[\w.-]+$/), workflowSha: z.string().regex(SHA), branch: z.string(),
   runId: z.string().regex(/^[1-9][0-9]{0,19}$/), runAttempt: z.number().int().min(1).max(10_000),

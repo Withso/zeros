@@ -21,8 +21,8 @@ The initial nine contexts are `quality`, `test`, `build`, `source-sync (macOS)`,
 
 1. Hold auto-merge and coordinate manual merges and ruleset administration for
    the entire transition. Verify the Alpha provider isolation prerequisites in
-   the CI rollout before weakening the PR requirements. Beta and Production
-   keep their existing workflows, evidence identities, and provider settings.
+   the CI rollout before weakening the PR requirements. Production
+   keeps its existing workflows, evidence identities, and provider settings.
 2. Review the producer changes on `main`. Checks must come from the canonical
    selected workflow; shadow jobs must use distinct names. A cosmetic green
    alias does not qualify as a replacement scan or selected gate.
@@ -153,7 +153,7 @@ node scripts/ci/ruleset-migration.mjs apply --stage finalize --yes
 
 Confirm the readback, then retire the legacy PR producers in the coordinated
 workflow change. Preserve the full `Preflight` and `CodeQL` release-evidence
-identities and Beta/Production's existing barrier. Resume ordinary merge
+identities and Production's existing barrier. Resume ordinary merge
 operations only after the current-head and incoming-head canaries remain green.
 
 ## Merge queue on main (available, not in use)

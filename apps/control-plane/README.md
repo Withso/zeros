@@ -217,11 +217,11 @@ eight shards on every PR, and Preflight runs all eight on every main push.
 ### Clean authentication cutover reset
 
 Preserve existing channel data during authentication and database migrations.
-For an explicitly disposable Alpha or Beta database, `reset:database` provides a guarded
+For an explicitly disposable Alpha database, `reset:database` provides a guarded
 full-schema reset. It never supports Production, is read-only by default, and
 does not print the database URL.
 
-1. Point `DATABASE_URL` at the exact Alpha or Beta database through the normal
+1. Point `DATABASE_URL` at the exact Alpha database through the normal
    secret environment and run a plan:
 
    ```bash
@@ -257,7 +257,7 @@ service settings select that Dockerfile and set the `/healthz` health check and
 restart behavior; [`.railway/railway.ts`](../../.railway/railway.ts) records
 the same settings for Railway's Infrastructure as Code.
 
-Use one Railway project with persistent `alpha`, `beta`, and `production`
+Use one Railway project with persistent `alpha` and `production`
 environments. Each environment has its own control-plane instance, PlanetScale Postgres database,
 authentication contract, GitHub App, feedback destinations, and public domain.
 Production autodeploy stays disabled; only Alpha tracks `main`.
@@ -430,7 +430,7 @@ values are:
 - `GITHUB_OAUTH_CALLBACK_URL`
 
 Refresh bindings are signed with a separate key so rotating the OAuth client
-secret never invalidates them. Railway Alpha, Beta and Production refuse to
+secret never invalidates them. Railway Alpha and Production refuse to
 boot without `GITHUB_REFRESH_BINDING_SECRET` (key version 1) or
 `GITHUB_REFRESH_BINDING_KEYS_JSON` (`{"<version>":"<secret>"}`, 1–32 versions,
 with `GITHUB_REFRESH_BINDING_CURRENT_KEY_VERSION` when there is more than one).
@@ -441,7 +441,7 @@ secret, with a warning on Railway. Rotation steps are in
 `docs/deployment-environments.md`. Keep the client and binding secrets
 server-side. Callback URLs must return to the matching web
 and desktop release channel; the supported schemes are `zeros`, `zeros-alpha`,
-`zeros-beta`, and `zeros-dev`.
+and `zeros-dev`.
 
 Grant only the repository permissions exercised by the desktop application.
 Webhooks are unnecessary until a webhook consumer exists. A partial or invalid
@@ -635,7 +635,7 @@ Set `CLOUD_EXECUTION_CHANGE_FILE` to a regular JSON file containing exactly:
 ```
 
 Replace the example identifiers and digest with reviewed values. The channel is
-`development`, `alpha`, `beta` or `production` and must match
+`development`, `alpha` or `production` and must match
 `RAILWAY_ENVIRONMENT_NAME`, or `CONTROL_PLANE_EXECUTION_CHANNEL` outside Railway.
 The reason is 16–512 characters; only its hash is retained. The initiator is the
 person whose current membership and repository access will authorize the fresh

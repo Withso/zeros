@@ -85,7 +85,7 @@ The organization menu has no sign-in action. Settings → Account explains the
 account-free mode and directs sign-in testing to Zeros Dev.
 Native main enables it only for the explicit unpackaged development launch.
 Preload obtains that decision directly from main before the renderer starts.
-Packaged Alpha/Beta/Production and full Dev retain their login boundary; Vite
+Packaged Alpha/Production and full Dev retain their login boundary; Vite
 variables and renderer/process arguments cannot enable Local admission.
 
 Account/organization/cloud requests, account security monitoring, cloud catalog

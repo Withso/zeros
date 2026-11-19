@@ -17,7 +17,7 @@ function harness(overrides: Partial<Config> = {}, ledger: Array<{ name: string; 
 }
 describe("public release readiness", () => {
 
-  it.each(["alpha", "beta", "production"] as const)("advertises build-drain v1 for a ready configured cloud service (%s)", async deploymentChannel => {
+  it.each(["alpha", "production"] as const)("advertises build-drain v1 for a ready configured cloud service (%s)", async deploymentChannel => {
     const { app, readLedger } = harness({ deploymentChannel, cloudV2: { runtime: { sha256: "c".repeat(64) } } as NonNullable<Config["cloudV2"]> });
     const responses = await Promise.all([app.request("/v1/release-identity"), app.request("/v1/release-identity")]);
     for (const response of responses) {
@@ -43,7 +43,7 @@ describe("public release readiness", () => {
     },
   );
 
-  it.each(["alpha", "beta", "production"] as const)("advertises canary support only on a configured Alpha (%s)", async deploymentChannel => {
+  it.each(["alpha", "production"] as const)("advertises canary support only on a configured Alpha (%s)", async deploymentChannel => {
     const { app } = harness({ deploymentChannel, cloudV2: { runtime: { sha256: "c".repeat(64) }, runtimeCanary: {} } as NonNullable<Config["cloudV2"]> });
     expect(await (await app.request("/v1/release-identity")).json()).toMatchObject({ runtimeCanaryAdmission: deploymentChannel === "alpha" ? 1 : null });
   });

@@ -4,15 +4,15 @@ export const partial = "zeros-control-plane";
 
 export default defineRailway((context) => {
   const channel = context.environmentName ?? context.environment;
-  if (!["alpha", "beta", "production"].includes(channel ?? "")) {
+  if (!["alpha", "production"].includes(channel ?? "")) {
     throw new Error(
-      "Link an existing alpha, beta, or production Railway environment before planning.",
+      "Link an existing alpha or production Railway environment before planning.",
     );
   }
   const branch = channel === "alpha" ? "main" : process.env.RELEASE_BRANCH;
   if (channel !== "alpha" && !/^release\/\d+\.\d+\.\d+$/.test(branch ?? "")) {
     throw new Error(
-      "Beta and Production IaC require the reviewed RELEASE_BRANCH=release/X.Y.Z.",
+      "Production IaC requires the reviewed RELEASE_BRANCH=release/X.Y.Z.",
     );
   }
   if (!context.projectName)

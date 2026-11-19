@@ -1,7 +1,7 @@
 # Playbook: live Alpha operator actions
 
 Applies to anything that writes to Alpha's database, provider, Railway or
-WorkOS. Never use Beta or Production credentials or data.
+WorkOS. Never use Production credentials or data.
 
 ## Before
 

@@ -1,15 +1,15 @@
 // ──────────────────────────────────────────────────────────
-// Feature flags — channel-gated (dev | beta | stable)
+// Feature flags — channel-gated (dev | alpha | stable)
 // ──────────────────────────────────────────────────────────
 //
 // The RENDERER's view of the release channel plus a tiny flag registry. The
 // channel is baked at BUILD time into the bundle (VITE_ZEROS_CHANNEL, injected
 // by the release workflows); under `pnpm dev` it is unset and treated as "dev".
 //
-// Why channel-gated flags at all: Beta and Production build from the SAME `main`
-// (Production is a promotion of a proven Beta commit), so you can NOT keep an
+// Why channel-gated flags at all: Alpha and Production build from the SAME `main`
+// (Production is a promotion of a proven Alpha commit), so you can NOT keep an
 // unfinished feature out of Production by "not merging it". Gate it instead —
-// ON in dev + beta, OFF in stable — and flip stable on once it's proven.
+// ON in dev + alpha, OFF in stable — and flip stable on once it's proven.
 //
 // The MAIN + ENGINE processes have their own resolver (apps/desktop/src/engine/runtime.ts
 // `channel()`, keyed off process.env.ZEROS_CHANNEL). Keep the two conceptually
@@ -20,7 +20,7 @@ import { CLOUD_WORKSPACE_CHANNELS } from "../../../shared/cloud-workspace-channe
 /** Keep in lockstep with apps/desktop/src/engine/runtime.ts's CHANNELS. Duplicated (not
  *  imported) because this module is renderer-only and must stay free of any
  *  process.env read; the engine module is the authority for main + engine. */
-export const CHANNELS = ["dev", "alpha", "beta", "stable"] as const;
+export const CHANNELS = ["dev", "alpha", "stable"] as const;
 
 export type Channel = (typeof CHANNELS)[number];
 
@@ -36,14 +36,10 @@ export const CHANNEL: Channel = (() => {
   return import.meta.env.DEV ? "dev" : "stable";
 })();
 
-/** True in the Beta channel. Handy for one-off "show this only in Beta" checks
- *  that don't warrant a named flag. */
-export const isBetaChannel: boolean = CHANNEL === "beta";
-
 /** True in the Alpha channel — the build cut from every merge to main. */
 export const isAlphaChannel: boolean = CHANNEL === "alpha";
 
-/** True in any PRE-RELEASE channel (dev, alpha, beta) — i.e. not Production.
+/** True in any PRE-RELEASE channel (dev, alpha) — i.e. not Production.
  *  Prefer this over `!== "stable"` so adding a future channel can't accidentally
  *  opt Production into something. */
 export const isPreReleaseChannel: boolean = CHANNEL !== "stable";
@@ -51,9 +47,8 @@ export const isPreReleaseChannel: boolean = CHANNEL !== "stable";
 /**
  * Feature → the set of channels where it is ON.
  *
- * Promotion ladder, now that Alpha exists:
+ * Promotion ladder:
  *   `["dev", "alpha"]`            lands in main, dogfooded in Alpha
- *   `["dev", "alpha", "beta"]`    promoted into the stabilization cut
  *   `+ "stable"`                  shipped to everyone
  * Delete the entry once the feature is permanent and unconditional.
  *

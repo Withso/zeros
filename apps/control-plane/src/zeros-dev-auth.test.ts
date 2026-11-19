@@ -156,7 +156,7 @@ describe("zeros-dev web session lifecycle stays inside its fixed Alpha admission
     expect(f.refresh).not.toHaveBeenCalled();
   });
 
-  it.each(["beta", "production"])("leaves all lifecycle paths unregistered on %s despite stale enablement", async channel => {
+  it.each(["production"])("leaves all lifecycle paths unregistered on %s despite stale enablement", async channel => {
     const cfg = loadConfig({ ...env, RAILWAY_ENVIRONMENT_NAME: channel }); cfg.zerosDevAuth = identity;
     const f = webLifecycle({ config: cfg });
     expect((await f.send("refresh")).status).toBe(404);
@@ -176,7 +176,7 @@ describe("zeros-dev fixed Alpha identity", () => {
   });
 
   it("requires explicit enablement and ignores stale keys outside Alpha", async () => {
-    for (const channel of ["development", "beta", "production", "preview", ""]) {
+    for (const channel of ["development", "production", "preview", ""]) {
       const cfg = loadConfig({ ...env, RAILWAY_ENVIRONMENT_NAME: channel });
       expect(cfg.zerosDevAuth).toBeNull();
       const { app, provider, repository } = fixture({ config: cfg });
@@ -189,7 +189,7 @@ describe("zeros-dev fixed Alpha identity", () => {
   });
 
   it("gates the assembled app before bearer auth and never exposes it on paused channels", async () => {
-    for (const channel of ["beta", "production"]) {
+    for (const channel of ["production"]) {
       const cfg = loadConfig({ ...env, RAILWAY_ENVIRONMENT_NAME: channel });
       // Even a stale manually supplied option cannot override the authoritative channel.
       cfg.zerosDevAuth = identity;
