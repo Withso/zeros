@@ -1630,12 +1630,81 @@ function isNetworkRemote(value: string): boolean {
   return Boolean(parseHttpRemote(value) || parseSshRemote(value));
 }
 
+async function resolveCloneUrlWithInsteadOf(
+  cwd: string,
+  target: string,
+): Promise<string> {
+  const [systemEntries, globalEntries] = await Promise.all(
+    (["--system", "--global"] as const).map(async (scope) => {
+      try {
+        const { stdout } = await runFile(
+          "git",
+          ["config", scope, "--show-origin", "--null", "--list", "--includes"],
+          {
+            cwd,
+            env: gitChildEnv(),
+            timeoutMs: 5_000,
+            maxBufferBytes: 4 * 1024 * 1024,
+          },
+        );
+        return parseOriginConfigList(stdout);
+      } catch (error) {
+        const failure = error as { stderr?: unknown; stdout?: unknown } | null;
+        if (
+          !/fatal: unable to read config file .*: No such file or directory/i.test(
+            String(failure?.stderr ?? ""),
+          )
+        ) {
+          throw gitProbeFailure("policy_config", error);
+        }
+        return parseOriginConfigList(String(failure?.stdout ?? ""));
+      }
+    }),
+  );
+  const entries = [...systemEntries, ...globalEntries];
+  if (entries.length > 8_192) {
+    throw unsafeGitInvocation(
+      "Engine Git configuration exceeds the safety limit.",
+    );
+  }
+  assertNoCodeWritableConfig(findWorktreeTerritory(cwd), entries, cwd);
+
+  let match: { prefix: string; base: string } | null = null;
+  const suffix = ".insteadof";
+  for (const entry of entries) {
+    const lowerKey = entry.key.toLowerCase();
+    if (
+      !lowerKey.startsWith("url.") ||
+      !lowerKey.endsWith(suffix) ||
+      entry.key.length <= 4 + suffix.length ||
+      !entry.value ||
+      !target.startsWith(entry.value)
+    ) {
+      continue;
+    }
+    if (!match || entry.value.length > match.prefix.length) {
+      match = {
+        prefix: entry.value,
+        base: entry.key.slice(4, -suffix.length),
+      };
+    }
+  }
+  return match ? `${match.base}${target.slice(match.prefix.length)}` : target;
+}
+
 function decodedUrlComponent(value: string): string {
   try {
     return decodeURIComponent(value);
   } catch {
     return value;
   }
+}
+
+function hasEmbeddedRemoteCredential(target: string): boolean {
+  const http = parseHttpRemote(target);
+  if (http) return Boolean(http.password || http.search || http.hash);
+  const ssh = parseSshRemote(target);
+  return ssh instanceof URL && Boolean(ssh.password || ssh.search || ssh.hash);
 }
 
 async function networkCredentialRequest(
@@ -1662,6 +1731,7 @@ async function networkCredentialRequest(
   }
   const command = args[commandIndex];
   let target = firstNetworkRemote(args, commandIndex, command);
+  let embeddedCredentialBeforeRewrite = false;
   if (!target && command === "pull") {
     target = await configuredPullRemote(cwd);
   }
@@ -1674,9 +1744,10 @@ async function networkCredentialRequest(
     };
   }
 
-  // clone takes a URL directly. Other network commands generally take a
-  // configured remote name; resolve it without crossing the broker seam.
-  if (command !== "clone" && !isNetworkRemote(target)) {
+  if (command === "clone") {
+    embeddedCredentialBeforeRewrite = hasEmbeddedRemoteCredential(target);
+    target = await resolveCloneUrlWithInsteadOf(cwd, target);
+  } else if (!isNetworkRemote(target)) {
     try {
       const resolved = await runFile(
         "git",
@@ -1694,6 +1765,8 @@ async function networkCredentialRequest(
     }
   }
 
+  const hasEmbeddedCredential =
+    embeddedCredentialBeforeRewrite || hasEmbeddedRemoteCredential(target);
   const parsed = parseHttpRemote(target);
   if (!parsed) {
     const ssh = parseSshRemote(target);
@@ -1701,10 +1774,7 @@ async function networkCredentialRequest(
       network: true,
       transport: ssh ? "ssh" : null,
       request: null,
-      hasEmbeddedCredential:
-        ssh instanceof URL
-          ? Boolean(ssh.password || ssh.search || ssh.hash)
-          : false,
+      hasEmbeddedCredential,
     };
   }
   const protocol = parsed.protocol.slice(0, -1) as "http" | "https";
@@ -1717,9 +1787,7 @@ async function networkCredentialRequest(
     // handles fine — carries no secret: git asks for the password, and the
     // broker answers with the selected credential. Rejecting it made push,
     // fetch, ls-remote, and Create PR all fail on those repositories.
-    hasEmbeddedCredential: Boolean(
-      parsed.password || parsed.search || parsed.hash,
-    ),
+    hasEmbeddedCredential,
     request: {
       contextId: `cwd:${cwd}`,
       protocol,
