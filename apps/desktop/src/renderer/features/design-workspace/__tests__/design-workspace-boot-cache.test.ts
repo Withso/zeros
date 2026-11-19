@@ -106,6 +106,24 @@ describe("Design workspace boot cache", () => {
     expect(cache.readDesignWorkspaceBootSnapshots().has("ws_large")).toBe(false);
   });
 
+  it("keeps the combined serialized mirror within the existing total bound", async () => {
+    const cache = await import("../state/design-workspace-boot-cache");
+    for (let index = 0; index < 4; index += 1) {
+      const value = pagedSnapshot(1, 1_000, 0);
+      value.pages![0]!.frameFiles = Array.from({ length: 1_000 }, (_, frame) =>
+        `page-1/frame-${frame}-${index}-${"x".repeat(535)}.html`,
+      );
+      expect(cache.safeDesignWorkspaceBootSnapshot(value)).not.toBeNull();
+      cache.queueDesignWorkspaceBootSnapshot(`ws_total_${index}`, value);
+    }
+    vi.runAllTimers();
+
+    const stored = localStorage.getItem("zeros-design-workspace-snapshots-v1")!;
+    const payload = JSON.parse(stored) as { entries: Record<string, unknown> };
+    expect(stored.length).toBeLessThanOrEqual(2_000_000);
+    expect(Object.keys(payload.entries)).toHaveLength(3);
+  });
+
   it("evicts the oldest workspace even when several snapshots settle in one millisecond", async () => {
     const cache = await import("../state/design-workspace-boot-cache");
     for (let index = 0; index < 5; index += 1) {

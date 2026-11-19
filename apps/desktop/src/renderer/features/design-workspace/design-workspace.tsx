@@ -8,6 +8,7 @@
 // --- IMPORTS ---
 
 import { takeDesignSyncAgentRequest } from "../../state/design-sync-intent";
+import { normalizeDesignPagesSnapshot } from "@zeros/protocol/design-pages";
 import { designSyncBrief } from "./design-agent-brief";
 import { useAskDesignAgent } from "./design-agent-sync";
 import {
@@ -41,6 +42,7 @@ import {
   useDesignWorkspaceUiStore,
 } from "./state/design-workspace-ui";
 import { useDesignPageSnapshot } from "./state/design-page-projection";
+import { isDesignWorkspaceBootPreview } from "./state/design-workspace-boot-cache";
 import { useDesignStyleBuildPresence } from "./state/use-design-style-build-presence";
 import { startDesignAgentDraftEvents } from "./state/design-agent-drafts";
 import { useDesignWorkspaceSnapshot } from "./state/use-design-workspace";
@@ -172,13 +174,34 @@ export function DesignWorkspaceColumn({
   const confirmedActivePageId = useDesignWorkspaceUiStore(state =>
     workspaceId ? state.byWorkspace[workspaceId]?.activePageId : undefined,
   );
+  const confirmedDirectoryId = useDesignWorkspaceUiStore(state =>
+    workspaceId ? state.byWorkspace[workspaceId]?.directoryId : undefined,
+  );
   const historyPresentation = useDesignHistoryPresentation(workspaceId);
   const historySelection = useDesignHistorySelection(workspaceId);
   const presentedHistory = surfaceActive ? historyPresentation : null;
   const presentedSelection = surfaceActive ? historySelection : null;
   const activePageId = presentedSelection?.activePageId ?? confirmedActivePageId;
-  const confirmedPageSnapshot = useDesignPageSnapshot(snapshot.data, confirmedActivePageId);
-  const pageSnapshot = useDesignPageSnapshot(presentedHistory?.catalog?.deref() ?? snapshot.data, activePageId);
+  const bootPreview = snapshot.data ? isDesignWorkspaceBootPreview(snapshot.data) : false;
+  const confirmedCatalog = bootPreview && confirmedActivePageId &&
+    !snapshot.data?.pages?.some(page => page.id === confirmedActivePageId) ? undefined : snapshot.data;
+  const presentedCatalog = presentedHistory?.catalog?.deref() ?? snapshot.data;
+  const pageCatalog = !presentedHistory && bootPreview && activePageId &&
+    !snapshot.data?.pages?.some(page => page.id === activePageId) ? undefined : presentedCatalog;
+  const confirmedPageSnapshot = useDesignPageSnapshot(confirmedCatalog, confirmedActivePageId);
+  const pageSnapshot = useDesignPageSnapshot(pageCatalog, activePageId);
+  const authoritativePages = useMemo(() => {
+    const data = snapshot.data;
+    if (!data) return undefined;
+    if (data.pages) return data.pages;
+    if (data.pageCatalog || data.mutationCatalog || data.preparation) return undefined;
+    return normalizeDesignPagesSnapshot(data).pages;
+  }, [snapshot.data]);
+  const allowPassiveSelection = Boolean(
+    !presentedHistory && snapshot.data && !bootPreview &&
+    snapshot.data.directoryId === confirmedDirectoryId &&
+    confirmedActivePageId && authoritativePages?.some(page => page.id === confirmedActivePageId),
+  );
   useEffect(() => {
     if (!surfaceActive && workspaceId) clearDesignHistoryPresentation(workspaceId);
     return () => { if (workspaceId) clearDesignHistoryPresentation(workspaceId); };
@@ -201,14 +224,14 @@ export function DesignWorkspaceColumn({
     ? savedEditing.registerDrain(() => waitForPendingDesignEdits(workspaceId))
     : undefined, [savedEditing, workspaceId]);
   useLayoutEffect(() => {
-    if (!surfaceActive || !workspaceId || !confirmedPageSnapshot || snapshot.loading || snapshot.refreshing || snapshot.error) return;
+    if (!surfaceActive || !workspaceId || bootPreview || !confirmedPageSnapshot || snapshot.loading || snapshot.refreshing || snapshot.error) return;
     bindDesignWorkspacePages(workspaceId, confirmedPageSnapshot.directoryId, confirmedPageSnapshot.pages!);
-  }, [surfaceActive, workspaceId, confirmedPageSnapshot, snapshot.loading, snapshot.refreshing, snapshot.error]);
+  }, [surfaceActive, workspaceId, bootPreview, confirmedPageSnapshot, snapshot.loading, snapshot.refreshing, snapshot.error]);
   useEffect(() => {
-    if (!surfaceActive || !workspaceId || !confirmedActivePageId || !confirmedPageSnapshot?.directoryId ||
+    if (!surfaceActive || !workspaceId || bootPreview || !confirmedActivePageId || !confirmedPageSnapshot?.directoryId ||
       !confirmedPageSnapshot.pages?.some(page => page.id === confirmedActivePageId)) return;
     void designSelectPage(workspaceId, confirmedPageSnapshot.directoryId, confirmedActivePageId).catch(() => {});
-  }, [surfaceActive, workspaceId, confirmedPageSnapshot?.directoryId, confirmedPageSnapshot?.pages, confirmedActivePageId]);
+  }, [surfaceActive, workspaceId, bootPreview, confirmedPageSnapshot?.directoryId, confirmedPageSnapshot?.pages, confirmedActivePageId]);
   const confirmedSelectedFrameFile = useDesignWorkspaceUiStore((state) =>
     workspaceId
       ? (state.byWorkspace[workspaceId]?.selectedFrame ?? null)
@@ -511,6 +534,7 @@ export function DesignWorkspaceColumn({
           error={snapshot.error}
           refresh={snapshot.refresh}
           active={surfaceActive}
+          allowPassiveSelection={allowPassiveSelection}
           canvasBackground={canvasBackground}
           motionTimelineOpen={motionTimelineOpen}
           motionPropertyRequest={motionPropertyRequest}

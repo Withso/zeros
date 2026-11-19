@@ -1,0 +1,9 @@
+{
+  "id": "design-boot-selection-passive-authority",
+  "kind": "replay",
+  "area": "desktop-design",
+  "fixedBy": "pr:1186",
+  "symptom": "After a renderer reload, a persisted top-level frame selection was present in the UI record but absent from the same-directory boot catalog; the real DesignCanvas passive selection publisher treated that advisory catalog as authoritative, published a null frame, and replaced the selection with the page's first frame.",
+  "rule": "An advisory boot snapshot cannot publish passive selection or prune an exact-owner persisted selection. Passive canvas publication is allowed only for the current authoritative workspace, directory and page snapshot; explicit user selection remains allowed, and an authoritative missing frame may still be pruned.",
+  "check": "pnpm exec vitest run --config vitest.config.ts apps/desktop/src/renderer/features/design-workspace/__tests__/design-workspace-boot-selection-readiness.test.ts -t \"does not prune a newer selected copy\""
+}
