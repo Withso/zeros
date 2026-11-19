@@ -610,8 +610,8 @@ function hasComponentAncestor(
 
 /** Place an instance's children in its definition's slots. A frame the
  * definition marks data-zd-slot="<name>" takes the children named for it
- * (slot="<name>") in place of what it holds; a bare <slot> takes the rest,
- * else shows its fallback; <slot data-zd-attr> shows an attribute's text. */
+ * (slot="<name>") in place of what it holds; a bare <slot> takes meaningful
+ * remaining content or its fallback; <slot data-zd-attr> shows an attribute's text. */
 function fillSlots(
   definitionBody: string,
   instanceSource: string,
@@ -637,16 +637,22 @@ function fillSlots(
   }
   const taken = new Map<string, string>();
   let rest = "";
+  let restHasContent = false;
+  const hasSlotContent = (child: DefaultTreeAdapterTypes.ChildNode) =>
+    "value" in child ? Boolean(child.value.trim()) : "tagName" in child;
   for (const child of named.size ? instance.childNodes : []) {
     const location = child.sourceCodeLocation;
     if (!location) continue;
     const text = instanceSource.slice(location.startOffset, location.endOffset);
     const slot = "tagName" in child ? child.attrs.find((attribute) => attribute.name === "slot")?.value : undefined;
     if (slot && named.has(slot)) taken.set(slot, (taken.get(slot) ?? "") + text);
-    else rest += text;
+    else {
+      rest += text;
+      if (hasSlotContent(child)) restHasContent = true;
+    }
   }
-  // Without a named slot filled, the default slot takes every child as written.
-  const instanceChildren = taken.size ? (rest.trim() ? rest : "") : innerSource(instanceSource, instance);
+  const instanceChildren = taken.size ? rest : innerSource(instanceSource, instance);
+  const hasInstanceContent = taken.size ? restHasContent : instance.childNodes.some(hasSlotContent);
   const edits: Array<{ start: number; end: number; text: string }> = [];
   const filled: Array<{ start: number; end: number }> = [];
   for (const [name, slot] of named) {
@@ -668,7 +674,7 @@ function fillSlots(
       ? attributes.has(attributeName)
         ? escapeText(attributes.get(attributeName) ?? "")
         : fallback
-      : instanceChildren || fallback;
+      : hasInstanceContent ? instanceChildren : `${fallback}${instanceChildren}`;
     edits.push({ start: location.startOffset, end: location.endOffset, text });
   }
   let result = definitionBody;

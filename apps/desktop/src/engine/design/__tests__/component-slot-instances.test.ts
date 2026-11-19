@@ -15,6 +15,41 @@ const CARD = doc(
 const sources = { "components/card.html": CARD };
 const render = (frame: string) => expandDesignComponentsForRender("/work/slots", frame, sources, "start/welcome.html", { registry: new Map() }, false);
 
+const FALLBACK_HOSTS = doc([
+  '<zd-card data-oid="comment"><!--keep--></zd-card>',
+  '<zd-card data-oid="whitespace"> \n\t </zd-card>',
+  '<zd-card data-oid="text">Actual text</zd-card>',
+  '<zd-card data-oid="element"><span>Nested content</span></zd-card>',
+  '<zd-card data-oid="named"><b slot="actions">Named content</b><!--named-comment--></zd-card>',
+].join(""));
+const FALLBACK_CASES: Array<{
+  kind: string;
+  components: Readonly<Record<string, string>>;
+  registry: Map<string, string>;
+  fallback: string;
+  fallbackCount: number;
+}> = [
+  {
+    kind: "plain",
+    components: { "components/card.html": doc('<article data-zid="card"><slot>plain-fallback</slot></article>') },
+    registry: new Map<string, string>(),
+    fallback: "plain-fallback",
+    fallbackCount: 2,
+  },
+  {
+    kind: "templated",
+    components: {
+      "parts/card.html": doc(
+        '<article data-zid="card"><slot>templated-fallback</slot><section data-zd-slot="actions"><slot name="actions"></slot></section></article>',
+        '<template data-zd-options><zd-option name="label" type="text" default="Card"></zd-option></template>',
+      ),
+    },
+    registry: new Map([["card", "parts/card.html"]]),
+    fallback: "templated-fallback",
+    fallbackCount: 3,
+  },
+];
+
 describe("a slot component's instances", () => {
   it("mark the host as an instance and each definition layer as its part", async () => {
     const result = await expandDesignComponents("/work/slots", doc('<zd-card data-oid="tour-1" meta="Page 1" heading="Start here">How to move.</zd-card>'), sources);
@@ -81,6 +116,22 @@ describe("a slot component's instances", () => {
     });
     expect(result.instances?.hosts["text-only"]?.text).toBe("Only & text");
     expect(result.instances?.hosts["too-long"]).not.toHaveProperty("text");
+  });
+
+  it.each(FALLBACK_CASES)("uses $kind fallback for whitespace/comment-only children but not supplied text or elements", async ({ components, registry, fallback, fallbackCount, kind }) => {
+    const result = await expandDesignComponentsForRender(
+      "/work/slots",
+      FALLBACK_HOSTS,
+      components,
+      "start/welcome.html",
+      { registry },
+      false,
+    );
+    expect(result.html.split(fallback).length - 1).toBe(fallbackCount);
+    expect(result.html).toContain("Actual text");
+    expect(result.html).toContain("Nested content");
+    expect(result.html).toContain("Named content");
+    if (kind === "templated") expect(result.html).toContain('<section data-zd-slot="actions"><b slot="actions">Named content</b></section>');
   });
 
   it("record an instance the frame places in another's slot, and none the definition places", async () => {

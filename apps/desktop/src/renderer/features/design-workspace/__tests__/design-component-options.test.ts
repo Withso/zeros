@@ -107,6 +107,21 @@ const VARIANTS: DesignFrameComponent = {
 const RESET_FILE = "home/index.html";
 const RESET_SOURCE = '<!doctype html><html><body><main data-oid="main"><zd-card data-oid="host" width="800" zd-variant="compact" zd-style-root="color: red" style="position: absolute; left: 12px; top: 24px; width: 300px; background: red">Before &amp;<!--keep--><span data-oid="default-layer">Default</span><b data-oid="named-layer" slot="actions">Named</b><i class="untracked">Keep</i>after &amp;</zd-card></main></body></html>';
 const RESET_COMPONENT = '<!doctype html><html><head><template data-zd-options><zd-option name="width" type="number" default="1120" min="640" max="1440" unit="px"></zd-option><zd-variant name="compact" width="800"></zd-variant></template></head><body><article data-zid="root"><slot></slot><div data-zd-slot="actions"><slot name="actions"></slot></div></article></body></html>';
+const RESET_FALLBACK_SOURCE = '<!doctype html><html><body><zd-card data-oid="host">custom<!--keep--></zd-card></body></html>';
+const RESET_FALLBACK_CASES = [
+  {
+    kind: "plain",
+    components: { "components/card.html": '<!doctype html><html><body><article data-zid="root"><slot>plain-fallback</slot></article></body></html>' },
+    registry: new Map<string, string>(),
+    fallback: "plain-fallback",
+  },
+  {
+    kind: "templated",
+    components: { "parts/card.html": '<!doctype html><html><head><template data-zd-options><zd-option name="label" type="text" default="Card"></zd-option></template></head><body><article data-zid="root"><slot>templated-fallback</slot></article></body></html>' },
+    registry: new Map<string, string>([["card", "parts/card.html"]]),
+    fallback: "templated-fallback",
+  },
+] as const;
 
 const resetCatalogHost = async () => {
   const result = await expandDesignComponentsForRender(
@@ -333,6 +348,40 @@ describe("variants and instances", () => {
     expect(session.undo()).toBeNull();
     expect(session.redo()?.state.files[RESET_FILE]).toBe(reset);
     expect(session.redo()).toBeNull();
+  });
+
+  it.each(RESET_FALLBACK_CASES.flatMap((component) => [
+    { ...component, resetKind: "text" as const },
+    { ...component, resetKind: "all" as const },
+  ]))("restores the $kind default-slot fallback after Reset $resetKind leaves its comment", async ({ components, registry, fallback, resetKind }) => {
+    const frame = { file: RESET_FILE, sourceVersion: V1 } as never;
+    const before = await expandDesignComponentsForRender(
+      "/work/reset",
+      RESET_FALLBACK_SOURCE,
+      components,
+      RESET_FILE,
+      { registry },
+      false,
+    );
+    expect(before.instances?.hosts.host?.text).toBe("custom");
+
+    if (resetKind === "text") await commitDesignInstanceText("w", frame, "host", "");
+    else await commitDesignInstanceAllOverridesReset("w", frame, "host", [], [], undefined, [], true);
+
+    const { outcome } = applyCapturedEdit(RESET_FALLBACK_SOURCE, latestCapturedEdit());
+    const reset = outcome.state.files[RESET_FILE]!;
+    expect(reset).toContain("<!--keep-->");
+    expect(reset).not.toContain("custom");
+    const after = await expandDesignComponentsForRender(
+      "/work/reset",
+      reset,
+      components,
+      RESET_FILE,
+      { registry },
+      false,
+    );
+    expect(after.html).toContain(fallback);
+    expect(after.html).toContain("<!--keep-->");
   });
 });
 
