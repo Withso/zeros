@@ -43,6 +43,7 @@ import { cloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
 import { useWorkspaceDispatch } from "../../state/store";
 import { spawnPreparedDefaultChat } from "../../state/spawn-default-chat";
 import { useOrganizationCloudPaused } from "../../features/team/cloud-workspace-pause";
+import { cloneErrorGuidance } from "./clone-error-guidance";
 
 interface OpenGithubProjectDialogProps {
   open: boolean;
@@ -166,10 +167,19 @@ function ScopedOpenGithubProjectDialog({
         if (mounted.current) onOpenChange(false);
         return;
       }
-      const result = await workspaceClone({
-        url: url.trim(),
-        parentFolder: parentFolder.trim(),
-      });
+      let result: Awaited<ReturnType<typeof workspaceClone>>;
+      try {
+        result = await workspaceClone({
+          url: url.trim(),
+          parentFolder: parentFolder.trim(),
+        });
+      } catch (err) {
+        if (!mounted.current) return;
+        const guidance = cloneErrorGuidance(err, "local");
+        if (!guidance) throw err;
+        toast.error("Couldn't clone repository", { description: guidance });
+        return;
+      }
       upsertProject({
         repoRoot: result.repoRoot,
         originUrl: url.trim(),

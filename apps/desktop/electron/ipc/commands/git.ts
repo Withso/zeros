@@ -18,6 +18,7 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
+import { NativeCommandError } from "@zeros/protocol/native-error";
 import {
   cloneRepo,
   initRepo,
@@ -127,6 +128,20 @@ export const workspaceClone: CommandHandler = async (args) => {
   try {
     return await cloneRepo({ url, parentFolder, directoryName });
   } catch (err) {
+    if (isGitError(err)) {
+      if (err.code === "NOT_AUTHENTICATED") {
+        throw new NativeCommandError(
+          "The repository host rejected the request.",
+          "NOT_AUTHENTICATED",
+        );
+      }
+      if (err.code === "NETWORK_ERROR") {
+        throw new NativeCommandError(
+          "The repository host could not be reached.",
+          "NETWORK_ERROR",
+        );
+      }
+    }
     rethrow(err);
   }
 };
