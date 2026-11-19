@@ -5470,6 +5470,10 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       var element = elementForOid(operation.nodeId);
       if (element === document.body || element === document.documentElement || !element.parentElement ||
           selected.some(function (other) { return other === element || other.contains(element) || element.contains(other); })) throw new Error("Overlapping structural edits.");
+      // Removing supplied slot layers can reveal fallback only source expansion knows.
+      if (operation.type === "delete" && partOwnerOf(element) &&
+          (!oidOf(element.parentElement) || element.parentElement.hasAttribute("data-zd-instance")))
+        throw new Error("Slot content changes require source reload.");
       selected.push(element);
       var descendants = element.getElementsByTagName("*");
       nodes += descendants.length + 1;

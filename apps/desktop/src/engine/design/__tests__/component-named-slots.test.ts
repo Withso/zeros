@@ -41,6 +41,25 @@ describe("a main component's slots", () => {
     expect(nested.html).toContain('<footer data-zd-part="foot"><section><em data-oid="nested">Nested</em></section></footer>');
   });
 
+  it.each([
+    (...args: Parameters<typeof expandDesignComponents>) => expandDesignComponents(...args),
+    (...args: Parameters<typeof expandDesignComponents>) => expandDesignComponentsForRender(args[0], args[1], args[2], args[3] ?? "", args[4] ?? {}, false),
+  ])("restores a reset named slot without consuming default-slot text and layers (%#)", async (expandComponent) => {
+    const main = doc(
+      '<article data-oid="card-root"><h3 data-oid="heading-part">{{ heading }}</h3>' +
+        '<section data-oid="nested-group"><div data-oid="content-part" data-zd-slot="content"><p data-oid="fallback">Main fallback content</p></div>' +
+        '<footer data-oid="footer-part"><slot>Main fallback footer</slot></footer></section></article>',
+      options('<zd-option name="heading" type="text" default="Default heading"></zd-option>' +
+        '<zd-option name="content" type="slot" label="Content"></zd-option>' +
+        '<zd-variant name="compact" heading="Compact heading"></zd-variant>'),
+    );
+    const host = '<zd-qa-card data-oid="instance-a" data-name="Authored Instance A" zd-variant="compact" mystery="keep-me" zd-style-heading-part="text-decoration: underline" zd-style-tag-part="font-style: italic" style="position:absolute;left:26px;top:80px;width:230px;transform:rotate(2deg);box-shadow:0 4px 10px #2225" show-tag="false">Supplied footer text <strong data-oid="supplied-inline">and element</strong><!-- preserve footer comment --></zd-qa-card>';
+    const result = await expandComponent("/work/slots", doc(host), { "qa/card.html": main }, "qa/stage.html", { registry: new Map([["qa-card", "qa/card.html"]]) });
+    expect(result.html).toContain('<div data-zd-part="content-part" data-zd-slot="content"><p data-zd-part="fallback">Main fallback content</p></div>');
+    expect(result.html).toContain('<footer data-zd-part="footer-part">Supplied footer text <strong data-oid="supplied-inline">and element</strong><!-- preserve footer comment --></footer>');
+    expect(result.html).toContain("Compact heading");
+  });
+
   it("are options of the component, which an attribute cannot set", async () => {
     const declared = designComponentSummaryOf(CARD)!;
     expect(declared.elements).toContainEqual({ tag: "zd-option", attributes: [{ name: "name", value: "content" }, { name: "type", value: "slot" }] });
