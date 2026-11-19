@@ -1,21 +1,3 @@
-// ──────────────────────────────────────────────────────────
-// Agent control rollout — who gets the staged agent control features
-// ──────────────────────────────────────────────────────────
-//
-// The Zeros browser, computer use and simulators reach users in stages
-// (AGENT_CONTROL_ROLLOUT in @zeros/protocol/agent-control-rollout): staff
-// first, behind Settings → Internal switches that start on; then an opt-in
-// under Settings → Experimental; then everyone. Every surface of a closed
-// feature is hidden or returns to its behavior from before the feature, and
-// BrowserSessionController pushes the result to Electron main, which applies
-// it to the control bars and forwards it to the engine for tool admission and
-// routing.
-//
-// Like internal-features.ts this is a rollout gate, not an authority
-// boundary: each feature keeps its own Settings switches, approvals and
-// managed policy.
-// ──────────────────────────────────────────────────────────
-
 import { useMemo } from "react";
 import {
   AGENT_CONTROL_FEATURES,
@@ -38,7 +20,6 @@ import {
   useInternalFeatureActive,
 } from "./internal-features";
 
-/** The switch rows under Settings → Internal or Settings → Experimental. */
 export const AGENT_CONTROL_FEATURE_ROWS: Readonly<
   Record<AgentControlFeature, { label: string; hint: string }>
 > = {
@@ -60,7 +41,6 @@ export const AGENT_CONTROL_FEATURE_ROWS: Readonly<
   },
 };
 
-/** The features whose switch lives at `stage`, in display order. */
 export function agentControlFeaturesAt(
   stage: AgentControlRolloutStage,
 ): AgentControlFeature[] {
@@ -69,15 +49,11 @@ export function agentControlFeaturesAt(
   );
 }
 
-// A local development build never loads a staff account (the team store does
-// not fetch there), yet it is where these features are built. Main reports
-// local development only for an unpackaged dev-channel build, so a shipped
-// app cannot claim it.
+// Unpackaged native development has no staff account; shipped builds cannot use that path.
 function internalAccess(staffFlagActive: boolean, flagOn: boolean): boolean {
   return staffFlagActive || (isLocalDevelopment() && flagOn);
 }
 
-/** Synchronous gate for non-React call sites. */
 export function isAgentControlFeatureActive(
   feature: AgentControlFeature,
 ): boolean {
@@ -90,8 +66,6 @@ export function isAgentControlFeatureActive(
   });
 }
 
-/** Hook: re-renders when the account, a switch or the build changes the
- *  answer. */
 export function useAgentControlFeatureActive(
   feature: AgentControlFeature,
 ): boolean {
@@ -104,6 +78,7 @@ export function useAgentControlFeatureActive(
   });
 }
 
+// This is rollout availability, not a substitute for tool approval or managed policy.
 export function agentControlAvailability(): AgentControlAvailability {
   return {
     zerosBrowser: isAgentControlFeatureActive("zerosBrowser"),
@@ -113,7 +88,6 @@ export function agentControlAvailability(): AgentControlAvailability {
   };
 }
 
-/** Hook: every feature at once, as one stable object per answer. */
 export function useAgentControlAvailability(): AgentControlAvailability {
   const zerosBrowser = useAgentControlFeatureActive("zerosBrowser");
   const computerUse = useAgentControlFeatureActive("computerUse");

@@ -3,38 +3,17 @@ import {
   writePreferenceCache,
   subscribePreferenceCache,
 } from "../../platform/personal-preferences";
-// ──────────────────────────────────────────────────────────
-// Experimental features — opt-in, per-user feature flags
-// ──────────────────────────────────────────────────────────
-//
-// Toggled from Settings → Experimental. Off by default ("Expect
-// breaking changes"); flipping one on reveals that feature's surface
-// elsewhere in the app — e.g. `terminalAgents` shows the Terminal
-// Agents tab in the settings sidebar, and `gibberishAgentThinking` a
-// shimmering, misspelled phrase ("Thenkeng") on the active turn's rail.
-//
-// Module-level store + useSyncExternalStore (mirrors enabled-agents.ts)
-// so a toggle in the Experimental panel propagates to an
-// already-mounted consumer in the same render cycle — no reload. Reads
-// are synchronous so non-React call sites can gate too.
-//
-// localStorage-backed for now (UI-only opt-ins); no settings.toml
-// mirror yet. To add a flag: extend `ExperimentalFeature`, then drop a
-// SettingsRow + Switch into ExperimentalPanel.
-// ──────────────────────────────────────────────────────────
 
 import { useCallback, useSyncExternalStore } from "react";
 import type { AgentControlFeature } from "@zeros/protocol/agent-control-rollout";
 
-/** The set of experimental feature flags. Agent control features use theirs
- *  only while their rollout stage is `experimental`
- *  (agent-control-rollout.ts). */
 export type ExperimentalFeature =
   | "terminalAgents"
   | "hideArchivedWorkspacesAfter15Days"
   | "gibberishAgentThinking"
   | AgentControlFeature;
 
+// This persisted key also identifies the preference in the shared cache.
 const STORAGE_KEY = "zeros.experimentalFeatures";
 
 type PersistedShape = Partial<Record<ExperimentalFeature, boolean>>;
@@ -65,7 +44,6 @@ function writePersisted(next: PersistedShape): void {
   }
 }
 
-// ── Shared module-level store ───────────────────────────
 let current: PersistedShape = readPersisted();
 const listeners = new Set<() => void>();
 
@@ -84,13 +62,10 @@ function getSnapshot(): PersistedShape {
   return current;
 }
 
-/** Read a flag synchronously. Off by default. */
 export function isExperimentalEnabled(feature: ExperimentalFeature): boolean {
   return current[feature] === true;
 }
 
-/** Flip a flag and notify every subscriber. Always swaps the snapshot
- *  reference so useSyncExternalStore consumers re-render. */
 export function setExperimentalEnabled(
   feature: ExperimentalFeature,
   on: boolean,
@@ -100,8 +75,7 @@ export function setExperimentalEnabled(
   emit();
 }
 
-// Cross-window sync — Electron devtools-in-a-separate-window and any
-// future multi-window setup (mirrors enabled-agents.ts).
+// Windows share persisted flags but not in-memory snapshots.
 if (typeof window !== "undefined") {
   window.addEventListener("storage", (e) => {
     if (e.key !== STORAGE_KEY) return;
@@ -110,8 +84,6 @@ if (typeof window !== "undefined") {
   });
 }
 
-/** Hook: `[on, setOn]` for one experimental feature. Re-renders every
- *  consumer when the flag flips. */
 export function useExperimentalFeature(
   feature: ExperimentalFeature,
 ): [boolean, (on: boolean) => void] {
