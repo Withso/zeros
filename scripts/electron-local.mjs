@@ -2,17 +2,22 @@
 // Account-free native development. This launcher never imports the hosted
 // lifecycle or an auth profile. Main supplies the mode to preload and engine.
 import { execFileSync, spawn } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
 import { portFree } from "./dev-ports.mjs";
 import { groupAlive, signalGroup } from "./electron-local-process-group.mjs";
+import { acquireExclusiveLock, launcherOwnerClassifier } from "./exclusive-file-lock.mjs";
+import { registryPath, upsertInstance } from "./local-instance-registry.mjs";
+import { pruneDevelopmentInstances } from "./local-instance-prune.mjs";
 
 const require = createRequire(import.meta.url);
 const bundle = require("./dev-electron-bundle.cjs");
+const developmentPaths = require("../apps/desktop/src/engine/db/local-development-paths.cjs");
 const watchdogPath = fileURLToPath(
   new URL("./electron-local-watchdog.mjs", import.meta.url),
 );
@@ -42,10 +47,57 @@ export function checkoutIdentity(root) {
   return { slug, name: `Zeros Local ${label} ${slug.slice(0, 6)}` };
 }
 
+/** The compatibility decision: a profile that already exists in the
+ * pre-registry layout stays there, because its database and Keychain-bound
+ * provider profiles hold absolute paths. Everything else is v2. */
+export function localLayout({ slug, home = os.homedir(), platform = process.platform }) {
+  if (developmentPaths.isReservedInstanceId(slug)) return "v2";
+  const legacy = developmentPaths.developmentPaths({
+    instance: slug,
+    layout: "legacy",
+    home,
+    platform,
+    env: {},
+  }).dataDir;
+  try {
+    fs.lstatSync(legacy);
+    return "legacy";
+  } catch (error) {
+    if (error.code === "ENOENT") return "v2";
+    throw error;
+  }
+}
+
+/** Register this launch, then prune other development identities. Neither
+ * step may fail or block the launch. */
+export function recordDevelopmentLaunch({
+  instance,
+  entry,
+  home = os.homedir(),
+  platform = process.platform,
+  prune = pruneDevelopmentInstances,
+  electronVersion = bundle.currentElectronVersion?.() ?? null,
+  log = (line) => console.warn(`[zeros-local] ${line}`),
+}) {
+  try {
+    upsertInstance(registryPath({ home, platform, env: {} }), instance, entry);
+  } catch {
+    log("instance registry is unavailable; continuing");
+  }
+  try {
+    const actions = prune({ home, platform, env: {}, currentInstance: instance, electronVersion });
+    const removed = actions.reduce((total, action) => total + action.removed.length, 0);
+    if (removed) console.log(`[zeros-local] pruned ${removed} stale development folder(s)`);
+  } catch {
+    log("development prune skipped");
+  }
+}
+
 export function localEnvironment({
   identity,
   vitePort,
   engineBase,
+  layout = "v2",
   environment = process.env,
 }) {
   const env = { ...environment };
@@ -80,6 +132,7 @@ export function localEnvironment({
     ZEROS_LOCAL_DEVELOPMENT: "1",
     ZEROS_INSTANCE: identity.slug,
     ZEROS_INSTANCE_NAME: identity.name,
+    ...(layout === "legacy" ? { ZEROS_LOCAL_LAYOUT: "legacy" } : {}),
     ZEROS_DEV_NODE_EXECUTABLE: process.execPath,
     ZEROS_CLOUD_WORKSPACES_ENABLED: "false",
     ZEROS_VITE_PORT: String(vitePort),
@@ -277,129 +330,21 @@ export function runOwnedProcess(
   });
 }
 
-const activeLockTokens = new Set();
-
 function launcherLock(root, slug) {
   // A second launch of the same checkout must not rebuild its running app.
   // Different checkouts never contend, even when they share branch names.
-  const directory = path.join(root, ".context", "zeros-local");
-  fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
-  const file = path.join(directory, "launcher.lock");
-  const token = randomUUID();
-  const record = JSON.stringify({ pid: process.pid, slug, token });
-  const read = () => {
-    let raw;
-    try {
-      raw = fs.readFileSync(file, "utf8");
-    } catch (error) {
-      if (error.code === "ENOENT") return null;
-      throw error;
-    }
-    try {
-      return { raw, owner: JSON.parse(raw) };
-    } catch {
-      throw new Error(
-        "Zeros Local launcher lock is incomplete; stop Local before removing .context/zeros-local/launcher.lock.",
-      );
-    }
-  };
-  acquire: for (let attempt = 0; attempt < 3; attempt++) {
-    const temporary = path.join(directory, `launcher-${token}.tmp`);
-    try {
-      fs.writeFileSync(temporary, record, { flag: "wx", mode: 0o600 });
-      try {
-        // Publish complete private JSON without overwriting another owner.
-        fs.linkSync(temporary, file);
-        activeLockTokens.add(token);
-        return () => {
-          try {
-            if (read()?.owner.token === token) fs.unlinkSync(file);
-          } finally {
-            activeLockTokens.delete(token);
-          }
-        };
-      } catch (error) {
-        if (error.code !== "EEXIST") throw error;
-      }
-    } finally {
-      fs.rmSync(temporary, { force: true });
-    }
-    const snapshot = read();
-    if (!snapshot) continue;
-    const { owner } = snapshot;
-    if (!Number.isSafeInteger(owner.pid) || owner.pid <= 0)
-      throw new Error("Invalid Zeros Local launcher lock.");
-    let live = true;
-    try {
-      process.kill(owner.pid, 0);
-    } catch (error) {
-      if (error.code === "ESRCH") live = false;
-      else throw error;
-    }
-    if (
-      live &&
-      !(owner.pid === process.pid && activeLockTokens.has(owner.token))
-    ) {
-      // A recycled PID (including after reboot) is not a launcher owner.
-      try {
-        const command = execFileSync(
-          "ps",
-          ["-o", "command=", "-p", String(owner.pid)],
-          { encoding: "utf8", timeout: 2000 },
-        );
-        live = command.includes("electron-local.mjs");
-      } catch {
-        // The PID can disappear between kill(0) and this read-only probe.
-        live = false;
-      }
-    }
-    if (live)
-      throw new Error(
-        "Zeros Local is already running for this checkout. Stop it before restarting.",
-      );
-    const generation = createHash("sha256").update(snapshot.raw).digest("hex");
-    const recovery = path.join(directory, `recovery-${generation}.lock`);
-    let fd;
-    for (let fenceAttempt = 0; fenceAttempt < 3; fenceAttempt++) {
-      try {
-        fd = fs.openSync(recovery, "wx", 0o600);
-        break;
-      } catch (error) {
-        if (error.code !== "EEXIST") throw error;
-        try {
-          const abandoned = fs.statSync(recovery);
-          if (Date.now() - abandoned.mtimeMs <= 30_000) break;
-          if (read()?.raw !== snapshot.raw) continue acquire;
-          const current = fs.statSync(recovery);
-          if (
-            current.ino === abandoned.ino &&
-            current.mtimeMs === abandoned.mtimeMs
-          )
-            fs.unlinkSync(recovery);
-        } catch (error) {
-          if (error.code !== "ENOENT") throw error;
-        }
-      }
-    }
-    if (fd === undefined) {
-      throw new Error(
-        "Zeros Local lock recovery is already in progress; retry after it completes.",
-      );
-    }
-    try {
-      // Retire only the stale generation inspected before taking the fence.
-      if (read()?.raw === snapshot.raw) fs.unlinkSync(file);
-    } finally {
-      const held = fs.fstatSync(fd);
-      fs.closeSync(fd);
-      try {
-        if (fs.statSync(recovery).ino === held.ino) fs.unlinkSync(recovery);
-      } catch (error) {
-        if (error.code !== "ENOENT") throw error;
-      }
-    }
-  }
-  throw new Error("Zeros Local launcher lock changed; retry.");
+  return acquireExclusiveLock({
+    file: path.join(root, ".context", "zeros-local", "launcher.lock"),
+    record: { slug },
+    classify: launcherOwnerClassifier(
+      "electron-local.mjs",
+      "Zeros Local launcher lock is incomplete; stop Local before removing .context/zeros-local/launcher.lock.",
+      "Invalid Zeros Local launcher lock.",
+    ),
+    busyMessage: "Zeros Local is already running for this checkout. Stop it before restarting.",
+    recoveryBusyMessage: "Zeros Local lock recovery is already in progress; retry after it completes.",
+    changedMessage: "Zeros Local launcher lock changed; retry.",
+  });
 }
 
 const quote = (value) => `'${value.replace(/'/g, `'\\''`)}'`;
@@ -422,6 +367,7 @@ function assertCheckoutAvailable(root, listProcesses) {
 
 export async function runLocalDevelopment({
   root = process.cwd(),
+  home = os.homedir(),
   platform = process.platform,
   environment = process.env,
   signal,
@@ -442,12 +388,19 @@ export async function runLocalDevelopment({
   const identity = checkoutIdentity(root);
   const unlock = launcherLock(root, identity.slug);
   try {
+    const layout = localLayout({ slug: identity.slug, home, platform });
+    recordDevelopmentLaunch({
+      instance: identity.slug,
+      entry: { kind: "checkout", name: identity.name, checkout: fs.realpathSync(root), layout },
+      home,
+      platform,
+    });
     const excluded = new Set();
     let ports = await pickLocalPorts(identity.slug, 0, {
       portFree: portProber,
       excluded,
     });
-    let env = localEnvironment({ identity, ...ports, environment });
+    let env = localEnvironment({ identity, ...ports, layout, environment });
     // Exactly the existing real local build (ABI, search assets, engine, main), with the
     // Local environment present BEFORE build-time defines are baked.
     const prepared = await run("pnpm", ["electron:dev:prep"], {
@@ -459,7 +412,7 @@ export async function runLocalDevelopment({
       return prepared.code;
     const result = prepareBundle({
       ...identity,
-      paths: bundle.localInstanceBundlePaths(identity),
+      paths: bundle.localInstanceBundlePaths({ ...identity, home, layout }),
     });
     const binary = typeof result === "string" ? result : result?.binPath;
     if (!binary)
@@ -473,7 +426,7 @@ export async function runLocalDevelopment({
           portFree: portProber,
           excluded,
         });
-      env = localEnvironment({ identity, ...ports, environment });
+      env = localEnvironment({ identity, ...ports, layout, environment });
       const launch =
         env.ZEROS_NO_MAIN_HMR === "1"
           ? `${quote(binary)} .`

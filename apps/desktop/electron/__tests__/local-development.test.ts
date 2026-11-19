@@ -3,6 +3,7 @@ import fs from "node:fs";
 import vm from "node:vm";
 import { transformSync } from "esbuild";
 import { CHANNELS, isChannel } from "../../src/engine/runtime";
+import { assertDevelopmentAdmission, sharedSecretsDirectory } from "../storage-identity";
 // @ts-expect-error The Node launcher is JavaScript; exercise its real boot environment.
 import { localEnvironment } from "../../../../scripts/electron-local.mjs";
 
@@ -18,16 +19,22 @@ describe("native Local development admission", () => {
     // Include the earlier environment authority, not only the sharing condition.
     const start = source.indexOf("const explicitDevEnv =");
     const end = source.indexOf('// Chromium cache', start);
-    const sharedRoot = local ? "/data/com.zeros.local" : `/data/com.zeros.${env.ZEROS_CHANNEL}`;
+    const development = () => env.ZEROS_CHANNEL === "dev";
+    const instanceDir = (instance: string) => `/data/com.zeros.local/instances/${instance}`;
+    const sharedRoot = development() ? "/data/com.zeros.local" : `/data/com.zeros.${env.ZEROS_CHANNEL}`;
     vm.runInNewContext(transformSync(source.slice(start, end), { loader: "ts" }).code, {
       IS_DEV: env.ZEROS_CHANNEL === "dev", IS_LOCAL_DEVELOPMENT: local,
-      INSTANCE_NAME: "Fixture", INSTANCE_LABEL: "Fixture",
       process: { env },
       isChannel,
       CHANNELS,
       seedCloudWorkspaceDesktopCapabilityEnvironment() {}, migrateElectronIdentity() {},
-      zerosDataDir: () => `${sharedRoot}.${env.ZEROS_INSTANCE ?? "fixture"}`,
+      storageFamily: () => (development() ? "development" : "installed"),
+      developmentInstance: () => (development() ? env.ZEROS_INSTANCE || "default" : null),
+      assertDevelopmentAdmission,
+      sharedSecretsDirectory,
+      zerosDataDir: () => (development() ? instanceDir(env.ZEROS_INSTANCE || "default") : sharedRoot),
       zerosChannelDataDir: () => sharedRoot,
+      zerosDevelopmentDataDir: instanceDir,
       app: { getPath: () => "/data", setName() {}, setPath() {} },
     });
     return env;
@@ -39,7 +46,7 @@ describe("native Local development admission", () => {
         identity: { slug, name: "Fixture" }, vitePort: 6400, engineBase: 31000, environment: {},
       }) : { ZEROS_CHANNEL: "dev", ZEROS_INSTANCE: slug };
       expect(initializeIdentity(local, env).ZEROS_SHARED_SECRETS_DIR).toBe(
-        local ? "/data/com.zeros.local" : "/data/com.zeros.dev",
+        local ? "/data/com.zeros.local" : "/data/com.zeros.local/instances/alpha",
       );
     }
   });
@@ -60,8 +67,20 @@ describe("native Local development admission", () => {
     expect(() => initializeIdentity(false, { ZEROS_CHANNEL: "beta" })).toThrow(/not a known channel/);
   });
 
+  it("keeps electron:alpha's account store private and refuses Local admission on it", () => {
+    const env = initializeIdentity(false, {
+      ZEROS_CHANNEL: "dev", ZEROS_INSTANCE: "alpha", ZEROS_SHARED_SECRETS_DIR: "/data/com.zeros.local",
+    });
+    expect(env.ZEROS_SHARED_SECRETS_DIR).toBe("/data/com.zeros.local/instances/alpha");
+    expect(() => initializeIdentity(true, {
+      ZEROS_CHANNEL: "dev", ZEROS_INSTANCE: "alpha", ZEROS_LOCAL_DEVELOPMENT: "1",
+    })).toThrow(/reserved/);
+  });
+
   it.each(["alpha", "stable"])("never shares a development store with %s", (channel) => {
-    const env = initializeIdentity(false, { ZEROS_CHANNEL: channel, ZEROS_LOCAL_DEVELOPMENT: "1" });
+    const env = initializeIdentity(false, {
+      ZEROS_CHANNEL: channel, ZEROS_LOCAL_DEVELOPMENT: "1", ZEROS_SHARED_SECRETS_DIR: "/data/com.zeros.local",
+    });
     expect(env.ZEROS_SHARED_SECRETS_DIR).toBeUndefined();
     expect(env.ZEROS_LOCAL_DEVELOPMENT).toBeUndefined();
   });
@@ -142,8 +161,8 @@ describe("native Local development admission", () => {
   });
 
   it.each([
-    [false, "Zeros Local"],
-    [true, "Zeros Dev"],
+    [false, "pnpm electron:local"],
+    [true, "pnpm electron:alpha"],
   ])(
     "exits main on a rebuilt %s mode before any data work",
     async (requested, buildName) => {

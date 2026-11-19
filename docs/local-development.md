@@ -11,12 +11,12 @@ Zeros Dev is the complete application for sign-in, organizations, cloud
 workspaces and integration testing. Local never invokes the Zeros Dev lifecycle
 or reads its private profile, credentials or launcher state.
 
-Run only one launcher from a checkout at a time: Local and Zeros Dev (including
-`electron:alpha`) share `dist-electron` and `dist-engine`. Local refuses to build while
-a Dev launcher from the same canonical checkout is running. Native main also
+Run only one launcher from a checkout at a time: Local and `electron:alpha`
+share `dist-electron` and `dist-engine`. Local refuses to build while
+an `electron:alpha` launcher from the same canonical checkout is running. Native main also
 checks its baked build mode before initializing data or account services; a
 rebuild from the other mode exits with an instruction to stop the other launcher
-and relaunch. Use separate checkouts to run Local and Dev together.
+and relaunch. Use separate checkouts to run Local and `electron:alpha` together.
 
 ## Start and stop
 
@@ -119,45 +119,64 @@ canonical path selects a new profile; keep the old directory if its data is
 needed. The readable app name includes the checkout folder and a short identity
 suffix so identically named folders can be distinguished.
 
-| State on macOS                                                  | Location                                                                  |
-| --------------------------------------------------------------- | ------------------------------------------------------------------------- |
-| SQLite, native settings, single-instance lock                  | `~/Library/Application Support/com.zeros.local.<identity>/`               |
-| Shared encrypted provider credentials and account profiles     | `~/Library/Application Support/com.zeros.local/`                          |
-| Chromium cache, cookies and renderer storage                    | `~/Library/Caches/com.zeros.local.<identity>/`                            |
-| Native logs                                                     | The existing per-identity log location under `com.zeros.local.<identity>` |
-| User settings, default-project sentinel and engine state        | `~/.zeros-local/instances/<identity>/`                                    |
-| Native development bundle and version marker                   | `~/.zeros-local/instances/<identity>/bundle/`                              |
-| Product worktrees                                               | `~/zeros-local-<identity>/workspaces/` and sibling `design workspaces/`   |
+New profiles use the consolidated development layout (one `com.zeros.local`
+folder per kind, the identity as a subfolder); see
+[storage layout](storage-layout.md) for every root, the instance registry, the
+launch-time prune and `pnpm storage:sweep`.
 
-Local never migrates Zeros Dev/packaged secrets or Chromium state into its
+| State on macOS                                              | Location                                                                     |
+| ----------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| SQLite, native settings, single-instance lock              | `~/Library/Application Support/com.zeros.local/instances/<identity>/`        |
+| Shared encrypted provider credentials and account profiles | `~/Library/Application Support/com.zeros.local/`                             |
+| Instance registry                                           | `~/Library/Application Support/com.zeros.local/instances.json`               |
+| Chromium cache, cookies and renderer storage                | `~/Library/Caches/com.zeros.local/instances/<identity>/`                     |
+| Native development bundle and version marker               | `~/Library/Caches/com.zeros.local/bundles/<identity>/`                       |
+| Native logs                                                 | `~/Library/Logs/com.zeros.local/<identity>/`                                 |
+| User settings, default-project sentinel and engine state    | `~/.zeros-local/instances/<identity>/`                                       |
+| Product worktrees                                           | `~/zeros-local/<identity>/workspaces/` and sibling `design workspaces/`      |
+
+A profile created before this layout keeps its original locations, because its
+database and Keychain-bound provider profiles hold absolute paths:
+`com.zeros.local.<identity>` under Application Support, Caches and Logs,
+`~/.zeros-local/instances/<identity>/bundle/` and `~/zeros-local-<identity>/`.
+The launcher detects one by its data folder and exports
+`ZEROS_LOCAL_LAYOUT=legacy` for that launch; the engine strips it from
+terminals and tools like the Local mode itself.
+
+Local never migrates hosted or packaged secrets or Chromium state into its
 profile. It also starts with its own user settings instead of seeding them from
 the installed app. Stopping the command does not remove SQLite or workspace
-data. Local profiles are not pruned by the Zeros Dev launcher.
+data.
 
 Local provider authentication is shared across checkouts by default. API keys,
 saved subscription accounts and the selected method persist independently of
-each checkout's database and renderer preferences. Zeros Dev similarly shares
-its own `com.zeros.dev` store; Local, Dev and packaged channels remain separate.
+each checkout's database and renderer preferences. `pnpm electron:alpha` keeps
+its account store in its own `instances/alpha/` profile; Local, `electron:alpha`
+and packaged channels remain separate.
 `ZEROS_ISOLATE=1 pnpm electron:local` explicitly keeps a checkout's secrets private.
 
 On the first shared launch from an older Local checkout, only its provider
 credentials migrate into missing shared slots. Existing shared values win. The
 old store remains recoverable, and a migration marker prevents deleted keys
 from returning. Migrated Claude/Codex profiles retain their original path because
-native Keychain entries depend on it; keep those profile directories when
-removing an old checkout's data. See [provider accounts](provider-accounts.md).
+native Keychain entries depend on it, so the launch-time prune and
+`pnpm storage:sweep` keep any old checkout's data folder that the shared store
+references. Keep those profile directories when removing an old checkout's data
+by hand. See [provider accounts](provider-accounts.md).
 
-To delete an old profile, stop its launcher first and remove its identity's
-directories: `~/Library/Application Support/com.zeros.local.<identity>/`,
-`~/Library/Caches/com.zeros.local.<identity>/`,
-`~/Library/Logs/com.zeros.local.<identity>/`,
-`~/.zeros-local/instances/<identity>/` (including its `bundle/` cache), and
-`~/zeros-local-<identity>/`. Older runs may also have
-`~/.zeros-local/dev-instances/<identity>/`; Local removes that old bundle cache
-best-effort when preparing the new one.
-The visible worktree directory contains project work and uncommitted changes;
-keep any work you need before removing it. The checkout's
-`.context/zeros-local/` contains only launcher coordination state.
+Each launch registers its profile, then prunes other development profiles:
+regenerable folders of a checkout that has been gone for 14 days (and its whole
+profile once its visible folder holds no workspaces), test identities whose
+owning process has exited, and stale bundles built for another Electron. It
+never touches a profile with a running launcher. Profiles that predate the
+registry, and the retired Zeros Dev desktop's folders, are listed and removed
+by `pnpm storage:sweep` (a dry run unless `--apply`; it skips any identity whose
+visible folder holds workspaces, or whose database changed in the last 14 days,
+unless named with `--identity`). Launch each checkout you still use once before
+sweeping, so it is registered. The visible
+worktree directory contains project work and uncommitted changes; keep any work
+you need before removing it. The checkout's `.context/zeros-local/` contains
+only launcher coordination state.
 Launcher locks use ownership tokens, verify stale PIDs, and serialize recovery.
 An abandoned recovery fence can be reclaimed after 30 seconds.
 

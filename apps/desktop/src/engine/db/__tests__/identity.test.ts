@@ -51,15 +51,15 @@ describe("appIdentity() — one reverse-DNS id per (channel, instance)", () => {
     expect(appIdentity()).toBe("com.zeros");
   });
 
-  it("dev primary → com.zeros.dev", () => {
+  it("dev with no instance → the development family's default instance", () => {
     process.env.ZEROS_DEV = "1";
-    expect(appIdentity()).toBe("com.zeros.dev");
+    expect(appIdentity()).toBe("com.zeros.local.default");
   });
 
-  it("dev worktree → com.zeros.dev.<slug>", () => {
+  it("dev instance → com.zeros.local.<instance>", () => {
     process.env.ZEROS_DEV = "1";
     process.env.ZEROS_INSTANCE = "san-francisco";
-    expect(appIdentity()).toBe("com.zeros.dev.san-francisco");
+    expect(appIdentity()).toBe("com.zeros.local.san-francisco");
   });
 
   it("alpha → com.zeros.alpha, and IGNORES ZEROS_INSTANCE (single app)", () => {
@@ -75,10 +75,12 @@ describe("appIdentity() — one reverse-DNS id per (channel, instance)", () => {
 });
 
 describe("zerosChannelDataDir() — the slug-stripped shared-secrets home", () => {
-  it("equals zerosDataDir() when there is no instance (stable + dev primary)", () => {
+  it("equals zerosDataDir() for an installed channel, and is the family root in dev", () => {
     expect(zerosChannelDataDir()).toBe(zerosDataDir());
     process.env.ZEROS_DEV = "1";
-    expect(zerosChannelDataDir()).toBe(zerosDataDir());
+    expect(zerosDataDir()).toBe(
+      `${zerosChannelDataDir()}/instances/default`,
+    );
   });
 
   it("strips the slug so every dev worktree shares ONE secrets home", () => {
@@ -95,9 +97,9 @@ describe("zerosChannelDataDir() — the slug-stripped shared-secrets home", () =
 });
 
 describe("zerosStateRoot() — dev-aware dot-dir (no prod pollution)", () => {
-  it("prod → ~/.zeros, dev → ~/.zeros-dev, and they are disjoint", () => {
+  it("prod → ~/.zeros, dev → its ~/.zeros-local instance, and they are disjoint", () => {
     expect(zerosStateRoot()).toBe(`${fakeHome}/.zeros`);
     process.env.ZEROS_DEV = "1";
-    expect(zerosStateRoot()).toBe(`${fakeHome}/.zeros-dev`);
+    expect(zerosStateRoot()).toBe(`${fakeHome}/.zeros-local/instances/default`);
   });
 });

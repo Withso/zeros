@@ -121,6 +121,17 @@ URL scheme. Starting GitHub or
 WorkOS sign-in reclaims that handler for the current instance, and a callback is
 relayed to the process that began that exact attempt.
 
+`pnpm electron:alpha` is one hosted development instance, `alpha`, for every
+checkout: the dev channel signed in against Alpha, named Zeros Local Alpha in
+the Dock and window. Its profile, account store and bundle live in the
+development family under `com.zeros.local/instances/alpha/` and
+`bundles/alpha/`, separate from Zeros Local's shared provider store; a second
+concurrent launch fails before it builds. The first launch after the move from
+the retired `com.zeros.dev` profile asks you to sign in to Alpha once again. See
+[storage layout](storage-layout.md). The retired Zeros Dev desktop's
+`com.zeros.dev*` folders are no longer created; `pnpm storage:sweep` lists and
+removes them. Headless Zeros Dev keeps `~/.zeros-dev/`.
+
 ### Test fixture
 
 A fresh database has no organization cloud entitlement. The optional `fixture`

@@ -5,7 +5,8 @@
 // The only module that touches settings files on disk; renderer and web clients
 // go through the bridge operations. Locations:
 //
-//   ~/.zeros/settings.toml              user      (dev: ~/.zeros-dev)
+//   <state root>/settings.toml          user      (~/.zeros, ~/.zeros-alpha,
+//                                                ~/.zeros-local/instances/<inst>)
 //   ~/.zeros/settings.managed.toml      managed
 //   <repo>/.zeros/settings.toml         legacy migration input only
 //   <repo>/.zeros/settings.local.toml   repo-local (personal — gitignored)
@@ -28,11 +29,10 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { homedir } from "node:os";
 import path from "node:path";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import { patch as tomlPatch } from "@decimalturn/toml-patch";
-import { legacySharedStateRoot, zerosDotDirName, zerosStateRoot } from "../db/paths";
+import { legacySharedStateRoot, zerosStateRoot } from "../db/paths";
 import { isLocalDevelopmentRuntime } from "../runtime";
 import { readBoundedUtf8FileSync } from "../files/bounded-read-sync";
 import {
@@ -45,20 +45,16 @@ import {
  *  same convention every other tool in this space uses. */
 export const REPO_SETTINGS_DIRNAME = ".zeros";
 
-/** The user settings dir, PER CHANNEL: `~/.zeros` (stable) / `~/.zeros-beta` /
- *  `~/.zeros-dev`. Delegates the leaf name to db/paths.ts's zerosDotDirName() so
- *  there is exactly one implementation.
- *
- *  This used to inline a TWO-way `isDevRuntime()` split, which meant **Beta and
- *  Production shared one `settings.toml`** — changing a setting in Beta silently
- *  changed Production (and vice versa), and MCP servers registered in one appeared
- *  in the other (mcp-registry.ts reads these layers). Override with
- *  ZEROS_USER_SETTINGS_DIR (tests, cloud sandboxes). */
+/** The user settings dir: the state root of this channel or development
+ *  instance (db/paths.ts zerosStateRoot()), so no two apps share a
+ *  settings.toml or the MCP servers registered in it (mcp-registry.ts reads
+ *  these layers). ZEROS_USER_SETTINGS_DIR overrides (tests, cloud sandboxes),
+ *  except for account-free Local, which always keeps its own. */
 export function userSettingsDir(): string {
   if (isLocalDevelopmentRuntime()) return zerosStateRoot();
   if (process.env.ZEROS_USER_SETTINGS_DIR)
     return process.env.ZEROS_USER_SETTINGS_DIR;
-  return path.join(homedir(), zerosDotDirName());
+  return zerosStateRoot();
 }
 
 export function userSettingsPath(): string {
@@ -83,29 +79,21 @@ const SEEDABLE_SETTINGS_FILES = [
   "settings.managed.toml",
 ] as const;
 
-/** One-time seed of the user settings files from the pre-split shared `~/.zeros`.
+/** One-time seed of the user settings files from Production's `~/.zeros`: a
+ *  channel or hosted development instance with no settings of its own starts
+ *  from the installed app's instead of defaults. Account-free Local never
+ *  seeds; it starts with its own settings.
  *
- *  WHY THIS EXISTS. Before the 3-way dot-dir split, `userSettingsDir()` was a
- *  TWO-way `isDevRuntime()` decision, so **Beta wrote its settings into
- *  Production's `~/.zeros`**. Splitting the dirs is correct, but doing it bare
- *  would silently reset every existing Beta user to default settings on upgrade —
- *  a regression introduced BY the fix. This copies their settings across once.
- *
- *  Deliberately narrow — ONLY the two settings files. The rest of the dot-dir is
- *  explicitly NOT copied because it references state that belongs to the other
- *  channel and would actively corrupt:
- *    • `state.db` / `worktrees/` — rows and paths pointing at the OTHER channel's
- *      workspaces root (`~/zeros/workspaces` vs `~/zeros-beta/workspaces`).
+ *  Deliberately narrow — ONLY the two settings files. The rest of the dot-dir
+ *  references state that belongs to the other channel and would corrupt:
+ *    • `state.db` / `worktrees/` — rows and paths pointing at the OTHER
+ *      channel's workspaces root.
  *    • `detach.lock` — a live pid/workspace lock; copying it fabricates a held lock.
  *    • `term-zdotdir/`, `agent-auth/` — generated; they regenerate correctly.
  *
- *  Idempotent and non-destructive: it never overwrites an existing file, so once
- *  a channel has its own settings this is a no-op. No marker file needed — the
- *  presence of the destination IS the marker. Uniform across channels (no
- *  dev-vs-packaged branch), so it cannot become another flavour divergence.
- *
- *  Best-effort by design: settings are a convenience, and a failure here must
- *  never block engine boot. */
+ *  Idempotent and non-destructive: it never overwrites an existing file, so the
+ *  presence of the destination IS the marker. Best-effort: settings are a
+ *  convenience, and a failure here must never block engine boot. */
 export function seedUserSettingsFromLegacyRoot(
   /** Test-only path injection. Production passes nothing and resolves both from
    *  the real channel. Injected explicitly (rather than driven through

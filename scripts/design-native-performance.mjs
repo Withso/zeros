@@ -2,7 +2,7 @@
 // checkout is read-only; builds, profiles, source fixtures and traces are isolated.
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import { createServer } from "node:net";
 import os from "node:os";
@@ -13,6 +13,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { launchNativeElectron } from "./design-native-electron.mjs";
 import { localEnvironment, pickLocalPorts } from "./electron-local.mjs";
+import { createEphemeralIdentity } from "./ephemeral-local-identity.mjs";
 import { collectNativeSourceManifest, writeNativeJson } from "./design-native-run.mjs";
 import { runNativeRendererAction, waitForNativeRenderer } from "./design-native-renderer.mjs";
 import { activateNativeWorkbenchTab, prepareNativeWorkspaceCatalog } from "./design-native-workbench.mjs";
@@ -68,6 +69,7 @@ async function authoredManifest(folder) {
 }
 
 let app, vite, viteLog, page, memoryGuard;
+const ephemeralIdentities = [];
 const deadline = setTimeout(() => { console.error("Native performance deadline exceeded"); void app?.close().finally(() => process.exit(124)); if (!app) process.exit(124); }, 16 * 60_000);
 async function closeApp() {
   const guard = memoryGuard; memoryGuard = undefined;
@@ -100,7 +102,9 @@ try {
       catch (error) { if (error.code !== "ENOENT") throw error; }
     }
     await fs.copyFile(path.join(source.root, "package.json"), path.join(stage, "package.json"));
-    const identity = { slug: `design-perf-${randomUUID().slice(0, 8)}`, name: "Zeros Design Performance" };
+    const ephemeral = createEphemeralIdentity({ purpose: "design-perf", name: "Zeros Design Performance" });
+    ephemeralIdentities.push(ephemeral);
+    const identity = { slug: ephemeral.slug, name: ephemeral.name };
     const ports = await pickLocalPorts(identity.slug);
     const cdpPort = await freePort();
     const env = { ...localEnvironment({ identity, ...ports }), ZEROS_ISOLATE: "1", ZEROS_NO_ENGINE_HMR: "1", ZEROS_NO_MAIN_HMR: "1",
@@ -474,5 +478,6 @@ try {
   clearTimeout(deadline);
   await closeApp().catch(error => { report.failures.push(`App close: ${error.message}`); process.exitCode = 1; });
   vite?.kill("SIGTERM"); await viteLog?.close();
+  for (const ephemeral of ephemeralIdentities) ephemeral.dispose();
   report.finishedAt = new Date().toISOString(); status(report.failures.length ? "failed" : "complete");
 }

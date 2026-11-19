@@ -33,8 +33,8 @@ their app directories will be added when implementation begins.
 Two launchers cover development. [Zeros Local](docs/local-development.md)
 (`pnpm electron:local`) is account-free and Local-only.
 [Zeros Dev](docs/electron-cloud.md) (`pnpm electron:dev`) runs this branch's
-control plane, database and desktop app on your Mac, with real Boat VMs for
-cloud workspaces. It requires a private Dev profile and never silently connects
+control plane and database headlessly, with real Boat VMs for cloud
+workspaces. It requires a private Dev profile and never silently connects
 a new clone to Alpha.
 
 ## Requirements
@@ -72,7 +72,9 @@ devices.
 next launch starts fresh. Zeros Dev is headless on macOS and Linux; use
 `pnpm electron:alpha` for the Mac app against Alpha, `pnpm alpha:probe` to
 measure Alpha, and `pnpm electron:local` for an account-free app without a
-backend.
+backend. [Storage layout](docs/storage-layout.md) lists where each app keeps
+its data; `pnpm storage:sweep` previews (and with `--apply` removes) folders
+left by retired development identities.
 
 Useful checks:
 

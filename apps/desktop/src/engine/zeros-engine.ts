@@ -2486,10 +2486,8 @@ export class ZerosEngine {
       console.log(`[Zeros] Data dir: ${zerosDataDir()}`);
     }
 
-    // One-time settings carry-over for the 3-way dot-dir split. Before the split
-    // Beta wrote settings into Production's `~/.zeros`; splitting the dirs without
-    // this would silently reset every existing Beta user to defaults on upgrade.
-    // Must run BEFORE loadMcpRegistry() / the settings watcher / any read of the
+    // Seeds a channel's empty user settings from Production's `~/.zeros`. Must
+    // run BEFORE loadMcpRegistry() / the settings watcher / any read of the
     // user layer. Synchronous, idempotent, never overwrites, never throws — see
     // settings/files.ts seedUserSettingsFromLegacyRoot.
     seedUserSettingsFromLegacyRoot();

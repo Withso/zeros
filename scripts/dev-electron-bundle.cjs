@@ -1,11 +1,8 @@
 // macOS Dock, Cmd-Tab and menu labels come from the bundle; app.setName() alone
-// cannot brand them. Linked worktrees clone a distinct bundle identity.
-// Bundle preparation is best-effort: launcher environment still isolates data
-// and ports if it falls back to the shared bundle.
+// cannot brand them, so each development instance clones a distinct bundle.
 
 const fs = require("node:fs");
 const { localInstanceBundlePaths } = require("../apps/desktop/src/engine/db/local-development-paths.cjs");
-const os = require("node:os");
 const path = require("node:path");
 const { execFileSync } = require("node:child_process");
 
@@ -19,12 +16,6 @@ function atomicWrite(file, data) {
   fs.writeFileSync(tmp, data);
   fs.renameSync(tmp, file);
 }
-
-const SHARED_DEV = {
-  name: "Zeros Dev",
-  exec: "Zeros Dev",
-  bundleId: "com.zeros.dev",
-};
 
 function findBaseElectronApp() {
   const candidates = [
@@ -155,131 +146,17 @@ function patchIcon(appDir) {
   return true;
 }
 
-/** Only the shared bundle needs path.txt: instance bundles launch by absolute path. */
-function patchPathTxt(electronPkgDir, targetExec) {
-  const pathTxt = path.join(electronPkgDir, "path.txt");
-  const want = `Electron.app/Contents/MacOS/${targetExec}`;
-  let current;
-  try {
-    current = fs.readFileSync(pathTxt, "utf8").trim();
-  } catch {
-    return false; // no path.txt here
-  }
-  if (current === want) return false;
-  fs.writeFileSync(pathTxt, want);
-  return true;
-}
-
 const LSREGISTER =
   "/System/Library/Frameworks/CoreServices.framework/" +
   "Frameworks/LaunchServices.framework/Support/lsregister";
 
+/** LaunchServices caches a bundle's name, icon and URL schemes per path; a
+ * callback scheme only routes to a clone once it is registered. Best-effort. */
 function refreshLaunchServices(appDir) {
-  // LaunchServices caches CFBundleName/icon per bundle path; force a re-register
-  // so the Dock/Cmd-Tab pick up the patched metadata. Best-effort.
   try {
     execFileSync(LSREGISTER, ["-f", appDir], { stdio: "ignore" });
   } catch {
     /* best-effort */
-  }
-}
-
-/** Unregister before deleting: stale bundles share the instance ID and can
- * keep serving old labels/icons. Cleanup must never block launch. */
-function discardBundle(appDir) {
-  try {
-    fs.lstatSync(appDir);
-  } catch {
-    return; // nothing there — skip the subprocess
-  }
-  try {
-    execFileSync(LSREGISTER, ["-u", appDir], { stdio: "ignore" });
-  } catch {
-    /* best-effort (also the non-darwin path — no lsregister to run) */
-  }
-  try {
-    fs.rmSync(appDir, { recursive: true, force: true });
-    fs.rmSync(`${appDir}.version`, { force: true });
-  } catch {
-    /* best-effort */
-  }
-}
-
-function patchBundleIdentity(appDir, { name, exec, bundleId, withPathTxt }) {
-  const plistPath = path.join(appDir, "Contents/Info.plist");
-  if (!fs.existsSync(plistPath)) {
-    console.warn(`[dev-electron-bundle] missing ${plistPath} — skipping`);
-    return { ok: false, binPath: null };
-  }
-  const plist = fs.readFileSync(plistPath, "utf8");
-  const currentExec = readPlistValue(plist, "CFBundleExecutable") || "Electron";
-  // Order matters: rename the on-disk binary first, then patch the plist
-  // (CFBundleExecutable must match the new file).
-  const execChanged = patchExecutable(appDir, currentExec, exec);
-  const plistChanged = patchPlist(plistPath, { name, exec, bundleId });
-  const iconChanged = patchIcon(appDir);
-  const pathTxtChanged = withPathTxt
-    ? patchPathTxt(path.resolve(appDir, "../.."), exec)
-    : false;
-  // Refresh even unchanged bundles: macOS caches the launch-bounce icon by
-  // path, independently of the running app's Dock icon.
-  try {
-    fs.utimesSync(appDir, new Date(), new Date());
-  } catch {
-    /* best-effort */
-  }
-  refreshLaunchServices(appDir);
-  if (plistChanged || execChanged || iconChanged || pathTxtChanged) {
-    const bits = [
-      plistChanged && `name → "${name}"`,
-      execChanged && `executable → "${exec}"`,
-      pathTxtChanged && "path.txt",
-      iconChanged && "icon → icon-dev.icns",
-    ].filter(Boolean);
-    console.log(`[dev-electron-bundle] patched ${bits.join(", ")}`);
-  }
-  return { ok: true, binPath: path.join(appDir, "Contents/MacOS", exec) };
-}
-
-function prepareSharedDevBundle() {
-  if (process.platform !== "darwin") return { ok: false, binPath: null };
-  const appDir = findBaseElectronApp();
-  if (!appDir) {
-    console.warn("[dev-electron-bundle] Electron.app not found — skipping");
-    return { ok: false, binPath: null };
-  }
-  return patchBundleIdentity(appDir, { ...SHARED_DEV, withPathTxt: true });
-}
-
-/** The Dock reads the bundle filename; Cmd-Tab reads process metadata. Keep
- * the display name in the filename and uniqueness in its parent slug.
- * Dev clones belong under ~/.zeros-dev, never the production ~/.zeros. */
-function instanceBundleDir(slug, name) {
-  return path.join(instancesRoot(), slug, `${name}.app`);
-}
-
-function instancesRoot() {
-  return path.join(os.homedir(), ".zeros-dev", "dev-instances");
-}
-
-/** Remove the legacy flat bundle: it shares the replacement's bundle ID
- * and can leave LaunchServices serving the old Dock name. */
-function legacyInstanceBundleDir(slug) {
-  return path.join(instancesRoot(), `${slug}.app`);
-}
-
-/** A display-name change can keep the same slug; remove siblings so only
- * one bundle claims that instance ID. */
-function pruneStaleBundles(dir, keep) {
-  let entries;
-  try {
-    entries = fs.readdirSync(dir);
-  } catch {
-    return; // first launch — the directory isn't there yet
-  }
-  for (const entry of entries) {
-    if (entry === keep || !entry.endsWith(".app")) continue;
-    discardBundle(path.join(dir, entry));
   }
 }
 
@@ -322,71 +199,24 @@ function readElectronVersion(appDir) {
   }
 }
 
-function prepareInstanceBundle({ slug, name }) {
-  if (process.platform !== "darwin") return { ok: false, binPath: null };
+/** The Electron version a fresh clone would carry, or null off macOS. */
+function currentElectronVersion() {
   const base = findBaseElectronApp();
-  if (!base) {
-    console.warn(
-      "[dev-electron-bundle] base Electron.app not found — instance uses shared bundle",
-    );
-    return { ok: false, binPath: null };
-  }
-  const dest = instanceBundleDir(slug, name);
-  const versionMarker = `${dest}.version`;
-  const baseVersion = readElectronVersion(base);
-  // Retire stale identities even on a cache hit; otherwise old names survive indefinitely.
-  discardBundle(legacyInstanceBundleDir(slug));
-  pruneStaleBundles(path.dirname(dest), path.basename(dest));
-  let cachedVersion = "";
-  try {
-    cachedVersion = fs.readFileSync(versionMarker, "utf8").trim();
-  } catch {
-    /* no marker yet */
-  }
-  const cacheValid =
-    !!baseVersion && cachedVersion === baseVersion && fs.existsSync(dest);
-  try {
-    if (!cacheValid) {
-      fs.rmSync(dest, { recursive: true, force: true });
-      fs.mkdirSync(path.dirname(dest), { recursive: true });
-      console.log(
-        `[dev-electron-bundle] hardlink-cloning Electron.app → ${dest} (first launch of "${name}"; ~0 disk)`,
-      );
-      cloneBundleHardlink(base, dest);
-      if (baseVersion) fs.writeFileSync(versionMarker, baseVersion);
-    }
-  } catch (err) {
-    console.warn(
-      `[dev-electron-bundle] instance bundle copy failed (${
-        err && err.message ? err.message : err
-      }) — falling back to shared bundle`,
-    );
-    return { ok: false, binPath: null };
-  }
-  return patchBundleIdentity(dest, {
-    name,
-    exec: name,
-    bundleId: `com.zeros.dev.${slug}`,
-    withPathTxt: false,
-  });
+  return base ? readElectronVersion(base) || null : null;
 }
 
 module.exports = {
   findBaseElectronApp,
-  prepareSharedDevBundle,
-  prepareInstanceBundle,
-  instanceBundleDir,
-  legacyInstanceBundleDir,
-  pruneStaleBundles,
-  discardBundle,
+  currentElectronVersion,
   patchPlist,
   prepareLocalInstanceBundle,
   localInstanceBundlePaths,
 };
 
-/** Local clones the base without branding/mutating hosted Dev's shared bundle.
- * A separate cache and no URL schemes keep it out of hosted OAuth routing. */
-function prepareLocalInstanceBundle({ slug, name, paths = localInstanceBundlePaths({slug,name}) }) {
+/** Clone the base without mutating it. Account-free Local declares no URL
+ * schemes, keeping it out of hosted OAuth routing; hosted electron:alpha
+ * declares the Dev callback scheme. */
+function prepareLocalInstanceBundle({ slug, name, callbackScheme = false, paths = localInstanceBundlePaths({slug,name}) }) {
   if (process.platform !== "darwin") return { ok: false, binPath: null };
   const base = findBaseElectronApp();
   if (!base) return { ok: false, binPath: null };
@@ -410,8 +240,9 @@ function prepareLocalInstanceBundle({ slug, name, paths = localInstanceBundlePat
     readPlistValue(fs.readFileSync(plistPath, "utf8"), "CFBundleExecutable") || "Electron";
   patchExecutable(dest, current, name);
   patchPlist(plistPath, {
-    name, exec: name, bundleId: `com.zeros.local.${slug}`, local: true,
+    name, exec: name, bundleId: `com.zeros.local.${slug}`, local: !callbackScheme,
   });
   patchIcon(dest);
+  if (callbackScheme) refreshLaunchServices(dest);
   return { ok: true, binPath: path.join(dest, "Contents", "MacOS", name) };
 }

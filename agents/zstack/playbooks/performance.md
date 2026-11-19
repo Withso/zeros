@@ -82,7 +82,7 @@ are in `agents/zstack/records/design-performance-measurements.md`.
   installed app (0.8–1.8 s); `press_key` / `type_text` wait 1.4–2 s on its
   read-back. A closed driver session's label is never reissued.
 - Measure from `zeros.db` (`turns`, `chat_messages`, read-only) and
-  `app.jsonl`, under `com.zeros.local.<16 hex>`. Detach Mac runs with `nohup`
+  `app.jsonl` (paths: docs/storage-layout.md). Detach Mac runs with `nohup`
   (60 s command limit), type only after `HIDIdleTime` shows the user idle, and
   recheck that Zeros is frontmost before each input. A prompt sent 0.3 s after
   typing hides none of the agent's startup. `electron:local` and its benches

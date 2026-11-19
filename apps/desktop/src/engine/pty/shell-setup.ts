@@ -24,10 +24,10 @@ import {
   TOOLCHAIN_ENV_NAMES,
 } from "../env/launcher-env";
 
-/** Zeros-managed ZDOTDIR under the DEV-AWARE dot-dir (~/.zeros in prod,
- *  ~/.zeros-dev in dev) so a dev run never writes term files (incl. shell
- *  history) into the production ~/.zeros. Resolved lazily — the channel/dev
- *  signal is in env by the time a PTY is first spawned. */
+/** Zeros-managed ZDOTDIR under this channel's or instance's state root so a
+ *  dev run never writes term files (incl. shell history) into the production
+ *  ~/.zeros. Resolved lazily — the channel/dev signal is in env by the time a
+ *  PTY is first spawned. */
 function zerosZdotdir(): string {
   return path.join(zerosStateRoot(), "term-zdotdir");
 }
@@ -346,27 +346,25 @@ export function buildPtyEnv(opts?: {
   // — impossible, which is exactly what this whole denylist exists to allow.
   delete env.ZEROS_CHANNEL;
   // Drop this dev instance's IDENTITY for the same reason: it describes THE APP,
-  // not the worktree. scripts/dev-instance.mjs derives one slug per worktree and
-  // exports these so every `pnpm electron:dev` is its own app — own Vite port, own
-  // engine port block, own com.zeros.dev.<slug> data dir, own userData +
-  // single-instance lock. Inherited by a shell, they hand all of that to the NEXT
-  // app: a nested `pnpm electron:dev` (dogfooding Zeros from a terminal inside
-  // Zeros) found ZEROS_INSTANCE already set, took the "caller owns uniqueness"
-  // branch of resolveInstance(), and adopted the PARENT's identity verbatim — only
-  // the display name came from the worktree. It then claimed the parent's Vite port
-  // (fatal under strictPort, and `concurrently -k` killed the whole block), the
-  // parent's SQLite DB (db/paths.ts), the parent's single-instance lock (so the
-  // child silently quits — deep-link.ts), and the parent's orphan-engine match key
-  // (so the two apps reap each other's engines — orphan-engines.ts). Deleting them
-  // lets the nested launcher derive a fresh identity from its own worktree.
+  // not the worktree. The development launchers export these so every
+  // instance is its own app — own Vite port, own engine port block, own data
+  // dir, own userData + single-instance lock. Inherited by a shell, they hand
+  // all of that to the NEXT app: a nested launch (dogfooding Zeros from a
+  // terminal inside Zeros) adopted the PARENT's identity verbatim — the
+  // parent's Vite port (fatal under strictPort, and `concurrently -k` killed
+  // the whole block), the parent's SQLite DB (db/paths.ts), the parent's
+  // single-instance lock (so the child silently quits — deep-link.ts), and the
+  // parent's orphan-engine match key (so the two apps reap each other's
+  // engines — orphan-engines.ts). ZEROS_LOCAL_LAYOUT is the launcher's layout
+  // decision for that same parent identity.
   //
-  // This is a denylist of what the launcher exports, so a new instance-scoped var
-  // has to be added here too — there's a pointer saying so at that export site.
-  // ZEROS_WORKTREE_PATH / ZEROS_WORKSPACE_ID stay: those ARE worktree context, and
-  // are set deliberately just below.
+  // This is a denylist of what the launchers export, so a new instance-scoped
+  // var has to be added here too. ZEROS_WORKTREE_PATH / ZEROS_WORKSPACE_ID
+  // stay: those ARE worktree context, and are set deliberately just below.
   delete env.ZEROS_INSTANCE;
   delete env.ZEROS_INSTANCE_NAME;
   delete env.ZEROS_LOCAL_DEVELOPMENT;
+  delete env.ZEROS_LOCAL_LAYOUT;
   // A nested checkout resolves its own backend/auth profile and credentials.
   delete env.ZEROS_DEV_ENVIRONMENT;
   delete env.ZEROS_DEV_AUTH_PROFILE;

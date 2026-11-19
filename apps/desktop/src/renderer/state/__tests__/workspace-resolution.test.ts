@@ -109,6 +109,22 @@ describe("repoSlugFromWorktreePath", () => {
     ).toBe("widgets");
   });
 
+  it("resolves the development family's instance roots in both layouts", () => {
+    for (const root of [
+      "/Users/dev/zeros-local/a123456789abcdef",
+      "/Users/dev/zeros-local/alpha",
+      "/Users/dev/zeros-local-a123456789abcdef",
+    ]) {
+      expect(repoSlugFromWorktreePath(`${root}/workspaces/widgets/ws_1/src/x.ts`)).toBe("widgets");
+      expect(workspaceIdFromWorktreePath(`${root}/workspaces/widgets/ws_1`)).toBe("ws_1");
+      expect(workspaceKindFromManagedPath(`${root}/design workspaces/widgets/landing`)).toBe("design");
+      expect(isWorktreePath(`${root}/workspaces/widgets/landing`)).toBe(true);
+    }
+    expect(isWorktreePath("/Users/dev/zeros-local/alpha")).toBe(false);
+    expect(repoSlugFromWorktreePath("/Users/dev/zeros-local/workspaces/widgets/ws_1/src")).toBe("widgets");
+    expect(repoSlugFromWorktreePath("/Users/dev/zeros-local/alpha/cloud-sync/widgets/1")).toBeNull();
+  });
+
   it("returns null for paths outside the worktrees layout", () => {
     expect(repoSlugFromWorktreePath("/Users/dev/code/zeros")).toBeNull();
     expect(repoSlugFromWorktreePath("/Users/dev/.zeros/cache/foo")).toBeNull();

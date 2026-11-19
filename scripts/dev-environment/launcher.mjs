@@ -17,6 +17,7 @@ import { ensureDevAuthEnvironment } from "../dev-auth-profile.mjs";
 import { cloudSeedMessage, cloudSeedNeeded, recordCloudSeed } from "./cloud-local-seed-state.mjs";
 import { REBOOT_RECOVERED, currentBoot, recoverLaunchAfterReboot } from "./reboot-recovery.mjs";
 import { resolveLocalRuntime } from "./cloud-local-runtime.mjs";
+import { alphaInstanceEnvironment, prepareAlphaLaunch } from "../alpha-instance.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 // `backend` is the former headless action; Zeros Dev now always runs headless.
@@ -215,9 +216,14 @@ async function main() {
   if (action === "alpha") {
     const auth = await ensureDevAuthEnvironment({ processEnv: {} });
     if (auth.issue || auth.source === "none") throw new Error("A valid Alpha public auth profile is required");
-    const env = { ...systemEnvironment(), ...auth.env, ZEROS_DEV: "1", ZEROS_CLOUD_WORKSPACES_ENABLED: "true" };
-    await run("pnpm", ["electron:dev:prep"], { cwd: root, env, inherit: true, timeout: 300_000 });
-    await run(process.execPath, [path.join(root, "scripts/dev-instance.mjs"), watch ? "--watch" : "--run-only"], { cwd: root, env, inherit: true, timeout: 12 * 3600_000 });
+    // One alpha profile serves every checkout: refuse a second launch before
+    // this one rebuilds anything.
+    const release = prepareAlphaLaunch();
+    try {
+      const env = alphaInstanceEnvironment({ ...systemEnvironment(), ...auth.env, ZEROS_DEV: "1", ZEROS_CLOUD_WORKSPACES_ENABLED: "true" });
+      await run("pnpm", ["electron:dev:prep"], { cwd: root, env, inherit: true, timeout: 300_000 });
+      await run(process.execPath, [path.join(root, "scripts/dev-instance.mjs"), watch ? "--watch" : "--run-only"], { cwd: root, env, inherit: true, timeout: 12 * 3600_000 });
+    } finally { release(); }
     return;
   }
   if (!["start", "doctor", "stop", "seed", "archive"].includes(action)) throw new Error("Use start, doctor, stop, seed, archive or alpha");

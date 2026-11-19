@@ -147,6 +147,7 @@ describe("buildPtyEnv sheds the dev-instance identity", () => {
   // passes an opaque per-workspace UUID, so its slug is that UUID + a realpath hash.
   const INSTANCE = {
     ZEROS_LOCAL_DEVELOPMENT: "1",
+    ZEROS_LOCAL_LAYOUT: "legacy",
     ZEROS_INSTANCE: "00000000-0000-0000-0000-000000000000-82d",
     ZEROS_INSTANCE_NAME: "zeros-coralline",
     ZEROS_VITE_PORT: "5261",

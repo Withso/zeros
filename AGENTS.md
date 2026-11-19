@@ -111,7 +111,9 @@ For renderer state, navigation, loading, tabs, panels, or list work, also read
 `docs/ui-interaction-performance.md` when it is present.
 For provider event handling or tool transcript UI, also read
 `docs/agent-tool-presentation.md`. For agent orchestration through
-`zeros local` (the Zeros Local CLI), read `docs/local-cli.md`.
+`zeros local` (the Zeros Local CLI), read `docs/local-cli.md`. For where data,
+caches, logs and development identities live on disk, read
+`docs/storage-layout.md`.
 
 ## Agent credentials
 

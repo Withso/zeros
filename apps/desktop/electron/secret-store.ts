@@ -24,12 +24,11 @@ import { app, safeStorage } from "electron";
 import fs from "node:fs";
 import path from "node:path";
 
-/** The directory holding secrets.json. Shared dev login: apps/desktop/electron/main.ts sets
- *  ZEROS_SHARED_SECRETS_DIR to the channel-PRIMARY data dir (com.zeros.dev) so
- *  every dev worktree reads/writes ONE secrets.json, decrypted by the ONE
- *  per-channel keychain key (app.getName() pinned to the channel) → log in once,
- *  every worktree authed. Falls back to THIS instance's own userData for
- *  stable/alpha (single instance) or a ZEROS_ISOLATE=1 dev worktree. */
+/** The directory holding secrets.json. main.ts sets ZEROS_SHARED_SECRETS_DIR
+ *  for development instances (storage-identity.ts sharedSecretsDirectory): one
+ *  secrets.json per store, decrypted by the one keychain key app.getName()
+ *  selects. Falls back to THIS instance's own userData for stable/alpha
+ *  (single instance) or a ZEROS_ISOLATE=1 development instance. */
 function secretsDir(): string {
   const shared = process.env.ZEROS_SHARED_SECRETS_DIR?.trim();
   return shared && shared.length > 0 ? shared : app.getPath("userData");

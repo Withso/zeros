@@ -51,7 +51,7 @@ describe("zerosDotDirName — one leaf name per channel", () => {
     }
     expect(seen.get("stable")).toBe(".zeros");
     expect(seen.get("alpha")).toBe(".zeros-alpha");
-    expect(seen.get("dev")).toBe(".zeros-dev");
+    expect(seen.get("dev")).toBe(".zeros-local");
   });
 
   it("THE regression: a packaged pre-release must NOT resolve to Production's `.zeros`", () => {
@@ -83,7 +83,11 @@ describe("all dot-dir consumers agree", () => {
     for (const ch of CHANNELS) {
       process.env.ZEROS_CHANNEL = ch;
       expect(gitStateRoot()).toBe(zerosStateRoot());
-      expect(zerosStateRoot()).toBe(path.join(homedir(), zerosDotDirName()));
+      expect(zerosStateRoot()).toBe(
+        ch === "dev"
+          ? path.join(homedir(), zerosDotDirName(), "instances", "default")
+          : path.join(homedir(), zerosDotDirName()),
+      );
     }
   });
 

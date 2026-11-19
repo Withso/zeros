@@ -154,6 +154,7 @@ describe("Local launch ownership", () => {
       await expect(
         runLocalDevelopment({
           root: launchRoot,
+          home: directory(),
           platform: "darwin",
           environment: {},
           listProcesses: () => `123 node ${root}/scripts/dev-instance.mjs`,
@@ -211,6 +212,7 @@ describe("Local launch ownership", () => {
     });
     const first = runLocalDevelopment({
       root,
+      home: directory(),
       platform: "darwin",
       environment: {},
       signal: controller.signal,
@@ -223,7 +225,7 @@ describe("Local launch ownership", () => {
     await ready;
     try {
       await expect(
-        runLocalDevelopment({ root, platform: "darwin" }),
+        runLocalDevelopment({ root, home: directory(), platform: "darwin" }),
       ).rejects.toThrow("already running");
     } finally {
       controller.abort();
@@ -253,6 +255,7 @@ describe("Local launch ownership", () => {
       try {
         code = await runLocalDevelopment({
           root,
+          home: directory(),
           platform: "darwin",
           environment: {},
           prepareBundle: () => "/local/Electron",
@@ -338,6 +341,71 @@ describe("Local launch ownership", () => {
     30_000,
   );
 
+  async function launchOnce(root: string, home: string) {
+    const prepared: Array<Record<string, unknown>> = [];
+    let env: Record<string, string> = {};
+    await runLocalDevelopment({
+      root,
+      home,
+      platform: "darwin",
+      environment: { ZEROS_LOCAL_LAYOUT: "legacy" },
+      prepareBundle: (identity: Record<string, unknown>) => {
+        prepared.push(identity);
+        return "/local/Electron";
+      },
+      run: async (_command: string, args: string[], options: { env: Record<string, string> }) => {
+        env = options.env;
+        return { code: args.includes("concurrently") ? 0 : 0, cancelled: false };
+      },
+    });
+    return { env, bundle: prepared[0]?.paths as Record<string, string> };
+  }
+
+  it("lays out a new checkout in the consolidated family and registers it", async () => {
+    const root = directory(), home = directory();
+    const identity = checkoutIdentity(root);
+    const { env, bundle } = await launchOnce(root, home);
+    expect(env.ZEROS_INSTANCE).toBe(identity.slug);
+    expect(env).not.toHaveProperty("ZEROS_LOCAL_LAYOUT");
+    expect(bundle.bundlePath).toBe(
+      path.join(home, "Library/Caches/com.zeros.local/bundles", identity.slug, `${identity.name}.app`),
+    );
+    const registry = JSON.parse(
+      fs.readFileSync(path.join(home, "Library/Application Support/com.zeros.local/instances.json"), "utf8"),
+    );
+    expect(registry.instances[identity.slug]).toMatchObject({
+      kind: "checkout", name: identity.name, checkout: fs.realpathSync(root), layout: "v2",
+    });
+  });
+
+  it("keeps an existing legacy profile on its legacy layout", async () => {
+    const root = directory(), home = directory();
+    const identity = checkoutIdentity(root);
+    fs.mkdirSync(path.join(home, "Library/Application Support", `com.zeros.local.${identity.slug}`), { recursive: true });
+    const { env, bundle } = await launchOnce(root, home);
+    expect(env.ZEROS_LOCAL_LAYOUT).toBe("legacy");
+    expect(bundle.bundlePath).toBe(
+      path.join(home, ".zeros-local/instances", identity.slug, "bundle", `${identity.name}.app`),
+    );
+    const registry = JSON.parse(
+      fs.readFileSync(path.join(home, "Library/Application Support/com.zeros.local/instances.json"), "utf8"),
+    );
+    expect(registry.instances[identity.slug].layout).toBe("legacy");
+  });
+
+  it("prunes dead ephemeral identities at launch without touching its own", async () => {
+    const root = directory(), home = directory();
+    const registry = path.join(home, "Library/Application Support/com.zeros.local/instances.json");
+    const leftover = path.join(home, "Library/Application Support/com.zeros.local/instances/design-qual-deadbeef");
+    fs.mkdirSync(leftover, { recursive: true });
+    fs.writeFileSync(registry, JSON.stringify({ version: 1, instances: {
+      "design-qual-deadbeef": { kind: "ephemeral", name: "Q", checkout: null, layout: "v2", ownerPid: 2 ** 22 + 99,
+        createdAt: new Date().toISOString(), lastUsedAt: new Date().toISOString() } } }));
+    await launchOnce(root, home);
+    expect(fs.existsSync(leftover)).toBe(false);
+    expect(Object.keys(JSON.parse(fs.readFileSync(registry, "utf8")).instances)).toEqual([checkoutIdentity(root).slug]);
+  });
+
   it("rejects Linux before any build, profile or bundle work", async () => {
     await expect(runLocalDevelopment({ platform: "linux" })).rejects.toThrow(
       "macOS",
@@ -349,6 +417,7 @@ describe("Local launch ownership", () => {
     let count = 0;
     const code = await runLocalDevelopment({
       root: directory(),
+      home: directory(),
       platform: "darwin",
       environment: {},
       signal: controller.signal,

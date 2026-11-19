@@ -12,6 +12,7 @@ import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
 import { localEnvironment, pickLocalPorts } from "./electron-local.mjs";
+import { createEphemeralIdentity } from "./ephemeral-local-identity.mjs";
 import { ensureDevAuthEnvironment } from "./dev-auth-profile.mjs";
 import { acquireNativeRunLock, collectNativeSourceManifest, nativeProcessAlive, readNativeReportJson, writeNativeJson } from "./design-native-run.mjs";
 import { launchNativeElectron } from "./design-native-electron.mjs";
@@ -110,11 +111,12 @@ async function main() {
   const pause = ms => delay(ms, undefined, { signal: controller.signal });
   const run = async (command, argv, options = {}) => (await exec(command, argv, { cwd: repo, timeout: 180_000,
     maxBuffer: 16 * 1024 ** 2, signal: controller.signal, ...options })).stdout;
-  let app, server, page, rawPage, cdp, guard, enginePid, fixtures, authoredBefore;
+  let app, server, page, rawPage, cdp, guard, enginePid, fixtures, authoredBefore, ephemeral;
   const restores = [];
   const memorySamples = [];
   try {
-    const identity = { slug: `design-accept-${runId.slice(-8)}`, name: "Zeros Performance Qualification" };
+    ephemeral = createEphemeralIdentity({ purpose: "design-accept", name: "Zeros Performance Qualification" });
+    const identity = { slug: ephemeral.slug, name: ephemeral.name };
     const ports = await pickLocalPorts(identity.slug);
     const env = localEnvironment({ identity, ...ports });
     // Ordinary Dev reads its normal shared sign-in; only workspace data and
@@ -124,7 +126,8 @@ async function main() {
     const auth = await ensureDevAuthEnvironment({ processEnv: {} });
     assert.equal(auth.issue, null, "A validated public Alpha Dev configuration is required.");
     Object.assign(env, auth.env, { NODE_ENV: "production", ZEROS_NO_MAIN_HMR: "1", ZEROS_NO_ENGINE_HMR: "1" });
-    const profile = path.join(os.homedir(), "Library/Application Support", `com.zeros.dev.${identity.slug}`);
+    const profile = ephemeral.roots.dataDir;
+    await fs.mkdir(path.dirname(profile), { recursive: true, mode: 0o700 });
     await fs.mkdir(profile, { mode: 0o700 });
     writeNativeJson(path.join(profile, "design-qualification-owner.json"), { runId });
     report.profile = profile;
@@ -462,6 +465,7 @@ async function main() {
       report.runtimeRetired = !report.cleanupError && report.retirement.retired;
       if (!report.runtimeRetired) report.cleanupError ??= "An owned native app, engine or helper did not retire.";
     } catch (error) { report.runtimeRetired = false; report.cleanupError ??= error.message; }
+    ephemeral?.dispose();
     clearTimeout(deadline); process.off("SIGINT", cancel); process.off("SIGTERM", cancel);
     report.acceptance = assessDesignPerformance(report);
     report.stage = report.error || report.cleanupError ? "failed" : report.acceptance.passed ? "passed" : "failed-budgets";

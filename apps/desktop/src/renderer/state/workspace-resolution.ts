@@ -37,10 +37,11 @@ import {
 // the bug that registered worktrees as phantom top-level projects). Matches
 // BOTH layouts:
 //   • current visible root  ~/zeros[-<channel>][-<instance>]/workspaces/<repo>/<name>/
+//   • development family    ~/zeros-local/<instance>/workspaces/<repo>/<name>/
 //   • legacy hidden root    ~/.zeros[-<channel>]/worktrees/<slug>/<wsId>/
-// The engine's zerosWorkspacesRoot() (apps/desktop/src/engine/db/paths.ts) names the visible
-// root `zeros-<channel>[-<instance>]` — e.g. `zeros-dev`, `zeros-alpha`, and for a
-// per-worktree dev instance `zeros-dev-<slug>` (like `zeros-dev-mogadishu-5486`).
+// The engine's zerosVisibleRoot() (apps/desktop/src/engine/db/paths.ts) names the
+// visible root `zeros`, `zeros-alpha`, `zeros-local/<instance>`, or a legacy Local
+// profile's `zeros-local-<instance>`. Older dev builds wrote `zeros-dev-<slug>`.
 // Design workspaces use the sibling `design workspaces` segment under that same
 // root; both layouts carry the same repository/workspace owner segments.
 // The suffix after `zeros-` / `.zeros-` is intentionally treated as the rest of
@@ -64,16 +65,23 @@ function worktreePathParts(folder: string): {
   const parts = folder.split("/").filter(Boolean);
   for (let i = 0; i + 3 < parts.length; i += 1) {
     const root = parts[i] ?? "";
-    const layout = parts[i + 1] ?? "";
+    // The development family nests each instance one level down:
+    // `zeros-local/<instance>/workspaces/…`.
+    const instanced =
+      root === "zeros-local" &&
+      i + 4 < parts.length &&
+      (parts[i + 2] === "workspaces" || parts[i + 2] === "design workspaces");
+    const at = instanced ? i + 1 : i;
+    const layout = parts[at + 1] ?? "";
     const matchesLegacyRoot =
-      matchesRootSegment(root, ".zeros") && layout === "worktrees";
+      !instanced && matchesRootSegment(root, ".zeros") && layout === "worktrees";
     const matchesVisibleRoot =
       matchesRootSegment(root, "zeros") &&
       (layout === "workspaces" || layout === "design workspaces");
     if (matchesLegacyRoot || matchesVisibleRoot) {
       return {
-        repositoryDirectory: parts[i + 2] ?? "",
-        workspaceDirectory: parts[i + 3] ?? "",
+        repositoryDirectory: parts[at + 2] ?? "",
+        workspaceDirectory: parts[at + 3] ?? "",
         kind:
           matchesVisibleRoot && layout === "design workspaces"
             ? "design"

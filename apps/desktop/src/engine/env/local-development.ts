@@ -1,9 +1,18 @@
-/** Local admission belongs to the desktop/engine, never a user subprocess. */
+/** Local admission and the launcher's layout selection belong to the
+ * desktop/engine, never a user subprocess. */
+const LOCAL_DEVELOPMENT_ENV = ["ZEROS_LOCAL_DEVELOPMENT", "ZEROS_LOCAL_LAYOUT"] as const;
+
+export function hasLocalDevelopmentEnvironment(
+  env: Record<string, string | undefined>,
+): boolean {
+  return LOCAL_DEVELOPMENT_ENV.some((name) => name in env);
+}
+
 export function withoutLocalDevelopment<
   T extends Record<string, string | undefined>,
 >(env: T): T {
-  if (!("ZEROS_LOCAL_DEVELOPMENT" in env)) return env;
+  if (!hasLocalDevelopmentEnvironment(env)) return env;
   const child = { ...env };
-  delete child.ZEROS_LOCAL_DEVELOPMENT;
+  for (const name of LOCAL_DEVELOPMENT_ENV) delete child[name];
   return child;
 }
