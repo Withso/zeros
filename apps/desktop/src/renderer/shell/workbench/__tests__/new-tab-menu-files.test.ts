@@ -167,3 +167,14 @@ it("loads Local search immediately without a cloud connection", async () => {
   await openMenu();
   expect(fixture.load).toHaveBeenCalledExactlyOnceWith(fixture.folder);
 });
+
+it("warms Local file search on focus before opening", async () => {
+  fixture.folder = "/local";
+  const trigger = await renderMenu();
+  expect(fixture.load).not.toHaveBeenCalled();
+
+  await act(async () => trigger.focus());
+
+  expect(fixture.load).toHaveBeenCalledExactlyOnceWith(fixture.folder);
+  expect(document.querySelector("[cmdk-input]")).toBeNull();
+});
