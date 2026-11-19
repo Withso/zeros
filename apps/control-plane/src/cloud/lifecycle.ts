@@ -65,6 +65,8 @@ const FORK_TTL_SECONDS = 60 * 60;
 const FORK_READY_ATTEMPTS = 36;
 /** Boat archives a stopped VM for a few seconds; a fork waits for that. */
 const ARCHIVING_RECHECK_MS = 60_000;
+/** A stop waits this long for Boat to finish archiving before trying again. */
+const ARCHIVE_CONFIRM_READS = 12, ARCHIVE_CONFIRM_MS = 5_000;
 /** Boat's stock image home; repositories live at <home>/<owner>/<name>. */
 export const CLOUD_V2_HOME = "/home/user";
 /** Boat's stock image runs commands as its one user, `user`. The worker and
@@ -566,7 +568,7 @@ export class CloudV2Lifecycle {
           // A stop that a later one has replaced leaves the VM to that one,
           // whose checkpoint may still be running on it.
           if (!await store.stopCurrent(workspace.id, workspace.stopGeneration)) return;
-          try { await compute.stop(sandboxId); }
+          try { await compute.stop(sandboxId); await this.untilArchived(sandboxId); }
           catch (error) {
             // Nothing is left to stop; the next wake restores the checkpoint.
             if (!sandboxLost(error) || !workspace.checkpoint) throw error;
@@ -756,6 +758,10 @@ export class CloudV2Lifecycle {
     try { inspected = await this.deps.compute.inspect(source); }
     catch (error) { if (!sandboxLost(error)) throw error; await this.retriesExhausted(row, retry, "checkpoint_failed"); return true; }
     if (inspected.state !== "archived") {
+      // A stop Boat accepted but then failed left the VM running; Boat's own
+      // guard still refuses one that would lose writes.
+      if (inspected.state !== "archiving")
+        await this.deps.compute.stop(source).catch(error => this.deps.logger?.warn(`[cloud-v2] checkpoint retry stop failed (${errorCode(error)})`));
       const next = now + (inspected.state === "archiving" ? ARCHIVING_RECHECK_MS : RETRY_BACKOFF_MS[Math.min(retry.attempts, RETRY_BACKOFF_MS.length - 1)]!);
       if (next >= until) await this.retriesExhausted(row, retry, "checkpoint_failed");
       else await store.checkpointRetryNext(row.id, retry.generation, { at: new Date(next) });
@@ -820,6 +826,19 @@ export class CloudV2Lifecycle {
     }
     if (sandboxId) await compute.delete(sandboxId);
     await store.checkpointForkGone(workspace.id, fork.attempt);
+  }
+
+  /** Boat accepts a stop and archives the VM afterwards, and can still fail
+   * it then, e.g. refusing one without a recent snapshot of its own. Only
+   * `archived` makes the workspace stopped. */
+  private async untilArchived(sandboxId: string): Promise<void> {
+    for (let read = 1; read <= ARCHIVE_CONFIRM_READS; read++) {
+      const { state } = await this.deps.compute.inspect(sandboxId);
+      if (state === "archived") return;
+      if (state !== "archiving") break;
+      if (read < ARCHIVE_CONFIRM_READS) await (this.deps.sleep ?? (ms => new Promise(resolve => setTimeout(resolve, ms))))(ARCHIVE_CONFIRM_MS);
+    }
+    throw Object.assign(new Error("Boat has not stopped the VM"), { code: "provider_stop_incomplete" });
   }
 
   /** A fork boots like a new VM; a slow boot is not a failed checkpoint. */

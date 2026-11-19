@@ -1889,6 +1889,13 @@ still land; it does so only while it still owns the VM, so none starts once
 deletion has begun. The record is removed when the upload is known to be over.
 A failed transfer, a timeout or a lost reply keeps it, and deletion waits for
 the latest remaining one, then prunes again.
+Boat's stop request returns before the VM is archived, and Boat can still fail
+the stop afterwards, for instance refusing one without a recent snapshot of its
+own. A stop therefore marks the workspace stopped only once Boat reports the VM
+`archived`, reading it every 5 s for up to a minute; otherwise the stop step
+fails with `provider_stop_incomplete` and retries with its usual backoff, ending
+`failed` rather than `stopped` while the VM still runs.
+
 A failed or oversized checkpoint (over 4 GiB) never blocks the stop: the
 previous checkpoint stays, and the workspace records `checkpoint_error`. The
 control plane logs `[cloud-v2] checkpoint failed (<code>) workspace=<id>
@@ -1915,7 +1922,9 @@ or deletion refuses them. An oversized checkpoint or a VM Boat no longer has
 ends the retries at once. When they end without a checkpoint, the control
 plane logs `[cloud-v2] checkpoint retries exhausted (<code>)` with the
 shortened workspace ID; the workspace keeps its previous checkpoint, if any,
-for a later restore. Enable it only after forking a stopped VM is qualified
+for a later restore. A retry that finds the VM neither `archived` nor `archiving`, because Boat
+accepted its stop and then failed it, asks Boat to stop it again before the
+next attempt. Enable it only after forking a stopped VM is qualified
 on the deployment's Boat account.
 
 A wake whose VM Boat deleted restores the last checkpoint:
