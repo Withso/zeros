@@ -12,8 +12,8 @@ describe("canvas cursors", () => {
   it("draws the arrow with its hotspot on the tip and a system fallback", () => {
     expect(DESIGN_ARROW_CURSOR.startsWith('url("data:image/svg+xml,<svg')).toBe(true);
     expect(glyph(DESIGN_ARROW_CURSOR)).toBe("arrow");
-    expect(DESIGN_ARROW_CURSOR).toContain("<path d='M6 5 ");
-    expect(DESIGN_ARROW_CURSOR.endsWith('") 6 5, default')).toBe(true);
+    expect(DESIGN_ARROW_CURSOR).toContain("<path d='M5 4 ");
+    expect(DESIGN_ARROW_CURSOR.endsWith('") 5 4, default')).toBe(true);
   });
 
   it("keeps colors and references percent-encoded literals", () => {
