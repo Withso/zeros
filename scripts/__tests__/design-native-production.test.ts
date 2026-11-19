@@ -46,10 +46,16 @@ it("serves WebAssembly as application/wasm, so the browser compiles it while it 
 });
 
 it("keeps the app's singleton and deferred circular bindings in an actual optimized build", async () => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "design-production-build-"));
+  let temporaryRoot: string | undefined;
   let server: Awaited<ReturnType<typeof serveNativeProductionAssets>> | undefined;
   let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined;
   try {
+    temporaryRoot = await fs.mkdtemp(path.join(os.tmpdir(), "design-production-build-"));
+    const projectRoot = path.join(temporaryRoot, "project");
+    const root = path.join(temporaryRoot, "project-alias");
+    await fs.mkdir(projectRoot);
+    await fs.symlink(projectRoot, root, process.platform === "win32" ? "junction" : "dir");
+    const buildRoot = await fs.realpath(root);
     vi.stubEnv("NODE_ENV", "production");
     await fs.writeFile(path.join(root, "index.html"), '<main></main><script type="module" src="/main.js"></script>');
     await fs.mkdir(path.join(root, "apps"));
@@ -60,7 +66,7 @@ it("keeps the app's singleton and deferred circular bindings in an actual optimi
     await fs.writeFile(path.join(root, "vite.config.ts"), `export default {base:"./",build:{rollupOptions:{input:{main:${JSON.stringify(path.join(root, "index.html"))}}}}};`);
     const configFile = path.join(root, "native.config.mjs");
     await fs.writeFile(configFile, nativeProductionViteConfiguration(root, path.join(root, "cache"), path.join(root, "dist"), path.join(root, "qualification.js")));
-    await build({ root, configFile, mode: "production", logLevel: "silent" });
+    await build({ root: buildRoot, configFile, mode: "production", logLevel: "silent" });
     const manifest = JSON.parse(await fs.readFile(path.join(root, "dist/.vite/manifest.json"), "utf8"));
     const probe = Object.values(manifest).find((entry: unknown) => (entry as { name?: string }).name === "qualification") as { file: string };
     server = await serveNativeProductionAssets(path.join(root, "dist"));
@@ -72,7 +78,7 @@ it("keeps the app's singleton and deferred circular bindings in an actual optimi
     const inspectBundle = new Function('return url => import(url).then(bundle => ({mode:bundle.build.mode,ready:bundle.modules["/apps/store.ts"].state.ready,copy:bundle.modules["/apps/store.ts"].copy}));')();
     expect(await page.evaluate(inspectBundle, `${server.url}/${probe.file}`))
       .toEqual({ mode: "production", ready: true, copy: "ready" });
-  } finally { vi.unstubAllEnvs(); await browser?.close(); await server?.close(); await fs.rm(root, { recursive: true, force: true }); }
+  } finally { vi.unstubAllEnvs(); await browser?.close(); await server?.close(); if (temporaryRoot) await fs.rm(temporaryRoot, { recursive: true, force: true }); }
 });
 
 it("serves the built renderer on loopback without source traversal, symlinks or mutation endpoints", async () => {
