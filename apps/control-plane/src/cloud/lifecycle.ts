@@ -157,6 +157,8 @@ function sandboxLost(error: unknown): boolean {
   return error instanceof BoatSnapshotExpiredError || (error instanceof CloudProviderError && error.code === "provider_not_found");
 }
 
+/** The checkpoint script's own step names; anything else the VM prints is not logged. */
+const CHECKPOINT_STEPS: ReadonlySet<string> = new Set(["attachments", "bundle", "decrypt", "download", "encrypt", "environment", "files", "fingerprint", "gitdir", "ignored", "marker", "node", "objects", "pack", "refs", "remotes", "repository", "sessions", "start", "stash", "turns", "upload", "upstream", "worktree"]);
 const checkpointError = (code: CloudV2CheckpointError) => Object.assign(new Error("checkpoint failed"), { code });
 const checkpointCode = (error: unknown): CloudV2CheckpointError =>
   (CLOUD_V2_CHECKPOINT_ERRORS as readonly string[]).includes(errorCode(error)) ? errorCode(error) as CloudV2CheckpointError : "checkpoint_failed";
@@ -685,7 +687,7 @@ export class CloudV2Lifecycle {
       // a timeout or a lost reply may still land, so its intent stays.
       if (!saved.ok) {
         settled = !result.timedOut && saved.step !== "upload" && saved.step !== "unknown";
-        cause = result.timedOut ? "timeout" : saved.step === "unknown" ? "no_result" : `step_${saved.step}`;
+        cause = result.timedOut ? "timeout" : CHECKPOINT_STEPS.has(saved.step) ? `step_${saved.step}` : "no_result";
         throw checkpointError(saved.code);
       }
       if (result.exitCode !== 0 || result.timedOut) { cause = result.timedOut ? "timeout" : "exit"; throw checkpointError("checkpoint_failed"); }

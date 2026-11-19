@@ -308,6 +308,7 @@ describe("cloud v2 lifecycle", () => {
     ["the upload is missing", {}, null, "checkpoint_upload_failed", true, "size"],
     ["the upload has another size", {}, 99, "checkpoint_upload_failed", true, "size"],
     ["the command prints nothing", { checkpoint: "" }, 1234, "checkpoint_failed", false, "no_result"],
+    ["the VM names a step the script does not have", { checkpoint: "zeros-checkpoint-error checkpoint_failed secretname" }, 1234, "checkpoint_failed", true, "no_result"],
   ] as const)("still stops, keeps the previous checkpoint and records why when %s", async (_case, vm, size, code, settled, cause) => {
     const checkpoints = checkpointsFake(), logs: string[] = [];
     checkpoints.storage.size.mockResolvedValue(size);
