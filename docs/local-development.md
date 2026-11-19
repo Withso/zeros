@@ -129,7 +129,8 @@ launch-time prune and `pnpm storage:sweep`.
 | SQLite, native settings, single-instance lock              | `~/Library/Application Support/com.zeros.local/instances/<identity>/`        |
 | Shared encrypted provider credentials and account profiles | `~/Library/Application Support/com.zeros.local/`                             |
 | Instance registry                                           | `~/Library/Application Support/com.zeros.local/instances.json`               |
-| Chromium cache, cookies and renderer storage                | `~/Library/Caches/com.zeros.local/instances/<identity>/`                     |
+| Cookies and renderer storage                                | `~/Library/Application Support/com.zeros.local/instances/<identity>/electron/` |
+| Regenerable Chromium code cache                             | `~/Library/Caches/com.zeros.local/instances/<identity>/`                     |
 | Native development bundle and version marker               | `~/Library/Caches/com.zeros.local/bundles/<identity>/`                       |
 | Native logs                                                 | `~/Library/Logs/com.zeros.local/<identity>/`                                 |
 | User settings, default-project sentinel and engine state    | `~/.zeros-local/instances/<identity>/`                                       |
@@ -137,7 +138,8 @@ launch-time prune and `pnpm storage:sweep`.
 
 A profile created before this layout keeps its original locations, because its
 database and Keychain-bound provider profiles hold absolute paths:
-`com.zeros.local.<identity>` under Application Support, Caches and Logs,
+`com.zeros.local.<identity>` under Application Support, Caches (including its
+renderer storage) and Logs,
 `~/.zeros-local/instances/<identity>/bundle/` and `~/zeros-local-<identity>/`.
 The launcher detects one by its data folder and exports
 `ZEROS_LOCAL_LAYOUT=legacy` for that launch; the engine strips it from

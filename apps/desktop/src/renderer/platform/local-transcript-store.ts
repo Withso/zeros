@@ -5,8 +5,8 @@
 // The engine's zeros.db is the transcript authority. This store only keeps a
 // bounded presentation copy of recently opened chats in separate Local/cloud
 // namespaces, so a cold tab can paint before authoritative history answers. It lives
-// in Chromium's session profile, which Electron main relocates to the
-// purgeable OS cache directory (`relocateChromiumCache`): losing it costs one
+// in Chromium's session profile, which may be cleared (and is
+// purgeable for a legacy Local profile): losing it costs one
 // cold read, never data. Policy (bounds, eligibility, scheduling) lives in
 // state/local-transcript-cache.ts; this file only moves records.
 // ──────────────────────────────────────────────────────────

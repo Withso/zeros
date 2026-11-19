@@ -16,8 +16,8 @@ launchers, the prune and `pnpm storage:sweep` import too. Nothing else builds
 | Shared data dir | `zerosChannelDataDir()` | An installed channel's data dir; the development family's `com.zeros.local` (shared Local provider credentials, instance registry) |
 | State root | `zerosStateRoot()` | `settings.toml`, `term-zdotdir/`, `state.db`, `detach.lock`, `default-project/` |
 | Visible root | `zerosVisibleRoot()` | `workspaces/`, `design workspaces/`, `cloud-sync/` |
-| Session data | `zerosSessionDataDir()` | Electron `sessionData` (renderer storage and Chromium caches); currently the cache dir |
-| Cache dir | `zerosCacheDir()` | Regenerable Chromium caches |
+| Session data | `zerosSessionDataDir()` | Electron `sessionData`: `<data dir>/electron` (durable renderer state, plus the caches Chromium will not relocate) |
+| Cache dir | `zerosCacheDir()` | Regenerable caches Electron can relocate (the JS code cache) |
 | Log dir | `zerosLogDir()` | `main.log`, `app.jsonl`, `engine.log` |
 | Bundle dir | `zerosDevelopmentBundleDir()` | Development only: the native `.app` clone and its `.version` marker |
 
@@ -34,7 +34,8 @@ Stable is `com.zeros`, Alpha is `com.zeros.alpha`. One app per channel.
 | Data | `~/Library/Application Support/<id>/` | `$XDG_DATA_HOME` or `~/.local/share` + `zeros[-alpha]/` | `%APPDATA%/<id>/` |
 | State root | `~/.zeros[-alpha]/` | same | same |
 | Visible root | `~/zeros[-alpha]/` | same | same |
-| Cache / session data | `~/Library/Caches/<id>/` | `~/.cache/<id>/` | `%LOCALAPPDATA%/<id>/` |
+| Session data | `~/Library/Application Support/<id>/electron/` | `<data>/electron/` | `<data>/electron/` |
+| Cache | `~/Library/Caches/<id>/` | `~/.cache/<id>/` | `%LOCALAPPDATA%/<id>/` |
 | Logs | `~/Library/Logs/<id>/` | `<data>/logs/` | `<data>/logs/` |
 
 ## Development family
@@ -49,7 +50,8 @@ mint. One folder per kind; each instance is a subfolder named by its id.
 | App data | `~/Library/Application Support/com.zeros.local/instances/<inst>/` |
 | Shared Local provider credentials | `~/Library/Application Support/com.zeros.local/` |
 | Instance registry | `~/Library/Application Support/com.zeros.local/instances.json` |
-| Cache / session data | `~/Library/Caches/com.zeros.local/instances/<inst>/` |
+| Session data | `~/Library/Application Support/com.zeros.local/instances/<inst>/electron/` |
+| Cache | `~/Library/Caches/com.zeros.local/instances/<inst>/` |
 | Native bundle + version marker | `~/Library/Caches/com.zeros.local/bundles/<inst>/` |
 | Logs | `~/Library/Logs/com.zeros.local/<inst>/` |
 | Preferences (written by macOS) | `~/Library/Preferences/com.zeros.local.<inst>.plist` |
@@ -103,6 +105,57 @@ has profiles inside its data dir; once a shared launch migrates its records,
 the shared store points there and writes the plaintext marker
 `local-provider-migration:<sha256(<data dir>/secrets.json)>`. Prune and sweep
 keep such a data dir (see below).
+
+## Renderer session data
+
+Electron's `sessionData` is `<data dir>/electron/` for installed channels and
+consolidated development identities, so durable renderer state is no longer in
+a folder cache cleaners empty. A legacy-layout Local profile keeps its session
+in its cache dir (`Caches/com.zeros.local.<inst>/`). A `ZEROS_DATA_DIR` run
+uses `<ZEROS_DATA_DIR>/electron/` and keeps every cache inside it.
+
+Observed on Electron 43.8.3 / Chromium 150 (the prototype in the storage PR):
+
+| Entry under `electron/` | Class |
+| --- | --- |
+| `Local Storage`, `IndexedDB`, `Session Storage`, `Cookies`, `WebStorage`, `Service Worker`, `blob_storage`, `Preferences`, `Local State`, `Network Persistent State`, `DIPS`, `Trust Tokens`, `Partitions/`; and any other name (`SharedStorage`, `TransportSecurity`, …) | Durable |
+| `Cache` (HTTP, capped at 250 MB), `GPUCache`, `DawnWebGPUCache`, `DawnGraphiteCache`, `Shared Dictionary`, `Dictionaries` (spell-check downloads); also `GrShaderCache`, `GraphiteDawnCache`, `ShaderCache`, `VideoDecodeStats` where Chromium creates them | Regenerable, cannot be relocated |
+| `Code Cache` | Regenerable; only an empty index here, the cache itself is in the cache dir |
+
+The JS code cache is the one cache Electron can place elsewhere:
+`session.setCodeCachePath()` points it at `<cache dir>/Code Cache` for the
+default session and at `<cache dir>/Partitions/<name>/Code Cache` for any
+persistent partition, applied from `app.on("session-created")`. Chromium
+ignores `--disk-cache-dir`, and the GPU switches only disable those caches.
+The app's other sessions (Browser leases, Design capture and recorder) are
+in-memory partitions that write nothing to disk. The regenerable list is
+`REGENERABLE_SESSION_ENTRIES` in `apps/desktop/src/engine/db/session-entries.ts`.
+
+### Moving existing profiles
+
+`apps/desktop/electron/session-data-migration.ts` runs once, before `app` is
+ready, with the marker `electron/.zeros-session-relocated`. Sources, earliest
+wins: the old `Caches/<id>/` session (for consolidated development identities,
+`Caches/com.zeros.local/instances/<inst>/`), then for Stable only, and only
+while the older hop never completed (no `Caches/com.zeros/.zeros-session-migrated`),
+`Caches/design.zeros.app/`. Alpha no longer reads Stable's old folder.
+
+- Every entry not on the regenerable list moves, unknown names included.
+  Moves are a rename or a no-replace hard link. Across volumes the entry is
+  copied to a private temporary, verified byte for byte, published, then
+  removed from the source; a failed verification keeps the source.
+- An existing destination entry is never replaced; that source entry stays.
+- `Code Cache` stays in `Caches/<id>/`, where the code cache now lives; the
+  other regenerable entries there are removed.
+- The marker is written only after a run with no failures, so an interrupted
+  or failed run retries next launch, and two processes starting together each
+  move only what the other has not.
+- A failure never stops startup: the app opens whatever `electron/` holds and
+  logs once.
+
+**Known limit: downgrade.** A build from before this change reads renderer
+state from `Caches/<id>/` again and finds none (drafts, theme and permissions
+reset). The updater never installs an older build; a manual downgrade does.
 
 ## Registry
 

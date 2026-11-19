@@ -18,7 +18,7 @@ describe("native Local development admission", () => {
     const source = fs.readFileSync("apps/desktop/electron/main.ts", "utf8");
     // Include the earlier environment authority, not only the sharing condition.
     const start = source.indexOf("const explicitDevEnv =");
-    const end = source.indexOf('// Chromium cache', start);
+    const end = source.indexOf("function relocateChromiumCache", start);
     const development = () => env.ZEROS_CHANNEL === "dev";
     const instanceDir = (instance: string) => `/data/com.zeros.local/instances/${instance}`;
     const sharedRoot = development() ? "/data/com.zeros.local" : `/data/com.zeros.${env.ZEROS_CHANNEL}`;

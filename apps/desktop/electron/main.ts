@@ -33,10 +33,12 @@ import {
   nativeTheme,
   powerMonitor,
   screen,
+  session,
   shell,
   systemPreferences,
   WebContentsView,
   type IpcMainInvokeEvent,
+  type Session,
 } from "electron";
 import fs from "node:fs";
 import path from "node:path";
@@ -135,6 +137,7 @@ import { controlPlaneFetch } from "./control-plane-fetch";
 import {
   developmentInstance,
   storageFamily,
+  zerosCacheDir,
   zerosChannelDataDir,
   zerosDataDir,
   zerosDesignWorkspacesRoot,
@@ -142,6 +145,7 @@ import {
   zerosLogDir,
   zerosSessionDataDir,
 } from "../src/engine/db/paths";
+import { codeCachePathFor, migrateSessionData, sessionMigrationSources } from "./session-data-migration";
 import { assertDevelopmentAdmission, sharedSecretsDirectory } from "./storage-identity";
 import { removeEmptyLegacyDesignFolder } from "./legacy-design-folder";
 // CHANNELS/isChannel only — importing the runtime module is side-effect-free, so
@@ -336,10 +340,13 @@ app.setPath("userData", zerosDataDir());
   else delete process.env.ZEROS_SHARED_SECRETS_DIR;
 }
 
-// Chromium cache → ~/Library/Caches (macOS-correct, purgeable)
-// Chromium ignores app.getPath("cache"); redirect sessionData before ready so
-// regenerable data uses the OS cache location. Migrate durable renderer stores
-// before reclaiming old caches; secrets and the engine DB use separate paths.
+// Durable renderer state (Local Storage, IndexedDB, Cookies, …) lives in
+// `<data dir>/electron`; only regenerable caches belong in the purgeable OS
+// cache dir. Chromium ignores app.getPath("cache") and --disk-cache-dir, so the
+// JS code cache is the one cache Electron can move (setCodeCachePath); the HTTP,
+// GPU and Dawn caches stay in the profile and are classified regenerable
+// (engine/db/session-entries.ts). Runs before ready: nothing may open the
+// profile before the one-time move out of the old location finishes.
 function relocateChromiumCache(): void {
   // Bound the HTTP disk cache so it can't grow without limit (250 MB).
   app.commandLine.appendSwitch("disk-cache-size", String(250 * 1024 * 1024));
@@ -350,90 +357,42 @@ function relocateChromiumCache(): void {
   // self-removes if the types ever add it).
   // @ts-expect-error - "cache" is a valid runtime path name, absent from the types.
   const cacheRoot = app.getPath("cache");
-  const newSessionData = zerosSessionDataDir(cacheRoot);
-
-  if (DEVELOPMENT) {
-    fs.mkdirSync(newSessionData, { recursive: true });
-    app.setPath("sessionData", newSessionData);
-    return;
-  }
-
-  // Legacy source under the RETIRED design.zeros.* scheme — migrate durable
-  // renderer state (composer drafts / theme / Local Storage) forward ONCE. Named
-  // by its LITERAL old value: app.getPath("sessionData") now resolves to the
-  // fresh new userData (the Phase-1 redirect ran above), so it can't be the source.
-  const oldSessionData = path.join(cacheRoot, "design.zeros.app");
-  if (path.resolve(oldSessionData) === path.resolve(newSessionData)) {
-    app.setPath("sessionData", newSessionData);
-    return;
-  }
-
+  const sessionDataDir = zerosSessionDataDir(cacheRoot);
+  const cacheDir = zerosCacheDir(cacheRoot);
+  const dataDirOverridden = Boolean(process.env.ZEROS_DATA_DIR);
+  const channelName = process.env.ZEROS_CHANNEL;
+  const sources = sessionMigrationSources({
+    family: storageFamily(),
+    channel: isChannel(channelName) ? channelName : "stable",
+    cacheRoot,
+    cacheDir,
+    sessionDataDir,
+    dataDirOverridden,
+    exists: fs.existsSync,
+  });
+  if (sources.length) migrateSessionData({ destination: sessionDataDir, sources });
   try {
-    fs.mkdirSync(newSessionData, { recursive: true });
+    fs.mkdirSync(sessionDataDir, { recursive: true, mode: 0o700 });
   } catch (err) {
     // Leave the default profile in place rather than risk a broken one.
-    console.error(`[Zeros] cache: cannot create ${newSessionData}:`, err);
+    console.error("[Zeros] session data: cannot create its folder:", err);
     return;
   }
-
-  // Durable renderer state we preserve across the move; the cache dirs
-  // we deliberately abandon (they regenerate) and reclaim from old.
-  const DURABLE = [
-    "Local Storage",
-    "Session Storage",
-    "IndexedDB",
-    "Cookies",
-    "Cookies-journal",
-    "WebStorage",
-    "SharedStorage",
-    "SharedStorage-wal",
-  ];
-  const REGENERABLE = [
-    "Cache",
-    "Code Cache",
-    "GPUCache",
-    "DawnWebGPUCache",
-    "DawnGraphiteCache",
-    "Shared Dictionary",
-    "VideoDecodeStats",
-  ];
-
-  const marker = path.join(newSessionData, ".zeros-session-migrated");
-  const isFreshInstall = !fs.existsSync(
-    path.join(oldSessionData, "Local Storage"),
-  );
-  if (!fs.existsSync(marker) && !isFreshInstall) {
-    for (const sub of DURABLE) {
-      const src = path.join(oldSessionData, sub);
-      const dest = path.join(newSessionData, sub);
-      try {
-        if (fs.existsSync(src) && !fs.existsSync(dest)) {
-          fs.cpSync(src, dest, { recursive: true });
-        }
-      } catch (err) {
-        console.error(`[Zeros] cache: copy "${sub}" failed:`, err);
-      }
+  app.setPath("sessionData", sessionDataDir);
+  if (dataDirOverridden) return;
+  // Every persistent session, including ones created later; in-memory
+  // partitions (Browser, Design capture) write no code cache.
+  const relocate = (target: Session) => {
+    const codeCache = codeCachePathFor(target.getStoragePath(), { sessionDataDir, cacheDir });
+    if (!codeCache) return;
+    try {
+      target.setCodeCachePath(codeCache);
+    } catch (err) {
+      console.warn("[Zeros] session data: code cache stays in the profile:", err);
     }
-    // Free the ~430 MB of orphaned cache from Application Support.
-    for (const sub of REGENERABLE) {
-      try {
-        fs.rmSync(path.join(oldSessionData, sub), {
-          recursive: true,
-          force: true,
-        });
-      } catch {
-        /* best-effort reclaim */
-      }
-    }
-  }
-  try {
-    fs.writeFileSync(marker, new Date().toISOString());
-  } catch {
-    /* best-effort; the per-dir existence guard keeps copies idempotent */
-  }
-
-  app.setPath("sessionData", newSessionData);
-  console.log(`[Zeros] sessionData → ${newSessionData} (cache now purgeable)`);
+  };
+  app.on("session-created", relocate);
+  void app.whenReady().then(() => relocate(session.defaultSession));
 }
 relocateChromiumCache();
 

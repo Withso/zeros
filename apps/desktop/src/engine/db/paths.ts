@@ -181,11 +181,13 @@ export function zerosCacheDir(cacheRoot: string = osCacheRoot()): string {
     : path.join(cacheRoot, installedId());
 }
 
-/** Electron's sessionData. Still the cache dir; one place to move it. */
+/** Electron's sessionData: durable renderer state (Local Storage, IndexedDB,
+ *  Cookies, …) in `<data dir>/electron`, beside the rest of the data. A legacy
+ *  Local profile keeps it in its cache dir. Only the cache dir is purgeable. */
 export function zerosSessionDataDir(cacheRoot: string = osCacheRoot()): string {
-  return storageFamily() === "development"
-    ? development(cacheRoot).sessionDataDir
-    : zerosCacheDir(cacheRoot);
+  if (storageFamily() === "development" && development().layout === "legacy")
+    return development(cacheRoot).sessionDataDir;
+  return path.join(zerosDataDir(), "electron");
 }
 
 /** main.log, app.jsonl and engine.log. macOS uses ~/Library/Logs; other

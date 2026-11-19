@@ -117,8 +117,8 @@ function developmentPaths({
     registryPath: path.join(sharedDataDir, "instances.json"),
     dataDir,
     cacheDir,
-    // Phase 3 moves renderer session data under the data dir.
-    sessionDataDir: cacheDir,
+    // A legacy profile keeps its renderer state where it always was.
+    sessionDataDir: legacy ? cacheDir : path.join(dataDir, "electron"),
     logDir,
     stateRoot,
     visibleRoot,

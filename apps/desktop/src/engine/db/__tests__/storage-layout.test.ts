@@ -102,7 +102,7 @@ describe("installed channels keep their exact layout", () => {
         workspaces: `${fakeHome}/${visible}/workspaces`,
         design: `${fakeHome}/${visible}/design workspaces`,
         cache: `${CACHES}/${id}`,
-        session: `${CACHES}/${id}`,
+        session: `${AS}/${id}/electron`,
         logs: `${LOGS}/${id}`,
         bundle: null,
       });
@@ -125,10 +125,10 @@ describe("installed channels keep their exact layout", () => {
     expect(zerosDataDir()).toBe(`/xdg/data/${xdg}`);
   });
 
-  it("uses Electron's cache root when main supplies it", () => {
+  it("uses Electron's cache root for caches; session data stays beside the data", () => {
     onPlatform("darwin");
     expect(zerosCacheDir("/electron/cache")).toBe("/electron/cache/com.zeros");
-    expect(zerosSessionDataDir("/electron/cache")).toBe("/electron/cache/com.zeros");
+    expect(zerosSessionDataDir("/electron/cache")).toBe(`${AS}/com.zeros/electron`);
   });
 });
 
@@ -145,6 +145,7 @@ describe("explicit overrides are unchanged for every channel", () => {
     expect(zerosVisibleRoot()).toBe("/home/user/owner");
     expect(zerosDesignWorkspacesRoot()).toBe("/home/user/owner/design workspaces");
     expect(zerosLogDir()).toBe("/home/user/.zeros-data/logs");
+    expect(zerosSessionDataDir()).toBe("/home/user/.zeros-data/electron");
     process.env.ZEROS_DESIGN_WORKSPACES_DIR = "/srv/design";
     expect(zerosDesignWorkspacesRoot()).toBe("/srv/design");
   });
@@ -169,7 +170,7 @@ describe("development family", () => {
       workspaces: `${fakeHome}/zeros-local/${inst}/workspaces`,
       design: `${fakeHome}/zeros-local/${inst}/design workspaces`,
       cache: `${CACHES}/com.zeros.local/instances/${inst}`,
-      session: `${CACHES}/com.zeros.local/instances/${inst}`,
+      session: `${AS}/com.zeros.local/instances/${inst}/electron`,
       logs: `${LOGS}/com.zeros.local/${inst}`,
       bundle: `${CACHES}/com.zeros.local/bundles/${inst}`,
     });
