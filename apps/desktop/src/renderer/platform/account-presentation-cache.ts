@@ -8,6 +8,21 @@ export const CLOUD_FILE_LIST_PRESENTATION_KEY = "cloud-file-lists:v1";
 export const CLOUD_TRANSCRIPT_SUMMARIES_PRESENTATION_KEY = "cloud-transcript-summaries:v1";
 let owner: string | null | undefined;
 let generation = 0;
+let storage: { read(key: string): string | null; write(key: string, raw: string | null): void } = {
+  read: readPreferenceCache,
+  write: writePreferenceCache,
+};
+
+export function isolateAccountPresentationStorageForTests(): void {
+  const entries = new Map<string, string>();
+  storage = {
+    read: (key) => entries.get(key) ?? null,
+    write: (key, raw) => {
+      if (raw === null) entries.delete(key);
+      else entries.set(key, raw);
+    },
+  };
+}
 
 export const accountPresentationOwner = (backend: string, account: string) =>
   JSON.stringify([backend.replace(/\/+$/, ""), account]);
@@ -18,21 +33,21 @@ export const accountPresentationGeneration = () => generation;
  * replacement or sign-out removes it before another identity can render. */
 export function bindAccountPresentationOwner(next: string | null): { changed: boolean; retire: boolean } {
   if (owner === next) return { changed: false, retire: false };
-  const saved = readPreferenceCache(OWNER_KEY);
+  const saved = storage.read(OWNER_KEY);
   const retire = next === null || owner !== undefined || saved !== null && saved !== next;
   owner = next;
   generation++;
   if (retire) {
     for (const key of [ORGANIZATION_PRESENTATION_KEY, CLOUD_CATALOG_PRESENTATION_KEY, CLOUD_CHATS_PRESENTATION_KEY, CLOUD_FILE_LIST_PRESENTATION_KEY, CLOUD_TRANSCRIPT_SUMMARIES_PRESENTATION_KEY, "cloud-chats:v1"])
-      writePreferenceCache(`zeros-${key}`, null);
+      storage.write(`zeros-${key}`, null);
   }
-  writePreferenceCache(OWNER_KEY, next);
+  storage.write(OWNER_KEY, next);
   return { changed: true, retire };
 }
 
 export function readAccountPresentation(key: string, expectedOwner: string, maxBytes: number): unknown {
   try {
-    const raw = readPreferenceCache(`zeros-${key}`);
+    const raw = storage.read(`zeros-${key}`);
     if (!raw || raw.length * 2 > maxBytes) return null;
     const envelope = JSON.parse(raw);
     return envelope?.version === 1 && envelope.owner === expectedOwner ? envelope.value : null;
@@ -43,6 +58,6 @@ export function writeAccountPresentation(key: string, expectedOwner: string, val
   try {
     const raw = JSON.stringify({ version: 1, owner: expectedOwner, value });
     // An oversized replacement must not leave removed rows in an older cache.
-    writePreferenceCache(`zeros-${key}`, raw.length * 2 <= maxBytes ? raw : null);
+    storage.write(`zeros-${key}`, raw.length * 2 <= maxBytes ? raw : null);
   } catch { /* Presentation is best-effort; the server still owns the data. */ }
 }

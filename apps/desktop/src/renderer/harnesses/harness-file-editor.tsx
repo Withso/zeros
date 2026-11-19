@@ -13,7 +13,11 @@ import { parseCloudWorkspaceKey } from "../platform/bridge/cloud-workspace-key";
 import { BridgeContext } from "../platform/bridge/use-bridge";
 import { WorkspaceRuntimeClient } from "../platform/bridge/workspace-runtime-client";
 import { setActiveBridge } from "../platform/bridge/active-bridge";
-import { accountPresentationOwner, bindAccountPresentationOwner } from "../platform/account-presentation-cache";
+import {
+  accountPresentationOwner,
+  bindAccountPresentationOwner,
+  isolateAccountPresentationStorageForTests,
+} from "../platform/account-presentation-cache";
 import { setSetting } from "../platform/settings";
 import { acceptCloudWorkspaceDocument } from "../state/cloud-workspace-catalog";
 import { useWorkspaceStore } from "../state/workspace-store";
@@ -49,6 +53,7 @@ const cloudTarget = parseCloudWorkspaceKey(roots[0]);
 if (cloudTarget) {
   const { organizationId, workspaceId } = cloudTarget;
   const createdBy = "33333333-3333-4333-8333-333333333333";
+  isolateAccountPresentationStorageForTests();
   bindAccountPresentationOwner(accountPresentationOwner("https://api.example.test", createdBy));
   acceptCloudWorkspaceDocument({
     id: workspaceId,
