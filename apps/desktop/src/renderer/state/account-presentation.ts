@@ -112,9 +112,9 @@ export function installAccountPresentationIdentity(user: AuthUser | null): void 
   if (active && !active.archived && active.kind !== "terminal") cloudTranscriptCache.prefetch([active.id]);
   const pruneFiles = () => pruneCloudFileLists((folder, lineage) => cloudFileListAccess(folder)?.lineage !== lineage);
   pruneFiles();
-  const offFileAccess = subscribeWorkspaceAccessEnded(() => {
+  const offFileAccess = subscribeWorkspaceAccessEnded(target => {
     pruneFiles();
-    invalidateCloudFileListAccess();
+    invalidateCloudFileListAccess(target);
   });
   const offDocuments = subscribeCloudWorkspaces(() => {
     pruneFiles();

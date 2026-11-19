@@ -27,7 +27,7 @@ const row = z.object({
 });
 const snapshot = z.tuple([z.string(), row]).array().max(MAX_ENTRIES);
 let account = -1;
-let revision = 0;
+const revisions = new Map<string, number>();
 let lists = new Map<string, z.infer<typeof row>>();
 const listeners = new Set<() => void>();
 const deniedDocuments = new WeakSet<object>();
@@ -40,7 +40,7 @@ export function cloudFileListAccess(folder: string) {
   // Team sharing authorizes history, not the workspace's live files.
   if (!doc || deniedDocuments.has(doc) || !canReadCloudWorkspace(doc) || doc.sharing?.readOnly || !doc.capabilities.canWrite) return null;
   const lineage = JSON.stringify([doc.ownerUserId === undefined ? doc.createdBy : doc.ownerUserId, doc.generation.number]);
-  const key = JSON.stringify([accountPresentationGeneration(), cloudCatalogGeneration(), cloudWorkspaceOwnerGeneration(target), folder, lineage, revision]);
+  const key = JSON.stringify([accountPresentationGeneration(), cloudCatalogGeneration(), cloudWorkspaceOwnerGeneration(target), folder, lineage, revisions.get(cloudWorkspaceKey(target)) ?? 0]);
   return {
     key,
     lineage,
@@ -107,11 +107,13 @@ export function pruneCloudFileLists(remove: (folder: string, lineage: string) =>
 
 export function retireCloudFileLists(): void {
   pruneCloudFileLists(() => true);
-  invalidateCloudFileListAccess();
+  revisions.clear();
+  for (const listener of listeners) listener();
 }
 
-export function invalidateCloudFileListAccess(): void {
-  revision++;
+export function invalidateCloudFileListAccess(target: Parameters<typeof cloudWorkspaceKey>[0]): void {
+  const key = cloudWorkspaceKey(target);
+  revisions.set(key, (revisions.get(key) ?? 0) + 1);
   for (const listener of listeners) listener();
 }
 
@@ -119,7 +121,7 @@ export function forgetCloudWorkspaceFileList(target: Parameters<typeof cloudWork
   const doc = cloudWorkspaceDocument(target);
   if (doc) deniedDocuments.add(doc);
   pruneCloudFileLists(folder => folder === cloudWorkspaceKey(target));
-  invalidateCloudFileListAccess();
+  invalidateCloudFileListAccess(target);
 }
 
 export function resetCloudFileListsForTests(): void {

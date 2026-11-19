@@ -334,6 +334,25 @@ it("drops only the denied cached chat on confirmed native access loss", async ()
   expect(m.workspace.useWorkspaceStore.getState().chats.some(chat => chat.id === "local")).toBe(true);
 });
 
+it("invalidates file list identity only for the workspace whose access changed", async () => {
+  const m = await seed();
+  const { cloudFileListAccess } = await import("../cloud-file-list-presentation");
+  const { reportWorkspaceAccessEnded, clearWorkspaceAccessEnded, registerAccessAccountScope } = await import("../../platform/team-sharing-registry");
+  const other = { ...target, workspaceId: "99999999-2222-4222-8222-222222222222" };
+  const otherFolder = cloudWorkspaceKey(other);
+  m.catalog.acceptCloudWorkspaceDocument({ ...doc, id: other.workspaceId });
+  registerAccessAccountScope(() => "test-session");
+  const initial = cloudFileListAccess(folder)?.key;
+  const unaffected = cloudFileListAccess(otherFolder)?.key;
+  expect(initial).toBeDefined();
+  expect(unaffected).toBeDefined();
+  reportWorkspaceAccessEnded(target);
+  expect(cloudFileListAccess(folder)).toBeNull();
+  clearWorkspaceAccessEnded(target);
+  expect(cloudFileListAccess(folder)?.key).not.toBe(initial);
+  expect(cloudFileListAccess(otherFolder)?.key).toBe(unaffected);
+});
+
 it("a relaunch exposes cached chats and files for the restored workspace before Boat attaches", async () => {
   const m = await seed();
   // A chat of a workspace that is no longer in this account's catalog (it left while the app was closed).
