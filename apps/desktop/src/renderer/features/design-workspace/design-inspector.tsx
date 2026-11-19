@@ -1571,10 +1571,9 @@ export const DesignInspector = React.memo(function DesignInspector({
   const zoomPercentage = Math.round(zoom * 100);
   const [frameAction, setFrameAction] = useState<"export" | null>(null);
   const [exportScale, setExportScale] = useState(1);
-  const [pendingHistoryActions, setPendingHistoryActions] = useState(0);
   // A slot takes layers, not styles: its frame is the main's.
   const slotSelected = !!selectedNodeId && designComponentSlotOf(selectedNodeId) !== null;
-  const editsDisabled = !active || pendingHistoryActions > 0 || slotSelected;
+  const editsDisabled = !active || slotSelected;
   const [cssMode, setCssMode] = useState(false);
   const inspectorRef = useRef<HTMLElement | null>(null);
   const inspectorId = workspaceId
@@ -1615,9 +1614,7 @@ export const DesignInspector = React.memo(function DesignInspector({
   const layoutActionQueueRef = useRef<Promise<unknown>>(Promise.resolve());
   const queueInspectorAction = useCallback(
     <T,>(action: () => Promise<T>): Promise<T> => {
-      const task = layoutActionQueueRef.current.then(() => ({
-        result: action(),
-      }));
+      const task = layoutActionQueueRef.current.then(() => ({ result: action() }));
       layoutActionQueueRef.current = task.then(
         () => {},
         () => {},
@@ -1631,16 +1628,23 @@ export const DesignInspector = React.memo(function DesignInspector({
     (direction: "undo" | "redo") => {
       if (!workspaceId) return;
       const owner = captureDesignPageOwner(workspaceId);
-      // Start every request immediately. applyDesignHistoryCached registers it
-      // with the workspace mutation lane before returning its promise, so two
-      // fast keypresses become two ordered history steps rather than one being
-      // discarded while the first bridge round trip is in flight.
-      setPendingHistoryActions((current) => current + 1);
+      const view = useDesignWorkspaceUiStore.getState().byWorkspace[workspaceId];
+      const historyOwner = {
+        directoryId: view?.directoryId,
+        directoryRevision: view?.directoryRevision ?? 0,
+      };
+      // Admit history before later edits; the workspace mutation lane orders
+      // its bridge write with inspector and direct canvas mutations.
       void queueInspectorAction(() => {
+        const current = useDesignWorkspaceUiStore.getState().byWorkspace[workspaceId];
+        if (current?.directoryId !== historyOwner.directoryId ||
+          (current?.directoryRevision ?? 0) !== historyOwner.directoryRevision)
+          return Promise.resolve(null);
         beginDesignHistorySelection(workspaceId);
         return applyDesignHistoryCached(workspaceId, frame?.file ?? null, direction);
       })
         .then((result) => {
+          if (!result) return;
           // A frame-level step restores its own frame selection below; an
           // in-document step brings back the node selection of the state it
           // returns to.
@@ -1657,9 +1661,6 @@ export const DesignInspector = React.memo(function DesignInspector({
           toast.error(`Couldn't ${direction} the design edit`, {
             description: errorMessage(historyError),
           });
-        })
-        .finally(() => {
-          setPendingHistoryActions((current) => Math.max(0, current - 1));
         });
     },
     [frame, workspaceId, queueInspectorAction],
@@ -3078,7 +3079,7 @@ export const DesignInspector = React.memo(function DesignInspector({
             {componentHeader && !headerInner ? componentHeader.title : missingComponent ? `zd-${missingComponent}` : selectionTitle ?? selectionName}
           </span>
           {componentHeader && !headerInner ? (
-            <Button type="button" variant="ghost" size="compact" data-design-edit-main="" disabled={!componentHeader.component.frame && (!active || pendingHistoryActions > 0)} onClick={editMain}>
+            <Button type="button" variant="ghost" size="compact" data-design-edit-main="" disabled={!componentHeader.component.frame && !active} onClick={editMain}>
               {componentHeader.component.frame ? "Edit main" : "Move main to canvas"}
             </Button>
           ) : selectionType ? (
@@ -3119,7 +3120,7 @@ export const DesignInspector = React.memo(function DesignInspector({
                 <Button type="button" variant="secondary" size="compact" data-design-part-reset="" disabled={editsDisabled} onClick={resetPart}>Reset</Button>
               ) : null}
               <Button type="button" variant="secondary" size="compact" data-design-select-instance="" onClick={selectInstance}>Select instance</Button>
-              <Button type="button" variant="secondary" size="compact" data-design-edit-main="" disabled={!componentHeader.component.frame && (!active || pendingHistoryActions > 0)} onClick={editMain}>
+              <Button type="button" variant="secondary" size="compact" data-design-edit-main="" disabled={!componentHeader.component.frame && !active} onClick={editMain}>
                 {componentHeader.component.frame ? "Edit main" : "Move main to canvas"}
               </Button>
             </span>

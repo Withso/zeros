@@ -956,6 +956,99 @@ describe("design workspace cache", () => {
     ).toBe("a".repeat(24));
   });
 
+  it("does not publish or retry a stale source refresh after the directory owner changes", async () => {
+    const workspaceId = "ws_stale_refresh_owner";
+    const stale = { ...snapshot(), directoryId: "design-a" };
+    const staleFrame = stale.frames[0]!;
+    const fresh = {
+      ...stale,
+      frames: [{ ...staleFrame, sourceVersion: "f".repeat(24) }],
+    };
+    const replacement = { ...snapshot(), directoryId: "design-b" };
+    designWorkspaceSnapshotCache.setData(workspaceId, stale);
+    observeDesignDirectory(workspaceId, stale);
+    runtimeMocks.designFrameRuntime.mockReturnValue(null);
+    platformMocks.updateStyles.mockRejectedValueOnce(
+      new Error("Design frame changed before the mutation: home.html. Re-read it and retry."),
+    );
+    let releaseRefresh!: (value: DesignWorkspaceSnapshotWire) => void;
+    platformMocks.readSnapshot.mockReturnValueOnce(
+      new Promise((resolve) => { releaseRefresh = resolve; }),
+    );
+
+    const mutation = updateDesignNodeStylesCached(workspaceId, {
+      frame: staleFrame.file,
+      sourceVersion: staleFrame.sourceVersion,
+      nodeId: "hero",
+      styles: { color: "red" },
+    });
+    await vi.waitFor(() => expect(platformMocks.readSnapshot).toHaveBeenCalledOnce());
+    designWorkspaceSnapshotCache.setData(workspaceId, replacement);
+    observeDesignDirectory(workspaceId, replacement);
+    releaseRefresh(fresh);
+
+    await expect(mutation).rejects.toThrow("The active Design directory changed");
+    expect(platformMocks.updateStyles).toHaveBeenCalledOnce();
+    expect(designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data).toBe(replacement);
+    expect(useDesignWorkspaceUiStore.getState().byWorkspace[workspaceId]?.directoryId).toBe("design-b");
+  });
+
+  it("serializes rapid history around an interleaved edit that refreshes a stale source", async () => {
+    const workspaceId = "ws_stale_history_lane";
+    const stale = snapshot();
+    const staleFrame = stale.frames[0]!;
+    const freshSourceVersion = "f".repeat(24);
+    const fresh = { ...snapshot(), frames: [{ ...staleFrame, sourceVersion: freshSourceVersion }] };
+    const committed = { ...snapshot(), frames: [{ ...staleFrame, sourceVersion: "a".repeat(24) }] };
+    designWorkspaceSnapshotCache.setData(workspaceId, stale);
+    platformMocks.readNavigation.mockResolvedValue({ ...stale, preparation: {
+      revision: "c".repeat(64), epoch: 1, descriptions: [], current: [], errors: {},
+    } });
+    runtimeMocks.designFrameRuntime.mockReturnValue(null);
+    platformMocks.readSnapshot.mockResolvedValue(fresh);
+
+    let releaseUndo!: (reply: { result: null }) => void;
+    platformMocks.history
+      .mockReturnValueOnce(new Promise((resolve) => { releaseUndo = resolve; }))
+      .mockResolvedValue({ result: null });
+    platformMocks.updateStyles
+      .mockRejectedValueOnce(new Error("Design frame changed before the mutation: home.html. Re-read it and retry."))
+      .mockImplementationOnce(async (_workspaceId, input) => {
+        expect(input.sourceVersion).toBe(freshSourceVersion);
+        return {
+          mutation: {
+            changed: true,
+            frame: { ...committed.frames[0]!, source: "<main></main>", srcDoc: "<main></main>", tree: [] },
+            lint: committed.lint,
+          },
+          snapshot: committed,
+        };
+      });
+
+    const undo = applyDesignHistoryCached(workspaceId, staleFrame.file, "undo");
+    await vi.waitFor(() => expect(platformMocks.history).toHaveBeenCalledOnce());
+    const edit = updateDesignNodeStylesCached(workspaceId, {
+      frame: staleFrame.file, nodeId: "hero", sourceVersion: staleFrame.sourceVersion, styles: { color: "red" },
+    });
+    const redo = applyDesignHistoryCached(workspaceId, staleFrame.file, "redo");
+    const nextUndo = applyDesignHistoryCached(workspaceId, staleFrame.file, "undo");
+    const nextRedo = applyDesignHistoryCached(workspaceId, staleFrame.file, "redo");
+    releaseUndo({ result: null });
+    await Promise.all([undo, edit, redo, nextUndo, nextRedo]);
+
+    expect(platformMocks.history.mock.calls.map(([, , direction]) => direction)).toEqual(["undo", "redo", "undo", "redo"]);
+    expect(platformMocks.updateStyles).toHaveBeenCalledTimes(2);
+    expect(platformMocks.readSnapshot).toHaveBeenCalledOnce();
+    const order = [
+      platformMocks.history.mock.invocationCallOrder[0]!,
+      platformMocks.updateStyles.mock.invocationCallOrder[0]!,
+      platformMocks.updateStyles.mock.invocationCallOrder[1]!,
+      platformMocks.history.mock.invocationCallOrder[1]!,
+    ];
+    expect(order).toEqual([...order].sort((left, right) => left - right));
+    expect(designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.frames[0]?.sourceVersion).toBe("a".repeat(24));
+  });
+
   it("never replays failures whose write may have landed", async () => {
     const workspaceId = "ws_transport_no_retry";
     const current = snapshot();
