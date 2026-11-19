@@ -305,6 +305,20 @@ describe("registered linked copies through production expansion and runtime", ()
     }
   });
 
+  it("b: an in-place style commit on an instance defers to the new render so the override stays own", async () => {
+    await setup();
+    const { page } = await render();
+    const reply = await page.evaluate(() => (window as unknown as RuntimeWindow).runtimeRequest("commitStyles",
+      { updates: [{ nodeId: "host", styles: { "padding-left": "40px" } }], nextSourceVersion: "a".repeat(24) }));
+    expect(reply.error).toBeDefined();
+    expect(await computed(page, "padding-left")).toEqual(["12px", "8px"]);
+    await mutate({ type: "node.set-styles", nodeId: "host", styles: { "padding-left": "40px" }, scope: "auto" });
+    const saved = await changes((await render()).page);
+    expect(saved.layers.find((layer) => layer.oid === "host")?.changes).toContainEqual(expect.objectContaining({
+      property: "padding-left", value: "40px", replaced: expect.objectContaining({ value: "12px" }),
+    }));
+  });
+
   it("e: warm-copy invalidation and a variant switch consume edited source and added/renamed variants", async () => {
     const source = doc('<main class="root" data-oid="root"><span class="label" data-oid="label">{{ size }}</span></main>',
       declaration + '<style>.root { padding-left: var(--zd-size); } .label { padding-left: 2px; }</style>');

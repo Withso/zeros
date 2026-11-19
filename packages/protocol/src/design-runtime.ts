@@ -5889,6 +5889,8 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
         }
       });
       var element = structure.elements.get(oid) || layerBoxOf(elementForOid(oid));
+      // Instance styles carry render-only provenance; the new render has it.
+      if (element && element.hasAttribute && instanceInlineStyles(element)) throw new Error("Reload the saved source after styling a component instance.");
       if (structure.deletes.some(function (deleted) { return deleted.element === element || deleted.element.contains(element); })) throw new Error("Cannot style a deleted subtree.");
       var preview = previewStyleOverridesByOid.get(oid);
       if (preview) {
