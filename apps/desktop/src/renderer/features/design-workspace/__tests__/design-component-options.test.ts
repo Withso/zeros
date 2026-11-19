@@ -6,7 +6,11 @@ vi.mock("../state/design-workspace-cache", () => ({ applyDesignEditCached: mocks
 vi.mock("../state/design-background-work", () => ({ designBackgroundWork: { pause: mocks.pause } }));
 
 import type { DesignFrameComponent } from "@zeros/protocol/design-catalog";
+import { designComponentSlotNodeId } from "@zeros/protocol/design-runtime";
+import { DesignTransactionSession, type DesignOperation } from "@zeros/design-core";
 import type { ComponentOptionValue } from "@zeros/design-core/component-options";
+import { createDesignWebDocumentState, designWebTransactionAdapter } from "@zeros/design-web";
+import { expandDesignComponentsForRender } from "../../../../engine/design/components";
 import {
   commitDesignComponentOption,
   commitDesignComponentVariant,
@@ -100,6 +104,51 @@ const VARIANTS: DesignFrameComponent = {
   reach: COMPONENT.reach,
 };
 
+const RESET_FILE = "home/index.html";
+const RESET_SOURCE = '<!doctype html><html><body><main data-oid="main"><zd-card data-oid="host" width="800" zd-variant="compact" zd-style-root="color: red" style="position: absolute; left: 12px; top: 24px; width: 300px; background: red">Before &amp;<!--keep--><span data-oid="default-layer">Default</span><b data-oid="named-layer" slot="actions">Named</b><i class="untracked">Keep</i>after &amp;</zd-card></main></body></html>';
+const RESET_COMPONENT = '<!doctype html><html><head><template data-zd-options><zd-option name="width" type="number" default="1120" min="640" max="1440" unit="px"></zd-option><zd-variant name="compact" width="800"></zd-variant></template></head><body><article data-zid="root"><slot></slot><div data-zd-slot="actions"><slot name="actions"></slot></div></article></body></html>';
+
+const resetCatalogHost = async () => {
+  const result = await expandDesignComponentsForRender(
+    "/work/reset",
+    RESET_SOURCE,
+    { "parts/card.html": RESET_COMPONENT },
+    RESET_FILE,
+    { registry: new Map([["card", "parts/card.html"]]) },
+    false,
+  );
+  const host = result.instances?.hosts.host;
+  if (!host) throw new Error("The expanded frame did not report its component instance.");
+  return host;
+};
+
+type CapturedEdit = {
+  transactionId: string;
+  actor: { kind: "human"; id: string };
+  intent: string;
+  createdAt: number;
+  operations: DesignOperation[];
+};
+
+const latestCapturedEdit = () =>
+  (mocks.apply.mock.calls as unknown as [string, unknown, CapturedEdit][]).at(-1)![2];
+
+const applyCapturedEdit = (source: string, edit: CapturedEdit) => {
+  const initial = createDesignWebDocumentState({ documentId: RESET_FILE, entryFile: RESET_FILE, files: { [RESET_FILE]: source } });
+  const session = new DesignTransactionSession(initial, designWebTransactionAdapter);
+  const outcome = session.apply({
+    schemaVersion: 1,
+    transactionId: edit.transactionId,
+    documentId: initial.documentId,
+    baseRevision: initial.revision,
+    actor: edit.actor,
+    intent: edit.intent,
+    createdAt: edit.createdAt,
+    operations: edit.operations,
+  });
+  return { initial, session, outcome };
+};
+
 describe("variants and instances", () => {
   beforeEach(() => mocks.apply.mockClear());
   const calls = () => mocks.apply.mock.calls as unknown as [string, { file: string }, { operations: Record<string, unknown>[]; intent: string }][];
@@ -177,7 +226,7 @@ describe("variants and instances", () => {
       expect.objectContaining({ type: "node.set-attribute", nodeId: "inst", attribute: "zd-style-cc-send", value: null }),
       expect.objectContaining({ type: "node.set-styles", nodeId: "inst", styles: { width: null, background: null } }),
       expect.objectContaining({ type: "node.delete", nodeId: "slot-content" }),
-      expect.objectContaining({ type: "node.set-text", nodeId: "inst", text: "" }),
+      expect.objectContaining({ type: "node.set-text", nodeId: designComponentSlotNodeId("inst", ""), text: "" }),
     ]);
     expect(calls()[0]![2].operations).not.toContainEqual(expect.objectContaining({ attribute: "zd-variant" }));
   });
@@ -219,7 +268,71 @@ describe("variants and instances", () => {
     await commitDesignInstanceText("w", frame, "tour-1", "How to move");
     expect(calls()[0]![1]).toBe(frame);
     expect(calls()[0]![2].intent).toBe("Set text");
-    expect(calls()[0]![2].operations).toEqual([expect.objectContaining({ type: "node.set-text", nodeId: "tour-1", text: "How to move" })]);
+    expect(calls()[0]![2].operations).toEqual([expect.objectContaining({ type: "node.set-text", nodeId: designComponentSlotNodeId("tour-1", ""), text: "How to move" })]);
+  });
+
+  it("edits direct text through the catalog default slot without touching mixed children", async () => {
+    const host = await resetCatalogHost();
+    expect(host.text).toBe("Before &after &");
+    await commitDesignInstanceText("w", { file: RESET_FILE, sourceVersion: V1 } as never, "host", "Changed & <safe>");
+    const edit = latestCapturedEdit();
+    expect(edit.operations).toEqual([expect.objectContaining({
+      type: "node.set-text",
+      nodeId: designComponentSlotNodeId("host", ""),
+      text: "Changed & <safe>",
+    })]);
+
+    const { outcome } = applyCapturedEdit(RESET_SOURCE, edit);
+    const changed = outcome.state.files[RESET_FILE]!;
+    expect(changed).toContain("Changed &amp; &lt;safe&gt;");
+    expect(changed).toContain("<!--keep-->");
+    expect(changed).toContain('data-oid="default-layer"');
+    expect(changed).toContain('data-oid="named-layer" slot="actions"');
+    expect(changed).toContain('<i class="untracked">Keep</i>');
+    expect(changed).not.toContain("Before &amp;");
+    expect(changed).not.toContain("after &amp;");
+  });
+
+  it("resets only catalog-reported slot layers and direct text in one undoable edit", async () => {
+    const host = await resetCatalogHost();
+    expect(host.text).toBe("Before &after &");
+    expect(host.slotted).toEqual({ "": ["default-layer"], actions: ["named-layer"] });
+    await commitDesignInstanceAllOverridesReset(
+      "w",
+      { file: RESET_FILE, sourceVersion: V1 } as never,
+      "host",
+      ["width"],
+      ["root"],
+      "position: absolute; left: 12px; top: 24px; width: 300px; background: red",
+      Object.values(host.slotted ?? {}).flat(),
+      host.text !== undefined,
+    );
+    expect(mocks.apply).toHaveBeenCalledTimes(1);
+    const edit = latestCapturedEdit();
+    expect(edit.operations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "node.set-text", nodeId: designComponentSlotNodeId("host", ""), text: "" }),
+      expect.objectContaining({ type: "node.delete", nodeId: "default-layer" }),
+      expect.objectContaining({ type: "node.delete", nodeId: "named-layer" }),
+    ]));
+    const { initial, session, outcome } = applyCapturedEdit(RESET_SOURCE, edit);
+    const reset = outcome.state.files[RESET_FILE]!;
+    expect(reset).toContain('zd-variant="compact"');
+    expect(reset).toContain("position: absolute");
+    expect(reset).toContain("left: 12px");
+    expect(reset).toContain("top: 24px");
+    expect(reset).toContain("<!--keep-->");
+    expect(reset).toMatch(/<i class="untracked"[^>]*>Keep<\/i>/);
+    expect(reset).not.toContain('width="800"');
+    expect(reset).not.toContain("zd-style-root");
+    expect(reset).not.toContain("background: red");
+    expect(reset).not.toContain("default-layer");
+    expect(reset).not.toContain("named-layer");
+    expect(reset).not.toContain("Before &amp;");
+    expect(reset).not.toContain("after &amp;");
+    expect(session.undo()?.state.files[RESET_FILE]).toBe(initial.files[RESET_FILE]);
+    expect(session.undo()).toBeNull();
+    expect(session.redo()?.state.files[RESET_FILE]).toBe(reset);
+    expect(session.redo()).toBeNull();
   });
 });
 

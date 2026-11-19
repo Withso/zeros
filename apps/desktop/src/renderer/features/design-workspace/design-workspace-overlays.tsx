@@ -11,7 +11,7 @@ import {
 
 // --- IMPORTS ---
 
-import { Diamond } from "lucide-react";
+import { Component as ComponentGlyph, Diamond } from "lucide-react";
 import React, { useLayoutEffect, useMemo, useRef } from "react";
 
 import type { DesignRuntimeNodeDetails } from "@zeros/protocol/design-runtime";
@@ -1111,6 +1111,7 @@ export function DesignSelectionMeasurements({
   sizeWidth,
   sizeHeight,
   component,
+  componentKind = "instance",
   onSpacingPointerDown,
   onSpacingCommit,
 }: {
@@ -1126,6 +1127,7 @@ export function DesignSelectionMeasurements({
   sizeHeight: number;
   /** A selected instance's component title, shown in place of its size. */
   component?: string | null;
+  componentKind?: "main" | "instance";
   onSpacingPointerDown?: DesignLayoutToolsProps["onSpacingPointerDown"];
   onSpacingCommit?: DesignLayoutToolsProps["onSpacingCommit"];
 }) {
@@ -1161,11 +1163,19 @@ export function DesignSelectionMeasurements({
         >
           {component ? (
             <>
-              <Diamond
-                data-design-component-mark=""
-                className="size-[11px] shrink-0"
-                aria-hidden="true"
-              />
+              {componentKind === "main" ? (
+                <ComponentGlyph
+                  data-design-component-mark="main"
+                  className="text-violet-primary fill-current size-[11px] shrink-0"
+                  aria-hidden="true"
+                />
+              ) : (
+                <Diamond
+                  data-design-component-mark="instance"
+                  className="size-[11px] shrink-0"
+                  aria-hidden="true"
+                />
+              )}
               {component}
             </>
           ) : (

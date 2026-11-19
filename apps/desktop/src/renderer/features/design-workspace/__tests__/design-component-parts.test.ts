@@ -75,6 +75,22 @@ describe("an instance's slot", () => {
     ]) expect(() => refuseDesignComponentPartWrite([operation]), operation.type).toThrow();
   });
 
+  it("allows text edits only on the default slot", () => {
+    const defaultSlot = designComponentSlotNodeId("inst", "");
+    expect(() => refuseDesignComponentPartWrite([{
+      operationId: "text",
+      type: "node.set-text",
+      nodeId: defaultSlot,
+      text: "replacement",
+    }])).not.toThrow();
+    expect(() => refuseDesignComponentPartWrite([{
+      operationId: "text",
+      type: "node.set-text",
+      nodeId: slot,
+      text: "replacement",
+    }])).toThrow();
+  });
+
   it("is a part that moves nowhere, named by its slot in Layers, with the instance as its host", () => {
     expect(isDesignComponentPartNodeId(slot)).toBe(true);
     expect(designComponentPartHost(slot)).toBe("inst");

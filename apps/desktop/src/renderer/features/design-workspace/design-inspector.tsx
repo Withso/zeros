@@ -1541,6 +1541,15 @@ export function designInspectorTabPreferenceKind(
   return hasOptionsTarget ? "component-root" : componentContext ? "component-inner" : "ordinary";
 }
 
+export function designInspectorSelectionIsComponentLike(evidence: {
+  frameIsComponent: boolean;
+  instanceHost: boolean;
+  selectedPart: boolean;
+  selectedSlot: boolean;
+}): boolean {
+  return evidence.frameIsComponent || evidence.instanceHost || evidence.selectedPart || evidence.selectedSlot;
+}
+
 export function designInspectorSimilarTabKey(
   owner: { workspaceId: string | null; directoryId: string | undefined },
   kind: DesignInspectorTabPreferenceKind,
@@ -3105,7 +3114,12 @@ export const DesignInspector = React.memo(function DesignInspector({
   });
   const similarTabKey = designInspectorSimilarTabKey(
     { workspaceId, directoryId: previewDirectoryId },
-    designInspectorTabPreferenceKind(optionsTarget !== null, Boolean(frame?.component || instanceNodeId)),
+    designInspectorTabPreferenceKind(optionsTarget !== null, designInspectorSelectionIsComponentLike({
+      frameIsComponent: Boolean(frame?.component),
+      instanceHost: instanceHost !== undefined,
+      selectedPart: selectedPart !== null,
+      selectedSlot: selectedSlot !== null,
+    })),
   );
   tabKeyRef.current = inspectorTabKey;
   tabSimilarityKeyRef.current = similarTabKey;

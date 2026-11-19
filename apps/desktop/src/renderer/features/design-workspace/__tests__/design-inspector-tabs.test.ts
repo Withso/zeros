@@ -59,6 +59,26 @@ describe("component inspector tab ownership", () => {
     expect(designInspectorDefaultTab(false)).toBe("style");
   });
 
+  it("classifies similar-target preferences from component evidence, not a selected node id", () => {
+    const api = designInspector as unknown as {
+      designInspectorSelectionIsComponentLike?: (evidence: {
+        frameIsComponent: boolean;
+        instanceHost: boolean;
+        selectedPart: boolean;
+        selectedSlot: boolean;
+      }) => boolean;
+      designInspectorTabPreferenceKind?: (hasOptionsTarget: boolean, componentContext: boolean) => string;
+    };
+    const classify = api.designInspectorSelectionIsComponentLike;
+
+    expect(classify?.({ frameIsComponent: false, instanceHost: false, selectedPart: false, selectedSlot: false })).toBe(false);
+    expect(classify?.({ frameIsComponent: true, instanceHost: false, selectedPart: false, selectedSlot: false })).toBe(true);
+    expect(classify?.({ frameIsComponent: false, instanceHost: true, selectedPart: false, selectedSlot: false })).toBe(true);
+    expect(classify?.({ frameIsComponent: false, instanceHost: false, selectedPart: true, selectedSlot: false })).toBe(true);
+    expect(classify?.({ frameIsComponent: false, instanceHost: false, selectedPart: false, selectedSlot: true })).toBe(true);
+    expect(api.designInspectorTabPreferenceKind?.(false, classify?.({ frameIsComponent: false, instanceHost: false, selectedPart: false, selectedSlot: false }) ?? false)).toBe("ordinary");
+  });
+
   it("reuses a bounded owner-and-kind preference without replacing exact target choices", () => {
     const api = designInspector as unknown as {
       designInspectorSimilarTabKey?: (owner: { workspaceId: string | null; directoryId: string | undefined }, kind: string) => string;

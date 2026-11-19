@@ -405,7 +405,7 @@ function applyOperation(
       state,
       operation,
       { ...state.files, [state.entryFile]: updated },
-      [operation.nodeId],
+      [designSlotOfNodeId(operation.nodeId)?.host ?? operation.nodeId],
     );
   }
   if (operation.type === "node.set-attribute") {

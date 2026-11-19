@@ -75,15 +75,30 @@ const details = {
 let container: HTMLDivElement;
 let root: Root;
 
-const view = (active: boolean, onCommitStyles: (styles: Record<string, string | null>) => Promise<void>) =>
+type EditorOptions = {
+  disabled?: boolean;
+  onPreviewStyles?: (styles: Record<string, string | null>) => Promise<void>;
+  onCancelStylePreview?: () => Promise<void>;
+};
+
+const view = (
+  active: boolean,
+  onCommitStyles: (styles: Record<string, string | null>) => Promise<void>,
+  options: EditorOptions = {},
+) =>
   React.createElement(DesignComputedCssEditor, {
     details,
     active,
+    ...options,
     onCommitStyles,
   });
 
-async function render(active: boolean, onCommitStyles: (styles: Record<string, string | null>) => Promise<void>) {
-  await act(async () => root.render(view(active, onCommitStyles)));
+async function render(
+  active: boolean,
+  onCommitStyles: (styles: Record<string, string | null>) => Promise<void>,
+  options: EditorOptions = {},
+) {
+  await act(async () => root.render(view(active, onCommitStyles, options)));
 }
 
 describe("retained computed CSS editor activity", () => {
@@ -124,6 +139,17 @@ describe("retained computed CSS editor activity", () => {
       .toEqual([{ anchor: 2, head: 9 }]);
   });
 
+  it("does not cancel a style preview it never owned on an initial inactive mount", async () => {
+    const commit = vi.fn(async () => {});
+    const preview = vi.fn(async () => {});
+    const cancel = vi.fn(async () => {});
+    await render(false, commit, { onPreviewStyles: preview, onCancelStylePreview: cancel });
+
+    expect(preview).not.toHaveBeenCalled();
+    expect(cancel).not.toHaveBeenCalled();
+    expect(commit).not.toHaveBeenCalled();
+  });
+
   it("does not chain a delayed commit while hidden, then resumes the latest valid draft", async () => {
     let finishFirst: (() => void) | undefined;
     const commit = vi.fn((_styles: Record<string, string | null>) =>
@@ -152,5 +178,46 @@ describe("retained computed CSS editor activity", () => {
     await act(async () => { await vi.advanceTimersByTimeAsync(300); });
     expect(commit).toHaveBeenCalledTimes(2);
     expect(commit.mock.calls[1]?.[0]).toEqual({ color: "green" });
+  });
+
+  it("never sends a retained Default draft to the Hover callback while disabled", async () => {
+    let finishFirst: (() => void) | undefined;
+    const defaultCommit = vi.fn((_styles: Record<string, string | null>) =>
+      defaultCommit.mock.calls.length === 1
+        ? new Promise<void>((resolve) => { finishFirst = resolve; })
+        : Promise.resolve(),
+    );
+    const hoverCommit = vi.fn(async (_styles: Record<string, string | null>) => {});
+    const preview = vi.fn(async () => {});
+    const cancel = vi.fn(async () => {});
+    const actions = { onPreviewStyles: preview, onCancelStylePreview: cancel };
+
+    await render(true, defaultCommit, actions);
+    act(() => editorHarness.props?.onChange("color: blue;"));
+    await act(async () => { await vi.advanceTimersByTimeAsync(300); });
+    expect(defaultCommit).toHaveBeenCalledTimes(1);
+
+    act(() => editorHarness.props?.onChange("color: green;"));
+    await act(async () => { await vi.advanceTimersByTimeAsync(300); });
+    expect(defaultCommit).toHaveBeenCalledTimes(1);
+
+    await render(false, defaultCommit, actions);
+    await act(async () => {
+      finishFirst?.();
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    await render(true, hoverCommit, { ...actions, disabled: true });
+    await act(async () => { await vi.advanceTimersByTimeAsync(300); });
+    expect(defaultCommit).toHaveBeenCalledTimes(1);
+    expect(hoverCommit).not.toHaveBeenCalled();
+    expect(editorHarness.props?.value).toBe("color: green;");
+
+    await render(true, defaultCommit, actions);
+    await act(async () => { await vi.advanceTimersByTimeAsync(300); });
+    expect(defaultCommit).toHaveBeenCalledTimes(2);
+    expect(defaultCommit.mock.calls[1]?.[0]).toEqual({ color: "green" });
+    expect(hoverCommit).not.toHaveBeenCalled();
   });
 });

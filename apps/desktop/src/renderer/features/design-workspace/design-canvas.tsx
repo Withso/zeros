@@ -8916,6 +8916,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                             sizeWidth={overlayFrame.width}
                             sizeHeight={overlayFrame.height}
                             component={selectedComponentIdentity}
+                            componentKind={mainComponentRoot ? "main" : "instance"}
                             onSpacingPointerDown={
                               selectedElements.length === 1 &&
                               activeTool === "select"

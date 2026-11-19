@@ -24,7 +24,7 @@ import {
   type DesignFrameInstances,
 } from "@zeros/protocol/design-catalog";
 import { isDesignComponentVariantName } from "@zeros/protocol/design-path";
-import { DESIGN_RUNTIME_INSTANCE_TARGET } from "@zeros/protocol/design-runtime";
+import { designComponentSlotNodeId, DESIGN_RUNTIME_INSTANCE_TARGET } from "@zeros/protocol/design-runtime";
 
 import { designFrameRuntime } from "../../../platform/bridge/design-frame-runtime";
 import { designBackgroundWork } from "./design-background-work";
@@ -251,7 +251,7 @@ export function commitDesignInstanceAllOverridesReset(
     ...(properties.length ? [{ operationId: "reset-style", type: "node.set-styles", nodeId,
       styles: Object.fromEntries(properties.map((property) => [property, null])), scope: "inline", responsiveContext: "base", stateContext: "default" }] : []),
     ...[...new Set(slottedLayers)].map((layer, index) => ({ operationId: `reset-slot-${index}`, type: "node.delete", nodeId: layer })),
-    ...(resetText ? [{ operationId: "reset-text", type: "node.set-text", nodeId, text: "" }] : []),
+    ...(resetText ? [{ operationId: "reset-text", type: "node.set-text", nodeId: designComponentSlotNodeId(nodeId, ""), text: "" }] : []),
   ];
   if (!operations.length) return Promise.resolve(undefined);
   return applyDesignEditCached(workspaceId, frame, edit("Reset all overrides", operations));
@@ -260,7 +260,7 @@ export function commitDesignInstanceAllOverridesReset(
 /** Set the text a plain component's instance fills its default slot with:
  * its host's own text. */
 export function commitDesignInstanceText(workspaceId: string, frame: { file: string; sourceVersion: string }, nodeId: string, text: string) {
-  return applyDesignEditCached(workspaceId, frame, edit("Set text", [{ operationId: "set-text", type: "node.set-text", nodeId, text }]));
+  return applyDesignEditCached(workspaceId, frame, edit("Set text", [{ operationId: "set-text", type: "node.set-text", nodeId: designComponentSlotNodeId(nodeId, ""), text }]));
 }
 
 /** Empty an instance's slot back to what its main puts there: delete the

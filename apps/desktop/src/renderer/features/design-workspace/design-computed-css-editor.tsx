@@ -345,7 +345,10 @@ export function DesignComputedCssEditor({
 
   const activeRef = useRef(active);
   activeRef.current = active;
+  const disabledRef = useRef(disabled);
+  disabledRef.current = disabled;
   const mountedRef = useRef(false);
+  const ownsStylePreviewRef = useRef(false);
   const baselineRef = useRef<Record<string, string>>(externalDeclarations);
   const validTargetRef = useRef<Record<string, string> | null>(
     externalDeclarations,
@@ -368,13 +371,20 @@ export function DesignComputedCssEditor({
     onCommitStyles,
   };
 
+  const cancelOwnedStylePreview = useCallback(() => {
+    if (!ownsStylePreviewRef.current) return;
+    ownsStylePreviewRef.current = false;
+    void actionsRef.current.onCancelStylePreview?.().catch(() => {});
+  }, []);
+
   useEffect(() => {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
       if (timerRef.current !== null) window.clearTimeout(timerRef.current);
+      cancelOwnedStylePreview();
     };
-  }, []);
+  }, [cancelOwnedStylePreview]);
 
   useEffect(() => {
     if (!active) return;
@@ -388,17 +398,17 @@ export function DesignComputedCssEditor({
   }, [active]);
 
   useEffect(() => {
-    if (active) return;
+    if (active && !disabled) return;
     if (timerRef.current !== null) {
       window.clearTimeout(timerRef.current);
       timerRef.current = null;
     }
-    void actionsRef.current.onCancelStylePreview?.().catch(() => {});
-  }, [active]);
+    cancelOwnedStylePreview();
+  }, [active, disabled, cancelOwnedStylePreview]);
 
   const scheduleFlush = useCallback((delay: number) => {
     if (timerRef.current !== null) window.clearTimeout(timerRef.current);
-    if (!mountedRef.current || !activeRef.current) return;
+    if (!mountedRef.current || !activeRef.current || disabledRef.current) return;
     timerRef.current = window.setTimeout(() => {
       timerRef.current = null;
       flushRef.current();
@@ -406,10 +416,10 @@ export function DesignComputedCssEditor({
   }, []);
 
   useEffect(() => {
-    if (!active || !dirty || !validTargetRef.current) return;
+    if (!active || disabled || !dirty || !validTargetRef.current) return;
     if (Object.keys(diffDesignCssDeclarations(baselineRef.current, validTargetRef.current)).length === 0) return;
     scheduleFlush(CSS_AUTOSAVE_DELAY_MS);
-  }, [active, dirty, scheduleFlush]);
+  }, [active, disabled, dirty, scheduleFlush]);
 
   const flushValidDraft = useCallback(() => {
     if (timerRef.current !== null) {
@@ -421,7 +431,7 @@ export function DesignComputedCssEditor({
     // commit was in flight would move these declarations onto whichever layer
     // the designer selected next. Blur already flushes the real edit before
     // the selection changes.
-    if (!mountedRef.current || !activeRef.current) return;
+    if (!mountedRef.current || !activeRef.current || disabledRef.current) return;
     const target = validTargetRef.current;
     if (!target) return;
     if (commitInFlightRef.current) {
@@ -431,7 +441,7 @@ export function DesignComputedCssEditor({
     const patch = diffDesignCssDeclarations(baselineRef.current, target);
     if (Object.keys(patch).length === 0) {
       setDirty(false);
-      void actionsRef.current.onCancelStylePreview?.().catch(() => {});
+      cancelOwnedStylePreview();
       return;
     }
 
@@ -457,7 +467,7 @@ export function DesignComputedCssEditor({
           setDirty(!settled);
         }
         if (settled) {
-          void actionsRef.current.onCancelStylePreview?.().catch(() => {});
+          cancelOwnedStylePreview();
         }
       })
       .catch((commitError: unknown) => {
@@ -465,13 +475,13 @@ export function DesignComputedCssEditor({
           setError(errorMessage(commitError));
           setDirty(true);
         }
-        void actionsRef.current.onCancelStylePreview?.().catch(() => {});
+        cancelOwnedStylePreview();
       })
       .finally(() => {
         commitInFlightRef.current = false;
         if (!mountedRef.current) return;
         setSaving(false);
-        if (!activeRef.current) {
+        if (!activeRef.current || disabledRef.current) {
           if (
             validTargetRef.current &&
             (rerunRef.current || versionRef.current !== committedVersion)
@@ -485,12 +495,12 @@ export function DesignComputedCssEditor({
           scheduleFlush(0);
         }
       });
-  }, [scheduleFlush]);
+  }, [cancelOwnedStylePreview, scheduleFlush]);
   flushRef.current = flushValidDraft;
 
   const handleChange = useCallback(
     (nextDraft: string) => {
-      if (!activeRef.current || disabled) return;
+      if (!activeRef.current || disabledRef.current) return;
       setDraft(nextDraft);
       versionRef.current += 1;
       if (timerRef.current !== null) {
@@ -519,13 +529,14 @@ export function DesignComputedCssEditor({
         previewTargetRef.current = next;
         setError(null);
         setDirty(commitPatchSize > 0);
-        if (Object.keys(previewPatch).length > 0) {
-          void actionsRef.current
-            .onPreviewStyles?.(previewPatch)
-            .catch(() => {});
+        if (Object.keys(previewPatch).length > 0 && actionsRef.current.onPreviewStyles) {
+          ownsStylePreviewRef.current = true;
+          void actionsRef.current.onPreviewStyles(previewPatch).catch(() => {
+            cancelOwnedStylePreview();
+          });
         }
         if (commitPatchSize === 0) {
-          void actionsRef.current.onCancelStylePreview?.().catch(() => {});
+          cancelOwnedStylePreview();
           return;
         }
         scheduleFlush(CSS_AUTOSAVE_DELAY_MS);
@@ -534,10 +545,10 @@ export function DesignComputedCssEditor({
         previewTargetRef.current = baselineRef.current;
         setDirty(true);
         setError(errorMessage(draftError));
-        void actionsRef.current.onCancelStylePreview?.().catch(() => {});
+        cancelOwnedStylePreview();
       }
     },
-    [disabled, scheduleFlush],
+    [cancelOwnedStylePreview, scheduleFlush],
   );
 
   useEffect(() => {

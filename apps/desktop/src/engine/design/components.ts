@@ -1031,7 +1031,7 @@ function emptyDesignDocument(source: string): string {
 }
 
 /** The frame's own instances, for the Style panel: each host layer (its
- * data-oid), its component and the option attributes it sets. */
+ * data-oid), its component, option attributes and supplied default-slot text. */
 function recordInstance(
   usage: DesignComponentExpansionUsage,
   registry: ReadonlyMap<string, string>,
@@ -1042,25 +1042,24 @@ function recordInstance(
   const { declaration, file } = definition.template;
   const shape = designComponentBodySlotShape(definition.body);
   const slotted = designInstanceSlottedLayers(instance, shape);
+  const text = directDefaultSlotText(instance, shape.fallback);
   recordHost(usage, definition.name, instance, new Set([...declaration.options.map((option) => option.name), COMPONENT_VARIANT_ATTRIBUTE]), () => {
     const summary = definition.template.summary?.() ?? null;
     return { elements: withDesignSlotOptions(summary?.elements ?? [], shape.names, designSlotOptionElement), reach: summary?.reach ?? {},
       file, frame: registry.get(definition.name) === file };
-  }, { ...(failed ? { failed: true } : {}), ...(slotted ? { slotted } : {}) });
+  }, { ...(failed ? { failed: true } : {}), ...(text !== undefined ? { text } : {}), ...(slotted ? { slotted } : {}) });
 }
 
 /** A plain definition's instance: each attribute slot is a text option with
- * its fallback as the default, and a default slot filled with text alone
- * reports that text, which the host's own text sets. */
+ * its fallback as the default, and a default slot reports bounded direct
+ * text nodes even when elements or comments are interleaved. */
 function recordSlotInstance(
   usage: DesignComponentExpansionUsage,
   definition: ComponentDefinition & { slots: NonNullable<ComponentDefinition["slots"]> },
   instance: DefaultTreeAdapterTypes.Element,
 ): void {
   const { options, content } = definition.slots;
-  const text = content && instance.childNodes.every((child) => child.nodeName === "#text")
-    ? instance.childNodes.map((child) => (child as DefaultTreeAdapterTypes.TextNode).value).join("")
-    : undefined;
+  const text = directDefaultSlotText(instance, content);
   const names = designComponentBodySlotShape(definition.body).names.filter((name) => !options.some((option) => option.name === name));
   const slotted = designInstanceSlottedLayers(instance, { names, fallback: content });
   recordHost(usage, definition.name, instance, new Set(options.map((option) => option.name)), () => ({
@@ -1069,7 +1068,19 @@ function recordSlotInstance(
     reach: {},
     file: `components/${definition.name}.html`,
     frame: false,
-  }), { ...(text !== undefined && text.length <= DESIGN_COMPONENT_RECORD_LIMITS.attributeValue ? { text } : {}), ...(slotted ? { slotted } : {}) });
+  }), { ...(text !== undefined ? { text } : {}), ...(slotted ? { slotted } : {}) });
+}
+
+function directDefaultSlotText(
+  instance: DefaultTreeAdapterTypes.Element,
+  hasDefaultSlot: boolean,
+): string | undefined {
+  if (!hasDefaultSlot) return undefined;
+  const text = instance.childNodes
+    .filter((child) => child.nodeName === "#text")
+    .map((child) => (child as DefaultTreeAdapterTypes.TextNode).value)
+    .join("");
+  return text.length <= DESIGN_COMPONENT_RECORD_LIMITS.attributeValue ? text : undefined;
 }
 
 function recordHost(

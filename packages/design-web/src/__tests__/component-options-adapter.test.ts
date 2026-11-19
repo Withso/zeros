@@ -1,4 +1,5 @@
 import { applyDesignTransaction, DesignTransactionSession, type DesignOperation } from "@zeros/design-core";
+import { designComponentSlotNodeId } from "@zeros/protocol/design-runtime";
 import { describe, expect, it } from "vitest";
 
 import { designWebTransactionAdapter } from "../adapter";
@@ -199,7 +200,7 @@ describe("Reset All on an instance", () => {
       { operationId: "reset-style", type: "node.set-styles", nodeId: "ws", styles: { width: null, background: null },
         scope: "inline", responsiveContext: "base", stateContext: "default" },
       { operationId: "reset-slot", type: "node.delete", nodeId: "slot-action" },
-      { operationId: "reset-text", type: "node.set-text", nodeId: "ws", text: "" },
+      { operationId: "reset-text", type: "node.set-text", nodeId: designComponentSlotNodeId("ws", ""), text: "" },
     ]));
     const reset = outcome.state.files["home/index.html"]!;
     expect(outcome.receipt.status).toBe("applied");
@@ -214,5 +215,17 @@ describe("Reset All on an instance", () => {
     expect(reset).not.toContain("Supplied default text");
     expect(session.undo()?.state.files["home/index.html"]).toBe(source);
     expect(session.undo()).toBeNull();
+    expect(session.redo()?.state.files["home/index.html"]).toBe(reset);
+    expect(session.redo()).toBeNull();
+  });
+
+  it("reports the host as affected by a default-slot text edit", () => {
+    const source = '<!doctype html><html><body><zd-card data-oid="ws">Before<span data-oid="child">Nested</span>after</zd-card></body></html>';
+    const initial = createDesignWebDocumentState({ documentId: "home/index.html", entryFile: "home/index.html", files: { "home/index.html": source } });
+    const outcome = applyDesignTransaction(initial, webTransaction(initial, "set-slot-text", [{
+      operationId: "set-text", type: "node.set-text", nodeId: designComponentSlotNodeId("ws", ""), text: "Changed",
+    }]), designWebTransactionAdapter);
+    expect(outcome.receipt.affectedNodeIds).toEqual(["ws"]);
+    expect(outcome.state.files["home/index.html"]).toContain('Changed<span data-oid="child">Nested</span>');
   });
 });

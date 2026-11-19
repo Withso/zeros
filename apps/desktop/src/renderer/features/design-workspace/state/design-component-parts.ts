@@ -49,8 +49,8 @@ export const designPartOverrideAttribute = (part: string) => `zd-style-${designP
 
 /** Throw when a write's input names a part or slot anywhere a layer id can
  * go, except a style write on a part, which the engine stores as the
- * instance's override, and a slot as the parent a layer moves into or the
- * layer drawn layers are added to. */
+ * instance's override, a slot as the parent a layer moves into or the layer
+ * drawn layers are added to, and direct text on the default slot. */
 export function refuseDesignComponentPartWrite(input: unknown, depth = 0): void {
   if (typeof input === "string") {
     if (isDesignComponentPartNodeId(input)) throw new DesignComponentPartWriteError();
@@ -63,9 +63,11 @@ export function refuseDesignComponentPartWrite(input: unknown, depth = 0): void 
     return;
   }
   const appendsToSlot = operation.type === "node.set-html" && operation.mode === "append" && isDesignComponentSlotNodeId(operation.nodeId);
+  const setsDefaultSlotText = operation.type === "node.set-text" && typeof operation.nodeId === "string" &&
+    designComponentSlotOf(operation.nodeId)?.name === "";
   const entries: Array<[string | number, unknown]> = Array.isArray(input) ? [...input.entries()] : Object.entries(input);
   for (const [key, value] of entries) {
-    if ((key === "parentId" || (key === "nodeId" && appendsToSlot)) && isDesignComponentSlotNodeId(value)) continue;
+    if ((key === "parentId" || (key === "nodeId" && (appendsToSlot || setsDefaultSlotText))) && isDesignComponentSlotNodeId(value)) continue;
     refuseDesignComponentPartWrite(value, depth + 1);
   }
 }

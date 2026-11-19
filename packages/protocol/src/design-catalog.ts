@@ -440,9 +440,9 @@ export const designFrameInstancesSchema = z.object({
      * component error instead. Such a host has no entry in `components` and
      * renders as an empty element. */
     missing: z.literal(true).optional(),
-    /** A plain component's instance whose default slot it fills with text
-     * alone: that text, as written (decoded). Absent when it places elements
-     * there, or its component has no default slot. */
+    /** Decoded direct text supplied to the component's default slot,
+     * concatenated in order. Element and comment children are ignored. Absent
+     * when there is no default slot or the text exceeds the attribute limit. */
     text: z.string().max(LIMITS.attributeValue).optional(),
     /** The frame's own layers (data-oid) it places in each slot of its
      * component, in order; "" is the default slot. A slot holding more than

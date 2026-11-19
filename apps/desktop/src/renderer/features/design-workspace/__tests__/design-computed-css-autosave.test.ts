@@ -29,7 +29,7 @@ function flushBody(): string {
 describe("computed CSS autosave lifecycle", () => {
   it("never commits a draft after the editor unmounts", () => {
     const body = flushBody();
-    const guard = body.indexOf("if (!mountedRef.current || !activeRef.current) return;");
+    const guard = body.indexOf("if (!mountedRef.current || !activeRef.current || disabledRef.current) return;");
     const read = body.indexOf("const target = validTargetRef.current;");
 
     expect(guard).toBeGreaterThan(-1);
@@ -58,8 +58,9 @@ describe("computed CSS autosave lifecycle", () => {
     const end = editorSource.indexOf("const flushValidDraft", start);
     const body = editorSource.slice(start, end);
 
-    expect(body).toContain("if (!mountedRef.current || !activeRef.current) return;");
-    expect(body.indexOf("if (!mountedRef.current || !activeRef.current) return;")).toBeLessThan(
+    const guard = "if (!mountedRef.current || !activeRef.current || disabledRef.current) return;";
+    expect(body).toContain(guard);
+    expect(body.indexOf(guard)).toBeLessThan(
       body.indexOf("window.setTimeout("),
     );
   });

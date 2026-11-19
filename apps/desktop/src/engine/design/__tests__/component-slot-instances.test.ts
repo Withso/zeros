@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { DESIGN_COMPONENT_RECORD_LIMITS } from "@zeros/protocol/design-catalog";
 import { expandDesignComponents, expandDesignComponentsForRender } from "../components";
 
 const doc = (body: string, head = "") => `<!doctype html><html><head>${head}</head><body>${body}</body></html>`;
@@ -49,10 +50,37 @@ describe("a slot component's instances", () => {
     });
     // An attribute slot whose name no option may take (title) is not offered.
     expect(instances?.hosts).toEqual({
-      "tour-1": { component: "card", attributes: { meta: "Page 1", heading: "Start & go" } },
+      "tour-1": { component: "card", attributes: { meta: "Page 1", heading: "Start & go" }, text: "How to ." },
       "tour-2": { component: "card", attributes: {}, text: "Tokens & themes" },
       "tour-3": { component: "card", attributes: {}, text: "" },
     });
+  });
+
+  it("reports bounded direct text for templated instances with a default slot", async () => {
+    const component = doc(
+      '<article data-zid="card"><slot></slot><div data-zd-slot="actions"><slot name="actions"></slot></div></article>',
+      '<template data-zd-options><zd-option name="label" type="text" default="Card"></zd-option></template>',
+    );
+    const frame = doc(
+      '<zd-card data-oid="mixed">Before &amp;<!--keep--><span data-oid="default-layer">Nested</span><b data-oid="named-layer" slot="actions">Action</b>after &amp;</zd-card>' +
+        '<zd-card data-oid="text-only">Only &amp; text</zd-card>' +
+        `<zd-card data-oid="too-long">${"x".repeat(DESIGN_COMPONENT_RECORD_LIMITS.attributeValue + 1)}</zd-card>`,
+    );
+    const result = await expandDesignComponentsForRender(
+      "/work/slots",
+      frame,
+      { "parts/card.html": component },
+      "start/welcome.html",
+      { registry: new Map([["card", "parts/card.html"]]) },
+      false,
+    );
+
+    expect(result.instances?.hosts.mixed).toMatchObject({
+      text: "Before &after &",
+      slotted: { "": ["default-layer"], actions: ["named-layer"] },
+    });
+    expect(result.instances?.hosts["text-only"]?.text).toBe("Only & text");
+    expect(result.instances?.hosts["too-long"]).not.toHaveProperty("text");
   });
 
   it("record an instance the frame places in another's slot, and none the definition places", async () => {
@@ -72,5 +100,22 @@ describe("a slot component's instances", () => {
     const { instances } = await expandDesignComponentsForRender("/work/slots", doc('<zd-pill data-oid="p" label="On">x</zd-pill>'),
       { "components/pill.html": doc('<span data-zid="pill"><slot data-zd-attr="label">Off</slot></span>') }, "start/welcome.html", { registry: new Map() }, false);
     expect(instances?.hosts).toEqual({ p: { component: "pill", attributes: { label: "On" } } });
+  });
+
+  it("offers no text for a templated component without a default slot", async () => {
+    const component = doc(
+      '<span data-zid="pill"><slot data-zd-attr="label">Off</slot></span>',
+      '<template data-zd-options><zd-option name="label" type="text" default="Off"></zd-option></template>',
+    );
+    const { instances } = await expandDesignComponentsForRender(
+      "/work/slots",
+      doc('<zd-pill data-oid="p">x</zd-pill>'),
+      { "parts/pill.html": component },
+      "start/welcome.html",
+      { registry: new Map([["pill", "parts/pill.html"]]) },
+      false,
+    );
+    expect(instances?.hosts.p).toMatchObject({ component: "pill" });
+    expect(instances?.hosts.p).not.toHaveProperty("text");
   });
 });
