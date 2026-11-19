@@ -8,6 +8,7 @@
 // --- IMPORTS ---
 
 import { takeDesignSyncAgentRequest } from "../../state/design-sync-intent";
+import { normalizeDesignPagesSnapshot } from "@zeros/protocol/design-pages";
 import { designSyncBrief } from "./design-agent-brief";
 import { useAskDesignAgent } from "./design-agent-sync";
 import {
@@ -189,10 +190,17 @@ export function DesignWorkspaceColumn({
     !snapshot.data?.pages?.some(page => page.id === activePageId) ? undefined : presentedCatalog;
   const confirmedPageSnapshot = useDesignPageSnapshot(confirmedCatalog, confirmedActivePageId);
   const pageSnapshot = useDesignPageSnapshot(pageCatalog, activePageId);
+  const authoritativePages = useMemo(() => {
+    const data = snapshot.data;
+    if (!data) return undefined;
+    if (data.pages) return data.pages;
+    if (data.pageCatalog || data.mutationCatalog || data.preparation) return undefined;
+    return normalizeDesignPagesSnapshot(data).pages;
+  }, [snapshot.data]);
   const allowPassiveSelection = Boolean(
     !presentedHistory && snapshot.data && !bootPreview &&
     snapshot.data.directoryId === confirmedDirectoryId &&
-    confirmedActivePageId && snapshot.data.pages?.some(page => page.id === confirmedActivePageId),
+    confirmedActivePageId && authoritativePages?.some(page => page.id === confirmedActivePageId),
   );
   useEffect(() => {
     if (!surfaceActive && workspaceId) clearDesignHistoryPresentation(workspaceId);

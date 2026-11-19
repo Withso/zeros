@@ -210,6 +210,11 @@ async function seedRendererReload(
     nodeIds?: string[];
     frameSelected?: boolean;
   } = { frame: COPY_FRAME, frameSelected: true },
+  initialPages: DesignPageSummary[] = [
+    page(OTHER_PAGE_ID, [OTHER_FRAME]),
+    page(PAGE_ID, [BASE_FRAME, COPY_FRAME]),
+  ],
+  activePageId = PAGE_ID,
 ) {
   const settings = await import("../../../platform/settings");
   settings.setSetting(BOOT_STORAGE_KEY, {
@@ -219,11 +224,8 @@ async function seedRendererReload(
 
   const initialUi = await import("../state/design-workspace-ui");
   uiStoresForCleanup.push(initialUi);
-  initialUi.bindDesignWorkspacePages(WORKSPACE_ID, DIRECTORY_ID, [
-    page(OTHER_PAGE_ID, [OTHER_FRAME]),
-    page(PAGE_ID, [BASE_FRAME, COPY_FRAME]),
-  ]);
-  initialUi.useDesignWorkspaceUiStore.getState().setActivePage(WORKSPACE_ID, PAGE_ID, DIRECTORY_ID);
+  initialUi.bindDesignWorkspacePages(WORKSPACE_ID, DIRECTORY_ID, initialPages);
+  initialUi.useDesignWorkspaceUiStore.getState().setActivePage(WORKSPACE_ID, activePageId, DIRECTORY_ID);
   const owner = initialUi.captureDesignPageOwner(WORKSPACE_ID);
   initialUi.useDesignWorkspaceUiStore.getState().setSelection(WORKSPACE_ID, selection.frame, selection.nodeId ?? null, selection.nodeIds, {
     owner,
@@ -305,6 +307,83 @@ async function mountWorkspace(workspaceId = WORKSPACE_ID, beforeCanvasPassive?: 
 }
 
 describe("Design selection validation against a boot preview", () => {
+  it("keeps a legacy aggregate snapshot's synthesized main page authoritative for the real canvas", async () => {
+    const legacyBoot = workspaceSnapshot([]);
+    delete legacyBoot.pages;
+    const legacyLive = workspaceSnapshot([page("main", ["home.html"])]);
+    delete legacyLive.pages;
+    expect(legacyLive.pages).toBeUndefined();
+    const pending = deferred<DesignWorkspaceSnapshotWire>();
+    platform.readSnapshot.mockImplementation(async () => {
+      const { normalizeDesignWorkspaceSnapshotPages } = await import("../../../platform/bridge/design-bridge");
+      return normalizeDesignWorkspaceSnapshotPages(await pending.promise);
+    });
+    await seedRendererReload(legacyBoot, { frame: "home.html", frameSelected: true }, [page("main", ["home.html"])], "main");
+
+    const mounted = await mountWorkspace();
+    expect(mounted.bootSnapshot?.pages).toEqual([{ id: "main", title: "Design", folder: "", frameFiles: [] }]);
+    expect(mounted.ui.designWorkspaceView(WORKSPACE_ID)).toMatchObject({
+      activePageId: "main",
+      selectedFrame: "home.html",
+      frameSelected: true,
+      selectedTargets: [{ frame: "home.html" }],
+    });
+
+    await act(async () => {
+      pending.resolve(legacyLive);
+      await pending.promise;
+      await flushMicrotasks();
+    });
+    mounted.unsubscribe();
+    expect(platform.canvasProps?.allowPassiveSelection).toBe(true);
+    expect(platform.canvasProps?.snapshot?.pages).toEqual([{ id: "main", title: "Design", folder: "", frameFiles: ["home.html"] }]);
+    expect(mounted.ui.designWorkspaceView(WORKSPACE_ID)).toMatchObject({
+      activePageId: "main",
+      selectedFrame: "home.html",
+      frameSelected: true,
+      selectedTargets: [{ frame: "home.html" }],
+    });
+  });
+
+  it("lets the real canvas validate an authoritative legacy mutation snapshot without pages", async () => {
+    const oldFrame = "home-old.html";
+    const boot = workspaceSnapshot([page("main", [oldFrame])]);
+    const authoritative = workspaceSnapshot([page("main", ["home.html"])]);
+    delete authoritative.pages;
+    const pending = deferred<DesignWorkspaceSnapshotWire>();
+    platform.readSnapshot.mockImplementation(() => pending.promise);
+    await seedRendererReload(boot, { frame: oldFrame, frameSelected: true }, [page("main", [oldFrame])], "main");
+
+    const mounted = await mountWorkspace();
+    let published: DesignWorkspaceSnapshotWire | undefined;
+    await act(async () => {
+      published = mounted.cache.primeDesignWorkspaceSnapshot(WORKSPACE_ID, authoritative);
+      await flushMicrotasks();
+    });
+    expect(published?.pages).toBeUndefined();
+    expect(platform.canvasProps?.allowPassiveSelection).toBe(true);
+    expect(platform.canvasProps?.snapshot?.pages).toEqual([
+      { id: "main", title: "Design", folder: "", frameFiles: ["home.html"] },
+    ]);
+
+    await act(async () => {
+      await flushMicrotasks();
+    });
+    expect(mounted.ui.designWorkspaceView(WORKSPACE_ID)).toMatchObject({
+      activePageId: "main",
+      selectedFrame: "home.html",
+      frameSelected: false,
+      selectedTargets: [],
+    });
+
+    await act(async () => {
+      pending.resolve(authoritative);
+      await pending.promise;
+      await flushMicrotasks();
+    });
+    mounted.unsubscribe();
+  });
+
   it("does not prune a newer selected copy before the deferred live catalog resolves", async () => {
     const boot = workspaceSnapshot([
       page(OTHER_PAGE_ID, [OTHER_FRAME]),
