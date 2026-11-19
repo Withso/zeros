@@ -32,6 +32,8 @@ const CONFIG_REFRESH_MS = 12 * 60 * 60_000;
 const MAX_QUEUED_FRAMES = 64;
 const MAX_QUEUED_OUTPUT_FRAMES = 1024;
 const MAX_QUEUED_OUTPUT_BYTES = 4 * 1024 * 1024;
+const MAX_COALESCED_WRITE_BYTES = 64 * 1024;
+const INVALID_FRAME = Symbol("invalid_frame");
 type ConfigFrame = Extract<CloudV2ControlFrame, { t: "config" }>;
 type ActivityReply = Omit<Extract<CloudV2ControlFrame, { t: "activity-reply" }>, "t" | "id">;
 
@@ -93,6 +95,11 @@ type Room = {
 };
 function reject(socket: Duplex): void {
   socket.end("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 0\r\n\r\n", () => socket.destroy());
+}
+function terminalWrite(frame: unknown): { sessionId: string; data: string } | null {
+  const write = frame as { type?: unknown; sessionId?: unknown; data?: unknown } | null;
+  return write?.type === "PTY_WRITE" && typeof write.sessionId === "string" && typeof write.data === "string"
+    ? write as { sessionId: string; data: string } : null;
 }
 function parse(data: RawData): unknown {
   return JSON.parse(Buffer.isBuffer(data) ? data.toString("utf8") : Buffer.concat(data as Buffer[]).toString("utf8"));
@@ -764,6 +771,7 @@ export class CloudV2Relay {
     if (grant?.execution) room.acting = true;
     const clientId = randomUUID(), openedAt = Date.now(); this.watch(ws);
     let inboundFrames = 0, inboundBytes = 0;
+    let typing: { sessionId: string; frame: { data: string }; bytes: number } | undefined;
     room.admitting.set(clientId, ws);
     let inbound = this.authorized(room, sessionId, true).then(async allowed => {
       if (allowed !== "allowed" || ws.readyState !== WebSocket.OPEN) {
@@ -808,10 +816,23 @@ export class CloudV2Relay {
       if (binary) { ws.close(4003, "invalid_frame"); return; }
       if (ws.readyState !== WebSocket.OPEN) return;
       const bytes = Array.isArray(data) ? data.reduce((sum, chunk) => sum + chunk.byteLength, 0) : data.byteLength;
+      let frame: unknown = INVALID_FRAME;
+      try { frame = parse(data); } catch { /* Refused in order by fromApp. */ }
+      const write = terminalWrite(frame);
+      // Each admitted write is a database transaction. Keystrokes typed while
+      // one is in flight join the queued write for that terminal, so a burst
+      // costs one admission instead of filling the frame bound.
+      if (write && typing?.sessionId === write.sessionId && typing.bytes + bytes <= MAX_COALESCED_WRITE_BYTES && inboundBytes + bytes <= MAX_QUEUED_OUTPUT_BYTES) {
+        typing.frame.data += write.data; typing.bytes += bytes; inboundBytes += bytes; return;
+      }
       if (inboundFrames >= MAX_QUEUED_FRAMES || inboundBytes + bytes > MAX_QUEUED_OUTPUT_BYTES) { ws.close(1013, "relay_backpressure"); return; }
       inboundFrames++; inboundBytes += bytes;
-      inbound = inbound.then(() => ws.readyState === WebSocket.OPEN ? this.fromApp(room, clientId, ws, data) : undefined)
-        .catch(() => ws.close(1011, "relay_unavailable")).finally(() => { inboundFrames--; inboundBytes -= bytes; });
+      const queued = write ? { sessionId: write.sessionId, frame: write, bytes } : undefined;
+      typing = queued;
+      inbound = inbound.then(() => {
+        if (typing === queued) typing = undefined;
+        return ws.readyState === WebSocket.OPEN ? this.fromApp(room, clientId, ws, frame) : undefined;
+      }).catch(() => ws.close(1011, "relay_unavailable")).finally(() => { inboundFrames--; inboundBytes -= queued?.bytes ?? bytes; });
     });
     ws.on("close", (code, reason) => {
       // Why app bridges end (load and probe runs lose them mid-turn): closed reasons only, never free text.
@@ -916,9 +937,8 @@ export class CloudV2Relay {
       ws.close(4009, "workspace_not_running");
     }
   }
-  private async fromApp(room: Room, clientId: string, ws: WebSocket, data: RawData): Promise<void> {
-    let frame: unknown;
-    try { frame = parse(data); } catch { ws.close(4003, "invalid_frame"); return; }
+  private async fromApp(room: Room, clientId: string, ws: WebSocket, frame: unknown): Promise<void> {
+    if (frame === INVALID_FRAME) { ws.close(4003, "invalid_frame"); return; }
     if ((frame as { type?: unknown } | null)?.type === "CLOUD_CONNECTION_RENEW") {
       await this.rolloverClient(room, clientId, frame); return;
     }
