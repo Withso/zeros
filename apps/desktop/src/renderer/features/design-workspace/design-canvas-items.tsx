@@ -34,6 +34,7 @@ import { COMMAND_EMPTY_CLS } from "../../shared/ui/primitives/command";
 import { loadWorkspaceFiles, peekWorkspaceFiles } from "../../shell/workspace-files-cache";
 import { searchWorkspaceFiles } from "../../shell/workbench/quick-open";
 import { observeDesignCanvasPaint } from "./design-canvas-camera";
+import { designResizeCursor } from "./design-canvas-cursors";
 import { DesignFrameSpatialIndex } from "./design-frame-spatial-index";
 import { DESIGN_FRAME_OVERSCAN_PIXELS } from "./design-frame-residency";
 import { errorMessage } from "./design-workspace-error";
@@ -472,13 +473,16 @@ const DesignCanvasItemView = React.memo(function DesignCanvasItemView({
             data-design-canvas-item-handle="width"
             aria-hidden="true"
             className="zd-canvas-item-handle zd-canvas-item-handle-width"
+            style={{ cursor: designResizeCursor(0) }}
             onPointerDown={(event) => onGesture(event, item, "width")}
           />
           {item.kind === "note" ? (
             <>
               <span data-design-canvas-item-handle="height" aria-hidden="true" className="zd-canvas-item-handle zd-canvas-item-handle-height"
+                style={{ cursor: designResizeCursor(90) }}
                 onPointerDown={(event) => onGesture(event, item, "height")} />
               <span data-design-canvas-item-handle="corner" aria-hidden="true" className="zd-canvas-item-handle zd-canvas-item-handle-corner"
+                style={{ cursor: designResizeCursor(45) }}
                 onPointerDown={(event) => onGesture(event, item, "corner")} />
             </>
           ) : null}

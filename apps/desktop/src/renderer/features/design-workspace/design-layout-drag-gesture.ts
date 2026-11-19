@@ -22,6 +22,7 @@ import { createDesignDragPresentation } from "./design-drag-presentation";
 import type { DesignOperation } from "@zeros/design-core";
 import { designBackgroundWork } from "./state/design-background-work";
 import { beginDesignPointerGesture } from "./design-pointer-gesture";
+import { DESIGN_ARROW_CURSOR } from "./design-canvas-cursors";
 import {
   DESIGN_MOVE_ACTIVATION_PIXELS,
   designSettledRelocation,
@@ -718,7 +719,7 @@ export function startDesignLayoutDrag(input: {
   const cancelPointerGesture = beginDesignPointerGesture({
     target: owner,
     pointerId: event.pointerId,
-    cursor: "grabbing",
+    cursor: DESIGN_ARROW_CURSOR,
     onMove: move,
     onFinish: finish,
     onCancel: cancel,

@@ -1,3 +1,4 @@
+import { designResizeCursor } from "./design-canvas-cursors";
 import { clampDesignZoom } from "./state/design-workspace-ui";
 import { DESIGN_PREVIEW_LEVELS } from "./state/design-frame-previews";
 
@@ -1267,15 +1268,13 @@ export function designResizeHandleLayout(screen: {
 export function designResizeHandleCursor(
   handle: DesignResizeHandle,
   box: Pick<DesignSelectionBox, "affine" | "rotation">,
-): "ew-resize" | "ns-resize" | "nwse-resize" | "nesw-resize" {
+): string {
   const local = {
     x: handle.includes("e") ? 1 : handle.includes("w") ? -1 : 0,
     y: handle.includes("s") ? 1 : handle.includes("n") ? -1 : 0,
   };
   const screen = applyLinear(designSelectionLinear(box), local);
-  const angle = (((Math.atan2(screen.y, screen.x) * 180) / Math.PI) % 180 + 180) % 180;
-  const sector = Math.round(angle / 45) % 4;
-  return sector === 0 ? "ew-resize" : sector === 1 ? "nwse-resize" : sector === 2 ? "ns-resize" : "nesw-resize";
+  return designResizeCursor((Math.atan2(screen.y, screen.x) * 180) / Math.PI);
 }
 
 /** The rotation cursor's angle at one corner: the corner's screen direction
@@ -1693,40 +1692,6 @@ export const DESIGN_ROTATION_CORNERS = [
 
 export type DesignRotationCorner =
   (typeof DESIGN_ROTATION_CORNERS)[number]["corner"];
-
-/** Quantizing the baked angle keeps the browser reusing a small set of decoded
- * cursor images while a rotation drag streams new angles. */
-const DESIGN_ROTATION_CURSOR_STEP = 15;
-
-/** A rotation cursor pointing the way the pointer will turn: two opposing
- * curved arrows around the point being turned. CSS has no rotate cursor and
- * cannot transform a cursor image, so the angle is baked into an inline SVG.
- * Its colors are literal percent-encoded values — a cursor image resolves no
- * CSS variables, and `#` must be encoded inside a data URL. */
-export function designRotationCursor(degrees: number): string {
-  const normalized = Number.isFinite(degrees) ? degrees : 0;
-  const angle =
-    Math.round(normalized / DESIGN_ROTATION_CURSOR_STEP) *
-    DESIGN_ROTATION_CURSOR_STEP;
-  // Two 120° arcs of one circle, each ending in a tangential arrowhead.
-  const upper = "M6.37 8.75A6.5 6.5 0 0 1 17.63 8.75";
-  const lower = "M17.63 15.25A6.5 6.5 0 0 1 6.37 15.25";
-  const upperHead = "M19.93 12.73 15.64 9.9 19.62 7.6Z";
-  const lowerHead = "M4.07 11.27 8.36 14.1 4.38 16.4Z";
-  const svg =
-    "<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'>" +
-    `<g transform='rotate(${angle} 12 12)' stroke-linecap='round' stroke-linejoin='round'>` +
-    `<path d='${upper}' fill='none' stroke='%23fff' stroke-width='4.6'/>` +
-    `<path d='${lower}' fill='none' stroke='%23fff' stroke-width='4.6'/>` +
-    `<path d='${upperHead}' fill='%23fff' stroke='%23fff' stroke-width='3'/>` +
-    `<path d='${lowerHead}' fill='%23fff' stroke='%23fff' stroke-width='3'/>` +
-    `<path d='${upper}' fill='none' stroke='%23000' stroke-width='1.8'/>` +
-    `<path d='${lower}' fill='none' stroke='%23000' stroke-width='1.8'/>` +
-    `<path d='${upperHead}' fill='%23000'/>` +
-    `<path d='${lowerHead}' fill='%23000'/>` +
-    "</g></svg>";
-  return `url("data:image/svg+xml,${svg}") 12 12, crosshair`;
-}
 
 /** Convert two screen-space pointer rays into a stable signed rotation. The
  * seam normalization prevents a drag across -180°/180° from jumping a full

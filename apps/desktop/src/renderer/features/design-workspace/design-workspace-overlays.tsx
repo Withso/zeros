@@ -21,6 +21,7 @@ import {
   type DesignFrameGeometryWire,
 } from "../../platform/git";
 import { cn } from "../../shared/ui/cn";
+import { designResizeCursor, designRotationCursor } from "./design-canvas-cursors";
 import {
   DESIGN_ROTATION_CORNERS,
   designMeasureSpacing,
@@ -29,7 +30,6 @@ import {
   designResizeHandleCursor,
   designResizeHandleLayout,
   designRotationCornerCursorAngle,
-  designRotationCursor,
   designSelectionBox,
   designSelectionLabelPlacement,
   designSelectionOverlayFrame,
@@ -569,14 +569,14 @@ export const DESIGN_RESIZE_HANDLES: ReadonlyArray<{
   y: "top" | "center" | "bottom";
   cursor: string;
 }> = [
-  { handle: "nw", x: "left", y: "top", cursor: "nwse-resize" },
-  { handle: "n", x: "center", y: "top", cursor: "ns-resize" },
-  { handle: "ne", x: "right", y: "top", cursor: "nesw-resize" },
-  { handle: "e", x: "right", y: "center", cursor: "ew-resize" },
-  { handle: "se", x: "right", y: "bottom", cursor: "nwse-resize" },
-  { handle: "s", x: "center", y: "bottom", cursor: "ns-resize" },
-  { handle: "sw", x: "left", y: "bottom", cursor: "nesw-resize" },
-  { handle: "w", x: "left", y: "center", cursor: "ew-resize" },
+  { handle: "nw", x: "left", y: "top", cursor: designResizeCursor(45) },
+  { handle: "n", x: "center", y: "top", cursor: designResizeCursor(90) },
+  { handle: "ne", x: "right", y: "top", cursor: designResizeCursor(135) },
+  { handle: "e", x: "right", y: "center", cursor: designResizeCursor(0) },
+  { handle: "se", x: "right", y: "bottom", cursor: designResizeCursor(45) },
+  { handle: "s", x: "center", y: "bottom", cursor: designResizeCursor(90) },
+  { handle: "sw", x: "left", y: "bottom", cursor: designResizeCursor(135) },
+  { handle: "w", x: "left", y: "center", cursor: designResizeCursor(0) },
 ];
 const DESIGN_CORNER_RESIZE_HANDLES = DESIGN_RESIZE_HANDLES.filter(
   ({ x, y }) => x !== "center" && y !== "center",
@@ -794,7 +794,6 @@ export function DesignOriginHandle({
           width: hit,
           height: hit,
           transform: `translate(-50%, -50%) ${designOverlayCounterTransform(overlay)}`.trim(),
-          cursor: "move",
         }}
         aria-label={`Move the rotation origin of ${label}`}
         title="Drag to move the rotation origin. Double-click to center it."

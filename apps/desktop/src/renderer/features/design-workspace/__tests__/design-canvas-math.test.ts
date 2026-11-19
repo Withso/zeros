@@ -56,7 +56,6 @@ import {
   designResizeAnchor,
   designResizeLayoutOffset,
   designRotatedResizeOrigin,
-  designRotationCursor,
   designSelectionBox,
   designSelectionBoxBounds,
   designSelectionBoxCorners,
@@ -1311,16 +1310,7 @@ describe("design rotated selection geometry", () => {
     });
   });
 
-  it("bakes a quantized angle into the rotation cursor", () => {
-    const cursor = designRotationCursor(46);
-    expect(cursor.startsWith('url("data:image/svg+xml,<svg')).toBe(true);
-    expect(cursor).toContain("rotate(45 12 12)");
-    expect(cursor.endsWith('") 12 12, crosshair')).toBe(true);
-    // A cursor image cannot resolve CSS variables, and a data URL cannot carry
-    // a raw "#", so the colors stay percent-encoded literals.
-    expect(cursor).toContain("stroke='%23fff'");
-    expect(designRotationCursor(-7)).toContain("rotate(0 12 12)");
-    expect(designRotationCursor(Number.NaN)).toContain("rotate(0 12 12)");
+  it("lists the rotation corners clockwise from the top left", () => {
     expect(DESIGN_ROTATION_CORNERS.map((corner) => corner.corner)).toEqual([
       "nw",
       "ne",

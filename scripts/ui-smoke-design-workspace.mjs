@@ -2123,7 +2123,7 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
                 getComputedStyle(highlight).getPropertyValue("opacity") === "0",
             )) &&
           (await inlinePaddingLeft.evaluate(
-            (handle) => getComputedStyle(handle).cursor === "ew-resize",
+            (handle) => getComputedStyle(handle).cursor.includes("zd-cursor-resize-0'"),
           )),
         "design-inline-padding-hover",
       ),
@@ -2717,8 +2717,8 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
           const handle = edge.getAttribute("data-design-resize-edge");
           const cursor = getComputedStyle(edge).cursor;
           return handle === "n" || handle === "s"
-            ? cursor === "ns-resize"
-            : (handle === "e" || handle === "w") && cursor === "ew-resize";
+            ? cursor.includes("zd-cursor-resize-90'")
+            : (handle === "e" || handle === "w") && cursor.includes("zd-cursor-resize-0'");
         }),
       )),
   );

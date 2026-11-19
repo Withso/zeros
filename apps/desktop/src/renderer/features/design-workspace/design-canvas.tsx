@@ -96,7 +96,10 @@ import {
   designSizingMode,
   designSizingStyles,
 } from "./design-auto-layout-values";
+import { DESIGN_ARROW_CURSOR, designResizeCursor, designRotationCursor } from "./design-canvas-cursors";
 import {
+  DESIGN_ROTATION_CORNERS,
+  type DesignRotationCorner,
   clampDesignRectPosition,
   clampDesignResizeRect,
   designAuthoredResizeAxis,
@@ -123,7 +126,7 @@ import {
   designGestureRectUnchanged,
   designSafeViewportRect,
   designRotatedResizeOrigin,
-  designRotationCursor,
+  designRotationCornerCursorAngle,
   designSelectionBox,
   designSelectionBoxBounds,
   designSelectionClickIntent,
@@ -3153,7 +3156,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         );
         if (!moved && Math.hypot(delta.x, delta.y) < 3 / zoom) return;
         moved = true;
-        document.body.style.cursor = "grabbing";
+        document.body.style.cursor = DESIGN_ARROW_CURSOR;
         const moving = { ...box, x: box.x + delta.x, y: box.y + delta.y };
         const snapped =
           pointerEvent.metaKey || pointerEvent.ctrlKey
@@ -3219,7 +3222,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
       gestureCancelRef.current = beginDesignPointerGesture({
         target: event.currentTarget,
         pointerId: event.pointerId,
-        cursor: "default",
+        cursor: DESIGN_ARROW_CURSOR,
         onMove: move,
         onFinish: finish,
         onCancel: cancel,
@@ -3500,7 +3503,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         const dy = delta.y;
         if (!moved && Math.hypot(dx, dy) < 3 / zoom) return;
         moved = true;
-        if (mode === "move") document.body.style.cursor = "grabbing";
+        if (mode === "move") document.body.style.cursor = DESIGN_ARROW_CURSOR;
         latest =
           mode === "move"
             ? (() => {
@@ -3806,9 +3809,9 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         pointerId: event.pointerId,
         cursor:
           mode === "move"
-            ? "default"
+            ? DESIGN_ARROW_CURSOR
             : (DESIGN_RESIZE_HANDLES.find((item) => item.handle === mode)
-                ?.cursor ?? "nwse-resize"),
+                ?.cursor ?? designResizeCursor(45)),
         onMove: move,
         onFinish: finish,
         onCancel: cancel,
@@ -3841,6 +3844,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
       event: React.PointerEvent<HTMLButtonElement>,
       frame: DesignCanvasFrameWire,
       details: DesignRuntimeNodeDetails,
+      corner: DesignRotationCorner,
     ) => {
       if (
         !workspaceId ||
@@ -3906,7 +3910,13 @@ export const DesignCanvas = React.memo(function DesignCanvas({
       );
       let latestTransform = formatDesignTransform(base);
       let latestRotation = overlayFrame.rotation;
-      let latestCursor = designRotationCursor(overlayFrame.rotation - 45);
+      // The glyph keeps wrapping the pressed corner while the drag turns it.
+      const cornerAngle =
+        designRotationCornerCursorAngle(
+          DESIGN_ROTATION_CORNERS.find((item) => item.corner === corner)!,
+          overlayFrame,
+        ) - overlayFrame.rotation;
+      let latestCursor = designRotationCursor(overlayFrame.rotation + cornerAngle);
       let moved = false;
       const previewInput = {
         workspaceId,
@@ -3978,7 +3988,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         if (!measuring) paintPredicted(latestRotation);
         // The cursor keeps pointing the way the drag turns, but each distinct
         // value decodes an SVG image; only assign one the pointer earned.
-        const cursor = designRotationCursor(latestRotation - 45);
+        const cursor = designRotationCursor(latestRotation + cornerAngle);
         if (cursor !== latestCursor) {
           latestCursor = cursor;
           document.body.style.cursor = cursor;
@@ -4226,7 +4236,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
       gestureCancelRef.current = cancel;
       if (anchors) anchors.style.display = "block";
       overlay.setAttribute("data-design-origin-dragging", "");
-      document.body.style.cursor = "move";
+      document.body.style.cursor = DESIGN_ARROW_CURSOR;
       document.body.style.userSelect = "none";
       window.addEventListener("pointermove", move);
       window.addEventListener("pointerup", finish);
@@ -5077,7 +5087,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
       gestureCancelRef.current = beginDesignPointerGesture({
         target: event.currentTarget,
         pointerId: event.pointerId,
-        cursor: "move",
+        cursor: DESIGN_ARROW_CURSOR,
         onMove: move,
         onFinish: finish,
         onCancel: cancel,
@@ -5424,7 +5434,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         pointerId: event.pointerId,
         cursor:
           DESIGN_RESIZE_HANDLES.find((item) => item.handle === handle)?.cursor ??
-          "nwse-resize",
+          designResizeCursor(45),
         onMove: move,
         onFinish: finish,
         onCancel: cancel,
@@ -6047,9 +6057,9 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         pointerId: event.pointerId,
         cursor:
           gestureMode === "move"
-            ? "move"
+            ? DESIGN_ARROW_CURSOR
             : (DESIGN_RESIZE_HANDLES.find((item) => item.handle === gestureMode)
-                ?.cursor ?? "nwse-resize"),
+                ?.cursor ?? designResizeCursor(45)),
         onMove: move,
         onFinish: finish,
         onCancel: cancel,
@@ -8032,13 +8042,12 @@ export const DesignCanvas = React.memo(function DesignCanvas({
           "bg-bg2 relative size-full overflow-clip outline-none",
           spacePressed
             ? "cursor-grab"
-            : activeTool !== "select"
-              ? "cursor-crosshair"
-              : "cursor-default",
+            : activeTool !== "select" && "cursor-crosshair",
         )}
         style={{
           // Runtime user color is an intentional canvas boundary.
           backgroundColor: canvasBackground,
+          cursor: spacePressed || activeTool !== "select" ? undefined : DESIGN_ARROW_CURSOR,
         }}
         onPointerDown={handleViewportPointerDown}
         // Pointer movement carries the authoritative modifier state, so a
@@ -8468,7 +8477,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                             : optionsProblem !== null ? `${frame.title}: ${optionsProblem}`
                             : frameIsComponent ? `${frame.title}, component` : frame.title}
                           className={cn(
-                            "text-2xxs block max-w-full min-w-0 cursor-default overflow-hidden border-0 bg-transparent p-0 text-left leading-4 font-medium whitespace-nowrap outline-none",
+                            "text-2xxs block max-w-full min-w-0 overflow-hidden border-0 bg-transparent p-0 text-left leading-4 font-medium whitespace-nowrap outline-none",
                             (frameIsComponent || missingComponents.length > 0 || optionsProblem !== null || preparationProblem !== null) && "flex items-center gap-1",
                             frameSelectedOnly
                               ? "text-[var(--design-selection-stroke)]"
@@ -8781,9 +8790,9 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                               ? "zd-design-selection-outline zd-design-stroke pointer-events-none"
                               : "zd-design-hover-outline zd-design-stroke pointer-events-none"
                           : primarySelection
-                            ? "zd-design-selection-outline zd-design-stroke pointer-events-auto cursor-move"
+                            ? "zd-design-selection-outline zd-design-stroke pointer-events-auto"
                             : additiveSelection
-                              ? "zd-design-selection-outline zd-design-stroke pointer-events-auto cursor-move"
+                              ? "zd-design-selection-outline zd-design-stroke pointer-events-auto"
                               : "zd-design-hover-outline zd-design-stroke pointer-events-none",
                         additiveSelection &&
                           selectionOverlaySuppressed &&
@@ -8943,8 +8952,8 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                                       width: overlayFrame.width * view.zoom,
                                       height: overlayFrame.height * view.zoom,
                                     }).rotationInset}
-                                    onPointerDown={(event) =>
-                                      startNodeRotation(event, frame, details)
+                                    onPointerDown={(event, corner) =>
+                                      startNodeRotation(event, frame, details, corner)
                                     }
                                   />
                                   <DesignOriginAnchors />

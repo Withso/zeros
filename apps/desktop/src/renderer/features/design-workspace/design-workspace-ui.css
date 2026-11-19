@@ -1364,6 +1364,12 @@
   background-color: transparent;
 }
 
+/* Canvas buttons (frame names, frame chrome) keep the canvas cursor instead
+   of the form-control default; handles set their own inline. */
+[data-design-canvas-viewport] button {
+  cursor: inherit;
+}
+
 [data-design-active-tool="frame"]
   :where(
     [data-design-element-overlay],
@@ -2045,7 +2051,6 @@
    screen pixel by dividing by the zoom. */
 .zd-canvas-item {
   box-sizing: border-box;
-  cursor: default;
   user-select: none;
 }
 .zd-canvas-item[data-selected] {
@@ -2152,19 +2157,16 @@
   left: calc(100% + 3px * var(--design-canvas-inverse-zoom));
   width: 4px;
   height: 16px;
-  cursor: ew-resize;
 }
 .zd-canvas-item-handle-height {
   left: 50%;
   top: calc(100% + 3px * var(--design-canvas-inverse-zoom));
   width: 16px;
   height: 4px;
-  cursor: ns-resize;
 }
 .zd-canvas-item-handle-corner {
   left: calc(100% + 2px * var(--design-canvas-inverse-zoom));
   top: calc(100% + 2px * var(--design-canvas-inverse-zoom));
   width: 8px;
   height: 8px;
-  cursor: nwse-resize;
 }

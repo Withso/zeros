@@ -1,4 +1,5 @@
 import { expect } from "@playwright/test";
+import { runDesignCanvasCursorSmoke } from "./ui-smoke-design-canvas-cursors.mjs";
 import { designFrameElementBox, openLayersDrawer } from "./ui-smoke-design-helpers.mjs";
 
 export async function runDesignDoubleClickSelectionSmoke({ page, check }) {
@@ -319,6 +320,7 @@ export async function runDesignSelectionSmoke({ page, waitFor, check }) {
   await runDesignDoubleClickSelectionSmoke({ page, check });
   await runDesignDescentHoverSmoke({ page, check });
   await runDesignLayerStructureSmoke({ page, check });
+  await runDesignCanvasCursorSmoke({ page, check });
   const origin = new URL(page.url()).origin;
   const open = async (query) => {
     await page.goto(
@@ -372,18 +374,19 @@ export async function runDesignSelectionSmoke({ page, waitFor, check }) {
   await clickBody();
   const point = await center();
   check(
-    "selecting the outer frame uses the ordinary cursor without a movable root overlay",
+    "selecting the outer frame uses the canvas arrow without a movable root overlay",
     (await frameSelected()) &&
       (await frame.locator("[data-design-selected-element]").count()) === 0 &&
       (await page.evaluate(
         ({ x, y }) =>
-          getComputedStyle(document.elementFromPoint(x, y)).cursor ===
-          "default",
+          getComputedStyle(document.elementFromPoint(x, y)).cursor.includes(
+            "zd-cursor-arrow",
+          ),
         point,
       )) &&
       (await frame
         .locator("[data-design-frame-label]")
-        .evaluate((el) => getComputedStyle(el).cursor === "default")),
+        .evaluate((el) => getComputedStyle(el).cursor.includes("zd-cursor-arrow"))),
   );
   await page.mouse.dblclick(point.x, point.y);
   await page.keyboard.down("ControlOrMeta");

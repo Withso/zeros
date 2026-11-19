@@ -2190,7 +2190,14 @@ a frame's own document (`canvas-items-exports.test.ts`).
   unmarked authored roots remain real children, even when they fill the viewport.
   Frame bodies and labels
   use the ordinary selection cursor; label dragging and resize handles retain
-  their gestures. Clicking a restored root-layer overlay also selects its frame.
+  their gestures. Canvas cursors are Figma's (`design-canvas-cursors.ts`): one
+  dark arrow over the canvas, layers, selections and canvas buttons, also while
+  moving; a double-headed resize arrow along each handle's screen direction;
+  and at each corner a rotation arrow that wraps that corner and turns with
+  the drag. Cursor images resolve no CSS variables and cannot be transformed,
+  so each glyph is an SVG data URL with literal colors and its angle baked in
+  at 15° steps. Space-pan keeps the grab hand, creation tools the crosshair,
+  and text editing the I-beam. Clicking a restored root-layer overlay also selects its frame.
   Modifier-clicks pass through padding and gap controls to deep-select beneath
   them; spacing drags retain their editing behavior. Outside-canvas clicks
   deselect. Fallback descent starts from the frame owner when the deepest hit
