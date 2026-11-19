@@ -290,6 +290,21 @@ describe("registered linked copies through production expansion and runtime", ()
     expect(await readFile(file(main), "utf8")).toBe(original);
   });
 
+  it("d: a var()-based main shorthand stays the reset value of a copy longhand", async () => {
+    const main = "--space: 12px; padding: var(--space)";
+    await setup(mainSource(main, main), 'style="padding-left: 40px" zd-style-label="padding-left: 40px"');
+    const { page } = await render();
+    expect.soft(await computed(page, "padding-left")).toEqual(["40px", "40px"]);
+    const report = await changes(page);
+    for (const oid of ["host", PART]) {
+      expect.soft(report.layers.find((layer) => layer.oid === oid)?.changes ?? []).toContainEqual(expect.objectContaining({
+        property: "padding-left", value: "40px", replaced: expect.objectContaining({ value: "padding: var(--space)" }),
+      }));
+      const details = await request<{ authoredStyles: Record<string, { replaced?: { value?: string } }> }>(page, "getNodeDetails", { nodeId: oid });
+      expect.soft(details.authoredStyles["padding-left"]?.replaced?.value).toBe("padding: var(--space)");
+    }
+  });
+
   it("e: warm-copy invalidation and a variant switch consume edited source and added/renamed variants", async () => {
     const source = doc('<main class="root" data-oid="root"><span class="label" data-oid="label">{{ size }}</span></main>',
       declaration + '<style>.root { padding-left: var(--zd-size); } .label { padding-left: 2px; }</style>');

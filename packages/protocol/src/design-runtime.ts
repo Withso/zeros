@@ -2784,12 +2784,15 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     // once that one is gone: what the layer's own declaration replaced.
     var inlineStyle = without && without.inline ? without.sourceStyle : element.style;
     var inline = inlineStyle ? declarationValue(inlineStyle, property, null) : null;
-    if (!inline && inlineStyle && without && without.inline) {
+    if ((!inline || inline.value === null) && inlineStyle && without && without.inline) {
       var longhands = longhandsOf(property);
-      var baseline = declarationProperties(inlineStyle).filter(function (name) { return longhands.indexOf(name) >= 0; });
+      var baseline = declarationProperties(inlineStyle).filter(function (name) {
+        return longhands.indexOf(name) >= 0 || (name !== property && longhandsOf(name).indexOf(property) >= 0);
+      });
       if (baseline.length) inline = { value: baseline.map(function (name) {
         return name + ": " + inlineStyle.getPropertyValue(name).trim() + (inlineStyle.getPropertyPriority(name) ? " !important" : "");
       }).join("; "), important: baseline.some(function (name) { return inlineStyle.getPropertyPriority(name) === "important"; }) };
+      else inline = null;
     }
     var best = inline ? { inline: true, value: inline.value, important: inline.important,
       sourceInline: !!(without && without.inline) || !ownsInlineProperty(element, property) } : null;
@@ -3118,6 +3121,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
 
   function replacedStyleOf(element, candidate, index, computed) {
     if (candidate.value.length > ${DESIGN_RUNTIME_AUTHORED_STYLE_LIMITS.value}) return null;
+    if (candidate.value === null) return null;
     var entry = candidate.match && candidate.match.entry;
     var replaced = originOfWinner(candidate);
     replaced.value = candidate.value;
@@ -3913,7 +3917,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       var target = resetTargetOf(element, property, winner, matches, oid);
       if (!target) continue;
       var other = winningDeclaration(element, property, matches, target);
-      if (!other || (!other.value && !inlineStyles)) continue;
+      if (!other || other.value === null || (!other.value && !inlineStyles)) continue;
       var replaced = originOfWinner(other);
       replaced.value = other.value.slice(0, ${DESIGN_RUNTIME_FRAME_CHANGE_LIMITS.value});
       var entry = other.match && other.match.entry;
