@@ -71,6 +71,10 @@ interface DesignComputedCssEditorProps {
   onCommitStyles: (styles: Record<string, string | null>) => Promise<void>;
 }
 
+interface StylePreviewToken {
+  cancel: DesignComputedCssEditorProps["onCancelStylePreview"];
+}
+
 const CSS_AUTOSAVE_DELAY_MS = 300;
 const MAX_CSS_DECLARATIONS = 128;
 const MAX_CSS_PATCH_PROPERTIES = 64;
@@ -348,7 +352,7 @@ export function DesignComputedCssEditor({
   const disabledRef = useRef(disabled);
   disabledRef.current = disabled;
   const mountedRef = useRef(false);
-  const ownsStylePreviewRef = useRef(false);
+  const stylePreviewTokenRef = useRef<StylePreviewToken | null>(null);
   const baselineRef = useRef<Record<string, string>>(externalDeclarations);
   const validTargetRef = useRef<Record<string, string> | null>(
     externalDeclarations,
@@ -371,10 +375,10 @@ export function DesignComputedCssEditor({
     onCommitStyles,
   };
 
-  const cancelOwnedStylePreview = useCallback(() => {
-    if (!ownsStylePreviewRef.current) return;
-    ownsStylePreviewRef.current = false;
-    void actionsRef.current.onCancelStylePreview?.().catch(() => {});
+  const cancelOwnedStylePreview = useCallback((expected = stylePreviewTokenRef.current) => {
+    if (!expected || stylePreviewTokenRef.current !== expected) return;
+    stylePreviewTokenRef.current = null;
+    void expected.cancel?.().catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -447,6 +451,7 @@ export function DesignComputedCssEditor({
 
     const committedTarget = target;
     const committedVersion = versionRef.current;
+    const committedPreviewToken = stylePreviewTokenRef.current;
     commitInFlightRef.current = true;
     rerunRef.current = false;
     setSaving(true);
@@ -463,19 +468,19 @@ export function DesignComputedCssEditor({
           currentPatch !== null &&
           Object.keys(currentPatch).length === 0;
         if (mountedRef.current) {
-          setError(null);
+          if (versionRef.current === committedVersion) setError(null);
           setDirty(!settled);
         }
         if (settled) {
-          cancelOwnedStylePreview();
+          cancelOwnedStylePreview(committedPreviewToken);
         }
       })
       .catch((commitError: unknown) => {
-        if (mountedRef.current) {
+        if (mountedRef.current && versionRef.current === committedVersion) {
           setError(errorMessage(commitError));
           setDirty(true);
         }
-        cancelOwnedStylePreview();
+        cancelOwnedStylePreview(committedPreviewToken);
       })
       .finally(() => {
         commitInFlightRef.current = false;
@@ -529,10 +534,12 @@ export function DesignComputedCssEditor({
         previewTargetRef.current = next;
         setError(null);
         setDirty(commitPatchSize > 0);
-        if (Object.keys(previewPatch).length > 0 && actionsRef.current.onPreviewStyles) {
-          ownsStylePreviewRef.current = true;
-          void actionsRef.current.onPreviewStyles(previewPatch).catch(() => {
-            cancelOwnedStylePreview();
+        const preview = actionsRef.current.onPreviewStyles;
+        if (Object.keys(previewPatch).length > 0 && preview) {
+          const token = { cancel: actionsRef.current.onCancelStylePreview };
+          stylePreviewTokenRef.current = token;
+          void preview(previewPatch).catch(() => {
+            cancelOwnedStylePreview(token);
           });
         }
         if (commitPatchSize === 0) {

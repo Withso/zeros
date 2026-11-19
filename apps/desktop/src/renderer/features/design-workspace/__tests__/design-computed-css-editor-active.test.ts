@@ -74,6 +74,15 @@ const details = {
 
 let container: HTMLDivElement;
 let root: Root;
+let rootMounted = true;
+
+function deferredVoid() {
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<void>((_resolve, rejectPromise) => {
+    reject = rejectPromise;
+  });
+  return { promise, reject };
+}
 
 type EditorOptions = {
   disabled?: boolean;
@@ -109,10 +118,11 @@ describe("retained computed CSS editor activity", () => {
     container = document.createElement("div");
     document.body.append(container);
     root = createRoot(container);
+    rootMounted = true;
   });
 
   afterEach(() => {
-    act(() => root.unmount());
+    if (rootMounted) act(() => root.unmount());
     container.remove();
     vi.useRealTimers();
   });
@@ -148,6 +158,133 @@ describe("retained computed CSS editor activity", () => {
     expect(preview).not.toHaveBeenCalled();
     expect(cancel).not.toHaveBeenCalled();
     expect(commit).not.toHaveBeenCalled();
+  });
+
+  it("keeps a newer visible preview when an older preview rejects", async () => {
+    const previewOne = deferredVoid();
+    let visiblePreview: string | null = null;
+    const preview = vi.fn((styles: Record<string, string | null>) => {
+      visiblePreview = styles.color ?? null;
+      return preview.mock.calls.length === 1 ? previewOne.promise : Promise.resolve();
+    });
+    const cancel = vi.fn(async () => { visiblePreview = null; });
+    const commit = vi.fn(async () => {});
+
+    await render(true, commit, { onPreviewStyles: preview, onCancelStylePreview: cancel });
+    act(() => editorHarness.props?.onChange("color: blue;"));
+    expect(visiblePreview).toBe("blue");
+    act(() => editorHarness.props?.onChange("color: green;"));
+    expect(visiblePreview).toBe("green");
+
+    await act(async () => {
+      previewOne.reject(new Error("stale preview"));
+      await previewOne.promise.catch(() => undefined);
+    });
+
+    expect(cancel).not.toHaveBeenCalled();
+    expect(visiblePreview).toBe("green");
+  });
+
+  it("keeps a newer preview and does not show an older commit error", async () => {
+    const commitOne = deferredVoid();
+    let visiblePreview: string | null = null;
+    const preview = vi.fn(async (styles: Record<string, string | null>) => {
+      visiblePreview = styles.color ?? null;
+    });
+    const cancel = vi.fn(async () => { visiblePreview = null; });
+    const commit = vi.fn((_styles: Record<string, string | null>) => commitOne.promise);
+
+    await render(true, commit, { onPreviewStyles: preview, onCancelStylePreview: cancel });
+    act(() => editorHarness.props?.onChange("color: blue;"));
+    await act(async () => { await vi.advanceTimersByTimeAsync(300); });
+    expect(commit).toHaveBeenCalledTimes(1);
+
+    act(() => editorHarness.props?.onChange("color: green;"));
+    expect(visiblePreview).toBe("green");
+    await act(async () => {
+      commitOne.reject(new Error("stale commit"));
+      await commitOne.promise.catch(() => undefined);
+    });
+
+    expect(cancel).not.toHaveBeenCalled();
+    expect(visiblePreview).toBe("green");
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    expect(editorHarness.props?.value).toBe("color: green;");
+  });
+
+  it("preserves a newer CSS validation error when an older commit rejects", async () => {
+    const commitOne = deferredVoid();
+    const preview = vi.fn(async () => {});
+    const cancel = vi.fn(async () => {});
+    const commit = vi.fn((_styles: Record<string, string | null>) => commitOne.promise);
+
+    await render(true, commit, { onPreviewStyles: preview, onCancelStylePreview: cancel });
+    act(() => editorHarness.props?.onChange("color: blue;"));
+    await act(async () => { await vi.advanceTimersByTimeAsync(300); });
+    expect(commit).toHaveBeenCalledTimes(1);
+
+    act(() => editorHarness.props?.onChange("invalid css"));
+    const draftError = container.querySelector('[role="alert"]')?.textContent;
+    expect(draftError).toContain("Invalid CSS declaration");
+    expect(cancel).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      commitOne.reject(new Error("stale commit"));
+      await commitOne.promise.catch(() => undefined);
+    });
+
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe(draftError);
+    expect(cancel).toHaveBeenCalledTimes(1);
+  });
+
+  it("cancels the callback captured by a preview once when hidden after a callback swap", async () => {
+    const previewOne = deferredVoid();
+    let visiblePreview: string | null = null;
+    const preview = vi.fn((styles: Record<string, string | null>) => {
+      visiblePreview = styles.color ?? null;
+      return previewOne.promise;
+    });
+    const cancelAtCreation = vi.fn(async () => { visiblePreview = null; });
+    const cancelAfterSwap = vi.fn(async () => { visiblePreview = null; });
+    const commit = vi.fn(async () => {});
+
+    await render(true, commit, { onPreviewStyles: preview, onCancelStylePreview: cancelAtCreation });
+    act(() => editorHarness.props?.onChange("color: blue;"));
+    expect(visiblePreview).toBe("blue");
+    await render(true, commit, { onPreviewStyles: preview, onCancelStylePreview: cancelAfterSwap });
+    await render(false, commit, { onPreviewStyles: preview, onCancelStylePreview: cancelAfterSwap });
+
+    expect(cancelAtCreation).toHaveBeenCalledTimes(1);
+    expect(cancelAfterSwap).not.toHaveBeenCalled();
+    expect(visiblePreview).toBeNull();
+    await act(async () => {
+      previewOne.reject(new Error("late preview rejection"));
+      await previewOne.promise.catch(() => undefined);
+    });
+    expect(cancelAtCreation).toHaveBeenCalledTimes(1);
+    expect(cancelAfterSwap).not.toHaveBeenCalled();
+  });
+
+  it("cancels the current preview once on unmount", async () => {
+    const previewOne = deferredVoid();
+    const preview = vi.fn(async () => previewOne.promise);
+    const cancel = vi.fn(async () => {});
+    const commit = vi.fn(async () => {});
+
+    await render(true, commit, { onPreviewStyles: preview, onCancelStylePreview: cancel });
+    act(() => editorHarness.props?.onChange("color: blue;"));
+    expect(preview).toHaveBeenCalledTimes(1);
+    act(() => {
+      root.unmount();
+      rootMounted = false;
+    });
+    expect(cancel).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      previewOne.reject(new Error("late preview rejection"));
+      await previewOne.promise.catch(() => undefined);
+    });
+    expect(cancel).toHaveBeenCalledTimes(1);
   });
 
   it("does not chain a delayed commit while hidden, then resumes the latest valid draft", async () => {
