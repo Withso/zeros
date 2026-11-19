@@ -8,6 +8,7 @@
 // production components.
 
 import { DESIGN_MAX_FRAMES_PER_PAGE } from "@zeros/protocol/design-pages";
+import { DESIGN_COMPONENT_IDENTITY_CAPABILITY } from "@zeros/protocol/design-catalog";
 import "../../../../../styles/zeros-tokens.css";
 import "../../../../../styles/semantic-tokens.css";
 import "../../../../../styles/globals.css";
@@ -818,6 +819,7 @@ async function main() {
         nodeCount: 12,
         modifiedAt: 1,
         sourceVersion: HOME_SOURCE_VERSION,
+        componentIdentity: null,
         ...(componentOptionsHarness ? { instances: harnessInstancesRecord(homeSource) } : {}),
       },
       {
@@ -831,6 +833,7 @@ async function main() {
         nodeCount: 18,
         modifiedAt: 2,
         sourceVersion: PRICING_SOURCE_VERSION,
+        componentIdentity: componentOptionsHarness ? { kind: "main", name: "chat-composer" } : null,
         ...(componentOptionsHarness ? { component: designComponentSummaryOf(pricingSource)! } : {}),
       },
     ],
@@ -1020,6 +1023,7 @@ async function main() {
       nodeCount: 12,
       modifiedAt: 1,
       sourceVersion: HOME_SOURCE_VERSION,
+      componentIdentity: null,
       source: homeSource,
       srcDoc: withDesignRuntime(homeSource, HOME_SOURCE_VERSION),
       tree: [],
@@ -1038,6 +1042,7 @@ async function main() {
       nodeCount: 18,
       modifiedAt: 2,
       sourceVersion: PRICING_SOURCE_VERSION,
+      componentIdentity: componentOptionsHarness ? { kind: "main", name: "chat-composer" } : null,
       source: pricingSource,
       srcDoc: withDesignRuntime(pricingSource, PRICING_SOURCE_VERSION),
       tree: [],
@@ -1445,6 +1450,7 @@ async function main() {
     onStatusChange: () => () => {},
     supportsEngineCapability: (capability: string) => capability === "design.copy-placement.v1" ||
       capability === "design.linked-component-copy.v1" ||
+      capability === DESIGN_COMPONENT_IDENTITY_CAPABILITY ||
       pagesHarness && capability === "design.canvas-items.v1" ||
       scopedMutationsHarness && capability === "design.mutation-snapshots.v1" ||
       lazyPreparationHarness && ["design.preparation.v1", "design.catalog.read.v1"].includes(capability),

@@ -2507,6 +2507,12 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         toast.error("This frame is still preparing. Try the copy again when it is ready.");
         return;
       }
+      if (capture?.identityUnknown && duplicateMode !== "independent") {
+        toast.error("Couldn't safely duplicate this frame", {
+          description: "Component identity is unavailable. Update the Local engine or choose Duplicate as independent frame.",
+        });
+        return;
+      }
       const componentCopy = capture?.componentCopy;
       const sourceVersion = capture?.sourceVersion ?? (isPreparedDesignFrame(frame) ? frame.sourceVersion : undefined);
       if (capture?.statePreview) toast.info("State-preview copies use Default.");

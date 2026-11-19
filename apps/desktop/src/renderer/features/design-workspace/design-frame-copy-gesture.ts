@@ -151,6 +151,10 @@ export function startDesignFrameCopy(input: {
     input.unprepared?.();
     return () => {};
   }
+  if (capture.identityUnknown) {
+    input.failed(new Error("Component identity is unavailable. Update the Local engine or choose Duplicate as independent frame."));
+    return () => {};
+  }
   const { componentCopy, statePreview } = capture;
   const article = event.currentTarget.closest<HTMLElement>("[data-design-frame]");
   if (!article) return () => {};

@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   gesture: null as Parameters<typeof beginDesignPointerGesture>[0] | null,
   wait: vi.fn(), duplicate: vi.fn(), transfer: vi.fn(), select: vi.fn(), resume: vi.fn(),
   runtime: null as any, runtimeState: null as any, destination: null as any, copyVariant: null as string | null, statePreview: false,
+  identity: "main" as "main" | "ordinary" | "instance" | "unknown",
   captureAvailable: true,
   presentation: { hasPixels: true, paint: vi.fn(), remove: vi.fn(), handoff: vi.fn(async () => {}), adopt: vi.fn() },
 }));
@@ -25,8 +26,12 @@ vi.mock("../state/design-workspace-ui", () => ({
   designWorkspaceView: () => ({ selectionEvent: 1 }), isCurrentDesignPageOwner: () => true,
 }));
 vi.mock("../state/design-runtime-store", () => ({ designRuntimeFrameState: () => mocks.runtimeState }));
-vi.mock("../state/design-component-variants", () => ({ captureDesignFrameComponentCopy: (_workspaceId: string, view: { sourceVersion: string }) =>
-  mocks.captureAvailable ? { frame: view, sourceVersion: view.sourceVersion, componentCopy: { variant: mocks.copyVariant }, statePreview: mocks.statePreview } : null }));
+vi.mock("../state/design-component-variants", () => ({ captureDesignFrameComponentCopy: (_workspaceId: string, view: { sourceVersion: string }) => {
+  if (!mocks.captureAvailable) return null;
+  if (mocks.identity === "unknown") return { frame: view, sourceVersion: view.sourceVersion, componentCopy: undefined, statePreview: false, identityUnknown: true };
+  if (mocks.identity !== "main") return { frame: view, sourceVersion: view.sourceVersion, statePreview: false, identityUnknown: false };
+  return { frame: view, sourceVersion: view.sourceVersion, componentCopy: { variant: mocks.copyVariant }, statePreview: mocks.statePreview, identityUnknown: false };
+} }));
 vi.mock("../state/design-selection", () => ({ selectDesignFrame: mocks.select }));
 vi.mock("../state/design-background-work", () => ({ designBackgroundWork: { pause: () => mocks.resume } }));
 
@@ -50,6 +55,7 @@ beforeEach(() => {
   mocks.destination = null;
   mocks.copyVariant = null;
   mocks.statePreview = false;
+  mocks.identity = "main";
   mocks.captureAvailable = true;
 });
 
@@ -145,5 +151,28 @@ describe("canvas frame Option copy", () => {
     expect(input.unprepared).toHaveBeenCalledOnce();
     expect(mocks.gesture).toBeNull();
     expect(mocks.duplicate).not.toHaveBeenCalled();
+  });
+
+  it("fails closed on an unknown identity before creating a gesture or copy", () => {
+    mocks.identity = "unknown";
+    const { input } = start();
+    expect(input.failed).toHaveBeenCalledOnce();
+    expect(input.failed.mock.calls[0]?.[0]?.message).toContain("Duplicate as independent frame");
+    expect(mocks.gesture).toBeNull();
+    expect(mocks.duplicate).not.toHaveBeenCalled();
+  });
+
+  it.each(["ordinary", "instance"] as const)("keeps %s identity on the independent legacy copy path", async (identity) => {
+    mocks.identity = identity;
+    mocks.duplicate.mockResolvedValue({ frame: { file: "copy.html" }, snapshot: { frames: [] } });
+    const { input } = start();
+    mocks.gesture!.onMove({ clientX: 65, clientY: 75 } as PointerEvent);
+    mocks.gesture!.onFinish();
+    await vi.waitFor(() => expect(mocks.duplicate).toHaveBeenCalledOnce());
+    expect(mocks.duplicate.mock.calls[0]?.[3]).toEqual({
+      sourceVersion: frame.sourceVersion,
+      geometry: { x: 60, y: 70, w: 100, h: 80, z: 1 },
+    });
+    expect(input.statePreviewed).not.toHaveBeenCalled();
   });
 });

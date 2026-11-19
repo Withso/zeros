@@ -72,6 +72,7 @@ describe("the variant a main component frame shows", () => {
       file: "home/main.html", frameId: "main", pageId: "page", title: "Main", kind: "frame",
       x: 0, y: 0, width: 800, height: 600, z: 0, nodeCount: 1, layerCount: 1, modifiedAt: 1,
       sourceVersion: "a".repeat(24), component: component(["compact", "wide-plan"]),
+      componentIdentity: { kind: "main", name: "main" },
     };
     const descriptor: DesignFrameView = {
       file: prepared.file, frameId: prepared.frameId, pageId: prepared.pageId, title: prepared.title, kind: prepared.kind,
@@ -88,6 +89,29 @@ describe("the variant a main component frame shows", () => {
       statePreview: false,
     });
     expect(variants.captureDesignFrameComponentCopy("ws1", { ...descriptor, file: "home/cold.html", previous: undefined })).toBeNull();
+  });
+
+  it.each([
+    [null, undefined],
+    [{ kind: "instance", nodeId: "host" }, undefined],
+  ] as const)("keeps an ordinary or instance frame independent (%j)", async (componentIdentity, componentCopy) => {
+    const variants = await load();
+    const frame = {
+      file: "home/ordinary.html", sourceVersion: "a".repeat(24),
+      component: component(["compact"]), componentIdentity,
+    } as unknown as DesignFrameView;
+    const captured = variants.captureDesignFrameComponentCopy("ws1", frame);
+    expect(captured?.componentCopy).toBe(componentCopy);
+    expect(Object.hasOwn(captured!, "componentCopy")).toBe(false);
+  });
+
+  it("marks an old or unnegotiated frame unknown instead of guessing ordinary", async () => {
+    const variants = await load();
+    const frame = { file: "home/legacy.html", sourceVersion: "a".repeat(24) } as unknown as DesignFrameView;
+    expect(variants.captureDesignFrameComponentCopy("ws1", frame)).toMatchObject({
+      identityUnknown: true,
+      componentCopy: undefined,
+    });
   });
 
   it("refuses names that are not a variant's and keeps its store bounded", async () => {

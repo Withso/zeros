@@ -251,7 +251,6 @@ describe("a frame registered as a component", () => {
       sourceVersion,
       nodeId: "shell",
       duplicateNodeId: "copy-shell",
-      componentCopy: { variant: null },
       destinationFrame: destination.file,
       destinationSourceVersion,
       parentId: "board",

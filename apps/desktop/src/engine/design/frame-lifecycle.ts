@@ -1075,7 +1075,7 @@ export async function transferDesignNode(
       ? [...designComponentRegistry(canvas).files].find(([, source]) => source === from.file)?.[0]
       : undefined;
     const linkedMainCopy = input.componentCopy !== undefined && componentName !== undefined;
-    const semanticRootCopy = input.componentCopy !== undefined &&
+    const semanticRootCopy = input.duplicateNodeId !== undefined &&
       !linkedMainCopy &&
       runtimeRoot?.oid === input.nodeId;
     const wholeFrame = input.nodeId === DESIGN_RUNTIME_DOCUMENT_BODY_ID || linkedMainCopy;

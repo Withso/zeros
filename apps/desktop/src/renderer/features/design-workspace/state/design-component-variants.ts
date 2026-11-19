@@ -131,12 +131,30 @@ export function designComponentCopyVariant(workspaceId: string, frame: { file: s
 export function captureDesignFrameComponentCopy(workspaceId: string, frameView: DesignFrameView | null | undefined) {
   const frame = designPresentedFrame(frameView);
   if (!frame) return null;
+  if (frame.componentIdentity === undefined) {
+    return {
+      frame,
+      sourceVersion: frame.sourceVersion,
+      componentCopy: undefined,
+      statePreview: false,
+      identityUnknown: true as const,
+    };
+  }
+  if (frame.componentIdentity === null || frame.componentIdentity.kind !== "main") {
+    return {
+      frame,
+      sourceVersion: frame.sourceVersion,
+      statePreview: false,
+      identityUnknown: false as const,
+    };
+  }
   const captured = designComponentCopyCapture(workspaceId, frame);
   return {
     frame,
     sourceVersion: frame.sourceVersion,
     componentCopy: { variant: captured.variant },
     statePreview: captured.statePreview,
+    identityUnknown: false as const,
   };
 }
 
