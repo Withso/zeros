@@ -56,19 +56,22 @@ function parse(args) {
   return value;
 }
 
-async function declaredAnchors(cwd, anchors, files) {
-  const result = [];
-  for (const anchor of new Set(anchors)) {
+function parseAnchors(anchors) {
+  return [...new Set(anchors)].map(anchor => {
     const [, file, rawLine] = /^([^:]+):([1-9][0-9]{0,8})$/.exec(anchor) ?? [];
-    if (!repositoryPath(file) || !files.includes(file)) throw new Error("zstack_anchor_invalid");
-    const source = await sourceBytes(cwd, file), line = Number(rawLine);
+    if (!repositoryPath(file)) throw new Error("zstack_anchor_invalid");
+    return { path: file, line: Number(rawLine) };
+  });
+}
+
+function validateAnchors(anchors, sources) {
+  for (const { path: file, line } of anchors) {
+    const source = sources.get(file);
     if (!source || source.mode === 0o120000 || source.bytes.includes(0)) throw new Error("zstack_anchor_invalid");
     let lines = source.bytes.length && source.bytes.at(-1) !== 10 ? 1 : 0;
     for (const byte of source.bytes) if (byte === 10) lines++;
     if (line > lines) throw new Error("zstack_anchor_invalid");
-    result.push({ path: file, line });
   }
-  return result;
 }
 
 export async function runCli(args, { cwd = process.cwd(), write = value => process.stdout.write(`${JSON.stringify(value)}\n`),
@@ -86,9 +89,12 @@ export async function runCli(args, { cwd = process.cwd(), write = value => proce
       host: host.host, platform: host.platform };
     let result;
     if (["plan", "run"].includes(options.action)) {
-      const source = await capture(cwd), plan = planVerification({ policy: loadPolicy(path.join(cwd, "scripts/ci/scope-rules.json")),
-        ...source, tests: options.tests });
-      metadata.sourceAnchors = await declaredAnchors(cwd, options.anchors, source.files);
+      const anchors = parseAnchors(options.anchors);
+      const { files, evidence, anchorSources } = await capture(cwd, anchors.map(anchor => anchor.path));
+      validateAnchors(anchors, anchorSources);
+      const plan = planVerification({ policy: loadPolicy(path.join(cwd, "scripts/ci/scope-rules.json")),
+        files, evidence, tests: options.tests });
+      metadata.sourceAnchors = anchors;
       if (!options.execute) { write({ ...plan, ...metadata }); return plan.blocked.length ? 1 : 0; }
       result = await verify(plan, { cwd, metadata, signal, fingerprint: async () => (await capture(cwd)).evidence.fingerprint });
     } else {

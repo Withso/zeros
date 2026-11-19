@@ -43,6 +43,18 @@ describe("zstack pack", () => {
     expect(() => zstackEntry("unknown-host")).toThrow("zstack_input_invalid");
   });
 
+  it("routes review and end-of-loop learning without implicit helper invocation", () => {
+    const files = renderZstackFiles(root), skills = zstackSkills(root);
+    const router = skills.find(skill => skill.name === "zstack")!.body;
+    for (const host of ["portable", "devin", "claude", "codex", "cursor"]) {
+      const entry = files[zstackEntry(host)] ?? router;
+      expect(entry).toMatch(/^4\. .*read `agents\/zstack\/skills\/zstack-review\/SKILL\.md` and run the full review/m);
+      expect(entry).toMatch(/^7\. .*read `agents\/zstack\/skills\/zstack-learn\/SKILL\.md`/m);
+    }
+    for (const name of ["zstack-review", "zstack-learn"])
+      expect(skills.find(skill => skill.name === name)?.invocation).toBe("router");
+  });
+
   it("keeps user-invoked skills out of every host's automatic selection", async () => {
     const { mkdtempSync, mkdirSync, writeFileSync } = await import("node:fs");
     const { join } = await import("node:path");
