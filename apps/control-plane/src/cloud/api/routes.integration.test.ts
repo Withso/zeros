@@ -1532,7 +1532,7 @@ database("cloud API through the assembled router and PostgreSQL", () => {
     const held = new Promise<void>(resolve => { release = resolve; }), stopping = new Promise<void>(resolve => { entered = resolve; });
     const stop = vi.fn(async () => { entered(); await held; });
     const stopWorker = vi.fn(async () => false);
-    const lifecycle = new CloudV2Lifecycle({ store, compute: { stop } as unknown as CloudV2Compute,
+    const lifecycle = new CloudV2Lifecycle({ store, compute: { stop, inspect: vi.fn(async () => ({ name: null, state: "archived" })), } as unknown as CloudV2Compute,
       stopWorker, sealPortToken: () => ({}), publicKeys: [], runtime: { sha256: "a".repeat(64), url: async () => "https://example.test/runtime" },
       bootEnv: () => ({}), sandboxName: () => "fixture" });
     const step = lifecycle.tick();
@@ -1563,7 +1563,7 @@ database("cloud API through the assembled router and PostgreSQL", () => {
     await store.transition(workspace.id, ["creating"], "running", { boatSandboxId: "bx_fixture" });
     expect((await management().request(`/v1/cloud-v2/workspaces/${workspace.id}/restart`, { method: "POST" })).status).toBe(202);
     const stop = vi.fn(async () => { throw new Error("synthetic stop failure"); });
-    const lifecycle = new CloudV2Lifecycle({ store, compute: { stop } as unknown as CloudV2Compute,
+    const lifecycle = new CloudV2Lifecycle({ store, compute: { stop, inspect: vi.fn(async () => ({ name: null, state: "archived" })), } as unknown as CloudV2Compute,
       sealPortToken: () => ({}), publicKeys: [], runtime: { sha256: "a".repeat(64), url: async () => "https://example.test/runtime" },
       bootEnv: () => ({}), sandboxName: () => "fixture" });
     await lifecycle.tick();

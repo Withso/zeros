@@ -334,7 +334,7 @@ database("real acting-user worker clients against HTTP routes and PostgreSQL", (
     await run("prepare"); expect(await row()).toMatchObject({ execution_mode: "prepared", execution_transition_id: null });
     await run("activate");
     let release!: () => void;
-    const compute = { stop: vi.fn(() => new Promise<void>(resolve => { release = resolve; })), delete: vi.fn(async () => {}),
+    const compute = { inspect: vi.fn(async () => ({ name: null, state: "archived" })), stop: vi.fn(() => new Promise<void>(resolve => { release = resolve; })), delete: vi.fn(async () => {}),
       extendLease: vi.fn(async () => {}) } as unknown as CloudV2Compute;
     const lifecycle = new CloudV2Lifecycle({ store: f.cp.store, compute,
       runtime: { sha256: change.runtimeSha256, url: async () => "https://example.test/runtime" },
