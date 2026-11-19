@@ -38,7 +38,7 @@ import { useShallow } from "zustand/react/shallow";
 import type { DesignRuntimeTreeNode } from "@zeros/protocol/design-runtime";
 import type { Workspace } from "../../platform/git";
 import type { DesignCanvasFrameWire } from "../../platform/bridge/design-bridge";
-import { designFrameViews, isPreparedDesignFrame, type DesignFrameView } from "./state/design-frame-view";
+import { designFrameViews, designPresentedFrame, isPreparedDesignFrame, type DesignFrameView } from "./state/design-frame-view";
 import type { DesignSelectionTarget } from "./design-selected-targets";
 
 import {
@@ -53,7 +53,7 @@ import {
 import { useDesignRuntimeStore } from "./state/design-runtime-store";
 import { useDesignHistoryPresentation, useDesignHistorySelection } from "./state/design-history-presentation";
 import { noteDesignFrameIntent } from "./state/design-frame-intent";
-import { designComponentIdentityLabel, designFrameIsComponent, designLayerDisplayName, designLayerRowKind } from "./state/design-component-parts";
+import { designComponentIdentityLabel, designFrameComponentPresentation, designLayerDisplayName, designLayerRowKind } from "./state/design-component-parts";
 import { designDeclaredVariants, useDesignComponentVariantStore } from "./state/design-component-variants";
 import { useActiveWorkspace } from "../../state/use-active-workspace";
 import { useReadRecovery } from "../../state/use-read-recovery";
@@ -301,7 +301,7 @@ function DesignLayerDisclosure({ open }: { open: boolean }) {
 }
 
 const DesignLayerFrameRow = React.memo(function DesignLayerFrameRow({
-  row, rowIndex, blockRadius, selected, tabbable, layoutKind, identity, rename, actions,
+  row, rowIndex, blockRadius, selected, tabbable, layoutKind, identity, identityKind, rename, actions,
 }: {
   row: Extract<DesignPanelRow, { kind: "frame" }>;
   rowIndex: number;
@@ -310,6 +310,7 @@ const DesignLayerFrameRow = React.memo(function DesignLayerFrameRow({
   tabbable: boolean;
   layoutKind: DesignFrameLayoutIconKind;
   identity: string | null;
+  identityKind: "main" | "instance" | null;
   rename: LayerRename | null;
   actions: DesignLayerRowActions;
 }) {
@@ -351,7 +352,9 @@ const DesignLayerFrameRow = React.memo(function DesignLayerFrameRow({
         ) : (
           <span className={DESIGN_LAYER_DISCLOSURE_SPACER} />
         )}
-        {identity ? <ComponentGlyph className="text-violet-primary fill-current" aria-hidden="true" />
+        {identity ? identityKind === "instance"
+          ? <Diamond className="text-violet-primary" data-design-frame-component-mark="instance" aria-hidden="true" />
+          : <ComponentGlyph className="text-violet-primary fill-current" data-design-frame-component-mark="main" aria-hidden="true" />
           : frame.kind === "text" ? <Type /> : <FrameLayoutIcon kind={layoutKind} />}
         <DesignLayerRowName rename={rename} name={identity ?? designFrameDisplayName(frame)} actions={actions} />
       </div>
@@ -1498,12 +1501,15 @@ function OwnedDesignWorkspaceSidebarPanels({
                   );
                 }
                 if (row.kind === "frame") {
-                  const componentFrame = "component" in row.frame ? row.frame : null;
+                  const componentFrame = designPresentedFrame(row.frame);
+                  const presentation = componentFrame ? designFrameComponentPresentation(componentFrame, mainTitle) : null;
                   const variant = componentFrame ? componentVariants[componentFrame.file] : null;
-                  const identity = componentFrame && designFrameIsComponent(componentFrame)
-                    ? designComponentIdentityLabel(componentFrame.title,
-                        variant && designDeclaredVariants(componentFrame.component).includes(variant) ? variant : null)
+                  const shownVariant = variant && componentFrame?.component && designDeclaredVariants(componentFrame.component).includes(variant)
+                    ? variant
                     : null;
+                  const identity = presentation?.kind === "main"
+                    ? designComponentIdentityLabel(presentation.label, shownVariant)
+                    : presentation?.label ?? null;
                   const activeFrame = selectedFrame?.file === row.frame.file;
                   // The frame row is "selected" only when the frame itself is
                   // the canvas selection target — merely showing its tree is
@@ -1518,6 +1524,7 @@ function OwnedDesignWorkspaceSidebarPanels({
                       tabbable={rovingRowKey === row.key}
                       layoutKind={frameLayoutIconsByFile[row.frame.file] ?? "frame"}
                       identity={identity}
+                      identityKind={presentation?.kind ?? null}
                       rename={rowRename}
                       actions={rowActions}
                     />

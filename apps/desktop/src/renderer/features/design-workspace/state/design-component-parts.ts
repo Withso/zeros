@@ -8,7 +8,7 @@
 // goes through the workspace cache, which refuses any other write that
 // names a part or slot before anything is sent.
 
-import type { DesignFrameComponent, DesignFrameInstances } from "@zeros/protocol/design-catalog";
+import type { DesignComponentIdentity, DesignFrameComponent, DesignFrameInstances } from "@zeros/protocol/design-catalog";
 import { designComponentPartOf, designComponentSlotOf } from "@zeros/protocol/design-runtime";
 import { designRuntimeLayerDisplayName } from "../design-layer-label";
 
@@ -101,6 +101,44 @@ export function designComponentTextLock(
  * "Component". Placing instances never makes a frame one. */
 export function designFrameIsComponent(frame: { component?: DesignFrameComponent }): boolean {
   return frame.component !== undefined;
+}
+
+export type DesignFrameComponentPresentation = {
+  kind: "main" | "instance";
+  label: string;
+  rootNodeId: string | null;
+};
+
+/** The prepared identity is authoritative when present. An omitted identity
+ * is an older engine response: only its existing declaration may identify a
+ * main; it must not infer an instance from a runtime or a sole host. */
+export function designFrameComponentPresentation(
+  frame: {
+    title: string;
+    component?: DesignFrameComponent;
+    componentIdentity?: DesignComponentIdentity | null;
+    instances?: DesignFrameInstances;
+  },
+  mainTitle: (file: string) => string | undefined = () => undefined,
+): DesignFrameComponentPresentation | null {
+  const identity = frame.componentIdentity;
+  if (identity === null) return null;
+  if (identity?.kind === "main") return { kind: "main", label: frame.title, rootNodeId: null };
+  if (identity?.kind === "instance") {
+    const host = frame.instances && Object.hasOwn(frame.instances.hosts, identity.nodeId)
+      ? frame.instances.hosts[identity.nodeId]
+      : undefined;
+    const component = host && frame.instances && Object.hasOwn(frame.instances.components, host.component)
+      ? frame.instances.components[host.component]
+      : undefined;
+    if (!host || !component) return null;
+    return {
+      kind: "instance",
+      label: designComponentInstanceIdentity(frame, identity.nodeId, mainTitle) ?? frame.title,
+      rootNodeId: identity.nodeId,
+    };
+  }
+  return frame.component ? { kind: "main", label: frame.title, rootNodeId: null } : null;
 }
 
 /** A component's name as people read it: its main frame's title, else its

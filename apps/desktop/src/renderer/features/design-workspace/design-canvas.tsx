@@ -213,7 +213,7 @@ import {
   type DesignMotionTimelineDraft,
 } from "./design-motion-timeline";
 import { canEditDesignNodeText } from "./design-node-capabilities";
-import { designComponentIdentityLabel, designComponentInstanceIdentity, designComponentSelectionIdentity, designComponentPartHost, designComponentTextLock, designFrameIsComponent, designFrameMissingComponents, designFrameOptionsProblem, isDesignComponentPartNodeId } from "./state/design-component-parts";
+import { designComponentIdentityLabel, designComponentInstanceIdentity, designComponentSelectionIdentity, designComponentPartHost, designComponentTextLock, designFrameComponentPresentation, designFrameMissingComponents, designFrameOptionsProblem, isDesignComponentPartNodeId } from "./state/design-component-parts";
 import { designDeclaredVariants, useDesignComponentVariantStore } from "./state/design-component-variants";
 import { resolveDesignSelectionShortcut } from "./design-selection-shortcuts";
 import {
@@ -8119,14 +8119,16 @@ export const DesignCanvas = React.memo(function DesignCanvas({
               </DesignPreparingFrame>
             );
             const framePlaying = currentPlayback?.file === frame.file;
-            const frameIsComponent = designFrameIsComponent(frame);
+            const frameComponentPresentation = designFrameComponentPresentation(frame, (file) =>
+              snapshot.frames.find((candidate) => candidate.file === file)?.title);
+            const frameIsComponent = frameComponentPresentation?.kind === "main";
             const storedVariant = componentVariants[frame.file];
             const frameVariant = frameIsComponent && storedVariant && designDeclaredVariants(frame.component).includes(storedVariant)
               ? storedVariant
               : null;
-            const componentIdentity = frameIsComponent
+            const componentIdentity = frameComponentPresentation?.kind === "main"
               ? designComponentIdentityLabel(frame.title, frameVariant)
-              : null;
+              : frameComponentPresentation?.label ?? null;
             const missingComponents = designFrameMissingComponents(frame);
             const optionsProblem = designFrameOptionsProblem(frame);
             const paintedFrame = frameGeometryPreviewsRef.current.get(
@@ -8258,8 +8260,8 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                 onPointerMoveCapture={(event) => { if (!prepared) event.stopPropagation(); }}
                 onDropCapture={(event) => { if (!prepared) { event.preventDefault(); event.stopPropagation(); } }}
                 data-design-frame-kind={frame.kind ?? "frame"}
-                data-design-frame-component={frameIsComponent ? "" : undefined}
-                data-design-frame-root-selected={frameSelectedOnly && frameIsComponent && paintedSelectedTargets.length === 1 ? "" : undefined}
+                data-design-frame-component={frameComponentPresentation ? "" : undefined}
+                data-design-frame-root-selected={frameSelectedOnly && frameComponentPresentation && paintedSelectedTargets.length === 1 ? "" : undefined}
                 data-design-frame-playing={framePlaying ? "" : undefined}
                 data-design-frame-selected={frameHasSelection ? "" : undefined}
                 data-design-frame-chrome-protected={selected || frameSelectedOnly || framePlaying ||
@@ -8494,8 +8496,8 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                             : componentIdentity ?? frame.title}
                           className={cn(
                             "text-2xxs block max-w-full min-w-0 overflow-hidden border-0 bg-transparent p-0 text-left leading-4 font-medium whitespace-nowrap outline-none",
-                            (frameIsComponent || missingComponents.length > 0 || optionsProblem !== null || preparationProblem !== null) && "flex items-center gap-1",
-                            frameIsComponent
+                            (frameComponentPresentation || missingComponents.length > 0 || optionsProblem !== null || preparationProblem !== null) && "flex items-center gap-1",
+                            frameComponentPresentation
                               ? "text-violet-primary"
                               : frameSelectedOnly
                               ? "text-[var(--design-selection-stroke)]"
@@ -8511,12 +8513,10 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                             setRenamingFrame(frame.file);
                           }}
                         >
-                          {frameIsComponent ? (
-                            <ComponentGlyph
-                              data-design-component-mark=""
-                              className="text-violet-primary fill-current size-[11px] shrink-0"
-                              aria-hidden="true"
-                            />
+                          {frameComponentPresentation ? frameComponentPresentation.kind === "main" ? (
+                            <ComponentGlyph data-design-component-mark="main" className="text-violet-primary fill-current size-[11px] shrink-0" aria-hidden="true" />
+                          ) : (
+                            <Diamond data-design-component-mark="instance" className="text-violet-primary size-[11px] shrink-0" aria-hidden="true" />
                           ) : null}
                           {preparationProblem !== null ? <DesignFrameProblemMark message={preparationProblem} /> : null}
                           {missingComponents.length ? (
@@ -8782,7 +8782,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                   // click goes through to the frame to pick another part.
                   const partOutline = isDesignComponentPartNodeId(details.oid);
                   const componentOwnerId = partOutline ? designComponentPartHost(details.oid) : details.oid;
-                  const mainComponentRoot = frameIsComponent && componentOwnerId === selectedFrameRootId;
+                  const mainComponentRoot = frameComponentPresentation?.kind === "main" && componentOwnerId === selectedFrameRootId;
                   const instanceComponentIdentity = mainComponentRoot ? null : designComponentInstanceIdentity(frame, componentOwnerId, (file) =>
                     snapshot.frames.find((candidate) => candidate.file === file)?.title);
                   const selectedComponentIdentity = designComponentSelectionIdentity(

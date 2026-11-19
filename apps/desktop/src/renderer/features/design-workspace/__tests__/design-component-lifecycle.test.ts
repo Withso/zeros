@@ -16,14 +16,14 @@ vi.mock("../../../platform/git", async (original) => ({
   designDeleteFrame: producer.deleteFrame,
 }));
 
-import { designFrameIsComponent, designFrameMissingComponents, designFrameOptionsProblem, designLayerDisplayName, designMissingComponentOf } from "../state/design-component-parts";
+import { designFrameComponentPresentation, designFrameIsComponent, designFrameMissingComponents, designFrameOptionsProblem, designLayerDisplayName, designMissingComponentOf } from "../state/design-component-parts";
 import { designComponentRecordProblem, designInstanceIgnoredAttributes } from "../state/design-component-options";
 import { deleteDesignFrameCached, designWorkspaceSnapshotCache, resetDesignWorkspaceCacheForTests } from "../state/design-workspace-cache";
 import { DesignComponentOptions, designComponentOptionProvenanceLabel } from "../design-component-options";
 import { DesignFrameDeleteDialog } from "../design-frame-delete-dialog";
 import { DesignFrameLoadError, DesignFrameProblemLabel, DesignFrameProblemMark } from "../design-frame-load-error";
 import { DesignFramePreparation } from "../state/design-workspace-preparation";
-import { designFramePreparationProblem, designFrameViews } from "../state/design-frame-view";
+import { designFramePreparationProblem, designFrameViews, designPresentedFrame } from "../state/design-frame-view";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 const source = readDesignWorkspaceSource();
@@ -31,6 +31,46 @@ const instances = (hosts: DesignFrameInstances["hosts"]): DesignFrameInstances =
   key: "0".repeat(16),
   components: { card: { elements: [], reach: {}, file: "page-1/card.html", frame: true } },
   hosts,
+});
+
+describe("prepared component identity presentation", () => {
+  const host = (nodeId = "host") => ({
+    key: "0".repeat(16),
+    components: { card: { elements: [], reach: {}, file: "page-1/card.html", frame: true } },
+    hosts: { [nodeId]: { component: "card", attributes: {} } },
+  } satisfies DesignFrameInstances);
+
+  it("keeps an explicit ordinary null from becoming a component via a sole instance", () => {
+    expect(designFrameComponentPresentation({ title: "Home", componentIdentity: null, component: { elements: [], reach: {} }, instances: host() })).toBeNull();
+  });
+
+  it("presents a registered main without requiring an options declaration", () => {
+    expect(designFrameComponentPresentation({ title: "Card", componentIdentity: { kind: "main", name: "card" } }))
+      .toEqual({ kind: "main", label: "Card", rootNodeId: null });
+  });
+
+  it("presents only an explicitly marked instance root", () => {
+    expect(designFrameComponentPresentation({ title: "Home", componentIdentity: { kind: "instance", nodeId: "host" }, instances: host() }))
+      .toEqual({ kind: "instance", label: "Card/Default", rootNodeId: "host" });
+    expect(designFrameComponentPresentation({ title: "Home", instances: host() })).toBeNull();
+  });
+
+  it("keeps the last confirmed identity visible while a frame revalidates", () => {
+    const previous = { title: "Card", file: "page-1/card.html", sourceVersion: "a".repeat(24), componentIdentity: { kind: "main" as const, name: "card" } };
+    const pending = { title: previous.title, file: previous.file, preparation: "unprepared" as const, previous };
+    const presented = designPresentedFrame(pending as never);
+    expect(presented?.componentIdentity).toEqual(previous.componentIdentity);
+    expect(designFrameComponentPresentation(presented!)).toEqual({ kind: "main", label: "Card", rootNodeId: null });
+  });
+
+  it("keeps a previous instance classification and default label while pending", () => {
+    const previous = { title: "Home", file: "page-1/home.html", sourceVersion: "a".repeat(24),
+      componentIdentity: { kind: "instance" as const, nodeId: "host" }, instances: host() };
+    const pending = { title: previous.title, file: previous.file, preparation: "unprepared" as const, previous };
+    const presented = designPresentedFrame(pending as never);
+    expect(designFrameComponentPresentation(presented!)).toEqual({ kind: "instance", label: "Card/Default", rootNodeId: "host" });
+  });
+
 });
 
 describe("an instance whose component is gone", () => {
@@ -73,6 +113,8 @@ describe("an instance whose component is gone", () => {
     // Names follow the subscribed snapshot, so renaming a main renames its instances' rows.
     expect(panels).toContain("displayName={designLayerDisplayName(frame, layer.node, mainTitle)}");
     expect(panels).toContain("designLayerDisplayName(selectedFrame, node, mainTitle)");
+    expect(panels).toContain("designPresentedFrame(row.frame)");
+    expect(panels).toContain("designComponentIdentityLabel(presentation.label, shownVariant)");
     expect(panels).not.toContain("peekSnapshot(workspaceId).data?.frames");
     // An instance row carries the component mark and a slot row its own; a
     // part or slot row is hidden like any layer, never renamed.

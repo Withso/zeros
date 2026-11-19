@@ -214,7 +214,7 @@ import {
   settleDesignHistorySelection,
 } from "./state/design-selection";
 import { designComponentPartOf, designComponentSlotOf } from "@zeros/protocol/design-runtime";
-import { designComponentDisplayTitle, designComponentIdentityLabel, designComponentInstanceIdentity, designComponentInstanceVariant, designComponentSlotLabel,
+import { designComponentDisplayTitle, designComponentIdentityLabel, designComponentInstanceIdentity, designComponentInstanceVariant, designComponentSlotLabel, designFrameComponentPresentation,
   designComponentTextLock, designMissingComponentOf, designPartOverrideAttribute, designPartOverrideKey } from "./state/design-component-parts";
 import { commitDesignInstanceOverridesReset, designInstanceVisualStyleProperties } from "./state/design-component-options";
 import { MessageRow } from "../../shared/ui/primitives/message-row";
@@ -273,6 +273,7 @@ const DESIGN_FRAME_POSITION_RANGE = {
 /** A percentage field (opacity) writes 0–100% of its value; the field shows
  * the same bound so a scrub past either end reads what is written. */
 const DESIGN_PERCENTAGE_RANGE = { min: 0, max: 100 };
+const EMPTY_COMPONENT_DECLARATION = { elements: [], reach: {} };
 /** Only a complete numeric entry is a display percentage; functions, keywords
  * and tokens are already CSS values and must not become a numeric conversion. */
 const DESIGN_PERCENTAGE_INPUT = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?%?$/i;
@@ -1653,11 +1654,33 @@ export const DesignInspector = React.memo(function DesignInspector({
       if (previewOwnerRef.current === previewOwner) setOpeningPreviewOwner(null);
     }
   };
+  const layoutRootId = useDesignRuntimeStore((state) =>
+    workspaceId && frame
+      ? state.byWorkspace[workspaceId]?.frames[frame.file]?.snapshot?.frame.oid
+      : undefined,
+  );
+  const runtimeSourceVersion = useDesignRuntimeStore((state) =>
+    workspaceId && frame ? state.byWorkspace[workspaceId]?.frames[frame.file]?.sourceVersion : undefined,
+  );
+  const legacyExactInstanceNodeId = frame?.componentIdentity === undefined &&
+    runtimeSourceVersion === frame?.sourceVersion && layoutRootId && frame?.instances && Object.hasOwn(frame.instances.hosts, layoutRootId)
+    ? layoutRootId
+    : null;
+  const explicitFrameIdentityNodeId = frame?.componentIdentity?.kind === "instance"
+    ? frame.componentIdentity.nodeId
+    : null;
   const styleTargetNodeId =
-    selectedNodeId ?? (frameSelected && details?.oid ? details.oid : null);
+    selectedNodeId ?? (frameSelected
+      ? explicitFrameIdentityNodeId ?? legacyExactInstanceNodeId ??
+        (details && details.oid === layoutRootId && details.sourceVersion === frame?.sourceVersion ? details.oid : null)
+      : null);
   const frameStyleTarget =
     frameSelected && !selectedNodeId && styleTargetNodeId !== null;
-  const elementDetails = styleTargetNodeId ? details : null;
+  const elementDetails = styleTargetNodeId && details?.oid === styleTargetNodeId && details.sourceVersion === frame?.sourceVersion
+    ? details
+    : null;
+  const frameComponentPresentation = frame ? designFrameComponentPresentation(frame, (file) =>
+    designWorkspaceSnapshotCache.peekSnapshot(workspaceId ?? "").data?.frames.find((candidate) => candidate.file === file)?.title) : null;
   const errors = useMemo(
     () => frameBlockingDesignLintErrors(lint?.violations ?? [], frame?.file),
     [lint, frame?.file],
@@ -1904,11 +1927,6 @@ export const DesignInspector = React.memo(function DesignInspector({
       : undefined;
     return styleNodeIds.map((nodeId) => frameState?.detailsByNode[nodeId] ?? null);
   }));
-  const layoutRootId = useDesignRuntimeStore((state) =>
-    workspaceId && frame
-      ? state.byWorkspace[workspaceId]?.frames[frame.file]?.snapshot?.frame.oid
-      : undefined,
-  );
   const layoutParents = useMemo(
     () =>
       styleNodeIds.flatMap((nodeId, index) => {
@@ -2630,7 +2648,7 @@ export const DesignInspector = React.memo(function DesignInspector({
         // A fixed canvas frame is sized by its viewport metadata. Its shell
         // continues to follow that viewport after later canvas resizes. A
         // main's root is the component, sized as itself, not a shell.
-        const rootStyles = context.layoutRootId && !frame.component
+        const rootStyles = context.layoutRootId && frameComponentPresentation?.kind !== "main"
           ? updates.get(context.layoutRootId)
           : undefined;
         const rootDetails = details.find(
@@ -2852,7 +2870,7 @@ export const DesignInspector = React.memo(function DesignInspector({
       );
       return task.then((prepared) => prepared?.persist);
     },
-    [styleOwner, stylePreviewIntentRef],
+    [styleOwner, stylePreviewIntentRef, frameComponentPresentation?.kind],
   );
   useLayoutEffect(() => { layoutShortcutRef.current = commitLayoutAction; }, [commitLayoutAction]);
 
@@ -2870,7 +2888,7 @@ export const DesignInspector = React.memo(function DesignInspector({
     // A main's W and H are its root's, the component's own size; its X and Y
     // still place the frame.
     const frameGeometryProperty = frameStyleTarget &&
-      !(styleContext.frame.component && (property === "width" || property === "height"))
+      !(frameComponentPresentation?.kind === "main" && (property === "width" || property === "height"))
       ? (
           {
             left: ["x", styleContext.frame.x],
@@ -3076,7 +3094,10 @@ export const DesignInspector = React.memo(function DesignInspector({
   // one names the instance and shows nothing to edit.
   const selectedPart = selectedNodeId ? designComponentPartOf(selectedNodeId) : null;
   const selectedSlot = selectedNodeId ? designComponentSlotOf(selectedNodeId) : null;
-  const instanceNodeId = selectedPart?.host ?? selectedSlot?.host ?? (styleNodeIds.length <= 1 ? selectedNodeId : null);
+  const instanceNodeId = selectedPart?.host ?? selectedSlot?.host ??
+    (frameSelected
+      ? explicitFrameIdentityNodeId ?? legacyExactInstanceNodeId
+      : styleNodeIds.length <= 1 ? selectedNodeId : null);
   // Own entries only: a layer id such as "constructor" is not a host.
   const instanceHost = instanceNodeId && frame?.instances && Object.hasOwn(frame.instances.hosts, instanceNodeId)
     ? frame.instances.hosts[instanceNodeId] : undefined;
@@ -3086,12 +3107,16 @@ export const DesignInspector = React.memo(function DesignInspector({
     ? designComponentTitle(workspaceId, instanceHost.component, instanceComponent)
     : null;
   const instanceVariant = designComponentInstanceVariant(frame ?? {}, instanceNodeId);
+  const mainComponent = frame?.component ?? (frameComponentPresentation?.kind === "main"
+    ? EMPTY_COMPONENT_DECLARATION
+    : undefined);
   const optionsTarget: DesignComponentOptionsTarget | null = !workspaceId || !active || !panelVisible || !frame
     ? null
     // The main's root is the component, so selecting it selects the main.
-    : frameSelected && frame.component && (!selectedNodeId || selectedNodeId === layoutRootId) && styleNodeIds.length <= 1
-      ? { kind: "main", component: frame.component }
-      : !selectedPart && !selectedSlot && instanceNodeId && instanceHost && instanceComponent && instanceTitle && styleNodeIds.length === 1
+    : frameSelected && frameComponentPresentation?.kind === "main" && (!selectedNodeId || selectedNodeId === layoutRootId) && styleNodeIds.length <= 1
+      ? { kind: "main", component: mainComponent! }
+      : !selectedPart && !selectedSlot && instanceNodeId && instanceHost && instanceComponent && instanceTitle &&
+        (styleNodeIds.length === 1 || (frameSelected && explicitFrameIdentityNodeId === instanceNodeId && styleNodeIds.length === 0))
         ? { kind: "instance", nodeId: instanceNodeId, title: instanceTitle, host: instanceHost, component: instanceComponent,
             ...(frame.instances?.notApplied ? { notApplied: frame.instances.notApplied } : {}) }
         : null;
@@ -3115,7 +3140,7 @@ export const DesignInspector = React.memo(function DesignInspector({
   const similarTabKey = designInspectorSimilarTabKey(
     { workspaceId, directoryId: previewDirectoryId },
     designInspectorTabPreferenceKind(optionsTarget !== null, designInspectorSelectionIsComponentLike({
-      frameIsComponent: Boolean(frame?.component),
+      frameIsComponent: frameComponentPresentation?.kind === "main",
       instanceHost: instanceHost !== undefined,
       selectedPart: selectedPart !== null,
       selectedSlot: selectedSlot !== null,

@@ -121,7 +121,8 @@ describe("design workspace inspector toolbar", () => {
 
   it("uses the selected frame's runtime root as a complete style target", () => {
     expect(source).toContain("const styleTargetNodeId =");
-    expect(source).toContain("frameSelected && details?.oid");
+    expect(source).toContain("const explicitFrameIdentityNodeId");
+    expect(source).toContain("explicitFrameIdentityNodeId");
     expect(source).toContain("nodeId: styleTargetNodeId");
     expect(source).toContain("frameStyleTarget");
   });
