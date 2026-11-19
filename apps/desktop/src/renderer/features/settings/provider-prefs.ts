@@ -1,17 +1,3 @@
-// ──────────────────────────────────────────────────────────
-// Provider prefs — per-agent UI choices (auth method, binary
-// path, gateway URL)
-// ──────────────────────────────────────────────────────────
-//
-// Settings → Providers writes here; session spawn reads here.
-// Backed by the same native settings layer as everything else
-// (localStorage today, app-data on the Mac build).
-//
-// API keys themselves stay in the macOS keychain (apps/desktop/src/renderer/platform/
-// secrets.ts) — only the user's *choice* of auth method and the
-// optional path overrides live here.
-// ──────────────────────────────────────────────────────────
-
 import { getSetting, setSetting } from "../../platform/settings";
 import { getSecret, SECRET_ACCOUNTS } from "../../platform/secrets";
 import { getActiveBridge } from "../../platform/bridge/active-bridge";
@@ -24,20 +10,14 @@ import {
 export type ProviderAuthMethod = "cli" | "apiKey";
 
 export interface ProviderPrefs {
-  /** "cli" = sign in via the vendor's own CLI; "apiKey" = inject the
-   *  vendor's env var (ANTHROPIC_API_KEY / OPENAI_API_KEY) read from
-   *  the keychain at spawn time. Defaults to "cli". */
   authMethod: ProviderAuthMethod;
   /** Distinguishes explicit SDK browser login from Cursor's old ignored CLI choice. */
   cursorSubscription?: true;
-  /** Optional absolute path or alternate command name for the CLI
-   *  binary. Empty/undefined = use the registry default from $PATH. */
   binaryPath?: string;
-  /** Claude-only: optional gateway base URL injected as
-   *  ANTHROPIC_BASE_URL. Empty/undefined = direct to api.anthropic.com. */
   gatewayBaseUrl?: string;
 }
 
+// Keep the legacy storage prefix readable; API key values live in the native secret store.
 const KEY_PREFIX = "provider-prefs:";
 const listeners = new Set<() => void>();
 const hydrated = new Map<string, ProviderPrefs>();
@@ -124,18 +104,14 @@ export const DEFAULT_PREFS: ProviderPrefs = {
   authMethod: "cli",
 };
 
-// Authentication UI capability, independent of whether a runtime is bundled.
-// All current providers support an interactive account connection.
+// Account sign-in capability is independent of whether a runtime is bundled.
 const API_KEY_ONLY_AGENT_IDS = new Set<string>();
 
-/** True when the agent authenticates solely via its provider API key —
- *  a bundled-SDK runtime with no CLI sign-in path. */
 export function isApiKeyOnly(agentId: string): boolean {
   return API_KEY_ONLY_AGENT_IDS.has(agentId);
 }
 
 export function getProviderPrefs(agentId: string): ProviderPrefs {
-  // Preserve Cursor's pre-browser-login default for existing installations.
   const fallback: ProviderPrefs =
     agentId === "cursor" || isApiKeyOnly(agentId)
       ? { authMethod: "apiKey" }
@@ -143,8 +119,7 @@ export function getProviderPrefs(agentId: string): ProviderPrefs {
   const prefs =
     hydrated.get(agentId) ??
     getSetting<ProviderPrefs>(KEY_PREFIX + agentId, fallback);
-  // Old Cursor "cli" choices were ignored. Only the explicit new subscription
-  // marker can switch those users away from their existing API key.
+  // Legacy Cursor CLI choices were ignored; only explicit subscription opt-in replaces API-key auth.
   if (
     (isApiKeyOnly(agentId) ||
       (agentId === "cursor" && !prefs.cursorSubscription)) &&
@@ -177,22 +152,6 @@ export function setProviderPrefs(agentId: string, prefs: ProviderPrefs): void {
   for (const listener of listeners) listener();
 }
 
-// ──────────────────────────────────────────────────────────
-// Spawn-time env derivation
-// ──────────────────────────────────────────────────────────
-//
-// `deriveProviderEnv` reads the user's saved prefs + keychain and
-// returns the env vars to inject when starting an agent subprocess.
-//   - authMethod="apiKey" → inject ANTHROPIC_API_KEY / OPENAI_API_KEY
-//     from the keychain.
-//   - claude gatewayBaseUrl → inject ANTHROPIC_BASE_URL.
-// Returns {} when no injection is required (CLI sign-in mode), so the
-// caller can merge it into the spawn env unconditionally.
-//
-// This is the engine-side contract for the "same headless behaviour
-// for CLI and API key" promise: the CLI subprocess always spawns the
-// same way; the only difference is whether these env vars are present.
-
 interface ProviderEnvConfig {
   envVar: string;
   secretAccount: string;
@@ -209,19 +168,14 @@ const PROVIDER_ENV_CONFIG: Record<string, ProviderEnvConfig> = {
     envVar: "OPENAI_API_KEY",
     secretAccount: SECRET_ACCOUNTS.OPENAI_API_KEY,
   },
-  // Pasted-key mode only. The engine privately receives browser credentials
-  // from main and selects them from user settings in subscription mode.
+  // Subscription credentials are delivered privately by the native runtime, not as a pasted key.
   cursor: {
     envVar: "CURSOR_API_KEY",
     secretAccount: SECRET_ACCOUNTS.CURSOR_API_KEY,
   },
 };
 
-/** The provider API keys Zeros can inject as env vars, for read-only display
- *  surfaces (Settings → Environment shows configured keys alongside the
- *  user's own variables, since they land in the agent's process env exactly
- *  the same way). Values stay in the encrypted secret store — this exposes
- *  only the env-var NAME and where to manage it. */
+// Display surfaces get environment variable names, never secret values.
 export const PROVIDER_KEY_ENV_VARS: ReadonlyArray<{
   agentId: string;
   vendor: string;
@@ -278,22 +232,13 @@ export async function deriveProviderEnv(
   return env;
 }
 
-/** Convenience accessor for the saved CLI binary override. Returns
- *  undefined when the user hasn't customised it — caller falls back to
- *  the registry default (PATH lookup). */
 export function getProviderBinaryOverride(agentId: string): string | undefined {
-  // Local runtime configuration is read directly by the engine from TOML.
-  // A removed override must not be resurrected by an older renderer cache.
+  // Let the local engine read TOML so stale renderer state cannot restore a removed override.
   if (getActiveBridge()?.executionIdentity?.kind === "local") return undefined;
   const v = getProviderPrefs(agentId).binaryPath?.trim();
   return v ? v : undefined;
 }
 
-/** Does this agent support API-key auth? True when we know which env
- *  var to inject (PROVIDER_ENV_CONFIG entry exists). The runnable-agent
- *  predicate uses this to honour "Connected via API key" — without it,
- *  installed-but-not-CLI-signed-in agents are gated as "Sign in
- *  required" even though Providers panel shows them connected. */
 export function supportsApiKey(agentId: string): boolean {
   return agentId in PROVIDER_ENV_CONFIG;
 }
