@@ -589,6 +589,17 @@ function readDeclaration(
   return declaration;
 }
 
+export function designComponentVariantFromSource(
+  source: string,
+  variantName: string,
+): ComponentDeclaration["variants"][number] | null {
+  const document = sharedDesignParse(source) ?? parse(source, { sourceCodeLocationInfo: true });
+  const declared = declarationElementsOf(document);
+  if (!declared) return null;
+  const declaration = readDeclaration(declared, "", "", [], source);
+  return declaration.variants.find((variant) => variant.name === variantName) ?? null;
+}
+
 function stylesheetLinksOf(document: ParentNode): string[] {
   return elements(document)
     .filter((element) => element.tagName === "link" &&

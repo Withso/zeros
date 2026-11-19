@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { DesignFrameView } from "../state/design-frame-view";
 
 const STORAGE_KEY = "zeros:design-component-variants-v1";
 
@@ -48,6 +49,45 @@ describe("the variant a main component frame shows", () => {
       files: ["home/main.html", "home/other.html"],
     });
     expect(variants.designComponentVariantsForTests("ws1")).toEqual({ "home/other.html": "compact" });
+  });
+
+  it("captures the shown named variant synchronously per workspace and maps interaction previews to defaults", async () => {
+    const variants = await load();
+    const frame = { file: "home/main.html", component: component(["compact", "wide-plan", "hover"]) };
+    variants.showDesignComponentVariant("ws1", frame.file, "compact");
+    const captured = variants.designComponentCopyVariant("ws1", frame);
+    variants.showDesignComponentVariant("ws1", frame.file, "wide-plan");
+    expect(captured).toBe("compact");
+    expect(variants.designComponentCopyVariant("ws2", frame)).toBeNull();
+    const stateFrame = { file: "home/state.html", component: { elements: [
+      { tag: "zd-variant", attributes: [{ name: "name", value: "hover" }, { name: "zd-state", value: "hover" }] },
+    ], reach: { width: "css" as const } } };
+    variants.showDesignComponentVariant("ws1", stateFrame.file, "hover");
+    expect(variants.designComponentCopyVariant("ws1", stateFrame)).toBeNull();
+  });
+
+  it("pins a presented generation and its named variant together", async () => {
+    const variants = await load();
+    const prepared: DesignFrameView = {
+      file: "home/main.html", frameId: "main", pageId: "page", title: "Main", kind: "frame",
+      x: 0, y: 0, width: 800, height: 600, z: 0, nodeCount: 1, layerCount: 1, modifiedAt: 1,
+      sourceVersion: "a".repeat(24), component: component(["compact", "wide-plan"]),
+    };
+    const descriptor: DesignFrameView = {
+      file: prepared.file, frameId: prepared.frameId, pageId: prepared.pageId, title: prepared.title, kind: prepared.kind,
+      x: prepared.x, y: prepared.y, width: prepared.width, height: prepared.height, z: prepared.z,
+      preparation: "unprepared", previous: prepared,
+    };
+    variants.showDesignComponentVariant("ws1", prepared.file, "compact");
+    const captured = variants.captureDesignFrameComponentCopy("ws1", descriptor);
+    variants.showDesignComponentVariant("ws1", prepared.file, "wide-plan");
+    expect(captured).toMatchObject({
+      frame: prepared,
+      sourceVersion: prepared.sourceVersion,
+      componentCopy: { variant: "compact" },
+      statePreview: false,
+    });
+    expect(variants.captureDesignFrameComponentCopy("ws1", { ...descriptor, file: "home/cold.html", previous: undefined })).toBeNull();
   });
 
   it("refuses names that are not a variant's and keeps its store bounded", async () => {

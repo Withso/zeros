@@ -4,7 +4,7 @@
 // semantics still go through its shared workspaceOp helper, while the design
 // wire vocabulary remains cohesive and cheap for the design shell to import.
 
-import { DESIGN_COPY_PLACEMENT_CAPABILITY, type DesignRelocation, type DesignMovementGuard } from "@zeros/protocol/design-relocation";
+import { DESIGN_COPY_PLACEMENT_CAPABILITY, DESIGN_LINKED_COMPONENT_COPY_CAPABILITY, type DesignComponentCopy, type DesignRelocation, type DesignMovementGuard } from "@zeros/protocol/design-relocation";
 import {
   designFoundationManifestSchema,
   designTransactionSchema,
@@ -1302,12 +1302,14 @@ export async function bridgeDesignDuplicateFrame(
   workspaceId: string,
   frame: string,
   pageId?: string,
-  placement?: { sourceVersion: string; geometry: DesignFrameGeometryWire },
+  placement?: { sourceVersion?: string; geometry?: DesignFrameGeometryWire; componentCopy?: DesignComponentCopy },
 ): Promise<{
   frame: DesignFrameSummaryWire;
   snapshot: DesignWorkspaceSnapshotWire;
 }> {
-  if (placement && (isCloudWorkspace(workspaceId) || !bridge.supportsEngineCapability?.(DESIGN_COPY_PLACEMENT_CAPABILITY, workspaceId)))
+  if (placement?.componentCopy && (isCloudWorkspace(workspaceId) || !bridge.supportsEngineCapability?.(DESIGN_LINKED_COMPONENT_COPY_CAPABILITY, workspaceId)))
+    throw new Error("Update the Local engine to duplicate this component as a linked instance.");
+  if (placement?.geometry && (isCloudWorkspace(workspaceId) || !bridge.supportsEngineCapability?.(DESIGN_COPY_PLACEMENT_CAPABILITY, workspaceId)))
     throw new Error("Update the Local engine to copy frames at the pointer.");
   const result = (await workspaceOp(bridge, "design.frame.duplicate", {
     workspaceId,
@@ -1379,6 +1381,7 @@ export interface DesignNodeTransferInput {
   sourceVersion: string;
   nodeId: string;
   duplicateNodeId?: string;
+  componentCopy?: DesignComponentCopy;
   destinationFrame?: string;
   destinationSourceVersion?: string;
   parentId?: string;
@@ -1407,6 +1410,8 @@ export async function bridgeDesignTransferNode(
   nodeId: string;
   snapshot: DesignWorkspaceSnapshotWire;
 }> {
+  if (input.componentCopy && (isCloudWorkspace(workspaceId) || !bridge.supportsEngineCapability?.(DESIGN_LINKED_COMPONENT_COPY_CAPABILITY, workspaceId)))
+    throw new Error("Update the Local engine to duplicate this component as a linked instance.");
   if (input.duplicateNodeId !== undefined && (isCloudWorkspace(workspaceId) || !bridge.supportsEngineCapability?.(DESIGN_COPY_PLACEMENT_CAPABILITY, workspaceId)))
     throw new Error("Update the Local engine to copy layers between frames.");
   const value = (await workspaceOp(bridge, "design.node.transfer", {

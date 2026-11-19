@@ -210,6 +210,16 @@ describe("HTML source adapter", () => {
     );
   });
 
+  it("keeps linked component host options, styles, parts, and slot content while reseeding identities", () => {
+    const source = '<!doctype html><html><body><zd-chip data-oid="host" zd-variant="compact" width="420" class="host-override" style="--host-color: red" zd-style-root="color: blue" zd-style-chip-label="font-weight: 700"><span data-oid="label" slot="label" style="font-weight: 700">Chip</span></zd-chip></body></html>';
+    const duplicated = mutateDesignNodeDuplicateSource(source, "host", "host-copy");
+    expect(duplicated).toContain('<zd-chip data-oid="host-copy" zd-variant="compact" width="420" class="host-override" style="--host-color: red" zd-style-root="color: blue" zd-style-chip-label="font-weight: 700">');
+    expect(duplicated).toContain('slot="label" style="font-weight: 700">Chip');
+    const identities = [...duplicated.matchAll(/data-oid="([^"]+)"/g)].map((match) => match[1]);
+    expect(new Set(identities).size).toBe(identities.length);
+    expect(duplicated).toContain('data-oid="host" zd-variant="compact" width="420"');
+  });
+
   it("preserves a large authored subtree and its neighbors through copy and delete", () => {
     const children = Array.from({ length: 1_000 }, (_, index) =>
       `<div class='item' data-oid="node-${index}"><!-- ${index} --><span data-oid="label-${index}">A &amp; B</span></div>`,

@@ -1,5 +1,6 @@
 import { designContextReferenceSchema } from "@zeros/protocol/design-context";
 import {
+  designComponentCopySchema,
   designFramesMoveSchema,
   designMovementGuardSchema,
   designRelocationSchema,
@@ -1565,7 +1566,10 @@ export async function handleDesignWorkspaceRoute(
         workspace.path,
         reqStr(params, "frame"),
         { pageId: designPageIdSchema.optional().parse(params.pageId),
-          ...(params.geometry !== undefined ? designMovementGuardSchema.parse({ sourceVersion: params.sourceVersion, geometry: params.geometry }) : {}) },
+          ...(params.componentCopy !== undefined || params.geometry !== undefined
+            ? designMovementGuardSchema.parse({ sourceVersion: params.sourceVersion, ...(params.geometry !== undefined ? { geometry: params.geometry } : {}) })
+            : {}),
+          ...(params.componentCopy !== undefined ? { componentCopy: designComponentCopySchema.parse(params.componentCopy) } : {}) },
       );
       host.recordDesignHistory(
         workspace.path,
@@ -1693,6 +1697,7 @@ export async function handleDesignWorkspaceRoute(
       const result = await transferDesignNode(workspace.path, {
         frame,
         ...(params.duplicateNodeId !== undefined ? { duplicateNodeId: reqStr(params, "duplicateNodeId") } : {}),
+        ...(params.componentCopy !== undefined ? { componentCopy: designComponentCopySchema.parse(params.componentCopy) } : {}),
         pageId: designPageIdSchema.optional().parse(params.pageId),
         sourceVersion: reqStr(params, "sourceVersion"),
         nodeId: reqStr(params, "nodeId"),

@@ -95,17 +95,19 @@ import { isDeepStrictEqual } from "node:util";
 import { assertDesignFrameRestorePage, designFramePage, designPageForWrite, designPageFrameFiles } from "./pages";
 import { assertDesignPageHasRoom } from "./frame-limits";
 import { currentDesignWriteAuthority } from "./write-authority";
-import { portableDesignName } from "@zeros/protocol/design-path";
+import { isDesignComponentVariantName, portableDesignName } from "@zeros/protocol/design-path";
 import { DESIGN_MAX_FRAMES_PER_PAGE } from "@zeros/protocol/design-pages";
 import { designTitleSlug } from "./design-naming";
 import {
   DESIGN_FRAMES_MOVE_LIMIT,
+  type DesignComponentCopy,
   type DesignRelocation,
   type DesignMovementGuard,
 } from "@zeros/protocol/design-relocation";
 import { assertDesignRelocationSource, designRelocationFlowRootStyles, designRelocationRootStyles } from "./relocation-source";
 import { forgetDesignComponentRender } from "./component-last-good";
 import { designComponentRegistry } from "./component-registry";
+import { designComponentVariantFromSource } from "./components";
 
 export interface DesignFrameCreateInput {
   title?: string;
@@ -542,10 +544,23 @@ function reseedFrameOids(source: string, salt: string): string {
   return parts.join("");
 }
 
+function designComponentHost(source: string, component: string, variant: string | null, oid: string): string {
+  let selectedVariant = variant;
+  if (variant !== null) {
+    if (!isDesignComponentVariantName(variant))
+      throw new Error("The selected component variant is invalid.");
+    const declaration = designComponentVariantFromSource(source, variant);
+    if (!declaration) throw new Error(`The component no longer declares the ${JSON.stringify(variant)} variant.`);
+    if (declaration.state) selectedVariant = null;
+  }
+  const variantAttribute = selectedVariant === null ? "" : ` zd-variant="${escapeAttribute(selectedVariant)}"`;
+  return `<zd-${component} data-oid="${escapeAttribute(oid)}"${variantAttribute}></zd-${component}>`;
+}
+
 export async function duplicateDesignFrame(
   workspacePath: string,
   frame: string,
-  input: { pageId?: string; geometry?: DesignFrameGeometry; sourceVersion?: string } = {},
+  input: { pageId?: string; geometry?: DesignFrameGeometry; sourceVersion?: string; componentCopy?: DesignComponentCopy } = {},
 ): Promise<DesignFrameSummary> {
   const originalFile = assertFrameFile(frame);
   return withDocumentWrite(workspacePath, async () => {
@@ -558,7 +573,7 @@ export async function duplicateDesignFrame(
       workspacePath,
       originalFile,
     );
-    if (input.geometry) {
+    if (input.geometry || input.componentCopy) {
       if (!input.sourceVersion || (await readDesignFrameRenderIdentityFromSource(workspacePath, originalFile, original)).sourceVersion !== input.sourceVersion)
         throw new Error("The source frame changed before the copy.");
     }
@@ -575,16 +590,31 @@ export async function duplicateDesignFrame(
     for (let suffix = 2; existsSync(path.join(directory, file)); suffix += 1) {
       file = folder ? `${folder}/${base}-${suffix}.html` : `${base}-${suffix}.html`;
     }
-    const source = rebaseDesignHtmlReferences(reseedFrameOids(
-      rewriteFrameTitleSource(original, title),
-      `${file}:${randomUUID()}`,
-    ), originalFile, file, { strict: true });
+    const componentName = input.componentCopy
+      ? [...designComponentRegistry(canvas).files].find(([, source]) => source === originalFile)?.[0]
+      : undefined;
     const existing = designPageFrameFiles(canvas, page).map(file => canvas.frames[file]!);
     const originalGeometry = canvas.frames[originalFile];
     const automatic = originalGeometry && designPageFrameFiles(canvas, page).includes(originalFile)
       ? duplicateFrameGeometry(originalGeometry, existing, originalMeta)
       : nextFrameGeometry(existing, originalMeta);
     const geometry = input.geometry ? normalizeGeometry(input.geometry, automatic) : automatic;
+    const source = componentName
+      ? FRAME_SEED(
+          title,
+          `f-${createHash("sha256").update(`${file}:${randomUUID()}`).digest("hex").slice(0, 8)}`,
+          geometry.w,
+          geometry.h,
+          folder ? "../tokens.css" : "./tokens.css",
+          readDesignStyleSourceCatalog(canvas).declarations.length > 0,
+        ).replace(
+          "</main>",
+          `${designComponentHost(original, componentName, input.componentCopy!.variant, `o-${randomUUID().replace(/-/g, "")}`)}</main>`,
+        )
+      : rebaseDesignHtmlReferences(reseedFrameOids(
+          rewriteFrameTitleSource(original, title),
+          `${file}:${randomUUID()}`,
+        ), originalFile, file, { strict: true });
     canvas.frames[file] = geometry;
     canvas.frame_info[file] = { id: `frame_${randomUUID().replace(/-/g, "")}`, title, kind: originalMeta.kind };
     await writeCanvas(workspacePath, canvas, [
@@ -961,6 +991,7 @@ export async function transferDesignNode(
     /** Copy into the destination; preserve the exact original source bytes. */
     duplicateNodeId?: string;
     pageId?: string;
+    componentCopy?: DesignComponentCopy;
     destinationFrame?: string;
     destinationSourceVersion?: string;
     parentId?: string;
@@ -1016,8 +1047,36 @@ export async function transferDesignNode(
       throw new Error("The source frame changed before the layer move.");
     if (input.destinationFrame === from.file && !relocationStyles)
       throw new Error("Use a node move for layers in the same frame.");
-    // A body-rooted frame moves whole: its body's content, in one new layer.
-    const wholeFrame = input.nodeId === DESIGN_RUNTIME_DOCUMENT_BODY_ID;
+    const fromSource = healDesignOids(from.source).html;
+    const sourceDocument = parse(fromSource, { sourceCodeLocationInfo: true });
+    const bodyElement = elementRecords(sourceDocument).find(
+      ({ element }) => element.tagName === "body",
+    )?.element;
+    const bodyRoots = (bodyElement?.childNodes ?? []).filter(
+      (node): node is DefaultTreeAdapterTypes.Element =>
+        "tagName" in node && node.attrs.some((attribute) => attribute.name === "data-oid"),
+    );
+    const headElement = elementRecords(sourceDocument).find(
+      ({ element }) => element.tagName === "head",
+    )?.element;
+    const declaresComponentOptions = (headElement?.childNodes ?? []).some(
+      (child) => "tagName" in child && child.tagName === "template" &&
+        child.attrs.some((attribute) => attribute.name === "data-zd-options"),
+    );
+    const runtimeRootElement = bodyRoots.length === 1 &&
+      (bodyRoots[0]!.attrs.some((attribute) => attribute.name === "data-zeros-frame-root") || declaresComponentOptions)
+      ? bodyRoots[0]
+      : undefined;
+    const runtimeRoot = runtimeRootElement && designNodeRecords(sourceDocument).find(
+      (candidate) => candidate.element === runtimeRootElement,
+    );
+    // The runtime exposes a sole seeded shell or a single-root component as
+    // the frame root. Only linked-copy intent treats that id as a whole frame;
+    // legacy node moves keep their existing layer semantics.
+    const wholeFrame = input.nodeId === DESIGN_RUNTIME_DOCUMENT_BODY_ID ||
+      (input.componentCopy !== undefined && runtimeRoot?.oid === input.nodeId);
+    if (input.componentCopy && (!wholeFrame || !input.duplicateNodeId))
+      throw new Error("A linked component copy must duplicate a whole frame.");
     if (
       wholeFrame &&
       (!input.destinationFrame ||
@@ -1025,26 +1084,23 @@ export async function transferDesignNode(
         !relocationStyles)
     )
       throw new Error("A whole frame can only be nested into another frame.");
-    const fromSource = healDesignOids(from.source).html;
     if (relocationStyles && !wholeFrame)
       assertDesignRelocationSource(fromSource, input.nodeId);
-    const sourceDocument = parse(fromSource, { sourceCodeLocationInfo: true });
     const record = wholeFrame
       ? undefined
       : designNodeRecords(sourceDocument).find(
           (record) => record.oid === input.nodeId,
         );
-    const bodyElement = elementRecords(sourceDocument).find(
-      ({ element }) => element.tagName === "body",
-    )?.element;
     const bodyLocation = bodyElement?.sourceCodeLocation;
-    const span = wholeFrame
+    const span = input.nodeId === DESIGN_RUNTIME_DOCUMENT_BODY_ID && wholeFrame
       ? bodyLocation?.startTag && bodyLocation.endTag
         ? {
             startOffset: bodyLocation.startTag.endOffset,
             endOffset: bodyLocation.endTag.startOffset,
           }
         : undefined
+      : wholeFrame
+        ? runtimeRoot?.element.sourceCodeLocation
       : record?.element.sourceCodeLocation;
     if ((!wholeFrame && !record) || !span)
       throw new Error("The layer has no movable source span.");
@@ -1084,14 +1140,24 @@ export async function transferDesignNode(
       throw new Error("The source frame needs an explicit body.");
     let nodeId = input.nodeId;
     let fragment = fromSource.slice(span.startOffset, span.endOffset);
+    let linkedComponentCopy = false;
     if (wholeFrame) {
       const taken = new Set([
         ...designNodeRecords(sourceDocument).map((candidate) => candidate.oid),
       ]);
       do nodeId = `frame-${randomUUID().slice(0, 8)}`;
       while (taken.has(nodeId));
-      // The body's own class and inline style carry to the new layer.
-      const carried = ["class", "style"]
+      if (input.componentCopy) {
+        const canvas = await readCanvas(workspacePath);
+        const componentName = [...designComponentRegistry(canvas).files].find(([, source]) => source === from.file)?.[0];
+        if (componentName) {
+          fragment = designComponentHost(from.source, componentName, input.componentCopy.variant, `o-${randomUUID().replace(/-/g, "")}`);
+          linkedComponentCopy = true;
+        }
+      }
+      // The body's own class and inline style carry to the new layer unless
+      // the registered main has been replaced by a linked host.
+      const carried = linkedComponentCopy ? "" : ["class", "style"]
         .map((name) => [name, body.attrs.find((attribute) => attribute.name === name)?.value] as const)
         .filter(([, value]) => value)
         .map(([name, value]) => ` ${name}="${escapeAttribute(value!)}"`)
@@ -1201,7 +1267,7 @@ export async function transferDesignNode(
       source = withPositionedParent(source, destination.file, input.parentId, input.parentStyles);
       // Keep local stylesheet dependencies when a detached frame is put back.
       // They remain relative to the same Design directory.
-      const dependencies = elementRecords(sourceDocument)
+      const dependencies = linkedComponentCopy ? [] : elementRecords(sourceDocument)
         .filter(
           ({ element }) =>
             element.tagName === "style" ||
