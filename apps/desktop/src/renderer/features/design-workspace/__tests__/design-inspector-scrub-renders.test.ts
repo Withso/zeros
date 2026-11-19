@@ -148,7 +148,7 @@ const card: DesignRuntimeNodeDetails = {
 let container: HTMLDivElement;
 let reactRoot: Root | null = null;
 
-async function show() {
+async function show(frameVersion = sourceVersion, details: DesignRuntimeNodeDetails | null = card, workspaceId = "w", nodeId = "card") {
   mocks.runtime.mockReturnValue({
     sourceVersion,
     supports: () => false,
@@ -156,16 +156,16 @@ async function show() {
     clearPreviewStyles: vi.fn(async () => card),
     getNodeDetails: vi.fn(async () => card),
   });
-  const frame = { file: "home.html", sourceVersion, title: "Home", x: 0, y: 0, z: 0, width: 400, height: 300 } as never;
+  const frame = { file: "home.html", sourceVersion: frameVersion, title: "Home", x: 0, y: 0, z: 0, width: 400, height: 300 } as never;
   const snapshot = { sourceVersion, revision: 1, tree: [], warnings: [], frame: root,
     viewport: { width: 400, height: 300, scrollX: 0, scrollY: 0 } } as DesignRuntimeSnapshot;
-  useDesignRuntimeStore.getState().publishSnapshot("w", "/repo", "home.html", snapshot, sourceVersion);
+  useDesignRuntimeStore.getState().publishSnapshot(workspaceId, "/repo", "home.html", snapshot, sourceVersion);
   await act(async () => {
     reactRoot ??= createRoot(container);
     reactRoot.render(React.createElement(TooltipProvider, null,
       React.createElement(DesignInspector, {
-        workspaceId: "w", folder: "/repo", frame, frameSelected: false, selectedNodeId: "card", selectedNodeIds: ["card"],
-        details: card, lint: null, active: true, canvasBackground: "white", onCanvasBackgroundChange: () => {},
+        workspaceId, folder: "/repo", frame, frameSelected: false, selectedNodeId: nodeId, selectedNodeIds: [nodeId],
+        details, lint: null, active: true, canvasBackground: "white", onCanvasBackgroundChange: () => {},
         motionTimelineOpen: false, motionProperties: [], onOpenMotionTimeline: () => {}, zoomActionsRef: { current: null },
       } as never)));
   });
@@ -265,6 +265,39 @@ describe("an inspector field scrub", () => {
     act(() => reactRoot?.unmount());
     reactRoot = null;
     container.remove();
+  });
+
+  it.each(["frame", "details"])("retains the same-node editor and open menu when %s advances first without allowing stale writes", async (first) => {
+    await show();
+    const editor = container.querySelector("[data-design-style-editor]");
+    const trigger = container.querySelector<HTMLButtonElement>('button[aria-label^="Width sizing:"]')!;
+    await act(async () => { trigger.dispatchEvent(pointer("pointerdown", 0)); });
+    expect(document.querySelector('[role="menu"]')).not.toBeNull();
+    const nextVersion = "2".repeat(24);
+    await show(first === "frame" ? nextVersion : sourceVersion, first === "details" ? { ...card, sourceVersion: nextVersion } : card);
+    expect(container.querySelector("[data-design-style-editor]")?.isSameNode(editor)).toBe(true);
+    expect(document.querySelector('[role="menu"]')).not.toBeNull();
+    expect(fieldInput("opacity").disabled).toBe(true);
+    expect(fieldInput("opacity").value).toBe("50");
+    const item = document.querySelector<HTMLElement>('[role="menuitemradio"]')!;
+    await act(async () => { item.click(); });
+    expect(writes()).toBe(0);
+    await show(nextVersion, null);
+    expect(container.querySelector("[data-design-style-editor]")).toBe(editor);
+    expect(fieldInput("opacity").disabled).toBe(true);
+    await show(nextVersion, { ...card, sourceVersion: nextVersion });
+    expect(container.querySelector("[data-design-style-editor]")).toBe(editor);
+    expect(fieldInput("opacity").disabled).toBe(false);
+  });
+
+  it("does not retain another owner or node's details when their readback is missing", async () => {
+    await show();
+    await show(sourceVersion, null, "other");
+    expect(container.querySelector("[data-design-style-editor]")).toBeNull();
+    await show();
+    await show(sourceVersion, null, "w", "other-node");
+    expect(container.querySelector("[data-design-style-editor]")).toBeNull();
+    expect(writes()).toBe(0);
   });
 
   it("a 120-tick scrub re-renders only the scrubbed field", async () => {

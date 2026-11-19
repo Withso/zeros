@@ -1701,6 +1701,7 @@ export const DesignInspector = React.memo(function DesignInspector({
   // A slot takes layers, not styles: its frame is the main's.
   const slotSelected = !!selectedNodeId && designComponentSlotOf(selectedNodeId) !== null;
   const editsDisabled = !active || pendingHistoryActions > 0 || slotSelected;
+  const styleEditsDisabled = editsDisabled || !elementDetails;
   const tabPreferencesRef = useRef(new Map<string, DesignInspectorTab>());
   const [tabPreference, setTabPreference] = useState<{ key: string; value: DesignInspectorTab } | null>(null);
   const tabKeyRef = useRef("");
@@ -1927,23 +1928,29 @@ export const DesignInspector = React.memo(function DesignInspector({
       : undefined;
     return styleNodeIds.map((nodeId) => frameState?.detailsByNode[nodeId] ?? null);
   }));
-  const layoutParents = useMemo(
-    () =>
-      styleNodeIds.flatMap((nodeId, index) => {
-        const node =
-          nodeId === elementDetails?.oid
-            ? elementDetails
-            : styleNodeDetails[index];
-        return node && node.sourceVersion === elementDetails?.sourceVersion
-          ? [node]
-          : [];
-      }),
-    [elementDetails, styleNodeDetails, styleNodeIds],
-  );
   const styleDirectoryKey = workspaceId
     ? designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.directoryId ??
       designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.directory ?? ""
     : "";
+  const styleOwnerKey = `${workspaceId ?? ""}\u0000${folder ?? ""}\u0000${styleDirectoryKey}\u0000${activePageId ?? ""}\u0000${frame?.file ?? ""}\u0000${styleNodeIds.join("\u0000")}`;
+  const confirmedStyleDetailsRef = useRef<{ owner: string; details: DesignRuntimeNodeDetails } | null>(null);
+  if (confirmedStyleDetailsRef.current?.owner !== styleOwnerKey) confirmedStyleDetailsRef.current = null;
+  if (elementDetails) confirmedStyleDetailsRef.current = { owner: styleOwnerKey, details: elementDetails };
+  // Revalidation retains presentation only; edit contexts still require exact-source details.
+  const presentedElementDetails = elementDetails ?? confirmedStyleDetailsRef.current?.details ?? null;
+  const layoutParents = useMemo(
+    () =>
+      styleNodeIds.flatMap((nodeId, index) => {
+        const node =
+          nodeId === presentedElementDetails?.oid
+            ? presentedElementDetails
+            : styleNodeDetails[index];
+        return node && node.sourceVersion === presentedElementDetails?.sourceVersion
+          ? [node]
+          : [];
+      }),
+    [presentedElementDetails, styleNodeDetails, styleNodeIds],
+  );
   // A main component showing one of its states: style edits write that
   // state's rule in the main, not the layers' own style.
   const shownState = useDesignShownComponentState(workspaceId ?? "", frame ?? null);
@@ -1953,7 +1960,7 @@ export const DesignInspector = React.memo(function DesignInspector({
     return variant && designDeclaredVariants(frame.component).includes(variant) ? variant : null;
   });
   const styleEditContextRef = useRef({
-    active,
+    active: active && Boolean(elementDetails),
     pageId: activePageId ?? null,
     directoryKey: styleDirectoryKey,
     workspaceId,
@@ -1966,7 +1973,7 @@ export const DesignInspector = React.memo(function DesignInspector({
     stateContext: shownState,
   });
   styleEditContextRef.current = {
-    active,
+    active: active && Boolean(elementDetails),
     pageId: activePageId ?? null,
     directoryKey: styleDirectoryKey,
     workspaceId,
@@ -1978,7 +1985,6 @@ export const DesignInspector = React.memo(function DesignInspector({
     layoutRootId,
     stateContext: shownState,
   };
-  const styleOwnerKey = `${workspaceId ?? ""}\u0000${styleDirectoryKey}\u0000${activePageId ?? ""}\u0000${frame?.file ?? ""}\u0000${styleNodeIds.join("\u0000")}`;
   // A keyed editor's cleanup runs after the new selection has rendered. Keep
   // its callbacks and cancellation baseline attached to its own owner; using
   // the live selection here would restore the incoming layer instead.
@@ -2005,7 +2011,7 @@ export const DesignInspector = React.memo(function DesignInspector({
   const holding = heldEntry !== null;
   const heldParents = useMemo(() => (heldDetails ? [heldDetails] : null), [heldDetails]);
   const heldChanges = useMemo(() => (heldDetails ? designHeldStateChanges(heldDetails) : null), [heldDetails]);
-  const shownDetails = heldDetails ?? elementDetails;
+  const shownDetails = heldDetails ?? presentedElementDetails;
   const shownParents = heldParents ?? layoutParents;
   const heldState = heldDetails?.heldState ?? null;
   const originsContext = useDesignStyleOriginsContext(workspaceId);
@@ -2875,7 +2881,7 @@ export const DesignInspector = React.memo(function DesignInspector({
   useLayoutEffect(() => { layoutShortcutRef.current = commitLayoutAction; }, [commitLayoutAction]);
 
   const styleContext =
-    workspaceId && folder && frame && styleTargetNodeId && elementDetails
+    workspaceId && folder && frame && styleTargetNodeId && presentedElementDetails
       ? { workspaceId, folder, frame, nodeId: styleTargetNodeId }
       : null;
   const styleField = (
@@ -2916,7 +2922,7 @@ export const DesignInspector = React.memo(function DesignInspector({
               : DESIGN_FRAME_POSITION_RANGE
           }
           compact={options?.compact}
-          disabled={editsDisabled || !styleActive}
+          disabled={styleEditsDisabled || !styleActive}
           applied
           onPreview={(next) => {
             const number = Number(next);
@@ -2940,6 +2946,7 @@ export const DesignInspector = React.memo(function DesignInspector({
             )
           }
           onCommit={async (next) => {
+            if (!styleEditContextRef.current.active) return;
             const number = Number(next);
             if (!Number.isFinite(number)) {
               throw new Error("Enter a finite number.");
@@ -3050,7 +3057,7 @@ export const DesignInspector = React.memo(function DesignInspector({
         originLabel={styleOriginLabel}
         onLayoutAction={commitLayoutAction}
         onPreviewLayoutAction={previewLayoutAction}
-        disabled={editsDisabled || !styleActive}
+        disabled={styleEditsDisabled || !styleActive}
         applied={applied}
         motionModeActive={motionTimelineOpen}
         motionTrackActive={motionProperties.includes(property)}
@@ -3500,7 +3507,7 @@ export const DesignInspector = React.memo(function DesignInspector({
               </Tooltip>
             ) : null}
 
-            {styleContext && elementDetails ? (
+            {styleContext && presentedElementDetails ? (
               <DesignStyleOriginLabelContext.Provider value={styleOriginLabel}>
                 <DesignFieldOriginsContext.Provider value={fieldOrigins}>
                 <DesignTokenCatalogContext.Provider value={tokenCatalog}>
@@ -3510,7 +3517,7 @@ export const DesignInspector = React.memo(function DesignInspector({
                   active={active && styleActive}
                   ownerKey={styleOwnerKey}
                   origins={fieldOrigins}
-                  disabled={editsDisabled || !styleActive}
+                  disabled={styleEditsDisabled || !styleActive}
                   readOnly={holding}
                   apiRef={overlaysApiRef}
                   onChooseToken={chooseFieldToken}
@@ -3520,7 +3527,7 @@ export const DesignInspector = React.memo(function DesignInspector({
                 >
                   <DesignStyleEditor
                     key={styleOwner.key}
-                    details={shownDetails ?? elementDetails}
+                    details={shownDetails ?? presentedElementDetails}
                     livePreviewOwner={
                       styleContext
                         ? {
@@ -3533,12 +3540,12 @@ export const DesignInspector = React.memo(function DesignInspector({
                     renderField={styleField}
                     onLayoutAction={commitLayoutAction}
                     frameSelected={
-                      frameStyleTarget || elementDetails.oid === layoutRootId
+                      frameStyleTarget || presentedElementDetails.oid === layoutRootId
                     }
                     layoutParents={shownParents}
                     selectionCount={styleNodeIds.length}
                     active={active && styleActive}
-                    disabled={editsDisabled || !styleActive}
+                    disabled={styleEditsDisabled || !styleActive}
                     onPreviewStyles={previewSelectedStyles}
                     onCancelStylePreview={clearSelectedStylePreview}
                     onCommitStyles={commitSelectedStyles}
