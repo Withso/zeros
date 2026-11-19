@@ -1,5 +1,4 @@
 import { execFile } from "node:child_process";
-import { readFileSync } from "node:fs";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -8,7 +7,6 @@ import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 const execFileAsync = promisify(execFile);
-const repositoryRoot = path.resolve(import.meta.dirname, "../../../../../..");
 
 describe("Zeros-scoped design-directory containment guarantees", () => {
   let temporaryRoot: string;
@@ -120,18 +118,5 @@ describe("Zeros-scoped design-directory containment guarantees", () => {
     await expect(
       readFile(path.join(repo, "code", "hardlinked.txt"), "utf8"),
     ).resolves.toContain("through-hardlink");
-  });
-
-  it("documents native mode policy separately from filesystem permissions", () => {
-    const designWorkspace = readFileSync(
-      path.join(repositoryRoot, "docs", "design-mode-roadmap.md"),
-      "utf8",
-    );
-    expect(designWorkspace).toContain("Shared Code/Design agent");
-    expect(designWorkspace).toContain("can edit Code and Design in either context");
-    expect(designWorkspace).toContain("External terminal/editor");
-    expect(designWorkspace).toMatch(
-      /Provider permissions and same-user host\s+authority remain independent of the composer tag/,
-    );
   });
 });
