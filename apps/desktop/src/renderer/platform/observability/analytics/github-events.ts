@@ -1,7 +1,4 @@
-// Metadata-only GitHub authentication funnel.
-//
-// Keep this vocabulary fixed: never pass usernames, repository names, branch
-// names, URLs, token fragments, or raw error messages to analytics.
+// Keep GitHub analytics fields closed; never send account or repository names, URLs, tokens, or raw errors.
 
 import type {
   GithubAuthMethod,
@@ -82,7 +79,6 @@ export function trackGithubConnectCompleted(args: {
   });
 }
 
-/** Reduce an IPC/main error to the fixed GitHub auth vocabulary. */
 export function githubConnectErrorKind(error: unknown): GithubConnectErrorKind {
   const code =
     error &&

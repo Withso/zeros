@@ -1,6 +1,4 @@
-/** Team sharing: a teammate's workspace this account only reads. Thrown before
- * a worker connection is attempted, and for the control plane's
- * 409 workspace_read_only, so callers see one error for both. */
+// Use one error for renderer refusal before worker admission and the control plane's workspace_read_only response.
 export class CloudWorkspaceReadOnlyError extends Error {
   readonly status = 409;
   readonly code = "workspace_read_only";

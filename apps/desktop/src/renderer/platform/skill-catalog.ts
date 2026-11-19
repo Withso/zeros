@@ -2,8 +2,7 @@ import { shallow } from "zustand/shallow";
 import { KeyedAsyncCache } from "../shared/lib/keyed-async-cache";
 import { listSkills, type Skill } from "./app";
 
-/** Discovery is server state shared by composers and source viewers. Keep
- * exact workspace/provider snapshots while revalidating, including A → B → A. */
+/** Composers and source viewers share the last confirmed exact workspace/provider catalog during revalidation. */
 export const skillCatalog = new KeyedAsyncCache<Skill[]>({
   maxEntries: 32,
   maxWeight: 8 * 1024 * 1024,

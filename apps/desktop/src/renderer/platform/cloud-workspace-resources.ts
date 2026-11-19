@@ -4,12 +4,9 @@ import { getActiveBridge } from "./bridge/active-bridge";
 import { cloudWorkspaceKey, type CloudWorkspaceTarget } from "./bridge/cloud-workspace-key";
 
 const REFRESH_MS = 5_000;
-/** R1: with a watching worker the samples are pushed; this re-asks only if pushes stop arriving. */
 const WATCH_FALLBACK_MS = 60_000;
 
-/** CPU, memory and disk from the workspace's worker. An older worker, a
- * refusal or a malformed reply is "no rows", never an error. Passive: a
- * disconnected or stopped workspace is not reopened to answer. */
+// Read only from an existing worker; unsupported or invalid replies produce no sample.
 export async function readCloudWorkspaceResources(target: CloudWorkspaceTarget, watch?: boolean): Promise<CloudWorkspaceResources | null> {
   const bridge = getActiveBridge(), workspaceId = cloudWorkspaceKey(target);
   if (!bridge?.supportsEngineCapability?.(CLOUD_WORKSPACE_RESOURCES_CAPABILITY, workspaceId)) return null;
@@ -21,9 +18,7 @@ export async function readCloudWorkspaceResources(target: CloudWorkspaceTarget, 
   return parsed.success ? parsed.data : null;
 }
 
-/** Sampled only while `active` (the details popup is open on a running
- * workspace); nothing is asked otherwise. Keyed by workspace, so a late reply
- * for another workspace never shows. */
+// Key samples by workspace so a late reply cannot paint another workspace's popup.
 export function useCloudWorkspaceResources(target: CloudWorkspaceTarget | null, active: boolean): CloudWorkspaceResources | null {
   const key = target ? cloudWorkspaceKey(target) : null;
   const [sample, setSample] = useState<{ key: string; value: CloudWorkspaceResources } | null>(null);
@@ -31,7 +26,7 @@ export function useCloudWorkspaceResources(target: CloudWorkspaceTarget | null, 
     if (!active || !target || !key) return;
     let cancelled = false, inFlight = false;
     const bridge = getActiveBridge();
-    // R1: a watching worker pushes samples; one request subscribes, and this re-asks only if pushes stop.
+    // Watch-capable workers push samples; poll only if the pushes stop.
     const watching = !!bridge?.supportsEngineCapability?.(CLOUD_WORKSPACE_RESOURCES_WATCH_CAPABILITY, key) && typeof bridge.on === "function";
     const ask = () => {
       if (inFlight) return;

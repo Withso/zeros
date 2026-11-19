@@ -139,7 +139,7 @@ export class NativeCloudChatCacheClient {
       await this.request({ op: "forget", targets: targets.slice(start, start + 500) }, z.null(), binding);
     }
   }
-  /** Launch diagnostics for main.log: reads this renderer answered without main, by closed class. Best effort. */
+  // Report only counts of renderer-declined reads by closed class to the main launch log.
   report(declines: Partial<Record<CloudCacheRendererDecline, number>>): Promise<void> {
     return this.deps.invoke({ op: "report", declines }).then(() => undefined, () => undefined);
   }

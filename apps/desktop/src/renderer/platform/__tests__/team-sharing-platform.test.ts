@@ -30,7 +30,7 @@ describe("team sharing in the desktop's documents", () => {
     const creator = cloudV2Document(CloudV2WorkspaceSchema.parse(ws("22222222-2222-4222-8222-222222222222")));
     expect(creator.capabilities).toMatchObject({ canWrite: true, canEdit: true, canManage: true, canStart: true });
     expect(creator).not.toHaveProperty("sharing");
-    // Malformed sharing fields read as no sharing, never as a writable teammate workspace with half the fields.
+    // An invalid viewer role drops the entire sharing block.
     expect(cloudV2Document(CloudV2WorkspaceSchema.parse(ws("22222222-2222-4222-8222-222222222222", { ...shared, viewerRole: "owner" })))).not.toHaveProperty("sharing");
   });
 
@@ -51,7 +51,7 @@ describe("team sharing in the desktop's documents", () => {
     const snapshot = await listCloudWorkspaceCatalogSnapshot(org);
     expect(snapshot.complete).toBe(false);          // the catalog keeps the teammates' rows it already has
     expect(sharingOrganization(org)).toBe(true);
-    // A new account generation forgets sharing; a creator-only reply then is simply the list.
+    // An account-generation change clears the prior account's shared-catalog confirmation.
     state.generation = 1;
     respond({ workspaces: [] });
     expect((await listCloudWorkspaceCatalogSnapshot(org)).complete).toBe(true);

@@ -45,7 +45,6 @@ describe("this Mac's sync statuses in the renderer", () => {
     } finally { stop(); }
   });
 
-  // Escaped to CI: a main process that answers nothing made the details popup throw on `null.find`.
   it("treats a missing or malformed reply and event as no statuses", async () => {
     state.reply = null;
     const stop = startWorkspaceSyncStatus();

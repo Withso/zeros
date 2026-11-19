@@ -16,3 +16,4 @@ fbb41482e3b95246228ba6437d8fbbc265648ee2 # Trim narration in Settings routing an
 b17f04301ed3c64a246b5a46775d575536c3d0e2 # Trim comments around Settings feature gates (#1170)
 2242be6093120f5a954911b00adee907d582a513 # Trim comments in agent and provider settings (#1171)
 238da07f193851502286d3299d5f51e2b33b3fad # Trim redundant comments across Settings (#1179)
+96cf6fe0310620d551954589a0c57c8ef6281978 # Trim redundant comments across the renderer bridge (#1183)

@@ -29,8 +29,7 @@ export const accountPresentationOwner = (backend: string, account: string) =>
 export const getAccountPresentationOwner = () => owner ?? null;
 export const accountPresentationGeneration = () => generation;
 
-/** One account/backend on this device. A renderer reload retains its snapshot;
- * replacement or sign-out removes it before another identity can render. */
+/** Retain presentation across reload for the same account/backend; retire it on replacement or sign-out. */
 export function bindAccountPresentationOwner(next: string | null): { changed: boolean; retire: boolean } {
   if (owner === next) return { changed: false, retire: false };
   const saved = storage.read(OWNER_KEY);

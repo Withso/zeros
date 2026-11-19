@@ -72,8 +72,7 @@ function forgetPresentation(key: string): void {
   invalidateCloudGithubPrScope(key);
 }
 onCloudGithubPrContextChange((key, retainPresentation) => {
-  // A new HEAD invalidates request/mutation authority, while the same branch's
-  // last confirmed presentation remains useful during its next read.
+  // A new HEAD invalidates request authority, not the same branch's last confirmed presentation.
   if (retainPresentation) return;
   snapshots.delete(key);
   forgetPresentation(key);
@@ -91,7 +90,7 @@ export function clearCloudGithubPr(organizationId?: string): void {
       forgetPresentation(key);
     }
   }
-  // A cleared flight is still fenced when it settles; callers may start a new read.
+  // Clearing deduplication permits new reads; epochs still fence old replies.
   for (const key of flights.keys())
     if (!organizationId || key.includes(organizationId)) flights.delete(key);
   if (scopeEpochs.size > 128) {
@@ -101,8 +100,7 @@ export function clearCloudGithubPr(organizationId?: string): void {
   } else invalidateCloudGithubPrScope(organizationId);
 }
 
-/** Published PR operations bypass the VM transport. Reads keep a stopped VM
- * stopped; native Git operations still use its explicit worker admission. */
+/** Published PR operations bypass the VM transport, so a read cannot wake a stopped worker. */
 export function requestCloudGithubPr(
   target: CloudWorkspaceTarget,
   op: string,
@@ -127,8 +125,7 @@ export function requestCloudGithubPr(
   const captured = snapshots.get(key),
     write = CLOUD_GITHUB_PR_WRITES.has(op);
   const { workspaceId: _workspaceId, ...params } = input;
-  // Shared suggestion callers carry their displayed remote as a Local hint.
-  // Cloud always resolves the server's pinned repository for this workspace.
+  // A caller's remote is only a Local hint; cloud uses the server-pinned repository.
   if (op === "gh.prList") {
     delete params.owner;
     delete params.repo;
@@ -182,7 +179,6 @@ export function requestCloudGithubPr(
         CloudGithubPrResponseSchema,
         { body: parsed.data, idempotencyKey: crypto.randomUUID() },
         {
-          // Team sharing: only an admin's or member's request opts in (team-sharing-registry sharingFor).
           ...sharingFor(target.workspaceId),
           githubPullRequest: true,
           ...(write ? { mutationReceipt: true } : {}),
@@ -191,8 +187,7 @@ export function requestCloudGithubPr(
     })
     .then(async (response) => {
       if (write && (!current() || response.authorityCurrent === false)) {
-        // The original action succeeded. Do not publish its protected snapshot
-        // into a different connection's mounted surfaces or encourage a retry.
+        // Preserve the successful receipt without publishing its snapshot into a different GitHub authority.
         if (current()) {
           snapshots.delete(key);
           forgetPresentation(key);
@@ -239,10 +234,7 @@ export function requestCloudGithubPr(
       snapshots.set(key, snapshot);
       while (snapshots.size > 128)
         snapshots.delete(snapshots.keys().next().value!);
-      // The request boundary reads the catalog's pure projection. Loading the
-      // refresh owner only after I/O avoids a Git → catalog → Git import cycle.
-      // Idle is quiet: a read-only PR sync re-reads the workspace only when the PR it reports differs from the
-      // document's (the control plane records it there); a write always does.
+      // Load catalog refresh lazily to avoid an import cycle; unchanged PR reads need no catalog I/O.
       if (write || op === "gh.prSync")
         await import("../state/cloud-workspace-catalog")
           .then(({ refreshCloudWorkspace, cloudWorkspaceDocument }) =>
@@ -299,7 +291,7 @@ export function requestCloudGithubPr(
   return pending;
 }
 
-/** Whether a gh.prSync result differs from the workspace document's PR fields; unknown means yes. */
+/** Treat an unknown catalog or result as needing revalidation. */
 function prSyncChangesDocument(github: { prNumber: number | null; prState: string | null; prUrl: string | null } | undefined, result: unknown): boolean {
   if (!github) return true;
   if (result === null || result === undefined) return github.prNumber !== null;

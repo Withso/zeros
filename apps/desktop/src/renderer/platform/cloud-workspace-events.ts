@@ -5,9 +5,7 @@ import { CONTROL_PLANE_URL, ControlPlaneError } from "../features/team/control-p
 import { controlPlaneFetch } from "../features/update/control-plane-fetch";
 import type { CloudWorkspaceTarget } from "./bridge/cloud-workspace-key";
 
-/** Team sharing phase 1: GET /v1/cloud-v2/workspaces/:id/events, the passive
- * read channel (team-sharing-wire.md section 4). It never starts or keeps a VM
- * running; it has no replay cursor, so ready and changed mean "read again". */
+// This passive stream never wakes or keeps a VM alive; without a replay cursor, ready and changed both invalidate reads.
 export type CloudWorkspaceEvent =
   | { event: "ready" }
   | { event: "changed" }
@@ -35,7 +33,6 @@ function parseEvent(name: string, data: string): CloudWorkspaceEvent | null {
   return null;   // A newer server's event: ignored.
 }
 
-/** One stream. Ends when the server ends it; throws on an HTTP or network error. */
 export async function* readCloudWorkspaceEvents(target: CloudWorkspaceTarget, signal: AbortSignal): AsyncGenerator<CloudWorkspaceEvent> {
   if (!CONTROL_PLANE_URL) throw new Error("Cloud workspaces are not configured");
   const epoch = getOrganizationStoreGeneration();
@@ -90,16 +87,14 @@ export async function* readCloudWorkspaceEvents(target: CloudWorkspaceTarget, si
 export interface CloudWorkspaceEventHandlers {
   /** ready or changed: read the document and history again (coalesced). */
   invalidate(): void;
-  /** Only when the set of people viewing changes. */
   presence(userIds: readonly string[], total: number): void;
-  /** Access ended (revoked, or the workspace is gone): the view stops. */
   ended(code: string): void;
 }
 export interface CloudWorkspaceEventDeps {
   events?: typeof readCloudWorkspaceEvents;
   sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
   now?: () => number;
-  /** A workspace that is not ready (stopped, waking) holds no stream: it waits, without a timer, for readiness. */
+  // Stopped or waking workspaces wait for readiness without a reconnect timer.
   ready?: () => boolean;
   onReadiness?: (listener: () => void) => () => void;
 }
@@ -111,10 +106,7 @@ const abortableSleep = (ms: number, signal: AbortSignal) => new Promise<void>(re
   signal.addEventListener("abort", () => { clearTimeout(timer); resolve(); }, { once: true });
 });
 
-/** Keep the stream open while the caller holds it. A clean end of a healthy
- * stream (the token's end) reconnects at once; a stream silent for 70 s is
- * aborted and reopened; errors back off to 30 s; revoked, 403 and 404 stop it.
- * Heartbeats only feed the watchdog: they never cause a read. */
+// Heartbeats feed only the watchdog; reconnects after healthy ends or watchdog aborts reset ordinary backoff.
 export function watchCloudWorkspaceEvents(target: CloudWorkspaceTarget, handlers: CloudWorkspaceEventHandlers, deps: CloudWorkspaceEventDeps = {}): () => void {
   const events = deps.events ?? readCloudWorkspaceEvents, sleep = deps.sleep ?? abortableSleep, now = deps.now ?? Date.now;
   const stop = new AbortController();

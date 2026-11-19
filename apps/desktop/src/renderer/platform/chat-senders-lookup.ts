@@ -3,10 +3,7 @@ import type { CloudWorkspaceTarget } from "./bridge/cloud-workspace-key";
 import { acceptHistorySenders, chatKeyFor, chatSender } from "./chat-senders";
 import { readCloudV2History } from "./cloud-v2";
 
-/** Team sharing phase 2: `messages.senders` for user messages that arrived
- * without attribution (a connected client reads history from the worker, and
- * live messages come from it too). Batched per chat, up to 200 ids a request,
- * each id asked once; a failed lookup may be asked again after a while. */
+/** Live and worker-history messages can lack sender attribution; fetch it from the control plane's receipts in a separate request. */
 const FLUSH_MS = 150, BATCH = 200, RETRY_MS = 30_000;
 const pending = new Map<string, { target: CloudWorkspaceTarget; chatId: string; ids: Set<string>; timer: ReturnType<typeof setTimeout> }>();
 const asked = new Map<string, number>();
@@ -36,7 +33,7 @@ function flush(key: string, read: typeof readCloudV2History): void {
     const userMessageIds = ids.slice(start, start + BATCH);
     void read(batch.target, "messages.senders", { chatId: batch.chatId, userMessageIds })
       .then(result => acceptHistorySenders(batch.target, batch.chatId, result.senders), () => {
-        // Not answered: forget the ask so a later render may try again after RETRY_MS.
+        // Keep the ask timestamp so failure still observes the retry cooldown.
       });
   }
 }
