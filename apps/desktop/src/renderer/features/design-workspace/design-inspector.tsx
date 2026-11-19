@@ -169,6 +169,7 @@ import {
 import { blockingDesignLintReason, frameBlockingDesignLintErrors } from "./design-lint-summary";
 import { beginDesignPointerGesture } from "./design-pointer-gesture";
 import { DesignStyleEditor } from "./design-style-editor";
+import { DesignColorRevalidatingContext } from "./design-color-picker";
 import {
   clampDesignStyleFieldValue,
   convertDesignLength,
@@ -1993,6 +1994,7 @@ export const DesignInspector = React.memo(function DesignInspector({
   });
   const styleEditContextRef = useRef({
     active: active && Boolean(elementDetails),
+    revalidating: active && !elementDetails && Boolean(presentedElementDetails) && !editsDisabled,
     pageId: activePageId ?? null,
     directoryKey: styleDirectoryKey,
     workspaceId,
@@ -2006,6 +2008,7 @@ export const DesignInspector = React.memo(function DesignInspector({
   });
   styleEditContextRef.current = {
     active: active && Boolean(elementDetails),
+    revalidating: active && !elementDetails && Boolean(presentedElementDetails) && !editsDisabled,
     pageId: activePageId ?? null,
     directoryKey: styleDirectoryKey,
     workspaceId,
@@ -2017,6 +2020,19 @@ export const DesignInspector = React.memo(function DesignInspector({
     layoutRootId,
     stateContext: shownState,
   };
+  const styleDetailsWaitersRef = useRef<Array<(ready: boolean) => void>>([]);
+  useLayoutEffect(() => {
+    const waiters = styleDetailsWaitersRef.current;
+    if (!waiters.length || styleEditContextRef.current.revalidating) return;
+    styleDetailsWaitersRef.current = [];
+    const ready = styleEditContextRef.current.active;
+    for (const resolve of waiters) resolve(ready);
+  });
+  useEffect(() => () => {
+    const waiters = styleDetailsWaitersRef.current;
+    styleDetailsWaitersRef.current = [];
+    for (const resolve of waiters) resolve(false);
+  }, []);
   // A keyed editor's cleanup runs after the new selection has rendered. Keep
   // its callbacks and cancellation baseline attached to its own owner; using
   // the live selection here would restore the incoming layer instead.
@@ -2302,8 +2318,13 @@ export const DesignInspector = React.memo(function DesignInspector({
       const context = styleEditContextRef.current;
       // Retire stale callbacks during render, before passive unmount cleanup.
       // An eyedropper or a pending animation frame cannot follow a new layer.
-      if (currentStyleOwnerRef.current !== styleOwner || !context.active)
-        return Promise.resolve();
+      if (currentStyleOwnerRef.current !== styleOwner) return Promise.resolve();
+      if (!context.active) {
+        if (!context.revalidating) return Promise.resolve();
+        // Same layer, newer source: write once its confirmed details arrive.
+        return new Promise<boolean>((resolve) => styleDetailsWaitersRef.current.push(resolve))
+          .then((ready) => ready ? commitSelectedStylesRef.current(styles, perNode, intent) : undefined);
+      }
       // A held state is view only, answered or not: no value reaches the source.
       if (context.workspaceId && context.frame && designHeldStateHolds(context.workspaceId, context.frame.file, context.styleNodeIds))
         return Promise.resolve();
@@ -2440,6 +2461,8 @@ export const DesignInspector = React.memo(function DesignInspector({
     },
     [styleOwner, stylesForNode],
   );
+  const commitSelectedStylesRef = useRef(commitSelectedStyles);
+  commitSelectedStylesRef.current = commitSelectedStyles;
 
   /** Detach: every selected layer keeps the value its token resolves to on
    * that layer, in one undoable step. */
@@ -3559,6 +3582,7 @@ export const DesignInspector = React.memo(function DesignInspector({
                   onEditInCss={editInCss}
                   onAskAgent={askAgentToChange}
                 >
+                  <DesignColorRevalidatingContext.Provider value={!elementDetails && !editsDisabled && styleActive}>
                   <DesignStyleEditor
                     key={styleOwner.key}
                     details={shownDetails ?? presentedElementDetails}
@@ -3587,6 +3611,7 @@ export const DesignInspector = React.memo(function DesignInspector({
                     motionProperties={motionProperties}
                     onOpenMotionTimeline={onOpenMotionTimeline}
                   />
+                  </DesignColorRevalidatingContext.Provider>
                 </DesignFieldOverlays>
                 </DesignTokenDetachContext.Provider>
                 </DesignTokenCatalogContext.Provider>

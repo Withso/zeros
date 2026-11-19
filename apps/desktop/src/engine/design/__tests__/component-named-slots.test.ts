@@ -53,6 +53,7 @@ describe("a main component's slots", () => {
         '<zd-option name="content" type="slot" label="Content"></zd-option>' +
         '<zd-variant name="compact" heading="Compact heading"></zd-variant>'),
     );
+    // check:ui ignore-next -- the fixture authors literal colour values.
     const host = '<zd-qa-card data-oid="instance-a" data-name="Authored Instance A" zd-variant="compact" mystery="keep-me" zd-style-heading-part="text-decoration: underline" zd-style-tag-part="font-style: italic" style="position:absolute;left:26px;top:80px;width:230px;transform:rotate(2deg);box-shadow:0 4px 10px #2225" show-tag="false">Supplied footer text <strong data-oid="supplied-inline">and element</strong><!-- preserve footer comment --></zd-qa-card>';
     const result = await expandComponent("/work/slots", doc(host), { "qa/card.html": main }, "qa/stage.html", { registry: new Map([["qa-card", "qa/card.html"]]) });
     expect(result.html).toContain('<div data-zd-part="content-part" data-zd-slot="content"><p data-zd-part="fallback">Main fallback content</p></div>');
