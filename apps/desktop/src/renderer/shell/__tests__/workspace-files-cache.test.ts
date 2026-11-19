@@ -16,6 +16,34 @@ import {
   workspaceFileListingFailure,
   subscribeWorkspaceFileListingFailure,
 } from "../workspace-files-cache";
+import { bindAccountPresentationOwner } from "../../platform/account-presentation-cache";
+import { cloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
+
+const cloud = vi.hoisted(() => ({
+  epoch: 0,
+  listeners: new Set<() => void>(),
+  docs: new Map<string, {
+    organizationId: string;
+    status: string;
+    capabilities: { canWrite: boolean };
+    generation: { number: number };
+    sharing?: { readOnly: boolean };
+  }>(),
+}));
+vi.mock("../../state/cloud-workspace-catalog", () => ({
+  cloudCatalogGeneration: () => cloud.epoch,
+  cloudWorkspaceDocument: ({ organizationId, workspaceId }: { organizationId: string; workspaceId: string }) => {
+    const doc = cloud.docs.get(workspaceId);
+    return doc?.organizationId === organizationId ? doc : undefined;
+  },
+  cloudWorkspaceOwnerGeneration: () => 1,
+  cloudWorkspaceStopVersion: () => 0,
+  subscribeCloudWorkspaces: (listener: () => void) => {
+    cloud.listeners.add(listener);
+    return () => { cloud.listeners.delete(listener); };
+  },
+  canReadCloudWorkspace: Boolean,
+}));
 
 vi.mock("@/renderer/platform/git", () => ({
   listWorkspaceFiles: vi.fn(),
@@ -42,6 +70,123 @@ describe("workspace-files-cache invalidation", () => {
     vi.mocked(listWorkspaceFileListing)
       .mockReset()
       .mockImplementation(async (cwd) => ({ files: await listFiles(cwd) }));
+  });
+
+  it("reopens the exact cloud file list after a renderer reload without reading a sleeping worker", async () => {
+    const target = { organizationId: "11111111-1111-4111-8111-111111111111", workspaceId: "22222222-2222-4222-8222-222222222222" };
+    const folder = cloudWorkspaceKey(target);
+    const doc = { organizationId: target.organizationId, status: "ready", capabilities: { canWrite: true }, generation: { number: 1 }, sharing: { readOnly: false } };
+    const storage = new Map<string, string>();
+    vi.stubGlobal("localStorage", {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => storage.set(key, value),
+      removeItem: (key: string) => storage.delete(key),
+    });
+    bindAccountPresentationOwner("test-cloud-list-owner");
+    cloud.docs.set(target.workspaceId, doc);
+    try {
+      listFiles.mockResolvedValueOnce(["cached.ts"]);
+      await loadWorkspaceFiles(folder);
+      resetWorkspaceFilesCacheForTests();
+      doc.status = "stopped";
+
+      expect(peekWorkspaceFiles(folder)).toEqual(["cached.ts"]);
+      await expect(loadWorkspaceFiles(folder)).resolves.toEqual(["cached.ts"]);
+      expect(listFiles).toHaveBeenCalledTimes(1);
+      expect(peekWorkspaceFiles(cloudWorkspaceKey({ ...target, organizationId: target.workspaceId }))).toBeNull();
+
+      doc.status = "ready";
+      const worker = deferred<string[]>();
+      listFiles.mockReturnValueOnce(worker.promise);
+      const refreshing = loadWorkspaceFiles(folder);
+      expect(peekWorkspaceFiles(folder)).toEqual(["cached.ts"]);
+      worker.resolve(["fresh.ts"]);
+      await expect(refreshing).resolves.toEqual(["fresh.ts"]);
+      expect(peekWorkspaceFiles(folder)).toEqual(["fresh.ts"]);
+
+      invalidateWorkspaceFiles(folder);
+      const interrupted = deferred<string[]>();
+      listFiles.mockReturnValueOnce(interrupted.promise);
+      const pending = loadWorkspaceFiles(folder);
+      const rejected = expect(pending).rejects.toThrow("access changed");
+      doc.status = "stopped";
+      for (const listener of cloud.listeners) listener();
+      doc.status = "ready";
+      interrupted.resolve(["late.ts"]);
+      await rejected;
+      expect(peekWorkspaceFiles(folder)).toEqual(["fresh.ts"]);
+
+      doc.generation.number++;
+      expect(peekWorkspaceFiles(folder)).toBeNull();
+      listFiles.mockResolvedValueOnce(["new-generation.ts"]);
+      await loadWorkspaceFiles(folder);
+      doc.sharing.readOnly = true;
+      expect(peekWorkspaceFiles(folder)).toBeNull();
+      await expect(loadWorkspaceFiles(folder)).rejects.toThrow("access changed");
+      doc.sharing.readOnly = false;
+      bindAccountPresentationOwner("another-owner");
+      expect(peekWorkspaceFiles(folder)).toBeNull();
+      bindAccountPresentationOwner("test-cloud-list-owner");
+      expect(peekWorkspaceFiles(folder)).toBeNull();
+    } finally {
+      bindAccountPresentationOwner(null);
+      cloud.docs.clear();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("retains an authorized cloud list too large to persist across stop", async () => {
+    const organizationId = "11111111-1111-4111-8111-111111111111";
+    const workspaceId = "22222222-2222-4222-8222-222222222222";
+    const folder = cloudWorkspaceKey({ organizationId, workspaceId });
+    const doc = { organizationId, status: "ready", capabilities: { canWrite: true }, generation: { number: 1 } };
+    bindAccountPresentationOwner("warm-cloud-list");
+    cloud.docs.set(workspaceId, doc);
+    try {
+      listFiles.mockResolvedValueOnce(["a".repeat(270_000)]);
+      const confirmed = await loadWorkspaceFiles(folder);
+      doc.status = "stopped";
+      for (const listener of cloud.listeners) listener();
+      expect(peekWorkspaceFiles(folder)).toBe(confirmed);
+      await expect(loadWorkspaceFiles(folder)).resolves.toBe(confirmed);
+      expect(listFiles).toHaveBeenCalledTimes(1);
+      resetWorkspaceFilesCacheForTests();
+      expect(peekWorkspaceFiles(folder)).toBeNull();
+    } finally {
+      bindAccountPresentationOwner(null);
+      cloud.docs.clear();
+    }
+  });
+
+  it.each([
+    { count: 13, pathLength: 10, retained: 12 },
+    { count: 4, pathLength: 185_000, retained: 2 },
+  ])("bounds persisted cloud lists independently of the memory cache ($retained retained)", async ({ count, pathLength, retained }) => {
+    const storage = new Map<string, string>();
+    vi.stubGlobal("localStorage", {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => storage.set(key, value),
+      removeItem: (key: string) => storage.delete(key),
+    });
+    bindAccountPresentationOwner("bounded-cloud-lists");
+    try {
+      const organizationId = "11111111-1111-4111-8111-111111111111";
+      const folders: string[] = [];
+      for (let i = 0; i < count; i++) {
+        const workspaceId = `22222222-2222-4222-8222-${String(i).padStart(12, "0")}`;
+        const folder = cloudWorkspaceKey({ organizationId, workspaceId });
+        cloud.docs.set(workspaceId, { organizationId, status: "ready", capabilities: { canWrite: true }, generation: { number: 1 } });
+        listFiles.mockResolvedValueOnce([`${i}-${"a".repeat(pathLength)}.ts`]);
+        await loadWorkspaceFiles(folder);
+        folders.push(folder);
+      }
+      resetWorkspaceFilesCacheForTests();
+      expect(folders.filter(folder => peekWorkspaceFiles(folder) !== null)).toEqual(folders.slice(-retained));
+    } finally {
+      bindAccountPresentationOwner(null);
+      cloud.docs.clear();
+      vi.unstubAllGlobals();
+    }
   });
 
   it("bypasses a fresh TTL entry after a workspace refresh", async () => {

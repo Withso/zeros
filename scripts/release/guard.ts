@@ -61,7 +61,7 @@ function manualCutoverSteps(candidate: DisabledCandidate) {
   return `Owner steps: dispatch controlled-cutover.yml for ${candidate.channel} from ${candidate.branch || "the release branch"} at ${candidate.sourceSha}, ` +
     `with approvals listing exactly the plan's pending controlled migrations and confirm=${database}. It holds independent deploys, fences writers ` +
     `with maintenance mode, backs up and migrates, deploys this SHA, uploads Pages and verifies WorkOS; its receipt is required here. ` +
-    `Then re-run the failed Release (${candidate.channel}) workflow for the same SHA. See docs/deployment-environments.md for controlled cutovers and recovery.`;
+    `Then re-run the failed Release (${candidate.channel}) workflow for the same SHA. For a controlled cutover use .github/workflows/controlled-cutover.yml and inspect its cutover journal before recovery.`;
 }
 
 export async function disabledGuard(_files: string[], candidate: DisabledCandidate, deps: GuardDependencies = {}) {

@@ -67,7 +67,7 @@ export async function sourceBytes(root, file) {
   } finally { await handle?.close(); }
 }
 
-export async function fingerprintFiles(root, files) {
+export async function fingerprintFiles(root, files, retainedSources) {
   const hash = createHash("sha256"); let size = 0;
   for (const file of [...new Set(files)].sort()) {
     const input = await sourceBytes(root, file);
@@ -75,18 +75,20 @@ export async function fingerprintFiles(root, files) {
     if (size > LIMIT) throw new Error("zstack_source_limit");
     hash.update(JSON.stringify([file, input?.mode ?? null, input?.bytes.length ?? null]));
     if (input) hash.update(input.bytes);
+    if (retainedSources?.has(file)) retainedSources.set(file, input);
   }
   return hash.digest("hex");
 }
 
-export async function captureSource(cwd) {
+export async function captureSource(cwd, anchorPaths = []) {
   const root = await realpath(cwd), evidence = collectLocalChanges({ cwd: root });
   const listed = gitRead(["ls-files", "--cached", "--others", "--exclude-standard", "-z"], root).toString("utf8").split("\0").filter(Boolean);
   // Never open untracked/tracked credential files, even if someone force-added one.
   const files = [...new Set(listed.filter(repositoryPath))].sort();
   if (files.length > 30_000) throw new Error("zstack_source_limit");
-  return { files, evidence: { ...evidence, complete: evidence.changes !== null,
-    fingerprint: await fingerprintFiles(root, files) } };
+  const anchorSources = new Map(anchorPaths.map(file => [file, null]));
+  return { files, anchorSources, evidence: { ...evidence, complete: evidence.changes !== null,
+    fingerprint: await fingerprintFiles(root, files, anchorSources) } };
 }
 
 export function resolveFix(cwd, fixedBy, git = args => gitRead(args, cwd).toString("utf8")) {

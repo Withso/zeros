@@ -41,6 +41,7 @@ import { createBrowserTab, createEmptyFilesTab, createSimulatorTab } from "./tab
 import { buildDirectFileOpenAction } from "./direct-file-open";
 import { searchRecentBrowsers, searchWorkspaceFiles } from "./quick-open";
 import { useChatCwd } from "../use-chat-cwd";
+import { useWorkspaceFileListScope } from "../use-workspace-file-list-scope";
 import {
   loadWorkspaceFiles,
   peekWorkspaceFiles,
@@ -77,33 +78,39 @@ export function WorkbenchNewTabMenu({
   const [query, setQuery] = useState("");
   const [selection, setSelection] = useState("new-file");
   const [environmentOpen, setEnvironmentOpen] = useState(false);
+  const { key: fileKey, live: filesLive, canLoad } = useWorkspaceFileListScope(cwd, open);
   // Async state carries its semantic owner. A reused menu fiber can switch cwd
   // before its effect runs; it must never search the previous workspace's rows.
   const [fileSnapshot, setFileSnapshot] = useState<{
     cwd: string;
+    key: string;
     files: string[];
     resolved: boolean;
     error: boolean;
   } | null>(null);
-  const peekedFiles = cwd ? peekWorkspaceFiles(cwd) : null;
-  const exactSnapshot = fileSnapshot?.cwd === cwd ? fileSnapshot : null;
+  const peekedFiles = open && cwd && fileKey ? peekWorkspaceFiles(cwd) : null;
+  const exactSnapshot = open && fileKey && fileSnapshot && fileSnapshot.cwd === cwd &&
+    fileSnapshot.key === fileKey ? fileSnapshot : null;
   const files = useMemo(
     () => exactSnapshot?.files ?? peekedFiles ?? [],
     [exactSnapshot, peekedFiles],
   );
   const filesResolved = exactSnapshot?.resolved ?? peekedFiles !== null;
-  const filesFailed = exactSnapshot?.error ?? false;
+  const filesUnavailable = exactSnapshot?.error ||
+    (!!cwd && isCloudWorkspace(cwd) && !filesLive && !filesResolved);
 
   // Load only while the palette is useful. The shared short-lived cache dedupes
   // this with the Files tree and keeps repeat opens instant.
   useEffect(() => {
-    if (!open || !cwd) {
+    if (!open || !cwd || !fileKey || !filesLive) {
+      setFileSnapshot(null);
       return;
     }
     let cancelled = false;
     const retained = peekWorkspaceFiles(cwd);
     setFileSnapshot({
       cwd,
+      key: fileKey,
       files: retained ?? [],
       resolved: retained !== null,
       error: false,
@@ -111,13 +118,14 @@ export function WorkbenchNewTabMenu({
     void loadWorkspaceFiles(cwd)
       .then((next) => {
         if (!cancelled) {
-          setFileSnapshot({ cwd, files: next, resolved: true, error: false });
+          setFileSnapshot({ cwd, key: fileKey, files: next, resolved: true, error: false });
         }
       })
       .catch(() => {
         if (!cancelled) {
           setFileSnapshot({
             cwd,
+            key: fileKey,
             files: retained ?? [],
             resolved: retained !== null,
             error: true,
@@ -127,7 +135,7 @@ export function WorkbenchNewTabMenu({
     return () => {
       cancelled = true;
     };
-  }, [open, cwd]);
+  }, [open, cwd, fileKey, filesLive]);
 
   const fileResults = useMemo(
     () => searchWorkspaceFiles(files, query),
@@ -157,7 +165,7 @@ export function WorkbenchNewTabMenu({
   };
 
   const warm = () => {
-    if (cwd) void loadWorkspaceFiles(cwd).catch(() => {});
+    if (cwd && canLoad()) void loadWorkspaceFiles(cwd).catch(() => {});
     prefetchSettingsForRepo(
       workspace?.path || workspace?.repoRoot || terminalFolder,
     );
@@ -356,7 +364,7 @@ export function WorkbenchNewTabMenu({
                 query={query}
                 onSelect={openEnvironment}
                 showEmpty={
-                  filesResolved && !filesFailed && !hasFileOrBrowserResults
+                  filesResolved && !filesUnavailable && !hasFileOrBrowserResults
                 }
               />
             )}
@@ -411,8 +419,8 @@ export function WorkbenchNewTabMenu({
               </CommandGroup>
             )}
 
-            {searching && filesFailed && fileResults.length === 0 && (
-              <div className={COMMAND_EMPTY_CLS}>
+            {searching && filesUnavailable && fileResults.length === 0 && (
+              <div className={COMMAND_EMPTY_CLS} role="status">
                 Files are temporarily unavailable.
               </div>
             )}

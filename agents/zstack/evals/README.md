@@ -33,7 +33,7 @@ together.
 | `scripts-dev` | Development-environment setup, launch and cleanup |
 | `styles` | `styles/`: design tokens, policy and shared CSS |
 | `third-party` | `third_party/` and third-party provenance/license contracts |
-| `docs` | `docs/`: durable public engineering contracts |
+| `docs` | repository documentation policy (including historical cases) |
 | `zstack` | `agents/zstack/`, `scripts/zstack/`: engineering pack and evidence tools |
 
 Historical cases can exercise retired code at their pinned fix. Their area

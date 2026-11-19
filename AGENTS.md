@@ -5,8 +5,8 @@ These instructions apply to the entire repository. Read and follow
 
 ## Working method
 
-- Treat `docs/` as durable engineering guidance. Code, tests, schemas, and this
-  guide remain authoritative when prose and behavior disagree.
+- Verify behavior in current source, schemas, configuration and tests. Use the
+  agent skills for workflow, not as a substitute for tracing the code.
 - Trace imports, call sites, persistence keys, IPC names, environment names,
   deep links, and packaging paths before moving or renaming anything.
 - Preserve runtime behavior and serialized compatibility unless a migration is
@@ -76,9 +76,8 @@ previous pin when that VM already holds it, verified at its own install, and
 stages the current pin in the background for the next wake.
 Cloud supports chat, files, Git and terminals; Browser, Design and simulators
 are unavailable. Local Personal and organization-local provider tools,
-permissions and Host lifecycle stay unchanged. See
-[docs/cloud-workspaces.md](docs/cloud-workspaces.md) for runtime delivery,
-history, idle stop and wake.
+permissions and Host lifecycle stay unchanged. Trace runtime delivery, history
+and lifecycle in `apps/control-plane/src/cloud/` and `apps/cloud-worker/src/`.
 
 ## Renderer invariants
 
@@ -103,17 +102,11 @@ history, idle stop and wake.
 - Internal-only runtime surfaces must use `useInternalFeatureActive(...)`, not a
   raw flag, and may attach hotkeys only while that gate is active.
 
-For renderer UI, styling, tokens, or colors, read `docs/design-system.md`
-first; its agent brief is mirrored into the generated `zeros-ui` skills for
-Claude, Codex, and Cursor. For Design work, read `docs/design-mode-roadmap.md`,
-the single Design architecture, implementation and future-phase reference.
-For renderer state, navigation, loading, tabs, panels, or list work, also read
-`docs/ui-interaction-performance.md` when it is present.
-For provider event handling or tool transcript UI, also read
-`docs/agent-tool-presentation.md`. For agent orchestration through
-`zeros local` (the Zeros Local CLI), read `docs/local-cli.md`. For where data,
-caches, logs and development identities live on disk, read
-`docs/storage-layout.md`.
+For renderer UI or styling, use the zeros-ui skill and inspect the owning
+primitive and nearby tests. For Design, start with the active directory's
+`rules.md`, its manifest, and the shipped Design skill. For provider events or
+transcripts, trace the provider adapter through `packages/protocol/src/agent-events.ts`
+to the renderer. For `zeros local`, start with its shipped skill and CLI help.
 
 ## Agent credentials
 
@@ -133,8 +126,7 @@ caches, logs and development identities live on disk, read
   list stays in GitHub rules and the wrapper still refuses failed or cancelled
   required checks. `main` has no merge queue: every PR runs full CI and
   several PRs may be armed at once, so `main` can occasionally go red; the
-  "main is red at <sha>" issue tracks it until a fix lands. See
-  [docs/ci.md](docs/ci.md).
+  "main is red at <sha>" issue tracks it until a fix lands.
 - Use the bot only for automation that is not a person's work: cutting a release
   branch
   (`pnpm agent:git push origin <sha>:refs/heads/release/X.Y.Z`), and
@@ -173,5 +165,4 @@ Never claim a platform-only check passed when it was not run on that platform.
 
 Run `pnpm ci:plan` to preview the path-selected lanes, and add any extra `ci:*`
 labels before the final push. Labels only add checks; they cannot remove path
-floors. See [docs/ci.md](docs/ci.md) for the closed label vocabulary and fallback
-rules. CI-definition PRs merge through `pnpm agent:merge` like any other PR.
+floors. Labels and fallback rules live in `scripts/ci/scope-rules.json`. CI-definition PRs merge through `pnpm agent:merge` like any other PR.

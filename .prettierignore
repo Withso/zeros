@@ -37,7 +37,6 @@ coverage/
 # file://; their indentation encodes the structure of the mock, and Prettier's
 # HTML printer rewraps it into something no one can read as a design.
 # `styles/Artifacts/` is the tracked design record. `.context/` is local-only
-# working material. Durable Markdown under `docs/` is intentionally formatted
-# and therefore is not exempted here.
+# working material.
 styles/Artifacts/
 .context/

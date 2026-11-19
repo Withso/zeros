@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
-import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
+import type { HookEvent, SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import ts from "typescript";
 import { describe, expect, it } from "vitest";
 import { ClaudeStreamTranslator, mapClaudeTerminalReason } from "../translator";
@@ -14,9 +14,7 @@ type EventKey<T> = T extends { type: infer Kind extends string }
   : never;
 type Disposition = "handled" | "intentionally ignored" | "unsupported";
 
-// An SDK upgrade must classify each new discriminator AND each new public
-// union member (including aliases such as SDKUserMessageReplay). Explanations,
-// field-level limitations and regression entry points live in the linked doc.
+// Aliases can share a discriminator, so upgrades must check both.
 const coverage = {
   assistant: ["handled", "SDKAssistantMessage"],
   user: ["handled", "SDKUserMessage", "SDKUserMessageReplay"],
@@ -80,8 +78,44 @@ const coverage = {
   readonly [Disposition, ...string[]]
 >;
 
+const hookCoverage = {
+  Stop: "local",
+  UserPromptSubmit: "local and cloud",
+  PreToolUse: "sdk-owned",
+  PostToolUse: "sdk-owned",
+  PostToolUseFailure: "sdk-owned",
+  PostToolBatch: "sdk-owned",
+  Notification: "sdk-owned",
+  UserPromptExpansion: "sdk-owned",
+  SessionStart: "sdk-owned",
+  SessionEnd: "sdk-owned",
+  StopFailure: "sdk-owned",
+  SubagentStart: "sdk-owned",
+  SubagentStop: "sdk-owned",
+  PreCompact: "sdk-owned",
+  PostCompact: "sdk-owned",
+  PreModelSwitch: "sdk-owned",
+  PostModelSwitch: "sdk-owned",
+  PermissionRequest: "sdk-owned",
+  PermissionDenied: "sdk-owned",
+  Setup: "sdk-owned",
+  TeammateIdle: "sdk-owned",
+  TaskCreated: "sdk-owned",
+  TaskCompleted: "sdk-owned",
+  Elicitation: "sdk-owned",
+  ElicitationResult: "sdk-owned",
+  ConfigChange: "sdk-owned",
+  WorktreeCreate: "sdk-owned",
+  WorktreeRemove: "sdk-owned",
+  InstructionsLoaded: "sdk-owned",
+  CwdChanged: "sdk-owned",
+  FileChanged: "sdk-owned",
+  DirectoryAdded: "sdk-owned",
+  MessageDisplay: "sdk-owned",
+} as const satisfies Record<HookEvent, "local" | "local and cloud" | "sdk-owned">;
+
 describe("installed Claude SDK event inventory", () => {
-  it("classifies every public SDKMessage alias and documents every discriminator", () => {
+  it("classifies public SDKMessage aliases and hooks and maps each terminal reason", () => {
     const require = createRequire(import.meta.url);
     const declarations = readFileSync(
       join(
@@ -108,13 +142,6 @@ describe("installed Claude SDK event inventory", () => {
       ...new Set(Object.values(coverage).flatMap(([, ...aliases]) => aliases)),
     ].sort();
     expect(classified).toEqual(installed);
-    const doc = readFileSync(
-      join(process.cwd(), "docs/claude-event-coverage.md"),
-      "utf8",
-    );
-    for (const [event, [disposition]] of Object.entries(coverage)) {
-      expect(doc).toContain(`| \`${event}\` | ${disposition} |`);
-    }
     for (const name of ["HookEvent", "TerminalReason"]) {
       const alias = source.statements.find(
         (s): s is ts.TypeAliasDeclaration =>
@@ -128,7 +155,7 @@ describe("installed Claude SDK event inventory", () => {
         const value = (
           (variant as ts.LiteralTypeNode).literal as ts.StringLiteral
         ).text;
-        if (name === "HookEvent") expect(doc).toContain(`\`${value}\``);
+        if (name === "HookEvent") expect(hookCoverage).toHaveProperty(value);
         else
           expect(
             mapClaudeTerminalReason(value),

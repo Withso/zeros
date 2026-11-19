@@ -30,12 +30,10 @@ The shipping desktop target is macOS on Apple silicon (`dmg` and `zip`). Windows
 Linux, iOS, and Android applications are not present in this repository yet;
 their app directories will be added when implementation begins.
 
-Two launchers cover development. [Zeros Local](docs/local-development.md)
-(`pnpm electron:local`) is account-free and Local-only.
-[Zeros Dev](docs/electron-cloud.md) (`pnpm electron:dev`) runs this branch's
-control plane and database headlessly, with real Boat VMs for cloud
-workspaces. It requires a private Dev profile and never silently connects
-a new clone to Alpha.
+Zeros Local (`pnpm electron:local`) is account-free and Local-only.
+Zeros Dev (`pnpm electron:dev`) runs this branch's headless control plane and
+database for cloud workspace development. It requires a private Dev profile
+and never silently connects a new clone to Alpha.
 
 ## Requirements
 
@@ -127,10 +125,8 @@ flowchart LR
   M -->|"spawn and supervise"| E
 ```
 
-See [REPOSITORY-ARCHITECTURE.md](REPOSITORY-ARCHITECTURE.md) for ownership,
-dependency boundaries, deployment roots, and the migration report.
-The hosted Alpha/Production topology and promotion runbook are in
-[docs/deployment-environments.md](docs/deployment-environments.md).
+Tests and configuration live beside their source. Release and cutover entry
+points live in [GitHub Actions](.github/workflows).
 
 ## Data, telemetry, and security
 

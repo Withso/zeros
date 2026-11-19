@@ -1,7 +1,7 @@
 ---
 name: zstack-verify
 description: "Choose and run the right checks for a Zeros change, Local and cloud: adjacent Vitest suites, required static gates, UI smoke, platform-only checks, and live Alpha verification with the cloud v2 gate0 probe. Includes evidence rules and where the environment gotchas live."
-globs: "**"
+invocation: router
 ---
 
 # zstack-verify
@@ -38,16 +38,18 @@ handing off. Preview the CI lanes with `pnpm ci:plan`.
 The selector does this bookkeeping:
 
 ```sh
-node scripts/zstack/verify.mjs plan --test path/to/adjacent.test.ts
-node scripts/zstack/verify.mjs run --test path/to/adjacent.test.ts --execute --receipt /private/scratch/verify.json
+node scripts/zstack/verify.mjs plan --test path/to/adjacent.test.ts --anchor path/to/source.ts:42
 ```
+
+For execution, use `run` with the same options plus `--execute --receipt <file>`.
 
 Record `--mode single-session --agent <model>`, or `--mode master-subagents
 --agent <model> --master <model>`. The selector uses the shared CI registry;
 unknown CI command text is deferred, never executed as shell. An incomplete diff
 or missing adjacent suite blocks execution, and a source change during
-verification invalidates the receipt. The receipt is unsigned engineering
-evidence; CI is still the merge authority. `node scripts/zstack/verify.mjs local-ui`
+verification invalidates the receipt. Source anchors are caller citations,
+not proof of inspection. The receipt is unsigned engineering evidence;
+CI is still the merge authority. `node scripts/zstack/verify.mjs local-ui`
 plans the Linux app driver (`--execute --receipt <file>`, optionally
 `--shard 1/3`); remaining shards and macOS proof stay unverified. See
 `agents/zstack/tools.md`.
@@ -67,7 +69,7 @@ pnpm --dir apps/control-plane cloud-v2:gate0 --local --runtime <runtime-sha256>
 - Run it only with the task's cloud-provider authorization, against this
   checkout's backend whose `CLOUD_V2_RUNTIME_SHA256` matches `--runtime`
   (`electron:cloud` takes `--runtime` or `ZEROS_CLOUD_V2_RUNTIME_SHA256`). No
-  Railway service or PlanetScale branch is created; see `docs/electron-cloud.md`.
+  Railway service or PlanetScale branch is created; see `scripts/electron-cloud.mjs`.
 - It creates one disposable workspace from the existing Cloud Computer, runs
   native Claude, Codex and Cursor turns and terminal, file and Git round trips,
   reads the mirrored history while the VM is stopped, wakes it once, then
@@ -75,7 +77,7 @@ pnpm --dir apps/control-plane cloud-v2:gate0 --local --runtime <runtime-sha256>
 - It starts a real VM: run it once per tested change, never in a loop. It
   reports only the failing stage; capture the control-plane logs and the
   workspace row through the API before any cleanup.
-- After deploy, `pnpm alpha:probe` measures Alpha (`docs/electron-cloud.md`).
+- After deploy, `pnpm alpha:probe` measures Alpha (`scripts/electron-cloud.mjs`).
 - Provider keys stay in `.env.agent` (Alpha and test only) or Actions; never
   copy them into the checkout or into output.
 - Run a control-plane-generated VM script (runtime install, checkpoint,

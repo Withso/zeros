@@ -20,7 +20,7 @@
 // detected; changes to the ledger itself are owner-reviewed (CODEOWNERS).
 //
 // Product UI only: harness pages and tests are out of scope. Rationale and
-// the replacement for each rule: docs/design-system.md.
+// the replacement for each rule: agents/skills/zeros-ui.md.
 // ============================================================
 import { readdirSync, readFileSync } from "node:fs";
 import { join, relative, sep } from "node:path";
@@ -92,7 +92,7 @@ export function edgeUtility(base) {
 }
 
 const SELECTION_EDGE_MESSAGE = (key) =>
-  `"${key}" draws an edge on a selected, pressed, active or current state. Selection is a fill and never an edge: use the primitive's state (bg-selected-bg, var(--selected-bg)) and keep the resting edge unchanged (docs/design-system.md).`;
+  `"${key}" draws an edge on a selected, pressed, active or current state. Selection is a fill and never an edge: use the primitive's state (bg-selected-bg, var(--selected-bg)) and keep the resting edge unchanged (agents/skills/zeros-ui.md).`;
 
 // The CSS half of selection-edge: a rule whose element is selected, pressed,
 // active or current (not a child of one) must not draw an edge.
@@ -249,7 +249,7 @@ export const CLASS_RULES = [
   {
     id: "arbitrary-value",
     message: (key) =>
-      `"${key}" is a raw visual value. Use the scale or a token: text-xxs…text-sm / leading-* / rounded-sm|md|lg / z-panel|chrome|dropdown|modal|toast / spacing steps / color tokens (docs/design-system.md).`,
+      `"${key}" is a raw visual value. Use the scale or a token: text-xxs…text-sm / leading-* / rounded-sm|md|lg / z-panel|chrome|dropdown|modal|toast / spacing steps / color tokens (agents/skills/zeros-ui.md).`,
     test(base) {
       const match = base.match(ARBITRARY_RE);
       if (!match) return null;

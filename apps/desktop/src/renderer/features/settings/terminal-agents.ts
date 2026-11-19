@@ -1,19 +1,9 @@
 import { subscribePreferenceCache } from "../../platform/personal-preferences";
-// Terminal agents: coding-CLI profiles the workbench terminal can launch in a
-// login shell at the active worktree, one keystroke instead of typing the
-// launch line. Purely the human-facing TUI launch line and prompt transport; no
-// auth, env injection or engine (that is provider-prefs.ts). Built-ins resolve
-// from BUILTIN_TERMINAL_AGENTS, so `terminal-agents:catalog` holds only edits
-// and custom agents, and `terminal-agents:default` names the agent "+"
-// launches (null = plain shell). Unused notification, hook and drop-target
-// fields stay in saved records so they can ship without a storage migration.
 
 import { useCallback, useEffect, useState } from "react";
 
 import { getSetting, setSetting } from "../../platform/settings";
 
-/** How a prompt is delivered to the CLI. The supported modes cover
- *  interactive sessions and the two common non-interactive inputs. */
 export type PromptTransport = "interactive" | "prompt-arg" | "stdin";
 
 export interface TerminalAgentInstallHint {
@@ -21,95 +11,47 @@ export interface TerminalAgentInstallHint {
   docsUrl?: string;
 }
 
-/** Reserved surface for detecting agent state from OSC 9/99/777
- *  sequences in the PTY byte stream without changing saved records. */
 export interface TerminalAgentNotificationsSpec {
   enabled: boolean;
-  /** Which OSC sequence IDs to listen for. Empty = use the
-   *  default 9/99/777 set when `enabled` is true. */
+  /** Reserved default OSC IDs for an empty list: 9/99/777. */
   oscSequences: number[];
 }
 
-/** Optional drag-and-drop capabilities. Each agent declares what it
- *  accepts so the terminal overlay can show the right affordance. */
 export interface TerminalAgentDropTargetsSpec {
   acceptsFiles: boolean;
   acceptsImages: boolean;
 }
 
-/** Optional commands associated with the agent lifecycle. */
 export interface TerminalAgentHooksSpec {
-  /** Shell line to run before the agent launches in the PTY. */
   onStart?: string;
-  /** Shell line to run when the agent's process exits. */
   onFinish?: string;
 }
 
 export interface TerminalAgent {
   id: string;
-  /** Short display name (used in tabs, dropdowns). */
   name: string;
-  /** One-line description shown under the tab. */
   description: string;
-  /** Icon URL (optional — falls back to neutral
-   *  foreground initial when absent). Per-agent brand color lives
-   *  in `apps/desktop/src/renderer/features/agent/agent-brands.ts` so terminal-only catalog
-   *  entries don't fork the token policy. */
   icon?: string;
-  /** Binary on PATH (e.g. "claude", "codex", "cursor-agent"). */
   binary: string;
-  /** The exact command Zeros types into the freshly-spawned
-   *  shell. Defaults to `binary` but the user can override (e.g.
-   *  `claude --resume` or a wrapper script). */
+  /** A shell command can include arguments, unlike the executable name. */
   launchCommand: string;
-  /** How a prompt — when the user later supplies one via the
-   *  composer — is delivered to the CLI. `interactive` skips
-   *  the prompt entirely (TUI-only). */
+  /** Interactive launches do not carry the prompt. */
   promptTransport: PromptTransport;
-  /** Tokens the CLI expects BEFORE the prompt body. E.g. Claude
-   *  uses `["-p"]`; Codex uses `["exec"]`. Stored as an array
-   *  so the user doesn't have to think about shell quoting. */
+  /** CLI arguments that must precede the prompt body. */
   promptArgs: string[];
-  /** Extra tokens appended to every launch (model flag, debug
-   *  mode, etc.). Free-form so the user can paste anything
-   *  their CLI version supports. */
   additionalArgs: string[];
-  /** Flag the user can toggle via a one-click checkbox in the
-   *  composer. Stored as a string so each CLI's
-   *  convention (--yolo / --dangerously-skip-permissions /
-   *  --force) survives a round-trip. */
+  /** Preserve the user's exact CLI syntax rather than mapping flags to an enum. */
   autoApproveFlag: string;
-  /** Pre-baked install command + docs URL, surfaced when the
-   *  binary isn't on PATH. */
   installHint?: TerminalAgentInstallHint;
-  /** Args for the CLI's own login flow (e.g. ["login"], ["auth",
-   *  "login"], ["/login"]). The terminal panel uses this when the
-   *  user clicks "Sign in" from a not-authenticated tab. */
   loginArgs: string[];
-  /** True when this entry has been Imported from the BUILTIN
-   *  catalog (vs. user-authored from scratch). Lets the UI
-   *  visually distinguish stock vs. custom rows. */
   imported: boolean;
-  /** Forward-looking — kept so future features don't migrate
-   *  storage. See comments on each sub-type. */
+  // Reserved fields are retained in stored profiles for compatibility.
   notifications?: TerminalAgentNotificationsSpec;
-  /** Forward-looking — file/image drag targets. */
   dropTargets?: TerminalAgentDropTargetsSpec;
-  /** Forward-looking — lifecycle hooks. */
   hooks?: TerminalAgentHooksSpec;
 }
 
-// `launchCommand` defaults to the bare binary (each CLI opens its TUI).
-// `autoApproveFlag` is a per-vendor string, not an enum, so a changed flag is
-// editable without an app update.
-
-// Display order + identity. The user-facing NAME is the launch command
-// (lowercase) — "the launch command is the name of the agent". Logos are
-// shown only for built-ins with bundled SVGs; every other agent renders
-// name-only (no `icon` → no robot fallback).
-// `autoApproveFlag` is a best-effort pre-fill the user can edit (the field is
-// a starting point, not a guarantee — see settings UI). Where a CLI's
-// skip-approval flag isn't well-established it's left blank.
+// Unknown approval flags stay blank rather than guessing a CLI's behavior.
 export const BUILTIN_TERMINAL_AGENTS: TerminalAgent[] = [
   {
     id: "claude",
@@ -232,15 +174,10 @@ export const BUILTIN_TERMINAL_AGENTS: TerminalAgent[] = [
   },
 ];
 
-/** Order in which Imported agents appear in the tab strip. Mirrors
- *  BUILTIN_TERMINAL_AGENTS — keeps the UI deterministic across
- *  reloads and across machines that imported in different orders. */
+// Keep tab order independent of import order.
 export const TERMINAL_AGENT_ORDER: ReadonlyArray<string> =
   BUILTIN_TERMINAL_AGENTS.map((a) => a.id);
 
-/** The agents that are ALWAYS shown and can't be removed or have their launch
- *  command edited. Every other agent (amp / antigravity / droid + any custom)
- *  is user-removable and fully editable. */
 export const CORE_TERMINAL_AGENT_IDS: ReadonlyArray<string> = [
   "claude",
   "codex",
@@ -248,11 +185,10 @@ export const CORE_TERMINAL_AGENT_IDS: ReadonlyArray<string> = [
   "opencode",
 ];
 
+// Store overrides and custom profiles; unedited built-ins resolve from code.
 const CATALOG_KEY = "terminal-agents:catalog";
 const DEFAULT_ID_KEY = "terminal-agents:default";
-// Ids of BUILT-IN agents the user removed from the list. Built-ins live in
-// code (not the catalog), so "removing" one means hiding it via this set; a
-// custom agent is removed by deleting it from the catalog outright.
+// Built-ins need persisted hide markers because deleting an override reveals the stock entry.
 const REMOVED_KEY = "terminal-agents:removed";
 
 export function loadTerminalAgents(): TerminalAgent[] {
@@ -275,8 +211,6 @@ export function setDefaultTerminalAgentId(id: string | null): void {
   notify();
 }
 
-/** Built-in agent ids the user has hidden (removed). Core agents are never
- *  removable, so they never appear here. */
 export function loadRemovedTerminalAgentIds(): string[] {
   const s = getSetting<string[] | null>(REMOVED_KEY, null);
   return Array.isArray(s)
@@ -289,9 +223,7 @@ function saveRemovedTerminalAgentIds(ids: string[]): void {
   notify();
 }
 
-/** Validate the persisted shape. We don't full-schema-check —
- *  loose fields stay as-is — but the four critical strings must
- *  be present or the entry is dropped. */
+// Tolerate optional fields from persisted profiles; only require the launch identity.
 function isWellFormed(a: unknown): a is TerminalAgent {
   if (!a || typeof a !== "object") return false;
   const r = a as Record<string, unknown>;
@@ -303,18 +235,9 @@ function isWellFormed(a: unknown): a is TerminalAgent {
   );
 }
 
-// Build the shell line typed into the PTY, for auto-launch on "+" and the
-// composer's "Send to terminal". Prompts and extra args are double-quoted with
-// `"` and `\` escaped; the binary itself stays unquoted so PATH resolves it
-// (users paste an absolute path into `launchCommand`).
-
 export interface BuildLaunchLineOptions {
   agent: TerminalAgent;
-  /** Optional prompt body. When omitted (or the agent's transport
-   *  is "interactive") the launch line is just the binary and
-   *  static args. */
   prompt?: string;
-  /** Whether to append the autoApproveFlag to the launch. */
   autoApprove?: boolean;
 }
 
@@ -333,16 +256,12 @@ export function buildLaunchLine(opts: BuildLaunchLineOptions): string {
     }
     parts.push(shellQuote(prompt));
   }
-  // "stdin" transport delivers the prompt out-of-band via a
-  // separate ptyWrite() with a newline terminator — the launch
-  // line itself stays prompt-free here.
+  // Stdin transport needs a separate PTY write, not a command argument.
   return parts.join(" ");
 }
 
 function shellQuote(value: string): string {
-  // POSIX double-quote: backslash-escape `"`, `\`, `$`, and the
-  // backtick. Anything else is safe inside double quotes. zsh +
-  // bash + sh all agree on this subset.
+  // Escape POSIX double-quote metacharacters in prompt text.
   const escaped = value.replace(/(["\\$`])/g, "\\$1");
   return `"${escaped}"`;
 }
@@ -363,12 +282,10 @@ function notify(): void {
 export interface UseTerminalAgentsApi {
   agents: TerminalAgent[];
   defaultId: string | null;
-  /** Built-in agent ids the user has hidden (removed). */
   removedIds: string[];
   setDefault(id: string | null): void;
   upsert(agent: TerminalAgent): void;
-  /** Remove an agent. `launchCommand` (when supplied) also purges any other
-   *  catalog entry sharing that command — clears leftover duplicates. */
+  /** Pass the command to purge duplicate entries from older catalogs. */
   remove(id: string, launchCommand?: string): void;
 }
 
@@ -410,22 +327,16 @@ export function useTerminalAgents(): UseTerminalAgentsApi {
   }, []);
 
   const remove = useCallback((id: string, launchCommand?: string) => {
-    // Core agents are permanent — guard even though the UI hides the control.
     if (CORE_TERMINAL_AGENT_IDS.includes(id)) return;
     const cmd = (launchCommand ?? "").trim();
-    // Drop the entry by id AND any catalog entry sharing the launch command
-    // (kills leftover duplicates from older catalogs).
     const next = loadTerminalAgents().filter(
       (a) => a.id !== id && !(cmd && a.launchCommand.trim() === cmd),
     );
     saveTerminalAgents(next);
-    // A built-in lives in code, not the catalog, so hide it via the removed set.
     if (TERMINAL_AGENT_ORDER.includes(id)) {
       const removed = loadRemovedTerminalAgentIds();
       if (!removed.includes(id)) saveRemovedTerminalAgentIds([...removed, id]);
     }
-    // If the removed agent was the default, fall back to null so new terminals
-    // open as plain shells until the user picks another default.
     if (getDefaultTerminalAgentId() === id) {
       setDefaultTerminalAgentId(null);
     }
@@ -441,12 +352,7 @@ export function useTerminalAgents(): UseTerminalAgentsApi {
   };
 }
 
-/** Non-React accessor used by `terminal-session-view.tsx` when
- *  the panel auto-launches the default agent. Falls back to the
- *  built-in catalog when the id isn't in the user's saved catalog —
- *  the settings UI shows (and lets you default to) every built-in
- *  without an explicit import/save, so a default that was never
- *  edited must still resolve to its stock launch profile. */
+// A saved default ID can point at a built-in with no saved profile.
 export function resolveTerminalAgent(
   id: string | null | undefined,
 ): TerminalAgent | null {
@@ -459,15 +365,9 @@ export function resolveTerminalAgent(
   );
 }
 
-/** Hardcoded terminal-agent fallback when the user hasn't picked a default.
- * Chat agents instead resolve from connected providers because their
- * authentication state is available through the live registry. */
+// Terminal agents do not use the chat provider registry to select a fallback.
 export const FALLBACK_TERMINAL_AGENT_ID = "codex";
 
-/** Idempotently ensure the fallback "codex" agent is in the saved catalog and,
- *  when no default exists, is the default, so a fresh install never opens a
- *  terminal-agent tab without an agent. Existing defaults are never
- *  overwritten. Null only if the built-in catalog lacks "codex" (a code bug). */
 export function ensureFallbackTerminalAgent(): TerminalAgent | null {
   const seed = BUILTIN_TERMINAL_AGENTS.find(
     (a) => a.id === FALLBACK_TERMINAL_AGENT_ID,

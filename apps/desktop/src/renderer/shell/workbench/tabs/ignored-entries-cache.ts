@@ -27,6 +27,7 @@
 // ──────────────────────────────────────────────────────────
 
 import { listIgnoredEntries } from "@/renderer/platform/git";
+import { isCloudWorkspace } from "@/renderer/platform/bridge/cloud-workspace-key";
 
 import { workspaceCacheKey } from "../../workspace-files-cache";
 
@@ -41,7 +42,7 @@ const inflightWarms = new Set<string>();
 /** The roots listing last confirmed for `cwd`, or null when this workspace has
  *  not been listed in this session. */
 export function peekIgnoredRoots(cwd: string | undefined): string[] | null {
-  if (!cwd) return null;
+  if (!cwd || isCloudWorkspace(cwd)) return null;
   const key = workspaceCacheKey(cwd);
   const roots = rootsByCwd.get(key);
   if (roots === undefined) return null;
@@ -56,7 +57,7 @@ export function peekIgnoredRoots(cwd: string | undefined): string[] | null {
  *  first frame. Callers pass only an authoritative response — never the empty
  *  starting state, which would look like "this workspace ignores nothing". */
 export function rememberIgnoredRoots(cwd: string, roots: string[]): void {
-  if (!cwd) return;
+  if (!cwd || isCloudWorkspace(cwd)) return;
   const key = workspaceCacheKey(cwd);
   rootsByCwd.delete(key);
   rootsByCwd.set(key, roots);
@@ -73,7 +74,7 @@ export function rememberIgnoredRoots(cwd: string, roots: string[]): void {
  *  is on its way: the destination tree re-lists for itself either way, so a
  *  repeated hover must not queue a repeated worktree walk. */
 export function warmIgnoredRoots(cwd: string | undefined): void {
-  if (!cwd) return;
+  if (!cwd || isCloudWorkspace(cwd)) return;
   const key = workspaceCacheKey(cwd);
   if (rootsByCwd.has(key) || inflightWarms.has(key)) return;
   inflightWarms.add(key);

@@ -15,7 +15,6 @@ import { isWorkspaceNumber } from "@zeros/protocol/local-orchestration";
 import { requestCloudGithubPr, cloudGithubPrAuthority } from "../cloud-github-pr";
 import { prepareCloudPromptErasure } from "../cloud-prompt-erasure";
 import { WorkspaceRuntimeClient, type ChatSnapshotRefresh } from "./workspace-runtime-client";
-import type { BridgeMessage } from "./messages";
 import type {
   Workspace,
   WorkspaceRecoveryInfo,
@@ -131,6 +130,7 @@ export async function workspaceOp(
   op: string,
   params: Record<string, unknown> = {},
   timeoutMs = 10_000,
+  connectedOnly = false,
 ): Promise<unknown> {
   if (CLOUD_GITHUB_PR_OPERATIONS.has(op)) {
     const target = cloudTargetForValue(params.workspaceId);
@@ -150,12 +150,10 @@ export async function workspaceOp(
     }
   }
   const tracked = GIT_OP_ANALYTICS[op];
-  const resp = (await bridge.request(
-    { type: "WORKSPACE_REQUEST", op, params } as Partial<BridgeMessage> & {
-      type: string;
-    },
-    timeoutMs,
-  )) as WorkspaceResponseLike | WorkspaceErrorLike;
+  const request = { type: "WORKSPACE_REQUEST" as const, op, params };
+  const resp = (await (connectedOnly
+    ? bridge.requestConnected(request, timeoutMs)
+    : bridge.request(request, timeoutMs))) as WorkspaceResponseLike | WorkspaceErrorLike;
   if (resp.type === "WORKSPACE_ERROR") {
     const err = new WorkspaceOpError(resp);
     if (tracked) trackGitOp({ op: tracked, outcome: "error", error: err });
@@ -938,12 +936,13 @@ export async function bridgeWorkspaceFileListing(
   bridge: RuntimeClient,
   workspaceId: string,
   limit?: number,
+  connectedOnly = false,
 ): Promise<WorkspaceFileListing> {
   const result = (await workspaceOp(bridge, "file.tree", {
     workspaceId,
     limit,
     includeDesignDirectories: true,
-  })) as WorkspaceFileListing;
+  }, 10_000, connectedOnly)) as WorkspaceFileListing;
   if (!Array.isArray(result?.files))
     throw new Error("Invalid workspace file listing");
   return result;
@@ -980,11 +979,12 @@ export async function bridgeIgnoredEntries(
   bridge: RuntimeClient,
   workspaceId: string,
   dir?: string,
+  connectedOnly = false,
 ): Promise<string[]> {
   const r = (await workspaceOp(bridge, "file.ignored", {
     workspaceId,
     ...(dir ? { dir } : {}),
-  })) as { entries?: string[] } | undefined;
+  }, 10_000, connectedOnly)) as { entries?: string[] } | undefined;
   return r?.entries ?? [];
 }
 

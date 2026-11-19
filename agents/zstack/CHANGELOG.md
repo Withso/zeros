@@ -3,6 +3,12 @@
 Each entry records the lesson behind the change as symptom → cause → rule →
 where it is encoded.
 
+## Unreleased
+
+- One source-first router; opt-in delegation and host-default models.
+- Verification receipts can carry source anchors alongside executed checks.
+- Archived the corpus receipt integrity fragment in Git history; the corpus tests and eval skill retain its checks.
+
 ## 0.3.5
 
 - **gate0 could not run a turn on Alpha.** Alpha refused the probe's bridge

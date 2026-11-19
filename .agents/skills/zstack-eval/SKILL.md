@@ -1,6 +1,7 @@
 ---
 name: zstack-eval
 description: "Run and extend zstack's eval cases — escaped Zeros bugs paired with the check that should have caught them — and keep every pack change from lowering the pass rate."
+disable-model-invocation: true
 ---
 
 <!-- GENERATED from agents/zstack/skills/zstack-eval/SKILL.md by scripts/design-system/build-design-docs.mjs. Edit it there, then run `pnpm design:docs`. -->

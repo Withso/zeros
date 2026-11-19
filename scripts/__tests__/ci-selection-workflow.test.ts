@@ -155,16 +155,15 @@ function fixtureRepository(policy?: string) {
       );
     }
   }
-  mkdirSync(path.join(directory, "docs"));
   writeFileSync(
-    path.join(directory, "docs/personal-settings.md"),
+    path.join(directory, "SECURITY.md"),
     "Fixture documentation\n",
   );
   git("add", ".");
   git("commit", "--quiet", "-m", "Create fixture base");
   const base = git("rev-parse", "HEAD");
   writeFileSync(
-    path.join(directory, "docs/personal-settings.md"),
+    path.join(directory, "SECURITY.md"),
     "Modified documentation\n",
   );
   git("commit", "--quiet", "-am", "Modify fixture documentation");
@@ -192,7 +191,7 @@ const OUTPUT_LEDGER = createLedger({
   policy: POLICY,
   decision: decideScope({
     policy: POLICY,
-    changes: [{ path: "docs/personal-settings.md", status: "M" }],
+    changes: [{ path: "SECURITY.md", status: "M" }],
   }),
   event: "pull_request",
   mode: "pr",
@@ -733,7 +732,7 @@ describe("the CI gate's executable ledger validation", () => {
       policy: POLICY,
       decision: decideScope({
         policy: POLICY,
-        changes: [{ path: "docs/personal-settings.md", status: "M" }],
+        changes: [{ path: "SECURITY.md", status: "M" }],
         labels,
       }),
       event: "pull_request",

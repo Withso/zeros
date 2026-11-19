@@ -1,20 +1,4 @@
-// ──────────────────────────────────────────────────────────
-// Default agent/model identity
-// ──────────────────────────────────────────────────────────
-//
-// Persisted choice of "which agent does New Chat start with."
-// Read/written via getSetting/setSetting. Lives in its own module
-// so settings-page.tsx can export only React components (required
-// for Vite Fast Refresh — mixed exports force a full reload, which
-// re-INITs every agent adapter every save).
-//
-// Surfaces that read this:
-//   - Settings → Models (lets the user pick the default explicitly)
-//   - Model pickers (exactly one global star identifies that same default)
-//
-// The Conversation pane menu uses the `useDefaultAgent()` hook below so all
-// mounts re-render in sync when the default moves from any surface.
-// ──────────────────────────────────────────────────────────
+// Keep these exports outside the Settings component module so Vite Fast Refresh does not reload it.
 
 import { useCallback, useEffect, useState } from "react";
 
@@ -30,13 +14,9 @@ import {
 } from "../agent/model-favorites";
 import type { BridgeRegistryAgent } from "../../platform/bridge/messages";
 
-/** Storage key for the user's preferred default agent (used by New Chat). */
+// Legacy key remains the fallback when no catalog favorite is set.
 export const DEFAULT_AGENT_KEY = "default-agent-id";
 
-/** The one preference ordering every "which agent?" resolution shares:
- *  the starred choice (exact id, else same family), then the product
- *  provider order Claude → Codex → Cursor, then the first candidate.
- *  Returns null only for an empty candidate list. */
 function pickByPreference<T extends BridgeRegistryAgent>(
   candidates: T[],
   starredId: string | null,
@@ -62,15 +42,6 @@ function findStarredAgent<T extends BridgeRegistryAgent>(
     agents.find(agent => family !== "" && agentFamily(agent.id) === family) ?? null;
 }
 
-/** Resolve the agent id a brand-new chat should bind to.
- *
- *  Settings, the catalog star, and New Chat share the full chain below. A saved
- *  choice wins even while it needs sign-in; otherwise confirmed connections
- *  precede the installed/enabled fallback tiers. Null only for an empty registry.
- *
- *  Deliberately omit a "sticky last-used" step: an unset preference resolves
- *  to the stable fallback rather than whichever agent was last used in another
- *  workspace. */
 export function pickDefaultAgentId(
   agents: BridgeRegistryAgent[],
   starredId: string | null = getDefaultAgentId(),
@@ -78,9 +49,6 @@ export function pickDefaultAgentId(
   return pickAgentForNewChat(agents, starredId)?.id ?? null;
 }
 
-/** Same priority chain as `pickDefaultAgentId`, but returns the full
- *  registry entry so callers can grab `name` + `icon` for the chat
- *  thread row. Returns null only for an empty registry. */
 export function pickDefaultAgent<T extends BridgeRegistryAgent>(
   agents: T[],
   starredId: string | null = getDefaultAgentId(),
@@ -88,24 +56,7 @@ export function pickDefaultAgent<T extends BridgeRegistryAgent>(
   return pickAgentForNewChat(agents, starredId);
 }
 
-/** Which agent should a brand-new chat BIND to, given that a chat must
- *  always end up with one (there is no picker; the composer's sign-in /
- *  install flow is the recovery surface for a not-ready agent)?
- *
- *  A saved default is honored before the tiers, even while disconnected.
- *  Otherwise each tier uses Claude → Codex → Cursor → first ordering:
- *    1. enabled + confirmed connected,
- *    2. enabled + runnable (preserves the existing auth-probe recovery tier),
- *    3. enabled + installed — nothing is signed in; bind the best installed
- *       agent so AgentChat's "Sign in required" flow can take over,
- *    4. enabled — detected but not even installed; the spawn path surfaces
- *       the install error with instructions,
- *    5. any registry agent — the user disabled everything; an agent the
- *       user hid still beats a dead pane, and the pill lets them switch.
- *
- *  Returns null ONLY for an empty registry list (engine listed zero
- *  adapters / listing failed). Callers that must bind anyway fall back to
- *  FALLBACK_NEW_CHAT_AGENT_ID. */
+// Honor a disconnected saved agent for recovery; never inherit another workspace's last-used agent.
 export function pickAgentForNewChat<T extends BridgeRegistryAgent>(
   agents: T[],
   starredId: string | null = getDefaultAgentId(),
@@ -126,17 +77,9 @@ export function pickAgentForNewChat<T extends BridgeRegistryAgent>(
   );
 }
 
-/** Hardcoded last-resort binding for a chat born while the registry is
- *  EMPTY (engine listed zero adapters, or the list call failed and the
- *  cache published its `[]` fallback). The product rule "every chat always
- *  has an agent" outranks accuracy here: binding the product-priority
- *  default renders a live composer whose spawn error ("not installed" /
- *  sign-in) is actionable, where an unbound chat renders a dead pane.
- *  Claude per the Claude → Codex → Cursor product order. */
+// An empty registry still needs an agent binding so the composer can show recovery.
 export const FALLBACK_NEW_CHAT_AGENT_ID = "claude";
 
-/** Read the default agent id from persistent settings. Returns null if never
- *  set; New Chat then follows the fallback chain in `pickDefaultAgentId`. */
 export function getDefaultAgentId(): string | null {
   return (
     getFavoriteSelection()?.agentId ??
@@ -144,7 +87,6 @@ export function getDefaultAgentId(): string | null {
   );
 }
 
-/** Persist the default agent id. Pass null to clear. */
 export function setDefaultAgentId(agentId: string | null): void {
   if (!agentId) {
     clearFavoriteSelection();
@@ -152,21 +94,15 @@ export function setDefaultAgentId(agentId: string | null): void {
   }
   const family = agentFamily(agentId);
   if (!family) {
-    // An extension-provided runnable agent cannot live in the curated
-    // agent+model record. Clear any prior curated selection first so the
-    // legacy id below does not remain shadowed by a stale global favorite.
+    // Clear the curated favorite first so it cannot shadow an extension agent's legacy id.
     clearFavoriteSelection();
     setSetting(DEFAULT_AGENT_KEY, agentId);
     notifyLegacy();
     return;
   }
-  // Choosing a provider moves the global star to that provider's effective
-  // catalog fallback without pinning today's fallback model forever. A later
-  // catalog default update should still reach users who picked only an agent.
+  // A provider-only choice must still follow future changes to the catalog default model.
   setFavoriteModel(family, null);
 }
-
-// ── Pub/sub bus ──────────────────────────────────────────
 
 type Listener = () => void;
 const legacyListeners = new Set<Listener>();
@@ -176,14 +112,11 @@ function notifyLegacy(): void {
     try {
       listener();
     } catch {
-      // Matches model-favorites/new-chat-defaults: one throwing subscriber must
-      // not strand the remaining mounts un-synced, nor escape setDefaultAgentId.
+      // A throwing subscriber must not block the remaining mounts.
     }
   }
 }
 
-/** React hook returning the current default + a toggle/set helper.
- *  Re-renders whenever any caller of setDefaultAgentId() fires. */
 export function useDefaultAgent(): {
   agentId: string | null;
   setDefault: (agentId: string | null) => void;

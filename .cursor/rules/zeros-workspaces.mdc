@@ -4,7 +4,7 @@ globs: apps/**,packages/**,scripts/**
 alwaysApply: false
 ---
 
-<!-- GENERATED from RULES.md by scripts/design-system/build-design-docs.mjs. Edit the workspace brief there, then run `pnpm design:docs`. -->
+<!-- GENERATED from agents/skills/zeros-workspaces.md by scripts/design-system/build-design-docs.mjs. Edit the workspace brief there, then run `pnpm design:docs`. -->
 
 ## Agent brief: local and cloud workspaces in Zeros
 
@@ -16,8 +16,7 @@ Zeros runs the same product against two runtimes. Handle both on every change.
   (`isPersonal`, shown as "Local"; `organization_id` is null). Collaborative
   **organizations** (Pro, Business, Team) are tenant roots with their own
   members and roles.
-- **Placement.** A workspace row has `placement` `local` or `cloud`
-  (docs/organizations-and-teams.md, "Workspace placement"). Local workspaces
+- **Placement.** A workspace row has `placement` `local` or `cloud`. Local workspaces
   run on the Mac's local engine and live in a Mac checkout or worktree; Local
   and organizations can both own them. Cloud workspaces require an
   organization: each runs a standalone worker in its own Boat VM, reached
@@ -47,7 +46,7 @@ Zeros runs the same product against two runtimes. Handle both on every change.
 4. **Cloud realities.**
    - A cloud workspace can be creating, starting, running, stopping, stopped,
      failed, deleting or deleted. Render states through the workbench status
-     standard (docs/design-system.md). Archive is a separate `archivedAt` flag:
+     components. Archive is a separate `archivedAt` flag:
      stopped or failed workspaces with it display as archived. Restore starts
      the VM and clears the flag; idle stop never sets it.
    - Passive history reads use the control-plane mirror and never wake a VM.
@@ -81,7 +80,7 @@ Zeros runs the same product against two runtimes. Handle both on every change.
      the shared UI and existing bridge messages.
    - The control plane type-checks and deploys standalone: its source never
      imports `@zeros/protocol`; mirror the contract and add a parity test.
-     See [docs/cloud-workspaces.md](docs/cloud-workspaces.md) for the v2 contract.
+     Trace the control-plane wire contract and the shared bridge tests.
 5. **Local realities.**
    - Local workspaces work without the control plane, network access, or a
      signed-in account where the feature allows it.

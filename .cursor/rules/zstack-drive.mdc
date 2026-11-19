@@ -1,6 +1,6 @@
 ---
-description: "Launch, diagnose, drive and capture Zeros user flows: the native app on macOS and production renderer fixtures on Linux. Use for hands-on app verification and locating workspace, chat, file, Git and terminal features."
-globs: apps/desktop/**,agents/zstack/drive/**
+description:
+globs:
 alwaysApply: false
 ---
 
@@ -19,7 +19,7 @@ deployment or cloud resource unless that work is authorized.
 | Host / purpose | Launch and limits |
 | --- | --- |
 | macOS, Local features | `pnpm electron:local` opens the real account-free desktop, engine, Git and PTYs. Only the Local Personal owner is available. |
-| macOS, organization/cloud features | Use the already authorized Dev or local cloud stack; see `docs/electron-cloud.md`. `pnpm electron:cloud` can publish a runtime and provision remote resources. |
+| macOS, organization/cloud features | Use the already authorized Dev or local cloud stack; see `scripts/electron-cloud.mjs`. `pnpm electron:cloud` can publish a runtime and provision remote resources. |
 | Linux cloud workspace | Use the browser path below. `electron:local` explicitly refuses Linux. Production renderer components run with fixture I/O; native engine, actual PTYs, provider turns and Boat lifecycle remain unverified. |
 
 Do not change platform checks or fabricate a native bridge to make the full app
@@ -30,7 +30,7 @@ things: browser fixtures can cover placement UI without running a Boat worker.
 
 Use the repository's Node/pnpm toolchain and frozen dependencies. If working
 alongside other agents, use the agreed heavy-check slots. A Mac Local launch
-needs only the root dependency graph; follow `docs/local-development.md` for
+needs only the root dependency graph; use the root `README.md` for
 native prerequisites. Run one launcher per checkout: Local and Dev share build
 outputs. Keep the launch in its own foreground terminal so its Stop signal owns
 cleanup.

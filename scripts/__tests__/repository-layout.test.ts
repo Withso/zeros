@@ -670,28 +670,11 @@ describe("repository layout contracts", () => {
     ).toBe(false);
   });
 
-  it("keeps the active agent capability roadmap indexed and current", () => {
-    const roadmapPath =
-      "docs/agent-capabilities-parity-and-ui-consolidated-2026-07-01.md";
-    const roadmap = read(roadmapPath);
-    const docsIndex = read("docs/README.md");
-
-    expect(existsSync(roadmapPath)).toBe(true);
-    expect(docsIndex).toContain(
-      "agent-capabilities-parity-and-ui-consolidated-2026-07-01.md",
-    );
-    expect(roadmap).toContain("actively maintained agent-capability backlog");
-    expect(roadmap).toContain("packages/protocol/src/agent-events.ts");
-    expect(roadmap).toContain(
-      "apps/desktop/src/renderer/features/agent/sessions-store.ts",
-    );
-    expect(roadmap).not.toContain("packages/core/");
-    expect(roadmap).not.toContain("`src/zeros/");
-    expect(roadmap).not.toContain("design-open-tasks-consolidated");
+  it("keeps repository guidance in source and agent inputs rather than a docs directory", () => {
+    expect(existsSync("docs")).toBe(false);
   });
 
-  it("retires the old cloud guide directory and image workflows", () => {
-    expect(existsSync("docs/cloud-workspace")).toBe(false);
+  it("keeps legacy cloud image workflows retired", () => {
     for (const workflow of ["cloud-provision", "cloud-worker-promotion", "cloud-runtime-bundle"])
       expect(existsSync(`.github/workflows/${workflow}.yml`)).toBe(false);
   });

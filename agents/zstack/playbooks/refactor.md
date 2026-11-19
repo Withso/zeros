@@ -24,6 +24,6 @@ packaging stay unchanged (`RULES.md` §1). Numbers refer to
    touched directories and every suite that imports moved code. A
    comments-only change passes `node scripts/zstack/comments.mjs verify`. After
    deleting a file or entry point, search for its path across `scripts/`,
-   `agents/`, `.github/` and `docs/`, and run `pnpm build:engine` and
+   `agents/` and `.github/`, and run `pnpm build:engine` and
    `pnpm electron:compile` when an engine entry moved.
 6. **Review and deliver** (`zstack-review`, `integrate-pr.md`).

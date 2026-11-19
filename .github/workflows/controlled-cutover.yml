@@ -6,7 +6,7 @@ name: Controlled cutover
 # migrate, deploy the exact SHA, upload Pages and verify WorkOS. Dispatch from
 # `main` for Alpha or from `release/X.Y.Z` for Production; Production
 # waits for its single approval in `production-approval`. Afterwards rerun the failed desktop release
-# for the same SHA. See docs/deployment-environments.md.
+# for the same SHA. Use the cutover journal to confirm the recorded stage before recovery.
 on:
   workflow_dispatch:
     inputs:

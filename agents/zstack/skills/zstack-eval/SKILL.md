@@ -1,7 +1,7 @@
 ---
 name: zstack-eval
 description: "Run and extend zstack's eval cases — escaped Zeros bugs paired with the check that should have caught them — and keep every pack change from lowering the pass rate."
-globs: "agents/zstack/**,scripts/zstack/**"
+invocation: router
 ---
 
 # zstack-eval

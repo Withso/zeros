@@ -1,5 +1,7 @@
 import { defineRailway, project, service } from "railway/iac";
 
+// Import the live environment before reviewing any optional apply; this
+// partial must not overwrite production's promotion hold or live settings.
 export const partial = "zeros-control-plane";
 
 export default defineRailway((context) => {

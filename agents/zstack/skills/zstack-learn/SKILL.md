@@ -1,7 +1,7 @@
 ---
 name: zstack-learn
 description: "End-of-loop retrospective for Zeros work: turn each surprise (missed check, flaky gate, wrong assumption, environment gotcha) into a pack update, an eval case, or — preferably — a test, lint or type, in the same branch."
-globs: "**"
+invocation: router
 ---
 
 # zstack-learn

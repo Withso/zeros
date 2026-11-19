@@ -1,4 +1,4 @@
-// Production release candidates (docs/release-candidates-roadmap.md).
+// Production release candidates.
 //
 // release.yml publishes each notarized Production build to the rolling `rc`
 // prerelease with a receipt of its exact files; release-promote.yml promotes

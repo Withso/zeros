@@ -499,7 +499,7 @@ export function browserRouteSettings(raw: unknown): BrowserRouteSettings {
   };
 }
 
-/** The routing table in docs/agent-control.md. "Enable browser use" decides
+/** "Enable browser use" decides
  * for every agent, Claude's Chrome included. */
 export function resolveBrowserRoute(
   agentFamily: string,

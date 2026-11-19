@@ -11,7 +11,6 @@
 // and opens no desktop. ZEROS_NO_MAIN_HMR=1 disables this
 // watcher independently of engine HMR. Restart the development command once
 // after changing the launcher or supervisor itself.
-// See docs/development-restarts.md for lifecycle and recovery behavior.
 
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";

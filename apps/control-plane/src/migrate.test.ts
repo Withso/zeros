@@ -720,17 +720,10 @@ it('preflights every pending controlled approval before applying the strict migr
 
 it('keeps published full and retirement-only approval commands complete for their starting ledger',()=>{
   const controlled=LADDER.filter(name=>readFileSync(path.join(MIGRATIONS_DIR,name),'utf8').includes('-- zeros:requires-controlled-downtime'));
-  const root=path.resolve(MIGRATIONS_DIR,'../../..');
-  for(const name of ['apps/control-plane/.env.example','apps/control-plane/README.md','docs/deployment-environments.md']){
-    const source=readFileSync(path.join(root,name),'utf8');
-    const commands=[...source.matchAll(/CONTROL_PLANE_MIGRATION_APPROVALS=([\w.,]+)/g)];
-    expect(commands.length,name).toBeGreaterThan(0);
-    expect(commands[0]![1]!.split(','),name).toEqual(controlled);
-    for(const command of commands.slice(1)) {
-      // The cutover guide also gives an explicit suffix for a database at
-      // 0181. That command must include every remaining controlled batch.
-      expect(name).toBe('docs/deployment-environments.md');
-      expect(command[1]!.split(','),name).toEqual(controlled.filter(file=>file>='0182_'));
-    }
-  }
+  const example=readFileSync(path.join(MIGRATIONS_DIR,'../.env.example'),'utf8');
+  const commands=[...example.matchAll(/CONTROL_PLANE_MIGRATION_APPROVALS=([\w.,]+)/g)];
+  expect(commands.map(command=>command[1]!.split(','))).toEqual([
+    controlled,
+    controlled.filter(file=>file>='0182_'),
+  ]);
 });

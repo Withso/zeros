@@ -29,8 +29,7 @@ import { workspaceNumberLabel } from "@zeros/protocol/local-orchestration";
 
 /** 350 single-word colour names, drawn from historic pigments and dyes,
  *  heraldic tinctures, traditional Japanese/Chinese colours, minerals, and a
- *  few modern paint coinages. See docs/color-names.md for the family + hex of
- *  each; this file only needs the names.
+ *  few modern paint coinages.
  *
  *  Invariants (enforced by naming.test.ts, and relied on elsewhere):
  *    - One capitalized word, 3-13 letters, `/^[A-Z][a-z]{2,15}$/`. No spaces
