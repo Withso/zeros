@@ -99,6 +99,7 @@ import {
   observeDesignDirectory,
   reconcileDesignWorkspaceRuntimeAudit,
   refreshDesignWorkspaceSnapshot,
+  warmDesignWorkspaceSnapshot,
   resetDesignWorkspaceCacheForTests,
   stabilizeDesignWorkspaceSnapshot,
   updateDesignNodeStylesCached,
@@ -113,6 +114,7 @@ import {
 } from "../state/design-workspace-cache";
 import {
   designWorkspaceSnapshotMatchesPath,
+  readDesignWorkspaceBootSnapshots,
   safeDesignWorkspaceBootSnapshot,
 } from "../state/design-workspace-boot-cache";
 import { presentDesignWorkspaceSnapshotRead } from "../state/use-design-workspace";
@@ -179,6 +181,56 @@ function snapshot(
       healedOids: 0,
     },
   };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((settle) => { resolve = settle; });
+  return { promise, resolve };
+}
+
+function lazySnapshot(pageFiles: string[], preparedFile?: string): DesignWorkspaceSnapshotWire {
+  const value = snapshot(preparedFile ? [{ file: preparedFile, x: 37 }] : []);
+  value.directoryId = "design_stage3";
+  value.pages = [{ id: "main", title: "Main", folder: "", frameFiles: pageFiles }];
+  const prepared = value.frames[0];
+  value.preparation = {
+    revision: "d".repeat(64),
+    epoch: 1,
+    current: prepared ? [prepared.file] : [],
+    errors: {},
+    descriptions: pageFiles.map((file, index) => ({
+      file,
+      title: file,
+      x: index * 100,
+      y: 0,
+      width: 1440,
+      height: 900,
+      z: index,
+      frameId: `frame_${index}`,
+      pageId: "main",
+      preparation: "unprepared" as const,
+    })),
+  };
+  return value;
+}
+
+function stubBootStorage() {
+  const storage = new Map<string, string>();
+  const setItem = vi.fn((key: string, value: string) => {
+    storage.set(key, value);
+  });
+  vi.stubGlobal("localStorage", {
+    getItem: (key: string) => storage.get(key) ?? null,
+    setItem,
+    removeItem: (key: string) => storage.delete(key),
+    clear: () => storage.clear(),
+    key: (index: number) => [...storage.keys()][index] ?? null,
+    get length() {
+      return storage.size;
+    },
+  } satisfies Storage);
+  return { storage, setItem };
 }
 
 describe("design workspace cache", () => {
@@ -412,6 +464,7 @@ describe("design workspace cache", () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.unstubAllGlobals();
   });
 
@@ -2671,6 +2724,116 @@ describe("design workspace cache", () => {
     expect(boot.data?.protocolCapability).toBeNull();
     expect(boot.data?.assets[0]?.dataUrl).toBeNull();
     expect(boot.invalidationVersion).toBeGreaterThan(0);
+  });
+
+  it("mirrors admitted lazy pages, only prepared geometry, and the latest publication", async () => {
+    const { storage, setItem } = stubBootStorage();
+    let flush: (() => void) | undefined;
+    const requestIdleCallback = vi.fn((callback: () => void) => {
+      flush = callback;
+      return 1;
+    });
+    vi.stubGlobal("window", {
+      addEventListener: vi.fn(),
+      requestIdleCallback,
+      cancelIdleCallback: vi.fn(),
+      setTimeout: vi.fn(() => 2),
+      clearTimeout: vi.fn(),
+    });
+    const workspaceId = "ws_lazy_mirror";
+    const earlier = lazySnapshot(["prepared.html", "old-pending.html"], "prepared.html");
+    const latest = lazySnapshot(["prepared.html", "new-pending.html"], "prepared.html");
+    latest.frames[0]!.x = 412;
+
+    primeDesignWorkspaceSnapshot(workspaceId, earlier);
+    primeDesignWorkspaceSnapshot(workspaceId, latest);
+    expect(requestIdleCallback).toHaveBeenCalledOnce();
+    expect(setItem).not.toHaveBeenCalled();
+    flush?.();
+    expect(setItem).toHaveBeenCalledOnce();
+    expect(storage.has("zeros-design-workspace-snapshots-v1")).toBe(true);
+
+    const mirrored = readDesignWorkspaceBootSnapshots().get(workspaceId);
+    expect(mirrored?.pages?.[0]?.frameFiles).toEqual(["prepared.html", "new-pending.html"]);
+    expect(mirrored?.frames).toMatchObject([{ file: "prepared.html", x: 412 }]);
+    expect(mirrored?.frames).toHaveLength(1);
+    expect(mirrored?.frames?.map((frame) => frame.file)).not.toContain("new-pending.html");
+    expect(mirrored?.frames?.[0]?.sourceVersion).toBe(latest.frames[0]?.sourceVersion);
+    expect(mirrored?.frames?.[0]).not.toHaveProperty("source");
+    expect(mirrored?.frames?.[0]).not.toHaveProperty("srcDoc");
+    expect(mirrored?.preparation).toBeUndefined();
+  });
+
+  it("does not let a late read or cloud publication replace the admitted local mirror", async () => {
+    stubBootStorage();
+    vi.useFakeTimers();
+    const workspaceId = "ws_lazy_mirror_race";
+    const pending = deferred<DesignWorkspaceSnapshotWire>();
+    platformMocks.readSnapshot.mockReturnValue(pending.promise);
+    warmDesignWorkspaceSnapshot(workspaceId);
+    for (let index = 0; index < 12; index += 1) await Promise.resolve();
+    expect(platformMocks.readSnapshot).toHaveBeenCalledOnce();
+
+    const latest = snapshot([{ file: "new.html", x: 440 }]);
+    latest.directoryId = "design_new";
+    latest.pages = [{ id: "main", title: "Main", folder: "", frameFiles: ["new.html"] }];
+    primeDesignWorkspaceSnapshot(workspaceId, latest);
+    const stale = snapshot([{ file: "old.html", x: 10 }]);
+    stale.directoryId = "design_old";
+    stale.pages = [{ id: "main", title: "Main", folder: "", frameFiles: ["old.html"] }];
+    pending.resolve(stale);
+    for (let index = 0; index < 16; index += 1) await Promise.resolve();
+
+    const cloudId = "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
+    primeDesignWorkspaceSnapshot(cloudId, latest);
+    await vi.runAllTimersAsync();
+
+    expect(readDesignWorkspaceBootSnapshots().get(workspaceId)?.pages?.[0]?.frameFiles).toEqual(["new.html"]);
+    expect(readDesignWorkspaceBootSnapshots().has(cloudId)).toBe(false);
+    const stalePages = lazySnapshot(["stale-page.html"]);
+    stalePages.preparation!.stalePages = ["main"];
+    primeDesignWorkspaceSnapshot(workspaceId, stalePages);
+    await vi.runAllTimersAsync();
+    expect(readDesignWorkspaceBootSnapshots().get(workspaceId)?.pages?.[0]?.frameFiles).toEqual(["new.html"]);
+  });
+
+  it("does not queue an explicit refresh result after a newer cache publication", async () => {
+    stubBootStorage();
+    vi.useFakeTimers();
+    const workspaceId = "ws_refresh_mirror_race";
+    const pending = deferred<DesignWorkspaceSnapshotWire>();
+    platformMocks.readSnapshot.mockReturnValue(pending.promise);
+    const refresh = refreshDesignWorkspaceSnapshot(workspaceId);
+    for (let index = 0; index < 12; index += 1) await Promise.resolve();
+    expect(platformMocks.readSnapshot).toHaveBeenCalledOnce();
+
+    const latest = snapshot([{ file: "new.html", x: 440 }]);
+    latest.directoryId = "design_new";
+    latest.pages = [{ id: "main", title: "Main", folder: "", frameFiles: ["new.html"] }];
+    primeDesignWorkspaceSnapshot(workspaceId, latest);
+    const stale = snapshot([{ file: "old.html", x: 10 }]);
+    stale.directoryId = "design_old";
+    stale.pages = [{ id: "main", title: "Main", folder: "", frameFiles: ["old.html"] }];
+    pending.resolve(stale);
+    await refresh;
+    await vi.runAllTimersAsync();
+
+    expect(readDesignWorkspaceBootSnapshots().get(workspaceId)?.pages?.[0]?.frameFiles).toEqual(["new.html"]);
+  });
+
+  it("queues an observed snapshot only when it is the exact admitted local object", async () => {
+    stubBootStorage();
+    vi.useFakeTimers();
+    const workspaceId = "ws_observed_mirror";
+    const admitted = lazySnapshot(["main.html"]);
+    designWorkspaceSnapshotCache.setData(workspaceId, admitted);
+    observeDesignDirectory(workspaceId, admitted);
+    const late = { ...admitted, directoryId: "design_replaced" };
+    observeDesignDirectory(workspaceId, late);
+    await vi.runAllTimersAsync();
+
+    expect(readDesignWorkspaceBootSnapshots().get(workspaceId)?.pages?.[0]?.frameFiles).toEqual(["main.html"]);
+    expect(designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data).toBe(admitted);
   });
 
   it("never reuses a persisted preview for an adapted workspace path", () => {

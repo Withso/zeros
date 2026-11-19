@@ -565,6 +565,81 @@ describe("Design selection validation against a boot preview", () => {
     });
   });
 
+  it("keeps the selected frame through an authoritative lazy catalog until preparation publishes", async () => {
+    const boot = workspaceSnapshot([
+      page(OTHER_PAGE_ID, [OTHER_FRAME]),
+      page(PAGE_ID, [BASE_FRAME, COPY_FRAME]),
+    ]);
+    boot.frames = [];
+    const selected = frame(COPY_FRAME, PAGE_ID, "card_copy_copy");
+    const descriptions = boot.pages!.flatMap((entry) => entry.frameFiles.map((file, index) => {
+      const value = frame(file, entry.id, entry.frameIds?.[index] ?? file.replaceAll("/", "_"));
+      return {
+        file: value.file,
+        pageId: value.pageId,
+        frameId: value.frameId,
+        title: value.title,
+        kind: value.kind,
+        x: value.x,
+        y: value.y,
+        width: value.width,
+        height: value.height,
+        z: value.z,
+        preparation: "unprepared" as const,
+      };
+    }));
+    const lazy: DesignWorkspaceSnapshotWire = {
+      ...boot,
+      frames: [],
+      preparation: {
+        revision: "b".repeat(64),
+        epoch: 2,
+        current: [],
+        errors: {},
+        descriptions,
+      },
+    };
+    const pending = deferred<DesignWorkspaceSnapshotWire>();
+    platform.readSnapshot.mockImplementation(() => pending.promise);
+    await seedRendererReload(boot);
+
+    const mounted = await mountWorkspace();
+    expect(platform.canvasAuthoritySamples.at(-1)).toBe(false);
+    await act(async () => {
+      pending.resolve(lazy);
+      await pending.promise;
+      await flushMicrotasks();
+    });
+    expect(mounted.cache.designWorkspaceSnapshotCache.peekSnapshot(WORKSPACE_ID).data?.frames).toEqual([]);
+    expect(platform.canvasAuthoritySamples.at(-1)).toBe(true);
+    expect(mounted.ui.designWorkspaceView(WORKSPACE_ID)).toMatchObject({
+      activePageId: PAGE_ID,
+      selectedFrame: COPY_FRAME,
+      frameSelected: true,
+      selectedTargets: [{ frame: COPY_FRAME }],
+    });
+    expect(platform.canvasProps?.snapshot?.frames).toEqual([]);
+    expect(platform.canvasProps?.snapshot?.preparation?.current).toEqual([]);
+
+    const prepared: DesignWorkspaceSnapshotWire = {
+      ...lazy,
+      frames: [selected],
+      preparation: { ...lazy.preparation!, current: [COPY_FRAME] },
+    };
+    await act(async () => {
+      mounted.cache.primeDesignWorkspaceSnapshot(WORKSPACE_ID, prepared);
+      await flushMicrotasks();
+    });
+    mounted.unsubscribe();
+    expect(platform.canvasProps?.snapshot?.frames).toEqual([selected]);
+    expect(mounted.ui.designWorkspaceView(WORKSPACE_ID)).toMatchObject({
+      activePageId: PAGE_ID,
+      selectedFrame: COPY_FRAME,
+      frameSelected: true,
+      selectedTargets: [{ frame: COPY_FRAME }],
+    });
+  });
+
   it("keeps a newly selected page and its viewport when the boot catalog omits that page", async () => {
     const boot = workspaceSnapshot([page(OTHER_PAGE_ID, [OTHER_FRAME])]);
     const live = workspaceSnapshot([

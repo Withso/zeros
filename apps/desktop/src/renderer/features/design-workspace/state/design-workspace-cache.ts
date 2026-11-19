@@ -785,8 +785,11 @@ export const designFoundationCache =
 
 export const designFramePreparation = new DesignFramePreparation({
   snapshot: (workspaceId) => designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data,
-  publish: (workspaceId, snapshot) => designWorkspaceSnapshotCache.setData(workspaceId,
-    stabilizeDesignWorkspaceSnapshot(designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data, snapshot)),
+  publish: (workspaceId, snapshot) => {
+    designWorkspaceSnapshotCache.setData(workspaceId,
+      stabilizeDesignWorkspaceSnapshot(designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data, snapshot));
+    queueAdmittedDesignWorkspaceBootSnapshot(workspaceId, designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data);
+  },
   canPrepare: (workspaceId) => {
     const read = designWorkspaceSnapshotCache.peekSnapshot(workspaceId);
     return !isCloudWorkspace(workspaceId) && !hasPendingDesignEdits(workspaceId) && !read.loading && !read.refreshing;
@@ -1398,12 +1401,27 @@ function sameFrameStyleSources(
   );
 }
 
+function queueAdmittedDesignWorkspaceBootSnapshot(
+  workspaceId: string,
+  snapshot: DesignWorkspaceSnapshotWire | undefined,
+): void {
+  if (
+    !snapshot ||
+    designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data !== snapshot ||
+    isCloudWorkspace(workspaceId) ||
+    isDesignWorkspaceBootPreview(snapshot) ||
+    snapshot.preparation?.stalePages?.length
+  ) return;
+  queueDesignWorkspaceBootSnapshot(workspaceId, snapshot);
+}
+
 /** Called after a cache publication, never from an unadmitted fetch result. */
 export function observeDesignDirectory(workspaceId: string, snapshot: DesignWorkspaceSnapshotWire): void {
   notifyDesignSelectionSnapshot(workspaceId);
   designSourceVectorCache.reconcile({ workspaceId, folder: snapshot.lint.workspacePath,
     directoryId: snapshot.directoryId ?? "", capability: snapshot.protocolCapability ?? "" },
     new Set((snapshot.preparation?.descriptions ?? snapshot.frames).map(frame => frame.file)));
+  queueAdmittedDesignWorkspaceBootSnapshot(workspaceId, snapshot);
   if (!snapshot.directoryId) return;
   const ui = useDesignWorkspaceUiStore.getState();
   const previous = ui.byWorkspace[workspaceId]?.directoryId;
@@ -1438,7 +1456,7 @@ function publishDesignWorkspaceSnapshot(
   // replacement read fetches them.
   if (stable.preparation?.stalePages?.length) designWorkspaceSnapshotCache.invalidate(workspaceId);
   notifyDesignSelectionSnapshot(workspaceId);
-  if (!stable.preparation) queueDesignWorkspaceBootSnapshot(workspaceId, stable);
+  queueAdmittedDesignWorkspaceBootSnapshot(workspaceId, designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data);
   if (stable.preparation?.lintPending?.length) lintWrittenDesignFrames(workspaceId);
   return stable;
 }
@@ -1610,7 +1628,6 @@ export async function fetchDesignWorkspaceSnapshot(
   const stable = previous && stabilized === previous && isDesignWorkspaceBootPreview(previous)
     ? { ...stabilized }
     : stabilized;
-  if (!stable.preparation) queueDesignWorkspaceBootSnapshot(workspaceId, stable);
   return stable;
 }
 
@@ -1619,6 +1636,7 @@ export function warmDesignWorkspaceSnapshot(workspaceId: string): void {
     .load(workspaceId, () => fetchDesignWorkspaceSnapshot(workspaceId), {
       maxAgeMs: DESIGN_SNAPSHOT_MAX_AGE_MS,
     })
+    .then((snapshot) => queueAdmittedDesignWorkspaceBootSnapshot(workspaceId, snapshot))
     .catch(() => {});
 }
 
@@ -1632,13 +1650,15 @@ export function invalidateDesignWorkspaceSnapshot(workspaceId: string): void {
 export async function refreshDesignWorkspaceSnapshot(
   workspaceId: string,
 ): Promise<DesignWorkspaceSnapshotWire> {
-  return designWorkspaceSnapshotCache.load(
+  const snapshot = await designWorkspaceSnapshotCache.load(
     workspaceId,
     // Explicit recovery and mutation retries need actual source generations.
     // Navigation/watchers use the lazy fetch through useCachedRead.
     () => fetchDesignWorkspaceSnapshot(workspaceId, true),
     { force: true },
   );
+  queueAdmittedDesignWorkspaceBootSnapshot(workspaceId, snapshot);
+  return snapshot;
 }
 
 /** Publish the mutation's exact aggregate response without a second bridge
