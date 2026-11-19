@@ -42,6 +42,87 @@ import { cloneRepo } from "../init-clone";
 
 const execFileAsync = promisify(execFile);
 
+async function withSystemConfigGitShim<T>(opts: {
+  directory: string;
+  home: string;
+  locale: string;
+  mode: "missing" | "malformed" | "denied";
+  interceptClone?: boolean;
+  run: (logs: { configLocale: string; cloneLocale: string }) => Promise<T>;
+}): Promise<T> {
+  const realGit = (await execFileAsync("which", ["git"])).stdout.trim();
+  const bin = path.join(opts.directory, "system-config-git-bin");
+  const configLocale = path.join(opts.directory, "system-config-locale");
+  const cloneLocale = path.join(opts.directory, "clone-locale");
+  const keys = [
+    "PATH",
+    "LC_ALL",
+    "HOME",
+    "XDG_CONFIG_HOME",
+    "ZEROS_TEST_REAL_GIT",
+    "ZEROS_TEST_SYSTEM_CONFIG_MODE",
+    "ZEROS_TEST_CONFIG_LOCALE_LOG",
+    "ZEROS_TEST_CLONE_LOCALE_LOG",
+    "ZEROS_TEST_INTERCEPT_CLONE",
+  ];
+  const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+  await mkdir(bin, { recursive: true });
+  const executable = path.join(bin, "git");
+  await writeFile(
+    executable,
+    `#!/bin/sh
+if [ "\${1:-}" = "config" ] && [ "\${2:-}" = "--system" ]; then
+  printf '%s' "\${LC_ALL:-}" > "$ZEROS_TEST_CONFIG_LOCALE_LOG"
+  case "\${ZEROS_TEST_SYSTEM_CONFIG_MODE:-missing}" in
+    missing)
+      case "\${LC_ALL:-}" in
+        C) printf '%s\\n' "fatal: unable to read config file '/isolated/system.gitconfig': No such file or directory" >&2 ;;
+        fr*) printf '%s\\n' "fatal: lecture du fichier de configuration '/isolated/system.gitconfig' impossible" >&2 ;;
+        de*) printf '%s\\n' "fatal: Konnte Konfigurationsdatei '/isolated/system.gitconfig' nicht lesen." >&2 ;;
+        *) printf '%s\\n' "fatal: unable to read config file '/isolated/system.gitconfig': No such file or directory" >&2 ;;
+      esac
+      ;;
+    malformed) printf '%s\\n' "fatal: bad config line 1 in '/isolated/system.gitconfig'" >&2 ;;
+    denied) printf '%s\\n' "fatal: unable to read config file '/isolated/system.gitconfig': Permission denied" >&2 ;;
+  esac
+  exit 128
+fi
+for arg in "$@"; do
+  if [ "$arg" = "clone" ]; then
+    printf '%s' "\${LC_ALL:-}" > "$ZEROS_TEST_CLONE_LOCALE_LOG"
+    if [ "\${ZEROS_TEST_INTERCEPT_CLONE:-}" = "1" ]; then
+      printf '%s\\n' "fatal: clone intercepted for test" >&2
+      exit 128
+    fi
+    break
+  fi
+done
+exec "$ZEROS_TEST_REAL_GIT" "$@"
+`,
+    "utf8",
+  );
+  await chmod(executable, 0o700);
+
+  process.env.PATH = `${bin}${path.delimiter}${process.env.PATH ?? ""}`;
+  process.env.LC_ALL = opts.locale;
+  process.env.HOME = opts.home;
+  delete process.env.XDG_CONFIG_HOME;
+  process.env.ZEROS_TEST_REAL_GIT = realGit;
+  process.env.ZEROS_TEST_SYSTEM_CONFIG_MODE = opts.mode;
+  process.env.ZEROS_TEST_CONFIG_LOCALE_LOG = configLocale;
+  process.env.ZEROS_TEST_CLONE_LOCALE_LOG = cloneLocale;
+  process.env.ZEROS_TEST_INTERCEPT_CLONE = opts.interceptClone ? "1" : "0";
+  try {
+    return await opts.run({ configLocale, cloneLocale });
+  } finally {
+    for (const key of keys) {
+      const value = previous[key];
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
 describe("redacted Git permission remediation", () => {
   it.each([
     "error: open('/private/fixture/path'): Permission denied",
@@ -1087,6 +1168,56 @@ describe("runGit — transient lock retry", () => {
         secondTarget.close(),
       ]);
     }
+  });
+
+  it("uses Git's empty insteadOf prefix when resolving clone credentials", async () => {
+    const hostHome = path.join(dir, "clone-empty-prefix-home");
+    await mkdir(hostHome, { recursive: true });
+    const config = path.join(hostHome, ".gitconfig");
+    await writeFile(config, "");
+    await execFileAsync("git", ["config", "--file", config, "url.https://proxy.invalid/mapped/.insteadOf", ""]);
+    const authorities: string[] = [];
+    setGitCredentialSourceForTesting({
+      supports({ protocol, authority }) { authorities.push(authority); return protocol === "https" && authority === "proxy.invalid"; },
+      async getCredential() { return { username: "x-access-token", password: "test" }; },
+    });
+    await withSystemConfigGitShim({ directory: dir, home: hostHome, locale: "C", mode: "missing", interceptClone: true, run: async ({ cloneLocale }) => {
+      await expect(cloneRepo({ url: "https://source.invalid/repo.git", parentFolder: dir, directoryName: "clone-empty-prefix" })).rejects.toMatchObject({ code: "GIT_COMMAND_FAILED" });
+      expect(authorities).toContain("proxy.invalid");
+      expect(await readFile(cloneLocale, "utf8")).toBe("C");
+    }});
+  });
+
+  it.each(["fr_FR.UTF-8", "de_DE.UTF-8"])("pins missing-config diagnostics to C under %s", async (locale) => {
+    const root = path.join(dir, `locale-${locale}`);
+    const home = path.join(dir, `locale-home-${locale}`);
+    const bare = path.join(root, "remote.git");
+    await mkdir(root, { recursive: true });
+    await mkdir(home, { recursive: true });
+    await execFileAsync("git", ["clone", "--bare", repo, bare]);
+    const source = await startAuthenticatedGitServer({ projectRoot: root, password: "source" });
+    const proxy = await startAuthenticatedGitServer({ projectRoot: root, password: "proxy" });
+    try {
+      const config = path.join(home, ".gitconfig");
+      await writeFile(config, "");
+      await execFileAsync("git", ["config", "--file", config, `url.${proxy.url}.insteadOf`, source.url]);
+      setGitCredentialSourceForTesting({ supports: ({ authority }) => authority === new URL(proxy.url).host, async getCredential() { return { username: "x-access-token", password: "proxy" }; } });
+      await withSystemConfigGitShim({ directory: dir, home, locale, mode: "missing", run: async ({ configLocale, cloneLocale }) => {
+        expect(await cloneRepo({ url: source.url, parentFolder: dir, directoryName: `clone-${locale}` })).toMatchObject({ defaultBranch: "main" });
+        expect(await readFile(configLocale, "utf8")).toBe("C");
+        expect(await readFile(cloneLocale, "utf8")).toBe(locale);
+      }});
+    } finally { await Promise.all([source.close(), proxy.close()]); }
+  });
+
+  it.each([["malformed", "invalid_configuration"], ["denied", "permission_denied"]] as const)("keeps %s config errors fail-closed", async (mode, reason) => {
+    const home = path.join(dir, `config-error-${mode}`);
+    await mkdir(home, { recursive: true });
+    await writeFile(path.join(home, ".gitconfig"), "");
+    await withSystemConfigGitShim({ directory: dir, home, locale: "fr_FR.UTF-8", mode, run: async ({ configLocale }) => {
+      await expect(cloneRepo({ url: "https://source.invalid/repo.git", parentFolder: dir, directoryName: `clone-${mode}` })).rejects.toMatchObject({ code: "GIT_COMMAND_FAILED", context: { reason } });
+      expect(await readFile(configLocale, "utf8")).toBe("C");
+    }});
   });
 
   it("keeps the broker credential path when no clone URL rewrite matches", async () => {

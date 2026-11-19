@@ -1634,6 +1634,7 @@ async function resolveCloneUrlWithInsteadOf(
   cwd: string,
   target: string,
 ): Promise<string> {
+  const configEnv = { ...gitChildEnv(), LC_ALL: "C" };
   const [systemEntries, globalEntries] = await Promise.all(
     (["--system", "--global"] as const).map(async (scope) => {
       try {
@@ -1642,7 +1643,7 @@ async function resolveCloneUrlWithInsteadOf(
           ["config", scope, "--show-origin", "--null", "--list", "--includes"],
           {
             cwd,
-            env: gitChildEnv(),
+            env: configEnv,
             timeoutMs: 5_000,
             maxBufferBytes: 4 * 1024 * 1024,
           },
@@ -1679,8 +1680,7 @@ async function resolveCloneUrlWithInsteadOf(
     if (
       !lowerKey.startsWith("url.") ||
       !lowerKey.endsWith(suffix) ||
-      entry.key.length <= 4 + suffix.length ||
-      !entry.value
+      entry.key.length <= 4 + suffix.length
     ) {
       continue;
     }
