@@ -135,6 +135,29 @@ describe("workspace-files-cache invalidation", () => {
     }
   });
 
+  it("retains an authorized cloud list too large to persist across stop", async () => {
+    const organizationId = "11111111-1111-4111-8111-111111111111";
+    const workspaceId = "22222222-2222-4222-8222-222222222222";
+    const folder = cloudWorkspaceKey({ organizationId, workspaceId });
+    const doc = { organizationId, status: "ready", capabilities: { canWrite: true }, generation: { number: 1 } };
+    bindAccountPresentationOwner("warm-cloud-list");
+    cloud.docs.set(workspaceId, doc);
+    try {
+      listFiles.mockResolvedValueOnce(["a".repeat(270_000)]);
+      const confirmed = await loadWorkspaceFiles(folder);
+      doc.status = "stopped";
+      for (const listener of cloud.listeners) listener();
+      expect(peekWorkspaceFiles(folder)).toBe(confirmed);
+      await expect(loadWorkspaceFiles(folder)).resolves.toBe(confirmed);
+      expect(listFiles).toHaveBeenCalledTimes(1);
+      resetWorkspaceFilesCacheForTests();
+      expect(peekWorkspaceFiles(folder)).toBeNull();
+    } finally {
+      bindAccountPresentationOwner(null);
+      cloud.docs.clear();
+    }
+  });
+
   it.each([
     { count: 13, pathLength: 10, retained: 12 },
     { count: 4, pathLength: 185_000, retained: 2 },

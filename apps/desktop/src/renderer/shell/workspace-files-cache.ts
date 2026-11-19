@@ -151,11 +151,11 @@ export async function loadWorkspaceFileListing(
   if (!key) throw new Error("Cloud file listing access changed");
   const retainedListing = () => {
     const latest = cache.get(key);
-    if (latest && latest.readKey === access?.readKey) return latest.listing;
+    if (latest) return latest.listing;
     return access ? peekCloudFileList(folder, access.lineage) : undefined;
   };
   if (access && !access.ready) {
-    const retained = peekCloudFileList(folder, access.lineage);
+    const retained = peekWorkspaceFileListing(folder);
     if (retained) return retained;
     throw new Error("Cloud file listing requires a running workspace");
   }
@@ -320,7 +320,11 @@ export function peekWorkspaceFileListing(
     const access = cloudFileListAccess(key);
     if (!access) return null;
     const hit = cache.get(access.key);
-    return (access.ready && hit?.readKey === access.readKey ? hit.listing : peekCloudFileList(key, access.lineage)) ?? null;
+    if (hit) {
+      touchCacheEntry(access.key, hit);
+      return hit.listing;
+    }
+    return peekCloudFileList(key, access.lineage) ?? null;
   }
   const entry = cache.get(key);
   if (!entry) return null;
