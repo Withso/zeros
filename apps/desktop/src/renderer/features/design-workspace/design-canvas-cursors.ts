@@ -32,13 +32,14 @@ function quantizedDegrees(degrees: number, period: number): number {
   return ((step % period) + period) % period;
 }
 
-const ARROW = "M6 5 22.2 14.3 14.2 17 9.7 23.3Z";
+// Sized to the macOS arrow's height; Figma's head is wider than the Mac's.
+const ARROW = "M6 5 18.6 12.3 12.4 14.4 8.9 19.3Z";
 
 /** The canvas arrow: a dark grey head in a thick white outline, tip top left. */
 export const DESIGN_ARROW_CURSOR = designSvgCursor(
   "zd-cursor-arrow",
-  `<path d='${ARROW}' fill='%23fff' stroke='%23fff' stroke-width='4' stroke-linejoin='round'/>` +
-    `<path d='${ARROW}' fill='%23333' stroke='%23333' stroke-width='1' stroke-linejoin='round'/>`,
+  `<path d='${ARROW}' fill='%23fff' stroke='%23fff' stroke-width='3' stroke-linejoin='round'/>` +
+    `<path d='${ARROW}' fill='%23333' stroke='%23333' stroke-width='0.8' stroke-linejoin='round'/>`,
   { x: 6, y: 5 },
   "default",
 );
@@ -62,8 +63,8 @@ export function designResizeCursor(degrees: number): string {
 }
 
 // A quarter arc wrapping the north-west corner, an arrowhead at each end.
-const ROTATE_ARC = "M10 20V17A6 6 0 0 1 16 11H20";
-const ROTATE_HEADS = ["M6 20H14L10 25Z", "M20 7V15L25 11Z"];
+const ROTATE_ARC = "M11.3 19.1V16.8A4.7 4.7 0 0 1 16 12.1H19.1";
+const ROTATE_HEADS = ["M8.2 19.1H14.4L11.3 23Z", "M19.1 9V15.2L23 12.1Z"];
 
 /** The rotation cursor for a corner whose screen direction from the box
  * centre, a quarter turn on, is `degrees`: -45° is an upright box's
@@ -75,9 +76,9 @@ export function designRotationCursor(degrees: number): string {
   return designSvgCursor(
     `zd-cursor-rotate-${angle}`,
     `<g transform='rotate(${angle} 16 16)'>` +
-      `<path d='${ROTATE_ARC}' fill='none' stroke='%23fff' stroke-width='5.4'/>` +
-      heads("fill='%23fff' stroke='%23fff' stroke-width='3' stroke-linejoin='round'") +
-      `<path d='${ROTATE_ARC}' fill='none' stroke='%23000' stroke-width='2.4'/>` +
+      `<path d='${ROTATE_ARC}' fill='none' stroke='%23fff' stroke-width='5'/>` +
+      heads("fill='%23fff' stroke='%23fff' stroke-width='2.8' stroke-linejoin='round'") +
+      `<path d='${ROTATE_ARC}' fill='none' stroke='%23000' stroke-width='2.2'/>` +
       heads("fill='%23000'") +
       "</g>",
     { x: 16, y: 16 },
