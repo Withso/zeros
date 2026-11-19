@@ -2,7 +2,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { refusal, refusalAsync, removeContainedAsync } from "../contained-removal.cjs";
+import * as contained from "../contained-removal.cjs";
+import { refusal, removeContained, removeContainedAsync } from "../contained-removal.cjs";
 
 const roots: string[] = [];
 function scratch() {
@@ -26,16 +27,16 @@ describe("async contained removal", () => {
     fs.mkdirSync(path.join(container, "entry", "deep"), { recursive: true });
     fs.writeFileSync(path.join(container, "entry", "deep", "f"), "x");
     fs.symlinkSync(outside, path.join(container, "linked"));
-    const cases = [
-      path.join(container, "entry"), path.join(container, "linked"), path.join(container, "missing"),
+    const refused = [
+      path.join(container, "linked"), path.join(container, "missing"),
       path.join(container, "entry", "deep"), `${container}/../store/entry`, path.join(outside),
     ];
-    const expected = cases.map((target) => refusal(target, { container, root }));
+    const expected = refused.map((target) => refusal(target, { container, root }));
+    expect(expected.every((reason) => reason !== null)).toBe(true);
     const spies = spySync();
     const actual = [];
-    for (const target of cases) actual.push(await refusalAsync(target, { container, root }));
+    for (const target of refused) actual.push(await removeContainedAsync(target, { container, root }));
     expect(actual).toEqual(expected);
-    expect(await removeContainedAsync(path.join(container, "linked"), { container, root })).toBe("symlink");
     expect(await removeContainedAsync(path.join(container, "entry"), { container, root })).toBe("removed");
     for (const spy of spies) expect(spy, spy.getMockName()).not.toHaveBeenCalled();
     vi.restoreAllMocks();
@@ -52,6 +53,29 @@ describe("the containment anchor", () => {
     fs.mkdirSync(path.join(real, "store", "entry"), { recursive: true });
     const options = { container: path.join(home, "store"), root: home };
     expect(refusal(path.join(home, "store", "entry"), options)).toBe("symlink");
-    expect(await refusalAsync(path.join(home, "store", "entry"), options)).toBe("symlink");
+    expect(await removeContainedAsync(path.join(home, "store", "entry"), options)).toBe("symlink");
+    expect(fs.existsSync(path.join(real, "store", "entry"))).toBe(true);
+  });
+
+  // Phase 4 review finding 6: a linked ancestor above a plain anchor was followed.
+  it("refuses everything below a real root reached through a linked ancestor, before reading below it", async () => {
+    const real = scratch(), linkParent = scratch();
+    fs.mkdirSync(path.join(real, "home", "store", "entry"), { recursive: true });
+    const linked = path.join(linkParent, "users");
+    fs.symlinkSync(real, linked);
+    const home = path.join(linked, "home");
+    const target = path.join(home, "store", "entry");
+    const options = { container: path.join(home, "store"), root: home };
+    const lstat = vi.spyOn(fs, "lstatSync");
+    expect(refusal(target, options)).toBe("linked ancestry");
+    expect(lstat.mock.calls.some(([file]) => String(file).startsWith(`${home}${path.sep}`))).toBe(false);
+    vi.restoreAllMocks();
+    expect(removeContained(target, options)).toBe("linked ancestry");
+    expect(await removeContainedAsync(target, options)).toBe("linked ancestry");
+    expect(fs.existsSync(target)).toBe(true);
+  });
+
+  it("exports only what its callers use", () => {
+    expect(Object.keys(contained).filter((key) => key !== "default").sort()).toEqual(["refusal", "removeContained", "removeContainedAsync"]);
   });
 });

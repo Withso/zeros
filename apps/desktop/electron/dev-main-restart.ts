@@ -2,14 +2,13 @@ import { statSync } from "node:fs";
 import path from "node:path";
 
 import { engineRuntimeDir } from "../src/engine/db/paths";
-import { ENGINE_BUSY_FRESH_MS } from "../src/engine/db/engine-runtime-prune";
 
 /** Both development reloaders use the engine's ten-second heartbeat. There
  * is no duration limit on a healthy turn; only an abandoned marker expires. */
 export function engineTurnIsActive(root: string, now = Date.now()): boolean {
   try {
     const marker = statSync(path.join(engineRuntimeDir(root), "busy"));
-    return !marker.isFile() || now - marker.mtimeMs < ENGINE_BUSY_FRESH_MS;
+    return !marker.isFile() || now - marker.mtimeMs < 30_000;
   } catch (error) {
     // An unreadable marker cannot establish that restarting is safe.
     return (error as NodeJS.ErrnoException).code !== "ENOENT";

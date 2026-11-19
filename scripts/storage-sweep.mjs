@@ -123,6 +123,15 @@ function realPathFrom(home, directory) {
   return true;
 }
 
+/** True when no component above `home` is a link either. */
+function reachedWithoutLinks(home) {
+  try {
+    return fs.realpathSync(home) === home;
+  } catch {
+    return false;
+  }
+}
+
 /** Names in `directory`. ok:false when it exists but cannot be listed, or is
  * reached through a link: what it holds is unknown. */
 function list(home, directory) {
@@ -207,7 +216,8 @@ export function planSweep({
   const deadline = Date.now() + budgetMs;
   const named = identities ? new Set(identities) : null;
   const base = { home, platform, env, only, named, items: [], keychain: [], unlisted: [], problem: null };
-  if (realPathFrom(home, home) !== true) return { ...base, problem: "the home folder is missing, a symlink or not a folder" };
+  if (realPathFrom(home, home) !== true || !reachedWithoutLinks(home))
+    return { ...base, problem: "the home folder is missing, not a folder, or reached through a symlink" };
   const library = path.join(home, "Library");
   const isProtected = neverTouch(home);
   const containers = paths.developmentContainers({ home, platform, env });

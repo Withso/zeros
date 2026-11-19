@@ -1,6 +1,13 @@
-// The one containment check for deleting Zeros storage: the launcher prune,
-// `pnpm storage:sweep` and the engine's own maintenance all use it. Plain
-// CommonJS with Node built-ins so plain-Node scripts and the engine share it.
+// The one containment check for deleting development storage: the launcher's
+// bundle prune, the ephemeral-identity helper, bundle preparation and
+// `pnpm storage:sweep`. These are developer tools a person or the dev launcher
+// runs; no installed app deletes through this module. Plain CommonJS with Node
+// built-ins so plain-Node scripts share it.
+//
+// Residual window: Node has no directory-handle (openat/unlinkat) removal, so a
+// target is validated by path and then removed by path. A component swapped
+// between the two by another process acting inside the same home is not
+// detected. Every removal re-validates immediately before it runs.
 const fs = require("node:fs");
 const path = require("node:path");
 
@@ -14,9 +21,9 @@ function lstatOrNull(target) {
 }
 
 /** Why `target` may not be removed, or null when it may. `target` must sit
- * directly inside `container`, which must be `root` or inside it; `root`
- * itself must be a real directory, and no path component from `root` down to
- * `target` may be a symlink. */
+ * directly inside `container`, which must be `root` or inside it; `root` must
+ * be a real directory reached through no link at all, and no path component
+ * from `root` down to `target` may be a symlink. */
 function shapeRefusal(target, container, root) {
   if (typeof target !== "string" || !path.isAbsolute(target) || path.resolve(target) !== target)
     return "not an absolute normalized path";
@@ -26,13 +33,21 @@ function shapeRefusal(target, container, root) {
   return null;
 }
 
+function anchorRefusal(anchor, real) {
+  if (!anchor) return "missing";
+  if (anchor.isSymbolicLink()) return "symlink";
+  if (!anchor.isDirectory()) return "not a directory path";
+  return real ? null : "linked ancestry";
+}
+
 function refusal(target, { container, root, kind = "directory" }) {
   const shape = shapeRefusal(target, container, root);
   if (shape) return shape;
   const anchor = lstatOrNull(root);
-  if (!anchor) return "missing";
-  if (anchor.isSymbolicLink()) return "symlink";
-  if (!anchor.isDirectory()) return "not a directory path";
+  let real = false;
+  if (anchor?.isDirectory()) real = fs.realpathSync(root) === root;
+  const unsafe = anchorRefusal(anchor, real);
+  if (unsafe) return unsafe;
   let cursor = root;
   for (const segment of path.relative(root, target).split(path.sep)) {
     if (!segment || segment === "." || segment === "..") return "outside the home folder";
@@ -65,15 +80,15 @@ async function lstatOrNullAsync(target) {
   }
 }
 
-/** `refusal` without blocking the caller's event loop (Electron main, the
- * engine): the same checks through fs.promises. */
+/** `refusal` through fs.promises, for the launcher's background prune. */
 async function refusalAsync(target, { container, root, kind = "directory" }) {
   const shape = shapeRefusal(target, container, root);
   if (shape) return shape;
   const anchor = await lstatOrNullAsync(root);
-  if (!anchor) return "missing";
-  if (anchor.isSymbolicLink()) return "symlink";
-  if (!anchor.isDirectory()) return "not a directory path";
+  let real = false;
+  if (anchor?.isDirectory()) real = (await fs.promises.realpath(root)) === root;
+  const unsafe = anchorRefusal(anchor, real);
+  if (unsafe) return unsafe;
   let cursor = root;
   let stat = null;
   for (const segment of path.relative(root, target).split(path.sep)) {
@@ -96,4 +111,4 @@ async function removeContainedAsync(target, options) {
   return "removed";
 }
 
-module.exports = { refusal, removeContained, refusalAsync, removeContainedAsync };
+module.exports = { refusal, removeContained, removeContainedAsync };

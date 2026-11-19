@@ -127,10 +127,11 @@ backend every launch). `--disk-cache-size` caps the HTTP cache at 250 MB.
 
 `REGENERABLE_SESSION_ENTRIES` in `apps/desktop/src/engine/db/session-entries.ts`
 names the entries Chromium rebuilds (observed on Electron 43 / Chromium 150);
-every other name, unknown ones included, is durable. The storage report, Clear
-and `pnpm storage:sweep` use it; they find the profile through
-`zerosEffectiveSessionDataDir()` (`effectiveSessionDataDir()` for the plain-Node
-scripts): the moved location once its marker is there, otherwise the old one.
+every other name, unknown ones included, is durable. Classification reads that
+list per entry; no whole directory is ever described as clearable. The profile
+itself is found through `zerosEffectiveSessionDataDir()`
+(`effectiveSessionDataDir()` for the plain-Node scripts): the moved location
+once its marker is there, otherwise the old one.
 
 ### Moving existing profiles
 
@@ -176,45 +177,35 @@ old location again and finds none: drafts, theme and permissions look reset in
 that build, while the profile itself is intact in `electron/` and returns on
 upgrade. The updater never installs an older build; a manual downgrade does.
 
-## Bounded growth inside a profile
+## Stores that grow, and why nothing prunes them automatically
 
-The engine's startup maintenance (`apps/desktop/src/engine/startup-maintenance.ts`,
-after readiness, one task at a time) and the updater prune what they can prove
-is unused. Every removal goes through
-`apps/desktop/src/engine/db/contained-removal.cjs` (shared with the launcher
-prune and `pnpm storage:sweep`). Each target sits directly inside its store and
-nothing follows a symlink.
+No installed app deletes anything from a profile automatically. Each store
+below grows, and each would need an owner that can prove a removal safe; an
+automatic deleter that can only guess is worse than the space it frees.
 
-| Store | Pruned | Kept |
-| --- | --- | --- |
-| `engines/<repoKey>/` (`engine.json` manifest and `busy` heartbeat only) | An entry whose manifest's pid is dead or absent and whose recorded root no longer exists, or which records no root and was untouched for 30 days. At most 200 removals or 2 s per launch | The running engine's own entry; a live pid; a `busy` heartbeat under 30 s old; an unreadable or unparsable manifest; symlinks and non-engine names |
-| `design-storage/` | Nothing new: pictures are kept within their byte budgets by the existing thumbnail sweep | Everything else. It holds Design recovery journals, review receipts, result bundles and retired private drafts, and records its owner only as a hash of the workspace path. `design-storage/recording-chunks/` is a known unbounded store until Design owns a sweep for unreferenced chunks |
-| `git-promotion-journal/` | Nothing, and it has no Clear | All of it. A retired build wrote it; no current code reads it, and its records may describe unfinished work. The storage report counts it as other app data |
-| `Caches/zeros-updater/` (macOS) | `pending/` download and `update-info.json` when the artifact name is this channel's and its version is the running one or older; the root `update.zip`, which this build never reads (differential downloads are off) | A newer download; another channel's download; anything whose file name or metadata cannot be read |
-| `Caches/<bundle id>.ShipIt/update.*/` | A staged app for this bundle whose version is the running one or older | A newer staged app (installs on quit); unreadable or foreign staging; everything while a ShipIt process for this bundle runs; `ShipItState.plist` and logs |
+| Store | Why nothing prunes it |
+| --- | --- |
+| `engines/<repoKey>/` | Tiny runtime metadata: an `engine.json` manifest and a `busy` heartbeat per repository (1.9 MB on the owner's Mac). An entry can be re-used by an engine at any moment: a starting engine creates the directory before it publishes its manifest, and a host waits on that path, so no check by name can tell a stale entry from one being written. |
+| `design-storage/` | Design recovery journals, review receipts, result bundles, retired private drafts, thumbnails and recording chunks, recorded against a hash of the workspace path. Thumbnails stay within their byte budgets through the thumbnail store's own sweep. `recording-chunks/` is unbounded until Design owns a sweep for unreferenced chunks. |
+| `git-promotion-journal/` | Written by a retired build; no current code reads it, and its records may describe unfinished work. It has no Clear. |
+| Updater staging: `Caches/zeros-updater/` and `Caches/<bundle id>.ShipIt/` (macOS) | Owned by electron-updater and Squirrel.Mac. Stable and Alpha share one download folder (app-builder-lib names it after `package.json` `name`, `zeros`, which both keep), so one channel cannot tell whether the other still needs a pending download or the differential base `update.zip`. A copy running a version is not proof that another copy of the same app was updated, and Squirrel writes its install request before it launches ShipIt. |
 
-The engine task runs only when the profile's single-instance holder, the
-`SingletonLock` link in the data dir, is this engine's own Electron parent
-(`ZEROS_PARENT_PID`). Standalone engines and `ZEROS_DATA_DIR` test engines
-therefore never prune. The updater cleanup runs 30 s after launch, only in
-packaged Stable or Alpha builds on macOS, only while this process holds the
-single-instance lock and the updater is idle; otherwise it retries every five
-minutes, at most six times.
+For ShipIt staging, the pinned Electron v43.8.3 carries Squirrel.Mac's own
+cleanup (`patches/squirrel.mac/fix_clean_up_orphaned_staged_updates_before_downloading_new_update.patch`):
+when a new update download starts, it removes the earlier `update.*` staging
+directories, except the one that holds the staged bundle named in
+`ShipItState.plist`. It does not run at launch or quit, and it does not touch
+`Caches/zeros-updater/`.
 
-Both are asynchronous end to end (process listing, reads and removal), so
-neither stalls Electron main or the engine's event loop; on an owner-sized
-profile (1,248 entries) the engine prune's worst event-loop delay was 4 ms.
-
-Stable and Alpha share `Caches/zeros-updater/`: app-builder-lib names it after
-`package.json` `name` (`zeros`), which both channels keep. Downloads are told
-apart by artifact name (`Zeros-<version>-…-mac.zip` and
-`Zeros-Alpha-<version>-…-mac.zip`). ShipIt staging is per bundle id. The
-development family is never auto-updated; its engines prune the same way.
+The development family is never auto-updated. Its only deleters are developer
+tools: the launcher's bundle prune, the ephemeral-identity helper and
+`pnpm storage:sweep`.
 
 Follow-up, not in this change: give Alpha its own updater cache
 (`-c.extraMetadata.name=zeros-alpha` in `scripts/electron-builder-run.mjs`
 gives `zeros-alpha-updater`). It also renames the packaged `package.json`
-`name`, so it needs a real Alpha release build to verify.
+`name`, so it needs a real Alpha release build to verify. Residue already in
+the shared folder would still have no provable owner.
 
 ## Registry
 
@@ -262,7 +253,17 @@ checkout's `.context/zeros-local/launcher.lock`, the profile's `SingletonLock`,
 or a live ephemeral owner. Anything unreadable counts as in use. An ephemeral
 identity is checked again just before it is removed. Every target is
 resolver-derived, sits directly inside its expected folder under `$HOME`, and
-no symlink is followed.
+no symlink is followed, from `/` down to the target.
+
+Every development deleter (this prune, the ephemeral-identity helper, bundle
+preparation and the sweep) goes through
+`apps/desktop/src/engine/db/contained-removal.cjs`. It refuses a `$HOME`
+reached through any link before reading below it, then checks every component
+from `$HOME` down. One window remains: Node has no handle-based (`openat` /
+`unlinkat`) removal, so a target is validated by path and removed by path, and
+a component another process swaps in between is not detected. These tools run
+only when a person or the dev launcher starts them, never inside an installed
+app.
 
 ## `pnpm storage:sweep`
 
@@ -323,8 +324,8 @@ evidence (registry, liveness, provider store, every work root) and removes only
 what is still removable for the same reasons; anything that changed is kept
 and reported. The state root goes last, since it holds the lease. Targets match
 exact patterns and must be a real file or directory directly inside its
-expected folder under a real `$HOME`; nothing below a refused or linked folder
-is listed, sized or removed. The total after `--apply` counts only what was
+expected folder under a `$HOME` reached through no link; nothing below a
+refused or linked folder is listed, sized or removed. The total after `--apply` counts only what was
 removed, and is an upper bound when a removed file had another hardlink (a
 bundle shares inodes with `node_modules`).
 

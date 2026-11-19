@@ -1,9 +1,9 @@
 /** Top-level entries of an Electron session profile that Chromium rebuilds on
- * demand, for the storage report's classification and Clear (with the app not
- * running). Everything else, including names this list does not know, is
- * durable renderer state (Local Storage, IndexedDB, Cookies, Session Storage,
- * WebStorage, Service Worker, Partitions, …). Observed on Electron 43 /
- * Chromium 150; see docs/storage-layout.md. */
+ * demand, for per-entry classification (`pnpm storage:sweep` keeps an equal
+ * copy). No directory is clearable as a whole. Everything else, including
+ * names this list does not know, is durable renderer state (Local Storage,
+ * IndexedDB, Cookies, Session Storage, WebStorage, Service Worker, Partitions,
+ * …). Observed on Electron 43 / Chromium 150; see docs/storage-layout.md. */
 export const REGENERABLE_SESSION_ENTRIES = [
   "Cache",
   "Code Cache",

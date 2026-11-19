@@ -1,6 +1,6 @@
 import { setImmediate as yieldToEventLoop } from "node:timers/promises";
 
-type MaintenanceName = "archive-refs" | "branch-refs" | "design-acls" | "engine-runtime";
+type MaintenanceName = "archive-refs" | "branch-refs" | "design-acls";
 
 interface MaintenanceTask {
   name: MaintenanceName;

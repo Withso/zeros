@@ -385,7 +385,16 @@ describe("pnpm storage:sweep", () => {
     fs.symlinkSync(realHome, linkedHome);
     const log = quietly();
     expect(main(["--apply"], { platform: "darwin", home: linkedHome, processList: idle })).toBe(2);
-    expect(log.mock.calls.join("\n")).toContain("Nothing swept: the home folder is missing, a symlink or not a folder.");
+    expect(log.mock.calls.join("\n")).toContain("Nothing swept: the home folder is missing, not a folder, or reached through a symlink.");
+    expect(exists(path.join(realHome, ".zeros-dev", "dev-instances", "data"))).toBe(true);
+
+    // A real home reached through a linked ancestor is refused the same way.
+    const linkedParent = path.join(temporary(), "users");
+    fs.symlinkSync(path.dirname(realHome), linkedParent);
+    const throughLink = path.join(linkedParent, path.basename(realHome));
+    const listed = vi.spyOn(fs, "readdirSync");
+    expect(main(["--apply"], { platform: "darwin", home: throughLink, processList: idle })).toBe(2);
+    expect(listed.mock.calls.some(([target]) => String(target).startsWith(throughLink))).toBe(false);
     expect(exists(path.join(realHome, ".zeros-dev", "dev-instances", "data"))).toBe(true);
   });
 

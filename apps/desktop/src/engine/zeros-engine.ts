@@ -2932,10 +2932,6 @@ export class ZerosEngine {
     // Recovery above owns readiness. Retention scans scale with every saved
     // repository and must not hold chat/history/Git reads behind old archives.
     this.startupMaintenance = startStartupMaintenance([
-      { name: "engine-runtime", run: async (signal) => {
-        const { pruneEngineRuntimeDirs } = await import("./db/engine-runtime-prune");
-        await pruneEngineRuntimeDirs({ ownRoot: this.root, signal });
-      } },
       { name: "archive-refs", run: async (signal) => {
         const { pruneOrphanArchiveSnapshots } = await import("./git/worktree");
         await pruneOrphanArchiveSnapshots({ signal });
