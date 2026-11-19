@@ -9,8 +9,7 @@
 // data flows through ONE live snapshot store (review-data.ts — stale-while-
 // revalidate, event-bus + adaptive polling) behind the ReviewProvider seam
 // (review-provider.ts). The published diff, where Post to PR works, stays one
-// step from Overview's rail until posting moves to the Changes tab
-// (docs/design-implementation/plans.md §1.2).
+// step from Overview's rail until posting moves to the Changes tab.
 //
 // Mounted ONLY for a workspace with a PR (ReviewSurface guards + renders the
 // empty state). "Add to chat" drops composed text into the active chat's

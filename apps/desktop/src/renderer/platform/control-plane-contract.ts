@@ -2,8 +2,7 @@
 // replies. Its JSON form is committed as
 // apps/control-plane/src/client-contracts/desktop-next.json; each release keeps
 // a copy, and the control plane replays every kept copy so a backend change
-// cannot break an app that is still supported
-// (docs/desktop-client-compatibility.md).
+// cannot break an app that is still supported.
 //
 // Entries reuse the exact schemas and headers their call sites use. Paths take
 // {organizationId}, {workspaceId} and {chatId} placeholders that the replay fills

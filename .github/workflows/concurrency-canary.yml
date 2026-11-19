@@ -1,7 +1,6 @@
 name: Concurrency Canary
 
 # Land and dispatch this canary before shipping Preflight queue changes.
-# See docs/ci-concurrency.md for the separate-commit rollout and acceptance gate.
 on:
   workflow_dispatch:
 

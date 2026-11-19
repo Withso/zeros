@@ -1,5 +1,5 @@
 {
-  "description": "Declared foreground/background pairings for the Zeros token palette, with WCAG 2.2 contrast ratios and reviewed supplemental/boundary floors in BOTH themes. Asserted by apps/desktop/src/renderer/shared/theme/__tests__/contrast-contract.test.ts and rendered into docs/design-tokens.md. A pairing that is not listed here is not a sanctioned combination.",
+  "description": "Declared foreground/background pairings for the Zeros token palette, with WCAG 2.2 contrast ratios and reviewed supplemental/boundary floors in BOTH themes. Asserted by apps/desktop/src/renderer/shared/theme/__tests__/contrast-contract.test.ts. A pairing that is not listed here is not a sanctioned combination.",
   "surfaces": {
     "rest": [
       "bg0",

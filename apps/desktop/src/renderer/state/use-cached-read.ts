@@ -7,7 +7,7 @@
 // paint immediately — and a background load runs only when the snapshot is
 // older than `maxAgeMs` (or absent). `loading` is true only before the FIRST
 // value for a key; revalidation reports `refreshing` while the stale rows stay
-// on screen. See docs/ui-interaction-performance.md.
+// on screen.
 // ──────────────────────────────────────────────────────────
 
 import { useCallback, useEffect, useRef, useSyncExternalStore } from "react";

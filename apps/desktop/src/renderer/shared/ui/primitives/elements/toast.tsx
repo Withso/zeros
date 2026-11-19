@@ -5,10 +5,9 @@
 // SINGLE source of transient feedback for the entire Mac app.
 // All errors, successes, warnings, and status messages MUST
 // flow through this surface — no inline pills, no banners
-// scattered through the chat. Rule lives in docs/design-system.md
-// (Feedback).
+// scattered through the chat.
 //
-// Visual recipe (the floating family, docs/design-system.md):
+// Visual recipe (the floating family):
 //   • Anchored bottom-right of the viewport, ~24px inset
 //   • Fixed 360px card — every toast is the same width regardless of
 //     text length — bg3, border2, 12px corners and the dropdown shadow

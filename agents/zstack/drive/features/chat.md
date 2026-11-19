@@ -34,5 +34,5 @@ pending/wake semantics. Never route a cloud chat through a Local engine as a
 fallback or expose provider credentials in evidence.
 
 Sources: `apps/desktop/src/renderer/features/agent/agent-chat.tsx`,
-`docs/agent-tool-presentation.md`,
+`packages/protocol/src/agent-events.ts`,
 `apps/desktop/src/renderer/harnesses/harness-claude-runtime-ui.tsx`.

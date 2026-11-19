@@ -5,8 +5,8 @@
 // The pull request reads top down: its header in rows, then Overview's Git
 // status (the branch on this machine), PR status (the pull request on the
 // host, with the one Merge) and Findings (agents, review apps and code
-// scanning), with the rail beside them (docs/design-implementation/plans.md
-// §1). Below the rail's container width it folds into Details after PR status.
+// scanning), with the rail beside them. Below the rail's container width it
+// folds into Details after PR status.
 
 import React, { useMemo, useState } from "react";
 import {

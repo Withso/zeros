@@ -58,7 +58,7 @@ const buttonVariants = cva(
         // 16px line box, with no fill, edge or padding.
         link: "h-auto min-w-0 rounded-sm px-0 py-0 font-normal leading-4 text-fg2 hover:text-fg1",
       },
-      // Two control heights (docs/design-system.md → Controls):
+      // Two control heights:
       //   standard 28px — every button by default, identical to the Select
       //     trigger. `sm` / `default` / `lg` are kept as names so call sites
       //     don't churn, but they are the same 28px control (2026-09-15:

@@ -5,7 +5,7 @@
 // State badge, check glyphs, author avatars, collapsible group headers,
 // empty/error states — one place so the four sections (changes /
 // commits / checks / reviews) stay visually identical. Recipes follow
-// docs/design-system.md (surfaces, controls, radius, motion).
+// the shared renderer primitives and tokens.
 
 import React, { useState } from "react";
 import {

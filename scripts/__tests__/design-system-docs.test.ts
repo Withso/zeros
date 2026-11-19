@@ -4,7 +4,6 @@ import {
   agentBrief,
   generatedFiles,
   renderAgentFiles,
-  renderTokenReference,
   renderWorkspaceAgentFiles,
   workspaceBrief,
 } from "../design-system/build-design-docs.mjs";
@@ -65,16 +64,7 @@ describe("checkDesignDocs", () => {
   });
 });
 
-describe("generated design docs", () => {
-  it("renders both themes and the contrast contract from the token sources", () => {
-    const reference = renderTokenReference(ROOT);
-    expect(reference).toMatch(/^# Zeros design tokens \(generated\)/);
-    expect(reference).toContain("| `--fg2` |");
-    expect(reference).toContain("## Contrast contract");
-    expect(reference).toContain("| border4 → border3 | bg2 | 1.15× |");
-    expect(reference).not.toContain("✗");
-  });
-
+describe("generated design skills", () => {
   it("mirrors one agent brief into every provider's skill file", () => {
     const brief = agentBrief(ROOT);
     const files = renderAgentFiles(ROOT);
@@ -93,7 +83,7 @@ describe("generated design docs", () => {
     expect(files[".claude/skills/zeros-ui/SKILL.md"]).toMatch(/^---\nname: zeros-ui\n/);
   });
 
-  it("mirrors the RULES.md workspace brief into every provider's zeros-workspaces skill", () => {
+  it("mirrors the workspace brief into every provider's zeros-workspaces skill", () => {
     const brief = workspaceBrief(ROOT);
     expect(brief).toMatch(/^## Agent brief: local and cloud workspaces/);
     const files = renderWorkspaceAgentFiles(ROOT);
@@ -106,9 +96,10 @@ describe("generated design docs", () => {
     );
     for (const content of Object.values(files)) {
       expect(content).toContain(brief);
-      expect(content).toContain("GENERATED from RULES.md");
+      expect(content).toContain("GENERATED from agents/skills/zeros-workspaces.md");
     }
     expect(files[".claude/skills/zeros-workspaces/SKILL.md"]).toMatch(/^---\nname: zeros-workspaces\n/);
     expect(Object.keys(generatedFiles(ROOT))).toEqual(expect.arrayContaining(Object.keys(files)));
+    expect(Object.keys(generatedFiles(ROOT)).some(path => path.startsWith("docs/"))).toBe(false);
   });
 });

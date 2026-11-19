@@ -60,61 +60,19 @@
   },
   "documentation": {
     "include": [
-      "docs/**/*.md",
       "CONTRIBUTING.md",
       "CODE_OF_CONDUCT.md",
       "SECURITY.md",
       "SUPPORT.md",
       ".github/PULL_REQUEST_TEMPLATE.md"
     ],
-    "exclude": [
-      "docs/README.md",
-      "docs/agent-capabilities-parity-and-ui-consolidated-2026-07-01.md",
-      "docs/deployment-environments.md",
-      "docs/design-system.md",
-      "docs/design-tokens.md"
-    ],
+    "exclude": [],
     "allowed_paths": [
       ".github/PULL_REQUEST_TEMPLATE.md",
       "CODE_OF_CONDUCT.md",
       "CONTRIBUTING.md",
       "SECURITY.md",
-      "SUPPORT.md",
-      "docs/agent-control.md",
-      "docs/agent-harness-capability-boundary.md",
-      "docs/agent-identity-model.md",
-      "docs/agent-tool-presentation.md",
-      "docs/agent-turn-usage.md",
-      "docs/browser-service.md",
-      "docs/changes-history.md",
-      "docs/chat-titles.md",
-      "docs/claude-event-coverage.md",
-      "docs/cloud-workspaces.md",
-      "docs/code-review.md",
-      "docs/codex-app-server-compatibility.md",
-      "docs/color-names.md",
-      "docs/composer-attachments.md",
-      "docs/composer-mentions.md",
-      "docs/context-storage.md",
-      "docs/design-mode-roadmap.md",
-      "docs/desktop-client-compatibility.md",
-      "docs/dev-connections.md",
-      "docs/development-restarts.md",
-      "docs/extension-discovery.md",
-      "docs/git-review-actions.md",
-      "docs/github-inline-review.md",
-      "docs/local-development.md",
-      "docs/native-computer-use.md",
-      "docs/navigation-state-persistence.md",
-      "docs/organizations-and-teams.md",
-      "docs/personal-settings.md",
-      "docs/plain-folder-ux.md",
-      "docs/provider-accounts.md",
-      "docs/release-candidates-roadmap.md",
-      "docs/terminal-workbench.md",
-      "docs/ui-interaction-performance.md",
-      "docs/workos-authentication-migration.md",
-      "docs/workspace-archive-recovery.md"
+      "SUPPORT.md"
     ],
     "allowed_statuses": ["modified"]
   },
@@ -304,44 +262,25 @@
       "lanes": ["cloud-runtime"]
     },
     {
-      "id": "operating-documents-are-db-inputs",
-      "include": ["docs/**"],
-      "lanes": ["control-plane", "control-plane-db", "repository-contracts"],
-      "input_source": "control-plane-database"
-    },
-    {
       "id": "repository-layout-documents",
-      "include": [
-        "docs/README.md",
-        "docs/agent-capabilities-parity-and-ui-consolidated-2026-07-01.md",
-        "README.md",
-        "REPOSITORY-ARCHITECTURE.md"
-      ],
+      "include": ["README.md", "docs/**"],
       "lanes": ["repository-contracts"]
     },
     {
-      "id": "added-documents-need-layout-contracts",
+      "id": "public-documents-need-layout-contracts",
       "include": [
-        "docs/**/*.md",
         "CONTRIBUTING.md",
         "CODE_OF_CONDUCT.md",
         "SECURITY.md",
         "SUPPORT.md",
         ".github/PULL_REQUEST_TEMPLATE.md"
       ],
-      "exclude": [
-        "docs/README.md",
-        "docs/agent-capabilities-parity-and-ui-consolidated-2026-07-01.md",
-        "docs/deployment-environments.md",
-        "docs/design-system.md",
-        "docs/design-tokens.md"
-      ],
-      "statuses": ["added"],
+      "statuses": ["added", "removed", "type-changed"],
       "lanes": ["repository-contracts"]
     },
     {
-      "id": "design-system-documents-are-checked-inputs",
-      "include": ["docs/design-system.md", "docs/design-tokens.md"],
+      "id": "agent-briefs-are-checked-inputs",
+      "include": ["agents/skills/zeros-ui.md", "agents/skills/zeros-workspaces.md"],
       "lanes": ["desktop-renderer", "repository-contracts"]
     },
     {

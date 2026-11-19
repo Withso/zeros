@@ -10,7 +10,7 @@ name: Promote release candidate
 # scripts/release/candidate.ts refuses a receipt for another version or commit,
 # changed bytes, a moved rc tag or branch, a candidate whose release.yml
 # publication did not succeed, or a live Production backend serving a different
-# source. See docs/release-candidates-roadmap.md.
+# source. The candidate and guard live in scripts/release/.
 
 on:
   workflow_dispatch:

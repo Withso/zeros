@@ -157,7 +157,7 @@ export async function checkCompiledClasses({ root, files, occurrences: extracted
     violations.push({
       file: toRel(root, occurrence.file),
       line: occurrence.line,
-      message: `Class "${token}" compiles to nothing — Tailwind silently drops unknown utilities, so the intended style never renders. Use an existing token utility (see docs/design-system.md), or define the class in an owned stylesheet.`,
+      message: `Class "${token}" compiles to nothing — Tailwind silently drops unknown utilities, so the intended style never renders. Use an existing token utility (see agents/skills/zeros-ui.md), or define the class in an owned stylesheet.`,
     });
   }
   for (const entry of hookClasses) {

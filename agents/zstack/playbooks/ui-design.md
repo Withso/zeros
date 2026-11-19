@@ -3,8 +3,7 @@
 For renderer UI, styling, tokens and mockups. The `zeros-ui` skill holds the
 design-system rules; this is the procedure around them.
 
-1. **Frame the change.** Read `docs/design-system.md` §0 (the direction) and
-   the page's `docs/design-implementation/<page>.md`, if any. Name the
+1. **Frame the change.** Read the zeros-ui skill and the page's current source, tests, and Design frame if present. Name the
    surface and its owning component, and list the states it must show:
    default, hover, selected, focus-visible, disabled, loading, empty, error,
    and long or missing content. Cover Dark and Light, and how Local and cloud
@@ -36,8 +35,7 @@ design-system rules; this is the procedure around them.
    CSS. Extend a primitive, with a test; never restyle it from a caller. Fix
    drift in the files you touch and list the rest in the receipt. Where an
    approved board breaks a system rule, keep the rule and log the decision.
-   Lists, selection, navigation, tabs, panels and loading follow
-   `docs/ui-interaction-performance.md`.
+   For lists, selection, navigation, tabs, panels and loading, trace the current keyed reads and interaction tests.
 6. **Gates** (`zstack-verify`). Never get `pnpm check:ui` green by raising
    `styles/policy/ui-debt.json` or adding an ignore; prune paid debt with
    `pnpm check:ui --prune-debt`. Overlay, focus, popover or composer work runs
@@ -61,11 +59,9 @@ design-system rules; this is the procedure around them.
    chat/question/queue content, read-only editors, shadow-DOM diffs and explicit
    drag-and-drop, including Local and cloud owner switches.
 8. **Deliver and learn** (`integrate-pr.md`, `zstack-learn`). State the Local
-   and cloud impact. A look the user corrects or approves is a direction
-   (design-system.md §0): move its owner and migrate callers, add the check
-   that holds it, record it in §0 and the page spec, run `pnpm design:docs`,
-   and retire what it replaces; two directions never coexist. An escaped
+   and cloud impact. When the user approves a new direction, update the owning
+   primitive or token, its checked-in frame, and its enforcing check. Run
+   `pnpm design:docs` for generated changes. An escaped
    mistake gets an eval case. Close a shipped round on the canvas: every board
    matches a render of its page, loaders included; a logged decision updates
-   its board; an approved design not built yet keeps a Planned line naming its
-   `plans.md` section; a board refits when rows go.
+   its board; a board refits when rows go.
