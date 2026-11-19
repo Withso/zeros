@@ -25,5 +25,9 @@ export function useWorkspaceFileListScope(folder: string | null | undefined, act
     return `${access.ready && status === "connected" ? "1" : "0"}${access.key}`;
   }, [bridge, folder]);
   const snapshot = useSyncExternalStore(subscribe, read, read);
-  return { key: snapshot.slice(1), live: snapshot.startsWith("1") };
+  return {
+    key: snapshot.slice(1),
+    live: snapshot.startsWith("1"),
+    canLoad: () => read().startsWith("1"),
+  };
 }

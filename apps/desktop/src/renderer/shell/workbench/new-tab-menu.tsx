@@ -78,7 +78,7 @@ export function WorkbenchNewTabMenu({
   const [query, setQuery] = useState("");
   const [selection, setSelection] = useState("new-file");
   const [environmentOpen, setEnvironmentOpen] = useState(false);
-  const { key: fileKey, live: filesLive } = useWorkspaceFileListScope(cwd, open);
+  const { key: fileKey, live: filesLive, canLoad } = useWorkspaceFileListScope(cwd, open);
   // Async state carries its semantic owner. A reused menu fiber can switch cwd
   // before its effect runs; it must never search the previous workspace's rows.
   const [fileSnapshot, setFileSnapshot] = useState<{
@@ -165,7 +165,7 @@ export function WorkbenchNewTabMenu({
   };
 
   const warm = () => {
-    if (cwd && !isCloudWorkspace(cwd)) void loadWorkspaceFiles(cwd).catch(() => {});
+    if (cwd && canLoad()) void loadWorkspaceFiles(cwd).catch(() => {});
     prefetchSettingsForRepo(
       workspace?.path || workspace?.repoRoot || terminalFolder,
     );

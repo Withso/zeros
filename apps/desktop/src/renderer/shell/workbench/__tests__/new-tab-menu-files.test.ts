@@ -78,11 +78,15 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-async function openMenu() {
+async function renderMenu() {
   await act(async () => root.render(createElement(WorkbenchNewTabMenu, {
     scope: fixture.folder, terminalFolder: fixture.folder,
   })));
-  const trigger = host.querySelector<HTMLButtonElement>("button")!;
+  return host.querySelector<HTMLButtonElement>("button")!;
+}
+
+async function openMenu() {
+  const trigger = await renderMenu();
   await act(async () => trigger.click());
   expect(document.querySelector("[cmdk-input]")).not.toBeNull();
 }
@@ -135,6 +139,27 @@ it("still searches cached files in a stopped cloud workspace", async () => {
   expect(document.querySelector("[aria-label='New tab']")?.textContent)
     .not.toContain("Files are temporarily unavailable.");
   expect(fixture.load).not.toHaveBeenCalled();
+});
+
+it("warms cloud file search on intent only if runtime and access are current", async () => {
+  fixture.folder = cloudFolder;
+  const trigger = await renderMenu();
+  const hover = () => act(async () => {
+    trigger.dispatchEvent(new Event("pointerover", { bubbles: true }));
+  });
+  await hover();
+  fixture.status = "connected";
+  fixture.ready = false;
+  await hover();
+  fixture.ready = true;
+  fixture.access = false;
+  await hover();
+  expect(fixture.load).not.toHaveBeenCalled();
+
+  fixture.access = true;
+  await hover();
+  expect(fixture.load).toHaveBeenCalledExactlyOnceWith(cloudFolder);
+  expect(document.querySelector("[cmdk-input]")).toBeNull();
 });
 
 it("loads Local search immediately without a cloud connection", async () => {
