@@ -288,7 +288,7 @@ export async function cancelSubscription(
       );
       acceptStatus(result, provider);
     } catch {
-      // Retire locally despite a lost native ACK so late events cannot reopen this attempt.
+      // Even without the native ACK, ignore late connecting updates for this retired attempt.
     } finally {
       const current = subscriptionCache.getSnapshot(provider).data;
       if (
