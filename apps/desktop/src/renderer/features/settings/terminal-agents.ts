@@ -33,7 +33,7 @@ export interface TerminalAgent {
   description: string;
   icon?: string;
   binary: string;
-  /** User-supplied shell command; may include arguments. */
+  /** A shell command can include arguments, unlike the executable name. */
   launchCommand: string;
   /** Interactive launches do not carry the prompt. */
   promptTransport: PromptTransport;
