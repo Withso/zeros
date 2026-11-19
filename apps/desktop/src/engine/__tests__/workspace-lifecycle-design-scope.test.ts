@@ -122,8 +122,7 @@ describe("workspace lifecycle Design scope", () => {
 
       await state.handleWorkspaceMessage(request(op, managed.id), client());
 
-      // An unscoped suspension also pauses every other workspace's chats, and a
-      // prompt prepared there failed with "The operation was aborted.".
+      // An unscoped suspension would pause every other workspace's chats and abort their prepared prompts.
       expect(scopes).toEqual([managed.id]);
       expect(state.workspace.handle).toHaveBeenCalledOnce();
     },
@@ -183,8 +182,7 @@ describe("workspace lifecycle Design scope", () => {
       receiver,
     );
     await held.started();
-    // Restoring several archived workspaces at once used to run strictly one
-    // after another, so later restores waited for every earlier one.
+    // Different workspaces' lifecycles run concurrently; this restore does not wait for another workspace's archive.
     const restore = state.handleWorkspaceMessage(
       request("workspace.restore", sibling.id),
       receiver,

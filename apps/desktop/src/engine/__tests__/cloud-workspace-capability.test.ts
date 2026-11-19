@@ -22,9 +22,7 @@ describe("desktop cloud-workspace release capability", () => {
     vi.stubEnv("ZEROS_RUNTIME_MODE", undefined);
     const capabilityEnabled = vi.fn(() => { throw new Error("VM engines have no desktop release channel"); });
     const createReplica = vi.fn(), createFork = vi.fn();
-    // zeros-engine supplies cloudWorker from its validated execution boundary,
-    // independently of channel(). These desktop pipelines were always absent
-    // in a VM; its native cloud transport and agents do not consume this gate.
+    // The throwing mock proves VM construction returns before consulting the desktop gate.
     expect(createCloudWorkspaceDesktopPipelines({ cloudWorker: true, capabilityEnabled, createReplica, createFork }))
       .toEqual({ replica: null, fork: null });
     expect(capabilityEnabled).not.toHaveBeenCalled();

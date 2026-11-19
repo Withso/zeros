@@ -57,6 +57,7 @@ describe("agent control rollout", () => {
     expect(
       agentControlFeatureOpen("internal", { internal: true, experimental: false }),
     ).toBe(true);
+    // Opting in under Experimental does nothing while staff still test it.
     expect(
       agentControlFeatureOpen("internal", { internal: false, experimental: true }),
     ).toBe(false);
@@ -67,6 +68,7 @@ describe("agent control rollout", () => {
         experimental: true,
       }),
     ).toBe(true);
+    // One switch per stage: the Internal switch retires with the stage.
     expect(
       agentControlFeatureOpen("experimental", {
         internal: true,
@@ -112,7 +114,8 @@ describe("agent control rollout", () => {
     ]) {
       expect(readAgentControlAvailability(bad)).toBeNull();
     }
-    // Older senders omit Local CLI availability; the other features still apply.
+    // A push from a renderer that predates the Local CLI still applies and
+    // keeps the Local CLI closed.
     expect(
       readAgentControlAvailability({
         zerosBrowser: true,

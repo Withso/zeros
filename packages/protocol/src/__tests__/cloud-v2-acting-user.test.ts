@@ -9,7 +9,7 @@ describe("team sharing slice B shapes", () => {
   it("names the feature and keeps generation a bounded decimal string", () => {
     expect(ACTING_USER_FEATURE).toBe("acting-user-v1");
     for (const ok of ["1", "42", "9223372036854775806"]) expect(CloudV2GenerationSchema.safeParse(ok).success, ok).toBe(true);
-    // Reject non-decimals without throwing during the range check.
+    // Invalid input never throws (a 400, not a crash): the range check runs only on a decimal.
     for (const bad of ["0", "01", "9223372036854775807", 1, "-1", "not-a-number", "1e3", " 1"]) expect(CloudV2GenerationSchema.safeParse(bad).success, String(bad)).toBe(false);
   });
 

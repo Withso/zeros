@@ -17,7 +17,9 @@ describe("shell command-name normalization", () => {
   });
 
   it("bounds parsing of long non-matching parenthesis runs without losing later edits", () => {
-    // Run out of process so a parser regression cannot hang Vitest; the deadline includes cold TS loading.
+    // Isolate the parser so a backtracking regression cannot hang the Vitest
+    // worker. This generous process deadline includes cold TypeScript loading;
+    // it is not a sub-millisecond benchmark of ordinary input.
     const moduleUrl = new URL("../shell-authored-paths.ts", import.meta.url).href;
     const result = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", `
       import { authoredPathsFromShellCommand } from ${JSON.stringify(moduleUrl)};

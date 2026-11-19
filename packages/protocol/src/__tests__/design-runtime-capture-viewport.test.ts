@@ -201,7 +201,8 @@ describe("design capture logical viewport", () => {
               height: captured.height,
               pixel,
               edges: [0.1, 0.9].map((fraction) => Array.from(context.getImageData(image.width * fraction, image.height / 2, 1, 1).data)),
-              // Count gray transition pixels to catch softened edges from bitmap upscaling.
+              // Interpolating a small bitmap produces a wide gray band. A
+              // source rerender has at most the two antialiased edge pixels.
               transitionPixels: Array.from(context.getImageData(0, image.height / 2, image.width, 1).data)
                 .filter((value, index) => index % 4 === 0 && value > 0 && value < 255).length,
               layoutWidth: innerWidth,
@@ -217,7 +218,8 @@ describe("design capture logical viewport", () => {
         expect(result.pixel.slice(0, 3)).toEqual(expected);
         expect(result.pixel[3]).toBe(255);
         if (highZoom) {
-          // CSS boxes still snap to Chromium's layout pixels; the SVG rectangle keeps its subpixel geometry.
+          // Both the CSS box and subpixel SVG stroke paint 200 sharp output
+          // pixels. CSS boxes keep Chromium's normal pixel-snapping semantics.
           expect(result.edges).toEqual([[255, 255, 255, 255], [255, 255, 255, 255]]);
           expect(result.transitionPixels).toBeLessThanOrEqual(2);
         }

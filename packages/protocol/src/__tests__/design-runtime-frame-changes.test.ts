@@ -12,8 +12,6 @@ type RuntimeWindow = Window & {
   computedReads: number;
 };
 
-// Values set on layers over what a class or a rule for them gave, one
-// set over nothing, a class value alone, and a rule written for one layer.
 const HEAD = `<style>
   .btn { border-radius: 6px; padding: 8px; background-color: rgb(1, 1, 1); }
   .tag { color: rgb(2, 2, 2); }
@@ -99,8 +97,7 @@ describe("a frame's changes made by hand", () => {
     const radius = frame.layers.find((layer) => layer.oid === "a")!.changes[0]!;
     expect(radius).toMatchObject({ property: "border-radius", value: "8px", replaced: { value: "6px", selector: ".btn", subjectClasses: ["btn"] } });
     expect(frame.layers.find((layer) => layer.oid === "own")!.changes[0]).toMatchObject({ value: "4px", replaced: { value: "2px", selector: ".row" } });
-    // A value set over nothing is not a change from a source, and a value
-    // !important beats is not the layer's.
+    // A change needs both a winning layer declaration and a lower-priority source value.
     expect(byLayer.drawn).toBeUndefined();
     expect(byLayer.loses).toBeUndefined();
     expect(frame.layers.find((layer) => layer.oid === "t")!.name).toBe("T");
@@ -131,8 +128,7 @@ describe("a frame's changes made by hand", () => {
     const many = Array.from({ length: 300 }, (_, index) => `<div data-oid="l${index}" class="btn" style="padding: 1px">L</div>`).join("");
     const scoped = await fixture(browser, many);
     try {
-      // The clock stands still, so only the layer cap can stop the pass: on a
-      // loaded machine the 12 ms budget would otherwise stop it first.
+      // Freeze the clock so only the layer cap can stop the scan.
       await scoped.evaluate(() => {
         const at = performance.now();
         performance.now = () => at;
@@ -151,7 +147,7 @@ describe("a frame's changes made by hand", () => {
     const many = Array.from({ length: 300 }, (_, index) => `<div data-oid="l${index}" class="btn" style="padding: 1px">L</div>`).join("");
     const scoped = await fixture(browser, many);
     try {
-      // Each clock read moves 5 ms, so the budget runs out after a few layers.
+      // Advance the clock on each read to hit the time budget before the layer cap.
       await scoped.evaluate(() => {
         let now = 0;
         performance.now = () => (now += 5);

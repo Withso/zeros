@@ -20,7 +20,7 @@ describe("RunLocalCommand input", () => {
 describe("RunLocalCommand result", () => {
   it("names one closed outcome and keeps each stream within its cap", () => {
     expect(LOCAL_COMMAND_OUTCOMES).toEqual(["completed", "failed", "denied", "approval_timed_out", "command_timed_out", "mac_not_connected", "no_target", "disabled", "cancelled", "interrupted"]);
-    // A startup failure carries a closed reason, not a completed result.
+    // A command that could not start is failed, with a closed reason; never completed.
     expect(LocalCommandResultSchema.safeParse({ outcome: "failed", error: "cwd_not_found", cwd: "/Users/alex/nope" }).success).toBe(true);
     expect(LocalCommandResultSchema.safeParse({ outcome: "failed", error: "spawn_failed" }).success).toBe(true);
     for (const error of [undefined, "something else"]) expect(LocalCommandResultSchema.safeParse({ outcome: "failed", ...(error ? { error } : {}) }).success).toBe(false);
@@ -78,7 +78,7 @@ describe("order 2 wire v1.1 shapes", () => {
   it("parses receipts, devices, presence, Macs and registration strictly", () => {
     expect(LocalCommandReceiptSchema.parse({ requestId: uuid, state: "terminal", approvalDeadline: iso, runDeadline: null, mac: "Studio",
       result: { outcome: "denied", denied: true }, outputAvailable: false }).state).toBe("terminal");
-    // Erasing output preserves the outcome, Mac and closed failure reason.
+    // v1.2: an erased receipt keeps outcome, mac and, for failed, the closed reason; nothing else is needed.
     expect(LocalCommandReceiptSchema.parse({ requestId: uuid, state: "terminal", approvalDeadline: iso, runDeadline: iso, mac: "Studio",
       result: { outcome: "failed", error: "spawn_failed", mac: "Studio" }, outputAvailable: false }).result).toEqual({ outcome: "failed", error: "spawn_failed", mac: "Studio" });
     expect(LocalCommandReceiptSchema.safeParse({ requestId: uuid, state: "terminal", approvalDeadline: iso, runDeadline: iso, mac: "Studio",

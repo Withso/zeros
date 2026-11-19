@@ -18,8 +18,7 @@ it("preserves Local link punctuation and distinct channel identities", () => {
 });
 
 it("bounds link extraction for long internal punctuation runs", () => {
-  // Isolate the adversarial input so a quadratic matcher cannot hang the suite.
-  // The budget includes Node/tsx startup and is far above the linear scan cost.
+  // Run the matcher in a subprocess so a hang cannot block Vitest; its timeout includes Node/tsx startup.
   const source = new URL("../local-orchestration.ts", import.meta.url).href;
   const code = `import assert from 'node:assert/strict';
     import { extractLocalLinks } from ${JSON.stringify(source)};

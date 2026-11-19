@@ -70,6 +70,7 @@ describe("canvas items as written in canvas.json", () => {
     const first = readDesignCanvasPageItems([{ ...section, id: "home" }, section, { ...note, id: "s1" }], reserved);
     expect(first.items).toEqual([section]);
     expect(first.issues.map((issue) => issue.index)).toEqual([0, 2]);
+    // The ids read on one page stay taken for the next.
     expect(readDesignCanvasPageItems([section], reserved).items).toEqual([]);
   });
 
@@ -78,7 +79,7 @@ describe("canvas items as written in canvas.json", () => {
     const read = readDesignCanvasPageItems([{ ...section, id: "shared", text: "" }, valid], new Set());
     expect(read.items).toEqual([valid]);
     expect(read.issues).toEqual([expect.objectContaining({ index: 0, id: "shared", kind: "invalid" })]);
-    // A kept unknown entry still owns its ID even though it isn't drawn.
+    // Unknown kinds and valid items past the cap still reserve the ids they keep.
     expect(readDesignCanvasPageItems([{ id: "shared", kind: "sticker" }, valid], new Set()).items).toEqual([]);
   });
 
@@ -94,7 +95,6 @@ describe("canvas items as written in canvas.json", () => {
     const counted = readDesignCanvasPageItems(many, reserved);
     expect(counted.items).toHaveLength(256);
     expect(counted.issues).toEqual([expect.objectContaining({ kind: "limit", count: 2 })]);
-    // Valid entries beyond the page cap still reserve their IDs.
     expect(readDesignCanvasPageItems([{ ...section, id: "s256" }], reserved).items).toEqual([]);
     // 2,000 four-byte characters a note: 32 notes is 256,000 bytes, the 33rd passes the cap.
     const heavy = Array.from({ length: 34 }, (_, index) => ({ ...note, id: `n${index}`, text: "\u{1F600}".repeat(2_000) }));

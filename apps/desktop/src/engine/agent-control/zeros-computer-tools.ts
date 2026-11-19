@@ -29,7 +29,6 @@ export interface ZerosComputerToolPorts {
     arguments: BrowserJsonValue;
     signal: AbortSignal;
   }): Promise<ComputerToolResult>;
-  /** End this chat's control of the Mac. */
   release(reason: "turn-end" | "stop"): Promise<boolean>;
 }
 

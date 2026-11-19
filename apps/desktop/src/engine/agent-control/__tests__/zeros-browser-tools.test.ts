@@ -359,8 +359,7 @@ describe("agent-control admissions", () => {
       transport: "http",
       headersFromEnv: { Authorization: ZEROS_BROWSER_TOOLS_ENV },
       toolTimeoutSec: 600,
-      // Zeros' host decides; no provider card per call (Codex asked twice
-      // per page before this).
+      // Zeros' host decides; no provider card per call.
       defaultToolsApproval: "approve",
     });
     const bearer = tools!.env[ZEROS_BROWSER_TOOLS_ENV]!;

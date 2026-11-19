@@ -1,23 +1,4 @@
-// Stop must stop the turn the user was looking at, and it must stay stopped
-// across a reload.
-//
-// Three engine-side holes made a Stop lie:
-//
-//   1. AGENT_PROMPT cleared the session's cancel intent immediately before
-//      dispatching (it could not tell a stale intent from one meant for the turn
-//      it was about to run), and every adapter clears its own cancel flag as it
-//      enters prompt(). A Stop clicked during the pre-dispatch window — persist
-//      the user message, take the pre-snapshot, wait on the workspace barrier,
-//      seconds on a large repo — was therefore dropped by BOTH: the provider ran
-//      the whole turn behind a "STOPPED BY USER" pill. (Clicking Stop a second
-//      time worked, which is exactly how it was reported.)
-//   2. Nothing bounded how long the engine would wait for an adapter to
-//      acknowledge a cancel, so a wedged run kept the accepted prompt as the
-//      session's live turn for the full 45-minute staleness window.
-//   3. AGENT_LOAD_SESSION re-adopted on the mere EXISTENCE of an active-prompt
-//      record, answering promptActive:true with the original startedAt — so a
-//      reload (or a tab switch, which reloads the session) brought the running
-//      shimmer back with a timer counting from the stopped prompt.
+// Stop must stop the turn the user was looking at and stay stopped across a reload: a Stop during prompt preparation, a cancel the adapter never settles, and reload re-adoption.
 
 import fs from "node:fs";
 import os from "node:os";
@@ -51,8 +32,7 @@ interface ActivePromptRecord {
   terminalPublished?: boolean;
 }
 
-/** Only the field the watchdog's old id comparison read — the rest of a real
- *  TurnSnapshotContext is inert here, since finishTurn is stubbed. */
+/** Only the field this file reads; the rest of a TurnSnapshotContext is inert because finishTurn is stubbed. */
 interface TurnSnapshotRecord {
   turnId: string;
 }
@@ -405,8 +385,7 @@ describe("a Stop during the pre-dispatch window", () => {
       .spyOn(state.agents, "cancel")
       .mockResolvedValue(undefined);
 
-    // Do NOT await: the prompt handler is now suspended inside its preparation
-    // phase (the pre-snapshot), which is where the Stop used to be swallowed.
+    // Do not await: the prompt handler is suspended in its preparation phase.
     const inFlight = state.handleMessage(promptMessage(), client);
     expect(state.activePromptContexts.has("session-1")).toBe(true);
     await state.handleMessage(cancelMessage(), client);
@@ -426,8 +405,7 @@ describe("a Stop during the pre-dispatch window", () => {
       state: "cancelled",
       stopReason: "cancelled",
     });
-    // …and never announced as running, which would have dragged the shimmer +
-    // elapsed timer back onto a chat the user had already stopped.
+    // …and never announced as running.
     expect(turnStates(messages)).not.toContainEqual(
       expect.objectContaining({ state: "running" }),
     );
@@ -436,11 +414,7 @@ describe("a Stop during the pre-dispatch window", () => {
     expect(state.promptSessions.has("session-1")).toBe(false);
   });
 
-  // The dispatch this drops would have REJECTED (a cancel that tears the
-  // provider down surfaces that way), and the old code recorded the resulting
-  // turn as `failed` — the chat then read AGENT STOPPED for something the user
-  // did deliberately, because the session-wide cancel intent had been cleared
-  // one line before the dispatch.
+  // A cancel that tears the provider down rejects the dispatch; the turn must still read as stopped, not failed.
   it("records the stop, not a failure, for the dispatch it dropped", async () => {
     const { state } = testEngine(29_892);
     const { client, messages } = testClient();
@@ -494,8 +468,7 @@ describe("a Stop during the pre-dispatch window", () => {
       promptMessage({ agentId: "codex" }),
       client,
     );
-    // Let the preparation phase finish so the prompt genuinely reaches the
-    // adapter before the Stop — the case that already worked, kept honest.
+    // Let preparation finish so the prompt reaches the adapter before the Stop.
     await vi.waitFor(() => expect(prompt).toHaveBeenCalledTimes(1));
     await state.handleMessage(cancelMessage(), client);
     releasePrompt();
@@ -545,12 +518,7 @@ describe("an adapter that never acknowledges the cancel", () => {
     expect(record.turnRowSettled).toBeFalsy();
   });
 
-  // The record's turn id and the recorded snapshot's are derived SEPARATELY —
-  // `turn-${msg.id}` here, the persisted user message's id there — so they
-  // disagree for any client that omits userMessageId. The watchdog compared
-  // them, found no match, wrote no ending, and then suppressed the prompt
-  // handler's finishTurn anyway: the row stayed `running` with no endedAt, for
-  // good, which is the exact symptom the deadline exists to prevent.
+  // The record's turn id and the recorded snapshot's are derived separately and disagree when userMessageId is omitted; the deadline must still end the row.
   it("finalizes the recorded row even when the two turn ids disagree", async () => {
     vi.useFakeTimers();
     const { state } = testEngine(29_897);
@@ -588,16 +556,7 @@ describe("an adapter that never acknowledges the cancel", () => {
 });
 
 describe("explicit session close during a live turn", () => {
-  // The pre-dispatch cases below were this file's first Zeros DB readers:
-  // admission resolves the chat's workspace (getChatLocation) synchronously,
-  // before it registers the prompt. While every Vitest worker shared the
-  // machine-wide app-data DB, a sibling worker still creating or migrating it
-  // held its write lock at that moment. This file's first open then failed at
-  // once ("database is locked"), admission answered AGENT_ERROR, and the prompt
-  // was never registered: the intermittent CI failure of these cases.
-  // vitest.setup.ts now gives each test file its own ZEROS_DATA_DIR. This case
-  // stands in for the sibling under a scratch home, so it never touches the
-  // real app-data DB.
+  // Each test file has its own ZEROS_DATA_DIR. This case stands in, under a scratch home, for a sibling worker holding the shared app-data DB's write lock.
   it("admits a pre-dispatch prompt while another process holds the default Zeros DB", async () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-sibling-home-"));
     const scratchHome = {
@@ -1164,9 +1123,7 @@ describe("tab close while a provider session is still binding", () => {
       const { state } = testEngine(30_029);
       const { client, messages } = testClient();
       state.router.register(client);
-      // This is the partial map left by the old territory-retirement path in
-      // the attached logs: the chat still named an execution, but the gateway
-      // had already revoked its live route.
+      // A partial map: the chat still names an execution whose live route was revoked.
       state.sessionChat.set("session-1", "chat-1");
       state.conversationExecution.set("chat-1", "session-1");
       const prompt = vi.spyOn(state.agents, "prompt").mockResolvedValue({});

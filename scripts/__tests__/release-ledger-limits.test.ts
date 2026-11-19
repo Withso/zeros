@@ -11,8 +11,7 @@ import {
 } from "../../apps/control-plane/src/client-compatibility";
 import { LIMITS } from "../agent-runtime/config.mjs";
 
-// The control plane deploys standalone, so it mirrors the writer's limits
-// instead of importing them; this keeps the published ledger readable.
+// The standalone control plane cannot import the release writer at runtime.
 describe("release ledger limits", () => {
   it("lets every reader accept the largest ledger the writer publishes", () => {
     const releases = Array.from({ length: WRITER_RELEASES }, (_, index) => ({

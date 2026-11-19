@@ -1,3 +1,16 @@
+// Pins the shared per-model context window (packages/protocol/src/model-context.ts).
+//
+// This exists because the rule used to be duplicated in two places that rotted
+// independently — the engine's gauge fallback (claude/translator.ts) and the
+// renderer's attachment budget (agent-attachments.ts). On 2026-07-25 the first
+// reported 200K for Fable 5 / Sonnet 5 / Opus 5 (it only matched
+// /opus-4-[78].*\[1m\]/) and the second had no row at all for Sonnet 5 or
+// Opus 5, so they got the 100K unknown-model fallback. Both are 1M models.
+//
+// The catalog-walk test at the bottom is the anti-rot gate: add a Claude model
+// to catalogs/models-v1.json without teaching model-context.ts about it and
+// this suite fails.
+
 import { describe, expect, it } from "vitest";
 
 import {
@@ -10,6 +23,7 @@ const ONE_M = 1_000_000;
 
 describe("claudeContextWindow", () => {
   it("reports 1M for the natively-1M family, suffixed or bare", () => {
+    // registry `native_1m: true` — the window does not depend on the suffix.
     for (const id of [
       "claude-fable-5",
       "claude-fable-5[1m]",
@@ -49,7 +63,9 @@ describe("claudeContextWindow", () => {
   });
 
   it("never gives Haiku 1M — it has no 1M beta despite declaring the suffix", () => {
-    // Haiku advertises the suffix but not the 1M beta; the suffix must not widen its budget.
+    // The registry lists supports_1m_suffix on Haiku but NO supports_1m_beta
+    // and a 200k window, so a [1m] there buys nothing. Haiku is checked before
+    // the generic suffix rule for exactly this reason.
     expect(claudeContextWindow("claude-haiku-4-5")).toBe(
       CLAUDE_DEFAULT_CONTEXT_WINDOW,
     );
@@ -70,7 +86,9 @@ describe("claudeContextWindow", () => {
   });
 
   it("ANTI-ROT: every curated Claude model resolves to 1M except Haiku", () => {
-    // Curated non-Haiku labels can omit context size only while this 1M invariant holds.
+    // The user-visible contract behind removing "1M" from the labels: the size
+    // is redundant precisely BECAUSE this holds. If a future model lands that
+    // isn't 1M, the label change needs revisiting — so fail loudly here.
     const claude = catalog.families.claude as Array<{
       value: string;
       label: string;

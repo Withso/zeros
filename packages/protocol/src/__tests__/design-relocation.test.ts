@@ -7,8 +7,6 @@ import {
   type DesignRuntimeRelocationContext,
 } from "../design-relocation";
 
-// A label that takes the frame body's dark text and Georgia, inside a frame
-// whose cards set white text (`.card { color: white }`).
 const body = { color: "rgb(20, 20, 20)", "font-family": "Georgia" };
 const label: DesignRuntimeRelocationContext = {
   inheritedStyles: { "font-size": "30px", "--accent": "red" },
@@ -25,8 +23,7 @@ const card: DesignRuntimeRelocationContext = {
 
 describe("relocation inherited styles", () => {
   it("carries each value the drop parent does not already give the layer", () => {
-    // The body's dark text equals the label's own, but the card would turn it
-    // white; only Georgia, which the card also gives, stays behind.
+    // Moving under the card would change the label's color but not its font family.
     expect(designRelocationInheritedStyles(label, card)).toEqual({
       "font-size": "30px",
       "--accent": "red",
@@ -74,8 +71,7 @@ describe("relocation inherited styles", () => {
 
 describe("relocation placement", () => {
   it("places a layer by left and top, so its saved position is the X and Y a person reads", () => {
-    // A translate in transform paints at the same place but reads as X 0, Y 0
-    // and survives into auto layout as a stray offset.
+    // Transform translation makes the saved X/Y read as zero and leaves an offset in auto layout.
     expect(designRelocationStyles({ width: 100, height: 80, matrix: [1, 0, 0, 1, 65.5, 223.25], inheritedStyles: {} })).toMatchObject({
       position: "absolute", left: "65.5px", top: "223.25px", width: "100px", height: "80px", transform: "none",
     });

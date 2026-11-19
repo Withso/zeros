@@ -168,7 +168,8 @@ describe("runtime child insertion", () => {
   });
 
   it("keeps a pending child across an earlier unrelated commit, then adopts it once", async () => {
-    // An earlier style write can confirm after a newer provisional child is already visible.
+    // A style write queued before the child's own transaction confirms first.
+    // It must not erase the newer provisional child the inspector is showing.
     const result = await page.evaluate(async ({ insert, parentStyles }) => {
       await window.layoutRequest("previewInsert", { inserts: [insert], updates: parentStyles });
       const previewed = document.querySelector('[data-oid="frame-child"]');
@@ -208,7 +209,8 @@ describe("runtime child insertion", () => {
   });
 
   it("advances the runtime revision when a nested preview or its cancellation changes the tree", async () => {
-    // Nested edits can leave root counts and warnings unchanged, so revision still has to advance.
+    // A child drawn inside a nested container leaves the root readback, the
+    // root count and the warnings unchanged; only the revision can say so.
     const result = await page.evaluate(async ({ insert }) => {
       const before = await window.layoutRequest("getSnapshot", {});
       const nested = { ...insert, parentId: "a" };

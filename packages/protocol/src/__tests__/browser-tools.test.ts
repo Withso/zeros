@@ -149,6 +149,7 @@ describe("agent control chrome", () => {
     expect(
       browserControlDetail({ status: "awaiting-confirmation", action }),
     ).toBe("Waiting for approval");
+    // A finished action's label is history, not current work.
     expect(browserControlDetail({ status: "ready", action })).toBe(
       "Using the browser",
     );

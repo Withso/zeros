@@ -9,7 +9,6 @@ export type HostedControlToolPolicy =
   | { ok: true }
   | { ok: false; reason: string };
 
-/** What Electron main returns for one call. */
 export interface HostedControlToolResult {
   success: boolean;
   content: Array<
@@ -33,7 +32,6 @@ export interface HostedControlToolPorts<TName extends string> {
     arguments: BrowserJsonValue;
     signal: AbortSignal;
   }): Promise<HostedControlToolResult>;
-  /** End this chat's hold on what main controls for it. */
   release(reason: "turn-end" | "stop"): Promise<boolean>;
 }
 

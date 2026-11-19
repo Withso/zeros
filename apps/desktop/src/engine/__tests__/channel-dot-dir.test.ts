@@ -1,18 +1,4 @@
-// Regression tests for the 3-way `~/.zeros` split.
-//
-// Four call sites used to inline `isDevRuntime() ? ".zeros-dev" : ".zeros"` — a
-// TWO-way split on a boolean — while EVERY other identity (data dir, workspaces,
-// engine ports, keychain service, deep-link scheme) split three ways on
-// `channel()`. Net effect: **Beta and Production shared `~/.zeros`.**
-//
-// That was not cosmetic. `~/.zeros/detach.lock` is single-instance enforcement
-// (git/detach.ts:17), so with Beta holding it Production could not enter detach mode
-// at all — it failed with DETACH_LOCKED naming a workspace belonging to the other
-// app. `settings.toml` was one file for both. `state.db` and `worktrees/` were shared
-// between two concurrently-running apps whose workspaces live in different roots.
-//
-// The dev instance was immune (it correctly used `.zeros-dev`), which is exactly why
-// none of this was reproducible in dev.
+// Every channel identity splits three ways on channel(). A two-way dev/non-dev split made Beta and Production share ~/.zeros, including detach.lock, settings.toml, state.db and worktrees/.
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { homedir } from "node:os";
@@ -83,8 +69,7 @@ describe("zerosDotDirName — one leaf name per channel", () => {
 
 describe("all dot-dir consumers agree", () => {
   it("db/paths and git/state resolve the SAME root for every channel", () => {
-    // Two implementations of the same concept is what allowed them to drift. They
-    // now share one helper; this pins that.
+    // One helper keyed on channel(); this pins that.
     for (const ch of CHANNELS) {
       process.env.ZEROS_CHANNEL = ch;
       expect(gitStateRoot()).toBe(zerosStateRoot());
@@ -113,11 +98,7 @@ describe("all dot-dir consumers agree", () => {
 
 describe("guard: nothing may reintroduce a 2-way dot-dir split", () => {
   it("no source file inlines `isDevRuntime() ? \".zeros-dev\" : \".zeros\"`", () => {
-    // This exact expression, duplicated across four files, IS the bug. The whole
-    // point of zerosDotDirName() is that there is one implementation keyed on
-    // channel(). A new call site that inlines the boolean split would silently
-    // recreate the Beta/Production collision — and, as established above, dev
-    // could never reveal it. Fail here instead.
+    // A call site that inlines the boolean split would recreate the Beta/Production collision, which dev cannot reveal.
     const roots = [
       "apps/desktop/src/engine",
       "apps/desktop/src/renderer",
@@ -135,8 +116,7 @@ describe("guard: nothing may reintroduce a 2-way dot-dir split", () => {
         }
         if (!/\.(ts|tsx|cjs|mjs)$/.test(e.name)) continue;
         const src = readFileSync(p, "utf8");
-        // Strip comments so the explanatory prose in paths.ts / state.ts (which
-        // deliberately quotes the old expression) isn't flagged.
+        // Strip comments so prose that quotes the old expression is not flagged.
         const code = src
           .replace(/\/\*[\s\S]*?\*\//g, "")
           .replace(/^\s*\/\/.*$/gm, "");
@@ -202,9 +182,7 @@ describe("seedUserSettingsFromLegacyRoot — no config loss on upgrade", () => {
   }
 
   it("COPIES settings.toml when the channel has none yet (the upgrade path)", () => {
-    // THE case the function exists for: an existing Beta user whose settings lived
-    // in the shared ~/.zeros before the split. Without this they silently start on
-    // defaults — a regression introduced BY the split.
+    // An existing Beta user whose settings lived in the shared ~/.zeros must keep them after the split.
     const { dest, read } = seed({ "settings.toml": 'theme = "dark"\n' });
     expect(read(dest, "settings.toml")).toBe('theme = "dark"\n');
   });
@@ -282,10 +260,7 @@ describe("seedUserSettingsFromLegacyRoot — no config loss on upgrade", () => {
   });
 
   it("only ever seeds settings files — never state.db / detach.lock / worktrees", () => {
-    // Copying those would be actively destructive: state.db rows and worktrees/
-    // paths point at the OTHER channel's workspaces root, and detach.lock is a live
-    // pid lock (copying it fabricates a held lock). Pin the allowlist so a future
-    // "just copy the whole dir" refactor fails here.
+    // Pin the allowlist so copying the whole directory fails here.
     const src = readFileSync(
       new URL("../settings/files.ts", import.meta.url),
       "utf8",

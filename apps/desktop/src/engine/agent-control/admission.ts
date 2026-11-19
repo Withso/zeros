@@ -89,7 +89,7 @@ export function agentControlBrief(surfaces: { computer: boolean; browser: boolea
   }
   return lines.join("\n");
 }
-// One browser action can wait for a website approval and then a download.
+// One browser action can wait for a user approval and then a download.
 const BROWSER_TOOL_TIMEOUT_SEC = 600;
 // One computer action can wait for another chat and then for an approval.
 const COMPUTER_TOOL_TIMEOUT_SEC = 660;
@@ -109,7 +109,6 @@ function rolloutPolicy(
     : { ok: false, reason: agentControlUnavailableReason(feature) };
 }
 
-/** The Electron browser host as the engine reaches it. */
 export interface AgentControlBrowserHost {
   /** The desktop app handed this engine a browser service capability. */
   configured(): boolean;
@@ -133,7 +132,6 @@ export interface AgentControlBrowserHost {
   stop(browserSessionId: string): Promise<boolean>;
 }
 
-/** Electron main's computer use as the engine reaches it. */
 export interface AgentControlComputerHost {
   /** The desktop app handed this engine an agent control capability on a
    * Mac. */
@@ -153,7 +151,6 @@ export interface AgentControlComputerHost {
   ): Promise<boolean>;
 }
 
-/** Electron main's simulators as the engine reaches them. */
 export interface AgentControlDeviceHost {
   /** The desktop app handed this engine an agent control capability on a
    * Mac. */
@@ -198,7 +195,7 @@ export class AgentControlToolAdmissions {
       browser: AgentControlBrowserHost;
       computer?: AgentControlComputerHost;
       device?: AgentControlDeviceHost;
-      /** The directory holding the shared `zeros` launcher, once it exists. */
+      /** Directory of the shared `zeros` launcher; null until it is installed. */
       binDir?: () => string | null;
     },
   ) {}

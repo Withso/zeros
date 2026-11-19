@@ -47,6 +47,7 @@ describe("agent control confirmations", () => {
     expect(isAgentControlConfirmationRequest(request)).toBe(true);
     for (const broken of [
       { ...request, kind: "desktop" },
+      // Apps need no approval any more.
       { ...request, kind: "app" },
       { ...request, agent: "gemini" },
       { ...request, subject: " " },

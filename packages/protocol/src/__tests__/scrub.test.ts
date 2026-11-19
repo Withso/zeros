@@ -26,7 +26,9 @@ describe("redactSensitive", () => {
     expect(redactSensitive(`commit ${sha} not found`)).toBe(
       "commit [redacted] not found",
     );
-    // Assemble the fake Stripe-shaped fixture so GitHub push protection does not flag a literal.
+    // Built by concatenation so no full Stripe-shaped key literal lands in the
+    // source (trips GitHub push protection). The scrubber keys off token
+    // length/char-class, not the prefix, so this exercises the same path.
     const fakeApiKey = "sk_" + "live_" + "Z".repeat(32);
     expect(redactSensitive(`key ${fakeApiKey}`)).toContain("[redacted]");
   });
@@ -129,7 +131,7 @@ describe("scrubError", () => {
 
   it("falls back to a default name for a nameless Error", () => {
     const err = new Error("x");
-    err.name = "";
+    err.name = ""; // force the empty-name edge
     expect(scrubError(err).name).toBe("Error");
   });
 });

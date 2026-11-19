@@ -16,6 +16,9 @@ it("appends late resource links without replacing captured output and clears the
   expect((applyUpdate(retracted, update)[0] as AgentToolMessage).resourceLinks).toBeUndefined();
 });
 
+// The live renderer and persist-on-emit engine share applyUpdate to fold
+// streaming chunks into AgentMessages.
+// These guard the streaming contract so the two can never drift.
 
 function agentChunk(
   text: string,
@@ -217,7 +220,8 @@ describe("applyUpdate — shared agent-message coalescer", () => {
     expect(after).toHaveLength(1);
   });
 
-  // The engine persists these prompt blocks without an ID because some providers never echo them.
+  // The engine keystone (persistUserPrompt) folds the prompt with NO messageId,
+  // mirroring the renderer's speculative bubble; these guard that contract.
   it("coalesces a multi-block user prompt into one bubble", () => {
     let msgs: AgentMessage[] = [];
     msgs = applyUpdate(msgs, userChunk("part one ", undefined));
@@ -229,11 +233,11 @@ describe("applyUpdate — shared agent-message coalescer", () => {
 
   it("an echoed user turn ADOPTS the speculative bubble (no duplicate)", () => {
     let msgs: AgentMessage[] = [];
-    msgs = applyUpdate(msgs, userChunk("hello", undefined));
+    msgs = applyUpdate(msgs, userChunk("hello", undefined)); // synthetic (engine/renderer)
     expect(msgs).toHaveLength(1);
     expect((msgs[0] as AgentTextMessage).messageId).toBeUndefined();
-    msgs = applyUpdate(msgs, userChunk("hello", "u1"));
-    expect(msgs).toHaveLength(1);
+    msgs = applyUpdate(msgs, userChunk("hello", "u1")); // adapter echo, with id
+    expect(msgs).toHaveLength(1); // adopted, not a second bubble
     expect((msgs[0] as AgentTextMessage).messageId).toBe("u1");
     expect((msgs[0] as AgentTextMessage).text).toBe("hello");
   });
@@ -281,7 +285,11 @@ describe("applyUpdate — shared agent-message coalescer", () => {
   });
 });
 
-// Question requests use the provider's tool ID, which may differ from the timeline row's ID.
+// Question-record durability (2026-07-04): the renderer stamps a resolution
+// record (`zerosQuestion`) onto the AskUserQuestion tool message's rawOutput,
+// and the vendor's tool_result lands milliseconds later — the update must not
+// wipe the stamp. nativeToolCallId is what correlates the timeline row to the
+// blocking QuestionRequest (which carries the VENDOR's id, not our uuid).
 describe("applyUpdate — question tool-call identity + stamp durability", () => {
   it("copies nativeToolCallId from tool_call onto the message", () => {
     const msgs = applyUpdate([], {
@@ -311,7 +319,8 @@ describe("applyUpdate — question tool-call identity + stamp durability", () =>
         status: "in_progress",
       },
     } as unknown as SessionNotification);
-    // The renderer writes the resolution directly to the row, outside the provider update stream.
+    // Renderer stamps the resolution (out-of-band mutation, same shape the
+    // sessions store writes).
     msgs = msgs.map((m) =>
       m.kind === "tool"
         ? {
@@ -322,6 +331,7 @@ describe("applyUpdate — question tool-call identity + stamp durability", () =>
           }
         : m,
     );
+    // The vendor's tool_result lands right after — with its own rawOutput.
     msgs = applyUpdate(msgs, {
       sessionId: "s",
       update: {
@@ -385,6 +395,7 @@ describe("applyUpdate — question tool-call identity + stamp durability", () =>
         status: "in_progress",
       },
     } as unknown as SessionNotification);
+    // Vendor tool_result lands first…
     msgs = applyUpdate(msgs, {
       sessionId: "s",
       update: {
@@ -394,6 +405,7 @@ describe("applyUpdate — question tool-call identity + stamp durability", () =>
         rawOutput: { vendor: "result body" },
       },
     } as unknown as SessionNotification);
+    // …then the adapter's synthetic stamp update arrives late.
     msgs = applyUpdate(msgs, {
       sessionId: "s",
       update: {
@@ -441,6 +453,9 @@ describe("applyUpdate — question tool-call identity + stamp durability", () =>
   });
 });
 
+// error_notice (2026-07-04): adapter-level transient notices (Codex retry
+// attempts, transport warnings) fold into ONE compact row per event — never
+// appended into the agent's prose. Replays dedupe on noticeId.
 describe("applyUpdate — error_notice rows", () => {
   it("retains autonomous failure classification across persistence and replay", () => {
     const notification = {
@@ -494,6 +509,7 @@ describe("applyUpdate — error_notice rows", () => {
         message: "Codex: Reconnecting… 3/5",
       },
     } as unknown as SessionNotification);
+    // Replayed duplicate of the first — must not duplicate the row.
     msgs = applyUpdate(msgs, {
       sessionId: "s",
       update: {
@@ -537,6 +553,7 @@ describe("applyUpdate — engine-recorded user rows (Zeros Local CLI)", () => {
     const next = applyUpdate(prompt, recorded(row));
     expect(next).toHaveLength(2);
     expect(next[1]).toEqual(row);
+    // The same row again (a second view, a replay) replaces it in place.
     expect(applyUpdate(next, recorded({ ...row, text: "Progress!" }))).toHaveLength(2);
   });
 

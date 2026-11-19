@@ -33,7 +33,6 @@ const releases = [
 ];
 const ledger = { version: 1, channel: "alpha", releases };
 
-/** A valid ledger of `count` releases, one minute apart, ending an hour ago. */
 function bulkLedger(count: number) {
   const start = now - 60 * 60_000 - (count - 1) * 60_000;
   return {

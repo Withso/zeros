@@ -4,9 +4,7 @@ import { DESIGN_SURFACE_VECTOR_SOURCE } from "../design-surface-vector";
 
 let browser: Browser;
 beforeAll(async () => {
-  // SVG images use grayscale text antialiasing. Match the HTML reference to
-  // that mode so Linux LCD font smoothing cannot masquerade as a layout or
-  // paint mismatch; keep the same strict pixel comparison on every platform.
+  // Use grayscale antialiasing for the HTML reference to match SVG image text on Linux.
   browser = await chromium.launch({ headless: true, args: ["--disable-lcd-text"] });
 });
 afterAll(async () => { await browser?.close(); });
@@ -52,11 +50,7 @@ const cases: Array<{ name: string; css: string; body?: string; fallback?: boolea
   { name: "font and layout", css: "body{font:16px/20px monospace;color:rgb(20,90,190)}main{display:grid;grid-template-columns:1fr 1fr;gap:10px}", body: "<main><span>Hello</span><strong>Vector</strong></main>" },
 ];
 
-/** Chromium on a loaded CI runner sometimes answers Page.captureScreenshot with
- * "Unable to capture screenshot" before any pixels exist (8c974a9c3 and merge
- * group 43122338545, two different cases, no pixel diff). Retry only that
- * protocol error, after a frame; every other error and every pixel comparison
- * still fails. */
+/** Retry only Chromium's transient screenshot error before pixels are available. */
 async function capturePixels(page: Pick<Page, "screenshot" | "evaluate">, attempts = 3): Promise<string> {
   for (let attempt = 1; ; attempt++) {
     try { return (await page.screenshot({ omitBackground: true })).toString("base64"); }
@@ -91,8 +85,7 @@ it.each(cases)("preserves native document pixels for $name", async ({ css, body,
     await page.evaluate(() => document.fonts.ready);
     const htmlPixels = await capturePixels(page);
     const svg = await page.evaluate(source => new Function(source + ";return designSurfaceVector();")() as string | null, DESIGN_SURFACE_VECTOR_SOURCE);
-    // Page-canvas image propagation on a short root has a distinct positioning
-    // area. Preserve its native preview instead of presenting different pixels.
+    // Use native preview when page-canvas image positioning cannot be reproduced in the vector.
     if (fallback) { expect(svg).toBeNull(); return; }
     expect(svg).not.toBeNull();
     await page.setContent('<!doctype html><style>html,body{margin:0;background:transparent}img{display:block;width:320px;height:240px}</style><img>');

@@ -11,6 +11,8 @@ type RuntimeWindow = Window & {
   runtimeRequest: (method: string, args: Record<string, unknown>) => Promise<{ result?: unknown; error?: unknown }>;
 };
 
+// A plain value that differs by theme, one that reads a token, and layers
+// hidden by themselves or by an ancestor.
 const HEAD = `<style>
   :root { --surface: rgb(250, 250, 250); }
   [data-zd-theme="dark"] { --surface: rgb(20, 20, 20); }
@@ -98,14 +100,15 @@ describe("what a field's marks read from a layer's details", () => {
   });
 
   it("lists the default theme's value once the host names the default theme", async () => {
+    // Before any theme is applied there is no other theme to name.
     expect((await details(page, "card")).authoredStyles?.["background-color"]?.themeValues).toEqual({ dark: "rgb(28, 28, 28)" });
     await request(page, "setTheme", { theme: "dark" });
-    // Without a name for the default theme, its unqualified declaration has no key in themeValues.
+    // Without the default theme's name the layer has nothing to compare with.
     expect((await details(page, "card")).authoredStyles?.["background-color"]?.themeValues).toBeUndefined();
     await request(page, "setTheme", { theme: "dark", baseTheme: "light" });
     const dark = await details(page, "card");
     expect(dark.authoredStyles?.["background-color"]?.themeValues).toEqual({ light: "rgb(255, 255, 255)" });
-    // Both themes use the same token reference, so the authored color has no separate theme value.
+    // A token differs by theme by itself: no theme values.
     expect(dark.authoredStyles?.color?.themeValues).toBeUndefined();
     expect(isDesignRuntimeNodeDetails(dark)).toBe(true);
     await request(page, "setTheme", { theme: "light", baseTheme: "light" });

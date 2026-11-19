@@ -2,9 +2,7 @@ import { z } from "zod";
 import { PromotionError, SHA, requireCheck, type Channel } from "./contracts";
 import { poll } from "./io";
 
-// The control plane forces an upgrade 30 days after a version's next release and
-// treats versions older than the ledger as unsupported, so the ledger must cover
-// that whole window. Readers mirror these bounds (release-ledger-limits.test.ts).
+// The control plane rejects versions older than the ledger, so retain its full support window within the shared caps.
 export const LEDGER_RETENTION_DAYS = 30;
 export const MAX_LEDGER_RELEASES = 2000;
 export const MAX_LEDGER_BYTES = 512 * 1024;
@@ -63,9 +61,7 @@ export function buildReleaseLedger(channel: Channel, previous: unknown | null, e
   return { version: 1, channel, releases: retainSupportWindow(releases, Date.parse(candidate.data.publishedAt)) };
 }
 
-/** A version stays supported until 30 days after its next release, so the newest
- * release before the window is kept too: it is still supported while its successor
- * is inside the window. */
+/** Keep the predecessor: its support window starts when its successor is published. */
 function retainSupportWindow(releases: LedgerEntry[], now: number): LedgerEntry[] {
   const cutoff = now - LEDGER_RETENTION_DAYS * DAY_MS;
   const inside = releases.findIndex(release => Date.parse(release.publishedAt) >= cutoff);

@@ -28,7 +28,6 @@ export interface ZerosDeviceToolPorts {
     arguments: BrowserJsonValue;
     signal: AbortSignal;
   }): Promise<DeviceToolResult>;
-  /** Let go of the simulators this chat is using. */
   release(reason: "turn-end" | "stop"): Promise<boolean>;
 }
 

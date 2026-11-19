@@ -16,9 +16,7 @@ type Outcome = {
   refused?: string;
 };
 
-/** Load the runtime into a page whose head inlines two linked Design
- * stylesheets the way render preparation does, hand-shake with or without
- * the opt-in, and run the given requests. */
+/** Use the same inline stylesheet markers as render preparation. */
 async function run(features: string[] | undefined): Promise<Outcome> {
   const browser = await chromium.launch({ headless: true });
   try {
@@ -123,13 +121,11 @@ describe("design runtime stylesheet previews", () => {
     expect(outcome.methods).toContain("previewStylesheet");
     expect(outcome.previewed.applied).toBe(1);
     expect(outcome.previewed.revision).toBeGreaterThan(1);
-    // The page stylesheet still reads the token: its rule now resolves green.
     expect(outcome.previewColor).toBe("rgb(0, 150, 0)");
     expect(outcome.otherColor).toBe("rgb(0, 0, 200)");
     expect(outcome.restored.applied).toBe(1);
     expect(outcome.restoredColor).toBe("rgb(200, 0, 0)");
     expect(outcome.restoredText).toBe(":root{--accent:rgb(200, 0, 0)}");
-    // A frame that does not link the file is untouched.
     expect(outcome.unlinked.applied).toBe(0);
     // Runtime-owned writes never surface as authored mutations.
     expect(outcome.mutationEvents).toBe(0);

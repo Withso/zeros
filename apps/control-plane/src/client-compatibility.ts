@@ -18,8 +18,7 @@ export type ClientUpgradeRequired = {
 const CACHE_MS = 5 * 60 * 1000;
 const FAILURE_CACHE_MS = 30_000;
 const FETCH_TIMEOUT_MS = 3_000;
-// Mirrors scripts/release/release-ledger.ts, which retains the whole support
-// window by date (release-ledger-limits.test.ts keeps the two in step).
+// The standalone control plane mirrors the release writer's caps and retention window; release-ledger-limits.test.ts checks the writer stays within them.
 export const MAX_LEDGER_BYTES = 512 * 1024;
 export const MAX_LEDGER_RELEASES = 2000;
 export const SUPPORT_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;

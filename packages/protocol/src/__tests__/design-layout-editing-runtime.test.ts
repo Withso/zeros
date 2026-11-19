@@ -191,7 +191,7 @@ describe("layout runtime editing", () => {
       const restored = await window.layoutRequest("restoreGeneration", {
         targetSourceVersion: "b".repeat(24),
         commit: true,
-        // Restoring a's width moves the untouched sibling b; unknown IDs are omitted.
+        // "b" moved without being touched; "missing" no longer exists.
         measure: ["b", "a", "missing"],
       });
       return restored.details.map(

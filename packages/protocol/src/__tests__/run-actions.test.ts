@@ -1,3 +1,9 @@
+// Run actions — shared parser/normalizer + session-id scheme. Both sides of
+// the bridge (engine RunManager + renderer run tabs) consume exactly these,
+// so the invariants here are the wire contract: skip-don't-drop validation,
+// one-default normalization, the legacy `scripts.run` read-time migration,
+// and the legacy-compatible session-id hash.
+
 import { describe, it, expect } from "vitest";
 
 import {
@@ -15,9 +21,9 @@ describe("parseRunActions", () => {
     const actions = parseRunActions({
       run_actions: [
         { id: "dev", name: "Dev", command: "pnpm dev" },
-        { id: "", name: "Broken", command: "x" },
-        { id: "test", name: "Test" },
-        "not a table",
+        { id: "", name: "Broken", command: "x" }, // missing id → skipped
+        { id: "test", name: "Test" }, // missing command → skipped
+        "not a table", // skipped
         { id: "sb", name: "Storybook", command: "pnpm storybook", icon: "globe" },
       ],
     });
@@ -92,7 +98,8 @@ describe("parseRunActions", () => {
 
 describe("runSessionId", () => {
   it("keeps the legacy unsuffixed id for the migrated 'run' action", () => {
-    // The migrated action must still reconnect to persisted terminals by their unsuffixed ID.
+    // The exact djb2 output the renderer's original runSessionId produced —
+    // persisted run terminals must keep matching after the move to core.
     expect(runSessionId("/w")).toBe(runSessionId("/w", LEGACY_RUN_ACTION_ID));
     expect(runSessionId("/w")).toMatch(/^pty-run-[a-z0-9]+$/);
   });
@@ -112,9 +119,9 @@ describe("one-shot heuristic", () => {
     expect(isOneShotCommand("pnpm test")).toBe(true);
     expect(isOneShotCommand("pnpm build")).toBe(true);
     expect(isOneShotCommand("pnpm dev")).toBe(false);
-    expect(isOneShotCommand("vitest --watch")).toBe(false);
+    expect(isOneShotCommand("vitest --watch")).toBe(false); // watch beats test
     expect(isOneShotCommand("pnpm storybook")).toBe(false);
-    expect(isOneShotCommand("./mystery.sh")).toBe(false);
+    expect(isOneShotCommand("./mystery.sh")).toBe(false); // unknown → no verdict
   });
 
   it("an explicit one_shot flag overrides the heuristic", () => {
@@ -142,6 +149,7 @@ describe("filterRunActionsForPlatform", () => {
   it("keeps platformless actions everywhere and re-normalizes the default", () => {
     const onWin = filterRunActionsForPlatform(actions, "win");
     expect(onWin.map((a) => a.id)).toEqual(["all", "win"]);
+    // The mac-only default was filtered out → the first eligible becomes it.
     expect(onWin[0]!.isDefault).toBe(true);
   });
 
