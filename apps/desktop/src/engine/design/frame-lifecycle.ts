@@ -1075,6 +1075,9 @@ export async function transferDesignNode(
       ? [...designComponentRegistry(canvas).files].find(([, source]) => source === from.file)?.[0]
       : undefined;
     const linkedMainCopy = input.componentCopy !== undefined && componentName !== undefined;
+    const semanticRootCopy = input.componentCopy !== undefined &&
+      !linkedMainCopy &&
+      runtimeRoot?.oid === input.nodeId;
     const wholeFrame = input.nodeId === DESIGN_RUNTIME_DOCUMENT_BODY_ID || linkedMainCopy;
     if (
       input.componentCopy &&
@@ -1089,7 +1092,7 @@ export async function transferDesignNode(
         !relocationStyles)
     )
       throw new Error("A whole frame can only be nested into another frame.");
-    if (relocationStyles && !wholeFrame)
+    if (relocationStyles && !wholeFrame && !semanticRootCopy)
       assertDesignRelocationSource(fromSource, input.nodeId);
     const record = wholeFrame
       ? undefined

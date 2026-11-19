@@ -146,7 +146,7 @@ describe("a frame registered as a component", () => {
   it("keeps an unregistered semantic frame root direct when frame-copy intent is present", async () => {
     const main = await createDesignFrame(root, { title: "Ordinary frame" });
     const destination = await createDesignFrame(root, { title: "Board" });
-    const source = '<!doctype html><html><head></head><body><main data-oid="shell" data-zeros-frame-root style="height:100vh"><footer data-oid="bottom" style="position:absolute;bottom:0">Bottom anchored</footer></main></body></html>';
+    const source = '<!doctype html><html><head></head><body><main data-oid="shell" data-zeros-frame-root style="height:100vh"><zd-card data-oid="card" heading="Welcome" zd-variant="compact" zd-style-card="padding: 4px"><p data-oid="slot-fill" slot="content">Slotted content</p></zd-card><footer data-oid="bottom" style="position:absolute;bottom:0">Bottom anchored</footer></main></body></html>';
     await writeFile(path.join(root, DESIGN_DIRECTORY_NAME, main.file), source);
     await writeFile(path.join(root, DESIGN_DIRECTORY_NAME, destination.file), '<!doctype html><html><head></head><body><section data-oid="board" style="position:relative"></section></body></html>');
     const sourceVersion = (await readDesignFrameRenderIdentity(root, main.file)).sourceVersion;
@@ -166,10 +166,34 @@ describe("a frame registered as a component", () => {
     });
     const destinationSource = await readFile(path.join(root, DESIGN_DIRECTORY_NAME, destination.file), "utf8");
     expect(destinationSource).toMatch(/<section[^>]*data-oid="board"[^>]*><main[^>]*data-oid="copy-shell"/);
+    expect(destinationSource).toContain('<zd-card data-oid="copy-shell-card" heading="Welcome" zd-variant="compact" zd-style-card="padding: 4px">');
+    expect(destinationSource).toContain('<p data-oid="copy-shell-slot-fill" slot="content">Slotted content</p>');
     expect(destinationSource).toMatch(/data-oid="copy-shell"[^>]*height:\s*900px/);
     expect(destinationSource).toMatch(/data-oid="copy-shell"[^>]*>[^]*<footer[^>]*data-oid="copy-shell-bottom"[^>]*style="position:absolute;bottom:0"/);
     expect(destinationSource).not.toMatch(/data-oid="copy-shell"[^>]*><main/);
+    const destinationIds = Array.from(destinationSource.matchAll(/data-oid="([^"]+)"/g), (match) => match[1]);
+    expect(new Set(destinationIds).size).toBe(destinationIds.length);
     expect(await readFile(path.join(root, DESIGN_DIRECTORY_NAME, main.file), "utf8")).toBe(source);
+  });
+
+  it("keeps component-instance relocation protection for generic root moves", async () => {
+    const main = await createDesignFrame(root, { title: "Ordinary frame" });
+    const destination = await createDesignFrame(root, { title: "Board" });
+    const source = '<!doctype html><html><head></head><body><main data-oid="shell" data-zeros-frame-root><zd-card data-oid="card"><p data-oid="slot-fill" slot="content">Slotted content</p></zd-card></main></body></html>';
+    await writeFile(path.join(root, DESIGN_DIRECTORY_NAME, main.file), source);
+    await writeFile(path.join(root, DESIGN_DIRECTORY_NAME, destination.file), '<!doctype html><html><head></head><body><section data-oid="board"></section></body></html>');
+    const sourceVersion = (await readDesignFrameRenderIdentity(root, main.file)).sourceVersion;
+    const destinationSourceVersion = (await readDesignFrameRenderIdentity(root, destination.file)).sourceVersion;
+    await expect(transferDesignNode(root, {
+      frame: main.file,
+      sourceVersion,
+      nodeId: "shell",
+      destinationFrame: destination.file,
+      destinationSourceVersion,
+      parentId: "board",
+      relocation: { width: main.width, height: main.height, matrix: [1, 0, 0, 1, 20, 30], inheritedStyles: {} },
+      geometry: { x: 20, y: 30, w: main.width, h: main.height, z: 1 },
+    })).rejects.toThrow(/component instance/);
   });
 
   it.each([
