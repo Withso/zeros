@@ -202,16 +202,11 @@ type SectionDef = {
   id: SectionId;
   label: string;
   icon: LucideIcon;
-  /** Optional per-row nav override, appended AFTER `SIDEBAR_ENTRY_CLS` so
-   *  twMerge lets it win (see `INTERNAL_NAV_CLS`). */
   navClassName?: string;
   Panel: ComponentType<{ surfaceActive?: boolean; openCloudRepository?(repository: string): void }>;
 };
 
-// Internal's row is the one colored entry: label and icon carry
-// `--brown-primary` in every state. Declared above SECTIONS, which evaluates at
-// module load. It restates every state SIDEBAR_ENTRY_CLS paints because twMerge
-// keeps the last class per group and modifier; a missed state falls back.
+// Override every state modifier; twMerge does not replace across modifiers.
 const INTERNAL_NAV_CLS =
   "text-brown-primary hover:text-brown-primary data-[state=active]:text-brown-primary data-[state=active]:hover:text-brown-primary [&>svg]:text-brown-primary data-[state=active]:[&>svg]:text-brown-primary";
 
@@ -253,9 +248,6 @@ const SECTIONS: SectionDef[] = [
     icon: Smartphone,
     Panel: SimulatorsPanel,
   },
-  // Gated by the `terminalAgents` experimental flag — hidden from the
-  // sidebar (and not resolvable as an active section) until the user
-  // opts in from Settings → Experimental. See `availableSections`.
   {
     id: "terminal-agents",
     label: "Terminal Agents",
@@ -274,9 +266,6 @@ const SECTIONS: SectionDef[] = [
     icon: GitPullRequest,
     Panel: GitDefaultsPanel,
   },
-  // MCP servers live on Customize and repository settings on each repository
-  // page. A stale `user:mcp` redirects to Customize; "repos" stays in SectionId
-  // only so legacy `repo:<id>:<section>` selections parse and redirect.
   {
     id: "integrations",
     label: "Integrations",
@@ -295,10 +284,6 @@ const SECTIONS: SectionDef[] = [
     icon: FlaskConical,
     Panel: ExperimentalPanel,
   },
-  // Gated to developer accounts (`users.staff_role`, served by GET /v1/me — see
-  // settings/internal-features.ts) — hidden from the sidebar AND not
-  // resolvable as an active section for everyone else. See
-  // `availableSections`.
   {
     id: "internal",
     label: "Internal",
@@ -308,8 +293,6 @@ const SECTIONS: SectionDef[] = [
   },
 ];
 
-// Labelled nav groups, in order. A section gated off in `availableSections`
-// drops out of its group.
 const SECTION_GROUPS: Array<{ label: string; ids: SectionId[] }> = [
   {
     label: "Personal",
@@ -329,17 +312,11 @@ const SECTION_GROUPS: Array<{ label: string; ids: SectionId[] }> = [
   { label: "Workspace", ids: ["cloud-computer", "environment", "git"] },
 ];
 
-// One persisted string encodes the selection: `user:<sectionId>`, or a legacy
-// `repo:<projectId>:<repoSection>` that redirects to the repository page. Bare
-// legacy values map forward on read. Section ids are independent of nav labels,
-// so persisted values and deep links survive renames.
-
-/** The repo drill-in's landing page (the card list), a
- *  pseudo-section alongside the real repo sections. */
 const REPO_OVERVIEW = "overview" as const;
 
 type RepoPage = RepoSectionId | typeof REPO_OVERVIEW;
 
+// Keep persisted selection and deep-link IDs stable across label renames.
 type Selection =
   | { scope: "user"; section: SectionId }
   | { scope: "repo"; repoId: string; section: RepoPage }
@@ -353,7 +330,6 @@ function repoSelection(repoId: string, section: RepoPage): string {
   return `repo:${repoId}:${section}`;
 }
 
-/** A Cloud Computer repository page: `cloud-repo:<tab>:<owner>/<name>`. */
 function cloudRepoSelection(repository: string, tab: CloudRepositoryTab): string {
   return `cloud-repo:${tab}:${repository}`;
 }
@@ -366,9 +342,7 @@ function isStaticSection(value: string): value is SectionId {
   return (VALID_STATIC_SECTIONS as readonly string[]).includes(value);
 }
 
-/** Decode the persisted active string into a structured selection,
- *  tolerating the legacy bare-section / `repo:<id>` shapes. Unknown and
- *  retired sections land on the owner's first page, `fallback`. */
+// Older installs saved bare section IDs and sectionless repo links.
 function parseSelection(active: string, fallback: SectionId = "general"): Selection {
   if (active.startsWith("cloud-repo:")) {
     const rest = active.slice("cloud-repo:".length), colon = rest.indexOf(":");
@@ -380,15 +354,12 @@ function parseSelection(active: string, fallback: SectionId = "general"): Select
   }
   if (active.startsWith("repo:")) {
     const rest = active.slice("repo:".length);
-    // The pre-revamp empty sentinel (`repo:` with no id) → the Repos list.
+    // The legacy empty repo sentinel means the list, not a repository.
     if (!rest) return { scope: "user", section: "repos" };
     const lastColon = rest.lastIndexOf(":");
     if (lastColon > 0) {
       const raw = rest.slice(lastColon + 1);
-      // Legacy persisted ids still parse as a repo selection so the redirect
-      // effect lands them on the repo page: the former Scripts / run-actions
-      // views folded into Environment; MCP left the repo sections entirely
-      // (2026-07-17). Retired Design settings also land on Environment.
+      // Redirect retired repository sections to Environment.
       const maybeSection =
         raw === "scripts" || raw === "run-actions" || raw === "mcp" ||
         raw === "design" || raw === "design-preferences"
@@ -402,14 +373,12 @@ function parseSelection(active: string, fallback: SectionId = "general"): Select
         };
       }
     }
-    // Legacy `repo:<id>` (no section) → the repo's overview page.
     return { scope: "repo", repoId: rest, section: REPO_OVERVIEW };
   }
   const rawBare = active.startsWith("user:")
     ? active.slice("user:".length)
     : active;
-  // Saved selections can still name the retired `computer-use` page, which
-  // is now part of General.
+  // Honor selections saved before Computer Use moved to General.
   if (rawBare === "computer-use") return { scope: "user", section: "general" };
   return { scope: "user", section: isStaticSection(rawBare) ? rawBare : fallback };
 }
@@ -418,23 +387,14 @@ const PAGE_HEADING_CLS = "m-0 text-lg leading-6 font-medium text-fg1";
 
 const HINT_CLS = "m-0 text-3xxs leading-4 text-fg3";
 
-// Derived from SECTIONS so a newly-registered section is automatically a
-// valid persisted target. A hardcoded list silently dropped any new section:
-// parseSelection rejected its id and fell back to "general", so the sidebar
-// entry rendered but clicking it never opened the panel.
 const VALID_STATIC_SECTIONS: SectionId[] = SECTIONS.map((s) => s.id);
 
-// Comment-only seed written to ~/.zeros/settings.toml on first "Open …" click
-// so Finder has a file to select (hand-edits happen in your own editor).
+// Finder needs a file to select even before the first settings write.
 const USER_SETTINGS_SEED = `# Zeros user settings (this Mac).
 # Values you set in Settings are saved here.
 `;
 
 function loadInitialSection(owner: string): string {
-  // Normalize to the canonical encoding so legacy values (bare `general`,
-  // `repo:<id>` without a section) migrate forward on first read. A
-  // `repo:<id>:<section>` value passes through; its repo id is re-validated
-  // against the project list in the mount-time effect once projects hydrate.
   const sel = parseSelection(
     readScopedSettingsSelection(owner, "section", owner === "local" ? "user:general" : "user:providers"),
     owner === "local" ? "general" : "providers",
@@ -446,10 +406,6 @@ function loadInitialSection(owner: string): string {
       : cloudRepoSelection(sel.repository, sel.tab);
 }
 
-// The shared 32px nav row (the web dashboard's too): 13/18 fg2 with a 14px fg3
-// icon; hover is the sidebar's, and the selected row is its own bg2-highlight
-// step with fg1, so it never reads as hover. Rows keep their width. Icons are
-// sized by `[&_svg]:size-3.5` because CSS size beats lucide's `size` prop.
 const SIDEBAR_ENTRY_CLS =
   "flex h-8 w-full min-w-0 items-center justify-start gap-2 rounded-md border-0 bg-transparent px-2 py-0 text-left text-xs leading-4.5 font-normal text-fg2 transition-colors duration-120 ease-out hover:bg-sidebar-bg-hover hover:text-fg1 data-[state=active]:bg-bg2-highlight data-[state=active]:text-fg1 data-[state=active]:hover:bg-bg2-highlight [&_svg]:size-3.5 [&>svg]:shrink-0 [&>svg]:text-fg3 data-[state=active]:[&>svg]:text-fg2";
 
@@ -458,7 +414,6 @@ const SETTINGS_GROUP_HEADER_CLS =
 
 const SETTINGS_GROUP_RULE_CLS = "bg-border1 mx-2 my-2 h-px shrink-0";
 
-/** One line under an organization page's title, said once for the page. */
 const ORGANIZATION_SECTION_DESCRIPTIONS: Partial<Record<SectionId, string>> = {
   providers: "Your accounts are private to you.",
 };
@@ -468,8 +423,7 @@ export function SettingsPage() {
   const { me } = useTeams();
   const organizationId = organization?.isPersonal ? null : organization?.id ?? getActiveOrganizationIdSnapshot();
   const owner = settingsOwnerKey(me?.user.id ?? "pending", organizationId);
-  // Switch the complete form tree in the same render as its owner. Retained
-  // sections, dialogs, secrets and unsaved drafts must never cross this boundary.
+  // Remount on owner changes so retained panels, secrets and drafts cannot cross owners.
   return <ScopedSettingsPage key={owner} owner={owner} />;
 }
 
@@ -482,8 +436,6 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
   const dispatch = useWorkspaceDispatch();
   const pageActive = useActivePage() === "settings";
   const { projects } = useOrganizationProjects();
-  // Restored from native settings. Type-guarded so a renamed section cannot crash
-  // mount; repo ids are re-validated once `projects` hydrates.
   const [active, setActiveState] = useState<string>(() => loadInitialSection(owner));
   const setActive = useCallback((next: string) => {
     setActiveState(next);
@@ -492,9 +444,7 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
   const selection = parseSelection(active, local ? "general" : "providers");
   useInstantViewSwitch(`settings:${owner}:${active}`, pageSurfaceRef);
 
-  // Deep links from action-error toasts must update this retained page as well
-  // as persistence; otherwise reopening an already-mounted Settings surface
-  // would show its stale prior section.
+  // A retained page will not reread persisted selection when a deep link opens it.
   useEffect(
     () =>
       subscribeUserSettingsSection((section) => {
@@ -505,14 +455,10 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
     [owner],
   );
 
-  // Invite handoff remains desktop-readable for existing email links; all
-  // member management and organization creation live in the web dashboard.
   const [joinTeamOpen, setJoinTeamOpen] = useState(false);
   const [joinToken, setJoinToken] = useState("");
 
-  // A zeros://invite deep link opens the Join dialog pre-filled — on cold
-  // navigation (token captured before this mount) and while Settings is
-  // already open. Works in every team state, including zero teams.
+  // Consume a legacy invite link whether it arrives before or after mount.
   useEffect(() => {
     const takePending = () => {
       const token = consumePendingInviteToken();
@@ -524,24 +470,19 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
     return subscribePendingInvite(takePending);
   }, []);
 
-  // One-time import of the legacy localStorage
-  // settings blobs into the engine-owned TOML files. Flag-guarded + merge-under
-  // on the engine side, so calling on every settings open is safe.
   const bridge = useBridge();
   useEffect(() => {
+    // The engine guards this legacy import and preserves existing TOML values.
     if (local) void ensureSettingsTomlMigrated(bridge);
   }, [bridge, local]);
 
-  // Repository settings moved to the repository page, so a `repo:<id>:<section>`
-  // selection re-routes there and Settings resets to its first section. Wait for
-  // a non-empty project list: the async fetch must not eat a restored selection
-  // before the redirect can resolve it.
   const prevProjectsLenRef = useRef(projects.length);
   useEffect(() => {
     const prevLen = prevProjectsLenRef.current;
     prevProjectsLenRef.current = projects.length;
     const sel = parseSelection(active);
     if (sel.scope !== "repo" || !local) return;
+    // Keep a saved repo route until the project list can resolve it.
     if (projects.length === 0 && prevLen === 0) return;
     const project = projects.find((p) => p.id === sel.repoId);
     if (project) {
@@ -554,9 +495,7 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
     setActive(userSelection("general"));
   }, [projects, active, dispatch, local, setActive]);
 
-  // A persisted or deep-linked `user:mcp` (or bare `mcp`) re-routes to Customize
-  // and resets Settings. This checks the raw string, because parseSelection
-  // already maps the unknown id to "general".
+  // Startup restore normalizes legacy MCP to the owner's fallback; only raw routes can redirect.
   useEffect(() => {
     const bare = active.startsWith("user:")
       ? active.slice("user:".length)
@@ -564,21 +503,15 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
     if (bare !== "mcp") return;
     setActive(userSelection("general"));
     dispatch({ type: "SET_ACTIVE_PAGE", page: "customize" });
-    // setActive is stable for the component's lifetime (state setter + setSetting).
   }, [active, dispatch, setActive]);
-  // Gated sections (Terminal Agents behind its experimental flag, Internal for
-  // allowlisted accounts) drop out of `availableSections`, so a stale or forged
-  // selection falls back to the first section and signing out never leaves a
-  // gated panel reachable.
   const [terminalAgentsEnabled] = useExperimentalFeature("terminalAgents");
   const internalUser = useIsInternalUser();
-  // Agent control rollout (agent-control-rollout.ts): a closed feature has
-  // no Settings page.
   const computerUseSectionActive = computerUseSectionOpen({
     computerUse: useAgentControlFeatureActive("computerUse"),
     zerosBrowser: useAgentControlFeatureActive("zerosBrowser"),
   });
   const simulatorsActive = useAgentControlFeatureActive("simulators");
+  // Enforce feature gates on restored and deep-linked routes, not just sidebar rows.
   const availableSections = useMemo(
     () =>
       SECTIONS.filter((section) => isSettingsSectionAvailable(section.id, {
@@ -590,8 +523,6 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
       computerUseSectionActive, simulatorsActive,
     ],
   );
-  // Each owner falls back to its own first page: General for Local, Agents
-  // for an organization, whose General holds only this Mac's controls.
   const fallbackSection =
     availableSections.find((s) => s.id === (local ? "general" : "providers")) ??
     availableSections[0];
@@ -600,8 +531,7 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
       ? (availableSections.find((s) => s.id === selection.section) ??
         fallbackSection)
       : local || selection.scope === "cloud-repo" ? null : fallbackSection;
-  // Rewrite a selection whose gate just closed; otherwise no row is active and the
-  // retired selection reactivates if the gate reopens.
+  // Persist the fallback so reopening a gate cannot restore a retired selection.
   const selectedSection = selection.scope === "cloud-repo" ? null : selection.section;
   useEffect(() => {
     if (selection.scope === "repo" && local) return;
@@ -609,15 +539,12 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
     if (selection.scope === "cloud-repo" && availableSections.some((s) => s.id === "cloud-computer")) return;
     const fallback = fallbackSection?.id;
     if (fallback) setActive(userSelection(fallback));
-    // setActive is stable for the component's lifetime (state setter + setSetting).
   }, [availableSections, fallbackSection, selection.scope, selectedSection, local, setActive]);
-  // Visited form panels remain mounted so local drafts, scroll-adjacent DOM,
-  // provider state, and resolved settings do not restart on every sidebar click.
+  // Keep visited panels mounted to preserve drafts across navigation.
   const availableSectionIds = useMemo(
     () => new Set(availableSections.map((section) => section.id)),
     [availableSections],
   );
-  // The Cloud Computer's repositories each get a page; only its managers see them.
   const cloudRepositories = useCloudComputerRepositories(me?.user.id ?? null,
     !local && availableSectionIds.has("cloud-computer") ? organization : null, pageActive);
   const openCloudRepository = useCallback((repository: string) => setActive(cloudRepoSelection(repository, "git")), [setActive]);
@@ -627,8 +554,7 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
     availableSectionIds,
   );
 
-  // Inactive panels hide with display:none in one shared scroller, so a switch
-  // clamps scrollTop. Keyed memory gives each section its own offset.
+  // Hiding a panel clamps the shared scroller, so restore offsets by section.
   const detailScrollRef = useScrollMemoryRef(
     activeSection ? `settings:${owner}:${activeSection.id}` : null,
   );
@@ -637,9 +563,6 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
     dispatch({ type: "SET_ACTIVE_PAGE", page: "dashboard" });
   };
 
-  // File-scope control — "Open settings.toml" reveals the user file in Finder
-  // (the same affordance as the repo page). Floats at the content's top-right.
-  // Self-hides when the native Finder integration is unavailable.
   const fileScopeControls = local ? (
     <OpenSettingsFileButton
       layer="user"
@@ -685,8 +608,6 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
               if (sections.length === 0) return null;
               return (
                 <React.Fragment key={group.label}>
-                  {/* The switcher names the first group, and a one-item
-                      group needs no 44px label: a hairline separates both. */}
                   {groupIndex === 0 || sections.length === 1 ? (
                     <div className={SETTINGS_GROUP_RULE_CLS} aria-hidden="true" />
                   ) : (
@@ -740,24 +661,17 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
 
         {/* Native overflow, because macOS overlay scrollbars auto-hide. */}
         <div className="border-border1 bg-bg1 relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden border-l">
-          {/* The 40px title bar, level with the sidebar's: a drag strip. */}
           <div className="h-10 shrink-0" data-tauri-drag-region aria-hidden="true" />
-          {/* The 24px side gutter lives on the SCROLLER, not the column, so
-              the column's 640px max is the content width (no inner padding
-              eating into it) and it still shrinks below 688px windows. */}
+          {/* Put padding on the scroller so the column cap is content width. */}
           <div
             ref={detailScrollRef}
             className="min-h-0 flex-1 overflow-y-auto px-6"
           >
-            {/* `settings-type-scale` (settings-page.css) keeps stray text-sm
-                at the 13px every Settings line uses. */}
             <div
               {...popoverBoundaryProps}
               className="settings-type-scale mx-auto w-full max-w-160 pb-12"
             >
-              {/* A transient repo-scope selection (legacy deep link) renders
-                  nothing for one frame — the redirect effect above re-routes
-                  it to the repo page. */}
+              {/* Legacy Local repo links redirect without mounting a Settings panel. */}
               {selection.scope === "cloud-repo" && (
                 <div className="flex flex-col gap-8">
                   <header className="flex min-w-0 flex-col gap-1">
@@ -784,8 +698,6 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
                     className={isActive ? "flex flex-col gap-8" : "hidden"}
                     aria-hidden={!isActive}
                   >
-                    {/* The title row: Open settings.toml sits on the column's
-                        right edge, level with the title. */}
                     <header className="flex items-start justify-between gap-4">
                       <div className="flex min-w-0 flex-col gap-1">
                         <h1 className={PAGE_HEADING_CLS}>{section.label}</h1>
@@ -807,7 +719,6 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
         </div>
       </div>
 
-      {/* Compatibility invite handoff. New invitations are managed on web. */}
       <JoinTeamDialog
         open={joinTeamOpen}
         initialToken={joinToken}
@@ -829,7 +740,6 @@ function SectionNavButton({
   icon: LucideIcon;
   label: string;
   isActive: boolean;
-  /** Per-row override, merged AFTER the shared entry class so it wins. */
   className?: string;
   onClick: () => void;
   onIntent?: () => void;
@@ -842,12 +752,7 @@ function SectionNavButton({
       data-state={isActive ? "active" : "inactive"}
       className={cn(SIDEBAR_ENTRY_CLS, className)}
       onClick={onClick}
-      // Called, never forwarded bare: React hands a handler the synthetic
-      // event, which `prefetchGithubAuthSnapshot` would take as its `fetcher`.
-      // `KeyedAsyncCache.load` then runs `.then(<event>)`, which resolves
-      // `undefined` — the prefetch silently does nothing AND publishes that
-      // `undefined` over a confirmed snapshot. `onIntent` is declared
-      // zero-argument; this is what honours it.
+      // A React event must not reach prefetch as its optional fetcher.
       onPointerEnter={() => onIntent?.()}
       onFocus={() => onIntent?.()}
     >
