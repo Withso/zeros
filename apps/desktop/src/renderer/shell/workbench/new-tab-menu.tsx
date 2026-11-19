@@ -96,7 +96,8 @@ export function WorkbenchNewTabMenu({
     [exactSnapshot, peekedFiles],
   );
   const filesResolved = exactSnapshot?.resolved ?? peekedFiles !== null;
-  const filesFailed = exactSnapshot?.error ?? false;
+  const filesUnavailable = exactSnapshot?.error ||
+    (!!cwd && isCloudWorkspace(cwd) && !filesLive && !filesResolved);
 
   // Load only while the palette is useful. The shared short-lived cache dedupes
   // this with the Files tree and keeps repeat opens instant.
@@ -363,7 +364,7 @@ export function WorkbenchNewTabMenu({
                 query={query}
                 onSelect={openEnvironment}
                 showEmpty={
-                  filesResolved && !filesFailed && !hasFileOrBrowserResults
+                  filesResolved && !filesUnavailable && !hasFileOrBrowserResults
                 }
               />
             )}
@@ -418,8 +419,8 @@ export function WorkbenchNewTabMenu({
               </CommandGroup>
             )}
 
-            {searching && filesFailed && fileResults.length === 0 && (
-              <div className={COMMAND_EMPTY_CLS}>
+            {searching && filesUnavailable && fileResults.length === 0 && (
+              <div className={COMMAND_EMPTY_CLS} role="status">
                 Files are temporarily unavailable.
               </div>
             )}
