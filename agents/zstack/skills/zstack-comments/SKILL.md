@@ -1,7 +1,7 @@
 ---
 name: zstack-comments
 description: "Keep Zeros comments to the non-obvious why: run a fresh-context comment pass over a diff before review, apply the Zeros keep-list, and prove comment cleanups change nothing else with scripts/zstack/comments.mjs."
-globs: "**"
+invocation: router
 ---
 
 # zstack-comments

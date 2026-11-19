@@ -1,6 +1,7 @@
 ---
 name: zstack-review
 description: "Independently review a Zeros diff against the repository's invariants: Local and cloud placements, owner switching, stale responses, exact-key state, security boundaries, locks and time windows, compatibility and test determinism. Verify every finding before reporting it."
+disable-model-invocation: true
 ---
 
 <!-- GENERATED from agents/zstack/skills/zstack-review/SKILL.md by scripts/design-system/build-design-docs.mjs. Edit it there, then run `pnpm design:docs`. -->

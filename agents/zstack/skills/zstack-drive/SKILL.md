@@ -1,7 +1,7 @@
 ---
 name: zstack-drive
 description: "Launch, diagnose, drive and capture Zeros user flows: the native app on macOS and production renderer fixtures on Linux. Use for hands-on app verification and locating workspace, chat, file, Git and terminal features."
-globs: "apps/desktop/**,agents/zstack/drive/**"
+invocation: router
 ---
 
 # Drive Zeros

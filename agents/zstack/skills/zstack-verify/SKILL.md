@@ -1,7 +1,7 @@
 ---
 name: zstack-verify
 description: "Choose and run the right checks for a Zeros change, Local and cloud: adjacent Vitest suites, required static gates, UI smoke, platform-only checks, and live Alpha verification with the cloud v2 gate0 probe. Includes evidence rules and where the environment gotchas live."
-globs: "**"
+invocation: router
 ---
 
 # zstack-verify
@@ -38,16 +38,18 @@ handing off. Preview the CI lanes with `pnpm ci:plan`.
 The selector does this bookkeeping:
 
 ```sh
-node scripts/zstack/verify.mjs plan --test path/to/adjacent.test.ts
-node scripts/zstack/verify.mjs run --test path/to/adjacent.test.ts --execute --receipt /private/scratch/verify.json
+node scripts/zstack/verify.mjs plan --test path/to/adjacent.test.ts --anchor path/to/source.ts:42
 ```
+
+For execution, use `run` with the same options plus `--execute --receipt <file>`.
 
 Record `--mode single-session --agent <model>`, or `--mode master-subagents
 --agent <model> --master <model>`. The selector uses the shared CI registry;
 unknown CI command text is deferred, never executed as shell. An incomplete diff
 or missing adjacent suite blocks execution, and a source change during
-verification invalidates the receipt. The receipt is unsigned engineering
-evidence; CI is still the merge authority. `node scripts/zstack/verify.mjs local-ui`
+verification invalidates the receipt. Source anchors are caller citations,
+not proof of inspection. The receipt is unsigned engineering evidence;
+CI is still the merge authority. `node scripts/zstack/verify.mjs local-ui`
 plans the Linux app driver (`--execute --receipt <file>`, optionally
 `--shard 1/3`); remaining shards and macOS proof stay unverified. See
 `agents/zstack/tools.md`.
