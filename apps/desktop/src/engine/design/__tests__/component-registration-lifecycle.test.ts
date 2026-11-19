@@ -28,7 +28,7 @@ import { prepareFrameRenderSource } from "../render-preparation";
 import { DESIGN_RUNTIME_DOCUMENT_BODY_ID } from "@zeros/protocol/design-runtime";
 import { createComponentTemplateBudget, renderComponentTemplate } from "@zeros/design-web/component-template";
 import { designIdentityCacheStatsForTests } from "../identity-cache";
-import { designNodeRecords, healDesignOids } from "../node-identities";
+import { designNodeRecords, healDesignOids, stripNonDesignOidsForRender } from "../node-identities";
 
 describe("a frame registered as a component", () => {
   let root: string;
@@ -140,9 +140,32 @@ describe("a frame registered as a component", () => {
     expect(removed.sourceVersion).toBe(ordinary.sourceVersion);
   });
 
+  it("identifies a frame-root host with a body-level style sibling", async () => {
+    const frame = await createDesignFrame(root, { title: "Styled host" });
+    const source = '<!doctype html><html><head></head><body><zd-card data-oid="host" data-zeros-frame-root></zd-card>' +
+      '<style data-oid="legacy-style">.host { display: grid; }</style></body></html>';
+    await writeFile(path.join(root, DESIGN_DIRECTORY_NAME, frame.file), source);
+    const inspection = inspectDesignCatalog(root, DESIGN_DIRECTORY_NAME);
+    const aggregate = await readDesignWorkspaceSnapshot(root, { includeComponentIdentity: true });
+    expect(aggregate.frames.find((candidate) => candidate.file === frame.file)?.componentIdentity)
+      .toEqual({ kind: "instance", nodeId: "host" });
+    const prepared = await prepareDesignNavigationFrames(root, designCatalogRevision(inspection), [frame.file], inspection.layout.manifest.id,
+      { includeComponentIdentity: true });
+    expect(prepared.frames[0]?.componentIdentity).toEqual({ kind: "instance", nodeId: "host" });
+  });
+
+  it("strips a legacy body-style OID from composition but retains the style element", () => {
+    const source = '<!doctype html><html><head></head><body><style data-oid="legacy-style">.host { display: grid; }</style></body></html>';
+    const rendered = stripNonDesignOidsForRender(source);
+    expect(rendered).toContain("<style");
+    expect(rendered).not.toContain('data-oid="legacy-style"');
+  });
+
   it.each([
     ["unmarked root", '<zd-card data-oid="host"></zd-card>'],
     ["non-root host", '<main data-oid="shell" data-zeros-frame-root><zd-card data-oid="host"></zd-card></main>'],
+    ["template sibling", '<zd-card data-oid="host" data-zeros-frame-root></zd-card><template data-zd-if="true"><zd-card data-oid="template-host" data-zeros-frame-root></zd-card></template>'],
+    ["visual sibling", '<zd-card data-oid="host" data-zeros-frame-root></zd-card><div data-oid="content">Content</div>'],
   ])("does not identify a single %s as a frame-root instance", async (_label, rootHtml) => {
     const frame = await createDesignFrame(root, { title: "Ordinary" });
     await writeFile(path.join(root, DESIGN_DIRECTORY_NAME, frame.file), `<!doctype html><html><head></head><body>${rootHtml}</body></html>`);
