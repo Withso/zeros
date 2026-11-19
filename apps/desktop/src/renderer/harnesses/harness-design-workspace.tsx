@@ -833,7 +833,7 @@ async function main() {
         nodeCount: 18,
         modifiedAt: 2,
         sourceVersion: PRICING_SOURCE_VERSION,
-        componentIdentity: componentOptionsHarness ? { kind: "main", name: "chat-composer" } : null,
+        componentIdentity: componentOptionsHarness && !legacyMainHarness ? { kind: "main", name: "chat-composer" } : null,
         ...(componentOptionsHarness ? { component: designComponentSummaryOf(pricingSource)! } : {}),
       },
     ],
@@ -1042,7 +1042,7 @@ async function main() {
       nodeCount: 18,
       modifiedAt: 2,
       sourceVersion: PRICING_SOURCE_VERSION,
-      componentIdentity: componentOptionsHarness ? { kind: "main", name: "chat-composer" } : null,
+      componentIdentity: componentOptionsHarness && !legacyMainHarness ? { kind: "main", name: "chat-composer" } : null,
       source: pricingSource,
       srcDoc: withDesignRuntime(pricingSource, PRICING_SOURCE_VERSION),
       tree: [],
@@ -1264,6 +1264,7 @@ async function main() {
     const previous = currentWorkspaceSnapshot.frames.find((frame) => frame.file === "pricing.html")!;
     const summary = designComponentSummaryOf(source)!;
     const frame = { ...previous, sourceVersion, modifiedAt: previous.modifiedAt + 1,
+      componentIdentity: componentOptionsHarness && (!legacyMainHarness || harnessMainMoved) ? { kind: "main" as const, name: "chat-composer" } : null,
       component: notApplied ? { ...summary, notApplied } : summary };
     currentPricingSource = source;
     currentWorkspaceSnapshot = { ...currentWorkspaceSnapshot, frames: currentWorkspaceSnapshot.frames.map((entry) => entry.file === "pricing.html" ? frame : entry) };
@@ -1656,6 +1657,15 @@ async function main() {
         harnessComponentMoves.push({ component: String(message.params?.component), pageId: message.params?.pageId as string | undefined });
         harnessMainMoved = true;
         publishHomeFrame(currentHomeSource);
+        const pricing = currentWorkspaceSnapshot.frames.find((frame) => frame.file === "pricing.html");
+        if (pricing) {
+          const registeredPricing = { ...pricing, componentIdentity: { kind: "main" as const, name: "chat-composer" } };
+          currentWorkspaceSnapshot = { ...currentWorkspaceSnapshot,
+            frames: currentWorkspaceSnapshot.frames.map((frame) => frame.file === "pricing.html" ? registeredPricing : frame) };
+          designFrameDocumentCache.setData(designFrameDocumentKey(workspaceId, "pricing.html", pricing.sourceVersion), {
+            ...registeredPricing, source: currentPricingSource, srcDoc: withDesignRuntime(currentPricingSource, pricing.sourceVersion), tree: [],
+          });
+        }
         const files = currentWorkspaceSnapshot.frames.map((frame) => frame.file);
         currentWorkspaceSnapshot = { ...currentWorkspaceSnapshot,
           pages: currentWorkspaceSnapshot.pages ?? [{ id: "main", title: "Design", folder: "", frameFiles: files }] };
