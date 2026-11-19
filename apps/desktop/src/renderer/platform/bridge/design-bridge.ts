@@ -1077,13 +1077,13 @@ function designPageMutationReply(value: unknown, operation: string): DesignPageM
 
 export async function bridgeDesignCreatePage(bridge: RuntimeClient, workspaceId: string, title?: string): Promise<DesignPageMutationReplyWire> {
   return designPageMutationReply(await workspaceOp(bridge, "design.page.create", {
-    workspaceId, ...(title !== undefined ? { title } : {}),
+    workspaceId, ...(title !== undefined ? { title } : {}), ...componentIdentityMutationSnapshot(bridge, workspaceId),
   }), "design.page.create");
 }
 
 export async function bridgeDesignRenamePage(bridge: RuntimeClient, workspaceId: string, pageId: string, title: string): Promise<DesignPageMutationReplyWire> {
   return designPageMutationReply(await workspaceOp(bridge, "design.page.rename", {
-    workspaceId, pageId, title,
+    workspaceId, pageId, title, ...componentIdentityMutationSnapshot(bridge, workspaceId),
   }), "design.page.rename");
 }
 
@@ -1108,13 +1108,17 @@ function designCanvasItemReply(value: unknown, operation: string, pageId: string
 /** Create (no id) or replace one canvas item on a page. */
 export async function bridgeDesignPutCanvasItem(bridge: RuntimeClient, workspaceId: string, pageId: string,
   item: DesignCanvasItemInput): Promise<DesignCanvasItemReplyWire> {
-  return designCanvasItemReply(await workspaceOp(bridge, "design.canvas.item.put", { workspaceId, pageId, item }),
+  return designCanvasItemReply(await workspaceOp(bridge, "design.canvas.item.put", {
+    workspaceId, pageId, item, ...componentIdentityMutationSnapshot(bridge, workspaceId),
+  }),
     "design.canvas.item.put", pageId);
 }
 
 export async function bridgeDesignDeleteCanvasItem(bridge: RuntimeClient, workspaceId: string, pageId: string,
   itemId: string): Promise<DesignCanvasItemReplyWire> {
-  return designCanvasItemReply(await workspaceOp(bridge, "design.canvas.item.delete", { workspaceId, pageId, itemId }),
+  return designCanvasItemReply(await workspaceOp(bridge, "design.canvas.item.delete", {
+    workspaceId, pageId, itemId, ...componentIdentityMutationSnapshot(bridge, workspaceId),
+  }),
     "design.canvas.item.delete", pageId);
 }
 
@@ -1123,7 +1127,9 @@ export async function bridgeDesignUpdateTheme(
   workspaceId: string,
   theme: { id: string; label: string; base?: boolean },
 ): Promise<{ themes: DesignThemeWire[]; snapshot: DesignWorkspaceSnapshotWire }> {
-  const result = await workspaceOp(bridge, "design.themes.update", { workspaceId, theme }) as {
+  const result = await workspaceOp(bridge, "design.themes.update", {
+    workspaceId, theme, ...componentIdentityMutationSnapshot(bridge, workspaceId),
+  }) as {
     themes?: DesignThemeWire[]; snapshot?: DesignWorkspaceSnapshotWire;
   } | null;
   if (!Array.isArray(result?.themes) || !result.snapshot || !isDesignWorkspaceSnapshotWire(result.snapshot))
@@ -1138,7 +1144,9 @@ export async function bridgeDesignMoveComponent(
   component: string,
   pageId?: string,
 ): Promise<{ frame: { file: string; pageId: string; title: string; component: string }; snapshot: DesignWorkspaceSnapshotWire }> {
-  const result = await workspaceOp(bridge, "design.component.move", { workspaceId, component, ...(pageId ? { pageId } : {}) }) as {
+  const result = await workspaceOp(bridge, "design.component.move", {
+    workspaceId, component, ...(pageId ? { pageId } : {}), ...componentIdentityMutationSnapshot(bridge, workspaceId),
+  }) as {
     frame?: { file?: unknown; pageId?: unknown; title?: unknown; component?: unknown }; snapshot?: DesignWorkspaceSnapshotWire;
   } | null;
   const frame = result?.frame;
@@ -1157,7 +1165,9 @@ export async function bridgeDesignDeletePage(bridge: RuntimeClient, workspaceId:
   deleted: { pageId: string };
   snapshot: DesignWorkspaceSnapshotWire;
 }> {
-  const result = await workspaceOp(bridge, "design.page.delete", { workspaceId, pageId, expectedFrameIds }) as {
+  const result = await workspaceOp(bridge, "design.page.delete", {
+    workspaceId, pageId, expectedFrameIds, ...componentIdentityMutationSnapshot(bridge, workspaceId),
+  }) as {
     deleted?: { pageId: string }; snapshot?: DesignWorkspaceSnapshotWire;
   } | null;
   if (result?.deleted?.pageId !== pageId || !result.snapshot?.pages ||
@@ -1225,6 +1235,7 @@ export async function bridgeDesignRenameFrame(
     workspaceId,
     frame,
     title,
+    ...componentIdentityMutationSnapshot(bridge, workspaceId),
   })) as {
     frame?: DesignFrameSummaryWire;
     snapshot?: DesignWorkspaceSnapshotWire;
@@ -1436,12 +1447,18 @@ export function setDesignKnownPagesReader(reader: typeof knownPagesReader): void
   knownPagesReader = reader;
 }
 
+function componentIdentityMutationSnapshot(bridge: RuntimeClient, workspaceId: string) {
+  if (isCloudWorkspace(workspaceId) || !bridge.supportsEngineCapability?.(DESIGN_COMPONENT_IDENTITY_CAPABILITY, workspaceId)) return {};
+  return { [DESIGN_COMPONENT_IDENTITY_PARAM]: true };
+}
+
 function scopedMutationSnapshot(bridge: RuntimeClient, workspaceId: string) {
-  if (isCloudWorkspace(workspaceId) || !bridge.supportsEngineCapability?.(DESIGN_MUTATION_SNAPSHOTS_CAPABILITY, workspaceId)) return {};
+  if (isCloudWorkspace(workspaceId)) return {};
+  const componentIdentity = componentIdentityMutationSnapshot(bridge, workspaceId);
+  if (!bridge.supportsEngineCapability?.(DESIGN_MUTATION_SNAPSHOTS_CAPABILITY, workspaceId)) return componentIdentity;
   const knownPages = bridge.supportsEngineCapability(DESIGN_PAGE_SCOPED_MUTATIONS_CAPABILITY, workspaceId)
     ? knownPagesReader?.(workspaceId) : undefined;
-  return { snapshotMode: "scoped", ...(knownPages ? { knownPages } : {}),
-    ...(bridge.supportsEngineCapability?.(DESIGN_COMPONENT_IDENTITY_CAPABILITY, workspaceId) ? { [DESIGN_COMPONENT_IDENTITY_PARAM]: true } : {}) };
+  return { snapshotMode: "scoped", ...(knownPages ? { knownPages } : {}), ...componentIdentity };
 }
 
 export async function bridgeDesignUpdateStyles(

@@ -362,6 +362,14 @@ export async function handleDesignWorkspaceRoute(
         : {}),
       ...(params.includeComponentIdentity === true ? { includeComponentIdentity: true } : {}),
     });
+  const freshAggregateSnapshot = (
+    workspace: Parameters<DesignWorkspaceRouteHost["readDesignSnapshot"]>[0],
+  ) =>
+    host.readDesignSnapshot(workspace, remote, {
+      hostLocalResources,
+      fresh: true,
+      ...(params.includeComponentIdentity === true ? { includeComponentIdentity: true } : {}),
+    });
   switch (op) {
     case "design.navigation.read": {
       if (remote || !hostLocalResources) throw new Error("Design navigation requires a Local workspace.");
@@ -1420,10 +1428,7 @@ export async function handleDesignWorkspaceRoute(
           );
           return {
             deleted: { pageId: input.pageId },
-            snapshot: await host.readDesignSnapshot(workspace, remote, {
-              hostLocalResources,
-              fresh: true,
-            }),
+            snapshot: await freshAggregateSnapshot(workspace),
           };
         }
         let page;
@@ -1437,7 +1442,7 @@ export async function handleDesignWorkspaceRoute(
           page = await renameDesignPage(workspace.path, input.pageId, input.title,
             change => host.recordDesignHistory(workspace.path, catalogDesignHistoryEntry(change, input.pageId)));
         }
-        return { page, snapshot: await host.readDesignSnapshot(workspace, remote, { hostLocalResources, fresh: true }) };
+        return { page, snapshot: await freshAggregateSnapshot(workspace) };
       });
     }
     case "design.canvas.item.put":
@@ -1454,7 +1459,7 @@ export async function handleDesignWorkspaceRoute(
           : { deleted: await deleteDesignCanvasItem(workspace.path, { pageId, itemId: params.itemId }, capture) };
         const itemId = "item" in result ? result.item?.id : result.deleted?.id;
         if (change && itemId) host.recordDesignHistory(workspace.path, catalogDesignHistoryEntry(change, pageId, [], true, itemId));
-        return { ...result, snapshot: await host.readDesignSnapshot(workspace, remote, { hostLocalResources, fresh: true }) };
+        return { ...result, snapshot: await freshAggregateSnapshot(workspace) };
       });
     }
     case "design.component.move": {
@@ -1466,7 +1471,7 @@ export async function handleDesignWorkspaceRoute(
         const frame = await moveDesignComponentToCanvas(workspace.path, { component: reqStr(params, "component"), ...(pageId ? { pageId } : {}) },
           change => host.recordDesignHistory(workspace.path, catalogDesignHistoryEntry(change, change.after.canvas.pages?.find(page =>
             page.frames.some(id => !change.before.canvas.pages?.some(previous => previous.frames.includes(id))))?.id)));
-        return { frame, snapshot: await host.readDesignSnapshot(workspace, remote, { hostLocalResources, fresh: true }) };
+        return { frame, snapshot: await freshAggregateSnapshot(workspace) };
       });
     }
     case "design.themes.update": {
@@ -1479,7 +1484,7 @@ export async function handleDesignWorkspaceRoute(
       return withDesignWorkspaceMutation(workspace.path, async () => ({
         themes: await upsertDesignTheme(workspace.path, input,
           change => host.recordDesignHistory(workspace.path, catalogDesignHistoryEntry(change))),
-        snapshot: await host.readDesignSnapshot(workspace, remote, { hostLocalResources, fresh: true }),
+        snapshot: await freshAggregateSnapshot(workspace),
       }));
     }
     case "design.frame.create": {
@@ -1555,10 +1560,7 @@ export async function handleDesignWorkspaceRoute(
       }
       return {
         frame,
-        snapshot: await host.readDesignSnapshot(workspace, remote, {
-          hostLocalResources,
-          fresh: true,
-        }),
+        snapshot: await freshAggregateSnapshot(workspace),
       };
     }
     case "design.frame.duplicate": {

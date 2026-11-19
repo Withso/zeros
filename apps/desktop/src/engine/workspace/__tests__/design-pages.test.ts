@@ -12,6 +12,7 @@ import { withDesignWorkspaceMutation } from "../../design/document-write-lock";
 import { getDesignPageHint } from "../../design/page-selection";
 import { getWorkspaceDesignApi, resetWorkspaceDesignApisForTests } from "../../design/design-api";
 import { readDesignFrame } from "../../design/document";
+import { readCanvas, writeCanvas } from "../../design/document-storage";
 import { MAX_DESIGN_HISTORY_BYTES } from "../../design/workspace-history";
 
 type Snapshot = {
@@ -138,6 +139,82 @@ describe("page operations through WorkspaceService", () => {
     expect((await call("design.history.redo") as Reply).snapshot.pages).toEqual(renamed.snapshot.pages);
     await call("design.history.redo");
     expect((await call("design.history.redo") as Reply).snapshot.themes).toEqual(themed.snapshot.themes);
+  });
+
+  it("preserves negotiated main, instance and ordinary identities in catalog mutation snapshots", async () => {
+    const pageId = initial.pages[0]!.id;
+    const createFrame = async (title: string) => (await service.handle("design.frame.create", {
+      ...params, pageId, title,
+    }, options) as { frame: { file: string } }).frame;
+    const main = await createFrame("Card main");
+    const instance = await createFrame("Card instance");
+    const ordinary = await createFrame("Ordinary");
+    const canvas = await readCanvas(root);
+    canvas.frame_info[main.file] = { ...canvas.frame_info[main.file]!, component: "card" } as never;
+    await writeCanvas(root, canvas);
+    await writeFile(path.join(root, initial.directory, instance.file),
+      '<!doctype html><html><head></head><body><zd-card data-oid="host" data-zeros-frame-root></zd-card></body></html>');
+
+    const expectIdentities = (snapshot: { frames: Array<{ file: string; componentIdentity?: unknown }> }) => {
+      const identity = (file: string) => snapshot.frames.find((frame) => frame.file === file)?.componentIdentity;
+      expect(identity(main.file)).toEqual({ kind: "main", name: "card" });
+      expect(identity(instance.file)).toEqual({ kind: "instance", nodeId: "host" });
+      expect(identity(ordinary.file)).toBeNull();
+    };
+    const negotiatedRead = await service.handle("design.snapshot", { ...params, includeComponentIdentity: true }, options) as {
+      snapshot: { frames: Array<{ file: string; componentIdentity?: unknown }> };
+    };
+    expectIdentities(negotiatedRead.snapshot);
+
+    const createdPage = await service.handle("design.page.create", {
+      ...params, directoryId: initial.directoryId, title: "Catalog test",
+      includeComponentIdentity: true,
+    }, options) as { page: { id: string }; snapshot: { frames: Array<{ file: string; componentIdentity?: unknown }> } };
+    expectIdentities(createdPage.snapshot);
+
+    const renamedPage = await service.handle("design.page.rename", {
+      ...params, pageId: createdPage.page.id, title: "Catalog renamed", includeComponentIdentity: true,
+    }, options) as { snapshot: { frames: Array<{ file: string; componentIdentity?: unknown }> } };
+    expectIdentities(renamedPage.snapshot);
+
+    const itemPut = await service.handle("design.canvas.item.put", {
+      ...params, pageId, item: { kind: "note", x: 0, y: 0, width: 200, height: 80, text: "Note" },
+      includeComponentIdentity: true,
+    }, options) as { item: { id: string }; snapshot: { frames: Array<{ file: string; componentIdentity?: unknown }> } };
+    expectIdentities(itemPut.snapshot);
+
+    const itemDeleted = await service.handle("design.canvas.item.delete", {
+      ...params, pageId, itemId: itemPut.item.id, includeComponentIdentity: true,
+    }, options) as { snapshot: { frames: Array<{ file: string; componentIdentity?: unknown }> } };
+    expectIdentities(itemDeleted.snapshot);
+
+    await mkdir(path.join(root, initial.directory, "components"), { recursive: true });
+    await writeFile(path.join(root, initial.directory, "components/fresh-card.html"),
+      "<!doctype html><html><head><title>Fresh card</title></head><body><span>Fresh card</span></body></html>");
+    const moved = await service.handle("design.component.move", {
+      ...params, component: "fresh-card", pageId, includeComponentIdentity: true,
+    }, options) as { snapshot: { frames: Array<{ file: string; componentIdentity?: unknown }> } };
+    expectIdentities(moved.snapshot);
+
+    const themed = await service.handle("design.themes.update", {
+      ...params, theme: { id: "light", label: "Day" }, includeComponentIdentity: true,
+    }, options) as { snapshot: { frames: Array<{ file: string; componentIdentity?: unknown }> } };
+    expectIdentities(themed.snapshot);
+
+    const renamedFrame = await service.handle("design.frame.rename", {
+      ...params, frame: ordinary.file, title: "Ordinary renamed", includeComponentIdentity: true,
+    }, options) as { snapshot: { frames: Array<{ file: string; componentIdentity?: unknown }> } };
+    expectIdentities(renamedFrame.snapshot);
+
+    const deletedPage = await service.handle("design.page.delete", {
+      ...params, pageId: createdPage.page.id, expectedFrameIds: [], includeComponentIdentity: true,
+    }, options) as { snapshot: { frames: Array<{ file: string; componentIdentity?: unknown }> } };
+    expectIdentities(deletedPage.snapshot);
+
+    const omitted = await service.handle("design.page.rename", {
+      ...params, pageId, title: "Without opt-in",
+    }, options) as { snapshot: { frames: Array<{ file: string; componentIdentity?: unknown }> } };
+    expect(omitted.snapshot.frames.every((frame) => !Object.hasOwn(frame, "componentIdentity"))).toBe(true);
   });
 
   it("keeps history selection on an empty affected page when another page still has frames", async () => {
