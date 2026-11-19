@@ -104,6 +104,25 @@ it.each([
   expect(designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.frames.map(frame => frame.file)).toEqual([file]);
 });
 
+it("lints demanded unchecked and relint frames but skips already checked frames", async () => {
+  const before = prepared();
+  const [unchecked, checked, checkedAndRelint] = before.frames.map(frame => frame.file);
+  const demanded = [unchecked!, checked!, checkedAndRelint!];
+  designWorkspaceSnapshotCache.setData(workspaceId, {
+    ...before,
+    frames: [],
+    lint: { ...before.lint, checkedFiles: [checked!, checkedAndRelint!] },
+    preparation: { ...before.preparation!, current: [], relint: [checkedAndRelint!] },
+  });
+  producer.prepare.mockImplementation(async (_workspace: string, _directory: string, _revision: string, files: string[], lintFiles?: string[]) => ({
+    catalogRevision: revision, errors: [], frames: before.frames.filter(frame => files.includes(frame.file)),
+    ...(lintFiles ? { lint: { checkedFiles: lintFiles, violations: [] } } : {}) }));
+  designFramePreparation.setDemand(token, { workspaceId, files: demanded });
+  await vi.waitFor(() => expect(designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.preparation?.current).toEqual(expect.arrayContaining(demanded)));
+  expect(producer.prepare).toHaveBeenCalledOnce();
+  expect(producer.prepare).toHaveBeenCalledWith(workspaceId, "design_test", revision, demanded, [unchecked, checkedAndRelint]);
+});
+
 /** A scoped write acknowledgement: it prepares `file` again and lints nothing. */
 function writeAck(before: DesignWorkspaceSnapshotWire, file: string, sourceVersion: string): DesignWorkspaceSnapshotWire {
   return { ...before, preparation: undefined, lint: { ...before.lint, checkedFiles: [], violations: [] },

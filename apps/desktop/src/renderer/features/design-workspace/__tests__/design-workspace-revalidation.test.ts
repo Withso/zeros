@@ -76,6 +76,9 @@ it.each(["personal", "organization-local"])("keeps %s's confirmed panel source u
     const after = await read;
     expect(after.preparation?.current).toEqual([before.frames[0]!.file]);
     expect(after.frames[0]!.sourceVersion).toBe("c".repeat(24));
+    expect(after.lint).toMatchObject({ checkedFiles: [file], violations: [
+      expect.objectContaining({ ruleId: "unknown-token", severity: "warning", message: "Fresh lint", file, line: 1, column: 1 }),
+    ] });
     expect(designFrameViews(after).map(isPreparedDesignFrame)).toEqual([true, false]);
     expect(published.every(value => isPreparedDesignFrame(designFrameViews(value)[0]!))).toBe(true);
   } finally { held.resolve(reply(next)); await read; unsubscribe(); }
