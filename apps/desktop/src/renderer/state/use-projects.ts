@@ -764,25 +764,30 @@ export function runWorkspaceDiscoveryForTesting(): Promise<void> {
   return runDiscovery(true);
 }
 
-/** Await a forced authoritative refresh of one repo's live list and commit it
- * to the single source. The optimistic-create success path awaits this so the
- * real row is present in the cache BEFORE its "Setting up…" placeholder drops,
- * killing the momentary no-tab flash on every surface at once. */
-export async function reloadWorkspacesFor(repoSlug: string): Promise<boolean> {
-  if (!repoSlug) return false;
+/** Return the confirmed rows from this generation, not a later root-scoped
+ * Local read that may replace the slug cache before the caller resumes. */
+export async function reloadWorkspaceRowsFor(
+  repoSlug: string,
+): Promise<Workspace[] | null> {
+  if (!repoSlug) return null;
   const bridge = getActiveBridge();
-  if (!bridge || (bridge.status !== "connected" && !(bridge instanceof WorkspaceRuntimeClient))) return false;
+  if (!bridge || (bridge.status !== "connected" && !(bridge instanceof WorkspaceRuntimeClient))) return null;
   try {
     const rows = await workspaceCache.load(
       repoSlug,
       () => fetchLiveWorkspaceRows(repoSlug),
       { force: true },
     );
-    return finalizeWorkspaceRows(repoSlug, rows);
+    return finalizeWorkspaceRows(repoSlug, rows) ? rows : null;
   } catch {
     /* keep prior rows; the list bus retries */
-    return false;
+    return null;
   }
+}
+
+/** Await a forced authoritative refresh and commit it to the single source. */
+export async function reloadWorkspacesFor(repoSlug: string): Promise<boolean> {
+  return (await reloadWorkspaceRowsFor(repoSlug)) !== null;
 }
 
 export type TimedOutWorkspaceCreateResolution =
