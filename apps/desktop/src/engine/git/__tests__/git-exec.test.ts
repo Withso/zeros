@@ -65,7 +65,9 @@ async function withSystemConfigGitShim<T>(opts: {
     "ZEROS_TEST_CLONE_LOCALE_LOG",
     "ZEROS_TEST_INTERCEPT_CLONE",
   ];
-  const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+  const previous = Object.fromEntries(
+    keys.map((key) => [key, process.env[key]]),
+  );
   await mkdir(bin, { recursive: true });
   const executable = path.join(bin, "git");
   await writeFile(
@@ -1175,49 +1177,125 @@ describe("runGit — transient lock retry", () => {
     await mkdir(hostHome, { recursive: true });
     const config = path.join(hostHome, ".gitconfig");
     await writeFile(config, "");
-    await execFileAsync("git", ["config", "--file", config, "url.https://proxy.invalid/mapped/.insteadOf", ""]);
+    await execFileAsync("git", [
+      "config",
+      "--file",
+      config,
+      "url.https://proxy.invalid/mapped/.insteadOf",
+      "",
+    ]);
     const authorities: string[] = [];
     setGitCredentialSourceForTesting({
-      supports({ protocol, authority }) { authorities.push(authority); return protocol === "https" && authority === "proxy.invalid"; },
-      async getCredential() { return { username: "x-access-token", password: "test" }; },
+      supports({ protocol, authority }) {
+        authorities.push(authority);
+        return protocol === "https" && authority === "proxy.invalid";
+      },
+      async getCredential() {
+        return { username: "x-access-token", password: "test" };
+      },
     });
-    await withSystemConfigGitShim({ directory: dir, home: hostHome, locale: "C", mode: "missing", interceptClone: true, run: async ({ cloneLocale }) => {
-      await expect(cloneRepo({ url: "https://source.invalid/repo.git", parentFolder: dir, directoryName: "clone-empty-prefix" })).rejects.toMatchObject({ code: "GIT_COMMAND_FAILED" });
-      expect(authorities).toContain("proxy.invalid");
-      expect(await readFile(cloneLocale, "utf8")).toBe("C");
-    }});
+    await withSystemConfigGitShim({
+      directory: dir,
+      home: hostHome,
+      locale: "C",
+      mode: "missing",
+      interceptClone: true,
+      run: async ({ cloneLocale }) => {
+        await expect(
+          cloneRepo({
+            url: "https://source.invalid/repo.git",
+            parentFolder: dir,
+            directoryName: "clone-empty-prefix",
+          }),
+        ).rejects.toMatchObject({ code: "GIT_COMMAND_FAILED" });
+        expect(authorities).toContain("proxy.invalid");
+        expect(await readFile(cloneLocale, "utf8")).toBe("C");
+      },
+    });
   });
 
-  it.each(["fr_FR.UTF-8", "de_DE.UTF-8"])("pins missing-config diagnostics to C under %s", async (locale) => {
-    const root = path.join(dir, `locale-${locale}`);
-    const home = path.join(dir, `locale-home-${locale}`);
-    const bare = path.join(root, "remote.git");
-    await mkdir(root, { recursive: true });
-    await mkdir(home, { recursive: true });
-    await execFileAsync("git", ["clone", "--bare", repo, bare]);
-    const source = await startAuthenticatedGitServer({ projectRoot: root, password: "source" });
-    const proxy = await startAuthenticatedGitServer({ projectRoot: root, password: "proxy" });
-    try {
-      const config = path.join(home, ".gitconfig");
-      await writeFile(config, "");
-      await execFileAsync("git", ["config", "--file", config, `url.${proxy.url}.insteadOf`, source.url]);
-      setGitCredentialSourceForTesting({ supports: ({ authority }) => authority === new URL(proxy.url).host, async getCredential() { return { username: "x-access-token", password: "proxy" }; } });
-      await withSystemConfigGitShim({ directory: dir, home, locale, mode: "missing", run: async ({ configLocale, cloneLocale }) => {
-        expect(await cloneRepo({ url: source.url, parentFolder: dir, directoryName: `clone-${locale}` })).toMatchObject({ defaultBranch: "main" });
-        expect(await readFile(configLocale, "utf8")).toBe("C");
-        expect(await readFile(cloneLocale, "utf8")).toBe(locale);
-      }});
-    } finally { await Promise.all([source.close(), proxy.close()]); }
-  });
+  it.each(["fr_FR.UTF-8", "de_DE.UTF-8"])(
+    "pins missing-config diagnostics to C under %s",
+    async (locale) => {
+      const root = path.join(dir, `locale-${locale}`);
+      const home = path.join(dir, `locale-home-${locale}`);
+      const bare = path.join(root, "remote.git");
+      await mkdir(root, { recursive: true });
+      await mkdir(home, { recursive: true });
+      await execFileAsync("git", ["clone", "--bare", repo, bare]);
+      const source = await startAuthenticatedGitServer({
+        projectRoot: root,
+        password: "source",
+      });
+      const proxy = await startAuthenticatedGitServer({
+        projectRoot: root,
+        password: "proxy",
+      });
+      try {
+        const config = path.join(home, ".gitconfig");
+        await writeFile(config, "");
+        await execFileAsync("git", [
+          "config",
+          "--file",
+          config,
+          `url.${proxy.url}.insteadOf`,
+          source.url,
+        ]);
+        setGitCredentialSourceForTesting({
+          supports: ({ authority }) => authority === new URL(proxy.url).host,
+          async getCredential() {
+            return { username: "x-access-token", password: "proxy" };
+          },
+        });
+        await withSystemConfigGitShim({
+          directory: dir,
+          home,
+          locale,
+          mode: "missing",
+          run: async ({ configLocale, cloneLocale }) => {
+            expect(
+              await cloneRepo({
+                url: source.url,
+                parentFolder: dir,
+                directoryName: `clone-${locale}`,
+              }),
+            ).toMatchObject({ defaultBranch: "main" });
+            expect(await readFile(configLocale, "utf8")).toBe("C");
+            expect(await readFile(cloneLocale, "utf8")).toBe(locale);
+          },
+        });
+      } finally {
+        await Promise.all([source.close(), proxy.close()]);
+      }
+    },
+  );
 
-  it.each([["malformed", "invalid_configuration"], ["denied", "permission_denied"]] as const)("keeps %s config errors fail-closed", async (mode, reason) => {
+  it.each([
+    ["malformed", "invalid_configuration"],
+    ["denied", "permission_denied"],
+  ] as const)("keeps %s config errors fail-closed", async (mode, reason) => {
     const home = path.join(dir, `config-error-${mode}`);
     await mkdir(home, { recursive: true });
     await writeFile(path.join(home, ".gitconfig"), "");
-    await withSystemConfigGitShim({ directory: dir, home, locale: "fr_FR.UTF-8", mode, run: async ({ configLocale }) => {
-      await expect(cloneRepo({ url: "https://source.invalid/repo.git", parentFolder: dir, directoryName: `clone-${mode}` })).rejects.toMatchObject({ code: "GIT_COMMAND_FAILED", context: { reason } });
-      expect(await readFile(configLocale, "utf8")).toBe("C");
-    }});
+    await withSystemConfigGitShim({
+      directory: dir,
+      home,
+      locale: "fr_FR.UTF-8",
+      mode,
+      run: async ({ configLocale }) => {
+        await expect(
+          cloneRepo({
+            url: "https://source.invalid/repo.git",
+            parentFolder: dir,
+            directoryName: `clone-${mode}`,
+          }),
+        ).rejects.toMatchObject({
+          code: "GIT_COMMAND_FAILED",
+          context: { reason },
+        });
+        expect(await readFile(configLocale, "utf8")).toBe("C");
+      },
+    });
   });
 
   it("keeps the broker credential path when no clone URL rewrite matches", async () => {
