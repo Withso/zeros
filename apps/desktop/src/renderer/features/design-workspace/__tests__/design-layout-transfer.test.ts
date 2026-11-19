@@ -118,6 +118,57 @@ beforeEach(() => {
 afterEach(() => vi.useRealTimers());
 
 describe("canvas transfer presentation", () => {
+  it("keeps the runtime root id for a nested linked frame copy", async () => {
+    const runtimeRoot = { ...node, oid: "cc-root" };
+    mocks.targets = [destination];
+    mocks.transfer.mockResolvedValue({
+      frame: destination.file,
+      nodeId: "copy-root",
+      snapshot: { frames: [source, confirmed] },
+    });
+    await transferDesignLayerOnCanvas({
+      ...input,
+      details: runtimeRoot,
+      componentCopy: { variant: "compact" },
+      duplicateNodeId: "copy-root",
+      detach: false,
+    });
+    expect(mocks.transfer.mock.calls[0]?.[1]).toMatchObject({
+      nodeId: "cc-root",
+      duplicateNodeId: "copy-root",
+      componentCopy: { variant: "compact" },
+      destinationFrame: destination.file,
+    });
+  });
+
+  it("uses the ordinary semantic root's measured size for nested frame-copy appearance", async () => {
+    const largerDestination = { ...destination, width: 800, height: 600 };
+    const ordinaryRoot = {
+      ...node,
+      oid: "shell",
+      rect: { x: 0, y: 0, width: source.width, height: source.height },
+      styles: { height: "100vh", position: "relative" },
+    } as DesignRuntimeNodeDetails;
+    mocks.targets = [largerDestination];
+    useDesignWorkspaceUiStore.getState().setSelection(input.workspaceId, source.file, "shell");
+    await transferDesignLayerOnCanvas({
+      ...input,
+      frames: [source, largerDestination],
+      details: ordinaryRoot,
+      componentCopy: { variant: null },
+      duplicateNodeId: "copy-shell",
+      detach: false,
+    });
+    expect(mocks.transfer.mock.calls[0]?.[1]).toMatchObject({
+      nodeId: "shell",
+      duplicateNodeId: "copy-shell",
+      componentCopy: { variant: null },
+      destinationFrame: destination.file,
+      w: source.width,
+      h: source.height,
+    });
+  });
+
   it("sends the measured affine appearance, with the new frame on whole pixels, instead of the legacy flattening request", async () => {
     await transferDesignLayerOnCanvas({
       ...input,

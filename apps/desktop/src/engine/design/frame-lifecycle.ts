@@ -1070,12 +1070,17 @@ export async function transferDesignNode(
     const runtimeRoot = runtimeRootElement && designNodeRecords(sourceDocument).find(
       (candidate) => candidate.element === runtimeRootElement,
     );
-    // The runtime exposes a sole seeded shell or a single-root component as
-    // the frame root. Only linked-copy intent treats that id as a whole frame;
-    // legacy node moves keep their existing layer semantics.
-    const wholeFrame = input.nodeId === DESIGN_RUNTIME_DOCUMENT_BODY_ID ||
-      (input.componentCopy !== undefined && runtimeRoot?.oid === input.nodeId);
-    if (input.componentCopy && (!wholeFrame || !input.duplicateNodeId))
+    const canvas = input.componentCopy ? await readCanvas(workspacePath) : undefined;
+    const componentName = canvas
+      ? [...designComponentRegistry(canvas).files].find(([, source]) => source === from.file)?.[0]
+      : undefined;
+    const linkedMainCopy = input.componentCopy !== undefined && componentName !== undefined;
+    const wholeFrame = input.nodeId === DESIGN_RUNTIME_DOCUMENT_BODY_ID || linkedMainCopy;
+    if (
+      input.componentCopy &&
+      (!input.duplicateNodeId ||
+        (!linkedMainCopy && input.nodeId !== DESIGN_RUNTIME_DOCUMENT_BODY_ID && runtimeRoot?.oid !== input.nodeId))
+    )
       throw new Error("A linked component copy must duplicate a whole frame.");
     if (
       wholeFrame &&
@@ -1092,15 +1097,13 @@ export async function transferDesignNode(
           (record) => record.oid === input.nodeId,
         );
     const bodyLocation = bodyElement?.sourceCodeLocation;
-    const span = input.nodeId === DESIGN_RUNTIME_DOCUMENT_BODY_ID && wholeFrame
+    const span = wholeFrame
       ? bodyLocation?.startTag && bodyLocation.endTag
         ? {
             startOffset: bodyLocation.startTag.endOffset,
             endOffset: bodyLocation.endTag.startOffset,
           }
         : undefined
-      : wholeFrame
-        ? runtimeRoot?.element.sourceCodeLocation
       : record?.element.sourceCodeLocation;
     if ((!wholeFrame && !record) || !span)
       throw new Error("The layer has no movable source span.");
@@ -1147,13 +1150,9 @@ export async function transferDesignNode(
       ]);
       do nodeId = `frame-${randomUUID().slice(0, 8)}`;
       while (taken.has(nodeId));
-      if (input.componentCopy) {
-        const canvas = await readCanvas(workspacePath);
-        const componentName = [...designComponentRegistry(canvas).files].find(([, source]) => source === from.file)?.[0];
-        if (componentName) {
-          fragment = designComponentHost(from.source, componentName, input.componentCopy.variant, `o-${randomUUID().replace(/-/g, "")}`);
-          linkedComponentCopy = true;
-        }
+      if (input.componentCopy && componentName) {
+        fragment = designComponentHost(from.source, componentName, input.componentCopy.variant, `o-${randomUUID().replace(/-/g, "")}`);
+        linkedComponentCopy = true;
       }
       // The body's own class and inline style carry to the new layer unless
       // the registered main has been replaced by a linked host.

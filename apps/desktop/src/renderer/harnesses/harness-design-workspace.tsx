@@ -1444,6 +1444,7 @@ async function main() {
     on: () => () => {},
     onStatusChange: () => () => {},
     supportsEngineCapability: (capability: string) => capability === "design.copy-placement.v1" ||
+      capability === "design.linked-component-copy.v1" ||
       pagesHarness && capability === "design.canvas-items.v1" ||
       scopedMutationsHarness && capability === "design.mutation-snapshots.v1" ||
       lazyPreparationHarness && ["design.preparation.v1", "design.catalog.read.v1"].includes(capability),

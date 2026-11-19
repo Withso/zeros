@@ -21,6 +21,7 @@ import {
 import { readCanvas, writeCanvas } from "../document-storage";
 import { prepareFrameRenderSource } from "../render-preparation";
 import { DESIGN_RUNTIME_DOCUMENT_BODY_ID } from "@zeros/protocol/design-runtime";
+import { createComponentTemplateBudget, renderComponentTemplate } from "@zeros/design-web/component-template";
 
 describe("a frame registered as a component", () => {
   let root: string;
@@ -139,6 +140,72 @@ describe("a frame registered as a component", () => {
     expect(destinationSource).toContain('<zd-chat-composer data-oid="');
     expect(destinationSource).toContain('zd-variant="compact"');
     expect(destinationSource).not.toContain("cc-copy");
+    expect(await readFile(path.join(root, DESIGN_DIRECTORY_NAME, main.file), "utf8")).toBe(source);
+  });
+
+  it("keeps an unregistered semantic frame root direct when frame-copy intent is present", async () => {
+    const main = await createDesignFrame(root, { title: "Ordinary frame" });
+    const destination = await createDesignFrame(root, { title: "Board" });
+    const source = '<!doctype html><html><head></head><body><main data-oid="shell" data-zeros-frame-root style="height:100vh"><footer data-oid="bottom" style="position:absolute;bottom:0">Bottom anchored</footer></main></body></html>';
+    await writeFile(path.join(root, DESIGN_DIRECTORY_NAME, main.file), source);
+    await writeFile(path.join(root, DESIGN_DIRECTORY_NAME, destination.file), '<!doctype html><html><head></head><body><section data-oid="board" style="position:relative"></section></body></html>');
+    const sourceVersion = (await readDesignFrameRenderIdentity(root, main.file)).sourceVersion;
+    const destinationSourceVersion = (await readDesignFrameRenderIdentity(root, destination.file)).sourceVersion;
+    await transferDesignNode(root, {
+      frame: main.file,
+      sourceVersion,
+      nodeId: "shell",
+      duplicateNodeId: "copy-shell",
+      componentCopy: { variant: null },
+      destinationFrame: destination.file,
+      destinationSourceVersion,
+      parentId: "board",
+      relocation: { width: main.width, height: main.height, matrix: [1, 0, 0, 1, 20, 30], inheritedStyles: {} },
+      geometry: { x: 20, y: 30, w: main.width, h: main.height, z: 1 },
+      styles: { position: "absolute", top: "30px", left: "20px", width: "100%", height: "100vh" },
+    });
+    const destinationSource = await readFile(path.join(root, DESIGN_DIRECTORY_NAME, destination.file), "utf8");
+    expect(destinationSource).toMatch(/<section[^>]*data-oid="board"[^>]*><main[^>]*data-oid="copy-shell"/);
+    expect(destinationSource).toMatch(/data-oid="copy-shell"[^>]*height:\s*900px/);
+    expect(destinationSource).toMatch(/data-oid="copy-shell"[^>]*>[^]*<footer[^>]*data-oid="copy-shell-bottom"[^>]*style="position:absolute;bottom:0"/);
+    expect(destinationSource).not.toMatch(/data-oid="copy-shell"[^>]*><main/);
+    expect(await readFile(path.join(root, DESIGN_DIRECTORY_NAME, main.file), "utf8")).toBe(source);
+  });
+
+  it.each([
+    ["conditional top-level siblings", '<div data-oid="a" data-zd-if="toolbar">Toolbar</div><div data-oid="b" data-zd-if="!toolbar">No toolbar</div>', "a", "b"],
+    ["conditional templates", '<template data-zd-if="toolbar"><div data-oid="compact-root">Compact</div></template><template data-zd-if="!toolbar"><div data-oid="default-root">Default</div></template>', "compact-root", "default-root"],
+  ])("copies a registered main with %s as a named linked variant", async (_shape, body, runtimeRootId, omittedRootId) => {
+    const main = await createDesignFrame(root, { title: "Conditional component" });
+    const destination = await createDesignFrame(root, { title: "Board" });
+    const source = '<!doctype html><html><head><template data-zd-options><zd-option name="toolbar" type="boolean" default="false"></zd-option><zd-variant name="compact" toolbar="true"></zd-variant></template></head><body>' + body + '</body></html>';
+    const evaluated = renderComponentTemplate(source, {
+      scope: new Map([["toolbar", true]]),
+      ids: "copy",
+      budget: createComponentTemplateBudget(),
+      document: true,
+    });
+    expect(evaluated).toContain(`data-oid="${runtimeRootId}"`);
+    expect(evaluated).not.toContain(`data-oid="${omittedRootId}"`);
+    await writeFile(path.join(root, DESIGN_DIRECTORY_NAME, main.file), source);
+    await writeFile(path.join(root, DESIGN_DIRECTORY_NAME, destination.file), '<!doctype html><html><head></head><body><section data-oid="board" style="position:relative"></section></body></html>');
+    await register(main.file, "conditional-card");
+    const sourceVersion = (await readDesignFrameRenderIdentity(root, main.file)).sourceVersion;
+    const destinationSourceVersion = (await readDesignFrameRenderIdentity(root, destination.file)).sourceVersion;
+    await transferDesignNode(root, {
+      frame: main.file,
+      sourceVersion,
+      nodeId: runtimeRootId,
+      duplicateNodeId: "copy-conditional",
+      componentCopy: { variant: "compact" },
+      destinationFrame: destination.file,
+      destinationSourceVersion,
+      parentId: "board",
+      relocation: { width: main.width, height: main.height, matrix: [1, 0, 0, 1, 20, 30], inheritedStyles: {} },
+      geometry: { x: 20, y: 30, w: main.width, h: main.height, z: 1 },
+    });
+    const destinationSource = await readFile(path.join(root, DESIGN_DIRECTORY_NAME, destination.file), "utf8");
+    expect(destinationSource).toMatch(/<zd-conditional-card data-oid="copy-conditional-o-[a-f0-9]+" zd-variant="compact">/);
     expect(await readFile(path.join(root, DESIGN_DIRECTORY_NAME, main.file), "utf8")).toBe(source);
   });
 

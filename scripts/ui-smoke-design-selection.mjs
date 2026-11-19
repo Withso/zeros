@@ -492,9 +492,14 @@ export async function runDesignSelectionSmoke({ page, waitFor, check }) {
   await clickBody({ button: "right" });
   const menu = page.getByRole("menu", { name: "Layers under pointer" });
   await waitFor(() => menu.isVisible(), "empty-frame-selection-menu");
+  const menuItems = menu.getByRole("menuitem");
   check(
     "an empty frame's selection menu offers the frame once without document wrappers",
-    (await menu.getByRole("menuitem").count()) === 1,
+    (await menuItems.filter({ hasNotText: "Duplicate as independent frame" }).count()) === 1,
+  );
+  check(
+    "the empty-frame selection menu exposes the independent-copy command separately",
+    (await menu.getByRole("menuitem", { name: "Duplicate as independent frame", exact: true }).count()) === 1,
   );
   await page.keyboard.press("Escape");
 
