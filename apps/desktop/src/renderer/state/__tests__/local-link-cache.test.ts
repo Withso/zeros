@@ -1,8 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const api = vi.hoisted(() => ({ list: vi.fn() }));
+vi.mock("../../platform/git", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../platform/git")>()),
+  workspaceListSnapshot: (...args: unknown[]) => api.list(...args),
+}));
+
 import { setActiveBridge } from "../../platform/bridge/active-bridge";
 import type { RuntimeClient } from "../../platform/bridge/ws-client";
 import type { Workspace } from "../../platform/git";
 import type { Project } from "../projects-store";
+import { repoNeedsFirstWorkspace } from "../../shell/create-workspace";
 import { findProjectForFolder } from "../workspace-resolution";
 import {
   beginLocalWorkspaceRead,
@@ -13,6 +21,7 @@ import {
 } from "../use-projects";
 
 beforeEach(() => {
+  api.list.mockReset();
   const storage = new Map<string, string>();
   vi.stubGlobal("localStorage", {
     getItem: (key: string) => storage.get(key) ?? null,
@@ -79,6 +88,147 @@ describe("Local link workspace publication", () => {
     expect(findProjectForFolder(`${workspace.path}/src`, [project])).toBe(project);
     commitWorkspaceDeleted(workspace);
     expect(peekWorkspacesFor(project.repoSlug)).toEqual([sibling]);
+  });
+
+  it("revalidates a root-only Local link cache before auto-create", async () => {
+    const { project: leftProject, workspace: leftWorkspace } = fixture("left");
+    const repoSlug = "same-name";
+    const rightProject: Project = {
+      ...leftProject,
+      id: "project-right",
+      repoRoot: "/var/projects/right/same-name",
+      repoSlug,
+    };
+    const left = {
+      ...leftWorkspace,
+      repoRoot: "/var/projects/left/same-name",
+      repoSlug,
+    };
+    const right = {
+      ...leftWorkspace,
+      id: "ws_right",
+      repoRoot: rightProject.repoRoot,
+      repoSlug,
+    };
+    const leftRootProject = {
+      ...leftProject,
+      repoRoot: left.repoRoot,
+      repoSlug,
+    };
+    setWorkspaceRowsForTesting(repoSlug, [left, right]);
+    expect(beginLocalWorkspaceRead()(leftRootProject, [left, right])).toBe(
+      true,
+    );
+    expect(peekWorkspacesFor(repoSlug)).toEqual([left]);
+    api.list.mockResolvedValue({
+      workspaces: [left, right],
+      confirmedLocalWorkspaces: true,
+      confirmedCloudWorkspaces: false,
+    });
+
+    await expect(
+      repoNeedsFirstWorkspace(repoSlug, rightProject.repoRoot),
+    ).resolves.toBe(false);
+    expect(api.list).toHaveBeenCalledOnce();
+    expect(api.list).toHaveBeenCalledWith({
+      repoSlug,
+      archived: false,
+      includeDesign: true,
+    });
+  });
+
+  it("keeps concurrent same-slug root checks on their shared complete refresh", async () => {
+    const { project: leftProject, workspace: leftWorkspace } = fixture("left");
+    const repoSlug = "same-name";
+    const leftRoot = "/var/projects/left/same-name";
+    const rightRoot = "/var/projects/right/same-name";
+    const leftProjectForSlug = {
+      ...leftProject,
+      repoRoot: leftRoot,
+      repoSlug,
+    };
+    const rightProject = {
+      ...leftProject,
+      id: "project-right",
+      repoRoot: rightRoot,
+      repoSlug,
+    };
+    const left = { ...leftWorkspace, repoRoot: leftRoot, repoSlug };
+    const right = {
+      ...leftWorkspace,
+      id: "ws_right",
+      repoRoot: rightRoot,
+      repoSlug,
+    };
+    setWorkspaceRowsForTesting(repoSlug, [left, right]);
+    expect(beginLocalWorkspaceRead()(leftProjectForSlug, [])).toBe(true);
+    expect(peekWorkspacesFor(repoSlug)).toEqual([]);
+
+    let signalListStarted!: () => void;
+    const listStarted = new Promise<void>((resolve) => {
+      signalListStarted = resolve;
+    });
+    let resolveSnapshot!: (snapshot: {
+      workspaces: Workspace[];
+      confirmedLocalWorkspaces: boolean;
+      confirmedCloudWorkspaces: boolean;
+    }) => void;
+    api.list.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          signalListStarted();
+          resolveSnapshot = resolve;
+        }),
+    );
+    const leftDecision = repoNeedsFirstWorkspace(repoSlug, leftRoot);
+    const rightDecision = repoNeedsFirstWorkspace(
+      repoSlug,
+      rightProject.repoRoot,
+    );
+    await listStarted;
+    expect(api.list).toHaveBeenCalledOnce();
+
+    resolveSnapshot({
+      workspaces: [left, right],
+      confirmedLocalWorkspaces: true,
+      confirmedCloudWorkspaces: false,
+    });
+    await expect(Promise.all([leftDecision, rightDecision])).resolves.toEqual([
+      false,
+      false,
+    ]);
+  });
+
+  it("does not let a concurrent Local destination read replace another root's snapshot", () => {
+    const { project: leftProject, workspace: leftWorkspace } = fixture("left");
+    const repoSlug = "same-name";
+    const leftRoot = "/var/projects/left/same-name";
+    const rightRoot = "/var/projects/right/same-name";
+    const leftProjectForSlug = {
+      ...leftProject,
+      repoRoot: leftRoot,
+      repoSlug,
+    };
+    const rightProject = {
+      ...leftProject,
+      id: "project-right",
+      repoRoot: rightRoot,
+      repoSlug,
+    };
+    const left = { ...leftWorkspace, repoRoot: leftRoot, repoSlug };
+    const right = {
+      ...leftWorkspace,
+      id: "ws_right",
+      repoRoot: rightRoot,
+      repoSlug,
+    };
+    setWorkspaceRowsForTesting(repoSlug, [left, right]);
+    const publishLeft = beginLocalWorkspaceRead();
+    const publishRight = beginLocalWorkspaceRead();
+
+    expect(publishLeft(leftProjectForSlug, [left, right])).toBe(true);
+    expect(publishRight(rightProject, [left, right])).toBe(false);
+    expect(peekWorkspacesFor(repoSlug)).toEqual([left]);
   });
 
   it("does not overwrite a newer exact-key snapshot", () => {

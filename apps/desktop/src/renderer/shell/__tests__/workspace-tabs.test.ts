@@ -383,41 +383,65 @@ describe("leftmostLiveWorkspace", () => {
     ).toBe(older);
   });
 
-  it("keeps cloud repository identity exact instead of falling back to Local", () => {
-    const target = {
-      organizationId: "11111111-1111-4111-8111-111111111111",
+  it("restores catalog cloud siblings under their shared repository", () => {
+    const organizationId = "11111111-1111-4111-8111-111111111111";
+    const representativeRoot = cloudWorkspaceKey({
+      organizationId,
       workspaceId: "22222222-2222-4222-8222-222222222222",
-    };
-    const foreign = {
-      organizationId: target.organizationId,
+    });
+    const siblingRoot = cloudWorkspaceKey({
+      organizationId,
       workspaceId: "33333333-3333-4333-8333-333333333333",
+    });
+    const projectKey = `${organizationId}:github.com:example/fixture`;
+    const repoSlug = `cloud-${projectKey}`;
+    const cloudProject = {
+      ...project,
+      id: `cloud-repository:${projectKey}`,
+      repoRoot: representativeRoot,
+      repoSlug,
+      originUrl: "https://github.com/example/fixture.git",
+      isGitRepository: true,
     };
-    const targetRoot = cloudWorkspaceKey(target);
-    const foreignRoot = cloudWorkspaceKey(foreign);
-    const targetWorkspace = workspace("target", {
-      repoRoot: targetRoot,
-      path: targetRoot,
+    const representative = workspace("representative", {
+      id: representativeRoot,
+      repoRoot: representativeRoot,
+      repoSlug,
+      path: representativeRoot,
       placement: "cloud",
-      organizationId: target.organizationId,
-      archivedAt: null,
+      organizationId,
+      number: 1,
+      title: "API",
+      archivedAt: 500,
       createdAt: 100,
     });
-    const foreignWorkspace = workspace("foreign", {
-      repoRoot: foreignRoot,
-      path: foreignRoot,
+    const sibling = workspace("sibling", {
+      id: siblingRoot,
+      repoRoot: siblingRoot,
+      repoSlug,
+      path: siblingRoot,
       placement: "cloud",
-      organizationId: foreign.organizationId,
+      organizationId,
+      number: 2,
+      title: "API follow-up",
       archivedAt: null,
-      createdAt: 1,
+      createdAt: 200,
     });
 
     expect(
       resolveRepoWorkspaceDestination({
-        project: { ...project, repoRoot: targetRoot, repoSlug: "cloud-target" },
-        rememberedFolder: foreignRoot,
-        cachedWorkspaces: [foreignWorkspace, targetWorkspace],
+        project: cloudProject,
+        rememberedFolder: siblingRoot,
+        cachedWorkspaces: [representative, sibling],
       }),
-    ).toBe(targetWorkspace);
+    ).toBe(sibling);
+    expect(
+      resolveRepoWorkspaceDestination({
+        project: cloudProject,
+        rememberedFolder: representativeRoot,
+        cachedWorkspaces: [representative, sibling],
+      }),
+    ).toBe(sibling);
   });
 
   it("keeps legacy organization-local rows eligible for their matching root", () => {

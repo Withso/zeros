@@ -10,6 +10,7 @@ import {
   isLocalMainWorkspace,
 } from "../state/local-main-workspace";
 import { normalizeProjectRoot, type Project } from "../state/projects-store";
+import { isCloudWorkspace } from "../platform/bridge/cloud-workspace-key";
 import {
   findWorkspaceForFolder,
   workspaceIdFromWorktreePath,
@@ -44,11 +45,13 @@ export function leftmostLiveWorkspace(
   repoRoot?: string,
 ): Workspace | null {
   if (!cachedWorkspaces) return null;
-  const scoped = repoRoot
+  const localRepoRoot = repoRoot && !isCloudWorkspace(repoRoot)
+    ? normalizeProjectRoot(repoRoot)
+    : undefined;
+  const scoped = localRepoRoot
     ? cachedWorkspaces.filter(
         (workspace) =>
-          normalizeProjectRoot(workspace.repoRoot) ===
-          normalizeProjectRoot(repoRoot),
+          normalizeProjectRoot(workspace.repoRoot) === localRepoRoot,
       )
     : cachedWorkspaces;
   const live = scoped.filter(
@@ -69,11 +72,13 @@ export function resolveRepoWorkspaceDestination(args: {
   cachedWorkspaces: readonly Workspace[] | undefined;
 }): WorkspaceNavigationTarget | null {
   const { project, cachedWorkspaces } = args;
-  const accessibleCachedWorkspaces = cachedWorkspaces?.filter(
-    (workspace) =>
-      normalizeProjectRoot(workspace.repoRoot) ===
-      normalizeProjectRoot(project.repoRoot),
-  );
+  const accessibleCachedWorkspaces = isCloudWorkspace(project.repoRoot)
+    ? cachedWorkspaces
+    : cachedWorkspaces?.filter(
+        (workspace) =>
+          normalizeProjectRoot(workspace.repoRoot) ===
+          normalizeProjectRoot(project.repoRoot),
+      );
   const rememberedFolder = args.rememberedFolder;
   if (!rememberedFolder)
     return leftmostLiveWorkspace(accessibleCachedWorkspaces);
