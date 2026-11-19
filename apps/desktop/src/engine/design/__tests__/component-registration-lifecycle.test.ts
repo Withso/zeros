@@ -28,6 +28,7 @@ import { prepareFrameRenderSource } from "../render-preparation";
 import { DESIGN_RUNTIME_DOCUMENT_BODY_ID } from "@zeros/protocol/design-runtime";
 import { createComponentTemplateBudget, renderComponentTemplate } from "@zeros/design-web/component-template";
 import { designIdentityCacheStatsForTests } from "../identity-cache";
+import { designNodeRecords, healDesignOids } from "../node-identities";
 
 describe("a frame registered as a component", () => {
   let root: string;
@@ -93,6 +94,26 @@ describe("a frame registered as a component", () => {
     expect(Object.hasOwn(oldMutation.frames[0]!, "componentIdentity")).toBe(false);
     const mutation = await readDesignMutationSnapshot(root, [frame.file], undefined, { includeComponentIdentity: true });
     expect(mutation.frames[0]?.componentIdentity).toEqual({ kind: "instance", nodeId: "host" });
+  });
+
+  it("uses healed OIDs in non-negotiated document trees without changing authored source", async () => {
+    const frame = await createDesignFrame(root, { title: "Legacy identities" });
+    const source = '<!doctype html><html><head></head><body><main><p data-oid="same">First</p>' +
+      '<p data-oid="same">Second</p><p data-oid="">Missing</p></main></body></html>';
+    await writeFile(path.join(root, DESIGN_DIRECTORY_NAME, frame.file), source);
+
+    const read = await readDesignFrame(root, frame.file);
+    const healed = healDesignOids(source);
+    const expected = designNodeRecords(healed.document!).map(({ oid }) => oid);
+    const actual = read.tree.flatMap(function flatten(node): (string | null)[] {
+      return [node.oid, ...node.children.flatMap(flatten)];
+    });
+
+    expect(Object.hasOwn(read, "componentIdentity")).toBe(false);
+    expect(actual).toEqual(expected);
+    expect(actual.every((oid) => oid !== null)).toBe(true);
+    expect(new Set(actual).size).toBe(actual.length);
+    expect(read.source).toBe(source);
   });
 
   it("tracks registration changes without HTML edits and gives registered mains precedence", async () => {

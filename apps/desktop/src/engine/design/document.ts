@@ -1056,12 +1056,8 @@ async function readDesignFrameFromSummary(
     workspacePath,
     summary.file,
   );
-  const document = includeComponentIdentity
-    ? (() => {
-        const healed = healDesignOids(source);
-        return healed.document ?? parse(healed.html, { sourceCodeLocationInfo: true });
-      })()
-    : parse(source, { sourceCodeLocationInfo: true });
+  const healed = healDesignOids(source);
+  const document = healed.document ?? parse(healed.html, { sourceCodeLocationInfo: true });
   const composed = await composeFrameSrcDoc(workspacePath, source, {
     width: summary.width,
     height: summary.height,
