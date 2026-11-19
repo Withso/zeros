@@ -5,5 +5,5 @@
   "fixedBy": "pr:1184",
   "symptom": "Local clone HTTP 401/403 and connection-refused failures crossed Electron IPC without their safe transport class, so the renderer showed a generic error; forwarding the engine remediation would also expose GitHub-specific guidance for other hosts.",
   "rule": "The bug-fix playbook requires a regression through the real producer and consumer, and zstack-learn requires an eval for every escaped bug. Transport only explicitly allowlisted safe clone error codes across Electron IPC; keep renderer guidance static and host-neutral, and leave unknown errors on the generic fallback.",
-  "check": "pnpm exec vitest run --config vitest.config.ts --maxWorkers=2 apps/desktop/src/renderer/platform/__tests__/workspace-clone-error-surface.test.ts"
+  "check": "pnpm exec vitest run --config vitest.config.ts apps/desktop/src/renderer/platform/__tests__/workspace-clone-error-surface.test.ts"
 }
