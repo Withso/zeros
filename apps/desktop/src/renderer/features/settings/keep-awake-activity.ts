@@ -4,9 +4,7 @@ import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
 import { agentExecutionActivity, parkedOnUser } from "../agent/agent-activity";
 import { useSessionsStore, type SessionsStoreState } from "../agent/sessions-store";
 
-/** Execution evidence across the entire app, independent of selected owner,
- * placement, tab and cloud presentation clocks. A user-blocked parent can
- * still have independent background work. Idle sessions do not count. */
+// Check every workspace: a user-blocked parent can still have background work.
 export function anyAgentNeedsKeepAwake(
   state: Pick<SessionsStoreState, "sessions" | "pendingLocalTurns">,
 ): boolean {
@@ -22,8 +20,7 @@ export function anyAgentNeedsKeepAwake(
   return Object.entries(state.pendingLocalTurns).some(([chatId, turn]) => !!turn && !state.sessions[chatId]);
 }
 
-/** Main requests refreshes on its own clock: hidden Chromium timers must not
- * decide whether the Mac sleeps. Token updates send IPC only on a bool change. */
+// Electron main owns the refresh clock so background Chromium throttling cannot decide sleep.
 export function startKeepAwakeActivityReporter(): () => void {
   let disposed = false;
   let lastReported: boolean | undefined;

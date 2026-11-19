@@ -3,8 +3,7 @@ import { nativeInvoke } from "../../platform/runtime";
 import { KeyedAsyncCache } from "../../shared/lib/keyed-async-cache";
 import { documentIsVisible } from "../../state/use-document-active";
 
-// Device state belongs to this desktop process, regardless of selected owner
-// or workspace placement. It is never synced to settings.toml or the cloud.
+// Use a device key across owners and placements; this grant is never synced.
 export const FULL_DISK_ACCESS_KEY = "this-mac";
 export const fullDiskAccessCache = new KeyedAsyncCache<FullDiskAccessSnapshot>(
   1,
@@ -69,8 +68,7 @@ export async function readFullDiskAccess(): Promise<FullDiskAccessSnapshot> {
       await nativeInvoke<unknown>("full_disk_access_status"),
     );
   } finally {
-    // Retire failures as well as successful replies if visibility changed
-    // before React or the visibility event could detach this observer.
+    // Retire both results and failures if visibility changes before React detaches the observer.
     requireVisibleObserver();
   }
 }

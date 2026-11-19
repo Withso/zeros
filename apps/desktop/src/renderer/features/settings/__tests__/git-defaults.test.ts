@@ -14,12 +14,7 @@ import { normalizeBranchPrefix } from "../../../shared/lib/branch-name";
 import { cn } from "../../../shared/ui/cn";
 import { badgeVariants } from "../../../shared/ui/primitives/badge";
 
-// The Git pane's preview line is the only place the UI states what a setting
-// will DO. If it disagrees with the engine, it is worse than no preview — the
-// user reads a promise and gets something else on disk.
 
-/** Every shape worth pinning: the ordinary ones, the separator variants the
- *  join rule has to absorb, and the hostile ones that must fall back. */
 const EXPECTED: Record<string, string | null> = {
   jordan: "jordan",
   "feature/": "feature",
@@ -60,11 +55,6 @@ const PREFIX_CASES = [
 
 describe("prefix rules", () => {
   it("is the ENGINE's module, not a copy of it", async () => {
-    // The renderer used to hand-copy these rules (naming.ts pulls node:crypto,
-    // which cannot enter the browser bundle), and a drift was silent and
-    // user-visible: the pane previews `hello/Cream`, the engine writes
-    // `zeros/Cream`. The pure rules now live in an import-free module both
-    // sides read, so identity — not agreement — is the thing to assert.
     const engine = await import("../../../../engine/git/branch-naming");
     const renderer = await import("../../../shared/lib/branch-name");
     expect(renderer.normalizeBranchPrefix).toBe(engine.normalizeBranchPrefix);
@@ -73,8 +63,7 @@ describe("prefix rules", () => {
   });
 
   it("keeps that module free of imports", async () => {
-    // The whole split rests on this file importing nothing: one `node:` import
-    // here and the renderer bundle breaks (or the copy comes back).
+    // Both bundles import this module; Node-only dependencies would break the renderer.
     const { readFileSync } = await import("node:fs");
     const src = readFileSync("apps/desktop/src/engine/git/branch-naming.ts", "utf8");
     expect(src).not.toMatch(/^\s*import\s/m);
@@ -82,8 +71,6 @@ describe("prefix rules", () => {
 
   it("normalizes every shape the settings pane can be handed", () => {
     for (const input of PREFIX_CASES) {
-      // Snapshot-free: each case states its own answer, so a rule change has
-      // to be acknowledged case by case rather than blessed in bulk.
       expect(normalizeBranchPrefix(input), `for ${JSON.stringify(input)}`).toBe(
         EXPECTED[input] ?? null,
       );
@@ -99,25 +86,17 @@ describe("previewFor", () => {
   });
 
   it("states the ABSENCE for none, rather than previewing a bare name", () => {
-    // 2026-07-29 founder direction. It used to render "New branches will be
-    // named like Cream." — which reads as a naming scheme and gives no hint
-    // that the other three rows put a namespace in FRONT of that name.
     expect(previewFor("none", "", null)).toBe(
       "New branches will have no prefix.",
     );
-    // The example sentence is what it must NOT be: no branch is previewed here.
     expect(previewFor("none", "", null)).not.toContain("named like");
     expect(previewFor("none", "", null)).not.toContain("Cream");
-    // A stale prefix/login in settings must not leak into the opt-out row.
     expect(previewFor("none", "hello", "jordan")).toBe(
       "New branches will have no prefix.",
     );
   });
 
   it("shows ONE separator however the user typed it", () => {
-    // The whole point of the 2026-07-29 join rule: a prefix is a namespace, so
-    // these are the same setting and must preview the same branch. Before it,
-    // `hello` previewed (and created) the flat `helloCream`.
     for (const typed of ["hello", "hello/", "/hello", "/hello/", "//hello//"]) {
       expect(previewFor("custom", typed, null), `for ${typed}`).toContain(
         "hello/Cream",
@@ -126,7 +105,6 @@ describe("previewFor", () => {
   });
 
   it("keeps a non-slash trailing character and joins after it", () => {
-    // Not silently trimmed — shown, so the user can see the shape and fix it.
     expect(previewFor("custom", "myname-", null)).toContain("myname-/Cream");
   });
 
@@ -137,8 +115,6 @@ describe("previewFor", () => {
   });
 
   it("admits when the engine will reject the custom prefix", () => {
-    // Previously this previewed "my name/Cream" while the engine normalized
-    // the value away and created zeros/Cream.
     const p = previewFor("custom", "my name/", null);
     expect(p).not.toContain("my name");
     expect(p).toContain("zeros/");
@@ -147,30 +123,18 @@ describe("previewFor", () => {
   it("says what to do when GitHub is picked but no account is connected", () => {
     const p = previewFor("github", "", null);
     expect(p).toMatch(/connect github/i);
-    // …and what happens UNTIL then. This row is the default (2026-08-03), so
-    // "no account connected" is the fresh-install state rather than a deliberate
-    // pick, and the ask alone left a new user with no idea what their branches
-    // would be called meanwhile. The engine substitutes the `zeros` fallback.
+    // A fresh install has no account, so its default GitHub mode still needs a fallback preview.
     expect(p).toContain("zeros/Cream");
   });
 
   it("prompts for a value when custom is picked but empty", () => {
-    // Just the ask (2026-07-29 founder direction). The old line explained the
-    // slash-join too — but the field is empty, so there is nothing to explain
-    // yet, and the moment the user types the preview shows the real branch.
     expect(previewFor("custom", "", null)).toBe("Enter a prefix.");
     expect(previewFor("custom", "   ", null)).toBe("Enter a prefix.");
     expect(previewFor("custom", "", null)).not.toContain("separated by");
   });
 });
 
-// The "GitHub username <login>" row renders the login as a `neutral` badge.
-// That variant overrides the cva base's type scale, and cva CONCATENATES — so
-// the override only lands if the result goes through tailwind-merge. Without
-// it both classes reach the DOM, and at equal specificity the later RULE wins:
-// Tailwind emits `.text-xs` after `.text-sm`, so the chip silently paints at
-// the base 13px semibold the variant exists to avoid. None of that shows up in
-// the class attribute's ORDER, which is why this asserts on the resolved set.
+// Assert the effective size: Tailwind rule order, not class order, decides when conflicting size classes survive.
 describe("the neutral badge chip", () => {
   const sizes = (cls: string) =>
     cls.split(/\s+/).filter((c) => /^text-(3xxs|2xxs|xxs|xs|sm|base|lg)$/.test(c));
@@ -180,7 +144,7 @@ describe("the neutral badge chip", () => {
       .filter((c) => /^font-(normal|medium|semibold|bold)$/.test(c));
 
   it("is the one badge size: 13px medium, merged or raw", () => {
-    // Variants carry colour only, so the raw cva call is unambiguous too.
+    // The raw variant must have one size before caller-side class merging.
     for (const cls of [cn(badgeVariants({ variant: "neutral" })), badgeVariants({ variant: "neutral" })]) {
       expect(sizes(cls)).toEqual(["text-xs"]);
       expect(weights(cls)).toEqual(["font-medium"]);
@@ -190,28 +154,18 @@ describe("the neutral badge chip", () => {
 
 describe("BranchPrefixType", () => {
   it("mirrors the engine's BRANCH_PREFIX_TYPES exactly", () => {
-    // The renderer duplicates the union rather than importing the zod schema
-    // into the browser bundle; this is what keeps the copy honest.
+    // The renderer mirrors these values without importing the engine's schema bundle.
     expect([...BRANCH_PREFIX_TYPES].sort()).toEqual(
       ["custom", "github", "none", "zeros"].sort(),
     );
   });
 });
 
-// The radio must never render with nothing selected (2026-08-03 founder
-// direction). Before this, the default was the unlisted "zeros", so a fresh
-// install showed three empty circles: the pane had a state for "the user hasn't
-// chosen" even though the app had already chosen for them. The fix is a real
-// default in the engine (repo-git.test.ts) plus this fold, which is what
-// guarantees `selected` always names a row that exists.
 describe("readType", () => {
   it("selects GitHub username by default", () => {
-    // Unset is the fresh-install case — the pane reads the EFFECTIVE tree, and
-    // an untouched one has no `git.branch_prefix_type` at all.
+    // An untouched effective tree may omit the branch-prefix mode.
     expect(readType(undefined)).toBe("github");
     expect(readType(null)).toBe("github");
-    // Whatever the engine defaults to is what the pane must preselect, or the
-    // dot describes a branch the engine won't create.
     expect(readType(undefined)).toBe(DEFAULT_BRANCH_PREFIX_TYPE);
   });
 
@@ -222,18 +176,12 @@ describe("readType", () => {
   });
 
   it("does not let the fold reach the preview line", () => {
-    // The fold is for the RADIO — it must have a row for the dot. Applying it to
-    // the preview too made the pane contradict the engine for the one value that
-    // has no row: a repo/team layer pinning "zeros" showed the GitHub row (the
-    // radio can't do better) AND promised `<login>/Cream`, while the engine kept
-    // creating `zeros/`. The row still folds; the sentence tells the truth.
+    // The schema's zeros mode has no radio row but must still preview its real prefix.
     expect(readType("zeros")).toBe("github");
     expect(readPreviewType("zeros")).toBe("zeros");
     expect(previewFor(readPreviewType("zeros"), "", "jordan")).toContain(
       "zeros/Cream",
     );
-    // Everything else must resolve exactly as the radio does, or the line and
-    // the dot would disagree for values the pane itself writes.
     for (const value of [undefined, null, "github", "custom", "none", "wat"]) {
       expect(
         readPreviewType(value),
@@ -243,9 +191,6 @@ describe("readType", () => {
   });
 
   it("never leaves the group unselected, whatever the tree holds", () => {
-    // "zeros" is a real schema value with no row of its own, and the rest are
-    // the shapes a hand-edited settings.toml can produce. Every one of them has
-    // to land on something the RadioGroup renders.
     for (const value of [
       undefined,
       null,

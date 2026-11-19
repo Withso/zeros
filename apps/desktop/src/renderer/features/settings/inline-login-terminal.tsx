@@ -12,11 +12,7 @@ function shellQuoteIfNeeded(path: string): string {
   return `'${path.replace(/'/g, "'\\''")}'`;
 }
 
-/**
- * Replace the disposable login shell with the auth process. Its exit now
- * reaches TerminalSessionView immediately instead of returning to an idle
- * prompt, and treating args as data avoids shell metacharacter injection.
- */
+// Exec lets the terminal observe auth exit directly; quote paths and args as data.
 export function buildInlineLoginCommand(
   binaryPath: string,
   args: readonly string[],
@@ -44,24 +40,18 @@ function makeLoginSessionId(ownerId: string): string {
   try {
     random = crypto.randomUUID();
   } catch {
-    // Fallback uses getRandomValues, not Math.random: randomUUID is the only
-    // part of WebCrypto that needs a secure context, so if it throws, the CSPRNG
-    // is still there. Math.random here made this a flagged weak-randomness site
-    // (CodeQL js/insecure-randomness) for no reason — the strong primitive was
-    // available the whole time in the one branch that claimed it wasn't.
+    // If randomUUID is unavailable, use getRandomValues, never Math.random.
     random = randomHex();
   }
   return `provider-login:${ownerId}:${random}`;
 }
 
-/** 16 bytes of CSPRNG as hex — the degraded path for makeLoginSessionId. */
 function randomHex(): string {
   const buf = new Uint8Array(16);
   crypto.getRandomValues(buf);
   return Array.from(buf, (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-/** Shared inline login terminal used by provider and GitHub authentication. */
 export function InlineLoginTerminal({
   ownerId,
   binary,

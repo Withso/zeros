@@ -96,7 +96,6 @@ function asLocalOwner(): void {
 const section = () => renderToStaticMarkup(createElement(ComputerUseSettingsSection));
 const permissions = () => renderToStaticMarkup(createElement(ComputerPermissionRows));
 
-/** The opening tag of the control with this id, attributes in any order. */
 function tag(html: string, id: string): string {
   const found = html.match(new RegExp(`<button[^>]*id="${id}"[^>]*>`))?.[0];
   if (!found) throw new Error(`no control #${id}`);
@@ -115,7 +114,6 @@ describe("Computer use in Settings → General", () => {
     expect(html).toContain("Keychain Access");
     expect(html).toContain("com.apple.systempreferences");
     expect(html).toContain("Add app");
-    // Retired rows stay gone.
     expect(html).not.toContain("Ask before using a new app");
     expect(html).not.toContain("built-in computer use");
     expect(html).not.toContain("Grant access");
@@ -183,7 +181,6 @@ describe("Computer use grants in Settings → General → Privacy", () => {
     expect(html).toContain("Accessibility");
     expect(html).toContain("Screen Recording");
     expect(html.match(/For computer use\./g)).toHaveLength(2);
-    // Granted: the status and the pane; missing: a request.
     expect(html).toMatch(/aria-label="Accessibility status"[^>]*>Granted</);
     expect(html).toMatch(/aria-label="Screen Recording status"[^>]*><\/span>/);
     expect(html).toContain("Open System Settings");

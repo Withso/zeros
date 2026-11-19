@@ -57,7 +57,6 @@ type PendingSimulatorSettings = {
   [K in SimulatorSettingKey]?: PendingSimulatorSetting<K>;
 };
 
-/** Android joins once the hub reports its setup. */
 const SETUP_PLATFORMS: readonly SimulatorPlatform[] = ["ios", "android"];
 
 const OPENS_OUTSIDE_ZEROS: ReadonlySet<SimulatorSetupAction["kind"]> = new Set([
@@ -77,8 +76,7 @@ export function SimulatorsPanel({ surfaceActive = true }: { surfaceActive?: bool
 
 function OrganizationSimulatorsPanel({ organizationId, surfaceActive }: { organizationId: string; surfaceActive: boolean }) {
   const { workspace } = useActiveWorkspace();
-  // Ownership alone does not determine placement. Only the selected owner's
-  // confirmed local workspace may expose this Mac's simulators.
+  // Only a confirmed local workspace of this organization can expose the Mac's simulators.
   if (
     workspace?.organizationId === organizationId &&
     workspace.placement !== "cloud" &&
@@ -122,9 +120,7 @@ function LocalSimulatorsPanel({ surfaceActive }: { surfaceActive: boolean }) {
   };
   const managed = (key: SimulatorSettingKey) => simulatorSettingIsManaged(sources, key);
 
-  // A write updates the layer cache immediately, while the resolved cache is
-  // replaced by the following settings broadcast. Keep the optimistic value
-  // until a matching resolved object arrives (or managed policy wins).
+  // Resolve events can lag writes; wait for the matching value or a managed override.
   useEffect(() => {
     setPending((current) => {
       let changed = false;
@@ -259,8 +255,7 @@ function LocalSimulatorsPanel({ surfaceActive }: { surfaceActive: boolean }) {
   );
 }
 
-/** Where one platform's tools stand, with the same fixes the Simulator tab's
- * setup screen offers. */
+// Share setup recovery actions with the Simulator tab.
 function SetupRow({
   platform,
   snapshot,
@@ -280,7 +275,7 @@ function SetupRow({
   const { action } = row;
   const checkAgain = () => {
     setChecking(true);
-    // Without a first snapshot there is nothing to refresh; read it again.
+    // Retry a failed initial read; with a snapshot, ask the hub to reprobe.
     const check = snapshot ? checkSimulatorsAgain() : loadSimulatorHub();
     void check.finally(() => setChecking(false));
   };
