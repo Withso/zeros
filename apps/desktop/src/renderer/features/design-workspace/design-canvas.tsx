@@ -574,6 +574,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
   loading,
   refresh,
   active,
+  allowPassiveSelection,
   canvasBackground,
   motionTimelineOpen,
   motionPropertyRequest,
@@ -1674,7 +1675,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
     setSelectionConnection((value) => value + 1);
   }), []);
   useEffect(() => {
-    if (!active || !snapshot || !workspaceId) return;
+    if (!active || !allowPassiveSelection || !snapshot || !workspaceId) return;
     // Page membership can prune a deleted primary in a parent layout effect.
     // This render's passive activation must not clear the surviving selection
     // (or replace an input intent published since the render).
@@ -1688,6 +1689,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
     publishSelection(selectedDescription ?? null, { selected: view.frameSelected, explicit: false, onError: forgetPassiveSelection });
   }, [
     active,
+    allowPassiveSelection,
     canvasPageOwner,
     forgetPassiveSelection,
     publishSelection,

@@ -14,8 +14,14 @@ const platform = vi.hoisted(() => ({
   setRuntimeAudit: vi.fn(async () => {}),
   provenance: vi.fn(),
   frameRuntime: vi.fn(),
-  canvasSnapshot: undefined as unknown,
-  canvasLoading: false,
+  canvasProps: undefined as {
+    snapshot?: DesignWorkspaceSnapshotWire;
+    loading?: boolean;
+    allowPassiveSelection?: boolean;
+    workspaceId?: string | null;
+  } | undefined,
+  canvasAuthoritySamples: [] as boolean[],
+  beforeCanvasPassive: undefined as (() => void) | undefined,
 }));
 
 vi.mock("../../../platform/git", async (importOriginal) => ({
@@ -38,7 +44,10 @@ vi.mock("../state/design-workspace-preparation", async (importOriginal) => ({
   readDesignNavigation: platform.readNavigation,
 }));
 vi.mock("../../../shared/ui/primitives/elements/toast", () => ({ toast: { info: vi.fn() } }));
-vi.mock("../../../shared/ui/primitives", () => ({ toast: { info: vi.fn(), error: vi.fn() } }));
+vi.mock("../../../shared/ui/primitives", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../../shared/ui/primitives")>()),
+  toast: { info: vi.fn(), error: vi.fn() },
+}));
 vi.mock("../../../shared/theme/use-theme-variant", () => ({ useThemeId: () => null }));
 vi.mock("../../../state/pending-workspaces", () => ({ clearWorkspaceSettling: vi.fn() }));
 vi.mock("../../../state/use-document-active", () => ({ useDocumentActive: (active: boolean) => active }));
@@ -52,18 +61,32 @@ vi.mock("../state/design-history-presentation", async (importOriginal) => ({
   useDesignHistorySelection: () => null,
 }));
 vi.mock("../state/use-design-style-build-presence", () => ({ useDesignStyleBuildPresence: vi.fn() }));
-vi.mock("../state/design-agent-drafts", () => ({ startDesignAgentDraftEvents: () => () => {} }));
+vi.mock("../state/design-agent-drafts", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../state/design-agent-drafts")>()),
+  startDesignAgentDraftEvents: () => () => {},
+}));
 vi.mock("../state/use-design-lifecycle-feedback", () => ({ useDesignLifecycleFeedback: vi.fn() }));
 vi.mock("../state/design-component-variants", () => ({ pruneDesignComponentVariantsFor: vi.fn() }));
 vi.mock("../design-component-options-loader", () => ({ loadDesignComponentOptions: vi.fn(async () => {}) }));
-vi.mock("../design-canvas", () => ({
-  DesignCanvas: (props: { snapshot?: unknown }) => {
-    platform.canvasSnapshot = props.snapshot;
-    platform.canvasLoading = Boolean((props as { loading?: boolean }).loading);
-    return null;
-  },
-  EMPTY_NODE_IDS: [],
-}));
+vi.mock("../design-canvas", async (importOriginal) => {
+  const react = await import("react");
+  const actual = await importOriginal<typeof import("../design-canvas")>();
+  const RecordingDesignCanvas = (props: Parameters<typeof actual.DesignCanvas>[0]) => {
+    platform.canvasProps = {
+      snapshot: props.snapshot,
+      loading: props.loading,
+      allowPassiveSelection: props.allowPassiveSelection,
+      workspaceId: props.workspaceId,
+    };
+    platform.canvasAuthoritySamples.push(props.allowPassiveSelection);
+    react.useLayoutEffect(() => {
+      platform.beforeCanvasPassive?.();
+      platform.beforeCanvasPassive = undefined;
+    }, []);
+    return react.createElement(actual.DesignCanvas, props);
+  };
+  return { ...actual, DesignCanvas: RecordingDesignCanvas };
+});
 vi.mock("../design-directory-pill", () => ({ DesignDirectoryPill: () => null }));
 vi.mock("../design-frame-changes-panel", () => ({ DesignFrameChangesPanel: () => null }));
 vi.mock("../design-frame-delete-dialog", () => ({ DesignFrameDeleteDialog: () => null }));
@@ -153,13 +176,15 @@ beforeEach(() => {
   cacheForCleanup = undefined;
   uiStoresForCleanup = [];
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  vi.stubGlobal("ResizeObserver", class { observe() {} unobserve() {} disconnect() {} });
   vi.resetModules();
   window.localStorage.clear();
   platform.readSnapshot.mockReset();
   platform.readNavigation.mockReset().mockResolvedValue(null);
+  platform.canvasProps = undefined;
+  platform.canvasAuthoritySamples = [];
+  platform.beforeCanvasPassive = undefined;
   platform.selectPage.mockReset().mockResolvedValue(undefined);
-  platform.canvasSnapshot = undefined;
-  platform.canvasLoading = false;
   vi.clearAllMocks();
   container = document.createElement("div");
   document.body.append(container);
@@ -213,12 +238,13 @@ async function seedRendererReload(
   vi.resetModules();
 }
 
-async function mountWorkspace(workspaceId = WORKSPACE_ID) {
+async function mountWorkspace(workspaceId = WORKSPACE_ID, beforeCanvasPassive?: () => void) {
   const cache = await import("../state/design-workspace-cache");
   cacheForCleanup = cache;
   const ui = await import("../state/design-workspace-ui");
   uiStoresForCleanup.push(ui);
   const { DesignWorkspaceColumn } = await import("../design-workspace");
+  platform.beforeCanvasPassive = beforeCanvasPassive;
   const snapshot = cache.designWorkspaceSnapshotCache.peekSnapshot(workspaceId);
   const { isDesignWorkspaceBootPreview } = await import("../state/design-workspace-boot-cache");
   const { createDesignPageProjection } = await import("../state/design-page-projection");
@@ -313,6 +339,7 @@ describe("Design selection validation against a boot preview", () => {
       refreshing: true,
       error: null,
     });
+    expect(platform.canvasProps?.allowPassiveSelection).toBe(false);
 
     await act(async () => {
       pending.resolve(live);
@@ -321,6 +348,46 @@ describe("Design selection validation against a boot preview", () => {
       await Promise.resolve();
     });
     mounted.unsubscribe();
+    expect(mounted.ui.designWorkspaceView(WORKSPACE_ID)).toMatchObject({
+      selectedFrame: COPY_FRAME,
+      frameSelected: true,
+      selectedTargets: [{ frame: COPY_FRAME }],
+    });
+  });
+
+  it("keeps the old boot render advisory when the cache updates before its passive effect", async () => {
+    const boot = workspaceSnapshot([
+      page(OTHER_PAGE_ID, [OTHER_FRAME]),
+      page(PAGE_ID, [BASE_FRAME]),
+    ]);
+    const live = workspaceSnapshot([
+      page(OTHER_PAGE_ID, [OTHER_FRAME]),
+      page(PAGE_ID, [BASE_FRAME, COPY_FRAME]),
+    ]);
+    const pending = deferred<DesignWorkspaceSnapshotWire>();
+    platform.readSnapshot.mockImplementation(() => pending.promise);
+    await seedRendererReload(boot);
+
+    const cache = await import("../state/design-workspace-cache");
+    const mounted = await mountWorkspace(WORKSPACE_ID, () => {
+      expect(platform.canvasProps?.allowPassiveSelection).toBe(false);
+      cache.designWorkspaceSnapshotCache.setData(WORKSPACE_ID, live);
+    });
+    expect(platform.canvasAuthoritySamples).toContain(false);
+    expect(cache.designWorkspaceSnapshotCache.peekSnapshot(WORKSPACE_ID).data).toBe(live);
+    expect(mounted.ui.designWorkspaceView(WORKSPACE_ID)).toMatchObject({
+      selectedFrame: COPY_FRAME,
+      frameSelected: true,
+      selectedTargets: [{ frame: COPY_FRAME }],
+    });
+
+    await act(async () => {
+      pending.resolve(live);
+      await pending.promise;
+      await flushMicrotasks();
+    });
+    mounted.unsubscribe();
+    expect(platform.canvasAuthoritySamples.at(-1)).toBe(true);
     expect(mounted.ui.designWorkspaceView(WORKSPACE_ID)).toMatchObject({
       selectedFrame: COPY_FRAME,
       frameSelected: true,
@@ -439,8 +506,9 @@ describe("Design selection validation against a boot preview", () => {
       panX: 217,
       panY: 136,
     });
+    expect(platform.canvasProps?.snapshot).toBeUndefined();
+    expect(platform.canvasProps?.loading).toBe(false);
     expect(platform.selectPage).not.toHaveBeenCalled();
-    expect(platform.canvasSnapshot).toBeUndefined();
 
     await act(async () => {
       pending.resolve(live);
@@ -450,7 +518,8 @@ describe("Design selection validation against a boot preview", () => {
     });
     mounted.unsubscribe();
     expect(mounted.ui.designWorkspaceView(WORKSPACE_ID)).toMatchObject({ activePageId: PAGE_ID, selectedFrame: COPY_FRAME });
-    expect((platform.canvasSnapshot as DesignWorkspaceSnapshotWire).frames.map((frame) => frame.pageId)).toEqual([PAGE_ID, PAGE_ID]);
+    expect(platform.canvasProps?.snapshot?.directoryId).toBe(DIRECTORY_ID);
+    expect(platform.canvasProps?.snapshot?.pages?.map((entry) => entry.id)).toEqual([OTHER_PAGE_ID, PAGE_ID]);
   });
 
   it("does not let a boot preview for an old directory reset the current exact owner", async () => {
@@ -470,8 +539,6 @@ describe("Design selection validation against a boot preview", () => {
     expect(mounted.bootPreview).toBe(true);
     expect(mounted.bootSnapshot?.directoryId).toBe("design_previous");
     expect(mounted.ui.designWorkspaceView(WORKSPACE_ID).directoryId).toBe(DIRECTORY_ID);
-    expect(platform.canvasSnapshot).toBeUndefined();
-    expect(platform.canvasLoading).toBe(false);
     expect(mounted.ui.designWorkspaceView(WORKSPACE_ID)).toMatchObject({
       directoryId: DIRECTORY_ID,
       activePageId: PAGE_ID,
@@ -481,6 +548,8 @@ describe("Design selection validation against a boot preview", () => {
       panX: 217,
       panY: 136,
     });
+    expect(platform.canvasProps?.snapshot).toBeUndefined();
+    expect(platform.canvasProps?.loading).toBe(false);
 
     await act(async () => {
       pending.resolve(live);
@@ -490,7 +559,8 @@ describe("Design selection validation against a boot preview", () => {
     });
     mounted.unsubscribe();
     expect(mounted.ui.designWorkspaceView(WORKSPACE_ID)).toMatchObject({ directoryId: "design_replacement", selectedFrame: OTHER_FRAME });
-    expect((platform.canvasSnapshot as DesignWorkspaceSnapshotWire).directoryId).toBe("design_replacement");
+    expect(platform.canvasProps?.snapshot?.directoryId).toBe("design_replacement");
+    expect(platform.canvasProps?.snapshot?.pages?.map((entry) => entry.id)).toEqual([OTHER_PAGE_ID, PAGE_ID]);
   });
 
   it("clears advisory provenance when an identical authoritative snapshot reuses the boot object", async () => {

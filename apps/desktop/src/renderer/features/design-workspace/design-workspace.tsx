@@ -173,6 +173,9 @@ export function DesignWorkspaceColumn({
   const confirmedActivePageId = useDesignWorkspaceUiStore(state =>
     workspaceId ? state.byWorkspace[workspaceId]?.activePageId : undefined,
   );
+  const confirmedDirectoryId = useDesignWorkspaceUiStore(state =>
+    workspaceId ? state.byWorkspace[workspaceId]?.directoryId : undefined,
+  );
   const historyPresentation = useDesignHistoryPresentation(workspaceId);
   const historySelection = useDesignHistorySelection(workspaceId);
   const presentedHistory = surfaceActive ? historyPresentation : null;
@@ -186,6 +189,11 @@ export function DesignWorkspaceColumn({
     !snapshot.data?.pages?.some(page => page.id === activePageId) ? undefined : presentedCatalog;
   const confirmedPageSnapshot = useDesignPageSnapshot(confirmedCatalog, confirmedActivePageId);
   const pageSnapshot = useDesignPageSnapshot(pageCatalog, activePageId);
+  const allowPassiveSelection = Boolean(
+    !presentedHistory && snapshot.data && !bootPreview &&
+    snapshot.data.directoryId === confirmedDirectoryId &&
+    confirmedActivePageId && snapshot.data.pages?.some(page => page.id === confirmedActivePageId),
+  );
   useEffect(() => {
     if (!surfaceActive && workspaceId) clearDesignHistoryPresentation(workspaceId);
     return () => { if (workspaceId) clearDesignHistoryPresentation(workspaceId); };
@@ -518,6 +526,7 @@ export function DesignWorkspaceColumn({
           error={snapshot.error}
           refresh={snapshot.refresh}
           active={surfaceActive}
+          allowPassiveSelection={allowPassiveSelection}
           canvasBackground={canvasBackground}
           motionTimelineOpen={motionTimelineOpen}
           motionPropertyRequest={motionPropertyRequest}
