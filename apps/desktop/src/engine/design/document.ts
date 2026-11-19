@@ -1084,6 +1084,8 @@ async function readDesignCanvasFrameFromSummary(
     workspacePath,
     summary.file,
   );
+  const healed = healDesignOids(source);
+  const document = healed.document ?? parseDesignSource(healed.html);
   const render = await prepareFrameRenderSource(workspacePath, source, {
     width: summary.width,
     height: summary.height,
@@ -1093,7 +1095,7 @@ async function readDesignCanvasFrameFromSummary(
     ...(component ? { component: designComponentRecordWithinLimits({ ...component,
       ...(render.componentOptions ? { notApplied: render.componentOptions.shows } : {}) }) } : {}),
     ...(render.instances ? { instances: render.instances } : {}),
-    ...(includeComponentIdentity ? { componentIdentity: designComponentIdentityFromDocument(canvas, summary.file, parse(source)) } : {}) };
+    ...(includeComponentIdentity ? { componentIdentity: designComponentIdentityFromDocument(canvas, summary.file, document) } : {}) };
 }
 
 function designComponentIdentityFromDocument(canvas: CanvasDocument, file: string, document: DefaultTreeAdapterTypes.Document): DesignComponentIdentity | null {
