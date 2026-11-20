@@ -5,7 +5,7 @@ import { join } from "node:path";
 export async function runWorkspaceShortcutsSmoke({ page, check, harnessBase, screenshotDir }) {
   const viewport = page.viewportSize();
   await page.setViewportSize({ width: 1600, height: 1000 });
-  await page.goto(`${harnessBase}/harness-app-sidebar.html?shortcuts&long-list&filter=ungrouped`, { waitUntil: "networkidle" });
+  await page.goto(`${harnessBase}/harness-app-sidebar.html?shortcuts&long-list&filter=ungrouped&feature-off=unified-workspaces`, { waitUntil: "networkidle" });
   const state = () => page.evaluate(() => window.appSidebarState());
   const rows = page.locator("[data-workspace-id]");
   const order = () => rows.evaluateAll(nodes => nodes.map(node => node.dataset.workspaceId));

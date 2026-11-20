@@ -10,7 +10,7 @@ export async function runDashboardSmoke({ page: originPage, check }) {
   const page = await context.newPage();
   const errors = [];
   page.on("pageerror", error => errors.push(error.message));
-  const url = `${origin}/apps/desktop/src/renderer/harnesses/harness-app-sidebar.html?dashboard`;
+  const url = `${origin}/apps/desktop/src/renderer/harnesses/harness-app-sidebar.html?dashboard&feature-off=unified-workspaces`;
   const root = () => page.locator('main[data-harness-page="dashboard"]');
   const row = id => root().locator(`[data-dashboard-workspace="${id}"]`);
   const search = () => root().getByRole("searchbox", { name: "Search workspaces" });
