@@ -1,4 +1,4 @@
-import type { DesignRuntimeNodeDetails, DesignRuntimeNodeState } from "@zeros/protocol/design-runtime";
+import type { DesignRuntimeLayoutMeasure, DesignRuntimeNodeDetails, DesignRuntimeNodeState } from "@zeros/protocol/design-runtime";
 import { create } from "zustand";
 
 import { designFrameRuntime, type DesignFrameRuntimeConnection } from "../../../platform/bridge/design-frame-runtime";
@@ -165,6 +165,20 @@ export async function measureDesignNodeUnheld(
 ): Promise<DesignRuntimeNodeDetails | null> {
   const measured = watch.read(await runtime.getNodeDetails(nodeId));
   return watch.blocked() ? null : measured;
+}
+
+export async function measureDesignLayoutUnheld(
+  runtime: Pick<DesignFrameRuntimeConnection, "measureLayout">,
+  input: DesignRuntimeLayoutMeasure,
+  watch: ReturnType<typeof designHeldStateWatch>,
+): Promise<Map<string, DesignRuntimeNodeDetails> | null> {
+  const measured = new Map((await runtime.measureLayout(input)).map((node) => [node.oid, watch.read(node)]));
+  if (watch.blocked()) return null;
+  for (const nodeId of input.nodeIds) {
+    if (!measured.has(nodeId))
+      throw new Error(`The requested Design layer is no longer available: ${nodeId}.`);
+  }
+  return measured;
 }
 
 /** Ask the frame to show the layer in a state. Never awaited by a click: the

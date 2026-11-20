@@ -545,6 +545,385 @@ describe("design workspace cache", () => {
       },
     });
 
+    it("awaits an asynchronous intent factory at the mutation lane turn", async () => {
+      const current = snapshot();
+      const frame = current.frames[0]!;
+      designWorkspaceSnapshotCache.setData(workspaceId, current);
+      designFoundationCache.setData(
+        designFoundationKey(workspaceId, frame.file, frame.sourceVersion),
+        opened("document:home", "home:1"),
+      );
+      platformMocks.applyTransaction.mockResolvedValue({ result: null, snapshot: current });
+      const intent = vi.fn(async () => draft());
+
+      await expect(applyDesignEditCached(workspaceId, frame, intent)).resolves.toMatchObject({
+        result: null,
+      });
+
+      expect(intent).toHaveBeenCalledOnce();
+      expect(platformMocks.applyTransaction).toHaveBeenCalledOnce();
+      expect(platformMocks.applyTransaction.mock.calls[0]![2].operations).toEqual(
+        draft().operations,
+      );
+    });
+
+    it("returns the existing null reply for an intentional no-op", async () => {
+      const current = snapshot();
+      const frame = current.frames[0]!;
+      designWorkspaceSnapshotCache.setData(workspaceId, current);
+
+      await expect(applyDesignEditCached(workspaceId, frame, () => null)).resolves.toEqual({
+        result: null,
+      });
+
+      expect(platformMocks.foundationOpen).not.toHaveBeenCalled();
+      expect(platformMocks.applyTransaction).not.toHaveBeenCalled();
+    });
+
+    it("reprepares an async intent against the refreshed generation on stale retry", async () => {
+      const current = snapshot();
+      const frame = current.frames[0]!;
+      const fresh = {
+        ...current,
+        frames: [{ ...frame, width: 1_600, sourceVersion: "a".repeat(24) }],
+      };
+      designWorkspaceSnapshotCache.setData(workspaceId, current);
+      designFoundationCache.setData(
+        designFoundationKey(workspaceId, frame.file, frame.sourceVersion),
+        opened("document:home", "home:1"),
+      );
+      platformMocks.applyTransaction
+        .mockRejectedValueOnce(new Error(
+          "Design frame changed before the mutation: home.html. Re-read it and retry.",
+        ))
+        .mockResolvedValueOnce({ result: null, snapshot: fresh });
+      platformMocks.readSnapshot.mockResolvedValue(fresh);
+      platformMocks.foundationOpen.mockResolvedValue(opened("document:home", "home:2"));
+      const intent = vi.fn(() => {
+        const latest = designWorkspaceSnapshotCache
+          .peekSnapshot(workspaceId)
+          .data!.frames.find((candidate) => candidate.file === frame.file)!;
+        return {
+          ...draft(),
+          operations: [{
+            ...draft().operations[0]!,
+            styles: { left: `${latest.width}px` },
+          }],
+        };
+      });
+
+      await applyDesignEditCached(workspaceId, frame, intent);
+
+      expect(intent).toHaveBeenCalledTimes(2);
+      expect(platformMocks.applyTransaction).toHaveBeenCalledTimes(2);
+      expect(platformMocks.applyTransaction.mock.calls[0]![2].operations[0]).toMatchObject({
+        styles: { left: "1440px" },
+      });
+      expect(platformMocks.applyTransaction.mock.calls[1]![2].operations[0]).toMatchObject({
+        styles: { left: "1600px" },
+      });
+    });
+
+    it("recovers a preview before stale reprepare and keeps the next edit behind a retry no-op", async () => {
+      const workspaceId = "ws_stale_retry_recovery";
+      const current = snapshot();
+      const frame = current.frames[0]!;
+      const freshSourceVersion = "f".repeat(24);
+      const fresh = {
+        ...current,
+        frames: [{ ...frame, width: 1_600, sourceVersion: freshSourceVersion }],
+      };
+      const events: string[] = [];
+      designWorkspaceSnapshotCache.setData(workspaceId, current);
+      designFoundationCache.setData(
+        designFoundationKey(workspaceId, frame.file, frame.sourceVersion),
+        opened("document:home", "home:1"),
+      );
+      designFoundationCache.setData(
+        designFoundationKey(workspaceId, frame.file, freshSourceVersion),
+        opened("document:home", "home:2"),
+      );
+      platformMocks.readNavigation.mockResolvedValue({ ...current, preparation: {
+        revision: "c".repeat(64), epoch: 1, descriptions: [], current: [], errors: {},
+      } });
+      platformMocks.readSnapshot.mockImplementation(async () => {
+        events.push("refresh");
+        return fresh;
+      });
+      platformMocks.applyTransaction
+        .mockImplementationOnce(async () => {
+          events.push("apply:first");
+          throw new Error("Design frame changed before the mutation: home.html. Re-read it and retry.");
+        })
+        .mockImplementationOnce(async () => {
+          events.push("apply:later");
+          return { result: null, snapshot: fresh };
+        });
+      let beginRecovery!: () => void;
+      let finishRecovery!: () => void;
+      const recoveryStarted = new Promise<void>((resolve) => { beginRecovery = resolve; });
+      const recoveryGate = new Promise<void>((resolve) => { finishRecovery = resolve; });
+      const intent = vi.fn(() => {
+        const firstAttempt = intent.mock.calls.length === 1;
+        events.push(firstAttempt ? "prepare:first" : "prepare:retry");
+        return firstAttempt ? draft() : null;
+      });
+      const pending = applyDesignEditCached(workspaceId, frame, intent, undefined, {
+        recover: async ({ assertCurrent }) => {
+          assertCurrent();
+          events.push("recover:start");
+          beginRecovery();
+          await recoveryGate;
+          assertCurrent();
+          events.push("recover:complete");
+        },
+      });
+
+      const firstStep = await Promise.race([
+        recoveryStarted.then(() => "recovery"),
+        pending.then(() => "settled", () => "settled"),
+      ]);
+      expect(firstStep).toBe("recovery");
+      const laterIntent = vi.fn(() => {
+        events.push("prepare:later");
+        return draft();
+      });
+      const later = applyDesignEditCached(workspaceId, frame, laterIntent);
+      expect(laterIntent).not.toHaveBeenCalled();
+      finishRecovery();
+      await expect(pending).resolves.toMatchObject({ result: null });
+      await later;
+
+      expect(events).toEqual([
+        "prepare:first",
+        "apply:first",
+        "recover:start",
+        "recover:complete",
+        "refresh",
+        "prepare:retry",
+        "prepare:later",
+        "apply:later",
+      ]);
+      expect(intent).toHaveBeenCalledTimes(2);
+      expect(laterIntent).toHaveBeenCalledOnce();
+      expect(platformMocks.applyTransaction).toHaveBeenCalledTimes(2);
+    });
+
+    it("does not repaint or refresh after the owner changes during stale retry recovery", async () => {
+      const workspaceId = "ws_stale_retry_recovery_owner";
+      const current = { ...snapshot(), directoryId: "design-a" };
+      const frame = current.frames[0]!;
+      const fresh = {
+        ...current,
+        frames: [{ ...frame, sourceVersion: "f".repeat(24) }],
+      };
+      const replacement = { ...snapshot(), directoryId: "design-b" };
+      designWorkspaceSnapshotCache.setData(workspaceId, current);
+      observeDesignDirectory(workspaceId, current);
+      designFoundationCache.setData(
+        designFoundationKey(workspaceId, frame.file, frame.sourceVersion),
+        opened("document:home", "home:1"),
+      );
+      designFoundationCache.setData(
+        designFoundationKey(workspaceId, frame.file, fresh.frames[0]!.sourceVersion),
+        opened("document:home", "home:2"),
+      );
+      platformMocks.readNavigation.mockResolvedValue({ ...current, preparation: {
+        revision: "c".repeat(64), epoch: 1, descriptions: [], current: [], errors: {},
+      } });
+      platformMocks.readSnapshot.mockResolvedValue(fresh);
+      platformMocks.applyTransaction
+        .mockRejectedValueOnce(
+          new Error("Design frame changed before the mutation: home.html. Re-read it and retry."),
+        )
+        .mockResolvedValueOnce({ result: null, snapshot: fresh });
+      let beginRecovery!: () => void;
+      let finishRecovery!: () => void;
+      let repainted = false;
+      const recoveryStarted = new Promise<void>((resolve) => { beginRecovery = resolve; });
+      const recoveryGate = new Promise<void>((resolve) => { finishRecovery = resolve; });
+      const intent = vi.fn(() => draft());
+      const pending = applyDesignEditCached(workspaceId, frame, intent, undefined, {
+        recover: async ({ assertCurrent }) => {
+          assertCurrent();
+          beginRecovery();
+          await recoveryGate;
+          assertCurrent();
+          repainted = true;
+        },
+      });
+
+      const firstStep = await Promise.race([
+        recoveryStarted.then(() => "recovery"),
+        pending.then(() => "settled", () => "settled"),
+      ]);
+      expect(firstStep).toBe("recovery");
+      designWorkspaceSnapshotCache.setData(workspaceId, replacement);
+      observeDesignDirectory(workspaceId, replacement);
+      finishRecovery();
+
+      await expect(pending).rejects.toThrow("The active Design directory changed");
+      expect(repainted).toBe(false);
+      expect(intent).toHaveBeenCalledOnce();
+      expect(platformMocks.applyTransaction).toHaveBeenCalledOnce();
+      expect(platformMocks.readSnapshot).not.toHaveBeenCalled();
+    });
+
+    it("reprepares an async intent when the exact frame generation changes during preparation", async () => {
+      const current = snapshot();
+      const frame = current.frames[0]!;
+      const freshSourceVersion = "a".repeat(24);
+      const fresh = {
+        ...current,
+        frames: [{ ...frame, sourceVersion: freshSourceVersion }],
+      };
+      designWorkspaceSnapshotCache.setData(workspaceId, current);
+      designFoundationCache.setData(
+        designFoundationKey(workspaceId, frame.file, frame.sourceVersion),
+        opened("document:home", "home:1"),
+      );
+      designFoundationCache.setData(
+        designFoundationKey(workspaceId, frame.file, freshSourceVersion),
+        opened("document:home", "home:2"),
+      );
+      platformMocks.readSnapshot.mockResolvedValue(fresh);
+      platformMocks.applyTransaction.mockResolvedValue({ result: null, snapshot: fresh });
+      let beginPreparation!: () => void;
+      let finishPreparation!: () => void;
+      const started = new Promise<void>((resolve) => { beginPreparation = resolve; });
+      const waiting = new Promise<void>((resolve) => { finishPreparation = resolve; });
+      const intent = vi.fn(async () => {
+        if (intent.mock.calls.length === 1) {
+          beginPreparation();
+          await waiting;
+        }
+        const latest = designWorkspaceSnapshotCache
+          .peekSnapshot(workspaceId)
+          .data!.frames.find((candidate) => candidate.file === frame.file)!;
+        return {
+          ...draft(),
+          operations: [{
+            ...draft().operations[0]!,
+            styles: { left: latest.sourceVersion },
+          }],
+        };
+      });
+
+      const mutation = applyDesignEditCached(workspaceId, frame, intent);
+      await started;
+      designWorkspaceSnapshotCache.setData(workspaceId, fresh);
+      finishPreparation();
+      await mutation;
+
+      expect(intent).toHaveBeenCalledTimes(2);
+      expect(platformMocks.applyTransaction).toHaveBeenCalledOnce();
+      expect(platformMocks.applyTransaction.mock.calls[0]![2].operations[0]).toMatchObject({
+        styles: { left: freshSourceVersion },
+      });
+    });
+
+    it("reprepares when the exact frame generation changes while resolving the base revision", async () => {
+      const current = snapshot([{ file: "home.html" }, { file: "other.html" }]);
+      const frame = current.frames[0]!;
+      const otherFrame = current.frames[1]!;
+      const preparedSourceVersion = "a".repeat(24);
+      const freshSourceVersion = "b".repeat(24);
+      frame.sourceVersion = preparedSourceVersion;
+      designWorkspaceSnapshotCache.setData(workspaceId, current);
+      platformMocks.applyTransaction.mockResolvedValue({ result: null, snapshot: current });
+
+      await applyDesignTransactionCached(workspaceId, otherFrame.file, {
+        ...draft(),
+        documentId: "document:other",
+        baseRevision: "other:1",
+      });
+
+      designFoundationCache.setData(
+        designFoundationKey(workspaceId, frame.file, frame.sourceVersion),
+        opened("document:home", "home:1"),
+      );
+      platformMocks.applyTransaction.mockClear();
+      const fresh = structuredClone(current);
+      fresh.frames[0]!.sourceVersion = freshSourceVersion;
+      platformMocks.readSnapshot.mockResolvedValue(fresh);
+      platformMocks.applyTransaction.mockResolvedValue({ result: null, snapshot: fresh });
+      platformMocks.foundationOpen.mockResolvedValue(opened("document:home", "home:2"));
+      let beginBaseRead!: () => void;
+      let finishBaseRead!: () => void;
+      const baseReadStarted = new Promise<void>((resolve) => {
+        beginBaseRead = resolve;
+      });
+      const originalLoad = designFoundationCache.load.bind(designFoundationCache);
+      let loadCount = 0;
+      const loadSpy = vi.spyOn(designFoundationCache, "load").mockImplementation((key, fetcher, options) => {
+        const loaded = originalLoad(key, fetcher, options);
+        if (++loadCount !== 2) return loaded;
+        return loaded.then((value) => new Promise<typeof value>((resolve) => {
+          finishBaseRead = () => resolve(value);
+          beginBaseRead();
+        }));
+      });
+      const intent = vi.fn(() => {
+        const latest = designWorkspaceSnapshotCache
+          .peekSnapshot(workspaceId)
+          .data!.frames.find((candidate) => candidate.file === frame.file)!;
+        return {
+          ...draft(),
+          operations: [{
+            ...draft().operations[0]!,
+            styles: { left: latest.sourceVersion },
+          }],
+        };
+      });
+
+      const mutation = applyDesignEditCached(workspaceId, frame, intent);
+      try {
+        await baseReadStarted;
+        designWorkspaceSnapshotCache.setData(workspaceId, fresh);
+        finishBaseRead();
+        await mutation;
+      } finally {
+        finishBaseRead?.();
+        loadSpy.mockRestore();
+      }
+
+      expect(intent).toHaveBeenCalledTimes(2);
+      expect(platformMocks.applyTransaction).toHaveBeenCalledOnce();
+      expect(platformMocks.applyTransaction.mock.calls[0]![2].operations[0]).toMatchObject({
+        styles: { left: freshSourceVersion },
+      });
+    });
+
+    it("fences an async intent when its directory owner changes during preparation", async () => {
+      const current = snapshot();
+      current.directoryId = "design-a";
+      const frame = current.frames[0]!;
+      designWorkspaceSnapshotCache.setData(workspaceId, current);
+      designFoundationCache.setData(
+        designFoundationKey(workspaceId, frame.file, frame.sourceVersion),
+        opened("document:home", "home:1"),
+      );
+      useDesignWorkspaceUiStore.getState().bindDirectory(workspaceId, "design-a");
+      let startPreparation!: () => void;
+      let finishPreparation!: () => void;
+      const started = new Promise<void>((resolve) => { startPreparation = resolve; });
+      const held = new Promise<void>((resolve) => { finishPreparation = resolve; });
+      const intent = vi.fn(async (context?: { assertCurrent(): void }) => {
+        startPreparation();
+        await held;
+        context?.assertCurrent();
+        return draft();
+      });
+
+      const pending = applyDesignEditCached(workspaceId, frame, intent);
+      await started;
+      useDesignWorkspaceUiStore.getState().bindDirectory(workspaceId, "design-b");
+      finishPreparation();
+
+      await expect(pending).rejects.toThrow("The active Design directory changed");
+      expect(platformMocks.applyTransaction).not.toHaveBeenCalled();
+    });
+
     it("recomputes the current reset factory after a stale transaction retry", async () => {
       const workspace = "ws_reset_lane";
       const sourceVersion = "1".repeat(24);
@@ -1712,6 +2091,99 @@ describe("design workspace cache", () => {
       designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.frames[0]
         ?.sourceVersion,
     ).toBe("a".repeat(24));
+  });
+
+  it("does not publish or retry a stale source refresh after the directory owner changes", async () => {
+    const workspaceId = "ws_stale_refresh_owner";
+    const stale = { ...snapshot(), directoryId: "design-a" };
+    const staleFrame = stale.frames[0]!;
+    const fresh = {
+      ...stale,
+      frames: [{ ...staleFrame, sourceVersion: "f".repeat(24) }],
+    };
+    const replacement = { ...snapshot(), directoryId: "design-b" };
+    designWorkspaceSnapshotCache.setData(workspaceId, stale);
+    observeDesignDirectory(workspaceId, stale);
+    runtimeMocks.designFrameRuntime.mockReturnValue(null);
+    platformMocks.updateStyles.mockRejectedValueOnce(
+      new Error("Design frame changed before the mutation: home.html. Re-read it and retry."),
+    );
+    let releaseRefresh!: (value: DesignWorkspaceSnapshotWire) => void;
+    platformMocks.readSnapshot.mockReturnValueOnce(
+      new Promise((resolve) => { releaseRefresh = resolve; }),
+    );
+
+    const mutation = updateDesignNodeStylesCached(workspaceId, {
+      frame: staleFrame.file,
+      sourceVersion: staleFrame.sourceVersion,
+      nodeId: "hero",
+      styles: { color: "red" },
+    });
+    await vi.waitFor(() => expect(platformMocks.readSnapshot).toHaveBeenCalledOnce());
+    designWorkspaceSnapshotCache.setData(workspaceId, replacement);
+    observeDesignDirectory(workspaceId, replacement);
+    releaseRefresh(fresh);
+
+    await expect(mutation).rejects.toThrow("The active Design directory changed");
+    expect(platformMocks.updateStyles).toHaveBeenCalledOnce();
+    expect(designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data).toBe(replacement);
+    expect(useDesignWorkspaceUiStore.getState().byWorkspace[workspaceId]?.directoryId).toBe("design-b");
+  });
+
+  it("serializes rapid history around an interleaved edit that refreshes a stale source", async () => {
+    const workspaceId = "ws_stale_history_lane";
+    const stale = snapshot();
+    const staleFrame = stale.frames[0]!;
+    const freshSourceVersion = "f".repeat(24);
+    const fresh = { ...snapshot(), frames: [{ ...staleFrame, sourceVersion: freshSourceVersion }] };
+    const committed = { ...snapshot(), frames: [{ ...staleFrame, sourceVersion: "a".repeat(24) }] };
+    designWorkspaceSnapshotCache.setData(workspaceId, stale);
+    platformMocks.readNavigation.mockResolvedValue({ ...stale, preparation: {
+      revision: "c".repeat(64), epoch: 1, descriptions: [], current: [], errors: {},
+    } });
+    runtimeMocks.designFrameRuntime.mockReturnValue(null);
+    platformMocks.readSnapshot.mockResolvedValue(fresh);
+
+    let releaseUndo!: (reply: { result: null }) => void;
+    platformMocks.history
+      .mockReturnValueOnce(new Promise((resolve) => { releaseUndo = resolve; }))
+      .mockResolvedValue({ result: null });
+    platformMocks.updateStyles
+      .mockRejectedValueOnce(new Error("Design frame changed before the mutation: home.html. Re-read it and retry."))
+      .mockImplementationOnce(async (_workspaceId, input) => {
+        expect(input.sourceVersion).toBe(freshSourceVersion);
+        return {
+          mutation: {
+            changed: true,
+            frame: { ...committed.frames[0]!, source: "<main></main>", srcDoc: "<main></main>", tree: [] },
+            lint: committed.lint,
+          },
+          snapshot: committed,
+        };
+      });
+
+    const undo = applyDesignHistoryCached(workspaceId, staleFrame.file, "undo");
+    await vi.waitFor(() => expect(platformMocks.history).toHaveBeenCalledOnce());
+    const edit = updateDesignNodeStylesCached(workspaceId, {
+      frame: staleFrame.file, nodeId: "hero", sourceVersion: staleFrame.sourceVersion, styles: { color: "red" },
+    });
+    const redo = applyDesignHistoryCached(workspaceId, staleFrame.file, "redo");
+    const nextUndo = applyDesignHistoryCached(workspaceId, staleFrame.file, "undo");
+    const nextRedo = applyDesignHistoryCached(workspaceId, staleFrame.file, "redo");
+    releaseUndo({ result: null });
+    await Promise.all([undo, edit, redo, nextUndo, nextRedo]);
+
+    expect(platformMocks.history.mock.calls.map(([, , direction]) => direction)).toEqual(["undo", "redo", "undo", "redo"]);
+    expect(platformMocks.updateStyles).toHaveBeenCalledTimes(2);
+    expect(platformMocks.readSnapshot).toHaveBeenCalledOnce();
+    const order = [
+      platformMocks.history.mock.invocationCallOrder[0]!,
+      platformMocks.updateStyles.mock.invocationCallOrder[0]!,
+      platformMocks.updateStyles.mock.invocationCallOrder[1]!,
+      platformMocks.history.mock.invocationCallOrder[1]!,
+    ];
+    expect(order).toEqual([...order].sort((left, right) => left - right));
+    expect(designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.frames[0]?.sourceVersion).toBe("a".repeat(24));
   });
 
   it("never replays failures whose write may have landed", async () => {

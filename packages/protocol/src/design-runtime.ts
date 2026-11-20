@@ -722,6 +722,13 @@ export interface DesignRuntimeLayoutPreview {
   cancelMoves?: boolean;
 }
 
+/** A bounded, synchronous measurement against confirmed styles. */
+export interface DesignRuntimeLayoutMeasure {
+  updates: DesignRuntimeStyleUpdate[];
+  nodeIds: string[];
+  relocation?: boolean;
+}
+
 /** A host-authored layer the engine appends to an existing parent (a frame
  * drawn inside a frame). The runtime builds the element from these fields
  * only; it never parses markup. */
@@ -792,6 +799,7 @@ export type DesignRuntimeMethod =
   | "previewStyles"
   | "getLayoutTargets"
   | "previewLayout"
+  | "measureLayout"
   | "restoreGeneration"
   | "previewHistory"
   | "previewGeometry"
@@ -826,7 +834,7 @@ export type DesignRuntimeMethod =
 /** Methods a runtime advertises only when the host's handshake lists them
  * in `features`, so a host that predates them still accepts the runtime's
  * capabilities. */
-export const DESIGN_RUNTIME_OPT_IN_METHODS = ["previewStylesheet", "setPlayback", "previewInsert", "clearPreviewInserts", "previewHistory", "commitStructure", "previewStructure", "clearPreviewStructure", "holdNodeState", "releaseNodeState", "getFrameChanges", "previewComponentOptions", "previewComponentInstanceOptions", "getComponentPartAtLoc"] as const;
+export const DESIGN_RUNTIME_OPT_IN_METHODS = ["previewStylesheet", "setPlayback", "previewInsert", "clearPreviewInserts", "previewHistory", "commitStructure", "previewStructure", "clearPreviewStructure", "holdNodeState", "releaseNodeState", "getFrameChanges", "previewComponentOptions", "previewComponentInstanceOptions", "getComponentPartAtLoc", "measureLayout"] as const;
 
 export interface DesignRuntimePlaybackStopped {
   sourceVersion: string;
@@ -897,6 +905,7 @@ const DESIGN_RUNTIME_METHODS = new Set<DesignRuntimeMethod>([
   "previewStyles",
   "getLayoutTargets",
   "previewLayout",
+  "measureLayout",
   "restoreGeneration",
   "previewHistory",
   "previewGeometry",
@@ -1435,7 +1444,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   ];
   // Advertised only to a host whose handshake asks for them, so a host that
   // predates a method still accepts these capabilities.
-  var OPT_IN_METHODS = ["previewStylesheet", "setPlayback", "previewInsert", "clearPreviewInserts", "previewHistory", "commitStructure", "previewStructure", "clearPreviewStructure", "holdNodeState", "releaseNodeState", "getFrameChanges", "previewComponentOptions", "previewComponentInstanceOptions", "getComponentPartAtLoc"];
+  var OPT_IN_METHODS = ["previewStylesheet", "setPlayback", "previewInsert", "clearPreviewInserts", "previewHistory", "commitStructure", "previewStructure", "clearPreviewStructure", "holdNodeState", "releaseNodeState", "getFrameChanges", "previewComponentOptions", "previewComponentInstanceOptions", "getComponentPartAtLoc", "measureLayout"];
   var enabledOptInMethods = [];
   var MAX_PREVIEW_STYLESHEET_CHARS = 4194304;
   // Everything one frame of direct manipulation paints from. Deliberately tiny:
@@ -2682,6 +2691,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     }
     for (var sheetIndex = 0; sheetIndex < scope.styleSheets.length; sheetIndex += 1) {
       var sheet = scope.styleSheets[sheetIndex];
+      if (sheet.disabled) continue;
       try {
         visit(sheet.cssRules || [], { active: true, layer: { key: "", path: [] }, origin: styleOriginOf(sheet), uncertain: false, nested: false, depth: 0, parent: null, chain: [], anonymous: false, grouped: false });
       } catch (_error) {
@@ -3379,6 +3389,8 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   function withoutHeldState(work) {
     var held = heldState;
     if (!held) return work();
+    var heldCascadeRuleIndex = cascadeRuleIndex;
+    cascadeRuleIndex = null;
     // Each switch also cancels the transition it would start, so the live
     // values the capture copies are Default's, and the held ones return at once.
     withoutObservedMutations(function () {
@@ -3395,6 +3407,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       return work();
     } finally {
       heldStateAside = false;
+      cascadeRuleIndex = heldState === held ? heldCascadeRuleIndex : null;
       if (heldState === held) {
         withoutObservedMutations(function () {
           held.style.disabled = false;
@@ -4724,7 +4737,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     });
   }
 
-  function applyPreviewStyles(element, oid, styles) {
+  function applyPreviewStyles(element, oid, styles, suspendMotion) {
     if (!styles || typeof styles !== "object" || Array.isArray(styles)) {
       throw new Error("styles must be an object.");
     }
@@ -4803,8 +4816,10 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     // The first write of a preview clears the document, because anything already
     // running would repaint against the editor. Every later write in the same
     // preview can only have started something on this element.
-    if (entering) suspendAuthoredMotion();
-    else suspendElementMotion(element);
+    if (suspendMotion !== false) {
+      if (entering) suspendAuthoredMotion();
+      else suspendElementMotion(element);
+    }
   }
 
   function previewStyles(oid, styles) {
@@ -4901,6 +4916,554 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     return geometryOf(element, includeChildren === true);
   }
 
+  function measureLayout(args) {
+    var updates = args.updates || [];
+    var nodeIds = args.nodeIds || [];
+    if (!Array.isArray(updates) || updates.length > ${DESIGN_LAYOUT_CHILD_LIMIT + 1} ||
+        !Array.isArray(nodeIds) || nodeIds.length > 64 ||
+        nodeIds.some(function (oid) { return typeof oid !== "string" || !oid || oid.length > 256; })) {
+      throw new Error("Layout measurement is too large or has invalid targets.");
+    }
+    updates.forEach(function (update) {
+      if (!update || typeof update.nodeId !== "string" || !update.nodeId || update.nodeId.length > 256 ||
+          !update.styles || typeof update.styles !== "object" || Array.isArray(update.styles)) throw new Error("Invalid layout measurement styles.");
+      var entries = Object.entries(update.styles);
+      if (entries.length > 64 || entries.some(function (entry) {
+        return !/^(--[A-Za-z0-9_-]+|-?[a-z][a-z0-9-]*)$/.test(entry[0]) ||
+          (entry[1] !== null && (typeof entry[1] !== "string" || entry[1].length > 2048));
+      })) throw new Error("Invalid layout measurement styles.");
+    });
+    var motionScopes = [document];
+    var motionScopeSet = new Set(motionScopes);
+    var motionScopeQueue = [];
+    var importantTransitionElements = new Set();
+    var animationNameUpdates = new Map();
+    updates.forEach(function (update) {
+      if (Object.prototype.hasOwnProperty.call(update.styles, "animation-name")) {
+        var names = animationNameUpdates.get(update.nodeId) || [];
+        names.push(update.styles["animation-name"]);
+        animationNameUpdates.set(update.nodeId, names);
+      }
+    });
+    var motionNodeCount = 0;
+    var documentRoot = document.body || document.documentElement;
+    var queueShadowRoot = function (element) {
+      var shadow = shadowRootOf(element);
+      if (shadow && !motionScopeSet.has(shadow)) {
+        if (motionScopes.length >= 256) throw new Error("Layout measurement exceeds its motion isolation safety budget.");
+        motionScopeSet.add(shadow);
+        motionScopes.push(shadow);
+        motionScopeQueue.push(shadow);
+      }
+    };
+    var inspectMotionElement = function (element) {
+      motionNodeCount += 1;
+      if (motionNodeCount > 20000) throw new Error("Layout measurement exceeds its motion isolation safety budget.");
+      queueShadowRoot(element);
+      if (element.style && [
+        "transition", "transition-property", "transition-duration", "transition-delay", "transition-behavior"
+      ].some(function (property) { return element.style.getPropertyPriority(property) === "important"; })) {
+        importantTransitionElements.add(element);
+      }
+    };
+    if (documentRoot) {
+      inspectMotionElement(documentRoot);
+      var documentWalker = document.createTreeWalker(documentRoot, NodeFilter.SHOW_ELEMENT);
+      for (var documentNode = documentWalker.nextNode(); documentNode; documentNode = documentWalker.nextNode()) {
+        inspectMotionElement(documentNode);
+      }
+    }
+    while (motionScopeQueue.length) {
+      var shadowScope = motionScopeQueue.shift();
+      var shadowWalker = document.createTreeWalker(shadowScope, NodeFilter.SHOW_ELEMENT);
+      for (var shadowNode = shadowWalker.nextNode(); shadowNode; shadowNode = shadowWalker.nextNode()) {
+        inspectMotionElement(shadowNode);
+      }
+    }
+    var measurementAnimations = [];
+    var seenAnimations = new Set();
+    var activeTransition = false;
+    var changedCssAnimationName = false;
+    motionScopes.forEach(function (scope) {
+      if (typeof scope.getAnimations !== "function") return;
+      scope.getAnimations({ subtree: true }).forEach(function (animation) {
+        if (seenAnimations.has(animation)) return;
+        seenAnimations.add(animation);
+        var isTransition = typeof CSSTransition === "function" && animation instanceof CSSTransition;
+        var isCssAnimation = typeof CSSAnimation === "function" && animation instanceof CSSAnimation;
+        if (isTransition && (animation.playState === "running" || animation.playState === "paused" || animation.pending)) {
+          activeTransition = true;
+          return;
+        }
+        var effect = animation.effect;
+        if (!effect || !("target" in effect) || !effect.target) return;
+        var currentTime = animation.currentTime;
+        var playState = animation.playState;
+        if (animation.pending || currentTime === null || (playState === "running" && animation.startTime === null)) {
+          throw new Error("Layout measurement cannot safely preserve a pending animation or one without a current time. Wait for it to settle and retry.");
+        }
+        if (isCssAnimation && animationNameUpdates.has(targetOidOf(effect.target))) {
+          var currentName = window.getComputedStyle(effect.target).animationName;
+          if (animationNameUpdates.get(targetOidOf(effect.target)).some(function (name) {
+            return name === null || name.trim() !== currentName;
+          })) changedCssAnimationName = true;
+        }
+        if (measurementAnimations.length >= 1024) throw new Error("Layout measurement exceeds its motion isolation safety budget.");
+        measurementAnimations.push({
+          animation: animation,
+          effect: effect,
+          target: effect.target,
+          currentTime: currentTime,
+          playState: playState,
+          startTime: animation.startTime
+        });
+      });
+    });
+    if (activeTransition) {
+      throw new Error("Active CSS transitions prevent layout measurement. Wait for them to finish, or stop frame playback and retry.");
+    }
+    if (changedCssAnimationName) {
+      throw new Error("Layout measurement cannot safely preserve a CSS animation when changing animation-name on its target. Measure without changing animation-name, then apply that edit separately.");
+    }
+    var saved = {
+      elements: elementsByOid, elementMapStale: elementMapStale, componentMarks: componentMarks,
+      visibility: visibilityOverridesByOid, styles: previewStyleOverridesByOid,
+      text: previewTextOverridesByOid, moves: previewMovesByOid, inserts: previewInsertsByOid,
+      structure: structurePreviews, authoredProperties: authoredStylePropertiesCache,
+      authoredStyles: authoredStylesCache, cascade: cascadeRuleIndex, oidRules: oidStyleRuleIndex,
+      revision: revision, snapshot: lastSnapshot
+    };
+    var relationships = new Map();
+    var inline = new Map();
+    var transitionTargets = new Set();
+    var declarations = new Map();
+    var textChildren = new Map();
+    var disabledSheets = new Map();
+    var temporarySheets = [];
+    var transitionSuppressionRules = [];
+    var transitionSuppressionAdoptedSheets = [];
+    var previewElements = new Map();
+    var bytes = 0;
+    var reserve = function (value) {
+      bytes += typeof value === "string" ? value.length * 2 : 128;
+      if (bytes > 4 * 1024 * 1024) throw new Error("Layout measurement exceeds its safety budget.");
+    };
+    var rememberDeclaration = function (style) {
+      if (declarations.has(style)) return;
+      var text = style.cssText;
+      reserve(text);
+      declarations.set(style, text);
+    };
+    var rememberInline = function (element) {
+      if (!element || !element.style || inline.has(element)) return;
+      var value = element.getAttribute("style");
+      reserve(value);
+      inline.set(element, value);
+      transitionTargets.add(element);
+      rememberDeclaration(element.style);
+    };
+    var rememberNode = function (element) {
+      if (!element || relationships.has(element)) return;
+      reserve(element);
+      relationships.set(element, { parent: element.parentNode, before: element.nextSibling });
+      rememberInline(element);
+    };
+    var rememberStyles = function (element, oid) {
+      rememberInline(element);
+      (styleRulesByOid().get(oid) || []).forEach(function (rule) { rememberDeclaration(rule.style); });
+    };
+    var savedElementForOid = function (oid) {
+      if (saved.elements.has(oid)) return saved.elements.get(oid);
+      if (saved.moves.has(oid)) return saved.moves.get(oid).element;
+      if (saved.inserts.has(oid)) return saved.inserts.get(oid).element;
+      for (var previewIndex = 0; previewIndex < saved.structure.length; previewIndex += 1) {
+        var plan = saved.structure[previewIndex].plan;
+        var planned = plan.inserts.concat(plan.deletes);
+        for (var nodeIndex = 0; nodeIndex < planned.length; nodeIndex += 1) {
+          if (oidOf(planned[nodeIndex].element) === oid) return planned[nodeIndex].element;
+        }
+      }
+      return elementForOid(oid);
+    };
+    var disableSheet = function (sheet) {
+      if (!sheet || disabledSheets.has(sheet)) return;
+      disabledSheets.set(sheet, sheet.disabled);
+      sheet.disabled = true;
+    };
+    importantTransitionElements.forEach(rememberInline);
+    var activeElement = document.activeElement;
+    var selection = window.getSelection();
+    var ranges = [];
+    if (selection) for (var rangeIndex = 0; rangeIndex < selection.rangeCount; rangeIndex += 1) ranges.push(selection.getRangeAt(rangeIndex).cloneRange());
+    var addTransitionSuppression = function () {
+      var sentinel = "zeros-layout-measure-sentinel-" + String(revision);
+      while (motionScopes.some(function (scope) {
+        return scope.getElementById ? scope.getElementById(sentinel) : scope.querySelector("#" + sentinel);
+      })) sentinel += "-x";
+      var specificity = "";
+      for (var index = 0; index < 16; index += 1) specificity += ":not(#" + sentinel + ")";
+      var rule = "@layer { *" + specificity + ", *" + specificity + "::before, *" + specificity +
+        "::after, *" + specificity + "::marker, *" + specificity +
+        "::backdrop { transition-property: none !important; transition-duration: 0s !important; transition-delay: 0s !important; } }";
+      var temporarilyDisabled = new Set();
+      previewStylesheetTexts.forEach(function (_text, element) {
+        if (element.sheet) temporarilyDisabled.add(element.sheet);
+      });
+      document.querySelectorAll("style[data-zeros-runtime-options],style[data-zeros-runtime-instance-options]").forEach(function (element) {
+        if (element.sheet) temporarilyDisabled.add(element.sheet);
+      });
+      var sheetsForScope = function (scope) {
+        var sheets = [];
+        var addSheet = function (sheet) {
+          if (sheet && sheets.indexOf(sheet) < 0) sheets.push(sheet);
+        };
+        if (scope.nodeType === 9) {
+          Array.from(scope.styleSheets).forEach(addSheet);
+        } else {
+          scope.querySelectorAll("style,link[rel~='stylesheet']").forEach(function (element) {
+            addSheet(element.sheet);
+          });
+        }
+        if (scope.adoptedStyleSheets) Array.from(scope.adoptedStyleSheets).forEach(addSheet);
+        return sheets;
+      };
+      var addSuppressionRule = function (scope) {
+        var sheets = sheetsForScope(scope);
+        for (var sheetIndex = 0; sheetIndex < sheets.length; sheetIndex += 1) {
+          var sheet = sheets[sheetIndex];
+          if (sheet.disabled || temporarilyDisabled.has(sheet)) continue;
+          // A rule in a sheet whose media does not match is never applied.
+          var media = sheet.media && sheet.media.mediaText;
+          if (media && !window.matchMedia(media).matches) continue;
+          try {
+            var rules = sheet.cssRules;
+            var insertionIndex = 0;
+            while (insertionIndex < rules.length &&
+                   (rules[insertionIndex].type === CSSRule.CHARSET_RULE ||
+                    rules[insertionIndex].type === CSSRule.IMPORT_RULE)) insertionIndex += 1;
+            var insertedIndex = sheet.insertRule(rule, insertionIndex);
+            transitionSuppressionRules.push({ sheet: sheet, rule: sheet.cssRules[insertedIndex] });
+            return;
+          } catch (_error) {
+            // Try the next stylesheet; unreadable and unmodifiable sheets are
+            // not safe places for a reversible temporary rule.
+          }
+        }
+        if (typeof CSSStyleSheet !== "function" || !("adoptedStyleSheets" in scope)) {
+          throw new Error("Layout measurement cannot isolate motion in this scope.");
+        }
+        var adopted = new CSSStyleSheet();
+        if (typeof adopted.replaceSync !== "function") {
+          throw new Error("Layout measurement cannot isolate motion in this scope.");
+        }
+        adopted.replaceSync(rule);
+        var originalSheets = Array.from(scope.adoptedStyleSheets || []);
+        transitionSuppressionAdoptedSheets.push({ scope: scope, original: originalSheets });
+        scope.adoptedStyleSheets = originalSheets.concat(adopted);
+      };
+      motionScopes.forEach(addSuppressionRule);
+      transitionTargets.forEach(function (element) {
+        element.style.setProperty("transition-property", "none", "important");
+      });
+    };
+    var suppressInlineTransitions = function () {
+      transitionTargets.forEach(function (element) {
+        element.style.setProperty("transition-property", "none", "important");
+      });
+    };
+    var restoreAnimations = function () {
+      var failure = null;
+      measurementAnimations.forEach(function (state) {
+        var animation = state.animation;
+        var attempt = function (work) {
+          try { work(); } catch (error) { if (!failure) failure = error; }
+        };
+        attempt(function () {
+          if (animation.effect !== state.effect) animation.effect = state.effect;
+        });
+        attempt(function () {
+          if (state.effect.target !== state.target) state.effect.target = state.target;
+        });
+        attempt(function () {
+          if (state.playState === "running" && animation.playState !== "running") animation.play();
+          else if (state.playState === "paused" && animation.playState !== "paused") animation.pause();
+          else if (state.playState === "finished" && animation.playState !== "finished") animation.finish();
+        });
+        attempt(function () {
+          if (state.currentTime !== null && animation.currentTime !== state.currentTime) {
+            animation.currentTime = state.currentTime;
+          }
+        });
+      });
+      if (failure) throw failure;
+    };
+    var detachAnimations = function () {
+      measurementAnimations.forEach(function (state) {
+        if (state.animation.playState === "running") state.animation.pause();
+        if (state.currentTime !== null) state.animation.currentTime = state.currentTime;
+        if (state.animation.effect !== null) state.animation.effect = null;
+      });
+    };
+    var flushMotionScopes = function () {
+      motionScopes.forEach(function (scope) {
+        var element = scope.nodeType === 9 ? scope.documentElement : scope.host;
+        if (element) element.getBoundingClientRect();
+      });
+    };
+    return withoutObservedMutations(function () {
+      try {
+        // Original maps and caches never participate in temporary tree reads:
+        // refreshElementMap prunes missing nodes, including projected deletes.
+        visibilityOverridesByOid = new Map(saved.visibility);
+        previewStyleOverridesByOid = new Map();
+        previewTextOverridesByOid = new Map();
+        previewMovesByOid = new Map();
+        previewInsertsByOid = new Map();
+        structurePreviews = [];
+        elementsByOid = new Map(saved.elements);
+        authoredStylePropertiesCache = new WeakMap();
+        authoredStylesCache = new WeakMap();
+        cascadeRuleIndex = null;
+        oidStyleRuleIndex = null;
+
+        saved.styles.forEach(function (properties, oid) {
+          var element = layerBoxOf(elementForOid(oid));
+          previewElements.set(oid, element);
+          rememberStyles(element, oid);
+          properties.forEach(function (prior) { if (prior.rule) rememberDeclaration(prior.rule.style); });
+        });
+        saved.text.forEach(function (_preview, oid) {
+          var element = elementForOid(oid);
+          rememberInline(element);
+          var children = Array.from(element.childNodes);
+          children.forEach(reserve);
+          textChildren.set(element, children);
+        });
+        saved.moves.forEach(function (prior) { rememberNode(prior.element); });
+        saved.inserts.forEach(function (preview) { rememberNode(preview.element); });
+        saved.structure.forEach(function (preview) {
+          preview.plan.inserts.forEach(function (insert) { rememberNode(insert.element); });
+          preview.plan.deletes.forEach(function (deleted) { rememberNode(deleted.element); });
+        });
+        updates.forEach(function (update) {
+          rememberInline(layerBoxOf(savedElementForOid(update.nodeId)));
+        });
+        var history = [];
+        if (historyPresentationTarget !== null && paintedSourceVersion !== SOURCE_VERSION) {
+          var versions = generationHistory.length ? [generationHistory[0].from].concat(generationHistory.map(function (entry) { return entry.to; })) : [SOURCE_VERSION];
+          var from = versions.lastIndexOf(paintedSourceVersion);
+          var to = versions.lastIndexOf(SOURCE_VERSION);
+          if (from < 0 || to < 0) throw new Error("History generation is no longer retained.");
+          history = generationHistory.slice(Math.min(from, to), Math.max(from, to));
+          history.forEach(function (entry) {
+            (entry.moves || []).forEach(function (move) { rememberNode(move.element); });
+            (entry.inserts || []).forEach(function (insert) { rememberNode(insert.element); });
+            (entry.deletes || []).forEach(function (deleted) { rememberNode(deleted.element); });
+            entry.changes.forEach(function (change) {
+              rememberDeclaration(change.target);
+              saved.elements.forEach(function (element) {
+                var box = layerBoxOf(element);
+                if (box && box.style === change.target) rememberInline(box);
+              });
+            });
+          });
+        }
+        addTransitionSuppression();
+        detachAnimations();
+        // Capture first, then invert projections using their existing nodes.
+        // Every write below is covered by the outer finally, even a partial throw.
+        saved.styles.forEach(function (properties, oid) {
+          properties.forEach(function (prior) { restorePreviewStyle(previewElements.get(oid), prior); });
+        });
+        Array.from(saved.moves.values()).reverse().forEach(function (prior) {
+          prior.parent.insertBefore(prior.element, prior.before && prior.before.parentNode === prior.parent ? prior.before : null);
+        });
+        Array.from(saved.inserts.values()).reverse().forEach(function (preview) {
+          if (preview.element.parentNode) preview.element.remove();
+        });
+        saved.structure.slice().reverse().forEach(function (preview) {
+          preview.plan.inserts.slice().reverse().forEach(function (insert) { insert.element.remove(); });
+          preview.plan.deletes.slice().reverse().forEach(function (deleted) {
+            deleted.parent.insertBefore(deleted.element, deleted.before && deleted.before.parentNode === deleted.parent ? deleted.before : null);
+          });
+        });
+        saved.text.forEach(function (preview, oid) {
+          var element = saved.elements.get(oid) || elementForOid(oid);
+          element.textContent = preview.text;
+          restoreTextPreviewPaint(element, preview);
+        });
+        if (history.length) replayLayoutHistory(paintedSourceVersion, SOURCE_VERSION);
+        // Keep existing CSSStyleSheet/rule identities intact. The temporary
+        // original sheet occupies the same cascade position as its preview.
+        previewStylesheetTexts.forEach(function (original, element) {
+          reserve(original);
+          var baseline = document.createElement("style");
+          baseline.textContent = original;
+          if (element.hasAttribute("media")) baseline.setAttribute("media", element.getAttribute("media"));
+          ["data-zeros-source", "data-zeros-component"].forEach(function (attribute) {
+            if (element.hasAttribute(attribute)) baseline.setAttribute(attribute, element.getAttribute(attribute));
+          });
+          temporarySheets.push(baseline);
+          disableSheet(element.sheet);
+          element.parentNode.insertBefore(baseline, element.nextSibling);
+        });
+        document.querySelectorAll("style[data-zeros-runtime-options],style[data-zeros-runtime-instance-options]").forEach(function (element) {
+          disableSheet(element.sheet);
+        });
+        elementMapStale = true;
+        refreshElementMap();
+        resetStyleCaches();
+        oidStyleRuleIndex = null;
+        updates.forEach(function (update) {
+          var element = layerBoxOf(elementForOid(update.nodeId));
+          rememberStyles(element, update.nodeId);
+          if (Object.keys(update.styles).length) applyPreviewStyles(element, update.nodeId, update.styles, false);
+        });
+        resetStyleCaches();
+        flushMotionScopes();
+        detachAnimations();
+        return nodeIds.map(function (oid) { return detailsOf(elementForOid(oid), false, args.relocation === true); });
+      } finally {
+        var failure = null;
+        var restore = function (work) {
+          try { work(); } catch (error) { if (!failure) failure = error; }
+        };
+        var restored = new Set();
+        var restoreNode = function (element) {
+          if (restored.has(element)) return;
+          restored.add(element);
+          var relation = relationships.get(element);
+          if (!relation) return;
+          if (relationships.has(relation.parent)) restoreNode(relation.parent);
+          if (relationships.has(relation.before)) restoreNode(relation.before);
+          if (!relation.parent) {
+            if (element.parentNode) element.remove();
+          } else if (element.parentNode !== relation.parent || element.nextSibling !== relation.before) {
+            relation.parent.insertBefore(element, relation.before);
+          }
+        };
+        relationships.forEach(function (_relation, element) { restore(function () { restoreNode(element); }); });
+        textChildren.forEach(function (children, element) {
+          restore(function () {
+            // Text preview owns these direct text children; preserve the live
+            // objects and their ranges instead of recreating them from strings.
+            Array.from(element.childNodes).forEach(function (child) {
+              if (children.indexOf(child) < 0) element.removeChild(child);
+            });
+            for (var index = children.length - 1; index >= 0; index -= 1) {
+              var before = children[index + 1] || null;
+              if (children[index].parentNode !== element || children[index].nextSibling !== before) element.insertBefore(children[index], before);
+            }
+          });
+        });
+        var inlineStyles = new Set();
+        inline.forEach(function (_value, element) { inlineStyles.add(element.style); });
+        declarations.forEach(function (text, style) {
+          if (!inlineStyles.has(style)) restore(function () { if (style.cssText !== text) style.cssText = text; });
+        });
+        temporarySheets.forEach(function (element) { restore(function () { element.remove(); }); });
+        disabledSheets.forEach(function (disabled, sheet) { restore(function () { sheet.disabled = disabled; }); });
+        inline.forEach(function (value, element) {
+          restore(function () {
+            if (value === null) {
+              element.getAttribute("style");
+              element.removeAttribute("style");
+            } else if (element.getAttribute("style") !== value) element.setAttribute("style", value);
+          });
+        });
+        restore(function () { suppressInlineTransitions(); });
+        elementsByOid = saved.elements;
+        elementMapStale = saved.elementMapStale;
+        componentMarks = saved.componentMarks;
+        visibilityOverridesByOid = saved.visibility;
+        previewStyleOverridesByOid = saved.styles;
+        previewTextOverridesByOid = saved.text;
+        previewMovesByOid = saved.moves;
+        previewInsertsByOid = saved.inserts;
+        structurePreviews = saved.structure;
+        authoredStylePropertiesCache = saved.authoredProperties;
+        authoredStylesCache = saved.authoredStyles;
+        cascadeRuleIndex = saved.cascade;
+        oidStyleRuleIndex = saved.oidRules;
+        revision = saved.revision;
+        lastSnapshot = saved.snapshot;
+        restore(function () {
+          if (activeElement && activeElement.isConnected && document.activeElement !== activeElement) activeElement.focus({ preventScroll: true });
+          if (selection && ranges.length && relationships.size + textChildren.size > 0) {
+            selection.removeAllRanges();
+            ranges.forEach(function (range) { selection.addRange(range); });
+          }
+        });
+        restore(function () {
+          restoreAnimations();
+          flushMotionScopes();
+        });
+        inline.forEach(function (value, element) {
+          restore(function () {
+            if (value === null) {
+              element.getAttribute("style");
+              element.removeAttribute("style");
+            }
+            else if (element.getAttribute("style") !== value) element.setAttribute("style", value);
+          });
+        });
+        restore(function () { flushMotionScopes(); });
+        transitionSuppressionRules.forEach(function (entry) {
+          restore(function () {
+            var rules = entry.sheet.cssRules;
+            for (var index = rules.length - 1; index >= 0; index -= 1) {
+              if (rules[index] === entry.rule) {
+                entry.sheet.deleteRule(index);
+                break;
+              }
+            }
+          });
+        });
+        transitionSuppressionAdoptedSheets.slice().reverse().forEach(function (entry) {
+          restore(function () { entry.scope.adoptedStyleSheets = entry.original; });
+        });
+        if (failure) throw failure;
+      }
+    });
+  }
+
+  function replayLayoutHistory(fromVersion, toVersion) {
+    var versions = generationHistory.length ? [generationHistory[0].from].concat(generationHistory.map(function (entry) { return entry.to; })) : [SOURCE_VERSION];
+    var from = versions.lastIndexOf(fromVersion);
+    var to = versions.lastIndexOf(toVersion);
+    if (from < 0 || to < 0) throw new Error("History generation is no longer retained.");
+    var apply = function (entry, forward) {
+      var changes = entry.changes || [];
+      var moves = entry.moves || [];
+      var inserts = entry.inserts || [];
+      var deletes = entry.deletes || [];
+      if (!forward) deletes.slice().reverse().forEach(function (deleted) {
+        deleted.parent.insertBefore(deleted.element, deleted.before && deleted.before.parentNode === deleted.parent ? deleted.before : null);
+      });
+      if (forward) inserts.forEach(function (insert) {
+        insert.parent.insertBefore(insert.element, insert.before && insert.before.parentNode === insert.parent ? insert.before : null);
+      });
+      (forward ? moves : moves.slice().reverse()).forEach(function (move) {
+        var parent = forward ? move.parent : move.oldParent;
+        var before = forward ? move.before : move.oldBefore;
+        parent.insertBefore(move.element, before && before.parentNode === parent ? before : null);
+      });
+      changes.forEach(function (change) {
+        var value = forward ? change.after : change.before;
+        var priority = forward ? change.afterPriority : change.beforePriority;
+        if (value) change.target.setProperty(change.property, value, priority);
+        else change.target.removeProperty(change.property);
+      });
+      if (!forward) inserts.slice().reverse().forEach(function (insert) { if (insert.element.parentNode) insert.element.parentNode.removeChild(insert.element); });
+      if (forward) deletes.forEach(function (deleted) { deleted.element.remove(); });
+    };
+    withoutObservedMutations(function () {
+      while (from > to) { from -= 1; apply(generationHistory[from], false); }
+      while (from < to) { apply(generationHistory[from], true); from += 1; }
+    });
+    resetStyleCaches();
+  }
+
   /** Mirror an uncontrolled inline editor into the exact painted element.
    * The authored text is retained once and restored on Escape or teardown. */
   function restoreTextPreviewPaint(element, preview) {
@@ -4968,6 +5531,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     var selectorPattern = /^\[\s*data-oid\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\]\s]+))\s*\]$/i;
     for (var sheetIndex = 0; sheetIndex < document.styleSheets.length; sheetIndex += 1) {
       var rules;
+      if (document.styleSheets[sheetIndex].disabled) continue;
       var owner = document.styleSheets[sheetIndex].ownerNode;
       // A component's sheet is its main's source, never the frame's own rule.
       if (owner && owner.hasAttribute && owner.hasAttribute("data-zeros-component")) continue;
@@ -6655,6 +7219,9 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
         return layoutTargets(args);
       case "previewLayout":
         return previewLayout(args);
+      case "measureLayout":
+        if (enabledOptInMethods.indexOf("measureLayout") < 0) throw new Error("Unknown design runtime method: measureLayout");
+        return measureLayout(args);
       case "restoreGeneration":
         return args.commit === true
           ? withHistoryPresentation(function () { return restoreGeneration(args.targetSourceVersion, true, args.measure); })

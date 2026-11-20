@@ -210,8 +210,16 @@ export function DesignAutoLayoutControls({
     styles[key] = value ?? "";
     styles[property] = value ?? "";
   }
+  // A previewed size is also the sizing value its mode is read from.
+  const layout = liveStyles && confirmedDetails.layout
+    ? {
+        ...confirmedDetails.layout,
+        ...(liveStyles.width != null ? { widthValue: liveStyles.width } : {}),
+        ...(liveStyles.height != null ? { heightValue: liveStyles.height } : {}),
+      }
+    : confirmedDetails.layout;
   const details = liveStyles
-    ? { ...confirmedDetails, styles }
+    ? { ...confirmedDetails, styles, layout }
     : confirmedDetails;
   const value = (property: string, fallback = "") =>
     readDesignComputedStyle(details.styles, property) || fallback;

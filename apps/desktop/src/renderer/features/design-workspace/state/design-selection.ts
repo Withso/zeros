@@ -608,7 +608,7 @@ const HISTORY_SELECTION_MS = 5_000;
 const SELECTION_GENERATIONS_PER_FRAME = 32;
 const SELECTION_GENERATION_FRAMES = 256;
 const selectionByGeneration = new Map<string, Map<string, readonly DesignSelectionTarget[]>>();
-const historySelectionByWorkspace = new Map<string, { until: number; frame?: string }>();
+const historySelectionByWorkspace = new Map<string, { until: number; frame?: string; selectionEvent?: number; ownerRevision?: number }>();
 
 function rememberSelectionGeneration(workspaceId: string, frame: string, sourceVersion: string,
   targets: readonly DesignSelectionTarget[]): void {
@@ -632,9 +632,21 @@ function rememberCurrentSelection(workspaceId: string, frame: string, snapshot: 
     rememberSelectionGeneration(workspaceId, frame, snapshot.sourceVersion, selected);
 }
 
+/** An edit is leaving `sourceVersion`: the selection it is made with belongs
+ * to that generation, which an undo back to it brings back, even when the
+ * runtime had not shown that generation yet when the selection changed. */
+export function rememberDesignEditSelection(workspaceId: string, frame: string, sourceVersion: string): void {
+  const root = designRuntimeFrameState(workspaceId, frame)?.snapshot?.frame.oid;
+  const selected = (useDesignWorkspaceUiStore.getState().byWorkspace[workspaceId]?.selectedTargets ?? [])
+    .filter(target => target.frame === frame && (!target.nodeId || target.nodeId !== root));
+  rememberSelectionGeneration(workspaceId, frame, sourceVersion, selected);
+}
+
 /** An undo or redo is being applied; its reply names the frame it changed. */
 export function beginDesignHistorySelection(workspaceId: string): void {
-  historySelectionByWorkspace.set(workspaceId, { until: performance.now() + HISTORY_SELECTION_MS });
+  const view = useDesignWorkspaceUiStore.getState().byWorkspace[workspaceId];
+  historySelectionByWorkspace.set(workspaceId, { until: performance.now() + HISTORY_SELECTION_MS,
+    selectionEvent: view?.selectionEvent, ownerRevision: view?.ownerRevision });
 }
 
 /** The engine named the frame a history step changed, or none for a step
@@ -647,7 +659,7 @@ export function settleDesignHistorySelection(workspaceId: string, frame: string 
     historySelectionByWorkspace.delete(workspaceId);
     return;
   }
-  historySelectionByWorkspace.set(workspaceId, { until: performance.now() + HISTORY_SELECTION_MS, frame });
+  historySelectionByWorkspace.set(workspaceId, { ...historySelectionByWorkspace.get(workspaceId), until: performance.now() + HISTORY_SELECTION_MS, frame });
   const snapshot = designRuntimeFrameState(workspaceId, frame)?.snapshot;
   const restored = snapshot ? historySelectionFor(workspaceId, frame, snapshot, designWorkspaceView(workspaceId).selectedTargets) : null;
   if (restored) void selectDesignTargets({ workspaceId, folder: useDesignRuntimeStore.getState().byWorkspace[workspaceId]?.folder ?? "",
@@ -658,6 +670,12 @@ function historySelectionFor(workspaceId: string, frame: string, snapshot: Desig
   current: readonly DesignSelectionTarget[]): readonly DesignSelectionTarget[] | null {
   const pending = historySelectionByWorkspace.get(workspaceId);
   if (!pending || pending.frame !== frame || pending.until < performance.now()) return null;
+  // A selection made after the step was asked for is newer than the one it would bring back.
+  const view = useDesignWorkspaceUiStore.getState().byWorkspace[workspaceId];
+  if (view?.selectionEvent !== pending.selectionEvent || (view?.ownerRevision ?? 0) !== (pending.ownerRevision ?? 0)) {
+    historySelectionByWorkspace.delete(workspaceId);
+    return null;
+  }
   const remembered = selectionByGeneration.get(`${workspaceId}\u0000${frame}`)?.get(snapshot.sourceVersion);
   if (!remembered?.every(target => !target.nodeId || treeContainsOid(snapshot.tree, target.nodeId))) return null;
   const same = remembered.length === current.length &&

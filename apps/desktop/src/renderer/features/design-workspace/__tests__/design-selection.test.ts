@@ -42,6 +42,7 @@ import {
   resetDesignSelectionWorkflowsForTests,
   beginDesignHistorySelection,
   settleDesignHistorySelection,
+  rememberDesignEditSelection,
   selectDesignFrame,
   setDesignSelectionSnapshotReader,
   selectDesignNode,
@@ -280,6 +281,29 @@ describe("design selection workflows", () => {
       settleDesignHistorySelection("workspace-a", FRAME.file);
       show(AFTER, ["button", "button-copy"]);
       expect(designWorkspaceView("workspace-a").selectedTargets).toEqual([{ frame: FRAME.file, nodeId: "button-copy" }]);
+    });
+
+    it("keeps a selection the person made after asking for the undo", () => {
+      duplicate();
+      beginDesignHistorySelection("workspace-a");
+      // The undo is still saving when the person selects the frame instead.
+      useDesignWorkspaceUiStore.getState().setSelection("workspace-a", FRAME.file, null, [], { frameSelected: true });
+      settleDesignHistorySelection("workspace-a", FRAME.file);
+      show(BEFORE, ["button"]);
+      expect(designWorkspaceView("workspace-a").selectedTargets).toEqual([{ frame: FRAME.file }]);
+    });
+
+    it("brings back the selection an edit was made with, though the runtime still showed the newer generation", () => {
+      duplicate();
+      // Undo back to BEFORE is still showing AFTER when the person selects the button and edits it.
+      select("button");
+      rememberDesignEditSelection("workspace-a", FRAME.file, BEFORE);
+      show(AFTER, ["button", "button-copy"]);
+      select("button-copy");
+      beginDesignHistorySelection("workspace-a");
+      settleDesignHistorySelection("workspace-a", FRAME.file);
+      show(BEFORE, ["button"]);
+      expect(designWorkspaceView("workspace-a").selectedTargets).toEqual([{ frame: FRAME.file, nodeId: "button" }]);
     });
 
     it("brings back the frame itself when the frame was what was selected at that generation", () => {

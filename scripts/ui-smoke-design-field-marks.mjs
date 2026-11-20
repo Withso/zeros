@@ -206,7 +206,11 @@ export async function runDesignFieldMarksSmoke({ page, check }) {
   await page.keyboard.press("ArrowUp");
   await page.keyboard.press("Enter");
   await expect.poll(() => inline("home-note", "font-size")).toBe("17px");
-  check("Enter commits the stepped value", (await writes()) === keyWrites + 1);
+  // The panel takes edits while an earlier Undo saves; the write follows it.
+  check(
+    "Enter commits the stepped value",
+    await expect.poll(writes).toBe(keyWrites + 1).then(() => true, () => false),
+  );
   await size.focus();
   await page.keyboard.press("Tab");
   check(

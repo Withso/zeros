@@ -98,7 +98,7 @@ describe("design workspace interaction wiring", () => {
     // Opened with the request, so the runtime snapshot that follows the
     // engine's reply can restore the selection remembered for its generation.
     expect(inspector).toContain(`beginDesignHistorySelection(workspaceId);
-        return applyDesignHistoryCached(workspaceId, frame?.file ?? null, direction);`);
+      void applyDesignHistoryCached(workspaceId, frame?.file ?? null, direction)`);
     expect(inspector).toContain("settleDesignHistorySelection(workspaceId, result.historySelection === undefined ? result.historyFrame ?? null : null);");
   });
 

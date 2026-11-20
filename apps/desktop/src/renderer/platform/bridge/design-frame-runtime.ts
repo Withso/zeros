@@ -45,6 +45,7 @@ import {
   type DesignRuntimeStyleCommit,
   type DesignRuntimeStyleUpdate,
   type DesignRuntimeLayoutPreview,
+  type DesignRuntimeLayoutMeasure,
 } from "@zeros/protocol/design-runtime";
 import { designCaptureScheduler, type DesignCapturePriority } from "./design-capture-scheduler";
 import { withNativeDesignCaptureAdmission } from "./design-native-capture-admission";
@@ -181,6 +182,10 @@ export interface DesignFrameRuntimeConnection {
     input: DesignRuntimeLayoutPreview,
     signal?: AbortSignal,
   ): Promise<DesignRuntimeNodeGeometry[]>;
+  measureLayout(
+    input: DesignRuntimeLayoutMeasure,
+    signal?: AbortSignal,
+  ): Promise<DesignRuntimeNodeDetails[]>;
   restoreGeneration(
     targetSourceVersion: string,
     commit: boolean,
@@ -1013,6 +1018,25 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
       )
     )
       throw runtimeError("previewLayout returned malformed data");
+    return result;
+  }
+
+  async measureLayout(
+    input: DesignRuntimeLayoutMeasure,
+    signal?: AbortSignal,
+  ): Promise<DesignRuntimeNodeDetails[]> {
+    const result = await this.request("measureLayout", { ...input }, signal);
+    if (
+      !Array.isArray(result) ||
+      result.length > 64 ||
+      result.some(
+        (node) =>
+          !isNodeDetails(node) ||
+          node.sourceVersion !== this.expectedSourceVersion,
+      )
+    ) {
+      throw runtimeError("measureLayout returned malformed data");
+    }
     return result;
   }
 

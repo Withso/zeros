@@ -116,6 +116,9 @@ interface DesignRuntimeStore {
   ): void;
   forgetWorkspace(workspaceId: string): void;
   retireFrame(workspaceId: string, frame: string): void;
+  /** The frame's readbacks belong to a generation it has left; drop them so
+   * nothing edits from them before it is measured again. */
+  dropFrameDetails(workspaceId: string, frame: string): void;
 }
 
 /** A reply read while its layer was held in a state shows that state, not
@@ -835,6 +838,17 @@ export const useDesignRuntimeStore = create<DesignRuntimeStore>((set, get) => ({
           },
         },
       };
+    });
+  },
+
+  dropFrameDetails(workspaceId, file) {
+    set((state) => {
+      const workspace = state.byWorkspace[workspaceId];
+      const frame = workspace?.frames[file];
+      if (!workspace || !frame || !frame.detailOrder.length) return state;
+      return { byWorkspace: { ...state.byWorkspace, [workspaceId]: { ...workspace,
+        frames: { ...workspace.frames, [file]: { ...frame, detailsByNode: {}, detailOrder: [] } },
+      } } };
     });
   },
 

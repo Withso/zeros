@@ -87,6 +87,7 @@ import {
   captureDesignRuntimeScreenshot,
   notifyDesignSelectionSnapshot,
   persistDesignRuntimeAuditSnapshot,
+  rememberDesignEditSelection,
   setDesignSelectionSnapshotReader,
 } from "./design-selection";
 import {
@@ -1919,6 +1920,7 @@ export async function updateDesignNodeStylesCached(
       ),
       async (sourceVersion) => {
         assertOwner();
+        rememberDesignEditSelection(workspaceId, input.frame, sourceVersion);
         const beforeState = historyStateKey(
           designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data,
         );
@@ -2388,13 +2390,11 @@ export function applyDesignEditCached(
     if (intentFactory) assertIntentCurrent();
     if (!resolved) return null;
     refuseDesignComponentPartWrite(resolved.operations);
-    const key = designFoundationKey(
-      workspaceId,
-      file,
-      measured
-        ? sourceVersion
-        : preparedSourceVersion ?? resolveLocalFrameSourceVersion(workspaceId, file, sourceVersion),
-    );
+    const editSourceVersion = measured
+      ? sourceVersion
+      : preparedSourceVersion ?? resolveLocalFrameSourceVersion(workspaceId, file, sourceVersion);
+    rememberDesignEditSelection(workspaceId, file, editSourceVersion);
+    const key = designFoundationKey(workspaceId, file, editSourceVersion);
     const foundation = await designFoundationCache.load(
       key,
       () => fetchDesignFoundation(key),
@@ -2834,7 +2834,34 @@ async function adoptDesignStyleGeneration(
   }
 }
 
+const pendingRootSizingByWorkspace = new Map<string, number>();
+/** An Undo, Redo or sizing edit is queued or applying, so the frame's root may
+ * hug its content by the time a later edit takes its turn. */
+export function hasPendingDesignRootSizing(workspaceId: string): boolean {
+  return (pendingRootSizingByWorkspace.get(workspaceId) ?? 0) > 0;
+}
+
+/** Marks `work`, an edit that can change whether the root hugs, until it settles. */
+export async function trackDesignRootSizing<T>(workspaceId: string, work: Promise<T>): Promise<T> {
+  pendingRootSizingByWorkspace.set(workspaceId, (pendingRootSizingByWorkspace.get(workspaceId) ?? 0) + 1);
+  try {
+    return await work;
+  } finally {
+    const left = (pendingRootSizingByWorkspace.get(workspaceId) ?? 1) - 1;
+    if (left > 0) pendingRootSizingByWorkspace.set(workspaceId, left);
+    else pendingRootSizingByWorkspace.delete(workspaceId);
+  }
+}
+
 export async function applyDesignHistoryCached(
+  workspaceId: string,
+  frame: string | null,
+  direction: "undo" | "redo",
+): Promise<DesignApiMutationReplyWire> {
+  return trackDesignRootSizing(workspaceId, applyDesignHistoryInLane(workspaceId, frame, direction));
+}
+
+async function applyDesignHistoryInLane(
   workspaceId: string,
   frame: string | null,
   direction: "undo" | "redo",
@@ -3029,7 +3056,9 @@ export async function applyDesignHistoryCached(
                 await runtime.restoreGeneration(pendingTarget, false);
             }
           } catch {
-            /* Unknown generations fall back to the authoritative document. */
+            // Unknown generations fall back to the authoritative document;
+            // the readbacks still describe the generation history left.
+            useDesignRuntimeStore.getState().dropFrameDetails(workspaceId, restoredFrame);
           }
         }
       }
