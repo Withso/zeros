@@ -5,6 +5,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CATEGORIES, formatInventory, helpText, inventory, main, parseArguments } from "../storage-inventory.mjs";
+import { RENDERER_PROFILE_MARKER } from "../../apps/desktop/electron/renderer-profile-location";
 import { registryPath, upsertInstance } from "../local-instance-registry.mjs";
 
 const roots: string[] = [];
@@ -360,6 +361,20 @@ describe("pnpm storage:inventory", () => {
     expect(bytes(state)).toBe(du(state) - du(bundle));
     expect(bytes(logs)).toBe(du(logs));
     expect(bytes(data)).toBe(du(data) - du(logs));
+  });
+
+  it("finds hosted Dev's renderer profile beside its data or in Caches, not a marker alone", () => {
+    const holdsProfile = (seed: (home: string) => void) => {
+      const home = temporary();
+      file(L(home, "Application Support", "com.zeros.dev", "secrets.json"), "{}");
+      seed(home);
+      const owner = find(inventory({ home, platform: "darwin", processList: idle }).groups as Group[], "hosted-dev", "dev");
+      return owner?.holds.includes("a renderer profile");
+    };
+    expect(holdsProfile((home) => file(L(home, "Application Support", "com.zeros.dev", "electron", "Local Storage", "leveldb", "000003.log")))).toBe(true);
+    expect(holdsProfile((home) => file(L(home, "Caches", "com.zeros.dev", "Local Storage", "leveldb", "000003.log")))).toBe(true);
+    expect(holdsProfile((home) => file(L(home, "Application Support", "com.zeros.dev", "electron", RENDERER_PROFILE_MARKER)))).toBe(false);
+    expect(holdsProfile(() => {})).toBe(false);
   });
 
   it("runs from a checkout with no node_modules", () => {
