@@ -1974,7 +1974,7 @@ describe("WorkspaceService", () => {
       })) as { frame: { file: string } };
       const copyPath = path.join(design.path, designDirectoryNameFor(design.path), copied.frame.file);
       const linkedHost = fs.readFileSync(copyPath, "utf8");
-      expect(linkedHost).toMatch(/<zd-chat-composer data-oid="[^"]+" zd-variant="compact"><\/zd-chat-composer>/);
+      expect(linkedHost).toMatch(/<zd-chat-composer data-oid="[^"]+" data-zeros-frame-root zd-variant="compact"><\/zd-chat-composer>/);
 
       const undone = (await svc.handle("design.history.undo", {
         workspaceId: design.workspaceId,
