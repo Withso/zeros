@@ -875,6 +875,32 @@ describe("an inspector field scrub", () => {
     expect(fieldInput("opacity").value).toBe("");
   });
 
+  it("keeps a Mixed scrub reading Mixed when the scrubbed layer's details read back mid-scrub", async () => {
+    const other: DesignRuntimeNodeDetails = {
+      ...card, oid: "other", name: "Other", selector: '[data-oid="other"]',
+      styles: { ...card.styles, opacity: "1" },
+    };
+    const selection = { selectedNodeId: "card", selectedNodeIds: ["card", "other"] };
+    useDesignRuntimeStore.getState().publishNodeDetails("w", "/repo", "home.html", other, sourceVersion);
+    await showRuntime(card, false, sourceVersion, selection);
+    expect(fieldInput("opacity").placeholder).toBe("Mixed");
+    act(() => {
+      container.querySelector<HTMLButtonElement>('button[aria-label="Scrub Opacity"]')!
+        .dispatchEvent(pointer("pointerdown", 0));
+    });
+    for (let tick = 1; tick <= 4; tick += 1) {
+      act(() => { window.dispatchEvent(pointer("pointermove", tick * 2)); });
+      await settle();
+    }
+    expect(fieldInput("opacity").value).toBe("");
+    // The preview's readback replaces the layer's details after the last tick.
+    await showRuntime({ ...card }, false, sourceVersion, selection);
+    expect(fieldInput("opacity").placeholder).toBe("Mixed");
+    expect(fieldInput("opacity").value).toBe("");
+    await release();
+    expect(fieldInput("opacity").value).toBe("");
+  });
+
   it("resizes a frame whose document is not running from its confirmed details", async () => {
     const contentRoot: DesignRuntimeNodeDetails = {
       ...root,
@@ -894,6 +920,60 @@ describe("an inspector field scrub", () => {
     });
     // A frame too small on screen paints its picture and runs no document.
     mocks.runtime.mockReturnValue(null);
+    mocks.waitForRuntime.mockResolvedValue(null);
+    let prepared: { operations: Array<{ type: string; styles?: Record<string, string | null> }> } | undefined;
+    mocks.applyEdit.mockImplementation((_workspaceId, _frame, intent) => {
+      if (typeof intent !== "function") return Promise.resolve({ result: null });
+      return Promise.resolve(intent({ assertCurrent: () => {} })).then((transaction) => {
+        if (transaction) prepared = transaction;
+        return { result: null };
+      });
+    });
+
+    const width = container
+      .querySelector<HTMLButtonElement>('button[aria-label="Scrub W"]')
+      ?.closest<HTMLElement>("[data-design-inspector-field]")
+      ?.querySelector<HTMLInputElement>("input");
+    await act(async () => {
+      width!.focus();
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(width, "110");
+      width!.dispatchEvent(new Event("input", { bubbles: true }));
+      width!.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+      await Promise.resolve();
+    });
+    await vi.waitFor(() => expect(prepared).toBeDefined());
+
+    expect(prepared?.operations[0]).toMatchObject({
+      type: "node.set-styles",
+      nodeId: root.oid,
+      styles: { width: "calc(100% - 16px)" },
+    });
+    expect(prepared?.operations[1]).toMatchObject({
+      type: "frame.set-geometry",
+      frame: "home.html",
+      geometry: { x: 0, y: 0, width: 110, height: 300, z: 0 },
+    });
+  });
+
+  it("resizes a frame whose document is still reloading from its confirmed details", async () => {
+    const contentRoot: DesignRuntimeNodeDetails = {
+      ...root,
+      styles: {
+        ...root.styles,
+        boxSizing: "content-box",
+        paddingLeft: "6px",
+        paddingRight: "6px",
+        borderLeftWidth: "2px",
+        borderRightWidth: "2px",
+      },
+    };
+    const runtime = await showRuntime(contentRoot, false, sourceVersion, {
+      frameSelected: true,
+      selectedNodeId: null,
+      selectedNodeIds: [],
+    });
+    // The document is still at an older generation and does not catch up.
+    mocks.runtime.mockReturnValue({ ...runtime, sourceVersion: "9".repeat(24) });
     mocks.waitForRuntime.mockResolvedValue(null);
     let prepared: { operations: Array<{ type: string; styles?: Record<string, string | null> }> } | undefined;
     mocks.applyEdit.mockImplementation((_workspaceId, _frame, intent) => {

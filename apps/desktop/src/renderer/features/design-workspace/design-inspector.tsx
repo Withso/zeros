@@ -1304,9 +1304,11 @@ const InspectorStyleField = React.memo(function InspectorStyleField({
   // Several layers that differ show the Mixed placeholder until a preview
   // or an edit gives the field one value for all of them. A Mixed scrub's
   // preview moves each by the same amount, so they still differ: the field
-  // keeps reading Mixed until these details are replaced.
-  const steppingRef = useRef<DesignRuntimeNodeDetails | undefined>(undefined);
-  if (options?.mixed && (liveValue === undefined || (details && steppingRef.current === details))) displayedValue = "";
+  // keeps reading Mixed until that preview clears, however often a
+  // readback replaces these details meanwhile.
+  const steppingRef = useRef(false);
+  if (liveValue === undefined) steppingRef.current = false;
+  if (options?.mixed && (liveValue === undefined || steppingRef.current)) displayedValue = "";
   // Measured geometry (X, Y, rotation) never shows a token; a live preview
   // shows its own value, and differing layers read Mixed.
   const tokenAccepts = designTokenFieldTypes(property);
@@ -1351,7 +1353,7 @@ const InspectorStyleField = React.memo(function InspectorStyleField({
         whole: Boolean(options.whole),
         selection,
         stepping: (on) => {
-          steppingRef.current = on ? details : undefined;
+          steppingRef.current = on;
         },
         preview: (styles, perNode) => void Promise.resolve(onPreviewStyles(styles, perNode)).catch(() => {}),
         previewLayout: (action) => void Promise.resolve(onPreviewLayoutAction?.(action)).catch(() => {}),
@@ -1407,17 +1409,19 @@ const InspectorStyleField = React.memo(function InspectorStyleField({
             }
           : undefined
       }
-      onPreview={(next) =>
-        options?.geometry && onPreviewLayoutAction
+      onPreview={(next) => {
+        steppingRef.current = false;
+        return options?.geometry && onPreviewLayoutAction
           ? onPreviewLayoutAction(layoutAction(next))
-          : onPreviewStyles(styleUpdate(next))
-      }
+          : onPreviewStyles(styleUpdate(next));
+      }}
       onCancelPreview={onCancelPreview}
-      onCommit={(next) =>
-        options?.geometry && onLayoutAction
+      onCommit={(next) => {
+        steppingRef.current = false;
+        return options?.geometry && onLayoutAction
           ? onLayoutAction(layoutAction(next))
-          : onCommitStyles(styleUpdate(next))
-      }
+          : onCommitStyles(styleUpdate(next));
+      }}
       unitBasis={unitBasis}
       // Emptying X, Y or rotation removes the offset or turn, which no menu
       // offers; elsewhere an emptied field restores its value.
@@ -3142,10 +3146,19 @@ export const DesignInspector = React.memo(function DesignInspector({
               await applyDesignEditCached(owner, target, async ({ assertCurrent }) => {
                 let latest: typeof target;
                 let rootStyles: Record<string, string | null>;
-                if (!designFrameRuntime(owner, target.file)) {
-                  // A frame that runs no document, such as one too small on
-                  // screen, has no preview over its confirmed readback.
-                  assertCurrent();
+                const current = designWorkspaceSnapshotCache.peekSnapshot(owner).data?.frames.find(
+                  (candidate) => candidate.file === target.file,
+                ) ?? target;
+                let live = designFrameRuntime(owner, target.file);
+                if (live && live.sourceVersion !== current.sourceVersion)
+                  live = await waitForDesignFrameRuntime(owner, target.file, 2_000, {
+                    sourceVersion: current.sourceVersion,
+                  });
+                assertCurrent();
+                if (!live) {
+                  // A frame that runs no document at this generation, such as
+                  // one too small on screen or still reloading, has no preview
+                  // over its confirmed readback.
                   latest = designWorkspaceSnapshotCache.peekSnapshot(owner).data?.frames.find(
                     (candidate) => candidate.file === target.file,
                   ) ?? target;

@@ -263,7 +263,10 @@ export async function runDesignComponentInstancesSmoke({ page, check }) {
   const writesBeforeDrag = await writes();
   await drag(slider("Width"), 0.2, 0.6, { release: false, steps: 20 });
   await expect.poll(() => style("home.html", '[data-zd-instance] > .composer', "width")).not.toBe("800px");
-  const during = await page.evaluate((from) => (window.__zerosHarnessWorkbenchOperations ?? []).slice(from), opsBefore);
+  // A still captured before the drag may finish saving during it; the drag
+  // pauses background captures, so it never starts one.
+  const during = await page.evaluate((from) => (window.__zerosHarnessWorkbenchOperations ?? []).slice(from), opsBefore)
+    .then((names) => names.filter((name) => name !== "design.screenshot.set"));
   check("dragging an instance's CSS-only number previews it on that instance with no engine request or bridge read",
     during.length === 0, JSON.stringify(during));
   await page.mouse.up();
