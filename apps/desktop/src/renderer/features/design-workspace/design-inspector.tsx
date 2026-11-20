@@ -2116,7 +2116,17 @@ export const DesignInspector = React.memo(function DesignInspector({
   const heldParents = useMemo(() => (heldDetails ? [heldDetails] : null), [heldDetails]);
   const heldChanges = useMemo(() => (heldDetails ? designHeldStateChanges(heldDetails) : null), [heldDetails]);
   const shownDetails = heldDetails ?? presentedElementDetails;
-  const shownParents = heldParents ?? layoutParents;
+  // A selected layer read back at another generation than the primary one
+  // drops out of layoutParents until it catches up. Its fields keep showing
+  // the last complete selection meanwhile, so a Mixed field stays Mixed.
+  const completeParentsRef = useRef<{ owner: string; parents: DesignRuntimeNodeDetails[] } | null>(null);
+  if (completeParentsRef.current?.owner !== styleOwnerKey) completeParentsRef.current = null;
+  if (layoutParents.length === styleNodeIds.length)
+    completeParentsRef.current = { owner: styleOwnerKey, parents: layoutParents };
+  const presentedParents = layoutParents.length < styleNodeIds.length && completeParentsRef.current
+    ? completeParentsRef.current.parents
+    : layoutParents;
+  const shownParents = heldParents ?? presentedParents;
   const heldState = heldDetails?.heldState ?? null;
   const originsContext = useDesignStyleOriginsContext(workspaceId);
   // The Styled-by filter belongs to the selection it was chosen for. A held

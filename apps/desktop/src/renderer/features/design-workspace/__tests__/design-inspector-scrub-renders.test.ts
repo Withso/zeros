@@ -258,12 +258,14 @@ async function showRuntime(
     frameSelected?: boolean;
     selectedNodeId?: string | null;
     selectedNodeIds?: string[];
+    frameVersion?: string;
   } = {},
 ) {
   const {
     frameSelected = false,
     selectedNodeId = "card",
     selectedNodeIds = ["card"],
+    frameVersion = sourceVersion,
   } = selection;
   const getNodeDetails = vi.fn<(nodeId: string) => Promise<DesignRuntimeNodeDetails>>(async (nodeId) =>
     nodeId === "root" && details.oid !== "root" ? root : details,
@@ -280,7 +282,7 @@ async function showRuntime(
     ),
   };
   mocks.runtime.mockReturnValue(runtime);
-  const frame = { file: "home.html", sourceVersion, title: "Home", x: 0, y: 0, z: 0, width: 400, height: 300 } as never;
+  const frame = { file: "home.html", sourceVersion: frameVersion, title: "Home", x: 0, y: 0, z: 0, width: 400, height: 300 } as never;
   designWorkspaceSnapshotCache.setData("w", { frames: [frame] } as never);
   const snapshot = { sourceVersion, revision: 1, tree: [], warnings: [], frame: root,
     viewport: { width: 400, height: 300, scrollX: 0, scrollY: 0 } } as DesignRuntimeSnapshot;
@@ -855,6 +857,22 @@ describe("an inspector field scrub", () => {
       frame: "home.html",
       geometry: { x: 0, y: 0, width: 480, height: 300, z: 0 },
     });
+  });
+
+  it("keeps a Mixed field Mixed while one selected layer reads back at a newer generation", async () => {
+    const other: DesignRuntimeNodeDetails = {
+      ...card, oid: "other", name: "Other", selector: '[data-oid="other"]',
+      styles: { ...card.styles, opacity: "1" },
+    };
+    const selection = { selectedNodeId: "card", selectedNodeIds: ["card", "other"] };
+    useDesignRuntimeStore.getState().publishNodeDetails("w", "/repo", "home.html", other, sourceVersion);
+    await showRuntime(card, false, sourceVersion, selection);
+    expect(fieldInput("opacity").placeholder).toBe("Mixed");
+    expect(fieldInput("opacity").value).toBe("");
+    const nextVersion = "2".repeat(24);
+    await showRuntime({ ...card, sourceVersion: nextVersion }, false, nextVersion, { ...selection, frameVersion: nextVersion });
+    expect(fieldInput("opacity").placeholder).toBe("Mixed");
+    expect(fieldInput("opacity").value).toBe("");
   });
 
   it("resizes a frame whose document is not running from its confirmed details", async () => {
