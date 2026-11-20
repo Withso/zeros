@@ -63,6 +63,12 @@ function snapshot(root: string) {
   return out;
 }
 
+/** Allocated bytes of a tree, as `du` counts them. */
+function du(target: string): number {
+  const stat = fs.lstatSync(target);
+  return stat.blocks * 512 + (stat.isDirectory() ? fs.readdirSync(target).reduce((sum, name) => sum + du(path.join(target, name)), 0) : 0);
+}
+
 function fixture() {
   const home = temporary();
   file(L(home, "Application Support", "com.zeros.dev.coral-reef", "zeros.db"));
@@ -281,6 +287,79 @@ describe("pnpm storage:inventory", () => {
     const allocated = (target: string) => fs.lstatSync(target).blocks * 512;
     expect(total).toBe(allocated(path.join(first, "blob")) + allocated(first) + allocated(second));
     expect(formatInventory(report)).toContain("upper bound");
+  });
+
+  // Devin review: the flat legacy Library folders were never discovered, and
+  // an identity's preferences and WebKit data were never counted.
+  it("reports a legacy Local identity whose only folder left is its Library cache", () => {
+    const home = temporary();
+    const session = L(home, "Caches", "com.zeros.local.e123456789abcdef");
+    file(path.join(session, "Local Storage", "leveldb", "000003.log"), "draft");
+    const owner = find(inventory({ home, platform: "darwin", processList: idle }).groups as Group[], "local", "e123456789abcdef");
+    expect(owner).toMatchObject({ status: "checkout, not registered", holds: ["a renderer profile"] });
+    expect(owner?.items).toEqual([expect.objectContaining({ path: session, readable: true })]);
+    expect(owner?.items[0].bytes).toBeGreaterThan(0);
+  });
+
+  it("attributes a known Local identity's preferences, WebKit and saved state to it", () => {
+    const home = temporary();
+    const id = "f123456789abcdef";
+    file(L(home, "Application Support", "com.zeros.local", "instances", id, "zeros.db"));
+    const owned = [
+      file(L(home, "Preferences", `com.zeros.local.${id}.plist`), "plist"),
+      file(L(home, "WebKit", `com.zeros.local.${id}`, "WebsiteData", "x"), "w"),
+      file(L(home, "HTTPStorages", `com.zeros.local.${id}`, "httpstorages.sqlite"), "h"),
+      file(L(home, "Saved Application State", `com.zeros.local.${id}.savedState`, "data.data"), "s"),
+    ].map((target) => (target.endsWith(".plist") ? target : path.dirname(target).replace(/\/(?:WebsiteData)$/, "")));
+    const owner = find(inventory({ home, platform: "darwin", processList: idle }).groups as Group[], "local", id);
+    for (const target of owned) {
+      const item = owner?.items.find((candidate) => candidate.path === target);
+      expect(item, target).toBeDefined();
+      expect(item?.bytes).toBeGreaterThan(0);
+    }
+    // Preferences alone is enough to discover an identity.
+    const lone = temporary();
+    file(L(lone, "Preferences", `com.zeros.local.${id}.plist`), "plist");
+    expect(find(inventory({ home: lone, platform: "darwin", processList: idle }).groups as Group[], "local", id)).toBeDefined();
+  });
+
+  // Devin review: ~/.zeros-dev was measured first and took the inodes of the
+  // per-worktree bundles inside it, so each bundle reported 0 bytes.
+  it("attributes a bundle inside the hosted Dev state root to its own row, whatever --only says", () => {
+    const home = temporary();
+    const state = path.join(home, ".zeros-dev");
+    file(path.join(state, "settings.json"), "{}");
+    const bundle = path.join(state, "dev-instances", "coral-reef");
+    file(path.join(bundle, "Zeros Dev.app", "blob"), "b".repeat(64 * 1024));
+    const bundleBytes = (report: ReturnType<typeof inventory>) =>
+      find(report.groups as Group[], "dev-worktrees", "coral-reef")?.items.find((item) => item.path === bundle)?.bytes;
+    const full = inventory({ home, platform: "darwin", processList: idle });
+    const alone = inventory({ home, platform: "darwin", processList: idle, only: ["dev-worktrees"] });
+    expect(bundleBytes(full)).toBe(du(bundle));
+    expect(bundleBytes(alone)).toBe(du(bundle));
+    const hosted = find(full.groups as Group[], "hosted-dev", "dev")?.items.find((item) => item.path === state)?.bytes;
+    expect(hosted).toBe(du(state) - du(bundle));
+    const hostedOnly = inventory({ home, platform: "darwin", processList: idle, only: ["hosted-dev"] });
+    expect(find(hostedOnly.groups as Group[], "hosted-dev", "dev")?.items[0].bytes).toBe(du(state) - du(bundle));
+  });
+
+  it("attributes nested Local roots to themselves: a legacy bundle in the state root, logs in a Linux data dir", () => {
+    const home = temporary();
+    const id = "a123456789abcdef";
+    const state = path.join(home, ".zeros-local", "instances", id);
+    file(path.join(state, "worktrees", "repo", "ws", "f.txt"));
+    const bundle = path.join(state, "bundle");
+    file(path.join(bundle, "Zeros Local.app", "blob"), "b".repeat(64 * 1024));
+    const data = path.join(home, ".local", "share", "zeros-local", "instances", id);
+    file(path.join(data, "zeros.db"));
+    const logs = path.join(data, "logs");
+    file(path.join(logs, "main.log"), "l".repeat(16 * 1024));
+    const owner = find(inventory({ home, platform: "linux", processList: idle }).groups as Group[], "local", id);
+    const bytes = (target: string) => owner?.items.find((item) => item.path === target)?.bytes;
+    expect(bytes(bundle)).toBe(du(bundle));
+    expect(bytes(state)).toBe(du(state) - du(bundle));
+    expect(bytes(logs)).toBe(du(logs));
+    expect(bytes(data)).toBe(du(data) - du(logs));
   });
 
   it("runs from a checkout with no node_modules", () => {

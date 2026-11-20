@@ -124,13 +124,16 @@ function list(home, directory) {
 }
 
 /** Allocated bytes (what `du` reports), each inode once across a report.
- * `hardlinked` flags a file with another link, possibly outside every row. */
-function sizeOf(target, { deadline, seen }) {
+ * `hardlinked` flags a file with another link, possibly outside every row.
+ * `nested` are other rows' roots inside this one: each is measured as its own
+ * row, so this traversal skips it. */
+function sizeOf(target, { deadline, seen, nested = new Set() }) {
   let bytes = 0, hardlinked = false, complete = true;
   const stack = [target];
   while (stack.length) {
     if (Date.now() > deadline) return { bytes, complete: false, hardlinked };
     const current = stack.pop();
+    if (nested.has(current)) continue;
     let stat;
     try {
       stat = fs.lstatSync(current);
@@ -233,7 +236,8 @@ function defaultSecurity(args) {
 
 /** Every development identity's possible roots, both layouts plus the
  * pre-release branch shapes (`~/zeros-local/<inst>`,
- * `Caches/com.zeros.local/instances/<inst>`), with the role each plays. */
+ * `Caches/com.zeros.local/instances/<inst>`) and, on macOS, its bundle id in
+ * every Library folder, with the role each plays. */
 function developmentRoots(instance, { home, platform, env, containers }) {
   const v2 = paths.developmentPaths({ instance, layout: "v2", home, platform, env });
   const legacy = paths.developmentPaths({ instance, layout: "legacy", home, platform, env });
@@ -242,7 +246,10 @@ function developmentRoots(instance, { home, platform, env, containers }) {
     [path.join(home, "zeros-local", instance), "visible"],
     [path.join(containers.cache, paths.FAMILY_ID, "instances", instance), "session"],
   ];
-  if (legacy) rows.push([legacy.dataDir, "data"], [legacy.sessionDataDir, "session"], [legacy.logDir, "logs"]);
+  rows.push([legacy.dataDir, "data"], [legacy.sessionDataDir, "session"], [legacy.logDir, "logs"], [legacy.bundleDir, "bundle"]);
+  if (platform === "darwin")
+    for (const [folder, suffix] of LIBRARY)
+      rows.push([path.join(home, "Library", folder, `${legacy.bundleId}${suffix}`), LIBRARY_ROLE[folder] ?? "other"]);
   const seen = new Set();
   return rows.filter(([target]) => !seen.has(target) && seen.add(target)).map(([target, role]) => ({ path: target, role }));
 }
@@ -285,16 +292,21 @@ export function inventory({
     if (!groups.has(key)) groups.set(key, { category, identity, status: null, items: [], holds: new Set(), unknown: new Set(), inUse: new Set() });
     return groups.get(key);
   };
+  // Every discovered root is recorded whatever --only says, so a subtree
+  // another row owns is never counted in its parent; --only filters the output.
   const add = (category, identity, target, role) => {
-    if (!only.includes(category)) return;
     const owner = group(category, identity);
     if (owner.items.some((item) => item.path === target)) return;
     owner.items.push({ path: target, role, state: reachable(home, target) });
   };
+  const listed = new Map();
   const scan = (directory) => {
-    const result = list(home, directory);
-    if (!result.ok) report.unlisted.push(directory);
-    return result.names;
+    if (!listed.has(directory)) {
+      const result = list(home, directory);
+      if (!result.ok) report.unlisted.push(directory);
+      listed.set(directory, result.names);
+    }
+    return listed.get(directory);
   };
   const library = path.join(home, "Library");
 
@@ -338,6 +350,14 @@ export function inventory({
     const reverseDns = platform === "darwin" || platform === "win32";
     const flatData = reverseDns ? /^com\.zeros\.local\.(.+)$/ : /^zeros-local-(.+)$/;
     for (const name of scan(containers.dataInstances)) ids.add(name);
+    const flatBundle = /^com\.zeros\.local\.(.+)$/;
+    const flatLocations = platform === "darwin" ? LIBRARY.map(([folder, suffix]) => [path.join(library, folder), suffix]) : [[containers.cache, ""]];
+    for (const [directory, suffix] of flatLocations)
+      for (const name of scan(directory)) {
+        if (suffix && !name.endsWith(suffix)) continue;
+        const match = (suffix ? name.slice(0, -suffix.length) : name).match(flatBundle);
+        if (match) ids.add(match[1]);
+      }
     for (const name of scan(containers.appData)) {
       const match = name.match(flatData);
       if (match) ids.add(match[1]);
@@ -391,9 +411,11 @@ export function inventory({
     }
   }
 
+  for (const owner of groups.values()) owner.items = owner.items.filter((item) => item.state !== "missing");
+  const roots = [...groups.values()].flatMap((owner) => owner.items.map((item) => item.path));
+  const nestedIn = (target) => new Set(roots.filter((other) => other.startsWith(`${target}${path.sep}`)));
   for (const owner of groups.values()) {
-    owner.items = owner.items.filter((item) => item.state !== "missing");
-    if (!owner.items.length) continue;
+    if (!only.includes(owner.category) || !owner.items.length) continue;
     for (const item of owner.items) {
       if (item.state === "refused") {
         owner.unknown.add(`${item.path} (reached through a link)`);
@@ -401,7 +423,7 @@ export function inventory({
         item.complete = true;
         continue;
       }
-      const size = Date.now() > deadline ? { bytes: 0, complete: false, hardlinked: false } : sizeOf(item.path, { deadline, seen });
+      const size = Date.now() > deadline ? { bytes: 0, complete: false, hardlinked: false } : sizeOf(item.path, { deadline, seen, nested: nestedIn(item.path) });
       Object.assign(item, { bytes: size.bytes, complete: size.complete });
       if (!size.complete) owner.unknown.add("its full size (some entries could not be read in time)");
       report.hardlinked ||= size.hardlinked;
