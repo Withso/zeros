@@ -9,8 +9,9 @@ export const COMPOSER_TRAY_RADIUS = "rounded-[calc(var(--radius-lg)*2.75)]";
 /**
  * A composer that cannot act yet, or has something to say, sits inside a
  * slightly larger sidebar-bg tray with one status line beneath it and at most
- * one action. With no message the composer renders alone, so nothing moves
- * above it and nothing is drawn between the context row and the card.
+ * one action. Nothing is drawn between the context row and the card. The
+ * wrapper element never changes, so the composer is not remounted (and keeps
+ * its focus and history) as the message comes and goes.
  */
 export function ComposerTray({
   message,
@@ -21,7 +22,8 @@ export function ComposerTray({
   action?: { label: string; onClick: () => void; onIntent?: () => void } | null;
   children?: ReactNode;
 }) {
-  if (!message) return <>{children}</>;
+  if (!message)
+    return <div className="contents">{children}</div>;
   return (
     <div
       data-composer-tray=""

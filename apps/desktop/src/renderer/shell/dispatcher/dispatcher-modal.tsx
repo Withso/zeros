@@ -262,20 +262,18 @@ function ActiveDispatcherPage({
   const computerIdentity = cloud.computerOwner ? JSON.parse(cloud.computerOwner) as [string, string] : null;
   // The personal home has no Cloud Computer yet; its cloud side keeps a device draft so the prompt survives a flip.
   const personalHome = Boolean(unified && cloud.organization?.isPersonal);
-  const draftKeyFor = (target: CreatePlacement) => {
-    const owner = target === "cloud" && !computerIdentity ? (personalHome ? "local" : null) : createComposerDraftOwner({
+  const draftOwnerFor = (target: CreatePlacement) =>
+    target === "cloud" && !computerIdentity ? (personalHome ? "local" : null) : createComposerDraftOwner({
       backend: CONTROL_PLANE_URL,
       userId: computerIdentity?.[0],
       organizationId: target === "cloud" ? computerIdentity![1] : null,
     });
+  const draftKeyFor = (target: CreatePlacement) => {
+    const owner = draftOwnerFor(target);
     const project = target === "cloud" ? cloud.computerRepository?.id ?? cloud.rememberedRepositoryId : selectedProject?.repoRoot;
     return owner ? createComposerDraftKey({ owner, project: project ?? null, placement: target }) : null;
   };
-  const draftOwner = placement === "cloud" && !computerIdentity ? (personalHome ? "local" : null) : createComposerDraftOwner({
-    backend: CONTROL_PLANE_URL,
-    userId: computerIdentity?.[0],
-    organizationId: placement === "cloud" ? computerIdentity![1] : null,
-  });
+  const draftOwner = draftOwnerFor(placement);
   const draftKey = draftKeyFor(placement);
   const choosePlacement = (next: CreatePlacement) => {
     if (next === placement || busy) return;

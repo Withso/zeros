@@ -8,7 +8,7 @@ const card = createElement("div", { "data-card": "" }, "composer");
 describe("composer tray", () => {
   it("renders the composer alone when there is nothing to say", () => {
     expect(renderToStaticMarkup(createElement(ComposerTray, { message: null }, card))).toBe(
-      '<div data-card="">composer</div>',
+      '<div class="contents"><div data-card="">composer</div></div>',
     );
   });
 
