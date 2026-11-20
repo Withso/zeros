@@ -42,7 +42,7 @@ describe("Local chat/workspace links", () => {
     registerProtocol();
     expect(state.register).toHaveBeenCalledWith("zeros-dev");
   });
-  it.each(["stable", "alpha", "beta", "dev"])(
+  it.each(["stable", "alpha", "dev"])(
     "routes only %s's links as navigation",
     async (channel) => {
       state.channel = channel;
@@ -61,7 +61,7 @@ describe("Local chat/workspace links", () => {
     },
   );
 
-  it.each(["stable", "alpha", "beta", "dev"])(
+  it.each(["stable", "alpha", "dev"])(
     "routes %s's numbered workspace and chat links as navigation",
     async (channel) => {
       state.channel = channel;

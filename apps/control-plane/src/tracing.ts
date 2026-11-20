@@ -89,7 +89,7 @@ export type ControlPlaneTracingOptions = Readonly<{
   /** Share of requests without a remote parent that are recorded, 0..1. */
   sampleRatio: number;
   processRole: "api" | "worker" | "realtime" | "combined";
-  deploymentChannel?: "development" | "alpha" | "beta" | "production";
+  deploymentChannel?: "development" | "alpha" | "production";
   /** "simple" exports each span when it ends (tests); default "batch". */
   processor?: "batch" | "simple";
 }>;

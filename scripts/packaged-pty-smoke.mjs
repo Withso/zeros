@@ -3,7 +3,7 @@
 // Packaged PTY smoke — exercise the exact .app terminal runtime
 // ──────────────────────────────────────────────────────────
 //
-// Loading `node-pty` is not enough: beta.58 loaded its signed native addon but
+// Loading `node-pty` is not enough: a shipped build loaded its signed native addon but
 // every pty.spawn failed with `posix_spawnp failed`. This probe runs the shipped
 // Electron executable as Node, loads the runtime-safe node-pty resource through
 // the shipped pty-host.cjs, spawns /bin/sh in a real PTY, and requires output +

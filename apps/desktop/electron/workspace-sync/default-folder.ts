@@ -1,7 +1,7 @@
 import { dirname, join } from "node:path";
 
 /** 12.zz: the app's channel folder, the parent of its visible workspaces root
- * (~/zeros, ~/zeros-alpha, ~/zeros-beta, a dev instance's own), never a hard-coded ~/zeros. */
+ * (~/zeros, ~/zeros-alpha, a dev instance's own), never a hard-coded ~/zeros. */
 export const syncChannelFolder = (workspacesRoot: string) => dirname(workspacesRoot);
 
 /** 12.z/12.zz: the folder a switch turns sync on in, without a picker:

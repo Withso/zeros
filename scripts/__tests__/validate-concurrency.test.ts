@@ -142,7 +142,7 @@ describe("queued concurrency policy", () => {
   it("does not extend the allowlist to another workflow or a misspelled job", () => {
     for (const file of [
       ".github/workflows/ci.yml",
-      ".github/workflows/release-beta.yml",
+      ".github/workflows/release-preview.yml",
     ]) {
       expect(validateQueuedConcurrency(queuedJob(), file)).toEqual([
         expect.stringContaining("allowlisted jobs"),

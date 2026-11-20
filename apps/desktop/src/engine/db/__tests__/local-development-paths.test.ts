@@ -45,7 +45,7 @@ describe("Local storage compatibility and isolation", () => {
     expect(roots[0]).not.toBe(roots[1]);
   });
 
-  it.each(["stable", "beta", "alpha", "dev"])(
+  it.each(["stable", "alpha", "dev"])(
     "preserves %s state paths with or without an instance",
     (channel) => {
       vi.stubEnv("ZEROS_DEV", "1");
@@ -118,7 +118,7 @@ describe("Local storage compatibility and isolation", () => {
     expect(zerosWorkspacesRoot()).not.toBe(first.workspaces);
     vi.stubEnv("ZEROS_INSTANCE", "a123456789abcdef");
     expect(zerosDbPath()).toBe(first.db);
-    for (const channel of ["dev", "alpha", "beta", "stable"]) {
+    for (const channel of ["dev", "alpha", "stable"]) {
       vi.stubEnv("ZEROS_LOCAL_DEVELOPMENT", undefined);
       vi.stubEnv("ZEROS_CHANNEL", channel);
       expect(appIdentity()).not.toBe(first.id);

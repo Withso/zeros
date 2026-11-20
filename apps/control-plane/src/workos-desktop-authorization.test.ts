@@ -129,6 +129,7 @@ describe("WorkOS hosted desktop authorization", () => {
     const { app, desktopAuthorizationUrl } = setup();
     for (const query of [
       `state=foreign.${"s".repeat(43)}&code_challenge=${CHALLENGE}`,
+      `state=zeros-beta.${"s".repeat(43)}&code_challenge=${CHALLENGE}`,
       `state=${STATE}&code_challenge=short`,
     ]) {
       expect((await app.request(`/auth/desktop/start?${query}`)).status).toBe(

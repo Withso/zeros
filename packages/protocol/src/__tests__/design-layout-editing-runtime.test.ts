@@ -944,6 +944,11 @@ describe("layout runtime editing", () => {
           styles: { width: "150px" },
         });
         const baselineSnapshot = await window.layoutRequest("getSnapshot", {});
+        // Start from no transition so an earlier case's one cannot be cancelled mid-check.
+        a.getAnimations().forEach((animation) => animation.cancel());
+        a.style.removeProperty("transition");
+        a.style.height = "100px";
+        void a.offsetHeight;
         a.style.transition = "height 30s linear";
         void a.offsetHeight;
         a.style.height = "160px";

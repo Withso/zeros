@@ -111,11 +111,11 @@ describe("dev orphan engine matching", () => {
 
 describe("range-listener reaping (shouldReapRangeListener)", () => {
   const packagedEngine =
-    "/Applications/Zeros Beta.app/Contents/Resources/zeros-engine serve --root /Users/dev/proj --port 24193";
+    "/Applications/Zeros Alpha.app/Contents/Resources/zeros-engine serve --root /Users/dev/proj --port 24193";
   const devEngine =
     "/opt/homebrew/bin/bun /Users/dev/Zeros/apps/desktop/src/cli.ts serve --root /Users/dev/proj --port 24293";
   const ptyHost =
-    "/Applications/Zeros Beta.app/Contents/MacOS/Zeros Beta /Applications/Zeros Beta.app/Contents/Resources/pty-host.cjs";
+    "/Applications/Zeros Alpha.app/Contents/MacOS/Zeros Alpha /Applications/Zeros Alpha.app/Contents/Resources/pty-host.cjs";
   const cursorHost =
     "/Applications/Zeros.app/Contents/MacOS/Zeros /Applications/Zeros.app/Contents/Resources/cursor-host.cjs";
 

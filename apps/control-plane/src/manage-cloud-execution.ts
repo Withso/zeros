@@ -10,7 +10,7 @@ import { executionActivationDigest as hash, preparedExecutionSnapshot } from "./
 import { executionActivationTarget } from "./cloud/execution/activation-target.js";
 
 const Change = z.object({ activationId: z.uuid(), action: z.enum(["prepare", "activate", "rollback"]),
-  channel: z.enum(["development", "alpha", "beta", "production"]), organizationId: z.uuid(), workspaceId: z.uuid(),
+  channel: z.enum(["development", "alpha", "production"]), organizationId: z.uuid(), workspaceId: z.uuid(),
   initiatorUserId: z.uuid(), operatorUserId: z.uuid(), runtimeSha256: z.string().regex(/^[a-f0-9]{64}$/),
   reason: z.string().trim().min(16).max(512), legacyTargetFingerprint: z.string().regex(/^[a-f0-9]{16}$/).optional() }).strict()
   .refine(input => input.legacyTargetFingerprint === undefined || input.action === "rollback");

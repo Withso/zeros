@@ -11,7 +11,6 @@ export * from "./runtime-client";
 
 import {
   ENGINE_BASE_PORT_ALPHA,
-  ENGINE_BASE_PORT_BETA,
   ENGINE_BASE_PORT_DEV,
   ENGINE_BASE_PORT_PROD,
 } from "../../../engine/runtime";
@@ -22,7 +21,6 @@ import { CHANNEL, type Channel } from "../../config/release-channel";
 const ENGINE_PORT_BY_CHANNEL: Record<Channel, number> = {
   dev: ENGINE_BASE_PORT_DEV,
   alpha: ENGINE_BASE_PORT_ALPHA,
-  beta: ENGINE_BASE_PORT_BETA,
   stable: ENGINE_BASE_PORT_PROD,
 };
 const DEFAULT_ENGINE_PORT = ENGINE_PORT_BY_CHANNEL[CHANNEL];

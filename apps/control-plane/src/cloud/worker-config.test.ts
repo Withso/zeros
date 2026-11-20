@@ -74,7 +74,7 @@ it("uses only a dedicated public canary key on Alpha and never accepts the worke
   expect(loadConfig({ ...base, CLOUD_V2_RUNTIME_CANARY_CONFIG: policy(canary) }).cloudV2?.runtimeCanary).toBeDefined();
   for (const pair of [worker, previous]) expect(() => loadConfig({ ...base, CLOUD_V2_RUNTIME_CANARY_CONFIG: policy(pair) })).toThrow("dedicated");
   expect(() => loadConfig({ ...base, CLOUD_V2_RUNTIME_CANARY_PRIVATE_KEY: "synthetic-private-key" })).toThrow("API must not receive");
-  for (const channel of ["beta", "production"]) expect(() => loadConfig({ ...base, RAILWAY_ENVIRONMENT_NAME: channel, CLOUD_V2_RUNTIME_CANARY_CONFIG: policy(canary) })).toThrow("Alpha-only");
+  for (const channel of ["production"]) expect(() => loadConfig({ ...base, RAILWAY_ENVIRONMENT_NAME: channel, CLOUD_V2_RUNTIME_CANARY_CONFIG: policy(canary) })).toThrow("Alpha-only");
   expect(() => loadConfig({ ...base, RAILWAY_ENVIRONMENT_NAME: "development", CLOUD_V2_RUNTIME_CANARY_CONFIG: policy(canary) })).toThrow("Alpha-only");
 });
 it("reads the release's previous runtime pin only when it is a distinct published digest", () => {

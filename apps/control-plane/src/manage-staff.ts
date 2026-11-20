@@ -16,7 +16,7 @@ import { z } from "zod";
 
 import type { StaffRole } from "./authz.js";
 
-const CHANNELS = ["development", "alpha", "beta", "production"] as const;
+const CHANNELS = ["development", "alpha", "production"] as const;
 const StaffRoleInputSchema = z.enum(["platform_owner", "developer", "none"]);
 const UserIdSchema = z.string().uuid();
 const EmailSchema = z.string().trim().email().max(320);
@@ -117,7 +117,7 @@ export function validateStaffRoleRequest(
   const channel = input.channel?.trim().toLowerCase() ?? "";
   if (!CHANNELS.includes(channel as (typeof CHANNELS)[number])) {
     throw new StaffManagementError(
-      "CONTROL_PLANE_STAFF_CHANNEL must be development, alpha, beta, or production",
+      "CONTROL_PLANE_STAFF_CHANNEL must be development, alpha, or production",
     );
   }
   const railwayEnvironment = input.railwayEnvironmentName?.trim().toLowerCase();

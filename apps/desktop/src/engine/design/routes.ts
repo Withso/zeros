@@ -245,12 +245,14 @@ export interface DesignWorkspaceRouteHost {
       fresh?: boolean;
       affectedFrames?: string[];
       knownPages?: DesignPageHashes;
+      includeComponentIdentity?: boolean;
     },
   ): Promise<DesignWorkspaceSnapshot & { protocolCapability: string | null }>;
   readDesignSnapshotRequest(
     workspaceId: string,
     remote: boolean,
     hostLocalResources: boolean,
+    includeComponentIdentity?: boolean,
   ): Promise<DesignWorkspaceSnapshot & { protocolCapability: string | null }>;
 }
 const DESIGN_WORKSPACE_ROUTES = new Set([
@@ -358,6 +360,15 @@ export async function handleDesignWorkspaceRoute(
       ...(params.snapshotMode === "scoped" && !affectedFiles.some(isSharedDesignSource)
         ? { affectedFrames: [...new Set(frames)], ...knownPagesParam(params) }
         : {}),
+      ...(params.includeComponentIdentity === true ? { includeComponentIdentity: true } : {}),
+    });
+  const freshAggregateSnapshot = (
+    workspace: Parameters<DesignWorkspaceRouteHost["readDesignSnapshot"]>[0],
+  ) =>
+    host.readDesignSnapshot(workspace, remote, {
+      hostLocalResources,
+      fresh: true,
+      ...(params.includeComponentIdentity === true ? { includeComponentIdentity: true } : {}),
     });
   switch (op) {
     case "design.navigation.read": {
@@ -370,15 +381,16 @@ export async function handleDesignWorkspaceRoute(
       const input = designFramesPrepareSchema.parse(params);
       const result = await host.withDesignReadWorkspace(input.workspaceId, remote, ({ root }) =>
         prepareDesignNavigationFrames(root, input.catalogRevision, input.files, input.directoryId,
-          input.lintFiles ? { lintFiles: input.lintFiles } : {}));
+          { ...(input.lintFiles ? { lintFiles: input.lintFiles } : {}), ...(input.includeComponentIdentity ? { includeComponentIdentity: true } : {}) }));
       // Older preparation decoders reject unknown fields. Keep their exact
       // reply shape; a new renderer opts in after capability negotiation.
-      if (input.surfaceCosts && input.componentOptions) return result;
-      return { ...result, frames: result.frames.map(({ surfaceCost, component, instances, ...frame }) => ({
+      if (input.surfaceCosts && input.componentOptions && input.includeComponentIdentity) return result;
+      return { ...result, frames: result.frames.map(({ surfaceCost, component, instances, componentIdentity, ...frame }) => ({
         ...frame,
         ...(input.surfaceCosts && surfaceCost !== undefined ? { surfaceCost } : {}),
         ...(input.componentOptions && component ? { component } : {}),
         ...(input.componentOptions && instances ? { instances } : {}),
+        ...(input.includeComponentIdentity && componentIdentity !== undefined ? { componentIdentity } : {}),
       })) };
     }
     case "design.frames.lint": {
@@ -1000,7 +1012,7 @@ export async function handleDesignWorkspaceRoute(
             root,
             reqStr(params, "frame"),
             optNum(params, "depth") ?? 4,
-            { writeBack, ...designFrameVariantParam(params) },
+            { writeBack, ...designFrameVariantParam(params), ...(params.includeComponentIdentity === true ? { includeComponentIdentity: true } : {}) },
           ),
         }),
       );
@@ -1011,6 +1023,7 @@ export async function handleDesignWorkspaceRoute(
           reqStr(params, "workspaceId"),
           remote,
           hostLocalResources,
+          params.includeComponentIdentity === true,
         ),
       };
     }
@@ -1415,10 +1428,7 @@ export async function handleDesignWorkspaceRoute(
           );
           return {
             deleted: { pageId: input.pageId },
-            snapshot: await host.readDesignSnapshot(workspace, remote, {
-              hostLocalResources,
-              fresh: true,
-            }),
+            snapshot: await freshAggregateSnapshot(workspace),
           };
         }
         let page;
@@ -1432,7 +1442,7 @@ export async function handleDesignWorkspaceRoute(
           page = await renameDesignPage(workspace.path, input.pageId, input.title,
             change => host.recordDesignHistory(workspace.path, catalogDesignHistoryEntry(change, input.pageId)));
         }
-        return { page, snapshot: await host.readDesignSnapshot(workspace, remote, { hostLocalResources, fresh: true }) };
+        return { page, snapshot: await freshAggregateSnapshot(workspace) };
       });
     }
     case "design.canvas.item.put":
@@ -1449,7 +1459,7 @@ export async function handleDesignWorkspaceRoute(
           : { deleted: await deleteDesignCanvasItem(workspace.path, { pageId, itemId: params.itemId }, capture) };
         const itemId = "item" in result ? result.item?.id : result.deleted?.id;
         if (change && itemId) host.recordDesignHistory(workspace.path, catalogDesignHistoryEntry(change, pageId, [], true, itemId));
-        return { ...result, snapshot: await host.readDesignSnapshot(workspace, remote, { hostLocalResources, fresh: true }) };
+        return { ...result, snapshot: await freshAggregateSnapshot(workspace) };
       });
     }
     case "design.component.move": {
@@ -1461,7 +1471,7 @@ export async function handleDesignWorkspaceRoute(
         const frame = await moveDesignComponentToCanvas(workspace.path, { component: reqStr(params, "component"), ...(pageId ? { pageId } : {}) },
           change => host.recordDesignHistory(workspace.path, catalogDesignHistoryEntry(change, change.after.canvas.pages?.find(page =>
             page.frames.some(id => !change.before.canvas.pages?.some(previous => previous.frames.includes(id))))?.id)));
-        return { frame, snapshot: await host.readDesignSnapshot(workspace, remote, { hostLocalResources, fresh: true }) };
+        return { frame, snapshot: await freshAggregateSnapshot(workspace) };
       });
     }
     case "design.themes.update": {
@@ -1474,7 +1484,7 @@ export async function handleDesignWorkspaceRoute(
       return withDesignWorkspaceMutation(workspace.path, async () => ({
         themes: await upsertDesignTheme(workspace.path, input,
           change => host.recordDesignHistory(workspace.path, catalogDesignHistoryEntry(change))),
-        snapshot: await host.readDesignSnapshot(workspace, remote, { hostLocalResources, fresh: true }),
+        snapshot: await freshAggregateSnapshot(workspace),
       }));
     }
     case "design.frame.create": {
@@ -1550,10 +1560,7 @@ export async function handleDesignWorkspaceRoute(
       }
       return {
         frame,
-        snapshot: await host.readDesignSnapshot(workspace, remote, {
-          hostLocalResources,
-          fresh: true,
-        }),
+        snapshot: await freshAggregateSnapshot(workspace),
       };
     }
     case "design.frame.duplicate": {

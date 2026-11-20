@@ -12,5 +12,8 @@ import { html } from "../../lib/page";
 import { deploymentAppLink } from "../../lib/schemes.mjs";
 import type { Env } from "../../lib/session";
 
-export const onRequestGet: PagesFunction<Env> = ({ env }) =>
-  html(githubCompletionPage(deploymentAppLink(env.ZEROS_DEPLOY_ENV)));
+export const onRequestGet: PagesFunction<Env> = ({ env }) => {
+  const appLink = deploymentAppLink(env.ZEROS_DEPLOY_ENV);
+  if (!appLink) return new Response("This deployment is misconfigured.", { status: 503 });
+  return html(githubCompletionPage(appLink));
+};

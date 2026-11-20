@@ -3,20 +3,18 @@
 // electron-builder-run — channel-aware packaging entry
 // ──────────────────────────────────────────────────────────
 //
-// Packages the app with electron-builder, applying per-channel identity so a
-// Beta build installs as a SEPARATE macOS app alongside the production app
+// Packages the app with electron-builder, applying per-channel identity so an
+// Alpha build installs as a SEPARATE macOS app alongside the production app
 // (own appId → own bundle, own ~/Library/Application Support, own dock entry).
 //
 // Channel comes from ZEROS_CHANNEL (default "stable"):
 //   • stable → electron-builder.yml verbatim (appId com.zeros · "Zeros").
 //             ZERO overrides, so the proven prod artifacts are byte-identical.
-//   • beta   → override appId/productName + a space-free artifact base so the
-//             filenames the beta release uploads (and beta-mac.yml references)
-//             stay clean: "Zeros-Beta-<version>-<arch>.dmg".
-//   • alpha  → same shape as beta, on its own appId/feed/prefix. Alpha is the
-//             build cut from EVERY merge to main; Beta is the stabilization cut
-//             from a release/* branch. Both must be installable alongside
-//             Production and each other, which is why each owns an appId.
+//   • alpha  → override appId/productName + a space-free artifact base so the
+//             filenames the alpha release uploads (and alpha-mac.yml references)
+//             stay clean: "Zeros-Alpha-<version>-<arch>.dmg". Alpha is the build
+//             cut from EVERY merge to main and must be installable alongside
+//             Production, which is why it owns an appId.
 //
 // electron-builder.yml is NOT templated — it stays usable on its own (release.yml,
 // scheduled.yml, and the asarUnpack/path checks all read it directly). All the
@@ -26,7 +24,7 @@
 //
 // Pass-through: any extra args go straight to electron-builder, e.g.
 //   node scripts/electron-builder-run.mjs --publish never
-//   ZEROS_CHANNEL=beta node scripts/electron-builder-run.mjs --publish never
+//   ZEROS_CHANNEL=alpha node scripts/electron-builder-run.mjs --publish never
 
 import { spawnSync } from "node:child_process";
 
@@ -35,32 +33,9 @@ const channel = process.env.ZEROS_CHANNEL || "stable";
 const OVERRIDES = {
   // Production: no overrides — use electron-builder.yml exactly as written.
   stable: [],
-  // Beta: separate app identity + its own dock icon + clean, space-free artifact
-  // names. The beta icon (build/icons/icon-beta.icns) is the β-badged mark; prod
-  // keeps electron-builder.yml's icon.icns.
-  beta: [
-    "-c.appId=com.zeros.beta",
-    "-c.productName=Zeros Beta",
-    "-c.mac.icon=build/icons/icon-beta.icns",
-    // Emit the BETA update feed (beta-mac.yml) instead of latest-mac.yml, and bake
-    // channel=beta into the bundle's app-update.yml so an installed "Zeros Beta"
-    // updates from beta-mac.yml while production (channel=latest) never sees betas.
-    // electron-builder does NOT auto-derive the channel from a -beta version — it
-    // defaults to "latest" — so this MUST be explicit; without it the build writes
-    // latest-mac.yml and release-beta.yml's "beta-mac.yml not found" guard fails.
-    "-c.publish.channel=beta",
-    // Beta's feed is the rolling `beta` release tag, not electron-builder.yml's
-    // /releases/latest/download URL. Runtime setFeedURL in apps/desktop/electron/updater.ts
-    // points at the same base; this keeps the baked app-update.yml truthful too.
-    // `?static=1` pins electron-updater's per-poll noCache query off (see the
-    // publish block comment in electron-builder.yml).
-    "-c.publish.url=https://github.com/Withso/zeros/releases/download/beta?static=1",
-    "-c.dmg.artifactName=Zeros-Beta-${version}-${arch}.${ext}",
-    "-c.mac.artifactName=Zeros-Beta-${version}-${arch}-mac.${ext}",
-  ],
-  // Alpha: the continuous channel built from every merge to main. Identical shape
-  // to beta, pointed at its own identity + feed prefix so an installed Alpha never
-  // updates itself into Beta or Production.
+  // Alpha: the continuous channel built from every merge to main, with its own
+  // identity, dock icon and feed prefix so an installed Alpha never updates
+  // itself into Production.
   alpha: [
     "-c.appId=com.zeros.alpha",
     "-c.productName=Zeros Alpha",
@@ -69,6 +44,11 @@ const OVERRIDES = {
     // -alpha version (it defaults to "latest"), and without this the build writes
     // latest-mac.yml and the release workflow's alpha-mac.yml guard fails.
     "-c.publish.channel=alpha",
+    // The rolling `alpha` release tag, not electron-builder.yml's
+    // /releases/latest/download URL. Runtime setFeedURL in apps/desktop/electron/updater.ts
+    // points at the same base; this keeps the baked app-update.yml truthful too.
+    // `?static=1` pins electron-updater's per-poll noCache query off (see the
+    // publish block comment in electron-builder.yml).
     "-c.publish.url=https://github.com/Withso/zeros/releases/download/alpha?static=1",
     "-c.dmg.artifactName=Zeros-Alpha-${version}-${arch}.${ext}",
     "-c.mac.artifactName=Zeros-Alpha-${version}-${arch}-mac.${ext}",

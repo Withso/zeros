@@ -4,7 +4,7 @@ import { releaseRuntime, type RuntimeReleaseDependencies } from "./runtime-relea
 import type { RuntimeReleaseConfig, RuntimeLiveState } from "./runtime-contracts";
 
 function fixture(action: "publish" | "promote" | "rollback" = "publish") {
-  const config: RuntimeReleaseConfig = { channel: action === "promote" ? "beta" : "alpha", action, repository: "example/project",
+  const config: RuntimeReleaseConfig = { channel: action === "promote" ? "production" : "alpha", action, repository: "example/project",
     branch: action === "promote" ? "release/1.2.3" : "main", workflowSha: "1".repeat(40), runId: "123", runAttempt: 1,
     expectedCpSha: "2".repeat(40), expectedRuntimeSha256: "a".repeat(64),
     ...(action === "publish" ? { sourceSha: "3".repeat(40) } : action === "promote" ? { runtimeSha256: "b".repeat(64), alphaRunId: "100", alphaRunAttempt: 1 } : {}) };

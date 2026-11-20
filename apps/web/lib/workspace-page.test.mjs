@@ -52,7 +52,7 @@ test("each deployment opens its own app, and an unnamed workspace keeps the plai
   const f=fixture({appLink:"zeros://",response:ok({...ready,name:"",organizationId:organizationId.toUpperCase()})});await f.settle();
   assert.equal(f.elements.get("title").textContent,"Cloud workspace");
   assert.equal(f.elements.get("open").href,`zeros://cloud-workspace/${organizationId}/${workspaceId}`);
-  for(const appLink of ["javascript:","https://","zeros-prod://","zeros"]) assert.throws(()=>renderWorkspacePage({workspaceId,appLink,nonce:"testnonce"}));
+  for(const appLink of ["javascript:","https://","zeros-prod://","zeros-beta://","zeros"]) assert.throws(()=>renderWorkspacePage({workspaceId,appLink,nonce:"testnonce"}));
 });
 
 test("a response for another workspace, or without its organization, opens nothing",async()=>{
@@ -109,7 +109,7 @@ test("the 16px loader stands in for the actions while the workspace loads",async
 });
 
 test("the page starts in its loading state and carries no invitation flow",()=>{
-  const {html}=renderWorkspacePage({workspaceId:workspaceId.toUpperCase(),appLink:"zeros-beta://",nonce:"testnonce"});
+  const {html}=renderWorkspacePage({workspaceId:workspaceId.toUpperCase(),appLink:"zeros-dev://",nonce:"testnonce"});
   assert.match(html,/<div class="title" id="title">Cloud workspace<\/div>/);
   assert.match(html,/<div class="sub" id="sub">Loading your cloud workspace\. This takes a moment\.<\/div>/);
   assert.match(html,/<a class="btn hidden" id="open">Open in Zeros<\/a>/);

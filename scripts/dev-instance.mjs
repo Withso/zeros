@@ -1,6 +1,6 @@
-// Linked worktrees need distinct ports, data, cache and native bundle IDs.
-// Keep the primary checkout on its existing 5193 / 24293 ports and com.zeros.dev
-// data directory so the ordinary dev loop does not migrate user state.
+// `pnpm electron:alpha` is one hosted Dev profile for every checkout: the
+// primary com.zeros.dev identity, unless a caller passes an explicit
+// ZEROS_INSTANCE. A linked worktree still searches free Vite and engine ports.
 // electron:dev:prep must build the engine and main process before launch.
 
 import { spawn, execFileSync } from "node:child_process";
@@ -11,7 +11,6 @@ import path from "node:path";
 
 import { ensureDevAuthEnvironment } from "./dev-auth-profile.mjs";
 import { portFree } from "./dev-ports.mjs";
-import { pruneStaleDevCaches } from "./dev-cache-prune.mjs";
 
 const require = createRequire(import.meta.url);
 const bundle = require("./dev-electron-bundle.cjs");
@@ -104,21 +103,13 @@ function resolveInstance() {
 
   const explicit = (process.env.ZEROS_INSTANCE ?? "").trim();
   if (explicit) return { slug: slugify(explicit), human }; // caller owns uniqueness
-  if (!isLinkedWorktree()) return { slug: "", human: "" }; // primary → no instance
-  // Equal branch tails must not share userData or its single-instance lock.
-  // Keep the realpath hash in the identity slug, out of the displayed name.
-  const slug = slugify(`${human}-${shortPathHash(REPO_ROOT)}`).slice(0, 40);
-  return { slug, human };
+  return { slug: "", human: "" }; // every checkout → the primary identity
 }
 
 const { slug: SLUG, human: HUMAN } = resolveInstance();
-
-const prunedProfiles = pruneStaleDevCaches({ currentSlug: SLUG });
-if (prunedProfiles.length) {
-  console.log(
-    `[dev-instance] pruned regenerable Chromium data from ${prunedProfiles.length} stale dev instance profile(s)`,
-  );
-}
+// Ports are not identity: a linked worktree keeps searching free ones, spread
+// by its own path, while the primary keeps the pinned pair.
+const PORT_KEY = SLUG || (isLinkedWorktree() ? `checkout-${shortPathHash(REPO_ROOT)}` : "");
 // Drop a leading zeros from the branch to avoid a doubled display prefix.
 const NAME = SLUG
   ? ("zeros-" + HUMAN.replace(/^zeros[-_]?/, "")).replace(/-+$/, "")
@@ -137,8 +128,8 @@ const portAttempt = Number(process.env.ZEROS_DEV_PORT_ATTEMPT ?? 0);
 if (!Number.isSafeInteger(portAttempt) || portAttempt < 0 || portAttempt > 2) throw new Error("Invalid Dev port retry");
 delete process.env.ZEROS_DEV_PORT_ATTEMPT;
 async function pickVitePort() {
-  if (!SLUG && !portAttempt) return VITE_BASE; // primary owns the pinned port
-  let p = VITE_BASE + 1 + (hashSlug(portAttempt ? `${SLUG}:${portAttempt}` : SLUG) % 200);
+  if (!PORT_KEY && !portAttempt) return VITE_BASE; // primary owns the pinned port
+  let p = VITE_BASE + 1 + (hashSlug(portAttempt ? `${PORT_KEY}:${portAttempt}` : PORT_KEY) % 200);
   for (let i = 0; i < 800; i++, p++) {
     if (p > 65000) p = VITE_BASE + 1;
     if (await portFree(p)) return p;
@@ -147,9 +138,9 @@ async function pickVitePort() {
 }
 
 async function pickEngineBasePort() {
-  if (!SLUG && !portAttempt) return ENGINE_BASE_DEV; // primary owns the default block
+  if (!PORT_KEY && !portAttempt) return ENGINE_BASE_DEV; // primary owns the default block
   const SLOTS = 256;
-  const start = 1 + (hashSlug(portAttempt ? `${SLUG}:${portAttempt}` : SLUG) % SLOTS);
+  const start = 1 + (hashSlug(portAttempt ? `${PORT_KEY}:${portAttempt}` : PORT_KEY) % SLOTS);
   for (let i = 0; i < SLOTS; i++) {
     const k = ((start - 1 + i) % SLOTS) + 1; // slot 0 is the primary's
     const base = ENGINE_BASE_DEV + k * ENGINE_STRIDE;

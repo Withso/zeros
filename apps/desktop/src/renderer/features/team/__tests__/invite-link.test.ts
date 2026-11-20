@@ -7,7 +7,6 @@ describe("parseInviteToken", () => {
   it("accepts every official channel deep link", () => {
     expect(parseInviteToken(`zeros://invite?token=${TOKEN}`)).toBe(TOKEN);
     expect(parseInviteToken(`zeros-alpha://invite?token=${TOKEN}`)).toBe(TOKEN);
-    expect(parseInviteToken(`zeros-beta://invite?token=${TOKEN}`)).toBe(TOKEN);
     expect(parseInviteToken(`zeros-dev://invite?token=${TOKEN}`)).toBe(TOKEN);
   });
 
@@ -15,7 +14,11 @@ describe("parseInviteToken", () => {
     expect(parseInviteToken(`https://app.zeros.build/invite?token=${TOKEN}`)).toBe(TOKEN);
     expect(parseInviteToken(`https://app.zeros.build/invite/?token=${TOKEN}`)).toBe(TOKEN);
     expect(parseInviteToken(`https://app-alpha.zeros.build/invite?token=${TOKEN}`)).toBe(TOKEN);
-    expect(parseInviteToken(`https://app-beta.zeros.build/invite?token=${TOKEN}`)).toBe(TOKEN);
+  });
+
+  it("refuses the retired Beta deep link and hosted app", () => {
+    expect(parseInviteToken(`zeros-beta://invite?token=${TOKEN}`)).toBeNull();
+    expect(parseInviteToken(`https://app-beta.zeros.build/invite?token=${TOKEN}`)).toBeNull();
   });
 
   it("accepts WorkOS custom invitation URLs on web and desktop", () => {

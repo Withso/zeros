@@ -9,7 +9,7 @@ import {
   ATTACHMENT_CLIPBOARD_MIME,
 } from "@zeros/protocol/attachment-policy";
 import type { ComposerAttachment } from "../composer-attachments";
-import { parseLocalLink } from "@zeros/protocol/local-orchestration";
+import { isRetiredLocalLink, parseLocalLink } from "@zeros/protocol/local-orchestration";
 import { linkNeedsSpaceBefore, textNeedsSpaceAfterLink } from "./local-link-node";
 import { attachmentOwner, sameAttachmentOwner } from "../attachment-owner";
 import { rememberAttachmentClipboardSources } from "../attachment-source-retention";
@@ -210,6 +210,8 @@ export function prepareClipboardPaste(
       throw new Error("Invalid clipboard document");
     if (node.type === "localLink") {
       const href = node.attrs?.href;
+      // A copied link of a retired channel stays readable but inert.
+      if (typeof href === "string" && isRetiredLocalLink(href)) return { type: "text", text: href.trim() };
       if (typeof href !== "string" || !parseLocalLink(href)) throw new Error("Invalid Local link");
       return owner.runtime.startsWith("local")
         ? { type: "localLink", attrs: { href } }

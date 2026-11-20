@@ -34,7 +34,7 @@ const PROD_REQUIRED = [
 // comes from the `import.meta.env.DEV ? "dev" : "stable"` fallback in
 // apps/desktop/src/renderer/config/release-channel.ts. (An earlier version of this comment claimed release.yml
 // injected "stable". It never did.) The alpha workflow DOES inject it
-// explicitly, and CHANNEL_WORKFLOWS below asserts that. Beta is retired.
+// explicitly, and CHANNEL_WORKFLOWS below asserts that.
 //
 // There is deliberately NO entry for internal features. Settings → Internal is
 // gated on `users.staff_role` from the control plane, not on a build-time var:
@@ -50,7 +50,7 @@ const DEV_ONLY = ["VITE_POSTHOG_KEY_DEV"];
 // forgotten in a channel workflow shipped that channel with the feature dark — and CI
 // stayed GREEN, because nothing ever looked at the other files. It is worse for
 // VITE_ZEROS_CHANNEL specifically: without it the renderer falls back to
-// `import.meta.env.DEV ? "dev" : "stable"`, so an Alpha or Beta build's RENDERER
+// `import.meta.env.DEV ? "dev" : "stable"`, so an Alpha build's RENDERER
 // reports CHANNEL === "stable" while its MAIN process reports the real channel. The
 // two then disagree about feature gating and the deep-link scheme it builds.
 const CHANNEL_WORKFLOWS = {

@@ -14,6 +14,7 @@ import {
   parseCloudWorkspaceLink,
 } from "@zeros/protocol/cloud-workspace-link";
 import { IS_LOCAL_DEVELOPMENT } from "./runtime-mode";
+import { holdSingleInstanceLock } from "./single-instance-lock";
 import {
   assertIsDirectory,
   isPlausibleProject,
@@ -23,7 +24,7 @@ import {
 import { emitEvent, emitLocalNavigation, whenRendererReady } from "./ipc/events";
 import { channel, schemeForChannel } from "../src/engine/runtime";
 
-// Keep stable, alpha, beta and dev URL schemes distinct. Resolve lazily because
+// Keep stable, alpha and dev URL schemes distinct. Resolve lazily because
 // main seeds ZEROS_CHANNEL after imports and before handlers run.
 function scheme(): string {
   return schemeForChannel(channel());
@@ -33,11 +34,11 @@ function scheme(): string {
  *  EARLY (before app.whenReady) on Windows/Linux because the OS
  *  caches the registration at app startup. On macOS registration
  *  is declared in Info.plist (electron-builder wires that in;
- *  the beta pack rewrites it to zeros-beta in scripts/electron-after-pack.cjs);
+ *  the alpha pack rewrites it to zeros-alpha in scripts/electron-after-pack.cjs);
  *  this runtime call is a safety net for dev. */
 export function registerProtocol(): void {
   // Local development also accepts navigation links. Its dev-only scheme
-  // stays separate from installed stable/alpha/beta copies.
+  // stays separate from installed stable/alpha copies.
   const s = scheme();
   if (process.defaultApp) {
     // A generic Electron binary needs the script path to register this app's URL handler.
@@ -71,8 +72,8 @@ export async function handleUrl(rawUrl: string): Promise<void> {
   }
 
   if (parsed.protocol !== `${scheme()}:`) {
-    // A foreign-channel scheme (e.g. a zeros:// link reaching a Beta app that
-    // owns only zeros-beta://) — reject rather than act on another app's link.
+    // A foreign-channel scheme (e.g. a zeros:// link reaching an Alpha app that
+    // owns only zeros-alpha://) — reject rather than act on another app's link.
     console.warn(`[Zeros] deep-link: unexpected protocol ${parsed.protocol}`);
     return;
   }
@@ -271,7 +272,7 @@ export function setupDeepLink(): void {
 
   // Windows/Linux launch a second process for links; the lock routes them to
   // the existing app and enables second-instance handling on macOS too.
-  const gotLock = app.requestSingleInstanceLock();
+  const gotLock = holdSingleInstanceLock();
   if (!gotLock) {
     app.quit();
     return;

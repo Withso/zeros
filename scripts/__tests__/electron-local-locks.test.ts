@@ -63,6 +63,7 @@ describe("Local launcher lock ownership", { timeout: 30_000 }, () => {
       };
     await runLocalDevelopment({
       root,
+      home: directory(),
       platform: "darwin",
       environment: {},
       listProcesses: () => "",
@@ -86,6 +87,7 @@ describe("Local launcher lock ownership", { timeout: 30_000 }, () => {
     let entered = false;
     const code = await runLocalDevelopment({
       root,
+      home: directory(),
       platform: "darwin",
       environment: {},
       listProcesses: () => "",
@@ -102,7 +104,20 @@ describe("Local launcher lock ownership", { timeout: 30_000 }, () => {
     expect(code).toBe(1);
     expect(fs.existsSync(lockPath(root))).toBe(false);
   });
-  it.each(["failed", "empty"])(
+  it("keeps a live owner when its command line cannot be read", async () => {
+    const root = directory();
+    fs.writeFileSync(lockPath(root), JSON.stringify({ pid: process.pid, slug: "old", token: "unknown-command" }));
+    pidProbe.mode = "failed";
+    let entered = false;
+    await expect(runLocalDevelopment({
+      root, home: directory(), platform: "darwin", environment: {}, listProcesses: () => "", portProber: async () => true,
+      run: async () => { entered = true; return { code: 1, cancelled: false }; },
+    })).rejects.toThrow(/already running/);
+    expect(entered).toBe(false);
+    expect(fs.existsSync(lockPath(root))).toBe(true);
+  });
+
+  it.each(["empty"])(
     "recovers when the PID command probe is %s",
     async (mode) => {
       const root = directory();
@@ -119,6 +134,7 @@ describe("Local launcher lock ownership", { timeout: 30_000 }, () => {
       await expect(
         runLocalDevelopment({
           root,
+          home: directory(),
           platform: "darwin",
           environment: {},
           listProcesses: () => "",
@@ -160,6 +176,7 @@ describe("Local launcher lock ownership", { timeout: 30_000 }, () => {
       let entered = false;
       const launch = runLocalDevelopment({
         root,
+        home: directory(),
         platform: "darwin",
         environment: {},
         listProcesses: () => "",
@@ -205,7 +222,7 @@ fs.readFileSync=function(file,...args){const value=read.call(fs,file,...args);if
 fs.unlinkSync=function(file){if(file===lock&&role==='B'){const deadline=Date.now()+5000;while(!fs.existsSync(path.join(root,'started-A'))&&Date.now()<deadline)sleep(10);}return unlink.call(fs,file);};
 const {runLocalDevelopment}=await import(process.argv[4]);
 const controller=new AbortController();process.on('SIGTERM',()=>controller.abort());const keepAlive=setInterval(()=>{},1000);
-try{await runLocalDevelopment({root,platform:'darwin',environment:{},listProcesses:()=>'',portProber:async()=>true,signal:controller.signal,
+try{await runLocalDevelopment({root,home:root,platform:'darwin',environment:{},listProcesses:()=>'',portProber:async()=>true,signal:controller.signal,
 run:async()=>{fs.writeFileSync(path.join(root,'started-'+role),String(process.pid));await new Promise(resolve=>controller.signal.addEventListener('abort',resolve,{once:true}));return{code:0,cancelled:true};}});}
 catch{fs.writeFileSync(path.join(root,'declined-'+role),'declined');}finally{clearInterval(keepAlive);}
 `,

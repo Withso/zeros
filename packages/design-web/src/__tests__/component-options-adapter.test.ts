@@ -1,4 +1,5 @@
 import { applyDesignTransaction, DesignTransactionSession, type DesignOperation } from "@zeros/design-core";
+import { designComponentSlotNodeId } from "@zeros/protocol/design-runtime";
 import { describe, expect, it } from "vitest";
 
 import { designWebTransactionAdapter } from "../adapter";
@@ -185,5 +186,46 @@ describe("an instance's option values", () => {
       operationId: "p", type: "instance.create", componentId: "composer", parentNodeId: "m", instanceNodeId: "c1",
       props: { width: 9000 }, slotHtml: "",
     }]), designWebTransactionAdapter)).toThrow(/640 to 1440/);
+  });
+});
+
+describe("Reset All on an instance", () => {
+  it("clears a slot layer and default-slot text with the other overrides in one undoable transaction", () => {
+    const source = '<!doctype html><html><body><main data-oid="m"><zd-chat-composer data-oid="ws" width="800" zd-variant="compact" zd-style-label="color: red" style="position: absolute; left: 12px; top: 24px; width: 300px; background: red">Supplied default text<span data-oid="slot-action" slot="actions">Action</span></zd-chat-composer></main></body></html>';
+    const initial = createDesignWebDocumentState({ documentId: "home/index.html", entryFile: "home/index.html", files: { "home/index.html": source } });
+    const session = new DesignTransactionSession(initial, designWebTransactionAdapter);
+    const outcome = session.apply(webTransaction(initial, "reset-all", [
+      { operationId: "reset-option", type: "node.set-attribute", nodeId: "ws", attribute: "width", value: null },
+      { operationId: "reset-part", type: "node.set-attribute", nodeId: "ws", attribute: "zd-style-label", value: null },
+      { operationId: "reset-style", type: "node.set-styles", nodeId: "ws", styles: { width: null, background: null },
+        scope: "inline", responsiveContext: "base", stateContext: "default" },
+      { operationId: "reset-slot", type: "node.delete", nodeId: "slot-action" },
+      { operationId: "reset-text", type: "node.set-text", nodeId: designComponentSlotNodeId("ws", ""), text: "" },
+    ]));
+    const reset = outcome.state.files["home/index.html"]!;
+    expect(outcome.receipt.status).toBe("applied");
+    expect(reset).toContain('zd-variant="compact"');
+    expect(reset).toContain("position: absolute");
+    expect(reset).toContain("left: 12px");
+    expect(reset).toContain("top: 24px");
+    expect(reset).not.toContain('width="800"');
+    expect(reset).not.toContain("zd-style-label");
+    expect(reset).not.toContain("background: red");
+    expect(reset).not.toContain("slot-action");
+    expect(reset).not.toContain("Supplied default text");
+    expect(session.undo()?.state.files["home/index.html"]).toBe(source);
+    expect(session.undo()).toBeNull();
+    expect(session.redo()?.state.files["home/index.html"]).toBe(reset);
+    expect(session.redo()).toBeNull();
+  });
+
+  it("reports the host as affected by a default-slot text edit", () => {
+    const source = '<!doctype html><html><body><zd-card data-oid="ws">Before<span data-oid="child">Nested</span>after</zd-card></body></html>';
+    const initial = createDesignWebDocumentState({ documentId: "home/index.html", entryFile: "home/index.html", files: { "home/index.html": source } });
+    const outcome = applyDesignTransaction(initial, webTransaction(initial, "set-slot-text", [{
+      operationId: "set-text", type: "node.set-text", nodeId: designComponentSlotNodeId("ws", ""), text: "Changed",
+    }]), designWebTransactionAdapter);
+    expect(outcome.receipt.affectedNodeIds).toEqual(["ws"]);
+    expect(outcome.state.files["home/index.html"]).toContain('Changed<span data-oid="child">Nested</span>');
   });
 });

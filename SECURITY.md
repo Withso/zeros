@@ -10,13 +10,12 @@ are the one form of inbound contribution this project actively wants — see
 
 ## Supported versions
 
-Zeros releases on three channels — Alpha, Beta, and Production — and every
-channel auto-updates.
+Zeros releases on two channels — Alpha and Production — and every channel
+auto-updates.
 
 | Channel | Supported |
 | --- | --- |
 | Production (stable) | Yes — the latest release only |
-| Beta | No — pre-release validation; fixes land in the next stable |
 | Alpha | No — unstable by design |
 | Builds you compiled yourself, or any fork | No |
 
@@ -93,7 +92,7 @@ contractual SLAs — all best effort:
    ignored.
 2. **Triage** — an initial severity assessment and a yes/no on reproduction,
    typically within 10 business days of acknowledgement.
-3. **Fix and release** — the fix rides the normal Alpha → Beta → Production
+3. **Fix and release** — the fix rides the normal Alpha → Production
    train, expedited for high severity. You'll be told which release contains
    it.
 4. **Disclosure** — coordinated. The default window is 90 days from

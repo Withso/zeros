@@ -24,7 +24,7 @@ import {
 
 export const REPO_SETTINGS_DIRNAME = ".zeros";
 
-/** Settings follow the release channel so Beta edits do not affect Production. */
+/** Settings follow the release channel so Alpha edits do not affect Production. */
 export function userSettingsDir(): string {
   if (isLocalDevelopmentRuntime()) return zerosStateRoot();
   if (process.env.ZEROS_USER_SETTINGS_DIR)

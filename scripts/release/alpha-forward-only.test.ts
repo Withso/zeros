@@ -530,7 +530,7 @@ describe("forward-only channel and operation invariance", () => {
     expect(test.requests).toEqual(["https://api.github.com/actions/runs/300", "https://api.github.com/commits/main"]);
   });
 
-  it.each(["beta", "production"])("keeps %s strict with both Alpha flags enabled", async channel => {
+  it.each(["production"])("keeps %s strict with both Alpha flags enabled", async channel => {
     const test = fixture({ RELEASE_CHANNEL: channel, ZEROS_ALPHA_FORWARD_ONLY: "enabled" }, { branch: "release/1.2.3" }); test.state.head = descendant;
     await expect(test.client.assertCurrent()).rejects.toBeInstanceOf(CandidateSupersededError);
     await expect(test.client.assertRequiredChecks()).rejects.toThrow();

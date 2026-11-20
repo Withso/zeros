@@ -1,3 +1,4 @@
+import { DESIGN_TRANSACTION_MAX_OPERATIONS } from "@zeros/design-core";
 // PURPOSE: A component frame's options in the Style panel. The declaration
 // arrives with the frame's prepared record (exact to its generation) and is
 // read once per record. A value that reaches the frame only through CSS is
@@ -21,15 +22,16 @@ import {
 import {
   designComponentRecordLimitMessage,
   type DesignFrameComponent,
-  type DesignFrameInstances,
-} from "@zeros/protocol/design-catalog";
+  type DesignFrameInstances } from "@zeros/protocol/design-catalog";
 import { isDesignComponentVariantName } from "@zeros/protocol/design-path";
-import { DESIGN_RUNTIME_INSTANCE_TARGET } from "@zeros/protocol/design-runtime";
+import { designComponentSlotNodeId, DESIGN_RUNTIME_INSTANCE_TARGET } from "@zeros/protocol/design-runtime";
 
-import { designFrameRuntime } from "../../../platform/bridge/design-frame-runtime";
+import { designFrameRuntime, waitForDesignFrameRuntime } from "../../../platform/bridge/design-frame-runtime";
 import { designBackgroundWork } from "./design-background-work";
 import { designPartOverrideAttribute } from "./design-component-parts";
-import { applyDesignEditCached } from "./design-workspace-cache";
+import { applyDesignEditCached, designWorkspaceSnapshotCache } from "./design-workspace-cache";
+import { preparedDesignSnapshot } from "./design-frame-view";
+import { foldTransformOffset, hasLegacyRelocationCandidate } from "../design-layout-values";
 
 export interface DesignFrameComponentView {
   declaration: ComponentDeclaration;
@@ -156,8 +158,87 @@ export function designInstanceOptionState(declaration: ComponentDeclaration, att
   const inherited = componentInheritedValues(declaration, variant);
   const { values } = componentOptionValues(declaration, written);
   const changed = new Set(declaration.options.filter((option) => !sameDesignComponentValue(values.get(option.name), inherited.get(option.name))).map((option) => option.name));
-  const resettable = [...written.keys()].some((name) => name === COMPONENT_VARIANT_ATTRIBUTE || declaration.options.some((option) => option.name === name));
-  return { variant, inherited, values, changed, resettable };
+  const overridden = new Set(declaration.options.filter((option) => option.kind !== "slot" && written.has(option.name)).map((option) => option.name));
+  return { variant, inherited, values, changed, overridden, resettable: overridden.size > 0 };
+}
+
+export function designInstanceHasSuppliedContent(slottedLayers: readonly string[], text: string | undefined): boolean {
+  return slottedLayers.length > 0 || Boolean(text?.length);
+}
+
+/** Reset All is one transaction, one undo step, so it is offered only when one
+ * transaction holds every reset: the legacy placement fold shares the style write. */
+export function designInstanceResetAllFits(counts: { options: number; parts: number; style: boolean; slotted: number; text: boolean }): boolean {
+  return counts.options + counts.parts + Number(counts.style) + counts.slotted + Number(counts.text) <= DESIGN_TRANSACTION_MAX_OPERATIONS;
+}
+
+type DesignInstanceResetKind = "style" | "all";
+type DesignInstanceResetFrame = { file: string; sourceVersion: string; frameId?: string };
+
+function resetError(nodeId: string): Error {
+  return new Error(`The component instance ${nodeId} is no longer available in the current prepared frame.`);
+}
+
+async function prepareDesignInstanceReset(
+  workspaceId: string,
+  frame: DesignInstanceResetFrame,
+  nodeId: string,
+  kind: DesignInstanceResetKind,
+  assertCurrent: () => void,
+) {
+  assertCurrent();
+  const snapshot = preparedDesignSnapshot(designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data);
+  const currentFrame = snapshot?.frames.find((candidate) =>
+    candidate.file === frame.file && (!frame.frameId || candidate.frameId === frame.frameId));
+  if (!currentFrame) throw resetError(nodeId);
+  const host = currentFrame.instances?.hosts[nodeId];
+  const component = host && currentFrame.instances?.components[host.component];
+  if (!host || !component) throw resetError(nodeId);
+  const declaration = readDesignFrameComponent(component).declaration;
+  const optionState = designInstanceOptionState(declaration, host.attributes);
+  const parts = Object.keys(host.overrides ?? {});
+  const properties = designInstanceVisualStyleProperties(host.style);
+  const styleUpdates: Record<string, string | null> = Object.fromEntries(properties.map((property) => [property, null]));
+
+  if (host.style && hasLegacyRelocationCandidate(host.style)) {
+    const runtime = await waitForDesignFrameRuntime(workspaceId, currentFrame.file, 2_000, {
+      sourceVersion: currentFrame.sourceVersion,
+    });
+    assertCurrent();
+    if (!runtime || runtime.sourceVersion !== currentFrame.sourceVersion || designFrameRuntime(workspaceId, currentFrame.file) !== runtime)
+      throw new Error(`The current runtime for ${currentFrame.file} is unavailable; placement was not reset.`);
+    let details;
+    try {
+      details = await runtime.getNodeDetails(nodeId, undefined, { relocation: true });
+    } catch {
+      throw new Error(`Fresh runtime details for ${nodeId} are unavailable; placement was not reset.`);
+    }
+    assertCurrent();
+    if (designFrameRuntime(workspaceId, currentFrame.file) !== runtime || details.oid !== nodeId || details.sourceVersion !== currentFrame.sourceVersion)
+      throw new Error(`The current runtime details for ${nodeId} are stale; placement was not reset.`);
+    const folded = foldTransformOffset(details);
+    if (folded) {
+      for (const property of ["left", "right", "top", "bottom"]) {
+        const value = folded.styles[property];
+        if (value !== undefined) styleUpdates[property] = value;
+      }
+    }
+  }
+
+  const operations: Record<string, unknown>[] = [];
+  if (kind === "all") {
+    for (const attribute of optionState.overridden) operations.push({ operationId: `reset-option-${operations.length}`, type: "node.set-attribute", nodeId, attribute, value: null });
+  }
+  for (const part of parts) operations.push({ operationId: `reset-part-${operations.length}`, type: "node.set-attribute", nodeId, attribute: designPartOverrideAttribute(part), value: null });
+  if (Object.keys(styleUpdates).length) operations.push({ operationId: "reset-style", type: "node.set-styles", nodeId, styles: styleUpdates, scope: "inline", responsiveContext: "base", stateContext: "default" });
+  if (kind === "all") {
+    for (const layer of [...new Set(Object.values(host.slotted ?? {}).flat())]) operations.push({ operationId: `reset-slot-${operations.length}`, type: "node.delete", nodeId: layer });
+    if (host.text?.length) operations.push({ operationId: "reset-text", type: "node.set-text", nodeId: defaultSlotTextTarget(nodeId, host.mixedText), text: "" });
+  }
+  if (!operations.length) return null;
+  if (operations.length > DESIGN_TRANSACTION_MAX_OPERATIONS)
+    throw new Error(`${nodeId} supplies too many layers to reset in one step; reset its slots one at a time.`);
+  return edit(kind === "all" ? "Reset all overrides" : "Reset overrides", operations);
 }
 
 /** Set or remove (null) attributes of one instance's host: one transaction,
@@ -201,32 +282,57 @@ export function designDeclaredProperties(list: string): string[] {
   return properties;
 }
 
+const INSTANCE_PLACEMENT_PROPERTIES = new Set([
+  "bottom", "inset", "inset-block", "inset-block-end", "inset-block-start", "inset-inline",
+  "inset-inline-end", "inset-inline-start", "left", "position", "right", "top",
+]);
+
+/** CSS positioning belongs to the canvas; visual sizing and transforms reset with Style. */
+export function designInstanceVisualStyleProperties(style: string | undefined): string[] {
+  return style ? designDeclaredProperties(style).filter((property) => !INSTANCE_PLACEMENT_PROPERTIES.has(property)) : [];
+}
+
 /** Reset an instance's overrides in one step: each part's zd-style-<part>,
  * and the style the instance sets on its root (its host's own style). */
 export function commitDesignInstanceOverridesReset(
   workspaceId: string,
-  frame: { file: string; sourceVersion: string },
+  frame: DesignInstanceResetFrame,
   nodeId: string,
-  parts: readonly string[],
-  style: string | undefined,
 ) {
-  const properties = style ? designDeclaredProperties(style) : [];
-  return applyDesignEditCached(workspaceId, frame, edit("Reset overrides", [
-    ...parts.map((part, index) => ({ operationId: `reset-part-${index}`, type: "node.set-attribute", nodeId, attribute: designPartOverrideAttribute(part), value: null })),
-    ...(properties.length ? [{ operationId: "reset-style", type: "node.set-styles", nodeId, styles: Object.fromEntries(properties.map((property) => [property, null])),
-      scope: "inline", responsiveContext: "base", stateContext: "default" }] : []),
-  ]));
+  return applyDesignEditCached(workspaceId, frame,
+    ({ assertCurrent }) => prepareDesignInstanceReset(workspaceId, frame, nodeId, "style", assertCurrent));
+}
+
+/** Reset local component values, styles and supplied slots without changing
+ * the selected variant or the instance's canvas placement. */
+export function commitDesignInstanceAllOverridesReset(
+  workspaceId: string,
+  frame: DesignInstanceResetFrame,
+  nodeId: string,
+) {
+  return applyDesignEditCached(workspaceId, frame,
+    ({ assertCurrent }) => prepareDesignInstanceReset(workspaceId, frame, nodeId, "all", assertCurrent));
+}
+
+/** The direct text of a host's default slot. Text beside other children comes
+ * only from an engine that negotiated slot text and is written through the
+ * virtual default slot; text alone is the host's own text, which every engine
+ * writes. The record decides, so a disconnected bridge cannot change it. */
+function defaultSlotTextTarget(nodeId: string, mixedText: boolean | undefined): string {
+  return mixedText ? designComponentSlotNodeId(nodeId, "") : nodeId;
 }
 
 /** Set the text a plain component's instance fills its default slot with:
  * its host's own text. */
-export function commitDesignInstanceText(workspaceId: string, frame: { file: string; sourceVersion: string }, nodeId: string, text: string) {
-  return applyDesignEditCached(workspaceId, frame, edit("Set text", [{ operationId: "set-text", type: "node.set-text", nodeId, text }]));
+export function commitDesignInstanceText(workspaceId: string, frame: { file: string; sourceVersion: string }, nodeId: string, text: string,
+  record: { mixedText?: boolean } = {}) {
+  return applyDesignEditCached(workspaceId, frame, edit("Set text", [{ operationId: "set-text", type: "node.set-text", nodeId: defaultSlotTextTarget(nodeId, record.mixedText), text }]));
 }
 
 /** Empty an instance's slot back to what its main puts there: delete the
  * frame's own layers it holds, in one step. */
 export function commitDesignInstanceSlotReset(workspaceId: string, frame: { file: string; sourceVersion: string }, layers: readonly string[], label: string) {
+  if (!layers.length) return Promise.resolve(undefined);
   return applyDesignEditCached(workspaceId, frame, edit(`Reset ${label}`, layers.map((nodeId, index) =>
     ({ operationId: `reset-slot-${index}`, type: "node.delete", nodeId }))));
 }

@@ -1,7 +1,7 @@
 // The desktop deep-link scheme allow-list — SINGLE SOURCE OF TRUTH.
 //
 // Mirrors apps/desktop/src/engine/runtime.ts `schemeForChannel`:
-//   stable → zeros · alpha → zeros-alpha · beta → zeros-beta · dev → zeros-dev
+//   stable → zeros · alpha → zeros-alpha · dev → zeros-dev
 //
 // The desktop passes its own channel's scheme in `?scheme=`. Both consumers
 // validate against this list before echoing it back as `<scheme>://…`, so the OS
@@ -18,7 +18,6 @@
 export const SCHEMES = new Set([
   "zeros",
   "zeros-alpha",
-  "zeros-beta",
   "zeros-dev",
 ]);
 
@@ -27,7 +26,6 @@ export const DEFAULT_SCHEME = "zeros";
 
 const DEPLOYMENT_SCHEMES = Object.freeze({
   alpha: "zeros-alpha",
-  beta: "zeros-beta",
   production: "zeros",
 });
 
@@ -39,7 +37,7 @@ export function schemeOrDefault(scheme) {
 /**
  * Choose the invite target for this hosted deployment. A query-string scheme
  * remains useful for local/preview pages, but it must not be able to redirect a
- * deployed Alpha or Beta invitation into a sibling app. Cloudflare validates
+ * deployed Alpha invitation into a sibling app. Cloudflare validates
  * ZEROS_DEPLOY_ENV against APP_ORIGIN at build time; this is the runtime half of
  * that channel binding.
  */
@@ -54,11 +52,15 @@ export function schemeForDeploymentEnvironment(environment, requestedScheme) {
 }
 
 /** This deployment's app link, for an Open Zeros that carries no callback (an
- * expired or incomplete handoff). An unknown environment opens the packaged app. */
+ * expired or incomplete handoff). Local/preview (unset) and hosted Dev open the
+ * packaged app. A named environment this code does not know (a stale binding
+ * such as the retired `beta`) gets null: callers must not build a link, least
+ * of all one that carries a destination. */
 export function deploymentAppLink(environment) {
-  try {
-    return `${schemeForDeploymentEnvironment(environment)}://`;
-  } catch {
+  // Trimmed exactly as deployment-env.mjs validates the build.
+  const name = typeof environment === "string" ? environment.trim() : environment;
+  if (name === undefined || name === null || name === "" || name === "dev")
     return `${DEFAULT_SCHEME}://`;
-  }
+  if (!Object.hasOwn(DEPLOYMENT_SCHEMES, name)) return null;
+  return `${DEPLOYMENT_SCHEMES[name]}://`;
 }

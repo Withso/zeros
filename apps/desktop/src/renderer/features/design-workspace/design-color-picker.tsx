@@ -199,6 +199,10 @@ export interface DesignColorPanelHandle {
   cancel(): void;
 }
 
+/** True while the selected layer's source revalidates: a focused draft stays
+ * editable and its commit waits for confirmed details. */
+export const DesignColorRevalidatingContext = React.createContext(false);
+
 interface DesignColorPanelProps extends DesignColorCallbacks {
   value: string;
   label: string;
@@ -257,6 +261,12 @@ export function DesignColorPanel({
   const mountedRef = useRef(false);
   const disabledRef = useRef(disabled);
   disabledRef.current = disabled;
+  const revalidating = React.useContext(DesignColorRevalidatingContext);
+  const revalidatingRef = useRef(revalidating);
+  revalidatingRef.current = revalidating;
+  const [focusedInput, setFocusedInput] = useState<"value" | "alpha" | null>(null);
+  const pendingCommitRef = useRef<(() => void) | null>(null);
+  const cancelPreviewRef = useRef<() => void>(() => {});
   /** Track bounds are read once per gesture, not on every pointer move. */
   const boundsRef = useRef<DOMRect | null>(null);
   const rootRef = useRef<HTMLDivElement | null>(null);
@@ -417,8 +427,22 @@ export function DesignColorPanel({
       skipBlurCommitRef.current = false;
       return;
     }
+    if (disabledRef.current) {
+      if (revalidatingRef.current) pendingCommitRef.current = commit;
+      else cancelPreview();
+      return;
+    }
     commit();
   };
+  cancelPreviewRef.current = cancelPreview;
+
+  useLayoutEffect(() => {
+    const pending = pendingCommitRef.current;
+    if (!pending || (disabled && revalidating)) return;
+    pendingCommitRef.current = null;
+    if (disabled) cancelPreviewRef.current();
+    else pending();
+  }, [disabled, revalidating]);
 
   if (panelRef) {
     panelRef.current = {
@@ -715,15 +739,15 @@ export function DesignColorPanel({
             aria-label={`${label} value`}
             spellCheck={false}
             autoComplete="off"
-            disabled={disabled}
+            disabled={disabled && !(revalidating && focusedInput === "value")}
             onChange={(event) => {
               // Typed text stays a draft: the canvas and the thumbs hear about
               // it on Enter or on blur, not on every character.
               valueDirtyRef.current = true;
               setDraft(event.currentTarget.value);
             }}
-            onFocus={() => { valueDirtyRef.current = false; }}
-            onBlur={() => commitOnBlur(commitTypedDraft)}
+            onFocus={() => { valueDirtyRef.current = false; setFocusedInput("value"); }}
+            onBlur={() => { setFocusedInput(null); commitOnBlur(commitTypedDraft); }}
             onKeyDown={(event) => {
               if (event.key === "Enter") {
                 event.preventDefault();
@@ -744,13 +768,13 @@ export function DesignColorPanel({
             className="zd-field-fixed w-9 text-right"
             inputMode="numeric"
             aria-label={`${label} opacity value`}
-            disabled={disabled}
+            disabled={disabled && !(revalidating && focusedInput === "alpha")}
             onChange={(event) => {
               alphaDirtyRef.current = true;
               setAlphaDraft(event.currentTarget.value);
             }}
-            onFocus={() => { alphaDirtyRef.current = false; }}
-            onBlur={() => commitOnBlur(commitAlphaDraft)}
+            onFocus={() => { alphaDirtyRef.current = false; setFocusedInput("alpha"); }}
+            onBlur={() => { setFocusedInput(null); commitOnBlur(commitAlphaDraft); }}
             onKeyDown={(event) => {
               if (event.key === "Enter") {
                 event.preventDefault();

@@ -74,7 +74,7 @@ import { desktopAuthConfig } from "./workos-desktop-config";
 // Resolve lazily: main.ts imports this module before its body seeds the release
 // channel baked into a packaged build. Every actual sidecar operation runs after
 // that seed, so deferring the lookup preserves one source of truth in
-// apps/desktop/src/engine/runtime.ts and gives Stable, Beta, Dev, and per-worktree overrides
+// apps/desktop/src/engine/runtime.ts and gives Stable, Alpha, Dev, and per-worktree overrides
 // the exact same block in both host and engine.
 let resolvedEngineBasePort: number | null = null;
 function currentEngineBasePort(): number {
@@ -865,7 +865,7 @@ async function reapOrphanEngines(skipPid?: number): Promise<void> {
   // are spawned as group leaders, so the group signal also reaches the
   // pty/cursor hosts and agent CLIs holding inherited copies of the engine's
   // LISTEN socket — the single-pid kill used to leave those alive, and the
-  // port stayed black-holed for every later bind (beta.82 respawn loop). A
+  // port stayed black-holed for every later bind (a shipped respawn loop). A
   // non-leader candidate (an orphaned host) has no group of its own pgid, so
   // the group attempt throws ESRCH and the plain pid signal lands instead.
   const signalTree = (pid: number, signal: NodeJS.Signals): boolean => {
@@ -1450,8 +1450,8 @@ async function doSpawnEngine(
     // Side-stream into a raw engine log for deep-dive parsing — useful
     // when the line-buffered forwarding above can't keep up with bursty
     // codex/claude streams or when inspecting binary blobs. Keep the SAME
-    // channel identity as main.log (com.zeros / com.zeros.beta); the old
-    // hard-coded `Logs/Zeros` path mixed beta + stable output and sent beta
+    // channel identity as main.log (com.zeros / com.zeros.alpha); the old
+    // hard-coded `Logs/Zeros` path mixed channels' output and sent
     // diagnostics to the wrong directory.
     const engineLogDir = path.join(
       os.homedir(),

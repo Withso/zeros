@@ -20,6 +20,7 @@ import {
   serializeDesignCssDeclarations,
   withDesignPositionContext,
 } from "../design-style-values";
+import { designPortableIdSchema } from "@zeros/design-core";
 
 describe("design style values", () => {
   it("reads kebab-case properties from the runtime's camel-case snapshot", () => {
@@ -368,6 +369,22 @@ describe("Style commit history keys", () => {
       const key = designStyleCommitCoalesceKey(["send"], ["border-radius"], intent);
       expect(key, intent).not.toBe(edit);
       expect(designStyleCommitCoalesceKey(["send"], ["border-radius"], intent), intent).not.toBe(key);
+    }
+  });
+
+  it("stays a valid transaction key for deeply copied layers", () => {
+    const deep = (n: number) => `card-copy-${n}${".title-copy-copy".repeat(8)}-${"x".repeat(80)}`;
+    const layers = [deep(1), deep(2)];
+    const edit = designStyleCommitCoalesceKey(layers, ["opacity"]);
+    expect(designPortableIdSchema.safeParse(edit).success).toBe(true);
+    expect(designStyleCommitCoalesceKey(layers, ["opacity"])).toBe(edit);
+    expect(designStyleCommitCoalesceKey([deep(1), deep(3)], ["opacity"])).not.toBe(edit);
+    expect(designStyleCommitCoalesceKey(layers, ["opacity", "filter"])).not.toBe(edit);
+    expect(designPortableIdSchema.safeParse(designStyleCommitCoalesceKey([deep(1).repeat(2)], ["opacity"])).success).toBe(true);
+    for (const intent of ["reset", "token", "detach"] as const) {
+      const key = designStyleCommitCoalesceKey(layers, ["opacity"], intent);
+      expect(designPortableIdSchema.safeParse(key).success, intent).toBe(true);
+      expect(key, intent).not.toBe(edit);
     }
   });
 });

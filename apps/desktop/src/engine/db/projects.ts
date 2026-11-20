@@ -376,8 +376,7 @@ export function pruneWorktreeRepos(): number {
   const roots = Array.from(
     new Set([
       zerosWorkspacesRoot(),
-      // Legacy hidden root (pre Phase-0 relocation), CHANNEL-aware. Was a 2-way
-      // isDevRuntime() split, so Beta pruned against PRODUCTION's legacy root.
+      // Legacy hidden root (pre Phase-0 relocation), CHANNEL-aware.
       path.join(zerosStateRoot(), "worktrees"),
     ]),
   ).map((r) => canonicalRepoRoot(r).replace(/\/+$/, "") + "/");

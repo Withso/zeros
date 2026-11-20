@@ -248,7 +248,7 @@ export function createApp(
         socialProviders: true,
       }),
     );
-    if (config.workos.opsOrigin && config.deploymentChannel !== "beta") {
+    if (config.workos.opsOrigin) {
       const opsSessions = new WorkOSBrowserSessions(
         new PostgresWorkOSBrowserSessionRepository(pool),
         workosProvider,
@@ -398,7 +398,7 @@ export function createApp(
   if (mcp) app.route("/", createMcpRoutes(mcp.store, mcp.oauth));
   app.route("/", createAccountRecoveryRoutes(pool));
   app.route("/", createDeletionLifecycleRoutes(pool));
-  if (config.workos?.opsOrigin && config.deploymentChannel !== "beta") {
+  if (config.workos?.opsOrigin) {
     app.route(
       "/",
       createOpsRoutes(

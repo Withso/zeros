@@ -142,7 +142,7 @@ import { TooltipProvider } from "../../../shared/ui/primitives";
 import { DesignInspector } from "../design-inspector";
 import { resetDesignRuntimeStoreForTests, useDesignRuntimeStore } from "../state/design-runtime-store";
 import { resetDesignHeldStateForTests } from "../state/design-held-state";
-import { resetDesignLivePreviewForTests, useDesignLivePreviewStore } from "../state/design-live-preview";
+import { designFrameGeometryLiveValue, publishDesignFrameGeometryLive, resetDesignLivePreviewForTests, useDesignLivePreviewStore } from "../state/design-live-preview";
 import { designWorkspaceSnapshotCache } from "../state/design-workspace-cache";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -194,7 +194,63 @@ const card: DesignRuntimeNodeDetails = {
 let container: HTMLDivElement;
 let reactRoot: Root | null = null;
 
-async function show(
+async function show(frameVersion = sourceVersion, details: DesignRuntimeNodeDetails | null = card, workspaceId = "w", nodeId = "card", active = true) {
+  // The runtime answers at the generation its readback carries.
+  const runtimeVersion = details?.sourceVersion ?? sourceVersion;
+  mocks.runtime.mockReturnValue({
+    sourceVersion: runtimeVersion,
+    supports: (capability: string) => capability === "measureLayout",
+    previewStyles: vi.fn(async () => card),
+    clearPreviewStyles: vi.fn(async () => card),
+    getNodeDetails: vi.fn(async () => card),
+    measureLayout: vi.fn(async ({ nodeIds }: { nodeIds: string[] }) =>
+      nodeIds.map((id) => (id === "root" ? root : details ?? card))),
+  });
+  const frame = { file: "home.html", sourceVersion: frameVersion, title: "Home", x: 0, y: 0, z: 0, width: 400, height: 300 } as never;
+  designWorkspaceSnapshotCache.setData(workspaceId, { frames: [frame] } as never);
+  const snapshot = { sourceVersion: runtimeVersion, revision: 1, tree: [], warnings: [], frame: { ...root, sourceVersion: runtimeVersion },
+    viewport: { width: 400, height: 300, scrollX: 0, scrollY: 0 } } as DesignRuntimeSnapshot;
+  useDesignRuntimeStore.getState().publishSnapshot(workspaceId, "/repo", "home.html", snapshot, runtimeVersion);
+  await act(async () => {
+    reactRoot ??= createRoot(container);
+    reactRoot.render(React.createElement(TooltipProvider, null,
+      React.createElement(DesignInspector, {
+        workspaceId, folder: "/repo", frame, frameSelected: false, selectedNodeId: nodeId, selectedNodeIds: [nodeId],
+        details, lint: null, active, canvasBackground: "white", onCanvasBackgroundChange: () => {},
+        motionTimelineOpen: false, motionProperties: [], onOpenMotionTimeline: () => {}, zoomActionsRef: { current: null },
+      } as never)));
+  });
+  await act(async () => {});
+}
+
+async function showFrameOnlyMain() {
+  mocks.runtime.mockReturnValue({
+    sourceVersion,
+    supports: () => false,
+    previewStyles: vi.fn(async () => card),
+    clearPreviewStyles: vi.fn(async () => card),
+    getNodeDetails: vi.fn(async () => card),
+  });
+  const frame = {
+    file: "home.html", sourceVersion, title: "Home", x: 0, y: 0, z: 0, width: 400, height: 300,
+    componentIdentity: { kind: "main", name: "home" },
+  } as never;
+  const snapshot = { sourceVersion, revision: 1, tree: [], warnings: [], frame: root,
+    viewport: { width: 400, height: 300, scrollX: 0, scrollY: 0 } } as DesignRuntimeSnapshot;
+  useDesignRuntimeStore.getState().publishSnapshot("w", "/repo", "home.html", snapshot, sourceVersion);
+  await act(async () => {
+    reactRoot ??= createRoot(container);
+    reactRoot.render(React.createElement(TooltipProvider, null,
+      React.createElement(DesignInspector, {
+        workspaceId: "w", folder: "/repo", frame, frameSelected: true, selectedNodeId: null, selectedNodeIds: [],
+        details: null, lint: null, active: true, canvasBackground: "white", onCanvasBackgroundChange: () => {},
+        motionTimelineOpen: false, motionProperties: [], onOpenMotionTimeline: () => {}, zoomActionsRef: { current: null },
+      } as never)));
+  });
+  await act(async () => {});
+}
+
+async function showRuntime(
   details: DesignRuntimeNodeDetails = card,
   previewLayout = false,
   runtimeSourceVersion = sourceVersion,
@@ -253,8 +309,8 @@ const serialMutationLane = () => {
     return task;
   };
 };
-const pointer = (type: string, clientX: number) => {
-  const event = new MouseEvent(type, { bubbles: true, cancelable: true, button: 0, clientX, clientY: 0 });
+const pointer = (type: string, clientX: number, shiftKey = false) => {
+  const event = new MouseEvent(type, { bubbles: true, cancelable: true, button: 0, clientX, clientY: 0, shiftKey });
   Object.defineProperties(event, { pointerId: { value: 1 }, isPrimary: { value: true } });
   return event;
 };
@@ -329,8 +385,112 @@ describe("an inspector field scrub", () => {
     resetDesignWorkspaceUiForTests();
   });
 
+  it.each(["frame", "details"])("retains the same-node editor and open menu when %s advances first without allowing stale writes", async (first) => {
+    await show();
+    const editor = container.querySelector("[data-design-style-editor]");
+    const trigger = container.querySelector<HTMLButtonElement>('button[aria-label^="Width sizing:"]')!;
+    await act(async () => { trigger.dispatchEvent(pointer("pointerdown", 0)); });
+    expect(document.querySelector('[role="menu"]')).not.toBeNull();
+    const nextVersion = "2".repeat(24);
+    await show(first === "frame" ? nextVersion : sourceVersion, first === "details" ? { ...card, sourceVersion: nextVersion } : card);
+    expect(container.querySelector("[data-design-style-editor]")?.isSameNode(editor)).toBe(true);
+    expect(document.querySelector('[role="menu"]')).not.toBeNull();
+    expect(fieldInput("opacity").disabled).toBe(true);
+    expect(fieldInput("opacity").value).toBe("50");
+    const item = document.querySelector<HTMLElement>('[role="menuitemradio"]')!;
+    await act(async () => { item.click(); });
+    expect(writes()).toBe(0);
+    await show(nextVersion, null);
+    expect(container.querySelector("[data-design-style-editor]")).toBe(editor);
+    expect(fieldInput("opacity").disabled).toBe(true);
+    await show(nextVersion, { ...card, sourceVersion: nextVersion });
+    expect(container.querySelector("[data-design-style-editor]")).toBe(editor);
+    expect(fieldInput("opacity").disabled).toBe(false);
+  });
+
+  it("does not retain another owner or node's details when their readback is missing", async () => {
+    await show();
+    await show(sourceVersion, null, "other");
+    expect(container.querySelector("[data-design-style-editor]")).toBeNull();
+    await show();
+    await show(sourceVersion, null, "w", "other-node");
+    expect(container.querySelector("[data-design-style-editor]")).toBeNull();
+    expect(writes()).toBe(0);
+  });
+
+  it("keeps an admitted Shift scrub through revalidation and writes only after exact-source readback", async () => {
+    const padding = { ...card, styles: { ...card.styles, "padding-left": "22px" } };
+    await show(sourceVersion, padding);
+    expect(fieldInput("padding-left").value).toBe("22");
+    act(() => {
+      container.querySelector<HTMLButtonElement>('button[aria-label="Scrub Left"]')!
+        .dispatchEvent(pointer("pointerdown", 0, true));
+      window.dispatchEvent(pointer("pointermove", 2, true));
+    });
+    await settle();
+    const nextVersion = "2".repeat(24);
+    await show(nextVersion, padding);
+    expect(fieldInput("padding-left").disabled).toBe(true);
+    expect(writes()).toBe(0);
+    await show(nextVersion, { ...padding, sourceVersion: nextVersion });
+    act(() => {
+      window.dispatchEvent(pointer("pointermove", 4, true));
+      window.dispatchEvent(pointer("pointerup", 4, true));
+    });
+    await settle();
+    expect(fieldInput("padding-left").value).toBe("62");
+    expect(writes()).toBe(1);
+    expect(lastWrite()).toContain('"padding-left":"62px"');
+    expect(JSON.stringify([...mocks.updateStyles.mock.calls, ...mocks.applyEdit.mock.calls].at(-1))).toContain(nextVersion);
+  });
+
+  it.each(["revalidating", "inactive"])("does not write when a scrub ends while %s", async (reason) => {
+    const padding = { ...card, styles: { ...card.styles, "padding-left": "22px" } };
+    await show(sourceVersion, padding);
+    act(() => {
+      container.querySelector<HTMLButtonElement>('button[aria-label="Scrub Left"]')!
+        .dispatchEvent(pointer("pointerdown", 0, true));
+      window.dispatchEvent(pointer("pointermove", 4, true));
+    });
+    await settle();
+    expect(fieldInput("padding-left").value).toBe("62");
+    await show("2".repeat(24), padding, "w", "card", reason !== "inactive");
+    act(() => { window.dispatchEvent(pointer("pointerup", 4, true)); });
+    await settle();
+    expect(fieldInput("padding-left").value).toBe(reason === "inactive" ? "22" : "62");
+    expect(writes()).toBe(0);
+    await show("2".repeat(24), { ...padding, sourceVersion: "2".repeat(24) });
+    expect(writes()).toBe(reason === "inactive" ? 0 : 1);
+  });
+
+  it.each(["confirmed", "inactive", "owner", "node"])("settles a pending typed commit only for its active exact-source owner: %s", async (outcome) => {
+    await show();
+    const input = fieldInput("opacity");
+    act(() => input.focus());
+    act(() => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, "75");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(input.value).toBe("75");
+    const nextVersion = "2".repeat(24);
+    await show(nextVersion);
+    expect(document.activeElement).toBe(input);
+    expect(input.disabled).toBe(false);
+    await act(async () => { input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); });
+    expect(writes()).toBe(0);
+    if (outcome === "inactive") await show(nextVersion, card, "w", "card", false);
+    if (outcome === "owner") await show(nextVersion, null, "other");
+    if (outcome === "node") await show(nextVersion, null, "w", "other-node");
+    await show(nextVersion, { ...card, sourceVersion: nextVersion });
+    expect(writes()).toBe(outcome === "confirmed" ? 1 : 0);
+    if (outcome === "confirmed") {
+      expect(lastWrite()).toContain('"opacity":"0.75"');
+      expect(lastWrite()).toContain(nextVersion);
+    }
+  });
+
   it("a 120-tick scrub re-renders only the scrubbed field", async () => {
-    const runtime = await show();
+    const runtime = await showRuntime();
     expect(fieldInput("opacity").value).toBe("50");
     const report = await scrub("Opacity");
     expect(report.publishes).toBe(120);
@@ -349,7 +509,7 @@ describe("an inspector field scrub", () => {
   });
 
   it("does not measure confirmed layout during ordinary pointer position previews", async () => {
-    const runtime = await show();
+    const runtime = await showRuntime();
     await scrub("X");
     expect(runtime.previewStyles).toHaveBeenCalled();
     expect(runtime.measureLayout).not.toHaveBeenCalled();
@@ -360,7 +520,7 @@ describe("an inspector field scrub", () => {
   });
 
   it("a layout scrub still reaches the layout section that reads it", async () => {
-    await show();
+    await showRuntime();
     const report = await scrub("Gap");
     expect(report.publishes).toBe(120);
     expect(report.commits).toBeLessThanOrEqual(2 * 120);
@@ -394,7 +554,7 @@ describe("an inspector field scrub", () => {
       bridgeMutation();
       return {};
     }));
-    await show();
+    await showRuntime();
     const inspector = container.querySelector<HTMLElement>("[data-design-inspector]")!;
     const input = fieldInput("opacity");
     try {
@@ -472,7 +632,7 @@ describe("an inspector field scrub", () => {
         return { result: null };
       }),
     );
-    await show(textCard, true);
+    await showRuntime(textCard, true);
     const input = fieldInput("font-size");
     await act(async () => {
       input.focus();
@@ -527,7 +687,7 @@ describe("an inspector field scrub", () => {
       }
       return { result: null };
     }));
-    const runtime = await show(beforeUndo, true);
+    const runtime = await showRuntime(beforeUndo, true);
     const rotate = container.querySelector<HTMLButtonElement>('button[aria-label="Rotate 90° clockwise"]')!;
     const inspector = container.querySelector("[data-design-inspector]");
     const opacity = fieldInput("opacity");
@@ -591,7 +751,7 @@ describe("an inspector field scrub", () => {
   });
 
   it("fails layout preparation instead of reading a stale runtime generation", async () => {
-    const runtime = await show(card, true, "f".repeat(24));
+    const runtime = await showRuntime(card, true, "f".repeat(24));
     mocks.waitForRuntime.mockResolvedValue(null);
     let preparation: Promise<unknown> | undefined;
     mocks.applyEdit.mockImplementation((_workspaceId, _frame, intent) => {
@@ -633,7 +793,7 @@ describe("an inspector field scrub", () => {
         borderRightWidth: "2px",
       },
     };
-    const runtime = await show(staleRoot, false, sourceVersion, {
+    const runtime = await showRuntime(staleRoot, false, sourceVersion, {
       frameSelected: true,
       selectedNodeId: null,
       selectedNodeIds: [],
@@ -679,7 +839,7 @@ describe("an inspector field scrub", () => {
   it("keeps layout actions enabled when history fails", async () => {
     let rejectUndo: ((error: Error) => void) | undefined;
     mocks.applyHistory.mockImplementationOnce(() => new Promise((_, reject) => { rejectUndo = reject; }));
-    await show();
+    await showRuntime();
     const rotate = container.querySelector<HTMLButtonElement>('button[aria-label="Rotate 90° clockwise"]')!;
     await act(async () => { fieldInput("opacity").focus(); });
     try {
@@ -717,7 +877,7 @@ describe("an inspector field scrub", () => {
       actions.push("canvas");
       return { result: null };
     }));
-    await show();
+    await showRuntime();
     await act(async () => { fieldInput("opacity").focus(); });
     try {
       await act(async () => {
@@ -747,7 +907,7 @@ describe("an inspector field scrub", () => {
   it("does not publish history selection after the directory changes", async () => {
     const settleHistorySelection = vi.spyOn(designSelection, "settleDesignHistorySelection");
     useDesignWorkspaceUiStore.getState().bindDirectory("w", "design-a");
-    await show();
+    await showRuntime();
     const rotate = container.querySelector<HTMLButtonElement>('button[aria-label="Rotate 90° clockwise"]')!;
     await act(async () => { fieldInput("opacity").focus(); });
     mocks.applyHistory.mockResolvedValue({ result: null, historyFrame: "home.html" });
@@ -774,5 +934,28 @@ describe("an inspector field scrub", () => {
     } finally {
       settleHistorySelection.mockRestore();
     }
+  });
+
+  it("keeps frame geometry inert while its Style panel is hidden", async () => {
+    await showFrameOnlyMain();
+    const stylePanel = container.querySelector<HTMLElement>("[data-design-style-panel]")!;
+    const xField = stylePanel.querySelector<HTMLInputElement>('input[aria-label="X"]')!;
+    expect(stylePanel.getAttribute("aria-hidden")).toBe("true");
+    expect(stylePanel.hasAttribute("inert")).toBe(true);
+    expect(xField.value).toBe("0");
+
+    await act(async () => {
+      publishDesignFrameGeometryLive("w", "home.html", { x: 42, y: 0, w: 400, h: 300 }, { settle: true });
+    });
+    expect(designFrameGeometryLiveValue("w", "home.html", "x")).toBe(42);
+    expect(xField.value).toBe("0");
+
+    const styleTab = [...container.querySelectorAll<HTMLButtonElement>('[role="tab"]')]
+      .find((tab) => tab.textContent?.trim() === "Style")!;
+    await act(async () => {
+      styleTab.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0 }));
+    });
+    expect(container.querySelector<HTMLElement>("[data-design-style-panel]")?.getAttribute("aria-hidden")).toBe("false");
+    expect(container.querySelector<HTMLInputElement>('[data-design-style-panel] input[aria-label="X"]')?.value).toBe("42");
   });
 });

@@ -28,7 +28,7 @@ describe("unwired Dev GitHub reference mode", () => {
     expect(
       devGithubReferenceEnabled({ isPackaged: false, deployment: "dev", env }),
     ).toBe(true);
-    for (const deployment of ["alpha", "beta", "production"])
+    for (const deployment of ["alpha", "production"])
       expect(
         devGithubReferenceEnabled({ isPackaged: false, deployment, env }),
       ).toBe(false);

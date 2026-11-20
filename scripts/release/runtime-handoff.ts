@@ -8,7 +8,7 @@ import { runtimeJson } from "./runtime-proof";
 
 export const RuntimeLoginSchema = z.object({
   id: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/),
-  name: z.string().regex(/^zeros-(?:alpha|beta|production)-runtime-[1-9]\d{0,19}-[1-9]\d{0,4}$/),
+  name: z.string().regex(/^zeros-(?:alpha|production)-runtime-[1-9]\d{0,19}-[1-9]\d{0,4}$/),
   username: z.string().regex(/^[A-Za-z0-9_]+\.[a-z0-9]+$/), password: z.string().min(1).max(8192),
   access_host_url: z.string().regex(/^[a-z0-9.-]+\.pg\.psdb\.cloud$/),
 }).strict();

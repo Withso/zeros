@@ -4,6 +4,7 @@ import { designTransformLinear } from "./design-canvas-math";
 import {
   parseDesignStyleNumericParts,
   readDesignComputedStyle,
+  parseDesignCssDeclarations,
 } from "./design-style-values";
 
 export type DesignLayoutAxis = "x" | "y";
@@ -293,18 +294,42 @@ const poseNumber = (value: number) =>
  * carried into a flow as a stray shift. Only a relocation's own pose counts:
  * an authored transform (`translate(...)`, other origins) stays the layer's
  * Transform. Null when there is no such offset. */
-function relocationOffset(
+function readRelocationMatrix(value: string): { values: [number, number, number, number, number, number] } | null {
+  const match = /^matrix\(([^)]+)\)$/i.exec(value.trim());
+  if (!match) return null;
+  const values = match[1]!.split(",").map((part) => Number(part.trim()));
+  if (values.length !== 6 || !values.every(Number.isFinite)) return null;
+  return { values: values as [number, number, number, number, number, number] };
+}
+
+/** Whether authored inline CSS contains the only relocation form that needs
+ * a current runtime measurement before a reset can preserve its placement. */
+export function hasLegacyRelocationCandidate(styleText: string | undefined): boolean {
+  if (!styleText) return false;
+  let declarations: Record<string, string>;
+  try {
+    declarations = parseDesignCssDeclarations(styleText);
+  } catch {
+    return false;
+  }
+  if (declarations["transform-origin"] && !/^0(?:px)?\s+0(?:px)?(?:\s+0(?:px)?)?$/.test(declarations["transform-origin"].trim()))
+    return false;
+  const matrix = readRelocationMatrix(declarations.transform ?? "");
+  if (!matrix) return false;
+  const [, , , , x, y] = matrix.values;
+  return Math.abs(x) >= 1e-9 || Math.abs(y) >= 1e-9;
+}
+
+export function relocationOffset(
   details: DesignRuntimeNodeDetails,
 ): { x: number; y: number; pose: string } | null {
   if (!/^0(?:px)?\s+0(?:px)?(?:\s+0(?:px)?)?$/.test(style(details, "transform-origin").trim()))
     return null;
   const authored = details.authoredStyles?.transform?.value.trim();
   if (authored && !/^matrix\(/i.test(authored)) return null;
-  const match = /^matrix\(([^)]+)\)$/i.exec(style(details, "transform").trim());
-  if (!match) return null;
-  const values = match[1]!.split(",").map((value) => Number(value.trim()));
-  if (values.length !== 6 || !values.every(Number.isFinite)) return null;
-  const [a, b, c, d, x, y] = values as [number, number, number, number, number, number];
+  const matrix = readRelocationMatrix(style(details, "transform"));
+  if (!matrix) return null;
+  const [a, b, c, d, x, y] = matrix.values;
   if (Math.abs(x) < 1e-9 && Math.abs(y) < 1e-9) return null;
   const near = (value: number, target: number) => Math.abs(value - target) < 1e-9;
   return {
@@ -334,7 +359,7 @@ export function designFlowTransformStyles(
 /** A free layer drawn at an offset, rewritten so its box is where it is
  * drawn: the offset moves into its insets and the transform keeps the pose.
  * Position, alignment and pins then work from what a person sees. */
-function foldTransformOffset(details: DesignRuntimeNodeDetails): {
+export function foldTransformOffset(details: DesignRuntimeNodeDetails): {
   details: DesignRuntimeNodeDetails;
   styles: Record<string, string>;
 } | null {

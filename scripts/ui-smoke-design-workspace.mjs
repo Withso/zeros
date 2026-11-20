@@ -1168,10 +1168,7 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
   const inspectorScrollViewport = inspector
     .locator("[data-radix-scroll-area-viewport]")
     .first();
-  const cssModeButton = stylePanelHeader.getByRole("button", {
-    name: "CSS",
-    exact: true,
-  });
+  const cssModeButton = stylePanelHeader.getByRole("tab", { name: "CSS", exact: true });
   const styleHeaderTopBeforeScroll = (await stylePanelHeader.boundingBox())?.y;
   await inspectorScrollViewport.evaluate((element) => {
     element.scrollTop = 320;
@@ -1194,13 +1191,13 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
   await inspectorScrollViewport.evaluate((element) => {
     element.scrollTop = 0;
   });
-  const initialCssPressed = await cssModeButton.getAttribute("aria-pressed");
+  const initialCssPressed = await cssModeButton.getAttribute("aria-selected");
   check(
     "the Style | CSS toggle lives in the header and the panel has no footer",
     initialCssPressed === "false" &&
       (await stylePanelHeader
-        .getByRole("button", { name: "Style", exact: true })
-        .getAttribute("aria-pressed")) === "true" &&
+        .getByRole("tab", { name: "Style", exact: true })
+        .getAttribute("aria-selected")) === "true" &&
       (await inspector.locator("[data-design-style-panel-footer]").count()) ===
         0,
     JSON.stringify({ initialCssPressed }),
@@ -1221,7 +1218,7 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
         (line) => !line.includes("\n"),
       ) &&
       (await page.getByText("Apply CSS", { exact: true }).count()) === 0 &&
-      (await cssModeButton.getAttribute("aria-pressed")) === "true",
+      (await cssModeButton.getAttribute("aria-selected")) === "true",
   );
   const cssStyleOperationStart = await page.evaluate(
     () => window.__zerosHarnessDesignShortcutOperations?.length ?? 0,
@@ -1304,12 +1301,12 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
     );
   }, "design-css-autosave-restore");
   check("removing a CSS line also persists automatically", cssEditRestored);
-  await cssModeButton.click();
+  await stylePanelHeader.getByRole("tab", { name: "Style", exact: true }).click();
   check(
-    "CSS toggle returns to the visual Style controls without a save or add action",
+    "the Style tab returns to the visual Style controls without a save or add action",
     (await page.locator("[data-design-style-editor]").isVisible()) &&
       (await computedCssEditor.count()) === 0 &&
-      (await cssModeButton.getAttribute("aria-pressed")) === "false",
+      (await cssModeButton.getAttribute("aria-selected")) === "false",
   );
   await homeFrameRow.click();
   const frameStyleReady = await waitFor(
@@ -3252,7 +3249,7 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
   );
   check(
     "design inspector has no Data or pull request surface",
-    (await page.locator("[data-design-inspector]").getByRole("tab").count()) ===
+    (await page.locator("[data-design-inspector]").getByRole("tab", { name: "Data", exact: true }).count()) ===
       0 &&
       (await page
         .getByRole("button", { name: "Open PR #42", exact: true })

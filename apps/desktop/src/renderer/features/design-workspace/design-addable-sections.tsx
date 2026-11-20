@@ -85,9 +85,11 @@ const MenuContext = React.createContext<ProviderValue | null>(null);
 export function DesignAddableSections({
   selectionKey,
   children,
+  active = true,
 }: {
   selectionKey: string;
   children: React.ReactNode;
+  active?: boolean;
 }) {
   const [hidden] = React.useState(() => new HiddenSections());
   const [revealed, setRevealed] = React.useState<{
@@ -120,8 +122,8 @@ export function DesignAddableSections({
     [hidden, selectionKey],
   );
   return (
-    <RegistryContext.Provider value={registry}>
-      <MenuContext.Provider value={menu}>{children}</MenuContext.Provider>
+    <RegistryContext.Provider value={active ? registry : null}>
+      <MenuContext.Provider value={active ? menu : null}>{children}</MenuContext.Provider>
     </RegistryContext.Provider>
   );
 }

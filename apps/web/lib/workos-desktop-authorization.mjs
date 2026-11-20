@@ -7,10 +7,9 @@ const MAX_CALLBACK_VALUE_LENGTH = 8_192;
 const DEPLOYMENT_SCHEMES = {
   // Local source builds deliberately authenticate against disposable Alpha
   // data. Alpha is the ONLY hosted boundary allowed to return to zeros-dev://;
-  // Beta and Production remain exact-channel so an installed release can never
+  // Production remains exact-channel so an installed release can never
   // lose its callback to a development bundle.
   alpha: new Set(["zeros-alpha", "zeros-dev"]),
-  beta: new Set(["zeros-beta"]),
   production: new Set(["zeros"]),
 };
 
@@ -35,8 +34,12 @@ function desktopState(raw, env) {
   const scheme = raw.slice(0, separator);
   const nonce = raw.slice(separator + 1);
   if (!SCHEMES.has(scheme) || !TOKEN_PART.test(nonce)) return null;
-  const allowed = DEPLOYMENT_SCHEMES[(env.ZEROS_DEPLOY_ENV || "").trim()];
-  if (allowed && !allowed.has(scheme)) return null;
+  const deployment = (env.ZEROS_DEPLOY_ENV || "").trim();
+  // Unset (local/preview) and hosted Dev accept any listed scheme; a named
+  // environment this code does not know accepts none.
+  if (deployment === "" || deployment === "dev") return { value: raw, scheme };
+  const allowed = Object.hasOwn(DEPLOYMENT_SCHEMES, deployment) ? DEPLOYMENT_SCHEMES[deployment] : null;
+  if (!allowed || !allowed.has(scheme)) return null;
   return { value: raw, scheme };
 }
 
@@ -64,8 +67,8 @@ function invalidPage(
     shell(
       "Sign-in didn’t finish",
       `<div class="title">Sign-in didn’t finish</div>
-          <div class="sub">${message}</div>
-          <div class="acts"><a class="btn" href="${esc(action.href)}">${action.label}</a></div>`,
+          <div class="sub">${message}</div>${action.href ? `
+          <div class="acts"><a class="btn" href="${esc(action.href)}">${action.label}</a></div>` : ""}`,
     ),
     400,
   );

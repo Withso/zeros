@@ -3,11 +3,11 @@ import { promotionConfig } from "./contracts";
 import { createProviders, publicPagesEnvironment } from "./providers";
 
 const sha = "a".repeat(40);
-const config = promotionConfig({ RELEASE_CHANNEL: "beta", RELEASE_SHA: sha, GITHUB_SHA: sha, RELEASE_BRANCH: "release/1.2.3",
+const config = promotionConfig({ RELEASE_CHANNEL: "production", RELEASE_SHA: sha, GITHUB_SHA: sha, RELEASE_BRANCH: "release/1.2.3",
   GITHUB_REPOSITORY: "example/zeros", GITHUB_RUN_ID: "1", GITHUB_RUN_ATTEMPT: "1", ZEROS_HOSTED_PROMOTION: "enabled",
   RAILWAY_DEPLOY_TOKEN: "fixture", PLANETSCALE_SERVICE_TOKEN_ID: "fixture", PLANETSCALE_SERVICE_TOKEN: "fixture", CLOUDFLARE_API_TOKEN: "fixture",
   RAILWAY_PROJECT_ID: "11111111-1111-4111-8111-111111111111", RAILWAY_ENVIRONMENT_ID: "22222222-2222-4222-8222-222222222222", RAILWAY_SERVICE_ID: "33333333-3333-4333-8333-333333333333",
-  PLANETSCALE_ORG: "example", PLANETSCALE_DATABASE: "zeros-control-plane-beta", PLANETSCALE_BRANCH: "main", CLOUDFLARE_ACCOUNT_ID: "c".repeat(32), CF_PAGES_APP_PROJECT: "zeros-web-beta", AUTH_PROVIDER: "workos" });
+  PLANETSCALE_ORG: "example", PLANETSCALE_DATABASE: "zeros-control-plane-production", PLANETSCALE_BRANCH: "main", CLOUDFLARE_ACCOUNT_ID: "c".repeat(32), CF_PAGES_APP_PROJECT: "zeros-web", CF_PAGES_OPS_PROJECT: "zeros-ops", AUTH_PROVIDER: "workos" });
 const workosEnv = { AUTH_ISSUER: "https://auth-api.example.com/", AUTH_JWKS_URL: "https://auth-api.example.com/sso/jwks/client_desktop",
   AUTH_WEB_CLIENT_ID: "client_web", AUTH_DESKTOP_CLIENT_ID: "client_desktop" };
 
@@ -19,16 +19,17 @@ function fixture(state: { autoDeploy: boolean; checkSuites: boolean; pagesAuto: 
   let current: { id: string; status: string }[] = [];
   const variables: Record<string, string> = { SECRET: "must-not-be-returned" };
   const branch = "release/1.2.2";
-  const project = () => ({ name: config.appProject, production_branch: branch, domains: ["app-beta.zeros.build"],
+  const project = (surface: "app" | "ops") => ({ name: surface === "app" ? config.appProject : config.opsProject,
+    production_branch: branch, domains: [new URL(surface === "app" ? config.app : config.ops!).hostname],
     source: { type: "github", config: { owner: "example", repo_name: "zeros", production_branch: branch, production_deployments_enabled: state.pagesAuto, preview_deployment_setting: "none" } },
-    deployment_configs: { production: { env_vars: Object.fromEntries(Object.entries(publicPagesEnvironment(config, "app", {})).map(([k, v]) => [k, { value: v }])) } } });
+    deployment_configs: { production: { env_vars: Object.fromEntries(Object.entries(publicPagesEnvironment(config, surface, {})).map(([k, v]) => [k, { value: v }])) } } });
   const fetcher: typeof fetch = async (url, init) => {
     const request = init?.body ? JSON.parse(String(init.body)) : {};
     calls.push({ url: String(url), method: init?.method, ...request });
     if (String(url).endsWith("/v1/release-identity")) return Response.json(state.identity ?? {}, { status: 503 });
     if (String(url).includes("cloudflare")) {
       if (init?.method === "PATCH") state.pagesAuto = request.source.config.production_deployments_enabled;
-      return Response.json({ success: true, result: project() });
+      return Response.json({ success: true, result: project(String(url).includes(`/projects/${config.opsProject}`) ? "ops" : "app") });
     }
     const q: string = request.query;
     if (q.includes("CutoverTriggers")) {
@@ -60,9 +61,9 @@ function fixture(state: { autoDeploy: boolean; checkSuites: boolean; pagesAuto: 
     if (q.includes("CutoverMaintenance")) { Object.assign(variables, request.variables.input.variables); return Response.json({ data: { variableCollectionUpsert: true } }); }
     if (q.includes("PromotionState")) return Response.json({ data: {
       serviceInstanceAutoDeployStatus: { enabled: state.autoDeploy },
-      environment: { id: config.environmentId, name: "beta", projectId: config.projectId, unmergedChangesCount: null,
+      environment: { id: config.environmentId, name: "production", projectId: config.projectId, unmergedChangesCount: null,
         config: { services: { [config.serviceId]: { source: { repo: config.repository, rootDirectory: "apps/control-plane", checkSuites: state.checkSuites, branch } } } } },
-      serviceInstance: { serviceId: config.serviceId, environmentId: config.environmentId, domains: { customDomains: [{ domain: "api-beta.zeros.build" }] } },
+      serviceInstance: { serviceId: config.serviceId, environmentId: config.environmentId, domains: { customDomains: [{ domain: "api.zeros.build" }] } },
       environmentStagedChanges: state.staged ?? { id: "<empty>", patch: {} },
     } });
     throw new Error(`unexpected query ${q}`);
@@ -162,7 +163,7 @@ describe("cutover provider adapters", () => {
   });
 
   it("waits until the exact candidate itself serves maintenance", async () => {
-    const fenced = { version: 1, ready: false, sourceSha: sha, channel: "beta", maintenance: true };
+    const fenced = { version: 1, ready: false, sourceSha: sha, channel: "production", maintenance: true };
     await expect(fixture({ autoDeploy: false, checkSuites: false, pagesAuto: false, identity: fenced }).providers.waitMaintenance()).resolves.toBe(true);
     const oldBuild = { ...fenced, sourceSha: "b".repeat(40) };
     await expect(fixture({ autoDeploy: false, checkSuites: false, pagesAuto: false, identity: oldBuild }).providers.waitMaintenance()).rejects.toThrow();

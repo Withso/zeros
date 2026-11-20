@@ -79,11 +79,11 @@ describe("visible archived contexts", () => {
   it("counts edits in older copies against retention and leaves a different channel alone", async () => {
     await writeFile(path.join(source, ".context", "notes"), "12345678");
     const first = await copy({ identity: "first", workspace: "first", archivedAt: 1 });
-    const beta = await copy({ channelRoot: path.join(root, "zeros-beta") });
+    const other = await copy({ channelRoot: path.join(root, "zeros-alpha") });
     await writeFile(path.join(first!.path, "notes"), "x".repeat(21));
     await copy({ identity: "new", workspace: "new", archivedAt: 2 });
     await expect(readFile(path.join(first!.path, "notes"))).rejects.toMatchObject({ code: "ENOENT" });
-    expect(await readFile(path.join(beta!.path, "notes"), "utf8")).toBe("12345678");
+    expect(await readFile(path.join(other!.path, "notes"), "utf8")).toBe("12345678");
   });
 
   it("keeps the copy just published even when its cloud archive time predates the retained copies", async () => {

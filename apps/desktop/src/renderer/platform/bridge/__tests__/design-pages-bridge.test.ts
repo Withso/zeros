@@ -1,12 +1,17 @@
 import { describe, expect, it, vi } from "vitest";
+import { DESIGN_COMPONENT_IDENTITY_CAPABILITY, DESIGN_COMPONENT_IDENTITY_PARAM } from "@zeros/protocol/design-catalog";
 import {
+  bridgeDesignDeleteCanvasItem,
   bridgeDesignCreateFrame,
   bridgeDesignCreatePage,
   bridgeDesignDeletePage,
   bridgeDesignDuplicateFrame,
   bridgeDesignMoveComponent,
+  bridgeDesignPutCanvasItem,
   bridgeDesignRenamePage,
+  bridgeDesignRenameFrame,
   bridgeDesignSelectPage,
+  bridgeDesignUpdateTheme,
   rememberDesignDirectoryIdentity,
 } from "../design-bridge";
 import type { RuntimeClient } from "../ws-client";
@@ -41,6 +46,77 @@ function client(result: unknown) {
   }));
   return { bridge: { request } as unknown as RuntimeClient, request };
 }
+
+function capableClient(result: unknown, capabilities: readonly string[]) {
+  const response = client(result);
+  return {
+    ...response,
+    bridge: {
+      ...response.bridge,
+      supportsEngineCapability: (capability: string) => capabilities.includes(capability),
+    } as RuntimeClient,
+  };
+}
+
+type AggregateMutation = {
+  name: string;
+  op: string;
+  malformedReply: string;
+  invoke: (bridge: RuntimeClient, workspaceId: string) => Promise<unknown>;
+};
+
+const aggregateMutations: AggregateMutation[] = [
+  {
+    name: "page create",
+    op: "design.page.create",
+    malformedReply: "design.page.create: malformed engine response",
+    invoke: (bridge, workspaceId) => bridgeDesignCreatePage(bridge, workspaceId, "Purchase"),
+  },
+  {
+    name: "page rename",
+    op: "design.page.rename",
+    malformedReply: "design.page.rename: malformed engine response",
+    invoke: (bridge, workspaceId) => bridgeDesignRenamePage(bridge, workspaceId, "checkout", "Purchase"),
+  },
+  {
+    name: "page delete",
+    op: "design.page.delete",
+    malformedReply: "design.page.delete: malformed engine response",
+    invoke: (bridge, workspaceId) => bridgeDesignDeletePage(bridge, workspaceId, "checkout", []),
+  },
+  {
+    name: "canvas item put",
+    op: "design.canvas.item.put",
+    malformedReply: "design.canvas.item.put: malformed engine response",
+    invoke: (bridge, workspaceId) => bridgeDesignPutCanvasItem(bridge, workspaceId, "checkout", {
+      kind: "note", x: 0, y: 0, width: 200, height: 80, text: "Note",
+    }),
+  },
+  {
+    name: "canvas item delete",
+    op: "design.canvas.item.delete",
+    malformedReply: "design.canvas.item.delete: malformed engine response",
+    invoke: (bridge, workspaceId) => bridgeDesignDeleteCanvasItem(bridge, workspaceId, "checkout", "note-1"),
+  },
+  {
+    name: "component move",
+    op: "design.component.move",
+    malformedReply: "design.component.move: malformed engine response",
+    invoke: (bridge, workspaceId) => bridgeDesignMoveComponent(bridge, workspaceId, "card", "checkout"),
+  },
+  {
+    name: "theme update",
+    op: "design.themes.update",
+    malformedReply: "design.themes.update: malformed engine response",
+    invoke: (bridge, workspaceId) => bridgeDesignUpdateTheme(bridge, workspaceId, { id: "light", label: "Day" }),
+  },
+  {
+    name: "frame rename",
+    op: "design.frame.rename",
+    malformedReply: "design.frame.rename: malformed engine response",
+    invoke: (bridge, workspaceId) => bridgeDesignRenameFrame(bridge, workspaceId, "checkout/card.html", "Card"),
+  },
+];
 
 describe("Design page bridge", () => {
   it("moves a component onto a page and checks the main is on that page", async () => {
@@ -91,6 +167,39 @@ describe("Design page bridge", () => {
         expectedFrameIds: ["home"],
       },
     });
+  });
+
+  it.each(aggregateMutations)("negotiates identity only for capable Local $name snapshots", async (mutation) => {
+    const workspaceId = "ws_aggregate_local";
+    const local = capableClient(null, [DESIGN_COMPONENT_IDENTITY_CAPABILITY]);
+    await expect(mutation.invoke(local.bridge, workspaceId)).rejects.toThrow(mutation.malformedReply);
+    const message = local.request.mock.calls[0]?.[0] as unknown as { op: string; params: Record<string, unknown> };
+    expect(message.op).toBe(mutation.op);
+    expect(message.params).toMatchObject({ workspaceId, [DESIGN_COMPONENT_IDENTITY_PARAM]: true });
+    expect(message.params).not.toHaveProperty("snapshotMode");
+    expect(message.params).not.toHaveProperty("knownPages");
+  });
+
+  it.each(aggregateMutations)("keeps legacy $name requests unchanged", async (mutation) => {
+    const workspaceId = "ws_aggregate_legacy";
+    const legacy = client(null);
+    await expect(mutation.invoke(legacy.bridge, workspaceId)).rejects.toThrow(mutation.malformedReply);
+    const message = legacy.request.mock.calls[0]?.[0] as unknown as { op: string; params: Record<string, unknown> };
+    expect(message.op).toBe(mutation.op);
+    expect(message.params).not.toHaveProperty(DESIGN_COMPONENT_IDENTITY_PARAM);
+    expect(message.params).not.toHaveProperty("snapshotMode");
+    expect(message.params).not.toHaveProperty("knownPages");
+  });
+
+  it.each(aggregateMutations)("keeps cloud $name requests fail-closed", async (mutation) => {
+    const workspaceId = "cloud://org/aggregate";
+    const cloud = capableClient(null, [DESIGN_COMPONENT_IDENTITY_CAPABILITY]);
+    await expect(mutation.invoke(cloud.bridge, workspaceId)).rejects.toThrow(mutation.malformedReply);
+    const message = cloud.request.mock.calls[0]?.[0] as unknown as { op: string; params: Record<string, unknown> };
+    expect(message.op).toBe(mutation.op);
+    expect(message.params).not.toHaveProperty(DESIGN_COMPONENT_IDENTITY_PARAM);
+    expect(message.params).not.toHaveProperty("snapshotMode");
+    expect(message.params).not.toHaveProperty("knownPages");
   });
 
   it("sends the hint's captured owner independently of a newer mutation binding", async () => {

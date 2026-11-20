@@ -16,13 +16,19 @@
 // mounts no rows. Local only.
 
 import { useEffect, useMemo, useState } from "react";
-import { Plus, RotateCcw, Sparkles } from "lucide-react";
+import { MoreHorizontal, Plus, RotateCcw, Sparkles } from "lucide-react";
 import { COMPONENT_STATE_PRESETS, componentInheritedValues } from "@zeros/design-core/component-options";
 import type { DesignFrameComponent, DesignFrameInstances } from "@zeros/protocol/design-catalog";
 import type { ComponentEasing, ComponentOption, ComponentOptionValue } from "@zeros/design-core/component-options";
 
 import {
   Button,
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
@@ -30,6 +36,7 @@ import {
   DropdownMenuRadioItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
+  Tooltip,
   toast,
 } from "../../shared/ui/primitives";
 // Imported directly, not through the primitives index, so the rows load with
@@ -57,22 +64,25 @@ import {
   commitDesignComponentOption,
   commitDesignComponentStateVariant,
   commitDesignComponentVariant,
+  commitDesignInstanceAllOverridesReset,
   commitDesignInstanceAttributes,
-  commitDesignInstanceOverridesReset,
   commitDesignInstanceSlotReset,
   commitDesignInstanceText,
+  designInstanceResetAllFits,
   createDesignComponentPreview,
   designComponentAttributeText,
   designComponentPreviewProperties,
   designComponentRecordProblem,
+  designInstanceHasSuppliedContent,
   designComponentVariantName,
+  designInstanceVisualStyleProperties,
   designInstanceIgnoredAttributes,
   designInstanceOptionState,
   readDesignFrameComponent,
   sameDesignComponentValue,
 } from "./state/design-component-options";
 import { DESIGN_OPTIONS_NOT_APPLIED_MESSAGES, designComponentSlotLabel } from "./state/design-component-parts";
-import { showDesignComponentVariant, useDesignShownComponentVariant } from "./state/design-component-variants";
+import { showDesignComponentVariant } from "./state/design-component-variants";
 
 const EASINGS = [
   { value: "linear", label: "Linear" },
@@ -93,10 +103,22 @@ const variantLabel = (name: string) => {
   return words.charAt(0).toUpperCase() + words.slice(1);
 };
 
+export function designComponentOptionProvenanceLabel(
+  component: string,
+  variant: string | null,
+  inherited: ComponentOptionValue | undefined,
+  overridden = false,
+): string {
+  const source = `${component}/${variant ? variantLabel(variant) : "Default"}`;
+  const value = inherited === undefined ? "the selected variant's value" : designComponentAttributeText(inherited);
+  return overridden ? `Overridden here. Reset to inherit ${source}: ${value}.` : `Inherited from ${source}: ${value}.`;
+}
+
 /** What the section edits: the main component frame itself, or one instance
  * of a component placed in this frame. */
 export type DesignComponentOptionsTarget =
-  | { kind: "main"; component: DesignFrameComponent }
+  /** undeclared: registered without an options template, so it has no variants to add to yet. */
+  | { kind: "main"; component: DesignFrameComponent; undeclared?: true }
   | {
       kind: "instance";
       /** The host layer's data-oid. */
@@ -116,6 +138,8 @@ export function DesignComponentOptions({
   directory,
   lint,
   disabled,
+  active = true,
+  shownVariant = null,
   onAskAgent,
 }: {
   workspaceId: string;
@@ -124,13 +148,14 @@ export function DesignComponentOptions({
   directory: string;
   lint: DesignLintReportWire | null;
   disabled: boolean;
+  active?: boolean;
+  shownVariant?: string | null;
   onAskAgent?: (brief: DesignAgentBrief) => void;
 }) {
   const instance = target.kind === "instance" ? target : null;
   const view = readDesignFrameComponent(target.component);
   const { declaration } = view;
   const notApplied = instance ? (instance.host.failed ? instance.notApplied ?? "defaults" : undefined) : view.notApplied;
-  const shownVariant = useDesignShownComponentVariant(workspaceId, frame);
   // Keyed by the host's record, which a new generation replaces.
   const host = instance?.host;
   const instanceState = useMemo(
@@ -158,23 +183,29 @@ export function DesignComponentOptions({
   }, [generation]);
   const [folded, setFolded] = useState<ReadonlySet<string>>(() => new Set());
   const [naming, setNaming] = useState(false);
+  const [confirmResetAll, setConfirmResetAll] = useState(false);
   const preview = useMemo(
     () => createDesignComponentPreview(workspaceId, frame.file, frame.sourceVersion, instance?.nodeId),
     [workspaceId, frame.file, frame.sourceVersion, instance?.nodeId],
   );
   useEffect(() => () => preview.clear(), [preview]);
+  useEffect(() => { if (!active) preview.clear(); }, [active, preview]);
+  useEffect(() => { if (!active) setConfirmResetAll(false); }, [active]);
+
+  const actionDisabled = disabled || !active;
 
   const current = (option: ComponentOption): ComponentOptionValue => pending.get(option.name) ?? base.get(option.name) ?? option.default;
   const shownValues = () => new Map<string, ComponentOptionValue>(declaration.options.map((entry) => [entry.name, current(entry)]));
   const values = (option: ComponentOption, value: ComponentOptionValue) => shownValues().set(option.name, value);
   const show = (option: ComponentOption, value: ComponentOptionValue) => {
-    if (view.reach[option.name] === "css") preview.set(designComponentPreviewProperties(declaration, values(option, value)));
+    if (active && view.reach[option.name] === "css") preview.set(designComponentPreviewProperties(declaration, values(option, value)));
   };
   const failed = (label: string) => (error: unknown) => {
     preview.clear();
     toast.error(`Couldn't change ${label}`, { description: errorMessage(error) });
   };
   const commit = (option: ComponentOption, value: ComponentOptionValue) => {
+    if (!active) return;
     if (sameDesignComponentValue(value, current(option))) {
       preview.clear();
       return;
@@ -199,7 +230,7 @@ export function DesignComponentOptions({
     });
   };
   const chooseVariant = (next: string | null) => {
-    if (next === variant) return;
+    if (!active || next === variant) return;
     if (!instance) {
       showDesignComponentVariant(workspaceId, frame.file, next);
       return;
@@ -209,30 +240,45 @@ export function DesignComponentOptions({
   };
   const reset = instance && instanceState?.resettable
     ? () => {
-        const removed: Record<string, null> = Object.fromEntries(Object.keys(instance.host.attributes).map((name) => [name, null]));
+        if (!active) return;
+        const removed: Record<string, null> = Object.fromEntries([...instanceState.overridden].map((name) => [name, null]));
         void commitDesignInstanceAttributes(workspaceId, frame, instance.nodeId, removed, `Reset ${instance.title}`).catch(failed("the options"));
       }
     : undefined;
   const overridden = instance ? Object.keys(instance.host.overrides ?? {}) : [];
   // The instance's own style is what it overrides on its root, its box.
   const ownStyle = instance?.host.style;
-  const overrideCount = overridden.length + (ownStyle ? 1 : 0);
-  const resetOverrides = instance && overrideCount
-    ? () => {
-        void commitDesignInstanceOverridesReset(workspaceId, frame, instance.nodeId, overridden, ownStyle).catch(failed("the overrides"));
-      }
-    : undefined;
+  const visualStyleCount = designInstanceVisualStyleProperties(ownStyle).length;
+  const slottedLayers = [...new Set(Object.values(instance?.host.slotted ?? {}).flat())];
+  const resetText = Boolean(instance?.host.text?.length);
+  const hasSuppliedContent = designInstanceHasSuppliedContent(slottedLayers, instance?.host.text);
+  const canResetAll = Boolean(instance && ((instanceState?.overridden.size ?? 0) > 0 || overridden.length > 0 || visualStyleCount > 0 || slottedLayers.length > 0 || resetText)) &&
+    designInstanceResetAllFits({ options: instanceState?.overridden.size ?? 0, parts: overridden.length, style: visualStyleCount > 0, slotted: slottedLayers.length, text: resetText });
+  const resetAll = () => {
+    if (!instance || !canResetAll || !active) return;
+    setConfirmResetAll(false);
+    void commitDesignInstanceAllOverridesReset(workspaceId, frame, instance.nodeId)
+      .catch(failed("all component overrides"));
+  };
+  const requestResetAll = () => {
+    if (!canResetAll || !active) return;
+    if (hasSuppliedContent) setConfirmResetAll(true);
+    else resetAll();
+  };
   const resetSlot = (label: string, layers: readonly string[]) => {
+    if (!active) return;
     void commitDesignInstanceSlotReset(workspaceId, frame, layers, label).catch(failed(label));
   };
   // The default slot is no declared option; it has a row once it holds layers.
   const defaultSlotted = instance?.host.slotted?.[""];
   const addState = (preset: (typeof COMPONENT_STATE_PRESETS)[number]) => {
+    if (!active) return;
     void commitDesignComponentStateVariant(workspaceId, frame, preset)
       .then(() => showDesignComponentVariant(workspaceId, frame.file, preset.name))
       .catch((error) => toast.error(`Couldn't add the ${preset.label} state`, { description: errorMessage(error) }));
   };
   const saveVariant = (typed: string) => {
+    if (!active) return null;
     const named = designComponentVariantName(declaration, typed);
     if ("error" in named) return named.error;
     setNaming(false);
@@ -283,46 +329,92 @@ export function DesignComponentOptions({
     if (option.group && folded.has(option.group)) continue;
     if (option.kind === "slot") {
       rows.push(<OptionSlotRow key={option.name} label={option.label} layers={instance ? instance.host.slotted?.[option.name] ?? [] : null}
-        disabled={disabled} onReset={(layers) => resetSlot(option.label, layers)} />);
+        disabled={actionDisabled} onReset={(layers) => resetSlot(option.label, layers)} />);
       continue;
     }
     const value = current(option);
-    rows.push(
+    const inherited = instanceState?.inherited.get(option.name);
+    const optionOverridden = Boolean(instance && instanceState?.overridden.has(option.name));
+    const control = (
       <DesignComponentOptionRow
-        key={option.name}
         option={option}
         value={value}
-        inherited={instanceState?.inherited.get(option.name)}
-        disabled={disabled}
+        inherited={inherited}
+        overridden={optionOverridden}
+        disabled={actionDisabled}
         onPreview={(next) => show(option, next)}
         onCancel={() => preview.clear()}
         onCommit={(next) => commit(option, next)}
-      />,
+      />
     );
+    if (instance && optionOverridden) {
+      rows.push(
+        <div key={option.name} className="flex min-w-0 items-center gap-1">
+          <div className="min-w-0 flex-1">{control}</div>
+          <Tooltip label={designComponentOptionProvenanceLabel(instance.title, variant, inherited, true)}>
+            <InspectorIconButton
+              label={`Reset ${option.label} to its inherited value`}
+              data-design-component-option-reset={option.name}
+              disabled={actionDisabled}
+              onClick={() => { if (active) void commitDesignInstanceAttributes(workspaceId, frame, instance.nodeId,
+                { [option.name]: null }, `Reset ${option.label}`).catch(failed(option.label))}
+              }
+            >
+              <RotateCcw />
+            </InspectorIconButton>
+          </Tooltip>
+        </div>,
+      );
+    } else if (instance && inherited !== undefined) {
+      rows.push(
+        <Tooltip key={option.name} label={designComponentOptionProvenanceLabel(instance.title, variant, inherited)}>
+          <div data-design-option-inherited={option.name}>{control}</div>
+        </Tooltip>,
+      );
+    } else {
+      rows.push(<div key={option.name}>{control}</div>);
+    }
   }
   // A state shows while an instance is hovered, pressed, focused or disabled,
   // so an instance picks only among the others.
   const variants = declaration.variants.filter((entry) => !entry.state).map((entry) => entry.name);
   const states = instance ? [] : declaration.variants.filter((entry) => entry.state).map((entry) => entry.name);
+  const creatable = !instance && !(target.kind === "main" && target.undeclared);
   const addable = COMPONENT_STATE_PRESETS.filter((preset) => !declaration.variants.some((entry) => entry.state === preset.state || entry.name === preset.name));
   const ignored = useMemo(() => (host ? designInstanceIgnoredAttributes(host) : []), [host]);
   const tooLarge = designComponentRecordProblem(target.component, title);
 
   return (
-    <InspectorSection
+    <>
+      <InspectorSection
       title="Options"
       data-design-component-options={instance ? "instance" : "main"}
       bodyClassName="gap-1.5"
       actions={instance ? (
-        <InspectorIconButton label="Reset options" data-design-options-reset="" disabled={disabled || !reset} onClick={reset}>
-          <RotateCcw />
-        </InspectorIconButton>
+        <>
+          <InspectorIconButton label="Reset options" data-design-options-reset="" disabled={actionDisabled || !reset} onClick={reset}>
+            <RotateCcw />
+          </InspectorIconButton>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <InspectorIconButton label="More component actions" data-design-component-actions="" disabled={actionDisabled}>
+                <MoreHorizontal />
+              </InspectorIconButton>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuItem disabled={!canResetAll} onSelect={requestResetAll} data-design-reset-all-overrides="">
+                <RotateCcw aria-hidden="true" />
+                Reset all overrides
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </>
       ) : undefined}
     >
       {notApplied ? (
         <OptionsNotice tone="error" role="alert" data-design-options-not-applied={notApplied}>
           <p>These options could not be applied. {DESIGN_OPTIONS_NOT_APPLIED_MESSAGES[notApplied]}</p>
-          <Button type="button" variant="secondary" size="compact" disabled={!askToFix} onClick={askToFix}>
+          <Button type="button" variant="secondary" size="compact" disabled={actionDisabled || !askToFix} onClick={askToFix}>
             <Sparkles aria-hidden="true" />
             Ask agent to fix
           </Button>
@@ -344,43 +436,79 @@ export function DesignComponentOptions({
           variant={variant}
           variants={variants}
           states={states}
-          addable={instance ? [] : addable}
-          disabled={disabled}
+          addable={creatable ? addable : []}
+          disabled={actionDisabled}
           onChoose={chooseVariant}
           onAddState={addState}
-          onSave={instance ? undefined : () => setNaming(true)}
+          onSave={creatable ? () => setNaming(true) : undefined}
         />
+      ) : null}
+      {instance && variant ? (
+        <div className="flex justify-end">
+          <Button type="button" variant="secondary" size="compact" data-design-options-use-default=""
+            disabled={actionDisabled} onClick={() => chooseVariant(null)}>
+            Use Default
+          </Button>
+        </div>
+      ) : null}
+      {instance && !tooLarge && declaration.options.length === 0 && variants.length === 0 ? (
+        <p className="text-fg3 px-2 py-1 text-3xxs" data-design-options-empty="" role="status">
+          This component has no declared options or variants.
+        </p>
       ) : null}
       {naming && !tooLarge ? <OptionEntryRow label="Name" inputLabel="Variant name" placeholder="Compact" onSubmit={saveVariant} onCancel={() => setNaming(false)} /> : null}
       {rows}
       {defaultSlotted ? (
-        <OptionSlotRow label={designComponentSlotLabel("")} layers={defaultSlotted} disabled={disabled}
+        <OptionSlotRow label={designComponentSlotLabel("")} layers={defaultSlotted} disabled={actionDisabled}
           onReset={(layers) => resetSlot(designComponentSlotLabel(""), layers)} />
       ) : null}
       {instance && instance.host.text !== undefined ? (
-        <OptionTextRow
-          label="Text"
-          value={instance.host.text}
-          disabled={disabled}
-          onCommit={(next) => {
-            if (next !== instance.host.text) void commitDesignInstanceText(workspaceId, frame, instance.nodeId, next).catch(failed("the text"));
-          }}
-        />
-      ) : null}
-      {resetOverrides ? (
-        <OptionActionRow disabled={disabled} onClick={resetOverrides} data-design-overrides-reset={overrideCount}>
-          <RotateCcw aria-hidden="true" />
-          {overrideCount === 1 ? "Reset 1 override" : `Reset ${overrideCount} overrides`}
-        </OptionActionRow>
+        <div className="flex min-w-0 items-center gap-1">
+          <div className="min-w-0 flex-1">
+            <OptionTextRow
+              label="Text"
+              value={instance.host.text}
+              disabled={actionDisabled}
+              onCommit={(next) => {
+                if (active && next !== instance.host.text) void commitDesignInstanceText(workspaceId, frame, instance.nodeId, next, instance.host).catch(failed("the text"));
+              }}
+            />
+          </div>
+          <Tooltip label="Supplied text fills the main component's default slot. Reset to show the main content.">
+            <InspectorIconButton
+              label="Reset text to the main component's default"
+              data-design-text-reset=""
+              disabled={actionDisabled || instance.host.text === ""}
+              onClick={() => { if (active) void commitDesignInstanceText(workspaceId, frame, instance.nodeId, "", instance.host).catch(failed("the text")); }}
+            >
+              <RotateCcw />
+            </InspectorIconButton>
+          </Tooltip>
+        </div>
       ) : null}
       {/* Options are the main's to change, so an instance does not offer it. */}
       {instance ? null : (
-        <OptionActionRow disabled={!askToChange} onClick={askToChange} data-design-options-ask="">
+        <OptionActionRow disabled={actionDisabled || !askToChange} onClick={askToChange} data-design-options-ask="">
           <Sparkles aria-hidden="true" />
           Ask agent to change options
         </OptionActionRow>
       )}
-    </InspectorSection>
+      </InspectorSection>
+      <Dialog open={confirmResetAll} onOpenChange={setConfirmResetAll}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Reset all overrides?</DialogTitle>
+            <DialogDescription>
+              This removes supplied slot layers and text from this instance, and resets its declared options and visual styles. The main component and other instances are unchanged.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button type="button" variant="secondary" onClick={() => setConfirmResetAll(false)}>Cancel</Button>
+            <Button type="button" variant="secondary" onClick={resetAll}>Reset all overrides</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
   );
 }
 
@@ -455,15 +583,15 @@ interface RowProps<T extends ComponentOptionValue> {
   value: T;
   /** An instance's inherited value; absent on the main. */
   inherited?: T;
+  overridden?: boolean;
   disabled: boolean;
   onPreview: (value: ComponentOptionValue) => void;
   onCancel: () => void;
   onCommit: (value: ComponentOptionValue) => void;
 }
 
-function DesignComponentOptionRow({ option, value, inherited, disabled, onPreview, onCancel, onCommit }: RowProps<ComponentOptionValue>) {
-  // On an instance, a value other than the one it inherits carries a dot.
-  const changed = inherited !== undefined && !sameDesignComponentValue(value, inherited);
+function DesignComponentOptionRow({ option, value, inherited, overridden, disabled, onPreview, onCancel, onCommit }: RowProps<ComponentOptionValue>) {
+  const changed = overridden ?? (inherited !== undefined && !sameDesignComponentValue(value, inherited));
   switch (option.kind) {
     case "number":
       return option.min !== undefined && option.max !== undefined ? (
@@ -498,7 +626,7 @@ function DesignComponentOptionRow({ option, value, inherited, disabled, onPrevie
     case "color":
       return <OptionColorRow label={option.label} value={value as string} disabled={disabled} changed={changed} onPreview={onPreview} onCancel={onCancel} onCommit={onCommit} />;
     case "easing":
-      return <OptionEasingRows label={option.label} value={value as ComponentEasing} inherited={inherited as ComponentEasing | undefined} disabled={disabled}
+      return <OptionEasingRows label={option.label} value={value as ComponentEasing} inherited={inherited as ComponentEasing | undefined} overridden={overridden} disabled={disabled}
         onPreview={onPreview} onCancel={onCancel} onCommit={onCommit} />;
     case "slot":
       return null;
@@ -611,12 +739,12 @@ function curvePath(curve: string): string {
   return `M${x(0)} ${y(0)}C${x(x1!)} ${y(y1!)} ${x(x2!)} ${y(y2!)} ${x(1)} ${y(1)}`;
 }
 
-function OptionEasingRows({ label, value, inherited, disabled, onPreview, onCancel, onCommit }: {
-  label: string; value: ComponentEasing; inherited?: ComponentEasing; disabled: boolean;
+function OptionEasingRows({ label, value, inherited, overridden, disabled, onPreview, onCancel, onCommit }: {
+  label: string; value: ComponentEasing; inherited?: ComponentEasing; overridden?: boolean; disabled: boolean;
   onPreview: (value: ComponentEasing) => void; onCancel: () => void; onCommit: (value: ComponentEasing) => void;
 }) {
-  const curveChanged = inherited !== undefined && inherited.curve !== value.curve;
-  const durationChanged = inherited !== undefined && inherited.duration !== value.duration;
+  const curveChanged = overridden ?? (inherited !== undefined && inherited.curve !== value.curve);
+  const durationChanged = overridden ?? (inherited !== undefined && inherited.duration !== value.duration);
   const spring = SPRING.exec(value.curve);
   const bounce = spring ? Number(spring[1]) : 0;
   const keyword = EASINGS.find((easing) => easing.value === value.curve);

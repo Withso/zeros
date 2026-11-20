@@ -110,6 +110,7 @@ describe("stripEngineAuthorityEnv", () => {
       expect(input[name]).toBe("secret");
     }
     expect(out.SAFE).toBe("visible");
+    expect(ENGINE_AUTHORITY_ENV_VARS).toContain("ZEROS_LOCAL_LAYOUT");
   });
 
   it("drops future boundary internals and Conductor authority by name pattern", () => {

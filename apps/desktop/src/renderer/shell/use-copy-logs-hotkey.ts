@@ -52,7 +52,7 @@ let copyInFlight = false;
  *  preload allowlist). This is the everyday worktree-dev trap: the renderer
  *  hot-reloads but a named dev instance's main/preload do NOT, so a
  *  freshly-added IPC command 404s until `pnpm electron:dev` is restarted. In a
- *  packaged Beta/Prod build main+preload ship with the renderer, so this branch
+ *  packaged Alpha/Prod build main+preload ship with the renderer, so this branch
  *  is effectively dev-only. Pure — exported for tests. */
 export function isStaleProcessError(err: unknown): boolean {
   const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();

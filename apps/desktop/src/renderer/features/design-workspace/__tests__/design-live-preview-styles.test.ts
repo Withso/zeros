@@ -1,11 +1,12 @@
 // @vitest-environment jsdom
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   publishDesignLivePreviewStyles,
   resetDesignLivePreviewForTests,
+  useDesignLivePreviewStore,
   useDesignLivePreviewStyles,
 } from "../state/design-live-preview";
 import {
@@ -34,13 +35,17 @@ let container: HTMLDivElement;
 let root: Root;
 const seen: (Readonly<Record<string, string | null>> | undefined)[] = [];
 
-function Probe({ reads }: { reads?: (property: string) => boolean }) {
-  seen.push(useDesignLivePreviewStyles("workspace-a", "home.html", "hero", reads));
+function Probe({ reads, active = true }: { reads?: (property: string) => boolean; active?: boolean }) {
+  const read = useDesignLivePreviewStyles as unknown as (
+    workspaceId: string, frame: string, nodeId: string,
+    reads: ((property: string) => boolean) | undefined, active: boolean,
+  ) => Readonly<Record<string, string | null>> | undefined;
+  seen.push(read("workspace-a", "home.html", "hero", reads, active));
   return null;
 }
 
-async function mount(reads?: (property: string) => boolean) {
-  await act(async () => root.render(React.createElement(Probe, { reads })));
+async function mount(reads?: (property: string) => boolean, active = true) {
+  await act(async () => root.render(React.createElement(Probe, { reads, active })));
 }
 
 const publish = (styles: Record<string, string>) =>
@@ -63,6 +68,16 @@ describe("an owner's live styles in a section", () => {
     resetDesignLivePreviewForTests();
     clearDesignHistoryPresentation();
     setDesignHistoryPresentationOwnerReader(() => "");
+    vi.restoreAllMocks();
+  });
+
+  it("does not subscribe to live previews while the Style tab is inactive", async () => {
+    const subscribe = vi.spyOn(useDesignLivePreviewStore, "subscribe");
+    await mount(readsGap, false);
+    expect(subscribe).not.toHaveBeenCalled();
+
+    await mount(readsGap, true);
+    expect(subscribe).toHaveBeenCalledTimes(1);
   });
 
   it("re-renders only for the properties it reads, keeping one reference between them", async () => {

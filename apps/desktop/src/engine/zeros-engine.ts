@@ -29,10 +29,10 @@ import * as path from "node:path";
 import { randomBytes } from "node:crypto";
 import { openBoundedDirectorySync } from "./files/bounded-read-sync";
 
-import { DESIGN_CATALOG_READ_CAPABILITY, DESIGN_CATALOG_READ_OPERATION, DESIGN_CATALOG_WIDE_BATCHES_CAPABILITY, DESIGN_FRAMES_CHANGES_CAPABILITY, DESIGN_LAZY_PREPARATION_CAPABILITY, DESIGN_MUTATION_SNAPSHOTS_CAPABILITY, DESIGN_PAGE_SCOPED_MUTATIONS_CAPABILITY } from "@zeros/protocol/design-catalog";
+import { DESIGN_CATALOG_READ_CAPABILITY, DESIGN_CATALOG_READ_OPERATION, DESIGN_CATALOG_WIDE_BATCHES_CAPABILITY, DESIGN_COMPONENT_IDENTITY_CAPABILITY, DESIGN_FRAMES_CHANGES_CAPABILITY, DESIGN_LAZY_PREPARATION_CAPABILITY, DESIGN_MUTATION_SNAPSHOTS_CAPABILITY, DESIGN_PAGE_SCOPED_MUTATIONS_CAPABILITY } from "@zeros/protocol/design-catalog";
 import { DESIGN_PREVIEW_JOBS_CAPABILITY, DESIGN_RECORDINGS_CAPABILITY, DESIGN_RECORDINGS_COLOR_SCHEME_CAPABILITY, DESIGN_RECORDINGS_READ_FAILURES_CAPABILITY, DESIGN_THUMBNAILS_CAPABILITY, DESIGN_THUMBNAILS_PREPARE_CAPABILITY, DESIGN_THUMBNAILS_STORE_CAPABILITY } from "@zeros/protocol/design-capture";
 import { DESIGN_SOURCE_SURFACES_CAPABILITY } from "@zeros/protocol/design-surface";
-import { DESIGN_COMPONENT_OPTIONS_CAPABILITY, DESIGN_FRAMES_LINT_CAPABILITY, DESIGN_FRAMES_PREPARE_LINT_CAPABILITY, DESIGN_OPTIONS_SHOW_NOTHING_CAPABILITY } from "@zeros/protocol/design-catalog";
+import { DESIGN_COMPONENT_OPTIONS_CAPABILITY, DESIGN_FRAMES_LINT_CAPABILITY, DESIGN_FRAMES_PREPARE_LINT_CAPABILITY, DESIGN_INSTANCE_SLOT_TEXT_CAPABILITY, DESIGN_OPTIONS_SHOW_NOTHING_CAPABILITY } from "@zeros/protocol/design-catalog";
 import { DESIGN_CANVAS_ITEMS_CAPABILITY } from "@zeros/protocol/design-canvas-items";
 import { isDesignComponentVariantName } from "@zeros/protocol/design-path";
 import { DESIGN_COPY_PLACEMENT_CAPABILITY } from "@zeros/protocol/design-relocation";
@@ -2474,7 +2474,7 @@ export class ZerosEngine {
 
     console.log(`[Zeros] Framework: ${this.framework}`);
     // Make the resolved release channel VISIBLE at every boot. A misconfigured
-    // launch (for example, Beta resolving as Stable and taking Stable's engine
+    // launch (for example, Alpha resolving as Stable and taking Stable's engine
     // block/data dirs) shows up here instead of as mysterious cross-channel
     // contamination. See apps/desktop/src/engine/runtime.ts. The channel + base port are
     // non-sensitive; the ABSOLUTE project-root + data-dir paths are
@@ -2486,10 +2486,8 @@ export class ZerosEngine {
       console.log(`[Zeros] Data dir: ${zerosDataDir()}`);
     }
 
-    // One-time settings carry-over for the 3-way dot-dir split. Before the split
-    // Beta wrote settings into Production's `~/.zeros`; splitting the dirs without
-    // this would silently reset every existing Beta user to defaults on upgrade.
-    // Must run BEFORE loadMcpRegistry() / the settings watcher / any read of the
+    // Seeds a channel's empty user settings from Production's `~/.zeros`. Must
+    // run BEFORE loadMcpRegistry() / the settings watcher / any read of the
     // user layer. Synchronous, idempotent, never overwrites, never throws — see
     // settings/files.ts seedUserSettingsFromLegacyRoot.
     seedUserSettingsFromLegacyRoot();
@@ -9180,7 +9178,7 @@ export class ZerosEngine {
         port: this.actualPort,
         protocolVersion: PROTOCOL_VERSION,
         minProtocolVersion: MIN_SUPPORTED_PROTOCOL,
-        capabilities: [DESIGN_CATALOG_READ_CAPABILITY, CONVERSATION_REPLAY_CAPABILITY, ...(client.kind === "local" ? [DESIGN_PREVIEW_JOBS_CAPABILITY, DESIGN_LAZY_PREPARATION_CAPABILITY, DESIGN_SOURCE_SURFACES_CAPABILITY, DESIGN_COMPONENT_OPTIONS_CAPABILITY, DESIGN_FRAMES_PREPARE_LINT_CAPABILITY, DESIGN_FRAMES_LINT_CAPABILITY, DESIGN_OPTIONS_SHOW_NOTHING_CAPABILITY, DESIGN_COPY_PLACEMENT_CAPABILITY, DESIGN_MUTATION_SNAPSHOTS_CAPABILITY, DESIGN_PAGE_SCOPED_MUTATIONS_CAPABILITY, DESIGN_THUMBNAILS_STORE_CAPABILITY, DESIGN_FRAMES_CHANGES_CAPABILITY,
+        capabilities: [DESIGN_CATALOG_READ_CAPABILITY, CONVERSATION_REPLAY_CAPABILITY, ...(client.kind === "local" ? [DESIGN_PREVIEW_JOBS_CAPABILITY, DESIGN_LAZY_PREPARATION_CAPABILITY, DESIGN_SOURCE_SURFACES_CAPABILITY, DESIGN_COMPONENT_OPTIONS_CAPABILITY, DESIGN_COMPONENT_IDENTITY_CAPABILITY, DESIGN_FRAMES_PREPARE_LINT_CAPABILITY, DESIGN_FRAMES_LINT_CAPABILITY, DESIGN_OPTIONS_SHOW_NOTHING_CAPABILITY, DESIGN_INSTANCE_SLOT_TEXT_CAPABILITY, DESIGN_COPY_PLACEMENT_CAPABILITY, DESIGN_MUTATION_SNAPSHOTS_CAPABILITY, DESIGN_PAGE_SCOPED_MUTATIONS_CAPABILITY, DESIGN_THUMBNAILS_STORE_CAPABILITY, DESIGN_FRAMES_CHANGES_CAPABILITY,
           DESIGN_CANVAS_ITEMS_CAPABILITY,
           // Wide catalog batches are Local: a remote transport keeps 256 KB replies.
           DESIGN_CATALOG_WIDE_BATCHES_CAPABILITY,

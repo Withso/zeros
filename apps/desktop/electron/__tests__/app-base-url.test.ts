@@ -27,10 +27,10 @@ describe("resolveAppBaseUrl", () => {
     expect(
       resolveAppBaseUrl([
         "https://app-alpha.zeros.build/handoff",
-        "https://app-beta.zeros.build/",
+        "https://app-alpha.zeros.build/",
         "https://app.zeros.build",
       ]),
-    ).toBe("https://app-beta.zeros.build");
+    ).toBe("https://app-alpha.zeros.build");
   });
 
   it("falls back to production when every configured value is invalid", () => {

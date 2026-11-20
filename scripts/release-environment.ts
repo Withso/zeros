@@ -5,10 +5,6 @@ const EXPECTED = {
     app: "https://app-alpha.zeros.build",
     api: "https://api-alpha.zeros.build",
   },
-  beta: {
-    app: "https://app-beta.zeros.build",
-    api: "https://api-beta.zeros.build",
-  },
   production: {
     app: "https://app.zeros.build",
     api: "https://api.zeros.build",
@@ -121,7 +117,7 @@ export function releaseEnvironmentErrors(
 const requested = process.argv[2] as HostedReleaseEnvironment | undefined;
 if (process.argv[1]?.endsWith("release-environment.ts")) {
   if (!requested || !(requested in EXPECTED)) {
-    console.error("Usage: release-environment.ts alpha|beta|production");
+    console.error("Usage: release-environment.ts alpha|production");
     process.exit(1);
   }
   const errors = releaseEnvironmentErrors(requested, process.env);

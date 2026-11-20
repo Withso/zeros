@@ -11,6 +11,8 @@ import {
   roundDesignLayoutValue,
   preserveDesignLayoutPins,
   designLayoutTransform,
+  foldTransformOffset,
+  hasLegacyRelocationCandidate,
 } from "../design-layout-values";
 
 function node(styles: Record<string, string> = {}): DesignRuntimeNodeDetails {
@@ -360,5 +362,25 @@ describe("designer layout values", () => {
         axis: "x",
       }),
     ).toEqual({ scale: "2 3" });
+  });
+
+  it("folds only a legacy relocation offset into each active pin", () => {
+    const left = node({ left: "10px", top: "20px", right: "auto", bottom: "auto", transform: "matrix(1, 0, 0, 1, 6, 8)", transformOrigin: "0px 0px" });
+    left.authoredStyleProperties = ["left", "top", "transform"];
+    expect(foldTransformOffset(left)?.styles).toMatchObject({ left: "16px", top: "28px" });
+    expect(hasLegacyRelocationCandidate("transform: matrix(1, 0, 0, 1, 6, 8);")).toBe(true);
+
+    const right = node({ left: "auto", top: "auto", right: "30px", bottom: "40px", transform: "matrix(1, 0, 0, 1, 6, 8)", transformOrigin: "0px 0px" });
+    right.authoredStyleProperties = ["right", "bottom", "transform"];
+    expect(foldTransformOffset(right)?.styles).toMatchObject({ right: "24px", bottom: "32px" });
+
+    const stretched = node({ left: "10px", top: "20px", right: "30px", bottom: "40px", transform: "matrix(0, 1, -1, 0, 6, 8)", transformOrigin: "0px 0px" });
+    stretched.authoredStyleProperties = ["left", "right", "top", "bottom", "transform"];
+    expect(foldTransformOffset(stretched)?.styles).toMatchObject({ left: "16px", right: "24px", top: "28px", bottom: "32px" });
+    expect(foldTransformOffset(stretched)?.styles.transform).toBe("matrix(0,1,-1,0,0,0)");
+
+    expect(hasLegacyRelocationCandidate("transform: translate(6px, 8px);")).toBe(false);
+    expect(hasLegacyRelocationCandidate("transform: matrix(1, 0, 0, 1, 0, 0);")).toBe(false);
+    expect(hasLegacyRelocationCandidate("transform-origin: 50px 30px; transform: matrix(1, 0, 0, 1, 6, 8);")).toBe(false);
   });
 });

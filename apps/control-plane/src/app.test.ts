@@ -82,7 +82,7 @@ const githubConfig: GithubBackendConfig = {
   webBaseUrl: "https://github.example.test",
   apiBaseUrl: "https://api.github.example.test",
   variantKey: "github.com",
-  desktopSchemes: ["zeros", "zeros-alpha", "zeros-beta", "zeros-dev"],
+  desktopSchemes: ["zeros", "zeros-alpha", "zeros-dev"],
 };
 
 function config(github: GithubBackendConfig | null): Config {
@@ -373,7 +373,7 @@ describe("public Alpha Dev onboarding configuration", () => {
     });
   });
 
-  it.each(["beta", "production"] as const)(
+  it.each(["production"] as const)(
     "does not bootstrap Dev from %s",
     async (channel) => {
       const configured = alphaConfig();

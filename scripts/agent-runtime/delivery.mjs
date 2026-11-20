@@ -114,7 +114,7 @@ export async function includesCommit(github, ancestor, source) {
 
 export async function collectDelivery(github, state, now) {
   const results = await Promise.allSettled([
-    ...["alpha", "beta", "production"].map((channel) =>
+    ...["alpha", "production"].map((channel) =>
       desktopDelivery(github, channel),
     ),
   ]);
@@ -122,7 +122,7 @@ export async function collectDelivery(github, state, now) {
   for (const provider of Object.keys(PROVIDERS)) {
     const desktop = {};
     let incomplete = false;
-    for (const [index, channel] of ["alpha", "beta", "production"].entries()) {
+    for (const [index, channel] of ["alpha", "production"].entries()) {
       const result = results[index];
       if (result.status === "rejected") {
         incomplete = true;

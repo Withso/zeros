@@ -20,7 +20,7 @@ describe("desktop and cloud delivery evidence", () => {
     const get = vi.fn(async () => { throw Object.assign(new Error("No release"), { status: 404 }); });
     const observations = await collectDelivery({ get }, state, now);
     expect(get.mock.calls.map(([path]) => path)).toEqual([
-      "/releases/tags/alpha", "/releases/tags/beta", "/releases/latest",
+      "/releases/tags/alpha", "/releases/latest",
     ]);
     expect(observations).toHaveLength(3);
     for (const observation of observations) {
@@ -47,7 +47,7 @@ describe("desktop and cloud delivery evidence", () => {
       ],
     };
     expect(validateLedger(ledger, "alpha")).toBe(ledger);
-    expect(() => validateLedger(ledger, "beta")).toThrow();
+    expect(() => validateLedger(ledger, "production")).toThrow();
     expect(() =>
       validateLedger(
         { ...ledger, releases: [ledger.releases[0], ledger.releases[0]] },

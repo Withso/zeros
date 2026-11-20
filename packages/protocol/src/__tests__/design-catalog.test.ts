@@ -2,6 +2,9 @@ import { describe, expect, it } from "vitest";
 import { COMPONENT_OPTION_LIMITS } from "@zeros/design-core/component-options";
 import {
   DESIGN_CATALOG_WIDE_BATCH_ENTRIES,
+  designComponentIdentitySchema,
+  designPreparedFrameSchema,
+  designFramesPrepareSchema,
   DESIGN_COMPONENT_RECORD_LIMITS,
   designComponentRecordWithinLimits,
   designFrameComponentSchema,
@@ -13,6 +16,29 @@ import {
   designFramesLintReplySchema,
   designFramesLintSchema,
 } from "../design-catalog";
+
+describe("prepared Design component identity", () => {
+  const frame = { file: "page/a.html", frameId: "a", pageId: "page", title: "A", kind: "frame" as const, x: 0, y: 0,
+    width: 100, height: 100, z: 0, nodeCount: 1, modifiedAt: 0, sourceVersion: "b".repeat(24) };
+
+  it("distinguishes negotiated ordinary, main, instance, and unknown identities", () => {
+    expect(designPreparedFrameSchema.parse({ ...frame, componentIdentity: null }).componentIdentity).toBeNull();
+    expect(designPreparedFrameSchema.parse({ ...frame, componentIdentity: { kind: "main", name: "card" } }).componentIdentity)
+      .toEqual({ kind: "main", name: "card" });
+    expect(designPreparedFrameSchema.parse({ ...frame, componentIdentity: { kind: "instance", nodeId: "host" } }).componentIdentity)
+      .toEqual({ kind: "instance", nodeId: "host" });
+    expect(Object.hasOwn(designPreparedFrameSchema.parse(frame), "componentIdentity")).toBe(false);
+    expect(designComponentIdentitySchema.safeParse({ kind: "instance", nodeId: "" }).success).toBe(false);
+    expect(designPreparedFrameSchema.safeParse({ ...frame, componentIdentity: { kind: "main", name: "not valid" } }).success).toBe(false);
+  });
+
+  it("accepts identity only as an explicit prepare opt-in", () => {
+    expect(designFramesPrepareSchema.parse({ workspaceId: "local", directoryId: "design_test", catalogRevision: "a".repeat(64),
+      files: [frame.file], includeComponentIdentity: true }).includeComponentIdentity).toBe(true);
+    expect(designFramesPrepareSchema.safeParse({ workspaceId: "local", directoryId: "design_test", catalogRevision: "a".repeat(64),
+      files: [frame.file], componentIdentity: true }).success).toBe(false);
+  });
+});
 
 describe("what a frame whose options do not apply says it shows", () => {
   const frame = { file: "page/a.html", frameId: "a", pageId: "page", title: "A", kind: "frame", x: 0, y: 0, width: 1, height: 1, z: 0,

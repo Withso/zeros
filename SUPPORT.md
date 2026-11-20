@@ -13,7 +13,7 @@ commands, and architecture.
 ## Unsupported requests
 
 - Self-built copies and forks
-- Alpha or Beta builds as production environments
+- Alpha builds as production environments
 - Changes or support for third-party agent runtimes themselves
 - External pull requests; see [CONTRIBUTING.md](CONTRIBUTING.md)
 - Guaranteed responses through GitHub Issues

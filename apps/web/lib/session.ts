@@ -8,7 +8,7 @@ import {
 
 export interface Env {
   /** Explicit deployment identity. Required by the Cloudflare build guard. */
-  ZEROS_DEPLOY_ENV?: "alpha" | "beta" | "production";
+  ZEROS_DEPLOY_ENV?: "alpha" | "production";
   /** Separate Pages projects use the same code with an isolated host surface. */
   ZEROS_SURFACE?: "app" | "ops";
   /**

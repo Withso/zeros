@@ -8,7 +8,7 @@
 //   win.webContents.on("devtools-opened", () => win.webContents.closeDevTools());
 //
 // The intent was to stop token/secret extraction at an unattended machine. The
-// effect was that ⌥⌘I in Alpha, Beta and Production opened DevTools, squeezed
+// effect was that ⌥⌘I in Alpha and Production opened DevTools, squeezed
 // the three-column layout to make room for the docked panel, and then tore it
 // all back down a frame later — a visible jolt, and no usable DevTools on any
 // shipped build. That block is gone; this module is what replaced it.
@@ -27,7 +27,7 @@
 //     reachable from any renderer-side code execution, which is precisely why
 //     the allowlist + sandbox + contextIsolation exist. The IPC boundary is
 //     already designed for an untrusted renderer.
-//   • The cost was total: no debugging on Alpha, Beta or Production — the builds
+//   • The cost was total: no debugging on Alpha or Production — the builds
 //     whose bugs matter most and the ones a maintainer can least afford to be
 //     blind on. Field bugs that only reproduce in a packaged build had no
 //     inspection path at all.
@@ -73,7 +73,7 @@ export function devToolsAccelerator(platform: NodeJS.Platform): string {
 
 /** Should opening DevTools print the self-XSS banner?
  *
- *  Production ONLY. Alpha and Beta are the maintainer/dogfood channels — the
+ *  Production ONLY. Alpha is the maintainer/dogfood channel — the
  *  people opening DevTools there are the people who wrote the app, and nagging
  *  them on every open would train them to ignore the banner by the time they
  *  see it somewhere it matters. Dev likewise. Pure — exported for tests. */

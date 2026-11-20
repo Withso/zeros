@@ -16,18 +16,18 @@ const deps = () => ({ receipt: async () => receipt, identity: async () => backen
 
 // Every channel allows cloud in the checked-in policy. A case pauses one
 // channel here; the shared policy reads this object on every call.
-const policy = vi.hoisted(() => ({ development: true, alpha: true, beta: true, production: true } as Record<string, boolean>));
+const policy = vi.hoisted(() => ({ development: true, alpha: true, production: true } as Record<string, boolean>));
 vi.mock("../../apps/control-plane/src/cloud/channels.json", () => ({ default: policy }));
 
 describe("V6 publication-time proof", () => {
-  afterEach(() => { Object.assign(policy, { beta: true, production: true }); });
+  afterEach(() => { Object.assign(policy, { production: true }); });
 
-  it.each(["beta", "production"] as const)("requires the %s control plane to honor its cloud pause before publication", async channel => {
+  it.each(["production"] as const)("requires the %s control plane to honor its cloud pause before publication", async channel => {
     policy[channel] = false;
     const config = { ...candidate, channel, branch: "release/1.2.3", cloudRequired: false };
     const paused = { ...backend, channel, cloud: { enabled: false, ready: true, state: "disabled" }, worker: null, workerQualified: false };
     const makeReceipt = (current: typeof paused | typeof backend) => ({ ...receipt, channel, branch: config.branch,
-      cloudRequired: false, backend: current, pages: channel === "beta" ? [{ id: "app", surface: "app" }] : receipt.pages });
+      cloudRequired: false, backend: current, pages: receipt.pages });
     await expect(publicationGate(config, { ...deps(), receipt: async () => makeReceipt(paused), identity: async () => paused })).resolves.toBeUndefined();
     for (const current of [{ ...backend, channel }]) {
       await expect(publicationGate(config, { ...deps(), receipt: async () => makeReceipt(current), identity: async () => current }))
@@ -35,12 +35,11 @@ describe("V6 publication-time proof", () => {
     }
   });
 
-  it.each(["beta", "production"] as const)("accepts the receipted %s cloud state once the channel allows cloud", async channel => {
+  it.each(["production"] as const)("accepts the receipted %s cloud state once the channel allows cloud", async channel => {
     const config = { ...candidate, channel, branch: "release/1.2.3", cloudRequired: false };
     const paused = { ...backend, channel, cloud: { enabled: false, ready: true, state: "disabled" }, worker: null, workerQualified: false };
     for (const current of [paused, { ...backend, channel }]) {
-      const currentReceipt = { ...receipt, channel, branch: config.branch, cloudRequired: false, backend: current,
-        pages: channel === "beta" ? [{ id: "app", surface: "app" }] : receipt.pages };
+      const currentReceipt = { ...receipt, channel, branch: config.branch, cloudRequired: false, backend: current, pages: receipt.pages };
       await expect(publicationGate(config, { ...deps(), receipt: async () => currentReceipt, identity: async () => current }))
         .resolves.toBeUndefined();
     }
@@ -77,10 +76,10 @@ describe("V6 publication-time proof", () => {
 });
 
 describe("published channel baselines", () => {
-  it("resolves rolling Alpha/Beta tags and the numerically highest stable v tag to commits", async () => {
+  it("resolves the rolling Alpha tag and the numerically highest stable v tag to commits", async () => {
     const calls: string[][] = [];
     const run = async (_file: string, args: string[]) => { calls.push(args); return args[0] === "for-each-ref" ? "alpha\nbeta\nv1.9.9\nv1.10.0\nv1.10.0-beta.2\n" : `${sha}\n`; };
-    for (const [channel, tag] of [["alpha", "alpha"], ["beta", "beta"], ["production", "v1.10.0"]] as const) {
+    for (const [channel, tag] of [["alpha", "alpha"], ["production", "v1.10.0"]] as const) {
       expect(await channelBaseline(channel, run)).toEqual({ tag, sourceSha: sha });
       expect(calls.at(-1)).toContain(`refs/tags/${tag}^{commit}`);
     }

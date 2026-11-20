@@ -2733,7 +2733,7 @@ describe("ClaudeSdkAdapter", () => {
   });
 
   it("ALWAYS passes pathToClaudeCodeExecutable, even with no cliBinary override", async () => {
-    // Regression guard for the Beta/Production-only "AGENT RESPONSE FAILURE"
+    // Regression guard for the packaged-build-only "AGENT RESPONSE FAILURE"
     // (0.0.14): this option used to be set ONLY from a user-typed Settings
     // override, leaving the SDK to find its own CLI. That lookup resolves the
     // platform package relative to sdk.mjs, which works in dev (`bun

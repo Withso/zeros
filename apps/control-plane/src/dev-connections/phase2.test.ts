@@ -8,7 +8,7 @@ const config = { deployment: "dev", origin: "https://connections.example.test", 
 const lease = () => ({state: {generation: randomUUID(), owner: "a".repeat(24), status: "provisioning"} as any, save: vi.fn(async()=>{}), fence: vi.fn(async()=>{})});
 describe("hosted Dev phase 2", () => {
   it("preserves every deployment default when the explicit Dev flag is absent",()=>{
-    for(const deployment of ['dev','alpha','beta','production','local']){
+    for(const deployment of ['dev','alpha','production','local']){
       const fetcher=vi.fn();
       expect(configuration.devConnectionClientFromEnvironment({ZEROS_DEPLOY_ENV:deployment},fetcher)).toBeNull();
       expect(fetcher).not.toHaveBeenCalled();
@@ -25,7 +25,7 @@ describe("hosted Dev phase 2", () => {
     expect(Object.keys(result).sort()).toEqual(["DEV_CONNECTIONS_AUDIENCE","DEV_CONNECTIONS_GENERATION","DEV_CONNECTIONS_GENERATION_CREDENTIAL","DEV_CONNECTIONS_ORIGIN"]);
     expect(fetcher.mock.calls.at(-1)?.[1].method).toBe("PUT");
   });
-  it.each([undefined,"alpha","beta","production","local"])("does not enable reference mode in %s", deployment => {
+  it.each([undefined,"alpha","production","local"])("does not enable reference mode in %s", deployment => {
     expect(configuration.devConnectionClientFromEnvironment({ZEROS_DEPLOY_ENV:deployment,ZEROS_DEV_CONNECTIONS_ENABLED:"true"})).toBeNull();
   });
   it("invalidates on explicit generation denial and keeps outages distinct", async () => {

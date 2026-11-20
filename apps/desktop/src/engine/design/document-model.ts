@@ -133,6 +133,8 @@ export interface DesignCanvasFrame extends DesignFrameSummary {
   component?: import("@zeros/protocol/design-catalog").DesignFrameComponent;
   /** Set when the frame places component instances with options. */
   instances?: import("@zeros/protocol/design-catalog").DesignFrameInstances;
+  /** Present only in reads that negotiated component identity. Null proves an ordinary frame. */
+  componentIdentity?: import("@zeros/protocol/design-catalog").DesignComponentIdentity | null;
 }
 
 export interface DesignFrameTreeNode {
@@ -163,6 +165,7 @@ export interface DesignElementOffset extends DesignSourceSpan {
 export interface DesignFrameDocument extends DesignFrameSummary {
   /** Hash of the rendered HTML, linked CSS, and frame viewport dimensions. */
   sourceVersion: string;
+  componentIdentity?: import("@zeros/protocol/design-catalog").DesignComponentIdentity | null;
   source: string;
   srcDoc: string;
   tree: DesignFrameTreeNode[];
@@ -251,6 +254,7 @@ export interface DesignReadOptions {
   /** Reads are observational by default. Explicit legacy repair may opt into
    * OID healing and placement; normal native authoring never requires it. */
   writeBack?: boolean;
+  includeComponentIdentity?: boolean;
 }
 
 export const canvasReadSnapshot = Symbol("canvasReadSnapshot");

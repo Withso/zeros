@@ -82,7 +82,7 @@ export function processHasEnvironmentAssignment(
  * The range scan is deliberately command-shape-based (any engine flavor in OUR
  * channel's range is a candidate), but it must not kill a listener that another
  * LIVE owner is still managing. A standalone `zeros serve` CLI can sit there,
- * and older releases once assigned Beta and Stable the same range — killing
+ * and older releases once assigned two channels the same range — killing
  * those out from under their owners caused cross-instance engine flaps. The
  * ppid tells the two cases apart:
  *
@@ -101,7 +101,7 @@ export function processHasEnvironmentAssignment(
  * Engine HOSTS (pty-host.cjs / cursor-host.cjs / watch-host.cjs — the Node subprocesses the
  * engine forks) matter here too: they inherit the engine's LISTENING socket,
  * so when the engine is SIGKILLed they keep the port alive with nobody
- * accepting — the "bound but black-holed" port behind the beta.82 respawn
+ * accepting — the "bound but black-holed" port behind a shipped respawn
  * loop. A live engine's hosts have ppid = the engine, so the ppid-1 gate is
  * also what makes them safe to match at all. */
 export function shouldReapRangeListener(opts: {

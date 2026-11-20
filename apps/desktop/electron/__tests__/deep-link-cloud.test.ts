@@ -38,7 +38,7 @@ beforeEach(() => {
 });
 
 describe("cloud workspace links", () => {
-  it.each(["stable", "alpha", "beta", "dev"])(
+  it.each(["stable", "alpha", "dev"])(
     "routes %s's link through the navigation intent, normalized",
     async (channel) => {
       state.channel = channel;

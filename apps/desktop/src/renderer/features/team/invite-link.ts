@@ -3,7 +3,7 @@
 //
 // Three entry paths converge on one pending-token slot:
 //   1. zeros://invite?token=… or ?invitation_token=… (deep link)
-//   2. https://app[-alpha|-beta].zeros.build/invite?... (email link, pasted)
+//   2. https://app[-alpha].zeros.build/invite?... (email link, pasted)
 //   3. a bare token, pasted
 // The token is held in-memory only (never persisted — it's a join
 // credential) until SettingsPage consumes it into the Join-team
@@ -22,7 +22,6 @@ const OFFICIAL_INVITE_PROTOCOLS = new Set(
 const OFFICIAL_APP_HOSTS = new Set([
   "app.zeros.build",
   "app-alpha.zeros.build",
-  "app-beta.zeros.build",
 ]);
 const INVITE_TOKEN_PATTERN = /^[A-Za-z0-9_-]{20,200}$/;
 

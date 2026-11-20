@@ -66,7 +66,10 @@ vi.mock("../state/design-agent-drafts", async (importOriginal) => ({
   startDesignAgentDraftEvents: () => () => {},
 }));
 vi.mock("../state/use-design-lifecycle-feedback", () => ({ useDesignLifecycleFeedback: vi.fn() }));
-vi.mock("../state/design-component-variants", () => ({ pruneDesignComponentVariantsFor: vi.fn() }));
+vi.mock("../state/design-component-variants", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../state/design-component-variants")>()),
+  pruneDesignComponentVariantsFor: vi.fn(),
+}));
 vi.mock("../design-component-options-loader", () => ({ loadDesignComponentOptions: vi.fn(async () => {}) }));
 vi.mock("../design-canvas", async (importOriginal) => {
   const react = await import("react");

@@ -4,8 +4,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createMigrationPool } from "../../apps/control-plane/src/db.js";
 import { planetScaleClient, type PlanetScaleRequest } from "../../apps/control-plane/src/manage-release-migration.js";
-import { BetaStaffBootstrapError, betaStaffBootstrapConfig, prepareBetaStaffBootstrap, readBetaStaffBootstrapTarget, runBetaStaffBootstrap,
-  type BetaStaffBootstrapConfig, type BetaStaffBootstrapDeps, type BetaStaffBootstrapJournal } from "./beta-staff-bootstrap";
+import { StaffOwnerBootstrapError, staffOwnerBootstrapConfig, prepareStaffOwnerBootstrap, readStaffOwnerBootstrapTarget, runStaffOwnerBootstrap,
+  type StaffOwnerBootstrapConfig, type StaffOwnerBootstrapDeps, type StaffOwnerBootstrapJournal } from "./staff-owner-bootstrap";
 import { githubClient } from "./github";
 import { command, jsonClient, type Command } from "./io";
 
@@ -27,30 +27,29 @@ async function readJson(file: string, code: "configuration" | "intent"): Promise
     } finally {
       await handle.close();
     }
-  } catch { throw new BetaStaffBootstrapError(code); }
+  } catch { throw new StaffOwnerBootstrapError(code); }
 }
 
 async function exists(file: string): Promise<boolean> {
   try { await stat(file); return true; }
   catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
-    throw new BetaStaffBootstrapError("journal");
+    throw new StaffOwnerBootstrapError("journal");
   }
 }
 
-async function saveJournal(file: string, journal: BetaStaffBootstrapJournal, initial = false) {
+async function saveJournal(file: string, journal: StaffOwnerBootstrapJournal, initial = false) {
   const temporary = `${file}.${randomUUID()}.tmp`;
   try {
     await writeFile(initial ? file : temporary, `${JSON.stringify(journal, null, 2)}\n`, { mode: 0o600, flag: "wx" });
     if (!initial) await rename(temporary, file);
-  } catch { throw new BetaStaffBootstrapError("journal"); }
+  } catch { throw new StaffOwnerBootstrapError("journal"); }
   finally { await rm(temporary, { force: true }).catch(() => undefined); }
 }
 
 /** The trusted workflow places this job in production-approval. Bind its actual
  * completion to this workflow/source/run/attempt, never an operator input flag. */
-async function assertProductionApproval(config: BetaStaffBootstrapConfig, env: NodeJS.ProcessEnv, fetcher?: typeof fetch) {
-  if (config.channel !== "production") return;
+async function assertProductionApproval(config: StaffOwnerBootstrapConfig, env: NodeJS.ProcessEnv, fetcher?: typeof fetch) {
   try {
     const json = jsonClient(fetcher);
     const read = (route: string) => json(`https://api.github.com/repos/${config.repository}${route}`, { headers: {
@@ -81,16 +80,16 @@ async function assertProductionApproval(config: BetaStaffBootstrapConfig, env: N
     if (matches.length !== 1 || job.run_id !== run.id || job.run_attempt !== attempt || job.head_sha !== config.sourceSha ||
       job.status !== "completed" || job.conclusion !== "success" || !Array.isArray(job.steps) ||
       !job.steps.some((step: any) => step.name === "Record the approved staff bootstrap" && step.status === "completed" && step.conclusion === "success")) throw new Error();
-  } catch { throw new BetaStaffBootstrapError("approval", undefined, config.channel); }
+  } catch { throw new StaffOwnerBootstrapError("approval"); }
 }
 
-export async function betaStaffBootstrapMain(args: string[], env: NodeJS.ProcessEnv, options: {
-  cwd?: string; fetch?: typeof fetch; command?: Command; createPool?: BetaStaffBootstrapDeps["createPool"]; signal?: AbortSignal;
-} = {}): Promise<BetaStaffBootstrapJournal> {
+export async function staffOwnerBootstrapMain(args: string[], env: NodeJS.ProcessEnv, options: {
+  cwd?: string; fetch?: typeof fetch; command?: Command; createPool?: StaffOwnerBootstrapDeps["createPool"]; signal?: AbortSignal;
+} = {}): Promise<StaffOwnerBootstrapJournal> {
   if (args.length !== 1 || !["--prepare", "--run"].includes(args[0]) || !env.GITHUB_EVENT_PATH || !env.GH_TOKEN?.trim()) {
-    throw new BetaStaffBootstrapError("configuration");
+    throw new StaffOwnerBootstrapError("configuration");
   }
-  const config = betaStaffBootstrapConfig(env, await readJson(env.GITHUB_EVENT_PATH, "configuration"));
+  const config = staffOwnerBootstrapConfig(env, await readJson(env.GITHUB_EVENT_PATH, "configuration"));
   const cwd = options.cwd ?? process.cwd(), directory = path.join(cwd, ".context/release");
   const intentPath = path.join(directory, `${config.channel}-staff-bootstrap-intent.json`), resultPath = path.join(directory, `${config.channel}-staff-bootstrap-result.json`);
   const runCommand = options.command ?? command, github = githubClient(config, env, { fetch: options.fetch, command: runCommand });
@@ -106,21 +105,21 @@ export async function betaStaffBootstrapMain(args: string[], env: NodeJS.Process
       await github.assertRequiredChecks(); await github.assertCurrent();
       await assertProductionApproval(config, env, options.fetch);
     } catch (error) {
-      if (error instanceof BetaStaffBootstrapError) throw error;
-      throw new BetaStaffBootstrapError("source", undefined, config.channel);
+      if (error instanceof StaffOwnerBootstrapError) throw error;
+      throw new StaffOwnerBootstrapError("source");
     }
   };
   if (args[0] === "--prepare") {
     await verifySource();
-    if (await exists(intentPath) || await exists(resultPath)) throw new BetaStaffBootstrapError("intent");
+    if (await exists(intentPath) || await exists(resultPath)) throw new StaffOwnerBootstrapError("intent");
     await mkdir(directory, { recursive: true, mode: 0o700 });
-    const journal = prepareBetaStaffBootstrap(config);
-    Object.assign(journal.target, await readBetaStaffBootstrapTarget(config, planetScale));
+    const journal = prepareStaffOwnerBootstrap(config);
+    Object.assign(journal.target, await readStaffOwnerBootstrapTarget(config, planetScale));
     await saveJournal(intentPath, journal, true);
     return journal;
   }
   const artifactId = env.STAFF_BOOTSTRAP_INTENT_ARTIFACT_ID ?? "";
-  if (!/^[1-9]\d*$/.test(artifactId) || !Number.isSafeInteger(Number(artifactId))) throw new BetaStaffBootstrapError("intent");
+  if (!/^[1-9]\d*$/.test(artifactId) || !Number.isSafeInteger(Number(artifactId))) throw new StaffOwnerBootstrapError("intent");
   try {
     const artifact = await jsonClient(options.fetch)(`https://api.github.com/repos/${config.repository}/actions/artifacts/${artifactId}`, {
       headers: { authorization: `Bearer ${env.GH_TOKEN}`, accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28" },
@@ -128,9 +127,9 @@ export async function betaStaffBootstrapMain(args: string[], env: NodeJS.Process
     if (artifact.id !== Number(artifactId) || artifact.name !== `${config.channel}-staff-owner-intent-${config.runId}-${config.runAttempt}` ||
       artifact.expired !== false || String(artifact.workflow_run?.id) !== config.runId || artifact.workflow_run?.head_sha !== config.sourceSha ||
       artifact.workflow_run?.head_branch !== config.branch) throw new Error();
-  } catch { throw new BetaStaffBootstrapError("intent"); }
+  } catch { throw new StaffOwnerBootstrapError("intent"); }
   const retained = await readJson(await exists(resultPath) ? resultPath : intentPath, "intent");
-  return runBetaStaffBootstrap(config, retained, {
+  return runStaffOwnerBootstrap(config, retained, {
     planetScale,
     createPool: options.createPool ?? (url => createMigrationPool(url, { role: "postgres", maxConnections: 1, applicationName: `zeros-${config.channel}-staff-bootstrap` })),
     verifySource, saveJournal: journal => saveJournal(resultPath, journal), signal: options.signal,
@@ -141,11 +140,10 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   const cancellation = new AbortController();
   const cancel = () => cancellation.abort();
   process.once("SIGINT", cancel); process.once("SIGTERM", cancel);
-  void betaStaffBootstrapMain(process.argv.slice(2), process.env, { signal: cancellation.signal }).then(journal => {
-    const channel = journal.source.channel === "production" ? "Production" : "Beta";
-    console.log(journal.staff ? `${channel} staff ${journal.staff.state}; temporary owner role absence verified.` : `${channel} staff role-create intent prepared; no provider mutation.`);
+  void staffOwnerBootstrapMain(process.argv.slice(2), process.env, { signal: cancellation.signal }).then(journal => {
+    console.log(journal.staff ? `Production staff ${journal.staff.state}; temporary owner role absence verified.` : "Production staff role-create intent prepared; no provider mutation.");
   }).catch(error => {
-    console.error(error instanceof BetaStaffBootstrapError ? error.message : "Beta staff bootstrap failed; details withheld.");
+    console.error(error instanceof StaffOwnerBootstrapError ? error.message : "Production staff bootstrap failed; details withheld.");
     process.exitCode = 1;
   }).finally(() => { process.removeListener("SIGINT", cancel); process.removeListener("SIGTERM", cancel); });
 }

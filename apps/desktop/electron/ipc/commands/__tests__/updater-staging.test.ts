@@ -99,12 +99,12 @@ describe("macOS updater staging boundary", () => {
     });
   });
 
-  it("parses feed versions and compares stable/beta SemVer", () => {
-    expect(updater.parseFeedVersion("version: '1.2.3-beta.12'\n")).toBe(
-      "1.2.3-beta.12",
+  it("parses feed versions and compares stable/prerelease SemVer", () => {
+    expect(updater.parseFeedVersion("version: '1.2.3-alpha.12'\n")).toBe(
+      "1.2.3-alpha.12",
     );
-    expect(updater.isVersionNewer("1.2.3-beta.12", "1.2.3-beta.11")).toBe(true);
-    expect(updater.isVersionNewer("1.2.3", "1.2.3-beta.12")).toBe(true);
+    expect(updater.isVersionNewer("1.2.3-alpha.12", "1.2.3-alpha.11")).toBe(true);
+    expect(updater.isVersionNewer("1.2.3", "1.2.3-alpha.12")).toBe(true);
     expect(updater.isVersionNewer("1.2.2", "1.2.3")).toBe(false);
   });
 

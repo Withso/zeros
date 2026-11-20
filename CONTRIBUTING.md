@@ -10,7 +10,7 @@ be closed without review, including documentation and dependency-only changes.
 
 ## Why pull requests are currently closed
 
-Zeros is maintained through an Alpha → Beta → Production release train. Desktop
+Zeros is maintained through an Alpha → Production release train. Desktop
 builds are code-signed, notarized, and delivered through an auto-updater. The
 maintainer must be able to review, support, and establish provenance for every
 change included in those binaries. The project cannot yet provide that review

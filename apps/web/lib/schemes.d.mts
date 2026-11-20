@@ -4,8 +4,8 @@ export declare const SCHEMES: ReadonlySet<string>;
 export declare const DEFAULT_SCHEME: string;
 export declare function schemeOrDefault(scheme: string): string;
 export declare function schemeForDeploymentEnvironment(
-  environment: "alpha" | "beta" | "production" | undefined,
+  environment: "alpha" | "production" | undefined,
   requestedScheme: string,
 ): string;
 /** This deployment's app link, for an Open Zeros that carries no callback. */
-export function deploymentAppLink(environment: string | undefined | null): string;
+export function deploymentAppLink(environment: string | undefined | null): string | null;

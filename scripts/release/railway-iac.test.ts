@@ -23,7 +23,7 @@ const BUILD = { builder: "DOCKERFILE", dockerfilePath: "Dockerfile" };
 const DEPLOY = { healthcheckPath: "/healthz", healthcheckTimeout: 60, restartPolicyType: "ON_FAILURE", restartPolicyMaxRetries: 5 };
 
 describe("Railway control-plane IaC authoring", () => {
-  it.each(["alpha", "beta", "production"])("keeps the %s service's Dockerfile, health check and restart settings", channel => {
+  it.each(["alpha", "production"])("keeps the %s service's Dockerfile, health check and restart settings", channel => {
     const result = configuration(channel, "release/0.1.20"), resource = result.project.resources[0];
     expect(result.partial).toBe("zeros-control-plane"); expect(result.project.name).toBe("existing-project");
     expect(result.project.resources).toHaveLength(1); expect(resource.name).toBe("zeros");
@@ -35,7 +35,7 @@ describe("Railway control-plane IaC authoring", () => {
   });
   it("rejects unreviewed environments and release-branch selections", () => {
     expect(() => configuration("dev")).toThrow(/existing alpha/);
-    expect(() => configuration("beta")).toThrow(/RELEASE_BRANCH/);
+    expect(() => configuration("beta", "release/0.1.20")).toThrow(/existing alpha/);
     expect(() => configuration("production", "main")).toThrow(/RELEASE_BRANCH/);
   });
 });

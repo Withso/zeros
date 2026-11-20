@@ -12,7 +12,6 @@
 import net from "node:net";
 import type { CommandHandler } from "../router";
 import {
-  ENGINE_BASE_PORT_BETA,
   ENGINE_BASE_PORT_DEV,
   ENGINE_BASE_PORT_PROD,
   ENGINE_PORT_SPAN,
@@ -26,7 +25,7 @@ interface LocalhostService {
 }
 
 /** Engine entries cover every channel-owned range so the inspector labels
- *  Stable, Beta, and Dev even while they run side-by-side. Each span matches
+ *  Stable and Dev even while they run side-by-side. Each span matches
  *  LocalTransport's port walk (ENGINE_PORT_SPAN). */
 const ENGINE_PORTS: Array<{
   port: number;
@@ -34,7 +33,6 @@ const ENGINE_PORTS: Array<{
   label: string;
 }> = [
   { base: ENGINE_BASE_PORT_PROD, label: "Zeros engine" },
-  { base: ENGINE_BASE_PORT_BETA, label: "Zeros engine (beta)" },
   { base: ENGINE_BASE_PORT_DEV, label: "Zeros engine (dev)" },
 ].flatMap(({ base, label }) =>
   Array.from({ length: ENGINE_PORT_SPAN }, (_, offset) => ({
@@ -71,7 +69,7 @@ const KNOWN_PORTS: Array<{
   { port: 5432, kind: "database", label: "Postgres" },
   { port: 6379, kind: "database", label: "Redis" },
   { port: 27017, kind: "database", label: "MongoDB" },
-  // Zeros engine (Stable 24193–24200 + Beta 24203–24210 + Dev 24293–24300)
+  // Zeros engine (Stable 24193–24200 + Dev 24293–24300)
   ...ENGINE_PORTS,
 ];
 

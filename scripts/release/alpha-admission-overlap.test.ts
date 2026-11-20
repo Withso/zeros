@@ -183,11 +183,11 @@ describe("Alpha barrier overlapping an older feed publication", () => {
     await expectNoAdmission();
   });
 
-  it.each(["verify", "downstream", "unauthenticated", "beta", "production"])("keeps %s callers strict", async caller => {
+  it.each(["verify", "downstream", "unauthenticated", "production"])("keeps %s callers strict", async caller => {
     if (caller === "verify") process.argv[2] = "--verify";
     if (caller === "downstream") vi.stubEnv("GITHUB_JOB", "entry");
     if (caller === "unauthenticated") fixture.automaticAlpha.mockResolvedValue(false);
-    if (caller === "beta" || caller === "production") fixture.source.channel = caller;
+    if (caller === "production") fixture.source.channel = caller;
     try {
       await import("./ci-cli");
       await vi.waitFor(() => expect(console.error).toHaveBeenCalledOnce());
