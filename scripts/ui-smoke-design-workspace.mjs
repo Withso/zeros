@@ -1812,23 +1812,31 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
   const styleMutationCount = await page.evaluate(
     () => window.__zerosHarnessStyleMutationSources?.length ?? 0,
   );
+  // A layout edit under a frame that hugs its content saves as a transaction
+  // that refits the frame; count those writes too.
+  const transactionCount = await page.evaluate(
+    () => (window.__zerosHarnessWorkbenchOperations ?? []).filter((op) => op === "design.transaction.apply").length,
+  );
   await widthInput.fill("640");
   await page.keyboard.press("Enter");
   await heightInput.fill("190");
   await page.keyboard.press("Enter");
   const rapidStyleStable = await waitFor(async () => {
     const parentStable = await page.evaluate(
-      ({ previousMutationCount }) => {
+      ({ previousMutationCount, previousTransactionCount }) => {
         const identity = window.__zerosDesignLiveStyleIdentity;
         const sources = window.__zerosHarnessStyleMutationSources ?? [];
         const recentSources = sources.slice(previousMutationCount);
+        const recentTransactions = (window.__zerosHarnessWorkbenchOperations ?? [])
+          .filter((op) => op === "design.transaction.apply").length - previousTransactionCount;
         const iframe = document.querySelector(
           '[data-design-frame="home.html"] iframe[data-design-document-buffer="displayed"][data-design-document-ready]',
         );
         return (
           !!identity &&
-          recentSources.length === 2 &&
-          recentSources[0] !== recentSources[1] &&
+          (recentSources.length === 2
+            ? recentSources[0] !== recentSources[1]
+            : recentSources.length + recentTransactions === 2) &&
           iframe === identity.iframe &&
           iframe?.closest('[data-design-frame="home.html"]') ===
             identity.frame &&
@@ -1842,7 +1850,7 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
           identity.iframeLoads() === 0
         );
       },
-      { previousMutationCount: styleMutationCount },
+      { previousMutationCount: styleMutationCount, previousTransactionCount: transactionCount },
     );
     const documentStable = await homeRuntime
       .locator('[data-oid="home-heading"]')

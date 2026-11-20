@@ -1851,8 +1851,12 @@ export const DesignInspector = React.memo(function DesignInspector({
     const frameState = workspaceId && frame
       ? state.byWorkspace[workspaceId]?.frames[frame.file]
       : undefined;
+    // Only an Undo still painted over the generation the frame holds.
+    const presented = presentedHistoryFrame?.sourceVersion === frameState?.sourceVersion
+      ? presentedHistoryFrame
+      : undefined;
     return styleNodeIds.map((nodeId) =>
-      presentedHistoryFrame?.details.get(nodeId) ?? frameState?.detailsByNode[nodeId] ?? null);
+      presented?.details.get(nodeId) ?? frameState?.detailsByNode[nodeId] ?? null);
   }));
   const layoutRootId = useDesignRuntimeStore((state) =>
     workspaceId && frame
