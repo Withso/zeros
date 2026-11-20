@@ -944,8 +944,9 @@ describe("layout runtime editing", () => {
           styles: { width: "150px" },
         });
         const baselineSnapshot = await window.layoutRequest("getSnapshot", {});
-        // Start from no transition so an earlier case's one cannot be cancelled mid-check.
-        a.getAnimations().forEach((animation) => animation.cancel());
+        // Outside playback the runtime stills a transition as it starts, so
+        // only frame playback can hold one for measurement to meet.
+        await window.layoutRequest("setPlayback", { sessionId: "transition-measurement", playing: true });
         a.style.removeProperty("transition");
         a.style.height = "100px";
         void a.offsetHeight;
@@ -960,7 +961,6 @@ describe("layout runtime editing", () => {
         if (playState === "paused") {
           transition.pause();
           transition.currentTime = 5000;
-          // Settle the pending pause so the measurement sees a paused transition.
           await transition.ready;
         }
         const before = {
@@ -993,6 +993,7 @@ describe("layout runtime editing", () => {
             ? (await window.layoutRequest("getSnapshot", {})).revision
             : null,
         };
+        await window.layoutRequest("setPlayback", { sessionId: "transition-measurement", playing: false });
         await window.layoutRequest("clearPreviewStyles", { nodeId: "a" });
         return {
           error,
