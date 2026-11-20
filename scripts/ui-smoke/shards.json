@@ -33,6 +33,7 @@
   ],
   [
     "design-motion-refinements",
+    "local-storage",
     "app-sidebar",
     "terminal-workbench",
     "codex-transcript",

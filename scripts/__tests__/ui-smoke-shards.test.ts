@@ -20,6 +20,7 @@ import { parseSmokeArgs } from "../ui-smoke/cli.mjs";
 // children. Core's later phases stay after file-prefetch in the execution plan.
 const originalOrder = [
   "full-disk-access",
+  "local-storage",
   "local-links",
   "text-selection",
   "git-review-actions",

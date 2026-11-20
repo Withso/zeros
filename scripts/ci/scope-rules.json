@@ -160,6 +160,11 @@
       "lanes": ["electron"]
     },
     {
+      "id": "desktop-local-storage-contract",
+      "include": ["apps/desktop/shared/local-storage.ts"],
+      "lanes": ["desktop-renderer", "electron"]
+    },
+    {
       "id": "renderer-sources-imported-by-electron",
       "include": [
         "apps/desktop/src/renderer/shell/workbench/tabs/localhost-url.ts",

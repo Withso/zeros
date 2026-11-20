@@ -299,6 +299,11 @@ const SETTINGS = [
     keywords: ["default", "favorites", "reasoning"],
   },
   {
+    id: "local-storage",
+    label: "Local Storage",
+    keywords: ["disk", "space", "cache", "storage", "size"],
+  },
+  {
     id: "providers",
     label: "Agents",
     keywords: ["claude", "codex", "cursor", "providers", "login"],

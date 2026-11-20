@@ -118,6 +118,12 @@ import { logSubmit, logsExportOpen, logsRecent } from "./logs";
 import { cloudCatalogStreamStateCommand, cloudWorkspaceCapability } from "./cloud-capability";
 import { cloudChatCache } from "./cloud-chat-cache";
 import { fullDiskAccessOpenSettings, fullDiskAccessStatus } from "./full-disk-access";
+import {
+  localStorageCancel,
+  localStorageClearCache,
+  localStorageMeasure,
+  localStorageReveal,
+} from "./local-storage";
 export function registerAllCommands(): void {
   registerAttachmentSourceIpc();
   // App info (runtime mode / version / platform) — consumed by the
@@ -127,6 +133,10 @@ export function registerAllCommands(): void {
   setCommand("edit_history", editHistory);
   setCommand("full_disk_access_status", fullDiskAccessStatus);
   setCommand("full_disk_access_open_settings", fullDiskAccessOpenSettings);
+  setCommand("local_storage_measure", localStorageMeasure);
+  setCommand("local_storage_cancel", localStorageCancel);
+  setCommand("local_storage_clear_cache", localStorageClearCache);
+  setCommand("local_storage_reveal", localStorageReveal);
   setCommand("local_navigation_ready", localNavigationReady);
   setCommand("cursor_subscription", cursorSubscription);
   setCommand("provider_subscription", providerSubscription);

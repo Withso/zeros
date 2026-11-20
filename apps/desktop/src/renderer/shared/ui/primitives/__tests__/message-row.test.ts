@@ -60,6 +60,13 @@ describe("SkeletonLine", () => {
     expect(markup).toContain("width:46%");
     expect([...set].some((cls) => cls.startsWith("animate-"))).toBe(false);
   });
+
+  it("steps up to bg2-highlight on a card, whose bg1-bright fill is bg2 in Light", () => {
+    const set = rootClasses(renderToStaticMarkup(createElement(SkeletonLine, { surface: "card" })));
+    expect(set).toContain("bg-bg2-highlight");
+    expect(set).not.toContain("bg-bg2");
+    for (const cls of ["h-2", "rounded-sm"]) expect(set, cls).toContain(cls);
+  });
 });
 
 describe("Badge mono", () => {

@@ -124,6 +124,11 @@ export function formatRepeatSummary(text: string, count: number): string {
 
 let repeatRun: RepeatRun | null = null;
 
+/** The folder this run's logs are written to, or null if none could be opened. */
+export function logStoreDir(): string | null {
+  return logDir;
+}
+
 /** Initialize the store. Idempotent per dir; safe to call before/without
  *  Electron. On failure the store degrades to a no-op (logging must never
  *  block app startup). */
