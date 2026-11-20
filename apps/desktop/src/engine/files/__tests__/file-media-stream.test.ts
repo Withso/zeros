@@ -73,7 +73,6 @@ it.each([false, true])("reads only the requested bytes and fences replaced media
   expect(readAll).not.toHaveBeenCalled();
   await expect(readWorkspaceMediaRange(root, { ...args, length: 1024 * 1024 + 1 }, remote)).rejects.toThrow();
   await expect(readWorkspaceMediaRange(root, { ...args, offset: 200_000_000 }, remote)).resolves.toEqual({ bytes: 0, base64: "" });
-  // Replace atomically without reopening the pathname whose version was checked.
   fs.renameSync(replacementPath, target);
   await expect(readWorkspaceMediaRange(root, args, remote)).rejects.toThrow(/changed/);
   await expect(readWorkspaceMediaRange(root, { ...args, path: "../outside.mp4" }, remote)).rejects.toThrow();

@@ -12,7 +12,7 @@ vi.mock("../../features/team/team-store", () => ({
 }));
 vi.mock("../runtime", () => ({ nativeInvoke: fixture.native }));
 vi.mock("../../../../../control-plane/src/cloud/channels.json", () => ({
-  default: { development: true, alpha: true, beta: false, production: false },
+  default: { development: true, alpha: true, production: false },
 }));
 
 const org = { id: "11111111-1111-4111-8111-111111111111", isPersonal: false,
@@ -29,7 +29,7 @@ beforeEach(() => {
 });
 afterEach(() => { vi.unstubAllEnvs(); vi.resetModules(); });
 
-describe.each(["beta", "stable"])("%s renderer cloud boundary while its channel is paused", releaseChannel => {
+describe.each(["stable"])("%s renderer cloud boundary while its channel is paused", releaseChannel => {
   beforeEach(() => vi.stubEnv("VITE_ZEROS_CHANNEL", releaseChannel));
 
   it("denies account and guest cloud admission plus new cloud workspace creation", async () => {

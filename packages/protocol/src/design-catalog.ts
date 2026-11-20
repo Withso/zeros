@@ -310,6 +310,10 @@ const notAppliedSchema = z.enum(["last-good", "defaults", "nothing"]);
 export const DESIGN_OPTIONS_SHOW_NOTHING_CAPABILITY = "design.component-options.shows-nothing.v1";
 /** Negotiated request flag stripped before the engine dispatches the operation. */
 export const DESIGN_OPTIONS_SHOW_NOTHING_PARAM = "optionsShowNothing";
+/** Advertises editing an instance's direct default-slot text beside its other children. */
+export const DESIGN_INSTANCE_SLOT_TEXT_CAPABILITY = "design.component-instances.slot-text.v1";
+/** Negotiated request flag: the renderer reads text beside a host's children and writes it through the virtual default slot. */
+export const DESIGN_INSTANCE_SLOT_TEXT_PARAM = "instanceSlotText";
 
 /** Template holes, not the author, set these layers' text; a loop-only binding can list no options. */
 export const DESIGN_COMPONENT_BOUND_TEXT_LIMIT = 512;
@@ -402,8 +406,11 @@ export const designFrameInstancesSchema = z.object({
     style: z.string().min(1).max(LIMITS.attributeValue).optional(),
     /** A missing source has no component entry and renders empty; a present but unusable source reports an error instead. */
     missing: z.literal(true).optional(),
-    /** Only a text-only default slot reports its decoded authored text. */
+    /** Decoded direct default-slot text in order, ignoring elements and comments;
+     * omitted without a default slot or above the attribute limit. */
     text: z.string().max(LIMITS.attributeValue).optional(),
+    /** The text sits beside element or comment children; sent only to a renderer that negotiated slot text. */
+    mixedText: z.literal(true).optional(),
     /** Slot layer IDs in order; the empty key means default, and over-limit slots are omitted. */
     slotted: boundedRecord(z.string().max(LIMITS.optionName),
       z.array(z.string().min(1).max(LIMITS.layerId)).min(1).max(DESIGN_FRAME_INSTANCE_LIMITS.slotted), DESIGN_FRAME_INSTANCE_LIMITS.slots).optional(),

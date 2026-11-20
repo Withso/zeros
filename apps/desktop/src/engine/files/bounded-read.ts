@@ -1,8 +1,7 @@
 import { constants } from "node:fs";
 import { open } from "node:fs/promises";
 
-/** Inspect and read the same descriptor, bounding allocation and rejecting
- * growth or truncation during the read. Symlinked files remain supported. */
+/** Allow symlinks; inspect and read one descriptor, rejecting a byte count different from its initial size. */
 export async function readBoundedUtf8File(
   file: string,
   maxBytes: number,

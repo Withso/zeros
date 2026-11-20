@@ -13,20 +13,17 @@ name: Release (alpha)
 # Alpha installs as a SEPARATE app (appId com.zeros.alpha · "Zeros Alpha") with its
 # OWN data dir (com.zeros.alpha), dot-dir (~/.zeros-alpha), workspaces root
 # (~/zeros-alpha/workspaces), engine port block (24213+) and deep-link scheme
-# (zeros-alpha://) — so it coexists with Beta AND Production and never shares state.
+# (zeros-alpha://) — so it coexists with Production and never shares state.
 #
 # WHERE ALPHA SITS IN THE LADDER:
 #
 #   main ───────────────► Alpha   (THIS FILE — auto, every merge, disposable)
-#     └─ release/x.y.z ─► Beta    (release-beta.yml — a FROZEN stabilization cut)
-#          └─ tag vx.y.z ► Prod   (release.yml — built from that EXACT commit)
+#     └─ release/x.y.z ─► Prod    (release.yml — built from that EXACT commit)
 #
-# Alpha is the continuous-integration ring: it churns, and it is safe to break. Beta
-# is the cut you stabilize and feature-test. Production is a rebuild of the SAME
-# commit Beta validated — before this model release.yml rebuilt main HEAD at dispatch
-# time, so the bytes tested in Beta were never the bytes shipped. Channel-gated
+# Alpha is the continuous-integration ring: it churns, and it is safe to break.
+# Production is built from a reviewed release branch cut from main. Channel-gated
 # features (apps/desktop/src/renderer/config/release-channel.ts) promote along the same ladder:
-# ["dev","alpha"] → +"beta" → +"stable".
+# ["dev","alpha"] → +"stable".
 #
 # SERVING: installed alphas auto-update straight from the rolling "alpha" GitHub
 # prerelease published below — electron-updater's generic provider reads
@@ -312,7 +309,7 @@ jobs:
           echo "✓ differential-update blockmap: $BLOCKMAP"
 
       - name: Smoke-test terminal in the packaged app
-        # Catches a native PTY that loads but cannot spawn (the beta.58
+        # Catches a native PTY that loads but cannot spawn (a shipped
         # `posix_spawnp failed` regression) before the rolling alpha is replaced.
         run: pnpm smoke:packaged-pty
 

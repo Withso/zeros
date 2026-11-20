@@ -32,7 +32,7 @@ import {
 // Pure leaf module (node:path only) — no cycle back into git/.
 import { pruneLauncherScriptEnv } from "../env/launcher-env";
 import { gitProcessOptions } from "./git-process-options";
-import { withoutLocalDevelopment } from "../env/local-development";
+import { hasLocalDevelopmentEnvironment, withoutLocalDevelopment } from "../env/local-development";
 import { currentGitReadLane, type GitReadLane } from "./git-read-lane";
 
 const execFileAsync = promisify(execFile);
@@ -188,7 +188,7 @@ export async function runFile(
   opts: RunFileOptions = {},
 ): Promise<RunFileResult> {
   const childEnv = opts.env ?? process.env;
-  if ("ZEROS_LOCAL_DEVELOPMENT" in childEnv) {
+  if (hasLocalDevelopmentEnvironment(childEnv)) {
     opts = { ...opts, env: withoutLocalDevelopment(childEnv) };
   }
   if (path.basename(command) === "git") {

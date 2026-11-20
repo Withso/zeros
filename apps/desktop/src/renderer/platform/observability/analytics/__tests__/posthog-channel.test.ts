@@ -52,7 +52,7 @@ describe("PostHog release-channel super property", () => {
   });
   it.each([
     ["alpha", "alpha"],
-    ["beta", "beta"],
+    ["beta", "dev"],
     ["stable", "production"],
     ["dev", "dev"],
   ])("tags %s as %s before any event", async (channel, expected) => {

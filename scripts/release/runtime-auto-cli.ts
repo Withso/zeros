@@ -36,7 +36,6 @@ export async function runtimeAutoMain(args = process.argv.slice(2), env = proces
   }
   const source = releaseSource(env), execute = options.command ?? command, json = jsonClient(options.fetch);
   const file = { alpha: "release-alpha.yml", production: "release.yml" } as const;
-  requireCheck(source.channel !== "beta", "Beta is retired; it has no automatic runtime release");
   const caller = runtimeCaller(file[source.channel], source.channel, source.channel === "alpha" ? "publish" : "promote");
   requireCheck(env.GITHUB_EVENT_NAME === caller.event && env.GITHUB_REF === `refs/heads/${source.branch}` &&
     env.GITHUB_WORKFLOW_REF === `${source.repository}/${caller.path}@refs/heads/${source.branch}` && env.GITHUB_WORKFLOW_SHA === source.sourceSha,

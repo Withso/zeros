@@ -107,7 +107,7 @@ describe("release candidates on the stable channel", () => {
     expect(fixture.check).toHaveBeenCalledOnce();
   });
 
-  it.each(["alpha", "beta"])("ignores the choice on %s, which has its own feed", async channel => {
+  it.each(["alpha"])("ignores the choice on %s, which has its own feed", async channel => {
     fixture.channel = channel;
     const updater = await setup();
     fixture.setFeedURL.mockClear();

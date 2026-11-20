@@ -425,6 +425,31 @@ export function mutateDesignNodeTextSource(
   text: string,
 ): string {
   if (text.length > 100_000) throw new Error("Design text is too long.");
+  const slot = designSlotOfNodeId(nodeId);
+  if (slot) {
+    if (slot.name !== "") {
+      throw new Error(`Setting text on non-default component slot is not supported: ${nodeId}.`);
+    }
+    const element = elementForMutation(source, slot.host, undefined, { shadow: true });
+    const location = element.sourceCodeLocation;
+    if (!location?.startTag || !location.endTag) {
+      throw new Error(`Design element cannot contain text: ${slot.host}`);
+    }
+    const spans = element.childNodes.flatMap((child) => {
+      if (child.nodeName !== "#text" || !child.sourceCodeLocation) return [];
+      return [{ start: child.sourceCodeLocation.startOffset, end: child.sourceCodeLocation.endOffset }];
+    });
+    if (!spans.length) {
+      if (!text) return source;
+      const start = location.startTag.endOffset;
+      return applySourceEdits(source, [{ start, end: start, text: escapeText(text) }]);
+    }
+    const [first, ...remaining] = spans;
+    return applySourceEdits(source, [
+      { ...first!, text: escapeText(text) },
+      ...remaining.map((span) => ({ ...span, text: "" })),
+    ]);
+  }
   const element = elementForMutation(source, nodeId, undefined, { shadow: true });
   if (element.childNodes.some((node) => "tagName" in node)) {
     throw new Error(

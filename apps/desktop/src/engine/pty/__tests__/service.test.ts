@@ -43,7 +43,7 @@ function makeFake() {
     },
     write: (d) => {
       state.writes.push(d);
-      dataCb?.(`echo:${d}`); // fake echo so we can assert data routing
+      dataCb?.(`echo:${d}`);
     },
     resize: (c, r) => {
       state.lastResize = [c, r];
@@ -134,7 +134,7 @@ describe("PtyService", () => {
       spawnedCwd = req.cwd;
       return fake.handle;
     });
-    svc.create({ sessionId: "t2", cwd: "/etc" }); // outside the engine root
+    svc.create({ sessionId: "t2", cwd: "/etc" });
     expect(spawnedCwd).toBe(process.cwd());
   });
 
@@ -166,7 +166,6 @@ describe("PtyService", () => {
       ...fake.handle,
       kill: () => {
         fake.state.killed = true;
-        // Deliberately omit the host exit callback.
       },
     };
     const svc = new PtyService(process.cwd(), () => handle);
@@ -242,20 +241,16 @@ describe("PtyService", () => {
     );
 
     svc.create({ sessionId: "m1" });
-    // The PTY byte stream is mirrored (the fake echoes writes back as data).
     svc.write("m1", "ls\n");
     expect(mstate.writes).toContain("echo:ls\n");
-    // A resize keeps the mirror grid in lockstep.
     svc.resize("m1", 120, 40);
     expect(mstate.resizes).toContainEqual([120, 40]);
 
-    // Reattach reports reattached:true; snapshot() serializes the mirror grid.
     const again = svc.create({ sessionId: "m1" });
     expect(again.reattached).toBe(true);
     const snap = await svc.snapshot("m1");
     expect(snap?.data).toBe("SNAP:echo:ls\n");
 
-    // kill disposes the mirror.
     svc.kill("m1");
     expect(mstate.disposed).toBe(true);
   });
@@ -289,7 +284,7 @@ describe("PtyService", () => {
     });
     svc.create({ sessionId: "local", scrubEnv: false });
     svc.create({ sessionId: "remote", scrubEnv: true });
-    svc.create({ sessionId: "default" }); // omitted → defaults to false
+    svc.create({ sessionId: "default" });
     expect(scrubs).toEqual([false, true, false]);
   });
 
@@ -297,12 +292,11 @@ describe("PtyService", () => {
     const fake = makeFake();
     const svc = new PtyService(process.cwd(), () => fake.handle);
     svc.create({ sessionId: "w1" });
-    // A malformed/hostile remote frame can carry a non-string payload.
     expect(() =>
       svc.write("w1", { evil: true } as unknown as string),
     ).not.toThrow();
     expect(() => svc.write("w1", 123 as unknown as string)).not.toThrow();
-    svc.write("w1", ""); // empty string is a no-op too
+    svc.write("w1", "");
     expect(fake.state.writes).toEqual([]);
     svc.write("w1", "ok\n");
     expect(fake.state.writes).toEqual(["ok\n"]);
@@ -314,9 +308,7 @@ describe("PtyService", () => {
       spawnedCwd = req.cwd;
       return makeFake().handle;
     });
-    // A path OUTSIDE the allowlist passed as resolvedCwd must still be spawned
-    // verbatim — proving create() did NOT re-run resolveCwd (which would have
-    // rejected it and fallen back to the engine root).
+    // Use a path the resolver would reject to distinguish re-resolution from reusing the approved path.
     svc.create({ sessionId: "rc", resolvedCwd: "/some/pre-approved/path" });
     expect(spawnedCwd).toBe("/some/pre-approved/path");
   });
@@ -325,10 +317,8 @@ describe("PtyService", () => {
     const path = await import("node:path");
     const fs = await import("node:fs");
     const svc = new PtyService(process.cwd(), () => makeFake().handle);
-    // Outside the allowlist → engine root.
     expect(svc.resolveCwd("/etc")).toBe(process.cwd());
     expect(svc.resolveCwd(undefined)).toBe(process.cwd());
-    // A real subdir of the root resolves to its realpath (symlink-safe).
     const sub = path.join(process.cwd(), "src");
     if (fs.existsSync(sub)) {
       expect(svc.resolveCwd(sub)).toBe(fs.realpathSync(sub));
@@ -350,8 +340,6 @@ describe("PtyService", () => {
     }
   });
 
-  // Cloud agents use the actual engine identity. Local keeps its existing
-  // repository-free authentication directory.
   it.runIf(process.platform === "linux")(
     "keeps the cloud auth cwd private to the actual engine identity",
     () => {
@@ -386,25 +374,14 @@ describe("PtyService", () => {
     const path = await import("node:path");
     const fs = await import("node:fs");
     const svc = new PtyService(process.cwd(), () => makeFake().handle);
-    // The engine root + a real subdir are inside the allowlist.
     expect(svc.isWithinAllowed(process.cwd())).toBe(true);
     const sub = path.join(process.cwd(), "src");
     if (fs.existsSync(sub)) expect(svc.isWithinAllowed(sub)).toBe(true);
-    // An existing path OUTSIDE the allowlist, a nonexistent path, and the empty
-    // string all fail closed — this is the boundary the agent-session path uses
-    // to reject a remote client's out-of-workspace cwd.
     expect(svc.isWithinAllowed("/etc")).toBe(false);
     expect(svc.isWithinAllowed("/nonexistent/zzz/qqq")).toBe(false);
     expect(svc.isWithinAllowed("")).toBe(false);
   });
 
-  // ── FIX 1: the VISIBLE worktrees root (~/zeros/workspaces) is allowlisted ──
-  // The engine relocates worktrees from the legacy hidden ~/.zeros/worktrees to
-  // the visible ~/zeros/workspaces tree at boot; the allowlist must cover it or
-  // every managed worktree fails isWithin() (terminal falls back to the engine
-  // root + remote agents are hard-rejected). Use the state-root override so both
-  // worktreesRoot() and legacyWorktreesRoot() resolve under a tmpdir — proving
-  // the allowlist is sourced from git/state, not a hardcoded path.
 
   describe("worktrees allowlist (FIX 1)", () => {
     let stateRoot: string;
@@ -413,16 +390,13 @@ describe("PtyService", () => {
     it("admits a cwd under the engine-managed worktrees root", () => {
       stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-pty-wt-"));
       setStateRootForTesting(stateRoot);
-      // A worktree-shaped dir under the (overridden) managed root.
       const wt = path.join(worktreesRoot(), "myrepo", "ws_abc123");
       fs.mkdirSync(wt, { recursive: true });
 
       const svc = new PtyService(stateRoot, () => makeFake().handle);
-      // Inside the managed worktrees root → allowed (this FAILED before the fix,
-      // which only hardcoded the legacy hidden ~/.zeros/worktrees path).
       expect(svc.isWithinAllowed(wt)).toBe(true);
       expect(svc.resolveCwd(wt)).toBe(fs.realpathSync(wt));
-      // The legacy root is still covered (equals the visible root under override).
+      // The test override merges the legacy and current roots, so this does not exercise separate on-disk trees.
       expect(legacyWorktreesRoot()).toBe(worktreesRoot());
 
       fs.rmSync(stateRoot, { recursive: true, force: true });
@@ -431,8 +405,6 @@ describe("PtyService", () => {
     it("admits a managed workspace path OUTSIDE the worktrees root (desktop parity)", () => {
       stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-pty-ws-"));
       setStateRootForTesting(stateRoot);
-      // A project the desktop opened that is NOT under the standard worktrees
-      // root (e.g. a tree adopted from another tool, or a primary checkout).
       const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-proj-"));
       const ws: Workspace = {
         id: "ws_outside",
@@ -454,8 +426,6 @@ describe("PtyService", () => {
       insertWorkspace(ws);
 
       const svc = new PtyService(stateRoot, () => makeFake().handle);
-      // Now allowlisted via listWorkspaces() — the engine can host a desktop
-      // terminal here instead of falling back to the engine root.
       expect(svc.isWithinAllowed(projectDir)).toBe(true);
       expect(svc.resolveCwd(projectDir)).toBe(fs.realpathSync(projectDir));
 

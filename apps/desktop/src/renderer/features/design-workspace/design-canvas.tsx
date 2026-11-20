@@ -213,7 +213,8 @@ import {
   type DesignMotionTimelineDraft,
 } from "./design-motion-timeline";
 import { canEditDesignNodeText } from "./design-node-capabilities";
-import { designComponentInstanceMark, designComponentPartHost, designComponentTextLock, designFrameIsComponent, designFrameMissingComponents, designFrameOptionsProblem, isDesignComponentPartNodeId } from "./state/design-component-parts";
+import { designComponentIdentityLabel, designComponentInstanceIdentity, designComponentSelectionIdentity, designComponentPartHost, designComponentTextLock, designFrameComponentPresentation, designFrameMissingComponents, designFrameOptionsProblem, isDesignComponentPartNodeId } from "./state/design-component-parts";
+import { designDeclaredVariants, useDesignComponentVariantStore } from "./state/design-component-variants";
 import { resolveDesignSelectionShortcut } from "./design-selection-shortcuts";
 import { captureDesignFrameComponentCopy } from "./state/design-component-variants";
 import {
@@ -407,6 +408,7 @@ const EMPTY_LINT_FINDINGS: readonly never[] = Object.freeze([]);
 const EMPTY_NODE_DETAILS: readonly DesignRuntimeNodeDetails[] = Object.freeze(
   [],
 );
+const EMPTY_COMPONENT_VARIANTS: Record<string, string> = Object.freeze({});
 export const EMPTY_NODE_IDS: readonly string[] = Object.freeze([]);
 /** The origin marker keeps a constant screen size, so on a selection only a few
  * marker-widths across it stops reading as a pivot and starts covering the
@@ -614,6 +616,11 @@ export const DesignCanvas = React.memo(function DesignCanvas({
   // Undo of a frame change also shows the frame it selects at once; this
   // paints frame chrome only. Gestures and writes keep the confirmed view.
   const historySelection = useDesignHistorySelection(active ? workspaceId : null);
+  const componentVariants = useDesignComponentVariantStore((state) =>
+    workspaceId
+      ? state.byWorkspace[workspaceId]?.frames ?? EMPTY_COMPONENT_VARIANTS
+      : EMPTY_COMPONENT_VARIANTS,
+  );
   const paintedSelectedTargets = historySelection?.selectedTargets ?? view.selectedTargets;
   const confirmedFrameViews = designFrameViews(snapshot);
   const frameViews = useMemo(
@@ -8140,7 +8147,16 @@ export const DesignCanvas = React.memo(function DesignCanvas({
               </DesignPreparingFrame>
             );
             const framePlaying = currentPlayback?.file === frame.file;
-            const frameIsComponent = designFrameIsComponent(frame);
+            const frameComponentPresentation = designFrameComponentPresentation(frame, (file) =>
+              snapshot.frames.find((candidate) => candidate.file === file)?.title);
+            const frameIsComponent = frameComponentPresentation?.kind === "main";
+            const storedVariant = componentVariants[frame.file];
+            const frameVariant = frameIsComponent && storedVariant && designDeclaredVariants(frame.component).includes(storedVariant)
+              ? storedVariant
+              : null;
+            const componentIdentity = frameComponentPresentation?.kind === "main"
+              ? designComponentIdentityLabel(frame.title, frameVariant)
+              : frameComponentPresentation?.label ?? null;
             const missingComponents = designFrameMissingComponents(frame);
             const optionsProblem = designFrameOptionsProblem(frame);
             const paintedFrame = frameGeometryPreviewsRef.current.get(
@@ -8272,6 +8288,8 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                 onPointerMoveCapture={(event) => { if (!prepared) event.stopPropagation(); }}
                 onDropCapture={(event) => { if (!prepared) { event.preventDefault(); event.stopPropagation(); } }}
                 data-design-frame-kind={frame.kind ?? "frame"}
+                data-design-frame-component={frameComponentPresentation ? "" : undefined}
+                data-design-frame-root-selected={frameSelectedOnly && frameComponentPresentation && paintedSelectedTargets.length === 1 ? "" : undefined}
                 data-design-frame-playing={framePlaying ? "" : undefined}
                 data-design-frame-selected={frameHasSelection ? "" : undefined}
                 data-design-frame-chrome-protected={selected || frameSelectedOnly || framePlaying ||
@@ -8503,11 +8521,13 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                             : missingComponents.length
                             ? `${frame.title}: ${designMissingComponentsLabel(missingComponents)}`
                             : optionsProblem !== null ? `${frame.title}: ${optionsProblem}`
-                            : frameIsComponent ? `${frame.title}, component` : frame.title}
+                            : componentIdentity ?? frame.title}
                           className={cn(
                             "text-2xxs block max-w-full min-w-0 overflow-hidden border-0 bg-transparent p-0 text-left leading-4 font-medium whitespace-nowrap outline-none",
-                            (frameIsComponent || missingComponents.length > 0 || optionsProblem !== null || preparationProblem !== null) && "flex items-center gap-1",
-                            frameSelectedOnly
+                            (frameComponentPresentation || missingComponents.length > 0 || optionsProblem !== null || preparationProblem !== null) && "flex items-center gap-1",
+                            frameComponentPresentation
+                              ? "text-violet-primary"
+                              : frameSelectedOnly
                               ? "text-[var(--design-selection-stroke)]"
                               : "text-muted-fg hover:text-fg2",
                           )}
@@ -8521,12 +8541,10 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                             setRenamingFrame(frame.file);
                           }}
                         >
-                          {frameIsComponent ? (
-                            <ComponentGlyph
-                              data-design-component-mark=""
-                              className="size-[11px] shrink-0"
-                              aria-hidden="true"
-                            />
+                          {frameComponentPresentation ? frameComponentPresentation.kind === "main" ? (
+                            <ComponentGlyph data-design-component-mark="main" className="text-violet-primary fill-current size-[11px] shrink-0" aria-hidden="true" />
+                          ) : (
+                            <Diamond data-design-component-mark="instance" className="text-violet-primary size-[11px] shrink-0" aria-hidden="true" />
                           ) : null}
                           {preparationProblem !== null ? <DesignFrameProblemMark message={preparationProblem} /> : null}
                           {missingComponents.length ? (
@@ -8537,7 +8555,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                             data-design-frame-name=""
                             className="block max-w-full min-w-0 overflow-hidden text-ellipsis"
                           >
-                            {frame.title}
+                            {componentIdentity ?? frame.title}
                           </span>
                         </button>
                         <DesignFrameLintBadge
@@ -8791,6 +8809,16 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                   // An instance's part is outlined only: no handle, and a
                   // click goes through to the frame to pick another part.
                   const partOutline = isDesignComponentPartNodeId(details.oid);
+                  const componentOwnerId = partOutline ? designComponentPartHost(details.oid) : details.oid;
+                  const mainComponentRoot = frameComponentPresentation?.kind === "main" && componentOwnerId === selectedFrameRootId;
+                  const instanceComponentIdentity = mainComponentRoot ? null : designComponentInstanceIdentity(frame, componentOwnerId, (file) =>
+                    snapshot.frames.find((candidate) => candidate.file === file)?.title);
+                  const selectedComponentIdentity = designComponentSelectionIdentity(
+                    selectedElements.length === 1 && paintedSelectedTargets.length === 1,
+                    mainComponentRoot,
+                    componentIdentity,
+                    instanceComponentIdentity,
+                  );
                   // The outline traces the element's own rotated box, not the
                   // upright bounding box a rotation grows around it.
                   const overlayFrame = designSelectionOverlayFrame(
@@ -8809,6 +8837,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                       data-design-selected-element={
                         primarySelection ? "" : undefined
                       }
+                      data-design-component-selection={selectedComponentIdentity ? "" : undefined}
                       className={cn(
                         "absolute touch-none",
                         editingThisElement
@@ -8914,12 +8943,8 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                             sizeModes={designSizeBadgeModes(details)}
                             sizeWidth={overlayFrame.width}
                             sizeHeight={overlayFrame.height}
-                            component={
-                              selectedElements.length === 1 && frame.instances
-                                ? designComponentInstanceMark(frame, details.oid, (file) =>
-                                    snapshot.frames.find((candidate) => candidate.file === file)?.title)?.title
-                                : null
-                            }
+                            component={selectedComponentIdentity}
+                            componentKind={mainComponentRoot ? "main" : "instance"}
                             onSpacingPointerDown={
                               selectedElements.length === 1 &&
                               activeTool === "select"

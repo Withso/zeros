@@ -1,21 +1,3 @@
-// ──────────────────────────────────────────────────────────
-// Settings foundation — bridge operation implementations
-// ──────────────────────────────────────────────────────────
-//
-// The engine-side handlers behind the workspace-service ops:
-//
-//   settings.resolve { repoRoot? }                 → effective + provenance
-//   settings.read    { layer, repoRoot? }          → one raw layer document
-//   settings.write   { layer, repoRoot?, patch }   → patch one layer file
-//   settings.migrateLegacy { repos, providers }    → one-time localStorage import
-//
-// Remote policy: resolve/read/write are all open to paired
-// devices (a paired device already holds PTY = arbitrary file edits; the
-// gate is the service allowlist + isKnownRepoRoot, enforced in service.ts).
-// Env values with secret-shaped NAMES are masked on remote reads as a
-// defensive courtesy, and a write refusing the mask sentinel keeps a remote
-// client from accidentally persisting the mask over a real value.
-// ──────────────────────────────────────────────────────────
 
 import { existsSync } from "node:fs";
 import { validateDesignSettings } from "../design/metadata";
@@ -54,8 +36,7 @@ import {
   type RawSettingsDoc,
 } from "./schema";
 
-/** Layers addressable over the bridge. `managed` is read-only by design —
- *  admin policy is provisioned out-of-band, never written by the app. */
+/** Managed policy is provisioned out of band and cannot be written through the bridge. */
 export const READABLE_LAYERS = [
   "user",
   "managed",
@@ -72,7 +53,7 @@ export const WRITABLE_LAYERS = [
 export type ReadableLayer = (typeof READABLE_LAYERS)[number];
 export type WritableLayer = (typeof WRITABLE_LAYERS)[number];
 
-/** Mask shown to REMOTE clients in place of a secret-shaped env value. */
+/** The mask is reserved on writes so a relay cannot overwrite a secret with its redacted readback. */
 export const REDACTED_SENTINEL = "<redacted>";
 
 export type SettingsOpErrorCode =
@@ -178,7 +159,6 @@ export function opSettingsResolve(
         (note): note is string => typeof note === "string",
       ),
     );
-  // A malformed layer is skipped, not fatal — surface it so the UI can say so.
   for (const [name, r] of [
     ["user", user],
     ["managed", managed],
@@ -210,8 +190,6 @@ function validateDesignSelection(
   }
 }
 
-/** True when any leaf of `value` is the redaction sentinel — a remote client
- *  echoing a masked read back as a write. */
 function containsRedactedSentinel(value: unknown): boolean {
   if (value === REDACTED_SENTINEL) return true;
   if (Array.isArray(value)) return value.some(containsRedactedSentinel);
@@ -220,26 +198,17 @@ function containsRedactedSentinel(value: unknown): boolean {
   return false;
 }
 
-/** Mask env values whose NAME is secret-shaped before a doc leaves for a
- *  relay client. Names stay visible (the UI shows which vars exist). */
 function redactEnvTable(env: unknown): unknown {
   if (!isPlainObject(env)) return env;
   const out: Record<string, unknown> = {};
   for (const [name, value] of Object.entries(env)) {
-    // Mask whenever the NAME is secret-shaped, regardless of value type — a
-    // secret stored as a TOML integer/array must not slip through.
+    // Mask by name regardless of TOML value type.
     out[name] = isSecretEnvName(name) ? REDACTED_SENTINEL : value;
   }
   return out;
 }
 
-/** Mask EVERY value in an MCP server's `env`/`headers` before a doc leaves for a
- *  relay client. Unlike the top-level `[env]` table (name-based masking), every
- *  MCP header/env value is masked unconditionally: any of them can be a real
- *  credential (e.g. an `auth="none"` server's `Authorization: Bearer …`), and a
- *  paired-but-untrusted device must never read it. Names stay visible. The
- *  gateway-brokered (`auth="oauth"|"header"`) secrets already live engine-only,
- *  so masking the residual plain values here is purely additive safety. */
+/** Mask every MCP env and header value for relay clients: any name can carry a credential. */
 function redactMcpTable(mcp: unknown): unknown {
   if (
     !isPlainObject(mcp) ||
@@ -281,11 +250,7 @@ export function redactDocForRemote(doc: RawSettingsDoc): RawSettingsDoc {
   return out;
 }
 
-/** Secret-shaped env NAMES present in a write patch's `env` table — the
- *  symmetric half of read masking, for the REMOTE write gate. Reads already
- *  mask these and the spawn path strips them, but refusing the write keeps the
- *  on-disk file clean and tells the client why, instead of persisting a value
- *  that would be silently dropped at spawn. Empty for a local (desktop) write. */
+/** Reject remote secret-shaped env writes rather than persisting values that spawn would discard. */
 export function secretEnvNamesInPatch(patch: unknown): string[] {
   if (!isPlainObject(patch) || !isPlainObject(patch.env)) return [];
   return Object.keys(patch.env).filter(isSecretEnvName);
@@ -313,14 +278,11 @@ export interface SettingsWriteOpResult {
   layer: WritableLayer;
   path: string;
   doc: RawSettingsDoc;
-  /** Advisory schema warnings about the document AFTER the patch (the write
-   *  itself is never rejected for unknown/invalid keys — forward compat). */
+  /** Schema warnings are advisory so writes preserve unfamiliar keys. */
   warnings: string[];
 }
 
 export interface SettingsWritePreview extends SettingsWriteOpResult {
-  /** Canonical file that would be replaced. Used only to project the resulting
-   * effective settings before a privileged pointer transition is committed. */
   path: string;
 }
 
@@ -352,8 +314,7 @@ function prepareSettingsWrite(
     );
   }
   const doc = applySettingsPatch(current.doc, patch);
-  // Selection validation applies even when no workspace is open. Unknown
-  // settings text stays on disk, but a bad path cannot become authority.
+  // Validate design selection even without an open workspace; stored text must not grant path authority.
   validateDesignSelection(
     repoRoot ? path.dirname(path.dirname(filePath)) : undefined,
     doc,
@@ -365,9 +326,7 @@ function prepareSettingsWrite(
   return { layer, path: filePath, doc, warnings };
 }
 
-/** Side-effect-free projection of settings.write. Privileged settings that
- * select an engine-owned filesystem territory use this to validate every
- * resulting effective pointer before touching the settings file. */
+/** Project the write without persisting it so callers can validate effective filesystem selections. */
 export function opSettingsPreviewWrite(
   layer: WritableLayer,
   patch: RawSettingsDoc,
@@ -376,10 +335,7 @@ export function opSettingsPreviewWrite(
   return prepareSettingsWrite(layer, patch, repoRoot);
 }
 
-/** Resolve a checkout exactly as opSettingsResolve would, replacing one layer
- * by a preview document when that layer's physical file matches `override`.
- * Worktrees resolve to the main checkout's personal file, just as real reads
- * and writes do. Previewing never persists a migration. */
+/** Match the layer by physical file and resolve legacy values without persisting migration. */
 export function opSettingsResolveWithOverride(
   repoRoot: string | undefined,
   mainRepoRoot: string | undefined,
@@ -459,9 +415,7 @@ export function opSettingsWrite(
     const current = readSettingsFile(filePath);
     if (!current.error) patch = withRetiredAgentControlCleared(current.doc, patch);
   }
-  // Re-run the format-preserving read/patch/write at the commit point. The
-  // preview above is validation only; updateSettingsFile remains the atomic
-  // source of truth and refuses a concurrently malformed file.
+  // Re-read at commit time so a preview cannot overwrite a file that has since become malformed.
   const doc = updateSettingsFile(filePath, patch, { schemaUrl });
   const { warnings } = sanitizeLayer(
     doc,
@@ -470,10 +424,7 @@ export function opSettingsWrite(
   return { layer, path: filePath, doc, warnings };
 }
 
-/** Write a RAW TOML document for the "Edit settings.toml" editor: the verbatim
- *  text (comments + layout kept intact), AFTER validating it parses. Rejects
- *  garbage — writing unparseable TOML would make the file malformed and block
- *  every future patch (updateSettingsFile refuses a malformed file). */
+/** Validate the replacement first; malformed TOML would block ordinary patch writes. */
 export function opSettingsWriteRaw(
   layer: WritableLayer,
   text: string,
@@ -506,10 +457,7 @@ export function opSettingsWriteRaw(
       text = `settings_version = ${PERSONAL_SETTINGS_VERSION}\n${text}`;
       doc.settings_version = PERSONAL_SETTINGS_VERSION;
     }
-    // A raw document replaces the layer, including malformed contents. Keep
-    // filename migration and path/privacy checks, but do not parse or merge
-    // the old document. The version above also prevents legacy values from
-    // being imported on a later read; the legacy repository file stays intact.
+    // Raw replacement can repair an unreadable document without merging it; the version prevents later legacy re-import.
     if (layer === "workspace-local") migrateWorkspaceSettings(repoRoot);
     ensureLocalSettingsIgnored(
       path.dirname(path.dirname(filePath)),
@@ -526,7 +474,6 @@ export function opSettingsWriteRaw(
   return { layer, path: filePath, doc, warnings };
 }
 
-// ── one-time legacy migration (localStorage → TOML) ────────
 
 interface LegacyRepoScript {
   name?: string;
@@ -556,12 +503,7 @@ export interface MigrateLegacyResult {
   warnings: string[];
 }
 
-/** Import the renderer's legacy localStorage blobs into TOML — once.
- *  Merge-under semantics: a key already present in the target file wins
- *  (re-running can never clobber what a user has since hand-edited).
- *  runOnCreate scripts join into `scripts.setup` with `&&`; the
- *  first non-runOnCreate script becomes `scripts.run`; leftovers are
- *  reported, not silently dropped. LOCAL-ONLY op. */
+/** Local-only import; existing target keys win so reruns cannot overwrite hand edits. */
 export function opSettingsMigrateLegacy(
   input: MigrateLegacyInput,
 ): MigrateLegacyResult {
@@ -578,7 +520,6 @@ export function opSettingsMigrateLegacy(
       continue;
     }
 
-    // Personal repository settings: branching + scripts.
     const shared: RawSettingsDoc = {};
     const git: Record<string, string> = {};
     if (typeof legacy.remoteOrigin === "string" && legacy.remoteOrigin.trim())
@@ -631,7 +572,6 @@ export function opSettingsMigrateLegacy(
       migratedRepos.push(repoRoot);
     }
 
-    // Personal (gitignored) layer: machine-specific worktrees path.
     if (
       typeof legacy.workspacesPath === "string" &&
       legacy.workspacesPath.trim()
@@ -672,15 +612,13 @@ export function opSettingsMigrateLegacy(
   return { migratedRepos, migratedProviders, warnings };
 }
 
-/** Patch a layer file keeping EXISTING values: any key already set in the
- *  file is dropped from the patch before writing. */
 function writeMergeUnder(
   layer: WritableLayer,
   patch: RawSettingsDoc,
   repoRoot?: string,
 ): void {
   const current = opSettingsRead(layer, repoRoot);
-  if (current.error) throw new Error(current.error); // retry; never mark a failed migration complete
+  if (current.error) throw new Error(current.error); // Leave a failed migration retryable.
   const pruned = dropExisting(patch, current.doc);
   if (Object.keys(pruned).length === 0) return;
   opSettingsWrite(layer, pruned, repoRoot);
@@ -701,7 +639,6 @@ function dropExisting(
       const nested = dropExisting(value, cur);
       if (Object.keys(nested).length > 0) out[key] = nested;
     }
-    // existing scalar/array → keep the file's value, drop the patch key
   }
   return out;
 }

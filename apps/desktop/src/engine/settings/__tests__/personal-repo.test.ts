@@ -245,9 +245,7 @@ describe("personal repository settings", () => {
   });
 
   describe("when the shared Git directory is not named .git", () => {
-    // personalRepoRoot then asks `git worktree list` for the owning checkout.
-    // That read opens every registered worktree's admin entry, so it can die
-    // on one that a concurrent `git worktree add` is still writing.
+    // A separate Git directory forces the worktree-list fallback that can see another checkout's unfinished registry entry.
     const linkedWorktree = (): string => {
       const store = path.join(root, "store.git");
       const checkout = path.join(root, "separate");
@@ -276,8 +274,6 @@ describe("personal repository settings", () => {
       return linked;
     };
 
-    /** Run `read` while a `git` on PATH fails the next `count` worktree
-     *  listings with `stderr`; returns how many failures it injected. */
     const withFailingWorktreeListings = (
       count: number,
       stderr: string,

@@ -37,7 +37,7 @@ export default defineConfig({
   // Bake the release channel at compile time so the Electron MAIN knows it
   // before any data-dir / updater code runs (the renderer uses VITE_ZEROS_CHANNEL
   // instead). "" in a normal dev compile → main falls back to the dev/packaged
-  // signal; the beta release workflow sets ZEROS_CHANNEL=beta for this step.
+  // signal; the alpha release workflow sets ZEROS_CHANNEL=alpha for this step.
   // main.ts reads this via `declare const __ZEROS_CHANNEL_BAKED__` and seeds
   // process.env.ZEROS_CHANNEL so the spawned engine inherits the same value.
   define: {
@@ -73,7 +73,7 @@ export default defineConfig({
       process.env.VITE_CLOUD_WORKSPACE_SSH_KNOWN_HOSTS_B64 || "",
     ),
     // Auth redemption/refresh happens in Electron main, not the renderer. Bake
-    // the same channel-specific web origin there or Alpha/Beta silently fall
+    // the same channel-specific web origin there or Alpha silently falls
     // back to Production after the browser handoff.
     __ZEROS_APP_BASE_URL_BAKED__: JSON.stringify(
       process.env.VITE_APP_BASE_URL || "",

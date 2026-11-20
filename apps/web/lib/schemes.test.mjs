@@ -7,7 +7,7 @@
  *
  * This file IMPORTS lib/schemes.mjs rather than mirroring it. That distinction is
  * the whole point: the previous version re-declared its own
- * `new Set(["zeros","zeros-beta","zeros-dev"])` and asserted against that copy, so
+ * `new Set(["zeros","zeros-dev"])`-style copy and asserted against it, so
  * "accepts all per-channel schemes" passed while hub.ts and invite.ts were BOTH
  * missing zeros-alpha — Alpha users got no "Launch Zeros" button, and every Alpha
  * invite link silently opened Production. A mirror can only test itself.
@@ -29,10 +29,10 @@ import {
 
 // Every value schemeForChannel() can return. Kept honest against the desktop by
 // scripts/check-deep-link-schemes.mjs.
-const CHANNEL_SCHEMES = ["zeros", "zeros-alpha", "zeros-beta", "zeros-dev"];
+const CHANNEL_SCHEMES = ["zeros", "zeros-alpha", "zeros-dev"];
 
 describe("scheme allow-list", () => {
-  it("contains exactly the four channel schemes — no more, no fewer", () => {
+  it("contains exactly the three channel schemes — no more, no fewer", () => {
     assert.deepEqual([...SCHEMES].sort(), [...CHANNEL_SCHEMES].sort());
   });
 
@@ -43,7 +43,7 @@ describe("scheme allow-list", () => {
 
 describe("foreign schemes", () => {
   it("rejects every scheme no release channel registers", () => {
-    for (const scheme of ["zeros-evil", "javascript", "http", "", "ZEROS", "zeros-alpha-evil"]) {
+    for (const scheme of ["zeros-evil", "javascript", "http", "", "ZEROS", "zeros-alpha-evil", "zeros-beta"]) {
       assert.equal(SCHEMES.has(scheme), false, `${scheme} should be rejected`);
     }
   });
@@ -54,10 +54,6 @@ describe("invite page scheme selection", () => {
     assert.equal(
       schemeForDeploymentEnvironment("alpha", "zeros"),
       "zeros-alpha",
-    );
-    assert.equal(
-      schemeForDeploymentEnvironment("beta", "zeros-alpha"),
-      "zeros-beta",
     );
     assert.equal(
       schemeForDeploymentEnvironment("production", "zeros-dev"),
@@ -77,7 +73,7 @@ describe("invite page scheme selection", () => {
   });
 
   it("fails closed for an unknown hosted deployment environment", () => {
-    for (const environment of ["staging", "constructor", "toString"]) {
+    for (const environment of ["staging", "beta", "constructor", "toString"]) {
       assert.throws(
         () => schemeForDeploymentEnvironment(environment, "zeros-alpha"),
         /ZEROS_DEPLOY_ENV/,
@@ -98,7 +94,7 @@ describe("invite page scheme selection", () => {
   });
 
   it("falls back to zeros:// for an unknown scheme (no open redirect)", () => {
-    for (const scheme of ["zeros-evil", "javascript", "", "zeros-alpha-evil"]) {
+    for (const scheme of ["zeros-evil", "javascript", "", "zeros-alpha-evil", "zeros-beta"]) {
       assert.equal(schemeOrDefault(scheme), "zeros");
     }
   });
@@ -106,8 +102,21 @@ describe("invite page scheme selection", () => {
 
 it("an Open Zeros link without a callback opens this deployment's app", () => {
   assert.equal(deploymentAppLink("alpha"), "zeros-alpha://");
-  assert.equal(deploymentAppLink("beta"), "zeros-beta://");
   assert.equal(deploymentAppLink("production"), "zeros://");
   assert.equal(deploymentAppLink(""), "zeros://");
-  assert.equal(deploymentAppLink("staging"), "zeros://");
+  assert.equal(deploymentAppLink(undefined), "zeros://");
+  // Hosted Dev is a deliberate configuration and keeps its existing link.
+  assert.equal(deploymentAppLink("dev"), "zeros://");
+});
+
+it("a named but unrecognised deployment gets no app link at all", () => {
+  for (const environment of ["beta", "staging", "Production", " beta "]) assert.equal(deploymentAppLink(environment), null);
+});
+
+// Review A finding 11: deployment-env.mjs accepts a padded name at build time,
+// so the runtime link must read it the same way.
+it("reads a deployment name exactly as the build validation does", () => {
+  assert.equal(deploymentAppLink(" alpha "), deploymentAppLink("alpha"));
+  assert.equal(deploymentAppLink("\tproduction\n"), deploymentAppLink("production"));
+  assert.equal(deploymentAppLink("  "), deploymentAppLink(""));
 });

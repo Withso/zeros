@@ -8,7 +8,7 @@ const day = 24 * 60 * 60 * 1000, now = Date.UTC(2026, 10, 7, 12);
 const dated = (number: number, publishedAt: number) => ({ version: `0.1.20-alpha.${number}`, publishedAt: new Date(publishedAt).toISOString(), sourceSha });
 
 describe("cumulative desktop release ledger", () => {
-  it.each(["alpha", "beta", "production"] as const)("builds the %s contract and channel asset", channel => {
+  it.each(["alpha", "production"] as const)("builds the %s contract and channel asset", channel => {
     const release = { ...entry(1), version: channel === "production" ? "0.1.20" : `0.1.20-${channel}.1` };
     expect(buildReleaseLedger(channel, null, release)).toEqual({ version: 1, channel, releases: [release] });
     expect(releaseLedgerUrl(repository, channel)).toBe(`https://github.com/${repository}/releases/${channel === "production" ? "latest/download" : `download/${channel}`}/${releaseLedgerAsset(channel)}`);
@@ -54,6 +54,8 @@ describe("cumulative desktop release ledger", () => {
     expect(() => buildReleaseLedger("alpha", previous, { ...entry(3), publishedAt: entry(1).publishedAt })).toThrow(/backwards/);
     expect(() => buildReleaseLedger("alpha", previous, entry(1))).toThrow(/monotonically/);
     expect(() => buildReleaseLedger("beta", null, entry(1))).toThrow(/channel/);
+    // A real Beta version matches its own channel pattern, so this reaches the channel refusal.
+    expect(() => buildReleaseLedger("beta" as "alpha", null, { ...entry(1), version: "0.1.20-beta.1" })).toThrow(/channel is unsupported/);
   });
   it("reads the prior ledger from the channel feed release without sending authorization to its asset", async () => {
     const previous = buildReleaseLedger("alpha", null, entry(1)), requests: Array<{ url: string; headers: Headers }> = [];

@@ -623,8 +623,8 @@ function hasComponentAncestor(
 
 /** Place an instance's children in its definition's slots. A frame the
  * definition marks data-zd-slot="<name>" takes the children named for it
- * (slot="<name>") in place of what it holds; a bare <slot> takes the rest,
- * else shows its fallback; <slot data-zd-attr> shows an attribute's text. */
+ * (slot="<name>") in place of what it holds; a bare <slot> takes meaningful
+ * remaining content or its fallback; <slot data-zd-attr> shows an attribute's text. */
 function fillSlots(
   definitionBody: string,
   instanceSource: string,
@@ -650,16 +650,22 @@ function fillSlots(
   }
   const taken = new Map<string, string>();
   let rest = "";
+  let restHasContent = false;
+  const hasSlotContent = (child: DefaultTreeAdapterTypes.ChildNode) =>
+    "value" in child ? Boolean(child.value.trim()) : "tagName" in child;
   for (const child of named.size ? instance.childNodes : []) {
     const location = child.sourceCodeLocation;
     if (!location) continue;
     const text = instanceSource.slice(location.startOffset, location.endOffset);
     const slot = "tagName" in child ? child.attrs.find((attribute) => attribute.name === "slot")?.value : undefined;
     if (slot && named.has(slot)) taken.set(slot, (taken.get(slot) ?? "") + text);
-    else rest += text;
+    else {
+      rest += text;
+      if (hasSlotContent(child)) restHasContent = true;
+    }
   }
-  // Without a named slot filled, the default slot takes every child as written.
-  const instanceChildren = taken.size ? (rest.trim() ? rest : "") : innerSource(instanceSource, instance);
+  const instanceChildren = taken.size ? rest : innerSource(instanceSource, instance);
+  const hasInstanceContent = taken.size ? restHasContent : instance.childNodes.some(hasSlotContent);
   const edits: Array<{ start: number; end: number; text: string }> = [];
   const filled: Array<{ start: number; end: number }> = [];
   for (const [name, slot] of named) {
@@ -681,7 +687,7 @@ function fillSlots(
       ? attributes.has(attributeName)
         ? escapeText(attributes.get(attributeName) ?? "")
         : fallback
-      : instanceChildren || fallback;
+      : hasInstanceContent ? instanceChildren : `${fallback}${instanceChildren.trim()}`;
     edits.push({ start: location.startOffset, end: location.endOffset, text });
   }
   let result = definitionBody;
@@ -1095,7 +1101,7 @@ function emptyDesignDocument(source: string): string {
 }
 
 /** The frame's own instances, for the Style panel: each host layer (its
- * data-oid), its component and the option attributes it sets. */
+ * data-oid), its component, option attributes and supplied default-slot text. */
 function recordInstance(
   usage: DesignComponentExpansionUsage,
   registry: ReadonlyMap<string, string>,
@@ -1106,25 +1112,24 @@ function recordInstance(
   const { declaration, file } = definition.template;
   const shape = designComponentBodySlotShape(definition.body);
   const slotted = designInstanceSlottedLayers(instance, shape);
+  const text = directDefaultSlotText(instance, shape.fallback);
   recordHost(usage, definition.name, instance, new Set([...declaration.options.map((option) => option.name), COMPONENT_VARIANT_ATTRIBUTE]), () => {
     const summary = definition.template.summary?.() ?? null;
     return { elements: withDesignSlotOptions(summary?.elements ?? [], shape.names, designSlotOptionElement), reach: summary?.reach ?? {},
       file, frame: registry.get(definition.name) === file };
-  }, { ...(failed ? { failed: true } : {}), ...(slotted ? { slotted } : {}) });
+  }, { ...(failed ? { failed: true } : {}), ...(text !== undefined ? { text, ...(mixedChildren(instance) ? { mixedText: true as const } : {}) } : {}), ...(slotted ? { slotted } : {}) });
 }
 
 /** A plain definition's instance: each attribute slot is a text option with
- * its fallback as the default, and a default slot filled with text alone
- * reports that text, which the host's own text sets. */
+ * its fallback as the default, and a default slot reports bounded direct
+ * text nodes even when elements or comments are interleaved. */
 function recordSlotInstance(
   usage: DesignComponentExpansionUsage,
   definition: ComponentDefinition & { slots: NonNullable<ComponentDefinition["slots"]> },
   instance: DefaultTreeAdapterTypes.Element,
 ): void {
   const { options, content } = definition.slots;
-  const text = content && instance.childNodes.every((child) => child.nodeName === "#text")
-    ? instance.childNodes.map((child) => (child as DefaultTreeAdapterTypes.TextNode).value).join("")
-    : undefined;
+  const text = directDefaultSlotText(instance, content);
   const names = designComponentBodySlotShape(definition.body).names.filter((name) => !options.some((option) => option.name === name));
   const slotted = designInstanceSlottedLayers(instance, { names, fallback: content });
   recordHost(usage, definition.name, instance, new Set(options.map((option) => option.name)), () => ({
@@ -1133,7 +1138,25 @@ function recordSlotInstance(
     reach: {},
     file: `components/${definition.name}.html`,
     frame: false,
-  }), { ...(text !== undefined && text.length <= DESIGN_COMPONENT_RECORD_LIMITS.attributeValue ? { text } : {}), ...(slotted ? { slotted } : {}) });
+  }), { ...(text !== undefined ? { text, ...(mixedChildren(instance) ? { mixedText: true as const } : {}) } : {}), ...(slotted ? { slotted } : {}) });
+}
+
+/** Whether a host's direct text sits beside other children: only a renderer
+ * that writes through the virtual default slot can edit it there. */
+function mixedChildren(instance: DefaultTreeAdapterTypes.Element): boolean {
+  return !instance.childNodes.every((child) => child.nodeName === "#text");
+}
+
+function directDefaultSlotText(
+  instance: DefaultTreeAdapterTypes.Element,
+  hasDefaultSlot: boolean,
+): string | undefined {
+  if (!hasDefaultSlot) return undefined;
+  const text = instance.childNodes
+    .filter((child) => child.nodeName === "#text")
+    .map((child) => (child as DefaultTreeAdapterTypes.TextNode).value)
+    .join("");
+  return text.length <= DESIGN_COMPONENT_RECORD_LIMITS.attributeValue ? text : undefined;
 }
 
 function recordHost(
@@ -1142,7 +1165,7 @@ function recordHost(
   instance: DefaultTreeAdapterTypes.Element,
   names: ReadonlySet<string>,
   component: () => DesignFrameInstances["components"][string],
-  extra: { failed?: true; text?: string; slotted?: Record<string, string[]> },
+  extra: { failed?: true; text?: string; mixedText?: true; slotted?: Record<string, string[]> },
 ): void {
   if (instance.attrs.some((attribute) => attribute.name === "data-zd-part")) return;
   const oid = instance.attrs.find((attribute) => attribute.name === "data-oid")?.value;
@@ -1178,7 +1201,7 @@ function recordHost(
   }
   record.hosts.set(oid, { component: name, attributes: Object.fromEntries(attributes), ...(extra.failed ? { failed: true as const } : {}),
     ...(ignored.size ? { ignored: Object.fromEntries(ignored) } : {}), ...(overrides.size ? { overrides: Object.fromEntries(overrides) } : {}),
-    ...(extra.text !== undefined ? { text: extra.text } : {}), ...(extra.slotted ? { slotted: extra.slotted } : {}) });
+    ...(extra.text !== undefined ? { text: extra.text } : {}), ...(extra.mixedText ? { mixedText: true as const } : {}), ...(extra.slotted ? { slotted: extra.slotted } : {}) });
 }
 
 /** A top-level instance of a name no definition answers to, so the panel and

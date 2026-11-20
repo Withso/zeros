@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import vm from "node:vm";
 import { transformSync } from "esbuild";
+import { assertLocalAdmission, assertLocalOverrideIsolated } from "../storage-identity";
+import { CHANNELS, isChannel } from "../../src/engine/runtime";
 // @ts-expect-error The Node launcher is JavaScript; exercise its real boot environment.
 import { localEnvironment } from "../../../../scripts/electron-local.mjs";
 
@@ -12,7 +14,7 @@ afterEach(() => {
 });
 
 describe("native Local development admission", () => {
-  function initializeIdentity(local: boolean, env: Record<string, string | undefined>) {
+  function initializeIdentity(local: boolean, env: Record<string, string | undefined>, baked = "") {
     const source = fs.readFileSync("apps/desktop/electron/main.ts", "utf8");
     // Include the earlier environment authority, not only the sharing condition.
     const start = source.indexOf("const explicitDevEnv =");
@@ -20,10 +22,13 @@ describe("native Local development admission", () => {
     const sharedRoot = local ? "/data/com.zeros.local" : `/data/com.zeros.${env.ZEROS_CHANNEL}`;
     vm.runInNewContext(transformSync(source.slice(start, end), { loader: "ts" }).code, {
       IS_DEV: env.ZEROS_CHANNEL === "dev", IS_LOCAL_DEVELOPMENT: local,
-      INSTANCE_NAME: "Fixture", INSTANCE_LABEL: "Fixture",
+      INSTANCE_NAME: "Fixture", INSTANCE_LABEL: "Fixture", INSTANCE_SLUG: env.ZEROS_INSTANCE ?? "",
+      __ZEROS_CHANNEL_BAKED__: baked,
+      assertLocalAdmission, assertLocalOverrideIsolated,
+      realProfileRoots: () => ({ profileRoots: ["/data/com.zeros", "/data/com.zeros.alpha", "/data/com.zeros.dev", "/data/com.zeros.local"], appData: "/data" }),
       process: { env },
-      isChannel: (value: string) => ["dev", "alpha", "beta", "stable"].includes(value),
-      CHANNELS: ["dev", "alpha", "beta", "stable"],
+      isChannel,
+      CHANNELS,
       seedCloudWorkspaceDesktopCapabilityEnvironment() {}, migrateElectronIdentity() {},
       zerosDataDir: () => `${sharedRoot}.${env.ZEROS_INSTANCE ?? "fixture"}`,
       zerosChannelDataDir: () => sharedRoot,
@@ -33,7 +38,7 @@ describe("native Local development admission", () => {
   }
 
   it.each([false, true])("shares the channel secret store across checkouts (local=%s)", (local) => {
-    for (const slug of ["checkout-a", "checkout-b"]) {
+    for (const slug of ["0123456789abcdef", "fedcba9876543210"]) {
       const env = local ? localEnvironment({
         identity: { slug, name: "Fixture" }, vitePort: 6400, engineBase: 31000, environment: {},
       }) : { ZEROS_CHANNEL: "dev", ZEROS_INSTANCE: slug };
@@ -45,7 +50,7 @@ describe("native Local development admission", () => {
 
   it.each([undefined, "0", "1"])("clears inherited hosted secrets and honors explicit Local isolation %s", (isolate) => {
     const env = localEnvironment({
-      identity: { slug: "checkout", name: "Fixture" }, vitePort: 6400, engineBase: 31000,
+      identity: { slug: "0123456789abcdef", name: "Fixture" }, vitePort: 6400, engineBase: 31000,
       environment: { ZEROS_ISOLATE: isolate },
     });
     // Main is also authoritative for direct launches that bypass the launcher.
@@ -55,7 +60,39 @@ describe("native Local development admission", () => {
     expect(env.ZEROS_SHARED_SECRETS_DIR).toBe(isolate === "1" ? undefined : "/data/com.zeros.local");
   });
 
-  it.each(["alpha", "beta", "stable"])("never shares a development store with %s", (channel) => {
+  it("refuses a retired beta channel at boot like any unknown channel", () => {
+    expect(() => initializeIdentity(false, { ZEROS_CHANNEL: "beta" })).toThrow(/not a known channel/);
+  });
+
+  // Final review: installed builds keep main's channel precedence; only a
+  // non-empty unknown bake is refused, before any storage is selected.
+  it("refuses a non-empty unknown bake, and otherwise keeps main's env-then-bake precedence", () => {
+    for (const env of [{}, { ZEROS_CHANNEL: "stable" }])
+      expect(() => initializeIdentity(false, { ...env }, "beta")).toThrow(/baked channel "beta"/);
+    expect(initializeIdentity(false, {}, "alpha").ZEROS_CHANNEL).toBe("alpha");
+    expect(initializeIdentity(false, { ZEROS_CHANNEL: "dev" }, "alpha").ZEROS_CHANNEL).toBe("dev");
+    expect(initializeIdentity(false, {}, "").ZEROS_CHANNEL).toBe("stable");
+  });
+
+  it("admits account-free Local only on a checkout id; hosted development keeps main's identities", () => {
+    const local = (slug: string) => localEnvironment({ identity: { slug, name: "Fixture" }, vitePort: 6400, engineBase: 31000, environment: {} });
+    expect(() => initializeIdentity(true, local("0123456789abcdef"))).not.toThrow();
+    for (const slug of ["alpha", "default", "feature-x"])
+      expect(() => initializeIdentity(true, local(slug)), slug).toThrow(/checkout's own instance/);
+    for (const instance of ["0123456789abcdef", "alpha", "feature-x"])
+      expect(() => initializeIdentity(false, { ZEROS_CHANNEL: "dev", ZEROS_INSTANCE: instance }), instance).not.toThrow();
+  });
+
+  it("refuses a Local ZEROS_DATA_DIR inside a real profile, and leaves hosted and installed overrides as main has them", () => {
+    const local = localEnvironment({ identity: { slug: "0123456789abcdef", name: "Fixture" }, vitePort: 6400, engineBase: 31000, environment: {} });
+    for (const dataDir of ["/data/com.zeros.alpha/sub", "/data/com.zeros.dev", "/data/com.zeros.local/instances/0123456789abcdef"])
+      expect(() => initializeIdentity(true, { ...local, ZEROS_DATA_DIR: dataDir }), dataDir).toThrow(/ZEROS_DATA_DIR/);
+    expect(() => initializeIdentity(true, { ...local, ZEROS_DATA_DIR: "/tmp/fixture" })).not.toThrow();
+    expect(() => initializeIdentity(false, { ZEROS_CHANNEL: "dev", ZEROS_DATA_DIR: "/data/com.zeros/sub" })).not.toThrow();
+    expect(() => initializeIdentity(false, { ZEROS_DATA_DIR: "/data/com.zeros/sub" }, "stable")).not.toThrow();
+  });
+
+  it.each(["alpha", "stable"])("never shares a development store with %s", (channel) => {
     const env = initializeIdentity(false, { ZEROS_CHANNEL: channel, ZEROS_LOCAL_DEVELOPMENT: "1" });
     expect(env.ZEROS_SHARED_SECRETS_DIR).toBeUndefined();
     expect(env.ZEROS_LOCAL_DEVELOPMENT).toBeUndefined();
@@ -67,7 +104,6 @@ describe("native Local development admission", () => {
     [true, "true", "dev", false],
     [false, "1", "dev", false],
     [false, "1", "alpha", false],
-    [false, "1", "beta", false],
     [false, "1", "stable", false],
     [true, "1", "alpha", false],
   ])(
@@ -93,10 +129,9 @@ describe("native Local development admission", () => {
             "",
             "dev",
             "alpha",
-            "beta",
             "stable",
           ]) {
-            for (const bakedChannel of ["", "dev", "alpha", "beta", "stable"]) {
+            for (const bakedChannel of ["", "dev", "alpha", "stable"]) {
               vi.resetModules();
               vi.stubGlobal("process", { ...process, defaultApp: !packaged });
               vi.stubGlobal("__ZEROS_LOCAL_DEVELOPMENT_BUILD__", bakedLocal);

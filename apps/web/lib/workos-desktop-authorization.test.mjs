@@ -184,9 +184,10 @@ test("Alpha alone permits the local Dev scheme through the WorkOS desktop bounda
   assert.match(callbackBody, /zeros-dev/);
 });
 
-test("Beta and Production reject the local Dev scheme", async () => {
+test("Production and a named unrecognised deployment reject the local Dev scheme", async () => {
   for (const [deployment, origin, api] of [
     ["beta", "https://app-beta.zeros.build", "https://api-beta.zeros.build"],
+    ["staging", "https://app-staging.zeros.build", "https://api-staging.zeros.build"],
     ["production", "https://app.zeros.build", "https://api.zeros.build"],
   ]) {
     const response = await renderWorkOSDesktopAuthorizationPage(
@@ -201,6 +202,18 @@ test("Beta and Production reject the local Dev scheme", async () => {
     );
     assert.equal(response.status, 400);
   }
+});
+
+test("a named unrecognised deployment's callback offers no app, even with a valid Dev state", async () => {
+  const response = renderWorkOSDesktopCallback(
+    new Request(
+      `https://app-beta.zeros.build/auth/desktop/callback?error=access_denied&state=${DEV_STATE}`,
+    ),
+    { ...ENV, ZEROS_DEPLOY_ENV: "beta" },
+  );
+  const body = await response.text();
+  assert.equal(response.status, 400);
+  assert.doesNotMatch(body, /zeros(?:-[a-z]+)?:\/\//);
 });
 
 test("the desktop handoff pages follow the canvas copy and keep Open Zeros", async () => {

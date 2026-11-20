@@ -1,4 +1,4 @@
-export type ClientReleaseChannel = "alpha" | "beta" | "production" | "dev";
+export type ClientReleaseChannel = "alpha" | "production" | "dev";
 export type ClientUpgradeRequired = {
   minimumVersion: string;
   latestVersion: string;
@@ -9,7 +9,7 @@ const VERSION_PATTERN =
 
 export function clientReleaseChannel(channel: unknown): ClientReleaseChannel {
   if (channel === "stable" || channel === "production") return "production";
-  return channel === "alpha" || channel === "beta" ? channel : "dev";
+  return channel === "alpha" ? channel : "dev";
 }
 
 function validVersion(value: unknown): value is string {

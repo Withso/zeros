@@ -1,55 +1,12 @@
 #!/usr/bin/env node
-// ──────────────────────────────────────────────────────────
-// Zeros PTY host — a tiny Node subprocess that owns node-pty
-// ──────────────────────────────────────────────────────────
-//
-// WHY THIS EXISTS
-// The Zeros engine runs under **bun** (dev: `bun apps/desktop/src/cli.ts`; packaged: a
-// bun-compiled standalone binary — see apps/desktop/electron/sidecar.ts). node-pty loads
-// fine under bun (it's N-API), but its PTY I/O is BROKEN there: `pty.spawn`
-// returns a pid and never throws, yet the shell emits zero bytes and ignores
-// writes (reproduced on bun 1.3.13; works perfectly under Node). That made
-// every terminal that rides the engine-owned PTY —
-// open a dead, blank shell.
-//
-// The fix keeps the engine on bun (it needs bun:sqlite + the Claude Agent SDK)
-// but moves the actual node-pty spawns into this Node subprocess. The engine
-// drives it over stdio; node-pty runs under Node, where it works.
-//
-// PROTOCOL (newline-delimited JSON, one object per line)
-//   engine → host (this process's stdin):
-//     {"t":"spawn","id":"<id>","shell":"/bin/zsh","args":["-l"],"cwd":"…",
-//      "cols":80,"rows":24,"env":{…},"name":"xterm-256color"}
-//     {"t":"write","id":"<id>","data":"<base64>"}
-//     {"t":"resize","id":"<id>","cols":100,"rows":40}
-//     {"t":"kill","id":"<id>"}
-//   host → engine (this process's stdout):
-//     {"t":"ready"}                                   (once, on startup)
-//     {"t":"spawned","id":"<id>","pid":12345}
-//     {"t":"data","id":"<id>","data":"<base64>"}
-//     {"t":"exit","id":"<id>","exitCode":0,"signal":null}
-//     {"t":"error","id":"<id>","message":"…"}         (spawn failed)
-//     {"t":"fatal","message":"…"}                     (node-pty unloadable)
-//
-// PTY data/keystrokes are base64-encoded so a line never contains a raw
-// newline; every other field is JSON-escaped. node-pty's onData yields whole
-// UTF-8 strings (it uses an internal StringDecoder, so multibyte chars are
-// never split across chunks), so base64(utf8)→decode round-trips exactly.
-//
-// stdout is RESERVED for the protocol — this process must never console.log.
-// Diagnostics go to stderr, which the engine forwards to its log.
-// ──────────────────────────────────────────────────────────
+// Bun 1.3.13 loaded node-pty but failed to deliver PTY I/O, so Node owns the PTYs. Stdout is reserved for the client's line-delimited JSON protocol; PTY data is base64 and diagnostics go to stderr.
 
 "use strict";
 
 const fs = require("fs");
 const { execFileSync } = require("child_process");
 
-// node-pty location: the engine passes an absolute path (ZEROS_PTY_NODE_PTY)
-// resolved to the ABI-matching copy — in a packaged app that's the
-// app.asar.unpacked copy (a .node can't be dlopen'd from inside asar). When
-// unset (engine run from source with no Electron host) fall back to ordinary
-// module resolution, which walks up to the repo node_modules.
+// Packaged builds point to the ABI-matching copy outside app.asar because native modules cannot load from inside it.
 const ptyModulePath = process.env.ZEROS_PTY_NODE_PTY;
 let pty;
 try {
@@ -58,9 +15,7 @@ try {
   );
 } catch (err) {
   try {
-    // `process.exit()` does not wait for asynchronous stdout writes. This fatal
-    // record determines whether the parent blocks a useless key-restart loop,
-    // so put the small protocol line into the pipe synchronously before exit.
+    // Write synchronously before process.exit() so the client can latch the fatal startup error.
     fs.writeSync(
       1,
       JSON.stringify({
@@ -74,7 +29,6 @@ try {
   process.exit(1);
 }
 
-/** id → IPty */
 const sessions = new Map();
 
 function send(msg) {
@@ -85,9 +39,7 @@ function send(msg) {
   }
 }
 
-/** parentPid → child pids, read from one `ps` sweep. `-A -o` is the portable
- *  spelling: BSD `-ax` and procps disagree, but `-A` means "every process" on
- *  both macOS and Linux. Returns null when the table can't be read. */
+/** Use ps -A rather than BSD -ax so process discovery works on both macOS and Linux. */
 function readProcessTree() {
   let rows = "";
   try {
@@ -112,13 +64,7 @@ function readProcessTree() {
   return children;
 }
 
-/** SIGKILL every process still descended from the PTY shell. Interactive job
- *  control gives background jobs their OWN process groups, so killing only the
- *  shell's group misses `cmd &`, `nohup`, and `disown`. Walk parent links BEFORE
- *  killing the shell, while those jobs still have an attributable owner.
- *  Best-effort POSIX fallback; Windows retains node-pty's own teardown.
- *  `tree` lets a sweep over many shells (shutdown) share ONE `ps` read instead
- *  of blocking the host's event loop for up to 1s per session. */
+/** Interactive jobs can have separate process groups; find them through parent links before killing the shell. */
 function killDescendants(rootPid, tree) {
   if (
     process.platform === "win32" ||
@@ -136,8 +82,7 @@ function killDescendants(rootPid, tree) {
     descendants.push(pid);
     pending.push(...(children.get(pid) || []));
   }
-  // Children first so a wrapper cannot reparent its own subprocess between
-  // our signals and escape attribution.
+  // Kill children first so killing a wrapper cannot reparent its subprocess before we signal it.
   for (const pid of descendants.reverse()) {
     if (pid <= 0 || pid === process.pid) continue;
     try {
@@ -148,12 +93,6 @@ function killDescendants(rootPid, tree) {
   }
 }
 
-/** Terminate one PTY COMPLETELY. `p.kill()` SIGHUPs the shell — that fells the
- *  foreground child. The process-group kill covers non-interactive commands;
- *  the descendant sweep above also covers interactive background job groups.
- *  Both are best-effort. Used by BOTH the interactive `kill`
- *  message (the × button) AND shutdown, so a user-closed terminal is torn down
- *  exactly as thoroughly as app-quit — they must never drift apart. */
 function killProc(p, tree) {
   killDescendants(p.pid, tree);
   try {
@@ -193,8 +132,7 @@ function handleSpawn(m) {
       cwd: m.cwd,
       cols: typeof m.cols === "number" && m.cols > 0 ? m.cols : 80,
       rows: typeof m.rows === "number" && m.rows > 0 ? m.rows : 24,
-      // The engine computes the full resolved env (Zeros ZDOTDIR, scrubbed
-      // allowlist for remote clients, per-worktree PWD); use it verbatim.
+      // Use the engine-owned environment as supplied; adding host variables would defeat the remote allowlist.
       env: m.env && typeof m.env === "object" ? m.env : process.env,
     });
   } catch (err) {
@@ -203,8 +141,7 @@ function handleSpawn(m) {
       id: m.id,
       message: err && err.message ? err.message : String(err),
     });
-    // Surface as an immediate exit so the client can classify this as a spawn
-    // infrastructure failure instead of leaving the terminal hanging.
+    // Send a terminal exit after a failed spawn so the client does not wait for a process that never started.
     send({ t: "exit", id: m.id, exitCode: null, signal: null });
     return;
   }
@@ -286,18 +223,12 @@ process.stdin.on("data", (chunk) => {
   }
 });
 
-// The parent (engine) closing our stdin — a clean shutdown OR a crash — means
-// we must tear down every shell and exit so we never linger as an orphan PTY
-// host holding shells (and their child processes) open.
+// Stdin closing also covers engine crashes; do not leave the host's shells behind.
 let shuttingDown = false;
 function shutdown() {
   if (shuttingDown) return;
   shuttingDown = true;
-  // Same complete teardown as the interactive × (killProc): SIGHUP the shell +
-  // SIGKILL its process group, so no shell or backgrounded child lingers when
-  // the engine goes away. ONE process-table read is shared across every
-  // session — quit must not serialise N blocking `ps` calls before the first
-  // shell is even signalled.
+  // Share one ps sweep so shutdown does not block once per terminal.
   const tree = sessions.size > 0 ? readProcessTree() : null;
   for (const p of sessions.values()) killProc(p, tree);
   sessions.clear();

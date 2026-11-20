@@ -5,7 +5,6 @@ import type { WorkOSDesktopAuthorizationProvider } from "./workos-provider.js";
 const DESKTOP_SCHEMES = new Set([
   "zeros",
   "zeros-alpha",
-  "zeros-beta",
   "zeros-dev",
 ]);
 const TOKEN_PART = /^[A-Za-z0-9_-]{43}$/;

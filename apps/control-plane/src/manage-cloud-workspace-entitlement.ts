@@ -14,7 +14,7 @@ import path from "node:path";
 import pg from "pg";
 import { z } from "zod";
 
-const CHANNELS = ["development", "alpha", "beta", "production"] as const;
+const CHANNELS = ["development", "alpha", "production"] as const;
 const PLANS = ["pro", "business", "enterprise"] as const;
 const ACTIVATION_STATUSES = ["active", "trialing"] as const;
 const ENTITLEMENT_STATUSES = [
@@ -329,7 +329,7 @@ export function validateCloudWorkspaceEntitlementRequest(
   const channel = input.channel?.trim().toLowerCase() ?? "";
   if (!CHANNELS.includes(channel as (typeof CHANNELS)[number])) {
     throw new CloudWorkspaceEntitlementManagementError(
-      "CONTROL_PLANE_CLOUD_ENTITLEMENT_CHANNEL must be development, alpha, beta, or production",
+      "CONTROL_PLANE_CLOUD_ENTITLEMENT_CHANNEL must be development, alpha, or production",
     );
   }
   const railwayEnvironment = input.railwayEnvironmentName?.trim().toLowerCase();

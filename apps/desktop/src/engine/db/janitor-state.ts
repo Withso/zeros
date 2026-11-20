@@ -1,29 +1,11 @@
-// ──────────────────────────────────────────────────────────
-// janitor_state — durable cursors for the boot janitors (v34)
-// ──────────────────────────────────────────────────────────
-//
-// A boot repair that walks an immutable history has to remember how far it got.
-// The rows it decides to leave alone are precisely the rows it does not write
-// to, so the history itself can never carry that mark — without a cursor the
-// repair re-reads the same backlog on every launch, forever, and pays for a
-// backlog that only grows.
-//
-// Engine-local and machine-local: a cursor describes one process's progress
-// through its own copy of the history, so these rows are deliberately not
-// rev-stamped and not part of the delta-sync set. Losing the table costs a
-// repeated pass, never correctness — every janitor that reads a cursor must
-// still be safe to run from zero.
-// ──────────────────────────────────────────────────────────
+// Boot repair cursors stay local because examined rows may not change. Restarting from zero must be safe.
 
 import { openZerosDb } from "./index";
 
-/** How far the finished-turn file-attribution repair has walked, as a `turns`
- *  `rev`. See git/turn-recovery.ts. */
+/** Persisted high-water mark in turns.rev, including examined rows left unchanged. */
 export const TURN_ATTRIBUTION_REPAIR_CURSOR = "turn-attribution-repair-rev";
 
-/** The cursor for `key`, or 0 when this janitor has never run. Never throws:
- *  a janitor that cannot read its cursor restarts from the beginning, which is
- *  slower but always correct. */
+/** An unreadable cursor restarts the repair from zero. */
 export function readJanitorCursor(key: string): number {
   try {
     const row = openZerosDb()
@@ -36,8 +18,6 @@ export function readJanitorCursor(key: string): number {
   }
 }
 
-/** Advance `key` to `cursor`. Monotonic by construction — a lower value is
- *  ignored so an interrupted pass can never rewind a completed one. */
 export function writeJanitorCursor(key: string, cursor: number): void {
   if (!Number.isSafeInteger(cursor) || cursor <= 0) return;
   try {

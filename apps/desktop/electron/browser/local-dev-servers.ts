@@ -16,7 +16,6 @@ import http from "node:http";
 import path from "node:path";
 import {
   ENGINE_BASE_PORT_ALPHA,
-  ENGINE_BASE_PORT_BETA,
   ENGINE_BASE_PORT_DEV,
   ENGINE_BASE_PORT_PROD,
   ENGINE_PORT_SPAN,
@@ -624,7 +623,6 @@ export function zerosListenerExclusions(input: {
   for (const base of [
     input.engineBase,
     ENGINE_BASE_PORT_PROD,
-    ENGINE_BASE_PORT_BETA,
     ENGINE_BASE_PORT_ALPHA,
     ENGINE_BASE_PORT_DEV,
   ])

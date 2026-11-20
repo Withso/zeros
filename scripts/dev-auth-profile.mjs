@@ -257,7 +257,7 @@ function workOSClientFromPath(raw, prefix) {
 
 /**
  * Mirror the main-process Dev boundary at launcher time. This is intentionally
- * Alpha-specific: a source checkout must never inherit Beta or Production auth
+ * Alpha-specific: a source checkout must never inherit Production auth
  * just because those values happen to be present in a parent shell.
  */
 export function devAuthEnvironmentIssue(env) {

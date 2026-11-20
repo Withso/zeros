@@ -928,8 +928,9 @@ describe("design workspace interaction wiring", () => {
     // over when the gesture settles or is cancelled.
     expect(source).toContain("publishDesignFrameGeometryLive(workspaceId, frame.file, latest);");
     expect(source).toContain("clearDesignFrameGeometryLive(workspaceId, frame.file);");
-    // Both frame field groups read it through one subscribed field.
-    expect(inspector).toContain("useDesignFrameGeometryLiveValue(workspaceId, frame, geometryKey)");
+    // Both frame field groups subscribe only while their Style panel is active.
+    expect(inspector).toContain("useDesignFrameGeometryLiveValue(workspaceId, frame, geometryKey, active)");
+    expect(inspector).toContain("active={active && styleActive}");
     expect(inspector.match(/<InspectorFrameGeometryField/g)).toHaveLength(2);
   });
 

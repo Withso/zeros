@@ -9,7 +9,7 @@ const DEFAULT_TIMEOUT_MS = 10 * 60_000;
 const DEFAULT_OPEN_EXTERNAL_TIMEOUT_MS = 5_000;
 const MAX_CALLBACK_VALUE_LENGTH = 8_192;
 const MAX_STATE_LENGTH = 256;
-const DESKTOP_SCHEME = /^zeros(?:-(?:alpha|beta|dev))?$/;
+const DESKTOP_SCHEME = /^zeros(?:-(?:alpha|dev))?$/;
 const RECOVERY_CODE_RE = /^ZR-[A-Z2-9]{4}-[A-Z2-9]{4}$/;
 
 export type WorkOSDesktopFlowErrorReason =

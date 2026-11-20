@@ -39,7 +39,7 @@ describe("clean database reset safety", () => {
     expect(fingerprint).toMatch(/^[a-f0-9]{16}$/);
     expect(fingerprint).toBe(resetTargetFingerprint(DATABASE_URL, "alpha"));
     expect(fingerprint).not.toContain("secret-password");
-    expect(resetTargetFingerprint(DATABASE_URL, "beta")).not.toBe(fingerprint);
+    expect(resetTargetFingerprint(DATABASE_URL, "development")).not.toBe(fingerprint);
   });
 
   it("allows a dry-run plan without destructive approval", () => {
@@ -67,10 +67,19 @@ describe("clean database reset safety", () => {
       validateResetRequest({
         databaseUrl: DATABASE_URL,
         channel: "alpha",
-        railwayEnvironmentName: "beta",
+        railwayEnvironmentName: "development",
         execute: false,
       }),
     ).toThrow(/does not match/);
+
+    expect(() =>
+      validateResetRequest({
+        databaseUrl: DATABASE_URL,
+        channel: "beta",
+        railwayEnvironmentName: "beta",
+        execute: false,
+      }),
+    ).toThrow(/must be alpha or development/);
   });
 
   it("requires backup confirmation and exact target-bound approval to execute", () => {

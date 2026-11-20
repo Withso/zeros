@@ -1,16 +1,3 @@
-// ──────────────────────────────────────────────────────────
-// Shell / zsh setup for engine-owned PTYs
-// ──────────────────────────────────────────────────────────
-//
-// The sole engine-side terminal shell setup (login shell, Zeros-managed
-// ZDOTDIR that re-sources the user's dotfiles then applies our prompt +
-// universal-history overrides, macOS Apple-Terminal session suppression).
-// The desktop terminal now runs through the engine bridge, so there is no
-// longer a parallel electron-main handler.
-//
-// Pure Node — no node-pty, no Electron. (node-pty lives in node-pty-spawn.ts
-// so this and the PtyService stay testable without the native binding.)
-// ──────────────────────────────────────────────────────────
 
 import fs from "node:fs";
 import path from "node:path";
@@ -24,10 +11,7 @@ import {
   TOOLCHAIN_ENV_NAMES,
 } from "../env/launcher-env";
 
-/** Zeros-managed ZDOTDIR under the DEV-AWARE dot-dir (~/.zeros in prod,
- *  ~/.zeros-dev in dev) so a dev run never writes term files (incl. shell
- *  history) into the production ~/.zeros. Resolved lazily — the channel/dev
- *  signal is in env by the time a PTY is first spawned. */
+/** Resolve lazily from the channel-specific state root so Dev and packaged shell state stay separate. */
 function zerosZdotdir(): string {
   return path.join(zerosStateRoot(), "term-zdotdir");
 }
@@ -65,8 +49,7 @@ autoload -Uz add-zsh-hook 2>/dev/null
 ${ZEROS_PROMPT_OVERRIDE}${ZEROS_HISTORY_OPTIONS}`,
 };
 
-/** Idempotently (re)write the Zeros-managed ZDOTDIR. Non-fatal on failure —
- *  the PTY still spawns with the user's default zsh setup. */
+/** If the wrapper cannot be written, keep the shell usable without it. */
 function ensureZerosZdotdir(): string | null {
   const dir = zerosZdotdir();
   try {
@@ -80,9 +63,7 @@ function ensureZerosZdotdir(): string | null {
   }
 }
 
-/** Strip a ZDOTDIR inherited from our own wrapper (Zeros-from-Zeros) so the
- *  spawned shell sources the user's real dotfiles, not ours, before we
- *  re-apply the wrapper. */
+/** Drop inherited Zeros wrappers so nested terminals start from the user's dotfiles. */
 function pruneInheritedZdotdir(env: Record<string, string>): void {
   const z = env.ZDOTDIR;
   if (!z) return;
@@ -95,7 +76,6 @@ function pruneInheritedZdotdir(env: Record<string, string>): void {
   }
 }
 
-/** Pick a login shell — honor $SHELL if it points at a real executable. */
 export function pickShell(): string {
   const envShell =
     typeof process.env.SHELL === "string" ? process.env.SHELL : "";
@@ -105,82 +85,11 @@ export function pickShell(): string {
   return "/bin/bash";
 }
 
-/** `-l` so the shell loads the user's login profile (PATH, nvm, pyenv, …). */
 export function buildLoginArgs(): string[] {
   return process.platform === "win32" ? [] : ["-l"];
 }
 
-/** Args for a ONE-SHOT command shell (Setup script, Run action) — the shell
- *  runs `command` and exits, and its exit code is the command's verdict.
- *
- *  WHAT `interactive` BUYS, AND WHY IT IS OPT-IN
- *  A login shell is not an INTERACTIVE shell, and the two read different
- *  startup files. `zsh -l -c` reads .zshenv → .zprofile → .zlogin and SKIPS
- *  .zshrc; `bash -l -c` reads .bash_profile and skips the `[[ $- == *i* ]]`
- *  branches inside it. But ~/.zshrc is exactly where the macOS ecosystem puts
- *  its PATH setup — nvm, fnm, mise, asdf, volta, rbenv/pyenv, the pnpm/bun
- *  installers, and per-project `chpwd` version hooks all append there. So a
- *  one-shot command saw a DIFFERENT toolchain than the Terminal tab (whose
- *  shell IS interactive): a wrong/absent `node`, no `pnpm`, no project-pinned
- *  version — surfacing as "command not found", or a dependency install that
- *  silently targeted another runtime. `interactive` closes that gap: same
- *  files, same tools, same shell functions/aliases as the terminal the user
- *  would otherwise have typed into.
- *
- *  It is OPT-IN, and the reason is NOT provenance. Run actions are just as
- *  repo-resident as the setup script: `scripts.run_actions` is read from the
- *  COMMITTED `<repo>/.zeros/settings.toml` (settings/schema.ts routes the whole
- *  `scripts` table there and refuses it from the personal, gitignored layers), and
- *  `run_on_create` starts one automatically at workspace creation with no click.
- *  So "the user's own command, started by hand" is not a property either of them
- *  has.
- *
- *  The real asymmetry is what the two already have. A run action's PTY is built
- *  from `buildPtyEnv` — the FULL desktop env, exactly like the Terminal tab — so
- *  sourcing ~/.zshrc grants it nothing it could not already read; the only delta
- *  is convenience in a packaged app, where the engine's own env came from launchd
- *  and carries none of the user's exports. The SETUP script is the opposite: its
- *  whole point is the narrow allowlist in setup-hooks.ts, which exists because
- *  `.zeros/settings.toml` arrives with a clone, and sourcing .zshrc — where
- *  `export ANTHROPIC_API_KEY=…` and `source ~/.secrets` live — would route
- *  straight around it. Setup therefore keeps the non-interactive shell and gets
- *  its toolchain the safe way: an out-of-band `$SHELL -ilc` PATH probe whose
- *  RESULT, not the dotfile's whole environment, is copied in
- *  (buildSetupCommandEnv).
- *
- *  KNOWN COST OF `interactive`, since it is a real one: the user's rc now runs
- *  before their command, so their aliases apply (`alias mv='mv -i'` turns a
- *  run action's `mv` into a y/n prompt), their shell options apply
- *  (`setopt NO_CLOBBER` makes `cmd > out.log` exit 1), their banners land above
- *  the command's first byte, and an `exec tmux new-session -A` idiom replaces the
- *  shell outright — the command never runs and the action sits on "running" until
- *  it is stopped. The blocking prompts we can name are neutralised in
- *  ZSH_ONE_SHOT_PROLOGUE and buildRunCommandEnv; the rest is the price of the
- *  parity that was asked for, and Stop always works.
- *
- *  WHY JOB CONTROL IS THEN TURNED BACK OFF
- *  `-i` on a tty also enables MONITOR (job control), which puts every job in
- *  its OWN process group. Our teardown SIGKILLs the shell's process group
- *  (pty-host.cjs killProc) precisely so a backgrounded grandchild — a dev
- *  server started with `&`, an MCP sidecar — dies with the run instead of
- *  reparenting to launchd. With job control on, that group no longer contains
- *  the child and the process leaks. zsh takes `+m`; bash ignores a `+m`
- *  argument here, so it gets an in-band `set +m`. Verified against a real PTY:
- *  with these flags a `cmd &` grandchild keeps the shell's pgid and dies with
- *  the group kill; without them it survives. (zsh also stops announcing
- *  `[1] 12345`; bash still prints the notice but does not split the group.)
- *
- *  …AND WHY zsh ALSO DROPS ITS LOGIN FLAG BEFORE RUNNING
- *  An interactive LOGIN shell runs the logout files on the way out, and both
- *  the stock /etc/zlogout and the common ~/.zlogout idiom are literally
- *  `clear` — which on a modern terminal is ESC[2J ESC[3J, i.e. erase screen
- *  AND erase scrollback. That fires the instant the command exits, so the run
- *  log would be wiped exactly when the user goes to read why it failed.
- *  `unsetopt login` in the prologue (after every rc file has already run)
- *  suppresses both .zlogout files and leaves the exit code untouched.
- *
- *  Shells we don't have a verified recipe for keep the plain `-l -c` form — a
- *  shell we can't reason about must not silently leak processes. */
+/** Run opts into Terminal startup parity; Setup must not source interactive dotfiles because its environment is scrubbed. Disable zsh/bash job control so background jobs stay in the managed process group. */
 export function buildOneShotArgs(
   shell: string,
   command: string,
@@ -189,56 +98,24 @@ export function buildOneShotArgs(
   if (process.platform === "win32") return ["/c", command];
   const login = buildLoginArgs();
   if (!interactive) return [...login, "-c", command];
-  // $SHELL may be a path (/bin/zsh, /opt/homebrew/bin/zsh) or a login-dashed
-  // name (-zsh) — reduce to the bare program name either way.
   const name = path.basename(shell).replace(/^-/, "");
-  // Tolerate a versioned or suffixed name (`zsh-5.9`, `zsh5`, `bash5`): the
-  // parity fix silently didn't apply to those, with nothing in the log to say so.
   if (/^zsh[-.\d]*$/.test(name)) {
     return [...login, "-i", "+m", "-c", `${ZSH_ONE_SHOT_PROLOGUE}${command}`];
   }
   if (/^bash[-.\d]*$/.test(name)) {
-    // bash has no runtime equivalent of `unsetopt login`, but it also read
-    // ~/.bash_logout under the plain `-l -c` form — so that is unchanged, not a
-    // regression. What IS new is the job notice (`[1] 12345`) for a backgrounded
-    // child; bash prints "logout" only on an interactive EOF, which a `-c` shell
-    // never reaches.
+    // Bash needs in-band set +m; it does not use zsh's +m argv form.
     return [...login, "-i", "-c", `set +m 2>/dev/null; ${command}`];
   }
-  // A shell we have no verified recipe for keeps the plain form. Note that is the
-  // CONSERVATIVE choice, not a safe one: csh/tcsh and elvish reject `-l` outright
-  // and the command never runs at all. That predates this function; it is called
-  // out here so nobody reads the fallback as a guarantee.
+  // Keep the existing non-interactive form for unknown shells; not all shells accept -l.
   return [...login, "-c", command];
 }
 
-/** Runs after every rc file, before the user's command.
- *
- *  `unsetopt login` — see the block comment above.
- *
- *  `zstyle ':omz:update' mode disabled` — oh-my-zsh's updater asks
- *  "Would you like to update? [Y/n]" and BLOCKS on a stdin nobody is watching.
- *  `DISABLE_AUTO_UPDATE` (set in buildRunCommandEnv) only works when the user has
- *  no `zstyle ':omz:update' mode …` of their own: upstream reads the env vars
- *  inside a `zstyle -s … || { … }` fallback block, so the modern, documented way
- *  of configuring the updater silently overrides them. Setting the zstyle here —
- *  after .zshrc has run — wins either way. Its `[[ ! -t 1 ]]` bail-out does not
- *  save us; a run action has a real PTY.
- *
- *  Both are `2>/dev/null` and both are no-ops on a shell that lacks them. */
+/** After startup, suppress zlogout so clear cannot erase the run log, and set oh-my-zsh's update style because it can override the environment switch. */
 const ZSH_ONE_SHOT_PROLOGUE =
   "unsetopt login 2>/dev/null; zstyle ':omz:update' mode disabled 2>/dev/null; ";
 
-// Env vars safe to forward into a REMOTE shell. This is an ALLOWLIST,
-// not a denylist: the engine inherits the operator's full env (provider API
-// keys, GitHub/cloud tokens, the ssh-agent socket, DATABASE_URL-style
-// connection strings, private URLs …), and no denylist can anticipate every
-// secret-bearing var name — especially URL/DSN/connection-string forms whose
-// KEY carries no secret marker. So a remote shell starts from a minimal,
-// known-safe base and copies in only these. Local shells keep the full env
-// (desktop parity; the operator already holds those secrets locally).
+// Use an allowlist: secrets can be carried under ordinary variable names as URLs or sockets.
 const REMOTE_ENV_ALLOW = new Set<string>([
-  // Core shell + locale + terminal.
   "PATH",
   "HOME",
   "USER",
@@ -259,18 +136,11 @@ const REMOTE_ENV_ALLOW = new Set<string>([
   "HOSTNAME",
   "EDITOR",
   "PAGER",
-  // Toolchain locations (paths, not secrets) so language tooling keeps working.
-  // Shared with the setup-script allowlist — one list, so a newly-supported
-  // version manager reaches every surface instead of only the one it was added
-  // to. Proxy/CA vars are deliberately NOT here: a proxy URL can embed
-  // credentials, and this list's whole job is that no host secret escapes.
+  // Share toolchain locations with Setup; proxy URLs can contain credentials and must stay out.
   ...TOOLCHAIN_ENV_NAMES,
 ]);
 
-// Public, but still identity-bearing: these describe the desktop app that
-// spawned the engine. A nested `pnpm electron:dev` must load the current shared
-// Alpha profile itself instead of treating a parent Alpha/Beta/Production
-// app's values as an intentional one-run override.
+// Public auth selectors still belong to the parent app; nested Dev must resolve its own profile.
 const DESKTOP_AUTH_SELECTOR_ENV_NAMES = [
   "AUTH_PROVIDER",
   "AUTH_DESKTOP_CLIENT_ID",
@@ -282,12 +152,7 @@ const DESKTOP_AUTH_SELECTOR_ENV_NAMES = [
   "ZEROS_AUTH_PROVIDER",
 ] as const;
 
-/** The child env for a PTY: truecolor, Apple-Terminal session noise off, and
- *  ZDOTDIR pointed at the Zeros wrapper. When `scrub` is set (an explicitly
- *  remote/cloud surface), the env is rebuilt from the allowlist so host and
- *  provider credentials are not inherited. Local human terminals retain the
- *  normal host environment. Engine authority is removed in
- *  both modes. `cwd` scopes the shell's location env to THIS worktree. */
+/** Remote shells inherit only allowlisted values. Local keeps ordinary credentials, never engine authority. */
 export function buildPtyEnv(opts?: {
   scrub?: boolean;
   cwd?: string;
@@ -305,9 +170,7 @@ export function buildPtyEnv(opts?: {
   } else {
     env = { ...src };
   }
-  // Markers read from process.env, not `env`: the remote allowlist has already
-  // filtered them out, so asking the rebuilt env would report "no launcher"
-  // and leave that launcher's node_modules/.bin on the PATH it copied over.
+  // Detect the launcher from the original environment: the remote allowlist has already removed its markers.
   pruneLauncherScriptEnv(env, src);
   Object.assign(env, {
     TERM: "xterm-256color",
@@ -320,9 +183,7 @@ export function buildPtyEnv(opts?: {
   delete env.TERM_PROGRAM;
   delete env.TERM_PROGRAM_VERSION;
   delete env.TERM_SESSION_ID;
-  // Drop the engine's internal PTY-host plumbing so it never leaks into the
-  // user's interactive shell (these tell the engine how to spawn the Node PTY
-  // host — see pty-host-client.ts — and are meaningless inside a terminal).
+  // Do not pass engine host-launch controls to the shell.
   delete env.ZEROS_PTY_HOST_RUNTIME;
   delete env.ZEROS_PTY_HOST_RUNTIME_ELECTRON;
   delete env.ZEROS_PTY_HOST_SCRIPT;
@@ -330,43 +191,14 @@ export function buildPtyEnv(opts?: {
   delete env.ZEROS_HOST_SUPERVISOR_RUNTIME;
   delete env.ZEROS_HOST_SUPERVISOR_SCRIPT;
   delete env.ELECTRON_RUN_AS_NODE;
-  // Drop the CHANNEL identity, one level coarser than the instance vars below.
-  // Nothing in scripts/dev-instance.mjs exports this one: apps/desktop/electron/main.ts seeds
-  // process.env.ZEROS_CHANNEL at boot for EVERY channel (from the compile-time
-  // bake) and hands it to the engine via {...process.env}, so every terminal a
-  // PACKAGED build opens carries ZEROS_CHANNEL=stable. A nested `pnpm
-  // electron:dev` then tripped main.ts's `if (!fromEnv)` guard — an inherited
-  // value is a VALID channel, so it wins over the dev signal — and the whole
-  // build took on the STABLE identity: db/paths.ts drops the per-worktree slug
-  // outside the dev channel, so userData, Chromium cache, logs and the DB all
-  // collapsed onto com.zeros. The dev app then went for the packaged app's
-  // single-instance lock, lost it, quit at boot with code 0 (deep-link.ts), and
-  // `concurrently -k` took vite + both tsup watchers down with it. That made
-  // dogfooding — running a dev instance from a terminal inside a released Zeros
-  // — impossible, which is exactly what this whole denylist exists to allow.
+  // A parent channel would override nested Dev's own channel and shared-state selection.
   delete env.ZEROS_CHANNEL;
-  // Drop this dev instance's IDENTITY for the same reason: it describes THE APP,
-  // not the worktree. scripts/dev-instance.mjs derives one slug per worktree and
-  // exports these so every `pnpm electron:dev` is its own app — own Vite port, own
-  // engine port block, own com.zeros.dev.<slug> data dir, own userData +
-  // single-instance lock. Inherited by a shell, they hand all of that to the NEXT
-  // app: a nested `pnpm electron:dev` (dogfooding Zeros from a terminal inside
-  // Zeros) found ZEROS_INSTANCE already set, took the "caller owns uniqueness"
-  // branch of resolveInstance(), and adopted the PARENT's identity verbatim — only
-  // the display name came from the worktree. It then claimed the parent's Vite port
-  // (fatal under strictPort, and `concurrently -k` killed the whole block), the
-  // parent's SQLite DB (db/paths.ts), the parent's single-instance lock (so the
-  // child silently quits — deep-link.ts), and the parent's orphan-engine match key
-  // (so the two apps reap each other's engines — orphan-engines.ts). Deleting them
-  // lets the nested launcher derive a fresh identity from its own worktree.
-  //
-  // This is a denylist of what the launcher exports, so a new instance-scoped var
-  // has to be added here too — there's a pointer saying so at that export site.
-  // ZEROS_WORKTREE_PATH / ZEROS_WORKSPACE_ID stay: those ARE worktree context, and
-  // are set deliberately just below.
+  // Keep in sync with the launcher: nested Dev derives its own app identity, independent of terminal worktree context.
   delete env.ZEROS_INSTANCE;
   delete env.ZEROS_INSTANCE_NAME;
   delete env.ZEROS_LOCAL_DEVELOPMENT;
+  // The launcher's layout decision for that same parent identity.
+  delete env.ZEROS_LOCAL_LAYOUT;
   // A nested checkout resolves its own backend/auth profile and credentials.
   delete env.ZEROS_DEV_ENVIRONMENT;
   delete env.ZEROS_DEV_AUTH_PROFILE;
@@ -376,10 +208,7 @@ export function buildPtyEnv(opts?: {
   delete env.ZEROS_ENGINE_BASE_PORT;
   delete env.ELECTRON_RENDERER_URL;
   for (const name of DESKTOP_AUTH_SELECTOR_ENV_NAMES) delete env[name];
-  // Engine-owned auth/control channels are never part of desktop parity. A
-  // legacy launch or a parent-process override must not turn them into terminal
-  // environment variables, where shell commands and coding agents can inspect
-  // them. (Git receives its scoped values only on the individual invocation.)
+  // Engine-owned auth and control authority is never part of Local terminal parity.
   delete env.ZEROS_GITHUB_TOKEN;
   delete env.ZEROS_LOCAL_WS_TOKEN;
   delete env.ZEROS_GIT_AUTH_CONTEXT;
@@ -391,11 +220,7 @@ export function buildPtyEnv(opts?: {
   delete env.ZEROS_REAL_GIT_PATH;
   delete env.ZEROS_REAL_GH_PATH;
   delete env.ZEROS_CONTROL_FD;
-  // Scope the shell's location env to THIS worktree. PWD/OLDPWD are otherwise
-  // inherited from whatever dir the engine was rooted at, so `cd -` / $OLDPWD
-  // would leak a DIFFERENT worktree's path into this terminal. Pin PWD to cwd,
-  // drop OLDPWD, and hint scripts/agents which worktree they're in. (Mirrors the
-  // E.1 scoping in apps/desktop/electron/ipc/commands/pty.ts.)
+  // Do not inherit another worktree's OLDPWD or identity.
   if (opts?.cwd) {
     env.PWD = opts.cwd;
     env.ZEROS_WORKTREE_PATH = opts.cwd;
@@ -408,30 +233,11 @@ export function buildPtyEnv(opts?: {
   pruneInheritedZdotdir(env);
   const zdotdir = ensureZerosZdotdir();
   if (zdotdir) env.ZDOTDIR = zdotdir;
-  // The full-parity path deliberately retains ordinary provider credentials,
-  // toolchain variables, and application service URLs. It must not retain the
-  // coordinator's bridge token, private-state roots, ZSR launch controls, or a
-  // Conductor control credential. Keep this final so future layering above
-  // cannot accidentally put engine authority back.
+  // Strip engine authority last so earlier environment layering cannot reintroduce it.
   return stripEngineAuthorityEnv(env);
 }
 
-/** The child env for a RUN ACTION's one-shot PTY — the Run tab's counterpart to
- *  buildSetupCommandEnv (setup-hooks.ts).
- *
- *  A run action is a LOCAL, user-authored command in the user's own worktree,
- *  so it keeps the full desktop env like the Terminal tab (unlike setup, whose
- *  The allowlist exists because `scripts.setup` is repository-resident and may arrive
- *  with a branch). What it adds on top is the parity the Run tab was missing:
- *
- *   • the login-shell PATH probe, so a PACKAGED app — launched from Finder with
- *     launchd's `/usr/bin:/bin:/usr/sbin:/sbin` — still finds Homebrew/nvm/pnpm
- *     even before the interactive rc runs (see login-shell-path.ts),
- *   • FORCE_COLOR, so tools that color on a flag rather than isatty look the
- *     same here as in Setup and the terminal,
- *   • the ZEROS_* worktree context every other Zeros-spawned command gets.
- *
- *  Never throws: a failed PATH probe just keeps the inherited PATH. */
+/** Run shares Terminal's environment, unlike scrubbed Setup; a login-shell PATH probe fills in toolchains missing from Finder launches. */
 export async function buildRunCommandEnv(ctx: {
   cwd: string;
   workspaceId: string | null;
@@ -447,29 +253,11 @@ export async function buildRunCommandEnv(ctx: {
   }
   env.FORCE_COLOR = "1";
   if (ctx.repoRoot) env.ZEROS_REPO_ROOT = ctx.repoRoot;
-  // A run action's shell is INTERACTIVE (buildOneShotArgs) so it picks up the
-  // user's real toolchain — which also means it runs their interactive-session
-  // housekeeping. A one-shot has nothing to house-keep: it shows no prompt and
-  // nobody is going to answer a question. Each knob below is the tool's own
-  // documented off switch, and they apply to THIS shell only.
-  //   • p10k paints its instant prompt the moment .zshrc is sourced, which
-  //     would prefix every run log with theme escape codes.
-  //   • oh-my-zsh's auto-update asks "Would you like to update? [Y/n]" and
-  //     blocks on stdin. This is the BELT; the brace is a `zstyle` in the shell
-  //     prologue, because upstream ignores this var whenever the user has
-  //     configured the updater the modern way (see ZSH_ONE_SHOT_PROLOGUE).
-  //   • compinit prints "zsh compinit: insecure directories … [y/n/a]" and
-  //     blocks the same way, on the completely ordinary macOS condition of a
-  //     group-writable Homebrew completions dir. This is its documented opt-out.
-  //   • direnv logs "direnv: loading …"/"direnv: error … is blocked" per run,
-  //     straight into the log above the command's first byte.
+  // Interactive dotfiles run for toolchain parity, but unattended runs need no update prompts, theme banners, or direnv logging.
   env.POWERLEVEL9K_INSTANT_PROMPT = "off";
   env.DISABLE_AUTO_UPDATE = "true";
   env.ZSH_DISABLE_COMPFIX = "true";
   env.DIRENV_LOG_FORMAT = "";
-  // NOT set: DISABLE_UPDATE_PROMPT. It reads like a second off switch but
-  // upstream maps it to `update_mode=auto`, i.e. "update WITHOUT asking" — so it
-  // would authorise a `git pull` of ~/.oh-my-zsh on every run. It is inert today
-  // only because DISABLE_AUTO_UPDATE is evaluated after it.
+  // Do not set DISABLE_UPDATE_PROMPT: oh-my-zsh treats it as unattended update, not no update.
   return env;
 }

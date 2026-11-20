@@ -98,7 +98,7 @@ describe("cloud-workspace Organization entitlement owner command", () => {
     ).not.toBe(approval);
     expect(
       cloudWorkspaceEntitlementApprovalText(
-        request({ channel: "beta", railwayEnvironmentName: "beta" }),
+        request({ channel: "production", railwayEnvironmentName: "production" }),
         null,
       ),
     ).not.toBe(approval);
@@ -128,7 +128,7 @@ describe("cloud-workspace Organization entitlement owner command", () => {
     expect(
       cloudWorkspaceEntitlementApprovalText(
         request({
-          reason: "Activate the separately reviewed Beta Organization plan.",
+          reason: "Activate the separately reviewed Production Organization plan.",
         }),
         null,
       ),

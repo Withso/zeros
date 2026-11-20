@@ -62,7 +62,7 @@ describe("old API client-header CORS tolerance", () => {
       await clientFetch(apiUrl, {
         method: "POST",
         headers: {
-          "X-Zeros-Client": "desktop/beta/0.0.0",
+          "X-Zeros-Client": "desktop/production/0.0.0",
           "Idempotency-Key": "synthetic-operation",
         },
         body: "{}",

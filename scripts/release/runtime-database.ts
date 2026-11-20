@@ -13,9 +13,9 @@ type Stage = typeof stages[number];
 export const RuntimeDatabaseJournalSchema = z.object({
   version: z.literal(1), source: RuntimeReleaseConfigSchema,
   target: z.object({ organization: z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/),
-    database: z.enum(["zeros-control-plane-alpha", "zeros-control-plane-beta", "zeros-control-plane-production"]), branch: z.literal("main"),
+    database: z.enum(["zeros-control-plane-alpha", "zeros-control-plane-production"]), branch: z.literal("main"),
     databaseId: providerId.nullable(), branchId: providerId.nullable() }).strict(),
-  role: z.object({ name: z.string().regex(/^zeros-(?:alpha|beta|production)-runtime-[1-9]\d{0,19}-[1-9]\d{0,4}$/),
+  role: z.object({ name: z.string().regex(/^zeros-(?:alpha|production)-runtime-[1-9]\d{0,19}-[1-9]\d{0,4}$/),
     creatorSha256: z.string().regex(/^[a-f0-9]{64}$/), ttlSeconds: z.literal(3600),
     phase: z.enum(["planned", "requested", "owned", "deleted"]), id: providerId.nullable(), acknowledged: z.boolean(),
     requestedAt: stamp.nullable(), expiresAt: stamp.nullable(), deleted: z.boolean(), absentObservedAt: stamp.nullable() }).strict(),

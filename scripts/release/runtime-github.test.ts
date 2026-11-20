@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { runtimeGithub } from "./runtime-github";
 import type { RuntimeReleaseConfig } from "./runtime-contracts";
 
-function fixture(channel: "alpha" | "beta" | "production" = "alpha") {
+function fixture(channel: "alpha" | "production" = "alpha") {
   const config: RuntimeReleaseConfig = { channel, action: channel === "alpha" ? "publish" : "promote", repository: "example/project", workflowSha: "1".repeat(40),
     branch: channel === "alpha" ? "main" : "release/1.2.3", runId: "123", runAttempt: 2, sourceSha: "2".repeat(40),
     expectedCpSha: "3".repeat(40), expectedRuntimeSha256: "a".repeat(64) };
@@ -103,10 +103,6 @@ describe("runtime release source and workflow provenance", () => {
   });
   it("requires a protected release branch to remain at the dispatched source", async () => {
     const f = fixture("production"); await f.client.source(); f.state.moved = true; await expect(f.client.source()).rejects.toThrow(/moved/);
-  });
-  it("refuses the retired Beta channel before reading any run", async () => {
-    const f = fixture("beta");
-    await expect(f.client.source()).rejects.toThrow(/Beta is retired/);
   });
   it.each(["failure", "old-attempt"])("refuses %s approval evidence for promotion", async change => {
     const f = fixture("production");

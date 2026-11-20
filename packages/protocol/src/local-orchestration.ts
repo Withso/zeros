@@ -193,7 +193,7 @@ export type LocalLinkKind = (typeof LOCAL_LINK_KINDS)[number];
 
 /** One URL scheme per release channel (mirrors DeepLinkScheme in the engine
  * runtime; kept literal so this package has no engine import). */
-export const LOCAL_LINK_SCHEMES = ["zeros", "zeros-alpha", "zeros-beta", "zeros-dev"] as const;
+export const LOCAL_LINK_SCHEMES = ["zeros", "zeros-alpha", "zeros-dev"] as const;
 export type LocalLinkScheme = (typeof LOCAL_LINK_SCHEMES)[number];
 
 /** Workspace numbers are permanent and never reused within an owner: local or an organization slug. */
@@ -221,7 +221,7 @@ const WORKSPACE_LINK_OWNER = /^[a-z0-9](?:[a-z0-9-]{0,98}[a-z0-9])?$/;
 /** Both stores keep numbers in a signed 32-bit integer column. */
 const MAX_WORKSPACE_NUMBER = 2_147_483_647;
 const NUMBERED_LINK =
-  /^(zeros(?:-alpha|-beta|-dev)?):\/\/([A-Za-z0-9-]{1,100})\/w\/([1-9][0-9]{0,9})(?:\?session=([^&#\s]+))?$/;
+  /^(zeros(?:-alpha|-dev)?):\/\/([A-Za-z0-9-]{1,100})\/w\/([1-9][0-9]{0,9})(?:\?session=([^&#\s]+))?$/;
 
 export function isWorkspaceNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value > 0 && value <= MAX_WORKSPACE_NUMBER;
@@ -260,6 +260,7 @@ export function formatWorkspaceLink(
 }
 
 export function formatLocalLink(scheme: LocalLinkScheme, kind: LocalLinkKind, id: string): string {
+  if (!LOCAL_LINK_SCHEMES.includes(scheme)) throw new Error("Unknown Zeros link scheme.");
   if (!LOCAL_LINK_ID.test(id)) throw new Error(`Invalid ${kind} id for a link.`);
   return `${scheme}://${kind}/${encodeURIComponent(id)}`;
 }
@@ -296,7 +297,7 @@ export function parseLocalLink(text: string): LocalLink | null {
   const trimmed = text.trim();
   const numbered = parseNumberedLink(trimmed);
   if (numbered) return numbered;
-  const match = /^(zeros(?:-alpha|-beta|-dev)?):\/\/(chat|workspace)\/([^/?#\s]+)$/.exec(trimmed);
+  const match = /^(zeros(?:-alpha|-dev)?):\/\/(chat|workspace)\/([^/?#\s]+)$/.exec(trimmed);
   if (!match) return null;
   let id: string;
   try {
@@ -308,10 +309,22 @@ export function parseLocalLink(text: string): LocalLink | null {
   return { scheme: match[1] as LocalLinkScheme, kind: match[2] as LocalLinkKind, id };
 }
 
+const RETIRED_SCHEME_PREFIX = "zeros-beta://";
+
+/** A well-formed link of a retired channel (`zeros-beta://`). It is never
+ * navigable; importers keep it as plain text instead of rejecting what holds it. */
+export function isRetiredLocalLink(text: string): boolean {
+  const trimmed = text.trim();
+  return trimmed.startsWith(RETIRED_SCHEME_PREFIX) && parseLocalLink(`zeros://${trimmed.slice(RETIRED_SCHEME_PREFIX.length)}`) !== null;
+}
+
 /** Ignore sentence punctuation after generated IDs; the caller filters links to its own release channel. */
 export function extractLocalLinks(text: string, limit = 64): LocalLink[] {
   const out: LocalLink[] = [];
   const seen = new Set<string>();
+  // Distinct retired links still count toward `limit`, exactly as they did when
+  // they were returned, so scanning stops no later than before the retirement.
+  let retired = 0;
   // Numbered first: `chat/w/3` is the organization `chat`'s workspace 3, not
   // a legacy chat whose id is `w`.
   // A number runs to its end (`w/31a` names no workspace, not w-31).
@@ -325,13 +338,16 @@ export function extractLocalLinks(text: string, limit = 64): LocalLink[] {
       end > 0 &&
       (candidate[end - 1] === "." || candidate[end - 1] === ":" || candidate[end - 1] === "-")
     ) end--;
-    const link = parseLocalLink(candidate.slice(0, end));
+    const trimmed = candidate.slice(0, end);
+    const isRetired = trimmed.startsWith(RETIRED_SCHEME_PREFIX);
+    const link = parseLocalLink(isRetired ? `zeros://${trimmed.slice(RETIRED_SCHEME_PREFIX.length)}` : trimmed);
     if (!link) continue;
-    const key = `${link.scheme}:${link.kind}:${link.id}`;
+    const key = `${isRetired ? "zeros-beta" : link.scheme}:${link.kind}:${link.id}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    out.push(link);
-    if (out.length >= limit) break;
+    if (isRetired) retired += 1;
+    else out.push(link);
+    if (out.length + retired >= limit) break;
   }
   return out;
 }

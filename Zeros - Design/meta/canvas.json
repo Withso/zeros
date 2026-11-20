@@ -69,6 +69,14 @@
         "np_changes_availability"
       ],
       "folder": "new-pages"
+    },
+    {
+      "id": "page_component_ux",
+      "title": "Component UX",
+      "frames": [
+        "component_identity_scope"
+      ],
+      "folder": "component-ux"
     }
   ],
   "frames": {
@@ -224,6 +232,15 @@
       "y": 1360,
       "width": 2134,
       "height": 1493
+    },
+    "component_identity_scope": {
+      "kind": "html",
+      "source": "component-ux/identity-and-scope.html",
+      "title": "Component identity — options and scope",
+      "x": 11100,
+      "y": 0,
+      "width": 1600,
+      "height": 1000
     },
     "cmp_checkbox": {
       "kind": "html",

@@ -21,6 +21,7 @@
 //   gh:device-code     { ... } (GitHub device-flow verification code)
 //   auth-signin-complete / auth-signin-error (main-owned WorkOS hosted flow)
 //   updater-status     { ... } (auto-updater progress)
+//   local-storage-progress { ... } (Settings → Local Storage sizes as measured)
 //   main-process-error { ... }
 //   browser-confirmation-request { ... } (trusted consequence prompt)
 //   browser-session-state { ... } (Zeros-owned browser activity)

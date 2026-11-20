@@ -96,6 +96,7 @@ interface DesignStyleEditorProps {
   motionProperties?: readonly string[];
   onOpenMotionTimeline: (property?: string, value?: string) => void;
   disabled?: boolean;
+  active?: boolean;
 }
 
 const BLEND_MODES = [
@@ -199,14 +200,16 @@ function LiveTransformSection(
   props: Omit<React.ComponentProps<typeof DesignTransformSection>, "value"> & {
     owner?: DesignLivePreviewOwner;
     confirmed: string;
+    active: boolean;
   },
 ) {
-  const { owner, confirmed, ...rest } = props;
+  const { owner, confirmed, active, ...rest } = props;
   const liveValue = useDesignLivePreviewValue(
     owner?.workspaceId ?? "",
     owner?.frame ?? "",
     owner?.nodeId ?? "",
     "transform",
+    active,
   );
   return (
     <DesignTransformSection
@@ -233,6 +236,7 @@ export function DesignStyleEditor({
   motionProperties = [],
   onOpenMotionTimeline,
   disabled = false,
+  active = true,
 }: DesignStyleEditorProps) {
   const commit = (styles: Record<string, string | null>, label: string) => {
     // Selects and segmented controls do not emit a separate drag/change
@@ -359,6 +363,7 @@ export function DesignStyleEditor({
           livePreviewOwner={livePreviewOwner}
           renderField={renderField}
           disabled={disabled}
+          active={active}
           frameSelected={frameSelected}
           layoutParents={layoutParents}
           selectionCount={selectionCount}
@@ -671,6 +676,7 @@ export function DesignStyleEditor({
   sections.transform = (
       <LiveTransformSection
         owner={livePreviewOwner}
+        active={active}
         confirmed={styleValue(details, "transform", "none")}
         details={details}
         disabled={disabled}
@@ -817,7 +823,7 @@ export function DesignStyleEditor({
   );
 
   return (
-    <DesignAddableSections selectionKey={details.oid}>
+    <DesignAddableSections selectionKey={details.oid} active={active}>
     <div data-design-style-editor className="flex flex-col">
       {designStyleSectionOrder(textLayer ? "text" : "other").map((id) =>
         sections[id] ? (

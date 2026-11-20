@@ -70,7 +70,8 @@ devices.
 next launch starts fresh. Zeros Dev is headless on macOS and Linux; use
 `pnpm electron:alpha` for the Mac app against Alpha, `pnpm alpha:probe` to
 measure Alpha, and `pnpm electron:local` for an account-free app without a
-backend.
+backend. `pnpm storage:inventory` lists, read-only, the folders left by retired
+and development identities and what each holds.
 
 Useful checks:
 

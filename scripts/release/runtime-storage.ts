@@ -160,7 +160,7 @@ export function runtimeReleaseStore(storage: CloudV2RuntimeStore, repository: st
     async qualification(sha256: string, runId: string, attempt: number) { return RuntimeQualification.parse(await getJson(qualificationKey(sha256, runId, attempt))); },
     async saveQualification(record: RuntimeQualification) { await immutableJson(qualificationKey(record.manifest.sha256, record.receipt.runId, record.receipt.runAttempt), record); },
     async saveReceipt(receipt: RuntimeReleaseReceipt) {
-      requireCheck(["alpha", "beta", "production"].includes(receipt.channel) && /^[1-9][0-9]{0,19}$/.test(receipt.runId) &&
+      requireCheck(["alpha", "production"].includes(receipt.channel) && /^[1-9][0-9]{0,19}$/.test(receipt.runId) &&
         Number.isSafeInteger(receipt.runAttempt) && receipt.runAttempt > 0 && receipt.runAttempt <= 10_000, "Runtime receipt identity is invalid");
       await immutableJson(`cloud-v2/runtime/releases/${receipt.channel}/${receipt.runId}/${receipt.runAttempt}.json`, receipt);
     },

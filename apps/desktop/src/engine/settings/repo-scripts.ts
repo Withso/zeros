@@ -1,19 +1,10 @@
-// ──────────────────────────────────────────────────────────
-// Repository lifecycle scripts from layered settings
-// ──────────────────────────────────────────────────────────
-//
-// Resolves a repo's inline lifecycle command (`scripts.setup` / `scripts.run`
-// / `scripts.archive`) from its layered TOML settings. The git lifecycle
-// (createWorkspace / archiveWorkspace) calls this to know what to run; the
-// shell execution itself lives in git/setup-hooks.ts (runInlineScript).
-// ──────────────────────────────────────────────────────────
-
 import { parseRunActions, type RunAction } from "@zeros/protocol/run-actions";
 
 import { opSettingsResolve } from "./ops";
 
 export type RepoScriptKind = "setup" | "run" | "archive";
 
+// Archive fails closed on invalid settings rather than skipping a configured hook.
 export function resolveArchiveScript(repoRoot: string) {
   const resolved = opSettingsResolve(repoRoot);
   if (resolved.warnings.some(warning => /scripts\.archive|file is malformed and was ignored/.test(warning))) {
@@ -26,10 +17,7 @@ export function resolveArchiveScript(repoRoot: string) {
   return { command, required, timeoutMs: typeof scripts?.archive_timeout_seconds === "number" ? scripts.archive_timeout_seconds * 1000 : 30_000 };
 }
 
-/** The repo's normalized run actions (per @zeros/protocol/run-actions: invalid
- *  entries skipped, exactly one default, legacy `scripts.run` migrated to one
- *  "run" action). Empty on any failure — a settings problem must never block
- *  the caller. */
+/** When there is no explicit run-action array, retain legacy scripts.run as the default; settings failures must not block the caller. */
 export function resolveRunActions(repoRoot: string): RunAction[] {
   if (!repoRoot) return [];
   try {
@@ -39,9 +27,7 @@ export function resolveRunActions(repoRoot: string): RunAction[] {
   }
 }
 
-/** The resolved inline command for `scripts.<kind>`, or "" when unset / on any
- *  failure (callers treat empty as "no script"). Never throws — a settings
- *  problem must never block creating or archiving a workspace. */
+/** For optional hooks, callers treat an empty command as absent even if settings could not be read. */
 export function resolveRepoScript(
   repoRoot: string,
   kind: RepoScriptKind,

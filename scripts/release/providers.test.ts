@@ -5,37 +5,38 @@ import { jsonClient, poll } from "./io";
 const workosEnv = { AUTH_ISSUER: "https://auth-api.example.com/", AUTH_JWKS_URL: "https://auth-api.example.com/sso/jwks/client_desktop",
   AUTH_WEB_CLIENT_ID: "client_web", AUTH_DESKTOP_CLIENT_ID: "client_desktop" };
 const sha = "a".repeat(40);
-const config = promotionConfig({ RELEASE_CHANNEL: "beta", RELEASE_SHA: sha, GITHUB_SHA: sha, RELEASE_BRANCH: "release/1.2.3",
+const config = promotionConfig({ RELEASE_CHANNEL: "production", RELEASE_SHA: sha, GITHUB_SHA: sha, RELEASE_BRANCH: "release/1.2.3",
   GITHUB_REPOSITORY: "example/zeros", GITHUB_RUN_ID: "1", GITHUB_RUN_ATTEMPT: "1", ZEROS_HOSTED_PROMOTION: "enabled",
   RAILWAY_DEPLOY_TOKEN: "fixture", PLANETSCALE_SERVICE_TOKEN_ID: "fixture", PLANETSCALE_SERVICE_TOKEN: "fixture", CLOUDFLARE_API_TOKEN: "fixture",
   RAILWAY_PROJECT_ID: "11111111-1111-4111-8111-111111111111", RAILWAY_ENVIRONMENT_ID: "22222222-2222-4222-8222-222222222222", RAILWAY_SERVICE_ID: "33333333-3333-4333-8333-333333333333",
-  PLANETSCALE_ORG: "example", PLANETSCALE_DATABASE: "zeros-control-plane-beta", PLANETSCALE_BRANCH: "main", CLOUDFLARE_ACCOUNT_ID: "c".repeat(32), CF_PAGES_APP_PROJECT: "zeros-web-beta", AUTH_PROVIDER: "workos" });
+  PLANETSCALE_ORG: "example", PLANETSCALE_DATABASE: "zeros-control-plane-production", PLANETSCALE_BRANCH: "main", CLOUDFLARE_ACCOUNT_ID: "c".repeat(32), CF_PAGES_APP_PROJECT: "zeros-web", CF_PAGES_OPS_PROJECT: "zeros-ops", AUTH_PROVIDER: "workos" });
 function fixture(railwayAuto = false, pagesAuto = false, staged: { unmergedChangesCount: number | null; stagedChanges: unknown } =
   { unmergedChangesCount: 0, stagedChanges: { id: "<empty>", patch: {} } }, settleReads = 0, pagesVars: Record<string, string | null> = {}) {
   let branch = "release/1.2.2", webBranch = branch, triggers: string[] = [], settling = 0;
   const calls: any[] = [], commands: any[] = [];
   let selectedWorker = {};
-  const project = () => ({ name: config.appProject, production_branch: webBranch, domains: ["app-beta.zeros.build"],
+  const project = (surface: "app" | "ops") => ({ name: surface === "app" ? config.appProject : config.opsProject,
+    production_branch: webBranch, domains: [new URL(surface === "app" ? config.app : config.ops!).hostname],
     source: { type: "github", config: { owner: "example", repo_name: "zeros", production_deployments_enabled: pagesAuto, preview_deployment_setting: "none" } },
     deployment_configs: { production: { env_vars: Object.fromEntries([
-      ...Object.entries(publicPagesEnvironment(config, "app", {})).filter(([k]) => !(k in pagesVars)),
+      ...Object.entries(publicPagesEnvironment(config, surface, {})).filter(([k]) => !(k in pagesVars)),
       ...Object.entries(pagesVars).filter((entry): entry is [string, string] => entry[1] !== null),
     ].map(([k,v]) => [k,{value:v}])) } },
     canonical_deployment: { id: "page1", environment: "production", latest_stage: { status: "success" }, deployment_trigger: { metadata: { commit_hash: sha, branch: config.branch } } } });
   const fetcher: typeof fetch = async (url, init) => {
     const request = init?.body ? JSON.parse(String(init.body)) : {};
     calls.push({ url, ...request, method: init?.method });
-    if (String(url).endsWith("zeros-deployment.json")) return Response.json({ version: 1, commitSha: sha, surface: "app" });
+    if (String(url).endsWith("zeros-deployment.json")) return Response.json({ version: 1, commitSha: sha, surface: new URL(String(url)).hostname.startsWith("ops") ? "ops" : "app" });
     if (String(url).includes("cloudflare")) {
       if (init?.method === "PATCH") webBranch = request.production_branch;
-      return Response.json({ success: true, result: project() });
+      return Response.json({ success: true, result: project(String(url).includes(`/projects/${config.opsProject}`) ? "ops" : "app") });
     }
     const q = request.query;
     if (q.includes("PromotionState")) return Response.json({ data: {
       serviceInstanceAutoDeployStatus: { enabled: railwayAuto || triggers.length > 0 },
-      environment: { id: config.environmentId, name: "beta", projectId: config.projectId, unmergedChangesCount: staged.unmergedChangesCount,
+      environment: { id: config.environmentId, name: "production", projectId: config.projectId, unmergedChangesCount: staged.unmergedChangesCount,
         config: { services: { [config.serviceId]: { source: { repo: config.repository, rootDirectory: "apps/control-plane", checkSuites: false, branch } } } } },
-      serviceInstance: { serviceId: config.serviceId, environmentId: config.environmentId, domains: { customDomains: [{ domain: "api-beta.zeros.build" }] } },
+      serviceInstance: { serviceId: config.serviceId, environmentId: config.environmentId, domains: { customDomains: [{ domain: "api.zeros.build" }] } },
       environmentStagedChanges: settling > 0 && settling-- ? { id: "settling", patch: { services: {} } } : staged.stagedChanges,
     } });
     if (q.includes("PromotionCommit")) { branch = request.variables.patch.services[config.serviceId].source.branch; triggers = ["recreated"]; settling = settleReads; return Response.json({ data: { environmentPatchCommit: "commit1" } }); }
@@ -75,7 +76,7 @@ describe("release provider adapters", () => {
     await expect(f.providers.inspect()).rejects.toThrow("staged changes");
     expect(f.calls.every(row => !row.query || row.query.startsWith("query"))).toBe(true);
   });
-  it("retargets Beta with deploys suppressed, then deploys only the event SHA", async () => {
+  it("retargets a release branch with deploys suppressed, then deploys only the event SHA", async () => {
     const f = fixture(); await f.providers.retarget(); const id = await f.providers.deploy(); await f.providers.waitDeployment(id);
     expect(f.calls.find(row => row.query?.includes("PromotionCommit")).query).toContain("skipDeploys:true");
     expect(f.calls.find(row => row.query?.includes("PromotionCommit")).query).toContain("environmentPatchCommit(");
@@ -118,7 +119,7 @@ describe("release provider adapters", () => {
 
   it("does not accept HTTP 200 until SHA, ledger manifest and maintenance all match", async () => {
     const manifest = { head: "0112_test.sql", sha256: "e".repeat(64) };
-    const ready = { version: 1, ready: true, sourceSha: sha, channel: "beta", maintenance: false,
+    const ready = { version: 1, ready: true, sourceSha: sha, channel: "production", maintenance: false,
       migrations: { state: "current", head: manifest.head, expectedHead: manifest.head, manifestSha256: manifest.sha256 },
       cloud: { enabled: false, ready: true, state: "disabled" }, worker: null };
     const replies = [{ ...ready, sourceSha: "f".repeat(40) }, { ...ready, maintenance: true },

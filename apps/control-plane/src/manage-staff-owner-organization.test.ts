@@ -6,9 +6,9 @@ const actorUserId = "22222222-2222-4222-8222-222222222222";
 const ownerOrganizationId = "33333333-3333-4333-8333-333333333333";
 const base = {
   databaseUrl: "postgresql://operator@database.test/postgres",
-  channel: "beta", execute: false, subjectUserId, actorUserId,
+  channel: "alpha", execute: false, subjectUserId, actorUserId,
   expectedEmail: "owner@example.test", nextRole: "platform_owner",
-  reason: "Bootstrap the reviewed Beta organization owner.",
+  reason: "Bootstrap the reviewed Alpha organization owner.",
 };
 
 describe("optional staff organization ownership requirement", () => {

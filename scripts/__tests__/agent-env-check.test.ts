@@ -55,10 +55,8 @@ function network(overrides: Record<string, Reply> = {}, railwayEnvironment = "al
     "api.cloudflare.com/client/v4/user/tokens/verify": { status: 200, body: { result: { status: "active", expires_on: "2026-12-24T00:00:00Z" } } },
     [`api.cloudflare.com/client/v4/accounts/${VALUES.CLOUDFLARE_ACCOUNT_ID}/pages/projects`]: { status: 200, body: { success: true, result: [] } },
     [`${R2_HOST}/zeros-cloud-workspaces-alpha`]: { status: 200 },
-    [`${R2_HOST}/zeros-cloud-workspaces-beta`]: { status: 403 },
     [`${R2_HOST}/zeros-cloud-workspaces-production`]: { status: 403 },
     [`${PLANETSCALE_DATABASES}/zeros-control-plane-alpha`]: { status: 200, body: {} },
-    [`${PLANETSCALE_DATABASES}/zeros-control-plane-beta`]: { status: 404 },
     [`${PLANETSCALE_DATABASES}/zeros-control-plane-production`]: { status: 404 },
     "boat.dev/api/v1/api-keys": { status: 200, body: { apiKeys: [{ name: "zeros-agent-dev", expiresAt: "2026-12-24T00:00:00Z", scope: { actions: ["sandbox.read", "exec"] } }] } },
     "api.workos.com/user_management/users": { status: 200, body: { data: [] } },
@@ -195,17 +193,17 @@ describe("agent credential check", () => {
     });
     const output = redact(formatResults(results, ".env.agent"), VALUES);
     for (const key of SECRET_KEYS) if (VALUES[key]) expect(output).not.toContain(VALUES[key]);
-    expect(output).toContain("lists zeros-cloud-workspaces-alpha; Beta and Production buckets refused");
+    expect(output).toContain("lists zeros-cloud-workspaces-alpha; Production bucket refused");
   });
 
-  it("warns when a key also reaches Beta or Production", async () => {
+  it("warns when a key also reaches Production", async () => {
     const { deps } = network({
       [`${PLANETSCALE_DATABASES}/zeros-control-plane-production`]: { status: 200, body: {} },
-      [`${R2_HOST}/zeros-cloud-workspaces-beta`]: { status: 200 },
+      [`${R2_HOST}/zeros-cloud-workspaces-production`]: { status: 200 },
     }, "production");
     const results = byId(await runProviderChecks(VALUES, deps));
     expect(results.planetscale).toMatchObject({ status: "warn", detail: "reads zeros-control-plane-alpha, but also zeros-control-plane-production" });
-    expect(results.r2).toMatchObject({ status: "warn", detail: "lists zeros-cloud-workspaces-alpha, but also zeros-cloud-workspaces-beta" });
+    expect(results.r2).toMatchObject({ status: "warn", detail: "lists zeros-cloud-workspaces-alpha, but also zeros-cloud-workspaces-production" });
     expect(results.railway).toMatchObject({ status: "warn", detail: "project token for the production environment, not alpha" });
   });
 

@@ -46,7 +46,7 @@ export type CutoverJournal = {
 
 const id = z.string().regex(/^[a-zA-Z0-9_-]{1,128}$/);
 export const CutoverReceipt = z.object({
-  version: z.literal(1), status: z.literal("cutover-complete"), channel: z.enum(["alpha", "beta", "production"]),
+  version: z.literal(1), status: z.literal("cutover-complete"), channel: z.enum(["alpha", "production"]),
   sourceSha: z.string().regex(SHA), branch: z.string(), repository: z.string(),
   runId: z.string().regex(/^\d+$/), runAttempt: z.string().regex(/^\d+$/),
   approvals: z.array(z.string()), migration: MigrationReceipt, maintenanceDeploymentId: id, railwayDeploymentId: id,

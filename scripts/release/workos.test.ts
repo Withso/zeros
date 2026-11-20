@@ -29,7 +29,7 @@ function fixture(change: (response: Response, surface: string) => Response = res
   return { fetcher, requests };
 }
 describe("post-Pages WorkOS handshake verification", () => {
-  it.each(["alpha", "beta", "production"] as const)("qualifies the %s desktop client and exact channel callback as well as browser sign-in", async channel => {
+  it.each(["alpha", "production"] as const)("qualifies the %s desktop client and exact channel callback as well as browser sign-in", async channel => {
     const app = `https://app${channel === "production" ? "" : `-${channel}`}.zeros.build`;
     const f = fixture();
     await verifyWorkOS({ ...config, channel, app, surfaces: ["app"] }, workosEnv, f.fetcher);

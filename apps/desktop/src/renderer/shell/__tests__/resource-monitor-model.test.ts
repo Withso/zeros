@@ -460,7 +460,7 @@ describe("Mac context and other Zeros apps", () => {
   it("sorts other Zeros apps like the process tree and reports them in the fallback copy", () => {
     const nodes = buildOtherAppNodes(
       [
-        { name: "Zeros Beta", processCount: 2, cpuPercent: 1, memoryBytes: 900 },
+        { name: "Zeros Dev", processCount: 2, cpuPercent: 1, memoryBytes: 900 },
         { name: "Zeros Alpha", processCount: 4, cpuPercent: 6.4, memoryBytes: 350 },
       ],
       "cpu",
@@ -468,7 +468,7 @@ describe("Mac context and other Zeros apps", () => {
     );
     expect(nodes.map((node) => [node.name, node.kind, node.count])).toEqual([
       ["Zeros Alpha", "other-app", 4],
-      ["Zeros Beta", "other-app", 2],
+      ["Zeros Dev", "other-app", 2],
     ]);
     const report = copyResourceReport({
       sampledAt: 1,

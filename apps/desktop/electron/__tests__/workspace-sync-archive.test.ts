@@ -18,7 +18,7 @@ describe("cloud archive through the passive workspace read and native sync manag
   afterEach(async () => { await rm(root, { recursive: true, force: true }); });
 
   async function fixture(options: { viewerId?: string; creatorUserId?: string | null } = {}) {
-    const folder = path.join(root, "mirror"), channel = path.join(root, "zeros-beta"), settings = new Map<string, string>();
+    const folder = path.join(root, "mirror"), channel = path.join(root, "zeros-alpha"), settings = new Map<string, string>();
     await mkdir(folder);
     await SyncEngine.open(folder, { workspaceId, accountId: "account-a", deviceId: device.deviceId });
     await mkdir(path.join(folder, ".context", "attachments"), { recursive: true });

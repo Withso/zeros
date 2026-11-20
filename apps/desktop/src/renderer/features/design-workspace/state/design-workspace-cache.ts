@@ -470,7 +470,7 @@ async function runLocalDesignMutation<T>(
   workspaceId: string,
   mutation: (assertOwner: () => void) => Promise<T>,
   kind: "edit" | "history" = "edit",
-  recover?: () => void,
+  recover?: (assertOwner: () => void) => void | Promise<void>,
   presentation?: LocalEditPresentation,
 ): Promise<T> {
   const owner = designMutationOwner(workspaceId);
@@ -487,10 +487,14 @@ async function runLocalDesignMutation<T>(
   // Recovery is part of the failed operation, so the next queued step never
   // starts from what that operation painted or predicted.
   const result = recover
-    ? attempt.catch((error: unknown) => {
-        recover();
-        throw error;
-      })
+    ? attempt.catch(async (error: unknown) => {
+      try {
+        await recover(() => assertDesignMutationOwner(workspaceId, owner));
+      } catch {
+        // Preserve the mutation failure; preview recovery is best-effort.
+      }
+      throw error;
+    })
     : attempt;
   const tail = result.then(
     () => undefined,
@@ -2331,6 +2335,13 @@ export async function moveDesignFramesCached(
 }
 
 type DesignEditIntent = Omit<DesignTransaction, "documentId" | "baseRevision">;
+type DesignEditIntentContext = { assertCurrent: () => void };
+type DesignEditIntentFactory = (
+  context: DesignEditIntentContext,
+) => DesignEditIntent | null | Promise<DesignEditIntent | null>;
+type DesignEditRecovery = (
+  context: DesignEditIntentContext,
+) => void | Promise<void>;
 interface DesignMeasuredMovement {
   movementGuard: DesignMovementGuard;
   isCurrent: () => boolean;
@@ -2348,29 +2359,54 @@ export function applyDesignEditCached(
     file,
     sourceVersion,
   }: Pick<DesignFrameDocumentWire, "file" | "sourceVersion">,
-  intent: DesignEditIntent | (() => DesignEditIntent),
+  intent: DesignEditIntent | DesignEditIntentFactory,
   measured?: DesignMeasuredMovement,
-  options?: { structurePreviewId?: string },
+  options?: { structurePreviewId?: string; recover?: DesignEditRecovery },
 ): Promise<DesignApiMutationReplyWire> {
-  return applyPreparedDesignTransactionCached(workspaceId, file, async () => {
-    const resolved = typeof intent === "function" ? intent() : intent;
+  const intentFactory: DesignEditIntentFactory | null =
+    typeof intent === "function" ? intent : null;
+  const staticIntent: DesignEditIntent | null =
+    typeof intent === "function" ? null : intent;
+  let assertPreparedIntentCurrent: (() => void) | undefined;
+  return applyPreparedDesignTransactionCached(workspaceId, file, async ({ assertCurrent }) => {
+    const preparedSourceVersion = intentFactory && !measured
+      ? currentFrameSourceVersion(workspaceId, file)
+      : undefined;
+    const assertIntentCurrent = () => {
+      assertCurrent();
+      if (
+        intentFactory &&
+        !measured &&
+        currentFrameSourceVersion(workspaceId, file) !== preparedSourceVersion
+      )
+        throw new Error(`Design frame changed before the mutation: ${file}. Re-read it and retry.`);
+    };
+    assertPreparedIntentCurrent = intentFactory ? assertIntentCurrent : undefined;
+    const resolved = intentFactory
+      ? await intentFactory({ assertCurrent: assertIntentCurrent })
+      : staticIntent;
+    if (intentFactory) assertIntentCurrent();
+    if (!resolved) return null;
     refuseDesignComponentPartWrite(resolved.operations);
     const key = designFoundationKey(
       workspaceId,
       file,
-      measured ? sourceVersion : resolveLocalFrameSourceVersion(workspaceId, file, sourceVersion),
+      measured
+        ? sourceVersion
+        : preparedSourceVersion ?? resolveLocalFrameSourceVersion(workspaceId, file, sourceVersion),
     );
     const foundation = await designFoundationCache.load(
       key,
       () => fetchDesignFoundation(key),
       { maxAgeMs: Number.POSITIVE_INFINITY },
     );
+    if (intentFactory) assertIntentCurrent();
     return {
       ...resolved,
       documentId: foundation.summary.documentId,
       baseRevision: foundation.summary.revision,
     };
-  }, measured, undefined, options?.structurePreviewId);
+  }, measured, undefined, options?.structurePreviewId, options?.recover, () => assertPreparedIntentCurrent?.());
 }
 
 export function applyDesignTransactionCached(
@@ -2401,26 +2437,52 @@ export function applyDesignTransactionCached(
 async function applyPreparedDesignTransactionCached(
   workspaceId: string,
   frame: string,
-  prepare: () => Promise<DesignTransaction>,
+  prepare: (context: DesignEditIntentContext) => Promise<DesignTransaction | null>,
   measured?: DesignMeasuredMovement,
   runtimeInserts?: readonly DesignRuntimeNodeInsert[],
   structurePreviewId?: string,
+  recover?: DesignEditRecovery,
+  assertPreparedIntentCurrent?: () => void,
 ): Promise<DesignApiMutationReplyWire> {
   const presentation: LocalEditPresentation = { frame, ready: false };
+  const recoverPreview = async (assertOwner: () => void) => {
+    if (!recover) return;
+    const assertCurrent = () => {
+      assertOwner();
+      if (measured && (!measured.isCurrent() || currentFrameSourceVersion(workspaceId, frame) !== measured.movementGuard.sourceVersion))
+        throw new Error("The measured movement changed or retired. Select the layer again before moving it.");
+    };
+    try {
+      assertCurrent();
+      await recover({ assertCurrent });
+    } catch {
+      assertCurrent();
+    }
+    assertCurrent();
+  };
   return runLocalDesignMutation(workspaceId, async (assertOwner) => {
     const assertCurrent = () => {
       assertOwner();
       if (measured && (!measured.isCurrent() || currentFrameSourceVersion(workspaceId, frame) !== measured.movementGuard.sourceVersion))
         throw new Error("The measured movement changed or retired. Select the layer again before moving it.");
     };
-    assertCurrent();
-    const transaction = await prepare();
-    refuseDesignComponentPartWrite(transaction.operations);
-    const visual = transactionRuntimeAdoption(transaction, runtimeInserts, structurePreviewId);
-    presentation.ready = !!visual && !visual.patch?.tokens && !visual.patch?.keyframes;
-    assertCurrent();
+    const assertPreparedCurrent = () => {
+      assertCurrent();
+      assertPreparedIntentCurrent?.();
+    };
+    const prepareTransaction = async () => {
+      assertCurrent();
+      presentation.ready = false;
+      const transaction = await prepare({ assertCurrent });
+      if (!transaction) return null;
+      refuseDesignComponentPartWrite(transaction.operations);
+      const visual = transactionRuntimeAdoption(transaction, runtimeInserts, structurePreviewId);
+      presentation.ready = !!visual && !visual.patch?.tokens && !visual.patch?.keyframes;
+      assertCurrent();
+      return transaction;
+    };
     const revisionKey = frameMutationKey(workspaceId, frame);
-    const execute = async () => {
+    const execute = async (transaction: DesignTransaction) => {
       const baseRevision = measured ? transaction.baseRevision : await resolveFoundationBaseRevision(
         workspaceId,
         frame,
@@ -2435,7 +2497,7 @@ async function applyPreparedDesignTransactionCached(
         designFrameRuntime(workspaceId, frame)?.sourceVersion;
       const beforeSnapshot = designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data;
       const beforeState = historyStateKey(beforeSnapshot);
-      assertCurrent();
+      assertPreparedCurrent();
       const result = measured
         ? await designApplyTransaction(workspaceId, frame, rebasedTransaction, false, measured.movementGuard)
         : await designApplyTransaction(workspaceId, frame, rebasedTransaction);
@@ -2513,22 +2575,31 @@ async function applyPreparedDesignTransactionCached(
       return result;
     };
     try {
-      return await execute();
+      const transaction = await prepareTransaction();
+      return transaction ? await execute(transaction) : { result: null };
     } catch (error) {
       if (measured || !isStaleDesignGenerationError(error)) throw error;
+      await recoverPreview(assertOwner);
       // Refresh first so the retry opens the foundation for the engine's
       // current generation, then let the stale flag re-resolve the base
-      // revision. The rejected transaction never applied, so one replay
-      // against the fresh document is exactly the user's intended edit.
+      // revision. Preparation and preview recovery both stay in the shared
+      // mutation lane, so the rejected preview cannot survive a retry no-op.
       try {
         await refreshDesignWorkspaceSnapshot(workspaceId);
       } catch {
         throw error;
       }
       markFoundationRevisionStale(workspaceId, frame);
-      return await execute();
+      const transaction = await prepareTransaction();
+      return transaction ? await execute(transaction) : { result: null };
     }
-  }, "edit", undefined, presentation);
+  }, "edit", recover ? async (assertOwner) => {
+    try {
+      await recoverPreview(assertOwner);
+    } catch {
+      // The original failure remains authoritative and switched owners are not repainted.
+    }
+  } : undefined, presentation);
 }
 
 /** An append is adoptable only through the structured insert its author

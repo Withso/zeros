@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 
+import { designComponentSlotNodeId } from "@zeros/protocol/design-runtime";
+
 import {
   assertSafeDesignHtmlDocument,
   assertSafeDesignHtmlFragment,
@@ -173,6 +175,23 @@ describe("HTML source adapter", () => {
     expect(
       mutateDesignNodeAttributeSource(attributed, "card", "aria-label", null),
     ).toBe(text);
+  });
+
+  it("edits only direct text spans for a default-slot target", () => {
+    const source = '<zd-card data-oid="host">before &amp;<!--keep--><span data-oid="default">nested &amp; text</span>middle <b data-oid="named" slot="actions">named &amp; text</b> after</zd-card>';
+    expect(
+      mutateDesignNodeTextSource(source, designComponentSlotNodeId("host", ""), "new & <text>"),
+    ).toBe('<zd-card data-oid="host">new &amp; &lt;text&gt;<!--keep--><span data-oid="default">nested &amp; text</span><b data-oid="named" slot="actions">named &amp; text</b></zd-card>');
+  });
+
+  it("inserts default-slot text before children and rejects other virtual slots", () => {
+    const source = '<zd-card data-oid="host"><!--keep--><span data-oid="child">nested</span></zd-card>';
+    expect(mutateDesignNodeTextSource(source, designComponentSlotNodeId("host", ""), "first"))
+      .toBe('<zd-card data-oid="host">first<!--keep--><span data-oid="child">nested</span></zd-card>');
+    expect(() => mutateDesignNodeTextSource(source, designComponentSlotNodeId("host", "actions"), "no"))
+      .toThrow(/non-default component slot/);
+    expect(() => mutateDesignNodeTextSource(source, "host", "no"))
+      .toThrow(/contains element children/);
   });
 
   it("validates inserted asset URLs relative to a page frame and rejects escapes", () => {

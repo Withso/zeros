@@ -53,7 +53,7 @@ describe("Alpha runtime canary gate0", () => {
       expect(JSON.stringify(proof) + f.logs.join("\n")).not.toContain(secret);
   });
 
-  it.each([{ runtimeCanaryAdmission: undefined }, { channel: "beta" }, { ready: false }, { sourceSha: "e".repeat(40) },
+  it.each([{ runtimeCanaryAdmission: undefined }, { channel: "production" }, { ready: false }, { sourceSha: "e".repeat(40) },
     { worker: { sha256: "e".repeat(64) } }, { cloud: { enabled: false, ready: true, state: "disabled" } }])(
     "refuses an unsupported or changed deployment before creating a fixture session: %j", async patch => {
       const f = fixture(); Object.assign(f.identity, patch);

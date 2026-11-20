@@ -356,7 +356,7 @@ export class LocalTransport implements Transport {
    *  candidate is busy or its traffic is routed to a stale inherited socket.
    *
    *  The in-process nonce check proves early socket ownership only. It cannot
-   *  claim final readiness: in beta.84 it passed, then a later native FSEvents
+   *  claim final readiness: in a shipped build it passed, then a later native FSEvents
    *  watcher deadlocked Bun's compiled event loop. The independent Electron
    *  host therefore verifies the same nonce after the manifest is published. */
   async start(): Promise<void> {

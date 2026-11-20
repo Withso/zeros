@@ -79,9 +79,9 @@ export async function runDesignFieldMarksSmoke({ page, check }) {
   await page.keyboard.press("Enter");
   await card.waitFor();
   await card.locator('[data-design-card-action="css"]').click();
-  await expect(page.getByRole("button", { name: "CSS", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByRole("tab", { name: "CSS", exact: true })).toHaveAttribute("aria-selected", "true");
   check("Edit in CSS shows the CSS tab", (await card.count()) === 0);
-  await page.getByRole("button", { name: "Style", exact: true }).click();
+  await page.getByRole("tab", { name: "Style", exact: true }).click();
 
   // Forced: a lock, Forced by the rule, and the agent.
   await layer("home-legacy").click();

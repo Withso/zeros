@@ -46,6 +46,23 @@ beforeEach(async () => {
 type StructureWindow = Window & { structureRequest(method: string, args: unknown): Promise<any> };
 
 describe("in-place structural generation adoption", () => {
+  it.each(["named", "default"])("reloads source for a %s slot reset instead of adopting an empty rendered slot", async kind => {
+    const result = await page.evaluate(async kind => {
+      const root = document.querySelector('[data-oid="root"]')!;
+      root.innerHTML = '<zd-qa-card data-oid="instance-a" data-zd-instance="1" zd-variant="compact"><article data-zd-part="card-root">' +
+        '<div data-zd-part="content-part" data-zd-slot="content"><p data-oid="supplied-content" slot="content">Supplied A content</p></div>' +
+        '<footer data-zd-part="footer-part">Supplied footer text <strong data-oid="supplied-inline">and element</strong><!-- preserve footer comment --></footer></article></zd-qa-card>';
+      const before = root.innerHTML;
+      let refused = false;
+      try {
+        await (window as unknown as StructureWindow).structureRequest("commitStructure", { updates: [], nextSourceVersion: "b".repeat(24),
+          patch: { structure: [{ type: "delete", nodeId: kind === "named" ? "supplied-content" : "supplied-inline" }] } });
+      } catch { refused = true; }
+      return { refused, unchanged: root.innerHTML === before, generation: (window as unknown as { __zerosDesignSourceVersion: string }).__zerosDesignSourceVersion };
+    }, kind);
+    expect(result).toEqual({ refused: true, unchanged: true, generation: "a".repeat(24) });
+  });
+
   it("bounds the total projected document before admitting a copy", async () => {
     const result = await page.evaluate(async () => {
       const root = document.querySelector('[data-oid="root"]')!;

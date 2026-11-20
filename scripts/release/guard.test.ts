@@ -3,19 +3,19 @@ import { writeFile } from "node:fs/promises";
 import path from "node:path";
 import { disabledGuard, publicIdentity } from "./guard";
 import { classifyChanges } from "./source";
-import { githubClient, validateBetaReceipt } from "./github";
+import { githubClient } from "./github";
 const sha = "a".repeat(40);
-function receipt() { return { version: 1, status: "success", channel: "beta", sourceSha: sha, branch: "release/1.2.3", repository: "example/zeros", runId: "1", runAttempt: "1",
-  migration: { mode: "execute", database: "zeros-control-plane-beta", branch: { name: "main", production: true }, backup: { id: "backup", state: "success" },
+function receipt() { return { version: 1, status: "success", channel: "production", sourceSha: sha, branch: "release/1.2.3", repository: "example/zeros", runId: "1", runAttempt: "1",
+  migration: { mode: "execute", database: "zeros-control-plane-production", branch: { name: "main", production: true }, backup: { id: "backup", state: "success" },
     controlledApprovals: [], pendingMigrations: [], applied: [], ledger: "verified", role: { deleted: true } }, railwayDeploymentId: "deployment",
-  backend: { version: 1, ready: true, sourceSha: sha, channel: "beta", maintenance: false,
+  backend: { version: 1, ready: true, sourceSha: sha, channel: "production", maintenance: false,
     migrations: { state: "current", head: "0112_test.sql", expectedHead: "0112_test.sql", manifestSha256: "b".repeat(64) },
     cloud: { enabled: false, ready: true, state: "disabled" }, worker: null },
-  pages: [{ id: "pages", surface: "app" }], completedAt: new Date().toISOString() }; }
-const run = { id: 1, run_attempt: 1, conclusion: "success", event: "push", head_sha: sha, head_branch: "release/1.2.3", path: ".github/workflows/release-beta.yml", repository: { full_name: "example/zeros" } };
+  pages: [{ id: "pages", surface: "app" }, { id: "ops-pages", surface: "ops" }], completedAt: new Date().toISOString() }; }
+const run = { id: 1, run_attempt: 1, conclusion: "success", event: "workflow_dispatch", head_sha: sha, head_branch: "release/1.2.3", path: ".github/workflows/release.yml", repository: { full_name: "example/zeros" } };
 const config = { sourceSha: sha, branch: "release/1.2.3", repository: "example/zeros" };
 describe("rollout and promotion evidence", () => {
-  it.each(["alpha", "beta", "production"] as const)("withholds a valid %s identity on HTTP 503", async channel => {
+  it.each(["alpha", "production"] as const)("withholds a valid %s identity on HTTP 503", async channel => {
     const fetcher = vi.fn<typeof fetch>(async () => Response.json({ ...liveIdentity(), channel }, { status: 503 }));
     expect(await publicIdentity(channel, fetcher)).toEqual({ present: true, identity: null });
   });
@@ -26,12 +26,12 @@ describe("rollout and promotion evidence", () => {
     expect(classifyChanges([migrationFile]).migrations).toBe(true);
     expect(classifyChanges(["apps/cloud-worker/src/worker.ts"]).migrations).toBe(false);
   });
-  it("accepts only the successful exact-SHA Beta workflow's own receipt", () => {
-    expect(validateBetaReceipt(receipt(), run, config, hostedJobs).channel).toBe("beta");
-    for (const patch of [{ conclusion: "failure" }, { head_sha: "c".repeat(40) }, { path: ".github/workflows/other.yml" }, { event: "pull_request" }, { run_attempt: 0 }])
-      expect(() => validateBetaReceipt(receipt(), { ...run, ...patch }, config, hostedJobs)).toThrow();
+  it("accepts only the exact-SHA Production run's own hosted receipt", async () => {
+    expect((await receiptClient().client.ownReceipt("production", "1")).channel).toBe("production");
+    for (const patch of [{ head_sha: "c".repeat(40) }, { path: ".github/workflows/other.yml" }, { event: "push" }, { run_attempt: 0 }])
+      await expect(receiptClient({ run: patch }).client.ownReceipt("production", "1")).rejects.toThrow();
     for (const patch of [{ channel: "alpha" }, { sourceSha: "c".repeat(40) }, { status: "disabled" }, { pages: [] }, { runId: "2" }])
-      expect(() => validateBetaReceipt({ ...receipt(), ...patch }, run, config, hostedJobs)).toThrow();
+      await expect(receiptClient({ receipt: { ...receipt(), ...patch } }).client.ownReceipt("production", "1")).rejects.toThrow();
   });
   it("refuses candidate publication from a ready rollback identity ahead of its packaged head", async () => {
     const identity = liveIdentity(), aheadManifest = { head: "0113_future_expand.sql", sha256: "e".repeat(64) };
@@ -51,8 +51,27 @@ const migrationFile = "apps/control-plane/migrations/0112_test.sql";
 const workerFile = "apps/desktop/src/engine/index.ts";
 const manifest = { head: "0112_test.sql", sha256: "b".repeat(64) };
 const baselineSha = "1".repeat(40);
-const hostedJobs = [{ run_id: 1, run_attempt: 1, head_sha: sha, name: "Hosted promotion (beta) / Hosted mutation", status: "completed", conclusion: "success",
+const hostedJobs = [{ run_id: 1, run_attempt: 1, head_sha: sha, name: "Hosted promotion (production) / Hosted mutation", status: "completed", conclusion: "success",
   steps: [{ name: "Provider preflight and ordered promotion", conclusion: "success" }, { name: "Save success receipt", conclusion: "success" }] }];
+/** The real hosted-receipt reader over a fake GitHub API and `gh run download`. */
+function receiptClient(options: { run?: object; receipt?: unknown; jobs?: unknown[] } = {}) {
+  const routes: string[] = [];
+  const client = githubClient(config, { GH_TOKEN: "fake-token" }, {
+    fetch: async input => {
+      const route = String(input); routes.push(route);
+      if (route.endsWith("/actions/runs/1")) return Response.json({ ...run, ...options.run });
+      if (route.includes("/artifacts?")) return Response.json({ artifacts: [{ name: `hosted-promotion-production-${sha}`, expired: false, workflow_run: { head_sha: sha } }] });
+      if (route.includes("/jobs?")) return Response.json({ jobs: options.jobs ?? hostedJobs });
+      throw new Error("Unexpected API route");
+    },
+    command: async (file, args, commandOptions) => {
+      expect(file).toBe("gh"); expect(args).not.toContain("fake-token"); expect(commandOptions?.env?.GH_TOKEN).toBe("fake-token");
+      await writeFile(path.join(args[args.indexOf("--dir") + 1], "hosted-receipt.json"), JSON.stringify(options.receipt ?? receipt()));
+      return "";
+    },
+  });
+  return { client, routes };
+}
 function liveIdentity() { return { ...receipt().backend, channel: "alpha",
   cloud: { enabled: true, ready: true, state: "healthy" } }; }
 function fakeIdentity(value: unknown, pagesSha?: string, receipt = true) {
@@ -135,7 +154,7 @@ describe("disabled promotion guard", () => {
     }
   });
   it("fails closed on absent, malformed, wrong-channel or unready identities with exact operator steps", async () => {
-    for (const identity of [null, {}, { ...liveIdentity(), version: 2 }, { ...liveIdentity(), channel: "beta" },
+    for (const identity of [null, {}, { ...liveIdentity(), version: 2 }, { ...liveIdentity(), channel: "production" },
       { ...liveIdentity(), maintenance: true }, { ...liveIdentity(), ready: false },
       { ...liveIdentity(), migrations: { ...liveIdentity().migrations, state: "pending" } }]) {
       const result = await disabledGuard([migrationFile], candidate, fakeIdentity(identity));
@@ -149,7 +168,7 @@ describe("disabled promotion guard", () => {
   });
 
   it("uses each channel's fixed public origin without provider authority", async () => {
-    for (const channel of ["alpha", "beta", "production"] as const) {
+    for (const channel of ["alpha", "production"] as const) {
       const deps = fakeIdentity({ ...liveIdentity(), channel });
       expect((await disabledGuard([migrationFile], { ...candidate, channel }, deps)).blocked).toBe(false);
       expect(deps.fetch.mock.calls[0][0]).toBe(`https://api${channel === "production" ? "" : `-${channel}`}.zeros.build/v1/release-identity`);
@@ -177,7 +196,7 @@ describe("V6 channel history regressions", () => {
     return { ...fakeIdentity(null), channelBaseline: async () => ({ tag: "alpha", sourceSha: baseSha }),
       migrationManifest: async (source?: string) => source === baseSha && schemaChanged ? old : manifest };
   }
-  it.each([["dispatch", "production"], ["first-push", "beta"]] as const)("allows %s with no endpoint when the published channel schema is unchanged", async (_event, channel) => {
+  it.each([["dispatch", "production"], ["first-push", "alpha"]] as const)("allows %s with no endpoint when the published channel schema is unchanged", async (_event, channel) => {
     expect(await disabledGuard([migrationFile, workerFile], { ...candidate, channel }, history())).toMatchObject({ blocked: false, migrations: false });
     expect((await disabledGuard([migrationFile, workerFile], { ...candidate, channel }, history(true))).blocked).toBe(true);
   });
@@ -201,34 +220,21 @@ describe("V6 channel history regressions", () => {
     expect((await disabledGuard([], candidate, deps)).blocked).toBe(true);
   });
 
-  it("accepts Beta's earlier hosted attempt only with that attempt's successful hosted job", () => {
-    const jobs = [{ run_id: 1, run_attempt: 1, head_sha: sha, name: "Hosted promotion (beta) / Hosted mutation", status: "completed", conclusion: "success",
-      steps: [{ name: "Provider preflight and ordered promotion", conclusion: "success" }, { name: "Save success receipt", conclusion: "success" }] }];
-    expect(validateBetaReceipt(receipt(), { ...run, run_attempt: 2 }, config, jobs).runAttempt).toBe("1");
+  it("accepts an earlier hosted attempt only with that attempt's successful hosted job", async () => {
+    const later = { run: { run_attempt: 2 } };
+    expect((await receiptClient(later).client.ownReceipt("production", "1")).runAttempt).toBe("1");
     for (const patch of [{ conclusion: "failure" }, { run_attempt: 2 }, { head_sha: nextSha }, { run_id: 2 }, { name: "test" }]) {
-      expect(() => validateBetaReceipt(receipt(), { ...run, run_attempt: 2 }, config, [{ ...jobs[0], ...patch }])).toThrow();
+      await expect(receiptClient({ ...later, jobs: [{ ...hostedJobs[0], ...patch }] }).client.ownReceipt("production", "1")).rejects.toThrow();
     }
-    expect(validateBetaReceipt({ ...receipt(), runAttempt: "2" }, { ...run, run_attempt: 2 }, config, [{ ...jobs[0], run_attempt: 2 }]).runAttempt).toBe("2");
+    expect((await receiptClient({ ...later, receipt: { ...receipt(), runAttempt: "2" }, jobs: [{ ...hostedJobs[0], run_attempt: 2 }] })
+      .client.ownReceipt("production", "1")).runAttempt).toBe("2");
   });
   it.each(["1", "2"])("fetches hosted evidence from recorded attempt %s, not the latest merged job list", async attempt => {
-    const routes: string[] = [], downloaded = { ...receipt(), runAttempt: attempt };
-    const client = githubClient(config, { GH_TOKEN: "fake-token" }, {
-      fetch: async input => {
-        const route = String(input); routes.push(route);
-        if (route.includes("/workflows/")) return Response.json({ workflow_runs: [{ ...run, run_attempt: 2 }] });
-        if (route.includes("/artifacts?")) return Response.json({ artifacts: [{ name: `hosted-promotion-beta-${sha}`, expired: false, workflow_run: { head_sha: sha } }] });
-        if (route.includes(`/attempts/${attempt}/jobs?`)) return Response.json({ jobs: [{ ...hostedJobs[0], run_attempt: undefined }] });
-        throw new Error("Unexpected API route");
-      },
-      command: async (file, args, options) => {
-        expect(file).toBe("gh"); expect(args).not.toContain("fake-token"); expect(options?.env?.GH_TOKEN).toBe("fake-token");
-        await writeFile(path.join(args[args.indexOf("--dir") + 1], "hosted-receipt.json"), JSON.stringify(downloaded));
-        return "";
-      },
-    });
-    expect((await client.betaReceipt()).runAttempt).toBe(attempt);
+    const downloaded = { ...receipt(), runAttempt: attempt }, later = { run: { run_attempt: 2 }, receipt: downloaded };
+    const { client, routes } = receiptClient({ ...later, jobs: [{ ...hostedJobs[0], run_attempt: undefined }] });
+    expect((await client.ownReceipt("production", "1")).runAttempt).toBe(attempt);
     expect(routes.filter(route => route.includes("/jobs?"))).toEqual([`https://api.github.com/repos/example/zeros/actions/runs/1/attempts/${attempt}/jobs?per_page=100&page=1`]);
-    expect(() => validateBetaReceipt(downloaded, { ...run, run_attempt: 2 }, config, [])).toThrow();
-    expect(() => validateBetaReceipt(downloaded, { ...run, run_attempt: 2 }, config, [{ ...hostedJobs[0], run_attempt: Number(attempt), steps: [] }])).toThrow();
+    await expect(receiptClient({ ...later, jobs: [] }).client.ownReceipt("production", "1")).rejects.toThrow();
+    await expect(receiptClient({ ...later, jobs: [{ ...hostedJobs[0], run_attempt: Number(attempt), steps: [] }] }).client.ownReceipt("production", "1")).rejects.toThrow();
   });
 });

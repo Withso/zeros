@@ -139,8 +139,7 @@ describe(".context directory compatibility", () => {
           throw Object.assign(new Error("process stopped"), { code: "EIO" });
       });
       expect(await ensureContextGraph(root)).toMatchObject({ ok: false });
-      // Observe absence in the directory: recovery intentionally changes the
-      // source before the later content assertion, so no stat result is reused.
+      // Check the directory listing before recovery can change the source.
       expect(await fs.readdir(path.dirname(source))).not.toContain(
         path.basename(source),
       );
@@ -150,7 +149,6 @@ describe(".context directory compatibility", () => {
       expect(await ensureContextGraph(root)).toMatchObject({ ok: !replace });
       if (replace)
         expect(await fs.readFile(source, "utf8")).toBe("new version");
-      // Recovery records do not appear as extra context cards.
       expect((await listContextGraph(root)).items).toHaveLength(
         replace ? 2 : 1,
       );
@@ -260,7 +258,7 @@ describe(".context directory compatibility", () => {
         path.join(root, directory, "shared/.gitignore"),
         "# allow docs\n",
       );
-      // Incoming rules may already have been copied to validate their effect.
+      // The first attempt may have copied the rules before checking visibility.
       await fs.rm(path.join(root, ".context/shared/.gitignore"), {
         force: true,
       });
@@ -284,8 +282,6 @@ describe(".context directory compatibility", () => {
         base64: "bmV3",
       }),
     ).toMatchObject({ ok: true });
-    // The migrated rules still hide the old private scope; whether the new
-    // attachment is committed is the repository's choice.
     expect(status()).toBe("?? .context/attachments/new-id/new.txt\n");
     expect(await ensureContextGraph(root)).toEqual({
       ok: true,
@@ -362,7 +358,7 @@ describe(".context directory compatibility", () => {
       ".context/attachments/new-id/new.txt",
       ".context/notes.md",
     ]);
-    // No ignore rules are written: the repository decides what Git sees.
+    // Only repository-owned rules should decide whether new attachments are tracked.
     await expect(fs.lstat(path.join(root, ".context/.gitignore"))).rejects.toMatchObject({
       code: "ENOENT",
     });

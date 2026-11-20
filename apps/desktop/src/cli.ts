@@ -167,7 +167,7 @@ function showHelp() {
     browser       Drive the chat's Zeros browser (open, read, click, type)
 
   \x1b[1mServe Options:\x1b[0m
-    --port <n>        Channel footprint base (stable 24193; beta 24203; dev 24293)
+    --port <n>        Channel footprint base (stable 24193; alpha 24213; dev 24293)
     --port-start <n>  First bridge port to try (default: --port)
     --port-span <n>   Consecutive bridge ports to try (default: ${ENGINE_PORT_SPAN})
     --root <dir>      Project root directory (default: auto-detect)

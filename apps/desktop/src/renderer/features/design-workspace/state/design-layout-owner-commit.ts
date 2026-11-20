@@ -6,7 +6,7 @@ import {
   designHugFrameSize,
   hasDesignIntrinsicSize,
 } from "../design-auto-layout-values";
-import { designStylePropertyAffectsLayout } from "../design-style-values";
+import { designStyleCommitCoalesceKey, designStylePropertyAffectsLayout } from "../design-style-values";
 import { useDesignRuntimeStore } from "./design-runtime-store";
 import { previewDesignNodeGeometry } from "./design-selection";
 import {
@@ -84,7 +84,7 @@ export async function commitDesignLayoutOwnerStyles(input: {
     actor: { kind: "human", id: "desktop" },
     intent: `Set ${properties.join(", ")} on 1 layer`,
     createdAt: Date.now(),
-    coalesceKey: `styles:${nodeId}:${properties.join(":")}`,
+    coalesceKey: designStyleCommitCoalesceKey([nodeId], properties),
     operations: [
       {
         operationId: `styles:${crypto.randomUUID()}`,

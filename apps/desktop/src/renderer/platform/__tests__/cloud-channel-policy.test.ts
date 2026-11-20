@@ -4,8 +4,9 @@ import { CLOUD_WORKSPACE_CHANNELS, cloudWorkspaceChannelEnabled } from "../../..
 
 describe("checked-in cloud channel policy", () => {
   it("allows cloud workspaces on every release channel", () => {
-    expect(CLOUD_WORKSPACE_CHANNELS).toEqual(["dev", "alpha", "beta", "stable"]);
+    expect(CLOUD_WORKSPACE_CHANNELS).toEqual(["dev", "alpha", "stable"]);
     for (const channel of CLOUD_WORKSPACE_CHANNELS) expect(cloudWorkspaceChannelEnabled(channel)).toBe(true);
     expect(cloudWorkspaceChannelEnabled("unknown")).toBe(false);
+    expect(cloudWorkspaceChannelEnabled("beta")).toBe(false);
   });
 });

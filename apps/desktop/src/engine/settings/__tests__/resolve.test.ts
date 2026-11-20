@@ -62,8 +62,6 @@ describe("resolveSettings — precedence", () => {
         git: { base_branch: "develop" },
         scripts: { run: "pnpm dev:repo" },
       },
-      // Scripts are repo settings (committed settings.toml only) — a stale
-      // personal-file [scripts] table is ignored, never a silent shadow.
       repoLocal: { scripts: { run: "pnpm electron:dev" } },
       managed: { git: { base_branch: "main" } },
     });
@@ -82,8 +80,6 @@ describe("resolveSettings — precedence", () => {
   });
 
   it("workspace-local overrides repository defaults below managed policy", () => {
-    // Probed with git (which personal layers still carry) — env left the repo
-    // files in the 2026-07-17 slimming, and scripts became repo-layer-only.
     const r = resolveSettings({
       repo: { git: { remote: "origin" }, scripts: { setup: "pnpm install" } },
       repoLocal: {
@@ -225,8 +221,7 @@ describe("resolveSettings — layer hygiene", () => {
   });
 
   it("keeps a retired opt-out in force in the layer that set it", () => {
-    // An organization that turned browser use off for any agent keeps it off
-    // for every agent, locked as managed, even before or without a migration.
+    // A managed opt-out stays locked without rewriting the settings file.
     for (const browser of [{ codex_enabled: false }, { in_app_enabled: false }]) {
       const resolved = resolveSettings({
         user: { browser: { enabled: true }, computer_use: { show_agent_cursor: true } },
@@ -245,8 +240,7 @@ describe("resolveSettings — layer hygiene", () => {
   });
 
   it("turns browser use off where an organization required asking before every website", () => {
-    // Zeros no longer asks before opening a website. A managed "always-ask"
-    // fails closed instead of silently dropping the question it required.
+    // With per-site prompts gone, managed always-ask must fail closed.
     const managed = resolveSettings({
       user: { browser: { enabled: true } },
       managed: { browser: { navigation_approval: "always-ask" } },
@@ -324,8 +318,6 @@ describe("resolveSettings — layer hygiene", () => {
   });
 
   it("drops invalid leaves with warnings but keeps valid siblings", () => {
-    // env moved to the user layer (repo files no longer carry it) — the
-    // per-leaf hygiene under test is unchanged.
     const r = resolveSettings({
       repoLocal: {
         scripts: { run: "pnpm dev", run_mode: "sometimes", setup: 42 },
@@ -386,7 +378,7 @@ describe("resolveSettings — layer hygiene", () => {
     const r = resolveSettings({
       repoLocal: { scripts: "pnpm dev", git: { base_branch: "dev" } },
     });
-    expect(r.effective.scripts).toEqual({ run_mode: "concurrent" }); // default survives
+    expect(r.effective.scripts).toEqual({ run_mode: "concurrent" });
     expect((r.effective.git as Record<string, unknown>).base_branch).toBe(
       "dev",
     );

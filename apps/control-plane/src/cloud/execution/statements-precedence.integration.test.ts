@@ -12,12 +12,14 @@ const results: Record<string, unknown> = {};
 const checked = new Set<string>();
 const database = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 database("begin, lease and send refuse a removal exactly as before statements-1", () => {
-  let pool: pg.Pool, f: ExecutionFixture;
+  let pool: pg.Pool, f: ExecutionFixture, credentialRows = 0;
   const features = () => `${f.features},begin-lease-v1`;
   beforeAll(() => { pool = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL, max: 10, statement_timeout: 8000 }); });
   beforeEach(async () => {
     f = await executionFixture(pool, { teamOwnership: true }); await f.activate(); expect((await f.hello(features())).status).toBe(200);
     await f.login(f.viewer); await f.login(f.creator);
+    credentialRows = Number((await pool.query<{ count: string }>("SELECT count(*)::text AS count FROM cloud_agent_credentials WHERE owner_user_id=$1", [f.creator.id])).rows[0]!.count);
+    expect(credentialRows).toBeGreaterThan(0);
   });
   afterEach(() => {
     for (const name of Object.keys(results).filter(name => !checked.has(name))) { checked.add(name); expect([name, results[name]]).toEqual([name, expected[name]]); }
@@ -50,6 +52,89 @@ database("begin, lease and send refuse a removal exactly as before statements-1"
     FROM cloud_v2_execution_contexts WHERE workspace_id=$1 AND kind='turn'`, [f.workspace.id])).rows;
   const answer = async (response: Response) => { const body = await response.json(); return { status: response.status, code: body?.error?.code ?? null, dispatch: body?.dispatch, state: body?.state, lease: "lease" in body }; };
   const thrown = (error: unknown) => error instanceof HttpError ? { status: error.status, code: error.code, class: error.constructor.name } : { raw: String(error) };
+  const refreshActorRevisions = async () => {
+    const [viewer, creator] = await Promise.all([
+      pool.query("SELECT auth_revision FROM users WHERE id=$1", [f.viewer.id]),
+      pool.query("SELECT auth_revision FROM users WHERE id=$1", [f.creator.id]),
+    ]);
+    f.viewer.accountRevision = Number(viewer.rows[0]!.auth_revision);
+    f.creator.accountRevision = Number(creator.rows[0]!.auth_revision);
+  };
+  const mutationActions = () => [
+    { name: "viewer-account", actorChanged: true, expectedRows: 1, run: () => pool.query("UPDATE users SET auth_revision=auth_revision+1 WHERE id=$1 RETURNING id", [f.viewer.id]) },
+    { name: "viewer-membership", actorChanged: true, expectedRows: 1, run: () => pool.query("UPDATE organization_members SET authorization_revision=authorization_revision+1 WHERE org_id=$1 AND user_id=$2 RETURNING user_id", [f.organizationId, f.viewer.id]) },
+    { name: "payer-account", actorChanged: true, expectedRows: 1, run: () => pool.query("UPDATE users SET auth_revision=auth_revision+1 WHERE id=$1 RETURNING id", [f.creator.id]) },
+    { name: "credential-noop", actorChanged: false, expectedRows: credentialRows, run: () => pool.query("UPDATE cloud_agent_credentials SET revision=revision WHERE owner_user_id=$1 RETURNING id", [f.creator.id]) },
+  ];
+  const beginState = async (userMessageId: string, chatId: string) => {
+    const [promptRow, chatRow] = await Promise.all([
+      pool.query<{ state: string; dispatch_id: string | null; execution_context_id: string | null; execution_parent_context_id: string | null;
+        cancel_requested: boolean; terminal_at: Date | null; payload: unknown | null; payload_bytes: number; delivery_id: string | null; worker_boot_id: string | null }>(
+        "SELECT state,dispatch_id,execution_context_id,execution_parent_context_id,cancel_requested,terminal_at,payload,payload_bytes,delivery_id,worker_boot_id FROM cloud_v2_prompt_outbox WHERE workspace_id=$1 AND user_message_id=$2",
+        [f.workspace.id, userMessageId]),
+      pool.query<{ epoch: string; next_sequence: string; stop_acked_epoch: string; active_context_id: string | null; acting_generation: string; acting_user_id: string | null }>(
+        "SELECT epoch::text,next_sequence::text,stop_acked_epoch::text,active_context_id,acting_generation::text,acting_user_id FROM cloud_v2_prompt_chats WHERE workspace_id=$1 AND chat_id=$2",
+        [f.workspace.id, chatId]),
+    ]);
+    expect(promptRow.rowCount).toBe(1);
+    expect(chatRow.rowCount).toBe(1);
+    return { prompt: promptRow.rows[0]!, chat: chatRow.rows[0]! };
+  };
+  const assertInboxBeforeBegin = (state: Awaited<ReturnType<typeof beginState>>) => {
+    expect(state.prompt).toMatchObject({ state: "inboxed", dispatch_id: null, execution_context_id: null,
+      execution_parent_context_id: null, cancel_requested: false, terminal_at: null });
+    expect(state.prompt.payload).not.toBeNull();
+    expect(state.prompt.payload_bytes).toBeGreaterThan(0);
+    expect(state.prompt.delivery_id).toEqual(expect.any(String));
+    expect(state.chat.active_context_id).toBeNull();
+  };
+  const readBeginResponse = async (response: Response) => ({
+    status: response.status,
+    body: await response.json() as { dispatch?: boolean; state?: string; contextId?: string; error?: { code?: string } },
+  });
+  const assertBeginDispatched = async (begin: { userMessageId: string; dispatchId: string }, chatId: string,
+    response: Awaited<ReturnType<typeof readBeginResponse>>) => {
+    expect(response.status).toBe(200);
+    expect(response.body.dispatch).toBe(true);
+    expect(response.body.state).toBe("dispatching");
+    expect(response.body.contextId).toEqual(expect.any(String));
+    const contextId = response.body.contextId!;
+    const state = await beginState(begin.userMessageId, chatId);
+    expect(state.prompt).toMatchObject({ state: "dispatching", dispatch_id: begin.dispatchId,
+      execution_context_id: contextId, execution_parent_context_id: null, cancel_requested: false });
+    const contexts = await pool.query<{ id: string; user_id: string; kind: string; user_message_id: string; dispatch_id: string; generation: string }>(
+      `SELECT id,user_id,kind,user_message_id,dispatch_id,generation::text AS generation FROM cloud_v2_execution_contexts
+       WHERE workspace_id=$1 AND user_message_id=$2 AND kind='turn'`, [f.workspace.id, begin.userMessageId]);
+    expect(contexts.rowCount).toBe(1);
+    expect(contexts.rows[0]).toMatchObject({ id: contextId, user_id: f.viewer.id, kind: "turn",
+      user_message_id: begin.userMessageId, dispatch_id: begin.dispatchId });
+    expect(state.chat).toMatchObject({ active_context_id: contextId, acting_user_id: f.viewer.id,
+      acting_generation: contexts.rows[0]!.generation });
+  };
+  const assertBeginRolledBack = async (begin: { userMessageId: string; dispatchId: string }, chatId: string,
+    before: Awaited<ReturnType<typeof beginState>>) => {
+    expect(before.prompt).toMatchObject({ state: "inboxed", dispatch_id: null, execution_context_id: null,
+      execution_parent_context_id: null, cancel_requested: false, terminal_at: null });
+    expect(await beginState(begin.userMessageId, chatId)).toEqual(before);
+    expect((await pool.query("SELECT id FROM cloud_v2_execution_contexts WHERE workspace_id=$1 AND user_message_id=$2 AND kind='turn'",
+      [f.workspace.id, begin.userMessageId])).rowCount).toBe(0);
+  };
+  const assertBeginCancelled = async (begin: { userMessageId: string }, chatId: string,
+    before: Awaited<ReturnType<typeof beginState>>, response: Awaited<ReturnType<typeof readBeginResponse>>) => {
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({ dispatch: false, state: "cancelled" });
+    expect(before.prompt).toMatchObject({ state: "inboxed", dispatch_id: null, execution_context_id: null,
+      execution_parent_context_id: null, cancel_requested: false, terminal_at: null });
+    const after = await beginState(begin.userMessageId, chatId);
+    expect(after.prompt).toMatchObject({ state: "cancelled", dispatch_id: null, execution_context_id: null,
+      execution_parent_context_id: null, cancel_requested: true, payload: null, payload_bytes: 0,
+      delivery_id: before.prompt.delivery_id, worker_boot_id: before.prompt.worker_boot_id });
+    expect(after.prompt.terminal_at).not.toBeNull();
+    expect(after.prompt.payload).toBeNull();
+    expect(after.chat).toEqual(before.chat);
+    expect((await pool.query("SELECT id FROM cloud_v2_execution_contexts WHERE workspace_id=$1 AND user_message_id=$2 AND kind='turn'",
+      [f.workspace.id, begin.userMessageId])).rowCount).toBe(0);
+  };
 
   /** Runs `action` once, when begin first reads the chat's agent (after its admission read in both trees). */
   const atAgent = (action: () => Promise<unknown>) => {
@@ -130,25 +215,135 @@ database("begin, lease and send refuse a removal exactly as before statements-1"
   it("S7 send: creator's login gone and creator cut with no trigger after preflight", () =>
     sendRecord("S7", () => silently(connection(f.creator.id), member(f.creator.id))));
 
+  for (const name of ["viewer-account", "viewer-membership", "payer-account", "credential-noop"] as const) {
+    it(`D1 begin dispatches when ${name} commits before delivery`, async () => {
+      const action = mutationActions().find(candidate => candidate.name === name)!;
+      const chatId = `before-${name}`;
+      const changed = await action.run();
+      expect(changed.rowCount, `${name} row count`).toBe(action.expectedRows);
+      await refreshActorRevisions();
+      const { input, begin } = await delivered(f.viewer, f.prompt(randomUUID(), { chatId }));
+      const before = await beginState(input.userMessageId, chatId);
+      assertInboxBeforeBegin(before);
+      await assertBeginDispatched(begin, chatId, await readBeginResponse(await f.worker("prompts/begin", begin, { features: features() })));
+    });
+  }
+
+  for (const name of ["viewer-account", "viewer-membership"] as const) {
+    it(`D1 begin cancels when ${name} changes after delivery and before begin`, async () => {
+      const action = mutationActions().find(candidate => candidate.name === name)!;
+      const chatId = `cancel-${name}`;
+      const { input, begin } = await delivered(f.viewer, f.prompt(randomUUID(), { chatId }));
+      const before = await beginState(input.userMessageId, chatId);
+      assertInboxBeforeBegin(before);
+      const changed = await action.run();
+      expect(changed.rowCount, `${name} row count`).toBe(action.expectedRows);
+      await assertBeginCancelled(begin, chatId, before,
+        await readBeginResponse(await f.worker("prompts/begin", begin, { features: features() })));
+    });
+  }
+
+  for (const name of ["viewer-account", "viewer-membership"] as const) {
+    it(`D1 begin rejects ${name} changed after admission and rolls back`, async () => {
+      const action = mutationActions().find(candidate => candidate.name === name)!;
+      const chatId = `after-${name}`;
+      const { input, begin } = await delivered(f.viewer, f.prompt(randomUUID(), { chatId }));
+      const before = await beginState(input.userMessageId, chatId);
+      assertInboxBeforeBegin(before);
+      let hookRuns = 0;
+      atAgent(async () => {
+        hookRuns++;
+        const changed = await action.run();
+        expect(changed.rowCount, `${name} row count`).toBe(action.expectedRows);
+      });
+      const response = await readBeginResponse(await f.worker("prompts/begin", begin, { features: features() }));
+      expect(hookRuns).toBe(1);
+      expect(response.status).toBe(409);
+      expect(response.body.error?.code).toBe("actor_changed");
+      await assertBeginRolledBack(begin, chatId, before);
+    });
+  }
+
+  it("D1 begin rejects a payer account changed after selection and rolls back", async () => {
+    const action = mutationActions().find(candidate => candidate.name === "payer-account")!;
+    const chatId = "after-payer-account";
+    const { input, begin } = await delivered(f.viewer, f.prompt(randomUUID(), { chatId }));
+    const before = await beginState(input.userMessageId, chatId);
+    assertInboxBeforeBegin(before);
+    const logins = f.cp.execution.deps.logins;
+    const forWorkspace = logins.forWorkspace.bind(logins);
+    let firstSelectionReturned = false, hookRuns = 0;
+    const spy = vi.spyOn(logins, "forWorkspace").mockImplementation(async (...args) => {
+      if (args[3] === undefined) {
+        const selection = await forWorkspace(...args);
+        firstSelectionReturned = true;
+        return selection;
+      }
+      if (hookRuns === 0) {
+        expect(firstSelectionReturned).toBe(true);
+        hookRuns++;
+        const changed = await action.run();
+        expect(changed.rowCount, "payer account row count").toBe(action.expectedRows);
+      }
+      return forWorkspace(...args);
+    });
+    const response = await readBeginResponse(await f.worker("prompts/begin", begin, { features: features() }));
+    expect(hookRuns).toBe(1);
+    expect(spy).toHaveBeenCalledTimes(2);
+    expect(response.status).toBe(409);
+    expect(response.body.error?.code).toBe("actor_changed");
+    await assertBeginRolledBack(begin, chatId, before);
+  });
+
   it("D1 begin racing account and membership changes: no deadlock", async () => {
     const deadlocks = async () => { await new Promise(resolve => setTimeout(resolve, 1500));
       return Number((await pool.query("SELECT deadlocks FROM pg_stat_database WHERE datname=current_database()")).rows[0].deadlocks); };
-    const before = await deadlocks(), statuses: number[] = [], failures: string[] = [];
+    const before = await deadlocks(), failures: string[] = [], outcomes: Array<Record<string, unknown>> = [], actions = mutationActions();
     for (let index = 0; index < 16; index++) {
-      const { begin } = await delivered(f.viewer, f.prompt(randomUUID(), { chatId: `chat-${index}` }));
-      const change = index % 4 === 0 ? pool.query("UPDATE users SET auth_revision=auth_revision+1 WHERE id=$1", [f.viewer.id])
-        : index % 4 === 1 ? pool.query("UPDATE organization_members SET authorization_revision=authorization_revision+1 WHERE org_id=$1 AND user_id=$2", [f.organizationId, f.viewer.id])
-        : index % 4 === 2 ? pool.query("UPDATE users SET auth_revision=auth_revision+1 WHERE id=$1", [f.creator.id])
-        : pool.query("UPDATE cloud_agent_credentials SET revision=revision WHERE owner_user_id=$1", [f.creator.id]);
-      const [reply, changed] = await Promise.allSettled([f.worker("prompts/begin", begin, { features: features() }), change]);
-      if (reply.status === "fulfilled") statuses.push(reply.value.status); else failures.push(String(reply.reason));
+      const chatId = `chat-${index}`;
+      const { input, begin } = await delivered(f.viewer, f.prompt(randomUUID(), { chatId }));
+      const stateBefore = await beginState(input.userMessageId, chatId);
+      assertInboxBeforeBegin(stateBefore);
+      const action = actions[index % actions.length]!;
+      const [reply, changed] = await Promise.allSettled([
+        f.worker("prompts/begin", begin, { features: features() }), action.run(),
+      ]);
+      const outcome: Record<string, unknown> = { index, mutation: action.name };
       if (changed.status === "rejected") failures.push(String(changed.reason));
+      else {
+        outcome.mutationRowCount = changed.value.rowCount;
+        if (changed.value.rowCount !== action.expectedRows) failures.push(`${action.name} updated ${changed.value.rowCount} rows; expected ${action.expectedRows}`);
+      }
+      if (reply.status === "rejected") failures.push(String(reply.reason));
+      else {
+        outcome.status = reply.value.status;
+        try {
+          const response = await readBeginResponse(reply.value);
+          outcome.state = response.body.state ?? null;
+          outcome.code = response.body.error?.code ?? null;
+          outcome.dispatch = response.body.dispatch ?? null;
+          outcome.contextId = response.body.contextId ?? null;
+          if (response.status === 200 && response.body.dispatch === true) {
+            await assertBeginDispatched(begin, chatId, response);
+          } else if (response.status === 200 && response.body.dispatch === false && response.body.state === "cancelled"
+            && (action.name === "viewer-account" || action.name === "viewer-membership")) {
+            await assertBeginCancelled(begin, chatId, stateBefore, response);
+          } else {
+            expect(action.actorChanged, JSON.stringify(outcome)).toBe(true);
+            expect(response.status, JSON.stringify(outcome)).toBe(409);
+            expect(response.body.error?.code, JSON.stringify(outcome)).toBe("actor_changed");
+            await assertBeginRolledBack(begin, chatId, stateBefore);
+          }
+        } catch (error) { failures.push(`${JSON.stringify(outcome)}: ${String(error)}`); }
+      }
+      outcomes.push(outcome);
       // The account revision moved: later sends need the actor's new revision.
-      const row = (await pool.query("SELECT auth_revision FROM users WHERE id=$1", [f.viewer.id])).rows[0];
-      f.viewer.accountRevision = Number(row.auth_revision);
-      const creator = (await pool.query("SELECT auth_revision FROM users WHERE id=$1", [f.creator.id])).rows[0];
-      f.creator.accountRevision = Number(creator.auth_revision);
+      await refreshActorRevisions();
     }
-    results.D1 = { statuses, failures, deadlocks: await deadlocks() - before };
+    const deadlockDelta = await deadlocks() - before;
+    const diagnostic = { outcomes, failures, deadlocks: deadlockDelta };
+    console.info(`[D1 outcomes] ${JSON.stringify(diagnostic)}`);
+    expect(failures).toEqual([]);
+    expect(deadlockDelta).toBe(0);
   }, 120_000);
 });

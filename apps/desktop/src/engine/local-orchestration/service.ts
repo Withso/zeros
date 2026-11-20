@@ -460,8 +460,8 @@ export class LocalOrchestrationService {
     };
   }
 
-  /** A link of this copy of Zeros. A link from another channel (a Beta link
-   * pasted into Alpha) names a chat in a different database. */
+  /** A link of this copy of Zeros. A link from another channel (an Alpha link
+   * pasted into Production) names a chat in a different database. */
   private ownLink(ref: string): LocalLink | null {
     const link = parseLocalLink(ref);
     if (link && link.scheme !== this.ports.linkScheme()) {

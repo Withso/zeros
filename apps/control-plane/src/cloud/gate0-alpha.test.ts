@@ -10,7 +10,7 @@ describe("Alpha probe target", () => {
   it("reads the deployed source and worker from a ready, healthy Alpha only", () => {
     expect(alphaProbeIdentity(healthy)).toEqual({ sourceSha: "a".repeat(40), workerSha256: "b".repeat(64) });
     for (const value of [
-      { ...healthy, channel: "beta" }, { ...healthy, ready: false }, { ...healthy, maintenance: true },
+      { ...healthy, channel: "production" }, { ...healthy, ready: false }, { ...healthy, maintenance: true },
       { ...healthy, cloud: { ...healthy.cloud, state: "degraded" } }, { ...healthy, worker: null }, null,
     ]) expect(() => alphaProbeIdentity(value)).toThrow("alpha_release_identity");
   });

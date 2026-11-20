@@ -10,7 +10,7 @@ const org = "5d2f8c1a-3b7e-4f90-a6d4-9c1e2b7f8a35";
 const ws = "6e3a9d2b-4c8f-4a01-b7e5-0d2f3c8a9b46";
 
 describe("cloud workspace links", () => {
-  it.each(["zeros", "zeros-alpha", "zeros-beta", "zeros-dev"] as const)(
+  it.each(["zeros", "zeros-alpha", "zeros-dev"] as const)(
     "round-trips a %s link",
     (scheme) => {
       const link = formatCloudWorkspaceLink(scheme, { organizationId: org, workspaceId: ws });
@@ -41,6 +41,7 @@ describe("cloud workspace links", () => {
     `zeros://cloud-workspace:44/${org}/${ws}`,
     `zeros://workspace/${org}/${ws}`,
     `zeros-prod://cloud-workspace/${org}/${ws}`,
+    `zeros-beta://cloud-workspace/${org}/${ws}`,
     `https://cloud-workspace/${org}/${ws}`,
     `zeros://cloud-workspace/${org}/not-a-uuid`,
     `zeros://cloud-workspace/${org}/${ws.replace(/-/g, "%2D")}`,

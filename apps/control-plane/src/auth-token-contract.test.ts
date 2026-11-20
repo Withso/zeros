@@ -229,7 +229,7 @@ describe("auth token contract", () => {
     })
       .setProtectedHeader({ alg: "RS256", kid: "key_example" })
       .setIssuer(config.issuer)
-      .setAudience("https://api-beta.zeros.build")
+      .setAudience("https://api.zeros.build")
       .setSubject("user_example")
       .setJti("token_example")
       .setIssuedAt(1_700_000_000)

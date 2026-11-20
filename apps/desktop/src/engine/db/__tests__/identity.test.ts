@@ -62,10 +62,15 @@ describe("appIdentity() — one reverse-DNS id per (channel, instance)", () => {
     expect(appIdentity()).toBe("com.zeros.dev.san-francisco");
   });
 
-  it("beta → com.zeros.beta, and IGNORES ZEROS_INSTANCE (single app)", () => {
-    process.env.ZEROS_CHANNEL = "beta";
+  it("alpha → com.zeros.alpha, and IGNORES ZEROS_INSTANCE (single app)", () => {
+    process.env.ZEROS_CHANNEL = "alpha";
     process.env.ZEROS_INSTANCE = "san-francisco";
-    expect(appIdentity()).toBe("com.zeros.beta");
+    expect(appIdentity()).toBe("com.zeros.alpha");
+  });
+
+  it("refuses the retired beta channel instead of naming com.zeros.beta", () => {
+    process.env.ZEROS_CHANNEL = "beta";
+    expect(() => appIdentity()).toThrow(/not a known channel/);
   });
 });
 

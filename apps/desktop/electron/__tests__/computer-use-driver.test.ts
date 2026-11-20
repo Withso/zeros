@@ -501,9 +501,9 @@ describe("driver location and identity", () => {
   it("reads the bundle ID from Info.plist", () => {
     expect(
       bundleIdFromInfoPlist(
-        "<dict>\n\t<key>CFBundleIdentifier</key>\n\t<string>com.zeros.beta</string>\n</dict>",
+        "<dict>\n\t<key>CFBundleIdentifier</key>\n\t<string>com.zeros.alpha</string>\n</dict>",
       ),
-    ).toBe("com.zeros.beta");
+    ).toBe("com.zeros.alpha");
     expect(bundleIdFromInfoPlist("<dict></dict>")).toBeNull();
     expect(
       bundleIdFromInfoPlist(

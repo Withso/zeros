@@ -1,16 +1,3 @@
-// ──────────────────────────────────────────────────────────
-// readWorkspaceFile — bounded, path-safe single-file read
-// ──────────────────────────────────────────────────────────
-//
-// Extracted from the Files-tab IPC handler so BOTH the local IPC path and
-// the remote-workspace bridge handler call one implementation. `relPath`
-// is a repo-relative POSIX path resolved against `cwd` (the worktree
-// folder). NEVER throws — every failure returns { kind: "error" } with a
-// human reason. Read-only by design.
-//
-// Safety: lexical containment (no `../` escape) + a realpath symlink-escape
-// check; text capped at 2 MB, images at 5 MB (data URL); binary detected.
-// ──────────────────────────────────────────────────────────
 
 import fs from "node:fs";
 import path from "node:path";
@@ -19,10 +6,9 @@ import { fileMediaType, type FileMediaDescriptor } from "@zeros/protocol/file-me
 import { readWorkspaceMediaMetadata } from "./file-media";
 import { openBoundedFileSync, readBoundedBufferDescriptorSync } from "./bounded-read-sync";
 
-const MAX_TEXT_BYTES = 2_000_000; // 2 MB
-const MAX_IMAGE_BYTES = 5 * 1024 * 1024; // same boundary as composer images
-// Videos opt in to the existing media budget; never send a movie-sized payload
-// over the 16 MiB bridge or retain it in the file snapshot cache.
+const MAX_TEXT_BYTES = 2_000_000;
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+// Legacy video payloads must opt in and fit the existing media budget below the bridge limit.
 const VIDEO_MIME: Record<string, string> = {
   ".mp4": "video/mp4", ".m4v": "video/mp4", ".webm": "video/webm",
   ".mov": "video/quicktime", ".ogv": "video/ogg", ".mkv": "video/x-matroska",
@@ -50,11 +36,7 @@ export interface ReadFileResult {
   dataUrl?: string;
   media?: FileMediaDescriptor;
   error?: string;
-  /** True when this path is Design territory, so the viewer must not offer an
-   *  Edit affordance that `file.write` is going to refuse. Advisory only: the
-   *  engine guard remains the authority, and a transport that omits this flag
-   *  simply shows an editor whose save is refused — the pre-existing
-   *  behaviour, never a false read-only. */
+  /** Advisory Design classification for the viewer; write authorization is enforced separately, and Local source repair remains available. */
   designPath?: boolean;
 }
 
@@ -62,20 +44,12 @@ function fail(rel: string, message: string): ReadFileResult {
   return { kind: "error", path: rel, bytes: 0, error: message };
 }
 
-// ── Sensitive-file denylist (remote boundary only) ──────────
-//
-// .gitignore-respect (git ls-files --exclude-standard) hides ignored secrets
-// from the TREE, but a remote client can still read a committed or
-// path-guessed secret directly. This denylist gates the REMOTE read/tree path
-// (the local Files tab keeps full access — it's the user's own machine).
+// The remote guard also covers direct reads; hiding ignored files from the tree does not prevent a read by path.
 export function isSensitiveRepoPath(relPath: string): boolean {
   return isSensitiveWorkspacePath(relPath, path.posix.normalize);
 }
 
-/** Containment test for two ALREADY-RESOLVED absolute paths. Exported so every
- *  workspace-scoped filesystem reader enforces the boundary identically — the
- *  ignored-entry listing in git/workspace-files.ts reuses it rather than
- *  writing a third copy of `startsWith(root + sep)`. */
+/** Both arguments must be resolved absolute paths. */
 export function isInside(target: string, root: string): boolean {
   return target === root || target.startsWith(root + path.sep);
 }
@@ -97,9 +71,7 @@ export function readWorkspaceFile(
     return fail(rel, "refusing to read outside the workspace");
   }
 
-  // (#7) Secret gate for a REMOTE client, on the RESOLVED relative path (so
-  // '.env/.' etc. can't slip past) and BEFORE stat (don't even reveal that a
-  // secret exists).
+  // Deny normalized remote secret paths before checking existence.
   const SECRET_REFUSAL =
     "refusing to read a secret/credential file over a remote connection";
   if (remote && isSensitiveRepoPath(path.relative(root, target))) {

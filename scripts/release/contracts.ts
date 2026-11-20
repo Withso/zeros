@@ -3,7 +3,6 @@ import { cloudWorkspaceChannelEnabled } from "../../apps/control-plane/src/cloud
 
 export const CHANNELS = {
   alpha: { api: "https://api-alpha.zeros.build", app: "https://app-alpha.zeros.build", ops: "https://ops-alpha.zeros.build", appProject: "zeros-web-alpha", opsProject: "zeros-ops-alpha" },
-  beta: { api: "https://api-beta.zeros.build", app: "https://app-beta.zeros.build", ops: null, appProject: "zeros-web-beta", opsProject: null },
   production: { api: "https://api.zeros.build", app: "https://app.zeros.build", ops: "https://ops.zeros.build", appProject: "zeros-web", opsProject: "zeros-ops" },
 } as const;
 export const SHA = /^[a-f0-9]{40}$/;
@@ -72,7 +71,7 @@ export const MigrationReceipt = z.object({
 // The frontier reader relaxes readiness before deployment; every publication
 // consumer uses the refined ReleaseIdentity below.
 export const ReleaseIdentityBase = z.object({ version: z.literal(1), ready: z.literal(true), sourceSha: z.string().regex(SHA),
-  channel: z.enum(["alpha", "beta", "production"]), maintenance: z.literal(false),
+  channel: z.enum(["alpha", "production"]), maintenance: z.literal(false),
   migrations: z.object({ state: z.literal("current"), head: migrationName, expectedHead: migrationName, manifestSha256: z.string().regex(DIGEST) }),
   cloud: z.object({ enabled: z.boolean(), ready: z.literal(true), state: z.enum(["healthy", "disabled"]) }),
   // These version-1 receipt fields remain readable; v2 does not qualify images.
@@ -81,7 +80,7 @@ export const ReleaseIdentityBase = z.object({ version: z.literal(1), ready: z.li
 export const ReleaseIdentity = ReleaseIdentityBase;
 export const WorkOSVerification = z.object({ kind: z.literal("workos-handshake-v1"), surfaces: z.array(z.enum(["app", "ops"])),
   desktopVerified: z.literal(true).optional(), verifiedAt: z.string().datetime() });
-export const HostedReceipt = z.object({ version: z.literal(1), status: z.literal("success"), channel: z.enum(["alpha", "beta", "production"]),
+export const HostedReceipt = z.object({ version: z.literal(1), status: z.literal("success"), channel: z.enum(["alpha", "production"]),
   sourceSha: z.string().regex(SHA), branch: z.string(), repository: z.string(), runId: z.string().regex(/^\d+$/), runAttempt: z.string().regex(/^\d+$/),
   migration: MigrationReceipt, backend: ReleaseIdentity, railwayDeploymentId: id, pages: z.array(z.object({ id, surface: z.enum(["app", "ops"]) })),
   completedAt: z.string().datetime(),

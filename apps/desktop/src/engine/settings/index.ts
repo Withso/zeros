@@ -1,5 +1,3 @@
-// Public surface of the engine settings module: schemas, file layers,
-// resolution, bridge operations, and file watching.
 export {
   managedSettingsSchema,
   PROVIDER_AUTH_METHODS,

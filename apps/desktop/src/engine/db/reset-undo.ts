@@ -1,19 +1,4 @@
-// ──────────────────────────────────────────────────────────
-// reset_undo — full-fidelity "undo reset" capture (v14)
-// ──────────────────────────────────────────────────────────
-//
-// "Reset to this point" reverts files AND truncates the transcript
-// (chat_messages + turns rows). To make the undo restore the CONVERSATION too —
-// the user messages, every tool call with its inputs/outputs, and the final
-// answer — we stash the exact rows about to be deleted here, just before
-// deleting them, keyed by a generated reset_id. Undo (service: turns.undoReset)
-// restores files from `snapshot` then re-inserts these rows verbatim.
-//
-// Engine-local: NOT part of the delta-sync set (the re-inserted messages/turns
-// carry their own bumped revs, which is what other devices pull). Pruned to the
-// last few per chat — older undo windows are gone (their pre-reset snapshot ref
-// is capped in lock-step by pruneResetSnapshots).
-// ──────────────────────────────────────────────────────────
+// Undo records are local; restored messages and turns sync through their own revisions.
 
 import { openZerosDb } from "./index";
 import type { PersistedMessageRow } from "./messages";
@@ -22,18 +7,12 @@ import type { TurnDbRow } from "./turns";
 export interface ResetUndoRecord {
   resetId: string;
   chatId: string;
-  /** Agent cwd — where to restore files (null for a non-git chat). */
   folder: string | null;
-  /** Pre-reset git snapshot OID to restore files from (null = nothing to undo). */
   snapshot: string | null;
-  /** Post-reset snapshot OID — undo's 3-way merge base, so edits made after the
-   *  reset are merged around instead of overwritten (null = legacy record /
-   *  snapshot-less reset → blind restore). */
+  /** Use the post-reset tree as the merge base to preserve later edits; older records without it use blind restore. */
   postSnapshot: string | null;
-  /** The authored paths the reset reverted (restored from `snapshot`). */
   resetPaths: string[];
-  /** The truncate cut ord — undo only re-inserts when this range is still free
-   *  (the chat wasn't continued past the reset), keeping ords exact. */
+  /** Restore original message ords only while the truncated range is still free. */
   cutOrd: number | null;
   messages: PersistedMessageRow[];
   turns: TurnDbRow[];
@@ -77,7 +56,6 @@ function toRecord(r: ResetUndoDbRow): ResetUndoRecord {
   };
 }
 
-/** Stash a reset's deleted rows so it can be undone. Idempotent on reset_id. */
 export function saveResetUndo(rec: ResetUndoRecord): void {
   if (!rec.resetId || !rec.chatId) return;
   openZerosDb()
@@ -115,8 +93,7 @@ export function deleteResetUndo(resetId: string): void {
     .run(resetId);
 }
 
-/** Keep only the newest `keep` undo records per chat (older windows are gone —
- *  their pre-reset snapshot ref is capped in lock-step by pruneResetSnapshots). */
+/** Keep only the newest undo records per chat; reset snapshot refs are pruned separately. */
 export function pruneResetUndo(chatId: string, keep: number): void {
   if (!chatId) return;
   openZerosDb()

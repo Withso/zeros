@@ -20,6 +20,16 @@ export async function runDesignComponentInstancesSmoke({ page, check }) {
   await page.goto(`${origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html?styleOrigins&componentOptions`, { waitUntil: "networkidle" });
   await openLayersDrawer(page);
   const section = page.locator("[data-design-component-options]");
+  // Reset all overrides sits in the instance's component actions menu.
+  const resetAllItem = page.locator("[data-design-reset-all-overrides]");
+  const resetAllEnabled = async () => {
+    await section.locator("[data-design-component-actions]").click();
+    await resetAllItem.waitFor();
+    const enabled = (await resetAllItem.getAttribute("data-disabled")) === null;
+    await page.keyboard.press("Escape");
+    await resetAllItem.waitFor({ state: "detached" });
+    return enabled;
+  };
   const header = page.locator("[data-design-inspector-header]");
   const line = page.locator("[data-design-component-of]");
   const frameRow = (file) => page.locator(`[data-design-frame-row="${file}"]`);
@@ -159,20 +169,20 @@ export async function runDesignComponentInstancesSmoke({ page, check }) {
   // ── An instance in another frame ──
   await selectInstance();
   const instanceHeader = await header.innerText();
-  check("an instance's header names its component with Edit main, and its line says Instance of",
-    instanceHeader.includes("Chat composer") && instanceHeader.includes("Edit main") && (await line.innerText()).includes("Instance of Chat composer"),
+  check("an instance's header names its component/variant with Edit main, and its line says Instance",
+    instanceHeader.includes("Chat composer/Default") && instanceHeader.includes("Edit main") && (await line.innerText()).startsWith("Instance ·"),
     instanceHeader);
   // ── The component mark ──
   const frameLabel = (file) => page.locator(`[data-design-frame="${file}"] [data-design-frame-label]`);
   const sizeChip = page.locator("[data-design-selection-size]");
   const opsBeforeMarks = await page.evaluate(() => (window.__zerosHarnessWorkbenchOperations ?? []).slice());
   await expect(sizeChip.locator("[data-design-component-mark]")).toHaveCount(1);
-  check("a selected instance's chip shows the mark and its component's name, not its size",
-    (await sizeChip.innerText()).trim() === "Chat composer" && (await sizeChip.getAttribute("data-design-selection-component")) === "",
+  check("a selected instance's chip shows the mark and its component/variant name, not its size",
+    (await sizeChip.innerText()).trim() === "Chat composer/Default" && (await sizeChip.getAttribute("data-design-selection-component")) === "",
     await sizeChip.innerText());
   check("a component frame shows the mark beside its name",
     (await frameLabel("pricing.html").locator("[data-design-component-mark]").count()) === 1 &&
-      (await frameLabel("pricing.html").getAttribute("title")) === "Chat composer, component");
+      (await frameLabel("pricing.html").getAttribute("title")) === "Chat composer/Default");
   check("a plain frame never shows the mark",
     (await frameLabel("home.html").locator("[data-design-component-mark]").count()) === 0 &&
       (await frameLabel("home.html").getAttribute("title")) !== null &&
@@ -208,6 +218,8 @@ export async function runDesignComponentInstancesSmoke({ page, check }) {
   check("the instance's width reads its root's, which its Width option sets",
     (await inspectorPanel.locator('[data-design-size-axis="x"]').innerText()).includes("zd-width"),
     await inspectorPanel.locator('[data-design-size-axis="x"]').innerText());
+  // An instance opens on Options; its size lives on Style.
+  await inspectorPanel.getByRole("tab", { name: "Style", exact: true }).click();
   const instanceHeight = inspectorPanel.getByLabel("H", { exact: true });
   const rootHeight = await rootBox.evaluate((element) => element.offsetHeight);
   check("the instance's height reads its root's", Math.abs(Number(await instanceHeight.inputValue()) - rootHeight) <= 1, `${await instanceHeight.inputValue()} root ${rootHeight}`);
@@ -215,13 +227,16 @@ export async function runDesignComponentInstancesSmoke({ page, check }) {
   await instanceHeight.press("Enter");
   await expect.poll(home).toMatch(/<zd-chat-composer data-oid="home-composer"[^>]*style="[^"]*height: 300px/);
   await expect.poll(() => rootBox.evaluate((element) => getComputedStyle(element).height)).toBe("300px");
-  await expect(section.locator("[data-design-overrides-reset]")).toHaveAttribute("data-design-overrides-reset", "1");
-  check("resizing an instance sizes its root, as an override its Options offer to reset", true);
-  await section.locator("[data-design-overrides-reset]").click();
+  // A size override is Style's: Reset Style takes it back and leaves options alone.
+  const resetStyle = inspectorPanel.locator("[data-design-reset-style]");
+  await expect(resetStyle).toBeEnabled();
+  check("resizing an instance sizes its root, as an override Style offers to reset", true);
+  await resetStyle.click();
   await expect.poll(home).not.toMatch(/<zd-chat-composer data-oid="home-composer"[^>]*style=/);
   await expect.poll(() => rootBox.evaluate((element) => getComputedStyle(element).height)).toBe(`${rootHeight}px`);
-  await expect(section.locator("[data-design-overrides-reset]")).toHaveCount(0);
-  check("Reset overrides gives the instance its main's size back", true);
+  await expect(resetStyle).toHaveCount(0);
+  check("Reset Style gives the instance its main's size back", (await home()).includes('mode="plan"'));
+  await inspectorPanel.getByRole("tab", { name: "Options", exact: true }).click();
 
   // Mode back to what it inherits removes the attribute, and the dot.
   const writesBeforeMode = await writes();
@@ -262,9 +277,11 @@ export async function runDesignComponentInstancesSmoke({ page, check }) {
   const writesBeforeReset = await writes();
   await section.getByRole("button", { name: "Reset options" }).click();
   await expect.poll(writes).toBe(writesBeforeReset + 1);
-  await expect.poll(home).toContain('<zd-chat-composer data-oid="home-composer"></zd-chat-composer>');
+  // Reset options keeps the chosen variant; only the option attributes go.
+  const keptVariant = beforeReset.match(/<zd-chat-composer data-oid="home-composer"[^>]*?( zd-variant="[^"]+")/)?.[1] ?? "";
+  await expect.poll(home).toContain(`<zd-chat-composer data-oid="home-composer"${keptVariant}></zd-chat-composer>`);
   await expect(section.getByRole("button", { name: "Reset options" })).toBeDisabled();
-  check("Reset removes every option and the variant in one write", (await section.locator("[data-option-changed]").count()) === 0);
+  check("Reset removes every option in one write and keeps the variant", (await section.locator("[data-option-changed]").count()) === 0, keptVariant);
   // Undone at once, while the Reset's document may still be swapping in.
   await undo();
   await expect.poll(home).toBe(beforeReset);
@@ -312,7 +329,7 @@ export async function runDesignComponentInstancesSmoke({ page, check }) {
   await expect(line).toHaveAttribute("data-design-component-of", "part");
   const partLine = await line.innerText();
   check("a double-click enters the instance and selects the part under the pointer",
-    partLine.includes("Part of Chat composer.") && (await page.locator("[data-design-select-instance]").count()) === 1 &&
+    /Part of Chat composer\/[^,.]+\./.test(partLine) && (await page.locator("[data-design-select-instance]").count()) === 1 &&
       (await page.locator("[data-design-edit-main]").count()) === 1, partLine);
   check("a part shows no Options", (await section.count()) === 0);
   check("Layers lists the selected part once, under its one instance row",
@@ -331,7 +348,7 @@ export async function runDesignComponentInstancesSmoke({ page, check }) {
   await expect.poll(() => style("home.html", '[data-zd-instance] [data-zd-part="cc-send"]', "opacity")).toBe("0.5");
   check("a part's style edit is an override on its instance, and the main is unchanged",
     (await main()) === mainBeforeOverride && /<zd-chat-composer [^>]*zd-style-cc-send="opacity: [^"]+"/.test(await home()));
-  await expect(line).toContainText("Part of Chat composer, overridden.");
+  await expect(line).toContainText(/Part of Chat composer\/[^,.]+, overridden\./);
   check("an overridden part says so and offers Reset", (await page.locator("[data-design-part-reset]").count()) === 1);
 
   // A repeated part's copies share one override.
@@ -348,11 +365,12 @@ export async function runDesignComponentInstancesSmoke({ page, check }) {
 
   // The instance offers to reset its overrides; undo takes back one.
   await selectInstance();
-  await expect(section.locator("[data-design-overrides-reset]")).toHaveAttribute("data-design-overrides-reset", "2");
-  check("an instance's Options offer to reset its part overrides", (await section.locator("[data-design-overrides-reset]").innerText()).includes("Reset 2 overrides"));
+  check("an instance's Options offer to reset its part overrides", await resetAllEnabled());
   await undo();
   await expect.poll(home).not.toContain("zd-style-cc-chip");
-  await expect(section.locator("[data-design-overrides-reset]")).toHaveAttribute("data-design-overrides-reset", "1");
+  // History restores the part's selection; the instance's actions hold Reset all.
+  await selectInstance();
+  await expect.poll(resetAllEnabled).toBe(true);
   check("undo takes back the last part override", /zd-style-cc-send="opacity: [^"]+"/.test(await home()));
 
   // A part's Reset removes its override.

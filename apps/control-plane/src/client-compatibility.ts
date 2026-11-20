@@ -1,6 +1,6 @@
 import type { MiddlewareHandler } from "hono";
 
-type ReleaseChannel = "alpha" | "beta" | "production";
+type ReleaseChannel = "alpha" | "production";
 type DesktopVersion = { core: number[]; prerelease: string[] };
 type Release = { version: string; publishedAt: string; sourceSha: string };
 type ReleaseLedger = {
@@ -261,7 +261,7 @@ export class ClientCompatibility {
     header: string | undefined,
   ): Promise<ClientUpgradeRequired | null> {
     if (!header || header.length > 160) return null;
-    const match = /^desktop\/(alpha|beta|production)\/([^/]+)$/.exec(header);
+    const match = /^desktop\/(alpha|production)\/([^/]+)$/.exec(header);
     if (!match) return null;
     const version = parseVersion(match[2]!);
     if (!version) return null;

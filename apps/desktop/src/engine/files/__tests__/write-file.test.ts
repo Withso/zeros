@@ -35,7 +35,6 @@ describe("writeWorkspaceFile (path-safe single-file write)", () => {
     fs.chmodSync(p, 0o755);
     const r = writeWorkspaceFile(root, "run.sh", "#!/bin/sh\necho new\n");
     expect(r.kind).toBe("success");
-    // The +x bits survive the tmp + rename (would be reset to ~0644 otherwise).
     expect(fs.statSync(p).mode & 0o777).toBe(0o755);
   });
 

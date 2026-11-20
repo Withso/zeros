@@ -27,9 +27,7 @@ const identity = (sourcePath: string, stat: Stats): SourceIdentity => ({
 const directory = () => path.join(zerosDataDir(), "attachment-sources");
 const cleanupCursor = new Map<string, string>();
 
-/** Only Electron's File-aware preload can register a selected native path.
- * Persist the small capability privately so an interrupted draft can retry
- * after restart. Neither the source path nor its contents enter draft JSON. */
+/** Only the File-aware preload registers paths; the private capability lets drafts retry after restart without storing source paths or bytes. */
 export async function registerAttachmentSource(
   sourcePath: string,
   size: number,
@@ -68,8 +66,7 @@ export async function registerAttachmentSource(
   }
 }
 
-/** Open the exact selected inode, checking again before the atomic publish.
- * A changed/deleted source must never silently become different prompt data. */
+/** Check the selected file's identity again before publishing so a changed source cannot silently replace prompt data. */
 export async function withAttachmentSource<T>(
   id: unknown,
   copy: (
@@ -113,8 +110,7 @@ export async function withAttachmentSource<T>(
   }
 }
 
-/** Recovery records are capabilities, not copies of the selected files. Only
- * expired, unreferenced records in this private store are disposable. */
+/** Prune only expired, unreferenced capability records; never remove their source files. */
 export async function pruneAttachmentSources(
   retained: ReadonlySet<string>,
 ): Promise<void> {

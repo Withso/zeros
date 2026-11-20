@@ -7,7 +7,6 @@ import {
   schemeForChannel,
   CHANNELS,
   ENGINE_BASE_PORT_ALPHA,
-  ENGINE_BASE_PORT_BETA,
   ENGINE_BASE_PORT_DEV,
   ENGINE_BASE_PORT_PROD,
   ENGINE_PORT_SPAN,
@@ -56,21 +55,20 @@ describe("engine runtime mode + port range", () => {
     expect(engineBasePort()).toBe(ENGINE_BASE_PORT_DEV);
   });
 
-  it("ZEROS_CHANNEL=beta → Beta's own base port 24203", () => {
+  it("ZEROS_CHANNEL=beta is refused at boot like any unknown channel", () => {
     process.env.ZEROS_CHANNEL = "beta";
-    expect(engineBasePort()).toBe(ENGINE_BASE_PORT_BETA);
-    expect(ENGINE_BASE_PORT_BETA).toBe(24203);
+    expect(() => engineBasePort()).toThrow(/not a known channel/);
   });
 
-  it("Stable, Beta, and Dev full footprints never overlap", () => {
+  it("Stable, Alpha, and Dev full footprints never overlap", () => {
     // A channel owns the eight-port engine walk plus base+8/base+9 for the MCP
     // gateway and OAuth callback. Testing only the walk would miss a gateway
     // collision at a channel boundary.
     const footprintHigh = (base: number) => base + ENGINE_PORT_SPAN + 1;
     expect(footprintHigh(ENGINE_BASE_PORT_PROD)).toBeLessThan(
-      ENGINE_BASE_PORT_BETA,
+      ENGINE_BASE_PORT_ALPHA,
     );
-    expect(footprintHigh(ENGINE_BASE_PORT_BETA)).toBeLessThan(
+    expect(footprintHigh(ENGINE_BASE_PORT_ALPHA)).toBeLessThan(
       ENGINE_BASE_PORT_DEV,
     );
   });
@@ -91,8 +89,8 @@ describe("engine runtime mode + port range", () => {
 describe("release channel + deep-link scheme", () => {
   it("channel() defaults to stable, honours an explicit ZEROS_CHANNEL", () => {
     expect(channel()).toBe("stable");
-    process.env.ZEROS_CHANNEL = "beta";
-    expect(channel()).toBe("beta");
+    process.env.ZEROS_CHANNEL = "alpha";
+    expect(channel()).toBe("alpha");
     process.env.ZEROS_CHANNEL = "stable";
     expect(channel()).toBe("stable");
   });
@@ -103,12 +101,14 @@ describe("release channel + deep-link scheme", () => {
   });
 
   // CONTRACT CHANGE: an unknown ZEROS_CHANNEL used to be silently ignored and
-  // resolved to "stable". That meant one typo (`betaa`) pointed a Beta/Alpha build
+  // resolved to "stable". That meant one typo (`alphaa`) pointed an Alpha build
   // at PRODUCTION's data dir, engine ports, update feed and zeros:// scheme — it
   // would read and WRITE real user data under a mislabeled build. There is no safe
   // default for "I don't know which app I am", so it now throws.
   it("an unknown ZEROS_CHANNEL THROWS rather than silently becoming stable", () => {
     process.env.ZEROS_CHANNEL = "garbage";
+    expect(() => channel()).toThrow(/not a known channel/);
+    process.env.ZEROS_CHANNEL = "beta";
     expect(() => channel()).toThrow(/not a known channel/);
     // …and the dev signal does NOT rescue it: an explicit bad value always wins
     // over inference, so a dev run can't mask the misconfiguration either.
@@ -117,8 +117,8 @@ describe("release channel + deep-link scheme", () => {
   });
 
   it("the throw names the offending value AND the valid set (actionable message)", () => {
-    process.env.ZEROS_CHANNEL = "Beta"; // wrong case — a realistic typo
-    expect(() => channel()).toThrow(/Beta/);
+    process.env.ZEROS_CHANNEL = "Alpha"; // wrong case — a realistic typo
+    expect(() => channel()).toThrow(/Alpha/);
     // Derived from CHANNELS, not hardcoded, so adding a channel can't leave this
     // assertion silently asserting a stale list.
     expect(() => channel()).toThrow(CHANNELS.join(" | "));
@@ -136,7 +136,7 @@ describe("release channel + deep-link scheme", () => {
 
   it("isChannel narrows exactly the known set", () => {
     for (const c of CHANNELS) expect(isChannel(c)).toBe(true);
-    for (const bad of ["", "Beta", "STABLE", "prod", undefined, null, 1]) {
+    for (const bad of ["", "Alpha", "beta", "STABLE", "prod", undefined, null, 1]) {
       expect(isChannel(bad)).toBe(false);
     }
   });
@@ -144,11 +144,9 @@ describe("release channel + deep-link scheme", () => {
   it("schemeForChannel maps each channel to a DISTINCT scheme", () => {
     expect(schemeForChannel("stable")).toBe("zeros");
     expect(schemeForChannel("alpha")).toBe("zeros-alpha");
-    expect(schemeForChannel("beta")).toBe("zeros-beta");
     expect(schemeForChannel("dev")).toBe("zeros-dev");
     // The whole point: no two channels share a scheme, so the OS never routes a
-    // sign-in / invite / pair deep link to a sibling app (the "Open Zeros Beta?"
-    // mis-route). Iterates CHANNELS so a newly added channel is covered
+    // sign-in / invite / pair deep link to a sibling app. Iterates CHANNELS so a newly added channel is covered
     // automatically instead of quietly reusing stable's zeros://.
     const schemes = CHANNELS.map(schemeForChannel);
     expect(new Set(schemes).size).toBe(CHANNELS.length);
@@ -162,11 +160,9 @@ describe("release channel + deep-link scheme", () => {
 // ──────────────────────────────────────────────────────────
 // Alpha channel (the build cut from every merge to main)
 // ──────────────────────────────────────────────────────────
-// Alpha exists so main can be dogfooded on a REAL signed packaged build while
-// Beta becomes a frozen stabilization cut from a release/* branch. It must be
-// installable and runnable ALONGSIDE Beta and Production, which means it needs its
-// own port block, data dirs and deep-link scheme — the same isolation #204
-// established for Beta.
+// Alpha exists so main can be dogfooded on a REAL signed packaged build. It must
+// be installable and runnable ALONGSIDE Production, which means it needs its own
+// port block, data dirs and deep-link scheme.
 describe("alpha channel isolation", () => {
   it("ZEROS_CHANNEL=alpha → its own base port 24213", () => {
     process.env.ZEROS_CHANNEL = "alpha";
@@ -175,15 +171,13 @@ describe("alpha channel isolation", () => {
     expect(ENGINE_BASE_PORT_ALPHA).toBe(24213);
   });
 
-  it("all FOUR channels own disjoint port footprints", () => {
+  it("every channel owns a disjoint port footprint", () => {
     // Footprint per channel = the span walk PLUS base+8 (MCP gateway) and base+9
-    // (its OAuth callback) — 10 ports. Overlap is what made Stable's reaper kill
-    // Beta's live engine in a ~21s loop before #204; a third packaged channel
-    // multiplies that risk, so pin the arithmetic.
+    // (its OAuth callback) — 10 ports. An overlap lets one channel's reaper kill
+    // another channel's live engine, so pin the arithmetic.
     const FOOTPRINT = ENGINE_PORT_SPAN + 2;
     const bases = [
       ENGINE_BASE_PORT_PROD,
-      ENGINE_BASE_PORT_BETA,
       ENGINE_BASE_PORT_ALPHA,
       ENGINE_BASE_PORT_DEV,
     ];
@@ -197,10 +191,12 @@ describe("alpha channel isolation", () => {
     expect(used.size).toBe(bases.length * FOOTPRINT);
   });
 
-  it("alpha sits after beta's full footprint and before dev", () => {
-    expect(ENGINE_BASE_PORT_ALPHA).toBeGreaterThanOrEqual(
-      ENGINE_BASE_PORT_BETA + ENGINE_PORT_SPAN + 2,
-    );
+  it("alpha keeps its shipped base and leaves the retired 24203 block unassigned", () => {
+    const retired = 24203;
+    for (const base of [ENGINE_BASE_PORT_PROD, ENGINE_BASE_PORT_ALPHA, ENGINE_BASE_PORT_DEV]) {
+      const footprintHigh = base + ENGINE_PORT_SPAN + 1;
+      expect(footprintHigh < retired || base > retired + ENGINE_PORT_SPAN + 1).toBe(true);
+    }
     expect(ENGINE_BASE_PORT_ALPHA).toBeLessThan(ENGINE_BASE_PORT_DEV);
   });
 

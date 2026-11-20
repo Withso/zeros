@@ -66,7 +66,7 @@ try {
   await status("preparing");
   report.sourceDigest = manifest().digest;
   report.revision = (await run("git", ["rev-parse", "HEAD"])).trim();
-  const identity = { slug: `design-qual-${randomUUID().slice(0, 8)}`, name: "Zeros Design Qualification" };
+  const identity = { slug: randomUUID().replace(/-/g, "").slice(0, 16), name: "Zeros Design Qualification" };
   const ports = await pickLocalPorts(identity.slug);
   const cdpPort = await freePort();
   const env = { ...localEnvironment({ identity, ...ports }), ZEROS_ISOLATE: "1", ZEROS_NO_ENGINE_HMR: "1", ZEROS_NO_MAIN_HMR: "1", ZEROS_DATA_DIR: path.join(root, "profile"), ELECTRON_RENDERER_URL: `http://127.0.0.1:${ports.vitePort}` };

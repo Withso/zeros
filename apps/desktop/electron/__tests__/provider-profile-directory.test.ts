@@ -80,4 +80,28 @@ describe("stable provider profile ownership", () => {
     state.local = false;
     expect(isOwnedProviderProfileDirectory("claude", id, legacy)).toBe(false);
   });
+
+  // Phase 2 finding 15: an isolated v2 instance's migrated profile keeps its
+  // `com.zeros.local/instances/<id>` path, so it must stay removable.
+  it("retains a migrated v2 instance profile, and nothing beside it", () => {
+    state.root = mkdtempSync(path.join(tmpdir(), "zeros-profile-ownership-"));
+    state.local = true;
+    const id = "00000000-0000-4000-8000-000000000001";
+    const v2 = (instance: string, provider = "claude") =>
+      path.join(state.root, "com.zeros.local", "instances", instance, "provider-accounts", provider, id);
+    expect(isOwnedProviderProfileDirectory("claude", id, v2("0123456789abcdef"))).toBe(true);
+    for (const directory of [
+      v2("design-qual-0011aabb"),
+      v2("alpha"),
+      v2("default"),
+      v2("Not_Valid"),
+      v2("0123456789abcdef", "codex"),
+      v2("0123456789abcdef").replace("com.zeros.local", "com.zeros.dev"),
+      path.join(state.root, "com.zeros.local", "instances", "a", "b", "provider-accounts", "claude", id),
+      `${state.root}/com.zeros.local/instances/../provider-accounts/claude/${id}`,
+    ])
+      expect(isOwnedProviderProfileDirectory("claude", id, directory), directory).toBe(false);
+    state.local = false;
+    expect(isOwnedProviderProfileDirectory("claude", id, v2("0123456789abcdef"))).toBe(false);
+  });
 });

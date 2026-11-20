@@ -16,7 +16,7 @@ import {
   runMigrations,
 } from "./migrate.js";
 
-const RESETTABLE_CHANNELS = new Set(["alpha", "beta", "development"]);
+const RESETTABLE_CHANNELS = new Set(["alpha", "development"]);
 const COUNT_TABLES = [
   "users",
   "user_identities",
@@ -71,7 +71,7 @@ export interface ResetRequestInput {
 }
 
 export interface ValidatedResetRequest {
-  channel: "alpha" | "beta" | "development";
+  channel: "alpha" | "development";
   execute: boolean;
   fingerprint: string;
 }
@@ -138,7 +138,7 @@ export function validateResetRequest(
   }
   if (!RESETTABLE_CHANNELS.has(channel)) {
     throw new DatabaseResetError(
-      "Invalid reset configuration: CONTROL_PLANE_RESET_CHANNEL must be alpha, beta, or development",
+      "Invalid reset configuration: CONTROL_PLANE_RESET_CHANNEL must be alpha or development",
     );
   }
   const railwayEnvironment = input.railwayEnvironmentName?.trim().toLowerCase();
