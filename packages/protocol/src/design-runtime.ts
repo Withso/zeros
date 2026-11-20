@@ -3120,8 +3120,9 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   }
 
   function replacedStyleOf(element, candidate, index, computed) {
-    if (candidate.value.length > ${DESIGN_RUNTIME_AUTHORED_STYLE_LIMITS.value}) return null;
+    // A variable shorthand's longhand has no value of its own until substitution.
     if (candidate.value === null) return null;
+    if (candidate.value.length > ${DESIGN_RUNTIME_AUTHORED_STYLE_LIMITS.value}) return null;
     var entry = candidate.match && candidate.match.entry;
     var replaced = originOfWinner(candidate);
     replaced.value = candidate.value;
