@@ -955,6 +955,8 @@ describe("layout runtime editing", () => {
         if (playState === "paused") {
           transition.pause();
           transition.currentTime = 5000;
+          // Settle the pending pause so the measurement sees a paused transition.
+          await transition.ready;
         }
         const before = {
           style: a.getAttribute("style"),
