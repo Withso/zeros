@@ -11,6 +11,7 @@
 // Mounted around MainShellBody and Settings. All the hooks it needs are stores or
 // providers that live above the main shell, so it can sit at that level.
 
+import { localWorkShowsEverywhere } from "../features/team/organization-capabilities";
 import React, {
   createContext,
   useCallback,
@@ -76,6 +77,8 @@ export interface AddProjectOptions {
   /** Return the registered project to Create's picker without opening a
    * workspace. Omit for the usual first-workspace flow. */
   onSelect?: (project: Project) => void;
+  /** unified-workspaces: Create's This Mac side clones onto this Mac under any owner. */
+  placement?: "local";
 }
 
 interface AddProjectActions {
@@ -206,7 +209,7 @@ export function AddProjectProvider({
       const { onSelect } = opts;
       const autoCreate = !onSelect && (opts.autoCreate ?? true);
       const organization = getActiveOrganizationSnapshot();
-      if (autoCreate && organization && !organization.isPersonal) {
+      if (autoCreate && organization && !organization.isPersonal && !localWorkShowsEverywhere()) {
         pendingOpens.current.delete(repoRoot);
         setPendingProject(null);
         setOpenGithubTarget({ onSelect });
@@ -362,7 +365,7 @@ export function AddProjectProvider({
   const openProject = useCallback(
     async ({ onSelect }: AddProjectOptions = {}) => {
       const organization = getActiveOrganizationSnapshot();
-      if (organization && !organization.isPersonal) {
+      if (organization && !organization.isPersonal && !localWorkShowsEverywhere()) {
         setOpenGithubTarget({ onSelect });
         return;
       }
@@ -421,7 +424,7 @@ export function AddProjectProvider({
 
   const quickStart = useCallback((options: AddProjectOptions = {}) => {
     const organization = getActiveOrganizationSnapshot();
-    if (organization && !organization.isPersonal) {
+    if (organization && !organization.isPersonal && !localWorkShowsEverywhere()) {
       setOpenGithubTarget(options);
       return;
     }
@@ -502,6 +505,7 @@ export function AddProjectProvider({
       />
       <OpenGithubProjectDialog
         open={openGithubTarget !== null}
+        local={openGithubTarget?.placement === "local" && localWorkShowsEverywhere()}
         onOpenChange={(open) => {
           if (!open) setOpenGithubTarget(null);
         }}

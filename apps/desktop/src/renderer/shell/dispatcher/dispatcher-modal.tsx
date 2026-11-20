@@ -725,7 +725,7 @@ function ActiveDispatcherPage({
                 </DropdownMenuItem>
                 <DropdownMenuItem
                   onSelect={() =>
-                    onOpenGithubProject({ onSelect: selectAddedProject })
+                    onOpenGithubProject({ onSelect: selectAddedProject, ...(unified ? { placement: "local" as const } : {}) })
                   }
                 >
                   <GithubIcon className="text-fg2" strokeWidth={1.5} />
@@ -827,7 +827,7 @@ function ActiveDispatcherPage({
           {!cloud.computerMode && !selectedProject && (
             <CreateStartBanners
               onOpenProject={() => onOpenProject({ onSelect: selectAddedProject })}
-              onOpenGithubProject={() => onOpenGithubProject({ onSelect: selectAddedProject })}
+              onOpenGithubProject={() => onOpenGithubProject({ onSelect: selectAddedProject, ...(unified ? { placement: "local" as const } : {}) })}
               onQuickStart={() => onQuickStart({ onSelect: selectAddedProject })}
             />
           )}
