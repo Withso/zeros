@@ -197,6 +197,8 @@ import type { AgentMemorySettings } from "@zeros/protocol/agent-events";
 import { popoverBoundaryProps } from "@/renderer/shared/ui/popover-boundary";
 import { CHANNEL, isFeatureEnabled } from "../../config/release-channel";
 import { PlaceLabel } from "./settings-ui";
+import { ProjectPage, settingsProjects, type SettingsProject } from "./project-page";
+import { useCloudComputerV2CreateGate } from "./cloud-computer-v2-create-gate";
 import { shellOpenUrl } from "../../platform/app";
 import { APP_BASE_URL, organizationDashboardUrl } from "../team/organization-links";
 import { CloudWorkspacePausedNotice } from "../team/cloud-workspace-pause";
@@ -371,7 +373,8 @@ type RepoPage = RepoSectionId | typeof REPO_OVERVIEW;
 type Selection =
   | { scope: "user"; section: SectionId }
   | { scope: "repo"; repoId: string; section: RepoPage }
-  | { scope: "cloud-repo"; repository: string; tab: CloudRepositoryTab };
+  | { scope: "cloud-repo"; repository: string; tab: CloudRepositoryTab }
+  | { scope: "project"; key: string };
 
 function userSelection(section: SectionId): string {
   return `user:${section}`;
@@ -395,6 +398,11 @@ function isStaticSection(value: string): value is SectionId {
 
 // Older installs saved bare section IDs and sectionless repo links.
 function parseSelection(active: string, fallback: SectionId = "general", unified = false): Selection {
+  // The unified rail's joined project page; the old rail shows its fallback without rewriting the save.
+  if (active.startsWith("project:")) {
+    const key = active.slice("project:".length);
+    return unified && key ? { scope: "project", key } : { scope: "user", section: fallback };
+  }
   if (active.startsWith("cloud-repo:")) {
     const rest = active.slice("cloud-repo:".length), colon = rest.indexOf(":");
     const tab = rest.slice(0, colon), repository = rest.slice(colon + 1);
@@ -435,6 +443,8 @@ function parseSelection(active: string, fallback: SectionId = "general", unified
 }
 
 const PAGE_HEADING_CLS = "m-0 text-lg leading-6 font-medium text-fg1";
+const NO_CLOUD_REPOSITORIES: readonly string[] = [];
+const NO_SETTINGS_PROJECTS: SettingsProject[] = [];
 
 const HINT_CLS = "m-0 text-3xxs leading-4 text-fg3";
 
@@ -455,7 +465,9 @@ function loadInitialSection(owner: string, unified: boolean): string {
     ? userSelection(sel.section)
     : sel.scope === "repo"
       ? repoSelection(sel.repoId, sel.section)
-      : cloudRepoSelection(sel.repository, sel.tab);
+      : sel.scope === "project"
+        ? `project:${sel.key}`
+        : cloudRepoSelection(sel.repository, sel.tab);
 }
 
 const SIDEBAR_ENTRY_CLS =
@@ -534,7 +546,8 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
     const prevLen = prevProjectsLenRef.current;
     prevProjectsLenRef.current = projects.length;
     const sel = parseSelection(active, "general", unified);
-    if (sel.scope !== "repo" || !local) return;
+    // The unified rail opens a saved repository on its project page instead.
+    if (sel.scope !== "repo" || !local || unified) return;
     // Keep a saved repo route until the project list can resolve it.
     if (projects.length === 0 && prevLen === 0) return;
     const project = projects.find((p) => p.id === sel.repoId);
@@ -590,26 +603,47 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
   const fallbackSection =
     availableSections.find((s) => s.id === (local ? "general" : "providers")) ??
     availableSections[0];
-  const activeSection: SectionDef | null =
-    selection.scope === "user"
-      ? (availableSections.find((s) => s.id === selection.section) ??
-        fallbackSection)
-      : local || selection.scope === "cloud-repo" ? null : fallbackSection;
-  // Persist the fallback so reopening a gate cannot restore a retired selection.
-  const selectedSection = selection.scope === "cloud-repo" ? null : selection.section;
-  useEffect(() => {
-    if (selection.scope === "repo" && local) return;
-    if (selection.scope === "user" && availableSections.some((s) => s.id === selectedSection)) return;
-    if (selection.scope === "cloud-repo" && availableSections.some((s) => s.id === "cloud-computer")) return;
-    const fallback = fallbackSection?.id;
-    if (fallback) setActive(userSelection(fallback));
-  }, [availableSections, fallbackSection, selection.scope, selectedSection, local, setActive]);
   const availableSectionIds = useMemo(
     () => new Set(availableSections.map((section) => section.id)),
     [availableSections],
   );
   const cloudRepositories = useCloudComputerRepositories(me?.user.id ?? null,
     !local && availableSectionIds.has("cloud-computer") ? organization : null, pageActive);
+  // unified-workspaces: one page per joined project. Members read the installed
+  // repositories; owners and admins also see what their recipe adds.
+  const installedCloud = useCloudComputerV2CreateGate(pageActive && unified && !local).repositories;
+  const projectCloudKey = unified && !local
+    ? [...new Set([...cloudRepositories, ...(installedCloud ?? []).map(row => `${row.owner}/${row.name}`)])].join("\n")
+    : "";
+  const projectCloudNames = useMemo(() => (projectCloudKey ? projectCloudKey.split("\n") : NO_CLOUD_REPOSITORIES), [projectCloudKey]);
+  const joinedProjects = useMemo(
+    () => (unified ? settingsProjects(projects, projectCloudNames) : NO_SETTINGS_PROJECTS),
+    [unified, projects, projectCloudNames],
+  );
+  const currentProject: SettingsProject | undefined = !unified ? undefined
+    : selection.scope === "project" ? joinedProjects.find(project => project.key === selection.key)
+    : selection.scope === "repo" ? joinedProjects.find(project => project.local.some(folder => folder.id === selection.repoId))
+    : selection.scope === "cloud-repo"
+      ? joinedProjects.find(project => project.cloudRepository?.toLowerCase() === selection.repository.toLowerCase())
+      : undefined;
+  const activeSection: SectionDef | null =
+    selection.scope === "user"
+      ? (availableSections.find((s) => s.id === selection.section) ??
+        fallbackSection)
+      : currentProject ? null
+      : unified ? fallbackSection
+      : local || selection.scope === "cloud-repo" ? null : fallbackSection;
+  // Persist the fallback so reopening a gate cannot restore a retired selection.
+  const selectedSection = selection.scope === "cloud-repo" || selection.scope === "project" ? null : selection.section;
+  useEffect(() => {
+    // A saved project may resolve once its lists load; keep it rather than rewrite it.
+    if (unified && selection.scope !== "user") return;
+    if (selection.scope === "repo" && local) return;
+    if (selection.scope === "user" && availableSections.some((s) => s.id === selectedSection)) return;
+    if (selection.scope === "cloud-repo" && availableSections.some((s) => s.id === "cloud-computer")) return;
+    const fallback = fallbackSection?.id;
+    if (fallback) setActive(userSelection(fallback));
+  }, [availableSections, fallbackSection, selection.scope, selectedSection, local, setActive, unified]);
   const openCloudRepository = useCallback((repository: string) => setActive(cloudRepoSelection(repository, "git")), [setActive]);
   // Keep visited panels mounted to preserve drafts across navigation.
   const sectionIdsToRender = useRetainedViewKeys(
@@ -723,16 +757,15 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
                     </React.Fragment>
                   );
                 })}
-                {(local ? projects.length > 0 : cloudRepositories.length > 0) && (
+                {joinedProjects.length > 0 && (
                   <>
                     <div className={SETTINGS_GROUP_HEADER_CLS}>Projects</div>
                     <div className="flex flex-col gap-0.5">
-                      {local
-                        ? projects.map((project) => (
-                            <SectionNavButton key={project.id} icon={FolderGit2} label={project.name} isActive={false}
-                              onClick={() => dispatch({ type: "OPEN_REPO_PAGE", projectId: project.id, view: repoPageViewForSection(REPO_OVERVIEW) })} />
-                          ))
-                        : cloudRepositories.map((repository) => renderCloudRepositoryNav(repository))}
+                      {joinedProjects.map((project) => (
+                        <SectionNavButton key={project.key} icon={FolderGit2} label={project.label}
+                          isActive={currentProject?.key === project.key}
+                          onClick={() => setActive(`project:${project.key}`)} />
+                      ))}
                     </div>
                   </>
                 )}
@@ -787,7 +820,21 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
               className="settings-type-scale mx-auto w-full max-w-160 pb-12"
             >
               {/* Legacy Local repo links redirect without mounting a Settings panel. */}
-              {selection.scope === "cloud-repo" && (
+              {currentProject && (
+                <div className="flex flex-col gap-8">
+                  <header className="flex min-w-0 flex-col gap-1">
+                    <h1 className={PAGE_HEADING_CLS}>{currentProject.label}</h1>
+                    <p className="text-fg2 m-0 truncate text-xs leading-4.5">{currentProject.subtitle}</p>
+                  </header>
+                  <ProjectPage key={currentProject.key} project={currentProject} surfaceActive={pageActive}
+                    cloudAvailable={!local && availableSectionIds.has("cloud-computer")}
+                    canManageCloud={organization?.role === "owner" || organization?.role === "admin"}
+                    onAddToCloud={() => setActive(userSelection("cloud-computer"))}
+                    onOpenCloudComputer={() => setActive(userSelection("cloud-computer"))}
+                    onOpenEnvironment={() => setActive(userSelection("environment"))} />
+                </div>
+              )}
+              {!unified && selection.scope === "cloud-repo" && (
                 <div className="flex flex-col gap-8">
                   <header className="flex min-w-0 flex-col gap-1">
                     <h1 className={PAGE_HEADING_CLS}>{selection.repository}</h1>

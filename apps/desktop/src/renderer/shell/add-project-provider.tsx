@@ -79,6 +79,8 @@ export interface AddProjectOptions {
   onSelect?: (project: Project) => void;
   /** unified-workspaces: Create's This Mac side clones onto this Mac under any owner. */
   placement?: "local";
+  /** Prefills Open GitHub project with this repository URL. */
+  url?: string;
 }
 
 interface AddProjectActions {
@@ -125,6 +127,11 @@ export function useAddProject(): AddProjectActions {
     throw new Error("useAddProject must be used within <AddProjectProvider>");
   }
   return ctx;
+}
+
+/** For surfaces that can also render outside the provider (harness pages). */
+export function useOptionalAddProject(): AddProjectActions | null {
+  return useContext(AddProjectContext);
 }
 
 export function AddProjectProvider({
@@ -506,6 +513,7 @@ export function AddProjectProvider({
       <OpenGithubProjectDialog
         open={openGithubTarget !== null}
         local={openGithubTarget?.placement === "local" && localWorkShowsEverywhere()}
+        initialUrl={openGithubTarget?.url}
         onOpenChange={(open) => {
           if (!open) setOpenGithubTarget(null);
         }}

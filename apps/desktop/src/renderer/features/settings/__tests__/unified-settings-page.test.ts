@@ -9,7 +9,7 @@ const state = vi.hoisted(() => ({
   organization: null as OrganizationSummary | null,
   saved: new Map<string, string>(),
   writes: [] as Array<[string, string, string]>,
-  projects: [] as Array<{ id: string; name: string }>,
+  projects: [] as Array<{ id: string; name: string; repoRoot?: string; originUrl?: string | null; addedAt?: number }>,
   cloudRepositories: [] as string[],
   cloudAccess: true,
   dispatch: vi.fn(),
@@ -95,6 +95,10 @@ vi.mock("../local-commands-settings", () => ({
   AlwaysAllowLocalCommands: () => "local-commands-fixture",
 }));
 vi.mock("../migrate-legacy", () => ({ ensureSettingsTomlMigrated: vi.fn() }));
+vi.mock("../project-page", async (original) => ({
+  ...(await original<typeof import("../project-page")>()),
+  ProjectPage: ({ project }: { project: { key: string } }) => `project-page-fixture:${project.key}`,
+}));
 vi.mock("../../../shell/add-project-provider", () => ({
   useAddProject: () => ({ openProject: vi.fn(), openGithubProject: vi.fn(), quickStart: vi.fn() }),
 }));
@@ -164,9 +168,10 @@ describe("unified Settings rail", () => {
       (node) => node.textContent === "Zeros",
     ) as HTMLElement;
     act(() => project.click());
-    expect(state.dispatch).toHaveBeenCalledWith(
-      expect.objectContaining({ type: "OPEN_REPO_PAGE", projectId: "project-zeros" }),
-    );
+    expect(state.dispatch).not.toHaveBeenCalled();
+    expect(heading()).toBe("Zeros");
+    expect(container.textContent).toContain("project-page-fixture:local:project-zeros");
+    expect(state.saved.get("local:section")).toBe("project:local:project-zeros");
   });
 
   it("adds the organization's group by name and its cloud repositories as Projects", () => {
@@ -179,7 +184,7 @@ describe("unified Settings rail", () => {
       "Withso",
       "GeneralMembersCloud Computer",
       "Projects",
-      "withso/zeros",
+      "zeros",
     ]);
   });
 
@@ -195,6 +200,30 @@ describe("unified Settings rail", () => {
     expect(url.searchParams.get("organization")).toBe("org-a");
     expect(url.searchParams.get("section")).toBe("members");
     expect(state.writes).toEqual([]);
+  });
+
+  it("joins a repository on this Mac and in the cloud into one project, and old saved pages land on it", () => {
+    state.organization = ORGANIZATION;
+    state.projects = [{ id: "project-zeros", name: "Zeros", repoRoot: "/Users/me/zeros", originUrl: "git@github.com:withso/zeros.git", addedAt: 1 }];
+    state.cloudRepositories = ["withso/zeros"];
+    for (const saved of ["cloud-repo:git:withso/zeros", "repo:project-zeros:git", "project:github:withso/zeros"]) {
+      state.saved.set(`${ORGANIZATION_OWNER}:section`, saved);
+      render();
+      expect(rail().slice(-2)).toEqual(["Projects", "Zeros"]);
+      expect(heading()).toBe("Zeros");
+      expect(container.querySelector("header p")?.textContent).toBe("withso/zeros");
+      expect(container.textContent).toContain("project-page-fixture:github:withso/zeros");
+      expect(activeEntry()).toBe("Zeros");
+    }
+    expect(state.writes).toEqual([]);
+    expect(state.dispatch).not.toHaveBeenCalled();
+  });
+
+  it("shows this Mac's projects under the Personal owner with no cloud side", () => {
+    state.projects = [{ id: "project-zeros", name: "Zeros", repoRoot: "/Users/me/zeros", originUrl: "git@github.com:withso/zeros.git", addedAt: 1 }];
+    state.cloudRepositories = ["withso/zeros"];
+    render();
+    expect(rail().slice(-2)).toEqual(["Projects", "Zeros"]);
   });
 
   it("splits General: personal rows, then This Mac; organization rows on their own page", () => {

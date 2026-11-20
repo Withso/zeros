@@ -423,6 +423,37 @@ export function RepoDetail({
   }
 }
 
+/** The unified project page's This Mac parts, composed from the repository
+ * sections with the same layer and root the repository page uses. */
+export function ProjectLocalPart({
+  project,
+  part,
+  surfaceActive = true,
+}: {
+  project: Project;
+  part: "setup" | "git" | "environment" | "more";
+  surfaceActive?: boolean;
+}) {
+  const root = project.repoRoot;
+  switch (part) {
+    case "setup":
+      return project.isGitRepository !== false ? <ScriptsSection project={project} layer="repo-local" root={root} /> : null;
+    case "git":
+      return <GitSection project={project} layer="repo-local" root={root} surfaceActive={surfaceActive} />;
+    case "environment":
+      return <EnvironmentSection project={project} layer="repo-local" root={root} />;
+    case "more":
+      return (
+        <div className="flex flex-col gap-8">
+          <RunActionsSection project={project} layer="repo-local" root={root} />
+          <ActionsSection project={project} layer="repo-local" root={root} />
+          <FilesToCopySection project={project} layer="repo-local" root={root} surfaceActive={surfaceActive} />
+          <PathsSection project={project} />
+        </div>
+      );
+  }
+}
+
 /** A script field that edits the repo layer while surfacing inheritance. The
  *  editor holds only what THIS repo sets; empty + save means inherit. */
 function OverrideField({

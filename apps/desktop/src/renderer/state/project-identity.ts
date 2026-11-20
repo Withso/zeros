@@ -123,24 +123,27 @@ export type RegisteredProjectSide = ProjectSide & { project: Project };
 const sideOf = new WeakMap<Project, RegisteredProjectSide>();
 const sidesOf = new WeakMap<readonly Project[], readonly RegisteredProjectSide[]>();
 
+/** One stable side object per registered project, so repeated joins reuse their result. */
+export function registeredProjectSide(project: Project): RegisteredProjectSide {
+  let side = sideOf.get(project);
+  if (!side) {
+    side = {
+      id: project.id,
+      place: isCloudWorkspace(project.repoRoot) ? "cloud" : "local",
+      remote: project.originUrl,
+      addedAt: project.addedAt,
+      project,
+    };
+    sideOf.set(project, side);
+  }
+  return side;
+}
+
 /** Registered local folders and the cloud catalog's repositories, joined. */
 export function joinRegisteredProjects(projects: readonly Project[]): ProjectJoin<RegisteredProjectSide> {
   let sides = sidesOf.get(projects);
   if (!sides) {
-    sides = projects.map(project => {
-      let side = sideOf.get(project);
-      if (!side) {
-        side = {
-          id: project.id,
-          place: isCloudWorkspace(project.repoRoot) ? "cloud" : "local",
-          remote: project.originUrl,
-          addedAt: project.addedAt,
-          project,
-        };
-        sideOf.set(project, side);
-      }
-      return side;
-    });
+    sides = projects.map(registeredProjectSide);
     sidesOf.set(projects, sides);
   }
   return joinProjects(sides);
