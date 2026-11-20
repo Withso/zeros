@@ -87,6 +87,7 @@ import {
   captureDesignRuntimeScreenshot,
   notifyDesignSelectionSnapshot,
   persistDesignRuntimeAuditSnapshot,
+  rememberDesignEditSelection,
   setDesignSelectionSnapshotReader,
 } from "./design-selection";
 import {
@@ -1916,6 +1917,7 @@ export async function updateDesignNodeStylesCached(
       ),
       async (sourceVersion) => {
         assertOwner();
+        rememberDesignEditSelection(workspaceId, input.frame, sourceVersion);
         const beforeState = historyStateKey(
           designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data,
         );
@@ -2385,13 +2387,11 @@ export function applyDesignEditCached(
     if (intentFactory) assertIntentCurrent();
     if (!resolved) return null;
     refuseDesignComponentPartWrite(resolved.operations);
-    const key = designFoundationKey(
-      workspaceId,
-      file,
-      measured
-        ? sourceVersion
-        : preparedSourceVersion ?? resolveLocalFrameSourceVersion(workspaceId, file, sourceVersion),
-    );
+    const editSourceVersion = measured
+      ? sourceVersion
+      : preparedSourceVersion ?? resolveLocalFrameSourceVersion(workspaceId, file, sourceVersion);
+    rememberDesignEditSelection(workspaceId, file, editSourceVersion);
+    const key = designFoundationKey(workspaceId, file, editSourceVersion);
     const foundation = await designFoundationCache.load(
       key,
       () => fetchDesignFoundation(key),
