@@ -470,7 +470,7 @@ export function DesignComponentOptions({
               value={instance.host.text}
               disabled={actionDisabled}
               onCommit={(next) => {
-                if (active && next !== instance.host.text) void commitDesignInstanceText(workspaceId, frame, instance.nodeId, next).catch(failed("the text"));
+                if (active && next !== instance.host.text) void commitDesignInstanceText(workspaceId, frame, instance.nodeId, next, instance.host).catch(failed("the text"));
               }}
             />
           </div>
@@ -479,7 +479,7 @@ export function DesignComponentOptions({
               label="Reset text to the main component's default"
               data-design-text-reset=""
               disabled={actionDisabled || instance.host.text === ""}
-              onClick={() => { if (active) void commitDesignInstanceText(workspaceId, frame, instance.nodeId, "").catch(failed("the text")); }}
+              onClick={() => { if (active) void commitDesignInstanceText(workspaceId, frame, instance.nodeId, "", instance.host).catch(failed("the text")); }}
             >
               <RotateCcw />
             </InspectorIconButton>

@@ -1,4 +1,3 @@
-import { getActiveBridge } from "../../../platform/bridge/active-bridge";
 import { DESIGN_TRANSACTION_MAX_OPERATIONS } from "@zeros/design-core";
 // PURPOSE: A component frame's options in the Style panel. The declaration
 // arrives with the frame's prepared record (exact to its generation) and is
@@ -23,7 +22,7 @@ import {
 import {
   designComponentRecordLimitMessage,
   type DesignFrameComponent,
-  type DesignFrameInstances, DESIGN_INSTANCE_SLOT_TEXT_CAPABILITY } from "@zeros/protocol/design-catalog";
+  type DesignFrameInstances } from "@zeros/protocol/design-catalog";
 import { isDesignComponentVariantName } from "@zeros/protocol/design-path";
 import { designComponentSlotNodeId, DESIGN_RUNTIME_INSTANCE_TARGET } from "@zeros/protocol/design-runtime";
 
@@ -234,7 +233,7 @@ async function prepareDesignInstanceReset(
   if (Object.keys(styleUpdates).length) operations.push({ operationId: "reset-style", type: "node.set-styles", nodeId, styles: styleUpdates, scope: "inline", responsiveContext: "base", stateContext: "default" });
   if (kind === "all") {
     for (const layer of [...new Set(Object.values(host.slotted ?? {}).flat())]) operations.push({ operationId: `reset-slot-${operations.length}`, type: "node.delete", nodeId: layer });
-    if (host.text?.length) operations.push({ operationId: "reset-text", type: "node.set-text", nodeId: defaultSlotTextTarget(workspaceId, nodeId), text: "" });
+    if (host.text?.length) operations.push({ operationId: "reset-text", type: "node.set-text", nodeId: defaultSlotTextTarget(nodeId, host.mixedText), text: "" });
   }
   if (!operations.length) return null;
   if (operations.length > DESIGN_TRANSACTION_MAX_OPERATIONS)
@@ -315,19 +314,19 @@ export function commitDesignInstanceAllOverridesReset(
     ({ assertCurrent }) => prepareDesignInstanceReset(workspaceId, frame, nodeId, "all", assertCurrent));
 }
 
-/** The direct text of a host's default slot: through its virtual ID where the
- * engine edits it beside other children, otherwise the host's own text, as an
- * older engine reports it only for a host holding nothing else. */
-function defaultSlotTextTarget(workspaceId: string, nodeId: string): string {
-  return getActiveBridge()?.supportsEngineCapability?.(DESIGN_INSTANCE_SLOT_TEXT_CAPABILITY, workspaceId) === true
-    ? designComponentSlotNodeId(nodeId, "")
-    : nodeId;
+/** The direct text of a host's default slot. Text beside other children comes
+ * only from an engine that negotiated slot text and is written through the
+ * virtual default slot; text alone is the host's own text, which every engine
+ * writes. The record decides, so a disconnected bridge cannot change it. */
+function defaultSlotTextTarget(nodeId: string, mixedText: boolean | undefined): string {
+  return mixedText ? designComponentSlotNodeId(nodeId, "") : nodeId;
 }
 
 /** Set the text a plain component's instance fills its default slot with:
  * its host's own text. */
-export function commitDesignInstanceText(workspaceId: string, frame: { file: string; sourceVersion: string }, nodeId: string, text: string) {
-  return applyDesignEditCached(workspaceId, frame, edit("Set text", [{ operationId: "set-text", type: "node.set-text", nodeId: defaultSlotTextTarget(workspaceId, nodeId), text }]));
+export function commitDesignInstanceText(workspaceId: string, frame: { file: string; sourceVersion: string }, nodeId: string, text: string,
+  record: { mixedText?: boolean } = {}) {
+  return applyDesignEditCached(workspaceId, frame, edit("Set text", [{ operationId: "set-text", type: "node.set-text", nodeId: defaultSlotTextTarget(nodeId, record.mixedText), text }]));
 }
 
 /** Empty an instance's slot back to what its main puts there: delete the

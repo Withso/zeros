@@ -14,11 +14,9 @@ const mocks = vi.hoisted(() => {
     }),
     pause: vi.fn(),
     resume: vi.fn(),
-    capability: vi.fn((_capability: string, _workspaceId: string) => true),
   };
   return state;
 });
-vi.mock("../../../platform/bridge/active-bridge", () => ({ getActiveBridge: () => ({ supportsEngineCapability: mocks.capability }) }));
 vi.mock("../../../platform/bridge/design-frame-runtime", () => ({ designFrameRuntime: mocks.runtime, waitForDesignFrameRuntime: mocks.waitRuntime }));
 vi.mock("../state/design-workspace-cache", () => ({
   applyDesignEditCached: mocks.apply,
@@ -26,7 +24,7 @@ vi.mock("../state/design-workspace-cache", () => ({
 }));
 vi.mock("../state/design-background-work", () => ({ designBackgroundWork: { pause: mocks.pause } }));
 
-import { DESIGN_INSTANCE_SLOT_TEXT_CAPABILITY, type DesignFrameComponent } from "@zeros/protocol/design-catalog";
+import type { DesignFrameComponent } from "@zeros/protocol/design-catalog";
 import { designComponentSlotNodeId } from "@zeros/protocol/design-runtime";
 import { DesignTransactionSession, type DesignOperation } from "@zeros/design-core";
 import type { ComponentOptionValue } from "@zeros/design-core/component-options";
@@ -404,7 +402,7 @@ describe("variants and instances", () => {
   it("resets options, style, part and supplied content in one transaction without resetting variant or placement", async () => {
     const frame = { file: "home.html", sourceVersion: V1 } as never;
     prepareResetSnapshot("home.html", "inst", { attributes: { label: "Go", "zd-variant": "compact" }, overrides: { "cc-send": "x" },
-      style: "position: absolute; left: 12px; top: 24px; width: 300px; background: red", slotted: { "": ["slot-content"] }, text: "supplied" });
+      style: "position: absolute; left: 12px; top: 24px; width: 300px; background: red", slotted: { "": ["slot-content"] }, text: "supplied", mixedText: true });
     await commitDesignInstanceAllOverridesReset("w", frame, "inst");
     expect(calls()).toHaveLength(1);
     expect(latestCapturedEdit().intent).toBe("Reset all overrides");
@@ -469,21 +467,19 @@ describe("variants and instances", () => {
     await commitDesignInstanceText("w", frame, "tour-1", "How to move");
     expect(calls()[0]![1]).toBe(frame);
     expect(calls()[0]![2].intent).toBe("Set text");
-    expect(calls()[0]![2].operations).toEqual([expect.objectContaining({ type: "node.set-text", nodeId: designComponentSlotNodeId("tour-1", ""), text: "How to move" })]);
+    expect(calls()[0]![2].operations).toEqual([expect.objectContaining({ type: "node.set-text", nodeId: "tour-1", text: "How to move" })]);
   });
 
-  it("writes a host's own text to an engine that predates slot text, as it reports text only for a host holding nothing else", async () => {
-    mocks.capability.mockReturnValueOnce(false);
-    await commitDesignInstanceText("w", { file: "start/welcome.html", sourceVersion: V1 } as never, "tour-1", "How to move");
-    expect(mocks.capability).toHaveBeenCalledWith(DESIGN_INSTANCE_SLOT_TEXT_CAPABILITY, "w");
-    expect(calls().at(-1)![2].operations).toEqual([expect.objectContaining({ type: "node.set-text", nodeId: "tour-1", text: "How to move" })]);
+  it("writes text beside other children through the virtual default slot, as its record says, whatever the connection reports", async () => {
+    await commitDesignInstanceText("w", { file: "start/welcome.html", sourceVersion: V1 } as never, "tour-1", "How to move", { mixedText: true });
+    expect(calls().at(-1)![2].operations).toEqual([expect.objectContaining({ type: "node.set-text", nodeId: designComponentSlotNodeId("tour-1", ""), text: "How to move" })]);
   });
 
   it("edits direct text through the catalog default slot without touching mixed children", async () => {
     const host = await resetCatalogHost();
     expect(host.text).toBe("Before &after &");
     expect(host.mixedText).toBe(true);
-    await commitDesignInstanceText("w", { file: RESET_FILE, sourceVersion: V1 } as never, "host", "Changed & <safe>");
+    await commitDesignInstanceText("w", { file: RESET_FILE, sourceVersion: V1 } as never, "host", "Changed & <safe>", host);
     const edit = latestCapturedEdit();
     expect(edit.operations).toEqual([expect.objectContaining({
       type: "node.set-text",
@@ -507,7 +503,7 @@ describe("variants and instances", () => {
     expect(host.text).toBe("Before &after &");
     expect(host.slotted).toEqual({ "": ["default-layer"], actions: ["named-layer"] });
     prepareResetSnapshot(RESET_FILE, "host", { attributes: { width: "800", "zd-variant": "compact" }, overrides: { root: "color: red" },
-      style: "position: absolute; left: 12px; top: 24px; width: 300px; background: red", slotted: host.slotted, text: host.text });
+      style: "position: absolute; left: 12px; top: 24px; width: 300px; background: red", slotted: host.slotted, text: host.text, mixedText: host.mixedText });
     await commitDesignInstanceAllOverridesReset("w", { file: RESET_FILE, sourceVersion: V1 } as never, "host");
     expect(mocks.apply).toHaveBeenCalledTimes(1);
     const edit = latestCapturedEdit();
@@ -551,10 +547,12 @@ describe("variants and instances", () => {
       false,
     );
     expect(before.instances?.hosts.host?.text).toBe("custom");
+    // Its comment sits beside the text, so the record says to write the default slot.
+    expect(before.instances?.hosts.host?.mixedText).toBe(true);
 
-    if (resetKind === "text") await commitDesignInstanceText("w", frame, "host", "");
+    if (resetKind === "text") await commitDesignInstanceText("w", frame, "host", "", before.instances!.hosts.host!);
     else {
-      prepareResetSnapshot(RESET_FILE, "host", { attributes: {}, text: "custom", component: "card" });
+      prepareResetSnapshot(RESET_FILE, "host", { attributes: {}, text: "custom", component: "card", mixedText: true });
       await commitDesignInstanceAllOverridesReset("w", frame, "host");
     }
 
