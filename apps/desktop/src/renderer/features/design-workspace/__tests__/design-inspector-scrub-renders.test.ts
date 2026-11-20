@@ -418,6 +418,27 @@ describe("an inspector field scrub", () => {
     expect(writes()).toBe(0);
   });
 
+  it("keeps the Styled-by line open while the layer's details revalidate", async () => {
+    const line = () =>
+      container.querySelector<HTMLElement>('[data-design-styled-by] [aria-label="What styles this layer"]');
+    const styled = {
+      ...card,
+      classes: "btn",
+      authoredStyles: {
+        ...card.authoredStyles,
+        gap: { origin: "frame", selector: ".btn", scope: "element", subjectClasses: ["btn"], value: "8px", declared: "gap" },
+      } as never,
+    };
+    await show(sourceVersion, styled);
+    act(() => line()!.click());
+    expect(line()!.getAttribute("aria-expanded")).toBe("true");
+    const nextVersion = "2".repeat(24);
+    await show(nextVersion, styled);
+    expect(line()?.getAttribute("aria-expanded")).toBe("true");
+    await show(nextVersion, { ...styled, sourceVersion: nextVersion });
+    expect(line()?.getAttribute("aria-expanded")).toBe("true");
+  });
+
   it("keeps an admitted Shift scrub through revalidation and writes only after exact-source readback", async () => {
     const padding = { ...card, styles: { ...card.styles, "padding-left": "22px" } };
     await show(sourceVersion, padding);

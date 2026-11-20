@@ -3668,7 +3668,7 @@ export const DesignInspector = React.memo(function DesignInspector({
             {heldState && heldChanges ? (
               <DesignHeldStateNote state={heldState} count={heldChanges.count} onBack={() => pickLayerState(null)} />
             ) : null}
-            {styleContext && elementDetails && defaultOrigins.styledBy ? (
+            {styleContext && presentedElementDetails && defaultOrigins.styledBy ? (
               <DesignStyledByLine
                 key={styleOwnerKey}
                 styledBy={defaultOrigins.styledBy}
