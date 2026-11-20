@@ -14,6 +14,7 @@ import {
   parseCloudWorkspaceLink,
 } from "@zeros/protocol/cloud-workspace-link";
 import { IS_LOCAL_DEVELOPMENT } from "./runtime-mode";
+import { holdSingleInstanceLock } from "./single-instance-lock";
 import {
   assertIsDirectory,
   isPlausibleProject,
@@ -271,7 +272,7 @@ export function setupDeepLink(): void {
 
   // Windows/Linux launch a second process for links; the lock routes them to
   // the existing app and enables second-instance handling on macOS too.
-  const gotLock = app.requestSingleInstanceLock();
+  const gotLock = holdSingleInstanceLock();
   if (!gotLock) {
     app.quit();
     return;
