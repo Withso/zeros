@@ -57,6 +57,7 @@ export const isPreReleaseChannel: boolean = CHANNEL !== "stable";
  */
 const FEATURE_CHANNELS: Record<string, readonly Channel[]> = {
   "cloud-workspaces": CLOUD_WORKSPACE_CHANNELS,
+  "unified-workspaces": ["dev", "alpha"],
 };
 
 /** Whether `feature` is enabled in this build's channel. Unregistered → false. */
