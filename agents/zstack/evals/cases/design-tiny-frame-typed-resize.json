@@ -1,0 +1,9 @@
+{
+  "id": "design-tiny-frame-typed-resize",
+  "kind": "replay",
+  "area": "desktop-design",
+  "fixedBy": "pr:1202",
+  "symptom": "Typing W then H on a canvas frame too small on screen to run its document saved 10 × 110: the W edit waited for a live runtime to measure the root, timed out as still loading and was dropped.",
+  "rule": "A frame that runs no document has no preview over its confirmed readback; typed frame sizes prepare from that readback instead of requiring a live measureLayout runtime.",
+  "check": "pnpm exec vitest run --config vitest.config.ts apps/desktop/src/renderer/features/design-workspace/__tests__/design-inspector-scrub-renders.test.ts"
+}
