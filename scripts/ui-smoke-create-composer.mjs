@@ -48,7 +48,7 @@ export async function runCreateComposerSmoke({ page, check, harnessBase }) {
     expect(route.request().method()).toBe("GET");
     return route.fulfill({ json: unbuiltComputer() });
   });
-  await page.goto(`${harnessBase}/harness-folder-workspace.html?create&cloud-enabled`);
+  await page.goto(`${harnessBase}/harness-folder-workspace.html?create&cloud-enabled&feature-off=unified-workspaces`);
   await page
     .getByRole("button", { name: "Open folder fixture", exact: true })
     .click();
@@ -327,6 +327,68 @@ export async function runCreateComposerSmoke({ page, check, harnessBase }) {
   await runCreateReferenceSafetySmoke({ page, check, harnessBase });
   await runCreateDraftIndicatorSmoke({ page, check, harnessBase });
   await runCreateLinkedDirectoriesSmoke({ page, check, harnessBase });
+  await runCreatePlacementSmoke({ page, check, harnessBase });
+}
+
+/** unified-workspaces (on in dev): the This Mac / Cloud control, not the
+ * selected owner, decides placement; a blocked cloud side speaks in the tray. */
+export async function runCreatePlacementSmoke({ page, check, harnessBase }) {
+  const computer = /^https:\/\/api\.example\.test\/v1\/cloud-v2\/organizations\/[^/]+\/computer\/repositories(?:\?|$)/;
+  await page.route(computer, route => route.fulfill({ json: unbuiltComputer() }));
+  await page.goto(`${harnessBase}/harness-folder-workspace.html?create&cloud-enabled`);
+  await page.getByRole("button", { name: "Open folder fixture", exact: true }).click();
+  await page.getByRole("button", { name: "Initialize git and create", exact: true }).click();
+  await page.getByRole("button", { name: "Show Create", exact: true }).click();
+  await page.evaluate(() => window.setCreateOrganization("personal"));
+  const card = page.locator("[data-dispatcher-composer]");
+  const editor = card.locator(".composer-pm");
+  const create = card.getByRole("button", { name: "Create", exact: true });
+  const placement = page.getByRole("tablist", { name: "Where the workspace runs", exact: true });
+  const mac = placement.getByRole("tab", { name: "This Mac", exact: true });
+  const cloudTab = placement.getByRole("tab", { name: "Cloud", exact: true });
+  const draft = "Keep my draft when switching organizations";
+  await mac.click();
+  await expect(mac).toHaveAttribute("aria-selected", "true");
+  await editor.fill(draft);
+  await page.evaluate(() => window.setCreateOrganization("organization"));
+  await expect(mac).toHaveAttribute("aria-selected", "true");
+  await expect(create).toBeEnabled();
+  await expect(editor).toHaveText(draft);
+  await cloudTab.click();
+  await expect(cloudTab).toHaveAttribute("aria-selected", "true");
+  await expect(create).toBeDisabled();
+  const tray = page.locator("[data-composer-tray]");
+  await expect(tray.getByRole("status").filter({ hasText: "Build your Cloud Computer first." })).toBeVisible();
+  await expect(tray.getByRole("button", { name: "Open Cloud Computer settings", exact: true })).toBeVisible();
+  await expect(editor).toHaveText(draft);
+  const context = await page.locator("[data-dispatcher-context]").boundingBox();
+  const trayBox = await tray.boundingBox();
+  expect(context.y + context.height).toBeLessThan(trayBox.y);
+  await page.screenshot({ path: ".context/cloud-create-ui.png" });
+  await mac.click();
+  await expect(create).toBeEnabled();
+  await expect(editor).toHaveText(draft);
+  await expect(tray).toHaveCount(0);
+  // A This Mac draft belongs to the device, so the sidebar's Create shows it under an organization.
+  const sidebar = page.locator("[data-app-sidebar]");
+  const sidebarCreate = sidebar.getByRole("button", { name: "Create workspace", exact: true });
+  await sidebar.getByRole("button", { name: "Home", exact: true }).click();
+  await expect(card).toHaveCount(0);
+  await expect(sidebarCreate.locator("[data-composer-draft]")).toBeVisible();
+  await sidebarCreate.click();
+  // Earlier sections registered more projects; return to the draft's own.
+  await page.getByRole("button", { name: "Choose project", exact: true }).click();
+  await page.getByRole("menuitem", { name: "To-do app", exact: true }).click();
+  await expect(editor).toHaveText(draft);
+  for (const owner of ["other", "sign-out", "personal"]) {
+    await page.evaluate(next => window.setCreateOrganization(next), owner);
+    await expect(mac).toHaveAttribute("aria-selected", "true");
+    await expect(create).toBeEnabled();
+    await expect(editor).toHaveText(draft);
+  }
+  await editor.fill("");
+  await page.unroute(computer);
+  check("Create keeps its This Mac / Cloud choice across owners, explains a blocked cloud side in the tray, and drafts follow the flip", true);
 }
 
 /** A delayed real create response must not retarget the newly selected owner. */
@@ -360,7 +422,7 @@ export async function runCloudCreateOwnerSmoke({ page, check, harnessBase }) {
   });
   try {
     await page.setViewportSize({ width: 1100, height: 780 });
-    await page.goto(`${harnessBase}/harness-folder-workspace.html?create&cloud-enabled`);
+    await page.goto(`${harnessBase}/harness-folder-workspace.html?create&cloud-enabled&feature-off=unified-workspaces`);
     await page.getByRole("button", { name: "Open folder fixture", exact: true }).click();
     await page.getByRole("button", { name: "Initialize git and create", exact: true }).click();
     await page.getByRole("button", { name: "Show Create", exact: true }).click();

@@ -60,8 +60,21 @@ const FEATURE_CHANNELS: Record<string, readonly Channel[]> = {
   "unified-workspaces": ["dev", "alpha"],
 };
 
+/** A UI-smoke harness page can pin a flag off (`?feature-off=<name>`) so the
+ * stable path stays covered while dev runs the new one. Only `--mode ui-smoke`
+ * honours it; built channels and tests always get false. */
+export function smokeFeatureOff(
+  feature: string,
+  mode: string = import.meta.env.MODE,
+  search: string | null = typeof location === "undefined" ? null : location.search,
+): boolean {
+  return mode === "ui-smoke" && search !== null &&
+    new URLSearchParams(search).getAll("feature-off").includes(feature);
+}
+
 /** Whether `feature` is enabled in this build's channel. Unregistered → false. */
 export function isFeatureEnabled(feature: string): boolean {
+  if (smokeFeatureOff(feature)) return false;
   const channels = FEATURE_CHANNELS[feature];
   return channels ? channels.includes(CHANNEL) : false;
 }

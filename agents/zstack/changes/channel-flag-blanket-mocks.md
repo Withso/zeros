@@ -1,15 +1,18 @@
-# A new channel flag is on in every test that mocks isFeatureEnabled with one value
+# A new dev/alpha channel flag is on in every existing renderer test
 
-**Symptom.** Adding `unified-workspaces` to `renderer/config/release-channel.ts`
-silently turned the new layout on in older Settings suites, because they mock
-`isFeatureEnabled: () => state.allowed` and so enable every flag at once.
+**Symptom.** Adding `unified-workspaces` (dev and alpha) silently turned the new
+layout on in older suites: Vitest runs the renderer as the dev channel, and
+suites that mock `isFeatureEnabled: () => state.allowed` enable every flag at
+once. Suites that encoded today's owner rules then failed, or passed while
+exercising the new branches without asserting them.
 
-**Cause.** The mock answers by value, not by feature name, so the old suites
-exercised the new flag's branches without asserting them.
+**Cause.** `CHANNEL` resolves to `dev` under Vitest, and value-based mocks
+answer for every feature name.
 
-**Rule.** Gate a new layout through an explicit prop or argument read once at
-the owning page, so panels stay on the old path unless the page passes it. In
-new tests mock `isFeatureEnabled` by feature name, and run the old suites with
-the new flag on to prove they still hold.
+**Rule.** Gate a new layout at one owning helper or prop. Suites that pin
+today's behavior mock `isFeatureEnabled` by name with the new flag off; the
+new behavior gets its own `*-unified` (flag-on) tests. `pnpm test:ui-smoke`
+also runs dev, so a flagged UI change must update or extend its smoke
+scenario in the same change.
 
 **Target.** `gotchas.md` (renderer flags).

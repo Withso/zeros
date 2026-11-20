@@ -16,7 +16,7 @@ export async function runCreateLinkedDirectoriesSmoke({ page, check, harnessBase
     return route.fulfill({ status: 503, json: { error: { code: "fixture_unavailable", message: "Fixture unavailable" } } });
   });
   try {
-  await page.goto(`${harnessBase}/harness-folder-workspace.html?create&cloud-enabled`);
+  await page.goto(`${harnessBase}/harness-folder-workspace.html?create&cloud-enabled&feature-off=unified-workspaces`);
   await expect(page.getByRole("button", { name: "Show Create", exact: true })).toBeVisible();
   await page.evaluate(() => { localStorage.clear(); sessionStorage.clear(); });
   await page.reload();
@@ -92,7 +92,7 @@ export async function runCreateDraftIndicatorSmoke({ page, check, harnessBase })
   });
   try {
     await page.setViewportSize({ width: 1280, height: 800 });
-    await page.goto(`${harnessBase}/harness-folder-workspace.html?create&cloud-enabled&composer-suggestions`);
+    await page.goto(`${harnessBase}/harness-folder-workspace.html?create&cloud-enabled&composer-suggestions&feature-off=unified-workspaces`);
     await page.evaluate(() => { localStorage.clear(); sessionStorage.clear(); });
     await page.reload();
     await page.getByRole("button", { name: "Open folder fixture", exact: true }).click();
@@ -224,7 +224,7 @@ export async function runCreateDraftsSmoke({ page, check, harnessBase }) {
   });
   try {
     await page.setViewportSize({ width: 1280, height: 800 });
-    await page.goto(`${harnessBase}/harness-folder-workspace.html?create&cloud-enabled`);
+    await page.goto(`${harnessBase}/harness-folder-workspace.html?create&cloud-enabled&feature-off=unified-workspaces`);
     await expect(page.getByRole("button", { name: "Show Create", exact: true })).toBeVisible();
     await page.evaluate(() => window.setFolderGitState(true, "https://github.com/example/project.git"));
     await page.getByRole("button", { name: "Show Create", exact: true }).click();

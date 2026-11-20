@@ -286,7 +286,11 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
     userId: userId ?? getTeamStoreState().me?.user.id,
     organizationId: getActiveOrganizationIdSnapshot(),
   });
-  const hasCreateDraft = useCreateComposerHasDraft(createDraftOwner);
+  // unified-workspaces: Create's This Mac drafts belong to the device under every owner.
+  const hasLocalCreateDraft = useCreateComposerHasDraft(
+    localWorkShowsEverywhere() && createDraftOwner !== "local" ? "local" : null,
+  );
+  const hasCreateDraft = useCreateComposerHasDraft(createDraftOwner) || hasLocalCreateDraft;
   const showCreateDraft = activePage !== "create" && hasCreateDraft;
   const preferences = useSidebarListPreferences();
   const repositoryIds = sidebarRepositoryIds(filterOwner);
