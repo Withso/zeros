@@ -210,8 +210,9 @@ export async function runDesignInlineToolsSmoke({ page, waitFor, check }) {
 
   async function css(patch, id = "home-hero") {
     const before = await saved(id);
-    if (!(await page.locator("[data-design-computed-css-editor]").count()))
-      await page.getByRole("tab", { name: "CSS", exact: true }).click();
+    // Every tab panel stays mounted; only the selected tab is showing.
+    const cssTab = page.getByRole("tab", { name: "CSS", exact: true });
+    if ((await cssTab.getAttribute("aria-selected")) !== "true") await cssTab.click();
     const editor = page.locator(
       '.cm-content[aria-label="Computed CSS declarations"]',
     );
