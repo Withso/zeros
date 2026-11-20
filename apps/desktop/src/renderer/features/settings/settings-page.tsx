@@ -52,6 +52,8 @@ import {
   Trash2,
   Building2,
   MousePointerClick,
+  Users,
+  ArrowUpRight,
   type LucideIcon,
 } from "lucide-react";
 import {
@@ -195,6 +197,8 @@ import type { AgentMemorySettings } from "@zeros/protocol/agent-events";
 import { popoverBoundaryProps } from "@/renderer/shared/ui/popover-boundary";
 import { CHANNEL, isFeatureEnabled } from "../../config/release-channel";
 import { PlaceLabel } from "./settings-ui";
+import { shellOpenUrl } from "../../platform/app";
+import { APP_BASE_URL, organizationDashboardUrl } from "../team/organization-links";
 import { CloudWorkspacePausedNotice } from "../team/cloud-workspace-pause";
 type SectionId =
   | "general"
@@ -703,12 +707,18 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
                     const section = availableSections.find((s) => s.id === id);
                     return section ? [section] : [];
                   });
-                  if (sections.length === 0) return null;
+                  const members = group.key === "organization" && organization && !organization.isPersonal;
+                  if (sections.length === 0 && !members) return null;
                   return (
                     <React.Fragment key={group.key}>
                       <div className={SETTINGS_GROUP_HEADER_CLS}>{group.label}</div>
                       <div className="flex flex-col gap-0.5">
-                        {sections.map((section) => renderSectionNav(section))}
+                        {sections.filter((section) => section.id === "org-general").map((section) => renderSectionNav(section))}
+                        {members && (
+                          <SectionNavButton icon={Users} label="Members" isActive={false} external
+                            onClick={() => void shellOpenUrl(organizationDashboardUrl(APP_BASE_URL, { organizationId: organization.id, section: "members" }))} />
+                        )}
+                        {sections.filter((section) => section.id !== "org-general").map((section) => renderSectionNav(section))}
                       </div>
                     </React.Fragment>
                   );
@@ -844,6 +854,7 @@ function SectionNavButton({
   className,
   onClick,
   onIntent,
+  external = false,
 }: {
   icon: NavIcon;
   label: string;
@@ -851,12 +862,15 @@ function SectionNavButton({
   className?: string;
   onClick: () => void;
   onIntent?: () => void;
+  /** Opens a page outside the app. */
+  external?: boolean;
 }) {
   return (
     <Button
       variant="ghost"
       role="tab"
       aria-selected={isActive}
+      aria-description={external ? "Opens in your browser" : undefined}
       data-state={isActive ? "active" : "inactive"}
       className={cn(SIDEBAR_ENTRY_CLS, className)}
       onClick={onClick}
@@ -866,6 +880,7 @@ function SectionNavButton({
     >
       <Icon size={14} />
       <span className="truncate">{label}</span>
+      {external && <ArrowUpRight className="ml-auto" aria-hidden />}
     </Button>
   );
 }
@@ -957,11 +972,11 @@ function ComputerUsePanel({ surfaceActive = true }: { surfaceActive?: boolean })
   const native = useNativeRuntime().ready;
   return (
     <div className="flex flex-col gap-8">
-      <ComputerUseSettingsSection surfaceActive={surfaceActive} />
+      <ComputerUseSettingsSection surfaceActive={surfaceActive} device />
       {native && (
         <SettingsGroup title="Privacy">
           <FullDiskAccessRow surfaceActive={surfaceActive} />
-          <ComputerPermissionRows surfaceActive={surfaceActive} />
+          <ComputerPermissionRows surfaceActive={surfaceActive} device />
         </SettingsGroup>
       )}
     </div>

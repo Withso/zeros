@@ -13,6 +13,11 @@ const state = vi.hoisted(() => ({
   cloudRepositories: [] as string[],
   cloudAccess: true,
   dispatch: vi.fn(),
+  openUrl: vi.fn(async (_url: string) => {}),
+}));
+vi.mock("../../../platform/app", async (original) => ({
+  ...(await original<typeof import("../../../platform/app")>()),
+  shellOpenUrl: state.openUrl,
 }));
 vi.mock("../../../config/release-channel", async (original) => ({
   ...(await original<typeof import("../../../config/release-channel")>()),
@@ -78,7 +83,8 @@ vi.mock("../environment-panel", () => ({
     unified ? "unified-environment-fixture" : "environment-fixture",
 }));
 vi.mock("../computer-use-panel", () => ({
-  ComputerUseSettingsSection: () => "computer-use-fixture",
+  ComputerUseSettingsSection: ({ device }: { device?: boolean }) =>
+    device ? "computer-use-device-fixture" : "computer-use-fixture",
   ComputerPermissionRows: () => null,
 }));
 vi.mock("../workspace-api-access-setting", async (original) => ({
@@ -171,10 +177,24 @@ describe("unified Settings rail", () => {
       "Personal",
       expect.stringContaining("General"),
       "Withso",
-      expect.stringContaining("Cloud Computer"),
+      "GeneralMembersCloud Computer",
       "Projects",
       "withso/zeros",
     ]);
+  });
+
+  it("opens Members on the organization's web dashboard, marked as leaving the app", () => {
+    state.organization = ORGANIZATION;
+    render();
+    const members = [...container.querySelectorAll('nav [role="tab"]')].find(
+      (node) => node.textContent === "Members",
+    ) as HTMLElement;
+    expect(members.getAttribute("aria-description")).toBe("Opens in your browser");
+    act(() => members.click());
+    const url = new URL(state.openUrl.mock.calls[0][0] as string);
+    expect(url.searchParams.get("organization")).toBe("org-a");
+    expect(url.searchParams.get("section")).toBe("members");
+    expect(state.writes).toEqual([]);
   });
 
   it("splits General: personal rows, then This Mac; organization rows on their own page", () => {
@@ -201,7 +221,7 @@ describe("unified Settings rail", () => {
     state.saved.set(`${ORGANIZATION_OWNER}:section`, "user:computer-use");
     render();
     expect(heading()).toBe("Computer use");
-    expect(container.textContent).toContain("computer-use-fixture");
+    expect(container.textContent).toContain("computer-use-device-fixture");
   });
 
   it("hides the organization General when the organization has no rows of its own", () => {
@@ -213,7 +233,7 @@ describe("unified Settings rail", () => {
     const groups = rail();
     expect(groups.slice(groups.indexOf("Withso"), groups.indexOf("Withso") + 2)).toEqual([
       "Withso",
-      "Cloud Computer",
+      "MembersCloud Computer",
     ]);
   });
 

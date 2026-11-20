@@ -91,9 +91,10 @@ function openClaudeChromeUrl(url: string): void {
   });
 }
 
-export function BrowserUsePanel() {
+/** `unified`: a device page, so this Mac's controls show under every owner. */
+export function BrowserUsePanel({ unified = false }: { unified?: boolean }) {
   const organization = useActiveOrganization();
-  if (!isFeatureEnabled("cloud-workspaces")) return <LocalBrowserUsePanel />;
+  if (unified || !isFeatureEnabled("cloud-workspaces")) return <LocalBrowserUsePanel />;
   if (!organization && getActiveOrganizationIdSnapshot())
     return <p className="text-fg2 text-xs">Loading organization browser settings…</p>;
   if (organization && !organization.isPersonal)

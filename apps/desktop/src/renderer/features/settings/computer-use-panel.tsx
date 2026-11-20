@@ -108,14 +108,18 @@ function ComputerSwitchRow({
 }
 
 // Organization General lacks a Privacy card, so it hosts the computer-use grants here.
+/** `device`: the unified rail's own page, which always edits this Mac's settings and carries the page title. */
 export function ComputerUseSettingsSection({
   surfaceActive = true,
   withPermissions = false,
+  device = false,
 }: {
   surfaceActive?: boolean;
   withPermissions?: boolean;
+  device?: boolean;
 }) {
-  const placement = useDevicePlacement();
+  const ownerPlacement = useDevicePlacement();
+  const placement = device ? "local" : ownerPlacement;
   const computerUse = useAgentControlFeatureActive("computerUse");
   const zerosBrowser = useAgentControlFeatureActive("zerosBrowser");
   if (!computerUseSectionOpen({ computerUse, zerosBrowser })) return null;
@@ -137,6 +141,7 @@ export function ComputerUseSettingsSection({
       surfaceActive={surfaceActive}
       computerUse={computerUse}
       withPermissions={withPermissions}
+      title={device ? undefined : "Computer use"}
     />
   );
 }
@@ -145,10 +150,12 @@ function LocalComputerUseSettings({
   surfaceActive,
   computerUse,
   withPermissions,
+  title,
 }: {
   surfaceActive: boolean;
   computerUse: boolean;
   withPermissions: boolean;
+  title?: string;
 }) {
   const resolved = useResolvedSettings();
   const layer = useSettingsLayer("user");
@@ -353,7 +360,7 @@ function LocalComputerUseSettings({
 
   return (
     <div className="flex flex-col gap-3">
-      <SettingsGroup title="Computer use">
+      <SettingsGroup title={title}>
         {computerUse
           ? switchRow("enabled", COMPUTER_USE_SETTINGS_ROWS.enabled, {
               inactive: status?.available === false && !values.enabled,
@@ -407,10 +414,13 @@ function LocalComputerUseSettings({
 
 export function ComputerPermissionRows({
   surfaceActive = true,
+  device = false,
 }: {
   surfaceActive?: boolean;
+  device?: boolean;
 }) {
-  const placement = useDevicePlacement();
+  const ownerPlacement = useDevicePlacement();
+  const placement = device ? "local" : ownerPlacement;
   const computerUse = useAgentControlFeatureActive("computerUse");
   const watching = surfaceActive && computerUse && placement === "local";
   const status = useComputerUseStatus(watching);
