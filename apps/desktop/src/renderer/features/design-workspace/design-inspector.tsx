@@ -3127,29 +3127,40 @@ export const DesignInspector = React.memo(function DesignInspector({
               const size = designFrameSizeValue(number);
               const { workspaceId: owner, frame: target } = styleContext;
               const rootNodeId = elementDetails.oid;
+              const confirmedRoot = elementDetails;
+              const axes = { width: geometryKey === "w", height: geometryKey === "h" };
               await applyDesignEditCached(owner, target, async ({ assertCurrent }) => {
-                const { frame: latest, runtime, assertFrameCurrent } =
-                  await readPreparedLayoutRuntime(owner, target.file, assertCurrent);
-                assertFrameCurrent();
-                if (!runtime.supports("measureLayout") || !runtime.measureLayout)
-                  throw new Error(
-                    "This Design frame cannot safely prepare layout edits. Reload the frame and try again.",
+                let latest: typeof target;
+                let rootStyles: Record<string, string | null>;
+                if (!designFrameRuntime(owner, target.file)) {
+                  // A frame that runs no document, such as one too small on
+                  // screen, has no preview over its confirmed readback.
+                  assertCurrent();
+                  latest = designWorkspaceSnapshotCache.peekSnapshot(owner).data?.frames.find(
+                    (candidate) => candidate.file === target.file,
+                  ) ?? target;
+                  rootStyles = designFrameRootFixedStyles(confirmedRoot, axes);
+                } else {
+                  const prepared = await readPreparedLayoutRuntime(owner, target.file, assertCurrent);
+                  const { runtime, assertFrameCurrent } = prepared;
+                  latest = prepared.frame;
+                  assertFrameCurrent();
+                  if (!runtime.supports("measureLayout") || !runtime.measureLayout)
+                    throw new Error(
+                      "This Design frame cannot safely prepare layout edits. Reload the frame and try again.",
+                    );
+                  // Confirmed source, never a newer padding or border preview.
+                  const held = designHeldStateWatch(owner, target.file, [rootNodeId]);
+                  const measured = await measureDesignLayoutUnheld(
+                    runtime,
+                    { updates: [], nodeIds: [rootNodeId] },
+                    held,
                   );
-                // Confirmed source, never a newer padding or border preview.
-                const held = designHeldStateWatch(owner, target.file, [rootNodeId]);
-                const measured = await measureDesignLayoutUnheld(
-                  runtime,
-                  { updates: [], nodeIds: [rootNodeId] },
-                  held,
-                );
-                assertFrameCurrent();
-                if (!measured)
-                  throw new Error("The frame's state changed while its size was prepared. Try again.");
-                const rootDetails = measured.get(rootNodeId)!;
-                const rootStyles = designFrameRootFixedStyles(rootDetails, {
-                  width: geometryKey === "w",
-                  height: geometryKey === "h",
-                });
+                  assertFrameCurrent();
+                  if (!measured)
+                    throw new Error("The frame's state changed while its size was prepared. Try again.");
+                  rootStyles = designFrameRootFixedStyles(measured.get(rootNodeId)!, axes);
+                }
                 return {
                   schemaVersion: 1,
                   transactionId: `desktop:${crypto.randomUUID()}`,
