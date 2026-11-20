@@ -3053,7 +3053,9 @@ async function applyDesignHistoryInLane(
                 await runtime.restoreGeneration(pendingTarget, false);
             }
           } catch {
-            /* Unknown generations fall back to the authoritative document. */
+            // Unknown generations fall back to the authoritative document;
+            // the readbacks still describe the generation history left.
+            useDesignRuntimeStore.getState().dropFrameDetails(workspaceId, restoredFrame);
           }
         }
       }

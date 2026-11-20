@@ -815,3 +815,21 @@ describe("pending history with isolated runtime presentation", () => {
     expect(f.cached).toBe(2); expect(f.painted).toBe(2);
   });
 });
+
+describe("history the runtime cannot restore", () => {
+  // The runtime keeps a bounded run of generations. When the target has left
+  // it, the frame reloads from source; the readbacks still describe the
+  // generation history left and must not be the base of the next edit.
+  it("drops readbacks of the generation it left", async () => {
+    const f = fixture();
+    await f.seed(3);
+    const hero = () => useDesignRuntimeStore.getState().byWorkspace[PERSONAL]?.frames["home.html"]?.detailsByNode.hero;
+    expect(hero()?.sourceVersion).toBe(version(3));
+    f.runtime.restoreGeneration.mockImplementation(async () => {
+      throw new Error("History generation is no longer retained.");
+    });
+    await f.history("undo");
+    expect(f.cached).toBe(2);
+    expect(hero()).toBeUndefined();
+  });
+});
