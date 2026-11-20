@@ -3,7 +3,7 @@ import { useOrganizationProjects } from "../../state/use-organization-projects";
 // Project/source select its destination; attachment previews use app storage.
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { ChevronDown, FolderOpen, Plus } from "lucide-react";
+import { ChevronDown, Cloud, FolderOpen, Laptop, Plus } from "lucide-react";
 
 import { Button, GithubIcon } from "../../shared/ui";
 import {
@@ -14,6 +14,14 @@ import {
   DropdownMenuTrigger,
 } from "../../shared/ui/primitives/dropdown-menu";
 import { toast } from "../../shared/ui/primitives/elements";
+import { Tabs, TabsList, TabsTrigger } from "../../shared/ui/primitives/tabs";
+import { Tooltip } from "../../shared/ui/primitives/tooltip";
+import { ComposerTray } from "../../features/agent/composer-tray";
+import { isFeatureEnabled } from "../../config/release-channel";
+import { requestUserSettingsSection } from "../../features/settings/settings-navigation";
+import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
+import { rememberCreatePlacement, resolveCreatePlacement, useSavedCreatePlacement, type CreatePlacement } from "./create-placement";
+import { createTrayState } from "./create-tray";
 
 import {
   notifyWorkspacesChanged,
@@ -88,7 +96,7 @@ import {
   getActiveOrganizationSnapshot,
   getOrganizationStoreGeneration,
 } from "../../features/team/team-store";
-import { canCreateWorkspaceIn, localWorkspaceOwner } from "../../features/team/organization-capabilities";
+import { canCreateWorkspaceIn, localWorkShowsEverywhere, localWorkspaceOwner } from "../../features/team/organization-capabilities";
 import { CloudWorkspacePausedNotice, useOrganizationCloudPaused } from "../../features/team/cloud-workspace-pause";
 import { CreateStartBanners } from "./create-start-banners";
 import { useNativeRuntime } from "../../platform/runtime";
@@ -143,7 +151,15 @@ function ActiveDispatcherPage({
   onOpenGithubProject,
   onQuickStart,
 }: DispatcherPageProps) {
-  const { projects } = useOrganizationProjects();
+  const { projects: ownerProjects } = useOrganizationProjects();
+  // unified-workspaces lists cloud repositories under an organization too; the
+  // This Mac side shows local projects only.
+  const unified = localWorkShowsEverywhere();
+  const localProjects = useMemo(
+    () => ownerProjects.filter(project => !isCloudWorkspace(project.repoRoot)),
+    [ownerProjects],
+  );
+  const projects = unified ? localProjects : ownerProjects;
   const agents = useAgentsSnapshot();
   const sessions = useAgentSessions();
   const dispatch = useWorkspaceDispatch();
@@ -216,14 +232,27 @@ function ActiveDispatcherPage({
   const base = needsGitSetup
     ? null
     : sourceForProject(sourceSelection, selectedProject);
-  const contextProject = projects.find(project => project.id === initialProjectId);
+  const contextProject = ownerProjects.find(project => project.id === initialProjectId);
   // Sidebar Create supplies the repository currently being worked in. Once
   // the user picks another repository below, clear that route hint so it
   // cannot override their newer persisted selection after a reload.
   const contextTarget = parseCloudWorkspaceKey(contextProject?.repoRoot);
   const contextDocument = contextTarget?.organizationId === getActiveOrganizationIdSnapshot() ? cloudWorkspaceDocument(contextTarget) : undefined;
   const preferredCloudRepository = contextDocument ? `${contextDocument.repository.owner}/${contextDocument.repository.name}`.toLowerCase() : null;
-  const cloud = useCloudCreate(active, computerSource, preferredCloudRepository, initialProjectId);
+  // A sidebar route into Create names its project's side; otherwise the last
+  // choice, or the cloud when this Mac has no projects yet.
+  const savedPlacement = useSavedCreatePlacement();
+  const cloudFeature = isFeatureEnabled("cloud-workspaces");
+  const routedPlacement: CreatePlacement | null = contextProject
+    ? isCloudWorkspace(contextProject.repoRoot) ? "cloud" : "local"
+    : null;
+  const chosenPlacement = resolveCreatePlacement({
+    savedPlacement: cloudFeature ? routedPlacement ?? savedPlacement : null,
+    cloudAvailable: cloudFeature,
+    hasLocalProjects: localProjects.length > 0,
+  });
+  const cloud = useCloudCreate(active, computerSource, preferredCloudRepository, initialProjectId,
+    unified ? chosenPlacement : undefined);
   const computerReadKey = cloud.computerOwner && cloud.computerRepository
     ? computerSourceReadKey(cloud.computerOwner, cloud.computerRepository) : null;
   // Ownership selects the backend synchronously; an unavailable cloud backend
@@ -231,13 +260,31 @@ function ActiveDispatcherPage({
   const placement = cloud.computerMode ? "cloud" : "local";
   const placementReason = placement === "cloud" ? cloud.reason : null;
   const computerIdentity = cloud.computerOwner ? JSON.parse(cloud.computerOwner) as [string, string] : null;
-  const draftOwner = placement === "cloud" && !computerIdentity ? null : createComposerDraftOwner({
+  // The personal home has no Cloud Computer yet; its cloud side keeps a device draft so the prompt survives a flip.
+  const personalHome = Boolean(unified && cloud.organization?.isPersonal);
+  const draftKeyFor = (target: CreatePlacement) => {
+    const owner = target === "cloud" && !computerIdentity ? (personalHome ? "local" : null) : createComposerDraftOwner({
+      backend: CONTROL_PLANE_URL,
+      userId: computerIdentity?.[0],
+      organizationId: target === "cloud" ? computerIdentity![1] : null,
+    });
+    const project = target === "cloud" ? cloud.computerRepository?.id ?? cloud.rememberedRepositoryId : selectedProject?.repoRoot;
+    return owner ? createComposerDraftKey({ owner, project: project ?? null, placement: target }) : null;
+  };
+  const draftOwner = placement === "cloud" && !computerIdentity ? (personalHome ? "local" : null) : createComposerDraftOwner({
     backend: CONTROL_PLANE_URL,
     userId: computerIdentity?.[0],
     organizationId: placement === "cloud" ? computerIdentity![1] : null,
   });
-  const draftProject = placement === "cloud" ? cloud.computerRepository?.id ?? cloud.rememberedRepositoryId : selectedProject?.repoRoot;
-  const draftKey = draftOwner ? createComposerDraftKey({ owner: draftOwner, project: draftProject ?? null, placement }) : null;
+  const draftKey = draftKeyFor(placement);
+  const choosePlacement = (next: CreatePlacement) => {
+    if (next === placement || busy) return;
+    const destination = draftKeyFor(next);
+    if (draftKey && destination) createComposerDrafts.carry(draftKey, destination);
+    rememberCreatePlacement(next);
+    // The route's project hint named the side the user just left.
+    if (initialProjectId) dispatch({ type: "OPEN_CREATE_PAGE", projectId: null });
+  };
   const currentSurface = useRef({ active, draftKey });
   currentSurface.current = { active, draftKey };
   const surfaceMounted = useRef(true);
@@ -433,7 +480,7 @@ function ActiveDispatcherPage({
     markWorkspaceSettling(prepared.path);
     setBusy(false);
 
-    const chatId = stillShowingCreate() && getActiveOrganizationIdSnapshot() === null ? createDispatcherChat({
+    const chatId = stillShowingCreate() && (unified || getActiveOrganizationIdSnapshot() === null) ? createDispatcherChat({
       dispatch,
       repoRoot: project.repoRoot,
       folder: prepared.path,
@@ -568,6 +615,24 @@ function ActiveDispatcherPage({
     }
   };
 
+  const openCloudComputerSettings = () => {
+    requestUserSettingsSection("cloud-computer");
+    dispatch({ type: "SET_ACTIVE_PAGE", page: "settings" });
+  };
+  const tray = unified ? createTrayState({
+    notice: computerCreateNotice?.owner === cloud.computerOwner && cloud.computerOwner ? computerCreateNotice.message : null,
+    reason: placementReason,
+    checking: cloud.checking,
+    computerRequired: cloud.computerRequired,
+    computerReason: cloud.computerReason,
+    canManageComputer: cloud.canManageComputer,
+  }) : null;
+  const trayAction = tray?.action === "cloud-computer-settings"
+    ? { label: "Open Cloud Computer settings", onClick: openCloudComputerSettings, onIntent: cloud.warmComputer }
+    : tray?.action === "manage-repositories"
+      ? { label: "Manage repositories", onClick: openCloudComputerSettings }
+      : null;
+
   return (
     <main
       className="bg-bg1 flex min-h-0 min-w-0 flex-1 overflow-hidden"
@@ -594,6 +659,7 @@ function ActiveDispatcherPage({
               repositories={cloud.computerRepositories ?? []}
               selected={cloud.computerRepository}
               rememberedId={cloud.rememberedRepositoryId}
+              manage={unified}
               active={active}
               open={projectMenuOpen}
               onOpenChange={setProjectMenuOpen}
@@ -709,15 +775,36 @@ function ActiveDispatcherPage({
               />
             )}
 
+            {unified && cloudFeature && (
+              <Tabs
+                className="ml-auto"
+                value={placement}
+                onValueChange={(value) => choosePlacement(value === "cloud" ? "cloud" : "local")}
+              >
+                <TabsList aria-label="Where the workspace runs">
+                  <Tooltip label="This Mac">
+                    <TabsTrigger value="local" aria-label="This Mac" disabled={busy}>
+                      <Laptop strokeWidth={1.5} />
+                    </TabsTrigger>
+                  </Tooltip>
+                  <Tooltip label="Cloud">
+                    <TabsTrigger value="cloud" aria-label="Cloud" disabled={busy}>
+                      <Cloud strokeWidth={1.5} />
+                    </TabsTrigger>
+                  </Tooltip>
+                </TabsList>
+              </Tabs>
+            )}
           </div>
 
-          {computerCreateNotice?.owner === cloud.computerOwner && cloud.computerOwner && (
+          {!unified && computerCreateNotice?.owner === cloud.computerOwner && cloud.computerOwner && (
             <p className="text-fg3 mb-2 px-2 text-xs" role="status">{computerCreateNotice.message}</p>
           )}
-          {placementReason && !cloud.checking && (cloud.computerRequired
+          {!unified && placementReason && !cloud.checking && (cloud.computerRequired
             ? <CloudComputerV2CreateNotice required reason={cloud.computerReason} canManage={cloud.canManageComputer} warm={cloud.warmComputer} />
             : <p className="text-fg3 mb-2 px-2 text-xs" role="status">{placementReason}</p>)}
           <section aria-label="Workspace prompt" onPointerEnter={cloud.warm} onFocus={cloud.warm} onKeyDown={cloud.warmAccess}>
+            <ComposerTray message={tray?.message ?? null} action={trayAction}>
             <DispatcherComposer
               key={draftKey ?? JSON.stringify([draftOwner, placement])}
               draftKey={draftKey}
@@ -735,6 +822,7 @@ function ActiveDispatcherPage({
               permissionModes={placement !== "cloud"}
               allowAdditionalDirectories={placement === "local"}
             />
+            </ComposerTray>
           </section>
           {!cloud.computerMode && !selectedProject && (
             <CreateStartBanners

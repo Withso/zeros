@@ -10,6 +10,7 @@ import { useComputerRepositorySelection } from "./cloud-computer-repository-sele
 import { useCloudComputerV2CreateGate } from "../../features/settings/cloud-computer-v2-create-gate";
 import { createCloudComputerRecovery } from "./cloud-create-request";
 import { warmCloudCreateAccess } from "./cloud-create-access-warm";
+import { ADD_CLOUD_REPOSITORY_REASON } from "./create-tray";
 import type { CloudComputerRepository } from "../../features/settings/cloud-computer-v2-create-gate";
 
 const capabilityCache = new KeyedAsyncCache<{ enabled: boolean }>(1);
@@ -48,10 +49,14 @@ export function useCloudCreate(
   computerSource: { owner: string; base: DispatcherBase } | null = null,
   preferredRepositoryId: string | null = null,
   selectionIntent?: string | null,
+  /** unified-workspaces: Create's placement control, not the selected owner, picks cloud. */
+  placement?: "local" | "cloud",
 ) {
   const computer = useCloudComputerV2CreateGate(active);
   const availability = useCloudCreateAvailability(active);
-  const computerMode = Boolean(availability.organization && !availability.organization.isPersonal || getActiveOrganizationIdSnapshot() !== null);
+  const computerMode = placement
+    ? placement === "cloud"
+    : Boolean(availability.organization && !availability.organization.isPersonal || getActiveOrganizationIdSnapshot() !== null);
   const selection = useComputerRepositorySelection(computer.key ?? null, computer.repositories, active, preferredRepositoryId, selectionIntent);
   const computerRepository = computerMode ? selection.repository : null;
   const repository = useMemo(
@@ -70,7 +75,7 @@ export function useCloudCreate(
   const computerBase = computerSource?.owner === sourceOwner ? computerSource?.base ?? null : null;
   const source = cloudSourceBaseBranch(computerBase);
   const reason = availability.reason ?? computer.reason ??
-    (!computerRepository ? "Add a repository to your Cloud Computer." : source.reason);
+    (!computerRepository ? ADD_CLOUD_REPOSITORY_REASON : source.reason);
   // Intent to create: the server checks GitHub access to this repository now,
   // so the create request reuses that check instead of waiting on GitHub.
   const warmAccess = (target: Pick<CloudComputerRepository, "owner" | "name"> | null) => {
