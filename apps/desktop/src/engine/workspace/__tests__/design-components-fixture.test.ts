@@ -82,9 +82,9 @@ describe("the committed component fixture through WorkspaceService", () => {
       "inst-badge": { component: "fx-badge", attributes: { text: "New" } },
     });
     const shown = (await frame("screens/hosts.html")).srcDoc!;
-    expect(shown).toContain('<b data-zd-part="chip-label">Hello</b>');
+    expect(shown).toContain('<b data-zd-part="chip-label" data-oid="chip-label">Hello</b>');
     expect(shown).toContain('data-tone="loud"');
-    expect(shown).toContain('<b data-zd-part="chip-label">Chip</b>');
+    expect(shown).toContain('<b data-zd-part="chip-label" data-oid="chip-label">Chip</b>');
     // The derived pad follows each instance's width.
     expect(shown).toMatch(/--zd-width: 200px;[^}]*--zd-pad: 20px;/);
     expect(shown).toMatch(/--zd-width: 160px;[^}]*--zd-pad: 16px;/);
@@ -219,7 +219,7 @@ describe("the committed component fixture through WorkspaceService", () => {
     expect(Object.values(canvas.frames)).toContainEqual(expect.objectContaining({ source: "library/fx-badge.html", component: "fx-badge" }));
     // The instance keeps its value, now through the main's option, and is the
     // main's root layer.
-    expect((await frame("screens/hosts.html")).srcDoc).toContain('<span data-zd-part="badge" class="badge" data-zd-root="">New</span>');
+    expect((await frame("screens/hosts.html")).srcDoc).toContain('<span data-zd-part="badge" data-oid="badge" class="badge" data-zd-root="">New</span>');
     // Its Options now come from the main, and Edit main opens it.
     expect((await prepare("screens/hosts.html")).instances!.components["fx-badge"]).toMatchObject({
       file: "library/fx-badge.html", frame: true,

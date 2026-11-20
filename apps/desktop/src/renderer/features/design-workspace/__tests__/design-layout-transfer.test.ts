@@ -118,6 +118,57 @@ beforeEach(() => {
 afterEach(() => vi.useRealTimers());
 
 describe("canvas transfer presentation", () => {
+  it("keeps the runtime root id for a nested linked frame copy", async () => {
+    const runtimeRoot = { ...node, oid: "cc-root" };
+    mocks.targets = [destination];
+    mocks.transfer.mockResolvedValue({
+      frame: destination.file,
+      nodeId: "copy-root",
+      snapshot: { frames: [source, confirmed] },
+    });
+    await transferDesignLayerOnCanvas({
+      ...input,
+      details: runtimeRoot,
+      componentCopy: { variant: "compact" },
+      duplicateNodeId: "copy-root",
+      detach: false,
+    });
+    expect(mocks.transfer.mock.calls[0]?.[1]).toMatchObject({
+      nodeId: "cc-root",
+      duplicateNodeId: "copy-root",
+      componentCopy: { variant: "compact" },
+      destinationFrame: destination.file,
+    });
+  });
+
+  it("uses the ordinary semantic root's measured size for nested frame-copy appearance", async () => {
+    const largerDestination = { ...destination, width: 800, height: 600 };
+    const ordinaryRoot = {
+      ...node,
+      oid: "shell",
+      rect: { x: 0, y: 0, width: source.width, height: source.height },
+      styles: { height: "100vh", position: "relative" },
+    } as DesignRuntimeNodeDetails;
+    mocks.targets = [largerDestination];
+    useDesignWorkspaceUiStore.getState().setSelection(input.workspaceId, source.file, "shell");
+    await transferDesignLayerOnCanvas({
+      ...input,
+      frames: [source, largerDestination],
+      details: ordinaryRoot,
+      componentCopy: { variant: null },
+      duplicateNodeId: "copy-shell",
+      detach: false,
+    });
+    expect(mocks.transfer.mock.calls[0]?.[1]).toMatchObject({
+      nodeId: "shell",
+      duplicateNodeId: "copy-shell",
+      componentCopy: { variant: null },
+      destinationFrame: destination.file,
+      w: source.width,
+      h: source.height,
+    });
+  });
+
   it("sends the measured affine appearance, with the new frame on whole pixels, instead of the legacy flattening request", async () => {
     await transferDesignLayerOnCanvas({
       ...input,
@@ -439,6 +490,45 @@ describe("design-tool nesting", () => {
     expect(sent.relocation.inheritedStyles).not.toHaveProperty("font-family");
   });
 
+  it("relocates a linked component's runtime root as a whole frame", async () => {
+    mocks.targets = [{ oid: "target-root", tag: "main", styles: { position: "relative" }, childCoordinateSpace: [1, 0, 0, 1, 0, 0] }];
+    mocks.destinationDetails = { relocationContext: { inheritedStyles: {}, baseStyles: {}, unsupported: [] } };
+    const root = {
+      oid: "cc-root",
+      sourceVersion: source.sourceVersion,
+      rect: { x: 0, y: 0, width: 600, height: 900 },
+      styles: { backgroundColor: "snow" },
+      relocationContext: { inheritedStyles: { color: "dimgray" }, baseStyles: {}, unsupported: [] },
+    } as unknown as DesignRuntimeNodeDetails;
+    await transferDesignLayerOnCanvas({ ...input, detach: false, componentCopy: { variant: "compact" }, details: root,
+      origin: { x: 1040, y: 60 }, destination, pointer: { x: 1100, y: 100 } });
+    const sent = mocks.transfer.mock.calls[0]?.[1];
+    expect(sent).toMatchObject({
+      nodeId: "cc-root",
+      componentCopy: { variant: "compact" },
+      destinationFrame: destination.file,
+      frameBackground: "snow",
+      relocation: { width: 600, height: 400, matrix: [1, 0, 0, 1, 40, 60], inheritedStyles: { color: "dimgray" } },
+    });
+  });
+
+  it("does not carry interaction-preview styling into a Default component copy", async () => {
+    mocks.targets = [{ oid: "target-root", tag: "main", styles: { position: "relative" }, childCoordinateSpace: [1, 0, 0, 1, 0, 0] }];
+    mocks.destinationDetails = { relocationContext: { inheritedStyles: {}, baseStyles: { color: "black" }, unsupported: [] } };
+    const root = {
+      oid: "cc-root",
+      sourceVersion: source.sourceVersion,
+      rect: { x: 0, y: 0, width: 600, height: 900 },
+      styles: { backgroundColor: "tomato" },
+      relocationContext: { inheritedStyles: { color: "red" }, baseStyles: { color: "black" }, unsupported: [] },
+    } as unknown as DesignRuntimeNodeDetails;
+    await transferDesignLayerOnCanvas({ ...input, detach: false, componentCopy: { variant: null }, statePreview: true,
+      details: root, origin: { x: 1040, y: 60 }, destination, pointer: { x: 1100, y: 100 } });
+    const sent = mocks.transfer.mock.calls[0]?.[1];
+    expect(sent).not.toHaveProperty("frameBackground");
+    expect(sent.relocation.inheritedStyles).not.toHaveProperty("color", "red");
+  });
+
   it("selects the nested frame before its source leaves the page, so the canvas never jumps to the first frame", async () => {
     mocks.targets = [{ oid: "target-root", tag: "main", styles: { position: "relative" }, childCoordinateSpace: [1, 0, 0, 1, 0, 0] }];
     mocks.destinationDetails = { relocationContext: { inheritedStyles: {}, baseStyles: {}, unsupported: [] } };
@@ -516,4 +606,3 @@ describe("design-tool nesting", () => {
     expect(mocks.transfer).toHaveBeenCalledOnce();
   });
 });
-

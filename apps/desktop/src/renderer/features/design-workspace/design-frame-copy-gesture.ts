@@ -9,6 +9,7 @@ import { beginDesignPointerGesture } from "./design-pointer-gesture";
 import { designCanvasFrameAt, transferDesignLayerOnCanvas } from "./design-layout-transfer";
 import { designFrameViews, type DesignFrameView } from "./state/design-frame-view";
 import { designWorkspaceSnapshotCache, duplicateDesignFrameCached } from "./state/design-workspace-cache";
+import { captureDesignFrameComponentCopy } from "./state/design-component-variants";
 import { captureDesignPageOwner, designWorkspaceView, isCurrentDesignPageOwner } from "./state/design-workspace-ui";
 import { selectDesignFrame } from "./state/design-selection";
 import { designBackgroundWork } from "./state/design-background-work";
@@ -140,9 +141,21 @@ export function startDesignFrameCopy(input: {
   saving(save: Promise<void>): void;
   /** Registers pixels shown while the save is pending; returns the release. */
   presenting?(retire: () => void): () => void;
+  statePreviewed?(): void;
+  unprepared?(): void;
   failed(error: unknown): void;
 }): () => void {
   const { event, workspaceId, frame } = input;
+  const capture = captureDesignFrameComponentCopy(workspaceId, frame);
+  if (!capture) {
+    input.unprepared?.();
+    return () => {};
+  }
+  if (capture.identityUnknown) {
+    input.failed(new Error("Component identity is unavailable. Update the Local engine or choose Duplicate as independent frame."));
+    return () => {};
+  }
+  const { componentCopy, statePreview } = capture;
   const article = event.currentTarget.closest<HTMLElement>("[data-design-frame]");
   if (!article) return () => {};
   event.preventDefault();
@@ -208,6 +221,7 @@ export function startDesignFrameCopy(input: {
       if (!moved || !current()) { cancel(); return; }
       released = true;
       input.finished();
+      if (statePreview) input.statePreviewed?.();
       const releasePresentation = input.presenting?.(() => presentation?.remove()) ?? (() => {});
       const save = (async () => {
         if (!current()) return;
@@ -217,13 +231,15 @@ export function startDesignFrameCopy(input: {
           if (!details) throw new Error("The source frame is still preparing. Try the copy again.");
           const transferred = await transferDesignLayerOnCanvas({ workspaceId, folder: input.folder, frame, details,
             duplicateNodeId: `copy-${crypto.randomUUID()}`, frames: designFrameViews(designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data),
+            componentCopy, statePreview,
             origin, pointer, destination, detach: false, requireRelocation: true, isCurrent: current,
             presented: target => presentation?.handoff(target) ?? Promise.resolve() });
           if (transferred) return;
           throw new Error("The copy destination changed before release.");
         }
         const result = await duplicateDesignFrameCached(workspaceId, frame.file, owner.pageId, {
-          sourceVersion: frame.sourceVersion, geometry: { ...origin, w: frame.width, h: frame.height, z: Math.min(DESIGN_MAX_FRAMES_PER_PAGE, frame.z + 1) },
+          sourceVersion: frame.sourceVersion, componentCopy,
+          geometry: { ...origin, w: frame.width, h: frame.height, z: Math.min(DESIGN_MAX_FRAMES_PER_PAGE, frame.z + 1) },
         });
         const copy = result.snapshot.frames.find(candidate => candidate.file === result.frame.file);
         if (copy && current()) {

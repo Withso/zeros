@@ -8,6 +8,8 @@ import { COMPONENT_VARIANT_STATE_ATTRIBUTE, isComponentVariantState, type Compon
 import { isDesignComponentVariantName, isDesignFrameFile } from "@zeros/protocol/design-path";
 import type { DesignFrameComponent } from "@zeros/protocol/design-catalog";
 import type { DesignWorkspaceSnapshotWire } from "../../../platform/bridge/design-bridge";
+import type { DesignFrameView } from "./design-frame-view";
+import { designPresentedFrame } from "./design-frame-view";
 import { isDesignWorkspaceBootPreview } from "./design-workspace-boot-cache";
 import { create } from "zustand";
 
@@ -111,6 +113,49 @@ function shownFrom(stored: Stored, workspaceId: string, frame: { file: string; c
 /** The variant this frame shows, or null for its defaults. */
 export function designShownComponentVariant(workspaceId: string, frame: { file: string; component?: DesignFrameComponent }): string | null {
   return shownFrom(useDesignComponentVariantStore.getState().byWorkspace, workspaceId, frame);
+}
+
+export function designComponentCopyCapture(workspaceId: string, frame: { file: string; component?: DesignFrameComponent }): {
+  variant: string | null;
+  statePreview: boolean;
+} {
+  const variant = designShownComponentVariant(workspaceId, frame);
+  const statePreview = designDeclaredVariantState(frame.component, variant) !== null;
+  return { variant: statePreview ? null : variant, statePreview };
+}
+
+export function designComponentCopyVariant(workspaceId: string, frame: { file: string; component?: DesignFrameComponent }): string | null {
+  return designComponentCopyCapture(workspaceId, frame).variant;
+}
+
+export function captureDesignFrameComponentCopy(workspaceId: string, frameView: DesignFrameView | null | undefined) {
+  const frame = designPresentedFrame(frameView);
+  if (!frame) return null;
+  if (frame.componentIdentity === undefined) {
+    return {
+      frame,
+      sourceVersion: frame.sourceVersion,
+      componentCopy: undefined,
+      statePreview: false,
+      identityUnknown: true as const,
+    };
+  }
+  if (frame.componentIdentity === null || frame.componentIdentity.kind !== "main") {
+    return {
+      frame,
+      sourceVersion: frame.sourceVersion,
+      statePreview: false,
+      identityUnknown: false as const,
+    };
+  }
+  const captured = designComponentCopyCapture(workspaceId, frame);
+  return {
+    frame,
+    sourceVersion: frame.sourceVersion,
+    componentCopy: { variant: captured.variant },
+    statePreview: captured.statePreview,
+    identityUnknown: false as const,
+  };
 }
 
 export function useDesignShownComponentVariant(workspaceId: string, frame: { file: string; component?: DesignFrameComponent }): string | null {

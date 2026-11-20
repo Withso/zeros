@@ -74,7 +74,7 @@ function partsOf(node: ParentNode, found: Element[] = []): Element[] {
 /** An instance's rendered body with each overridden part's declarations
  * after its own inline style. Run before the instance's slots are filled:
  * the layers a frame places there are its own, not parts. */
-export function applyDesignPartStyleOverrides(body: string, overrides: ReadonlyMap<string, string>): string {
+export function applyDesignPartStyleOverrides(body: string, overrides: ReadonlyMap<string, string>, copyOwned = true): string {
   if (overrides.size === 0) return body;
   const fragment = parseFragment(body, { sourceCodeLocationInfo: true });
   const edits: Array<{ start: number; end: number; text: string }> = [];
@@ -84,7 +84,8 @@ export function applyDesignPartStyleOverrides(body: string, overrides: ReadonlyM
     const location = element.sourceCodeLocation?.startTag;
     if (!override || !location) continue;
     const own = element.attrs.find((attribute) => attribute.name === "style")?.value.trim();
-    const style = `style="${escapeAttribute(own ? `${own.replace(/;\s*$/, "")}; ${override}` : override)}"`;
+    const provenance = copyOwned ? ` data-zd-own-style="${escapeAttribute(override)}" data-zd-source-style="${escapeAttribute(own ?? "")}"` : "";
+    const style = `style="${escapeAttribute(own ? `${own.replace(/;\s*$/, "")}; ${override}` : override)}"${provenance}`;
     const span = element.sourceCodeLocation?.attrs?.style;
     if (span) {
       edits.push({ start: span.startOffset, end: span.endOffset, text: style });
@@ -110,7 +111,7 @@ export const DESIGN_INSTANCE_ROOT_ATTRIBUTE = "data-zd-root";
  * its own. Null for a body of several layers, text beside one, a root no
  * part names, a slot (layers are put in it, so it keeps its own row) or a
  * nested instance: that host keeps its box. */
-export function designInstanceRootBody(body: string, host: { style?: string | undefined; className?: string | undefined }): string | null {
+export function designInstanceRootBody(body: string, host: { style?: string | undefined; className?: string | undefined; ownStyle?: string | undefined; sourceStyle?: string | undefined }): string | null {
   const fragment = parseFragment(body, { sourceCodeLocationInfo: true });
   let root: Element | null = null;
   for (const child of fragment.childNodes) {
@@ -134,6 +135,20 @@ export function designInstanceRootBody(body: string, host: { style?: string | un
     else added.push(text);
   };
   merge("class", host.className, (own, extra) => `${own} ${extra}`);
+  const hostOwnStyle = host.ownStyle ?? host.style;
+  if (host.style?.trim() && hostOwnStyle?.trim()) {
+    const attribute = (name: string) => root!.attrs.find((entry) => entry.name === name)?.value;
+    const prior = attribute("data-zd-own-style");
+    for (const [name, value] of [
+      ["data-zd-own-style", prior ? `${prior}; ${hostOwnStyle.trim()}` : hostOwnStyle.trim()],
+      ["data-zd-source-style", [attribute("data-zd-source-style") ?? attribute("style") ?? "", host.sourceStyle ?? ""].filter(Boolean).join("; ")],
+    ] as const) {
+      const text = `${name}="${escapeAttribute(value)}"`;
+      const span = root.sourceCodeLocation?.attrs?.[name];
+      if (span) edits.push({ start: span.startOffset, end: span.endOffset, text });
+      else added.push(text);
+    }
+  }
   merge("style", host.style, (own, extra) => `${own.replace(/;\s*$/, "")}; ${extra}`);
   added.push(`${DESIGN_INSTANCE_ROOT_ATTRIBUTE}=""`);
   const close = body.lastIndexOf(">", location.endOffset - 1);

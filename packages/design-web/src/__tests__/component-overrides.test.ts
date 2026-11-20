@@ -60,7 +60,7 @@ describe("part overrides", () => {
 
   it("add to a void part's start tag", () => {
     expect(applyDesignPartStyleOverrides('<img data-zd-part="pic" src="a.png" />', new Map([["pic", 'width: 4px; content: "x"']])))
-      .toBe('<img data-zd-part="pic" src="a.png" style="width: 4px; content: &quot;x&quot;" />');
+      .toBe('<img data-zd-part="pic" src="a.png" style="width: 4px; content: &quot;x&quot;" data-zd-own-style="width: 4px; content: &quot;x&quot;" data-zd-source-style="" />');
   });
 });
 
@@ -68,10 +68,10 @@ describe("an instance's root layer", () => {
   it("is its box: the host's style follows the root's overrides, its classes follow the root's, and the root is marked", () => {
     expect(designInstanceRootBody('<article class="card" data-zd-part="card" style="padding: 2px"><b data-zd-part="t">x</b></article>',
       { style: 'width: 300px; content: "x"', className: "mt-4" }))
-      .toBe('<article class="card mt-4" data-zd-part="card" style="padding: 2px; width: 300px; content: &quot;x&quot;" data-zd-root=""><b data-zd-part="t">x</b></article>');
+      .toBe('<article class="card mt-4" data-zd-part="card" style="padding: 2px; width: 300px; content: &quot;x&quot;" data-zd-own-style="width: 300px; content: &quot;x&quot;" data-zd-source-style="padding: 2px" data-zd-root=""><b data-zd-part="t">x</b></article>');
     expect(designInstanceRootBody('\n  <img data-zd-part="pic" src="a.png" />\n', {}))
       .toBe('\n  <img data-zd-part="pic" src="a.png" data-zd-root="" />\n');
-    expect(designInstanceRootBody('<div data-zd-part="d"></div>', { style: "margin: 0" })).toBe('<div data-zd-part="d" style="margin: 0" data-zd-root=""></div>');
+    expect(designInstanceRootBody('<div data-zd-part="d"></div>', { style: "margin: 0" })).toBe('<div data-zd-part="d" data-zd-own-style="margin: 0" data-zd-source-style="" style="margin: 0" data-zd-root=""></div>');
   });
 
   it("is none for a body of several layers, text beside it, an unnamed root, a slot or a nested instance", () => {

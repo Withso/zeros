@@ -9,7 +9,7 @@ import {
   readDesignFrameRenderSourceFromSource,
 } from "./document";
 import { readSafeRegularFile } from "./safe-files";
-import { isDesignComponentVariantName, isDesignFrameFile } from "@zeros/protocol/design-path";
+import { isDesignComponentVariantName, isDesignFrameFile, isDesignPageFolder } from "@zeros/protocol/design-path";
 import { discoverFrameFiles, readSharedCanvasContext } from "./document-storage";
 import { prepareDesignSurfaceDocument } from "./surface-document";
 
@@ -176,9 +176,10 @@ export async function readDesignProtocolResource(
       : null;
   const extension = path.extname(relativePath).toLowerCase();
   const frameHtml = isDesignFrameFile(relativePath) ? relativePath : null;
+  const resourceParts = relativePath.split("/");
   const allowedResource =
     (extension === ".css" && !relativePath.includes("/")) ||
-    (relativePath.startsWith("assets/") && MIME_TYPES[extension]);
+    ((relativePath.startsWith("assets/") || (isDesignPageFolder(resourceParts[0]) && resourceParts[1] === "assets")) && MIME_TYPES[extension]);
   if (!frameHtml && !allowedResource) return response(404, "Not found.");
   // A frame document is requested per visible frame; at tens of thousands of
   // frames, decoding the canvas for each would dominate the request.

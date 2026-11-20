@@ -773,6 +773,7 @@ function assertSafeElements(records: readonly Element[], sourceFile: string): vo
     }
     for (const attribute of element.attrs) {
       const name = attribute.name.toLowerCase();
+      if (name === "data-zd-own-style" || name === "data-zd-source-style") throw new Error("Render-only style provenance cannot be authored.");
       if (/^on/i.test(name)) {
         throw new Error(
           `Event handler attributes are not allowed: ${attribute.name}.`,
@@ -953,6 +954,7 @@ export function mutateDesignNodeAttributeSource(
     throw new Error(`Invalid design attribute: ${rawName}`);
   }
   const normalized = name.toLowerCase();
+  if (normalized === "data-zd-own-style" || normalized === "data-zd-source-style") throw new Error("Render-only style provenance cannot be authored.");
   if (normalized === "data-oid") {
     throw new Error(
       "Stable data-oid identity cannot be changed as an attribute.",

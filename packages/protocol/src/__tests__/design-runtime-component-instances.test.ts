@@ -128,6 +128,26 @@ describe("component instances in the frame runtime", () => {
     }
   });
 
+  it("keeps a part's authored styles when the rule it replaced reads a variable shorthand", async () => {
+    const page = await fixture(browser);
+    try {
+      await page.evaluate(() => {
+        const style = document.createElement("style");
+        style.textContent = ".pad { padding: var(--pad, 4px); color: navy; }";
+        document.head.append(style);
+        document.body.insertAdjacentHTML("beforeend", '<zd-pad data-oid="h9" data-zd-instance="9"><button data-zd-part="v" class="pad" ' +
+          'style="padding-left: 9px; color: red" data-zd-own-style="padding-left: 9px; color: red" data-zd-source-style="">V</button></zd-pad>');
+      });
+      await request(page, "getSnapshot");
+      const reply = await request(page, "getNodeDetails", { nodeId: designComponentPartNodeId("h9", "v") });
+      const styles = (reply.result as { authoredStyles?: Record<string, unknown> } | null)?.authoredStyles;
+      expect(styles?.color).toMatchObject({ value: "red" });
+      expect(styles?.["padding-left"]).toMatchObject({ value: "9px" });
+    } finally {
+      await page.close();
+    }
+  });
+
   it("finds the part under a point inside an instance, by its part and copy, and reads it like a layer", async () => {
     const page = await fixture(browser);
     try {
