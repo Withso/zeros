@@ -3142,10 +3142,19 @@ export const DesignInspector = React.memo(function DesignInspector({
               await applyDesignEditCached(owner, target, async ({ assertCurrent }) => {
                 let latest: typeof target;
                 let rootStyles: Record<string, string | null>;
-                if (!designFrameRuntime(owner, target.file)) {
-                  // A frame that runs no document, such as one too small on
-                  // screen, has no preview over its confirmed readback.
-                  assertCurrent();
+                const current = designWorkspaceSnapshotCache.peekSnapshot(owner).data?.frames.find(
+                  (candidate) => candidate.file === target.file,
+                ) ?? target;
+                let live = designFrameRuntime(owner, target.file);
+                if (live && live.sourceVersion !== current.sourceVersion)
+                  live = await waitForDesignFrameRuntime(owner, target.file, 2_000, {
+                    sourceVersion: current.sourceVersion,
+                  });
+                assertCurrent();
+                if (!live) {
+                  // A frame that runs no document at this generation, such as
+                  // one too small on screen or still reloading, has no preview
+                  // over its confirmed readback.
                   latest = designWorkspaceSnapshotCache.peekSnapshot(owner).data?.frames.find(
                     (candidate) => candidate.file === target.file,
                   ) ?? target;

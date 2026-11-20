@@ -929,6 +929,60 @@ describe("an inspector field scrub", () => {
     });
   });
 
+  it("resizes a frame whose document is still reloading from its confirmed details", async () => {
+    const contentRoot: DesignRuntimeNodeDetails = {
+      ...root,
+      styles: {
+        ...root.styles,
+        boxSizing: "content-box",
+        paddingLeft: "6px",
+        paddingRight: "6px",
+        borderLeftWidth: "2px",
+        borderRightWidth: "2px",
+      },
+    };
+    const runtime = await showRuntime(contentRoot, false, sourceVersion, {
+      frameSelected: true,
+      selectedNodeId: null,
+      selectedNodeIds: [],
+    });
+    // The document is still at an older generation and does not catch up.
+    mocks.runtime.mockReturnValue({ ...runtime, sourceVersion: "9".repeat(24) });
+    mocks.waitForRuntime.mockResolvedValue(null);
+    let prepared: { operations: Array<{ type: string; styles?: Record<string, string | null> }> } | undefined;
+    mocks.applyEdit.mockImplementation((_workspaceId, _frame, intent) => {
+      if (typeof intent !== "function") return Promise.resolve({ result: null });
+      return Promise.resolve(intent({ assertCurrent: () => {} })).then((transaction) => {
+        if (transaction) prepared = transaction;
+        return { result: null };
+      });
+    });
+
+    const width = container
+      .querySelector<HTMLButtonElement>('button[aria-label="Scrub W"]')
+      ?.closest<HTMLElement>("[data-design-inspector-field]")
+      ?.querySelector<HTMLInputElement>("input");
+    await act(async () => {
+      width!.focus();
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(width, "110");
+      width!.dispatchEvent(new Event("input", { bubbles: true }));
+      width!.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+      await Promise.resolve();
+    });
+    await vi.waitFor(() => expect(prepared).toBeDefined());
+
+    expect(prepared?.operations[0]).toMatchObject({
+      type: "node.set-styles",
+      nodeId: root.oid,
+      styles: { width: "calc(100% - 16px)" },
+    });
+    expect(prepared?.operations[1]).toMatchObject({
+      type: "frame.set-geometry",
+      frame: "home.html",
+      geometry: { x: 0, y: 0, width: 110, height: 300, z: 0 },
+    });
+  });
+
   it("keeps layout actions enabled when history fails", async () => {
     let rejectUndo: ((error: Error) => void) | undefined;
     mocks.applyHistory.mockImplementationOnce(() => new Promise((_, reject) => { rejectUndo = reject; }));
