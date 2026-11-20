@@ -258,12 +258,14 @@ async function showRuntime(
     frameSelected?: boolean;
     selectedNodeId?: string | null;
     selectedNodeIds?: string[];
+    frameVersion?: string;
   } = {},
 ) {
   const {
     frameSelected = false,
     selectedNodeId = "card",
     selectedNodeIds = ["card"],
+    frameVersion = sourceVersion,
   } = selection;
   const getNodeDetails = vi.fn<(nodeId: string) => Promise<DesignRuntimeNodeDetails>>(async (nodeId) =>
     nodeId === "root" && details.oid !== "root" ? root : details,
@@ -280,7 +282,7 @@ async function showRuntime(
     ),
   };
   mocks.runtime.mockReturnValue(runtime);
-  const frame = { file: "home.html", sourceVersion, title: "Home", x: 0, y: 0, z: 0, width: 400, height: 300 } as never;
+  const frame = { file: "home.html", sourceVersion: frameVersion, title: "Home", x: 0, y: 0, z: 0, width: 400, height: 300 } as never;
   designWorkspaceSnapshotCache.setData("w", { frames: [frame] } as never);
   const snapshot = { sourceVersion, revision: 1, tree: [], warnings: [], frame: root,
     viewport: { width: 400, height: 300, scrollX: 0, scrollY: 0 } } as DesignRuntimeSnapshot;
@@ -854,6 +856,76 @@ describe("an inspector field scrub", () => {
       type: "frame.set-geometry",
       frame: "home.html",
       geometry: { x: 0, y: 0, width: 480, height: 300, z: 0 },
+    });
+  });
+
+  it("keeps a Mixed field Mixed while one selected layer reads back at a newer generation", async () => {
+    const other: DesignRuntimeNodeDetails = {
+      ...card, oid: "other", name: "Other", selector: '[data-oid="other"]',
+      styles: { ...card.styles, opacity: "1" },
+    };
+    const selection = { selectedNodeId: "card", selectedNodeIds: ["card", "other"] };
+    useDesignRuntimeStore.getState().publishNodeDetails("w", "/repo", "home.html", other, sourceVersion);
+    await showRuntime(card, false, sourceVersion, selection);
+    expect(fieldInput("opacity").placeholder).toBe("Mixed");
+    expect(fieldInput("opacity").value).toBe("");
+    const nextVersion = "2".repeat(24);
+    await showRuntime({ ...card, sourceVersion: nextVersion }, false, nextVersion, { ...selection, frameVersion: nextVersion });
+    expect(fieldInput("opacity").placeholder).toBe("Mixed");
+    expect(fieldInput("opacity").value).toBe("");
+  });
+
+  it("resizes a frame whose document is not running from its confirmed details", async () => {
+    const contentRoot: DesignRuntimeNodeDetails = {
+      ...root,
+      styles: {
+        ...root.styles,
+        boxSizing: "content-box",
+        paddingLeft: "6px",
+        paddingRight: "6px",
+        borderLeftWidth: "2px",
+        borderRightWidth: "2px",
+      },
+    };
+    await showRuntime(contentRoot, false, sourceVersion, {
+      frameSelected: true,
+      selectedNodeId: null,
+      selectedNodeIds: [],
+    });
+    // A frame too small on screen paints its picture and runs no document.
+    mocks.runtime.mockReturnValue(null);
+    mocks.waitForRuntime.mockResolvedValue(null);
+    let prepared: { operations: Array<{ type: string; styles?: Record<string, string | null> }> } | undefined;
+    mocks.applyEdit.mockImplementation((_workspaceId, _frame, intent) => {
+      if (typeof intent !== "function") return Promise.resolve({ result: null });
+      return Promise.resolve(intent({ assertCurrent: () => {} })).then((transaction) => {
+        if (transaction) prepared = transaction;
+        return { result: null };
+      });
+    });
+
+    const width = container
+      .querySelector<HTMLButtonElement>('button[aria-label="Scrub W"]')
+      ?.closest<HTMLElement>("[data-design-inspector-field]")
+      ?.querySelector<HTMLInputElement>("input");
+    await act(async () => {
+      width!.focus();
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(width, "110");
+      width!.dispatchEvent(new Event("input", { bubbles: true }));
+      width!.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+      await Promise.resolve();
+    });
+    await vi.waitFor(() => expect(prepared).toBeDefined());
+
+    expect(prepared?.operations[0]).toMatchObject({
+      type: "node.set-styles",
+      nodeId: root.oid,
+      styles: { width: "calc(100% - 16px)" },
+    });
+    expect(prepared?.operations[1]).toMatchObject({
+      type: "frame.set-geometry",
+      frame: "home.html",
+      geometry: { x: 0, y: 0, width: 110, height: 300, z: 0 },
     });
   });
 

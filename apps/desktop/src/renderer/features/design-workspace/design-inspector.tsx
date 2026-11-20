@@ -2116,7 +2116,17 @@ export const DesignInspector = React.memo(function DesignInspector({
   const heldParents = useMemo(() => (heldDetails ? [heldDetails] : null), [heldDetails]);
   const heldChanges = useMemo(() => (heldDetails ? designHeldStateChanges(heldDetails) : null), [heldDetails]);
   const shownDetails = heldDetails ?? presentedElementDetails;
-  const shownParents = heldParents ?? layoutParents;
+  // A selected layer read back at another generation than the primary one
+  // drops out of layoutParents until it catches up. Its fields keep showing
+  // the last complete selection meanwhile, so a Mixed field stays Mixed.
+  const completeParentsRef = useRef<{ owner: string; parents: DesignRuntimeNodeDetails[] } | null>(null);
+  if (completeParentsRef.current?.owner !== styleOwnerKey) completeParentsRef.current = null;
+  if (layoutParents.length === styleNodeIds.length)
+    completeParentsRef.current = { owner: styleOwnerKey, parents: layoutParents };
+  const presentedParents = layoutParents.length < styleNodeIds.length && completeParentsRef.current
+    ? completeParentsRef.current.parents
+    : layoutParents;
+  const shownParents = heldParents ?? presentedParents;
   const heldState = heldDetails?.heldState ?? null;
   const originsContext = useDesignStyleOriginsContext(workspaceId);
   // The Styled-by filter belongs to the selection it was chosen for. A held
@@ -3127,29 +3137,40 @@ export const DesignInspector = React.memo(function DesignInspector({
               const size = designFrameSizeValue(number);
               const { workspaceId: owner, frame: target } = styleContext;
               const rootNodeId = elementDetails.oid;
+              const confirmedRoot = elementDetails;
+              const axes = { width: geometryKey === "w", height: geometryKey === "h" };
               await applyDesignEditCached(owner, target, async ({ assertCurrent }) => {
-                const { frame: latest, runtime, assertFrameCurrent } =
-                  await readPreparedLayoutRuntime(owner, target.file, assertCurrent);
-                assertFrameCurrent();
-                if (!runtime.supports("measureLayout") || !runtime.measureLayout)
-                  throw new Error(
-                    "This Design frame cannot safely prepare layout edits. Reload the frame and try again.",
+                let latest: typeof target;
+                let rootStyles: Record<string, string | null>;
+                if (!designFrameRuntime(owner, target.file)) {
+                  // A frame that runs no document, such as one too small on
+                  // screen, has no preview over its confirmed readback.
+                  assertCurrent();
+                  latest = designWorkspaceSnapshotCache.peekSnapshot(owner).data?.frames.find(
+                    (candidate) => candidate.file === target.file,
+                  ) ?? target;
+                  rootStyles = designFrameRootFixedStyles(confirmedRoot, axes);
+                } else {
+                  const prepared = await readPreparedLayoutRuntime(owner, target.file, assertCurrent);
+                  const { runtime, assertFrameCurrent } = prepared;
+                  latest = prepared.frame;
+                  assertFrameCurrent();
+                  if (!runtime.supports("measureLayout") || !runtime.measureLayout)
+                    throw new Error(
+                      "This Design frame cannot safely prepare layout edits. Reload the frame and try again.",
+                    );
+                  // Confirmed source, never a newer padding or border preview.
+                  const held = designHeldStateWatch(owner, target.file, [rootNodeId]);
+                  const measured = await measureDesignLayoutUnheld(
+                    runtime,
+                    { updates: [], nodeIds: [rootNodeId] },
+                    held,
                   );
-                // Confirmed source, never a newer padding or border preview.
-                const held = designHeldStateWatch(owner, target.file, [rootNodeId]);
-                const measured = await measureDesignLayoutUnheld(
-                  runtime,
-                  { updates: [], nodeIds: [rootNodeId] },
-                  held,
-                );
-                assertFrameCurrent();
-                if (!measured)
-                  throw new Error("The frame's state changed while its size was prepared. Try again.");
-                const rootDetails = measured.get(rootNodeId)!;
-                const rootStyles = designFrameRootFixedStyles(rootDetails, {
-                  width: geometryKey === "w",
-                  height: geometryKey === "h",
-                });
+                  assertFrameCurrent();
+                  if (!measured)
+                    throw new Error("The frame's state changed while its size was prepared. Try again.");
+                  rootStyles = designFrameRootFixedStyles(measured.get(rootNodeId)!, axes);
+                }
                 return {
                   schemaVersion: 1,
                   transactionId: `desktop:${crypto.randomUUID()}`,
@@ -3227,6 +3248,9 @@ export const DesignInspector = React.memo(function DesignInspector({
         label={label}
         property={property}
         value={
+          // A Mixed field never shows one layer's value, even when that
+          // layer reads back ahead of the others mid-scrub.
+          mixed ? "" :
           (!options?.geometry && shownDetails ? designAuthoredLength(shownDetails, property) : null) ??
           designStyleFieldValue(authoredProperties, property, value)
         }
