@@ -2,7 +2,7 @@ import { defaultFilter } from "cmdk";
 import type { Workspace } from "../platform/git";
 import { isCloudWorkspace } from "../platform/bridge/cloud-workspace-key";
 import type { OrganizationSummary } from "../features/team/control-plane";
-import { filterRowsForOrganization } from "../features/team/organization-capabilities";
+import { filterRowsForOrganization, localWorkShowsEverywhere } from "../features/team/organization-capabilities";
 import { PERSONAL_ORGANIZATION } from "../features/team/personal-organization";
 import {
   isSettingsSectionAvailable,
@@ -99,7 +99,7 @@ export function paletteCapabilities(input: {
   return {
     createWorkspace: input.createWorkspace,
     localOwner: input.localOwner,
-    localNative: input.localOwner && input.native,
+    localNative: (input.localOwner || localWorkShowsEverywhere()) && input.native,
     workspace,
     codeWorkspace,
     terminalAgent: codeWorkspace && input.terminalAgents,
@@ -394,8 +394,11 @@ export function paletteWorkspacesForOwner(
   confirmedId: string | null,
 ): Workspace[] {
   if (!organization && confirmedId) {
+    const everywhere = localWorkShowsEverywhere();
     return filterRowsForOrganization(rows, null).filter(
-      (row) => row.organizationId === confirmedId,
+      (row) =>
+        row.organizationId === confirmedId ||
+        (everywhere && row.organizationId == null && row.placement !== "cloud"),
     );
   }
   return filterRowsForOrganization(rows, organization ?? PERSONAL_ORGANIZATION);
@@ -428,7 +431,7 @@ export function workspacePaletteEntries(
         workspaceNumberName(workspace),
         projects.find((project) => project.repoSlug === workspace.repoSlug)
           ?.name ?? workspace.repoSlug,
-        isCloudWorkspace(workspace.path) ? "Cloud" : "Local",
+        isCloudWorkspace(workspace.path) ? "Cloud" : localWorkShowsEverywhere() ? "This Mac" : "Local",
         workspace.present === false
           ? "Folder missing"
           : workspace.archivedAt != null

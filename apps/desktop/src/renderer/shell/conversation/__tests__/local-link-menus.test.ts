@@ -1,6 +1,11 @@
 import { createElement, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+// These cases cover today's owners; the *-unified tests cover unified-workspaces.
+vi.mock("../../../config/release-channel", async (original) => ({
+  ...(await original<typeof import("../../../config/release-channel")>()),
+  isFeatureEnabled: (feature: string) => feature !== "unified-workspaces",
+}));
 import type { Workspace } from "../../../platform/git";
 import type { ChatThread } from "../../../state/store";
 

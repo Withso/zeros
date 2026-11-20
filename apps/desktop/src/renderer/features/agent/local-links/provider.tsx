@@ -1,3 +1,4 @@
+import { localWorkShowsEverywhere } from "../../team/organization-capabilities";
 import {
   useCallback,
   useEffect,
@@ -89,7 +90,7 @@ export function LocalLinksProvider({
   const [scheme, setScheme] = useState<LocalLinkScheme | null>(null);
   const local =
     rollout &&
-    getActiveOrganizationIdSnapshot() == null &&
+    (localWorkShowsEverywhere() || getActiveOrganizationIdSnapshot() == null) &&
     bridge?.executionIdentity.kind === "local" &&
     !!cwd &&
     !isCloudWorkspace(cwd);

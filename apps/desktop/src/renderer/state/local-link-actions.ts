@@ -1,3 +1,4 @@
+import { localWorkShowsEverywhere } from "../features/team/organization-capabilities";
 import {
   LOCAL_WORKSPACE_LINK_OWNER,
   formatLocalLink,
@@ -30,8 +31,9 @@ export function useCanCopyLocalLink(workspace: Workspace | null): boolean {
   const organization = useActiveOrganization();
   return (
     enabled &&
-    (!organization || organization.isPersonal) &&
-    getActiveOrganizationIdSnapshot() == null &&
+    (localWorkShowsEverywhere() ||
+      ((!organization || organization.isPersonal) &&
+        getActiveOrganizationIdSnapshot() == null)) &&
     isPersonalLocalLinkWorkspace(workspace) &&
     getActiveBridge()?.executionIdentity.kind !== "cloud"
   );
@@ -65,7 +67,7 @@ export async function copyLocalLink(
     getActiveBridge() === bridge &&
     bridge?.executionIdentity.kind !== "cloud" &&
     getOrganizationStoreGeneration() === generation &&
-    getActiveOrganizationIdSnapshot() == null &&
+    (localWorkShowsEverywhere() || getActiveOrganizationIdSnapshot() == null) &&
     isAgentControlFeatureActive("localOrchestration") &&
     isPersonalLocalLinkWorkspace(workspace);
   if (!allowed()) return;

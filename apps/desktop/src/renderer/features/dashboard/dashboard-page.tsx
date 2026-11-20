@@ -135,7 +135,7 @@ import { useActiveOrganization } from "../team/team-store";
 import { useMyUserId, useSharingOrganization } from "../../platform/team-sharing-state";
 import { memberName, useOrganizationRoster } from "../../state/organization-roster";
 import { useCloudWorkspaceCreators } from "../../state/cloud-workspace-creators";
-import { filterRowsForOrganization } from "../team/organization-capabilities";
+import { filterRowsForOrganization, localWorkShowsEverywhere } from "../team/organization-capabilities";
 import { isLocalMainWorkspace } from "../../state/local-main-workspace";
 import { useFolderWorkspaces } from "../../state/use-folder-workspaces";
 import type { Project } from "../../state/projects-store";
@@ -227,7 +227,8 @@ export function DashboardPage() {
     [sharing, sharingOrganizationId, byValue, setBy, roster, me],
   );
   const ownerName = (workspace: Workspace) => {
-    if (!workspace.organizationId || activeOrganization?.isPersonal) return "Local";
+    if (!workspace.organizationId || activeOrganization?.isPersonal)
+      return localWorkShowsEverywhere() ? "You" : "Local";
     const creator = sharing ? creatorOf(workspace) : null;
     if (creator) return creator === me ? "You" : memberName(roster, creator);
     return activeOrganization?.name ?? "Organization";

@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { localWorkShowsEverywhere } from "../features/team/organization-capabilities";
 import type { LocalLink } from "@zeros/protocol/local-orchestration";
 import { isCloudNavigationLink } from "@zeros/protocol/cloud-workspace-link";
 import { agentControlUnavailableReason } from "@zeros/protocol/agent-control-rollout";
@@ -143,10 +144,14 @@ export async function navigateLocalLink(
       options.beforeCommit();
       // Same semantic owner switch as the organization picker. No raw storage
       // writes, engine re-root, archive restoration, or default-tab creation.
-      setActiveOrganizationSelection(PERSONAL_ORGANIZATION_ID, true);
-      if (getActiveOrganizationIdSnapshot() != null) {
-        toast.info("Select Local to open this link.");
-        return;
+      // Local work shows under every owner with unified-workspaces, so the
+      // selected organization stays.
+      if (!localWorkShowsEverywhere()) {
+        setActiveOrganizationSelection(PERSONAL_ORGANIZATION_ID, true);
+        if (getActiveOrganizationIdSnapshot() != null) {
+          toast.info("Select Local to open this link.");
+          return;
+        }
       }
       useWorkspaceStore.getState().dispatch({
         type: "OPEN_LOCAL_LINK",

@@ -2,6 +2,11 @@ import { createElement, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { parseFragment, type DefaultTreeAdapterTypes } from "parse5";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+// These cases cover today's owners; the *-unified tests cover unified-workspaces.
+vi.mock("../../../config/release-channel", async (original) => ({
+  ...(await original<typeof import("../../../config/release-channel")>()),
+  isFeatureEnabled: (feature: string) => feature !== "unified-workspaces",
+}));
 import multiOrganizationFixture from "../../../../../../../scripts/__tests__/fixtures/organization-list.json";
 
 const io = vi.hoisted(() => ({

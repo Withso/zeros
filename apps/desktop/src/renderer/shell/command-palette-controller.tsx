@@ -14,7 +14,7 @@ import {
   useExperimentalFeature,
 } from "../features/settings/experimental-features";
 import { requestUserSettingsSection } from "../features/settings/settings-navigation";
-import { canCreateWorkspaceIn } from "../features/team/organization-capabilities";
+import { canCreateWorkspaceIn, localWorkShowsEverywhere } from "../features/team/organization-capabilities";
 import { hasCloudWorkspaceAccountAccess } from "../features/team/cloud-workspace-account-access";
 import { unifiedOrganizationGeneralSections } from "../features/settings/organization-general";
 import {
@@ -215,7 +215,7 @@ function CommandPaletteSession({
     native: isNativeRuntime(),
     cloudCanEdit: canEdit,
     cloudStatus,
-    createWorkspace: localOwner || canCreateWorkspaceIn(organization, "cloud"),
+    createWorkspace: localOwner || localWorkShowsEverywhere() || canCreateWorkspaceIn(organization, "cloud"),
     terminalAgents,
     activeFile: !!activeFile,
     feedback: isFeedbackConfigured(),

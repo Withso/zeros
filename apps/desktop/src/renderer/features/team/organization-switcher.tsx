@@ -5,6 +5,7 @@ import {
   Check,
   ChevronDown,
   LaptopMinimal,
+  House,
   LogIn,
   LogOut,
   Plus,
@@ -26,6 +27,7 @@ import { toast } from "../../shared/ui/primitives/elements";
 import { isLocalDevelopment } from "../../platform/runtime";
 import { useAuth, type AuthStatus } from "../auth";
 import { setActiveOrganizationSelection } from "./active-team";
+import { localWorkShowsEverywhere } from "./organization-capabilities";
 import { APP_BASE_URL, organizationDashboardUrl } from "./organization-links";
 import { useActiveOrganization, useOrganizations } from "./team-store";
 import type { OrganizationSummary } from "./control-plane";
@@ -71,10 +73,14 @@ export function organizationSwitcherSessionActions(
  * live on this machine. The selection id and model name stay unchanged. */
 export const LOCAL_ORGANIZATION_LABEL = "Local";
 
+/** With unified-workspaces Local work shows in every organization, so the
+ * Personal entry is the person's home: their name, else "Personal". */
 export function organizationDisplayName(
   organization: Pick<OrganizationSummary, "isPersonal" | "name">,
+  personalName?: string | null,
 ): string {
-  if (organization.isPersonal) return LOCAL_ORGANIZATION_LABEL;
+  if (organization.isPersonal)
+    return localWorkShowsEverywhere() ? personalName?.trim() || "Personal" : LOCAL_ORGANIZATION_LABEL;
   return organization.name.trim() || "Organization";
 }
 
@@ -84,7 +90,7 @@ function OrganizationIcon({
   organization: Pick<OrganizationSummary, "isPersonal"> | null;
 }) {
   return organization?.isPersonal ? (
-    <LaptopMinimal strokeWidth={1.5} />
+    localWorkShowsEverywhere() ? <House strokeWidth={1.5} /> : <LaptopMinimal strokeWidth={1.5} />
   ) : (
     <Building2 strokeWidth={1.5} />
   );
@@ -141,11 +147,12 @@ export function OrganizationSwitcher({
   const organizations = showMemberships
     ? availableOrganizations
     : desktopOrganizationChoices(null);
+  const personalName = me?.user.displayName;
   const label = active
-    ? organizationDisplayName(active)
+    ? organizationDisplayName(active, personalName)
     : organizationStatus === "loading"
       ? "Loading…"
-      : LOCAL_ORGANIZATION_LABEL;
+      : organizationDisplayName(PERSONAL_ORGANIZATION, personalName);
 
   // Keep Escape deterministic when another Radix layer is completing its exit.
   // The switcher has no nested menus, so the visible root is always the target.
@@ -201,7 +208,7 @@ export function OrganizationSwitcher({
           >
             <OrganizationIcon organization={organization} />
             <span className="min-w-0 flex-1 truncate">
-              {organizationDisplayName(organization)}
+              {organizationDisplayName(organization, personalName)}
             </span>
             {organization.id === active?.id && <Check aria-hidden="true" />}
           </DropdownMenuItem>

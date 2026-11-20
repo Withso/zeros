@@ -1,6 +1,11 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+// These cases cover today's owners; the *-unified tests cover unified-workspaces.
+vi.mock("../../../config/release-channel", async (original) => ({
+  ...(await original<typeof import("../../../config/release-channel")>()),
+  isFeatureEnabled: (feature: string) => feature !== "unified-workspaces",
+}));
 import type { LocalLinkSnapshot } from "../../../platform/local-link-snapshot";
 import type { RuntimeClient } from "../../../platform/bridge/ws-client";
 
