@@ -3644,7 +3644,7 @@ async function resolveRestoreAnchor(
     if (sha) return { ref: sha, label: "its last saved commit" };
   }
   // 3. The remote-tracking branch, if it still exists.
-  const { remote } = resolveRepoGit(ws.repoRoot);
+  const { remote } = resolveRepoGit(ws.repoRoot, ws);
   if (await refExists(ws.repoRoot, `refs/remotes/${remote}/${ws.branch}`)) {
     return { ref: `${remote}/${ws.branch}`, label: `${remote}/${ws.branch}` };
   }

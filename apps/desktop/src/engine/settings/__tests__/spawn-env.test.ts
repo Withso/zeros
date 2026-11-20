@@ -3,7 +3,11 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { opSettingsResolve } from "../ops";
-import { clearTeamContext, setTeamContext } from "../team-context";
+import {
+  clearTeamContext,
+  configureSettingsOwnerLookup,
+  setTeamContext,
+} from "../team-context";
 import { mergeSpawnEnv, parseDotenv, resolveSpawnEnv } from "../spawn-env";
 
 describe("parseDotenv", () => {
@@ -50,6 +54,7 @@ describe("resolveSpawnEnv", () => {
   afterEach(() => {
     delete process.env.ZEROS_USER_SETTINGS_DIR;
     clearTeamContext();
+    configureSettingsOwnerLookup(null);
     rmSync(dir, { recursive: true, force: true });
     rmSync(userDir, { recursive: true, force: true });
   });
@@ -120,6 +125,7 @@ describe("resolveSpawnEnv", () => {
 
   it("drops the whole ZEROS_ prefix, including from the cloud TEAM layer", () => {
     // Reserve the whole internal prefix so new engine knobs cannot bypass the settings guard.
+    configureSettingsOwnerLookup(() => ({ organizationId: "team-1" }));
     setTeamContext({
       teamId: "team-1",
       doc: {
@@ -141,6 +147,7 @@ describe("resolveSpawnEnv", () => {
   });
 
   it("drops credential-redirect names from the cloud TEAM layer (untrusted for routing)", () => {
+    configureSettingsOwnerLookup(() => ({ organizationId: "team-1" }));
     setTeamContext({
       teamId: "team-1",
       doc: {

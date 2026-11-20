@@ -22,7 +22,7 @@ export interface FetchResult {
 
 export async function fetch(opts: FetchOptions): Promise<FetchResult> {
   const ws = getWorkspace(opts.workspaceId);
-  const remote = opts.remote ?? resolveRepoGit(ws.repoRoot).remote;
+  const remote = opts.remote ?? resolveRepoGit(ws.repoRoot, ws).remote;
   assertSafeGitRef(remote, "remote");
   const args = ["fetch"];
   if (opts.prune) args.push("--prune");

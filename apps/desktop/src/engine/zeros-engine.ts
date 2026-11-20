@@ -180,9 +180,10 @@ import {
   type CreatedWorkspace,
 } from "./git";
 import { RunManager } from "./run/run-manager";
-import { getWorkspaceById, getWorkspaceByPath, listWorkspaces } from "./git/state";
+import { getLocalWorkspaceOwnerForPath, getWorkspaceById, getWorkspaceByPath, listWorkspaces } from "./git/state";
 import { listKnownRepoRoots } from "./db/projects";
 import { resolveRunActions } from "./settings/repo-scripts";
+import { configureSettingsOwnerLookup } from "./settings/team-context";
 import {
   filterRunActionsForPlatform,
   normalizeRunPlatform,
@@ -1012,6 +1013,7 @@ export class ZerosEngine {
       this.executionBoundary,
     );
     this.launchedMcp = new LaunchedMcpServers(repoTaskBoundaryFactory);
+    configureSettingsOwnerLookup(getLocalWorkspaceOwnerForPath);
     configureLoginShellPathRunner({
       cacheKey: `execution:${this.executionBoundary.backend}:${this.root}`,
       run: async (command, args, { timeoutMs }) => {

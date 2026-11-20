@@ -15,7 +15,7 @@ import {
   type ReadSettingsResult,
 } from "./files";
 import { resolveSettings, type ResolvedSettings } from "./resolve";
-import { getTeamDoc } from "./team-context";
+import { teamDocFor, type SettingsOwner } from "./team-context";
 import { withRetiredAgentControlCleared } from "./retired-agent-control";
 import {
   ensureLocalSettingsIgnored,
@@ -120,9 +120,11 @@ function readLocalLayer(
     : readPersonalRepoSettings(root, persist);
 }
 
+/** `owner` names the workspace a shared main checkout is resolved for; otherwise the registry owner of `repoRoot` decides. */
 export function opSettingsResolve(
   repoRoot?: string,
   mainRepoRoot?: string,
+  owner?: SettingsOwner,
 ): ResolvedSettings {
   const user = readSettingsFile(userSettingsPath());
   const managed = readSettingsFile(managedSettingsPath());
@@ -138,7 +140,7 @@ export function opSettingsResolve(
       : undefined;
   const resolved = resolveSettings({
     user: user.error ? null : user.doc,
-    team: getTeamDoc(),
+    team: teamDocFor(repoRoot, owner),
     managed: managed.error ? null : managed.doc,
     repoLocal: repoLocal?.error ? null : repoLocal?.doc,
     workspaceLocal: workspaceLocal?.error ? null : workspaceLocal?.doc,
@@ -340,6 +342,7 @@ export function opSettingsResolveWithOverride(
   repoRoot: string | undefined,
   mainRepoRoot: string | undefined,
   override: Pick<SettingsWritePreview, "path" | "doc">,
+  owner?: SettingsOwner,
 ): ResolvedSettings {
   const overridePath = path.resolve(override.path);
   const read = (filePath: string): ReadSettingsResult =>
@@ -365,7 +368,7 @@ export function opSettingsResolveWithOverride(
       : undefined;
   const resolved = resolveSettings({
     user: user.error ? null : user.doc,
-    team: getTeamDoc(),
+    team: teamDocFor(repoRoot, owner),
     managed: managed.error ? null : managed.doc,
     repoLocal: repoLocal?.error ? null : repoLocal?.doc,
     workspaceLocal: workspaceLocal?.error ? null : workspaceLocal?.doc,
