@@ -1,6 +1,6 @@
 
 import React from "react";
-import { Lock, Plus } from "lucide-react";
+import { Cloud, Laptop, Lock, Plus } from "lucide-react";
 import { cn } from "@/renderer/shared/ui/cn";
 import { badgeVariants } from "@/renderer/shared/ui/primitives/badge";
 import { Button } from "@/renderer/shared/ui/primitives/button";
@@ -35,6 +35,17 @@ export function SettingsSection({
       )}
       {children}
     </section>
+  );
+}
+
+/** Titles the part of a page that applies on this Mac or in cloud workspaces. */
+export function PlaceLabel({ place }: { place: "mac" | "cloud" }) {
+  const Icon = place === "mac" ? Laptop : Cloud;
+  return (
+    <span className="text-fg2 inline-flex items-center gap-1.5">
+      <Icon className="text-fg3 size-3.5" strokeWidth={1.5} aria-hidden />
+      {place === "mac" ? "This Mac" : "Cloud"}
+    </span>
   );
 }
 

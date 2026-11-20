@@ -195,8 +195,10 @@ function HealthDetail({ summary }: { summary: GithubCredentialSummary }) {
 
 export function GitHubSection({
   surfaceActive = true,
+  title = "GitHub",
 }: {
   surfaceActive?: boolean;
+  title?: React.ReactNode;
 }) {
   const [setupMethod, setSetupMethod] = useState<GithubAuthMethod | null>(null);
   const [terminalOpen, setTerminalOpen] = useState(false);
@@ -561,7 +563,7 @@ export function GitHubSection({
     <>
       <section className="flex flex-col gap-3">
         <div>
-          <h2 className="text-fg1 m-0 text-xs leading-4.5 font-medium">GitHub</h2>
+          <h2 className="text-fg1 m-0 text-xs leading-4.5 font-medium">{title}</h2>
           <p className="text-fg2 mt-0.5 text-xs">
             How Zeros signs in to GitHub on this Mac.
           </p>

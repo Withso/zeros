@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
   Check,
   ExternalLink,
@@ -30,10 +30,12 @@ export function CloudGithubSection({
   userId,
   organizationId,
   surfaceActive,
+  title = "GitHub",
 }: {
   userId: string;
   organizationId: string;
   surfaceActive: boolean;
+  title?: ReactNode;
 }) {
   const key = cloudGithubConnectionKey(userId, organizationId);
   const snapshot = useRecoveringRead(
@@ -148,7 +150,7 @@ export function CloudGithubSection({
   const openUrl = (url: string) => void run(() => shellOpenUrl(url));
   return (
     <SettingsSection
-      title="GitHub"
+      title={title}
       description="How cloud workspaces in this organization reach GitHub."
       action={
         <Button
