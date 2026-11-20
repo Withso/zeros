@@ -507,7 +507,34 @@ export async function runDesignTinySelectionSmoke({ page, check }) {
   // and 20% the frame is 22 screen pixels; world (85, 100) is over the hero
   // layer and clear of the lower-right corner handle.
   await typeSize(page, 110, 110);
-  await expect.poll(() => savedFrameSize(page), { timeout: 10_000 }).toBe("110 × 110");
+  try {
+    await expect.poll(() => savedFrameSize(page), { timeout: 10_000 }).toBe("110 × 110");
+  } catch (error) {
+    const width = page.locator('[data-design-layout-section] input[aria-label="W"]');
+    const state = await page.evaluate(async () => {
+      const { designWorkspaceSnapshotCache } =
+        await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-cache.ts");
+      const { designFrameRuntime } = await import("/apps/desktop/src/renderer/platform/bridge/design-frame-runtime.ts");
+      const { useDesignRuntimeStore } =
+        await import("/apps/desktop/src/renderer/features/design-workspace/state/design-runtime-store.ts");
+      const frame = designWorkspaceSnapshotCache.peekSnapshot("ws_design_harness").data?.frames.find((item) => item.file === "home.html");
+      const runtime = designFrameRuntime("ws_design_harness", "home.html");
+      const stored = useDesignRuntimeStore.getState().byWorkspace.ws_design_harness?.frames["home.html"];
+      return {
+        frame: frame?.sourceVersion,
+        runtime: runtime ? { sourceVersion: runtime.sourceVersion, active: runtime.isActive?.() } : null,
+        stored: stored?.sourceVersion,
+        operations: (window.__zerosHarnessWorkbenchOperations ?? []).slice(-12),
+      };
+    });
+    throw new Error(`${error.message}\n${JSON.stringify({
+      saved: await savedFrameSize(page),
+      widthField: { value: await width.inputValue(), disabled: await width.isDisabled() },
+      toasts: await page.locator("[data-sonner-toast]").allTextContents(),
+      messages: await page.locator("[data-design-field-message]").allTextContents(),
+      ...state,
+    })}`);
+  }
   const zoom = 0.2;
   const resized = await geometry();
   await setCamera(page, {
