@@ -30,6 +30,7 @@ function relocate({
   dataDir = "",
   dataDirOverride,
   lock = true,
+  tmpdir = os.tmpdir(),
 }: {
   cacheRoot: string;
   identity: string;
@@ -41,6 +42,7 @@ function relocate({
   dataDir?: string;
   dataDirOverride?: string;
   lock?: boolean;
+  tmpdir?: string;
 }) {
   const source = fs.readFileSync(process.env.ZEROS_MAIN_UNDER_TEST ?? "apps/desktop/electron/main.ts", "utf8");
   const start = source.indexOf("function relocateChromiumCache");
@@ -72,6 +74,7 @@ function relocate({
     zerosRendererProfileDir: () => path.join(dataDir, "electron"),
     rendererProfileDiagnostics: diagnostics,
     fs,
+    os: { tmpdir: () => tmpdir },
     path,
     console: { log() {}, error() {}, warn() {} },
   });
@@ -148,7 +151,7 @@ describe("Chromium session data before ready", () => {
       expect(result.diagnostics.join("\n")).toMatch(/moved from/);
       const again = relocate({ cacheRoot: at.cacheRoot, identity: "com.zeros", channel: "stable", platform: "darwin", dataDir: at.dataDir });
       expect(again.sessionData).toBe(at.electron);
-      expect(again.chooser.lockCalls).toBe(0);
+      expect(again.chooser.lockCalls).toBe(1);
       expect(fs.existsSync(at.cache)).toBe(false);
     });
 
@@ -164,13 +167,20 @@ describe("Chromium session data before ready", () => {
       expect(fs.existsSync(path.join(dataDir, "electron", "GPUCache"))).toBe(true);
     });
 
-    it("without the lock uses Caches and writes nothing, not even main's marker", () => {
+    it.each([false, true])("without the lock runs on a new temp folder and touches neither profile (moved before: %s)", (moved) => {
       const at = installed();
-      const before = fs.statSync(path.join(at.cache, ".zeros-session-migrated")).mtimeMs;
-      const result = relocate({ cacheRoot: at.cacheRoot, identity: "com.zeros", channel: "stable", platform: "darwin", dataDir: at.dataDir, lock: false });
-      expect(result.sessionData).toBe(at.cache);
-      expect(fs.statSync(path.join(at.cache, ".zeros-session-migrated")).mtimeMs).toBe(before);
-      expect(fs.existsSync(at.electron)).toBe(false);
+      if (moved) relocate({ cacheRoot: at.cacheRoot, identity: "com.zeros", channel: "stable", platform: "darwin", dataDir: at.dataDir });
+      const profile = moved ? at.electron : at.cache;
+      const before = fs.readdirSync(profile).sort();
+      const mtime = fs.statSync(profile).mtimeMs;
+      const tmpdir = scratch();
+      const result = relocate({ cacheRoot: at.cacheRoot, identity: "com.zeros", channel: "stable", platform: "darwin", dataDir: at.dataDir, lock: false, tmpdir });
+      expect(path.dirname(result.sessionData)).toBe(tmpdir);
+      expect(path.basename(result.sessionData)).toMatch(/^zeros-second-instance-/);
+      expect(fs.readdirSync(result.sessionData)).toEqual([]);
+      expect(fs.readdirSync(profile).sort()).toEqual(before);
+      expect(fs.statSync(profile).mtimeMs).toBe(mtime);
+      expect(fs.existsSync(moved ? at.cache : at.electron)).toBe(false);
     });
 
     it("lets main's older hop fill Caches first, then moves on the next launch", () => {

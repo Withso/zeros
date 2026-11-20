@@ -57,6 +57,8 @@ function recordingFs(overrides: Partial<Record<keyof RendererProfileFs, (...args
   }) as unknown as RendererProfileFs;
   return { fs, calls };
 }
+/** Where a process without the lock runs; the chooser only names it. */
+const throwaway = (l: Layout) => path.join(l.home, "tmp", "zeros-second-instance-x");
 const MUTATING = new Set(["renameSync", "mkdirSync", "writeFileSync", "rmSync", "rmdirSync", "unlinkSync", "cpSync", "copyFileSync", "symlinkSync", "linkSync", "truncateSync", "appendFileSync", "chmodSync", "utimesSync"]);
 
 function choose(l: Layout, { lock = true, fs }: { lock?: boolean; fs?: RendererProfileFs } = {}) {
@@ -71,6 +73,7 @@ function choose(l: Layout, { lock = true, fs }: { lock?: boolean; fs?: RendererP
       lockCalls++;
       return lock;
     },
+    throwawayProfile: () => throwaway(l),
     fs: recorder.fs,
     log: (line) => logs.push(line),
   });
@@ -122,14 +125,14 @@ describe("renderer profile location", () => {
     expect(draftIn(l.data)).toBe("draft");
   });
 
-  it("reopens a marked profile with two lstat calls, no lock request and no writes", () => {
+  it("reopens a marked profile with one lock request, two lstat calls and no writes", () => {
     const l = layout();
     seedProfile(l.cache);
     choose(l);
     const { choice, calls, lockCalls } = choose(l);
     expect(choice).toEqual({ dir: l.data, outcome: "marked" });
     expect(calls.map((call) => call.name)).toEqual(["lstatSync", "lstatSync"]);
-    expect(lockCalls).toBe(0);
+    expect(lockCalls).toBe(1);
   });
 
   it("converges after a crash between the rename and the marker", () => {
@@ -147,7 +150,7 @@ describe("renderer profile location", () => {
     const l = layout();
     seedProfile(l.cache);
     // A crash here leaves at most the data folder's parent created.
-    expect(choose(l, { lock: false }).choice).toEqual({ dir: l.cache, outcome: "unlocked" });
+    expect(choose(l, { lock: false }).choice).toEqual({ dir: throwaway(l), outcome: "unlocked" });
     expect(choose(l).choice.outcome).toBe("moved");
     expect(draftIn(l.data)).toBe("draft");
   });
@@ -242,6 +245,7 @@ describe("renderer profile location", () => {
         seedProfile(l.cache, "recreated by an older build");
         return true;
       },
+      throwawayProfile: () => throwaway(l),
       log: (line) => logs.push(line),
     });
     expect(choice).toEqual({ dir: l.data, outcome: "marked" });
@@ -249,51 +253,60 @@ describe("renderer profile location", () => {
     expect(draftIn(l.data)).toBe("moved by the previous holder");
   });
 
-  describe("without the single-instance lock", () => {
-    it("uses the Caches profile and changes nothing", () => {
-      const l = layout();
-      seedProfile(l.cache);
-      const { choice, mutations, lockCalls } = choose(l, { lock: false });
-      expect(choice).toEqual({ dir: l.cache, outcome: "unlocked" });
-      expect(lockCalls).toBe(1);
-      expect(mutations).toEqual([]);
-      expect(nodeFs.existsSync(l.data)).toBe(false);
-    });
-
-    it("uses a marked data folder without asking for the lock", () => {
-      const l = layout();
-      seedProfile(l.cache);
-      choose(l);
-      const { choice, lockCalls, mutations } = choose(l, { lock: false });
-      expect(choice).toEqual({ dir: l.data, outcome: "marked" });
-      expect(lockCalls).toBe(0);
-      expect(mutations).toEqual([]);
-    });
-
-    it("uses a moved but unmarked data folder without marking it", () => {
-      const l = layout();
-      seedProfile(l.cache);
+  // Electron can grant the lock to two processes started together: a process
+  // that reads the first one's SingletonLock before its socket exists treats it
+  // as orphaned (IsChromeProcess fails on the app's executable name) and takes
+  // the lock too. The rename arbitrates; the other must join E, never recreate C.
+  describe("when two processes both hold the lock", () => {
+    const peerMoves = (l: Layout) => {
       nodeFs.renameSync(l.cache, l.data);
-      const { choice, mutations } = choose(l, { lock: false });
-      expect(choice).toEqual({ dir: l.data, outcome: "unlocked" });
-      expect(mutations).toEqual([]);
-      expect(marked(l)).toBe(false);
-    });
-
-    it("creates nothing when neither location exists", () => {
+      nodeFs.writeFileSync(path.join(l.data, RENDERER_PROFILE_MARKER), "peer");
+    };
+    const interleavings: [string, (l: Layout) => Partial<Record<keyof RendererProfileFs, (...args: never[]) => unknown>>][] = [
+      ["before the listing", (l) => ({ readdirSync: ((dir: string, options: never) => (dir === l.cache && peerMoves(l), nodeFs.readdirSync(dir, options))) as never })],
+      ["before the rename", (l) => ({ renameSync: ((from: string, to: string) => (peerMoves(l), nodeFs.renameSync(from, to))) as never })],
+      ["before the older-hop check", (l) => ({ existsSync: ((file: string) => (file.startsWith(l.cache) && nodeFs.existsSync(l.cache) && peerMoves(l), nodeFs.existsSync(file))) as never })],
+      ["between looking at E and at C", (l) => {
+        let first = true;
+        return { lstatSync: ((file: string) => (file === l.cache && first && ((first = false), peerMoves(l)), nodeFs.lstatSync(file))) as never };
+      }],
+    ];
+    it.each(interleavings)("joins the peer's moved profile when it moves %s", (_name, overrides) => {
       const l = layout();
-      const { choice, mutations } = choose(l, { lock: false });
-      expect(choice).toEqual({ dir: l.cache, outcome: "unlocked" });
-      expect(mutations).toEqual([]);
-      expect(nodeFs.existsSync(l.cache) || nodeFs.existsSync(l.data)).toBe(false);
+      seedProfile(l.cache, "the one profile");
+      seedProfile(l.hop, "older hop source");
+      nodeFs.rmSync(path.join(l.hop, ".zeros-session-migrated"));
+      const { fs } = recordingFs(overrides(l));
+      const { choice, mutations } = choose(l, { fs });
+      expect(choice.dir).toBe(l.data);
+      expect(nodeFs.existsSync(l.cache)).toBe(false);
+      expect(draftIn(l.data)).toBe("the one profile");
+      expect(marked(l)).toBe(true);
+      expect(mutations.filter((call) => call.name === "renameSync" && !nodeFs.existsSync(l.cache)).length).toBeLessThanOrEqual(1);
     });
+  });
 
-    it("never selects a regular file: like main, a file at the Caches path means the userData default", () => {
+  describe("without the single-instance lock", () => {
+    // The losing process still reaches `ready` before it quits, and its Chromium
+    // writes into whatever sessionData it was given: that must be neither C nor E.
+    const states: [string, (l: Layout) => void][] = [
+      ["a Caches profile", (l) => seedProfile(l.cache)],
+      ["a marked data folder", (l) => (seedProfile(l.data), nodeFs.writeFileSync(path.join(l.data, RENDERER_PROFILE_MARKER), "x"))],
+      ["a moved but unmarked data folder", (l) => seedProfile(l.data)],
+      ["neither", () => {}],
+      ["a regular file at the Caches path", (l) => nodeFs.writeFileSync(l.cache, "not a folder")],
+      ["both, ambiguous", (l) => (seedProfile(l.cache), seedProfile(l.data))],
+    ];
+    it.each(states)("runs on a throwaway folder with %s, touching nothing", (_name, prepare) => {
       const l = layout();
-      nodeFs.writeFileSync(l.cache, "not a folder");
-      const { choice, mutations } = choose(l, { lock: false });
-      expect(choice).toEqual({ dir: l.userData, outcome: "unlocked" });
-      expect(mutations).toEqual([]);
+      prepare(l);
+      const before = [nodeFs.existsSync(l.cache), nodeFs.existsSync(l.data), marked(l)];
+      const { choice, calls, lockCalls } = choose(l, { lock: false });
+      expect(choice).toEqual({ dir: throwaway(l), outcome: "unlocked" });
+      expect(lockCalls).toBe(1);
+      expect(calls).toEqual([]);
+      expect([nodeFs.existsSync(l.cache), nodeFs.existsSync(l.data), marked(l)]).toEqual(before);
+      expect(nodeFs.existsSync(throwaway(l))).toBe(false);
     });
 
     it("lets only the process holding the lock move, whichever starts first", () => {
@@ -302,8 +315,9 @@ describe("renderer profile location", () => {
       const loser = choose(l, { lock: false });
       const winner = choose(l, { lock: true });
       expect([loser.choice.outcome, winner.choice.outcome]).toEqual(["unlocked", "moved"]);
-      expect(loser.mutations).toEqual([]);
-      expect(choose(l, { lock: false }).choice).toEqual({ dir: l.data, outcome: "marked" });
+      expect(loser.calls).toEqual([]);
+      expect(choose(l, { lock: false }).choice).toEqual({ dir: throwaway(l), outcome: "unlocked" });
+      expect(choose(l).choice).toEqual({ dir: l.data, outcome: "marked" });
     });
   });
 
@@ -341,7 +355,8 @@ describe("renderer profile location", () => {
           fail("EIO");
         }) as never,
       });
-      expect(choose(l, { fs }).choice).toEqual({ dir: l.data, outcome: "moved" });
+      // Whether this process or a peer renamed it, the profile is now E.
+      expect(choose(l, { fs }).choice).toEqual({ dir: l.data, outcome: "joined" });
       expect(marked(l)).toBe(true);
     });
 
@@ -363,7 +378,7 @@ describe("renderer profile location", () => {
       nodeFs.writeFileSync(path.join(other, RENDERER_PROFILE_MARKER), "x");
       nodeFs.symlinkSync(other, l.data);
       expect(choose(l).choice).toMatchObject({ dir: null, outcome: "kept" });
-      expect(choose(l, { lock: false }).choice).toEqual({ dir: l.cache, outcome: "unlocked" });
+      expect(choose(l, { lock: false }).choice).toEqual({ dir: throwaway(l), outcome: "unlocked" });
       nodeFs.rmSync(l.cache, { recursive: true });
       const fresh = choose(l);
       expect(fresh.choice).toMatchObject({ dir: null, outcome: "kept" });
@@ -489,7 +504,7 @@ describe("renderer profile location", () => {
         prepare(l);
         const first = choose(l, { lock });
         expectOnlyAllowedMutations(l, first.mutations);
-        if (!lock) expect(first.mutations).toEqual([]);
+        if (!lock) expect(first.calls).toEqual([]);
         expectOnlyAllowedMutations(l, choose(l, { lock }).mutations);
       }
   });

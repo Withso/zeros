@@ -7,8 +7,8 @@
 import nodeFs from "node:fs";
 import path from "node:path";
 
-/** Written into E only by the process that moved C or created E, and only
- *  while it held the single-instance lock. */
+/** Written into E only by the process that moved C or created E, while it
+ *  held the single-instance lock. */
 export const RENDERER_PROFILE_MARKER = ".zeros-renderer-profile";
 /** main.ts writes this into C on every launch that runs its Caches code; it
  *  certifies that the older design.zeros.app hop has run. */
@@ -20,7 +20,7 @@ export type RendererProfileFs = Pick<
 >;
 
 export type RendererProfileChoice =
-  | { dir: string; outcome: "marked" | "repaired" | "moved" | "created" | "unlocked" }
+  | { dir: string; outcome: "marked" | "repaired" | "joined" | "moved" | "created" | "unlocked" }
   /** dir null: run main's existing Caches code this launch. */
   | { dir: null; outcome: "kept"; reason: string };
 
@@ -32,6 +32,7 @@ export function chooseRendererProfile({
   dataProfile,
   olderHopSource,
   holdsLock,
+  throwawayProfile,
   fs = nodeFs,
   log,
 }: {
@@ -43,6 +44,8 @@ export function chooseRendererProfile({
   olderHopSource: string;
   /** Electron's single-instance lock for this userData, requested at most once. */
   holdsLock: () => boolean;
+  /** A fresh folder outside C and E for a process that does not hold the lock. */
+  throwawayProfile: () => string;
   fs?: RendererProfileFs;
   log: (line: string) => void;
 }): RendererProfileChoice {
@@ -58,10 +61,6 @@ export function chooseRendererProfile({
     }
   };
   const isDir = (stat: Probe): stat is nodeFs.Stats => stat !== null && stat !== UNKNOWN && stat.isDirectory();
-  const kept = (reason: string): RendererProfileChoice => {
-    log(`renderer profile stays at ${cacheProfile} this launch: ${reason}`);
-    return { dir: null, outcome: "kept", reason };
-  };
   const mark = () => {
     try {
       fs.writeFileSync(marker, `${new Date().toISOString()}\n`, { flag: "wx", mode: 0o600 });
@@ -85,32 +84,36 @@ export function chooseRendererProfile({
     }
   };
 
+  // Electron can grant the lock to two processes started together (a second
+  // process that finds the first one's SingletonLock before its socket exists
+  // takes the lock over), so a peer may move C while this one decides. Exactly
+  // one rename succeeds; before refusing, join a profile a peer has just moved
+  // instead of letting main's code recreate C.
+  const kept = (reason: string): RendererProfileChoice => {
+    const now = probe(dataProfile);
+    if (probe(cacheProfile) === null && isDir(now) && contents(dataProfile) === "filled") {
+      mark();
+      log(`renderer profile at ${dataProfile} was moved by another process starting at the same time`);
+      return { dir: dataProfile, outcome: "joined" };
+    }
+    log(`renderer profile stays at ${cacheProfile} this launch: ${reason}`);
+    return { dir: null, outcome: "kept", reason };
+  };
+
+  // A process without the lock still reaches `ready` before it quits through
+  // the second-instance path, and its Chromium creates or rewrites files in
+  // whatever sessionData it gets. Neither C nor E may be that folder: the holder
+  // may be renaming C away at this moment, and E belongs to the holder.
+  if (!holdsLock()) return { dir: throwawayProfile(), outcome: "unlocked" };
+
   // A marked E wins over any C. After a downgrade an older build finds no C and
   // starts a fresh profile there; a later upgrade uses E again and leaves that C
   // alone. Nothing is deleted, and the updater refuses downgrades.
-  const isMarked = (stat: Probe) => {
-    if (!isDir(stat)) return false;
-    const m = probe(marker);
-    return m !== null && m !== UNKNOWN && m.isFile();
-  };
-  const seen = probe(dataProfile);
-  if (isMarked(seen)) return { dir: dataProfile, outcome: "marked" };
-
-  // Everything below may mutate, so this process must own the userData lock
-  // first. Without it, use only what is already established and change nothing;
-  // main then quits this process through the second-instance path.
-  if (!holdsLock()) {
-    const cache = probe(cacheProfile);
-    if (isDir(seen) && cache === null && contents(dataProfile) === "filled") return { dir: dataProfile, outcome: "unlocked" };
-    // main cannot create C over a file and runs on Electron's default, userData.
-    if (cache !== null && cache !== UNKNOWN && !cache.isDirectory() && !cache.isSymbolicLink())
-      return { dir: userData, outcome: "unlocked" };
-    return { dir: cacheProfile, outcome: "unlocked" };
-  }
-
-  // A previous holder may have finished a move between the first look and the lock.
   const e = probe(dataProfile);
-  if (isMarked(e)) return { dir: dataProfile, outcome: "marked" };
+  if (isDir(e)) {
+    const m = probe(marker);
+    if (m !== null && m !== UNKNOWN && m.isFile()) return { dir: dataProfile, outcome: "marked" };
+  }
   const c = probe(cacheProfile);
   if (e === UNKNOWN || c === UNKNOWN) return kept("its location cannot be inspected");
   const target = e === null ? "absent" : isDir(e) ? contents(dataProfile) : "other";
@@ -185,13 +188,7 @@ export function chooseRendererProfile({
   try {
     fs.renameSync(cacheProfile, dataProfile);
   } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code ?? "error";
-    if (probe(cacheProfile) === null && isDir(probe(dataProfile))) {
-      mark();
-      log(`renderer profile moved to ${dataProfile} although rename reported ${code}`);
-      return { dir: dataProfile, outcome: "moved" };
-    }
-    return kept(`the move failed (${code})`);
+    return kept(`the move failed (${(error as NodeJS.ErrnoException).code ?? "error"})`);
   }
   mark();
   log(`renderer profile moved from ${cacheProfile} to ${dataProfile}`);

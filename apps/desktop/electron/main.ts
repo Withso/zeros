@@ -445,6 +445,16 @@ function relocateChromiumCache(): void {
       dataProfile: zerosRendererProfileDir(),
       olderHopSource: oldSessionData,
       holdsLock: holdSingleInstanceLock,
+      // Left for the OS to clear: this process is about to quit, and removing a
+      // folder its Chromium may still hold is not worth the risk.
+      throwawayProfile: () => {
+        const prefix = path.join(os.tmpdir(), "zeros-second-instance-");
+        try {
+          return fs.mkdtempSync(prefix);
+        } catch {
+          return `${prefix}${process.pid}-${Date.now()}`;
+        }
+      },
       log: (line) => rendererProfileDiagnostics.push(line),
     });
     if (choice.dir !== null) {
