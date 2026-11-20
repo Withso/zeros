@@ -4,7 +4,7 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { DesignSurfaceCost } from "@zeros/protocol/design-surface";
 import { DESIGN_MAX_FRAMES_PER_PAGE } from "@zeros/protocol/design-pages";
-import { designFrameComponentSchema, designFrameInstancesSchema, type DesignFrameComponent, type DesignFrameInstances } from "@zeros/protocol/design-catalog";
+import { designComponentIdentitySchema, designFrameComponentSchema, designFrameInstancesSchema, type DesignComponentIdentity, type DesignFrameComponent, type DesignFrameInstances } from "@zeros/protocol/design-catalog";
 import { isDevRuntime } from "../runtime";
 import { durableDesignDependenciesCurrent, type DurableDesignDependency } from "./dependency-read-set";
 import type { CanvasDocument } from "./document-model";
@@ -23,6 +23,9 @@ export interface DesignFrameIdentity {
   component?: DesignFrameComponent;
   /** The frame's own component instances, from the same preparation. */
   instances?: DesignFrameInstances;
+  /** Identity of this frame as a registered main or authored frame-root host.
+   * Absent means an older cache entry has not been hydrated yet. */
+  componentIdentity?: DesignComponentIdentity | null;
 }
 
 // A frame's identity is reused while every file its preparation read keeps
@@ -147,6 +150,8 @@ async function load(workspacePath: string, page: Page): Promise<void> {
     const indexes = entry.dependencies as unknown[];
     if (!indexes.every((index) => Number.isSafeInteger(index) && usable[index as number])) continue;
     if (page.entries.has(file)) continue;
+    const componentIdentity = identity.componentIdentity === undefined ? undefined : designComponentIdentitySchema.nullable().safeParse(identity.componentIdentity);
+    if (componentIdentity && !componentIdentity.success) continue;
     const component = identity.component === undefined ? undefined : designFrameComponentSchema.safeParse(identity.component);
     if (component && !component.success) continue;
     const instances = identity.instances === undefined ? undefined : designFrameInstancesSchema.safeParse(identity.instances);
@@ -156,6 +161,7 @@ async function load(workspacePath: string, page: Page): Promise<void> {
       nodeCount: identity.nodeCount, layerCount: identity.layerCount,
       ...(component ? { component: component.data } : {}),
       ...(instances ? { instances: instances.data } : {}),
+      ...(componentIdentity ? { componentIdentity: componentIdentity.data } : {}),
     }, dependencies: indexes.map((index) => table[index as number]!) });
   }
 }

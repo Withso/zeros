@@ -6,6 +6,7 @@ import {
   DesignColorField,
   DesignColorPanel,
   DesignColorPreviewScope,
+  DesignColorRevalidatingContext,
   DesignColorValueInputs,
 } from "../design-color-picker";
 
@@ -173,5 +174,51 @@ describe("a color write that fails", () => {
     });
     await settle();
     expect(onCancelPreview).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("a color draft during source revalidation", () => {
+  it("keeps the focused opacity draft and commits it once details return", async () => {
+    const onCommit = vi.fn(async (_value: string) => {});
+    const render = (value: string, disabled: boolean, revalidating: boolean) =>
+      act(async () => root.render(createElement(DesignColorRevalidatingContext.Provider, { value: revalidating },
+        createElement(DesignColorPanel, { value, label: "Fill", disabled, onCommit }))));
+    await render(START, false, false);
+    const alpha = host.querySelector<HTMLInputElement>('input[aria-label="Fill opacity value"]')!;
+    await act(async () => {
+      alpha.focus();
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(alpha, "60");
+      alpha.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    // check:ui ignore-next -- the fixture authors literal colour values.
+    await render("rgb(51 102 153 / 0.5)", true, true);
+    expect(alpha.disabled).toBe(false);
+    expect(document.activeElement).toBe(alpha);
+    expect(alpha.value).toBe("60");
+    await act(async () => alpha.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })));
+    expect(onCommit).not.toHaveBeenCalled();
+    // check:ui ignore-next -- the fixture authors literal colour values.
+    await render("rgb(51 102 153 / 0.5)", false, false);
+    expect(onCommit).toHaveBeenCalledTimes(1);
+    expect(onCommit.mock.calls[0]![0]).toMatch(/0\.6|60%|99/i);
+  });
+
+  it("drops a deferred draft when editing is disabled for another reason", async () => {
+    const onCommit = vi.fn(async () => {});
+    const render = (disabled: boolean, revalidating: boolean) =>
+      act(async () => root.render(createElement(DesignColorRevalidatingContext.Provider, { value: revalidating },
+        createElement(DesignColorPanel, { value: START, label: "Fill", disabled, onCommit }))));
+    await render(false, false);
+    const alpha = host.querySelector<HTMLInputElement>('input[aria-label="Fill opacity value"]')!;
+    await act(async () => {
+      alpha.focus();
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(alpha, "60");
+      alpha.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await render(true, true);
+    await act(async () => alpha.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })));
+    await render(true, false);
+    expect(onCommit).not.toHaveBeenCalled();
+    expect(alpha.value).toBe("100");
   });
 });

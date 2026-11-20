@@ -182,6 +182,8 @@ export type DesignCatalogFailure = z.infer<typeof designCatalogFailureSchema>;
 export type DesignCatalogReply = z.infer<typeof designCatalogReplySchema>;
 /** Negotiate this capability before lazy preparation; catalog revisions cannot replace source hashes. */
 export const DESIGN_LAZY_PREPARATION_CAPABILITY = "design.preparation.v1";
+export const DESIGN_COMPONENT_IDENTITY_CAPABILITY = "design.component-identity.v1";
+export const DESIGN_COMPONENT_IDENTITY_PARAM = "includeComponentIdentity";
 export const DESIGN_MUTATION_SNAPSHOTS_CAPABILITY = "design.mutation-snapshots.v1";
 /** Only sources affected by the write are ready; prepare other sources before authorizing edits. */
 export const designMutationCatalogSchema = z.object({
@@ -251,6 +253,8 @@ export const designFramesPrepareSchema = z.object({
   surfaceCosts: z.literal(true).optional(),
   /** Only requested after design.component-options.v1 capability negotiation. */
   componentOptions: z.literal(true).optional(),
+  /** Only requested after design.component-identity.v1 capability negotiation. */
+  includeComponentIdentity: z.literal(true).optional(),
   /** Request lint rows for this subset of files only after prepare-lint negotiation. */
   lintFiles: z.array(designFrameFileSchema).min(1).max(16).optional(),
 }).strict();
@@ -306,6 +310,10 @@ const notAppliedSchema = z.enum(["last-good", "defaults", "nothing"]);
 export const DESIGN_OPTIONS_SHOW_NOTHING_CAPABILITY = "design.component-options.shows-nothing.v1";
 /** Negotiated request flag stripped before the engine dispatches the operation. */
 export const DESIGN_OPTIONS_SHOW_NOTHING_PARAM = "optionsShowNothing";
+/** Advertises editing an instance's direct default-slot text beside its other children. */
+export const DESIGN_INSTANCE_SLOT_TEXT_CAPABILITY = "design.component-instances.slot-text.v1";
+/** Negotiated request flag: the renderer reads text beside a host's children and writes it through the virtual default slot. */
+export const DESIGN_INSTANCE_SLOT_TEXT_PARAM = "instanceSlotText";
 
 /** Template holes, not the author, set these layers' text; a loop-only binding can list no options. */
 export const DESIGN_COMPONENT_BOUND_TEXT_LIMIT = 512;
@@ -398,8 +406,11 @@ export const designFrameInstancesSchema = z.object({
     style: z.string().min(1).max(LIMITS.attributeValue).optional(),
     /** A missing source has no component entry and renders empty; a present but unusable source reports an error instead. */
     missing: z.literal(true).optional(),
-    /** Only a text-only default slot reports its decoded authored text. */
+    /** Decoded direct default-slot text in order, ignoring elements and comments;
+     * omitted without a default slot or above the attribute limit. */
     text: z.string().max(LIMITS.attributeValue).optional(),
+    /** The text sits beside element or comment children; sent only to a renderer that negotiated slot text. */
+    mixedText: z.literal(true).optional(),
     /** Slot layer IDs in order; the empty key means default, and over-limit slots are omitted. */
     slotted: boundedRecord(z.string().max(LIMITS.optionName),
       z.array(z.string().min(1).max(LIMITS.layerId)).min(1).max(DESIGN_FRAME_INSTANCE_LIMITS.slotted), DESIGN_FRAME_INSTANCE_LIMITS.slots).optional(),
@@ -408,6 +419,12 @@ export const designFrameInstancesSchema = z.object({
   notApplied: notAppliedSchema.optional(),
 }).strict();
 export type DesignFrameInstances = z.infer<typeof designFrameInstancesSchema>;
+
+export const designComponentIdentitySchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("main"), name: componentNameSchema }).strict(),
+  z.object({ kind: z.literal("instance"), nodeId: z.string().min(1).max(LIMITS.layerId) }).strict(),
+]);
+export type DesignComponentIdentity = z.infer<typeof designComponentIdentitySchema>;
 
 export const designPreparedFrameSchema = designCatalogFrameSchema.pick({
   title: true, x: true, y: true, width: true, height: true, z: true,
@@ -427,6 +444,7 @@ export const designPreparedFrameSchema = designCatalogFrameSchema.pick({
   }).strict().nullable().optional(),
   component: designFrameComponentSchema.optional(),
   instances: designFrameInstancesSchema.optional(),
+  componentIdentity: designComponentIdentitySchema.nullable().optional(),
 }).strict();
 const PREPARE_REPLY_ERRORS = 16;
 /** When per-frame lint rows hit the cap, keep the most severe. */

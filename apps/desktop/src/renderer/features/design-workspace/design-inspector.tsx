@@ -16,6 +16,7 @@ import {
   Frame as FrameIcon,
   Image as ImageIcon,
   Layers,
+  RotateCcw,
   Spline,
   Type,
 } from "lucide-react";
@@ -60,6 +61,10 @@ import {
   SelectItem,
   SelectTrigger,
   SelectValue,
+  Tabs,
+  TabsContent,
+  TabsList,
+  TabsTrigger,
   Tooltip,
   toast,
 } from "../../shared/ui/primitives";
@@ -108,7 +113,7 @@ import { designInputResetsOnAltBackspace, useDesignFieldOverlays, type DesignFie
 import { designForcedValueBrief } from "./design-agent-brief";
 import { DesignStyledByLine } from "./design-styled-by";
 import { DesignHeldStateNote, DesignStateVariantNote, useDesignHeldReadOnly } from "./design-state-picker";
-import { showDesignComponentVariant, useDesignShownComponentState } from "./state/design-component-variants";
+import { designDeclaredVariants, showDesignComponentVariant, useDesignComponentVariantStore, useDesignShownComponentState } from "./state/design-component-variants";
 import { designHeldStateChanges, designStylePropertyLabel } from "./design-style-origins";
 import {
   designHeldStateEntry,
@@ -164,6 +169,7 @@ import {
 import { blockingDesignLintReason, frameBlockingDesignLintErrors } from "./design-lint-summary";
 import { beginDesignPointerGesture } from "./design-pointer-gesture";
 import { DesignStyleEditor } from "./design-style-editor";
+import { DesignColorRevalidatingContext } from "./design-color-picker";
 import {
   clampDesignStyleFieldValue,
   convertDesignLength,
@@ -209,8 +215,9 @@ import {
   settleDesignHistorySelection,
 } from "./state/design-selection";
 import { designComponentPartOf, designComponentSlotOf } from "@zeros/protocol/design-runtime";
-import { designComponentDisplayTitle, designComponentSlotLabel, designComponentTextLock, designMissingComponentOf, designPartOverrideAttribute,
-  designPartOverrideKey } from "./state/design-component-parts";
+import { designComponentDisplayTitle, designComponentIdentityLabel, designComponentInstanceIdentity, designComponentInstanceVariant, designComponentSlotLabel, designFrameComponentPresentation,
+  designComponentTextLock, designMissingComponentOf, designPartOverrideAttribute, designPartOverrideKey } from "./state/design-component-parts";
+import { commitDesignInstanceOverridesReset, designInstanceVisualStyleProperties } from "./state/design-component-options";
 import { MessageRow } from "../../shared/ui/primitives/message-row";
 import type { DesignComponentOptionsTarget } from "./design-component-options";
 import {
@@ -220,8 +227,7 @@ import {
   saveDesigns,
   updateDesignFrameGeometryCached,
   updateDesignNodeStylesCached,
-  moveDesignComponentCached,
-} from "./state/design-workspace-cache";
+  moveDesignComponentCached, hasPendingDesignEdits } from "./state/design-workspace-cache";
 import {
   DEFAULT_DESIGN_WORKSPACE_VIEW,
   DESIGN_MAX_ZOOM,
@@ -267,6 +273,7 @@ const DESIGN_FRAME_POSITION_RANGE = {
 /** A percentage field (opacity) writes 0–100% of its value; the field shows
  * the same bound so a scrub past either end reads what is written. */
 const DESIGN_PERCENTAGE_RANGE = { min: 0, max: 100 };
+const EMPTY_COMPONENT_DECLARATION = { elements: [], reach: {} };
 /** Only a complete numeric entry is a display percentage; functions, keywords
  * and tokens are already CSS values and must not become a numeric conversion. */
 const DESIGN_PERCENTAGE_INPUT = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?%?$/i;
@@ -286,6 +293,7 @@ interface InspectorEditFieldProps {
   value: string | number;
   applied?: boolean;
   disabled?: boolean;
+  revalidating?: boolean;
   placeholder?: string;
   styleProperty?: string;
   /** Properties the field writes with styleProperty, such as both sides of
@@ -369,6 +377,7 @@ export function InspectorEditField({
   value: valueProp,
   applied = false,
   disabled = false,
+  revalidating = false,
   placeholder,
   styleProperty,
   linkedProperties,
@@ -387,6 +396,12 @@ export function InspectorEditField({
   mixedSteps,
 }: InspectorEditFieldProps) {
   const id = useId();
+  const disabledRef = useRef(disabled);
+  disabledRef.current = disabled;
+  const revalidatingRef = useRef(revalidating);
+  revalidatingRef.current = revalidating;
+  const pendingCommitRef = useRef<string | null>(null);
+  const commitRef = useRef<((draft?: string) => Promise<void>) | null>(null);
   const origin = useDesignFieldOrigin(styleProperty, linkedProperties);
   // A computed value (calc(), clamp()…) shows as written and is edited in
   // CSS; layers that differ still read Mixed.
@@ -506,7 +521,7 @@ export function InspectorEditField({
   // Finish an unfocused incoming value in this commit. A passive state update
   // can land after the next focus/select-all and overwrite that user's draft.
   useLayoutEffect(() => {
-    if (scrubRef.current) return;
+    if (scrubRef.current || pendingCommitRef.current !== null) return;
     const focused = document.activeElement === inputRef.current;
     // The one focused case that adopts at once: this field's own undo or redo,
     // and only while the field holds no draft the person started.
@@ -535,8 +550,8 @@ export function InspectorEditField({
   );
 
   useEffect(() => {
-    if (disabled) scrubCancelRef.current?.();
-  }, [disabled]);
+    if (disabled && (!revalidating || !scrubRef.current)) scrubCancelRef.current?.();
+  }, [disabled, revalidating]);
 
   useLayoutEffect(() => {
     const input = inputRef.current;
@@ -607,6 +622,15 @@ export function InspectorEditField({
   };
 
   const commit = async (requestedDraft = draftRef.current) => {
+    if (disabledRef.current) {
+      if (revalidatingRef.current) {
+        pendingCommitRef.current = requestedDraft;
+        return;
+      }
+      cancelPreview();
+      setPresentedDraft(baselineRef.current);
+      return;
+    }
     if (skipCommitRef.current) {
       skipCommitRef.current = false;
       cancelPreview();
@@ -670,6 +694,18 @@ export function InspectorEditField({
       });
     }
   };
+  commitRef.current = commit;
+  useLayoutEffect(() => {
+    const pending = pendingCommitRef.current;
+    if (pending === null || revalidating) return;
+    pendingCommitRef.current = null;
+    if (disabled) {
+      cancelPreview();
+      setPresentedDraft(baselineRef.current);
+    } else {
+      void commitRef.current?.(pending);
+    }
+  }, [disabled, revalidating, setPresentedDraft]);
 
   const glyph =
     icon ?? (compact && label === "Rotation" ? ("rotation" as const) : null);
@@ -829,7 +865,7 @@ export function InspectorEditField({
                 }
                 scrubRef.current = null;
                 scrubCancelRef.current = null;
-                void commit(scrub.latestValue);
+                void commitRef.current?.(scrub.latestValue);
               },
               onCancel: restore,
             });
@@ -869,7 +905,7 @@ export function InspectorEditField({
           data-design-draft={draft === String(value) ? "clean" : "dirty"}
           value={presentation.text}
           placeholder={placeholder}
-          disabled={disabled}
+          disabled={disabled && !(revalidating && focused)}
           readOnly={Boolean(origin.lock)}
           spellCheck={false}
           autoComplete="off"
@@ -1121,6 +1157,7 @@ export function InspectorEditField({
 /** A frame's X, Y, W or H: its saved value, or the one a drag or resize on
  * the canvas is painting right now. Only this field subscribes to the gesture. */
 function InspectorFrameGeometryField({
+  active = true,
   workspaceId,
   frame,
   geometryKey,
@@ -1131,8 +1168,9 @@ function InspectorFrameGeometryField({
   frame: string;
   geometryKey: DesignFrameGeometryLiveKey;
   saved: number;
+  active?: boolean;
 }) {
-  const shown = useDesignFrameGeometryLiveValue(workspaceId, frame, geometryKey) ?? saved;
+  const shown = useDesignFrameGeometryLiveValue(workspaceId, frame, geometryKey, active) ?? saved;
   return <InspectorEditField {...field} value={shown} />;
 }
 
@@ -1150,6 +1188,7 @@ const InspectorStyleField = React.memo(function InspectorStyleField({
   onLayoutAction,
   onPreviewLayoutAction,
   disabled,
+  revalidating,
   applied,
   onPreviewStyles,
   onCancelPreview,
@@ -1159,6 +1198,7 @@ const InspectorStyleField = React.memo(function InspectorStyleField({
   onAddMotionKeyframe,
   onDetachToken,
   selection,
+  active,
 }: {
   workspaceId: string;
   frame: string;
@@ -1176,6 +1216,8 @@ const InspectorStyleField = React.memo(function InspectorStyleField({
   onLayoutAction?: (action: DesignLayoutAction) => Promise<void>;
   onPreviewLayoutAction?: (action: DesignLayoutAction) => Promise<void>;
   disabled?: boolean;
+  revalidating?: boolean;
+  active: boolean;
   applied: boolean;
   onPreviewStyles: (
     styles: Record<string, string | null>,
@@ -1197,6 +1239,7 @@ const InspectorStyleField = React.memo(function InspectorStyleField({
     frame,
     nodeId,
     property,
+    active,
   );
   const farEdge =
     property === "left" ? "right" : property === "top" ? "bottom" : property;
@@ -1205,6 +1248,7 @@ const InspectorStyleField = React.memo(function InspectorStyleField({
     frame,
     nodeId,
     farEdge,
+    active,
   );
   let displayedValue =
     liveValue === undefined ? value || computedValue : (liveValue ?? "");
@@ -1342,6 +1386,7 @@ const InspectorStyleField = React.memo(function InspectorStyleField({
           : undefined
       }
       disabled={disabled || options?.disabled}
+      revalidating={revalidating && !options?.disabled}
       applied={applied}
       motion={
         motionModeActive
@@ -1488,6 +1533,97 @@ function designMixedSteps(input: {
   };
 }
 
+type DesignInspectorTab = "options" | "style" | "css";
+type DesignInspectorTabPreferenceKind = "component-root" | "component-inner" | "ordinary";
+const MAX_DESIGN_INSPECTOR_TAB_PREFERENCES = 32;
+
+export function designInspectorTabKey({
+  workspaceId,
+  directoryId,
+  pageId,
+  frameFile,
+  selection,
+}: {
+  workspaceId: string | null;
+  directoryId: string | undefined;
+  pageId: string | null;
+  frameFile: string | null;
+  selection: readonly string[];
+}): string {
+  return JSON.stringify([workspaceId ?? "", directoryId ?? "", pageId ?? "", frameFile ?? "", selection]);
+}
+
+export function rememberDesignInspectorTab(
+  preferences: Map<string, DesignInspectorTab>,
+  key: string,
+  value: DesignInspectorTab,
+): void {
+  preferences.delete(key);
+  preferences.set(key, value);
+  while (preferences.size > MAX_DESIGN_INSPECTOR_TAB_PREFERENCES) {
+    const oldest = preferences.keys().next().value;
+    if (oldest === undefined) break;
+    preferences.delete(oldest);
+  }
+}
+
+export function designInspectorTabPreferenceKind(
+  hasOptionsTarget: boolean,
+  componentContext: boolean,
+): DesignInspectorTabPreferenceKind {
+  return hasOptionsTarget ? "component-root" : componentContext ? "component-inner" : "ordinary";
+}
+
+export function designInspectorSelectionIsComponentLike(evidence: {
+  frameIsComponent: boolean;
+  instanceHost: boolean;
+  selectedPart: boolean;
+  selectedSlot: boolean;
+}): boolean {
+  return evidence.frameIsComponent || evidence.instanceHost || evidence.selectedPart || evidence.selectedSlot;
+}
+
+export function designInspectorSimilarTabKey(
+  owner: { workspaceId: string | null; directoryId: string | undefined },
+  kind: DesignInspectorTabPreferenceKind,
+): string {
+  return JSON.stringify(["similar", owner.workspaceId ?? "", owner.directoryId ?? "", kind]);
+}
+
+export function designInspectorTabForSelection(
+  preferences: ReadonlyMap<string, DesignInspectorTab>,
+  exactKey: string,
+  similarKey: string,
+): DesignInspectorTab | null {
+  return preferences.get(exactKey) ?? preferences.get(similarKey) ?? null;
+}
+
+export function rememberDesignInspectorSelectionTab(
+  preferences: Map<string, DesignInspectorTab>,
+  exactKey: string,
+  similarKey: string,
+  value: DesignInspectorTab,
+): void {
+  rememberDesignInspectorTab(preferences, exactKey, value);
+  if (similarKey !== exactKey) rememberDesignInspectorTab(preferences, similarKey, value);
+}
+
+export function designInspectorPanelState(activeTab: DesignInspectorTab, tab: DesignInspectorTab) {
+  const active = activeTab === tab;
+  return { active, inert: !active, ariaHidden: !active };
+}
+
+export function designInspectorDefaultTab(hasOptionsTarget: boolean): DesignInspectorTab {
+  return hasOptionsTarget ? "options" : "style";
+}
+
+export function designInspectorCssStateMismatch(stateContext: string | null): boolean {
+  return stateContext !== null;
+}
+
+type InertTabsContentProps = React.ComponentProps<typeof TabsContent> & { inert?: "" };
+const InertTabsContent = TabsContent as React.ComponentType<InertTabsContentProps>;
+
 export const DesignInspector = React.memo(function DesignInspector({
   workspaceId,
   pages,
@@ -1550,11 +1686,39 @@ export const DesignInspector = React.memo(function DesignInspector({
       if (previewOwnerRef.current === previewOwner) setOpeningPreviewOwner(null);
     }
   };
+  const layoutRootId = useDesignRuntimeStore((state) =>
+    workspaceId && frame
+      ? state.byWorkspace[workspaceId]?.frames[frame.file]?.snapshot?.frame.oid
+      : undefined,
+  );
+  const runtimeSourceVersion = useDesignRuntimeStore((state) =>
+    workspaceId && frame ? state.byWorkspace[workspaceId]?.frames[frame.file]?.sourceVersion : undefined,
+  );
+  const legacyExactInstanceNodeId = frame?.componentIdentity === undefined &&
+    runtimeSourceVersion === frame?.sourceVersion && layoutRootId && frame?.instances && Object.hasOwn(frame.instances.hosts, layoutRootId)
+    ? layoutRootId
+    : null;
+  // An edit still saving adopts its generation in the runtime before the
+  // workspace snapshot names it; that readback is current for the next edit.
+  const runtimeAheadBySave = Boolean(workspaceId && runtimeSourceVersion &&
+    runtimeSourceVersion !== frame?.sourceVersion && hasPendingDesignEdits(workspaceId));
+  const currentReadback = (sourceVersion: string | undefined) =>
+    sourceVersion === frame?.sourceVersion || (runtimeAheadBySave && sourceVersion === runtimeSourceVersion);
+  const explicitFrameIdentityNodeId = frame?.componentIdentity?.kind === "instance"
+    ? frame.componentIdentity.nodeId
+    : null;
   const styleTargetNodeId =
-    selectedNodeId ?? (frameSelected && details?.oid ? details.oid : null);
+    selectedNodeId ?? (frameSelected
+      ? explicitFrameIdentityNodeId ?? legacyExactInstanceNodeId ??
+        (details && details.oid === layoutRootId && currentReadback(details.sourceVersion) ? details.oid : null)
+      : null);
   const frameStyleTarget =
     frameSelected && !selectedNodeId && styleTargetNodeId !== null;
-  const elementDetails = styleTargetNodeId ? details : null;
+  const elementDetails = styleTargetNodeId && details?.oid === styleTargetNodeId && currentReadback(details.sourceVersion)
+    ? details
+    : null;
+  const frameComponentPresentation = frame ? designFrameComponentPresentation(frame, (file) =>
+    designWorkspaceSnapshotCache.peekSnapshot(workspaceId ?? "").data?.frames.find((candidate) => candidate.file === file)?.title) : null;
   const errors = useMemo(
     () => frameBlockingDesignLintErrors(lint?.violations ?? [], frame?.file),
     [lint, frame?.file],
@@ -1575,7 +1739,17 @@ export const DesignInspector = React.memo(function DesignInspector({
   // A slot takes layers, not styles: its frame is the main's.
   const slotSelected = !!selectedNodeId && designComponentSlotOf(selectedNodeId) !== null;
   const editsDisabled = !active || pendingHistoryActions > 0 || slotSelected;
-  const [cssMode, setCssMode] = useState(false);
+  const styleEditsDisabled = editsDisabled || !elementDetails;
+  const tabPreferencesRef = useRef(new Map<string, DesignInspectorTab>());
+  const [tabPreference, setTabPreference] = useState<{ key: string; value: DesignInspectorTab } | null>(null);
+  const tabKeyRef = useRef("");
+  const tabSimilarityKeyRef = useRef("");
+  const selectInspectorTab = useCallback((value: DesignInspectorTab) => {
+    const key = tabKeyRef.current;
+    if (!key) return;
+    rememberDesignInspectorSelectionTab(tabPreferencesRef.current, key, tabSimilarityKeyRef.current, value);
+    setTabPreference({ key, value });
+  }, []);
   const inspectorRef = useRef<HTMLElement | null>(null);
   const inspectorId = workspaceId
     ? `design-style-panel-${workspaceId}`
@@ -1792,34 +1966,40 @@ export const DesignInspector = React.memo(function DesignInspector({
       : undefined;
     return styleNodeIds.map((nodeId) => frameState?.detailsByNode[nodeId] ?? null);
   }));
-  const layoutRootId = useDesignRuntimeStore((state) =>
-    workspaceId && frame
-      ? state.byWorkspace[workspaceId]?.frames[frame.file]?.snapshot?.frame.oid
-      : undefined,
-  );
-  const layoutParents = useMemo(
-    () =>
-      styleNodeIds.flatMap((nodeId, index) => {
-        const node =
-          nodeId === elementDetails?.oid
-            ? elementDetails
-            : styleNodeDetails[index];
-        return node && node.sourceVersion === elementDetails?.sourceVersion
-          ? [node]
-          : [];
-      }),
-    [elementDetails, styleNodeDetails, styleNodeIds],
-  );
   const styleDirectoryKey = workspaceId
     ? designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.directoryId ??
       designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.directory ?? ""
     : "";
+  const styleOwnerKey = `${workspaceId ?? ""}\u0000${folder ?? ""}\u0000${styleDirectoryKey}\u0000${activePageId ?? ""}\u0000${frame?.file ?? ""}\u0000${styleNodeIds.join("\u0000")}`;
+  const confirmedStyleDetailsRef = useRef<{ owner: string; details: DesignRuntimeNodeDetails } | null>(null);
+  if (confirmedStyleDetailsRef.current?.owner !== styleOwnerKey) confirmedStyleDetailsRef.current = null;
+  if (elementDetails) confirmedStyleDetailsRef.current = { owner: styleOwnerKey, details: elementDetails };
+  // Revalidation retains presentation only; edit contexts still require exact-source details.
+  const presentedElementDetails = elementDetails ?? confirmedStyleDetailsRef.current?.details ?? null;
+  const layoutParents = useMemo(
+    () =>
+      styleNodeIds.flatMap((nodeId, index) => {
+        const node =
+          nodeId === presentedElementDetails?.oid
+            ? presentedElementDetails
+            : styleNodeDetails[index];
+        return node && node.sourceVersion === presentedElementDetails?.sourceVersion
+          ? [node]
+          : [];
+      }),
+    [presentedElementDetails, styleNodeDetails, styleNodeIds],
+  );
   // A main component showing one of its states: style edits write that
   // state's rule in the main, not the layers' own style.
   const shownState = useDesignShownComponentState(workspaceId ?? "", frame ?? null);
+  const shownVariant = useDesignComponentVariantStore((state) => {
+    if (!workspaceId || !frame?.component) return null;
+    const variant = state.byWorkspace[workspaceId]?.frames[frame.file];
+    return variant && designDeclaredVariants(frame.component).includes(variant) ? variant : null;
+  });
   const styleEditContextRef = useRef({
-    active,
-    pageId: activePageId,
+    active: active && Boolean(elementDetails),
+    pageId: activePageId ?? null,
     directoryKey: styleDirectoryKey,
     workspaceId,
     folder,
@@ -1831,8 +2011,8 @@ export const DesignInspector = React.memo(function DesignInspector({
     stateContext: shownState,
   });
   styleEditContextRef.current = {
-    active,
-    pageId: activePageId,
+    active: active && Boolean(elementDetails),
+    pageId: activePageId ?? null,
     directoryKey: styleDirectoryKey,
     workspaceId,
     folder,
@@ -1843,7 +2023,6 @@ export const DesignInspector = React.memo(function DesignInspector({
     layoutRootId,
     stateContext: shownState,
   };
-  const styleOwnerKey = `${workspaceId ?? ""}\u0000${styleDirectoryKey}\u0000${activePageId ?? ""}\u0000${frame?.file ?? ""}\u0000${styleNodeIds.join("\u0000")}`;
   // A keyed editor's cleanup runs after the new selection has rendered. Keep
   // its callbacks and cancellation baseline attached to its own owner; using
   // the live selection here would restore the incoming layer instead.
@@ -1870,7 +2049,7 @@ export const DesignInspector = React.memo(function DesignInspector({
   const holding = heldEntry !== null;
   const heldParents = useMemo(() => (heldDetails ? [heldDetails] : null), [heldDetails]);
   const heldChanges = useMemo(() => (heldDetails ? designHeldStateChanges(heldDetails) : null), [heldDetails]);
-  const shownDetails = heldDetails ?? elementDetails;
+  const shownDetails = heldDetails ?? presentedElementDetails;
   const shownParents = heldParents ?? layoutParents;
   const heldState = heldDetails?.heldState ?? null;
   const originsContext = useDesignStyleOriginsContext(workspaceId);
@@ -1943,9 +2122,8 @@ export const DesignInspector = React.memo(function DesignInspector({
   }, []);
   /** A computed value's card: the CSS tab, which edits Default. */
   const editInCss = useCallback(() => {
-    pickLayerState(null);
-    setCssMode(true);
-  }, [pickLayerState]);
+    selectInspectorTab("css");
+  }, [selectInspectorTab]);
   const currentStyleOwnerRef = useRef(styleOwner);
   currentStyleOwnerRef.current = styleOwner;
   const stylePreviewIntentRef = styleOwner.previewIntentRef;
@@ -2514,7 +2692,7 @@ export const DesignInspector = React.memo(function DesignInspector({
         // A fixed canvas frame is sized by its viewport metadata. Its shell
         // continues to follow that viewport after later canvas resizes. A
         // main's root is the component, sized as itself, not a shell.
-        const rootStyles = context.layoutRootId && !frame.component
+        const rootStyles = context.layoutRootId && frameComponentPresentation?.kind !== "main"
           ? updates.get(context.layoutRootId)
           : undefined;
         const rootDetails = details.find(
@@ -2736,12 +2914,12 @@ export const DesignInspector = React.memo(function DesignInspector({
       );
       return task.then((prepared) => prepared?.persist);
     },
-    [styleOwner, stylePreviewIntentRef],
+    [styleOwner, stylePreviewIntentRef, frameComponentPresentation?.kind],
   );
   useLayoutEffect(() => { layoutShortcutRef.current = commitLayoutAction; }, [commitLayoutAction]);
 
   const styleContext =
-    workspaceId && folder && frame && styleTargetNodeId && elementDetails
+    workspaceId && folder && frame && styleTargetNodeId && presentedElementDetails
       ? { workspaceId, folder, frame, nodeId: styleTargetNodeId }
       : null;
   const styleField = (
@@ -2754,7 +2932,7 @@ export const DesignInspector = React.memo(function DesignInspector({
     // A main's W and H are its root's, the component's own size; its X and Y
     // still place the frame.
     const frameGeometryProperty = frameStyleTarget &&
-      !(styleContext.frame.component && (property === "width" || property === "height"))
+      !(frameComponentPresentation?.kind === "main" && (property === "width" || property === "height"))
       ? (
           {
             left: ["x", styleContext.frame.x],
@@ -2773,6 +2951,7 @@ export const DesignInspector = React.memo(function DesignInspector({
           frame={styleContext.frame.file}
           geometryKey={geometryKey}
           saved={geometryValue}
+          active={active && styleActive}
           label={label}
           whole={options?.whole}
           range={
@@ -2781,7 +2960,8 @@ export const DesignInspector = React.memo(function DesignInspector({
               : DESIGN_FRAME_POSITION_RANGE
           }
           compact={options?.compact}
-          disabled={editsDisabled}
+          disabled={styleEditsDisabled || !styleActive}
+          revalidating={!elementDetails && !editsDisabled && styleActive}
           applied
           onPreview={(next) => {
             const number = Number(next);
@@ -2805,6 +2985,7 @@ export const DesignInspector = React.memo(function DesignInspector({
             )
           }
           onCommit={async (next) => {
+            if (!styleEditContextRef.current.active) return;
             const number = Number(next);
             if (!Number.isFinite(number)) {
               throw new Error("Enter a finite number.");
@@ -2901,6 +3082,7 @@ export const DesignInspector = React.memo(function DesignInspector({
         workspaceId={styleContext.workspaceId}
         frame={styleContext.frame.file}
         nodeId={styleContext.nodeId}
+        active={active && styleActive}
         label={label}
         property={property}
         value={
@@ -2914,7 +3096,8 @@ export const DesignInspector = React.memo(function DesignInspector({
         originLabel={styleOriginLabel}
         onLayoutAction={commitLayoutAction}
         onPreviewLayoutAction={previewLayoutAction}
-        disabled={editsDisabled}
+        disabled={styleEditsDisabled || !styleActive}
+        revalidating={!elementDetails && !editsDisabled && styleActive}
         applied={applied}
         motionModeActive={motionTimelineOpen}
         motionTrackActive={motionProperties.includes(property)}
@@ -2958,7 +3141,10 @@ export const DesignInspector = React.memo(function DesignInspector({
   // one names the instance and shows nothing to edit.
   const selectedPart = selectedNodeId ? designComponentPartOf(selectedNodeId) : null;
   const selectedSlot = selectedNodeId ? designComponentSlotOf(selectedNodeId) : null;
-  const instanceNodeId = selectedPart?.host ?? selectedSlot?.host ?? (styleNodeIds.length <= 1 ? selectedNodeId : null);
+  const instanceNodeId = selectedPart?.host ?? selectedSlot?.host ??
+    (frameSelected
+      ? explicitFrameIdentityNodeId ?? legacyExactInstanceNodeId
+      : styleNodeIds.length <= 1 ? selectedNodeId : null);
   // Own entries only: a layer id such as "constructor" is not a host.
   const instanceHost = instanceNodeId && frame?.instances && Object.hasOwn(frame.instances.hosts, instanceNodeId)
     ? frame.instances.hosts[instanceNodeId] : undefined;
@@ -2967,16 +3153,62 @@ export const DesignInspector = React.memo(function DesignInspector({
   const instanceTitle = instanceHost && instanceComponent && workspaceId
     ? designComponentTitle(workspaceId, instanceHost.component, instanceComponent)
     : null;
+  const instanceVariant = designComponentInstanceVariant(frame ?? {}, instanceNodeId);
+  const mainComponent = frame?.component ?? (frameComponentPresentation?.kind === "main"
+    ? EMPTY_COMPONENT_DECLARATION
+    : undefined);
   const optionsTarget: DesignComponentOptionsTarget | null = !workspaceId || !active || !panelVisible || !frame
     ? null
     // The main's root is the component, so selecting it selects the main.
-    : frameSelected && frame.component && (!selectedNodeId || selectedNodeId === layoutRootId) && styleNodeIds.length <= 1
-      ? { kind: "main", component: frame.component }
-      : !selectedPart && !selectedSlot && instanceNodeId && instanceHost && instanceComponent && instanceTitle && styleNodeIds.length === 1
+    : frameSelected && frameComponentPresentation?.kind === "main" && (!selectedNodeId || selectedNodeId === layoutRootId) && styleNodeIds.length <= 1
+      ? { kind: "main", component: mainComponent!, ...(frame.component ? {} : { undeclared: true as const }) }
+      : !selectedPart && !selectedSlot && instanceNodeId && instanceHost && instanceComponent && instanceTitle &&
+        (styleNodeIds.length === 1 || (frameSelected && explicitFrameIdentityNodeId === instanceNodeId && styleNodeIds.length === 0))
         ? { kind: "instance", nodeId: instanceNodeId, title: instanceTitle, host: instanceHost, component: instanceComponent,
             ...(frame.instances?.notApplied ? { notApplied: frame.instances.notApplied } : {}) }
         : null;
   const optionsFrame = optionsTarget ? frame : null;
+  const componentIdentity = optionsTarget?.kind === "main" && frame
+    ? designComponentIdentityLabel(frame.title, shownVariant)
+    : null;
+  const instanceIdentity = frame && instanceNodeId
+    ? designComponentInstanceIdentity(frame, instanceNodeId, (file) => designWorkspaceSnapshotCache.peekSnapshot(workspaceId ?? "").data?.frames.find((candidate) => candidate.file === file)?.title)
+    : null;
+  const selectionKey = frameSelected && !selectedNodeId
+    ? ["frame-root"]
+    : styleNodeIds.length ? styleNodeIds : selectedNodeId ? [selectedNodeId] : ["page"];
+  const inspectorTabKey = designInspectorTabKey({
+    workspaceId,
+    directoryId: previewDirectoryId,
+    pageId: activePageId ?? null,
+    frameFile: frame?.file ?? null,
+    selection: selectionKey,
+  });
+  const similarTabKey = designInspectorSimilarTabKey(
+    { workspaceId, directoryId: previewDirectoryId },
+    designInspectorTabPreferenceKind(optionsTarget !== null, designInspectorSelectionIsComponentLike({
+      frameIsComponent: frameComponentPresentation?.kind === "main",
+      instanceHost: instanceHost !== undefined,
+      selectedPart: selectedPart !== null,
+      selectedSlot: selectedSlot !== null,
+    })),
+  );
+  tabKeyRef.current = inspectorTabKey;
+  tabSimilarityKeyRef.current = similarTabKey;
+  const defaultTab = designInspectorDefaultTab(optionsTarget !== null);
+  const storedTab = tabPreference?.key === inspectorTabKey
+    ? tabPreference.value
+    : designInspectorTabForSelection(tabPreferencesRef.current, inspectorTabKey, similarTabKey);
+  const activeTab = storedTab === "options" && !optionsTarget ? defaultTab : storedTab ?? defaultTab;
+  const styleActive = activeTab === "style";
+  const cssActive = activeTab === "css";
+  const styleResetCount = instanceHost ? Object.keys(instanceHost.overrides ?? {}).length + designInstanceVisualStyleProperties(instanceHost.style).length : 0;
+  const canResetComponentStyle = optionsTarget?.kind === "instance" && styleResetCount > 0;
+  const resetComponentStyle = () => {
+    if (!workspaceId || !frame || !instanceNodeId || !instanceHost || styleResetCount === 0) return;
+    void commitDesignInstanceOverridesReset(workspaceId, frame, instanceNodeId)
+      .catch((error) => toast.error("Couldn't reset the component style", { description: errorMessage(error) }));
+  };
   // An instance whose main is gone renders nothing; it is named by the
   // component it asks for rather than read as an empty Frame.
   const missingComponent = frame && instanceNodeId && !selectedPart && !selectedSlot && styleNodeIds.length <= 1
@@ -2985,7 +3217,8 @@ export const DesignInspector = React.memo(function DesignInspector({
   // As in Layers, the header names the instance by its component; the line
   // under it says what it is, and a part's line offers its instance too.
   const componentHeader = instanceTitle && instanceComponent && instanceNodeId && (selectedPart || selectedSlot || optionsTarget?.kind === "instance")
-    ? { title: instanceTitle, component: instanceComponent, host: instanceNodeId, part: selectedPart?.part ?? null, slot: selectedSlot?.name ?? null }
+    ? { title: instanceTitle, identity: instanceIdentity ?? designComponentIdentityLabel(instanceTitle, null), component: instanceComponent,
+        host: instanceNodeId, part: selectedPart?.part ?? null, slot: selectedSlot?.name ?? null }
     : null;
   const headerInner = !!componentHeader && (componentHeader.part !== null || componentHeader.slot !== null);
   const textLock = frame && selectedNodeId ? designComponentTextLock(frame, selectedNodeId) : null;
@@ -3072,10 +3305,14 @@ export const DesignInspector = React.memo(function DesignInspector({
             activePageId={activePageId} frames={pageFrames ?? []} active={active} />
         ) : <>
           {componentHeader || optionsTarget?.kind === "main" || missingComponent
-            ? <ComponentGlyph className="text-fg2 size-3.5 shrink-0" aria-hidden="true" />
+            ? componentHeader
+              ? <Diamond className="text-violet-primary size-3.5 shrink-0" aria-hidden="true" />
+              : <ComponentGlyph className="text-violet-primary fill-current size-3.5 shrink-0" aria-hidden="true" />
             : <SelectionGlyph className="text-fg2 size-3.5 shrink-0" aria-hidden="true" />}
-          <span data-design-inspector-title="" className="text-fg1 min-w-0 flex-1 truncate text-xs font-medium">
-            {componentHeader && !headerInner ? componentHeader.title : missingComponent ? `zd-${missingComponent}` : selectionTitle ?? selectionName}
+          <span data-design-inspector-title="" className={cn(componentHeader || optionsTarget?.kind === "main" ? "text-violet-primary" : "text-fg1", "min-w-0 flex-1 truncate text-xs font-medium")}>
+            {componentHeader
+              ? headerInner ? `${componentHeader.identity} · ${selectionTitle ?? selectionName}` : componentHeader.identity
+              : optionsTarget?.kind === "main" ? componentIdentity : missingComponent ? `zd-${missingComponent}` : selectionTitle ?? selectionName}
           </span>
           {componentHeader && !headerInner ? (
             <Button type="button" variant="ghost" size="compact" data-design-edit-main="" disabled={!componentHeader.component.frame && (!active || pendingHistoryActions > 0)} onClick={editMain}>
@@ -3106,12 +3343,13 @@ export const DesignInspector = React.memo(function DesignInspector({
       {componentHeader ? (
         <div data-design-component-of={componentHeader.slot !== null ? "slot" : componentHeader.part ? "part" : "instance"}
           className="border-border1 text-fg3 flex min-h-7 min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1 border-t py-1 pr-1.5 pl-3 text-xs leading-4">
-          <ComponentGlyph className="size-3 shrink-0" aria-hidden="true" />
+          <Diamond className="text-violet-primary size-3 shrink-0" aria-hidden="true" />
           {/* Its own width first, so a narrow panel moves the buttons to a line of their own. */}
           <span className="min-w-0 grow basis-auto truncate">
             {componentHeader.slot !== null
-              ? `${designComponentSlotLabel(componentHeader.slot)} slot of ${componentHeader.title}. Drop or draw layers into it.`
-              : componentHeader.part ? `Part of ${componentHeader.title}${partOverridden ? ", overridden" : ""}.` : `Instance of ${componentHeader.title}`}
+              ? `${designComponentSlotLabel(componentHeader.slot)} slot of ${componentHeader.identity}. Drop or draw layers into it.`
+              : componentHeader.part ? `Part of ${componentHeader.identity}${partOverridden ? ", overridden" : ""}.`
+                : `Instance · ${selectedNode?.layerName?.trim() || elementDetails?.name?.trim() || "edits apply only here"}`}
           </span>
           {headerInner ? (
             <span className="flex shrink-0 items-center gap-1">
@@ -3124,6 +3362,12 @@ export const DesignInspector = React.memo(function DesignInspector({
               </Button>
             </span>
           ) : null}
+        </div>
+      ) : null}
+      {optionsTarget?.kind === "main" && componentIdentity ? (
+        <div data-design-component-scope="main" className="border-border1 text-fg3 flex min-h-7 items-center gap-1.5 border-t py-1 pr-1.5 pl-3 text-xs leading-4">
+          <ComponentGlyph className="text-violet-primary fill-current size-3 shrink-0" aria-hidden="true" />
+          <span>Main component · changes update inheriting instances</span>
         </div>
       ) : null}
       {missingComponent ? (
@@ -3170,6 +3414,20 @@ export const DesignInspector = React.memo(function DesignInspector({
         </div>
       </InspectorSection>
     ) : null;
+  const cssStateContext = heldState ?? styleEditContextRef.current.stateContext;
+  const cssStateMismatch = designInspectorCssStateMismatch(cssStateContext);
+  const cssTargetLabel = componentHeader?.title ?? (optionsTarget?.kind === "main" && frame ? frame.title : selectionTitle ?? selectionName);
+  const cssVariant = instanceHost ? instanceVariant : shownVariant;
+  const cssVariantLabel = cssVariant
+    ? cssVariant.replace(/-/g, " ").replace(/^./, (first) => first.toUpperCase())
+    : "Default";
+  const returnToDefault = () => {
+    if (heldState !== null) pickLayerState(null);
+    if (shownState && workspaceId && frame) showDesignComponentVariant(workspaceId, frame.file, null);
+  };
+  const optionsPanel = designInspectorPanelState(activeTab, "options");
+  const stylePanel = designInspectorPanelState(activeTab, "style");
+  const cssPanel = designInspectorPanelState(activeTab, "css");
 
   // Width, placement, and the popover boundary belong to the floating panel
   // that stacks this inspector below Layers.
@@ -3182,118 +3440,89 @@ export const DesignInspector = React.memo(function DesignInspector({
       data-design-state-held={heldState ?? undefined}
       className="bg-bg1 relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
     >
-      <PanelHeader data-design-style-panel-header="" size="window">
-        <div
-          role="group"
-          aria-label="Inspector view"
-          className="flex items-center gap-0.5"
-        >
-          <button
-            type="button"
-            className="zd-panel-tab"
-            aria-pressed={!cssMode}
-            onClick={() => setCssMode(false)}
-          >
-            Style
-          </button>
-          <button
-            type="button"
-            className="zd-panel-tab"
-            disabled={!styleContext && !cssMode}
-            aria-label="CSS"
-            aria-pressed={cssMode}
-            onClick={() => {
-              // The CSS view edits Default; the canvas follows it there.
-              if (!cssMode && workspaceId) pickLayerState(null);
-              setCssMode((current) => !current);
-            }}
-          >
-            CSS
-          </button>
-        </div>
-        <div className="ml-auto flex items-center gap-0.5">
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                className="text-fg2 h-7 min-w-12 px-2 text-xs tabular-nums"
-                disabled={!active || !workspaceId}
-                aria-label={`Canvas zoom ${zoomPercentage}%`}
-              >
-                {zoomPercentage}%
+      <Tabs value={activeTab} onValueChange={(value) => selectInspectorTab(value as DesignInspectorTab)} className="flex min-h-0 flex-1 flex-col">
+        {inspectorSelectionHeader}
+        <PanelHeader data-design-style-panel-header="" size="window">
+          <TabsList aria-label="Inspector" className="h-7">
+            {optionsTarget ? <TabsTrigger value="options">Options</TabsTrigger> : null}
+            <TabsTrigger value="style">Style</TabsTrigger>
+            <TabsTrigger value="css" disabled={!styleContext && !cssActive}>CSS</TabsTrigger>
+          </TabsList>
+          <div className="ml-auto flex items-center gap-0.5">
+            {styleActive && canResetComponentStyle ? (
+              <Button type="button" variant="ghost" size="sm" data-design-reset-style=""
+                disabled={editsDisabled} onClick={resetComponentStyle}>
+                <RotateCcw /> Reset Style
               </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent data-design-history-owner={workspaceId ?? undefined} align="end" className="w-48">
-              <DropdownMenuItem
-                disabled={zoom >= DESIGN_MAX_ZOOM}
-                aria-label="Zoom in"
-                onSelect={() => zoomActionsRef.current?.zoomIn()}
-              >
-                <span>Zoom in</span>
-                <DropdownMenuShortcut>
-                  +
-                </DropdownMenuShortcut>
-              </DropdownMenuItem>
-              <DropdownMenuItem
-                disabled={zoom <= DESIGN_MIN_ZOOM}
-                aria-label="Zoom out"
-                onSelect={() => zoomActionsRef.current?.zoomOut()}
-              >
-                <span>Zoom out</span>
-                <DropdownMenuShortcut>
-                  −
-                </DropdownMenuShortcut>
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
-        </div>
-      </PanelHeader>
-      {cssMode && styleContext && elementDetails ? (
-        <div
-          data-design-style-panel-css-mode=""
-          className="flex min-h-0 flex-1 flex-col"
-        >
-          {inspectorSelectionHeader}
-          <DesignComputedCssEditor
-            key={`${styleOwner.key}:css`}
-            details={elementDetails}
-            originLabel={styleOriginLabel}
-            disabled={editsDisabled}
-            onPreviewStyles={previewSelectedStyles}
-            onCancelStylePreview={clearSelectedStylePreview}
-            onCommitStyles={commitSelectedStyles}
-          />
-        </div>
-      ) : (
-        <ScrollArea className="min-h-0 flex-1">
-          <div className="flex flex-col pb-6">
-            {inspectorSelectionHeader}
-            {textLock?.kind === "option" ? (
-              <p data-design-text-set-by="" className="border-border1 text-fg2 border-b px-3 py-2 text-3xxs leading-4">{textLock.message}</p>
             ) : null}
-            {optionsFrame && optionsTarget && workspaceId ? (
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="text-fg2 h-7 min-w-12 px-2 text-xs tabular-nums"
+                  disabled={!active || !workspaceId}
+                  aria-label={`Canvas zoom ${zoomPercentage}%`}
+                >
+                  {zoomPercentage}%
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent data-design-history-owner={workspaceId ?? undefined} align="end" className="w-48">
+                <DropdownMenuItem
+                  disabled={zoom >= DESIGN_MAX_ZOOM}
+                  aria-label="Zoom in"
+                  onSelect={() => zoomActionsRef.current?.zoomIn()}
+                >
+                  <span>Zoom in</span>
+                  <DropdownMenuShortcut>+</DropdownMenuShortcut>
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  disabled={zoom <= DESIGN_MIN_ZOOM}
+                  aria-label="Zoom out"
+                  onSelect={() => zoomActionsRef.current?.zoomOut()}
+                >
+                  <span>Zoom out</span>
+                  <DropdownMenuShortcut>−</DropdownMenuShortcut>
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div>
+        </PanelHeader>
+        {/* A shown state changes what Options and Style both display. */}
+        {shownState && frame && workspaceId ? (
+          <DesignStateVariantNote state={shownState} onBack={() => showDesignComponentVariant(workspaceId, frame.file, null)} />
+        ) : null}
+        {optionsFrame && optionsTarget && workspaceId ? (
+          <InertTabsContent value="options" forceMount inert={optionsPanel.inert ? "" : undefined} aria-hidden={optionsPanel.ariaHidden}
+            data-design-options-panel="" className="mt-0 min-h-0 flex-1 overflow-hidden data-[state=active]:flex data-[state=inactive]:!hidden">
+            <ScrollArea className="min-h-0 flex-1">
               <DesignTokenCatalogContext.Provider value={tokenCatalog}>
                 <React.Suspense fallback={null}>
-                <DesignComponentOptions
-                  // One target keeps its drafts and folds across generations; the
-                  // section handles a changed declaration itself.
-                  key={JSON.stringify([workspaceId, designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.directoryId ?? "", optionsFrame.file,
-                    optionsTarget.kind === "instance" ? [optionsTarget.nodeId, optionsTarget.host.component] : "main"])}
-                  workspaceId={workspaceId}
-                  frame={optionsFrame}
-                  target={optionsTarget}
-                  directory={designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.directory ?? ""}
-                  lint={lint}
-                  disabled={editsDisabled}
-                  onAskAgent={onAskAgent}
-                />
+                  <DesignComponentOptions
+                    key={JSON.stringify([workspaceId, designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.directoryId ?? "", optionsFrame.file,
+                      optionsTarget.kind === "instance" ? [optionsTarget.nodeId, optionsTarget.host.component] : "main"])}
+                    workspaceId={workspaceId}
+                    frame={optionsFrame}
+                    target={optionsTarget}
+                    directory={designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.directory ?? ""}
+                    lint={lint}
+                    active={active && optionsPanel.active}
+                    shownVariant={shownVariant}
+                    disabled={editsDisabled || !optionsPanel.active}
+                    onAskAgent={onAskAgent}
+                  />
                 </React.Suspense>
               </DesignTokenCatalogContext.Provider>
-            ) : null}
-            {shownState && frame && workspaceId ? (
-              <DesignStateVariantNote state={shownState} onBack={() => showDesignComponentVariant(workspaceId, frame.file, null)} />
+            </ScrollArea>
+          </InertTabsContent>
+        ) : null}
+        <InertTabsContent value="style" forceMount inert={stylePanel.inert ? "" : undefined} aria-hidden={stylePanel.ariaHidden}
+          data-design-style-panel="" className="mt-0 min-h-0 flex-1 overflow-hidden data-[state=active]:flex data-[state=inactive]:!hidden">
+          <ScrollArea className="min-h-0 flex-1">
+            <div className="flex flex-col pb-6">
+              {textLock?.kind === "option" ? (
+              <p data-design-text-set-by="" className="border-border1 text-fg2 border-b px-3 py-2 text-3xxs leading-4">{textLock.message}</p>
             ) : null}
             {heldState && heldChanges ? (
               <DesignHeldStateNote state={heldState} count={heldChanges.count} onBack={() => pickLayerState(null)} />
@@ -3319,17 +3548,17 @@ export const DesignInspector = React.memo(function DesignInspector({
               </Tooltip>
             ) : null}
 
-            {styleContext && elementDetails ? (
+            {styleContext && presentedElementDetails ? (
               <DesignStyleOriginLabelContext.Provider value={styleOriginLabel}>
                 <DesignFieldOriginsContext.Provider value={fieldOrigins}>
                 <DesignTokenCatalogContext.Provider value={tokenCatalog}>
                 <DesignTokenDetachContext.Provider value={detachSelectedToken}>
                 <DesignFieldOverlays
                   rootRef={inspectorRef}
-                  active={active}
+                  active={active && styleActive}
                   ownerKey={styleOwnerKey}
                   origins={fieldOrigins}
-                  disabled={editsDisabled}
+                  disabled={styleEditsDisabled || !styleActive}
                   readOnly={holding}
                   apiRef={overlaysApiRef}
                   onChooseToken={chooseFieldToken}
@@ -3337,9 +3566,10 @@ export const DesignInspector = React.memo(function DesignInspector({
                   onEditInCss={editInCss}
                   onAskAgent={askAgentToChange}
                 >
+                  <DesignColorRevalidatingContext.Provider value={!elementDetails && !editsDisabled && styleActive}>
                   <DesignStyleEditor
                     key={styleOwner.key}
-                    details={shownDetails ?? elementDetails}
+                    details={shownDetails ?? presentedElementDetails}
                     livePreviewOwner={
                       styleContext
                         ? {
@@ -3352,11 +3582,12 @@ export const DesignInspector = React.memo(function DesignInspector({
                     renderField={styleField}
                     onLayoutAction={commitLayoutAction}
                     frameSelected={
-                      frameStyleTarget || elementDetails.oid === layoutRootId
+                      frameStyleTarget || presentedElementDetails.oid === layoutRootId
                     }
                     layoutParents={shownParents}
                     selectionCount={styleNodeIds.length}
-                    disabled={editsDisabled}
+                    active={active && styleActive}
+                    disabled={styleEditsDisabled || !styleActive}
                     onPreviewStyles={previewSelectedStyles}
                     onCancelStylePreview={clearSelectedStylePreview}
                     onCommitStyles={commitSelectedStyles}
@@ -3364,6 +3595,7 @@ export const DesignInspector = React.memo(function DesignInspector({
                     motionProperties={motionProperties}
                     onOpenMotionTimeline={onOpenMotionTimeline}
                   />
+                  </DesignColorRevalidatingContext.Provider>
                 </DesignFieldOverlays>
                 </DesignTokenDetachContext.Provider>
                 </DesignTokenCatalogContext.Provider>
@@ -3373,7 +3605,7 @@ export const DesignInspector = React.memo(function DesignInspector({
               <DesignCanvasBackgroundEditor
                 key={activePageId ?? "legacy"}
                 value={canvasBackground}
-                disabled={!active}
+                disabled={!active || !styleActive}
                 onPreview={previewCanvasBackground}
                 onCancelPreview={cancelCanvasBackgroundPreview}
                 onCommit={commitCanvasBackground}
@@ -3391,10 +3623,12 @@ export const DesignInspector = React.memo(function DesignInspector({
                   ).map(([label, key, value]) => (
                     <InspectorFrameGeometryField
                       key={key}
+                      active={active && styleActive}
                       workspaceId={workspaceId}
                       frame={frame.file}
                       geometryKey={key}
                       saved={value}
+                      disabled={!active || !styleActive}
                       label={label}
                       compact
                       whole
@@ -3444,8 +3678,45 @@ export const DesignInspector = React.memo(function DesignInspector({
             ) : null}
             {exportSection}
           </div>
-        </ScrollArea>
-      )}
+          </ScrollArea>
+        </InertTabsContent>
+        <InertTabsContent value="css" forceMount inert={cssPanel.inert ? "" : undefined} aria-hidden={cssPanel.ariaHidden}
+          data-design-style-panel-css-mode="" className="mt-0 min-h-0 flex-1 overflow-hidden data-[state=active]:flex data-[state=inactive]:!hidden">
+          {styleContext && elementDetails ? (
+            <div className="flex min-h-0 flex-1 flex-col">
+              <div data-design-base-css-context="" className="border-border1 text-fg2 flex shrink-0 items-center gap-2 border-b px-3 py-2 text-3xxs leading-4">
+                <div className="min-w-0 flex-1">
+                  <div className="text-fg1 font-medium">Base CSS</div>
+                  <div className="truncate">{cssTargetLabel} · {cssVariantLabel}{cssStateMismatch ? ` · ${cssStateContext}` : ""}</div>
+                </div>
+                {cssStateMismatch ? (
+                  <Button type="button" variant="secondary" size="compact" data-design-css-return-default=""
+                    disabled={!active || !workspaceId} onClick={returnToDefault}>
+                    Return to Default
+                  </Button>
+                ) : null}
+              </div>
+              {cssStateMismatch ? (
+                <p data-design-base-css-state="mismatch" role="status" className="border-border1 bg-bg2 text-fg2 px-3 py-2 text-3xxs leading-4">
+                  Base CSS edits apply to Default, not the currently shown interaction state.
+                </p>
+              ) : null}
+              <DesignComputedCssEditor
+                key={`${styleOwner.key}:css`}
+                details={elementDetails}
+                originLabel={styleOriginLabel}
+                active={active && cssActive}
+                disabled={editsDisabled || !cssActive || cssStateMismatch}
+                onPreviewStyles={previewSelectedStyles}
+                onCancelStylePreview={clearSelectedStylePreview}
+                onCommitStyles={commitSelectedStyles}
+              />
+            </div>
+          ) : (
+            <p data-design-css-unavailable="" className="text-fg3 px-3 py-3 text-xs">Select one layer to edit its Base CSS.</p>
+          )}
+        </InertTabsContent>
+      </Tabs>
     </aside>
   );
 });

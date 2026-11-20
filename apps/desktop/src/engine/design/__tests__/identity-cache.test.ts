@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, symlink, utimes, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -19,6 +19,7 @@ import {
 } from "../identity-cache";
 import { resetDesignStylesheetCacheForTests } from "../render-preparation";
 import { sharedDesignParseStatsForTests } from "../shared-parse";
+import { designPrivateStorageDirectory } from "../metadata-storage";
 
 // A 1x1 transparent PNG, and a 2x1 one.
 const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=", "base64");
@@ -54,9 +55,10 @@ describe.each([["its own path", false], ["a symlinked path", true]] as const)("d
     edit(canvas);
     await writeFile(file, JSON.stringify(canvas, null, 2));
   };
-  const prepare = async () => {
+  const prepare = async (includeComponentIdentity = false) => {
     const navigation = await readDesignNavigationSnapshot(root);
-    const prepared = await prepareDesignNavigationFrames(root, navigation.catalogRevision, frames);
+    const prepared = await prepareDesignNavigationFrames(root, navigation.catalogRevision, frames,
+      undefined, includeComponentIdentity ? { includeComponentIdentity: true } : undefined);
     expect(prepared.errors).toEqual([]);
     return prepared.frames;
   };
@@ -164,6 +166,34 @@ describe.each([["its own path", false], ["a symlinked path", true]] as const)("d
     stats = designIdentityCacheStatsForTests();
     expect(await prepare()).toEqual(first);
     expect(designIdentityCacheStatsForTests().misses - stats.misses).toBe(2);
+  });
+
+  it("hydrates legacy and rejects malformed cached component identities without a new store", async () => {
+    configureDesignIdentityCacheForTests({ durable: true, build: "build-identity-shapes" });
+    await prepare(true);
+    await flushDesignIdentityCacheForTests();
+    const storage = designPrivateStorageDirectory(root);
+    const file = path.join(storage, (await readdir(storage)).find((name) => name.startsWith("identities-"))!);
+    const cached = JSON.parse(await readFile(file, "utf8")) as { entries: Record<string, { identity: Record<string, unknown> }> };
+    for (const entry of Object.values(cached.entries)) delete entry.identity.componentIdentity;
+    await writeFile(file, JSON.stringify(cached));
+    resetDesignIdentityCacheForTests();
+    const legacyStats = designIdentityCacheStatsForTests();
+    const hydrated = await prepare(true);
+    expect(hydrated.every((frame) => frame.componentIdentity === null)).toBe(true);
+    expect(designIdentityCacheStatsForTests().misses - legacyStats.misses).toBe(0);
+    const hydratedStats = designIdentityCacheStatsForTests();
+    await prepare(true);
+    expect(designIdentityCacheStatsForTests().hits - hydratedStats.hits).toBe(2);
+
+    await flushDesignIdentityCacheForTests();
+    const repaired = JSON.parse(await readFile(file, "utf8")) as { entries: Record<string, { identity: Record<string, unknown> }> };
+    for (const entry of Object.values(repaired.entries)) entry.identity.componentIdentity = { kind: "not-a-kind" };
+    await writeFile(file, JSON.stringify(repaired));
+    resetDesignIdentityCacheForTests();
+    const malformedStats = designIdentityCacheStatsForTests();
+    await prepare(true);
+    expect(designIdentityCacheStatsForTests().misses - malformedStats.misses).toBe(2);
   });
 });
 

@@ -79,7 +79,7 @@ export async function runDesignStyleTokensSmoke({ page, check }) {
   await fill.press("Escape");
   await fillPill.waitFor({ timeout: 5_000 });
 
-  await page.getByRole("button", { name: "CSS", exact: true }).click();
+  await page.getByRole("tab", { name: "CSS", exact: true }).click();
   const editor = page.locator('.cm-content[aria-label="Computed CSS declarations"]');
   await editor.waitFor({ timeout: 5_000 });
   const declarations = await editor.innerText();
@@ -95,7 +95,7 @@ export async function runDesignStyleTokensSmoke({ page, check }) {
       !declarations.includes("App styles"),
     `${declarations} | ${hint}`,
   );
-  await page.getByRole("button", { name: "Style", exact: true }).click();
+  await page.getByRole("tab", { name: "Style", exact: true }).click();
 
   // A field holding a token offers Detach token on hover, which writes the
   // value the token resolves to as a plain value.

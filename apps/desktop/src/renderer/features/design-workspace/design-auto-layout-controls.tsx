@@ -78,6 +78,7 @@ interface Props {
   /** How many layers are selected; Mixed needs every one loaded. */
   selectionCount?: number;
   disabled: boolean;
+  active?: boolean;
 }
 
 /** Every live property this section's values and helpers read. Alignment
@@ -192,12 +193,14 @@ export function DesignAutoLayoutControls({
   layoutParents,
   selectionCount = 1,
   disabled,
+  active = true,
 }: Props) {
   const liveStyles = useDesignLivePreviewStyles(
     livePreviewOwner?.workspaceId ?? "",
     livePreviewOwner?.frame ?? "",
     livePreviewOwner?.nodeId ?? "",
     autoLayoutReads,
+    active,
   );
   const styles = { ...confirmedDetails.styles };
   for (const [property, value] of Object.entries(liveStyles ?? {})) {

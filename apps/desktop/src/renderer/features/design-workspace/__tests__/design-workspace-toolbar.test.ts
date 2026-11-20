@@ -69,14 +69,16 @@ describe("design workspace inspector toolbar", () => {
     expect(inspector).not.toContain('aria-label="Delete frame"');
   });
 
-  it("keeps a single Style and zoom bar fixed above the inspector scroller", () => {
+  it("keeps the Inspector tabs and zoom bar fixed above the inspector scroller", () => {
     const inspector = source.match(
       /<aside[\s\S]*?data-design-inspector=""[\s\S]*?<\/aside>/,
     )?.[0];
 
     expect(inspector).toBeDefined();
     expect(inspector).toContain('data-design-style-panel-header=""');
-    expect(inspector).toMatch(/>\s*Style\s*<\/button>/);
+    expect(inspector).toContain('<TabsList aria-label="Inspector"');
+    expect(inspector).toContain('<TabsTrigger value="style">Style</TabsTrigger>');
+    expect(inspector).toContain('<TabsTrigger value="css"');
     expect(inspector).toContain("<DropdownMenuTrigger asChild>");
     expect(inspector).toContain("Zoom in");
     expect(inspector).toContain("Zoom out");
@@ -93,7 +95,7 @@ describe("design workspace inspector toolbar", () => {
     expect(styleEditorSource).not.toContain("propertyQuery");
   });
 
-  it("switches to computed CSS from the header's Style | CSS toggle", () => {
+  it("switches to computed CSS through the Inspector tab primitives", () => {
     const inspector = source.match(
       /<aside[\s\S]*?data-design-inspector=""[\s\S]*?<\/aside>/,
     )?.[0];
@@ -101,21 +103,26 @@ describe("design workspace inspector toolbar", () => {
     expect(inspector).toBeDefined();
     expect(inspector).not.toContain("data-design-style-panel-footer");
     expect(inspector).toContain("<DesignComputedCssEditor");
-    expect(inspector).toContain("aria-pressed={cssMode}");
-    expect(inspector).toContain("setCssMode((current) => !current)");
-    expect(inspector).toContain("aria-pressed={!cssMode}");
+    expect(inspector).toContain("<Tabs value={activeTab} onValueChange=");
+    expect(inspector).toContain('<TabsTrigger value="style">Style</TabsTrigger>');
+    expect(inspector).toContain('<TabsTrigger value="css"');
+    expect(inspector).toContain('<InertTabsContent value="css"');
+    expect(inspector).not.toContain("cssMode");
     expect(source).toContain('data-design-inspector-header=""');
     expect(inspector).toContain("{inspectorSelectionHeader}");
-    expect(inspector!.indexOf('aria-label="CSS"')).toBeLessThan(
-      inspector!.indexOf("<ScrollArea"),
-    );
+    const cssTrigger = inspector!.indexOf('<TabsTrigger value="css"');
+    const scroller = inspector!.indexOf("<ScrollArea");
+    expect(cssTrigger).toBeGreaterThan(-1);
+    expect(scroller).toBeGreaterThan(-1);
+    expect(cssTrigger).toBeLessThan(scroller);
     expect(styleEditorSource).not.toContain("Element CSS declarations");
     expect(styleEditorSource).not.toContain("Apply CSS");
   });
 
   it("uses the selected frame's runtime root as a complete style target", () => {
     expect(source).toContain("const styleTargetNodeId =");
-    expect(source).toContain("frameSelected && details?.oid");
+    expect(source).toContain("const explicitFrameIdentityNodeId");
+    expect(source).toContain("explicitFrameIdentityNodeId");
     expect(source).toContain("nodeId: styleTargetNodeId");
     expect(source).toContain("frameStyleTarget");
   });

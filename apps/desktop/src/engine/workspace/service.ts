@@ -24,7 +24,7 @@ import {
   type DesignWorkspaceRouteHost,
   type DesignReadWorkspace,
 } from "../design/routes";
-import { designReplyCarriesFrames, designReplyForOlderRenderer, takeDesignShowsNothing } from "../design/options-shows-compat";
+import { designReplyCarriesFrames, designReplyForOlderRenderer, takeDesignNegotiation } from "../design/options-shows-compat";
 import {
   MAX_DESIGN_HISTORY_WORKSPACES,
   pruneWorkspaceDesignHistory,
@@ -1403,8 +1403,8 @@ export class WorkspaceService {
       this.pruneDesignHistoryFrames(workspacePath, frames, folder),
     readDesignSnapshot: (workspace, remote, options) =>
       this.readDesignSnapshot(workspace, remote, options),
-    readDesignSnapshotRequest: (workspaceId, remote, hostLocalResources) =>
-      this.readDesignSnapshotRequest(workspaceId, remote, hostLocalResources),
+    readDesignSnapshotRequest: (workspaceId, remote, hostLocalResources, includeComponentIdentity) =>
+      this.readDesignSnapshotRequest(workspaceId, remote, hostLocalResources, includeComponentIdentity),
   };
 
   /** Engine-owned authority transition around a mutation that changes the
@@ -2237,6 +2237,7 @@ export class WorkspaceService {
       fresh?: boolean;
       affectedFrames?: string[];
       knownPages?: DesignPageHashes;
+      includeComponentIdentity?: boolean;
     } = {},
   ) {
     const root = options.root ?? workspace.path;
@@ -2250,15 +2251,15 @@ export class WorkspaceService {
     // The resolved directory is equally load-bearing: two concurrent leases
     // can point synchronous document readers at different Design documents
     // under the same workspace root.
-    const key = `${workspace.id}\u0000${nodePath.resolve(root)}\u0000${writeBack ? "write" : "read"}\u0000${designDirectory}\u0000${hostLocalResources ? "host-resources" : "bridge-resources"}${options.affectedFrames ? `\u0000${JSON.stringify([options.affectedFrames, options.knownPages ?? null])}` : ""}`;
+    const key = `${workspace.id}\u0000${nodePath.resolve(root)}\u0000${writeBack ? "write" : "read"}\u0000${designDirectory}\u0000${hostLocalResources ? "host-resources" : "bridge-resources"}${options.includeComponentIdentity ? "\u0000component-identity" : ""}${options.affectedFrames ? `\u0000${JSON.stringify([options.affectedFrames, options.knownPages ?? null])}` : ""}`;
     const epoch = designSnapshotReadEpoch(root);
     const current = this.designSnapshotFlights.get(key);
     if (current && !options.fresh && this.joinsDesignSnapshotFlight(current, epoch))
       return current;
     const request = (async () => {
       const snapshot = options.affectedFrames && hostLocalResources && !remote
-        ? await readDesignMutationSnapshot(root, options.affectedFrames, options.knownPages)
-        : await readDesignWorkspaceSnapshot(root, { writeBack });
+        ? await readDesignMutationSnapshot(root, options.affectedFrames, options.knownPages, { includeComponentIdentity: options.includeComponentIdentity })
+        : await readDesignWorkspaceSnapshot(root, { writeBack, includeComponentIdentity: options.includeComponentIdentity });
       // The directory this desktop's canvas shows, for prompt change polling.
       if (!remote) noteDesignSnapshotDirectory(root, designDirectory);
       return {
@@ -2292,11 +2293,12 @@ export class WorkspaceService {
     workspaceId: string,
     remote: boolean,
     hostLocalResources: boolean,
+    includeComponentIdentity = false,
   ): Promise<DesignWorkspaceSnapshot & { protocolCapability: string | null }> {
     const workspace = this.resolveDesignWorkspaceRecord(workspaceId, remote);
     const key = `${workspace.id}\u0000${nodePath.resolve(workspace.path)}\u0000read\u0000${designDirectoryNameFor(workspace.path)}\u0000${
       hostLocalResources ? "host-resources" : "bridge-resources"
-    }`;
+    }${includeComponentIdentity ? "\u0000component-identity" : ""}`;
     const epoch = designSnapshotReadEpoch(workspace.path);
     const current = this.designSnapshotRequestFlights.get(key);
     if (current && this.joinsDesignSnapshotFlight(current, epoch)) return current;
@@ -2309,6 +2311,7 @@ export class WorkspaceService {
           writeBack,
           designDirectory,
           hostLocalResources,
+          includeComponentIdentity,
         }),
     );
     this.designSnapshotFlightEpochs.set(request, epoch);
@@ -2557,9 +2560,9 @@ export class WorkspaceService {
     } = {},
   ): Promise<unknown> {
     if (designReplyCarriesFrames(op) && !opts.designReplyShaped) {
-      const request = takeDesignShowsNothing(params);
+      const request = takeDesignNegotiation(params);
       const result = await this.handle(op, request.params, { ...opts, designReplyShaped: true });
-      return request.negotiated ? result : designReplyForOlderRenderer(result);
+      return request.negotiated.showsNothing && request.negotiated.slotText ? result : designReplyForOlderRenderer(result, request.negotiated);
     }
     const remote = opts.remote === true;
     const hostLocalResources = opts.hostLocalResources ?? !remote;

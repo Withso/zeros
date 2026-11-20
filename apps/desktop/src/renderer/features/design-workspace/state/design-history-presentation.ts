@@ -1,3 +1,4 @@
+import { useCallback, useSyncExternalStore } from "react";
 import { create } from "zustand";
 import type { DesignFrameGeometryWire, DesignWorkspaceSnapshotWire } from "../../../platform/git";
 import type { DesignRuntimeNodeDetails, DesignRuntimeTreeNode } from "@zeros/protocol/design-runtime";
@@ -124,8 +125,21 @@ export function clearDesignHistoryPresentation(workspaceId?: string, token?: obj
   const byWorkspace = new Map(store.getState().byWorkspace);
   byWorkspace.delete(workspaceId); store.setState({ byWorkspace });
 }
-export function useDesignHistoryPresentation(workspaceId: string | null | undefined): DesignHistoryPresentation | null {
-  return store(state => workspaceId ? current(workspaceId, state.byWorkspace.get(workspaceId)) : null);
+const noopSubscribe = () => () => {};
+
+export function useDesignHistoryPresentation(
+  workspaceId: string | null | undefined,
+  active = true,
+): DesignHistoryPresentation | null {
+  const subscribe = useCallback(
+    (listener: () => void) => active ? store.subscribe(() => listener()) : noopSubscribe(),
+    [active],
+  );
+  const getSnapshot = useCallback(
+    () => workspaceId ? current(workspaceId, store.getState().byWorkspace.get(workspaceId)) : null,
+    [workspaceId],
+  );
+  return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
 }
 export function useDesignHistoryGeometryPreview(workspaceId: string): DesignHistoryGeometryPreview | null {
   return useDesignHistoryPresentation(workspaceId)?.geometry ?? null;
