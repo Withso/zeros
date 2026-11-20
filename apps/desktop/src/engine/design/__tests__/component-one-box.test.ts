@@ -40,4 +40,15 @@ describe("an instance is one box", () => {
     expect(instances?.hosts.c1).toMatchObject({ component: "card", style: "width: 300px" });
     expect(instances?.hosts.p1?.style).toBeUndefined();
   });
+  it("lays out a linked frame copy as its main's page: the main's body classes and stylesheets apply", async () => {
+    const main = '<!doctype html><html><head><template data-zd-options>\n<zd-option name="t" type="text" default="Go"></zd-option>\n</template>' +
+      '<link rel="stylesheet" href="../ui.css"></head><body class="stage"><button data-oid="btn">{{ t }}</button></body></html>';
+    const result = await expandDesignComponents("/work/one-box", doc('<zd-button data-oid="copy" data-zeros-frame-root></zd-button>'),
+      { "parts/button.html": main }, "home/index.html", { registry: new Map([["button", "parts/button.html"]]) });
+    expect(result.html).toMatch(/<body[^>]*class="stage"/);
+    expect(result.html).toContain("ui.css");
+    const nested = await expandDesignComponents("/work/one-box", doc('<main data-oid="m"><zd-button data-oid="copy"></zd-button></main>'),
+      { "parts/button.html": main }, "home/index.html", { registry: new Map([["button", "parts/button.html"]]) });
+    expect(nested.html).not.toMatch(/<body[^>]*class="stage"/);
+  });
 });

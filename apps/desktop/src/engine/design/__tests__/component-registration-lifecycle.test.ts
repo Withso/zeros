@@ -210,6 +210,19 @@ describe("a frame registered as a component", () => {
     expect(await componentOf(copy.file)).toBeUndefined();
   });
 
+  it("makes a linked copy's host the frame root, so the frame is the instance", async () => {
+    const main = await createDesignFrame(root, { title: "Button" });
+    const source = '<!doctype html><html><head><template data-zd-options><zd-variant name="compact"></zd-variant></template></head>' +
+      '<body class="stage"><button data-oid="btn">Go</button></body></html>';
+    await writeFile(path.join(root, DESIGN_DIRECTORY_NAME, main.file), source);
+    await register(main.file, "button");
+    const sourceVersion = (await readDesignFrameRenderIdentity(root, main.file)).sourceVersion;
+    const copy = await duplicateDesignFrame(root, main.file, { sourceVersion, componentCopy: { variant: "compact" } });
+    const copied = await readFile(path.join(root, DESIGN_DIRECTORY_NAME, copy.file), "utf8");
+    expect(copied).toMatch(/<body>\s*<zd-button data-oid="[^"]+" data-zeros-frame-root zd-variant="compact"><\/zd-button>\s*<\/body>/);
+    expect(copied).not.toContain("<main");
+  });
+
   it("validates linked variants only from direct options in the head", async () => {
     const main = await createDesignFrame(root, { title: "Chat composer" });
     const source = '<!doctype html><html><head><template data-zd-options>' +

@@ -91,8 +91,8 @@ interface ComponentDefinition {
     links: string[];
     /** What the Style panel shows for its instances; read on first use. */
     summary?: () => DesignComponentSummary | null;
-    /** The main's html and body style attributes, for a linked frame copy. */
-    documentStyles?: { html?: string; body?: string };
+    /** The main's html and body style attributes and body classes, for a linked frame copy. */
+    documentStyles?: { html?: string; body?: string; bodyClass?: string };
   };
   /** A plain definition's slots: each attribute slot an option may name,
    * with its fallback text, and whether it has a default slot. */
@@ -700,8 +700,20 @@ function documentStylesOf(document: DefaultTreeAdapterTypes.Document, body: Defa
   const html = document.childNodes.find((node): node is DefaultTreeAdapterTypes.Element => node.nodeName === "html");
   const style = (element: DefaultTreeAdapterTypes.Element | undefined) =>
     element?.attrs.find((attribute) => attribute.name === "style")?.value.trim() || undefined;
-  const result = { html: style(html), body: style(body) };
-  return result.html || result.body ? result : undefined;
+  const bodyClass = body?.attrs.find((attribute) => attribute.name === "class")?.value.trim() || undefined;
+  const result = { html: style(html), body: style(body), bodyClass };
+  return result.html || result.body || result.bodyClass ? result : undefined;
+}
+
+/** A linked frame copy's body takes its main's body classes, so page rules
+ * written for them (a centering stage) lay the copy out as the main. */
+function withBodyClass(html: string, classes: string): string {
+  return html.replace(/<body\b([^>]*)>/i, (tag, attributes: string) => {
+    const existing = /\sclass\s*=\s*"([^"]*)"/i.exec(attributes);
+    const merged = [...new Set([...(existing?.[1] ?? "").split(/\s+/), ...classes.split(/\s+/)].filter(Boolean))].join(" ")
+      .replace(/&/g, "&amp;").replace(/"/g, "&quot;");
+    return existing ? tag.replace(existing[0], ` class="${merged}"`) : `<body${attributes} class="${merged}">`;
+  });
 }
 
 /** The registered main a frame is a linked copy of: its body's one layer is
@@ -1342,14 +1354,17 @@ async function expandBoundedComponents(
   if (usage) usage.templated = entryDeclared !== null || work.templated === true;
   const usedNames = [...used].sort();
   const carriesLinks = usedNames.some((name) => definitions.get(name)?.template?.links.length);
-  const html = injectComponentStyles(
+  const documentComponent = entryDeclared ? null : linkedFrameComponent(source, registry);
+  const bodyClass = documentComponent ? definitions.get(documentComponent)?.template?.documentStyles?.bodyClass : undefined;
+  const injected = injectComponentStyles(
     expandedEntry,
     usedNames,
     definitions,
     budget,
     { rules: work.rules, entryFile, entryLinks: carriesLinks ? stylesheetLinksOf(parse(expandedEntry)) : [],
-      documentComponent: entryDeclared ? null : linkedFrameComponent(source, registry) },
+      documentComponent },
   );
+  const html = bodyClass ? withBodyClass(injected, bodyClass) : injected;
   return {
     html,
     usedComponents: [...used].sort(),

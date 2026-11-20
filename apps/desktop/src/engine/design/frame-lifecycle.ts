@@ -544,7 +544,7 @@ function reseedFrameOids(source: string, salt: string): string {
   return parts.join("");
 }
 
-function designComponentHost(source: string, component: string, variant: string | null, oid: string): string {
+function designComponentHost(source: string, component: string, variant: string | null, oid: string, frameRoot = false): string {
   let selectedVariant = variant;
   if (variant !== null) {
     if (!isDesignComponentVariantName(variant))
@@ -554,7 +554,7 @@ function designComponentHost(source: string, component: string, variant: string 
     if (declaration.state) selectedVariant = null;
   }
   const variantAttribute = selectedVariant === null ? "" : ` zd-variant="${escapeAttribute(selectedVariant)}"`;
-  return `<zd-${component} data-oid="${escapeAttribute(oid)}"${variantAttribute}></zd-${component}>`;
+  return `<zd-${component} data-oid="${escapeAttribute(oid)}"${frameRoot ? " data-zeros-frame-root" : ""}${variantAttribute}></zd-${component}>`;
 }
 
 export async function duplicateDesignFrame(
@@ -608,8 +608,10 @@ export async function duplicateDesignFrame(
           folder ? "../tokens.css" : "./tokens.css",
           readDesignStyleSourceCatalog(canvas).declarations.length > 0,
         ).replace(
-          "</main>",
-          `${designComponentHost(original, componentName, input.componentCopy!.variant, `o-${randomUUID().replace(/-/g, "")}`)}</main>`,
+          // The host is the frame's root, as a main's body is its component:
+          // selecting the frame selects the instance, laid out by the main's page.
+          /<main data-oid="[^"]*" data-zeros-frame-root style="[^"]*"><\/main>/,
+          designComponentHost(original, componentName, input.componentCopy!.variant, `o-${randomUUID().replace(/-/g, "")}`, true),
         )
       : rebaseDesignHtmlReferences(reseedFrameOids(
           rewriteFrameTitleSource(original, title),
