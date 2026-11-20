@@ -215,6 +215,7 @@ import {
   settleDesignHistorySelection,
 } from "./state/design-selection";
 import { designComponentPartOf, designComponentSlotOf } from "@zeros/protocol/design-runtime";
+import { useDesignHistoryPresentation } from "./state/design-history-presentation";
 import { designComponentDisplayTitle, designComponentSlotLabel, designComponentTextLock, designMissingComponentOf, designPartOverrideAttribute,
   designPartOverrideKey } from "./state/design-component-parts";
 import { MessageRow } from "../../shared/ui/primitives/message-row";
@@ -1843,11 +1844,15 @@ export const DesignInspector = React.memo(function DesignInspector({
   );
   // Exactly the styled nodes' readbacks and the frame root id: hover reads,
   // screenshots and other nodes' details must not re-render every field.
+  // An Undo or Redo painted ahead of its save reads its layers back; every
+  // selected layer steps from that, as the primary one already does.
+  const presentedHistoryFrame = useDesignHistoryPresentation(workspaceId)?.runtime.get(frame?.file ?? "");
   const styleNodeDetails = useDesignRuntimeStore(useShallow((state) => {
     const frameState = workspaceId && frame
       ? state.byWorkspace[workspaceId]?.frames[frame.file]
       : undefined;
-    return styleNodeIds.map((nodeId) => frameState?.detailsByNode[nodeId] ?? null);
+    return styleNodeIds.map((nodeId) =>
+      presentedHistoryFrame?.details.get(nodeId) ?? frameState?.detailsByNode[nodeId] ?? null);
   }));
   const layoutRootId = useDesignRuntimeStore((state) =>
     workspaceId && frame
