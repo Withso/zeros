@@ -4,11 +4,14 @@ import { getSetting, setSetting } from "../platform/settings";
 import { LIFECYCLE_STATUSES } from "../shared/lib/workspace-status";
 
 export type SidebarWorkspaceSort = "updated" | "created";
+export type SidebarPlacement = "local" | "cloud";
 
 interface SidebarListPreferences {
   sort: SidebarWorkspaceSort;
   repositoryIdsByOwner: Readonly<Record<string, readonly string[]>>;
   collapsedStatuses: readonly WorkspaceStatus[];
+  /** unified-workspaces: a view preference per owner; at most one placement is hidden. */
+  hiddenPlacementsByOwner: Readonly<Record<string, readonly SidebarPlacement[]>>;
 }
 
 const KEY = "sidebar-list-preferences-v1";
@@ -16,11 +19,18 @@ const MAX_OWNERS = 32;
 const MAX_REPOSITORIES = 256;
 const MAX_ID_LENGTH = 512;
 const EMPTY_IDS: readonly string[] = Object.freeze([]);
+const NO_PLACEMENTS: readonly SidebarPlacement[] = Object.freeze([]);
 const DEFAULTS: SidebarListPreferences = {
   sort: "updated",
   repositoryIdsByOwner: {},
   collapsedStatuses: [],
+  hiddenPlacementsByOwner: {},
 };
+
+function hiddenPlacements(value: unknown): readonly SidebarPlacement[] {
+  const only = Array.isArray(value) && value.length === 1 ? value[0] : null;
+  return only === "local" || only === "cloud" ? [only] : NO_PLACEMENTS;
+}
 const listeners = new Set<() => void>();
 let snapshot: SidebarListPreferences | null = null;
 
@@ -62,6 +72,16 @@ export function getSidebarListPreferences(): SidebarListPreferences {
             .filter(([owner]) => validId(owner))
             .slice(-MAX_OWNERS)
             .map(([owner, ids]) => [owner, repositoryIds(ids)])
+        : [],
+    ),
+    hiddenPlacementsByOwner: Object.fromEntries(
+      value.hiddenPlacementsByOwner &&
+        typeof value.hiddenPlacementsByOwner === "object" &&
+        !Array.isArray(value.hiddenPlacementsByOwner)
+        ? Object.entries(value.hiddenPlacementsByOwner)
+            .filter(([owner, hidden]) => validId(owner) && hiddenPlacements(hidden).length > 0)
+            .slice(-MAX_OWNERS)
+            .map(([owner, hidden]) => [owner, hiddenPlacements(hidden)])
         : [],
     ),
     collapsedStatuses: LIFECYCLE_STATUSES.filter(
@@ -112,6 +132,26 @@ export function setSidebarRepositoryIds(
     ...current,
     repositoryIdsByOwner: Object.fromEntries(entries.slice(-MAX_OWNERS)),
   });
+}
+
+export function sidebarHiddenPlacements(owner: string): readonly SidebarPlacement[] {
+  const owners = getSidebarListPreferences().hiddenPlacementsByOwner;
+  return Object.hasOwn(owners, owner) ? owners[owner] : NO_PLACEMENTS;
+}
+
+/** Hiding both placements would empty the list, so that request shows both. */
+export function setSidebarHiddenPlacements(
+  owner: string,
+  hidden: readonly SidebarPlacement[],
+): void {
+  if (!validId(owner)) return;
+  const next = hidden.length === 1 ? hiddenPlacements(hidden) : NO_PLACEMENTS;
+  const previous = sidebarHiddenPlacements(owner);
+  if (previous.length === next.length && previous[0] === next[0]) return;
+  const current = getSidebarListPreferences();
+  const entries = Object.entries(current.hiddenPlacementsByOwner).filter(([key]) => key !== owner);
+  if (next.length) entries.push([owner, next]);
+  write({ ...current, hiddenPlacementsByOwner: Object.fromEntries(entries.slice(-MAX_OWNERS)) });
 }
 
 export function setSidebarStatusCollapsed(
@@ -167,8 +207,7 @@ export function pruneSidebarOwnerPreferences(
   organizationIds: readonly string[],
 ): void {
   const current = getSidebarListPreferences();
-  const entries = Object.entries(current.repositoryIdsByOwner);
-  const retained = entries.filter(([owner]) => {
+  const keep = ([owner]: [string, unknown]) => {
     try {
       const value: unknown = JSON.parse(owner);
       return (
@@ -179,9 +218,17 @@ export function pruneSidebarOwnerPreferences(
     } catch {
       return true;
     }
-  });
-  if (retained.length !== entries.length) {
-    write({ ...current, repositoryIdsByOwner: Object.fromEntries(retained) });
+  };
+  const entries = Object.entries(current.repositoryIdsByOwner);
+  const retained = entries.filter(keep);
+  const placements = Object.entries(current.hiddenPlacementsByOwner);
+  const retainedPlacements = placements.filter(keep);
+  if (retained.length !== entries.length || retainedPlacements.length !== placements.length) {
+    write({
+      ...current,
+      repositoryIdsByOwner: Object.fromEntries(retained),
+      hiddenPlacementsByOwner: Object.fromEntries(retainedPlacements),
+    });
   }
 }
 

@@ -21,6 +21,7 @@
 // disappears from the navigation while the rest of the group is folded away.
 
 import type { Workspace } from "../platform/git";
+import { isCloudWorkspace } from "../platform/bridge/cloud-workspace-key";
 import type { PendingWorkspaceCreate } from "../state/pending-workspaces";
 import type { Project } from "../state/projects-store";
 import type { SidebarWorkspaceSort } from "../state/sidebar-list-preferences";
@@ -138,6 +139,16 @@ function finiteTimestamp(value: number | null | undefined): number {
 
 /** Project the live workspace union and in-flight creates into sidebar
  * entries. Inputs are never mutated; ordering is deterministic. */
+/** The sidebar's This Mac / Cloud view filter. Returns the same array when nothing is hidden. */
+export function rowsShownForPlacements<T extends { placement?: "local" | "cloud"; path?: string | null; organizationId?: string | null }>(
+  rows: readonly T[],
+  hidden: readonly ("local" | "cloud")[],
+): readonly T[] {
+  if (hidden.length === 0) return rows;
+  const cloud = (row: T) => row.placement === "cloud" || isCloudWorkspace(row.path ?? undefined);
+  return rows.filter((row) => !hidden.includes(cloud(row) ? "cloud" : "local"));
+}
+
 export function buildSidebarWorkspaceEntries(args: {
   filter: SidebarWorkspaceListFilter;
   sort?: SidebarWorkspaceSort;

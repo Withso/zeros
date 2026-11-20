@@ -41,6 +41,8 @@ export function SidebarWorkspaceMenu({
   onGroupingChange,
   onSortChange,
   onRepositoryIdsChange,
+  hiddenPlacements,
+  onHiddenPlacementsChange,
 }: {
   active: boolean;
   projects: readonly Project[];
@@ -50,6 +52,9 @@ export function SidebarWorkspaceMenu({
   onGroupingChange: (value: SidebarWorkspaceListFilter) => void;
   onSortChange: (value: SidebarWorkspaceSort) => void;
   onRepositoryIdsChange: (value: readonly string[]) => void;
+  /** unified-workspaces: This Mac / Cloud, a view preference that starts with both shown. */
+  hiddenPlacements?: readonly ("local" | "cloud")[];
+  onHiddenPlacementsChange?: (value: readonly ("local" | "cloud")[]) => void;
 }) {
   const [open, setOpen] = useState(false);
   const [repoOpen, setRepoOpen] = useState(false);
@@ -86,7 +91,8 @@ export function SidebarWorkspaceMenu({
       .toLocaleLowerCase()
       .includes(search),
   );
-  const filtered = repositoryIds.length > 0;
+  const placementFiltered = (hiddenPlacements?.length ?? 0) > 0;
+  const filtered = repositoryIds.length > 0 || placementFiltered;
 
   return (
     <DropdownMenu
@@ -112,7 +118,10 @@ export function SidebarWorkspaceMenu({
                 "opacity-0 group-hover/section:opacity-100 focus-visible:opacity-100",
             )}
             label="Filter workspaces"
-            aria-description={filtered ? "Repository filter active" : undefined}
+            aria-description={
+              repositoryIds.length > 0 ? "Repository filter active"
+                : placementFiltered ? "Placement filter active" : undefined
+            }
             data-filtered={filtered || undefined}
           >
             <ListFilter strokeWidth={1.5} />
@@ -157,6 +166,29 @@ export function SidebarWorkspaceMenu({
             className="w-40"
             aria-label="Workspace filters"
           >
+            {hiddenPlacements && onHiddenPlacementsChange && (
+              <>
+                {(["local", "cloud"] as const).map((placement) => {
+                  const shown = !hiddenPlacements.includes(placement);
+                  const other = placement === "local" ? "cloud" : "local";
+                  return (
+                    <DropdownMenuCheckboxItem
+                      key={placement}
+                      checked={shown}
+                      // The last shown placement stays: hiding both would empty the list.
+                      disabled={shown && hiddenPlacements.includes(other)}
+                      onSelect={(event) => event.preventDefault()}
+                      onCheckedChange={(checked) =>
+                        onHiddenPlacementsChange(checked ? [] : [placement])
+                      }
+                    >
+                      {placement === "local" ? "This Mac" : "Cloud"}
+                    </DropdownMenuCheckboxItem>
+                  );
+                })}
+                <DropdownMenuSeparator />
+              </>
+            )}
             <DropdownMenuSub
               open={repoOpen}
               onOpenChange={(value) => {

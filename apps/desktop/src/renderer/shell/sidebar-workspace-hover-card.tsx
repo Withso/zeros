@@ -1,5 +1,6 @@
 import { useEffect } from "react";
-import { Archive, Cloud, FolderOpen, GitCommitVertical } from "lucide-react";
+import { Archive, Cloud, FolderOpen, GitCommitVertical, Laptop } from "lucide-react";
+import { localWorkShowsEverywhere } from "../features/team/organization-capabilities";
 import { PrPill } from "./pr/pr-pill";
 import { usePrIslandKind } from "./pr/pr-island-state-store";
 import { workspacePrTone } from "./workspace-glyph";
@@ -58,6 +59,7 @@ export function SidebarWorkspaceHoverCard({
     if (chatId && sessions) void sessions.hydrateChat(chatId).catch(() => {});
   }, [chatId, sessions]);
   const cloud = isCloudWorkspace(workspace.path);
+  const unified = localWorkShowsEverywhere();
   const folder = isLocalMainWorkspace(workspace);
   const { remoteUrl } = useRepositoryRemote(workspace.repoRoot, project?.originUrl ?? null, !cloud && !folder);
   const github = isGithubDotComRemote(remoteUrl);
@@ -91,7 +93,11 @@ export function SidebarWorkspaceHoverCard({
   return (
     <div className="flex min-w-0 flex-col gap-2" data-workspace-preview={workspace.id}>
       <div className="text-fg3 flex min-w-0 items-center gap-2 text-xs">
-        <span className="shrink-0 font-mono" title={workspace.id}>
+        <span className="flex shrink-0 items-center gap-1 font-mono" title={workspace.id}>
+          {/* Local and cloud numbers count separately, so the number carries its placement. */}
+          {unified && (cloud
+            ? <Cloud className="size-3.5 shrink-0" aria-label="Cloud" />
+            : <Laptop className="size-3.5 shrink-0" aria-label="This Mac" />)}
           {sidebarWorkspaceDisplayId(workspace)}
         </span>
         {(changeLines.additions > 0 || changeLines.deletions > 0) && (
@@ -101,7 +107,7 @@ export function SidebarWorkspaceHoverCard({
           </span>
         )}
         <span className="ml-auto flex min-w-0 items-center gap-1.5" title={repoName}>
-          {cloud && <Cloud className="size-3.5 shrink-0" aria-label="Cloud workspace" />}
+          {cloud && !unified && <Cloud className="size-3.5 shrink-0" aria-label="Cloud workspace" />}
           {project && <RepositoryIcon project={project} className={REPOSITORY_ICON_CHIP_CLS} />}
           <span className="truncate">{repoName}</span>
         </span>
