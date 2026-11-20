@@ -51,7 +51,7 @@ describe("Dev browser callback ownership", () => {
     expect(registerClient.mock.calls[0]?.[0]).toBe("zeros-dev");
   });
 
-  it.each(["alpha", "beta", "stable"])("preserves %s protocol ownership", async channel => {
+  it.each(["alpha", "stable"])("preserves %s protocol ownership", async channel => {
     currentChannel.mockReturnValue(channel);
     await deepLink.openDesktopAuthBrowser("https://auth.example.test/authorize");
     expect(registerClient).not.toHaveBeenCalled();

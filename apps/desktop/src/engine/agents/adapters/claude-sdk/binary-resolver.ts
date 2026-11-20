@@ -2,7 +2,7 @@
 // Claude Code CLI resolution for the Agent SDK (the agent run path).
 // ──────────────────────────────────────────────────────────
 //
-// WHY THIS FILE EXISTS — the "works in dev, broken in Beta/Prod" bug class.
+// WHY THIS FILE EXISTS — the "works in dev, broken when packaged" bug class.
 //
 // `@anthropic-ai/claude-agent-sdk` ships NO `cli.js`. Its `files` list is just
 // sdk.mjs + bridge.mjs + d.ts + manifest.json; the actual `claude` executable

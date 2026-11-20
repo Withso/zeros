@@ -10,7 +10,7 @@ vi.mock("../runtime", () => ({
   nativeListen: state.listen,
   isNativeRuntime: () => state.native,
 }));
-vi.mock("../../config/release-channel", () => ({ CHANNEL: "beta" }));
+vi.mock("../../config/release-channel", () => ({ CHANNEL: "alpha" }));
 
 beforeEach(() => {
   vi.resetModules();
@@ -27,7 +27,7 @@ describe("Local link native boundary", () => {
     const off = await onLocalNavigation(handler);
     openLocalLink("zeros-dev://chat/clicked");
     await vi.waitFor(() => expect(handler).toHaveBeenCalledExactlyOnceWith({ scheme: "zeros-dev", kind: "chat", id: "clicked" }));
-    openLocalLink("zeros-beta://chat/foreign");
+    openLocalLink("zeros-alpha://chat/foreign");
     await Promise.resolve();
     expect(handler).toHaveBeenCalledTimes(1);
     off();
@@ -50,7 +50,7 @@ describe("Local link native boundary", () => {
     off();
   });
 
-  it.each(["stable", "alpha", "beta", "dev"])(
+  it.each(["stable", "alpha", "dev"])(
     "copies main's authoritative %s channel",
     async (channel) => {
       state.invoke.mockResolvedValue({ channel });
@@ -66,7 +66,7 @@ describe("Local link native boundary", () => {
     state.invoke.mockRejectedValue(new Error("older shell"));
     expect(
       await (await import("../local-links")).resolveLocalLinkScheme(),
-    ).toBe("zeros-beta");
+    ).toBe("zeros-alpha");
   });
 
   it("subscribes before consuming a pending link and rejects foreign or malformed events", async () => {
@@ -76,9 +76,9 @@ describe("Local link native boundary", () => {
       return vi.fn();
     });
     state.invoke.mockImplementation(async (name) => {
-      if (name === "app_info") return { channel: "beta" };
+      if (name === "app_info") return { channel: "alpha" };
       expect(listener).toBeTypeOf("function");
-      return "zeros-beta://chat/one";
+      return "zeros-alpha://chat/one";
     });
     const handler = vi.fn();
     const off = await (
@@ -86,14 +86,14 @@ describe("Local link native boundary", () => {
     ).onLocalNavigation(handler);
     await vi.waitFor(() =>
       expect(handler).toHaveBeenCalledWith({
-        scheme: "zeros-beta",
+        scheme: "zeros-alpha",
         kind: "chat",
         id: "one",
       }),
     );
     handler.mockClear();
     listener("zeros://chat/one");
-    listener("zeros-beta://chat/one?start=true");
+    listener("zeros-alpha://chat/one?start=true");
     listener({ id: "one" });
     await Promise.resolve();
     expect(handler).not.toHaveBeenCalled();
@@ -101,7 +101,7 @@ describe("Local link native boundary", () => {
     expect(state.invoke).toHaveBeenLastCalledWith("local_navigation_ready", {
       ready: false,
     });
-    listener("zeros-beta://chat/two");
+    listener("zeros-alpha://chat/two");
     await Promise.resolve();
     expect(handler).not.toHaveBeenCalled();
   });

@@ -36,7 +36,7 @@ describe("authenticated release artifact handoff", () => {
   ])("refuses untrusted parent workflow evidence %j", async patch => {
     expect(() => validateServicesReceipt(serviceReceipt(), { ...run, ...patch }, config, "alpha", [job("services")])).toThrow();
   });
-  it.each([{ channel: "beta" }, { sourceSha: "c".repeat(40) }, { repository: "other/zeros" }, { branch: "release/1.2.3" }, { runId: "124" }, { runAttempt: "4" }])(
+  it.each([{ channel: "production" }, { channel: "beta" }, { sourceSha: "c".repeat(40) }, { repository: "other/zeros" }, { branch: "release/1.2.3" }, { runId: "124" }, { runAttempt: "4" }])(
     "refuses another channel, source, run or future attempt %j", async patch => {
       expect(() => validateServicesReceipt({ ...serviceReceipt(), ...patch }, run, config, "alpha", [job("services")])).toThrow();
     });
@@ -48,7 +48,8 @@ describe("authenticated release artifact handoff", () => {
   it("requires all channel surfaces, WorkOS proof, migration execution and the matching API", () => {
     const services = serviceReceipt();
     for (const patch of [{ pages: services.pages.slice(0, 1) }, { workos: undefined },
-      { migration: { ...services.migration, mode: "plan" } }, { backend: { ...services.backend, channel: "beta" } }])
+      { migration: { ...services.migration, mode: "plan" } }, { backend: { ...services.backend, channel: "production" } },
+      { backend: { ...services.backend, channel: "beta" } }])
       expect(() => validateServicesReceipt({ ...services, ...patch }, run, config, "alpha", [job("services")])).toThrow();
   });
 });

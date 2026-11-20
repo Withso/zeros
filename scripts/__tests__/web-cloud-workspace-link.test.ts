@@ -58,7 +58,7 @@ describe("the web workspace page's Open in Zeros link", () => {
     expect([...SCHEMES].sort()).toEqual([...LOCAL_LINK_SCHEMES].sort());
   });
 
-  it.each(["alpha", "beta", "production", undefined] as const)(
+  it.each(["alpha", "production", undefined] as const)(
     "is the desktop's cloud workspace link on %s",
     async (environment) => {
       const appLink = deploymentAppLink(environment);
@@ -96,7 +96,7 @@ describe("the web's numbered workspace page path", () => {
 describe("the web's numbered page opens the desktop's numbered link", () => {
   const address = { owner: "acme-labs", number: 310 };
 
-  it.each(["alpha", "beta", "production", undefined] as const)(
+  it.each(["alpha", "production", undefined] as const)(
     "is the desktop's workspace and chat link on %s",
     (environment) => {
       const appLink = deploymentAppLink(environment);
@@ -116,4 +116,22 @@ describe("the web's numbered page opens the desktop's numbered link", () => {
       expect(workspacePageSession(new URLSearchParams({ session })).ok).toBe(isWorkspaceLinkSession(session));
     },
   );
+});
+
+describe("a stale deployment binding", () => {
+  it("opens no app at a workspace address", async () => {
+    const { onRequestGet } = await import("../../apps/web/functions/[org]/w/[number].ts");
+    const call = (ZEROS_DEPLOY_ENV: string) =>
+      (onRequestGet as unknown as (context: unknown) => Response)({
+        request: new Request("https://app.example.test/acme/w/7?session=chat-1"),
+        params: { org: "acme", number: "7" },
+        env: { ZEROS_DEPLOY_ENV },
+      });
+    const stale = call("beta");
+    expect(stale.status).toBe(503);
+    expect(await stale.text()).not.toMatch(/zeros(?:-[a-z]+)?:\/\//);
+    const alpha = call("alpha");
+    expect(alpha.status).toBe(200);
+    expect(await alpha.text()).toContain("zeros-alpha://acme/w/7?session=chat-1");
+  });
 });

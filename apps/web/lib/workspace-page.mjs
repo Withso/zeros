@@ -1,6 +1,6 @@
 import {invitationResponseHeaders,invitationPageShell} from "./invite-page.mjs";
 const UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const APP_LINK=/^zeros(?:-alpha|-beta|-dev)?:\/\/$/;
+const APP_LINK=/^zeros(?:-alpha|-dev)?:\/\/$/;
 const OWNER=/^[a-z0-9](?:[a-z0-9-]{0,98}[a-z0-9])?$/;
 const NUMBER=/^[1-9][0-9]{0,9}$/;
 /** Owner segments no organization's page uses (web routes, Local, link

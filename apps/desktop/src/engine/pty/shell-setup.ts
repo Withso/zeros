@@ -197,6 +197,8 @@ export function buildPtyEnv(opts?: {
   delete env.ZEROS_INSTANCE;
   delete env.ZEROS_INSTANCE_NAME;
   delete env.ZEROS_LOCAL_DEVELOPMENT;
+  // The launcher's layout decision for that same parent identity.
+  delete env.ZEROS_LOCAL_LAYOUT;
   // A nested checkout resolves its own backend/auth profile and credentials.
   delete env.ZEROS_DEV_ENVIRONMENT;
   delete env.ZEROS_DEV_AUTH_PROFILE;

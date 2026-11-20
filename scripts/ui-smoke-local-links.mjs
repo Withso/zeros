@@ -133,7 +133,7 @@ export async function runLocalLinksSmoke({ page, harnessBase, check }) {
     "zeros-dev://chat/codex",
   );
   await expect(page.getByTestId("agent-prose")).toContainText(
-    "zeros-beta://chat/other",
+    "zeros-alpha://chat/other",
   );
   await expect(page.locator("button button")).toHaveCount(0);
   for (const id of ["sent-from", "steered-from", "saved-from", "short-from"]) {

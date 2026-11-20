@@ -4,7 +4,7 @@ name: Preflight
 # on release-branch pushes, and on merge-queue commits. Pull
 # requests use selected required jobs in `ci.yml` ("CI") and call this graph
 # for the complementary workloads, including every unselected browser shard.
-# Releases read this workflow by name and path (scripts/release/ci.ts): Beta and Production
+# Releases read this workflow by name and path (scripts/release/ci.ts): Production
 # require a successful Preflight and CodeQL run on their exact release commit.
 # Automatic Alpha can opt in to the successful alpha-gate job alone while the
 # other jobs finish.

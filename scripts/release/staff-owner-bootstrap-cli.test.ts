@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import type pg from "pg";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { betaStaffBootstrapMain } from "./beta-staff-bootstrap-cli";
+import { staffOwnerBootstrapMain } from "./staff-owner-bootstrap-cli";
 
 const descriptorProbe = vi.hoisted(() => ({ file: null as string | null, afterStat: null as (() => Promise<void>) | null,
   readLengths: [] as number[], closed: 0, failure: null as "read" | "close" | null }));
@@ -55,7 +55,8 @@ afterEach(async () => {
   await Promise.all(directories.splice(0).map(directory => rm(directory, { recursive: true, force: true })));
 });
 
-async function fixture(channel: "beta" | "production" = "beta") {
+async function fixture() {
+  const channel = "production";
   const directory = await mkdtemp(path.join(os.tmpdir(), `zeros-${channel}-staff-cli-`)); directories.push(directory);
   const eventPath = path.join(directory, "event.json");
   await writeFile(eventPath, JSON.stringify({ repository: { full_name: "example/zeros", fork: false },
@@ -69,7 +70,7 @@ async function fixture(channel: "beta" | "production" = "beta") {
     PLANETSCALE_SERVICE_TOKEN_ID: "synthetic-token-id", PLANETSCALE_SERVICE_TOKEN: "synthetic-provider-token",
     STAFF_BOOTSTRAP_MODE: "plan", STAFF_BOOTSTRAP_CONFIRM: `zeros-control-plane-${channel}`, STAFF_SUBJECT_USER_ID: subject,
     STAFF_ACTOR_USER_ID: actor, STAFF_OWNER_ORGANIZATION_ID: organization, STAFF_EXPECTED_EMAIL: "owner@example.test",
-    STAFF_REASON: "Bootstrap the reviewed active Beta organization owner.", GH_TOKEN: "synthetic-github-token",
+    STAFF_REASON: "Bootstrap the reviewed active Production organization owner.", GH_TOKEN: "synthetic-github-token",
     STAFF_BOOTSTRAP_INTENT_ARTIFACT_ID: "456" };
   const approvalRun = { id: 123, run_attempt: 1, head_sha: sourceSha, head_branch: "release/1.2.3", event: "workflow_dispatch",
     path: ".github/workflows/staff-owner-bootstrap.yml", actor: { login: "synthetic-operator" },
@@ -78,7 +79,7 @@ async function fixture(channel: "beta" | "production" = "beta") {
     status: "completed", conclusion: "success", steps: [{ name: "Record the approved staff bootstrap", status: "completed", conclusion: "success" }] };
   const state = { exists: false, checkoutSha: sourceSha, branchSha: sourceSha, artifactSha: sourceSha, artifactExpired: false,
     artifactRun: 123, artifactName: `${channel}-staff-owner-intent-123-1`, preflight: "success", approvalRun, approvalJobs: [approvalJob],
-    subjectRole: (channel === "production" ? "developer" : null) as string | null, revision: channel === "production" ? 2 : 1 };
+    subjectRole: "developer" as string | null, revision: 2 };
   const calls: string[] = [];
   const role = { id: "temporary-role", name: `zeros-${channel}-staff-123`, branch: { id: "main-branch", name: "main" },
     actor: { id: "synthetic-token-id" }, username: "synthetic_owner.mainbranch", password: "synthetic-one-time-password",
@@ -125,16 +126,16 @@ async function fixture(channel: "beta" | "production" = "beta") {
     return { rows: sql.includes("owns_users") ? [{ principal: "postgres", owns_users: true, owns_audit: true, can_update_staff: true, can_write_audit: true }]
       : sql.includes("FROM organizations") ? [{ is_personal: false, lifecycle_status: "active", deleted_at: null, role: "owner" }]
       : sql.includes("FROM users") ? [{ id: subject, email: "owner@example.test", staff_role: state.subjectRole, auth_status: "active", auth_revision: state.revision },
-        { id: actor, email: "actor@example.test", staff_role: channel === "production" ? "platform_owner" : null,
-          auth_status: "active", auth_revision: channel === "production" ? 2 : 1 }] : [] };
+        { id: actor, email: "actor@example.test", staff_role: "platform_owner",
+          auth_status: "active", auth_revision: 2 }] : [] };
   }) };
   const pool = { connect: vi.fn(async () => client), end: vi.fn(async () => {}) } as unknown as pg.Pool;
   const options = { cwd: directory, fetch: fetcher as typeof fetch, command: vi.fn(async () => state.checkoutSha), createPool: vi.fn(() => pool) };
   return { directory, eventPath, env, state, calls, client, pool, options,
-    invoke: (args: string[]) => betaStaffBootstrapMain(args, env, options) };
+    invoke: (args: string[]) => staffOwnerBootstrapMain(args, env, options) };
 }
 
-describe("Beta staff bootstrap real CLI boundary", () => {
+describe("staff owner bootstrap real CLI boundary", () => {
   it("reads the checked descriptor even when the pathname is substituted after metadata validation", async () => {
     const test = await fixture(); descriptorProbe.file = test.eventPath;
     descriptorProbe.afterStat = async () => {
@@ -162,7 +163,7 @@ describe("Beta staff bootstrap real CLI boundary", () => {
     if (boundary === "metadata") descriptorProbe.afterStat = async () => { throw new Error("Synthetic private filesystem detail"); };
     if (boundary === "read" || boundary === "close") descriptorProbe.failure = boundary;
     if (boundary === "parse") await writeFile(test.eventPath, "Synthetic private filesystem detail");
-    await expect(test.invoke(["--prepare"])).rejects.toThrow(/^Beta staff bootstrap configuration failed$/);
+    await expect(test.invoke(["--prepare"])).rejects.toThrow(/^Production staff bootstrap configuration failed$/);
     expect(descriptorProbe.closed).toBe(1);
     expect(test.calls).toEqual([]);
   });
@@ -191,9 +192,9 @@ describe("Beta staff bootstrap real CLI boundary", () => {
     const test = await fixture(), result = await test.invoke(["--prepare"]);
     expect(result.role.phase).toBe("planned");
     expect(test.calls.every(call => call.startsWith("GET "))).toBe(true);
-    expect(result.target.databaseId).toBe("beta-database");
+    expect(result.target.databaseId).toBe("production-database");
     expect(result.target.branchId).toBe("main-branch");
-    const target = path.join(test.directory, ".context/release/beta-staff-bootstrap-intent.json");
+    const target = path.join(test.directory, ".context/release/production-staff-bootstrap-intent.json");
     const bytes = await readFile(target, "utf8");
     expect((await stat(target)).mode & 0o777).toBe(0o600);
     for (const forbidden of ["owner@example.test", "synthetic-provider-token", "synthetic-token-id", "synthetic-github-token", test.env.STAFF_REASON!]) {
@@ -223,9 +224,9 @@ describe("Beta staff bootstrap real CLI boundary", () => {
     const result = await test.invoke(["--run"]);
     expect(result.staff?.state).toBe("planned"); expect(result.role.deleted).toBe(true);
     expect(test.pool.end).toHaveBeenCalledOnce();
-    const resultPath = path.join(test.directory, ".context/release/beta-staff-bootstrap-result.json");
+    const resultPath = path.join(test.directory, ".context/release/production-staff-bootstrap-result.json");
     expect(JSON.parse(await readFile(resultPath, "utf8"))).toEqual(result);
-    expect((await readdir(path.dirname(resultPath))).sort()).toEqual(["beta-staff-bootstrap-intent.json", "beta-staff-bootstrap-result.json"]);
+    expect((await readdir(path.dirname(resultPath))).sort()).toEqual(["production-staff-bootstrap-intent.json", "production-staff-bootstrap-result.json"]);
     await expect(test.invoke(["--run"])).rejects.toThrow("recovery");
     expect(test.calls.filter(call => call.startsWith("POST "))).toHaveLength(1);
   });
@@ -250,7 +251,7 @@ describe("Beta staff bootstrap real CLI boundary", () => {
 
 describe("Production current-run human approval proof", () => {
   it("requires an authenticated successful approval job before Production parent preparation", async () => {
-    const test = await fixture("production"), result = await test.invoke(["--prepare"]);
+    const test = await fixture(), result = await test.invoke(["--prepare"]);
     expect(result.source.channel).toBe("production"); expect(result.target.databaseId).toBe("production-database");
     expect(result.role.name).toBe("zeros-production-staff-123"); expect(result.version).toBe(1);
     const approval = test.calls.findIndex(call => call.includes("/attempts/1/jobs"));
@@ -271,7 +272,7 @@ describe("Production current-run human approval proof", () => {
     expect(descriptorProbe.closed).toBe(1);
   });
   it.each(["missing", "failure", "skipped", "cancelled", "pending", "step", "duplicate"])("refuses %s approval before any Production provider access", async boundary => {
-    const test = await fixture("production");
+    const test = await fixture();
     if (boundary === "missing") test.state.approvalJobs = [];
     else if (boundary === "duplicate") test.state.approvalJobs.push({ ...test.state.approvalJobs[0], id: 790 });
     else if (boundary === "pending") test.state.approvalJobs[0].status = "in_progress";
@@ -282,7 +283,7 @@ describe("Production current-run human approval proof", () => {
     await expect(stat(path.join(test.directory, ".context/release/production-staff-bootstrap-intent.json"))).rejects.toThrow();
   });
   it.each(["run", "attempt", "sha", "branch", "workflow", "event", "actor", "repository", "fork", "head-repository", "job-run", "job-attempt", "job-sha"])("refuses an approval bound to another %s", async boundary => {
-    const test = await fixture("production"), run = test.state.approvalRun, job = test.state.approvalJobs[0];
+    const test = await fixture(), run = test.state.approvalRun, job = test.state.approvalJobs[0];
     if (boundary === "run") run.id = 124;
     if (boundary === "attempt") run.run_attempt = 2;
     if (boundary === "sha") run.head_sha = "b".repeat(40);
@@ -300,14 +301,14 @@ describe("Production current-run human approval proof", () => {
     expect(test.calls.every(trustedGithubRead)).toBe(true);
   });
   it("reads complete bounded job pages rather than treating a partial list as approval", async () => {
-    const test = await fixture("production"), approval = test.state.approvalJobs[0];
+    const test = await fixture(), approval = test.state.approvalJobs[0];
     test.state.approvalJobs = Array.from({ length: 100 }, (_, index) => ({ ...approval, id: 800 + index, name: `Synthetic other job ${index}` }));
     test.state.approvalJobs.push(approval);
     expect((await test.invoke(["--prepare"])).source.channel).toBe("production");
     expect(test.calls.some(call => call.includes("page=2"))).toBe(true);
   });
   it.each(["artifact", "journal"])("rejects a cross-channel %s before Production role access", async boundary => {
-    const test = await fixture("production"); await test.invoke(["--prepare"]); test.calls.length = 0;
+    const test = await fixture(); await test.invoke(["--prepare"]); test.calls.length = 0;
     if (boundary === "artifact") test.state.artifactName = "beta-staff-owner-intent-123-1";
     else {
       const file = path.join(test.directory, ".context/release/production-staff-bootstrap-intent.json");
@@ -318,13 +319,13 @@ describe("Production current-run human approval proof", () => {
     expect(test.options.createPool).not.toHaveBeenCalled();
   });
   it("rechecks approval at run time instead of trusting prepare or an input flag", async () => {
-    const test = await fixture("production"); await test.invoke(["--prepare"]); test.calls.length = 0;
+    const test = await fixture(); await test.invoke(["--prepare"]); test.calls.length = 0;
     test.env.STAFF_PRODUCTION_APPROVED = "true"; test.state.approvalJobs[0].conclusion = "skipped";
     await expect(test.invoke(["--run"])).rejects.toThrow("approval"); expect(test.calls.every(trustedGithubRead)).toBe(true);
     expect(test.options.createPool).not.toHaveBeenCalled();
   });
   it.each(["checkout", "ci", "branch"])("requires Production's actual current %s proof before provider preparation", async boundary => {
-    const test = await fixture("production");
+    const test = await fixture();
     if (boundary === "checkout") test.state.checkoutSha = "b".repeat(40);
     if (boundary === "ci") test.state.preflight = "failure";
     if (boundary === "branch") test.state.branchSha = "b".repeat(40);
@@ -332,7 +333,7 @@ describe("Production current-run human approval proof", () => {
     expect(test.calls.every(trustedGithubRead)).toBe(true); expect(test.options.createPool).not.toHaveBeenCalled();
   });
   it("rechecks approval after inventory and withholds Production role creation when proof changes", async () => {
-    const test = await fixture("production"); await test.invoke(["--prepare"]); test.calls.length = 0;
+    const test = await fixture(); await test.invoke(["--prepare"]); test.calls.length = 0;
     const fetcher = test.options.fetch;
     test.options.fetch = async (url, init) => {
       const result = await fetcher(url, init), target = new URL(String(url));
@@ -345,7 +346,7 @@ describe("Production current-run human approval proof", () => {
     expect(test.calls.some(call => call.startsWith("POST "))).toBe(false); expect(test.options.createPool).not.toHaveBeenCalled();
   });
   it("cleans the owned Production role when source drifts after creation, without a staff grant", async () => {
-    const test = await fixture("production"); test.env.STAFF_BOOTSTRAP_MODE = "apply"; await test.invoke(["--prepare"]);
+    const test = await fixture(); test.env.STAFF_BOOTSTRAP_MODE = "apply"; await test.invoke(["--prepare"]);
     const fetcher = test.options.fetch;
     test.options.fetch = async (url, init) => {
       const result = await fetcher(url, init);
@@ -358,7 +359,7 @@ describe("Production current-run human approval proof", () => {
     expect(test.calls.filter(call => call.startsWith("DELETE "))).toHaveLength(1); expect(test.state.exists).toBe(false);
   });
   it("applies one audited Production grant while preserving the existing owner and closes the owned role", async () => {
-    const test = await fixture("production"); test.env.STAFF_BOOTSTRAP_MODE = "apply";
+    const test = await fixture(); test.env.STAFF_BOOTSTRAP_MODE = "apply";
     await test.invoke(["--prepare"]); const result = await test.invoke(["--run"]);
     expect(result.staff?.state).toBe("changed"); expect(result.staff?.accountRevision).toBe(3); expect(result.role.deleted).toBe(true);
     expect(test.client.query.mock.calls.filter(([sql]) => sql.startsWith("UPDATE users"))).toEqual([[expect.any(String), [subject, "platform_owner"]]]);
@@ -372,10 +373,10 @@ describe("Production current-run human approval proof", () => {
     await expect(test.invoke(["--run"])).rejects.toThrow("recovery");
     expect(test.calls.filter(call => call.startsWith("POST "))).toHaveLength(1);
   });
-  it("retains Beta version-1 paths and requires no Production approval API for Beta", async () => {
-    const test = await fixture(); await test.invoke(["--prepare"]); const result = await test.invoke(["--run"]);
-    expect(result.version).toBe(1); expect(result.source.channel).toBe("beta"); expect(result.role.name).toBe("zeros-beta-staff-123");
-    expect(test.calls.some(call => call.includes("/attempts/1"))).toBe(false);
-    expect((await readdir(path.join(test.directory, ".context/release"))).sort()).toEqual(["beta-staff-bootstrap-intent.json", "beta-staff-bootstrap-result.json"]);
+  it("refuses a retired Beta dispatch before any approval or provider read", async () => {
+    const test = await fixture();
+    Object.assign(test.env, { RELEASE_CHANNEL: "beta", PLANETSCALE_DATABASE: "zeros-control-plane-beta", STAFF_BOOTSTRAP_CONFIRM: "zeros-control-plane-beta" });
+    await expect(test.invoke(["--prepare"])).rejects.toThrow(/^Production staff bootstrap configuration failed$/);
+    expect(test.calls).toEqual([]); expect(test.options.createPool).not.toHaveBeenCalled();
   });
 });

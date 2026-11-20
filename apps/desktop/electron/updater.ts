@@ -28,13 +28,12 @@ const MIN_OPPORTUNISTIC_CHECK_GAP_MS = 60 * 1000;
 const STAGED_REPLACEMENT_HOLD_MS = 60 * 60 * 1000;
 // GitHub Releases is the serving layer. `/releases/latest/download/<asset>`
 // always resolves to whatever release is marked Latest (release-promote.yml passes
-// `--latest`; prereleases never qualify), and the rolling `alpha` / `beta` / `rc`
-// tags give the pre-release channels and Production candidates a stable URL.
+// `--latest`; prereleases never qualify), and the rolling `alpha` / `rc`
+// tags give the pre-release channel and Production candidates a stable URL.
 const RELEASES = "https://github.com/Withso/zeros/releases";
 // Raw feed metadata for the staged-update preflight below (no cache-busting
 // query, so GitHub's CDN can serve repeated polls).
 const STABLE_FEED_METADATA_URL = `${RELEASES}/latest/download/latest-mac.yml`;
-const BETA_FEED_METADATA_URL = `${RELEASES}/download/beta/beta-mac.yml`;
 const ALPHA_FEED_METADATA_URL = `${RELEASES}/download/alpha/alpha-mac.yml`;
 
 /** Pin generic feeds per channel: the GitHub provider also accepts stable tags,
@@ -57,12 +56,6 @@ const UPDATER_FEED_BY_CHANNEL: Record<
     metadataUrl: ALPHA_FEED_METADATA_URL,
     url: `${RELEASES}/download/alpha?static=1`,
     channel: "alpha",
-    allowDowngrade: false,
-  },
-  beta: {
-    metadataUrl: BETA_FEED_METADATA_URL,
-    url: `${RELEASES}/download/beta?static=1`,
-    channel: "beta",
     allowDowngrade: false,
   },
   stable: {
@@ -160,7 +153,7 @@ interface ParsedVersion {
   prerelease: Array<number | string>;
 }
 
-/** Parse the subset of SemVer used by stable and beta release feeds. */
+/** Parse the subset of SemVer used by stable and prerelease feeds. */
 function parseVersion(value: string): ParsedVersion | null {
   const normalized = value.trim().replace(/^v/, "").split("+", 1)[0];
   const [corePart, prereleasePart] = normalized.split("-", 2);
@@ -403,8 +396,8 @@ function checkForNewerThanStaged(reason: string, force = false): void {
 /** Whether THIS build has a working auto-update source at all.
  *
  *  False for dev (nothing to update) and for any channel whose
- *  UPDATER_FEED_BY_CHANNEL entry is null — currently only dev; Alpha and Beta both
- *  have live feeds. This must gate EVERY entry point, not just the scheduler: the
+ *  UPDATER_FEED_BY_CHANNEL entry is null — currently only dev; Alpha has a live
+ *  feed. This must gate EVERY entry point, not just the scheduler: the
  *  `-c.publish.url` override bakes a channel URL into the packaged
  *  app-update.yml, so electron-updater would happily poll that prefix on its own
  *  and 404 on every attempt — the 5-minute interval plus every window focus and
@@ -541,7 +534,7 @@ export function setupUpdater(): void {
   if (wired) return;
   wired = true;
 
-  // Dev / unpackaged builds, and any channel with no feed (Alpha, Beta): no
+  // Dev / unpackaged builds, and any channel with no feed: no
   // meaningful update source, so wire NOTHING — no interval, no focus/resume
   // triggers, no event handlers. One info line so a field log says why the app
   // never self-updates, instead of leaving it a mystery.
@@ -593,8 +586,8 @@ export function setupUpdater(): void {
   // the zip filenames inside it against the same base — exactly the assets each
   // release workflow uploads, and nothing else. electron-updater's GitHub PROVIDER
   // remains unusable for this: its channel filter also accepts stable tags, so it
-  // 404s on beta-mac.yml under a stable tag and, with allowDowngrade, tries to swap
-  // Beta for the older prod build.
+  // 404s on alpha-mac.yml under a stable tag and, with allowDowngrade, tries to swap
+  // Alpha for the older prod build.
   const feed = UPDATER_FEED_BY_CHANNEL[channel()];
   if (feed && channel() !== "stable") {
     autoUpdater.setFeedURL({
@@ -716,7 +709,7 @@ export function setupUpdater(): void {
  *                date". The main-owned scheduler catches its own failures, so
  *                letting this reject never surfaces UI for an unattended check. */
 export const updaterCheck: CommandHandler = async () => {
-  // Feedless channels (Alpha, Beta) return null, i.e. "no update available" —
+  // Feedless channels return null, i.e. "no update available" —
   // the same shape as an up-to-date stable. Polling here would 404 against a
   // prefix that was never populated.
   if (!updaterEnabled()) return null;
@@ -785,7 +778,7 @@ export const systemIdleTime: CommandHandler = () => powerMonitor.getSystemIdleTi
 export const updaterRequire: CommandHandler = (args) => requireClientUpgrade(args);
 /** `updater_release_candidates` — the renderer reports the effective staff opt-in
  * (staff role AND the Internal flag) once the role is known. Stable builds only:
- * Alpha, Beta and Dev have their own feeds. Turning it off never downgrades. */
+ * Alpha and Dev have their own feeds. Turning it off never downgrades. */
 export const updaterReleaseCandidates: CommandHandler = (args) => {
   const enabled = (args as { enabled?: unknown } | undefined)?.enabled;
   if (typeof enabled !== "boolean") throw new Error("Invalid release candidate choice");

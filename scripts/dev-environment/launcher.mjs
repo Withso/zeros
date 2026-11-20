@@ -17,6 +17,7 @@ import { ensureDevAuthEnvironment } from "../dev-auth-profile.mjs";
 import { cloudSeedMessage, cloudSeedNeeded, recordCloudSeed } from "./cloud-local-seed-state.mjs";
 import { REBOOT_RECOVERED, currentBoot, recoverLaunchAfterReboot } from "./reboot-recovery.mjs";
 import { resolveLocalRuntime } from "./cloud-local-runtime.mjs";
+import { prepareAlphaLaunch } from "../alpha-instance.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 // `backend` is the former headless action; Zeros Dev now always runs headless.
@@ -213,11 +214,25 @@ async function start(workspace, profile) {
 
 async function main() {
   if (action === "alpha") {
-    const auth = await ensureDevAuthEnvironment({ processEnv: {} });
-    if (auth.issue || auth.source === "none") throw new Error("A valid Alpha public auth profile is required");
-    const env = { ...systemEnvironment(), ...auth.env, ZEROS_DEV: "1", ZEROS_CLOUD_WORKSPACES_ENABLED: "true" };
-    await run("pnpm", ["electron:dev:prep"], { cwd: root, env, inherit: true, timeout: 300_000 });
-    await run(process.execPath, [path.join(root, "scripts/dev-instance.mjs"), watch ? "--watch" : "--run-only"], { cwd: root, env, inherit: true, timeout: 12 * 3600_000 });
+    // One hosted Dev profile serves every checkout, and Local shares this
+    // checkout's builds: refuse a second launch before any auth or build work.
+    const release = prepareAlphaLaunch({ root });
+    // The locks cover the whole stack: stop the child groups on our signals
+    // and release only after they have exited.
+    const controller = new AbortController();
+    const stop = () => controller.abort(new Error("Development shutdown requested"));
+    for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) process.on(sig, stop);
+    try {
+      const auth = await ensureDevAuthEnvironment({ processEnv: {} });
+      if (auth.issue || auth.source === "none") throw new Error("A valid Alpha public auth profile is required");
+      const env = { ...systemEnvironment(), ...auth.env, ZEROS_DEV: "1", ZEROS_CLOUD_WORKSPACES_ENABLED: "true" };
+      await run("pnpm", ["electron:dev:prep"], { cwd: root, env, inherit: true, timeout: 300_000, signal: controller.signal });
+      await run(process.execPath, [path.join(root, "scripts/dev-instance.mjs"), watch ? "--watch" : "--run-only"],
+        { cwd: root, env, inherit: true, timeout: 12 * 3600_000, signal: controller.signal });
+    } finally {
+      for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) process.off(sig, stop);
+      release();
+    }
     return;
   }
   if (!["start", "doctor", "stop", "seed", "archive"].includes(action)) throw new Error("Use start, doctor, stop, seed, archive or alpha");

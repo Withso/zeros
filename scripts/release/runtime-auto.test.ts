@@ -22,7 +22,7 @@ function fixture(channel: Channel = "alpha") {
 
 describe("automatic runtime resolution", () => {
   it("leaves Local-only channels independent of cloud availability", async () => {
-    const f = fixture("beta"); f.deps.identity.mockRejectedValue(new Error("offline"));
+    const f = fixture("production"); f.deps.identity.mockRejectedValue(new Error("offline"));
     expect(await resolveRuntimeRelease({ ...f.input, cloudEnabled: false }, f.deps)).toEqual({ action: "skip", reason: "cloud_disabled" });
     expect(f.deps.identity).not.toHaveBeenCalled(); expect(f.deps.changes).not.toHaveBeenCalled();
   });
@@ -51,26 +51,26 @@ describe("automatic runtime resolution", () => {
     expect(await resolveRuntimeRelease(f.input, f.deps)).toMatchObject({ action: "publish", reason: "unqualified" });
   });
   it("refuses promotion when Alpha pin metadata names an incomplete publication", async () => {
-    const f = fixture("beta"); f.deps.published.mockResolvedValue(false);
+    const f = fixture("production"); f.deps.published.mockResolvedValue(false);
     await expect(resolveRuntimeRelease(f.input, f.deps)).rejects.toThrow(/publication/);
   });
   it("keeps unavailable publication evidence unknown instead of publishing or skipping", async () => {
     const f = fixture(); f.deps.published.mockRejectedValue(new Error("GitHub unavailable"));
     await expect(resolveRuntimeRelease(f.input, f.deps)).rejects.toThrow(/unavailable/);
   });
-  it.each(["beta", "production"] as const)("promotes the qualified Alpha bytes to %s with both destination fences", async channel => {
+  it.each(["production"] as const)("promotes the qualified Alpha bytes to %s with both destination fences", async channel => {
     const f = fixture(channel);
     expect(await resolveRuntimeRelease(f.input, f.deps)).toEqual({ action: "promote", reason: "promotion", expected_cp_sha: source,
       expected_runtime_sha256: previousDigest, runtime_sha256: digest, alpha_run_id: "123", alpha_run_attempt: "2" });
     expect(f.deps.ancestor).toHaveBeenCalledExactlyOnceWith(previousSource, source);
   });
   it("skips only a matching pin with matching qualification metadata", async () => {
-    const f = fixture("beta"); Object.assign(f.current, f.identity("beta"));
+    const f = fixture("production"); Object.assign(f.current, f.identity("production"));
     expect(await resolveRuntimeRelease(f.input, f.deps)).toEqual({ action: "skip", reason: "current" });
     Object.assign(f.current, runtimeReleaseIdentity({ sha256: digest }));
     expect(await resolveRuntimeRelease(f.input, f.deps)).toMatchObject({ action: "promote", expected_runtime_sha256: digest });
   });
-  it.each(["beta", "production"] as const)("keeps %s's own qualified pin for a later push with unchanged runtime and qualifying code", async channel => {
+  it.each(["production"] as const)("keeps %s's own qualified pin for a later push with unchanged runtime and qualifying code", async channel => {
     // rc.2, a final rebuild or a desktop-only cherry-pick days after the cut: Alpha has moved on.
     const f = fixture(channel); Object.assign(f.current, f.identity(channel));
     f.deps.ancestor.mockImplementation(async (before: string) => before === previousSource);
@@ -100,13 +100,13 @@ describe("automatic runtime resolution", () => {
   });
   describe("when Alpha has moved past this release", () => {
     // Production's pin is from an older source; Alpha now serves a newer, unrelated one.
-    const moved = (channel: "beta" | "production") => {
+    const moved = (channel: "production") => {
       const f = fixture(channel); Object.assign(f.current, f.identity(channel));
       f.deps.ancestor.mockImplementation(async (before: string) => before === previousSource);
       f.deps.changes.mockResolvedValue(["apps/control-plane/src/index.ts"]);
       return f;
     };
-    it.each(["beta", "production"] as const)("keeps %s's current runtime when Alpha's qualifying code differs and CI replays its contract", async channel => {
+    it.each(["production"] as const)("keeps %s's current runtime when Alpha's qualifying code differs and CI replays its contract", async channel => {
       const f = moved(channel); f.deps.keptContract.mockResolvedValue(true);
       expect(await resolveRuntimeRelease(f.input, f.deps)).toEqual({ action: "skip", reason: "kept" });
       expect(f.deps.keptContract).toHaveBeenCalledExactlyOnceWith(previousSource);
@@ -144,21 +144,21 @@ describe("automatic runtime resolution", () => {
       await expect(resolveRuntimeRelease(f.input, f.deps)).rejects.toThrow();
     });
   });
-  it.each(["alpha", "beta", "production"] as const)("refuses destination drift on %s", async channel => {
+  it.each(["alpha", "production"] as const)("refuses destination drift on %s", async channel => {
     const f = fixture(channel); f.current.sourceSha = "3".repeat(40);
     await expect(resolveRuntimeRelease(f.input, f.deps)).rejects.toThrow(/destination/);
   });
-  it.each(["alpha", "beta", "production"] as const)("refuses a newer or unrelated Alpha pin on %s", async channel => {
+  it.each(["alpha", "production"] as const)("refuses a newer or unrelated Alpha pin on %s", async channel => {
     const f = fixture(channel); f.deps.ancestor.mockResolvedValue(false);
     await expect(resolveRuntimeRelease(f.input, f.deps)).rejects.toThrow(/newer/);
   });
   it.each(["pnpm-lock.yaml", "apps/cloud-worker/src/worker.ts", "apps/control-plane/src/index.ts", "packages/protocol/README.md"])(
     "does not promote an ancestor whose runtime or qualifying input changed: %s", async path => {
-      const f = fixture("beta"); f.deps.changes.mockResolvedValue([path]);
+      const f = fixture("production"); f.deps.changes.mockResolvedValue([path]);
       await expect(resolveRuntimeRelease(f.input, f.deps)).rejects.toThrow(/differ/);
     });
   it.each(["legacy", "offline", "maintenance", "wrong-channel", "missing-worker"])("fails instead of a green skip for %s Alpha", async state => {
-    const f = fixture("beta");
+    const f = fixture("production");
     if (state === "legacy") Object.assign(f.alpha, f.identity("alpha", false));
     if (state === "offline") f.deps.identity.mockRejectedValue(new Error("offline"));
     if (state === "maintenance") f.alpha.maintenance = true;

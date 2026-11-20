@@ -19,14 +19,20 @@ test("local builds do not require hosted environment credentials", () => {
   assert.deepEqual(deploymentEnvironmentErrors({}), []);
 });
 
-test("accepts the exact Alpha, Beta, and Production channel wiring", () => {
-  for (const channel of ["alpha", "beta", "production"]) {
+test("accepts the exact Alpha and Production channel wiring", () => {
+  for (const channel of ["alpha", "production"]) {
     assert.deepEqual(deploymentEnvironmentErrors(cloudflareEnv(channel)), []);
   }
 });
 
+test("rejects the retired Beta deployment like any unknown channel", () => {
+  assert.deepEqual(deploymentEnvironmentErrors(cloudflareEnv("beta")), [
+    "ZEROS_DEPLOY_ENV must be alpha or production",
+  ]);
+});
+
 test("accepts WorkOS Pages wiring whether or not AUTH_PROVIDER is set, and only WorkOS", () => {
-  for (const channel of ["alpha", "beta", "production"]) {
+  for (const channel of ["alpha", "production"]) {
     const env = cloudflareEnv(channel);
     delete env.AUTH_PROVIDER;
     assert.deepEqual(deploymentEnvironmentErrors(env), []);
@@ -40,7 +46,7 @@ test("accepts WorkOS Pages wiring whether or not AUTH_PROVIDER is set, and only 
   }
 });
 
-test("accepts isolated Alpha and Production Ops projects and rejects Beta Ops", () => {
+test("accepts isolated Alpha and Production Ops projects", () => {
   for (const channel of ["alpha", "production"]) {
     const env = cloudflareEnv(channel);
     env.ZEROS_SURFACE = "ops";
@@ -51,15 +57,6 @@ test("accepts isolated Alpha and Production Ops projects and rejects Beta Ops", 
         : "https://ops.zeros.build";
     assert.deepEqual(deploymentEnvironmentErrors(env), []);
   }
-
-  const beta = cloudflareEnv("beta");
-  beta.ZEROS_SURFACE = "ops";
-  beta.WORKOS_BROWSER_ROUTE_PREFIX = "/ops";
-  assert.ok(
-    deploymentEnvironmentErrors(beta).some((error) =>
-      error.includes("not deployed to Beta"),
-    ),
-  );
 });
 
 test("rejects noncanonical surface values instead of normalizing deployment drift", () => {
@@ -91,7 +88,7 @@ test("Pages rejects retired bindings and misplaced Railway secrets", () => {
 
 test("rejects a Pages build with no named deployment environment", () => {
   assert.deepEqual(deploymentEnvironmentErrors({ CF_PAGES: "1" }), [
-    "ZEROS_DEPLOY_ENV must be alpha, beta, or production",
+    "ZEROS_DEPLOY_ENV must be alpha or production",
   ]);
 });
 
@@ -121,7 +118,7 @@ test("hosted Dev names the exact checkout and cannot target Alpha or Ops", () =>
     APP_ORIGIN: `https://app-dev-${owner}.example.com`, CONTROL_PLANE_URL: `https://api-dev-${owner}.example.com` };
   assert.deepEqual(deploymentEnvironmentErrors(env), []);
   assert.ok(deploymentEnvironmentErrors({ ...env, CONTROL_PLANE_URL: "https://api-alpha.zeros.build" }).length);
-  assert.ok(deploymentEnvironmentErrors({ ...env, ZEROS_SURFACE: "ops" }).length);
+  assert.ok(deploymentEnvironmentErrors({ ...env, ZEROS_SURFACE: "ops" }).includes("The Ops surface is not deployed to dev"));
   assert.ok(deploymentEnvironmentErrors({ ...env, AUTH_PROVIDER: "auth0" }).length);
   assert.ok(deploymentEnvironmentErrors({ ...env, CF_PAGES_BRANCH: "main" }).length);
   assert.ok(deploymentEnvironmentErrors({ ...env, ZEROS_DEV_GENERATION: "" }).length);

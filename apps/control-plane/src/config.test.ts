@@ -488,14 +488,14 @@ describe("GitHub backend configuration", () => {
 });
 
 describe("refresh-binding keys in official Railway deployments", () => {
-  const official = (name: "alpha" | "beta" | "production") => {
+  const official = (name: "alpha" | "production") => {
     const host = name === "production" ? "" : `-${name}`;
     return {
       ...validEnv(),
       AUTH_AUDIENCE: `https://api${host}.zeros.build`,
       APP_ORIGIN: `https://app${host}.zeros.build`,
       INVITE_LINK_BASE: `https://app${host}.zeros.build/invite`,
-      ...(name === "beta" ? {} : { OPS_ORIGIN: `https://ops${host}.zeros.build` }),
+      OPS_ORIGIN: `https://ops${host}.zeros.build`,
       RAILWAY_PROJECT_ID: "project-1",
       RAILWAY_ENVIRONMENT_NAME: name,
       RAILWAY_GIT_BRANCH: name === "alpha" ? "main" : "release/1.2.3",
@@ -504,7 +504,7 @@ describe("refresh-binding keys in official Railway deployments", () => {
 
   // Disabling GitHub here would strand every connected desktop; a failed boot
   // keeps the previous deployment serving behind /healthz instead.
-  it.each(["alpha", "beta", "production"] as const)("refuses to boot %s without a dedicated binding key", (name) => {
+  it.each(["alpha", "production"] as const)("refuses to boot %s without a dedicated binding key", (name) => {
     expect(() => loadConfig(official(name))).toThrow(
       new RegExp(`Railway ${name} GitHub App: GITHUB_REFRESH_BINDING_SECRET or GITHUB_REFRESH_BINDING_KEYS_JSON is required`),
     );
@@ -515,8 +515,8 @@ describe("refresh-binding keys in official Railway deployments", () => {
   it("refuses to boot with an invalid keyring instead of disabling GitHub", () => {
     expect(() => loadConfig({ ...official("production"), GITHUB_REFRESH_BINDING_KEYS_JSON: "not json" }))
       .toThrow(/Railway production GitHub App: GITHUB_REFRESH_BINDING_KEYS_JSON must be a JSON object/);
-    expect(() => loadConfig({ ...official("beta"), GITHUB_REFRESH_BINDING_SECRET: "short" }))
-      .toThrow(/Railway beta GitHub App: GITHUB_REFRESH_BINDING_SECRET/);
+    expect(() => loadConfig({ ...official("alpha"), GITHUB_REFRESH_BINDING_SECRET: "short" }))
+      .toThrow(/Railway alpha GitHub App: GITHUB_REFRESH_BINDING_SECRET/);
   });
 
   it("keeps an absent GitHub App block optional", () => {
@@ -646,10 +646,9 @@ describe("feedback backend configuration", () => {
 });
 
 describe("Railway deployment environment isolation", () => {
-  it("accepts the matching Alpha and release-branch Beta/Production wiring", () => {
+  it("accepts the matching Alpha and release-branch Production wiring", () => {
     for (const [name, audience, appOrigin, opsOrigin, branch] of [
       ["alpha", "https://api-alpha.zeros.build", "https://app-alpha.zeros.build", "https://ops-alpha.zeros.build", "main"],
-      ["beta", "https://api-beta.zeros.build", "https://app-beta.zeros.build", null, "release/1.2.3"],
       ["production", "https://api.zeros.build", "https://app.zeros.build", "https://ops.zeros.build", "release/1.2.3"],
     ] as const) {
       expect(() =>
@@ -657,7 +656,7 @@ describe("Railway deployment environment isolation", () => {
           ...baseEnv(),
           AUTH_AUDIENCE: audience,
           APP_ORIGIN: appOrigin,
-          ...(opsOrigin ? { OPS_ORIGIN: opsOrigin } : {}),
+          OPS_ORIGIN: opsOrigin,
           INVITE_LINK_BASE: `${appOrigin}/invite`,
           RAILWAY_PROJECT_ID: "project-1",
           RAILWAY_ENVIRONMENT_NAME: name,
@@ -667,6 +666,27 @@ describe("Railway deployment environment isolation", () => {
     }
   });
 
+  it("refuses the retired Beta Railway environment even with its former wiring", () => {
+    expect(() =>
+      loadConfig({
+        ...baseEnv(),
+        AUTH_AUDIENCE: "https://api-beta.zeros.build",
+        APP_ORIGIN: "https://app-beta.zeros.build",
+        INVITE_LINK_BASE: "https://app-beta.zeros.build/invite",
+        RAILWAY_PROJECT_ID: "project-1",
+        RAILWAY_ENVIRONMENT_NAME: "beta",
+        RAILWAY_GIT_BRANCH: "release/1.2.3",
+      }),
+    ).toThrow(/retired/);
+  });
+
+  it("refuses an explicitly retired environment name without a project id or when self-hosted", () => {
+    for (const extra of [{}, { RAILWAY_PROJECT_ID: "project-1", ZEROS_SELF_HOSTED: "true" }])
+      for (const name of ["beta", " Beta "])
+        expect(() => loadConfig({ ...baseEnv(), ...extra, RAILWAY_ENVIRONMENT_NAME: name, OPS_ORIGIN: "https://ops.example.test" }))
+          .toThrow(/retired/);
+  });
+
   it("rejects an unknown Railway environment or cross-environment audience", () => {
     expect(() =>
       loadConfig({
@@ -674,7 +694,7 @@ describe("Railway deployment environment isolation", () => {
         RAILWAY_PROJECT_ID: "project-1",
         RAILWAY_ENVIRONMENT_NAME: "staging",
       }),
-    ).toThrow(/alpha, beta, or production/);
+    ).toThrow(/must be named alpha or production/);
     expect(() =>
       loadConfig({
         ...baseEnv(),

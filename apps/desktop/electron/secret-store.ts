@@ -29,7 +29,7 @@ import path from "node:path";
  *  every dev worktree reads/writes ONE secrets.json, decrypted by the ONE
  *  per-channel keychain key (app.getName() pinned to the channel) → log in once,
  *  every worktree authed. Falls back to THIS instance's own userData for
- *  stable/beta (single instance) or a ZEROS_ISOLATE=1 dev worktree. */
+ *  stable/alpha (single instance) or a ZEROS_ISOLATE=1 dev worktree. */
 function secretsDir(): string {
   const shared = process.env.ZEROS_SHARED_SECRETS_DIR?.trim();
   return shared && shared.length > 0 ? shared : app.getPath("userData");

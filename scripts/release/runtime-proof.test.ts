@@ -21,7 +21,7 @@ function fixture() {
     repository: config.repository, workflowSha: config.workflowSha, runId: config.runId, runAttempt: config.runAttempt,
     cpSourceSha: config.expectedCpSha, previousRuntimeSha256: config.expectedRuntimeSha256, runtime: prepared.release,
     deploymentId: "alpha-deployment", completedAt: new Date().toISOString() });
-  const promotion = { ...config, channel: "beta" as const, action: "promote" as const, branch: "release/1.2.3",
+  const promotion = { ...config, channel: "production" as const, action: "promote" as const, branch: "release/1.2.3",
     runtimeSha256: manifest.sha256, alphaRunId: config.runId, alphaRunAttempt: config.runAttempt };
   const run = { id: 123, run_attempt: 2, head_sha: config.workflowSha, head_branch: "main", path: ".github/workflows/runtime-release.yml",
     event: "workflow_dispatch", status: "completed", conclusion: "success", repository: { full_name: config.repository }, head_repository: { full_name: config.repository } };
@@ -54,7 +54,7 @@ describe("immutable runtime qualification provenance", () => {
     await expect(verifyRuntimeQualification(f.promotion, f.manifest, f.record, f.deps)).rejects.toThrow();
   });
   it("refuses legacy gate0-only evidence for a new promotion even when its Alpha workflow succeeded", async () => {
-    const f = fixture(), config = { ...f.config, channel: "beta" as const, action: "promote" as const,
+    const f = fixture(), config = { ...f.config, channel: "production" as const, action: "promote" as const,
       branch: "release/1.2.3", runtimeSha256: f.manifest.sha256, alphaRunId: "123", alphaRunAttempt: 2 };
     await expect(verifyRuntimeQualification(config, f.manifest, f.legacy, f.deps)).rejects.toThrow(/publication/);
   });
@@ -98,7 +98,7 @@ describe("immutable runtime qualification provenance", () => {
       await expect(verifyRuntimeQualification(promotion, f.manifest, f.record, f.deps)).rejects.toThrow();
     });
   it("can roll back to the already pinned receipt after GitHub artifacts expire", async () => {
-    const f = fixture(), config = { ...f.config, channel: "beta" as const, action: "rollback" as const, branch: "release/1.2.3" };
+    const f = fixture(), config = { ...f.config, channel: "production" as const, action: "rollback" as const, branch: "release/1.2.3" };
     f.deps.read.mockRejectedValue(new Error("expired-workflow-history")); f.deps.artifact.mockRejectedValue(new Error("expired-artifact"));
     f.deps.alphaCurrent.mockRejectedValue(new Error("Alpha unavailable"));
     expect(await verifyRuntimeQualification(config, f.manifest, f.record, f.deps, f.record.release)).toEqual(f.record);
@@ -148,7 +148,7 @@ describe("immutable runtime qualification provenance", () => {
       expect(f.deps.read).not.toHaveBeenCalled();
     });
   it.each(["missing", "receipt", "digest", "cp", "promotion"])("refuses %s substitution at the pinned rollback boundary", async change => {
-    const f = fixture(), config = { ...f.config, channel: "beta" as const, action: (change === "promotion" ? "promote" : "rollback") as "promote" | "rollback", branch: "release/1.2.3" };
+    const f = fixture(), config = { ...f.config, channel: "production" as const, action: (change === "promotion" ? "promote" : "rollback") as "promote" | "rollback", branch: "release/1.2.3" };
     const pinned = structuredClone(f.record.release);
     if (change === "receipt") pinned.qualification.receiptSha256 = "f".repeat(64);
     if (change === "digest") pinned.sha256 = "f".repeat(64);

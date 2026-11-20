@@ -5,8 +5,6 @@ export type RuntimeWorkflow = typeof RUNTIME_WORKFLOWS[number];
 type Action = "publish" | "promote" | "rollback";
 
 export function runtimeCaller(file: RuntimeWorkflow, channel: Channel, action: Action) {
-  // Beta is retired: no runtime action, automatic or manual, targets it.
-  requireCheck(channel !== "beta", "Beta is retired; it has no runtime release");
   const automatic: Partial<Record<Channel, RuntimeWorkflow>> = { alpha: "release-alpha.yml", production: "release.yml" };
   requireCheck(file === "runtime-release.yml" || file === automatic[channel] && action === (channel === "alpha" ? "publish" : "promote"),
     "Runtime caller does not own this channel and action");

@@ -25,10 +25,9 @@ const path = require("node:path");
 const PLIST_BUDDY = "/usr/libexec/PlistBuddy";
 
 /** Non-stable packs reuse the base electron-builder.yml, whose mac.extendInfo
- *  declares `CFBundleURLSchemes: [zeros]`. Without this, an Alpha or Beta .app
- *  would register the SAME zeros:// scheme as Production, and macOS
- *  LaunchServices could route a Production sign-in to it — the "Open Zeros Beta?"
- *  mis-route. Rewrite the packaged Info.plist to the channel's own scheme + URL
+ *  declares `CFBundleURLSchemes: [zeros]`. Without this, an Alpha .app would
+ *  register the SAME zeros:// scheme as Production, and macOS LaunchServices
+ *  could route a Production sign-in to it. Rewrite the packaged Info.plist to the channel's own scheme + URL
  *  name here in afterPack, which runs BEFORE electron-builder's doSignAfterPack —
  *  so the Developer-ID signature seals this edit (a CLI `-c` override can't do it:
  *  yargs turns the numeric keypath into `{"0":…}` objects that malform the plist
@@ -40,7 +39,6 @@ const PLIST_BUDDY = "/usr/libexec/PlistBuddy";
  *  on purpose: it IS the base plist, so it needs no patch. */
 const CHANNEL_PLIST = {
   alpha: { scheme: "zeros-alpha", name: "Zeros Alpha" },
-  beta: { scheme: "zeros-beta", name: "Zeros Beta" },
 };
 
 function patchChannelUrlScheme(appPath, ch) {
@@ -116,7 +114,7 @@ exports.default = async function afterPack(context) {
   // Signed path: when a Developer ID cert is configured, electron-builder will
   // apply a proper signature (in doSignAfterPack, after this hook) and notarize.
   // An ad-hoc re-sign here would be overwritten and could invalidate that — so
-  // skip it. (The beta scheme patch above still applies: it runs before signing.)
+  // skip it. (The channel scheme patch above still applies: it runs before signing.)
   if (process.env.CSC_LINK) {
     // eslint-disable-next-line no-console
     console.log(

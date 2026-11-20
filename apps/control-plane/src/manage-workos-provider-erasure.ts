@@ -20,7 +20,7 @@ import {
   type WorkOSProviderSubject,
 } from "./workos-provider-locks.js";
 
-const CHANNELS = ["development", "alpha", "beta", "production"] as const;
+const CHANNELS = ["development", "alpha", "production"] as const;
 const Uuid = z.string().uuid();
 const EvidenceReference = z.string().trim().min(16).max(512);
 const ProviderSubject = z
@@ -138,7 +138,7 @@ export function validateWorkOSProviderErasureRequest(
   const channel = input.channel?.trim().toLowerCase() ?? "";
   if (!CHANNELS.includes(channel as (typeof CHANNELS)[number])) {
     throw new WorkOSProviderErasureManagementError(
-      "CONTROL_PLANE_WORKOS_ERASURE_CHANNEL must be development, alpha, beta, or production",
+      "CONTROL_PLANE_WORKOS_ERASURE_CHANNEL must be development, alpha, or production",
     );
   }
   const railwayEnvironment = input.railwayEnvironmentName?.trim().toLowerCase();

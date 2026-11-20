@@ -88,4 +88,22 @@ describe("Local admission at external process boundaries", () => {
     });
     expect(env).toEqual({ SAFE: "kept" });
   });
+  it("treats the launcher's legacy layout selection like Local admission", async () => {
+    const env = { ZEROS_LOCAL_LAYOUT: "legacy", ZEROS_INSTANCE: "checkout", SAFE: "kept" };
+    expect(gitProcessOptions(env).env).toEqual({ ZEROS_INSTANCE: "checkout", SAFE: "kept" });
+    expect(env.ZEROS_LOCAL_LAYOUT).toBe("legacy");
+    expect(mergeSpawnEnv("", { ZEROS_LOCAL_LAYOUT: "legacy", SAFE: "kept" })).toEqual({ SAFE: "kept" });
+    const server = materializeMcpServerRegistration(
+      { name: "test", transport: "stdio", command: "node", env: { ZEROS_LOCAL_LAYOUT: "legacy", SAFE: "kept" } },
+      {},
+    );
+    expect(server).toMatchObject({ env: { SAFE: "kept" } });
+    expect("env" in server && server.env?.ZEROS_LOCAL_LAYOUT).toBeUndefined();
+    vi.stubEnv("ZEROS_LOCAL_LAYOUT", "legacy");
+    const result = await runFile(process.execPath, [
+      "-e",
+      "process.stdout.write(String('ZEROS_LOCAL_LAYOUT' in process.env))",
+    ]);
+    expect(result.stdout).toBe("false");
+  });
 });

@@ -22,12 +22,6 @@ describe("desktop release environment routing", () => {
         "refs/heads/main",
       ],
       [
-        "beta",
-        "https://app-beta.zeros.build",
-        "https://api-beta.zeros.build",
-        "refs/heads/release/1.2.3",
-      ],
-      [
         "production",
         "https://app.zeros.build",
         "https://api.zeros.build",
@@ -55,18 +49,18 @@ describe("desktop release environment routing", () => {
       "AUTH_AUDIENCE must be https://api-alpha.zeros.build",
     ]);
     expect(
-      releaseEnvironmentErrors("beta", {
-        VITE_APP_BASE_URL: "https://app.zeros.build",
+      releaseEnvironmentErrors("production", {
+        VITE_APP_BASE_URL: "https://app-alpha.zeros.build",
         VITE_CONTROL_PLANE_URL: "https://api.zeros.build/path",
-        ...desktopAuth("https://api-beta.zeros.build"),
+        ...desktopAuth("https://api.zeros.build"),
       }),
     ).toEqual([
-      "VITE_APP_BASE_URL must be https://app-beta.zeros.build",
-      "VITE_CONTROL_PLANE_URL must be https://api-beta.zeros.build",
+      "VITE_APP_BASE_URL must be https://app.zeros.build",
+      "VITE_CONTROL_PLANE_URL must be https://api.zeros.build",
     ]);
   });
 
-  it("never permits Beta or Production to release directly from main", () => {
+  it("never permits Production to release directly from main", () => {
     expect(
       releaseEnvironmentErrors("production", {
         VITE_APP_BASE_URL: "https://app.zeros.build",

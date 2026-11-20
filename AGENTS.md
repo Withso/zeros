@@ -112,8 +112,8 @@ to the renderer. For `zeros local`, start with its shipped skill and CLI help.
 
 - Live checks use the gitignored `.env.agent` at the repository root; its
   template is `.env.agent.example`, and Conductor copies it into new
-  workspaces. It holds Alpha and test credentials only: never add Beta or
-  Production keys.
+  workspaces. It holds Alpha and test credentials only: never add Production
+  keys.
 - Run `pnpm agent:check` to verify it read-only. Never print, log, commit or
   echo a credential value, including in command arguments and test output.
 - Commits and pull requests use the workspace's own Git and GitHub identity,

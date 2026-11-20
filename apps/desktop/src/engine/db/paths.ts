@@ -4,7 +4,12 @@ import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { channel, isLocalDevelopmentRuntime } from "../runtime";
-import { localInstanceStateRoot } from "./local-development-paths.cjs";
+import {
+  developmentLayout,
+  developmentPaths,
+  localInstanceStateRoot,
+  type DevelopmentPaths,
+} from "./local-development-paths.cjs";
 
 /** Keep the persisted app-data ID; Finder treats directories ending in .app as application bundles. */
 const APP_ID = "com.zeros";
@@ -66,7 +71,58 @@ function dataDirSlug(): string {
 
 /** Electron userData and the engine database must use the same instance identity. */
 export function zerosDataDir(): string {
-  return dataDirForInstance(dataDirSlug());
+  if (process.env.ZEROS_DATA_DIR) return process.env.ZEROS_DATA_DIR;
+  return localV2()?.dataDir ?? dataDirForInstance(dataDirSlug());
+}
+
+// A new account-free Local identity's own layout (local-development-paths.cjs);
+// null for a legacy Local profile, hosted development and installed channels,
+// which all resolve exactly as above. Cached per exact input because Design
+// storage resolves zerosDataDir() per recording chunk.
+let localInputs: readonly unknown[] = [];
+let localRoots: DevelopmentPaths | null = null;
+function localV2(): DevelopmentPaths | null {
+  if (!isLocalDevelopmentRuntime()) return null;
+  const instance = devInstanceSlug();
+  if (!instance || developmentLayout(process.env) === "legacy") return null;
+  const env = process.env;
+  const inputs = [instance, homedir(), process.platform, env.APPDATA, env.LOCALAPPDATA, env.XDG_DATA_HOME, env.XDG_CACHE_HOME];
+  if (localRoots && inputs.every((value, index) => value === localInputs[index])) return localRoots;
+  localRoots = Object.freeze(developmentPaths({ instance, layout: "v2", home: inputs[1] as string, platform: process.platform, env }));
+  localInputs = inputs;
+  return localRoots;
+}
+
+/** A new Local identity's Electron session (`<data dir>/electron`), else null:
+ *  every other launch keeps its session where it always was (main.ts). */
+export function zerosLocalSessionDataDir(): string | null {
+  return localV2() ? path.join(zerosDataDir(), "electron") : null;
+}
+
+/** A new Local identity's log folder, else null (main.ts keeps every other
+ *  launch's log folder). */
+export function zerosLocalLogDir(): string | null {
+  const local = localV2();
+  if (!local) return null;
+  return process.platform === "darwin" ? local.logDir : path.join(zerosDataDir(), "logs");
+}
+
+/** Every real profile root on this machine whatever overrides are set
+ *  (Stable, Alpha, hosted Dev, the Local family) and the app-data folder that
+ *  holds them and their per-instance siblings. */
+export function realProfileRoots(): { profileRoots: string[]; appData: string } {
+  const home = homedir();
+  const appData =
+    process.platform === "darwin"
+      ? path.join(home, "Library", "Application Support")
+      : process.platform === "win32"
+        ? (process.env.APPDATA ?? path.join(home, "AppData", "Roaming"))
+        : (process.env.XDG_DATA_HOME ?? path.join(home, ".local", "share"));
+  const names =
+    process.platform === "darwin" || process.platform === "win32"
+      ? ["com.zeros", "com.zeros.alpha", "com.zeros.dev", "com.zeros.local"]
+      : ["zeros", "zeros-alpha", "zeros-dev", "zeros-local"];
+  return { profileRoots: names.map((name) => path.join(appData, name)), appData };
 }
 
 /** Omit the instance slug so dev worktrees can share their channel's sign-in. */

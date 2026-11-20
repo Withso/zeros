@@ -10,7 +10,7 @@ import {parseDatabaseTarget} from "./database-target.js";
 
 const ChangeSchema=z.object({
   operationId:z.string().uuid(),
-  channel:z.enum(["development","alpha","beta","production"]),
+  channel:z.enum(["development","alpha","production"]),
   subjectUserId:z.string().uuid(),
   expectedEmail:z.string().trim().email().max(320).transform(value=>value.toLowerCase()),
   actorUserId:z.string().uuid(),

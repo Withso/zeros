@@ -332,7 +332,7 @@ describe("Local link identity and presentation", () => {
 
   it("keeps all occurrences, punctuation and foreign/malformed URLs intact", () => {
     const text =
-      "See (zeros-dev://chat/codex), zeros-dev://chat/codex. zeros-beta://chat/other zeros-dev://chat/codex?run=true zeros-dev://chat/codex/path";
+      "See (zeros-dev://chat/codex), zeros-dev://chat/codex. zeros-alpha://chat/other zeros-dev://chat/codex?run=true zeros-dev://chat/codex/path";
     const spans = localLinkSpans(text, "zeros-dev");
     expect(spans.map((span) => text.slice(span.start, span.end))).toEqual([
       "zeros-dev://chat/codex",
@@ -340,7 +340,7 @@ describe("Local link identity and presentation", () => {
     ]);
     const html = render(h(LocalLinkText, { text }));
     expect(html.match(/data-local-link-pill=/g)).toHaveLength(2);
-    expect(html).toContain("zeros-beta://chat/other");
+    expect(html).toContain("zeros-alpha://chat/other");
     expect(html).toContain("zeros-dev://chat/codex?run=true");
     expect(render(h(LocalLinkText, { text: "No links here" }))).toBe(
       "No links here",

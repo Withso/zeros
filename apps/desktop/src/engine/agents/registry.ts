@@ -151,7 +151,7 @@ export interface AgentManifestEntry {
    *
    *  This exists because "has credentials" and "can run" are INDEPENDENT, and
    *  conflating them shipped a green "Connected" badge on a completely broken
-   *  Claude in Beta + Production (0.0.14): the auth probe found a keychain item
+   *  Claude in packaged builds (0.0.14): the auth probe found a keychain item
    *  and reported success, while `query()` threw "Native CLI binary for
    *  darwin-arm64 not found" on every send. Cheap + synchronous (a couple of
    *  stat() calls behind a process-lifetime memo), so it can run on every
@@ -230,7 +230,7 @@ export const AGENT_MANIFEST: AgentManifestEntry[] = [
     bundledRuntime: true,
     // …and because the runtime is bundled, its ABSENCE is a build defect the UI
     // has to state plainly instead of rendering a green "Connected" badge on a
-    // Claude that fails every send (the 0.0.14 Beta/Production bug).
+    // Claude that fails every send (the 0.0.14 packaged-build bug).
     // Passes the user's persisted Executable path through, so setting it is a real
     // remedy rather than advice the probe then ignores.
     runtimeUnavailable: (override) =>
@@ -351,8 +351,8 @@ function readClaudeBundledCliVersion(): string | null {
   cachedClaudeCliVersion = null;
   // PACKAGED FIRST. The require.resolve walk below CANNOT work in the packaged
   // app — the engine is a `bun build --compile` single-file binary with no
-  // node_modules on disk — so before this it silently returned null and Beta/
-  // Production reported NO Claude runtime version while dev reported the right
+  // node_modules on disk — so before this it silently returned null and packaged
+  // builds reported NO Claude runtime version while dev reported the right
   // one. Electron main reads the version from the staged
   // Contents/Resources/claude-cli-version.txt and forwards it here (see
   // apps/desktop/electron/sidecar.ts resolveClaudeCliPaths + claude-sdk/binary-resolver.ts).

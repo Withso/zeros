@@ -147,7 +147,7 @@ describe("release dependency and authority contracts", () => {
   });
   it("retires the Beta pipeline: no Beta workflow, and no workflow input offers Beta", () => {
     expect(() => workflow("release-beta")).toThrow();
-    for (const name of ["controlled-cutover", "runtime-release"]) expect(workflow(name)).not.toMatch(/options: \[[^\]]*\bbeta\b/);
+    for (const name of ["controlled-cutover", "runtime-release", "staff-owner-bootstrap"]) expect(workflow(name)).not.toMatch(/options: \[[^\]]*\bbeta\b/);
     expect(workflow("runtime-release-run")).not.toContain("inputs.channel == 'beta'");
   });
   it("includes the release controller source in normal Git discovery", () => {
@@ -223,7 +223,7 @@ describe("release dependency and authority contracts", () => {
     const gated = [...release.matchAll(/^  ([a-z][a-z_-]*):\n(?:(?!^  [a-z][a-z_-]*:\n)[\s\S])*?^    environment: production$/gm)].map(match => match[1]);
     expect(gated.sort()).toEqual(["build", "notarize", "publish", "runtime-resolve", "submit"]);
     for (const name of [...gated, "hosted"]) expect(job(release, name)).toMatch(/^    needs: (?:approve$|\[approve, )/m);
-    // A direct Production cutover needs the same approval; Alpha and Beta skip it.
+    // A direct Production cutover needs the same approval; Alpha skips it.
     const cutover = workflow("controlled-cutover");
     expect(job(cutover, "approve")).toContain("environment: production-approval");
     expect(job(cutover, "approve")).toContain("inputs.channel == 'production'");

@@ -13,14 +13,14 @@ interface ImportMetaEnv {
   readonly VITE_CONTROL_PLANE_URL?: string;
   readonly VITE_CLOUD_WORKSPACE_PREVIEW_HOST_SUFFIXES?: string;
   /** Release channel baked into the bundle at build:
-   *  "dev" | "alpha" | "beta" | "stable". Drives renderer feature-flag gating
+   *  "dev" | "alpha" | "stable". Drives renderer feature-flag gating
    *  (apps/desktop/src/renderer/config/release-channel.ts).
    *
-   *  Injected explicitly by release-alpha.yml ("alpha") and release-beta.yml
-   *  ("beta") — `check:vite-env` asserts both. **release.yml does NOT inject it**:
+   *  Injected explicitly by release-alpha.yml ("alpha") — `check:vite-env`
+   *  asserts it. **release.yml does NOT inject it**:
    *  Production's renderer channel comes from the
    *  `import.meta.env.DEV ? "dev" : "stable"` fallback in flags.ts, and so does
    *  `pnpm dev`. Do not claim otherwise here — an earlier version of this comment
    *  said the release workflows inject "stable", which was never true. */
-  readonly VITE_ZEROS_CHANNEL?: "dev" | "alpha" | "beta" | "stable";
+  readonly VITE_ZEROS_CHANNEL?: "dev" | "alpha" | "stable";
 }

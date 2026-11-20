@@ -34,7 +34,7 @@ export interface MigrateIdentityOpts {
   appDataDir: string;
   /** zerosDataDir() — the NEW single-identity userData dir. */
   newUserData: string;
-  /** The channel's legacy name-based dir: "Zeros" | "Zeros Dev" | "Zeros Beta". */
+  /** The channel's legacy name-based dir: "Zeros" | "Zeros Dev" | "Zeros Alpha". */
   legacyChannelName: string;
   /** A dev worktree's legacy per-instance dir ("Zeros — <Label>"), else null. */
   legacyInstanceName: string | null;

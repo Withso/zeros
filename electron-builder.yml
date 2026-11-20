@@ -211,7 +211,7 @@ mac:
   # GRACEFUL UNSIGNED FALLBACK: when CSC_LINK is ABSENT (a local build, or any
   # CI run without the secrets) electron-builder finds no Developer ID and SKIPS
   # signing — hardenedRuntime + notarize become no-ops — and the afterPack hook
-  # applies a complete ad-hoc signature (the old beta path needing `xattr -cr`).
+  # applies a complete ad-hoc signature (the old unsigned path needed `xattr -cr`).
   # One config covers both states.
   #
   # WARNING: do NOT re-add `identity: null` — that FORCE-disables Developer ID
@@ -283,7 +283,7 @@ dmg:
 # (see apps/desktop/electron/updater.ts UPDATER_FEED_BY_CHANNEL).
 #
 # This block is baked into the bundle's app-update.yml at package time — it is
-# what the STABLE updater actually uses at runtime (alpha/beta override via
+# what the STABLE updater actually uses at runtime (alpha overrides via
 # setFeedURL in apps/desktop/electron/updater.ts). The generic provider fetches
 # <url>/latest-mac.yml and resolves the zip filenames inside it against the
 # same base.
@@ -306,7 +306,7 @@ publish:
 # depend on prior build/cache state. Disable it and let beforePack rebuild ONLY
 # better-sqlite3 from source, then validate/select node-pty's Darwin prebuild.
 # The packaged PTY smoke below the release workflows separately catches the
-# macOS spawn-helper location failure that caused beta.58.
+# macOS spawn-helper location failure that broke a shipped build's terminal.
 npmRebuild: false
 beforePack: ./scripts/electron-before-pack.cjs
 

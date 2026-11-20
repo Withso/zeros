@@ -12,7 +12,7 @@ function databaseRoute(username: string, password = "synthetic") {
   return url.toString();
 }
 
-function fixture(channel: "alpha" | "beta" = "alpha") {
+function fixture(channel: "alpha" | "production" = "alpha") {
   const config: RuntimeReleaseConfig = { channel, action: channel === "alpha" ? "publish" : "promote", repository: "example/project", workflowSha: "1".repeat(40), branch: channel === "alpha" ? "main" : "release/1.2.3",
     runId: "123", runAttempt: 1, ...(channel === "alpha" ? { sourceSha: "2".repeat(40) } : { runtimeSha256: "b".repeat(64), alphaRunId: "100", alphaRunAttempt: 1 }), expectedCpSha: "3".repeat(40), expectedRuntimeSha256: "a".repeat(64) };
   const env = { RAILWAY_PROJECT_ID: randomUUID(), RAILWAY_ENVIRONMENT_ID: randomUUID(), RAILWAY_SERVICE_ID: randomUUID(), RAILWAY_DEPLOY_TOKEN: "synthetic-private-token" };
@@ -27,7 +27,7 @@ function fixture(channel: "alpha" | "beta" = "alpha") {
   const state = { serviceInstanceAutoDeployStatus: { enabled: false },
     environment: { id: target.environmentId, name: config.channel, projectId: target.projectId, unmergedChangesCount: null,
       config: { services: { [target.serviceId]: { source: { repo: config.repository, branch: config.branch, rootDirectory: "apps/control-plane", checkSuites: false } } } } },
-    serviceInstance: { serviceId: target.serviceId, environmentId: target.environmentId, domains: { customDomains: [{ domain: `api-${channel}.zeros.build` }] } },
+    serviceInstance: { serviceId: target.serviceId, environmentId: target.environmentId, domains: { customDomains: [{ domain: channel === "production" ? "api.zeros.build" : `api-${channel}.zeros.build` }] } },
     environmentStagedChanges: { id: "<empty>", patch: {} }, variables };
   const identity = { version: 1, channel: config.channel, sourceSha: config.expectedCpSha, ready: true, maintenance: false,
     migrations: { state: "current", head: "0221_fixture.sql", expectedHead: "0221_fixture.sql", manifestSha256: "e".repeat(64) },
@@ -45,7 +45,7 @@ function fixture(channel: "alpha" | "beta" = "alpha") {
   const inventoryRead = vi.fn(async () => {});
   const alphaRead = vi.fn(async () => Response.json({ version: 1, channel: "alpha", ready: true, worker: { sha256: pin.sha256 } }));
   const fetcher: typeof fetch = async (url, init) => {
-    if (channel === "beta" && String(url) === "https://api-alpha.zeros.build/v1/release-identity") return alphaRead();
+    if (channel === "production" && String(url) === "https://api-alpha.zeros.build/v1/release-identity") return alphaRead();
     if (String(url).endsWith("/v1/release-identity")) return Response.json(identity, { status: identityStatuses.shift() ?? 200 });
     const body = JSON.parse(String(init?.body)); calls.push(body);
     if (body.query.includes("RuntimeState")) return Response.json({ data: state });
@@ -91,7 +91,7 @@ function transaction(f: ReturnType<typeof fixture>) {
 
 describe("runtime-only Railway boundary", () => {
   it.each(["stage", "deploy"] as const)("refuses %s when Alpha no longer serves the exact ready digest", async phase => {
-    const f = fixture("beta");
+    const f = fixture("production");
     if (phase === "deploy") await f.provider.stage(f.pin, f.previous, f.lease);
     f.alphaRead.mockResolvedValue(Response.json({ version: 1, channel: "alpha", ready: true, worker: { sha256: "f".repeat(64) } }));
     const before = f.calls.filter(call => call.query.startsWith("mutation")).length;
@@ -99,7 +99,7 @@ describe("runtime-only Railway boundary", () => {
     expect(f.calls.filter(call => call.query.startsWith("mutation"))).toHaveLength(before);
   });
   it.each(["stage", "deploy"] as const)("refuses %s while Alpha is unreachable", async phase => {
-    const f = fixture("beta");
+    const f = fixture("production");
     if (phase === "deploy") await f.provider.stage(f.pin, f.previous, f.lease);
     f.alphaRead.mockRejectedValue(new Error("private fixture upstream body"));
     const before = f.calls.filter(call => call.query.startsWith("mutation")).length;
@@ -107,7 +107,7 @@ describe("runtime-only Railway boundary", () => {
     expect(f.calls.filter(call => call.query.startsWith("mutation"))).toHaveLength(before);
   });
   it.each(["stage", "deploy"] as const)("refuses %s while Alpha is unready", async phase => {
-    const f = fixture("beta");
+    const f = fixture("production");
     if (phase === "deploy") await f.provider.stage(f.pin, f.previous, f.lease);
     f.alphaRead.mockImplementation(async () => Response.json({ version: 1, channel: "alpha", ready: false, worker: { sha256: f.pin.sha256 } }));
     const before = f.calls.filter(call => call.query.startsWith("mutation")).length;
@@ -116,7 +116,7 @@ describe("runtime-only Railway boundary", () => {
   });
   it.each(["stage", "deploy"] as const)("refreshes serving ownership, expiry and cancellation after the final Alpha read for %s", async phase => {
     for (const change of ["unchanged", "serving", "pin", "expiry", "cancelled"]) {
-      const f = fixture("beta");
+      const f = fixture("production");
       if (phase === "deploy") await f.provider.stage(f.pin, f.previous, f.lease);
       const entered = Promise.withResolvers<void>(), finish = Promise.withResolvers<void>();
       f.alphaRead.mockImplementation(async () => {
@@ -138,7 +138,7 @@ describe("runtime-only Railway boundary", () => {
     }
   });
   it("restores its owned staged pin if Alpha stops qualifying before deploy", async () => {
-    const f = fixture("beta"), t = transaction(f);
+    const f = fixture("production"), t = transaction(f);
     f.alphaRead.mockImplementationOnce(async () => Response.json({ version: 1, channel: "alpha", ready: true, worker: { sha256: f.pin.sha256 } }))
       .mockRejectedValue(new Error("Alpha unavailable"));
     await expect(t.run()).rejects.toThrow(/Alpha/);

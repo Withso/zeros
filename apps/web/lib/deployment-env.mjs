@@ -4,11 +4,6 @@ const CHANNELS = {
     opsOrigin: "https://ops-alpha.zeros.build",
     controlPlaneOrigin: "https://api-alpha.zeros.build",
   },
-  beta: {
-    appOrigin: "https://app-beta.zeros.build",
-    opsOrigin: null,
-    controlPlaneOrigin: "https://api-beta.zeros.build",
-  },
   production: {
     appOrigin: "https://app.zeros.build",
     opsOrigin: "https://ops.zeros.build",
@@ -37,7 +32,7 @@ function normalizedHttpsOrigin(raw) {
 
 /**
  * Fail closed only inside Cloudflare Pages. Local builds intentionally keep
- * working without hosted credentials. The three Pages projects share one
+ * working without hosted credentials. The Pages projects share one
  * codebase, but each must name and target exactly one deployment channel.
  */
 export function deploymentEnvironmentErrors(env) {
@@ -54,7 +49,7 @@ export function deploymentEnvironmentErrors(env) {
     controlPlaneOrigin: `https://api-dev-${devOwner}.${devDomain}`,
   } : CHANNELS[channel];
   if (!expected) {
-    errors.push(channel === "dev" ? "Hosted Dev requires an exact owner, generation and domain" : "ZEROS_DEPLOY_ENV must be alpha, beta, or production");
+    errors.push(channel === "dev" ? "Hosted Dev requires an exact owner, generation and domain" : "ZEROS_DEPLOY_ENV must be alpha or production");
     return errors;
   }
 
@@ -98,7 +93,7 @@ export function deploymentEnvironmentErrors(env) {
     errors.push("ZEROS_SURFACE must be app or ops");
   }
   if (surface === "ops" && expected.opsOrigin === null) {
-    errors.push("The Ops surface is intentionally not deployed to Beta");
+    errors.push(`The Ops surface is not deployed to ${channel}`);
   }
   const expectedAppOrigin =
     surface === "ops" ? expected.opsOrigin : expected.appOrigin;
@@ -133,12 +128,10 @@ export function deploymentEnvironmentErrors(env) {
   } else if (channel === "alpha" && branch !== "main") {
     errors.push("Alpha Pages deployments must build main");
   } else if (
-    (channel === "beta" || channel === "production") &&
+    channel === "production" &&
     !/^release\/\d+\.\d+\.\d+$/.test(branch)
   ) {
-    errors.push(
-      `${channel === "beta" ? "Beta" : "Production"} Pages deployments must build release/X.Y.Z`,
-    );
+    errors.push("Production Pages deployments must build release/X.Y.Z");
   }
   if (channel === "dev" && branch !== "dev") errors.push("Dev Pages deployments must use the dev branch");
   return errors;

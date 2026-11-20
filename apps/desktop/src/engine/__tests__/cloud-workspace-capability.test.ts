@@ -9,7 +9,7 @@ import {
 
 // The checked-in policy allows every channel; these cases exercise its pause.
 vi.mock("../../../../control-plane/src/cloud/channels.json", () => ({
-  default: { development: true, alpha: true, beta: false, production: false },
+  default: { development: true, alpha: true, production: false },
 }));
 
 beforeEach(() => vi.stubEnv("ZEROS_CHANNEL", "alpha"));
@@ -32,7 +32,7 @@ describe("desktop cloud-workspace release capability", () => {
     expect(createFork).not.toHaveBeenCalled();
   });
 
-  it.each(["beta", "stable"])("keeps %s cloud off while its channel is paused, even with baked and inherited opt-ins", releaseChannel => {
+  it.each(["stable"])("keeps %s cloud off while its channel is paused, even with baked and inherited opt-ins", releaseChannel => {
     vi.stubEnv("ZEROS_CHANNEL", releaseChannel);
     const environment = { [CLOUD_WORKSPACES_DESKTOP_CAPABILITY_ENV]: "true" };
     expect(cloudWorkspaceDesktopCapabilityEnabled({ bakedCapability: true, environment })).toBe(false);

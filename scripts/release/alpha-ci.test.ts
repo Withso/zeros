@@ -308,14 +308,14 @@ describe("full release policy isolation", () => {
     expect(requests.every(url => url.includes("/actions/workflows/"))).toBe(true);
   });
 
-  it.each(["beta", "production"])("never accepts an Alpha-gate-only success for %s or queries Alpha authority", async channel => {
+  it.each(["production"])("never accepts an Alpha-gate-only success for %s or queries Alpha authority", async channel => {
     const { client, requests } = fixture({ env: { RELEASE_CHANNEL: channel } });
     await expect(client.assertRequiredChecks()).rejects.toThrow();
     expect(requests).toHaveLength(2);
     expect(requests.every(url => url.includes("/actions/workflows/") && !url.includes("event="))).toBe(true);
   });
 
-  it.each(["beta", "production"])("preserves push, PR and merge-group whole-run success for %s", async channel => {
+  it.each(["production"])("preserves push, PR and merge-group whole-run success for %s", async channel => {
     for (const event of ["push", "pull_request", "merge_group"]) {
       const { client } = fixture({ env: { RELEASE_CHANNEL: channel }, preflight: [{ ...preflight, event, status: "completed", conclusion: "success" }],
         codeql: [{ ...codeql, event }] });

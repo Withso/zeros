@@ -105,7 +105,7 @@ const prose: AgentTextMessage = {
   kind: "text",
   role: "agent",
   createdAt: 2,
-  text: "I compared [the research](zeros-dev://chat/claude) with zeros-dev://chat/cursor.\n\n```sh\nzeros-dev://chat/codex\n```\n\nForeign links stay plain: zeros-beta://chat/other.",
+  text: "I compared [the research](zeros-dev://chat/claude) with zeros-dev://chat/cursor.\n\n```sh\nzeros-dev://chat/codex\n```\n\nForeign links stay plain: zeros-alpha://chat/other.",
 };
 const notes: AgentTextMessage[] = [
   {

@@ -25,7 +25,7 @@ describe("Electron user API requests", () => {
     expect(monitor?.[1]).toMatch(/fetch:\s*controlPlaneFetch/);
     expect(main).toContain('from "./control-plane-fetch"');
   });
-  it.each(["alpha", "beta", "stable", "dev"])(
+  it.each(["alpha", "stable", "dev"])(
     "sends the main process's %s identity",
     async (channel) => {
       state.channel = channel;

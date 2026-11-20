@@ -31,7 +31,7 @@ const APPS = [
     running: true,
   },
   { name: "Zeros", bundle_id: "com.zeros", pid: SELF_PID, running: true },
-  { name: "Zeros Beta", bundle_id: "com.zeros.beta", pid: 505, running: true },
+  { name: "Zeros Alpha", bundle_id: "com.zeros.alpha", pid: 505, running: true },
   { name: "Notes", bundle_id: "com.apple.Notes", pid: 0, running: false },
 ];
 
@@ -293,7 +293,7 @@ describe("Zeros computer use controller", () => {
       text(await controller.invoke(request("type_text", { pid: 9_999, text: "x" }))),
     ).toBe("No app you can control has process ID 9999. Call list_apps.");
     expect(
-      text(await controller.invoke(request("open_app", { bundle_id: "com.zeros.beta" }))),
+      text(await controller.invoke(request("open_app", { bundle_id: "com.zeros.alpha" }))),
     ).toBe("Agents cannot control Zeros.");
     expect(
       text(

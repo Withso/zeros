@@ -121,7 +121,6 @@ beforeAll(async () => {
       desktopSchemes: [
         "zeros",
         "zeros-alpha",
-        "zeros-beta",
         "zeros-dev",
       ],
     },

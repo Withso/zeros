@@ -138,6 +138,7 @@ describe("desktop support window", () => {
     "",
     "desktop/dev/0.0.0",
     "desktop/unknown/0.0.0",
+    "desktop/beta/0.1.20-beta.1",
     "browser/alpha/0.0.0",
     "desktop/alpha/unknown",
   ])(
@@ -192,9 +193,6 @@ describe("bounded channel ledger cache", () => {
     expect(releaseLedgerUrl("alpha")).toBe(
       "https://github.com/withso/zeros/releases/download/alpha/alpha-release-ledger.json",
     );
-    expect(releaseLedgerUrl("beta")).toBe(
-      "https://github.com/withso/zeros/releases/download/beta/beta-release-ledger.json",
-    );
     expect(releaseLedgerUrl("production")).toBe(
       "https://github.com/withso/zeros/releases/latest/download/release-ledger.json",
     );
@@ -222,7 +220,7 @@ describe("bounded channel ledger cache", () => {
     const fetchLedger = vi.fn(async (url: string | URL | Request) =>
       Response.json({
         ...ledger,
-        channel: String(url).includes("beta") ? "beta" : "alpha",
+        channel: String(url).includes("/latest/") ? "production" : "alpha",
       }),
     );
     const compatibility = new ClientCompatibility({
@@ -232,17 +230,17 @@ describe("bounded channel ledger cache", () => {
       ledgerUrl: "https://releases.example.test/alpha-ledger.json",
     });
     await compatibility.check("desktop/alpha/0.1.20-alpha.179");
-    await compatibility.check("desktop/beta/0.1.20-alpha.179");
+    await compatibility.check("desktop/production/0.1.20");
     expect(fetchLedger.mock.calls.map(([url]) => url)).toEqual([
       "https://releases.example.test/alpha-ledger.json",
-      releaseLedgerUrl("beta"),
+      releaseLedgerUrl("production"),
     ]);
   });
 
   it.each([
     null,
     { ...ledger, version: 2 },
-    { ...ledger, channel: "beta" },
+    { ...ledger, channel: "production" },
     { ...ledger, releases: [] },
     { ...ledger, releases: [...releases].reverse() },
     { ...ledger, releases: [{ ...releases[0], publishedAt: "yesterday" }] },

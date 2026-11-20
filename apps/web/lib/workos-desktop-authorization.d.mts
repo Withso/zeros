@@ -1,6 +1,6 @@
 export interface WorkOSDesktopAuthorizationEnv {
   AUTH_PROVIDER?: string;
-  ZEROS_DEPLOY_ENV?: "alpha" | "beta" | "production";
+  ZEROS_DEPLOY_ENV?: "alpha" | "production";
   CONTROL_PLANE_URL?: string;
 }
 

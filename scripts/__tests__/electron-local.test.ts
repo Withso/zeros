@@ -3,12 +3,13 @@ import os from "node:os";
 import path from "node:path";
 import net from "node:net";
 import { once } from "node:events";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { afterEach, describe, expect, it } from "vitest";
 import { parse } from "smol-toml";
 import {
   checkoutIdentity,
   localEnvironment,
+  localLayout,
   pickLocalPorts,
   runLocalDevelopment,
   runOwnedProcess,
@@ -154,6 +155,7 @@ describe("Local launch ownership", () => {
       await expect(
         runLocalDevelopment({
           root: launchRoot,
+          home: directory(),
           platform: "darwin",
           environment: {},
           listProcesses: () => `123 node ${root}/scripts/dev-instance.mjs`,
@@ -211,6 +213,7 @@ describe("Local launch ownership", () => {
     });
     const first = runLocalDevelopment({
       root,
+      home: directory(),
       platform: "darwin",
       environment: {},
       signal: controller.signal,
@@ -223,7 +226,7 @@ describe("Local launch ownership", () => {
     await ready;
     try {
       await expect(
-        runLocalDevelopment({ root, platform: "darwin" }),
+        runLocalDevelopment({ root, home: directory(), platform: "darwin" }),
       ).rejects.toThrow("already running");
     } finally {
       controller.abort();
@@ -253,6 +256,7 @@ describe("Local launch ownership", () => {
       try {
         code = await runLocalDevelopment({
           root,
+          home: directory(),
           platform: "darwin",
           environment: {},
           prepareBundle: () => "/local/Electron",
@@ -338,6 +342,138 @@ describe("Local launch ownership", () => {
     30_000,
   );
 
+  async function launchOnce(root: string, home: string) {
+    const prepared: Array<Record<string, unknown>> = [];
+    let env: Record<string, string> = {};
+    await runLocalDevelopment({
+      root,
+      home,
+      platform: "darwin",
+      environment: { ZEROS_LOCAL_LAYOUT: "legacy" },
+      prepareBundle: (identity: Record<string, unknown>) => {
+        prepared.push(identity);
+        return "/local/Electron";
+      },
+      run: async (_command: string, args: string[], options: { env: Record<string, string> }) => {
+        env = options.env;
+        return { code: args.includes("concurrently") ? 0 : 0, cancelled: false };
+      },
+    });
+    return { env, bundle: prepared[0]?.paths as Record<string, string> };
+  }
+
+  it("lays out a new checkout in the consolidated family and registers it", async () => {
+    const root = directory(), home = directory();
+    const identity = checkoutIdentity(root);
+    const { env, bundle } = await launchOnce(root, home);
+    expect(env.ZEROS_INSTANCE).toBe(identity.slug);
+    expect(env).not.toHaveProperty("ZEROS_LOCAL_LAYOUT");
+    expect(bundle.bundlePath).toBe(
+      path.join(home, "Library/Caches/com.zeros.local/bundles", identity.slug, `${identity.name}.app`),
+    );
+    const registry = JSON.parse(
+      fs.readFileSync(path.join(home, "Library/Application Support/com.zeros.local/instances.json"), "utf8"),
+    );
+    expect(registry.instances[identity.slug]).toMatchObject({
+      kind: "checkout", name: identity.name, checkout: fs.realpathSync(root), layout: "v2",
+    });
+  });
+
+  // Final review: an older checkout of the same path creates the flat folder;
+  // an identity with an established v2 database must not switch to it.
+  describe("layout choice", () => {
+    const support = (home: string) => path.join(home, "Library/Application Support");
+    const v2 = (home: string, slug: string) => path.join(support(home), "com.zeros.local/instances", slug);
+    const flat = (home: string, slug: string) => path.join(support(home), `com.zeros.local.${slug}`);
+    const write = (file: string) => { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, "db"); };
+    const slug = "0123456789abcdef";
+
+    it("stays on an established v2 database when the flat folder appears, warning once", () => {
+      const home = directory(), warnings: string[] = [];
+      write(path.join(v2(home, slug), "zeros.db"));
+      expect(localLayout({ slug, home, platform: "darwin", warn: (line: string) => warnings.push(line) })).toBe("v2");
+      fs.mkdirSync(flat(home, slug), { recursive: true });
+      expect(localLayout({ slug, home, platform: "darwin", warn: (line: string) => warnings.push(line) })).toBe("v2");
+      expect(warnings).toEqual([]);
+      write(path.join(flat(home, slug), "zeros.db"));
+      expect(localLayout({ slug, home, platform: "darwin", warn: (line: string) => warnings.push(line) })).toBe("v2");
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toContain(v2(home, slug));
+      expect(warnings[0]).toContain(flat(home, slug));
+      expect(fs.readFileSync(path.join(flat(home, slug), "zeros.db"), "utf8")).toBe("db");
+    });
+
+    it("keeps a true legacy profile legacy, and a fresh identity v2", () => {
+      const home = directory();
+      expect(localLayout({ slug, home, platform: "darwin", warn: () => {} })).toBe("v2");
+      write(path.join(flat(home, slug), "zeros.db"));
+      expect(localLayout({ slug, home, platform: "darwin", warn: () => {} })).toBe("legacy");
+      fs.mkdirSync(v2(home, slug), { recursive: true });
+      expect(localLayout({ slug, home, platform: "darwin", warn: () => {} })).toBe("legacy");
+    });
+
+    it("treats a flat folder holding only a Chromium session as the established legacy profile", () => {
+      const home = directory();
+      fs.mkdirSync(path.join(flat(home, slug), "Local Storage", "leveldb"), { recursive: true });
+      expect(localLayout({ slug, home, platform: "darwin", warn: () => {} })).toBe("legacy");
+    });
+
+    it("stops with a clear message when it cannot tell what is established", () => {
+      const home = directory();
+      fs.mkdirSync(support(home), { recursive: true });
+      fs.mkdirSync(path.join(support(home), "com.zeros.local"));
+      fs.writeFileSync(path.join(support(home), "com.zeros.local", "instances"), "not a folder");
+      expect(() => localLayout({ slug, home, platform: "darwin", warn: () => {} })).toThrow(/instances/);
+    });
+  });
+
+  it("keeps an existing legacy profile on its legacy layout", async () => {
+    const root = directory(), home = directory();
+    const identity = checkoutIdentity(root);
+    fs.mkdirSync(path.join(home, "Library/Application Support", `com.zeros.local.${identity.slug}`), { recursive: true });
+    const { env, bundle } = await launchOnce(root, home);
+    expect(env.ZEROS_LOCAL_LAYOUT).toBe("legacy");
+    expect(bundle.bundlePath).toBe(
+      path.join(home, ".zeros-local/instances", identity.slug, "bundle", `${identity.name}.app`),
+    );
+    const registry = JSON.parse(
+      fs.readFileSync(path.join(home, "Library/Application Support/com.zeros.local/instances.json"), "utf8"),
+    );
+    expect(registry.instances[identity.slug].layout).toBe("legacy");
+  });
+
+  it("never removes another development identity's files at launch", async () => {
+    const root = directory(), home = directory();
+    const leftover = path.join(home, "Library/Application Support/com.zeros.local/instances/design-qual-deadbeef");
+    fs.mkdirSync(leftover, { recursive: true });
+    fs.writeFileSync(path.join(leftover, "zeros.db"), "db");
+    const bundle = path.join(home, "Library/Caches/com.zeros.local/bundles/0123456789abcdef");
+    fs.mkdirSync(bundle, { recursive: true });
+    await launchOnce(root, home);
+    expect(fs.readFileSync(path.join(leftover, "zeros.db"), "utf8")).toBe("db");
+    expect(fs.existsSync(bundle)).toBe(true);
+    expect(fs.readFileSync("scripts/electron-local.mjs", "utf8")).not.toMatch(/prune/i);
+  });
+
+  it("registers within a short bound when another process holds the registry lock", async () => {
+    const root = directory(), home = directory();
+    const registry = path.join(home, "Library/Application Support/com.zeros.local/instances.json");
+    fs.mkdirSync(path.dirname(registry), { recursive: true });
+    const holder = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30_000)"], { stdio: "ignore" });
+    try {
+      fs.writeFileSync(`${registry}.lock`, JSON.stringify({ pid: holder.pid, token: "busy" }));
+      const started = Date.now();
+      await runLocalDevelopment({
+        root, home, platform: "darwin", environment: {}, prepareBundle: () => "/local/Electron",
+        run: async () => ({ code: 0, cancelled: false }),
+      });
+      expect(Date.now() - started).toBeLessThan(1_500);
+      expect(fs.existsSync(registry)).toBe(false);
+    } finally {
+      holder.kill("SIGKILL");
+    }
+  });
+
   it("rejects Linux before any build, profile or bundle work", async () => {
     await expect(runLocalDevelopment({ platform: "linux" })).rejects.toThrow(
       "macOS",
@@ -349,6 +485,7 @@ describe("Local launch ownership", () => {
     let count = 0;
     const code = await runLocalDevelopment({
       root: directory(),
+      home: directory(),
       platform: "darwin",
       environment: {},
       signal: controller.signal,

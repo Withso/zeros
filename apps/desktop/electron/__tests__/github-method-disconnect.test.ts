@@ -95,7 +95,7 @@ describe("GitHub method disconnect commit order", () => {
     expect(mocks.beginApp).toHaveBeenCalledWith(true, true, false);
   });
 
-  it.each(["dev", "alpha", "beta", "stable"])(
+  it.each(["dev", "alpha", "stable"])(
     "preserves the installation flow for %s even with former workspace Dev variables",
     async (channel) => {
       vi.stubEnv("ZEROS_CHANNEL", channel);

@@ -7,14 +7,17 @@ import saved from "./fixtures/v6b-channel-tags.json";
 // Public response fields retained from V6b-channel-tags.json. The audit saved
 // selected run fields; repository/status/job envelopes below are API fakes.
 const repository = "Withso/zeros", descendant = "a".repeat(40);
-function harness(channel: "alpha" | "beta", sameTag = false) {
+function harness(channel: "alpha" | "production", sameTag = false) {
   const snapshot = saved.find(row => row.channel === channel)!;
   const published = snapshot.sources.find(row => row.role === "releaseTarget")!;
-  const run = { ...snapshot.successfulTargetRuns![0], repository: { full_name: repository }, head_repository: { full_name: repository },
+  // The audit saved no Production run; this one is an API fake for its published target.
+  const savedRun = snapshot.successfulTargetRuns?.[0] ?? { id: 1001, run_number: 1, run_attempt: 1, head_sha: published.sha,
+    head_branch: "release/0.1.19", event: "workflow_dispatch", conclusion: "success", path: ".github/workflows/release-promote.yml" };
+  const run = { ...savedRun, repository: { full_name: repository }, head_repository: { full_name: repository },
     status: "completed", updated_at: "2026-09-29T10:02:00Z" };
   const job = { run_id: run.id, head_sha: run.head_sha, head_branch: run.head_branch, status: "completed", conclusion: "success",
-    name: `Build + publish ${channel === "alpha" ? "Alpha" : "Beta"} (macOS arm64 · signed · NOT notarized)`,
-    steps: [{ name: `Publish rolling "${channel}" prerelease`, status: "completed", conclusion: "success", completed_at: "2026-09-29T10:01:00Z" }] };
+    name: channel === "alpha" ? "Build + publish Alpha (macOS arm64 · signed · NOT notarized)" : "Promote to Production",
+    steps: [{ name: channel === "alpha" ? 'Publish rolling "alpha" prerelease' : "Publish GitHub release", status: "completed", conclusion: "success", completed_at: "2026-09-29T10:01:00Z" }] };
   const responses = { runs: [run], jobs: [job] }, requests: string[] = [], gitCalls: string[][] = [];
   const fetcher: typeof fetch = async (url, init) => {
     requests.push(String(url));
@@ -43,18 +46,18 @@ describe("V6b existing rolling-tag bootstrap", () => {
     const fixture = harness("alpha");
     fixture.job.name = "Alpha publication / Publish Alpha feed";
     expect((await fixture.baseline())?.sourceSha).toBe(fixture.published.sha);
-    for (const name of ["Untrusted publication / Publish Alpha feed", "Alpha publication / Publish Beta feed", "Alpha publication / other / Publish Alpha feed"]) {
+    for (const name of ["Untrusted publication / Publish Alpha feed", "Alpha publication / Publish Production feed", "Alpha publication / other / Publish Alpha feed"]) {
       fixture.job.name = name;
       expect(await fixture.client.lastPublication("alpha")).toBeNull();
     }
   });
-  it.each(["alpha", "beta"] as const)("recognizes the separate %s publisher while retaining historical combined jobs", async channel => {
-    const fixture = harness(channel);
-    fixture.responses.jobs[0].name = `Publish ${channel === "alpha" ? "Alpha" : "Beta"} feed`;
+  it("recognizes the separate Alpha publisher while retaining historical combined jobs", async () => {
+    const fixture = harness("alpha");
+    fixture.responses.jobs[0].name = "Publish Alpha feed";
     expect((await fixture.baseline())?.sourceSha).toBe(fixture.published.sha);
   });
   it.each(["Notarize + verify + publish (macOS arm64)", "Publish Production feed"])("recognizes Production publication provenance from %s", async publisher => {
-    const fixture = harness("beta");
+    const fixture = harness("production");
     fixture.run.path = ".github/workflows/release.yml";
     fixture.run.event = "workflow_dispatch";
     fixture.job.name = publisher;
@@ -62,7 +65,7 @@ describe("V6b existing rolling-tag bootstrap", () => {
     expect((await fixture.client.lastPublication("production"))?.sourceSha).toBe(fixture.published.sha);
   });
   it("recognizes Production publication by release-promote.yml, and never counts a release candidate", async () => {
-    const fixture = harness("beta");
+    const fixture = harness("production");
     Object.assign(fixture.run, { path: ".github/workflows/release-promote.yml", event: "workflow_dispatch" });
     fixture.job.name = "Promote to Production";
     fixture.job.steps[0].name = "Publish GitHub release";
@@ -74,13 +77,13 @@ describe("V6b existing rolling-tag bootstrap", () => {
     fixture.job.steps[0].name = "Publish release candidate";
     expect(await fixture.client.lastPublication("production")).toBeNull();
     // A promote job name from another workflow is not Production provenance.
-    Object.assign(fixture.run, { path: ".github/workflows/release-beta.yml" });
+    Object.assign(fixture.run, { path: ".github/workflows/release-alpha.yml" });
     fixture.job.name = "Promote to Production";
     fixture.job.steps[0].name = "Publish GitHub release";
     expect(await fixture.client.lastPublication("production")).toBeNull();
   });
-  it.each(["alpha", "beta"] as const)("allows the already published %s schema despite the saved stale remote tag", async channel => {
-    const f = harness(channel);
+  it("allows the already published Alpha schema despite the saved stale remote tag", async () => {
+    const channel = "alpha", f = harness(channel);
     const result = await disabledGuard([], f.candidate, f.deps);
     expect(result.blocked).toBe(false);
     expect(result.message).toContain("tag discrepancy");
@@ -91,7 +94,7 @@ describe("V6b existing rolling-tag bootstrap", () => {
     expect(f.gitCalls.every(args => ["for-each-ref", "rev-parse"].includes(args[0]))).toBe(true);
   });
   it("keeps new schema changes blocked beyond that publication", async () => {
-    const f = harness("beta");
+    const f = harness("alpha");
     f.deps.migrationManifest = async source => source === descendant ? { head: "0105_next.sql", sha256: "e".repeat(64) } : f.current;
     expect((await disabledGuard([], { ...f.candidate, sourceSha: descendant }, f.deps)).blocked).toBe(true);
     f.deps.migrationManifest = async () => f.current;
@@ -99,14 +102,14 @@ describe("V6b existing rolling-tag bootstrap", () => {
   });
   it("requires exact repository, source repository, workflow, event, channel branch and successful publication", async () => {
     for (const patch of [{ repository: { full_name: "other/zeros" } }, { head_repository: { full_name: "other/zeros" } },
-      { path: ".github/workflows/preflight.yml" }, { event: "pull_request" }, { head_branch: "main" }, { conclusion: "failure" },
+      { path: ".github/workflows/preflight.yml" }, { event: "pull_request" }, { head_branch: "release/0.1.19" }, { conclusion: "failure" },
       { status: "in_progress" }, { head_sha: "release/0.1.19" }]) {
-      const f = harness("beta"); Object.assign(f.responses.runs[0], patch);
+      const f = harness("alpha"); Object.assign(f.responses.runs[0], patch);
       expect(await f.baseline()).toBeNull();
     }
     for (const patch of [{ run_id: 1 }, { head_sha: descendant }, { name: "test" }, { conclusion: "failure" }, { steps: [] },
-      { steps: [{ name: 'Publish rolling "beta" prerelease', status: "completed", conclusion: "skipped", completed_at: "2026-09-29T10:01:00Z" }] }]) {
-      const f = harness("beta"); Object.assign(f.responses.jobs[0], patch);
+      { steps: [{ name: 'Publish rolling "alpha" prerelease', status: "completed", conclusion: "skipped", completed_at: "2026-09-29T10:01:00Z" }] }]) {
+      const f = harness("alpha"); Object.assign(f.responses.jobs[0], patch);
       expect(await f.baseline()).toBeNull();
     }
   });
@@ -118,7 +121,7 @@ describe("V6b existing rolling-tag bootstrap", () => {
     expect(f.requests.every(url => !url.includes("/releases/"))).toBe(true);
   });
   it("uses the most recent successful publish time even for a rerun of an older run", async () => {
-    const f = harness("beta");
+    const f = harness("alpha");
     const older = { ...f.run, id: f.run.id - 1, head_sha: descendant, updated_at: "2026-09-29T11:02:00Z" };
     f.responses.runs.push(older);
     f.responses.jobs.push({ ...f.job, run_id: older.id, head_sha: descendant,

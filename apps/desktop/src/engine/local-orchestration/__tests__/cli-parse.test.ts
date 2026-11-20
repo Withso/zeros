@@ -50,7 +50,7 @@ describe("Local CLI argv", () => {
   });
 
   it("accepts global options anywhere, equals values, and channel-specific links verbatim", () => {
-    const link = "zeros-beta://chat/chat-1";
+    const link = "zeros-alpha://chat/chat-1";
     const argv = ["--json", "chat", "wait", link, "--turn=turn-1", "--request-id", "retry:1", "--timeout=0.25"];
     expect(parseLocalCliArgs(argv)).toEqual({ command: "chat.wait", json: true, requestId: "retry:1", args: { targets: [{ chat: link, turn: "turn-1" }], timeoutMs: 250 } });
     expect(argv).toEqual(["--json", "chat", "wait", link, "--turn=turn-1", "--request-id", "retry:1", "--timeout=0.25"]);

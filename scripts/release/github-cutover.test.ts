@@ -45,7 +45,8 @@ describe("controlled-cutover receipt evidence", () => {
     expect(await client([run], receipt()).cutoverReceipt("production", sha)).toBe(true);
   });
   it.each([
-    ["another channel", receipt({ channel: "beta" })],
+    ["another channel", receipt({ channel: "alpha" })],
+    ["a retired channel", receipt({ channel: "beta" })],
     ["another run", receipt({ runId: "8" })],
     ["a backend on another commit", receipt({ backend: { ...receipt().backend, sourceSha: "c".repeat(40) } })],
     ["a missing Ops upload", receipt({ pages: [{ id: "page1", surface: "app" }] })],

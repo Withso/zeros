@@ -89,7 +89,7 @@ describe("Zeros bundle detection", () => {
   it("matches release-channel bundles only", () => {
     expect(appBundleName("/Applications/Zeros Alpha.app/Contents/MacOS/Zeros Alpha")).toBe("Zeros Alpha");
     expect(isZerosBundle("Zeros")).toBe(true);
-    expect(isZerosBundle("Zeros Beta")).toBe(true);
+    expect(isZerosBundle("Zeros Dev")).toBe(true);
     expect(isZerosBundle("Zeroscope")).toBe(false);
     expect(isZerosBundle("Zeros Helper (Renderer)")).toBe(false);
     expect(isZerosBundle(null)).toBe(false);

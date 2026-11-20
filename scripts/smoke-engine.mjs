@@ -97,7 +97,7 @@ function getFreePort() {
 
 // Prove an INDEPENDENT process can drive the packaged sidecar's application
 // event loop, not merely complete a TCP handshake against its listen backlog.
-// beta.84 passed the old connect-only check while every HTTP/WS request hung:
+// A shipped build passed the old connect-only check while every HTTP/WS request hung:
 // its early same-process probe passed, then native FSEvents initialization
 // deadlocked the Bun-compiled event loop later in startup.
 function probeHealth(port) {

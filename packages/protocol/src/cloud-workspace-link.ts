@@ -23,7 +23,7 @@ export interface CloudWorkspaceLink {
 // The renderer's cloud workspace key accepts the same UUIDs.
 const UUID = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}";
 const UUID_ONLY = new RegExp(`^${UUID}$`);
-const LINK = new RegExp(`^(zeros(?:-alpha|-beta|-dev)?)://cloud-workspace/(${UUID})/(${UUID})$`);
+const LINK = new RegExp(`^(zeros(?:-alpha|-dev)?)://cloud-workspace/(${UUID})/(${UUID})$`);
 
 export function formatCloudWorkspaceLink(
   scheme: LocalLinkScheme,

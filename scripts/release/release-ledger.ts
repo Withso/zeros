@@ -11,7 +11,7 @@ export const MAX_LEDGER_BYTES = 512 * 1024;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 const ReleaseEntry = z.object({ version: z.string(), publishedAt: z.string().datetime(), sourceSha: z.string().regex(SHA) }).strict();
-export const ReleaseLedger = z.object({ version: z.literal(1), channel: z.enum(["alpha", "beta", "production"]),
+export const ReleaseLedger = z.object({ version: z.literal(1), channel: z.enum(["alpha", "production"]),
   releases: z.array(ReleaseEntry).max(MAX_LEDGER_RELEASES) }).strict();
 export type Ledger = z.infer<typeof ReleaseLedger>;
 export type LedgerEntry = z.infer<typeof ReleaseEntry>;
@@ -34,6 +34,8 @@ function versionParts(channel: Channel, version: string): bigint[] {
 }
 
 export function buildReleaseLedger(channel: Channel, previous: unknown | null, entry: LedgerEntry): Ledger {
+  // Never write a ledger the reader (ReleaseLedger) would reject.
+  requireCheck(ReleaseLedger.shape.channel.safeParse(channel).success, "Release ledger channel is unsupported");
   const candidate = ReleaseEntry.safeParse(entry);
   requireCheck(candidate.success, "Release ledger entry is invalid");
   const parts = versionParts(channel, candidate.data.version);

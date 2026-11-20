@@ -100,7 +100,7 @@ try {
       catch (error) { if (error.code !== "ENOENT") throw error; }
     }
     await fs.copyFile(path.join(source.root, "package.json"), path.join(stage, "package.json"));
-    const identity = { slug: `design-perf-${randomUUID().slice(0, 8)}`, name: "Zeros Design Performance" };
+    const identity = { slug: randomUUID().replace(/-/g, "").slice(0, 16), name: "Zeros Design Performance" };
     const ports = await pickLocalPorts(identity.slug);
     const cdpPort = await freePort();
     const env = { ...localEnvironment({ identity, ...ports }), ZEROS_ISOLATE: "1", ZEROS_NO_ENGINE_HMR: "1", ZEROS_NO_MAIN_HMR: "1",

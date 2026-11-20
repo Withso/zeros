@@ -34,7 +34,7 @@ const stablePromoteWorkflow = readFileSync(
   ".github/workflows/release-promote.yml",
   "utf8",
 );
-// The PRE-RELEASE channel workflow: Alpha (every merge to main); Beta is retired.
+// The PRE-RELEASE channel workflow: Alpha (every merge to main).
 // Alpha gates its writers on explicit CI readiness. Adding a channel
 // workflow without adding it here would ship a channel whose differential-update
 // blockmap is silently dropped: updates still work, but every client downloads the
@@ -159,7 +159,7 @@ requireWorkflowToken(
   2,
 );
 for (const { label, text, file, parent, publication } of channelReleaseWorkflows) {
-  // `alpha` | `beta` — the rolling release tag AND the artifact basename. They
+  // `alpha` — the rolling release tag AND the artifact basename. They
   // must agree, or the feed references assets that were never uploaded.
   const ch = /release-(\w+)\.yml$/.exec(file)?.[1];
   requireWorkflowToken(text, label, 'ZIP_BLOCKMAP="${ZIP}.blockmap"');
@@ -178,8 +178,8 @@ for (const { label, text, file, parent, publication } of channelReleaseWorkflows
   // latest-mac.yml still fails; verified by swapping one line, which a min-1
   // check waved through.
   //
-  // This is the #198 guard: that incident removed beta's uploads while the app
-  // kept polling beta's feed, producing a stale feed and a false "You're up to
+  // This is the #198 guard: that incident removed a channel's uploads while the
+  // app kept polling its feed, producing a stale feed and a false "You're up to
   // date!". Since the rolling prerelease is now BOTH the manual-install source
   // and the update origin, these four references are the whole chain.
   requireWorkflowToken(text, label, `release/${ch}-mac.yml`, 4);
@@ -292,7 +292,7 @@ if (existsSync(localLauncher) && !(statSync(localLauncher).mode & 0o111)) {
 // node_modules on disk, so ANY runtime it locates via require.resolve is
 // unreachable there — while resolving perfectly in dev (`bun apps/desktop/src/cli.ts`) and in
 // vitest. That asymmetry shipped a Claude that threw "Native CLI binary for
-// darwin-arm64 not found" on every send in Beta + Production while dev was
+// darwin-arm64 not found" on every send in packaged builds while dev was
 // flawless (0.0.14), and nothing failed at build time: the app just booted into a
 // broken agent. These assertions are the missing build-time failure.
 for (const staged of CLAUDE_STAGED) {
@@ -540,7 +540,7 @@ if (froms.length === 0) {
 // node-pty's Darwin prebuild is deliberate. A blanket source rebuild creates a
 // higher-priority build/ override, making the packaged selection cache-dependent.
 // Guard the deterministic policy here; the packaged spawn smoke covers the
-// separate app.asar.unpacked helper-location failure seen in beta.58.
+// separate app.asar.unpacked helper-location failure seen in a shipped build.
 if (!/^npmRebuild:\s*false\s*$/m.test(yml)) {
   errs.push(
     "npmRebuild must stay false (beforePack rebuilds only better-sqlite3)",
