@@ -26,8 +26,8 @@ export type SizeDisplay =
 
 /** A known size stays while it is measured again; an unknown one shows the
  * walk's lower bound or a placeholder; a failure never reads as zero. */
-export function sizeDisplay(category: LocalStorageCategory | undefined): SizeDisplay {
-  if (!category) return { kind: "pending" };
+export function sizeDisplay(category: LocalStorageCategory | undefined, failed = false): SizeDisplay {
+  if (!category) return failed ? { kind: "unmeasured" } : { kind: "pending" };
   if (category.status === "measured") return { kind: "exact", bytes: category.bytes! };
   if (category.status === "partial") return { kind: "at-least", bytes: category.bytes! };
   if (category.measuring)
@@ -72,6 +72,20 @@ export function summarize(report: LocalStorageReport | null): StorageSummary {
     return { id: group.id, label: group.label, bytes };
   });
   return { total, exact, known, groups };
+}
+
+export type TotalDisplay =
+  | { kind: "known"; bytes: number; exact: boolean }
+  | { kind: "pending" }
+  | { kind: "unmeasured" };
+
+/** A placeholder only while something is being measured: before the first
+ * reply or during a run. A finished or failed measurement with no size known
+ * reads as not measured. */
+export function totalDisplay(report: LocalStorageReport | null, failed: boolean): TotalDisplay {
+  const summary = summarize(report);
+  if (summary.known) return { kind: "known", bytes: summary.total, exact: summary.exact };
+  return (report ? report.measuring : !failed) ? { kind: "pending" } : { kind: "unmeasured" };
 }
 
 export function updatedLabel(report: LocalStorageReport | null, now: number): string {

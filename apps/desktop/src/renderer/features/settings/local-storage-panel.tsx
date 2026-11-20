@@ -22,7 +22,7 @@ import { Card } from "../../shared/ui/primitives/card";
 import { toast } from "../../shared/ui/primitives/elements";
 import { SkeletonLine } from "../../shared/ui/primitives/skeleton";
 import { Tooltip } from "../../shared/ui/primitives/tooltip";
-import { formatBytes, sizeDisplay, summarize, updatedLabel, type SummaryGroup } from "./local-storage-format";
+import { formatBytes, sizeDisplay, summarize, totalDisplay, updatedLabel, type SummaryGroup } from "./local-storage-format";
 import {
   clearLocalStorageCache,
   ensureLocalStorageMeasured,
@@ -107,6 +107,7 @@ export function LocalStoragePanel({ surfaceActive = false }: { surfaceActive?: b
 
 function Summary({ view, now, active }: { view: LocalStorageView; now: number; active: boolean }) {
   const summary = summarize(view.report);
+  const total = totalDisplay(view.report, view.error !== null);
   const measuring = view.report?.measuring ?? false;
   const busy = measuring || view.clearing || !active;
   const status = view.error && !measuring ? "Could not measure" : updatedLabel(view.report, now);
@@ -114,15 +115,17 @@ function Summary({ view, now, active }: { view: LocalStorageView; now: number; a
     <Card role="group" aria-label="Total storage">
       <div className="flex items-center justify-between gap-4">
         <p className="m-0 flex min-w-0 items-baseline gap-1.5">
-          {summary.known ? (
+          {total.kind === "known" ? (
             <>
-              {!summary.exact && <span className="text-muted-fg text-3xxs">At least</span>}
-              <span className="text-fg1 text-lg leading-6 font-medium tabular-nums">{formatBytes(summary.total)}</span>
+              {!total.exact && <span className="text-muted-fg text-3xxs">At least</span>}
+              <span className="text-fg1 text-lg leading-6 font-medium tabular-nums">{formatBytes(total.bytes)}</span>
             </>
-          ) : (
+          ) : total.kind === "pending" ? (
             <span className="flex h-6 items-center" role="img" aria-label="Measuring total">
               <SkeletonLine surface="card" className="w-16" />
             </span>
+          ) : (
+            <span className="text-muted-fg text-xs leading-6">Not measured</span>
           )}
           <span className="text-fg3 text-xs">on this Mac</span>
         </p>
@@ -191,7 +194,7 @@ function StorageRow({
   return (
     <SettingsRow leading={<Icon className="text-fg3 size-3.5 shrink-0" aria-hidden />} label={spec.label} hint={hint}>
       <div className="flex items-center gap-3">
-        <Size category={category} />
+        <Size category={category} failed={view.error !== null} />
         <div className="flex min-w-29 justify-end">
           <RowAction spec={spec} category={category} view={view} active={active} />
         </div>
@@ -200,8 +203,8 @@ function StorageRow({
   );
 }
 
-function Size({ category }: { category: LocalStorageCategory | undefined }) {
-  const size = sizeDisplay(category);
+function Size({ category, failed }: { category: LocalStorageCategory | undefined; failed: boolean }) {
+  const size = sizeDisplay(category, failed);
   return (
     <div className="text-fg2 min-w-19 text-right text-xs leading-4.5 tabular-nums">
       {size.kind === "exact" ? (

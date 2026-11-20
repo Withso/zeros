@@ -213,6 +213,56 @@ describe("Local Storage store", () => {
     expect(calls("local_storage_cancel")).toBe(1);
   });
 
+  it("a viewer that returns while a cancelled run settles gets exactly one fresh measurement", async () => {
+    const first = deferred<LocalStorageReport>();
+    native.invoke.mockImplementation((command: string) =>
+      command === "local_storage_measure" ? (calls("local_storage_measure") === 1 ? first.promise : new Promise(() => {})) : Promise.resolve(null),
+    );
+    const release = retainLocalStorageView();
+    release();
+    await flush();
+    expect(calls("local_storage_cancel")).toBe(1);
+    const again = retainLocalStorageView();
+    expect(calls("local_storage_measure")).toBe(1);
+    // Main settles the cancelled run with nothing newly confirmed.
+    first.resolve(report(4, null, { measuredAt: null }));
+    await flush();
+    expect(calls("local_storage_measure")).toBe(2);
+    await flush();
+    expect(calls("local_storage_measure")).toBe(2);
+    again();
+  });
+
+  it("does not restart when the cancel lost the race and the run completed", async () => {
+    const first = deferred<LocalStorageReport>();
+    native.invoke.mockImplementation((command: string) =>
+      command === "local_storage_measure" ? first.promise : Promise.resolve(null),
+    );
+    const release = retainLocalStorageView();
+    release();
+    await flush();
+    const again = retainLocalStorageView();
+    first.resolve(report(4, 10));
+    await flush();
+    await flush();
+    expect(calls("local_storage_measure")).toBe(1);
+    again();
+  });
+
+  it("does not restart a cancelled run once no viewer remains", async () => {
+    const first = deferred<LocalStorageReport>();
+    native.invoke.mockImplementation((command: string) =>
+      command === "local_storage_measure" ? first.promise : Promise.resolve(null),
+    );
+    const release = retainLocalStorageView();
+    release();
+    await flush();
+    first.resolve(report(4, null, { measuredAt: null }));
+    await flush();
+    await flush();
+    expect(calls("local_storage_measure")).toBe(1);
+  });
+
   it("does not cancel when nothing is running", async () => {
     native.invoke.mockResolvedValueOnce(report(1, 1));
     const release = retainLocalStorageView();

@@ -13,6 +13,32 @@ import { resolveLocalStorageLocations, updaterLocations, type LocalStorageLocati
 import { planLocalStorage, revealTarget, type LocalStoragePlan } from "../local-storage/plan";
 import { createLocalStorageService, type Measurer } from "../local-storage/service";
 
+// Inject errno failures for chosen paths; every other call is the real fs.
+const faults = vi.hoisted(() => new Map<string, string>());
+vi.mock("node:fs/promises", async (importActual) => {
+  const actual = await importActual<typeof import("node:fs/promises")>();
+  const fault = (call: string, target: unknown) => {
+    const code = faults.get(`${call}:${String(target)}`);
+    if (code) throw Object.assign(new Error(`${code}: ${call} ${String(target)}`), { code });
+  };
+  const wrapped = {
+    ...actual,
+    realpath: (async (target: string, ...rest: unknown[]) => {
+      fault("realpath", target);
+      return (actual.realpath as (...a: unknown[]) => Promise<string>)(target, ...rest);
+    }) as typeof actual.realpath,
+    readdir: (async (target: string, ...rest: unknown[]) => {
+      fault("readdir", target);
+      return (actual.readdir as (...a: unknown[]) => Promise<string[]>)(target, ...rest);
+    }) as typeof actual.readdir,
+    lstat: (async (target: string, ...rest: unknown[]) => {
+      fault("lstat", target);
+      return (actual.lstat as (...a: unknown[]) => Promise<unknown>)(target, ...rest);
+    }) as typeof actual.lstat,
+  };
+  return { ...wrapped, default: wrapped };
+});
+
 const ENV = ["HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "ZEROS_DATA_DIR", "ZEROS_WORKSPACES_DIR", "ZEROS_DESIGN_WORKSPACES_DIR",
   "ZEROS_DEV", "ZEROS_RUNTIME_MODE", "ZEROS_CHANNEL", "ZEROS_INSTANCE", "ZEROS_LOCAL_DEVELOPMENT", "ZEROS_LOCAL_LAYOUT"] as const;
 const saved: Record<string, string | undefined> = {};
@@ -29,6 +55,7 @@ beforeEach(() => {
   Object.defineProperty(process, "platform", { value: "darwin" });
 });
 afterEach(() => {
+  faults.clear();
   Object.defineProperty(process, "platform", { value: realPlatform });
   for (const key of ENV) {
     if (saved[key] === undefined) delete process.env[key];
@@ -206,6 +233,47 @@ describe("planLocalStorage per identity", () => {
     }
   });
 
+  it("an unresolvable root is unknown, not missing: its rows are not measured as zero", async () => {
+    const locations = resolveLocalStorageLocations(runtimeFor("stable"));
+    populate(locations);
+    faults.set(`realpath:${locations.workspaces}`, "EACCES");
+    faults.set(`realpath:${locations.sessionData}`, "EIO");
+    const plan = await planLocalStorage(locations);
+    expect(plan.workspaces.unresolved).toBe(true);
+    // Every row the profile's entries could land in is unknown.
+    expect(plan.cache.unresolved).toBe(true);
+    expect(plan["window-state"].unresolved).toBe(true);
+    expect(plan.cache.paths).toEqual([]);
+    for (const id of ["chats", "provider-accounts", "other-app-data", "logs", "cloud-sync"] as const)
+      expect(plan[id].unresolved, id).toBe(false);
+  });
+
+  it("an unlistable root leaves every row it feeds unknown", async () => {
+    const locations = resolveLocalStorageLocations(runtimeFor("stable"));
+    populate(locations);
+    faults.set(`readdir:${locations.dataDir}`, "EACCES");
+    const plan = await planLocalStorage(locations);
+    for (const id of ["chats", "provider-accounts", "other-app-data"] as const) expect(plan[id].unresolved, id).toBe(true);
+    expect(plan.cache.unresolved).toBe(false);
+  });
+
+  it.each(["ENOENT", "ENOTDIR"])("%s from a root still means absent, measured as nothing", async (code) => {
+    const locations = resolveLocalStorageLocations(runtimeFor("stable"));
+    populate(locations);
+    faults.set(`realpath:${locations.cloudSync}`, code);
+    const plan = await planLocalStorage(locations);
+    expect(plan["cloud-sync"]).toMatchObject({ paths: [], unresolved: false });
+  });
+
+  it("Reveal treats only ENOENT/ENOTDIR as absent", async () => {
+    const locations = resolveLocalStorageLocations(runtimeFor("stable"));
+    populate(locations);
+    faults.set(`lstat:${locations.logDir}`, "EACCES");
+    expect(await revealTarget(locations, "logs")).toBe(locations.logDir);
+    faults.set(`lstat:${locations.logDir}`, "ENOENT");
+    expect(await revealTarget(locations, "logs")).toBeNull();
+  });
+
   it("does not count a symlinked alias twice", async () => {
     const locations = resolveLocalStorageLocations(runtimeFor("stable"));
     populate(locations);
@@ -230,7 +298,7 @@ describe("planLocalStorage per identity", () => {
 // ── Run coordination with an injected measurer ──────────────────────────────
 
 const PLAN = Object.fromEntries(
-  LOCAL_STORAGE_CATEGORY_IDS.map((id) => [id, { paths: [`/fixture/${id}`], location: null, reveal: null }]),
+  LOCAL_STORAGE_CATEGORY_IDS.map((id) => [id, { paths: [`/fixture/${id}`], location: null, reveal: null, unresolved: false }]),
 ) as LocalStoragePlan;
 
 interface Call {
@@ -248,7 +316,7 @@ function harness(overrides: { plan?: () => Promise<LocalStoragePlan>; concurrenc
     new Promise<DuResult>((resolve) => {
       active += 1;
       peak = Math.max(peak, active);
-      const id = paths[0]!.slice("/fixture/".length) as LocalStorageCategoryId;
+      const id = (paths[0]?.slice("/fixture/".length) ?? "(no paths)") as LocalStorageCategoryId;
       const call: Call = {
         id,
         options,
@@ -394,6 +462,34 @@ describe("createLocalStorageService", () => {
     expect(report.categories.every((c) => c.status === "unmeasured" && !c.measuring)).toBe(true);
   });
 
+  it("shows a row whose location could not be resolved as not measured, without running du for it", async () => {
+    const plan = { ...PLAN, workspaces: { ...PLAN.workspaces, paths: [], unresolved: true } };
+    const h = harness({ plan: async () => plan });
+    const first = h.service.measure();
+    await h.settleAll(() => ({ status: "measured", bytes: 5 }), LOCAL_STORAGE_CATEGORY_IDS.length - 1);
+    const report = await first;
+    expect(h.calls.map((c) => c.id)).not.toContain("workspaces");
+    expect(byId(report, "workspaces")).toMatchObject({ status: "unmeasured", bytes: null, measuring: false });
+  });
+
+  it("a planner failure after cancel keeps the last confirmed values", async () => {
+    let fail: (error: Error) => void = () => {};
+    let planning = 0;
+    const h = harness({
+      plan: () => (planning++ === 0 ? Promise.resolve(PLAN) : new Promise<LocalStoragePlan>((_, reject) => (fail = reject))),
+    });
+    const first = h.service.measure();
+    await h.settleAll(() => ({ status: "measured", bytes: 77 }));
+    await first;
+    const second = h.service.measure();
+    await vi.waitFor(() => expect(planning).toBe(2));
+    h.service.cancel();
+    fail(new Error("EIO"));
+    const report = await second;
+    expect(report.measuring).toBe(false);
+    expect(report.categories.every((c) => c.status === "measured" && c.bytes === 77 && !c.measuring)).toBe(true);
+  });
+
   it("cancels the children and keeps the last confirmed values", async () => {
     const h = harness();
     const first = h.service.measure();
@@ -474,6 +570,35 @@ describe("clearCache", () => {
     expect(clear).toHaveBeenCalledOnce();
     expect(result.freedBytes).toBeNull();
     expect(result.report.measuring).toBe(false);
+  });
+
+  it("cancel drops a measurement queued behind clearing, and the resume clearing would start", async () => {
+    const h = harness({ concurrency: 1 });
+    const run = h.service.measure();
+    expect(await h.settleNext(1)).toBe("chats");
+    await vi.waitFor(() => expect(h.calls.length).toBe(2));
+    const clearing = h.service.clearCache(async () => {});
+    await run;
+    const queued = h.service.measure();
+    h.service.cancel();
+    await clearing;
+    const report = await queued;
+    expect(report.measuring).toBe(false);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    // Only the interrupted walk and clearing's own samples ever ran du.
+    expect(h.calls.filter((c) => !("done" in c))).toEqual([]);
+    expect(h.calls.map((c) => c.id)).toEqual(["chats", "provider-accounts", "cache", "cache"].slice(0, h.calls.length));
+    expect(h.service.report().measuring).toBe(false);
+  });
+
+  it("a later measure after a cancelled clear starts normally", async () => {
+    const h = harness();
+    const clearing = h.service.clearCache(async () => {});
+    h.service.cancel();
+    await clearing;
+    const next = h.service.measure();
+    await h.settleAll(() => ({ status: "measured", bytes: 2 }));
+    expect((await next).categories.every((c) => c.bytes === 2)).toBe(true);
   });
 
   it("shares a second click and makes a measure request wait for it", async () => {

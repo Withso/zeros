@@ -4,7 +4,7 @@ import {
   type LocalStorageCategory,
   type LocalStorageReport,
 } from "../../../../../shared/local-storage";
-import { formatBytes, sizeDisplay, summarize, updatedLabel } from "../local-storage-format";
+import { formatBytes, sizeDisplay, summarize, totalDisplay, updatedLabel } from "../local-storage-format";
 
 const category = (patch: Partial<LocalStorageCategory>): LocalStorageCategory => ({
   id: "workspaces",
@@ -58,6 +58,22 @@ describe("Local Storage presentation", () => {
     const partial = summarize(report((id) => (id === "logs" ? {} : { status: "measured", bytes: 10 })));
     expect(partial).toMatchObject({ total: 80, exact: false });
     expect(summarize(null)).toMatchObject({ total: 0, exact: false, known: false });
+  });
+
+  it("shows the total as not measured once measuring stopped with no size known", () => {
+    const none = report(() => ({}));
+    expect(totalDisplay(none, false)).toEqual({ kind: "unmeasured" });
+    expect(totalDisplay(report(() => ({ measuring: true }), true), false)).toEqual({ kind: "pending" });
+    // Before the first reply the page is measuring; after a failed one it is not.
+    expect(totalDisplay(null, false)).toEqual({ kind: "pending" });
+    expect(totalDisplay(null, true)).toEqual({ kind: "unmeasured" });
+    expect(totalDisplay(report(() => ({ status: "measured", bytes: 5 })), false)).toEqual({ kind: "known", bytes: 45, exact: true });
+    expect(totalDisplay(report((id) => (id === "logs" ? {} : { status: "measured", bytes: 5 })), false)).toEqual({ kind: "known", bytes: 40, exact: false });
+  });
+
+  it("shows rows as not measured, not as a placeholder, when the first reply failed", () => {
+    expect(sizeDisplay(undefined, true)).toEqual({ kind: "unmeasured" });
+    expect(sizeDisplay(undefined, false)).toEqual({ kind: "pending" });
   });
 
   it("describes freshness", () => {

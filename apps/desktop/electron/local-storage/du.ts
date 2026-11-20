@@ -38,9 +38,10 @@ export function assertDuPath(value: unknown): asserts value is string {
 }
 
 /**
- * Allocated size of `paths` from one system `du` per chunk: `-P` never follows
- * a symlink, `-x` stays on each path's volume, and du counts a hardlinked file
- * once per invocation. The walk runs in a child process so neither Electron's
+ * Allocated size of `paths` from one system `du` per chunk of 512 paths: `-P`
+ * never follows a symlink and `-x` stays on each path's volume. du counts a
+ * hardlinked file once per invocation, so links that fall in different chunks
+ * are each counted. The walk runs in a child process so neither Electron's
  * main thread nor the engine walks large trees. A timeout, cancellation or
  * unreadable folder never yields an exact-looking number: completed paths
  * become a lower bound (`partial`), and nothing completed is `unmeasured`.

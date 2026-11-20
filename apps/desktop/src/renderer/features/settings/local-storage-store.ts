@@ -25,6 +25,8 @@ const EMPTY: LocalStorageView = Object.freeze({ report: null, error: null, clear
 let view: LocalStorageView = EMPTY;
 const listeners = new Set<() => void>();
 let measuring: Promise<void> | null = null;
+/** Set when this window cancels the request in flight. */
+let cancelled = false;
 let viewers = 0;
 let listening = false;
 let stopListening: (() => void) | null = null;
@@ -93,6 +95,8 @@ export function ensureLocalStorageMeasured(options: { force?: boolean } = {}): v
   if (fresh && !options.force) return;
   listen();
   publish({ error: null, freedBytes: undefined });
+  cancelled = false;
+  const confirmedAt = report?.measuredAt ?? null;
   measuring = nativeInvoke<unknown>("local_storage_measure")
     .then(
       (value) => accept(parseLocalStorageReport(value)),
@@ -100,7 +104,12 @@ export function ensureLocalStorageMeasured(options: { force?: boolean } = {}): v
     )
     .finally(() => {
       measuring = null;
+      // A page reopened while its cancelled walk settled would otherwise keep
+      // stale or unmeasured rows; restart once unless the run had completed.
+      const restart = cancelled && viewers > 0 && (view.report?.measuredAt ?? null) === confirmedAt;
+      cancelled = false;
       settleListening();
+      if (restart) ensureLocalStorageMeasured({ force: true });
     });
 }
 
@@ -112,6 +121,7 @@ export function warmLocalStorage(): void {
 /** Stop the walk (main kills its du children) unless a view still wants it. */
 export function cancelLocalStorageMeasurement(): void {
   if (viewers > 0 || (!measuring && !view.report?.measuring)) return;
+  if (measuring) cancelled = true;
   void nativeInvoke("local_storage_cancel").catch(() => {});
 }
 
@@ -153,6 +163,7 @@ export function _resetLocalStorageForTests(): void {
   view = EMPTY;
   listeners.clear();
   measuring = null;
+  cancelled = false;
   viewers = 0;
   listening = false;
   stopListening = null;

@@ -66,6 +66,8 @@ export function createLocalStorageService(options: LocalStorageServiceOptions): 
   let run: Run | null = null;
   let clearing: Promise<LocalStorageClearResult> | null = null;
   let clearSampling: AbortController | null = null;
+  /** Advances on cancel; work queued behind a clear checks it before starting. */
+  let cancels = 0;
   let progressTimer: ReturnType<typeof setTimeout> | null = null;
   let current: LocalStorageReport | null = null;
 
@@ -100,6 +102,7 @@ export function createLocalStorageService(options: LocalStorageServiceOptions): 
   };
   const measureOne = async (id: LocalStorageCategoryId, plan: LocalStoragePlan, signal: AbortSignal): Promise<DuResult> => {
     if (signal.aborted) return { status: "unmeasured", bytes: null, reason: "cancelled" };
+    if (plan[id].unresolved) return { status: "unmeasured", bytes: null, reason: "failed" };
     const result = await options.measure(plan[id].paths, {
       signal,
       timeoutMs,
@@ -129,8 +132,10 @@ export function createLocalStorageService(options: LocalStorageServiceOptions): 
       try {
         plan = await options.plan(await options.locations());
       } catch {
-        for (const id of ids) settle(id, { status: "unmeasured", bytes: null, reason: "failed" });
-        remaining.clear();
+        // A cancelled run keeps its confirmed values even if planning then fails.
+        const reason = controller.signal.aborted ? "cancelled" : "failed";
+        for (const id of ids) settle(id, { status: "unmeasured", bytes: null, reason });
+        if (reason === "failed") remaining.clear();
         return finish();
       }
       if (!controller.signal.aborted) applyPlan(plan);
@@ -151,11 +156,16 @@ export function createLocalStorageService(options: LocalStorageServiceOptions): 
 
   const measure = (): Promise<LocalStorageReport> => {
     if (run) return run.promise;
-    if (clearing) return clearing.then(() => measure());
+    if (clearing) {
+      const queuedAt = cancels;
+      const resume = () => (cancels === queuedAt ? measure() : report());
+      return clearing.then(resume, resume);
+    }
     return start([...LOCAL_STORAGE_CATEGORY_IDS]).promise;
   };
 
   const cancel = () => {
+    cancels += 1;
     run?.controller.abort();
     // The cache is still cleared; only its before/after measurement stops.
     clearSampling?.abort();
@@ -163,6 +173,9 @@ export function createLocalStorageService(options: LocalStorageServiceOptions): 
 
   const clearCache = (clear: () => Promise<void>): Promise<LocalStorageClearResult> => {
     if (clearing) return clearing;
+    const startedAt = cancels;
+    clearSampling = new AbortController();
+    const { signal } = clearSampling;
     clearing = (async (): Promise<LocalStorageClearResult> => {
       // Clearing supersedes a measurement in flight, then resumes what it had
       // left, so one measurement still runs at a time.
@@ -172,8 +185,6 @@ export function createLocalStorageService(options: LocalStorageServiceOptions): 
       const resume = interrupted ? [...interrupted.remaining].filter((id) => id !== "cache") : [];
       update("cache", { measuring: true, progressBytes: null });
       publish();
-      clearSampling = new AbortController();
-      const { signal } = clearSampling;
       let plan: LocalStoragePlan | null = null;
       try {
         plan = await options.plan(await options.locations());
@@ -184,7 +195,7 @@ export function createLocalStorageService(options: LocalStorageServiceOptions): 
       const sample = (): Promise<DuResult> =>
         plan ? measureOne("cache", plan, signal) : Promise.resolve({ status: "unmeasured", bytes: null });
       const before = await sample();
-      let after: DuResult = { status: "unmeasured", bytes: null };
+      let after: DuResult;
       try {
         await clear();
       } finally {
@@ -193,7 +204,8 @@ export function createLocalStorageService(options: LocalStorageServiceOptions): 
         clearing = null;
         clearSampling = null;
         publish();
-        if (resume.length > 0) start(resume);
+        // A cancel while clearing (the page closed) also drops the resume.
+        if (resume.length > 0 && cancels === startedAt) start(resume);
       }
       return {
         freedBytes:

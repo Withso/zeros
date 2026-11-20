@@ -120,7 +120,6 @@ window.__ZEROS_NATIVE__ = {
           return report as T;
         }
       } else {
-        await new Promise((resolve) => setTimeout(resolve, 60));
         emit(build({ ...confirmed, chats: { bytes: LOADED.chats } }, true));
       }
       confirmed = loaded();

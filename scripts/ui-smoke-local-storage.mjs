@@ -39,13 +39,22 @@ export async function runLocalStorageSmoke({ page, harnessBase, check }) {
   expect(await calls("local_storage_measure")).toBe(0);
   check("Settings lists Local Storage after Appearance and measures nothing until asked", true);
 
+  // Hold the warmed measurement open so opening provably joins it.
+  const pending = () => page.evaluate(() => window.__localStorageFixture.pending());
+  await page.evaluate(() => window.__localStorageFixture.hold());
   await nav.hover();
   await expect.poll(() => calls("local_storage_measure")).toBe(1);
+  await expect.poll(pending).toBe(true);
   await nav.click();
   await expect(panel.getByText("What Zeros keeps on this Mac.")).toBeVisible();
+  await expect(panel.getByText("Measuring…")).toBeVisible();
+  expect(await pending()).toBe(true);
+  expect(await calls("local_storage_measure")).toBe(1);
+  await page.evaluate(() => window.__localStorageFixture.release());
+  await expect(panel.getByText("Updated just now")).toBeVisible();
   await expect(panel.getByText("124 MB")).toBeVisible();
   expect(await calls("local_storage_measure")).toBe(1);
-  check("Hovering the entry warms the measurement and opening shares it", true);
+  check("Hovering the entry warms the measurement and opening joins the one still in flight", true);
 
   for (const label of ["Workspaces", "Cloud sync", "Chats and history", "Provider accounts", "Window and editor state", "Other app data", "Cache", "Logs", "Updates"])
     await expect(panel.locator("section").getByText(label, { exact: true })).toBeVisible();
