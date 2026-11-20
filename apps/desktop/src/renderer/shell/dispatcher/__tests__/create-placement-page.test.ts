@@ -8,7 +8,7 @@ const s = vi.hoisted(() => ({
   unified: true,
   cloudFeature: true,
   settings: new Map<string, unknown>(),
-  organization: { id: "11111111-1111-4111-8111-111111111111", name: "Withso", isPersonal: false } as { id: string; name: string; isPersonal: boolean },
+  organization: { id: "11111111-1111-4111-8111-111111111111", name: "Withso", isPersonal: false, workspaceCapabilities: { local: false, cloud: true } } as { id: string; name: string; isPersonal: boolean; workspaceCapabilities?: { local: boolean; cloud: boolean } },
   projects: [] as Array<{ id: string; name: string; repoRoot: string; repoSlug: string; isGitRepository?: boolean }>,
   cloudReason: null as string | null,
   dispatch: vi.fn(),
@@ -138,7 +138,7 @@ beforeEach(() => {
   s.unified = true;
   s.cloudFeature = true;
   s.settings.clear();
-  s.organization = { id: ORG, name: "Withso", isPersonal: false };
+  s.organization = { id: ORG, name: "Withso", isPersonal: false, workspaceCapabilities: { local: false, cloud: true } };
   s.projects = [
     { id: "local-zeros", name: "Zeros", repoRoot: "/Users/me/zeros", repoSlug: "zeros" },
     { id: "cloud-zeros", name: "zeros", repoRoot: `cloud://${ORG}/22222222-2222-4222-8222-222222222222`, repoSlug: "zeros" },
@@ -201,6 +201,13 @@ describe("Create placement control", () => {
     expect(tab("Cloud")?.getAttribute("aria-selected")).toBe("true");
     press(tab("This Mac")!);
     expect(s.settings.get("create:placement:v1")).toBe("local");
+    render();
+    expect(tab("This Mac")?.getAttribute("aria-selected")).toBe("true");
+  });
+
+  it("starts on This Mac in the personal home even without local projects", () => {
+    s.organization = { id: "local-personal", name: "Personal", isPersonal: true };
+    s.projects = [];
     render();
     expect(tab("This Mac")?.getAttribute("aria-selected")).toBe("true");
   });

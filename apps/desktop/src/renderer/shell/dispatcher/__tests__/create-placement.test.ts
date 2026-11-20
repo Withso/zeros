@@ -21,6 +21,11 @@ describe("Create placement", () => {
     expect(resolveCreatePlacement({ savedPlacement: "local", cloudAvailable: true, hasLocalProjects: false })).toBe("local");
   });
 
+  it("starts on This Mac where this owner cannot create in the cloud yet", () => {
+    expect(resolveCreatePlacement({ savedPlacement: null, cloudAvailable: true, cloudCreatable: false, hasLocalProjects: false })).toBe("local");
+    expect(resolveCreatePlacement({ savedPlacement: "cloud", cloudAvailable: true, cloudCreatable: false, hasLocalProjects: false })).toBe("cloud");
+  });
+
   it("remembers the last choice as a device preference", () => {
     rememberCreatePlacement("cloud");
     expect(values.get("create:placement:v1")).toBe("cloud");

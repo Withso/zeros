@@ -19,18 +19,21 @@ export function rememberCreatePlacement(placement: CreatePlacement): void {
 }
 
 /** Without cloud the control is hidden and Create is on this Mac. Without a
- * saved choice, a device with no local projects starts in the cloud. */
+ * saved choice, a device with no local projects starts in the cloud only
+ * where this owner can create there; otherwise This Mac's start actions lead. */
 export function resolveCreatePlacement({
   savedPlacement,
   cloudAvailable,
+  cloudCreatable = true,
   hasLocalProjects,
 }: {
   savedPlacement: CreatePlacement | null;
   cloudAvailable: boolean;
+  cloudCreatable?: boolean;
   hasLocalProjects: boolean;
 }): CreatePlacement {
   if (!cloudAvailable) return "local";
-  return savedPlacement ?? (hasLocalProjects ? "local" : "cloud");
+  return savedPlacement ?? (hasLocalProjects || !cloudCreatable ? "local" : "cloud");
 }
 
 function subscribe(listener: () => void): () => void {

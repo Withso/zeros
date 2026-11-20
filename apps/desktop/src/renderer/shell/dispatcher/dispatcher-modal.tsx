@@ -95,6 +95,7 @@ import {
   getActiveOrganizationIdSnapshot,
   getActiveOrganizationSnapshot,
   getOrganizationStoreGeneration,
+  useActiveOrganization,
 } from "../../features/team/team-store";
 import { canCreateWorkspaceIn, localWorkShowsEverywhere, localWorkspaceOwner } from "../../features/team/organization-capabilities";
 import { CloudWorkspacePausedNotice, useOrganizationCloudPaused } from "../../features/team/cloud-workspace-pause";
@@ -242,6 +243,7 @@ function ActiveDispatcherPage({
   // A sidebar route into Create names its project's side; otherwise the last
   // choice, or the cloud when this Mac has no projects yet.
   const savedPlacement = useSavedCreatePlacement();
+  const activeOrganization = useActiveOrganization();
   const cloudFeature = isFeatureEnabled("cloud-workspaces");
   const routedPlacement: CreatePlacement | null = contextProject
     ? isCloudWorkspace(contextProject.repoRoot) ? "cloud" : "local"
@@ -249,6 +251,7 @@ function ActiveDispatcherPage({
   const chosenPlacement = resolveCreatePlacement({
     savedPlacement: cloudFeature ? routedPlacement ?? savedPlacement : null,
     cloudAvailable: cloudFeature,
+    cloudCreatable: canCreateWorkspaceIn(activeOrganization, "cloud"),
     hasLocalProjects: localProjects.length > 0,
   });
   const cloud = useCloudCreate(active, computerSource, preferredCloudRepository, initialProjectId,
