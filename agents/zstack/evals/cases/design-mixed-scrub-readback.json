@@ -1,0 +1,9 @@
+{
+  "id": "design-mixed-scrub-readback",
+  "kind": "replay",
+  "area": "desktop-design",
+  "fixedBy": "pr:1203",
+  "symptom": "Scrubbing a Mixed field across two layers showed one layer's live value (12) instead of Mixed whenever a readback replaced the field's details after the last scrub tick, which CI's slower runner hit on most runs.",
+  "rule": "A Mixed step preview holds the Mixed presentation for the gesture's whole lifetime until its live preview clears, not for one details object.",
+  "check": "pnpm exec vitest run --config vitest.config.ts apps/desktop/src/renderer/features/design-workspace/__tests__/design-inspector-scrub-renders.test.ts"
+}

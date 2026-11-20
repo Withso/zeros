@@ -875,6 +875,32 @@ describe("an inspector field scrub", () => {
     expect(fieldInput("opacity").value).toBe("");
   });
 
+  it("keeps a Mixed scrub reading Mixed when the scrubbed layer's details read back mid-scrub", async () => {
+    const other: DesignRuntimeNodeDetails = {
+      ...card, oid: "other", name: "Other", selector: '[data-oid="other"]',
+      styles: { ...card.styles, opacity: "1" },
+    };
+    const selection = { selectedNodeId: "card", selectedNodeIds: ["card", "other"] };
+    useDesignRuntimeStore.getState().publishNodeDetails("w", "/repo", "home.html", other, sourceVersion);
+    await showRuntime(card, false, sourceVersion, selection);
+    expect(fieldInput("opacity").placeholder).toBe("Mixed");
+    act(() => {
+      container.querySelector<HTMLButtonElement>('button[aria-label="Scrub Opacity"]')!
+        .dispatchEvent(pointer("pointerdown", 0));
+    });
+    for (let tick = 1; tick <= 4; tick += 1) {
+      act(() => { window.dispatchEvent(pointer("pointermove", tick * 2)); });
+      await settle();
+    }
+    expect(fieldInput("opacity").value).toBe("");
+    // The preview's readback replaces the layer's details after the last tick.
+    await showRuntime({ ...card }, false, sourceVersion, selection);
+    expect(fieldInput("opacity").placeholder).toBe("Mixed");
+    expect(fieldInput("opacity").value).toBe("");
+    await release();
+    expect(fieldInput("opacity").value).toBe("");
+  });
+
   it("resizes a frame whose document is not running from its confirmed details", async () => {
     const contentRoot: DesignRuntimeNodeDetails = {
       ...root,
