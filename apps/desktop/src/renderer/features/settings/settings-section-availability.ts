@@ -6,6 +6,8 @@ export interface SettingsSectionAvailability {
   computerUseSectionActive: boolean;
   simulatorsActive: boolean;
   internalUser: boolean;
+  /** Local Storage describes this Mac: every owner, macOS app only. */
+  localStorageSupported: boolean;
 }
 
 export function isSettingsSectionAvailable(
@@ -22,11 +24,13 @@ export function isSettingsSectionAvailable(
           "cloud-computer",
           "browser-use",
           "simulators",
+          "local-storage",
         ].includes(id)) &&
     (context.cloudEnabled || id !== "cloud-computer") &&
     (context.terminalAgentsEnabled || id !== "terminal-agents") &&
     (context.local || context.computerUseSectionActive || id !== "general") &&
     (context.simulatorsActive || id !== "simulators") &&
-    (context.internalUser || id !== "internal")
+    (context.internalUser || id !== "internal") &&
+    (context.localStorageSupported || id !== "local-storage")
   );
 }

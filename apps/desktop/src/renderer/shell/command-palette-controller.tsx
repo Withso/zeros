@@ -8,6 +8,7 @@ import {
   useAgentControlFeatureActive,
 } from "../features/settings/agent-control-rollout";
 import { computerUseSectionOpen } from "../features/settings/computer-use-settings";
+import { isLocalStorageSupported } from "../features/settings/local-storage-store";
 import {
   isExperimentalEnabled,
   useExperimentalFeature,
@@ -226,6 +227,7 @@ function CommandPaletteSession({
     computerUseSectionActive,
     simulatorsActive,
     internalUser: false,
+    localStorageSupported: isLocalStorageSupported(),
   };
   const filesEnabled =
     capabilities.workspace && (category === "all" || category === "files");

@@ -1,4 +1,10 @@
 import { isSettingsSectionAvailable } from "./settings-section-availability";
+import { LocalStoragePanel } from "./local-storage-panel";
+import {
+  cancelLocalStorageMeasurement,
+  isLocalStorageSupported,
+  warmLocalStorage,
+} from "./local-storage-store";
 import { CloudComputerPanel } from "./cloud-computer-panel";
 import { prefetchCloudComputer, useCloudComputerRepositories } from "./cloud-computer-store";
 import { CLOUD_REPOSITORY_TABS, CloudRepositoryPanel, type CloudRepositoryTab } from "./cloud-repository-panel";
@@ -36,6 +42,7 @@ import {
   UserPlus,
   Lock,
   Globe2,
+  HardDrive,
   Smartphone,
   Trash2,
   type LucideIcon,
@@ -52,7 +59,7 @@ import {
   PROVIDER_DIAGNOSTIC_MAX_AGE_MS,
 } from "../../state/read-caches";
 import { Button } from "../../shared/ui";
-import { isLocalDevelopment } from "../../platform/runtime";
+import { isLocalDevelopment, useNativeRuntime } from "../../platform/runtime";
 import { toast } from "@/renderer/shared/ui/primitives/elements";
 import { cn } from "@/renderer/shared/ui/cn";
 import { Switch } from "../../shared/ui/primitives/switch";
@@ -185,6 +192,7 @@ type SectionId =
   | "general"
   | "appearance"
   | "models"
+  | "local-storage"
   | "providers"
   | "browser-use"
   | "simulators"
@@ -201,6 +209,8 @@ type SectionId =
 type SectionDef = {
   id: SectionId;
   label: string;
+  /** One line under the title for every owner. */
+  description?: string;
   icon: LucideIcon;
   navClassName?: string;
   Panel: ComponentType<{ surfaceActive?: boolean; openCloudRepository?(repository: string): void }>;
@@ -228,6 +238,13 @@ const SECTIONS: SectionDef[] = [
     label: "Models",
     icon: Box,
     Panel: ModelsPanel,
+  },
+  {
+    id: "local-storage",
+    label: "Local Storage",
+    description: "What Zeros keeps on this Mac.",
+    icon: HardDrive,
+    Panel: LocalStoragePanel,
   },
   { id: "cloud-computer", label: "Cloud Computer", icon: Box, Panel: CloudComputerPanel },
   {
@@ -299,6 +316,7 @@ const SECTION_GROUPS: Array<{ label: string; ids: SectionId[] }> = [
     ids: [
       "general",
       "appearance",
+      "local-storage",
       "experimental",
       "account",
       "integrations",
@@ -511,16 +529,21 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
     zerosBrowser: useAgentControlFeatureActive("zerosBrowser"),
   });
   const simulatorsActive = useAgentControlFeatureActive("simulators");
+  const localStorageSupported = useNativeRuntime().ready && isLocalStorageSupported();
+  // A walk started by hovering the entry stops when Settings closes.
+  useEffect(() => {
+    if (!pageActive) cancelLocalStorageMeasurement();
+  }, [pageActive]);
   // Enforce feature gates on restored and deep-linked routes, not just sidebar rows.
   const availableSections = useMemo(
     () =>
       SECTIONS.filter((section) => isSettingsSectionAvailable(section.id, {
         local, cloudEnabled, terminalAgentsEnabled, computerUseSectionActive,
-        simulatorsActive, internalUser,
+        simulatorsActive, internalUser, localStorageSupported,
       })),
     [
       terminalAgentsEnabled, internalUser, local, cloudEnabled,
-      computerUseSectionActive, simulatorsActive,
+      computerUseSectionActive, simulatorsActive, localStorageSupported,
     ],
   );
   const fallbackSection =
@@ -628,6 +651,8 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
                         onIntent={
                           section.id === "integrations"
                             ? prefetchGithubAuthSnapshot
+                            : section.id === "local-storage"
+                              ? warmLocalStorage
                             : section.id === "cloud-computer" && organization && me
                               ? () => prefetchCloudComputer(me.user.id, organization)
                             : undefined
@@ -690,6 +715,9 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
                   selection.scope === "user" &&
                   activeSection?.id === section.id;
                 const Panel = section.Panel;
+                const description =
+                  (!local && cloudEnabled && ORGANIZATION_SECTION_DESCRIPTIONS[section.id]) ||
+                  section.description;
                 return (
                   <div
                     key={section.id}
@@ -700,10 +728,8 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
                     <header className="flex items-start justify-between gap-4">
                       <div className="flex min-w-0 flex-col gap-1">
                         <h1 className={PAGE_HEADING_CLS}>{section.label}</h1>
-                        {!local && cloudEnabled && ORGANIZATION_SECTION_DESCRIPTIONS[section.id] && (
-                          <p className="text-fg2 m-0 text-xs leading-4.5">
-                            {ORGANIZATION_SECTION_DESCRIPTIONS[section.id]}
-                          </p>
+                        {description && (
+                          <p className="text-fg2 m-0 text-xs leading-4.5">{description}</p>
                         )}
                       </div>
                       {fileScopeControls}

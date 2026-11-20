@@ -268,6 +268,7 @@ describe("supported command availability", () => {
       computerUseSectionActive: true,
       simulatorsActive: false,
       internalUser: true,
+      localStorageSupported: true,
     };
     const ids = (overrides: Partial<typeof context>) =>
       settingsPaletteEntries({ ...context, ...overrides }).map((entry) => entry.id);
@@ -286,6 +287,11 @@ describe("supported command availability", () => {
       "settings:general",
     );
     expect(ids({ computerUseSectionActive: false })).toContain("settings:general");
+    // Local Storage describes this Mac for every owner, and only in the Mac app.
+    expect(localIds).toContain("settings:local-storage");
+    expect(cloudIds).toContain("settings:local-storage");
+    expect(ids({ localStorageSupported: false })).not.toContain("settings:local-storage");
+    expect(ids({ local: false, localStorageSupported: false })).not.toContain("settings:local-storage");
   });
 });
 
@@ -341,6 +347,7 @@ describe("command search", () => {
         computerUseSectionActive: true,
         simulatorsActive: false,
         internalUser: false,
+        localStorageSupported: true,
       }),
     ];
     expect(
