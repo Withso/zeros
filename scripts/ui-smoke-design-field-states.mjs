@@ -147,10 +147,16 @@ export async function runDesignFieldStatesSmoke({ page, check }) {
   const moved = () => radii().then((now) => now.map((value, index) => Number.parseFloat(value) - Number.parseFloat(start[index])));
   await expect.poll(async () => (await moved())[0]).toBeGreaterThan(0);
   const deltas = await moved();
+  const scrubbedValue = await input("border-radius").inputValue();
   check(
     "a Mixed scrub moves each layer by the same step and the field keeps reading Mixed",
-    deltas[0] === deltas[1] && (await input("border-radius").inputValue()) === "",
-    deltas.join(","),
+    deltas[0] === deltas[1] && scrubbedValue === "",
+    JSON.stringify({
+      deltas,
+      value: scrubbedValue,
+      placeholder: await input("border-radius").getAttribute("placeholder"),
+      selected: await page.locator("[data-design-element-overlay]").count(),
+    }),
   );
   await page.mouse.up();
   await undo();
