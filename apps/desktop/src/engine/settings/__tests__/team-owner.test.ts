@@ -175,8 +175,10 @@ describe("organization settings layer follows the resolved workspace's owner", (
     expect(baseBranch(owned.path)).toBe("main");
   });
 
-  it("keeps a resolve with no workspace on the loaded document", () => {
+  it("resolves with no workspace as Personal unless the caller names the owner", () => {
     setTeamContext({ teamId: ORG_A, doc: TEAM_DOC });
-    expect(baseBranch()).toBe("team-base");
+    expect(baseBranch()).toBe("main");
+    expect(opSettingsResolve().sources["git.base_branch"]).toBe("default");
+    expect(baseBranch(undefined, { organizationId: ORG_A })).toBe("team-base");
   });
 });

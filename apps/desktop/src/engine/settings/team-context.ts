@@ -44,14 +44,14 @@ export function configureSettingsOwnerLookup(
   ownerLookup = lookup;
 }
 
-/** A workspace receives the organization layer only when that organization owns it. A resolve with no workspace keeps the loaded document. */
+/** A workspace receives the organization layer only when that organization owns it; a resolve with no workspace is Personal. */
 export function teamDocFor(
   workspacePath: string | undefined,
   owner?: SettingsOwner,
 ): RawSettingsDoc | null {
   const { teamId, doc } = context;
   if (!doc) return null;
-  if (!owner && !workspacePath) return doc;
+  if (!owner && !workspacePath) return null;
   let resolvedOwner = owner ?? null;
   if (!owner && workspacePath) {
     try {
