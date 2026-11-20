@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   isSettingsSectionAvailable,
   settingsSectionForRail,
+  UNIFIED_PERSONAL_SECTIONS,
   type SettingsSectionAvailability,
 } from "../settings-section-availability";
 
@@ -100,6 +101,12 @@ describe("settings sections with unified-workspaces", () => {
     expect(
       available({ ...unified, local: false, organizationGeneral: true }),
     ).toEqual([...personal.slice(0, 2), "org-general", ...personal.slice(2, 5), "cloud-computer", ...personal.slice(5)]);
+  });
+
+  it("keeps Local Storage right after Appearance in the rail, as the Local Storage smoke expects", () => {
+    expect(UNIFIED_PERSONAL_SECTIONS.indexOf("local-storage")).toBe(
+      UNIFIED_PERSONAL_SECTIONS.indexOf("appearance") + 1,
+    );
   });
 
   it("omits organization pages under the Personal owner and when the organization has none", () => {

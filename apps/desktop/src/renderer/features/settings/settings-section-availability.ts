@@ -18,6 +18,7 @@ export interface SettingsSectionAvailability {
 export const UNIFIED_PERSONAL_SECTIONS = [
   "general",
   "appearance",
+  "local-storage",
   "models",
   "providers",
   "git",
@@ -26,7 +27,6 @@ export const UNIFIED_PERSONAL_SECTIONS = [
   "computer-use",
   "browser-use",
   "simulators",
-  "local-storage",
   "account",
   "experimental",
   "internal",
