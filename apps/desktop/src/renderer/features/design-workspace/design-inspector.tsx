@@ -227,8 +227,7 @@ import {
   saveDesigns,
   updateDesignFrameGeometryCached,
   updateDesignNodeStylesCached,
-  moveDesignComponentCached,
-} from "./state/design-workspace-cache";
+  moveDesignComponentCached, hasPendingDesignEdits } from "./state/design-workspace-cache";
 import {
   DEFAULT_DESIGN_WORKSPACE_VIEW,
   DESIGN_MAX_ZOOM,
@@ -1699,17 +1698,23 @@ export const DesignInspector = React.memo(function DesignInspector({
     runtimeSourceVersion === frame?.sourceVersion && layoutRootId && frame?.instances && Object.hasOwn(frame.instances.hosts, layoutRootId)
     ? layoutRootId
     : null;
+  // An edit still saving adopts its generation in the runtime before the
+  // workspace snapshot names it; that readback is current for the next edit.
+  const runtimeAheadBySave = Boolean(workspaceId && runtimeSourceVersion &&
+    runtimeSourceVersion !== frame?.sourceVersion && hasPendingDesignEdits(workspaceId));
+  const currentReadback = (sourceVersion: string | undefined) =>
+    sourceVersion === frame?.sourceVersion || (runtimeAheadBySave && sourceVersion === runtimeSourceVersion);
   const explicitFrameIdentityNodeId = frame?.componentIdentity?.kind === "instance"
     ? frame.componentIdentity.nodeId
     : null;
   const styleTargetNodeId =
     selectedNodeId ?? (frameSelected
       ? explicitFrameIdentityNodeId ?? legacyExactInstanceNodeId ??
-        (details && details.oid === layoutRootId && details.sourceVersion === frame?.sourceVersion ? details.oid : null)
+        (details && details.oid === layoutRootId && currentReadback(details.sourceVersion) ? details.oid : null)
       : null);
   const frameStyleTarget =
     frameSelected && !selectedNodeId && styleTargetNodeId !== null;
-  const elementDetails = styleTargetNodeId && details?.oid === styleTargetNodeId && details.sourceVersion === frame?.sourceVersion
+  const elementDetails = styleTargetNodeId && details?.oid === styleTargetNodeId && currentReadback(details.sourceVersion)
     ? details
     : null;
   const frameComponentPresentation = frame ? designFrameComponentPresentation(frame, (file) =>
