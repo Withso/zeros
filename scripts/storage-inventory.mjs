@@ -51,6 +51,9 @@ const KEYCHAIN = [
 ];
 const INSTANCE = /^[a-z0-9][a-z0-9._-]{0,39}$/;
 const IGNORABLE = new Set([".DS_Store"]);
+// RENDERER_PROFILE_MARKER in apps/desktop/electron/renderer-profile-location.ts:
+// a freshly created `<data dir>/electron` holds only this file.
+const RENDERER_PROFILE_IGNORABLE = new Set([...IGNORABLE, ".zeros-renderer-profile"]);
 const EMPTY_WORK_FOLDERS = new Set(["workspaces", "design workspaces", "cloud-sync"]);
 
 // Library folders, and the suffix macOS appends to a bundle id in each.
@@ -158,10 +161,10 @@ function sizeOf(target, { deadline, seen, nested = new Set() }) {
 }
 
 /** "yes", "no" or "unknown": whether `directory` has entries. */
-function hasEntries(home, directory) {
+function hasEntries(home, directory, ignorable = IGNORABLE) {
   const result = list(home, directory);
   if (!result.ok) return "unknown";
-  return result.names.some((name) => !IGNORABLE.has(name)) ? "yes" : "no";
+  return result.names.some((name) => !ignorable.has(name)) ? "yes" : "no";
 }
 
 /** A visible root holds work unless it is missing or holds only empty
@@ -435,7 +438,7 @@ export function inventory({
         const profiles = hasEntries(home, path.join(item.path, "provider-accounts"));
         if (profiles === "yes") owner.holds.add("provider profiles");
         else if (profiles === "unknown") owner.unknown.add("provider profiles");
-        const electron = hasEntries(home, path.join(item.path, "electron"));
+        const electron = hasEntries(home, path.join(item.path, "electron"), RENDERER_PROFILE_IGNORABLE);
         if (electron === "yes") owner.holds.add("a renderer profile");
         for (const [folder, kind] of [["design-storage", "Design storage (recovery journals, drafts, thumbnails)"], ["git-promotion-journal", "a Git promotion journal"]]) {
           const entries = hasEntries(home, path.join(item.path, folder));

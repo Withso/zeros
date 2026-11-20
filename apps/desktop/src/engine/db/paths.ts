@@ -99,6 +99,12 @@ export function zerosLocalSessionDataDir(): string | null {
   return localV2() ? path.join(zerosDataDir(), "electron") : null;
 }
 
+/** `<data dir>/electron`: the installed macOS app's Chromium profile once it
+ *  has left Caches (electron/renderer-profile-location.ts). */
+export function zerosRendererProfileDir(): string {
+  return path.join(zerosDataDir(), "electron");
+}
+
 /** A new Local identity's log folder, else null (main.ts keeps every other
  *  launch's log folder). */
 export function zerosLocalLogDir(): string | null {

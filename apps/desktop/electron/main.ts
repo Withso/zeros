@@ -107,6 +107,8 @@ import { setupContextMenu } from "./context-menu";
 import { installDevToolsGuard } from "./devtools";
 import { installDevMainRestartCheck } from "./dev-main-restart";
 import { setupDeepLink } from "./deep-link";
+import { holdSingleInstanceLock } from "./single-instance-lock";
+import { chooseRendererProfile } from "./renderer-profile-location";
 import { setupUpdater } from "./updater";
 import {
   pushAgentControlAvailabilityToEngine,
@@ -141,6 +143,7 @@ import {
   zerosDesignWorkspacesRoot,
   zerosLocalLogDir,
   zerosLocalSessionDataDir,
+  zerosRendererProfileDir,
 } from "../src/engine/db/paths";
 import { assertLocalAdmission, assertLocalOverrideIsolated } from "./storage-identity";
 import { removeEmptyLegacyDesignFolder } from "./legacy-design-folder";
@@ -388,6 +391,8 @@ if (
 // Chromium ignores app.getPath("cache"); redirect sessionData before ready so
 // regenerable data uses the OS cache location. Migrate durable renderer stores
 // before reclaiming old caches; secrets and the engine DB use separate paths.
+// Replayed into main.log once setupLogFile() has installed its console hook.
+const rendererProfileDiagnostics: string[] = [];
 function relocateChromiumCache(): void {
   // Bound the HTTP disk cache so it can't grow without limit (250 MB).
   app.commandLine.appendSwitch("disk-cache-size", String(250 * 1024 * 1024));
@@ -430,6 +435,32 @@ function relocateChromiumCache(): void {
   if (path.resolve(oldSessionData) === path.resolve(newSessionData)) {
     app.setPath("sessionData", newSessionData);
     return;
+  }
+
+  // macOS keeps the profile beside zeros.db, out of reach of cache cleaners.
+  // Other platforms and an explicit ZEROS_DATA_DIR keep the code below as is.
+  if (process.platform === "darwin" && !process.env.ZEROS_DATA_DIR) {
+    const choice = chooseRendererProfile({
+      cacheProfile: newSessionData,
+      dataProfile: zerosRendererProfileDir(),
+      olderHopSource: oldSessionData,
+      holdsLock: holdSingleInstanceLock,
+      // Left for the OS to clear: this process is about to quit, and removing a
+      // folder its Chromium may still hold is not worth the risk.
+      throwawayProfile: () => {
+        const prefix = path.join(os.tmpdir(), "zeros-second-instance-");
+        try {
+          return fs.mkdtempSync(prefix);
+        } catch {
+          return `${prefix}${process.pid}-${Date.now()}`;
+        }
+      },
+      log: (line) => rendererProfileDiagnostics.push(line),
+    });
+    if (choice.dir !== null) {
+      app.setPath("sessionData", choice.dir);
+      return;
+    }
   }
 
   try {
@@ -699,6 +730,7 @@ function setupLogFile(): void {
 }
 
 setupLogFile();
+for (const line of rendererProfileDiagnostics.splice(0)) console.warn(`[Zeros] ${line}`);
 
 // Pinned to the Mac-app Vite port (see vite.config.ts). Must NOT be
 // 5173 — that's the default Vite port other Zeros workspace projects
