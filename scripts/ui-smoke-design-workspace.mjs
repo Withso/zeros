@@ -1301,9 +1301,9 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
     );
   }, "design-css-autosave-restore");
   check("removing a CSS line also persists automatically", cssEditRestored);
-  await cssModeButton.click();
+  await stylePanelHeader.getByRole("tab", { name: "Style", exact: true }).click();
   check(
-    "CSS toggle returns to the visual Style controls without a save or add action",
+    "the Style tab returns to the visual Style controls without a save or add action",
     (await page.locator("[data-design-style-editor]").isVisible()) &&
       (await computedCssEditor.count()) === 0 &&
       (await cssModeButton.getAttribute("aria-selected")) === "false",
@@ -3241,7 +3241,7 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
   );
   check(
     "design inspector has no Data or pull request surface",
-    (await page.locator("[data-design-inspector]").getByRole("tab").count()) ===
+    (await page.locator("[data-design-inspector]").getByRole("tab", { name: "Data", exact: true }).count()) ===
       0 &&
       (await page
         .getByRole("button", { name: "Open PR #42", exact: true })
