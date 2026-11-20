@@ -780,15 +780,20 @@ function ActiveDispatcherPage({
                 onValueChange={(value) => choosePlacement(value === "cloud" ? "cloud" : "local")}
               >
                 <TabsList aria-label="Where the workspace runs">
+                  {/* The tooltip owns its wrapper's data-state; on the tab it would replace "active". */}
                   <Tooltip label="This Mac">
-                    <TabsTrigger value="local" aria-label="This Mac" disabled={busy}>
-                      <Laptop strokeWidth={1.5} />
-                    </TabsTrigger>
+                    <span className="inline-flex">
+                      <TabsTrigger value="local" aria-label="This Mac" disabled={busy}>
+                        <Laptop strokeWidth={1.5} />
+                      </TabsTrigger>
+                    </span>
                   </Tooltip>
                   <Tooltip label="Cloud">
-                    <TabsTrigger value="cloud" aria-label="Cloud" disabled={busy}>
-                      <Cloud strokeWidth={1.5} />
-                    </TabsTrigger>
+                    <span className="inline-flex">
+                      <TabsTrigger value="cloud" aria-label="Cloud" disabled={busy}>
+                        <Cloud strokeWidth={1.5} />
+                      </TabsTrigger>
+                    </span>
                   </Tooltip>
                 </TabsList>
               </Tabs>

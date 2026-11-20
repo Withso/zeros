@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { cloudComputerV2BuildRequired } from "../../../features/settings/cloud-computer-v2-create-gate";
+import { cloudComputerV2BuildRequired, cloudComputerV2CheckFailed } from "../../../features/settings/cloud-computer-v2-create-gate";
 import { ADD_CLOUD_REPOSITORY_REASON, createTrayState } from "../create-tray";
 
 const base = {
@@ -31,6 +31,13 @@ describe("Create tray", () => {
     expect(createTrayState({ ...base, reason: ADD_CLOUD_REPOSITORY_REASON })).toEqual({
       message: ADD_CLOUD_REPOSITORY_REASON,
       action: "manage-repositories",
+    });
+  });
+
+  it("offers the Cloud Computer settings when the Cloud Computer could not be checked", () => {
+    expect(createTrayState({ ...base, reason: cloudComputerV2CheckFailed })).toEqual({
+      message: cloudComputerV2CheckFailed,
+      action: "cloud-computer-settings",
     });
   });
 

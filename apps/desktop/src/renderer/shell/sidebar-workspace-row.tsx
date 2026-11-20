@@ -45,7 +45,7 @@ import {
 import { type Workspace } from "../platform/git";
 import { isCloudWorkspace } from "../platform/bridge/cloud-workspace-key";
 import { localWorkShowsEverywhere } from "../features/team/organization-capabilities";
-import { SidebarCloudMark } from "./sidebar-cloud-mark";
+import { showsCloudMark, SidebarCloudMark } from "./sidebar-cloud-mark";
 import { AgentActivityIndicator } from "../features/agent/agent-activity-indicator";
 import { AgentAwaitingIcon } from "../features/agent/agent-awaiting-indicator";
 import { useAnyChatUnread } from "../features/agent/chat-unread";
@@ -274,7 +274,7 @@ export function SidebarWorkspaceRow({
   const statusMark = archiving ? null : (awaitingKind ?? (unread ? "unread" : null));
   const trailingMark = !grouped && statusMark ? statusMark : showDraft ? "draft" : null;
   // unified-workspaces lists Local and cloud rows together; only cloud rows carry a mark.
-  const cloudMark = localWorkShowsEverywhere() && isCloudWorkspace(workspace.path);
+  const cloudMark = showsCloudMark(localWorkShowsEverywhere() && isCloudWorkspace(workspace.path), trailingMark);
   // One hover/focus action per row: Archive for a managed worktree, folder
   // settings for a legacy plain folder, nothing for a primary checkout.
   const action =

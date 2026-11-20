@@ -21,6 +21,13 @@ export function cloudMarkState(status: string | null | undefined): CloudMarkStat
   return "stopped";
 }
 
+/** A row has one trailing mark slot, so its name truncates where a Local row's
+ * does. An actionable mark (awaiting, unread, draft) outranks the cloud mark,
+ * which returns once that mark clears. */
+export function showsCloudMark(cloudRow: boolean, actionableMark: string | null): boolean {
+  return cloudRow && actionableMark === null;
+}
+
 const LABELS: Record<CloudMarkState, string> = {
   running: "Cloud workspace, running",
   stopped: "Cloud workspace, stopped",

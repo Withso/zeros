@@ -5,7 +5,6 @@ import {
   Check,
   ChevronDown,
   LaptopMinimal,
-  House,
   LogIn,
   LogOut,
   Plus,
@@ -90,7 +89,7 @@ function OrganizationIcon({
   organization: Pick<OrganizationSummary, "isPersonal"> | null;
 }) {
   return organization?.isPersonal ? (
-    localWorkShowsEverywhere() ? <House strokeWidth={1.5} /> : <LaptopMinimal strokeWidth={1.5} />
+    localWorkShowsEverywhere() ? <UserRound strokeWidth={1.5} /> : <LaptopMinimal strokeWidth={1.5} />
   ) : (
     <Building2 strokeWidth={1.5} />
   );

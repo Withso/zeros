@@ -164,6 +164,27 @@ describe("Create placement control", () => {
     expect(tab("Cloud")?.getAttribute("aria-selected")).toBe("false");
   });
 
+  it("keeps the selected side's tab state while its tooltip is closed and open", () => {
+    render();
+    const selected = tab("This Mac")!;
+    expect(selected.getAttribute("data-state")).toBe("active");
+    expect(tab("Cloud")!.getAttribute("data-state")).toBe("inactive");
+    vi.useFakeTimers();
+    try {
+      act(() => {
+        const move = new MouseEvent("pointermove", { bubbles: true });
+        Object.defineProperty(move, "pointerType", { value: "mouse" });
+        selected.dispatchEvent(move);
+        vi.advanceTimersByTime(5_000);
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(selected.parentElement?.getAttribute("data-state")).toMatch(/open/);
+    expect(document.body.querySelector('[role="tooltip"]')?.textContent).toContain("This Mac");
+    expect(selected.getAttribute("data-state")).toBe("active");
+  });
+
   it("is hidden where cloud is off, and absent without unified-workspaces", () => {
     s.cloudFeature = false;
     render();

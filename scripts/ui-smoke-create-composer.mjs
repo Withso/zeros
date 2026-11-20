@@ -352,9 +352,17 @@ export async function runCreatePlacementSmoke({ page, check, harnessBase }) {
   await editor.fill(draft);
   await page.evaluate(() => window.setCreateOrganization("organization"));
   await expect(mac).toHaveAttribute("aria-selected", "true");
+  await expect(mac).toHaveAttribute("data-state", "active");
   await expect(create).toBeEnabled();
   await expect(editor).toHaveText(draft);
+  // The tray grows downward only: neither the control nor the card moves.
+  const placementBefore = await placement.boundingBox();
+  const cardBefore = await card.boundingBox();
   await cloudTab.click();
+  await expect(page.locator("[data-composer-tray]")).toBeVisible();
+  expect(await placement.boundingBox()).toEqual(placementBefore);
+  expect(await card.boundingBox()).toEqual(cardBefore);
+  await expect(cloudTab).toHaveAttribute("data-state", "active");
   await expect(cloudTab).toHaveAttribute("aria-selected", "true");
   await expect(create).toBeDisabled();
   const tray = page.locator("[data-composer-tray]");

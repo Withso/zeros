@@ -1,4 +1,4 @@
-import { cloudComputerV2BuildRequired } from "../../features/settings/cloud-computer-v2-create-gate";
+import { cloudComputerV2BuildRequired, cloudComputerV2CheckFailed } from "../../features/settings/cloud-computer-v2-create-gate";
 
 export const ADD_CLOUD_REPOSITORY_REASON = "Add a repository to your Cloud Computer.";
 
@@ -30,6 +30,9 @@ export function createTrayState(input: {
       action: input.canManageComputer ? "cloud-computer-settings" : null,
     };
   }
+  // Its copy points to Settings, so the line carries the way there.
+  if (input.reason === cloudComputerV2CheckFailed)
+    return { message: input.reason, action: "cloud-computer-settings" };
   if (input.reason === ADD_CLOUD_REPOSITORY_REASON)
     return { message: input.reason, action: "manage-repositories" };
   return { message: input.reason, action: null };
