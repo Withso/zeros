@@ -172,10 +172,11 @@ export async function runRepoSettingsSmoke({ page, check }) {
       expect(backBox.y + backBox.height).toBeLessThanOrEqual(bandBox.y + bandBox.height);
       expect(orgBox.y).toBeGreaterThanOrEqual(bandBox.y + bandBox.height);
       expect(await back.evaluate(node => getComputedStyle(node).getPropertyValue("-webkit-app-region"))).toBe("no-drag");
-      // Computer use lives in General for every owner; it has no page of its own.
-      for (const feature of ["General", "Browser", "Simulators"])
-        await expect(sections.getByRole("tab", { name: feature, exact: true })).toBeVisible();
-      await expect(sections.getByRole("tab", { name: "Computer use", exact: true })).toHaveCount(0);
+      // Dev runs the unified rail: Computer use, Browser and Simulators are
+      // Personal device pages for every owner.
+      // An organization adds its own General after the Personal one.
+      for (const feature of ["General", "Computer use", "Browser", "Simulators"])
+        await expect(sections.getByRole("tab", { name: feature, exact: true }).first()).toBeVisible();
       await expect(sections.getByRole("tab", { name: "Internal", exact: true })).toHaveCount(0);
       await back.focus();
       await page.keyboard.press("Enter");
