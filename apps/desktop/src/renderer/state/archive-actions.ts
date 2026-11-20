@@ -13,6 +13,7 @@
 //   • Restore adapts the path/branch (occupied / checked-out-elsewhere / deleted)
 //     and can leave checkpoint conflicts — both are surfaced.
 
+import { projectGroupLookup } from "./project-identity";
 import { useCallback } from "react";
 import { unstable_batchedUpdates } from "react-dom";
 import { forgetAdoptedWorktree, recordAdoptedWorktree } from "./adopted-worktrees";
@@ -150,6 +151,7 @@ function pickRepointTarget(leaving: Workspace): {
     repositoryIds: sidebarRepositoryIds(filterOwner),
     workspaces: rowsShownForPlacements(cached, hidden),
     pending: rowsShownForPlacements(pending, hidden),
+    ...(localWorkShowsEverywhere() ? { projectGroupOf: projectGroupLookup(projects) } : {}),
     projects,
     activity: { activeAtByWorkspaceId: sidebarWorkspaceActivity(cached, state.chats, state.workspaceActivityByFolder) },
   });

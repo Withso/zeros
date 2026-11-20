@@ -17,6 +17,7 @@ import { requestUserSettingsSection } from "../features/settings/settings-naviga
 import { canCreateWorkspaceIn, localWorkShowsEverywhere } from "../features/team/organization-capabilities";
 import { hasCloudWorkspaceAccountAccess } from "../features/team/cloud-workspace-account-access";
 import { unifiedOrganizationGeneralSections } from "../features/settings/organization-general";
+import { projectGroupLookup } from "../state/project-identity";
 import {
   getActiveOrganizationIdSnapshot,
   getOrganizationStoreGeneration,
@@ -251,6 +252,7 @@ function CommandPaletteSession({
         visible,
         projects,
         category === "workspaces" ? workspaceFilter : "active",
+        localWorkShowsEverywhere() ? projectGroupLookup(projects) : undefined,
       ),
     [visible, projects, category, workspaceFilter],
   );

@@ -8,6 +8,7 @@ import { useOrganizationProjects } from "../../state/use-organization-projects";
 // The board groups by persisted lifecycle status; archive is an independent
 // flag. Rows preserve the workspace's normal open, history and lifecycle actions.
 
+import { projectGroupLookup } from "../../state/project-identity";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useWarmWorkspaceHistory } from "../../state/use-warm-workspace-history";
 import {
@@ -329,7 +330,8 @@ export function DashboardPage() {
     [projects],
   );
   const toRow = useMemo(
-    () => dashboardRowBuilder(projects, chats, activity),
+    () => dashboardRowBuilder(projects, chats, activity,
+      localWorkShowsEverywhere() ? projectGroupLookup(projects) : undefined),
     [projects, chats, activity],
   );
   const rows = useMemo(() => workspaces.map(toRow), [workspaces, toRow]);

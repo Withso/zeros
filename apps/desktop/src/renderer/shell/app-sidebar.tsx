@@ -1,4 +1,5 @@
 import { useOrganizationProjects } from "../state/use-organization-projects";
+import { projectGroupLookup } from "../state/project-identity";
 import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 // ============================================
 // COMPONENT: AppSidebar
@@ -437,11 +438,12 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
       projects,
       workspaces: rowsShownForPlacements(realWorkspaces, hiddenPlacements),
       pending: rowsShownForPlacements(dedupedPendingCreates, hiddenPlacements),
+      ...(unifiedPlacements ? { projectGroupOf: projectGroupLookup(projects) } : {}),
     };
     return sharing
       ? buildSidebarSharingSections({ ...args, sectionOf })
       : [{ id: null, label: "", entries: buildSidebarWorkspaceEntries(args) }];
-  }, [dedupedPendingCreates, listFilter, preferences.sort, repositoryIds, hiddenPlacements, activeAtByWorkspaceId, projects, realWorkspaces, sharing, sectionOf]);
+  }, [dedupedPendingCreates, listFilter, preferences.sort, repositoryIds, hiddenPlacements, activeAtByWorkspaceId, projects, realWorkspaces, sharing, sectionOf, unifiedPlacements]);
   const entries = useMemo(() => sections.flatMap(section => section.entries), [sections]);
   const listedItems = useMemo(() => sidebarWorkspaceItems(entries), [entries]);
   const navigableWorkspaces = useMemo(

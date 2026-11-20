@@ -408,6 +408,8 @@ export function workspacePaletteEntries(
   rows: Workspace[],
   projects: readonly Project[],
   filter: PaletteWorkspaceFilter,
+  /** unified-workspaces: a repository's sides read as its default folder. */
+  projectGroupOf?: (projectId: string) => readonly Project[] | undefined,
 ): PaletteEntry[] {
   return [...new Map(rows.map((row) => [row.id, row])).values()]
     .filter(
@@ -429,8 +431,9 @@ export function workspacePaletteEntries(
         : "Workspaces",
       detail: [
         workspaceNumberName(workspace),
-        projects.find((project) => project.repoSlug === workspace.repoSlug)
-          ?.name ?? workspace.repoSlug,
+        ((project) => (project && projectGroupOf?.(project.id)?.[0]) || project)(
+          projects.find((project) => project.repoSlug === workspace.repoSlug),
+        )?.name ?? workspace.repoSlug,
         isCloudWorkspace(workspace.path) ? "Cloud" : localWorkShowsEverywhere() ? "This Mac" : "Local",
         workspace.present === false
           ? "Folder missing"

@@ -148,3 +148,24 @@ export function joinRegisteredProjects(projects: readonly Project[]): ProjectJoi
   }
   return joinProjects(sides);
 }
+
+const lookups = new WeakMap<readonly Project[], (projectId: string) => readonly Project[] | undefined>();
+
+/** The registered projects that are one GitHub repository: the default local
+ * folder first, then other folders, then cloud. Undefined for a lone side. */
+export function projectGroupLookup(projects: readonly Project[]): (projectId: string) => readonly Project[] | undefined {
+  let lookup = lookups.get(projects);
+  if (!lookup) {
+    const join = joinRegisteredProjects(projects);
+    const members = new Map<string, readonly Project[]>();
+    for (const joined of join.projects) {
+      const sides = [...joined.local, ...joined.cloud];
+      if (sides.length < 2) continue;
+      const group = sides.map(side => side.project);
+      for (const side of sides) members.set(side.id, group);
+    }
+    lookup = (projectId) => members.get(projectId);
+    lookups.set(projects, lookup);
+  }
+  return lookup;
+}

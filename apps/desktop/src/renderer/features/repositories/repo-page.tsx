@@ -32,6 +32,9 @@
 // context menu ("Repository Settings"), and the legacy `repo:<id>:<section>`
 // settings deep links (settings-page redirects them here).
 
+import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
+import { localWorkShowsEverywhere } from "../team/organization-capabilities";
+import { projectGroupLookup } from "../../state/project-identity";
 import React, { useCallback, useLayoutEffect, useMemo, useRef } from "react";
 import { useWarmWorkspaceHistory } from "../../state/use-warm-workspace-history";
 import { Archive, Folder, FolderX } from "lucide-react";
@@ -253,10 +256,19 @@ function RepoWorkspaceRow({
 export function RepoWorkspacesList({ project }: { project: Project }) {
   const showArchived = useRepoHistoryVisible(project.id);
   const archives = useArchivedWorkspaces();
-  const { workspaces: allWorkspaces, loading } = useWorkspacesFor(
+  const { workspaces: ownWorkspaces, loading } = useWorkspacesFor(
     project.repoSlug,
   );
   const { projects } = useProjects();
+  // unified-workspaces: the same repository's cloud workspaces belong here too.
+  const cloudSide = localWorkShowsEverywhere()
+    ? projectGroupLookup(projects)(project.id)?.find(member => isCloudWorkspace(member.repoRoot)) ?? null
+    : null;
+  const { workspaces: cloudWorkspaces } = useWorkspacesFor(cloudSide?.repoSlug ?? null);
+  const allWorkspaces = useMemo(
+    () => (cloudSide && cloudWorkspaces.length > 0 ? [...ownWorkspaces, ...cloudWorkspaces] : ownWorkspaces),
+    [cloudSide, ownWorkspaces, cloudWorkspaces],
+  );
   const listedWorkspaces = useFolderWorkspaces(allWorkspaces, projects);
   const activeOrganization = useActiveOrganization();
   const accessibleWorkspaces = useMemo(
@@ -278,7 +290,7 @@ export function RepoWorkspacesList({ project }: { project: Project }) {
         accessibleWorkspaces,
         filterRowsForOrganization(
           archives.workspaces.filter(
-            (row) => row.repoSlug === project.repoSlug,
+            (row) => row.repoSlug === project.repoSlug || row.repoSlug === cloudSide?.repoSlug,
           ),
           activeOrganization,
         ),
@@ -287,6 +299,7 @@ export function RepoWorkspacesList({ project }: { project: Project }) {
       accessibleWorkspaces,
       archives.workspaces,
       project.repoSlug,
+      cloudSide,
       activeOrganization,
     ],
   );

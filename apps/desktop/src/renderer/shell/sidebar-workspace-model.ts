@@ -157,9 +157,14 @@ export function buildSidebarWorkspaceEntries(args: {
   projects: readonly Project[];
   workspaces: readonly Workspace[];
   pending: readonly PendingWorkspaceCreate[];
+  /** unified-workspaces: one group per GitHub repository, holding its local and cloud workspaces. */
+  projectGroupOf?: (projectId: string) => readonly Project[] | undefined;
 }): SidebarWorkspaceEntry[] {
-  const { filter, sort = "updated", activity } = args;
-  const selectedIds = new Set(args.repositoryIds);
+  const { filter, sort = "updated", activity, projectGroupOf } = args;
+  // Selecting any side of a joined project selects the whole project.
+  const selectedIds = new Set(projectGroupOf
+    ? (args.repositoryIds ?? []).flatMap(id => projectGroupOf(id)?.map(project => project.id) ?? [id])
+    : args.repositoryIds);
   const projects = selectedIds.size
     ? args.projects.filter(project => selectedIds.has(project.id))
     : args.projects;
@@ -247,7 +252,28 @@ export function buildSidebarWorkspaceEntries(args: {
       group.project ? [[group.project.id, group.workspaces] as const] : [],
     ),
   );
+  // A joined project paints once, where its first side is listed, under its
+  // default local folder (members come default-first). That folder's header
+  // key, and so its persisted collapse state, still applies.
+  const painted = new Set<string>();
   const entries = projects.flatMap((project): SidebarWorkspaceEntry[] => {
+    if (painted.has(project.id)) return [];
+    const members = (projectGroupOf?.(project.id) ?? [project]).filter(member => visibleProjectIds.has(member.id));
+    if (members.length > 1) {
+      for (const member of members) painted.add(member.id);
+      const head = members[0];
+      const memberOf = new Map<string, Project>();
+      for (const member of members)
+        for (const workspace of workspacesByProject.get(member.id) ?? []) memberOf.set(workspace.id, member);
+      const items = [
+        ...members.flatMap(member => (pendingByProject.get(member.id) ?? []).map(pending => ({ member, pending })))
+          .sort((a, b) => finiteTimestamp(b.pending.startedAt) - finiteTimestamp(a.pending.startedAt))
+          .map(({ member, pending }) => pendingItem(member, pending)),
+        ...orderWorkspaces(members.flatMap(member => workspacesByProject.get(member.id) ?? []))
+          .map(workspace => workspaceItem(memberOf.get(workspace.id)!, workspace)),
+      ];
+      return [{ kind: "repository" as const, key: `project:${head.id}`, project: head, items }];
+    }
     const items = [
       ...(pendingByProject.get(project.id) ?? []).map((pending) =>
         pendingItem(project, pending),
