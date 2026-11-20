@@ -2236,8 +2236,14 @@ export const DesignInspector = React.memo(function DesignInspector({
         }));
       };
       const properties = Object.keys(styles).sort();
+      const committedRoot =
+        useDesignRuntimeStore.getState().byWorkspace[workspaceId]?.frames[frame.file]?.snapshot?.frame;
+      // Only a Hug frame resizes with its content; other layout edits keep the direct style save.
       const needsIntrinsicPreparation =
-        !stateContext && Object.keys(styles).some(designStylePropertyAffectsLayout);
+        !stateContext &&
+        !!committedRoot &&
+        hasDesignIntrinsicSize(committedRoot) &&
+        Object.keys(styles).some(designStylePropertyAffectsLayout);
       const transaction = (operations: DesignOperation[]) => ({
         schemaVersion: 1 as const,
         transactionId: `desktop:${crypto.randomUUID()}`,

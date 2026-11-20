@@ -125,6 +125,18 @@ describe("a style commit that refits its frame", () => {
     expect(mocks.applyEdit).toHaveBeenCalledTimes(1);
   });
 
+  it("saves a layout style directly when the frame does not hug its content", async () => {
+    const fixed = { ...root, layout: { ...root.layout, widthValue: "400px", heightValue: "300px" } } as DesignRuntimeNodeDetails;
+    const connection = runtime(fixed);
+    mocks.runtime.mockReturnValue(connection);
+    mount(fixed, { ...fixed, oid: "child" });
+    await act(async () => { await mocks.editor.props!.onCommitStyles({ "word-spacing": "12px" }); });
+    expect(mocks.updateStyles).toHaveBeenCalledExactlyOnceWith("w", expect.objectContaining({
+      nodeId: "child", styles: { "word-spacing": "12px" } }));
+    expect(mocks.applyEdit).not.toHaveBeenCalled();
+    expect(connection.measureLayout).not.toHaveBeenCalled();
+  });
+
   it("prepares queued intrinsic P1 atomically without repainting the newer P2 preview", async () => {
     const child = { ...root, oid: "child" };
     const connection = runtime({ ...root, rect: { ...root.rect, width: 420 } });
