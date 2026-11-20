@@ -2330,10 +2330,13 @@ export async function bridgeSettingsResolve(
   /** When resolving a worktree's settings (per-workspace view): repo-local
    *  comes from this main checkout, workspace-local from `repoRoot`. */
   mainRepoRoot?: string,
+  /** The organization a user-level view is for; the engine honours it only for its Local client. */
+  ownerOrganizationId?: string,
 ): Promise<ResolvedSettingsWire> {
   return (await workspaceOp(bridge, "settings.resolve", {
     ...(repoRoot ? { repoRoot } : {}),
     ...(mainRepoRoot ? { mainRepoRoot } : {}),
+    ...(ownerOrganizationId ? { ownerOrganizationId } : {}),
   })) as ResolvedSettingsWire;
 }
 

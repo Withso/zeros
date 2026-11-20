@@ -645,13 +645,16 @@ export function EnvironmentSection({
   layer,
   root,
   mainRepoRoot,
+  ownerOrganizationId,
 }: {
   project?: Project;
   layer: EditableRepoLayer | "user";
   root?: string;
   mainRepoRoot?: string;
+  /** The old rail's organization view of the user-level list. */
+  ownerOrganizationId?: string;
 }) {
-  const resolved = useResolvedSettings(root, mainRepoRoot);
+  const resolved = useResolvedSettings(root, mainRepoRoot, true, ownerOrganizationId);
   const scope = useMemo<EnvVaultScope>(
     () =>
       layer === "user"
@@ -975,8 +978,8 @@ export function EnvironmentSection({
 /** The User-scope Environment section (Settings → Environment) — the same editor
  *  as the per-repo layers, bound to the global user layer (~/.zeros/settings.local.toml)
  *  that every project inherits. A no-props Panel for the Settings page. */
-export function UserEnvironmentPanel() {
-  return <EnvironmentSection layer="user" />;
+export function UserEnvironmentPanel({ ownerOrganizationId }: { ownerOrganizationId?: string } = {}) {
+  return <EnvironmentSection layer="user" ownerOrganizationId={ownerOrganizationId} />;
 }
 
 // Two pickers over the layered `git.base_branch` and `git.remote` keys. The base

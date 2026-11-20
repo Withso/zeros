@@ -50,7 +50,8 @@ function EnvironmentScope({ userId, organizationId, active, unified }: { userId:
   </div>;
   return <Tabs value={selection.scope} onValueChange={value => select(value === "cloud" ? "cloud" : "local")}>
     <TabsList aria-label="Environment location"><TabsTrigger value="local">Local</TabsTrigger><TabsTrigger value="cloud">Cloud</TabsTrigger></TabsList>
-    <TabsContent value="local"><UserEnvironmentPanel /></TabsContent>
+    {/* The old rail showed this organization's values read-only here; stable keeps that. */}
+    <TabsContent value="local"><UserEnvironmentPanel ownerOrganizationId={organizationId} /></TabsContent>
     <TabsContent value="cloud" className="mt-6">{cloud}</TabsContent>
   </Tabs>;
 }
