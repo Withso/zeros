@@ -20,25 +20,25 @@ describe("a main component's slots", () => {
   it("take the instance's layers named for them, and the rest go to the default slot", async () => {
     const result = await expand('<zd-card data-oid="c1"><p data-oid="mine" slot="content">x</p><em data-oid="rest">y</em></zd-card>');
     expect(result.errors).toEqual([]);
-    expect(result.html).toContain('<div data-zd-part="body" data-zd-slot="content" style="display: flex"><p data-oid="mine" slot="content">x</p></div>');
-    expect(result.html).toContain('<footer data-zd-part="foot"><em data-oid="rest">y</em></footer>');
+    expect(result.html).toContain('<div data-zd-part="body" data-oid="body" data-zd-slot="content" style="display: flex"><p data-oid="mine" slot="content">x</p></div>');
+    expect(result.html).toContain('<footer data-zd-part="foot" data-oid="foot"><em data-oid="rest">y</em></footer>');
   });
 
   it("show what the main puts in them until the instance fills them, whitespace aside", async () => {
     const empty = await expand('<zd-card data-oid="c2"></zd-card>');
-    expect(empty.html).toContain('<div data-zd-part="body" data-zd-slot="content" style="display: flex"><p data-zd-part="placeholder">Empty</p></div>');
-    expect(empty.html).toContain('<footer data-zd-part="foot">No footer</footer>');
+    expect(empty.html).toContain('<div data-zd-part="body" data-oid="body" data-zd-slot="content" style="display: flex"><p data-zd-part="placeholder" data-oid="placeholder">Empty</p></div>');
+    expect(empty.html).toContain('<footer data-zd-part="foot" data-oid="foot">No footer</footer>');
     const named = await expand('<zd-card data-oid="c3">\n  <b data-oid="only" slot="content">b</b>\n</zd-card>');
     expect(named.html).toContain('<b data-oid="only" slot="content">b</b></div>');
-    expect(named.html).toContain('<footer data-zd-part="foot">No footer</footer>');
+    expect(named.html).toContain('<footer data-zd-part="foot" data-oid="foot">No footer</footer>');
   });
 
   it("keeps comments and nested children when filling a fallback", async () => {
     const commented = await expand('<zd-card data-oid="c4">\n  <!-- keep -->\n</zd-card>');
-    expect(commented.html).toContain('<footer data-zd-part="foot">No footer<!-- keep --></footer>');
+    expect(commented.html).toContain('<footer data-zd-part="foot" data-oid="foot">No footer<!-- keep --></footer>');
 
     const nested = await expand('<zd-card data-oid="c5"><section><em data-oid="nested">Nested</em></section></zd-card>');
-    expect(nested.html).toContain('<footer data-zd-part="foot"><section><em data-oid="nested">Nested</em></section></footer>');
+    expect(nested.html).toContain('<footer data-zd-part="foot" data-oid="foot"><section><em data-oid="nested">Nested</em></section></footer>');
   });
 
   it.each([
@@ -56,8 +56,8 @@ describe("a main component's slots", () => {
     // check:ui ignore-next -- the fixture authors literal colour values.
     const host = '<zd-qa-card data-oid="instance-a" data-name="Authored Instance A" zd-variant="compact" mystery="keep-me" zd-style-heading-part="text-decoration: underline" zd-style-tag-part="font-style: italic" style="position:absolute;left:26px;top:80px;width:230px;transform:rotate(2deg);box-shadow:0 4px 10px #2225" show-tag="false">Supplied footer text <strong data-oid="supplied-inline">and element</strong><!-- preserve footer comment --></zd-qa-card>';
     const result = await expandComponent("/work/slots", doc(host), { "qa/card.html": main }, "qa/stage.html", { registry: new Map([["qa-card", "qa/card.html"]]) });
-    expect(result.html).toContain('<div data-zd-part="content-part" data-zd-slot="content"><p data-zd-part="fallback">Main fallback content</p></div>');
-    expect(result.html).toContain('<footer data-zd-part="footer-part">Supplied footer text <strong data-oid="supplied-inline">and element</strong><!-- preserve footer comment --></footer>');
+    expect(result.html).toContain('<div data-zd-part="content-part" data-oid="content-part" data-zd-slot="content"><p data-zd-part="fallback" data-oid="fallback">Main fallback content</p></div>');
+    expect(result.html).toContain('<footer data-zd-part="footer-part" data-oid="footer-part">Supplied footer text <strong data-oid="supplied-inline">and element</strong><!-- preserve footer comment --></footer>');
     expect(result.html).toContain("Compact heading");
   });
 
@@ -84,7 +84,7 @@ describe("a main component's slots", () => {
     const result = await expandDesignComponents("/work/slots", doc('<zd-card data-oid="plans" heading="Plans"><p data-oid="plans-copy" slot="body">Body</p></zd-card>'),
       { "parts/card.html": main }, "home/index.html", { registry });
     expect(result.errors).toEqual([]);
-    expect(result.html).toContain('<h2 data-zd-part="heading">Plans</h2><div data-zd-part="body" data-zd-slot="body"><p data-oid="plans-copy" slot="body">Body</p></div>');
+    expect(result.html).toContain('<h2 data-zd-part="heading" data-oid="heading">Plans</h2><div data-zd-part="body" data-oid="body" data-zd-slot="body"><p data-oid="plans-copy" slot="body">Body</p></div>');
   });
 
   it("work in a components/ file too", async () => {

@@ -7,22 +7,28 @@ import { decodeCanvasFile, encodeCanvasFile } from "../canvas-file";
 import { designComponentRenderBytesForTests, rememberDesignComponentRender, resetDesignComponentRendersForTests } from "../component-last-good";
 import {
   createDesignFrame,
+  createDesignPage,
   deleteDesignFrame,
   DESIGN_DIRECTORY_NAME,
   duplicateDesignFrame,
+  listDesignFrames,
   lintDesignDocument,
   prepareDesignNavigationFrames,
   readDesignFrame,
   readDesignMutationSnapshot,
+  readDesignFrameRenderIdentity,
   readDesignWorkspaceSnapshot,
   renameDesignFrame,
   restoreDesignFrame,
+  transferDesignNode,
 } from "../document";
 import { designCatalogRevision, inspectDesignCatalog } from "../catalog-storage";
 import { readCanvas, writeCanvas } from "../document-storage";
 import { prepareFrameRenderSource } from "../render-preparation";
+import { DESIGN_RUNTIME_DOCUMENT_BODY_ID } from "@zeros/protocol/design-runtime";
+import { createComponentTemplateBudget, renderComponentTemplate } from "@zeros/design-web/component-template";
 import { designIdentityCacheStatsForTests } from "../identity-cache";
-import { stripNonDesignOidsForRender } from "../node-identities";
+import { designNodeRecords, healDesignOids, stripNonDesignOidsForRender } from "../node-identities";
 
 describe("a frame registered as a component", () => {
   let root: string;
@@ -57,12 +63,414 @@ describe("a frame registered as a component", () => {
     expect(await componentOf(frame.file)).toBe("chat-composer");
   });
 
+  it("negotiates component identity on aggregate, document, and lazy prepared reads", async () => {
+    const frame = await createDesignFrame(root, { title: "Component host" });
+    const source = '<!doctype html><html><head></head><body><zd-card data-oid="host" data-zeros-frame-root></zd-card></body></html>';
+    await writeFile(path.join(root, DESIGN_DIRECTORY_NAME, frame.file), source);
+    const inspection = inspectDesignCatalog(root, DESIGN_DIRECTORY_NAME);
+    const catalogRevision = designCatalogRevision(inspection);
+    const directoryId = inspection.layout.manifest.id;
+
+    const oldAggregate = (await readDesignWorkspaceSnapshot(root)).frames.find((candidate) => candidate.file === frame.file)!;
+    expect(Object.hasOwn(oldAggregate, "componentIdentity")).toBe(false);
+    const aggregate = (await readDesignWorkspaceSnapshot(root, { includeComponentIdentity: true })).frames.find((candidate) => candidate.file === frame.file)!;
+    expect(aggregate.componentIdentity).toEqual({ kind: "instance", nodeId: "host" });
+
+    const oldDocument = await readDesignFrame(root, frame.file);
+    expect(Object.hasOwn(oldDocument, "componentIdentity")).toBe(false);
+    expect((await readDesignFrame(root, frame.file, 4, { includeComponentIdentity: true })).componentIdentity)
+      .toEqual({ kind: "instance", nodeId: "host" });
+
+    const oldPrepared = await prepareDesignNavigationFrames(root, catalogRevision, [frame.file], directoryId);
+    expect(Object.hasOwn(oldPrepared.frames[0]!, "componentIdentity")).toBe(false);
+    const beforeWarmNegotiatedRead = designIdentityCacheStatsForTests();
+    const prepared = await prepareDesignNavigationFrames(root, catalogRevision, [frame.file], directoryId, { includeComponentIdentity: true });
+    expect(prepared.frames[0]?.componentIdentity).toEqual({ kind: "instance", nodeId: "host" });
+    expect(designIdentityCacheStatsForTests().hits).toBeGreaterThan(beforeWarmNegotiatedRead.hits);
+    const oldPreparedAfterWarm = await prepareDesignNavigationFrames(root, catalogRevision, [frame.file], directoryId);
+    expect(Object.hasOwn(oldPreparedAfterWarm.frames[0]!, "componentIdentity")).toBe(false);
+
+    const oldMutation = await readDesignMutationSnapshot(root, [frame.file]);
+    expect(Object.hasOwn(oldMutation.frames[0]!, "componentIdentity")).toBe(false);
+    const mutation = await readDesignMutationSnapshot(root, [frame.file], undefined, { includeComponentIdentity: true });
+    expect(mutation.frames[0]?.componentIdentity).toEqual({ kind: "instance", nodeId: "host" });
+  });
+
+  it("uses healed OIDs in non-negotiated document trees without changing authored source", async () => {
+    const frame = await createDesignFrame(root, { title: "Legacy identities" });
+    const source = '<!doctype html><html><head></head><body><main><p data-oid="same">First</p>' +
+      '<p data-oid="same">Second</p><p data-oid="">Missing</p></main></body></html>';
+    await writeFile(path.join(root, DESIGN_DIRECTORY_NAME, frame.file), source);
+
+    const read = await readDesignFrame(root, frame.file);
+    const healed = healDesignOids(source);
+    const expected = designNodeRecords(healed.document!).map(({ oid }) => oid);
+    const actual = read.tree.flatMap(function flatten(node): (string | null)[] {
+      return [node.oid, ...node.children.flatMap(flatten)];
+    });
+
+    expect(Object.hasOwn(read, "componentIdentity")).toBe(false);
+    expect(actual).toEqual(expected);
+    expect(actual.every((oid) => oid !== null)).toBe(true);
+    expect(new Set(actual).size).toBe(actual.length);
+    expect(read.source).toBe(source);
+  });
+
+  it("tracks registration changes without HTML edits and gives registered mains precedence", async () => {
+    const frame = await createDesignFrame(root, { title: "Registered main" });
+    const source = '<!doctype html><html><head></head><body><zd-card data-oid="host" data-zeros-frame-root></zd-card></body></html>';
+    await writeFile(path.join(root, DESIGN_DIRECTORY_NAME, frame.file), source);
+    const readIdentity = async () => {
+      const inspection = inspectDesignCatalog(root, DESIGN_DIRECTORY_NAME);
+      const prepared = await prepareDesignNavigationFrames(root, designCatalogRevision(inspection), [frame.file], inspection.layout.manifest.id,
+        { includeComponentIdentity: true });
+      return prepared.frames.find((candidate) => candidate.file === frame.file)!;
+    };
+
+    const ordinary = await readIdentity();
+    expect(ordinary.componentIdentity).toEqual({ kind: "instance", nodeId: "host" });
+    await register(frame.file, "card-main");
+    const registered = await readIdentity();
+    expect(registered.component).toBeUndefined();
+    expect(registered.componentIdentity).toEqual({ kind: "main", name: "card-main" });
+    expect(registered.sourceVersion).toBe(ordinary.sourceVersion);
+    await unregister(frame.file);
+    const removed = await readIdentity();
+    expect(removed.componentIdentity).toEqual({ kind: "instance", nodeId: "host" });
+    expect(removed.sourceVersion).toBe(ordinary.sourceVersion);
+  });
+
+  it("identifies a frame-root host with a body-level style sibling", async () => {
+    const frame = await createDesignFrame(root, { title: "Styled host" });
+    const source = '<!doctype html><html><head></head><body><zd-card data-oid="host" data-zeros-frame-root></zd-card>' +
+      '<style data-oid="legacy-style">.host { display: grid; }</style></body></html>';
+    await writeFile(path.join(root, DESIGN_DIRECTORY_NAME, frame.file), source);
+    const inspection = inspectDesignCatalog(root, DESIGN_DIRECTORY_NAME);
+    const aggregate = await readDesignWorkspaceSnapshot(root, { includeComponentIdentity: true });
+    expect(aggregate.frames.find((candidate) => candidate.file === frame.file)?.componentIdentity)
+      .toEqual({ kind: "instance", nodeId: "host" });
+    const prepared = await prepareDesignNavigationFrames(root, designCatalogRevision(inspection), [frame.file], inspection.layout.manifest.id,
+      { includeComponentIdentity: true });
+    expect(prepared.frames[0]?.componentIdentity).toEqual({ kind: "instance", nodeId: "host" });
+  });
+
+  it("strips a legacy body-style OID from composition but retains the style element", () => {
+    const source = '<!doctype html><html><head></head><body><style data-oid="legacy-style">.host { display: grid; }</style></body></html>';
+    const rendered = stripNonDesignOidsForRender(source);
+    expect(rendered).toContain("<style");
+    expect(rendered).not.toContain('data-oid="legacy-style"');
+  });
+
+  it.each([
+    ["unmarked root", '<zd-card data-oid="host"></zd-card>'],
+    ["non-root host", '<main data-oid="shell" data-zeros-frame-root><zd-card data-oid="host"></zd-card></main>'],
+    ["template sibling", '<zd-card data-oid="host" data-zeros-frame-root></zd-card><template data-zd-if="true"><zd-card data-oid="template-host" data-zeros-frame-root></zd-card></template>'],
+    ["visual sibling", '<zd-card data-oid="host" data-zeros-frame-root></zd-card><div data-oid="content">Content</div>'],
+  ])("does not identify a single %s as a frame-root instance", async (_label, rootHtml) => {
+    const frame = await createDesignFrame(root, { title: "Ordinary" });
+    await writeFile(path.join(root, DESIGN_DIRECTORY_NAME, frame.file), `<!doctype html><html><head></head><body>${rootHtml}</body></html>`);
+    const prepared = await readDesignWorkspaceSnapshot(root, { includeComponentIdentity: true });
+    expect(prepared.frames.find((candidate) => candidate.file === frame.file)?.componentIdentity).toBeNull();
+  });
+
+  it.each([
+    ["missing", '<zd-card data-zeros-frame-root></zd-card>'],
+    ["empty", '<zd-card data-oid="" data-zeros-frame-root></zd-card>'],
+    ["duplicate", '<zd-card data-oid="same" data-zeros-frame-root><b data-oid="same"></b></zd-card>'],
+  ])("uses the healed frame-root identity for aggregate and prepared reads (%s)", async (_label, rootHtml) => {
+    const frame = await createDesignFrame(root, { title: "Healed host" });
+    await writeFile(path.join(root, DESIGN_DIRECTORY_NAME, frame.file), `<!doctype html><html><head></head><body>${rootHtml}</body></html>`);
+    const inspection = inspectDesignCatalog(root, DESIGN_DIRECTORY_NAME);
+    const revision = designCatalogRevision(inspection);
+    const aggregate = (await readDesignWorkspaceSnapshot(root, { includeComponentIdentity: true })).frames.find((candidate) => candidate.file === frame.file)!;
+    const prepared = (await prepareDesignNavigationFrames(root, revision, [frame.file], inspection.layout.manifest.id,
+      { includeComponentIdentity: true })).frames[0]!;
+    expect(aggregate.componentIdentity?.kind).toBe("instance");
+    expect(prepared.componentIdentity).toEqual(aggregate.componentIdentity);
+  });
+
   it("does not pass its registration to a duplicate", async () => {
     const frame = await createDesignFrame(root, { title: "Chat composer" });
     await register(frame.file, "chat-composer");
     const copy = await duplicateDesignFrame(root, frame.file);
     expect(await componentOf(copy.file)).toBeUndefined();
     expect(await componentOf(frame.file)).toBe("chat-composer");
+  });
+
+  it("keeps an unregistered declaration as an authored copy", async () => {
+    const main = await createDesignFrame(root, { title: "Unregistered declaration" });
+    const source = '<!doctype html><html><head><template data-zd-options><zd-option name="width" type="number" default="400"></zd-option><zd-variant name="compact" width="320"></zd-variant></template></head><body><div data-oid="main">Authored main</div></body></html>';
+    await writeFile(path.join(root, DESIGN_DIRECTORY_NAME, main.file), source);
+    const sourceVersion = (await readDesignFrameRenderIdentity(root, main.file)).sourceVersion;
+    const copy = await duplicateDesignFrame(root, main.file, { sourceVersion, componentCopy: { variant: "compact" } });
+    const copiedSource = await readFile(path.join(root, DESIGN_DIRECTORY_NAME, copy.file), "utf8");
+    expect(copiedSource).toContain("<template data-zd-options>");
+    expect(copiedSource).toContain('name="compact" width="320"');
+    expect(copiedSource).not.toContain("<zd-unregistered-declaration");
+    expect(await componentOf(copy.file)).toBeUndefined();
+  });
+
+  it("makes a linked copy's host the frame root, so the frame is the instance", async () => {
+    const main = await createDesignFrame(root, { title: "Button" });
+    const source = '<!doctype html><html><head><template data-zd-options><zd-variant name="compact"></zd-variant></template></head>' +
+      '<body class="stage"><button data-oid="btn">Go</button></body></html>';
+    await writeFile(path.join(root, DESIGN_DIRECTORY_NAME, main.file), source);
+    await register(main.file, "button");
+    const sourceVersion = (await readDesignFrameRenderIdentity(root, main.file)).sourceVersion;
+    const copy = await duplicateDesignFrame(root, main.file, { sourceVersion, componentCopy: { variant: "compact" } });
+    const copied = await readFile(path.join(root, DESIGN_DIRECTORY_NAME, copy.file), "utf8");
+    expect(copied).toMatch(/<body>\s*<zd-button data-oid="[^"]+" data-zeros-frame-root zd-variant="compact"><\/zd-button>\s*<\/body>/);
+    expect(copied).not.toContain("<main");
+  });
+
+  it("validates linked variants only from direct options in the head", async () => {
+    const main = await createDesignFrame(root, { title: "Chat composer" });
+    const source = '<!doctype html><html><head><template data-zd-options>' +
+      '<zd-variant name="compact"></zd-variant><div><zd-variant name="nested"></zd-variant></div>' +
+      '</template></head><body><template data-zd-options><zd-variant name="body"></zd-variant></template>' +
+      '<main data-oid="cc-root"></main></body></html>';
+    await writeFile(path.join(root, DESIGN_DIRECTORY_NAME, main.file), source);
+    await register(main.file, "chat-composer");
+    const sourceVersion = (await readDesignFrameRenderIdentity(root, main.file)).sourceVersion;
+    await expect(duplicateDesignFrame(root, main.file, { sourceVersion, componentCopy: { variant: "body" } }))
+      .rejects.toThrow(/no longer declares/);
+    await expect(duplicateDesignFrame(root, main.file, { sourceVersion, componentCopy: { variant: "nested" } }))
+      .rejects.toThrow(/no longer declares/);
+  });
+
+  it("duplicates a whole registered frame into another frame as a linked host", async () => {
+    const main = await createDesignFrame(root, { title: "Chat composer" });
+    const destination = await createDesignFrame(root, { title: "Board" });
+    const source = '<!doctype html><html><head><template data-zd-options><zd-variant name="compact" width="420"></zd-variant></template><style>.main-definition { color: red; }</style></head><body><div data-oid="main">Authored component</div></body></html>';
+    await writeFile(path.join(root, DESIGN_DIRECTORY_NAME, main.file), source);
+    await writeFile(path.join(root, DESIGN_DIRECTORY_NAME, destination.file), '<!doctype html><html><head></head><body><section data-oid="board" style="position:relative"></section></body></html>');
+    await register(main.file, "chat-composer");
+    const sourceVersion = (await readDesignFrameRenderIdentity(root, main.file)).sourceVersion;
+    const destinationSourceVersion = (await readDesignFrameRenderIdentity(root, destination.file)).sourceVersion;
+    const transfer = await transferDesignNode(root, {
+      frame: main.file,
+      sourceVersion,
+      nodeId: DESIGN_RUNTIME_DOCUMENT_BODY_ID,
+      duplicateNodeId: "copy",
+      componentCopy: { variant: "compact" },
+      destinationFrame: destination.file,
+      destinationSourceVersion,
+      parentId: "board",
+      relocation: { width: main.width, height: main.height, matrix: [1, 0, 0, 1, 20, 30], inheritedStyles: {} },
+      geometry: { x: 20, y: 30, w: main.width, h: main.height, z: 1 },
+    });
+    const destinationSource = await readFile(path.join(root, DESIGN_DIRECTORY_NAME, destination.file), "utf8");
+    expect(transfer.frame).toBe(destination.file);
+    expect(destinationSource).toContain('<zd-chat-composer data-oid="');
+    expect(destinationSource).toContain('zd-variant="compact"');
+    expect(destinationSource).not.toContain("main-definition");
+    expect(await readFile(path.join(root, DESIGN_DIRECTORY_NAME, main.file), "utf8")).toBe(source);
+  });
+
+  it("duplicates a runtime component-root id into another frame as a linked host", async () => {
+    const main = await createDesignFrame(root, { title: "Chat composer" });
+    const destination = await createDesignFrame(root, { title: "Board" });
+    const source = '<!doctype html><html><head><template data-zd-options><zd-variant name="compact"></zd-variant></template></head><body><main data-oid="cc-root"><p data-oid="cc-copy">Copy</p></main></body></html>';
+    await writeFile(path.join(root, DESIGN_DIRECTORY_NAME, main.file), source);
+    await writeFile(path.join(root, DESIGN_DIRECTORY_NAME, destination.file), '<!doctype html><html><head></head><body><section data-oid="board" style="position:relative"></section></body></html>');
+    await register(main.file, "chat-composer");
+    const sourceVersion = (await readDesignFrameRenderIdentity(root, main.file)).sourceVersion;
+    const destinationSourceVersion = (await readDesignFrameRenderIdentity(root, destination.file)).sourceVersion;
+    await transferDesignNode(root, {
+      frame: main.file,
+      sourceVersion,
+      nodeId: "cc-root",
+      duplicateNodeId: "copy",
+      componentCopy: { variant: "compact" },
+      destinationFrame: destination.file,
+      destinationSourceVersion,
+      parentId: "board",
+      relocation: { width: main.width, height: main.height, matrix: [1, 0, 0, 1, 20, 30], inheritedStyles: {} },
+      geometry: { x: 20, y: 30, w: main.width, h: main.height, z: 1 },
+    });
+    const destinationSource = await readFile(path.join(root, DESIGN_DIRECTORY_NAME, destination.file), "utf8");
+    expect(destinationSource).toContain('<zd-chat-composer data-oid="');
+    expect(destinationSource).toContain('zd-variant="compact"');
+    expect(destinationSource).not.toContain("cc-copy");
+    expect(await readFile(path.join(root, DESIGN_DIRECTORY_NAME, main.file), "utf8")).toBe(source);
+  });
+
+  it("keeps an unregistered semantic frame root direct when frame-copy intent is present", async () => {
+    const main = await createDesignFrame(root, { title: "Ordinary frame" });
+    const destination = await createDesignFrame(root, { title: "Board" });
+    const source = '<!doctype html><html><head></head><body><main data-oid="shell" data-zeros-frame-root style="height:100vh"><zd-card data-oid="card" heading="Welcome" zd-variant="compact" zd-style-card="padding: 4px"><p data-oid="slot-fill" slot="content">Slotted content</p></zd-card><footer data-oid="bottom" style="position:absolute;bottom:0">Bottom anchored</footer></main></body></html>';
+    await writeFile(path.join(root, DESIGN_DIRECTORY_NAME, main.file), source);
+    await writeFile(path.join(root, DESIGN_DIRECTORY_NAME, destination.file), '<!doctype html><html><head></head><body><section data-oid="board" style="position:relative"></section></body></html>');
+    const sourceVersion = (await readDesignFrameRenderIdentity(root, main.file)).sourceVersion;
+    const destinationSourceVersion = (await readDesignFrameRenderIdentity(root, destination.file)).sourceVersion;
+    await transferDesignNode(root, {
+      frame: main.file,
+      sourceVersion,
+      nodeId: "shell",
+      duplicateNodeId: "copy-shell",
+      destinationFrame: destination.file,
+      destinationSourceVersion,
+      parentId: "board",
+      relocation: { width: main.width, height: main.height, matrix: [1, 0, 0, 1, 20, 30], inheritedStyles: {} },
+      geometry: { x: 20, y: 30, w: main.width, h: main.height, z: 1 },
+      styles: { position: "absolute", top: "30px", left: "20px", width: "100%", height: "100vh" },
+    });
+    const destinationSource = await readFile(path.join(root, DESIGN_DIRECTORY_NAME, destination.file), "utf8");
+    expect(destinationSource).toMatch(/<section[^>]*data-oid="board"[^>]*><main[^>]*data-oid="copy-shell"/);
+    expect(destinationSource).toContain('<zd-card data-oid="copy-shell-card" heading="Welcome" zd-variant="compact" zd-style-card="padding: 4px">');
+    expect(destinationSource).toContain('<p data-oid="copy-shell-slot-fill" slot="content">Slotted content</p>');
+    expect(destinationSource).toMatch(/data-oid="copy-shell"[^>]*height:\s*900px/);
+    expect(destinationSource).toMatch(/data-oid="copy-shell"[^>]*>[^]*<footer[^>]*data-oid="copy-shell-bottom"[^>]*style="position:absolute;bottom:0"/);
+    expect(destinationSource).not.toMatch(/data-oid="copy-shell"[^>]*><main/);
+    const destinationIds = Array.from(destinationSource.matchAll(/data-oid="([^"]+)"/g), (match) => match[1]);
+    expect(new Set(destinationIds).size).toBe(destinationIds.length);
+    expect(await readFile(path.join(root, DESIGN_DIRECTORY_NAME, main.file), "utf8")).toBe(source);
+  });
+
+  it("keeps component-instance relocation protection for generic root moves", async () => {
+    const main = await createDesignFrame(root, { title: "Ordinary frame" });
+    const destination = await createDesignFrame(root, { title: "Board" });
+    const source = '<!doctype html><html><head></head><body><main data-oid="shell" data-zeros-frame-root><zd-card data-oid="card"><p data-oid="slot-fill" slot="content">Slotted content</p></zd-card></main></body></html>';
+    await writeFile(path.join(root, DESIGN_DIRECTORY_NAME, main.file), source);
+    await writeFile(path.join(root, DESIGN_DIRECTORY_NAME, destination.file), '<!doctype html><html><head></head><body><section data-oid="board"></section></body></html>');
+    const sourceVersion = (await readDesignFrameRenderIdentity(root, main.file)).sourceVersion;
+    const destinationSourceVersion = (await readDesignFrameRenderIdentity(root, destination.file)).sourceVersion;
+    await expect(transferDesignNode(root, {
+      frame: main.file,
+      sourceVersion,
+      nodeId: "shell",
+      destinationFrame: destination.file,
+      destinationSourceVersion,
+      parentId: "board",
+      relocation: { width: main.width, height: main.height, matrix: [1, 0, 0, 1, 20, 30], inheritedStyles: {} },
+      geometry: { x: 20, y: 30, w: main.width, h: main.height, z: 1 },
+    })).rejects.toThrow(/component instance/);
+  });
+
+  it.each([
+    ["conditional top-level siblings", '<div data-oid="a" data-zd-if="toolbar">Toolbar</div><div data-oid="b" data-zd-if="!toolbar">No toolbar</div>', "a", "b"],
+    ["conditional templates", '<template data-zd-if="toolbar"><div data-oid="compact-root">Compact</div></template><template data-zd-if="!toolbar"><div data-oid="default-root">Default</div></template>', "compact-root", "default-root"],
+  ])("copies a registered main with %s as a named linked variant", async (_shape, body, runtimeRootId, omittedRootId) => {
+    const main = await createDesignFrame(root, { title: "Conditional component" });
+    const destination = await createDesignFrame(root, { title: "Board" });
+    const source = '<!doctype html><html><head><template data-zd-options><zd-option name="toolbar" type="boolean" default="false"></zd-option><zd-variant name="compact" toolbar="true"></zd-variant></template></head><body>' + body + '</body></html>';
+    const evaluated = renderComponentTemplate(source, {
+      scope: new Map([["toolbar", true]]),
+      ids: "copy",
+      budget: createComponentTemplateBudget(),
+      document: true,
+    });
+    expect(evaluated).toContain(`data-oid="${runtimeRootId}"`);
+    expect(evaluated).not.toContain(`data-oid="${omittedRootId}"`);
+    await writeFile(path.join(root, DESIGN_DIRECTORY_NAME, main.file), source);
+    await writeFile(path.join(root, DESIGN_DIRECTORY_NAME, destination.file), '<!doctype html><html><head></head><body><section data-oid="board" style="position:relative"></section></body></html>');
+    await register(main.file, "conditional-card");
+    const sourceVersion = (await readDesignFrameRenderIdentity(root, main.file)).sourceVersion;
+    const destinationSourceVersion = (await readDesignFrameRenderIdentity(root, destination.file)).sourceVersion;
+    await transferDesignNode(root, {
+      frame: main.file,
+      sourceVersion,
+      nodeId: runtimeRootId,
+      duplicateNodeId: "copy-conditional",
+      componentCopy: { variant: "compact" },
+      destinationFrame: destination.file,
+      destinationSourceVersion,
+      parentId: "board",
+      relocation: { width: main.width, height: main.height, matrix: [1, 0, 0, 1, 20, 30], inheritedStyles: {} },
+      geometry: { x: 20, y: 30, w: main.width, h: main.height, z: 1 },
+    });
+    const destinationSource = await readFile(path.join(root, DESIGN_DIRECTORY_NAME, destination.file), "utf8");
+    expect(destinationSource).toMatch(/<zd-conditional-card data-oid="copy-conditional-o-[a-f0-9]+" zd-variant="compact">/);
+    expect(await readFile(path.join(root, DESIGN_DIRECTORY_NAME, main.file), "utf8")).toBe(source);
+  });
+
+  it.each([
+    [null, null],
+    ["compact", 'zd-variant="compact"'],
+    ["hover", null],
+  ] as const)("duplicates a registered main as a linked instance for %s", async (variant, expectedAttribute) => {
+    const main = await createDesignFrame(root, { title: "Chat composer" });
+    const otherPage = await createDesignPage(root, { title: "Other page" });
+    const mainPageFolder = main.file.split("/")[0]!;
+    const mainAsset = path.join(root, DESIGN_DIRECTORY_NAME, mainPageFolder, "assets", "icon.svg");
+    const otherAsset = path.join(root, DESIGN_DIRECTORY_NAME, otherPage.folder, "assets", "icon.svg");
+    await mkdir(path.dirname(mainAsset), { recursive: true });
+    await mkdir(path.dirname(otherAsset), { recursive: true });
+    await writeFile(mainAsset, '<svg id="component-origin"></svg>');
+    await writeFile(otherAsset, '<svg id="destination-origin"></svg>');
+    const source = '<!doctype html><html><head><title>Chat composer</title><template data-zd-options>' +
+      '<zd-option name="width" type="number" default="1120"></zd-option>' +
+      '<zd-variant name="compact" width="420"></zd-variant>' +
+      '<zd-variant name="hover" zd-state="hover"></zd-variant>' +
+      '</template><style>.main-definition { color: red; }</style></head>' +
+      '<body><div class="main-definition" data-oid="root"><img data-oid="icon" src="./assets/icon.svg" alt="component asset"></div></body></html>';
+    await writeFile(path.join(root, DESIGN_DIRECTORY_NAME, main.file), source);
+    await register(main.file, "chat-composer");
+    const sourceVersion = (await readDesignFrameRenderIdentity(root, main.file)).sourceVersion;
+    const linked = await duplicateDesignFrame(root, main.file, {
+      pageId: otherPage.id,
+      sourceVersion,
+      componentCopy: { variant },
+      geometry: { x: 800, y: 640, w: main.width, h: main.height, z: 2 },
+    });
+    const linkedSource = await readFile(path.join(root, DESIGN_DIRECTORY_NAME, linked.file), "utf8");
+    const hostId = linkedSource.match(/<zd-chat-composer data-oid="([^"]+)"/)?.[1];
+    const identities = [...linkedSource.matchAll(/data-oid="([^"]+)"/g)].map((match) => match[1]);
+    expect(linkedSource).toContain(`<zd-chat-composer data-oid="${hostId}"`);
+    expect(hostId).toBeTruthy();
+    expect(hostId).not.toBe("root");
+    expect(new Set(identities).size).toBe(identities.length);
+    if (expectedAttribute) expect(linkedSource).toContain(expectedAttribute);
+    else expect(linkedSource).not.toMatch(/<zd-chat-composer[^>]*\s+zd-variant=/);
+    expect(linkedSource).not.toContain("main-definition");
+    expect(linkedSource).not.toContain("<img");
+    expect(await readFile(path.join(root, DESIGN_DIRECTORY_NAME, main.file), "utf8")).toBe(source);
+    expect(linked).toMatchObject({ kind: main.kind, x: 800, y: 640, width: main.width, height: main.height });
+    expect(await componentOf(linked.file)).toBeUndefined();
+    const expanded = await prepareFrameRenderSource(root, linkedSource, { width: 400, height: 300 }, undefined, undefined, linked.file, await readCanvas(root));
+    expect(expanded.sanitized).toContain("component asset");
+    expect(expanded.sanitized).toContain(`src="${path.posix.relative(otherPage.folder, `${mainPageFolder}/assets/icon.svg`)}"`);
+    expect(expanded.sanitized).not.toContain(`src="./assets/icon.svg"`);
+  });
+
+  it("rejects unknown or stale linked component copies without changing the source", async () => {
+    const main = await createDesignFrame(root, { title: "Chat composer" });
+    await writeFile(path.join(root, DESIGN_DIRECTORY_NAME, main.file),
+      '<!doctype html><html><head><template data-zd-options><zd-variant name="compact"></zd-variant></template></head><body><b data-oid="root">Main</b></body></html>');
+    await register(main.file, "chat-composer");
+    const source = await readFile(path.join(root, DESIGN_DIRECTORY_NAME, main.file), "utf8");
+    const sourceVersion = (await readDesignFrameRenderIdentity(root, main.file)).sourceVersion;
+    await expect(duplicateDesignFrame(root, main.file, {
+      sourceVersion,
+      componentCopy: { variant: "missing" },
+    })).rejects.toThrow(/variant/i);
+    await expect(duplicateDesignFrame(root, main.file, {
+      sourceVersion: "0".repeat(24),
+      componentCopy: { variant: null },
+    })).rejects.toThrow(/changed/i);
+    await expect(duplicateDesignFrame(root, main.file, {
+      componentCopy: { variant: null },
+    })).rejects.toThrow(/source frame changed/i);
+    expect(await readFile(path.join(root, DESIGN_DIRECTORY_NAME, main.file), "utf8")).toBe(source);
+    expect((await listDesignFrames(root)).filter((frame) => frame.file !== main.file)).toHaveLength(0);
+  });
+
+  it("serializes concurrent linked copies with collision-safe names", async () => {
+    const main = await createDesignFrame(root, { title: "Chat composer" });
+    await writeFile(path.join(root, DESIGN_DIRECTORY_NAME, main.file),
+      '<!doctype html><html><head></head><body><b data-oid="root">Main</b></body></html>');
+    await register(main.file, "chat-composer");
+    const sourceVersion = (await readDesignFrameRenderIdentity(root, main.file)).sourceVersion;
+    const copies = await Promise.all(Array.from({ length: 3 }, () => duplicateDesignFrame(root, main.file, {
+      sourceVersion,
+      componentCopy: { variant: null },
+    })));
+    expect(new Set(copies.map((copy) => copy.file)).size).toBe(3);
+    expect(copies.map((copy) => copy.file)).toEqual(expect.arrayContaining([
+      "page-1/chat-composer-copy.html",
+      "page-1/chat-composer-copy-2.html",
+      "page-1/chat-composer-copy-3.html",
+    ]));
   });
 
   it("comes back to its place on the page on undo, leaving the canvas file as it was", async () => {
@@ -99,7 +507,7 @@ describe("a frame registered as a component", () => {
     const source = '<!doctype html><html><head></head><body><zd-chat-composer data-oid="ws" width="800"></zd-chat-composer></body></html>';
     const canvas = await readCanvas(root);
     const render = await prepareFrameRenderSource(root, source, { width: 400, height: 300 }, undefined, undefined, host.file, canvas);
-    expect(render.sanitized).toContain('<div class="c" data-zd-part="root" data-zd-root="">Composer</div>');
+    expect(render.sanitized).toContain('<div class="c" data-zd-part="root" data-oid="root" data-zd-root="">Composer</div>');
     expect(render.sanitized).toContain("--zd-width: 800px;");
     expect(render.componentOptions).toBeUndefined();
   });
@@ -288,6 +696,32 @@ describe("instances of a component that is no longer there", () => {
       message: `Component <zd-chip> is registered to ${main.file}, which is missing.`,
       fix: `Restore ${main.file}, register another frame as zd-chip in meta/canvas.json, or replace the component instance.`,
     })]);
+  });
+
+  it("keeps a generated missing-component instance diagnosable through host rename and delete", async () => {
+    const main = await createDesignFrame(root, { title: "Chip" });
+    const source = '<!doctype html><html><head><template data-zd-options>' +
+      '<zd-variant name="compact"></zd-variant></template></head><body><b data-oid="root">Chip</b></body></html>';
+    await writeFile(path.join(root, DESIGN_DIRECTORY_NAME, main.file), source);
+    await register(main.file, "chip");
+    const sourceVersion = (await readDesignFrameRenderIdentity(root, main.file)).sourceVersion;
+    const copy = await duplicateDesignFrame(root, main.file, { sourceVersion, componentCopy: { variant: "compact" } });
+    const copySource = await readFile(path.join(root, DESIGN_DIRECTORY_NAME, copy.file), "utf8");
+    expect(copySource).toContain('<zd-chip data-oid="');
+
+    await deleteDesignFrame(root, main.file);
+    const missing = (await lintDesignDocument(root, copy.file, { healOids: false, includeRuntimeAudits: false })).violations;
+    expect(missing).toContainEqual(expect.objectContaining({ ruleId: "component-undefined", severity: "error" }));
+
+    const renamed = await renameDesignFrame(root, copy.file, "Missing chip copy");
+    const instanceMarkup = copySource.match(/<zd-chip[^>]*><\/zd-chip>/)?.[0];
+    expect(instanceMarkup).toBeTruthy();
+    expect(await readFile(path.join(root, DESIGN_DIRECTORY_NAME, renamed.file), "utf8")).toContain(instanceMarkup!);
+    const renamedMissing = (await lintDesignDocument(root, renamed.file, { healOids: false, includeRuntimeAudits: false })).violations;
+    expect(renamedMissing).toContainEqual(expect.objectContaining({ ruleId: "component-undefined", severity: "error" }));
+
+    await deleteDesignFrame(root, renamed.file);
+    expect((await listDesignFrames(root)).some((frame) => frame.file === renamed.file)).toBe(false);
   });
 
   it("says no frame is registered and there is no components/ file when the name is not defined at all", async () => {

@@ -16,6 +16,10 @@ import {
 import { FRAME_HTML, webState } from "./fixtures";
 
 describe("HTML source adapter", () => {
+  it.each(["data-zd-own-style", "data-zd-source-style"])("refuses render-only %s in authored mutations", (attribute) => {
+    expect(() => mutateDesignNodeAttributeSource('<div data-oid="target"></div>', "target", attribute, "color: red")).toThrow(/Render-only/);
+    expect(() => assertSafeDesignHtmlFragment(`<div ${attribute}="color: red"></div>`)).toThrow(/Render-only/);
+  });
   it("validates URL attribute mutations at the containing page and retains root behavior", () => {
     const source = '<img data-oid="image" src="local.png">';
     expect(
@@ -227,6 +231,16 @@ describe("HTML source adapter", () => {
     expect(mutateDesignNodeDeleteSource(duplicated, "card-copy")).toBe(
       FRAME_HTML,
     );
+  });
+
+  it("keeps linked component host options, styles, parts, and slot content while reseeding identities", () => {
+    const source = '<!doctype html><html><body><zd-chip data-oid="host" zd-variant="compact" width="420" class="host-override" style="--host-color: red" zd-style-root="color: blue" zd-style-chip-label="font-weight: 700"><span data-oid="label" slot="label" style="font-weight: 700">Chip</span></zd-chip></body></html>';
+    const duplicated = mutateDesignNodeDuplicateSource(source, "host", "host-copy");
+    expect(duplicated).toContain('<zd-chip data-oid="host-copy" zd-variant="compact" width="420" class="host-override" style="--host-color: red" zd-style-root="color: blue" zd-style-chip-label="font-weight: 700">');
+    expect(duplicated).toContain('slot="label" style="font-weight: 700">Chip');
+    const identities = [...duplicated.matchAll(/data-oid="([^"]+)"/g)].map((match) => match[1]);
+    expect(new Set(identities).size).toBe(identities.length);
+    expect(duplicated).toContain('data-oid="host" zd-variant="compact" width="420"');
   });
 
   it("preserves a large authored subtree and its neighbors through copy and delete", () => {

@@ -12,6 +12,7 @@ import {
   designWorkspaceSnapshotCache,
   transferDesignNodeCached,
 } from "./state/design-workspace-cache";
+import type { DesignComponentCopy } from "@zeros/protocol/design-relocation";
 import { selectDesignFrame, selectDesignNode } from "./state/design-selection";
 import { designFrameViews, isPreparedDesignFrame, type DesignFrameView } from "./state/design-frame-view";
 import { designLayoutDrop } from "./design-layout-drag";
@@ -142,6 +143,8 @@ export async function transferDesignLayerOnCanvas(input: {
   frames: readonly DesignFrameView[];
   details: DesignRuntimeNodeDetails;
   duplicateNodeId?: string;
+  componentCopy?: DesignComponentCopy;
+  statePreview?: boolean;
   origin: { x: number; y: number };
   detach: boolean;
   isCurrent?: () => boolean;
@@ -154,7 +157,16 @@ export async function transferDesignLayerOnCanvas(input: {
   /** The destination the gesture already highlighted, kept at release. */
   destination?: DesignFrameView;
 }): Promise<boolean> {
-  const { workspaceId, folder, frame, details, origin } = input;
+  const { workspaceId, folder, frame, origin } = input;
+  const details = input.statePreview && input.componentCopy && input.details.relocationContext
+    ? {
+        ...input.details,
+        relocationContext: {
+          ...input.details.relocationContext,
+          inheritedStyles: input.details.relocationContext.baseStyles ?? {},
+        },
+      }
+    : input.details;
   const owner = captureDesignPageOwner(workspaceId);
   const initialSelection = designWorkspaceView(workspaceId);
   const hasIntent = () =>
@@ -247,7 +259,7 @@ export async function transferDesignLayerOnCanvas(input: {
   if (!hasIntent() || input.canWrite?.() === false) return false;
   if (!destinationIsCurrent()) throw stillLoading();
   // A body-rooted frame moves whole: its content keeps the frame's size.
-  const wholeFrame = details.oid === DESIGN_RUNTIME_DOCUMENT_BODY_ID;
+  const wholeFrame = details.oid === DESIGN_RUNTIME_DOCUMENT_BODY_ID || input.componentCopy !== undefined;
   if (wholeFrame && !destination) return false;
   const relocation = !details.relocationContext
     ? undefined
@@ -267,7 +279,7 @@ export async function transferDesignLayerOnCanvas(input: {
           destination ? destinationParent?.childCoordinateSpace : undefined,
           destinationContext,
         );
-  const background = wholeFrame ? details.styles?.backgroundColor : undefined;
+  const background = wholeFrame && !input.statePreview ? details.styles?.backgroundColor : undefined;
   const frameBackground =
     background && !/^(?:transparent|rgba\([^)]*,\s*0\))$/.test(background)
       ? background
@@ -308,6 +320,7 @@ export async function transferDesignLayerOnCanvas(input: {
       : {}),
     nodeId: details.oid,
     ...(input.duplicateNodeId ? { duplicateNodeId: input.duplicateNodeId } : {}),
+    ...(input.componentCopy ? { componentCopy: input.componentCopy } : {}),
     ...(destination && drop
       ? {
           destinationFrame: destination.file,

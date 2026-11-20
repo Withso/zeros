@@ -216,6 +216,7 @@ import { canEditDesignNodeText } from "./design-node-capabilities";
 import { designComponentIdentityLabel, designComponentInstanceIdentity, designComponentSelectionIdentity, designComponentPartHost, designComponentTextLock, designFrameComponentPresentation, designFrameMissingComponents, designFrameOptionsProblem, isDesignComponentPartNodeId } from "./state/design-component-parts";
 import { designDeclaredVariants, useDesignComponentVariantStore } from "./state/design-component-variants";
 import { resolveDesignSelectionShortcut } from "./design-selection-shortcuts";
+import { captureDesignFrameComponentCopy } from "./state/design-component-variants";
 import {
   createDesignTextMarkup,
   createDesignTextNodeId,
@@ -243,7 +244,7 @@ import {
 import { useDesignRuntimeStore, waitForDesignRuntimeFrame } from "./state/design-runtime-store";
 import { clearDesignFrameIntent, noteDesignFrameIntent, primeDesignFrameIntent, useDesignFrameIntent } from "./state/design-frame-intent";
 import { useDesignFrameResidency } from "./state/use-design-frame-residency";
-import { designFramePreparationProblem, designFrameViews, designFramesAtPresentedGeometry, isPreparedDesignFrame, type DesignFrameView } from "./state/design-frame-view";
+import { designFramePreparationProblem, designFrameViews, designFramesAtPresentedGeometry, designPresentedFrame, isPreparedDesignFrame, type DesignFrameView } from "./state/design-frame-view";
 import { DesignPassiveSelectionPublisher } from "./state/design-passive-selection";
 import { getActiveBridge, onActiveBridgeConnected } from "../../platform/bridge/active-bridge";
 import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
@@ -2501,16 +2502,38 @@ export const DesignCanvas = React.memo(function DesignCanvas({
   );
 
   const duplicateSelectedFrame = useCallback(
-    async (duplicateMode: "copy" | "duplicate" = "duplicate") => {
+    async (duplicateMode: "copy" | "duplicate" | "independent" = "duplicate", target?: {
+      frame: DesignFrameView;
+      owner: ReturnType<typeof captureDesignPageOwner>;
+    }) => {
       if (!workspaceId) return;
       const selected = designWorkspaceView(workspaceId);
-      const frame = designFrameViews(designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data).find(candidate => candidate.file === selected.selectedFrame);
-      if (!frame) return;
+      const frameView = target?.frame ?? designFrameViews(designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data)
+        .find(candidate => candidate.file === selected.selectedFrame);
+      const capture = duplicateMode === "independent" ? null : captureDesignFrameComponentCopy(workspaceId, frameView);
+      const frame = capture?.frame ?? (duplicateMode === "independent" ? frameView : designPresentedFrame(frameView));
+      if (!frame) {
+        toast.error("This frame is still preparing. Try the copy again when it is ready.");
+        return;
+      }
+      if (capture?.identityUnknown && duplicateMode !== "independent") {
+        toast.error("Couldn't safely duplicate this frame", {
+          description: "Component identity is unavailable. Update the Local engine or choose Duplicate as independent frame.",
+        });
+        return;
+      }
+      const componentCopy = capture?.componentCopy;
+      const sourceVersion = capture?.sourceVersion ?? (isPreparedDesignFrame(frame) ? frame.sourceVersion : undefined);
+      if (capture?.statePreview) toast.info("State-preview copies use Default.");
       if (frameActionPendingRef.current >= 256) {
         toast.error("Let the pending copies finish before adding more");
         return;
       }
-      const owner = captureDesignPageOwner(workspaceId);
+      const owner = target?.owner ?? captureDesignPageOwner(workspaceId);
+      if (!isCurrentDesignPageOwner(owner) || (target && frame.pageId !== owner.pageId)) {
+        toast.error("The frame's page changed before it could be copied.");
+        return;
+      }
       const intent = ++frameActionIntentRef.current;
       frameActionPendingRef.current++;
       // Paint the copy where the engine will place it, before the save is
@@ -2531,7 +2554,8 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         provisionalCopiesRef.current.add(provisional.retire);
         revealAgentRects([{ x: geometry.x, y: geometry.y, width: geometry.w, height: geometry.h }]);
       }
-      const save = duplicateDesignFrameCached(workspaceId, frame.file, owner.pageId);
+      const save = duplicateDesignFrameCached(workspaceId, frame.file, owner.pageId,
+        componentCopy ? { sourceVersion, componentCopy } : undefined);
       const pending = { owner, selectionEvent: selected.selectionEvent, frame: frame.file,
         result: save.then(result => result.snapshot.frames.find(candidate => candidate.file === result.frame.file) ?? null) };
       pendingFrameCopyRef.current = pending;
@@ -3310,6 +3334,8 @@ export const DesignCanvas = React.memo(function DesignCanvas({
             provisionalCopiesRef.current.add(retire);
             return () => provisionalCopiesRef.current.delete(retire);
           },
+          statePreviewed: () => toast.info("State-preview copies use Default."),
+          unprepared: () => toast.error("This frame is still preparing. Try the copy again when it's ready."),
           failed: error => toast.error("Couldn't copy the frame", { description: errorMessage(error) }),
         });
         return;
@@ -9321,6 +9347,19 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                 <span className="min-w-0 flex-1 truncate">
                   {hitStackMenu.frame.title}
                 </span>
+              </ContextMenuItem>
+              <ContextMenuItem
+                onSelect={() => {
+                  const owner = captureDesignPageOwner(workspaceId!);
+                  const frame = hitStackMenu.frame;
+                  setHitStackMenu(null);
+                  void duplicateSelectedFrame("independent", { frame, owner }).catch((error) => {
+                    toast.error("Couldn't duplicate the frame independently", { description: errorMessage(error) });
+                  });
+                }}
+              >
+                <Frame />
+                <span className="min-w-0 flex-1 truncate">Duplicate as independent frame</span>
               </ContextMenuItem>
             </ContextMenuContent>
           </ContextMenu>

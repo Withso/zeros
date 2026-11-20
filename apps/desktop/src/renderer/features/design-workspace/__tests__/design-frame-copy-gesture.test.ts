@@ -6,15 +6,18 @@ import type { beginDesignPointerGesture } from "../design-pointer-gesture";
 const mocks = vi.hoisted(() => ({
   gesture: null as Parameters<typeof beginDesignPointerGesture>[0] | null,
   wait: vi.fn(), duplicate: vi.fn(), transfer: vi.fn(), select: vi.fn(), resume: vi.fn(),
+  runtime: null as any, runtimeState: null as any, destination: null as any, copyVariant: null as string | null, statePreview: false,
+  identity: "main" as "main" | "ordinary" | "instance" | "unknown",
+  captureAvailable: true,
   presentation: { hasPixels: true, paint: vi.fn(), remove: vi.fn(), handoff: vi.fn(async () => {}), adopt: vi.fn() },
 }));
-vi.mock("../../../platform/bridge/design-frame-runtime", () => ({ designFrameRuntime: () => null, waitForDesignFrameRuntime: mocks.wait }));
+vi.mock("../../../platform/bridge/design-frame-runtime", () => ({ designFrameRuntime: () => mocks.runtime, waitForDesignFrameRuntime: mocks.wait }));
 vi.mock("../design-pointer-gesture", () => ({ beginDesignPointerGesture: (input: Parameters<typeof beginDesignPointerGesture>[0]) => {
   mocks.gesture = input;
   return input.onCancel;
 } }));
 vi.mock("../design-drag-presentation", () => ({ createDesignDragPresentation: () => mocks.presentation }));
-vi.mock("../design-layout-transfer", () => ({ designCanvasFrameAt: () => undefined, transferDesignLayerOnCanvas: mocks.transfer }));
+vi.mock("../design-layout-transfer", () => ({ designCanvasFrameAt: () => mocks.destination, transferDesignLayerOnCanvas: mocks.transfer }));
 vi.mock("../state/design-workspace-cache", () => ({
   designWorkspaceSnapshotCache: { peekSnapshot: () => ({ data: { frames: [] } }) }, duplicateDesignFrameCached: mocks.duplicate,
 }));
@@ -22,7 +25,13 @@ vi.mock("../state/design-workspace-ui", () => ({
   captureDesignPageOwner: () => ({ workspaceId: "local", pageId: "page", revision: 1 }),
   designWorkspaceView: () => ({ selectionEvent: 1 }), isCurrentDesignPageOwner: () => true,
 }));
-vi.mock("../state/design-runtime-store", () => ({ designRuntimeFrameState: () => undefined }));
+vi.mock("../state/design-runtime-store", () => ({ designRuntimeFrameState: () => mocks.runtimeState }));
+vi.mock("../state/design-component-variants", () => ({ captureDesignFrameComponentCopy: (_workspaceId: string, view: { sourceVersion: string }) => {
+  if (!mocks.captureAvailable) return null;
+  if (mocks.identity === "unknown") return { frame: view, sourceVersion: view.sourceVersion, componentCopy: undefined, statePreview: false, identityUnknown: true };
+  if (mocks.identity !== "main") return { frame: view, sourceVersion: view.sourceVersion, statePreview: false, identityUnknown: false };
+  return { frame: view, sourceVersion: view.sourceVersion, componentCopy: { variant: mocks.copyVariant }, statePreview: mocks.statePreview, identityUnknown: false };
+} }));
 vi.mock("../state/design-selection", () => ({ selectDesignFrame: mocks.select }));
 vi.mock("../state/design-background-work", () => ({ designBackgroundWork: { pause: () => mocks.resume } }));
 
@@ -34,11 +43,21 @@ function start() {
     preventDefault() {}, stopPropagation() {} } as unknown as React.PointerEvent<HTMLElement>;
   const input = { event, workspaceId: "local", folder: "/local", frame,
     point: ({ clientX, clientY }: { clientX: number; clientY: number }) => ({ x: clientX, y: clientY }),
-    current: () => true, nest: vi.fn(), finished: vi.fn(), saving: vi.fn(), failed: vi.fn() };
+    current: () => true, nest: vi.fn(), finished: vi.fn(), saving: vi.fn(), failed: vi.fn(), statePreviewed: vi.fn(), unprepared: vi.fn() };
   const cancel = startDesignFrameCopy(input);
   return { input, cancel };
 }
-beforeEach(() => { vi.clearAllMocks(); mocks.gesture = null; });
+beforeEach(() => {
+  vi.clearAllMocks();
+  mocks.gesture = null;
+  mocks.runtime = null;
+  mocks.runtimeState = null;
+  mocks.destination = null;
+  mocks.copyVariant = null;
+  mocks.statePreview = false;
+  mocks.identity = "main";
+  mocks.captureAvailable = true;
+});
 
 describe("canvas frame Option copy", () => {
   it("keeps an Option-click free of editor readiness and capture work", () => {
@@ -59,7 +78,8 @@ describe("canvas frame Option copy", () => {
     mocks.gesture!.onFinish();
     try {
       await vi.waitFor(() => expect(mocks.duplicate).toHaveBeenCalledExactlyOnceWith("local", frame.file, "page", {
-        sourceVersion: frame.sourceVersion, geometry: { x: 60, y: 70, w: 100, h: 80, z: 1 },
+        sourceVersion: frame.sourceVersion, componentCopy: { variant: null },
+        geometry: { x: 60, y: 70, w: 100, h: 80, z: 1 },
       }));
       await input.saving.mock.calls[0]?.[0];
       expect(mocks.wait).not.toHaveBeenCalled();
@@ -87,5 +107,72 @@ describe("canvas frame Option copy", () => {
     await input.saving.mock.calls[0]?.[0];
     expect(mocks.select).toHaveBeenCalledWith("local", copy, expect.objectContaining({ selected: true }));
   });
-});
 
+  it("pins a named preview through a nested drop on the runtime component root", async () => {
+    const runtime = {
+      sourceVersion: frame.sourceVersion,
+      getSnapshot: vi.fn(async () => ({ frame: { oid: "cc-root" } })),
+      getNodeDetails: vi.fn(async (oid: string) => ({ oid, rect: { x: 0, y: 0, width: 100, height: 80 } })),
+    };
+    mocks.runtime = runtime;
+    mocks.runtimeState = { snapshot: { frame: { oid: "cc-root" } } };
+    mocks.wait.mockResolvedValue(runtime);
+    mocks.destination = { ...frame, file: "page/board.html", frameId: "board", x: 0, y: 0, width: 500, height: 400 };
+    mocks.transfer.mockResolvedValue(true);
+    mocks.copyVariant = "compact";
+    const { input } = start();
+    mocks.copyVariant = "spacious";
+    mocks.gesture!.onMove({ clientX: 65, clientY: 75 } as PointerEvent);
+    mocks.gesture!.onFinish();
+    await vi.waitFor(() => expect(mocks.transfer).toHaveBeenCalledOnce());
+    expect(runtime.getNodeDetails).toHaveBeenCalledWith("cc-root", expect.anything(), { relocation: true });
+    expect(mocks.transfer).toHaveBeenCalledWith(expect.objectContaining({
+      componentCopy: { variant: "compact" },
+      details: expect.objectContaining({ oid: "cc-root" }),
+      destination: expect.objectContaining({ file: "page/board.html" }),
+    }));
+    expect(input.statePreviewed).not.toHaveBeenCalled();
+    await input.saving.mock.calls[0]?.[0];
+  });
+
+  it("notifies when a state preview is copied as Default", () => {
+    mocks.copyVariant = null;
+    mocks.statePreview = true;
+    mocks.duplicate.mockResolvedValue({ frame: { file: "copy.html" }, snapshot: { frames: [] } });
+    const { input } = start();
+    mocks.gesture!.onMove({ clientX: 65, clientY: 75 } as PointerEvent);
+    mocks.gesture!.onFinish();
+    expect(input.statePreviewed).toHaveBeenCalledOnce();
+  });
+
+  it("clearly rejects a cold frame without preparing an optimistic copy", () => {
+    mocks.captureAvailable = false;
+    const { input } = start();
+    expect(input.unprepared).toHaveBeenCalledOnce();
+    expect(mocks.gesture).toBeNull();
+    expect(mocks.duplicate).not.toHaveBeenCalled();
+  });
+
+  it("fails closed on an unknown identity before creating a gesture or copy", () => {
+    mocks.identity = "unknown";
+    const { input } = start();
+    expect(input.failed).toHaveBeenCalledOnce();
+    expect(input.failed.mock.calls[0]?.[0]?.message).toContain("Duplicate as independent frame");
+    expect(mocks.gesture).toBeNull();
+    expect(mocks.duplicate).not.toHaveBeenCalled();
+  });
+
+  it.each(["ordinary", "instance"] as const)("keeps %s identity on the independent legacy copy path", async (identity) => {
+    mocks.identity = identity;
+    mocks.duplicate.mockResolvedValue({ frame: { file: "copy.html" }, snapshot: { frames: [] } });
+    const { input } = start();
+    mocks.gesture!.onMove({ clientX: 65, clientY: 75 } as PointerEvent);
+    mocks.gesture!.onFinish();
+    await vi.waitFor(() => expect(mocks.duplicate).toHaveBeenCalledOnce());
+    expect(mocks.duplicate.mock.calls[0]?.[3]).toEqual({
+      sourceVersion: frame.sourceVersion,
+      geometry: { x: 60, y: 70, w: 100, h: 80, z: 1 },
+    });
+    expect(input.statePreviewed).not.toHaveBeenCalled();
+  });
+});

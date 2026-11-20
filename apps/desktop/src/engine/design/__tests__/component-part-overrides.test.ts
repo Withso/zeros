@@ -23,22 +23,22 @@ describe("an instance's part overrides", () => {
   it("add the host's zd-style-<part> after the part's own inline style, so the override wins over its rules and options", async () => {
     const result = await expand(doc('<zd-card data-oid="c1" tone="#eee" zd-style-card="background: #fde; padding: 4px" zd-style-card-title="color: red"></zd-card>')); // check:ui ignore-line -- fixture colour
     expect(result.errors).toEqual([]);
-    expect(result.html).toContain('<article class="card" data-zd-part="card" style="padding: 2px; background: #fde; padding: 4px" data-zd-root="">'); // check:ui ignore-line -- fixture colour
-    expect(result.html).toContain('<h3 data-zd-part="card-title" style="color: red">Plans</h3>');
+    expect(result.html).toContain('<article class="card" data-zd-part="card" data-oid="card" style="padding: 2px; background: #fde; padding: 4px" data-zd-own-style="background: #fde; padding: 4px" data-zd-source-style="padding: 2px" data-zd-root="">'); // check:ui ignore-line -- fixture colour
+    expect(result.html).toContain('<h3 data-zd-part="card-title" data-oid="card-title" style="color: red" data-zd-own-style="color: red" data-zd-source-style="">Plans</h3>');
   });
 
   it("style every repeated copy of a part, and a nested instance's host, but not the nested instance's own parts", async () => {
     const result = await expand(doc('<zd-card data-oid="c1" zd-style-chip="color: blue" zd-style-inner="display: block" zd-style-badge="color: green"></zd-card>'));
-    expect(result.html).toContain('<span class="chip" data-zd-part="chip" style="color: blue">0</span><span class="chip" data-zd-part="chip#1" style="color: blue">1</span>');
+    expect(result.html).toContain('<span class="chip" data-zd-part="chip" data-oid="chip" style="color: blue" data-zd-own-style="color: blue" data-zd-source-style="">0</span><span class="chip" data-zd-part="chip#1" data-oid="chip" style="color: blue" data-zd-own-style="color: blue" data-zd-source-style="">1</span>');
     // The nested instance's override styles its box, its root.
-    expect(result.html).toContain('<zd-badge data-zd-part="inner" style="display: contents" data-zd-instance="2"><b data-zd-part="badge" style="display: block" data-zd-root="">B</b></zd-badge>');
+    expect(result.html).toContain('<zd-badge data-zd-part="inner" data-oid="inner" data-zd-own-style="display: block" data-zd-source-style="" style="display: contents" data-zd-instance="2"><b data-zd-part="badge" data-oid="badge" data-zd-own-style="display: block" data-zd-source-style="" style="display: block" data-zd-root="">B</b></zd-badge>');
   });
 
   it("leave the instance's slotted layers alone", async () => {
     const slotted = doc('<section data-zid="panel"><slot></slot></section>');
     const result = await expandDesignComponents("/work/overrides", doc('<zd-panel data-oid="p" zd-style-panel="gap: 8px"><p data-oid="mine" data-zd-part="panel">x</p></zd-panel>'),
       { "components/panel.html": slotted }, "home/index.html", { registry: new Map() });
-    expect(result.html).toContain('<section data-zd-part="panel" style="gap: 8px"><p data-oid="mine" data-zd-part="panel">x</p></section>');
+    expect(result.html).toContain('<section data-zd-part="panel" style="gap: 8px" data-zd-own-style="gap: 8px" data-zd-source-style=""><p data-oid="mine" data-zd-part="panel">x</p></section>');
   });
 
   it("are reported on the host's record, apart from its options", async () => {

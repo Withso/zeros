@@ -1,8 +1,16 @@
 import { z } from "zod";
 import { DESIGN_MAX_FRAMES_PER_PAGE } from "./design-pages";
+import { isDesignComponentVariantName } from "./design-path";
 
 /** Never send a copy to an older engine as a move that would remove its source. */
 export const DESIGN_COPY_PLACEMENT_CAPABILITY = "design.copy-placement.v1";
+export const DESIGN_LINKED_COMPONENT_COPY_CAPABILITY = "design.linked-component-copy.v1";
+
+export const designComponentCopySchema = z.object({
+  variant: z.string().nullable().refine((value) => value === null || isDesignComponentVariantName(value)),
+}).strict();
+
+export type DesignComponentCopy = z.infer<typeof designComponentCopySchema>;
 
 export const DESIGN_RELOCATION_INHERITED_PROPERTIES = [
   "color",

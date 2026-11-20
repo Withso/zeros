@@ -4,6 +4,7 @@ import { setDesignKnownPagesReader, bridgeDesignHistory, bridgeDesignSnapshot, b
 import type { RuntimeClient } from "../ws-client";
 import { DESIGN_COMPONENT_IDENTITY_CAPABILITY, DESIGN_LAZY_PREPARATION_CAPABILITY, DESIGN_MUTATION_SNAPSHOTS_CAPABILITY, DESIGN_OPTIONS_SHOW_NOTHING_CAPABILITY, DESIGN_OPTIONS_SHOW_NOTHING_PARAM,
   DESIGN_PAGE_SCOPED_MUTATIONS_CAPABILITY } from "@zeros/protocol/design-catalog";
+import { DESIGN_COPY_PLACEMENT_CAPABILITY, DESIGN_LINKED_COMPONENT_COPY_CAPABILITY } from "@zeros/protocol/design-relocation";
 
 function scopedSnapshot() {
   const descriptor = { id: "home", pageId: "screens", source: "page-1/home.html", title: "Home", kind: "html" as const,
@@ -63,6 +64,29 @@ describe("Design bridge read budgets", () => {
     }
     expect(isDesignWorkspaceSnapshotWire({ ...snapshot, mutationCatalog: { ...snapshot.mutationCatalog,
       frames: [...snapshot.mutationCatalog.frames, ...snapshot.mutationCatalog.frames] } })).toBe(false);
+  });
+
+  it("fails closed before sending linked-copy intent to cloud or an unsupported Local engine", async () => {
+    const snapshot = scopedSnapshot();
+    const request = vi.fn(async (_message: { op: string }) => ({ type: "WORKSPACE_RESPONSE", result: { frame: snapshot.frames[0], snapshot } }));
+    const unsupported = { request, supportsEngineCapability: () => false } as unknown as RuntimeClient;
+    const linked = { sourceVersion: "a".repeat(24), componentCopy: { variant: "compact" } };
+    await expect(bridgeDesignDuplicateFrame(unsupported, "local", snapshot.frames[0]!.file, undefined, linked)).rejects.toThrow(/linked instance/i);
+    await expect(bridgeDesignDuplicateFrame(unsupported, "cloud://org/workspace", snapshot.frames[0]!.file, undefined, linked)).rejects.toThrow(/linked instance/i);
+    const placementOnly = { request, supportsEngineCapability: (capability: string) => capability === DESIGN_COPY_PLACEMENT_CAPABILITY } as unknown as RuntimeClient;
+    await expect(bridgeDesignTransferNode(placementOnly, "local", {
+      frame: snapshot.frames[0]!.file, nodeId: "body", duplicateNodeId: "copy", sourceVersion: "a".repeat(24),
+      componentCopy: { variant: null }, x: 0, y: 0, w: 390, h: 844, z: 1,
+    })).rejects.toThrow(/linked instance/i);
+    expect(request).not.toHaveBeenCalled();
+
+    const capable = { request, supportsEngineCapability: (capability: string) => capability === DESIGN_LINKED_COMPONENT_COPY_CAPABILITY } as unknown as RuntimeClient;
+    await bridgeDesignDuplicateFrame(capable, "local", snapshot.frames[0]!.file, undefined, linked);
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(request.mock.calls[0]?.[0]).toMatchObject({
+      op: "design.frame.duplicate",
+      params: expect.objectContaining({ componentCopy: { variant: "compact" }, sourceVersion: "a".repeat(24) }),
+    });
   });
 
   it.each([

@@ -47,6 +47,7 @@ import {
   readDesignWorkspaceSnapshot,
   writeDesignNodeHtml,
 } from "../../design/document";
+import { readCanvas, writeCanvas } from "../../design/document-storage";
 import {
   DESIGN_CANVAS_FILE,
   designDirectoryNameFor,
@@ -1933,6 +1934,64 @@ describe("WorkspaceService", () => {
       expect(
         redoneDuplicate.snapshot.frames.map((frame) => frame.file),
       ).toContain(duplicated.frame.file);
+    } finally {
+      await svc.handle("workspace.delete", {
+        workspaceId: design.workspaceId,
+        includeBranch: true,
+      });
+    }
+  });
+
+  it("keeps a registered main's named linked copy in one undo and redo step", async () => {
+    execFileSync("git", ["config", "user.email", "t@t"], { cwd: dir });
+    execFileSync("git", ["config", "user.name", "t"], { cwd: dir });
+    execFileSync("git", ["add", "hello.txt"], { cwd: dir });
+    execFileSync("git", ["commit", "-q", "-m", "init"], { cwd: dir });
+    const design = await createWorkspace({
+      repoRoot: dir,
+      repoSlug: "design-linked-copy-history",
+      kind: "design",
+    });
+    try {
+      const main = (await svc.handle("design.frame.create", {
+        workspaceId: design.workspaceId,
+        title: "Chat composer",
+      })) as { frame: { file: string } };
+      const originalSource = '<!doctype html><html><head><template data-zd-options>' +
+        '<zd-variant name="compact"></zd-variant></template></head><body>' +
+        '<main data-oid="cc-root">Authored main</main></body></html>';
+      fs.writeFileSync(path.join(design.path, designDirectoryNameFor(design.path), main.frame.file), originalSource, "utf8");
+      const canvas = await readCanvas(design.path);
+      canvas.frame_info[main.frame.file] = { ...canvas.frame_info[main.frame.file]!, component: "chat-composer" } as never;
+      await writeCanvas(design.path, canvas);
+
+      const sourceVersion = (await readDesignFrame(design.path, main.frame.file)).sourceVersion;
+      const copied = (await svc.handle("design.frame.duplicate", {
+        workspaceId: design.workspaceId,
+        frame: main.frame.file,
+        sourceVersion,
+        componentCopy: { variant: "compact" },
+      })) as { frame: { file: string } };
+      const copyPath = path.join(design.path, designDirectoryNameFor(design.path), copied.frame.file);
+      const linkedHost = fs.readFileSync(copyPath, "utf8");
+      expect(linkedHost).toMatch(/<zd-chat-composer data-oid="[^"]+" data-zeros-frame-root zd-variant="compact"><\/zd-chat-composer>/);
+
+      const undone = (await svc.handle("design.history.undo", {
+        workspaceId: design.workspaceId,
+        frame: copied.frame.file,
+      })) as { snapshot: { frames: Array<{ file: string }> } };
+      expect(undone.snapshot.frames.map((frame) => frame.file)).not.toContain(copied.frame.file);
+      expect(fs.existsSync(copyPath)).toBe(false);
+      expect((await readDesignFrame(design.path, main.frame.file)).source).toBe(originalSource);
+      expect((await readCanvas(design.path)).frame_info[main.frame.file]).toMatchObject({ component: "chat-composer" });
+
+      await svc.handle("design.history.redo", {
+        workspaceId: design.workspaceId,
+        frame: main.frame.file,
+      });
+      expect(fs.readFileSync(copyPath, "utf8")).toBe(linkedHost);
+      expect((await readDesignFrame(design.path, main.frame.file)).source).toBe(originalSource);
+      expect((await readCanvas(design.path)).frame_info[main.frame.file]).toMatchObject({ component: "chat-composer" });
     } finally {
       await svc.handle("workspace.delete", {
         workspaceId: design.workspaceId,

@@ -50,7 +50,7 @@ describe("an instance of a component with options", () => {
     expect(result.usedComponents).toEqual(["chat-composer"]);
     expect(result.html).toContain(
       '<zd-chat-composer data-oid="ws" zd-variant="compact" attachments="1" toolbar="false" style="display: contents" data-zd-instance="1">' +
-        '<div class="composer" data-zd-part="cc-root" data-density="compact" data-zd-root=""><span class="chip" data-zd-part="cc-chip">File 1</span></div></zd-chat-composer>',
+        '<div class="composer" data-zd-part="cc-root" data-oid="cc-root" data-density="compact" data-zd-root=""><span class="chip" data-zd-part="cc-chip" data-oid="cc-chip">File 1</span></div></zd-chat-composer>',
     );
     expect(result.html).toContain('<style data-zeros-options>:where([data-zd-instance="1"]) { --zd-width: 800px; --zd-attachments: 1; --zd-accent: var(--blue-primary); }</style>');
   });
