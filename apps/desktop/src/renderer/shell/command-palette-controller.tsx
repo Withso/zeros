@@ -16,6 +16,7 @@ import {
 import { requestUserSettingsSection } from "../features/settings/settings-navigation";
 import { canCreateWorkspaceIn } from "../features/team/organization-capabilities";
 import { hasCloudWorkspaceAccountAccess } from "../features/team/cloud-workspace-account-access";
+import { unifiedOrganizationGeneralSections } from "../features/settings/organization-general";
 import {
   getActiveOrganizationIdSnapshot,
   getOrganizationStoreGeneration,
@@ -220,7 +221,15 @@ function CommandPaletteSession({
     feedback: isFeedbackConfigured(),
   };
   const capabilities = paletteCapabilities(capabilityInput);
+  const unifiedSettings = isFeatureEnabled("unified-workspaces");
   const settingsAvailability = {
+    unified: unifiedSettings,
+    organizationGeneral:
+      unifiedSettings &&
+      unifiedOrganizationGeneralSections(
+        organization,
+        !!organization && hasCloudWorkspaceAccountAccess(organization.id),
+      ).length > 0,
     local: localOwner,
     cloudEnabled: isFeatureEnabled("cloud-workspaces"),
     terminalAgentsEnabled: terminalAgents,

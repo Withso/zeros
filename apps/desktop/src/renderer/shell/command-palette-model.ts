@@ -287,6 +287,7 @@ const SETTINGS = [
       "screen recording",
       "privacy",
     ],
+    unifiedKeywords: ["startup", "updates", "notifications", "privacy", "usage data", "keep awake"],
   },
   {
     id: "appearance",
@@ -307,6 +308,7 @@ const SETTINGS = [
     id: "providers",
     label: "Agents",
     keywords: ["claude", "codex", "cursor", "providers", "login"],
+    unifiedKeywords: ["claude", "codex", "cursor", "providers", "login", "cloud", "terminal agents", "shell", "cli"],
   },
   {
     id: "cloud-computer",
@@ -328,6 +330,7 @@ const SETTINGS = [
     id: "environment",
     label: "Environment",
     keywords: ["variables", "secrets", "env"],
+    unifiedKeywords: ["variables", "secrets", "env", "cloud"],
   },
   {
     id: "git",
@@ -337,7 +340,19 @@ const SETTINGS = [
   {
     id: "integrations",
     label: "Integrations",
+    unifiedLabel: "GitHub",
     keywords: ["github", "account", "connect"],
+    unifiedKeywords: ["github", "account", "connect", "integrations", "cloud"],
+  },
+  {
+    id: "computer-use",
+    label: "Computer use",
+    keywords: ["blocked apps", "agent cursor", "accessibility", "screen recording", "full disk access", "privacy"],
+  },
+  {
+    id: "org-general",
+    label: "Organization",
+    keywords: ["general", "workspace api access", "local commands"],
   },
   { id: "account", label: "Profile", keywords: ["account", "name"] },
   { id: "experimental", label: "Experimental", keywords: ["features"] },
@@ -553,7 +568,14 @@ export function settingsPaletteEntries(
   const entries: PaletteEntry[] = SETTINGS.filter((section) =>
     isSettingsSectionAvailable(section.id, context),
   ).map((section) => ({
-    ...section,
+    label:
+      context.unified && "unifiedLabel" in section
+        ? section.unifiedLabel
+        : section.label,
+    keywords:
+      context.unified && "unifiedKeywords" in section
+        ? section.unifiedKeywords
+        : section.keywords,
     id: `settings:${section.id}`,
     category: "settings",
     group: "Settings",
