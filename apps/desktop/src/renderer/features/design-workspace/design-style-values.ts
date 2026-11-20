@@ -1051,8 +1051,25 @@ export function designStyleCommitCoalesceKey(
   properties: readonly string[],
   intent?: "reset" | "token" | "detach",
 ): string {
-  const key = `styles:${nodeIds.join(":")}:${properties.join(":")}`;
-  return intent ? `${intent}:${crypto.randomUUID()}:${key}` : key;
+  const prefix = intent ? `${intent}:${crypto.randomUUID()}:` : "";
+  let key = `styles:${nodeIds.join(":")}:${properties.join(":")}`;
+  // Transactions bound the key like any ID; deep-copied layer IDs overflow it.
+  if (prefix.length + key.length > DESIGN_COALESCE_KEY_LIMIT)
+    key = `styles:h-${designKeyDigest(`${nodeIds.join("\u0000")}\u0001${properties.join("\u0000")}`)}`;
+  return prefix + key;
+}
+
+const DESIGN_COALESCE_KEY_LIMIT = 256;
+
+function designKeyDigest(value: string): string {
+  let a = 0x811c9dc5;
+  let b = 0x01000193;
+  for (let i = 0; i < value.length; i++) {
+    const code = value.charCodeAt(i);
+    a = Math.imul(a ^ code, 0x01000193);
+    b = Math.imul(b ^ code, 0x5bd1e995);
+  }
+  return `${(a >>> 0).toString(36)}${(b >>> 0).toString(36).padStart(7, "0")}`;
 }
 
 /** A length the layer's own winning declaration writes as a plain number
