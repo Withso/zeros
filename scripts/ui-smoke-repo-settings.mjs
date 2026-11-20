@@ -130,12 +130,15 @@ export async function runRepoSettingsSmoke({ page, check }) {
   );
 
   for (const section of ["design", "design-preferences"]) {
+    await selectRepo("Local");
     await tab("Actions").click();
     await page.evaluate(
       (section) => window.openRepoSettingsSection(section),
       section,
     );
     await expect(tab("Environment")).toHaveAttribute("aria-selected", "true");
+    // Dev runs unified-workspaces: a saved repository selection opens its
+    // joined project page in Settings instead of the repository page.
     await page.evaluate(
       (section) => window.openLegacyRepoSettingsSection(section),
       section,
@@ -143,7 +146,10 @@ export async function runRepoSettingsSmoke({ page, check }) {
     await expect(
       page.getByRole("heading", { level: 1, name: "Local", exact: true }),
     ).toBeVisible();
-    await expect(tab("Environment")).toHaveAttribute("aria-selected", "true");
+    await expect(page.locator("[data-project-page]")).toBeVisible();
+    await expect(
+      page.getByRole("tablist", { name: "Settings sections" }).getByRole("tab", { name: "Local", exact: true }),
+    ).toHaveAttribute("aria-selected", "true");
   }
   await expectNoDesignRequests();
   check(

@@ -188,6 +188,13 @@ RuntimeClient.prototype.request = async function <
       path: `${root}/.zeros/settings.local.toml`,
     };
   if (request.op === "workspace.list") result = { workspaces: [] };
+  // The unified project page mounts these sections together; answer with the engine's empty shapes.
+  if (request.op === "filesToCopy.preview")
+    result = { source: "default", rootPath: root, patterns: [], files: [], totalCount: 0, totalBytes: 0,
+      truncated: false, trackedMatches: [], candidates: [], warnings: [] };
+  if (request.op === "git.repoBranchCatalog")
+    result = { remotes: [], effectiveRemote: "origin", remoteExists: false, baseExplicit: false, effectiveBase: "main",
+      detectedDefault: null, listedRemote: null, branchSource: "local", branches: [] };
   return {
     type: "WORKSPACE_RESPONSE",
     requestId: request.requestId ?? "fixture",
