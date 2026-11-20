@@ -40,7 +40,7 @@ vi.mock("../state/design-workspace-cache", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../state/design-workspace-cache")>()),
   applyDesignEditCached: mocks.applyEdit,
   updateDesignNodeStylesCached: mocks.updateStyles,
-  hasPendingDesignEdits: mocks.pending,
+  hasPendingDesignHistory: mocks.pending,
 }));
 
 import { TooltipProvider } from "../../../shared/ui/primitives";
@@ -140,7 +140,7 @@ describe("a style commit that refits its frame", () => {
     expect(connection.measureLayout).not.toHaveBeenCalled();
   });
 
-  it("decides on refitting in the mutation lane while earlier edits are pending", async () => {
+  it("decides on refitting in the mutation lane while an Undo or Redo is pending", async () => {
     const fixed = { ...root, layout: { ...root.layout, widthValue: "400px", heightValue: "300px" } } as DesignRuntimeNodeDetails;
     const connection = runtime(fixed);
     mocks.runtime.mockReturnValue(connection);

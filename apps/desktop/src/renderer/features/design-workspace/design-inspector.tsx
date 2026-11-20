@@ -221,7 +221,7 @@ import { MessageRow } from "../../shared/ui/primitives/message-row";
 import type { DesignComponentOptionsTarget } from "./design-component-options";
 import {
   applyDesignEditCached,
-  hasPendingDesignEdits,
+  hasPendingDesignHistory,
   applyDesignHistoryCached,
   designWorkspaceSnapshotCache,
   saveDesigns,
@@ -2240,12 +2240,12 @@ export const DesignInspector = React.memo(function DesignInspector({
       const committedRoot =
         useDesignRuntimeStore.getState().byWorkspace[workspaceId]?.frames[frame.file]?.snapshot?.frame;
       // Only a Hug frame resizes with its content; other layout edits keep the
-      // direct style save. Queued behind other edits (an Undo can restore Hug),
+      // direct style save. Behind a queued Undo or Redo, which can restore Hug,
       // the lane decides at its turn.
       const needsIntrinsicPreparation =
         !stateContext &&
         !!committedRoot &&
-        (hasDesignIntrinsicSize(committedRoot) || hasPendingDesignEdits(workspaceId)) &&
+        (hasDesignIntrinsicSize(committedRoot) || hasPendingDesignHistory(workspaceId)) &&
         Object.keys(styles).some(designStylePropertyAffectsLayout);
       const transaction = (operations: DesignOperation[]) => ({
         schemaVersion: 1 as const,

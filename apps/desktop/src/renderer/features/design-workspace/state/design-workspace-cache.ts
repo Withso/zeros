@@ -2831,7 +2831,28 @@ async function adoptDesignStyleGeneration(
   }
 }
 
+const pendingHistoryByWorkspace = new Map<string, number>();
+/** An Undo or Redo is queued or applying, so the next confirmed frame may differ. */
+export function hasPendingDesignHistory(workspaceId: string): boolean {
+  return (pendingHistoryByWorkspace.get(workspaceId) ?? 0) > 0;
+}
+
 export async function applyDesignHistoryCached(
+  workspaceId: string,
+  frame: string | null,
+  direction: "undo" | "redo",
+): Promise<DesignApiMutationReplyWire> {
+  pendingHistoryByWorkspace.set(workspaceId, (pendingHistoryByWorkspace.get(workspaceId) ?? 0) + 1);
+  try {
+    return await applyDesignHistoryInLane(workspaceId, frame, direction);
+  } finally {
+    const left = (pendingHistoryByWorkspace.get(workspaceId) ?? 1) - 1;
+    if (left > 0) pendingHistoryByWorkspace.set(workspaceId, left);
+    else pendingHistoryByWorkspace.delete(workspaceId);
+  }
+}
+
+async function applyDesignHistoryInLane(
   workspaceId: string,
   frame: string | null,
   direction: "undo" | "redo",
