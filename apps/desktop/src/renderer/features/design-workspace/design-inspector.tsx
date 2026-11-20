@@ -3248,6 +3248,9 @@ export const DesignInspector = React.memo(function DesignInspector({
         label={label}
         property={property}
         value={
+          // A Mixed field never shows one layer's value, even when that
+          // layer reads back ahead of the others mid-scrub.
+          mixed ? "" :
           (!options?.geometry && shownDetails ? designAuthoredLength(shownDetails, property) : null) ??
           designStyleFieldValue(authoredProperties, property, value)
         }
