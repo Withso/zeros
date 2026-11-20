@@ -707,12 +707,16 @@ function documentStylesOf(document: DefaultTreeAdapterTypes.Document, body: Defa
 
 /** A linked frame copy's body takes its main's body classes, so page rules
  * written for them (a centering stage) lay the copy out as the main. */
+const CLASS_ATTRIBUTE = "class";
+const CLASS_ATTRIBUTE_PATTERN = new RegExp(`\\s${CLASS_ATTRIBUTE}\\s*=\\s*"([^"]*)"`, "i");
+
 function withBodyClass(html: string, classes: string): string {
   return html.replace(/<body\b([^>]*)>/i, (tag, attributes: string) => {
-    const existing = /\sclass\s*=\s*"([^"]*)"/i.exec(attributes);
+    const existing = CLASS_ATTRIBUTE_PATTERN.exec(attributes);
     const merged = [...new Set([...(existing?.[1] ?? "").split(/\s+/), ...classes.split(/\s+/)].filter(Boolean))].join(" ")
       .replace(/&/g, "&amp;").replace(/"/g, "&quot;");
-    return existing ? tag.replace(existing[0], ` class="${merged}"`) : `<body${attributes} class="${merged}">`;
+    const attribute = ` ${CLASS_ATTRIBUTE}="${merged}"`;
+    return existing ? tag.replace(existing[0], attribute) : `<body${attributes}${attribute}>`;
   });
 }
 
