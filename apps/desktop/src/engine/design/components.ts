@@ -1053,7 +1053,7 @@ function recordInstance(
     const summary = definition.template.summary?.() ?? null;
     return { elements: withDesignSlotOptions(summary?.elements ?? [], shape.names, designSlotOptionElement), reach: summary?.reach ?? {},
       file, frame: registry.get(definition.name) === file };
-  }, { ...(failed ? { failed: true } : {}), ...(text !== undefined ? { text } : {}), ...(slotted ? { slotted } : {}) });
+  }, { ...(failed ? { failed: true } : {}), ...(text !== undefined ? { text, ...(mixedChildren(instance) ? { mixedText: true as const } : {}) } : {}), ...(slotted ? { slotted } : {}) });
 }
 
 /** A plain definition's instance: each attribute slot is a text option with
@@ -1074,7 +1074,13 @@ function recordSlotInstance(
     reach: {},
     file: `components/${definition.name}.html`,
     frame: false,
-  }), { ...(text !== undefined ? { text } : {}), ...(slotted ? { slotted } : {}) });
+  }), { ...(text !== undefined ? { text, ...(mixedChildren(instance) ? { mixedText: true as const } : {}) } : {}), ...(slotted ? { slotted } : {}) });
+}
+
+/** Whether a host's direct text sits beside other children: only a renderer
+ * that writes through the virtual default slot can edit it there. */
+function mixedChildren(instance: DefaultTreeAdapterTypes.Element): boolean {
+  return !instance.childNodes.every((child) => child.nodeName === "#text");
 }
 
 function directDefaultSlotText(
@@ -1095,7 +1101,7 @@ function recordHost(
   instance: DefaultTreeAdapterTypes.Element,
   names: ReadonlySet<string>,
   component: () => DesignFrameInstances["components"][string],
-  extra: { failed?: true; text?: string; slotted?: Record<string, string[]> },
+  extra: { failed?: true; text?: string; mixedText?: true; slotted?: Record<string, string[]> },
 ): void {
   const oid = instance.attrs.find((attribute) => attribute.name === "data-oid")?.value;
   if (!oid || oid.length > DESIGN_COMPONENT_RECORD_LIMITS.layerId || INHERITED_NAMES.has(oid) || INHERITED_NAMES.has(name)) return;
@@ -1130,7 +1136,7 @@ function recordHost(
   }
   record.hosts.set(oid, { component: name, attributes: Object.fromEntries(attributes), ...(extra.failed ? { failed: true as const } : {}),
     ...(ignored.size ? { ignored: Object.fromEntries(ignored) } : {}), ...(overrides.size ? { overrides: Object.fromEntries(overrides) } : {}),
-    ...(extra.text !== undefined ? { text: extra.text } : {}), ...(extra.slotted ? { slotted: extra.slotted } : {}) });
+    ...(extra.text !== undefined ? { text: extra.text } : {}), ...(extra.mixedText ? { mixedText: true as const } : {}), ...(extra.slotted ? { slotted: extra.slotted } : {}) });
 }
 
 /** A top-level instance of a name no definition answers to, so the panel and

@@ -281,6 +281,14 @@ describe("the Options section across new generations of the same target", () => 
     await show({ file: "components/chip.html", sourceVersion: V1,
       componentIdentity: { kind: "main", name: "chip" }, runtime: null });
     expect(container.querySelector('[data-design-component-options="main"]')).not.toBeNull();
+    // With no options template to append to, a variant or state cannot be saved yet.
+    expect(container.querySelector("[data-design-options-add-variant]")).toBeNull();
+  });
+
+  it("offers adding a variant on a main that declares its options", async () => {
+    await show({ file: "components/chip.html", sourceVersion: V1, component: CHIP,
+      componentIdentity: { kind: "main", name: "chip" }, runtime: null });
+    expect(container.querySelector("[data-design-options-add-variant]")).not.toBeNull();
   });
 
   it("shows a registered main header without asking runtime for classification", async () => {

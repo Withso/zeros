@@ -1,3 +1,5 @@
+import { getActiveBridge } from "../../../platform/bridge/active-bridge";
+import { DESIGN_TRANSACTION_MAX_OPERATIONS } from "@zeros/design-core";
 // PURPOSE: A component frame's options in the Style panel. The declaration
 // arrives with the frame's prepared record (exact to its generation) and is
 // read once per record. A value that reaches the frame only through CSS is
@@ -21,8 +23,7 @@ import {
 import {
   designComponentRecordLimitMessage,
   type DesignFrameComponent,
-  type DesignFrameInstances,
-} from "@zeros/protocol/design-catalog";
+  type DesignFrameInstances, DESIGN_INSTANCE_SLOT_TEXT_CAPABILITY } from "@zeros/protocol/design-catalog";
 import { isDesignComponentVariantName } from "@zeros/protocol/design-path";
 import { designComponentSlotNodeId, DESIGN_RUNTIME_INSTANCE_TARGET } from "@zeros/protocol/design-runtime";
 
@@ -166,6 +167,12 @@ export function designInstanceHasSuppliedContent(slottedLayers: readonly string[
   return slottedLayers.length > 0 || Boolean(text?.length);
 }
 
+/** Reset All is one transaction, one undo step, so it is offered only when one
+ * transaction holds every reset: the legacy placement fold shares the style write. */
+export function designInstanceResetAllFits(counts: { options: number; parts: number; style: boolean; slotted: number; text: boolean }): boolean {
+  return counts.options + counts.parts + Number(counts.style) + counts.slotted + Number(counts.text) <= DESIGN_TRANSACTION_MAX_OPERATIONS;
+}
+
 type DesignInstanceResetKind = "style" | "all";
 type DesignInstanceResetFrame = { file: string; sourceVersion: string; frameId?: string };
 
@@ -227,9 +234,11 @@ async function prepareDesignInstanceReset(
   if (Object.keys(styleUpdates).length) operations.push({ operationId: "reset-style", type: "node.set-styles", nodeId, styles: styleUpdates, scope: "inline", responsiveContext: "base", stateContext: "default" });
   if (kind === "all") {
     for (const layer of [...new Set(Object.values(host.slotted ?? {}).flat())]) operations.push({ operationId: `reset-slot-${operations.length}`, type: "node.delete", nodeId: layer });
-    if (host.text?.length) operations.push({ operationId: "reset-text", type: "node.set-text", nodeId: designComponentSlotNodeId(nodeId, ""), text: "" });
+    if (host.text?.length) operations.push({ operationId: "reset-text", type: "node.set-text", nodeId: defaultSlotTextTarget(workspaceId, nodeId), text: "" });
   }
   if (!operations.length) return null;
+  if (operations.length > DESIGN_TRANSACTION_MAX_OPERATIONS)
+    throw new Error(`${nodeId} supplies too many layers to reset in one step; reset its slots one at a time.`);
   return edit(kind === "all" ? "Reset all overrides" : "Reset overrides", operations);
 }
 
@@ -306,10 +315,19 @@ export function commitDesignInstanceAllOverridesReset(
     ({ assertCurrent }) => prepareDesignInstanceReset(workspaceId, frame, nodeId, "all", assertCurrent));
 }
 
+/** The direct text of a host's default slot: through its virtual ID where the
+ * engine edits it beside other children, otherwise the host's own text, as an
+ * older engine reports it only for a host holding nothing else. */
+function defaultSlotTextTarget(workspaceId: string, nodeId: string): string {
+  return getActiveBridge()?.supportsEngineCapability?.(DESIGN_INSTANCE_SLOT_TEXT_CAPABILITY, workspaceId) === true
+    ? designComponentSlotNodeId(nodeId, "")
+    : nodeId;
+}
+
 /** Set the text a plain component's instance fills its default slot with:
  * its host's own text. */
 export function commitDesignInstanceText(workspaceId: string, frame: { file: string; sourceVersion: string }, nodeId: string, text: string) {
-  return applyDesignEditCached(workspaceId, frame, edit("Set text", [{ operationId: "set-text", type: "node.set-text", nodeId: designComponentSlotNodeId(nodeId, ""), text }]));
+  return applyDesignEditCached(workspaceId, frame, edit("Set text", [{ operationId: "set-text", type: "node.set-text", nodeId: defaultSlotTextTarget(workspaceId, nodeId), text }]));
 }
 
 /** Empty an instance's slot back to what its main puts there: delete the

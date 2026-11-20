@@ -3156,7 +3156,7 @@ export const DesignInspector = React.memo(function DesignInspector({
     ? null
     // The main's root is the component, so selecting it selects the main.
     : frameSelected && frameComponentPresentation?.kind === "main" && (!selectedNodeId || selectedNodeId === layoutRootId) && styleNodeIds.length <= 1
-      ? { kind: "main", component: mainComponent! }
+      ? { kind: "main", component: mainComponent!, ...(frame.component ? {} : { undeclared: true as const }) }
       : !selectedPart && !selectedSlot && instanceNodeId && instanceHost && instanceComponent && instanceTitle &&
         (styleNodeIds.length === 1 || (frameSelected && explicitFrameIdentityNodeId === instanceNodeId && styleNodeIds.length === 0))
         ? { kind: "instance", nodeId: instanceNodeId, title: instanceTitle, host: instanceHost, component: instanceComponent,

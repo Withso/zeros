@@ -24,7 +24,7 @@ import {
   type DesignWorkspaceRouteHost,
   type DesignReadWorkspace,
 } from "../design/routes";
-import { designReplyCarriesFrames, designReplyForOlderRenderer, takeDesignShowsNothing } from "../design/options-shows-compat";
+import { designReplyCarriesFrames, designReplyForOlderRenderer, takeDesignNegotiation } from "../design/options-shows-compat";
 import {
   MAX_DESIGN_HISTORY_WORKSPACES,
   pruneWorkspaceDesignHistory,
@@ -2560,9 +2560,9 @@ export class WorkspaceService {
     } = {},
   ): Promise<unknown> {
     if (designReplyCarriesFrames(op) && !opts.designReplyShaped) {
-      const request = takeDesignShowsNothing(params);
+      const request = takeDesignNegotiation(params);
       const result = await this.handle(op, request.params, { ...opts, designReplyShaped: true });
-      return request.negotiated ? result : designReplyForOlderRenderer(result);
+      return request.negotiated.showsNothing && request.negotiated.slotText ? result : designReplyForOlderRenderer(result, request.negotiated);
     }
     const remote = opts.remote === true;
     const hostLocalResources = opts.hostLocalResources ?? !remote;

@@ -85,7 +85,7 @@ describe("a slot component's instances", () => {
     });
     // An attribute slot whose name no option may take (title) is not offered.
     expect(instances?.hosts).toEqual({
-      "tour-1": { component: "card", attributes: { meta: "Page 1", heading: "Start & go" }, text: "How to ." },
+      "tour-1": { component: "card", attributes: { meta: "Page 1", heading: "Start & go" }, text: "How to .", mixedText: true },
       "tour-2": { component: "card", attributes: {}, text: "Tokens & themes" },
       "tour-3": { component: "card", attributes: {}, text: "" },
     });

@@ -68,6 +68,7 @@ import {
   commitDesignInstanceAttributes,
   commitDesignInstanceSlotReset,
   commitDesignInstanceText,
+  designInstanceResetAllFits,
   createDesignComponentPreview,
   designComponentAttributeText,
   designComponentPreviewProperties,
@@ -116,7 +117,8 @@ export function designComponentOptionProvenanceLabel(
 /** What the section edits: the main component frame itself, or one instance
  * of a component placed in this frame. */
 export type DesignComponentOptionsTarget =
-  | { kind: "main"; component: DesignFrameComponent }
+  /** undeclared: registered without an options template, so it has no variants to add to yet. */
+  | { kind: "main"; component: DesignFrameComponent; undeclared?: true }
   | {
       kind: "instance";
       /** The host layer's data-oid. */
@@ -250,7 +252,8 @@ export function DesignComponentOptions({
   const slottedLayers = [...new Set(Object.values(instance?.host.slotted ?? {}).flat())];
   const resetText = Boolean(instance?.host.text?.length);
   const hasSuppliedContent = designInstanceHasSuppliedContent(slottedLayers, instance?.host.text);
-  const canResetAll = Boolean(instance && ((instanceState?.overridden.size ?? 0) > 0 || overridden.length > 0 || visualStyleCount > 0 || slottedLayers.length > 0 || resetText));
+  const canResetAll = Boolean(instance && ((instanceState?.overridden.size ?? 0) > 0 || overridden.length > 0 || visualStyleCount > 0 || slottedLayers.length > 0 || resetText)) &&
+    designInstanceResetAllFits({ options: instanceState?.overridden.size ?? 0, parts: overridden.length, style: visualStyleCount > 0, slotted: slottedLayers.length, text: resetText });
   const resetAll = () => {
     if (!instance || !canResetAll || !active) return;
     setConfirmResetAll(false);
@@ -376,6 +379,7 @@ export function DesignComponentOptions({
   // so an instance picks only among the others.
   const variants = declaration.variants.filter((entry) => !entry.state).map((entry) => entry.name);
   const states = instance ? [] : declaration.variants.filter((entry) => entry.state).map((entry) => entry.name);
+  const creatable = !instance && !(target.kind === "main" && target.undeclared);
   const addable = COMPONENT_STATE_PRESETS.filter((preset) => !declaration.variants.some((entry) => entry.state === preset.state || entry.name === preset.name));
   const ignored = useMemo(() => (host ? designInstanceIgnoredAttributes(host) : []), [host]);
   const tooLarge = designComponentRecordProblem(target.component, title);
@@ -432,11 +436,11 @@ export function DesignComponentOptions({
           variant={variant}
           variants={variants}
           states={states}
-          addable={instance ? [] : addable}
+          addable={creatable ? addable : []}
           disabled={actionDisabled}
           onChoose={chooseVariant}
           onAddState={addState}
-          onSave={instance ? undefined : () => setNaming(true)}
+          onSave={creatable ? () => setNaming(true) : undefined}
         />
       ) : null}
       {instance && variant ? (

@@ -14,9 +14,11 @@ const mocks = vi.hoisted(() => {
     }),
     pause: vi.fn(),
     resume: vi.fn(),
+    capability: vi.fn((_capability: string, _workspaceId: string) => true),
   };
   return state;
 });
+vi.mock("../../../platform/bridge/active-bridge", () => ({ getActiveBridge: () => ({ supportsEngineCapability: mocks.capability }) }));
 vi.mock("../../../platform/bridge/design-frame-runtime", () => ({ designFrameRuntime: mocks.runtime, waitForDesignFrameRuntime: mocks.waitRuntime }));
 vi.mock("../state/design-workspace-cache", () => ({
   applyDesignEditCached: mocks.apply,
@@ -24,7 +26,7 @@ vi.mock("../state/design-workspace-cache", () => ({
 }));
 vi.mock("../state/design-background-work", () => ({ designBackgroundWork: { pause: mocks.pause } }));
 
-import type { DesignFrameComponent } from "@zeros/protocol/design-catalog";
+import { DESIGN_INSTANCE_SLOT_TEXT_CAPABILITY, type DesignFrameComponent } from "@zeros/protocol/design-catalog";
 import { designComponentSlotNodeId } from "@zeros/protocol/design-runtime";
 import { DesignTransactionSession, type DesignOperation } from "@zeros/design-core";
 import type { ComponentOptionValue } from "@zeros/design-core/component-options";
@@ -38,6 +40,7 @@ import {
   commitDesignInstanceOverridesReset,
   commitDesignInstanceSlotReset,
   commitDesignInstanceText,
+  designInstanceResetAllFits,
   createDesignComponentPreview,
   designComponentVariantName,
   designInstanceOptionState,
@@ -442,6 +445,19 @@ describe("variants and instances", () => {
     expect(mocks.resolved).toBeNull();
   });
 
+  it("keeps Reset All within one transaction: 256 resets fit, 257 are refused before submitting", async () => {
+    const slot = (name: string) => Array.from({ length: 64 }, (_, index) => `${name}-${index}`);
+    const full = { a: slot("a"), b: slot("b"), c: slot("c"), d: slot("d") };
+    expect(designInstanceResetAllFits({ options: 0, parts: 0, style: false, slotted: 256, text: false })).toBe(true);
+    expect(designInstanceResetAllFits({ options: 1, parts: 0, style: false, slotted: 256, text: false })).toBe(false);
+    prepareResetSnapshot("home.html", "inst", { attributes: { label: "Go" }, slotted: full });
+    await expect(commitDesignInstanceAllOverridesReset("w", { file: "home.html", sourceVersion: V1 }, "inst"))
+      .rejects.toThrow("too many layers to reset in one step");
+    prepareResetSnapshot("home.html", "inst", { slotted: full });
+    await commitDesignInstanceAllOverridesReset("w", { file: "home.html", sourceVersion: V1 }, "inst");
+    expect(latestCapturedEdit().operations).toHaveLength(256);
+  });
+
   it("preserves a failed Reset All transaction for the caller to report", async () => {
     mocks.apply.mockRejectedValueOnce(new Error("stale component instance"));
     await expect(commitDesignInstanceAllOverridesReset("w", { file: "home.html", sourceVersion: V1 }, "inst"))
@@ -456,9 +472,17 @@ describe("variants and instances", () => {
     expect(calls()[0]![2].operations).toEqual([expect.objectContaining({ type: "node.set-text", nodeId: designComponentSlotNodeId("tour-1", ""), text: "How to move" })]);
   });
 
+  it("writes a host's own text to an engine that predates slot text, as it reports text only for a host holding nothing else", async () => {
+    mocks.capability.mockReturnValueOnce(false);
+    await commitDesignInstanceText("w", { file: "start/welcome.html", sourceVersion: V1 } as never, "tour-1", "How to move");
+    expect(mocks.capability).toHaveBeenCalledWith(DESIGN_INSTANCE_SLOT_TEXT_CAPABILITY, "w");
+    expect(calls().at(-1)![2].operations).toEqual([expect.objectContaining({ type: "node.set-text", nodeId: "tour-1", text: "How to move" })]);
+  });
+
   it("edits direct text through the catalog default slot without touching mixed children", async () => {
     const host = await resetCatalogHost();
     expect(host.text).toBe("Before &after &");
+    expect(host.mixedText).toBe(true);
     await commitDesignInstanceText("w", { file: RESET_FILE, sourceVersion: V1 } as never, "host", "Changed & <safe>");
     const edit = latestCapturedEdit();
     expect(edit.operations).toEqual([expect.objectContaining({
