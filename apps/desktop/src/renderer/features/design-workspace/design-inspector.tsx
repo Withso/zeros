@@ -3484,6 +3484,10 @@ export const DesignInspector = React.memo(function DesignInspector({
             </DropdownMenu>
           </div>
         </PanelHeader>
+        {/* A shown state changes what Options and Style both display. */}
+        {shownState && frame && workspaceId ? (
+          <DesignStateVariantNote state={shownState} onBack={() => showDesignComponentVariant(workspaceId, frame.file, null)} />
+        ) : null}
         {optionsFrame && optionsTarget && workspaceId ? (
           <InertTabsContent value="options" forceMount inert={optionsPanel.inert ? "" : undefined} aria-hidden={optionsPanel.ariaHidden}
             data-design-options-panel="" className="mt-0 min-h-0 flex-1 overflow-hidden data-[state=active]:flex data-[state=inactive]:!hidden">
@@ -3514,9 +3518,6 @@ export const DesignInspector = React.memo(function DesignInspector({
             <div className="flex flex-col pb-6">
               {textLock?.kind === "option" ? (
               <p data-design-text-set-by="" className="border-border1 text-fg2 border-b px-3 py-2 text-3xxs leading-4">{textLock.message}</p>
-            ) : null}
-            {shownState && frame && workspaceId ? (
-              <DesignStateVariantNote state={shownState} onBack={() => showDesignComponentVariant(workspaceId, frame.file, null)} />
             ) : null}
             {heldState && heldChanges ? (
               <DesignHeldStateNote state={heldState} count={heldChanges.count} onBack={() => pickLayerState(null)} />
