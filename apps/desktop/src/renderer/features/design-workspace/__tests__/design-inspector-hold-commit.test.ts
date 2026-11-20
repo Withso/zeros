@@ -21,6 +21,7 @@ const mocks = vi.hoisted(() => {
     return { result: null };
   }),
   updateStyles: vi.fn(async () => {}),
+  pending: vi.fn(() => false),
   state,
   };
 });
@@ -39,6 +40,7 @@ vi.mock("../state/design-workspace-cache", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../state/design-workspace-cache")>()),
   applyDesignEditCached: mocks.applyEdit,
   updateDesignNodeStylesCached: mocks.updateStyles,
+  hasPendingDesignEdits: mocks.pending,
 }));
 
 import { TooltipProvider } from "../../../shared/ui/primitives";
@@ -109,6 +111,7 @@ describe("a style commit that refits its frame", () => {
     resetDesignWorkspaceUiForTests();
     mocks.applyEdit.mockClear();
     mocks.updateStyles.mockClear();
+    mocks.pending.mockReset().mockReturnValue(false);
     mocks.state.prepared = undefined;
     mocks.editor.props = null;
   });
@@ -135,6 +138,34 @@ describe("a style commit that refits its frame", () => {
       nodeId: "child", styles: { "word-spacing": "12px" } }));
     expect(mocks.applyEdit).not.toHaveBeenCalled();
     expect(connection.measureLayout).not.toHaveBeenCalled();
+  });
+
+  it("decides on refitting in the mutation lane while earlier edits are pending", async () => {
+    const fixed = { ...root, layout: { ...root.layout, widthValue: "400px", heightValue: "300px" } } as DesignRuntimeNodeDetails;
+    const connection = runtime(fixed);
+    mocks.runtime.mockReturnValue(connection);
+    mocks.pending.mockReturnValue(true);
+    mount(fixed, { ...fixed, oid: "child" });
+    await act(async () => { await mocks.editor.props!.onCommitStyles({ padding: "12px" }); });
+    expect(mocks.updateStyles).not.toHaveBeenCalled();
+    expect(mocks.applyEdit).toHaveBeenCalledTimes(1);
+    // Confirmed fixed at its turn: the style saves without measuring.
+    expect(connection.measureLayout).not.toHaveBeenCalled();
+    expect((mocks.state.prepared as { operations: { type: string }[] }).operations.map((operation) => operation.type))
+      .toEqual(["node.set-styles"]);
+  });
+
+  it("sizes a frame from the confirmed root, not a newer preview", async () => {
+    const connection = runtime(root);
+    mocks.runtime.mockReturnValue(connection);
+    mount();
+    const renderField = (mocks.editor.props as unknown as {
+      renderField: (label: string, property: string, value: string) => React.ReactElement<{ onCommit: (next: string) => Promise<void> }>;
+    }).renderField;
+    await act(async () => { await renderField("W", "width", "400").props.onCommit("480"); });
+    expect(mocks.applyEdit).toHaveBeenCalledTimes(1);
+    expect(connection.measureLayout).toHaveBeenCalledExactlyOnceWith({ updates: [], nodeIds: ["root"] });
+    expect(connection.getNodeDetails).toHaveBeenCalledTimes(1);
   });
 
   it("prepares queued intrinsic P1 atomically without repainting the newer P2 preview", async () => {

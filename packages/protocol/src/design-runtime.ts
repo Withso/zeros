@@ -5082,6 +5082,9 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
         for (var sheetIndex = 0; sheetIndex < sheets.length; sheetIndex += 1) {
           var sheet = sheets[sheetIndex];
           if (sheet.disabled || temporarilyDisabled.has(sheet)) continue;
+          // A rule in a sheet whose media does not match is never applied.
+          var media = sheet.media && sheet.media.mediaText;
+          if (media && !window.matchMedia(media).matches) continue;
           try {
             var rules = sheet.cssRules;
             var insertionIndex = 0;

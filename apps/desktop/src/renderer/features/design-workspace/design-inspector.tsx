@@ -221,6 +221,7 @@ import { MessageRow } from "../../shared/ui/primitives/message-row";
 import type { DesignComponentOptionsTarget } from "./design-component-options";
 import {
   applyDesignEditCached,
+  hasPendingDesignEdits,
   applyDesignHistoryCached,
   designWorkspaceSnapshotCache,
   saveDesigns,
@@ -2238,11 +2239,13 @@ export const DesignInspector = React.memo(function DesignInspector({
       const properties = Object.keys(styles).sort();
       const committedRoot =
         useDesignRuntimeStore.getState().byWorkspace[workspaceId]?.frames[frame.file]?.snapshot?.frame;
-      // Only a Hug frame resizes with its content; other layout edits keep the direct style save.
+      // Only a Hug frame resizes with its content; other layout edits keep the
+      // direct style save. Queued behind other edits (an Undo can restore Hug),
+      // the lane decides at its turn.
       const needsIntrinsicPreparation =
         !stateContext &&
         !!committedRoot &&
-        hasDesignIntrinsicSize(committedRoot) &&
+        (hasDesignIntrinsicSize(committedRoot) || hasPendingDesignEdits(workspaceId)) &&
         Object.keys(styles).some(designStylePropertyAffectsLayout);
       const transaction = (operations: DesignOperation[]) => ({
         schemaVersion: 1 as const,
@@ -2933,8 +2936,21 @@ export const DesignInspector = React.memo(function DesignInspector({
                 const { frame: latest, runtime, assertFrameCurrent } =
                   await readPreparedLayoutRuntime(owner, target.file, assertCurrent);
                 assertFrameCurrent();
-                const rootDetails = await runtime.getNodeDetails(rootNodeId);
+                if (!runtime.supports("measureLayout") || !runtime.measureLayout)
+                  throw new Error(
+                    "This Design frame cannot safely prepare layout edits. Reload the frame and try again.",
+                  );
+                // Confirmed source, never a newer padding or border preview.
+                const held = designHeldStateWatch(owner, target.file, [rootNodeId]);
+                const measured = await measureDesignLayoutUnheld(
+                  runtime,
+                  { updates: [], nodeIds: [rootNodeId] },
+                  held,
+                );
                 assertFrameCurrent();
+                if (!measured)
+                  throw new Error("The frame's state changed while its size was prepared. Try again.");
+                const rootDetails = measured.get(rootNodeId)!;
                 const rootStyles = designFrameRootFixedStyles(rootDetails, {
                   width: geometryKey === "w",
                   height: geometryKey === "h",

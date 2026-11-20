@@ -1949,6 +1949,44 @@ describe("layout runtime editing", () => {
   },
   );
 
+  it("isolates an inherited descendant's transition when the first stylesheet is print-only", async () => {
+    const result = await page.evaluate(async () => {
+      const target = document.querySelector<HTMLElement>('[data-oid="a"]')!;
+      const print = document.createElement("style");
+      print.media = "print";
+      print.textContent = ".print-only{color:red}";
+      document.head.prepend(print);
+      const screen = document.createElement("style");
+      screen.textContent = ".inherits{display:block;width:10em;height:4px;transition:width 30s linear}";
+      document.head.append(screen);
+      const kid = document.createElement("div");
+      kid.className = "inherits";
+      target.append(kid);
+      target.style.fontSize = "16px";
+      void kid.offsetWidth;
+      let kidWidth: string | null = null;
+      const originalRect = HTMLElement.prototype.getBoundingClientRect;
+      HTMLElement.prototype.getBoundingClientRect = function () {
+        if (this === target) kidWidth = getComputedStyle(kid).width;
+        return originalRect.call(this);
+      };
+      try {
+        await window.layoutRequest("measureLayout", {
+          updates: [{ nodeId: "a", styles: { "font-size": "20px" } }],
+          nodeIds: ["a"],
+        });
+      } finally {
+        HTMLElement.prototype.getBoundingClientRect = originalRect;
+        kid.remove();
+        print.remove();
+        screen.remove();
+        target.style.removeProperty("font-size");
+      }
+      return { kidWidth };
+    });
+    expect(result.kidWidth).toBe("200px");
+  });
+
   it("rejects an active transition in an open shadow scope before measurement writes", async () => {
     const result = await page.evaluate(async () => {
       const host = document.createElement("div");
