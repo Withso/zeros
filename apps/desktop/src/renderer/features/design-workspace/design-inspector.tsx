@@ -221,7 +221,8 @@ import { MessageRow } from "../../shared/ui/primitives/message-row";
 import type { DesignComponentOptionsTarget } from "./design-component-options";
 import {
   applyDesignEditCached,
-  hasPendingDesignHistory,
+  hasPendingDesignRootSizing,
+  trackDesignRootSizing,
   applyDesignHistoryCached,
   designWorkspaceSnapshotCache,
   saveDesigns,
@@ -2240,12 +2241,12 @@ export const DesignInspector = React.memo(function DesignInspector({
       const committedRoot =
         useDesignRuntimeStore.getState().byWorkspace[workspaceId]?.frames[frame.file]?.snapshot?.frame;
       // Only a Hug frame resizes with its content; other layout edits keep the
-      // direct style save. Behind a queued Undo or Redo, which can restore Hug,
-      // the lane decides at its turn.
+      // direct style save. Behind a queued Undo, Redo or sizing edit, which can
+      // make the root hug, the lane decides at its turn.
       const needsIntrinsicPreparation =
         !stateContext &&
         !!committedRoot &&
-        (hasDesignIntrinsicSize(committedRoot) || hasPendingDesignHistory(workspaceId)) &&
+        (hasDesignIntrinsicSize(committedRoot) || hasPendingDesignRootSizing(workspaceId)) &&
         Object.keys(styles).some(designStylePropertyAffectsLayout);
       const transaction = (operations: DesignOperation[]) => ({
         schemaVersion: 1 as const,
@@ -2563,7 +2564,7 @@ export const DesignInspector = React.memo(function DesignInspector({
           })().catch(() => {}); // The durable preparation reports an unsupported choice.
         }
       }
-      return applyDesignEditCached(workspaceId, capturedFrame, async ({ assertCurrent }) => {
+      const saved = applyDesignEditCached(workspaceId, capturedFrame, async ({ assertCurrent }) => {
         assertCurrent();
         const { frame: currentFrame, runtime, assertFrameCurrent } =
           await readPreparedLayoutRuntime(workspaceId, capturedFrame.file, assertCurrent);
@@ -2851,6 +2852,10 @@ export const DesignInspector = React.memo(function DesignInspector({
           await restorePreview(assertCurrent);
         },
       }).then(() => {});
+      // A sizing or auto-layout choice can make the root hug before later edits' turns.
+      return action.type === "sizing" || action.type === "auto-layout"
+        ? trackDesignRootSizing(workspaceId, saved)
+        : saved;
     },
     [readPreparedLayoutRuntime, styleOwner, stylePreviewIntentRef],
   );

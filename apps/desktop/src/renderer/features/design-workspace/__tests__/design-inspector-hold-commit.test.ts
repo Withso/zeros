@@ -36,12 +36,15 @@ vi.mock("../design-style-editor", () => ({
     return null;
   },
 }));
-vi.mock("../state/design-workspace-cache", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../state/design-workspace-cache")>()),
-  applyDesignEditCached: mocks.applyEdit,
-  updateDesignNodeStylesCached: mocks.updateStyles,
-  hasPendingDesignHistory: mocks.pending,
-}));
+vi.mock("../state/design-workspace-cache", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../state/design-workspace-cache")>();
+  return {
+    ...actual,
+    applyDesignEditCached: mocks.applyEdit,
+    updateDesignNodeStylesCached: mocks.updateStyles,
+    hasPendingDesignRootSizing: (workspaceId: string) => mocks.pending() || actual.hasPendingDesignRootSizing(workspaceId),
+  };
+});
 
 import { TooltipProvider } from "../../../shared/ui/primitives";
 import { DesignInspector } from "../design-inspector";
@@ -153,6 +156,25 @@ describe("a style commit that refits its frame", () => {
     expect(connection.measureLayout).not.toHaveBeenCalled();
     expect((mocks.state.prepared as { operations: { type: string }[] }).operations.map((operation) => operation.type))
       .toEqual(["node.set-styles"]);
+  });
+
+  it("decides on refitting in the mutation lane behind a sizing choice still saving", async () => {
+    const fixed = { ...root, layout: { ...root.layout, widthValue: "400px", heightValue: "300px" } } as DesignRuntimeNodeDetails;
+    mocks.runtime.mockReturnValue(runtime(fixed));
+    mount(fixed, { ...fixed, oid: "child" });
+    (mocks.applyEdit as unknown as { mockImplementationOnce: (fn: () => Promise<never>) => void })
+      .mockImplementationOnce(() => new Promise<never>(() => {}));
+    await act(async () => {
+      void Promise.resolve(mocks.editor.props!.onLayoutAction({ type: "sizing", axis: "x", mode: "fixed" })).catch(() => {});
+      await Promise.resolve();
+    });
+    expect(mocks.applyEdit).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      void Promise.resolve(mocks.editor.props!.onCommitStyles({ "font-size": "24px" })).catch(() => {});
+      await Promise.resolve();
+    });
+    expect(mocks.updateStyles).not.toHaveBeenCalled();
+    expect(mocks.applyEdit).toHaveBeenCalledTimes(2);
   });
 
   it("sizes a frame from the confirmed root, not a newer preview", async () => {

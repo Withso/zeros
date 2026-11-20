@@ -2831,10 +2831,23 @@ async function adoptDesignStyleGeneration(
   }
 }
 
-const pendingHistoryByWorkspace = new Map<string, number>();
-/** An Undo or Redo is queued or applying, so the next confirmed frame may differ. */
-export function hasPendingDesignHistory(workspaceId: string): boolean {
-  return (pendingHistoryByWorkspace.get(workspaceId) ?? 0) > 0;
+const pendingRootSizingByWorkspace = new Map<string, number>();
+/** An Undo, Redo or sizing edit is queued or applying, so the frame's root may
+ * hug its content by the time a later edit takes its turn. */
+export function hasPendingDesignRootSizing(workspaceId: string): boolean {
+  return (pendingRootSizingByWorkspace.get(workspaceId) ?? 0) > 0;
+}
+
+/** Marks `work`, an edit that can change whether the root hugs, until it settles. */
+export async function trackDesignRootSizing<T>(workspaceId: string, work: Promise<T>): Promise<T> {
+  pendingRootSizingByWorkspace.set(workspaceId, (pendingRootSizingByWorkspace.get(workspaceId) ?? 0) + 1);
+  try {
+    return await work;
+  } finally {
+    const left = (pendingRootSizingByWorkspace.get(workspaceId) ?? 1) - 1;
+    if (left > 0) pendingRootSizingByWorkspace.set(workspaceId, left);
+    else pendingRootSizingByWorkspace.delete(workspaceId);
+  }
 }
 
 export async function applyDesignHistoryCached(
@@ -2842,14 +2855,7 @@ export async function applyDesignHistoryCached(
   frame: string | null,
   direction: "undo" | "redo",
 ): Promise<DesignApiMutationReplyWire> {
-  pendingHistoryByWorkspace.set(workspaceId, (pendingHistoryByWorkspace.get(workspaceId) ?? 0) + 1);
-  try {
-    return await applyDesignHistoryInLane(workspaceId, frame, direction);
-  } finally {
-    const left = (pendingHistoryByWorkspace.get(workspaceId) ?? 1) - 1;
-    if (left > 0) pendingHistoryByWorkspace.set(workspaceId, left);
-    else pendingHistoryByWorkspace.delete(workspaceId);
-  }
+  return trackDesignRootSizing(workspaceId, applyDesignHistoryInLane(workspaceId, frame, direction));
 }
 
 async function applyDesignHistoryInLane(
