@@ -833,7 +833,7 @@ export class CloudWorker {
         publish: (frame) => { if (workspace && this.workspace === workspace) void this.broadcast(frame); },
       }), timing);
       if (this.disposed || this.stopping) return false;
-      const repositories = await this.openRepositories(scope, asStarter, timing);
+      const repositories = await this.openRepositories(scope, asStarter, timing, config.githubPullRequests === 1);
       // Agents start in the project folder; it names each repository's own instruction files.
       await writeWorkspaceInstructions(scope).catch(() => this.options.log?.("[repositories] workspace instructions could not be written"));
       if (this.disposed || this.stopping) { await Promise.allSettled([...repositories.values()].map(entry => entry.dispose())); return false; }
@@ -970,7 +970,7 @@ export class CloudWorker {
   /** The repositories after the first: each checkout prepared on its branch, its own
    * workspace service (state, Git, files, remote fix-up) and setup. One that cannot be
    * prepared stays unavailable without failing the workspace. */
-  private async openRepositories(scope: WorkspaceScope, asStarter: <T>(work: () => T) => T, timing?: StartupTimingObserver): Promise<Map<string, RepositoryRuntime>> {
+  private async openRepositories(scope: WorkspaceScope, asStarter: <T>(work: () => T) => T, timing?: StartupTimingObserver, pullRequests = false): Promise<Map<string, RepositoryRuntime>> {
     const opened = this.pendingRepositories = new Map<string, RepositoryRuntime>();
     for (const [position, entry] of scope.repositories.entries()) {
       if (!position || this.disposed || this.stopping) continue;
@@ -991,6 +991,9 @@ export class CloudWorker {
             return run(program, args, options);
           },
           publish: frame => { if (this.repositories.get(entry.repository.toLowerCase()) === runtime) void this.broadcast(frame); },
+          // Its own checkout report, so its pull request follows its branch.
+          ...(pullRequests && this.options.transport.reportGithubCheckout && /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/.test(entry.repository)
+            ? { reportGithubCheckout: value => this.options.transport.reportGithubCheckout!({ ...value, repository: entry.repository }) } : {}),
         });
         runtime.setup = new WorkspaceSetup({ directory, workspace: repositoryScope.workspace, gitEnvironment: this.gitEnvironment,
           application: new ApplicationEnvironment(undefined), signal: this.environmentLifetime.signal,

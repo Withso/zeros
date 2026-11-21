@@ -22,14 +22,15 @@ export function cloudGithubRequestContext(deps: {
   authorize(workspaceId: string, userId: string): Promise<void>;
   fetch: typeof fetch;
 }) {
-  return async (workspaceId: string, userId: string, options = { checkout: true }) => {
+  /** `repository`: one of a workspace of several's repositories; the first without one. */
+  return async (workspaceId: string, userId: string, options = { checkout: true }, repository?: string) => {
     const read = async (tx: Tx, expected?: { context: CloudGithubPrContext; generation: string }) => {
       // Credential callers retain the source-retirement refusal even when a
       // deleted checkout no longer has readable PR metadata.
       const tokenAdmission = expected && !options.checkout
         ? await deps.verifications.workspaceAdmission(tx, workspaceId,
           { organizationId: expected.context.organizationId, userId: expected.context.actorUserId ?? expected.context.creatorUserId }, expected.generation) : undefined;
-      const context = await deps.metadata.context(workspaceId, userId, tx);
+      const context = await deps.metadata.context(workspaceId, userId, tx, repository);
       const scope = { organizationId: context.organizationId, userId: context.actorUserId ?? context.creatorUserId };
       let credential: CloudGithubCredentialSnapshot | null = null;
       if (expected) await deps.connections.store.assertCurrent(scope, expected.generation, tx);
@@ -37,7 +38,8 @@ export function cloudGithubRequestContext(deps: {
       if (!expected && !credential) return { context, scope, credential, admission: null };
       const admission = tokenAdmission !== undefined ? tokenAdmission
         : await deps.verifications.workspaceAdmission(tx, workspaceId, scope, expected?.generation ?? credential!.generation);
-      if (admission) {
+      // The admission covers every source; it pins the first repository's identity, which another one's context does not take.
+      if (admission && !context.other) {
         if (context.repositoryId && context.repositoryId !== admission.repositoryId)
           throw new HttpError(409, "github_repository_changed", "The workspace's saved repository identity changed.");
         context.repositoryId = admission.repositoryId;

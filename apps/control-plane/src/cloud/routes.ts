@@ -41,9 +41,13 @@ import { TEAM_SHARING_HEADER, TEAM_OWNERSHIP_HEADER, teamOwnershipRequired } fro
 export type CloudGithubWorkspaceDocument = CloudV2Workspace & {
   checkoutPath?: string;
   githubUnavailableReason?: CloudGithubUnavailableReason;
-  github?: { repositoryId: string; branch: string | null; baseBranch: string; headSha: string | null;
-    prNumber: number | null; prState: "draft" | "ready" | "merged" | "closed" | null; prUrl: string | null };
+  github?: CloudGithubRepositoryState;
+  /** A workspace of several repositories: the project folder, and each repository with its own checkout and pull request. */
+  root?: string;
+  repositories?: { repository: string; checkoutPath: string; branch: string; baseBranch: string; github?: CloudGithubRepositoryState }[];
 };
+export type CloudGithubRepositoryState = { repositoryId: string; branch: string | null; baseBranch: string; headSha: string | null;
+  prNumber: number | null; prState: "draft" | "ready" | "merged" | "closed" | null; prUrl: string | null };
 
 const CONNECT_TICKET_TTL_MS = 60_000;
 export const CLOUD_V2_CAPABILITIES: CloudV2Capabilities = {

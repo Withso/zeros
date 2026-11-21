@@ -16,6 +16,8 @@ import { CloudProjects } from "./projects.js";
 import { scheduleCloudDeletion } from "./deletion.js";
 import { withSystemTx } from "../db.js";
 import { otherRepositories, workerRepositories } from "./workspace-repositories.js";
+import { CloudGithubPrStore } from "./github-pr-store.js";
+import { hashCloudV2Token } from "./tokens.js";
 
 const d = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 const DAY = 24 * 60 * 60_000;
@@ -893,5 +895,36 @@ d("cloud v2 ready copies", () => {
     const renamed = await make("zeros-studio", ["main", "main", "main"]);
     expect(await forks.prepare({ ...renamed, boatSandboxId: null })).toBeNull();
     expect(await copies.forkOf(renamed.id)).toBeNull();
+  });
+
+  it("keeps each repository's checkout and pull request in its own row, and shows every repository with its own pull request", async () => {
+    await liveBase();
+    const app = await project([{ repository: "withso/api" }, { repository: "withso/web" }], { name: "Zeros App" });
+    const store = new CloudV2Store(pool), base = (await copies.base(org))!, id = randomUUID(), boot = randomUUID(), token = "synthetic-worker-token";
+    const workspace = await store.createWorkspace({ id, organizationId: org, creatorUserId: member, name: "Zeros App", repository: "withso/api", branch: "zeros/app-1",
+      baseBranch: "main", computerBuildId: base.buildId, projectId: app, checkoutFolder: "zeros-app/api", folder: "zeros-app",
+      repositories: [["withso/api", "api"], ["withso/web", "web"]].map(([repository, folder]) => ({ repository: repository!, repositoryId: repositoryId(repository!),
+        folder: folder!, branch: "zeros/app-1", baseBranch: "main", baseCommit: "c".repeat(40) })) });
+    await pool.query("UPDATE cloud_v2_workspaces SET state='running', worker_token_hash=$2, worker_boot_id=$3 WHERE id=$1", [id, hashCloudV2Token(token), boot]);
+    const prs = new CloudGithubPrStore(pool);
+    await prs.checkout(token, boot, { sequence: 1, branch: "zeros/app-1", baseBranch: "main", headSha: "a".repeat(40) });
+    await prs.checkout(token, boot, { sequence: 1, branch: "zeros/app-1", baseBranch: "release", headSha: "b".repeat(40), repository: "withso/web" });
+    await expect(prs.checkout(token, boot, { sequence: 2, branch: "x", baseBranch: "main", headSha: null, repository: "acme/other" })).rejects.toMatchObject({ status: 404 });
+    const first = await prs.context(id, member), web = await prs.context(id, member, undefined, "Withso/Web");
+    expect(first).not.toHaveProperty("other");
+    expect(web).toMatchObject({ other: { repository: "withso/web", repositoryId: repositoryId("withso/web") }, repository: "withso/web", baseBranch: "release",
+      headSha: "b".repeat(40), revision: `${boot}:1` });
+    // The first repository's identity is bound by a pull request read, as today.
+    await prs.repository(first, { repositoryId: repositoryId("withso/api"), repository: "withso/api" });
+    await prs.recordPr(web, { number: 7, state: "draft", url: "https://github.com/withso/web/pull/7" } as never, "generation-1");
+    expect((await pool.query("SELECT pr_number FROM cloud_v2_github_workspaces WHERE workspace_id=$1", [id])).rows[0].pr_number).toBeNull();
+    const [document] = await prs.documents([workspace]);
+    expect(document).toMatchObject({ root: "/home/user/zeros-app", checkoutPath: "/home/user/zeros-app/api", repositories: [
+      { repository: "withso/api", checkoutPath: "/home/user/zeros-app/api", github: { headSha: "a".repeat(40), prNumber: null } },
+      { repository: "withso/web", checkoutPath: "/home/user/zeros-app/web", baseBranch: "main",
+        github: { repositoryId: repositoryId("withso/web"), baseBranch: "release", headSha: "b".repeat(40), prNumber: 7, prState: "draft" } }] });
+    expect(document).not.toHaveProperty("checkoutFolder");
+    // Each repository's context has the same access rule as the first's: only its creator outside shared execution.
+    for (const repository of [undefined, "withso/web"]) await expect(prs.context(id, admin, undefined, repository)).rejects.toMatchObject({ status: 404 });
   });
 });
