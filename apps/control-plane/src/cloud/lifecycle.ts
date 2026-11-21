@@ -3,6 +3,7 @@
 // repeats it: creation uses the workspace id as Boat's idempotency key, and
 // the worker credential is delivered by command after boot, never in the
 // sandbox definition, so it can be rotated on any retry.
+import { workspaceCheckoutPath } from "./workspace-layout.js";
 import { randomBytes, randomUUID } from "node:crypto";
 import { CLOUD_V2_LEASE_SECONDS, type CloudV2Compute, type CloudV2CommandResult } from "./boat.js";
 import { BoatBootPendingError, BoatCreateRejectedError, BoatForkRefusedError, BoatSnapshotExpiredError } from "./boat-client.js";
@@ -500,7 +501,7 @@ export class CloudV2Lifecycle {
         await this.measure(workspace, "runtime_install", () => this.ensureRuntime(sandboxId, boot.runtime), installed => ({ runtimeChanged: installed.changed }));
         // Boat exec waited ~6 s for a 6 s child with trailing "&"; braces + echo returned in ~120 ms.
         // Still unawaited so a slow or failed launch cannot hold up worker startup.
-        const warmup = image.checkout ? checkoutWarmupCommand(`${CLOUD_V2_HOME}/${workspace.repository}`) : null;
+        const warmup = image.checkout ? checkoutWarmupCommand(workspaceCheckoutPath(workspace)) : null;
         if (warmup) void this.deps.compute.exec(sandboxId, warmup, 30).catch(() => undefined);
         if (!forked && (image.prune.length || !image.from)) await this.measure(workspace, "image_prepare", () => this.prepareImage(sandboxId, image));
         if (forked) await this.measure(workspace, "repository_prepare", () => this.deps.readyCopies!.fetchBase(workspace, sandboxId));
@@ -707,7 +708,7 @@ export class CloudV2Lifecycle {
       // instance once deletion began, issues no upload at all.
       if (!await store.checkpointUpload(workspace.id, owner, generation, object, uploadUntil, ...scoped)) return "fenced";
       const reuse = await this.reusable(workspace);
-      const command = checkpointCommand({ checkoutPath: `${CLOUD_V2_HOME}/${workspace.repository}`, home: CLOUD_V2_HOME,
+      const command = checkpointCommand({ checkoutPath: workspaceCheckoutPath(workspace), home: CLOUD_V2_HOME,
         baseBranch: workspace.baseBranch, key, uploadUrl: await checkpoints.storage.uploadUrl(workspace.id, object), ...(reuse ? { reuse } : {}) });
       const { result, saved } = await this.measure(workspace, "checkpoint", async () => {
         const result = await this.deps.compute.exec(vm, command, CLOUD_V2_CHECKPOINT_SECONDS);
@@ -895,7 +896,7 @@ export class CloudV2Lifecycle {
     const github = await this.deps.githubToken?.(workspace) ?? null;
     const key = checkpoints.open(checkpoint.key, workspace.id, checkpoint.object);
     try {
-      const command = restoreCommand({ checkoutPath: `${CLOUD_V2_HOME}/${workspace.repository}`, home: CLOUD_V2_HOME, key,
+      const command = restoreCommand({ checkoutPath: workspaceCheckoutPath(workspace), home: CLOUD_V2_HOME, key,
         sha256: checkpoint.sha256, downloadUrl: await checkpoints.storage.downloadUrl(workspace.id, checkpoint.object),
         repositoryUrl: `https://github.com/${workspace.repository}.git`, ...(github ? { githubToken: github.token } : {}), ...(active ? { active: true } : {}) });
       await this.deps.store.defer(workspace.id, "starting", CHECKPOINT_LEASE_MS, { failure: true });

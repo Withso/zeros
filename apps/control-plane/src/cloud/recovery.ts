@@ -1,4 +1,5 @@
 import { randomBytes, randomUUID } from "node:crypto";
+import { workspaceCheckoutPath } from "./workspace-layout.js";
 import type { CloudV2Compute } from "./boat.js";
 import { BoatBootPendingError, BoatCreateRejectedError } from "./boat-client.js";
 import { CLOUD_V2_CHECKPOINT_SECONDS, cloudV2CheckpointObject, parseCheckpointResult, parseRestoreResult,
@@ -152,7 +153,7 @@ export class CloudRecovery {
     try {
       if (!await store.upload(a.id, a.lease_id!, { object, key: checkpoints.seal(key, w.id, object), until: new Date(this.now() + UPLOAD_HORIZON_MS) }))
         throw fail("recovery_binding_changed");
-      const command = recoveryCheckpointCommand({ ...binding, checkoutPath: `${CLOUD_V2_HOME}/${w.repository}`, home: CLOUD_V2_HOME,
+      const command = recoveryCheckpointCommand({ ...binding, checkoutPath: workspaceCheckoutPath(w), home: CLOUD_V2_HOME,
         baseBranch: w.baseBranch, key, uploadUrl: await checkpoints.storage.uploadUrl(w.id, object) });
       await this.current(a);
       const result = await compute.exec(a.source_sandbox_id, command, CLOUD_V2_CHECKPOINT_SECONDS);
@@ -203,7 +204,7 @@ export class CloudRecovery {
     const github = await this.deps.githubToken(w), object = a.checkpoint_object!;
     const key = checkpoints.open(a.checkpoint_key, w.id, object);
     try {
-      const command = restoreCommand({ checkoutPath: `${CLOUD_V2_HOME}/${w.repository}`, home: CLOUD_V2_HOME, key,
+      const command = restoreCommand({ checkoutPath: workspaceCheckoutPath(w), home: CLOUD_V2_HOME, key,
         sha256: a.checkpoint_sha256!, downloadUrl: await checkpoints.storage.downloadUrl(w.id, object),
         repositoryUrl: `https://github.com/${w.repository}.git`, githubToken: github.token, active: true, recovery: true });
       await this.current(a);

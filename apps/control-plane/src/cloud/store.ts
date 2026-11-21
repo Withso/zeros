@@ -114,6 +114,9 @@ export type CloudV2Workspace = {
   privateOwnerUserId?: string;
   /** The project it was created from; none for workspaces made before projects. */
   projectId?: string;
+  /** workspace-layout.ts: the first checkout under /home/user, and the project folder when it holds several repositories. */
+  checkoutFolder?: string;
+  folder?: string;
 };
 
 /** What a checkpoint is compared by at the next stop: the fingerprint of what
@@ -189,12 +192,14 @@ export type CloudV2WorkspaceRow = {
   agent_cost_usd: string; agent_cost_turns: string; agent_cost_estimated_turns: string;
   private_owner_user_id?: string | null;
   project_id?: string | null;
+  checkout_path?: string | null;
+  folder?: string | null;
 };
 type Row = CloudV2WorkspaceRow;
 
 const WORKSPACE_COLUMNS_SQL = sql`id, org_id, creator_user_id, name, number, title, repository, branch, base_branch, state, boat_sandbox_id,
   computer_build_id, error_code, active_at, archived_at, created_at, updated_at, source_pending, created_by_session_id, setup_status,
-  agent_cost_usd, agent_cost_turns, agent_cost_estimated_turns, private_owner_user_id, project_id`;
+  agent_cost_usd, agent_cost_turns, agent_cost_estimated_turns, private_owner_user_id, project_id, checkout_path, folder`;
 const COLUMNS = WORKSPACE_COLUMNS_SQL.text;
 export const CLOUD_V2_WORKSPACE_COLUMNS = COLUMNS.split(",").map(value => value.trim());
 
@@ -294,6 +299,8 @@ function workspace(row: Row): CloudV2Workspace {
     ...(row.source_pending ? { sourcePending: true as const } : {}),
     ...(row.private_owner_user_id ? { privateOwnerUserId: row.private_owner_user_id } : {}),
     ...(row.project_id ? { projectId: row.project_id } : {}),
+    ...(row.checkout_path ? { checkoutFolder: row.checkout_path } : {}),
+    ...(row.folder ? { folder: row.folder } : {}),
   };
 }
 export { workspace as cloudV2WorkspaceFromRow };

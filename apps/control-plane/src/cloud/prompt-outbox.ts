@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { workspaceRootPath } from "./workspace-layout.js";
 import type pg from "pg";
 import { offerCloudChatEdits } from "./chat-edits.js";
 import type { AuthedUser } from "../auth.js";
@@ -32,7 +33,7 @@ export const CLOUD_V2_PROMPT_LIMITS = { pending: 128, bytes: 32 * 1024 * 1024, r
 type Limits = typeof CLOUD_V2_PROMPT_LIMITS;
 type ReceiptCache = { userId: string; queueRevision?: number | undefined };
 type Workspace = { id: string; repository: string; state: CloudV2PromptReceipt["workspaceState"]; archived_at: Date | null;
-  access_epoch: string; worker_boot_id: string | null; execution_mode: string; previous?: Row };
+  access_epoch: string; worker_boot_id: string | null; execution_mode: string; checkout_path?: string | null; folder?: string | null; previous?: Row };
 type Row = { user_message_id: string; chat_id: string; creator_user_id: string; sequence: string; epoch: string; access_epoch: string;
   payload_hash: string; payload: CloudV2Prompt | null; receipt: CloudV2PromptReceipt; state: CloudV2PromptState;
   created_by_session_id: string | null;
@@ -59,12 +60,12 @@ export class CloudV2PromptOutbox {
   }
 
   private async owned(tx: Tx, id: string, userId: string, lock: boolean, messageId?: string): Promise<Workspace> {
-    const { rows } = await tx.query<Workspace>(`SELECT id, repository, state, archived_at, access_epoch::text, worker_boot_id, execution_mode
+    const { rows } = await tx.query<Workspace>(`SELECT id, repository, state, archived_at, access_epoch::text, worker_boot_id, execution_mode, checkout_path, folder
       FROM cloud_v2_workspaces w WHERE id=$1 AND (creator_user_id=$2 OR execution_mode='active' AND EXISTS (
         SELECT 1 FROM organization_members m JOIN users u ON u.id=m.user_id WHERE m.org_id=w.org_id AND m.user_id=$2
           AND u.auth_status='active' AND u.deleted_at IS NULL AND NOT ${memberOnHoldSql("m.org_id", "m.user_id")})) AND state NOT IN ('deleting','deleted')
-        AND ${CLOUD_V2_LIVE_ACCESS} ${lock ? "FOR UPDATE OF w" : ""}`, [id, userId]);
         AND (private_owner_user_id IS NULL OR private_owner_user_id=$2)
+        AND ${CLOUD_V2_LIVE_ACCESS} ${lock ? "FOR UPDATE OF w" : ""}`, [id, userId]);
     if (!rows[0]) throw notFound();
     // READ COMMITTED can wait on the workspace row after evaluating a member
     // subquery in its old statement snapshot. Use a fresh statement after the
@@ -196,7 +197,7 @@ export class CloudV2PromptOutbox {
       // booted. Keep prompt bubbles in the outbox until the worker records them:
       // pre-inserting transcript rows would reorder a queued follow-up ahead of
       // the preceding turn's later tools/assistant rows.
-      const chatRow = JSON.stringify({ id: payload.chatId, folder: `/home/user/${workspace.repository}`,
+      const chatRow = JSON.stringify({ id: payload.chatId, folder: workspaceRootPath({ repository: workspace.repository, folder: workspace.folder, checkoutFolder: workspace.checkout_path }),
           agentId: payload.agentId, agentName: { codex: "Codex", claude: "Claude", cursor: "Cursor" }[payload.agentId],
           title: named.data ?? "", model: payload.model ?? null, effort: payload.effort ?? "", createdAt: payload.startedAt, updatedAt: payload.startedAt });
       if (options?.device) await this.localDevices.connectMessage(tx, authority!, id, options.device);

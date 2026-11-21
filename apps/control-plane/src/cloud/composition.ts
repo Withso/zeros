@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { workspaceCheckoutPath } from "./workspace-layout.js";
 import { withExecutionLifetimeRetry } from "./execution/lifetime.js";
 // Assembles cloud workspace v2 from configuration: one store, Boat, the relay
 // (realtime role), the lifecycle loop (worker role), the HTTP routes and the
@@ -313,7 +314,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
               promptOutbox: 1, pushSignals: 1, notifyUser: 1, githubPullRequests: 1, githubUserTokens: 1, agentInteractions: 1, runtimeUpdate: 1,
               ...(localCommandsEnabled ? { localCommands: 1 } : {}),
               workspace: { id: workspace.id, organizationId: workspace.organizationId, repository: workspace.repository,
-                checkoutPath: `${CLOUD_V2_HOME}/${workspace.repository}`, branch: workspace.branch, baseBranch: workspace.baseBranch,
+                checkoutPath: workspaceCheckoutPath(workspace), branch: workspace.branch, baseBranch: workspace.baseBranch,
                 github: { ...target, previousRepositories: [workspace.repository] }, ...(setup ?? {}), ...(baseCommit ? { baseCommit } : {}) } } satisfies ConfigFrame;
           }, { serializable: true }));
         } catch (error) {
@@ -351,7 +352,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
       loginRevision: access.loginRevision,
       workspace: {
         id: workspace.id, organizationId: workspace.organizationId, repository: workspace.repository,
-        checkoutPath: `${CLOUD_V2_HOME}/${workspace.repository}`, branch: workspace.branch, baseBranch: workspace.baseBranch,
+        checkoutPath: workspaceCheckoutPath(workspace), branch: workspace.branch, baseBranch: workspace.baseBranch,
         github: repositoryBinding,
         ...(setup ?? {}),
         ...(baseCommit ? { baseCommit } : {}),

@@ -1,4 +1,5 @@
 import type pg from "pg";
+import { workspaceCheckoutPath } from "./workspace-layout.js";
 import { HttpError } from "../authz.js";
 import { withSystemTx, type Tx } from "../db.js";
 import type { CloudGithubPullRequest } from "./github-api.js";
@@ -285,7 +286,7 @@ export class CloudGithubPrStore {
       return {
         ...workspace,
         repository: row?.canonical_repository ?? workspace.repository,
-        checkoutPath: `/home/user/${workspace.repository}`,
+        checkoutPath: workspaceCheckoutPath(workspace),
         updatedAt:
           row && row.updated_at.getTime() > Date.parse(workspace.updatedAt)
             ? row.updated_at.toISOString()

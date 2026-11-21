@@ -1,4 +1,5 @@
 import type pg from "pg";
+import { workspaceCheckoutPath } from "./workspace-layout.js";
 import { z } from "zod";
 import { withSystemTx } from "../db.js";
 import { HttpError } from "../authz.js";
@@ -445,7 +446,7 @@ export function pruneCloudRepositories(repositories: readonly string[]): string 
 export function hydrateCloudRepository(workspace: CloudV2Workspace, canonicalRepository = workspace.repository): string {
   if (!repositorySchema.safeParse(workspace.repository).success || !repositorySchema.safeParse(canonicalRepository).success) throw new Error("Invalid repository");
   const q = (value: string) => `'${value.replace(/'/g, `'\\''`)}'`;
-  const directory = `/home/user/${workspace.repository}`, url = `https://github.com/${canonicalRepository}.git`;
+  const directory = workspaceCheckoutPath(workspace), url = `https://github.com/${canonicalRepository}.git`;
   return `bash -lc ${q([
     "set -eu",
     "IFS= read -r ZEROS_GITHUB_AUTH_HEADER",
