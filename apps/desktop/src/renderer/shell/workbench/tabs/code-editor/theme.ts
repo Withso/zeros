@@ -28,6 +28,12 @@
 import { EditorView } from "@codemirror/view";
 import type { Extension } from "@codemirror/state";
 
+/** The Diff view's line-number rule (Pierre's own) on the editor's surface, so
+ *  switching Diff view on or off leaves the gutter the same color. */
+export function editorLineNumberColor(baseFg: string | null): string {
+  return `color-mix(in lab, ${baseFg ?? "var(--fg1)"} 65%, var(--bg1))`;
+}
+
 const chrome = (dark: boolean, baseFg: string | null): Extension =>
   EditorView.theme(
     {
@@ -50,7 +56,7 @@ const chrome = (dark: boolean, baseFg: string | null): Extension =>
       ".cm-cursor, .cm-dropCursor": { borderLeftColor: "var(--fg1)" },
       ".cm-gutters": {
         backgroundColor: "var(--bg1)",
-        color: "color-mix(in srgb, var(--fg2) 60%, transparent)",
+        color: editorLineNumberColor(baseFg),
         border: "none",
       },
       ".cm-gutters .cm-gutterElement": { padding: "0 12px" },

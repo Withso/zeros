@@ -255,24 +255,28 @@ export function useCodeReview({
   active,
   refreshKey = 0,
   external: suppliedExternal,
+  comments = true,
 }: {
   cwd: string | undefined;
   workspaceId?: string | null;
   active: boolean;
   refreshKey?: number;
   external?: CodeReviewExternalSource;
+  /** False for a surface that never hosts review: it neither reads nor shows
+   *  threads, and offers no comment affordance. */
+  comments?: boolean;
 }): CodeReviewController {
   const inheritedExternal = useCodeReviewExternal();
-  const workspaceCommentsAvailable = useCodeReviewAvailable({ cwd, workspaceId }, active);
+  const workspaceCommentsAvailable = useCodeReviewAvailable({ cwd, workspaceId }, active && comments) && comments;
   const cloudTarget = codeReviewTarget({ cwd, workspaceId });
-  const commentsAvailable = workspaceCommentsAvailable || githubReviewAvailable({ cwd, workspaceId });
+  const commentsAvailable = comments && (workspaceCommentsAvailable || githubReviewAvailable({ cwd, workspaceId }));
   const external = commentsAvailable
     ? suppliedExternal ?? inheritedExternal
     : undefined;
   const target = workspaceId || cwd || "";
   const scope = useCloudGithubPrScope(target);
   const ownerKey = keyForReviewOwner(target, scope);
-  const key = cloudTarget !== false && cwd && target ? codeReviewCacheKey(cwd, target) : null;
+  const key = comments && cloudTarget !== false && cwd && target ? codeReviewCacheKey(cwd, target) : null;
   const subscribe = useCallback(
     (listener: () => void) =>
       key ? codeReviewCache.subscribe(key, listener) : () => {},

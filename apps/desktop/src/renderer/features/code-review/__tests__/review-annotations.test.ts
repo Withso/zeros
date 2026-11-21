@@ -3,6 +3,7 @@ import { getSingularPatch } from "@pierre/diffs";
 import {
   ReviewAnnotationCache,
   reviewAnnotationVersion,
+  reviewThreadsOutside,
 } from "../review-annotations";
 import {
   anchorFromSelection,
@@ -144,5 +145,14 @@ describe("native review annotation identities", () => {
       ["deletions", 1],
     ]);
     expect(annotations[0]!.metadata.id).not.toBe(annotations[1]!.metadata.id);
+  });
+});
+
+describe("threads outside a comparison", () => {
+  it("lists discussions on files the comparison omits, including an empty one", () => {
+    const readme = { ...thread("readme", 1), anchor: { ...thread("readme", 1).anchor, path: "README.md" } };
+    const changed = thread("changed", 2);
+    expect(reviewThreadsOutside(["a.ts"], [changed, readme])).toEqual([{ thread: readme, state: "unavailable" }]);
+    expect(reviewThreadsOutside([], [changed, readme]).map((entry) => entry.thread.id)).toEqual(["changed", "readme"]);
   });
 });

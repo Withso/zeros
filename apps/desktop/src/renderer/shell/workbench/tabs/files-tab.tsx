@@ -31,12 +31,9 @@ import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import { File, FolderOpen, FolderTree, Search } from "lucide-react";
 
 import { useActiveWorkspace } from "@/renderer/state/use-active-workspace";
-import { useGithubReview } from "@/renderer/features/code-review/use-github-review";
 import { useWorkspaceReviewStatus } from "@/renderer/features/code-review/use-workspace-review-status";
 import { statusForGeneration } from "../../git-status-reads";
 import { fileStatusesForFolder } from "./file-status";
-import { parseRemote } from "../../pr/github-url";
-import { resolveReviewProvider } from "../../pr/review-provider";
 import { isLocalMainWorkspace } from "@/renderer/state/local-main-workspace";
 import { relativeWorkspaceFilePath } from "@/renderer/platform/workspace-file-path";
 import { useWorkspaceDispatch } from "@/renderer/state/store";
@@ -69,7 +66,7 @@ import {
 } from "./files-sidebar-mode";
 import { treeSelectionMirrorTarget } from "./tree-paths";
 import { Inline } from "@/renderer/shared/ui/layout/inline";
-import { WorkbenchTabToolbar, useWorkbenchStatusSource } from "../tab-status";
+import { WorkbenchTabToolbar } from "../tab-status";
 
 interface TabBodyProps {
   tab: WorkbenchTab;
@@ -115,10 +112,6 @@ const WorkspaceFilesTab = React.memo(function WorkspaceFilesTab({
   const gitStatus = useWorkspaceReviewStatus({ cwd, workspaceId, active, refreshKey: gitRefresh, read: statusForGeneration });
   const gitRoot = isTrunk ? workspace?.repoRoot : workspace?.path;
   const fileStatuses = useMemo(() => fileStatusesForFolder(gitStatus.data, cwd, gitRoot), [gitStatus.data, cwd, gitRoot]);
-  const githubReview = useGithubReview({
-    workspaceId: resolveReviewProvider(parseRemote(project?.originUrl)?.host ?? "github.com") ? workspaceId : undefined,
-    prNumber: workspace?.prNumber, cwd, active: active && !!tab.filePath,
-  });
   // Whether the tree sidebar stacks a "Design files" section under the code
   // tree (design-files-pane.tsx). Decided here, from the same cached listing
   // the trees read, so a repo without a design document mounts exactly one
@@ -126,14 +119,6 @@ const WorkspaceFilesTab = React.memo(function WorkspaceFilesTab({
   const hasDesignSection = useHasDesignSection(cwd, gitRefresh, active);
 
   const filePath = tab.filePath ?? "";
-  useWorkbenchStatusSource(
-    {
-      error: tab.filePath ? githubReview.error : null,
-      pending: !!tab.filePath && !!githubReview.source?.loading,
-      retry: githubReview.refresh,
-    },
-    "github-comments",
-  );
   // Blank tabs start with a full-width tree. A filled tab restores its own
   // persisted tree visibility synchronously from the tab object.
   const layout = resolveFilesTabLayout(tab.filePath, tab.fileTreeVisible);
@@ -416,7 +401,6 @@ const WorkspaceFilesTab = React.memo(function WorkspaceFilesTab({
             ) ?? filePath : filePath}
             fileEditor
             workspaceId={workspaceId}
-            reviewExternal={githubReview.source}
             diff={tab.diff ?? false}
             diffScope={tab.diffScope}
             diffSha={tab.diffSha}
