@@ -27,6 +27,11 @@ export async function runDesignFieldStatesSmoke({ page, check }) {
   const status = inspector.locator('[role="status"][aria-live="polite"]');
   const card = page.locator("[data-design-style-card]");
   const writes = () => page.evaluate(() => window.__zerosHarnessDesignTransactions ?? 0);
+  const runtimeGeneration = () =>
+    page.evaluate(async () => {
+      const { designFrameRuntime } = await import("/apps/desktop/src/renderer/platform/bridge/design-frame-runtime.ts");
+      return designFrameRuntime("ws_design_harness", "home.html")?.sourceVersion ?? null;
+    });
   const inline = (id, property) =>
     runtime.locator(`[data-oid="${id}"]`).evaluate((element, property) => element.style.getPropertyValue(property), property);
   const computed = (id, property) =>
@@ -215,4 +220,66 @@ export async function runDesignFieldStatesSmoke({ page, check }) {
   check("an arrow on a Mixed field moves each layer by one", (await input("border-radius").inputValue()) === "");
   await undo();
   await expect.poll(radii).toEqual(start);
+
+  // A generation that lands mid-drag, such as an undo still finishing or
+  // another edit, replaces the document under the preview. The drag keeps
+  // showing on the new document instead of snapping back.
+  await editable("border-radius");
+  const again = await scrub.boundingBox();
+  await page.mouse.move(again.x + again.width / 2, again.y + again.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(again.x + again.width / 2 + 8, again.y + again.height / 2, { steps: 4 });
+  await expect.poll(async () => (await moved())[0]).toBeGreaterThan(0);
+  const dragged = await moved();
+  const generation = await page.evaluate(() => window.__zerosHarnessCommitStyleGeneration("home-note", { "letter-spacing": "1px" }));
+  await expect.poll(() => runtimeGeneration()).toBe(generation);
+  await expect.poll(() => inline("home-note", "letter-spacing")).toBe("1px");
+  await expect.poll(moved).toEqual(dragged);
+  check("a Mixed scrub keeps its preview when a new generation lands mid-drag", true);
+  await page.mouse.up();
+  await expect.poll(radii).toEqual(start.map((value, index) => `${Number.parseFloat(value) + dragged[index]}px`));
+  await editable("border-radius");
+  check("that scrub saves what it showed on the new generation", true);
+
+  // The same holds for one layer's own scrub.
+  await layer("home-cancel").click();
+  await editable("border-radius");
+  const single = async () => Number.parseFloat(await computed("home-cancel", "border-top-left-radius"));
+  const singleStart = await single();
+  const singleScrub = await field("border-radius").locator("button.zd-field-scrub").boundingBox();
+  await page.mouse.move(singleScrub.x + singleScrub.width / 2, singleScrub.y + singleScrub.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(singleScrub.x + singleScrub.width / 2 + 8, singleScrub.y + singleScrub.height / 2, { steps: 4 });
+  await expect.poll(single).toBeGreaterThan(singleStart);
+  const singleDragged = await single();
+  const nextGeneration = await page.evaluate(() => window.__zerosHarnessCommitStyleGeneration("home-note", { "letter-spacing": "2px" }));
+  await expect.poll(() => runtimeGeneration()).toBe(nextGeneration);
+  await expect.poll(() => inline("home-note", "letter-spacing")).toBe("2px");
+  await expect.poll(single).toBe(singleDragged);
+  await page.mouse.up();
+  await expect.poll(() => inline("home-cancel", "border-radius")).toBe(`${singleDragged}px`);
+  check("a single layer's scrub keeps its preview across a new generation and saves it", true);
+
+  // A Mixed size scrub previews through layout, which keeps it too.
+  await layer("home-drawn").click({ modifiers: ["Shift"] });
+  await expect(input("width")).toHaveAttribute("placeholder", "Mixed");
+  const widthScrub = field("width").locator("button.zd-field-scrub");
+  await expect(widthScrub).toBeEnabled();
+  const widths = async () => [
+    Number.parseFloat(await computed("home-cancel", "width")),
+    Number.parseFloat(await computed("home-drawn", "width")),
+  ];
+  const widthStart = await widths();
+  const widthBox = await widthScrub.boundingBox();
+  await page.mouse.move(widthBox.x + widthBox.width / 2, widthBox.y + widthBox.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(widthBox.x + widthBox.width / 2 + 8, widthBox.y + widthBox.height / 2, { steps: 4 });
+  await expect.poll(async () => (await widths())[0]).toBeGreaterThan(widthStart[0]);
+  const widened = await widths();
+  const widthGeneration = await page.evaluate(() => window.__zerosHarnessCommitStyleGeneration("home-note", { "letter-spacing": "3px" }));
+  await expect.poll(() => runtimeGeneration()).toBe(widthGeneration);
+  await expect.poll(() => inline("home-note", "letter-spacing")).toBe("3px");
+  await expect.poll(widths).toEqual(widened);
+  await page.mouse.up();
+  check("a Mixed size scrub keeps its preview when a new generation lands mid-drag", true);
 }

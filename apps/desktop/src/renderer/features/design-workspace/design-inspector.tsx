@@ -377,6 +377,13 @@ function inspectorFieldDraftWithUnit(text: string, unit: string): string {
   return text;
 }
 
+interface DesignPendingStylePreview {
+  styles: Record<string, string | null>;
+  perNode?: (nodeId: string) => Record<string, string | null>;
+  /** The generation the preview was last shown on; null before it showed. */
+  sourceVersion: string | null;
+}
+
 /** Which node a selection styles. A selected frame styles its root, named by
  *  the root's details whatever their generation: after an edit the frame's
  *  generation advances before its details are read again, and dropping the
@@ -2195,6 +2202,7 @@ export const DesignInspector = React.memo(function DesignInspector({
       key: styleOwnerKey,
       contextRef: { current: styleEditContextRef.current },
       previewIntentRef: { current: 0 },
+      pendingPreviewRef: { current: null as DesignPendingStylePreview | null },
     }),
     [styleOwnerKey],
   );
@@ -2360,7 +2368,15 @@ export const DesignInspector = React.memo(function DesignInspector({
       perNode?: (nodeId: string) => Record<string, string | null>,
     ) => {
       const context = styleOwner.contextRef.current;
-      if (currentStyleOwnerRef.current !== styleOwner || !context.active) return;
+      if (currentStyleOwnerRef.current !== styleOwner) return;
+      // Kept until the gesture commits or restores, so a document that
+      // replaces this one mid-gesture shows the same preview.
+      styleOwner.pendingPreviewRef.current = {
+        styles,
+        perNode,
+        sourceVersion: context.elementDetails?.sourceVersion ?? null,
+      };
+      if (!context.active) return;
       if (
         !context.workspaceId ||
         !context.folder ||
@@ -2427,7 +2443,17 @@ export const DesignInspector = React.memo(function DesignInspector({
     [styleOwner, stylePreviewIntentRef, stylesForNode],
   );
 
+  // A new generation (an undo finishing, another edit) replaces the document
+  // under a gesture's preview; show the same preview on it.
+  const styleGeneration = elementDetails?.sourceVersion ?? null;
+  useEffect(() => {
+    const pending = styleOwner.pendingPreviewRef.current;
+    if (!pending || !styleGeneration || pending.sourceVersion === styleGeneration) return;
+    void previewSelectedStyles(pending.styles, pending.perNode).catch(() => {});
+  }, [previewSelectedStyles, styleGeneration, styleOwner]);
+
   const restoreSelectedStylePreview = useCallback(async () => {
+    styleOwner.pendingPreviewRef.current = null;
     const context = styleOwner.contextRef.current;
     if (!context.workspaceId || !context.folder || !context.frame) return;
     const snapshot = designWorkspaceSnapshotCache.peekSnapshot(context.workspaceId).data;
@@ -2513,6 +2539,7 @@ export const DesignInspector = React.memo(function DesignInspector({
       // An eyedropper or a pending animation frame cannot follow a new layer.
       if (currentStyleOwnerRef.current !== styleOwner || !context.active)
         return Promise.resolve();
+      styleOwner.pendingPreviewRef.current = null;
       // A held state is view only, answered or not: no value reaches the source.
       if (context.workspaceId && context.frame && designHeldStateHolds(context.workspaceId, context.frame.file, context.styleNodeIds))
         return Promise.resolve();

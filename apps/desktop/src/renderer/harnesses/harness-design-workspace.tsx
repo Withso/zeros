@@ -3084,18 +3084,24 @@ async function main() {
 
   (
     window as Window & {
-      __zerosHarnessCommitStyleGeneration?: () => Promise<string>;
+      __zerosHarnessCommitStyleGeneration?: (
+        nodeId?: string,
+        styles?: Record<string, string | null>,
+      ) => Promise<string>;
     }
-  ).__zerosHarnessCommitStyleGeneration = async () => {
+  ).__zerosHarnessCommitStyleGeneration = async (
+    nodeId = "home-heading",
+    styles = { width: "901px" },
+  ) => {
     const frame = designWorkspaceSnapshotCache
       .getSnapshot(workspaceId)
       .data?.frames.find((candidate) => candidate.file === "home.html");
     if (!frame) throw new Error("The style harness frame is unavailable.");
     await updateDesignNodeStylesCached(workspaceId, {
       frame: "home.html",
-      nodeId: "home-heading",
+      nodeId,
       sourceVersion: frame.sourceVersion,
-      styles: { width: "901px" },
+      styles,
     });
     const committedFrame = designWorkspaceSnapshotCache
       .getSnapshot(workspaceId)
