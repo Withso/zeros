@@ -57,6 +57,14 @@ const READY_ATTEMPTS = 36, READY_WAIT_MS = 5_000;
 const MAX_LOG_BYTES = 64 * 1024;
 
 export type ReadyCopyState = "building" | "ready" | "failed" | "retired";
+/** Why a generation ran, stored when it was queued. */
+export type ReadyCopyTrigger = "repository_added" | "weekly_update" | "computer_build" | "setup_changed" | "branch_changed" | "secrets_changed" | "retry" | "manual";
+/** Generations whose detail (setup output, location) is kept per repository; older rows keep only their result. */
+export const READY_COPY_HISTORY_LIMIT = 20;
+/** The last part of a failed setup's output that is kept, redacted. */
+export const READY_COPY_OUTPUT_BYTES = 16 * 1024;
+/** Build now: at most one manual start per repository in this long. */
+export const READY_COPY_MANUAL_INTERVAL_MS = 10 * 60_000;
 export type CloudV2ReadyCopy = {
   id: string; organizationId: string; repository: string; repositoryId: string; generation: number; state: ReadyCopyState;
   /** A private repository's member; null for a shared repository. */
@@ -64,7 +72,8 @@ export type CloudV2ReadyCopy = {
   idempotencyKey: string; machineId: string | null; machinePending: boolean; builtFromBase: string | null;
   computerBuildId: string | null; createdBy: string | null; branch: string | null; commit: string | null;
   failureReason: string | null; failureDetail: string | null; stale: boolean; refresh: boolean; machineDeletedAt: Date | null;
-  inputs: string | null; manualRetry: boolean;
+  inputs: string | null; manualRetry: boolean; trigger: ReadyCopyTrigger | null; triggeredBy: string | null;
+  setupOutput: string | null; detailPrunedAt: Date | null;
   stoppedAt: Date | null; lastForkedAt: Date | null; createdAt: Date; startedAt: Date | null; finishedAt: Date | null;
 };
 type Row = {
@@ -72,7 +81,8 @@ type Row = {
   owner_user_id: string | null; idempotency_key: string; machine_id: string | null; machine_pending: boolean; built_from_base: string | null;
   computer_build_id: string | null; created_by: string | null; branch: string | null; commit_sha: string | null;
   failure_reason: string | null; failure_detail: string | null; stale: boolean; refresh: boolean; machine_deleted_at: Date | null;
-  inputs: string | null; manual_retry: boolean;
+  inputs: string | null; manual_retry: boolean; trigger: ReadyCopyTrigger | null; triggered_by: string | null;
+  setup_output: string | null; detail_pruned_at: Date | null;
   stopped_at: Date | null; last_forked_at: Date | null; created_at: Date; started_at: Date | null; finished_at: Date | null;
 };
 const copy = (row: Row): CloudV2ReadyCopy => ({
@@ -80,7 +90,8 @@ const copy = (row: Row): CloudV2ReadyCopy => ({
   state: row.state, ownerUserId: row.owner_user_id, idempotencyKey: row.idempotency_key, machineId: row.machine_id, machinePending: row.machine_pending,
   builtFromBase: row.built_from_base, computerBuildId: row.computer_build_id, createdBy: row.created_by, branch: row.branch,
   commit: row.commit_sha, failureReason: row.failure_reason, failureDetail: row.failure_detail, stale: row.stale, refresh: row.refresh,
-  machineDeletedAt: row.machine_deleted_at, inputs: row.inputs, manualRetry: row.manual_retry, stoppedAt: row.stopped_at,
+  machineDeletedAt: row.machine_deleted_at, inputs: row.inputs, manualRetry: row.manual_retry, trigger: row.trigger,
+  triggeredBy: row.triggered_by, setupOutput: row.setup_output, detailPrunedAt: row.detail_pruned_at, stoppedAt: row.stopped_at,
   lastForkedAt: row.last_forked_at, createdAt: row.created_at, startedAt: row.started_at, finishedAt: row.finished_at,
 });
 
@@ -107,31 +118,43 @@ export class CloudV2ReadyCopies {
 
   async base(organizationId: string): Promise<ReadyCopyBase | null> {
     const row = (await this.tx(tx => tx.query<{ id: string; snapshot_name: string; created_by: string | null; base_shared: boolean;
-      recipe: { repositories?: ReadyCopyBase["repositories"] }; source_targets: unknown }>(
-      `SELECT b.id, c.snapshot_name, b.created_by, b.base_shared, b.recipe, b.source_targets FROM cloud_v2_computers c
+      recipe: { repositories?: ReadyCopyBase["repositories"] }; source_targets: unknown;
+      configured: { repositories?: ReadyCopyBase["repositories"] } | null; configured_targets: unknown }>(
+      `SELECT b.id, c.snapshot_name, b.created_by, b.base_shared, b.recipe, b.source_targets,
+         c.recipe AS configured, c.recipe_source_targets AS configured_targets FROM cloud_v2_computers c
        JOIN cloud_v2_computer_builds b ON b.id=c.active_build_id AND b.org_id=c.org_id AND b.state='succeeded' AND b.base_only
        JOIN organizations o ON o.id=c.org_id AND o.deleted_at IS NULL AND o.lifecycle_status='active' AND o.cloud_workspaces_allowed
        WHERE c.org_id=$1 AND c.snapshot_name IS NOT NULL`, [organizationId]))).rows[0];
     if (!row?.created_by) return null;
-    const sources = Array.isArray(row.source_targets) ? row.source_targets as CloudSourceTarget[] : [];
-    return { buildId: row.id, snapshot: row.snapshot_name, createdBy: row.created_by, shared: row.base_shared,
-      repositories: row.recipe.repositories ?? [], sources };
+    // A repository's setup and branch are read as configured: saving them rebuilds that
+    // repository's copy without a Cloud Computer build. Verified branches come from the build.
+    const configured = Array.isArray(row.configured?.repositories) && Array.isArray(row.configured_targets)
+      && row.configured!.repositories!.length === (row.configured_targets as unknown[]).length;
+    const built = row.recipe.repositories ?? [];
+    const repositories = configured ? row.configured!.repositories!.map(entry => {
+      const live = built.find(candidate => candidate.repository.toLowerCase() === entry.repository.toLowerCase());
+      return { ...entry, ...(live?.branch && (live.ref ?? null) === (entry.ref ?? null) ? { branch: live.branch } : {}) };
+    }) : built;
+    const sources = (configured ? row.configured_targets : Array.isArray(row.source_targets) ? row.source_targets : []) as CloudSourceTarget[];
+    return { buildId: row.id, snapshot: row.snapshot_name, createdBy: row.created_by, shared: row.base_shared, repositories, sources };
   }
 
   /** Queues a generation, or joins the one already building for this repository. */
   async request(input: { organizationId: string; repository: string; repositoryId: string; createdBy: string; computerBuildId: string;
-    builtFromBase: string; refresh?: boolean; now?: Date; ownerUserId?: string | null; inputs?: string | null; manualRetry?: boolean }): Promise<CloudV2ReadyCopy> {
+    builtFromBase: string; refresh?: boolean; now?: Date; ownerUserId?: string | null; inputs?: string | null; manualRetry?: boolean;
+    trigger?: ReadyCopyTrigger; triggeredBy?: string | null }): Promise<CloudV2ReadyCopy> {
     const repository = input.repository.toLowerCase(), id = randomUUID(), owner = input.ownerUserId ?? null;
     return this.tx(async tx => {
       await tx.query(
         `INSERT INTO cloud_v2_ready_copies (id, org_id, repository, repository_id, generation, state, idempotency_key, built_from_base,
-           computer_build_id, created_by, refresh, created_at, updated_at, owner_user_id, inputs, manual_retry)
+           computer_build_id, created_by, refresh, created_at, updated_at, owner_user_id, inputs, manual_retry, trigger, triggered_by)
          VALUES ($1,$2,$3,$4,coalesce((SELECT max(generation) FROM cloud_v2_ready_copies
              WHERE org_id=$2 AND repository=$3 AND owner_user_id IS NOT DISTINCT FROM $11::uuid),0)+1,
-           'building',$5,$6,$7,$8,$9,coalesce($10,clock_timestamp()),coalesce($10,clock_timestamp()),$11,$12,$13)
+           'building',$5,$6,$7,$8,$9,coalesce($10,clock_timestamp()),coalesce($10,clock_timestamp()),$11,$12,$13,$14,$15)
          ON CONFLICT (org_id, repository, owner_user_id) WHERE state='building' DO NOTHING`,
         [id, input.organizationId, repository, input.repositoryId, `ready-copy:${id}`, input.builtFromBase, input.computerBuildId,
-          input.createdBy, input.refresh === true, input.now ?? null, owner, input.inputs ?? null, input.manualRetry === true]);
+          input.createdBy, input.refresh === true, input.now ?? null, owner, input.inputs ?? null, input.manualRetry === true,
+          input.trigger ?? null, input.triggeredBy ?? null]);
       return copy((await tx.query<Row>(`SELECT * FROM cloud_v2_ready_copies WHERE org_id=$1 AND repository=$2 AND state='building'
         AND owner_user_id IS NOT DISTINCT FROM $3::uuid`, [input.organizationId, repository, owner])).rows[0]!);
     });
@@ -251,11 +274,14 @@ export class CloudV2ReadyCopies {
   }
 
   /** The previous ready generation stays the one workspaces fork. */
-  async fail(id: string, reason: string, now = new Date(), detail: string | null = null): Promise<void> {
+  async fail(id: string, reason: string, now = new Date(), detail: string | null = null, output: string | null = null): Promise<void> {
     const code = /^[a-z0-9_]{1,64}$/.test(reason) ? reason : "ready_copy_failed";
-    await this.tx(tx => tx.query(
-      `UPDATE cloud_v2_ready_copies SET state='failed', failure_reason=$2, failure_detail=$4, finished_at=$3, updated_at=$3 WHERE id=$1 AND state='building'`,
-      [id, code, now, detail?.slice(0, 1100) || null]));
+    await this.tx(async tx => {
+      await tx.query(
+        `UPDATE cloud_v2_ready_copies SET state='failed', failure_reason=$2, failure_detail=$4, setup_output=$5, finished_at=$3, updated_at=$3
+         WHERE id=$1 AND state='building'`, [id, code, now, detail?.slice(0, 1100) || null, output ? tailBytes(output, READY_COPY_OUTPUT_BYTES) : null]);
+      await this.pruneDetail(tx, id);
+    });
   }
 
   /** The atomic pointer switch: the previous ready generation retires in the
@@ -276,6 +302,7 @@ export class CloudV2ReadyCopies {
         [row.org_id, row.repository, id, row.owner_user_id]);
       await tx.query(`UPDATE cloud_v2_ready_copies SET state='ready', stale=false, branch=$2, commit_sha=$3, stopped_at=$4,
         finished_at=clock_timestamp(), updated_at=clock_timestamp() WHERE id=$1`, [id, result.branch, result.commit, result.stoppedAt]);
+      await this.pruneDetail(tx, id);
       // A base build pins no branch for a repository it never had: the first
       // copy's verified branch becomes its default, which released desktops read.
       if (result.branch && row.computer_build_id) {
@@ -326,6 +353,31 @@ export class CloudV2ReadyCopies {
   async pruneSecrets(organizationId: string, repositories: readonly string[]): Promise<void> {
     await this.tx(tx => tx.query("DELETE FROM cloud_v2_ready_copy_secrets WHERE org_id=$1 AND NOT (repository = ANY($2::text[]))",
       [organizationId, repositories.map(repository => repository.toLowerCase())]));
+  }
+
+  /** Past READY_COPY_HISTORY_LIMIT generations a row keeps its result, not its detail. */
+  private async pruneDetail(tx: Tx, id: string): Promise<void> {
+    await tx.query(`UPDATE cloud_v2_ready_copies SET setup_output=NULL, failure_detail=NULL, detail_pruned_at=clock_timestamp()
+      WHERE id IN (SELECT o.id FROM cloud_v2_ready_copies o JOIN cloud_v2_ready_copies c ON c.id=$1
+        WHERE o.org_id=c.org_id AND o.repository=c.repository AND o.owner_user_id IS NOT DISTINCT FROM c.owner_user_id
+          AND o.detail_pruned_at IS NULL ORDER BY o.generation DESC OFFSET $2)`, [id, READY_COPY_HISTORY_LIMIT]);
+  }
+
+  /** A repository's generations, newest first, within the history bound. */
+  async history(organizationId: string, repository: string, ownerUserId: string | null): Promise<CloudV2ReadyCopy[]> {
+    const { rows } = await this.tx(tx => tx.query<Row>(
+      `SELECT * FROM cloud_v2_ready_copies WHERE org_id=$1 AND repository=$2 AND owner_user_id IS NOT DISTINCT FROM $3::uuid
+       ORDER BY generation DESC LIMIT $4`, [organizationId, repository.toLowerCase(), ownerUserId, READY_COPY_HISTORY_LIMIT]));
+    return rows.map(copy);
+  }
+
+  /** Whether Build now may start one: at most one manual start per repository per READY_COPY_MANUAL_INTERVAL_MS. */
+  async manualAllowed(organizationId: string, repository: string, ownerUserId: string | null, now: Date): Promise<boolean> {
+    const { rows } = await this.tx(tx => tx.query<{ recent: boolean }>(
+      `SELECT EXISTS (SELECT 1 FROM cloud_v2_ready_copies WHERE org_id=$1 AND repository=$2 AND owner_user_id IS NOT DISTINCT FROM $3::uuid
+         AND trigger='manual' AND created_at > $4::timestamptz - make_interval(secs => $5::double precision / 1000)) AS recent`,
+      [organizationId, repository.toLowerCase(), ownerUserId, now, READY_COPY_MANUAL_INTERVAL_MS]));
+    return !rows[0]?.recent;
   }
 
   /** A new Cloud Computer base: every ready copy is rebuilt from it. */
@@ -503,6 +555,21 @@ function code(error: unknown, fallback: string): string {
 }
 const failure = (reason: string) => Object.assign(new Error(reason), { code: reason });
 
+function tailBytes(text: string, limit: number): string {
+  const bytes = Buffer.from(text, "utf8");
+  return bytes.length <= limit ? text : bytes.subarray(bytes.length - limit).toString("utf8").replace(/^\uFFFD+/, "");
+}
+/** Every build secret out of a setup's output before it is kept: the exact
+ * value, and its base64, base64url and URL-encoded forms. */
+export function redactSecrets(output: string, values: readonly string[]): string {
+  const forms = values.filter(value => value.length > 0).flatMap(value => [value, Buffer.from(value, "utf8").toString("base64"),
+    Buffer.from(value, "utf8").toString("base64url"), encodeURIComponent(value), Buffer.from(value, "utf8").toString("base64").replace(/=+$/, "")])
+    .filter((form, index, all) => form.length >= 3 && all.indexOf(form) === index).sort((a, b) => b.length - a.length);
+  let redacted = output;
+  for (const form of forms) redacted = redacted.split(form).join("[redacted]");
+  return redacted;
+}
+
 /** Setup reads `NAME=<base64>` lines from standard input, then runs with no
  * input at all. Values never reach argv, the environment of anything but
  * this one command, or a file the command did not write itself. */
@@ -635,16 +702,16 @@ export class CloudV2ReadyCopyBuilder {
   }
 
   /** A private repository's first copy, cloned as its member. */
-  async queuePrivateCopy(organizationId: string, ownerUserId: string, repository: string): Promise<void> {
+  async queuePrivateCopy(organizationId: string, ownerUserId: string, repository: string, trigger: ReadyCopyTrigger = "repository_added"): Promise<void> {
     const { copies } = this.deps;
     const base = await copies.base(organizationId), entry = await copies.privateEntry(organizationId, ownerUserId, repository);
     const inputs = await copies.inputs(organizationId, repository, ownerUserId);
     if (!base || !entry || !await copies.mayQueueFirst(organizationId, repository, this.now(), ownerUserId, inputs)) return;
     await copies.request({ organizationId, repository, repositoryId: entry.repositoryId, createdBy: ownerUserId, ownerUserId,
-      computerBuildId: base.buildId, builtFromBase: `snapshot:${base.snapshot}`, inputs });
+      computerBuildId: base.buildId, builtFromBase: `snapshot:${base.snapshot}`, inputs, trigger });
   }
 
-  async queueFirstCopies(organizationId: string, only?: string): Promise<void> {
+  async queueFirstCopies(organizationId: string, only?: string, trigger: ReadyCopyTrigger = "repository_added"): Promise<void> {
     const { copies } = this.deps;
     const base = await copies.base(organizationId);
     if (!base) return;
@@ -654,8 +721,49 @@ export class CloudV2ReadyCopyBuilder {
       const inputs = await copies.inputs(organizationId, entry.repository, null);
       if (!target || !await copies.mayQueueFirst(organizationId, entry.repository, this.now(), null, inputs)) continue;
       await copies.request({ organizationId, repository: entry.repository, repositoryId: target.repositoryId, createdBy: base.createdBy,
-        computerBuildId: base.buildId, builtFromBase: `snapshot:${base.snapshot}`, inputs });
+        computerBuildId: base.buildId, builtFromBase: `snapshot:${base.snapshot}`, inputs, trigger });
     }
+  }
+
+  /** A repository's setup, branch or build secrets were saved: rebuild that
+   * repository's copy alone, once its inputs differ from the copy's. */
+  async reconcile(organizationId: string, repository: string, trigger: "setup_changed" | "branch_changed" | "secrets_changed" | "repository_added"): Promise<void> {
+    const { copies } = this.deps, base = await copies.base(organizationId), name = repository.toLowerCase();
+    const entry = base?.repositories.find(candidate => candidate.repository.toLowerCase() === name);
+    const target = base?.sources.find(source => source.repository.toLowerCase() === name);
+    if (!base || !entry || !target) return;
+    const inputs = await copies.inputs(organizationId, name, null);
+    const latest = (await copies.history(organizationId, name, null)).find(row => row.state !== "retired");
+    if (latest && latest.inputs === inputs && latest.state !== "failed") return;
+    const ready = await copies.forkable(organizationId, name, this.now());
+    await copies.request({ organizationId, repository: entry.repository, repositoryId: target.repositoryId, createdBy: base.createdBy,
+      computerBuildId: base.buildId, builtFromBase: ready ? `copy:${ready.id}` : `snapshot:${base.snapshot}`, refresh: !!ready, inputs,
+      trigger: latest || trigger !== "repository_added" ? trigger : "repository_added" });
+  }
+
+  /** Build now (admins for a shared repository, its member for a private one;
+   * the route checks which): coalesces with a running build, at most one manual start per repository each READY_COPY_MANUAL_INTERVAL_MS. */
+  async buildNow(organizationId: string, repository: string, ownerUserId: string | null, userId: string): Promise<CloudV2ReadyCopy | null> {
+    const { copies } = this.deps, now = this.now(), name = repository.toLowerCase();
+    const building = await copies.building(organizationId, name, ownerUserId);
+    if (building) return building;
+    if (!await copies.manualAllowed(organizationId, name, ownerUserId, now))
+      throw new HttpError(429, "ready_copy_build_limited", "This repository's copy was started a few minutes ago. Try again later.");
+    const base = await copies.base(organizationId);
+    if (!base) return null;
+    const ready = await copies.forkable(organizationId, name, now, ownerUserId);
+    const inputs = await copies.inputs(organizationId, name, ownerUserId);
+    if (ownerUserId) {
+      const entry = await copies.privateEntry(organizationId, ownerUserId, name);
+      if (!entry) return null;
+      return copies.request({ organizationId, repository: name, repositoryId: entry.repositoryId, createdBy: ownerUserId, ownerUserId,
+        computerBuildId: base.buildId, builtFromBase: ready ? `copy:${ready.id}` : `snapshot:${base.snapshot}`, refresh: true, inputs,
+        manualRetry: true, trigger: "manual", triggeredBy: userId });
+    }
+    const target = base.sources.find(source => source.repository.toLowerCase() === name);
+    if (!target) return null;
+    return copies.request({ organizationId, repository: name, repositoryId: target.repositoryId, createdBy: base.createdBy, computerBuildId: base.buildId,
+      builtFromBase: ready ? `copy:${ready.id}` : `snapshot:${base.snapshot}`, refresh: true, inputs, manualRetry: true, trigger: "manual", triggeredBy: userId });
   }
 
   async tick(): Promise<void> {
@@ -679,12 +787,14 @@ export class CloudV2ReadyCopyBuilder {
       // A refresh that keeps failing backs off and stops like a first copy; the
       // older generation keeps serving until it expires, and nobody but admins hears of it.
       const inputs = await copies.inputs(ready.organizationId, ready.repository, ready.ownerUserId);
-      if (!(await copies.retryState(ready.organizationId, ready.repository, ready.ownerUserId, inputs, now)).allowed) continue;
+      const retry = await copies.retryState(ready.organizationId, ready.repository, ready.ownerUserId, inputs, now);
+      if (!retry.allowed) continue;
+      const trigger: ReadyCopyTrigger = retry.failures ? "retry" : base && ready.computerBuildId !== base.buildId ? "computer_build" : "weekly_update";
       if (ready.ownerUserId) {
         // A private copy: its entry still stands (refreshCandidates checks); rebuilt as its member.
         if (!base) continue;
         await copies.request({ organizationId: ready.organizationId, repository: ready.repository, repositoryId: ready.repositoryId,
-          createdBy: ready.ownerUserId, ownerUserId: ready.ownerUserId, computerBuildId: base.buildId, refresh: true, inputs,
+          createdBy: ready.ownerUserId, ownerUserId: ready.ownerUserId, computerBuildId: base.buildId, refresh: true, inputs, trigger,
           builtFromBase: ready.stale || !ready.machineId || ready.computerBuildId !== base.buildId ? `snapshot:${base.snapshot}` : `copy:${ready.id}` });
         continue;
       }
@@ -694,26 +804,27 @@ export class CloudV2ReadyCopyBuilder {
       if (!target || !base.repositories.some(entry => entry.repository.toLowerCase() === ready.repository)) { await copies.retire(ready.id); continue; }
       // A copy on the current base is refreshed by forking it; a stale one is rebuilt from the base.
       await copies.request({ organizationId: ready.organizationId, repository: ready.repository, repositoryId: target.repositoryId,
-        createdBy: base.createdBy, computerBuildId: base.buildId, refresh: true, inputs,
+        createdBy: base.createdBy, computerBuildId: base.buildId, refresh: true, inputs, trigger,
         builtFromBase: ready.stale || !ready.machineId || ready.computerBuildId !== base.buildId ? `snapshot:${base.snapshot}` : `copy:${ready.id}` });
     }
     // First copies that failed: retried on the backoff, then left until something changes.
     for (const failed of await copies.unrecovered()) {
       if (this.closed) return;
-      if (failed.ownerUserId) await this.queuePrivateCopy(failed.organizationId, failed.ownerUserId, failed.repository);
-      else await this.queueFirstCopies(failed.organizationId, failed.repository);
+      if (failed.ownerUserId) await this.queuePrivateCopy(failed.organizationId, failed.ownerUserId, failed.repository, "retry");
+      else await this.queueFirstCopies(failed.organizationId, failed.repository, "retry");
     }
   }
 
   /** An admin's Retry now: a new generation whatever the backoff, which also starts it over. */
-  async retryNow(organizationId: string, repository: string): Promise<CloudV2ReadyCopy | null> {
+  async retryNow(organizationId: string, repository: string, userId: string | null = null): Promise<CloudV2ReadyCopy | null> {
     const { copies } = this.deps, base = await copies.base(organizationId);
     const entry = base?.repositories.find(candidate => candidate.repository.toLowerCase() === repository.toLowerCase());
     const target = base?.sources.find(source => source.repository.toLowerCase() === repository.toLowerCase());
     if (!base || !entry || !target) return null;
     const ready = await copies.forkable(organizationId, repository, this.now());
     return copies.request({ organizationId, repository, repositoryId: target.repositoryId, createdBy: base.createdBy, computerBuildId: base.buildId,
-      builtFromBase: `snapshot:${base.snapshot}`, refresh: !!ready, manualRetry: true, inputs: await copies.inputs(organizationId, repository, null) });
+      builtFromBase: `snapshot:${base.snapshot}`, refresh: !!ready, manualRetry: true, inputs: await copies.inputs(organizationId, repository, null),
+      trigger: "manual", triggeredBy: userId });
   }
 
   async cleanup(): Promise<void> {
@@ -752,9 +863,9 @@ export class CloudV2ReadyCopyBuilder {
     try { await this.build(job); }
     catch (error) {
       const reason = code(error, "ready_copy_failed");
-      const detail = (error as { detail?: unknown } | null)?.detail;
+      const detail = (error as { detail?: unknown } | null)?.detail, output = (error as { output?: unknown } | null)?.output;
       this.deps.logger?.warn(`[cloud-v2] ready copy ${job.repository} generation ${job.generation} failed (${reason})`);
-      await copies.fail(job.id, reason, this.now(), typeof detail === "string" ? detail : null);
+      await copies.fail(job.id, reason, this.now(), typeof detail === "string" ? detail : null, typeof output === "string" ? output : null);
     } finally { clearInterval(beat); }
   }
 
@@ -797,8 +908,9 @@ export class CloudV2ReadyCopyBuilder {
       const names = Object.keys(secrets);
       const input = names.length ? names.map(name => `${name}=${Buffer.from(secrets[name]!, "utf8").toString("base64")}`).join("\n") + "\n" : undefined;
       const setup = await compute.execLong(machineId, readyCopySetupCommand(dir, entry.setup, input !== undefined), 3600, input);
-      // Setup output is not stored; a failure records its exit status only.
-      if (setup.exitCode !== 0 || setup.timedOut) throw failure("ready_copy_setup_failed");
+      // Only a failed setup keeps its output: the last part, every build secret redacted.
+      if (setup.exitCode !== 0 || setup.timedOut)
+        throw Object.assign(failure("ready_copy_setup_failed"), { output: redactSecrets(setup.stdout, Object.values(secrets)) });
       const tidy = await compute.exec(machineId, asZeros([`cd ${shellQuote(dir)}`,
         "if [ \"$(git status --porcelain --untracked-files=no | wc -l)\" -gt 0 ]; then git reset -q --hard HEAD; fi"]), 120);
       if (tidy.exitCode !== 0 || tidy.timedOut) throw failure("ready_copy_setup_failed");

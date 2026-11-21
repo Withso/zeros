@@ -205,6 +205,10 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     },
     onShared: (organizationId: string, userId: string, repository: string) => computers.addConfigured(organizationId, userId, repository),
     onPrivate: async (organizationId: string, userId: string, repository: string) => { await readyCopyBuilder?.queuePrivateCopy(organizationId, userId, repository); },
+    ...(readyCopies ? { readyCopies: { copies: readyCopies, buildNow: async (organizationId: string, repository: string, owner: string | null, userId: string) => {
+      if (!readyCopyBuilder) throw new HttpError(503, "ready_copies_unavailable", "Ready copies are not built on this server.");
+      return readyCopyBuilder.buildNow(organizationId, repository, owner, userId);
+    } } } : {}),
   } : null;
   const source = github.source;
   const authorizeRepository = async (org: string, user: string, repository: string) => {
@@ -370,7 +374,10 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
       } } : {}),
     ...(readyCopies && readyCopySecrets ? { readyCopies: { status: (organizationId: string, viewer?: string | null) => readyCopies.status(organizationId, viewer ?? null),
       failures: (organizationId: string) => readyCopies.failureSummaries(organizationId, new Date()),
-      retryNow: async (organizationId: string, repository: string) => { await readyCopyBuilder?.retryNow(organizationId, repository); },
+      retryNow: async (organizationId: string, repository: string, userId: string) => { await readyCopyBuilder?.retryNow(organizationId, repository, userId); },
+      reconcile: async (organizationId: string, repository: string, trigger: "setup_changed" | "branch_changed" | "secrets_changed" | "repository_added") => {
+        await readyCopyBuilder?.reconcile(organizationId, repository, trigger);
+      },
       secrets: readyCopySecrets } } : {}),
     authorizeRepository, authorizeRepositories, authorizeSourceTargets, authorizeBuildRepository, authorizeSource, continueSource,
     remoteHead: (org, user, target, branch) => github.remoteHead(org, user, target.repository, branch, target.repositoryId),
@@ -630,7 +637,8 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   const copyCloneToken = async (organizationId: string, userId: string, target: CloudSourceTarget) =>
     (await github.token({ organizationId, userId }, target, "read", "computer",
       () => authorizeSourceTargets(organizationId, userId, [target]))).token;
-  const readyCopyBuilder = roles.lifecycle && readyCopies ? new CloudV2ReadyCopyBuilder({
+  // Every role queues generations through it (Build now, Retry now, saves); only the lifecycle role runs its loop.
+  const readyCopyBuilder = readyCopies ? new CloudV2ReadyCopyBuilder({
     copies: readyCopies, compute, channel: config.deploymentChannel, localOwner, runtime, publicKeys: signer.publicKeys,
     cloneToken: copyCloneToken,
     ...(repositoryLevels ? { sharedCloneToken: organizationCloneToken({ levels: repositoryLevels, config: config.github ?? null }) } : {}),

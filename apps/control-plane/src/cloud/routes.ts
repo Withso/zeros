@@ -89,7 +89,9 @@ export type CloudV2RouteDeps = {
     failures(organizationId: string): Promise<{ repository: string; generation: number; reason: string; detail: string | null; finishedAt: string;
       failures?: number; nextRetryAt?: string | null }[]>;
     /** An admin's Retry now for one shared repository's ready copy. */
-    retryNow?(organizationId: string, repository: string): Promise<unknown>;
+    retryNow?(organizationId: string, repository: string, userId: string): Promise<unknown>;
+    /** A saved setup, branch or build secrets rebuild that repository's copy alone. */
+    reconcile?(organizationId: string, repository: string, trigger: "setup_changed" | "branch_changed" | "secrets_changed" | "repository_added"): Promise<void>;
     secrets: Pick<CloudV2ReadyCopySecrets, "names" | "save" | "clear" | "update">;
   };
   /** Repositories the organization's active Cloud Computer has installed; null without one. */
@@ -442,14 +444,17 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
     const parsed = z.object({ secrets: ReadyCopySecretsSchema }).strict().safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) throw new HttpError(400, "invalid_request", "Invalid build secrets");
     c.header("Cache-Control", "no-store");
-    return c.json({ names: await deps.readyCopies.secrets.save(organizationId, secretRepository(c.req.param("owner"), c.req.param("name")), userId, parsed.data.secrets) });
+    const repository = secretRepository(c.req.param("owner"), c.req.param("name"));
+    const names = await deps.readyCopies.secrets.save(organizationId, repository, userId, parsed.data.secrets);
+    await deps.readyCopies.reconcile?.(organizationId, repository, "secrets_changed").catch(() => undefined);
+    return c.json({ names });
   });
 
   app.post("/v1/cloud-v2/organizations/:org/computer/repositories/:owner/:name/ready-copy/retry", async c => {
     const organizationId = org(c.req.param("org"));
     if (!deps.readyCopies?.retryNow) throw new HttpError(404, "not_found", "Not found");
     await deps.computers.requireAdmin(organizationId, c.get("user").id);
-    await deps.readyCopies.retryNow(organizationId, secretRepository(c.req.param("owner"), c.req.param("name")));
+    await deps.readyCopies.retryNow(organizationId, secretRepository(c.req.param("owner"), c.req.param("name")), c.get("user").id);
     return c.json({ ok: true }, 202);
   });
 
@@ -461,7 +466,10 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
       .safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) throw new HttpError(400, "invalid_request", "Invalid build secrets");
     c.header("Cache-Control", "no-store");
-    return c.json({ names: await deps.readyCopies.secrets.update(organizationId, secretRepository(c.req.param("owner"), c.req.param("name")), userId, parsed.data) });
+    const repository = secretRepository(c.req.param("owner"), c.req.param("name"));
+    const names = await deps.readyCopies.secrets.update(organizationId, repository, userId, parsed.data);
+    await deps.readyCopies.reconcile?.(organizationId, repository, "secrets_changed").catch(() => undefined);
+    return c.json({ names });
   });
 
   app.post("/v1/cloud-v2/organizations/:org/computer/builds", json, async c => {
@@ -482,8 +490,16 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
     await deps.computers.requireAdmin(organizationId, c.get("user").id);
     const parsed = RecipeSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) throw new HttpError(400, "invalid_request", "Invalid Cloud Computer repositories");
+    const before = deps.readyCopies?.reconcile ? (await deps.computers.overview(organizationId)).recipe.repositories : [];
     const saved = await deps.computers.saveRecipe(organizationId, c.get("user").id, parsed.data.repositories, parsed.data.revision);
     await deps.syncSharedRepositories?.(organizationId, c.get("user").id);
+    // Ready copies: each repository whose setup or branch changed rebuilds its own copy, no Cloud Computer build needed.
+    for (const entry of deps.readyCopies?.reconcile ? saved.recipe.repositories : []) {
+      const old = before.find(candidate => candidate.repository.toLowerCase() === entry.repository.toLowerCase());
+      const trigger = !old ? "repository_added" as const : (old.setup ?? "") !== (entry.setup ?? "") ? "setup_changed" as const
+        : (old.ref ?? "") !== (entry.ref ?? "") ? "branch_changed" as const : null;
+      if (trigger) await deps.readyCopies?.reconcile?.(organizationId, entry.repository, trigger).catch(() => undefined);
+    }
     return c.json(saved);
   });
 

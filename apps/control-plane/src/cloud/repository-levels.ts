@@ -144,6 +144,20 @@ export class CloudRepositoryLevels {
     });
   }
 
+  /** The caller's role; not found once they have left. */
+  async memberRole(organizationId: string, userId: string): Promise<string> {
+    return this.tx(async tx => (await this.role(tx, organizationId, userId)).role);
+  }
+
+  /** Display names for history rows, of the organization's members only. */
+  async people(organizationId: string, userIds: readonly string[]): Promise<Map<string, string>> {
+    if (!userIds.length) return new Map();
+    const { rows } = await this.tx(tx => tx.query<{ id: string; name: string }>(
+      `SELECT u.id, coalesce(nullif(u.display_name,''), u.email) AS name FROM users u JOIN organization_members m ON m.user_id=u.id AND m.org_id=$1
+       WHERE u.id = ANY($2::uuid[])`, [organizationId, [...new Set(userIds)]]));
+    return new Map(rows.map(row => [row.id, row.name]));
+  }
+
   /** Whether the organization has one member: its two GitHub levels show as one page. */
   async solo(organizationId: string): Promise<boolean> {
     const { rows } = await this.tx(tx => tx.query<{ n: string }>("SELECT count(*) AS n FROM organization_members WHERE org_id=$1", [organizationId]));

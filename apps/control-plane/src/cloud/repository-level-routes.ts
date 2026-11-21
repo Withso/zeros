@@ -7,6 +7,8 @@ import { z } from "zod";
 import { HttpError } from "../authz.js";
 import { rateLimit } from "../ratelimit.js";
 import type { CloudRepositoryLevels } from "./repository-levels.js";
+import type { CloudV2ReadyCopies } from "./ready-copies.js";
+import { readyCopyHistory, readyCopyStatus } from "./ready-copy-status.js";
 
 export type RepositoryLevelRouteDeps = {
   levels: CloudRepositoryLevels;
@@ -23,6 +25,11 @@ export type RepositoryLevelRouteDeps = {
   onShared?(organizationId: string, userId: string, repository: string): Promise<void>;
   /** A private repository's first copy. */
   onPrivate?(organizationId: string, userId: string, repository: string): Promise<void>;
+  /** A repository's ready copy on its project page. */
+  readyCopies?: {
+    copies: Pick<CloudV2ReadyCopies, "history" | "retryState" | "inputs" | "base">;
+    buildNow(organizationId: string, repository: string, ownerUserId: string | null, userId: string): Promise<unknown>;
+  };
 };
 
 const uuid = z.string().uuid();
@@ -87,6 +94,55 @@ export function createRepositoryLevelRoutes(deps: RepositoryLevelRouteDeps): Hon
     const level = (repositoryId: string) => added.shared.some(row => row.repositoryId === repositoryId) ? "shared"
       : added.private.some(row => row.repositoryId === repositoryId) ? "private" : null;
     return c.json({ connection, repositories: listed.repositories.map(row => ({ ...row, added: level(row.id) })), nextPage: listed.nextPage });
+  });
+
+  /** Which copy a reader may see: a shared repository's (on the Cloud Computer or registered),
+   * or the reader's own private one; null when neither. Removed members get not found. */
+  const copyScope = async (org: string, user: string, repository: string) => {
+    const role = await deps.levels.memberRole(org, user), level = await deps.levels.levelFor(org, user, repository);
+    const name = repository.toLowerCase();
+    if (level?.level === "private") return { owner: user, full: true, canBuild: true, name };
+    const shared = level?.level === "shared" || !!(await deps.readyCopies?.copies.base(org))?.repositories.some(entry => entry.repository.toLowerCase() === name);
+    if (!shared) throw new HttpError(404, "not_found", "Repository not found");
+    const admin = role === "owner" || role === "admin";
+    return { owner: null, full: admin, canBuild: admin, name };
+  };
+  const repositoryQuery = z.string().max(201).regex(/^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/);
+
+  app.get("/v1/cloud-v2/organizations/:org/cloud-repositories/ready-copy", rateLimit("cloud-ready-copy-read", 120, 60_000), async c => {
+    c.header("Cache-Control", "no-store");
+    const org = organization(c.req.param("org")), user = c.get("user").id, copies = deps.readyCopies?.copies;
+    const repository = repositoryQuery.safeParse(c.req.query("repository"));
+    if (!copies || !repository.success) throw new HttpError(404, "not_found", "Not found");
+    const scope = await copyScope(org, user, repository.data), now = new Date();
+    const history = await copies.history(org, scope.name, scope.owner);
+    const retry = await copies.retryState(org, scope.name, scope.owner, await copies.inputs(org, scope.name, scope.owner), now);
+    const status = readyCopyStatus(history, retry, now, scope.full);
+    if (!scope.full) return c.json({ status });
+    const people = await deps.levels.people(org, history.flatMap(row => row.triggeredBy ? [row.triggeredBy] : []));
+    return c.json({ status, history: readyCopyHistory(history, people), canBuild: scope.canBuild });
+  });
+
+  app.get("/v1/cloud-v2/organizations/:org/cloud-repositories/ready-copy/output", rateLimit("cloud-ready-copy-read", 120, 60_000), async c => {
+    c.header("Cache-Control", "no-store");
+    const org = organization(c.req.param("org")), user = c.get("user").id, copies = deps.readyCopies?.copies;
+    const repository = repositoryQuery.safeParse(c.req.query("repository")), generation = z.coerce.number().int().positive().safeParse(c.req.query("generation"));
+    if (!copies || !repository.success || !generation.success) throw new HttpError(404, "not_found", "Not found");
+    const scope = await copyScope(org, user, repository.data);
+    if (!scope.full) throw new HttpError(404, "not_found", "Not found");
+    const row = (await copies.history(org, scope.name, scope.owner)).find(candidate => candidate.generation === generation.data);
+    if (!row?.setupOutput) throw new HttpError(404, "not_found", "No output for this build");
+    return c.json({ output: row.setupOutput });
+  });
+
+  app.post("/v1/cloud-v2/organizations/:org/cloud-repositories/ready-copy/build", json, rateLimit("cloud-ready-copy-build", 10, 60_000), async c => {
+    const org = organization(c.req.param("org")), user = c.get("user").id;
+    const input = await read(c, z.object({ repository: repositoryQuery }).strict());
+    if (!deps.readyCopies) throw new HttpError(404, "not_found", "Not found");
+    const scope = await copyScope(org, user, input.repository);
+    if (!scope.canBuild) throw new HttpError(403, "forbidden", "Requires an owner or admin");
+    await deps.readyCopies.buildNow(org, scope.name, scope.owner, user);
+    return c.json({ ok: true }, 202);
   });
 
   app.get("/v1/cloud-v2/organizations/:org/cloud-repositories", rateLimit("cloud-github-levels-read", 60, 60_000), async c => {

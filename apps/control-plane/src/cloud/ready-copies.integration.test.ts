@@ -7,7 +7,7 @@ import { FakeBoat } from "./__fixtures__/boat-fake.js";
 import { CloudV2ComputerBuilder, CloudV2Computers, type CloudV2ComputerOptions } from "./computer.js";
 import type { CloudV2ComputerSourceResolver } from "./computer-provenance.js";
 import { CloudV2Lifecycle } from "./lifecycle.js";
-import { CloudV2ReadyCopies, CloudV2ReadyCopyBuilder, CloudV2ReadyCopyForks, READY_COPY_REFRESH_STARTS, READY_COPY_RETRY_LIMIT,
+import { CloudV2ReadyCopies, CloudV2ReadyCopyBuilder, CloudV2ReadyCopyForks, READY_COPY_HISTORY_LIMIT, READY_COPY_REFRESH_STARTS, READY_COPY_RETRY_LIMIT,
   type ReadyCopyWorkspace } from "./ready-copies.js";
 import { CloudV2ReadyCopySecrets } from "./ready-copy-secrets.js";
 import { CloudV2Store } from "./store.js";
@@ -543,6 +543,84 @@ d("cloud v2 ready copies", () => {
     expect(await forks().prepare(workspace())).toEqual({ waitMs: 3_000 });
     const older = workspace({ createdAt: new Date(clock - 91_000).toISOString() });
     expect(await forks().prepare(older)).toBeNull();
+  });
+
+  it("stores why each generation ran, and rebuilds one repository's copy when its setup or secrets are saved", async () => {
+    const computers = computersWith();
+    await liveBase(computers);
+    await copyBuilder().tick();
+    expect(await row(1)).toMatchObject({ state: "ready", trigger: "repository_added" });
+    // A saved setup rebuilds this repository's copy alone, from the configured setup, with no Cloud Computer build.
+    const builds = (await pool.query("SELECT count(*)::int AS n FROM cloud_v2_computer_builds WHERE org_id=$1", [org])).rows[0].n;
+    const revision = (await computers.overview(org)).recipeRevision;
+    await computers.saveRecipe(org, admin, [{ repository: "withso/zeros", setup: "pnpm install --frozen-lockfile" }], revision);
+    await copyBuilder().reconcile(org, "withso/zeros", "setup_changed");
+    await copyBuilder().reconcile(org, "withso/zeros", "setup_changed");
+    expect(await copies.list(org, "withso/zeros")).toHaveLength(2);
+    await copyBuilder().tick();
+    expect(await row(2)).toMatchObject({ state: "ready", trigger: "setup_changed", builtFromBase: `copy:${(await row(1)).id}` });
+    const second = (await row(2)).machineId;
+    expect(boat.commands.filter(command => command.machineId === second).some(command => command.command.includes("pnpm install --frozen-lockfile"))).toBe(true);
+    expect((await pool.query("SELECT count(*)::int AS n FROM cloud_v2_computer_builds WHERE org_id=$1", [org])).rows[0].n).toBe(builds);
+    const keys = { keys: { 1: randomBytes(32).toString("base64url") }, currentKeyVersion: 1 };
+    await new CloudV2ReadyCopySecrets(pool, keys).save(org, "withso/zeros", admin, { NPM_TOKEN: "npm_fixture_secret_hist" });
+    await copyBuilder().reconcile(org, "withso/zeros", "secrets_changed");
+    expect(await row(3)).toMatchObject({ trigger: "secrets_changed" });
+    await copyBuilder().tick();
+    clock += 7 * DAY + 60_000;
+    await copyBuilder().maintain();
+    expect(await row(4)).toMatchObject({ trigger: "weekly_update" });
+    await copyBuilder().tick();
+    // A new Cloud Computer base: every copy is rebuilt from it.
+    await liveBase(computers, copyBuilder(), { repositories: [{ repository: "withso/zeros", setup: "pnpm install --frozen-lockfile" }] });
+    await copyBuilder().maintain();
+    expect(await row(5)).toMatchObject({ trigger: "computer_build" });
+  });
+
+  it("keeps a failed setup's last output with every build secret redacted, and none for a build that passed", async () => {
+    const keys = { keys: { 1: randomBytes(32).toString("base64url") }, currentKeyVersion: 1 };
+    const secrets = new CloudV2ReadyCopySecrets(pool, keys), value = "s3cr3t/value+with=chars";
+    await secrets.save(org, "withso/zeros", admin, { NPM_TOKEN: value });
+    await liveBase();
+    const echo = `installing\nraw ${value}\nb64 ${Buffer.from(value).toString("base64")}\nb64url ${Buffer.from(value).toString("base64url")}\nurl ${encodeURIComponent(value)}\nnpm ERR! failed\n`;
+    boat.script = (_machine, command) => command.includes("pnpm install") ? { exitCode: 1, stdout: "x".repeat(40_000) + echo, timedOut: false } : undefined;
+    await copyBuilder({ secrets: (organizationId, repository) => secrets.open(organizationId, repository) }).tick();
+    const failed = await row(1);
+    expect(failed.setupOutput).toContain("npm ERR! failed");
+    expect(Buffer.byteLength(failed.setupOutput!)).toBeLessThanOrEqual(16 * 1024);
+    for (const form of [value, Buffer.from(value).toString("base64"), Buffer.from(value).toString("base64url"), encodeURIComponent(value)])
+      expect(failed.setupOutput).not.toContain(form);
+    expect(failed.setupOutput!.match(/\[redacted\]/g)).toHaveLength(4);
+    boat.script = null;
+    await copyBuilder({ secrets: (organizationId, repository) => secrets.open(organizationId, repository) }).retryNow(org, "withso/zeros", admin);
+    await copyBuilder({ secrets: (organizationId, repository) => secrets.open(organizationId, repository) }).tick();
+    expect(await row(2)).toMatchObject({ state: "ready", setupOutput: null, trigger: "manual", triggeredBy: admin });
+  });
+
+  it("keeps the detail of the latest 20 generations, coalesces Build now with a running build, and limits it", async () => {
+    await liveBase();
+    await copyBuilder().tick();
+    const builder = copyBuilder();
+    const first = await builder.buildNow(org, "withso/zeros", null, admin);
+    expect(await builder.buildNow(org, "withso/zeros", null, member)).toMatchObject({ id: first!.id });
+    await builder.tick();
+    await expect(builder.buildNow(org, "withso/zeros", null, admin)).rejects.toMatchObject({ code: "ready_copy_build_limited" });
+    clock += 11 * 60_000;
+    await pool.query("UPDATE cloud_v2_ready_copies SET created_at=$1 WHERE trigger='manual'", [new Date(clock - 11 * 60_000)]);
+    expect(await builder.buildNow(org, "withso/zeros", null, admin)).toMatchObject({ trigger: "manual" });
+    await builder.tick();
+    // Older generations keep their result but lose their detail; their machines are cleaned as before.
+    for (let generation = 0; generation < READY_COPY_HISTORY_LIMIT + 2; generation++)
+      await pool.query(`INSERT INTO cloud_v2_ready_copies (id, org_id, repository, repository_id, generation, state, idempotency_key, failure_reason, failure_detail, setup_output, finished_at)
+        VALUES ($1,$2,'withso/zeros','42',$3,'failed',$4,'ready_copy_setup_failed','/home/user/x','output',now())`,
+        [randomUUID(), org, 100 + generation, `fixture-${generation}`]);
+    await copies.fail((await copies.request({ organizationId: org, repository: "withso/zeros", repositoryId: "42", createdBy: admin,
+      computerBuildId: (await copies.base(org))!.buildId, builtFromBase: "snapshot:x" })).id, "ready_copy_setup_failed", new Date(clock));
+    const kept = (await pool.query(`SELECT count(*)::int AS n FROM cloud_v2_ready_copies WHERE org_id=$1 AND detail_pruned_at IS NULL`, [org])).rows[0].n;
+    expect(kept).toBe(READY_COPY_HISTORY_LIMIT);
+    expect((await pool.query(`SELECT count(*)::int AS n FROM cloud_v2_ready_copies WHERE org_id=$1 AND detail_pruned_at IS NOT NULL
+      AND (setup_output IS NOT NULL OR failure_detail IS NOT NULL)`, [org])).rows[0].n).toBe(0);
+    expect(await copies.history(org, "withso/zeros", null)).toHaveLength(READY_COPY_HISTORY_LIMIT);
   });
 
   it("never stamps a workspace's activity when a copy is built or forked", async () => {
