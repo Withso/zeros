@@ -411,3 +411,13 @@ it("does not publish a late aggregate after account replacement", async () => {
   } as never);
   await rejection;
 });
+
+it.each(["github:owner/repo", "project:77777777-7777-4777-8777-777777777777"])("never asks Local for a cloud group's workspaces before the catalog is confirmed (%s)", async rest => {
+  const local = vi.spyOn(RuntimeClient.prototype, "request").mockResolvedValue({ type: "WORKSPACE_RESPONSE", result: { workspaces: [] } } as never);
+  const client = new WorkspaceRuntimeClient({ open: vi.fn(), workspaces: () => [], workspacesConfirmed: () => false });
+  clients.push(client);
+  await expect(client.request({ type: "WORKSPACE_REQUEST", op: "workspace.list",
+    params: { repoSlug: `cloud-11111111-1111-4111-8111-111111111111:${rest}` } })).rejects.toThrow(/not confirmed/);
+  expect(local).not.toHaveBeenCalled();
+  local.mockRestore();
+});

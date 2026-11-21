@@ -210,6 +210,17 @@ it("keeps the visible Local repository when retiring a remembered cloud workspac
   expect(m.workspace.useWorkspaceStore.getState()).toMatchObject({ activePage: "repo", activeRepoId: "local-project", lastHomePage: "repo" });
 });
 
+it.each(["cloud-repository", "cloud-project"])("retires a %s group's page and Create selections with the account", async kind => {
+  const m = await seed();
+  const projectId = kind === "cloud-project" ? `cloud-project:${target.organizationId}:project:77777777-7777-4777-8777-777777777777`
+    : `cloud-repository:${target.organizationId}:github.com:example/fixture`;
+  m.workspace.useWorkspaceStore.getState().dispatch({ type: "OPEN_REPO_PAGE", projectId, view: "environment" });
+  m.identity.installAccountPresentationIdentity({ ...user, sub: "account-b" });
+  const state = m.workspace.useWorkspaceStore.getState();
+  expect(state.activeRepoId).not.toBe(projectId);
+  expect(state.repoPageViewByProject).not.toHaveProperty(projectId);
+});
+
 it.each(["corrupt", "oversized", "foreign-owner", "duplicate"])("rejects %s membership and catalog cache envelopes", async problem => {
   const m = await seed();
   const owner = m.account.getAccountPresentationOwner()!;
