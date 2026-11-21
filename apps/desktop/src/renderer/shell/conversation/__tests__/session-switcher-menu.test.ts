@@ -9,6 +9,11 @@ import type { ChatThread } from "../../../state/store";
 import { editChat } from "../../../state/cloud-chat-edits";
 import { ParentMenu, RenameRow, workspaceBadgeLabel } from "../session-switcher";
 
+const natives = vi.hoisted(() => new Map<string, Array<{ id: string; ownerChatId: string; title: string; running: boolean }>>());
+vi.mock("../../../features/agent/native-subagents", () => ({
+  useNativeSubagents: (ids: readonly string[]) => ids.flatMap((id) => natives.get(id) ?? []),
+}));
+
 vi.mock("../../../state/cloud-chat-edits", () => ({ editChat: vi.fn() }));
 import type { Workspace } from "../../../platform/git";
 
@@ -47,6 +52,32 @@ describe("parent session menu", () => {
     act(() => press(arrow!));
     expect(onSelect).not.toHaveBeenCalled();
     expect(document.querySelector('[data-session-row="kid"]')).not.toBeNull();
+  });
+});
+
+describe("native subagent rows", () => {
+  it("expands a parent whose only descendants are native subagents", () => {
+    const tree = buildSessionTree([chat("root")], "/repo");
+    natives.set("root", [{ id: "sa", ownerChatId: "root", title: "Explore", running: false }]);
+    const onSelect = vi.fn();
+    const node = document.body.appendChild(document.createElement("div"));
+    root = createRoot(node);
+    try {
+      act(() => root!.render(createElement(DropdownMenu, { open: true },
+        createElement(DropdownMenuTrigger, null, "open"),
+        createElement(DropdownMenuContent, null,
+          createElement(ParentMenu, { tree, folder: "/repo", activeId: "root", onSelect })))));
+      const arrow = document.querySelector('[data-session-row="root"] [role="button"]');
+      expect(arrow?.className).not.toContain("invisible");
+      expect(document.querySelector('[data-native-subagent="sa"]')).toBeNull();
+      act(() => press(arrow!));
+      const row = document.querySelector('[data-native-subagent="sa"]');
+      expect(row?.textContent).toContain("Explore");
+      act(() => press(row!));
+      expect(onSelect).toHaveBeenCalledWith("root");
+    } finally {
+      natives.clear();
+    }
   });
 });
 

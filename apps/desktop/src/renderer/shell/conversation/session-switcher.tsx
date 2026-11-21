@@ -38,6 +38,8 @@ export function sessionName(chat: ChatThread): string {
   return chat.title.trim() || "New session";
 }
 
+const NO_OWNER_IDS: readonly string[] = [];
+
 const ROW_INDENT_CLS = ["pl-2", "pl-6", "pl-8", "pl-10", "pl-12"] as const;
 
 const CRUMB_CLS = "text-fg1 min-w-0 max-w-60 gap-1.5 aria-expanded:bg-bg2-highlight";
@@ -86,7 +88,9 @@ function SessionRow({ node, depth, folder, activeId, expanded, onToggle, onSelec
   onSelect: (id: string) => void;
 }) {
   const ids = useMemo(() => [node.chat.id, ...sessionDescendantIds(node)], [node]);
-  const hasChildren = node.children.length > 0;
+  const ownIds = useMemo(() => (onToggle ? [node.chat.id] : NO_OWNER_IDS), [onToggle, node.chat.id]);
+  const hasNative = useNativeSubagents(ownIds).length > 0;
+  const hasChildren = node.children.length > 0 || hasNative;
   return (
     <DropdownMenuItem
       onSelect={() => onSelect(node.chat.id)}
