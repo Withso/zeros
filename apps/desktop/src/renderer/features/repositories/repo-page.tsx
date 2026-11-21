@@ -101,6 +101,7 @@ import {
   REPO_SECTIONS,
   type RepoSectionId,
 } from "./repositories-panel";
+import { pullRequestTarget } from "../../state/workspace-repositories";
 
 // ── View model ───────────────────────────────────────────
 //
@@ -188,7 +189,7 @@ function RepoWorkspaceRow({
 }) {
   const warmHistory = useWarmWorkspaceHistory();
   const w = row.workspace;
-  const prTone = workspacePrTone(w, usePrIslandKind(w.id, w.prNumber));
+  const prTone = workspacePrTone(w, usePrIslandKind(pullRequestTarget(w), w.prNumber));
   const archiveWorkspace = useArchiveWorkspace();
   const archiving = useWorkspaceArchiving(w.id);
   const historyOnly = workspaceIsReadOnly(w);

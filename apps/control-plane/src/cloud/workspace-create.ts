@@ -126,6 +126,9 @@ export function createCloudWorkspaceOperations(deps: CloudV2RouteDeps) {
       const first = project.repositories[0]!;
       if (input.repository && input.repository.toLowerCase() !== first.repository)
         throw new HttpError(422, "invalid_request", "The repository is not this project's first.");
+      // Each entry only picks a base branch for one of the project's own repositories.
+      const unknown = input.repositories?.find(requested => !project.repositories.some(entry => entry.repository === requested.repository.toLowerCase()));
+      if (unknown) throw new HttpError(422, "invalid_request", `${unknown.repository} is not one of this project's repositories.`);
       if (!computer.baseOnly) throw await computerUnavailable(input.organizationId, userId);
       if (!deps.projectAccess) throw new HttpError(503, "github_unavailable", "Repository access could not be verified.");
       const branchFor = (entry: (typeof project.repositories)[number], index: number) => (index === 0 ? input.baseBranch : undefined)

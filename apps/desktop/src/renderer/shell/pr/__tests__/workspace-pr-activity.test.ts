@@ -291,3 +291,34 @@ describe("Local workspace PR discovery activity", () => {
     expect(fixture.probe).toHaveBeenCalledTimes(2);
   });
 });
+
+describe("a workspace of several repositories", () => {
+  it("discovers the current repository's pull request under its key while another repository already has one", async () => {
+    const { combinedPullRequest, repositoryWorkspace } = await import("../../../state/workspace-repositories");
+    const key = "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
+    const repositories = [
+      { repository: "withso/api", folder: "api", target: `${key}/api`, branch: "work", baseBranch: "main", prNumber: 4, prState: "ready" as const, prUrl: "https://github.com/withso/api/pull/4" },
+      { repository: "withso/web", folder: "web", target: `${key}/web`, branch: "work", baseBranch: "main", prNumber: null, prState: null, prUrl: null },
+    ];
+    const workspace = { id: key, path: key, repoRoot: key, repoSlug: "cloud-project", branch: "work", baseBranch: "main", repositories,
+      ...combinedPullRequest(repositories) } as unknown as Workspace;
+    // The workspace's mark is api's #4, so the workspace itself is past discovery …
+    useWorkspacePrSync(workspace);
+    for (const effect of fixture.effects.splice(0)) { const cleanup = effect(); if (cleanup) cleanups.push(cleanup); }
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fixture.probe).not.toHaveBeenCalled();
+    unmount();
+    // … while web, the current repository, is discovered under its own key, and Review's retry reaches it.
+    useWorkspacePrSync(repositoryWorkspace(workspace, repositories[1]!));
+    for (const effect of fixture.effects.splice(0)) { const cleanup = effect(); if (cleanup) cleanups.push(cleanup); }
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fixture.probe).toHaveBeenCalledWith(`${key}/web`);
+    const { retryWorkspacePrDiscovery } = await import("../use-workspace-pr-sync");
+    await retryWorkspacePrDiscovery(`${key}/web`);
+    expect(fixture.probe).toHaveBeenCalledTimes(2);
+    // The shell mounts discovery on the current repository's view.
+    const { readFileSync } = await import("node:fs");
+    expect(readFileSync(new URL("../../../app-shell.tsx", import.meta.url), "utf8"))
+      .toContain("useWorkspacePrSync(workspaceToolsAvailable ? activeRepositoryWorkspace ?? activeWorkspace : null)");
+  });
+});

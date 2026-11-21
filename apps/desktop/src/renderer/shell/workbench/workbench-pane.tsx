@@ -57,6 +57,7 @@ import {
   useStableRetainedViewOrder,
 } from "../use-retained-view-keys";
 import { PrStatusRow } from "../pr/pr-status-row";
+import { RepositorySwitcher, repositoryOriginUrl } from "./repository-switcher";
 import { useBrowserFloatEntries } from "../../features/browser/browser-float-store";
 import { activeBrowserDeckKeys, browserViewKey } from "./browser-deck-keys";
 import { ActivityScope } from "../../shared/ui/loading/activity-scope";
@@ -66,6 +67,7 @@ import { hasShortcutPriorityClaim } from "../../features/agent/shortcut-priority
 
 import { popoverBoundaryProps } from "@/renderer/shared/ui/popover-boundary";
 import { Surface } from "@/renderer/shared/ui/layout/surface";
+import { observePullRequestAppearance } from "./pr-appearance";
 // Proportional columns (2026-07-17): workbench grows by `(1 - ratio)·100`,
 // the complement of conversation pane's `--zeros-column-2-ratio` grow factor (see
 // CONVERSATION_DEFAULT_WIDTH_CLS in conversation/conversation-pane.tsx) — so a window
@@ -270,7 +272,7 @@ export function WorkbenchPane({
   // The Changes tab's PR status row and the Review tab share one condition:
   // the active workspace has a PR. Tracked here for the creation-moment
   // auto-focus below.
-  const { workspace: activeWorkspace, project: activeProject } =
+  const { workspace: activeWorkspace, project: activeProject, repositoryWorkspace } =
     useActiveWorkspace();
   const tabs = useMemo(
     () => availableWorkspaceTabs(allTabs, activeProject),
@@ -284,7 +286,8 @@ export function WorkbenchPane({
       ? activeWorkspace.repoRoot
       : activeWorkspace.id
     : null;
-  const prNumber = activeWorkspace?.prNumber ?? null;
+  // A workspace of several repositories: its current repository's pull request.
+  const prNumber = repositoryWorkspace?.prNumber ?? null;
 
   // Re-validate the stored active id against the tab list: a stale id (including
   // a removed tab) falls back to the first File tab, then
@@ -308,7 +311,7 @@ export function WorkbenchPane({
     !!activeWorkspace &&
     !isLocalMainWorkspace(activeWorkspace) &&
     (activeWorkbenchTab?.type === "changes" ||
-      (activeWorkbenchTab?.type === "review" && activeWorkspace.prNumber == null));
+      (activeWorkbenchTab?.type === "review" && prNumber == null));
   // Recent clean File views join the always-retained Browser/source surfaces;
   // this preserves tree/editor layout without mounting an unbounded tab set.
   const availableWorkbenchIds = useMemo(
@@ -410,12 +413,11 @@ export function WorkbenchPane({
     lastWorkbenchInteractionRef.current = Date.now();
   };
   const seenPrByWorkspace = useRef(new Map<string, number | null>());
-  const workspaceId = activeWorkspace?.id ?? null;
+  // The current repository's key: its pull request number is that repository's.
+  const prWatchKey = repositoryWorkspace?.id ?? activeWorkspace?.id ?? null;
   useEffect(() => {
-    if (!workspaceId) return;
-    const prev = seenPrByWorkspace.current.get(workspaceId);
-    seenPrByWorkspace.current.set(workspaceId, prNumber);
-    if (prev !== null || prNumber == null) return; // not a live null → PR flip
+    if (!prWatchKey) return;
+    if (!observePullRequestAppearance(seenPrByWorkspace.current, prWatchKey, prNumber)) return; // not a live null → PR flip
     const WORKBENCH_IDLE_MS = 10_000;
     if (Date.now() - lastWorkbenchInteractionRef.current < WORKBENCH_IDLE_MS)
       return;
@@ -423,7 +425,7 @@ export function WorkbenchPane({
     if (reviewTabIdRef.current) {
       dispatch({ type: "ACTIVATE_WORKBENCH_TAB", id: reviewTabIdRef.current });
     }
-  }, [workspaceId, prNumber, dispatch]);
+  }, [prWatchKey, prNumber, dispatch]);
 
   // ── New-workspace defaults: Open file + Setup in primary tabs ────────────────────────────
   // A newly-created workspace may reuse stale persisted UI state if its path was
@@ -563,9 +565,10 @@ export function WorkbenchPane({
               <div className={WORKBENCH_CONTENT_CLS}>
                 {showSharedPrStatusRow && (
                   <PrStatusRow
-                    workspace={activeWorkspace}
-                    originUrl={activeProject?.originUrl ?? null}
+                    workspace={repositoryWorkspace}
+                    originUrl={repositoryOriginUrl(activeWorkspace, repositoryWorkspace, activeProject?.originUrl ?? null)}
                     active={surfaceActive && !collapsed}
+                    leading={<RepositorySwitcher workspace={activeWorkspace} active={surfaceActive && !collapsed} />}
                   />
                 )}
                 <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">

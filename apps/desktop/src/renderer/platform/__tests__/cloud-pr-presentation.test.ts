@@ -1,11 +1,12 @@
-import { beforeEach, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 const f = vi.hoisted(() => ({ request: vi.fn(), forget: vi.fn() }));
 vi.mock("../cloud-workspaces", () => ({ cloudAccountRequest: f.request }));
 vi.mock("../../features/team/team-store", () => ({ getOrganizationStoreGeneration: () => 1 }));
 vi.mock("../../state/cloud-workspace-catalog", () => ({ refreshCloudWorkspace: async () => {} }));
 vi.mock("../../shell/pr/pr-cache-forget", () => ({ forgetPrCachesForWorkspace: f.forget }));
 vi.mock("../../features/code-review/review-cache-forget", () => ({ forgetReviewCachesForFolders: f.forget }));
-import { clearCloudGithubPr, cloudGithubPrAuthority, requestCloudGithubPr } from "../cloud-github-pr";
+import { clearCloudGithubPr, cloudGithubPrAuthority, cloudGithubPrAuthorityFor, requestCloudGithubPr, requestCloudGithubPrFor } from "../cloud-github-pr";
+import { publishCloudRepositoryLayouts } from "../bridge/cloud-repository-routing";
 import { publishCloudGithubPrCapabilities } from "../cloud-github-pr-capability";
 import { cloudGithubPrScope } from "../cloud-github-pr-scope";
 import { cloudWorkspaceKey } from "../bridge/cloud-workspace-key";
@@ -83,4 +84,57 @@ it.each(["branch", "connection"] as const)("retires presentation when its %s cha
   }
   expect(cloudGithubPrScope(key)).not.toBe(scope);
   expect(f.forget).toHaveBeenCalled();
+});
+
+describe("a workspace of several repositories: each repository's own authority and lifetime", () => {
+  const api = `${key}/api`, web = `${key}/web`;
+  const head = (c: string) => c.repeat(40);
+  const several = (webBranch = "work", webHead = head("d")): CloudWorkspaceDocument => ({
+    ...document(), root: "/home/user/example/project",
+    repositories: [
+      { repository: "example/project", checkoutPath: "/home/user/example/project/api", branch: "work", baseBranch: "main" },
+      { repository: "example/web", checkoutPath: "/home/user/example/project/web", branch: webBranch, baseBranch: "main",
+        github: { repositoryId: "44", branch: webBranch, baseBranch: "main", headSha: webHead, prNumber: 9, prState: "draft", prUrl: "https://github.com/example/web/pull/9" } },
+    ],
+  } as CloudWorkspaceDocument);
+  const answer = (generation = "generation-1") => f.request.mockImplementation(async (_path: string, _schema: unknown, init: { body: { repository?: string } }) => ({
+    authority: init.body.repository === "example/web" ? { ...authority, connectionGeneration: generation, repositoryId: "44", repository: "example/web" } : authority,
+    result: init.body.repository === "example/web" ? { ...pr, number: 9 } : pr,
+  }));
+  beforeEach(async () => {
+    publishCloudRepositoryLayouts(new Map([[key, { repositories: [{ repository: "example/project", folder: "api" }, { repository: "example/web", folder: "web" }] }]]));
+    publishCloudGithubPrCapabilities([several()]);
+    answer();
+    await requestCloudGithubPrFor(api, "gh.prGet", { prNumber: 7 });
+    await requestCloudGithubPrFor(web, "gh.prGet", { prNumber: 9 });
+    vi.clearAllMocks(); answer();
+  });
+
+  it("a branch change in one repository retires its authority and presentation, never the other's", () => {
+    const [apiScope, webScope] = [cloudGithubPrScope(api), cloudGithubPrScope(web)];
+    expect(cloudGithubPrAuthorityFor(web)?.repository).toBe("example/web");
+    publishCloudGithubPrCapabilities([several("other")]);
+    expect(cloudGithubPrAuthorityFor(web)).toBeUndefined();
+    expect(cloudGithubPrScope(web)).not.toBe(webScope);
+    expect(f.forget).toHaveBeenCalledWith(web);
+    expect(f.forget).not.toHaveBeenCalledWith(api);
+    expect(cloudGithubPrAuthorityFor(api)?.repository).toBe("example/project");
+    expect(cloudGithubPrScope(api)).toBe(apiScope);
+  });
+
+  it("a new head in one repository refuses that repository's writes until it is read again; the other's still go", async () => {
+    const webScope = cloudGithubPrScope(web);
+    publishCloudGithubPrCapabilities([several("work", head("e"))]);
+    expect(cloudGithubPrScope(web)).toBe(webScope);
+    await expect(requestCloudGithubPrFor(web, "gh.prMarkReady", { prNumber: 9 })).rejects.toThrow(/Refresh/);
+    await expect(requestCloudGithubPrFor(api, "gh.prMarkReady", { prNumber: 7 })).resolves.toBeDefined();
+  });
+
+  it("a repository's own connection change retires that repository's mounted state", async () => {
+    const [apiScope, webScope] = [cloudGithubPrScope(api), cloudGithubPrScope(web)];
+    answer("generation-2");
+    await requestCloudGithubPrFor(web, "gh.prGet", { prNumber: 9 });
+    expect(cloudGithubPrScope(web)).not.toBe(webScope);
+    expect(cloudGithubPrScope(api)).toBe(apiScope);
+  });
 });

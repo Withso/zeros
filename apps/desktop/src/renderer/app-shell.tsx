@@ -927,6 +927,7 @@ function MainShellBody({
   const { openProject, openGithubProject, quickStart } = useAddProject();
   const {
     workspace: activeWorkspace,
+    repositoryWorkspace: activeRepositoryWorkspace,
     folder: activeWorkspaceFolder,
     project: activeProject,
     loading: workspaceLoading,
@@ -951,7 +952,10 @@ function MainShellBody({
   // Reveal a PR opened outside the engine (agent `gh pr create` / terminal): if
   // the active workspace has no recorded prNumber, detect + backfill it so the
   // Workbench PR-status island appears and the header "Create PR" button hides.
-  useWorkspacePrSync(workspaceToolsAvailable ? activeWorkspace : null);
+  // A workspace of several repositories: its current repository's, under that
+  // repository's key and with its own pull request (the workspace's mark is non-null
+  // once any one has a pull request, which would stop discovery for the rest).
+  useWorkspacePrSync(workspaceToolsAvailable ? activeRepositoryWorkspace ?? activeWorkspace : null);
   const { projects } = useProjects();
   useWarmAutomaticRepositoryIcons(projects);
   // ⌘T opens a chat; ⌘⇧T opens a terminal-agent tab when that feature is

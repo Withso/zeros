@@ -18,6 +18,8 @@ import {
   readChangesSections,
   subscribeChangesSections,
   writeChangesSections,
+  readChangesCount,
+  writeChangesCount,
 } from "../changes-snapshot-cache";
 
 function installStorage(): void {
@@ -300,6 +302,26 @@ describe("Changes snapshot persistence", () => {
     ).toBe(false);
     expect(restored.counts.has("workspace-a")).toBe(false);
     expect(restored.counts.get("workspace-b")).toBe(2);
+  });
+
+  it("keeps each repository's snapshots of a workspace of several under its own key, and forgets them all with the workspace", () => {
+    const workspace = "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
+    const [api, web] = [`${workspace}/api`, `${workspace}/web`];
+    writeChangesSections(api, { kind: "all" }, [{ kind: "committed", title: null, files: [changedFile("api.ts")] }], "main");
+    writeChangesSections(web, { kind: "all" }, [{ kind: "committed", title: null, files: [changedFile("web.ts")] }], "release");
+    writeChangesCount(api, 1);
+    writeChangesCount(web, 4);
+    // Switching repository reads only that repository's snapshot; never another's under a shared base.
+    expect(readChangesSections(changesSnapshotKey(web, { kind: "all" }, "release"))?.[0]?.files.map(file => file.path)).toEqual(["web.ts"]);
+    expect(readChangesSections(changesSnapshotKey(web, { kind: "all" }, "main"))).toBeUndefined();
+    expect(readChangesSections(changesSnapshotKey(workspace, { kind: "all" }, "main"))).toBeUndefined();
+    expect([readChangesCount(api), readChangesCount(web), readChangesCount(workspace)]).toEqual([1, 4, undefined]);
+    // Another workspace whose key starts the same is not a repository of it.
+    writeChangesCount(`${workspace}0`, 7);
+    forgetChangesSnapshots([workspace]);
+    expect(readChangesSections(changesSnapshotKey(api, { kind: "all" }, "main"))).toBeUndefined();
+    expect([readChangesCount(api), readChangesCount(web), readChangesCount(`${workspace}0`)]).toEqual([undefined, undefined, 7]);
+    expect(loadPersistedChangesSnapshots().counts.has(web)).toBe(false);
   });
 
   it("publishes only to the exact scope and rejects an older request token", () => {

@@ -61,7 +61,7 @@ export function installAccountPresentationIdentity(user: AuthUser | null): void 
       workspaceListFilterProjectId(state.workspaceListFilter),
       ...Object.keys(state.repoPageViewByProject),
     ]);
-    for (const projectId of projectIds) if (projectId?.startsWith("cloud-repository:"))
+    for (const projectId of projectIds) if (projectId?.startsWith("cloud-repository:") || projectId?.startsWith("cloud-project:"))
       state.dispatch({ type: "REMOVE_REPO_UI_STATE", projectId, repoRoot: "" });
   } else state.dispatch({ type: "REVALIDATE_CLOUD_CHATS" });
   const bridge = getActiveBridge();

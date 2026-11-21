@@ -1,6 +1,7 @@
 import {
   cloudTargetForValue,
   cloudWorkspaceKey,
+  parseCloudWorkspaceKey,
 } from "./bridge/cloud-workspace-key";
 import { useCallback, useSyncExternalStore } from "react";
 
@@ -21,7 +22,11 @@ export function cloudGithubPrScope(
   try {
     const target = cloudTargetForValue(workspaceId);
     if (!target) return "local";
-    return `${all}:${scopes.get(target.organizationId) ?? 0}:${scopes.get(cloudWorkspaceKey(target)) ?? 0}`;
+    const key = cloudWorkspaceKey(target);
+    // One repository of a workspace of several also has its own lifetime, under its key.
+    const folder = parseCloudWorkspaceKey(workspaceId)?.relativePath;
+    const repository = folder ? `:${scopes.get(`${key}/${folder}`) ?? 0}` : "";
+    return `${all}:${scopes.get(target.organizationId) ?? 0}:${scopes.get(key) ?? 0}${repository}`;
   } catch {
     return "unavailable";
   }

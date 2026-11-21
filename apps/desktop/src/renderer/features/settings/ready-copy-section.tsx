@@ -13,7 +13,7 @@ import { readyCopyFailureLine, readyCopyTriggerLabel } from "./ready-copy-copy";
 import { SettingsGroup, SettingsRow } from "./settings-ui";
 
 /** Null: no ready copies here (setting off, older control plane, or not visible to this reader). */
-const copies = new KeyedAsyncCache<CloudReadyCopy | null>({ maxEntries: 32 });
+export const readyCopyCache = new KeyedAsyncCache<CloudReadyCopy | null>({ maxEntries: 32 });
 const absent = (error: unknown) => { if (error instanceof ControlPlaneError && error.status === 404) return null; throw error; };
 const later = (iso: string | null, now: number) => {
   if (!iso) return null;
@@ -21,15 +21,16 @@ const later = (iso: string | null, now: number) => {
   return days <= 0 ? "soon" : days === 1 ? "in 1 day" : `in ${days} days`;
 };
 
-/** The status line in words. Members get it without any failure (the server never sends one). */
-export function readyCopyStatusLine(status: CloudReadyCopy["status"], now: number): string | null {
+/** The status in words: the label is the status itself, the hint its detail.
+ * Members get it without any failure (the server never sends one). */
+export function readyCopyStatus(status: CloudReadyCopy["status"], now: number): { label: string; hint: string | null } | null {
   const updated = relativeAge(status.updatedAt, now), next = later(status.nextUpdateAt, now);
   switch (status.state) {
-    case "ready": return ["Ready", updated && `updated ${updated}`, next && `next update ${next}`].filter(Boolean).join(" · ");
-    case "updating": return "Updating… The previous copy still serves new workspaces.";
-    case "getting_ready": return "Getting ready…";
-    case "update_failed": return `Update failed. New workspaces still use the copy from ${updated ?? "before"}.`;
-    case "failed": return "Update failed. New workspaces clone directly until a copy is ready.";
+    case "ready": return { label: "Ready", hint: [updated && `Updated ${updated}`, next && `next update ${next}`].filter(Boolean).join(" · ") || null };
+    case "updating": return { label: "Updating…", hint: "New workspaces use the last build until this one is ready." };
+    case "getting_ready": return { label: "Getting ready…", hint: "New workspaces clone directly until the first build is ready." };
+    case "update_failed": return { label: "Update failed", hint: `New workspaces still use the build from ${updated ?? "before"}.` };
+    case "failed": return { label: "Update failed", hint: "New workspaces clone directly until a build succeeds." };
     default: return null;
   }
 }
@@ -44,12 +45,12 @@ const duration = (start: string | null, end: string | null) => {
 /** A project's ready copy on its project page, for whoever the server lets see it. */
 export function ReadyCopySection({ organizationId, projectId, active }: { organizationId: string; projectId: string; active: boolean }) {
   const key = JSON.stringify([organizationId, projectId]);
-  const read = useRecoveringRead(copies, key, () => getCloudReadyCopy(organizationId, projectId).catch(absent), { enabled: active, maxAgeMs: 30_000 });
+  const read = useRecoveringRead(readyCopyCache, key, () => getCloudReadyCopy(organizationId, projectId).catch(absent), { enabled: active, maxAgeMs: 30_000 });
   const [busy, setBusy] = useState(false), [error, setError] = useState<string | null>(null);
   const [output, setOutput] = useState<{ generation: number; text: string } | null>(null);
   const copy = read.data;
   if (!copy) return null;
-  const now = Date.now(), line = readyCopyStatusLine(copy.status, now), failure = copy.status.failure;
+  const now = Date.now(), status = readyCopyStatus(copy.status, now), failure = copy.status.failure;
   const build = async () => {
     setBusy(true); setError(null);
     try { await buildCloudReadyCopy(organizationId, projectId); read.refresh(); } catch (cause) { setError(message(cause)); } finally { setBusy(false); }
@@ -57,33 +58,34 @@ export function ReadyCopySection({ organizationId, projectId, active }: { organi
   const show = async (generation: number) => {
     try { setOutput({ generation, text: await getCloudReadyCopyOutput(organizationId, projectId, generation) }); } catch (cause) { setError(message(cause)); }
   };
-  if (!line && !copy.history?.length) return null;
+  if (!status && !copy.history?.length) return null;
   return (
     <SettingsGroup>
       {error && <MessageRow tone="error" role="alert" flush>{error}</MessageRow>}
-      <SettingsRow label="Ready copy" hint={[line, failure && readyCopyFailureLine(failure, now)].filter(Boolean).join(" ")}>
+      <SettingsRow label={status?.label ?? "Not built yet"} hint={[status?.hint, failure && readyCopyFailureLine(failure, now)].filter(Boolean).join(" ") || null}>
         {copy.canBuild && (
           <Button variant="secondary" size="sm" disabled={busy || copy.status.state === "updating" || copy.status.state === "getting_ready"}
             onClick={() => void build()}>{failure ? "Retry now" : "Build now"}</Button>
         )}
       </SettingsRow>
       {copy.history && copy.history.length > 0 && (
-        <ul className="divide-border1 m-0 flex list-none flex-col divide-y p-0" aria-label="Ready copy builds">
+        <ul className="divide-border1 m-0 flex list-none flex-col divide-y p-0" aria-label="Builds">
           {copy.history.map(row => (
-            <BuildHistoryItem key={row.generation} state={RESULT[row.state]} title={`Copy #${row.generation}`}
-              details={[relativeAge(row.startedAt, now) && `started ${relativeAge(row.startedAt, now)}`, duration(row.startedAt, row.finishedAt),
+            <BuildHistoryItem key={row.generation} state={RESULT[row.state]} title={`Build #${row.generation}`}
+              // Why it ran first, then when and how long.
+              details={[readyCopyTriggerLabel(row.trigger, row.startedBy), relativeAge(row.startedAt, now), duration(row.startedAt, row.finishedAt),
                 row.failure ? readyCopyFailureLine({ ...row.failure, nextRetryAt: null }, now).split(".")[0]! : null,
                 ...(row.repositories ?? []).map(entry => entry.branch && entry.commit
-                  ? `${row.repositories!.length > 1 ? `${entry.repository} ` : ""}${entry.branch} @ ${entry.commit.slice(0, 7)}` : null),
-                readyCopyTriggerLabel(row.trigger, row.startedBy)]}
-              action={row.output ? <Button variant="ghost" size="compact" onClick={() => void show(row.generation)}>Output</Button> : undefined} />
+                  ? `${row.repositories!.length > 1 ? `${entry.repository} ` : ""}${entry.branch} @ ${entry.commit.slice(0, 7)}` : null)]}
+              // Only a failed build keeps its setup output.
+              action={row.state === "failed" && row.output ? <Button variant="ghost" size="compact" onClick={() => void show(row.generation)}>Output</Button> : undefined} />
           ))}
         </ul>
       )}
       <Sheet open={!!output} onOpenChange={value => { if (!value) setOutput(null); }}>
         <SheetContent side="right" className="p-6">
           <SheetHeader>
-            <SheetTitle>{`Copy #${output?.generation ?? ""} setup output`}</SheetTitle>
+            <SheetTitle>{`Build #${output?.generation ?? ""} setup output`}</SheetTitle>
             <SheetDescription>The last part of the setup's output. Build secrets are shown as [redacted].</SheetDescription>
           </SheetHeader>
           <pre className="text-fg2 m-0 overflow-auto text-xs whitespace-pre-wrap">{output?.text}</pre>

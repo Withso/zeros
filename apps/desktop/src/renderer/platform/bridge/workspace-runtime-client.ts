@@ -9,7 +9,7 @@ import type { CloudWorkspaceWakeIntent } from "../../state/cloud-workspace-wake"
 import { relativeWorkspaceFilePath } from "../workspace-file-path";
 import {
   cloudWorkspaceKey,
-  isCloudRepositorySlug,
+  isCloudOwnedSlug,
   parseCloudWorkspaceKey,
   parseCloudScopedId,
   type CloudWorkspaceTarget,
@@ -275,7 +275,7 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
       (params.archived === undefined || Boolean(row.archivedAt) === params.archived));
     // A confirmed cloud listing never asks Local about an organization-owned repository.
     const cloudOnly = wire.op === "workspace.list" && typeof params.repoSlug === "string" &&
-      (isCloudRepositorySlug(params.repoSlug) || this.cloudRepositorySlugs.has(params.repoSlug));
+      (isCloudOwnedSlug(params.repoSlug) || this.cloudRepositorySlugs.has(params.repoSlug));
     if (cloudOnly && !catalogConfirmed && !catalogRows.some(row => row.repoSlug === params.repoSlug))
       throw new Error("Cloud workspace catalog is not confirmed");
     const refreshLocal = refresh === "all" || refresh === "local";

@@ -6,11 +6,12 @@ import type {
 } from "@zeros/protocol/changes-history";
 
 import type { RuntimeClient } from "./ws-client";
-import { cloudTargetForValue, cloudWorkspaceKey, isCloudWorkspace, parseCloudScopedId } from "./cloud-workspace-key";
+import { cloudWorkspaceKey, isCloudWorkspace, parseCloudScopedId } from "./cloud-workspace-key";
 import { DESIGN_INSTANCE_SLOT_TEXT_CAPABILITY, DESIGN_INSTANCE_SLOT_TEXT_PARAM, DESIGN_OPTIONS_SHOW_NOTHING_CAPABILITY, DESIGN_OPTIONS_SHOW_NOTHING_PARAM } from "@zeros/protocol/design-catalog";
 import { CLOUD_GITHUB_PR_OPERATIONS } from "@zeros/protocol/cloud-github-pr";
 import { isWorkspaceNumber } from "@zeros/protocol/local-orchestration";
-import { requestCloudGithubPr, cloudGithubPrAuthority } from "../cloud-github-pr";
+import { requestCloudGithubPr, cloudGithubPrAuthority, cloudGithubPrRoute } from "../cloud-github-pr";
+import { cloudRepositoryRoute } from "./cloud-repository-routing";
 import { prepareCloudPromptErasure } from "../cloud-prompt-erasure";
 import { WorkspaceRuntimeClient, type ChatSnapshotRefresh } from "./workspace-runtime-client";
 import type {
@@ -113,23 +114,30 @@ export async function workspaceOp(
   timeoutMs = 10_000,
   connectedOnly = false,
 ): Promise<unknown> {
+  // A cloud pull request request: the repository it is for comes from one place.
   if (CLOUD_GITHUB_PR_OPERATIONS.has(op)) {
-    const target = cloudTargetForValue(params.workspaceId);
-    if (target) {
+    const scope = cloudGithubPrRoute(params.workspaceId, op, params);
+    if (scope) {
+      const named = scope.repository ? [scope.repository] as const : [] as const;
       if (op === "gh.prCreate") {
-        await requestCloudGithubPr(target, "gh.repoAccess", {});
-        const before = cloudGithubPrAuthority(target);
+        await requestCloudGithubPr(scope.target, "gh.repoAccess", {}, ...named);
+        const before = cloudGithubPrAuthority(scope.target, ...named);
         if (!before) throw new Error("Refresh this workspace's GitHub connection before publishing.");
-        await workspaceOp(bridge, "workspace.prepareGithub", { workspaceId: params.workspaceId, branch: before.branch, baseBranch: before.baseBranch }, 150_000);
-        await requestCloudGithubPr(target, "gh.repoAccess", {});
-        const after = cloudGithubPrAuthority(target);
+        await workspaceOp(bridge, "workspace.prepareGithub", { workspaceId: scope.repository?.key ?? params.workspaceId, branch: before.branch, baseBranch: before.baseBranch }, 150_000);
+        await requestCloudGithubPr(scope.target, "gh.repoAccess", {}, ...named);
+        const after = cloudGithubPrAuthority(scope.target, ...named);
         if (!after || before.connectionGeneration !== after.connectionGeneration || before.repositoryId !== after.repositoryId ||
           before.repository !== after.repository || before.branch !== after.branch || before.baseBranch !== after.baseBranch)
           throw new Error("Your GitHub connection or branch changed after publishing. Refresh before creating the pull request.");
       }
-      return requestCloudGithubPr(target, op, params);
+      return requestCloudGithubPr(scope.target, op, params, ...named);
     }
   }
+  // A workspace of several repositories: name the repository a request is for.
+  const route = cloudRepositoryRoute(op, params);
+  if (route.kind === "one") params = route.params;
+  else if (route.kind === "each")
+    return route.merge(await Promise.all(route.requests.map(request => workspaceOp(bridge, op, request.params, timeoutMs, connectedOnly))));
   const tracked = GIT_OP_ANALYTICS[op];
   const request = { type: "WORKSPACE_REQUEST" as const, op, params };
   const resp = (await (connectedOnly

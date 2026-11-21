@@ -7,14 +7,13 @@ import type {
   PrThreadReplyInput,
   PrThreadResolveInput,
 } from "@zeros/protocol/github-review";
-import { cloudTargetForValue } from "./bridge/cloud-workspace-key";
-import { requestCloudGithubPr } from "./cloud-github-pr";
+import { requestCloudGithubPrFor } from "./cloud-github-pr";
 import { getActiveBridge } from "./bridge/active-bridge";
 import { workspaceOp } from "./bridge/workspace-bridge";
 
 function request<T>(op: string, input: PrReviewTarget & { kind?: string }): Promise<T> {
-  const cloud = cloudTargetForValue(input.workspaceId);
-  if (cloud) return requestCloudGithubPr(cloud, op, { ...input }) as Promise<T>;
+  const cloud = requestCloudGithubPrFor(input.workspaceId, op, { ...input });
+  if (cloud) return cloud as Promise<T>;
   const bridge = getActiveBridge();
   if (!bridge)
     return Promise.reject(

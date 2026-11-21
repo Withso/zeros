@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 // ──────────────────────────────────────────────────────────
 // PrStatusRow — the shared worktree PR status row
 // ──────────────────────────────────────────────────────────
@@ -51,11 +52,14 @@ export function PrStatusRow({
   workspace,
   originUrl,
   active,
+  leading,
 }: {
   workspace: Workspace | null;
   originUrl: string | null;
   /** Inactive/collapsed workspace surfaces stay inert (no Git/GitHub reads). */
   active: boolean;
+  /** Shown first in the row: a workspace of several repositories' switcher. */
+  leading?: ReactNode;
 }) {
   const nativeReady = useNativeRuntime().ready;
   const prWorkspace = workspace;
@@ -76,6 +80,7 @@ export function PrStatusRow({
     const message = document?.githubUnavailableReason ? cloudUnavailableCopy[document.githubUnavailableReason] : null;
     return (
       <PanelHeader size="window" className="gap-2">
+        {leading}
         <TargetBranchButton workspace={prWorkspace} disabled={!cloudReady} />
         <div className="flex-1" />
         {message && (
@@ -89,7 +94,7 @@ export function PrStatusRow({
 
   if (prWorkspace && prWorkspace.prNumber != null) {
     // key: reset island state on workspace switch (same as the old render site).
-    return (
+    const island = (
       <PrStatusIsland
         key={prWorkspace.id}
         workspace={prWorkspace}
@@ -97,11 +102,13 @@ export function PrStatusRow({
         localDesktop={nativeReady}
       />
     );
+    return leading ? <>{<PanelHeader size="window" className="gap-2">{leading}</PanelHeader>}{island}</> : island;
   }
   return (
     <PanelHeader size="window" className="gap-2">
       {prWorkspace ? (
         <>
+          {leading}
           {/* Left: pick the base branch (remote-only). Right: Create PR. */}
           <TargetBranchButton workspace={prWorkspace} disabled={cloud ? !cloudReady : !nativeReady} />
           <div className="flex-1" />

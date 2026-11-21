@@ -29,6 +29,7 @@ import {
 } from "./dashboard-metadata";
 import type { DashboardDisplay } from "./preferences";
 import type { DashboardRow } from "./dashboard-model";
+import { pullRequestTarget } from "../../state/workspace-repositories";
 
 // --- CONSTANTS ---
 
@@ -234,7 +235,7 @@ export const DashboardListRow = forwardRef<
   const archived = w.archivedAt != null;
   const missing = w.present === false && !archived;
   const folder = isLocalMainWorkspace(w);
-  const prTone = workspacePrTone(w, usePrIslandKind(w.id, w.prNumber));
+  const prTone = workspacePrTone(w, usePrIslandKind(pullRequestTarget(w), w.prNumber));
   const status = archived
     ? "Archived"
     : missing

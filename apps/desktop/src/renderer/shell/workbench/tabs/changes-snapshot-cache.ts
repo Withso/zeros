@@ -1,3 +1,4 @@
+import { isCloudWorkspace } from "../../../platform/bridge/cloud-workspace-key";
 import {
   changesHistoryKey,
   changesHistorySchema,
@@ -420,9 +421,14 @@ export function persistChangesCount(workspaceId: string, count: number): void {
 
 /** Prune both persisted and in-memory snapshots for removed semantic owners. */
 export function forgetChangesSnapshots(workspaceIds: Iterable<string>): void {
-  const owners = new Set([...workspaceIds].filter(Boolean));
-  if (owners.size === 0) return;
+  const given = new Set([...workspaceIds].filter(Boolean));
+  if (given.size === 0) return;
+  // A cloud workspace of several repositories retains each repository's
+  // snapshots under its own key (`<workspace key>/<folder>`): they go with it.
+  const owned = (id: string) => given.has(id) || [...given].some(owner => isCloudWorkspace(owner) && id.startsWith(`${owner}/`));
   const payload = readPayload();
+  const owners = new Set([...given, ...payload.sections.map(entry => entry.workspaceId), ...payload.counts.map(entry => entry.workspaceId),
+    ...countCache.keys()].filter(owned));
   payload.sections = payload.sections.filter(
     (entry) => !owners.has(entry.workspaceId),
   );
@@ -432,7 +438,7 @@ export function forgetChangesSnapshots(workspaceIds: Iterable<string>): void {
   for (const key of [...sectionCache.keys()]) {
     try {
       const [workspaceId] = JSON.parse(key) as [string];
-      if (owners.has(workspaceId)) {
+      if (owned(workspaceId)) {
         sectionCache.delete(key);
         requestTokens.delete(key);
         for (const listener of sectionListeners.get(key) ?? []) listener();

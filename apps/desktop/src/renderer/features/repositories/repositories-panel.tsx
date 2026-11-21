@@ -144,6 +144,7 @@ import {
   type SettingsSource,
 } from "../settings/settings-ui";
 import { RunActionsSection } from "./run-actions-section";
+import { FetchSubmodulesSetting } from "./fetch-submodules-setting";
 import { FilesToCopySection } from "./files-to-copy-section";
 import { AddEnvVariableDialog } from "./add-env-variable-dialog";
 import { MCP_SECRET_SENTINEL } from "../agent-extensions/mcp-server-model";
@@ -1476,6 +1477,11 @@ function GitSection({
           </p>
         )}
       </SettingsSection>
+
+      {/* This Mac only; saved to the repository's personal settings. */}
+      <SettingsList>
+        <FetchSubmodulesSetting root={root} mainRepoRoot={mainRepoRoot} />
+      </SettingsList>
     </div>
   );
 }

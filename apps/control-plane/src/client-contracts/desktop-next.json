@@ -272,6 +272,133 @@
                   "type": "string",
                   "format": "uuid",
                   "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                },
+                "project": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                    },
+                    "name": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 100
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "name"
+                  ]
+                },
+                "root": {
+                  "type": "string"
+                },
+                "repositories": {
+                  "minItems": 2,
+                  "maxItems": 10,
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "repository": {
+                        "type": "string",
+                        "pattern": "^[^/]+\\/[^/]+$"
+                      },
+                      "checkoutPath": {
+                        "type": "string"
+                      },
+                      "branch": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 255
+                      },
+                      "baseBranch": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 255
+                      },
+                      "github": {
+                        "type": "object",
+                        "properties": {
+                          "repositoryId": {
+                            "type": "string",
+                            "pattern": "^[1-9][0-9]*$"
+                          },
+                          "branch": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "baseBranch": {
+                            "type": "string"
+                          },
+                          "headSha": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "prNumber": {
+                            "anyOf": [
+                              {
+                                "type": "integer",
+                                "exclusiveMinimum": 0,
+                                "maximum": 9007199254740991
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "prState": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "enum": [
+                                  "draft",
+                                  "ready",
+                                  "merged",
+                                  "closed"
+                                ]
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "prUrl": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "format": "uri"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          }
+                        },
+                        "required": [
+                          "repositoryId",
+                          "branch",
+                          "baseBranch",
+                          "headSha",
+                          "prNumber",
+                          "prState",
+                          "prUrl"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "repository",
+                      "checkoutPath",
+                      "branch",
+                      "baseBranch"
+                    ]
+                  }
                 }
               },
               "required": [
@@ -568,6 +695,133 @@
                 "type": "string",
                 "format": "uuid",
                 "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+              },
+              "project": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 100
+                  }
+                },
+                "required": [
+                  "id",
+                  "name"
+                ]
+              },
+              "root": {
+                "type": "string"
+              },
+              "repositories": {
+                "minItems": 2,
+                "maxItems": 10,
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "repository": {
+                      "type": "string",
+                      "pattern": "^[^/]+\\/[^/]+$"
+                    },
+                    "checkoutPath": {
+                      "type": "string"
+                    },
+                    "branch": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 255
+                    },
+                    "baseBranch": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 255
+                    },
+                    "github": {
+                      "type": "object",
+                      "properties": {
+                        "repositoryId": {
+                          "type": "string",
+                          "pattern": "^[1-9][0-9]*$"
+                        },
+                        "branch": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "baseBranch": {
+                          "type": "string"
+                        },
+                        "headSha": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "prNumber": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "exclusiveMinimum": 0,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "prState": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "enum": [
+                                "draft",
+                                "ready",
+                                "merged",
+                                "closed"
+                              ]
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "prUrl": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "format": "uri"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "repositoryId",
+                        "branch",
+                        "baseBranch",
+                        "headSha",
+                        "prNumber",
+                        "prState",
+                        "prUrl"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "repository",
+                    "checkoutPath",
+                    "branch",
+                    "baseBranch"
+                  ]
+                }
               }
             },
             "required": [

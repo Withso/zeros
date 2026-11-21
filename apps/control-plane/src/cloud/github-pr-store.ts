@@ -382,8 +382,14 @@ export class CloudGithubPrStore {
       LEFT JOIN cloud_v2_github_sources s ON s.workspace_id=r.workspace_id AND s.source_repository=lower(r.repository)
       LEFT JOIN cloud_v2_github_workspace_repositories g ON g.workspace_id=r.workspace_id AND g.repository_id=coalesce(r.repository_id, s.repository_id)
       WHERE r.workspace_id=ANY($1::uuid[]) ORDER BY r.workspace_id, r.position`, [several]);
-    const [rows, others] = await (transaction ? Promise.all([read(transaction), several.length ? readOthers(transaction) : null])
-      : withSystemTx(this.pool, async tx => [await read(tx), several.length ? await readOthers(tx) : null] as const));
+    // A project's current name, so a workspace is shown under its project after a rename (its folder keeps the old one).
+    const projectIds = [...new Set(workspaces.flatMap(workspace => workspace.projectId ? [workspace.projectId] : []))];
+    const readProjects = (tx: Tx) => tx.query<{ id: string; name: string }>("SELECT id, name FROM cloud_projects WHERE id=ANY($1::uuid[])", [projectIds]);
+    const [rows, others, projects] = await (transaction
+      ? Promise.all([read(transaction), several.length ? readOthers(transaction) : null, projectIds.length ? readProjects(transaction) : null])
+      : withSystemTx(this.pool, async tx => [await read(tx), several.length ? await readOthers(tx) : null,
+        projectIds.length ? await readProjects(tx) : null] as const));
+    const projectNames = new Map((projects?.rows ?? []).map(row => [row.id, row.name]));
     const metadata = new Map(rows.rows.map((row) => [row.workspace_id, row]));
     const repositoriesOf = new Map<string, Other[]>();
     for (const row of others?.rows ?? []) repositoriesOf.set(row.workspace_id, [...repositoriesOf.get(row.workspace_id) ?? [], row]);
@@ -410,6 +416,7 @@ export class CloudGithubPrStore {
         repository: row?.canonical_repository ?? workspace.repository,
         checkoutPath: workspaceCheckoutPath(workspace),
         ...(workspace.folder && repositories && repositories.length > 1 ? { root: workspaceRootPath(workspace), repositories } : {}),
+        ...(workspace.projectId && projectNames.has(workspace.projectId) ? { project: { id: workspace.projectId, name: projectNames.get(workspace.projectId)! } } : {}),
         updatedAt:
           row && row.updated_at.getTime() > Date.parse(workspace.updatedAt)
             ? row.updated_at.toISOString()
