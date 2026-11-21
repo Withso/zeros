@@ -47,10 +47,10 @@ interface ClaudeOptions {
   environment?: NodeJS.ProcessEnv;
   gitEnvironment?: NodeJS.ProcessEnv;
   interruptTimeoutMs?: number;
-  /** Claude Code's config directory, whose projects/ holds each native session, exactly as the
-   * spawned Claude process sees it. Unset skips the on-disk check (a resume proceeds as before);
-   * the worker sets it where it knows the agent's home. */
-  configDirectory?: string | null;
+  /** Check, before resuming, that Claude holds the native session on disk, in the config
+   * directory of the very environment the child is spawned with (childEnvironment). Off, a
+   * resume proceeds as before; the worker turns it on. */
+  checkNativeSessions?: boolean;
 }
 interface Process {
   query: NativeQuery; input: InputQueue<SDKUserMessage>;
@@ -94,7 +94,7 @@ export class ClaudeDriver implements Driver {
     if (input.proxy || !!input.oauthToken === !!input.apiKey) throw new Error("Provide one Claude OAuth token or API key.");
     if (input.nativeSessionId && !/^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i.test(input.nativeSessionId)) throw new Error("Invalid Claude session id.");
     // Claude reads a resumed session only at the first turn; one it does not have would fail that turn.
-    const fresh = !!input.nativeSessionId && await this.nativeSessionOnDisk(input.nativeSessionId, input.cwd) === false;
+    const fresh = !!input.nativeSessionId && await this.nativeSessionOnDisk(input.nativeSessionId, input) === false;
     if (this.input || this.disposed) throw new Error("Claude driver has already been opened.");
     this.input = input; this.nativeSessionId = input.nativeSessionId && !fresh ? input.nativeSessionId : randomUUID();
     this.resumed = !!input.nativeSessionId && !fresh; this.model = input.model;
@@ -105,13 +105,27 @@ export class ClaudeDriver implements Driver {
     return { nativeSessionId: this.nativeSessionId, ...(!this.resumed ? { provisional: true } : {}), ...(fresh ? { resumedFresh: true as const } : {}) };
   }
 
+  /** The environment the Claude child is spawned with. The on-disk check reads its config
+   * directory from this same value: application variables can never set HOME or
+   * CLAUDE_CONFIG_DIR (reserved names), and a context's own Git identity sets only GIT_*. */
+  private childEnvironment(session: DriverOpen): NodeJS.ProcessEnv {
+    return agentEnvironment(session.oauthToken ? { agent: "claude", oauthToken: session.oauthToken } : { agent: "claude", apiKey: session.apiKey! },
+      this.options.environment, session.gitEnvironment ? mergeGitEnvironment(this.options.gitEnvironment, session.gitEnvironment) : this.options.gitEnvironment,
+      session.application?.variables, session.zerosEnvironment);
+  }
+
   /** Whether Claude Code holds this session: exactly <config>/projects/<cwd as the SDK
    * encodes it>/<id>.jsonl, the id already checked as a UUID. Present costs one lstat;
    * a link at the file, or anywhere on the way when it is absent, is never followed and
    * answers undefined (resume as before), as does a cwd the SDK would hash. */
-  private async nativeSessionOnDisk(id: string, cwd: string): Promise<boolean | undefined> {
-    const config = this.options.configDirectory;
+  private async nativeSessionOnDisk(id: string, session: DriverOpen): Promise<boolean | undefined> {
+    if (!this.options.checkNativeSessions) return undefined;
+    let env: NodeJS.ProcessEnv;
+    // An environment the child could not start with fails at the first turn, as before.
+    try { env = this.childEnvironment(session); } catch { return undefined; }
+    const config = env.CLAUDE_CONFIG_DIR || (env.HOME ? join(env.HOME, ".claude") : undefined);
     if (!config || !config.startsWith("/")) return undefined;
+    const cwd = session.cwd;
     // The SDK's own project key; above 200 characters it appends a hash we do not reproduce.
     const project = cwd.replace(/[^a-zA-Z0-9]/g, "-");
     if (project.length > 200) return undefined;
@@ -269,7 +283,7 @@ export class ClaudeDriver implements Driver {
       settings: claudeSettings(this.effort, this.fast),
       ...(this.effort?.trim() === "max" ? { effort: "max" as const } : {}),
       ...(this.resumed ? { resume: this.nativeSessionId } : { sessionId: this.nativeSessionId }),
-      env: agentEnvironment(session.oauthToken ? { agent: "claude", oauthToken: session.oauthToken } : { agent: "claude", apiKey: session.apiKey! }, this.options.environment, session.gitEnvironment ? mergeGitEnvironment(this.options.gitEnvironment, session.gitEnvironment) : this.options.gitEnvironment, session.application?.variables, session.zerosEnvironment),
+      env: this.childEnvironment(session),
       permissionMode: claudePermissionMode(this.modeId),
       ...(fullAccessQuestions ? { permissionPromptToolName: "stdio" } : {}),
       ...(this.modeId === "bypass" ? { allowDangerouslySkipPermissions: true } : {

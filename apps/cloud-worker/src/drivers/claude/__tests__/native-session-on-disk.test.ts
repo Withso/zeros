@@ -16,14 +16,15 @@ vi.mock("node:fs/promises", async original => {
 import { ClaudeDriver } from "../driver";
 import { harness, input, nativeId, result, text } from "./fake-query";
 
-let config: string;
+let home: string, config: string;
 const drivers: ClaudeDriver[] = [];
 const project = join("projects", input.cwd.replace(/[^a-zA-Z0-9]/g, "-"));
-beforeEach(() => { config = mkdtempSync(join(tmpdir(), "zeros-claude-config-")); fs.lstat.mockClear(); });
-afterEach(async () => { for (const driver of drivers.splice(0)) await driver.dispose(); rmSync(config, { recursive: true, force: true }); });
+beforeEach(() => { home = mkdtempSync(join(tmpdir(), "zeros-claude-home-")); config = join(home, ".claude"); mkdirSync(config); fs.lstat.mockClear(); });
+afterEach(async () => { for (const driver of drivers.splice(0)) await driver.dispose(); rmSync(home, { recursive: true, force: true }); });
 
-function setup(configDirectory: string | null = config) {
-  const h = harness(), driver = new ClaudeDriver({ query: h.query, executable: "/fixture/claude", environment: { PATH: "/usr/bin" }, configDirectory });
+/** The check reads the HOME of the environment the driver spawns Claude with, as the worker runs it. */
+function setup(checkNativeSessions = true) {
+  const h = harness(), driver = new ClaudeDriver({ query: h.query, executable: "/fixture/claude", environment: { PATH: "/usr/bin", HOME: home }, checkNativeSessions });
   drivers.push(driver); return { driver, ...h };
 }
 const session = (id = nativeId) => { mkdirSync(join(config, project), { recursive: true }); writeFileSync(join(config, project, `${id}.jsonl`), "{}\n"); };
@@ -36,7 +37,25 @@ it("resumes a session Claude has on disk exactly as before, for one lstat", asyn
   expect(fs.lstat).toHaveBeenCalledWith(join(config, project, `${nativeId}.jsonl`));
   const turn = driver.prompt(text("hello")), query = queries[0]!, sent = await query.read();
   expect(query.args.options.resume).toBe(nativeId);
+  // The directory checked is the one the spawned child itself uses.
+  expect(join(query.args.options.env!.HOME!, ".claude", project, `${nativeId}.jsonl`)).toBe(fs.lstat.mock.calls[0]![0]);
+  expect(query.args.options.env).not.toHaveProperty("CLAUDE_CONFIG_DIR");
   query.push(result(sent.uuid)); await turn;
+});
+
+it("uses the same home for a shared-execution context: its Git identity and application variables cannot move it", async () => {
+  session();
+  const context = { gitEnvironment: { GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "user.name", GIT_CONFIG_VALUE_0: "Context Person" } };
+  const { driver, queries } = setup();
+  await expect(driver.open({ ...input, ...context })).resolves.toEqual({ nativeSessionId: nativeId });
+  expect(fs.lstat).toHaveBeenCalledWith(join(config, project, `${nativeId}.jsonl`));
+  const turn = driver.prompt(text("hello")), query = queries[0]!, sent = await query.read();
+  expect(query.args.options.env?.HOME).toBe(home);
+  query.push(result(sent.uuid)); await turn;
+  // No context can choose another home or config directory for the child: both names are refused before they reach a driver.
+  const { ApplicationEnvironment } = await import("../../../credentials/application-environment");
+  for (const name of ["HOME", "CLAUDE_CONFIG_DIR"])
+    expect(() => new ApplicationEnvironment({ variables: { [name]: "/tmp/elsewhere" }, files: [] })).toThrow("Invalid application environment.");
 });
 
 it("opens a fresh session, and says so, when Claude has none on disk for the chat", async () => {
@@ -62,6 +81,11 @@ it("never follows a link: a linked session file, or a linked directory on the wa
     rmSync(join(config, "projects"), { recursive: true });
     symlinkSync(elsewhere, join(config, "projects"));
     await expect(setup().driver.open(input)).resolves.toEqual({ nativeSessionId: nativeId });
+
+    rmSync(join(config, "projects"));
+    rmSync(config, { recursive: true });
+    symlinkSync(elsewhere, config);
+    await expect(setup().driver.open(input)).resolves.toEqual({ nativeSessionId: nativeId });
   } finally { rmSync(elsewhere, { recursive: true, force: true }); }
 });
 
@@ -71,8 +95,8 @@ it("refuses an id with path characters before touching the disk", async () => {
   expect(fs.lstat).not.toHaveBeenCalled();
 });
 
-it("keeps today's resume when it cannot tell: no config directory, or a cwd Claude would hash", async () => {
-  await expect(setup(null).driver.open(input)).resolves.toEqual({ nativeSessionId: nativeId });
+it("keeps today's resume when it is not asked to check, or cannot tell for a cwd Claude would hash", async () => {
+  await expect(setup(false).driver.open(input)).resolves.toEqual({ nativeSessionId: nativeId });
   await expect(setup().driver.open({ ...input, cwd: `/home/user/${"a".repeat(200)}` })).resolves.toEqual({ nativeSessionId: nativeId });
   expect(fs.lstat).not.toHaveBeenCalled();
   // A new chat never checks anything.
