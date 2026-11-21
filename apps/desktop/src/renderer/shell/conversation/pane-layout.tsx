@@ -92,6 +92,7 @@ import {
 import { prepareChatView } from "./chat-intent";
 import { onFocusedPaneSplitRequest } from "./pane-split-requests";
 import { PaneSessionBar } from "./session-switcher";
+import { buildSessionTree, sessionRootId } from "../../state/session-tree";
 import { warmCloudWorkspaceDestination } from "../../state/cloud-workspace-warmup";
 import { useInstantViewSwitch } from "../../shared/ui/use-instant-view-switch";
 import { useWorkspaceProvisioning } from "../../state/pending-workspaces";
@@ -1287,14 +1288,29 @@ function ChatPane({ paneId, ctx }: { paneId: string; ctx: PaneCtx }) {
     };
   }, [handlePaneActivation]);
 
+  const paneFolder = ctx.folder;
   // Native capture also reaches the portaled composer/terminal body. Only the
-  // pane containing keyboard focus owns Command+Left/Right.
+  // pane containing keyboard focus owns Command+Left/Right and Command+[/].
   useEffect(() => {
     const root = rootRef.current;
     if (!root) return;
     const handler = (event: KeyboardEvent) => {
       if (hasShortcutPriorityClaim() || navigationShortcutBlocked(event)) return;
       const shortcut = resolveNavigationShortcut(event);
+      if (shortcut?.kind === "parent-session") {
+        const state = useWorkspaceStore.getState();
+        if (state.activePage !== "workspace" || !state.activeChatId) return;
+        const tree = buildSessionTree(state.chats, paneFolder);
+        const parents = tree.roots.map(node => node.chat.id);
+        const current = parents.indexOf(sessionRootId(tree, state.activeChatId) ?? "");
+        if (current < 0) return;
+        const index = adjacentNavigationIndex(parents.length, current, shortcut.direction, true);
+        if (index === null) return;
+        event.preventDefault();
+        event.stopPropagation();
+        if (index !== current) onSelectChat(parents[index]);
+        return;
+      }
       if (shortcut?.kind !== "chat-tab") return;
       const state = useWorkspaceStore.getState();
       if (state.activePage !== "workspace") return;
@@ -1317,7 +1333,7 @@ function ChatPane({ paneId, ctx }: { paneId: string; ctx: PaneCtx }) {
     };
     root.addEventListener("keydown", handler, true);
     return () => root.removeEventListener("keydown", handler, true);
-  }, [onSelectChat, paneChats]);
+  }, [onSelectChat, paneChats, paneFolder]);
 
   const splitRightAllowed = !ctx.readOnly && canSplit.right && !atPaneCap;
   const splitDownAllowed = !ctx.readOnly && canSplit.down && !atPaneCap;
