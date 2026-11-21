@@ -73,7 +73,7 @@ export type CloudV2RouteDeps = {
   workspaceSync?: CloudWorkspaceSync;
   workspaceGithubReadTokens?: CloudWorkspaceGithubReadTokens;
   localDevices?: CloudLocalDeviceRoutes;
-  store: Pick<CloudV2Store, "activeComputer" | "createWorkspace" | "createWorkspaceOnce" | "readCreateReceipt" | "get" | "promptContext" | "list" | "requestLifecycle" | "transition" | "issueToken" | "listChats" | "messageWindow" | "searchMessages" | "messageRange" | "messageSince" | "markActive"> & Partial<Pick<CloudV2Store, "prompts" | "getByNumber" | "chatEdits" | "requestExecutionLifecycle">>;
+  store: Pick<CloudV2Store, "activeComputer" | "createWorkspace" | "createWorkspaceOnce" | "readCreateReceipt" | "get" | "promptContext" | "list" | "requestLifecycle" | "transition" | "issueToken" | "listChats" | "messageWindow" | "searchMessages" | "messageRange" | "messageSince" | "markActive"> & Partial<Pick<CloudV2Store, "prompts" | "getByNumber" | "chatEdits" | "requestExecutionLifecycle" | "dismissLostWork">>;
   /** Roll out only with a runtime that advertises durable prompt delivery. */
   promptOutbox?: boolean;
   computers: Pick<CloudV2Computers, "requireMember" | "requireAdmin" | "overview" | "enqueue" | "buildConfigured" | "buildSourceTargets" | "saveRecipe" | "discardRecipe" | "reactivate" | "log" | "logRepositories">
@@ -301,6 +301,13 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
     const running = workspace.state === "running";
     if (running) await deps.store.markActive(workspace.id);
     return c.json({ running });
+  });
+
+  /** Retention: the person has seen that a restore came back without some work (`lostWork`). */
+  if (deps.store.dismissLostWork) app.post("/v1/cloud-v2/workspaces/:id/lost-work/dismiss", async c => {
+    const id = uuid.safeParse(c.req.param("id"));
+    if (!id.success) throw new HttpError(404, "not_found", "Cloud workspace not found");
+    return c.json({ workspace: await document(await deps.store.dismissLostWork!(id.data, c.get("user").id)) });
   });
 
   /** History reads from the control plane's mirror; never wakes the VM. */

@@ -117,7 +117,7 @@ export type CloudV2LifecycleDeps = {
     | "beginRestore" | "replaceSandbox" | "finishRestore" | "checkpointUnchanged" | "claimCheckpointRetry" | "beginCheckpointFork"
     | "checkpointForkCreated" | "checkpointForkGone" | "checkpointRetryNext"
     // Retention (`retention`); absent from older compositions, which never enable it.
-    | "recordStopProbe" | "restoreForkRefused" | "replaceLostSandbox" | "workspaceBranches">;
+    | "recordStopProbe" | "restoreForkRefused" | "replaceLostSandbox" | "workspaceBranches" | "recordLostWork">;
   /** Optional for older compositions; the shipped store always provides it. */
   prompts?: CloudV2Store["prompts"];
   pruneEnvironments?: () => Promise<void>;
@@ -458,7 +458,8 @@ export class CloudV2Lifecycle {
         : workspace.state === "deleting" ? { expectedSandboxId: workspace.boatSandboxId } : {};
       // Retrying cannot wake or stop a VM that is gone; say so at once. With a
       // checkpoint the next attempt restores instead.
-      if ((workspace.state === "starting" || workspace.state === "stopping") && workspace.boatSandboxId && sandboxLost(error) && !workspace.checkpoint) {
+      if ((workspace.state === "starting" || workspace.state === "stopping") && workspace.boatSandboxId && sandboxLost(error) && !workspace.checkpoint
+        && !(this.retention && workspace.executionIntent === undefined)) {
         await this.deps.store.transition(workspace.id, [workspace.state], "failed", { errorCode: "sandbox_missing", revoke: true, ...fence });
       } else if ((code === "cloud_source_checkout_failed" || code === "github_access_required") && (workspace.state === "creating" || workspace.state === "starting")) {
         await this.deps.store.transition(workspace.id, [workspace.state], "failed", { errorCode: code });
@@ -629,7 +630,10 @@ export class CloudV2Lifecycle {
           // Retention: in the hour before a stop's backup, a lost VM restores the last earlier one.
           const earlier = this.retention && workspace.checkpoint?.stopGeneration !== workspace.stopGeneration;
           await this.measure(workspace, "checkpoint_restore", () => this.applyCheckpoint(workspace, sandboxId!), () => earlier ? { checkpoint: "earlier" } : {});
-          if (earlier) this.deps.logger?.warn(`[cloud-v2] restored an earlier backup or checkpoint: the latest stop had none yet workspace=${workspace.id.slice(0, 8)}`);
+          if (earlier) {
+            this.deps.logger?.warn(`[cloud-v2] restored an earlier backup or checkpoint: the latest stop had none yet workspace=${workspace.id.slice(0, 8)}`);
+            await store.recordLostWork(workspace.id, "earlier");
+          }
           if (!await store.finishRestore(workspace.id, sandboxId)) return;
         }
         if (!await (routed ?? route())) return;
@@ -652,8 +656,8 @@ export class CloudV2Lifecycle {
           if (!await store.stopCurrent(workspace.id, workspace.stopGeneration)) return;
           try { await compute.stop(sandboxId); stoppedAt = await this.untilArchived(sandboxId); }
           catch (error) {
-            // Nothing is left to stop; the next wake restores the checkpoint.
-            if (!sandboxLost(error) || !(workspace.checkpoint || saved)) throw error;
+            // Nothing is left to stop; the next wake restores the checkpoint, or under retention rebuilds without one.
+            if (!sandboxLost(error) || !(workspace.checkpoint || saved || (this.retention && workspace.executionIntent === undefined))) throw error;
           }
         }
         // Credentials go only with this stop's own completion. Retention keeps
@@ -1025,10 +1029,11 @@ export class CloudV2Lifecycle {
     }
   }
 
-  /** Retention: the latest stop left nothing that is not on GitHub, so a lost VM
-   * starts again without a checkpoint. Shared execution keeps today's behavior. */
+  /** Retention: a lost VM starts again without a checkpoint when the latest stop left nothing that
+   * is not on GitHub, or when there is no backup at all (then the loss is recorded on the workspace,
+   * never a dead end). Shared execution keeps today's behavior. */
   private cleanRestore(workspace: CloudV2LifecycleWorkspace): boolean {
-    return this.retention && workspace.stopProbe === "clean" && !workspace.restorePending && workspace.executionIntent === undefined;
+    return this.retention && (workspace.stopProbe === "clean" || !workspace.checkpoint) && !workspace.restorePending && workspace.executionIntent === undefined;
   }
 
   /** Retention's replacement for a lost VM whose workspace had nothing off GitHub at

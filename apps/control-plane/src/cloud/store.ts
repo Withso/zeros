@@ -125,6 +125,9 @@ export type CloudV2Workspace = {
   /** workspace-layout.ts: the first checkout under /home/user, and the project folder when it holds several repositories. */
   checkoutFolder?: string;
   folder?: string;
+  /** Retention: a lost VM came back without the work of the stop at `stoppedAt`: nothing of it
+   * (rebuilt from GitHub) or an earlier backup instead. Until dismissed or the next backup. */
+  lostWork?: { restored: "none" | "earlier"; stoppedAt: string };
 };
 
 /** What a checkpoint is compared by at the next stop: the fingerprint of what
@@ -208,6 +211,7 @@ export type CloudV2WorkspaceRow = {
   agent_cost_usd: string; agent_cost_turns: string; agent_cost_estimated_turns: string;
   private_owner_user_id?: string | null;
   project_id?: string | null;
+  lost_work_restored?: "none" | "earlier" | null; lost_work_since?: Date | null;
   checkout_path?: string | null;
   folder?: string | null;
 };
@@ -215,7 +219,8 @@ type Row = CloudV2WorkspaceRow;
 
 const WORKSPACE_COLUMNS_SQL = sql`id, org_id, creator_user_id, name, number, title, repository, branch, base_branch, state, boat_sandbox_id,
   computer_build_id, error_code, active_at, archived_at, created_at, updated_at, source_pending, created_by_session_id, setup_status,
-  agent_cost_usd, agent_cost_turns, agent_cost_estimated_turns, private_owner_user_id, project_id, checkout_path, folder`;
+  agent_cost_usd, agent_cost_turns, agent_cost_estimated_turns, private_owner_user_id, project_id, checkout_path, folder,
+  lost_work_restored, lost_work_since`;
 const COLUMNS = WORKSPACE_COLUMNS_SQL.text;
 export const CLOUD_V2_WORKSPACE_COLUMNS = COLUMNS.split(",").map(value => value.trim());
 
@@ -279,7 +284,10 @@ export function cloudV2LifecycleWorkspaceFromRow(row: LifecycleRow): CloudV2Life
     stopGeneration: row.stop_generation, checkpointUploadUntil: uploadHorizon(row.checkpoint_uploads),
     checkpointRetryFork: checkpointFork(row.checkpoint_retry_fork),
     ...(row.backup_probe && row.backup_probe_generation === row.stop_generation ? { stopProbe: row.backup_probe } : {}),
-    ...(row.worker_off_unverified_at ? { workerOffUnverified: true as const } : {}) };
+    // Unverified unless this generation's stop ran the verified worker-off step: Boat's own stop,
+    // a restore-pending stop and one from before retention never did.
+    ...(row.worker_off_unverified_at || (row.backup_probe_generation !== undefined && row.backup_probe_generation !== row.stop_generation)
+      ? { workerOffUnverified: true as const } : {}) };
 }
 const lifecycleWorkspace = cloudV2LifecycleWorkspaceFromRow;
 
@@ -321,6 +329,7 @@ function workspace(row: Row): CloudV2Workspace {
     ...(row.project_id ? { projectId: row.project_id } : {}),
     ...(row.checkout_path ? { checkoutFolder: row.checkout_path } : {}),
     ...(row.folder ? { folder: row.folder } : {}),
+    ...(row.lost_work_restored && row.lost_work_since ? { lostWork: { restored: row.lost_work_restored, stoppedAt: row.lost_work_since.toISOString() } } : {}),
   };
 }
 export { workspace as cloudV2WorkspaceFromRow };
@@ -1407,7 +1416,8 @@ export class CloudV2Store {
       const reuse = checkpoint.reuse ? { object: checkpoint.object, fingerprint: checkpoint.reuse.fingerprint, base: checkpoint.reuse.base } : null;
       await tx.query(
         `UPDATE cloud_v2_workspaces SET checkpoint_object=$2, checkpoint_key=$3, checkpoint_sha256=$4, checkpoint_bytes=$5, checkpoint_reuse=$6,
-           checkpoint_saved_at=clock_timestamp(), checkpoint_stop_generation=stop_generation, checkpoint_error=NULL WHERE id=$1`,
+           checkpoint_saved_at=clock_timestamp(), checkpoint_stop_generation=stop_generation, checkpoint_error=NULL,
+           lost_work_restored=NULL, lost_work_since=NULL WHERE id=$1`,
         [id, checkpoint.object, JSON.stringify(checkpoint.key), checkpoint.sha256, checkpoint.bytes, reuse ? JSON.stringify(reuse) : null]);
       return { replaced: rows[0].checkpoint_object };
     });
@@ -1599,14 +1609,38 @@ export class CloudV2Store {
     return Boolean(result.rowCount);
   }
 
-  /** Retention: a lost VM's replacement for a workspace whose latest stop left nothing off GitHub. It
+  /** Retention: a lost VM's replacement for a workspace whose latest stop left nothing off GitHub, or
+   * that has no backup at all (then it records that the latest stop's work did not come back). It
    * needs no checkpoint and no pending restore: it is recorded only once it holds the workspace. */
   async replaceLostSandbox(id: string, lostSandboxId: string | null, sandboxId: string, renewedAt: Date): Promise<boolean> {
     const result = await withSystemTx(this.pool, tx => tx.query(
-      `UPDATE cloud_v2_workspaces SET boat_sandbox_id=$3, lease_renewed_at=$4
+      `UPDATE cloud_v2_workspaces SET boat_sandbox_id=$3, lease_renewed_at=$4,
+         lost_work_restored=CASE WHEN backup_probe='clean' AND backup_probe_generation=stop_generation THEN lost_work_restored ELSE 'none' END,
+         lost_work_since=CASE WHEN backup_probe='clean' AND backup_probe_generation=stop_generation THEN lost_work_since ELSE coalesce(stopped_at, updated_at) END
        WHERE id=$1 AND state='starting' AND boat_sandbox_id IS NOT DISTINCT FROM $2::text AND NOT restore_pending
-         AND backup_probe='clean' AND backup_probe_generation=stop_generation`, [id, lostSandboxId, sandboxId, renewedAt]));
+         AND ((backup_probe='clean' AND backup_probe_generation=stop_generation) OR checkpoint_object IS NULL)`, [id, lostSandboxId, sandboxId, renewedAt]));
     return Boolean(result.rowCount);
+  }
+
+  /** Retention: a restore brought back an earlier backup or checkpoint, not the latest stop's work. */
+  async recordLostWork(id: string, restored: "earlier"): Promise<void> {
+    await withSystemTx(this.pool, tx => tx.query(
+      "UPDATE cloud_v2_workspaces SET lost_work_restored=$2, lost_work_since=coalesce(stopped_at, updated_at) WHERE id=$1", [id, restored]));
+  }
+
+  /** The person has seen that a restore came back without some work. */
+  async dismissLostWork(id: string, userId: string): Promise<CloudV2Workspace> {
+    await this.get(id, userId);
+    const { rows } = await withSystemTx(this.pool, tx => tx.query<Row>(
+      `UPDATE cloud_v2_workspaces SET lost_work_restored=NULL, lost_work_since=NULL WHERE id=$1 RETURNING ${COLUMNS}`, [id]));
+    if (!rows[0]) throw notFound();
+    return workspace(rows[0]);
+  }
+
+  /** One workspace's lifecycle row, as the lifecycle reads it. */
+  async lifecycleWorkspace(id: string): Promise<CloudV2LifecycleWorkspace | null> {
+    const { rows } = await withSystemTx(this.pool, tx => tx.query<LifecycleRow>(`SELECT ${LIFECYCLE_COLUMNS} FROM cloud_v2_workspaces WHERE id=$1`, [id]));
+    return rows[0] ? lifecycleWorkspace(rows[0]) : null;
   }
 
   /** Every repository's workspace branch, first repository first, for a restore that starts without a checkpoint. */

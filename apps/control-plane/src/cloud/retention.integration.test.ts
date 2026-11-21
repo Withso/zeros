@@ -188,6 +188,75 @@ d("cloud v2 retention", () => {
     expect(errors.some(line => line.includes("backup fork refused: its worker unit is on"))).toBe(true);
   });
 
+  const lostWork = async () => (await store.get(id, user)).lostWork;
+
+  it("rebuilds from GitHub when the VM is lost before a dirty stop's backup, and records that nothing came back", async () => {
+    remoteBranches.add(path("app"));
+    boat.write(vm, `${path("api")}/UNPUSHED`, "api work");
+    await stop();
+    const stoppedAt = (await row()).stopped_at;
+    boat.machine(vm)!.state = "deleted";
+    await wake();
+    const restored = await row();
+    expect(restored.state).toBe("starting");
+    expect(restored.boat_sandbox_id).not.toBe(vm);
+    const replacement = boat.machine(restored.boat_sandbox_id)!;
+    expect(replacement.source).toBe(readyCopy);
+    expect(replacement.files.get(`${path("app")}/.git/refs/heads/zeros/w`)).toBe("from GitHub");
+    expect(replacement.files.has(`${path("api")}/UNPUSHED`)).toBe(false);
+    expect(await lostWork()).toEqual({ restored: "none", stoppedAt: stoppedAt.toISOString() });
+  });
+
+  it("restores the earlier checkpoint when the VM is lost before the backup, and records that the latest stop's work is missing", async () => {
+    const object = `cloud-v2/checkpoints/${id}/${randomUUID()}.zck`;
+    archives.set(object, new Map([[`${path("app")}/UNPUSHED`, "older work"]]));
+    await pool.query(`UPDATE cloud_v2_workspaces SET checkpoint_object=$2, checkpoint_key='{"sealed":true}', checkpoint_sha256=$3, checkpoint_bytes=100,
+      checkpoint_saved_at=clock_timestamp(), checkpoint_stop_generation=stop_generation WHERE id=$1`, [id, object, "e".repeat(64)]);
+    boat.write(vm, `${path("app")}/UNPUSHED`, "newer work");
+    await stop();
+    const stoppedAt = (await row()).stopped_at;
+    boat.machine(vm)!.state = "deleted";
+    await wake();
+    expect(boat.machine((await row()).boat_sandbox_id)!.files.get(`${path("app")}/UNPUSHED`)).toBe("older work");
+    expect(await lostWork()).toEqual({ restored: "earlier", stoppedAt: stoppedAt.toISOString() });
+    // The person dismisses it; it does not come back on its own.
+    await store.dismissLostWork(id, user);
+    expect(await lostWork()).toBeUndefined();
+  });
+
+  it("finishes a stop whose VM is already gone, and the next wake rebuilds it", async () => {
+    boat.write(vm, `${path("api")}/UNPUSHED`, "api work");
+    await store.transition(id, ["running"], "stopping");
+    boat.machine(vm)!.state = "deleted";
+    await lifecycle().tick();
+    expect((await row()).state).toBe("stopped");
+    await wake();
+    const restored = await row();
+    expect(restored.boat_sandbox_id).not.toBe(vm);
+    expect(boat.machine(restored.boat_sandbox_id)!.source).toBe(readyCopy);
+    expect((await lostWork())?.restored).toBe("none");
+  });
+
+  it("clears the note at the next successful backup", async () => {
+    await pool.query("UPDATE cloud_v2_workspaces SET lost_work_restored='none', lost_work_since=clock_timestamp() - interval '1 day' WHERE id=$1", [id]);
+    expect((await lostWork())?.restored).toBe("none");
+    boat.write(vm, `${path("api")}/UNPUSHED`, "api work");
+    await stop();
+    await earlier(CLOUD_V2_BACKUP_DELAY_MS + 60_000);
+    await lifecycle().tick();
+    expect((await row()).checkpoint_object).toMatch(OBJECT);
+    expect(await lostWork()).toBeUndefined();
+  });
+
+  it("treats every stop without its verified worker-off step as unverified, the provider's own stop included", async () => {
+    await stop();
+    expect((await store.lifecycleWorkspace(id))?.workerOffUnverified).toBeUndefined();
+    // Boat archived the VM on its own (a lease or provider stop): no step ran.
+    await store.transition(id, ["stopped"], "starting");
+    await pool.query("UPDATE cloud_v2_workspaces SET state='stopped', stop_generation=stop_generation+1 WHERE id=$1", [id]);
+    expect((await store.lifecycleWorkspace(id))?.workerOffUnverified).toBe(true);
+  });
+
   it("with the switch off, still checkpoints at the stop exactly as before", async () => {
     await store.transition(id, ["running"], "stopping");
     await lifecycle({ retention: false }).tick();
