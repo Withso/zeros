@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Tabs</title>
+<template data-zd-options>
+<zd-option name="selected" type="choice" label="Selected tab" choices="overview activity members settings" default="overview"></zd-option>
+<zd-option name="count" type="number" label="Activity count" default="3" min="0" max="99" step="1"></zd-option>
+<zd-option name="settings" type="boolean" label="Settings tab" default="true"></zd-option>
+<zd-option name="underline" type="color" label="Underline" default="var(--accent)"></zd-option>
+<zd-derive name="tabs" value="settings ? ['overview', 'activity', 'members', 'settings'] : ['overview', 'activity', 'members']"></zd-derive>
+<zd-variant name="activity" selected="activity" count="12"></zd-variant>
+<zd-variant name="read-only" settings="false" count="0"></zd-variant>
+</template>
+<link rel="stylesheet" href="../tokens.css">
+<link rel="stylesheet" href="../ui.css">
+<style>
+zd-tabs { display: block; }
+.tabs { display: flex; gap: var(--space-1); width: 100%; box-shadow: inset 0 -1px 0 var(--border-subtle); }
+.tab { display: inline-flex; align-items: center; gap: var(--space-2); padding: var(--space-2) var(--space-3); border-bottom: 2px solid transparent; color: var(--fg-muted); font-size: var(--text-small); font-weight: var(--weight-medium); text-transform: capitalize; }
+.tab[aria-selected="true"] { border-bottom-color: var(--zd-underline); color: var(--fg-strong); }
+</style>
+</head>
+<body class="stage">
+<div class="tabs" data-oid="tabs" data-name="Tabs" role="tablist">
+<span class="tab" data-oid="tab" data-name="Tab" role="tab" data-zd-for="t in tabs" aria-selected="{{ t == selected }}">{{ t }}<span class="badge badge--soft badge--info" data-oid="tab-count" data-zd-if="t == 'activity' && count > 0">{{ count }}</span></span>
+</div>
+</body>
+</html>

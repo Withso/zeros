@@ -21,7 +21,8 @@ import {
   type ComponentExpressionBudget,
   type ComponentExpressionValue,
 } from "@zeros/design-core/components";
-import { DESIGN_COMPONENT_BOUND_TEXT_LIMIT, DESIGN_COMPONENT_RECORD_LIMITS } from "@zeros/protocol/design-catalog";
+import { DESIGN_COMPONENT_BOUND_TEXT_LIMIT, DESIGN_COMPONENT_RECORD_LIMITS, type DesignComponentBindings } from "@zeros/protocol/design-catalog";
+import { componentBindingsOf } from "./component-bindings";
 import { designSlotOptionElement, designSlotsOfNodes, withDesignSlotOptions } from "./component-slots";
 
 export const COMPONENT_TEMPLATE_LIMITS = Object.freeze({
@@ -288,6 +289,9 @@ export interface DesignComponentSummary {
    * reads, through any derived value (none for a loop's own name). A person
    * cannot type over them. */
   boundText?: Record<string, string[]>;
+  /** Which controls each layer reads (component-bindings.ts). Sent only to
+   * renderers that negotiated them. */
+  bindings?: DesignComponentBindings;
 }
 
 /** The options an expression reads, through derived values. */
@@ -371,5 +375,6 @@ export function designComponentSummaryOf(source: string): DesignComponentSummary
     }
   }
   const boundText = boundTextOf(document, declaration);
-  return { elements, reach: componentOptionReach(declaration, names), ...(boundText ? { boundText } : {}) };
+  const bindings = componentBindingsOf(document, declaration);
+  return { elements, reach: componentOptionReach(declaration, names), ...(boundText ? { boundText } : {}), ...(bindings ? { bindings } : {}) };
 }

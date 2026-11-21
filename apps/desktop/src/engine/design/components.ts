@@ -1116,7 +1116,7 @@ function recordInstance(
   recordHost(usage, definition.name, instance, new Set([...declaration.options.map((option) => option.name), COMPONENT_VARIANT_ATTRIBUTE]), () => {
     const summary = definition.template.summary?.() ?? null;
     return { elements: withDesignSlotOptions(summary?.elements ?? [], shape.names, designSlotOptionElement), reach: summary?.reach ?? {},
-      file, frame: registry.get(definition.name) === file };
+      file, frame: registry.get(definition.name) === file, ...(summary?.bindings ? { bindings: summary.bindings } : {}) };
   }, { ...(failed ? { failed: true } : {}), ...(text !== undefined ? { text, ...(mixedChildren(instance) ? { mixedText: true as const } : {}) } : {}), ...(slotted ? { slotted } : {}) });
 }
 

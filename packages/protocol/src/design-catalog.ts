@@ -318,6 +318,53 @@ export const DESIGN_INSTANCE_SLOT_TEXT_PARAM = "instanceSlotText";
 /** Template holes, not the author, set these layers' text; a loop-only binding can list no options. */
 export const DESIGN_COMPONENT_BOUND_TEXT_LIMIT = 512;
 
+/** Advertises which controls each main layer reads (`bindings`), Local engines only. */
+export const DESIGN_COMPONENT_BINDINGS_CAPABILITY = "design.component-bindings.v1";
+/** Negotiated request flag: the renderer reads `bindings`; without it every reply omits them. */
+export const DESIGN_COMPONENT_BINDINGS_PARAM = "componentBindings";
+/** Bounds on a record's `bindings`, enforced while collecting: past one, entries are dropped and
+ * `truncated` is set; the declaration (`elements`, `reach`) is never affected. */
+export const DESIGN_COMPONENT_BINDINGS_LIMITS = Object.freeze({
+  layers: 256,
+  /** Options one entry lists. */
+  options: 8,
+  /** Properties one layer's `styles` lists. */
+  styles: 16,
+  property: 128,
+  vars: 64,
+  gates: 64,
+  unread: 64,
+  /** The serialized `bindings` of one record. */
+  bytes: 65_536,
+});
+const BINDINGS = DESIGN_COMPONENT_BINDINGS_LIMITS;
+const bindingOptionsSchema = z.array(z.string().min(1).max(LIMITS.optionName)).min(1).max(BINDINGS.options);
+/** Which controls each layer of a main reads: by its data-oid (a part's id without its "#n"). */
+export const designComponentBindingsSchema = z.object({
+  /** The main's one root layer, which an instance's host stands for; absent with several roots. */
+  root: z.string().min(1).max(LIMITS.layerId).optional(),
+  layers: boundedRecord(z.string().min(1).max(LIMITS.layerId), z.object({
+    /** Options a direct text hole reads. */
+    text: bindingOptionsSchema.optional(),
+    /** Options data-zd-if or data-zd-for on the layer (or a template wrapping it) reads. */
+    visible: bindingOptionsSchema.optional(),
+    /** Options attribute holes read, class holes included. */
+    attributes: bindingOptionsSchema.optional(),
+    /** CSS property (or custom property the layer sets) to the options its declaration reaches:
+     * through var(--zd-*), the custom properties in `vars`, or a selector testing a `gates` attribute. */
+    styles: boundedRecord(z.string().min(1).max(BINDINGS.property), bindingOptionsSchema, BINDINGS.styles).optional(),
+  }).strict(), BINDINGS.layers),
+  /** Custom properties of the main's own CSS that reach controls, for winners read from other sheets. */
+  vars: boundedRecord(z.string().regex(/^--[A-Za-z0-9_-]{1,126}$/), bindingOptionsSchema, BINDINGS.vars).optional(),
+  /** Attributes a hole fills on some layer ("class" for class holes) to the options it reads. */
+  gates: boundedRecord(z.string().min(1).max(LIMITS.attributeName), bindingOptionsSchema, BINDINGS.gates).optional(),
+  /** Some layers or entries were dropped at a limit: a layer missing here may still be bound. */
+  truncated: z.literal(true).optional(),
+  /** Declared options nothing in the main reads. */
+  unread: z.array(z.string().min(1).max(LIMITS.optionName)).max(BINDINGS.unread).optional(),
+}).strict();
+export type DesignComponentBindings = z.infer<typeof designComponentBindingsSchema>;
+
 /** Carries authored options, their CSS or structural reach, and the fallback when values fail. */
 export const designFrameComponentSchema = z.object({
   elements: declarationElementsSchema,
@@ -325,6 +372,8 @@ export const designFrameComponentSchema = z.object({
   notApplied: notAppliedSchema.optional(),
   boundText: boundedRecord(z.string().min(1).max(LIMITS.layerId),
     z.array(z.string().min(1).max(LIMITS.optionName)).max(LIMITS.boundTextOptions), DESIGN_COMPONENT_BOUND_TEXT_LIMIT).optional(),
+  /** Sent only to a renderer that negotiated DESIGN_COMPONENT_BINDINGS_PARAM. */
+  bindings: designComponentBindingsSchema.optional(),
   /** The declaration is past this limit: `elements` and `reach` are empty,
    * there is no `boundText`, and the frame still renders. */
   exceeds: recordLimitSchema.optional(),
@@ -346,12 +395,18 @@ export function designComponentRecordWithinLimits<T extends { elements: unknown[
 ): T | (Omit<T, "boundText"> & { exceeds: DesignComponentRecordLimit }) {
   const parsed = schema.safeParse(record);
   if (parsed.success) return record;
+  // Bindings are bounded while collecting; one that still fails is dropped
+  // alone, so the controls stay listed.
+  if (parsed.error.issues.every((entry) => entry.path[0] === "bindings") && "bindings" in record) {
+    const { bindings: _dropped, ...withoutBindings } = record as T & { bindings?: unknown };
+    return designComponentRecordWithinLimits(withoutBindings as T, schema);
+  }
   const issue = parsed.error.issues[0]!;
   const at = issue.path.join(".");
   // Unmapped issues are treated as declaration-shape errors.
   const exceeds = LIMIT_PATHS.find(([pattern]) => pattern.test(at))?.[1] ?? "elements";
-  const { boundText: _omitted, ...rest } = record;
-  return { ...rest, elements: [], reach: {}, exceeds };
+  const { boundText: _omitted, bindings: _bindings, ...rest } = record as T & { bindings?: unknown };
+  return { ...rest, elements: [], reach: {}, exceeds } as Omit<T, "boundText"> & { exceeds: DesignComponentRecordLimit };
 }
 
 export function designComponentRecordLimitMessage(component: string, limit: DesignComponentRecordLimit): string {
@@ -383,6 +438,8 @@ export const designFrameInstanceComponentSchema = z.object({
   frame: z.boolean(),
   /** As on a main frame's record: its declaration is past this limit. */
   exceeds: recordLimitSchema.optional(),
+  /** As on a main frame's record; sent only to a renderer that negotiated them. */
+  bindings: designComponentBindingsSchema.optional(),
 }).strict();
 
 export const designFrameInstancesSchema = z.object({

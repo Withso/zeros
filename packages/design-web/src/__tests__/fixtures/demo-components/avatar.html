@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Avatar</title>
+<template data-zd-options>
+<zd-option name="initials" type="text" label="Initials" default="AR"></zd-option>
+<zd-option name="size" type="number" label="Size" default="40" min="24" max="72" step="4" unit="px"></zd-option>
+<zd-option name="shape" type="choice" label="Shape" choices="circle rounded square" default="circle"></zd-option>
+<zd-option name="status" type="choice" label="Status" choices="none online away busy" choice-labels="None|Online|Away|Busy" default="online"></zd-option>
+<zd-option name="ring" type="boolean" label="Ring" group="Ring" default="false"></zd-option>
+<zd-option name="ring-color" type="color" label="Ring colour" group="Ring" default="var(--accent)"></zd-option>
+<zd-derive name="font" value="round(size * 0.38)" unit="px"></zd-derive>
+<zd-derive name="dot-size" value="max(8, round(size / 4))" unit="px"></zd-derive>
+<zd-variant name="small" size="24" status="none"></zd-variant>
+<zd-variant name="large" size="64" ring="true"></zd-variant>
+<zd-variant name="team" shape="rounded" status="none" initials="OW"></zd-variant>
+</template>
+<link rel="stylesheet" href="../tokens.css">
+<link rel="stylesheet" href="../ui.css">
+<style>
+.avatar-wrap { position: relative; display: inline-flex; vertical-align: middle; }
+.avatar-wrap .avatar { width: var(--zd-size); height: var(--zd-size); font-size: var(--zd-font); line-height: 1; }
+.avatar-wrap[data-shape="rounded"] .avatar { border-radius: var(--radius-md); }
+.avatar-wrap[data-shape="square"] .avatar { border-radius: var(--radius-sm); }
+.avatar-wrap[data-ring="true"] .avatar { box-shadow: 0 0 0 2px var(--bg-surface), 0 0 0 4px var(--zd-ring-color); }
+.avatar-status { position: absolute; right: -1px; bottom: -1px; width: var(--zd-dot-size); height: var(--zd-dot-size); border: 2px solid var(--bg-surface); border-radius: var(--radius-full); }
+.avatar-status[data-status="online"] { background: var(--success); }
+.avatar-status[data-status="away"] { background: var(--warning); }
+.avatar-status[data-status="busy"] { background: var(--danger); }
+</style>
+</head>
+<body class="stage">
+<span class="avatar-wrap" data-oid="avatar" data-name="Avatar" data-shape="{{ shape }}" data-ring="{{ ring }}">
+<span class="avatar" data-oid="avatar-initials" data-name="Initials">{{ initials }}</span>
+<span class="avatar-status" data-oid="avatar-status" data-name="Status dot" data-status="{{ status }}" data-zd-if="status != 'none'"></span>
+</span>
+</body>
+</html>
