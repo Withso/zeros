@@ -106,6 +106,27 @@ export async function persistAuthenticationPrompt(
     throw new Error("Could not save the message for retry.");
 }
 
+/** Persist one Zeros-authored transcript row (a user-applied agent switch)
+ * through the engine's message upsert. */
+export async function persistTranscriptRow(
+  bridge: import("../../platform/bridge/ws-client").RuntimeClient,
+  chatId: string,
+  message: import("./use-agent-session").AgentMessage,
+): Promise<void> {
+  const result = (await workspaceOp(bridge, "messages.import", {
+    chatId,
+    messages: [
+      {
+        msgId: message.id,
+        kind: message.kind,
+        payload: JSON.stringify(message),
+        createdAt: message.createdAt,
+      },
+    ],
+  })) as { imported?: number };
+  if (result.imported !== 1) throw new Error("Could not save the switch.");
+}
+
 export async function windowMessages(
   chatId: string,
   limit: number,
