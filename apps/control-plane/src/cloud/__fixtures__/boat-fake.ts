@@ -134,11 +134,12 @@ export class FakeBoat implements CloudV2Compute {
       ...(machine.state === "archived" ? { snapshotAvailable: true, dataExpiredAt: null } : {}) };
   }
 
-  async resume(sandboxId: string) {
-    this.record("resume", sandboxId);
+  async resume(sandboxId: string, ttlSeconds?: number) {
+    this.record("resume", sandboxId, ...(ttlSeconds === undefined ? [] : [ttlSeconds]));
     const machine = this.live(sandboxId);
     if (machine.cold) { machine.worker.active = machine.worker.enabled; machine.cold = false; }
-    machine.state = "running"; machine.leaseUntil = null;
+    // Boat's lease is the resume's ttl; boat.ts sends 24 hours when none is given.
+    machine.state = "running"; machine.leaseUntil = this.clock() + (ttlSeconds ?? 24 * 60 * 60) * 1000;
   }
 
   async extendLease(sandboxId: string) { this.record("extendLease", sandboxId); this.live(sandboxId); }

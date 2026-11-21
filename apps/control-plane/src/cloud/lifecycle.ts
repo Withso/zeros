@@ -65,6 +65,17 @@ export const CLOUD_V2_BACKUP_DELAY_MS = 60 * 60_000;
 /** Retention: backup forks begun per hour, across the deployment. Boat counts forks as creation
  * requests (its 12-a-minute and 200-a-day limits); creates and wakes keep the rest. */
 export const CLOUD_V2_BACKUP_FORKS_PER_HOUR = 20;
+/** Retention S2: the shared budget of maintenance machine starts (wakes and backup forks). Boat counts
+ * creates, forks and resumes against 12 a minute and 200 a day (Alpha), so creates and user wakes keep
+ * at least 80 of the day's 200. */
+export const CLOUD_V2_MAINTENANCE_PER_HOUR = 20;
+export const CLOUD_V2_MAINTENANCE_PER_DAY = 120;
+/** A maintenance wake's own lease: if our stop fails, Boat archives the machine after this. */
+export const CLOUD_V2_MAINTENANCE_LEASE_SECONDS = 300;
+/** A maintenance mark older than this belongs to a step that died; a user wake or the next claim takes over. */
+export const CLOUD_V2_MAINTENANCE_STALE_MS = 10 * 60_000;
+/** A user wake that finds a maintenance stop under way waits this long between checks. */
+const MAINTENANCE_WAIT_MS = 5_000;
 /** Retention: before rebuilding a workspace whose unbacked work only its machine held, the
  * machine must read as gone twice this far apart, after the resume that failed. */
 export const CLOUD_V2_LOSS_CONFIRM_MS = 30_000;
@@ -88,7 +99,7 @@ export const CLOUD_V2_WORKER_TOKEN_PATH = "/home/user/.config/zeros/worker-token
 /** Non-secret boot settings for the worker's systemd unit (EnvironmentFile). */
 export const CLOUD_V2_WORKER_ENV_PATH = "/home/user/.config/zeros/worker.env";
 
-type LifecyclePhase = "boat_create" | "boat_resume" | "source_resolve" | "source_authorize" | "runtime_install" | "image_prepare" | "repository_prepare" | "protected_route" | "token_delivery" | "checkpoint" | "checkpoint_restore" | "total";
+type LifecyclePhase = "boat_create" | "boat_resume" | "source_resolve" | "source_authorize" | "runtime_install" | "image_prepare" | "repository_prepare" | "protected_route" | "token_delivery" | "checkpoint" | "checkpoint_restore" | "maintenance_wake" | "maintenance_backlog" | "total";
 export type CloudV2TimingRecord = {
   workspaceId: string;
   state?: CloudV2Workspace["state"];
@@ -105,6 +116,11 @@ export type CloudV2TimingRecord = {
   readyWaitMs?: number; routeReads?: number; gatewayFailures?: number; gatewayWaitMs?: number;
   /** relay_ready: route reads until the worker was ready, including the successful one. */
   attempts?: number;
+  /** maintenance_backlog: sleeping workspaces due a wake, past due by 2 days, found expired by Boat,
+   * and those the budget cannot reach before Boat's expected deletion. */
+  due?: number; overdue?: number; expired?: number; unreachable?: number;
+  /** maintenance_wake: how it ended. */
+  outcome?: "stopped" | "adopted" | "gone" | "failed";
 } & ({
   phase: LifecyclePhase | CloudV2WorkerTiming["phase"] | "worker_hello" | "relay_ready";
   durationMs: number;
@@ -122,7 +138,8 @@ export type CloudV2LifecycleDeps = {
     | "beginRestore" | "replaceSandbox" | "finishRestore" | "checkpointUnchanged" | "claimCheckpointRetry" | "beginCheckpointFork"
     | "checkpointForkCreated" | "checkpointForkGone" | "checkpointRetryNext"
     // Retention (`retention`); absent from older compositions, which never enable it.
-    | "recordStopProbe" | "restoreForkRefused" | "replaceLostSandbox" | "workspaceBranches" | "recordLostWork">;
+    | "recordStopProbe" | "restoreForkRefused" | "replaceLostSandbox" | "workspaceBranches" | "recordLostWork"
+    | "claimMaintenanceWake" | "beginMaintenanceStop" | "finishMaintenance" | "clearStaleMaintenance" | "maintenanceBacklog" | "keepLostMachine">;
   /** Optional for older compositions; the shipped store always provides it. */
   prompts?: CloudV2Store["prompts"];
   pruneEnvironments?: () => Promise<void>;
@@ -176,6 +193,9 @@ export type CloudV2LifecycleDeps = {
   retention?: boolean;
   /** Retention's cap on backup forks per hour; CLOUD_V2_BACKUP_FORKS_PER_HOUR by default. */
   backupForksPerHour?: number;
+  /** Retention S2's shared maintenance budget; CLOUD_V2_MAINTENANCE_PER_HOUR / _PER_DAY by default. */
+  maintenancePerHour?: number;
+  maintenancePerDay?: number;
   /** Retention: the stopped machine of the workspace's project's ready copy a restore may fork,
    * when it is laid out as this workspace is; null to create from the Cloud Computer. */
   restoreSource?(workspace: CloudV2LifecycleWorkspace): Promise<string | null>;
@@ -294,6 +314,7 @@ export class CloudV2Lifecycle {
       await Promise.all(this.inFlight.values());
       await this.renewing;
       await this.retrying;
+      await this.maintaining;
       await this.building;
       await this.copying;
       await this.cleaning;
@@ -326,7 +347,7 @@ export class CloudV2Lifecycle {
     this.sweeping = true;
     let next = this.intervalMs;
     try {
-      const running = new Set([this.building, this.copying, this.cleaning, this.retrying, this.renewing]);
+      const running = new Set([this.building, this.copying, this.cleaning, this.retrying, this.renewing, this.maintaining]);
       await this.poll();
       next = await this.nextSweep(running);
     } catch (error) {
@@ -339,13 +360,13 @@ export class CloudV2Lifecycle {
   /** Work in progress keeps the fast cadence; otherwise the next due deferral,
    * bounded by the idle sweep, decides. */
   private async nextSweep(running: ReadonlySet<Promise<void> | null>): Promise<number> {
-    const background = [this.building, this.copying, this.cleaning, this.retrying, this.renewing].filter(task => task !== null && !running.has(task));
+    const background = [this.building, this.copying, this.cleaning, this.retrying, this.renewing, this.maintaining].filter(task => task !== null && !running.has(task));
     if (background.length) {
       let timer: NodeJS.Timeout | undefined;
       await Promise.race([Promise.allSettled(background), new Promise(resolve => { timer = setTimeout(resolve, BACKGROUND_SETTLE_MS); })]);
       clearTimeout(timer);
     }
-    if (this.inFlight.size || this.building || this.copying || this.cleaning || this.retrying || this.renewing) return this.intervalMs;
+    if (this.inFlight.size || this.building || this.copying || this.cleaning || this.retrying || this.renewing || this.maintaining) return this.intervalMs;
     const due = await this.deps.store.nextLifecycleDue();
     return due === null ? IDLE_SWEEP_MS : Math.min(IDLE_SWEEP_MS, Math.max(this.intervalMs, due));
   }
@@ -357,6 +378,9 @@ export class CloudV2Lifecycle {
   private renewing: Promise<void> | null = null;
   private lastLeaseScan = -Infinity;
   private retrying: Promise<void> | null = null;
+  private maintaining: Promise<void> | null = null;
+  private nextMaintenanceScan = -Infinity;
+  private nextBacklogReport = -Infinity;
   private nextRetryScan = -Infinity;
   private lastProviderStopScan = -Infinity;
   private providerStopScan: Promise<void> | null = null;
@@ -365,6 +389,7 @@ export class CloudV2Lifecycle {
     await this.poll();
     await Promise.all(this.inFlight.values());
     await this.retrying;
+    await this.maintaining;
   }
 
   private poll(): Promise<void> {
@@ -412,13 +437,24 @@ export class CloudV2Lifecycle {
     if (stopSlots > 0) this.admitClaimed(await this.deps.store.claimPending(stopSlots, LEASE_MS, [...this.inFlight.keys()], ["stopping"]), now);
     // One retry at a time, only with a slot to spare, and never in a slot: a
     // fork runs for minutes and nobody is waiting for it.
-    if ((this.deps.checkpointRetry || this.retention) && this.deps.checkpoints && !this.retrying && now >= this.nextRetryScan && this.inFlight.size < CONCURRENCY) {
+    if ((this.deps.checkpointRetry || this.retention) && this.deps.checkpoints && !this.retrying && !this.maintaining && now >= this.nextRetryScan && this.inFlight.size < CONCURRENCY) {
       this.nextRetryScan = now + MAINTENANCE_SCAN_MS;
       this.retrying = this.retryCheckpoint()
         // Another one may be due at once; otherwise wait for the next scan.
         .then(claimed => { if (claimed) this.nextRetryScan = -Infinity; })
         .catch(error => this.deps.logger?.warn(`[cloud-v2] checkpoint retry step failed (${errorCode(error)})`))
         .finally(() => { this.retrying = null; });
+    }
+    // Retention S2: one maintenance wake at a time, only with two slots to spare, so creates and
+    // user wakes always go first. A claimed wake looks for the next at once.
+    // Never beside a backup retry: one would resume the machine the other is forking or inspecting.
+    if (this.retention && !this.maintaining && !this.retrying && now >= this.nextMaintenanceScan && this.inFlight.size <= CONCURRENCY - 2) {
+      this.nextMaintenanceScan = now + MAINTENANCE_SCAN_MS;
+      this.maintaining = this.maintenanceWake()
+        .then(claimed => { if (claimed) this.nextMaintenanceScan = -Infinity; })
+        .then(() => this.reportBacklog(now))
+        .catch(error => this.deps.logger?.warn(`[cloud-v2] maintenance wake step failed (${errorCode(error)})`))
+        .finally(() => { this.maintaining = null; });
     }
   }
 
@@ -566,6 +602,15 @@ export class CloudV2Lifecycle {
         return;
       }
       case "starting": {
+        // A maintenance wake marked its stop before this user wake: let it finish (stopped then
+        // resumed), or take over a mark whose step died. Never resume under a stop in flight.
+        if (workspace.maintenance?.phase === "stopping") {
+          if (now - Date.parse(workspace.maintenance.startedAt) < CLOUD_V2_MAINTENANCE_STALE_MS) {
+            await store.defer(workspace.id, "starting", MAINTENANCE_WAIT_MS);
+            return;
+          }
+          await store.clearStaleMaintenance(workspace.id, CLOUD_V2_MAINTENANCE_STALE_MS);
+        }
         let sandboxId = workspace.boatSandboxId, restoring = workspace.restorePending;
         const deadline = restoring || (!sandboxId && workspace.checkpoint) ? RESTORE_DEADLINE_MS : BOOT_DEADLINE_MS;
         if (now - Date.parse(workspace.updatedAt) > deadline) {
@@ -602,16 +647,17 @@ export class CloudV2Lifecycle {
             // Boat deleted the disk of a VM stopped for 14 days: a new VM
             // from the Cloud Computer gets the last checkpoint.
             if (!sandboxLost(error) || !(workspace.checkpoint || this.cleanRestore(workspace))) throw error;
+            // One 404 is not proof: the machine may hold the only copy of the latest stop's work, with
+            // no backup or only an earlier one.
+            if (this.onlyOnMachine(workspace) && !await this.confirmedGone(sandboxId)) {
+              // Deferred, never rebuilt; past a few attempts someone should look. The generic attempt
+              // bound then fails the start visibly with this code, leaving the machine untouched.
+              // The claim has already counted this attempt.
+              if (workspace.attempts >= CLOUD_V2_LOSS_UNCONFIRMED_ALERT) (this.deps.logger?.error ?? this.deps.logger?.warn)?.call(this.deps.logger,
+                `[cloud-v2] resume keeps failing but Boat still has the machine; not rebuilding workspace=${workspace.id.slice(0, 8)} attempts=${workspace.attempts}`);
+              throw Object.assign(new Error("Boat has not confirmed the machine gone"), { code: "provider_loss_unconfirmed" });
+            }
             if (this.cleanRestore(workspace)) {
-              // One 404 is not proof: the machine may hold the only copy of the latest stop's work.
-              if (this.unbacked(workspace) && !await this.confirmedGone(sandboxId)) {
-                // Deferred, never rebuilt; past a few attempts someone should look. The generic attempt
-                // bound then fails the start visibly with this code, leaving the machine untouched.
-                // The claim has already counted this attempt.
-                if (workspace.attempts >= CLOUD_V2_LOSS_UNCONFIRMED_ALERT) (this.deps.logger?.error ?? this.deps.logger?.warn)?.call(this.deps.logger,
-                  `[cloud-v2] resume keeps failing but Boat still has the machine; not rebuilding workspace=${workspace.id.slice(0, 8)} attempts=${workspace.attempts}`);
-                throw Object.assign(new Error("Boat has not confirmed the machine gone"), { code: "provider_loss_unconfirmed" });
-              }
               sandboxId = await this.cleanReplacement(workspace, sandboxId, boot.env);
               if (!sandboxId) return;
             } else {
@@ -728,8 +774,14 @@ export class CloudV2Lifecycle {
       }
       if (!begun) return null;
       ({ attempt, create: request } = begun);
-      // Boat may keep a record of the expired VM.
-      if (lost) await compute.delete(lost).catch(() => {});
+      // Boat may keep a record of the expired VM. One that may hold the latest stop's work, which the
+      // earlier backup does not, is kept instead (its loss was already confirmed twice).
+      if (lost && !this.onlyOnMachine(workspace)) await compute.delete(lost).catch(() => {});
+      else if (lost) {
+        await store.keepLostMachine(workspace.id, lost);
+        (this.deps.logger?.error ?? this.deps.logger?.warn)?.call(this.deps.logger,
+          `[cloud-v2] restored an earlier backup; the machine that may hold later work was kept workspace=${workspace.id.slice(0, 8)}`);
+      }
     }
     if (!attempt || !request) return null;
     // This step's apply reads it; a later step reads the claimed row instead.
@@ -766,6 +818,73 @@ export class CloudV2Lifecycle {
     // A stop or deletion that won the race finds this VM in the row.
     const state = await store.replaceSandbox(workspace.id, attempt, sandboxId, new Date(this.deps.now?.() ?? Date.now()));
     return state && (options.find || state === "starting") ? sandboxId : null;
+  }
+
+  /** Retention S2's invisible wake: resumes a sleeping machine on a short lease so Boat's deletion of a
+   * stopped disk never reaches it, switches the worker off (verified), and stops it again. It never
+   * changes the workspace's state, tokens, updated_at or active_at, so no client sees it. A user who
+   * opens the workspace meanwhile adopts the running machine; the stop is marked first in the same
+   * statement that checks the workspace is still stopped, and a user wake waits for that mark.
+   * Resolves whether a wake was claimed. */
+  private async maintenanceWake(): Promise<boolean> {
+    const { store, compute } = this.deps, attempt = randomUUID();
+    const row = await store.claimMaintenanceWake({ attempt, perHour: this.deps.maintenancePerHour ?? CLOUD_V2_MAINTENANCE_PER_HOUR,
+      perDay: this.deps.maintenancePerDay ?? CLOUD_V2_MAINTENANCE_PER_DAY, staleMs: CLOUD_V2_MAINTENANCE_STALE_MS, excludeIds: [...this.inFlight.keys()] });
+    if (!row) return false;
+    const vm = row.boatSandboxId!, start = this.deps.now?.() ?? Date.now();
+    let outcome: "stopped" | "adopted" | "gone" | "failed" = "failed", workerFoundRunning = false, workerOff: boolean | undefined;
+    let machineStoppedAt: Date | null = null, snapshotAvailable: boolean | undefined, dataExpiredAt: Date | null = null;
+    try {
+      try { await compute.resume(vm, CLOUD_V2_MAINTENANCE_LEASE_SECONDS); }
+      catch (error) {
+        if (!sandboxLost(error)) throw error;
+        // Boat's own answer is recorded; a later user wake decides what a lost machine means.
+        const inspected = await compute.inspect(vm).catch(() => null);
+        snapshotAvailable = inspected?.snapshotAvailable; dataExpiredAt = inspected?.dataExpiredAt ?? null;
+        outcome = "gone";
+        return true;
+      }
+      // Anything the user left running outside the worker's service also runs for this minute.
+      const unit = await compute.exec(vm, WORKER_UNIT_CHECK, 30).catch(() => null);
+      workerFoundRunning = !!unit && /\bactive=active\b/.test(unit.stdout);
+      if (workerFoundRunning) (this.deps.logger?.error ?? this.deps.logger?.warn)?.call(this.deps.logger,
+        `[cloud-v2] worker found running during a maintenance wake; switching it off workspace=${row.id.slice(0, 8)}`);
+      workerOff = await this.switchWorkerOff(vm);
+      if (!workerOff) (this.deps.logger?.error ?? this.deps.logger?.warn)?.call(this.deps.logger,
+        `[cloud-v2] maintenance wake could not verify the worker off; stopping at once workspace=${row.id.slice(0, 8)}`);
+      // Opened meanwhile: the person's wake has the running machine.
+      if (!await store.beginMaintenanceStop(row.id, attempt)) { outcome = "adopted"; return true; }
+      await compute.stop(vm);
+      machineStoppedAt = await this.untilArchived(vm);
+      outcome = "stopped";
+      return true;
+    } catch (error) {
+      // The short lease archives the machine if our stop did not.
+      this.deps.logger?.warn(`[cloud-v2] maintenance wake failed (${errorCode(error)}) workspace=${row.id.slice(0, 8)}`);
+      return true;
+    } finally {
+      await store.finishMaintenance(row.id, attempt, { outcome, machineStoppedAt, workerFoundRunning, ...(workerOff !== undefined ? { workerOff } : {}),
+        ...(snapshotAvailable !== undefined ? { snapshotAvailable } : {}), dataExpiredAt })
+        .catch(error => this.deps.logger?.warn(`[cloud-v2] maintenance wake not recorded (${errorCode(error)})`));
+      emitCloudV2Timing(this.deps.timing, { workspaceId: row.id.slice(0, 8), state: row.state, phase: "maintenance_wake", outcome,
+        durationMs: Math.max(0, Math.round((this.deps.now?.() ?? Date.now()) - start)) });
+    }
+  }
+
+  /** Once an hour: how far the maintenance budget is from what is due. A workspace the budget cannot
+   * reach before Boat's expected deletion falls back to its last backup or checkpoint, as today; that
+   * is one summary line, not an alert each. */
+  private async reportBacklog(now: number): Promise<void> {
+    if (now < this.nextBacklogReport) return;
+    this.nextBacklogReport = now + 60 * 60_000;
+    const backlog = await this.deps.store.maintenanceBacklog();
+    const perHour = Math.min(this.deps.maintenancePerHour ?? CLOUD_V2_MAINTENANCE_PER_HOUR, (this.deps.maintenancePerDay ?? CLOUD_V2_MAINTENANCE_PER_DAY) / 24);
+    // Deadline-first: the i-th due workspace is reached about i / perHour hours from now.
+    const unreachable = backlog.deadlines.filter((deadline, index) => now + (index / perHour) * 60 * 60_000 > deadline.getTime()).length;
+    emitCloudV2Timing(this.deps.timing, { workspaceId: "-", phase: "maintenance_backlog", durationMs: 0,
+      due: backlog.due, overdue: backlog.overdue, expired: backlog.expired, unreachable });
+    if (unreachable || backlog.overdue) this.deps.logger?.warn(`[cloud-v2] maintenance backlog: ${backlog.due} due, ${backlog.overdue} past due by 2 days, `
+      + `${unreachable} beyond the budget before Boat's expected deletion (they restore from their last backup or checkpoint)`);
   }
 
   /** Retention's stop: switches the worker service off and verifies it, then
@@ -906,7 +1025,8 @@ export class CloudV2Lifecycle {
     const retention = this.retention;
     const row = await store.claimCheckpointRetry({ leaseMs: RETRY_LEASE_MS, firstDelayMs: retention ? CLOUD_V2_BACKUP_DELAY_MS : RETRY_FIRST_MS,
       windowMs: CLOUD_V2_CHECKPOINT_RETRY_WINDOW_MS, excludeIds: [...this.inFlight.keys()],
-      ...(retention ? { retention: { forksPerHour: this.deps.backupForksPerHour ?? CLOUD_V2_BACKUP_FORKS_PER_HOUR } } : {}) });
+      ...(retention ? { retention: { forksPerHour: this.deps.backupForksPerHour ?? CLOUD_V2_BACKUP_FORKS_PER_HOUR,
+        maintenance: { perHour: this.deps.maintenancePerHour ?? CLOUD_V2_MAINTENANCE_PER_HOUR, perDay: this.deps.maintenancePerDay ?? CLOUD_V2_MAINTENANCE_PER_DAY } } } : {}) });
     if (!row) return false;
     const { retry } = row;
     // A fork an earlier attempt may have left goes first, whatever comes next.
@@ -1053,6 +1173,13 @@ export class CloudV2Lifecycle {
   /** The latest stop may have left work off GitHub and no backup holds it: only the machine might. */
   private unbacked(workspace: CloudV2LifecycleWorkspace): boolean {
     return this.cleanRestore(workspace) && workspace.stopProbe !== "clean";
+  }
+
+  /** The machine may hold the latest stop's work and nothing else does: there is no backup, or only
+   * one from an earlier stop. Its loss is confirmed twice and it is never deleted. */
+  private onlyOnMachine(workspace: CloudV2LifecycleWorkspace): boolean {
+    return this.retention && workspace.stopProbe !== "clean" && !workspace.restorePending && workspace.executionIntent === undefined
+      && (!workspace.checkpoint || workspace.checkpoint.stopGeneration !== workspace.stopGeneration);
   }
 
   /** Two inspect reads CLOUD_V2_LOSS_CONFIRM_MS apart both report the machine gone: not found,

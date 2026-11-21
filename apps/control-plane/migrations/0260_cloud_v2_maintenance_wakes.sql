@@ -15,6 +15,8 @@ ALTER TABLE cloud_v2_workspaces
   ADD COLUMN maintenance_phase text CHECK (maintenance_phase IN ('waking', 'stopping')),
   ADD COLUMN maintenance_started_at timestamptz,
   ADD COLUMN archive_wake_done_at timestamptz,
+  -- A maintenance wake verified the worker service off for this stop generation (the stop itself may not have).
+  ADD COLUMN worker_off_verified_generation bigint,
   ADD CONSTRAINT cloud_v2_maintenance_complete CHECK ((maintenance_attempt IS NULL) = (maintenance_phase IS NULL));
 
 -- Each maintenance start of a machine (a wake, or a retention backup fork): the shared budget's count against Boat's
@@ -28,8 +30,12 @@ CREATE TABLE cloud_v2_maintenance_wakes (
   finished_at timestamptz,
   outcome text CHECK (outcome IN ('stopped', 'adopted', 'gone', 'failed')),
   worker_found_running boolean NOT NULL DEFAULT false,
-  -- Boat's deletion time for the machine when the wake began: stoppedAt + 14 days.
+  -- When Boat is expected to delete the machine's disk: Boat's own dataExpiredAt when it reports one, else its
+  -- stoppedAt + 14 days (an estimate; one Alpha machine outlived it).
   deadline_at timestamptz,
+  -- What Boat reported at this wake's inspects.
+  snapshot_available boolean,
+  data_expired_at timestamptz,
   UNIQUE (attempt)
 );
 CREATE INDEX cloud_v2_maintenance_wakes_recent ON cloud_v2_maintenance_wakes (started_at DESC);
