@@ -1,5 +1,5 @@
-import { Fragment, useMemo, useState } from "react";
-import { ChevronRight, Cloud, Columns2, Ellipsis, GitBranchPlus, Laptop, Plus, Rows2, X } from "lucide-react";
+import { Fragment, useEffect, useMemo, useState } from "react";
+import { ChevronRight, Cloud, Columns2, Ellipsis, GitBranchPlus, Laptop, PencilLine, Plus, Rows2, X } from "lucide-react";
 import { leafIds } from "../../state/chat-panes";
 import { useChatPanesStore } from "../../state/chat-panes-store";
 import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
@@ -10,6 +10,7 @@ import { useAnyChatAgentActivity, useAnyChatAwaitingKind } from "../../features/
 import { useOptionalAgentSessions } from "../../features/agent/sessions-hooks";
 import { RunStream } from "../../shared/ui/loading";
 import { Button } from "../../shared/ui/primitives";
+import { Input } from "../../shared/ui/primitives/input";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -20,6 +21,8 @@ import {
 } from "../../shared/ui/primitives/dropdown-menu";
 import { addChildSession, canAddChildSession } from "../../features/agent/add-child-session";
 import { spawnNewChatTab } from "../../state/spawn-default-chat";
+import { editChat } from "../../state/cloud-chat-edits";
+import { openSession } from "../../state/open-session";
 import type { ChatThread } from "../../state/store";
 import { useWorkspaceDispatch, useWorkspaceStore } from "../../state/store";
 import { buildSessionTree, sessionDescendantIds, sessionLineage, type SessionNode, type SessionTree } from "../../state/session-tree";
@@ -154,8 +157,45 @@ function ParentMenu({ tree, folder, activeId, onSelect, onNewParent }: {
   );
 }
 
-function Crumb({ chat, leading, identity, children }: {
+/** The open session's name, editable at the top of its crumb's menu. */
+function RenameRow({ chat }: { chat: ChatThread }) {
+  const dispatch = useWorkspaceDispatch();
+  const [draft, setDraft] = useState(chat.title);
+  useEffect(() => setDraft(chat.title), [chat.title]);
+  const commit = () => {
+    const next = draft.trim();
+    if (next && next !== chat.title) editChat(dispatch, chat.id, { title: next });
+    else setDraft(chat.title);
+  };
+  return (
+    <>
+      <label className="text-fg2 flex items-center gap-2 px-2 py-1.5">
+        <PencilLine className="size-4 shrink-0" strokeWidth={1.5} aria-hidden="true" />
+        <Input
+          appearance="inline"
+          aria-label="Rename session"
+          data-session-rename=""
+          value={draft}
+          placeholder={sessionName(chat)}
+          onChange={(event) => setDraft(event.target.value)}
+          onBlur={commit}
+          onKeyDown={(event) => {
+            // Keep typing out of the menu's typeahead and arrow navigation.
+            if (event.key !== "Escape") event.stopPropagation();
+            if (event.key === "Enter") { event.preventDefault(); commit(); event.currentTarget.blur(); }
+          }}
+          className="min-w-0 flex-1"
+        />
+      </label>
+      <DropdownMenuSeparator />
+    </>
+  );
+}
+
+function Crumb({ chat, leading, identity, rename, children }: {
   chat: ChatThread;
+  /** The session the crumb names can be renamed from its menu. */
+  rename?: boolean;
   leading?: React.ReactNode;
   /** The first crumb is the workspace's identity: placement, then name. */
   identity?: WorkspacePlacement;
@@ -179,6 +219,7 @@ function Crumb({ chat, leading, identity, children }: {
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" sideOffset={6} className="max-h-96 min-w-64 max-w-96 overflow-y-auto">
+        {rename && <RenameRow chat={chat} />}
         {children}
       </DropdownMenuContent>
     </DropdownMenu>
@@ -200,13 +241,13 @@ export function SessionSwitcher({ folder, placement, showPlacement = true, fallb
   const activeId = useActiveChatId();
   const dispatch = useWorkspaceDispatch();
   const sessions = useOptionalAgentSessions();
-  const tree = useMemo(() => buildSessionTree(chats, folder, { includeArchived: readOnly }), [chats, folder, readOnly]);
+  const tree = useMemo(() => buildSessionTree(chats, folder, { includeArchived: true }), [chats, folder]);
   const lineage = useMemo(() => {
     const path = activeId ? sessionLineage(tree, activeId) : [];
     return path.length ? path : tree.roots[0] ? [tree.roots[0].chat] : [];
   }, [tree, activeId]);
   if (lineage.length === 0) return <>{fallback}</>;
-  const select = (id: string) => dispatch({ type: "SET_ACTIVE_CHAT", id });
+  const select = (id: string) => readOnly ? dispatch({ type: "SET_ACTIVE_CHAT", id }) : openSession(dispatch, id);
   const newParent = readOnly || !sessions ? undefined : () => {
     void spawnNewChatTab({ folder, sessions, dispatch }).then((chat) => select(chat.id)).catch(() => {});
   };
@@ -220,6 +261,7 @@ export function SessionSwitcher({ folder, placement, showPlacement = true, fallb
             {index > 0 && <ChevronRight className="text-fg3 size-3.5 shrink-0" strokeWidth={1.5} aria-hidden="true" />}
             <Crumb
               chat={chat}
+              rename={!readOnly && chat.id === activeId}
               identity={index === 0 && showPlacement ? placement : undefined}
               leading={index === 0 && showPlacement
                 ? <Icon className="text-fg2 size-4 shrink-0" strokeWidth={1.5} aria-hidden="true" data-workspace-placement={placement} />

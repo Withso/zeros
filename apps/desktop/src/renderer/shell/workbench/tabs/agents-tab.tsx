@@ -5,6 +5,7 @@ import { AgentIcon } from "../../../features/agent/agent-icon";
 import { awaitingKindOfSlot, useSessionsStore } from "../../../features/agent/sessions-store";
 import { RunStream } from "../../../shared/ui/loading";
 import { ListRow, Tabs, TabsContent, TabsList, TabsTrigger } from "../../../shared/ui/primitives";
+import { openSession } from "../../../state/open-session";
 import { buildSessionTree, sessionRootId, type SessionNode } from "../../../state/session-tree";
 import { selectActiveFolder, useWorkspaceDispatch, useWorkspaceStore, type ChatThread } from "../../../state/store";
 import { useActiveChatId, useChats } from "../../../state/workspace-store";
@@ -82,7 +83,7 @@ export function AgentsTab({ active, scope }: { tab: WorkbenchTab; active: boolea
   const chats = useChats();
   const activeId = useActiveChatId();
   const dispatch = useWorkspaceDispatch();
-  const tree = useMemo(() => buildSessionTree(chats, folder), [chats, folder]);
+  const tree = useMemo(() => buildSessionTree(chats, folder, { includeArchived: true }), [chats, folder]);
   const [picked, setPicked] = useState<string | null>(null);
   const activeRoot = activeId ? sessionRootId(tree, activeId) : null;
   const parentId = (picked && tree.byId.has(picked) ? picked : null)
@@ -100,7 +101,7 @@ export function AgentsTab({ active, scope }: { tab: WorkbenchTab; active: boolea
   const statuses = useSessionStatuses(active ? childIds : NO_IDS);
   // Stored chats stay browsable while a cloud runtime sleeps.
   useWorkbenchStatusSource({ pending: false, primary: true, hasContent: chats.length > 0 });
-  const select = (id: string) => dispatch({ type: "SET_ACTIVE_CHAT", id });
+  const select = (id: string) => openSession(dispatch, id);
 
   if (tree.roots.length === 0 && terminals.length === 0) {
     return <div className="text-fg3 flex h-full items-center justify-center text-xs" data-agents-empty="">No sessions yet</div>;
