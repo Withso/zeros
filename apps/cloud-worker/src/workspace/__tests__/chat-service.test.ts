@@ -72,6 +72,7 @@ it("switches an established chat to another agent in place and clears the old pr
   await store.upsert({ id: "chat", folder: root, createdAt: 100, agentId: "claude", model: "opus" });
   await store.importMessages("chat", [row("prompt", "user", "Build the feature")]);
   await store.bind("chat", "claude", "native-claude");
+  await store.update("chat", (draft) => { draft.executionId = "claude-execution"; });
   const switchAgent = (params = {}) => service.handle("chats.switchAgent",
     { chatId: "chat", fromAgentId: "claude", agentId: "codex", model: "gpt-5", effort: "high", fast: true, ...params });
 
@@ -84,6 +85,7 @@ it("switches an established chat to another agent in place and clears the old pr
   const marker = row("switch", "assistant", "", { kind: "tool", toolKind: "harness_switch", title: "Switched to GPT-5" });
   expect(await switchAgent({ message: { ...marker, kind: "tool" } })).toEqual({ ok: true });
   expect(closed).toEqual(["chat"]);
+  expect(store.metadata("chat")?.executionId).toBeUndefined();
   expect(store.metadata("chat")).toMatchObject({ nativeSessionId: undefined, chat: { agentId: "codex", agentName: "Codex", model: "gpt-5",
     effort: "high", fast: true, sessionId: null, providerBinding: null, providerMetadata: null } });
   expect(store.snapshot("chat")?.rows.map((value) => value.msgId)).toEqual(["prompt", "switch"]);

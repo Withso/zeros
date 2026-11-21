@@ -522,7 +522,9 @@ export class SessionStore {
         draft.messages = [...draft.messages, ...transcript([input.row])];
         draft.continuation = (draft.continuation ?? 0) + 1;
       }
-      draft.nativeSessionId = undefined;
+      // A restarted worker has no live route for closeChat to retire, so the
+      // old provider's execution must not stay adoptable by the new agent.
+      draft.nativeSessionId = undefined; draft.executionId = undefined;
       chat.agentId = input.agentId; chat.agentName = input.agentName;
       chat.model = input.model; chat.effort = input.effort; chat.fast = input.fast;
       chat.sessionId = null; chat.providerBinding = null; chat.providerMetadata = null;
